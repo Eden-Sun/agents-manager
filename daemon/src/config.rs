@@ -52,9 +52,17 @@ pub struct BotCfg {
     /// None = the CLI's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Reasoning effort (grok `--reasoning-effort low|medium|high`). None = CLI default.
+    /// Reasoning effort: grok `--reasoning-effort low|medium|high`, codex
+    /// `-c model_reasoning_effort="<x>"` (values from `model/list`). Always None for claude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// v4.0: codex "Fast" service tier (`-c service_tier="priority"`). Ignored by other kinds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fast: bool,
+    /// v4.0: text appended to the agent's system prompt (claude `--append-system-prompt`,
+    /// grok `--rules`, codex `-c developer_instructions=…`). Never touches CLAUDE.md / AGENTS.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -151,8 +159,39 @@ pub const BOT_NAME_RE: &str = "1–32 個字，不可含空白或 @ , : ;";
 /// Supported agent kinds (SPEC §2, §12). Also the herdr `agent.start` `kind` value.
 pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
 
-pub fn valid_effort(e: &str) -> bool {
-    matches!(e.to_ascii_lowercase().as_str(), "low" | "medium" | "high")
+/// Effort values a kind accepts (v4.0, kind-dependent). claude accepts none: its effort is
+/// always normalised to `None` without an error.
+pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "grok" => &["low", "medium", "high"],
+        "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        _ => &[],
+    }
+}
+
+/// Normalise a requested effort for `kind`: trims / lowercases, `""` → `None`, claude → `None`.
+/// `Err(msg)` when the value is not one this kind accepts.
+pub fn normalize_effort(kind: &str, e: Option<&str>) -> Result<Option<String>, String> {
+    let Some(e) = e.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
+    if kind == "claude" {
+        return Ok(None);
+    }
+    let v = e.to_ascii_lowercase();
+    let allowed = efforts_for_kind(kind);
+    if allowed.contains(&v.as_str()) {
+        Ok(Some(v))
+    } else {
+        Err(format!("effort for {kind} must be one of {}", allowed.join(", ")))
+    }
+}
+
+/// v4.0: the `herdr` command a user pastes into a terminal to attach to a host's session.
+pub fn attach_command(host: Option<&HostCfg>, local_session: &str) -> String {
+    match host {
+        None => format!("herdr --session {local_session}"),
+        Some(h) if h.ssh_port == 22 => format!("herdr --remote {} --session {}", h.ssh, h.herdr_session),
+        Some(h) => format!("herdr --remote ssh://{}:{} --session {}", h.ssh, h.ssh_port, h.herdr_session),
+    }
 }
 
 pub fn valid_kind(kind: &str) -> bool {
@@ -365,6 +404,45 @@ pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod v40_tests {
+    use super::{attach_command, normalize_effort, HostCfg};
+
+    fn host(port: u16) -> HostCfg {
+        HostCfg {
+            name: "m4p".into(),
+            ssh: "m4p@100.112.229.82".into(),
+            ssh_port: port,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+            hook_port: None,
+        }
+    }
+
+    #[test]
+    fn attach_commands() {
+        assert_eq!(attach_command(None, "am-v40"), "herdr --session am-v40");
+        assert_eq!(attach_command(Some(&host(22)), "x"), "herdr --remote m4p@100.112.229.82 --session agents-manager");
+        assert_eq!(
+            attach_command(Some(&host(2222)), "x"),
+            "herdr --remote ssh://m4p@100.112.229.82:2222 --session agents-manager"
+        );
+    }
+
+    #[test]
+    fn effort_is_kind_dependent() {
+        assert_eq!(normalize_effort("grok", Some(" High ")).unwrap(), Some("high".into()));
+        assert!(normalize_effort("grok", Some("xhigh")).is_err());
+        assert_eq!(normalize_effort("codex", Some("xhigh")).unwrap(), Some("xhigh".into()));
+        assert_eq!(normalize_effort("codex", Some("none")).unwrap(), Some("none".into()));
+        assert!(normalize_effort("codex", Some("turbo")).is_err());
+        assert_eq!(normalize_effort("claude", Some("high")).unwrap(), None);
+        assert_eq!(normalize_effort("codex", Some("")).unwrap(), None);
+        assert_eq!(normalize_effort("codex", None).unwrap(), None);
+    }
 }
 
 #[cfg(test)]

@@ -164,6 +164,35 @@ fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
 pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; PORT="$4"; shift 4
 LIMIT=1048576
+# v4.0 statusLine mode: POST the rate limits as a `StatusLine` claude event (fire-and-forget,
+# never spooled), then run the user's own statusLine command on the same input so the pane
+# shows exactly what it would without the daemon. Budget: ~2 s, always exit 0.
+if [ "$PROVIDER" = "statusline" ]; then
+  INPUT=$(head -c $LIMIT)
+  case "$INPUT" in
+    '{}'|'') ;;
+    '{'*)
+      NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      PAYLOAD='{"hook_event_name":"StatusLine",'"${INPUT#\{}"
+      BODY=$(printf '{"bot_id":"%s","provider":"claude","payload":%s,"received_at":"%s","truncated":false}' "$BOT" "$PAYLOAD" "$NOW")
+      ( NO_PROXY=127.0.0.1 curl -s -m 2 --connect-timeout 0.3 -o /dev/null -X POST "http://127.0.0.1:$PORT/hook/claude" \
+          -H 'Content-Type: application/json' -H "X-AM-Bot-Token: $TOKEN" --data-binary "$BODY" >/dev/null 2>&1 & ) ;;
+  esac
+  CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  CMD=""
+  if [ -f "$CFG" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      CMD=$(jq -r 'if (.statusLine.type // "command") == "command" then (.statusLine.command // empty) else empty end' "$CFG" 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then
+      CMD=$(python3 -c 'import json,sys
+s=(json.load(open(sys.argv[1])).get("statusLine") or {})
+print(s.get("command","") if s.get("type","command")=="command" else "")' "$CFG" 2>/dev/null)
+    fi
+  fi
+  case "$CMD" in *"hook.sh statusline"*|*"agents-managerd statusline"*) CMD="" ;; esac
+  if [ -n "$CMD" ]; then printf '%s' "$INPUT" | sh -c "$CMD" 2>/dev/null; fi
+  exit 0
+fi
 if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c $LIMIT); fi
 LEN=$(printf '%s' "$PAYLOAD" | wc -c | tr -d ' ')
 if [ "$PROVIDER" != "codex" ] && [ "$LEN" -ge "$LIMIT" ]; then TRUNC=true; else TRUNC=false; fi
@@ -314,11 +343,21 @@ async fn install_remote_hook(
         bot.hook_token.clone(),
         hook_port.to_string(),
     ]);
+    // v4.0: `hook.sh statusline <bot> <token> <port>` POSTs the rate limits, then execs the
+    // user's own statusLine command (read from the remote ~/.claude/settings.json).
+    let statusline = shell_join(&[
+        p.hook_sh.clone(),
+        "statusline".into(),
+        bot.id.clone(),
+        bot.hook_token.clone(),
+        hook_port.to_string(),
+    ]);
     let settings = json!({
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
-        }
+        },
+        "statusLine": {"type": "command", "command": statusline}
     });
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
@@ -390,12 +429,19 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
     let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
             let cmd = shell_join(&hook_cmd_parts(app, bot, "claude"));
+            // v4.0: the status line reports rate limits (`StatusLine` hook event) and then
+            // runs the user's own statusLine command so the pane looks unchanged.
+            let mut sl = hook_cmd_parts(app, bot, "claude");
+            sl[1] = "statusline".into();
+            sl.remove(2);
+            let statusline = shell_join(&sl);
             // v3: no Notification hook; Stop with stop_hook_active=true is ignored daemon-side.
             let settings = json!({
                 "hooks": {
                     "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
                     "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
-                }
+                },
+                "statusLine": {"type": "command", "command": statusline}
             });
             let path = dir.join("claude-settings.json");
             std::fs::write(&path, serde_json::to_vec_pretty(&settings)?)?;
@@ -465,6 +511,42 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
     Value::Object(env)
 }
 
+/// Quote `s` as a TOML basic string (for codex `-c key="…"` overrides): `\`, `"`, newlines,
+/// tabs and other control characters are escaped.
+pub fn toml_basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// v4.0: `bot.persona` appended to the agent's system prompt, per kind. Sits right after the
+/// daemon's own flags (before model / effort). Nothing when empty.
+fn persona_args(bot: &db::Bot) -> Vec<String> {
+    let Some(p) = bot.persona.as_deref().filter(|s| !s.trim().is_empty()) else { return vec![] };
+    match bot.kind.as_str() {
+        "claude" => vec!["--append-system-prompt".into(), p.to_string()],
+        // `grok --help`: "Extra rules to append to the system prompt".
+        "grok" => vec!["--rules".into(), p.to_string()],
+        // app-server / config schema key `developer_instructions`; the value is TOML.
+        "codex" => vec!["-c".into(), format!("developer_instructions={}", toml_basic_string(p))],
+        _ => vec![],
+    }
+}
+
 /// `bot.model` as CLI args, inserted between the daemon's own flags and `identity.args`.
 fn model_args(bot: &db::Bot) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -476,12 +558,86 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
         }
     }
     // grok: `--reasoning-effort low|medium|high` (verified: `grok --help`, unknown value → error)
+    // codex: `-c model_reasoning_effort="<x>"` (values from `model/list`); claude: nothing.
     if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if bot.kind == "grok" {
-            out.extend(["--reasoning-effort".to_string(), e.to_lowercase()]);
+        match bot.kind.as_str() {
+            "grok" => out.extend(["--reasoning-effort".to_string(), e.to_lowercase()]),
+            "codex" => out.extend(["-c".to_string(), format!("model_reasoning_effort=\"{}\"", e.to_lowercase())]),
+            _ => {}
         }
     }
+    // v4.0: codex Fast tier, same key the user's config.toml uses.
+    if bot.fast != 0 && bot.kind == "codex" {
+        out.extend(["-c".to_string(), "service_tier=\"priority\"".to_string()]);
+    }
     out
+}
+
+#[cfg(test)]
+mod model_args_tests {
+    use super::model_args;
+    use crate::db::Bot;
+
+    fn bot(kind: &str, model: Option<&str>, effort: Option<&str>, fast: bool) -> Bot {
+        Bot {
+            id: "b".into(),
+            project_id: "p".into(),
+            name: "n".into(),
+            kind: kind.into(),
+            model: model.map(String::from),
+            effort: effort.map(String::from),
+            fast: fast as i64,
+            persona: None,
+            args_json: "[]".into(),
+            autostart: 0,
+            inject_hooks: 1,
+            auto_approve: 1,
+            identity: None,
+            env_json: "{}".into(),
+            hook_token: "t".into(),
+            deleted_at: None,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn codex_effort_and_fast() {
+        let a = model_args(&bot("codex", Some("gpt-5.6-sol"), Some("high"), true));
+        assert_eq!(
+            a,
+            vec!["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\""]
+        );
+        let a = model_args(&bot("codex", None, None, false));
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn grok_keeps_reasoning_effort_and_ignores_fast() {
+        let a = model_args(&bot("grok", Some("grok-4.6"), Some("low"), true));
+        assert_eq!(a, vec!["-m", "grok-4.6", "--reasoning-effort", "low"]);
+    }
+
+    #[test]
+    fn claude_never_gets_effort_or_fast() {
+        let a = model_args(&bot("claude", Some("opus"), Some("high"), true));
+        assert_eq!(a, vec!["--model", "opus"]);
+    }
+
+    #[test]
+    fn persona_per_kind() {
+        use super::{persona_args, toml_basic_string};
+        let mut b = bot("claude", None, None, false);
+        b.persona = Some("回覆結尾一律加上 [PERSONA-OK]".into());
+        assert_eq!(persona_args(&b), vec!["--append-system-prompt", "回覆結尾一律加上 [PERSONA-OK]"]);
+        b.kind = "grok".into();
+        assert_eq!(persona_args(&b), vec!["--rules", "回覆結尾一律加上 [PERSONA-OK]"]);
+        b.kind = "codex".into();
+        b.persona = Some("line1\nsay \"hi\" \\ done".into());
+        assert_eq!(persona_args(&b), vec!["-c", "developer_instructions=\"line1\\nsay \\\"hi\\\" \\\\ done\""]);
+        b.persona = Some("   ".into());
+        assert!(persona_args(&b).is_empty());
+        assert_eq!(toml_basic_string("a\tb\u{1}"), "\"a\\tb\\u0001\"");
+    }
 }
 
 /// Extra CLI args contributed by the bot's identity.
@@ -625,6 +781,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .map_err(up)?;
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
+    args.extend(persona_args(bot));
     args.extend(model_args(bot));
     args.extend(identity_args(app, bot).await);
     args.extend(bot.args());
