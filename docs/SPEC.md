@@ -4,6 +4,7 @@
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
+> - v3.3（2026-09-06）：§2 Bot 新增可選欄位 `model`（claude `--model`／codex `-m`，注入順序：daemon 旗標 → model → identity.args → bot.args）；§7.2 `PATCH /bots/:id` 擴充為 `{name?, model?, args?, autostart?, auto_approve?, inject_hooks?, identity?, env?}` 並回 `{needs_restart}`（只有改 `name` 需要無 active Run，其餘可線上改、重啟後生效）；新增 `POST /bots/:id/restart`（stop 再 start）；§6.4 DELETE Bot 補上「刪除本機／遠端 `~/.config/agents-manager/bots/<id>/`」；§6.3.7 stall watchdog 的系統訊息改為中性敘述並原樣引用畫面關鍵行。
 > - v3.2（2026-09-06）：§6.3 新增 prompt-stall watchdog（送達後 12 秒內 agent 未離開 idle → Turn `failed` + 系統訊息，畫面含 Not logged in / usage limit 時給明確原因）；§4.3 備援擷取無回覆標記時改為清理後的畫面（去 banner / 狀態列，保留 `⎿` 工具結果行）。
 > - v3.1（2026-09-06）：新增 §11 遠端主機（透過 SSH 連遠端 herdr）、`auto_approve`、目錄選擇器、Markdown 渲染；附錄 E 遠端實測。
 > - v3（2026-09-05）：依 Grok（grok CLI 1.0.13）第二輪完整審視修訂 15 條：Turn 狀態收斂為 `in_flight`（每 Run 至多一筆，hook 只配那一筆）；per-bot 鎖；active Run 部分唯一索引；先寫 Run 再建 pane；blocked 不觸發備援；hook 子命令最低契約；事件訂閱拓撲實測定案；TOML / SQLite 權威劃分；多項 demo 範圍縮減標為第二階段。
@@ -25,7 +26,7 @@
 | 概念 | 說明 | 主鍵 | herdr 對應 |
 |---|---|---|---|
 | **Project** | 以目錄為單位的分組。目錄路徑正規化（canonical path）後唯一 | `project_id`（ULID） | 一個 `workspace`（本系統建立並記錄 `workspace_id`；對帳發現不存在則設 NULL 並於下次啟動 Bot 時重建） |
-| **Bot** | 使用者定義的 agent 設定：名稱、kind、啟動參數。屬於一個 Project | `bot_id`（ULID，永久） | 無直接對應 |
+| **Bot** | 使用者定義的 agent 設定：名稱、kind、`model`（v3.3，可為空）、啟動參數。屬於一個 Project | `bot_id`（ULID，永久） | 無直接對應 |
 | **Run** | Bot 的一次執行實例。**每個 Bot 同時最多一個 active Run（DB 部分唯一索引保證）**。欄位含 `native_session_id`、`transcript_path`（由 hook 回填，可為 NULL） | `run_id`（ULID） | `pane_id` + herdr agent `name`（= `bot.name`） |
 | **Conversation** | 使用者與 Bot 的訊息串。**與 Bot 1:1，跨 Run 延續，第一階段永不拆分** | `conversation_id` | 無 |
 | **Turn** | 一次「prompt → 回覆完成」的回合。**每個 active Run 同時最多一筆 in-flight Turn** | `turn_id` | Claude `prompt_id` / Codex `turn-id` |
@@ -196,12 +197,13 @@ label = "foo"
 
 > 因 Turn 在送 prompt **之前**已是 `in_flight`，hook 早於 RPC 回應到達也能配對。
 
-7. **stall watchdog（v3.2）**：`delivery = ok` 後啟動 12 秒計時；期間收到該 Run 的 `working` 或 `blocked` 事件即取消。逾時仍 `in_flight` 且 agent 仍 `idle/unknown` → 讀 `visible` 快照判斷原因（`Not logged in` / `usage limit`）→ Turn `failed` + system Message（含原因與快照）。避免 agent 對輸入無反應時回合永遠卡住、輸入框鎖死。
+7. **stall watchdog（v3.2）**：`delivery = ok` 後啟動 12 秒計時；期間收到該 Run 的 `working` 或 `blocked` 事件即取消。逾時仍 `in_flight` 且 agent 仍 `idle/unknown` → 讀 `visible` 快照判斷原因（`Not logged in` / `usage limit`）→ Turn `failed` + system Message（含原因與快照）。v3.3：訊息改為中性敘述（不再斷言「尚未登入」），原樣引用畫面中含 `Not logged in` / `/login` / `unlock-keychain` / `usage limit` / `limit` 的行，並提示 macOS Keychain 在 ssh 環境可能讀不到。避免 agent 對輸入無反應時回合永遠卡住、輸入框鎖死。
 
 ### 6.4 停止 Bot（在 per-bot 鎖內）
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → Run `stopped`（`ended_at`）→ 關閉狀態訂閱。
-- DELETE Bot：先 stop → TOML 移除 → DB `deleted_at`，保留 Conversation。
+- DELETE Bot：先 stop → TOML 移除 → DB `deleted_at`，保留 Conversation 與訊息 → 刪除該 bot 的 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，失敗只 log）（v3.3）。
+- 重啟 Bot（v3.3）：`POST /bots/:id/restart` = 有 Run 就先 stop 再 start，用來套用改過的 `model` / `args` / `identity` / `env`。
 - DELETE Project：需所有 Bot 已停止 → TOML 移除 → 不關 workspace（第二階段）、不刪目錄。
 
 ### 6.5 對帳（daemon 啟動、事件連線重連；逐 bot 在鎖內）
@@ -247,9 +249,10 @@ label = "foo"
 | POST | `/projects` | `{path,label}`；路徑正規化；重複 409 |
 | DELETE | `/projects/:id` | §6.4 |
 | POST | `/projects/:id/bots` | `{name,kind,args,autostart}` |
-| PATCH | `/bots/:id` | `{args?, autostart?, name?}`；name 變更需無 active Run |
+| PATCH | `/bots/:id` | `{name?, model?, args?, autostart?, auto_approve?, inject_hooks?, identity?, env?}` → `{needs_restart}`；只有 `name` 變更需無 active Run（v3.3） |
 | DELETE | `/bots/:id` | §6.4 |
 | POST | `/bots/:id/start` | 200 `{run_id}`；已有 active Run → 409 `{run_id}` |
+| POST | `/bots/:id/restart` | 200 `{run_id}`；等同 stop（若有 Run）+ start（v3.3） |
 | POST | `/bots/:id/stop` | 200；無 Run → 204 |
 | POST | `/bots/:id/interrupt` | 送 esc |
 | POST | `/bots/:id/prompt` | `{text, client_request_id}` → 200 `{turn_id, message_id, delivery}`；409 見 §6.3 |

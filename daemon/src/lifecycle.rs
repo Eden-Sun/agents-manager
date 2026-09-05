@@ -146,14 +146,28 @@ fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
 /// SPEC appendix E — the POSIX sh + curl hook installed on remote hosts (no daemon binary there).
 pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; PORT="$4"; shift 4
-if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c 1048576); fi
+LIMIT=1048576
+if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c $LIMIT); fi
+LEN=$(printf '%s' "$PAYLOAD" | wc -c | tr -d ' ')
+if [ "$PROVIDER" != "codex" ] && [ "$LEN" -ge "$LIMIT" ]; then TRUNC=true; else TRUNC=false; fi
+# The payload is spliced into JSON verbatim, so it must BE valid JSON: empty stdin becomes
+# null and anything that is not an object is wrapped as a string, otherwise the daemon would
+# reject the body and the line would sit in the spool forever.
+case "$PAYLOAD" in
+  '{'*) ;;
+  '') PAYLOAD=null ;;
+  *) ESC=$(printf '%s' "$PAYLOAD" | tr -d '\015' | tr '\011' ' ' | tr -d '\000-\010\013\014\016-\037' \
+       | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
+     PAYLOAD=$(printf '{"raw":"%s"}' "$ESC") ;;
+esac
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":false}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW")
+BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":%s}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW" "$TRUNC")
 DIR="$HOME/.config/agents-manager/bots/$BOT"
 mkdir -p "$DIR"
 OUT=$(NO_PROXY=127.0.0.1 curl -s -m 2 --connect-timeout 0.3 -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/hook/$PROVIDER" \
   -H 'Content-Type: application/json' -H "X-AM-Bot-Token: $TOKEN" --data-binary "$BODY" 2>>"$DIR/hook.log") || OUT=fail
-case "$OUT" in 2*) ;; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
+# 4xx means the daemon will never accept this line (deleted bot / bad token): do not spool it.
+case "$OUT" in 2*) ;; 4*) printf '%s rejected %s\n' "$NOW" "$OUT" >> "$DIR/hook.log";; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
 exit 0
 "#;
 
@@ -981,6 +995,24 @@ fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
     text.to_string()
 }
 
+/// Index of the first line *after* the last prompt echo (`❯ …` / `› …`), or 0 when the echo
+/// is not on screen. Everything before it belongs to earlier turns.
+fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
+    let echo = match kind {
+        "claude" => "❯ ",
+        "codex" => "› ",
+        _ => return 0,
+    };
+    lines
+        .iter()
+        .rposition(|l| {
+            let t = l.trim_start();
+            t.starts_with(echo) && t.len() > echo.len()
+        })
+        .map(|i| i + 1)
+        .unwrap_or(0)
+}
+
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
 fn is_noise(s: &str) -> bool {
     if s.is_empty() {
@@ -1004,22 +1036,8 @@ fn is_noise(s: &str) -> bool {
 /// minus TUI chrome. Tool-result lines (`⎿ …`) are kept because they usually carry the
 /// actual error ("Not logged in · Please run /login").
 fn clean_screen(kind: &str, text: &str) -> Option<String> {
-    let echo = match kind {
-        "claude" => "❯ ",
-        "codex" => "› ",
-        _ => "",
-    };
     let lines: Vec<&str> = text.lines().collect();
-    let start = if echo.is_empty() {
-        0
-    } else {
-        lines.iter().rposition(|l| {
-            let t = l.trim_start();
-            t.starts_with(echo) && t.len() > echo.len()
-        })
-        .map(|i| i + 1)
-        .unwrap_or(0)
-    };
+    let start = after_last_prompt_echo(kind, &lines);
     let mut out: Vec<String> = Vec::new();
     for line in &lines[start..] {
         let s = line.trim();
@@ -1058,7 +1076,10 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
         _ => return None,
     };
     let lines: Vec<&str> = text.lines().collect();
-    let start = lines.iter().rposition(|l| l.trim_start().starts_with(marker))?;
+    // A2: only this turn's output counts. Without this the last `⏺` line of the *previous*
+    // turn would be handed back as the answer whenever the current turn printed no marker.
+    let after_echo = after_last_prompt_echo(kind, &lines);
+    let start = after_echo + lines[after_echo..].iter().rposition(|l| l.trim_start().starts_with(marker))?;
     let mut out: Vec<String> = Vec::new();
     for line in &lines[start..] {
         let t = line.trim_end();
@@ -1116,6 +1137,26 @@ mod extract_tests {
         assert!(extract_reply("claude", NOT_LOGGED_IN).is_none());
         let got = clean_screen("claude", NOT_LOGGED_IN).unwrap();
         assert_eq!(got, "Not logged in · Please run /login");
+    }
+
+    /// Two turns; the second produced only tool output. The previous turn's `⏺ FIRST-ANSWER`
+    /// must not be reported as the answer to "echo 2" (review A2).
+    const TWO_TURNS: &str = "\
+❯ echo 1
+⏺ FIRST-ANSWER
+
+❯ echo 2
+  ⎿  Not logged in · Please run /login
+
+✻ Worked for 0s
+────────────────────────────────────────────
+❯
+";
+
+    #[test]
+    fn extract_reply_ignores_the_previous_turn() {
+        assert_eq!(extract_reply("claude", TWO_TURNS), None);
+        assert_eq!(clean_screen("claude", TWO_TURNS).unwrap(), "Not logged in · Please run /login");
     }
 
     #[test]

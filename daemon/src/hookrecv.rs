@@ -33,6 +33,10 @@ pub async fn receive(
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let expected = match db::bot(&app.db, &body.bot_id).await {
+        // A3: a deleted bot's surviving agent must not be able to create turns / messages.
+        Ok(Some(b)) if b.deleted_at.is_some() => {
+            return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
+        }
         Ok(Some(b)) => b.hook_token,
         _ => {
             return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot"})));
@@ -125,6 +129,11 @@ pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
+    // A3: also guards the spool-replay path, where nothing checked the token.
+    if bot.deleted_at.is_some() {
+        tracing::info!(bot = %bot.name, "hook for a deleted bot; ignored");
+        return Ok(());
+    }
     let conv = db::conversation_id(&app.db, &bot.id).await?;
     let run = db::active_run(&app.db, &bot.id).await?;
     let kind = classify(&body.provider, &body.payload);
@@ -289,7 +298,9 @@ async fn replay_spool_remote(app: &Arc<App>, bot_id: &str, host: &str) -> Result
                     n += 1;
                 }
             }
-            Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line"),
+            // A4: the line is already removed from the remote spool, so this is a drop, not a
+            // retry — say so once and move on.
+            Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line; dropped"),
         }
     }
     if n > 0 {

@@ -78,21 +78,31 @@ fn host_is_local(headers: &HeaderMap, port: u16) -> bool {
     expected.iter().any(|e| e == h)
 }
 
-fn origin_is_local(headers: &HeaderMap) -> bool {
-    match headers.get("origin").and_then(|v| v.to_str().ok()) {
-        None => true,
-        Some(o) => {
-            o.starts_with("http://127.0.0.1")
-                || o.starts_with("http://localhost")
-                || o.starts_with("http://[::1]")
-                || o == "null"
-        }
+/// A5: parse the Origin and compare the **host** exactly. `starts_with` used to let
+/// `http://localhost.attacker.com` through, and `null` (file://) is not a supported caller.
+///
+/// The port is deliberately *not* pinned to `listen`: the dev UI is served by Vite on another
+/// local port and its proxy forwards the browser's Origin verbatim (`web/vite.config.ts` only
+/// rewrites `Host`), so pinning it would reject every dev-server request. Cross-origin reads
+/// still need the UI token.
+fn origin_is_local(headers: &HeaderMap, _port: u16) -> bool {
+    let Some(o) = headers.get("origin").and_then(|v| v.to_str().ok()) else { return true };
+    let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else { return false };
+    // Reject anything with a path / userinfo; an Origin is scheme + host + optional port.
+    if rest.contains('/') || rest.contains('@') {
+        return false;
     }
+    let host = match rest.rsplit_once(':') {
+        // `[::1]` has colons of its own: only treat the tail as a port when it is numeric.
+        Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => rest,
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
     let headers = req.headers().clone();
-    if !origin_is_local(&headers) {
+    if !origin_is_local(&headers, app.port) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
     }
     let tok = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -103,7 +113,7 @@ async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
 }
 
 async fn get_session(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if !host_is_local(&headers, app.port) || !origin_is_local(&headers) {
+    if !host_is_local(&headers, app.port) || !origin_is_local(&headers, app.port) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "non-local request"}))).into_response();
     }
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
@@ -825,7 +835,7 @@ async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !origin_is_local(&headers) {
+    if !origin_is_local(&headers, app.port) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if q.get("token").map(|s| s.as_str()) != Some(app.ui_token.as_str()) {

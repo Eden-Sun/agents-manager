@@ -34,7 +34,11 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         anyhow::bail!("unknown host `{host}`");
     };
     let snapshot = client.snapshot().await?;
-    let agents = client.agent_list().await.unwrap_or_default();
+    // A1: never reconcile against an empty list. A transient RPC failure would otherwise look
+    // like "no agents on this host" and mark every active Run `exited` (failing their turns).
+    let agents = client.agent_list().await.map_err(|e| {
+        anyhow::anyhow!("agent.list failed on host `{host}`: {e}; skipping reconcile so runs are not falsely exited")
+    })?;
     let by_name: HashMap<String, &crate::herdr::AgentInfo> =
         agents.iter().filter_map(|a| a.name.clone().map(|n| (n, a))).collect();
 
