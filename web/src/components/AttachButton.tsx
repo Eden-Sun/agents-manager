@@ -51,11 +51,12 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
     <span className={`attach${compact ? ' compact' : ''}`} ref={wrap} onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        className={`icon-btn attach-btn${open ? ' on' : ''}${copied === 'ok' ? ' copied' : ''}`}
+        className={`icon-btn attach-btn icon-tip${open ? ' on' : ''}${copied === 'ok' ? ' copied' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={open}
         title={`複製 attach 指令：${command}`}
         aria-label="複製 attach 指令"
+        data-tip="複製 attach 指令 · 終端"
         onClick={onMainClick}
       >
         <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">

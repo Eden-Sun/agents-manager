@@ -143,6 +143,8 @@ interface StoreState {
   rightTab: RightTab
   /** 開著「Bot 設定」面板的 bot id（null = 面板關閉）。 */
   settingsBotId: string | null
+  /** Sidebar consumes this to open the「新增 Bot」sheet for a project. */
+  openBotSheetFor: string | null
   notices: Notice[]
   busy: Record<string, boolean>
 
@@ -157,6 +159,9 @@ interface StoreState {
   setRightTab: (tab: RightTab) => void
   openSettings: (botId: string) => void
   closeSettings: () => void
+  /** Ask the Sidebar to open its「新增 Bot」sheet for this project. */
+  requestOpenBotSheet: (projectId: string) => void
+  clearOpenBotSheet: () => void
   loadMessages: (botId: string) => Promise<void>
   notify: (kind: Notice['kind'], text: string) => void
   dismiss: (id: number) => void
@@ -232,6 +237,7 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedBotId: null,
   rightTab: 'chat',
   settingsBotId: null,
+  openBotSheetFor: null,
   notices: [],
   busy: {},
 
@@ -375,6 +381,9 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   closeSettings: () => set({ settingsBotId: null }),
+
+  requestOpenBotSheet: (projectId) => set({ openBotSheetFor: projectId }),
+  clearOpenBotSheet: () => set({ openBotSheetFor: null }),
 
   async loadMessages(botId) {
     try {

@@ -99,9 +99,10 @@ function BotRow({ botId }: { botId: string }) {
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
         <button
           type="button"
-          className="icon-btn gear"
-          title={`${bot.name} 的設定（模型、身份、autostart…）`}
-          aria-label={`${bot.name} 的設定`}
+          className="icon-btn gear icon-tip"
+          title={`設定 ${bot.name}（模型、身份、autostart…）`}
+          aria-label={`設定 ${bot.name}`}
+          data-tip={`設定 · ${bot.name}`}
           onClick={() => openSettings(botId)}
         >
           ⚙
@@ -109,11 +110,12 @@ function BotRow({ botId }: { botId: string }) {
         <div className="bot-menu" ref={menuRef}>
           <button
             type="button"
-            className="icon-btn bot-menu-btn"
+            className="icon-btn bot-menu-btn icon-tip"
             aria-label={`${bot.name} 的操作選單`}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
-            title="啟動／停止"
+            title={`${active ? '停止' : '啟動'} ${bot.name}`}
+            data-tip={`${active ? '停止' : '啟動'} · ${bot.name}`}
             onClick={() => setMenuOpen((v) => !v)}
           >
             ⋯
@@ -528,6 +530,8 @@ export function Sidebar() {
   const identityCount = useStore((s) => s.identities.length)
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
   const [botSheetOpen, setBotSheetOpen] = useState(false)
+  const openBotSheetFor = useStore((s) => s.openBotSheetFor)
+  const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
   const hostsDown = hosts.filter((h) => !h.connected).length
@@ -542,6 +546,12 @@ export function Sidebar() {
     setBotFormFor(projectId ?? null)
     setBotSheetOpen(true)
   }
+
+  useEffect(() => {
+    if (!openBotSheetFor) return
+    openBotSheet(openBotSheetFor)
+    clearOpenBotSheet()
+  }, [openBotSheetFor, clearOpenBotSheet])
 
   const botSheetProject = botFormFor ? projects.find((p) => p.id === botFormFor) : null
   const botSheetLabel = botSheetProject?.label ?? '選擇 Project'
@@ -625,8 +635,10 @@ export function Sidebar() {
                 <ProjectAttach projectId={p.id} />
                 <button
                   type="button"
-                  className="icon-btn add"
-                  title="在這個 Project 新增 Bot"
+                  className="icon-btn add icon-tip"
+                  title={`在「${p.label}」新增 Bot`}
+                  aria-label={`在 ${p.label} 新增 Bot`}
+                  data-tip={`新增 Bot · ${p.label}`}
                   aria-expanded={false}
                   onClick={(e) => {
                     e.stopPropagation()
@@ -637,8 +649,10 @@ export function Sidebar() {
                 </button>
                 <button
                   type="button"
-                  className="icon-btn"
-                  title="刪除 Project（所有 Bot 需先停止）"
+                  className="icon-btn icon-tip"
+                  title={`刪除專案「${p.label}」（所有 Bot 需先停止）`}
+                  aria-label={`刪除專案 ${p.label}`}
+                  data-tip={`刪除專案 · ${p.label}`}
                   onClick={(e) => {
                     e.stopPropagation()
                     if (confirm(`刪除 Project「${p.label}」？（不會刪除目錄）`)) void removeProject(p.id)
@@ -648,12 +662,12 @@ export function Sidebar() {
                 </button>
               </header>
               {list.length === 0 ? (
-                <p className="hint" style={{ padding: '0 14px 6px' }}>
-                  這個 Project 還沒有 Bot。{' '}
-                  <button type="button" className="link-btn" onClick={() => openBotSheet(p.id)}>
-                    ＋ 新增 Bot
+                <div className="project-empty">
+                  <span className="project-empty-title">此專案尚無 Bot</span>
+                  <button type="button" className="btn primary empty-add-btn" onClick={() => openBotSheet(p.id)}>
+                    新增 Bot
                   </button>
-                </p>
+                </div>
               ) : (
                 list.map((b) => <BotRow key={b.id} botId={b.id} />)
               )}

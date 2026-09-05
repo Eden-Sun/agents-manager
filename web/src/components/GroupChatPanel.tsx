@@ -138,8 +138,12 @@ function GroupMessageList({ projectId }: { projectId: string }) {
       }}
     >
       {rows.length === 0 ? (
-        <EmptyState loading={!loaded}>
-          {loaded ? '群組裡還沒有訊息。在下方以 @bot 名稱或 @all 對成員發言。' : '載入群組訊息中…'}
+        <EmptyState
+          loading={!loaded}
+          title={loaded ? '開始交代第一個任務' : undefined}
+          icon={loaded ? '✦' : undefined}
+        >
+          {loaded ? '在下方以 @bot 或 @all 對成員送出第一則訊息。' : '載入群組訊息中…'}
         </EmptyState>
       ) : (
         rows.map((r) =>
@@ -221,9 +225,12 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
   const [active, setActive] = useState(0)
   const ref = inputRef
 
+  const loaded = useStore((s) => Boolean(s.loadedProjects[projectId]))
+  const empty = useStore((s) => (s.groupMessages[projectId]?.length ?? 0) === 0)
+
   useEffect(() => {
     if (!state.disabled) ref.current?.focus()
-  }, [state.disabled, projectId, ref])
+  }, [state.disabled, projectId, ref, loaded && empty])
 
   useEffect(() => {
     const el = ref.current
@@ -455,6 +462,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const memberCount = members.length
   const memberKinds = useMemo(() => [...new Set(members.map((b) => b.kind))] as BotKind[], [members])
   const selectProject = useStore((s) => s.selectProject)
+  const requestOpenBotSheet = useStore((s) => s.requestOpenBotSheet)
   const attachCommand = useStore((s) => attachCommandOf(s, projectId))
   const composerRef = useRef<HTMLTextAreaElement>(null)
 
@@ -462,7 +470,14 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
     return (
       <>
         <div className="main-head">
-          <button type="button" className="btn menu-btn" onClick={onOpenSidebar}>
+          <button
+            type="button"
+            className="btn menu-btn icon-tip"
+            onClick={onOpenSidebar}
+            aria-label="開啟側邊欄"
+            title="開啟側邊欄"
+            data-tip="開啟側邊欄"
+          >
             ☰
           </button>
           <span className="main-status">找不到 Project</span>
@@ -474,7 +489,14 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   return (
     <>
       <div className="main-head group-head">
-        <button type="button" className="btn menu-btn" onClick={onOpenSidebar} aria-label="開啟側邊欄">
+        <button
+          type="button"
+          className="btn menu-btn icon-tip"
+          onClick={onOpenSidebar}
+          aria-label="開啟側邊欄"
+          title="開啟側邊欄"
+          data-tip="開啟側邊欄"
+        >
           ☰
         </button>
         <div className="main-title">
@@ -500,11 +522,32 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         </div>
       </div>
       <ToolsHint focusHost={hostName} focusKinds={memberKinds} />
-      <div className="chat">
-        <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
-        <GroupMessageList projectId={projectId} />
-        <GroupComposer projectId={projectId} inputRef={composerRef} />
-      </div>
+      {memberCount === 0 ? (
+        <EmptyState
+          title="此專案尚無 Bot"
+          icon="＋"
+          action={
+            <button
+              type="button"
+              className="btn primary empty-add-btn"
+              onClick={() => {
+                onOpenSidebar()
+                requestOpenBotSheet(projectId)
+              }}
+            >
+              新增 Bot
+            </button>
+          }
+        >
+          為此專案建立第一個 Bot 後，即可在群組中交代任務。
+        </EmptyState>
+      ) : (
+        <div className="chat">
+          <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
+          <GroupMessageList projectId={projectId} />
+          <GroupComposer projectId={projectId} inputRef={composerRef} />
+        </div>
+      )}
     </>
   )
 }
