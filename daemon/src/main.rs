@@ -9,15 +9,20 @@ mod assets;
 mod config;
 mod db;
 mod events;
+mod github;
 mod group;
 mod herdr;
 mod hook_cmd;
 mod hookrecv;
 mod hosts;
 mod lifecycle;
+mod models;
 mod projection;
+mod quota;
 mod reconcile;
 mod state;
+mod statusline_cmd;
+mod tools;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -56,6 +61,16 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         payload: Vec<String>,
     },
+    /// Claude Code statusLine command for daemon-started claude bots (v4.0): reports the
+    /// rate limits to the daemon, then runs the user's own statusLine command. Always exits 0.
+    Statusline {
+        #[arg(long)]
+        bot: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long, default_value_t = 7788)]
+        port: u16,
+    },
 }
 
 fn main() {
@@ -64,6 +79,10 @@ fn main() {
         Cmd::Hook { provider, bot, token, port, payload } => {
             let payload_arg = if provider == "codex" { payload.last().cloned() } else { None };
             hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, payload_arg });
+            std::process::exit(0);
+        }
+        Cmd::Statusline { bot, token, port } => {
+            statusline_cmd::run(statusline_cmd::StatuslineArgs { bot, token, port });
             std::process::exit(0);
         }
         Cmd::Serve { config, dev_watch_all_panes } => {
@@ -169,6 +188,11 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     }
 
     hookrecv::replay_host(&app, config::LOCAL_HOST).await;
+
+    // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.
+    tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
+    quota::spawn_codex_poller(app.clone());
+    github::spawn_detect_all(app.clone());
 
     {
         let app2 = app.clone();

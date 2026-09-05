@@ -749,3 +749,40 @@ herdr 測試 session `am-grok` 已 `server stop` + `session delete`；探測用�
 - grok `effort`：欄位貫通 config / DB（additive migration）/ API / 注入 `--reasoning-effort`（值以 `grok --help` 實測：low / medium / high）。
 - UI：新增 Bot 表單只留 Project、名稱、kind（選項列）、模型或強度、身份（claude 才顯示，選項列）；自動核准恆為 true、不設 autostart、按「新增並啟動」後立刻 start。設定面板同樣精簡，名稱隨時可改。
 - `cargo test` 21 passed（含全形標點 mention 測試）。
+
+## v4.0 — 模型清單 / fast / attach / 額度 / tools / persona / GitHub issues（2026-09-06）
+
+契約：`docs/API.md` §12。接手 wip commit（`models.rs` / `quota.rs` / `tools.rs` / `github.rs` / `statusline_cmd.rs` 等），修到 build + 驗收通過。**未動 7788 正式 daemon、未動 `web/`。**
+
+### 修補
+
+- **`gh --json` ANSI**：agent / IDE shell 常帶 `CLICOLOR_FORCE=1`，`gh issue list --json` 會輸出上色 pretty JSON，`serde_json` 直接炸。`github.rs` 在指令前 `NO_COLOR=1` + `unset CLICOLOR_FORCE FORCE_COLOR`，並對 stdout 做 ANSI strip（含單元測試）。
+
+### 驗收（獨立 daemon）
+
+```
+AM_DATA_DIR=/tmp/am-v40
+./target/release/agents-managerd serve --config /tmp/am-v40/config.toml
+# listen 127.0.0.1:7800、herdr_session=am-v40
+# projects: agents-manager + powertech-hub；bots: v-claude / v-codex / v-grok
+```
+
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | `GET /api/models` | claude `source=static` 3 模（opus/sonnet/haiku）；codex `codex-app-server` 6 模（含 `gpt-6-astra` + efforts + `service_tiers.priority`）；grok `grok-cli` 2 模（`grok-4.6`/`4.5`，efforts low/medium/high）。bad kind→400、未知 host→404 ✅ |
+| 2 | `bot.fast` / `effort` | grok `effort=xhigh`→400；合法值寫入 state。argv：codex `-c model_reasoning_effort="medium" -c service_tier="priority"`（fast）；grok `--reasoning-effort low`；claude effort 一律清成 `null`。執行中 PATCH → `needs_restart:true` ✅ |
+| 3 | `hosts[].attach_command` | local = `herdr --session am-v40`；遠端埠規則有單元測試（22 → `--remote user@host`，非 22 → `ssh://user@host:port`） ✅ |
+| 4 | `GET /api/quota` + WS `quota_updated` | codex：`source=codex-app-server`（plus，5h/7d）；claude：注入 `statusLine.command = agents-managerd statusline …`，模擬／真機 StatusLine → `source=statusline`，並轉呼叫使用者原 statusLine（stdout 原樣）；WS 收到 `{"type":"quota_updated","data":{"kind":"claude",…}}`；grok 固定 `null` ✅ |
+| 5 | `hosts[].tools` + install | local 三 CLI `installed/logged_in=true`；`POST …/tools/refresh` 200；`POST …/tools/install {kind:grok,via_bot_id:v-claude}` → `delivery=ok`（官方 install.sh prompt）；bad kind→400 ✅ |
+| 6 | `bot.persona` | argv：claude `--append-system-prompt`、grok `--rules`、codex `-c developer_instructions="…"`（TOML 逃逸）。實效：claude「你好！… [PERSONA-CLAUDE]」；codex `Hi! [PERSONA-CODEX]`（需可用模型，見下）；grok `GROK-P-OK\n[PERSONA-GROK]` ✅ |
+| 7 | `projects[].github` + issues | powertech-hub → `{owner:Eden-Sun,repo:powertech-hub}`；`GET …/issues?limit=3` 回 open issues（含 labels/author/excerpt）；`…/issues/21` 回完整 body；agents-manager 無 origin → `github:null`，issues→400 ✅ |
+
+`cargo test` → **40 passed**（含 v4.0 單元測試）。測完已 stop bots、`herdr --session am-v40 server stop`、`herdr session delete am-v40`。
+
+### 設計選擇 / 實測筆記
+
+1. **codex Fast**：UI 顯示 `gpt-6-astra medium fast`；對不支援 priority 的舊模型（曾試 `gpt-5.4`）終端會警告並省略 tier，且 ChatGPT 帳號回 400「model is not supported」——前端應只從 `/api/models` 選 id。
+2. **claude persona**：`--append-system-prompt` 有效，但「Reply with exactly …」或「不要加其他說明」可能壓過 persona；一般對話會附上標記。
+3. **codex `developer_instructions`**：經 `-c` TOML basic string 注入，實測會出現在回覆尾端（`[PERSONA-CODEX]`）。
+4. **statusline**：daemon 寫入 bot 專屬 `claude-settings.json` 的 `statusLine`，不改使用者 `~/.claude/settings.json`；子命令會再 exec 使用者自己的 statusLine。
+5. **issues 快取** 2 分鐘；models 快取 10 分鐘；`?refresh=1` 皆可跳過。

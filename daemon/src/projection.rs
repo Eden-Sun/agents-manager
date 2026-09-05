@@ -102,10 +102,10 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
-                   model=excluded.model, effort=excluded.effort, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
+                   model=excluded.model, effort=excluded.effort, fast=excluded.fast, persona=excluded.persona, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
                    auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, deleted_at=NULL",
             )
             .bind(&bid)
@@ -113,7 +113,10 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             .bind(&b.name)
             .bind(&b.kind)
             .bind(b.model.as_deref().filter(|s| !s.trim().is_empty()))
-            .bind(b.effort.as_deref().filter(|s| !s.trim().is_empty()))
+            // v4.0: effort is kind-dependent; a hand-edited value that the kind rejects is dropped.
+            .bind(crate::config::normalize_effort(&b.kind, b.effort.as_deref()).unwrap_or(None))
+            .bind(b.fast as i64)
+            .bind(b.persona.as_deref().filter(|s| !s.trim().is_empty()))
             .bind(&args_json)
             .bind(b.autostart as i64)
             .bind(b.inject_hooks as i64)
