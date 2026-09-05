@@ -47,6 +47,10 @@ pub struct BotCfg {
     /// terminal-fallback path (§4.3) can be exercised. Defaults to true.
     #[serde(default = "default_true")]
     pub inject_hooks: bool,
+    /// Grant the agent all permissions on start: claude `--dangerously-skip-permissions`,
+    /// codex `--yolo` (alias of `--dangerously-bypass-approvals-and-sandbox`). Defaults to true.
+    #[serde(default = "default_true")]
+    pub auto_approve: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

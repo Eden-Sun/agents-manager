@@ -142,12 +142,20 @@ fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
 
 /// Returns the daemon-injected CLI args that go *before* the bot's own args.
 fn injected_args(app: &App, bot: &db::Bot) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    if bot.auto_approve != 0 {
+        match bot.kind.as_str() {
+            "claude" => out.push("--dangerously-skip-permissions".into()),
+            "codex" => out.push("--yolo".into()),
+            other => anyhow::bail!("unknown bot kind {other}"),
+        }
+    }
     if bot.inject_hooks == 0 {
-        return Ok(vec![]);
+        return Ok(out);
     }
     let dir = app.bot_dir(&bot.id);
     std::fs::create_dir_all(&dir)?;
-    match bot.kind.as_str() {
+    let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
             let cmd = shell_join(&hook_cmd_parts(app, bot, "claude"));
             // v3: no Notification hook; Stop with stop_hook_active=true is ignored daemon-side.
@@ -159,15 +167,17 @@ fn injected_args(app: &App, bot: &db::Bot) -> anyhow::Result<Vec<String>> {
             });
             let path = dir.join("claude-settings.json");
             std::fs::write(&path, serde_json::to_vec_pretty(&settings)?)?;
-            Ok(vec!["--settings".into(), path.to_string_lossy().to_string()])
+            vec!["--settings".into(), path.to_string_lossy().to_string()]
         }
         "codex" => {
             let parts = hook_cmd_parts(app, bot, "codex");
             let arr = serde_json::to_string(&parts)?;
-            Ok(vec!["-c".into(), format!("notify={arr}")])
+            vec!["-c".into(), format!("notify={arr}")]
         }
         other => anyhow::bail!("unknown bot kind {other}"),
-    }
+    };
+    out.extend(hook_args);
+    Ok(out)
 }
 
 fn shell_join(parts: &[String]) -> String {

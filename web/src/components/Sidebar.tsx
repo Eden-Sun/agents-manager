@@ -162,6 +162,7 @@ function NewBotForm({ onDone }: { onDone: () => void }) {
   const [kind, setKind] = useState<BotKind>('claude')
   const [args, setArgs] = useState('')
   const [autostart, setAutostart] = useState(false)
+  const [autoApprove, setAutoApprove] = useState(true)
   const [busy, setBusy] = useState(false)
 
   const pid = projectId || projects[0]?.id || ''
@@ -183,6 +184,7 @@ function NewBotForm({ onDone }: { onDone: () => void }) {
           kind,
           args: args.trim() ? args.trim().split(/\s+/) : [],
           autostart,
+          auto_approve: autoApprove,
         }).then((ok) => {
           setBusy(false)
           if (ok) {
@@ -234,6 +236,12 @@ function NewBotForm({ onDone }: { onDone: () => void }) {
       <label className="field row">
         <input type="checkbox" checked={autostart} onChange={(e) => setAutostart(e.target.checked)} />
         <span>autostart（daemon 啟動時自動執行）</span>
+      </label>
+      <label className="field row">
+        <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
+        <span>
+          自動核准全部權限（claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code>）
+        </span>
       </label>
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>

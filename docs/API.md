@@ -52,6 +52,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
           "args": [],
           "autostart": false,
           "inject_hooks": true,
+    "auto_approve": true,
           "run": null,
           "lamp": "offline",
           "unread": 0
@@ -263,3 +264,8 @@ UI 標籤建議：
 ```
 
 錯誤：路徑不存在或不是目錄 → 400 `{"error":"bad_request","message":"..."}`。
+
+
+## bot.auto_approve（2026-09-06 新增）
+
+每個 bot 的布林欄位，預設 `true`。啟動時 daemon 依 kind 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`（等同 `--dangerously-bypass-approvals-and-sandbox`）。`POST /projects/:id/bots` 與 `PATCH /bots/:id` 皆接受 `auto_approve`。舊資料庫啟動時自動 `ALTER TABLE` 補欄位。

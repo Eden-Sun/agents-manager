@@ -118,6 +118,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     args,
     autostart: bool(v.autostart),
     inject_hooks: bool(v.inject_hooks, true),
+    auto_approve: bool(v.auto_approve, true),
     created_at: str(v.created_at),
   }
 }
