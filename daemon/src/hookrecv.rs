@@ -108,11 +108,24 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
                 .filter(|s| !s.is_empty());
+            // Codex runs a hidden follow-up turn after each reply to name the thread
+            // ("Generate a concise, single-line task title …" → `{"title": …}`). It is not a
+            // user-visible turn, so it must not become an external Turn in the timeline.
+            let assistant = s("last-assistant-message");
+            let is_title_turn = user.as_deref().map(|u| u.contains("single-line task title")).unwrap_or(false)
+                || assistant
+                    .as_deref()
+                    .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                    .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
+                    .unwrap_or(false);
+            if is_title_turn {
+                return HookKind::Ignore("codex title-generation turn".into());
+            }
             HookKind::TurnComplete {
                 session_id: s("thread-id"),
                 turn_id: s("turn-id"),
                 transcript_path: None,
-                assistant: s("last-assistant-message"),
+                assistant,
                 user,
             }
         }
@@ -461,5 +474,26 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
         if let Err(e) = replay_spool(app, &b.id).await {
             tracing::warn!(bot = %b.name, host, error = ?e, "spool replay failed");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    #[test]
+    fn codex_title_turn_is_ignored() {
+        let p = serde_json::json!({
+            "type": "agent-turn-complete", "thread-id": "t", "turn-id": "u",
+            "input-messages": ["Generate a concise, single-line task title of at most 36 characters …"],
+            "last-assistant-message": "{\"title\":\"Reply with MERGED-OK\"}"
+        });
+        assert!(matches!(classify("codex", &p), HookKind::Ignore(_)));
+        let real = serde_json::json!({
+            "type": "agent-turn-complete", "thread-id": "t", "turn-id": "v",
+            "input-messages": ["Reply with exactly MERGED-OK"], "last-assistant-message": "MERGED-OK"
+        });
+        assert!(matches!(classify("codex", &real), HookKind::TurnComplete { .. }));
     }
 }
