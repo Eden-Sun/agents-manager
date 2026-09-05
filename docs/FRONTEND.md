@@ -617,3 +617,21 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 2. **不同 bot 的相鄰回覆**在群組視圖也套用同側收緊（-4px），靠 meta 列的徽章區分。
 3. **狀態字隱藏 idle / offline** 後，離線 bot 只靠空心燈號辨識；hover 列或看啟動 / 停止鈕可確認。
 4. **≤1080 寬時標題列的狀態字整個隱藏**（沿用原規則），run / pane tooltip 也跟著不可見。
+
+## Project 選擇 UI（grok）
+
+優化側欄 Project 標題列與新增 Bot 表單的 Project 選擇（只動 `web/src/**`）。
+
+### 改了什麼
+
+| # | 項目 | 處理 |
+|---|---|---|
+| 1 | 新增 Bot 的 Project 欄 | `NewBotForm` 拿掉原生 `<select>`，改成與 kind 相同的 `.opt-group` / `.opt` chip 列；每個 Project 一顆 chip 顯示 `label`，遠端 Project 在 chip 內帶既有 `HostBadge`（`@host`）；主機未連線的 chip `disabled`。有 `initialProjectId` 時仍預選該 Project |
+| 2 | 超過 6 個 Project | chip 列上方出現小過濾框（`.opt-filter`），輸入即時依 `label` 過濾 |
+| 3 | 側欄 `.project-head` | 整列可點（點路徑區也會 `selectProject`；`＋` / `✕` 仍 `stopPropagation`）；hover 有 `--bg-hover`；`min-height: 32px`；`store.selectedProjectId` 對應的列加 `.selected`，左側 3px `--accent` 色條。class 名稱（`.project-head`、`.project-label-btn`、`.icon-btn.add`、`.host-badge`）全部保留，只調結構與 CSS |
+| 4 | 深淺色 | chip / 色條 / hover 一律走既有 CSS 變數（`--accent`、`--bg-hover`、`--bg-active` 等）；選中 chip 內的 `HostBadge` 改用 `accent-text` 混色以保持對比 |
+
+### 檔案
+
+- `web/src/components/Sidebar.tsx` — `NewBotForm` Project chip + 過濾；`.project-head` 整列點選與 `.selected`
+- `web/src/styles.css` — `.project-head` / `.selected`、`.opt-filter`、chip 內 `HostBadge` 對比
