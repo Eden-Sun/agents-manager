@@ -69,6 +69,8 @@ interface MockBot {
   project_id: string
   name: string
   kind: 'claude' | 'codex'
+  /** API.md v3.3：模型別名，null = 不帶 `--model` */
+  model: string | null
   args_json: string
   autostart: number
   inject_hooks: number
@@ -149,7 +151,8 @@ export class MockTransport implements Transport {
       project_id: p.id,
       name: 'am-claude',
       kind: 'claude',
-      args_json: JSON.stringify(['--model', 'opus']),
+      model: null,
+      args_json: '[]',
       autostart: 1,
       inject_hooks: 1,
       auto_approve: 1,
@@ -162,6 +165,7 @@ export class MockTransport implements Transport {
       project_id: p.id,
       name: 'am-codex',
       kind: 'codex',
+      model: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -228,6 +232,7 @@ export class MockTransport implements Transport {
       if (method === 'POST') {
         if (action === 'start') return this.start(botId)
         if (action === 'stop') return this.stop(botId)
+        if (action === 'restart') return this.restart(botId)
         if (action === 'interrupt') return this.interrupt(botId)
         if (action === 'prompt') return this.prompt(botId, b)
         if (action === 'keys') return this.keys(botId, b)
@@ -507,6 +512,7 @@ export class MockTransport implements Transport {
               project_id: b.project_id,
               name: b.name,
               kind: b.kind,
+              model: b.model,
               args: JSON.parse(b.args_json) as string[],
               autostart: b.autostart === 1,
               inject_hooks: b.inject_hooks === 1,
@@ -573,6 +579,7 @@ export class MockTransport implements Transport {
       project_id: projectId,
       name,
       kind: b.kind === 'codex' ? 'codex' : 'claude',
+      model: typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
       inject_hooks: 1,
@@ -581,35 +588,112 @@ export class MockTransport implements Transport {
       env_json: JSON.stringify(b.env && typeof b.env === 'object' ? b.env : {}),
       created_at: now(),
     }
-    if (bot.identity) {
-      const ident = this.identities.find((x) => x.name === bot.identity)
-      if (!ident) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
-      if (ident.kind !== bot.kind) {
-        throw new ApiError(400, { error: 'bad_request', message: `identity ${ident.name} 是 ${ident.kind}，bot 是 ${bot.kind}` }, 'bad request')
-      }
-    }
+    if (bot.identity) this.checkIdentity(bot.identity, bot.kind)
     this.bots.push(bot)
     this.emit('bot_changed', { bot_id: bot.id })
     return { bot_id: bot.id }
   }
 
-  private patchBot(id: string, b: Rec) {
-    const bot = this.bot(id)
-    if (b.name !== undefined && this.activeRun(id)) {
-      throw new ApiError(409, { reason: '有 active Run 時不可改名' }, 'conflict')
+  /** identity 必須存在且 kind 相符（API.md identities 章節）。 */
+  private checkIdentity(name: string, kind: 'claude' | 'codex') {
+    const ident = this.identities.find((x) => x.name === name)
+    if (!ident) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
+    if (ident.kind !== kind) {
+      throw new ApiError(
+        400,
+        { error: 'bad_request', message: `identity ${ident.name} 是 ${ident.kind}，bot 是 ${kind}` },
+        'bad request',
+      )
     }
-    if (typeof b.name === 'string') bot.name = b.name
-    if (Array.isArray(b.args)) bot.args_json = JSON.stringify(b.args)
-    if (b.autostart !== undefined) bot.autostart = b.autostart ? 1 : 0
-    this.emit('bot_changed', { bot_id: id })
-    return bot
   }
 
+  /**
+   * `PATCH /api/bots/:id`（API.md v3.3）。改名時有 active Run → 409；其他欄位允許，
+   * 但回 `needs_restart: true`（目前的 Run 仍跑在舊參數上）。
+   */
+  private patchBot(id: string, b: Rec) {
+    const bot = this.bot(id)
+    const run = this.activeRun(id)
+    if (b.name !== undefined && run) {
+      throw new ApiError(
+        409,
+        { error: 'conflict', reason: 'cannot rename a bot with an active run', run_id: run.id, bot_id: id },
+        'conflict',
+      )
+    }
+    if (typeof b.name === 'string') {
+      const name = b.name.trim()
+      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+        throw new ApiError(400, { error: 'bad_request', message: 'name 必須符合 [a-z][a-z0-9_-]{0,31}' }, 'bad request')
+      }
+      if (this.bots.some((x) => x.id !== id && x.name === name)) {
+        throw new ApiError(409, { error: 'conflict', reason: 'bot name already in use', name }, 'conflict')
+      }
+      bot.name = name
+    }
+    if (b.identity !== undefined) {
+      const name = typeof b.identity === 'string' && b.identity.trim() ? b.identity.trim() : null
+      if (name) this.checkIdentity(name, bot.kind)
+      bot.identity = name
+    }
+    if (b.model !== undefined) {
+      bot.model = typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null
+    }
+    if (Array.isArray(b.args)) bot.args_json = JSON.stringify(b.args.map((a) => String(a)))
+    if (b.env !== undefined) {
+      const env: Record<string, string> = {}
+      if (b.env && typeof b.env === 'object') for (const [k, v] of Object.entries(b.env as Rec)) env[k] = String(v)
+      bot.env_json = JSON.stringify(env)
+    }
+    if (b.autostart !== undefined) bot.autostart = b.autostart ? 1 : 0
+    if (b.auto_approve !== undefined) bot.auto_approve = b.auto_approve ? 1 : 0
+    if (b.inject_hooks !== undefined) bot.inject_hooks = b.inject_hooks ? 1 : 0
+    this.emit('bot_changed', { bot_id: id })
+    // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟；只改 autostart → false。
+    const LAUNCH_FIELDS = ['model', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
+    const needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
+    return { needs_restart }
+  }
+
+  /** `POST /api/bots/:id/restart`（API.md v3.3）= stop 再 start，回新的 run_id。 */
+  private restart(botId: string) {
+    const run = this.activeRun(botId)
+    if (run) {
+      const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
+      if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
+      run.state = 'stopped'
+      run.agent_status = 'unknown'
+      run.ended_at = now()
+      this.emitBotStatus(botId)
+      this.addMessage({
+        conversation_id: this.conv(botId),
+        turn_id: null,
+        bot_id: botId,
+        role: 'system',
+        content: '套用新設定，重新啟動中（mock）。',
+        source: 'system',
+        incomplete: 0,
+      })
+    }
+    return this.start(botId)
+  }
+
+  /** `DELETE /api/bots/:id`：有 Run 會先 stop（關 pane），設定移除，對話歷史保留。 */
   private deleteBot(id: string) {
-    if (this.activeRun(id)) throw new ApiError(409, { reason: 'Bot 尚未停止' }, 'conflict')
+    this.bot(id)
+    const run = this.activeRun(id)
+    if (run) {
+      const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
+      if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
+      run.state = 'stopped'
+      run.agent_status = 'unknown'
+      run.ended_at = now()
+      this.emitBotStatus(id)
+    }
     this.bots = this.bots.filter((x) => x.id !== id)
+    // messages / turns / conversation 刻意保留（對話歷史不刪）。
     this.emit('bot_changed', { bot_id: id, deleted: true })
-    return null
+    return {}
   }
 
   private start(botId: string) {

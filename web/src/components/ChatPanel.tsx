@@ -5,6 +5,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
 import { botLamp, composerState, projectHostName, useStore } from '../store/store'
 import { BlockedPanel } from './BlockedPanel'
+import { BotSettingsPanel } from './BotSettingsPanel'
 import { HostBadge } from './HostsPanel'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
@@ -198,6 +199,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   })
   const tab = useStore((s) => s.rightTab)
   const setRightTab = useStore((s) => s.setRightTab)
+  const settingsBotId = useStore((s) => s.settingsBotId)
+  const openSettings = useStore((s) => s.openSettings)
+  const closeSettings = useStore((s) => s.closeSettings)
   const startBot = useStore((s) => s.startBot)
   const stopBot = useStore((s) => s.stopBot)
   const interruptBot = useStore((s) => s.interruptBot)
@@ -221,6 +225,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
 
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
   const blocked = run?.agent_status === 'blocked'
+  const settingsOpen = settingsBotId === botId
 
   return (
     <>
@@ -232,7 +237,22 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <StatusLamp lamp={lamp} />
           <strong>{bot.name}</strong>
           <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+          {bot.model ? (
+            <span className="model-tag" title={`模型：${bot.model}`}>
+              {bot.model}
+            </span>
+          ) : null}
           <HostBadge host={hostName} connected={hostUp} />
+          <button
+            type="button"
+            className="icon-btn gear"
+            aria-label="Bot 設定"
+            aria-expanded={settingsOpen}
+            title="Bot 設定（模型、args、身份、env、刪除）"
+            onClick={() => (settingsOpen ? closeSettings() : openSettings(botId))}
+          >
+            ⚙
+          </button>
         </div>
         <span className="main-status">
           {LAMP_LABEL[lamp]}
@@ -240,14 +260,14 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </span>
         <span className="spacer" />
         <div className="tabs" role="tablist">
-          <button type="button" className="tab" role="tab" aria-selected={tab === 'chat'} onClick={() => setRightTab('chat')}>
+          <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
             對話
           </button>
           <button
             type="button"
             className="tab"
             role="tab"
-            aria-selected={tab === 'terminal'}
+            aria-selected={tab === 'terminal' && !settingsOpen}
             onClick={() => setRightTab('terminal')}
           >
             終端
@@ -285,7 +305,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </div>
       </div>
 
-      {tab === 'terminal' ? (
+      {settingsOpen ? (
+        <BotSettingsPanel key={botId} botId={botId} />
+      ) : tab === 'terminal' ? (
         active ? (
           <TerminalTab botId={botId} />
         ) : (

@@ -94,6 +94,11 @@ export interface Bot {
   project_id: string
   name: string
   kind: BotKind
+  /**
+   * 模型別名（API.md v3.3）。`null` = 不指定，由 agent CLI 自己決定預設。
+   * daemon 會把它翻成 `--model <值>`（claude）/ `-m <值>`（codex）。
+   */
+  model: string | null
   args: string[]
   autostart: boolean
   /** daemon extension: false = no hook injection (terminal-fallback path) */
@@ -274,9 +279,47 @@ export interface DirListing {
 export interface NewBotInput {
   name: string
   kind: BotKind
+  /** `null` / 省略 = 不帶 `--model`（由 CLI 自己決定） */
+  model?: string | null
   args: string[]
   autostart: boolean
   auto_approve?: boolean
   identity?: string | null
   env?: Record<string, string>
 }
+
+/**
+ * `PATCH /api/bots/:id`（API.md v3.3）。只送有變更的欄位；
+ * `model` / `identity` 傳 `null` 代表清除。
+ */
+export interface PatchBotInput {
+  name?: string
+  model?: string | null
+  args?: string[]
+  autostart?: boolean
+  auto_approve?: boolean
+  inject_hooks?: boolean
+  identity?: string | null
+  env?: Record<string, string>
+}
+
+/**
+ * `PATCH /api/bots/:id` 的回應。`needs_restart = true` 代表設定已寫入 config，
+ * 但目前這個 Run 仍跑在舊參數上，要 `POST /api/bots/:id/restart` 才會生效。
+ */
+export interface PatchBotResult {
+  needs_restart: boolean
+}
+
+/**
+ * 各 kind 的常用模型別名（下拉選單用；使用者仍可用「自訂…」輸入任意字串）。
+ * 空字串 = `（預設）`，送出時轉成 `null`。
+ */
+export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
+  claude: ['opus', 'sonnet', 'haiku'],
+  codex: ['gpt-5.5', 'gpt-5.6-luna', 'gpt-6-astra'],
+}
+
+/** 「（預設）」與「自訂…」在 `<select>` 裡的 sentinel 值。 */
+export const MODEL_DEFAULT = ''
+export const MODEL_CUSTOM = ' custom'

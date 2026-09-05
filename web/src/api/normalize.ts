@@ -148,6 +148,8 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     project_id: str(pick(v, 'project_id', 'projectId'), projectId ?? ''),
     name: str(pick(v, 'name', 'label'), id),
     kind: oneOf<BotKind>(v.kind, ['claude', 'codex'], 'claude'),
+    // API.md v3.3; older daemons omit it entirely → treated as "no explicit model".
+    model: optStr(pick(v, 'model')),
     args,
     autostart: bool(v.autostart),
     inject_hooks: bool(v.inject_hooks, true),

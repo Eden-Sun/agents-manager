@@ -6,6 +6,7 @@ import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge, parseEnvText } from './IdentitiesPanel'
+import { ModelField } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -34,6 +35,7 @@ function BotRow({ botId }: { botId: string }) {
   const selectBot = useStore((s) => s.selectBot)
   const startBot = useStore((s) => s.startBot)
   const stopBot = useStore((s) => s.stopBot)
+  const openSettings = useStore((s) => s.openSettings)
 
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
@@ -57,11 +59,25 @@ function BotRow({ botId }: { botId: string }) {
         <span className="bot-name">{bot.name}</span>
         <span className="bot-sub">
           <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+          {bot.model ? (
+            <span className="model-tag" title={`模型：${bot.model}`}>
+              {bot.model}
+            </span>
+          ) : null}
           <IdentityBadge name={bot.identity} />
           <span>{LAMP_LABEL[lamp]}</span>
         </span>
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className="icon-btn gear"
+          title={`${bot.name} 的設定（模型、args、身份、env…）`}
+          aria-label={`${bot.name} 的設定`}
+          onClick={() => openSettings(botId)}
+        >
+          ⚙
+        </button>
         {active ? (
           <button
             type="button"
@@ -187,6 +203,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
+  const [model, setModel] = useState<string | null>(null)
   const [args, setArgs] = useState('')
   const [autostart, setAutostart] = useState(false)
   const [autoApprove, setAutoApprove] = useState(true)
@@ -213,6 +230,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         void addBot(pid, {
           name,
           kind,
+          model,
           args: args.trim() ? args.trim().split(/\s+/) : [],
           autostart,
           auto_approve: autoApprove,
@@ -256,12 +274,23 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           onChange={(e) => {
             setKind(e.target.value as BotKind)
             setIdentity('')
+            setModel(null)
           }}
         >
           <option value="claude">claude</option>
           <option value="codex">codex</option>
         </select>
       </label>
+      <ModelField
+        kind={kind}
+        value={model}
+        onChange={setModel}
+        hint={
+          kind === 'claude'
+            ? 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
+            : '留「（預設）」則不帶 -m，由 codex 自行決定'
+        }
+      />
       <label className="field">
         <span>身份（例如 cc1 = 另一個 CLAUDE_CONFIG_DIR；在下方「身份」管理）</span>
         <select value={identity} onChange={(e) => setIdentity(e.target.value)}>
