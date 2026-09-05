@@ -200,9 +200,11 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
 
 function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialProjectId?: string }) {
   const projects = useStore((s) => s.projects)
+  const hosts = useStore((s) => s.hosts)
   const addBot = useStore((s) => s.addBot)
   const startBot = useStore((s) => s.startBot)
   const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
+  const [projectFilter, setProjectFilter] = useState('')
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
   const [model, setModel] = useState<string | null>(null)
@@ -212,6 +214,11 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
 
   const pid = projectId || projects[0]?.id || ''
   const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
+  const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
+  const filterQ = projectFilter.trim().toLowerCase()
+  const visibleProjects = filterQ
+    ? projects.filter((p) => p.label.toLowerCase().includes(filterQ))
+    : projects
 
   if (projects.length === 0) {
     return <p className="hint">請先新增一個 Project。</p>
@@ -243,16 +250,41 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         })
       }}
     >
-      <label className="field">
+      <div className="field">
         <span>Project</span>
-        <select value={pid} onChange={(e) => setProjectId(e.target.value)}>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      </label>
+        {projects.length > 6 ? (
+          <input
+            type="text"
+            className="opt-filter"
+            value={projectFilter}
+            placeholder="過濾 Project…"
+            aria-label="過濾 Project"
+            spellCheck={false}
+            onChange={(e) => setProjectFilter(e.target.value)}
+          />
+        ) : null}
+        <div className="opt-group" role="radiogroup" aria-label="Project">
+          {visibleProjects.map((p) => {
+            const up = hostUp(p.host)
+            return (
+              <button
+                key={p.id}
+                type="button"
+                role="radio"
+                aria-checked={pid === p.id}
+                className={`opt${pid === p.id ? ' on' : ''}`}
+                disabled={!up}
+                title={up ? p.path : `${p.label}（主機未連線）`}
+                onClick={() => setProjectId(p.id)}
+              >
+                <span className="opt-label">{p.label}</span>
+                <HostBadge host={p.host} connected={up} />
+              </button>
+            )
+          })}
+        </div>
+        {visibleProjects.length === 0 ? <span className="hint">沒有符合的 Project。</span> : null}
+      </div>
       <label className="field">
         <span>名稱</span>
         <input
@@ -334,6 +366,8 @@ export function Sidebar() {
   const hosts = useStore((s) => s.hosts)
   const socket = useStore((s) => s.socket)
   const connected = useStore((s) => s.connected)
+  const selectedProjectId = useStore((s) => s.selectedProjectId)
+  const selectProject = useStore((s) => s.selectProject)
   const removeProject = useStore((s) => s.removeProject)
   const [open, setOpen] = useState<'project' | 'bot' | 'host' | 'identity' | null>(null)
   const identityCount = useStore((s) => s.identities.length)
@@ -358,9 +392,13 @@ export function Sidebar() {
         ) : null}
         {projects.map((p) => {
           const list = bots.filter((b) => b.project_id === p.id)
+          const projectSelected = selectedProjectId === p.id
           return (
             <section className="project" key={p.id}>
-              <header className="project-head">
+              <header
+                className={`project-head${projectSelected ? ' selected' : ''}`}
+                onClick={() => selectProject(p.id)}
+              >
                 <ProjectTitle projectId={p.id} label={p.label} />
                 <HostBadge host={p.host} connected={hostUp(p.host)} />
                 <span className="project-path" title={p.path}>
@@ -371,7 +409,10 @@ export function Sidebar() {
                   className="icon-btn add"
                   title="在這個 Project 新增 Bot"
                   aria-expanded={botFormFor === p.id}
-                  onClick={() => setBotFormFor(botFormFor === p.id ? null : p.id)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setBotFormFor(botFormFor === p.id ? null : p.id)
+                  }}
                 >
                   ＋
                 </button>
@@ -379,7 +420,8 @@ export function Sidebar() {
                   type="button"
                   className="icon-btn"
                   title="刪除 Project（所有 Bot 需先停止）"
-                  onClick={() => {
+                  onClick={(e) => {
+                    e.stopPropagation()
                     if (confirm(`刪除 Project「${p.label}」？（不會刪除目錄）`)) void removeProject(p.id)
                   }}
                 >

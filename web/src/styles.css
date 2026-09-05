@@ -266,7 +266,19 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px 3px 14px;
+  min-height: 32px;
+  padding: 4px 10px 4px 13px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+}
+
+.project-head:hover {
+  background: var(--bg-hover);
+}
+
+.project-head.selected {
+  background: var(--bg-active);
+  border-left-color: var(--accent);
 }
 
 .project-label {
@@ -1863,11 +1875,13 @@ button:disabled {
   cursor: pointer;
 }
 
+.project-head:hover .project-label,
 .project-label-btn:hover .project-label,
 .project-label-btn.selected .project-label {
   color: var(--accent);
 }
 
+.project-head.selected .project-group-icon,
 .project-label-btn.selected .project-group-icon {
   color: var(--accent);
 }
@@ -2074,22 +2088,51 @@ button:disabled {
   }
 }
 
-/* ---- option rows (kind / effort / identity) ---- */
+/* ---- option rows (kind / effort / identity / project) ---- */
+.opt-filter {
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
 .opt-group {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
 }
 .opt-group .opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid var(--border-strong);
   background: var(--bg-sunken);
   border-radius: 6px;
   padding: 3px 10px;
   font-size: 12px;
+  color: var(--text);
   cursor: pointer;
+}
+.opt-group .opt:hover:not(:disabled):not(.on) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 .opt-group .opt.on {
   background: var(--accent);
   border-color: var(--accent);
+  color: var(--accent-text);
+}
+.opt-group .opt .opt-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.opt-group .opt .host-badge {
+  font-size: 9.5px;
+  padding: 0 4px;
+  line-height: 1.4;
+}
+.opt-group .opt.on .host-badge:not(.down) {
+  background: color-mix(in srgb, var(--accent-text) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent-text) 40%, transparent);
   color: var(--accent-text);
 }
