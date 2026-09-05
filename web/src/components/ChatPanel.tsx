@@ -1,15 +1,20 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
-import { botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { AttachButton } from './AttachButton'
 import { BlockedPanel } from './BlockedPanel'
-import { BotSettingsPanel } from './BotSettingsPanel'
+import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
 import { HostBadge } from './HostsPanel'
+import { IssuesBar } from './IssuesBar'
+import { KindTag } from './KindTag'
+import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
+import { ToolsHint } from './Tools'
 
 const SOURCE_LABEL: Record<string, string> = {
   hook: 'hook',
@@ -149,27 +154,32 @@ function MessageList({ botId }: { botId: string }) {
   )
 }
 
-function Composer({ botId }: { botId: string }) {
+function Composer({ botId, inputRef }: { botId: string; inputRef: RefObject<HTMLTextAreaElement | null> }) {
   // `composerState` builds a fresh object every call, so it must be compared shallowly —
   // returning it raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
-  const [text, setText] = useState('')
+  // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
+  // bots / tabs and reloading keep it; it is cleared only on a successful send.
+  const draftKey = `bot:${botId}` as const
+  const text = useStore((s) => s.drafts[draftKey] ?? '')
+  const setDraft = useStore((s) => s.setDraft)
+  const setText = (v: string) => setDraft(draftKey, v)
   const [sending, setSending] = useState(false)
-  const ref = useRef<HTMLTextAreaElement>(null)
+  const ref = inputRef
 
   useEffect(() => {
     if (!state.disabled) ref.current?.focus()
-  }, [state.disabled, botId])
+  }, [state.disabled, botId, ref])
 
   useEffect(() => {
     const el = ref.current
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(200, el.scrollHeight)}px`
-  }, [text])
+  }, [text, ref])
 
   const submit = () => {
     const body = text.trim()
@@ -240,6 +250,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const stopBot = useStore((s) => s.stopBot)
   const interruptBot = useStore((s) => s.interruptBot)
   const busy = useStore((s) => s.busy)
+  const attachCommand = useStore((s) => attachCommandOf(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
+  const composerRef = useRef<HTMLTextAreaElement>(null)
 
   if (!botId || !bot) {
     return (
@@ -249,7 +261,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             ☰
           </button>
           <span className="main-status">未選擇 Bot</span>
+          <span className="spacer" />
+          <QuotaStrip />
+          <AttachButton command={attachCommand} />
         </div>
+        <ToolsHint />
         <EmptyState>從左側選擇一個 Bot，或先新增 Project 與 Bot。</EmptyState>
       </>
     )
@@ -268,7 +284,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="main-title">
           <StatusLamp lamp={lamp} />
           <strong>{bot.name}</strong>
-          <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+          <PersonaMark persona={bot.persona} />
+          <KindTag kind={bot.kind} />
           {bot.model ? (
             <span className="model-tag" title={`模型：${bot.model}`}>
               {bot.model}
@@ -293,6 +310,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {LAMP_LABEL[lamp]}
         </span>
         <span className="spacer" />
+        <QuotaStrip />
+        <AttachButton command={attachCommand} compact />
         <div className="tabs" role="tablist">
           <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
             對話
@@ -338,6 +357,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           )}
         </div>
       </div>
+      <ToolsHint />
 
       {settingsOpen ? (
         <BotSettingsPanel key={botId} botId={botId} />
@@ -349,9 +369,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         )
       ) : (
         <div className="chat">
+          <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
           {blocked ? <BlockedPanel botId={botId} /> : null}
           <MessageList botId={botId} />
-          <Composer botId={botId} />
+          <Composer botId={botId} inputRef={composerRef} />
         </div>
       )}
     </>
