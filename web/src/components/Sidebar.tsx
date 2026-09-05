@@ -1,13 +1,18 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from '../api'
 import type { BotKind } from '../api/types'
-import { botLamp, useStore } from '../store/store'
+import { BOT_KINDS } from '../api/types'
+import { attachCommandOf, botLamp, projectHostName, toolsOfHost, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
-import { ModelField, EffortField, IdentityOptions } from './BotSettingsPanel'
+import { ModelField, IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
+import { AttachButton } from './AttachButton'
+import { KindDisplayToggle, KindTag } from './KindTag'
+import { ApiModelFields } from './ModelPicker'
+import { InstallToolButton } from './Tools'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
@@ -56,9 +61,12 @@ function BotRow({ botId }: { botId: string }) {
     >
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
       <span className="bot-main">
-        <span className="bot-name">{bot.name}</span>
+        <span className="bot-name">
+          {bot.name}
+          <PersonaMark persona={bot.persona} />
+        </span>
         <span className="bot-sub">
-          <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+          <KindTag kind={bot.kind} />
           {bot.model ? (
             <span className="model-tag" title={`模型：${bot.model}`}>
               {bot.model}
@@ -207,11 +215,21 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [kind, setKind] = useState<BotKind>('claude')
   const [model, setModel] = useState<string | null>(null)
   const [effort, setEffort] = useState<string | null>(null)
+  const [fast, setFast] = useState(false)
+  const [persona, setPersona] = useState('')
   const [identity, setIdentity] = useState('')
   const [busy, setBusy] = useState(false)
+  const nameRef = useRef<HTMLInputElement>(null)
 
   const pid = projectId || projects[0]?.id || ''
+  const host = useStore((s) => projectHostName(s, pid || null))
+  const tools = useStore((s) => toolsOfHost(s, host))
   const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
+
+  // Opened from a project's「＋」: the project is given, so go straight to the name.
+  useEffect(() => {
+    if (initialProjectId) nameRef.current?.focus()
+  }, [initialProjectId])
 
   if (projects.length === 0) {
     return <p className="hint">請先新增一個 Project。</p>
@@ -228,8 +246,10 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         void addBot(pid, {
           name,
           kind,
-          model: kind === 'grok' ? null : model,
-          effort: kind === 'grok' ? effort : null,
+          model,
+          effort: kind === 'claude' ? null : effort,
+          fast: kind === 'codex' ? fast : undefined,
+          persona: persona.trim() || null,
           autostart: false,
           auto_approve: true,
           identity: kind === 'claude' && identity ? identity : null,
@@ -243,53 +263,67 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         })
       }}
     >
-      <label className="field">
-        <span>Project</span>
-        <select value={pid} onChange={(e) => setProjectId(e.target.value)}>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      {initialProjectId ? null : (
+        <label className="field">
+          <span>Project</span>
+          <select value={pid} onChange={(e) => setProjectId(e.target.value)}>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label className="field">
         <span>名稱</span>
         <input
+          ref={nameRef}
           type="text"
           value={name}
           placeholder="foo-claude"
           spellCheck={false}
+          autoFocus={Boolean(initialProjectId)}
           onChange={(e) => setName(e.target.value)}
         />
         {name && !nameOk ? <span className="hint">1–32 個字，不可含空白或 @ , : ;</span> : null}
       </label>
       <div className="field">
         <span>kind</span>
-        <div className="opt-group" role="radiogroup" aria-label="kind">
-          {(['claude', 'codex', 'grok'] as BotKind[]).map((k) => (
-            <button
-              key={k}
-              type="button"
-              className={`opt${kind === k ? ' on' : ''}`}
-              onClick={() => {
-                setKind(k)
-                setIdentity('')
-                setModel(null)
-                setEffort(null)
-              }}
-            >
-              {k}
-            </button>
-          ))}
+        <div className="opt-group kinds" role="radiogroup" aria-label="kind">
+          {BOT_KINDS.map((k) => {
+            const missing = !tools[k].installed
+            return (
+              <span key={k} className="opt-wrap">
+                <button
+                  type="button"
+                  className={`opt${kind === k ? ' on' : ''}`}
+                  disabled={missing}
+                  title={missing ? `${host === 'local' ? '本機' : host} 尚未安裝 ${k}` : k}
+                  onClick={() => {
+                    setKind(k)
+                    setIdentity('')
+                    setModel(null)
+                    setEffort(null)
+                    setFast(false)
+                  }}
+                >
+                  <KindTag kind={k} />
+                  <span className="opt-label">{k}</span>
+                </button>
+                {missing ? <InstallToolButton host={host} kind={k} small /> : null}
+              </span>
+            )
+          })}
         </div>
       </div>
-      {kind === 'grok' ? (
-        <EffortField value={effort} onChange={setEffort} />
-      ) : (
+      {kind === 'claude' ? (
         <ModelField kind={kind} value={model} onChange={setModel} />
+      ) : (
+        <ApiModelFields kind={kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
       )}
       <IdentityOptions kind={kind} value={identity} onChange={setIdentity} />
+      <PersonaField value={persona} onChange={setPersona} collapsible />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消
@@ -302,8 +336,11 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   )
 }
 
-/** SPEC §13.5/§13.6: the project title opens the group view; unread replies pile up on it. */
-function ProjectTitle({ projectId, label }: { projectId: string; label: string }) {
+/**
+ * SPEC §13.5/§13.6: the project title opens the group view; unread replies pile up on it.
+ * v4.0: the whole row (label + host + path) is the hit area, ≥ 32px tall.
+ */
+function ProjectTitle({ projectId, label, host, path, hostUp }: { projectId: string; label: string; host: string; path: string; hostUp: boolean }) {
   const selected = useStore((s) => s.selectedProjectId === projectId)
   const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
   const selectProject = useStore((s) => s.selectProject)
@@ -311,7 +348,7 @@ function ProjectTitle({ projectId, label }: { projectId: string; label: string }
     <button
       type="button"
       className={`project-label-btn${selected ? ' selected' : ''}`}
-      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）`}
+      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}`}
       aria-pressed={selected}
       onClick={() => selectProject(projectId)}
     >
@@ -324,8 +361,16 @@ function ProjectTitle({ projectId, label }: { projectId: string; label: string }
           {unread > 99 ? '99+' : unread}
         </span>
       ) : null}
+      <HostBadge host={host} connected={hostUp} />
+      <span className="project-path">{shortPath(path)}</span>
     </button>
   )
+}
+
+/** Hover-only「在終端開啟」for a project head (its host's attach command). */
+function ProjectAttach({ projectId }: { projectId: string }) {
+  const command = useStore((s) => attachCommandOf(s, projectId))
+  return <AttachButton command={command} compact />
 }
 
 export function Sidebar() {
@@ -361,11 +406,8 @@ export function Sidebar() {
           return (
             <section className="project" key={p.id}>
               <header className="project-head">
-                <ProjectTitle projectId={p.id} label={p.label} />
-                <HostBadge host={p.host} connected={hostUp(p.host)} />
-                <span className="project-path" title={p.path}>
-                  {shortPath(p.path)}
-                </span>
+                <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} />
+                <ProjectAttach projectId={p.id} />
                 <button
                   type="button"
                   className="icon-btn add"
@@ -456,6 +498,7 @@ export function Sidebar() {
           <span className="disclosure-note">{identityCount === 0 ? '無' : `${identityCount} 個`}</span>
         </button>
         {open === 'identity' ? <IdentitiesPanel /> : null}
+        <KindDisplayToggle />
       </div>
     </>
   )

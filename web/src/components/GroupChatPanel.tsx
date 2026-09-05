@@ -1,10 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { parseMentions } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
-import { botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { AttachButton } from './AttachButton'
 import { Bubble, EmptyState, LiveBubble } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
+import { IssuesBar } from './IssuesBar'
+import { QuotaStrip } from './QuotaStrip'
+import { ToolsHint } from './Tools'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 
 /**
@@ -151,7 +156,7 @@ function mentionAtCaret(text: string, caret: number): { start: number; query: st
   return { start: caret - m[2].length - 1, query: m[2] }
 }
 
-function GroupComposer({ projectId }: { projectId: string }) {
+function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: RefObject<HTMLTextAreaElement | null> }) {
   // `groupComposerState` builds a fresh object (with an array) every call; flatten it to
   // primitives so the shallow comparison is stable.
   const state = useStore(
@@ -163,23 +168,27 @@ function GroupComposer({ projectId }: { projectId: string }) {
   const sendable = useMemo(() => state.sendableKey.split(',').filter(Boolean), [state.sendableKey])
   const members = useStore(useShallow((s) => s.bots.filter((b) => b.project_id === projectId)))
   const sendGroupChat = useStore((s) => s.sendGroupChat)
-  const [text, setText] = useState('')
+  // v4.0: draft per group in the store (localStorage-backed); the `@` popup state stays local.
+  const draftKey = `group:${projectId}` as const
+  const text = useStore((s) => s.drafts[draftKey] ?? '')
+  const setDraft = useStore((s) => s.setDraft)
+  const setText = (v: string) => setDraft(draftKey, v)
   const [caret, setCaret] = useState(0)
   const [sending, setSending] = useState(false)
   const [popOpen, setPopOpen] = useState(true)
   const [active, setActive] = useState(0)
-  const ref = useRef<HTMLTextAreaElement>(null)
+  const ref = inputRef
 
   useEffect(() => {
     if (!state.disabled) ref.current?.focus()
-  }, [state.disabled, projectId])
+  }, [state.disabled, projectId, ref])
 
   useEffect(() => {
     const el = ref.current
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(200, el.scrollHeight)}px`
-  }, [text])
+  }, [text, ref])
 
   const mention = mentionAtCaret(text, caret)
   const candidates: Candidate[] = useMemo(() => {
@@ -346,6 +355,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const hostUp = useStore((s) => hostName === 'local' || (s.hosts.find((h) => h.name === hostName)?.connected ?? false))
   const memberCount = useStore((s) => s.bots.filter((b) => b.project_id === projectId).length)
   const selectProject = useStore((s) => s.selectProject)
+  const attachCommand = useStore((s) => attachCommandOf(s, projectId))
+  const composerRef = useRef<HTMLTextAreaElement>(null)
 
   if (!project) {
     return (
@@ -376,18 +387,22 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         </div>
         <MemberStrip projectId={projectId} />
         <span className="spacer" />
+        <QuotaStrip />
         <span className="main-status" title={project.path}>
-          {memberCount} 個成員 ・ {project.path}
+          {memberCount} 個成員
         </span>
+        <AttachButton command={attachCommand} compact />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={() => selectProject(null)} title="回到單一 Bot 的對話">
             關閉群組
           </button>
         </div>
       </div>
+      <ToolsHint />
       <div className="chat">
+        <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
         <GroupMessageList projectId={projectId} />
-        <GroupComposer projectId={projectId} />
+        <GroupComposer projectId={projectId} inputRef={composerRef} />
       </div>
     </>
   )

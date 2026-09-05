@@ -12,6 +12,8 @@ import {
   frameBotId,
   hostArray,
   lampOf,
+  toKindQuota,
+  toToolMap,
   optStr,
   sortById,
   sortByTime,
@@ -25,10 +27,48 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, Project, Run, TerminalSource, Turn } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
+import { BOT_KINDS } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
+/** v4.0 global preference: how a bot's kind is shown (icon glyph or the word). */
+export type KindDisplay = 'icon' | 'text'
+
+const KIND_DISPLAY_KEY = 'am.kindDisplay'
+const DRAFTS_KEY = 'am.drafts'
+
+/** Composer drafts survive bot / group / tab switches and reloads. Key: `bot:<id>` | `group:<projectId>`. */
+export type DraftKey = `bot:${string}` | `group:${string}`
+
+function readDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(DRAFTS_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    if (!isRec(parsed)) return {}
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string' && v) out[k] = v
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeDrafts(drafts: Record<string, string>) {
+  try {
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts))
+  } catch {
+    /* storage unavailable: drafts still live for this page */
+  }
+}
+
+function readKindDisplay(): KindDisplay {
+  try {
+    return localStorage.getItem(KIND_DISPLAY_KEY) === 'text' ? 'text' : 'icon'
+  } catch {
+    return 'icon'
+  }
+}
 
 export interface Notice {
   id: number
@@ -60,6 +100,19 @@ interface StoreState {
 
   /** SPEC §11.6 remote hosts; the local machine is never in this list. */
   hosts: Host[]
+  /** v4.0: `herdr --session …` for the local machine (remote ones carry their own). */
+  attachCommand: string
+  /** v4.0: agent CLI detection on the local machine (`hosts[0].tools`). */
+  localTools: ToolMap
+  /** v4.0: `GET /api/quota` + WS `quota_updated`; key = kind or `kind:identity`. */
+  quota: QuotaMap
+  /** v4.0: `GET /api/models` cache, keyed `kind@host`; null = fetch failed (use static list). */
+  models: Record<string, ModelInfo[] | null>
+  kindDisplay: KindDisplay
+  /** The "host is missing <kind>" banner, closed for this page load. */
+  toolHintDismissed: boolean
+  /** v4.0: unsent composer text per bot / group (mirrored to localStorage). */
+  drafts: Record<string, string>
   identities: Identity[]
   projects: Project[]
   bots: Bot[]
@@ -127,6 +180,16 @@ interface StoreState {
   removeBot: (botId: string) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
+
+  // v4.0
+  loadQuota: () => Promise<void>
+  loadModels: (kind: BotKind, host: string) => Promise<ModelInfo[] | null>
+  /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
+  installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
+  setKindDisplay: (mode: KindDisplay) => void
+  dismissToolHint: () => void
+  /** Empty text removes the draft. */
+  setDraft: (key: DraftKey, text: string) => void
 }
 
 let noticeSeq = 0
@@ -145,6 +208,13 @@ export const useStore = create<StoreState>((set, get) => ({
   lastSeq: 0,
 
   hosts: [],
+  attachCommand: 'herdr --session agents-manager',
+  localTools: toToolMap(undefined),
+  quota: {},
+  models: {},
+  kindDisplay: readKindDisplay(),
+  toolHintDismissed: false,
+  drafts: readDrafts(),
   identities: [],
   projects: [],
   bots: [],
@@ -184,6 +254,7 @@ export const useStore = create<StoreState>((set, get) => ({
       return
     }
     connectSocket(set, get)
+    void get().loadQuota()
   },
 
   async refreshState() {
@@ -205,6 +276,8 @@ export const useStore = create<StoreState>((set, get) => ({
         s.selectedProjectId && st.projects.some((p) => p.id === s.selectedProjectId) ? s.selectedProjectId : null
       return {
         hosts: st.hosts,
+        attachCommand: st.attach_command,
+        localTools: st.tools,
         identities: st.identities,
         projects: st.projects,
         bots: st.bots,
@@ -515,10 +588,15 @@ export const useStore = create<StoreState>((set, get) => ({
     const next = (siblings[i + 1] ?? siblings[i - 1] ?? null)?.id ?? null
     try {
       await api.deleteBot(botId)
-      set((s) => ({
-        selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
-        settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
-      }))
+      set((s) => {
+        const drafts = withoutKey(s.drafts, `bot:${botId}`)
+        writeDrafts(drafts)
+        return {
+          selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
+          settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
+          drafts,
+        }
+      })
       await get().refreshState()
       // `refreshState` falls back to `bots[0]` when nothing is selected; honour the
       // explicit "no sibling left" case instead.
@@ -532,12 +610,80 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async removeProject(projectId) {
+    const botIds = get().bots.filter((b) => b.project_id === projectId).map((b) => b.id)
     try {
       await api.deleteProject(projectId)
+      set((s) => {
+        let drafts = withoutKey(s.drafts, `group:${projectId}`)
+        for (const id of botIds) drafts = withoutKey(drafts, `bot:${id}`)
+        writeDrafts(drafts)
+        return {
+          drafts,
+          selectedProjectId: s.selectedProjectId === projectId ? null : s.selectedProjectId,
+        }
+      })
       await get().refreshState()
     } catch (e) {
       get().notify('error', errText(e))
     }
+  },
+
+  async loadQuota() {
+    try {
+      set({ quota: await api.fetchQuota() })
+    } catch {
+      /* older daemon without /quota: the strip just shows nothing */
+    }
+  },
+
+  async loadModels(kind, host) {
+    const key = `${kind}@${host || 'local'}`
+    const cached = get().models[key]
+    if (cached !== undefined) return cached
+    try {
+      const list = await api.fetchModels(kind, host)
+      set((s) => ({ models: { ...s.models, [key]: list } }))
+      return list
+    } catch {
+      set((s) => ({ models: { ...s.models, [key]: null } }))
+      return null
+    }
+  },
+
+  async installTool(host, kind, viaBotId) {
+    const key = `install:${host}:${kind}`
+    set((s) => ({ busy: { ...s.busy, [key]: true } }))
+    try {
+      const res = await api.installTool(host, kind, viaBotId)
+      get().selectBot(viaBotId)
+      get().notify('info', `已請 ${get().bots.find((b) => b.id === viaBotId)?.name ?? viaBotId} 安裝並登入 ${kind}`)
+      return res.turn_id
+    } catch (e) {
+      get().notify('error', `安裝 ${kind} 失敗：${errText(e)}`)
+      return null
+    } finally {
+      set((s) => ({ busy: { ...s.busy, [key]: false } }))
+    }
+  },
+
+  setKindDisplay: (mode) => {
+    try {
+      localStorage.setItem(KIND_DISPLAY_KEY, mode)
+    } catch {
+      /* private mode etc. */
+    }
+    set({ kindDisplay: mode })
+  },
+
+  dismissToolHint: () => set({ toolHintDismissed: true }),
+
+  setDraft: (key, text) => {
+    set((s) => {
+      if ((s.drafts[key] ?? '') === text) return {}
+      const drafts = text ? { ...s.drafts, [key]: text } : withoutKey(s.drafts, key)
+      writeDrafts(drafts)
+      return { drafts }
+    })
   },
 
   readTerminal: (botId, source, lines) => api.fetchTerminal(botId, source, lines),
@@ -619,7 +765,10 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (!name) return
       if (name === 'local') {
         // The reserved local entry maps onto `connected`, not the hosts list.
-        set({ connected: bool(pick(data, 'connected'), get().connected) })
+        set({
+          connected: bool(pick(data, 'connected'), get().connected),
+          ...(pick(data, 'tools') !== undefined ? { localTools: toToolMap(pick(data, 'tools')) } : {}),
+        })
         return
       }
       if (bool(pick(data, 'deleted'), false)) {
@@ -708,6 +857,19 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       })
       return
     }
+    case 'quota_updated': {
+      // v4.0: `{kind, quota}` (or a whole `{kinds}` map).
+      if (!isRec(data)) return
+      const kinds = pick(data, 'kinds')
+      if (isRec(kinds)) {
+        set((s) => ({ quota: { ...s.quota, ...Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v)])) } }))
+        return
+      }
+      const kind = str(pick(data, 'kind'))
+      if (!kind) return
+      set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota')) } }))
+      return
+    }
     case 'identities_changed':
     case 'project_changed':
     case 'bot_changed': {
@@ -736,9 +898,10 @@ function mergeHosts(current: Host[], updates: unknown[]): Host[] {
       : connected
         ? null
         : h.error
-    if (connected === h.connected && error === h.error) return h
+    const tools = u.tools !== undefined ? toToolMap(u.tools) : h.tools
+    if (connected === h.connected && error === h.error && tools === h.tools) return h
     changed = true
-    return { ...h, connected, error }
+    return { ...h, connected, error, tools }
   })
   return changed ? next : current
 }
@@ -823,6 +986,41 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, reason: '上一則訊息仍在進行中，等待回覆或按「中斷」', inFlightTurnId: inflight.id }
   }
   return { disabled: false, reason: '', inFlightTurnId: null, unknownTurnId: null }
+}
+
+const NO_TOOLS: ToolMap = toToolMap(undefined)
+
+/** v4.0: the tools map for a host name (`local` = the daemon's machine). Stable references. */
+export function toolsOfHost(state: StoreState, host: string): ToolMap {
+  if (!host || host === 'local') return state.localTools
+  return state.hosts.find((h) => h.name === host)?.tools ?? NO_TOOLS
+}
+
+/** v4.0: `[host, kind]` pairs where the CLI is reported missing (local first). */
+export function missingTools(state: StoreState): { host: string; kind: BotKind }[] {
+  const out: { host: string; kind: BotKind }[] = []
+  const scan = (host: string, tools: ToolMap) => {
+    for (const k of BOT_KINDS) if (!tools[k].installed) out.push({ host, kind: k })
+  }
+  scan('local', state.localTools)
+  for (const h of state.hosts) if (h.connected) scan(h.name, h.tools)
+  return out
+}
+
+/** v4.0: running bots on a host — candidates for `installTool`. */
+export function runningBotsOnHost(state: StoreState, host: string): Bot[] {
+  return state.bots.filter((b) => {
+    if (projectHostName(state, b.project_id) !== (host || 'local')) return false
+    const run = state.runs[b.id]
+    return run !== null && run !== undefined && run.state === 'running'
+  })
+}
+
+/** v4.0: the `herdr …` attach command for the host a project sits on. */
+export function attachCommandOf(state: StoreState, projectId: string | null): string {
+  const host = projectHostName(state, projectId)
+  if (host === 'local') return state.attachCommand
+  return state.hosts.find((h) => h.name === host)?.attach_command ?? state.attachCommand
 }
 
 /** The partial reply to show as a live bubble: only for the turn that is actually in flight. */

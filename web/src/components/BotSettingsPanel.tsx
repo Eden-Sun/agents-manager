@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { EFFORT_OPTIONS, MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
 import type { BotKind, PatchBotInput } from '../api/types'
-import { useStore } from '../store/store'
+import { projectHostName, useStore } from '../store/store'
+import { KindTag } from './KindTag'
+import { ApiModelFields } from './ModelPicker'
 
 /**
  * 「Bot 設定」面板（API.md v3.3）：改名 / 模型 / 身份 / autostart / auto_approve，
@@ -112,6 +114,54 @@ export function EffortField({ value, onChange }: { value: string | null; onChang
   )
 }
 
+/** v4.0 人設：auto-growing textarea; empty = null. */
+export function PersonaField({ value, onChange, collapsible }: { value: string; onChange: (v: string) => void; collapsible?: boolean }) {
+  const [open, setOpen] = useState(!collapsible || Boolean(value))
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(240, Math.max(56, el.scrollHeight))}px`
+  }, [value, open])
+  if (collapsible && !open) {
+    return (
+      <button type="button" className="disclosure sub persona-toggle" aria-expanded={false} onClick={() => setOpen(true)}>
+        <span className="chev">▶</span> 人設（選填）
+      </button>
+    )
+  }
+  return (
+    <label className="field persona-field">
+      <span>
+        人設{collapsible ? '（選填）' : ''}
+        <span className="field-note">啟動時作為 system prompt 前置文字</span>
+      </span>
+      <textarea
+        ref={ref}
+        value={value}
+        rows={2}
+        placeholder="你是這個專案的 PM，回覆用繁體中文、先給結論"
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </label>
+  )
+}
+
+/** Small marker shown next to a bot that has a persona; hover = the first 80 chars. */
+export function PersonaMark({ persona }: { persona: string | null }) {
+  if (!persona) return null
+  const short = persona.length > 80 ? `${persona.slice(0, 80)}…` : persona
+  return (
+    <span className="persona-mark" role="img" aria-label="有人設" title={`人設：${short}`}>
+      <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+        <path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+        <path d="M5 6.5h6M5 8.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      </svg>
+    </span>
+  )
+}
+
 /** claude only: identity as a row of options（無下拉）. Renders nothing when there are no identities. */
 export function IdentityOptions({
   kind,
@@ -147,6 +197,7 @@ export function IdentityOptions({
 export function BotSettingsPanel({ botId }: { botId: string }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const project = useStore((s) => s.projects.find((p) => p.id === s.bots.find((b) => b.id === botId)?.project_id))
+  const host = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null))
   const closeSettings = useStore((s) => s.closeSettings)
   const patchBot = useStore((s) => s.patchBot)
   const restartBot = useStore((s) => s.restartBot)
@@ -156,6 +207,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
+  const [fast, setFast] = useState<boolean>(bot?.fast ?? false)
+  const [persona, setPersona] = useState(bot?.persona ?? '')
   const [identity, setIdentity] = useState(bot?.identity ?? '')
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
@@ -170,6 +223,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setName(b.name)
     setModel(b.model)
     setEffort(b.effort)
+    setFast(b.fast)
+    setPersona(b.persona ?? '')
     setIdentity(b.identity ?? '')
     setBanner(null)
   }, [botId])
@@ -193,8 +248,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
   const patch: PatchBotInput = {}
   if (name !== bot.name) patch.name = name
-  if (bot.kind !== 'grok' && model !== bot.model) patch.model = model
-  if (bot.kind === 'grok' && effort !== bot.effort) patch.effort = effort
+  if (model !== bot.model) patch.model = model
+  if (bot.kind !== 'claude' && effort !== bot.effort) patch.effort = effort
+  if (bot.kind === 'codex' && fast !== bot.fast) patch.fast = fast
+  if ((persona.trim() || null) !== bot.persona) patch.persona = persona.trim() || null
   if (bot.kind === 'claude' && (identity || null) !== bot.identity) patch.identity = identity || null
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
@@ -216,7 +273,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     <div className="bot-settings">
       <div className="bs-head">
         <strong>Bot 設定</strong>
-        <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+        <KindTag kind={bot.kind} />
         <span className="bs-sub" title={project?.path}>
           {project?.label ?? ''}
         </span>
@@ -281,12 +338,22 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <input type="text" value={bot.kind} readOnly disabled />
           </label>
 
-          {bot.kind === 'grok' ? (
-            <EffortField value={effort} onChange={setEffort} />
-          ) : (
+          {bot.kind === 'claude' ? (
             <ModelField kind={bot.kind} value={model} onChange={setModel} />
+          ) : (
+            <ApiModelFields
+              kind={bot.kind}
+              host={host}
+              model={model}
+              onModel={setModel}
+              effort={effort}
+              onEffort={setEffort}
+              fast={fast}
+              onFast={setFast}
+            />
           )}
           <IdentityOptions kind={bot.kind} value={identity} onChange={setIdentity} />
+          <PersonaField value={persona} onChange={setPersona} />
 
           <div className="bs-actions">
             <span className="hint">{dirty ? `已變更：${changedKeys.join(', ')}` : '沒有變更'}</span>
