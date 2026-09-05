@@ -703,3 +703,32 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 | `tools` 缺 | 視為已安裝（不誤報） |
 | `github` 缺 | 無 IssuesBar |
 | `persona` / `fast` 缺 | 讀成 null / false；寫入多半被舊 daemon 忽略 |
+
+## Project 選擇 UI（grok）
+
+優化側欄 Project 標題列與新增 Bot 表單的 Project 選擇（只動 `web/src/**`）。
+
+### 改了什麼
+
+| # | 項目 | 處理 |
+|---|---|---|
+| 1 | 新增 Bot 的 Project 欄 | `NewBotForm` 拿掉原生 `<select>`，改成與 kind 相同的 `.opt-group` / `.opt` chip 列；每個 Project 一顆 chip 顯示 `label`，遠端 Project 在 chip 內帶既有 `HostBadge`（`@host`）；主機未連線的 chip `disabled`。有 `initialProjectId` 時仍預選該 Project |
+| 2 | 超過 6 個 Project | chip 列上方出現小過濾框（`.opt-filter`），輸入即時依 `label` 過濾 |
+| 3 | 側欄 `.project-head` | 整列可點（點路徑區也會 `selectProject`；`＋` / `✕` / 標題鈕仍 `stopPropagation`）；hover 有 `--bg-hover`；`min-height: 32px`；`store.selectedProjectId` 對應的列加 `.selected`，左側 3px `--accent` 色條。class 名稱（`.project-head`、`.project-label-btn`、`.icon-btn.add`、`.host-badge`、`.opt-group`、`.opt`）全部保留，只調結構與 CSS |
+| 4 | 深淺色 | chip / 色條 / hover 一律走既有 CSS 變數（`--accent`、`--bg-hover`、`--bg-active` 等）；選中 chip 內的 `HostBadge` 改用 `accent-text` 混色以保持對比 |
+| 5 | 對比 / 對齊 / 換行 / hover | chip `max-width: 100%` + label ellipsis，窄側欄可換行不橫向溢出；disabled chip 不用半透明疊加（改明確淡色）；`.project-head:hover:not(.selected)` 與 `.selected:hover` 分開；列上 `＋`/`✕` hover 底色加色混以免被列 hover 洗掉 |
+
+### 驗收截圖
+
+mock（`VITE_MOCK=1 npx vite --port 5190`，headless Chrome CDP 9370，獨立 `--user-data-dir`，@2x）：
+
+| 檔案 | 內容 |
+|---|---|
+| `190-project-select-dark-1280.png` / `190-project-select-light-1280.png` | 多 Project + 遠端 badge；footer「新增 Bot」chip 列（含 filter、disabled `@dead`）；側欄 `.project-head` selected / hover |
+| `190-project-select-dark-900.png` / `190-project-select-light-900.png` | 900 寬（側欄 244px）chip 換行 |
+| `190-project-select-inline-dark-1280.png` / `190-project-select-inline-light-1280.png` | Project 列「＋」展開的 inline 表單（`initialProjectId` 預選） |
+
+### 檔案
+
+- `web/src/components/Sidebar.tsx` — `NewBotForm` Project chip + 過濾；`.project-head` 整列點選與 `.selected`
+- `web/src/styles.css` — `.project-head` / `.selected`、`.opt-filter`、chip 換行 / disabled / hover、chip 內 `HostBadge` 對比
