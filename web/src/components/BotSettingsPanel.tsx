@@ -122,7 +122,10 @@ export function IdentityOptions({
   value: string
   onChange: (v: string) => void
 }) {
-  const identities = useStore((s) => s.identities.filter((i) => i.kind === 'claude'))
+  // Select the stable array and filter outside: a selector that returns a fresh array
+  // re-renders forever (React #185).
+  const all = useStore((s) => s.identities)
+  const identities = all.filter((i) => i.kind === 'claude')
   if (kind !== 'claude' || identities.length === 0) return null
   return (
     <div className="field">
