@@ -9,7 +9,8 @@
  *   - text containing `fallback`             → the reply arrives as `terminal_fallback` (incomplete)
  *   - text containing `slow`                 → the reply takes ~8s (good for testing the composer lock)
  *
- * Dev helpers on `window.__amMock`: `resync()`, `dropSocket()`, `block(botId)`, `disconnect()`.
+ * Dev helpers on `window.__amMock`: `resync()`, `dropSocket()`, `block(botId)`, `disconnect()`,
+ * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts).
  */
 
 import { ApiError } from './types'
@@ -80,7 +81,20 @@ interface MockProject {
   path: string
   label: string
   workspace_id: string | null
+  host: string
   created_at: string
+}
+
+/** SPEC §11.2 `[[hosts]]` + the runtime connection state the daemon reports. */
+interface MockHost {
+  name: string
+  ssh: string
+  ssh_port: number
+  herdr_session: string
+  remote_path: string
+  hook_port: number
+  connected: boolean
+  error: string | null
 }
 
 const REPLIES = [
@@ -93,6 +107,7 @@ const REPLIES = [
 export class MockTransport implements Transport {
   readonly mock = true
 
+  private hosts: MockHost[] = []
   private projects: MockProject[] = []
   private bots: MockBot[] = []
   private runs: MockRun[] = []
@@ -112,6 +127,7 @@ export class MockTransport implements Transport {
       path: '/Users/me/project/agents-manager',
       label: 'agents-manager',
       workspace_id: 'ws_demo',
+      host: 'local',
       created_at: now(),
     }
     this.projects.push(p)
@@ -171,7 +187,11 @@ export class MockTransport implements Transport {
     const seg = rawPath.split('/').filter(Boolean)
 
     if (method === 'GET' && rawPath === '/state') return this.state()
-    if (method === 'GET' && rawPath === '/fs/dirs') return this.dirs(q.get('path') ?? '')
+    if (method === 'GET' && rawPath === '/fs/dirs') return this.dirs(q.get('path') ?? '', q.get('host') ?? '')
+
+    if (method === 'POST' && rawPath === '/hosts') return this.addHost(b)
+    if (seg[0] === 'hosts' && seg.length === 2 && method === 'DELETE') return this.deleteHost(seg[1])
+    if (seg[0] === 'hosts' && seg[2] === 'reconnect' && method === 'POST') return this.reconnectHost(seg[1])
 
     if (method === 'POST' && rawPath === '/projects') return this.addProject(b)
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
@@ -202,30 +222,149 @@ export class MockTransport implements Transport {
 
   // ------------------------------------------------------------------ helpers
 
-  private dirs(path: string) {
-    const home = '/Users/me'
-    const tree: Record<string, string[]> = {
-      '/': ['Users', 'opt', 'tmp'],
-      '/Users': ['me'],
-      '/Users/me': ['project', 'Documents', 'Downloads'],
-      '/Users/me/project': ['foo', 'bar', 'agents-manager'],
-      '/Users/me/project/foo': ['src'],
-      '/Users/me/Documents': [],
-      '/Users/me/Downloads': [],
+  /** SPEC §11.5: the same JSON shape for local and remote; `host` picks the tree. */
+  private dirs(path: string, host: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    if (remote && !remote.connected) {
+      throw new ApiError(502, { error: 'upstream', message: `主機 ${remote.name} 未連線：${remote.error ?? 'ssh 中斷'}` }, 'upstream')
     }
-    const cur = path && path in tree ? path : path.startsWith('/Users/me/project/') ? path : home
+    const user = remote ? (remote.ssh.split('@')[0] || remote.name) : 'me'
+    const home = `/Users/${user}`
+    const tree: Record<string, string[]> = remote
+      ? {
+          '/': ['Users', 'opt', 'tmp'],
+          '/Users': [user],
+          [home]: ['work', 'src', 'Documents'],
+          [`${home}/work`]: ['api-server', 'web-client', 'scratch'],
+          [`${home}/work/api-server`]: ['crates'],
+          [`${home}/src`]: ['herdr'],
+          [`${home}/Documents`]: [],
+        }
+      : {
+          '/': ['Users', 'opt', 'tmp'],
+          '/Users': ['me'],
+          '/Users/me': ['project', 'Documents', 'Downloads'],
+          '/Users/me/project': ['foo', 'bar', 'agents-manager'],
+          '/Users/me/project/foo': ['src'],
+          '/Users/me/Documents': [],
+          '/Users/me/Downloads': [],
+        }
+    const gitDirs = remote
+      ? new Set([`${home}/work/api-server`, `${home}/work/web-client`, `${home}/src/herdr`])
+      : new Set(['/Users/me/project/foo', '/Users/me/project/agents-manager'])
+    const cur = path && (path in tree || path.startsWith(`${home}/`)) ? path : home
     const kids = tree[cur] ?? []
     const parent = cur === '/' ? null : cur.slice(0, cur.lastIndexOf('/')) || '/'
     return {
       path: cur,
       parent,
       home,
-      entries: kids.map((name) => ({
-        name,
-        path: cur === '/' ? `/${name}` : `${cur}/${name}`,
-        git: name === 'foo' || name === 'agents-manager',
-      })),
+      entries: kids.map((name) => {
+        const full = cur === '/' ? `/${name}` : `${cur}/${name}`
+        return { name, path: full, git: gitDirs.has(full) }
+      }),
     }
+  }
+
+  // -------------------------------------------------------------- hosts (§11.6)
+
+  private host(name: string): MockHost {
+    const h = this.hosts.find((x) => x.name === name)
+    if (!h) throw new ApiError(404, { error: 'not_found', what: 'host' }, 'host not found')
+    return h
+  }
+
+  private hostMap(): Record<string, { connected: boolean; error: string | null }> {
+    const out: Record<string, { connected: boolean; error: string | null }> = {
+      local: { connected: this.connected, error: null },
+    }
+    for (const h of this.hosts) out[h.name] = { connected: h.connected, error: h.error }
+    return out
+  }
+
+  /** Fake ssh dial: anything with `fail` / `bad` / an unreachable-looking target stays down. */
+  private dial(h: MockHost) {
+    const bad = /fail|bad|unreachable|0\.0\.0\.0/i.test(h.ssh)
+    h.connected = !bad
+    h.error = bad ? `ssh: connect to host ${h.ssh.split('@').pop()} port ${h.ssh_port}: Operation timed out` : null
+  }
+
+  private async addHost(b: Rec) {
+    const name = String(b.name ?? '').trim()
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+      throw new ApiError(400, { error: 'bad_request', message: 'name 必須符合 [a-z][a-z0-9_-]{0,31}' }, 'bad request')
+    }
+    if (name === 'local') {
+      throw new ApiError(400, { error: 'bad_request', message: '`local` 為保留名稱' }, 'bad request')
+    }
+    const ssh = String(b.ssh ?? '').trim()
+    if (!ssh) throw new ApiError(400, { error: 'bad_request', message: 'ssh 目標不可為空' }, 'bad request')
+    const h: MockHost = {
+      name,
+      ssh,
+      ssh_port: Number(b.ssh_port ?? 22) || 22,
+      herdr_session: String(b.herdr_session ?? '') || 'agents-manager',
+      remote_path: String(b.remote_path ?? ''),
+      hook_port: Number(b.hook_port ?? 7788) || 7788,
+      connected: false,
+      error: null,
+    }
+    // API.md: an existing name is an update (disconnect, then reconnect with the new config).
+    this.hosts = this.hosts.filter((x) => x.name !== name)
+    this.hosts.push(h)
+    await sleep(700) // ssh master + remote `herdr session list` take a moment
+    this.dial(h)
+    this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
+    return { name: h.name, connected: h.connected, error: h.error }
+  }
+
+  private deleteHost(name: string) {
+    const h = this.host(name)
+    const used = this.projects.filter((p) => p.host === h.name)
+    if (used.length > 0) {
+      throw new ApiError(
+        409,
+        {
+          error: 'conflict',
+          reason: `host still used by projects（仍有 ${used.length} 個 Project 使用 ${h.name}）`,
+          project_id: used[0].id,
+        },
+        'conflict',
+      )
+    }
+    this.hosts = this.hosts.filter((x) => x.name !== name)
+    this.emit('host_changed', { name, connected: false, error: 'removed' })
+    this.emit('project_changed', {})
+    return {}
+  }
+
+  private async reconnectHost(name: string) {
+    const h = this.host(name)
+    await sleep(600)
+    this.dial(h)
+    this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
+    for (const b of this.botsOnHost(h.name)) this.emitBotStatus(b.id)
+    return { name: h.name, connected: h.connected, error: h.error }
+  }
+
+  private botsOnHost(name: string): MockBot[] {
+    const pids = new Set(this.projects.filter((p) => p.host === name).map((p) => p.id))
+    return this.bots.filter((b) => pids.has(b.project_id))
+  }
+
+  /** Dev helper: flip a host up / down the way the daemon's health check would. */
+  setHostConnected(name: string, connected: boolean) {
+    const h = this.hosts.find((x) => x.name === name)
+    if (!h) return
+    h.connected = connected
+    h.error = connected ? null : 'ssh master 已退出（mock 模擬斷線）'
+    this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
+    this.emit('daemon_status', { herdr_connected: this.connected, connected: this.connected, hosts: this.hostMap() })
+    for (const b of this.botsOnHost(h.name)) this.emitBotStatus(b.id)
+  }
+
+  hostNames(): string[] {
+    return this.hosts.map((h) => h.name)
   }
 
   private emit(type: string, data: unknown) {
@@ -278,11 +417,35 @@ export class MockTransport implements Transport {
       daemon_seq: this.seq,
       connected: this.connected,
       herdr_session: 'agents-manager',
+      // API.md: the reserved `local` entry is always first, with null ssh fields.
+      hosts: [
+        {
+          name: 'local',
+          ssh: null,
+          ssh_port: null,
+          herdr_session: 'agents-manager',
+          remote_path: null,
+          hook_port: null,
+          connected: this.connected,
+          error: null,
+        },
+        ...this.hosts.map((h) => ({
+          name: h.name,
+          ssh: h.ssh,
+          ssh_port: h.ssh_port,
+          herdr_session: h.herdr_session,
+          remote_path: h.remote_path,
+          hook_port: h.hook_port,
+          connected: h.connected,
+          error: h.error,
+        })),
+      ],
       projects: this.projects.map((p) => ({
         id: p.id,
         path: p.path,
         label: p.label,
         workspace_id: p.workspace_id,
+        host: p.host,
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -312,11 +475,16 @@ export class MockTransport implements Transport {
     if (this.projects.some((p) => p.path === canonical)) {
       throw new ApiError(409, { reason: `專案路徑已存在：${canonical}` }, 'conflict')
     }
+    const host = String(b.host ?? '').trim() || 'local'
+    if (host !== 'local' && !this.hosts.some((h) => h.name === host)) {
+      throw new ApiError(404, { error: 'not_found', what: 'host' }, 'host not found')
+    }
     const p: MockProject = {
       id: ulid('proj'),
       path: canonical,
       label: String(b.label ?? '').trim() || (canonical.split('/').pop() ?? canonical),
       workspace_id: null,
+      host,
       created_at: now(),
     }
     this.projects.push(p)
@@ -382,7 +550,14 @@ export class MockTransport implements Transport {
   }
 
   private start(botId: string) {
-    this.bot(botId)
+    const bot = this.bot(botId)
+    const project = this.projects.find((p) => p.id === bot.project_id)
+    if (project && project.host !== 'local') {
+      const h = this.hosts.find((x) => x.name === project.host)
+      if (!h?.connected) {
+        throw new ApiError(409, { error: 'conflict', reason: `主機 ${project.host} 未連線` }, 'conflict')
+      }
+    }
     const existing = this.activeRun(botId)
     if (existing) throw new ApiError(409, { reason: '已有 active Run', run_id: existing.id }, 'conflict')
     const run: MockRun = {
@@ -656,7 +831,9 @@ export class MockTransport implements Transport {
 
   setConnected(v: boolean) {
     this.connected = v
-    this.emit('daemon_status', { connected: v })
+    // SPEC §11.6: `daemon_status` carries `herdr_connected` + a per-host map. `connected`
+    // is kept for the pre-§11 shape.
+    this.emit('daemon_status', { herdr_connected: v, connected: v, hosts: this.hostMap() })
     for (const b of this.bots) this.emitBotStatus(b.id)
   }
 
@@ -676,5 +853,8 @@ function installDevHelpers(mock: MockTransport) {
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
     disconnect: () => mock.setConnected(false),
     reconnect: () => mock.setConnected(true),
+    hostDown: (name: string) => mock.setHostConnected(name, false),
+    hostUp: (name: string) => mock.setHostConnected(name, true),
+    hosts: () => mock.hostNames(),
   }
 }

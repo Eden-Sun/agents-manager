@@ -4,12 +4,14 @@
  */
 
 import { MockTransport } from './mock'
-import { toMessagesPage, toState, toTerminal, num, str, isRec, pick } from './normalize'
+import { toMessagesPage, toState, toTerminal, num, str, isRec, optStr, pick } from './normalize'
 import { HttpTransport } from './transport'
 import type { SocketHandlers, Transport } from './transport'
 import type {
   AppState,
   DirListing,
+  HostResult,
+  NewHostInput,
   MessagesPage,
   NewBotInput,
   NewProjectInput,
@@ -54,9 +56,16 @@ export async function fetchTerminal(
   return toTerminal(raw, source)
 }
 
-export async function listDirs(path?: string): Promise<DirListing> {
-  const q = path ? `?path=${encodeURIComponent(path)}` : ''
-  const raw = await transport.request('GET', `/fs/dirs${q}`)
+/**
+ * `GET /api/fs/dirs?host=<name>&path=` — SPEC §11.5. `host` omitted / `"local"` lists the
+ * daemon's own filesystem; anything else is listed over ssh on that host.
+ */
+export async function listDirs(path?: string, host?: string): Promise<DirListing> {
+  const params = new URLSearchParams()
+  if (path) params.set('path', path)
+  if (host && host !== 'local') params.set('host', host)
+  const q = params.toString()
+  const raw = await transport.request('GET', `/fs/dirs${q ? `?${q}` : ''}`)
   const r = isRec(raw) ? raw : {}
   const entries = Array.isArray(r.entries) ? r.entries : []
   return {
@@ -65,6 +74,29 @@ export async function listDirs(path?: string): Promise<DirListing> {
     home: str(r.home),
     entries: entries.filter(isRec).map((e) => ({ name: str(e.name), path: str(e.path), git: e.git === true })),
   }
+}
+
+// ------------------------------------------------------------------ hosts (§11.6)
+
+function toHostResult(raw: unknown, name: string): HostResult {
+  const o = isRec(raw) ? raw : {}
+  return {
+    name: str(pick(o, 'name'), name),
+    connected: o.connected === true || o.ok === true,
+    error: optStr(pick(o, 'error', 'last_error', 'message', 'reason')),
+  }
+}
+
+export async function createHost(input: NewHostInput): Promise<HostResult> {
+  return toHostResult(await transport.request('POST', '/hosts', input), input.name)
+}
+
+export async function deleteHost(name: string): Promise<void> {
+  await transport.request('DELETE', `/hosts/${encodeURIComponent(name)}`)
+}
+
+export async function reconnectHost(name: string): Promise<HostResult> {
+  return toHostResult(await transport.request('POST', `/hosts/${encodeURIComponent(name)}/reconnect`), name)
 }
 
 export async function createProject(input: NewProjectInput): Promise<string> {

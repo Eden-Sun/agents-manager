@@ -15,6 +15,7 @@ import type {
   AppState,
   Bot,
   BotKind,
+  Host,
   Lamp,
   Message,
   MessageRole,
@@ -81,6 +82,36 @@ const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
 
+/**
+ * SPEC §11.6 `hosts[]`. The daemon may report the connection flag as `connected` /
+ * `ok` / `up` and the failure text as `error` / `last_error` / `message`.
+ */
+export function toHost(v: unknown): Host | null {
+  if (!isRec(v)) return null
+  const name = str(pick(v, 'name', 'host', 'id'))
+  if (!name) return null
+  return {
+    name,
+    ssh: str(pick(v, 'ssh', 'target', 'ssh_target')),
+    ssh_port: num(pick(v, 'ssh_port', 'port'), 22),
+    herdr_session: str(pick(v, 'herdr_session', 'session'), 'agents-manager'),
+    remote_path: str(pick(v, 'remote_path', 'path')),
+    hook_port: num(pick(v, 'hook_port'), 0),
+    connected: bool(pick(v, 'connected', 'ok', 'up'), false),
+    error: optStr(pick(v, 'error', 'last_error', 'message', 'reason')),
+  }
+}
+
+/**
+ * `hosts` arrives as an array in `GET /api/state` but as a `{name: {connected, error}}`
+ * map in the `daemon_status` frame (SPEC §11.6); accept both.
+ */
+export function hostArray(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v
+  if (isRec(v)) return Object.entries(v).map(([name, val]) => (isRec(val) ? { name, ...val } : { name }))
+  return []
+}
+
 export function toProject(v: unknown): Project | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id', 'project_id'))
@@ -91,6 +122,7 @@ export function toProject(v: unknown): Project | null {
     path,
     label: str(pick(v, 'label', 'name'), path.split('/').pop() ?? id),
     workspace_id: optStr(v.workspace_id),
+    host: str(pick(v, 'host', 'host_name'), 'local') || 'local',
     created_at: str(v.created_at),
   }
 }
@@ -188,10 +220,18 @@ export function sortByTime<T extends { created_at: string; id: string }>(items: 
 
 export function toState(raw: unknown): AppState {
   const root = isRec(raw) ? raw : {}
+  const hosts: Host[] = []
   const projects: Project[] = []
   const bots: Bot[] = []
   const runs: Run[] = []
   const turns: Turn[] = []
+
+  for (const h of hostArray(pick(root, 'hosts', 'host_list'))) {
+    // API.md: `hosts[0]` is always the reserved `local` entry (ssh fields null). The UI
+    // models the local machine separately (`state.connected`), so drop it here.
+    const host = toHost(h)
+    if (host && host.name !== 'local' && !hosts.some((x) => x.name === host.name)) hosts.push(host)
+  }
 
   for (const p of arr(pick(root, 'projects', 'project_list'))) {
     const project = toProject(p)
@@ -228,6 +268,7 @@ export function toState(raw: unknown): AppState {
   return {
     daemon_seq: num(pick(root, 'daemon_seq', 'seq'), 0),
     connected: bool(pick(root, 'connected', 'herdr_connected'), true),
+    hosts,
     projects,
     bots,
     runs,

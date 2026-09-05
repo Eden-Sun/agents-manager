@@ -5,9 +5,12 @@
  * daemon's own `daemon/src/api.rs` handlers, which these were checked against:
  *
  *   GET  /api/session          -> {token, port}
- *   GET  /api/state            -> {daemon_seq, connected, herdr_session,
- *                                  projects:[{id,path,label,workspace_id,
+ *   GET  /api/state            -> {daemon_seq, connected, herdr_session, hosts:[...],
+ *                                  projects:[{id,path,label,workspace_id,host,
  *                                             bots:[{...,args,autostart,inject_hooks,run,lamp,unread}]}]}
+ *   POST /api/hosts            -> {name, connected, error?}       (SPEC §11.6)
+ *   DELETE /api/hosts/:name    -> {}
+ *   POST /api/hosts/:name/reconnect -> {name, connected, error?}
  *   POST /api/projects         -> {project_id}
  *   POST /api/projects/:id/bots-> {bot_id}
  *   POST /api/bots/:id/start   -> {run_id}
@@ -34,8 +37,57 @@ export interface Project {
   path: string
   label: string
   workspace_id: string | null
+  /** SPEC §11.6: `"local"` = 本機，其餘為 `hosts[].name` */
+  host: string
   created_at: string
 }
+
+/** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
+export interface Host {
+  /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */
+  name: string
+  /** ssh 目標，例如 `m4p@100.112.229.82`，可為 ssh_config 別名 */
+  ssh: string
+  ssh_port: number
+  herdr_session: string
+  remote_path: string
+  hook_port: number
+  connected: boolean
+  /** 連線失敗原因（ssh / herdr），連線正常時為 null */
+  error: string | null
+}
+
+/**
+ * 本機的保留 host id。`GET /api/state` 的 `hosts[]` 第一筆一定是它（ssh 等欄位為 null），
+ * 但 `normalize.toState()` 會把它濾掉：store 的 `hosts` 只含遠端主機，本機狀態看 `connected`。
+ */
+export const LOCAL_HOST = 'local'
+
+export interface NewHostInput {
+  name: string
+  ssh: string
+  ssh_port?: number
+  herdr_session?: string
+  remote_path?: string
+  hook_port?: number
+  /** 額外的 ssh 參數，原樣附加到每個 ssh 指令（例：`["-i","~/.ssh/id_x"]`） */
+  ssh_opts?: string[]
+}
+
+/** `POST /api/hosts` / `POST /api/hosts/:name/reconnect` 的回應。 */
+export interface HostResult {
+  name: string
+  connected: boolean
+  error: string | null
+}
+
+/** §11.2 進階欄位的預設值（表單預填，與 daemon 的預設一致）。 */
+export const HOST_DEFAULTS = {
+  ssh_port: 22,
+  herdr_session: 'agents-manager',
+  remote_path: '/opt/homebrew/bin:$HOME/.local/bin',
+  hook_port: 7788,
+} as const
 
 export interface Bot {
   id: string
@@ -100,6 +152,7 @@ export interface Message {
 export interface AppState {
   daemon_seq: number
   connected: boolean
+  hosts: Host[]
   projects: Project[]
   bots: Bot[]
   /** active runs, keyed by bot_id downstream */
@@ -147,6 +200,7 @@ export type WsEventType =
   | 'project_changed'
   | 'bot_changed'
   | 'daemon_status'
+  | 'host_changed'
   | 'resync'
 
 export interface ApiErrorBody {
@@ -177,6 +231,8 @@ export class ApiError extends Error {
 export interface NewProjectInput {
   path: string
   label: string
+  /** SPEC §11.6：省略或 `"local"` = 本機 */
+  host?: string
 }
 
 export interface DirEntry {

@@ -246,3 +246,89 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
 ## 目錄選擇器（2026-09-05 新增）
 
 新增 Project 表單的「瀏覽…」按鈕會開啟 `DirPicker`（`web/src/components/DirPicker.tsx`），透過 `GET /api/fs/dirs` 逐層瀏覽：上一層、家目錄、麵包屑、手動輸入路徑、單擊進入子目錄、雙擊直接選取、「選擇此目錄」帶回表單並自動填 label。mock 模式有一棵假目錄樹。截圖 `docs/screenshots/40-42`。
+
+
+## 遠端主機（SPEC §11.6，2026-09-06 新增）
+
+Project 可以位於另一台機器（daemon 透過 SSH 轉發連遠端 herdr）。前端把「本機」當成一個
+保留的 host `local`，其餘都是使用者設定的遠端主機。
+
+### 資料流
+
+| 來源 | 欄位 | 前端處理 |
+|---|---|---|
+| `GET /api/state` | `hosts[]`（**第一筆固定是 `local`**，ssh 欄位為 null） | `normalize.toState()` 濾掉 `local`，store 的 `hosts` 只留遠端；本機狀態仍看頂層 `connected` |
+| `GET /api/state` | `projects[].host`（`"local"` 或 host name） | `Project.host`；舊 daemon 沒有這個欄位時預設 `"local"` |
+| WS `daemon_status` | `{herdr_connected, connected, hosts: {name: {connected, error}}}` | 讀 `herdr_connected`（退回舊的 `connected`），`hosts` map 以 `mergeHosts()` 併入既有 host 設定 |
+| WS `host_changed` | `{name, connected, error}` | 直接更新該 host；`name = "local"` 時改的是 `connected`；沒見過的名字（新增／刪除通知）觸發 `GET /api/state` |
+| `POST /api/hosts` | `{name, connected, error}` | 表單下方顯示連線結果（綠框 / 紅框），同時跳右下角通知 |
+
+**燈號**：`botLamp()` 先看 bot 所屬 Project 的 host。遠端 host `connected = false` →
+該 host 底下所有 bot 一律 `disconnected`（灰），不看 run 狀態；本機 bot 沿用頂層 `connected`。
+`composerState()` 對應顯示鎖定原因「主機未連線（`<name>`）：`<error>`」。
+
+**相容性**：daemon 若還沒實作 §11（`/api/state` 沒有 `hosts`），前端會得到空的 host 清單、
+所有 project `host = "local"`，行為與 §11 之前完全相同（已對現行 daemon 實測，見下方截圖 `6c`）。
+
+### UI
+
+- **sidebar 底部「主機」disclosure**（`components/HostsPanel.tsx`）：右側顯示 `本機 + N ・ M 個未連線`。
+  每個 host 一列：連線燈（綠 / 灰）、名稱、使用中的 Project 數、`ssh 目標:port ・ session`、
+  未連線時的錯誤字串、「重連」（`POST /hosts/:name/reconnect`）與「✕」刪除
+  （`DELETE /hosts/:name`；仍有 Project 使用會被後端 409 擋下並顯示 reason）。
+- **新增主機表單**：`名稱`、`ssh 目標` 兩個必填欄位；`ssh_port` / `herdr_session` /
+  `remote_path` / `hook_port` / `ssh_opts` 收在「進階（都有預設值）」裡，預設值取自 SPEC §11.2
+  （`22` / `agents-manager` / `/opt/homebrew/bin:$HOME/.local/bin` / `7788`）。
+  送出後按鈕變「連線中…」（後端最多約 20 秒），結果直接顯示在表單上方。
+- **新增 Project 表單**多一個「主機」下拉（本機 + 已設定 hosts，未連線的 host 標示並停用）；
+  切換主機會清掉已選路徑，`DirPicker` 帶 `host` 呼叫 `GET /api/fs/dirs?host=…`，
+  並在頂端顯示 `@<host> 遠端目錄`。送出時帶 `host`。
+- **host 徽章** `@<host>`：sidebar 的 Project 標題與右側標題列的 bot 名稱旁邊；本機不顯示。
+  host 斷線時徽章轉灰並加刪除線。
+
+### mock 模式的主機（`VITE_MOCK=1`）
+
+`api/mock.ts` 完整實作了 `/hosts` 三個端點、`?host=` 的遠端目錄樹、`hosts[]`（含 `local`）
+與 `host_changed` / `daemon_status` 事件。假 ssh 撥號規則：**ssh 目標含 `fail` / `bad` /
+`unreachable` / `0.0.0.0` 會連線失敗**（回 `connected:false` + 錯誤字串），其餘成功。
+遠端目錄樹以 ssh 目標的使用者名稱為家目錄（`m4p@…` → `/Users/m4p`，底下有
+`work/{api-server,web-client,scratch}`、`src/herdr`）。
+
+console 開關（在既有的 `__amMock` 上）：
+
+```js
+__amMock.hosts()          // 目前設定的 host 名稱
+__amMock.hostDown('m4p')  // 模擬 ssh master 掛掉：燈號轉灰、composer 鎖定
+__amMock.hostUp('m4p')    // 恢復
+```
+
+### 驗收紀錄（2026-09-06，mock）
+
+`node scripts/demo-hosts.mjs`（headless Chrome / CDP，先 `VITE_MOCK=1 npx vite --port 5199`）：
+
+| 檔案 | 內容 |
+|---|---|
+| `60-hosts-empty.png` | 「主機」disclosure 展開，尚未設定遠端主機 |
+| `61-new-host-form.png` | 新增主機表單（含展開的進階欄位） |
+| `62-host-connected.png` | 新增 `m4p`（`m4p@100.112.229.82`）→ 綠燈 + 「ssh master 與遠端 herdr 都就緒」 |
+| `63-remote-dirpicker.png` / `64-remote-dirpicker-work.png` | 選擇器切到 `@m4p`，列出 `/Users/m4p`、`/Users/m4p/work` |
+| `65-remote-project.png` | 新增 Project `api-server@m4p`，標題列出現 `@m4p` 徽章 |
+| `66-remote-bot-running.png` | 遠端 bot `api-claude` 啟動後綠燈，標題列顯示徽章 |
+| `67-host-down.png` | `__amMock.hostDown('m4p')` → 燈號轉灰、徽章刪除線、composer 鎖定「主機未連線」 |
+| `68-host-down-panel.png` | 主機面板顯示錯誤字串與「重連」 |
+| `69-host-reconnected.png` | 重連後燈號恢復、composer 解鎖 |
+| `6a-dark.png` / `6b-narrow-900.png` | 深色主題、900 寬 |
+| `6c-real-daemon-no-hosts.png` | 對**現行（尚未實作 §11 的）daemon** 的相容性檢查：無徽章、本機燈號不變、主機面板為空狀態，console 無錯誤（`scripts/demo-hosts-real.mjs`） |
+
+### 已知問題（遠端主機）
+
+1. **尚未對真後端的 `/api/hosts` 實跑**。現行 daemon 還沒有 `hosts` 欄位（`GET /api/state`
+   回傳無 `hosts`），所以只做了相容性檢查；等 daemon 端 §11 完成後要再跑一次
+   「新增 m4p → 遠端目錄選 `/Users/m4p` 下的目錄」。
+2. **`POST /api/hosts` 最長約 20 秒**才回應（ensure session + ssh master + ping），期間表單
+   只顯示「連線中…」，沒有進度或取消。
+3. **host 設定不能編輯**：改 ssh 目標要重新送一次同名的「新增主機」（後端視為更新），
+   UI 沒有「編輯」入口。
+4. **`local` 不出現在主機清單**：本機的連線狀態只在左上角的連線徽章顯示，主機面板不列它，
+   因此也沒有「重新 ping 本機 herdr」的按鈕（後端的 `POST /hosts/local/reconnect` 沒接 UI）。
+5. **遠端 Project 的路徑沒有前端驗證**：路徑不存在由後端 ssh 檢查後回 400。

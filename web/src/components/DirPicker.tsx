@@ -5,13 +5,17 @@ import type { DirListing } from '../api/types'
 /**
  * Server-backed directory browser. Browsers cannot hand a page a real filesystem path,
  * so the daemon lists directories (`GET /api/fs/dirs`) and the user drills down here.
+ * With `host` set (SPEC §11.5) the daemon runs the listing over ssh on that host instead.
  */
 export function DirPicker({
   initial,
+  host,
   onPick,
   onCancel,
 }: {
   initial?: string
+  /** `undefined` / `"local"` = the daemon's own filesystem */
+  host?: string
   onPick: (path: string) => void
   onCancel: () => void
 }) {
@@ -19,11 +23,12 @@ export function DirPicker({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [manual, setManual] = useState('')
+  const remote = host && host !== 'local' ? host : null
 
   const load = (path?: string) => {
     setBusy(true)
     setError(null)
-    listDirs(path)
+    listDirs(path, host)
       .then((l) => {
         setListing(l)
         setManual(l.path)
@@ -35,7 +40,7 @@ export function DirPicker({
   useEffect(() => {
     load(initial?.trim() || undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [host])
 
   const crumbs = (() => {
     const p = listing?.path ?? ''
@@ -52,6 +57,12 @@ export function DirPicker({
 
   return (
     <div className="dirpicker" role="dialog" aria-label="選擇目錄">
+      {remote ? (
+        <div className="dirpicker-host" title={`透過 ssh 列出 ${remote} 上的目錄（SPEC §11.5）`}>
+          <span className="host-badge">@{remote}</span>
+          <span>遠端目錄</span>
+        </div>
+      ) : null}
       <div className="dirpicker-top">
         <button type="button" className="btn" title="上一層" disabled={!listing?.parent || busy} onClick={() => load(listing?.parent ?? undefined)}>
           ↑
