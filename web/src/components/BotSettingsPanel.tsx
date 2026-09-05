@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { EFFORT_OPTIONS, MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
 import type { BotKind, PatchBotInput } from '../api/types'
 import { projectHostName, useStore } from '../store/store'
+import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 
@@ -214,6 +215,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
   const [saving, setSaving] = useState(false)
   const [restarting, setRestarting] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
@@ -372,25 +374,37 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <strong>刪除 Bot</strong>
             <p className="hint">會停止並關閉它的終端 pane，對話紀錄保留。</p>
           </div>
-          <button
-            type="button"
-            className="btn danger"
-            onClick={() => {
-              if (
-                confirm(
-                  `刪除 Bot「${bot.name}」？\n\n` +
-                    '會停止並關閉它的終端 pane（有 active Run 也會先停止），設定從 config.toml 移除。\n' +
-                    '對話紀錄會保留在資料庫裡。',
-                )
-              ) {
-                void removeBot(botId)
-              }
-            }}
-          >
+          <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>
             刪除 Bot
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title="刪除 Bot"
+        body={
+          <>
+            確定刪除 <strong>{bot.name}</strong>
+            {project ? (
+              <>
+                （專案 <strong>{project.label}</strong>）
+              </>
+            ) : null}
+            ？會停止並關閉它的終端 pane，設定從 config.toml 移除；對話紀錄會保留。
+          </>
+        }
+        confirmLabel="刪除"
+        danger
+        requireText={bot.name}
+        requireTextLabel={`請輸入完整名稱「${bot.name}」以確認刪除`}
+        width={360}
+        onCancel={() => setDeleteOpen(false)}
+        onConfirm={() => {
+          setDeleteOpen(false)
+          void removeBot(botId)
+        }}
+      />
     </div>
   )
 }

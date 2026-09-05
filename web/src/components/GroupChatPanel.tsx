@@ -5,7 +5,7 @@ import { parseMentions } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
-import { Bubble, EmptyState, LiveBubble } from './ChatPanel'
+import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { IssuesBar } from './IssuesBar'
 import { QuotaStrip } from './QuotaStrip'
@@ -20,6 +20,28 @@ import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 /** Left-hand badge on a reply: which bot said it. */
 export function BotBadge({ name, kind }: { name: string; kind?: Bot['kind'] }) {
   return <span className={`bot-badge${kind ? ` ${kind}` : ''}`}>{name}</span>
+}
+
+const MENTION_RE = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
+
+/** Strip @mentions so chip selection can rewrite the recipient prefix. */
+function stripMentions(text: string): string {
+  return text.replace(MENTION_RE, '$1').replace(/[ \t]{2,}/g, ' ').replace(/^\s+/, '')
+}
+
+function hasAllMention(text: string): boolean {
+  for (const m of text.matchAll(MENTION_RE)) {
+    if (m[2].toLowerCase() === 'all') return true
+  }
+  return false
+}
+
+function applyRecipients(text: string, mode: 'all' | string[]): string {
+  const body = stripMentions(text)
+  if (mode === 'all') return body ? `@all ${body}` : '@all '
+  if (mode.length === 0) return body
+  const prefix = mode.map((n) => `@${n}`).join(' ')
+  return body ? `${prefix} ${body}` : `${prefix} `
 }
 
 type Row =
@@ -126,17 +148,36 @@ function GroupMessageList({ projectId }: { projectId: string }) {
               msg={r.msg}
               from={
                 <span className="msg-targets" title="這則訊息送給了這些 Bot">
-                  → {r.targets.map((t) => `@${t}`).join(', ')}
+                  你 → {r.targets.join(', ')}
                 </span>
               }
             />
           ) : (
-            <Bubble key={r.key} msg={r.msg} from={<BotBadge name={r.msg.bot_name} kind={kinds[r.msg.bot_id]} />} />
+            <Bubble
+              key={r.key}
+              msg={r.msg}
+              kind={kinds[r.msg.bot_id]}
+              from={
+                <span className="msg-speaker">
+                  {r.msg.bot_name}
+                  {kinds[r.msg.bot_id] ? ` · ${KIND_TITLE[kinds[r.msg.bot_id]]}` : ''}
+                </span>
+              }
+            />
           ),
         )
       )}
       {typing.map((t) => (
-        <LiveBubble key={`typing-${t.id}`} text={liveText[t.id] ?? null} from={<BotBadge name={t.name} kind={t.kind} />} />
+        <LiveBubble
+          key={`typing-${t.id}`}
+          text={liveText[t.id] ?? null}
+          kind={t.kind}
+          from={
+            <span className="msg-speaker">
+              {t.name} · {KIND_TITLE[t.kind]}
+            </span>
+          }
+        />
       ))}
     </div>
   )
@@ -204,7 +245,35 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
   const activeIdx = Math.min(active, Math.max(0, candidates.length - 1))
 
   const targets = useMemo(() => parseMentions(text, members), [text, members])
+  const allSelected = hasAllMention(text)
+  const selectedNames = useMemo(() => new Set(targets.map((t) => t.name)), [targets])
   const skippedNow = targets.filter((b) => !sendable.includes(b.id))
+
+  const writeDraft = (next: string) => {
+    setText(next)
+    const pos = next.length
+    setCaret(pos)
+    requestAnimationFrame(() => {
+      const el = ref.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    })
+  }
+
+  const toggleAll = () => {
+    if (allSelected) writeDraft(stripMentions(text))
+    else writeDraft(applyRecipients(text, 'all'))
+  }
+
+  const toggleBot = (name: string) => {
+    if (allSelected) {
+      writeDraft(applyRecipients(text, [name]))
+      return
+    }
+    const next = members.map((b) => b.name).filter((n) => (n === name ? !selectedNames.has(n) : selectedNames.has(n)))
+    writeDraft(applyRecipients(text, next))
+  }
 
   const pick = (c: Candidate) => {
     if (!mention) return
@@ -250,6 +319,34 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
           <span>⛔ {state.reason}</span>
         </div>
       ) : null}
+      <div className="recipient-row" role="group" aria-label="收件者">
+        <button
+          type="button"
+          className={`recipient-chip all${allSelected ? ' on' : ''}`}
+          aria-pressed={allSelected}
+          disabled={state.disabled || sending || members.length === 0}
+          title={`送給全部 ${members.length} 個 bot`}
+          onClick={toggleAll}
+        >
+          @all · {members.length} 個 bot
+        </button>
+        {members.map((b) => {
+          const on = !allSelected && selectedNames.has(b.name)
+          return (
+            <button
+              key={b.id}
+              type="button"
+              className={`recipient-chip ${b.kind}${on ? ' on' : ''}`}
+              aria-pressed={on}
+              disabled={state.disabled || sending}
+              title={`送給 @${b.name}`}
+              onClick={() => toggleBot(b.name)}
+            >
+              @{b.name}
+            </button>
+          )
+        })}
+      </div>
       <div className="composer-box">
         {showPop ? (
           <ul className="mention-pop" role="listbox" aria-label="選擇收件 Bot">
@@ -321,7 +418,7 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
           type="button"
           className="send-btn"
           disabled={state.disabled || sending || !text.trim() || targets.length === 0}
-          title={targets.length === 0 ? '請以 @<bot> 或 @all 指定收件者' : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`}
+          title={targets.length === 0 ? '請選擇收件者（上方 chip 或 @mention）' : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`}
           onClick={submit}
         >
           {sending ? '送出中…' : '送出'}
@@ -330,12 +427,12 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
       {/* Only while there is something to say: no mention yet, or the resolved recipient list. */}
       {text.trim() && targets.length === 0 ? (
         <div className="composer-hint group-hint">
-          <span className="mention-warn">請以 @&lt;bot 名稱&gt; 或 @all 指定收件者（輸入 @ 會出現選單）</span>
+          <span className="mention-warn">請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定</span>
         </div>
       ) : targets.length > 0 ? (
         <div className="composer-hint group-hint">
           <span className="group-targets">
-            → {targets.map((t) => `@${t.name}`).join(', ')}
+            → {allSelected ? `@all（${members.length} 個 bot）` : targets.map((t) => `@${t.name}`).join(', ')}
             {skippedNow.length > 0 ? (
               <span className="mention-warn">
                 {' '}

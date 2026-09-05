@@ -41,13 +41,31 @@ function BotRow({ botId }: { botId: string }) {
   const startBot = useStore((s) => s.startBot)
   const stopBot = useStore((s) => s.stopBot)
   const openSettings = useStore((s) => s.openSettings)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDoc = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
 
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
 
   return (
     <div
-      className={`bot-row${selected ? ' selected' : ''}`}
+      className={`bot-row${selected ? ' selected' : ''}${menuOpen ? ' menu-open' : ''}`}
       role="option"
       aria-selected={selected}
       tabIndex={0}
@@ -87,27 +105,61 @@ function BotRow({ botId }: { botId: string }) {
         >
           ⚙
         </button>
-        {active ? (
+        <div className="bot-menu" ref={menuRef}>
           <button
             type="button"
-            className="mini-btn danger"
-            disabled={busyStop}
-            onClick={() => void stopBot(botId)}
-            title="stop：ctrl+c ×2，必要時關閉 pane"
+            className="icon-btn bot-menu-btn"
+            aria-label={`${bot.name} 的操作選單`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title="啟動／停止"
+            onClick={() => setMenuOpen((v) => !v)}
           >
-            停止
+            ⋯
           </button>
-        ) : (
-          <button
-            type="button"
-            className="mini-btn primary"
-            disabled={busyStart}
-            onClick={() => void startBot(botId)}
-            title="start：建立 pane 並啟動 agent"
-          >
-            啟動
-          </button>
-        )}
+          {menuOpen ? (
+            <div className="bot-menu-pop" role="menu">
+              {active ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="bot-menu-item danger"
+                  disabled={busyStop}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    void stopBot(botId)
+                  }}
+                >
+                  停止
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="bot-menu-item"
+                  disabled={busyStart}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    void startBot(botId)
+                  }}
+                >
+                  啟動
+                </button>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                className="bot-menu-item"
+                onClick={() => {
+                  setMenuOpen(false)
+                  openSettings(botId)
+                }}
+              >
+                設定
+              </button>
+            </div>
+          ) : null}
+        </div>
       </span>
     </div>
   )

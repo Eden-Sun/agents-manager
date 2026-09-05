@@ -3,11 +3,12 @@ import remarkGfm from 'remark-gfm'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Message } from '../api/types'
+import type { BotKind, Message } from '../api/types'
 import { attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
+import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
 import { IssuesBar } from './IssuesBar'
 import { KindTag } from './KindTag'
@@ -24,6 +25,12 @@ const SOURCE_LABEL: Record<string, string> = {
   system: 'system',
 }
 
+export const KIND_TITLE: Record<BotKind, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  grok: 'Grok',
+}
+
 function timeOf(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false })
@@ -31,18 +38,45 @@ function timeOf(iso: string): string {
 
 /**
  * One message, shown in full (long content scrolls with the list — nothing is folded).
- * `from` (SPEC §13 group view) sits on the meta line under the bubble — the bot badge on
- * a reply, or the `→ @a, @b` recipient list on a folded user message — so a short reply
- * stays two lines tall. System notes have no meta line; theirs goes above.
+ * Metadata (speaker / recipients + time) always sits ABOVE the bubble (18px row).
  */
-export function Bubble({ msg, from }: { msg: Message; from?: ReactNode }) {
+export function Bubble({
+  msg,
+  from,
+  kind,
+}: {
+  msg: Message
+  from?: ReactNode
+  kind?: BotKind
+}) {
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
+  const rail = system || msg.source === 'hook' || msg.source === 'system'
 
   return (
-    <article className={`msg ${msg.role}`}>
-      {from && system ? <div className="msg-from">{from}</div> : null}
-      <div className={`bubble${msg.role === 'assistant' && !fallback ? ' md' : ''}`}>
+    <article className={`msg ${msg.role}${rail ? ' rail' : ''}`}>
+      <div className="msg-meta msg-meta-above">
+        <div className="msg-meta-left">
+          {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
+          {from ? <span className="msg-from">{from}</span> : null}
+          {system || msg.source === 'hook' || msg.source === 'system' ? (
+            <span className="src-tag mono" title={`messages.source = ${msg.source}`}>
+              {SOURCE_LABEL[msg.source] ?? msg.source}
+            </span>
+          ) : msg.role === 'assistant' ? (
+            <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`messages.source = ${msg.source}`}>
+              {SOURCE_LABEL[msg.source] ?? msg.source}
+            </span>
+          ) : null}
+          {fallback || msg.incomplete ? <span className="meta-warn">可能不完整</span> : null}
+        </div>
+        {system ? null : (
+          <time className="msg-time" dateTime={msg.created_at} title={msg.created_at}>
+            {timeOf(msg.created_at)}
+          </time>
+        )}
+      </div>
+      <div className={`bubble${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}`}>
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
@@ -51,21 +85,6 @@ export function Bubble({ msg, from }: { msg: Message; from?: ReactNode }) {
           msg.content
         )}
       </div>
-      {system ? null : (
-        <div className="msg-meta">
-          {from && msg.role === 'assistant' ? <span className="msg-from">{from}</span> : null}
-          <time dateTime={msg.created_at} title={msg.created_at}>
-            {timeOf(msg.created_at)}
-          </time>
-          {msg.role === 'assistant' ? (
-            <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`messages.source = ${msg.source}`}>
-              {SOURCE_LABEL[msg.source] ?? msg.source}
-            </span>
-          ) : null}
-          {fallback || msg.incomplete ? <span className="meta-warn">可能不完整</span> : null}
-          {from && msg.role === 'user' ? <span className="msg-from">{from}</span> : null}
-        </div>
-      )}
     </article>
   )
 }
@@ -75,9 +94,24 @@ export function Bubble({ msg, from }: { msg: Message; from?: ReactNode }) {
  * v3.9) once there is text, otherwise the typing indicator. Styled like an assistant bubble
  * so it turns into the final message in place.
  */
-export function LiveBubble({ text, from }: { text: string | null; from?: ReactNode }) {
+export function LiveBubble({
+  text,
+  from,
+  kind,
+}: {
+  text: string | null
+  from?: ReactNode
+  kind?: BotKind
+}) {
   return (
     <article className={`msg assistant live${text ? ' streaming' : ''}`} aria-live="polite">
+      <div className="msg-meta msg-meta-above">
+        <div className="msg-meta-left">
+          {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
+          {from ? <span className="msg-from">{from}</span> : null}
+          <span>{text ? '輸出中…' : '等待回覆（hook）…'}</span>
+        </div>
+      </div>
       <div className={`bubble${text ? ' md' : ''}`}>
         {text ? (
           <>
@@ -87,10 +121,6 @@ export function LiveBubble({ text, from }: { text: string | null; from?: ReactNo
         ) : (
           <TypingDots />
         )}
-      </div>
-      <div className="msg-meta">
-        {from ? <span className="msg-from">{from}</span> : null}
-        <span>{text ? '輸出中…' : '等待回覆（hook）…'}</span>
       </div>
     </article>
   )
@@ -234,6 +264,7 @@ function Composer({ botId, inputRef }: { botId: string; inputRef: RefObject<HTML
 export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
+  const project = useStore((s) => s.projects.find((p) => p.id === s.bots.find((b) => b.id === s.selectedBotId)?.project_id) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
@@ -252,6 +283,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const busy = useStore((s) => s.busy)
   const attachCommand = useStore((s) => attachCommandOf(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
 
   if (!botId || !bot) {
     return (
@@ -329,7 +361,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="head-actions">
           <button
             type="button"
-            className="mini-btn"
+            className="mini-btn interrupt-btn"
             disabled={!active}
             title="送出 esc 中斷目前回合"
             onClick={() => void interruptBot(botId)}
@@ -339,9 +371,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {active ? (
             <button
               type="button"
-              className="mini-btn danger"
+              className="mini-btn danger stop-btn"
               disabled={Boolean(busy[`stop:${botId}`])}
-              onClick={() => void stopBot(botId)}
+              onClick={() => setStopConfirmOpen(true)}
             >
               停止
             </button>
@@ -358,6 +390,30 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </div>
       </div>
       <ToolsHint />
+
+      <ConfirmDialog
+        open={stopConfirmOpen}
+        title="停止 Bot"
+        body={
+          <>
+            確定停止 <strong>{bot.name}</strong>
+            {project ? (
+              <>
+                （專案 <strong>{project.label}</strong>）
+              </>
+            ) : null}
+            ？會對 pane 送出 ctrl+c，必要時關閉終端。
+          </>
+        }
+        confirmLabel="停止"
+        danger
+        width={360}
+        onCancel={() => setStopConfirmOpen(false)}
+        onConfirm={() => {
+          setStopConfirmOpen(false)
+          void stopBot(botId)
+        }}
+      />
 
       {settingsOpen ? (
         <BotSettingsPanel key={botId} botId={botId} />
