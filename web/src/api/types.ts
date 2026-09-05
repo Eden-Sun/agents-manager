@@ -41,7 +41,15 @@ export interface Project {
   workspace_id: string | null
   /** SPEC §11.6: `"local"` = 本機，其餘為 `hosts[].name` */
   host: string
+  /** v4.0：目錄的 GitHub remote（daemon 由 `git remote` / `gh` 解析），null = 非 GitHub 專案 */
+  github: ProjectGithub | null
   created_at: string
+}
+
+export interface ProjectGithub {
+  owner: string
+  repo: string
+  url: string
 }
 
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
@@ -57,7 +65,27 @@ export interface Host {
   connected: boolean
   /** 連線失敗原因（ssh / herdr），連線正常時為 null */
   error: string | null
+  /**
+   * v4.0：在本機終端 attach 同一個 herdr session 的指令，例如
+   * `herdr --remote m4p@100.112.229.82 --session agents-manager`（本機為 `herdr --session agents-manager`）。
+   */
+  attach_command: string
+  /** v4.0：該主機上各 agent CLI 的偵測結果。 */
+  tools: ToolMap
 }
+
+/** v4.0 `hosts[].tools.<kind>`。`logged_in` 為 null = 未知（例如 CLI 沒有可查的登入狀態）。 */
+export interface ToolStatus {
+  installed: boolean
+  path: string | null
+  version: string | null
+  logged_in: boolean | null
+}
+
+export type ToolMap = Record<BotKind, ToolStatus>
+
+/** 沒有資訊時的預設（視為已安裝、登入未知，避免誤報缺工具）。 */
+export const TOOL_UNKNOWN: ToolStatus = { installed: true, path: null, version: null, logged_in: null }
 
 /**
  * 本機的保留 host id。`GET /api/state` 的 `hosts[]` 第一筆一定是它（ssh 等欄位為 null），
@@ -101,8 +129,12 @@ export interface Bot {
    * daemon 會把它翻成 `--model <值>`（claude）/ `-m <值>`（codex、grok）。
    */
   model: string | null
-  /** grok reasoning effort: low | medium | high; null = CLI default */
+  /** reasoning effort（grok：low | medium | high；codex：依 `GET /api/models` 的 `efforts`）；null = CLI 預設 */
   effort: string | null
+  /** v4.0：codex 的 fast / priority service tier（`--fast`）。 */
+  fast: boolean
+  /** v4.0：人設（system prompt 前置文字），null = 無。 */
+  persona: string | null
   args: string[]
   autostart: boolean
   /** daemon extension: false = no hook injection (terminal-fallback path) */
@@ -230,6 +262,10 @@ export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
 export interface AppState {
   daemon_seq: number
   connected: boolean
+  /** v4.0：本機的 attach 指令（`hosts[0]`，reserved `local` 的 `attach_command`）。 */
+  attach_command: string
+  /** v4.0：本機的工具偵測（`hosts[0].tools`）。 */
+  tools: ToolMap
   hosts: Host[]
   identities: Identity[]
   projects: Project[]
@@ -280,6 +316,8 @@ export type WsEventType =
   | 'bot_changed'
   | 'daemon_status'
   | 'host_changed'
+  | 'turn_progress'
+  | 'quota_updated'
   | 'resync'
 
 export interface ApiErrorBody {
@@ -342,6 +380,10 @@ export interface NewBotInput {
   auto_approve?: boolean
   identity?: string | null
   env?: Record<string, string>
+  /** v4.0：codex fast tier */
+  fast?: boolean
+  /** v4.0：人設 */
+  persona?: string | null
 }
 
 /**
@@ -358,6 +400,8 @@ export interface PatchBotInput {
   inject_hooks?: boolean
   identity?: string | null
   env?: Record<string, string>
+  fast?: boolean
+  persona?: string | null
 }
 
 /**
@@ -384,3 +428,70 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
 /** 「（預設）」與「自訂…」在 `<select>` 裡的 sentinel 值。 */
 export const MODEL_DEFAULT = ''
 export const MODEL_CUSTOM = ' custom'
+
+// ------------------------------------------------------------------ v4.0
+
+/** `GET /api/models?kind=&host=` 的一筆。 */
+export interface ModelInfo {
+  id: string
+  display_name: string
+  description: string
+  is_default: boolean
+  /** 該模型的預設 reasoning effort（null = 不適用） */
+  default_effort: string | null
+  /** 可選的 effort（空陣列 = 該模型不支援） */
+  efforts: string[]
+  /** 含 `priority` 時 UI 才顯示「Fast」開關 */
+  service_tiers: { id: string; name: string; description: string }[]
+}
+
+/** 「Fast」開關對應的 service tier id。 */
+export const FAST_TIER = 'priority'
+
+/** `GET /api/quota` 的一個視窗（5 小時 / 7 天）。 */
+export interface QuotaWindow {
+  used_pct: number
+  /** ISO 時間 */
+  resets_at: string
+}
+
+export interface KindQuota {
+  five_hour: QuotaWindow | null
+  seven_day: QuotaWindow | null
+  plan: string | null
+  updated_at: string
+}
+
+/**
+ * `GET /api/quota` → `{kinds: {...}}`。key 為 kind（`claude` / `codex` / `grok`）或
+ * `<kind>:<identity>`（例如 `claude:cc1`）；null = 該 kind 沒有額度資訊。
+ */
+export type QuotaMap = Record<string, KindQuota | null>
+
+/** `POST /api/hosts/:name/tools/install {kind, via_bot_id}` → `{turn_id}`。 */
+export interface InstallToolResult {
+  turn_id: string
+}
+
+/** `GET /api/projects/:id/issues` 的一筆（列表不含完整 body）。 */
+export interface Issue {
+  number: number
+  title: string
+  state: 'open' | 'closed'
+  labels: IssueLabel[]
+  url: string
+  updated_at: string
+  author: string
+  body_excerpt: string
+}
+
+export interface IssueLabel {
+  name: string
+  /** 6 碼 hex（無 #），null = 未知 */
+  color: string | null
+}
+
+/** `GET /api/projects/:id/issues/:number` — 含完整 `body`。 */
+export interface IssueDetail extends Issue {
+  body: string
+}

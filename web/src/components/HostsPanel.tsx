@@ -2,6 +2,8 @@ import { useState } from 'react'
 import type { HostResult } from '../api/types'
 import { HOST_DEFAULTS } from '../api/types'
 import { useStore } from '../store/store'
+import { AttachButton } from './AttachButton'
+import { ToolBadges } from './Tools'
 
 /**
  * SPEC §11.6 host management: the list of configured remote hosts (connection lamp,
@@ -52,8 +54,10 @@ function HostRow({ name }: { name: string }) {
             {host.error ?? '未連線'}
           </span>
         )}
+        <ToolBadges host={host.name} tools={host.tools} />
       </span>
       <span className="host-actions">
+        <AttachButton command={host.attach_command} compact />
         <button
           type="button"
           className="mini-btn"
@@ -192,12 +196,39 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   )
 }
 
+/** The daemon's own machine: connection lamp, attach command, tool badges (v4.0). */
+function LocalHostRow() {
+  const connected = useStore((s) => s.connected)
+  const tools = useStore((s) => s.localTools)
+  const attach = useStore((s) => s.attachCommand)
+  const projectCount = useStore((s) => s.projects.filter((p) => p.host === 'local').length)
+  return (
+    <div className="host-row local">
+      <span className={`lamp lamp-${connected ? 'idle' : 'disconnected'}`} role="img" aria-label={connected ? 'herdr 已連線' : 'herdr 中斷'} title={connected ? 'herdr 已連線' : 'herdr 中斷'} />
+      <span className="host-main">
+        <span className="host-name">
+          本機
+          <span className="host-count">{projectCount > 0 ? `${projectCount} 個 Project` : '未使用'}</span>
+        </span>
+        <span className="host-ssh">{attach}</span>
+        <ToolBadges host="local" tools={tools} />
+      </span>
+      <span className="host-actions">
+        <AttachButton command={attach} compact />
+      </span>
+    </div>
+  )
+}
+
 export function HostsPanel() {
   const hosts = useStore((s) => s.hosts)
   const [result, setResult] = useState<HostResult | null>(null)
 
   return (
     <div className="hosts-panel">
+      <div className="host-list">
+        <LocalHostRow />
+      </div>
       {hosts.length === 0 ? (
         <p className="hint hosts-empty">尚未設定遠端主機。Project 預設都在本機。</p>
       ) : (

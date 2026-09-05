@@ -4,7 +4,7 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toMessagesPage, toState, toTerminal, num, str, isRec, optStr, pick, arr } from './normalize'
+import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toModels, toQuota, toState, toTerminal, num, str, isRec, optStr, pick, arr } from './normalize'
 import { HttpTransport } from './transport'
 import type { SocketHandlers, Transport } from './transport'
 import type {
@@ -14,6 +14,11 @@ import type {
   GroupMessagesPage,
   GroupSkipReason,
   HostResult,
+  InstallToolResult,
+  Issue,
+  IssueDetail,
+  ModelInfo,
+  QuotaMap,
   NewHostInput,
   NewIdentityInput,
   MessagesPage,
@@ -22,6 +27,7 @@ import type {
   PatchBotInput,
   PatchBotResult,
   PromptResult,
+  BotKind,
   TerminalSnapshot,
   TerminalSource,
   TurnDelivery,
@@ -223,6 +229,45 @@ export async function sendKeys(botId: string, keys: string[], expectRunId: strin
 
 export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
+}
+
+// ------------------------------------------------------------------ v4.0
+
+/** `GET /api/models?kind=&host=` — the agent CLI's model catalogue on that host. */
+export async function fetchModels(kind: BotKind, host?: string): Promise<ModelInfo[]> {
+  const q = new URLSearchParams({ kind })
+  if (host && host !== 'local') q.set('host', host)
+  return toModels(await transport.request('GET', `/models?${q.toString()}`))
+}
+
+/** `GET /api/quota` — per-kind 5h / 7d usage. */
+export async function fetchQuota(): Promise<QuotaMap> {
+  return toQuota(await transport.request('GET', '/quota'))
+}
+
+/**
+ * `POST /api/hosts/:name/tools/install {kind, via_bot_id}` — asks a running bot on that
+ * host to install + log in the given agent CLI (as a prompt in its own pane).
+ */
+export async function installTool(host: string, kind: BotKind, viaBotId: string): Promise<InstallToolResult> {
+  return toInstallResult(
+    await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/install`, { kind, via_bot_id: viaBotId }),
+  )
+}
+
+/** `GET /api/projects/:id/issues?state=&limit=&q=` (v4.0; the daemon shells out to `gh`). */
+export async function fetchIssues(projectId: string, opts: { state?: 'open' | 'closed'; limit?: number; q?: string } = {}): Promise<Issue[]> {
+  const q = new URLSearchParams()
+  if (opts.state) q.set('state', opts.state)
+  if (opts.limit) q.set('limit', String(opts.limit))
+  if (opts.q) q.set('q', opts.q)
+  const qs = q.toString()
+  return toIssues(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues${qs ? `?${qs}` : ''}`))
+}
+
+/** `GET /api/projects/:id/issues/:number` — with the full body. */
+export async function fetchIssue(projectId: string, number: number): Promise<IssueDetail | null> {
+  return toIssueDetail(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues/${number}`))
 }
 
 /** `crypto.randomUUID()` with a fallback for non-secure origins. */
