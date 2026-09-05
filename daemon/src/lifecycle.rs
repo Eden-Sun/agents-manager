@@ -467,12 +467,21 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
 
 /// `bot.model` as CLI args, inserted between the daemon's own flags and `identity.args`.
 fn model_args(bot: &db::Bot) -> Vec<String> {
-    let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return vec![] };
-    match bot.kind.as_str() {
-        "claude" => vec!["--model".into(), m.to_string()],
-        "codex" | "grok" => vec!["-m".into(), m.to_string()],
-        _ => vec![],
+    let mut out: Vec<String> = Vec::new();
+    if let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        match bot.kind.as_str() {
+            "claude" => out.extend(["--model".to_string(), m.to_string()]),
+            "codex" | "grok" => out.extend(["-m".to_string(), m.to_string()]),
+            _ => {}
+        }
     }
+    // grok: `--reasoning-effort low|medium|high` (verified: `grok --help`, unknown value → error)
+    if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if bot.kind == "grok" {
+            out.extend(["--reasoning-effort".to_string(), e.to_lowercase()]);
+        }
+    }
+    out
 }
 
 /// Extra CLI args contributed by the bot's identity.
@@ -621,7 +630,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     args.extend(bot.args());
 
     // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
-    let agent = crate::config::agent_name(&project.label, &bot.name);
+    let agent = crate::config::agent_name(&project.label, &bot.id);
     sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
         .bind(&agent)
         .bind(run_id)

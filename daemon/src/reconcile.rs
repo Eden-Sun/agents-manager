@@ -87,7 +87,13 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 candidates.push(n);
             }
         }
-        for n in [computed.clone(), bot.name.clone()] {
+        let label: String = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?")
+            .bind(&bot.project_id)
+            .fetch_optional(&app.db)
+            .await?
+            .unwrap_or_default();
+        let legacy = crate::config::agent_name_legacy(&label, &bot.name);
+        for n in [computed.clone(), legacy, bot.name.clone()] {
             if !candidates.contains(&n) {
                 candidates.push(n);
             }

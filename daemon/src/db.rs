@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
   model TEXT,
+  effort TEXT,
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
   auto_approve INTEGER NOT NULL DEFAULT 1,
@@ -96,6 +97,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
         ("runs", "agent_name", "ALTER TABLE runs ADD COLUMN agent_name TEXT"),
         ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
+        ("bots", "effort", "ALTER TABLE bots ADD COLUMN effort TEXT"),
         // SPEC §13: project group chat stamps every message of one send with a group id.
         ("messages", "group_id", "ALTER TABLE messages ADD COLUMN group_id TEXT"),
     ] {
@@ -193,14 +195,15 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
                name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
                model TEXT,
+               effort TEXT,
                args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
                inject_hooks INTEGER NOT NULL DEFAULT 1,
                auto_approve INTEGER NOT NULL DEFAULT 1,
                identity TEXT,
                env_json TEXT NOT NULL DEFAULT '{}',
                hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
-            "INSERT INTO bots_new (id, project_id, name, kind, model, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at)
-               SELECT id, project_id, name, kind, model, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at FROM bots",
+            "INSERT INTO bots_new (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at)
+               SELECT id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at FROM bots",
             "DROP TABLE bots",
             "ALTER TABLE bots_new RENAME TO bots",
             "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
@@ -248,6 +251,7 @@ pub struct Bot {
     pub kind: String,
     /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; NULL = the CLI's own default.
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub args_json: String,
     pub autostart: i64,
     pub inject_hooks: i64,
@@ -428,7 +432,7 @@ pub async fn agent_name_for_bot(pool: &SqlitePool, bot: &Bot) -> Result<String> 
         .bind(&bot.project_id)
         .fetch_optional(pool)
         .await?;
-    Ok(crate::config::agent_name(label.as_deref().unwrap_or(""), &bot.name))
+    Ok(crate::config::agent_name(label.as_deref().unwrap_or(""), &bot.id))
 }
 
 /// The herdr target to address an *existing* run with. Runs record the name they were

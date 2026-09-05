@@ -5,7 +5,7 @@
  */
 export function parseMentions<T extends { name: string }>(text: string, members: T[]): T[] {
   const hits: T[] = []
-  const re = /(^|[^\p{L}\p{N}_])@([A-Za-z0-9_-]+)/gu
+  const re = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
   for (const m of text.matchAll(re)) {
     const raw = m[2].toLowerCase()
     for (const cand of [raw, raw.replace(/[-_]+$/, '')]) {

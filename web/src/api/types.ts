@@ -101,6 +101,8 @@ export interface Bot {
    * daemon 會把它翻成 `--model <值>`（claude）/ `-m <值>`（codex、grok）。
    */
   model: string | null
+  /** grok reasoning effort: low | medium | high; null = CLI default */
+  effort: string | null
   args: string[]
   autostart: boolean
   /** daemon extension: false = no hook injection (terminal-fallback path) */
@@ -329,6 +331,7 @@ export interface NewBotInput {
   name: string
   kind: BotKind
   /** `null` / 省略 = 不帶 `--model`（由 CLI 自己決定） */
+  effort?: string | null
   model?: string | null
   /**
    * 契約保留，但 UI 不再提供 args 欄位（使用者決定）：新增 Bot 時一律省略，
@@ -348,6 +351,7 @@ export interface NewBotInput {
 export interface PatchBotInput {
   name?: string
   model?: string | null
+  effort?: string | null
   args?: string[]
   autostart?: boolean
   auto_approve?: boolean
@@ -368,6 +372,8 @@ export interface PatchBotResult {
  * 各 kind 的常用模型別名（下拉選單用；使用者仍可用「自訂…」輸入任意字串）。
  * 空字串 = `（預設）`，送出時轉成 `null`。
  */
+export const EFFORT_OPTIONS = ['low', 'medium', 'high'] as const
+
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
   codex: ['gpt-5.5', 'gpt-5.6-luna', 'gpt-6-astra'],
