@@ -1,0 +1,180 @@
+//! agents-managerd — a local multi-agent manager on top of herdr.
+//!
+//! Subcommands:
+//!   serve                       run the daemon (REST + WS + hook receiver)
+//!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
+
+mod api;
+mod assets;
+mod config;
+mod db;
+mod events;
+mod herdr;
+mod hook_cmd;
+mod hookrecv;
+mod lifecycle;
+mod projection;
+mod reconcile;
+mod state;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Parser)]
+#[command(name = "agents-managerd", version)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the daemon.
+    Serve {
+        /// Override the config path (default ~/.config/agents-manager/config.toml)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// M1 aid: also subscribe to agent status for every pane already in the session.
+        #[arg(long)]
+        dev_watch_all_panes: bool,
+    },
+    /// Hook callback invoked by the agent CLI. Always exits 0 with empty stdout.
+    Hook {
+        /// claude | codex
+        provider: String,
+        #[arg(long)]
+        bot: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long, default_value_t = 7788)]
+        port: u16,
+        /// Codex passes the event JSON as the last argv element.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        payload: Vec<String>,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Hook { provider, bot, token, port, payload } => {
+            let payload_arg = if provider == "codex" { payload.last().cloned() } else { None };
+            hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, payload_arg });
+            std::process::exit(0);
+        }
+        Cmd::Serve { config, dev_watch_all_panes } => {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(e) = rt.block_on(serve(config, dev_watch_all_panes)) {
+                eprintln!("fatal: {e:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn data_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/agents-manager")
+}
+
+fn load_or_create_ui_token(dir: &PathBuf) -> Result<String> {
+    let path = dir.join("ui-token");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return Ok(s);
+        }
+    }
+    let tok = projection::new_token();
+    std::fs::write(&path, &tok)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(tok)
+}
+
+async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,agents_managerd=debug")),
+        )
+        .with_target(false)
+        .init();
+
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir)?;
+    let cfg_path = config_path.unwrap_or_else(|| dir.join("config.toml"));
+    let store = config::ConfigStore::load(cfg_path.clone()).await?;
+    let cfg = store.get().await;
+    tracing::info!(config = %cfg_path.display(), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
+
+    let pool = db::open(&dir.join("agents-manager.sqlite3")).await?;
+    projection::project_config(&store, &pool).await.context("project config into sqlite")?;
+
+    let herdr_client = state::ensure_session(&cfg.server.herdr_session, &dir).await?;
+    let pong = herdr_client.ping().await?;
+    if pong.protocol != herdr::EXPECTED_PROTOCOL {
+        tracing::warn!(got = pong.protocol, expected = herdr::EXPECTED_PROTOCOL, "unexpected herdr protocol version");
+    }
+    tracing::info!(version = %pong.version, protocol = pong.protocol, "herdr ping ok");
+
+    let addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
+    let ui_token = load_or_create_ui_token(&dir)?;
+    let exe = std::env::current_exe()?;
+    let app = state::App::new(
+        pool,
+        herdr_client,
+        store,
+        dir.clone(),
+        exe,
+        addr.port(),
+        ui_token,
+        cfg.server.herdr_session.clone(),
+    );
+    app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
+    if let Err(e) = reconcile::reconcile(&app).await {
+        tracing::error!(error = ?e, "initial reconcile failed");
+    }
+    events::spawn_global(app.clone());
+
+    if dev_watch_all_panes {
+        if let Ok(panes) = app.herdr.pane_list(None).await {
+            for p in panes {
+                events::watch_pane(&app, &p.pane_id).await;
+            }
+            tracing::info!("dev: watching agent status for all existing panes");
+        }
+    }
+
+    hookrecv::replay_all(&app).await;
+
+    {
+        let app2 = app.clone();
+        tokio::spawn(async move {
+            for bot in db::live_bots(&app2.db).await.unwrap_or_default() {
+                if bot.autostart == 1 && db::active_run(&app2.db, &bot.id).await.ok().flatten().is_none() {
+                    tracing::info!(bot = %bot.name, "autostart");
+                    if let Err(e) = lifecycle::start_bot(&app2, &bot.id).await {
+                        tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+                    }
+                }
+            }
+        });
+    }
+
+    let router = api::router(app.clone());
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
+    tracing::info!(%addr, "listening");
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+// Keep Arc<App> in scope for the type checker in all builds.
+#[allow(dead_code)]
+fn _assert_send(_: &Arc<state::App>) {}
