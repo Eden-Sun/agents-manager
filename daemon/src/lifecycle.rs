@@ -979,8 +979,75 @@ pub async fn prompt_grouped(
     emit_turn(app, &turn_id).await;
     if delivery == "ok" {
         arm_stall(app, &run.id, bot_id, &turn_id).await;
+        arm_progress(app, &run.id, bot_id, &turn_id).await;
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into() })
+}
+
+// ---------------------------------------------------------------- live progress (v3.9)
+
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(700);
+const PROGRESS_MAX: Duration = Duration::from_secs(40 * 60);
+
+/// While a turn is in flight, poll the pane and push the partial reply as `turn_progress`
+/// so the UI can render it as it is being written. Stops by itself once the turn is no
+/// longer `in_flight` (hook / fallback / watchdog / stop all end it).
+pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
+    let mut pollers = app.progress_pollers.lock().await;
+    if let Some(h) = pollers.remove(run_id) {
+        h.abort();
+    }
+    let app2 = app.clone();
+    let run_id = run_id.to_string();
+    let bot_id = bot_id.to_string();
+    let turn_id = turn_id.to_string();
+    let key = run_id.clone();
+    let h = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
+        let mut last = String::new();
+        loop {
+            tokio::time::sleep(PROGRESS_INTERVAL).await;
+            if started.elapsed() > PROGRESS_MAX {
+                break;
+            }
+            let still = matches!(db::in_flight_turn(&app2.db, &run_id).await, Ok(Some(t)) if t.id == turn_id);
+            if !still {
+                break;
+            }
+            let Ok(Some(run)) = db::run(&app2.db, &run_id).await else { break };
+            let Some(pane) = run.pane_id.clone() else { continue };
+            let Ok(client) = client_for_bot(&app2, &bot_id).await else { continue };
+            let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
+            let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
+            if live != last {
+                last = live.clone();
+                app2.emit(
+                    "turn_progress",
+                    json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "revision": read.revision}),
+                )
+                .await;
+            }
+        }
+        app2.progress_pollers.lock().await.remove(&run_id);
+    });
+    pollers.insert(key, h);
+}
+
+/// Everything the agent has printed since the prompt echo, cleaned of TUI chrome, with the
+/// reply markers (`⏺ ` / `• `) dropped so it reads like the final message will.
+fn live_reply(kind: &str, text: &str) -> Option<String> {
+    let cleaned = clean_screen(kind, text)?;
+    let out: Vec<String> = cleaned
+        .lines()
+        .filter(|l| !matches!(l.trim(), "⏺" | "•"))
+        .map(|l| {
+            let t = l.trim_start();
+            t.strip_prefix("⏺ ").or_else(|| t.strip_prefix("• ")).unwrap_or(l).to_string()
+        })
+        .collect();
+    let joined = out.join("\n").trim().to_string();
+    if joined.is_empty() { None } else { Some(joined) }
 }
 
 // ---------------------------------------------------------------- prompt-stall watchdog
