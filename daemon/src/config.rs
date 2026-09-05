@@ -48,7 +48,8 @@ pub struct BotCfg {
     pub id: Option<String>,
     pub name: String,
     pub kind: String,
-    /// Model to run under, injected as claude `--model <m>` / codex `-m <m>`. None = the CLI's own default.
+    /// Model to run under, injected as claude `--model <m>` / codex `-m <m>` / grok `-m <m>`.
+    /// None = the CLI's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default)]
@@ -60,7 +61,8 @@ pub struct BotCfg {
     #[serde(default = "default_true")]
     pub inject_hooks: bool,
     /// Grant the agent all permissions on start: claude `--dangerously-skip-permissions`,
-    /// codex `--yolo` (alias of `--dangerously-bypass-approvals-and-sandbox`). Defaults to true.
+    /// codex `--yolo` (alias of `--dangerously-bypass-approvals-and-sandbox`),
+    /// grok `--always-approve` (= `--permission-mode bypassPermissions`). Defaults to true.
     #[serde(default = "default_true")]
     pub auto_approve: bool,
     /// Name of an `[[identities]]` entry, or none.
@@ -72,12 +74,12 @@ pub struct BotCfg {
 }
 
 /// A named set of env vars + args, applied to a bot at start time. Lets several bots of the
-/// same kind run under different accounts (e.g. claude's `CLAUDE_CONFIG_DIR`).
+/// same kind run under different accounts (e.g. claude's `CLAUDE_CONFIG_DIR`, grok's `GROK_HOME`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityCfg {
     /// Unique id, `[a-z][a-z0-9_-]{0,31}`.
     pub name: String,
-    /// `claude` | `codex`; must match the bot it is applied to.
+    /// `claude` | `codex` | `grok`; must match the bot it is applied to.
     pub kind: String,
     /// Extra pane env. `$HOME` / `${HOME}` / a leading `~` expand to the *host's* home.
     #[serde(default)]
@@ -139,6 +141,19 @@ pub struct ConfigFile {
 }
 
 pub const BOT_NAME_RE: &str = "[a-z][a-z0-9_-]{0,31}";
+
+/// Supported agent kinds (SPEC §2, §12). Also the herdr `agent.start` `kind` value.
+pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
+
+pub fn valid_kind(kind: &str) -> bool {
+    KINDS.contains(&kind)
+}
+
+/// Human-readable list for error messages: `claude, codex or grok`.
+pub fn kinds_list() -> String {
+    let (last, rest) = KINDS.split_last().unwrap();
+    format!("{} or {last}", rest.join(", "))
+}
 
 pub fn valid_bot_name(name: &str) -> bool {
     let mut it = name.chars();

@@ -6,7 +6,7 @@ import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
-import { ModelField } from './BotSettingsPanel'
+import { AutoApproveFlags, ModelField, modelHint } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -274,20 +274,12 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         >
           <option value="claude">claude</option>
           <option value="codex">codex</option>
+          <option value="grok">grok</option>
         </select>
       </label>
-      <ModelField
-        kind={kind}
-        value={model}
-        onChange={setModel}
-        hint={
-          kind === 'claude'
-            ? 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
-            : '留「（預設）」則不帶 -m，由 codex 自行決定'
-        }
-      />
+      <ModelField kind={kind} value={model} onChange={setModel} hint={modelHint(kind)} />
       <label className="field">
-        <span>身份（例如 cc1 = 另一個 CLAUDE_CONFIG_DIR；在下方「身份」管理）</span>
+        <span>身份（例如 cc1 = 另一個 CLAUDE_CONFIG_DIR / GROK_HOME；在下方「身份」管理）</span>
         <select value={identity} onChange={(e) => setIdentity(e.target.value)}>
           <option value="">（預設）</option>
           {identities
@@ -307,7 +299,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
       <label className="field row">
         <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
         <span>
-          自動核准全部權限（claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code>）
+          自動核准全部權限（<AutoApproveFlags />）
         </span>
       </label>
       <div className="form-actions">

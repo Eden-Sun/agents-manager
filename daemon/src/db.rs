@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex')),
+  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
   model TEXT,
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
@@ -150,7 +150,61 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
         }
     }
+    migrate_bots_kind_check(&pool).await?;
     Ok(pool)
+}
+
+/// SPEC §12: `bots.kind` gained `grok`. SQLite cannot edit a CHECK constraint, so a database
+/// created with the two-value CHECK is rebuilt once (same rename dance as `projects` above).
+/// `runs` / `conversations` reference `bots(id)` by name, so with `legacy_alter_table=ON` the
+/// rename does not rewrite their FKs and the ids stay valid.
+async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    let ddl: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='bots'")
+        .fetch_optional(&mut *conn)
+        .await?;
+    let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bots_new'")
+        .fetch_one(&mut *conn)
+        .await?;
+    let needs_rebuild = ddl.as_deref().map(|d| d.contains("kind IN ('claude','codex'))")).unwrap_or(false);
+    if !needs_rebuild && stale == 0 {
+        return Ok(());
+    }
+    tracing::info!("migrating bots.kind CHECK -> ('claude','codex','grok')");
+    sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
+    sqlx::query("PRAGMA legacy_alter_table=ON").execute(&mut *conn).await?;
+    let steps: Vec<&str> = if needs_rebuild {
+        vec![
+            "DROP TABLE IF EXISTS bots_new",
+            "CREATE TABLE bots_new (
+               id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+               name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
+               model TEXT,
+               args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
+               inject_hooks INTEGER NOT NULL DEFAULT 1,
+               auto_approve INTEGER NOT NULL DEFAULT 1,
+               identity TEXT,
+               env_json TEXT NOT NULL DEFAULT '{}',
+               hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
+            "INSERT INTO bots_new (id, project_id, name, kind, model, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at)
+               SELECT id, project_id, name, kind, model, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at FROM bots",
+            "DROP TABLE bots",
+            "ALTER TABLE bots_new RENAME TO bots",
+            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL",
+        ]
+    } else {
+        // A previous run died between DROP and RENAME; finish the job.
+        vec![
+            "ALTER TABLE bots_new RENAME TO bots",
+            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL",
+        ]
+    };
+    for stmt in steps {
+        sqlx::query(stmt).execute(&mut *conn).await.with_context(|| format!("migrate bots: {stmt}"))?;
+    }
+    sqlx::query("PRAGMA legacy_alter_table=OFF").execute(&mut *conn).await?;
+    sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
+    Ok(())
 }
 
 pub fn now() -> String {
@@ -179,7 +233,7 @@ pub struct Bot {
     pub project_id: String,
     pub name: String,
     pub kind: String,
-    /// claude `--model <m>` / codex `-m <m>`; NULL = the CLI's own default.
+    /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; NULL = the CLI's own default.
     pub model: Option<String>,
     pub args_json: String,
     pub autostart: i64,
