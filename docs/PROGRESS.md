@@ -359,6 +359,65 @@ R1 (host up) / R2 (remote project+bot, trust prompt) / R3 (hook reply): PASS
 
 ---
 
+## 身份 identities（per-bot env / 多帳號）
+
+日期：2026-09-06
+
+需求：使用者的 `cc0` / `cc1` 是 zsh alias，差別只在 `CLAUDE_CONFIG_DIR`。實作成具名的
+`[[identities]]`（env + args），bot 以 `identity = "cc1"` 綁定，另可有自己的 `env`。
+
+實作：`config.rs`（`IdentityCfg`、`BotCfg.identity` / `BotCfg.env`、`expand_home`）、
+`db.rs`（`bots.identity` / `bots.env_json`，additive migration）、`projection.rs`、
+`lifecycle.rs`（`pane_env` 合併、`identity_args`）、`api.rs`（`/api/identities`、
+`GET /api/state` 的 `identities[]` 與 bot 的 `identity` / `env`）、`docs/API.md`。
+
+合併順序：pane env = daemon 注入 ∪ identity.env ∪ bot.env（後者覆蓋）；
+args = daemon 注入 ++ identity.args ++ bot.args。env 值裡的 `$HOME` / `${HOME}` /
+開頭的 `~` 以**該 host 的 home** 展開（本機用 `dirs::home_dir`，遠端用 `HostConn::home()`，
+由 `ssh 'printf %s "$HOME"'` 取得並快取）。
+
+驗收：
+
+```
+$ curl -sX POST … -d '{"name":"cc0","kind":"claude","env":{},"args":[]}' …/api/identities
+{"name":"cc0"}
+$ curl -sX POST … -d '{"name":"cc1","kind":"claude","env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]}' …/api/identities
+{"name":"cc1"}
+$ curl -sX POST … -d '{"name":"am-cc1","kind":"claude","identity":"cc1","env":{"AM_IDENTITY_PROBE":"yes"}}' …/projects/<pid>/bots
+$ curl -sX POST …/api/bots/<bid>/start          # lamp=blocked（新 config dir 尚未信任該目錄）
+$ for p in $(pgrep -f "claude --dangerously-skip-permissions"); do ps -E -o command= -p $p | tr ' ' '\n' \
+    | grep -E '^(CLAUDE_CONFIG_DIR|AM_BOT_ID|AM_IDENTITY_PROBE)='; done
+AM_BOT_ID=01M1S7P95A658P4VN2S0Z2AHAX
+AM_IDENTITY_PROBE=yes
+CLAUDE_CONFIG_DIR=/Users/m1pro/.claude-ccompany        <- ✅ $HOME 已展開
+$ curl -sX POST … -d '{"keys":["down","enter"]}' …/keys   → lamp=idle
+```
+
+錯誤情境：
+
+```
+identity kind 不符      400 {"error":"bad_request","message":"identity `cc1` is for claude but this bot is codex"}
+identity 不存在         404 {"error":"not_found","what":"identity"}
+identity 重名           409 {"error":"conflict","reason":"identity name already in use","name":"cc1"}
+DELETE 仍被 bot 使用    409 {"error":"conflict","reason":"identity still used by bots","bot_id":"…"}
+PATCH {"identity":null} 200 → 解除綁定（bot.identity = null）
+```
+
+使用者的 `~/.config/agents-manager/config.toml` 已補上 `cc0` 與 `cc1` 兩個 identity。
+驗收用的 `am-cc1` probe bot 測完已刪除。
+
+### identities 偏離規格 / 設計選擇
+
+23. **identities 只存 TOML，不進 SQLite**（依需求）；bot 端存 `bots.identity` 與
+    `bots.env_json` 兩欄，`GET /api/state` 的 `identities[]` 直接由 TOML 讀出。
+24. **`PATCH /bots/:id` 的 `identity` 用 double-option**：欄位不存在 = 不動、
+    `null` 或 `""` = 解除綁定、字串 = 綁定。`env` 傳整個物件即為取代（不做 merge）。
+25. **`$HOME` 展開只認完整識別字**：`$HOMEBREW_PREFIX` 不會被誤展開；`~` 只在字串開頭展開。
+26. **啟動時若取不到遠端 home**（ssh 暫時失敗），env 值中的 `$HOME` 會原樣保留並記一行 warn，
+    而不是讓整個 start 失敗。
+
+---
+
 ## 偏離規格（與理由）
 
 1. **新增 bot 設定欄位 `inject_hooks`（TOML + `bots.inject_hooks` 欄）**。SPEC 沒有這個欄位，

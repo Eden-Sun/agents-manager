@@ -60,6 +60,28 @@ pub struct BotCfg {
     /// codex `--yolo` (alias of `--dangerously-bypass-approvals-and-sandbox`). Defaults to true.
     #[serde(default = "default_true")]
     pub auto_approve: bool,
+    /// Name of an `[[identities]]` entry, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    /// Per-bot pane env; overrides the identity's.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// A named set of env vars + args, applied to a bot at start time. Lets several bots of the
+/// same kind run under different accounts (e.g. claude's `CLAUDE_CONFIG_DIR`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityCfg {
+    /// Unique id, `[a-z][a-z0-9_-]{0,31}`.
+    pub name: String,
+    /// `claude` | `codex`; must match the bot it is applied to.
+    pub kind: String,
+    /// Extra pane env. `$HOME` / `${HOME}` / a leading `~` expand to the *host's* home.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Extra CLI args, inserted between the daemon's injected args and the bot's own.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// SPEC §11.2 — a remote machine reached over SSH, running its own herdr.
@@ -106,6 +128,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<IdentityCfg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostCfg>,
     #[serde(default)]
     pub projects: Vec<ProjectCfg>,
@@ -123,6 +147,44 @@ pub fn valid_bot_name(name: &str) -> bool {
         return false;
     }
     it.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Identity names use the same shape as bot names.
+pub fn valid_identity_name(name: &str) -> bool {
+    valid_bot_name(name)
+}
+
+/// Expand `$HOME`, `${HOME}` and a leading `~` against a specific host's home directory.
+pub fn expand_home(value: &str, home: &str) -> String {
+    let mut out = if value == "~" {
+        home.to_string()
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else {
+        value.to_string()
+    };
+    out = out.replace("${HOME}", home);
+    // Replace `$HOME` only when it is not part of a longer identifier ($HOMEBREW…).
+    let mut res = String::with_capacity(out.len());
+    let bytes: Vec<char> = out.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '$' && bytes[i + 1..].starts_with(&['H', 'O', 'M', 'E']) {
+            let after = bytes.get(i + 5);
+            let boundary = match after {
+                None => true,
+                Some(c) => !(c.is_ascii_alphanumeric() || *c == '_'),
+            };
+            if boundary {
+                res.push_str(home);
+                i += 5;
+                continue;
+            }
+        }
+        res.push(bytes[i]);
+        i += 1;
+    }
+    res
 }
 
 /// Host names use the same shape as bot names; `local` is reserved for this machine.

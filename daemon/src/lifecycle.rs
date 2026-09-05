@@ -283,15 +283,51 @@ fn shell_join(parts: &[String]) -> String {
         .join(" ")
 }
 
-fn pane_env(bot_id: &str, run_id: &str, hook_port: u16) -> Value {
-    json!({
-        "AM_BOT_ID": bot_id,
-        "AM_RUN_ID": run_id,   // diagnostics only; hook identity is per-bot
-        // On a remote host this is the reverse-forwarded port, not the daemon's own.
-        "AM_PORT": hook_port.to_string(),
-        "CLAUDE_CODE_CHILD_SESSION": "",
-        "CLAUDECODE": "",
-    })
+/// Pane env = daemon-injected ∪ identity.env ∪ bot.env (later wins). `$HOME` / `~` in the
+/// identity's and bot's values expand against *that host's* home.
+async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_port: u16) -> Value {
+    let mut env = serde_json::Map::new();
+    env.insert("AM_BOT_ID".into(), json!(bot.id));
+    // diagnostics only; hook identity is per-bot
+    env.insert("AM_RUN_ID".into(), json!(run_id));
+    // On a remote host this is the reverse-forwarded port, not the daemon's own.
+    env.insert("AM_PORT".into(), json!(hook_port.to_string()));
+    env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
+    env.insert("CLAUDECODE".into(), json!(""));
+
+    let home = match app.hosts.get(host).await {
+        Some(c) => c.home().await.unwrap_or_else(|e| {
+            tracing::warn!(host, error = %e, "could not resolve the host's home; leaving $HOME unexpanded");
+            "$HOME".to_string()
+        }),
+        None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+    };
+
+    let cfg = app.cfg.get().await;
+    if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(id) = cfg.identities.iter().find(|i| i.name == idn) {
+            for (k, v) in &id.env {
+                env.insert(k.clone(), json!(crate::config::expand_home(v, &home)));
+            }
+        }
+    }
+    for (k, v) in bot.env() {
+        env.insert(k, json!(crate::config::expand_home(&v, &home)));
+    }
+    Value::Object(env)
+}
+
+/// Extra CLI args contributed by the bot's identity.
+async fn identity_args(app: &Arc<App>, bot: &db::Bot) -> Vec<String> {
+    let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
+    app.cfg
+        .get()
+        .await
+        .identities
+        .iter()
+        .find(|i| i.name == idn)
+        .map(|i| i.args.clone())
+        .unwrap_or_default()
 }
 
 /// Resolve the herdr client for a bot through its project's host.
@@ -369,7 +405,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         Some(c) => c.hook_port(app.port),
         None => app.port,
     };
-    let env = pane_env(&bot.id, run_id, hook_port);
+    let env = pane_env(app, bot, &host, run_id, hook_port).await;
 
     // 2. workspace
     let mut fresh_root: Option<String> = None;
@@ -415,6 +451,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .map_err(up)?;
     let injected = injected_args(app, bot, project).await.map_err(up)?;
     let mut args = injected;
+    args.extend(identity_args(app, bot).await);
     args.extend(bot.args());
 
     // 5. agent.start (async on the socket)
