@@ -203,6 +203,34 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 return Ok(());
             }
 
+            // §4.3: a hook that arrives after the terminal fallback already claimed the
+            // turn must not overwrite it. Stamp the native ids onto that turn (so a retry
+            // dedups) and drop the payload.
+            if let Some(r) = &run {
+                // Only a *recent* fallback counts as "this hook's turn"; timestamps are
+                // fixed-width RFC3339 UTC so lexicographic comparison is chronological.
+                let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let late = sqlx::query_as::<_, db::Turn>(
+                    "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL
+                     AND completed_at > ? ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(&r.id)
+                .bind(&cutoff)
+                .fetch_optional(&app.db)
+                .await?;
+                if let Some(t) = late {
+                    sqlx::query("UPDATE turns SET native_session_id=?, native_turn_id=? WHERE id=?")
+                        .bind(&session_id)
+                        .bind(&turn_id)
+                        .bind(&t.id)
+                        .execute(&app.db)
+                        .await?;
+                    tracing::info!(turn = %t.id, "late hook dropped; turn already completed via terminal fallback");
+                    return Ok(());
+                }
+            }
+
             // 5. external turn
             let tid = db::ulid();
             sqlx::query(
