@@ -87,8 +87,49 @@ async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration
 }
 
 /// PATH prefix so `gh` / `git` from Homebrew are found even from a launchd daemon.
-const PATH_FIX: &str = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"\n";
+/// Also kill color forcing: some agent / IDE shells export `CLICOLOR_FORCE=1`, and
+/// `gh --json` then pretty-prints with ANSI — which breaks `serde_json`.
+const PATH_FIX: &str = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"\n\
+export NO_COLOR=1\nunset CLICOLOR_FORCE FORCE_COLOR CLICOLOR 2>/dev/null\n";
 
+/// Strip CSI / OSC ANSI sequences so a colored `gh` dump is still parseable.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                while let Some(x) = chars.next() {
+                    if ('\x40'..='\x7e').contains(&x) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(x) = chars.next() {
+                    if x == '\u{7}' {
+                        break;
+                    }
+                    if x == '\u{1b}' && matches!(chars.peek(), Some('\\')) {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                let _ = chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
 // ---------------------------------------------------------------- origin detection
 
 pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInfo> {
@@ -224,7 +265,9 @@ pub async fn list_issues(
         cmd.push_str(&format!(" --search {}", sh_quote(q)));
     }
     let out = run_on_host(app, &p.host, &cmd, GH_TIMEOUT).await.map_err(gh_error)?;
-    let arr: Vec<Value> = serde_json::from_str(out.trim()).map_err(|e| gh_error(format!("{e}: {}", out.trim())))?;
+    let cleaned = strip_ansi(&out);
+    let arr: Vec<Value> =
+        serde_json::from_str(cleaned.trim()).map_err(|e| gh_error(format!("{e}: {}", cleaned.trim())))?;
     let v = json!({
         "project_id": p.id,
         "repo": gh.slug(),
@@ -244,8 +287,9 @@ pub async fn get_issue(app: &Arc<App>, project_id: &str, number: u64) -> Result<
         sh_quote(&gh.slug())
     );
     let out = run_on_host(app, &p.host, &cmd, GH_TIMEOUT).await.map_err(gh_error)?;
-    let v: Value = serde_json::from_str(out.trim()).map_err(|e| gh_error(format!("{e}: {}", out.trim())))?;
-    let mut issue = issue_summary(&v);
+    let cleaned = strip_ansi(&out);
+    let v: Value =
+        serde_json::from_str(cleaned.trim()).map_err(|e| gh_error(format!("{e}: {}", cleaned.trim())))?;    let mut issue = issue_summary(&v);
     if let Some(o) = issue.as_object_mut() {
         o.remove("body_excerpt");
         o.insert("body".into(), json!(v.get("body").and_then(|b| b.as_str()).unwrap_or("")));
@@ -295,5 +339,13 @@ mod tests {
         assert_eq!(s["labels"], json!(["bug"]));
         assert_eq!(s["author"], "me");
         assert_eq!(s["body_excerpt"], "hello world");
+    }
+
+    #[test]
+    fn strip_ansi_makes_colored_json_parseable() {
+        let colored = "\u{1b}[1;37m[\u{1b}[m\n  \u{1b}[1;37m{\u{1b}[m\n    \u{1b}[1;34m\"number\"\u{1b}[m\u{1b}[1;37m:\u{1b}[m 21\n  \u{1b}[1;37m}\u{1b}[m\n\u{1b}[1;37m]\u{1b}[m";
+        let cleaned = strip_ansi(colored);
+        let v: Value = serde_json::from_str(&cleaned).expect(&cleaned);
+        assert_eq!(v[0]["number"], 21);
     }
 }
