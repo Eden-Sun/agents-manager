@@ -6,12 +6,17 @@
 
 | # | 嚴重度 | 位置 | 問題 | 建議 | 狀態 |
 |---|---|---|---|---|---|
-| A1 | 高 | `reconcile.rs:37` | `client.agent_list().await.unwrap_or_default()`：herdr RPC 暫時失敗時 `by_name` 為空，`(Some(run), None)` 分支會把該 host **所有** active Run 標成 `exited`（鎖內的 `agent_get` 再查一次只在 RPC 恢復時有救）。下一次對帳雖會重新收養，但中間 in-flight Turn 已被 `fail_in_flight`。 | `agent_list` 失敗直接 `return Err`，讓呼叫端退避重試，不要以空清單對帳。 | 待修 |
-| A2 | 中 | `lifecycle.rs:980 extract_reply` | 取整個緩衝區**最後一個** `⏺` 行。若本回合沒有產生標記（只有工具輸出），會把上一回合的回覆誤配給本回合；`last_read_tail_hash` 只在 fallback 時前進，hook 完成的回合不會推進游標，所以這條路徑實際會踩到。 | 先找最後一行 prompt 回音（`❯ `/`› `），只在其後搜尋標記；找不到再走 `clean_screen`。 | 待修 |
-| A3 | 中 | `hookrecv.rs:35` | `receive` 只查 `db::bot` 不看 `deleted_at`：已刪除 bot 的殘存 agent 仍能打 hook，`process_locked` 會為它建立 external Turn 與訊息。 | `deleted_at.is_some()` → 401/410，並在 `process_locked` 開頭同樣防守（spool 重放路徑）。 | 待修 |
-| A4 | 中 | `lifecycle.rs:147 REMOTE_HOOK_SH` | Claude stdin 為空或被 `head -c` 截斷時，`printf '…"payload":%s…'` 產生非法 JSON → daemon 400 → 寫入 spool → 每次對帳重放都 `unparseable`，永遠清不掉。`truncated` 也永遠是 false。 | `PAYLOAD=${PAYLOAD:-null}`；若 `printf '%s' "$PAYLOAD" \| head -c1` 不是 `{` 就包成 `{"raw":"…"}`（用 `sed` 逃逸引號）或直接 `null`；重放端遇到不可解析行改為丟棄並 log 一次。 | 待修 |
-| A5 | 低 | `api.rs:80 origin_is_local` | `starts_with("http://localhost")` 會放行 `http://localhost.attacker.com`；`Origin: null` 也放行。因為沒有 CORS 標頭，瀏覽器讀不到回應，實際風險低，但 `/ws` 沒有 CORS 保護（只靠 token）。 | 解析 Origin 的 host:port，與 `listen` 精確比對；移除 `null`（file:// 不是支援情境）。 | 待修 |
-| A6 | 低 | `events.rs:75` | 本機 global 訂閱失敗分支把 `connected=false` 但**沒有** `emit_daemon_status`，UI 燈號不會變灰，直到下一次成功才更新。 | Err 分支也呼叫 `emit_daemon_status`。 | 待修 |
+| A1 | 高 | `reconcile.rs:37` | `client.agent_list().await.unwrap_or_default()`：herdr RPC 暫時失敗時 `by_name` 為空，`(Some(run), None)` 分支會把該 host **所有** active Run 標成 `exited`（鎖內的 `agent_get` 再查一次只在 RPC 恢復時有救）。下一次對帳雖會重新收養，但中間 in-flight Turn 已被 `fail_in_flight`。 | `agent_list` 失敗直接 `return Err`，讓呼叫端退避重試，不要以空清單對帳。 | 已修（`69165d3`） |
+| A2 | 中 | `lifecycle.rs:980 extract_reply` | 取整個緩衝區**最後一個** `⏺` 行。若本回合沒有產生標記（只有工具輸出），會把上一回合的回覆誤配給本回合；`last_read_tail_hash` 只在 fallback 時前進，hook 完成的回合不會推進游標，所以這條路徑實際會踩到。 | 先找最後一行 prompt 回音（`❯ `/`› `），只在其後搜尋標記；找不到再走 `clean_screen`。 | 已修（`69165d3`，含單元測試） |
+| A3 | 中 | `hookrecv.rs:35` | `receive` 只查 `db::bot` 不看 `deleted_at`：已刪除 bot 的殘存 agent 仍能打 hook，`process_locked` 會為它建立 external Turn 與訊息。 | `deleted_at.is_some()` → 401/410，並在 `process_locked` 開頭同樣防守（spool 重放路徑）。 | 已修（`69165d3`，回 410） |
+| A4 | 中 | `lifecycle.rs:147 REMOTE_HOOK_SH` | Claude stdin 為空或被 `head -c` 截斷時，`printf '…"payload":%s…'` 產生非法 JSON → daemon 400 → 寫入 spool → 每次對帳重放都 `unparseable`，永遠清不掉。`truncated` 也永遠是 false。 | `PAYLOAD=${PAYLOAD:-null}`；若 `printf '%s' "$PAYLOAD" \| head -c1` 不是 `{` 就包成 `{"raw":"…"}`（用 `sed` 逃逸引號）或直接 `null`；重放端遇到不可解析行改為丟棄並 log 一次。 | 已修（`69165d3`） |
+| A5 | 低 | `api.rs:80 origin_is_local` | `starts_with("http://localhost")` 會放行 `http://localhost.attacker.com`；`Origin: null` 也放行。因為沒有 CORS 標頭，瀏覽器讀不到回應，實際風險低，但 `/ws` 沒有 CORS 保護（只靠 token）。 | 解析 Origin 的 host:port，與 `listen` 精確比對；移除 `null`（file:// 不是支援情境）。 | 已修（`69165d3`，port 不鎖定，見下註） |
+| A6 | 低 | `events.rs:75` | 本機 global 訂閱失敗分支把 `connected=false` 但**沒有** `emit_daemon_status`，UI 燈號不會變灰，直到下一次成功才更新。 | Err 分支也呼叫 `emit_daemon_status`。 | 已修（`69165d3`） |
+
+> A5 註：Origin 只精確比對 **host**（`127.0.0.1` / `localhost` / `[::1]`），不比對 port。
+> 開發時 UI 由 Vite（另一個 port）提供，其 proxy 只改寫 `Host`、Origin 原樣轉送
+> （`web/vite.config.ts`），鎖定 port 會讓 dev server 的每個請求都被擋掉。
+> 真正的漏洞（`http://localhost.attacker.com`、`Origin: null`）已封掉，跨來源讀取仍需 UI token。
 
 ## B. 穩健性 / 設計（排入下一輪）
 

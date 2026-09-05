@@ -613,3 +613,16 @@ Not logged in · Run /login
 31. **watchdog 訊息改為中性敘述 + 原樣引用畫面行**（使用者指出 ssh 主機其實已登入）。
     比對關鍵字 `Not logged in` / `/login` / `unlock-keychain` / `usage limit` / `limit`（不分大小寫），
     無匹配行時只說「請查看終端分頁」。
+
+### Codebase review A 節修復（2026-09-06，commit `69165d3`）
+
+`docs/REVIEW.md` A1–A6 全數修復並驗證：A1 對帳不再以空 `agent.list` 誤殺 active Run；
+A2 `extract_reply` 只看最後一次 prompt 回音之後的畫面（新增單元測試，`cargo test` 6 passed）；
+A3 已刪除 bot 的 hook 回 `410`（實測：刪掉的 `amtmp` 打 hook → 410，訊息數未增加；
+存活 bot 仍 200）；A4 遠端 hook 腳本對空 / 非 JSON payload 產生合法 JSON（`sh` 實測三種輸入
+皆可 `json.loads`），4xx 不再進 spool，遠端 `m4ptmp2` 實測 prompt → `source=hook`、spool 0 行；
+A5 Origin 精確比對 host（`localhost.attacker.com`、`null`、`https://evil.com` → 403；
+`localhost:5173`、`127.0.0.1:7788`、`[::1]:5173` → 200）；A6 本機訂閱失敗即推 `daemon_status`。
+
+**A5 偏離建議**：不鎖定 port（Vite dev server 的 Origin 會被 proxy 原樣轉送，鎖 port 會直接
+擋掉整個開發環境）；理由已寫在 `docs/REVIEW.md` A 節下方的註。
