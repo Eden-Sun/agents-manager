@@ -267,18 +267,23 @@ button:disabled {
   align-items: center;
   gap: 6px;
   min-height: 32px;
-  padding: 4px 10px 4px 13px;
+  padding: 4px 8px 4px 11px;
   border-left: 3px solid transparent;
   cursor: pointer;
+  overflow: hidden;
 }
 
-.project-head:hover {
+.project-head:hover:not(.selected) {
   background: var(--bg-hover);
 }
 
 .project-head.selected {
   background: var(--bg-active);
   border-left-color: var(--accent);
+}
+
+.project-head.selected:hover {
+  background: color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%);
 }
 
 .project-label {
@@ -321,6 +326,17 @@ button:disabled {
 }
 .icon-btn.add:hover:not(:disabled),
 .icon-btn.add[aria-expanded='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Keep ＋/✕ readable on top of the row hover / selected wash. */
+.project-head .icon-btn:hover:not(:disabled):not(.add) {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+.project-head .icon-btn.add:hover:not(:disabled),
+.project-head .icon-btn.add[aria-expanded='true'] {
   color: var(--accent);
   background: var(--accent-soft);
 }
@@ -1864,11 +1880,12 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex: 0 1 auto;
   min-width: 0;
-  max-width: 60%;
+  max-width: 58%;
   border: 0;
   background: transparent;
-  padding: 0 4px 0 0;
+  padding: 0 2px 0 0;
   border-radius: 4px;
   color: inherit;
   text-align: left;
@@ -1877,6 +1894,7 @@ button:disabled {
 
 .project-head:hover .project-label,
 .project-label-btn:hover .project-label,
+.project-head.selected .project-label,
 .project-label-btn.selected .project-label {
   color: var(--accent);
 }
@@ -1884,6 +1902,13 @@ button:disabled {
 .project-head.selected .project-group-icon,
 .project-label-btn.selected .project-group-icon {
   color: var(--accent);
+}
+
+.project-head > .host-badge {
+  flex: none;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .project-group-icon,
@@ -2090,6 +2115,7 @@ button:disabled {
 
 /* ---- option rows (kind / effort / identity / project) ---- */
 .opt-filter {
+  width: 100%;
   font-size: 12px;
   padding: 4px 8px;
 }
@@ -2097,42 +2123,64 @@ button:disabled {
 .opt-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  align-items: flex-start;
+  gap: 5px;
 }
 .opt-group .opt {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  max-width: 100%;
+  min-width: 0;
   border: 1px solid var(--border-strong);
   background: var(--bg-sunken);
   border-radius: 6px;
-  padding: 3px 10px;
+  padding: 3px 9px;
   font-size: 12px;
+  line-height: 1.35;
   color: var(--text);
   cursor: pointer;
 }
 .opt-group .opt:hover:not(:disabled):not(.on) {
   background: var(--bg-hover);
   border-color: var(--border-strong);
+  color: var(--text);
 }
 .opt-group .opt.on {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-text);
 }
+.opt-group .opt:disabled {
+  opacity: 1;
+  color: var(--text-faint);
+  background: color-mix(in srgb, var(--bg-sunken) 72%, var(--border) 28%);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.opt-group .opt.on:disabled {
+  background: color-mix(in srgb, var(--accent) 42%, var(--bg-sunken));
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: color-mix(in srgb, var(--accent-text) 72%, var(--text-faint));
+}
 .opt-group .opt .opt-label {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .opt-group .opt .host-badge {
+  flex: none;
   font-size: 9.5px;
   padding: 0 4px;
   line-height: 1.4;
 }
+.opt-group .opt:disabled .host-badge.down {
+  opacity: 0.9;
+}
 .opt-group .opt.on .host-badge:not(.down) {
-  background: color-mix(in srgb, var(--accent-text) 16%, transparent);
-  border-color: color-mix(in srgb, var(--accent-text) 40%, transparent);
+  background: color-mix(in srgb, var(--accent-text) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent-text) 42%, transparent);
   color: var(--accent-text);
 }

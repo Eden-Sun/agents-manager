@@ -345,7 +345,10 @@ function ProjectTitle({ projectId, label }: { projectId: string; label: string }
       className={`project-label-btn${selected ? ' selected' : ''}`}
       title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）`}
       aria-pressed={selected}
-      onClick={() => selectProject(projectId)}
+      onClick={(e) => {
+        e.stopPropagation()
+        selectProject(projectId)
+      }}
     >
       <span className="project-group-icon" aria-hidden="true">
         ⌗
