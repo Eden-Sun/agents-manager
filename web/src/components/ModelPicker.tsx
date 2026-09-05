@@ -88,7 +88,7 @@ export function ApiModelFields({
             title={defaultModel ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）` : '不帶 -m'}
             onClick={() => pickModel(null)}
           >
-            （預設）
+            使用 CLI 預設
           </button>
           {models.map((m) => (
             <button

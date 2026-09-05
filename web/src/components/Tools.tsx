@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
-import { missingTools, runningBotsOnHost, toolsOfHost, useStore } from '../store/store'
+import { missingTools, projectHostName, runningBotsOnHost, toolsOfHost, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
 /**
@@ -58,7 +58,7 @@ export function InstallToolButton({ host, kind, small }: { host: string; kind: B
     <span className="install" ref={wrap} onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        className={`${small ? 'mini-btn' : 'btn'} primary install-btn`}
+        className={`${small ? 'mini-btn' : 'btn'} install-btn`}
         disabled={busy}
         aria-haspopup={candidates.length > 1 ? 'listbox' : undefined}
         aria-expanded={open}
@@ -105,29 +105,97 @@ export function ToolBadges({ host, tools }: { host: string; tools: ToolMap }) {
   )
 }
 
-/** Banner under the header: one line per host that is missing a CLI; collapsible. */
-export function ToolsHint() {
-  const missing = useStore(useShallow((s) => missingTools(s).map((m) => `${m.host}:${m.kind}`)))
+function summarizeMissing(byHost: Map<string, BotKind[]>): string {
+  const entries = [...byHost.entries()]
+  if (entries.length === 1 && entries[0][1].length === 1) {
+    const [host, kinds] = entries[0]
+    const kindLabel = kinds[0] === 'claude' ? 'Claude' : kinds[0] === 'codex' ? 'Codex' : 'Grok'
+    return `${hostLabel(host)} 缺少 ${kindLabel} CLI`
+  }
+  const hostCount = entries.length
+  const cliCount = entries.reduce((n, [, ks]) => n + ks.length, 0)
+  return `${hostCount} 台主機缺少 ${cliCount} 個 CLI`
+}
+
+/** Missing tools that affect the current bot or group members. */
+export function relevantMissing(
+  all: { host: string; kind: BotKind }[],
+  focusHost: string | null | undefined,
+  focusKinds: BotKind[] | null | undefined,
+): { host: string; kind: BotKind }[] {
+  if (!focusHost || !focusKinds || focusKinds.length === 0) return []
+  const want = new Set(focusKinds)
+  return all.filter((m) => m.host === focusHost && want.has(m.kind))
+}
+
+/** Compact amber icon + count for the main header when the full bar is not shown. */
+export function ToolsHintIcon() {
+  const missing = useStore(useShallow((s) => missingTools(s)))
+  const dismissed = useStore((s) => s.toolHintDismissed)
+  const selectedBotId = useStore((s) => s.selectedBotId)
+  const selectedProjectId = useStore((s) => s.selectedProjectId)
+  const bots = useStore((s) => s.bots)
+
+  const focus = useMemo(() => {
+    const state = useStore.getState()
+    if (selectedProjectId) {
+      const host = projectHostName(state, selectedProjectId)
+      const kinds = bots.filter((b) => b.project_id === selectedProjectId).map((b) => b.kind)
+      return { host, kinds: [...new Set(kinds)] as BotKind[] }
+    }
+    if (selectedBotId) {
+      const bot = bots.find((b) => b.id === selectedBotId)
+      if (!bot) return null
+      return { host: projectHostName(state, bot.project_id), kinds: [bot.kind] as BotKind[] }
+    }
+    return null
+  }, [selectedBotId, selectedProjectId, bots])
+
+  const relevant = relevantMissing(missing, focus?.host, focus?.kinds)
+  if (dismissed || missing.length === 0 || relevant.length > 0) return null
+
+  const title = summarizeMissing(
+    missing.reduce((map, m) => {
+      map.set(m.host, [...(map.get(m.host) ?? []), m.kind])
+      return map
+    }, new Map<string, BotKind[]>()),
+  )
+
+  return (
+    <span className="tools-hint-icon" title={title} aria-label={title}>
+      <span aria-hidden="true">⚠</span>
+      <span className="tools-hint-count">{missing.length}</span>
+    </span>
+  )
+}
+
+/** Banner under the header: only when the current bot / group recipients are affected. */
+export function ToolsHint({
+  focusHost,
+  focusKinds,
+}: {
+  focusHost?: string | null
+  focusKinds?: BotKind[] | null
+}) {
+  const missingAll = useStore(useShallow((s) => missingTools(s)))
   const dismissed = useStore((s) => s.toolHintDismissed)
   const dismiss = useStore((s) => s.dismissToolHint)
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(true)
+
+  const missing = relevantMissing(missingAll, focusHost, focusKinds)
   if (dismissed || missing.length === 0) return null
+
   const byHost = new Map<string, BotKind[]>()
-  for (const key of missing) {
-    const i = key.lastIndexOf(':')
-    const host = key.slice(0, i)
-    const kind = key.slice(i + 1) as BotKind
-    byHost.set(host, [...(byHost.get(host) ?? []), kind])
+  for (const m of missing) {
+    byHost.set(m.host, [...(byHost.get(m.host) ?? []), m.kind])
   }
+  const summary = summarizeMissing(byHost)
+
   return (
     <div className={`tools-hint${collapsed ? ' collapsed' : ''}`} role="status">
       <button type="button" className="tools-hint-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)} title={collapsed ? '展開' : '收合'}>
         <span className="chev">{collapsed ? '▶' : '▼'}</span>
-        <span className="tools-hint-title">
-          {collapsed
-            ? `缺少 agent CLI：${[...byHost.entries()].map(([h, ks]) => `${hostLabel(h)} 缺 ${ks.join('、')}`).join('；')}`
-            : '有主機缺少 agent CLI'}
-        </span>
+        <span className="tools-hint-title">{summary}</span>
       </button>
       {collapsed ? null : (
         <ul className="tools-hint-list">
