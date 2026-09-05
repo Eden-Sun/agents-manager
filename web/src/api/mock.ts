@@ -13,6 +13,7 @@
  * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts).
  */
 
+import { parseMentions } from './mentions'
 import { ApiError } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
 
@@ -61,6 +62,8 @@ interface MockMessage {
   content: string
   source: 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system'
   incomplete: number
+  /** SPEC §13：群組發言的 group_id；一般訊息為 null */
+  group_id: string | null
   created_at: string
 }
 
@@ -219,6 +222,8 @@ export class MockTransport implements Transport {
     if (method === 'POST' && rawPath === '/projects') return this.addProject(b)
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'bots') return this.addBot(seg[1], b)
+    if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'messages') return this.projectMessages(seg[1], q)
+    if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'chat') return this.projectChat(seg[1], b)
 
     if (seg[0] === 'bots' && seg.length >= 2) {
       const botId = seg[1]
@@ -453,8 +458,8 @@ export class MockTransport implements Transport {
     this.emit('bot_status', { bot_id: botId, run: this.activeRun(botId) ?? null, connected: this.connected })
   }
 
-  private addMessage(m: Omit<MockMessage, 'id' | 'created_at'>): MockMessage {
-    const msg: MockMessage = { ...m, id: ulid('msg'), created_at: now() }
+  private addMessage(m: Omit<MockMessage, 'id' | 'created_at' | 'group_id'> & { group_id?: string | null }): MockMessage {
+    const msg: MockMessage = { group_id: null, ...m, id: ulid('msg'), created_at: now() }
     this.messages.push(msg)
     this.emit('message_added', { bot_id: msg.bot_id, message: msg })
     return msg
@@ -785,13 +790,14 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  private prompt(botId: string, b: Rec) {
+  private prompt(botId: string, b: Rec, groupId: string | null = null) {
     const run = this.activeRun(botId)
-    if (!run || run.state !== 'running') {
-      throw new ApiError(409, { reason: 'Run 不在 running 狀態' }, 'conflict')
+    if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
+    if (run.state !== 'running') {
+      throw new ApiError(409, { error: 'conflict', reason: 'run is not running', state: run.state }, 'conflict')
     }
     if (run.agent_status === 'blocked') {
-      throw new ApiError(409, { reason: 'agent 處於 blocked，請先在終端面板回應' }, 'conflict')
+      throw new ApiError(409, { error: 'conflict', reason: 'agent is blocked; answer the prompt first' }, 'conflict')
     }
     const clientRequestId = typeof b.client_request_id === 'string' ? b.client_request_id : null
     if (clientRequestId) {
@@ -799,10 +805,14 @@ export class MockTransport implements Transport {
       if (dup) return { turn_id: dup.id, message_id: null, delivery: dup.delivery }
     }
     const busy = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
-    if (busy) throw new ApiError(409, { reason: '已有進行中的 Turn', turn_id: busy.id }, 'conflict')
+    if (busy) throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id }, 'conflict')
     const unknown = this.turns.find((t) => t.run_id === run.id && t.delivery === 'unknown')
     if (unknown) {
-      throw new ApiError(409, { reason: 'delivery=unknown，需先 abandon 或 stop', turn_id: unknown.id }, 'conflict')
+      throw new ApiError(
+        409,
+        { error: 'conflict', reason: 'a previous turn has unknown delivery; abandon it first', turn_id: unknown.id },
+        'conflict',
+      )
     }
 
     const text = String(b.text ?? '')
@@ -827,6 +837,7 @@ export class MockTransport implements Transport {
       content: text,
       source: 'web',
       incomplete: 0,
+      group_id: groupId,
     })
     this.updateTurn(turn, { delivery: 'ok' })
     run.agent_status = 'working'
@@ -922,6 +933,90 @@ export class MockTransport implements Transport {
       turns: this.turns.filter((t) => t.bot_id === botId),
       has_more: false,
     }
+  }
+
+  // ------------------------------------------------------------ group chat (§13)
+
+  /** Mirrors `daemon/src/group.rs::messages`: member bots' messages merged, paginated by id. */
+  private projectMessages(projectId: string, q: URLSearchParams) {
+    if (!this.projects.some((p) => p.id === projectId)) {
+      throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
+    }
+    const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
+    const before = q.get('before') ?? ''
+    const byId = new Map(this.bots.map((b) => [b.id, b] as const))
+    const rows = this.messages
+      .filter((m) => byId.get(m.bot_id)?.project_id === projectId)
+      .filter((m) => !before || m.id < before)
+      .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+    const page = rows.slice(0, limit).reverse()
+    return {
+      project_id: projectId,
+      messages: page.map((m) => ({ ...m, bot_name: byId.get(m.bot_id)?.name ?? m.bot_id })),
+      has_more: rows.length > limit,
+    }
+  }
+
+  /** Mirrors `daemon/src/group.rs::chat` — mention parsing, fan-out, skipped notes. */
+  private projectChat(projectId: string, b: Rec) {
+    if (!this.projects.some((p) => p.id === projectId)) {
+      throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
+    }
+    const text = String(b.text ?? '')
+    const crid = typeof b.client_request_id === 'string' && b.client_request_id ? b.client_request_id : ulid('crid')
+    const members = this.bots.filter((x) => x.project_id === projectId)
+    const targets = parseMentions(text, members)
+    if (targets.length === 0) {
+      throw new ApiError(
+        400,
+        {
+          error: 'no_mention',
+          message: 'text must mention @all or at least one bot of this project',
+          bots: members.map((m) => ({ id: m.id, name: m.name, kind: m.kind })),
+        },
+        'no mention',
+      )
+    }
+    const sent: Rec[] = []
+    const skipped: Rec[] = []
+    for (const t of targets) {
+      try {
+        const out = this.prompt(t.id, { text, client_request_id: `${crid}:${t.id}` }, crid) as Rec
+        sent.push({ bot_id: t.id, bot_name: t.name, turn_id: out.turn_id, message_id: out.message_id, delivery: out.delivery })
+      } catch (e) {
+        const reason = e instanceof ApiError ? String(e.body.reason ?? e.message) : String(e)
+        const code = /no active run|not running/.test(reason)
+          ? 'not_running'
+          : /blocked/.test(reason)
+            ? 'blocked'
+            : /in flight/.test(reason)
+              ? 'in_flight'
+              : /unknown delivery/.test(reason)
+                ? 'unknown_delivery'
+                : 'conflict'
+        const label: Record<string, string> = {
+          not_running: 'bot 未啟動（不會自動啟動）',
+          blocked: 'agent 正在等待終端回應',
+          in_flight: '上一回合仍在進行中',
+          unknown_delivery: '上一回合送達狀態未知，請先放棄該回合',
+        }
+        const dup = this.messages.some((m) => m.bot_id === t.id && m.group_id === crid && m.role === 'system')
+        if (!dup) {
+          this.addMessage({
+            conversation_id: this.conv(t.id),
+            turn_id: null,
+            bot_id: t.id,
+            role: 'system',
+            content: `群組訊息未送達 ${t.name}：${label[code] ?? reason}`,
+            source: 'system',
+            incomplete: 0,
+            group_id: crid,
+          })
+        }
+        skipped.push({ bot_id: t.id, bot_name: t.name, reason: code, detail: reason })
+      }
+    }
+    return { group_id: crid, project_id: projectId, sent, skipped }
   }
 
   private terminal(botId: string, source: string, lines: number) {

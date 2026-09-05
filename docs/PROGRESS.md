@@ -639,3 +639,42 @@ A5 Origin 精確比對 host（`localhost.attacker.com`、`null`、`https://evil.
 - daemon 重啟後 log `remote session ensured … mode=launchd`；m4p `launchctl print gui/501/dev.agents-manager.herdr-agents-manager` state=running，herdr ppid=1 ✅
 - `cctest`（m4p，cc1）start → idle → prompt「Reply with exactly LAUNCHD-OK」→ 4 秒 `assistant/hook: LAUNCHD-OK`；程序 env `CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany` ✅
 - 為何不用 `herdr --remote`：只是 TUI 串流（`--remote can only be used with the default launch command`），無 API 轉發，遠端 server 同樣經 ssh 啟動。
+
+
+## v3.5 — 專案群組聊天（SPEC §13，2026-09-06）
+
+一個 Project = 一個群組；`@<bot>` / `@all` 把同一段文字 fan-out 給成員 bot，回覆回到合併時間軸。
+不新增 conversation 型別：每個收件 bot 各自一個 Turn + user Message（冪等鍵 `<crid>:<bot_id>`），
+`messages.group_id`（additive migration）把同一次發言的副本與「未送達」註記串起來。
+
+改動：`daemon/src/group.rs`（mention 解析 + fan-out + 合併時間軸，含 4 個單元測試）、`db.rs`
+（`group_id` 欄位 / 索引 / `GroupMessage`）、`lifecycle.rs`（`prompt_grouped` / `insert_message_grouped`）、
+`api.rs`（`GET /projects/:id/messages`、`POST /projects/:id/chat`）、`main.rs`（`AM_DATA_DIR`）；
+前端 `GroupChatPanel.tsx`、`api/mentions.ts`、store 群組狀態 / 未讀、sidebar 專案標題、mock 兩個端點；
+文件 SPEC §13、API.md §11、FRONTEND.md、截圖 `docs/screenshots/140-*`、`scripts/demo-group.mjs`。
+
+驗收（獨立 daemon：`AM_DATA_DIR=/tmp/am-group`、`127.0.0.1:7799`、session `am-group`，
+project 指向本 repo，bot `g-claude` / `g-codex`；**未動 7788 的正式 daemon**）：
+
+- G1 `@all Reply with exactly GROUP-OK` → `sent` 兩筆 `delivery=ok`；g-claude 4 秒、g-codex 5 秒後
+  各回 `GROUP-OK`（`source=hook`）；合併時間軸：兩則 user 副本（同 `group_id`）+ 兩則回覆 ✅
+  （第一次嘗試時 g-codex 撞到 usage limit「try again at 2:15 AM」，回覆走 terminal_fallback；
+  2:15 後重送即正常。附帶發現：codex 的 `■ You've hit your usage limit…` 行沒被 `clean_screen`
+  留下，fallback 只給「（終端沒有可辨識的回覆）」，不在本次範圍。）
+- G2 `@g-claude 只有你…` → 只有 g-claude 收到，回 `ONLY-CLAUDE` ✅
+- G3 停掉 g-codex 後 `@all` → `skipped:[{g-codex, not_running}]`、g-codex 對話多一則 `group_id`
+  相同的 system 訊息；同一 crid 重送回同一 `turn_id`、system 訊息仍只有一則 ✅
+- G4 沒有 mention → `400 {error:"no_mention", bots:[…]}` ✅
+- G5 `limit=3` → `has_more=true`；`before=<id>` 游標分頁 ✅
+- `cargo test` 10 passed（含 `group::tests` 4 個）；`npm run build` / `tsc -b` 通過；oxlint 無新增警告 ✅
+- mock 模式 headless Chrome 走完 140–14b 截圖（空群組 → 無 mention 鎖定 → `@` 自動完成 → `@all`
+  折疊 + 兩個回覆 → 單一目標 → 略過註記 → 未讀計數 → 深色 / 900 寬）✅
+
+設計選擇 / 偏離：
+32. **`group_id` = `client_request_id`**（而不是另產 ULID）：重送同一 crid 才能對到同一組 Turn，
+    也才能用「同一 conversation + group_id 已有 system 訊息」擋掉重複的未送達註記。
+33. **群組時間軸只含存活 bot**（`bots.deleted_at IS NULL`）：已刪 bot 的歷史仍可經 `GET /bots/:id/messages` 讀到。
+34. **略過 bot 的判斷直接沿用 `lifecycle::prompt` 的 409**（不另寫一份前置檢查），把 `reason` 字串
+    對應成機器碼；避免兩份規則走岔。
+35. **demo 腳本改用專屬 CDP 埠（9377）與 user-data-dir**：第一次跑時撞到另一個 agent 的 headless
+    Chrome（同埠），把對方的分頁導到我的 URL；腳本現在在 Chrome 提前退出時直接失敗而不是接管別人的實例。

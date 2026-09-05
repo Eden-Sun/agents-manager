@@ -49,11 +49,27 @@ pub async fn insert_message(
     incomplete: bool,
     snapshot: Option<&str>,
 ) -> anyhow::Result<db::Message> {
+    insert_message_grouped(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, None).await
+}
+
+/// `insert_message` with a SPEC §13 `group_id` (project group chat).
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_message_grouped(
+    app: &Arc<App>,
+    conversation_id: &str,
+    turn_id: Option<&str>,
+    role: &str,
+    content: &str,
+    source: &str,
+    incomplete: bool,
+    snapshot: Option<&str>,
+    group_id: Option<&str>,
+) -> anyhow::Result<db::Message> {
     let id = db::ulid();
     let now = db::now();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(conversation_id)
@@ -63,6 +79,7 @@ pub async fn insert_message(
     .bind(source)
     .bind(incomplete as i64)
     .bind(snapshot)
+    .bind(group_id)
     .bind(&now)
     .execute(&app.db)
     .await?;
@@ -641,6 +658,17 @@ pub struct PromptOut {
 }
 
 pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
+    prompt_grouped(app, bot_id, text, client_request_id, None).await
+}
+
+/// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
+pub async fn prompt_grouped(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    group_id: Option<&str>,
+) -> LcResult<PromptOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
 
@@ -708,12 +736,13 @@ pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id:
     .map_err(up)?;
     let msg_id = db::ulid();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'user',?,'web',?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, created_at) VALUES (?,?,?,'user',?,'web',?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
     .bind(&turn_id)
     .bind(text)
+    .bind(group_id)
     .bind(db::now())
     .execute(&mut *tx)
     .await

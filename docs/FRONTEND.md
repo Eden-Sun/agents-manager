@@ -39,11 +39,13 @@ web/src/
     normalize.ts   # 寬鬆解碼：吸收 0/1 vs bool、args vs args_json、巢狀 vs 扁平等差異
     transport.ts   # Transport 介面 + 真後端實作（fetch + WebSocket 自動重連）
     mock.ts        # 記憶體假後端（VITE_MOCK=1）
+    mentions.ts    # SPEC §13 的 @mention 規則（與 daemon/src/group.rs 同一套；輸入框與 mock 共用）
     index.ts       # 依 VITE_MOCK 選 transport，對外只暴露具名 API 函式
   store/store.ts   # 單一 Zustand store：server state 鏡像 + UI state + WS 事件處理
   components/
     Sidebar.tsx    # Project 分組、狀態燈、start/stop、新增 Project / Bot 表單
-    ChatPanel.tsx  # 標題列、對話/終端分頁、氣泡列表、輸入框
+    ChatPanel.tsx  # 標題列、對話/終端分頁、氣泡列表、輸入框（export Bubble）
+    GroupChatPanel.tsx # SPEC §13 專案群組聊天：成員燈號列、合併時間軸、@mention 自動完成
     BotSettingsPanel.tsx # Bot 設定（改名 / 模型 / args / 身份 / env / 刪除），另 export ModelField
     BlockedPanel.tsx # blocked 時的終端快照 + 按鍵面板
     TerminalTab.tsx  # recent_unwrapped 唯讀快照 + 刷新
@@ -462,3 +464,75 @@ bot**（沒有就往前一個，都沒有則 `null`；`removeBot` 會蓋掉 `ref
 3. **改名沒有「改完自動再啟動」**：「停止並改名」只負責停止，改完要自己按「啟動」。
 4. **`needs_restart` 的判斷完全信後端**。前端不自己推論哪些欄位需要重啟。
 5. **面板沒有未存變更的離開確認**：切 bot / 切分頁 / 按 ✕ 會直接丟掉未儲存的編輯。
+
+
+## 專案群組聊天（SPEC §13 / API.md §11，2026-09-06 新增）
+
+一個 Project 就是一個群組。契約以 `docs/API.md` §11 為準。
+
+### 資料流
+
+| 來源 | 前端處理 |
+|---|---|
+| `GET /projects/:id/messages` | `api.fetchProjectMessages()` → `normalize.toGroupMessagesPage()`（每則帶 `bot_id` / `bot_name`），存 `store.groupMessages[projectId]`，以 `message.id` 排序 |
+| `POST /projects/:id/chat` | `api.sendGroupChat()` → `store.sendGroupChat()`；回來的 `sent[]` 先塞進各 bot 的 `turns` map（輸入框立即反映 in-flight），`skipped[]` 跳一則通知；`400 no_mention` 以 `ApiError` 顯示 |
+| WS `message_added` | 既有的 per-bot 路徑不變，**同一 frame** 再依 `bot.project_id` 追加到 `groupMessages`（已載入時），並在該群組視圖未開啟時把 `groupUnread[projectId]` +1（只算非 user 訊息） |
+| `resync` | 重載目前 bot 的 messages 之外，也重載目前開著的群組 |
+
+`Message` 型別新增 `group_id: string | null`；`normalize.toMessage()` 讀 `group_id` / `groupId`。
+mention 規則放在 **`web/src/api/mentions.ts`**（`parseMentions()`），與 `daemon/src/group.rs` 同一套，
+mock 與輸入框共用；後端仍是最終裁決者。
+
+### store
+
+- `selectedProjectId`：非 null = 右側顯示群組視圖（`App.tsx` 據此切 `GroupChatPanel` / `ChatPanel`）。
+  `selectBot()` / `openSettings()` 會清掉它；`selectProject(id)` 順便把 `groupUnread[id]` 歸零並載入時間軸。
+- `groupComposerState(state, projectId)`：**專案內至少一個 bot 的 `composerState()` 未鎖定就可送**；
+  `sendable` 列出目前可收的 bot id，輸入框用它標示「會被略過」的收件者。
+
+### UI（`components/GroupChatPanel.tsx`）
+
+- **sidebar**：Project 標題變成按鈕（`⌗` 圖示 + 名稱），點了切群組視圖，選取時變 accent 色；
+  右邊的藍色圓點是未讀計數（`.unread-badge`）。
+- **標題列**：`⌗ <label>` + `群組` 標籤 + host 徽章 + **成員燈號列**（每個成員一顆燈 + 名稱徽章，
+  點了跳到該 bot 的單獨對話）+ 成員數 / 路徑 + 「關閉群組」。≤1080 寬時成員列收起。
+- **時間軸**：`foldRows()` 把同一 `group_id` 的 user 副本折成一列，`from` 顯示 `→ @a, @b`；
+  單一 bot 對話送出的訊息（無 `group_id`）也顯示 `→ @bot`。assistant / system 訊息上方是
+  bot 名稱徽章（`.bot-badge.claude` / `.codex`，配色沿用 kind-tag）。氣泡本體重用
+  `ChatPanel.tsx` 的 `Bubble`（新增可選的 `from` prop）。每個仍在回覆中的成員各一個 typing 氣泡。
+- **輸入框**：`mentionAtCaret()` 找游標前的 `@token`，彈出 `@all` + 成員（依前綴過濾）；
+  ↑ / ↓ 移動、Enter / Tab 選取（插入 `@name `）、Esc 關閉；其餘 Enter 送出、Shift+Enter 換行。
+  沒有 mention → 送出鈕 disabled，下方黃字提示；有 mention → 列出 `→ @a, @b`，並標示目前無法接收、
+  會被略過的成員（不會自動啟動）。
+
+### mock（`VITE_MOCK=1`）
+
+`api/mock.ts` 實作兩個群組端點（mention 解析、fan-out、`skipped` + system 註記、`group_id`），
+`prompt` 的 409 `reason` 改成與 daemon 相同的英文字串，方便 `skipped.reason` 分類一致。
+
+### 驗收紀錄（2026-09-06，mock）
+
+`node scripts/demo-group.mjs`（先在 `web/` 內 `VITE_MOCK=1 npx vite --port 5185`；CDP 埠 9377、
+獨立 user-data-dir，避免撞到其他 agent 的 headless Chrome）：
+
+| 檔案 | 內容 |
+|---|---|
+| `140-group-empty.png` | 兩個 bot 啟動後點 Project 標題進群組視圖：標題列成員燈號、空時間軸（只有 run 啟動的 system 訊息） |
+| `141-group-no-mention.png` | 輸入沒有 `@` 的文字：送出鈕 disabled + 提示 |
+| `142-group-mention-popup.png` | 輸入 `@`：自動完成列出 `@all` / `@am-claude` / `@am-codex`；↓↓ Enter 選到 `@am-codex ` |
+| `143-group-all-working.png` / `144-group-all-replied.png` | `@all Reply with exactly GROUP-OK`：user 氣泡折成一則 `→ @am-claude, @am-codex`，兩個 typing 指示 → 兩則帶 bot 徽章的 Markdown 回覆 |
+| `145-group-single-target.png` | `@am-claude, only you: reply PONG`：只有 am-claude 收到（`→ @am-claude`） |
+| `146-group-skip-hint.png` / `147-group-skipped.png` | 停掉 am-codex 後 `@all`：輸入框提示「@am-codex 目前無法接收，會被略過」；送出後時間軸出現 am-codex 的「群組訊息未送達」system 註記 + 右下通知，am-claude 照常回覆 |
+| `148-group-unread-badge.png` / `149-group-after-direct.png` | 切到 am-claude 單獨對話送一則，回覆到達時 Project 標題出現未讀 `1`；再開群組視圖歸零，該則以 `→ @am-claude` 出現在時間軸 |
+| `14a-group-dark.png` / `14b-group-narrow-900.png` | 深色主題、900 寬 |
+
+真後端的端到端（兩個真 bot `@all` → 兩個 `GROUP-OK`、`@g-claude` 單送、停掉 g-codex 後 `skipped`、
+400 `no_mention`、分頁）以 curl 對 `AM_DATA_DIR=/tmp/am-group` 的獨立 daemon（7799）驗過，見 SPEC §13.7。
+
+### 已知問題（群組聊天）
+
+1. **群組時間軸只包含存活的 bot**：刪掉 bot 後它的歷史仍在 `GET /bots/:id/messages`，但不再出現在群組合併時間軸。
+2. **沒有「載入更早訊息」**：`GET /projects/:id/messages` 的 `before` / `has_more` 契約與 `api.fetchProjectMessages(…, before)` 都備妥，UI 一次抓 200 則。
+3. **未讀計數只在記憶體**：重新整理即歸零；`GET /api/state` 的 `unread` 仍固定 0。
+4. **mention 自動完成只針對游標前的 token**：在文字中間插入 `@` 後往回移動游標也會觸發，但用滑鼠選取整段文字時不會重新計算游標。
+5. **mock 的 `@all` 回覆順序固定**（依 `REPLIES` 輪替），真後端的順序取決於各 agent 的回覆速度。

@@ -43,6 +43,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects", post(create_project))
         .route("/projects/{id}", delete(delete_project))
         .route("/projects/{id}/bots", post(create_bot))
+        .route("/projects/{id}/messages", get(get_project_messages))
+        .route("/projects/{id}/chat", post(project_chat))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
@@ -800,6 +802,39 @@ async fn get_messages(
         .await
         .map_err(any_err)?;
     Ok(Json(json!({"bot_id": id, "conversation_id": conv, "messages": msgs, "turns": turns, "has_more": has_more})))
+}
+
+/// SPEC §13.4: the project group timeline (every member bot's messages, merged).
+async fn get_project_messages(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, LcError> {
+    let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
+    let before = q.get("before").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    Ok(Json(crate::group::messages(&app, &id, before, limit).await?))
+}
+
+/// SPEC §13.4: `@<bot>` / `@all` fan-out. No valid mention → 400 `{error:"no_mention", bots}`.
+async fn project_chat(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<PromptIn>,
+) -> Response {
+    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    match crate::group::chat(&app, &id, &b.text, &crid).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(crate::group::Response400::Lc(e)) => e.into_response(),
+        Err(crate::group::Response400::NoMention(bots)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "no_mention",
+                "message": "text must mention @all or at least one bot of this project",
+                "bots": bots,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_terminal(

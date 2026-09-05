@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('web','hook','transcript','terminal_fallback','system')),
   incomplete INTEGER NOT NULL DEFAULT 0, terminal_snapshot TEXT,
+  group_id TEXT,
   created_at TEXT NOT NULL, updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_conv_time ON messages(conversation_id, created_at);
@@ -93,6 +94,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("bots", "identity", "ALTER TABLE bots ADD COLUMN identity TEXT"),
         ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
         ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
+        // SPEC §13: project group chat stamps every message of one send with a group id.
+        ("messages", "group_id", "ALTER TABLE messages ADD COLUMN group_id TEXT"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -102,6 +105,11 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             sqlx::query(ddl).execute(&pool).await.with_context(|| format!("migrate: {ddl}"))?;
         }
     }
+    // Partial index on the §13 column; created here (not in SCHEMA) because on a pre-§13 file
+    // SCHEMA runs before the ALTER above.
+    sqlx::query("CREATE INDEX IF NOT EXISTS messages_group ON messages(group_id) WHERE group_id IS NOT NULL")
+        .execute(&pool)
+        .await?;
     // The first cut of the §11 migration made (host, path) unique over *all* rows, which
     // stopped a soft-deleted project's directory from being registered again.
     sqlx::query("DROP INDEX IF EXISTS projects_host_path").execute(&pool).await?;
@@ -244,8 +252,21 @@ pub struct Message {
     pub source: String,
     pub incomplete: i64,
     pub terminal_snapshot: Option<String>,
+    /// SPEC §13: set on every message produced by one `POST /projects/:id/chat` send
+    /// (the per-bot user copies and the "skipped" system notes); NULL otherwise.
+    pub group_id: Option<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
+}
+
+/// A message row joined with the bot it belongs to — the unit of the project group timeline.
+#[derive(Debug, Clone, FromRow, serde::Serialize)]
+pub struct GroupMessage {
+    #[sqlx(flatten)]
+    #[serde(flatten)]
+    pub message: Message,
+    pub bot_id: String,
+    pub bot_name: String,
 }
 
 pub const ACTIVE_STATES: &str = "('starting','running','stopping')";

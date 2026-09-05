@@ -4,12 +4,15 @@
  */
 
 import { MockTransport } from './mock'
-import { toMessagesPage, toState, toTerminal, num, str, isRec, optStr, pick } from './normalize'
+import { toGroupMessagesPage, toMessagesPage, toState, toTerminal, num, str, isRec, optStr, pick, arr } from './normalize'
 import { HttpTransport } from './transport'
 import type { SocketHandlers, Transport } from './transport'
 import type {
   AppState,
   DirListing,
+  GroupChatResult,
+  GroupMessagesPage,
+  GroupSkipReason,
   HostResult,
   NewHostInput,
   NewIdentityInput,
@@ -45,6 +48,46 @@ export async function fetchState(): Promise<AppState> {
 export async function fetchMessages(botId: string, limit = 200): Promise<MessagesPage> {
   const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/messages?limit=${limit}`)
   return toMessagesPage(raw, botId)
+}
+
+/** SPEC §13.4 `GET /api/projects/:id/messages` — every member bot's messages, merged. */
+export async function fetchProjectMessages(projectId: string, limit = 200, before?: string): Promise<GroupMessagesPage> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (before) q.set('before', before)
+  const raw = await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/messages?${q.toString()}`)
+  return toGroupMessagesPage(raw, projectId)
+}
+
+/**
+ * SPEC §13.4 `POST /api/projects/:id/chat`. The daemon resolves `@all` / `@<bot>` itself;
+ * no valid mention → 400 `{error:"no_mention", bots}` (surfaces as an `ApiError`).
+ */
+export async function sendGroupChat(projectId: string, text: string, clientRequestId: string): Promise<GroupChatResult> {
+  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/chat`, {
+    text,
+    client_request_id: clientRequestId,
+  })
+  const o = isRec(raw) ? raw : {}
+  return {
+    group_id: str(pick(o, 'group_id'), clientRequestId),
+    sent: arr(o.sent)
+      .filter(isRec)
+      .map((x) => ({
+        bot_id: str(pick(x, 'bot_id')),
+        bot_name: str(pick(x, 'bot_name')),
+        turn_id: str(pick(x, 'turn_id')),
+        message_id: str(pick(x, 'message_id')) || null,
+        delivery: str(pick(x, 'delivery'), 'pending') as TurnDelivery,
+      })),
+    skipped: arr(o.skipped)
+      .filter(isRec)
+      .map((x) => ({
+        bot_id: str(pick(x, 'bot_id')),
+        bot_name: str(pick(x, 'bot_name')),
+        reason: str(pick(x, 'reason'), 'conflict') as GroupSkipReason,
+        detail: str(pick(x, 'detail', 'message')),
+      })),
+  }
 }
 
 export async function fetchTerminal(

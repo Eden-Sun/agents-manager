@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MOCK_MODE } from './api'
 import { ChatPanel } from './components/ChatPanel'
+import { GroupChatPanel } from './components/GroupChatPanel'
 import { Sidebar } from './components/Sidebar'
 import { useStore } from './store/store'
 
@@ -26,6 +27,7 @@ export default function App() {
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
   const bootstrap = useStore((s) => s.bootstrap)
+  const groupProjectId = useStore((s) => s.selectedProjectId)
   const [drawer, setDrawer] = useState(false)
 
   useEffect(() => {
@@ -66,7 +68,11 @@ export default function App() {
       </aside>
       {drawer ? <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} /> : null}
       <main className="main">
-        <ChatPanel onOpenSidebar={() => setDrawer(true)} />
+        {groupProjectId ? (
+          <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
+        ) : (
+          <ChatPanel onOpenSidebar={() => setDrawer(true)} />
+        )}
       </main>
       <Notices />
     </div>

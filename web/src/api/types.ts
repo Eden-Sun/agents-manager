@@ -173,7 +173,53 @@ export interface Message {
   content: string
   source: MessageSource
   incomplete: boolean
+  /**
+   * SPEC §13：同一次群組發言（`POST /projects/:id/chat`）產生的訊息共用一個 group_id
+   * （每個收件 bot 的 user 副本、以及「未送達」的 system 註記）；其他訊息為 null。
+   */
+  group_id: string | null
   created_at: string
+}
+
+/** SPEC §13.4 `GET /api/projects/:id/messages` 的一則：訊息 + 它屬於哪個 bot。 */
+export interface GroupMessage extends Message {
+  bot_id: string
+  bot_name: string
+}
+
+export interface GroupMessagesPage {
+  project_id: string
+  messages: GroupMessage[]
+  has_more: boolean
+}
+
+/** SPEC §13.4 `POST /api/projects/:id/chat` 的回應。 */
+export interface GroupChatResult {
+  group_id: string
+  sent: { bot_id: string; bot_name: string; turn_id: string; message_id: string | null; delivery: TurnDelivery }[]
+  skipped: { bot_id: string; bot_name: string; reason: GroupSkipReason; detail: string }[]
+}
+
+/** §13.3 略過原因（機器碼）；人類可讀說明在 `detail` 與該 bot 對話裡的 system 訊息。 */
+export type GroupSkipReason =
+  | 'not_running'
+  | 'blocked'
+  | 'in_flight'
+  | 'unknown_delivery'
+  | 'conflict'
+  | 'not_found'
+  | 'bad_request'
+  | 'upstream'
+
+export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
+  not_running: '未啟動',
+  blocked: '等待終端回應',
+  in_flight: '上一回合進行中',
+  unknown_delivery: '上一回合送達狀態未知',
+  conflict: '狀態衝突',
+  not_found: '找不到 bot',
+  bad_request: '請求不合法',
+  upstream: 'herdr / DB 錯誤',
 }
 
 /** Normalized `GET /api/state`. */
