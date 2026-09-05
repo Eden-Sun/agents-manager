@@ -641,7 +641,7 @@ A5 Origin 精確比對 host（`localhost.attacker.com`、`null`、`https://evil.
 - 為何不用 `herdr --remote`：只是 TUI 串流（`--remote can only be used with the default launch command`），無 API 轉發，遠端 server 同樣經 ssh 啟動。
 
 
-## v3.5 — 專案群組聊天（SPEC §13，2026-09-06）
+## v3.6 — 專案群組聊天（SPEC §13，2026-09-06）
 
 一個 Project = 一個群組；`@<bot>` / `@all` 把同一段文字 fan-out 給成員 bot，回覆回到合併時間軸。
 不新增 conversation 型別：每個收件 bot 各自一個 Turn + user Message（冪等鍵 `<crid>:<bot_id>`），
@@ -678,3 +678,15 @@ project 指向本 repo，bot `g-claude` / `g-codex`；**未動 7788 的正式 da
     對應成機器碼；避免兩份規則走岔。
 35. **demo 腳本改用專屬 CDP 埠（9377）與 user-data-dir**：第一次跑時撞到另一個 agent 的 headless
     Chrome（同埠），把對方的分頁導到我的 URL；腳本現在在 Chrome 提前退出時直接失敗而不是接管別人的實例。
+
+合併 main `3bb616b`（herdr agent name = `<project>-<bot>`）後重跑：`cargo test` 13 passed；
+7799 實例重啟（舊 DB 自動補 `runs.agent_name`）→ 兩個 bot 以 `agents-manager-g-claude` /
+`agents-manager-g-codex` 啟動 → G1 `@all` 兩個 `GROUP-OK`（hook）、G2 `@g-claude` 只送 claude、
+G3 停掉 g-codex 後 `@all` → `skipped not_running` + 一則 system 註記（同 crid 重送不重複）、G4 400 ✅。
+mention 仍以 bot 的專案內 `name` 比對，與 herdr 名稱無關。
+
+順帶觀察到（非本次範圍）：
+- 同一 Project 兩個 bot **同時**第一次 start 時各自 `workspace.create`（`projects.workspace_id` 尚未寫回），
+  結果落在兩個 workspace（w1 / w2）；序列啟動不會。
+- Codex 回覆後會多送一個「Generate a concise, single-line task title…」的 notify（標題生成子回合），
+  hookrecv 把它當 external turn 寫成一組 user / assistant 訊息（`{"title":"…"}`），群組時間軸也會顯示。

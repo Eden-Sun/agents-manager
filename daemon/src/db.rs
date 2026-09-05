@@ -25,12 +25,13 @@ CREATE TABLE IF NOT EXISTS bots (
   env_json TEXT NOT NULL DEFAULT '{}',
   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id),
   state TEXT NOT NULL CHECK (state IN ('starting','running','stopping','stopped','exited')),
   agent_status TEXT NOT NULL DEFAULT 'unknown' CHECK (agent_status IN ('idle','working','blocked','unknown')),
   workspace_id TEXT, pane_id TEXT, adopted INTEGER NOT NULL DEFAULT 0,
+  agent_name TEXT,
   native_session_id TEXT, transcript_path TEXT,
   last_read_revision INTEGER, last_read_tail_hash TEXT,
   started_at TEXT NOT NULL, ended_at TEXT
@@ -93,6 +94,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("projects", "host", "ALTER TABLE projects ADD COLUMN host TEXT NOT NULL DEFAULT 'local'"),
         ("bots", "identity", "ALTER TABLE bots ADD COLUMN identity TEXT"),
         ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
+        ("runs", "agent_name", "ALTER TABLE runs ADD COLUMN agent_name TEXT"),
         ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
         // SPEC §13: project group chat stamps every message of one send with a group id.
         ("messages", "group_id", "ALTER TABLE messages ADD COLUMN group_id TEXT"),
@@ -110,6 +112,9 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS messages_group ON messages(group_id) WHERE group_id IS NOT NULL")
         .execute(&pool)
         .await?;
+    // Bot names used to be unique across the whole daemon; since the herdr agent name is now
+    // `<project>-<bot>`, uniqueness is per project.
+    sqlx::query("DROP INDEX IF EXISTS bots_name_live").execute(&pool).await?;
     // The first cut of the §11 migration made (host, path) unique over *all* rows, which
     // stopped a soft-deleted project's directory from being registered again.
     sqlx::query("DROP INDEX IF EXISTS projects_host_path").execute(&pool).await?;
@@ -219,6 +224,9 @@ pub struct Run {
     pub workspace_id: Option<String>,
     pub pane_id: Option<String>,
     pub adopted: i64,
+    /// The herdr agent name this run was started (or adopted) under. `None` on rows from
+    /// before the column existed; `run_target` falls back to the bot's bare name then.
+    pub agent_name: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub last_read_revision: Option<i64>,
@@ -358,6 +366,21 @@ pub async fn active_runs_for_pane(pool: &SqlitePool, host: &str, pane_id: &str) 
     .bind(host)
     .fetch_all(pool)
     .await?)
+}
+
+/// The herdr agent name a *new* run of this bot should use: `<project label slug>-<bot>`.
+pub async fn agent_name_for_bot(pool: &SqlitePool, bot: &Bot) -> Result<String> {
+    let label: Option<String> = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?")
+        .bind(&bot.project_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(crate::config::agent_name(label.as_deref().unwrap_or(""), &bot.name))
+}
+
+/// The herdr target to address an *existing* run with. Runs record the name they were
+/// started under, so a rename of the project label (or a legacy bare-name run) keeps working.
+pub fn run_target(run: &Run, bot: &Bot) -> String {
+    run.agent_name.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| bot.name.clone())
 }
 
 pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Turn>> {
