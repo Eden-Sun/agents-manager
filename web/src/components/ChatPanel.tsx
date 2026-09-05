@@ -1,3 +1,5 @@
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
@@ -35,8 +37,14 @@ function Bubble({ msg }: { msg: Message }) {
 
   return (
     <article className={`msg ${msg.role}`}>
-      <div className={`bubble${clamped ? ' clamped' : ''}`}>
-        {msg.content || <em style={{ opacity: 0.6 }}>（空白訊息）</em>}
+      <div className={`bubble${clamped ? ' clamped' : ''}${msg.role === 'assistant' && !fallback ? ' md' : ''}`}>
+        {!msg.content ? (
+          <em style={{ opacity: 0.6 }}>（空白訊息）</em>
+        ) : msg.role === 'assistant' && !fallback ? (
+          <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+        ) : (
+          msg.content
+        )}
       </div>
       {msg.role === 'system' ? null : (
         <div className="msg-meta">

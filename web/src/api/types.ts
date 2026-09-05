@@ -46,6 +46,7 @@ export interface Bot {
   autostart: boolean
   /** daemon extension: false = no hook injection (terminal-fallback path) */
   inject_hooks: boolean
+  auto_approve: boolean
   created_at: string
 }
 
@@ -196,4 +197,5 @@ export interface NewBotInput {
   kind: BotKind
   args: string[]
   autostart: boolean
+  auto_approve?: boolean
 }

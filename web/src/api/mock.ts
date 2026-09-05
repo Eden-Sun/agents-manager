@@ -71,6 +71,7 @@ interface MockBot {
   args_json: string
   autostart: number
   inject_hooks: number
+  auto_approve: number
   created_at: string
 }
 
@@ -122,6 +123,7 @@ export class MockTransport implements Transport {
       args_json: JSON.stringify(['--model', 'opus']),
       autostart: 1,
       inject_hooks: 1,
+      auto_approve: 1,
       created_at: now(),
     })
     this.bots.push({
@@ -132,6 +134,7 @@ export class MockTransport implements Transport {
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
+      auto_approve: 1,
       created_at: now(),
     })
     installDevHelpers(this)
@@ -292,6 +295,7 @@ export class MockTransport implements Transport {
               args: JSON.parse(b.args_json) as string[],
               autostart: b.autostart === 1,
               inject_hooks: b.inject_hooks === 1,
+              auto_approve: b.auto_approve === 1,
               run,
               in_flight_turn: this.turns.find((t) => run && t.run_id === run.id && t.status === 'in_flight') ?? null,
               unread: 0,
@@ -350,6 +354,7 @@ export class MockTransport implements Transport {
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
       inject_hooks: 1,
+      auto_approve: 1,
       created_at: now(),
     }
     this.bots.push(bot)

@@ -139,6 +139,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "args": b.args(),
                 "autostart": b.autostart == 1,
                 "inject_hooks": b.inject_hooks == 1,
+                "auto_approve": b.auto_approve == 1,
                 "run": run,
                 "lamp": lamp(connected, run.as_ref()),
                 "unread": 0,
@@ -286,6 +287,8 @@ struct NewBot {
     autostart: bool,
     #[serde(default)]
     inject_hooks: Option<bool>,
+    #[serde(default)]
+    auto_approve: Option<bool>,
 }
 
 async fn create_bot(
@@ -318,6 +321,7 @@ async fn create_bot(
                 args: b.args.clone(),
                 autostart: b.autostart,
                 inject_hooks: b.inject_hooks.unwrap_or(true),
+                auto_approve: b.auto_approve.unwrap_or(true),
             });
             Ok(())
         })
@@ -341,6 +345,7 @@ struct PatchBot {
     autostart: Option<bool>,
     name: Option<String>,
     inject_hooks: Option<bool>,
+    auto_approve: Option<bool>,
 }
 
 async fn patch_bot(
@@ -375,6 +380,9 @@ async fn patch_bot(
             }
             if let Some(h) = b.inject_hooks {
                 bot.inject_hooks = h;
+            }
+            if let Some(a) = b.auto_approve {
+                bot.auto_approve = a;
             }
             Ok(())
         })

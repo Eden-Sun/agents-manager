@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS bots (
   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex')),
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
+  auto_approve INTEGER NOT NULL DEFAULT 1,
   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL;
@@ -80,6 +81,16 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         }
         sqlx::query(s).execute(&pool).await.with_context(|| format!("apply schema: {s}"))?;
     }
+    // Additive migrations for databases created before a column existed.
+    for (table, col, ddl) in [("bots", "auto_approve", "ALTER TABLE bots ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1")] {
+        let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
+            .bind(col)
+            .fetch_one(&pool)
+            .await?;
+        if has == 0 {
+            sqlx::query(ddl).execute(&pool).await.with_context(|| format!("migrate: {ddl}"))?;
+        }
+    }
     Ok(pool)
 }
 
@@ -110,6 +121,7 @@ pub struct Bot {
     pub args_json: String,
     pub autostart: i64,
     pub inject_hooks: i64,
+    pub auto_approve: i64,
     #[serde(skip_serializing)]
     pub hook_token: String,
     pub deleted_at: Option<String>,
