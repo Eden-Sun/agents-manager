@@ -99,7 +99,29 @@ export interface Bot {
   /** daemon extension: false = no hook injection (terminal-fallback path) */
   inject_hooks: boolean
   auto_approve: boolean
+  /** 身份預設（`identities[].name`），null = 無 */
+  identity: string | null
+  /** 額外注入 pane 的環境變數（覆蓋 identity.env） */
+  env: Record<string, string>
   created_at: string
+}
+
+/**
+ * 身份預設（例如 `cc1` = 用另一個 `CLAUDE_CONFIG_DIR` 跑不同帳號）。
+ * daemon 啟動 bot 時把 `env` 注入 pane、`args` 接在 daemon 注入參數之後。
+ */
+export interface Identity {
+  name: string
+  kind: BotKind
+  env: Record<string, string>
+  args: string[]
+}
+
+export interface NewIdentityInput {
+  name: string
+  kind: BotKind
+  env: Record<string, string>
+  args: string[]
 }
 
 /**
@@ -153,6 +175,7 @@ export interface AppState {
   daemon_seq: number
   connected: boolean
   hosts: Host[]
+  identities: Identity[]
   projects: Project[]
   bots: Bot[]
   /** active runs, keyed by bot_id downstream */
@@ -254,4 +277,6 @@ export interface NewBotInput {
   args: string[]
   autostart: boolean
   auto_approve?: boolean
+  identity?: string | null
+  env?: Record<string, string>
 }

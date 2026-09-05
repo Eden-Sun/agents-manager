@@ -5,6 +5,7 @@ import { botLamp, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
+import { IdentitiesPanel, IdentityBadge, parseEnvText } from './IdentitiesPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -56,6 +57,7 @@ function BotRow({ botId }: { botId: string }) {
         <span className="bot-name">{bot.name}</span>
         <span className="bot-sub">
           <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+          <IdentityBadge name={bot.identity} />
           <span>{LAMP_LABEL[lamp]}</span>
         </span>
       </span>
@@ -188,6 +190,10 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [args, setArgs] = useState('')
   const [autostart, setAutostart] = useState(false)
   const [autoApprove, setAutoApprove] = useState(true)
+  const [identity, setIdentity] = useState('')
+  const [envText, setEnvText] = useState('')
+  const [advanced, setAdvanced] = useState(false)
+  const identities = useStore((s) => s.identities)
   const [busy, setBusy] = useState(false)
 
   const pid = projectId || projects[0]?.id || ''
@@ -210,6 +216,8 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           args: args.trim() ? args.trim().split(/\s+/) : [],
           autostart,
           auto_approve: autoApprove,
+          identity: identity || null,
+          env: parseEnvText(envText),
         }).then((ok) => {
           setBusy(false)
           if (ok) {
@@ -243,9 +251,29 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
       </label>
       <label className="field">
         <span>kind</span>
-        <select value={kind} onChange={(e) => setKind(e.target.value as BotKind)}>
+        <select
+          value={kind}
+          onChange={(e) => {
+            setKind(e.target.value as BotKind)
+            setIdentity('')
+          }}
+        >
           <option value="claude">claude</option>
           <option value="codex">codex</option>
+        </select>
+      </label>
+      <label className="field">
+        <span>身份（例如 cc1 = 另一個 CLAUDE_CONFIG_DIR；在下方「身份」管理）</span>
+        <select value={identity} onChange={(e) => setIdentity(e.target.value)}>
+          <option value="">（預設）</option>
+          {identities
+            .filter((i) => i.kind === kind)
+            .map((i) => (
+              <option key={i.name} value={i.name}>
+                {i.name}
+                {Object.keys(i.env).length ? ` ・ ${Object.entries(i.env).map(([k, v]) => `${k}=${v}`).join(' ')}` : ''}
+              </option>
+            ))}
         </select>
       </label>
       <label className="field">
@@ -268,6 +296,15 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           自動核准全部權限（claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code>）
         </span>
       </label>
+      <button type="button" className="disclosure sub" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
+        <span className="chev">{advanced ? '▼' : '▶'}</span> 進階：額外環境變數
+      </button>
+      {advanced ? (
+        <label className="field">
+          <span>env（每行 KEY=VALUE，覆蓋身份的 env）</span>
+          <textarea rows={2} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
+        </label>
+      ) : null}
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消
@@ -287,7 +324,8 @@ export function Sidebar() {
   const socket = useStore((s) => s.socket)
   const connected = useStore((s) => s.connected)
   const removeProject = useStore((s) => s.removeProject)
-  const [open, setOpen] = useState<'project' | 'bot' | 'host' | null>(null)
+  const [open, setOpen] = useState<'project' | 'bot' | 'host' | 'identity' | null>(null)
+  const identityCount = useStore((s) => s.identities.length)
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
@@ -396,6 +434,17 @@ export function Sidebar() {
           </span>
         </button>
         {open === 'host' ? <HostsPanel /> : null}
+
+        <button
+          type="button"
+          className="disclosure"
+          aria-expanded={open === 'identity'}
+          onClick={() => setOpen(open === 'identity' ? null : 'identity')}
+        >
+          <span className="chev">{open === 'identity' ? '▼' : '▶'}</span> 身份
+          <span className="disclosure-note">{identityCount === 0 ? '無' : `${identityCount} 個`}</span>
+        </button>
+        {open === 'identity' ? <IdentitiesPanel /> : null}
       </div>
     </>
   )
