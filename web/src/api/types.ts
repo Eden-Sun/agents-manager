@@ -126,7 +126,8 @@ export interface NewIdentityInput {
   name: string
   kind: BotKind
   env: Record<string, string>
-  args: string[]
+  /** 契約保留；UI 的新增身份表單不再提供 args（身份的本體是 env）。 */
+  args?: string[]
 }
 
 /**
@@ -281,7 +282,11 @@ export interface NewBotInput {
   kind: BotKind
   /** `null` / 省略 = 不帶 `--model`（由 CLI 自己決定） */
   model?: string | null
-  args: string[]
+  /**
+   * 契約保留，但 UI 不再提供 args 欄位（使用者決定）：新增 Bot 時一律省略，
+   * 由 daemon 用預設值。要調參數請改身份（identity）或 config.toml。
+   */
+  args?: string[]
   autostart: boolean
   auto_approve?: boolean
   identity?: string | null

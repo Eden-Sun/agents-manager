@@ -1,6 +1,6 @@
 /**
  * Bot 設定面板（API.md v3.3）驗收：mock 模式走一遍
- *   開設定 → 改模型 opus / args → 儲存（needs_restart）→ 立即重啟 → starting→idle
+ *   開設定 → 改模型 opus → 儲存（needs_restart）→ 立即重啟 → starting→idle
  *   → 停止並改名 → 刪除 bot → 列表消失
  *
  * 先在 web/ 內啟動：VITE_MOCK=1 npx vite --port 5183
@@ -67,9 +67,9 @@ console.log('name disabled (active run):', await ev(`document.querySelector('.bs
 console.log('model options:', await ev(`[...document.querySelectorAll('.bs-body select')[0].options].map(o=>o.textContent).join(' | ')`))
 await shot('100-bot-settings')
 
-// 2) 改模型 → opus，改 args
+// 2) 改模型 → opus（UI 已不提供 args / env 欄位）
 console.log('set model:', await setVal('.bs-body select', 'opus'))
-console.log('set args:', await ev(`(()=>{const ins=[...document.querySelectorAll('.bs-body input[type=text]')];const el=ins[ins.length-1];Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,'--search --verbose');el.dispatchEvent(new Event('input',{bubbles:true}));return 'args='+el.value})()`))
+console.log('fields:', await ev(`[...document.querySelectorAll('.bs-body .field > span')].map(e=>e.textContent.split('（')[0]).join(' | ')`))
 await sleep(200)
 console.log('changed:', await ev(`document.querySelector('.bs-actions .hint').textContent`))
 await shot('101-bot-settings-model-changed')

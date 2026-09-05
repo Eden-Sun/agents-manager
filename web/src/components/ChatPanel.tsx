@@ -248,7 +248,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             className="icon-btn gear"
             aria-label="Bot 設定"
             aria-expanded={settingsOpen}
-            title="Bot 設定（模型、args、身份、env、刪除）"
+            title="Bot 設定（模型、身份、autostart、刪除）"
             onClick={() => (settingsOpen ? closeSettings() : openSettings(botId))}
           >
             ⚙
