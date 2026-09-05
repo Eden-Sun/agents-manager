@@ -1,7 +1,7 @@
 # Agents Manager 規格書（v3.1）
 
 > 修訂紀錄
-> - v3.5（2026-09-06）：新增 §12「grok 支援」（第三種 kind：xAI grok CLI 1.0.13）與附錄 F（grok 實測：CLI 旗標、hook 機制與 payload、終端標記、身份隔離）。grok 無每次啟動的 hook 注入旗標，改由 daemon 寫入 `<GROK_HOME>/hooks/agents-manager.json` + 以 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` 分派的固定腳本；pane env 新增 `AM_HOOK_TOKEN`；`bots.kind` CHECK 重建加入 `grok`。
+> - v3.6（2026-09-06）：新增 §12「grok 支援」（第三種 kind：xAI grok CLI 1.0.13）與附錄 F（grok 實測：CLI 旗標、hook 機制與 payload、終端標記、身份隔離）。grok 無每次啟動的 hook 注入旗標，改由 daemon 寫入 `<GROK_HOME>/hooks/agents-manager.json` + 以 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` 分派的固定腳本；pane env 新增 `AM_HOOK_TOKEN`；`bots.kind` CHECK 重建加入 `grok`。
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
@@ -14,7 +14,7 @@
 
 ## 1. 目標
 
-一個本機執行的「多 agent 管理器」。使用者透過 Web UI 以聊天方式管理多個正在終端中執行的 coding agent CLI，第一階段支援 **Claude Code** 與 **Codex**；v3.5 起加入 **grok**（xAI grok CLI，§12）。
+一個本機執行的「多 agent 管理器」。使用者透過 Web UI 以聊天方式管理多個正在終端中執行的 coding agent CLI，第一階段支援 **Claude Code** 與 **Codex**；v3.6 起加入 **grok**（xAI grok CLI，§12）。
 
 所有 agent 由 **herdr**（terminal workspace manager，實測版本 0.8.2，socket API protocol 20）承載。本系統不直接 spawn agent 程序，而是透過 herdr 的 Unix socket API 建立 pane、啟動 agent、送訊息、讀輸出、訂閱狀態事件。
 
@@ -119,7 +119,7 @@ origin:   web | external                     （external = 非本系統送出、
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot","<bot_id>","--token","<t>","--port","<port>"]`。實測（codex-cli 0.153.4）argv 最後一個參數為 JSON：`{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages":[...],"last-assistant-message"}`。
 使用者原本的 `notify` 在此實例中被覆蓋；**轉呼叫原 notify 為第二階段**（UI 顯示提示）。
 
-**grok**（v3.5）：無每次啟動注入旗標，改為全域 hooks 檔 + env 分派，見 §12.2。
+**grok**（v3.6）：無每次啟動注入旗標，改為全域 hooks 檔 + env 分派，見 §12.2。
 
 hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 Bot 目前的 active Run。原因：對帳收養會產生新 `run_id`，但存活的 agent 程序仍持有啟動時的參數。pane env 中的 `AM_RUN_ID` **僅供診斷，不作身分**。
 
@@ -182,7 +182,7 @@ label = "foo"
 3. 取得 pane：
    - 若 workspace 剛由本步驟建立 → 用 `root_pane`。
    - 否則 `pane.split {target_pane_id: <該 workspace 任一 pane>, direction:"right", cwd, focus:false, env}`。
-   - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`AM_HOOK_TOKEN`（v3.5；`inject_hooks = false` 時不給，grok 的分派腳本以此判斷是否回報）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
+   - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`AM_HOOK_TOKEN`（v3.6；`inject_hooks = false` 時不給，grok 的分派腳本以此判斷是否回報）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
    - 失敗 → Run `exited`（`ended_at` 填入），回 502。
 4. 更新 Run 的 `workspace_id` / `pane_id`。產生 hook 注入檔（Claude）或參數（Codex）。
 5. 先寫 `runs.agent_name = agent_name(project.label, bot.name)`，再 `agent.start {name: <agent_name>, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`（立即回傳 `launch_pending`）。之後所有 herdr 目標（wait / prompt / keys / stop）一律用 `run.agent_name`，缺值時退回 `bot.name`。失敗 → Run `exited` + 盡力 `pane.close`。
@@ -323,7 +323,7 @@ label = "foo@m4p"
 ### 11.4 遠端 hook
 遠端沒有 `agents-managerd` 二進位，改用 **POSIX sh + curl** 腳本（附錄 E 已實測可通過反向通道打到 daemon）：
 - daemon 在啟動 Run 時透過 ssh 寫入遠端 `~/.config/agents-manager/bots/<bot_id>/hook.sh`（內容固定，見附錄 E）與 `claude-settings.json`；`chmod +x`。
-- claude args：`--settings <遠端絕對路徑>`；codex：`-c notify=["<遠端 hook.sh>","codex","<bot_id>","<token>","<hook_port>"]`；grok（v3.5）：不加 args，另寫遠端 `~/.config/agents-manager/grok-hook.sh`（分派到 `bots/$AM_BOT_ID/hook.sh grok …`）與 `<GROK_HOME>/hooks/agents-manager.json`（§12.2）。`hook.sh` 對 provider ≠ codex 一律讀 stdin，grok 不需改。
+- claude args：`--settings <遠端絕對路徑>`；codex：`-c notify=["<遠端 hook.sh>","codex","<bot_id>","<token>","<hook_port>"]`；grok（v3.6）：不加 args，另寫遠端 `~/.config/agents-manager/grok-hook.sh`（分派到 `bots/$AM_BOT_ID/hook.sh grok …`）與 `<GROK_HOME>/hooks/agents-manager.json`（§12.2）。`hook.sh` 對 provider ≠ codex 一律讀 stdin，grok 不需改。
 - 腳本契約與 §4.4 相同：≤3 秒、exit 0、空 stdout、失敗寫遠端 `hook-spool.jsonl`。
 - daemon 的 `/hook/*` **不做** Host 檢查（只驗 per-bot token），因為經反向通道的請求 Host 為 `127.0.0.1:<hook_port>`。
 - spool 重放：對帳時 `ssh <host> 'f=~/.config/agents-manager/bots/<id>/hook-spool.jsonl; [ -f "$f" ] && mv "$f" "$f.replaying" && cat "$f.replaying" && rm "$f.replaying"'`，逐行依 §6.7 處理。
@@ -341,7 +341,7 @@ label = "foo@m4p"
 ### 11.7 第一階段不做
 遠端密碼 / 互動認證、跳板（ProxyJump 交給 ssh_config）、遠端 transcript 回補、多 daemon。
 
-## 12. grok 支援（v3.5）
+## 12. grok 支援（v3.6）
 
 第三種 `kind = "grok"`：xAI 的 **grok CLI**（Grok Build，實測 1.0.13，`~/.grok/bin/grok`）。herdr 0.8.2 內建 `grok` agent manifest（bundled 2026.07.16.2），`agent.start {kind: "grok"}` 直接可用，狀態偵測靠 OSC title / OSC 9;4 progress / 畫面規則（附錄 F）。
 

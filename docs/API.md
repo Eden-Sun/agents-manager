@@ -99,7 +99,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 |---|---|---|---|
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label":"foo"}`（`label` 可省，預設取目錄名） | `200 {"project_id":"..."}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 bot 有 active Run → 409 |
-| POST | `/api/projects/{id}/bots` | `{"name":"foo-claude","kind":"claude"\|"codex","args":[],"autostart":false,"inject_hooks":true}` | `200 {"bot_id":"..."}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；名稱重複 409 |
+| POST | `/api/projects/{id}/bots` | `{"name":"foo-claude","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true}` | `200 {"bot_id":"..."}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；名稱重複 409 |
 | PATCH | `/api/bots/{id}` | `{"name"?,"model"?,"args"?,"autostart"?,"auto_approve"?,"inject_hooks"?,"identity"?,"env"?}` | `200 {"needs_restart":bool}`；改名時有 active Run → 409（詳見 §10） |
 | DELETE | `/api/bots/{id}` | — | `200 {}`（會先 stop；conversation 與訊息保留，詳見 §10） |
 
@@ -269,7 +269,7 @@ UI 標籤建議：
 
 ## bot.auto_approve（2026-09-06 新增）
 
-每個 bot 的布林欄位，預設 `true`。啟動時 daemon 依 kind 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`（等同 `--dangerously-bypass-approvals-and-sandbox`）。`POST /projects/:id/bots` 與 `PATCH /bots/:id` 皆接受 `auto_approve`。舊資料庫啟動時自動 `ALTER TABLE` 補欄位。
+每個 bot 的布林欄位，預設 `true`。啟動時 daemon 依 kind 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`（等同 `--dangerously-bypass-approvals-and-sandbox`）、grok `--always-approve`（等同 `--permission-mode bypassPermissions`）。`POST /projects/:id/bots` 與 `PATCH /bots/:id` 皆接受 `auto_approve`。舊資料庫啟動時自動 `ALTER TABLE` 補欄位。
 
 
 ## 遠端主機 hosts（SPEC §11.6，2026-09-06 新增）
@@ -408,7 +408,7 @@ host 不存在 → `404`；ssh 失敗（含認證失敗、目錄不存在）→ 
 ```toml
 [[identities]]
 name = "cc1"                                          # [a-z][a-z0-9_-]{0,31}，唯一
-kind = "claude"                                       # claude | codex
+kind = "claude"                                       # claude | codex | grok
 args = []
 [identities.env]
 CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
@@ -469,7 +469,7 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
 { "name":"cc1", "kind":"claude", "env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"}, "args":[] }
 ```
 
-`200 {"name":"cc1"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` 或 `kind` 不是 claude/codex → `400`；
+`200 {"name":"cc1"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` 或 `kind` 不是 claude/codex/grok → `400`；
 名稱重複 → `409 {"error":"conflict","reason":"identity name already in use","name":"cc1"}`。
 
 ### `DELETE /api/identities/{name}`
@@ -497,6 +497,7 @@ bot 的 `identity` / `env` 變更沿用既有的 `bot_changed`。
 |---|---|
 | `claude` | `--model <model>` |
 | `codex` | `-m <model>` |
+| `grok` | `-m <model>`（`grok models`：`grok-4.6` 預設、`grok-4.5`） |
 
 **argv 組合順序**（前端可據此預覽）：
 
@@ -591,3 +592,14 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 ## bot.agent_name（v3.5）
 
 `GET /api/state` 的 bot 物件新增唯讀欄位 `agent_name`：herdr 內的 agent 名稱。有 active Run 時為該 run 實際啟動的名稱；否則為下次啟動會用的 `<project label slug>-<bot name>`（例如 `agents-manager-am-codex`）。bot `name` 的唯一性改為**專案內**唯一（同名 bot 可存在於不同專案）；`POST /projects/:id/bots` 與 `PATCH /bots/:id` 的重名 409 訊息改為 `bot name already in use in this project`。
+
+
+## bot.kind = "grok"（v3.6，SPEC §12）
+
+第三種 kind：xAI grok CLI（1.0.13）。`POST /projects/:id/bots`、`POST /identities` 的 `kind` 接受 `claude | codex | grok`（其他值 → `400 {"error":"bad_request","message":"kind must be claude, codex or grok"}`）。前端與 mock 都已有 `grok` 選項與 `am-grok` 種子。
+
+啟動時 daemon 注入：`auto_approve` → `--always-approve`；`model` → `-m <model>`；hook **不走 argv**（grok 沒有每次啟動的 hook 旗標），改為寫入 `<GROK_HOME>/hooks/agents-manager.json` + `~/.config/agents-manager/grok-hook.sh`，靠 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` 分派到正確的 bot；`inject_hooks = false` 時不給 `AM_HOOK_TOKEN`，hook 變成 no-op，回覆走 `terminal_fallback`。
+
+hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok 的 stdin JSON：`hookEventName: "stop"`、`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`、`reason: "end_turn"`、`stopHookActive`）。`reason ≠ end_turn`（session 結束時的觀察用 Stop）與 `session_end` 會被忽略；`session_start` 只回填 `runs.native_session_id`。
+
+對前端可見的差異：`kind: "grok"`；`GET /api/state` 其餘欄位相同；`terminal_fallback` 訊息不再含 grok 的遙測 banner / 時戳 / 捲軸字元。
