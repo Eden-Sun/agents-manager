@@ -29,3 +29,20 @@
 已知問題：無。
 
 ---
+
+## M2 — config 載入 / 補 id / 寫回、SQLite migrations、TOML→SQLite 投影、`GET /api/state`
+
+日期：2026-09-05
+
+驗收指令與結果：
+
+1. 手寫 `~/.config/agents-manager/config.toml`（1 project + 2 bots，**沒有 id**）→ 啟動 daemon 後
+   檔案被補寫成含 `id = "01M1S2SQPS9TA1DYRKNYCF2SJK"` 等 ULID ✅（同時補寫 `inject_hooks`）。
+2. `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7788/api/state` → `401` ✅（需 token）
+3. `curl -s http://127.0.0.1:7788/api/session` → `{"token":"…","port":7788}` ✅
+4. `curl -H "X-AM-Token: …" .../api/state` → 回傳 1 project / 2 bots，`run: null`、`lamp: "offline"`、
+   `connected: true`、`daemon_seq: 6` ✅
+5. `docs/API.md` 已產出（`GET /api/state` 結構、REST 契約、WS 事件 JSON 範例），供前端 agent 使用。
+
+已知問題：無。
+
