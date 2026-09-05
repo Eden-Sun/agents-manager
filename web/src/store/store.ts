@@ -24,7 +24,7 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, Host, HostResult, Identity, Lamp, Message, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, Project, Run, TerminalSource, Turn } from '../api/types'
+import type { Bot, Host, HostResult, Identity, Lamp, Message, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, Project, Run, TerminalSource, Turn } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -62,6 +62,8 @@ interface StoreState {
 
   selectedBotId: string | null
   rightTab: RightTab
+  /** 開著「Bot 設定」面板的 bot id（null = 面板關閉）。 */
+  settingsBotId: string | null
   notices: Notice[]
   busy: Record<string, boolean>
 
@@ -69,6 +71,8 @@ interface StoreState {
   refreshState: () => Promise<void>
   selectBot: (botId: string | null) => void
   setRightTab: (tab: RightTab) => void
+  openSettings: (botId: string) => void
+  closeSettings: () => void
   loadMessages: (botId: string) => Promise<void>
   notify: (kind: Notice['kind'], text: string) => void
   dismiss: (id: number) => void
@@ -86,6 +90,9 @@ interface StoreState {
   reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
   addBot: (projectId: string, input: NewBotInput) => Promise<boolean>
+  /** `PATCH /api/bots/:id` — 回傳 `needs_restart`，失敗回 null（原因已跳通知）。 */
+  patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
+  restartBot: (botId: string) => Promise<boolean>
   removeBot: (botId: string) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
@@ -117,6 +124,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   selectedBotId: null,
   rightTab: 'chat',
+  settingsBotId: null,
   notices: [],
   busy: {},
 
@@ -173,11 +181,20 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   selectBot: (botId) => {
-    set({ selectedBotId: botId, rightTab: 'chat' })
+    set({ selectedBotId: botId, rightTab: 'chat', settingsBotId: null })
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
-  setRightTab: (rightTab) => set({ rightTab }),
+  // 切分頁等於離開設定面板（面板是蓋在對話/終端上的）。
+  setRightTab: (rightTab) => set({ rightTab, settingsBotId: null }),
+
+  /** 設定面板永遠對著「目前選取的 bot」，所以開啟時順便切過去。 */
+  openSettings: (botId) => {
+    set({ selectedBotId: botId, rightTab: 'chat', settingsBotId: botId })
+    if (!get().loadedBots[botId]) void get().loadMessages(botId)
+  },
+
+  closeSettings: () => set({ settingsBotId: null }),
 
   async loadMessages(botId) {
     try {
@@ -222,6 +239,14 @@ export const useStore = create<StoreState>((set, get) => ({
       const res = await api.sendPrompt(botId, text, crid)
       if (res.delivery === 'unknown') {
         get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
+      }
+      if (res.delivery === 'failed') {
+        // REVIEW B10: the daemon already failed the turn (e.g. agent_blocked). Seeding a
+        // local `in_flight` turn would lock the composer until `turn_updated` arrives, so
+        // just reload the conversation and leave the composer usable.
+        get().notify('error', '訊息未送達（delivery=failed），請確認 agent 狀態後重試。')
+        void get().loadMessages(botId)
+        return false
       }
       // The user message + turn arrive over the socket; only patch the turn map here so
       // the composer locks immediately even if the frame is slow.
@@ -353,11 +378,47 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  async patchBot(botId, input) {
+    if (Object.keys(input).length === 0) return false
+    let needsRestart: boolean | null = null
+    await guarded(set, get, `patch:${botId}`, async () => {
+      const res = await api.patchBot(botId, input)
+      needsRestart = res.needs_restart
+      await get().refreshState()
+    })
+    return needsRestart
+  },
+
+  async restartBot(botId) {
+    let ok = false
+    await guarded(set, get, `restart:${botId}`, async () => {
+      await api.restartBot(botId)
+      await get().refreshState()
+      ok = true
+    })
+    return ok
+  },
+
   async removeBot(botId) {
+    // SPEC: selection moves to the next bot in the same project, else null.
+    const s0 = get()
+    const bot = s0.bots.find((b) => b.id === botId)
+    const siblings = bot ? s0.bots.filter((b) => b.project_id === bot.project_id) : []
+    const i = siblings.findIndex((b) => b.id === botId)
+    const next = (siblings[i + 1] ?? siblings[i - 1] ?? null)?.id ?? null
     try {
       await api.deleteBot(botId)
-      set((s) => ({ selectedBotId: s.selectedBotId === botId ? null : s.selectedBotId }))
+      set((s) => ({
+        selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
+        settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
+      }))
       await get().refreshState()
+      // `refreshState` falls back to `bots[0]` when nothing is selected; honour the
+      // explicit "no sibling left" case instead.
+      if (next === null && get().selectedBotId !== null && !get().bots.some((b) => b.id === botId)) {
+        set({ selectedBotId: null })
+      }
+      get().notify('info', `已刪除 Bot ${bot?.name ?? botId}`)
     } catch (e) {
       get().notify('error', errText(e))
     }

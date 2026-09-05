@@ -1476,3 +1476,165 @@ button:disabled {
   font-size: 11.5px;
   resize: vertical;
 }
+
+/* --------------------------------------------------------- bot settings (v3.3) */
+
+.model-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.icon-btn.gear {
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.icon-btn.gear:hover:not(:disabled),
+.icon-btn.gear[aria-expanded='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Covers the chat/terminal body; the head (lamp, name, start/stop) stays visible. */
+.bot-settings {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.bs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.bs-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bs-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bs-banner.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.bs-banner.ok {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.bs-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.bs-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 14px 24px;
+}
+
+.bs-body > .form {
+  max-width: 560px;
+  gap: 11px;
+  padding-top: 12px;
+}
+
+.bs-body .field input[type='text']:disabled,
+.bs-body .field select:disabled {
+  color: var(--text-dim);
+  background: var(--bg-hover);
+  -webkit-text-fill-color: var(--text-dim);
+  opacity: 1;
+}
+
+.bs-inline-note {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--warn);
+}
+
+.bs-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.bs-danger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 560px;
+  margin-top: 22px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+}
+
+.bs-danger > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.bs-danger strong {
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.bs-danger .hint {
+  margin: 2px 0 0;
+  font-family: var(--font-ui);
+  color: var(--text-dim);
+}
+
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--bg-panel);
+  white-space: nowrap;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: var(--accent-text);
+}
+
+@media (width <= 1080px) {
+  .bs-danger {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

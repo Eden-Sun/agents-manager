@@ -44,6 +44,7 @@ web/src/
   components/
     Sidebar.tsx    # Project 分組、狀態燈、start/stop、新增 Project / Bot 表單
     ChatPanel.tsx  # 標題列、對話/終端分頁、氣泡列表、輸入框
+    BotSettingsPanel.tsx # Bot 設定（改名 / 模型 / args / 身份 / env / 刪除），另 export ModelField
     BlockedPanel.tsx # blocked 時的終端快照 + 按鍵面板
     TerminalTab.tsx  # recent_unwrapped 唯讀快照 + 刷新
     StatusLamp.tsx   # §2.2 合成燈號
@@ -116,6 +117,10 @@ web/src/
 符合 API.md §9 的建議。後端回 409 時，`reason` 直接顯示在右下角通知。
 
 輸入框：Enter 送出、Shift+Enter 換行，並排除輸入法組字中的 Enter（`isComposing`）。
+
+`POST /prompt` 回 `delivery = "failed"`（例如 agent 正 blocked）時**不塞本地的假 Turn**
+（REVIEW B10）：直接跳通知並 `loadMessages`，輸入框保持可用、文字留在框裡讓使用者重送。
+只有 `pending` / `ok` / `unknown` 才會先在 `turns` map 補一筆，讓輸入框在 WS 事件抵達前就鎖住。
 
 ### blocked 面板
 
@@ -220,10 +225,9 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
 4. **`turn_updated` 的 in-flight 判斷依賴事件抵達**。若 WS 在 prompt 與 hook 之間斷線且
    `resync` 沒補上，輸入框可能短暫誤判為可用；再送會被後端 409 擋下並顯示原因，
    不會造成錯配，但體驗上會多一次失敗。
-5. **`PATCH /api/bots/:id` 尚未接 UI**（改 args / autostart / 改名）。目前只能刪掉重建。
-   後端端點已存在。
-6. **`inject_hooks` 沒有出現在新增 Bot 表單**（後端支援，預設 true）。要測終端備援
-   目前得手改 `config.toml`。
+5. ~~**`PATCH /api/bots/:id` 尚未接 UI**~~ → 2026-09-06 已完成，見下方「Bot 設定面板」。
+6. **`inject_hooks` 沒有出現在新增 Bot 表單**（後端支援，預設 true）。建立後可在
+   「Bot 設定」面板改（改完要重啟）。
 7. **終端快照是純文字**，ANSI 已由後端去除，但 box-drawing 字元在含中文的行會對不齊
    （等寬字體對 CJK 的寬度處理）。不影響操作。
 8. **`terminal_fallback` 的長訊息**會整段終端內容進氣泡；超過 ~900 字或 18 行的氣泡預設
@@ -359,3 +363,92 @@ daemon 端 §11 上線後用 `node scripts/demo-hosts-real.mjs`（前端 `npx vi
 ## 身份（identities，2026-09-06 新增）
 
 sidebar 底部「身份」面板列出 `identities[]`（名稱、kind、env、args、使用中的 Bot 數）並可新增 / 刪除。新增 Bot 表單多了「身份」下拉（只列同 kind 的身份）與「進階：額外環境變數」；bot 列在 kind 標籤旁顯示身份徽章。契約見 `docs/API.md` 的 identities 章節（bot.identity、bot.env、`POST /api/identities`、`DELETE /api/identities/:name`、WS `identities_changed`）。mock 內建 `cc0`（無 env）與 `cc1`（`CLAUDE_CONFIG_DIR=$HOME/.claude-ccompany`）。驗收腳本 `scripts/demo-identity.mjs`，截圖 `docs/screenshots/80-82`。
+
+## Bot 設定面板（API.md §10 / v3.3，2026-09-06 新增）
+
+改名、改模型、改參數、改身份與 env、autostart / auto_approve / inject_hooks、刪除 bot、
+重啟套用。契約以 [`docs/API.md` §10](./API.md) 為準。
+
+### 入口
+
+- **bot 列的齒輪** ⚙（`.icon-btn.gear`，hover / 選取時整排 `.bot-actions` 才浮出）。
+- **右側標題列** bot 名稱旁的齒輪（`aria-expanded` 反映開合）。
+
+兩者都呼叫 `openSettings(botId)`：順便把選取切到該 bot，面板**覆蓋在對話 / 終端之上**
+（標題列的燈號、run/pane、啟動 / 停止仍在），按 ✕、「關閉」或切「對話 / 終端」分頁即回到對話。
+
+### 欄位與送出
+
+| 欄位 | 備註 |
+|---|---|
+| 名稱 | 有 active Run 時 `disabled`，下方提示「停止後才能改名」＋「停止並改名」按鈕（stop → 輪詢到 run 進 `stopped` / 消失 → 自動 focus 回輸入框）。前端仍檢查 `[a-z][a-z0-9_-]{0,31}` |
+| kind | 唯讀 |
+| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.5` / `gpt-5.6-luna` / `gpt-6-astra`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
+| args | 空白分隔 |
+| 身份 | 只列同 kind 的 identities；`（無）` = `null` |
+| env | 每行 `KEY=VALUE`（與身份面板共用 `parseEnvText` / `envToText`），整包取代 |
+| autostart / auto_approve / inject_hooks | checkbox |
+
+`ModelField` 由 `components/BotSettingsPanel.tsx` export，**新增 Bot 表單也用同一個**
+（預設「（預設）」，claude 的提示字：「claude 預設可能是 haiku，建議選 opus 或 sonnet」）。
+`api/types.ts` 的 `MODEL_OPTIONS` 是唯一的清單來源。
+
+**只送有變更的欄位**：面板每次 render 把表單狀態和 `bot` 逐欄比對成一個 `PatchBotInput`，
+按鈕旁顯示「已變更：model, args」；沒有變更時「儲存」是 disabled。
+
+### needs_restart
+
+`PATCH` 回 `{needs_restart:true}`（有 active Run 且動到影響啟動 argv/env 的欄位）時，面板頂部
+出現黃色 `.bs-banner.warn`「已儲存，重啟 Bot 後生效」＋「立即重啟」→ `POST /api/bots/:id/restart`，
+成功後橫幅消失、燈號 `starting → idle`。回 `false`（沒有 Run，或只改了 `autostart`）則顯示
+藍色「已儲存」橫幅並跳一則通知。
+
+### 刪除
+
+面板底部紅框「刪除 Bot」，`confirm` 文案說明「會停止並關閉它的終端 pane（有 active Run 也會先
+停止），設定從 config.toml 移除，對話紀錄會保留」。刪除後選取移到**同一個 Project 的下一個
+bot**（沒有就往前一個，都沒有則 `null`；`removeBot` 會蓋掉 `refreshState` 的「退回 bots[0]」）。
+
+### mock 補齊（`VITE_MOCK=1`）
+
+`bots[].model`、`PATCH` 回 `needs_restart`（只有 `model` / `args` / `identity` / `env` /
+`auto_approve` / `inject_hooks` 算數，只改 `autostart` → `false`）、`POST /bots/:id/restart`
+（先把 run 收掉再 start）、`DELETE /bots/:id`（有 Run 先停、訊息保留）、改名衝突 409
+（`cannot rename a bot with an active run` / `bot name already in use`）、identity kind 不符 → 400。
+種子資料的 `am-claude` 改成 `model: null`（原本是 `args: ["--model","opus"]`）。
+
+### 驗收紀錄（2026-09-06）
+
+`node scripts/demo-botsettings.mjs`（先在 `web/` 內 `VITE_MOCK=1 npx vite --port 5183`）：
+
+| 檔案 | 內容 |
+|---|---|
+| `100-bot-settings.png` | 齒輪開啟面板；`am-claude` 執行中 → 名稱欄 disabled ＋「停止並改名」 |
+| `101-bot-settings-model-changed.png` | 模型改 `opus`、args 改 `--search --verbose`，顯示「已變更：model, args」 |
+| `102-needs-restart.png` | 儲存 → 黃色「已儲存，重啟 Bot 後生效」＋「立即重啟」 |
+| `103-restarting.png` / `104-restarted-idle.png` | 立即重啟 → `starting`（黃閃）→ `idle`（綠），橫幅消失，列上出現 `opus` 徽章 |
+| `105-rename-after-stop.png` | 「停止並改名」→ 停止完成後名稱欄解鎖，輸入 `am-claude-fast` |
+| `106-renamed.png` | 儲存 → 藍色「已儲存」，sidebar 名稱更新 |
+| `107-dark.png` / `108-narrow-900.png` | 深色主題、900 寬（`.bs-danger` 轉直排） |
+| `109-new-bot-model-field.png` | 新增 Bot 表單的「模型」欄位與 haiku 提示 |
+| `110-delete-section.png` / `111-after-delete.png` | 刪除區塊；刪除後列表只剩 `am-codex`，選取自動移過去 |
+
+真後端（`agents-managerd serve` @ 127.0.0.1:7788），`node scripts/demo-botsettings-real.mjs`
+（前端 `npx vite --port 5184`）。**只動本機的 `am-codex`**，沒碰遠端 `@m4p` 的 bot：
+
+| 檔案 | 內容 |
+|---|---|
+| `112-real-bot-settings.png` | 真 state 下開啟面板：codex 的模型選項、名稱欄因 active Run 而 disabled |
+| `113-real-needs-restart.png` | 模型改 `gpt-5.5` → 儲存 → daemon 回 `needs_restart: true` |
+| `114-real-restarting.png` / `115-real-restarted.png` | 立即重啟 → `starting` → `idle`，標題列與 bot 列出現 `gpt-5.5` 徽章 |
+
+事後確認 `~/.config/agents-manager/config.toml` 寫入了 `model = "gpt-5.5"`，
+`GET /api/state` 的 `am-codex.model` 也是 `gpt-5.5`。全程主控台無例外。
+
+### 已知問題（Bot 設定）
+
+1. **模型清單是前端寫死的**（`MODEL_OPTIONS`），後端不做白名單驗證。CLI 換代號時要改
+   `web/src/api/types.ts`；在那之前使用者可以用「自訂…」輸入任意字串。
+2. **改名沒有「改完自動再啟動」**：「停止並改名」只負責停止，改完要自己按「啟動」。
+3. **`needs_restart` 的判斷完全信後端**。前端不自己推論哪些欄位需要重啟。
+4. **面板沒有未存變更的離開確認**：切 bot / 切分頁 / 按 ✕ 會直接丟掉未儲存的編輯。

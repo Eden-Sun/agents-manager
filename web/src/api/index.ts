@@ -16,6 +16,8 @@ import type {
   MessagesPage,
   NewBotInput,
   NewProjectInput,
+  PatchBotInput,
+  PatchBotResult,
   PromptResult,
   TerminalSnapshot,
   TerminalSource,
@@ -120,6 +122,22 @@ export async function deleteIdentity(name: string): Promise<void> {
 export async function createBot(projectId: string, input: NewBotInput): Promise<string> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/bots`, input)
   return isRec(raw) ? str(pick(raw, 'bot_id', 'id')) : ''
+}
+
+/**
+ * `PATCH /api/bots/:id` (API.md v3.3). Only the changed fields are sent; `model` /
+ * `identity` as `null` clears them. Renaming a bot that has an active Run is a 409.
+ */
+export async function patchBot(botId: string, input: PatchBotInput): Promise<PatchBotResult> {
+  const raw = await transport.request('PATCH', `/bots/${encodeURIComponent(botId)}`, input)
+  const o = isRec(raw) ? raw : {}
+  return { needs_restart: o.needs_restart === true || o.restart_required === true }
+}
+
+/** `POST /api/bots/:id/restart` — stop then start; returns the new run id. */
+export async function restartBot(botId: string): Promise<string> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart`)
+  return isRec(raw) ? str(pick(raw, 'run_id')) : ''
 }
 
 export async function deleteBot(botId: string): Promise<void> {
