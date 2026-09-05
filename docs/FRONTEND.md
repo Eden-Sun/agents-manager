@@ -732,3 +732,23 @@ mock（`VITE_MOCK=1 npx vite --port 5190`，headless Chrome CDP 9370，獨立 `-
 
 - `web/src/components/Sidebar.tsx` — `NewBotForm` Project chip + 過濾；`.project-head` 整列點選與 `.selected`
 - `web/src/styles.css` — `.project-head` / `.selected`、`.opt-filter`、chip 換行 / disabled / hover、chip 內 `HostBadge` 對比
+
+## UI 決策實作（Codex sol 決策 → grok 實作，2026-09-06）
+
+決策清單見 `docs/UI-DECISIONS.md`（12 條，依實機截圖 200–204 產出）。實作分四個 commit：P0、P1、P2，加一個 zustand selector 修正。
+
+| 決策 | 對應截圖 | 狀態 |
+|---|---|---|
+| P0 群組收件者／發言者 | `212-ui-group-dark` | 訊息上方 metadata 列（`你 → am-claude` / `am-claude · Claude`）、composer 上方收件者 chip（`@all · 3 個 bot`） |
+| P0 停止／刪除誤操作 | `210-ui-chat-dark`、`214-ui-settings-dark` | bot 列不再常駐紅色停止鈕（改 hover 選單）、`ConfirmDialog.tsx` 帶全名確認 |
+| P1 版面寬度與動線 | 全部 | 量測：lane 1152px、agent 氣泡上限 840px |
+| P1 側欄資訊層級 | `210`、`212` | 專案兩行（名稱＋路徑）、bot 列 kind 圖示化、底部只留兩顆主要按鈕＋「環境設定」 |
+| P1 缺少 CLI 提示 | `210` 頂欄 | 由 140px 區塊縮成琥珀色 `⚠ 1` 圖示 |
+| P1 額度 pill | `210`、`212` | 單一 kind pill＋「全部額度」popover（<1600px 時收合） |
+| P1 淺色對比 | `211-ui-chat-light` | canvas／surface／border 角色重建 |
+| P1 訊息結構 | 全部 | 量測：同回合間距 12px、跨回合 24px |
+| P1 新增 Bot 表單 | `213-ui-newbot-dark` | 欄位順序與預設值文案 |
+| P1 設定 drawer | `214-ui-settings-dark` | 右側固定寬度 drawer |
+| P2 空狀態、icon/tab/鍵盤 | `215-ui-narrow-900` | 已實作 |
+
+驗證方式：`node` 驅動 headless Chrome（CDP）對真 daemon（127.0.0.1:7788）截圖，主控台零例外。
