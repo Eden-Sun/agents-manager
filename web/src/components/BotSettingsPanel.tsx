@@ -32,9 +32,9 @@ export function modelHint(kind: BotKind): string {
     case 'claude':
       return 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
     case 'codex':
-      return '留「（預設）」則不帶 -m，由 codex 自行決定'
+      return '選「使用 CLI 預設」則不帶 -m，由 codex 自行決定'
     case 'grok':
-      return '留「（預設）」則不帶 -m，由 grok 自行決定（`grok models`：grok-4.6 為預設）'
+      return '選「使用 CLI 預設」則不帶 -m，由 grok 自行決定（`grok models`：grok-4.6 為預設）'
   }
 }
 
@@ -73,7 +73,7 @@ export function ModelField({
           onChange(v === MODEL_DEFAULT ? null : v)
         }}
       >
-        <option value={MODEL_DEFAULT}>（預設）</option>
+        <option value={MODEL_DEFAULT}>使用 CLI 預設</option>
         {opts.map((m) => (
           <option key={m} value={m}>
             {m}
@@ -183,7 +183,7 @@ export function IdentityOptions({
       <span>身份</span>
       <div className="opt-group" role="radiogroup" aria-label="identity">
         <button type="button" className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
-          預設
+          不指定身分（本機預設）
         </button>
         {identities.map((i) => (
           <button key={i.name} type="button" className={`opt${value === i.name ? ' on' : ''}`} title={Object.entries(i.env).map(([k, v]) => `${k}=${v}`).join(' ')} onClick={() => onChange(i.name)}>
@@ -216,6 +216,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [saving, setSaving] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
@@ -229,11 +230,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setPersona(b.persona ?? '')
     setIdentity(b.identity ?? '')
     setBanner(null)
+    setCloseConfirmOpen(false)
   }, [botId])
 
   if (!bot) {
     return (
-      <div className="bot-settings">
+      <div className="bot-settings" role="dialog" aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -265,22 +267,31 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setBanner(null)
     void patchBot(botId, patch).then((needsRestart) => {
       setSaving(false)
-      if (needsRestart === null) return // 失敗，原因已跳通知
+      if (needsRestart === null) return
       setBanner(needsRestart ? 'restart' : 'saved')
       if (!needsRestart) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
     })
   }
 
+  const requestClose = () => {
+    if (dirty) {
+      setCloseConfirmOpen(true)
+      return
+    }
+    closeSettings()
+  }
+
   return (
-    <div className="bot-settings">
+    <div className="bot-settings" role="dialog" aria-label={`${bot.name} 的設定`}>
       <div className="bs-head">
         <strong>Bot 設定</strong>
         <KindTag kind={bot.kind} />
         <span className="bs-sub" title={project?.path}>
-          {project?.label ?? ''}
+          {bot.name}
+          {project ? ` · ${project.label}` : ''}
         </span>
         <span className="spacer" />
-        <button type="button" className="icon-btn" onClick={closeSettings} aria-label="關閉設定" title="關閉，回到對話">
+        <button type="button" className="icon-btn" onClick={requestClose} aria-label="關閉設定" title="關閉，回到對話">
           ✕
         </button>
       </div>
@@ -316,6 +327,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       <div className="bs-body">
         <form
           className="form"
+          id={`bot-settings-form-${botId}`}
           onSubmit={(e) => {
             e.preventDefault()
             save()
@@ -335,11 +347,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             ) : null}
           </label>
 
-          <label className="field">
-            <span>kind（建立後不可更改）</span>
-            <input type="text" value={bot.kind} readOnly disabled />
-          </label>
-
           {bot.kind === 'claude' ? (
             <ModelField kind={bot.kind} value={model} onChange={setModel} />
           ) : (
@@ -356,17 +363,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           )}
           <IdentityOptions kind={bot.kind} value={identity} onChange={setIdentity} />
           <PersonaField value={persona} onChange={setPersona} />
-
-          <div className="bs-actions">
-            <span className="hint">{dirty ? `已變更：${changedKeys.join(', ')}` : '沒有變更'}</span>
-            <span className="spacer" />
-            <button type="button" className="btn" onClick={closeSettings}>
-              關閉
-            </button>
-            <button type="submit" className="btn primary" disabled={!canSave}>
-              {saving ? '儲存中…' : '儲存'}
-            </button>
-          </div>
         </form>
 
         <div className="bs-danger">
@@ -379,6 +375,35 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           </button>
         </div>
       </div>
+
+      <div className="bs-actions">
+        <span className="hint">{dirty ? `已變更：${changedKeys.join(', ')}` : '沒有變更'}</span>
+        <span className="spacer" />
+        <button type="button" className="btn" onClick={requestClose}>
+          關閉
+        </button>
+        <button type="submit" form={`bot-settings-form-${botId}`} className="btn primary" disabled={!canSave}>
+          {saving ? '儲存中…' : '儲存'}
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={closeConfirmOpen}
+        title="放棄未儲存的變更？"
+        body={
+          <>
+            <strong>{bot.name}</strong> 的設定尚未儲存（{changedKeys.join(', ')}）。關閉將遺失這些變更。
+          </>
+        }
+        confirmLabel="放棄並關閉"
+        danger
+        width={360}
+        onCancel={() => setCloseConfirmOpen(false)}
+        onConfirm={() => {
+          setCloseConfirmOpen(false)
+          closeSettings()
+        }}
+      />
 
       <ConfirmDialog
         open={deleteOpen}

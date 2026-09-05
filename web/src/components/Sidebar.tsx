@@ -82,6 +82,8 @@ function BotRow({ botId }: { botId: string }) {
         <span className="bot-name">
           {bot.name}
           <PersonaMark persona={bot.persona} />
+          {/* idle / offline are hidden by CSS — the lamp already says so. */}
+          <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
         </span>
         <span className="bot-sub">
           <KindTag kind={bot.kind} />
@@ -89,10 +91,9 @@ function BotRow({ botId }: { botId: string }) {
             <span className="model-tag" title={`模型：${bot.model}`}>
               {bot.model}
             </span>
-          ) : null}
-          <IdentityBadge name={bot.identity} />
-          {/* idle / offline are hidden by CSS — the lamp already says so. */}
-          <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
+          ) : (
+            <IdentityBadge name={bot.identity} />
+          )}
         </span>
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
@@ -258,15 +259,45 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   )
 }
 
+function lastKindKey(projectId: string): string {
+  return `am:lastKind:${projectId}`
+}
+
+function uniqueBotName(kind: BotKind, projectId: string, bots: { project_id: string; name: string }[]): string {
+  const taken = new Set(bots.filter((b) => b.project_id === projectId).map((b) => b.name))
+  let n = 1
+  while (taken.has(`${kind}-${n}`)) n += 1
+  return `${kind}-${n}`
+}
+
+function defaultKindForProject(projectId: string, tools: ReturnType<typeof toolsOfHost>, bots: { project_id: string; kind: BotKind }[]): BotKind {
+  const installed = BOT_KINDS.filter((k) => tools[k].installed)
+  try {
+    const stored = localStorage.getItem(lastKindKey(projectId)) as BotKind | null
+    if (stored && installed.includes(stored)) return stored
+  } catch {
+    /* ignore */
+  }
+  for (let i = bots.length - 1; i >= 0; i -= 1) {
+    const b = bots[i]
+    if (b.project_id === projectId && tools[b.kind].installed) return b.kind
+  }
+  return installed[0] ?? BOT_KINDS[0]
+}
+
 function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialProjectId?: string }) {
   const projects = useStore((s) => s.projects)
   const hosts = useStore((s) => s.hosts)
+  const bots = useStore((s) => s.bots)
   const addBot = useStore((s) => s.addBot)
   const startBot = useStore((s) => s.startBot)
   const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
   const [projectFilter, setProjectFilter] = useState('')
-  const [name, setName] = useState('')
-  const [kind, setKind] = useState<BotKind>('claude')
+  const pid = projectId || projects[0]?.id || ''
+  const host = useStore((s) => projectHostName(s, pid || null))
+  const tools = useStore((s) => toolsOfHost(s, host))
+  const [kind, setKind] = useState<BotKind>(() => (pid ? defaultKindForProject(pid, tools, bots) : 'claude'))
+  const [name, setName] = useState(() => (pid ? uniqueBotName(kind, pid, bots) : ''))
   const [model, setModel] = useState<string | null>(null)
   const [effort, setEffort] = useState<string | null>(null)
   const [fast, setFast] = useState(false)
@@ -274,21 +305,34 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [identity, setIdentity] = useState('')
   const [busy, setBusy] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
+  const nameTouched = useRef(false)
 
-  const pid = projectId || projects[0]?.id || ''
-  const host = useStore((s) => projectHostName(s, pid || null))
-  const tools = useStore((s) => toolsOfHost(s, host))
   const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
-  const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
+  const cliOk = Boolean(tools[kind]?.installed)
+  const canSubmit = nameOk && cliOk && Boolean(pid) && !busy
+  const hostUp = (h: string) => h === 'local' || (hosts.find((x) => x.name === h)?.connected ?? false)
   const filterQ = projectFilter.trim().toLowerCase()
-  const visibleProjects = filterQ
-    ? projects.filter((p) => p.label.toLowerCase().includes(filterQ))
-    : projects
+  const visibleProjects = filterQ ? projects.filter((p) => p.label.toLowerCase().includes(filterQ)) : projects
 
-  // Opened from a project's「＋」: the project is given, so go straight to the name.
   useEffect(() => {
-    if (initialProjectId) nameRef.current?.focus()
-  }, [initialProjectId])
+    if (!pid) return
+    const nextKind = defaultKindForProject(pid, tools, bots)
+    setKind(nextKind)
+    if (!nameTouched.current) setName(uniqueBotName(nextKind, pid, bots))
+  }, [pid])
+
+  useEffect(() => {
+    nameRef.current?.focus()
+  }, [])
+
+  const pickKind = (k: BotKind) => {
+    setKind(k)
+    setIdentity('')
+    setModel(null)
+    setEffort(null)
+    setFast(false)
+    if (!nameTouched.current && pid) setName(uniqueBotName(k, pid, bots))
+  }
 
   if (projects.length === 0) {
     return <p className="hint">請先新增一個 Project。</p>
@@ -299,9 +343,8 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
       className="form"
       onSubmit={(e) => {
         e.preventDefault()
-        if (!nameOk || !pid || busy) return
+        if (!canSubmit) return
         setBusy(true)
-        // 精簡表單：自動核准永遠開、不設 autostart；新增後立刻啟動。
         void addBot(pid, {
           name,
           kind,
@@ -315,14 +358,18 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         }).then(async (id) => {
           setBusy(false)
           if (id) {
-            setName('')
+            try {
+              localStorage.setItem(lastKindKey(pid), kind)
+            } catch {
+              /* ignore */
+            }
             onDone()
             await startBot(id)
           }
         })
       }}
     >
-{initialProjectId ? null : (
+      {initialProjectId ? null : (
         <div className="field">
           <span>Project</span>
           {projects.length > 6 ? (
@@ -348,7 +395,10 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
                   className={`opt${pid === p.id ? ' on' : ''}`}
                   disabled={!up}
                   title={up ? p.path : `${p.label}（主機未連線）`}
-                  onClick={() => setProjectId(p.id)}
+                  onClick={() => {
+                    setProjectId(p.id)
+                    nameTouched.current = false
+                  }}
                 >
                   <span className="opt-label">{p.label}</span>
                   <HostBadge host={p.host} connected={up} />
@@ -359,43 +409,30 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           {visibleProjects.length === 0 ? <span className="hint">沒有符合的 Project。</span> : null}
         </div>
       )}
-      <label className="field">
-        <span>名稱</span>
-        <input
-          ref={nameRef}
-          type="text"
-          value={name}
-          placeholder="foo-claude"
-          spellCheck={false}
-          autoFocus={Boolean(initialProjectId)}
-          onChange={(e) => setName(e.target.value)}
-        />
-        {name && !nameOk ? <span className="hint">1–32 個字，不可含空白或 @ , : ;</span> : null}
-      </label>
       <div className="field">
         <span>kind</span>
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {BOT_KINDS.map((k) => {
             const missing = !tools[k].installed
+            const reason = missing ? `${host === 'local' ? '本機' : host} 尚未安裝 ${k}` : k
             return (
               <span key={k} className="opt-wrap">
                 <button
                   type="button"
                   className={`opt${kind === k ? ' on' : ''}`}
                   disabled={missing}
-                  title={missing ? `${host === 'local' ? '本機' : host} 尚未安裝 ${k}` : k}
-                  onClick={() => {
-                    setKind(k)
-                    setIdentity('')
-                    setModel(null)
-                    setEffort(null)
-                    setFast(false)
-                  }}
+                  title={reason}
+                  onClick={() => pickKind(k)}
                 >
                   <KindTag kind={k} />
                   <span className="opt-label">{k}</span>
                 </button>
-                {missing ? <InstallToolButton host={host} kind={k} small /> : null}
+                {missing ? (
+                  <>
+                    <span className="kind-missing-reason">未安裝</span>
+                    <InstallToolButton host={host} kind={k} small />
+                  </>
+                ) : null}
               </span>
             )
           })}
@@ -407,12 +444,28 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         <ApiModelFields kind={kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
       )}
       <IdentityOptions kind={kind} value={identity} onChange={setIdentity} />
+      <label className="field">
+        <span>名稱</span>
+        <input
+          ref={nameRef}
+          type="text"
+          value={name}
+          placeholder={`${kind}-1`}
+          spellCheck={false}
+          onChange={(e) => {
+            nameTouched.current = true
+            setName(e.target.value)
+          }}
+        />
+        {name && !nameOk ? <span className="hint">1–32 個字，不可含空白或 @ , : ;</span> : null}
+        {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
+      </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消
         </button>
-        <button type="submit" className="btn primary" disabled={!nameOk || busy}>
+        <button type="submit" className="btn primary" disabled={!canSubmit}>
           {busy ? '建立中…' : '新增並啟動'}
         </button>
       </div>
@@ -449,7 +502,9 @@ function ProjectTitle({ projectId, label, host, path, hostUp }: { projectId: str
         </span>
       ) : null}
       <HostBadge host={host} connected={hostUp} />
-      <span className="project-path">{shortPath(path)}</span>
+      <span className="project-path" title={path}>
+        {shortPath(path, 36)}
+      </span>
     </button>
   )
 }
@@ -469,12 +524,79 @@ export function Sidebar() {
   const selectedProjectId = useStore((s) => s.selectedProjectId)
   const selectProject = useStore((s) => s.selectProject)
   const removeProject = useStore((s) => s.removeProject)
-  const [open, setOpen] = useState<'project' | 'bot' | 'host' | 'identity' | null>(null)
+  const [open, setOpen] = useState<'project' | 'env' | null>(null)
   const identityCount = useStore((s) => s.identities.length)
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
+  const [botSheetOpen, setBotSheetOpen] = useState(false)
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
   const hostsDown = hosts.filter((h) => !h.connected).length
+
+  const closeBotSheet = () => {
+    setBotFormFor(null)
+    setBotSheetOpen(false)
+  }
+
+  const openBotSheet = (projectId?: string) => {
+    setOpen(null)
+    setBotFormFor(projectId ?? null)
+    setBotSheetOpen(true)
+  }
+
+  const botSheetProject = botFormFor ? projects.find((p) => p.id === botFormFor) : null
+  const botSheetLabel = botSheetProject?.label ?? '選擇 Project'
+
+  if (botSheetOpen) {
+    return (
+      <>
+        <div className="sidebar-head">
+          <h1>Agents Manager</h1>
+          {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
+          <ConnBadge socket={socket} connected={connected} />
+        </div>
+        <div className="new-bot-sheet">
+          <div className="sheet-head">
+            <button type="button" className="icon-btn" aria-label="返回" title="返回清單" onClick={closeBotSheet}>
+              ←
+            </button>
+            <strong title={botSheetProject?.path}>
+              新增 Bot · {botSheetLabel}
+            </strong>
+          </div>
+          <div className="sheet-body inline-form">
+            <NewBotForm
+              key={botFormFor ?? 'pick'}
+              initialProjectId={botFormFor ?? undefined}
+              onDone={closeBotSheet}
+            />
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  if (open === 'project') {
+    return (
+      <>
+        <div className="sidebar-head">
+          <h1>Agents Manager</h1>
+          {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
+          <ConnBadge socket={socket} connected={connected} />
+        </div>
+        <div className="new-project-sheet">
+          <div className="sheet-head">
+            <button type="button" className="icon-btn" aria-label="返回" title="返回清單" onClick={() => setOpen(null)}>
+              ←
+            </button>
+            <strong>新增 Project</strong>
+          </div>
+          <div className="sheet-body">
+            <NewProjectForm onDone={() => setOpen(null)} />
+          </div>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
@@ -505,10 +627,10 @@ export function Sidebar() {
                   type="button"
                   className="icon-btn add"
                   title="在這個 Project 新增 Bot"
-                  aria-expanded={botFormFor === p.id}
+                  aria-expanded={false}
                   onClick={(e) => {
                     e.stopPropagation()
-                    setBotFormFor(botFormFor === p.id ? null : p.id)
+                    openBotSheet(p.id)
                   }}
                 >
                   ＋
@@ -525,22 +647,12 @@ export function Sidebar() {
                   ✕
                 </button>
               </header>
-              {botFormFor === p.id ? (
-                <div className="inline-form">
-                  <NewBotForm key={p.id} initialProjectId={p.id} onDone={() => setBotFormFor(null)} />
-                </div>
-              ) : null}
               {list.length === 0 ? (
                 <p className="hint" style={{ padding: '0 14px 6px' }}>
-                  這個 Project 還沒有 Bot。
-                  {botFormFor === p.id ? null : (
-                    <>
-                      {' '}
-                      <button type="button" className="link-btn" onClick={() => setBotFormFor(p.id)}>
-                        ＋ 新增 Bot
-                      </button>
-                    </>
-                  )}
+                  這個 Project 還沒有 Bot。{' '}
+                  <button type="button" className="link-btn" onClick={() => openBotSheet(p.id)}>
+                    ＋ 新增 Bot
+                  </button>
                 </p>
               ) : (
                 list.map((b) => <BotRow key={b.id} botId={b.id} />)
@@ -551,51 +663,35 @@ export function Sidebar() {
       </div>
 
       <div className="sidebar-foot">
-        <button
-          type="button"
-          className="disclosure"
-          aria-expanded={open === 'project'}
-          onClick={() => setOpen(open === 'project' ? null : 'project')}
-        >
-          <span className="chev">{open === 'project' ? '▼' : '▶'}</span> 新增 Project
-        </button>
-        {open === 'project' ? <NewProjectForm onDone={() => setOpen(null)} /> : null}
+        <div className="sidebar-foot-actions">
+          <button type="button" className="btn" onClick={() => setOpen('project')}>
+            新增 Project
+          </button>
+          <button type="button" className="btn" onClick={() => openBotSheet(selectedProjectId ?? projects[0]?.id)} disabled={projects.length === 0}>
+            新增 Bot
+          </button>
+        </div>
 
         <button
           type="button"
           className="disclosure"
-          aria-expanded={open === 'bot'}
-          onClick={() => setOpen(open === 'bot' ? null : 'bot')}
+          aria-expanded={open === 'env'}
+          onClick={() => setOpen(open === 'env' ? null : 'env')}
         >
-          <span className="chev">{open === 'bot' ? '▼' : '▶'}</span> 新增 Bot
-        </button>
-        {open === 'bot' ? <NewBotForm onDone={() => setOpen(null)} /> : null}
-
-        <button
-          type="button"
-          className="disclosure"
-          aria-expanded={open === 'host'}
-          onClick={() => setOpen(open === 'host' ? null : 'host')}
-        >
-          <span className="chev">{open === 'host' ? '▼' : '▶'}</span> 主機
+          <span className="chev">{open === 'env' ? '▼' : '▶'}</span> 環境設定
           <span className="disclosure-note">
             {hosts.length === 0 ? '本機' : `本機 + ${hosts.length}`}
-            {hostsDown > 0 ? ` ・ ${hostsDown} 個未連線` : ''}
+            {hostsDown > 0 ? ` ・ ${hostsDown} 未連線` : ''}
+            {` ・ 身分 ${identityCount}`}
           </span>
         </button>
-        {open === 'host' ? <HostsPanel /> : null}
-
-        <button
-          type="button"
-          className="disclosure"
-          aria-expanded={open === 'identity'}
-          onClick={() => setOpen(open === 'identity' ? null : 'identity')}
-        >
-          <span className="chev">{open === 'identity' ? '▼' : '▶'}</span> 身份
-          <span className="disclosure-note">{identityCount === 0 ? '無' : `${identityCount} 個`}</span>
-        </button>
-        {open === 'identity' ? <IdentitiesPanel /> : null}
-        <KindDisplayToggle />
+        {open === 'env' ? (
+          <div className="env-panel">
+            <HostsPanel />
+            <IdentitiesPanel />
+            <KindDisplayToggle />
+          </div>
+        ) : null}
       </div>
     </>
   )

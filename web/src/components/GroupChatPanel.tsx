@@ -9,7 +9,8 @@ import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { IssuesBar } from './IssuesBar'
 import { QuotaStrip } from './QuotaStrip'
-import { ToolsHint } from './Tools'
+import { ToolsHint, ToolsHintIcon } from './Tools'
+import type { BotKind } from '../api/types'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 
 /**
@@ -450,7 +451,9 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const project = useStore((s) => s.projects.find((p) => p.id === projectId) ?? null)
   const hostName = useStore((s) => projectHostName(s, projectId))
   const hostUp = useStore((s) => hostName === 'local' || (s.hosts.find((h) => h.name === hostName)?.connected ?? false))
-  const memberCount = useStore((s) => s.bots.filter((b) => b.project_id === projectId).length)
+  const members = useStore(useShallow((s) => s.bots.filter((b) => b.project_id === projectId)))
+  const memberCount = members.length
+  const memberKinds = useMemo(() => [...new Set(members.map((b) => b.kind))] as BotKind[], [members])
   const selectProject = useStore((s) => s.selectProject)
   const attachCommand = useStore((s) => attachCommandOf(s, projectId))
   const composerRef = useRef<HTMLTextAreaElement>(null)
@@ -484,6 +487,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         </div>
         <MemberStrip projectId={projectId} />
         <span className="spacer" />
+        <ToolsHintIcon />
         <QuotaStrip />
         <span className="main-status" title={project.path}>
           {memberCount} 個成員
@@ -495,7 +499,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           </button>
         </div>
       </div>
-      <ToolsHint />
+      <ToolsHint focusHost={hostName} focusKinds={memberKinds} />
       <div className="chat">
         <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
         <GroupMessageList projectId={projectId} />

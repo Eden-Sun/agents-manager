@@ -15,7 +15,7 @@ import { KindTag } from './KindTag'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
-import { ToolsHint } from './Tools'
+import { ToolsHint, ToolsHintIcon } from './Tools'
 
 const SOURCE_LABEL: Record<string, string> = {
   hook: 'hook',
@@ -294,10 +294,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </button>
           <span className="main-status">未選擇 Bot</span>
           <span className="spacer" />
+          <ToolsHintIcon />
           <QuotaStrip />
           <AttachButton command={attachCommand} />
         </div>
-        <ToolsHint />
         <EmptyState>從左側選擇一個 Bot，或先新增 Project 與 Bot。</EmptyState>
       </>
     )
@@ -342,7 +342,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {LAMP_LABEL[lamp]}
         </span>
         <span className="spacer" />
-        <QuotaStrip />
+        <ToolsHintIcon />
+        <QuotaStrip focusKind={bot.kind} />
         <AttachButton command={attachCommand} compact />
         <div className="tabs" role="tablist">
           <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
@@ -389,7 +390,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           )}
         </div>
       </div>
-      <ToolsHint />
+      <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
 
       <ConfirmDialog
         open={stopConfirmOpen}
@@ -415,9 +416,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         }}
       />
 
-      {settingsOpen ? (
-        <BotSettingsPanel key={botId} botId={botId} />
-      ) : tab === 'terminal' ? (
+      {tab === 'terminal' && !settingsOpen ? (
         active ? (
           <TerminalTab botId={botId} />
         ) : (
@@ -429,6 +428,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {blocked ? <BlockedPanel botId={botId} /> : null}
           <MessageList botId={botId} />
           <Composer botId={botId} inputRef={composerRef} />
+          {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}
     </>
