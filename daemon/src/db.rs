@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS projects (
   workspace_id TEXT,
   deleted_at TEXT, created_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path ON projects(host, path);
+CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex')),
@@ -96,6 +96,9 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             sqlx::query(ddl).execute(&pool).await.with_context(|| format!("migrate: {ddl}"))?;
         }
     }
+    // The first cut of the §11 migration made (host, path) unique over *all* rows, which
+    // stopped a soft-deleted project's directory from being registered again.
+    sqlx::query("DROP INDEX IF EXISTS projects_host_path").execute(&pool).await?;
     // SPEC §11: `path` used to be UNIQUE across every machine. The same directory can now
     // exist on several hosts, so rebuild the table with a UNIQUE(host, path) index instead.
     // The whole rebuild must run on ONE connection: `PRAGMA foreign_keys` is per-connection.
@@ -125,13 +128,13 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
                        SELECT id, path, label, host, workspace_id, deleted_at, created_at FROM projects",
                     "DROP TABLE projects",
                     "ALTER TABLE projects_new RENAME TO projects",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path ON projects(host, path)",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL",
                 ]
             } else {
                 // A previous run died between DROP and RENAME; finish the job.
                 vec![
                     "ALTER TABLE projects_new RENAME TO projects",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path ON projects(host, path)",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL",
                 ]
             };
             for stmt in steps {

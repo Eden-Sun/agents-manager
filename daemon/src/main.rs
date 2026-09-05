@@ -148,7 +148,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     if let Err(e) = reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
         tracing::error!(error = ?e, "initial reconcile failed");
     }
-    events::spawn_global(app.clone());
+    events::spawn_global(app.clone()).await;
 
     if dev_watch_all_panes {
         if let Ok(panes) = app.herdr.pane_list(None).await {
@@ -187,7 +187,13 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     let shutdown_app = app.clone();
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+            match term.as_mut() {
+                Some(t) => tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = t.recv() => {} },
+                None => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
             tracing::info!("shutting down; closing ssh masters");
             shutdown_app.hosts.shutdown().await;
         })
