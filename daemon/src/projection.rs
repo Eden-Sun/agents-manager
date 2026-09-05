@@ -26,8 +26,8 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                 if !crate::config::valid_identity_name(&i.name) {
                     bail!("invalid identity name `{}` (must match {})", i.name, crate::config::BOT_NAME_RE);
                 }
-                if i.kind != "claude" && i.kind != "codex" {
-                    bail!("invalid identity kind `{}`", i.kind);
+                if !crate::config::valid_kind(&i.kind) {
+                    bail!("invalid identity kind `{}` (must be {})", i.kind, crate::config::kinds_list());
                 }
             }
             for p in cfg.projects.iter_mut() {
@@ -53,8 +53,8 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                     if !valid_bot_name(&b.name) {
                         bail!("invalid bot name `{}` (must match {})", b.name, crate::config::BOT_NAME_RE);
                     }
-                    if b.kind != "claude" && b.kind != "codex" {
-                        bail!("invalid bot kind `{}`", b.kind);
+                    if !crate::config::valid_kind(&b.kind) {
+                        bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
                     }
                     if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
                         match identities.iter().find(|i| i.name == idn) {

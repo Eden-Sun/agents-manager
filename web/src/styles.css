@@ -375,6 +375,12 @@ button:disabled {
   color: #33587f;
 }
 
+.kind-tag.grok {
+  background: #ebebeb;
+  border-color: #c4c4c4;
+  color: #3a3a3a;
+}
+
 @media (prefers-color-scheme: dark) {
   .kind-tag.claude {
     background: #38291b;
@@ -386,6 +392,12 @@ button:disabled {
     background: #1d2836;
     border-color: #33506f;
     color: #8fb8e8;
+  }
+
+  .kind-tag.grok {
+    background: #2a2a2a;
+    border-color: #555;
+    color: #d6d6d6;
   }
 }
 

@@ -105,10 +105,11 @@ function NewIdentityForm() {
         <select value={kind} onChange={(e) => setKind(e.target.value as BotKind)}>
           <option value="claude">claude</option>
           <option value="codex">codex</option>
+          <option value="grok">grok</option>
         </select>
       </label>
       <label className="field">
-        <span>env（每行 KEY=VALUE；`$HOME` 與開頭 `~` 會以該主機的家目錄展開）</span>
+        <span>env（每行 KEY=VALUE；`$HOME` 與開頭 `~` 會以該主機的家目錄展開；claude 用 CLAUDE_CONFIG_DIR、grok 用 GROK_HOME）</span>
         <textarea rows={3} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
       </label>
       <div className="form-actions">

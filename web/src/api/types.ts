@@ -22,7 +22,9 @@
  * `normalize.ts` is the single place that absorbs any remaining shape drift.
  */
 
-export type BotKind = 'claude' | 'codex'
+export type BotKind = 'claude' | 'codex' | 'grok'
+/** 全部支援的 kind（下拉選單與 normalize 共用；SPEC §12 新增 `grok`）。 */
+export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok']
 export type RunState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited'
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'unknown'
 export type TurnStatus = 'in_flight' | 'completed' | 'completed_fallback' | 'failed'
@@ -96,7 +98,7 @@ export interface Bot {
   kind: BotKind
   /**
    * 模型別名（API.md v3.3）。`null` = 不指定，由 agent CLI 自己決定預設。
-   * daemon 會把它翻成 `--model <值>`（claude）/ `-m <值>`（codex）。
+   * daemon 會把它翻成 `--model <值>`（claude）/ `-m <值>`（codex、grok）。
    */
   model: string | null
   args: string[]
@@ -369,6 +371,8 @@ export interface PatchBotResult {
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
   codex: ['gpt-5.5', 'gpt-5.6-luna', 'gpt-6-astra'],
+  // `grok models`（grok 1.0.13，2026-09-06）：grok-4.6（預設）、grok-4.5
+  grok: ['grok-4.6', 'grok-4.5'],
 }
 
 /** 「（預設）」與「自訂…」在 `<select>` 裡的 sentinel 值。 */

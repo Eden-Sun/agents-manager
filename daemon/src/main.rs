@@ -44,7 +44,7 @@ enum Cmd {
     },
     /// Hook callback invoked by the agent CLI. Always exits 0 with empty stdout.
     Hook {
-        /// claude | codex
+        /// claude | codex | grok (claude and grok deliver the payload on stdin, codex via argv)
         provider: String,
         #[arg(long)]
         bot: String,
