@@ -241,3 +241,8 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
 - 前端**不會**呼叫 `/hook/*`，proxy 設定只是為了本機除錯方便。
 - 如果 `GET /api/state` 之後要加欄位，前端會安全忽略未知欄位；但如果**改欄位名**，
   請同步更新 `web/src/api/normalize.ts`（那是唯一需要改的地方）。
+
+
+## 目錄選擇器（2026-09-05 新增）
+
+新增 Project 表單的「瀏覽…」按鈕會開啟 `DirPicker`（`web/src/components/DirPicker.tsx`），透過 `GET /api/fs/dirs` 逐層瀏覽：上一層、家目錄、麵包屑、手動輸入路徑、單擊進入子目錄、雙擊直接選取、「選擇此目錄」帶回表單並自動填 label。mock 模式有一棵假目錄樹。截圖 `docs/screenshots/40-42`。

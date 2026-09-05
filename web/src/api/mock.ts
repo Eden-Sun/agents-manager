@@ -168,6 +168,7 @@ export class MockTransport implements Transport {
     const seg = rawPath.split('/').filter(Boolean)
 
     if (method === 'GET' && rawPath === '/state') return this.state()
+    if (method === 'GET' && rawPath === '/fs/dirs') return this.dirs(q.get('path') ?? '')
 
     if (method === 'POST' && rawPath === '/projects') return this.addProject(b)
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
@@ -197,6 +198,32 @@ export class MockTransport implements Transport {
   }
 
   // ------------------------------------------------------------------ helpers
+
+  private dirs(path: string) {
+    const home = '/Users/me'
+    const tree: Record<string, string[]> = {
+      '/': ['Users', 'opt', 'tmp'],
+      '/Users': ['me'],
+      '/Users/me': ['project', 'Documents', 'Downloads'],
+      '/Users/me/project': ['foo', 'bar', 'agents-manager'],
+      '/Users/me/project/foo': ['src'],
+      '/Users/me/Documents': [],
+      '/Users/me/Downloads': [],
+    }
+    const cur = path && path in tree ? path : path.startsWith('/Users/me/project/') ? path : home
+    const kids = tree[cur] ?? []
+    const parent = cur === '/' ? null : cur.slice(0, cur.lastIndexOf('/')) || '/'
+    return {
+      path: cur,
+      parent,
+      home,
+      entries: kids.map((name) => ({
+        name,
+        path: cur === '/' ? `/${name}` : `${cur}/${name}`,
+        git: name === 'foo' || name === 'agents-manager',
+      })),
+    }
+  }
 
   private emit(type: string, data: unknown) {
     this.seq += 1

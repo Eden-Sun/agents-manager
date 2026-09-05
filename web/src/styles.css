@@ -1092,3 +1092,117 @@ button:disabled {
     display: none;
   }
 }
+
+/* ---- directory picker (new project) ---- */
+.field-with-btn {
+  display: flex;
+  gap: 6px;
+}
+.field-with-btn input[type='text'] {
+  flex: 1;
+  min-width: 0;
+}
+.dirpicker {
+  display: grid;
+  gap: 6px;
+  padding: 8px 4px 10px;
+}
+.dirpicker-top {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.dirpicker-manual {
+  flex: 1;
+  min-width: 0;
+}
+.dirpicker-manual input[type='text'] {
+  width: 100%;
+  padding: 4px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.dirpicker-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1px;
+  font-size: 11.5px;
+  padding: 0 2px;
+}
+.dirpicker-crumbs .sep {
+  color: var(--text-faint);
+  margin: 0 1px;
+}
+.dirpicker-crumbs .crumb {
+  background: none;
+  border: none;
+  padding: 1px 3px;
+  border-radius: 4px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.dirpicker-crumbs .crumb:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.dirpicker-list {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  display: grid;
+  align-content: start;
+}
+.dirpicker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.dirpicker-row:last-child {
+  border-bottom: none;
+}
+.dirpicker-row:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.dirpicker-row .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dirpicker-row .tag {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.dirpicker-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.dirpicker-empty.err {
+  color: #d04a4a;
+}
+.dirpicker-cur {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  align-self: center;
+}

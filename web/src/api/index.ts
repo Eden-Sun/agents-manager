@@ -9,6 +9,7 @@ import { HttpTransport } from './transport'
 import type { SocketHandlers, Transport } from './transport'
 import type {
   AppState,
+  DirListing,
   MessagesPage,
   NewBotInput,
   NewProjectInput,
@@ -51,6 +52,19 @@ export async function fetchTerminal(
     `/bots/${encodeURIComponent(botId)}/terminal?source=${source}&lines=${lines}`,
   )
   return toTerminal(raw, source)
+}
+
+export async function listDirs(path?: string): Promise<DirListing> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : ''
+  const raw = await transport.request('GET', `/fs/dirs${q}`)
+  const r = isRec(raw) ? raw : {}
+  const entries = Array.isArray(r.entries) ? r.entries : []
+  return {
+    path: str(r.path),
+    parent: r.parent == null ? null : str(r.parent),
+    home: str(r.home),
+    entries: entries.filter(isRec).map((e) => ({ name: str(e.name), path: str(e.path), git: e.git === true })),
+  }
 }
 
 export async function createProject(input: NewProjectInput): Promise<string> {

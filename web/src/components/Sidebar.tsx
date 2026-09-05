@@ -4,6 +4,7 @@ import type { BotKind } from '../api/types'
 import { botLamp, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { DirPicker } from './DirPicker'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
@@ -89,6 +90,21 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   const [path, setPath] = useState('')
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
+
+  if (browsing) {
+    return (
+      <DirPicker
+        initial={path}
+        onCancel={() => setBrowsing(false)}
+        onPick={(p) => {
+          setPath(p)
+          if (!label.trim()) setLabel(p.split('/').filter(Boolean).pop() ?? '')
+          setBrowsing(false)
+        }}
+      />
+    )
+  }
 
   return (
     <form
@@ -109,13 +125,18 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
     >
       <label className="field">
         <span>目錄路徑</span>
-        <input
-          type="text"
-          value={path}
-          placeholder="/Users/me/project/foo"
-          spellCheck={false}
-          onChange={(e) => setPath(e.target.value)}
-        />
+        <div className="field-with-btn">
+          <input
+            type="text"
+            value={path}
+            placeholder="/Users/me/project/foo"
+            spellCheck={false}
+            onChange={(e) => setPath(e.target.value)}
+          />
+          <button type="button" className="btn" onClick={() => setBrowsing(true)} title="瀏覽目錄">
+            瀏覽…
+          </button>
+        </div>
       </label>
       <label className="field">
         <span>標籤（留白則取目錄名）</span>

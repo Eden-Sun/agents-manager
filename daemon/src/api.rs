@@ -49,6 +49,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/turns/{id}/abandon", post(abandon_turn))
+        .route("/fs/dirs", get(list_dirs))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session));
 
@@ -169,6 +170,58 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
 struct NewProject {
     path: String,
     label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DirsQuery {
+    path: Option<String>,
+}
+
+/// Directory browser for the "new project" picker. Lists only directories (no files),
+/// hides dot-entries, never follows into unreadable places, and reports the parent.
+async fn list_dirs(Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let raw = q.path.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| home.to_string_lossy().to_string());
+    let raw = if let Some(rest) = raw.strip_prefix("~") { format!("{}{}", home.display(), rest) } else { raw };
+    let path = std::fs::canonicalize(&raw).map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
+    if !path.is_dir() {
+        return Err(LcError::Bad(format!("{} is not a directory", path.display())));
+    }
+    let rd = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || -> std::io::Result<Vec<Value>> {
+            let mut out = Vec::new();
+            for ent in std::fs::read_dir(&path)? {
+                let Ok(ent) = ent else { continue };
+                let name = ent.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let Ok(ft) = ent.file_type() else { continue };
+                let is_dir = if ft.is_symlink() { ent.path().is_dir() } else { ft.is_dir() };
+                if !is_dir {
+                    continue;
+                }
+                let full = path.join(&name);
+                let has_git = full.join(".git").exists();
+                out.push(json!({"name": name, "path": full.to_string_lossy(), "git": has_git}));
+            }
+            out.sort_by(|a, b| {
+                a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+            });
+            Ok(out)
+        }
+    })
+    .await
+    .map_err(any_err)?
+    .map_err(|e| LcError::Bad(format!("{}: {e}", path.display())))?;
+    let parent = path.parent().map(|p| p.to_string_lossy().to_string());
+    Ok(Json(json!({
+        "path": path.to_string_lossy(),
+        "parent": parent,
+        "home": home.to_string_lossy(),
+        "entries": rd,
+    })))
 }
 
 async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) -> Result<Response, LcError> {
