@@ -4,25 +4,30 @@
 :root {
   color-scheme: light dark;
 
-  --bg: #f4f5f7;
+  /* Chat canvas is a shade darker than the panels (sidebar / header / composer) so the
+     white assistant bubbles and the panel edges read clearly in light mode. */
+  --bg: #e9ecf1;
   --bg-panel: #ffffff;
-  --bg-sunken: #eceef1;
-  --bg-hover: #e7e9ed;
-  --bg-active: #dfe3ea;
-  --border: #d8dbe1;
-  --border-strong: #c2c7d0;
-  --text: #1b1e23;
-  --text-dim: #616873;
-  --text-faint: #8a919c;
-  --accent: #3563d8;
+  --bg-side: #f4f5f8;
+  --bg-sunken: #eceef2;
+  --bg-hover: #e4e7ec;
+  --bg-active: #d9dfe9;
+  --border: #d3d7de;
+  --border-strong: #b9bfc9;
+  --text: #15181d;
+  --text-dim: #5a616c;
+  --text-faint: #858c97;
+  --accent: #2f5fd6;
   --accent-text: #ffffff;
-  --accent-soft: #e5ecfd;
+  --accent-soft: #e2eafd;
 
-  --bubble-user: #3563d8;
+  --bubble-user: #2f5fd6;
   --bubble-user-text: #ffffff;
   --bubble-assistant: #ffffff;
-  --bubble-assistant-border: #d8dbe1;
-  --bubble-system: #eef0f3;
+  --bubble-assistant-border: #cfd4dc;
+  --bubble-shadow: 0 1px 1px rgb(16 20 28 / 5%);
+  --bubble-system: #dfe3ea;
+  --code-bg: rgb(16 20 28 / 6%);
 
   --lamp-green: #21a35b;
   --lamp-blue: #2f7ff0;
@@ -50,25 +55,29 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181d;
-    --bg-panel: #1d2026;
+    /* Dark: sidebar darkest, chat canvas in the middle, header / composer slightly lifted. */
+    --bg: #191c22;
+    --bg-panel: #1f232a;
+    --bg-side: #131519;
     --bg-sunken: #14161a;
     --bg-hover: #262a32;
-    --bg-active: #2f343e;
-    --border: #2e333c;
-    --border-strong: #3d434e;
-    --text: #e6e8ec;
-    --text-dim: #a3aab6;
-    --text-faint: #767d89;
-    --accent: #5b8bf5;
+    --bg-active: #2d3340;
+    --border: #2f343d;
+    --border-strong: #414855;
+    --text: #e8eaee;
+    --text-dim: #a6adb8;
+    --text-faint: #7a818d;
+    --accent: #6a96f7;
     --accent-text: #0f1115;
-    --accent-soft: #22304d;
+    --accent-soft: #243456;
 
-    --bubble-user: #3a63c4;
-    --bubble-user-text: #f2f5fb;
-    --bubble-assistant: #23272f;
-    --bubble-assistant-border: #333944;
-    --bubble-system: #1f232a;
+    --bubble-user: #3b66cc;
+    --bubble-user-text: #f4f6fb;
+    --bubble-assistant: #272c35;
+    --bubble-assistant-border: #3a404b;
+    --bubble-shadow: none;
+    --bubble-system: #22262e;
+    --code-bg: rgb(0 0 0 / 28%);
 
     --lamp-green: #35c274;
     --lamp-blue: #5b9cff;
@@ -177,15 +186,16 @@ button:disabled {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--bg-panel);
-  border-right: 1px solid var(--border);
+  background: var(--bg-side);
+  border-right: 1px solid var(--border-strong);
 }
 
 .sidebar-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px;
+  height: 46px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -254,15 +264,16 @@ button:disabled {
 
 .project-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  padding: 8px 14px 4px;
+  padding: 10px 12px 3px 14px;
 }
 
 .project-label {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 650;
-  color: var(--text);
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -302,7 +313,7 @@ button:disabled {
   background: var(--accent-soft);
 }
 .inline-form {
-  margin: 0 10px 6px;
+  margin: 2px 10px 8px;
   padding: 0 4px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -312,13 +323,14 @@ button:disabled {
 .bot-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   width: 100%;
-  padding: 6px 10px 6px 14px;
+  padding: 5px 8px 5px 14px;
   border: 0;
   border-left: 2px solid transparent;
   background: transparent;
   text-align: left;
+  cursor: pointer;
 }
 
 .bot-row:hover {
@@ -333,12 +345,15 @@ button:disabled {
 .bot-main {
   flex: 1;
   min-width: 0;
+  display: grid;
+  gap: 1px;
 }
 
 .bot-name {
   display: block;
   font-size: 13px;
-  font-weight: 550;
+  font-weight: 600;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -347,9 +362,38 @@ button:disabled {
 .bot-sub {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  min-width: 0;
   font-size: 10.5px;
+  line-height: 1.4;
   color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The lamp already says idle / offline; only transitional or attention states get words. */
+.bot-state {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bot-state.idle,
+.bot-state.offline {
+  display: none;
+}
+
+.bot-state.working {
+  color: var(--lamp-blue);
+}
+
+.bot-state.blocked {
+  color: var(--lamp-red);
+  font-weight: 600;
+}
+
+.bot-state.starting,
+.bot-state.stopping {
+  color: var(--warn);
 }
 
 .kind-tag {
@@ -403,22 +447,43 @@ button:disabled {
 
 .bot-actions {
   display: flex;
-  gap: 4px;
-  opacity: 0.75;
+  align-items: center;
+  gap: 2px;
+  flex: none;
 }
 
-.bot-row:hover .bot-actions,
-.bot-row.selected .bot-actions {
+/* The gear is secondary: it only shows on hover / focus / selection so the row stays calm. */
+.bot-actions .gear {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.bot-row:hover .gear,
+.bot-row:focus-within .gear,
+.bot-row.selected .gear,
+.bot-actions .gear[aria-expanded='true'] {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .bot-actions .gear {
+    opacity: 1;
+  }
+}
+
+.bot-row .mini-btn {
+  min-width: 38px;
+  text-align: center;
 }
 
 .mini-btn {
   border: 1px solid var(--border-strong);
-  background: var(--bg-panel);
+  background: transparent;
   color: var(--text-dim);
-  border-radius: 5px;
-  font-size: 10.5px;
-  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 8px;
   white-space: nowrap;
 }
 
@@ -521,8 +586,8 @@ button:disabled {
 
 .sidebar-foot {
   border-top: 1px solid var(--border);
-  padding: 8px 10px 10px;
-  background: var(--bg-panel);
+  padding: 6px 10px 8px;
+  background: var(--bg-side);
 }
 
 .disclosure {
@@ -639,7 +704,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
+  height: 46px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
@@ -647,7 +713,7 @@ button:disabled {
 .main-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   flex: 0 1 auto;
   min-width: 0;
 }
@@ -667,6 +733,21 @@ button:disabled {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: default;
+}
+
+.main-status.working {
+  color: var(--lamp-blue);
+}
+
+.main-status.blocked {
+  color: var(--lamp-red);
+  font-weight: 600;
+}
+
+.main-head .icon-btn.gear {
+  padding: 2px 5px;
+  color: var(--text-faint);
 }
 
 .spacer {
@@ -718,25 +799,48 @@ button:disabled {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 20px 8px;
+  padding: 14px 18px 10px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
 }
 
+/* Unified empty / loading / error state for the main area. */
 .msg-empty {
   margin: auto;
   text-align: center;
-  color: var(--text-faint);
+  color: var(--text-dim);
   font-size: 13px;
+  line-height: 1.6;
   max-width: 420px;
+  padding: 18px 22px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+}
+
+.msg-empty.loading {
+  border-style: solid;
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+.msg-empty .typing {
+  margin-right: 8px;
+  vertical-align: middle;
 }
 
 .msg {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   max-width: min(760px, 82%);
+}
+
+/* Slack / iMessage density: same-side neighbours sit closer together. */
+.msg.user + .msg.user,
+.msg.assistant + .msg.assistant {
+  margin-top: -4px;
 }
 
 .msg.user {
@@ -752,11 +856,13 @@ button:disabled {
   align-self: center;
   max-width: min(680px, 90%);
   align-items: center;
+  margin: 2px 0;
 }
 
 .bubble {
-  padding: 8px 12px;
+  padding: 6px 11px;
   border-radius: var(--radius-lg);
+  line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -770,26 +876,45 @@ button:disabled {
 .msg.assistant .bubble {
   background: var(--bubble-assistant);
   border: 1px solid var(--bubble-assistant-border);
+  box-shadow: var(--bubble-shadow);
   border-bottom-left-radius: 4px;
 }
 
-.bubble.clamped {
+/* Live (partial) reply of the in-flight turn — same shape as the final assistant bubble. */
+.msg.live .bubble {
+  border-style: dashed;
+}
+
+.msg.live.streaming .bubble {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--bubble-assistant-border));
+}
+
+.msg.live.streaming .bubble {
   position: relative;
-  max-height: 280px;
-  overflow: hidden;
+  padding-right: 18px;
 }
 
-.bubble.clamped::after {
-  content: '';
+/* Small blinking caret pinned to the bubble's bottom-right corner. */
+.msg.live .caret {
   position: absolute;
-  inset: auto 0 0;
-  height: 56px;
-  background: linear-gradient(to bottom, transparent, var(--bubble-assistant));
-  pointer-events: none;
+  right: 8px;
+  bottom: 8px;
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: blink 1s steps(2, start) infinite;
 }
 
-.msg.user .bubble.clamped::after {
-  background: linear-gradient(to bottom, transparent, var(--bubble-user));
+@media (prefers-reduced-motion: reduce) {
+  .msg.live .caret {
+    animation: none;
+  }
+}
+
+.msg.live .msg-meta {
+  color: var(--accent);
 }
 
 .link-btn {
@@ -804,32 +929,45 @@ button:disabled {
 .msg.system .bubble {
   background: var(--bubble-system);
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 11.5px;
   text-align: center;
   border-radius: 999px;
-  padding: 4px 14px;
+  padding: 3px 12px;
 }
 
+/* One line under the bubble: [who] time · source. Kept small so it never competes with text. */
 .msg-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 10.5px;
+  gap: 5px;
+  min-height: 14px;
+  font-size: 10px;
+  line-height: 1.3;
   color: var(--text-faint);
-  padding: 0 4px;
+  padding: 0 3px;
+  white-space: nowrap;
+}
+
+.msg-meta time {
+  font-variant-numeric: tabular-nums;
 }
 
 .src-tag {
-  font-size: 10px;
-  padding: 0 5px;
+  font-size: 9.5px;
+  line-height: 1.3;
+  padding: 0 4px;
   border-radius: 3px;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
 }
 
 .src-tag.fallback {
   border-color: var(--warn);
   background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.meta-warn {
   color: var(--warn);
 }
 
@@ -872,7 +1010,7 @@ button:disabled {
 .composer {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
-  padding: 10px 16px 12px;
+  padding: 10px 16px;
 }
 
 .composer-lock {
@@ -896,18 +1034,24 @@ button:disabled {
 
 .composer textarea {
   flex: 1;
-  min-height: 42px;
+  min-height: 38px;
   max-height: 200px;
   resize: none;
-  padding: 9px 12px;
+  padding: 8px 12px;
   background: var(--bg-sunken);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   font-family: var(--font-ui);
+  line-height: 1.45;
+}
+
+.composer textarea::placeholder {
+  color: var(--text-faint);
 }
 
 .composer textarea:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
   outline: none;
 }
 
@@ -920,14 +1064,21 @@ button:disabled {
   background: var(--accent);
   color: var(--accent-text);
   border-radius: var(--radius);
-  padding: 9px 18px;
+  padding: 8px 16px;
   font-size: 13px;
   font-weight: 600;
+  line-height: 1.45;
 }
 
+.send-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+/* Only shown when it has something to say (mention targets / warnings); never a static blurb. */
 .composer-hint {
-  margin-top: 6px;
+  margin-top: 5px;
   font-size: 10.5px;
+  line-height: 1.4;
   color: var(--text-faint);
 }
 
@@ -1038,17 +1189,21 @@ button:disabled {
   display: flex;
   gap: 10px;
   align-items: flex-start;
-  padding: 8px 12px;
+  padding: 8px 10px 8px 12px;
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   font-size: 12.5px;
+  line-height: 1.45;
   background: var(--bg-panel);
   border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  color: var(--text);
+  animation: notice-in 0.16s ease-out;
 }
 
 .notice.error {
-  background: var(--danger-soft);
-  border-color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+  border-left-color: var(--danger);
   color: var(--danger);
 }
 
@@ -1056,8 +1211,28 @@ button:disabled {
   border: 0;
   background: transparent;
   color: inherit;
-  opacity: 0.7;
-  padding: 0 2px;
+  opacity: 0.6;
+  padding: 0 4px;
+  border-radius: 4px;
+  line-height: 1.3;
+}
+
+.notice button:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}
+
+@keyframes notice-in {
+  from {
+    transform: translateY(6px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notice {
+    animation: none;
+  }
 }
 
 /* ---------------------------------------------------------- responsive */
@@ -1237,15 +1412,15 @@ button:disabled {
 /* ---- markdown inside assistant bubbles ---- */
 .bubble.md {
   white-space: normal;
-  line-height: 1.55;
+  line-height: 1.5;
 }
 .bubble.md > :first-child { margin-top: 0; }
 .bubble.md > :last-child { margin-bottom: 0; }
-.bubble.md p { margin: 0 0 8px; }
-.bubble.md ul, .bubble.md ol { margin: 0 0 8px; padding-left: 20px; }
-.bubble.md li { margin: 2px 0; }
+.bubble.md p { margin: 0 0 6px; }
+.bubble.md ul, .bubble.md ol { margin: 0 0 6px; padding-left: 20px; }
+.bubble.md li { margin: 1px 0; }
 .bubble.md h1, .bubble.md h2, .bubble.md h3, .bubble.md h4 {
-  margin: 10px 0 6px;
+  margin: 8px 0 4px;
   font-size: 1em;
   font-weight: 600;
 }
@@ -1254,25 +1429,35 @@ button:disabled {
 .bubble.md code {
   font-family: var(--font-mono);
   font-size: 0.9em;
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 4px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
+  background: var(--code-bg);
 }
+/* Fenced blocks: a tinted slab, no border, so they don't read as a box inside a box. */
 .bubble.md pre {
-  margin: 6px 0 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
+  margin: 4px 0 6px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--code-bg);
   overflow-x: auto;
   white-space: pre;
+  line-height: 1.4;
 }
 .bubble.md pre code {
   padding: 0;
   border: none;
   background: none;
   font-size: 0.88em;
+}
+/* A reply that is nothing but one fence (e.g. `1`) renders as plain monospace text. */
+.bubble.md > pre:only-child {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  white-space: pre-wrap;
+}
+.bubble.md > pre:only-child code {
+  font-size: 0.95em;
 }
 .bubble.md blockquote {
   margin: 6px 0;
@@ -1528,9 +1713,14 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
+  height: 40px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+.bs-head strong {
+  font-size: 13px;
 }
 
 .bs-sub {
@@ -1575,8 +1765,14 @@ button:disabled {
 
 .bs-body > .form {
   max-width: 560px;
-  gap: 11px;
-  padding-top: 12px;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.bs-body .field input[type='text'],
+.bs-body .field select {
+  background: var(--bg-panel);
+  border-color: var(--border-strong);
 }
 
 .bs-body .field input[type='text']:disabled,
@@ -1759,6 +1955,12 @@ button:disabled {
   color: #33587f;
 }
 
+.bot-badge.grok {
+  background: #ebebeb;
+  border-color: #c4c4c4;
+  color: #3a3a3a;
+}
+
 .bot-badge.all {
   background: var(--accent-soft);
   border-color: transparent;
@@ -1777,24 +1979,41 @@ button:disabled {
     border-color: #33506f;
     color: #8fb8e8;
   }
+
+  .bot-badge.grok {
+    background: #2a2a2a;
+    border-color: #555;
+    color: #d6d6d6;
+  }
 }
 
+/* Group view: who said it / who it went to lives on the meta line, not on its own row. */
 .msg-from {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 4px;
-  font-size: 10.5px;
+  gap: 5px;
+  min-width: 0;
   color: var(--text-dim);
 }
 
+.msg-meta .msg-from .bot-badge {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 5px;
+}
+
+/* System notes have no meta line, so the badge stays above the pill. */
 .msg.system .msg-from {
   justify-content: center;
+  font-size: 10.5px;
+  padding: 0 4px;
 }
 
 .msg-targets {
   font-family: var(--font-mono);
   color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .group-composer .composer-box {
@@ -1842,6 +2061,10 @@ button:disabled {
 }
 
 .group-targets {
+  font-family: var(--font-mono);
+}
+
+.group-head .main-status {
   font-family: var(--font-mono);
 }
 

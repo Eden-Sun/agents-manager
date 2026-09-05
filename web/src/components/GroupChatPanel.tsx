@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { parseMentions } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
-import { botLamp, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
-import { Bubble } from './ChatPanel'
+import { botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { Bubble, EmptyState, LiveBubble } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 
@@ -85,14 +85,20 @@ function GroupMessageList({ projectId }: { projectId: string }) {
         .filter((b) => s.runs[b.id]?.agent_status === 'working' || composerState(s, b.id).inFlightTurnId !== null),
     ),
   )
+  // v3.9 live output per member: bot_id → partial text (only for the in-flight turn). A
+  // fresh object each call, but its values are strings, so `useShallow` settles.
+  const liveText = useStore(
+    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.text ?? null]))),
+  )
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const rows = useMemo(() => foldRows(messages ?? []), [messages])
 
+  // Follow the tail (new rows, live output growing) only while the user is at the bottom.
   useLayoutEffect(() => {
     const el = ref.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [rows, typing.length])
+  }, [rows, typing.length, liveText])
 
   return (
     <div
@@ -104,9 +110,9 @@ function GroupMessageList({ projectId }: { projectId: string }) {
       }}
     >
       {rows.length === 0 ? (
-        <p className="msg-empty">
+        <EmptyState loading={!loaded}>
           {loaded ? '群組裡還沒有訊息。在下方以 @bot 名稱或 @all 對成員發言。' : '載入群組訊息中…'}
-        </p>
+        </EmptyState>
       ) : (
         rows.map((r) =>
           r.kind === 'user' ? (
@@ -125,19 +131,7 @@ function GroupMessageList({ projectId }: { projectId: string }) {
         )
       )}
       {typing.map((t) => (
-        <article className="msg assistant" key={`typing-${t.id}`}>
-          <div className="msg-from">
-            <BotBadge name={t.name} kind={t.kind} />
-          </div>
-          <div className="bubble">
-            <span className="typing">
-              <i />
-              <i />
-              <i />
-            </span>
-          </div>
-          <div className="msg-meta">等待回覆（hook）…</div>
-        </article>
+        <LiveBubble key={`typing-${t.id}`} text={liveText[t.id] ?? null} from={<BotBadge name={t.name} kind={t.kind} />} />
       ))}
     </div>
   )
@@ -272,7 +266,8 @@ function GroupComposer({ projectId }: { projectId: string }) {
           ref={ref}
           value={text}
           disabled={state.disabled || sending}
-          placeholder={state.disabled ? '目前無法送出訊息' : '輸入 @bot 或 @all 指定收件者…（Enter 送出，Shift+Enter 換行）'}
+          placeholder={state.disabled ? '目前無法送出訊息' : '@bot 或 @all …'}
+          title="以 @<bot> 或 @all 指定收件者；Enter 送出，Shift+Enter 換行"
           onChange={(e) => {
             setText(e.target.value)
             setCaret(e.target.selectionStart ?? e.target.value.length)
@@ -323,10 +318,13 @@ function GroupComposer({ projectId }: { projectId: string }) {
           {sending ? '送出中…' : '送出'}
         </button>
       </div>
-      <div className="composer-hint group-hint">
-        {text.trim() && targets.length === 0 ? (
+      {/* Only while there is something to say: no mention yet, or the resolved recipient list. */}
+      {text.trim() && targets.length === 0 ? (
+        <div className="composer-hint group-hint">
           <span className="mention-warn">請以 @&lt;bot 名稱&gt; 或 @all 指定收件者（輸入 @ 會出現選單）</span>
-        ) : targets.length > 0 ? (
+        </div>
+      ) : targets.length > 0 ? (
+        <div className="composer-hint group-hint">
           <span className="group-targets">
             → {targets.map((t) => `@${t.name}`).join(', ')}
             {skippedNow.length > 0 ? (
@@ -336,10 +334,8 @@ function GroupComposer({ projectId }: { projectId: string }) {
               </span>
             ) : null}
           </span>
-        ) : (
-          <span>`@all` 送給所有成員；每個收件 Bot 各自產生一個回合，回覆會回到這條時間軸。</span>
-        )}
-      </div>
+        </div>
+      ) : null}
     </div>
   )
 }

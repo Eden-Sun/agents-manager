@@ -36,6 +36,13 @@ export interface Notice {
   text: string
 }
 
+/** WS `turn_progress` (API.md v3.9): the partial reply of an in-flight turn. */
+export interface LiveReply {
+  turnId: string
+  text: string
+  revision: number
+}
+
 export interface ComposerState {
   disabled: boolean
   reason: string
@@ -60,6 +67,12 @@ interface StoreState {
   turns: Record<string, Record<string, Turn>>
   messages: Record<string, Message[]>
   loadedBots: Record<string, boolean>
+  /**
+   * bot_id → partial reply of its in-flight turn (`turn_progress`). Cleared when that turn's
+   * assistant `message_added` arrives or `turn_updated` leaves `in_flight`. Render it only
+   * while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows.
+   */
+  liveReply: Record<string, LiveReply>
 
   /**
    * SPEC §13 group view. Non-null = the right pane shows this project's group timeline
@@ -139,6 +152,7 @@ export const useStore = create<StoreState>((set, get) => ({
   turns: {},
   messages: {},
   loadedBots: {},
+  liveReply: {},
 
   selectedProjectId: null,
   groupMessages: {},
@@ -647,6 +661,10 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (!existing.some((m) => m.id === msg.id)) {
           patch.messages = { ...s.messages, [botId]: sortByTime([...existing, msg]) }
         }
+        // The final reply supersedes the live (partial) one.
+        if (msg.role === 'assistant' && s.liveReply[botId] && (!msg.turn_id || s.liveReply[botId].turnId === msg.turn_id)) {
+          patch.liveReply = withoutKey(s.liveReply, botId)
+        }
         // §13: route the same frame into its project's group timeline + unread counter.
         const bot = s.bots.find((b) => b.id === botId)
         if (bot) {
@@ -667,7 +685,27 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       const botId = frameBotId(data)
       const turn = toTurn(unwrap(data, 'turn'), botId ?? undefined)
       if (!turn || !botId) return
-      set((s) => ({ turns: { ...s.turns, [botId]: { ...(s.turns[botId] ?? {}), [turn.id]: turn } } }))
+      set((s) => ({
+        turns: { ...s.turns, [botId]: { ...(s.turns[botId] ?? {}), [turn.id]: turn } },
+        liveReply:
+          turn.status !== 'in_flight' && s.liveReply[botId]?.turnId === turn.id ? withoutKey(s.liveReply, botId) : s.liveReply,
+      }))
+      return
+    }
+    case 'turn_progress': {
+      // API.md v3.9: `{bot_id, run_id, turn_id, text, revision}` — the partial reply so far.
+      const botId = frameBotId(data)
+      if (!botId || !isRec(data)) return
+      const turnId = str(pick(data, 'turn_id', 'turnId'))
+      if (!turnId) return
+      const text = str(pick(data, 'text', 'content'))
+      const revision = Number(pick(data, 'revision') ?? 0) || 0
+      set((s) => {
+        const prev = s.liveReply[botId]
+        // Frames can only move forward within a turn; a new turn always replaces.
+        if (prev && prev.turnId === turnId && prev.revision > revision) return {}
+        return { liveReply: { ...s.liveReply, [botId]: { turnId, text, revision } } }
+      })
       return
     }
     case 'identities_changed':
@@ -679,6 +717,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     default:
       return
   }
+}
+
+function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
+  const { [key]: _dropped, ...rest } = map
+  return rest
 }
 
 /** Patch connection state onto the known hosts without losing their config fields. */
@@ -780,6 +823,14 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, reason: '上一則訊息仍在進行中，等待回覆或按「中斷」', inFlightTurnId: inflight.id }
   }
   return { disabled: false, reason: '', inFlightTurnId: null, unknownTurnId: null }
+}
+
+/** The partial reply to show as a live bubble: only for the turn that is actually in flight. */
+export function liveReplyOf(state: StoreState, botId: string): LiveReply | null {
+  const live = state.liveReply[botId]
+  if (!live || !live.text.trim()) return null
+  const inflight = inFlightTurn(state, botId)
+  return inflight && inflight.id === live.turnId ? live : null
 }
 
 /** SPEC §13.5 composer rule: the group composer is open as long as *one* member can be sent to. */

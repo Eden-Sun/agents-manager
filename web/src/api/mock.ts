@@ -123,6 +123,8 @@ const REPLIES = [
   '已完成。修改重點：\n\n1. `runs_one_active` 部分唯一索引避免重複啟動\n2. per-bot mutex 包住 start / stop / prompt\n3. hook 早於 RPC 回應時仍能配對 in-flight Turn\n\n測試都過了。',
   '這段的問題在於 `agent.start` 是非同步的，socket 立刻回 `launch_pending:true`，所以必須接 `agent.wait {until:[idle,done,blocked]}` 才能確定就緒。',
   'PONG',
+  // A reply that is only a fenced one-liner (what `echo 1` really produced) — renders as plain mono text.
+  '```\n1\n```',
 ]
 
 export class MockTransport implements Transport {
@@ -878,15 +880,34 @@ export class MockTransport implements Transport {
     } else if (lowered.includes('fallback')) {
       setTimeout(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
     } else {
-      setTimeout(() => this.finishTurn(botId, turn, 'hook'), lowered.includes('slow') ? 8000 : 1900)
+      // v3.9 live output: 3–4 `turn_progress` frames (every 0.5 s) before the final reply.
+      const reply = this.nextReply()
+      const slow = lowered.includes('slow')
+      const frames = slow ? 4 : 3
+      const lines = reply.split('\n')
+      // Grow by whole lines when there are several (a fence never splits mid-way), else by chars.
+      const partial = (i: number) =>
+        lines.length > 1
+          ? lines.slice(0, Math.max(1, Math.ceil((lines.length * i) / (frames + 1)))).join('\n')
+          : reply.slice(0, Math.max(1, Math.round((reply.length * i) / (frames + 1))))
+      for (let i = 1; i <= frames; i++) {
+        setTimeout(() => {
+          if (turn.status !== 'in_flight') return
+          this.emit('turn_progress', { bot_id: botId, run_id: run.id, turn_id: turn.id, text: partial(i), revision: i })
+        }, 500 * i)
+      }
+      setTimeout(() => this.finishTurn(botId, turn, 'hook', reply), slow ? 8000 : 500 * (frames + 1) + 400)
     }
     return { turn_id: turn.id, message_id: userMsg.id, delivery: 'ok' }
   }
 
-  private finishTurn(botId: string, turn: MockTurn, source: 'hook' | 'terminal_fallback') {
+  private nextReply(): string {
+    return REPLIES[this.replyIndex++ % REPLIES.length]
+  }
+
+  private finishTurn(botId: string, turn: MockTurn, source: 'hook' | 'terminal_fallback', reply = this.nextReply()) {
     if (turn.status !== 'in_flight') return
     const run = this.activeRun(botId)
-    const reply = REPLIES[this.replyIndex++ % REPLIES.length]
     this.updateTurn(turn, {
       status: source === 'hook' ? 'completed' : 'completed_fallback',
       completed_at: now(),
