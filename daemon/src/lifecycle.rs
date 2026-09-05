@@ -2,8 +2,10 @@
 //!
 //! Every public entry point takes the per-bot lock.
 
+use crate::config::LOCAL_HOST;
 use crate::db;
-use crate::herdr::{AgentStatus, HerdrError};
+use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
+use crate::hosts::{sh_quote, HostConn};
 use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -107,7 +109,8 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
         .await;
     fail_in_flight(app, run_id, &format!("run ended: {reason}")).await;
     if let Some(p) = run.pane_id.as_deref() {
-        crate::events::unwatch_pane(app, p).await;
+        let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+        crate::events::unwatch_pane(app, &host, p).await;
     }
     app.emit_bot_status(&run.bot_id).await;
 }
@@ -140,8 +143,71 @@ fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
     ]
 }
 
+/// SPEC appendix E — the POSIX sh + curl hook installed on remote hosts (no daemon binary there).
+pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
+PROVIDER="$1"; BOT="$2"; TOKEN="$3"; PORT="$4"; shift 4
+if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c 1048576); fi
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":false}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW")
+DIR="$HOME/.config/agents-manager/bots/$BOT"
+mkdir -p "$DIR"
+OUT=$(NO_PROXY=127.0.0.1 curl -s -m 2 --connect-timeout 0.3 -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/hook/$PROVIDER" \
+  -H 'Content-Type: application/json' -H "X-AM-Bot-Token: $TOKEN" --data-binary "$BODY" 2>>"$DIR/hook.log") || OUT=fail
+case "$OUT" in 2*) ;; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
+exit 0
+"#;
+
+/// Absolute remote paths for a bot's hook material.
+pub struct RemoteHookPaths {
+    pub dir: String,
+    pub hook_sh: String,
+    pub settings: String,
+}
+
+pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<RemoteHookPaths> {
+    let home = conn.home().await?;
+    let dir = format!("{home}/.config/agents-manager/bots/{bot_id}");
+    Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
+}
+
+/// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
+async fn install_remote_hook(
+    conn: &HostConn,
+    bot: &db::Bot,
+    hook_port: u16,
+) -> anyhow::Result<RemoteHookPaths> {
+    let p = remote_bot_dir(conn, &bot.id).await?;
+    let cmd = shell_join(&[
+        p.hook_sh.clone(),
+        "claude".into(),
+        bot.id.clone(),
+        bot.hook_token.clone(),
+        hook_port.to_string(),
+    ]);
+    let settings = json!({
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
+        }
+    });
+    let settings_text = serde_json::to_string_pretty(&settings)?;
+    let script = format!(
+        "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod +x \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nprintf 'AM_INSTALLED\\n'\n",
+        dir = sh_quote(&p.dir),
+        hook = REMOTE_HOOK_SH,
+        settings = settings_text,
+    );
+    let out = conn.ssh_exec(&script).await?;
+    if !out.contains("AM_INSTALLED") {
+        anyhow::bail!("remote hook install did not confirm:\n{}", out.trim());
+    }
+    tracing::info!(host = %conn.name, bot = %bot.name, dir = %p.dir, "remote hook installed");
+    Ok(p)
+}
+
 /// Returns the daemon-injected CLI args that go *before* the bot's own args.
-fn injected_args(app: &App, bot: &db::Bot) -> anyhow::Result<Vec<String>> {
+/// For a remote project this also uploads the hook script over ssh (SPEC §11.4).
+async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project) -> anyhow::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     if bot.auto_approve != 0 {
         match bot.kind.as_str() {
@@ -153,6 +219,35 @@ fn injected_args(app: &App, bot: &db::Bot) -> anyhow::Result<Vec<String>> {
     if bot.inject_hooks == 0 {
         return Ok(out);
     }
+
+    // ---- remote project: POSIX sh hook over the reverse tunnel
+    if project.host != LOCAL_HOST {
+        let conn = app
+            .hosts
+            .get(&project.host)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
+        let hook_port = conn.hook_port(app.port);
+        let paths = install_remote_hook(&conn, bot, hook_port).await?;
+        let hook_args: Vec<String> = match bot.kind.as_str() {
+            "claude" => vec!["--settings".into(), paths.settings],
+            "codex" => {
+                let parts = vec![
+                    paths.hook_sh,
+                    "codex".to_string(),
+                    bot.id.clone(),
+                    bot.hook_token.clone(),
+                    hook_port.to_string(),
+                ];
+                vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
+            }
+            other => anyhow::bail!("unknown bot kind {other}"),
+        };
+        out.extend(hook_args);
+        return Ok(out);
+    }
+
+    // ---- local project: the daemon binary is right here
     let dir = app.bot_dir(&bot.id);
     std::fs::create_dir_all(&dir)?;
     let hook_args: Vec<String> = match bot.kind.as_str() {
@@ -188,14 +283,23 @@ fn shell_join(parts: &[String]) -> String {
         .join(" ")
 }
 
-fn pane_env(app: &App, bot_id: &str, run_id: &str) -> Value {
+fn pane_env(bot_id: &str, run_id: &str, hook_port: u16) -> Value {
     json!({
         "AM_BOT_ID": bot_id,
         "AM_RUN_ID": run_id,   // diagnostics only; hook identity is per-bot
-        "AM_PORT": app.port.to_string(),
+        // On a remote host this is the reverse-forwarded port, not the daemon's own.
+        "AM_PORT": hook_port.to_string(),
         "CLAUDE_CODE_CHILD_SESSION": "",
         "CLAUDECODE": "",
     })
+}
+
+/// Resolve the herdr client for a bot through its project's host.
+async fn client_for_bot(app: &Arc<App>, bot_id: &str) -> LcResult<HerdrClient> {
+    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    app.herdr_for(&host)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))
 }
 
 // ---------------------------------------------------------------- start
@@ -253,15 +357,27 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
 }
 
 async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_id: &str) -> LcResult<()> {
-    let env = pane_env(app, &bot.id, run_id);
+    let host = project.host.clone();
+    let client = app
+        .herdr_for(&host)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))?;
+    if !app.host_connected(&host).await {
+        return Err(LcError::Upstream(format!("host `{host}` is not connected")));
+    }
+    let hook_port = match app.hosts.get(&host).await {
+        Some(c) => c.hook_port(app.port),
+        None => app.port,
+    };
+    let env = pane_env(&bot.id, run_id, hook_port);
 
     // 2. workspace
     let mut fresh_root: Option<String> = None;
     let workspace_id = match project.workspace_id.as_deref() {
-        Some(ws) if app.herdr.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
+        Some(ws) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
         _ => {
             let (ws, root) =
-                app.herdr.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
+                client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
             sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
                 .bind(&ws.workspace_id)
                 .bind(&project.id)
@@ -277,11 +393,11 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     let pane_id = match fresh_root {
         Some(p) => p,
         None => {
-            let panes = app.herdr.pane_list(Some(&workspace_id)).await.map_err(up)?;
+            let panes = client.pane_list(Some(&workspace_id)).await.map_err(up)?;
             let target = panes.first().map(|p| p.pane_id.clone()).ok_or_else(|| {
                 LcError::Upstream(format!("workspace {workspace_id} has no panes to split"))
             })?;
-            app.herdr
+            client
                 .pane_split(&target, "right", &project.path, env.clone())
                 .await
                 .map_err(up)?
@@ -297,22 +413,22 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .execute(&app.db)
         .await
         .map_err(up)?;
-    let injected = injected_args(app, bot).map_err(up)?;
+    let injected = injected_args(app, bot, project).await.map_err(up)?;
     let mut args = injected;
     args.extend(bot.args());
 
     // 5. agent.start (async on the socket)
-    if let Err(e) = app.herdr.agent_start(&bot.name, &bot.kind, &pane_id, &args, 60_000).await {
-        let _ = app.herdr.pane_close(&pane_id).await;
+    if let Err(e) = client.agent_start(&bot.name, &bot.kind, &pane_id, &args, 60_000).await {
+        let _ = client.pane_close(&pane_id).await;
         return Err(up(e));
     }
 
     // 6. per-run status subscription
-    crate::events::watch_pane(app, &pane_id).await;
+    crate::events::watch_pane(app, &host, &pane_id).await;
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    match app.herdr.agent_wait(&bot.name, &until, 60_000).await {
+    match client.agent_wait(&bot.name, &until, 60_000).await {
         Ok(info) => {
             let st = info.agent_status.normalized();
             set_run(app, run_id, "running", st.as_str()).await;
@@ -320,10 +436,10 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "agent.wait did not settle");
             // Do NOT close the pane on timeout (SPEC §6.2.7).
-            match app.herdr.agent_get(&bot.name).await {
+            match client.agent_get(&bot.name).await {
                 Ok(Some(info)) => set_run(app, run_id, "running", info.agent_status.normalized().as_str()).await,
                 _ => {
-                    let _ = app.herdr.pane_close(&pane_id).await;
+                    let _ = client.pane_close(&pane_id).await;
                     return Err(up(e));
                 }
             }
@@ -349,20 +465,22 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     let _g = lock.lock().await;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
+    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let client = client_for_bot(app, bot_id).await?;
 
     let _ = sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run.id).execute(&app.db).await;
     app.emit_bot_status(bot_id).await;
     fail_in_flight(app, &run.id, "run stopped by user").await;
 
     for _ in 0..2 {
-        let _ = app.herdr.agent_send_keys(&bot.name, &["ctrl+c".to_string()]).await;
+        let _ = client.agent_send_keys(&bot.name, &["ctrl+c".to_string()]).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let mut gone = false;
     for _ in 0..20 {
-        let agent = app.herdr.agent_get(&bot.name).await;
+        let agent = client.agent_get(&bot.name).await;
         let pane = match run.pane_id.as_deref() {
-            Some(p) => app.herdr.pane_get(p).await.ok().flatten(),
+            Some(p) => client.pane_get(p).await.ok().flatten(),
             None => None,
         };
         if matches!(agent, Ok(None)) || pane.is_none() {
@@ -374,7 +492,7 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     // The pane belongs to this Run either way: once the agent is gone (or refused to go)
     // we close it, otherwise a bare shell pane would linger until the next reconcile.
     if let Some(p) = run.pane_id.as_deref() {
-        let _ = app.herdr.pane_close(p).await;
+        let _ = client.pane_close(p).await;
     }
     if !gone {
         tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
@@ -385,7 +503,7 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         .execute(&app.db)
         .await;
     if let Some(p) = run.pane_id.as_deref() {
-        crate::events::unwatch_pane(app, p).await;
+        crate::events::unwatch_pane(app, &host, p).await;
     }
     app.emit_bot_status(bot_id).await;
     Ok(true)
@@ -396,7 +514,7 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let _g = lock.lock().await;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
-    app.herdr.agent_send_keys(&bot.name, &["esc".to_string()]).await.map_err(up)?;
+    client_for_bot(app, bot_id).await?.agent_send_keys(&bot.name, &["esc".to_string()]).await.map_err(up)?;
     fail_in_flight(app, &run.id, "interrupted by user").await;
     Ok(())
 }
@@ -411,7 +529,7 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
         }
     }
-    app.herdr.agent_send_keys(&bot.name, &keys).await.map_err(up)?;
+    client_for_bot(app, bot_id).await?.agent_send_keys(&bot.name, &keys).await.map_err(up)?;
     Ok(())
 }
 
@@ -514,8 +632,8 @@ pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id:
     emit_turn(app, &turn_id).await;
 
     // 4. deliver
-    let res = app
-        .herdr
+    let res = client_for_bot(app, bot_id)
+        .await?
         .call_timeout("agent.prompt", json!({"target": bot.name, "text": text}), Duration::from_secs(10))
         .await;
     let delivery = match res {
@@ -613,7 +731,12 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
     let pane_id = run.pane_id.clone().unwrap_or_default();
-    let read = app.herdr.pane_read(&pane_id, "recent_unwrapped", 200).await?;
+    let host = db::bot_host(&app.db, &run.bot_id).await?;
+    let client = app
+        .herdr_for(&host)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("host `{host}` is not configured"))?;
+    let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
     let reply = extract_reply(&bot.kind, &fresh).unwrap_or_else(|| fresh.trim().to_string());
 

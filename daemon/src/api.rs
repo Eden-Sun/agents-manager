@@ -1,6 +1,6 @@
 //! REST + WebSocket API (SPEC §7).
 
-use crate::config::{canonical_path, valid_bot_name};
+use crate::config::{canonical_path, valid_bot_name, valid_host_name, HostCfg, LOCAL_HOST};
 use crate::db;
 use crate::lifecycle::{self, LcError};
 use crate::state::App;
@@ -49,6 +49,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/turns/{id}/abandon", post(abandon_turn))
+        .route("/hosts", post(create_host))
+        .route("/hosts/{name}", delete(delete_host))
+        .route("/hosts/{name}/reconnect", post(reconnect_host))
         .route("/fs/dirs", get(list_dirs))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session));
@@ -122,12 +125,34 @@ fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
     }
 }
 
+/// `hosts[]` for `GET /api/state` (SPEC §11.6). `local` always comes first.
+async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for c in app.hosts.list().await {
+        let connected = if c.is_local() { app.connected.load(Ordering::SeqCst) } else { c.is_connected() };
+        out.push(json!({
+            "name": c.name,
+            "ssh": c.cfg.as_ref().map(|x| x.ssh.clone()),
+            "ssh_port": c.cfg.as_ref().map(|x| x.ssh_port),
+            "ssh_opts": c.cfg.as_ref().map(|x| x.ssh_opts.clone()).unwrap_or_default(),
+            "herdr_session": c.cfg.as_ref().map(|x| x.herdr_session.clone()).unwrap_or_else(|| app.herdr_session.clone()),
+            "remote_path": c.cfg.as_ref().map(|x| x.remote_path.clone()),
+            "hook_port": c.cfg.as_ref().and_then(|x| x.hook_port),
+            "connected": connected,
+            "error": c.error_string().await,
+        }));
+    }
+    out
+}
+
 pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
     let mut out = Vec::new();
     for p in projects {
+        // SPEC §11.6: a bot on a disconnected host lamps `disconnected`.
+        let host_up = app.host_connected(&p.host).await;
         let mut bl = Vec::new();
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = db::active_run(&app.db, &b.id).await.map_err(any_err)?;
@@ -141,18 +166,20 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "inject_hooks": b.inject_hooks == 1,
                 "auto_approve": b.auto_approve == 1,
                 "run": run,
-                "lamp": lamp(connected, run.as_ref()),
+                "lamp": lamp(host_up, run.as_ref()),
                 "unread": 0,
             }));
         }
         out.push(json!({
-            "id": p.id, "path": p.path, "label": p.label, "workspace_id": p.workspace_id, "bots": bl
+            "id": p.id, "path": p.path, "label": p.label, "host": p.host,
+            "workspace_id": p.workspace_id, "bots": bl
         }));
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
         "connected": connected,
         "herdr_session": app.herdr_session,
+        "hosts": hosts_list(app).await,
         "projects": out,
     }))
 }
@@ -171,16 +198,28 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
 struct NewProject {
     path: String,
     label: Option<String>,
+    /// `"local"` (default) or a configured host name.
+    host: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct DirsQuery {
     path: Option<String>,
+    host: Option<String>,
 }
 
 /// Directory browser for the "new project" picker. Lists only directories (no files),
 /// hides dot-entries, never follows into unreadable places, and reports the parent.
-async fn list_dirs(Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
+async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
+    // SPEC §11.5: the same JSON, produced by a remote `sh` snippet.
+    let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    if host != LOCAL_HOST {
+        let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+        let v = crate::hosts::remote_list_dirs(&conn, q.path.as_deref())
+            .await
+            .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+        return Ok(Json(v));
+    }
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let raw = q.path.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| home.to_string_lossy().to_string());
     let raw = if let Some(rest) = raw.strip_prefix("~") { format!("{}{}", home.display(), rest) } else { raw };
@@ -226,7 +265,16 @@ async fn list_dirs(Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
 }
 
 async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) -> Result<Response, LcError> {
-    let path = canonical_path(&b.path).map_err(|e| LcError::Bad(e.to_string()))?;
+    let host = b.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    let path = if host == LOCAL_HOST {
+        canonical_path(&b.path).map_err(|e| LcError::Bad(e.to_string()))?
+    } else {
+        // Remote paths cannot be canonicalized locally; ask the host (SPEC §11.6).
+        let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+        crate::hosts::remote_canonical_dir(&conn, &b.path)
+            .await
+            .map_err(|e| LcError::Bad(format!("{e:#}")))?
+    };
     let label = b.label.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
         std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.clone())
     });
@@ -234,13 +282,14 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
     let res = app
         .cfg
         .update(|cfg| {
-            if cfg.projects.iter().any(|p| p.path == path) {
+            if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
                 anyhow::bail!("duplicate");
             }
             cfg.projects.push(crate::config::ProjectCfg {
                 id: Some(id.clone()),
                 path: path.clone(),
                 label: label.clone(),
+                host: host.clone(),
                 bots: vec![],
             });
             Ok(())
@@ -409,6 +458,86 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
+
+// ---------------------------------------------------------------- hosts (§11.6)
+
+#[derive(Deserialize)]
+struct NewHost {
+    name: String,
+    ssh: String,
+    ssh_port: Option<u16>,
+    ssh_opts: Option<Vec<String>>,
+    herdr_session: Option<String>,
+    remote_path: Option<String>,
+    hook_port: Option<u16>,
+}
+
+/// Write the `[[hosts]]` entry (upsert), then connect and report the outcome.
+async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Result<Response, LcError> {
+    if b.name == LOCAL_HOST {
+        return Err(LcError::Bad("`local` is reserved for this machine".into()));
+    }
+    if !valid_host_name(&b.name) {
+        return Err(LcError::Bad(format!("host name must match {}", crate::config::BOT_NAME_RE)));
+    }
+    if b.ssh.trim().is_empty() {
+        return Err(LcError::Bad("ssh target must not be empty".into()));
+    }
+    let cfg = HostCfg {
+        name: b.name.clone(),
+        ssh: b.ssh.trim().to_string(),
+        ssh_port: b.ssh_port.unwrap_or(22),
+        ssh_opts: b.ssh_opts.unwrap_or_default(),
+        herdr_session: b.herdr_session.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "agents-manager".into()),
+        remote_path: b.remote_path.unwrap_or_default(),
+        hook_port: b.hook_port,
+    };
+    let c2 = cfg.clone();
+    app.cfg
+        .update(move |f| {
+            match f.hosts.iter_mut().find(|h| h.name == c2.name) {
+                Some(existing) => *existing = c2,
+                None => f.hosts.push(c2),
+            }
+            Ok(())
+        })
+        .await
+        .map_err(any_err)?;
+    let hosts = app.cfg.get().await.hosts;
+    app.hosts.apply_config(&app, &hosts).await;
+    let (connected, error) = app.hosts.reconnect(&app, &b.name).await.unwrap_or((false, Some("host vanished".into())));
+    app.emit("host_changed", json!({"name": b.name, "connected": connected, "error": error})).await;
+    crate::state::emit_daemon_status(&app).await;
+    Ok((StatusCode::OK, Json(json!({"name": b.name, "connected": connected, "error": error}))).into_response())
+}
+
+async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    if name == LOCAL_HOST {
+        return Err(LcError::Bad("`local` cannot be removed".into()));
+    }
+    for p in db::live_projects(&app.db).await.map_err(any_err)? {
+        if p.host == name {
+            return Err(LcError::conflict("host still used by projects", json!({"project_id": p.id})));
+        }
+    }
+    let n2 = name.clone();
+    app.cfg
+        .update(move |f| {
+            f.hosts.retain(|h| h.name != n2);
+            Ok(())
+        })
+        .await
+        .map_err(any_err)?;
+    app.hosts.remove(&app, &name).await;
+    app.emit("project_changed", json!({})).await;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    let (connected, error) = app.hosts.reconnect(&app, &name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
+}
+
 // ---------------------------------------------------------------- run control
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
@@ -510,7 +639,12 @@ async fn get_terminal(
         return Err(LcError::Bad("bad source".into()));
     }
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
-    let read = app.herdr.pane_read(&pane, &source, lines).await.map_err(any_err)?;
+    let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+    let client = app
+        .herdr_for(&host)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))?;
+    let read = client.pane_read(&pane, &source, lines).await.map_err(any_err)?;
     Ok(Json(json!({
         "bot_id": id, "run_id": run.id, "pane_id": pane,
         "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,

@@ -8,10 +8,12 @@ use std::str::FromStr;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+  id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
+  host TEXT NOT NULL DEFAULT 'local',
   workspace_id TEXT,
   deleted_at TEXT, created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path ON projects(host, path);
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex')),
@@ -82,13 +84,61 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         sqlx::query(s).execute(&pool).await.with_context(|| format!("apply schema: {s}"))?;
     }
     // Additive migrations for databases created before a column existed.
-    for (table, col, ddl) in [("bots", "auto_approve", "ALTER TABLE bots ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1")] {
+    for (table, col, ddl) in [
+        ("bots", "auto_approve", "ALTER TABLE bots ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1"),
+        ("projects", "host", "ALTER TABLE projects ADD COLUMN host TEXT NOT NULL DEFAULT 'local'"),
+    ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
             .fetch_one(&pool)
             .await?;
         if has == 0 {
             sqlx::query(ddl).execute(&pool).await.with_context(|| format!("migrate: {ddl}"))?;
+        }
+    }
+    // SPEC §11: `path` used to be UNIQUE across every machine. The same directory can now
+    // exist on several hosts, so rebuild the table with a UNIQUE(host, path) index instead.
+    // The whole rebuild must run on ONE connection: `PRAGMA foreign_keys` is per-connection.
+    {
+        let mut conn = pool.acquire().await?;
+        let projects_ddl: Option<String> =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'")
+                .fetch_optional(&mut *conn)
+                .await?;
+        let stale_rebuild: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects_new'")
+                .fetch_one(&mut *conn)
+                .await?;
+        let needs_rebuild = projects_ddl.as_deref().map(|d| d.contains("path TEXT NOT NULL UNIQUE")).unwrap_or(false);
+        if needs_rebuild || stale_rebuild > 0 {
+            tracing::info!("migrating projects.path UNIQUE -> UNIQUE(host, path)");
+            sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
+            sqlx::query("PRAGMA legacy_alter_table=ON").execute(&mut *conn).await?;
+            let steps: Vec<&str> = if needs_rebuild {
+                vec![
+                    "DROP TABLE IF EXISTS projects_new",
+                    "CREATE TABLE projects_new (
+                       id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
+                       host TEXT NOT NULL DEFAULT 'local', workspace_id TEXT,
+                       deleted_at TEXT, created_at TEXT NOT NULL)",
+                    "INSERT INTO projects_new (id, path, label, host, workspace_id, deleted_at, created_at)
+                       SELECT id, path, label, host, workspace_id, deleted_at, created_at FROM projects",
+                    "DROP TABLE projects",
+                    "ALTER TABLE projects_new RENAME TO projects",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path ON projects(host, path)",
+                ]
+            } else {
+                // A previous run died between DROP and RENAME; finish the job.
+                vec![
+                    "ALTER TABLE projects_new RENAME TO projects",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path ON projects(host, path)",
+                ]
+            };
+            for stmt in steps {
+                sqlx::query(stmt).execute(&mut *conn).await.with_context(|| format!("migrate projects: {stmt}"))?;
+            }
+            sqlx::query("PRAGMA legacy_alter_table=OFF").execute(&mut *conn).await?;
+            sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
         }
     }
     Ok(pool)
@@ -107,6 +157,8 @@ pub struct Project {
     pub id: String,
     pub path: String,
     pub label: String,
+    /// `"local"` or a configured host name (SPEC §11.2).
+    pub host: String,
     pub workspace_id: Option<String>,
     pub deleted_at: Option<String>,
     pub created_at: String,
@@ -235,6 +287,40 @@ pub async fn conversation_id(pool: &SqlitePool, bot_id: &str) -> Result<String> 
         .execute(pool)
         .await?;
     Ok(id)
+}
+
+/// Bots on one host (join through their project), in creation order.
+pub async fn live_bots_on_host(pool: &SqlitePool, host: &str) -> Result<Vec<Bot>> {
+    Ok(sqlx::query_as::<_, Bot>(
+        "SELECT b.* FROM bots b JOIN projects p ON p.id = b.project_id
+         WHERE b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.host = ? ORDER BY b.created_at",
+    )
+    .bind(host)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The host a bot lives on. Missing rows fall back to `local`.
+pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT p.host FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
+    )
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string()))
+}
+
+/// Active runs sitting on `pane_id` **on this host**. pane ids are only unique per host.
+pub async fn active_runs_for_pane(pool: &SqlitePool, host: &str, pane_id: &str) -> Result<Vec<Run>> {
+    Ok(sqlx::query_as::<_, Run>(
+        "SELECT r.* FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+         WHERE r.pane_id = ? AND p.host = ? AND r.state IN ('starting','running','stopping')",
+    )
+    .bind(pane_id)
+    .bind(host)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Turn>> {

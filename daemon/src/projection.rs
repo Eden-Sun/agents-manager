@@ -26,10 +26,14 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                     p.id = Some(db::ulid());
                     dirty = true;
                 }
-                if let Ok(c) = canonical_path(&p.path) {
-                    if c != p.path {
-                        p.path = c;
-                        dirty = true;
+                // Only local paths can be canonicalized here; a remote path was already
+                // canonicalized on its host when the project was created (SPEC §11.6).
+                if p.host == crate::config::LOCAL_HOST {
+                    if let Ok(c) = canonical_path(&p.path) {
+                        if c != p.path {
+                            p.path = c;
+                            dirty = true;
+                        }
                     }
                 }
                 for b in p.bots.iter_mut() {
@@ -61,12 +65,14 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
         let pid = p.id.clone().unwrap();
         live_projects.insert(pid.clone());
         sqlx::query(
-            "INSERT INTO projects (id, path, label, created_at) VALUES (?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label, deleted_at=NULL",
+            "INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
+               host=excluded.host, deleted_at=NULL",
         )
         .bind(&pid)
         .bind(&p.path)
         .bind(&p.label)
+        .bind(&p.host)
         .bind(&now)
         .execute(pool)
         .await?;
