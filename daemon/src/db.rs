@@ -195,13 +195,13 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
                SELECT id, project_id, name, kind, model, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at FROM bots",
             "DROP TABLE bots",
             "ALTER TABLE bots_new RENAME TO bots",
-            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
         ]
     } else {
         // A previous run died between DROP and RENAME; finish the job.
         vec![
             "ALTER TABLE bots_new RENAME TO bots",
-            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
         ]
     };
     for stmt in steps {
