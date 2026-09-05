@@ -65,7 +65,8 @@ function BotRow({ botId }: { botId: string }) {
             </span>
           ) : null}
           <IdentityBadge name={bot.identity} />
-          <span>{LAMP_LABEL[lamp]}</span>
+          {/* idle / offline are hidden by CSS — the lamp already says so. */}
+          <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
         </span>
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>

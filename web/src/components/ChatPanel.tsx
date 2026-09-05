@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
-import { botLamp, composerState, projectHostName, useStore } from '../store/store'
+import { botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel } from './BotSettingsPanel'
 import { HostBadge } from './HostsPanel'
@@ -24,28 +24,20 @@ function timeOf(iso: string): string {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false })
 }
 
-/** A terminal-fallback reply can be a whole screen dump, so long bubbles start collapsed. */
-const LONG_CHARS = 900
-const LONG_LINES = 18
-
-function isLong(content: string): boolean {
-  return content.length > LONG_CHARS || content.split('\n').length > LONG_LINES
-}
-
 /**
- * One message. `from` (SPEC §13 group view) is rendered above the bubble: the bot badge on
- * a reply, or the `→ @a, @b` recipient list on a folded user message.
+ * One message, shown in full (long content scrolls with the list — nothing is folded).
+ * `from` (SPEC §13 group view) sits on the meta line under the bubble — the bot badge on
+ * a reply, or the `→ @a, @b` recipient list on a folded user message — so a short reply
+ * stays two lines tall. System notes have no meta line; theirs goes above.
  */
 export function Bubble({ msg, from }: { msg: Message; from?: ReactNode }) {
   const fallback = msg.source === 'terminal_fallback'
-  const long = isLong(msg.content)
-  const [expanded, setExpanded] = useState(false)
-  const clamped = long && !expanded
+  const system = msg.role === 'system'
 
   return (
     <article className={`msg ${msg.role}`}>
-      {from ? <div className="msg-from">{from}</div> : null}
-      <div className={`bubble${clamped ? ' clamped' : ''}${msg.role === 'assistant' && !fallback ? ' md' : ''}`}>
+      {from && system ? <div className="msg-from">{from}</div> : null}
+      <div className={`bubble${msg.role === 'assistant' && !fallback ? ' md' : ''}`}>
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
@@ -54,23 +46,68 @@ export function Bubble({ msg, from }: { msg: Message; from?: ReactNode }) {
           msg.content
         )}
       </div>
-      {msg.role === 'system' ? null : (
+      {system ? null : (
         <div className="msg-meta">
-          <span>{timeOf(msg.created_at)}</span>
+          {from && msg.role === 'assistant' ? <span className="msg-from">{from}</span> : null}
+          <time dateTime={msg.created_at} title={msg.created_at}>
+            {timeOf(msg.created_at)}
+          </time>
           {msg.role === 'assistant' ? (
             <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`messages.source = ${msg.source}`}>
               {SOURCE_LABEL[msg.source] ?? msg.source}
             </span>
           ) : null}
-          {fallback || msg.incomplete ? <span style={{ color: 'var(--warn)' }}>可能不完整</span> : null}
-          {long ? (
-            <button type="button" className="link-btn" onClick={() => setExpanded(!expanded)}>
-              {expanded ? '收合' : '展開全文'}
-            </button>
-          ) : null}
+          {fallback || msg.incomplete ? <span className="meta-warn">可能不完整</span> : null}
+          {from && msg.role === 'user' ? <span className="msg-from">{from}</span> : null}
         </div>
       )}
     </article>
+  )
+}
+
+/**
+ * The in-flight turn's tail: a live bubble with the partial reply (`turn_progress`, API.md
+ * v3.9) once there is text, otherwise the typing indicator. Styled like an assistant bubble
+ * so it turns into the final message in place.
+ */
+export function LiveBubble({ text, from }: { text: string | null; from?: ReactNode }) {
+  return (
+    <article className={`msg assistant live${text ? ' streaming' : ''}`} aria-live="polite">
+      <div className={`bubble${text ? ' md' : ''}`}>
+        {text ? (
+          <>
+            <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+            <span className="caret" aria-hidden="true" />
+          </>
+        ) : (
+          <TypingDots />
+        )}
+      </div>
+      <div className="msg-meta">
+        {from ? <span className="msg-from">{from}</span> : null}
+        <span>{text ? '輸出中…' : '等待回覆（hook）…'}</span>
+      </div>
+    </article>
+  )
+}
+
+/** Shared empty / loading state for the main area (chat, group, terminal, no selection). */
+export function EmptyState({ loading, children }: { loading?: boolean; children: ReactNode }) {
+  return (
+    <p className={`msg-empty${loading ? ' loading' : ''}`}>
+      {loading ? <TypingDots /> : null}
+      {children}
+    </p>
+  )
+}
+
+export function TypingDots() {
+  return (
+    <span className="typing" aria-hidden="true">
+      <i />
+      <i />
+      <i />
+    </span>
   )
 }
 
@@ -79,13 +116,15 @@ function MessageList({ botId }: { botId: string }) {
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
+  const liveText = useStore((s) => liveReplyOf(s, botId)?.text ?? null)
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
 
+  // Follow the tail (new messages, live output growing) only while the user is at the bottom.
   useLayoutEffect(() => {
     const el = ref.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [messages, working])
+  }, [messages, working, liveText])
 
   const list = messages ?? []
 
@@ -99,24 +138,13 @@ function MessageList({ botId }: { botId: string }) {
       }}
     >
       {list.length === 0 ? (
-        <p className="msg-empty">
+        <EmptyState loading={!loaded}>
           {loaded ? '還沒有訊息。啟動 Bot 之後，在下方輸入框送出第一則訊息。' : '載入訊息中…'}
-        </p>
+        </EmptyState>
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} />)
       )}
-      {inFlight || working ? (
-        <article className="msg assistant">
-          <div className="bubble">
-            <span className="typing">
-              <i />
-              <i />
-              <i />
-            </span>
-          </div>
-          <div className="msg-meta">等待回覆（hook）…</div>
-        </article>
-      ) : null}
+      {inFlight || working ? <LiveBubble text={liveText} /> : null}
     </div>
   )
 }
@@ -175,7 +203,8 @@ function Composer({ botId }: { botId: string }) {
           ref={ref}
           value={text}
           disabled={state.disabled || sending}
-          placeholder={state.disabled ? '目前無法送出訊息' : '輸入訊息…（Enter 送出，Shift+Enter 換行）'}
+          placeholder={state.disabled ? '目前無法送出訊息' : '輸入訊息…'}
+          title="Enter 送出，Shift+Enter 換行"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -188,7 +217,6 @@ function Composer({ botId }: { botId: string }) {
           {sending ? '送出中…' : '送出'}
         </button>
       </div>
-      <div className="composer-hint">每次送出會產生新的 client_request_id（uuid）作為冪等鍵。</div>
     </div>
   )
 }
@@ -222,9 +250,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </button>
           <span className="main-status">未選擇 Bot</span>
         </div>
-        <p className="msg-empty" style={{ margin: 'auto' }}>
-          從左側選擇一個 Bot，或先新增 Project 與 Bot。
-        </p>
+        <EmptyState>從左側選擇一個 Bot，或先新增 Project 與 Bot。</EmptyState>
       </>
     )
   }
@@ -260,9 +286,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             ⚙
           </button>
         </div>
-        <span className="main-status">
+        <span
+          className={`main-status ${lamp}`}
+          title={run ? `run ${run.id}${run.pane_id ? ` ・ pane ${run.pane_id}` : ''}` : undefined}
+        >
           {LAMP_LABEL[lamp]}
-          {run ? ` ・ run ${run.id.slice(-6)}${run.pane_id ? ` ・ pane ${run.pane_id}` : ''}` : ''}
         </span>
         <span className="spacer" />
         <div className="tabs" role="tablist">
@@ -317,9 +345,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         active ? (
           <TerminalTab botId={botId} />
         ) : (
-          <p className="msg-empty" style={{ margin: 'auto' }}>
-            Bot 未在執行中，沒有可讀取的終端。
-          </p>
+          <EmptyState>Bot 未在執行中，沒有可讀取的終端。</EmptyState>
         )
       ) : (
         <div className="chat">

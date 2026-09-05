@@ -145,8 +145,9 @@ web/src/
 ### 主題與版面
 
 深淺色跟隨系統（`prefers-color-scheme`），不提供手動切換。
-版面在 1280 與 900 寬都測過；≤1080 會收起 sidebar 的連線文字與標題列的 run/pane 細節，
-≤780 sidebar 變成可開合的抽屜（左上 ☰）。
+版面在 1280 與 900 寬都測過；≤1080 會收起 sidebar 的連線文字與標題列的狀態字
+（run / pane id 已改為狀態字的 tooltip），≤780 sidebar 變成可開合的抽屜（左上 ☰）。
+視覺規格見文末「UI 優化（2026-09-06）」。
 
 ---
 
@@ -232,8 +233,8 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
    使用者決定不顯示，要改只能編 `config.toml`。
 7. **終端快照是純文字**，ANSI 已由後端去除，但 box-drawing 字元在含中文的行會對不齊
    （等寬字體對 CJK 的寬度處理）。不影響操作。
-8. **`terminal_fallback` 的長訊息**會整段終端內容進氣泡；超過 ~900 字或 18 行的氣泡預設
-   收合並提供「展開全文」。
+8. **`terminal_fallback` 的長訊息**會整段終端內容進氣泡。2026-09-06 起不再預先收合
+   （使用者要求一律完整顯示，靠 `.msg-list` 捲動）。
 9. **oxlint 兩個 warning** 未修：`StatusLamp.tsx` 同時 export 常數（fast-refresh 提示）、
    `TerminalTab.tsx` 的 set-state-in-effect（非同步刷新，誤報）。不影響 build。
 
@@ -548,3 +549,71 @@ mock 與輸入框共用；後端仍是最終裁決者。
 | `130-grok-kind-tag.png` | sidebar 三個 bot：`am-claude` / `am-codex` / `am-grok`，各自的 kind 標籤 |
 | `130-new-bot-grok-form.png` | 「+」新增 Bot 表單 kind 選 `grok`：模型選項 `（預設） | grok-4.6 | grok-4.5 | 自訂…`，auto_approve 文案含 `grok --always-approve` |
 | `131-grok-bot-added.png` | 選 `grok-4.5` 送出後列表出現 `am-grok-2` |
+
+
+## UI 優化（2026-09-06，視覺與互動）與即時輸出（API.md v3.9）
+
+以真 daemon 截圖 `170–174` 為輸入的整理；只動 `web/src/**`，驗收腳本依賴的 class / 結構
+（`.app` `.bot-row` `.bot-name` `.lamp.lamp-<state>` `.kind-tag.<kind>` `.identity-badge` `.host-badge`
+`.project-head` `.project-label-btn` `.icon-btn.add` `.inline-form` `.opt-group .opt` `.msg(.assistant/.user)`
+`.bubble(.md)` `.msg-list` `.composer textarea` `.composer-lock` `.dirpicker*` `.host-row` `.identity-row`
+`.disclosure` `.tab`）全部保留。
+
+### 改了什麼
+
+| # | 問題 | 處理 |
+|---|---|---|
+| 1 | 訊息垂直留白過大 | `.msg-list` gap 12→6px、氣泡 padding 8/12→6/11、行高 1.45；meta 列縮成 10px 單行（`<time>` + 來源標籤）；同側相鄰訊息（`.msg.user + .msg.user`、`.msg.assistant + .msg.assistant`）再收 4px。一對短問答從 ~200px 降到 ~110px |
+| 2 | `1` 被畫成框中框 | fenced code 改為無邊框淡色底（`--code-bg`）；整則回覆只有一個 fence 時（`.bubble.md > pre:only-child`）直接以等寬字顯示，不畫底。行內 code 也去邊框 |
+| 3 | 群組 bot 徽章 / 收件者列佔一整行 | `from` 改進 meta 列：回覆為 `[bot 徽章] 時間 · hook`，使用者訊息為 `時間 → @a, @b`（`.msg-from` 仍在，只是位置改到 `.msg-meta` 內；system 註記無 meta 列，徽章維持在氣泡上方）。補上 `.bot-badge.grok` 配色 |
+| 4 | 淺色偏白、對比弱；深色側欄邊界不明 | 新增 `--bg-side`：淺色側欄 `#f4f5f8`、對話底 `#e9ecf1`、白色氣泡 + 邊框 + 1px 陰影；深色側欄 `#131519`（最深）、對話底 `#191c22`、標題列 / 輸入區 `#1f232a`；側欄右邊線改 `--border-strong` |
+| 5 | 輸入框下說明文字 | 單 bot 的 `client_request_id` 說明拿掉；群組的固定說明拿掉，只在「沒有 mention」或「已解析收件者 / 略過」時顯示；placeholder 縮成「輸入訊息…」「@bot 或 @all …」，Enter / Shift+Enter 說明移到 `title` |
+| 6 | 側欄每列擁擠 | ⚙ 只在 hover / focus / 選取時出現（`@media (hover: none)` 常顯）；狀態字 `.bot-state.<lamp>` 在 idle / offline 時隱藏（燈號已足夠），working 藍、blocked 紅、starting / stopping 黃；`.bot-sub` 不換行、溢出截斷；停止 / 啟動鈕改透明底、固定最小寬 |
+| 7 | 標題列資訊過多 | `run <id> ・ pane <id>` 收進狀態字的 `title`；狀態字依 lamp 上色（`.main-status.working/.blocked`）；標題列固定 46px 與側欄頭齊高 |
+| 8 | 空狀態 / 載入 / toast 不一致 | 共用 `EmptyState`（`.msg-empty`，虛線卡片；`loading` 版帶 typing 點）用於無選取、無訊息、終端未執行、群組空；toast `.notice` 統一左側色條（info 藍 / error 紅）、進場動畫、關閉鈕 hover |
+| + | 長訊息預先收合 | 依使用者要求移除 `isLong` / `.clamped` / 「展開全文」，一律完整顯示 |
+| + | Bot 設定面板 | 頭列 40px、欄位改白底 + 強邊框，其餘不變 |
+
+### 即時輸出（WS `turn_progress`）
+
+- **store**：`liveReply: Record<botId, {turnId, text, revision}>`。`turn_progress` 更新（同 turn 只接受 revision 不倒退）；
+  同 turn 的 assistant `message_added`、或 `turn_updated` 離開 `in_flight` 時清掉。
+  選擇器 `liveReplyOf(state, botId)` 只在該 turn 仍是 `inFlightTurn` 且文字非空白時回傳，避免殘留。
+- **ChatPanel / GroupChatPanel**：訊息列最後的 `LiveBubble`（`.msg.assistant.live`）：有文字時 `.streaming`
+  以 Markdown 渲染、邊框帶 accent、右下角閃爍游標、meta 顯示「輸出中…」；沒有文字時維持 typing 點 +
+  「等待回覆（hook）…」。群組視圖每個進行中的成員各一個，帶 bot 徽章。內容變長時只在使用者原本就在
+  底部（距底 < 80px）才自動捲到底。
+- **mock**：`prompt` 後每 0.5 秒推 3 幀（`slow` 4 幀）`turn_progress`（回覆前綴），約 2.4 秒送最終
+  `message_added`。`REPLIES` 多一則 ``` ```\n1\n``` ``` 用來驗證單 fence 的顯示。
+
+### 驗收截圖
+
+mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900 @2x）：
+
+| 檔案 | 內容 |
+|---|---|
+| `180-chat-dark.png` / `180-chat-light.png` | 單 bot 對話：緊湊密度、`1` 不再框中框、無 composer 說明字 |
+| `180-live-chat-dark.png` | 送出 `echo 1` 途中：即時氣泡 + 游標 + 「輸出中…」 |
+| `180-live-group-dark.png` | 群組 `@all echo 1`：三個成員各一個即時氣泡（帶徽章），側欄三列顯示藍色「執行中」 |
+| `180-group-dark.png` / `180-group-light.png` | 群組時間軸：徽章 / 收件者在 meta 列 |
+| `180-settings-dark.png` / `180-settings-light.png` | Bot 設定面板 |
+| `180-newbot-dark.png` / `180-newbot-light.png` | Project 內「+」新增 Bot 表單 |
+| `180-chat-narrow-900.png` | 900 寬 |
+
+真後端（`npx vite --port 5187` → 7788，CDP 9361；與 `170–174` 對照）：
+
+| 檔案 | 內容 |
+|---|---|
+| `181-chat-dark.png` / `181-chat-light.png` | 同 `170` / `171` 的資料 |
+| `181-live-chat-dark.png` | `am-claude` 回「8 個月球事實」途中：清單到第 4 條、第 5 條進行中，游標閃爍，側欄與標題列「執行中」 |
+| `181-chat-after-live-dark.png` | 回合結束，即時氣泡被最終 `hook` 訊息取代 |
+| `181-group-dark.png` / `181-group-light.png` | 同 `172` |
+| `181-settings-dark.png` / `181-newbot-dark.png` | 同 `173` / `174` |
+
+### 已知取捨
+
+1. **即時氣泡的前幾幀可能是 TUI 雜訊**（真後端看到 `✢ Improvising…`、`Tip: …` 各出現約 0.7 秒），
+   這是 daemon 端 `turn_progress` 的過濾範圍；前端只把全空白的幀當成「沒有文字」。
+2. **不同 bot 的相鄰回覆**在群組視圖也套用同側收緊（-4px），靠 meta 列的徽章區分。
+3. **狀態字隱藏 idle / offline** 後，離線 bot 只靠空心燈號辨識；hover 列或看啟動 / 停止鈕可確認。
+4. **≤1080 寬時標題列的狀態字整個隱藏**（沿用原規則），run / pane tooltip 也跟著不可見。
