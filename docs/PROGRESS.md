@@ -186,6 +186,179 @@ box-drawing / 水平線即停、略過 spinner 行、去尾端空行；第二次
 
 ---
 
+## §11 遠端主機（Remote hosts，v3.1）
+
+日期：2026-09-06
+
+實作檔案：`daemon/src/hosts.rs`（新）、`config.rs`、`db.rs`、`projection.rs`、`state.rs`、
+`events.rs`、`reconcile.rs`、`lifecycle.rs`、`hookrecv.rs`、`api.rs`、`main.rs`；
+`scripts/dev-sshd.sh`（新）、`scripts/remote-loop-test.sh`（新）；`docs/API.md`。
+
+驗收環境：
+- `loop`：`scripts/dev-sshd.sh` 起的使用者權限 sshd（127.0.0.1:2222），herdr session `am-loop`，
+  `hook_port = 17788`（不能用 7788，反向轉發的另一端就是本機、會撞到 daemon 自己）。
+- `m4p`：`m4p@100.112.229.82`（真遠端，macOS，herdr 0.8.2），herdr session `agents-manager`，
+  `hook_port = 7788`。
+
+### R1 — HostManager ✅
+
+```
+$ curl -sX POST -H "X-AM-Token: $TOK" -H 'Content-Type: application/json'     -d '{"name":"loop","ssh":"m1pro@127.0.0.1","ssh_port":2222,"herdr_session":"am-loop",
+         "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","hook_port":17788,
+         "ssh_opts":["-i",".../clientkey","-o","UserKnownHostsFile=...","-o","StrictHostKeyChecking=yes"]}'     http://127.0.0.1:7788/api/hosts
+{"connected":true,"error":null,"name":"loop"}
+```
+
+daemon log（`m4p` 同時連上）：
+
+```
+INFO host configured host=loop ssh=m1pro@127.0.0.1
+INFO host configured host=m4p  ssh=m4p@100.112.229.82
+INFO remote session ensured host=loop session=am-loop socket=/Users/m1pro/.config/herdr/sessions/am-loop/herdr.sock
+INFO remote session ensured host=m4p  session=agents-manager socket=/Users/m4p/.config/herdr/sessions/agents-manager/herdr.sock
+INFO ssh master up; herdr ping ok host=loop socket=/tmp/agents-manager-501/loop.sock hook_port=17788
+INFO ssh master up; herdr ping ok host=m4p  socket=/tmp/agents-manager-501/m4p.sock  hook_port=7788
+INFO global herdr event subscription established host=loop
+INFO global herdr event subscription established host=m4p
+```
+
+`ps` 確認兩條 master（短路徑 socket + 反向轉發）：
+
+```
+ssh -N -M -S /tmp/agents-manager-501/loop.ctl -p 2222 -i .../clientkey     -L /tmp/agents-manager-501/loop.sock:/Users/m1pro/.config/herdr/sessions/am-loop/herdr.sock     -R 17788:127.0.0.1:7788 m1pro@127.0.0.1
+ssh -N -M -S /tmp/agents-manager-501/m4p.ctl     -L /tmp/agents-manager-501/m4p.sock:/Users/m4p/.config/herdr/sessions/agents-manager/herdr.sock     -R 7788:127.0.0.1:7788 m4p@100.112.229.82
+```
+
+殺掉 master → 自動重連（healthy ping 每 10 秒；本次 6 秒偵測到、8 秒內恢復，遠低於 30 秒上限）：
+
+```
+$ kill -9 $(pgrep -f "ssh -N -M -S /tmp/agents-manager-501/m4p.ctl")   # 00:29:30
+00:29:32 True  None
+00:29:36 False 'ssh master exited'
+00:29:38 True  None            <- 重連完成，並對該 host 重跑對帳 + 重建訂閱
+```
+
+### R2 — 遠端 Project / Bot ✅（`m4p` 真遠端 + `loop`）
+
+```
+$ curl -s "…/api/fs/dirs?host=m4p&path=~/am-remote-test"
+{"entries":[],"home":"/Users/m4p","parent":"/Users/m4p","path":"/Users/m4p/am-remote-test"}
+$ curl -sX POST … -d '{"path":"~/am-remote-test","label":"m4p-test","host":"m4p"}' …/api/projects
+{"project_id":"01M1S6VGWNNQ77WDGBSXNH4YE7"}                 # path 由遠端 `cd && pwd -P` 正規化
+$ curl -sX POST … -d '{"name":"m4p-claude","kind":"claude","auto_approve":false}' …/projects/<pid>/bots
+$ curl -sX POST …/api/bots/<bid>/start        # 4.6 s
+{"run_id":"01M1S6VGZG1SB4WTZ63SAHZJ5R"}
+lamp = blocked                                # claude 的 trust 提示
+$ curl -sX POST … -d '{"keys":["down","enter"]}' …/api/bots/<bid>/keys
+lamp = idle                                   # 3 秒內
+```
+
+遠端 hook 材料確實由 ssh 佈署（`m4p` 上）：
+
+```
+$ ssh m4p@… ls -la ~/.config/agents-manager/bots/01M1S6VGYNSRTR2688B3KCFJTB/
+-rw-r--r--  claude-settings.json      # --settings 指向這個檔
+-rwxr-xr-x  hook.sh                   # 附錄 E 的 POSIX sh 腳本
+```
+
+codex 亦驗過（`m4p-codex`，trust 提示按 `enter` → idle；`-c notify=[<hook.sh>,"codex",…]`）。
+
+### R3 — 遠端 hook ✅
+
+**`loop`（完整往返）**
+
+```
+$ curl -sX POST … -d '{"text":"Reply with exactly PONG","client_request_id":"r3-loop-1"}' …/prompt
+{"turn_id":"…","delivery":"ok"}
+$ curl -s …/messages?limit=10
+user      web   'Reply with exactly PONG'
+assistant hook  'PONG'                       <- 來源 hook，經 -R 17788 反向通道
+turns: [('completed','ok','479ae148-712a-432a-beef-af0abfcab0d7')]
+```
+
+**spool（daemon 停機 → 重啟補入）**
+
+```
+$ pkill -f "agents-managerd serve"
+$ herdr --session am-loop agent prompt loop-claude "Reply with exactly SPOOLTEST"
+$ wc -l ~/.config/agents-manager/bots/<bid>/hook-spool.jsonl      # 1（curl 打不到 daemon）
+$ <重啟 daemon>
+INFO hook received bot=loop-claude provider=claude kind=TurnComplete { … assistant: Some("SPOOLTEST") }
+INFO remote hook spool replayed bot_id=… host="loop" replayed=1
+messages: assistant/hook 'SPOOLTEST'（external Turn），spool 檔已被 ssh 端 mv+rm 清掉
+```
+
+**`m4p`（真遠端）**：`SessionStart` hook 經反向通道回填成功——
+
+```
+INFO hook received bot=m4p-claude provider=claude kind=Identity {
+  session_id: Some("838bdf5e-…"), transcript_path: Some("/Users/m4p/.claude/projects/…jsonl") }
+run.native_session_id = 838bdf5e-5932-4ecf-b302-d3638a86ca16
+```
+
+`Stop` hook 在 m4p 上**未驗到**：該機的 claude 與 codex 帳號都在用量上限
+（terminal 顯示 `Usage limit reached · continuing automatically at 1am`），
+prompt 走了終端備援（`source = terminal_fallback`，行為正確）。
+反向通道本身已由 `SessionStart` 與 `loop` 的完整往返證明可用。見「已知問題」。
+
+### R4 — 本機不受影響 ✅
+
+```
+$ curl -sX POST … -d '{"text":"Reply with exactly R4OK","client_request_id":"r4-local-1"}' …/bots/<am-claude>/prompt
+assistant/hook 'R4OK'                                  # 本機 hook 仍走 agents-managerd hook 子命令
+$ curl -sX POST …/bots/<am-codex>/start ; …/stop
+idle → offline                                          # 本機 start/stop 正常
+```
+
+`GET /api/state` 中本機 project 的 `host` 為 `"local"`、`lamp` 與 M1–M8 相同；
+既有三個本機 bot 在整個 §11 開發期間持續運行未被打斷（對帳保住 run）。
+
+### R5 — 開發測試自動化 ✅
+
+`scripts/dev-sshd.sh start|stop|status|ssh-opts|key`
+（key / config 在 `~/.config/agents-manager/dev-sshd/`，不需 sudo、不改系統設定）。
+
+`scripts/remote-loop-test.sh` 一鍵跑完 R1–R3 並自我清理，可重複執行：
+
+```
+$ scripts/remote-loop-test.sh
+=== 1. dev sshd on 127.0.0.1:2222            ok
+=== 2. POST /api/hosts (loop -> am-loop)     ok: host loop connected
+=== 2b. remote directory listing (§11.5)     ok
+=== 3. remove leftovers from a previous run
+=== 4. POST /api/projects (host=loop, path=/tmp/am-loop-test.5f1FvN)   ok
+=== 5. POST /api/projects/…/bots (loop-claude, claude)                 ok
+=== 6. POST /api/bots/…/start                ok: started, lamp=blocked
+=== 7. remote hook material installed over ssh                          ok
+=== 8. answer the trust prompt (down, enter) ok: trust prompt answered, lamp=idle
+=== 9. POST /api/bots/…/prompt               reply source=hook body=PONG
+=== 10. POST /api/bots/…/stop                ok: stopped
+=== 11. cleanup                              ok: host, project, bot and dev sshd removed
+R1 (host up) / R2 (remote project+bot, trust prompt) / R3 (hook reply): PASS
+```
+
+預設每次用 `mktemp -d /tmp/am-loop-test.XXXXXX` 新目錄，所以 trust 提示（blocked 分支）
+一定會被走到；`AM_PROJECT_DIR=` 可固定目錄、`AM_KIND=codex` 換 agent、`AM_KEEP=1` 保留環境。
+
+### §11 實作過程中發現並修掉的 bug
+
+1. **`reconcile` 的 snapshot 早於 per-bot 鎖**（原本就有，遠端把時間窗放大到必現）：
+   `session.snapshot` / `agent.list` 在迴圈外先取，之後才逐 bot 上鎖；若某 bot 在這中間
+   剛啟動成功，reconcile 會拿舊快照判定「agent gone」把 Run 標成 exited。
+   修法：`(Some(run), None)` 這一支在鎖內對該 bot 再打一次 `agent.get` 才下結論。
+2. **同一 host 會有兩條 global 訂閱**：`spawn_global_for_host` 原本 fire-and-forget，
+   兩次快速呼叫會交錯。改為 `async fn`，在同一把鎖內 abort 舊的、插入新的。
+3. **`projection.rs` 沒有把 `projects[].host` 投影進 SQLite**，遠端 project 全部被當成本機。
+4. **遠端登入 shell 是 zsh**：把 sh 片段當 argv 傳過去會被 zsh 解析（`printf` 的 `%`、
+   `${d%/}` 都會炸）。改成把腳本從 stdin 灌進 `ssh <target> /bin/sh -s`。
+5. **macOS 的 `nohup` 在 stderr 不是 console 時拒絕 detach**
+   （`nohup: can't detach from console: Inappropriate ioctl for device`），遠端 herdr server
+   起不來。改用 `( trap '' HUP; herdr … & )`。
+6. **`projects.path` 的 UNIQUE**：改成 `UNIQUE(host, path) WHERE deleted_at IS NULL`
+   （否則同一路徑不能同時存在於兩台機器，而且刪掉的 project 也無法重建）。
+
+---
+
 ## 偏離規格（與理由）
 
 1. **新增 bot 設定欄位 `inject_hooks`（TOML + `bots.inject_hooks` 欄）**。SPEC 沒有這個欄位，
@@ -214,6 +387,35 @@ box-drawing / 水平線即停、略過 spinner 行、去尾端空行；第二次
 10. **`agent.prompt` 不帶 `wait`**，以 10 秒 RPC 逾時界定 delivery。SPEC §6.3.4 的語義即此。
 11. **API 未匹配路徑會回 `index.html`**（SPA fallback），不是 404。第一階段可接受。
 
+### §11 偏離規格（與理由）
+
+12. **`hosts[].ssh_opts`（字串陣列，原樣附加到每個 ssh 指令）**。SPEC §11.2 只有 `ssh`
+    與 `ssh_port`，但 R5 的 dev sshd 需要 `-i <key>` 與 `-o UserKnownHostsFile=…`
+    才能在 `BatchMode=yes` 下免密登入。預設 `[]`，不影響既有設定。
+13. **`ssh_port` 只在不等於 22 時才加 `-p`**。若一律加 `-p 22`，會蓋掉 ssh_config
+    別名自訂的 Port（SPEC §11.2 說「可含 ssh_config 別名」）。
+14. **遠端 sh 片段一律以 `ssh <target> /bin/sh -s` + stdin 執行**，不用 SPEC §11.3.1 寫的
+    `ssh <host> '<指令>'`。遠端登入 shell 可能是 zsh/fish，argv 形式會被它再解析一次。
+15. **遠端 herdr server 用 `( trap '' HUP; … & )` 而非 `nohup`**（附錄 E 的 nohup 在
+    macOS 非 console stderr 下會失敗）。
+16. **`fallback_timers` 仍以 `run_id` 為鍵**，不是 SPEC §11.3.6 說的 `(host, pane_id)`。
+    `run_id` 是 ULID、全域唯一，本來就沒有跨 host 碰撞問題；`pane_watchers` 依規格改成
+    `(host, pane_id)`（pane id 只在單一 host 內唯一）。
+17. **`projects.path` 的唯一性改為 `UNIQUE(host, path) WHERE deleted_at IS NULL`**。
+    SPEC §2 的「路徑正規化後唯一」在多主機下必須帶上 host；加上 `deleted_at IS NULL`
+    是為了讓刪除過的 project 目錄可以重新註冊（沿用 `bots_name_live` 的既有寫法）。
+18. **遠端 project 的 `path` 不做本機 canonicalize**，改由 `ssh 'cd <p> && pwd -P'` 取得；
+    `projection.rs` 也只對 `host = "local"` 的 project 做 `canonical_path`。
+19. **`GET /api/fs/dirs?host=` 在 host `connected:false` 時仍可能回 200**：目錄瀏覽只用
+    ssh、不經過 herdr，所以只要 ssh 通就能列。ssh 失敗才回 502。已寫進 `docs/API.md`。
+20. **`daemon_status` 保留 `connected` 作為 `herdr_connected` 的同義欄位**（相容既有前端）；
+    `bot_status` 多帶 `host`，其 `connected` 是**該 bot 所屬 host** 的狀態（驅動 `lamp`）。
+21. **`POST /api/hosts` 是 upsert**（同名視為更新，先斷開舊連線再以新設定連），
+    SPEC 只寫「新增」。UI 的「編輯主機」用同一支 API 即可。
+22. **daemon 收到 SIGTERM / SIGINT 才會 `ssh -O exit`**。被 `kill -9` 時 master 會殘留，
+    但下次連線的 `start_master` 會先 `ssh -O exit` + 刪 socket 清乾淨。
+
+
 ## 已知問題
 
 1. **真 Codex 的 hook 未驗**：codex 帳號用量額度用盡（"You've hit your usage limit"），
@@ -224,3 +426,14 @@ box-drawing / 水平線即停、略過 spinner 行、去尾端空行；第二次
 4. **`transcript` 回補未實作**（第二階段），`runs.transcript_path` 已由 SessionStart hook 回填。
 5. 測試期間 DB 內留有多筆測試用的 external / 假 hook Turn（`sess-M4*`、`ws-*` 等），
    不影響功能；要乾淨的話刪掉 `~/.config/agents-manager/agents-manager.sqlite3*` 重來即可。
+
+6. **`m4p` 上的 `Stop` hook 未驗到**：該機的 claude 與 codex 帳號都在用量上限
+   （`Usage limit reached · continuing automatically at 1am`），prompt 只走到終端備援。
+   反向通道本身已由 `m4p` 的 `SessionStart` hook 與 `loop` 的完整往返（含 spool 補入）證明。
+   額度恢復後重跑：`POST /api/bots/<m4p-claude>/prompt` 並確認 `source = "hook"`。
+7. **`kill -9` daemon 會殘留 ssh master**：SIGTERM / SIGINT 有 graceful shutdown（`ssh -O exit`），
+   `kill -9` 沒有。殘留的 master 會在下次 `start_master` 被 `ssh -O exit` 清掉，不影響功能。
+8. **remote_path 之外的遠端環境不做偵測**：遠端沒有 herdr（或不在 `remote_path` 上）時，
+   host 會停在 `disconnected` 並在 `error` 顯示 `could not determine remote herdr socket path`。
+9. **遠端 `~/.config/agents-manager/bots/<id>/` 不會被清掉**：DELETE Bot 只刪本機設定，
+   遠端的 `hook.sh` / `claude-settings.json` / `hook.log` 留著（下次同 bot id 會覆寫）。

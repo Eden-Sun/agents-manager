@@ -74,8 +74,18 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         let lock = app.bot_lock(&bot.id).await;
         let _g = lock.lock().await;
         let active = db::active_run(&app.db, &bot.id).await?;
-        match (active, by_name.get(&bot.name)) {
+        // The snapshot above was taken *before* this bot's lock was acquired, so a Run that
+        // started in the meantime would look dead. Re-check that one agent under the lock.
+        let mut found: Option<crate::herdr::AgentInfo> = by_name.get(&bot.name).map(|a| (*a).clone());
+        if found.is_none() && active.is_some() {
+            found = client.agent_get(&bot.name).await.ok().flatten();
+            if found.is_some() {
+                tracing::debug!(host, bot = %bot.name, "reconcile: agent appeared after the snapshot");
+            }
+        }
+        match (active, found.as_ref()) {
             (Some(run), Some(agent)) => {
+                let agent: &crate::herdr::AgentInfo = agent;
                 // Still alive: refresh pane_id (pane move changes it) and status.
                 let status = agent.agent_status.normalized().as_str().to_string();
                 sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, agent_status=?, state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")

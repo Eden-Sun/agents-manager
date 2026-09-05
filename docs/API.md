@@ -225,7 +225,7 @@ UI 標籤建議：
 
 | type | data |
 |---|---|
-| `bot_status` | `{"bot_id":"...", "run": <run 物件或 null>, "connected": true}` |
+| `bot_status` | `{"bot_id":"...", "host":"local"\|"<name>", "run": <run 物件或 null>, "connected": true}`（`connected` 是**該 bot 所屬 host** 的連線狀態） |
 | `message_added` | `{"bot_id":"...", "message": <message 物件>}` |
 | `turn_updated` | `{"bot_id":"...", "turn": <turn 物件>}` |
 | `project_changed` | `{"project_id":"..."}`（或 `{}`） |
@@ -286,11 +286,11 @@ Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到
   "connected": true,
   "herdr_session": "agents-manager",
   "hosts": [
-    {"name":"local","ssh":null,"ssh_port":null,"herdr_session":"agents-manager",
+    {"name":"local","ssh":null,"ssh_port":null,"ssh_opts":[],"herdr_session":"agents-manager",
      "remote_path":null,"hook_port":null,"connected":true,"error":null},
-    {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"herdr_session":"agents-manager",
-     "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","hook_port":7788,
-     "connected":false,"error":"ssh master exited: Permission denied (publickey)."}
+    {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"ssh_opts":[],
+     "herdr_session":"agents-manager","remote_path":"/opt/homebrew/bin:$HOME/.local/bin",
+     "hook_port":7788,"connected":false,"error":"ssh master exited immediately (exit status: 255)"}
   ],
   "projects": [
     {"id":"01M1...","path":"/Users/m4p/work/foo","label":"foo@m4p","host":"m4p",
@@ -337,7 +337,7 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
 | `hook_port` | | daemon 自己的 port（預設 7788） |
 | `ssh_opts` | | `[]`，額外的 ssh 參數，原樣附加到每個 ssh 指令（例：`["-i","~/.ssh/id_x"]`） |
 
-回應 `200`：
+回應 `200`（同步等待第一次連線結果，最長約 35 秒）：
 
 ```json
 { "name": "m4p", "connected": true, "error": null }
@@ -380,7 +380,10 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
  "entries":[{"name":"foo","path":"/Users/m4p/work/foo","git":true}]}
 ```
 
-host 不存在 → `404`；host 斷線或 ssh 失敗 → `502 {"error":"upstream","message":"..."}`。
+host 不存在 → `404`；ssh 失敗（含認證失敗、目錄不存在）→ `502 {"error":"upstream","message":"..."}`。
+
+> 目錄瀏覽只用 ssh，不經過 herdr，所以 **host 斷線（`connected:false`）時仍可能成功回 200**；
+> 只有 ssh 本身失敗才回 502。UI 可以在 host 斷線時照樣讓使用者瀏覽目錄。
 
 ### WebSocket 事件變更
 

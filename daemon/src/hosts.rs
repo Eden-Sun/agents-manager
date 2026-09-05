@@ -352,7 +352,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     if let Err(e) = crate::reconcile::reconcile_host(&app, &conn.name).await {
                         tracing::error!(host = %conn.name, error = ?e, "reconcile after connect failed");
                     }
-                    crate::events::spawn_global_for_host(app.clone(), conn.name.clone());
+                    crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
 
                     // Health loop.

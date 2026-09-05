@@ -19,21 +19,22 @@ fn norm(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// Start (or restart) the global subscription for one host.
-pub fn spawn_global_for_host(app: Arc<App>, host: String) {
-    tokio::spawn(async move {
-        if let Some(old) = app.global_watchers.lock().await.remove(&host) {
-            old.abort();
-        }
-        let (a, h) = (app.clone(), host.clone());
-        let t = tokio::spawn(async move { global_loop(a, h).await });
-        app.global_watchers.lock().await.insert(host, t);
-    });
+/// Start (or restart) the global subscription for one host. Replacing the old task and
+/// registering the new one happens under one lock, so two quick calls cannot leave two
+/// loops running (each of which would reconcile independently).
+pub async fn spawn_global_for_host(app: Arc<App>, host: String) {
+    let mut g = app.global_watchers.lock().await;
+    if let Some(old) = g.remove(&host) {
+        old.abort();
+    }
+    let (a, h) = (app.clone(), host.clone());
+    let t = tokio::spawn(async move { global_loop(a, h).await });
+    g.insert(host, t);
 }
 
 /// Local host convenience (kept for `main.rs`).
-pub fn spawn_global(app: Arc<App>) {
-    spawn_global_for_host(app, LOCAL_HOST.to_string());
+pub async fn spawn_global(app: Arc<App>) {
+    spawn_global_for_host(app, LOCAL_HOST.to_string()).await;
 }
 
 async fn global_loop(app: Arc<App>, host: String) {
