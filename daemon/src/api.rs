@@ -45,6 +45,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/bots", post(create_bot))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
         .route("/bots/{id}/start", post(start_bot))
+        .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/stop", post(stop_bot))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/prompt", post(prompt_bot))
@@ -166,6 +167,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "project_id": b.project_id,
                 "name": b.name,
                 "kind": b.kind,
+                "model": b.model,
                 "args": b.args(),
                 "autostart": b.autostart == 1,
                 "inject_hooks": b.inject_hooks == 1,
@@ -338,6 +340,9 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
 struct NewBot {
     name: String,
     kind: String,
+    /// claude `--model <m>` / codex `-m <m>`; omitted / null / "" = the CLI's own default.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -394,6 +399,7 @@ async fn create_bot(
                 id: Some(id.clone()),
                 name: b.name.clone(),
                 kind: b.kind.clone(),
+                model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
                 args: b.args.clone(),
                 autostart: b.autostart,
                 inject_hooks: b.inject_hooks.unwrap_or(true),
@@ -419,6 +425,9 @@ async fn create_bot(
 
 #[derive(Deserialize)]
 struct PatchBot {
+    /// `Some(Some(m))` sets, `Some(None)` / `Some("")` clears, absent = unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    model: Option<Option<String>>,
     args: Option<Vec<String>>,
     autostart: Option<bool>,
     name: Option<String>,
@@ -442,14 +451,35 @@ async fn patch_bot(
     Path(id): Path<String>,
     Json(b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
+    let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
     if let Some(n) = &b.name {
         if !valid_bot_name(n) {
             return Err(LcError::Bad(format!("bot name must match {}", crate::config::BOT_NAME_RE)));
         }
-        if db::active_run(&app.db, &id).await.map_err(any_err)?.is_some() {
-            return Err(LcError::conflict("cannot rename a bot with an active run", json!({"bot_id": id})));
+        // herdr binds the agent name at start time, so renaming needs the bot stopped.
+        if let Some(run) = &active {
+            return Err(LcError::conflict(
+                "cannot rename a bot with an active run",
+                json!({"bot_id": id, "run_id": run.id}),
+            ));
+        }
+        if db::live_bots(&app.db)
+            .await
+            .map_err(any_err)?
+            .iter()
+            .any(|x| x.id != id && &x.name == n)
+        {
+            return Err(LcError::conflict("bot name already in use", json!({"name": n})));
         }
     }
+    // Everything else may change while a run is live — it just needs a restart to take effect.
+    let restart_relevant = b.model.is_some()
+        || b.args.is_some()
+        || b.identity.is_some()
+        || b.env.is_some()
+        || b.auto_approve.is_some()
+        || b.inject_hooks.is_some();
+    let needs_restart = active.is_some() && restart_relevant;
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
             let kind = db::bot(&app.db, &id)
@@ -474,6 +504,9 @@ async fn patch_bot(
             if let Some(e) = &b.env {
                 bot.env = e.clone();
             }
+            if let Some(m) = &b.model {
+                bot.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+            }
             if let Some(a) = &b.args {
                 bot.args = a.clone();
             }
@@ -495,10 +528,16 @@ async fn patch_bot(
         .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { any_err(e) })?;
     reproject(&app).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    Ok((StatusCode::OK, Json(json!({}))).into_response())
+    Ok((StatusCode::OK, Json(json!({"needs_restart": needs_restart}))).into_response())
 }
 
 async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.deleted_at.is_some() {
+        return Err(LcError::NotFound("bot".into()));
+    }
+    let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+    // SPEC §6.4: stop first (ctrl+c x2, pane closed on timeout), then drop the config entry.
     let _ = lifecycle::stop_bot(&app, &id).await;
     app.cfg
         .update(|cfg| {
@@ -509,7 +548,9 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
         })
         .await
         .map_err(any_err)?;
+    // Projection soft-deletes the row (`bots.deleted_at`); the conversation and its messages stay.
     reproject(&app).await?;
+    lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -660,6 +701,12 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let run_id = lifecycle::start_bot(&app, &id).await?;
+    Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
+}
+
+async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let run_id = lifecycle::restart_bot(&app, &id).await?;
+    app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
 }
 

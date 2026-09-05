@@ -48,6 +48,9 @@ pub struct BotCfg {
     pub id: Option<String>,
     pub name: String,
     pub kind: String,
+    /// Model to run under, injected as claude `--model <m>` / codex `-m <m>`. None = the CLI's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]

@@ -317,6 +317,16 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
     Value::Object(env)
 }
 
+/// `bot.model` as CLI args, inserted between the daemon's own flags and `identity.args`.
+fn model_args(bot: &db::Bot) -> Vec<String> {
+    let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return vec![] };
+    match bot.kind.as_str() {
+        "claude" => vec!["--model".into(), m.to_string()],
+        "codex" => vec!["-m".into(), m.to_string()],
+        _ => vec![],
+    }
+}
+
 /// Extra CLI args contributed by the bot's identity.
 async fn identity_args(app: &Arc<App>, bot: &db::Bot) -> Vec<String> {
     let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
@@ -451,6 +461,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .map_err(up)?;
     let injected = injected_args(app, bot, project).await.map_err(up)?;
     let mut args = injected;
+    args.extend(model_args(bot));
     args.extend(identity_args(app, bot).await);
     args.extend(bot.args());
 
@@ -544,6 +555,42 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     }
     app.emit_bot_status(bot_id).await;
     Ok(true)
+}
+
+/// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
+pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    stop_bot(app, bot_id).await?;
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    start_bot_locked(app, bot_id).await
+}
+
+/// Remove a deleted bot's hook material (`~/.config/agents-manager/bots/<id>/`). Best effort:
+/// a remote host that is down only gets a log line — the bot is gone either way.
+pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
+    if host == LOCAL_HOST {
+        let dir = app.bot_dir(bot_id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => tracing::info!(dir = %dir.display(), "removed bot config dir"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "could not remove bot config dir"),
+        }
+        return;
+    }
+    let Some(conn) = app.hosts.get(host).await else {
+        tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
+        return;
+    };
+    let res = async {
+        let p = remote_bot_dir(&conn, bot_id).await?;
+        conn.ssh_exec(&format!("rm -rf {}\n", sh_quote(&p.dir))).await?;
+        Ok::<_, anyhow::Error>(p.dir)
+    }
+    .await;
+    match res {
+        Ok(dir) => tracing::info!(host, %dir, "removed remote bot config dir"),
+        Err(e) => tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not remove remote bot config dir"),
+    }
 }
 
 pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
@@ -743,22 +790,19 @@ async fn fail_stalled_turn(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: 
     if turn.id != turn_id || turn.delivery != "ok" {
         return Ok(());
     }
-    // Peek at the screen for a human-readable reason before giving up.
-    let mut reason = format!("agent 在 {STALL_SECS} 秒內沒有對訊息作出反應（狀態一直是 {}）", run.agent_status);
+    // Peek at the screen and quote the lines that usually explain it. We do NOT assert a cause
+    // (the host may well be logged in) — the user reads the quoted lines and decides.
     let mut snapshot: Option<String> = None;
+    let mut hints: Vec<String> = Vec::new();
     if let Ok(client) = client_for_bot(app, bot_id).await {
         if let Some(pane) = run.pane_id.as_deref() {
             if let Ok(read) = client.pane_read(pane, "visible", 60).await {
-                let low = read.text.to_lowercase();
-                if low.contains("not logged in") || low.contains("/login") {
-                    reason = "agent 尚未登入（畫面顯示 Not logged in · Please run /login）。請在該主機用同一身份執行一次 claude 完成登入。".into();
-                } else if low.contains("usage limit") || low.contains("session limit") {
-                    reason = "agent 帳號已達用量上限（畫面顯示 usage / session limit）。".into();
-                }
+                hints = stall_hint_lines(&read.text);
                 snapshot = Some(read.text);
             }
         }
     }
+    let reason = stall_reason(&hints);
     let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
         .bind(turn_id)
@@ -771,6 +815,36 @@ async fn fail_stalled_turn(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: 
     insert_message(app, &turn.conversation_id, Some(turn_id), "system", &reason, "system", false, snapshot.as_deref()).await?;
     emit_turn(app, turn_id).await;
     Ok(())
+}
+
+/// Screen lines worth quoting back to the user when a prompt stalls.
+fn stall_hint_lines(screen: &str) -> Vec<String> {
+    const NEEDLES: [&str; 5] = ["not logged in", "/login", "unlock-keychain", "usage limit", "limit"];
+    let mut out: Vec<String> = Vec::new();
+    for line in screen.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let low = t.to_lowercase();
+        if NEEDLES.iter().any(|n| low.contains(n)) && !out.iter().any(|o| o == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// Neutral wording: state the symptom, quote the screen, and mention the keychain caveat.
+/// Never claim the agent "is not logged in" — the host may be logged in and stuck for other reasons.
+fn stall_reason(hints: &[String]) -> String {
+    let head = format!("agent 在 {STALL_SECS} 秒內沒有對訊息作出反應。");
+    if hints.is_empty() {
+        return format!("{head}請查看終端分頁。");
+    }
+    format!(
+        "{head}終端畫面：\n{}\n若該身份使用 macOS Keychain 儲存憑證，透過 ssh 啟動的 herdr 可能讀不到（畫面提示 `security unlock-keychain`）。",
+        hints.join("\n")
+    )
 }
 
 pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
