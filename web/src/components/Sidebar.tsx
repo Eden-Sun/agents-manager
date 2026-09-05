@@ -179,10 +179,10 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   )
 }
 
-function NewBotForm({ onDone }: { onDone: () => void }) {
+function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialProjectId?: string }) {
   const projects = useStore((s) => s.projects)
   const addBot = useStore((s) => s.addBot)
-  const [projectId, setProjectId] = useState(projects[0]?.id ?? '')
+  const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
   const [args, setArgs] = useState('')
@@ -288,6 +288,7 @@ export function Sidebar() {
   const connected = useStore((s) => s.connected)
   const removeProject = useStore((s) => s.removeProject)
   const [open, setOpen] = useState<'project' | 'bot' | 'host' | null>(null)
+  const [botFormFor, setBotFormFor] = useState<string | null>(null)
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
   const hostsDown = hosts.filter((h) => !h.connected).length
@@ -318,6 +319,15 @@ export function Sidebar() {
                 </span>
                 <button
                   type="button"
+                  className="icon-btn add"
+                  title="在這個 Project 新增 Bot"
+                  aria-expanded={botFormFor === p.id}
+                  onClick={() => setBotFormFor(botFormFor === p.id ? null : p.id)}
+                >
+                  ＋
+                </button>
+                <button
+                  type="button"
                   className="icon-btn"
                   title="刪除 Project（所有 Bot 需先停止）"
                   onClick={() => {
@@ -327,9 +337,22 @@ export function Sidebar() {
                   ✕
                 </button>
               </header>
+              {botFormFor === p.id ? (
+                <div className="inline-form">
+                  <NewBotForm key={p.id} initialProjectId={p.id} onDone={() => setBotFormFor(null)} />
+                </div>
+              ) : null}
               {list.length === 0 ? (
                 <p className="hint" style={{ padding: '0 14px 6px' }}>
                   這個 Project 還沒有 Bot。
+                  {botFormFor === p.id ? null : (
+                    <>
+                      {' '}
+                      <button type="button" className="link-btn" onClick={() => setBotFormFor(p.id)}>
+                        ＋ 新增 Bot
+                      </button>
+                    </>
+                  )}
                 </p>
               ) : (
                 list.map((b) => <BotRow key={b.id} botId={b.id} />)

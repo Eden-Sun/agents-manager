@@ -293,6 +293,21 @@ button:disabled {
   background: var(--bg-hover);
   color: var(--danger);
 }
+.icon-btn.add {
+  font-weight: 700;
+}
+.icon-btn.add:hover:not(:disabled),
+.icon-btn.add[aria-expanded='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.inline-form {
+  margin: 0 10px 6px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
 
 .bot-row {
   display: flex;
