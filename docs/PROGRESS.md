@@ -690,3 +690,47 @@ mention 仍以 bot 的專案內 `name` 比對，與 herdr 名稱無關。
   結果落在兩個 workspace（w1 / w2）；序列啟動不會。
 - Codex 回覆後會多送一個「Generate a concise, single-line task title…」的 notify（標題生成子回合），
   hookrecv 把它當 external turn 寫成一組 user / assistant 訊息（`{"title":"…"}`），群組時間軸也會顯示。
+
+## v3.6 — grok 支援（第三種 kind，2026-09-06）
+
+規格：`docs/SPEC.md` §12 + 附錄 F；API：`docs/API.md`「bot.kind = grok」；前端：`docs/FRONTEND.md`「grok kind」。
+
+### 研究結論（grok 1.0.13）
+
+- 旗標：`--always-approve`（= `--permission-mode bypassPermissions`）、`-m <model>`；`grok models` → `grok-4.6`（預設）、`grok-4.5`。
+- **沒有每次啟動的 hook 注入旗標**（`--settings` / `--hooks` / `--plugin-dir` 對 TUI 都是 `unexpected argument`）。hook 來源只有 `<GROK_HOME>/hooks/*.json`（全域、永遠信任）、專案 `.grok/hooks/`（需 trust）、config.toml `[[hooks.<Event>]]`、plugin。
+- hook payload 由 stdin 給、camelCase：`stop` 帶 `sessionId` / `promptId` / `transcriptPath` / `lastAssistantMessage` / `reason` (`end_turn` | `shutdown`) / `stopHookActive`；`session_start` 在 TUI 下**延遲到第一次 prompt 才觸發**；父程序 env 會傳到 hook（`AM_BOT_ID` 實測可見）。
+- 終端：prompt 回音 `❯ `，回覆**無標記**（縮排純文字 + 右側 `h:mm AM` 時戳 + `█` 捲軸），另有 `◆ …` 事件行、`Worked for … stop [hooks: N]`、遙測 opt-in banner（依寬度換行）。
+- 身份隔離：`GROK_HOME`（預設 `~/.grok`，含 auth / sessions / hooks / config）。
+- herdr：內建 grok manifest，`agent.start --kind grok` 3–4 秒 idle，本機無 trust 提示。
+
+### 設計
+
+全域 hooks 檔 `<GROK_HOME>/hooks/agents-manager.json`（SessionStart + Stop，timeout 5）→ 固定分派腳本 `~/.config/agents-manager/grok-hook.sh` → 讀 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` → `agents-managerd hook grok --bot … --token … --port …`（遠端：`bots/$AM_BOT_ID/hook.sh grok …`）。無 `AM_BOT_ID` 時立即 `exit 0`，使用者自己的 grok 不受影響。pane env 新增 `AM_HOOK_TOKEN`；`inject_hooks = false` 不給 token → hook no-op → 走終端備援。`bots.kind` CHECK 以 `bots_new` 重建加入 `grok`（重建後索引為 `bots_name_project_live`，配合 v3.5 專案內唯一）。
+
+### 驗收指令與結果（本機，daemon = 本 worktree release build）
+
+```
+POST /projects/01M1S2SQ…/bots {"name":"am-grok","kind":"grok"}   → {"bot_id":"01M1SCMS…"}
+POST /bots/<id>/start                                             → 4s；lamp idle；argv `grok --always-approve`
+  ~/.grok/hooks/agents-manager.json、~/.config/agents-manager/grok-hook.sh 已寫入（log: grok hook installed）
+POST /bots/<id>/prompt "Reply with exactly GROK-OK"               → 7s completed；assistant source=hook「GROK-OK」
+  log: hook received kind=Identity{session_id} → TurnComplete{promptId, transcriptPath, "GROK-OK"}
+PATCH {"model":"grok-4.5","inject_hooks":false} + restart         → argv `grok --always-approve -m grok-4.5`，pane env 無 AM_HOOK_TOKEN
+prompt "Reply with exactly GROK-FALLBACK"                         → 10s completed_fallback；terminal_fallback「GROK-FALLBACK」
+  （第一版把換行後的遙測 banner 帶進來，已改為整塊跳過並加單元測試）
+PATCH {"model":null,"inject_hooks":true} + restart + prompt       → hook「GROK-OK-2」
+merge main（v3.5 agent_name）後 restart am-grok                     → herdr agent list `agents-manager-am-grok`，
+  GET /state agent_name=agents-manager-am-grok，prompt → hook「GROK-OK-3」
+daemon 重啟 ×3：reconcile: kept active run bot=am-grok（同 pane）
+cargo test → 15 passed；npm run build ✅；scripts/demo-grok.mjs → docs/screenshots/130-*.png、131-*.png
+```
+
+herdr 測試 session `am-grok` 已 `server stop` + `session delete`；探測用的 `~/.grok/hooks/am-probe.json` 已移除。
+
+### 已知問題 / 注意
+
+1. **舊 daemon 二進位遇到 `kind = "grok"` 會 fatal**（`project config into sqlite: invalid bot kind grok`）。驗收期間另一個 agent 曾以 main 的舊 build 重啟 7788，daemon 立刻退出；請在合併前不要用未含此分支的 build 重啟 daemon，或先把 `am-grok` 從 config 移除。
+2. 全域 `~/.grok/hooks/agents-manager.json` 在刪除最後一個 grok bot 後不會被清掉（無害 no-op），第二階段可加清理。
+3. `session_start` 延遲觸發，所以 grok bot 剛啟動時 `runs.native_session_id` 為空，直到第一次 prompt。
+4. grok 的 Stop hook 在回合結束時是 gate（預設 600 秒 timeout），子命令 ≤ 3 秒且 stdout 為空，不會卡住回合；但 hook 失敗對 grok 是 fail-open，不會有錯誤提示，只能從 daemon log / `hook.log` 看。

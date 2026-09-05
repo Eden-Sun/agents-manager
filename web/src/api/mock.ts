@@ -14,8 +14,14 @@
  */
 
 import { parseMentions } from './mentions'
-import { ApiError } from './types'
+import { ApiError, BOT_KINDS } from './types'
+import type { BotKind } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
+
+/** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
+function toKind(v: unknown): BotKind {
+  return BOT_KINDS.includes(v as BotKind) ? (v as BotKind) : 'claude'
+}
 
 type Rec = Record<string, unknown>
 
@@ -71,7 +77,7 @@ interface MockBot {
   id: string
   project_id: string
   name: string
-  kind: 'claude' | 'codex'
+  kind: BotKind
   /** API.md v3.3：模型別名，null = 不帶 `--model` */
   model: string | null
   args_json: string
@@ -85,7 +91,7 @@ interface MockBot {
 
 interface MockIdentity {
   name: string
-  kind: 'claude' | 'codex'
+  kind: BotKind
   env: Record<string, string>
   args: string[]
 }
@@ -168,6 +174,20 @@ export class MockTransport implements Transport {
       project_id: p.id,
       name: 'am-codex',
       kind: 'codex',
+      model: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      created_at: now(),
+    })
+    this.bots.push({
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'am-grok',
+      kind: 'grok',
       model: null,
       args_json: '[]',
       autostart: 0,
@@ -309,7 +329,7 @@ export class MockTransport implements Transport {
     if (b.env && typeof b.env === 'object') for (const [k, v] of Object.entries(b.env as Rec)) env[k] = String(v)
     this.identities.push({
       name,
-      kind: b.kind === 'codex' ? 'codex' : 'claude',
+      kind: toKind(b.kind),
       env,
       args: Array.isArray(b.args) ? b.args.map(String) : [],
     })
@@ -583,7 +603,7 @@ export class MockTransport implements Transport {
       id: ulid('bot'),
       project_id: projectId,
       name,
-      kind: b.kind === 'codex' ? 'codex' : 'claude',
+      kind: toKind(b.kind),
       model: typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
@@ -600,7 +620,7 @@ export class MockTransport implements Transport {
   }
 
   /** identity 必須存在且 kind 相符（API.md identities 章節）。 */
-  private checkIdentity(name: string, kind: 'claude' | 'codex') {
+  private checkIdentity(name: string, kind: BotKind) {
     const ident = this.identities.find((x) => x.name === name)
     if (!ident) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
     if (ident.kind !== kind) {

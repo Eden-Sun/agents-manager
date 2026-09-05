@@ -13,6 +13,28 @@ import { useStore } from '../store/store'
  * 也不會出現在 PATCH body 裡（維持 config.toml 既有的值）。
  */
 
+/** 各 kind 的 auto_approve 旗標（daemon `injected_args`）。 */
+export function AutoApproveFlags() {
+  return (
+    <>
+      claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code> / grok{' '}
+      <code>--always-approve</code>
+    </>
+  )
+}
+
+/** 模型欄位下方的提示文字。 */
+export function modelHint(kind: BotKind): string {
+  switch (kind) {
+    case 'claude':
+      return 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
+    case 'codex':
+      return '留「（預設）」則不帶 -m，由 codex 自行決定'
+    case 'grok':
+      return '留「（預設）」則不帶 -m，由 grok 自行決定（`grok models`：grok-4.6 為預設）'
+  }
+}
+
 /**
  * 模型下拉：常用別名 + 「（預設）」+「自訂…」（任意字串）。
  * `null` = 不帶 `--model`，由 agent CLI 自己決定。
@@ -35,7 +57,7 @@ export function ModelField({
 
   return (
     <label className="field">
-      <span>模型（daemon 會翻成 {kind === 'codex' ? <code>-m &lt;值&gt;</code> : <code>--model &lt;值&gt;</code>}）</span>
+      <span>模型（daemon 會翻成 {kind === 'claude' ? <code>--model &lt;值&gt;</code> : <code>-m &lt;值&gt;</code>}）</span>
       <select
         value={custom ? MODEL_CUSTOM : (value ?? MODEL_DEFAULT)}
         onChange={(e) => {
@@ -249,16 +271,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <input type="text" value={bot.kind} readOnly disabled />
           </label>
 
-          <ModelField
-            kind={bot.kind}
-            value={model}
-            onChange={setModel}
-            hint={
-              bot.kind === 'claude'
-                ? 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
-                : '留「（預設）」則不帶 -m，由 codex 自行決定'
-            }
-          />
+          <ModelField kind={bot.kind} value={model} onChange={setModel} hint={modelHint(bot.kind)} />
 
           <label className="field">
             <span>身份（只列同 kind 的身份；在左側「身份」面板管理）</span>
@@ -284,7 +297,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           <label className="field row">
             <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
             <span>
-              自動核准全部權限（claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code>）
+              自動核准全部權限（<AutoApproveFlags />）
             </span>
           </label>
 

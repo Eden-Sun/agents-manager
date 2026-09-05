@@ -116,7 +116,93 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 user,
             }
         }
+        // SPEC §12 / appendix F: grok's stdin envelope. Keys come in camelCase (and, on 1.0.13,
+        // a snake_case copy of some of them); we read the camelCase ones and fall back to snake.
+        "grok" => {
+            let either = |camel: &str, snake: &str| s(camel).or_else(|| s(snake));
+            let ev = either("hookEventName", "hook_event_name").unwrap_or_default().to_lowercase();
+            match ev.as_str() {
+                "session_start" | "sessionstart" => HookKind::Identity {
+                    session_id: either("sessionId", "session_id"),
+                    transcript_path: either("transcriptPath", "transcript_path"),
+                },
+                "stop" => {
+                    // A second, observe-only Stop fires at session end (`reason: shutdown`).
+                    let reason = s("reason").unwrap_or_else(|| "end_turn".into());
+                    if reason != "end_turn" {
+                        return HookKind::Ignore(format!("stop reason {reason}"));
+                    }
+                    let active = p
+                        .get("stopHookActive")
+                        .or_else(|| p.get("stop_hook_active"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if active {
+                        return HookKind::Ignore("stop_hook_active".into());
+                    }
+                    HookKind::TurnComplete {
+                        session_id: either("sessionId", "session_id"),
+                        turn_id: either("promptId", "prompt_id"),
+                        transcript_path: either("transcriptPath", "transcript_path"),
+                        assistant: either("lastAssistantMessage", "last_assistant_message"),
+                        user: None,
+                    }
+                }
+                other => HookKind::Ignore(other.to_string()),
+            }
+        }
         other => HookKind::Ignore(format!("unknown provider {other}")),
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// Captured from grok 1.0.13 (appendix F), trimmed.
+    const GROK_STOP: &str = r#"{"hookEventName":"stop","sessionId":"01a072c2-9098-7d50-b3d1-f1750320ae28",
+      "cwd":"/x","workspaceRoot":"/x","timestamp":"2026-09-05T18:09:13.833011+00:00",
+      "transcriptPath":"/Users/me/.grok/sessions/%2Fx/01a072c2/updates.jsonl",
+      "promptId":"089f03f9-594f-4e92-bfb0-5180eefaa250","permissionMode":"bypassPermissions",
+      "reason":"end_turn","stopHookActive":false,"lastAssistantMessage":"GROK-OK",
+      "backgroundTasks":[],"sessionCrons":[],"hook_event_name":"stop",
+      "session_id":"01a072c2-9098-7d50-b3d1-f1750320ae28"}"#;
+
+    #[test]
+    fn grok_stop_is_a_turn() {
+        let v: Value = serde_json::from_str(GROK_STOP).unwrap();
+        match classify("grok", &v) {
+            HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+                assert_eq!(session_id.as_deref(), Some("01a072c2-9098-7d50-b3d1-f1750320ae28"));
+                assert_eq!(turn_id.as_deref(), Some("089f03f9-594f-4e92-bfb0-5180eefaa250"));
+                assert!(transcript_path.unwrap().ends_with("updates.jsonl"));
+                assert_eq!(assistant.as_deref(), Some("GROK-OK"));
+                assert!(user.is_none());
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_session_end_stop_is_ignored() {
+        let v = json!({"hookEventName":"stop","sessionId":"s","reason":"shutdown","stopHookActive":false});
+        assert!(matches!(classify("grok", &v), HookKind::Ignore(_)));
+        let v = json!({"hookEventName":"stop","sessionId":"s","reason":"end_turn","stopHookActive":true});
+        assert!(matches!(classify("grok", &v), HookKind::Ignore(_)));
+        let v = json!({"hookEventName":"session_end","sessionId":"s"});
+        assert!(matches!(classify("grok", &v), HookKind::Ignore(_)));
+    }
+
+    #[test]
+    fn grok_session_start_is_identity() {
+        let v = json!({"hookEventName":"session_start","sessionId":"s1","source":"new"});
+        match classify("grok", &v) {
+            HookKind::Identity { session_id, transcript_path } => {
+                assert_eq!(session_id.as_deref(), Some("s1"));
+                assert!(transcript_path.is_none());
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
     }
 }
 
@@ -160,7 +246,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
-            // Backfill run identity opportunistically (Codex has no SessionStart equivalent).
+            // Backfill run identity opportunistically (Codex has no SessionStart equivalent;
+            // grok's SessionStart carries no transcript path).
             if let Some(r) = &run {
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(native_session_id, ?),

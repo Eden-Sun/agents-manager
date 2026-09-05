@@ -390,7 +390,7 @@ sidebar 底部「身份」面板列出 `identities[]`（名稱、kind、env 摘�
 |---|---|
 | 名稱 | 有 active Run 時 `disabled`，下方提示「停止後才能改名」＋「停止並改名」按鈕（stop → 輪詢到 run 進 `stopped` / 消失 → 自動 focus 回輸入框）。前端仍檢查 `[a-z][a-z0-9_-]{0,31}` |
 | kind | 唯讀 |
-| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.5` / `gpt-5.6-luna` / `gpt-6-astra`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
+| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.5` / `gpt-5.6-luna` / `gpt-6-astra`，grok = `grok-4.6` / `grok-4.5`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
 | args | 空白分隔 |
 | 身份 | 只列同 kind 的 identities；`（無）` = `null` |
 | env | 每行 `KEY=VALUE`（與身份面板共用 `parseEnvText` / `envToText`），整包取代 |
@@ -536,3 +536,15 @@ mock 與輸入框共用；後端仍是最終裁決者。
 3. **未讀計數只在記憶體**：重新整理即歸零；`GET /api/state` 的 `unread` 仍固定 0。
 4. **mention 自動完成只針對游標前的 token**：在文字中間插入 `@` 後往回移動游標也會觸發，但用滑鼠選取整段文字時不會重新計算游標。
 5. **mock 的 `@all` 回覆順序固定**（依 `REPLIES` 輪替），真後端的順序取決於各 agent 的回覆速度。
+
+## grok kind（2026-09-06，SPEC §12）
+
+`BotKind` 加上 `'grok'`（`BOT_KINDS` 常數供 normalize / mock 共用）。新增 Bot 與新增身份的 kind 下拉多了 `grok`；`MODEL_OPTIONS.grok = ['grok-4.6', 'grok-4.5']`；模型欄位標題對 claude 顯示 `--model <值>`、其餘（codex / grok）顯示 `-m <值>`；auto_approve 說明改用 `AutoApproveFlags`（claude `--dangerously-skip-permissions` / codex `--yolo` / grok `--always-approve`）；`.kind-tag.grok` 灰色系（深淺色各一組）。mock 多種一個 `am-grok`。身份表單 env 提示補上 `GROK_HOME`。
+
+驗收腳本 `scripts/demo-grok.mjs`（mock 模式，`VITE_MOCK=1 npx vite --port 5186`）：
+
+| 檔案 | 內容 |
+|---|---|
+| `130-grok-kind-tag.png` | sidebar 三個 bot：`am-claude` / `am-codex` / `am-grok`，各自的 kind 標籤 |
+| `130-new-bot-grok-form.png` | 「+」新增 Bot 表單 kind 選 `grok`：模型選項 `（預設） | grok-4.6 | grok-4.5 | 自訂…`，auto_approve 文案含 `grok --always-approve` |
+| `131-grok-bot-added.png` | 選 `grok-4.5` 送出後列表出現 `am-grok-2` |

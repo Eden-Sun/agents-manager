@@ -354,7 +354,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
 struct NewBot {
     name: String,
     kind: String,
-    /// claude `--model <m>` / codex `-m <m>`; omitted / null / "" = the CLI's own default.
+    /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; omitted / null / "" = the CLI's own default.
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -392,8 +392,8 @@ async fn create_bot(
     if !valid_bot_name(&b.name) {
         return Err(LcError::Bad(format!("bot name must match {}", crate::config::BOT_NAME_RE)));
     }
-    if b.kind != "claude" && b.kind != "codex" {
-        return Err(LcError::Bad("kind must be claude or codex".into()));
+    if !crate::config::valid_kind(&b.kind) {
+        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
     let identity = check_identity(&app, &b.identity, &b.kind).await?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
@@ -668,8 +668,8 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     if !valid_identity_name(&b.name) {
         return Err(LcError::Bad(format!("identity name must match {}", crate::config::BOT_NAME_RE)));
     }
-    if b.kind != "claude" && b.kind != "codex" {
-        return Err(LcError::Bad("kind must be claude or codex".into()));
+    if !crate::config::valid_kind(&b.kind) {
+        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
     let cfg = IdentityCfg { name: b.name.clone(), kind: b.kind.clone(), env: b.env.clone(), args: b.args.clone() };
     let res = app

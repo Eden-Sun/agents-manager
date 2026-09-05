@@ -1,4 +1,4 @@
-//! `agents-managerd hook claude|codex` — the hook child process (SPEC §4.4).
+//! `agents-managerd hook claude|codex|grok` — the hook child process (SPEC §4.4, §12).
 //!
 //! Contract (agreed interface — do not change the signatures):
 //!   - synchronous, never panics, never writes to stdout, caller exits 0 afterwards.
@@ -31,12 +31,12 @@ const HTTP_TIMEOUT: Duration = Duration::from_millis(2_000);
 const MAX_PAYLOAD: usize = 1024 * 1024;
 
 pub struct HookArgs {
-    /// "claude" | "codex"
+    /// "claude" | "codex" | "grok"
     pub provider: String,
     pub bot: String,
     pub token: String,
     pub port: u16,
-    /// codex: the last argv JSON string; claude: None (payload comes from stdin)
+    /// codex: the last argv JSON string; claude / grok: None (payload comes from stdin)
     pub payload_arg: Option<String>,
 }
 
@@ -66,7 +66,7 @@ fn inner(args: HookArgs) {
                 (s, false)
             }
         }
-        // Claude: the payload arrives on stdin.
+        // Claude / grok: the payload arrives on stdin.
         None => read_stdin_capped(STDIN_BUDGET),
     };
 

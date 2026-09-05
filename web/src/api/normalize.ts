@@ -34,6 +34,7 @@ import type {
   TurnOrigin,
   TurnStatus,
 } from './types'
+import { BOT_KINDS } from './types'
 
 type Rec = Record<string, unknown>
 
@@ -149,7 +150,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     id,
     project_id: str(pick(v, 'project_id', 'projectId'), projectId ?? ''),
     name: str(pick(v, 'name', 'label'), id),
-    kind: oneOf<BotKind>(v.kind, ['claude', 'codex'], 'claude'),
+    kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
     // API.md v3.3; older daemons omit it entirely → treated as "no explicit model".
     model: optStr(pick(v, 'model')),
     args,
@@ -188,7 +189,7 @@ export function toIdentity(v: unknown): Identity | null {
   const rawArgs = pick(v, 'args')
   return {
     name,
-    kind: oneOf<BotKind>(v.kind, ['claude', 'codex'], 'claude'),
+    kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
     env: envMap(pick(v, 'env')),
     args: Array.isArray(rawArgs) ? rawArgs.map((a) => str(a)) : [],
   }
