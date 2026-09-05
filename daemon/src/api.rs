@@ -1,6 +1,9 @@
 //! REST + WebSocket API (SPEC §7).
 
-use crate::config::{canonical_path, valid_bot_name, valid_host_name, HostCfg, LOCAL_HOST};
+use crate::config::{
+    canonical_path, valid_bot_name, valid_host_name, valid_identity_name, HostCfg, IdentityCfg, LOCAL_HOST,
+};
+use std::collections::BTreeMap;
 use crate::db;
 use crate::lifecycle::{self, LcError};
 use crate::state::App;
@@ -52,6 +55,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts", post(create_host))
         .route("/hosts/{name}", delete(delete_host))
         .route("/hosts/{name}/reconnect", post(reconnect_host))
+        .route("/identities", post(create_identity))
+        .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session));
@@ -165,6 +170,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "autostart": b.autostart == 1,
                 "inject_hooks": b.inject_hooks == 1,
                 "auto_approve": b.auto_approve == 1,
+                "identity": b.identity,
+                "env": b.env(),
                 "run": run,
                 "lamp": lamp(host_up, run.as_ref()),
                 "unread": 0,
@@ -180,6 +187,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "connected": connected,
         "herdr_session": app.herdr_session,
         "hosts": hosts_list(app).await,
+        "identities": app.cfg.get().await.identities,
         "projects": out,
     }))
 }
@@ -338,6 +346,23 @@ struct NewBot {
     inject_hooks: Option<bool>,
     #[serde(default)]
     auto_approve: Option<bool>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
+}
+
+/// `None` = no identity requested; `Some(name)` = must exist and match `kind`.
+async fn check_identity(app: &Arc<App>, identity: &Option<String>, kind: &str) -> Result<Option<String>, LcError> {
+    let Some(name) = identity.clone().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
+    let cfg = app.cfg.get().await;
+    let Some(id) = cfg.identities.iter().find(|i| i.name == name) else {
+        return Err(LcError::NotFound("identity".into()));
+    };
+    if id.kind != kind {
+        return Err(LcError::Bad(format!("identity `{name}` is for {} but this bot is {kind}", id.kind)));
+    }
+    Ok(Some(name))
 }
 
 async fn create_bot(
@@ -351,6 +376,8 @@ async fn create_bot(
     if b.kind != "claude" && b.kind != "codex" {
         return Err(LcError::Bad("kind must be claude or codex".into()));
     }
+    let identity = check_identity(&app, &b.identity, &b.kind).await?;
+    let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
     let res = app
         .cfg
@@ -371,6 +398,8 @@ async fn create_bot(
                 autostart: b.autostart,
                 inject_hooks: b.inject_hooks.unwrap_or(true),
                 auto_approve: b.auto_approve.unwrap_or(true),
+                identity: identity.clone(),
+                env: env.clone(),
             });
             Ok(())
         })
@@ -395,6 +424,17 @@ struct PatchBot {
     name: Option<String>,
     inject_hooks: Option<bool>,
     auto_approve: Option<bool>,
+    /// `Some(Some(name))` binds, `Some(None)` / `Some("")` unbinds, absent = unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    identity: Option<Option<String>>,
+    env: Option<BTreeMap<String, String>>,
+}
+
+fn double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(d).map(Some)
 }
 
 async fn patch_bot(
@@ -410,6 +450,16 @@ async fn patch_bot(
             return Err(LcError::conflict("cannot rename a bot with an active run", json!({"bot_id": id})));
         }
     }
+    if let Some(Some(name)) = &b.identity {
+        if !name.trim().is_empty() {
+            let kind = db::bot(&app.db, &id)
+                .await
+                .map_err(any_err)?
+                .map(|x| x.kind)
+                .ok_or_else(|| LcError::NotFound("bot".into()))?;
+            check_identity(&app, &Some(name.clone()), &kind).await?;
+        }
+    }
     app.cfg
         .update(|cfg| {
             let bot = cfg
@@ -418,6 +468,12 @@ async fn patch_bot(
                 .flat_map(|p| p.bots.iter_mut())
                 .find(|x| x.id.as_deref() == Some(id.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("no-bot"))?;
+            if let Some(idn) = &b.identity {
+                bot.identity = idn.clone().filter(|s| !s.trim().is_empty());
+            }
+            if let Some(e) = &b.env {
+                bot.env = e.clone();
+            }
             if let Some(a) = &b.args {
                 bot.args = a.clone();
             }
@@ -536,6 +592,68 @@ async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> R
 async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let (connected, error) = app.hosts.reconnect(&app, &name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
+}
+
+
+// ---------------------------------------------------------------- identities
+
+#[derive(Deserialize)]
+struct NewIdentity {
+    name: String,
+    kind: String,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
+    if !valid_identity_name(&b.name) {
+        return Err(LcError::Bad(format!("identity name must match {}", crate::config::BOT_NAME_RE)));
+    }
+    if b.kind != "claude" && b.kind != "codex" {
+        return Err(LcError::Bad("kind must be claude or codex".into()));
+    }
+    let cfg = IdentityCfg { name: b.name.clone(), kind: b.kind.clone(), env: b.env.clone(), args: b.args.clone() };
+    let res = app
+        .cfg
+        .update(move |f| {
+            if f.identities.iter().any(|i| i.name == cfg.name) {
+                anyhow::bail!("duplicate");
+            }
+            f.identities.push(cfg);
+            Ok(())
+        })
+        .await;
+    match res {
+        Ok(()) => {}
+        Err(e) if e.to_string() == "duplicate" => {
+            return Err(LcError::conflict("identity name already in use", json!({"name": b.name})))
+        }
+        Err(e) => return Err(any_err(e)),
+    }
+    reproject(&app).await?;
+    app.emit("identities_changed", json!({})).await;
+    Ok((StatusCode::OK, Json(json!({"name": b.name}))).into_response())
+}
+
+async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    for b in db::live_bots(&app.db).await.map_err(any_err)? {
+        if b.identity.as_deref() == Some(name.as_str()) {
+            return Err(LcError::conflict("identity still used by bots", json!({"bot_id": b.id})));
+        }
+    }
+    let n2 = name.clone();
+    app.cfg
+        .update(move |f| {
+            f.identities.retain(|i| i.name != n2);
+            Ok(())
+        })
+        .await
+        .map_err(any_err)?;
+    reproject(&app).await?;
+    app.emit("identities_changed", json!({})).await;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
 // ---------------------------------------------------------------- run control

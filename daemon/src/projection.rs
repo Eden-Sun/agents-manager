@@ -21,6 +21,15 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
     let changed = store
         .update(|cfg| {
             let mut dirty = false;
+            let identities = cfg.identities.clone();
+            for i in &identities {
+                if !crate::config::valid_identity_name(&i.name) {
+                    bail!("invalid identity name `{}` (must match {})", i.name, crate::config::BOT_NAME_RE);
+                }
+                if i.kind != "claude" && i.kind != "codex" {
+                    bail!("invalid identity kind `{}`", i.kind);
+                }
+            }
             for p in cfg.projects.iter_mut() {
                 if p.id.is_none() {
                     p.id = Some(db::ulid());
@@ -46,6 +55,15 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                     }
                     if b.kind != "claude" && b.kind != "codex" {
                         bail!("invalid bot kind `{}`", b.kind);
+                    }
+                    if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
+                        match identities.iter().find(|i| i.name == idn) {
+                            None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
+                            Some(i) if i.kind != b.kind => {
+                                bail!("identity `{idn}` is for {} but bot `{}` is {}", i.kind, b.name, b.kind)
+                            }
+                            Some(_) => {}
+                        }
                     }
                 }
             }
@@ -81,12 +99,14 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             let bid = b.id.clone().unwrap();
             live_bots.insert(bid.clone());
             let args_json = serde_json::to_string(&b.args)?;
+            let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, auto_approve, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
-                   args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks, auto_approve=excluded.auto_approve, deleted_at=NULL",
+                   args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
+                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, deleted_at=NULL",
             )
             .bind(&bid)
             .bind(&pid)
@@ -96,6 +116,8 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             .bind(b.autostart as i64)
             .bind(b.inject_hooks as i64)
             .bind(b.auto_approve as i64)
+            .bind(&b.identity)
+            .bind(&env_json)
             .bind(&token)
             .bind(&now)
             .execute(pool)

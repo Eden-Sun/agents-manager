@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS bots (
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
   auto_approve INTEGER NOT NULL DEFAULT 1,
+  identity TEXT,
+  env_json TEXT NOT NULL DEFAULT '{}',
   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS bots_name_live ON bots(name) WHERE deleted_at IS NULL;
@@ -87,6 +89,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
     for (table, col, ddl) in [
         ("bots", "auto_approve", "ALTER TABLE bots ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1"),
         ("projects", "host", "ALTER TABLE projects ADD COLUMN host TEXT NOT NULL DEFAULT 'local'"),
+        ("bots", "identity", "ALTER TABLE bots ADD COLUMN identity TEXT"),
+        ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -177,6 +181,8 @@ pub struct Bot {
     pub autostart: i64,
     pub inject_hooks: i64,
     pub auto_approve: i64,
+    pub identity: Option<String>,
+    pub env_json: String,
     #[serde(skip_serializing)]
     pub hook_token: String,
     pub deleted_at: Option<String>,
@@ -186,6 +192,9 @@ pub struct Bot {
 impl Bot {
     pub fn args(&self) -> Vec<String> {
         serde_json::from_str(&self.args_json).unwrap_or_default()
+    }
+    pub fn env(&self) -> std::collections::BTreeMap<String, String> {
+        serde_json::from_str(&self.env_json).unwrap_or_default()
     }
 }
 
