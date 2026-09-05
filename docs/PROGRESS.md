@@ -626,3 +626,16 @@ A5 Origin 精確比對 host（`localhost.attacker.com`、`null`、`https://evil.
 
 **A5 偏離建議**：不鎖定 port（Vite dev server 的 Origin 會被 proxy 原樣轉送，鎖 port 會直接
 擋掉整個開發環境）；理由已寫在 `docs/REVIEW.md` A 節下方的註。
+
+
+## v3.4 — 遠端 herdr 改由 launchd GUI 網域啟動（2026-09-06）
+
+問題：cc1 身份（`CLAUDE_CONFIG_DIR=~/.claude-ccompany`）的遠端 bot 顯示「Not logged in · security unlock-keychain」，但主機確實已登入。根因：herdr 由非互動 ssh 拉起，該工作階段的登入 Keychain 是鎖住的；預設 `~/.claude` 靠 `.credentials.json` 檔案所以沒事。
+
+修正：`hosts.rs ensure_remote_session` 在 macOS 且 ssh 使用者擁有 `/dev/console` 時，改以 LaunchAgent（`gui/<uid>`、KeepAlive）啟動 herdr server；否則退回 nohup。
+
+驗收：
+- ssh 工作階段 `security find-generic-password` → 錯誤 36；launchd GUI 網域 → OK ✅
+- daemon 重啟後 log `remote session ensured … mode=launchd`；m4p `launchctl print gui/501/dev.agents-manager.herdr-agents-manager` state=running，herdr ppid=1 ✅
+- `cctest`（m4p，cc1）start → idle → prompt「Reply with exactly LAUNCHD-OK」→ 4 秒 `assistant/hook: LAUNCHD-OK`；程序 env `CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany` ✅
+- 為何不用 `herdr --remote`：只是 TUI 串流（`--remote can only be used with the default launch command`），無 API 轉發，遠端 server 同樣經 ssh 啟動。

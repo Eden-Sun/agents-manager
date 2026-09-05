@@ -5,6 +5,7 @@
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
 > - v3.3（2026-09-06）：§2 Bot 新增可選欄位 `model`（claude `--model`／codex `-m`，注入順序：daemon 旗標 → model → identity.args → bot.args）；§7.2 `PATCH /bots/:id` 擴充為 `{name?, model?, args?, autostart?, auto_approve?, inject_hooks?, identity?, env?}` 並回 `{needs_restart}`（只有改 `name` 需要無 active Run，其餘可線上改、重啟後生效）；新增 `POST /bots/:id/restart`（stop 再 start）；§6.4 DELETE Bot 補上「刪除本機／遠端 `~/.config/agents-manager/bots/<id>/`」；§6.3.7 stall watchdog 的系統訊息改為中性敘述並原樣引用畫面關鍵行。
+> - v3.4（2026-09-06）：§11.3.1 遠端 herdr 改由 launchd GUI 網域 LaunchAgent 啟動（Keychain 可用、KeepAlive）；附錄 E 補 Keychain 實測。
 > - v3.2（2026-09-06）：§6.3 新增 prompt-stall watchdog（送達後 12 秒內 agent 未離開 idle → Turn `failed` + 系統訊息，畫面含 Not logged in / usage limit 時給明確原因）；§4.3 備援擷取無回覆標記時改為清理後的畫面（去 banner / 狀態列，保留 `⎿` 工具結果行）。
 > - v3.1（2026-09-06）：新增 §11 遠端主機（透過 SSH 連遠端 herdr）、`auto_approve`、目錄選擇器、Markdown 渲染；附錄 E 遠端實測。
 > - v3（2026-09-05）：依 Grok（grok CLI 1.0.13）第二輪完整審視修訂 15 條：Turn 狀態收斂為 `in_flight`（每 Run 至多一筆，hook 只配那一筆）；per-bot 鎖；active Run 部分唯一索引；先寫 Run 再建 pane；blocked 不觸發備援；hook 子命令最低契約；事件訂閱拓撲實測定案；TOML / SQLite 權威劃分；多項 demo 範圍縮減標為第二階段。
@@ -306,7 +307,8 @@ label = "foo@m4p"
 
 ### 11.3 HostManager（daemon）
 每個 host 一個 `HostConn`：
-1. **ensure remote session**：`ssh <host> 'export PATH=<remote_path>:$PATH; herdr session list | grep -q "^<session> .*running" || (nohup herdr --session <session> server >/tmp/herdr-<session>.log 2>&1 &); sleep 1; herdr session list'`。
+1. **ensure remote session**（v3.4）：遠端為 macOS 且 ssh 使用者就是 `/dev/console` 的擁有者時，寫入 `~/Library/LaunchAgents/dev.agents-manager.herdr-<session>.plist`（`ProgramArguments = herdr --session <session> server`、`KeepAlive`、`RunAtLoad`、`ProcessType Interactive`、PATH 含 `remote_path`）並 `launchctl bootstrap gui/<uid>`；若已載入則沿用；若原本有 nohup 起的 server 先 `herdr --session <session> server stop` 再交給 launchd。非 macOS、無桌面登入或 launchctl 失敗 → 退回 `( trap '' HUP; herdr --session <session> server & )`。
+   - 原因：非互動 ssh 工作階段讀不到使用者的登入 Keychain（`security` 回 errSecInteractionNotAllowed，錯誤 36），在該 herdr 底下啟動的 Claude Code 會顯示「Not logged in」即使主機已登入；GUI 網域的 LaunchAgent 跑在桌面工作階段，Keychain 已解鎖。附帶好處：ssh 斷線或 herdr 當掉 launchd 會自動拉起。
 2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> -R <hook_port>:127.0.0.1:<daemon port> <target>`。
    - `<local.sock>` 與 `<ctl>` 必須放在**短路徑**（macOS AF_UNIX 上限 104 bytes）：`/tmp/agents-manager-<uid>/<host>.sock`、`<host>.ctl`。
 3. 以 `HerdrClient::new(<local.sock>)` 取得與本機完全相同的 client；`ping` 成功 → `connected`。
@@ -441,6 +443,7 @@ CREATE INDEX messages_turn ON messages(turn_id);
 - 非互動 ssh shell 的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`；herdr 在 `/opt/homebrew/bin`，claude / codex 在 `~/.local/bin`。pane 內的 shell 是互動 shell，PATH 正常。
 - `herdr --session agents-manager server` 可用 `nohup … &` 從 ssh 啟動並存活。
 - `ssh -N -M -S <ctl> -L <local.sock>:<remote herdr.sock> …` 轉發後，以本機 `HerdrClient` 直接 `ping` 成功（約 137 ms），`workspace.create`、`agent.start`、`agent.wait`、`agent.send_keys`、`agent.prompt`、`events.subscribe`（逐 pane `pane.agent_status_changed`）全部正常。AF_UNIX 路徑過長會 `path too long`，需用 `/tmp` 短路徑。
+- **Keychain**（v3.4 實測）：`ssh m4p 'security find-generic-password -s "Claude Code-credentials" -w'` 失敗（36）；同一指令放進 `launchctl bootstrap gui/501` 的 LaunchAgent 執行成功。m4p 預設 `~/.claude` 有 `.credentials.json` 所以不受影響，`~/.claude-ccompany` 只有 Keychain 憑證，在 ssh 起的 herdr 底下就「Not logged in」。改為 launchd 後 cc1 身份的 bot 4 秒內回覆（hook）。`herdr --remote` 也是經 ssh 拉起遠端 server（binary 內無 launchctl），同樣受限，且它只是 TUI 串流、無 socket API 轉發。
 - 遠端 claude 首次啟動出現「trust this folder」提示 → herdr 回報 `blocked`；游標預設在「No, exit」，需送 `down` + `enter`。
 - `ssh -O forward -R 17788:127.0.0.1:7788` 可在既有 master 上動態加反向轉發；遠端 `curl http://127.0.0.1:17788/api/session` 被 daemon 以 `non-local request` 拒絕（Host 檢查，預期），但 `/hook/claude` 回 `401 unknown bot`（只驗 token，未被 Host 擋下）。
 - 遠端 claude 以 `--settings` 注入指向 `hook.sh` 的 hooks，SessionStart 確實觸發腳本並經反向通道打到 daemon；失敗時 spool 寫入 1 行。Stop hook 因遠端帳號當時撞到 session 上限未驗到。

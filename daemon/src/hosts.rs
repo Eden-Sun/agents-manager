@@ -185,23 +185,75 @@ impl HostConn {
     // ------------------------------------------------------------ connect
 
     /// SPEC §11.3.1 — make sure the remote named session's herdr server is running.
+    ///
+    /// On macOS the server is registered as a **launchd GUI-domain agent**
+    /// (`launchctl bootstrap gui/<uid>`) instead of being `nohup`ed from the ssh shell:
+    /// a process spawned from a non-interactive ssh session cannot read the user's login
+    /// Keychain (`security` → errSecInteractionNotAllowed), so Claude Code started inside
+    /// that herdr reports "Not logged in" even though the host *is* logged in. A GUI-domain
+    /// agent runs in the console user's session where the Keychain is unlocked, survives
+    /// ssh disconnects, and launchd restarts it if it dies. Falls back to `nohup` when the
+    /// remote is not macOS, nobody owns /dev/console, or launchctl refuses.
     async fn ensure_remote_session(&self) -> Result<String> {
         let cfg = self.cfg.as_ref().unwrap();
         let sess = &cfg.herdr_session;
         let q = sh_quote(sess);
+        let path_prefix = if cfg.remote_path.trim().is_empty() { String::new() } else { format!("{}:", cfg.remote_path.trim()) };
         let script = format!(
             r#"printf 'AM_HOME=%s\n' "$HOME"
 S={q}
 SOCK="$HOME/.config/herdr/sessions/$S/herdr.sock"
-if ! herdr session list 2>/dev/null | grep -q "^$S[[:space:]].*running"; then
+LABEL="dev.agents-manager.herdr-$S"
+running() {{ herdr session list 2>/dev/null | grep -q "^$S[[:space:]].*running"; }}
+HERDR_BIN=$(command -v herdr 2>/dev/null)
+CONSOLE_USER=$(stat -f %Su /dev/console 2>/dev/null || true)
+MODE=nohup
+if [ "$(uname -s)" = Darwin ] && [ -n "$HERDR_BIN" ] && [ "$CONSOLE_USER" = "$(id -un)" ] && command -v launchctl >/dev/null 2>&1; then
+  MODE=launchd
+fi
+if [ "$MODE" = launchd ]; then
+  PL="$HOME/Library/LaunchAgents/$LABEL.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    printf 'AM_MODE=launchd-existing\n'
+  else
+    cat > "$PL" <<AM_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>$HERDR_BIN</string><string>--session</string><string>$S</string><string>server</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path_prefix}$PATH</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>/tmp/herdr-$S.log</string>
+  <key>StandardErrorPath</key><string>/tmp/herdr-$S.log</string>
+</dict></plist>
+AM_PLIST
+    if running; then
+      # A server started the old way (nohup) is still up: stop it so launchd owns the next one.
+      herdr --session "$S" server stop >/dev/null 2>&1 || true
+      sleep 1
+    fi
+    if launchctl bootstrap "gui/$(id -u)" "$PL" 2>/tmp/am-launchctl.err; then
+      printf 'AM_MODE=launchd\n'
+    else
+      printf 'AM_MODE=nohup-fallback launchctl: %s\n' "$(tr '\n' ' ' </tmp/am-launchctl.err)"
+      MODE=nohup
+    fi
+  fi
+fi
+if [ "$MODE" = nohup ] && ! running; then
   # `nohup` refuses to detach when stderr is not a console on some macOS builds,
   # so ignore SIGHUP in a subshell instead.
   ( trap '' HUP; herdr --session "$S" server </dev/null >"/tmp/herdr-$S.log" 2>&1 & )
+  printf 'AM_MODE=nohup\n'
   sleep 1
 fi
 i=0
 while [ $i -lt 20 ]; do
-  if [ -S "$SOCK" ] && herdr session list 2>/dev/null | grep -q "^$S[[:space:]].*running"; then
+  if [ -S "$SOCK" ] && running; then
     printf 'AM_OK=1\n'; break
   fi
   i=$((i+1)); sleep 1
@@ -214,11 +266,14 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         let mut home = None;
         let mut sock = None;
         let mut ok = false;
+        let mut mode = String::from("?");
         for line in out.lines() {
             if let Some(v) = line.strip_prefix("AM_HOME=") {
                 home = Some(v.trim().to_string());
             } else if let Some(v) = line.strip_prefix("AM_SOCK=") {
                 sock = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("AM_MODE=") {
+                mode = v.trim().to_string();
             } else if line.starts_with("AM_OK=1") {
                 ok = true;
             }
@@ -228,9 +283,9 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         }
         let sock = sock.filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("could not determine remote herdr socket path; is herdr on the remote PATH? (remote_path)\n{out}"))?;
         if !ok {
-            bail!("remote herdr session `{sess}` did not come up:\n{}", out.trim());
+            bail!("remote herdr session `{sess}` did not come up (mode {mode}):\n{}", out.trim());
         }
-        tracing::info!(host = %self.name, session = %sess, socket = %sock, "remote session ensured");
+        tracing::info!(host = %self.name, session = %sess, socket = %sock, mode = %mode, "remote session ensured");
         Ok(sock)
     }
 
