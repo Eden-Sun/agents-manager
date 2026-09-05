@@ -80,6 +80,7 @@ interface MockBot {
   kind: BotKind
   /** API.md v3.3：模型別名，null = 不帶 `--model` */
   model: string | null
+  effort: string | null
   args_json: string
   autostart: number
   inject_hooks: number
@@ -161,6 +162,7 @@ export class MockTransport implements Transport {
       name: 'am-claude',
       kind: 'claude',
       model: null,
+      effort: null,
       args_json: '[]',
       autostart: 1,
       inject_hooks: 1,
@@ -175,6 +177,7 @@ export class MockTransport implements Transport {
       name: 'am-codex',
       kind: 'codex',
       model: null,
+      effort: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -189,6 +192,7 @@ export class MockTransport implements Transport {
       name: 'am-grok',
       kind: 'grok',
       model: null,
+      effort: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -538,6 +542,7 @@ export class MockTransport implements Transport {
               name: b.name,
               kind: b.kind,
               model: b.model,
+              effort: b.effort,
               args: JSON.parse(b.args_json) as string[],
               autostart: b.autostart === 1,
               inject_hooks: b.inject_hooks === 1,
@@ -590,8 +595,8 @@ export class MockTransport implements Transport {
 
   private addBot(projectId: string, b: Rec) {
     const name = String(b.name ?? '').trim()
-    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
-      throw new ApiError(400, { reason: 'name 必須符合 [a-z][a-z0-9_-]{0,31}' }, 'bad request')
+    if (!/^[^\s@,:;]{1,32}$/.test(name)) {
+      throw new ApiError(400, { reason: 'name：1–32 個字，不可含空白或 @ , : ;' }, 'bad request')
     }
     if (this.bots.some((x) => x.name === name)) {
       throw new ApiError(409, { reason: `agent name 已被使用：${name}` }, 'conflict')
@@ -605,6 +610,7 @@ export class MockTransport implements Transport {
       name,
       kind: toKind(b.kind),
       model: typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
+      effort: typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null,
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
       inject_hooks: 1,
@@ -648,8 +654,8 @@ export class MockTransport implements Transport {
     }
     if (typeof b.name === 'string') {
       const name = b.name.trim()
-      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
-        throw new ApiError(400, { error: 'bad_request', message: 'name 必須符合 [a-z][a-z0-9_-]{0,31}' }, 'bad request')
+      if (!/^[^\s@,:;]{1,32}$/.test(name)) {
+        throw new ApiError(400, { error: 'bad_request', message: 'name：1–32 個字，不可含空白或 @ , : ;' }, 'bad request')
       }
       if (this.bots.some((x) => x.id !== id && x.name === name)) {
         throw new ApiError(409, { error: 'conflict', reason: 'bot name already in use', name }, 'conflict')
@@ -660,6 +666,9 @@ export class MockTransport implements Transport {
       const name = typeof b.identity === 'string' && b.identity.trim() ? b.identity.trim() : null
       if (name) this.checkIdentity(name, bot.kind)
       bot.identity = name
+    }
+    if (b.effort !== undefined) {
+      bot.effort = typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null
     }
     if (b.model !== undefined) {
       bot.model = typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null
@@ -675,7 +684,7 @@ export class MockTransport implements Transport {
     if (b.inject_hooks !== undefined) bot.inject_hooks = b.inject_hooks ? 1 : 0
     this.emit('bot_changed', { bot_id: id })
     // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟；只改 autostart → false。
-    const LAUNCH_FIELDS = ['model', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
+    const LAUNCH_FIELDS = ['model', 'effort', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
     const needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
     return { needs_restart }
   }

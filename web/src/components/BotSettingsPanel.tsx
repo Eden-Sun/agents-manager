@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
+import { EFFORT_OPTIONS, MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
 import type { BotKind, PatchBotInput } from '../api/types'
 import { useStore } from '../store/store'
 
@@ -57,7 +57,7 @@ export function ModelField({
 
   return (
     <label className="field">
-      <span>模型（daemon 會翻成 {kind === 'claude' ? <code>--model &lt;值&gt;</code> : <code>-m &lt;值&gt;</code>}）</span>
+      <span>模型</span>
       <select
         value={custom ? MODEL_CUSTOM : (value ?? MODEL_DEFAULT)}
         onChange={(e) => {
@@ -93,38 +93,70 @@ export function ModelField({
   )
 }
 
-/** 等 stop 真的走完（run 消失或進入 stopped/exited）；mock 約 0.7s、真後端數秒。 */
-async function waitStopped(botId: string, timeoutMs = 20000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const run = useStore.getState().runs[botId]
-    if (!run || run.state === 'stopped' || run.state === 'exited') return true
-    if (Date.now() > deadline) return false
-    await new Promise((r) => setTimeout(r, 250))
-  }
+/** grok only: reasoning effort as a row of options (daemon → `--reasoning-effort`). */
+export function EffortField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
+  return (
+    <div className="field">
+      <span>強度</span>
+      <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
+        <button type="button" className={`opt${value === null ? ' on' : ''}`} onClick={() => onChange(null)}>
+          預設
+        </button>
+        {EFFORT_OPTIONS.map((e) => (
+          <button key={e} type="button" className={`opt${value === e ? ' on' : ''}`} onClick={() => onChange(e)}>
+            {e}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** claude only: identity as a row of options（無下拉）. Renders nothing when there are no identities. */
+export function IdentityOptions({
+  kind,
+  value,
+  onChange,
+}: {
+  kind: BotKind
+  value: string
+  onChange: (v: string) => void
+}) {
+  const identities = useStore((s) => s.identities.filter((i) => i.kind === 'claude'))
+  if (kind !== 'claude' || identities.length === 0) return null
+  return (
+    <div className="field">
+      <span>身份</span>
+      <div className="opt-group" role="radiogroup" aria-label="identity">
+        <button type="button" className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
+          預設
+        </button>
+        {identities.map((i) => (
+          <button key={i.name} type="button" className={`opt${value === i.name ? ' on' : ''}`} title={Object.entries(i.env).map(([k, v]) => `${k}=${v}`).join(' ')} onClick={() => onChange(i.name)}>
+            {i.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export function BotSettingsPanel({ botId }: { botId: string }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const project = useStore((s) => s.projects.find((p) => p.id === s.bots.find((b) => b.id === botId)?.project_id))
-  const run = useStore((s) => s.runs[botId] ?? null)
-  const identities = useStore((s) => s.identities)
   const closeSettings = useStore((s) => s.closeSettings)
   const patchBot = useStore((s) => s.patchBot)
   const restartBot = useStore((s) => s.restartBot)
-  const stopBot = useStore((s) => s.stopBot)
   const removeBot = useStore((s) => s.removeBot)
   const notify = useStore((s) => s.notify)
 
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
+  const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
   const [identity, setIdentity] = useState(bot?.identity ?? '')
-  const [autostart, setAutostart] = useState(bot?.autostart ?? false)
-  const [autoApprove, setAutoApprove] = useState(bot?.auto_approve ?? true)
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
   const [saving, setSaving] = useState(false)
-  const [stopping, setStopping] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
 
@@ -134,9 +166,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     if (!b) return
     setName(b.name)
     setModel(b.model)
+    setEffort(b.effort)
     setIdentity(b.identity ?? '')
-    setAutostart(b.autostart)
-    setAutoApprove(b.auto_approve)
     setBanner(null)
   }, [botId])
 
@@ -155,15 +186,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     )
   }
 
-  const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
-  const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
+  const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
 
   const patch: PatchBotInput = {}
   if (name !== bot.name) patch.name = name
-  if (model !== bot.model) patch.model = model
-  if ((identity || null) !== bot.identity) patch.identity = identity || null
-  if (autostart !== bot.autostart) patch.autostart = autostart
-  if (autoApprove !== bot.auto_approve) patch.auto_approve = autoApprove
+  if (bot.kind !== 'grok' && model !== bot.model) patch.model = model
+  if (bot.kind === 'grok' && effort !== bot.effort) patch.effort = effort
+  if (bot.kind === 'claude' && (identity || null) !== bot.identity) patch.identity = identity || null
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
   const canSave = dirty && (patch.name === undefined || nameOk) && !saving
@@ -231,38 +260,16 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           }}
         >
           <label className="field">
-            <span>名稱（herdr agent name，全域唯一）</span>
+            <span>名稱</span>
             <input
               ref={nameRef}
               type="text"
               value={name}
-              disabled={active}
               spellCheck={false}
-              onChange={(e) => setName(e.target.value.toLowerCase())}
+              onChange={(e) => setName(e.target.value)}
             />
-            {active ? (
-              <span className="bs-inline-note">
-                停止後才能改名（改名會換掉 herdr agent name）。
-                <button
-                  type="button"
-                  className="link-btn"
-                  disabled={stopping}
-                  onClick={() => {
-                    setStopping(true)
-                    void (async () => {
-                      await stopBot(botId)
-                      const ok = await waitStopped(botId)
-                      setStopping(false)
-                      if (ok) nameRef.current?.focus()
-                      else notify('error', '停止逾時，請稍後再試')
-                    })()
-                  }}
-                >
-                  {stopping ? '停止中…' : '停止並改名'}
-                </button>
-              </span>
-            ) : name && !nameOk ? (
-              <span className="hint">必須符合 [a-z][a-z0-9_-]&#123;0,31&#125;</span>
+            {name && !nameOk ? (
+              <span className="hint">1–32 個字，不可含空白或 @ , : ;</span>
             ) : null}
           </label>
 
@@ -271,35 +278,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <input type="text" value={bot.kind} readOnly disabled />
           </label>
 
-          <ModelField kind={bot.kind} value={model} onChange={setModel} hint={modelHint(bot.kind)} />
-
-          <label className="field">
-            <span>身份（只列同 kind 的身份；在左側「身份」面板管理）</span>
-            <select value={identity} onChange={(e) => setIdentity(e.target.value)}>
-              <option value="">（無）</option>
-              {identities
-                .filter((i) => i.kind === bot.kind)
-                .map((i) => (
-                  <option key={i.name} value={i.name}>
-                    {i.name}
-                    {Object.keys(i.env).length
-                      ? ` ・ ${Object.entries(i.env).map(([k, v]) => `${k}=${v}`).join(' ')}`
-                      : ''}
-                  </option>
-                ))}
-            </select>
-          </label>
-
-          <label className="field row">
-            <input type="checkbox" checked={autostart} onChange={(e) => setAutostart(e.target.checked)} />
-            <span>autostart（daemon 啟動時自動執行）</span>
-          </label>
-          <label className="field row">
-            <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
-            <span>
-              自動核准全部權限（<AutoApproveFlags />）
-            </span>
-          </label>
+          {bot.kind === 'grok' ? (
+            <EffortField value={effort} onChange={setEffort} />
+          ) : (
+            <ModelField kind={bot.kind} value={model} onChange={setModel} />
+          )}
+          <IdentityOptions kind={bot.kind} value={identity} onChange={setIdentity} />
 
           <div className="bs-actions">
             <span className="hint">{dirty ? `已變更：${changedKeys.join(', ')}` : '沒有變更'}</span>

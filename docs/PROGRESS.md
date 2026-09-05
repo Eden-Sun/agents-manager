@@ -740,3 +740,12 @@ herdr 測試 session `am-grok` 已 `server stop` + `session delete`；探測用�
 - **preflight**（`lifecycle::ensure_kind_installed`）：start 前用該主機的登入 shell（`$SHELL -lic 'command -v <kind>'`，退回 plain PATH）確認 claude / codex / grok 存在；找不到 → 400 + 該 bot 對話一則 system 訊息，Run 不建立。實測 m4p 建 grok bot → `HTTP 400 in 0.33s`，訊息「主機 m4p 上找不到 `grok` 執行檔…」；之前會在 `starting` 轉 60 秒後靜默失敗。
 - **群組 mention 去除**（`group::strip_mentions`）：送給 bot 的文字移除 `@all` / `@<member>`（含尾隨 `,` `:` `;`），時間軸保留原文；全部是 mention 時退回原文。實測 `@am-claude Reply with exactly STRIP-OK` → bot 終端只看到去掉 `@am-claude` 的內容並回 `STRIP-OK`，時間軸 user 訊息仍為原文。5 個單元測試。
 - 合併後修正：`hookrecv.rs` 兩個 `classify_tests` 模組重名（grok 分支與 codex 標題過濾各一），後者改名 `codex_title_tests`；`cargo test` 21 passed。
+
+
+## v3.8 — 暱稱 / hash agent name / effort / 表單精簡（2026-09-06）
+
+- herdr agent name 改為 `<project slug>-<bot id 尾 6 碼>`；restart am-codex 後 `herdr agent list` 顯示 `agents-manager-rbmyf7`。舊名稱 run 由對帳沿用（重啟 daemon 4 個本機 run 全部 `kept active run`）。
+- 暱稱改名不需重啟：am-claude 執行中 `PATCH {name:"小幫手"}` → `{needs_restart:false}`；群組 `@小幫手，Reply with exactly NICK-OK` → 3 秒 `assistant/hook NICK-OK`。
+- grok `effort`：欄位貫通 config / DB（additive migration）/ API / 注入 `--reasoning-effort`（值以 `grok --help` 實測：low / medium / high）。
+- UI：新增 Bot 表單只留 Project、名稱、kind（選項列）、模型或強度、身份（claude 才顯示，選項列）；自動核准恆為 true、不設 autostart、按「新增並啟動」後立刻 start。設定面板同樣精簡，名稱隨時可改。
+- `cargo test` 21 passed（含全形標點 mention 測試）。

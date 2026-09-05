@@ -107,7 +107,7 @@ interface StoreState {
   removeHost: (name: string) => Promise<void>
   reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
-  addBot: (projectId: string, input: NewBotInput) => Promise<boolean>
+  addBot: (projectId: string, input: NewBotInput) => Promise<string | null>
   /** `PATCH /api/bots/:id` — 回傳 `needs_restart`，失敗回 null（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
   restartBot: (botId: string) => Promise<boolean>
@@ -464,10 +464,10 @@ export const useStore = create<StoreState>((set, get) => ({
       await get().refreshState()
       if (id) set({ selectedBotId: id })
       get().notify('info', `已新增 Bot ${input.name}`)
-      return true
+      return id || null
     } catch (e) {
       get().notify('error', errText(e))
-      return false
+      return null
     }
   },
 

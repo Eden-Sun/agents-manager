@@ -6,7 +6,7 @@ import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
-import { AutoApproveFlags, ModelField, modelHint } from './BotSettingsPanel'
+import { ModelField, EffortField, IdentityOptions } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -200,18 +200,17 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
 function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialProjectId?: string }) {
   const projects = useStore((s) => s.projects)
   const addBot = useStore((s) => s.addBot)
+  const startBot = useStore((s) => s.startBot)
   const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
   const [model, setModel] = useState<string | null>(null)
-  const [autostart, setAutostart] = useState(false)
-  const [autoApprove, setAutoApprove] = useState(true)
+  const [effort, setEffort] = useState<string | null>(null)
   const [identity, setIdentity] = useState('')
-  const identities = useStore((s) => s.identities)
   const [busy, setBusy] = useState(false)
 
   const pid = projectId || projects[0]?.id || ''
-  const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
+  const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
 
   if (projects.length === 0) {
     return <p className="hint">請先新增一個 Project。</p>
@@ -224,19 +223,21 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         e.preventDefault()
         if (!nameOk || !pid || busy) return
         setBusy(true)
-        // UI 不提供 args / env（使用者決定）：省略欄位，由 daemon 用預設值。
+        // 精簡表單：自動核准永遠開、不設 autostart；新增後立刻啟動。
         void addBot(pid, {
           name,
           kind,
-          model,
-          autostart,
-          auto_approve: autoApprove,
-          identity: identity || null,
-        }).then((ok) => {
+          model: kind === 'grok' ? null : model,
+          effort: kind === 'grok' ? effort : null,
+          autostart: false,
+          auto_approve: true,
+          identity: kind === 'claude' && identity ? identity : null,
+        }).then(async (id) => {
           setBusy(false)
-          if (ok) {
+          if (id) {
             setName('')
             onDone()
+            await startBot(id)
           }
         })
       }}
@@ -252,62 +253,48 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         </select>
       </label>
       <label className="field">
-        <span>名稱（herdr agent name，全域唯一）</span>
+        <span>名稱</span>
         <input
           type="text"
           value={name}
           placeholder="foo-claude"
           spellCheck={false}
-          onChange={(e) => setName(e.target.value.toLowerCase())}
+          onChange={(e) => setName(e.target.value)}
         />
-        {name && !nameOk ? <span className="hint">必須符合 [a-z][a-z0-9_-]&#123;0,31&#125;</span> : null}
+        {name && !nameOk ? <span className="hint">1–32 個字，不可含空白或 @ , : ;</span> : null}
       </label>
-      <label className="field">
+      <div className="field">
         <span>kind</span>
-        <select
-          value={kind}
-          onChange={(e) => {
-            setKind(e.target.value as BotKind)
-            setIdentity('')
-            setModel(null)
-          }}
-        >
-          <option value="claude">claude</option>
-          <option value="codex">codex</option>
-          <option value="grok">grok</option>
-        </select>
-      </label>
-      <ModelField kind={kind} value={model} onChange={setModel} hint={modelHint(kind)} />
-      <label className="field">
-        <span>身份（例如 cc1 = 另一個 CLAUDE_CONFIG_DIR / GROK_HOME；在下方「身份」管理）</span>
-        <select value={identity} onChange={(e) => setIdentity(e.target.value)}>
-          <option value="">（預設）</option>
-          {identities
-            .filter((i) => i.kind === kind)
-            .map((i) => (
-              <option key={i.name} value={i.name}>
-                {i.name}
-                {Object.keys(i.env).length ? ` ・ ${Object.entries(i.env).map(([k, v]) => `${k}=${v}`).join(' ')}` : ''}
-              </option>
-            ))}
-        </select>
-      </label>
-      <label className="field row">
-        <input type="checkbox" checked={autostart} onChange={(e) => setAutostart(e.target.checked)} />
-        <span>autostart（daemon 啟動時自動執行）</span>
-      </label>
-      <label className="field row">
-        <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
-        <span>
-          自動核准全部權限（<AutoApproveFlags />）
-        </span>
-      </label>
+        <div className="opt-group" role="radiogroup" aria-label="kind">
+          {(['claude', 'codex', 'grok'] as BotKind[]).map((k) => (
+            <button
+              key={k}
+              type="button"
+              className={`opt${kind === k ? ' on' : ''}`}
+              onClick={() => {
+                setKind(k)
+                setIdentity('')
+                setModel(null)
+                setEffort(null)
+              }}
+            >
+              {k}
+            </button>
+          ))}
+        </div>
+      </div>
+      {kind === 'grok' ? (
+        <EffortField value={effort} onChange={setEffort} />
+      ) : (
+        <ModelField kind={kind} value={model} onChange={setModel} />
+      )}
+      <IdentityOptions kind={kind} value={identity} onChange={setIdentity} />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消
         </button>
         <button type="submit" className="btn primary" disabled={!nameOk || busy}>
-          新增
+          {busy ? '建立中…' : '新增並啟動'}
         </button>
       </div>
     </form>

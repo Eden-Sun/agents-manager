@@ -699,3 +699,11 @@ Project 底下**所有存活 bot** 的訊息合併，以 `message.id`（ULID，�
 hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok 的 stdin JSON：`hookEventName: "stop"`、`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`、`reason: "end_turn"`、`stopHookActive`）。`reason ≠ end_turn`（session 結束時的觀察用 Stop）與 `session_end` 會被忽略；`session_start` 只回填 `runs.native_session_id`。
 
 對前端可見的差異：`kind: "grok"`；`GET /api/state` 其餘欄位相同；`terminal_fallback` 訊息不再含 grok 的遙測 banner / 時戳 / 捲軸字元。
+
+
+## v3.8：暱稱、hash 式 agent name、effort
+
+- `bot.name` 是暱稱：1–32 字、不可含空白或 `@ , : ;`，允許 CJK；`PATCH /bots/:id {name}` 在 run 執行中也可改（回 `needs_restart:false`），herdr 不受影響。
+- `bot.agent_name`（唯讀）= `<project slug>-<bot id 尾 6 碼>`，例如 `agents-manager-rbmyf7`。
+- `bot.effort: "low"|"medium"|"high"|null`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；只有 grok 會注入 `--reasoning-effort`；其他值 400）。
+- `@mention` 解析（daemon 與前端一致）：token 為連續非空白、非標點字元，支援 `@小幫手，看一下`；送給 bot 的文字會去掉 mention 與其後的 `, : ; ，：；、`。

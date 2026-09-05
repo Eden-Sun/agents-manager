@@ -23,6 +23,12 @@ pub struct Member {
 /// against the project's bots. Returns the recipients in project order, deduplicated.
 /// A `@` only counts when it starts the text or follows a non-word character, so
 /// `me@example.com` is not a mention.
+/// Characters that may appear inside an `@mention` token: anything but whitespace and the
+/// usual sentence punctuation, so CJK nicknames work (`@小幫手，看一下`).
+fn mention_char(c: char) -> bool {
+    !c.is_whitespace() && !"@,:;?!。，、！？()（）[]{}<>\"'".contains(c)
+}
+
 pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
     let mut all = false;
     let mut hit: Vec<usize> = Vec::new();
@@ -36,7 +42,7 @@ pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
         let boundary = i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
         let start = i + 1;
         let mut end = start;
-        while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_' || chars[end] == '-') {
+        while end < chars.len() && mention_char(chars[end]) {
             end += 1;
         }
         i = end.max(i + 1);
@@ -78,7 +84,7 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
         if chars[i] == '@' && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_')) {
             let start = i + 1;
             let mut end = start;
-            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_' || chars[end] == '-') {
+            while end < chars.len() && mention_char(chars[end]) {
                 end += 1;
             }
             if end > start {
@@ -92,7 +98,7 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
                     });
                 if known {
                     let mut skip_to = end;
-                    if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';') {
+                    if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';' | '，' | '：' | '；' | '、') {
                         skip_to += 1;
                     }
                     i = skip_to;
@@ -335,5 +341,8 @@ mod strip_tests {
         assert_eq!(strip_mentions("hey @am-claude what about @bob?", &ms), "hey what about @bob?");
         assert_eq!(strip_mentions("mail me@example.com @all", &ms), "mail me@example.com");
         assert_eq!(strip_mentions("@all", &ms), "@all");
+        let cjk = [m("小幫手")];
+        assert_eq!(parse_mentions("@小幫手，看一下", &cjk).len(), 1);
+        assert_eq!(strip_mentions("@小幫手，看一下", &cjk), "看一下");
     }
 }

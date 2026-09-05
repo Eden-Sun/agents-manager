@@ -7,6 +7,7 @@
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
 > - v3.6（2026-09-06）：新增 §13 專案群組聊天：一個 Project = 一個群組，`@<bot>` / `@all` fan-out 給成員 bot（每個收件 bot 各自 Turn，冪等鍵 `<crid>:<bot_id>`），`messages.group_id` 串起同一次發言；`GET /projects/:id/messages`（跨 bot 合併分頁）、`POST /projects/:id/chat`（略過不可送的 bot、不自動啟動、無 mention → 400 `no_mention`）；daemon 支援 `AM_DATA_DIR`。
 > - v3.3（2026-09-06）：§2 Bot 新增可選欄位 `model`（claude `--model`／codex `-m`，注入順序：daemon 旗標 → model → identity.args → bot.args）；§7.2 `PATCH /bots/:id` 擴充為 `{name?, model?, args?, autostart?, auto_approve?, inject_hooks?, identity?, env?}` 並回 `{needs_restart}`（只有改 `name` 需要無 active Run，其餘可線上改、重啟後生效）；新增 `POST /bots/:id/restart`（stop 再 start）；§6.4 DELETE Bot 補上「刪除本機／遠端 `~/.config/agents-manager/bots/<id>/`」；§6.3.7 stall watchdog 的系統訊息改為中性敘述並原樣引用畫面關鍵行。
+> - v3.8（2026-09-06）：herdr agent name 改為 `<project slug>-<bot id 尾 6 碼>`，bot `name` 成為可隨時修改的暱稱（不需重啟、允許 CJK，禁空白與 `@ , : ;`）；mention 解析支援 unicode 暱稱與全形標點；新增 `effort`（grok `--reasoning-effort`）；啟動前 preflight 執行檔；群組送出去除 mention；UI 表單精簡（自動核准恆開、無 autostart、新增即啟動、身份只對 claude 且為選項列、grok 顯示強度不顯示模型）。
 > - v3.5（2026-09-06）：herdr agent name 改為 `<project label slug>-<bot name>`（§2 表、§6.2.5）；`runs.agent_name` 記錄實際啟動名稱，舊的裸名稱 run 由對帳沿用；bot 名稱唯一性改為專案內。
 > - v3.4（2026-09-06）：§11.3.1 遠端 herdr 改由 launchd GUI 網域 LaunchAgent 啟動（Keychain 可用、KeepAlive）；附錄 E 補 Keychain 實測。
 > - v3.2（2026-09-06）：§6.3 新增 prompt-stall watchdog（送達後 12 秒內 agent 未離開 idle → Turn `failed` + 系統訊息，畫面含 Not logged in / usage limit 時給明確原因）；§4.3 備援擷取無回覆標記時改為清理後的畫面（去 banner / 狀態列，保留 `⎿` 工具結果行）。
@@ -31,7 +32,7 @@
 |---|---|---|---|
 | **Project** | 以目錄為單位的分組。目錄路徑正規化（canonical path）後唯一 | `project_id`（ULID） | 一個 `workspace`（本系統建立並記錄 `workspace_id`；對帳發現不存在則設 NULL 並於下次啟動 Bot 時重建） |
 | **Bot** | 使用者定義的 agent 設定：名稱、kind、`model`（v3.3，可為空）、啟動參數。屬於一個 Project | `bot_id`（ULID，永久） | 無直接對應 |
-| **Run** | Bot 的一次執行實例。**每個 Bot 同時最多一個 active Run（DB 部分唯一索引保證）**。欄位含 `agent_name`（v3.5：實際使用的 herdr agent name）、`native_session_id`、`transcript_path`（由 hook 回填，可為 NULL） | `run_id`（ULID） | `pane_id` + herdr agent `name`（v3.5 起 = `agent_name(project.label, bot.name)` = `<label slug>-<bot>`，塞進 `[a-z][a-z0-9_-]{0,31}`，bot 名稱一定完整保留；舊 run 以裸 `bot.name` 沿用） |
+| **Run** | Bot 的一次執行實例。**每個 Bot 同時最多一個 active Run（DB 部分唯一索引保證）**。欄位含 `agent_name`（v3.5：實際使用的 herdr agent name）、`native_session_id`、`transcript_path`（由 hook 回填，可為 NULL） | `run_id`（ULID） | `pane_id` + herdr agent `name`（v3.8 起 = `agent_name(project.label, bot.id)` = `<label slug>-<id 尾 6 碼>`，與暱稱無關；v3.5 的 `<label>-<name>` 與更早的裸 `bot.name` 由對帳沿用直到重啟） |
 | **Conversation** | 使用者與 Bot 的訊息串。**與 Bot 1:1，跨 Run 延續，第一階段永不拆分** | `conversation_id` | 無 |
 | **Turn** | 一次「prompt → 回覆完成」的回合。**每個 active Run 同時最多一筆 in-flight Turn** | `turn_id` | Claude `prompt_id` / Codex `turn-id` |
 | **Message** | 對話中的一則訊息，`role ∈ {user, assistant, system}` | `message_id` | 無 |

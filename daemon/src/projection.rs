@@ -24,7 +24,7 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             let identities = cfg.identities.clone();
             for i in &identities {
                 if !crate::config::valid_identity_name(&i.name) {
-                    bail!("invalid identity name `{}` (must match {})", i.name, crate::config::BOT_NAME_RE);
+                    bail!("invalid identity name `{}` (must match {})", i.name, crate::config::SLUG_NAME_RE);
                 }
                 if !crate::config::valid_kind(&i.kind) {
                     bail!("invalid identity kind `{}` (must be {})", i.kind, crate::config::kinds_list());
@@ -51,7 +51,7 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                         dirty = true;
                     }
                     if !valid_bot_name(&b.name) {
-                        bail!("invalid bot name `{}` (must match {})", b.name, crate::config::BOT_NAME_RE);
+                        bail!("invalid bot name `{}` ({})", b.name, crate::config::BOT_NAME_RE);
                     }
                     if !crate::config::valid_kind(&b.kind) {
                         bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
@@ -102,10 +102,10 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, model, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
-                   model=excluded.model, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
+                   model=excluded.model, effort=excluded.effort, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
                    auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, deleted_at=NULL",
             )
             .bind(&bid)
@@ -113,6 +113,7 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             .bind(&b.name)
             .bind(&b.kind)
             .bind(b.model.as_deref().filter(|s| !s.trim().is_empty()))
+            .bind(b.effort.as_deref().filter(|s| !s.trim().is_empty()))
             .bind(&args_json)
             .bind(b.autostart as i64)
             .bind(b.inject_hooks as i64)

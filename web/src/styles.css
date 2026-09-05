@@ -1850,3 +1850,23 @@ button:disabled {
     display: none;
   }
 }
+
+/* ---- option rows (kind / effort / identity) ---- */
+.opt-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.opt-group .opt {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.opt-group .opt.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}

@@ -180,6 +180,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "name": b.name,
                 "kind": b.kind,
                 "model": b.model,
+                "effort": b.effort,
                 "args": b.args(),
                 "autostart": b.autostart == 1,
                 "inject_hooks": b.inject_hooks == 1,
@@ -358,6 +359,8 @@ struct NewBot {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     autostart: bool,
@@ -390,12 +393,17 @@ async fn create_bot(
     Json(b): Json<NewBot>,
 ) -> Result<Response, LcError> {
     if !valid_bot_name(&b.name) {
-        return Err(LcError::Bad(format!("bot name must match {}", crate::config::BOT_NAME_RE)));
+        return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
     }
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
     let identity = check_identity(&app, &b.identity, &b.kind).await?;
+    if let Some(e) = b.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !crate::config::valid_effort(e) {
+            return Err(LcError::Bad("effort must be low, medium or high".into()));
+        }
+    }
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
     let res = app
@@ -415,6 +423,7 @@ async fn create_bot(
                 name: b.name.clone(),
                 kind: b.kind.clone(),
                 model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+                effort: b.effort.clone().map(|m| m.trim().to_lowercase()).filter(|m| !m.is_empty()),
                 args: b.args.clone(),
                 autostart: b.autostart,
                 inject_hooks: b.inject_hooks.unwrap_or(true),
@@ -443,6 +452,8 @@ struct PatchBot {
     /// `Some(Some(m))` sets, `Some(None)` / `Some("")` clears, absent = unchanged.
     #[serde(default, deserialize_with = "double_option")]
     model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    effort: Option<Option<String>>,
     args: Option<Vec<String>>,
     autostart: Option<bool>,
     name: Option<String>,
@@ -469,15 +480,9 @@ async fn patch_bot(
     let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
     if let Some(n) = &b.name {
         if !valid_bot_name(n) {
-            return Err(LcError::Bad(format!("bot name must match {}", crate::config::BOT_NAME_RE)));
+            return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
         }
-        // herdr binds the agent name at start time, so renaming needs the bot stopped.
-        if let Some(run) = &active {
-            return Err(LcError::conflict(
-                "cannot rename a bot with an active run",
-                json!({"bot_id": id, "run_id": run.id}),
-            ));
-        }
+        // v3.8: the name is a nickname (herdr sees `<project>-<hash>`), so renaming is free.
         let me = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
         if db::live_bots(&app.db)
             .await
@@ -490,12 +495,18 @@ async fn patch_bot(
     }
     // Everything else may change while a run is live — it just needs a restart to take effect.
     let restart_relevant = b.model.is_some()
+        || b.effort.is_some()
         || b.args.is_some()
         || b.identity.is_some()
         || b.env.is_some()
         || b.auto_approve.is_some()
         || b.inject_hooks.is_some();
     let needs_restart = active.is_some() && restart_relevant;
+    if let Some(Some(e)) = &b.effort {
+        if !e.trim().is_empty() && !crate::config::valid_effort(e.trim()) {
+            return Err(LcError::Bad("effort must be low, medium or high".into()));
+        }
+    }
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
             let kind = db::bot(&app.db, &id)
@@ -522,6 +533,9 @@ async fn patch_bot(
             }
             if let Some(m) = &b.model {
                 bot.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+            }
+            if let Some(e) = &b.effort {
+                bot.effort = e.clone().map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty());
             }
             if let Some(a) = &b.args {
                 bot.args = a.clone();
@@ -591,7 +605,7 @@ async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Res
         return Err(LcError::Bad("`local` is reserved for this machine".into()));
     }
     if !valid_host_name(&b.name) {
-        return Err(LcError::Bad(format!("host name must match {}", crate::config::BOT_NAME_RE)));
+        return Err(LcError::Bad(format!("host name must match {}", crate::config::SLUG_NAME_RE)));
     }
     if b.ssh.trim().is_empty() {
         return Err(LcError::Bad("ssh target must not be empty".into()));
@@ -666,7 +680,7 @@ struct NewIdentity {
 
 async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
     if !valid_identity_name(&b.name) {
-        return Err(LcError::Bad(format!("identity name must match {}", crate::config::BOT_NAME_RE)));
+        return Err(LcError::Bad(format!("identity name must match {}", crate::config::SLUG_NAME_RE)));
     }
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
