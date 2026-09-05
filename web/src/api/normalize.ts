@@ -19,8 +19,17 @@ import type {
   GroupMessagesPage,
   Host,
   Identity,
+  InstallToolResult,
+  Issue,
+  IssueDetail,
+  IssueLabel,
+  KindQuota,
   Lamp,
   Message,
+  ModelInfo,
+  QuotaMap,
+  ToolMap,
+  ToolStatus,
   MessageRole,
   MessageSource,
   MessagesPage,
@@ -34,7 +43,7 @@ import type {
   TurnOrigin,
   TurnStatus,
 } from './types'
-import { BOT_KINDS } from './types'
+import { BOT_KINDS, TOOL_UNKNOWN } from './types'
 
 type Rec = Record<string, unknown>
 
@@ -103,7 +112,33 @@ export function toHost(v: unknown): Host | null {
     hook_port: num(pick(v, 'hook_port'), 0),
     connected: bool(pick(v, 'connected', 'ok', 'up'), false),
     error: optStr(pick(v, 'error', 'last_error', 'message', 'reason')),
+    attach_command:
+      str(pick(v, 'attach_command', 'attach')) ||
+      `herdr --remote ${str(pick(v, 'ssh', 'target', 'ssh_target'))} --session ${str(pick(v, 'herdr_session', 'session'), 'agents-manager')}`,
+    tools: toToolMap(pick(v, 'tools')),
   }
+}
+
+/** v4.0 `tools`：缺的 kind 視為未知（`TOOL_UNKNOWN`），不會誤報「缺少」。 */
+export function toToolMap(raw: unknown): ToolMap {
+  const root = isRec(raw) ? raw : {}
+  const one = (v: unknown): ToolStatus => {
+    if (!isRec(v)) return TOOL_UNKNOWN
+    const li = pick(v, 'logged_in', 'loggedIn')
+    return {
+      installed: bool(pick(v, 'installed', 'ok'), true),
+      path: optStr(pick(v, 'path')),
+      version: optStr(pick(v, 'version')),
+      logged_in: typeof li === 'boolean' ? li : null,
+    }
+  }
+  const out = {} as ToolMap
+  for (const k of BOT_KINDS) out[k] = one(root[k])
+  return out
+}
+
+export function toInstallResult(raw: unknown): InstallToolResult {
+  return { turn_id: isRec(raw) ? str(pick(raw, 'turn_id')) : '' }
 }
 
 /**
@@ -127,6 +162,14 @@ export function toProject(v: unknown): Project | null {
     label: str(pick(v, 'label', 'name'), path.split('/').pop() ?? id),
     workspace_id: optStr(v.workspace_id),
     host: str(pick(v, 'host', 'host_name'), 'local') || 'local',
+    github: (() => {
+      const g = pick(v, 'github')
+      if (!isRec(g)) return null
+      const owner = str(pick(g, 'owner'))
+      const repo = str(pick(g, 'repo', 'name'))
+      if (!owner || !repo) return null
+      return { owner, repo, url: str(pick(g, 'url', 'html_url')) || `https://github.com/${owner}/${repo}` }
+    })(),
     created_at: str(v.created_at),
   }
 }
@@ -154,6 +197,11 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     // API.md v3.3; older daemons omit it entirely → treated as "no explicit model".
     model: optStr(pick(v, 'model')),
     effort: optStr(pick(v, 'effort')),
+    fast: bool(pick(v, 'fast'), false),
+    persona: (() => {
+      const x = pick(v, 'persona')
+      return typeof x === 'string' && x.trim() ? x : null
+    })(),
     args,
     autostart: bool(v.autostart),
     inject_hooks: bool(v.inject_hooks, true),
@@ -293,11 +341,21 @@ export function toState(raw: unknown): AppState {
   const runs: Run[] = []
   const turns: Turn[] = []
 
+  const session = str(pick(root, 'herdr_session'), 'agents-manager')
+  let attachCommand = `herdr --session ${session}`
+  let localTools = toToolMap(undefined)
   for (const h of hostArray(pick(root, 'hosts', 'host_list'))) {
     // API.md: `hosts[0]` is always the reserved `local` entry (ssh fields null). The UI
-    // models the local machine separately (`state.connected`), so drop it here.
+    // models the local machine separately (`state.connected`), so drop it here — keeping
+    // only its v4.0 `attach_command`.
     const host = toHost(h)
-    if (host && host.name !== 'local' && !hosts.some((x) => x.name === host.name)) hosts.push(host)
+    if (!host) continue
+    if (host.name === 'local') {
+      if (isRec(h) && str(pick(h, 'attach_command', 'attach'))) attachCommand = str(pick(h, 'attach_command', 'attach'))
+      localTools = host.tools
+      continue
+    }
+    if (!hosts.some((x) => x.name === host.name)) hosts.push(host)
   }
 
   for (const i of arr(pick(root, 'identities', 'identity_list'))) {
@@ -340,6 +398,8 @@ export function toState(raw: unknown): AppState {
   return {
     daemon_seq: num(pick(root, 'daemon_seq', 'seq'), 0),
     connected: bool(pick(root, 'connected', 'herdr_connected'), true),
+    attach_command: attachCommand,
+    tools: localTools,
     hosts,
     identities,
     projects,
@@ -435,3 +495,102 @@ export function unwrap(data: unknown, key: string): unknown {
 }
 
 export { isRec, num, str, bool, optStr, pick, arr }
+
+// ------------------------------------------------------------------ v4.0
+
+/** `GET /api/models` → `ModelInfo[]`（缺欄位時給安全預設）。 */
+export function toModels(raw: unknown): ModelInfo[] {
+  const root = isRec(raw) ? raw : {}
+  return arr(pick(root, 'models', 'items'))
+    .filter(isRec)
+    .map((m) => {
+      const id = str(pick(m, 'id', 'name', 'model'))
+      return {
+        id,
+        display_name: str(pick(m, 'display_name', 'label'), id),
+        description: str(pick(m, 'description')),
+        is_default: bool(pick(m, 'is_default', 'default'), false),
+        default_effort: optStr(pick(m, 'default_effort')),
+        efforts: arr(pick(m, 'efforts')).map((e) => str(e)).filter(Boolean),
+        service_tiers: arr(pick(m, 'service_tiers', 'tiers'))
+          .filter(isRec)
+          .map((t) => ({ id: str(pick(t, 'id')), name: str(pick(t, 'name'), str(pick(t, 'id'))), description: str(pick(t, 'description')) })),
+      }
+    })
+    .filter((m) => m.id)
+}
+
+function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
+  if (!isRec(v)) return null
+  return {
+    used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct', 'used'), 0))),
+    resets_at: optStr(pick(v, 'resets_at', 'reset_at')),
+  }
+}
+
+/** 一個 kind 的額度；null 代表沒有資訊。 */
+export function toKindQuota(v: unknown): KindQuota | null {
+  if (!isRec(v)) return null
+  return {
+    five_hour: toQuotaWindow(pick(v, 'five_hour', '5h')),
+    seven_day: toQuotaWindow(pick(v, 'seven_day', '7d')),
+    plan: optStr(pick(v, 'plan')),
+    updated_at: str(pick(v, 'updated_at')),
+  }
+}
+
+/** `GET /api/quota` → `{kinds: {...}}`（也接受直接給 map）。 */
+export function toQuota(raw: unknown): QuotaMap {
+  const root = isRec(raw) ? raw : {}
+  const kinds = isRec(root.kinds) ? root.kinds : root
+  const out: QuotaMap = {}
+  for (const [k, v] of Object.entries(kinds)) out[k] = toKindQuota(v)
+  return out
+}
+
+// ------------------------------------------------------------------ v4.0 issues
+
+function toLabel(v: unknown): IssueLabel | null {
+  if (typeof v === 'string') return v ? { name: v, color: null } : null
+  if (!isRec(v)) return null
+  const name = str(pick(v, 'name', 'label'))
+  if (!name) return null
+  const c = str(pick(v, 'color')).replace(/^#/, '')
+  return { name, color: /^[0-9a-fA-F]{6}$/.test(c) ? c : null }
+}
+
+export function toIssue(v: unknown): Issue | null {
+  if (!isRec(v)) return null
+  const number = num(pick(v, 'number', 'id'), 0)
+  if (!number) return null
+  const state = str(pick(v, 'state'), 'open').toLowerCase()
+  return {
+    number,
+    title: str(pick(v, 'title')),
+    state: state === 'closed' ? 'closed' : 'open',
+    labels: arr(pick(v, 'labels')).map(toLabel).filter((l): l is IssueLabel => l !== null),
+    url: str(pick(v, 'url', 'html_url')),
+    updated_at: str(pick(v, 'updated_at', 'updatedAt')),
+    author: (() => {
+      const a = pick(v, 'author', 'user')
+      return isRec(a) ? str(pick(a, 'login', 'name')) : str(a)
+    })(),
+    body_excerpt: str(pick(v, 'body_excerpt', 'excerpt')),
+  }
+}
+
+export function toIssues(raw: unknown): Issue[] {
+  const root = isRec(raw) ? raw : {}
+  return arr(pick(root, 'issues', 'items')).map(toIssue).filter((i): i is Issue => i !== null)
+}
+
+export function toIssueDetail(raw: unknown): IssueDetail | null {
+  const root = isRec(raw) && isRec(root_issue(raw)) ? root_issue(raw) : raw
+  const base = toIssue(root)
+  if (!base) return null
+  return { ...base, body: isRec(root) ? str(pick(root, 'body')) : '' }
+}
+
+function root_issue(raw: Record<string, unknown>): unknown {
+  return raw.issue ?? raw
+}

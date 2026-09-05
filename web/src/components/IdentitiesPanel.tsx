@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
+import { KindTag } from './KindTag'
 
 /**
  * 身份預設（identities）：例如 `cc1` = 用另一個 `CLAUDE_CONFIG_DIR` 跑不同帳號。
@@ -47,7 +48,7 @@ function IdentityRow({ name }: { name: string }) {
       <span className="identity-main">
         <span className="identity-name">
           <IdentityBadge name={ident.name} />
-          <span className={`kind-tag ${ident.kind}`}>{ident.kind}</span>
+          <KindTag kind={ident.kind} />
           <span className="host-count">{used > 0 ? `${used} 個 Bot` : '未使用'}</span>
         </span>
         <span className="identity-detail" title={envText}>

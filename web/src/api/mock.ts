@@ -81,6 +81,10 @@ interface MockBot {
   /** API.md v3.3：模型別名，null = 不帶 `--model` */
   model: string | null
   effort: string | null
+  /** v4.0 codex fast tier */
+  fast: number
+  /** v4.0 persona */
+  persona: string | null
   args_json: string
   autostart: number
   inject_hooks: number
@@ -103,8 +107,22 @@ interface MockProject {
   label: string
   workspace_id: string | null
   host: string
+  /** v4.0: GitHub remote, null = not a GitHub project */
+  github: { owner: string; repo: string; url: string } | null
   created_at: string
 }
+
+/** v4.0 fake `gh issue list` for the seeded project. */
+const ISSUES: Rec[] = [
+  { number: 42, title: '群組聊天：刪掉的 bot 歷史不再出現在合併時間軸', state: 'open', labels: [{ name: 'bug', color: 'd73a4a' }, { name: 'group-chat', color: '0e8a16' }], author: 'edansun', updated_at: inHours(-3), body: '重現步驟：\n1. 在群組視圖送 `@all` \n2. 刪掉其中一個 bot\n3. 重新整理\n\n預期：歷史仍在；實際：只剩存活 bot 的訊息。\n\n相關：`GET /projects/:id/messages` 只合併現存 bot。' },
+  { number: 41, title: '即時輸出前幾幀是 TUI 雜訊（✢ Improvising…）', state: 'open', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'polish', color: 'fbca04' }], author: 'edansun', updated_at: inHours(-9), body: '`turn_progress` 的前 1–2 幀會帶 Claude Code 的 spinner 文字，應在 daemon 端過濾。' },
+  { number: 40, title: 'Bot 設定：codex 模型 / effort / fast 從 `GET /api/models` 取', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-20), body: '目前是靜態清單。改為 API 驅動，失敗退回靜態清單。' },
+  { number: 39, title: '主機面板顯示三個 kind 的工具偵測徽章', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'm4p-bot', updated_at: inHours(-30), body: '已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。' },
+  { number: 38, title: '額度徽章：低於 20% 用警示色', state: 'open', labels: [{ name: 'web', color: '5319e7' }, { name: 'good first issue', color: '7057ff' }], author: 'edansun', updated_at: inHours(-50), body: '剩餘 = 100 − used_pct。' },
+  { number: 37, title: '長訊息不要預先收合', state: 'closed', labels: [{ name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-60), body: '已在 v3.9 UI polish 移除 isLong / clamped。' },
+  { number: 35, title: 'hash 式 herdr agent name', state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }], author: 'edansun', updated_at: inHours(-100), body: '`<project slug>-<bot id 尾 6 碼>`。' },
+  { number: 33, title: 'grok kind：hook 不走 argv', state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'grok', color: '000000' }], author: 'edansun', updated_at: inHours(-140), body: '改寫入 `<GROK_HOME>/hooks/agents-manager.json`。' },
+]
 
 /** SPEC §11.2 `[[hosts]]` + the runtime connection state the daemon reports. */
 interface MockHost {
@@ -116,6 +134,73 @@ interface MockHost {
   hook_port: number
   connected: boolean
   error: string | null
+  /** v4.0 tool detection on that host */
+  tools: Record<BotKind, MockTool>
+}
+
+interface MockTool {
+  installed: boolean
+  path: string | null
+  version: string | null
+  logged_in: boolean | null
+}
+
+const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
+  claude: { installed: true, path: '/opt/homebrew/bin/claude', version: '2.1.40', logged_in: true },
+  codex: { installed: true, path: '/opt/homebrew/bin/codex', version: '0.68.0', logged_in: true },
+  grok: { installed: true, path: '/Users/me/.local/bin/grok', version: '1.0.13', logged_in: null },
+}
+
+/** v4.0 `GET /api/models` catalogue (what the CLIs report on 2026-09-06). */
+const MODELS: Record<BotKind, Rec[]> = {
+  claude: [
+    { id: 'opus', display_name: 'Opus', description: '最強推理', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'sonnet', display_name: 'Sonnet', description: '速度與品質平衡', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'haiku', display_name: 'Haiku', description: '最快、最省', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+  ],
+  codex: [
+    {
+      id: 'gpt-5.5',
+      display_name: 'GPT-5.5',
+      description: '日常編碼的預設模型',
+      is_default: true,
+      default_effort: 'medium',
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      service_tiers: [
+        { id: 'default', name: 'Standard', description: '一般佇列' },
+        { id: 'priority', name: 'Fast', description: '優先佇列，較快但額度消耗較高' },
+      ],
+    },
+    {
+      id: 'gpt-5.6-luna',
+      display_name: 'GPT-5.6 Luna',
+      description: '長脈絡、重構友善',
+      is_default: false,
+      default_effort: 'high',
+      efforts: ['medium', 'high', 'xhigh'],
+      service_tiers: [
+        { id: 'default', name: 'Standard', description: '一般佇列' },
+        { id: 'priority', name: 'Fast', description: '優先佇列' },
+      ],
+    },
+    {
+      id: 'gpt-6-astra',
+      display_name: 'GPT-6 Astra',
+      description: '規格審視 / 深度推理（無 fast tier）',
+      is_default: false,
+      default_effort: 'high',
+      efforts: ['high', 'xhigh'],
+      service_tiers: [{ id: 'default', name: 'Standard', description: '一般佇列' }],
+    },
+  ],
+  grok: [
+    { id: 'grok-4.6', display_name: 'Grok 4.6', description: 'grok CLI 預設', is_default: true, default_effort: 'medium', efforts: ['low', 'medium', 'high'], service_tiers: [] },
+    { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'medium', efforts: ['low', 'medium', 'high'], service_tiers: [] },
+  ],
+}
+
+function inHours(h: number): string {
+  return new Date(Date.now() + h * 3600_000).toISOString()
 }
 
 const REPLIES = [
@@ -131,6 +216,18 @@ export class MockTransport implements Transport {
   readonly mock = true
 
   private hosts: MockHost[] = []
+  /** v4.0: the local machine's tool detection (grok missing, codex not logged in — for the hint UI). */
+  private localTools: Record<BotKind, MockTool> = {
+    claude: { ...TOOLS_ALL_OK.claude },
+    codex: { ...TOOLS_ALL_OK.codex, logged_in: false },
+    grok: { installed: false, path: null, version: null, logged_in: null },
+  }
+  private quota: Record<string, Rec | null> = {
+    claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 40, resets_at: inHours(70) }, plan: 'Max 20x', updated_at: now() },
+    'claude:cc1': { five_hour: { used_pct: 85, resets_at: inHours(1.1) }, seven_day: { used_pct: 30, resets_at: inHours(120) }, plan: 'Pro', updated_at: now() },
+    codex: { five_hour: { used_pct: 63, resets_at: inHours(3.2) }, seven_day: { used_pct: 88, resets_at: inHours(41) }, plan: 'Plus', updated_at: now() },
+    grok: null,
+  }
   private identities: MockIdentity[] = [
     { name: 'cc0', kind: 'claude', env: {}, args: [] },
     { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-ccompany' }, args: [] },
@@ -155,6 +252,7 @@ export class MockTransport implements Transport {
       label: 'agents-manager',
       workspace_id: 'ws_demo',
       host: 'local',
+      github: { owner: 'edansun', repo: 'agents-manager', url: 'https://github.com/edansun/agents-manager' },
       created_at: now(),
     }
     this.projects.push(p)
@@ -165,6 +263,8 @@ export class MockTransport implements Transport {
       kind: 'claude',
       model: null,
       effort: null,
+      fast: 0,
+      persona: '你是 agents-manager 的 PM。回覆用繁體中文，先給結論再列理由；改動前先說明影響範圍。',
       args_json: '[]',
       autostart: 1,
       inject_hooks: 1,
@@ -180,6 +280,8 @@ export class MockTransport implements Transport {
       kind: 'codex',
       model: null,
       effort: null,
+      fast: 0,
+      persona: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -195,6 +297,8 @@ export class MockTransport implements Transport {
       kind: 'grok',
       model: null,
       effort: null,
+      fast: 0,
+      persona: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -220,6 +324,16 @@ export class MockTransport implements Transport {
       this.socketOpen = true
       handlers.onStatus('open')
     }, 120)
+    // v4.0: codex usage creeps up every 20 s (WS `quota_updated`).
+    const drift = setInterval(() => {
+      if (this.handlers !== handlers) return clearInterval(drift)
+      const q = this.quota.codex
+      if (!q) return
+      const fh = q.five_hour as Rec
+      fh.used_pct = Math.min(100, Number(fh.used_pct) + 1)
+      q.updated_at = now()
+      this.emit('quota_updated', { kind: 'codex', quota: q })
+    }, 20000)
     return () => {
       if (this.handlers === handlers) {
         this.handlers = null
@@ -238,6 +352,9 @@ export class MockTransport implements Transport {
 
     if (method === 'GET' && rawPath === '/state') return this.state()
     if (method === 'GET' && rawPath === '/fs/dirs') return this.dirs(q.get('path') ?? '', q.get('host') ?? '')
+    if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '')
+    if (method === 'GET' && rawPath === '/quota') return { kinds: this.quota }
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
 
     if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)
     if (seg[0] === 'identities' && seg.length === 2 && method === 'DELETE') return this.deleteIdentity(decodeURIComponent(seg[1]))
@@ -249,6 +366,7 @@ export class MockTransport implements Transport {
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'bots') return this.addBot(seg[1], b)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'messages') return this.projectMessages(seg[1], q)
+    if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'chat') return this.projectChat(seg[1], b)
 
     if (seg[0] === 'bots' && seg.length >= 2) {
@@ -276,6 +394,81 @@ export class MockTransport implements Transport {
   }
 
   // ------------------------------------------------------------------ helpers
+
+  /** v4.0 `GET /api/projects/:id/issues[/:number]` — fake `gh`; `?q=gh-error` simulates a 502. */
+  private issues(projectId: string, number: string | undefined, q: URLSearchParams) {
+    const p = this.projects.find((x) => x.id === projectId)
+    if (!p) throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
+    if (!p.github) throw new ApiError(400, { error: 'bad_request', message: 'project has no GitHub remote' }, 'bad request')
+    const list: Rec[] = ISSUES.map((i) => ({ ...i, url: `${p.github?.url}/issues/${String(i.number)}` }))
+    if (number) {
+      const one = list.find((i) => String(i.number) === number)
+      if (!one) throw new ApiError(404, { error: 'not_found', what: 'issue' }, 'not found')
+      return { issue: one }
+    }
+    const query = (q.get('q') ?? '').trim().toLowerCase()
+    if (query === 'gh-error') {
+      throw new ApiError(502, { error: 'upstream', message: 'gh: To get started with GitHub CLI, please run: gh auth login' }, 'upstream')
+    }
+    const state = q.get('state') ?? 'open'
+    const limit = Number(q.get('limit') ?? 30) || 30
+    return {
+      project_id: projectId,
+      github: p.github,
+      issues: list
+        .filter((i) => (state === 'all' ? true : i.state === state))
+        .filter((i) => !query || `#${String(i.number)} ${String(i.title)}`.toLowerCase().includes(query))
+        .slice(0, limit)
+        .map((i) => ({ ...i, body: undefined, body_excerpt: String(i.body).split('\n')[0].slice(0, 120) })),
+    }
+  }
+
+  /** v4.0 `GET /api/models?kind=&host=` — unknown kind → 400; a down host → 502. */
+  private models(kind: string, host: string) {
+    if (!BOT_KINDS.includes(kind as BotKind)) {
+      throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
+    }
+    const remote = host && host !== 'local' ? this.host(host) : null
+    if (remote && !remote.connected) {
+      throw new ApiError(502, { error: 'upstream', message: `主機 ${remote.name} 未連線` }, 'upstream')
+    }
+    return { kind, host: remote?.name ?? 'local', models: MODELS[kind as BotKind] }
+  }
+
+  /**
+   * v4.0 `POST /api/hosts/:name/tools/install {kind, via_bot_id}`: the install + login
+   * instructions go to a running bot on that host as an ordinary prompt.
+   */
+  private installTool(hostName: string, b: Rec) {
+    const kind = String(b.kind ?? '')
+    if (!BOT_KINDS.includes(kind as BotKind)) {
+      throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
+    }
+    const remote = hostName && hostName !== 'local' ? this.host(hostName) : null
+    const botId = String(b.via_bot_id ?? '')
+    const bot = this.bots.find((x) => x.id === botId)
+    const project = bot ? this.projects.find((p) => p.id === bot.project_id) : undefined
+    if (!bot || !project || project.host !== (remote?.name ?? 'local')) {
+      throw new ApiError(404, { error: 'not_found', what: 'via_bot_id (on that host)' }, 'not found')
+    }
+    if (!this.activeRun(botId)) {
+      throw new ApiError(409, { error: 'conflict', reason: 'via bot is not running' }, 'conflict')
+    }
+    const text =
+      `請在這台主機安裝並登入 ${kind} CLI：\n` +
+      `1. 安裝（brew / npm / 官方安裝腳本擇一）\n2. 執行 \`${kind} login\` 完成登入（會顯示 URL，請貼給我）\n3. 回報 \`${kind} --version\``
+    const reply =
+      `已安裝 ${kind}（mock）。\n\n` +
+      '```\n' + `$ ${kind} --version\n${kind} 1.0.13\n` + '```\n\n' +
+      `登入請開啟 https://example.invalid/login?device=MOCK-${kind.toUpperCase()}`
+    const res = this.prompt(botId, { text, client_request_id: ulid('cr') }, null, reply)
+    const tools = remote ? remote.tools : this.localTools
+    setTimeout(() => {
+      tools[kind as BotKind] = { installed: true, path: `/usr/local/bin/${kind}`, version: '1.0.13', logged_in: true }
+      this.emit('host_changed', { name: remote?.name ?? 'local', connected: true, error: null, tools })
+    }, 3500)
+    return { turn_id: res.turn_id }
+  }
 
   /** SPEC §11.5: the same JSON shape for local and remote; `host` picks the tree. */
   private dirs(path: string, host: string) {
@@ -395,6 +588,8 @@ export class MockTransport implements Transport {
       hook_port: Number(b.hook_port ?? 7788) || 7788,
       connected: false,
       error: null,
+      // A fresh remote box: claude + codex present, grok missing (exercises the tools hint).
+      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null } },
     }
     // API.md: an existing name is an update (disconnect, then reconnect with the new config).
     this.hosts = this.hosts.filter((x) => x.name !== name)
@@ -516,6 +711,8 @@ export class MockTransport implements Transport {
           hook_port: null,
           connected: this.connected,
           error: null,
+          attach_command: 'herdr --session agents-manager',
+          tools: this.localTools,
         },
         ...this.hosts.map((h) => ({
           name: h.name,
@@ -526,6 +723,8 @@ export class MockTransport implements Transport {
           hook_port: h.hook_port,
           connected: h.connected,
           error: h.error,
+          attach_command: `herdr --remote ${h.ssh}${h.ssh_port !== 22 ? ` -p ${h.ssh_port}` : ''} --session ${h.herdr_session}`,
+          tools: h.tools,
         })),
       ],
       projects: this.projects.map((p) => ({
@@ -534,6 +733,7 @@ export class MockTransport implements Transport {
         label: p.label,
         workspace_id: p.workspace_id,
         host: p.host,
+        github: p.github,
         bots: this.bots
           .filter((b) => b.project_id === p.id)
           .map((b) => {
@@ -545,6 +745,8 @@ export class MockTransport implements Transport {
               kind: b.kind,
               model: b.model,
               effort: b.effort,
+              fast: b.fast === 1,
+              persona: b.persona,
               args: JSON.parse(b.args_json) as string[],
               autostart: b.autostart === 1,
               inject_hooks: b.inject_hooks === 1,
@@ -577,6 +779,8 @@ export class MockTransport implements Transport {
       label: String(b.label ?? '').trim() || (canonical.split('/').pop() ?? canonical),
       workspace_id: null,
       host,
+      // Anything that looks like a repo directory name gets a fake GitHub remote.
+      github: /-/.test(canonical.split('/').pop() ?? '') ? { owner: 'me', repo: canonical.split('/').pop() ?? 'repo', url: `https://github.com/me/${canonical.split('/').pop() ?? 'repo'}` } : null,
       created_at: now(),
     }
     this.projects.push(p)
@@ -613,6 +817,8 @@ export class MockTransport implements Transport {
       kind: toKind(b.kind),
       model: typeof b.model === 'string' && b.model.trim() ? b.model.trim() : null,
       effort: typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null,
+      fast: b.fast === true ? 1 : 0,
+      persona: typeof b.persona === 'string' && b.persona.trim() ? b.persona.trim() : null,
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
       inject_hooks: 1,
@@ -681,12 +887,14 @@ export class MockTransport implements Transport {
       if (b.env && typeof b.env === 'object') for (const [k, v] of Object.entries(b.env as Rec)) env[k] = String(v)
       bot.env_json = JSON.stringify(env)
     }
+    if (b.fast !== undefined) bot.fast = b.fast ? 1 : 0
+    if (b.persona !== undefined) bot.persona = typeof b.persona === 'string' && b.persona.trim() ? b.persona.trim() : null
     if (b.autostart !== undefined) bot.autostart = b.autostart ? 1 : 0
     if (b.auto_approve !== undefined) bot.auto_approve = b.auto_approve ? 1 : 0
     if (b.inject_hooks !== undefined) bot.inject_hooks = b.inject_hooks ? 1 : 0
     this.emit('bot_changed', { bot_id: id })
     // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟；只改 autostart → false。
-    const LAUNCH_FIELDS = ['model', 'effort', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
+    const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
     const needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
     return { needs_restart }
   }
@@ -821,7 +1029,7 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  private prompt(botId: string, b: Rec, groupId: string | null = null) {
+  private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
     const run = this.activeRun(botId)
     if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
     if (run.state !== 'running') {
@@ -881,7 +1089,7 @@ export class MockTransport implements Transport {
       setTimeout(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
     } else {
       // v3.9 live output: 3–4 `turn_progress` frames (every 0.5 s) before the final reply.
-      const reply = this.nextReply()
+      const reply = replyOverride ?? this.nextReply()
       const slow = lowered.includes('slow')
       const frames = slow ? 4 : 3
       const lines = reply.split('\n')
