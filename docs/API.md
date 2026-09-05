@@ -591,7 +591,7 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 
 ---
 
-## 11. 專案群組聊天（SPEC §13，v3.5，2026-09-06 新增）
+## 11. 專案群組聊天（SPEC §13，v3.6，2026-09-06 新增）
 
 一個 Project 就是一個群組。使用者在群組裡輸入 `@<bot 名稱>` 或 `@all`，daemon 把同一段文字
 （保留原文，含 `@`）以 §5 的 prompt 路徑送給每個目標 bot；各 bot 的回覆回到同一條合併時間軸。
@@ -684,3 +684,6 @@ Project 底下**所有存活 bot** 的訊息合併，以 `message.id`（ULID，�
 `hook` 子命令早已支援同名變數）。用途：在不動正式 daemon 的情況下起第二個實例驗證，例如
 `AM_DATA_DIR=/tmp/am-group agents-managerd serve --config /tmp/am-group/config.toml`
 （config 用另一個 `listen` port 與 `herdr_session`）。
+## bot.agent_name（v3.5）
+
+`GET /api/state` 的 bot 物件新增唯讀欄位 `agent_name`：herdr 內的 agent 名稱。有 active Run 時為該 run 實際啟動的名稱；否則為下次啟動會用的 `<project label slug>-<bot name>`（例如 `agents-manager-am-codex`）。bot `name` 的唯一性改為**專案內**唯一（同名 bot 可存在於不同專案）；`POST /projects/:id/bots` 與 `PATCH /bots/:id` 的重名 409 訊息改為 `bot name already in use in this project`。

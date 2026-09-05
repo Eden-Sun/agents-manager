@@ -186,6 +186,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "auto_approve": b.auto_approve == 1,
                 "identity": b.identity,
                 "env": b.env(),
+                // herdr agent name: the live run's, else what the next start will use.
+                "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.name)),
                 "run": run,
                 "lamp": lamp(host_up, run.as_ref()),
                 "unread": 0,
@@ -399,14 +401,15 @@ async fn create_bot(
     let res = app
         .cfg
         .update(|cfg| {
-            if cfg.projects.iter().flat_map(|p| &p.bots).any(|x| x.name == b.name) {
-                anyhow::bail!("duplicate-name");
-            }
             let p = cfg
                 .projects
                 .iter_mut()
                 .find(|p| p.id.as_deref() == Some(pid.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("no-project"))?;
+            // Bot names are unique per project (the herdr agent name is `<project>-<bot>`).
+            if p.bots.iter().any(|x| x.name == b.name) {
+                anyhow::bail!("duplicate-name");
+            }
             p.bots.push(crate::config::BotCfg {
                 id: Some(id.clone()),
                 name: b.name.clone(),
@@ -475,13 +478,14 @@ async fn patch_bot(
                 json!({"bot_id": id, "run_id": run.id}),
             ));
         }
+        let me = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
         if db::live_bots(&app.db)
             .await
             .map_err(any_err)?
             .iter()
-            .any(|x| x.id != id && &x.name == n)
+            .any(|x| x.id != id && x.project_id == me.project_id && &x.name == n)
         {
-            return Err(LcError::conflict("bot name already in use", json!({"name": n})));
+            return Err(LcError::conflict("bot name already in use in this project", json!({"name": n})));
         }
     }
     // Everything else may change while a run is live — it just needs a restart to take effect.

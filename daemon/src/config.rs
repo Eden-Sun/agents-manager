@@ -152,6 +152,45 @@ pub fn valid_bot_name(name: &str) -> bool {
     it.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
+/// herdr agent name for a bot: `<project slug>-<bot name>`, squeezed into herdr's
+/// `[a-z][a-z0-9_-]{0,31}`. The project label is slugged (lowercase, non-name chars → `-`,
+/// must start with a letter) and truncated so the bot name always survives intact; when
+/// nothing of the prefix fits, the bare bot name is used.
+pub fn agent_name(project_label: &str, bot_name: &str) -> String {
+    const MAX: usize = 32;
+    let mut slug: String = project_label
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
+    // collapse runs of '-' and trim them at both ends
+    let mut collapsed = String::with_capacity(slug.len());
+    for c in slug.chars() {
+        if c == '-' && collapsed.ends_with('-') {
+            continue;
+        }
+        collapsed.push(c);
+    }
+    slug = collapsed.trim_matches('-').to_string();
+    if let Some(first) = slug.chars().next() {
+        if !first.is_ascii_lowercase() {
+            slug.insert(0, 'p');
+        }
+    }
+    let room = MAX.saturating_sub(bot_name.len() + 1);
+    if slug.is_empty() || room == 0 {
+        return bot_name.to_string();
+    }
+    if slug.len() > room {
+        slug.truncate(room);
+        slug = slug.trim_end_matches('-').to_string();
+        if slug.is_empty() {
+            return bot_name.to_string();
+        }
+    }
+    format!("{slug}-{bot_name}")
+}
+
 /// Identity names use the same shape as bot names.
 pub fn valid_identity_name(name: &str) -> bool {
     valid_bot_name(name)
@@ -271,4 +310,34 @@ pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod agent_name_tests {
+    use super::agent_name;
+
+    #[test]
+    fn prefixes_with_project_slug() {
+        assert_eq!(agent_name("agents-manager", "am-claude"), "agents-manager-am-claude");
+        assert_eq!(agent_name("PowerTech Hub", "pt-leader"), "powertech-hub-pt-leader");
+        assert_eq!(agent_name("pt", "test"), "pt-test");
+    }
+
+    #[test]
+    fn slug_must_start_with_a_letter_and_survives_symbols() {
+        assert_eq!(agent_name("2026 專案!!", "bot"), "p2026-bot");
+        assert_eq!(agent_name("---", "bot"), "bot");
+        assert_eq!(agent_name("", "bot"), "bot");
+    }
+
+    #[test]
+    fn bot_name_always_survives_the_32_char_cap() {
+        let long_bot = "b".repeat(30);
+        assert_eq!(agent_name("agents-manager", &long_bot), format!("a-{long_bot}"));
+        let bot32 = "c".repeat(32);
+        assert_eq!(agent_name("agents-manager", &bot32), bot32);
+        let n = agent_name("a-very-long-project-label-indeed", "worker");
+        assert!(n.len() <= 32, "{n}");
+        assert!(n.ends_with("-worker"));
+    }
 }
