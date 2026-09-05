@@ -479,8 +479,15 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     args.extend(identity_args(app, bot).await);
     args.extend(bot.args());
 
-    // 5. agent.start (async on the socket)
-    if let Err(e) = client.agent_start(&bot.name, &bot.kind, &pane_id, &args, 60_000).await {
+    // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
+    let agent = crate::config::agent_name(&project.label, &bot.name);
+    sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
+        .bind(&agent)
+        .bind(run_id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    if let Err(e) = client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
         let _ = client.pane_close(&pane_id).await;
         return Err(up(e));
     }
@@ -490,7 +497,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    match client.agent_wait(&bot.name, &until, 60_000).await {
+    match client.agent_wait(&agent, &until, 60_000).await {
         Ok(info) => {
             let st = info.agent_status.normalized();
             set_run(app, run_id, "running", st.as_str()).await;
@@ -498,7 +505,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "agent.wait did not settle");
             // Do NOT close the pane on timeout (SPEC §6.2.7).
-            match client.agent_get(&bot.name).await {
+            match client.agent_get(&agent).await {
                 Ok(Some(info)) => set_run(app, run_id, "running", info.agent_status.normalized().as_str()).await,
                 _ => {
                     let _ = client.pane_close(&pane_id).await;
@@ -534,13 +541,14 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     app.emit_bot_status(bot_id).await;
     fail_in_flight(app, &run.id, "run stopped by user").await;
 
+    let target = db::run_target(&run, &bot);
     for _ in 0..2 {
-        let _ = client.agent_send_keys(&bot.name, &["ctrl+c".to_string()]).await;
+        let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let mut gone = false;
     for _ in 0..20 {
-        let agent = client.agent_get(&bot.name).await;
+        let agent = client.agent_get(&target).await;
         let pane = match run.pane_id.as_deref() {
             Some(p) => client.pane_get(p).await.ok().flatten(),
             None => None,
@@ -612,7 +620,8 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let _g = lock.lock().await;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
-    client_for_bot(app, bot_id).await?.agent_send_keys(&bot.name, &["esc".to_string()]).await.map_err(up)?;
+    let target = db::run_target(&run, &bot);
+    client_for_bot(app, bot_id).await?.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
     fail_in_flight(app, &run.id, "interrupted by user").await;
     Ok(())
 }
@@ -627,7 +636,8 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
         }
     }
-    client_for_bot(app, bot_id).await?.agent_send_keys(&bot.name, &keys).await.map_err(up)?;
+    let target = db::run_target(&run, &bot);
+    client_for_bot(app, bot_id).await?.agent_send_keys(&target, &keys).await.map_err(up)?;
     Ok(())
 }
 
@@ -732,7 +742,7 @@ pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id:
     // 4. deliver
     let res = client_for_bot(app, bot_id)
         .await?
-        .call_timeout("agent.prompt", json!({"target": bot.name, "text": text}), Duration::from_secs(10))
+        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": text}), Duration::from_secs(10))
         .await;
     let delivery = match res {
         Ok(_) => "ok",
