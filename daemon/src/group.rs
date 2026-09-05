@@ -67,6 +67,64 @@ pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
     hit.into_iter().map(|i| members[i].clone()).collect()
 }
 
+/// Remove every recognised mention token (`@all`, `@<member>`, optionally followed by
+/// `,` / `:` / `;`) and tidy the whitespace. Falls back to the original text when nothing
+/// would be left, so a bare `@all` still delivers *something* rather than an empty prompt.
+pub fn strip_mentions(text: &str, members: &[Member]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '@' && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_')) {
+            let start = i + 1;
+            let mut end = start;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_' || chars[end] == '-') {
+                end += 1;
+            }
+            if end > start {
+                let raw: String = chars[start..end].iter().collect::<String>().to_ascii_lowercase();
+                let trimmed = raw.trim_end_matches(['-', '_']).to_string();
+                let known = raw == "all"
+                    || trimmed == "all"
+                    || members.iter().any(|m| {
+                        let n = m.name.to_ascii_lowercase();
+                        n == raw || n == trimmed
+                    });
+                if known {
+                    let mut skip_to = end;
+                    if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';') {
+                        skip_to += 1;
+                    }
+                    i = skip_to;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    // collapse whitespace runs left behind by removed tokens (keep newlines)
+    let mut tidy = String::with_capacity(out.len());
+    let mut prev_space = false;
+    for c in out.chars() {
+        if c == ' ' || c == '\t' {
+            if !prev_space {
+                tidy.push(' ');
+            }
+            prev_space = true;
+        } else {
+            tidy.push(c);
+            prev_space = c == '\n';
+        }
+    }
+    let tidy = tidy.trim().to_string();
+    if tidy.is_empty() {
+        text.to_string()
+    } else {
+        tidy
+    }
+}
+
 /// Why a recipient was skipped (SPEC §13.3). Short machine codes; the system message
 /// carries the human-readable text.
 fn skip_reason(app_err: &LcError) -> (&'static str, String) {
@@ -127,11 +185,13 @@ pub async fn chat(app: &Arc<App>, project_id: &str, text: &str, client_request_i
     }
 
     let group_id = client_request_id.to_string();
+    // Bots must not see the routing syntax: `@all echo 1` reaches each bot as `echo 1`.
+    let deliver = strip_mentions(text, &member_list);
     let mut sent = Vec::new();
     let mut skipped = Vec::new();
     for t in targets {
         let crid = format!("{client_request_id}:{}", t.id);
-        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id)).await {
+        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver)).await {
             Ok(out) => sent.push(json!({
                 "bot_id": t.id, "bot_name": t.name, "turn_id": out.turn_id,
                 "message_id": out.message_id, "delivery": out.delivery,
@@ -257,5 +317,23 @@ mod tests {
         assert!(names("@nobody here").is_empty());
         assert!(names("mail me@g-claude now").is_empty(), "an email-like @ is not a mention");
         assert!(names("@").is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod strip_tests {
+    use super::*;
+    fn m(n: &str) -> Member {
+        Member { id: n.to_string(), name: n.to_string() }
+    }
+    #[test]
+    fn strips_all_and_members_only() {
+        let ms = [m("am-claude"), m("am-codex")];
+        assert_eq!(strip_mentions("@all echo 1", &ms), "echo 1");
+        assert_eq!(strip_mentions("@am-claude, @am-codex: 請看一下", &ms), "請看一下");
+        assert_eq!(strip_mentions("hey @am-claude what about @bob?", &ms), "hey what about @bob?");
+        assert_eq!(strip_mentions("mail me@example.com @all", &ms), "mail me@example.com");
+        assert_eq!(strip_mentions("@all", &ms), "@all");
     }
 }

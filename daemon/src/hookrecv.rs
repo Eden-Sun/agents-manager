@@ -479,7 +479,7 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
 
 
 #[cfg(test)]
-mod classify_tests {
+mod codex_title_tests {
     use super::*;
 
     #[test]
