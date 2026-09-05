@@ -1,9 +1,10 @@
-# Agents Manager 規格書（v3）
+# Agents Manager 規格書（v3.1）
 
 > 修訂紀錄
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
+> - v3.1（2026-09-06）：新增 §11 遠端主機（透過 SSH 連遠端 herdr）、`auto_approve`、目錄選擇器、Markdown 渲染；附錄 E 遠端實測。
 > - v3（2026-09-05）：依 Grok（grok CLI 1.0.13）第二輪完整審視修訂 15 條：Turn 狀態收斂為 `in_flight`（每 Run 至多一筆，hook 只配那一筆）；per-bot 鎖；active Run 部分唯一索引；先寫 Run 再建 pane；blocked 不觸發備援；hook 子命令最低契約；事件訂閱拓撲實測定案；TOML / SQLite 權威劃分；多項 demo 範圍縮減標為第二階段。
 
 ## 1. 目標
@@ -265,6 +266,77 @@ label = "foo"
 ## 9. 非目標（第一階段）
 遠端存取、遠端 herdr、xterm.js 串流、bot 互相對話、diff 檢視、共用使用者 default session、transcript 回補、Codex notify chain、`toml_edit` 保註解、WS terminal 推送、未讀計數、Project 刪除時關 workspace。
 
+
+## 11. 遠端主機（Remote hosts，v3.1）
+
+### 11.1 目標
+Project 可以位於另一台機器：該機器上有自己的 herdr，agent 在那台機器的 pane 內執行，daemon 仍在本機，UI 操作方式完全相同。herdr 本身的 `--remote` 只支援 TUI attach，因此本系統以 **OpenSSH 轉發**達成（附錄 E 已實測）：
+
+```
+本機 daemon ──(ssh -M master)──► 遠端 sshd
+   │  -L <本機短路徑>.sock : ~/.config/herdr/sessions/<session>/herdr.sock   （herdr RPC / 事件）
+   │  -R <hook_port> : 127.0.0.1:<daemon port>                               （遠端 hook 回呼）
+   └─ ssh <host> '<sh 指令>'                                                 （放 hook 腳本、settings、讀 spool、列目錄）
+```
+
+### 11.2 設定
+```toml
+[[hosts]]
+name = "m4p"                       # 唯一識別，[a-z][a-z0-9_-]{0,31}
+ssh = "m4p@100.112.229.82"         # ssh 目標；可含 ssh_config 別名；port 以 ssh_port 指定
+ssh_port = 22
+herdr_session = "agents-manager"   # 遠端 named session（絕不使用遠端 default session）
+remote_path = "/opt/homebrew/bin:$HOME/.local/bin"   # 非互動 ssh shell 缺少的 PATH，前置到 PATH
+hook_port = 7788                   # 遠端 127.0.0.1 上反向轉發的埠；與 daemon 埠相同即可，衝突時改
+
+[[projects]]
+host = "m4p"                       # 缺省 = 本機
+path = "/Users/m4p/work/foo"
+label = "foo@m4p"
+```
+- 認證只用使用者現有的 ssh key / agent / ssh_config；一律 `BatchMode=yes`，**絕不**互動輸入密碼。認證失敗 → host `disconnected` 並在 UI 顯示錯誤字串。
+- `hosts[].name` 為 `"local"` 保留給本機，不可設定。
+
+### 11.3 HostManager（daemon）
+每個 host 一個 `HostConn`：
+1. **ensure remote session**：`ssh <host> 'export PATH=<remote_path>:$PATH; herdr session list | grep -q "^<session> .*running" || (nohup herdr --session <session> server >/tmp/herdr-<session>.log 2>&1 &); sleep 1; herdr session list'`。
+2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> -R <hook_port>:127.0.0.1:<daemon port> <target>`。
+   - `<local.sock>` 與 `<ctl>` 必須放在**短路徑**（macOS AF_UNIX 上限 104 bytes）：`/tmp/agents-manager-<uid>/<host>.sock`、`<host>.ctl`。
+3. 以 `HerdrClient::new(<local.sock>)` 取得與本機完全相同的 client；`ping` 成功 → `connected`。
+4. 健康檢查：每 10 秒 `ping`；失敗或 master 程序退出 → 標 `disconnected`、指數退避（1s→30s）重建 master → 成功後對該 host 執行對帳（§6.5）並重建事件訂閱。
+5. daemon 退出時關閉 master（`ssh -O exit`）；遠端 herdr server 與 agent 保持存活。
+6. `App` 由單一 `herdr` 改為 `hosts: HashMap<String, HostConn>`，`"local"` 為既有本機 client；所有用到 `app.herdr` 的地方改為 `app.herdr_for(project.host)`。pane watcher、fallback timer 等以 `(host, pane_id)` 為鍵。對帳與全域事件訂閱逐 host 執行。
+
+### 11.4 遠端 hook
+遠端沒有 `agents-managerd` 二進位，改用 **POSIX sh + curl** 腳本（附錄 E 已實測可通過反向通道打到 daemon）：
+- daemon 在啟動 Run 時透過 ssh 寫入遠端 `~/.config/agents-manager/bots/<bot_id>/hook.sh`（內容固定，見附錄 E）與 `claude-settings.json`；`chmod +x`。
+- claude args：`--settings <遠端絕對路徑>`；codex：`-c notify=["<遠端 hook.sh>","codex","<bot_id>","<token>","<hook_port>"]`。
+- 腳本契約與 §4.4 相同：≤3 秒、exit 0、空 stdout、失敗寫遠端 `hook-spool.jsonl`。
+- daemon 的 `/hook/*` **不做** Host 檢查（只驗 per-bot token），因為經反向通道的請求 Host 為 `127.0.0.1:<hook_port>`。
+- spool 重放：對帳時 `ssh <host> 'f=~/.config/agents-manager/bots/<id>/hook-spool.jsonl; [ -f "$f" ] && mv "$f" "$f.replaying" && cat "$f.replaying" && rm "$f.replaying"'`，逐行依 §6.7 處理。
+
+### 11.5 目錄選擇器
+`GET /api/fs/dirs?host=<name>&path=` 對遠端執行一段 sh：`cd <path> && pwd && for d in */ .[!.]*/; do [ -d "$d" ] && printf '%s\t%s\n' "${d%/}" "$([ -d "$d/.git" ] && echo 1 || echo 0)"; done`，daemon 解析後回傳與本機相同的 JSON（`home` 以 `echo $HOME` 取得；`~` 前綴展開）。隱藏目錄仍略過。
+
+### 11.6 API 與 UI
+- `GET /api/state` 新增 `hosts: [{name, ssh, herdr_session, connected, error?}]`；`projects[].host`（`"local"` 或 host name）。
+- `POST /api/hosts {name, ssh, ssh_port?, herdr_session?, remote_path?, hook_port?}` → 寫 TOML、立即嘗試連線、回 `{name, connected, error?}`；`DELETE /api/hosts/:name`（需無 project 使用）；`POST /api/hosts/:name/reconnect`。
+- `POST /api/projects` 新增 `host?`。
+- WS `daemon_status` 改為 `{herdr_connected, hosts: {<name>: {connected, error?}}}`；`host_changed {name, connected, error?}`。
+- UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單多一個「主機」下拉（本機 + 已設定 hosts），選擇器隨主機切換；新增「主機」管理表單（名稱、ssh 目標、port、session、remote_path），列出各 host 連線狀態與重連按鈕；host 斷線時該 host 的 bot 燈號為 `disconnected`（灰）。
+
+### 11.7 第一階段不做
+遠端密碼 / 互動認證、跳板（ProxyJump 交給 ssh_config）、遠端 transcript 回補、多 daemon。
+
+### 11.8 驗收
+| # | 內容 | 驗收 |
+|---|---|---|
+| R1 | HostManager | 設定 host `m4p`（`m4p@100.112.229.82`）→ daemon log 出現 remote session ensured、master up、ping ok；`kill` master 程序 → 30 秒內自動重連並對帳 |
+| R2 | 遠端 Project / Bot | UI 新增 host、以選擇器選 `/Users/m4p` 下目錄建 Project、新增 claude bot → start → 遇 trust 提示 `blocked` → 按鍵 ↓ Enter → idle |
+| R3 | 遠端 hook | 送 prompt → 回覆來源 `hook`；daemon 停機時遠端 spool 增加一行，重啟後補入 |
+| R4 | 本機不受影響 | 既有本機 bot 行為與 M1–M8 驗收相同 |
+| R5 | 開發測試 | `scripts/dev-sshd.sh` 以使用者權限起 127.0.0.1:2222 的 sshd（不改系統設定），以 `host = "loop"`（ssh 到 127.0.0.1:2222、session `am-loop`）跑 R1–R3 的自動化版本 |
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。
@@ -356,3 +428,27 @@ CREATE INDEX messages_turn ON messages(turn_id);
 | M8 | 前端內嵌、`cargo run --release -- serve` 一鍵啟動 | 開 `http://127.0.0.1:7788` 可用 |
 
 風險最高：M4（hook 配對）與 M3b（對帳）。M5 的 blocked 依賴 herdr 辨識，若不穩可先以假狀態驗 UI。
+
+## 附錄 E：遠端 herdr 實測（2026-09-06，本機 → m4p@100.112.229.82，macOS / herdr 0.8.2）
+
+- 非互動 ssh shell 的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`；herdr 在 `/opt/homebrew/bin`，claude / codex 在 `~/.local/bin`。pane 內的 shell 是互動 shell，PATH 正常。
+- `herdr --session agents-manager server` 可用 `nohup … &` 從 ssh 啟動並存活。
+- `ssh -N -M -S <ctl> -L <local.sock>:<remote herdr.sock> …` 轉發後，以本機 `HerdrClient` 直接 `ping` 成功（約 137 ms），`workspace.create`、`agent.start`、`agent.wait`、`agent.send_keys`、`agent.prompt`、`events.subscribe`（逐 pane `pane.agent_status_changed`）全部正常。AF_UNIX 路徑過長會 `path too long`，需用 `/tmp` 短路徑。
+- 遠端 claude 首次啟動出現「trust this folder」提示 → herdr 回報 `blocked`；游標預設在「No, exit」，需送 `down` + `enter`。
+- `ssh -O forward -R 17788:127.0.0.1:7788` 可在既有 master 上動態加反向轉發；遠端 `curl http://127.0.0.1:17788/api/session` 被 daemon 以 `non-local request` 拒絕（Host 檢查，預期），但 `/hook/claude` 回 `401 unknown bot`（只驗 token，未被 Host 擋下）。
+- 遠端 claude 以 `--settings` 注入指向 `hook.sh` 的 hooks，SessionStart 確實觸發腳本並經反向通道打到 daemon；失敗時 spool 寫入 1 行。Stop hook 因遠端帳號當時撞到 session 上限未驗到。
+- 實測用的 `hook.sh`（POSIX sh）：
+
+```sh
+#!/bin/sh
+PROVIDER="$1"; BOT="$2"; TOKEN="$3"; PORT="$4"; shift 4
+if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c 1048576); fi
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":false}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW")
+DIR="$HOME/.config/agents-manager/bots/$BOT"
+OUT=$(NO_PROXY=127.0.0.1 curl -s -m 2 --connect-timeout 0.3 -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/hook/$PROVIDER" \
+  -H 'Content-Type: application/json' -H "X-AM-Bot-Token: $TOKEN" --data-binary "$BODY" 2>>"$DIR/hook.log") || OUT=fail
+case "$OUT" in 2*) ;; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
+exit 0
+```
+- 使用者權限的測試 sshd：`/usr/sbin/sshd -f <cfg>`，cfg 指定 `Port 2222`、`ListenAddress 127.0.0.1`、自產 HostKey、`AuthorizedKeysFile`、`StrictModes no`、`AllowStreamLocalForwarding yes`、`StreamLocalBindUnlink yes`、`UsePAM no`；可正常登入與轉發，不需 sudo、不改系統設定。
