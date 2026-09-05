@@ -49,6 +49,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
           "project_id": "01M1S2SQPS9TA1DYRKNYCF2SJK",
           "name": "am-claude",
           "kind": "claude",
+          "model": null,
           "args": [],
           "autostart": false,
           "inject_hooks": true,
@@ -99,8 +100,8 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label":"foo"}`（`label` 可省，預設取目錄名） | `200 {"project_id":"..."}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 bot 有 active Run → 409 |
 | POST | `/api/projects/{id}/bots` | `{"name":"foo-claude","kind":"claude"\|"codex","args":[],"autostart":false,"inject_hooks":true}` | `200 {"bot_id":"..."}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；名稱重複 409 |
-| PATCH | `/api/bots/{id}` | `{"args"?:[],"autostart"?:bool,"name"?:"...","inject_hooks"?:bool}` | `200 {}`；改名時有 active Run → 409 |
-| DELETE | `/api/bots/{id}` | — | `200 {}`（會先 stop；conversation 保留） |
+| PATCH | `/api/bots/{id}` | `{"name"?,"model"?,"args"?,"autostart"?,"auto_approve"?,"inject_hooks"?,"identity"?,"env"?}` | `200 {"needs_restart":bool}`；改名時有 active Run → 409（詳見 §10） |
+| DELETE | `/api/bots/{id}` | — | `200 {}`（會先 stop；conversation 與訊息保留，詳見 §10） |
 
 這些操作成功後 daemon 會推 `project_changed` / `bot_changed`，前端收到後重新 `GET /api/state`。
 
@@ -482,3 +483,106 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
 | `identities_changed` | `{}` — 重新 `GET /api/state` |
 
 bot 的 `identity` / `env` 變更沿用既有的 `bot_changed`。
+
+---
+
+## 10. Bot 編輯 / 刪除 / 指定模型（v3.3，2026-09-06 新增）
+
+### 10.1 `bot.model`
+
+每個 bot 新增可選欄位 **`model`**（`string | null`，預設 `null` = 不指定，由 CLI 自己決定）。
+啟動 Run 時 daemon 依 kind 注入：
+
+| kind | 注入 |
+|---|---|
+| `claude` | `--model <model>` |
+| `codex` | `-m <model>` |
+
+**argv 組合順序**（前端可據此預覽）：
+
+```
+daemon 旗標（auto_approve: --dangerously-skip-permissions / --yolo；hooks: --settings / -c notify=…）
+  → model（--model <m> / -m <m>）
+  → identity.args
+  → bot.args
+```
+
+- TOML：`model = "opus"`（`[[projects.bots]]` 內）。
+- DB：`bots.model TEXT`（additive migration，舊 DB 啟動時自動補欄位）。
+- `GET /api/state` 的每個 bot 物件都有 `model`（`string | null`）。
+- `POST /api/projects/{id}/bots` 可帶 `model`（省略 = `null`）。
+- 值不做白名單驗證（各 CLI 自己驗），只把空白字串正規化成 `null`。
+
+### 10.2 `PATCH /api/bots/{id}`
+
+body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）：
+
+```json
+{
+  "name": "am-codex",
+  "model": "gpt-5.5",
+  "args": ["--search"],
+  "autostart": false,
+  "auto_approve": true,
+  "inject_hooks": true,
+  "identity": "cc1",
+  "env": {"FOO": "bar"}
+}
+```
+
+回應：
+
+```json
+200 {"needs_restart": true}
+```
+
+- **`needs_restart`**：`true` 表示這次修改要等 bot 重啟後才會生效（有 active Run，且本次動到會影響啟動 argv / env 的欄位：`model`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`）。
+  沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
+  前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
+- **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
+
+  ```json
+  409 {"error":"conflict","reason":"cannot rename a bot with an active run","run_id":"01M1…","bot_id":"01M1…"}
+  ```
+
+  停掉 bot 之後即可改名。名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；與其他 bot 重名 → 409 `{"reason":"bot name already in use","name":"…"}`。
+- **其他欄位在有 active Run 時允許修改**（不再 409），只是回 `needs_restart: true`。
+- `identity` 指向不存在的 identity → `404 {"error":"not_found","what":"identity"}`；kind 與 bot 不符 → `400`。
+- `env` 傳整個物件即為**取代**（不 merge）；`identity` / `model` 傳 `null` 或 `""` 即為清除。
+- 成功後推 WS `bot_changed {bot_id}`。
+
+### 10.3 `POST /api/bots/{id}/restart`
+
+等同「有 Run 就先 stop（§6.4：ctrl+c ×2、逾時關 pane）→ 再 start」，用來讓改過的 `model` / `args` /
+`identity` / `env` 生效。
+
+```json
+200 {"run_id":"01M1…"}        // 新 Run 的 id
+```
+
+- 本來就沒有 Run 也可以呼叫，等同 start。
+- start 失敗的錯誤與 `POST /bots/{id}/start` 相同（502 / 409 / 404）。
+- 過程中會推 `bot_status`（stopping → offline → starting → idle）。
+
+### 10.4 `DELETE /api/bots/{id}`
+
+```json
+200 {}
+```
+
+流程：有 active Run 先 stop（ctrl+c ×2、逾時關 pane；遠端 host 亦同）→ 從 config.toml 移除 →
+DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id 之後仍查得到歷史）→
+刪除該 bot 的 hook 材料目錄 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，
+失敗只寫 log、不影響回應）。
+
+- 找不到 bot → `404`。
+- 刪除後推 `bot_changed {bot_id}`；前端重新 `GET /api/state`（該 bot 會從 `projects[].bots` 消失）。
+- 訊息歷史仍可用 `GET /api/bots/{id}/messages` 讀到（第一階段不提供「已刪除 bot」的列表 UI）。
+
+### 10.5 WebSocket
+
+沿用既有事件，沒有新型別：
+
+| type | data |
+|---|---|
+| `bot_changed` | `{"bot_id":"…"}` — PATCH / DELETE / restart 都推這個，收到後重新 `GET /api/state` |
