@@ -533,3 +533,83 @@ CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany           <- ✅ 展開成「該 h
 - 遠端 `test`（cc1，未登入）送 `echo 2` → 12 秒後 `TURN failed ok`，system 訊息「agent 尚未登入（畫面顯示 Not logged in · Please run /login）…」；daemon log `prompt stalled; turn failed` ✅
 - 本機 `am-claude` 送 `Reply with exactly WATCHDOG-OK` → `completed`、`assistant/hook WATCHDOG-OK`，stall 計數未增加（working 事件已取消 watchdog）✅
 - `cargo test -p agents-managerd extract_tests`：以截圖畫面為 fixture，`clean_screen` 只留下 `Not logged in · Please run /login`；`extract_reply` 仍優先取 `⏺` 行 ✅
+
+## v3.3 — Bot 可編輯 / 可刪除 / 可指定模型（2026-09-06）
+
+需求：UI 要能改 bot（含新的 `model` 欄位）、重啟套用、刪除 bot；watchdog 訊息不要斷言「尚未登入」。
+
+實作：`config.rs`（`BotCfg.model`）、`db.rs`（`bots.model TEXT` + additive migration）、
+`projection.rs`（model 同步）、`lifecycle.rs`（`model_args()`、`restart_bot()`、`purge_bot_dir()`、
+`stall_hint_lines()` / `stall_reason()`）、`api.rs`（`PATCH` 擴充 + `needs_restart`、
+`POST /bots/:id/restart`、`DELETE /bots/:id` 清理 bot 目錄、`GET /state` 的 `model`）、`docs/API.md` §10。
+
+argv 注入順序：daemon 旗標（auto_approve、hooks）→ model（claude `--model`／codex `-m`）
+→ identity.args → bot.args。
+
+驗收（daemon 版本 = 本次 release build）：
+
+```
+$ curl -sX PATCH … -d '{"model":"gpt-5.5"}' …/api/bots/<am-codex>      # 無 Run
+{"needs_restart":false}
+$ curl -sX POST …/api/bots/<am-codex>/start ; ps -o command= -p <pid>
+codex --yolo -c notify=[…] -m gpt-5.5                                   ✅ 順序正確
+
+$ curl -sX PATCH … -d '{"model":"opus","args":["--append-system-prompt","AM-V33-TEST"]}' …/<am-claude>  # 有 Run
+{"needs_restart":true}
+$ curl -sX PATCH … -d '{"autostart":false}' …/<am-claude>
+{"needs_restart":false}                                                 # 只改 autostart 不需重啟
+$ curl -sX PATCH … -d '{"name":"am-claude2"}' …/<am-claude>
+409 {"error":"conflict","reason":"cannot rename a bot with an active run","run_id":"01M1S5P4…"}
+$ curl -sX POST …/api/bots/<am-claude>/restart → {"run_id":"01M1S9XP…"}
+claude --dangerously-skip-permissions --settings …/claude-settings.json --model opus --append-system-prompt AM-V33-TEST  ✅
+herdr agent list：只有一個 am-claude（舊 agent 無殘留）、舊 pane 已關（w8 剩 p4/p5）✅
+```
+
+刪除（本機 `amtmp`，claude，model=haiku）：
+
+```
+start → argv 帶 --model haiku ✅；有 Run 時 rename → 409；stop 後 rename → 200 {"needs_restart":false} ✅
+prompt "Reply with exactly TMP-OK" → assistant/hook TMP-OK
+DELETE /api/bots/<id> → 200 {}
+  herdr agent list 無 amtmp、pane w8:p7 消失 ✅
+  config.toml 無該 bot ✅
+  ~/.config/agents-manager/bots/<id>/ 已刪除 ✅
+  GET /bots/<id>/messages 仍回 2 則；DB bots.deleted_at 非 NULL、messages 仍在 ✅
+```
+
+遠端（m4p / project `pt` 的 `m4ptmp`）：
+
+```
+start → 遠端 argv `claude … --settings /Users/m4p/.config/agents-manager/bots/<id>/claude-settings.json --model haiku` ✅
+prompt → assistant/hook RTMP-OK（遠端 hook 正常）
+DELETE → 遠端 agent list 只剩 pt-opu、pane wD:p2 消失、
+        /Users/m4p/.config/agents-manager/bots/<id>/ 已由 ssh rm -rf 刪除 ✅，訊息仍在 ✅
+```
+
+watchdog 新訊息（`test` @ m4p，identity cc1）：
+
+```
+--- system system
+agent 在 12 秒內沒有對訊息作出反應。終端畫面：
+⎿  Not logged in · Please run /login
+· Run in another terminal: security unlock-keychain
+Not logged in · Run /login
+若該身份使用 macOS Keychain 儲存憑證，透過 ssh 啟動的 herdr 可能讀不到（畫面提示 `security unlock-keychain`）。
+```
+
+驗收用的 `amtmp` / `m4ptmp` 已刪除；`am-claude` / `am-codex` 的 model 與 args 已還原成原本的空值並重啟，
+`test` 已停回原本的 offline 狀態。
+
+### v3.3 偏離規格 / 設計選擇
+
+27. **`needs_restart` 的判定**：有 active Run 且本次 PATCH 動到會影響啟動 argv / env 的欄位
+    （`model` / `args` / `identity` / `env` / `auto_approve` / `inject_hooks`）才是 `true`。
+    只改 `autostart` 回 `false`（它本來就只在下次 daemon 啟動時才讀）。已寫進 `docs/API.md` §10.2。
+28. **PATCH 改名多了一個重名檢查**：SPEC 只寫「有 active Run 拒絕」，但改成別的 bot 已用的名字
+    會讓 herdr agent name 撞名，因此比照 POST 回 409 `bot name already in use`。
+29. **`DELETE /bots/:id` 對已刪除 / 不存在的 bot 回 404**（原本一律回 200）。
+30. **`model` 不做白名單驗證**：值直接傳給 CLI（只把空白字串正規化成 `null`），
+    因為模型名稱由各家 CLI 自行演進。
+31. **watchdog 訊息改為中性敘述 + 原樣引用畫面行**（使用者指出 ssh 主機其實已登入）。
+    比對關鍵字 `Not logged in` / `/login` / `unlock-keychain` / `usage limit` / `limit`（不分大小寫），
+    無匹配行時只說「請查看終端分頁」。

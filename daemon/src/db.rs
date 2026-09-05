@@ -17,6 +17,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex')),
+  model TEXT,
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
   auto_approve INTEGER NOT NULL DEFAULT 1,
@@ -91,6 +92,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("projects", "host", "ALTER TABLE projects ADD COLUMN host TEXT NOT NULL DEFAULT 'local'"),
         ("bots", "identity", "ALTER TABLE bots ADD COLUMN identity TEXT"),
         ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
+        ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -177,6 +179,8 @@ pub struct Bot {
     pub project_id: String,
     pub name: String,
     pub kind: String,
+    /// claude `--model <m>` / codex `-m <m>`; NULL = the CLI's own default.
+    pub model: Option<String>,
     pub args_json: String,
     pub autostart: i64,
     pub inject_hooks: i64,
