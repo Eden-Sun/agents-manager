@@ -904,3 +904,49 @@ codex `npm i -g @openai/codex`、grok `curl -fsSL https://x.ai/cli/install.sh | 
 | `codex` | `-c developer_instructions=<TOML 字串>`（daemon 以 TOML basic string 逃逸換行與引號；實測結果見 PROGRESS v4.0） |
 
 argv 順序：daemon 旗標 → persona → model → effort → fast → identity.args → bot.args。
+
+### 12.9 GitHub 專案偵測 `projects[].github` 與 issues
+
+daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機 `git -C <path> remote get-url origin`，遠端經 ssh 同指令），
+解析 `git@github.com:owner/repo.git`、`https://github.com/owner/repo(.git)`、`ssh://git@github.com/owner/repo`，放進
+`GET /api/state` 的每個 project：
+
+```json
+{ "id": "01M1…", "path": "…", "label": "powertech-hub", "host": "local",
+  "github": {"owner": "Eden-Sun", "repo": "powertech-hub", "url": "https://github.com/Eden-Sun/powertech-hub"},
+  "bots": [ … ] }
+```
+
+- 非 GitHub、沒有 remote、或 git 指令失敗 → `github: null`。結果快取到下次對帳。
+- `POST /api/projects/{id}/github/refresh` → 立即重測，回 `200 {"project_id":"…","github":{…}|null}`；並推 `project_changed`。
+
+#### `GET /api/projects/{id}/issues?state=open|closed|all&limit=30&q=<關鍵字>&refresh=1`
+
+用該主機的 `gh issue list --repo owner/repo --state <s> --limit <n> [--search "<q>"] --json …` 取得。
+`state` 預設 `open`；`limit` 1–100（預設 30）；`q` 可省。daemon 快取 **2 分鐘**（key = project + state + q + limit），`refresh=1` 跳過。
+
+```json
+{
+  "project_id": "01M1…", "repo": "Eden-Sun/powertech-hub", "source": "gh",
+  "fetched_at": "2026-09-06T10:00:00.000Z",
+  "issues": [
+    {"number": 42, "title": "…", "state": "OPEN", "labels": ["bug"], "url": "https://github.com/Eden-Sun/powertech-hub/issues/42",
+     "updated_at": "2026-09-05T12:00:00Z", "author": "Eden-Sun", "body_excerpt": "前 300 字，換行壓成空白"}
+  ]
+}
+```
+
+- `project.github` 為 `null` → `400 {"error":"bad_request","message":"project has no GitHub origin"}`。
+- `gh` 不存在 / 未登入 / 執行失敗 → `502 {"error":"upstream","message":"gh 未安裝或未登入…"}`。
+- project 不存在 → 404。
+
+#### `GET /api/projects/{id}/issues/{number}`
+
+單一 issue 的完整內容（`gh issue view <n> --repo … --json …`，不快取）：
+
+```json
+{"project_id":"…","repo":"owner/repo","issue":{"number":42,"title":"…","state":"OPEN","labels":["bug"],"url":"…",
+ "updated_at":"…","author":"…","body":"完整 markdown 內文"}}
+```
+
+錯誤同上（找不到 issue 也是 502，message 含 gh 的輸出）。
