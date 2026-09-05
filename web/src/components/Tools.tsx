@@ -128,13 +128,29 @@ export function relevantMissing(
   return all.filter((m) => m.host === focusHost && want.has(m.kind))
 }
 
+/** Stable snapshot key — `missingTools()` returns fresh objects each call. */
+function missingKeyOf(state: Parameters<typeof missingTools>[0]): string {
+  return missingTools(state)
+    .map((m) => `${m.host}:${m.kind}`)
+    .join('|')
+}
+
+function missingFromKey(key: string): { host: string; kind: BotKind }[] {
+  if (!key) return []
+  return key.split('|').map((part) => {
+    const i = part.lastIndexOf(':')
+    return { host: part.slice(0, i), kind: part.slice(i + 1) as BotKind }
+  })
+}
+
 /** Compact amber icon + count for the main header when the full bar is not shown. */
 export function ToolsHintIcon() {
-  const missing = useStore(useShallow((s) => missingTools(s)))
+  const missingKey = useStore((s) => missingKeyOf(s))
   const dismissed = useStore((s) => s.toolHintDismissed)
   const selectedBotId = useStore((s) => s.selectedBotId)
   const selectedProjectId = useStore((s) => s.selectedProjectId)
   const bots = useStore((s) => s.bots)
+  const missing = useMemo(() => missingFromKey(missingKey), [missingKey])
 
   const focus = useMemo(() => {
     const state = useStore.getState()
@@ -177,7 +193,8 @@ export function ToolsHint({
   focusHost?: string | null
   focusKinds?: BotKind[] | null
 }) {
-  const missingAll = useStore(useShallow((s) => missingTools(s)))
+  const missingKey = useStore((s) => missingKeyOf(s))
+  const missingAll = useMemo(() => missingFromKey(missingKey), [missingKey])
   const dismissed = useStore((s) => s.toolHintDismissed)
   const dismiss = useStore((s) => s.dismissToolHint)
   const [collapsed, setCollapsed] = useState(true)
