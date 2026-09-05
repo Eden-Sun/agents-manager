@@ -288,7 +288,7 @@ INFO remote hook spool replayed bot_id=… host="loop" replayed=1
 messages: assistant/hook 'SPOOLTEST'（external Turn），spool 檔已被 ssh 端 mv+rm 清掉
 ```
 
-**`m4p`（真遠端）**：`SessionStart` hook 經反向通道回填成功——
+**`m4p`（真遠端，完整往返）**：先是 `SessionStart` 回填——
 
 ```
 INFO hook received bot=m4p-claude provider=claude kind=Identity {
@@ -296,10 +296,25 @@ INFO hook received bot=m4p-claude provider=claude kind=Identity {
 run.native_session_id = 838bdf5e-5932-4ecf-b302-d3638a86ca16
 ```
 
-`Stop` hook 在 m4p 上**未驗到**：該機的 claude 與 codex 帳號都在用量上限
-（terminal 顯示 `Usage limit reached · continuing automatically at 1am`），
-prompt 走了終端備援（`source = terminal_fallback`，行為正確）。
-反向通道本身已由 `SessionStart` 與 `loop` 的完整往返證明可用。見「已知問題」。
+00:36 與 00:46 兩次 prompt 撞到該機 claude 的用量上限
+（terminal `Usage limit reached · continuing automatically at 1am`），
+Turn 走了終端備援（`completed_fallback` / `source = terminal_fallback`，行為正確）。
+額度於 01:00 恢復後重跑，`Stop` hook 也通了：
+
+```
+$ date +%T ; curl -sX POST … -d '{"text":"Reply with exactly PONG","client_request_id":"r3-m4p-3"}' …/prompt
+01:01:17  {"turn_id":"01M1S88W5DC34W405Y2MWYVCFZ","delivery":"ok"}
+
+INFO hook received bot=m4p-claude provider=claude kind=TurnComplete {
+  session_id: Some("838bdf5e-…"), turn_id: Some("d0d87669-…"), assistant: Some("PONG") }
+
+17:01:17 user      web   'Reply with exactly PONG'
+17:01:19 assistant hook  'PONG'          <- ✅ 真遠端的 Stop hook 經 -R 7788 反向通道回來
+17:01:21 assistant hook  'PONG'          <- claude 在 1am 自動續跑先前那回合產生的另一個
+                                            prompt_id，依 §6.7.5 建成 external Turn（正確）
+turns: [('external','completed','ok','3a970edc-…'), ('web','completed','ok','d0d87669-…'),
+        ('web','completed_fallback','ok',None), ('web','completed_fallback','ok',None)]
+```
 
 ### R4 — 本機不受影響 ✅
 
@@ -403,8 +418,16 @@ DELETE 仍被 bot 使用    409 {"error":"conflict","reason":"identity still use
 PATCH {"identity":null} 200 → 解除綁定（bot.identity = null）
 ```
 
+**遠端 host 的 home 展開**（前端 agent 在 `m4p` 上建了 identity=cc1 的 bot，順帶驗到）：
+
+```
+$ ssh m4p@… 'ps -E -o command= -p <claude pid>' | tr " " "\n" | grep CLAUDE_CONFIG_DIR
+CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany           <- ✅ 展開成「該 host」的 home
+```
+
 使用者的 `~/.config/agents-manager/config.toml` 已補上 `cc0` 與 `cc1` 兩個 identity。
-驗收用的 `am-cc1` probe bot 測完已刪除。
+驗收用的 `am-cc1` probe bot 與 `m4p-test` 專案（m4p-claude / m4p-codex）測完已刪除，
+`m4p:~/am-remote-test` 也已移除。
 
 ### identities 偏離規格 / 設計選擇
 
@@ -486,10 +509,10 @@ PATCH {"identity":null} 200 → 解除綁定（bot.identity = null）
 5. 測試期間 DB 內留有多筆測試用的 external / 假 hook Turn（`sess-M4*`、`ws-*` 等），
    不影響功能；要乾淨的話刪掉 `~/.config/agents-manager/agents-manager.sqlite3*` 重來即可。
 
-6. **`m4p` 上的 `Stop` hook 未驗到**：該機的 claude 與 codex 帳號都在用量上限
-   （`Usage limit reached · continuing automatically at 1am`），prompt 只走到終端備援。
-   反向通道本身已由 `m4p` 的 `SessionStart` hook 與 `loop` 的完整往返（含 spool 補入）證明。
-   額度恢復後重跑：`POST /api/bots/<m4p-claude>/prompt` 並確認 `source = "hook"`。
+6. **`m4p` 上的 codex `notify` hook 未驗到**：該機 codex 帳號在用量上限
+   （`You have 1 usage limit reset available`），prompt 只走到終端備援。
+   claude 端的 `SessionStart` 與 `Stop` 皆已在 m4p 實測通過，
+   codex 的 `-c notify=[<遠端 hook.sh>,…]` 注入格式與本機相同、僅未跑到真實 turn。
 7. **`kill -9` daemon 會殘留 ssh master**：SIGTERM / SIGINT 有 graceful shutdown（`ssh -O exit`），
    `kill -9` 沒有。殘留的 master 會在下次 `start_master` 被 `ssh -O exit` 清掉，不影響功能。
 8. **remote_path 之外的遠端環境不做偵測**：遠端沒有 herdr（或不在 `remote_path` 上）時，
