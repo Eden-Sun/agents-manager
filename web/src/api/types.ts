@@ -416,7 +416,10 @@ export interface PatchBotResult {
  * 各 kind 的常用模型別名（下拉選單用；使用者仍可用「自訂…」輸入任意字串）。
  * 空字串 = `（預設）`，送出時轉成 `null`。
  */
+/** grok 的靜態 effort（`GET /api/models` 失敗時退回）。 */
 export const EFFORT_OPTIONS = ['low', 'medium', 'high'] as const
+/** codex 的靜態 effort（API.md §12.2；`GET /api/models` 失敗時退回）。 */
+export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
 
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
@@ -451,8 +454,8 @@ export const FAST_TIER = 'priority'
 /** `GET /api/quota` 的一個視窗（5 小時 / 7 天）。 */
 export interface QuotaWindow {
   used_pct: number
-  /** ISO 時間 */
-  resets_at: string
+  /** ISO 時間；daemon 可能給 null */
+  resets_at: string | null
 }
 
 export interface KindQuota {

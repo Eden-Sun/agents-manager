@@ -610,8 +610,18 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async removeProject(projectId) {
+    const botIds = get().bots.filter((b) => b.project_id === projectId).map((b) => b.id)
     try {
       await api.deleteProject(projectId)
+      set((s) => {
+        let drafts = withoutKey(s.drafts, `group:${projectId}`)
+        for (const id of botIds) drafts = withoutKey(drafts, `bot:${id}`)
+        writeDrafts(drafts)
+        return {
+          drafts,
+          selectedProjectId: s.selectedProjectId === projectId ? null : s.selectedProjectId,
+        }
+      })
       await get().refreshState()
     } catch (e) {
       get().notify('error', errText(e))
