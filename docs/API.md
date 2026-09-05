@@ -870,7 +870,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 ```
 
 daemon 組一則安裝 prompt（依 kind 用官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、
-codex `npm i -g @openai/codex`、grok `curl -fsSL https://grok.com/install.sh | sh`（官方 CLI 安裝腳本）；接著要求 agent 確認
+codex `npm i -g @openai/codex`、grok `curl -fsSL https://x.ai/cli/install.sh | bash`（`~/.grok/README.md` 記載的官方安裝腳本）；接著要求 agent 確認
 `<kind> --version`、執行登入（claude 直接執行 `claude` / codex `codex login` / grok `grok login`）並把登入 URL 原樣印出），
 走既有的 §5 prompt 路徑送給 `via_bot_id`（`client_request_id` 由 daemon 產生）。
 
