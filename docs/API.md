@@ -885,3 +885,22 @@ codex `npm i -g @openai/codex`、grok `curl -fsSL https://x.ai/cli/install.sh | 
 - `kind` 不合法 → 400。
 - 登入是互動式的：agent 執行 `login` 後 pane 會變 `blocked`，使用者在 UI 的終端快照處理即可。
 - 安裝完成後前端可呼叫 `POST /api/hosts/{name}/tools/refresh` 更新 `tools`。
+
+### 12.8 bot 人設 `bot.persona`
+
+每個 bot 新增可選欄位 **`persona`**（`string | null`，預設 `null`）：一段附加到 agent system prompt 尾端的文字
+（使用者的「附加在 agent 的 md 最後」）。**不會**動到專案目錄裡共用的 `CLAUDE.md` / `AGENTS.md`。
+
+| 欄位 | TOML | DB | `GET state` | `POST bots` | `PATCH bots` |
+|---|---|---|---|---|---|
+| `persona` | `persona = """多行字串"""` | `bots.persona TEXT`（additive migration） | 每個 bot 物件都有（`string \| null`） | 可省 | 可改，`null` / `""` 清除；有 active Run 時列入 `needs_restart` |
+
+啟動注入（有值才注入；位置在 daemon 旗標之後、model / effort 之前；遠端主機同樣走 argv，不需額外檔案）：
+
+| kind | 注入 |
+|---|---|
+| `claude` | `--append-system-prompt "<persona>"` |
+| `grok` | `--rules "<persona>"`（`grok --help`：Extra rules to append to the system prompt） |
+| `codex` | `-c developer_instructions=<TOML 字串>`（daemon 以 TOML basic string 逃逸換行與引號；實測結果見 PROGRESS v4.0） |
+
+argv 順序：daemon 旗標 → persona → model → effort → fast → identity.args → bot.args。
