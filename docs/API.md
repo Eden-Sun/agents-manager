@@ -251,3 +251,15 @@ UI 標籤建議：
 4. 選定 bot 時 `GET /api/bots/{id}/messages?limit=100`。
 5. 送訊息用 `POST /api/bots/{id}/prompt`（自帶 `client_request_id`），user 氣泡會同時經
    `message_added` 推回來——請用 `message.id` 去重，不要用本地暫存氣泡重複顯示。
+
+
+## GET /api/fs/dirs?path=
+
+目錄瀏覽（新增 Project 的目錄選擇器用）。`path` 省略或空白時為家目錄；支援 `~` 前綴。只列子目錄，略過 `.` 開頭項目；symlink 指向目錄者也列出。
+
+```json
+{"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me",
+ "entries":[{"name":"foo","path":"/Users/me/project/foo","git":true}]}
+```
+
+錯誤：路徑不存在或不是目錄 → 400 `{"error":"bad_request","message":"..."}`。

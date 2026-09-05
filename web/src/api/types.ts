@@ -178,6 +178,19 @@ export interface NewProjectInput {
   label: string
 }
 
+export interface DirEntry {
+  name: string
+  path: string
+  git: boolean
+}
+
+export interface DirListing {
+  path: string
+  parent: string | null
+  home: string
+  entries: DirEntry[]
+}
+
 export interface NewBotInput {
   name: string
   kind: BotKind
