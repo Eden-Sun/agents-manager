@@ -9,6 +9,7 @@ mod assets;
 mod config;
 mod db;
 mod events;
+mod group;
 mod herdr;
 mod hook_cmd;
 mod hookrecv;
@@ -75,7 +76,15 @@ fn main() {
     }
 }
 
+/// `~/.config/agents-manager`, or `AM_DATA_DIR` when set (a second daemon instance for
+/// tests / verification; `hook_cmd.rs` honours the same variable for its spool).
 fn data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("AM_DATA_DIR") {
+        let d = PathBuf::from(d);
+        if !d.as_os_str().is_empty() {
+            return d;
+        }
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/agents-manager")
 }
 

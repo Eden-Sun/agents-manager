@@ -1,9 +1,10 @@
-# Agents Manager 規格書（v3.1）
+# Agents Manager 規格書（v3.5）
 
 > 修訂紀錄
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
+> - v3.5（2026-09-06）：新增 §13 專案群組聊天：一個 Project = 一個群組，`@<bot>` / `@all` fan-out 給成員 bot（每個收件 bot 各自 Turn，冪等鍵 `<crid>:<bot_id>`），`messages.group_id` 串起同一次發言；`GET /projects/:id/messages`（跨 bot 合併分頁）、`POST /projects/:id/chat`（略過不可送的 bot、不自動啟動、無 mention → 400 `no_mention`）；daemon 支援 `AM_DATA_DIR`。
 > - v3.3（2026-09-06）：§2 Bot 新增可選欄位 `model`（claude `--model`／codex `-m`，注入順序：daemon 旗標 → model → identity.args → bot.args）；§7.2 `PATCH /bots/:id` 擴充為 `{name?, model?, args?, autostart?, auto_approve?, inject_hooks?, identity?, env?}` 並回 `{needs_restart}`（只有改 `name` 需要無 active Run，其餘可線上改、重啟後生效）；新增 `POST /bots/:id/restart`（stop 再 start）；§6.4 DELETE Bot 補上「刪除本機／遠端 `~/.config/agents-manager/bots/<id>/`」；§6.3.7 stall watchdog 的系統訊息改為中性敘述並原樣引用畫面關鍵行。
 > - v3.4（2026-09-06）：§11.3.1 遠端 herdr 改由 launchd GUI 網域 LaunchAgent 啟動（Keychain 可用、KeepAlive）；附錄 E 補 Keychain 實測。
 > - v3.2（2026-09-06）：§6.3 新增 prompt-stall watchdog（送達後 12 秒內 agent 未離開 idle → Turn `failed` + 系統訊息，畫面含 Not logged in / usage limit 時給明確原因）；§4.3 備援擷取無回覆標記時改為清理後的畫面（去 banner / 狀態列，保留 `⎿` 工具結果行）。
@@ -260,6 +261,8 @@ label = "foo"
 | POST | `/bots/:id/keys` | `{keys:[...], expect_run_id}`；run 不符 409 |
 | POST | `/turns/:id/abandon` | in-flight / delivery=unknown → `failed` |
 | GET | `/bots/:id/messages?before=&limit=` | 倒序分頁 |
+| GET | `/projects/:id/messages?before=&limit=` | 群組時間軸：該 Project 所有 bot 的訊息合併，每則帶 `bot_id` / `bot_name`（§13） |
+| POST | `/projects/:id/chat` | `{text, client_request_id}` → `{group_id, sent, skipped}`；`@<bot>` / `@all` fan-out（§13） |
 | GET | `/bots/:id/terminal?source=visible|recent_unwrapped&lines=` | 快照（含 revision / truncated） |
 
 ### 7.3 WebSocket `/ws`
@@ -272,7 +275,7 @@ label = "foo"
 - 專案結構：`daemon/`（單一 crate，bin `agents-managerd`，子命令 `serve` / `hook`）、`web/`。
 
 ## 9. 非目標（第一階段）
-遠端存取、遠端 herdr、xterm.js 串流、bot 互相對話、diff 檢視、共用使用者 default session、transcript 回補、Codex notify chain、`toml_edit` 保註解、WS terminal 推送、未讀計數、Project 刪除時關 workspace。
+遠端存取、遠端 herdr、xterm.js 串流、bot 互相對話（使用者對多個 bot 的群組發言見 §13）、diff 檢視、共用使用者 default session、transcript 回補、Codex notify chain、`toml_edit` 保註解、WS terminal 推送、未讀計數（§13 群組視圖的前端記憶體計數除外）、Project 刪除時關 workspace。
 
 
 ## 11. 遠端主機（Remote hosts，v3.1）
@@ -346,6 +349,51 @@ label = "foo@m4p"
 | R4 | 本機不受影響 | 既有本機 bot 行為與 M1–M8 驗收相同 |
 | R5 | 開發測試 | `scripts/dev-sshd.sh` 以使用者權限起 127.0.0.1:2222 的 sshd（不改系統設定），以 `host = "loop"`（ssh 到 127.0.0.1:2222、session `am-loop`）跑 R1–R3 的自動化版本 |
 
+## 13. 專案群組聊天（Project group chat，v3.5）
+
+### 13.1 資料模型
+- **一個 Project 就是一個群組**，成員 = 該 Project 底下所有存活（`deleted_at IS NULL`）的 Bot。**不新增 conversation 型別**。
+- **群組時間軸** = 成員 Bot 的所有 messages 合併，依 `message.id`（ULID，時間有序）排序，每則附 `bot_id`、`bot_name`。
+- 群組發言以既有 §6.3 `prompt()` 送給每個目標 Bot：**每個目標 Bot 各建一個 Turn 與一則 user Message**，`client_request_id = <crid>:<bot_id>` 保持冪等。
+- `messages` 表新增欄位 **`group_id TEXT`**（additive migration，舊 DB 啟動時 `ALTER TABLE` 補上；部分索引 `messages_group`）。同一次群組發言產生的 user 副本與「未送達」system 註記共用同一個 `group_id`（= 該次發言的 `client_request_id`）；Bot 的回覆與其他訊息為 NULL。
+- 前端把同一 `group_id` 的 user 副本折疊成一則並列出目標（`→ @a, @b`）。
+
+### 13.2 mention 解析（後端為準，前端只做提示）
+- `@all` = 專案內所有 Bot（大小寫不敏感）。
+- `@<name>` 匹配專案內 Bot 名稱，大小寫不敏感；token 為 `[A-Za-z0-9_-]+`，因此 `@name,`、`@name:`、`(@name)` 的尾隨標點自然被切掉；`@name-` / `@name_` 若整個 token 沒對上會去掉尾隨的 `-`/`_` 再試。
+- `@` 必須在開頭或接在非字元（非字母 / 數字 / `_`）之後，`me@example.com` 不算 mention。
+- 沒有任何有效 mention → **400 `{error:"no_mention", message, bots:[{id,name,kind}]}`**。
+- 送給 agent 的文字**保留原文（含 `@`）**；目標依 Project 內 Bot 順序去重。
+
+### 13.3 不可送的 Bot（略過，不自動啟動）
+目標 Bot 沒有 active Run、Run 非 `running`、agent `blocked`、已有 in-flight Turn、或有 `delivery=unknown` 的 Turn → 該 Bot **略過**，列在回應的 `skipped:[{bot_id, bot_name, reason, detail}]`（`reason ∈ not_running | blocked | in_flight | unknown_delivery | conflict | not_found | bad_request | upstream`），並在該 Bot 的 conversation 寫一則 system Message（`group_id` 同），內容如「群組訊息未送達 g-codex：bot 未啟動（不會自動啟動）」。同一 `client_request_id` 重送不會再寫第二則。**絕不**自動啟動。
+
+### 13.4 API（契約細節見 `docs/API.md` §11）
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/api/projects/:id/messages?before=&limit=` | `{project_id, messages:[{...message, bot_id, bot_name}], has_more}`；跨 Bot 合併、以 message id 倒序分頁，回傳正序 |
+| POST | `/api/projects/:id/chat` | `{text, client_request_id}` → `{group_id, project_id, sent:[{bot_id, bot_name, turn_id, message_id, delivery}], skipped:[...]}` |
+
+WS：沿用 `message_added`（已含 `bot_id`；`message.group_id` 新增）與 `turn_updated`，前端依 Bot 的 `project_id` 歸入群組。
+
+### 13.5 前端
+- sidebar 每個 Project 標題可點（`⌗` 圖示）切到群組視圖；右側標題列顯示專案名、`群組` 標籤、host 徽章與**成員燈號列**（點成員可跳到該 Bot 的單獨對話）。
+- 時間軸：Bot 回覆 / system 訊息左上顯示 Bot 名稱徽章（依 kind 配色）；user 訊息折疊顯示 `→ @a, @b`；各 Bot 回覆沿用既有 Markdown 氣泡；每個仍在回覆中的成員各一個 typing 指示。
+- 輸入框：輸入 `@` 彈出成員與 `all` 的自動完成（↑ / ↓ 移動、Enter / Tab 選取、Esc 關閉）；沒有 mention 時送出鈕 disabled 並提示；有 mention 時列出收件者，並標示目前無法接收、將被略過的成員。
+- Composer 鎖定規則：**專案內至少一個 Bot 可送就允許**（單一 Bot 的 §6.3 規則逐一判斷）。
+
+### 13.6 通知
+群組視圖打開時不做額外通知；未打開時 sidebar 的 Project 標題顯示未讀計數（assistant / system 訊息，前端記憶體，開啟群組視圖即歸零）。
+
+### 13.7 驗收（2026-09-06，獨立 daemon `AM_DATA_DIR=/tmp/am-group`、port 7799、session `am-group`）
+| # | 內容 | 結果 |
+|---|---|---|
+| G1 | 兩個 Bot（g-claude / g-codex）start 後 `POST chat {"text":"@all Reply with exactly GROUP-OK"}` | `sent` 兩筆 `delivery=ok`；兩個 Bot 都回 `GROUP-OK`（`source=hook`）；`GET projects/:id/messages` 合併時間軸正確（user 副本各一、`group_id` 相同） |
+| G2 | `@g-claude 只有你…` | 只有 g-claude 收到（`sent` 一筆），回 `ONLY-CLAUDE` |
+| G3 | 停掉 g-codex 後 `@all` | `skipped:[{bot_id:g-codex, reason:"not_running"}]`，g-codex conversation 出現一則 `group_id` 相同的 system 訊息；同一 crid 重送回同一 `turn_id`、system 訊息不重複 |
+| G4 | 沒有 mention | `400 {error:"no_mention", bots:[…]}` |
+| G5 | `limit=3` / `before=<id>` | `has_more` 與游標分頁正確 |
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。
@@ -416,10 +464,12 @@ CREATE TABLE messages (
   content TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('web','hook','transcript','terminal_fallback','system')),
   incomplete INTEGER NOT NULL DEFAULT 0, terminal_snapshot TEXT,
+  group_id TEXT,                              -- §13：同一次群組發言的副本 / 註記共用；其他為 NULL
   created_at TEXT NOT NULL, updated_at TEXT
 );
 CREATE INDEX messages_conv_time ON messages(conversation_id, created_at);
 CREATE INDEX messages_turn ON messages(turn_id);
+CREATE INDEX messages_group ON messages(group_id) WHERE group_id IS NOT NULL;
 ```
 
 ## 附錄 D：實作里程碑

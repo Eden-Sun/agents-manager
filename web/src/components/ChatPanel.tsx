@@ -1,6 +1,7 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
 import { botLamp, composerState, projectHostName, useStore } from '../store/store'
@@ -31,7 +32,11 @@ function isLong(content: string): boolean {
   return content.length > LONG_CHARS || content.split('\n').length > LONG_LINES
 }
 
-function Bubble({ msg }: { msg: Message }) {
+/**
+ * One message. `from` (SPEC §13 group view) is rendered above the bubble: the bot badge on
+ * a reply, or the `→ @a, @b` recipient list on a folded user message.
+ */
+export function Bubble({ msg, from }: { msg: Message; from?: ReactNode }) {
   const fallback = msg.source === 'terminal_fallback'
   const long = isLong(msg.content)
   const [expanded, setExpanded] = useState(false)
@@ -39,6 +44,7 @@ function Bubble({ msg }: { msg: Message }) {
 
   return (
     <article className={`msg ${msg.role}`}>
+      {from ? <div className="msg-from">{from}</div> : null}
       <div className={`bubble${clamped ? ' clamped' : ''}${msg.role === 'assistant' && !fallback ? ' md' : ''}`}>
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>

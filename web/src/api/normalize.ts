@@ -15,6 +15,8 @@ import type {
   AppState,
   Bot,
   BotKind,
+  GroupMessage,
+  GroupMessagesPage,
   Host,
   Identity,
   Lamp,
@@ -243,8 +245,33 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     content: str(pick(v, 'content', 'text', 'body')),
     source: oneOf<MessageSource>(v.source, SOURCES, 'system'),
     incomplete: bool(v.incomplete),
+    group_id: optStr(pick(v, 'group_id', 'groupId')),
     created_at: str(v.created_at),
   }
+}
+
+/** SPEC §13.4 group timeline row: a message that must know its bot. */
+export function toGroupMessage(v: unknown): GroupMessage | null {
+  const m = toMessage(v)
+  if (!m || !isRec(v)) return null
+  const bot_id = str(pick(v, 'bot_id', 'botId'))
+  if (!bot_id) return null
+  return { ...m, bot_id, bot_name: str(pick(v, 'bot_name', 'botName'), bot_id) }
+}
+
+export function toGroupMessagesPage(raw: unknown, projectId: string): GroupMessagesPage {
+  const o = isRec(raw) ? raw : {}
+  const out: GroupMessage[] = []
+  for (const m of arr(pick(o, 'messages', 'items'))) {
+    const gm = toGroupMessage(m)
+    if (gm) out.push(gm)
+  }
+  return { project_id: str(pick(o, 'project_id'), projectId), messages: sortById(out), has_more: bool(pick(o, 'has_more')) }
+}
+
+/** Group timeline order = message id (ULID, time-ordered) — the daemon paginates by it. */
+export function sortById<T extends { id: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => a.id.localeCompare(b.id))
 }
 
 /** Sort ascending by created_at, falling back to id (ULIDs sort lexicographically by time). */

@@ -322,6 +322,32 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   )
 }
 
+/** SPEC §13.5/§13.6: the project title opens the group view; unread replies pile up on it. */
+function ProjectTitle({ projectId, label }: { projectId: string; label: string }) {
+  const selected = useStore((s) => s.selectedProjectId === projectId)
+  const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
+  const selectProject = useStore((s) => s.selectProject)
+  return (
+    <button
+      type="button"
+      className={`project-label-btn${selected ? ' selected' : ''}`}
+      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）`}
+      aria-pressed={selected}
+      onClick={() => selectProject(projectId)}
+    >
+      <span className="project-group-icon" aria-hidden="true">
+        ⌗
+      </span>
+      <span className="project-label">{label}</span>
+      {unread > 0 ? (
+        <span className="unread-badge" title={`${unread} 則未讀的群組回覆`}>
+          {unread > 99 ? '99+' : unread}
+        </span>
+      ) : null}
+    </button>
+  )
+}
+
 export function Sidebar() {
   const projects = useStore((s) => s.projects)
   const bots = useStore((s) => s.bots)
@@ -355,7 +381,7 @@ export function Sidebar() {
           return (
             <section className="project" key={p.id}>
               <header className="project-head">
-                <span className="project-label">{p.label}</span>
+                <ProjectTitle projectId={p.id} label={p.label} />
                 <HostBadge host={p.host} connected={hostUp(p.host)} />
                 <span className="project-path" title={p.path}>
                   {shortPath(p.path)}

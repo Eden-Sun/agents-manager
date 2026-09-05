@@ -160,6 +160,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
       "source": "web" | "hook" | "transcript" | "terminal_fallback" | "system",
       "incomplete": 0,
       "terminal_snapshot": null,
+      "group_id": null,
       "created_at": "2026-09-05T15:31:00.000Z",
       "updated_at": null
     }
@@ -586,3 +587,100 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 | type | data |
 |---|---|
 | `bot_changed` | `{"bot_id":"…"}` — PATCH / DELETE / restart 都推這個，收到後重新 `GET /api/state` |
+
+
+---
+
+## 11. 專案群組聊天（SPEC §13，v3.5，2026-09-06 新增）
+
+一個 Project 就是一個群組。使用者在群組裡輸入 `@<bot 名稱>` 或 `@all`，daemon 把同一段文字
+（保留原文，含 `@`）以 §5 的 prompt 路徑送給每個目標 bot；各 bot 的回覆回到同一條合併時間軸。
+**沒有新的 conversation 型別**，也不會自動啟動 bot。
+
+### 11.1 `messages.group_id`
+
+每個 message 物件多一個欄位 **`group_id`**（`string | null`）：同一次 `POST /projects/:id/chat`
+產生的每個收件 bot 的 user 副本、以及「未送達」的 system 註記共用同一個 `group_id`
+（= 該次的 `client_request_id`）。bot 的回覆與其他訊息為 `null`。
+`GET /bots/:id/messages` 與 WS `message_added` 的 message 物件都帶這個欄位。
+
+### 11.2 `GET /api/projects/{id}/messages?before=<message_id>&limit=100`
+
+Project 底下**所有存活 bot** 的訊息合併，以 `message.id`（ULID，時間有序）倒序分頁，
+回傳時已**正序**排好。`limit` 1–500（預設 100）。Project 不存在 → 404。
+
+```json
+{
+  "project_id": "01M1...",
+  "messages": [
+    {
+      "id": "01M1...", "conversation_id": "01M1...", "turn_id": "01M1...",
+      "role": "user", "content": "@all Reply with exactly GROUP-OK",
+      "source": "web", "incomplete": 0, "terminal_snapshot": null,
+      "group_id": "c-group-1",
+      "created_at": "2026-09-05T18:12:30.121Z", "updated_at": null,
+      "bot_id": "01M1...", "bot_name": "g-claude"
+    },
+    { "...": "同一則 user 訊息在 g-codex 上的副本（group_id 相同）", "bot_name": "g-codex" },
+    { "role": "assistant", "content": "GROUP-OK", "source": "hook", "group_id": null, "bot_name": "g-claude", "...": "…" }
+  ],
+  "has_more": false
+}
+```
+
+前端把同一 `group_id` 的 user 訊息折疊成一則並列出目標 bot。
+
+### 11.3 `POST /api/projects/{id}/chat`
+
+```json
+{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "<前端產生的唯一字串>" }
+```
+
+- **mention 規則（daemon 為準）**：`@all` = 專案內所有 bot；`@<name>` 比對專案內 bot 名稱，
+  大小寫不敏感，token 為 `[A-Za-z0-9_-]+`（`@name,` / `@name:` 的尾隨標點會被切掉；
+  `@name-` / `@name_` 整個對不上時去掉尾隨 `-` `_` 再試）；`@` 必須在開頭或接在非字元後
+  （`me@example.com` 不算）。目標依專案內 bot 順序去重。
+- `client_request_id` 同時是 **`group_id`**；每個收件 bot 的 prompt 用 `<crid>:<bot_id>` 做冪等鍵，
+  所以同一 id 重送會回同一組 `turn_id`，也不會再寫第二則「未送達」註記。
+
+成功 `200`（部分 bot 略過仍是 200）：
+
+```json
+{
+  "group_id": "c-group-4",
+  "project_id": "01M1...",
+  "sent": [
+    { "bot_id": "01M1...", "bot_name": "g-claude", "turn_id": "01M1...", "message_id": "01M1...", "delivery": "ok" }
+  ],
+  "skipped": [
+    { "bot_id": "01M1...", "bot_name": "g-codex", "reason": "not_running", "detail": "bot has no active run" }
+  ]
+}
+```
+
+- `sent[].delivery` 意義同 §5（`ok` / `unknown` / `failed`）。
+- `skipped[].reason`：`not_running`（無 active Run 或 Run 非 running）、`blocked`、`in_flight`、
+  `unknown_delivery`、`conflict`、`not_found`、`bad_request`、`upstream`；`detail` 為人類可讀原因
+  （即單一 bot prompt 會回的 409 `reason`）。每個略過的 bot 的 conversation 會多一則
+  `role=system`、`group_id` 相同的訊息（例：「群組訊息未送達 g-codex：bot 未啟動（不會自動啟動）」），
+  並經 `message_added` 推送。**不會自動啟動 bot。**
+
+錯誤：
+
+| 狀態碼 | body |
+|---|---|
+| 400 | `{"error":"no_mention","message":"…","bots":[{"id":"…","name":"g-claude","kind":"claude"}]}` — 沒有任何有效 mention；`bots` 列出可用名稱 |
+| 400 | `{"error":"bad_request","message":"text must not be empty"}` |
+| 404 | `{"error":"not_found","what":"project"}` |
+
+### 11.4 WebSocket
+
+沒有新事件。每個收件 bot 各自推 `message_added`（user 副本，帶 `group_id`）與 `turn_updated`；
+回覆到達時推該 bot 的 `message_added`。前端依 `bot_id → project_id` 歸入群組時間軸。
+
+### 11.5 daemon 的 `AM_DATA_DIR`
+
+`agents-managerd serve` 讀環境變數 `AM_DATA_DIR` 覆蓋資料目錄（預設 `~/.config/agents-manager`；
+`hook` 子命令早已支援同名變數）。用途：在不動正式 daemon 的情況下起第二個實例驗證，例如
+`AM_DATA_DIR=/tmp/am-group agents-managerd serve --config /tmp/am-group/config.toml`
+（config 用另一個 `listen` port 與 `herdr_session`）。

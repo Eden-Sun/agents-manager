@@ -13,6 +13,7 @@ import {
   hostArray,
   lampOf,
   optStr,
+  sortById,
   sortByTime,
   str,
   toMessage,
@@ -24,7 +25,7 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, Host, HostResult, Identity, Lamp, Message, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, Project, Run, TerminalSource, Turn } from '../api/types'
+import type { Bot, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, Project, Run, TerminalSource, Turn } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -60,6 +61,18 @@ interface StoreState {
   messages: Record<string, Message[]>
   loadedBots: Record<string, boolean>
 
+  /**
+   * SPEC §13 group view. Non-null = the right pane shows this project's group timeline
+   * instead of `selectedBotId`'s conversation (the bot selection is kept for when the
+   * user switches back).
+   */
+  selectedProjectId: string | null
+  /** project_id → merged member timeline (`GET /projects/:id/messages`) plus WS appends. */
+  groupMessages: Record<string, GroupMessage[]>
+  loadedProjects: Record<string, boolean>
+  /** §13.6: replies that arrived while that project's group view was not open (memory only). */
+  groupUnread: Record<string, number>
+
   selectedBotId: string | null
   rightTab: RightTab
   /** 開著「Bot 設定」面板的 bot id（null = 面板關閉）。 */
@@ -70,6 +83,11 @@ interface StoreState {
   bootstrap: () => Promise<void>
   refreshState: () => Promise<void>
   selectBot: (botId: string | null) => void
+  /** Open the §13 group view of a project (null = back to the selected bot). */
+  selectProject: (projectId: string | null) => void
+  loadGroupMessages: (projectId: string) => Promise<void>
+  /** `POST /projects/:id/chat`; null = failed (reason already shown as a notice). */
+  sendGroupChat: (projectId: string, text: string) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
   openSettings: (botId: string) => void
   closeSettings: () => void
@@ -122,6 +140,11 @@ export const useStore = create<StoreState>((set, get) => ({
   messages: {},
   loadedBots: {},
 
+  selectedProjectId: null,
+  groupMessages: {},
+  loadedProjects: {},
+  groupUnread: {},
+
   selectedBotId: null,
   rightTab: 'chat',
   settingsBotId: null,
@@ -164,6 +187,8 @@ export const useStore = create<StoreState>((set, get) => ({
         s.selectedBotId && st.bots.some((b) => b.id === s.selectedBotId)
           ? s.selectedBotId
           : (st.bots[0]?.id ?? null)
+      const selectedProject =
+        s.selectedProjectId && st.projects.some((p) => p.id === s.selectedProjectId) ? s.selectedProjectId : null
       return {
         hosts: st.hosts,
         identities: st.identities,
@@ -174,15 +199,83 @@ export const useStore = create<StoreState>((set, get) => ({
         connected: st.connected,
         lastSeq: Math.max(s.lastSeq, st.daemon_seq),
         selectedBotId: selected,
+        selectedProjectId: selectedProject,
       }
     })
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
+    const proj = get().selectedProjectId
+    if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
   },
 
   selectBot: (botId) => {
-    set({ selectedBotId: botId, rightTab: 'chat', settingsBotId: null })
+    set({ selectedBotId: botId, selectedProjectId: null, rightTab: 'chat', settingsBotId: null })
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
+  },
+
+  selectProject: (projectId) => {
+    set((s) => ({
+      selectedProjectId: projectId,
+      rightTab: 'chat',
+      settingsBotId: null,
+      groupUnread: projectId ? { ...s.groupUnread, [projectId]: 0 } : s.groupUnread,
+    }))
+    if (projectId) void get().loadGroupMessages(projectId)
+  },
+
+  async loadGroupMessages(projectId) {
+    try {
+      const page = await api.fetchProjectMessages(projectId)
+      set((s) => ({
+        groupMessages: { ...s.groupMessages, [projectId]: page.messages },
+        loadedProjects: { ...s.loadedProjects, [projectId]: true },
+      }))
+    } catch (e) {
+      get().notify('error', `載入群組訊息失敗：${errText(e)}`)
+    }
+  },
+
+  async sendGroupChat(projectId, text) {
+    const crid = api.newClientRequestId()
+    try {
+      const res = await api.sendGroupChat(projectId, text, crid)
+      // Lock each recipient's composer state right away (same as `sendPrompt`); the user
+      // copies and turns arrive over the socket.
+      set((s) => {
+        const turns = { ...s.turns }
+        for (const x of res.sent) {
+          if (x.delivery === 'failed' || !x.turn_id) continue
+          turns[x.bot_id] = {
+            ...(turns[x.bot_id] ?? {}),
+            [x.turn_id]: {
+              ...(turns[x.bot_id]?.[x.turn_id] ?? {
+                id: x.turn_id,
+                conversation_id: '',
+                run_id: s.runs[x.bot_id]?.id ?? null,
+                bot_id: x.bot_id,
+                origin: 'web' as const,
+                status: 'in_flight' as const,
+                client_request_id: `${crid}:${x.bot_id}`,
+                created_at: new Date().toISOString(),
+                completed_at: null,
+              }),
+              delivery: x.delivery,
+            },
+          }
+        }
+        return { turns }
+      })
+      if (res.sent.some((x) => x.delivery === 'unknown')) {
+        get().notify('error', '部分訊息送達狀態未知（delivery=unknown），該 bot 需先放棄該回合才能再送。')
+      }
+      if (res.skipped.length > 0) {
+        get().notify('info', `未送達：${res.skipped.map((x) => `@${x.bot_name}（${x.detail || x.reason}）`).join('、')}`)
+      }
+      return res
+    } catch (e) {
+      get().notify('error', errText(e))
+      return null
+    }
   },
 
   // 切分頁等於離開設定面板（面板是蓋在對話/終端上的）。
@@ -190,7 +283,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   /** 設定面板永遠對著「目前選取的 bot」，所以開啟時順便切過去。 */
   openSettings: (botId) => {
-    set({ selectedBotId: botId, rightTab: 'chat', settingsBotId: botId })
+    set({ selectedBotId: botId, selectedProjectId: null, rightTab: 'chat', settingsBotId: botId })
     if (!get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
@@ -484,6 +577,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           await get().refreshState()
           const sel = get().selectedBotId
           if (sel) await get().loadMessages(sel)
+          const proj = get().selectedProjectId
+          if (proj) await get().loadGroupMessages(proj)
         } finally {
           resyncPending = false
         }
@@ -547,9 +642,24 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         return
       }
       set((s) => {
+        const patch: Partial<StoreState> = {}
         const existing = s.messages[botId] ?? []
-        if (existing.some((m) => m.id === msg.id)) return {}
-        return { messages: { ...s.messages, [botId]: sortByTime([...existing, msg]) } }
+        if (!existing.some((m) => m.id === msg.id)) {
+          patch.messages = { ...s.messages, [botId]: sortByTime([...existing, msg]) }
+        }
+        // §13: route the same frame into its project's group timeline + unread counter.
+        const bot = s.bots.find((b) => b.id === botId)
+        if (bot) {
+          const pid = bot.project_id
+          const group = s.groupMessages[pid]
+          if (group && !group.some((m) => m.id === msg.id)) {
+            patch.groupMessages = { ...s.groupMessages, [pid]: sortById([...group, { ...msg, bot_id: botId, bot_name: bot.name }]) }
+          }
+          if (msg.role !== 'user' && s.selectedProjectId !== pid) {
+            patch.groupUnread = { ...s.groupUnread, [pid]: (s.groupUnread[pid] ?? 0) + 1 }
+          }
+        }
+        return patch
       })
       return
     }
@@ -670,4 +780,24 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, reason: '上一則訊息仍在進行中，等待回覆或按「中斷」', inFlightTurnId: inflight.id }
   }
   return { disabled: false, reason: '', inFlightTurnId: null, unknownTurnId: null }
+}
+
+/** SPEC §13.5 composer rule: the group composer is open as long as *one* member can be sent to. */
+export interface GroupComposerState {
+  disabled: boolean
+  reason: string
+  /** member bots that would accept a prompt right now */
+  sendable: string[]
+}
+
+export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
+  if (!projectId) return { disabled: true, reason: '', sendable: [] }
+  const members = state.bots.filter((b) => b.project_id === projectId)
+  if (members.length === 0) return { disabled: true, reason: '這個 Project 還沒有 Bot', sendable: [] }
+  const sendable = members.filter((b) => !composerState(state, b.id).disabled).map((b) => b.id)
+  if (sendable.length === 0) {
+    const first = composerState(state, members[0].id).reason
+    return { disabled: true, reason: `專案內沒有可送訊息的 Bot（${first}）`, sendable }
+  }
+  return { disabled: false, reason: '', sendable }
 }
