@@ -707,3 +707,12 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 - `bot.agent_name`（唯讀）= `<project slug>-<bot id 尾 6 碼>`，例如 `agents-manager-rbmyf7`。
 - `bot.effort: "low"|"medium"|"high"|null`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；只有 grok 會注入 `--reasoning-effort`；其他值 400）。
 - `@mention` 解析（daemon 與前端一致）：token 為連續非空白、非標點字元，支援 `@小幫手，看一下`；送給 bot 的文字會去掉 mention 與其後的 `, : ; ，：；、`。
+
+
+## WS `turn_progress`（v3.9，即時輸出）
+
+回合 `in_flight` 且 `delivery=ok` 時，daemon 每 0.7 秒讀一次 pane（`recent_unwrapped`），把 prompt 回音之後、去掉 TUI 雜訊與回覆標記的文字推成：
+```json
+{"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","revision":42}}
+```
+只在文字變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。

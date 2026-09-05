@@ -49,6 +49,8 @@ pub struct App {
     pub fallback_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> prompt-stall watchdog (delivered but the agent never went `working`)
     pub stall_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// run_id -> live-progress poller (streams the partial reply while a turn is in flight)
+    pub progress_pollers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl App {
@@ -82,6 +84,7 @@ impl App {
             global_watchers: Mutex::new(HashMap::new()),
             fallback_timers: Mutex::new(HashMap::new()),
             stall_timers: Mutex::new(HashMap::new()),
+            progress_pollers: Mutex::new(HashMap::new()),
         })
     }
 
