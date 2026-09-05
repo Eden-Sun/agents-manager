@@ -318,13 +318,36 @@ __amMock.hostUp('m4p')    // 恢復
 | `68-host-down-panel.png` | 主機面板顯示錯誤字串與「重連」 |
 | `69-host-reconnected.png` | 重連後燈號恢復、composer 解鎖 |
 | `6a-dark.png` / `6b-narrow-900.png` | 深色主題、900 寬 |
-| `6c-real-daemon-no-hosts.png` | 對**現行（尚未實作 §11 的）daemon** 的相容性檢查：無徽章、本機燈號不變、主機面板為空狀態，console 無錯誤（`scripts/demo-hosts-real.mjs`） |
+| `6c-real-daemon-no-hosts.png` | 相容性檢查：對**還沒有 `hosts` 欄位的 daemon**，無徽章、本機燈號不變、主機面板為空狀態，console 無錯誤 |
+
+### 驗收紀錄（2026-09-06，真後端 `agents-managerd serve` @ 127.0.0.1:7788）
+
+daemon 端 §11 上線後用 `node scripts/demo-hosts-real.mjs`（前端 `npx vite --port 5198`，proxy 到
+7788）走過。**刻意不建立 Project、不 start 遠端 bot**（後端 agent 正在同一個 daemon 上驗收 R1–R3）。
+
+| 檔案 | 內容 |
+|---|---|
+| `6c-real-host-connected.png` | 從 UI 新增主機 `m4p`（`m4p@100.112.229.82`）→ 寫入成功、連線失敗，紅框顯示 daemon 回的錯誤字串；主機列出現 `loop`（後端 R5 的測試 sshd）與 `m4p`，disclosure 顯示「本機 + 2 ・ 2 個未連線」 |
+| `6d-real-remote-dirpicker.png` | 新增 Project 表單選 `m4p` → 選擇器標示 `@m4p 遠端目錄`，列出**真實的** `/Users/m4p`（Applications / Desktop / Documents / go / project …），確認 `GET /api/fs/dirs?host=` 端到端可用 |
+| `6e-real-remote-dirpicker-sub.png` | 進入子目錄 |
+
+這一輪在真後端上發現兩個 **daemon 端**問題（已回報，不在前端範圍）：
+
+1. `POST /api/hosts` 與 `reconnect` 一律回 `connected:false`，`error` 為
+   `ssh <target> failed (exit status: 1): zsh:5: bad output format specification`
+   ——遠端 sh 片段被遠端登入 shell（zsh）解讀，`loop` 與 `m4p` 都一樣。
+2. `GET /api/fs/dirs?host=` 的第一筆是名稱為 `'` 的假目錄（進去會變成 `/Users/m4p/'`），
+   遠端列目錄的 sh 片段有引號外漏。另外 host `connected = false` 時這個端點仍會成功回傳，
+   與 API.md 寫的「host 斷線 → 502」不一致。
+
+前端對兩者的呈現都正確（錯誤字串顯示在主機列與通知、目錄照回傳內容渲染）。
 
 ### 已知問題（遠端主機）
 
-1. **尚未對真後端的 `/api/hosts` 實跑**。現行 daemon 還沒有 `hosts` 欄位（`GET /api/state`
-   回傳無 `hosts`），所以只做了相容性檢查；等 daemon 端 §11 完成後要再跑一次
-   「新增 m4p → 遠端目錄選 `/Users/m4p` 下的目錄」。
+1. **真後端上還沒走完「建立遠端 Project → start 遠端 bot → 對話」**。上面那一輪只做到
+   新增主機與遠端目錄瀏覽（後端 agent 正在同一個 daemon 上驗收 R1–R3，避免干擾）；
+   等 daemon 的 ssh 片段修好、host 能連上之後要再跑一次完整流程。
+   目前 `config.toml` 裡留了一個由 UI 新增的 host `m4p`（連線失敗狀態）。
 2. **`POST /api/hosts` 最長約 20 秒**才回應（ensure session + ssh master + ping），期間表單
    只顯示「連線中…」，沒有進度或取消。
 3. **host 設定不能編輯**：改 ssh 目標要重新送一次同名的「新增主機」（後端視為更新），
