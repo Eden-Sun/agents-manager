@@ -78,13 +78,39 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         let lock = app.bot_lock(&bot.id).await;
         let _g = lock.lock().await;
         let active = db::active_run(&app.db, &bot.id).await?;
+        // Names this bot may be running under: the run's recorded name, the current
+        // `<project>-<bot>` scheme, and the legacy bare bot name (runs from before v3.5).
+        let computed = db::agent_name_for_bot(&app.db, &bot).await?;
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(r) = &active {
+            if let Some(n) = r.agent_name.clone().filter(|s| !s.is_empty()) {
+                candidates.push(n);
+            }
+        }
+        for n in [computed.clone(), bot.name.clone()] {
+            if !candidates.contains(&n) {
+                candidates.push(n);
+            }
+        }
+        let mut found: Option<crate::herdr::AgentInfo> = None;
+        let mut found_name: Option<String> = None;
+        for n in &candidates {
+            if let Some(a) = by_name.get(n) {
+                found = Some((*a).clone());
+                found_name = Some(n.clone());
+                break;
+            }
+        }
         // The snapshot above was taken *before* this bot's lock was acquired, so a Run that
         // started in the meantime would look dead. Re-check that one agent under the lock.
-        let mut found: Option<crate::herdr::AgentInfo> = by_name.get(&bot.name).map(|a| (*a).clone());
         if found.is_none() && active.is_some() {
-            found = client.agent_get(&bot.name).await.ok().flatten();
-            if found.is_some() {
-                tracing::debug!(host, bot = %bot.name, "reconcile: agent appeared after the snapshot");
+            for n in &candidates {
+                if let Some(a) = client.agent_get(n).await.ok().flatten() {
+                    tracing::debug!(host, bot = %bot.name, agent = %n, "reconcile: agent appeared after the snapshot");
+                    found = Some(a);
+                    found_name = Some(n.clone());
+                    break;
+                }
             }
         }
         match (active, found.as_ref()) {
@@ -92,10 +118,11 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 let agent: &crate::herdr::AgentInfo = agent;
                 // Still alive: refresh pane_id (pane move changes it) and status.
                 let status = agent.agent_status.normalized().as_str().to_string();
-                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, agent_status=?, state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
+                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
                     .bind(&agent.pane_id)
                     .bind(&agent.workspace_id)
                     .bind(&status)
+                    .bind(&found_name)
                     .bind(&run.id)
                     .execute(&app.db)
                     .await?;
@@ -115,14 +142,15 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 let run_id = db::ulid();
                 let status = agent.agent_status.normalized().as_str().to_string();
                 sqlx::query(
-                    "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, adopted, started_at)
-                     VALUES (?,?,'running',?,?,?,1,?)",
+                    "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, adopted, agent_name, started_at)
+                     VALUES (?,?,'running',?,?,?,1,?,?)",
                 )
                 .bind(&run_id)
                 .bind(&bot.id)
                 .bind(&status)
                 .bind(&agent.workspace_id)
                 .bind(&agent.pane_id)
+                .bind(&found_name)
                 .bind(db::now())
                 .execute(&app.db)
                 .await?;

@@ -586,3 +586,8 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 | type | data |
 |---|---|
 | `bot_changed` | `{"bot_id":"…"}` — PATCH / DELETE / restart 都推這個，收到後重新 `GET /api/state` |
+
+
+## bot.agent_name（v3.5）
+
+`GET /api/state` 的 bot 物件新增唯讀欄位 `agent_name`：herdr 內的 agent 名稱。有 active Run 時為該 run 實際啟動的名稱；否則為下次啟動會用的 `<project label slug>-<bot name>`（例如 `agents-manager-am-codex`）。bot `name` 的唯一性改為**專案內**唯一（同名 bot 可存在於不同專案）；`POST /projects/:id/bots` 與 `PATCH /bots/:id` 的重名 409 訊息改為 `bot name already in use in this project`。
