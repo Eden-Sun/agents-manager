@@ -114,3 +114,48 @@ hook 子命令本身由 hook agent 負責（16/16 PASS，見 `docs/HOOK.md`）�
   （`-c notify=[…]`）與 payload 解析已由 hook agent 以手動 argv JSON 驗過。額度恢復後可補跑。
   副作用：這次 codex prompt 反而完整驗證了 §4.3 終端備援（見 M5）。
 
+---
+
+## M5 — blocked + keys + 終端備援
+
+日期：2026-09-05
+
+**blocked / terminal / keys**（用新專案 `/tmp/am-blocked-test` 觸發 claude 的 trust 提示；
+codex 因額度用盡無法用「需確認的指令」觸發，改用等價的 blocked 情境）：
+
+1. `POST /api/projects {"path":"/tmp/am-blocked-test"}` → 200；重複 → `409`；
+   `POST /api/projects/{id}/bots {"name":"Bad Name"}` → `400` ✅
+2. `POST /api/bots/{bt-claude}/start` → `lamp: "blocked"` ✅
+3. `GET /api/bots/{id}/terminal?source=visible` → `agent_status: blocked`，內容為
+   `Quick safety check: Is this a project you created or one you trust? … ❯ No, exit / Yes, I trust this folder` ✅
+4. blocked 期間 `POST prompt` → `409 {"reason":"agent is blocked; answer the prompt first"}` ✅
+5. `POST /api/bots/{id}/keys {"keys":["down","enter"]}` → 6 秒後 `lamp: "idle"` ✅
+6. `POST keys {"expect_run_id":"NOPE"}` → `409` ✅
+7. `DELETE /api/projects/{id}`（bot 仍在跑）→ `409`；`DELETE /api/bots/{id}` → 200（先 stop）；
+   `DELETE /api/projects/{id}` → 200；DB 中 `bt-claude.deleted_at` 非 NULL（歷史保留）✅
+
+**終端備援**（把 am-claude 的 `inject_hooks` 改成 false，等於停用 hook 注入）：
+
+1. `PATCH /api/bots/{id} {"inject_hooks":false}` → 200 → stop / start
+2. `POST prompt {"text":"Reply with exactly SECOND-FALLBACK"}` → `delivery: ok`
+3. 約 5 秒後（`working→idle` 起算）log `terminal fallback engaged turn=…`，
+   Turn 變 `completed_fallback`，訊息
+   `('assistant','terminal_fallback', incomplete=1, 'SECOND-FALLBACK')` ✅
+4. **晚到的 hook 不覆蓋**：事後補送 `last_assistant_message="LATE-HOOK-SHOULD-BE-DROPPED"` 的 Stop
+   → `LATE msg count: 0`，log `late hook dropped; turn already completed via terminal fallback`，
+   該 Turn 只被寫入 native ids 作為去重標記 ✅
+5. 另有一次非預期但真實的備援驗證：codex 因額度用盡沒有 notify，5 秒後同樣走到 `terminal_fallback`。
+
+備註：第一版抽取會把狀態列（`✻ Crunched for 9s`）與分隔線一起收進來，已修正為遇到
+box-drawing / 水平線即停、略過 spinner 行、去尾端空行；第二次驗證得到乾淨的 `SECOND-FALLBACK`。
+
+## M6 — WebSocket
+
+日期：2026-09-05（`scripts` 外的臨時 node 腳本，見 PROGRESS 內容）
+
+1. 單客戶端 `ws://127.0.0.1:7788/ws?token=…`：觸發 hook 後依序收到
+   `seq=9 bot_status`、`seq=10 message_added`、`seq=11 turn_updated` ✅
+2. 斷線後帶 `?since=8` 重連 → 補齊 seq 9/10/11 三則 ✅
+3. 帶 `?since=999999`（seq 倒退，模擬 daemon 重啟）→ 立即收到 `{"type":"resync","seq":11}` ✅
+4. `?token=nope` → 連線被拒（401）✅
+

@@ -670,12 +670,23 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     for line in &lines[start..] {
         let t = line.trim_end();
-        // Stop at the input box / status bar drawn below the transcript.
-        if t.trim_start().starts_with('╭') || t.trim_start().starts_with('│') || t.trim_start().starts_with('╰') {
+        let s = t.trim_start();
+        // Stop at the input box / horizontal rule drawn below the transcript.
+        if s.starts_with('╭') || s.starts_with('│') || s.starts_with('╰') || s.starts_with('▔') {
             break;
         }
-        let cleaned = t.trim_start().strip_prefix(marker).unwrap_or(t).to_string();
+        if !s.is_empty() && s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_') {
+            break;
+        }
+        // Skip the spinner / status line ("✻ Crunched for 9s · done 11:35 PM").
+        if s.starts_with('✻') || s.starts_with('✽') || s.starts_with('✶') || s.starts_with('·') {
+            continue;
+        }
+        let cleaned = s.strip_prefix(marker).unwrap_or(t).to_string();
         out.push(cleaned);
+    }
+    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
     }
     let joined = out.join("\n").trim().to_string();
     if joined.is_empty() {
