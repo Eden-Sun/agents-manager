@@ -171,6 +171,105 @@ case "$OUT" in 2*) ;; 4*) printf '%s rejected %s\n' "$NOW" "$OUT" >> "$DIR/hook.
 exit 0
 "#;
 
+// ---------------------------------------------------------------- grok (SPEC §12)
+//
+// grok 1.0.13 has no per-launch hook flag (`--settings` / `--hooks` / `--plugin-dir` are all
+// rejected by the TUI), so the daemon installs ONE global, always-trusted hook file
+// `<GROK_HOME>/hooks/agents-manager.json` whose Stop / SessionStart entries run a static
+// dispatcher `~/.config/agents-manager/grok-hook.sh`. The dispatcher reads the pane env
+// (`AM_BOT_ID`, `AM_HOOK_TOKEN`, `AM_PORT`) to decide which bot to report to, and exits 0
+// immediately when those are unset, so the user's own grok sessions are unaffected.
+
+/// File name inside `<GROK_HOME>/hooks/`.
+pub const GROK_HOOKS_FILE: &str = "agents-manager.json";
+/// Dispatcher file name inside `~/.config/agents-manager/`.
+pub const GROK_DISPATCH_SH: &str = "grok-hook.sh";
+
+/// Dispatcher installed on remote hosts: forwards to the per-bot `hook.sh` (SPEC §11.4).
+pub const REMOTE_GROK_DISPATCH_SH: &str = r#"#!/bin/sh
+# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.
+[ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
+H="$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh"
+[ -x "$H" ] || exit 0
+exec "$H" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN" "${AM_PORT:-7788}"
+"#;
+
+/// Local dispatcher: runs the daemon binary's `hook grok` subcommand.
+fn local_grok_dispatch_sh(exe: &str) -> String {
+    format!(
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\nexec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\"\n",
+        exe = sh_quote(exe)
+    )
+}
+
+/// The hooks file (grok's JSON hook-file schema, same shape as Claude's `hooks` object).
+fn grok_hooks_json(dispatcher: &str) -> String {
+    let entry = json!([{"hooks": [{"type": "command", "command": dispatcher, "timeout": 5}]}]);
+    serde_json::to_string_pretty(&json!({"hooks": {"SessionStart": entry, "Stop": entry}})).unwrap_or_default()
+}
+
+/// `GROK_HOME` from the resolved pane env, else `<home>/.grok`.
+fn grok_home(env: &Value, home: &str) -> String {
+    env.get("GROK_HOME")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| format!("{home}/.grok"))
+}
+
+/// Write only when the content differs, so grok's hook loader does not see spurious changes.
+fn write_if_changed(path: &std::path::Path, content: &str, executable: bool) -> anyhow::Result<bool> {
+    if std::fs::read_to_string(path).map(|cur| cur == content).unwrap_or(false) {
+        return Ok(false);
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(path, content)?;
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(true)
+}
+
+/// Local grok bot: install the dispatcher + the global hooks file. Idempotent.
+fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?.to_string_lossy().to_string();
+    let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
+    let exe = app.exe.to_string_lossy().to_string();
+    let a = write_if_changed(&dispatcher, &local_grok_dispatch_sh(&exe), true)?;
+    let hooks_path = std::path::PathBuf::from(grok_home(env, &home)).join("hooks").join(GROK_HOOKS_FILE);
+    let b = write_if_changed(&hooks_path, &grok_hooks_json(&dispatcher.to_string_lossy()), false)?;
+    if a || b {
+        tracing::info!(dispatcher = %dispatcher.display(), hooks = %hooks_path.display(), "grok hook installed");
+    }
+    Ok(())
+}
+
+/// Remote grok bot: the same two files, written over ssh after `install_remote_hook`.
+async fn install_remote_grok_hook(conn: &HostConn, env: &Value) -> anyhow::Result<()> {
+    let home = conn.home().await?;
+    let dispatcher = format!("{home}/.config/agents-manager/{GROK_DISPATCH_SH}");
+    let hooks_dir = format!("{}/hooks", grok_home(env, &home));
+    let script = format!(
+        "set -e\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\ncat > \"$W\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod +x \"$W\"\nG={g}\nmkdir -p \"$G\"\ncat > \"$G/{file}\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nprintf 'AM_GROK_INSTALLED\\n'\n",
+        w = sh_quote(&dispatcher),
+        wrap = REMOTE_GROK_DISPATCH_SH,
+        g = sh_quote(&hooks_dir),
+        file = GROK_HOOKS_FILE,
+        json = grok_hooks_json(&dispatcher),
+    );
+    let out = conn.ssh_exec(&script).await?;
+    if !out.contains("AM_GROK_INSTALLED") {
+        anyhow::bail!("remote grok hook install did not confirm:\n{}", out.trim());
+    }
+    tracing::info!(host = %conn.name, hooks_dir, "remote grok hook installed");
+    Ok(())
+}
+
 /// Absolute remote paths for a bot's hook material.
 pub struct RemoteHookPaths {
     pub dir: String,
@@ -221,12 +320,14 @@ async fn install_remote_hook(
 
 /// Returns the daemon-injected CLI args that go *before* the bot's own args.
 /// For a remote project this also uploads the hook script over ssh (SPEC §11.4).
-async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project) -> anyhow::Result<Vec<String>> {
+async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     if bot.auto_approve != 0 {
         match bot.kind.as_str() {
             "claude" => out.push("--dangerously-skip-permissions".into()),
             "codex" => out.push("--yolo".into()),
+            // = `--permission-mode bypassPermissions` (grok 1.0.13 `--help`).
+            "grok" => out.push("--always-approve".into()),
             other => anyhow::bail!("unknown bot kind {other}"),
         }
     }
@@ -254,6 +355,11 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project) -> anyho
                     hook_port.to_string(),
                 ];
                 vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
+            }
+            // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
+            "grok" => {
+                install_remote_grok_hook(&conn, env).await?;
+                vec![]
             }
             other => anyhow::bail!("unknown bot kind {other}"),
         };
@@ -283,6 +389,11 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project) -> anyho
             let arr = serde_json::to_string(&parts)?;
             vec!["-c".into(), format!("notify={arr}")]
         }
+        // SPEC §12: the hook is global (dispatched through the pane env), not an argv flag.
+        "grok" => {
+            install_local_grok_hook(app, env)?;
+            vec![]
+        }
         other => anyhow::bail!("unknown bot kind {other}"),
     };
     out.extend(hook_args);
@@ -306,6 +417,12 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
     env.insert("AM_RUN_ID".into(), json!(run_id));
     // On a remote host this is the reverse-forwarded port, not the daemon's own.
     env.insert("AM_PORT".into(), json!(hook_port.to_string()));
+    // SPEC §12: grok's hook is a global dispatcher that can only learn the bot from the pane
+    // env, so the token rides along too (claude / codex still get it on the command line).
+    // Omitting it is how `inject_hooks = false` is honoured for grok: the dispatcher exits 0.
+    if bot.inject_hooks != 0 {
+        env.insert("AM_HOOK_TOKEN".into(), json!(bot.hook_token));
+    }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
 
@@ -336,7 +453,7 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
     let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return vec![] };
     match bot.kind.as_str() {
         "claude" => vec!["--model".into(), m.to_string()],
-        "codex" => vec!["-m".into(), m.to_string()],
+        "codex" | "grok" => vec!["-m".into(), m.to_string()],
         _ => vec![],
     }
 }
@@ -473,7 +590,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .execute(&app.db)
         .await
         .map_err(up)?;
-    let injected = injected_args(app, bot, project).await.map_err(up)?;
+    let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
     args.extend(model_args(bot));
     args.extend(identity_args(app, bot).await);
@@ -999,7 +1116,7 @@ fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
 /// is not on screen. Everything before it belongs to earlier turns.
 fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
     let echo = match kind {
-        "claude" => "❯ ",
+        "claude" | "grok" => "❯ ",
         "codex" => "› ",
         _ => return 0,
     };
@@ -1032,6 +1149,54 @@ fn is_noise(s: &str) -> bool {
     s.starts_with("Claude Code v") || s.starts_with("Tip:") || s.starts_with("Ask Codex") || s.contains("shift+tab to cycle")
 }
 
+/// grok 1.0.13 TUI chrome (appendix F): `◆ …` event / thinking lines, the "Worked for" footer
+/// with its `[hooks: N]` chip, the telemetry opt-in banner, the shortcut footer, the
+/// `<cwd>   15K / 500K` header, and the `[stable]` tag.
+fn is_grok_noise(s: &str) -> bool {
+    if s.starts_with('◆') || s.starts_with("Worked for ") || s.contains("[hooks:") {
+        return true;
+    }
+    if s.starts_with("Help improve Grok")
+        || s.starts_with("Off by default.")
+        || s == "settings."
+        || s.starts_with("Read Terms and Privacy")
+        || s == "[stable]"
+        || s.starts_with("Grok Build ")
+    {
+        return true;
+    }
+    if s.contains("Ctrl+.:shortcuts") || s.contains("Shift+Tab:mode") || s.contains("Esc:cancel") {
+        return true;
+    }
+    // "<cwd>                       15K / 500K"
+    if let Some((_, tail)) = s.rsplit_once("  ") {
+        let t = tail.trim();
+        if t.ends_with('K') && t.contains(" / ") && t.chars().all(|c| c.is_ascii_digit() || c == 'K' || c == ' ' || c == '/' || c == '.') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strip grok's per-line decoration: the scrollbar glyph `█` at the right edge and the
+/// right-aligned `h:mm AM|PM` timestamp on prompt / reply lines.
+fn strip_grok_decor(line: &str) -> String {
+    let mut s = line.trim_end().trim_end_matches('█').trim_end().to_string();
+    if let Some(rest) = s.strip_suffix(" AM").or_else(|| s.strip_suffix(" PM")) {
+        if let Some((head, clock)) = rest.rsplit_once(' ') {
+            let ok = clock.len() >= 4
+                && clock.len() <= 5
+                && clock.chars().filter(|c| *c == ':').count() == 1
+                && clock.chars().all(|c| c.is_ascii_digit() || c == ':');
+            // Two or more spaces before the clock = right-aligned column, not prose.
+            if ok && head.ends_with(' ') {
+                s = head.trim_end().to_string();
+            }
+        }
+    }
+    s
+}
+
 /// No reply marker found: keep whatever the agent printed after the last prompt echo,
 /// minus TUI chrome. Tool-result lines (`⎿ …`) are kept because they usually carry the
 /// actual error ("Not logged in · Please run /login").
@@ -1039,9 +1204,30 @@ fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let mut out: Vec<String> = Vec::new();
+    let grok = kind == "grok";
+    // grok's telemetry opt-in banner wraps at the pane width, so it is skipped as a block:
+    // from "Help improve Grok" through "Read Terms and Privacy Policy." inclusive.
+    let mut in_banner = false;
     for line in &lines[start..] {
-        let s = line.trim();
-        if is_noise(s) {
+        let stripped;
+        let s = if grok {
+            stripped = strip_grok_decor(line);
+            stripped.trim()
+        } else {
+            line.trim()
+        };
+        if grok {
+            if s.starts_with("Help improve Grok") {
+                in_banner = true;
+            }
+            if in_banner {
+                if s.starts_with("Read Terms and Privacy") {
+                    in_banner = false;
+                }
+                continue;
+            }
+        }
+        if is_noise(s) || (grok && is_grok_noise(s)) {
             continue;
         }
         // An empty prompt box means the transcript ended.
@@ -1069,6 +1255,9 @@ fn clean_screen(kind: &str, text: &str) -> Option<String> {
 }
 
 /// Provider-specific reply extraction from a terminal snapshot.
+///
+/// grok prints the reply as plain indented text with no marker (appendix F), so it has no
+/// entry here and always goes through `clean_screen`.
 fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let marker = match kind {
         "claude" => "⏺ ",
@@ -1163,5 +1352,72 @@ mod extract_tests {
     fn extract_reply_prefers_marker() {
         let screen = "❯ Reply with PONG\n⏺ PONG\n✻ Cooked for 5s\n──────\n❯\n";
         assert_eq!(extract_reply("claude", screen).unwrap(), "PONG");
+    }
+
+    /// grok 1.0.13 `agent.read {source: visible}` after "Reply with exactly GROK-OK"
+    /// (appendix F), columns narrowed.
+    const GROK_SCREEN: &str = "\
+
+  /private/tmp/scratch/grok-ws                                       15K / 500K
+
+
+     ❯ Reply with exactly GROK-OK                                        2:09 AM
+                                                                                █
+     ◆ user_prompt_submit  [hooks: 1]                                           █
+     ◆ Thought for 0.1s                                                         █
+                                                                                █
+     GROK-OK                                                             2:09 AM   █
+                                                                                █
+     Worked for 3.6s                                        stop  [hooks: 2]   █
+                                                                                █
+
+  Help improve Grok                                       [Opt out] [Opt in]
+  Off by default. Opt-in to allow SpaceXAI to retain coding data. Change anytime via
+  settings.
+  Read Terms and Privacy Policy.
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰──────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+    #[test]
+    fn grok_reply_comes_from_clean_screen() {
+        assert_eq!(extract_reply("grok", GROK_SCREEN), None);
+        assert_eq!(clean_screen("grok", GROK_SCREEN).unwrap(), "GROK-OK");
+    }
+
+    /// Narrower pane: the banner wraps differently and the header carries a git branch.
+    const GROK_SCREEN_NARROW: &str = "\
+   main ~/project/agents-manager                                15K / 500K
+     ❯ Reply with exactly GROK-FALLBACK                           2:20 AM
+                                                                            █
+     ◆ user_prompt_submit  [hooks: 1]                                       █
+     ◆ Thought for 0.3s                                                     █
+     GROK-FALLBACK                                                2:20 AM   █
+     Worked for 3.3s                                     stop  [hooks: 2]   █
+  Help improve Grok                                      [Opt out] [Opt in]
+  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g.,
+  prompts, traces, & metrics, for training and debugging purposes.
+  Change anytime via settings.
+  Read Terms and Privacy Policy.
+  ╭───────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                     │
+  ╰──────────────────────────────────── Grok 4.5 (high) · always-approve ─╯
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+    #[test]
+    fn grok_banner_is_skipped_as_a_block() {
+        assert_eq!(clean_screen("grok", GROK_SCREEN_NARROW).unwrap(), "GROK-FALLBACK");
+    }
+
+    #[test]
+    fn grok_decor_strip_keeps_prose_times() {
+        assert_eq!(strip_grok_decor("     GROK-OK                 2:09 AM   █"), "     GROK-OK");
+        assert_eq!(strip_grok_decor("meet at 2:09 PM"), "meet at 2:09 PM");
+        assert_eq!(strip_grok_decor("plain line █"), "plain line");
     }
 }

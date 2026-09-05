@@ -1,6 +1,7 @@
 # Agents Manager 規格書（v3.1）
 
 > 修訂紀錄
+> - v3.5（2026-09-06）：新增 §12「grok 支援」（第三種 kind：xAI grok CLI 1.0.13）與附錄 F（grok 實測：CLI 旗標、hook 機制與 payload、終端標記、身份隔離）。grok 無每次啟動的 hook 注入旗標，改由 daemon 寫入 `<GROK_HOME>/hooks/agents-manager.json` + 以 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` 分派的固定腳本；pane env 新增 `AM_HOOK_TOKEN`；`bots.kind` CHECK 重建加入 `grok`。
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
@@ -12,7 +13,7 @@
 
 ## 1. 目標
 
-一個本機執行的「多 agent 管理器」。使用者透過 Web UI 以聊天方式管理多個正在終端中執行的 coding agent CLI，第一階段支援 **Claude Code** 與 **Codex**。
+一個本機執行的「多 agent 管理器」。使用者透過 Web UI 以聊天方式管理多個正在終端中執行的 coding agent CLI，第一階段支援 **Claude Code** 與 **Codex**；v3.5 起加入 **grok**（xAI grok CLI，§12）。
 
 所有 agent 由 **herdr**（terminal workspace manager，實測版本 0.8.2，socket API protocol 20）承載。本系統不直接 spawn agent 程序，而是透過 herdr 的 Unix socket API 建立 pane、啟動 agent、送訊息、讀輸出、訂閱狀態事件。
 
@@ -86,7 +87,7 @@ origin:   web | external                     （external = 非本系統送出、
   - 型別：手寫 M1–M5 用到的 method 子集；未知欄位與未知事件容忍。`docs/herdr-schema.json` 為契約參考。
 - **session 管理**：啟動時若 socket 不可連，spawn `herdr --session <name> server`（detached，stdout/stderr 導向 log），輪詢 socket 最多 10 秒。daemon 退出不停 herdr server。
 - **per-bot 鎖**：每個 `bot_id` 一把 `tokio::sync::Mutex`，start / stop / prompt / hook 配對 / spool 重放 / 對帳都在鎖內執行。
-- **hook receiver**：`POST /hook/claude|codex`，驗 per-bot token → **入佇列後立即回 200** → 背景配對（§6.7）。
+- **hook receiver**：`POST /hook/claude|codex|grok`，驗 per-bot token → **入佇列後立即回 200** → 背景配對（§6.7）。
 
 ### 3.2 React 前端
 
@@ -117,6 +118,8 @@ origin:   web | external                     （external = 非本系統送出、
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot","<bot_id>","--token","<t>","--port","<port>"]`。實測（codex-cli 0.153.4）argv 最後一個參數為 JSON：`{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages":[...],"last-assistant-message"}`。
 使用者原本的 `notify` 在此實例中被覆蓋；**轉呼叫原 notify 為第二階段**（UI 顯示提示）。
 
+**grok**（v3.5）：無每次啟動注入旗標，改為全域 hooks 檔 + env 分派，見 §12.2。
+
 hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 Bot 目前的 active Run。原因：對帳收養會產生新 `run_id`，但存活的 agent 程序仍持有啟動時的參數。pane env 中的 `AM_RUN_ID` **僅供診斷，不作身分**。
 
 ### 4.2 回補來源：transcript（第二階段，先留介面）
@@ -124,13 +127,13 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 
 ### 4.3 備援來源：終端快照
 - 觸發：Turn `in_flight` 且 `delivery = ok`，agent 狀態由 `working` 轉為 **`idle`**（`blocked` 不觸發），5 秒內未收到 hook。
-- 執行：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`；成功才 `agent.read {source: recent_unwrapped, lines: 200}`，取上次游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 規則抽回覆（Claude：`⏺ ` 開頭；Codex：`• ` 開頭）。
+- 執行：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`；成功才 `agent.read {source: recent_unwrapped, lines: 200}`，取上次游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 規則抽回覆（Claude：`⏺ ` 開頭；Codex：`• ` 開頭；grok **無標記**，一律走下一條的 `clean_screen`，§12.3）。
 - 無回覆標記時（v3.2）改用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner 與 `⚠` 提示，保留 `⎿` 工具結果行（去掉符號）；仍為空 → 「（終端沒有可辨識的回覆）」。不再把整個畫面塞進氣泡。
 - 存為 assistant Message `source = terminal_fallback`、`incomplete = 1`。**之後晚到的 hook 不覆蓋**（去重後丟棄並 log），避免跨回合錯配。
 
-### 4.4 hook 子命令（`agents-managerd hook claude|codex`）最低契約
+### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
 1. wall-clock ≤ 3 秒；**永遠 exit 0；永遠空 stdout**（即使錯誤也不印 JSON）。
-2. 讀 stdin（Claude）上限 1 MiB，超限截斷並標 `truncated`；Codex 取 argv 最後一個參數。
+2. 讀 stdin（Claude、grok）上限 1 MiB，超限截斷並標 `truncated`；Codex 取 argv 最後一個參數。
 3. POST `http://127.0.0.1:<port>/hook/<provider>`（寫死 IPv4 loopback；設 `NO_PROXY=127.0.0.1`；連線逾時 300 ms、總逾時 2 秒），header `X-AM-Bot-Token`，body `{bot_id, provider, payload, received_at}`。
 4. 失敗 → 以 `O_APPEND` 追加一行 JSON 到 `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫入失敗只記自己的 log 檔（`hook.log`），仍 exit 0。
 5. `--port` 來自 command 列（不依賴 env）；env `AM_PORT` 為備援。
@@ -153,7 +156,7 @@ label = "foo"
   [[projects.bots]]
   id = "01J..."
   name = "foo-claude"        # herdr agent name：[a-z][a-z0-9_-]{0,31}，全域唯一
-  kind = "claude"            # claude | codex
+  kind = "claude"            # claude | codex | grok
   args = ["--model", "opus"] # 原生參數，接在 daemon 注入參數之後
   autostart = true
 ```
@@ -178,7 +181,7 @@ label = "foo"
 3. 取得 pane：
    - 若 workspace 剛由本步驟建立 → 用 `root_pane`。
    - 否則 `pane.split {target_pane_id: <該 workspace 任一 pane>, direction:"right", cwd, focus:false, env}`。
-   - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
+   - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`AM_HOOK_TOKEN`（v3.5；`inject_hooks = false` 時不給，grok 的分派腳本以此判斷是否回報）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
    - 失敗 → Run `exited`（`ended_at` 填入），回 502。
 4. 更新 Run 的 `workspace_id` / `pane_id`。產生 hook 注入檔（Claude）或參數（Codex）。
 5. `agent.start {name: bot.name, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`（立即回傳 `launch_pending`）。失敗 → Run `exited` + 盡力 `pane.close`。
@@ -225,8 +228,8 @@ label = "foo"
 ### 6.7 hook 與 Turn 的配對（在 per-bot 鎖內）
 1. 驗 token；解析 active Run；無 → `origin=external` 處理（下方第 5 點）。
 2. 事件分類：
-   - Claude `SessionStart` / Codex 首次任何事件 → 回填 `runs.native_session_id`、`transcript_path`，**不建 Turn**。
-   - Claude `Stop`（`stop_hook_active=false`）/ Codex `agent-turn-complete` → 進入配對。
+   - Claude `SessionStart` / grok `session_start` / Codex 首次任何事件 → 回填 `runs.native_session_id`、`transcript_path`，**不建 Turn**。
+   - Claude `Stop`（`stop_hook_active=false`）/ Codex `agent-turn-complete` / grok `stop`（`reason = end_turn` 且 `stopHookActive = false`）→ 進入配對。
    - 其他 type → ack 後丟棄。
 3. 去重：`(native_session_id, native_turn_id)` 已存在 → 忽略。
 4. 配對目標 = 該 Run **唯一**的 `in_flight` Turn（不用時間排序）：
@@ -319,7 +322,7 @@ label = "foo@m4p"
 ### 11.4 遠端 hook
 遠端沒有 `agents-managerd` 二進位，改用 **POSIX sh + curl** 腳本（附錄 E 已實測可通過反向通道打到 daemon）：
 - daemon 在啟動 Run 時透過 ssh 寫入遠端 `~/.config/agents-manager/bots/<bot_id>/hook.sh`（內容固定，見附錄 E）與 `claude-settings.json`；`chmod +x`。
-- claude args：`--settings <遠端絕對路徑>`；codex：`-c notify=["<遠端 hook.sh>","codex","<bot_id>","<token>","<hook_port>"]`。
+- claude args：`--settings <遠端絕對路徑>`；codex：`-c notify=["<遠端 hook.sh>","codex","<bot_id>","<token>","<hook_port>"]`；grok（v3.5）：不加 args，另寫遠端 `~/.config/agents-manager/grok-hook.sh`（分派到 `bots/$AM_BOT_ID/hook.sh grok …`）與 `<GROK_HOME>/hooks/agents-manager.json`（§12.2）。`hook.sh` 對 provider ≠ codex 一律讀 stdin，grok 不需改。
 - 腳本契約與 §4.4 相同：≤3 秒、exit 0、空 stdout、失敗寫遠端 `hook-spool.jsonl`。
 - daemon 的 `/hook/*` **不做** Host 檢查（只驗 per-bot token），因為經反向通道的請求 Host 為 `127.0.0.1:<hook_port>`。
 - spool 重放：對帳時 `ssh <host> 'f=~/.config/agents-manager/bots/<id>/hook-spool.jsonl; [ -f "$f" ] && mv "$f" "$f.replaying" && cat "$f.replaying" && rm "$f.replaying"'`，逐行依 §6.7 處理。
@@ -336,6 +339,61 @@ label = "foo@m4p"
 
 ### 11.7 第一階段不做
 遠端密碼 / 互動認證、跳板（ProxyJump 交給 ssh_config）、遠端 transcript 回補、多 daemon。
+
+## 12. grok 支援（v3.5）
+
+第三種 `kind = "grok"`：xAI 的 **grok CLI**（Grok Build，實測 1.0.13，`~/.grok/bin/grok`）。herdr 0.8.2 內建 `grok` agent manifest（bundled 2026.07.16.2），`agent.start {kind: "grok"}` 直接可用，狀態偵測靠 OSC title / OSC 9;4 progress / 畫面規則（附錄 F）。
+
+### 12.1 啟動參數
+| 項目 | 注入 |
+|---|---|
+| `auto_approve` | `--always-approve`（= `--permission-mode bypassPermissions`；使用者的 `~/.grok/config.toml` 若已設 `permission_mode = "always-approve"` 也不衝突） |
+| `model` | `-m <model>`（`grok models`：`grok-4.6` 預設、`grok-4.5`） |
+| hooks | **無 argv**（見 12.2） |
+
+argv 組合順序與 §2 相同：daemon 旗標 → model → identity.args → bot.args。實測 `agent.start` 後約 3–4 秒 `idle`，本機無 trust 提示（`~/.grok/trusted_folders.toml` 已含該目錄；新目錄可能出現 trust 對話框 → `blocked`，UI 送鍵處理）；畫面有一個「Help improve Grok [Opt out] [Opt in]」遙測 banner，不阻塞輸入。
+
+### 12.2 hook 注入：全域 hooks 檔 + env 分派
+grok 1.0.13 的 TUI **沒有**每次啟動注入 hook 的旗標（`--settings` / `--hooks` / `--plugin-dir` 皆 `unexpected argument`；`--plugin-dir` 只在 `grok agent … stdio` 可用）。hook 只能來自 `<GROK_HOME>/hooks/*.json`（全域、永遠信任）、`<project>/.grok/hooks/`（需 trust、會污染使用者 repo）、`config.toml` 的 `[[hooks.<Event>]]`、plugin。因此採 **全域 hooks 檔 + pane env 分派**：
+
+1. daemon 在啟動 grok bot 時（`inject_hooks` 與否皆寫，內容固定、只在變更時覆寫）寫入：
+   - `~/.config/agents-manager/grok-hook.sh`（分派腳本，本機版）：
+     ```sh
+     #!/bin/sh
+     [ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
+     exec '<abs agents-managerd>' hook grok --bot "$AM_BOT_ID" --token "$AM_HOOK_TOKEN" --port "${AM_PORT:-7788}"
+     ```
+     遠端版改為 `exec "$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN" "${AM_PORT:-7788}"`。
+   - `<GROK_HOME>/hooks/agents-manager.json`：`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"<分派腳本絕對路徑>","timeout":5}]}],"Stop":[…同…]}}`。`GROK_HOME` 取自 identity.env ∪ bot.env（已展開 `$HOME`），缺省 `~/.grok`。
+2. pane env 多帶 `AM_HOOK_TOKEN`（§6.2.3）。**`inject_hooks = false` 時不給 `AM_HOOK_TOKEN`**，分派腳本立即 `exit 0`，等同未注入（實測走 `terminal_fallback`）。
+3. 使用者自己開的 grok（無 `AM_BOT_ID`）只多付一次 `sh` 啟動的成本，行為不變。hook 失敗對 grok 是 fail-open，且 Stop hook 的 stdout 必須空（JSON 會被當成 decision）——子命令契約 §4.4 已保證。
+4. hook 子命令 `hook grok` 與 `hook claude` 相同：payload 從 stdin 讀，POST `/hook/grok`。
+5. 刪除 bot 不移除全域 hooks 檔（它不屬於任何 bot；沒有 grok bot 時它是無害的 no-op）。第二階段可在最後一個 grok bot 刪除時清掉。
+
+### 12.3 事件分類與回覆擷取
+- `hookrecv::classify("grok")`：`hookEventName`（或 snake_case 副本 `hook_event_name`）
+  - `session_start` → Identity（`sessionId`；無 transcript）。**注意：grok 的 SessionStart 延遲到第一次送 prompt 時才觸發**（實測 `agent.start` 後 idle 不會來，prompt 送出瞬間先來 session_start 再來 stop）。
+  - `stop` 且 `reason = "end_turn"` 且 `stopHookActive = false` → TurnComplete（`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`）。`reason = "shutdown"`（session 結束時再觸發一次的觀察用 Stop）→ 忽略。
+  - `session_end` / 其他 → 忽略。
+- 終端備援：grok 回覆是**無標記**的縮排純文字，右側帶 `h:mm AM|PM` 時戳與捲軸字元 `█`。`extract_reply` 對 grok 回 `None`，`clean_screen` 對 grok 另外：去掉行尾 `█` 與右對齊時戳、跳過 `◆ …`（hook / thinking 事件）、`Worked for …  stop [hooks: N]`、`<cwd>  15K / 500K` 標頭、`[stable]`、`Shift+Tab:mode │ Ctrl+.:shortcuts` 頁尾，並把「Help improve Grok … Read Terms and Privacy Policy.」整塊（會依寬度換行）跳過。prompt 回音字元與 Claude 相同為 `❯ `。
+- 遠端 host：`REMOTE_HOOK_SH` 對 provider ≠ codex 讀 stdin，grok payload 以 `{` 開頭 → 原樣塞進 body，不需第三種分支。
+
+### 12.4 身份隔離
+`GROK_HOME`（預設 `~/.grok`）等同 Claude 的 `CLAUDE_CONFIG_DIR`：config.toml、`auth.json`、`sessions/`、`hooks/` 全部跟著走。identity 設 `GROK_HOME=$HOME/.grok-work` 即可用另一個帳號；daemon 會把 hooks 檔寫到該 `GROK_HOME/hooks/`。
+
+### 12.5 資料層
+- `bots.kind` CHECK 改為 `('claude','codex','grok')`。SQLite 無法修改 CHECK，舊 DB 以 `bots_new` 重建（`PRAGMA foreign_keys=OFF; legacy_alter_table=ON`，與 projects 的重建同法，並處理中途當機殘留的 `bots_new`）。
+- `identities[].kind` 亦允許 `grok`。
+- API：`POST /projects/:id/bots` / `POST /identities` 的 kind 驗證改為 `claude | codex | grok`，錯誤訊息 `kind must be claude, codex or grok`。
+
+### 12.6 驗收
+| # | 內容 | 結果（2026-09-06，本機） |
+|---|---|---|
+| G1 | 建 `am-grok` → start | 4 秒 `running/idle`，argv `grok --always-approve`，pane w8:pB；`~/.grok/hooks/agents-manager.json` 與 `~/.config/agents-manager/grok-hook.sh` 已寫入 |
+| G2 | prompt「Reply with exactly GROK-OK」 | 7 秒 `completed`，assistant `source=hook` 內容 `GROK-OK`；log 先 `Identity{session_id}` 再 `TurnComplete{promptId, transcriptPath, "GROK-OK"}` |
+| G3 | PATCH `{model:"grok-4.5", inject_hooks:false}` → restart | argv `grok --always-approve -m grok-4.5`，pane env 無 `AM_HOOK_TOKEN`；prompt → 10 秒 `completed_fallback`，`terminal_fallback` 內容 `GROK-FALLBACK` |
+| G4 | PATCH 還原 → restart → prompt | `source=hook` `GROK-OK-2` |
+| G5 | daemon 重啟對帳 | `reconcile: kept active run bot=am-grok`，同一 pane |
 
 ### 11.8 驗收
 | # | 內容 | 驗收 |
@@ -376,7 +434,7 @@ CREATE TABLE projects (
 );
 CREATE TABLE bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex')),
+  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),  -- v3.5 加 grok
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL
 );
@@ -462,3 +520,73 @@ case "$OUT" in 2*) ;; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
 exit 0
 ```
 - 使用者權限的測試 sshd：`/usr/sbin/sshd -f <cfg>`，cfg 指定 `Port 2222`、`ListenAddress 127.0.0.1`、自產 HostKey、`AuthorizedKeysFile`、`StrictModes no`、`AllowStreamLocalForwarding yes`、`StreamLocalBindUnlink yes`、`UsePAM no`；可正常登入與轉發，不需 sudo、不改系統設定。
+
+## 附錄 F：grok CLI 實測（2026-09-06，grok 1.0.13 `5e9a58528b76`，macOS，herdr 0.8.2）
+
+### F.1 CLI 旗標（`grok --help` 節錄）
+```
+Usage: grok [OPTIONS] [PROMPT] [COMMAND]
+      --always-approve            Auto-approve all tool executions
+      --permission-mode <MODE>    default | acceptEdits | auto | dontAsk | bypassPermissions | plan
+  -m, --model <MODEL>             Model ID to use
+      --reasoning-effort <EFFORT> (alias --effort)
+  -p, --single <PROMPT>           Single-turn prompt. Prints the response to stdout and exits
+      --output-format <FMT>       plain | json | streaming-json | streaming-messages-json（headless）
+  -c, --continue / -r, --resume [<ID>] / -s, --session-id <UUID> / --fork-session
+      --cwd <CWD> / -w, --worktree [<NAME>] / --worktree-ref <REF>
+      --allow <RULE> / --deny <RULE> / --tools <T> / --disallowed-tools <T> / --sandbox <PROFILE>
+      --agent <NAME> / --agents <JSON> / --no-subagents / --no-plan / --rules <RULES>
+      --system-prompt-override <PROMPT> / --json-schema <SCHEMA> / --max-turns <N> / --verbatim
+      --fullscreen / --minimal / --no-alt-screen / --oauth / --debug / --debug-file <FILE>
+      --leader-socket <PATH>
+Commands: agent, clone, completions, dashboard, doctor, du, export, inspect, leader, login, logout,
+          mcp, memory, models, plugin, sessions, setup, trace, update, version, worktree, wrap
+```
+- `--always-approve` 為 `--permission-mode bypassPermissions` 的別名（文件 14-headless-mode.md：「`--always-approve` (alias `--yolo`, same as `--permission-mode bypassPermissions`)」；但 `--yolo` 不在 1.0.13 的 `--help` 中，保守用 `--always-approve`）。
+- **不存在**：`--settings`、`--hooks`、`--plugin-dir`（TUI）、`--trust`（文件提到但 `--help` 無）。`--plugin-dir` 只在 `grok agent [stdio|serve|…]` 子命令。
+- `grok models`：`grok-4.6`（預設）、`grok-4.5`。使用者 `~/.grok/config.toml`：`[models] default = "grok-4.6"`、`[ui] permission_mode = "always-approve"`。
+
+### F.2 hook 機制（`~/.grok/docs/user-guide/10-hooks.md` + 實測）
+- 來源（全部合併）：`~/.grok/hooks/*.json`（全域、永遠信任）、`~/.claude/settings.json` 相容掃描、`<project>/.grok/hooks/*.json`（需 `/hooks-trust`）、`~/.grok/config.toml` `[[hooks.<Event>]]`、`managed_config.toml`、`requirements.toml`、plugin `hooks/hooks.json`。herdr 的 `herdr integration install grok` 也是寫 `~/.grok/hooks/herdr-agent-state.sh`（本機未安裝）；`~/.grok/hooks/` 現有 `cmux-session.json`（cmux 寫的，格式同 Claude `hooks` 物件）。
+- 事件：`SessionStart`、`SessionEnd`、`UserPromptSubmit`、`Stop`（可 block）、`StopFailure`、`StopCancelled`、`PreToolUse`、`PostToolUse`、`Notification`（`idle_prompt` / `permission_prompt`）、`SubagentStart/Stop`、`PreCompact/PostCompact`。
+- 執行：command 經 shell 執行，事件 JSON 由 **stdin** 給；runner 注入 env `GROK_HOOK_EVENT`、`GROK_HOOK_NAME`、`GROK_SESSION_ID`、`GROK_WORKSPACE_ROOT`、`CLAUDE_PROJECT_DIR`；**父程序 env 會繼承**（實測 `AM_BOT_ID` / `AM_PORT` 從 pane env 一路傳到 hook）。Stop 預設 timeout 600 秒、其餘 5 秒；失敗 fail-open；Stop 的 stdout JSON 會被當 decision，exit 2 會 block。
+- 實測 payload（`-p` 模式與 TUI 相同；鍵為 camelCase，1.0.13 另附 `hook_event_name` / `session_id` / `transcript_path` / `permission_mode` 的 snake_case 副本）：
+
+```json
+// session_start（TUI 下延遲到第一次 prompt 才觸發）
+{"hookEventName":"session_start","sessionId":"01a072c2-…","cwd":"…","workspaceRoot":"…",
+ "timestamp":"2026-09-05T18:09:10.232596+00:00","permissionMode":"bypassPermissions","source":"new"}
+// stop（回合結束）
+{"hookEventName":"stop","sessionId":"01a072c2-…","cwd":"…","workspaceRoot":"…","timestamp":"…",
+ "transcriptPath":"/Users/m1pro/.grok/sessions/%2Fpath%2Fescaped/01a072c2-…/updates.jsonl",
+ "promptId":"089f03f9-…","permissionMode":"bypassPermissions","reason":"end_turn",
+ "stopHookActive":false,"lastAssistantMessage":"GROK-OK","backgroundTasks":[],"sessionCrons":[]}
+// stop（session 結束時再來一次，觀察用）
+{"hookEventName":"stop", …, "reason":"shutdown","stopHookActive":false}   // 無 promptId / lastAssistantMessage
+// session_end
+{"hookEventName":"session_end", …, "reason":"shutdown"}
+```
+- argv：空（`argv=[]`）；只用 stdin。
+
+### F.3 herdr 測試 session（`herdr --session am-grok server`，用完 `server stop` + `session delete`）
+- `agent start am-grok-probe --kind grok --pane w1:p1 -- --always-approve` → **3 秒** `idle`，`argv:["grok","--always-approve"]`，`terminal_title: "grok"`；無 trust 提示（scratch 目錄）。畫面：Grok Build 1.0.13 歡迎框 + 遙測 opt-in banner + `╭ │ ❯ │ ╰ … Grok 4.6 (low) · always-approve ─╯` 輸入框 + `[stable]`。
+- `agent prompt … "Reply with exactly GROK-OK" --wait --until idle` → **6 秒**；hook log 依序 `session_start`（prompt 當下）、`stop`（`end_turn`，`lastAssistantMessage: "GROK-OK"`）。
+- 回覆在終端的樣子（`visible`，無標記）：
+```
+     ❯ Reply with exactly GROK-OK                                    2:09 AM
+     ◆ user_prompt_submit  [hooks: 1]                                        █
+     ◆ Thought for 0.1s                                                      █
+     GROK-OK                                                         2:09 AM   █
+     Worked for 3.6s                                        stop  [hooks: 2]   █
+  Help improve Grok                                       [Opt out] [Opt in]
+  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g., prompts, …
+  Read Terms and Privacy Policy.
+  ╭──…──╮ / │ ❯ … │ / ╰── Grok 4.6 (low) · always-approve ─╯
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+```
+- `-p` 模式：`AM_BOT_ID=probe grok -p "Reply with exactly GROK-OK"` 9 秒印出 `GROK-OK`，同樣觸發 session_start / stop(end_turn) / session_end / stop(shutdown)。
+- herdr 的 grok manifest（`~/.local/state/herdr/agent-detection/remote/grok.toml`，bundled 2026.07.16.2 更新）：blocked 靠 OSC title 含 `Action Required`、`┃  2 (○) Yes, proceed` 選單、頁尾 `:select │ ctrl+o:yolo │ ctrl+c:cancel`；working 靠 OSC 9;4 `4;1;-1`、braille spinner 行尾 `[stop]`、頁尾 `esc:cancel`；idle 靠 OSC title `grok` / `<session> - grok`、頁尾 `ctrl+.:shortcuts`。
+
+### F.4 身份隔離
+- `GROK_HOME`：覆寫設定目錄（預設 `~/.grok`），含 `config.toml`、`auth.json`、`sessions/`、`hooks/`、`plugins/`、`memory/`（05-configuration.md、17-sessions.md、26-config-reference.md）。無 `GROK_CONFIG_DIR`。
+- 其他相關 env：`XAI_API_KEY`（API key 登入）、`GROK_SANDBOX`（= `--sandbox`）、`GROK_FOLDER_TRUST=0`（關閉 folder trust）、`GROK_CLAUDE_HOOKS_ENABLED` / `GROK_CURSOR_HOOKS_ENABLED`（相容掃描開關）。
