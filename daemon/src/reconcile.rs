@@ -33,6 +33,8 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let Some(client) = app.herdr_for(host).await else {
         anyhow::bail!("unknown host `{host}`");
     };
+    // v4.0: refresh the GitHub-origin cache for this host's projects (off-path).
+    crate::github::spawn_detect_host(app.clone(), host.to_string());
     let snapshot = client.snapshot().await?;
     // A1: never reconcile against an empty list. A transient RPC failure would otherwise look
     // like "no agents on this host" and mark every active Run `exited` (failing their turns).

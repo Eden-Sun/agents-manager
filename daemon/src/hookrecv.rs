@@ -69,6 +69,8 @@ enum HookKind {
         assistant: Option<String>,
         user: Option<String>,
     },
+    /// v4.0: Claude Code statusLine input — rate limits only, never a Turn.
+    StatusLine,
     Ignore(String),
 }
 
@@ -82,6 +84,7 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 .map(String::from)
                 .unwrap_or_else(|| if p.get("prompt_id").is_some() { "Stop".into() } else { "SessionStart".into() });
             match ev.as_str() {
+                "StatusLine" => HookKind::StatusLine,
                 "SessionStart" => HookKind::Identity { session_id: s("session_id"), transcript_path: s("transcript_path") },
                 "Stop" => {
                     if p.get("stop_hook_active").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -236,11 +239,36 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let conv = db::conversation_id(&app.db, &bot.id).await?;
     let run = db::active_run(&app.db, &bot.id).await?;
     let kind = classify(&body.provider, &body.payload);
-    tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
+    if matches!(kind, HookKind::StatusLine) {
+        tracing::debug!(bot = %bot.name, "statusline received");
+    } else {
+        tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
+    }
 
     match kind {
         HookKind::Ignore(reason) => {
             tracing::debug!(reason, "hook ignored");
+            Ok(())
+        }
+        HookKind::StatusLine => {
+            // Quota only: `claude`, plus `claude:<identity>` for a bot running under one.
+            let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
+            if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
+                crate::quota::set(app, "claude", q).await;
+            }
+            if let Some(idn) = identity {
+                if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
+                    crate::quota::set(app, &format!("claude:{idn}"), q).await;
+                }
+            }
+            // The statusLine also carries the session id — backfill it like SessionStart does.
+            if let (Some(r), Some(sid)) = (&run, body.payload.get("session_id").and_then(|v| v.as_str())) {
+                let _ = sqlx::query("UPDATE runs SET native_session_id = COALESCE(native_session_id, ?) WHERE id = ?")
+                    .bind(sid)
+                    .bind(&r.id)
+                    .execute(&app.db)
+                    .await;
+            }
             Ok(())
         }
         HookKind::Identity { session_id, transcript_path } => {

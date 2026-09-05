@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS bots (
   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
   model TEXT,
   effort TEXT,
+  fast INTEGER NOT NULL DEFAULT 0,
+  persona TEXT,
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
   auto_approve INTEGER NOT NULL DEFAULT 1,
@@ -98,6 +100,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("runs", "agent_name", "ALTER TABLE runs ADD COLUMN agent_name TEXT"),
         ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
         ("bots", "effort", "ALTER TABLE bots ADD COLUMN effort TEXT"),
+        ("bots", "fast", "ALTER TABLE bots ADD COLUMN fast INTEGER NOT NULL DEFAULT 0"),
+        ("bots", "persona", "ALTER TABLE bots ADD COLUMN persona TEXT"),
         // SPEC §13: project group chat stamps every message of one send with a group id.
         ("messages", "group_id", "ALTER TABLE messages ADD COLUMN group_id TEXT"),
     ] {
@@ -196,14 +200,16 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
                name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
                model TEXT,
                effort TEXT,
+               fast INTEGER NOT NULL DEFAULT 0,
+               persona TEXT,
                args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
                inject_hooks INTEGER NOT NULL DEFAULT 1,
                auto_approve INTEGER NOT NULL DEFAULT 1,
                identity TEXT,
                env_json TEXT NOT NULL DEFAULT '{}',
                hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
-            "INSERT INTO bots_new (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at)
-               SELECT id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at FROM bots",
+            "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at)
+               SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, deleted_at, created_at FROM bots",
             "DROP TABLE bots",
             "ALTER TABLE bots_new RENAME TO bots",
             "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
@@ -252,6 +258,10 @@ pub struct Bot {
     /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; NULL = the CLI's own default.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// v4.0: codex Fast service tier (`-c service_tier="priority"`).
+    pub fast: i64,
+    /// v4.0: text appended to the agent's system prompt.
+    pub persona: Option<String>,
     pub args_json: String,
     pub autostart: i64,
     pub inject_hooks: i64,
