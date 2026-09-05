@@ -837,3 +837,51 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 ```
 
 `kind` 為 `kinds` 的 key（含 `claude:<identity>`）。每次額度數值更新時推送；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
+
+### 12.6 工具偵測 `hosts[].tools`
+
+每個 host 連線成功時（本機為 daemon 啟動時）daemon 用該主機的登入 shell 偵測三種 CLI 是否存在、版本與登入狀態，
+結果快取在 `GET /api/state` 的 `hosts[]`：
+
+```json
+{
+  "name": "m4p", "…": "…",
+  "tools": {
+    "claude": {"installed": true,  "path": "/opt/homebrew/bin/claude", "version": "2.1.0 (Claude Code)", "logged_in": true},
+    "codex":  {"installed": true,  "path": "/opt/homebrew/bin/codex",  "version": "codex-cli 0.120.0",   "logged_in": true},
+    "grok":   {"installed": false, "path": null, "version": null, "logged_in": null}
+  },
+  "tools_checked_at": "2026-09-06T10:00:00.000Z"
+}
+```
+
+- `installed`：登入 shell（`"$SHELL" -lic 'command -v <kind>'`）找得到執行檔。
+- `path` / `version`：`command -v` 與 `<kind> --version` 的輸出（第一行，trim）；沒裝為 `null`。
+- `logged_in`：`true | false | null`（判不了為 `null`）。判斷依據：claude `~/.claude/.credentials.json`（或 Keychain
+  `Claude Code-credentials`）存在；codex `~/.codex/auth.json` 存在；grok `~/.grok/` 下有 auth 檔。
+- host 尚未偵測（例如遠端還沒連上）時 `tools` 為 `null`、`tools_checked_at` 為 `null`。
+- `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測，回 `200 {"name":"m4p","tools":{…},"tools_checked_at":"…"}`
+  （host 不存在 404；ssh 失敗 502）。重新偵測後亦推 WS `host_changed`（前端重新 `GET /api/state`）。
+
+### 12.7 透過現有 agent 安裝 / 登入 `POST /api/hosts/{name}/tools/install`
+
+```json
+{ "kind": "grok", "via_bot_id": "01M1…" }
+```
+
+daemon 組一則安裝 prompt（依 kind 用官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、
+codex `npm i -g @openai/codex`、grok `curl -fsSL https://grok.com/install.sh | sh`（官方 CLI 安裝腳本）；接著要求 agent 確認
+`<kind> --version`、執行登入（claude 直接執行 `claude` / codex `codex login` / grok `grok login`）並把登入 URL 原樣印出），
+走既有的 §5 prompt 路徑送給 `via_bot_id`（`client_request_id` 由 daemon 產生）。
+
+回應 `200`：
+
+```json
+{ "turn_id": "01M1…", "message_id": "01M1…", "delivery": "ok" }
+```
+
+- `via_bot_id` 不存在 → `404 {"error":"not_found","what":"bot"}`；bot 不屬於該 host → `400`；
+  bot 沒有 running 的 Run / blocked / in-flight → 與 §5 相同的 `409`。
+- `kind` 不合法 → 400。
+- 登入是互動式的：agent 執行 `login` 後 pane 會變 `blocked`，使用者在 UI 的終端快照處理即可。
+- 安裝完成後前端可呼叫 `POST /api/hosts/{name}/tools/refresh` 更新 `tools`。
