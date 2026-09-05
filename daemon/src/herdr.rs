@@ -201,8 +201,10 @@ impl HerdrClient {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// herdr wraps the payload as `{"type":"session_snapshot","snapshot":{...}}`; unwrap it.
     pub async fn snapshot(&self) -> Result<Value> {
-        self.call("session.snapshot", json!({})).await
+        let v = self.call("session.snapshot", json!({})).await?;
+        Ok(v.get("snapshot").cloned().unwrap_or(v))
     }
 
     // ----- workspace -----
