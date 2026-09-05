@@ -3,12 +3,14 @@ import type { ReactNode } from 'react'
 import { MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
 import type { BotKind, PatchBotInput } from '../api/types'
 import { useStore } from '../store/store'
-import { envToText, parseEnvText } from './IdentitiesPanel'
 
 /**
- * 「Bot 設定」面板（API.md v3.3）：改名 / 模型 / args / 身份 / env / 三個開關，
+ * 「Bot 設定」面板（API.md v3.3）：改名 / 模型 / 身份 / autostart / auto_approve，
  * 以及刪除 Bot。儲存走 `PATCH /api/bots/:id`，只送有變更的欄位；後端回
  * `needs_restart: true` 時面板頂部提示要重啟才生效（`POST /api/bots/:id/restart`）。
+ *
+ * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`：契約與型別保留，但這裡既不顯示
+ * 也不會出現在 PATCH body 裡（維持 config.toml 既有的值）。
  */
 
 /**
@@ -69,14 +71,6 @@ export function ModelField({
   )
 }
 
-const sameArgs = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i])
-
-function sameEnv(a: Record<string, string>, b: Record<string, string>): boolean {
-  const ka = Object.keys(a).sort()
-  const kb = Object.keys(b).sort()
-  return ka.length === kb.length && ka.every((k, i) => k === kb[i] && a[k] === b[k])
-}
-
 /** 等 stop 真的走完（run 消失或進入 stopped/exited）；mock 約 0.7s、真後端數秒。 */
 async function waitStopped(botId: string, timeoutMs = 20000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
@@ -102,12 +96,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
-  const [argsText, setArgsText] = useState((bot?.args ?? []).join(' '))
   const [identity, setIdentity] = useState(bot?.identity ?? '')
-  const [envText, setEnvText] = useState(envToText(bot?.env ?? {}))
   const [autostart, setAutostart] = useState(bot?.autostart ?? false)
   const [autoApprove, setAutoApprove] = useState(bot?.auto_approve ?? true)
-  const [injectHooks, setInjectHooks] = useState(bot?.inject_hooks ?? true)
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
   const [saving, setSaving] = useState(false)
@@ -121,12 +112,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     if (!b) return
     setName(b.name)
     setModel(b.model)
-    setArgsText(b.args.join(' '))
     setIdentity(b.identity ?? '')
-    setEnvText(envToText(b.env))
     setAutostart(b.autostart)
     setAutoApprove(b.auto_approve)
-    setInjectHooks(b.inject_hooks)
     setBanner(null)
   }, [botId])
 
@@ -146,19 +134,14 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
 
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
-  const args = argsText.trim() ? argsText.trim().split(/\s+/) : []
-  const env = parseEnvText(envText)
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
 
   const patch: PatchBotInput = {}
   if (name !== bot.name) patch.name = name
   if (model !== bot.model) patch.model = model
-  if (!sameArgs(args, bot.args)) patch.args = args
   if ((identity || null) !== bot.identity) patch.identity = identity || null
-  if (!sameEnv(env, bot.env)) patch.env = env
   if (autostart !== bot.autostart) patch.autostart = autostart
   if (autoApprove !== bot.auto_approve) patch.auto_approve = autoApprove
-  if (injectHooks !== bot.inject_hooks) patch.inject_hooks = injectHooks
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
   const canSave = dirty && (patch.name === undefined || nameOk) && !saving
@@ -278,17 +261,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           />
 
           <label className="field">
-            <span>args（以空白分隔，接在 daemon 注入參數之後）</span>
-            <input
-              type="text"
-              value={argsText}
-              placeholder="--verbose"
-              spellCheck={false}
-              onChange={(e) => setArgsText(e.target.value)}
-            />
-          </label>
-
-          <label className="field">
             <span>身份（只列同 kind 的身份；在左側「身份」面板管理）</span>
             <select value={identity} onChange={(e) => setIdentity(e.target.value)}>
               <option value="">（無）</option>
@@ -305,11 +277,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             </select>
           </label>
 
-          <label className="field">
-            <span>env（每行 KEY=VALUE，覆蓋身份的 env）</span>
-            <textarea rows={3} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
-          </label>
-
           <label className="field row">
             <input type="checkbox" checked={autostart} onChange={(e) => setAutostart(e.target.checked)} />
             <span>autostart（daemon 啟動時自動執行）</span>
@@ -319,10 +286,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <span>
               自動核准全部權限（claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code>）
             </span>
-          </label>
-          <label className="field row">
-            <input type="checkbox" checked={injectHooks} onChange={(e) => setInjectHooks(e.target.checked)} />
-            <span>inject_hooks（關閉則只靠終端備援抓回覆）</span>
           </label>
 
           <div className="bs-actions">

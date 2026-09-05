@@ -4,7 +4,8 @@ import { useStore } from '../store/store'
 
 /**
  * 身份預設（identities）：例如 `cc1` = 用另一個 `CLAUDE_CONFIG_DIR` 跑不同帳號。
- * daemon 啟動 bot 時把 `env` 注入 pane，`args` 接在 daemon 注入參數之後。
+ * daemon 啟動 bot 時把 `env` 注入 pane。身份的本體就是 env，所以表單只收 env；
+ * `args` 契約仍在（舊設定讀得到），但 UI 不再提供輸入。
  */
 
 /** `KEY=VALUE` 每行 → map；忽略空行與 `#` 註解。 */
@@ -49,9 +50,8 @@ function IdentityRow({ name }: { name: string }) {
           <span className={`kind-tag ${ident.kind}`}>{ident.kind}</span>
           <span className="host-count">{used > 0 ? `${used} 個 Bot` : '未使用'}</span>
         </span>
-        <span className="identity-detail" title={`${envText}${ident.args.length ? `\nargs: ${ident.args.join(' ')}` : ''}`}>
+        <span className="identity-detail" title={envText}>
           {envText ? envText.replace(/\n/g, ' ・ ') : '（無 env）'}
-          {ident.args.length ? ` ・ args: ${ident.args.join(' ')}` : ''}
         </span>
       </span>
       <button
@@ -73,7 +73,6 @@ function NewIdentityForm() {
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
   const [envText, setEnvText] = useState('CLAUDE_CONFIG_DIR=$HOME/.claude-')
-  const [args, setArgs] = useState('')
   const [busy, setBusy] = useState(false)
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
 
@@ -84,17 +83,9 @@ function NewIdentityForm() {
         e.preventDefault()
         if (!nameOk || busy) return
         setBusy(true)
-        void addIdentity({
-          name,
-          kind,
-          env: parseEnvText(envText),
-          args: args.trim() ? args.trim().split(/\s+/) : [],
-        }).then((ok) => {
+        void addIdentity({ name, kind, env: parseEnvText(envText) }).then((ok) => {
           setBusy(false)
-          if (ok) {
-            setName('')
-            setArgs('')
-          }
+          if (ok) setName('')
         })
       }}
     >
@@ -119,10 +110,6 @@ function NewIdentityForm() {
       <label className="field">
         <span>env（每行 KEY=VALUE；`$HOME` 與開頭 `~` 會以該主機的家目錄展開）</span>
         <textarea rows={3} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
-      </label>
-      <label className="field">
-        <span>args（以空白分隔，接在 daemon 注入參數之後）</span>
-        <input type="text" value={args} placeholder="--model opus" spellCheck={false} onChange={(e) => setArgs(e.target.value)} />
       </label>
       <div className="form-actions">
         <button type="submit" className="btn primary" disabled={!nameOk || busy}>

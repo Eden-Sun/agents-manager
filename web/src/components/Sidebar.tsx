@@ -5,7 +5,7 @@ import { botLamp, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
-import { IdentitiesPanel, IdentityBadge, parseEnvText } from './IdentitiesPanel'
+import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { ModelField } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 
@@ -72,7 +72,7 @@ function BotRow({ botId }: { botId: string }) {
         <button
           type="button"
           className="icon-btn gear"
-          title={`${bot.name} 的設定（模型、args、身份、env…）`}
+          title={`${bot.name} 的設定（模型、身份、autostart…）`}
           aria-label={`${bot.name} 的設定`}
           onClick={() => openSettings(botId)}
         >
@@ -204,12 +204,9 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
   const [model, setModel] = useState<string | null>(null)
-  const [args, setArgs] = useState('')
   const [autostart, setAutostart] = useState(false)
   const [autoApprove, setAutoApprove] = useState(true)
   const [identity, setIdentity] = useState('')
-  const [envText, setEnvText] = useState('')
-  const [advanced, setAdvanced] = useState(false)
   const identities = useStore((s) => s.identities)
   const [busy, setBusy] = useState(false)
 
@@ -227,20 +224,18 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         e.preventDefault()
         if (!nameOk || !pid || busy) return
         setBusy(true)
+        // UI 不提供 args / env（使用者決定）：省略欄位，由 daemon 用預設值。
         void addBot(pid, {
           name,
           kind,
           model,
-          args: args.trim() ? args.trim().split(/\s+/) : [],
           autostart,
           auto_approve: autoApprove,
           identity: identity || null,
-          env: parseEnvText(envText),
         }).then((ok) => {
           setBusy(false)
           if (ok) {
             setName('')
-            setArgs('')
             onDone()
           }
         })
@@ -305,16 +300,6 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
             ))}
         </select>
       </label>
-      <label className="field">
-        <span>args（以空白分隔）</span>
-        <input
-          type="text"
-          value={args}
-          placeholder="--model opus"
-          spellCheck={false}
-          onChange={(e) => setArgs(e.target.value)}
-        />
-      </label>
       <label className="field row">
         <input type="checkbox" checked={autostart} onChange={(e) => setAutostart(e.target.checked)} />
         <span>autostart（daemon 啟動時自動執行）</span>
@@ -325,15 +310,6 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           自動核准全部權限（claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code>）
         </span>
       </label>
-      <button type="button" className="disclosure sub" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
-        <span className="chev">{advanced ? '▼' : '▶'}</span> 進階：額外環境變數
-      </button>
-      {advanced ? (
-        <label className="field">
-          <span>env（每行 KEY=VALUE，覆蓋身份的 env）</span>
-          <textarea rows={2} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
-        </label>
-      ) : null}
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消
