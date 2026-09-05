@@ -203,6 +203,11 @@ async fn handle_status(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
     }
     app.emit_bot_status(&run.bot_id).await;
 
+    // The agent reacted to the prompt: the stall watchdog is no longer needed.
+    if status == "working" || status == "blocked" {
+        crate::lifecycle::cancel_stall(app, &run.id).await;
+    }
+
     // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
     if prev == "working" && status == "idle" {
         crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;

@@ -4,6 +4,7 @@
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
 > - v2（2026-09-05）：Codex 第二輪（因用量上限中斷，僅取得初步結論）：hook 身分改 per-bot、hook 早於 RPC 回應、備援與晚到 hook 配對、SQLite schema 與里程碑草案。
+> - v3.2（2026-09-06）：§6.3 新增 prompt-stall watchdog（送達後 12 秒內 agent 未離開 idle → Turn `failed` + 系統訊息，畫面含 Not logged in / usage limit 時給明確原因）；§4.3 備援擷取無回覆標記時改為清理後的畫面（去 banner / 狀態列，保留 `⎿` 工具結果行）。
 > - v3.1（2026-09-06）：新增 §11 遠端主機（透過 SSH 連遠端 herdr）、`auto_approve`、目錄選擇器、Markdown 渲染；附錄 E 遠端實測。
 > - v3（2026-09-05）：依 Grok（grok CLI 1.0.13）第二輪完整審視修訂 15 條：Turn 狀態收斂為 `in_flight`（每 Run 至多一筆，hook 只配那一筆）；per-bot 鎖；active Run 部分唯一索引；先寫 Run 再建 pane；blocked 不觸發備援；hook 子命令最低契約；事件訂閱拓撲實測定案；TOML / SQLite 權威劃分；多項 demo 範圍縮減標為第二階段。
 
@@ -122,6 +123,7 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 ### 4.3 備援來源：終端快照
 - 觸發：Turn `in_flight` 且 `delivery = ok`，agent 狀態由 `working` 轉為 **`idle`**（`blocked` 不觸發），5 秒內未收到 hook。
 - 執行：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`；成功才 `agent.read {source: recent_unwrapped, lines: 200}`，取上次游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 規則抽回覆（Claude：`⏺ ` 開頭；Codex：`• ` 開頭）。
+- 無回覆標記時（v3.2）改用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner 與 `⚠` 提示，保留 `⎿` 工具結果行（去掉符號）；仍為空 → 「（終端沒有可辨識的回覆）」。不再把整個畫面塞進氣泡。
 - 存為 assistant Message `source = terminal_fallback`、`incomplete = 1`。**之後晚到的 hook 不覆蓋**（去重後丟棄並 log），避免跨回合錯配。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex`）最低契約
@@ -193,6 +195,8 @@ label = "foo"
 6. `interrupt`（送 `esc`）/ `stop` 時，將 in-flight Turn 標 `failed` 並加 system Message。
 
 > 因 Turn 在送 prompt **之前**已是 `in_flight`，hook 早於 RPC 回應到達也能配對。
+
+7. **stall watchdog（v3.2）**：`delivery = ok` 後啟動 12 秒計時；期間收到該 Run 的 `working` 或 `blocked` 事件即取消。逾時仍 `in_flight` 且 agent 仍 `idle/unknown` → 讀 `visible` 快照判斷原因（`Not logged in` / `usage limit`）→ Turn `failed` + system Message（含原因與快照）。避免 agent 對輸入無反應時回合永遠卡住、輸入框鎖死。
 
 ### 6.4 停止 Bot（在 per-bot 鎖內）
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
