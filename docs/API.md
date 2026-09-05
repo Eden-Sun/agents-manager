@@ -716,3 +716,124 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 {"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","revision":42}}
 ```
 只在文字變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
+
+
+---
+
+## 12. v4.0：模型清單、fast 模式、attach 指令、額度
+
+### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>`
+
+列出某 host 上某 kind 可用的模型。`host` 省略 = `local`。daemon 端快取 **10 分鐘**（key = host+kind），
+`?refresh=1` 強制重抓。遠端 host 透過 ssh（`HostConn::ssh_exec_path`）在遠端跑同樣的管線。
+
+```json
+{
+  "kind": "codex",
+  "host": "local",
+  "source": "codex-app-server" | "grok-cli" | "static",
+  "fetched_at": "2026-09-06T10:00:00.000Z",
+  "models": [
+    {
+      "id": "gpt-6-astra",
+      "display_name": "gpt-6-astra",
+      "description": "…",
+      "is_default": true,
+      "default_effort": "medium",
+      "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}]
+    }
+  ]
+}
+```
+
+| kind | source | 來源 | efforts | service_tiers |
+|---|---|---|---|---|
+| `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型自己的 `supportedReasoningEfforts`（可能含 `none/minimal/low/medium/high/xhigh/max/ultra`） | 每個模型自己的 `serviceTiers`（目前只有 `priority` = Fast） |
+| `grok` | `grok-cli` | `grok models` 文字輸出 | 固定 `["low","medium","high"]` | `[]` |
+| `claude` | `static` | 靜態 | `[]`（claude 不注入 effort） | `[]` |
+
+- `display_name` / `description` 可能為空字串；`default_effort` 可能為 `null`。
+- 失敗（CLI 不存在、逾時、解析失敗、ssh 失敗）→ `502 {"error":"upstream","message":"…"}`，
+  **前端應退回靜態清單**（claude：`opus / sonnet / haiku`；codex / grok 由前端自備）。
+- `kind` 不合法 → 400；`host` 不存在 → `404 {"error":"not_found","what":"host"}`。
+
+### 12.2 `bot.fast`（布林，預設 `false`）
+
+| 欄位 | TOML | DB | `GET state` | `POST bots` | `PATCH bots` |
+|---|---|---|---|---|---|
+| `fast` | `fast = true` | `bots.fast INTEGER`（additive migration） | 每個 bot 物件都有 | 可省，預設 `false` | 可改；有 active Run 時列入 `needs_restart` |
+
+啟動注入（依 kind）：
+
+| kind | model | effort | fast |
+|---|---|---|---|
+| `codex` | `-m <model>` | `-c model_reasoning_effort="<effort>"` | `-c service_tier="priority"`（僅 `fast=true`） |
+| `grok` | `-m <model>` | `--reasoning-effort <effort>` | 不注入 |
+| `claude` | `--model <model>` | 不注入（`effort` 一律存為 `null`） | 不注入 |
+
+**`effort` 驗證改為 kind 相依**（`POST` / `PATCH` 皆同，違反 → 400）：
+
+- `grok`：`low | medium | high`
+- `codex`：`none | minimal | low | medium | high | xhigh | max | ultra`
+- `claude`：任何值都被清成 `null`（不報錯）
+
+argv 順序不變：daemon 旗標 → model → effort → fast → identity.args → bot.args。
+
+### 12.3 `hosts[].attach_command`
+
+`GET /api/state` 的 `hosts[]` 每項新增唯讀字串 **`attach_command`**：在使用者終端貼上即可接上該 host 的 herdr session。
+
+| host | 指令 |
+|---|---|
+| `local` | `herdr --session <herdr_session>` |
+| 遠端、`ssh_port = 22` | `herdr --remote <ssh> --session <herdr_session>` |
+| 遠端、其他埠 | `herdr --remote ssh://<ssh>:<port> --session <herdr_session>` |
+
+範例：`{"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":2222,"herdr_session":"agents-manager","attach_command":"herdr --remote ssh://m4p@100.112.229.82:2222 --session agents-manager", …}`
+
+### 12.4 額度 `GET /api/quota`
+
+```json
+{
+  "kinds": {
+    "codex": {
+      "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z"},
+      "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z"},
+      "plan": "pro",
+      "updated_at": "2026-09-06T10:00:00.000Z",
+      "source": "codex-app-server"
+    },
+    "claude": {
+      "five_hour": {"used_pct": 3.0, "resets_at": "2026-09-06T14:00:00.000Z"},
+      "seven_day": {"used_pct": 22.0, "resets_at": "2026-09-12T08:00:00.000Z"},
+      "plan": null,
+      "updated_at": "2026-09-06T10:00:00.000Z",
+      "source": "statusline",
+      "account": null
+    },
+    "claude:cc1": { "…": "同上，account = \"cc1\"" },
+    "grok": null
+  }
+}
+```
+
+- `kinds` 的 key：`codex`、`claude`、`grok`，以及有 identity 的 claude bot 另存一份 `claude:<identity>`
+  （`account` = identity 名稱）。**沒有資料的 kind 為 `null`**（grok 目前一律 `null`；沒裝 codex 也是 `null`；
+  claude 在第一個 StatusLine 事件到達前為 `null`）。
+- `used_pct` 為 0–100 的數字；`resets_at` 為 RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
+- `?refresh=1`：立刻重讀 codex（claude 是被動收到的，refresh 對它無效）。
+- 來源：
+  - **codex**：daemon 啟動後與每 5 分鐘用本機 `codex app-server` 的 `account/rateLimits/read`。
+  - **claude**：由 daemon 注入 claude 的 `statusLine` 指令（`agents-managerd statusline …`）把 Claude Code 餵給 statusline 的 JSON
+    （`rate_limits.five_hour / seven_day`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；daemon 不建 Turn，只更新額度。
+    使用者原本的 statusLine 指令仍會被執行、pane 顯示不變。
+  - **grok**：無來源，固定 `null`。
+
+### 12.5 WS `quota_updated`
+
+```json
+{"seq":57,"type":"quota_updated","data":{"kind":"claude","quota":{ "five_hour":{…},"seven_day":{…},"plan":null,"updated_at":"…","source":"statusline","account":null }}}
+```
+
+`kind` 為 `kinds` 的 key（含 `claude:<identity>`）。每次額度數值更新時推送；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
