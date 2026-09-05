@@ -361,10 +361,13 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    // The pane belongs to this Run either way: once the agent is gone (or refused to go)
+    // we close it, otherwise a bare shell pane would linger until the next reconcile.
+    if let Some(p) = run.pane_id.as_deref() {
+        let _ = app.herdr.pane_close(p).await;
+    }
     if !gone {
-        if let Some(p) = run.pane_id.as_deref() {
-            let _ = app.herdr.pane_close(p).await;
-        }
+        tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
     }
     let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
         .bind(db::now())
