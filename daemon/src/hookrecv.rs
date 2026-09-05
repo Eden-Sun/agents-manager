@@ -258,8 +258,52 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     }
 }
 
+/// SPEC §11.4 — the same rename-and-drain dance, but on a remote host over ssh.
+async fn replay_spool_remote(app: &Arc<App>, bot_id: &str, host: &str) -> Result<usize> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let Some(conn) = app.hosts.get(host).await else { return Ok(0) };
+    if !conn.is_connected() {
+        return Ok(0);
+    }
+    let script = format!(
+        "d=\"$HOME/.config/agents-manager/bots/{id}\"\nf=\"$d/hook-spool.jsonl\"\n         if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\";          elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n         if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; rm -f \"$f.replaying\"; fi\n",
+        id = bot_id
+    );
+    let text = conn.ssh_exec(&script).await?;
+    let mut n = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<HookBody>(line) {
+            Ok(b) => {
+                if b.bot_id != bot_id {
+                    tracing::warn!("remote spool line for a different bot; skipped");
+                    continue;
+                }
+                if let Err(e) = process_locked(app, &b).await {
+                    tracing::error!(error = ?e, "remote spool replay line failed");
+                } else {
+                    n += 1;
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line"),
+        }
+    }
+    if n > 0 {
+        tracing::info!(bot_id, host, replayed = n, "remote hook spool replayed");
+    }
+    Ok(n)
+}
+
 /// SPEC §4.4.6: take the per-bot lock, rename the spool aside, replay each line, delete.
 pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
+    let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    if host != crate::config::LOCAL_HOST {
+        return replay_spool_remote(app, bot_id, &host).await;
+    }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let dir = app.bot_dir(bot_id);
@@ -306,11 +350,18 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     Ok(n)
 }
 
+#[allow(dead_code)]
 pub async fn replay_all(app: &Arc<App>) {
-    let bots = db::live_bots(&app.db).await.unwrap_or_default();
-    for b in bots {
+    for host in app.hosts.names().await {
+        replay_host(app, &host).await;
+    }
+}
+
+/// Replay every bot's spool on one host (called after a host (re)connects).
+pub async fn replay_host(app: &Arc<App>, host: &str) {
+    for b in db::live_bots_on_host(&app.db, host).await.unwrap_or_default() {
         if let Err(e) = replay_spool(app, &b.id).await {
-            tracing::warn!(bot = %b.name, error = ?e, "spool replay failed");
+            tracing::warn!(bot = %b.name, host, error = ?e, "spool replay failed");
         }
     }
 }

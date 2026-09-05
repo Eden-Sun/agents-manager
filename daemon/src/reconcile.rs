@@ -1,14 +1,40 @@
-//! Reconciliation (SPEC §6.5): runs at daemon start and after every event-stream reconnect.
+//! Reconciliation (SPEC §6.5): runs at daemon start, after every event-stream reconnect,
+//! and after a remote host's ssh master comes back (SPEC §11.3.4).
+//!
+//! Reconciliation is always scoped to **one host** — pane / workspace / agent ids are only
+//! unique within a host's herdr session.
 
+use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::state::App;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Reconcile every known host.
+#[allow(dead_code)]
 pub async fn reconcile(app: &Arc<App>) -> Result<()> {
-    let snapshot = app.herdr.snapshot().await?;
-    let agents = app.herdr.agent_list().await.unwrap_or_default();
+    let mut first_err = None;
+    for host in app.hosts.names().await {
+        if let Err(e) = reconcile_host(app, &host).await {
+            tracing::error!(host = %host, error = ?e, "reconcile failed");
+            if host == LOCAL_HOST && first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
+    let Some(client) = app.herdr_for(host).await else {
+        anyhow::bail!("unknown host `{host}`");
+    };
+    let snapshot = client.snapshot().await?;
+    let agents = client.agent_list().await.unwrap_or_default();
     let by_name: HashMap<String, &crate::herdr::AgentInfo> =
         agents.iter().filter_map(|a| a.name.clone().map(|n| (n, a))).collect();
 
@@ -34,16 +60,16 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
         .unwrap_or_default();
 
     // Drop workspace mappings that no longer exist.
-    for p in db::live_projects(&app.db).await? {
+    for p in db::live_projects(&app.db).await?.into_iter().filter(|p| p.host == host) {
         if let Some(ws) = p.workspace_id.as_deref() {
             if !live_ws.contains(&ws.to_string()) {
                 sqlx::query("UPDATE projects SET workspace_id=NULL WHERE id=?").bind(&p.id).execute(&app.db).await?;
-                tracing::info!(project = %p.label, "workspace disappeared; mapping cleared");
+                tracing::info!(host, project = %p.label, "workspace disappeared; mapping cleared");
             }
         }
     }
 
-    let bots = db::live_bots(&app.db).await?;
+    let bots = db::live_bots_on_host(&app.db, host).await?;
     for bot in bots {
         let lock = app.bot_lock(&bot.id).await;
         let _g = lock.lock().await;
@@ -61,14 +87,14 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
                     .await?;
                 if run.pane_id.as_deref() != Some(agent.pane_id.as_str()) {
                     if let Some(old) = run.pane_id.as_deref() {
-                        crate::events::unwatch_pane(app, old).await;
+                        crate::events::unwatch_pane(app, host, old).await;
                     }
                 }
-                crate::events::watch_pane(app, &agent.pane_id).await;
-                tracing::info!(bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
+                crate::events::watch_pane(app, host, &agent.pane_id).await;
+                tracing::info!(host, bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
             }
             (Some(run), None) => {
-                tracing::info!(bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
+                tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
                 crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
             }
             (None, Some(agent)) => {
@@ -92,8 +118,8 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
                     .bind(&bot.project_id)
                     .execute(&app.db)
                     .await?;
-                crate::events::watch_pane(app, &agent.pane_id).await;
-                tracing::info!(bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
+                crate::events::watch_pane(app, host, &agent.pane_id).await;
+                tracing::info!(host, bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
             }
             (None, None) => {}
         }
@@ -102,15 +128,20 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
 
     // Orphan pane recovery: panes we created for finished runs that no longer host an agent.
     let dead: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT pane_id FROM runs WHERE pane_id IS NOT NULL AND state IN ('exited','stopped')
-         AND pane_id NOT IN (SELECT pane_id FROM runs WHERE pane_id IS NOT NULL AND state IN ('starting','running','stopping'))",
+        "SELECT DISTINCT r.pane_id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+         WHERE r.pane_id IS NOT NULL AND p.host = ? AND r.state IN ('exited','stopped')
+         AND r.pane_id NOT IN (
+           SELECT r2.pane_id FROM runs r2 JOIN bots b2 ON b2.id = r2.bot_id JOIN projects p2 ON p2.id = b2.project_id
+           WHERE r2.pane_id IS NOT NULL AND p2.host = ? AND r2.state IN ('starting','running','stopping'))",
     )
+    .bind(host)
+    .bind(host)
     .fetch_all(&app.db)
     .await?;
     for pane in dead {
         if live_panes.contains(&pane) && !panes_with_agent.contains(&pane) {
-            tracing::info!(pane_id = %pane, "reconcile: closing orphan pane");
-            let _ = app.herdr.pane_close(&pane).await;
+            tracing::info!(host, pane_id = %pane, "reconcile: closing orphan pane");
+            let _ = client.pane_close(&pane).await;
         }
     }
     Ok(())

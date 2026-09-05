@@ -12,6 +12,7 @@ mod events;
 mod herdr;
 mod hook_cmd;
 mod hookrecv;
+mod hosts;
 mod lifecycle;
 mod projection;
 mod reconcile;
@@ -136,9 +137,15 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         cfg.server.herdr_session.clone(),
     );
     app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(local) = app.hosts.get("local").await {
+        local.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // §11.3: bring up every configured remote host (each supervisor reconciles on connect).
+    app.hosts.apply_config(&app, &cfg.hosts).await;
 
     // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
-    if let Err(e) = reconcile::reconcile(&app).await {
+    if let Err(e) = reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
         tracing::error!(error = ?e, "initial reconcile failed");
     }
     events::spawn_global(app.clone());
@@ -146,18 +153,23 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     if dev_watch_all_panes {
         if let Ok(panes) = app.herdr.pane_list(None).await {
             for p in panes {
-                events::watch_pane(&app, &p.pane_id).await;
+                events::watch_pane(&app, config::LOCAL_HOST, &p.pane_id).await;
             }
             tracing::info!("dev: watching agent status for all existing panes");
         }
     }
 
-    hookrecv::replay_all(&app).await;
+    hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
     {
         let app2 = app.clone();
         tokio::spawn(async move {
             for bot in db::live_bots(&app2.db).await.unwrap_or_default() {
+                let host = db::bot_host(&app2.db, &bot.id).await.unwrap_or_else(|_| config::LOCAL_HOST.to_string());
+                if !app2.host_connected(&host).await {
+                    tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
+                    continue;
+                }
                 if bot.autostart == 1 && db::active_run(&app2.db, &bot.id).await.ok().flatten().is_none() {
                     tracing::info!(bot = %bot.name, "autostart");
                     if let Err(e) = lifecycle::start_bot(&app2, &bot.id).await {
@@ -171,7 +183,16 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     let router = api::router(app.clone());
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
     tracing::info!(%addr, "listening");
-    axum::serve(listener, router).await?;
+    // SPEC §11.3.5: close every ssh master on the way out; remote herdr servers stay alive.
+    let shutdown_app = app.clone();
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutting down; closing ssh masters");
+            shutdown_app.hosts.shutdown().await;
+        })
+        .await?;
+    app.hosts.shutdown().await;
     Ok(())
 }
 

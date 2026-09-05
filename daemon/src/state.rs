@@ -1,7 +1,8 @@
 //! Shared daemon state: db pool, herdr client, per-bot locks, WS event bus.
 
-use crate::config::ConfigStore;
+use crate::config::{ConfigStore, LOCAL_HOST};
 use crate::herdr::HerdrClient;
+use crate::hosts::{HostConn, HostManager};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -24,7 +25,10 @@ pub struct WsEvent {
 
 pub struct App {
     pub db: SqlitePool,
+    /// The local herdr client. Prefer `herdr_for(host)` — SPEC §11.3.6.
     pub herdr: HerdrClient,
+    /// `local` plus every configured `[[hosts]]` entry.
+    pub hosts: HostManager,
     pub cfg: ConfigStore,
     pub data_dir: PathBuf,
     pub exe: PathBuf,
@@ -37,8 +41,10 @@ pub struct App {
     bus: broadcast::Sender<WsEvent>,
     seq: AtomicU64,
     ring: Mutex<VecDeque<WsEvent>>,
-    /// pane_id -> per-run agent_status subscription task
-    pub pane_watchers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// (host, pane_id) -> per-run agent_status subscription task
+    pub pane_watchers: Mutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>,
+    /// host -> global event subscription task
+    pub global_watchers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> pending terminal-fallback timer
     pub fallback_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
@@ -57,6 +63,7 @@ impl App {
         let (bus, _) = broadcast::channel(1024);
         Arc::new(Self {
             db,
+            hosts: HostManager::new(herdr.clone()),
             herdr,
             cfg,
             data_dir,
@@ -70,8 +77,32 @@ impl App {
             seq: AtomicU64::new(0),
             ring: Mutex::new(VecDeque::new()),
             pane_watchers: Mutex::new(HashMap::new()),
+            global_watchers: Mutex::new(HashMap::new()),
             fallback_timers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The herdr client for a host (`"local"` = this machine). `None` = unknown host.
+    pub async fn herdr_for(&self, host: &str) -> Option<HerdrClient> {
+        self.hosts.client(host).await
+    }
+
+    /// The herdr client for a bot, resolved through its project's host.
+    #[allow(dead_code)]
+    pub async fn herdr_for_bot(&self, bot_id: &str) -> Option<HerdrClient> {
+        let host = crate::db::bot_host(&self.db, bot_id).await.ok()?;
+        self.hosts.client(&host).await
+    }
+
+    /// Whether the host a bot lives on is currently usable (drives `lamp`).
+    pub async fn host_connected(&self, host: &str) -> bool {
+        if host == LOCAL_HOST {
+            return self.connected.load(Ordering::SeqCst);
+        }
+        match self.hosts.get(host).await {
+            Some(c) => c.is_connected(),
+            None => false,
+        }
     }
 
     /// Per-bot mutex. start / stop / prompt / hook matching / spool replay / reconcile all take it.
@@ -122,16 +153,56 @@ impl App {
     pub async fn emit_bot_status(&self, bot_id: &str) {
         if let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await {
             let run = crate::db::active_run(&self.db, bot_id).await.ok().flatten();
+            let host = crate::db::bot_host(&self.db, bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
             self.emit(
                 "bot_status",
                 json!({
                     "bot_id": bot.id,
                     "run": run,
-                    "connected": self.connected.load(Ordering::SeqCst),
+                    "host": host,
+                    "connected": self.host_connected(&host).await,
                 }),
             )
             .await;
         }
+    }
+}
+
+/// `hosts` map for `daemon_status` / `GET /api/state`.
+pub async fn hosts_json(app: &Arc<App>) -> Value {
+    let mut m = serde_json::Map::new();
+    for c in app.hosts.list().await {
+        let connected = if c.is_local() { app.connected.load(Ordering::SeqCst) } else { c.is_connected() };
+        m.insert(c.name.clone(), json!({"connected": connected, "error": c.error_string().await}));
+    }
+    Value::Object(m)
+}
+
+pub async fn emit_daemon_status(app: &Arc<App>) {
+    let herdr_connected = app.connected.load(Ordering::SeqCst);
+    app.emit(
+        "daemon_status",
+        json!({
+            "herdr_connected": herdr_connected,
+            // Deprecated alias kept for older clients.
+            "connected": herdr_connected,
+            "hosts": hosts_json(app).await,
+        }),
+    )
+    .await;
+}
+
+/// Push `host_changed` plus a refreshed `daemon_status`, and re-lamp that host's bots.
+pub async fn emit_host_changed(app: &Arc<App>, conn: &HostConn) {
+    let connected = if conn.is_local() { app.connected.load(Ordering::SeqCst) } else { conn.is_connected() };
+    app.emit(
+        "host_changed",
+        json!({"name": conn.name, "connected": connected, "error": conn.error_string().await}),
+    )
+    .await;
+    emit_daemon_status(app).await;
+    for b in crate::db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
+        app.emit_bot_status(&b.id).await;
     }
 }
 

@@ -17,6 +17,15 @@ fn default_session() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_ssh_port() -> u16 {
+    22
+}
+pub fn default_host() -> String {
+    LOCAL_HOST.to_string()
+}
+
+/// Reserved host name for "this machine".
+pub const LOCAL_HOST: &str = "local";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -53,12 +62,41 @@ pub struct BotCfg {
     pub auto_approve: bool,
 }
 
+/// SPEC §11.2 — a remote machine reached over SSH, running its own herdr.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostCfg {
+    /// Unique id, `[a-z][a-z0-9_-]{0,31}`. `"local"` is reserved.
+    pub name: String,
+    /// ssh target: `user@host` or an ssh_config alias.
+    pub ssh: String,
+    /// Only emitted on the ssh command line when != 22, so ssh_config aliases keep their Port.
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    /// Extra ssh arguments appended verbatim (e.g. `["-i", "/path/to/key"]`).
+    /// Beyond SPEC §11.2 — needed for the loopback dev sshd (§11.8 R5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_opts: Vec<String>,
+    /// Remote named session. Never the remote default session.
+    #[serde(default = "default_session")]
+    pub herdr_session: String,
+    /// PATH a non-interactive ssh shell is missing; prefixed to the remote PATH.
+    #[serde(default)]
+    pub remote_path: String,
+    /// Port on the remote 127.0.0.1 that is reverse-forwarded to the daemon.
+    /// Defaults to the daemon's own port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_port: Option<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectCfg {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub path: String,
     pub label: String,
+    /// `"local"` (default) or a `[[hosts]]` name.
+    #[serde(default = "default_host")]
+    pub host: String,
     #[serde(default, rename = "bots")]
     pub bots: Vec<BotCfg>,
 }
@@ -67,6 +105,8 @@ pub struct ProjectCfg {
 pub struct ConfigFile {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostCfg>,
     #[serde(default)]
     pub projects: Vec<ProjectCfg>,
 }
@@ -83,6 +123,11 @@ pub fn valid_bot_name(name: &str) -> bool {
         return false;
     }
     it.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Host names use the same shape as bot names; `local` is reserved for this machine.
+pub fn valid_host_name(name: &str) -> bool {
+    valid_bot_name(name)
 }
 
 /// Canonicalize a project path; the directory must exist.
