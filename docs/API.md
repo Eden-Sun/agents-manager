@@ -397,3 +397,88 @@ host 不存在 → `404`；ssh 失敗（含認證失敗、目錄不存在）→ 
 - `host_changed` 在 host 連上 / 斷線 / 新增 / 刪除 / 設定變更時推送。刪除時送
   `{"name":"m4p","connected":false,"error":"removed"}`，並同時推 `project_changed`。
 - host 連線狀態改變時，該 host 底下每個 bot 也會收到 `bot_status`（`lamp` 已反映 disconnected）。
+
+
+## 身份 identities（2026-09-06 新增）
+
+同一種 agent 想用不同帳號執行時，用 **identity**：一組具名的 env + args，套在 bot 上。
+典型用法是 claude 的 `CLAUDE_CONFIG_DIR`（等同使用者原本的 `cc0` / `cc1` alias）：
+
+```toml
+[[identities]]
+name = "cc1"                                          # [a-z][a-z0-9_-]{0,31}，唯一
+kind = "claude"                                       # claude | codex
+args = []
+[identities.env]
+CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
+
+  [[projects.bots]]
+  name = "foo-cc1"
+  kind = "claude"
+  identity = "cc1"
+  [projects.bots.env]                                 # bot 自己的 env（覆蓋 identity）
+  FOO = "bar"
+```
+
+啟動 Run 時：
+
+- **pane env** = daemon 既有注入（`AM_BOT_ID` / `AM_RUN_ID` / `AM_PORT` /
+  `CLAUDE_CODE_CHILD_SESSION` / `CLAUDECODE`）∪ `identity.env` ∪ `bot.env`，後者覆蓋前者。
+- **args** = daemon 注入（`--dangerously-skip-permissions` / `--settings` …）
+  ++ `identity.args` ++ `bot.args`。
+- env 值中的 `$HOME`、`${HOME}` 與**開頭**的 `~` 會展開成**該 host 的 home**
+  （本機用本機 home，遠端用 ssh `echo $HOME` 取得並快取）。
+- identity 的 `kind` 與 bot 的 `kind` 不符 → `400`。
+
+### `GET /api/state` 新增欄位
+
+```json
+{
+  "identities": [
+    {"name":"cc0","kind":"claude","env":{},"args":[]},
+    {"name":"cc1","kind":"claude","env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]}
+  ],
+  "projects": [
+    {"bots": [
+      {"id":"01M1…","name":"foo-cc1","kind":"claude","identity":"cc1","env":{"FOO":"bar"}, "…": "…"}
+    ]}
+  ]
+}
+```
+
+- `identities` 一定存在（沒設定時為 `[]`）。
+- 每個 bot 物件都有 `identity`（`string | null`）與 `env`（物件，預設 `{}`）。
+
+### bot 建立 / 修改
+
+`POST /api/projects/{id}/bots` 與 `PATCH /api/bots/{id}` 都多接受兩個欄位：
+
+```json
+{ "name":"foo-cc1", "kind":"claude", "identity":"cc1", "env":{"FOO":"bar"} }
+```
+
+- `identity` 省略 = 不變（PATCH）／`null`（POST）；傳 `null` 或 `""` 可解除綁定。
+- `env` 省略 = 不變（PATCH）／`{}`（POST）；傳整個物件會**取代**既有的 env。
+- 指定不存在的 identity → `404 {"error":"not_found","what":"identity"}`。
+- identity 的 kind 與 bot kind 不符 → `400`。
+
+### `POST /api/identities`
+
+```json
+{ "name":"cc1", "kind":"claude", "env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"}, "args":[] }
+```
+
+`200 {"name":"cc1"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` 或 `kind` 不是 claude/codex → `400`；
+名稱重複 → `409 {"error":"conflict","reason":"identity name already in use","name":"cc1"}`。
+
+### `DELETE /api/identities/{name}`
+
+`200 {}`；仍有 bot 綁著 → `409 {"error":"conflict","reason":"identity still used by bots","bot_id":"…"}`。
+
+### WebSocket
+
+| type | data |
+|---|---|
+| `identities_changed` | `{}` — 重新 `GET /api/state` |
+
+bot 的 `identity` / `env` 變更沿用既有的 `bot_changed`。
