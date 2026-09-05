@@ -45,6 +45,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
         .route("/projects/{id}/chat", post(project_chat))
+        .route("/projects/{id}/github/refresh", post(refresh_github))
+        .route("/projects/{id}/issues", get(get_issues))
+        .route("/projects/{id}/issues/{number}", get(get_issue))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
@@ -58,6 +61,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts", post(create_host))
         .route("/hosts/{name}", delete(delete_host))
         .route("/hosts/{name}/reconnect", post(reconnect_host))
+        .route("/hosts/{name}/tools/refresh", post(refresh_tools))
+        .route("/hosts/{name}/tools/install", post(install_tool))
+        .route("/models", get(get_models))
+        .route("/quota", get(get_quota))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
@@ -146,8 +153,10 @@ fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
 /// `hosts[]` for `GET /api/state` (SPEC §11.6). `local` always comes first.
 async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
     let mut out = Vec::new();
+    let tools = app.tools.lock().await.clone();
     for c in app.hosts.list().await {
         let connected = if c.is_local() { app.connected.load(Ordering::SeqCst) } else { c.is_connected() };
+        let t = tools.get(&c.name);
         out.push(json!({
             "name": c.name,
             "ssh": c.cfg.as_ref().map(|x| x.ssh.clone()),
@@ -158,6 +167,10 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "hook_port": c.cfg.as_ref().and_then(|x| x.hook_port),
             "connected": connected,
             "error": c.error_string().await,
+            // v4.0
+            "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
+            "tools": t.map(|x| json!(x.tools)),
+            "tools_checked_at": t.map(|x| x.checked_at.clone()),
         }));
     }
     out
@@ -181,6 +194,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "kind": b.kind,
                 "model": b.model,
                 "effort": b.effort,
+                "fast": b.fast == 1,
+                "persona": b.persona,
                 "args": b.args(),
                 "autostart": b.autostart == 1,
                 "inject_hooks": b.inject_hooks == 1,
@@ -188,7 +203,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "identity": b.identity,
                 "env": b.env(),
                 // herdr agent name: the live run's, else what the next start will use.
-                "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.name)),
+                "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
                 "lamp": lamp(host_up, run.as_ref()),
                 "unread": 0,
@@ -196,7 +211,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         }
         out.push(json!({
             "id": p.id, "path": p.path, "label": p.label, "host": p.host,
-            "workspace_id": p.workspace_id, "bots": bl
+            "workspace_id": p.workspace_id,
+            "github": crate::github::cached(app, &p.id).await,
+            "bots": bl
         }));
     }
     Ok(json!({
@@ -328,8 +345,47 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         Err(e) => return Err(any_err(e)),
     }
     reproject(&app).await?;
+    // v4.0: GitHub origin detection for the new project (blocking is fine: one git call).
+    if let Ok(Some(p)) = db::project(&app.db, &id).await {
+        crate::github::detect_project(&app, &p).await;
+    }
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"project_id": id}))).into_response())
+}
+
+// ---------------------------------------------------------------- v4.0: GitHub
+
+async fn refresh_github(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let p = db::project(&app.db, &id)
+        .await
+        .map_err(any_err)?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let gh = crate::github::detect_project(&app, &p).await;
+    app.emit("project_changed", json!({"project_id": id})).await;
+    Ok((StatusCode::OK, Json(json!({"project_id": id, "github": gh}))).into_response())
+}
+
+#[derive(Deserialize)]
+struct IssuesQuery {
+    state: Option<String>,
+    limit: Option<u32>,
+    q: Option<String>,
+    refresh: Option<String>,
+}
+
+async fn get_issues(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<IssuesQuery>,
+) -> Result<Json<Value>, LcError> {
+    let state = q.state.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "open".into());
+    let v = crate::github::list_issues(&app, &id, &state, q.limit.unwrap_or(30), q.q.as_deref(), flag(&q.refresh)).await?;
+    Ok(Json(v))
+}
+
+async fn get_issue(State(app): State<Arc<App>>, Path((id, number)): Path<(String, u64)>) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::github::get_issue(&app, &id, number).await?))
 }
 
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
@@ -360,6 +416,12 @@ struct NewBot {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    /// v4.0: codex Fast tier.
+    #[serde(default)]
+    fast: bool,
+    /// v4.0: appended to the agent's system prompt.
+    #[serde(default)]
+    persona: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -399,11 +461,8 @@ async fn create_bot(
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
     let identity = check_identity(&app, &b.identity, &b.kind).await?;
-    if let Some(e) = b.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if !crate::config::valid_effort(e) {
-            return Err(LcError::Bad("effort must be low, medium or high".into()));
-        }
-    }
+    // v4.0: effort is kind-dependent (claude → always None).
+    let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
     let res = app
@@ -423,7 +482,9 @@ async fn create_bot(
                 name: b.name.clone(),
                 kind: b.kind.clone(),
                 model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
-                effort: b.effort.clone().map(|m| m.trim().to_lowercase()).filter(|m| !m.is_empty()),
+                effort: effort.clone(),
+                fast: b.fast,
+                persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
                 args: b.args.clone(),
                 autostart: b.autostart,
                 inject_hooks: b.inject_hooks.unwrap_or(true),
@@ -454,6 +515,11 @@ struct PatchBot {
     model: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     effort: Option<Option<String>>,
+    /// v4.0
+    fast: Option<bool>,
+    /// v4.0: `Some(None)` / `Some("")` clears.
+    #[serde(default, deserialize_with = "double_option")]
+    persona: Option<Option<String>>,
     args: Option<Vec<String>>,
     autostart: Option<bool>,
     name: Option<String>,
@@ -496,24 +562,22 @@ async fn patch_bot(
     // Everything else may change while a run is live — it just needs a restart to take effect.
     let restart_relevant = b.model.is_some()
         || b.effort.is_some()
+        || b.fast.is_some()
+        || b.persona.is_some()
         || b.args.is_some()
         || b.identity.is_some()
         || b.env.is_some()
         || b.auto_approve.is_some()
         || b.inject_hooks.is_some();
     let needs_restart = active.is_some() && restart_relevant;
-    if let Some(Some(e)) = &b.effort {
-        if !e.trim().is_empty() && !crate::config::valid_effort(e.trim()) {
-            return Err(LcError::Bad("effort must be low, medium or high".into()));
-        }
-    }
+    let kind = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.kind).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    // v4.0: effort is kind-dependent; `Some(None)` clears.
+    let effort: Option<Option<String>> = match &b.effort {
+        None => None,
+        Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
+    };
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
-            let kind = db::bot(&app.db, &id)
-                .await
-                .map_err(any_err)?
-                .map(|x| x.kind)
-                .ok_or_else(|| LcError::NotFound("bot".into()))?;
             check_identity(&app, &Some(name.clone()), &kind).await?;
         }
     }
@@ -534,8 +598,14 @@ async fn patch_bot(
             if let Some(m) = &b.model {
                 bot.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
             }
-            if let Some(e) = &b.effort {
-                bot.effort = e.clone().map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty());
+            if let Some(e) = &effort {
+                bot.effort = e.clone();
+            }
+            if let Some(f) = b.fast {
+                bot.fast = f;
+            }
+            if let Some(p) = &b.persona {
+                bot.persona = p.clone().filter(|x| !x.trim().is_empty());
             }
             if let Some(a) = &b.args {
                 bot.args = a.clone();
@@ -663,6 +733,71 @@ async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> R
 async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let (connected, error) = app.hosts.reconnect(&app, &name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
+}
+
+// ---------------------------------------------------------------- v4.0: tools / models / quota
+
+/// `POST /api/hosts/:name/tools/refresh` — re-run CLI detection now.
+async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    if app.hosts.get(&name).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let ht = crate::tools::detect(&app, &name).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    if let Some(conn) = app.hosts.get(&name).await {
+        crate::state::emit_host_changed(&app, &conn).await;
+    }
+    Ok((StatusCode::OK, Json(json!({"name": name, "tools": ht.tools, "tools_checked_at": ht.checked_at}))).into_response())
+}
+
+#[derive(Deserialize)]
+struct InstallTool {
+    kind: String,
+    via_bot_id: String,
+}
+
+/// `POST /api/hosts/:name/tools/install` — ask a running agent on that host to install + log in.
+async fn install_tool(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Json(b): Json<InstallTool>,
+) -> Result<Response, LcError> {
+    let out = crate::tools::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
+    Ok((StatusCode::OK, Json(json!({"turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery})))
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ModelsQuery {
+    kind: String,
+    host: Option<String>,
+    refresh: Option<String>,
+}
+
+fn flag(v: &Option<String>) -> bool {
+    matches!(v.as_deref().map(str::trim), Some("1") | Some("true") | Some("yes"))
+}
+
+/// `GET /api/models?kind=&host=&refresh=1`
+async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -> Result<Json<Value>, LcError> {
+    if !crate::config::valid_kind(&q.kind) {
+        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
+    }
+    let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    if app.hosts.get(&host).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let v = crate::models::list(&app, &host, &q.kind, flag(&q.refresh)).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    Ok(Json(v))
+}
+
+/// `GET /api/quota?refresh=1`
+async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+    if flag(&q.get("refresh").cloned()) {
+        if let Err(e) = crate::quota::refresh_codex(&app).await {
+            tracing::warn!(error = %e, "codex quota refresh failed");
+        }
+    }
+    Ok(Json(crate::quota::snapshot(&app).await))
 }
 
 

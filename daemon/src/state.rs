@@ -51,6 +51,16 @@ pub struct App {
     pub stall_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> live-progress poller (streams the partial reply while a turn is in flight)
     pub progress_pollers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
+    pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
+    /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
+    pub quotas: Mutex<std::collections::BTreeMap<String, crate::quota::Quota>>,
+    /// v4.0: per-host CLI detection (`hosts[].tools`), refreshed on every (re)connect.
+    pub tools: Mutex<HashMap<String, crate::tools::HostTools>>,
+    /// v4.0: project id -> GitHub origin (`None` = checked, not GitHub).
+    pub github: Mutex<HashMap<String, Option<crate::github::GithubInfo>>>,
+    /// v4.0: `GET /projects/:id/issues` cache (2 min).
+    pub issues_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
 }
 
 impl App {
@@ -85,6 +95,11 @@ impl App {
             fallback_timers: Mutex::new(HashMap::new()),
             stall_timers: Mutex::new(HashMap::new()),
             progress_pollers: Mutex::new(HashMap::new()),
+            models_cache: Mutex::new(HashMap::new()),
+            quotas: Mutex::new(std::collections::BTreeMap::new()),
+            tools: Mutex::new(HashMap::new()),
+            github: Mutex::new(HashMap::new()),
+            issues_cache: Mutex::new(HashMap::new()),
         })
     }
 

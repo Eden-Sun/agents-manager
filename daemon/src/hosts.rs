@@ -409,6 +409,8 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     }
                     crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
+                    // v4.0: tool detection (claude / codex / grok) runs once per connect, off-path.
+                    crate::tools::spawn_detect(app.clone(), conn.name.clone());
 
                     // Health loop.
                     loop {
