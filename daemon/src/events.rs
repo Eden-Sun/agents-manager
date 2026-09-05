@@ -75,6 +75,9 @@ async fn global_loop(app: Arc<App>, host: String) {
             Err(e) => {
                 if is_local {
                     app.connected.store(false, Ordering::SeqCst);
+                    // A6: tell the UI right away, otherwise the lamp stays green until a
+                    // later attempt succeeds.
+                    crate::state::emit_daemon_status(&app).await;
                 }
                 tracing::warn!(host = %host, error = %e, "herdr subscribe failed");
             }
