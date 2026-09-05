@@ -35,10 +35,10 @@ npm run lint              # oxlint
 ```
 web/src/
   api/
-    types.ts       # SPEC §7 / API.md 的 TypeScript 型別（單一集中處）
+    types.ts       # SPEC §7 / API.md 的 TypeScript 型別（單一集中處；含 v4.0）
     normalize.ts   # 寬鬆解碼：吸收 0/1 vs bool、args vs args_json、巢狀 vs 扁平等差異
     transport.ts   # Transport 介面 + 真後端實作（fetch + WebSocket 自動重連）
-    mock.ts        # 記憶體假後端（VITE_MOCK=1）
+    mock.ts        # 記憶體假後端（VITE_MOCK=1；含 v4.0 models/quota/tools/issues）
     mentions.ts    # SPEC §13 的 @mention 規則（與 daemon/src/group.rs 同一套；輸入框與 mock 共用）
     index.ts       # 依 VITE_MOCK 選 transport，對外只暴露具名 API 函式
   store/store.ts   # 單一 Zustand store：server state 鏡像 + UI state + WS 事件處理
@@ -50,6 +50,13 @@ web/src/
     BlockedPanel.tsx # blocked 時的終端快照 + 按鍵面板
     TerminalTab.tsx  # recent_unwrapped 唯讀快照 + 刷新
     StatusLamp.tsx   # §2.2 合成燈號
+    AttachButton.tsx # v4.0：一鍵複製 hosts[].attach_command
+    QuotaStrip.tsx   # v4.0：頂欄 5h/7d 剩餘額度（掛在 Chat/Group 標題列）
+    Tools.tsx        # v4.0：工具徽章、可收合缺 CLI 提示、用現有 agent 安裝
+    KindTag.tsx      # v4.0：kind 圖示/文字全域切換（localStorage）
+    ModelPicker.tsx  # v4.0：GET /api/models 驅動的模型 / effort / Fast
+    IssuesBar.tsx    # v4.0：專案 github 非 null 時的 Issues 下拉
+    HostsPanel.tsx / IdentitiesPanel.tsx / DirPicker.tsx
   styles.css       # 全部 CSS（淺色在 :root，深色在 prefers-color-scheme）
   App.tsx / main.tsx
 ```
@@ -586,29 +593,31 @@ mock 與輸入框共用；後端仍是最終裁決者。
 - **mock**：`prompt` 後每 0.5 秒推 3 幀（`slow` 4 幀）`turn_progress`（回覆前綴），約 2.4 秒送最終
   `message_added`。`REPLIES` 多一則 ``` ```\n1\n``` ``` 用來驗證單 fence 的顯示。
 
-### 驗收截圖
+### 驗收截圖（UI polish；亦見下方 v4.0 重拍）
 
 mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900 @2x）：
 
 | 檔案 | 內容 |
 |---|---|
-| `180-chat-dark.png` / `180-chat-light.png` | 單 bot 對話：緊湊密度、`1` 不再框中框、無 composer 說明字 |
-| `180-live-chat-dark.png` | 送出 `echo 1` 途中：即時氣泡 + 游標 + 「輸出中…」 |
-| `180-live-group-dark.png` | 群組 `@all echo 1`：三個成員各一個即時氣泡（帶徽章），側欄三列顯示藍色「執行中」 |
-| `180-group-dark.png` / `180-group-light.png` | 群組時間軸：徽章 / 收件者在 meta 列 |
-| `180-settings-dark.png` / `180-settings-light.png` | Bot 設定面板 |
-| `180-newbot-dark.png` / `180-newbot-light.png` | Project 內「+」新增 Bot 表單 |
+| `180-chat-dark.png` / `180-chat-light.png` | 單 bot 對話（含 v4.0 額度列 / attach / Issues） |
+| `180-live-chat-dark.png` | 送出途中：即時氣泡 |
+| `180-live-group-dark.png` | 群組 `@all`：成員即時氣泡 |
+| `180-group-dark.png` / `180-group-light.png` | 群組時間軸 |
+| `180-settings-dark.png` / `180-settings-light.png` | Bot 設定（含 persona / Fast） |
+| `180-newbot-dark.png` / `180-newbot-light.png` | Project「+」新增 Bot（無 Project 選擇） |
+| `180-issues-dark.png` / `180-hosts-tools-dark.png` | Issues 面板、主機工具徽章（v4.0） |
 | `180-chat-narrow-900.png` | 900 寬 |
 
-真後端（`npx vite --port 5187` → 7788，CDP 9361；與 `170–174` 對照）：
+真後端（`npx vite --port 5187` → 7788，CDP 9361；舊 daemon 無 v4.0 端點時 UI 優雅退回）：
 
 | 檔案 | 內容 |
 |---|---|
-| `181-chat-dark.png` / `181-chat-light.png` | 同 `170` / `171` 的資料 |
-| `181-live-chat-dark.png` | `am-claude` 回「8 個月球事實」途中：清單到第 4 條、第 5 條進行中，游標閃爍，側欄與標題列「執行中」 |
-| `181-chat-after-live-dark.png` | 回合結束，即時氣泡被最終 `hook` 訊息取代 |
-| `181-group-dark.png` / `181-group-light.png` | 同 `172` |
-| `181-settings-dark.png` / `181-newbot-dark.png` | 同 `173` / `174` |
+| `181-chat-dark.png` / `181-chat-light.png` | 真資料對話（無 quota／Issues 時不顯示） |
+| `181-live-chat-dark.png` / `181-chat-after-live-dark.png` | 即時輸出與回合結束 |
+| `181-group-dark.png` / `181-group-light.png` | 群組 |
+| `181-settings-dark.png` / `181-newbot-dark.png` | 設定 / 新增 Bot |
+
+腳本：`node scripts/demo-v40.mjs`（`AM_URL` / `AM_PREFIX` / `AM_CDP` 可覆寫）。
 
 ### 已知取捨
 
@@ -617,3 +626,80 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 2. **不同 bot 的相鄰回覆**在群組視圖也套用同側收緊（-4px），靠 meta 列的徽章區分。
 3. **狀態字隱藏 idle / offline** 後，離線 bot 只靠空心燈號辨識；hover 列或看啟動 / 停止鈕可確認。
 4. **≤1080 寬時標題列的狀態字整個隱藏**（沿用原規則），run / pane tooltip 也跟著不可見。
+
+---
+
+## 8. v4.0（API.md §12，2026-09-06）
+
+契約見 [`docs/API.md`](./API.md) §12。前端只動 `web/src/**`；舊 daemon（例如目前 7788
+尚未實作 `/api/models`、`/api/quota`、`attach_command`、`tools`、`github`、`persona`、`fast`）
+必須能開、能聊，v4.0 區塊靜默消失或退回靜態清單。
+
+### 8.1 Attach 指令
+
+- `hosts[].attach_command`（本機在 `GET /state` 的 reserved `local` host；normalize 合成到
+  `AppState.attach_command`）。缺欄時前端依 ssh / session 合成。
+- `AttachButton`：標題列一鍵複製到剪貼簿，並短暫展開彈層顯示指令。掛在
+  `ChatPanel` / `GroupChatPanel` 標題列、側欄專案列、`HostsPanel`。
+
+### 8.2 側欄專案列
+
+- `ProjectTitle`（`.project-label-btn`）整列可點開群組聊天，`min-height: 32px`、hover 底色。
+- 專案「＋」開 `NewBotForm({ initialProjectId })`：**不顯示 Project 選擇**，直接 `autoFocus` 名稱。
+
+### 8.3 模型 / effort / Fast
+
+- `GET /api/models?kind=&host=` → `ModelPicker.ApiModelFields`（codex / grok）。
+  選模型後顯示該模型的 `efforts`；`service_tiers` 含 `priority` 才顯示 Fast 開關。
+  切到無 Fast 的模型會清掉 `fast`。
+- claude 仍用靜態 `ModelField`（opus / sonnet / haiku）。
+- 失敗或舊 daemon（可能回 SPA HTML 200）：退回 `MODEL_OPTIONS`；codex 另帶
+  `CODEX_EFFORT_OPTIONS`，grok 帶 `EFFORT_OPTIONS`。Fast 在靜態清單不顯示（無 tiers）。
+- `bot.fast` / `bot.persona` 貫穿 types → normalize → mock → 新增表單 → 設定面板。
+
+### 8.4 額度列
+
+- `GET /api/quota` + WS `quota_updated` → store `quota`；`QuotaStrip` 置中於 Chat / Group
+  標題列（**不在** `App.tsx`）。
+- 顯示 `5h 剩 N% · 7d 剩 N%`；剩餘 &lt; 20% 警示色；hover 顯示重置時間與 plan；
+  `claude:<identity>` 以小字掛在對應 kind 下。
+- 失敗 / 空 map → 整列不渲染。
+
+### 8.5 工具偵測與安裝
+
+- `hosts[].tools`（缺欄 → `TOOL_UNKNOWN` / `installed: true`，避免舊 daemon 誤報缺工具）。
+- `ToolBadges` 在 `HostsPanel`；`ToolsHint` 可收合提示列掛在標題列下方，選 running bot →
+  `POST /hosts/:name/tools/install`。
+- 新增 Bot 表單：該 host 未安裝的 kind `disabled`，旁附小「安裝」鈕。
+
+### 8.6 kind 圖示 / 文字
+
+- store `kindDisplay`（`localStorage` key `am.kindDisplay`），側欄腳 `KindDisplayToggle`。
+- 所有 kind 標示走 `KindTag`（class 仍為 `.kind-tag.<kind>`，驗收腳本可辨識）。
+
+### 8.7 對話草稿
+
+- store `drafts` + `localStorage`（`am.drafts`）；key `bot:<id>` / `group:<projectId>`。
+- 切換 bot／群組／重整保留；**送出成功**才清空；`delivery=failed` 保留。
+- 刪 bot 清對應 draft；刪專案清 `group:` 與該專案下各 `bot:` draft。
+
+### 8.8 人設 persona
+
+- 設定面板與新增表單的 `PersonaField`（textarea）；有值時側欄／標題列顯示 `PersonaMark`。
+
+### 8.9 GitHub Issues
+
+- `projects[].github` 非 null 時，對話頂部 `IssuesBar`：搜尋（300ms debounce）、open/closed、
+  labels 顯示、插入 `#n 標題\nurl`、插入完整內容為 `>` 引用。
+- 舊 daemon 無 `github` → 不渲染；`gh` 502 顯示錯誤字。
+
+### 8.10 舊 daemon 退回一覽
+
+| 端點 / 欄位 | 行為 |
+|---|---|
+| `GET /quota` 失敗或回 HTML | `quota={}`，額度列不顯示 |
+| `GET /models` 失敗或空清單 | 靜態模型 + kind 對應 effort |
+| `attach_command` 缺 | 依 host 合成 |
+| `tools` 缺 | 視為已安裝（不誤報） |
+| `github` 缺 | 無 IssuesBar |
+| `persona` / `fast` 缺 | 讀成 null / false；寫入多半被舊 daemon 忽略 |

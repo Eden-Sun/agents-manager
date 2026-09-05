@@ -1,23 +1,24 @@
 import { useEffect, useState } from 'react'
 import type { BotKind, ModelInfo } from '../api/types'
-import { EFFORT_OPTIONS, FAST_TIER, MODEL_OPTIONS } from '../api/types'
+import { CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, MODEL_OPTIONS } from '../api/types'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
 /**
  * v4.0 model / effort / fast for codex and grok, driven by `GET /api/models?kind=&host=`.
- * When the call fails the static `MODEL_OPTIONS` list (and, for grok, `EFFORT_OPTIONS`)
+ * When the call fails the static `MODEL_OPTIONS` list (and kind-specific efforts)
  * is used instead, so the form still works against an older daemon.
  */
 
 function staticModels(kind: BotKind): ModelInfo[] {
+  const efforts = kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : []
   return MODEL_OPTIONS[kind].map((id, i) => ({
     id,
     display_name: id,
     description: '',
     is_default: i === 0,
     default_effort: null,
-    efforts: kind === 'grok' ? [...EFFORT_OPTIONS] : [],
+    efforts,
     service_tiers: [],
   }))
 }
@@ -61,6 +62,18 @@ export function ApiModelFields({
   const efforts = current?.efforts ?? []
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
+  // Drop Fast when the chosen model (or the static fallback) has no priority tier.
+  useEffect(() => {
+    if (!hasFast && fast) onFast(false)
+  }, [hasFast, fast, onFast])
+
+  const pickModel = (id: string | null) => {
+    setCustom(false)
+    onModel(id)
+    const next = (id && models.find((m) => m.id === id)) || defaultModel
+    if (!(next?.service_tiers.some((t) => t.id === FAST_TIER) ?? false) && fast) onFast(false)
+  }
+
   return (
     <>
       <div className="field">
@@ -73,10 +86,7 @@ export function ApiModelFields({
             type="button"
             className={`opt${model === null && !customMode ? ' on' : ''}`}
             title={defaultModel ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）` : '不帶 -m'}
-            onClick={() => {
-              setCustom(false)
-              onModel(null)
-            }}
+            onClick={() => pickModel(null)}
           >
             （預設）
           </button>
@@ -86,10 +96,7 @@ export function ApiModelFields({
               type="button"
               className={`opt${model === m.id && !custom ? ' on' : ''}`}
               title={[m.id, m.description].filter(Boolean).join(' — ')}
-              onClick={() => {
-                setCustom(false)
-                onModel(m.id)
-              }}
+              onClick={() => pickModel(m.id)}
             >
               {m.display_name}
               {m.is_default ? <span className="opt-note">預設</span> : null}

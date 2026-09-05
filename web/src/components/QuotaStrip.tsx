@@ -22,11 +22,19 @@ function fmtTime(iso: string): string {
   return d.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+function windowLine(name: string, w: QuotaWindow | null): string | null {
+  if (!w) return null
+  const reset = w.resets_at ? `${fmtTime(w.resets_at)} 重置` : '重置時間未知'
+  return `${name}：已用 ${w.used_pct}%，${reset}`
+}
+
 function tooltip(label: string, q: KindQuota | null): string {
   if (!q) return `${label}：沒有額度資訊`
   const lines = [label]
-  if (q.five_hour) lines.push(`5 小時：已用 ${q.five_hour.used_pct}%，${fmtTime(q.five_hour.resets_at)} 重置`)
-  if (q.seven_day) lines.push(`7 天：已用 ${q.seven_day.used_pct}%，${fmtTime(q.seven_day.resets_at)} 重置`)
+  const five = windowLine('5 小時', q.five_hour)
+  const seven = windowLine('7 天', q.seven_day)
+  if (five) lines.push(five)
+  if (seven) lines.push(seven)
   if (q.plan) lines.push(`方案：${q.plan}`)
   if (q.updated_at) lines.push(`更新：${fmtTime(q.updated_at)}`)
   return lines.join('\n')

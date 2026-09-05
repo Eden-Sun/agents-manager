@@ -522,7 +522,10 @@ export function toModels(raw: unknown): ModelInfo[] {
 
 function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   if (!isRec(v)) return null
-  return { used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct', 'used'), 0))), resets_at: str(pick(v, 'resets_at', 'reset_at')) }
+  return {
+    used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct', 'used'), 0))),
+    resets_at: optStr(pick(v, 'resets_at', 'reset_at')),
+  }
 }
 
 /** 一個 kind 的額度；null 代表沒有資訊。 */
