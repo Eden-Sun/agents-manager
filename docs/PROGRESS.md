@@ -159,3 +159,68 @@ box-drawing / 水平線即停、略過 spinner 行、去尾端空行；第二次
 3. 帶 `?since=999999`（seq 倒退，模擬 daemon 重啟）→ 立即收到 `{"type":"resync","seq":11}` ✅
 4. `?token=nope` → 連線被拒（401）✅
 
+---
+
+## M8 — 前端內嵌 + release 一鍵啟動
+
+日期：2026-09-05
+
+1. `daemon/Cargo.toml` 新增 feature `embed-ui`（`default = ["embed-ui"]`），
+   `daemon/src/assets.rs` 以 `rust_embed::Embed` 內嵌 `../web/dist`，未命中的路徑 fallback 到 `index.html`。
+2. `cargo build --release` 通過（55s）。
+3. `env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE ./target/release/agents-managerd serve`：
+   - `GET /` → `200 text/html`，內容為前端的 `index.html`（`<title>Agents Manager</title>`）✅
+   - `GET /assets/index-BCsfVINw.js` → `200 text/javascript 224377 bytes` ✅
+   - `GET /some/deep/route` → `200 text/html`（SPA fallback）✅
+   - `GET /api/session` → `{"port":7788,"token":"…"}`（API 未被 fallback 蓋掉）✅
+
+## 最終 demo 驗收
+
+日期：2026-09-05，release binary，PID 見最終回報。
+
+1. 兩個 bot 皆可 stop / start：`am-codex` → `w5:p1 idle`、`am-claude` → `w5:p2 idle` ✅
+2. `POST /api/bots/{am-claude}/prompt {"text":"Reply with exactly PONG"}` → `delivery: ok`
+   → Turn `('web','completed','ok','3c35d278-fb7b-4691-a923-677092334937')`
+   → 訊息 `('assistant','hook',0,'PONG')` ✅ **回覆來源為 hook**
+3. `http://127.0.0.1:7788` 可開（內嵌前端）✅
+
+---
+
+## 偏離規格（與理由）
+
+1. **新增 bot 設定欄位 `inject_hooks`（TOML + `bots.inject_hooks` 欄）**。SPEC 沒有這個欄位，
+   但附錄 D 的 M5 驗收要求「停用 hook 注入後 prompt → 5 秒後出現 terminal_fallback」，
+   需要一個可切換的開關。預設 `true`，行為與 SPEC 相同。
+2. **`stop` 一律關閉該 Run 的 pane**。SPEC §6.4 只在「agent 沒消失」時 `pane.close`，
+   但實測 agent 退出後會留下一個裸 shell pane，與附錄 D「stop 後 pane 消失」的驗收不符
+   （要等下一次對帳的 orphan 回收才會清掉）。改為停止流程結束時一律關 pane。
+3. **終端備援用 `pane.read {pane_id}` 而非 `agent.read {target}`**。備援發生時 agent 可能已經
+   不在（herdr 的 agent name 會被清掉），用 `pane_id` 比較穩；讀到的內容與 revision 相同。
+4. **晚到 hook 的處理**：SPEC §4.3 說「之後晚到的 hook 不覆蓋（去重後丟棄並 log）」，
+   §6.7.5 卻說「沒有 in-flight Turn → 建 external Turn」，兩者衝突。採 §4.3 優先：
+   若該 Run 有一筆 **120 秒內**完成、且還沒有 native ids 的 `completed_fallback` Turn，
+   就把 native ids 寫到那筆 Turn（作為去重標記）並丟棄訊息；否則仍走 §6.7.5 建 external Turn。
+   時間窗是必要的，否則任何後續的 external hook 都會被永久吞掉（M6 測試時踩到）。
+5. **`session.snapshot` 需解包**。附錄 A 說回傳 `{version, protocol, workspaces[], …}`，
+   實測外層還包了一層：`{"type":"session_snapshot","snapshot":{…}}`。herdr client 已處理。
+   （這個 bug 一開始讓 orphan pane 回收整段變成 no-op。）
+6. **`--dev-watch-all-panes` 旗標**：只為 M1 驗收（daemon 還沒有任何 Run 時要能看到
+   `pane.agent_status_changed`）而加；正式路徑仍是 SPEC §3.1 的「每個 active Run 一條」。
+7. **`{"type":"resync"}` 多帶一個 `seq`**：方便前端 log，欄位相容。
+8. **`GET /api/bots/:id/messages` 多回 `turns` 與 `has_more`**：前端需要知道「這回合還在跑」
+   與 delivery 警示，否則得再打一支 API。
+9. **`delivery=unknown` 的封鎖判定**寫成「同一 conversation 內存在 delivery=unknown 且
+   status 不是 failed 的 Turn」。SPEC 只說「該 Bot 禁止再送 prompt」，此為具體化。
+10. **`agent.prompt` 不帶 `wait`**，以 10 秒 RPC 逾時界定 delivery。SPEC §6.3.4 的語義即此。
+11. **API 未匹配路徑會回 `index.html`**（SPA fallback），不是 404。第一階段可接受。
+
+## 已知問題
+
+1. **真 Codex 的 hook 未驗**：codex 帳號用量額度用盡（"You've hit your usage limit"），
+   notify 不會觸發。`-c notify=[…]` 的注入與 payload 解析已由 hook agent 用手動 argv JSON 驗過；
+   額度恢復後跑 `scripts/hook-smoke.sh --codex-only` 補齊。
+2. **daemon 重啟後 WS `seq` 歸零**：客戶端帶舊的 `since` 會拿到 `resync`。這是 SPEC §7.3 的設計。
+3. **config.toml 寫回不保留註解**（第一階段以 serde 全量序列化，`toml_edit` 為第二階段）。
+4. **`transcript` 回補未實作**（第二階段），`runs.transcript_path` 已由 SessionStart hook 回填。
+5. 測試期間 DB 內留有多筆測試用的 external / 假 hook Turn（`sess-M4*`、`ws-*` 等），
+   不影響功能；要乾淨的話刪掉 `~/.config/agents-manager/agents-manager.sqlite3*` 重來即可。

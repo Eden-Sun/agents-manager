@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["embed-ui"]
 # Enabled for the release build once `web/dist` exists (M8).
 embed-ui = []
 
