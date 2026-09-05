@@ -127,12 +127,26 @@ export function LiveBubble({
 }
 
 /** Shared empty / loading state for the main area (chat, group, terminal, no selection). */
-export function EmptyState({ loading, children }: { loading?: boolean; children: ReactNode }) {
+export function EmptyState({
+  loading,
+  title,
+  icon,
+  action,
+  children,
+}: {
+  loading?: boolean
+  title?: string
+  icon?: ReactNode
+  action?: ReactNode
+  children?: ReactNode
+}) {
   return (
-    <p className={`msg-empty${loading ? ' loading' : ''}`}>
-      {loading ? <TypingDots /> : null}
-      {children}
-    </p>
+    <div className={`msg-empty${loading ? ' loading' : ''}`} role="status">
+      {loading ? <TypingDots /> : icon ? <div className="msg-empty-icon">{icon}</div> : null}
+      {title ? <h2 className="msg-empty-title">{title}</h2> : null}
+      {children ? <p className="msg-empty-body">{children}</p> : null}
+      {action ? <div className="msg-empty-action">{action}</div> : null}
+    </div>
   )
 }
 
@@ -173,8 +187,12 @@ function MessageList({ botId }: { botId: string }) {
       }}
     >
       {list.length === 0 ? (
-        <EmptyState loading={!loaded}>
-          {loaded ? '還沒有訊息。啟動 Bot 之後，在下方輸入框送出第一則訊息。' : '載入訊息中…'}
+        <EmptyState
+          loading={!loaded}
+          title={loaded ? '開始交代第一個任務' : undefined}
+          icon={loaded ? '✦' : undefined}
+        >
+          {loaded ? '在下方輸入框寫下第一則訊息。' : '載入訊息中…'}
         </EmptyState>
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} />)
@@ -184,7 +202,19 @@ function MessageList({ botId }: { botId: string }) {
   )
 }
 
-function Composer({ botId, inputRef }: { botId: string; inputRef: RefObject<HTMLTextAreaElement | null> }) {
+function Composer({
+  botId,
+  inputRef,
+  hideLock,
+  forceFocus,
+}: {
+  botId: string
+  inputRef: RefObject<HTMLTextAreaElement | null>
+  /** Parent already shows a stopped / start bar — skip the duplicate lock strip. */
+  hideLock?: boolean
+  /** Empty chat: focus as soon as the composer is usable. */
+  forceFocus?: boolean
+}) {
   // `composerState` builds a fresh object every call, so it must be compared shallowly —
   // returning it raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
@@ -202,7 +232,7 @@ function Composer({ botId, inputRef }: { botId: string; inputRef: RefObject<HTML
 
   useEffect(() => {
     if (!state.disabled) ref.current?.focus()
-  }, [state.disabled, botId, ref])
+  }, [state.disabled, botId, ref, forceFocus])
 
   useEffect(() => {
     const el = ref.current
@@ -221,9 +251,11 @@ function Composer({ botId, inputRef }: { botId: string; inputRef: RefObject<HTML
     })
   }
 
+  const showLock = !hideLock && state.disabled && Boolean(state.reason)
+
   return (
     <div className="composer">
-      {state.disabled && state.reason ? (
+      {showLock ? (
         <div className="composer-lock" role="status">
           <span>⛔ {state.reason}</span>
           {state.unknownTurnId ? (
@@ -243,7 +275,7 @@ function Composer({ botId, inputRef }: { botId: string; inputRef: RefObject<HTML
           ref={ref}
           value={text}
           disabled={state.disabled || sending}
-          placeholder={state.disabled ? '目前無法送出訊息' : '輸入訊息…'}
+          placeholder={state.disabled ? state.reason || '目前無法送出訊息' : '輸入訊息…'}
           title="Enter 送出，Shift+Enter 換行"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -285,11 +317,23 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
 
+  const messages = useStore((s) => (botId ? s.messages[botId] : undefined))
+  const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
+  const chatEmpty = messagesLoaded && (messages?.length ?? 0) === 0
+  const composerReason = useStore((s) => (botId ? composerState(s, botId).reason : ''))
+
   if (!botId || !bot) {
     return (
       <>
         <div className="main-head">
-          <button type="button" className="btn menu-btn" onClick={onOpenSidebar}>
+          <button
+            type="button"
+            className="btn menu-btn icon-tip"
+            onClick={onOpenSidebar}
+            aria-label="開啟側邊欄"
+            title="開啟側邊欄"
+            data-tip="開啟側邊欄"
+          >
             ☰
           </button>
           <span className="main-status">未選擇 Bot</span>
@@ -298,7 +342,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <QuotaStrip />
           <AttachButton command={attachCommand} />
         </div>
-        <EmptyState>從左側選擇一個 Bot，或先新增 Project 與 Bot。</EmptyState>
+        <EmptyState title="尚未選擇 Bot" icon="◎">
+          從左側選擇一個 Bot，或先新增 Project 與 Bot。
+        </EmptyState>
       </>
     )
   }
@@ -310,7 +356,14 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   return (
     <>
       <div className="main-head">
-        <button type="button" className="btn menu-btn" onClick={onOpenSidebar} aria-label="開啟側邊欄">
+        <button
+          type="button"
+          className="btn menu-btn icon-tip"
+          onClick={onOpenSidebar}
+          aria-label="開啟側邊欄"
+          title="開啟側邊欄"
+          data-tip="開啟側邊欄"
+        >
           ☰
         </button>
         <div className="main-title">
@@ -326,10 +379,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <HostBadge host={hostName} connected={hostUp} />
           <button
             type="button"
-            className="icon-btn gear"
-            aria-label="Bot 設定"
+            className="icon-btn gear icon-tip"
+            aria-label={`${bot.name} 的設定`}
             aria-expanded={settingsOpen}
-            title="Bot 設定（模型、身份、autostart、刪除）"
+            title={`設定 ${bot.name}（模型、身份、autostart、刪除）`}
+            data-tip={`設定 · ${bot.name}`}
             onClick={() => (settingsOpen ? closeSettings() : openSettings(botId))}
           >
             ⚙
@@ -364,7 +418,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             type="button"
             className="mini-btn interrupt-btn"
             disabled={!active}
-            title="送出 esc 中斷目前回合"
+            title={`中斷 ${bot.name} 目前回合（esc）`}
             onClick={() => void interruptBot(botId)}
           >
             中斷
@@ -374,6 +428,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               type="button"
               className="mini-btn danger stop-btn"
               disabled={Boolean(busy[`stop:${botId}`])}
+              title={`停止 ${bot.name}`}
               onClick={() => setStopConfirmOpen(true)}
             >
               停止
@@ -383,6 +438,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               type="button"
               className="mini-btn primary"
               disabled={Boolean(busy[`start:${botId}`])}
+              title={`啟動 ${bot.name}`}
               onClick={() => void startBot(botId)}
             >
               啟動
@@ -420,14 +476,30 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         active ? (
           <TerminalTab botId={botId} />
         ) : (
-          <EmptyState>Bot 未在執行中，沒有可讀取的終端。</EmptyState>
+          <EmptyState title="終端尚未就緒" icon="▭">
+            Bot 未在執行中，沒有可讀取的終端。請先啟動 Bot。
+          </EmptyState>
         )
       ) : (
         <div className="chat">
           <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
           {blocked ? <BlockedPanel botId={botId} /> : null}
           <MessageList botId={botId} />
-          <Composer botId={botId} inputRef={composerRef} />
+          {!active ? (
+            <div className="bot-stopped-bar" role="status">
+              <span>{composerReason || 'Bot 未在執行中，無法送出訊息'}</span>
+              <button
+                type="button"
+                className="mini-btn primary"
+                disabled={Boolean(busy[`start:${botId}`])}
+                title={`啟動 ${bot.name}`}
+                onClick={() => void startBot(botId)}
+              >
+                啟動
+              </button>
+            </div>
+          ) : null}
+          <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} />
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}

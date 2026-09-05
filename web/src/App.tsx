@@ -23,6 +23,24 @@ function Notices() {
   )
 }
 
+function ConnBanner() {
+  const connected = useStore((s) => s.connected)
+  const socket = useStore((s) => s.socket)
+  if (socket === 'open' && connected) return null
+  const label =
+    socket !== 'open'
+      ? socket === 'connecting'
+        ? '正在重新連線 daemon…'
+        : '與 daemon 的連線中斷，正在重試…'
+      : 'daemon 與 herdr 連線中斷，暫時無法送出訊息'
+  return (
+    <div className="conn-banner" role="status">
+      <span className={`conn-dot ${socket === 'open' && !connected ? 'closed' : socket}`} />
+      <span>{label}</span>
+    </div>
+  )
+}
+
 export default function App() {
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
@@ -68,6 +86,7 @@ export default function App() {
       </aside>
       {drawer ? <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} /> : null}
       <main className="main">
+        <ConnBanner />
         {groupProjectId ? (
           <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
