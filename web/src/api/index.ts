@@ -12,6 +12,7 @@ import type {
   DirListing,
   HostResult,
   NewHostInput,
+  NewIdentityInput,
   MessagesPage,
   NewBotInput,
   NewProjectInput,
@@ -106,6 +107,14 @@ export async function createProject(input: NewProjectInput): Promise<string> {
 
 export async function deleteProject(projectId: string): Promise<void> {
   await transport.request('DELETE', `/projects/${encodeURIComponent(projectId)}`)
+}
+
+export async function createIdentity(input: NewIdentityInput): Promise<void> {
+  await transport.request('POST', '/identities', input)
+}
+
+export async function deleteIdentity(name: string): Promise<void> {
+  await transport.request('DELETE', `/identities/${encodeURIComponent(name)}`)
 }
 
 export async function createBot(projectId: string, input: NewBotInput): Promise<string> {

@@ -73,7 +73,16 @@ interface MockBot {
   autostart: number
   inject_hooks: number
   auto_approve: number
+  identity: string | null
+  env_json: string
   created_at: string
+}
+
+interface MockIdentity {
+  name: string
+  kind: 'claude' | 'codex'
+  env: Record<string, string>
+  args: string[]
 }
 
 interface MockProject {
@@ -108,6 +117,10 @@ export class MockTransport implements Transport {
   readonly mock = true
 
   private hosts: MockHost[] = []
+  private identities: MockIdentity[] = [
+    { name: 'cc0', kind: 'claude', env: {}, args: [] },
+    { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-ccompany' }, args: [] },
+  ]
   private projects: MockProject[] = []
   private bots: MockBot[] = []
   private runs: MockRun[] = []
@@ -140,6 +153,8 @@ export class MockTransport implements Transport {
       autostart: 1,
       inject_hooks: 1,
       auto_approve: 1,
+      identity: null,
+      env_json: '{}',
       created_at: now(),
     })
     this.bots.push({
@@ -151,6 +166,8 @@ export class MockTransport implements Transport {
       autostart: 0,
       inject_hooks: 1,
       auto_approve: 1,
+      identity: null,
+      env_json: '{}',
       created_at: now(),
     })
     installDevHelpers(this)
@@ -189,6 +206,8 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/state') return this.state()
     if (method === 'GET' && rawPath === '/fs/dirs') return this.dirs(q.get('path') ?? '', q.get('host') ?? '')
 
+    if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)
+    if (seg[0] === 'identities' && seg.length === 2 && method === 'DELETE') return this.deleteIdentity(decodeURIComponent(seg[1]))
     if (method === 'POST' && rawPath === '/hosts') return this.addHost(b)
     if (seg[0] === 'hosts' && seg.length === 2 && method === 'DELETE') return this.deleteHost(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'reconnect' && method === 'POST') return this.reconnectHost(seg[1])
@@ -264,6 +283,38 @@ export class MockTransport implements Transport {
         return { name, path: full, git: gitDirs.has(full) }
       }),
     }
+  }
+
+  // -------------------------------------------------------------- identities
+
+  private addIdentity(b: Rec) {
+    const name = String(b.name ?? '').trim()
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+      throw new ApiError(400, { error: 'bad_request', message: 'name 必須符合 [a-z][a-z0-9_-]{0,31}' }, 'bad request')
+    }
+    if (this.identities.some((x) => x.name === name)) {
+      throw new ApiError(409, { error: 'conflict', reason: `identity 已存在：${name}` }, 'conflict')
+    }
+    const env: Record<string, string> = {}
+    if (b.env && typeof b.env === 'object') for (const [k, v] of Object.entries(b.env as Rec)) env[k] = String(v)
+    this.identities.push({
+      name,
+      kind: b.kind === 'codex' ? 'codex' : 'claude',
+      env,
+      args: Array.isArray(b.args) ? b.args.map(String) : [],
+    })
+    this.emit('identities_changed', {})
+    return {}
+  }
+
+  private deleteIdentity(name: string) {
+    const used = this.bots.filter((x) => x.identity === name)
+    if (used.length > 0) {
+      throw new ApiError(409, { error: 'conflict', reason: `仍有 ${used.length} 個 Bot 使用身份 ${name}` }, 'conflict')
+    }
+    this.identities = this.identities.filter((x) => x.name !== name)
+    this.emit('identities_changed', {})
+    return {}
   }
 
   // -------------------------------------------------------------- hosts (§11.6)
@@ -417,6 +468,7 @@ export class MockTransport implements Transport {
       daemon_seq: this.seq,
       connected: this.connected,
       herdr_session: 'agents-manager',
+      identities: this.identities.map((i) => ({ ...i, env: { ...i.env }, args: [...i.args] })),
       // API.md: the reserved `local` entry is always first, with null ssh fields.
       hosts: [
         {
@@ -459,6 +511,8 @@ export class MockTransport implements Transport {
               autostart: b.autostart === 1,
               inject_hooks: b.inject_hooks === 1,
               auto_approve: b.auto_approve === 1,
+              identity: b.identity,
+              env: JSON.parse(b.env_json) as Record<string, string>,
               run,
               in_flight_turn: this.turns.find((t) => run && t.run_id === run.id && t.status === 'in_flight') ?? null,
               unread: 0,
@@ -522,8 +576,17 @@ export class MockTransport implements Transport {
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
       inject_hooks: 1,
-      auto_approve: 1,
+      auto_approve: b.auto_approve === false ? 0 : 1,
+      identity: typeof b.identity === 'string' && b.identity.trim() ? b.identity : null,
+      env_json: JSON.stringify(b.env && typeof b.env === 'object' ? b.env : {}),
       created_at: now(),
+    }
+    if (bot.identity) {
+      const ident = this.identities.find((x) => x.name === bot.identity)
+      if (!ident) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
+      if (ident.kind !== bot.kind) {
+        throw new ApiError(400, { error: 'bad_request', message: `identity ${ident.name} 是 ${ident.kind}，bot 是 ${bot.kind}` }, 'bad request')
+      }
     }
     this.bots.push(bot)
     this.emit('bot_changed', { bot_id: bot.id })

@@ -24,20 +24,7 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type {
-  Bot,
-  Host,
-  HostResult,
-  Lamp,
-  Message,
-  NewBotInput,
-  NewHostInput,
-  NewProjectInput,
-  Project,
-  Run,
-  TerminalSource,
-  Turn,
-} from '../api/types'
+import type { Bot, Host, HostResult, Identity, Lamp, Message, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, Project, Run, TerminalSource, Turn } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -65,6 +52,7 @@ interface StoreState {
 
   /** SPEC §11.6 remote hosts; the local machine is never in this list. */
   hosts: Host[]
+  identities: Identity[]
   projects: Project[]
   bots: Bot[]
   runs: Record<string, Run | null>
@@ -92,6 +80,8 @@ interface StoreState {
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   abandonTurn: (botId: string, turnId: string) => Promise<void>
   addHost: (input: NewHostInput) => Promise<HostResult | null>
+  addIdentity: (input: NewIdentityInput) => Promise<boolean>
+  removeIdentity: (name: string) => Promise<void>
   removeHost: (name: string) => Promise<void>
   reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
@@ -117,6 +107,7 @@ export const useStore = create<StoreState>((set, get) => ({
   lastSeq: 0,
 
   hosts: [],
+  identities: [],
   projects: [],
   bots: [],
   runs: {},
@@ -167,6 +158,7 @@ export const useStore = create<StoreState>((set, get) => ({
           : (st.bots[0]?.id ?? null)
       return {
         hosts: st.hosts,
+        identities: st.identities,
         projects: st.projects,
         bots: st.bots,
         runs,
@@ -274,6 +266,28 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       await api.abandonTurn(turnId)
       await get().loadMessages(botId)
+    } catch (e) {
+      get().notify('error', errText(e))
+    }
+  },
+
+  async addIdentity(input) {
+    try {
+      await api.createIdentity(input)
+      await get().refreshState()
+      get().notify('info', `已新增身份 ${input.name}`)
+      return true
+    } catch (e) {
+      get().notify('error', errText(e))
+      return false
+    }
+  },
+
+  async removeIdentity(name) {
+    try {
+      await api.deleteIdentity(name)
+      await get().refreshState()
+      get().notify('info', `已刪除身份 ${name}`)
     } catch (e) {
       get().notify('error', errText(e))
     }
@@ -485,6 +499,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       set((s) => ({ turns: { ...s.turns, [botId]: { ...(s.turns[botId] ?? {}), [turn.id]: turn } } }))
       return
     }
+    case 'identities_changed':
     case 'project_changed':
     case 'bot_changed': {
       void get().refreshState()

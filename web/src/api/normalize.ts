@@ -16,6 +16,7 @@ import type {
   Bot,
   BotKind,
   Host,
+  Identity,
   Lamp,
   Message,
   MessageRole,
@@ -151,7 +152,41 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     autostart: bool(v.autostart),
     inject_hooks: bool(v.inject_hooks, true),
     auto_approve: bool(v.auto_approve, true),
+    identity: (() => {
+      const i = pick(v, 'identity')
+      return typeof i === 'string' && i.trim() ? i : null
+    })(),
+    env: envMap(pick(v, 'env', 'env_json')),
     created_at: str(v.created_at),
+  }
+}
+
+/** `{K: V}` or a JSON string of one; anything else → `{}`. */
+export function envMap(v: unknown): Record<string, string> {
+  let raw: unknown = v
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      return {}
+    }
+  }
+  if (!isRec(raw)) return {}
+  const out: Record<string, string> = {}
+  for (const [k, val] of Object.entries(raw)) if (k) out[k] = str(val)
+  return out
+}
+
+export function toIdentity(v: unknown): Identity | null {
+  if (!isRec(v)) return null
+  const name = str(pick(v, 'name'))
+  if (!name) return null
+  const rawArgs = pick(v, 'args')
+  return {
+    name,
+    kind: oneOf<BotKind>(v.kind, ['claude', 'codex'], 'claude'),
+    env: envMap(pick(v, 'env')),
+    args: Array.isArray(rawArgs) ? rawArgs.map((a) => str(a)) : [],
   }
 }
 
@@ -221,6 +256,7 @@ export function sortByTime<T extends { created_at: string; id: string }>(items: 
 export function toState(raw: unknown): AppState {
   const root = isRec(raw) ? raw : {}
   const hosts: Host[] = []
+  const identities: Identity[] = []
   const projects: Project[] = []
   const bots: Bot[] = []
   const runs: Run[] = []
@@ -231,6 +267,11 @@ export function toState(raw: unknown): AppState {
     // models the local machine separately (`state.connected`), so drop it here.
     const host = toHost(h)
     if (host && host.name !== 'local' && !hosts.some((x) => x.name === host.name)) hosts.push(host)
+  }
+
+  for (const i of arr(pick(root, 'identities', 'identity_list'))) {
+    const ident = toIdentity(i)
+    if (ident && !identities.some((x) => x.name === ident.name)) identities.push(ident)
   }
 
   for (const p of arr(pick(root, 'projects', 'project_list'))) {
@@ -269,6 +310,7 @@ export function toState(raw: unknown): AppState {
     daemon_seq: num(pick(root, 'daemon_seq', 'seq'), 0),
     connected: bool(pick(root, 'connected', 'herdr_connected'), true),
     hosts,
+    identities,
     projects,
     bots,
     runs,

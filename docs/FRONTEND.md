@@ -355,3 +355,7 @@ daemon 端 §11 上線後用 `node scripts/demo-hosts-real.mjs`（前端 `npx vi
 4. **`local` 不出現在主機清單**：本機的連線狀態只在左上角的連線徽章顯示，主機面板不列它，
    因此也沒有「重新 ping 本機 herdr」的按鈕（後端的 `POST /hosts/local/reconnect` 沒接 UI）。
 5. **遠端 Project 的路徑沒有前端驗證**：路徑不存在由後端 ssh 檢查後回 400。
+
+## 身份（identities，2026-09-06 新增）
+
+sidebar 底部「身份」面板列出 `identities[]`（名稱、kind、env、args、使用中的 Bot 數）並可新增 / 刪除。新增 Bot 表單多了「身份」下拉（只列同 kind 的身份）與「進階：額外環境變數」；bot 列在 kind 標籤旁顯示身份徽章。契約見 `docs/API.md` 的 identities 章節（bot.identity、bot.env、`POST /api/identities`、`DELETE /api/identities/:name`、WS `identities_changed`）。mock 內建 `cc0`（無 env）與 `cc1`（`CLAUDE_CONFIG_DIR=$HOME/.claude-ccompany`）。驗收腳本 `scripts/demo-identity.mjs`，截圖 `docs/screenshots/80-82`。
