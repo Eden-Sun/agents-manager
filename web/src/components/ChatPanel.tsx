@@ -3,8 +3,9 @@ import remarkGfm from 'remark-gfm'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../api/types'
-import { botLamp, composerState, useStore } from '../store/store'
+import { botLamp, composerState, projectHostName, useStore } from '../store/store'
 import { BlockedPanel } from './BlockedPanel'
+import { HostBadge } from './HostsPanel'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
 
@@ -190,6 +191,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
+  const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
+  const hostUp = useStore((s) => {
+    const name = projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
+    return name === 'local' || (s.hosts.find((h) => h.name === name)?.connected ?? false)
+  })
   const tab = useStore((s) => s.rightTab)
   const setRightTab = useStore((s) => s.setRightTab)
   const startBot = useStore((s) => s.startBot)
@@ -226,6 +232,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <StatusLamp lamp={lamp} />
           <strong>{bot.name}</strong>
           <span className={`kind-tag ${bot.kind}`}>{bot.kind}</span>
+          <HostBadge host={hostName} connected={hostUp} />
         </div>
         <span className="main-status">
           {LAMP_LABEL[lamp]}

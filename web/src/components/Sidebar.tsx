@@ -5,6 +5,7 @@ import { botLamp, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
+import { HostBadge, HostsPanel } from './HostsPanel'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
@@ -87,15 +88,22 @@ function BotRow({ botId }: { botId: string }) {
 
 function NewProjectForm({ onDone }: { onDone: () => void }) {
   const addProject = useStore((s) => s.addProject)
+  const hosts = useStore((s) => s.hosts)
   const [path, setPath] = useState('')
   const [label, setLabel] = useState('')
+  const [host, setHost] = useState('local')
   const [busy, setBusy] = useState(false)
   const [browsing, setBrowsing] = useState(false)
+
+  // A host removed while the form is open falls back to the local machine.
+  const hostOk = host === 'local' || hosts.some((h) => h.name === host)
+  const effectiveHost = hostOk ? host : 'local'
 
   if (browsing) {
     return (
       <DirPicker
         initial={path}
+        host={effectiveHost}
         onCancel={() => setBrowsing(false)}
         onPick={(p) => {
           setPath(p)
@@ -113,7 +121,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
         e.preventDefault()
         if (!path.trim() || busy) return
         setBusy(true)
-        void addProject({ path: path.trim(), label: label.trim() }).then((ok) => {
+        void addProject({ path: path.trim(), label: label.trim(), host: effectiveHost }).then((ok) => {
           setBusy(false)
           if (ok) {
             setPath('')
@@ -124,7 +132,24 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
       }}
     >
       <label className="field">
-        <span>目錄路徑</span>
+        <span>主機</span>
+        <select
+          value={effectiveHost}
+          onChange={(e) => {
+            setHost(e.target.value)
+            setPath('')
+          }}
+        >
+          <option value="local">本機</option>
+          {hosts.map((h) => (
+            <option key={h.name} value={h.name} disabled={!h.connected}>
+              {h.name}（{h.ssh}）{h.connected ? '' : ' — 未連線'}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>目錄路徑{effectiveHost === 'local' ? '' : `（${effectiveHost} 上的絕對路徑）`}</span>
         <div className="field-with-btn">
           <input
             type="text"
@@ -258,10 +283,14 @@ function NewBotForm({ onDone }: { onDone: () => void }) {
 export function Sidebar() {
   const projects = useStore((s) => s.projects)
   const bots = useStore((s) => s.bots)
+  const hosts = useStore((s) => s.hosts)
   const socket = useStore((s) => s.socket)
   const connected = useStore((s) => s.connected)
   const removeProject = useStore((s) => s.removeProject)
-  const [open, setOpen] = useState<'project' | 'bot' | null>(null)
+  const [open, setOpen] = useState<'project' | 'bot' | 'host' | null>(null)
+
+  const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
+  const hostsDown = hosts.filter((h) => !h.connected).length
 
   return (
     <>
@@ -283,6 +312,7 @@ export function Sidebar() {
             <section className="project" key={p.id}>
               <header className="project-head">
                 <span className="project-label">{p.label}</span>
+                <HostBadge host={p.host} connected={hostUp(p.host)} />
                 <span className="project-path" title={p.path}>
                   {shortPath(p.path)}
                 </span>
@@ -329,6 +359,20 @@ export function Sidebar() {
           <span className="chev">{open === 'bot' ? '▼' : '▶'}</span> 新增 Bot
         </button>
         {open === 'bot' ? <NewBotForm onDone={() => setOpen(null)} /> : null}
+
+        <button
+          type="button"
+          className="disclosure"
+          aria-expanded={open === 'host'}
+          onClick={() => setOpen(open === 'host' ? null : 'host')}
+        >
+          <span className="chev">{open === 'host' ? '▼' : '▶'}</span> 主機
+          <span className="disclosure-note">
+            {hosts.length === 0 ? '本機' : `本機 + ${hosts.length}`}
+            {hostsDown > 0 ? ` ・ ${hostsDown} 個未連線` : ''}
+          </span>
+        </button>
+        {open === 'host' ? <HostsPanel /> : null}
       </div>
     </>
   )

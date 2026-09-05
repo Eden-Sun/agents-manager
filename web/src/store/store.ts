@@ -8,9 +8,36 @@
 
 import { create } from 'zustand'
 import * as api from '../api'
-import { frameBotId, lampOf, sortByTime, toMessage, toRun, toTurn, unwrap, isRec, bool, pick } from '../api/normalize'
+import {
+  frameBotId,
+  hostArray,
+  lampOf,
+  optStr,
+  sortByTime,
+  str,
+  toMessage,
+  toRun,
+  toTurn,
+  unwrap,
+  isRec,
+  bool,
+  pick,
+} from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, Lamp, Message, NewBotInput, NewProjectInput, Project, Run, TerminalSource, Turn } from '../api/types'
+import type {
+  Bot,
+  Host,
+  HostResult,
+  Lamp,
+  Message,
+  NewBotInput,
+  NewHostInput,
+  NewProjectInput,
+  Project,
+  Run,
+  TerminalSource,
+  Turn,
+} from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -32,10 +59,12 @@ interface StoreState {
   ready: boolean
   bootError: string | null
   socket: SocketStatus
-  /** daemon <-> herdr link (SPEC §2.2 "連線") */
+  /** daemon <-> 本機 herdr link (SPEC §2.2 "連線") */
   connected: boolean
   lastSeq: number
 
+  /** SPEC §11.6 remote hosts; the local machine is never in this list. */
+  hosts: Host[]
   projects: Project[]
   bots: Bot[]
   runs: Record<string, Run | null>
@@ -62,6 +91,9 @@ interface StoreState {
   sendPrompt: (botId: string, text: string) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   abandonTurn: (botId: string, turnId: string) => Promise<void>
+  addHost: (input: NewHostInput) => Promise<HostResult | null>
+  removeHost: (name: string) => Promise<void>
+  reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
   addBot: (projectId: string, input: NewBotInput) => Promise<boolean>
   removeBot: (botId: string) => Promise<void>
@@ -84,6 +116,7 @@ export const useStore = create<StoreState>((set, get) => ({
   connected: true,
   lastSeq: 0,
 
+  hosts: [],
   projects: [],
   bots: [],
   runs: {},
@@ -133,6 +166,7 @@ export const useStore = create<StoreState>((set, get) => ({
           ? s.selectedBotId
           : (st.bots[0]?.id ?? null)
       return {
+        hosts: st.hosts,
         projects: st.projects,
         bots: st.bots,
         runs,
@@ -245,6 +279,41 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  async addHost(input) {
+    try {
+      const res = await api.createHost(input)
+      await get().refreshState()
+      if (res.connected) get().notify('info', `主機 ${res.name} 已連線`)
+      else get().notify('error', `主機 ${res.name} 連線失敗：${res.error ?? '未知原因'}`)
+      return res
+    } catch (e) {
+      get().notify('error', errText(e))
+      return null
+    }
+  },
+
+  async removeHost(name) {
+    try {
+      await api.deleteHost(name)
+      await get().refreshState()
+      get().notify('info', `已刪除主機 ${name}`)
+    } catch (e) {
+      get().notify('error', errText(e))
+    }
+  },
+
+  async reconnectHost(name) {
+    let res: HostResult | null = null
+    await guarded(set, get, `host:${name}`, async () => {
+      res = await api.reconnectHost(name)
+      await get().refreshState()
+      const r = res as HostResult
+      if (r.connected) get().notify('info', `主機 ${r.name} 已重新連線`)
+      else get().notify('error', `主機 ${r.name} 重連失敗：${r.error ?? '未知原因'}`)
+    })
+    return res
+  },
+
   async addProject(input) {
     try {
       await api.createProject(input)
@@ -347,7 +416,40 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       return
     }
     case 'daemon_status': {
-      if (isRec(data)) set({ connected: bool(pick(data, 'connected'), true) })
+      // SPEC §11.6: `{herdr_connected, hosts: {<name>: {connected, error?}}}`.
+      // The pre-§11 shape was `{connected}`; accept both.
+      if (!isRec(data)) return
+      set((s) => {
+        const patch: Partial<StoreState> = {
+          connected: bool(pick(data, 'herdr_connected', 'connected'), s.connected),
+        }
+        const raw = pick(data, 'hosts')
+        if (raw !== undefined) patch.hosts = mergeHosts(s.hosts, hostArray(raw))
+        return patch
+      })
+      return
+    }
+    case 'host_changed': {
+      if (!isRec(data)) return
+      const name = str(pick(data, 'name', 'host'))
+      if (!name) return
+      if (name === 'local') {
+        // The reserved local entry maps onto `connected`, not the hosts list.
+        set({ connected: bool(pick(data, 'connected'), get().connected) })
+        return
+      }
+      if (bool(pick(data, 'deleted'), false)) {
+        set((s) => ({ hosts: s.hosts.filter((h) => h.name !== name) }))
+        return
+      }
+      const known = get().hosts.some((h) => h.name === name)
+      if (!known) {
+        // Added elsewhere, or the deletion notice (`error: "removed"`, always paired with
+        // `project_changed`) — either way the full record comes from `GET /api/state`.
+        void get().refreshState()
+        return
+      }
+      set((s) => ({ hosts: mergeHosts(s.hosts, [data]) }))
       return
     }
     case 'bot_status': {
@@ -393,9 +495,54 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
   }
 }
 
+/** Patch connection state onto the known hosts without losing their config fields. */
+function mergeHosts(current: Host[], updates: unknown[]): Host[] {
+  let changed = false
+  const next = current.map((h) => {
+    const u = updates.find((x) => isRec(x) && str(pick(x, 'name', 'host')) === h.name)
+    if (!isRec(u)) return h
+    const connected = bool(pick(u, 'connected', 'ok', 'up'), h.connected)
+    const error = u.error !== undefined || u.last_error !== undefined
+      ? optStr(pick(u, 'error', 'last_error'))
+      : connected
+        ? null
+        : h.error
+    if (connected === h.connected && error === h.error) return h
+    changed = true
+    return { ...h, connected, error }
+  })
+  return changed ? next : current
+}
+
 // ----------------------------------------------------------------- selectors
 
+/** `"local"` (or an unknown name) means the local machine. */
+export function hostOfProject(state: StoreState, projectId: string | null): Host | null {
+  const project = state.projects.find((p) => p.id === projectId)
+  if (!project || project.host === 'local') return null
+  return state.hosts.find((h) => h.name === project.host) ?? null
+}
+
+export function hostOfBot(state: StoreState, botId: string | null): Host | null {
+  const bot = state.bots.find((b) => b.id === botId)
+  return bot ? hostOfProject(state, bot.project_id) : null
+}
+
+/** The host name a project sits on, even when that host is not in `hosts` (yet). */
+export function projectHostName(state: StoreState, projectId: string | null): string {
+  return state.projects.find((p) => p.id === projectId)?.host ?? 'local'
+}
+
+/**
+ * SPEC §11.6: a bot whose host is down is `disconnected` (grey) regardless of its last
+ * known run state.
+ */
 export function botLamp(state: StoreState, botId: string): Lamp {
+  const host = hostOfBot(state, botId)
+  if (host !== null) return lampOf(state.runs[botId], host.connected)
+  const bot = state.bots.find((b) => b.id === botId)
+  // A project pointing at a host the daemon no longer reports is treated as down.
+  if (bot && projectHostName(state, bot.project_id) !== 'local') return 'disconnected'
   return lampOf(state.runs[botId], state.connected)
 }
 
@@ -422,7 +569,16 @@ export function unknownDeliveryTurn(state: StoreState, botId: string): Turn | nu
 export function composerState(state: StoreState, botId: string | null): ComposerState {
   const base: ComposerState = { disabled: true, reason: '', inFlightTurnId: null, unknownTurnId: null }
   if (!botId) return { ...base, reason: '請先在左側選擇一個 Bot' }
-  if (!state.connected) return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }
+  const bot = state.bots.find((b) => b.id === botId)
+  const hostName = bot ? projectHostName(state, bot.project_id) : 'local'
+  if (hostName !== 'local') {
+    const host = hostOfBot(state, botId)
+    if (!host || !host.connected) {
+      return { ...base, reason: `主機未連線（${hostName}）${host?.error ? `：${host.error}` : ''}` }
+    }
+  } else if (!state.connected) {
+    return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }
+  }
   const run = state.runs[botId]
   if (!run) return { ...base, reason: 'Bot 尚未啟動，請先按「啟動」' }
   if (run.state !== 'running') return { ...base, reason: `Run 狀態為 ${run.state}，尚無法送出訊息` }
