@@ -269,3 +269,128 @@ UI 標籤建議：
 ## bot.auto_approve（2026-09-06 新增）
 
 每個 bot 的布林欄位，預設 `true`。啟動時 daemon 依 kind 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`（等同 `--dangerously-bypass-approvals-and-sandbox`）。`POST /projects/:id/bots` 與 `PATCH /bots/:id` 皆接受 `auto_approve`。舊資料庫啟動時自動 `ALTER TABLE` 補欄位。
+
+
+## 遠端主機 hosts（SPEC §11.6，2026-09-06 新增）
+
+Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到遠端 herdr。UI 操作方式完全相同，
+差別只在 Project 多了一個 `host` 欄位，以及多了一組 `/api/hosts` 端點。
+
+`host` 是 host 名稱字串，`"local"` 為保留字，代表本機（不可被使用者建立/刪除）。
+
+### `GET /api/state` 新增欄位
+
+```json
+{
+  "daemon_seq": 6,
+  "connected": true,
+  "herdr_session": "agents-manager",
+  "hosts": [
+    {"name":"local","ssh":null,"ssh_port":null,"herdr_session":"agents-manager",
+     "remote_path":null,"hook_port":null,"connected":true,"error":null},
+    {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"herdr_session":"agents-manager",
+     "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","hook_port":7788,
+     "connected":false,"error":"ssh master exited: Permission denied (publickey)."}
+  ],
+  "projects": [
+    {"id":"01M1...","path":"/Users/m4p/work/foo","label":"foo@m4p","host":"m4p",
+     "workspace_id":null,"bots":[ ... ]}
+  ]
+}
+```
+
+- `hosts` **必定含 `local`**，且 `local` 永遠排在第一個；`local` 的 `ssh` / `ssh_port` /
+  `remote_path` / `hook_port` 為 `null`，`connected` = 本機 herdr 連線狀態（與頂層 `connected` 同值）。
+- UI 的「主機」下拉可直接用這個陣列；sidebar 的 host 徽章在 `project.host !== "local"` 時才顯示。
+- `error` 為 `null` 或人類可讀的錯誤字串（ssh 認證失敗、herdr 起不來、ping 失敗…）。
+- `projects[].host` 永遠存在，本機專案為 `"local"`。
+
+### bot `lamp`
+
+host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 `lamp` 一律為 `"disconnected"`
+（灰），不論 run 狀態為何。本機 bot 的行為不變（沿用頂層 `connected`）。
+
+### `POST /api/hosts`
+
+新增或更新一台遠端主機。寫回 `config.toml` 的 `[[hosts]]`，接著**立即**嘗試連線後才回應
+（含 ensure remote session + ssh master + ping，最多約 20 秒）。
+
+```json
+{
+  "name": "m4p",
+  "ssh": "m4p@100.112.229.82",
+  "ssh_port": 22,
+  "herdr_session": "agents-manager",
+  "remote_path": "/opt/homebrew/bin:$HOME/.local/bin",
+  "hook_port": 7788,
+  "ssh_opts": ["-i", "/path/to/key"]
+}
+```
+
+| 欄位 | 必填 | 預設 |
+|---|---|---|
+| `name` | ✅ | —，須符合 `[a-z][a-z0-9_-]{0,31}`，`"local"` 保留 |
+| `ssh` | ✅ | — ，`user@host` 或 ssh_config 別名 |
+| `ssh_port` | | `22` |
+| `herdr_session` | | `"agents-manager"` |
+| `remote_path` | | `""`（非互動 ssh shell 缺少的 PATH，會前置到遠端 PATH） |
+| `hook_port` | | daemon 自己的 port（預設 7788） |
+| `ssh_opts` | | `[]`，額外的 ssh 參數，原樣附加到每個 ssh 指令（例：`["-i","~/.ssh/id_x"]`） |
+
+回應 `200`：
+
+```json
+{ "name": "m4p", "connected": true, "error": null }
+```
+
+連不上時仍回 `200`（設定已寫入），`connected: false` 且 `error` 有字串；UI 應顯示錯誤並提供重連。
+名稱不合法或為 `local` → `400`。已存在同名 host → 視為更新（會先斷開舊連線再以新設定連）。
+
+### `DELETE /api/hosts/{name}`
+
+`200 {}`。仍有 project 使用該 host → `409 {"error":"conflict","reason":"host still used by projects","project_id":"..."}`。
+`name = "local"` → `400`。
+
+### `POST /api/hosts/{name}/reconnect`
+
+強制斷開並重建 ssh master 與訂閱，回應同 `POST /api/hosts`：
+
+```json
+{ "name": "m4p", "connected": true, "error": null }
+```
+
+`local` 亦可呼叫（重新 ping 本機 herdr）。找不到 host → `404`。
+
+### `POST /api/projects` 新增 `host`
+
+```json
+{ "path": "/Users/m4p/work/foo", "label": "foo@m4p", "host": "m4p" }
+```
+
+`host` 可省（預設 `"local"`）。指定未設定的 host → `404 {"error":"not_found","what":"host"}`。
+**遠端 project 的 `path` 不做本機 canonicalize**（本機不存在該路徑）：daemon 會透過 ssh 檢查該目錄
+存在並取得遠端 canonical path，失敗 → `400`。
+
+### `GET /api/fs/dirs?host=<name>&path=<path>`
+
+`host` 可省（預設 `local`）。指定 host 時，daemon 透過 ssh 列出**遠端**目錄，回傳格式與本機完全相同：
+
+```json
+{"path":"/Users/m4p/work","parent":"/Users/m4p","home":"/Users/m4p",
+ "entries":[{"name":"foo","path":"/Users/m4p/work/foo","git":true}]}
+```
+
+host 不存在 → `404`；host 斷線或 ssh 失敗 → `502 {"error":"upstream","message":"..."}`。
+
+### WebSocket 事件變更
+
+| type | data |
+|---|---|
+| `daemon_status` | `{"herdr_connected":true,"connected":true,"hosts":{"local":{"connected":true,"error":null},"m4p":{"connected":false,"error":"..."}}}` |
+| `host_changed` | `{"name":"m4p","connected":true,"error":null}` |
+
+- `daemon_status` 的 `connected` 保留為 `herdr_connected` 的同義欄位（相容舊前端），新程式請用
+  `herdr_connected`；`hosts` 是 map，key 為 host name（含 `local`）。
+- `host_changed` 在 host 連上 / 斷線 / 新增 / 刪除 / 設定變更時推送。刪除時送
+  `{"name":"m4p","connected":false,"error":"removed"}`，並同時推 `project_changed`。
+- host 連線狀態改變時，該 host 底下每個 bot 也會收到 `bot_status`（`lamp` 已反映 disconnected）。
