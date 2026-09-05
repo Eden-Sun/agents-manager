@@ -693,7 +693,84 @@ pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id:
     };
     let _ = sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(&turn_id).execute(&app.db).await;
     emit_turn(app, &turn_id).await;
+    if delivery == "ok" {
+        arm_stall(app, &run.id, bot_id, &turn_id).await;
+    }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into() })
+}
+
+// ---------------------------------------------------------------- prompt-stall watchdog
+
+const STALL_SECS: u64 = 12;
+
+/// After a delivered prompt the agent must leave `idle` within `STALL_SECS`; otherwise the
+/// Turn would sit `in_flight` forever (e.g. Claude "Not logged in", or a modal we cannot see)
+/// and the composer would stay locked. Cancelled by the first `working` / `blocked` event.
+pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
+    let mut timers = app.stall_timers.lock().await;
+    if let Some(h) = timers.remove(run_id) {
+        h.abort();
+    }
+    let app2 = app.clone();
+    let run_id = run_id.to_string();
+    let bot_id = bot_id.to_string();
+    let turn_id = turn_id.to_string();
+    let key = run_id.clone();
+    let h = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(STALL_SECS)).await;
+        let lock = app2.bot_lock(&bot_id).await;
+        let _g = lock.lock().await;
+        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id).await {
+            tracing::warn!(error = ?e, "stall watchdog failed");
+        }
+        app2.stall_timers.lock().await.remove(&run_id);
+    });
+    timers.insert(key, h);
+}
+
+pub async fn cancel_stall(app: &Arc<App>, run_id: &str) {
+    if let Some(h) = app.stall_timers.lock().await.remove(run_id) {
+        h.abort();
+    }
+}
+
+async fn fail_stalled_turn(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) -> anyhow::Result<()> {
+    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(()) };
+    if run.agent_status == "working" || run.agent_status == "blocked" {
+        return Ok(());
+    }
+    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(()) };
+    if turn.id != turn_id || turn.delivery != "ok" {
+        return Ok(());
+    }
+    // Peek at the screen for a human-readable reason before giving up.
+    let mut reason = format!("agent 在 {STALL_SECS} 秒內沒有對訊息作出反應（狀態一直是 {}）", run.agent_status);
+    let mut snapshot: Option<String> = None;
+    if let Ok(client) = client_for_bot(app, bot_id).await {
+        if let Some(pane) = run.pane_id.as_deref() {
+            if let Ok(read) = client.pane_read(pane, "visible", 60).await {
+                let low = read.text.to_lowercase();
+                if low.contains("not logged in") || low.contains("/login") {
+                    reason = "agent 尚未登入（畫面顯示 Not logged in · Please run /login）。請在該主機用同一身份執行一次 claude 完成登入。".into();
+                } else if low.contains("usage limit") || low.contains("session limit") {
+                    reason = "agent 帳號已達用量上限（畫面顯示 usage / session limit）。".into();
+                }
+                snapshot = Some(read.text);
+            }
+        }
+    }
+    let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
+        .bind(db::now())
+        .bind(turn_id)
+        .execute(&app.db)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Ok(());
+    }
+    tracing::warn!(turn = %turn_id, bot = %bot_id, %reason, "prompt stalled; turn failed");
+    insert_message(app, &turn.conversation_id, Some(turn_id), "system", &reason, "system", false, snapshot.as_deref()).await?;
+    emit_turn(app, turn_id).await;
+    Ok(())
 }
 
 pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
@@ -775,7 +852,9 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("host `{host}` is not configured"))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
-    let reply = extract_reply(&bot.kind, &fresh).unwrap_or_else(|| fresh.trim().to_string());
+    let reply = extract_reply(&bot.kind, &fresh)
+        .or_else(|| clean_screen(&bot.kind, &fresh))
+        .unwrap_or_else(|| "（終端沒有可辨識的回覆）".to_string());
 
     sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
         .bind(read.revision as i64)
@@ -828,6 +907,75 @@ fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
     text.to_string()
 }
 
+/// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
+fn is_noise(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let first = s.chars().next().unwrap_or(' ');
+    if "▐▝▛▜█╭╮╰╯│▔✻✽✶✳⏵⚠·".contains(first) {
+        return true;
+    }
+    if s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_' || c == ' ') {
+        return true;
+    }
+    // Claude Code status bar: "user | project | model | 5h:- | 7d:-"; codex: "gpt-… · ~/dir · 5h 60% left"
+    if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:"))) || (s.contains(" · ") && s.contains("left")) {
+        return true;
+    }
+    s.starts_with("Claude Code v") || s.starts_with("Tip:") || s.starts_with("Ask Codex") || s.contains("shift+tab to cycle")
+}
+
+/// No reply marker found: keep whatever the agent printed after the last prompt echo,
+/// minus TUI chrome. Tool-result lines (`⎿ …`) are kept because they usually carry the
+/// actual error ("Not logged in · Please run /login").
+fn clean_screen(kind: &str, text: &str) -> Option<String> {
+    let echo = match kind {
+        "claude" => "❯ ",
+        "codex" => "› ",
+        _ => "",
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let start = if echo.is_empty() {
+        0
+    } else {
+        lines.iter().rposition(|l| {
+            let t = l.trim_start();
+            t.starts_with(echo) && t.len() > echo.len()
+        })
+        .map(|i| i + 1)
+        .unwrap_or(0)
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in &lines[start..] {
+        let s = line.trim();
+        if is_noise(s) {
+            continue;
+        }
+        // An empty prompt box means the transcript ended.
+        if s == "❯" || s == "›" {
+            break;
+        }
+        let s = s.strip_prefix("⎿ ").or_else(|| s.strip_prefix("⎿")).unwrap_or(s).trim();
+        if s.is_empty() {
+            if !out.last().map(|l: &String| l.is_empty()).unwrap_or(true) {
+                out.push(String::new());
+            }
+            continue;
+        }
+        out.push(s.to_string());
+    }
+    while out.last().map(|l| l.is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+    let joined = out.join("\n").trim().to_string();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 /// Provider-specific reply extraction from a terminal snapshot.
 fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let marker = match kind {
@@ -863,5 +1011,42 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
         None
     } else {
         Some(joined)
+    }
+}
+
+#[cfg(test)]
+mod extract_tests {
+    use super::*;
+
+    const NOT_LOGGED_IN: &str = "\
+ ▐▛███▛█   Claude Code v2.1.261
+▝▜██████▀  Haiku 4.5 · API Usage Billing
+  ▝▝ ▝▝    ~/project/hermes-agents/projects/pt
+
+ ⚠ AGENTS.md is over the 40.0k-char limit (57.0k chars) · /memory to free up context
+
+❯ echo 1
+  ⎿  Not logged in · Please run /login
+   · Run in another terminal: security unlock-keychain
+
+✻ Worked for 0s · done 1:07 AM
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  tony. | pt | HAI4.5 | 5h:- | 7d:-
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+";
+
+    #[test]
+    fn clean_screen_keeps_only_tool_result_lines() {
+        assert!(extract_reply("claude", NOT_LOGGED_IN).is_none());
+        let got = clean_screen("claude", NOT_LOGGED_IN).unwrap();
+        assert_eq!(got, "Not logged in · Please run /login");
+    }
+
+    #[test]
+    fn extract_reply_prefers_marker() {
+        let screen = "❯ Reply with PONG\n⏺ PONG\n✻ Cooked for 5s\n──────\n❯\n";
+        assert_eq!(extract_reply("claude", screen).unwrap(), "PONG");
     }
 }

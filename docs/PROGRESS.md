@@ -519,3 +519,17 @@ CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany           <- ✅ 展開成「該 h
    host 會停在 `disconnected` 並在 `error` 顯示 `could not determine remote herdr socket path`。
 9. **遠端 `~/.config/agents-manager/bots/<id>/` 不會被清掉**：DELETE Bot 只刪本機設定，
    遠端的 `hook.sh` / `claude-settings.json` / `hook.log` 留著（下次同 bot id 會覆寫）。
+
+
+## v3.2 — prompt-stall watchdog 與備援擷取清理（2026-09-06）
+
+問題（使用者截圖）：遠端 `cc1` 身份未登入，claude 對 prompt 完全不反應 → Turn 永遠 `in_flight`、輸入框鎖死；另一個回合的備援擷取把整個畫面（banner、⚠ 警告、狀態列）塞進氣泡。
+
+修正：
+- `lifecycle::arm_stall` / `cancel_stall` / `fail_stalled_turn`：delivery ok 後 12 秒內未見 `working`/`blocked` → CAS `in_flight → failed`，system 訊息含原因（畫面偵測 `Not logged in` / `usage limit`）與快照。`events.rs` 收到 working/blocked 即取消。
+- `lifecycle::clean_screen` + `is_noise`：無 `⏺`/`•` 標記時只保留最後 prompt 回音之後的內容並去雜訊，保留 `⎿` 行。
+
+驗收：
+- 遠端 `test`（cc1，未登入）送 `echo 2` → 12 秒後 `TURN failed ok`，system 訊息「agent 尚未登入（畫面顯示 Not logged in · Please run /login）…」；daemon log `prompt stalled; turn failed` ✅
+- 本機 `am-claude` 送 `Reply with exactly WATCHDOG-OK` → `completed`、`assistant/hook WATCHDOG-OK`，stall 計數未增加（working 事件已取消 watchdog）✅
+- `cargo test -p agents-managerd extract_tests`：以截圖畫面為 fixture，`clean_screen` 只留下 `Not logged in · Please run /login`；`extract_reply` 仍優先取 `⏺` 行 ✅

@@ -47,6 +47,8 @@ pub struct App {
     pub global_watchers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> pending terminal-fallback timer
     pub fallback_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// run_id -> prompt-stall watchdog (delivered but the agent never went `working`)
+    pub stall_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl App {
@@ -79,6 +81,7 @@ impl App {
             pane_watchers: Mutex::new(HashMap::new()),
             global_watchers: Mutex::new(HashMap::new()),
             fallback_timers: Mutex::new(HashMap::new()),
+            stall_timers: Mutex::new(HashMap::new()),
         })
     }
 
