@@ -559,6 +559,13 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     if !app.host_connected(&host).await {
         return Err(LcError::Upstream(format!("host `{host}` is not connected")));
     }
+    // 1b. preflight: the agent CLI must exist on that host, otherwise herdr would sit in
+    //     `launch_pending` for the whole 60 s timeout with nothing to tell the user.
+    if let Err(reason) = ensure_kind_installed(app, &host, &bot.kind).await {
+        let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
+        let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
+        return Err(LcError::Bad(reason));
+    }
     let hook_port = match app.hosts.get(&host).await {
         Some(c) => c.hook_port(app.port),
         None => app.port,
@@ -650,6 +657,53 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     }
     app.emit_bot_status(&bot.id).await;
     Ok(())
+}
+
+/// Look the kind's executable up the way the pane will see it: through the user's *login*
+/// shell (`$SHELL -lic`), falling back to the plain PATH. Returns a user-facing reason when
+/// it is missing. Best effort — a lookup that itself fails (timeout, odd shell) passes.
+async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result<(), String> {
+    if !crate::config::valid_kind(kind) {
+        return Err(format!("未知的 bot kind `{kind}`"));
+    }
+    let probe = format!(
+        "( \"${{SHELL:-/bin/sh}}\" -lic 'command -v {kind}' 2>/dev/null || command -v {kind} 2>/dev/null ) | tail -1"
+    );
+    let found: Option<String> = if host == LOCAL_HOST {
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new("/bin/sh").arg("-c").arg(&probe).output(),
+        )
+        .await;
+        match out {
+            Ok(Ok(o)) => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+            _ => None, // could not probe → do not block the start
+        }
+    } else {
+        match app.hosts.get(host).await {
+            Some(conn) => match conn.ssh_exec_path(&probe).await {
+                Ok(o) => Some(o.trim().to_string()),
+                Err(e) => {
+                    tracing::warn!(host, kind, error = %e, "kind preflight could not run; continuing");
+                    None
+                }
+            },
+            None => None,
+        }
+    };
+    match found {
+        Some(path) if path.is_empty() => {
+            let where_ = if host == LOCAL_HOST { "本機".to_string() } else { format!("主機 {host}") };
+            Err(format!(
+                "{where_}上找不到 `{kind}` 執行檔（用登入 shell 檢查 `command -v {kind}` 沒有結果）。請先在該主機安裝 {kind}，或確認它在登入 shell 的 PATH 中；遠端主機也可在主機設定的 remote_path 補上路徑。"
+            ))
+        }
+        Some(path) => {
+            tracing::debug!(host, kind, %path, "kind preflight ok");
+            Ok(())
+        }
+        None => Ok(()),
+    }
 }
 
 async fn set_run(app: &Arc<App>, run_id: &str, state: &str, agent_status: &str) {
@@ -785,17 +839,21 @@ pub struct PromptOut {
 }
 
 pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None).await
+    prompt_grouped(app, bot_id, text, client_request_id, None, None).await
 }
 
 /// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
+/// `deliver` is what the agent actually receives; `text` is what the timeline shows. The
+/// group chat passes the mention-stripped variant so a bot never sees `@all`.
 pub async fn prompt_grouped(
     app: &Arc<App>,
     bot_id: &str,
     text: &str,
     client_request_id: &str,
     group_id: Option<&str>,
+    deliver: Option<&str>,
 ) -> LcResult<PromptOut> {
+    let deliver = deliver.unwrap_or(text);
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
 
@@ -888,7 +946,7 @@ pub async fn prompt_grouped(
     // 4. deliver
     let res = client_for_bot(app, bot_id)
         .await?
-        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": text}), Duration::from_secs(10))
+        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": deliver}), Duration::from_secs(10))
         .await;
     let delivery = match res {
         Ok(_) => "ok",

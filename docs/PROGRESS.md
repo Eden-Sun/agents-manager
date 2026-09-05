@@ -734,3 +734,9 @@ herdr 測試 session `am-grok` 已 `server stop` + `session delete`；探測用�
 2. 全域 `~/.grok/hooks/agents-manager.json` 在刪除最後一個 grok bot 後不會被清掉（無害 no-op），第二階段可加清理。
 3. `session_start` 延遲觸發，所以 grok bot 剛啟動時 `runs.native_session_id` 為空，直到第一次 prompt。
 4. grok 的 Stop hook 在回合結束時是 gate（預設 600 秒 timeout），子命令 ≤ 3 秒且 stdout 為空，不會卡住回合；但 hook 失敗對 grok 是 fail-open，不會有錯誤提示，只能從 daemon log / `hook.log` 看。
+
+## v3.7 — 啟動前檢查執行檔、群組訊息去掉 mention（2026-09-06）
+
+- **preflight**（`lifecycle::ensure_kind_installed`）：start 前用該主機的登入 shell（`$SHELL -lic 'command -v <kind>'`，退回 plain PATH）確認 claude / codex / grok 存在；找不到 → 400 + 該 bot 對話一則 system 訊息，Run 不建立。實測 m4p 建 grok bot → `HTTP 400 in 0.33s`，訊息「主機 m4p 上找不到 `grok` 執行檔…」；之前會在 `starting` 轉 60 秒後靜默失敗。
+- **群組 mention 去除**（`group::strip_mentions`）：送給 bot 的文字移除 `@all` / `@<member>`（含尾隨 `,` `:` `;`），時間軸保留原文；全部是 mention 時退回原文。實測 `@am-claude Reply with exactly STRIP-OK` → bot 終端只看到去掉 `@am-claude` 的內容並回 `STRIP-OK`，時間軸 user 訊息仍為原文。5 個單元測試。
+- 合併後修正：`hookrecv.rs` 兩個 `classify_tests` 模組重名（grok 分支與 codex 標題過濾各一），後者改名 `codex_title_tests`；`cargo test` 21 passed。
