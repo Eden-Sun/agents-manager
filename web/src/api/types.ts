@@ -181,6 +181,8 @@ export interface Run {
   workspace_id: string | null
   pane_id: string | null
   adopted: boolean
+  /** agent 目前替自己取的名字（herdr `terminal_title_stripped`，claude 會寫成當前任務摘要）。 */
+  agent_title: string | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string

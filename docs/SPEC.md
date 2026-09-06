@@ -393,7 +393,14 @@ grok 1.0.13 的 TUI **沒有**每次啟動注入 hook 的旗標（`--settings` /
 
 ### 12.6 額度：`/usage` 探測
 
-grok CLI 沒有 `usage` 子命令，也沒有可查額度的 RPC；數字只存在 TUI 的 `/usage` 對話框裡。daemon 因此開一個**用完即丟**的 herdr workspace 探測：
+grok CLI 沒有 `usage` 子命令，也沒有可查額度的 RPC；數字只存在 TUI 的 `/usage` 對話框裡。daemon 因此開一個**用完即丟**的 herdr workspace 探測。
+
+探測跑在**專屬的 herdr session `am-quota`**（daemon 需要時以 `herdr --session am-quota server` 起，永遠不 attach），不是使用者那個 session。兩個理由：
+
+- **寬度**：pane 寬度來自 attach 的 client。使用者終端若只有 32 欄，grok 會把 `/usage` 對話框截掉右緣，百分比整個不見（只剩 `█████░░░…`），怎麼等都解析不出來——這就是「一直顯示背景查詢中」的原因。沒有 client 的 session 用寬預設格線（~180 欄）算版，數字才完整。
+- **打擾**：每 30 秒在使用者正在看的 workspace 閃一個 grok pane 不能接受。
+
+流程：
 
 1. `workspace.create`（`focus:false`，label `am-quota-grok`，cwd = 家目錄）
 2. `agent.start` kind `grok`、無額外 argv，名稱 `amquota<6碼>`（不在 DB 裡，對帳永遠不會把它當成 bot）
@@ -401,6 +408,8 @@ grok CLI 沒有 `usage` 子命令，也沒有可查額度的 RPC；數字只存�
 4. `pane.send_text "/usage"` → 0.8 秒 → `pane.send_keys ["Enter"]`
 5. 每 0.9 秒 `pane.read visible 120`，最多 25 秒，直到畫面解析得出額度
 6. `workspace.close`（放在 `Drop` 裡，錯誤路徑也會關）
+
+daemon 若在探測中途被砍，workspace 會留下來、裡面的 grok 也還活著。所以 poller 啟動時先 `sweep_stale()`：把 `am-quota` 與本機 session 裡 label 為 `am-quota-grok` 的 workspace 全部關掉（本機那份是為了清掉舊版把探測開在使用者 session 的殘留）。
 
 畫面（去掉框線）長這樣：
 
@@ -424,6 +433,8 @@ Resets: September 12, 16:28
 | Q1 | 探測 pane 跑 `/usage` | 對話框在 ~4 秒內出現，`Weekly limit (SuperGrok) 14% Resets: September 12, 16:28` |
 | Q2 | `GET /api/quota` 的 `grok` | `{"plan":"SuperGrok","five_hour":null,"seven_day":{"used_pct":14.0,"resets_at":"2026-09-12T08:28:00.000Z"},"source":"grok-usage"}`，與 TUI 逐字相符 |
 | Q3 | 額度列 | 三個 kind 同列：claude 2 條、codex 2 條、grok 1 條（`docs/screenshots/227-quota-grok-1400.png`） |
+| Q4 | 32 欄的 pane | 對話框截斷成 `█████░░░…`（無百分比）、`Resets: September 12, 16:2`，25 秒逾時；換到未 attach 的 session 後同一份程式碼解析成功 |
+| Q5 | 不打擾 / 不殘留 | 每 8 秒取樣 6 次：使用者 session 一路只有 `agents-manager` 一個 workspace，探測 workspace 只在 `am-quota` session 短暫出現；重啟時 `sweep_stale` 關掉了 2 個舊版殘留 |
 
 ### 12.7 驗收
 | # | 內容 | 結果（2026-09-06，本機） |

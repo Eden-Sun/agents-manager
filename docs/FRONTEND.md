@@ -682,8 +682,9 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 
 - `GET /api/quota` + WS `quota_updated` → store `quota`；`QuotaStrip` 置中於 Chat / Group
   標題列（**不在** `App.tsx`）。
-- 顯示 `5h 剩 N% · 7d 剩 N%`；剩餘 &lt; 20% 警示色；hover 顯示重置時間與 plan；
-  `claude:<identity>` 以小字掛在對應 kind 下。
+- 顯示 `5h` / `7d` 血條（有回報的視窗才畫）；剩餘低於門檻警示色；hover 顯示重置時間與 plan。
+- `claude:<identity>`（例如 `claude:cc1`）各自獨立一條 gauge，kind 圖示旁以小字標身份名稱；
+  與預設帳號的 `claude` 列並存（cc0 / cc1 都在時就會看到兩條 Claude）。
 - 失敗 / 空 map → 整列不渲染。
 
 ### 8.5 工具偵測與安裝
@@ -843,3 +844,18 @@ LiveBubble 例外——輸出一直往下長，狀態放在成長的那一端才
 一鍵之後必要的防呆；啟動無害，直接執行。`.bot-row` 的 `menu-open` 隨之更名為 `confirming`
 （確認框開著時，圖示不要淡出）。截圖：`260`/`261`（■ 停止，深/淺色）、`262`（▶ 啟動）、
 `263`（停止確認框）。
+
+## Bot 列：agent 自己的名字 + 拿掉停止鍵（2026-09-06）
+
+**執行中顯示 agent 取的名字**：bot 名稱旁原本寫「執行中」，現在改顯示 `run.agent_title`
+（API.md「run.agent_title」）——claude 會把當前任務寫成標題，所以那行直接告訴你這隻 bot 正在
+忙什麼。斜體、`--text-faint`、可截斷（標題常常很長），tooltip 給全文。
+
+只有 `working` / `idle` 時才用標題取代狀態字：`blocked` / `starting` / `stopping` 是使用者要
+處理的狀態，那些字不能被蓋掉。沒有標題（或標題被後端判定為預設值）就回到原本的行為。
+
+**拿掉側欄的停止鍵**：平常不會需要停止 bot，一顆常駐的 ■ 只是佔位置又容易誤觸。現在執行中的
+列只有 ⚙；沒在跑的列才有 ▶ 啟動。要停止就進那隻 bot 的對話，用標題列的「停止」（那裡本來就
+有確認框）。連帶移除 `StopIcon`、`ConfirmDialog` 的 import 與 `.bot-row.confirming`。
+
+截圖：`270-agent-titles-dark` / `271-agent-titles-light`。

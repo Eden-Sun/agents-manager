@@ -302,7 +302,7 @@ button:disabled {
   padding: 4px 8px 4px 11px;
   border-left: 3px solid transparent;
   cursor: pointer;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .project-head > .icon-btn,
@@ -542,6 +542,15 @@ button:disabled {
 .bot-state.idle,
 .bot-state.offline {
   display: none;
+}
+
+/* The agent's own label, in place of the status word. Quieter than the name it sits next
+   to, and it truncates — these run long ("Left menu cc0 cc1 annotations"). */
+.bot-state.agent-title {
+  min-width: 0;
+  color: var(--text-faint);
+  font-weight: 400;
+  font-style: italic;
 }
 
 .bot-state.working {
@@ -2182,6 +2191,102 @@ button:disabled {
   align-self: center;
 }
 
+/* ---- attach (在終端開啟) ---- */
+.attach {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.attach-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.attach-btn:hover:not(:disabled),
+.attach-btn.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.attach-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(260px, calc(100vh - 32px));
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: left;
+  white-space: normal;
+}
+
+.attach-hint {
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.attach-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attach-cmd {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.btn.primary.ok {
+  background: var(--lamp-green);
+  border-color: var(--lamp-green);
+}
+
+/* The sidebar button is compact, while its command panel spans the project head. */
+.project-head .attach {
+  position: static;
+}
+
+.project-head .attach-btn {
+  opacity: 0;
+  padding: 2px 4px;
+}
+
+.project-head:hover .attach-btn,
+.project-head .attach-btn:focus-visible,
+.project-head .attach-btn.on {
+  opacity: 1;
+}
+
+.project-head .attach-pop {
+  left: 8px;
+  right: 8px;
+  width: auto;
+}
+
+.host-row .attach-btn {
+  padding: 2px 4px;
+}
+
 /* ---- markdown inside assistant bubbles ---- */
 .bubble.md {
   white-space: normal;
@@ -2501,7 +2606,7 @@ button:disabled {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: rgb(0 0 0 / 24%);
+  background: rgb(0 0 0 / 14%);
 }
 
 .bot-settings {
@@ -2538,7 +2643,8 @@ button:disabled {
   min-height: 56px;
   padding: 0 20px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
+  /* 頭尾壓一階、表單區留白，彈窗才有層次。 */
+  background: var(--bg-side);
   flex: none;
 }
 
@@ -2625,10 +2731,18 @@ button:disabled {
   min-height: 72px;
   padding: 0 24px;
   border-top: 1px solid var(--border);
-  background: var(--bg-panel);
+  background: var(--bg-side);
   flex: none;
   position: sticky;
   bottom: 0;
+}
+
+/* 不能存的「儲存」不該還是淡藍實心（看起來像可按）：退成中性 disabled。 */
+.bs-actions .btn.primary:disabled {
+  opacity: 1;
+  background: var(--bg-sunken);
+  border-color: var(--border);
+  color: var(--text-faint);
 }
 
 .bs-danger {
@@ -2637,9 +2751,10 @@ button:disabled {
   gap: 12px;
   margin-top: 32px;
   padding: 12px 14px;
-  border: 1px solid var(--danger);
+  /* 紅色留給標題與按鈕；整塊粉紅會蓋過表單本身。 */
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--danger-soft);
+  background: var(--bg-sunken);
 }
 
 .bs-danger > div {
@@ -3108,6 +3223,18 @@ button:disabled {
   align-items: center;
   gap: 5px;
   padding: 0 2px;
+}
+
+.quota-identity {
+  flex: none;
+  max-width: 4.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .quota-kind {

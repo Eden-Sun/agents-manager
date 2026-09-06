@@ -3,7 +3,8 @@
 //! * codex: polled from the local `codex app-server` (`account/rateLimits/read`) at start-up,
 //!   every 5 min and on `?refresh=1`.
 //! * claude: pushed by the daemon-injected statusLine command (`StatusLine` hook event);
-//!   keyed `claude`, plus `claude:<identity>` when the bot runs under an identity.
+//!   keyed `claude` for bots with no identity, or `claude:<identity>` when the bot runs under one
+//!   (identity bots do not overwrite the default-account `claude` row).
 //! * grok: scraped from the TUI's `/usage` dialog in a throwaway pane every 30 s — see
 //!   [`crate::quota_grok`]; grok exposes no CLI or RPC surface for it.
 

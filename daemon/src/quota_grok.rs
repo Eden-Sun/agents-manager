@@ -1,10 +1,15 @@
 //! grok quota (SPEC §12.6).
 //!
 //! grok's CLI has no `usage` subcommand and no rate-limit RPC — the numbers only exist inside
-//! the TUI's `/usage` dialog. So the daemon opens a throwaway herdr workspace, starts a grok
-//! agent in it, types `/usage`, reads the rendered dialog back through `pane.read`, parses it
-//! and closes the workspace again. The probe pane is never focused and never adopted as a bot
-//! (reconcile only matches agents named in the DB), so it is invisible to the user.
+//! the TUI's `/usage` dialog. So the daemon opens a throwaway pane, starts a grok agent in it,
+//! types `/usage`, reads the rendered dialog back through `pane.read`, parses it and closes the
+//! pane again.
+//!
+//! The probe runs in its **own herdr session** (`am-quota`), never the user's. Two reasons:
+//! a pane in the user's session is as wide as their terminal, and grok truncates the dialog —
+//! at 32 columns the percentage is cut off the right edge entirely and no probe can ever
+//! succeed; an unattached session renders at a wide default grid instead. And a probe every
+//! 30 s must not flash panes through the workspace the user is looking at.
 //!
 //! The dialog looks like this (box drawing trimmed):
 //!
@@ -193,6 +198,56 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
 
 // ------------------------------------------------------------------ the probe
 
+/// The dedicated herdr session the probe lives in. Never attached, so it renders wide.
+const PROBE_SESSION: &str = "am-quota";
+/// Label on every probe workspace, so stale ones are recognisable after a daemon restart.
+const PROBE_LABEL: &str = "am-quota-grok";
+
+/// A client for [`PROBE_SESSION`], starting its herdr server the first time.
+async fn probe_client() -> Result<HerdrClient> {
+    let client = HerdrClient::new(HerdrClient::session_socket(PROBE_SESSION));
+    if client.ping().await.is_ok() {
+        return Ok(client);
+    }
+    // `herdr --session … server` stays in the foreground; detach it and wait for the socket.
+    std::process::Command::new("/bin/sh")
+        .arg("-lc")
+        .arg(format!("exec herdr --session {PROBE_SESSION} server"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow!("could not start the `{PROBE_SESSION}` herdr session: {e}"))?;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if client.ping().await.is_ok() {
+            return Ok(client);
+        }
+    }
+    Err(anyhow!("the `{PROBE_SESSION}` herdr session did not come up"))
+}
+
+/// Close probe workspaces left behind by a daemon that died mid-probe — each one still holds a
+/// live grok process. Also sweeps the local session, where probes ran before they moved out.
+pub async fn sweep_stale(app: &Arc<App>) {
+    let mut clients = Vec::new();
+    if let Ok(c) = probe_client().await {
+        clients.push(c);
+    }
+    if let Some(c) = app.herdr_for(LOCAL_HOST).await {
+        clients.push(c);
+    }
+    for c in clients {
+        let Ok(list) = c.workspace_list().await else { continue };
+        for ws in list.iter().filter(|w| w.label.as_deref() == Some(PROBE_LABEL)) {
+            match c.workspace_close(&ws.workspace_id).await {
+                Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a stale grok quota probe"),
+                Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "stale probe not closed"),
+            }
+        }
+    }
+}
+
 /// Closes the probe workspace on every exit path, including the error ones.
 struct Probe {
     client: HerdrClient,
@@ -220,12 +275,9 @@ pub async fn refresh_grok(app: &Arc<App>) -> Result<bool> {
     if crate::tools::cached_path(app, LOCAL_HOST, "grok").await.is_none() {
         return Ok(false);
     }
-    let client = app.herdr_for(LOCAL_HOST).await.ok_or_else(|| anyhow!("local host is not configured"))?;
-    if !app.host_connected(LOCAL_HOST).await {
-        return Err(anyhow!("local herdr is not connected"));
-    }
+    let client = probe_client().await?;
     let cwd = dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into());
-    let (ws, pane) = client.workspace_create(&cwd, "am-quota-grok", json!({})).await?;
+    let (ws, pane) = client.workspace_create(&cwd, PROBE_LABEL, json!({})).await?;
     let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone() };
     let pane_id = pane.pane_id.clone();
 
@@ -260,6 +312,7 @@ pub async fn refresh_grok(app: &Arc<App>) -> Result<bool> {
 /// Start-up + every 30 min.
 pub fn spawn_grok_poller(app: Arc<App>) {
     tokio::spawn(async move {
+        sweep_stale(&app).await;
         loop {
             match refresh_grok(&app).await {
                 Ok(true) => {}

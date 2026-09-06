@@ -258,6 +258,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     workspace_id: optStr(v.workspace_id),
     pane_id: optStr(v.pane_id),
     adopted: bool(v.adopted),
+    agent_title: optStr(pick(v, 'agent_title', 'agentTitle')),
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),
