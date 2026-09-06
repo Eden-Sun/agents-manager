@@ -666,6 +666,9 @@ export function Sidebar() {
     () => identitiesOfHost(configuredIdentities, localIdentityStatus).length,
     [configuredIdentities, localIdentityStatus],
   )
+  // 刪 Project 本來是 `window.confirm()`：整個 app 只有這裡（與主機／身分）跳原生對話框，
+  // 沒有專案全名以外的說明，也沒有 focus trap。改用跟其他刪除一致的 `ConfirmDialog`。
+  const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
@@ -788,7 +791,7 @@ export function Sidebar() {
                     data-tip={`刪除專案 · ${p.label}`}
                     onClick={(e) => {
                       e.stopPropagation()
-                      if (confirm(`刪除 Project「${p.label}」？（不會刪除目錄）`)) void removeProject(p.id)
+                      setDeleteProject({ id: p.id, label: p.label })
                     }}
                   >
                     ✕
@@ -851,6 +854,25 @@ export function Sidebar() {
       >
         <NewBotForm key={botFormFor ?? 'pick'} initialProjectId={botFormFor ?? undefined} onDone={closeBotSheet} />
       </Modal>
+
+      <ConfirmDialog
+        open={deleteProject !== null}
+        title="刪除 Project"
+        body={
+          <>
+            要把 <strong>{deleteProject?.label}</strong> 從清單移除嗎？磁碟上的目錄與其中的檔案都不會動，
+            這個 Project 底下的 Bot 需要先停止。
+          </>
+        }
+        confirmLabel="刪除 Project"
+        danger
+        onCancel={() => setDeleteProject(null)}
+        onConfirm={() => {
+          const id = deleteProject?.id
+          setDeleteProject(null)
+          if (id) void removeProject(id)
+        }}
+      />
 
       <Modal open={open === 'env'} title="環境設定" width={560} onClose={() => setOpen(null)}>
         <div className="env-panel">

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { useStore } from '../store/store'
+import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 
 /**
@@ -90,6 +91,7 @@ function IdentityRow({ name }: { name: string }) {
   const ident = useStore((s) => s.identities.find((i) => i.name === name))
   const used = useStore((s) => s.bots.filter((b) => b.identity === name).length)
   const removeIdentity = useStore((s) => s.removeIdentity)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   if (!ident) return null
   const envText = envToText(ident.env)
   return (
@@ -109,12 +111,29 @@ function IdentityRow({ name }: { name: string }) {
         type="button"
         className="icon-btn"
         title={used > 0 ? '仍有 Bot 使用這個身份' : '刪除身份'}
-        onClick={() => {
-          if (confirm(`刪除身份「${name}」？`)) void removeIdentity(name)
-        }}
+        onClick={() => setConfirmDelete(true)}
       >
         ✕
       </button>
+      {/* 本來是 `window.confirm()`；跟主機、Project 一起換成同一顆確認框。 */}
+      <ConfirmDialog
+        open={confirmDelete}
+        title="刪除身份"
+        body={
+          <>
+            要把身份 <strong>{name}</strong> 移除嗎？
+            {used > 0 ? `目前還有 ${used} 個 Bot 用它。` : '目前沒有 Bot 在用它。'}
+            已經登入的帳號本身不受影響。
+          </>
+        }
+        confirmLabel="刪除身份"
+        danger
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => {
+          setConfirmDelete(false)
+          void removeIdentity(name)
+        }}
+      />
     </div>
   )
 }
