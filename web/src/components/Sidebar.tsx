@@ -19,6 +19,7 @@ import type { SocketStatus } from '../store/store'
 import { CloneIcon, GearIcon, PlayIcon, TrashIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
+import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
@@ -783,19 +784,22 @@ export function Sidebar() {
                   >
                     ＋
                   </button>
-                  <button
-                    type="button"
-                    className="icon-btn icon-tip"
-                    title={`刪除專案「${p.label}」（所有 Bot 需先停止）`}
-                    aria-label={`刪除專案 ${p.label}`}
-                    data-tip={`刪除專案 · ${p.label}`}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setDeleteProject({ id: p.id, label: p.label })
-                    }}
-                  >
-                    ✕
-                  </button>
+                  {/* 刪除專案本來是一顆 `✕`，就排在「新增 Bot」的 `＋` 旁邊——建設性與
+                      破壞性的動作肩並肩，而且在選取中的專案上是常駐的。跟 Team 標題列
+                      同一顆 `⋯`。 */}
+                  <HeadMoreMenu label={`更多動作 · ${p.label}`}>
+                    <button
+                      type="button"
+                      className="head-menu-item danger"
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setDeleteProject({ id: p.id, label: p.label })
+                      }}
+                    >
+                      刪除專案…
+                    </button>
+                  </HeadMoreMenu>
                 </span>
               </header>
               {list.length === 0 ? (
