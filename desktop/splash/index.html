@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>agents-manager</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; gap: 14px;
+    font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    background: #fbfbfd; color: #1d1d1f;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #1c1c1e; color: #f2f2f7; } }
+  .box { text-align: center; max-width: 34em; padding: 0 2em; }
+  .dot {
+    width: 22px; height: 22px; margin: 0 auto 14px; border-radius: 50%;
+    border: 2px solid currentColor; border-top-color: transparent;
+    animation: spin .8s linear infinite; opacity: .55;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .hint { opacity: .6; margin-top: .6em; }
+  .bad .dot { display: none; }
+  .cmd {
+    margin: .8em auto 0; padding: .5em .8em; max-width: 30em; border-radius: 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    background: rgba(120, 120, 140, .13); text-align: left; user-select: all;
+  }
+  .note { margin-top: 1em; font-size: 12px; opacity: .85; }
+</style>
+<div class="box" id="box">
+  <div class="dot"></div>
+  <div id="msg">正在啟動 agents-managerd…</div>
+  <div class="hint" id="hint">首次啟動需要建立 herdr session，可能要幾秒鐘。</div>
+</div>
+<script>
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c])
+  const bad = (msg, hint) => {
+    document.getElementById('box').className = 'box bad'
+    document.getElementById('msg').textContent = msg
+    document.getElementById('hint').innerHTML = hint
+  }
+
+  // Called by the shell when a required CLI is not on the login shell's PATH.
+  window.amMissing = (missing) => {
+    const names = missing.map(([bin]) => '<code>' + esc(bin) + '</code>').join('、')
+    const cmds = missing.map(([, hint]) => '<div class="cmd">' + esc(hint) + '</div>').join('')
+    bad(
+      '缺少必要的指令：' + missing.map(([bin]) => bin).join('、'),
+      '找不到 ' + names + '。請先安裝：' + cmds +
+      '<div class="note">安裝完成後重開 AgentsManager。若已安裝但仍出現這則訊息，' +
+      '表示它不在登入 shell 的 PATH 內 — 在終端機執行 ' +
+      '<code>zsh -lic \'which herdr\'</code> 確認。</div>',
+    )
+  }
+
+  // Called by the shell when the daemon never bound its port.
+  window.amFailed = (addr) => {
+    bad(
+      'agents-managerd 沒有在 ' + esc(addr) + ' 上啟動。',
+      '從終端機執行下面這行，看 daemon 的錯誤訊息：' +
+      '<div class="cmd">/Applications/AgentsManager.app/Contents/MacOS/AgentsManager</div>',
+    )
+  }
+</script>
