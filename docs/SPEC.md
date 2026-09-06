@@ -185,7 +185,8 @@ label = "foo"
 2. 取得或建立 workspace：`projects.workspace_id` 存在且 `workspace.get` 成功 → 用之；否則 `workspace.create {cwd, label, focus:false}` 並更新映射。
 3. 取得 pane：
    - 若 workspace 剛由本步驟建立 → 用 `root_pane`。
-   - 否則 `pane.split {target_pane_id: <該 workspace 任一 pane>, direction:"right", cwd, focus:false, env}`。
+   - 否則 `pane.split {target_pane_id: <該 workspace 中面積最大的 pane>, direction, cwd, focus:false, env}`。
+     **不是**第一個 pane（v4.2 修正）：一直切第一個會讓它每次減半，實測第 6 個 bot 只剩 **6 欄**，窄到 agent 的 TUI 把文字排成一欄、每列一個字，終端備援完全讀不出東西（§4.3）。改成先 `pane.layout` 取每個 pane 的矩形，挑面積最大的那個，沿長邊切——終端字元格高約為寬的兩倍，所以 `width >= height * 2` 才切 `right`，否則切 `down`。這樣長出來的是網格而不是階梯：同一個 185×54 視窗開 6 個 bot，舊規則最窄 6 欄，新規則最窄 **46 欄**（實測）。`pane.layout` 失敗時退回舊行為。
    - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`AM_HOOK_TOKEN`（v3.6；`inject_hooks = false` 時不給，grok 的分派腳本以此判斷是否回報）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
    - 失敗 → Run `exited`（`ended_at` 填入），回 502。
 4. 更新 Run 的 `workspace_id` / `pane_id`。產生 hook 注入檔（Claude）或參數（Codex）。
