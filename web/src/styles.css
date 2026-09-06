@@ -2883,7 +2883,7 @@ button:disabled {
   .scrim {
     position: fixed;
     inset: 0;
-    background: rgb(0 0 0 / 35%);
+    background: rgb(0 0 0 / 48%);
     z-index: 25;
     border: 0;
   }
@@ -3741,7 +3741,10 @@ button.model-tag[aria-expanded='true'] {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: rgb(0 0 0 / 14%);
+  /* 14% 幾乎等於沒有罩子：底下的對話照樣完整可讀，跟設定面板搶注意力。這個面板本來就
+     是 modal（focus trap、Escape 關閉、點外面關閉），罩子就該跟其他對話框一致。 */
+  background: rgb(16 20 28 / 58%);
+  backdrop-filter: blur(2px);
 }
 
 .bot-settings {
@@ -4305,7 +4308,10 @@ button.model-tag[aria-expanded='true'] {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgb(16 20 28 / 45%);
+  /* 45% 在淺色主題下幾乎沒把背景推遠——對話的文字仍然完全可讀，跟對話框搶注意力。
+     加深到 58%，再補一層極輕的模糊讓背景真的退到後面（不支援就只有加深）。 */
+  background: rgb(16 20 28 / 58%);
+  backdrop-filter: blur(2px);
 }
 
 .confirm-dialog {
@@ -4986,7 +4992,9 @@ button.model-tag[aria-expanded='true'] {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgb(16 20 28 / 45%);
+  /* 同 `.confirm-backdrop`。 */
+  background: rgb(16 20 28 / 58%);
+  backdrop-filter: blur(2px);
 }
 
 .modal {

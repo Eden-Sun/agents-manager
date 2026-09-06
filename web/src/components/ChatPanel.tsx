@@ -519,7 +519,9 @@ function Composer({
       ) : null}
       {showLock ? (
         <div className="composer-lock" role="status">
-          <span>⛔ {state.reason}</span>
+          {/* 拿掉 ⛔：emoji 吃不到 `color`（OS 自己上色），跟琥珀色的框對不上，
+              每個平台長得也不一樣。框與文字本身已經是訊號。 */}
+          <span>{state.reason}</span>
           {state.unknownTurnId ? (
             <button type="button" className="mini-btn" onClick={() => void abandonTurn(botId, state.unknownTurnId!)}>
               放棄該回合

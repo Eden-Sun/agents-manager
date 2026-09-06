@@ -381,7 +381,8 @@ function GroupComposer({
     <div className="composer group-composer">
       {state.disabled && state.reason ? (
         <div className="composer-lock" role="status">
-          <span>⛔ {state.reason}</span>
+          {/* 同 `ChatPanel`：emoji 吃不到 `color`，拿掉。 */}
+          <span>{state.reason}</span>
         </div>
       ) : null}
       <div className="recipient-row" role="group" aria-label="收件者">
