@@ -100,10 +100,16 @@ export function ApiModelFields({
           <button
             type="button"
             className={`opt${model === null && !customMode ? ' on' : ''}`}
-            title={defaultModel ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）` : '不帶 -m'}
+            title={
+              kind === 'claude'
+                ? '不帶 --model，由這個專案的 Claude 設定決定'
+                : defaultModel
+                  ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）`
+                  : '不帶 -m'
+            }
             onClick={() => pickModel(null)}
           >
-            使用 CLI 預設
+            {kind === 'claude' ? '不指定模型（專案預設）' : '使用 CLI 預設'}
           </button>
           {models.map((m) => (
             <button
