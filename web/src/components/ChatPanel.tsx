@@ -25,6 +25,7 @@ import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
 
+// `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
 const SOURCE_LABEL: Record<string, string> = {
   hook: '回覆',
   terminal_fallback: '終端擷取',
@@ -67,11 +68,14 @@ export function Bubble({
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
-          {system || msg.source === 'hook' || msg.source === 'system' ? (
+          {/* 來源只在「不是正常那條路」時才標。`hook` 是每一則回覆的常態，在每顆氣泡上
+              印一次「回覆」等於沒說話；會影響你要不要信這段文字的是另外那幾種——終端
+              擷取、對話紀錄、系統通知。 */}
+          {system || msg.source === 'system' ? (
             <span className="src-tag mono" title={`訊息來源：${msg.source}`}>
               {SOURCE_LABEL[msg.source] ?? msg.source}
             </span>
-          ) : msg.role === 'assistant' ? (
+          ) : msg.role === 'assistant' && msg.source !== 'hook' ? (
             <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`訊息來源：${msg.source}`}>
               {SOURCE_LABEL[msg.source] ?? msg.source}
             </span>
