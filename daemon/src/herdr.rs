@@ -52,6 +52,15 @@ pub struct WorkspaceInfo {
     pub pane_count: u32,
 }
 
+/// One tab of a workspace. `pane_count` is what tells a caller whether a tab still holds
+/// anything — the one thing the tab tidy-up in `lifecycle` needs from herdr.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TabInfo {
+    pub tab_id: String,
+    #[serde(default)]
+    pub pane_count: u32,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaneInfo {
     pub pane_id: String,
@@ -143,6 +152,23 @@ pub struct HerdrClient {
 }
 
 pub const EXPECTED_PROTOCOL: u32 = 20;
+
+/// Put an argument on one line, because herdr will not launch with one that isn't.
+///
+/// It types the command into a pane, so an embedded newline would read as Enter; it rejects
+/// the whole call with `invalid_agent_argument: agent arguments cannot be encoded safely for
+/// the target shell` (verified 2026-09-06 against herdr 0.8.2 — newlines are the *only* thing
+/// it refuses; backticks, quotes, `#` and CJK all pass).
+///
+/// A multi-line value is easy to arrive at by accident: a persona typed into the settings
+/// textarea, or a team's generated role brief. Folding to spaces loses the paragraph breaks
+/// but keeps every word, which beats a bot that silently refuses to start.
+fn fold_newlines(arg: &str) -> String {
+    if !arg.contains('\n') && !arg.contains('\r') {
+        return arg.to_string();
+    }
+    arg.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join(" ")
+}
 
 impl HerdrClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
@@ -268,6 +294,11 @@ impl HerdrClient {
         }
     }
 
+    /// Kept for reference, deliberately uncalled: starting a bot used to go through here and
+    /// now goes through [`Self::tab_create`], because panes of one tab divide a fixed width
+    /// between them and tabs do not. Anything that reaches for this again should read the
+    /// comment on `tab_create` first.
+    #[allow(dead_code)]
     pub async fn pane_split(&self, target_pane_id: &str, direction: &str, cwd: &str, env: Value) -> Result<PaneInfo> {
         self.call_as(
             "pane.split",
@@ -290,7 +321,18 @@ impl HerdrClient {
     /// Pane rectangles for a workspace's active tab, so a caller can pick *which* pane to
     /// split instead of always taking the first one.
     pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
-        let v = self.call("pane.layout", json!({"workspace_id": workspace_id})).await?;
+        self.rects(json!({"workspace_id": workspace_id})).await
+    }
+
+    /// One pane's own size. `pane.layout` keyed by `workspace_id` only ever describes that
+    /// workspace's **active tab**, so a pane living in any other tab is simply absent from it —
+    /// which, now that each bot gets its own tab, is the normal case. Ask by `pane_id` instead.
+    pub async fn pane_size(&self, pane_id: &str) -> Result<Option<(u32, u32)>> {
+        Ok(self.rects(json!({"pane_id": pane_id})).await?.into_iter().find(|(id, _, _)| id == pane_id).map(|(_, w, h)| (w, h)))
+    }
+
+    async fn rects(&self, params: Value) -> Result<Vec<(String, u32, u32)>> {
+        let v = self.call("pane.layout", params).await?;
         let panes = v.get("layout").and_then(|l| l.get("panes")).and_then(|p| p.as_array()).cloned().unwrap_or_default();
         Ok(panes
             .iter()
@@ -313,6 +355,65 @@ impl HerdrClient {
         Ok(())
     }
 
+    // ----- tab -----
+
+    /// Give a bot a **tab** of its own rather than a slice of somebody else's pane.
+    ///
+    /// Panes in one tab share the workspace's width — seven of them in a 185-column
+    /// workspace left the narrowest at 18 columns, and below roughly 31 an agent's TUI wraps
+    /// to a few glyphs a row without writing the spaces, which is unreadable to the user and
+    /// unrecoverable from the terminal fallback (`is_shredded`). Tabs of the same workspace
+    /// do not share width: five bots in five tabs each get the full 185.
+    ///
+    /// Takes the same arguments as `pane_split` and returns the new tab's root pane, so the
+    /// caller gets the `pane_id` (and the `tab_id`) straight back.
+    pub async fn tab_create(&self, workspace_id: &str, cwd: &str, label: &str, env: Value) -> Result<PaneInfo> {
+        self.call_as(
+            "tab.create",
+            json!({"workspace_id": workspace_id, "cwd": cwd, "label": label, "focus": false, "env": env}),
+            "root_pane",
+        )
+        .await
+    }
+
+    pub async fn tab_list(&self, workspace_id: &str) -> Result<Vec<TabInfo>> {
+        self.call_as("tab.list", json!({"workspace_id": workspace_id}), "tabs").await
+    }
+
+    /// `Ok(false)` means the tab was already gone. herdr reaps a tab when its last pane
+    /// closes, so a caller tidying up behind `pane.close` legitimately finds nothing there;
+    /// that is success, not an upstream failure.
+    pub async fn tab_close(&self, tab_id: &str) -> Result<bool> {
+        match self.call("tab.close", json!({"tab_id": tab_id})).await {
+            Ok(_) => Ok(true),
+            Err(e) if is_not_found(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Move a live pane into a tab of its own. This is a *move*, not a restart: herdr keeps
+    /// the `pane_id` (verified against 0.8.2), so the run's mapping, its pane subscription
+    /// and any in-flight turn are untouched — only `tab_id` changes.
+    ///
+    /// Returns `(new_tab_id, previous_tab_id)`.
+    pub async fn pane_move_to_new_tab(&self, pane_id: &str, label: &str) -> Result<(String, String)> {
+        let v = self
+            .call(
+                "pane.move",
+                json!({"pane_id": pane_id, "destination": {"type": "new_tab", "label": label}, "focus": false}),
+            )
+            .await?;
+        let r = v.get("move_result").cloned().unwrap_or(v);
+        let new_tab = r
+            .get("pane")
+            .and_then(|p| p.get("tab_id"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow!("pane.move result had no pane.tab_id: {r}"))?
+            .to_string();
+        let previous = r.get("previous_tab_id").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+        Ok((new_tab, previous))
+    }
+
     // ----- agent -----
 
     pub async fn agent_list(&self) -> Result<Vec<AgentInfo>> {
@@ -329,6 +430,7 @@ impl HerdrClient {
 
     /// Asynchronous on the socket: returns with `launch_pending: true`; follow with `agent_wait`.
     pub async fn agent_start(&self, name: &str, kind: &str, pane_id: &str, args: &[String], timeout_ms: u64) -> Result<AgentInfo> {
+        let args: Vec<String> = args.iter().map(|a| fold_newlines(a)).collect();
         self.call_as(
             "agent.start",
             json!({"name": name, "kind": kind, "pane_id": pane_id, "args": args, "timeout_ms": timeout_ms}),
@@ -412,4 +514,27 @@ fn is_not_found(e: &anyhow::Error) -> bool {
     e.downcast_ref::<HerdrError>()
         .map(|h| h.code.contains("not_found") || h.code == "unknown_target" || h.code == "invalid_target")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::fold_newlines;
+
+    /// Reported 2026-09-06: a team failed to start with `invalid_agent_argument` because the
+    /// generated PM persona spans four lines. Verified against herdr 0.8.2 that a newline is
+    /// the only character it refuses, so folding is enough — and nothing else may change.
+    #[test]
+    fn only_newlines_are_folded() {
+        assert_eq!(fold_newlines("你是 issue #1 的 PM。\n成員：`pm`、`dev-1`。\n合併由 daemon 處理。"),
+                   "你是 issue #1 的 PM。 成員：`pm`、`dev-1`。 合併由 daemon 處理。");
+        assert_eq!(fold_newlines("a\r\nb"), "a b");
+        // Blank lines are separators, not content: they must not become double spaces.
+        assert_eq!(fold_newlines("a\n\n\nb"), "a b");
+        assert_eq!(fold_newlines("trailing\n"), "trailing");
+
+        // Everything herdr accepts has to survive byte-for-byte.
+        for s in ["--append-system-prompt", "with `backtick` and 'quote' and \"dq\"", "#1 中文與符號、《》", ""] {
+            assert_eq!(fold_newlines(s), s, "{s}");
+        }
+    }
 }
