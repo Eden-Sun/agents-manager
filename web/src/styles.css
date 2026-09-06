@@ -6163,8 +6163,20 @@ button.team-workers:disabled {
   box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 28%, transparent);
   transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
 }
+/*
+ * 做完 / 中止的 team：整塊本來用 `opacity: 0.62` 讓它退到背景，但整層透明度會把裡面
+ * 每一段文字的對比一起拉下來——實測最低只剩 2.37:1，連 bot 名字都從 15:1 掉到 4.4。
+ * 改成用「安靜的顏色」表達：左邊那條 accent 收掉、底色沉一階、標題降到 --text-dim。
+ * 文字的對比全部維持原樣，狀態本身由 phase dot 說。
+ */
 .team-node.terminal {
-  opacity: 0.62;
+  background: var(--bg-sunken);
+  box-shadow: inset 3px 0 0 var(--border);
+}
+
+.team-node.terminal .team-node-label {
+  color: var(--text-dim);
+  font-weight: 500;
 }
 .team-node.collapsed {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
