@@ -2890,6 +2890,12 @@ button:disabled {
     display: none;
   }
 
+  /* Team 副標題列在這個寬度會折行，而折下去的那一整行往往只有專案名——標題列與側欄
+     都寫著同一個名字。讓它先走，副標題就少一整行。 */
+  .team-subhead .team-project {
+    display: none;
+  }
+
   /* Keep the tabs intact; the run/pane detail is the first thing to go.
      `.main-status.pane-toggle` is defined later with two classes, so a bare `.main-status`
      here loses on specificity and the pane chip never actually left. */
