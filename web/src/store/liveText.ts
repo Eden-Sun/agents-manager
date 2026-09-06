@@ -45,6 +45,24 @@ const SUMMARY_VERB =
 /** 被原樣回顯的 shell 指令：`Running 3 shell commands… $ cd /Users/…`、`$ git status`。 */
 const SHELL_ECHO = /(?:^|\s)\$\s+[a-z][\w./-]*[\s;|]/
 
+/**
+ * CLI 的工具活動行：一句動名詞開頭的自述，接著耗時與被執行的指令片段——
+ * `Moving Chrome profile out of the repo, committing · 4s "user-data-dir" foo.mjs | cut -c1-120; git rm …`
+ * 判定要兩個條件同時成立（`· 4s` 這種耗時標記，加上 shell 的管線／分號／旗標），
+ * 免得吃掉 agent 真的在講的、剛好帶了個秒數的句子。
+ */
+const TOOL_ELAPSED = /·\s*\d+(?:\.\d+)?\s*[sm]\b/
+const SHELL_HINT = /[|;]|\s--?[a-z]/
+
+/** 收尾的計時行：`Cogitated for 5m 53s · done 2:53 AM`、`Churned for 21s`、`Thought for 12s`。 */
+const SPINNER_DONE = /^\s*[*✻✽✢✳✶·]?\s*[A-Za-z]+(?:ed|ing)?\s+for\s+\d+(?:\.\d+)?\s*[smh]\b/
+
+/** `(5s · 2 lines)`：工具跑完貼在行尾的統計。 */
+const TOOL_TAIL = /\([\d.]+\s*[smh]\s*·\s*\d+\s+lines?\)\s*$/
+
+/** 貼在段落結尾的狀態字（` · summarized`），不是句子的一部分。 */
+const TRAILING_STATE = /\s*·\s*(?:summari[sz]ed|compacted|truncated|cancell?ed|interrupted)\s*$/i
+
 /** 至少要有一個字母或中日韓文字，否則這段「內容」其實什麼也沒說。 */
 const HAS_WORD = /[a-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/i
 
@@ -62,6 +80,10 @@ function isNoise(line: string): boolean {
   if (CHROME_ONLY.test(t)) return true
   if (SHELL_ECHO.test(t)) return true
   if (/^(?:running|ran)\b[^.]*\bshell command/i.test(t)) return true
+  if (SPINNER_DONE.test(t)) return true
+  if (TOOL_TAIL.test(t)) return true
+  if (TOOL_ELAPSED.test(t) && SHELL_HINT.test(t)) return true
+  if (/^\s*❯\s/.test(t)) return true
   if (isCliSummary(t)) return true
   return NOISE.some((re) => re.test(t))
 }
@@ -73,7 +95,9 @@ const CACHE_MAX = 16
 
 function scrub(raw: string): string | null {
   const kept: string[] = []
-  for (const line of raw.split('\n')) {
+  for (const raw_line of raw.split('\n')) {
+    // ` · summarized` 這種狀態字黏在句尾，整行不能丟，只能把尾巴剝掉。
+    const line = raw_line.replace(TRAILING_STATE, '')
     if (isNoise(line)) continue
     // 濾掉雜訊後不要留下一串空行，把中間的空白壓成單一段落分隔。
     if (!line.trim() && (kept.length === 0 || !kept[kept.length - 1].trim())) continue
