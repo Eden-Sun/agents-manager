@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { MOCK_MODE } from '../api'
-import type { BotKind, HostMem } from '../api/types'
+import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import {
   adjacentBotId,
@@ -26,6 +26,8 @@ import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { AttachButton } from './AttachButton'
 import { BotNameField } from './BotNameField'
+import { MemBadge } from './MemBadge'
+import { ModelTag } from './ModelTag'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
@@ -42,41 +44,42 @@ function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boo
   )
 }
 
-/** 1.4G / 820M / 64M — 一格寬度就要看得懂，所以個位數才給小數。 */
-function humanBytes(n: number): string {
-  if (n <= 0) return '0'
-  const g = n / 1024 ** 3
-  if (g >= 1) return `${g < 10 ? g.toFixed(1) : Math.round(g)}G`
-  const m = n / 1024 ** 2
-  if (m >= 1) return `${Math.round(m)}M`
-  return `${Math.max(1, Math.round(n / 1024))}K`
-}
-
 /**
- * 所有 herdr 進程樹目前佔的常駐記憶體（SPEC §15）。標題列右邊那一格，
- * tooltip 拆成「herdr 本身 / 底下的 agent」以及每一台主機。
+ * 現在開著幾個 herdr pane（＝有幾個 bot 的終端還活著）。和 RAM 那格並排：兩個都是
+ * 「整套系統現在佔多少」，一個講記憶體、一個講終端；哪一台開了幾個放 tooltip。
  *
- * 舊 daemon 沒有 `/api/mem` → `mem` 是 null → 整格不出現（不要顯示假的 0）。
+ * 一個都沒有就整格不出現——`pane 0` 只是佔位置，狀態燈已經說了沒有東西在跑。
  */
-function MemBadge() {
-  const mem = useStore((s) => s.mem)
-  if (!mem || (mem.total_bytes === 0 && mem.processes === 0)) return null
-  const failed = mem.hosts.filter((h: HostMem) => h.error)
-  const lines = [
-    `herdr 本身 ${humanBytes(mem.herdr_bytes)} · 底下的 agent ${humanBytes(mem.agents_bytes)}`,
-    `${mem.processes} 個 process`,
-    '',
-    ...mem.hosts.map((h: HostMem) =>
-      h.error ? `${h.host}：量不到（${h.error}）` : `${h.host}：${humanBytes(h.total_bytes)}（${h.processes} 個 process）`,
+function PaneBadge() {
+  // 字串而不是物件：`useShallow` 是逐一 `Object.is`，每次都給新物件就永遠不相等，
+  // 於是每次 render 都算「變了」→ 無限重繪。
+  const panes = useStore(
+    useShallow((s) =>
+      s.bots
+        .filter((b) => {
+          const r = s.runs[b.id]
+          // 和 BotSettingsPanel 同一條判準：pane 還在就算開著。
+          return Boolean(r) && r!.state !== 'stopped' && r!.state !== 'exited'
+        })
+        .map((b) => `${projectHostName(s, b.project_id)}\t${b.name}`),
     ),
+  )
+  if (panes.length === 0) return null
+
+  const byHost = new Map<string, string[]>()
+  for (const row of panes) {
+    const [host, name] = row.split('\t')
+    byHost.set(host, [...(byHost.get(host) ?? []), name])
+  }
+  const tip = [
+    `現在開著 ${panes.length} 個 herdr pane`,
     '',
-    '每 15 秒更新一次',
+    ...[...byHost.entries()].map(([host, names]) => `${host === 'local' ? '本機' : host}：${names.join('、')}`),
   ]
   return (
-    <span className={`mem-badge${failed.length > 0 ? ' partial' : ''}`} title={lines.join('\n')}>
-      <span className="mem-k">RAM</span>
-      <span className="mem-v">{humanBytes(mem.total_bytes)}</span>
-      {failed.length > 0 ? <span className="mem-partial" aria-hidden="true">*</span> : null}
+    <span className="pane-badge" title={tip.join('\n')}>
+      <span className="pane-k">pane</span>
+      <span className="pane-v">{panes.length}</span>
     </span>
   )
 }
@@ -225,11 +228,9 @@ function BotRow({
             >
               ⚠ 額度剩 {quotaWarning.pct}%
             </span>
-          ) : bot.model ? (
-            <span className="model-tag" title={`模型：${bot.model}`}>
-              {bot.model}
-            </span>
-          ) : null}
+          ) : (
+            <ModelTag botId={botId} />
+          )}
         </span>
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
@@ -654,7 +655,7 @@ export function Sidebar() {
   const selectProject = useStore((s) => s.selectProject)
   const removeProject = useStore((s) => s.removeProject)
   const [open, setOpen] = useState<'project' | 'env' | null>(null)
-  // config 的身份加上本機 shell 認到的 `ccN`（SPEC §15）——腳註寫的是「這台機器有幾個身份」。
+  // config 的身份加上本機 shell 認到的 `ccN`（SPEC §16）——腳註寫的是「這台機器有幾個身份」。
   const configuredIdentities = useStore((s) => s.identities)
   const localIdentityStatus = useStore((s) => s.localIdentityStatus)
   const identityCount = useMemo(
@@ -734,8 +735,10 @@ export function Sidebar() {
   return (
     <>
       <div className="sidebar-head">
-        <h1>Agents Manager</h1>
+        {/* 縮寫是為了把寬度讓給右邊那排徽章；全名留在 title 裡。 */}
+        <h1 title="Agents Manager">AG Man</h1>
         {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
+        <PaneBadge />
         <MemBadge />
         <ConnBadge socket={socket} connected={connected} />
       </div>

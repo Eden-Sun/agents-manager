@@ -14,7 +14,7 @@
 //! host's home), because the credential may live in the macOS Keychain or the environment
 //! rather than in a file next to the config dir.
 //!
-//! The same pass also *discovers* identities (SPEC §15): people who run several Claude
+//! The same pass also *discovers* identities (SPEC §16): people who run several Claude
 //! accounts already keep them as shell aliases —
 //!
 //! ```sh

@@ -173,7 +173,7 @@ function NewIdentityForm() {
 }
 
 /**
- * 從各主機 shell 認出來的 `ccN`（SPEC §15）。唯讀：它們是使用者 zshrc 裡的 alias，
+ * 從各主機 shell 認出來的 `ccN`（SPEC §16）。唯讀：它們是使用者 zshrc 裡的 alias，
  * 這裡只負責讓人看見「daemon 認到了什麼、指到哪個設定目錄、登入了沒」。
  * 同名的 config 身份會蓋過它，所以已經在上面列出來的就不重複列。
  */

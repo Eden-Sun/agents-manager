@@ -485,7 +485,7 @@ export function QuotaStrip({
 }) {
   const quota = useStore((s) => s.quota)
   const configured = useStore((s) => s.identities)
-  // 這台主機認得的身份：config 的加上它 shell 裡的 `ccN`（SPEC §15）。遠端的 cc1 可能指到
+  // 這台主機認得的身份：config 的加上它 shell 裡的 `ccN`（SPEC §16）。遠端的 cc1 可能指到
   // 跟本機不同的帳號，額度列本來就一次只看一台，所以身份清單也要跟著那一台。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
   const identities = useMemo(() => identitiesOfHost(configured, idStatus), [configured, idStatus])
@@ -527,6 +527,26 @@ export function QuotaStrip({
 
   // Both queryable kinds always stay on the bar; only the per-kind windows collapse.
   const collapsed = width < 1100
+  /**
+   * Under ~1500px the strip cannot hold five gauges *and* leave the title readable: measured
+   * at 1200px it took 563px of a 912px header, which squeezed the team's issue title down to
+   * its 84px floor and pushed the action buttons past the edge. When it is that tight only
+   * the gauge for what you are looking at stays on the bar; the rest are one click away in
+   * the popover, which lists every one of them anyway.
+   */
+  const tight = width < 1500
+
+  /** The one gauge worth the width when space is tight: the kind/identity this view is about. */
+  const focusEntry = focusKind
+    ? (ordered.find((e) => {
+        if (e.kind !== focusKind) return false
+        if (e.kind !== 'claude') return true
+        const id = focusIdentity?.trim() || (claudeIdentities(identities).some((i) => i.name === 'cc0') ? 'cc0' : null)
+        return id ? e.identity === id : !e.identity
+      }) ?? null)
+    : null
+  const shown = tight ? [focusEntry ?? ordered[0]] : ordered
+  const hidden = ordered.length - shown.length
 
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
@@ -545,7 +565,7 @@ export function QuotaStrip({
             {host}
           </span>
         ) : null}
-        {ordered.map((entry) => {
+        {shown.map((entry) => {
           let focused = false
           if (focusKind && entry.kind === focusKind) {
             if (entry.kind !== 'claude') {
@@ -564,6 +584,11 @@ export function QuotaStrip({
             <Gauge key={entryReactKey(entry)} entry={entry} host={host} collapsed={collapsed} focused={focused} />
           )
         })}
+        {hidden > 0 ? (
+          <span className="quota-more" title={`還有 ${hidden} 組額度，點開看`}>
+            +{hidden}
+          </span>
+        ) : null}
       </button>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>

@@ -1,5 +1,5 @@
 // claude 的 `--effort`（2.1+）：Bot 設定的「強度」列現在對 claude 也要出現，
-// 而且改了要回「重啟後才會套用」——claude 的 `/effort` 是拉桿，沒有帶參數的 slash 指令。
+// 而且執行中改得動——claude 2.1.263 的 `/effort <level>` 帶參數就直接套用（不帶參數才是拉桿）。
 // 走 mock backend（`VITE_MOCK=1 npx vite --port 5311`）。
 // Usage: node scripts/demo-claude-effort.mjs [http://127.0.0.1:5311/]
 import { spawn } from 'node:child_process'
@@ -30,6 +30,8 @@ console.log('  強度:', await opts('reasoning effort'))
 console.log(' ', await ev(`(()=>{const b=[...document.querySelectorAll('.bs-body .opt-group[aria-label="reasoning effort"] .opt')].find(x=>x.textContent.trim()==='高');if(!b)return 'MISSING 高';b.click();return 'picked 高'})()`))
 await sleep(300)
 console.log('  儲存前提示:', await ev(`document.querySelector('.bs-foot .hint, .bs-foot span')?.textContent`))
+// 強度那列的即時套用註記：claude 2.1 的 `/effort <level>` 送得進去，所以應該有這行。
+console.log('  強度註記:', await ev(`[...document.querySelectorAll('.bs-body .field')].find(f=>f.querySelector('.opt-group[aria-label="reasoning effort"]'))?.querySelector('.field-note')?.textContent`))
 await shot('353-claude-effort')
 
 console.log('== codex 仍有它自己的 8 級、grok 4 級 ==')

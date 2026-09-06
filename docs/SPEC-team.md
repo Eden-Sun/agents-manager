@@ -64,7 +64,7 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 ### 2.3 Issue 佇列（一組隊伍解多個 issue）
 
 一個 Team 帶一份 **issue 佇列**，依 `seq` 順序處理。**PM 與 reviewer 全程是同兩個 bot**（保住累積的上下文），
-**每個 issue 換一批執行者**，每個 issue 有自己的整合分支並各自交付。
+執行者**預設每個 issue 換一批**，但 PM 在 `done` 時可用 `workers: keep` 決定沿用（依它對執行者上下文長度與相關性的判斷）；每個 issue 有自己的整合分支並各自交付。
 
 - 新表 `team_issues`：`(team_id, seq)` 與 `(team_id, issue_number)` 唯一，
   `state ∈ {queued, working, done, failed, skipped}`，各自帶 `branch` / `base_sha` / `summary` / `pr_url` / `fail_reason`。
@@ -153,7 +153,7 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 |---|---|---|---|
 | pm | `dispatch` | `tasks:[{to, title, brief, files?[]}]` | 派工。`to` 為成員暱稱（`dev-1`）；一次可派多人；已有未完成 task 的 worker 會被拒（§4.5） |
 | pm | `wait` | — | 目前沒事做，等回報 |
-| pm | `done` | `summary` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject` |
+| pm | `done` | `summary`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
 | pm | `abort` | `reason` | PM 認為做不了 → team `paused(pm_abort)`（不直接 abort，讓人決定） |
 | worker | `report` | `status: done \| blocked`, `summary`, `notes?` | 工作回報。`done` 進審查；`blocked` 轉給 PM 決定 |
@@ -532,7 +532,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | POST | `/teams/{id}/abort` | `{"reason"?}` | `200 {}`；停所有成員 |
 | POST | `/teams/{id}/cleanup` | — | 非終態 409；成功 `200 {}`，推 `bot_changed` ×N + `team_changed` |
 | DELETE | `/teams/{id}` | `?branches=keep\|delete`（預設 `keep`）| **任何 phase 都可刪**（§6.5a）：非終態時先停成員 → 清 worktree → 關 workspace → 刪三張表的列 → 成員 bot 標 `deleted_at`（訊息保留）。`branches=delete` 才 `git branch -D`，遠端分支一律不動。成功 `200 {}` 並推帶 `deleted: true` 的 `team_changed` + `bot_changed` ×N；不存在 `404 {"error":"not_found","what":"team"}` |
-| PATCH | `/teams/{id}` | `{"budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr"}` | `200 {}`；終態 409 |
+| PATCH | `/teams/{id}` | `{"budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "workers"?: {"model"?, "effort"?, "fast"?, "apply"?: "next"\|"now"}}` | `200 {}`；終態 409。`workers` 改執行者的模型設定：一律寫回 `roles_json.workers.spec`（下一批據此建立）並更新現有 worker bot 的欄位；`apply: "now"` 再把有 run 的 worker 逐一重啟（進行中的工作會中斷），預設 `next` 只等重啟或換批時生效 |
 | POST | `/teams/{id}/say` | `{"text", "to", "client_request_id"}`；`to` 接受**角色**（`pm` / `reviewer`）、**短名**（`dev-1`，同 §4.4 協定用的）、**暱稱**（`i42-pm`）、**bot_id**，可帶 `@` 前綴 | 使用者插話（記 `kind:user`，不計預算），走 §13 群組路徑；回同 `POST chat` 的單筆 `sent` |
 | POST | `/teams/{id}/tasks/{tid}/decide` | `{"action": "rework" \| "force_merge" \| "skip", "note"?}` | 只在 task `exhausted` / `blocked_by_worker` / rebase 用盡時有效；其餘 409 |
 | POST | `/teams/{id}/answer` | `{"text"}` | 回 PM 的 `ask_user`；等同 `say` 到 pm + `resume` |

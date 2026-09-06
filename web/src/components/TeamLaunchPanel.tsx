@@ -4,6 +4,7 @@ import * as api from '../api'
 import type { BotKind, Issue, IssueDetail, KindQuota, TeamBudget, TeamDeliver, TeamRoleSpec } from '../api/types'
 import {
   BOT_KINDS,
+  quotaKey,
   TEAM_BUDGET_DEFAULTS,
   TEAM_WORKERS_DEFAULT,
   TEAM_WORKERS_MAX,
@@ -255,8 +256,9 @@ export function TeamLaunchPanel({
 
   /** §9.2：任一角色所選 kind 的已用量 ≥ quota_stop_pct → 不給建立。 */
   const blockedKind = roles.find((r) => {
-    const key = r.spec.identity ? `${r.spec.kind}:${r.spec.identity}` : r.spec.kind
-    const used = worstUsedPct(quota[key] ?? quota[r.spec.kind])
+    // 額度按主機分（SPEC §14）：team 開在哪台，就看哪台的列。
+    const key = quotaKey(host, r.spec.identity ? `${r.spec.kind}:${r.spec.identity}` : r.spec.kind)
+    const used = worstUsedPct(quota[key] ?? quota[quotaKey(host, r.spec.kind)])
     return used !== null && used >= budget.quota_stop_pct
   })
   useEffect(() => {

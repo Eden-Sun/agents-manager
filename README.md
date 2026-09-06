@@ -40,7 +40,7 @@
 
 ![群組聊天](docs/screenshots/212-ui-group-dark.png)
 
-**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+）且換模型走 `/model` 當場套用、改強度要重啟；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），`/model` 與 `/effort` 都能當場套用；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
+**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+），模型與強度都能靠 TUI 的 `/model` / `/effort` 當場套用；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），同樣當場套用；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
 
 ![Bot 設定](docs/screenshots/310-grok-settings.png)
 
@@ -51,7 +51,7 @@
 ![額度條](docs/screenshots/231-quota-order-labeled.png)
 ![遠端主機的額度](docs/screenshots/341-quota-host-remote.png)
 
-**身份 cc0～cc6** — 多帳號不必再寫設定：daemon 會讀每台主機登入 shell 裡的 `alias ccN='CLAUDE_CONFIG_DIR=… claude …'`，把 `cc0`～`cc6` 當成可指派的身份（[SPEC §15](docs/SPEC.md)）。同一個 `cc1` 在本機和遠端可以是不同帳號——它跟著那台機器的 alias 走。手寫的 `[[identities]]` 仍然有效，同名時以它為準。
+**身份 cc0～cc6** — 多帳號不必再寫設定：daemon 會讀每台主機登入 shell 裡的 `alias ccN='CLAUDE_CONFIG_DIR=… claude …'`，把 `cc0`～`cc6` 當成可指派的身份（[SPEC §16](docs/SPEC.md)）。同一個 `cc1` 在本機和遠端可以是不同帳號——它跟著那台機器的 alias 走。手寫的 `[[identities]]` 仍然有效，同名時以它為準。
 
 ![身份](docs/screenshots/350-identities-shell-local.png)
 

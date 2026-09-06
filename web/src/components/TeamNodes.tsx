@@ -3,7 +3,9 @@ import { useShallow } from 'zustand/react/shallow'
 import type { Bot, Team } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, TEAM_TERMINAL_PHASES, teamPauseLabel, teamPhaseTone } from '../api/types'
 import { botLamp, teamMemberBots, teamShortName, teamsOfProject, useStore } from '../store/store'
+import { IdentityBadge } from './IdentitiesPanel'
 import { KindTag } from './KindTag'
+import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 
@@ -25,7 +27,7 @@ function MemberRow({ bot }: { bot: Bot }) {
       role="option"
       aria-selected={selected}
       tabIndex={0}
-      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}\ncwd ${bot.cwd ?? '（專案根目錄）'}`}
+      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}\n身分 ${bot.identity ?? '預設'}\ncwd ${bot.cwd ?? '（專案根目錄）'}`}
       onClick={() => selectBot(bot.id)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -42,11 +44,10 @@ function MemberRow({ bot }: { bot: Bot }) {
         </span>
         <span className="bot-sub">
           <KindTag kind={bot.kind} />
-          {bot.model ? (
-            <span className="model-tag" title={`模型：${bot.model}`}>
-              {bot.model}
-            </span>
-          ) : null}
+          {/* 和一般 bot 列同一條規則：同一個 CLI 的兩個帳號要分得出來（SPEC §16）。 */}
+          <IdentityBadge name={bot.identity} showDefault />
+          {/* 和一般 bot 列同一顆籤：模型＋強度。 */}
+          <ModelTag botId={bot.id} />
         </span>
       </span>
     </div>

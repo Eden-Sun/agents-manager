@@ -671,7 +671,7 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
         None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
     };
 
-    // Identities are per host (SPEC §15): `[[identities]]` plus the `ccN` aliases discovered
+    // Identities are per host (SPEC §16): `[[identities]]` plus the `ccN` aliases discovered
     // on *this* machine, so `cc1` picks up the config dir that machine's shell means by it.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if let Some(id) = crate::tools::identity_for_host(app, host, idn).await {

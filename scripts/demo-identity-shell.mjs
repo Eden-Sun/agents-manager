@@ -1,4 +1,4 @@
-// SPEC §15：cc0～cc6 由各主機自己的登入 shell（zshrc 的 alias）認出來，不必寫 config.toml。
+// SPEC §16：cc0～cc6 由各主機自己的登入 shell（zshrc 的 alias）認出來，不必寫 config.toml。
 // 走 mock backend（`VITE_MOCK=1 npx vite --port 5311`）：身份面板要分得出 config 與 shell 兩種
 // 來源，Bot 設定的身份選項要選得到 shell 來的那個，而且同一個名字在遠端指到的是遠端的目錄。
 // Usage: node scripts/demo-identity-shell.mjs [http://127.0.0.1:5311/]

@@ -334,7 +334,9 @@ pub struct DispatchItem {
 pub enum Action {
     Dispatch(Vec<DispatchItem>),
     Wait,
-    Done { summary: String },
+    /// `keep_workers`: the PM's call on whether the next issue reuses this batch of
+    /// executors (their context is still useful) or gets a fresh one.
+    Done { summary: String, keep_workers: bool },
     AskUser { question: String },
     Abort { reason: String },
     Report { blocked: bool, summary: String, notes: String },
@@ -384,7 +386,17 @@ impl Action {
                 Ok(Action::Dispatch(out))
             }
             ("pm", "wait") => Ok(Action::Wait),
-            ("pm", "done") => Ok(Action::Done { summary: s(v, "summary") }),
+            ("pm", "done") => {
+                // `"workers": "keep" | "replace"` (or `keep_workers: bool`); unspecified = replace,
+                // the behaviour before the PM had a say.
+                let keep = match v.get("workers").and_then(Value::as_str).map(|w| w.trim().to_ascii_lowercase()) {
+                    Some(w) if w == "keep" => true,
+                    Some(w) if w == "replace" => false,
+                    Some(w) => return Err(format!("done.workers 必須是 keep 或 replace，不是 `{w}`")),
+                    None => v.get("keep_workers").and_then(Value::as_bool).unwrap_or(false),
+                };
+                Ok(Action::Done { summary: s(v, "summary"), keep_workers: keep })
+            }
             ("pm", "ask_user") => {
                 let q = s(v, "question");
                 if q.is_empty() {
@@ -1164,6 +1176,30 @@ pub async fn on_turn_done(
     // still followed by a `step`, because `step` is what turns that condition into a visible
     // `paused` rather than a warning in the log.
     let applied = apply_reply(app, team_id, bot_id, &text, status).await;
+    if let Err(e) = &applied {
+        // A reply the scheduler failed to apply (a DB or git error, not a protocol error)
+        // would otherwise vanish: the member has said its piece, nothing is pending for it,
+        // and the team sits in its phase forever. Ask once for a resend; the second failure
+        // in a row is left to the log, so a persistent fault cannot ping-pong.
+        let last_was_retry = sqlx::query_scalar::<_, String>(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay' ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(team_id)
+        .bind(bot_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+        .map(|v| v["action"] == "retry")
+        .unwrap_or(false);
+        if !last_was_retry {
+            let text = format!(
+                "系統套用你上一則回覆時失敗（{e:?}），沒有任何 task 被建立或狀態被改動。請依原本的判斷把同一份 ```am-team 區塊重新送一次。"
+            );
+            enqueue(app, team_id, None, bot_id, None, "retry", text).await?;
+        }
+    }
     let stepped = step(app, team_id).await;
     applied.and(stepped)
 }
@@ -1215,7 +1251,7 @@ pub async fn apply_reply(
     match action {
         Action::Dispatch(items) => dispatch(app, &ctx, &bot, items).await,
         Action::Wait => wait(app, &ctx).await,
-        Action::Done { summary } => pm_done(app, &ctx, &bot, &summary).await,
+        Action::Done { summary, keep_workers } => pm_done(app, &ctx, &bot, &summary, keep_workers).await,
         Action::AskUser { question } => {
             note(app, team_id, json!({"action": "ask_user", "question": question})).await?;
             pause(app, &ctx.team, "ask_user").await
@@ -1282,7 +1318,10 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
     let mut rejected: Vec<String> = Vec::new();
     let mut created: Vec<(String, String)> = Vec::new(); // (task_id, worker short)
     let existing = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
-    let mut next_seq = existing.iter().map(|t| t.seq).max().unwrap_or(0);
+    // `team_tasks_seq` is unique per **team**, not per issue: the second issue's first task
+    // must continue the numbering (t2, t3…) or the INSERT below collides with t1 of the
+    // first issue and the PM's whole dispatch is lost.
+    let mut next_seq = db::team_tasks(&app.db, &ctx.team.id).await.map_err(up)?.iter().map(|t| t.seq).max().unwrap_or(0);
     // §6.3: overlapping `files` are a warning to the PM, never a refusal.
     let mut overlaps: Vec<String> = Vec::new();
 
@@ -1429,7 +1468,7 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
 }
 
 /// §8.3: the PM declares completion, the daemon verifies it.
-async fn pm_done(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, summary: &str) -> LcResult<()> {
+async fn pm_done(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, summary: &str, keep_workers: bool) -> LcResult<()> {
     let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
     let open: Vec<String> = tasks
         .iter()
@@ -1455,8 +1494,29 @@ async fn pm_done(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, summary: &str) -> LcRe
         .execute(&app.db)
         .await
         .map_err(up)?;
+    // The decision is read back by `close_issue_and_advance` once delivery is done; it lives
+    // in the log (no new column) and only the most recent one for this issue counts.
+    note(app, &ctx.team.id, json!({"action": "worker_plan", "keep": keep_workers})).await?;
     team::set_phase(app, &ctx.team.id, "finishing", None, None).await?;
     Ok(())
+}
+
+/// What the PM asked for in its `done` for `issue_id`: `true` to keep this batch of workers
+/// for the next issue. Absent (the PM never said, or the issue failed) means replace.
+async fn keep_workers_for(app: &Arc<App>, team_id: &str, issue_id: &str) -> bool {
+    sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM team_events WHERE team_id=? AND issue_id=? AND kind='note'
+           AND json_extract(payload_json, '$.action') = 'worker_plan' ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(team_id)
+    .bind(issue_id)
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+    .and_then(|v| v["keep"].as_bool())
+    .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------- worker
@@ -1730,9 +1790,16 @@ async fn close_issue_and_advance(
         let ctx = Ctx::load(app, team_id).await?;
         return end_team(app, &ctx).await;
     };
-    // Only now — with somewhere to go — are this issue's executors replaced.
-    team::retire_issue_workers(app, team_id, &current.id).await;
-    if let Err(e) = team::start_issue(app, team_id, &next).await {
+    // Only now — with somewhere to go — are this issue's executors replaced. Unless the PM
+    // asked to keep them (`done.workers = "keep"`): then they stay up, with their context, and
+    // only their leftover tasks are closed out.
+    let keep = state == "done" && keep_workers_for(app, team_id, &current.id).await;
+    if keep {
+        team::fail_open_tasks(app, team_id, &current.id).await;
+    } else {
+        team::retire_issue_workers(app, team_id, &current.id).await;
+    }
+    if let Err(e) = team::start_issue(app, team_id, &next, keep).await {
         // The team is healthy but the queue cannot move; that is a human problem, not a
         // reason to throw away the rest of the queue.
         note(app, team_id, json!({"action": "issue_start_failed", "issue_number": next.issue_number,
@@ -1742,7 +1809,51 @@ async fn close_issue_and_advance(
         pause(app, &ctx.team, "upstream").await?;
         return Ok(());
     }
-    hand_issue_to_pm(app, team_id).await
+    // `start_issue` only *inserts* the new executors; `startup` — the one place members get
+    // started — runs solely in the `starting` phase. Without this the PM's first dispatch on
+    // the second issue hits a worker with no run and the team parks on `member_lost`.
+    if !keep {
+        start_issue_workers(app, team_id).await?;
+    }
+    hand_issue_to_pm(app, team_id, keep).await
+}
+
+/// Start the executors `start_issue` just created (the PM and the reviewer are already up).
+/// A failure is noted, not fatal here: the PM's dispatch to a worker without a run is what
+/// turns it into `paused(member_lost)`, the same way it always has.
+async fn start_issue_workers(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let ctx = Ctx::load(app, team_id).await?;
+    let workers: Vec<db::Bot> = ctx.workers().into_iter().cloned().collect();
+    for e in crate::trust::pretrust_members(app, &workers).await {
+        tracing::warn!(team = %team_id, error = %e, "could not pre-trust a team worktree");
+        note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
+    }
+    for b in &workers {
+        if db::active_run(&app.db, &b.id).await.map_err(up)?.is_some() {
+            continue;
+        }
+        match lifecycle::start_bot(app, &b.id).await {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = format!("{e:?}");
+                note(app, team_id, json!({"action": "member_start_failed", "bot": b.name, "error": msg})).await?;
+                if let Ok(conv) = db::conversation_id(&app.db, &b.id).await {
+                    let _ = lifecycle::insert_message(
+                        app,
+                        &conv,
+                        None,
+                        "system",
+                        &format!("這個成員沒能啟動：{msg}。修好原因後在這裡按「啟動」，再回 Team 面板按「繼續」。"),
+                        "system",
+                        false,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The queue is empty: stop every member and write the one terminal phase this module has.
@@ -1760,7 +1871,7 @@ async fn end_team(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
 /// Appendix A.1's first relay, re-sent for each issue in the queue. The PM is the same agent
 /// across the whole queue, so this is the message that tells it the subject changed — and that
 /// its executors are different people now.
-async fn hand_issue_to_pm(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+async fn hand_issue_to_pm(app: &Arc<App>, team_id: &str, kept_workers: bool) -> LcResult<()> {
     team::set_phase(app, team_id, "planning", None, None).await?;
     let ctx = Ctx::load(app, team_id).await?;
     let Some(pm) = ctx.pm() else { return Ok(()) };
@@ -1772,14 +1883,16 @@ async fn hand_issue_to_pm(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .filter(|i| i.state == "queued")
         .count();
     let tail = if queued > 0 { format!("這個 issue 完成後，佇列裡還有 {queued} 個。") } else { String::new() };
+    let who_line = if kept_workers {
+        format!("執行者照你的決定沿用上一個 issue 那批：{who}（共 {k} 位），他們記得先前的工作。", who = names.join("、"), k = names.len())
+    } else {
+        format!("執行者換了一批，現在可派的是：{who}（共 {k} 位）。", who = names.join("、"), k = names.len())
+    };
     let text = format!(
-        "換下一個 issue：#{n}「{title}」。全文在 `.agents-manager/team/ISSUE.md`（已更新）。\
-         執行者也換了一批，現在可派的是：{who}（共 {k} 位）。\
+        "換下一個 issue：#{n}「{title}」。全文在 `.agents-manager/team/ISSUE.md`（已更新）。{who_line}\
          請重新讀取 `.agents-manager/team/ISSUE.md` 與 `TEAM.md` 再派工，先前 issue 的 task 一律不要再提。{tail}",
         n = ctx.team.issue_number,
         title = ctx.team.issue_title,
-        k = names.len(),
-        who = names.join("、"),
     );
     enqueue(app, team_id, None, &pm.id, None, "next_issue", text).await?;
     Ok(())
@@ -1796,7 +1909,7 @@ mod tests {
         let text = "先講一段\n\n```am-team\n{\"action\":\"wait\"}\n```\n\n改主意了\n\n```am-team\n{\"action\":\"done\",\"summary\":\"ok\"}\n```\n";
         let v = parse_block(text).unwrap();
         assert_eq!(v["action"], "done");
-        assert_eq!(Action::parse("pm", &v).unwrap(), Action::Done { summary: "ok".into() });
+        assert_eq!(Action::parse("pm", &v).unwrap(), Action::Done { summary: "ok".into(), keep_workers: false });
     }
 
     #[test]
@@ -2279,7 +2392,46 @@ mod scenarios {
     ///
     /// The repository has no remote at all, so if anything on this path tried to push, it
     /// would fail loudly rather than silently succeeding.
-        /// §2.3: one team, two issues. The PM and the reviewer are the *same bots* throughout;
+        /// `done.workers = "keep"`: the PM may carry its executors over to the next issue — same
+    /// bot rows, same worktrees, no retirement — and the hand-over relay says so.
+    #[tokio::test]
+    async fn the_pm_can_keep_its_workers_across_issues() {
+        let s = S::with_issues(1, true, vec![issue(), issue2()]).await;
+        let (pm, rev, d1) = (s.bot("pm", 0).await, s.bot("reviewer", 0).await, s.bot("worker", 0).await);
+
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        s.reply(&rev, json!({"action":"verdict","result":"approve"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        s.reply(&pm, json!({"action":"done","summary":"完成了 A","workers":"keep"})).await;
+        assert_eq!(s.team().await.phase, "finishing");
+        let ctx = s.ctx().await;
+        finish(s.app(), &ctx).await.unwrap();
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.issue_number), ("planning", 43));
+        let c = s.ctx().await;
+        let workers = c.workers();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].id, d1.id, "the executor is the same bot");
+        assert!(std::path::Path::new(&s.wt("dev-1")).exists(), "its worktree stays");
+        assert!(db::bot(&s.app().db, &d1.id).await.unwrap().unwrap().deleted_at.is_none());
+
+        let last: String = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND kind='relay' ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        let v: Value = serde_json::from_str(&last).unwrap();
+        assert_eq!(v["action"], "next_issue");
+        assert!(v["text"].as_str().unwrap().contains("沿用"), "{v}");
+    }
+
+    /// §2.3: one team, two issues. The PM and the reviewer are the *same bots* throughout;
     /// the executors are not, and neither is the integration branch.
     #[tokio::test]
     async fn the_queue_carries_the_pm_across_issues_and_swaps_the_workers() {

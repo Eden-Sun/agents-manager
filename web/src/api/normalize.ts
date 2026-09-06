@@ -65,7 +65,7 @@ import type {
   TurnDelivery,
   TurnOrigin,
   TurnStatus,
-} from './types'
+ TeamWorkerSpec } from './types'
 import {
   BOT_KINDS,
   hostOfQuotaKey,
@@ -938,6 +938,21 @@ export function toTeamDetail(raw: unknown, teamId: string): TeamDetail | null {
     base_ref: str(pick(o, 'base_ref') ?? pick(outer, 'base_ref'), 'HEAD'),
     base_sha: str(pick(o, 'base_sha') ?? pick(outer, 'base_sha')),
     worktree_root: str(pick(o, 'worktree_root') ?? pick(outer, 'worktree_root')),
+    workers: toWorkerSpec(pick(o, 'roles') ?? pick(outer, 'roles')),
+  }
+}
+
+function toWorkerSpec(roles: unknown): TeamWorkerSpec | null {
+  if (!isRec(roles) || !isRec(roles.workers) || !isRec(roles.workers.spec)) return null
+  const sp = roles.workers.spec
+  const kind = str(sp.kind)
+  if (kind !== 'claude' && kind !== 'codex' && kind !== 'grok') return null
+  return {
+    kind,
+    model: optStr(sp.model),
+    effort: optStr(sp.effort),
+    fast: sp.fast === true,
+    identity: optStr(sp.identity),
   }
 }
 

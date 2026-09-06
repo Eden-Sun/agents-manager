@@ -206,7 +206,7 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
             "tools": t.map(|x| json!(x.tools)),
             // v4.0: per-identity login state *on this host* (same shape as `tools`), covering
-            // both `[[identities]]` and the `ccN` aliases read off this host (SPEC §15).
+            // both `[[identities]]` and the `ccN` aliases read off this host (SPEC §16).
             "identities": t.map(|x| json!(x.identities)),
             // v4.1: the raw `ccN` aliases this host defines (env unexpanded, as written).
             "shell_identities": t.map(|x| json!(x.shell_identities)),
@@ -693,7 +693,7 @@ struct NewBot {
 }
 
 /// `None` = no identity requested; `Some(name)` = must exist **on that bot's host** and match
-/// `kind` — the list is `[[identities]]` plus that host's `ccN` aliases (SPEC §15).
+/// `kind` — the list is `[[identities]]` plus that host's `ccN` aliases (SPEC §16).
 async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, kind: &str) -> Result<Option<String>, LcError> {
     let Some(name) = identity.clone().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
     let Some(id) = crate::tools::identity_for_host(app, host, &name).await else {
@@ -1187,7 +1187,7 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
         .await
         .map_err(any_err)?;
     // Drop the stale per-host login rows rather than leaving a deleted identity on the strip.
-    // A `ccN` alias of the same name is a *different* entry (SPEC §15) and survives: it is put
+    // A `ccN` alias of the same name is a *different* entry (SPEC §16) and survives: it is put
     // back from that host's `shell_identities`, which the config never owned.
     for ht in app.tools.lock().await.values_mut() {
         ht.identities.remove(&name);

@@ -302,7 +302,7 @@ interface MockIdentityStatus {
   logged_in: boolean | null
   account?: string
   plan?: string
-  /** `config` = config.toml 的 `[[identities]]`；`shell` = 那台主機 zshrc 的 `ccN`（SPEC §15）。 */
+  /** `config` = config.toml 的 `[[identities]]`；`shell` = 那台主機 zshrc 的 `ccN`（SPEC §16）。 */
   source: 'config' | 'shell'
   /** shell 來源的 `CLAUDE_CONFIG_DIR`（`cc0` 這種預設帳號沒有）。 */
   config_dir?: string
@@ -403,7 +403,7 @@ export class MockTransport implements Transport {
    * mock 讓身份選擇器的「未登入」標記在沒有 daemon 時也看得到。
    */
   /**
-   * 本機每個身份的登入狀態。`cc2` 是從 zshrc 的 alias 認來的（SPEC §15）——config 裡沒有它，
+   * 本機每個身份的登入狀態。`cc2` 是從 zshrc 的 alias 認來的（SPEC §16）——config 裡沒有它，
    * 一樣可以指派給 Bot，UI 要標得出兩種來源的差別。
    */
   private localIdentityStatus: Record<string, MockIdentityStatus> = {
@@ -427,7 +427,7 @@ export class MockTransport implements Transport {
   private quota: Record<string, Rec | null> = {
     claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 40, resets_at: inHours(70) }, plan: 'Max 20x', updated_at: now(), host: 'local' },
     'claude:cc1': { five_hour: { used_pct: 85, resets_at: inHours(1.1) }, seven_day: { used_pct: 30, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
-    // zshrc 認來的身份也有自己的額度列（SPEC §15）。
+    // zshrc 認來的身份也有自己的額度列（SPEC §16）。
     'claude:cc2': { five_hour: { used_pct: 24, resets_at: inHours(3.8) }, seven_day: { used_pct: 51, resets_at: inHours(88) }, plan: 'Pro', updated_at: now(), host: 'local' },
     codex: { five_hour: { used_pct: 63, resets_at: inHours(3.2) }, seven_day: { used_pct: 88, resets_at: inHours(41) }, plan: 'Plus', updated_at: now(), host: 'local' },
     grok: null,
@@ -943,7 +943,7 @@ export class MockTransport implements Transport {
               : { name: i.name, kind: i.kind, logged_in: false, source: 'config' as const },
           ]),
         ),
-        // 那台自己 zshrc 裡的 `ccN`：同一個名字，指到的卻是那台的目錄（SPEC §15）。
+        // 那台自己 zshrc 裡的 `ccN`：同一個名字，指到的卻是那台的目錄（SPEC §16）。
         cc2: {
           name: 'cc2',
           kind: 'claude' as BotKind,
@@ -1342,12 +1342,14 @@ export class MockTransport implements Transport {
     const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
     let needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
     // TUI slash 指令當場套用（daemon `apply_live_setting` 同一套條件）：
-    // grok `/effort`、grok `/model`（可順便帶 effort）、claude `/model`。清成 CLI 預設沒有對應指令。
+    // grok `/effort`、grok `/model`（可順便帶 effort）、claude `/model`、claude `/effort`。
+    // 清成 CLI 預設沒有對應指令。
     const only = (...fields: string[]) =>
       fields.every((f) => b[f] !== undefined) && LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
     if (needs_restart && bot.kind === 'grok' && only('effort') && bot.effort) needs_restart = false
     if (needs_restart && bot.kind === 'grok' && (only('model') || only('model', 'effort')) && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
+    if (needs_restart && bot.kind === 'claude' && only('effort') && bot.effort) needs_restart = false
     return { needs_restart }
   }
 
@@ -2064,7 +2066,9 @@ export class MockTransport implements Transport {
     if (!p) throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
     // SPEC-team §10.1：非 git 目錄 400 `not_a_git_repo`；mock 用 github 有無代替。
     if (!p.github) throw new ApiError(400, { error: 'not_a_git_repo' }, 'not a git repo')
-    const issueNumber = Number(b.issue_number ?? 0) || 0
+    // SPEC-team §2.3 之後前端送的是 issue **佇列**（`issue_numbers`）；舊的單數欄位仍接受。
+    const queue = Array.isArray(b.issue_numbers) ? b.issue_numbers.map((n) => Number(n) || 0).filter(Boolean) : []
+    const issueNumber = queue[0] ?? (Number(b.issue_number ?? 0) || 0)
     const issue = ISSUES.find((i) => i.number === issueNumber)
     if (!issue) throw new ApiError(502, { error: 'upstream', message: `gh: issue #${issueNumber} not found` }, 'upstream')
 

@@ -502,7 +502,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
     // `~` in an identity's env expands against the *probed* host's home, not the daemon's.
     let home = host_home(app, host).await;
-    // `[[identities]]` plus the `ccN` aliases discovered on *this* host (SPEC §15): cc1 is a
+    // `[[identities]]` plus the `ccN` aliases discovered on *this* host (SPEC §16): cc1 is a
     // different account on m4p than it is here, and each gets its own probe there.
     let identities = crate::tools::identities_for_host(app, host).await;
     let mut targets: Vec<(String, Option<String>, BTreeMap<String, String>)> = Vec::new();
@@ -535,7 +535,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     for (key, account, env) in targets {
         // A bot chatting under this account already pushes its limits through the statusLine
         // hook. Opening a whole TUI to re-read what arrived seconds ago is pure cost — and
-        // with `cc0`…`cc6` discovered from the shell (SPEC §15) there can be several accounts
+        // with `cc0`…`cc6` discovered from the shell (SPEC §16) there can be several accounts
         // per host, so this is what keeps one 60 s cycle from turning into a queue of probes.
         if let Some(q) = app.quotas.lock().await.get(&crate::quota::quota_key(host, &key)) {
             if q.source == "statusline" && fresher_than(&q.updated_at, CLAUDE_POLL) {
