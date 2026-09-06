@@ -653,6 +653,9 @@ button:disabled {
 .bot-row.selected {
   background: var(--bg-active);
   border-left-color: var(--accent);
+  /* 選取列的底色比側欄亮，`--text-faint` 在它上面只有 4.49:1（深色主題）。整列的弱化文字
+     升一階到 --text-dim（5.22:1），選取＋hover 的混色也還在 4.5:1 以上。 */
+  --text-faint: var(--text-dim);
 }
 
 .bot-row.selected:hover {
@@ -807,12 +810,19 @@ button:disabled {
   display: none;
 }
 
-/* The agent's own label, in place of the status word. Quieter than the name it sits next
-   to, and it truncates — these run long ("Left menu cc0 cc1 annotations"). */
-.bot-state.agent-title {
+/*
+ * agent 自己的標題，第二行的尾巴。它曾經跟名字擠在第一行，結果兩邊各剩六個字
+ * （`C0-畫面修改者 資料夾…`）；搬到徽章後面之後名字拿回整行，這一段拿到剩下的全部寬度。
+ * 還是會截——這些標題很長（"Left menu cc0 cc1 annotations"）——完整內容在 title。
+ */
+.bot-agent-title {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--text-faint);
-  font-weight: 400;
   font-style: italic;
 }
 

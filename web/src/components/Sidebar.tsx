@@ -140,6 +140,8 @@ function BotRow({
 
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
+  // 標題只在選取中的那一列展開成一行——一次只有一列，清單的掃讀節奏不會被打亂。
+  const showTitle = Boolean(agentTitle) && selected
 
   const dragging = drag?.id === botId
   // 只在同一個專案內排序：跨專案拖曳不畫插入線，也不會有動作。
@@ -200,21 +202,16 @@ function BotRow({
         onDrag(null)
       }}
     >
-      <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
+      {/* 沒展開標題的列，agent 的標題掛在燈號的 tooltip 上，資訊沒有掉。 */}
+      <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
       <span className="bot-main">
         {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
         <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
           <PersonaMark persona={bot.persona} />
-          {/* While it is up, what the agent calls itself says more than "執行中" — for claude
-              that is its own summary of the task. blocked / starting / stopping still win:
-              those the user has to act on. idle / offline text is hidden by CSS anyway. */}
-          {agentTitle ? (
-            <span className="bot-state agent-title" title={`agent 目前的標題：${agentTitle}`}>
-              {agentTitle}
-            </span>
-          ) : (
-            <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
-          )}
+          {/* agent 自己的標題不再跟名字擠同一行——那樣兩邊各剩六個字
+              （`C0-畫面修改者 資料夾…`）。選取中的那一列給它自己一行（見下面），
+              其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
+          {showTitle ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
         </BotNameField>
         <span className="bot-sub">
           <KindTag kind={bot.kind} />
@@ -232,6 +229,13 @@ function BotRow({
             <ModelTag botId={botId} />
           )}
         </span>
+        {/* agent 對自己工作的一句話（claude 的 pane 標題）。只有選取中的那一列給它一整行：
+            側欄第二行已經被 kind / 身份 / 模型三顆徽章佔滿，硬擠進去只會把模型也截成 `op…`。 */}
+        {showTitle ? (
+          <span className="bot-agent-title" title={`agent 目前的標題：${agentTitle}`}>
+            {agentTitle}
+          </span>
+        ) : null}
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
         {/* 這一列的選單就兩個鍵，上下疊：開同類分身 / 設定。 */}
