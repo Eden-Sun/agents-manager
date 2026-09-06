@@ -13,6 +13,7 @@ import {
   teamPhaseTone,
   effortLabel,
 } from '../api/types'
+import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import {
   botLamp,
   composerState,
@@ -459,9 +460,9 @@ function Timeline({ teamId }: { teamId: string }) {
       members.filter((b) => s.runs[b.id]?.agent_status === 'working' || composerState(s, b.id).inFlightTurnId !== null),
     ),
   )
-  const liveText = useStore(useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.text ?? null]))))
+  const liveText = useStore(useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveText(liveReplyOf(s, b.id)?.text)]))))
   const liveActivity = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.activity ?? null]))),
+    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveActivity(liveReplyOf(s, b.id)?.activity)]))),
   )
   const liveAlert = useStore(useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.alert ?? null]))))
   const ref = useRef<HTMLDivElement>(null)
