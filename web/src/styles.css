@@ -379,9 +379,21 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  /* 這個 label 包著 select / checkbox，整塊都是點擊區：至少 24px 高。 */
+  min-height: 24px;
   font-size: 11px;
   color: var(--text-dim);
   white-space: nowrap;
+}
+
+/* 終端工具列的下拉與勾選框本身也墊大一點——13×13 的勾選框在觸控上幾乎按不到。 */
+.conn select {
+  min-height: 24px;
+}
+
+.conn input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
 }
 
 .conn-dot {
@@ -5036,7 +5048,7 @@ button.model-tag[aria-expanded='true'] {
 
 .tabs.small .tab {
   height: auto;
-  min-height: 0;
+  min-height: 24px;
   padding: 2px 8px;
   font-size: 11px;
 }
@@ -5338,6 +5350,8 @@ button.model-tag[aria-expanded='true'] {
 }
 
 .issue-title {
+  /* 佇列裡的整行連結：夾兩行的 `-webkit-box` 只有 17px 高，墊到 24。 */
+  min-height: 24px;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -6069,6 +6083,7 @@ button.team-workers:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 24px;
   padding: 2px 8px;
   color: var(--text-dim);
   font-size: 11px;
@@ -6732,6 +6747,10 @@ button.run-debug-toggle:hover {
 /* 「重新偵測」：登入完回來按一下就重問，不必重啟 daemon。長得像連結而不是按鈕，
    免得跟身份選項本身搶。 */
 .identity-recheck {
+  /* 可按的東西一律至少 24px 高（WCAG 2.2 的最小目標）；底線連結的樣式不變。 */
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   margin-left: 8px;
   padding: 0;
   border: 0;
