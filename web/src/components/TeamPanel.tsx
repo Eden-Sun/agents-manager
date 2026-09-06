@@ -1041,9 +1041,16 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         <MemberStrip teamId={teamId} />
         <span className="team-sep" aria-hidden="true" />
         <CopyChip label="整合分支" value={team.branch} title="daemon 把通過審查的 task 合併到這條分支" />
-        <CopyChip label="worktree" value={detail?.worktree_root ?? ''} title="成員的工作目錄根（在 daemon 資料目錄下，不在你的 checkout 裡）" />
+        {/* worktree / base / 專案名在手機讓位：副標題列在 390px 本來要疊四行，
+            佔掉三分之一畫面。三者都是坐在桌機前才會去抄的東西。 */}
+        <CopyChip
+          className="desk-only"
+          label="worktree"
+          value={detail?.worktree_root ?? ''}
+          title="成員的工作目錄根（在 daemon 資料目錄下，不在你的 checkout 裡）"
+        />
         {detail?.base_ref ? (
-          <span className="team-base mono" title={detail.base_sha}>
+          <span className="team-base mono desk-only" title={detail.base_sha}>
             base {detail.base_ref}
           </span>
         ) : null}
@@ -1066,7 +1073,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         ) : null}
         <span className="spacer" />
         {project ? (
-          <span className="team-project" title={project.path}>
+          <span className="team-project desk-only" title={project.path}>
             {project.label}
           </span>
         ) : null}

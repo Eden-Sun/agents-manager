@@ -2927,6 +2927,37 @@ button:disabled {
     gap: 4px;
   }
 
+  /*
+   * Team 標題列在 390px 會把 issue 標題擠成 0px——你完全看不出在看哪一個 team。
+   * 預算計量（`9/40 · 5 分`）讓位，標題拿回寬度並允許截斷。
+   */
+  .team-head .team-budget-meter {
+    display: none;
+  }
+
+  /* 額度在 Team 標題列同樣讓位：這一列在手機只需要回答「我在看哪一個 team」與「怎麼回去」。
+     額度在每個 bot 的對話標題列都還在，也還在環境設定裡。 */
+  .team-head > .quota-strip {
+    display: none;
+  }
+
+  .team-head .main-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .team-head .main-title > strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 副標題列在 390px 要疊四行，佔掉三分之一畫面。這幾樣是坐在桌機前才會去抄的。 */
+  .team-subhead .desk-only {
+    display: none;
+  }
+
   /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
   .main-head .quota-more {
     display: none;
