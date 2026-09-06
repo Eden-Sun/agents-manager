@@ -122,9 +122,13 @@ function AmTeamChip({ block }: { block: AmTeamBlock }) {
   )
 }
 
+/**
+ * 時間軸上的事件跟訊息排在同一欄，所以格式要跟氣泡一致（都到分）——一邊 `02:59`、
+ * 一邊 `02:59:31` 讀起來像兩種東西。先後順序由排列本身表達，精確到秒的時間在 `title`。
+ */
 function timeOf(iso: string): string {
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false })
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })
 }
 
 /** 一件 task 屬於清單的哪一欄（看板的欄位，這一輪只做分組標題）。 */
@@ -492,7 +496,8 @@ function noteText(p: Record<string, unknown>): string | null {
   const num = (k: string): string => (typeof p[k] === 'number' ? String(p[k]) : '')
   const action = str('action')
   if (!action) return null
-  const bot = str('bot')
+  // note 的 payload 帶的是完整成員名（`ttxka1d-i2-rev`）；畫面上其他地方一律用短名。
+  const bot = teamShortName(str('bot'))
   const error = str('error')
   const issue = num('issue_number')
   switch (action) {
@@ -534,7 +539,7 @@ function noteText(p: Record<string, unknown>): string | null {
     case 'worker_plan':
       return p.keep === true ? '下一個 issue 沿用同一批執行者' : '下一個 issue 換一批執行者'
     case 'pm_repeat':
-      return `PM 又把同一件事派給 ${str('to')}`
+      return `PM 又把同一件事派給 ${teamShortName(str('to'))}`
     case 'auto_commit':
       return `已幫 ${bot} 把沒提交的變更 commit`
     case 'pr_created':
@@ -620,7 +625,7 @@ function Timeline({ teamId }: { teamId: string }) {
               <div key={r.key} className={`team-sys ${r.event.kind}`} role="note">
                 <span className="team-sys-kind">{EVENT_KIND_LABEL[r.event.kind] ?? r.event.kind}</span>
                 <span className="team-sys-text">{eventText(r.event)}</span>
-                <time className="msg-time" dateTime={r.event.created_at}>
+                <time className="msg-time" dateTime={r.event.created_at} title={r.event.created_at}>
                   {timeOf(r.event.created_at)}
                 </time>
               </div>
