@@ -2968,6 +2968,15 @@ button:disabled {
     display: none;
   }
 
+  /*
+   * 終端工具列在 390px 會折成三行（`pane w8:p17 · 93×54` 自己就折了三行），看起來像壞掉。
+   * pane 那顆在對話標題列本來就有一份，結尾那句是說明；兩個都讓位，剩下的排得下一行。
+   */
+  .term-bar .term-pane-chip,
+  .term-bar .term-bar-note {
+    display: none;
+  }
+
   /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
   .main-head .quota-more {
     display: none;
