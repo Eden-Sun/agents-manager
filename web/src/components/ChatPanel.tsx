@@ -731,7 +731,12 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
         </SlItem>
       ) : null}
       {status.cost_usd !== null ? <SlItem k="花費">${status.cost_usd.toFixed(2)}</SlItem> : null}
-      {status.version ? <SlItem k="版本">{status.version}</SlItem> : null}
+      {/* 版本是這一列最不常看的一欄，窄視窗第一個讓位（`sl-version`）。 */}
+      {status.version ? (
+        <SlItem k="版本" className="sl-version">
+          {status.version}
+        </SlItem>
+      ) : null}
     </div>
   )
 }

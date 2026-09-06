@@ -2881,6 +2881,15 @@ button:disabled {
 }
 
 @media (width <= 1080px) {
+  /*
+   * context bar 排不下四欄時，`版本` 第一個讓位——它是這一列最不常看的一欄（`帳號` 要到
+   * 手機才讓）。門檻放在這裡而不是 1024：真正決定寬度的是「主區域」，1025–1080 側欄還在
+   * （主區域只剩約 790px）比 1024 側欄變抽屜時更擠。
+   */
+  .context-bar .sl-item.sl-version {
+    display: none;
+  }
+
   /* Keep the tabs intact; the run/pane detail is the first thing to go.
      `.main-status.pane-toggle` is defined later with two classes, so a bare `.main-status`
      here loses on specificity and the pane chip never actually left. */
