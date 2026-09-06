@@ -557,10 +557,15 @@ button:disabled {
   color: var(--text-dim);
 }
 
+:root {
+  /* Claude's brand orange; the other two marks are monochrome by brand. */
+  --kind-claude: #c2603c;
+}
+
 .kind-tag.claude {
   background: #f6ede4;
   border-color: #e0c8ae;
-  color: #8a5a26;
+  color: var(--kind-claude);
 }
 
 .kind-tag.codex {
@@ -576,10 +581,14 @@ button:disabled {
 }
 
 @media (prefers-color-scheme: dark) {
+  :root {
+    --kind-claude: #e08a6b;
+  }
+
   .kind-tag.claude {
     background: #38291b;
     border-color: #5c4429;
-    color: #e0b483;
+    color: var(--kind-claude);
   }
 
   .kind-tag.codex {
@@ -649,9 +658,9 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  color: var(--text-dim);
   font-size: 16px;
-  line-height: 1;
-  letter-spacing: 0.02em;
+  line-height: 0;
 }
 
 .bot-menu-pop {
@@ -1603,6 +1612,226 @@ button:disabled {
   filter: brightness(1.08);
 }
 
+/* ------------------------------------------------- attachments (drop / paste) */
+
+/* The whole chat column is the drop zone (`.chat` is already positioned above). */
+.drop-veil {
+  position: absolute;
+  inset: 8px;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent-soft) 82%, transparent);
+  pointer-events: none;
+}
+
+.drop-veil-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  border-radius: 999px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.attach-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.attach-thumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 4px 26px 4px 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.attach-thumb img {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg-hover);
+}
+
+.attach-thumb-name {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-thumb-state {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.attach-thumb-state.err {
+  color: var(--danger);
+}
+
+.attach-thumb.uploading img {
+  opacity: 0.55;
+}
+
+.attach-thumb.failed {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.attach-thumb-x {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.attach-thumb-x:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 📎 in the composer row, aligned with the textarea's bottom edge. */
+.attach-pick {
+  flex: none;
+  align-self: flex-end;
+  height: 38px;
+  width: 34px;
+  font-size: 15px;
+  color: var(--text-dim);
+}
+
+.attach-pick:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+/* Sent images, inside the bubble. */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.msg-attachment {
+  padding: 0;
+  border: 1px solid color-mix(in srgb, currentcolor 25%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentcolor 8%, transparent);
+  overflow: hidden;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.msg-attachment img {
+  display: block;
+  max-width: 220px;
+  max-height: 160px;
+  /* `contain`, not `cover`: a tall screenshot must stay recognisable, not be cropped. */
+  object-fit: contain;
+}
+
+.msg-attachment.loading {
+  width: 96px;
+  height: 72px;
+}
+
+.msg-attachment-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: rgb(0 0 0 / 62%);
+}
+
+.lightbox-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(1100px, 92vw);
+  max-height: 88vh;
+}
+
+.lightbox-inner img {
+  max-width: 100%;
+  max-height: calc(88vh - 52px);
+  object-fit: contain;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.lightbox-loading {
+  display: grid;
+  place-items: center;
+  width: 320px;
+  height: 200px;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+
+.lightbox-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lightbox-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Only shown when it has something to say (mention targets / warnings); never a static blurb. */
 .composer-hint {
   margin-top: 5px;
@@ -1807,7 +2036,9 @@ button:disabled {
 }
 
 @media (width > 1024px) {
-  .menu-btn {
+  /* Must out-specify `.main-head .menu-btn`'s display above — a media query adds no
+     specificity, so a bare `.menu-btn` here loses and the ☰ never hides. */
+  .main-head .menu-btn {
     display: none;
   }
 
@@ -2214,14 +2445,26 @@ button:disabled {
 }
 
 .icon-btn.gear {
-  font-size: 13px;
-  line-height: 1.2;
+  /* SVG sized in `em`, so this is the icon's box. */
+  font-size: 16px;
+  line-height: 0;
+  color: var(--text-dim);
 }
 
 .icon-btn.gear:hover:not(:disabled),
-.icon-btn.gear[aria-expanded='true'] {
+.icon-btn.gear[aria-expanded='true'],
+.bot-menu-btn:hover:not(:disabled),
+.bot-menu-btn[aria-expanded='true'] {
   color: var(--accent);
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* On the selected row the wash is already accent-tinted, so the resting state needs more
+   contrast than --text-dim to read as a control rather than decoration. Same specificity as
+   the hover rule above, so it must exclude hover/open explicitly or it would win by order. */
+.bot-row.selected .icon-btn.gear:not(:hover):not([aria-expanded='true']),
+.bot-row.selected .bot-menu-btn:not(:hover):not([aria-expanded='true']) {
+  color: var(--text);
 }
 
 /* Right drawer over the chat body; main-head stays visible. */
@@ -2792,133 +3035,169 @@ button:disabled {
   gap: 8px;
 }
 
-/* ----------------------------------------------------------- P1: quota pills */
+/* --------------------------------------------- quota (sol decision, 2026-09-06)
+   At most two queryable kinds; grok never takes strip space. Risk = shape + colour.  */
 
 .quota-strip {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: visible;
+  flex: 0 0 auto;
 }
 
-.quota-pill {
-  display: inline-flex;
+.quota-open {
+  display: flex;
   align-items: center;
-  gap: 8px;
-  width: 132px;
-  min-width: 132px;
-  height: 40px;
-  padding: 4px 8px 4px 6px;
-  border: 1px solid var(--border);
+  gap: 10px;
+  padding: 4px 2px;
+  border: 0;
   border-radius: 8px;
-  background: var(--bg-sunken);
-  box-sizing: border-box;
+  background: transparent;
+  cursor: pointer;
 }
 
-.quota-pct.crit {
-  color: var(--danger);
-  font-weight: 700;
+.quota-open:hover {
+  background: var(--bg-hover);
 }
 
-.quota-pct.warn {
-  color: var(--warn);
-  font-weight: 650;
+.quota-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.quota-pct.ok {
-  color: var(--text-dim);
-}
-
-.quota-pct.ok::after {
-  content: '';
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 4px;
-  border-radius: 50%;
-  background: var(--lamp-green);
-  vertical-align: middle;
-}
-
-.quota-pill-left {
+.quota-hp {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-width: 0;
+  gap: 5px;
+  padding: 0 2px;
 }
 
-.quota-pill-left .kind-tag {
-  width: 16px;
-  height: 16px;
-  padding: 0;
+.quota-kind {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 9px;
+  font-size: 13px;
+  color: var(--text-dim);
 }
 
-.quota-pill-left .kind-tag.icon {
-  font-size: 11px;
+.quota-hp.claude .quota-kind {
+  color: var(--kind-claude);
 }
 
-.quota-kind-name {
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--text);
-  text-transform: capitalize;
+.quota-hp.warn .quota-kind {
+  color: var(--warn);
 }
 
-.quota-pill-right {
+.quota-hp.crit .quota-kind {
+  color: var(--danger);
+}
+
+.quota-bars {
   display: grid;
-  gap: 1px;
-  margin-left: auto;
-  text-align: right;
-  font-size: 11px;
-  line-height: 1.25;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
+  gap: 2px;
 }
 
-.quota-none {
-  font-size: 11px;
-  color: var(--text-dim);
+.quota-bar {
+  display: block;
+  width: 38px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
 }
 
-.quota-more {
-  position: relative;
+.quota-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--lamp-green);
+  transition: width 240ms ease;
 }
 
-.quota-more-btn {
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--bg-panel);
-  color: var(--text-dim);
-  font-size: 12px;
-  white-space: nowrap;
+.quota-bar.warn .quota-bar-fill {
+  background: var(--warn);
 }
 
-.quota-more-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+.quota-bar.crit .quota-bar-fill {
+  background: var(--danger);
+}
+
+/* no data: hatched track, no fill */
+.quota-bar.nodata {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--border) 0 2px,
+    transparent 2px 4px
+  );
 }
 
 .quota-pop {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 50;
+  z-index: 40;
+  width: 336px;
+  max-height: 420px;
+  overflow-y: auto;
   display: grid;
-  gap: 8px;
-  min-width: 148px;
-  padding: 10px;
-  background: var(--bg-panel);
+  gap: 10px;
+  padding: 12px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.quota-pop-row {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.quota-pop-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.quota-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quota-plan {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+.quota-pop-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-pop-line > :first-child {
+  width: 44px;
+  flex: none;
+}
+
+.quota-reset {
+  margin-left: auto;
+  color: var(--text-faint);
+}
+
+.quota-pop-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 /* ----------------------------------------------------------- P1: tools hint */
@@ -3180,3 +3459,244 @@ button:disabled {
   position: relative;
 }
 
+
+/* ------------------------------------------------------------------------ v4.0: github issues */
+
+/* Thin bar under the chat header (ChatPanel / GroupChatPanel); the popover anchors to it. */
+.issues-bar {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.issues-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.issues-btn svg {
+  flex: none;
+  font-size: 13px;
+}
+
+.issues-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.issues-btn.on {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.issues-repo {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.issues-count {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.issues-btn.on .issues-count {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Popover anchored below the button (same shape as .quota-pop / .mention-pop). */
+.issues-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 16px;
+  z-index: 40;
+  width: min(640px, 92vw);
+  min-width: min(420px, 92vw);
+  max-width: calc(100% - 32px);
+  max-height: min(480px, 70vh);
+  overflow-y: auto;
+  padding: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: left;
+}
+
+.issues-tools {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.issues-tools input[type='search'] {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  appearance: none;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.issues-tools input[type='search']:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.issues-tools .tabs {
+  flex: none;
+}
+
+.issues-status {
+  padding: 14px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.issues-status.err {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.issues-list {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  transition: opacity 0.15s;
+}
+
+.issues-list.stale {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.issue-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+}
+
+.issue-row + .issue-row {
+  border-top: 1px solid var(--border);
+}
+
+.issue-row:hover {
+  background: var(--bg-hover);
+}
+
+.issue-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.issue-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.issue-title:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.issue-num {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* Labels / author / time: flex + gap so they never run together. */
+.issue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+/* Pill; background / text colour come inline from labelStyle() when GitHub gives a colour. */
+.issue-label {
+  display: inline-block;
+  max-width: 160px;
+  padding: 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.issue-author {
+  font-weight: 500;
+}
+
+.issue-time {
+  white-space: nowrap;
+}
+
+.issue-author + .issue-time::before {
+  content: '·';
+  margin-right: 6px;
+}
+
+.issue-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}

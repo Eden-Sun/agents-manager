@@ -37,6 +37,41 @@ export type KindDisplay = 'icon' | 'text'
 
 const KIND_DISPLAY_KEY = 'am.kindDisplay'
 const DRAFTS_KEY = 'am.drafts'
+const SELECTION_KEY = 'am.selection'
+
+/**
+ * Which conversation is open, mirrored to localStorage so a reload lands on the same one.
+ * Both halves matter: `projectId` non-null means the right pane shows that project's group
+ * chat (SPEC §13) while `botId` stays parked for when the user switches back.
+ */
+interface Selection {
+  botId: string | null
+  projectId: string | null
+}
+
+const NO_SELECTION: Selection = { botId: null, projectId: null }
+
+function readSelection(): Selection {
+  try {
+    const raw = localStorage.getItem(SELECTION_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    if (!isRec(parsed)) return NO_SELECTION
+    return { botId: optStr(pick(parsed, 'botId')), projectId: optStr(pick(parsed, 'projectId')) }
+  } catch {
+    return NO_SELECTION
+  }
+}
+
+function writeSelection(sel: Selection) {
+  try {
+    localStorage.setItem(SELECTION_KEY, JSON.stringify(sel))
+  } catch {
+    /* storage unavailable: the selection still holds for this page */
+  }
+}
+
+/** Read once at module load so the store's initial state is already the restored selection. */
+const initialSelection = readSelection()
 
 /** Composer drafts survive bot / group / tab switches and reloads. Key: `bot:<id>` | `group:<projectId>`. */
 export type DraftKey = `bot:${string}` | `group:${string}`
@@ -80,6 +115,13 @@ export interface Notice {
 export interface LiveReply {
   turnId: string
   text: string
+  /**
+   * What the agent is doing right now (`turn_progress.activity`, API.md v4.1): the pane's
+   * spinner row — `Thinking… (12s · ↑ 1.2k tokens)`, a tool name. Plain terminal text, never
+   * Markdown, and never part of the stored message; shown only while `text` is still empty.
+   * `''` when the frame carried none.
+   */
+  activity: string
   revision: number
 }
 
@@ -155,7 +197,7 @@ interface StoreState {
   selectProject: (projectId: string | null) => void
   loadGroupMessages: (projectId: string) => Promise<void>
   /** `POST /projects/:id/chat`; null = failed (reason already shown as a notice). */
-  sendGroupChat: (projectId: string, text: string) => Promise<GroupChatResult | null>
+  sendGroupChat: (projectId: string, text: string, attachments?: string[]) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
   openSettings: (botId: string) => void
   closeSettings: () => void
@@ -169,7 +211,8 @@ interface StoreState {
   startBot: (botId: string) => Promise<void>
   stopBot: (botId: string) => Promise<void>
   interruptBot: (botId: string) => Promise<void>
-  sendPrompt: (botId: string, text: string) => Promise<boolean>
+  /** `attachments` 是 `POST /bots/:id/attachments` 回傳的 id（拖放進來的圖片）。 */
+  sendPrompt: (botId: string, text: string, attachments?: string[]) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   abandonTurn: (botId: string, turnId: string) => Promise<void>
   addHost: (input: NewHostInput) => Promise<HostResult | null>
@@ -229,12 +272,12 @@ export const useStore = create<StoreState>((set, get) => ({
   loadedBots: {},
   liveReply: {},
 
-  selectedProjectId: null,
+  selectedProjectId: initialSelection.projectId,
   groupMessages: {},
   loadedProjects: {},
   groupUnread: {},
 
-  selectedBotId: null,
+  selectedBotId: initialSelection.botId,
   rightTab: 'chat',
   settingsBotId: null,
   openBotSheetFor: null,
@@ -328,10 +371,10 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  async sendGroupChat(projectId, text) {
+  async sendGroupChat(projectId, text, attachments = []) {
     const crid = api.newClientRequestId()
     try {
-      const res = await api.sendGroupChat(projectId, text, crid)
+      const res = await api.sendGroupChat(projectId, text, crid, attachments)
       // Lock each recipient's composer state right away (same as `sendPrompt`); the user
       // copies and turns arrive over the socket.
       set((s) => {
@@ -422,10 +465,10 @@ export const useStore = create<StoreState>((set, get) => ({
     })
   },
 
-  async sendPrompt(botId, text) {
+  async sendPrompt(botId, text, attachments = []) {
     const crid = api.newClientRequestId()
     try {
-      const res = await api.sendPrompt(botId, text, crid)
+      const res = await api.sendPrompt(botId, text, crid, attachments)
       if (res.delivery === 'unknown') {
         get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
       }
@@ -698,6 +741,16 @@ export const useStore = create<StoreState>((set, get) => ({
   readTerminal: (botId, source, lines) => api.fetchTerminal(botId, source, lines),
 }))
 
+// One subscription instead of a write at every mutation site: `selectBot`, `selectProject`,
+// `openSettings`, `addBot`, `removeBot`/`removeProject` and `refreshState`'s own "the selected
+// bot is gone" fallback are all covered — as is anything added later.
+let lastSelection = initialSelection
+useStore.subscribe((s) => {
+  if (s.selectedBotId === lastSelection.botId && s.selectedProjectId === lastSelection.projectId) return
+  lastSelection = { botId: s.selectedBotId, projectId: s.selectedProjectId }
+  writeSelection(lastSelection)
+})
+
 type SetFn = (partial: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)) => void
 type GetFn = () => StoreState
 
@@ -851,18 +904,20 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       return
     }
     case 'turn_progress': {
-      // API.md v3.9: `{bot_id, run_id, turn_id, text, revision}` — the partial reply so far.
+      // API.md v3.9/v4.1: `{bot_id, run_id, turn_id, text, activity?, revision}` — the partial
+      // reply so far, plus the spinner row (`activity`) for turns that are still only thinking.
       const botId = frameBotId(data)
       if (!botId || !isRec(data)) return
       const turnId = str(pick(data, 'turn_id', 'turnId'))
       if (!turnId) return
       const text = str(pick(data, 'text', 'content'))
+      const activity = str(pick(data, 'activity'))
       const revision = Number(pick(data, 'revision') ?? 0) || 0
       set((s) => {
         const prev = s.liveReply[botId]
         // Frames can only move forward within a turn; a new turn always replaces.
         if (prev && prev.turnId === turnId && prev.revision > revision) return {}
-        return { liveReply: { ...s.liveReply, [botId]: { turnId, text, revision } } }
+        return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, revision } } }
       })
       return
     }
@@ -1032,10 +1087,16 @@ export function attachCommandOf(state: StoreState, projectId: string | null): st
   return state.hosts.find((h) => h.name === host)?.attach_command ?? state.attachCommand
 }
 
-/** The partial reply to show as a live bubble: only for the turn that is actually in flight. */
+/**
+ * The partial reply to show as a live bubble: only for the turn that is actually in flight.
+ *
+ * A frame counts as showable when it carries *either* body text or an `activity` row — a turn
+ * that is still only thinking has no text at all, and dropping it here is exactly what used to
+ * pin the bubble on "等待回覆（hook）…" for the whole thinking phase.
+ */
 export function liveReplyOf(state: StoreState, botId: string): LiveReply | null {
   const live = state.liveReply[botId]
-  if (!live || !live.text.trim()) return null
+  if (!live || (!live.text.trim() && !live.activity.trim())) return null
   const inflight = inFlightTurn(state, botId)
   return inflight && inflight.id === live.turnId ? live : null
 }

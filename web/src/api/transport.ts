@@ -23,6 +23,13 @@ export interface Transport {
   /** `GET /api/session` → token, cached for subsequent calls. */
   session: () => Promise<string>
   request: (method: HttpMethod, path: string, body?: unknown) => Promise<unknown>
+  /** POST raw bytes (an image) with `Content-Type: <mime>`; used by attachment upload. */
+  upload: (path: string, file: Blob) => Promise<unknown>
+  /**
+   * GET binary content as an object URL. Attachments are behind the token, and an
+   * `<img src>` cannot carry a header — so the bytes are fetched and blob-URL'd instead.
+   */
+  blobUrl: (path: string) => Promise<string>
   openSocket: (handlers: SocketHandlers) => () => void
 }
 
@@ -74,6 +81,28 @@ export class HttpTransport implements Transport {
       throw new ApiError(res.status, errBody, `${method} ${path} failed (${res.status})`)
     }
     return parsed
+  }
+
+  async upload(path: string, file: Blob): Promise<unknown> {
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (this.token) headers['X-AM-Token'] = this.token
+    headers['Content-Type'] = file.type || 'application/octet-stream'
+    const res = await fetch(`/api${path}`, { method: 'POST', headers, body: file })
+    const parsed = await readBody(res)
+    if (!res.ok) {
+      const errBody: ApiErrorBody =
+        parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: String(parsed ?? '') }
+      throw new ApiError(res.status, errBody, `POST ${path} failed (${res.status})`)
+    }
+    return parsed
+  }
+
+  async blobUrl(path: string): Promise<string> {
+    const headers: Record<string, string> = {}
+    if (this.token) headers['X-AM-Token'] = this.token
+    const res = await fetch(`/api${path}`, { headers })
+    if (!res.ok) throw new ApiError(res.status, { reason: res.statusText }, `GET ${path} failed (${res.status})`)
+    return URL.createObjectURL(await res.blob())
   }
 
   openSocket(handlers: SocketHandlers): () => void {

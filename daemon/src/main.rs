@@ -6,6 +6,7 @@
 
 mod api;
 mod assets;
+mod attach;
 mod config;
 mod db;
 mod events;

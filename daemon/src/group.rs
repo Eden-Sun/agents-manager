@@ -169,7 +169,13 @@ pub async fn members(app: &Arc<App>, project_id: &str) -> LcResult<Vec<db::Bot>>
 /// The group id **is** the client request id: a retry with the same id reaches the same
 /// per-bot Turns (`<crid>:<bot_id>` idempotency in `lifecycle::prompt`) and does not add a
 /// second "skipped" note.
-pub async fn chat(app: &Arc<App>, project_id: &str, text: &str, client_request_id: &str) -> Result<Value, Response400> {
+pub async fn chat(
+    app: &Arc<App>,
+    project_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+) -> Result<Value, Response400> {
     let project = db::project(&app.db, project_id)
         .await
         .map_err(|e| Response400::Lc(LcError::Upstream(e.to_string())))?
@@ -197,7 +203,7 @@ pub async fn chat(app: &Arc<App>, project_id: &str, text: &str, client_request_i
     let mut skipped = Vec::new();
     for t in targets {
         let crid = format!("{client_request_id}:{}", t.id);
-        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver)).await {
+        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids).await {
             Ok(out) => sent.push(json!({
                 "bot_id": t.id, "bot_name": t.name, "turn_id": out.turn_id,
                 "message_id": out.message_id, "delivery": out.delivery,
