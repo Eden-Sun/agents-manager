@@ -102,23 +102,28 @@ export function TerminalTab({ botId }: { botId: string }) {
             ))}
           </select>
         </label>
-        <span>
-          source=<code>recent_unwrapped</code>
-          {snap?.revision !== null && snap?.revision !== undefined ? `・revision ${snap.revision}` : ''}
-          {snap?.truncated ? '・已截斷' : ''}
-        </span>
+        {/* `source=recent_unwrapped・revision 12` 是抓法本身，只有在對帳時才有意義：
+            收進 tooltip。留在條上的是你會用到的兩件事——這是哪個 pane、有沒有被截斷。 */}
         {snap?.pane_id ? (
-          <span className="hint">
+          <span
+            className="hint"
+            title={`抓法 recent_unwrapped${
+              snap.revision !== null && snap.revision !== undefined ? `・revision ${snap.revision}` : ''
+            }`}
+          >
             pane <code>{snap.pane_id}</code>
             {snap.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
           </span>
         ) : null}
+        {snap?.truncated ? <span className="hint">已截斷</span> : null}
         <label className="conn">
           <input type="checkbox" checked={tight} onChange={(e) => setTight(e.target.checked)} />
           壓縮空行
         </label>
         <span className="spacer" />
-        <span className="hint">唯讀快照，第一階段不做 xterm.js 串流</span>
+        {/* 這裡本來寫的是開發備忘（「第一階段不做 xterm.js 串流」）。畫面上要說的是這東西
+            現在怎麼用，不是它的實作進度。 */}
+        <span className="hint">唯讀快照，按「刷新」更新</span>
       </div>
       {narrow ? (
         <div className="term-warn" role="status">
