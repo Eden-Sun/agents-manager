@@ -85,6 +85,31 @@ function splitAmTeam(content: string): { text: string; blocks: AmTeamBlock[] } {
   return { text, blocks }
 }
 
+/**
+ * daemon 附在每一則轉送尾巴的協定提醒（`team_sched.rs` 的 `footer()`）。
+ *
+ * 那段話是對 agent 講的規矩（「回覆結尾必須包含一個 am-team 區塊…」），每一則轉送都帶著，
+ * 所以在時間軸上就是同一段系統語重複幾十次，有時整顆氣泡裡只剩它。折起來，要看還看得到。
+ */
+const PROTOCOL_FOOTER_RE = /\n*-{3,}\n回覆結尾必須包含一個[\s\S]*$/
+
+function splitProtocolFooter(content: string): { text: string; footer: string | null } {
+  const m = PROTOCOL_FOOTER_RE.exec(content)
+  if (!m) return { text: content, footer: null }
+  return { text: content.slice(0, m.index).trim(), footer: m[0].replace(/^\n*-{3,}\n/, '').trim() }
+}
+
+function ProtocolChip({ text }: { text: string }) {
+  return (
+    <details className="am-chip">
+      <summary title="daemon 附在每一則轉送尾巴的協定規矩（寫給 agent，不是寫給你）">
+        <span className="am-chip-action">協定提醒</span>
+      </summary>
+      <pre className="am-chip-body">{text}</pre>
+    </details>
+  )
+}
+
 function AmTeamChip({ block }: { block: AmTeamBlock }) {
   return (
     <details className="am-chip">
@@ -423,6 +448,9 @@ type Row =
   | { key: string; sort: string; kind: 'msg'; msg: GroupMessage }
   | { key: string; sort: string; kind: 'event'; event: TeamEvent }
 
+/** 時間軸左邊那顆小標：事件種類的中文（`note` 這種 daemon 用詞不進畫面）。 */
+const EVENT_KIND_LABEL: Record<string, string> = { note: '系統', phase: '階段', merge: '合併' }
+
 function eventText(ev: TeamEvent): string | null {
   const p = ev.payload
   if (ev.kind === 'merge') {
@@ -432,37 +460,102 @@ function eventText(ev: TeamEvent): string | null {
     return `合併衝突：${branch}${files ? ` — ${files}` : ''}`
   }
   if (ev.kind === 'phase') {
-    const to = typeof p.to === 'string' ? p.to : ''
-    const from = typeof p.from === 'string' ? p.from : ''
+    // 階段代號（`finishing → done`）是 daemon 的字，時間軸是給人看的：兩邊都翻成中文。
+    const to = phaseLabel(p.to)
+    const from = phaseLabel(p.from)
     const reason = typeof p.reason === 'string' && p.reason ? `（${teamPauseLabel(p.reason)}）` : ''
     return `${from} → ${to}${reason}`
   }
   if (ev.kind === 'note') {
     if (typeof p.text === 'string') return p.text
-    // A note without `text` used to render as nothing at all, which is how a member that
-    // failed to start became an unexplained grey lamp: the reason was in the team log the
-    // whole time and the panel dropped it. Known actions get a sentence; anything else
-    // still shows up, as its action plus whatever fields it carries.
-    const action = typeof p.action === 'string' ? p.action : ''
-    const bot = typeof p.bot === 'string' ? p.bot : ''
-    const error = typeof p.error === 'string' ? p.error : ''
-    if (action === 'member_start_failed') return `成員 ${bot} 啟動失敗：${error}`
-    if (action === 'pretrust_failed') return `無法預先信任工作目錄：${error}`
-    if (action === 'protocol_error') {
-      return `${bot} 的回覆沒有可用的 am-team 區塊（第 ${typeof p.attempt === 'number' ? p.attempt : 1} 次）：${error}`
-    }
-    if (action === 'issue_closed') {
-      const n = typeof p.number === 'number' ? p.number : ''
-      return p.already_closed === true ? `issue #${n} 本來就已經關閉` : `已關閉 issue #${n}`
-    }
-    if (!action) return null
-    const rest = Object.entries(p)
-      .filter(([k, v]) => k !== 'action' && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'))
-      .map(([k, v]) => `${k}=${String(v)}`)
-      .join('，')
-    return rest ? `${action}：${rest}` : action
+    return noteText(p)
   }
   return null
+}
+
+/** `finishing` → `收尾中`；不認得的（或空的）就原樣回去，總比空白好。 */
+function phaseLabel(v: unknown): string {
+  const raw = typeof v === 'string' ? v : ''
+  return (TEAM_PHASE_LABEL as Record<string, string>)[raw] ?? raw
+}
+
+/**
+ * `note` 事件的人話。
+ *
+ * 這些 payload 本來是 daemon 寫給自己的記錄，時間軸卻直接把 `action：k=v` 印出來
+ * （`note reply_ok：role=pm`、`note issue_finished：branch=…，seq=6`）。時間軸是給人看的，
+ * 所以：常見的記帳事件翻成一句話；純粹重複旁邊那則訊息的（`reply_ok`）直接不顯示；
+ * 其餘（多半是失敗）保留 `action：欄位` 的原樣——那些欄位就是你要拿去查的東西。
+ */
+function noteText(p: Record<string, unknown>): string | null {
+  const str = (k: string): string => (typeof p[k] === 'string' ? (p[k] as string) : '')
+  const num = (k: string): string => (typeof p[k] === 'number' ? String(p[k]) : '')
+  const action = str('action')
+  if (!action) return null
+  const bot = str('bot')
+  const error = str('error')
+  const issue = num('issue_number')
+  switch (action) {
+    // 成員回覆本身就在時間軸上、就在這一列旁邊，再記一次「他回了」是純重複。
+    case 'reply_ok':
+      return null
+    case 'member_start_failed':
+      return `成員 ${bot} 啟動失敗：${error}`
+    case 'pretrust_failed':
+      return `無法預先信任工作目錄：${error}`
+    case 'protocol_error':
+      return `${bot} 的回覆沒有可用的 am-team 區塊（第 ${num('attempt') || 1} 次）：${error}`
+    case 'issue_closed': {
+      const n = num('number')
+      return p.already_closed === true ? `issue #${n} 本來就已經關閉` : `已關閉 issue #${n}`
+    }
+    case 'issues_queued': {
+      const list = Array.isArray(p.issue_numbers) ? p.issue_numbers.map((n) => `#${String(n)}`).join('、') : ''
+      return list ? `已排入佇列：${list}` : '已排入佇列'
+    }
+    case 'issue_unqueued':
+      return `已從佇列移除 issue #${issue}`
+    case 'issue_started':
+      return `開始處理 issue #${issue}${num('seq') ? `（佇列第 ${num('seq')} 個）` : ''}`
+    case 'issue_finished':
+      return `issue #${issue} 完成`
+    case 'issue_failed':
+      return `issue #${issue} 失敗${str('reason') ? `（${teamPauseLabel(str('reason'))}）` : ''}`
+    case 'issue_start_failed':
+      return `issue #${issue} 啟動失敗：${error}`
+    case 'gate':
+      return `等你放行：${str('gate')}`
+    case 'gate_release':
+      return `已放行：${str('gate')}`
+    case 'abort':
+      return `已中止${str('reason') ? `（${teamPauseLabel(str('reason'))}）` : ''}`
+    case 'pm_abort':
+      return `PM 要求中止${str('reason') ? `（${teamPauseLabel(str('reason'))}）` : ''}`
+    case 'worker_plan':
+      return p.keep === true ? '下一個 issue 沿用同一批執行者' : '下一個 issue 換一批執行者'
+    case 'pm_repeat':
+      return `PM 又把同一件事派給 ${str('to')}`
+    case 'auto_commit':
+      return `已幫 ${bot} 把沒提交的變更 commit`
+    case 'pr_created':
+      return `已 push ${str('pushed')} 並開 PR`
+    case 'deliver_downgraded':
+      return '這個 project 沒有 GitHub origin，改成只留整合分支'
+    case 'delivered':
+      return str('deliver') === 'pr' ? '已交付：PR' : `已交付：留下整合分支 ${str('branch')}`
+    case 'cleanup':
+      return '已清理：移除成員與 worktree（分支保留）'
+    case 'patch':
+      return '設定已更新'
+    default: {
+      // 不認得的（幾乎都是失敗）照舊把欄位攤開——那是唯一能查下去的線索。
+      const rest = Object.entries(p)
+        .filter(([k, v]) => k !== 'action' && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'))
+        .map(([k, v]) => `${k}=${String(v)}`)
+        .join('，')
+      return rest ? `${action}：${rest}` : action
+    }
+  }
 }
 
 function Timeline({ teamId }: { teamId: string }) {
@@ -525,7 +618,7 @@ function Timeline({ teamId }: { teamId: string }) {
           if (r.kind === 'event') {
             return (
               <div key={r.key} className={`team-sys ${r.event.kind}`} role="note">
-                <span className="team-sys-kind">{r.event.kind}</span>
+                <span className="team-sys-kind">{EVENT_KIND_LABEL[r.event.kind] ?? r.event.kind}</span>
                 <span className="team-sys-text">{eventText(r.event)}</span>
                 <time className="msg-time" dateTime={r.event.created_at}>
                   {timeOf(r.event.created_at)}
@@ -534,8 +627,9 @@ function Timeline({ teamId }: { teamId: string }) {
             )
           }
           const m = r.msg
-          const { text, blocks } = splitAmTeam(m.content)
-          const shown = blocks.length ? { ...m, content: text } : m
+          const stripped = splitProtocolFooter(m.content)
+          const { text, blocks } = splitAmTeam(stripped.text)
+          const shown = blocks.length || stripped.footer ? { ...m, content: text } : m
           const to = shortNames[m.bot_id] ?? m.bot_name
           const from =
             m.role === 'user' ? (
@@ -560,13 +654,21 @@ function Timeline({ teamId }: { teamId: string }) {
               </span>
             ) : undefined
           return (
-            <div key={r.key} className="team-msg-row">
-              <Bubble msg={shown} kind={m.role === 'assistant' ? kinds[m.bot_id] : undefined} from={from} />
-              {blocks.length ? (
+            // 使用者／轉送的訊息靠右，所以它底下的 chip 也要靠右，不然會浮在對面。
+            <div key={r.key} className={`team-msg-row${m.role === 'user' ? ' from-user' : ''}`}>
+              {/* 拿掉協定提醒後整則就空了（daemon 只是來提醒規矩的）：不畫空氣泡，
+                  只留發話標記與那顆折起來的 chip。 */}
+              {shown.content.trim() || blocks.length ? (
+                <Bubble msg={shown} kind={m.role === 'assistant' ? kinds[m.bot_id] : undefined} from={from} />
+              ) : (
+                <div className="team-msg-bare">{from}</div>
+              )}
+              {blocks.length || stripped.footer ? (
                 <div className="am-chips">
                   {blocks.map((b, i) => (
                     <AmTeamChip key={i} block={b} />
                   ))}
+                  {stripped.footer ? <ProtocolChip text={stripped.footer} /> : null}
                 </div>
               ) : null}
             </div>
