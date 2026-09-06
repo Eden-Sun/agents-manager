@@ -1398,6 +1398,19 @@ button:disabled {
   filter: brightness(1.08);
 }
 
+/*
+ * 停用的主要按鈕不該還長得像「主要動作」——`opacity: 0.5` 只是把藍色調淡，遠看仍然
+ * 是那顆最搶眼的按鈕。改成中性的沉底色。（這個做法本來只寫在 Bot 設定的頁尾，
+ * 現在全站一致；`.send-btn` 也套同一套。）
+ */
+.btn.primary:disabled,
+.send-btn:disabled {
+  opacity: 1;
+  background: var(--bg-sunken);
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
 .hint {
   font-size: 11px;
   color: var(--text-faint);
@@ -3961,13 +3974,6 @@ button.model-tag[aria-expanded='true'] {
 }
 
 /* 不能存的「儲存」不該還是淡藍實心（看起來像可按）：退成中性 disabled。 */
-.bs-actions .btn.primary:disabled {
-  opacity: 1;
-  background: var(--bg-sunken);
-  border-color: var(--border);
-  color: var(--text-faint);
-}
-
 .bs-danger {
   display: flex;
   align-items: center;
