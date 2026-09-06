@@ -267,6 +267,7 @@ impl Drop for Probe {
 
 /// One grok quota read. `Ok(false)` = grok is not installed locally (quota stays null).
 pub async fn refresh_grok(app: &Arc<App>) -> Result<bool> {
+    let _guard = crate::quota::probe_lock().await;
     // The start-up poller can beat CLI detection to the cache; an empty cache is "unknown",
     // not "missing", so detect once rather than reporting grok as uninstalled for 30 minutes.
     if !app.tools.lock().await.contains_key(LOCAL_HOST) {

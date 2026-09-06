@@ -398,7 +398,7 @@ sidebar 底部「身份」面板列出 `identities[]`（名稱、kind、env 摘�
 |---|---|
 | 名稱 | 有 active Run 時 `disabled`，下方提示「停止後才能改名」＋「停止並改名」按鈕（stop → 輪詢到 run 進 `stopped` / 消失 → 自動 focus 回輸入框）。前端仍檢查 `[a-z][a-z0-9_-]{0,31}` |
 | kind | 唯讀 |
-| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.5` / `gpt-5.6-luna` / `gpt-6-astra`，grok = `grok-4.6` / `grok-4.5`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
+| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.5` / `gpt-5.6-sol` / `gpt-5.6-luna` / `gpt-6-astra`，grok = `grok-4.6` / `grok-4.5`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
 | args | 空白分隔 |
 | 身份 | 只列同 kind 的 identities；`（無）` = `null` |
 | env | 每行 `KEY=VALUE`（與身份面板共用 `parseEnvText` / `envToText`），整包取代 |
@@ -859,3 +859,38 @@ LiveBubble 例外——輸出一直往下長，狀態放在成長的那一端才
 有確認框）。連帶移除 `StopIcon`、`ConfirmDialog` 的 import 與 `.bot-row.confirming`。
 
 截圖：`270-agent-titles-dark` / `271-agent-titles-light`。
+
+## 對話上方的 statusline（2026-09-06）
+
+點進某隻 bot 的對話時，標題列下方多一條 `.statusline-bar`，顯示 `run.status_line`——就是
+那隻 bot 在 pane 底下看到的同一行（帳號、專案、模型、5h/7d、F5…，內容取決於使用者自己的
+`statusLine` 腳本）。等寬字、單行、過長時橫向捲動（捲軸隱藏），tooltip 給全文。
+
+**改用原始欄位（2026-09-06 同日修訂）**：原本直接顯示腳本輸出的原文，但那行是為終端寬度寫的
+——使用者的腳本把 email 截成前 5 碼（`hunta`）、模型縮成 `OP5`，還放不下 context。網頁沒有這個
+限制，所以改成讀 `run.status`（API.md `run.status_json`）自己排：完整帳號、完整模型名（含
+effort / thinking / fast）、context（% 與 tokens/容量）、5h、7d、花費、版本。原文退居 tooltip，
+也是 payload 還沒到時的 fallback。百分比要 round——claude 送的是 `28.000000000000004`。
+
+標題列的額度條是另一回事：它是跨 bot 的總覽，這條是這隻 bot 自己的。
+
+沒有 statusline 的 bot（codex / grok，或沒設定 `statusLine.command`）不會出現這條，不留空位。
+截圖：`281-statusline-head-dark` / `282-statusline-head-light`。
+
+**codex / grok 也有 statusline（2026-09-06）**：codex 的狀態列是 TUI 內建的，欄位由
+`~/.codex/config.toml` 的 `[tui] status_line` 決定（這台是 `model-with-reasoning`、
+`current-dir`、`model`、`five-hour-limit`、`weekly-limit`）；grok 同理。兩者都沒有 claude 那種
+可以把文字交出來的 statusLine command，而從 pane 讀回來的又是被終端寬度截斷的版本
+（`gpt-5.6-luna max fast · ~/…`）。
+
+這些欄位 store 裡本來就有，所以改用 `derivedStatus()` 直接組：模型（`bot.model` + effort +
+fast）、目錄（`project.path`，家目錄縮成 `~`）、5h / 7d（`quota[kind:identity]`，ISO 時間換成
+epoch 秒好和 claude 的欄位共用同一個 renderer）。沒有帳號就把目錄提到第一格。claude 仍走
+`run.status`（它的資料更多，還有 context 和花費）。
+
+**點模型改（2026-09-06）**：狀態列的「模型 …」和標題列的模型標籤都是按鈕，開出
+`ModelQuickPicker`（模型清單；grok / codex 還有強度）。選了就 `PATCH /api/bots/:id`。
+claude / grok 執行中會走 TUI slash 指令當場套用（grok `/model <id> [effort]`、`/effort`；
+claude `/model`）；codex 仍要重啟。
+
+grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它的那條只會有目錄與模型。
