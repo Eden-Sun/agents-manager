@@ -168,7 +168,10 @@ function NewIdentityForm() {
           spellCheck={false}
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
-        {name && !nameOk ? <span className="hint">必須符合 [a-z][a-z0-9_-]&#123;0,31&#125;</span> : null}
+        {/* 同 `HostsPanel`：不要把 regex 印給使用者看。 */}
+        {name && !nameOk ? (
+          <span className="hint">小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字。</span>
+        ) : null}
       </label>
       <label className="field">
         <span>kind</span>

@@ -152,7 +152,8 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
         {name && !nameOk ? (
-          <span className="hint">必須符合 [a-z][a-z0-9_-]&#123;0,31&#125;，且不可為 local</span>
+          /* 這裡本來直接把 regex 印給使用者看。改成講規則本身——bot 名稱那一欄早就是這樣寫的。 */
+          <span className="hint">小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字；不能叫 local。</span>
         ) : null}
       </label>
       <label className="field">
