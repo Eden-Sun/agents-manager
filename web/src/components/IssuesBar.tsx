@@ -199,7 +199,11 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
           <span className="issues-owner">{github.owner}/</span>
           {github.repo}
         </span>
-        <span className="issues-count">{openCount === null ? 'Issues' : `${openCount >= 100 ? '100+' : openCount} open`}</span>
+        {/* 數字還沒回來時本來會顯示 `Issues`——一個長得像計數的藥丸裡放一個單字，讀起來
+            像壞掉的數字。沒有數字就不畫這顆；repo 名與 tooltip 已經說明這是什麼。 */}
+        {openCount === null ? null : (
+          <span className="issues-count">{openCount >= 100 ? '100+' : openCount} open</span>
+        )}
       </button>
       {open ? (
         <div className="issues-pop" role="dialog" aria-label="GitHub issues">
