@@ -2700,8 +2700,11 @@ button:disabled {
 }
 
 @media (width <= 1080px) {
-  /* Keep the tabs intact; the run/pane detail is the first thing to go. */
-  .main-status {
+  /* Keep the tabs intact; the run/pane detail is the first thing to go.
+     `.main-status.pane-toggle` is defined later with two classes, so a bare `.main-status`
+     here loses on specificity and the pane chip never actually left. */
+  .main-status,
+  .main-head .main-status.pane-toggle {
     display: none;
   }
 
@@ -2740,6 +2743,67 @@ button:disabled {
     background: rgb(0 0 0 / 35%);
     z-index: 25;
     border: 0;
+  }
+}
+
+/*
+ * 手機（≤640px）：標題列只回答「這是誰、在做什麼、去哪一頁」。額度縮成一顆 chip——
+ * 量表換成數字（風險不能只剩顏色），完整數字仍在點開的 popover 裡；模型徽章讓位，
+ * 標題就回到一行。context bar 丟掉最長也最不急的帳號欄與 repo 的 owner，其餘照舊橫捲。
+ */
+@media (width <= 640px) {
+  .main-head {
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  /* 模型與它的設定在側欄 bot 列和設定面板都看得到，手機上不值標題列第二行。 */
+  .bot-head .model-tag {
+    display: none;
+  }
+
+  .main-head .quota-open {
+    gap: 5px;
+    padding: 4px 4px;
+  }
+
+  .main-head .quota-hp {
+    gap: 5px;
+    padding: 3px 5px;
+    min-height: 26px;
+  }
+
+  .main-head .quota-head {
+    flex-direction: row;
+    gap: 4px;
+  }
+
+  .context-bar {
+    gap: 8px;
+    padding: 4px 10px;
+  }
+
+  /* repo chip 可以縮，才輪得到右邊的欄位露臉。 */
+  .context-bar > .issues-bar {
+    min-width: 0;
+  }
+
+  .issues-btn {
+    min-width: 0;
+  }
+
+  .issues-repo {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .issues-owner {
+    display: none;
+  }
+
+  .sl-item.sl-account {
+    display: none;
   }
 }
 
@@ -4372,6 +4436,35 @@ button.model-tag[aria-expanded='true'] {
   align-items: center;
   gap: 3px;
   min-width: 38px;
+}
+
+/* 手機用的 chip 內容：窗口名 + 剩餘百分比，取代 38px 的量表（見 QuotaStrip 的 `compact`）。 */
+.quota-compact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.quota-compact .quota-window-name {
+  text-align: left;
+}
+
+.quota-compact-pct {
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-hp.warn .quota-compact-pct {
+  color: var(--warn);
+}
+
+.quota-hp.crit .quota-compact-pct {
+  color: var(--danger);
 }
 
 /* 條 + 重置黑針：針要能凸出條的上下緣，所以定位掛在外層而不是條裡（條有 overflow: hidden）。 */

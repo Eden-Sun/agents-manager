@@ -332,11 +332,14 @@ function Gauge({
   entry,
   host,
   collapsed,
+  compact,
   focused,
 }: {
   entry: QuotaEntry
   host: string
   collapsed: boolean
+  /** 手機：條子縮成一顆 chip，剩餘量改用數字寫出來（見 `QuotaStrip` 的 `compact`）。 */
+  compact: boolean
   focused: boolean
 }) {
   const q = useEntryQuota(entry, host)
@@ -397,6 +400,14 @@ function Gauge({
         </span>
         {entry.identity ? <span className="quota-identity">{entry.identity}</span> : null}
       </span>
+      {compact ? (
+        /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
+           （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
+        <span className="quota-compact">
+          <span className="quota-window-name">{windows[0].name}</span>
+          <span className="quota-compact-pct">{windows[0].pct === null ? '無資料' : `${windows[0].pct}%`}</span>
+        </span>
+      ) : (
       <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
         {windows.map((w) => {
           const span = WINDOW_MS[w.name]
@@ -416,6 +427,7 @@ function Gauge({
           )
         })}
       </span>
+      )}
     </span>
   )
 }
@@ -535,6 +547,8 @@ export function QuotaStrip({
    * the popover, which lists every one of them anyway.
    */
   const tight = width < 1500
+  /** 手機：標題列連一顆量表都放不下，剩餘量改用數字寫在 chip 上。 */
+  const compact = width <= 640
 
   /** The one gauge worth the width when space is tight: the kind/identity this view is about. */
   const focusEntry = focusKind
@@ -581,7 +595,7 @@ export function QuotaStrip({
             }
           }
           return (
-            <Gauge key={entryReactKey(entry)} entry={entry} host={host} collapsed={collapsed} focused={focused} />
+            <Gauge key={entryReactKey(entry)} entry={entry} host={host} collapsed={collapsed} compact={compact} focused={focused} />
           )
         })}
         {hidden > 0 ? (
