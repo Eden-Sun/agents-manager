@@ -792,8 +792,6 @@ button:disabled {
 .bot-sub .model-tag {
   flex: 0 1 auto;
   min-width: 0;
-  /* 側欄這一行只有 156px（尾端的操作鍵固定佔 62px），`grok-4.6 · 中` 差一兩 px 就被截。 */
-  padding: 0 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -900,11 +898,62 @@ button:disabled {
   }
 }
 
+/*
+ * 這一排操作鍵本來只是 `opacity: 0`：看不見，卻照樣佔著每一列尾端 62px——四分之一的列寬。
+ * 名字與徽章被擠掉的寬度，全是被它吃走的（`grok-4.6 · 中` 就差這幾 px 被截）。改成疊在列上
+ * （跟 `.project-head-actions` 同一套做法），背後補一段漸層，浮出來時蓋住的那一小截才會
+ * 看起來像「被蓋住」而不是「被切斷」。
+ */
 .bot-actions {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
   flex: none;
+  padding-left: 20px;
+  background: linear-gradient(to right, transparent, var(--bg-panel) 16px);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 按鍵自己的淡入淡出照舊（見下面的 opacity 規則）；這裡只管「浮出來時能不能點」。 */
+.bot-row:hover .bot-actions,
+.bot-row:focus-within .bot-actions,
+.bot-row.selected .bot-actions,
+.bot-row.confirming .bot-actions {
+  pointer-events: auto;
+}
+
+.bot-row:hover:not(.selected) .bot-actions {
+  background: linear-gradient(to right, transparent, var(--bg-hover) 16px);
+}
+
+.bot-row.selected .bot-actions {
+  background: linear-gradient(to right, transparent, var(--bg-active) 16px);
+}
+
+/* 選取中的那一列，操作鍵是常駐的——所以這一列（也只有這一列）照舊把寬度讓出來，
+   免得第三行的 agent 標題跑到按鍵底下。寬度是固定的，不會因為 hover 而跳動。 */
+.bot-row.selected .bot-main {
+  padding-right: 64px;
+}
+
+@media (hover: none) {
+  /* 沒有 hover 的裝置上這排永遠顯示，疊著就會擋住徽章：回到原本佔位的排法。 */
+  .bot-actions {
+    position: static;
+    transform: none;
+    padding-left: 0;
+    background: none;
+    pointer-events: auto;
+  }
+
+  .bot-row.selected .bot-main {
+    padding-right: 0;
+  }
 }
 
 /* 這一列的選單：分身在上、設定在下，兩顆疊成一欄。 */
