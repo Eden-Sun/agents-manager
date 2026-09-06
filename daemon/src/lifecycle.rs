@@ -17,6 +17,9 @@ pub enum LcError {
     Conflict(Value),
     Upstream(String),
     Bad(String),
+    /// A 400 whose body is machine-readable rather than a message, e.g. SPEC-team §10.1's
+    /// `{"error":"quota_low","kind":"claude","used_pct":93}`.
+    BadValue(Value),
 }
 
 impl LcError {
@@ -108,6 +111,17 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
             .await
             .unwrap_or_default();
         app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
+        // SPEC-team §3: the same transition on the internal bus. Every path that takes a
+        // turn out of `in_flight` (hook match, terminal fallback, watchdog, stop, interrupt)
+        // funnels through here, so team schedulers only need this one subscription.
+        app.publish_turn(crate::state::TurnEvent {
+            bot_id,
+            turn_id: t.id.clone(),
+            status: t.status.clone(),
+            delivery: t.delivery.clone(),
+            team_id: t.team_id.clone(),
+            team_event_id: t.team_event_id.clone(),
+        });
     }
 }
 
@@ -127,7 +141,9 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
     fail_in_flight(app, run_id, &format!("run ended: {reason}")).await;
     if let Some(p) = run.pane_id.as_deref() {
         let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-        crate::events::unwatch_pane(app, &host, p).await;
+        if let Some(session) = app.session_for_run(&run).await {
+            crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
+        }
     }
     app.emit_bot_status(&run.bot_id).await;
 }
@@ -594,6 +610,11 @@ mod model_args_tests {
             auto_approve: 1,
             identity: None,
             env_json: "{}".into(),
+            managed_by: "user".into(),
+            team_id: None,
+            team_role: None,
+            cwd: None,
+            herdr_session: None,
             hook_token: "t".into(),
             deleted_at: None,
             created_at: String::new(),
@@ -655,10 +676,15 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot) -> Vec<String> {
 
 /// Resolve the herdr client for a bot through its project's host.
 async fn client_for_bot(app: &Arc<App>, bot_id: &str) -> LcResult<HerdrClient> {
-    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
-    app.herdr_for(&host)
+    app.herdr_for_bot(bot_id)
         .await
-        .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))
+        .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for bot `{bot_id}`")))
+}
+
+async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> {
+    app.herdr_for_run(run)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))
 }
 
 // ---------------------------------------------------------------- start
@@ -681,12 +707,17 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let session = app
+        .session_for_bot(&bot, &project.host)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?;
 
     // 1. INSERT Run before touching herdr (SPEC §6.2.1).
     let run_id = db::ulid();
-    let ins = sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at) VALUES (?,?,'starting','unknown',?)")
+    let ins = sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at) VALUES (?,?,'starting','unknown',?,?)")
         .bind(&run_id)
         .bind(bot_id)
+        .bind(&session)
         .bind(db::now())
         .execute(&app.db)
         .await;
@@ -715,13 +746,27 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
     }
 }
 
+/// SPEC-team §2.2: the directory a bot's pane starts in. `bots.cwd` when set (a team member
+/// lives in its own worktree), otherwise the project's path — which is what every ordinary
+/// bot has, so this is a no-op for them.
+pub fn bot_cwd<'a>(bot: &'a db::Bot, project: &'a db::Project) -> &'a str {
+    match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => project.path.as_str(),
+    }
+}
+
 async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_id: &str) -> LcResult<()> {
     let host = project.host.clone();
-    let client = app
-        .herdr_for(&host)
+    let session = app
+        .session_for_bot(bot, &host)
         .await
         .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))?;
-    if !app.host_connected(&host).await {
+    let client = app
+        .herdr_for_session(&host, &session)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("Herdr session `{session}` for host `{host}` is not configured")))?;
+    if !app.session_connected(&host, &session).await {
         return Err(LcError::Upstream(format!("host `{host}` is not connected")));
     }
     // 1b. preflight: the agent CLI must exist on that host, otherwise herdr would sit in
@@ -739,23 +784,33 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
 
     // 2. workspace
     let mut fresh_root: Option<String> = None;
-    let workspace_id = match project.workspace_id.as_deref() {
-        Some(ws) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
+    // `projects.workspace_id` belongs to the manager's configured session. An imported bot
+    // lives in the user's default session, so it must not overwrite that mapping or cause the
+    // next named-session reconcile to clear it.
+    let workspace_id = match (session.as_str() != "default", project.workspace_id.as_deref()) {
+        (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
         _ => {
             let (ws, root) =
                 client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
-            sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
-                .bind(&ws.workspace_id)
-                .bind(&project.id)
-                .execute(&app.db)
-                .await
-                .map_err(up)?;
+            if session != "default" {
+                sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
+                    .bind(&ws.workspace_id)
+                    .bind(&project.id)
+                    .execute(&app.db)
+                    .await
+                    .map_err(up)?;
+            }
             fresh_root = Some(root.pane_id.clone());
             ws.workspace_id
         }
     };
 
     // 3. pane
+    //
+    // SPEC-team §2.2: the pane's cwd is `bots.cwd` when the bot has one (a team member lives
+    // in its own worktree), otherwise the project's path. The *workspace* is still created at
+    // `project.path` — one workspace per project stays true.
+    let cwd = bot_cwd(bot, project);
     let pane_id = match fresh_root {
         Some(p) => p,
         None => {
@@ -763,11 +818,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
             let target = panes.first().map(|p| p.pane_id.clone()).ok_or_else(|| {
                 LcError::Upstream(format!("workspace {workspace_id} has no panes to split"))
             })?;
-            client
-                .pane_split(&target, "right", &project.path, env.clone())
-                .await
-                .map_err(up)?
-                .pane_id
+            client.pane_split(&target, "right", cwd, env.clone()).await.map_err(up)?.pane_id
         }
     };
 
@@ -800,7 +851,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     }
 
     // 6. per-run status subscription
-    crate::events::watch_pane(app, &host, &pane_id).await;
+    crate::events::watch_pane_on_session(app, &host, &session, &pane_id).await;
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
@@ -920,8 +971,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         return Ok(());
     }
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(()) };
-    let host = db::bot_host(&app.db, bot_id).await?;
-    let Some(client) = app.herdr_for(&host).await else { return Ok(()) };
+    let Some(client) = app.herdr_for_run(&run).await else { return Ok(()) };
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
@@ -951,7 +1001,7 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
-    let client = client_for_bot(app, bot_id).await?;
+    let client = client_for_run(app, &run).await?;
 
     let _ = sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run.id).execute(&app.db).await;
     app.emit_bot_status(bot_id).await;
@@ -989,7 +1039,9 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         .execute(&app.db)
         .await;
     if let Some(p) = run.pane_id.as_deref() {
-        crate::events::unwatch_pane(app, &host, p).await;
+        if let Some(session) = app.session_for_run(&run).await {
+            crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
+        }
     }
     app.emit_bot_status(bot_id).await;
     Ok(true)
@@ -1037,7 +1089,7 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let target = db::run_target(&run, &bot);
-    client_for_bot(app, bot_id).await?.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
+    client_for_run(app, &run).await?.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
     fail_in_flight(app, &run.id, "interrupted by user").await;
     Ok(())
 }
@@ -1053,8 +1105,47 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
         }
     }
     let target = db::run_target(&run, &bot);
-    client_for_bot(app, bot_id).await?.agent_send_keys(&target, &keys).await.map_err(up)?;
+    client_for_run(app, &run).await?.agent_send_keys(&target, &keys).await.map_err(up)?;
     Ok(())
+}
+
+/// grok 的推理強度可以在執行中改：TUI 有 `/effort <level>`（grok 1.0.13
+/// `04-slash-commands.md`），所以不必為了改 effort 重啟整個 session。
+///
+/// 回傳 `true` = 已經送進去（呼叫端就不用回 `needs_restart`）。做不到的情況一律回
+/// `false`（不是 grok、沒在跑、正在忙、清成「CLI 預設」——那個沒有對應的 slash 指令），
+/// 讓呼叫端退回原本的「重啟才生效」。
+pub async fn apply_grok_effort_live(app: &Arc<App>, bot_id: &str) -> bool {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
+    if bot.kind != "grok" {
+        return false;
+    }
+    // 清成「不指定」沒有 slash 指令可用（/effort 一定要帶 level）。
+    let Some(level) = bot.effort.as_deref().map(str::to_ascii_lowercase).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
+    if run.state != "running" || run.agent_status == "working" || run.agent_status == "blocked" {
+        return false;
+    }
+    // 正在跑的回合會把這行吃成 prompt 的一部分。
+    if !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
+        return false;
+    }
+    let Some(pane_id) = run.pane_id.clone() else { return false };
+    let Ok(client) = client_for_run(app, &run).await else { return false };
+    // 和 grok 額度探測同一套：先打字，等輸入列畫好，再送 Enter。
+    if client.pane_send_text(&pane_id, &format!("/effort {level}")).await.is_err() {
+        return false;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    if client.pane_send_keys(&pane_id, &["Enter"]).await.is_err() {
+        return false;
+    }
+    tracing::info!(bot_id, level, "grok effort applied live via /effort");
+    true
 }
 
 // ---------------------------------------------------------------- prompt
@@ -1193,7 +1284,7 @@ pub async fn prompt_grouped(
     emit_turn(app, &turn_id).await;
 
     // 4. deliver
-    let res = client_for_bot(app, bot_id)
+    let res = client_for_run(app, &run)
         .await?
         .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": &deliver}), Duration::from_secs(10))
         .await;
@@ -1247,7 +1338,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
         let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
         // What we sent, so the pane's echo of it can be stripped back off every frame.
         let sent = db::turn_user_messages(&app2.db, &turn_id).await.unwrap_or_default();
-        let mut last = (String::new(), String::new());
+        let mut last = (String::new(), String::new(), String::new());
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
             if started.elapsed() > PROGRESS_MAX {
@@ -1259,7 +1350,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             }
             let Ok(Some(run)) = db::run(&app2.db, &run_id).await else { break };
             let Some(pane) = run.pane_id.clone() else { continue };
-            let Ok(client) = client_for_bot(&app2, &bot_id).await else { continue };
+            let Ok(client) = client_for_run(&app2, &run).await else { continue };
             let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
             let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
             // Same multi-line echo problem as the fallback path: strip our own prompt back off.
@@ -1267,11 +1358,12 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             // The spinner row is dropped by `clean_screen`, so a pure thinking / tool phase
             // produces no frame at all and the UI sits on "waiting". Ship it separately.
             let activity = live_activity(&bot.kind, &read.text).unwrap_or_default();
-            if live != last.0 || activity != last.1 {
-                last = (live.clone(), activity.clone());
+            let alert = live_alert(&bot.kind, &read.text).unwrap_or_default();
+            if live != last.0 || activity != last.1 || alert != last.2 {
+                last = (live.clone(), activity.clone(), alert.clone());
                 app2.emit(
                     "turn_progress",
-                    json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "activity": activity, "revision": read.revision}),
+                    json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "activity": activity, "alert": alert, "revision": read.revision}),
                 )
                 .await;
             }
@@ -1341,7 +1433,7 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
 async fn pane_prompt_echo(app: &Arc<App>, run: &db::Run) -> Option<String> {
     let bot = db::bot(&app.db, &run.bot_id).await.ok().flatten()?;
     let pane = run.pane_id.clone()?;
-    let client = client_for_bot(app, &run.bot_id).await.ok()?;
+    let client = client_for_run(app, run).await.ok()?;
     let read = client.pane_read(&pane, "recent_unwrapped", 160).await.ok()?;
     last_prompt_echo_text(&bot.kind, &read.text)
 }
@@ -1480,6 +1572,58 @@ fn live_activity(kind: &str, text: &str) -> Option<String> {
     Some(cut)
 }
 
+/// A retry / API-error banner on the pane, e.g. claude's `API error · Retrying in 3s ·
+/// attempt 1/10` or codex's `stream error: …; retrying 2/5`.
+///
+/// The turn is still technically in flight when one of these is on screen, so `activity` shows
+/// the spinner and the UI looks healthy while the agent is actually stuck retrying an upstream
+/// failure. Surfaced separately as `turn_progress.alert` so the UI can say so.
+///
+/// Shape, never wording: a short line that says *error* **and** carries a retry / attempt token
+/// — or that opens with `API error`. Requiring both halves keeps the agent's own prose about
+/// errors (which is neither short nor retry-shaped, and rarely both) out of the banner.
+fn live_alert(kind: &str, text: &str) -> Option<String> {
+    const RETRY_TOKENS: [&str; 6] = ["retry", "retrying", "attempt", "reconnect", "重試", "retries"];
+    let lines: Vec<&str> = text.lines().collect();
+    let start = after_last_prompt_echo(kind, &lines);
+    let mut found: Option<String> = None;
+    for line in &lines[start..] {
+        let stripped;
+        let s = if kind == "grok" {
+            stripped = strip_grok_decor(line);
+            stripped.trim()
+        } else {
+            line.trim()
+        };
+        // Drop a leading spinner / bullet glyph so `✻ API error …` matches too.
+        let s = match s.chars().next() {
+            Some(c) if !c.is_alphanumeric() => s[c.len_utf8()..].trim(),
+            _ => s,
+        };
+        if s.is_empty() || s.chars().count() > ACTIVITY_MAX * 2 {
+            continue;
+        }
+        let low = s.to_ascii_lowercase();
+        let says_error = low.contains("error") || low.contains("錯誤") || low.contains("overloaded");
+        if !says_error {
+            continue;
+        }
+        let retrying = RETRY_TOKENS.iter().any(|t| low.contains(t));
+        if !retrying && !low.starts_with("api error") {
+            continue;
+        }
+        // Keep scanning: the newest banner is the one that is still true.
+        found = Some(s.to_string());
+    }
+    let s = found?;
+    if s.chars().count() <= ACTIVITY_MAX {
+        return Some(s);
+    }
+    let mut cut: String = s.chars().take(ACTIVITY_MAX).collect::<String>().trim_end().to_string();
+    cut.push('…');
+    Some(cut)
+}
+
 // ---------------------------------------------------------------- prompt-stall watchdog
 
 const STALL_SECS: u64 = 12;
@@ -1528,7 +1672,7 @@ async fn fail_stalled_turn(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: 
     // (the host may well be logged in) — the user reads the quoted lines and decides.
     let mut snapshot: Option<String> = None;
     let mut hints: Vec<String> = Vec::new();
-    if let Ok(client) = client_for_bot(app, bot_id).await {
+    if let Ok(client) = client_for_run(app, &run).await {
         if let Some(pane) = run.pane_id.as_deref() {
             if let Ok(read) = client.pane_read(pane, "visible", 60).await {
                 hints = stall_hint_lines(&read.text);
@@ -1658,11 +1802,10 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
     let pane_id = run.pane_id.clone().unwrap_or_default();
-    let host = db::bot_host(&app.db, &run.bot_id).await?;
     let client = app
-        .herdr_for(&host)
+        .herdr_for_run(&run)
         .await
-        .ok_or_else(|| anyhow::anyhow!("host `{host}` is not configured"))?;
+        .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
     let reply = extract_reply(&bot.kind, &fresh)
@@ -2047,6 +2190,38 @@ mod extract_tests {
 ────────────────────────────────────────────
 ❯
 ";
+
+    #[test]
+    fn live_alert_catches_a_retry_banner() {
+        let screen = "\
+❯ do the thing
+● Running 3 shell commands…
+  ⎿ $ ls
+✻ API error · Retrying in 0s · attempt 1/10";
+        assert_eq!(
+            live_alert("claude", screen).as_deref(),
+            Some("API error · Retrying in 0s · attempt 1/10")
+        );
+        // codex words it differently; the shape is what matches.
+        assert_eq!(
+            live_alert("codex", "stream error: 503 upstream; retrying 2/5 in 1s").as_deref(),
+            Some("stream error: 503 upstream; retrying 2/5 in 1s")
+        );
+        // The newest banner wins.
+        let two = "API error · Retrying in 0s · attempt 1/10\nAPI error · Retrying in 4s · attempt 2/10";
+        assert!(live_alert("claude", two).unwrap().ends_with("attempt 2/10"));
+    }
+
+    #[test]
+    fn live_alert_ignores_the_agent_talking_about_errors() {
+        // Prose that merely mentions an error is not a banner: no retry token.
+        assert!(live_alert("claude", "I fixed the error in the parser.").is_none());
+        // A retry token with no error is not one either.
+        assert!(live_alert("claude", "Retrying the test suite now").is_none());
+        // Long prose that happens to contain both stays out.
+        let prose = format!("The {} error means we should retry the request later on.", "x".repeat(300));
+        assert!(live_alert("claude", &prose).is_none());
+    }
 
     #[test]
     fn extract_reply_ignores_the_previous_turn() {

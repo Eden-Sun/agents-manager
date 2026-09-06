@@ -171,6 +171,30 @@ button:disabled {
   transform: translateX(-50%) translateY(0);
 }
 
+/* 側欄那幾顆鍵貼著面板右緣，置中的泡泡會被 sidebar 裁掉：改成靠右邊展開。 */
+.bot-actions .icon-tip[data-tip]::after {
+  left: auto;
+  right: 0;
+  transform: translateY(2px);
+}
+
+.bot-actions .icon-tip[data-tip]:hover::after,
+.bot-actions .icon-tip[data-tip]:focus-visible::after {
+  transform: translateY(0);
+}
+
+/* 兩顆疊在一起：下面那顆的泡泡往下開，才不會蓋住上面那顆。 */
+.bot-menu .icon-tip[data-tip]:last-child::after {
+  top: calc(100% + 6px);
+  bottom: auto;
+  transform: translateY(-2px);
+}
+
+.bot-menu .icon-tip[data-tip]:last-child:hover::after,
+.bot-menu .icon-tip[data-tip]:last-child:focus-visible::after {
+  transform: translateY(0);
+}
+
 /* ------------------------------------------------------------------ shell */
 
 .app {
@@ -302,7 +326,7 @@ button:disabled {
   padding: 4px 8px 4px 11px;
   border-left: 3px solid transparent;
   cursor: pointer;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .project-head > .icon-btn,
@@ -447,6 +471,35 @@ button:disabled {
 
 .bot-row:hover:not(.selected) {
   background: var(--bg-hover);
+}
+
+/* 拖曳排序：被拖的那列淡出，插入位置畫一條 accent 線。 */
+.bot-row {
+  position: relative;
+}
+
+.bot-row.dragging {
+  opacity: 0.4;
+}
+
+.bot-row.drop-before::before,
+.bot-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.bot-row.drop-before::before {
+  top: -1px;
+}
+
+.bot-row.drop-after::after {
+  bottom: -1px;
 }
 
 .bot-row.selected {
@@ -632,29 +685,35 @@ button:disabled {
   flex: none;
 }
 
-.bot-actions .gear {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+/* 這一列的選單：分身在上、設定在下，兩顆疊成一欄。 */
+.bot-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bot-actions .menu-btn {
+  width: 28px;
+  height: 22px;
+  min-width: 28px;
+  min-height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-/* Gear + run button: only on hover / focus / selection so the row stays calm.
+/* Menu + run button: only on hover / focus / selection so the row stays calm.
    `.confirming` = the stop confirmation is up, which must not make them fade out. */
-.bot-actions .gear,
+.bot-actions .bot-menu,
 .bot-actions .bot-run-btn {
   opacity: 0;
   transition: opacity 0.12s ease;
 }
 
-.bot-row:hover .gear,
-.bot-row:focus-within .gear,
-.bot-row.selected .gear,
-.bot-row.confirming .gear,
-.bot-actions .gear[aria-expanded='true'],
+.bot-row:hover .bot-menu,
+.bot-row:focus-within .bot-menu,
+.bot-row.selected .bot-menu,
+.bot-row.confirming .bot-menu,
 .bot-row:hover .bot-run-btn,
 .bot-row:focus-within .bot-run-btn,
 .bot-row.selected .bot-run-btn,
@@ -663,7 +722,7 @@ button:disabled {
 }
 
 @media (hover: none) {
-  .bot-actions .gear,
+  .bot-actions .bot-menu,
   .bot-actions .bot-run-btn {
     opacity: 1;
   }
@@ -1219,6 +1278,14 @@ button:disabled {
   color: var(--warn);
   font-size: 12.5px;
   font-weight: 600;
+}
+
+.conn-banner .conn-retry {
+  margin-left: auto;
+  padding: 2px 10px;
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: var(--warn);
+  background: transparent;
 }
 
 .msg-empty .typing {
@@ -1870,6 +1937,63 @@ button:disabled {
   color: var(--text-faint);
 }
 
+/* The bot's own status bar, mirrored from the pane. One line, scrolls if it overflows. */
+.statusline-bar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  padding: 5px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.statusline-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.statusline-text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre;
+}
+
+/* One field of the status bar: a quiet key, then the value. */
+.sl-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  flex: none;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sl-item + .sl-item {
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  margin-left: 2px;
+}
+
+.sl-k {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.sl-v {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.sl-dim {
+  color: var(--text-faint);
+}
+
 /* -------------------------------------------------------- blocked / term */
 
 .blocked {
@@ -2266,6 +2390,11 @@ button:disabled {
   position: static;
 }
 
+.project-head:has(.attach-pop) {
+  overflow: visible;
+  z-index: 31;
+}
+
 .project-head .attach-btn {
   opacity: 0;
   padding: 2px 4px;
@@ -2589,10 +2718,23 @@ button:disabled {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
+/* 側欄那一列的兩顆選單鍵（分身 / 設定）共用齒輪的弱化色與 hover 底。 */
+.icon-btn.menu-btn {
+  font-size: 14px;
+  line-height: 0;
+  color: var(--text-dim);
+}
+
+.icon-btn.menu-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
 /* On the selected row the wash is already accent-tinted, so the resting state needs more
    contrast than --text-dim to read as a control rather than decoration. Same specificity as
    the hover rule above, so it must exclude hover/open explicitly or it would win by order. */
 .bot-row.selected .icon-btn.gear:not(:hover):not([aria-expanded='true']),
+.bot-row.selected .icon-btn.menu-btn:not(:hover),
 .bot-row.selected .bot-run-btn:not(:hover) {
   color: var(--text);
 }
@@ -3201,7 +3343,7 @@ button:disabled {
 .quota-open {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 4px 2px;
   border: 0;
   border-radius: 8px;
@@ -3221,8 +3363,28 @@ button:disabled {
 .quota-hp {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 0 2px;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+/* Highlight only the selected bot's identity gauge (cc0 vs cc1), not every Claude row. */
+.quota-hp.focused {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.quota-head {
+  flex: none;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 1.6em;
 }
 
 .quota-identity {
@@ -3231,10 +3393,12 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: 9.5px;
+  font-weight: 700;
   line-height: 1;
-  color: var(--text-faint);
+  color: var(--text-dim);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 .quota-kind {
@@ -3258,9 +3422,30 @@ button:disabled {
   color: var(--danger);
 }
 
+.quota-hp.focused .quota-kind,
+.quota-hp.focused .quota-identity {
+  color: var(--accent);
+}
+
 .quota-bars {
   display: grid;
   gap: 2px;
+}
+
+.quota-window {
+  display: grid;
+  grid-template-columns: 14px 38px;
+  align-items: center;
+  gap: 3px;
+}
+
+.quota-window-name {
+  font-size: 8.5px;
+  font-weight: 650;
+  line-height: 1;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .quota-bar {
@@ -3866,4 +4051,739 @@ button:disabled {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+}
+
+/* Retry / API-error banner under a live bubble (`turn_progress.alert`). The turn is still in
+   flight and the spinner still spins, so this row is the only thing that says the agent is
+   stuck on an upstream failure — it has to read as a warning, not as more status text. */
+.live-alert {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.live-alert-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: var(--warn-soft);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* ================================================================= Issue Team
+   SPEC-team §11。只加新 class，全部走既有 token（沒有寫死色碼，也不需要另開
+   prefers-color-scheme 區塊——token 本身已經會換色）。 */
+
+/* IssuesBar 每列的「組隊」：跟「插入」同一組 mini-btn，只是用 accent 標出來。 */
+.mini-btn.team-btn:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------- 共用小元件 */
+
+.team-icon {
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.team-tag,
+.team-deliver {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.team-deliver.pr {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* phase chip：busy / run / warn / ok / dim 五級，沿用燈號色。 */
+.team-phase {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.team-phase.busy {
+  border-color: var(--lamp-yellow);
+  color: var(--lamp-yellow);
+}
+.team-phase.run {
+  border-color: var(--lamp-blue);
+  color: var(--lamp-blue);
+}
+.team-phase.warn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.team-phase.ok {
+  border-color: var(--lamp-green);
+  color: var(--lamp-green);
+}
+
+.team-role {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.team-role.pm {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.team-role.reviewer {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* ---------------------------------------------------------- TeamPanel 標題列 */
+
+.team-members {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.team-member-task {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* 預算量條：長度是主訊號，顏色只是加強（同 QuotaStrip 的做法）。 */
+.team-budget-meter {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-budget-bar {
+  width: 56px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.team-budget-fill {
+  display: block;
+  height: 100%;
+  background: var(--lamp-blue);
+}
+.team-budget-meter.warn .team-budget-fill {
+  background: var(--lamp-yellow);
+}
+.team-budget-meter.crit .team-budget-fill {
+  background: var(--lamp-red);
+}
+.team-budget-text {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 分支 / worktree / 連結列。 */
+.team-subhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.team-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 340px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+.team-copy:hover {
+  border-color: var(--border-strong);
+}
+.team-copy.done {
+  border-color: var(--lamp-green);
+}
+.team-copy-label {
+  flex: none;
+  color: var(--text-faint);
+}
+.team-copy-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-copy-ok {
+  flex: none;
+  color: var(--lamp-green);
+}
+
+.team-base {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.team-pr {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+}
+.team-pr:hover {
+  text-decoration: underline;
+}
+
+.team-project {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* paused 橫幅：44px 的警示列（同「缺 CLI 情境式警示」）。 */
+.team-paused {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.team-paused-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: var(--warn-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+.team-paused-text {
+  min-width: 0;
+}
+
+.team-summary {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.team-summary strong {
+  flex: none;
+  color: var(--text-dim);
+}
+
+/* ---------------------------------------------------------- task 清單 */
+
+.team-tasks {
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.team-task-list {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 0 10px 8px;
+}
+.team-task-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+}
+.team-task-col {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.team-task-col.urgent {
+  color: var(--warn);
+  font-weight: 600;
+}
+.team-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.team-task:hover {
+  background: var(--bg-hover);
+}
+.team-task.urgent {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+.team-task-id {
+  flex: none;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.team-task-who {
+  flex: none;
+  min-width: 42px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.team-task-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-task-state {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 16px;
+}
+.team-task-state.merged,
+.team-task-state.skipped {
+  border-color: var(--lamp-green);
+  color: var(--lamp-green);
+}
+.team-task-state.working,
+.team-task-state.reviewing,
+.team-task-state.merging,
+.team-task-state.rebasing {
+  border-color: var(--lamp-blue);
+  color: var(--lamp-blue);
+}
+.team-task-state.exhausted,
+.team-task-state.blocked_by_worker,
+.team-task-state.changes_requested {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.team-task-state.failed {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.team-task-round {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+.team-task-actions {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+/* ---------------------------------------------------------- 時間軸 */
+
+.team-msg-row {
+  display: flex;
+  flex-direction: column;
+}
+
+/* daemon 代轉的訊息：`pm → dev-1`。和「你 → …」用不同顏色，免得誤以為是自己送的。 */
+.msg-targets.relay {
+  color: var(--accent);
+}
+
+/* merge / phase / note 事件插成一條系統列。 */
+.team-sys {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 2px 0;
+  padding: 3px 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.team-sys.merge {
+  border-left-color: var(--lamp-green);
+}
+.team-sys.phase {
+  border-left-color: var(--lamp-blue);
+}
+.team-sys-kind {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+.team-sys-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* am-team 區塊折成一行 chip，點開才看 JSON。 */
+.am-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 6px;
+}
+.am-chip {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+.am-chip > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  list-style: none;
+}
+.am-chip > summary::-webkit-details-marker {
+  display: none;
+}
+.am-chip-action {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+.am-chip-detail {
+  color: var(--text-faint);
+}
+.am-chip-body {
+  max-height: 260px;
+  margin: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  overflow: auto;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* ---------------------------------------------------------- composer */
+
+.team-ask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+}
+.team-ask-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: var(--warn-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------- sidebar Team 節點 */
+
+.team-nodes {
+  display: flex;
+  flex-direction: column;
+}
+.team-node {
+  border-top: 1px solid var(--border);
+}
+.team-node.terminal {
+  opacity: 0.62;
+}
+.team-node-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px 2px 8px;
+}
+.team-node-head.selected {
+  background: var(--bg-active);
+}
+.team-node-chev {
+  flex: none;
+}
+.team-node-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.team-node-btn:hover {
+  background: var(--bg-hover);
+}
+.team-node-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-phase-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lamp-grey);
+}
+.team-phase-dot.busy {
+  background: var(--lamp-yellow);
+}
+.team-phase-dot.run {
+  background: var(--lamp-blue);
+}
+.team-phase-dot.warn {
+  background: var(--warn);
+}
+.team-phase-dot.ok {
+  background: var(--lamp-green);
+}
+.bot-row.team-member-row {
+  padding-left: 26px;
+}
+
+/* ---------------------------------------------------------- TeamLaunchPanel */
+
+.team-launch {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 20px;
+  background: var(--bg);
+}
+
+.team-issue {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+.team-issue-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.team-issue-body {
+  max-height: 240px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  overflow: auto;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.team-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.team-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+.team-card.off {
+  opacity: 0.7;
+}
+.team-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.team-card-title {
+  flex: 1;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.team-card-note {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.team-card-hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.team-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.team-count-num {
+  min-width: 40px;
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+}
+
+.team-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.team-options,
+.team-quota {
+  margin-top: 10px;
+}
+
+.team-launch .opt-note {
+  margin-left: 5px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+.team-launch .opt-note.warn {
+  color: var(--warn);
+}
+.team-launch .opt.danger-opt.on {
+  border-color: var(--warn);
+}
+.team-launch .warn-hint {
+  color: var(--warn);
+}
+
+.team-budget {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+}
+.team-budget-field input {
+  width: 100%;
+}
+
+.team-quota-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.team-quota-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-quota-role {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.team-quota-num {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.team-block {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.team-launch-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
 }

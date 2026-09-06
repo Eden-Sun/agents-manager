@@ -20,6 +20,9 @@ import {
   str,
   toMessage,
   toRun,
+  toTeam,
+  toTeamTask,
+  toTeamEvent,
   toTurn,
   unwrap,
   isRec,
@@ -27,8 +30,8 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
-import { BOT_KINDS } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import { BOT_KINDS, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -45,7 +48,9 @@ export function anchorOf(el: Element): SettingsAnchor {
 export type KindDisplay = 'icon' | 'text'
 
 const KIND_DISPLAY_KEY = 'am.kindDisplay'
+const BOT_ORDER_KEY = 'am.botOrder'
 const DRAFTS_KEY = 'am.drafts'
+const DRAFT_CURSORS_KEY = 'am.draftCursors'
 const SELECTION_KEY = 'am.selection'
 
 /**
@@ -56,16 +61,22 @@ const SELECTION_KEY = 'am.selection'
 interface Selection {
   botId: string | null
   projectId: string | null
+  /** SPEC-team §11.5：與另外兩個互斥；非 null = 右側顯示 TeamPanel。 */
+  teamId: string | null
 }
 
-const NO_SELECTION: Selection = { botId: null, projectId: null }
+const NO_SELECTION: Selection = { botId: null, projectId: null, teamId: null }
 
 function readSelection(): Selection {
   try {
     const raw = localStorage.getItem(SELECTION_KEY)
     const parsed: unknown = raw ? JSON.parse(raw) : null
     if (!isRec(parsed)) return NO_SELECTION
-    return { botId: optStr(pick(parsed, 'botId')), projectId: optStr(pick(parsed, 'projectId')) }
+    return {
+      botId: optStr(pick(parsed, 'botId')),
+      projectId: optStr(pick(parsed, 'projectId')),
+      teamId: optStr(pick(parsed, 'teamId')),
+    }
   } catch {
     return NO_SELECTION
   }
@@ -82,8 +93,17 @@ function writeSelection(sel: Selection) {
 /** Read once at module load so the store's initial state is already the restored selection. */
 const initialSelection = readSelection()
 
-/** Composer drafts survive bot / group / tab switches and reloads. Key: `bot:<id>` | `group:<projectId>`. */
-export type DraftKey = `bot:${string}` | `group:${string}`
+/**
+ * Composer drafts survive bot / group / team / tab switches and reloads.
+ * Key: `bot:<id>` | `group:<projectId>` | `team:<teamId>`.
+ */
+export type DraftKey = `bot:${string}` | `group:${string}` | `team:${string}`
+
+/** The saved selection in a composer draft (usually a collapsed caret). */
+export interface DraftCursor {
+  start: number
+  end: number
+}
 
 function readDrafts(): Record<string, string> {
   try {
@@ -103,6 +123,61 @@ function writeDrafts(drafts: Record<string, string>) {
     localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts))
   } catch {
     /* storage unavailable: drafts still live for this page */
+  }
+}
+
+function readDraftCursors(): Record<string, DraftCursor> {
+  try {
+    const raw = localStorage.getItem(DRAFT_CURSORS_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    if (!isRec(parsed)) return {}
+    const out: Record<string, DraftCursor> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      if (!isRec(v)) continue
+      const start = v.start
+      const end = v.end
+      if (typeof start !== 'number' || !Number.isFinite(start) || start < 0) continue
+      if (typeof end !== 'number' || !Number.isFinite(end) || end < 0) continue
+      out[k] = { start: Math.floor(start), end: Math.floor(end) }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeDraftCursors(cursors: Record<string, DraftCursor>) {
+  try {
+    localStorage.setItem(DRAFT_CURSORS_KEY, JSON.stringify(cursors))
+  } catch {
+    /* storage unavailable: cursors still live for this page */
+  }
+}
+
+/**
+ * 側欄裡每個 project 的 bot 順序（bot id 陣列）。daemon 沒有排序欄位，所以這是純前端偏好，
+ * 存在 localStorage；沒被列到的 bot（新增的）沿用 daemon 回來的順序接在後面。
+ */
+function readBotOrder(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem(BOT_ORDER_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    if (!isRec(parsed)) return {}
+    const out: Record<string, string[]> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      if (Array.isArray(v)) out[k] = v.filter((x): x is string => typeof x === 'string')
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeBotOrder(order: Record<string, string[]>) {
+  try {
+    localStorage.setItem(BOT_ORDER_KEY, JSON.stringify(order))
+  } catch {
+    /* storage unavailable: the order still holds for this page */
   }
 }
 
@@ -131,6 +206,13 @@ export interface LiveReply {
    * `''` when the frame carried none.
    */
   activity: string
+  /**
+   * A retry / API-error banner on the pane (`turn_progress.alert`, API.md v4.2) —
+   * `API error · Retrying in 3s · attempt 1/10`. The turn is still in flight and the spinner
+   * still spins, so without this the UI looks healthy while the agent is stuck retrying an
+   * upstream failure. Plain terminal text. `''` when the frame carried none.
+   */
+  alert: string
   revision: number
 }
 
@@ -159,6 +241,8 @@ interface StoreState {
   socket: SocketStatus
   /** daemon <-> 本機 herdr link (SPEC §2.2 "連線") */
   connected: boolean
+  /** The observed user's Herdr default session, used by imported default-session bots. */
+  defaultConnected: boolean
   lastSeq: number
 
   /** SPEC §11.6 remote hosts; the local machine is never in this list. */
@@ -176,6 +260,8 @@ interface StoreState {
   toolHintDismissed: boolean
   /** v4.0: unsent composer text per bot / group (mirrored to localStorage). */
   drafts: Record<string, string>
+  /** The last selection/caret for each unsent composer draft (mirrored to localStorage). */
+  draftCursors: Record<string, DraftCursor>
   identities: Identity[]
   projects: Project[]
   bots: Bot[]
@@ -208,12 +294,33 @@ interface StoreState {
   /** §13.6: replies that arrived while that project's group view was not open (memory only). */
   groupUnread: Record<string, number>
 
+  // ---- SPEC-team §11.5 -------------------------------------------------
+  /** `GET /api/state` 的 `projects[].teams[]` 攤平；key = team id。 */
+  teams: Record<string, Team>
+  /** `GET /teams/:id`（含 tasks / worktree_root）；只在開過的 team 上有值。 */
+  teamDetail: Record<string, TeamDetail>
+  /** `GET /teams/:id/events` + WS `team_event`。 */
+  teamEvents: Record<string, TeamEvent[]>
+  /** 該 team 的視圖沒開著時進來的成員回覆數（僅記憶體）。 */
+  teamUnread: Record<string, number>
+  /** 非 null = 右側顯示 TeamPanel（與 `selectedProjectId` 互斥）。 */
+  selectedTeamId: string | null
+  /**
+   * false = 這個 daemon 沒有 `/api/teams` 端點（舊版）。第一次收到 404/405 就翻成 false，
+   * 之後 UI 的 team 入口靜默消失，不再重試，也不再跳錯誤（docs/FRONTEND.md §8）。
+   */
+  teamsSupported: boolean
+  /** TeamLaunchPanel（右側暫時性 sheet）；null = 未開啟。 */
+  teamLaunch: { projectId: string; issueNumber: number } | null
+
   selectedBotId: string | null
   rightTab: RightTab
   /** 開著「Bot 設定」面板的 bot id（null = 面板關閉）。 */
   settingsBotId: string | null
   /** 觸發設定的按鈕位置（viewport 座標），彈窗會貼著它開；null = 置中。 */
   settingsAnchor: SettingsAnchor | null
+  /** 使用者拖出來的 bot 順序，key = project id（見 `botsOfProject`）。 */
+  botOrder: Record<string, string[]>
   /** Sidebar consumes this to open the「新增 Bot」sheet for a project. */
   openBotSheetFor: string | null
   notices: Notice[]
@@ -229,6 +336,8 @@ interface StoreState {
   sendGroupChat: (projectId: string, text: string, attachments?: string[]) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
   openSettings: (botId: string, anchor?: SettingsAnchor | null) => void
+  /** 把 `botId` 移到 `beforeId` 之前（`beforeId = null` = 移到最後）。同專案內才有效。 */
+  moveBot: (botId: string, beforeId: string | null) => void
   closeSettings: () => void
   /** Ask the Sidebar to open its「新增 Bot」sheet for this project. */
   requestOpenBotSheet: (projectId: string) => void
@@ -251,6 +360,8 @@ interface StoreState {
   reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
   addBot: (projectId: string, input: NewBotInput) => Promise<string | null>
+  /** 「開同類分身」：同專案、同 kind/模型/身份/人設，名字自動加序號。 */
+  cloneBot: (botId: string) => Promise<string | null>
   /** `PATCH /api/bots/:id` — 回傳 `needs_restart`，失敗回 null（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
   restartBot: (botId: string) => Promise<boolean>
@@ -267,11 +378,31 @@ interface StoreState {
   dismissToolHint: () => void
   /** Empty text removes the draft. */
   setDraft: (key: DraftKey, text: string) => void
+  /** Save a draft's selection; positions are clamped to the current draft text. */
+  setDraftCursor: (key: DraftKey, start: number, end?: number) => void
 
   /** 回合進行中按送出：排隊，等這回合結束再送。 */
   queueSend: (botId: string, text: string, attachments: string[]) => void
   /** 取消排隊中的送出（訊息會退回輸入框，由呼叫端決定）。 */
   cancelQueuedSend: (botId: string) => void
+
+  // ---- SPEC-team -------------------------------------------------------
+  /** 開啟某個 team 的視圖（null = 回到原本的 bot / 群組）。 */
+  selectTeam: (teamId: string | null) => void
+  /** 載入 `GET /teams/:id` + `/events` + 該專案的合併時間軸。 */
+  loadTeam: (teamId: string) => Promise<void>
+  /** IssuesBar 的「組隊」：開啟 TeamLaunchPanel。 */
+  openTeamLaunch: (projectId: string, issueNumber: number) => void
+  closeTeamLaunch: () => void
+  /** `POST /projects/:id/teams`；成功後自動 `selectTeam`。null = 失敗。 */
+  createTeam: (projectId: string, input: NewTeamInput) => Promise<string | null>
+  controlTeam: (teamId: string, action: TeamControlAction) => Promise<boolean>
+  patchTeam: (teamId: string, input: PatchTeamInput) => Promise<boolean>
+  /** `POST /teams/:id/say`（`to` = `pm` 或 bot_id）。 */
+  sayToTeam: (teamId: string, text: string, to: string) => Promise<boolean>
+  /** `POST /teams/:id/answer` — 回覆 PM 的 `ask_user`。 */
+  answerTeam: (teamId: string, text: string) => Promise<boolean>
+  decideTeamTask: (teamId: string, taskId: string, action: TeamTaskDecision, note?: string) => Promise<boolean>
 }
 
 let noticeSeq = 0
@@ -287,6 +418,7 @@ export const useStore = create<StoreState>((set, get) => ({
   bootError: null,
   socket: 'connecting',
   connected: true,
+  defaultConnected: false,
   lastSeq: 0,
 
   hosts: [],
@@ -297,6 +429,7 @@ export const useStore = create<StoreState>((set, get) => ({
   kindDisplay: readKindDisplay(),
   toolHintDismissed: false,
   drafts: readDrafts(),
+  draftCursors: readDraftCursors(),
   identities: [],
   projects: [],
   bots: [],
@@ -312,10 +445,19 @@ export const useStore = create<StoreState>((set, get) => ({
   loadedProjects: {},
   groupUnread: {},
 
+  teams: {},
+  teamDetail: {},
+  teamEvents: {},
+  teamUnread: {},
+  selectedTeamId: initialSelection.teamId,
+  teamsSupported: true,
+  teamLaunch: null,
+
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
   settingsBotId: null,
   settingsAnchor: null,
+  botOrder: readBotOrder(),
   openBotSheetFor: null,
   notices: [],
   busy: {},
@@ -359,6 +501,10 @@ export const useStore = create<StoreState>((set, get) => ({
           : (st.bots[0]?.id ?? null)
       const selectedProject =
         s.selectedProjectId && st.projects.some((p) => p.id === s.selectedProjectId) ? s.selectedProjectId : null
+      // SPEC-team：`teams` 以 state 為權威，但保留 WS 已經推進的 phase/usage（state 可能較舊）。
+      const teams: Record<string, Team> = {}
+      for (const t of st.teams) teams[t.id] = { ...(s.teams[t.id] ?? {}), ...t }
+      const selectedTeam = s.selectedTeamId && teams[s.selectedTeamId] ? s.selectedTeamId : null
       return {
         hosts: st.hosts,
         attachCommand: st.attach_command,
@@ -366,28 +512,35 @@ export const useStore = create<StoreState>((set, get) => ({
         identities: st.identities,
         projects: st.projects,
         bots: st.bots,
+        teams,
         runs,
         turns,
         connected: st.connected,
+        defaultConnected: st.default_connected,
         lastSeq: Math.max(s.lastSeq, st.daemon_seq),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
+        selectedTeamId: selectedTeam,
       }
     })
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
     const proj = get().selectedProjectId
     if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
+    const team = get().selectedTeamId
+    if (team) await get().loadTeam(team)
   },
 
   selectBot: (botId) => {
-    set({ selectedBotId: botId, selectedProjectId: null, rightTab: 'chat', settingsBotId: null })
+    set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, rightTab: 'chat', settingsBotId: null })
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
   selectProject: (projectId) => {
     set((s) => ({
       selectedProjectId: projectId,
+      selectedTeamId: null,
+      teamLaunch: null,
       rightTab: 'chat',
       settingsBotId: null,
       groupUnread: projectId ? { ...s.groupUnread, [projectId]: 0 } : s.groupUnread,
@@ -466,6 +619,23 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   closeSettings: () => set({ settingsBotId: null, settingsAnchor: null }),
+
+  moveBot: (botId, beforeId) => {
+    set((s) => {
+      const bot = s.bots.find((b) => b.id === botId)
+      if (!bot || botId === beforeId) return {}
+      const pid = bot.project_id
+      const current = botsOfProject(s, pid).map((b) => b.id)
+      const rest = current.filter((id) => id !== botId)
+      const at = beforeId === null ? rest.length : rest.indexOf(beforeId)
+      if (beforeId !== null && at < 0) return {}
+      const next = [...rest.slice(0, at), botId, ...rest.slice(at)]
+      if (next.join() === current.join()) return {}
+      const botOrder = { ...s.botOrder, [pid]: next }
+      writeBotOrder(botOrder)
+      return { botOrder }
+    })
+  },
 
   requestOpenBotSheet: (projectId) => set({ openBotSheetFor: projectId }),
   clearOpenBotSheet: () => set({ openBotSheetFor: null }),
@@ -660,6 +830,42 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  async cloneBot(botId) {
+    const s = get()
+    const bot = s.bots.find((b) => b.id === botId)
+    if (!bot) return null
+    const taken = new Set(s.bots.filter((b) => b.project_id === bot.project_id).map((b) => b.name))
+    // `claude-cc1` → `claude-cc1-2`；已經是 `-N` 結尾的就往上加。
+    const stem = bot.name.replace(/-\d+$/, '') || bot.name
+    let n = 2
+    while (taken.has(`${stem}-${n}`)) n += 1
+    const key = `clone:${botId}`
+    set((st) => ({ busy: { ...st.busy, [key]: true } }))
+    try {
+      const id = await get().addBot(bot.project_id, {
+        name: `${stem}-${n}`,
+        kind: bot.kind,
+        model: bot.model,
+        effort: bot.effort,
+        fast: bot.fast,
+        persona: bot.persona,
+        identity: bot.identity,
+        env: bot.env,
+        autostart: bot.autostart,
+        auto_approve: bot.auto_approve,
+      })
+      // 分身排在本尊後面，而不是掉到清單最尾巴。
+      if (id) {
+        const ids = botsOfProject(get(), bot.project_id).map((b) => b.id)
+        const at = ids.indexOf(botId)
+        if (at >= 0) get().moveBot(id, ids[at + 1] === id ? null : (ids[at + 1] ?? null))
+      }
+      return id
+    } finally {
+      set((st) => ({ busy: { ...st.busy, [key]: false } }))
+    }
+  },
+
   async patchBot(botId, input) {
     if (Object.keys(input).length === 0) return false
     let needsRestart: boolean | null = null
@@ -692,11 +898,14 @@ export const useStore = create<StoreState>((set, get) => ({
       await api.deleteBot(botId)
       set((s) => {
         const drafts = withoutKey(s.drafts, `bot:${botId}`)
+        const draftCursors = withoutKey(s.draftCursors, `bot:${botId}`)
         writeDrafts(drafts)
+        writeDraftCursors(draftCursors)
         return {
           selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
           settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
           drafts,
+          draftCursors,
         }
       })
       await get().refreshState()
@@ -717,10 +926,14 @@ export const useStore = create<StoreState>((set, get) => ({
       await api.deleteProject(projectId)
       set((s) => {
         let drafts = withoutKey(s.drafts, `group:${projectId}`)
+        let draftCursors = withoutKey(s.draftCursors, `group:${projectId}`)
         for (const id of botIds) drafts = withoutKey(drafts, `bot:${id}`)
+        for (const id of botIds) draftCursors = withoutKey(draftCursors, `bot:${id}`)
         writeDrafts(drafts)
+        writeDraftCursors(draftCursors)
         return {
           drafts,
+          draftCursors,
           selectedProjectId: s.selectedProjectId === projectId ? null : s.selectedProjectId,
         }
       })
@@ -781,23 +994,206 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setDraft: (key, text) => {
     set((s) => {
-      if ((s.drafts[key] ?? '') === text) return {}
+      if ((s.drafts[key] ?? '') === text) {
+        if (text || !s.draftCursors[key]) return {}
+        const draftCursors = withoutKey(s.draftCursors, key)
+        writeDraftCursors(draftCursors)
+        return { draftCursors }
+      }
       const drafts = text ? { ...s.drafts, [key]: text } : withoutKey(s.drafts, key)
+      const draftCursors = text ? s.draftCursors : withoutKey(s.draftCursors, key)
       writeDrafts(drafts)
-      return { drafts }
+      if (!text) writeDraftCursors(draftCursors)
+      return { drafts, draftCursors }
+    })
+  },
+
+  setDraftCursor: (key, start, end = start) => {
+    set((s) => {
+      const text = s.drafts[key] ?? ''
+      if (!text) {
+        if (!s.draftCursors[key]) return {}
+        const draftCursors = withoutKey(s.draftCursors, key)
+        writeDraftCursors(draftCursors)
+        return { draftCursors }
+      }
+      const max = text.length
+      const next: DraftCursor = {
+        start: Math.max(0, Math.min(max, Math.floor(start))),
+        end: Math.max(0, Math.min(max, Math.floor(end))),
+      }
+      const previous = s.draftCursors[key]
+      if (previous && previous.start === next.start && previous.end === next.end) return {}
+      const draftCursors = { ...s.draftCursors, [key]: next }
+      writeDraftCursors(draftCursors)
+      return { draftCursors }
     })
   },
 
   readTerminal: (botId, source, lines) => api.fetchTerminal(botId, source, lines),
+
+  // ------------------------------------------------------------ SPEC-team
+
+  selectTeam: (teamId) => {
+    set((s) => ({
+      selectedTeamId: teamId,
+      selectedProjectId: null,
+      teamLaunch: null,
+      rightTab: 'chat',
+      settingsBotId: null,
+      teamUnread: teamId ? { ...s.teamUnread, [teamId]: 0 } : s.teamUnread,
+    }))
+    if (teamId) void get().loadTeam(teamId)
+  },
+
+  async loadTeam(teamId) {
+    if (!get().teamsSupported) return
+    // The timeline is `GET /projects/:id/messages` filtered by `team_id` (SPEC-team §11.3),
+    // so the project's merged history has to be there before the panel can render anything.
+    const projectId = get().teams[teamId]?.project_id ?? get().teamDetail[teamId]?.project_id ?? null
+    if (projectId && !get().loadedProjects[projectId]) await get().loadGroupMessages(projectId)
+    try {
+      const [detail, events] = await Promise.all([api.fetchTeam(teamId), api.fetchTeamEvents(teamId)])
+      set((s) => ({
+        teamDetail: detail ? { ...s.teamDetail, [teamId]: detail } : s.teamDetail,
+        teams: detail ? { ...s.teams, [teamId]: { ...(s.teams[teamId] ?? {}), ...stripDetail(detail) } } : s.teams,
+        teamEvents: { ...s.teamEvents, [teamId]: events },
+      }))
+      const pid = detail?.project_id
+      if (pid && !get().loadedProjects[pid]) await get().loadGroupMessages(pid)
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return
+      get().notify('error', `載入 Team 失敗：${errText(e)}`)
+    }
+  },
+
+  openTeamLaunch: (projectId, issueNumber) =>
+    set({ teamLaunch: { projectId, issueNumber }, selectedTeamId: null, settingsBotId: null }),
+
+  closeTeamLaunch: () => set({ teamLaunch: null }),
+
+  async createTeam(projectId, input) {
+    try {
+      const id = await api.createTeam(projectId, input)
+      set({ teamLaunch: null })
+      await get().refreshState()
+      if (id) {
+        get().selectTeam(id)
+        get().notify('info', `已建立 Team（issue #${input.issue_number}），成員啟動中…`)
+      }
+      return id || null
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return null
+      get().notify('error', `建立 Team 失敗：${errText(e)}`)
+      return null
+    }
+  },
+
+  async controlTeam(teamId, action) {
+    let ok = false
+    await guarded(set, get, `team:${teamId}:${action}`, async () => {
+      await api.controlTeam(teamId, action)
+      ok = true
+      if (action === 'cleanup') {
+        set((s) => ({
+          selectedTeamId: s.selectedTeamId === teamId ? null : s.selectedTeamId,
+          teamDetail: withoutKey(s.teamDetail, teamId),
+          teamEvents: withoutKey(s.teamEvents, teamId),
+          teamUnread: withoutKey(s.teamUnread, teamId),
+          drafts: (() => {
+            const drafts = withoutKey(s.drafts, `team:${teamId}`)
+            writeDrafts(drafts)
+            return drafts
+          })(),
+          draftCursors: (() => {
+            const draftCursors = withoutKey(s.draftCursors, `team:${teamId}`)
+            writeDraftCursors(draftCursors)
+            return draftCursors
+          })(),
+        }))
+      }
+      await get().refreshState()
+    })
+    return ok
+  },
+
+  async patchTeam(teamId, input) {
+    let ok = false
+    await guarded(set, get, `team:${teamId}:patch`, async () => {
+      await api.patchTeam(teamId, input)
+      ok = true
+      await get().loadTeam(teamId)
+      await get().refreshState()
+    })
+    return ok
+  },
+
+  async sayToTeam(teamId, text, to) {
+    try {
+      await api.sayToTeam(teamId, text, to, api.newClientRequestId())
+      return true
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return false
+      get().notify('error', errText(e))
+      return false
+    }
+  },
+
+  async answerTeam(teamId, text) {
+    try {
+      await api.answerTeam(teamId, text)
+      await get().loadTeam(teamId)
+      return true
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return false
+      get().notify('error', errText(e))
+      return false
+    }
+  },
+
+  async decideTeamTask(teamId, taskId, action, note) {
+    let ok = false
+    await guarded(set, get, `team:${teamId}:decide:${taskId}`, async () => {
+      await api.decideTeamTask(teamId, taskId, action, note)
+      ok = true
+      await get().loadTeam(teamId)
+    })
+    return ok
+  },
 }))
+
+/** `TeamDetail` 的 `Team` 部分（`teams` map 只存共同欄位，細節留在 `teamDetail`）。 */
+function stripDetail(detail: TeamDetail): Team {
+  const { tasks: _tasks, summary: _summary, base_ref: _ref, base_sha: _sha, worktree_root: _root, ...team } = detail
+  return team
+}
+
+/**
+ * daemon 還沒有 team 端點（404 / 405）→ 靜默關掉整組 team UI，只留一則說明用的 info。
+ * 回 true 代表「已處理，呼叫端不要再跳錯誤」。
+ */
+function markTeamsUnsupported(set: SetFn, get: GetFn, e: unknown): boolean {
+  if (!api.isTeamsUnsupported(e)) return false
+  if (get().teamsSupported) {
+    set({ teamsSupported: false, teamLaunch: null, selectedTeamId: null })
+    get().notify('info', '這個 daemon 版本還沒有 Team 端點，已隱藏「組隊」功能。')
+  }
+  return true
+}
 
 // One subscription instead of a write at every mutation site: `selectBot`, `selectProject`,
 // `openSettings`, `addBot`, `removeBot`/`removeProject` and `refreshState`'s own "the selected
 // bot is gone" fallback are all covered — as is anything added later.
 let lastSelection = initialSelection
 useStore.subscribe((s) => {
-  if (s.selectedBotId === lastSelection.botId && s.selectedProjectId === lastSelection.projectId) return
-  lastSelection = { botId: s.selectedBotId, projectId: s.selectedProjectId }
+  if (
+    s.selectedBotId === lastSelection.botId &&
+    s.selectedProjectId === lastSelection.projectId &&
+    s.selectedTeamId === lastSelection.teamId
+  ) {
+    return
+  }
+  lastSelection = { botId: s.selectedBotId, projectId: s.selectedProjectId, teamId: s.selectedTeamId }
   writeSelection(lastSelection)
 })
 
@@ -851,6 +1247,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           if (sel) await get().loadMessages(sel)
           const proj = get().selectedProjectId
           if (proj) await get().loadGroupMessages(proj)
+          const team = get().selectedTeamId
+          if (team) await get().loadTeam(team)
         } finally {
           resyncPending = false
         }
@@ -864,6 +1262,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       set((s) => {
         const patch: Partial<StoreState> = {
           connected: bool(pick(data, 'herdr_connected', 'connected'), s.connected),
+        }
+        if (pick(data, 'default_connected') !== undefined) {
+          patch.defaultConnected = bool(pick(data, 'default_connected'), s.defaultConnected)
         }
         const raw = pick(data, 'hosts')
         if (raw !== undefined) patch.hosts = mergeHosts(s.hosts, hostArray(raw))
@@ -900,10 +1301,20 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     case 'bot_status': {
       const botId = frameBotId(data)
       if (!botId) return
-      const run = toRun(isRec(data) ? (data.run ?? null) : null, botId)
+      const record = isRec(data) ? data : null
+      const run = toRun(record ? (record.run ?? null) : null, botId)
+      const bot = get().bots.find((b) => b.id === botId)
+      const defaultSession = str(record ? pick(record, 'herdr_session') : undefined) === 'default' || bot?.herdr_session === 'default'
       set((s) => ({
         runs: { ...s.runs, [botId]: run },
-        connected: isRec(data) && data.connected !== undefined ? bool(data.connected, true) : s.connected,
+        // bot_status.connected is per effective session. Keep the legacy global connected field
+        // for manager-session bots, but never let a default-session bot disconnect the whole UI.
+        ...(record && record.connected !== undefined && !defaultSession
+          ? { connected: bool(record.connected, true) }
+          : {}),
+        ...(record && record.connected !== undefined && defaultSession
+          ? { defaultConnected: bool(record.connected, s.defaultConnected) }
+          : {}),
       }))
       return
     }
@@ -938,6 +1349,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
             patch.groupUnread = { ...s.groupUnread, [pid]: (s.groupUnread[pid] ?? 0) + 1 }
           }
         }
+        // SPEC-team §11.5: the team timeline reads the same `groupMessages` rows (filtered by
+        // `team_id`), so only the unread counter is team-specific here.
+        if (msg.team_id && msg.role !== 'user' && s.selectedTeamId !== msg.team_id) {
+          patch.teamUnread = { ...s.teamUnread, [msg.team_id]: (s.teamUnread[msg.team_id] ?? 0) + 1 }
+        }
         return patch
       })
       return
@@ -956,20 +1372,22 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       return
     }
     case 'turn_progress': {
-      // API.md v3.9/v4.1: `{bot_id, run_id, turn_id, text, activity?, revision}` — the partial
-      // reply so far, plus the spinner row (`activity`) for turns that are still only thinking.
+      // API.md v3.9/v4.1/v4.2: `{bot_id, run_id, turn_id, text, activity?, alert?, revision}` —
+      // the partial reply so far, the spinner row (`activity`) for turns that are still only
+      // thinking, and any retry / API-error banner (`alert`).
       const botId = frameBotId(data)
       if (!botId || !isRec(data)) return
       const turnId = str(pick(data, 'turn_id', 'turnId'))
       if (!turnId) return
       const text = str(pick(data, 'text', 'content'))
       const activity = str(pick(data, 'activity'))
+      const alert = str(pick(data, 'alert'))
       const revision = Number(pick(data, 'revision') ?? 0) || 0
       set((s) => {
         const prev = s.liveReply[botId]
         // Frames can only move forward within a turn; a new turn always replaces.
         if (prev && prev.turnId === turnId && prev.revision > revision) return {}
-        return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, revision } } }
+        return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision } } }
       })
       return
     }
@@ -984,6 +1402,56 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       const kind = str(pick(data, 'kind'))
       if (!kind) return
       set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota')) } }))
+      return
+    }
+    case 'team_changed': {
+      // SPEC-team §10.6: `{team_id, project_id, phase, pause_reason, usage}` — a partial patch.
+      if (!isRec(data)) return
+      const teamId = str(pick(data, 'team_id', 'id'))
+      if (!teamId) return
+      const existing = get().teams[teamId]
+      if (!existing) {
+        // A team this client has not seen yet (just created elsewhere): pull the full record.
+        void get().refreshState()
+        return
+      }
+      const merged = toTeam({ ...existing, ...data, id: teamId }, existing.project_id)
+      if (!merged) return
+      set((s) => ({
+        teams: { ...s.teams, [teamId]: merged },
+        teamDetail: s.teamDetail[teamId] ? { ...s.teamDetail, [teamId]: { ...s.teamDetail[teamId], ...merged } } : s.teamDetail,
+      }))
+      if (existing.phase !== merged.phase && TEAM_TERMINAL_PHASES.includes(merged.phase)) {
+        get().notify('info', `Team #${merged.issue_number} ${TEAM_PHASE_LABEL[merged.phase]}`)
+      }
+      return
+    }
+    case 'team_task_updated': {
+      if (!isRec(data)) return
+      const teamId = str(pick(data, 'team_id'))
+      const task = toTeamTask(unwrap(data, 'task'))
+      if (!teamId || !task) return
+      set((s) => {
+        const detail = s.teamDetail[teamId]
+        if (!detail) return {}
+        const tasks = detail.tasks.some((t) => t.id === task.id)
+          ? detail.tasks.map((t) => (t.id === task.id ? task : t))
+          : [...detail.tasks, task]
+        return { teamDetail: { ...s.teamDetail, [teamId]: { ...detail, tasks: tasks.sort((a, b) => a.seq - b.seq) } } }
+      })
+      return
+    }
+    case 'team_event': {
+      if (!isRec(data)) return
+      const teamId = str(pick(data, 'team_id'))
+      const ev = toTeamEvent(unwrap(data, 'event'))
+      if (!teamId || !ev) return
+      set((s) => {
+        const list = s.teamEvents[teamId]
+        if (!list) return {}
+        if (list.some((x) => x.id === ev.id)) return {}
+        return { teamEvents: { ...s.teamEvents, [teamId]: [...list, ev] } }
+      })
       return
     }
     case 'identities_changed':
@@ -1071,7 +1539,25 @@ export function botLamp(state: StoreState, botId: string): Lamp {
   const bot = state.bots.find((b) => b.id === botId)
   // A project pointing at a host the daemon no longer reports is treated as down.
   if (bot && projectHostName(state, bot.project_id) !== 'local') return 'disconnected'
-  return lampOf(state.runs[botId], state.connected)
+  const connected = bot?.herdr_session === 'default' ? state.defaultConnected : state.connected
+  return lampOf(state.runs[botId], connected)
+}
+
+/**
+ * 某個 project 的 bot，套上使用者拖曳出來的順序。`botOrder` 裡沒有的（剛新增的）
+ * 依 daemon 回來的順序接在後面，所以拖過的清單不會因為新增 bot 而重排。
+ */
+export function botsOfProject(
+  state: { bots: Bot[]; botOrder: Record<string, string[]> },
+  projectId: string,
+): Bot[] {
+  const list = state.bots.filter((b) => b.project_id === projectId)
+  const order = state.botOrder[projectId]
+  if (!order || order.length === 0) return list
+  const rank = new Map(order.map((id, i) => [id, i]))
+  const known = list.filter((b) => rank.has(b.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!)
+  const added = list.filter((b) => !rank.has(b.id))
+  return [...known, ...added]
 }
 
 export function inFlightTurn(state: StoreState, botId: string): Turn | null {
@@ -1104,7 +1590,7 @@ export function composerState(state: StoreState, botId: string | null): Composer
     if (!host || !host.connected) {
       return { ...base, reason: `主機未連線（${hostName}）${host?.error ? `：${host.error}` : ''}` }
     }
-  } else if (!state.connected) {
+  } else if (!(bot?.herdr_session === 'default' ? state.defaultConnected : state.connected)) {
     return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }
   }
   const run = state.runs[botId]
@@ -1163,13 +1649,13 @@ export function attachCommandOf(state: StoreState, projectId: string | null): st
 /**
  * The partial reply to show as a live bubble: only for the turn that is actually in flight.
  *
- * A frame counts as showable when it carries *either* body text or an `activity` row — a turn
- * that is still only thinking has no text at all, and dropping it here is exactly what used to
- * pin the bubble on "等待回覆（hook）…" for the whole thinking phase.
+ * A frame counts as showable when it carries body text, an `activity` row, or an `alert` — a
+ * turn that is still only thinking has no text at all, and dropping it here is exactly what used
+ * to pin the bubble on "等待回覆（hook）…" for the whole thinking phase.
  */
 export function liveReplyOf(state: StoreState, botId: string): LiveReply | null {
   const live = state.liveReply[botId]
-  if (!live || (!live.text.trim() && !live.activity.trim())) return null
+  if (!live || (!live.text.trim() && !live.activity.trim() && !live.alert.trim())) return null
   const inflight = inFlightTurn(state, botId)
   return inflight && inflight.id === live.turnId ? live : null
 }
@@ -1180,6 +1666,44 @@ export interface GroupComposerState {
   reason: string
   /** member bots that would accept a prompt right now */
   sendable: string[]
+}
+
+// ---------------------------------------------------- SPEC-team selectors
+
+/** 某個 project 底下的 team（建立時間新的排前面）。 */
+export function teamsOfProject(state: { teams: Record<string, Team> }, projectId: string): Team[] {
+  return Object.values(state.teams)
+    .filter((t) => t.project_id === projectId)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
+}
+
+/**
+ * SPEC-team §11.3 時間軸：`GET /projects/:id/messages` 的同一份資料，過濾 `team_id`。
+ * 專案的群組歷史還沒載入時回 null，讓面板顯示載入狀態而不是「空的」。
+ */
+export function teamMessages(state: StoreState, teamId: string | null): GroupMessage[] | null {
+  if (!teamId) return null
+  const projectId = state.teams[teamId]?.project_id ?? state.teamDetail[teamId]?.project_id ?? null
+  if (!projectId) return null
+  const all = state.groupMessages[projectId]
+  if (!all) return null
+  return all.filter((m) => m.team_id === teamId)
+}
+
+/** team 成員的 Bot 物件，依 pm → worker → reviewer 排序（缺席的成員略過）。 */
+export function teamMemberBots(state: StoreState, teamId: string | null): Bot[] {
+  const team = teamId ? state.teams[teamId] : null
+  if (!team) return []
+  const rank = { pm: 0, worker: 1, reviewer: 2 }
+  return team.members
+    .map((m) => state.bots.find((b) => b.id === m.bot_id))
+    .filter((b): b is Bot => Boolean(b))
+    .sort((a, b) => rank[a.team?.role ?? 'worker'] - rank[b.team?.role ?? 'worker'] || a.name.localeCompare(b.name))
+}
+
+/** SPEC-team §7.3：`i42-dev-1` → `dev-1`（am-team 區塊裡的短名）。 */
+export function teamShortName(botName: string): string {
+  return botName.replace(/^i\d+-/, '')
 }
 
 export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
