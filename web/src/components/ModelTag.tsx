@@ -2,13 +2,14 @@ import { useStore } from '../store/store'
 import { effortLabel } from '../api/types'
 
 /**
- * `opus-高` — the model a bot is on, with its reasoning effort bound to it.
+ * `opus · 高` — the model a bot is on, with its reasoning effort next to it.
  *
  * Effort belongs next to the model name because the two are one setting in practice: the same
  * `opus` at `低` and at `高` behave nothing alike, and the model name alone cannot tell them
- * apart. `-` joins them for that reason; `·` stays the separator between *different* facts,
- * which is why `fast` / `thinking` live in the tooltip rather than on the chip — these rows
- * are narrow enough that a third segment gets ellipsized away.
+ * apart. It used to be joined with `-` (`opus-高`) to say so, but glued to the name that reads
+ * as part of the model's *id* — `grok-4.6-中` looks like a release of grok. `·` plus the
+ * quieter colour keeps them one chip while saying they are two facts. `fast` / `thinking`
+ * stay in the tooltip: these rows are narrow enough that a third segment gets ellipsized.
  *
  * The effort shown is what the CLI **reported** when it has said (the statusLine payload),
  * falling back to what the bot is configured with before it has ever run.
@@ -31,7 +32,7 @@ export function ModelTag({ botId }: { botId: string }) {
   return (
     <span className="model-tag" title={`模型：${bot.model ?? '（CLI 預設）'}${detail ? ` · ${detail}` : ''}`}>
       {bot.model ?? 'CLI 預設'}
-      {chipExtra ? <span className="model-tag-extra">-{chipExtra}</span> : null}
+      {chipExtra ? <span className="model-tag-extra">· {chipExtra}</span> : null}
     </span>
   )
 }

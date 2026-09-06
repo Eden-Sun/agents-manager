@@ -3582,7 +3582,9 @@ button.model-tag {
   border-style: dashed;
 }
 
+/* 強度是「另一個事實」，不是模型名的字尾：`·` 前留一點空隙，顏色再退一階。 */
 .model-tag-extra {
+  margin-left: 2px;
   color: var(--text-faint);
   font-weight: 500;
 }
