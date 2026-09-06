@@ -42,8 +42,12 @@ const NOISE: RegExp[] = [
 const SUMMARY_VERB =
   /^(?:ran|read|wrote|edited|added|removed|deleted|created|updated|searched|listed|fetched|explored|analy[sz]ed|committed|pushed|pulled|running|reading|writing|editing|searching|fetching|thinking|thought|called|did)\b/i
 
-/** 被原樣回顯的 shell 指令：`Running 3 shell commands… $ cd /Users/…`、`$ git status`。 */
-const SHELL_ECHO = /(?:^|\s)\$\s+[a-z][\w./-]*[\s;|]/
+/**
+ * 被原樣回顯的 shell 指令：`$ git status`。只認行首的 `$ `——`Running 3 shell commands… $ cd …`
+ * 那種由下面的 `shell command` 規則接手。行中間的 `$ ` 不算，否則 agent 在句子裡提到
+ * 「執行 $ npm run build」也會被整行吃掉。
+ */
+const SHELL_ECHO = /^\s*\$\s+[a-z][\w./-]*(?:[\s;|]|$)/
 
 /**
  * CLI 的工具活動行：一句動名詞開頭的自述，接著耗時與被執行的指令片段——
