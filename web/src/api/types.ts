@@ -106,7 +106,7 @@ export interface IdentityStatus {
   plan: string | null
   /**
    * `config` = config.toml 的 `[[identities]]`（可編輯、可刪）；
-   * `shell` = daemon 從這台主機登入 shell 的 `ccN` alias 認出來的（唯讀，SPEC §15）。
+   * `shell` = daemon 從這台主機登入 shell 的 `ccN` alias 認出來的（唯讀，SPEC §16）。
    */
   source: 'config' | 'shell'
   /** 這台主機上這個身份指到的設定目錄（`cc0` 這種預設帳號沒有）。顯示用。 */
@@ -896,6 +896,7 @@ export interface TeamDetail extends Team {
   base_ref: string
   base_sha: string
   worktree_root: string
+  workers: TeamWorkerSpec | null
 }
 
 /** SPEC-team §10.4 `GET /api/teams/:id/events` 的一則。 */
@@ -945,6 +946,17 @@ export interface PatchTeamInput {
   budget?: Partial<TeamBudget>
   supervised?: boolean
   deliver?: TeamDeliver
+  /** 改執行者的模型設定；`apply: 'now'` 會重啟現有的 worker，預設只對下一批生效。 */
+  workers?: { model?: string | null; effort?: string | null; fast?: boolean; apply?: 'next' | 'now' }
+}
+
+/** `roles_json.workers.spec`：執行者是用什麼設定建出來的（`GET /teams/:id` 的 `roles`）。 */
+export interface TeamWorkerSpec {
+  kind: BotKind
+  model: string | null
+  effort: string | null
+  fast: boolean
+  identity: string | null
 }
 
 /** SPEC-team §10.7 `POST /api/teams/:id/close-issue` 的回應。 */

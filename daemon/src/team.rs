@@ -384,8 +384,10 @@ fn full_persona(
              工作：讀 `.agents-manager/team/ISSUE.md` 與 `.agents-manager/team/TEAM.md`（都在你的 cwd 內），\
              把當前 issue 拆成互不重疊（以檔案 / 模組切分）的 task，用 `dispatch` 派給執行者；\
              收到回報後決定下一步；所有 task 合併後 `done` 並寫摘要。不確定就 `ask_user`。\n\
-             這個 team 會依序處理多個 issue：`done` 之後 daemon 會交派下一個 issue、換一批執行者，\
-             屆時 `ISSUE.md` 與 `TEAM.md` 都會更新，執行者的名字也會變，一律以檔案為準。\n\
+             這個 team 會依序處理多個 issue：`done` 之後 daemon 會交派下一個 issue。\
+             `done` 時由你決定執行者要不要換一批：`\"workers\": \"keep\"` 沿用這批（他們對程式碼的理解還有用、\
+             而且對話還不算太長時），`\"workers\": \"replace\"` 換新的（他們的上下文已經很長或已經偏題時）；\
+             屆時 `ISSUE.md` 與 `TEAM.md` 都會更新，換批時執行者的名字也會變，一律以檔案為準。\n\
              合併與分支由 daemon 用 git 處理，你不需要（也不可以）自己 merge。"
         ),
         "reviewer" => format!(
@@ -435,7 +437,7 @@ fn team_md(issue: &IssueRef, branch: &str, root: &str, members: &[(String, Strin
     }
     s.push_str(
         "\n## 協定\n\n每則回覆的**最後**要有一個 ```am-team fenced 區塊（一個 JSON 物件）。daemon 只讀最後一個。\n\n\
-         - pm：`dispatch` / `wait` / `done` / `ask_user` / `abort`\n\
+         - pm：`dispatch` / `wait` / `done`（可帶 `workers: keep | replace`，決定下一個 issue 是否沿用執行者）/ `ask_user` / `abort`\n\
          - worker：`report`（`status: done | blocked`）\n\
          - reviewer：`verdict`（`result: approve | request_changes`）\n\n\
          區塊之外的文字給人看，區塊給系統看。\n",
@@ -724,7 +726,7 @@ pub async fn set_phase(
 // ---------------------------------------------------------------- validation
 
 /// The same identity rule as `POST /projects/:id/bots` — resolved on the team's host, so a
-/// discovered `ccN` counts there too (SPEC §15).
+/// discovered `ccN` counts there too (SPEC §16).
 async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, kind: &str) -> LcResult<Option<String>> {
     let Some(name) = identity.clone().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
     let Some(i) = crate::tools::identity_for_host(app, host, &name).await else {
@@ -1225,7 +1227,7 @@ async fn refresh_issue(app: &Arc<App>, project_id: &str, q: &db::TeamIssue) -> I
 /// Every issue is cut from the team's original `base_sha`, not from wherever `base_ref` points
 /// now, so the queue's entries stay independent of each other and of anything the user merges
 /// while the team is running.
-pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue) -> LcResult<()> {
+pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_workers: bool) -> LcResult<()> {
     let t = load(app, team_id).await?;
     let project = db::project(&app.db, &t.project_id)
         .await
@@ -1246,11 +1248,14 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue) -> Lc
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
 
-    // A fresh set of workers, in their own per-issue directories (§6.2).
-    let (count, spec) = queued_worker_role(app, &t, &project.host).await?;
+    // A fresh set of workers, in their own per-issue directories (§6.2) — unless the PM kept
+    // the previous batch, which then simply stays where it is.
     let mut dirs: Vec<String> = Vec::new();
     let mut created: Vec<String> = Vec::new();
+    let count = if keep_workers { 0 } else { queued_worker_role(app, &t, &project.host).await?.0 };
+    let spec = if keep_workers { None } else { Some(queued_worker_role(app, &t, &project.host).await?.1) };
     for n in 1..=count {
+        let spec = spec.as_ref().expect("spec is loaded when workers are created");
         let dir = format!("{root}/{}", member_dir("worker", n, q.seq));
         tg::worktree_add(app, &project.host, &project.path, &dir, &t.base_sha, true)
             .await
@@ -1339,15 +1344,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue) -> Lc
 pub async fn retire_issue_workers(app: &Arc<App>, team_id: &str, issue_id: &str) {
     let Ok(Some(t)) = db::team(&app.db, team_id).await else { return };
     let Ok(Some(project)) = db::project(&app.db, &t.project_id).await else { return };
-    let _ = sqlx::query(
-        "UPDATE team_tasks SET state = 'failed', updated_at = ?
-          WHERE team_id = ? AND issue_id = ? AND state NOT IN ('merged','skipped','failed')",
-    )
-    .bind(db::now())
-    .bind(team_id)
-    .bind(issue_id)
-    .execute(&app.db)
-    .await;
+    fail_open_tasks(app, team_id, issue_id).await;
 
     let members = db::team_members(&app.db, team_id).await.unwrap_or_default();
     for b in members.iter().filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker")) {
@@ -1370,6 +1367,20 @@ pub async fn retire_issue_workers(app: &Arc<App>, team_id: &str, issue_id: &str)
         app.emit("bot_changed", json!({"bot_id": b.id})).await;
     }
     tg::worktree_prune(app, &project.host, &project.path).await;
+}
+
+/// Close out whatever an issue left open: `team_tasks_one_open_per_worker` is unique on the
+/// worker, so a stale open task would block the next dispatch to the same executor.
+pub async fn fail_open_tasks(app: &Arc<App>, team_id: &str, issue_id: &str) {
+    let _ = sqlx::query(
+        "UPDATE team_tasks SET state = 'failed', updated_at = ?
+          WHERE team_id = ? AND issue_id = ? AND state NOT IN ('merged','skipped','failed')",
+    )
+    .bind(db::now())
+    .bind(team_id)
+    .bind(issue_id)
+    .execute(&app.db)
+    .await;
 }
 
 fn role_spec_json(r: &CheckedRole) -> Value {
@@ -2044,6 +2055,23 @@ pub struct PatchTeam {
     pub supervised: Option<bool>,
     #[serde(default)]
     pub deliver: Option<String>,
+    #[serde(default)]
+    pub workers: Option<WorkersPatch>,
+}
+
+/// Change the executors' model mid-run. `apply = "next"` (default) only rewrites the spec the
+/// next batch is created from; `apply = "now"` also updates the live workers and restarts
+/// them, which drops whatever they were in the middle of.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkersPatch {
+    #[serde(default)]
+    pub model: Option<Option<String>>,
+    #[serde(default)]
+    pub effort: Option<Option<String>>,
+    #[serde(default)]
+    pub fast: Option<bool>,
+    #[serde(default)]
+    pub apply: Option<String>,
 }
 
 /// `PATCH /api/teams/:id` — top up the budget, flip supervised, change the delivery mode.
@@ -2062,10 +2090,66 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
         Some(_) => return Err(LcError::Bad("deliver must be `branch` or `pr`".into())),
     };
     let supervised = p.supervised.unwrap_or(t.supervised == 1);
-    sqlx::query("UPDATE teams SET budget_json = ?, deliver = ?, supervised = ? WHERE id = ?")
+    let mut roles: Value = serde_json::from_str(&t.roles_json).unwrap_or_else(|_| json!({}));
+    let mut restarted: Vec<String> = Vec::new();
+    let mut workers_note = Value::Null;
+    if let Some(wp) = &p.workers {
+        let apply_now = match wp.apply.as_deref().map(str::trim) {
+            None | Some("") | Some("next") => false,
+            Some("now") => true,
+            Some(other) => return Err(LcError::Bad(format!("workers.apply must be `next` or `now`, not `{other}`"))),
+        };
+        let project = db::project(&app.db, &t.project_id).await.map_err(any_err)?;
+        let host = project.as_ref().map(|p| p.host.clone()).unwrap_or_else(|| LOCAL_HOST.to_string());
+        let mut spec: RoleSpec = roles
+            .get("workers")
+            .and_then(|w| w.get("spec"))
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .ok_or_else(|| LcError::Upstream("team roles_json has no worker spec".into()))?;
+        if let Some(m) = &wp.model {
+            spec.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        }
+        if let Some(e) = &wp.effort {
+            spec.effort = e.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        }
+        if let Some(f) = wp.fast {
+            spec.fast = f;
+        }
+        let checked = check_role(app, &host, &spec, "workers").await?;
+        if let Some(w) = roles.get_mut("workers").and_then(Value::as_object_mut) {
+            w.insert("spec".into(), role_spec_json(&checked));
+        }
+        // The live batch: the spec is what they were started from, so the same fields move
+        // with it. Without `apply = "now"` they keep running as they are until replaced.
+        let members = db::team_members(&app.db, team_id).await.map_err(any_err)?;
+        for b in members.iter().filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker")) {
+            sqlx::query("UPDATE bots SET model = ?, effort = ?, fast = ? WHERE id = ?")
+                .bind(&checked.model)
+                .bind(&checked.effort)
+                .bind(checked.fast as i64)
+                .bind(&b.id)
+                .execute(&app.db)
+                .await
+                .map_err(any_err)?;
+            app.emit("bot_changed", json!({"bot_id": b.id})).await;
+            if apply_now && db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
+                match crate::lifecycle::restart_bot(app, &b.id).await {
+                    Ok(_) => restarted.push(short_name(&b.name, team_id)),
+                    Err(e) => tracing::warn!(bot = %b.name, error = ?e, "team worker restart after model change failed"),
+                }
+            }
+        }
+        workers_note = json!({
+            "model": checked.model, "effort": checked.effort, "fast": checked.fast,
+            "apply": if apply_now { "now" } else { "next" }, "restarted": restarted,
+        });
+    }
+    sqlx::query("UPDATE teams SET budget_json = ?, deliver = ?, supervised = ?, roles_json = ? WHERE id = ?")
         .bind(serde_json::to_string(&budget).unwrap_or_else(|_| "{}".into()))
         .bind(&deliver)
         .bind(supervised as i64)
+        .bind(serde_json::to_string(&roles).unwrap_or_else(|_| "{}".into()))
         .bind(team_id)
         .execute(&app.db)
         .await
@@ -2078,7 +2162,7 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
         None,
         None,
         None,
-        json!({"action": "patch", "budget": budget, "deliver": deliver, "supervised": supervised}),
+        json!({"action": "patch", "budget": budget, "deliver": deliver, "supervised": supervised, "workers": workers_note}),
     )
     .await?;
     let t = load(app, team_id).await?;
@@ -3553,6 +3637,7 @@ mod api_tests {
                 budget: Some(BudgetPatch { max_relays: Some(80), ..Default::default() }),
                 supervised: Some(true),
                 deliver: Some("pr".into()),
+                workers: None,
             },
         )
         .await

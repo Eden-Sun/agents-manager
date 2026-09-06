@@ -308,9 +308,25 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
 舊版截圖 `40-42` 保留為對照。
 
 
-## 左上角：herdr 佔用的 RAM 總量（SPEC §15，2026-09-06 加）
+## 左上角：標題、pane 數與 RAM
 
-側邊欄標題列（`Agents Manager` 右邊）多了一格 `RAM 1.5G`，是**所有 herdr 進程樹**現在吃掉的
+側邊欄標題列現在是 `AG Man ｜ pane 2 ｜ RAM 1.5G ｜ ● 已連線`。
+
+- **標題縮寫成 `AG Man`**（全名留在 `title`）：位置讓給右邊那排徽章。CSS 上它是 `flex: none`
+  ——原本的 `flex: 1` 會先把它截成「A…」；把空白吃掉的是它後面第一個徽章的 `margin-left: auto`。
+- **`pane N`**（`.pane-badge`）：現在開著幾個 herdr pane，也就是有幾個 bot 的終端還在
+  （run 是 `starting` / `running` / `stopping` 且已經拿到 `pane_id`；`stopped` / `exited` 早就把
+  pane 還回去了，不算）。tooltip 依主機拆開（`本機：2 個`），因為 pane 是開在各自的 herdr 上。
+  一個都沒有時整格不出現。
+  - 實作上它跟 `botQuotaWarning` 踩同一個坑：selector **不能**自己組陣列回傳，否則
+    `useSyncExternalStore` 每次都判斷「快照變了」→ 無限重渲染（React #185）。所以 selector 只取
+    `bots` / `runs` / `projects` 三個穩定引用，統計放 `useMemo`。
+  - 驗收 `node scripts/demo-panebadge.mjs`（截圖 `354`–`356`，最後一張把 MOCK 徽章拿掉，確認
+    正式模式下這一列不會擠爆：287px 內全放得下）。
+
+### RAM 總量（SPEC §15，2026-09-06 加）
+
+`RAM 1.5G` 是**所有 herdr 進程樹**現在吃掉的
 常駐記憶體——herdr 自己 ＋ 它底下的 pane 與 agent CLI，所有主機加總。
 
 - 資料來自 `GET /api/mem` 與 WS `mem_updated`（見 docs/API.md），store 存在 `mem`。
@@ -1021,8 +1037,9 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
   切到無 Fast 的模型會清掉 `fast`。
 - claude 的模型是 daemon 端的靜態清單（opus / sonnet / haiku / fable），**v4.1 起帶
   `--effort` 的五級**（low / medium / high / xhigh / max，每個 alias 都一樣）。因為不隨模型
-  變，強度那列不顯示「依 <模型>」的註記；也沒有 slash 形式（claude 的 `/effort` 是拉桿），
-  所以改強度一定是「重啟後才會套用」。
+  變，強度那列不顯示「依 <模型>」的註記；執行中改強度會走 TUI 的 `/effort <level>` 當場套用
+  （`liveEffort()` 現在含 claude），註記寫「執行中改會即時套用，不用重啟」，tooltip 補一句
+  claude 會順手把它存成之後新 session 的預設。
 - 失敗或舊 daemon（可能回 SPA HTML 200）：退回 `MODEL_OPTIONS`；codex 另帶
   `CODEX_EFFORT_OPTIONS`，grok 帶 `EFFORT_OPTIONS`，claude 帶 `CLAUDE_EFFORT_OPTIONS`。
   Fast 在靜態清單不顯示（無 tiers）。
@@ -1053,7 +1070,7 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
   `342-quota-host-remote-pop.png`（popover）、`343`〜`345`（切回本機 / 深色 / 1040 寬）；
   重跑 `node scripts/demo-quota-host.mjs`（需 `VITE_MOCK=1 npx vite --port 5311`）。
 
-### 8.4.1 身份清單的來源（SPEC §15）
+### 8.4.1 身份清單的來源（SPEC §16）
 
 - store 的 `identities` 仍是 config.toml 那一份；每台主機另外有 `hosts[].identity_status`
   （本機是 `localIdentityStatus`），裡面除了登入狀態還帶 `source`（`config` / `shell`）與
@@ -1272,9 +1289,25 @@ epoch 秒好和 claude 的欄位共用同一個 renderer）。沒有帳號就把
 **點模型改（2026-09-06）**：狀態列的「模型 …」和標題列的模型標籤都是按鈕，開出
 `ModelQuickPicker`（模型清單，三種 kind 現在都有強度）。選了就 `PATCH /api/bots/:id`。
 claude / grok 執行中會走 TUI slash 指令當場套用（grok `/model <id> [effort]`、`/effort`；
-claude `/model`）；claude 的**強度**與 codex 的任何改動仍要重啟。
+claude `/model`、`/effort <level>`）；codex 仍要重啟。
 
 grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它的那條只會有目錄與模型。
+
+## Team 成員的身分（2026-09-07 加）
+
+一個 team 常常一個角色一個帳號（分散額度），所以 `identity` 要看得見，不能只留在 tooltip：
+
+- **主區的成員 chip**（`TeamPanel.MemberChip`）：短名徽章（`pm` / `dev-1` / `rev`）後面接
+  `IdentityBadge`，沒指定就顯示「預設」——和側欄一般 bot 列同一顆元件、同一條規則。
+- **側欄 team 節點下的成員列**（`TeamNodes.MemberRow`）：`bot-sub` 那行的 `KindTag` 後面同樣接
+  `IdentityBadge`。
+- 兩邊的 tooltip 都多一行「身分 cc2 / 預設」。
+- 開團表單本來就能逐角色選身分（`TeamLaunchPanel` 用的就是 `IdentityOptions`，吃專案的 host，
+  所以 shell 認來的 `ccN` 也在選項裡，SPEC §16）。
+- 驗收 `node scripts/demo-team-identity.mjs`（截圖 `357-team-member-identity.png`）：PM 指定 cc2、
+  其餘留預設，建立後主區是 `pm cc2 ｜ dev-1 預設 ｜ dev-2 預設 ｜ rev 預設`，側欄同步。
+  過程中順手補了 mock 的一個落差：`createTeam` 只讀舊的 `issue_number`，而前端早就送
+  `issue_numbers` 佇列（SPEC-team §2.3），所以 mock 一直回 `gh: issue #0 not found`。
 
 ## Team 完成後的「關閉 issue」提議（SPEC-team §10.7）
 

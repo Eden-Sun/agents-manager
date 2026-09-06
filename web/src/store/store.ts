@@ -1955,7 +1955,7 @@ export function toolsOfHost(state: StoreState, host: string): ToolMap {
  */
 /**
  * 這台主機上「可以拿來啟動 bot」的身份：config.toml 的 `[[identities]]`，加上 daemon 從那台
- * 主機的登入 shell 認出來的 `ccN` alias（SPEC §15）。同名時 config 優先——daemon 那邊
+ * 主機的登入 shell 認出來的 `ccN` alias（SPEC §16）。同名時 config 優先——daemon 那邊
  * (`tools::identities_for_host`) 用的是同一條規則。
  *
  * 是純函式而不是 selector：兩個輸入都是 store 裡的穩定引用，元件端用 `useMemo` 合併，
@@ -2063,8 +2063,24 @@ export function teamMemberBots(state: StoreState, teamId: string | null): Bot[] 
 }
 
 /** SPEC-team §7.3：`i42-dev-1` → `dev-1`（am-team 區塊裡的短名）。 */
+/**
+ * `ttxka1d-i2-dev-1` → `dev-1`, `ttxka1d-pm` → `pm`, `i42-rev` → `rev`.
+ *
+ * Team members are named `<team slug>-[i<issue>-]<role>`; the slug and issue number are the
+ * same for every member on the screen, so they are pure noise in a chip that sits next to
+ * five siblings. The full name stays in the chip's tooltip.
+ */
 export function teamShortName(botName: string): string {
-  return botName.replace(/^i\d+-/, '')
+  // Only peel a prefix when what is left still reads as a role, so an already-short
+  // `dev-1` is not shortened to `1`.
+  const role = /^(pm|rev|reviewer|dev|worker)(-|$)/i
+  let out = botName
+  for (let i = 0; i < 2 && !role.test(out); i += 1) {
+    const peeled = out.replace(/^[a-z0-9]+-/i, '')
+    if (peeled === out) break
+    out = peeled
+  }
+  return role.test(out) ? out : botName
 }
 
 export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {

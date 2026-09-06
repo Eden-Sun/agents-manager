@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
-import { effortLabel } from '../api/types'
+import { effortLabel, quotaKey } from '../api/types'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedModal } from './BlockedModal'
@@ -18,6 +18,7 @@ import { GearIcon } from './Icons'
 import { IssuesBar } from './IssuesBar'
 import { KindTag } from './KindTag'
 import { ModelQuickPicker } from './ModelPicker'
+import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
@@ -659,6 +660,8 @@ function derivedStatus(
  */
 function modelExtraOf(status: StatusInfo | null): string {
   if (!status) return ''
+  // `-` binds the effort to the model name (`opus-高`); the rest are separate facts and
+  // keep the `·` used everywhere else.
   return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null, status.thinking ? 'thinking' : null]
     .filter(Boolean)
     .join(' · ')
@@ -746,8 +749,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const r = s.runs[b.id] ?? null
       if (r?.status) return r.status
       if (b.kind === 'claude') return null
-      const key = b.identity ? `${b.kind}:${b.identity}` : b.kind
-      const q = s.quota[key] ?? s.quota[b.kind] ?? null
+      // 額度按主機分（SPEC §14）：狀態列講的是這隻 bot，就看它那台的列。
+      const host = projectHostName(s, b.project_id)
+      const key = quotaKey(host, b.identity ? `${b.kind}:${b.identity}` : b.kind)
+      const q = s.quota[key] ?? s.quota[quotaKey(host, b.kind)] ?? null
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
       return derivedStatus(b.kind, b.model, b.effort, b.fast, path, q)
     }),
@@ -875,7 +880,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               }
             >
               {bot.model ?? statusInfo?.model_name}
-              {modelExtra ? <span className="model-tag-extra"> · {modelExtra}</span> : null}
+              {modelExtra ? <span className="model-tag-extra">-{modelExtra}</span> : null}
             </ModelQuickPicker>
           ) : null}
         </div>
@@ -898,6 +903,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         ) : null}
         <span className="spacer" />
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
+        {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
+        <MemBadge host={hostName} onlyRemote />
         <div className="tabs" role="tablist">
           <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
             對話

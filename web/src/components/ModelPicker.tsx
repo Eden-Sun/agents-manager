@@ -142,8 +142,13 @@ export function ApiModelFields({
             {current && current.id !== model && kind !== 'claude' ? (
               <span className="field-note">依 {current.display_name}</span>
             ) : null}
-            {/* grok 的 TUI 有 /effort，daemon 會直接送進去；codex 只能重啟。 */}
-            {kind === 'grok' ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
+            {/* grok / claude 的 TUI 都有 `/effort <level>`，daemon 會直接送進去；codex 只能重啟。
+                claude 會順手把它存成該帳號的預設（CLI 行為，見 SPEC §17）。 */}
+            {liveEffort(kind) ? (
+              <span className="field-note" title={kind === 'claude' ? 'claude 會同時把它存成之後新 session 的預設強度' : undefined}>
+                執行中改會即時套用，不用重啟
+              </span>
+            ) : null}
           </span>
           <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
             <button
@@ -198,8 +203,9 @@ function liveModel(kind: BotKind): boolean {
   return kind === 'claude' || kind === 'grok'
 }
 
+/** grok 與 claude 的 TUI 都吃 `/effort <level>`（claude 2.1.263 實測）；codex 沒有。 */
 function liveEffort(kind: BotKind): boolean {
-  return kind === 'grok'
+  return kind === 'grok' || kind === 'claude'
 }
 
 /**

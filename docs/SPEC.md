@@ -1,8 +1,8 @@
 # Agents Manager 規格書（v3.6）
 
 > 修訂紀錄
-> - v4.1（2026-09-06）：新增 §16「claude 的 `--effort`」：claude 2.1+ 的五級強度（low…max）納入 `bot.effort`，啟動注入 `--effort`，`GET /api/models` 的 claude 清單帶同一組 `efforts`；TUI 的 `/effort` 是拉桿，所以改 claude 強度一律 `needs_restart`。
-> - v4.1（2026-09-06）：新增 §15「從 shell 認出來的身份 cc0～cc6」：daemon 在工具偵測時順便讀該主機登入 shell 的 `ccN` alias（`~/.zshrc` 為退路），只取 `CLAUDE_CONFIG_DIR`、不取旗標，結果放在 `hosts[].shell_identities` 與 `hosts[].identities.<name>.source/config_dir`，**不寫回 config.toml**；bot 啟動、identity 驗證、額度探測與 UI 選單一律改用 `identities_for_host(host)`（config 優先）；額度探測跳過「statusLine 剛更新過」與「這台沒登入」的身份。
+> - v4.1（2026-09-06）：新增 §17「claude 的 `--effort`」：claude 2.1+ 的五級強度（low…max）納入 `bot.effort`，啟動注入 `--effort`，`GET /api/models` 的 claude 清單帶同一組 `efforts`；執行中改強度走 TUI 的 `/effort <level>` 當場套用（帶參數才行，不帶參數是拉桿；claude 會順手存成該帳號的預設）。
+> - v4.1（2026-09-06）：新增 §16「從 shell 認出來的身份 cc0～cc6」：daemon 在工具偵測時順便讀該主機登入 shell 的 `ccN` alias（`~/.zshrc` 為退路），只取 `CLAUDE_CONFIG_DIR`、不取旗標，結果放在 `hosts[].shell_identities` 與 `hosts[].identities.<name>.source/config_dir`，**不寫回 config.toml**；bot 啟動、identity 驗證、額度探測與 UI 選單一律改用 `identities_for_host(host)`（config 優先）；額度探測跳過「statusLine 剛更新過」與「這台沒登入」的身份。
 > - v3.9（2026-09-06）：新增 §14「每台主機各自的額度」：quota map key 加上 `<host>/` 前綴、`quota.host` 欄位；codex RPC / claude statusLine / claude 與 grok 的 `/usage` 探測全部跟著主機走（遠端探測借 daemon 在該主機的 named session）；三個 poller 改為對 `local` + 每台已連線遠端各跑一輪、`probe_lock` 改 per host；`GET /api/quota` 新增 `host=`、WS `quota_updated` 多帶 `host`；標題列額度條一次只顯示一台並在遠端掛主機名牌。
 > - v3.6（2026-09-06）：新增 §12「grok 支援」（第三種 kind：xAI grok CLI 1.0.13）與附錄 F（grok 實測：CLI 旗標、hook 機制與 payload、終端標記、身份隔離）。grok 無每次啟動的 hook 注入旗標，改由 daemon 寫入 `<GROK_HOME>/hooks/agents-manager.json` + 以 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` 分派的固定腳本；pane env 新增 `AM_HOOK_TOKEN`；`bots.kind` CHECK 重建加入 `grok`。
 > - v0（2026-09-05）：初稿。
@@ -617,7 +617,7 @@ claude / grok 的 `/usage` 探測開在本機、遠端 bot 的 statusLine 也直
 > 測試 daemon 的探測進行到一半 master 就被踢掉（`ssh master exited`）。要端到端跑遠端 claude 探測，
 > 得先停掉另一個 daemon。
 
-## 15. 從 shell 認出來的身份 cc0～cc6（v4.1）
+## 16. 從 shell 認出來的身份 cc0～cc6（v4.1）
 
 多帳號的人本來就已經把帳號寫在 shell 裡了：
 
@@ -630,7 +630,7 @@ alias cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-permiss
 
 所以 daemon 直接讀它，`cc0`…`cc6` 不必再手寫一份 `[[identities]]`。
 
-### 15.1 怎麼讀
+### 16.1 怎麼讀
 偵測跟在既有的工具偵測（§12 的 `tools` 那一支）後面，同一個腳本、同一次 ssh：
 
 ```sh
@@ -651,7 +651,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 - 沒有 `CLAUDE_CONFIG_DIR` 的（典型是 `cc0`）→ **env 為空**的身份，也就是預設帳號；額度列本來就把
   它折到裸的 `claude` key 上（§14.1）。
 
-### 15.2 每台主機各一份
+### 16.2 每台主機各一份
 發現到的身份**不寫回 `config.toml`**（使用者決定）：`cc1` 在本機是 `~/.claude-cc1`，在 m4p 是
 `~/.claude-ccompany`——同一個名字、不同帳號，寫成全域設定就會在遠端跑錯帳號。它們跟著該主機的
 偵測結果走：
@@ -662,7 +662,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 - 合併規則只有一條，`tools::identities_for_host()`：**config.toml 的 `[[identities]]` 先，同名的
   shell 身份讓位**。手寫的永遠贏得過猜出來的。
 
-### 15.3 誰在用
+### 16.3 誰在用
 | 用途 | 之前 | 現在 |
 |---|---|---|
 | 啟動 bot 的 pane env / args | `cfg.identities` | `identities_for_host(bot 的 host)` |
@@ -673,7 +673,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 `[[identities]]` 本身沒有變：仍可手寫、可從 UI 新增與刪除，也仍然是唯一可編輯的那種。從 shell 認來的
 是唯讀的——要改就去改那台主機的 alias。
 
-### 15.4 探測節流
+### 16.4 探測節流
 `cc0`…`cc6` 全開的話，一台主機最多 7 個 claude 帳號，每個帳號的 `/usage` 探測要開一次 TUI（~25 秒），
 一輪 60 秒根本跑不完。所以額度探測（§14.3）多兩個跳過條件：
 
@@ -681,7 +681,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 - 工具偵測說該身份在這台**沒有登入**（`logged_in == false`）→ 不探（它只會停在登入畫面，把 25 秒的
   對話框逾時燒掉）。等哪次偵測看到它登入了，下一輪自然恢復。
 
-### 15.5 驗收
+### 16.5 驗收
 mock（`node scripts/demo-identity-shell.mjs`，需 `VITE_MOCK=1 npx vite --port 5311`）：
 
 | # | 內容 | 結果 |
@@ -689,16 +689,16 @@ mock（`node scripts/demo-identity-shell.mjs`，需 `VITE_MOCK=1 npx vite --port
 | I1 | 環境設定 → 身分 | config 的 cc0 / cc1 可刪；虛線下方是「從 shell 認來的」cc2 → `/Users/me/.claude-cc2`，唯讀（`docs/screenshots/350-identities-shell-local.png`） |
 | I2 | 加一台 m4p | 同一個 `cc2` 多出一列，指到 `/Users/m4p/.claude-ccompany`——同名不同帳號（`351-identities-shell-two-hosts.png`） |
 | I3 | Bot 設定的身份選項 | `不指定身分 / cc0 / cc1 / cc2`，cc2 的 tooltip 寫明「來自本機的 shell alias（ccN），不是 config.toml」與登入的帳號（`352-bot-settings-identity-options.png`） |
-| I4 | 額度列 | 本機 cc0 / cc1 / cc2 三條，切到 m4p 後同樣三條但數字是那台的（`320`〜`325`，§14.6） |
+| I4 | 額度列 | 本機 cc0 / cc1 / cc2 三條，切到 m4p 後同樣三條但數字是那台的（`340`〜`345`，§14.6） |
 
 真後端（本機 daemon，`~/.zshrc` 有 cc0 / cc1 / cc2）：
 
 | # | 內容 | 結果 |
 |---|---|---|
 | I5 | `GET /api/state` 的 `hosts[0].identities` | `cc0`（無 `config_dir`，已登入）、`cc1`（`/Users/…/.claude-cc1`，**未登入**）、`cc2`（`/Users/…/.claude-cc2`，已登入，帳號與 cc0 不同），三個都是 `source: "shell"` |
-| I6 | 額度 | `claude:cc2` 由 `/usage` 探測填上；未登入的 `cc1` 依 §15.4 被跳過，不再每分鐘燒一次 25 秒逾時 |
+| I6 | 額度 | `claude:cc2` 由 `/usage` 探測填上；未登入的 `cc1` 依 §16.4 被跳過，不再每分鐘燒一次 25 秒逾時 |
 
-## 16. claude 的 `--effort`（v4.1）
+## 17. claude 的 `--effort`（v4.1）
 
 claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），所以 `bot.effort`
 不再只對 codex / grok 有效：
@@ -709,9 +709,14 @@ claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），
   → effort → identity.args → bot.args）。
 - `GET /api/models` 的 claude 靜態清單每個 alias 都帶同一組 `efforts`——claude 沒有 codex
   `model/list` 那種 per-model 清單，所以 UI 的強度列不標「依 <模型>」。
-- **不能**當場套用：TUI 的 `/effort` 是一條拉桿（`←/→ to adjust · Enter to confirm`，2.1.263 實測），
-  沒有 `/effort high` 這種帶參數的形式，所以 `PATCH /bots/:id {effort}` 對 claude 一律回
-  `needs_restart: true`（`live_slash_command` 只認 claude 的 `model`）。
+- **可以當場套用**：`/effort <level>` 帶參數就直接生效（2.1.263 實測，畫面回
+  `Set effort level to low (saved as your default for new sessions)`）；不帶參數的 `/effort`
+  才是那條拉桿（`←/→ to adjust · Enter to confirm`）。所以 `PATCH /bots/:id {effort}` 走
+  `apply_live_setting` 送 `/effort <level>` 並回 `needs_restart: false`，條件與 grok 相同
+  （只改這個欄位、run 在跑且不忙、不是清成 CLI 預設）。
+- **副作用**：那行 `saved as your default for new sessions` 是 claude 自己的行為——用
+  `/effort <level>` 會順手把它存成該帳號之後新 session 的預設強度。TUI 的拉桿有「按 `s` 只
+  套用這一次」，但那條路要靠方向鍵定位，送不出確定的值，所以 daemon 用帶參數的形式。
 
 實測（2026-09-06，claude 2.1.263，本機與 m4p 同版）：
 
@@ -719,8 +724,9 @@ claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），
 |---|---|---|
 | E1 | `claude -p --effort high --model haiku` | 正常回覆 |
 | E2 | `claude -p --effort bogus` | `Warning: Unknown --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.` — 只是警告，不會讓 run 掛掉 |
-| E3 | TUI 打 `/effort` | 出現拉桿：`low medium high xhigh max ultracode`（`ultracode` = xhigh + workflows，只有 TUI 有，CLI 不吃），`←/→ to adjust · Enter to confirm` |
-| E4 | UI | Bot 設定的「強度」列對 claude 出現（預設 / 低 / 中 / 高 / 最高 / Max），改了底部顯示「已變更：effort」，儲存回 needs_restart（`docs/screenshots/353-claude-effort.png`） |
+| E3 | TUI 打 `/effort`（不帶參數） | 出現拉桿：`low medium high xhigh max ultracode`（`ultracode` = xhigh + workflows，只有 TUI 有，CLI 不吃），`←/→ to adjust · Enter to confirm · s for this session only` |
+| E4 | TUI 打 `/effort low` | 直接套用：`⎿ Set effort level to low (saved as your default for new sessions): …`，狀態列變成 `○ low · /effort`；再開拉桿 ▲ 停在 low |
+| E5 | UI | Bot 設定的「強度」列對 claude 出現（預設 / 低 / 中 / 高 / 最高 / Max）並標「執行中改會即時套用，不用重啟」（`docs/screenshots/353-claude-effort.png`） |
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 

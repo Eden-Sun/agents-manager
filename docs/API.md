@@ -509,7 +509,7 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
   登入 shell 認出來的 `ccN`（見下方「shell 認出來的身份」）。
 - 每個 bot 物件都有 `identity`（`string | null`）與 `env`（物件，預設 `{}`）。
 
-### shell 認出來的身份 `ccN`（v4.1，SPEC §15）
+### shell 認出來的身份 `ccN`（v4.1，SPEC §16）
 
 daemon 在每台主機的工具偵測裡順便讀那台登入 shell 的 alias（`"$SHELL" -lic alias`，讀不到時退回
 `~/.zshrc`），把 `cc0`…`cc6` 當成身份用，**不寫回 config.toml**：
@@ -634,8 +634,8 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
     - grok `effort` → `/effort <level>`
     - grok `model` → `/model <id>`；若這次 PATCH 也帶了 `effort`（或 bot 本來就有），第二參數一併送（`/model grok-4.6 high`）
     - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）
-    - claude `effort` **沒有** slash 形式：TUI 的 `/effort` 是一條拉桿（←/→ 調整、Enter 確認，實測 2.1.263），
-      送不進一個確定的值，所以改 claude 的強度一律回 `needs_restart: true`
+    - claude `effort` → `/effort <level>`（2.1.263 實測：帶參數就直接套用；不帶參數的 `/effort` 才是拉桿）。
+      **副作用**：claude 會把它一併存成該帳號之後新 session 的預設強度（CLI 行為，TUI 上按 `s` 才是只此一次）
   沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
   前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
 - **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
@@ -979,7 +979,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
     2. **`/usage` pane 探測**（背景，每 60 秒）：與 grok 相同，在專屬 `am-quota` herdr session 開用完即丟的 pane
        跑 claude、送 `/usage`、解析 `Current session` / `Current week (all models)` 兩條；每個有獨立
        `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）；identity
-       清單是**該主機**的（含它 shell 的 `ccN`，SPEC §15）。兩種情況跳過不探：該列在 60 秒內剛被
+       清單是**該主機**的（含它 shell 的 `ccN`，SPEC §16）。兩種情況跳過不探：該列在 60 秒內剛被
        statusLine 更新過，或工具偵測說這個身份在這台沒登入（否則只會停在登入畫面燒掉 25 秒逾時）。
        `source` = `claude-usage`。**遠端主機**的探測改開在 daemon 自己在那台上的 named session
        （遠端只有一條被轉發的 socket），cwd 與 identity env 的 `~` 都用遠端的 `$HOME`（SPEC §14.2）。

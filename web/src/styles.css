@@ -277,8 +277,36 @@ button:disabled {
   border-bottom: 1px solid var(--border);
 }
 
-/* 所有 herdr 進程樹目前吃掉的記憶體（SPEC §15）。放標題列，因為它是「整套系統現在多重」，
-   不屬於任何一個 bot；等寬字讓數字跳動時不會把旁邊的東西推來推去。 */
+/* 現在開著幾個 herdr pane。和 RAM 那格同一種徽章：都是「整套系統現在佔多少」，
+   一個講記憶體、一個講終端；細節（哪台幾個）在 tooltip。 */
+.pane-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-size: 10.5px;
+  line-height: 1.6;
+  cursor: default;
+}
+
+.pane-badge .pane-k {
+  color: var(--text-faint);
+  letter-spacing: 0.03em;
+}
+
+.pane-badge .pane-v {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一台主機上 herdr 進程樹吃掉的記憶體（SPEC §15）。左上角那顆固定是本機；遠端的只在標題列
+   出現、而且只在你正看著那台的東西時。等寬數字讓它跳動時不會把旁邊的東西推來推去。 */
 .mem-badge {
   flex: none;
   display: inline-flex;
@@ -305,22 +333,37 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* 有主機量不到：數字是低估的，標一顆星，理由在 tooltip 裡。 */
-.mem-badge.partial .mem-partial {
+/* 量不到的那台：直接顯示「—」，不要拿 0 假裝。 */
+.mem-badge.partial .mem-v {
   color: var(--warn);
-  font-weight: 700;
 }
 
+/* 遠端那顆掛在標題列（本機的固定在左上角），跟 host-badge 同一種語彙。 */
+.mem-badge.remote {
+  flex: none;
+  border-color: var(--border-strong);
+}
+
+.mem-badge.remote .mem-k {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 650;
+}
+
+/* 標題縮寫成「AG Man」就是為了讓徽章有位置，所以它自己不再被壓縮（`flex: 1` 會先把它
+   截成「A…」）；推開右邊的空白改由徽章前的 auto margin 負責。 */
 .sidebar-head h1 {
   margin: 0;
   font-size: 14px;
   font-weight: 650;
   letter-spacing: 0.01em;
-  flex: 1;
-  min-width: 0;
+  flex: none;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+/* 第一個徽章把剩下的空白吃掉，標題貼左、徽章群貼右。 */
+.sidebar-head h1 + * {
+  margin-left: auto;
 }
 
 .conn {
@@ -3332,7 +3375,7 @@ button:disabled {
   padding: 6px 4px;
   border-bottom: 1px solid var(--border);
 }
-/* 從 shell alias 認來的身份（SPEC §15）：唯讀，所以整塊退一階，和可編輯的 config 列分開。 */
+/* 從 shell alias 認來的身份（SPEC §16）：唯讀，所以整塊退一階，和可編輯的 config 列分開。 */
 .identity-shell-block {
   display: grid;
   gap: 2px;
@@ -4166,6 +4209,28 @@ button.model-tag[aria-expanded='true'] {
   border-radius: 8px;
   background: transparent;
   cursor: pointer;
+}
+
+/* 「還有 N 個」：窄視窗下條子只留焦點那一個，其餘點開 popover 才看。 */
+.quota-more {
+  flex: none;
+  align-self: center;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「還有 N 組」：窄視窗下條子只留焦點那一個，其餘點開 popover 才看。 */
+.quota-more {
+  flex: none;
+  align-self: center;
+  padding: 0 2px 0 4px;
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .quota-open:hover {
@@ -5083,6 +5148,23 @@ button.model-tag[aria-expanded='true'] {
   white-space: nowrap;
 }
 
+/* 執行者模型 chip：跟交付 chip 同一款，但是可以按的。 */
+button.team-workers {
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+button.team-workers:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+button.team-workers:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .team-deliver.pr {
   border-color: var(--warn);
   background: var(--warn-soft);
@@ -5979,20 +6061,13 @@ button.model-tag[aria-expanded='true'] {
   white-space: nowrap;
 }
 
-/* Badges may shorten when the title needs the space. Their full text remains in the
-   existing title tooltip, while a badge can never reserve enough width to displace
-   the quota strip. */
-.team-head .team-phase,
-.team-head .team-deliver {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 22ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.team-head .team-deliver {
-  max-width: 12ch;
+/* The phase badge never shrinks. It used to be allowed to, and at a busy width it collapsed
+   to a single character (`進`, `交`) — a one-character status badge is worse than no badge,
+   and the title next to it has a tooltip while this does not. The title yields instead. */
+.team-head .main-title > .team-phase {
+  flex: none;
+  max-width: none;
+  overflow: visible;
 }
 
 /* 組隊表單的標題是短字「組隊」，不要沿用 TeamPanel 那種把 strong 撐滿、把專案名推到右邊的規則。 */
