@@ -1020,6 +1020,70 @@ button:disabled {
   color: var(--danger);
 }
 
+/*
+ * 標題列的 `⋯` 溢位選單。危險項目（刪除）住在這裡而不是排在「中止」旁邊：
+ * 紅色要留給確認階段與 hover，不該是標題列的常態色（見 UI-DECISIONS）。
+ */
+.head-menu {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.head-menu-btn.on {
+  background: var(--bg-active);
+  color: var(--text);
+}
+
+.head-menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 168px;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.head-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.head-menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+/* 危險項目在選單裡才轉紅——這是它唯一該用紅色的時候（下一步就是確認框）。 */
+.head-menu-item.danger {
+  color: var(--danger);
+}
+
+.head-menu-item.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.head-menu-item:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
 /* ------------------------------------------------------------------ lamps */
 
 .lamp {

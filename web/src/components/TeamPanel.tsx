@@ -1,4 +1,5 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Bot, GroupMessage, TeamEvent, TeamTask, TeamTaskState } from '../api/types'
 import {
@@ -29,6 +30,7 @@ import { CopyChip } from './CopyChip'
 import { Modal } from './Modal'
 import { ApiModelFields } from './ModelPicker'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
+import { MoreIcon } from './Icons'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
@@ -751,6 +753,57 @@ function BudgetMeter({ teamId }: { teamId: string }) {
   )
 }
 
+/**
+ * 標題列的 `⋯`：收「不常按、又不該常駐在標題列上」的動作。
+ *
+ * 起因是「中止」與「刪除」兩顆紅框按鈕肩並肩——紅色因此變成標題列的常態色，而且要停掉
+ * 一個 team 時很容易多按一格就把它整筆刪掉。UI-DECISIONS 已經定了「一般畫面最多一個常駐
+ * 危險操作」，所以中止／清理留在外面，刪除收進來。
+ */
+function HeadMoreMenu({ children, label }: { children: ReactNode; label: string }) {
+  const [open, setOpen] = useState(false)
+  const wrap = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div className="head-menu" ref={wrap}>
+      <button
+        type="button"
+        className={`icon-btn head-menu-btn icon-tip${open ? ' on' : ''}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        title={label}
+        data-tip={label}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <MoreIcon />
+      </button>
+      {open ? (
+        // 點到裡面任何一顆按鈕就關起來：每一項都是「開確認框」或「離開」，沒有留著的理由。
+        <div className="head-menu-pop" role="menu" onClick={() => setOpen(false)}>
+          {children}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSidebar: () => void }) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   const detail = useStore((s) => s.teamDetail[teamId] ?? null)
@@ -879,18 +932,21 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
               中止
             </button>
           )}
-          <button
-            type="button"
-            className="mini-btn danger"
-            disabled={Boolean(busy[`team:${teamId}:delete`])}
-            title="刪除：連 Team 紀錄一起移除（進行中會先停成員；訊息與分支預設保留）"
-            onClick={() => setConfirm('delete')}
-          >
-            刪除
-          </button>
           <button type="button" className="mini-btn" title="回到這個 Project 的群組聊天" onClick={() => selectProject(team.project_id)}>
             關閉
           </button>
+          <HeadMoreMenu label="更多 Team 動作">
+            <button
+              type="button"
+              className="head-menu-item danger"
+              role="menuitem"
+              disabled={Boolean(busy[`team:${teamId}:delete`])}
+              title="刪除：連 Team 紀錄一起移除（進行中會先停成員；訊息與分支預設保留）"
+              onClick={() => setConfirm('delete')}
+            >
+              刪除 Team…
+            </button>
+          </HeadMoreMenu>
         </div>
       </div>
 
