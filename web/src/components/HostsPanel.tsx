@@ -3,6 +3,7 @@ import type { HostResult } from '../api/types'
 import { HOST_DEFAULTS } from '../api/types'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
+import { ConfirmDialog } from './ConfirmDialog'
 import { ToolBadges } from './Tools'
 
 /**
@@ -30,6 +31,7 @@ function HostRow({ name }: { name: string }) {
   const busy = useStore((s) => Boolean(s.busy[`host:${name}`]))
   const reconnectHost = useStore((s) => s.reconnectHost)
   const removeHost = useStore((s) => s.removeHost)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   if (!host) return null
 
   return (
@@ -71,13 +73,30 @@ function HostRow({ name }: { name: string }) {
           type="button"
           className="icon-btn"
           title={projectCount > 0 ? '仍有 Project 使用這個主機' : '刪除主機'}
-          onClick={() => {
-            if (confirm(`刪除主機「${name}」？（遠端 herdr 與 agent 不受影響）`)) void removeHost(name)
-          }}
+          onClick={() => setConfirmDelete(true)}
         >
           ✕
         </button>
       </span>
+      {/* 本來是 `window.confirm()`——整個 app 只有這裡跳原生對話框，樣式、Escape 與
+          focus trap 都跟其他刪除不一樣。 */}
+      <ConfirmDialog
+        open={confirmDelete}
+        title="刪除主機"
+        body={
+          <>
+            要把 <strong>{name}</strong> 從清單移除嗎？遠端的 herdr 與 agent 都不受影響，
+            只是這台不再出現在 Project 的主機選項裡。
+          </>
+        }
+        confirmLabel="刪除主機"
+        danger
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => {
+          setConfirmDelete(false)
+          void removeHost(name)
+        }}
+      />
     </div>
   )
 }
