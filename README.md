@@ -107,6 +107,7 @@ release 二進位預設開 `embed-ui`：先 `cd web && npm run build` 再 `cargo
 | [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、mock、與 API 的對齊、已知 UI 決策 |
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | 實作進度、驗收紀錄、**已知問題** |
 | [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令契約與時序測試 |
+| [`docs/PACKAGING.md`](docs/PACKAGING.md) | 打包成 macOS `.dmg`（Apple Silicon、ad-hoc 簽章）|
 | [`docs/screenshots/`](docs/screenshots/) | 歷次 UI 截圖 |
 
 後端 / 前端交接筆記在 `docs/HANDOFF-BACKEND.md`、`docs/HANDOFF-FRONTEND.md`。

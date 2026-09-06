@@ -1,0 +1,14 @@
+[package]
+name = "agents-manager-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop shell for agents-manager: boots agents-managerd and shows its UI in a native window."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+toml = "0.8"
+dirs = "5"

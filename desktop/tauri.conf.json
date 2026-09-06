@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AgentsManager",
+  "mainBinaryName": "AgentsManager",
+  "version": "0.1.0",
+  "identifier": "com.witsper.agents-manager",
+  "build": {
+    "frontendDist": "./splash"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "agents-manager",
+        "url": "index.html",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "icon": [
+      "icons/icon.icns"
+    ],
+    "externalBin": [
+      "binaries/agents-managerd"
+    ],
+    "category": "DeveloperTool",
+    "copyright": "",
+    "shortDescription": "Local multi-agent manager on top of herdr",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "exceptionDomain": "localhost"
+    }
+  }
+}
