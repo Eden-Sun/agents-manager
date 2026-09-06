@@ -715,15 +715,23 @@ button:disabled {
  * 額度 critical（daemon 給的旗標，見 docs/API.md §12.4）：整列反灰但不 disabled——列本身
  * 還是能點（進去看對話）。只降子元素的 opacity/saturation，不動 .bot-row 的
  * background / border-left，選取狀態（.selected 的底色與左邊 accent 線）才不會被蓋掉。
- * `.bot-quota-warn` 是警語本身，特意不在這個清單裡，跟其他元素反灰形成對比，视线自然被拉过去。
+ * `.bot-quota-warn` 是警語本身，特意不在這個清單裡，跟其他元素反灰形成對比，視線自然被拉過去。
+ *
+ * 名字不用 opacity：這一列反灰的時候，你最需要讀的就是「是哪一個 bot 快沒額度了」，
+ * 半透明的名字剛好把它弄糊（`--text` 15:1 → 4.4:1）。名字改用 --text-dim 退一階，
+ * 一樣讓得出視覺重量，對比卻還在 5:1 以上。燈號與徽章不是文字，維持原本的做法。
  */
 .bot-row.quota-critical .lamp,
-.bot-row.quota-critical .bot-name,
 .bot-row.quota-critical .bot-sub .kind-tag,
 .bot-row.quota-critical .bot-sub .identity-badge,
 .bot-row.quota-critical .bot-actions {
   opacity: 0.5;
   filter: saturate(0.35);
+}
+
+.bot-row.quota-critical .bot-name {
+  color: var(--text-dim);
+  font-weight: 500;
 }
 
 .bot-row .lamp {
