@@ -663,8 +663,7 @@ function derivedStatus(
  */
 function modelExtraOf(status: StatusInfo | null): string {
   if (!status) return ''
-  // `-` binds the effort to the model name (`opus-高`); the rest are separate facts and
-  // keep the `·` used everywhere else.
+  // 全部用 `·`：`opus-高` 這種連字號黏法讀起來像模型 id 的一部分（見 `ModelTag`）。
   return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null, status.thinking ? 'thinking' : null]
     .filter(Boolean)
     .join(' · ')
@@ -886,7 +885,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               }
             >
               {bot.model ?? statusInfo?.model_name}
-              {modelExtra ? <span className="model-tag-extra">-{modelExtra}</span> : null}
+              {modelExtra ? <span className="model-tag-extra">· {modelExtra}</span> : null}
             </ModelQuickPicker>
           ) : null}
         </div>

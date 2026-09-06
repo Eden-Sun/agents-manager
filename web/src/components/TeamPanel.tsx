@@ -157,7 +157,7 @@ function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
       type="button"
       className="member team-member"
       role="listitem"
-      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}${task ? `\n目前：t${task.seq} ${task.title}` : ''}\n身分 ${bot.identity ?? '預設'}\n模型 ${bot.model ?? '（CLI 預設）'}${bot.effort ? `-${effortLabel(bot.effort)}` : ''}\ncwd ${bot.cwd ?? '（專案根目錄）'}\n點擊開啟它的單獨對話`}
+      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}${task ? `\n目前：t${task.seq} ${task.title}` : ''}\n身分 ${bot.identity ?? '預設'}\n模型 ${bot.model ?? '（CLI 預設）'}${bot.effort ? ` · ${effortLabel(bot.effort)}` : ''}\ncwd ${bot.cwd ?? '（專案根目錄）'}\n點擊開啟它的單獨對話`}
       onClick={() => selectBot(bot.id)}
     >
       <StatusLamp lamp={lamp} />
