@@ -5555,6 +5555,7 @@ button.team-workers:disabled {
 
 .team-summary {
   display: flex;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
@@ -5566,6 +5567,27 @@ button.team-workers:disabled {
 .team-summary strong {
   flex: none;
   color: var(--text-dim);
+}
+
+/* 預設夾兩行：完整的總結是一整段長文，釘在頂端會把時間軸推出畫面。 */
+.team-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* 展開也有上限——攤開是為了讀，不是為了佔滿畫面。 */
+.team-summary.open .team-summary-text {
+  display: block;
+  max-height: 34vh;
+  overflow-y: auto;
+}
+
+.team-summary-toggle {
+  flex: none;
 }
 
 /* SPEC-team §10.7：team 做完之後才出現的一列「要不要順手關掉 issue」。
