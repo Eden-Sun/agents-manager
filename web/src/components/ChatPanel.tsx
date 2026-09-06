@@ -24,11 +24,11 @@ import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
 
 const SOURCE_LABEL: Record<string, string> = {
-  hook: 'hook',
-  terminal_fallback: 'terminal_fallback',
-  transcript: 'transcript',
-  web: 'web',
-  system: 'system',
+  hook: '回覆',
+  terminal_fallback: '終端擷取',
+  transcript: '對話紀錄',
+  web: '網頁訊息',
+  system: '系統通知',
 }
 
 export const KIND_TITLE: Record<BotKind, string> = {
@@ -66,11 +66,11 @@ export function Bubble({
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
           {system || msg.source === 'hook' || msg.source === 'system' ? (
-            <span className="src-tag mono" title={`messages.source = ${msg.source}`}>
+            <span className="src-tag mono" title={`訊息來源：${msg.source}`}>
               {SOURCE_LABEL[msg.source] ?? msg.source}
             </span>
           ) : msg.role === 'assistant' ? (
-            <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`messages.source = ${msg.source}`}>
+            <span className={`src-tag${fallback ? ' fallback' : ''}`} title={`訊息來源：${msg.source}`}>
               {SOURCE_LABEL[msg.source] ?? msg.source}
             </span>
           ) : null}
@@ -103,7 +103,7 @@ export function Bubble({
  *
  * The meta line is three-state: streaming text → 「輸出中…」; no text but an `activity` row
  * (API.md v4.1, e.g. `Thinking… (12s · ↑ 1.2k tokens)`) → that row verbatim, so a long
- * thinking / tool phase is not silent; neither → 「等待回覆（hook）…」. `activity` comes
+ * thinking / tool phase is not silent; neither → 「等待回覆…」. `activity` comes
  * straight off the terminal, so it is rendered as plain text, never Markdown.
  *
  * `alert` (API.md v4.2) is the one thing that outranks all of it: while the CLI is retrying an
@@ -146,7 +146,7 @@ export function LiveBubble({
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
-          <span>{text ? '輸出中…' : (act ?? '等待回覆（hook）…')}</span>
+          <span>{text ? '輸出中…' : (act ?? '等待回覆…')}</span>
         </div>
         {action ?? null}
       </div>
@@ -252,7 +252,7 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
  * 這個回合跑多久之後，才把「強制中止」露出來（秒）。
  *
  * 刻意不是立刻出現：正常回合開頭本來就會有一段只在想、沒有輸出的時間，那時候按這顆只會
- * 弄壞好好的回合。等一分鐘之後還停在「等待回覆（hook）…」，才比較像是收尾判斷失準。
+ * 弄壞好好的回合。等一分鐘之後還停在「等待回覆…」，才比較像是收尾判斷失準。
  */
 const ABANDON_AFTER_S = 60
 
@@ -267,7 +267,7 @@ function elapsedLabel(sec: number): string {
  *
  * 跟標題列的「中斷」是兩件事：「中斷」是對 pane 送 esc（要 agent 停手），這裡完全不碰 agent，
  * 只推翻 daemon 這邊「回合還在跑」的認定。所以它不放在標題列——放在 live 泡泡的狀態列右端，
- * 也就是使用者盯著「等待回覆（hook）…」出不來時眼睛已經在的地方，而且一分鐘後才出現。
+ * 也就是使用者盯著「等待回覆…」出不來時眼睛已經在的地方，而且一分鐘後才出現。
  */
 export function AbandonTurnAction({ botId }: { botId: string }) {
   const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
@@ -297,7 +297,7 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
       <button
         type="button"
         className="live-abandon"
-        title={`強制中止：把這個回合標成失敗、解開輸入框（已進行 ${elapsedLabel(elapsed)}）。\n不會叫 agent 停手——那是「中斷」做的事。`}
+        title={`將這個回合標記為失敗並解開輸入框（已進行 ${elapsedLabel(elapsed)}）。Bot 可能仍在執行。`}
         onClick={() => setOpenFor(turnId)}
       >
         強制中止 · 已 {elapsedLabel(elapsed)}
@@ -309,12 +309,11 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
         body={
           <>
             <p className="abandon-note">
-              把 <strong>{botName}</strong> 目前這個回合標成 <strong>failed</strong>，立刻解開輸入框。用在 UI
-              判成「還在等回覆」但 agent 其實早就回完的時候。
+              把 <strong>{botName}</strong> 目前這個回合標記為<strong>失敗</strong>，立刻解開輸入框。適用於
+              Bot 已完成回覆，但畫面仍顯示等待的情況。
             </p>
             <p className="abandon-note">
-              這<strong>不是</strong>叫 agent 停手——送 esc 給 agent 的是標題列的「中斷」。這裡只推翻 daemon
-              這邊的紀錄，agent 那頭照樣在跑。
+              這個操作只更新回合紀錄，Bot 可能仍在執行。如需讓 Bot 停下來，請到「終端」分頁送出 Esc。
             </p>
             <p className="abandon-note">
               <strong>不可逆</strong>：之後 agent 真的回話，daemon 已經配不回這個回合，那則回覆不會出現在對話裡。
@@ -515,8 +514,8 @@ function Composer({
             </button>
           ) : null}
           {state.inFlightTurnId ? (
-            <button type="button" className="mini-btn" onClick={() => void interruptBot(botId)}>
-              中斷（esc）
+            <button type="button" className="mini-btn" title="請 Bot 中斷目前回覆，Bot 仍保持啟動" onClick={() => void interruptBot(botId)}>
+              中斷回覆
             </button>
           ) : null}
         </div>

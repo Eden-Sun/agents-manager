@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useStore } from '../store/store'
 
 /** Same ceiling as `attach::MAX_BYTES`, checked here so the error is instant. */
@@ -296,16 +297,30 @@ function useStoredUrl(id: string): string | null {
 
 function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) {
   const url = useStoredUrl(item.id)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      // 讓縮圖上的選單／popover 先吃掉自己的 Escape，沒人處理才關 lightbox。
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      onClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // 打開時焦點進到「關閉」鍵（圖片本身不可聚焦），關掉時退回原本按到的縮圖。
+  useFocusTrap(true, boxRef, { initialFocus: () => closeRef.current })
+
   return (
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label={item.name} onClick={onClose}>
+    <div
+      ref={boxRef}
+      className="lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={item.name}
+      onClick={onClose}
+    >
       <div className="lightbox-inner" onClick={(e) => e.stopPropagation()}>
         {url ? <img src={url} alt={item.name} /> : <div className="lightbox-loading">載入中…</div>}
         <div className="lightbox-bar">
@@ -313,7 +328,7 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
             {item.name} · {formatSize(item.size)}
           </span>
           <code className="lightbox-path mono">{item.path}</code>
-          <button type="button" className="mini-btn" onClick={onClose}>
+          <button type="button" className="mini-btn" ref={closeRef} onClick={onClose}>
             關閉
           </button>
         </div>

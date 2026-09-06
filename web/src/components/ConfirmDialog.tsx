@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 export interface ConfirmDialogProps {
   open: boolean
@@ -35,6 +36,8 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const titleId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
   const [typed, setTyped] = useState('')
   const needsMatch = requireText !== undefined
   const matched = !needsMatch || typed === requireText
@@ -61,18 +64,25 @@ export function ConfirmDialog({
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // Window-level capture, so with a confirm stacked over another dialog the outer
+        // listener runs first. Focus is trapped in the innermost one, so let the keystroke's
+        // target decide which dialog the Escape belongs to.
+        const dialog = dialogRef.current
+        if (dialog && e.target instanceof Node && !dialog.contains(e.target)) return
         e.preventDefault()
         e.stopPropagation()
         onCancelRef.current()
       }
     }
     window.addEventListener('keydown', onKey, true)
-    // Focus the require-text field, otherwise the cancel button for Escape-friendly keyboard use.
-    requestAnimationFrame(() => {
-      if (needsMatch) inputRef.current?.focus()
-    })
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, needsMatch])
+  }, [open])
+
+  // The require-text field when there is one, otherwise Cancel — never Confirm: an accidental
+  // Enter or Space on a just-opened destructive dialog must not go through.
+  useFocusTrap(open, dialogRef, {
+    initialFocus: () => (needsMatch ? inputRef.current : cancelRef.current),
+  })
 
   if (!open) return null
 
@@ -80,6 +90,7 @@ export function ConfirmDialog({
     <div className="confirm-backdrop" role="presentation" onMouseDown={onCancel}>
       <div
         className="confirm-dialog"
+        ref={dialogRef}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -111,7 +122,7 @@ export function ConfirmDialog({
           </label>
         ) : null}
         <div className="confirm-actions">
-          <button type="button" className="btn" onClick={onCancel}>
+          <button type="button" className="btn" ref={cancelRef} onClick={onCancel}>
             {cancelLabel}
           </button>
           <button

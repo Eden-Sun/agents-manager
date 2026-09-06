@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from './api'
+import { useFocusTrap } from './hooks/useFocusTrap'
+import { MOBILE_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { Sidebar } from './components/Sidebar'
@@ -94,12 +96,47 @@ export default function App() {
   // 只為了下面那個 key：ChatPanel 自己從 store 讀 selectedBotId。
   const botId = useStore((s) => s.selectedBotId)
   const [drawer, setDrawer] = useState(false)
+  // Below this width the sidebar is an off-canvas drawer (styles.css `@media (width <= 1024px)`);
+  // above it, it is a plain column that is always on screen and must stay reachable.
+  const isMobile = useMediaQuery(MOBILE_QUERY)
+  const sidebarRef = useRef<HTMLElement>(null)
+  const drawerOpen = isMobile && drawer
 
   useEffect(() => {
     void bootstrap()
   }, [bootstrap])
 
   useBotSwitchKeys()
+
+  // Picking anything in the drawer navigates the main panel, which the drawer is covering —
+  // close it so the result is visible. Rotating to landscape (or any resize past the
+  // breakpoint) drops the flag too, so the drawer does not spring back open on the way in.
+  // Compared during render rather than from an effect: that is React's own answer for
+  // "adjust state when a prop changes", and it avoids the extra paint of the stale open
+  // drawer that a post-render effect would leave on screen for a frame.
+  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${teamId ?? ''}|${teamLaunch ? `${teamLaunch.projectId}:${teamLaunch.issueNumber}` : ''}`
+  const [lastNav, setLastNav] = useState({ selection, isMobile })
+  if (lastNav.selection !== selection || lastNav.isMobile !== isMobile) {
+    setLastNav({ selection, isMobile })
+    if (drawer) setDrawer(false)
+  }
+
+  useEffect(() => {
+    if (!drawerOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      // A dialog on top owns Escape; it is the drawer's turn only when none is open.
+      if (document.querySelector('.modal-backdrop, .confirm-backdrop')) return
+      e.preventDefault()
+      setDrawer(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [drawerOpen])
+
+  // Over the main panel with a scrim, the drawer is modal: keep Tab inside it and hand focus
+  // back to the header button that opened it.
+  useFocusTrap(drawerOpen, sidebarRef)
 
   if (!ready) {
     return (
@@ -130,10 +167,20 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside className={`sidebar${drawer ? ' open' : ''}`}>
+      <aside
+        ref={sidebarRef}
+        className={`sidebar${drawer ? ' open' : ''}`}
+        // Only at the drawer breakpoint, and only while closed: there the sidebar is parked
+        // offscreen, where Tab and a screen reader would otherwise still walk through it.
+        // On desktop it is a visible column, so it must never be inert.
+        inert={isMobile && !drawer}
+        {...(drawerOpen ? { role: 'dialog' as const, 'aria-modal': true, 'aria-label': '側邊欄' } : {})}
+      >
         <Sidebar />
       </aside>
-      {drawer ? <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} /> : null}
+      {drawerOpen ? (
+        <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} />
+      ) : null}
       <main className="main">
         <ConnBanner />
         {teamLaunch ? (
