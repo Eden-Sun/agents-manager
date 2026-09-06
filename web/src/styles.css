@@ -288,7 +288,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-sunken);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.6;
   cursor: default;
 }
@@ -316,7 +316,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-sunken);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.6;
   cursor: default;
 }
@@ -396,7 +396,7 @@ button:disabled {
 }
 
 .mock-badge {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.04em;
   padding: 1px 7px;
@@ -747,7 +747,7 @@ button:disabled {
 .bot-sub {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   min-width: 0;
   height: 20px;
   font-size: 11px;
@@ -792,6 +792,8 @@ button:disabled {
 .bot-sub .model-tag {
   flex: 0 1 auto;
   min-width: 0;
+  /* 側欄這一行只有 156px（尾端的操作鍵固定佔 62px），`grok-4.6 · 中` 差一兩 px 就被截。 */
+  padding: 0 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -841,7 +843,7 @@ button:disabled {
 }
 
 .kind-tag {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -1242,7 +1244,7 @@ button:disabled {
 }
 
 .disclosure .chev {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-faint);
 }
 
@@ -1317,7 +1319,7 @@ button:disabled {
 }
 
 .hint {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
@@ -1373,7 +1375,7 @@ button:disabled {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 90px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -1912,7 +1914,7 @@ button:disabled {
 }
 
 .src-tag {
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.45;
   padding: 0 5px;
   border-radius: 3px;
@@ -2187,7 +2189,7 @@ button:disabled {
 
 .attach-thumb-state {
   flex: none;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-faint);
 }
 
@@ -2344,7 +2346,7 @@ button:disabled {
 /* Only shown when it has something to say (mention targets / warnings); never a static blurb. */
 .composer-hint {
   margin-top: 5px;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.4;
   color: var(--text-faint);
 }
@@ -2452,7 +2454,7 @@ button:disabled {
 
 .sl-k {
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.02em;
 }
 
@@ -2836,6 +2838,12 @@ button:disabled {
     display: none;
   }
 
+  /* kind 已經畫在額度 chip 的圖示上；標題列再標一次，就會把設定鍵擠出可視範圍
+     （`.main-title` 是 overflow: hidden，被切掉的是排在後面的那些）。 */
+  .bot-head .main-title-row .kind-tag {
+    display: none;
+  }
+
   .main-head .quota-open {
     gap: 5px;
     padding: 4px 4px;
@@ -2850,6 +2858,11 @@ button:disabled {
   .main-head .quota-head {
     flex-direction: row;
     gap: 4px;
+  }
+
+  /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
+  .main-head .quota-more {
+    display: none;
   }
 
   .context-bar {
@@ -3090,7 +3103,7 @@ button:disabled {
   font-weight: 600;
 }
 .dirpicker-row .tag {
-  font-size: 10px;
+  font-size: 11px;
   padding: 0 5px;
   border-radius: 8px;
   border: 1px solid var(--border-strong);
@@ -3152,7 +3165,7 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-faint);
 }
 .dirpicker-cur {
@@ -3342,7 +3355,7 @@ button:disabled {
 
 .host-badge {
   flex: none;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.02em;
   padding: 0 5px;
@@ -3363,7 +3376,7 @@ button:disabled {
 
 .disclosure-note {
   margin-left: auto;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-faint);
   font-family: var(--font-mono);
@@ -3419,13 +3432,13 @@ button:disabled {
 }
 
 .host-count {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-faint);
 }
 
 .host-ssh {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-dim);
   font-family: var(--font-mono);
   white-space: nowrap;
@@ -3434,7 +3447,7 @@ button:disabled {
 }
 
 .host-err {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--danger);
   overflow-wrap: anywhere;
 }
@@ -3490,7 +3503,7 @@ button:disabled {
 /* ---- identities ---- */
 .identity-badge {
   display: inline-block;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   padding: 0 6px;
   border-radius: 8px;
@@ -3541,7 +3554,7 @@ button:disabled {
   gap: 6px;
 }
 .identity-detail {
-  font-size: 10.5px;
+  font-size: 11px;
   font-family: var(--font-mono);
   color: var(--text-faint);
   white-space: nowrap;
@@ -3557,7 +3570,7 @@ button:disabled {
 /* --------------------------------------------------------- bot settings (v3.3) */
 
 .model-tag {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   padding: 0 5px;
   border-radius: 3px;
@@ -3582,11 +3595,19 @@ button.model-tag {
   border-style: dashed;
 }
 
-/* 強度是「另一個事實」，不是模型名的字尾：`·` 前留一點空隙，顏色再退一階。 */
+/*
+ * 強度是「另一個事實」，不是模型名的字尾：`·` 由 CSS 生成，兩側各留一點空隙，顏色再退
+ * 一階。分隔符寫在這裡而不是 JSX 裡，是為了省下那個空白字元——側欄那一行的模型徽章
+ * 差幾 px 就會被截成 `grok-4.6 · …`。
+ */
 .model-tag-extra {
-  margin-left: 2px;
   color: var(--text-faint);
   font-weight: 500;
+}
+
+.model-tag-extra::before {
+  content: '·';
+  margin: 0 2px 0 3px;
 }
 
 button.model-tag:hover,
@@ -3751,7 +3772,7 @@ button.model-tag[aria-expanded='true'] {
   align-items: baseline;
   gap: 6px;
   flex-wrap: wrap;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--warn);
 }
 
@@ -3913,14 +3934,14 @@ button.model-tag[aria-expanded='true'] {
   border-radius: 999px;
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 16px;
   text-align: center;
 }
 
 .group-tag {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.03em;
   padding: 0 5px;
@@ -4004,7 +4025,7 @@ button.model-tag[aria-expanded='true'] {
 .bot-badge {
   display: inline-block;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 650;
   padding: 0 6px;
   border-radius: 8px;
@@ -4078,7 +4099,7 @@ button.model-tag[aria-expanded='true'] {
 }
 
 .msg-meta .msg-from .bot-badge {
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.4;
   padding: 0 5px;
 }
@@ -4356,7 +4377,7 @@ button.model-tag[aria-expanded='true'] {
   flex: none;
   align-self: center;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
@@ -4367,7 +4388,7 @@ button.model-tag[aria-expanded='true'] {
   flex: none;
   align-self: center;
   padding: 0 2px 0 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
@@ -4390,7 +4411,7 @@ button.model-tag[aria-expanded='true'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.02em;
   padding: 1px 5px;
@@ -4434,7 +4455,7 @@ button.model-tag[aria-expanded='true'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1.1;
   color: var(--text-dim);
@@ -4497,8 +4518,9 @@ button.model-tag[aria-expanded='true'] {
   gap: 3px;
 }
 
+/* `5h` / `7d`：mono 的細節數字，是這條規則裡唯一允許 10.5px 的一類。 */
 .quota-window-name {
-  font-size: 8.5px;
+  font-size: 10.5px;
   font-weight: 650;
   line-height: 1;
   color: var(--text-faint);
@@ -4663,7 +4685,7 @@ button.model-tag[aria-expanded='true'] {
 
 .quota-plan {
   margin-left: auto;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-faint);
   text-transform: uppercase;
 }
@@ -4966,13 +4988,13 @@ button.model-tag[aria-expanded='true'] {
 
 .opt-wrap .hint,
 .kind-missing-reason {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--warn);
 }
 
 .field-note {
   margin-left: 6px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-dim);
 }
@@ -5205,7 +5227,7 @@ button.model-tag[aria-expanded='true'] {
   border-radius: 999px;
   background: var(--bg-sunken);
   color: var(--text-dim);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   line-height: 16px;
   white-space: nowrap;
@@ -5261,7 +5283,7 @@ button.model-tag[aria-expanded='true'] {
   border-radius: 50%;
   background: var(--warn);
   color: var(--warn-soft);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -5376,7 +5398,7 @@ button.team-workers:disabled {
   border-radius: 4px;
   background: var(--bg-hover);
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 15px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -5597,7 +5619,7 @@ button.team-workers:disabled {
   flex: none;
   width: 16px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 10.5px;
   text-align: right;
 }
 .team-queue-rows .issue-title {
@@ -5611,7 +5633,7 @@ button.team-workers:disabled {
   max-width: 200px;
   overflow: hidden;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5621,7 +5643,7 @@ button.team-workers:disabled {
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 16px;
 }
 .team-issue-state.working {
@@ -5753,7 +5775,7 @@ button.team-workers:disabled {
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 16px;
 }
 .team-task-state.merged,
@@ -5781,7 +5803,7 @@ button.team-workers:disabled {
 .team-task-round {
   flex: none;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
 }
 .team-task-actions {
   flex: none;
@@ -6018,7 +6040,7 @@ button.team-workers:disabled {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1.4;
   white-space: nowrap;
@@ -6175,7 +6197,7 @@ button.team-workers:disabled {
 .team-launch .opt-note {
   margin-left: 5px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
 }
 .team-launch .opt-note.warn {
   color: var(--warn);
@@ -6346,7 +6368,7 @@ button.run-debug-toggle:hover {
 
 .main-status.pane-toggle .pane-chev {
   flex: none;
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-faint);
 }
 
@@ -6383,7 +6405,7 @@ button.run-debug-toggle:hover {
   border-radius: var(--radius);
   background: transparent;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 15px;
   white-space: nowrap;
   cursor: pointer;
@@ -6459,7 +6481,7 @@ button.run-debug-toggle:hover {
 /* 身份選項旁的「未登入」標記。跟 `.kind-missing-reason`（未安裝）同一個語彙：
    同樣是警示色、同樣不擋操作，差別只在講的是帳號而不是 CLI。 */
 .identity-logged-out {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--warn);
   white-space: nowrap;
@@ -6482,7 +6504,7 @@ button.run-debug-toggle:hover {
   border: 0;
   background: none;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-dim);
   text-decoration: underline;
@@ -6509,7 +6531,7 @@ button.run-debug-toggle:hover {
 }
 
 .identity-login {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   line-height: 1.6;
   padding: 0 6px;

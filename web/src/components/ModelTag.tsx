@@ -32,7 +32,7 @@ export function ModelTag({ botId }: { botId: string }) {
   return (
     <span className="model-tag" title={`模型：${bot.model ?? '（CLI 預設）'}${detail ? ` · ${detail}` : ''}`}>
       {bot.model ?? 'CLI 預設'}
-      {chipExtra ? <span className="model-tag-extra">· {chipExtra}</span> : null}
+      {chipExtra ? <span className="model-tag-extra">{chipExtra}</span> : null}
     </span>
   )
 }
