@@ -3734,6 +3734,11 @@ button:disabled {
 
 button.model-tag {
   cursor: pointer;
+  /* 這顆是按鈕（點了開模型選單），不是純標籤：20px 高的點擊區太小（WCAG 2.2 的
+     最小目標是 24×24）。文字大小不動，只把高度墊到 24。 */
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
   /* The badge now carries `名稱 · 高 · thinking`; the header is tight, so cap it. */
   max-width: 26ch;
   overflow: hidden;
@@ -6567,6 +6572,10 @@ button.run-debug-toggle:hover {
 .main-status.pane-toggle {
   display: inline-flex;
   align-items: center;
+  /* 同 `button.model-tag`：它是展開 run 識別列的開關，17px 高按不太到。 */
+  min-height: 24px;
+  padding: 0 4px;
+  border-radius: 5px;
   gap: 3px;
   max-width: 120px;
   font-family: var(--font-mono);
