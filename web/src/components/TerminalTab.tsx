@@ -106,7 +106,7 @@ export function TerminalTab({ botId }: { botId: string }) {
             收進 tooltip。留在條上的是你會用到的兩件事——這是哪個 pane、有沒有被截斷。 */}
         {snap?.pane_id ? (
           <span
-            className="hint"
+            className="hint term-pane-chip"
             title={`抓法 recent_unwrapped${
               snap.revision !== null && snap.revision !== undefined ? `・revision ${snap.revision}` : ''
             }`}
@@ -123,7 +123,7 @@ export function TerminalTab({ botId }: { botId: string }) {
         <span className="spacer" />
         {/* 這裡本來寫的是開發備忘（「第一階段不做 xterm.js 串流」）。畫面上要說的是這東西
             現在怎麼用，不是它的實作進度。 */}
-        <span className="hint">唯讀快照，按「刷新」更新</span>
+        <span className="hint term-bar-note">唯讀快照，按「刷新」更新</span>
       </div>
       {narrow ? (
         <div className="term-warn" role="status">
