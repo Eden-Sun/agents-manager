@@ -8,6 +8,12 @@ import { useSyncExternalStore } from 'react'
  */
 export const MOBILE_QUERY = '(max-width: 1024px)'
 
+/**
+ * 手機。必須跟 styles.css 裡的 `@media (width <= 640px)` 同一個數字：那個區塊把標題列
+ * 收成一行、額度縮成 chip；JS 這邊用來換掉在窄螢幕會折兩行的長提示字。
+ */
+export const PHONE_QUERY = '(max-width: 640px)'
+
 /** `true` while the media query matches, re-rendering when that flips. */
 export function useMediaQuery(query: string): boolean {
   return useSyncExternalStore(
