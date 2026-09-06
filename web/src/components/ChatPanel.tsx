@@ -903,9 +903,12 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </ModelQuickPicker>
           ) : null}
         </div>
+        <span className="spacer" />
         {/* pane id 而不是狀態文字：狀態看左邊的燈號就好（它自己帶 tooltip），這個位置留給
             debug 時真正要抄的那串。點一下展開整組識別資訊（agent / session / workspace / run）。
-            沒有 pane 就什麼都不放——燈號已經說了它沒在跑。 */}
+            沒有 pane 就什麼都不放——燈號已經說了它沒在跑。
+            擺在右邊那一組（額度、記憶體、分頁）而不是名字後面：它跟額度一樣是「這個 run 的
+            數字」，跟在名字後面只會在標題列中間留下一段空白。 */}
         {run?.pane_id ? (
           <button
             type="button"
@@ -920,7 +923,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </span>
           </button>
         ) : null}
-        <span className="spacer" />
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
