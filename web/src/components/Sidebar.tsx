@@ -40,6 +40,13 @@ function BotRow({ botId }: { botId: string }) {
   const selectBot = useStore((s) => s.selectBot)
   const startBot = useStore((s) => s.startBot)
   const openSettings = useStore((s) => s.openSettings)
+  const agentTitle = useStore((s) => {
+    const r = s.runs[botId]
+    const t = r?.agent_title?.trim()
+    if (!t) return ''
+    const l = botLamp(s, botId)
+    return l === 'working' || l === 'idle' ? t : ''
+  })
 
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
@@ -63,8 +70,16 @@ function BotRow({ botId }: { botId: string }) {
         <span className="bot-name">
           {bot.name}
           <PersonaMark persona={bot.persona} />
-          {/* idle / offline are hidden by CSS — the lamp already says so. */}
-          <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
+          {/* While it is up, what the agent calls itself says more than "執行中" — for claude
+              that is its own summary of the task. blocked / starting / stopping still win:
+              those the user has to act on. idle / offline text is hidden by CSS anyway. */}
+          {agentTitle ? (
+            <span className="bot-state agent-title" title={`agent 目前的標題：${agentTitle}`}>
+              {agentTitle}
+            </span>
+          ) : (
+            <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
+          )}
         </span>
         <span className="bot-sub">
           <KindTag kind={bot.kind} />

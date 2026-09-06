@@ -848,8 +848,8 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
   - **claude**：由 daemon 注入 claude 的 `statusLine` 指令（`agents-managerd statusline …`）把 Claude Code 餵給 statusline 的 JSON
     （`rate_limits.five_hour / seven_day`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；daemon 不建 Turn，只更新額度。
     使用者原本的 statusLine 指令仍會被執行、pane 顯示不變。
-  - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒開一個用完即丟的 herdr pane 跑 grok、送 `/usage`、
-    讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
+  - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒在專屬的 `am-quota` herdr session（永不 attach，
+    因此版面夠寬）開一個用完即丟的 pane 跑 grok、送 `/usage`、讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
     `Weekly limit (SuperGrok)` 的括號，`source` = `grok-usage`。
 
 ### 12.5 WS `quota_updated`
@@ -1020,3 +1020,20 @@ object URL，不能直接塞進 `<img src>`。
   使用者原本打的字。
 - 這些圖片會記在該則 user message 的 `attachments_json`（`GET /messages` 一併回傳），格式是
   上面 upload 回應的物件陣列，UI 靠它重畫縮圖。
+
+### `run.agent_title`（2026-09-06 新增）
+
+`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件多一個欄位：
+
+```json
+{"id":"01M1…","state":"running","agent_status":"working","agent_title":"V40-OK", …}
+```
+
+- 來源是 herdr `agent.list` 的 `terminal_title_stripped`——**agent 自己替當前工作取的名字**
+  （Claude Code 會寫成任務摘要，codex / grok 通常是目錄名或狀態）。
+- herdr 沒有「標題變了」的事件，所以 daemon 每 4 秒對每個已連線的 host 做一次 `agent.list`
+  （`events::spawn_title_poller`），只有真的變了才寫 DB 並推 `bot_status`。
+- 存進 `runs.agent_title`（新欄位）。寫入前會過濾：前後的 `-` 去掉（grok 把狀態寫進標題，
+  像 `- Thinking - <task> - grok`），標題若只是 CLI 自己的名字（`Claude Code`、`codex`…）
+  就當作沒有，維持 `null`。
+- run 結束後不會清除，但 UI 只在 run 還活著時讀它。

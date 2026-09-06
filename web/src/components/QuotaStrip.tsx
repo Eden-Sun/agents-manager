@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { BotKind, KindQuota, QuotaWindow } from '../api/types'
+import type { BotKind, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { useStore } from '../store/store'
 import { KindIcon, KIND_LABEL } from './KindTag'
@@ -15,10 +15,16 @@ import { KindIcon, KIND_LABEL } from './KindTag'
  * The kinds do not report the same windows: claude and codex have both 5h and 7d, grok only a
  * weekly one (scraped from its `/usage` dialog, SPEC §12.6). A kind therefore draws one bar per
  * window it actually reports — never a filler bar for a window that does not exist.
+ *
+ * Claude may also report per-identity keys (`claude:cc1`, …). Each such key gets its own gauge
+ * (same icon + small identity label), so cc0/default and cc1 both show when both exist.
  */
 
 /** Every kind can report quota; grok arrives from the `/usage` probe. */
 const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok']
+
+/** One strip / popover row: base kind or `kind:identity`. */
+type QuotaEntry = { key: string; kind: BotKind; identity: string | null }
 
 type Level = 'crit' | 'warn' | 'ok'
 
@@ -62,8 +68,12 @@ function pctText(pct: number | null): string {
   return pct === null ? '—' : `${pct}%`
 }
 
-function label(kind: BotKind, q: KindQuota | null): string {
-  const parts = [KIND_LABEL[kind]]
+function entryLabel(entry: QuotaEntry): string {
+  return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
+}
+
+function label(entry: QuotaEntry, q: KindQuota | null): string {
+  const parts = [entryLabel(entry)]
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   if (five === null && seven === null) parts.push('額度尚未取得')
@@ -72,6 +82,46 @@ function label(kind: BotKind, q: KindQuota | null): string {
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
   if (q?.seven_day?.resets_at) parts.push(`7 天 ${fmtTime(q.seven_day.resets_at)} 重置`)
   return parts.join('，')
+}
+
+/** Parse `claude` / `claude:cc1` into a strip entry; unknown kinds are ignored. */
+function parseQuotaKey(key: string): QuotaEntry | null {
+  const i = key.indexOf(':')
+  const kind = (i === -1 ? key : key.slice(0, i)) as BotKind
+  if (!QUERYABLE.includes(kind)) return null
+  const identity = i === -1 ? null : key.slice(i + 1) || null
+  if (identity !== null && !identity) return null
+  return { key, kind, identity }
+}
+
+/**
+ * Keys to draw: every base kind present in the map, plus each `kind:identity` that has its own
+ * row. Base kinds with a null placeholder (daemon always emits them) still count as "present"
+ * so the strip stays stable; identity keys only appear once they have reported.
+ */
+function collectEntries(quota: QuotaMap): QuotaEntry[] {
+  const out: QuotaEntry[] = []
+  const seen = new Set<string>()
+  for (const kind of QUERYABLE) {
+    if (kind in quota) {
+      out.push({ key: kind, kind, identity: null })
+      seen.add(kind)
+    }
+  }
+  for (const key of Object.keys(quota)) {
+    if (seen.has(key)) continue
+    const entry = parseQuotaKey(key)
+    if (!entry || !entry.identity) continue
+    if (quota[key] == null) continue
+    out.push(entry)
+    seen.add(key)
+  }
+  return out
+}
+
+function kindRank(kind: BotKind): number {
+  const i = QUERYABLE.indexOf(kind)
+  return i === -1 ? QUERYABLE.length : i
 }
 
 /** Shape + colour, so the level survives greyscale and colour blindness. */
@@ -89,20 +139,26 @@ function Bar({ pct }: { pct: number | null }) {
   )
 }
 
-/** Frameless, compact: kind glyph + one bar per reported window (collapsed shows the worst). */
-function Gauge({ kind, collapsed }: { kind: BotKind; collapsed: boolean }) {
-  const q = useStore((s) => s.quota[kind] ?? null)
+/** Frameless, compact: kind glyph (+ identity) + one bar per reported window (collapsed = worst). */
+function Gauge({ entry, collapsed }: { entry: QuotaEntry; collapsed: boolean }) {
+  const q = useStore((s) => s.quota[entry.key] ?? null)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   // Only windows this kind actually reports; a lone hatched bar when it reports none yet.
   const present = [five, seven].filter((v): v is number => v !== null)
   const bars = collapsed ? [worstWindow(q).pct] : present.length ? present : [null]
+  const title = label(entry, q)
 
   return (
-    <span className={`quota-hp ${kind} ${worst(q).level}`} title={label(kind, q)} aria-label={label(kind, q)}>
+    <span className={`quota-hp ${entry.kind} ${worst(q).level}`} title={title} aria-label={title}>
       <span className="quota-kind" aria-hidden="true">
-        <KindIcon kind={kind} />
+        <KindIcon kind={entry.kind} />
       </span>
+      {entry.identity ? (
+        <span className="quota-identity" aria-hidden="true">
+          {entry.identity}
+        </span>
+      ) : null}
       <span className="quota-bars">
         {bars.map((pct, i) => (
           <Bar key={i} pct={pct} />
@@ -112,10 +168,10 @@ function Gauge({ kind, collapsed }: { kind: BotKind; collapsed: boolean }) {
   )
 }
 
-function PopRow({ kind }: { kind: BotKind }) {
-  const q = useStore((s) => s.quota[kind] ?? null)
-  const known = useStore((s) => kind in s.quota)
-  const supported = QUERYABLE.includes(kind)
+function PopRow({ entry }: { entry: QuotaEntry }) {
+  const q = useStore((s) => s.quota[entry.key] ?? null)
+  const known = useStore((s) => entry.key in s.quota)
+  const supported = QUERYABLE.includes(entry.kind)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
 
@@ -123,9 +179,9 @@ function PopRow({ kind }: { kind: BotKind }) {
     <div className="quota-pop-row">
       <div className="quota-pop-head">
         <span className="quota-kind" aria-hidden="true">
-          <KindIcon kind={kind} />
+          <KindIcon kind={entry.kind} />
         </span>
-        <span className="quota-name">{KIND_LABEL[kind]}</span>
+        <span className="quota-name">{entryLabel(entry)}</span>
         {supported ? <RiskDot level={worst(q).level} /> : null}
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
       </div>
@@ -133,7 +189,7 @@ function PopRow({ kind }: { kind: BotKind }) {
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
       ) : !known || (five === null && seven === null) ? (
         <p className="quota-pop-note">
-          {kind === 'grok' ? '背景查詢中' : `尚未取得（啟動一個 ${KIND_LABEL[kind]} bot 後回報）`}
+          {entry.kind === 'grok' ? '背景查詢中' : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
         </p>
       ) : (
         <>
@@ -146,7 +202,7 @@ function PopRow({ kind }: { kind: BotKind }) {
           ) : null}
           {seven !== null ? (
             <div className="quota-pop-line">
-              <span>{kind === 'grok' ? '每週' : '7 天'}</span>
+              <span>{entry.kind === 'grok' ? '每週' : '7 天'}</span>
               <span className={`quota-row ${levelOf(seven)}`}>剩 {pctText(seven)}</span>
               <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)} 重置</span>
             </div>
@@ -186,22 +242,34 @@ export function QuotaStrip({ focusKind }: { focusKind?: BotKind | null }) {
     }
   }, [open])
 
-  /** Critical first, then warning, then by remaining; the focused kind wins a tie. */
+  /** Critical first, then warning, then by remaining; focused kind wins a tie; identities follow base. */
   const ordered = useMemo(() => {
     const rank: Record<Level, number> = { crit: 0, warn: 1, ok: 2 }
-    return QUERYABLE.filter((k) => k in quota)
-      .map((k) => ({ kind: k, ...worst(quota[k] ?? null) }))
+    return collectEntries(quota)
+      .map((entry) => ({ entry, ...worst(quota[entry.key] ?? null) }))
       .sort((a, b) => {
         if (rank[a.level] !== rank[b.level]) return rank[a.level] - rank[b.level]
         const av = a.pct ?? 101
         const bv = b.pct ?? 101
         if (av !== bv) return av - bv
-        if (a.kind === focusKind) return -1
-        if (b.kind === focusKind) return 1
-        return 0
+        if (a.entry.kind === focusKind && b.entry.kind !== focusKind) return -1
+        if (b.entry.kind === focusKind && a.entry.kind !== focusKind) return 1
+        if (a.entry.kind !== b.entry.kind) return kindRank(a.entry.kind) - kindRank(b.entry.kind)
+        // Same kind: base row first, then identity name.
+        if (!a.entry.identity && b.entry.identity) return -1
+        if (a.entry.identity && !b.entry.identity) return 1
+        return (a.entry.identity ?? '').localeCompare(b.entry.identity ?? '')
       })
-      .map((x) => x.kind)
+      .map((x) => x.entry)
   }, [quota, focusKind])
+
+  /** Popover lists every base kind, then any identity rows that have reported. */
+  const popEntries = useMemo(() => {
+    const base: QuotaEntry[] = BOT_KINDS.map((kind) => ({ key: kind, kind, identity: null }))
+    const extras = collectEntries(quota).filter((e) => e.identity)
+    extras.sort((a, b) => kindRank(a.kind) - kindRank(b.kind) || (a.identity ?? '').localeCompare(b.identity ?? ''))
+    return [...base, ...extras]
+  }, [quota])
 
   if (ordered.length === 0) return null
 
@@ -219,14 +287,14 @@ export function QuotaStrip({ focusKind }: { focusKind?: BotKind | null }) {
         title="所有額度"
         onClick={() => setOpen((v) => !v)}
       >
-        {ordered.map((k) => (
-          <Gauge key={k} kind={k} collapsed={collapsed} />
+        {ordered.map((entry) => (
+          <Gauge key={entry.key} entry={entry} collapsed={collapsed} />
         ))}
       </button>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label="所有額度">
-          {BOT_KINDS.map((k) => (
-            <PopRow key={k} kind={k} />
+          {popEntries.map((entry) => (
+            <PopRow key={entry.key} entry={entry} />
           ))}
         </div>
       ) : null}

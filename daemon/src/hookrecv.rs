@@ -283,15 +283,15 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::StatusLine => {
-            // Quota only: `claude`, plus `claude:<identity>` for a bot running under one.
+            // Quota only. Bots with an identity write `claude:<identity>` alone so they do not
+            // overwrite the default-account `claude` row (cc0 / no-identity bots keep that key).
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
-            if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
-                crate::quota::set(app, "claude", q).await;
-            }
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
                     crate::quota::set(app, &format!("claude:{idn}"), q).await;
                 }
+            } else if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
+                crate::quota::set(app, "claude", q).await;
             }
             // The statusLine also carries the session id — backfill it like SessionStart does.
             if let (Some(r), Some(sid)) = (&run, body.payload.get("session_id").and_then(|v| v.as_str())) {

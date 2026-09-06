@@ -1245,6 +1245,8 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
     let h = tokio::spawn(async move {
         let started = std::time::Instant::now();
         let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
+        // What we sent, so the pane's echo of it can be stripped back off every frame.
+        let sent = db::turn_user_messages(&app2.db, &turn_id).await.unwrap_or_default();
         let mut last = (String::new(), String::new());
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
@@ -1260,6 +1262,8 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             let Ok(client) = client_for_bot(&app2, &bot_id).await else { continue };
             let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
             let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
+            // Same multi-line echo problem as the fallback path: strip our own prompt back off.
+            let live = sent.iter().fold(live, |acc, p| strip_echoed_prompt(&acc, p));
             // The spinner row is dropped by `clean_screen`, so a pure thinking / tool phase
             // produces no frame at all and the UI sits on "waiting". Ship it separately.
             let activity = live_activity(&bot.kind, &read.text).unwrap_or_default();
@@ -1369,15 +1373,12 @@ fn is_elapsed_token(s: &str) -> bool {
     !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
-/// Does this row have the *shape* of a spinner frame — `<Verb>… (3m 18s · ↓ 11.0k tokens)` —
-/// whatever glyph, if any, precedes it?
+/// Drop the tail of the user's own prompt from the head of what we scraped.
 ///
-/// Neither half of the row can be matched literally: the verb is picked at random per frame
-/// (`Thinking`, `Boogieing`, `Improvising`, `Puttering`, `Simmering`, …) and the leading glyph
-/// set is a moving target across CLI releases. The bracketed elapsed time / token counter is
-/// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
-/// a parenthesised status carrying `tokens` or a duration. A false positive only ever reaches
-/// `turn_progress.activity`, never a stored message.
+/// A multi-line prompt echoes as **one** `❯ <first line>` marker row followed by its remaining
+/// lines verbatim, and `after_last_prompt_echo` only skips that marker row — so lines 2..n of
+/// the user's own message come back as if the agent had written them. Matching them against
+/// what we actually sent is exact, unlike guessing from indentation.
 fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
     let want: Vec<&str> = prompt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if want.len() < 2 {
@@ -1407,6 +1408,14 @@ fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
     lines[i..].join("\n").trim().to_string()
 }
 
+/// Does this row have the *shape* of a spinner frame — `<Verb>… (3m 18s · ↓ 11.0k tokens)` —
+/// whatever glyph, if any, precedes it?
+///
+/// Neither half of the row can be matched literally: the verb is picked at random per frame
+/// (`Thinking`, `Boogieing`, `Improvising`, `Puttering`, `Simmering`, …) and the leading glyph
+/// set is a moving target across CLI releases. The bracketed elapsed time / token counter is
+/// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
+/// a parenthesised status carrying `tokens` or a duration.
 fn is_activity_shape(s: &str) -> bool {
     // A leading decoration glyph is ignored here; the caller strips it from what it reports.
     let body = match s.chars().next() {
@@ -1659,6 +1668,10 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     let reply = extract_reply(&bot.kind, &fresh)
         .or_else(|| clean_screen(&bot.kind, &fresh))
         .unwrap_or_else(|| "（終端沒有可辨識的回覆）".to_string());
+    // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
+    // 2..n on screen and they would be stored as the agent's answer.
+    let sent = db::turn_user_messages(&app.db, &turn.id).await.unwrap_or_default();
+    let reply = sent.iter().fold(reply, |acc, p| strip_echoed_prompt(&acc, p));
 
     sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
         .bind(read.revision as i64)
@@ -2126,6 +2139,46 @@ mod extract_tests {
 
     /// Same frame with a glyph that is in no whitelist at all — `is_activity_shape` is what
     /// keeps this working when the CLI adds a spinner character we have never seen.
+
+    /// Reported 2026-09-06: the reply bubble came back holding the user's own message.
+    /// A multi-line prompt echoes as one `❯ <first line>` row plus its remaining lines verbatim,
+    /// and only the marker row is skipped — so lines 2..n were stored as the agent's answer.
+    const ECHOED_BACK: &str = "\
+❯ 併行
+1 沒事 bot 不會需要停止的動作
+2 執行中 能夠show session name agent取的名字
+
+✛ Generating… (4s · thinking)
+";
+    const SENT: &str = "併行\n1 沒事 bot 不會需要停止的動作\n2 執行中 能夠show session name agent取的名字";
+
+    #[test]
+    fn the_users_own_prompt_does_not_come_back_as_the_reply() {
+        // Before the fix this was the whole tail of the prompt plus the spinner row.
+        let scraped = clean_screen("claude", ECHOED_BACK).unwrap_or_default();
+        assert_eq!(strip_echoed_prompt(&scraped, SENT), "");
+    }
+
+    #[test]
+    fn an_unknown_spinner_glyph_never_reaches_a_message() {
+        // `✛` is in no glyph list, so only `is_activity_shape` keeps it out of `clean_screen`.
+        assert_eq!(clean_screen("claude", "❯ go\n✛ Generating… (4s · thinking)\n"), None);
+    }
+
+    #[test]
+    fn strip_echoed_prompt_keeps_a_real_reply() {
+        let text = "1 沒事 bot 不會需要停止的動作\n2 執行中 能夠show session name agent取的名字\n好的，我來處理。";
+        assert_eq!(strip_echoed_prompt(text, SENT), "好的，我來處理。");
+    }
+
+    #[test]
+    fn strip_echoed_prompt_leaves_a_partial_match_alone() {
+        // The pane wrapped line 2 away: dropping half a real reply is worse than a duplicate.
+        let text = "1 沒事 bot 不會需要停止的動作\n好的，我來處理。";
+        assert_eq!(strip_echoed_prompt(text, SENT), text);
+        // A single-line prompt has no tail to strip.
+        assert_eq!(strip_echoed_prompt("PONG", "ping"), "PONG");
+    }
 
     #[test]
     fn live_activity_surfaces_the_spinner_when_there_is_no_text() {

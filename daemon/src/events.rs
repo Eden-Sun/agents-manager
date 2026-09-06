@@ -233,6 +233,22 @@ async fn handle_status(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
 /// covers every run on it, and a write only happens when the text actually changed.
 const TITLE_POLL: Duration = Duration::from_secs(4);
 
+/// Titles that carry no information: the CLI's own name before it has been given a task.
+const PLACEHOLDER_TITLES: &[&str] = &["claude code", "claude", "codex", "grok", "grok cli", "terminal", "zsh", "bash"];
+
+/// Tidy one raw terminal title.
+///
+/// herdr already strips the spinner glyph, but some CLIs bake their status into the title
+/// itself (grok: `- Thinking - <task> - grok`), so trim the leading/trailing dashes too.
+/// Returns `None` for a title that says nothing the status lamp does not already say.
+fn clean_title(raw: &str) -> Option<String> {
+    let t = raw.trim().trim_matches('-').trim();
+    if t.is_empty() || PLACEHOLDER_TITLES.contains(&t.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 /// Keep `runs.agent_title` in step with what each agent currently calls itself
 /// (`terminal_title_stripped` — for Claude Code, a running summary of its task).
 pub fn spawn_title_poller(app: Arc<App>) {
@@ -246,13 +262,11 @@ pub fn spawn_title_poller(app: Arc<App>) {
                 let Some(client) = app.herdr_for(&conn.name).await else { continue };
                 let Ok(agents) = client.agent_list().await else { continue };
                 for a in agents {
-                    let (Some(name), Some(title)) = (a.name.as_deref(), a.terminal_title_stripped.as_deref()) else {
+                    let (Some(name), Some(raw)) = (a.name.as_deref(), a.terminal_title_stripped.as_deref()) else {
                         continue;
                     };
-                    let title = title.trim();
-                    if title.is_empty() {
-                        continue;
-                    }
+                    let Some(title) = clean_title(raw) else { continue };
+                    let title = title.as_str();
                     // Match on the agent name the run was started under; only live runs.
                     let row = sqlx::query_as::<_, (String, String, Option<String>)>(
                         &format!("SELECT id, bot_id, agent_title FROM runs WHERE agent_name = ? AND state IN {} LIMIT 1", crate::db::ACTIVE_STATES),
