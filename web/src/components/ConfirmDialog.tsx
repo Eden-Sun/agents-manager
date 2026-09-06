@@ -39,16 +39,31 @@ export function ConfirmDialog({
   const needsMatch = requireText !== undefined
   const matched = !needsMatch || typed === requireText
 
+  // Clearing the field belongs to the open/close transition, not to an effect: resetting it
+  // from an effect re-rendered the component, and since every call site passes an inline
+  // `onCancel={() => …}` (a new identity each render) the effect re-ran and reset again —
+  // "Maximum update depth exceeded". Comparing against the previous prop during render is
+  // React's own answer for this; it settles in one extra render because `lastOpen` then matches.
+  const [lastOpen, setLastOpen] = useState(open)
+  if (lastOpen !== open) {
+    setLastOpen(open)
+    if (!open && typed !== '') setTyped('')
+  }
+
+  // Read through a ref so the Escape listener always calls the current handler without making
+  // the unstable prop a dependency of the effect below.
+  const onCancelRef = useRef(onCancel)
   useEffect(() => {
-    if (!open) {
-      setTyped('')
-      return
-    }
+    onCancelRef.current = onCancel
+  })
+
+  useEffect(() => {
+    if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        onCancel()
+        onCancelRef.current()
       }
     }
     window.addEventListener('keydown', onKey, true)
@@ -57,7 +72,7 @@ export function ConfirmDialog({
       if (needsMatch) inputRef.current?.focus()
     })
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, onCancel, needsMatch])
+  }, [open, needsMatch])
 
   if (!open) return null
 

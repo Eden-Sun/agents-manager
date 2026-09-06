@@ -41,7 +41,12 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
   }
 
   const onMainClick = () => {
-    // One-click copy; keep the popover open so the command stays visible.
+    // Once open, the same button is the close control. Otherwise one click copies and
+    // leaves the command visible for confirmation.
+    if (open) {
+      setOpen(false)
+      return
+    }
     void copy().then(() => setOpen(true))
   }
 
@@ -54,15 +59,21 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
         className={`icon-btn attach-btn icon-tip${open ? ' on' : ''}${copied === 'ok' ? ' copied' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={`複製 attach 指令：${command}`}
-        aria-label="複製 attach 指令"
-        data-tip="複製 attach 指令 · 終端"
+        title={open ? '關閉 attach 指令' : `複製 attach 指令：${command}`}
+        aria-label={open ? '關閉 attach 指令' : '複製 attach 指令'}
+        data-tip={open ? '關閉 attach 指令 · 終端' : '複製 attach 指令 · 終端'}
         onClick={onMainClick}
       >
-        <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
-          <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          <path d="M4.5 6l2.5 2-2.5 2M8.5 10.5h3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        {open ? (
+          <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+            <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.7" fill="none" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M4.5 6l2.5 2-2.5 2M8.5 10.5h3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
         {compact ? null : <span className="attach-label">{copied === 'ok' ? '已複製' : '在終端開啟'}</span>}
       </button>
       {open ? (
