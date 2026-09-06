@@ -906,6 +906,29 @@ function HeadMoreMenu({ children, label }: { children: ReactNode; label: string 
   )
 }
 
+/**
+ * PM 的完成總結。內容是有用的，但它是一整段沒有斷行的長文，釘在面板頂端會吃掉三分之一
+ * 畫面——跟 issue 佇列 / Task 清單同一個毛病。預設夾成兩行，點「展開」才攤開，展開後也
+ * 有高度上限，不會再把時間軸推出畫面。
+ */
+function TeamSummary({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`team-summary${open ? ' open' : ''}`} role="note">
+      <strong>PM 總結</strong>
+      <span className="team-summary-text">{text}</span>
+      <button
+        type="button"
+        className="mini-btn team-summary-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? '收合' : '展開'}
+      </button>
+    </div>
+  )
+}
+
 export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSidebar: () => void }) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   const detail = useStore((s) => s.teamDetail[teamId] ?? null)
@@ -1113,12 +1136,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         </div>
       ) : null}
 
-      {detail?.summary && terminal ? (
-        <div className="team-summary" role="note">
-          <strong>PM 總結</strong>
-          <span>{detail.summary}</span>
-        </div>
-      ) : null}
+      {detail?.summary && terminal ? <TeamSummary text={detail.summary} /> : null}
 
       {canCloseIssue ? (
         <div className="team-close-issue" role="note">
