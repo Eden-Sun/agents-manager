@@ -82,6 +82,10 @@ pub struct BotCfg {
     /// Per-bot pane env; overrides the identity's.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Herdr session override. Set for bots imported from the local user's `default` session;
+    /// ordinary configured bots inherit their project's session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_session: Option<String>,
 }
 
 /// A named set of env vars + args, applied to a bot at start time. Lets several bots of the
@@ -161,9 +165,13 @@ pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
 
 /// Effort values a kind accepts (v4.0, kind-dependent). claude accepts none: its effort is
 /// always normalised to `None` without an error.
+///
+/// grok includes `xhigh` (grok-4.6+; verified `--reasoning-effort xhigh -m grok-4.6`). The
+/// per-model list from `GET /api/models` may be narrower (e.g. grok-4.5 is low/medium/high);
+/// `effort_checked` drops a stored value the chosen model rejects.
 pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
     match kind {
-        "grok" => &["low", "medium", "high"],
+        "grok" => &["low", "medium", "high", "xhigh"],
         "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         _ => &[],
     }
@@ -435,7 +443,8 @@ mod v40_tests {
     #[test]
     fn effort_is_kind_dependent() {
         assert_eq!(normalize_effort("grok", Some(" High ")).unwrap(), Some("high".into()));
-        assert!(normalize_effort("grok", Some("xhigh")).is_err());
+        assert_eq!(normalize_effort("grok", Some("xhigh")).unwrap(), Some("xhigh".into()));
+        assert!(normalize_effort("grok", Some("max")).is_err());
         assert_eq!(normalize_effort("codex", Some("xhigh")).unwrap(), Some("xhigh".into()));
         assert_eq!(normalize_effort("codex", Some("none")).unwrap(), Some("none".into()));
         assert!(normalize_effort("codex", Some("turbo")).is_err());

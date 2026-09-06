@@ -4,7 +4,7 @@
 
 ## 要完成的功能（全部在 daemon/，不要動 web/）
 1. `GET /api/models?kind=&host=&refresh=`：codex 用 `codex app-server`（stdio JSON-RPC：initialize → initialized 通知 → `model/list`）；grok 解析 `grok models` 文字；claude 靜態 opus/sonnet/haiku。快取 10 分鐘；遠端 host 走 `HostConn::ssh_exec_path`。（`daemon/src/models.rs` 已有草稿）
-2. bot 欄位 `fast: bool`、`effort` 依 kind 驗證（grok low/medium/high；codex none/minimal/low/medium/high/xhigh/max/ultra；claude 清空）；啟動注入 codex `-c service_tier="priority"`（fast）、`-c model_reasoning_effort="<effort>"`；grok `--reasoning-effort`。
+2. bot 欄位 `fast: bool`、`effort` 依 kind 驗證（grok low/medium/high/xhigh；codex none/minimal/low/medium/high/xhigh/max/ultra；claude 清空）；啟動注入 codex `-c service_tier="priority"`（fast）、`-c model_reasoning_effort="<effort>"`；grok `--reasoning-effort`。grok 模型清單的 efforts 來自 `~/.grok/models_cache.json`（per-model）。
 3. `hosts[].attach_command`：本機 `herdr --session <session>`；遠端 `herdr --remote <user@host> --session <session>`，非 22 埠 `herdr --remote ssh://<user@host>:<port> --session <session>`。
 4. 額度 `GET /api/quota` + WS `quota_updated`：codex 每 5 分鐘 `account/rateLimits/read`（primary=5h、secondary=7d）；claude 由 daemon 注入 statusLine（`agents-managerd statusline --bot --token --port`，讀 stdin 的 `rate_limits` POST 到 `/hook/claude` 當 `StatusLine` 事件，然後轉呼叫使用者原本的 statusLine 指令並原樣輸出）；grok null。（`quota.rs`、`statusline_cmd.rs` 已有草稿）
 5. `hosts[].tools`（claude/codex/grok 的 installed/path/version/logged_in）與 `POST /api/hosts/:name/tools/install {kind, via_bot_id}`（把官方安裝＋login 指令當 prompt 送給該主機上一個 running bot）。（`tools.rs` 草稿）
