@@ -134,6 +134,23 @@
   box-sizing: border-box;
 }
 
+/*
+ * 減少動態：一次收乾淨。
+ *
+ * 原本是三個各自關掉自己動畫的小區塊（燈號、游標、通知），但漏掉了最常出現的那個——
+ * 打字點（`.typing i`，只要有 agent 在工作就一直在跳），以及全部的 transition。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 html,
 body,
 #root {
@@ -1239,14 +1256,6 @@ button:disabled {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .lamp-working::after,
-  .lamp-starting,
-  .conn-dot.connecting {
-    animation: none;
-  }
-}
-
 /* ------------------------------------------------------------------ forms */
 
 .sidebar-foot {
@@ -1864,12 +1873,6 @@ button:disabled {
   border-radius: 1px;
   background: var(--accent);
   animation: blink 1s steps(2, start) infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .msg.live .caret {
-    animation: none;
-  }
 }
 
 .msg.live .msg-meta {
@@ -2811,12 +2814,6 @@ button:disabled {
   from {
     transform: translateY(6px);
     opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .notice {
-    animation: none;
   }
 }
 
