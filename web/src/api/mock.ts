@@ -70,6 +70,8 @@ interface MockMessage {
   incomplete: number
   /** SPEC §13：群組發言的 group_id；一般訊息為 null */
   group_id: string | null
+  /** 拖放進來的圖片（mock 只保留 metadata，位元組留在 `blobs`）。 */
+  attachments_json: string | null
   created_at: string
 }
 
@@ -238,6 +240,8 @@ export class MockTransport implements Transport {
   private turns: MockTurn[] = []
   private messages: MockMessage[] = []
   private conversations = new Map<string, string>()
+  /** Uploaded attachment bytes, so the mock UI can render its own thumbnails. */
+  private blobs = new Map<string, Blob>()
 
   private seq = 0
   private connected = true
@@ -314,6 +318,28 @@ export class MockTransport implements Transport {
 
   session(): Promise<string> {
     return Promise.resolve('mock-ui-token')
+  }
+
+  /** `POST /bots/:id/attachments` — keeps the bytes in memory and hands back metadata. */
+  async upload(path: string, file: Blob): Promise<unknown> {
+    await this.session()
+    const id = ulid('att')
+    this.blobs.set(id, file)
+    const name = new URLSearchParams(path.split('?')[1] ?? '').get('name') || 'image'
+    return {
+      id,
+      name,
+      mime: file.type || 'image/png',
+      size: file.size,
+      path: `/Users/me/project/agents-manager/.agents-manager/attachments/${id}.png`,
+    }
+  }
+
+  async blobUrl(path: string): Promise<string> {
+    const id = decodeURIComponent(path.replace('/attachments/', ''))
+    const blob = this.blobs.get(id)
+    if (!blob) throw new ApiError(404, { error: 'not_found', reason: 'unknown attachment' }, 'not found')
+    return URL.createObjectURL(blob)
   }
 
   openSocket(handlers: SocketHandlers): () => void {
@@ -679,8 +705,13 @@ export class MockTransport implements Transport {
     this.emit('bot_status', { bot_id: botId, run: this.activeRun(botId) ?? null, connected: this.connected })
   }
 
-  private addMessage(m: Omit<MockMessage, 'id' | 'created_at' | 'group_id'> & { group_id?: string | null }): MockMessage {
-    const msg: MockMessage = { group_id: null, ...m, id: ulid('msg'), created_at: now() }
+  private addMessage(
+    m: Omit<MockMessage, 'id' | 'created_at' | 'group_id' | 'attachments_json'> & {
+      group_id?: string | null
+      attachments_json?: string | null
+    },
+  ): MockMessage {
+    const msg: MockMessage = { group_id: null, attachments_json: null, ...m, id: ulid('msg'), created_at: now() }
     this.messages.push(msg)
     this.emit('message_added', { bot_id: msg.bot_id, message: msg })
     return msg
@@ -1055,6 +1086,7 @@ export class MockTransport implements Transport {
     }
 
     const text = String(b.text ?? '')
+    const attachIds = Array.isArray(b.attachments) ? b.attachments.filter((x): x is string => typeof x === 'string') : []
     const turn: MockTurn = {
       id: ulid('turn'),
       conversation_id: this.conv(botId),
@@ -1077,6 +1109,17 @@ export class MockTransport implements Transport {
       source: 'web',
       incomplete: 0,
       group_id: groupId,
+      attachments_json: attachIds.length
+        ? JSON.stringify(
+            attachIds.map((id) => ({
+              id,
+              name: `image-${id.slice(-4)}.png`,
+              mime: this.blobs.get(id)?.type ?? 'image/png',
+              size: this.blobs.get(id)?.size ?? 0,
+              path: `/Users/me/project/agents-manager/.agents-manager/attachments/${id}.png`,
+            })),
+          )
+        : null,
     })
     this.updateTurn(turn, { delivery: 'ok' })
     run.agent_status = 'working'
@@ -1092,6 +1135,17 @@ export class MockTransport implements Transport {
       const reply = replyOverride ?? this.nextReply()
       const slow = lowered.includes('slow')
       const frames = slow ? 4 : 3
+      // v4.1: the thinking phase first — frames with only `activity` and an empty `text`,
+      // the state the real daemon sits in while the pane shows nothing but the spinner.
+      // The real verb is randomised per frame (Thinking / Boogieing / Puttering / …), so these
+      // are just two of them; only the bracketed counter shape is meaningful.
+      const thinking = ['Boogieing… (2s · ↑ 0.4k tokens)', 'Puttering… (4s · ↑ 1.2k tokens)']
+      thinking.forEach((activity, i) => {
+        setTimeout(() => {
+          if (turn.status !== 'in_flight') return
+          this.emit('turn_progress', { bot_id: botId, run_id: run.id, turn_id: turn.id, text: '', activity, revision: i + 1 })
+        }, 200 * (i + 1))
+      })
       const lines = reply.split('\n')
       // Grow by whole lines when there are several (a fence never splits mid-way), else by chars.
       const partial = (i: number) =>
@@ -1101,7 +1155,14 @@ export class MockTransport implements Transport {
       for (let i = 1; i <= frames; i++) {
         setTimeout(() => {
           if (turn.status !== 'in_flight') return
-          this.emit('turn_progress', { bot_id: botId, run_id: run.id, turn_id: turn.id, text: partial(i), revision: i })
+          this.emit('turn_progress', {
+            bot_id: botId,
+            run_id: run.id,
+            turn_id: turn.id,
+            text: partial(i),
+            activity: 'Simmering… (6s · ↑ 2.1k tokens)',
+            revision: thinking.length + i,
+          })
         }, 500 * i)
       }
       setTimeout(() => this.finishTurn(botId, turn, 'hook', reply), slow ? 8000 : 500 * (frames + 1) + 400)

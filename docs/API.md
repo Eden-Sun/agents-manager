@@ -713,9 +713,23 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
 回合 `in_flight` 且 `delivery=ok` 時，daemon 每 0.7 秒讀一次 pane（`recent_unwrapped`），把 prompt 回音之後、去掉 TUI 雜訊與回覆標記的文字推成：
 ```json
-{"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","revision":42}}
+{"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","activity":"Thinking… (12s · ↑ 1.2k tokens)","revision":42}}
 ```
-只在文字變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
+
+- `text`：目前為止的部分回覆（同最終訊息的清理規則）。
+- `activity`（**選填**，v4.1 新增）：agent 目前的**活動狀態**——畫面上該回合最後一行 spinner／事件行去掉開頭字元後的內容，例如 `Boogieing… (3m 18s · ↓ 11.0k tokens)`、`Thought for 0.1s`。上限 120 字元（超過截斷並補 `…`），沒有就送空字串。它**只給前端在 `text` 還是空的時候顯示用**，是純文字（不要當 Markdown 渲染），**不會**寫進 DB、也**不會**進入最終訊息。
+
+  辨識規則是兩條**取聯集**、以該回合畫面上**最後一行**命中者為準：
+  1. **glyph 白名單**（快路徑）：claude / codex `✻ ✽ ✶ ✳ ✢ ·`，grok `◆`。
+  2. **結構性後備**（`is_activity_shape`）：不管前面是什麼 glyph、甚至沒有 glyph，只要 trim 後長成 `<單字>… (…)` 且括號內含 `tokens` 或時間樣式（`12s` / `3m` / `1h`）就算活動行。
+
+  ⚠️ **spinner 的動詞是隨機的**（`Thinking`、`Boogieing`、`Improvising`、`Puttering`、`Simmering`…），任何字面比對都是錯的；glyph 集合也會隨 CLI 版本增減，所以白名單只是快路徑，真正撐住的是第 2 條的形狀比對。
+
+  括號內的秒數每次輪詢都在變，因此 `activity` 幾乎每 0.7 秒都不同、每次都發幀——這是**預期且想要**的行為（前端計時會跟著跳），daemon 與前端都**不做**去抖或節流。
+
+只在 `text` 或 `activity` **任一**變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
+
+> 為什麼要 `activity`：清理管線（`clean_screen` / `is_noise`）把 spinner 行、框線與狀態列整行濾掉，而 agent 在**純思考／跑工具**的階段畫面上就只剩這些。整頁被濾成空字串後 `text` 一直沒變化 → 一幀都不發 → 前端氣泡永遠停在「等待回覆（hook）…」。`activity` 是繞過清理的獨立旁路，讓進度透出而不污染回覆內容。
 
 
 ---
@@ -950,3 +964,51 @@ daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機
 ```
 
 錯誤同上（找不到 issue 也是 502，message 含 gh 的輸出）。
+
+## 圖片附件（2026-09-06 新增）
+
+CLI agent 只吃文字（`agent.prompt`），所以「拖一張圖進對話」是**先把檔案放到 bot 所在主機**，
+再把路徑寫進 agent 讀到的那段文字。
+
+### `POST /api/bots/{id}/attachments?name=<檔名>`
+
+body 直接是圖片位元組（**不是** multipart），`Content-Type` 就是圖片的 MIME：
+
+```
+POST /api/bots/01.../attachments?name=screenshot.png
+Content-Type: image/png
+X-AM-Token: <token>
+<raw bytes>
+```
+
+成功 `200`：
+```json
+{"id":"01M1…","name":"screenshot.png","mime":"image/png","size":10158,
+ "path":"/Users/me/proj/.agents-manager/attachments/01M1…-screenshot.png"}
+```
+
+- 檔案落在 **`<project.path>/.agents-manager/attachments/`**（agent 的 cwd 之內，沙箱化的 CLI
+  才讀得到）；該目錄會自動寫一個內容為 `*` 的 `.gitignore`，repo 不會看到這些檔案。
+- 專案在遠端 host 時，位元組經 `ssh`（`hosts.rs::ssh_put`）寫到遠端同一路徑，daemon 另存一份
+  本機副本供 UI 取縮圖。
+- 只收圖片（`Content-Type` 必須是 `image/*`），單檔上限 12 MB；其餘 `400 bad_request`。
+
+### `GET /api/attachments/{id}`
+
+回傳原始位元組（`Content-Type` 為原 MIME）。一樣要 `X-AM-Token`，所以 UI 是用 fetch 取回再轉
+object URL，不能直接塞進 `<img src>`。
+
+### prompt / 群組聊天帶附件
+
+`POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 都多接一個可選欄位：
+
+```json
+{ "text": "這張圖哪裡怪？", "client_request_id": "…", "attachments": ["01M1…", "01M1…"] }
+```
+
+- attachment id 以 **project** 為範圍：同專案的 bot 共用（群組聊天一次上傳、每個收件 bot 都拿到
+  同一個路徑）；跨專案的 id 會 `400 unknown attachment`。
+- agent 實際收到的是「文字 + 附加圖片（請讀取這些檔案來查看）：<絕對路徑>」；時間軸存的仍是
+  使用者原本打的字。
+- 這些圖片會記在該則 user message 的 `attachments_json`（`GET /messages` 一併回傳），格式是
+  上面 upload 回應的物件陣列，UI 靠它重畫縮圖。

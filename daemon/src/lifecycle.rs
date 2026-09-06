@@ -1005,7 +1005,20 @@ pub struct PromptOut {
 }
 
 pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None, None).await
+    prompt_grouped(app, bot_id, text, client_request_id, None, None, &[]).await
+}
+
+/// `prompt` carrying images dropped into the composer (`attach.rs`). The agent gets the
+/// text plus their paths on its own host; the timeline keeps the text and renders the
+/// thumbnails from `messages.attachments_json`.
+pub async fn prompt_with(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+) -> LcResult<PromptOut> {
+    prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids).await
 }
 
 /// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
@@ -1018,6 +1031,7 @@ pub async fn prompt_grouped(
     client_request_id: &str,
     group_id: Option<&str>,
     deliver: Option<&str>,
+    attachment_ids: &[String],
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     let lock = app.bot_lock(bot_id).await;
@@ -1028,6 +1042,12 @@ pub async fn prompt_grouped(
     }
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
+    // Resolved before anything is written, so an unknown id is a plain 400 rather than a
+    // turn that exists but was never delivered.
+    let files = crate::attach::resolve(app, bot_id, attachment_ids)
+        .await
+        .map_err(|e| LcError::Bad(e.to_string()))?;
+    let deliver = crate::attach::deliver_text(deliver, &files);
 
     // 2. idempotency
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
@@ -1099,6 +1119,7 @@ pub async fn prompt_grouped(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
+    crate::attach::bind(app, &msg_id, &files).await.map_err(up)?;
 
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
         .bind(&msg_id)
@@ -1112,7 +1133,7 @@ pub async fn prompt_grouped(
     // 4. deliver
     let res = client_for_bot(app, bot_id)
         .await?
-        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": deliver}), Duration::from_secs(10))
+        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": &deliver}), Duration::from_secs(10))
         .await;
     let delivery = match res {
         Ok(_) => "ok",
@@ -1162,7 +1183,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
     let h = tokio::spawn(async move {
         let started = std::time::Instant::now();
         let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
-        let mut last = String::new();
+        let mut last = (String::new(), String::new());
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
             if started.elapsed() > PROGRESS_MAX {
@@ -1177,11 +1198,14 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             let Ok(client) = client_for_bot(&app2, &bot_id).await else { continue };
             let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
             let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
-            if live != last {
-                last = live.clone();
+            // The spinner row is dropped by `clean_screen`, so a pure thinking / tool phase
+            // produces no frame at all and the UI sits on "waiting". Ship it separately.
+            let activity = live_activity(&bot.kind, &read.text).unwrap_or_default();
+            if live != last.0 || activity != last.1 {
+                last = (live.clone(), activity.clone());
                 app2.emit(
                     "turn_progress",
-                    json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "revision": read.revision}),
+                    json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "activity": activity, "revision": read.revision}),
                 )
                 .await;
             }
@@ -1189,6 +1213,71 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
         app2.progress_pollers.lock().await.remove(&run_id);
     });
     pollers.insert(key, h);
+}
+
+// ------------------------------------------------- CLI-side (external) turn, live
+
+/// The user typed straight into the tmux pane: open the `external` turn **now**.
+///
+/// Until this existed an external turn was only ever born at Stop-hook time, already
+/// `completed` — so for the whole time the agent was working the web UI had no in-flight turn,
+/// no `turn_progress` poller and therefore nothing to show; the exchange appeared in one lump
+/// at the end. Opening the turn on the `-> working` edge puts a CLI prompt on exactly the same
+/// footing as one the web sent: live bubble, activity row, streaming reply.
+///
+/// `delivery` is `ok` deliberately — the §4.3 terminal fallback ignores any other value, and
+/// this turn needs that safety net just as much as a web one (it is what closes the turn if the
+/// Stop hook never arrives).
+pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
+    let lock = app.bot_lock(&run.bot_id).await;
+    let _g = lock.lock().await;
+    // Re-read under the lock: `prompt()` may have opened its own turn since the status event,
+    // and the pane watcher is armed *before* `start_bot` flips the run to `running` (step 6 vs
+    // step 7), so a boot-time `-> working` blip must not be mistaken for the user typing.
+    let Ok(Some(run)) = db::run(&app.db, &run.id).await else { return };
+    if run.state != "running" {
+        return;
+    }
+    if !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
+        return;
+    }
+    let Ok(conv) = db::conversation_id(&app.db, &run.bot_id).await else { return };
+    let tid = db::ulid();
+    if let Err(e) = sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+         VALUES (?,?,?,'external','in_flight','ok',?)",
+    )
+    .bind(&tid)
+    .bind(&conv)
+    .bind(&run.id)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    {
+        // `turns_one_in_flight` is a unique index; losing that race just means someone else
+        // opened the turn first, which is the outcome we wanted anyway.
+        tracing::debug!(run = %run.id, error = %e, "external turn not opened");
+        return;
+    }
+    tracing::info!(run = %run.id, turn = %tid, "external turn opened from pane activity");
+    // The prompt echo on the pane is the text the user typed. If it is not on screen we open
+    // the turn anyway (the live reply is still worth showing) rather than invent a message.
+    if let Some(text) = pane_prompt_echo(app, &run).await {
+        if let Err(e) = insert_message(app, &conv, Some(&tid), "user", &text, "hook", false, None).await {
+            tracing::warn!(turn = %tid, error = ?e, "external prompt echo not stored");
+        }
+    }
+    emit_turn(app, &tid).await;
+    arm_progress(app, &run.id, &run.bot_id, &tid).await;
+}
+
+/// Read the pane and pull the last prompt echo off it. Same read as `arm_progress`.
+async fn pane_prompt_echo(app: &Arc<App>, run: &db::Run) -> Option<String> {
+    let bot = db::bot(&app.db, &run.bot_id).await.ok().flatten()?;
+    let pane = run.pane_id.clone()?;
+    let client = client_for_bot(app, &run.bot_id).await.ok()?;
+    let read = client.pane_read(&pane, "recent_unwrapped", 160).await.ok()?;
+    last_prompt_echo_text(&bot.kind, &read.text)
 }
 
 /// Everything the agent has printed since the prompt echo, cleaned of TUI chrome, with the
@@ -1205,6 +1294,90 @@ fn live_reply(kind: &str, text: &str) -> Option<String> {
         .collect();
     let joined = out.join("\n").trim().to_string();
     if joined.is_empty() { None } else { Some(joined) }
+}
+
+/// Longest activity string we forward; the pane can carry a whole wrapped status bar.
+const ACTIVITY_MAX: usize = 120;
+
+/// Is `s` an elapsed-time token — `18s`, `3m`, `1h`, `0.1s`?
+fn is_elapsed_token(s: &str) -> bool {
+    let Some(num) = s.strip_suffix('s').or_else(|| s.strip_suffix('m')).or_else(|| s.strip_suffix('h')) else {
+        return false;
+    };
+    !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// Does this row have the *shape* of a spinner frame — `<Verb>… (3m 18s · ↓ 11.0k tokens)` —
+/// whatever glyph, if any, precedes it?
+///
+/// Neither half of the row can be matched literally: the verb is picked at random per frame
+/// (`Thinking`, `Boogieing`, `Improvising`, `Puttering`, `Simmering`, …) and the leading glyph
+/// set is a moving target across CLI releases. The bracketed elapsed time / token counter is
+/// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
+/// a parenthesised status carrying `tokens` or a duration. A false positive only ever reaches
+/// `turn_progress.activity`, never a stored message.
+fn is_activity_shape(s: &str) -> bool {
+    // A leading decoration glyph is ignored here; the caller strips it from what it reports.
+    let body = match s.chars().next() {
+        Some(c) if !c.is_alphanumeric() => s[c.len_utf8()..].trim_start(),
+        _ => s,
+    };
+    let Some((verb, tail)) = body.split_once("… (") else { return false };
+    if verb.is_empty() || verb.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((inner, _)) = tail.rsplit_once(')') else { return false };
+    inner.contains("tokens") || inner.split(|c: char| c.is_whitespace() || c == '·').any(|t| is_elapsed_token(t.trim()))
+}
+
+/// The agent's *current activity* — the spinner row of this turn (`✻ Thinking… (12s · ↑ 1.2k
+/// tokens)`, grok's `◆ Thought for 0.1s`), with the glyph stripped.
+///
+/// `clean_screen` (and therefore `live_reply`) throws these lines away as TUI chrome, which is
+/// right for the message body but leaves a purely-thinking turn with nothing at all to show.
+/// This is a read-only side channel for `turn_progress.activity`: it never reaches a stored
+/// message, so `clean_screen` / `extract_reply` stay untouched.
+fn live_activity(kind: &str, text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = after_last_prompt_echo(kind, &lines);
+    let grok = kind == "grok";
+    // grok marks event / thinking rows with `◆` (see `is_grok_noise`); claude / codex cycle
+    // through this spinner set. It grows between CLI releases, so it is a fast path, not the
+    // whole test — `is_activity_shape` below catches frames printed with a glyph we don't know.
+    let glyphs: &[char] = if grok { &['◆'] } else { &['✻', '✽', '✶', '✳', '✢', '·'] };
+    let mut found: Option<String> = None;
+    for line in &lines[start..] {
+        let stripped;
+        let s = if grok {
+            stripped = strip_grok_decor(line);
+            stripped.trim()
+        } else {
+            line.trim()
+        };
+        let Some(first) = s.chars().next() else { continue };
+        // The verb is randomised per frame (`Thinking…`, `Boogieing…`, `Improvising…`), so this
+        // can only ever match on shape — never on the word itself.
+        let rest = if glyphs.contains(&first) {
+            s[first.len_utf8()..].trim()
+        } else if is_activity_shape(s) {
+            // Unknown glyph (or none at all): drop a leading symbol if there is one.
+            if first.is_alphanumeric() { s } else { s[first.len_utf8()..].trim() }
+        } else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        // Keep scanning: the last activity row on screen is the current one.
+        found = Some(rest.to_string());
+    }
+    let s = found?;
+    if s.chars().count() <= ACTIVITY_MAX {
+        return Some(s);
+    }
+    let mut cut: String = s.chars().take(ACTIVITY_MAX).collect::<String>().trim_end().to_string();
+    cut.push('…');
+    Some(cut)
 }
 
 // ---------------------------------------------------------------- prompt-stall watchdog
@@ -1442,14 +1615,20 @@ fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
     text.to_string()
 }
 
+/// The prompt-echo prefix each CLI prints in front of what the user typed. Single source of
+/// truth for `after_last_prompt_echo` and `last_prompt_echo_text`.
+fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" | "grok" => Some("❯ "),
+        "codex" => Some("› "),
+        _ => None,
+    }
+}
+
 /// Index of the first line *after* the last prompt echo (`❯ …` / `› …`), or 0 when the echo
 /// is not on screen. Everything before it belongs to earlier turns.
 fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
-    let echo = match kind {
-        "claude" | "grok" => "❯ ",
-        "codex" => "› ",
-        _ => return 0,
-    };
+    let Some(echo) = prompt_echo_prefix(kind) else { return 0 };
     lines
         .iter()
         .rposition(|l| {
@@ -1458,6 +1637,32 @@ fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
         })
         .map(|i| i + 1)
         .unwrap_or(0)
+}
+
+/// What the user typed on the *last* prompt echo — the echo line itself, prefix stripped.
+///
+/// `after_last_prompt_echo` reports the index of the line **after** the echo, so the echo is
+/// at `idx - 1` and `idx == 0` means no echo is on screen. This is how a turn the user started
+/// by typing straight into the tmux pane gets its user message: there is no hook payload to
+/// read it from until the turn ends.
+pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
+    let echo = prompt_echo_prefix(kind)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let idx = after_last_prompt_echo(kind, &lines);
+    if idx == 0 {
+        return None;
+    }
+    let raw = lines[idx - 1];
+    // grok right-aligns a clock and a scrollbar glyph onto the prompt row (see `clean_screen`).
+    let stripped;
+    let line = if kind == "grok" {
+        stripped = strip_grok_decor(raw);
+        stripped.as_str()
+    } else {
+        raw
+    };
+    let body = line.trim_start().strip_prefix(echo)?.trim();
+    if body.is_empty() { None } else { Some(body.to_string()) }
 }
 
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
@@ -1744,10 +1949,132 @@ mod extract_tests {
         assert_eq!(clean_screen("grok", GROK_SCREEN_NARROW).unwrap(), "GROK-FALLBACK");
     }
 
+    /// Claude mid-turn with nothing printed yet: spinner + input box + status bar only.
+    /// Everything here is chrome, so `live_reply` has nothing — but the user still needs to
+    /// see that the agent is thinking.
+    const THINKING_ONLY: &str = "\
+❯ 幫我看一下這個 bug
+✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)
+╭────────────────────────────────────────────╮
+│ ❯                                          │
+╰────────────────────────────────────────────╯
+  tony. | pt | HAI4.5 | 5h:- | 7d:-
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+";
+
+    /// Reported from a real stuck session (2026-09-06): the UI sat on 「等待回覆（hook）…」
+    /// for 3m18s. The verb is randomised per frame and `✢` was missing from the glyph set,
+    /// so this row has to be caught on shape alone.
+
+    /// Same frame with a glyph that is in no whitelist at all — `is_activity_shape` is what
+    /// keeps this working when the CLI adds a spinner character we have never seen.
+
+    #[test]
+    fn live_activity_surfaces_the_spinner_when_there_is_no_text() {
+        assert_eq!(live_reply("claude", THINKING_ONLY), None);
+        assert_eq!(live_activity("claude", THINKING_ONLY).unwrap(), "Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)");
+    }
+
+    /// Once the agent prints something, `live_reply` keeps working exactly as before and the
+    /// activity row is still reported alongside it (the UI prefers the text).
+    #[test]
+    fn live_reply_still_wins_once_there_is_output() {
+        let screen = "❯ Reply with PONG\n⏺ PONG\n✻ Cooked for 5s\n──────\n❯\n";
+        assert_eq!(live_reply("claude", screen).unwrap(), "PONG");
+        assert_eq!(live_activity("claude", screen).unwrap(), "Cooked for 5s");
+    }
+
+    #[test]
+    fn live_activity_takes_the_last_row_and_is_capped() {
+        let screen = format!("❯ go\n✻ Thinking…\n✻ {}\n", "x".repeat(200));
+        let got = live_activity("claude", &screen).unwrap();
+        assert_eq!(got.chars().count(), ACTIVITY_MAX + 1);
+        assert!(got.ends_with('…'));
+    }
+
+    /// grok's thinking rows are `◆ …` and carry the scrollbar glyph, so they go through
+    /// `strip_grok_decor` first (same as `clean_screen`).
+    #[test]
+    fn live_activity_reads_grok_event_rows() {
+        assert_eq!(live_activity("grok", GROK_SCREEN).unwrap(), "Thought for 0.1s");
+    }
+
+    /// Real capture from the stuck session that started this fix: three minutes in, the pane
+    /// carried nothing but this row and the UI still said 「等待回覆（hook）…」.
+    const BOOGIEING: &str = "\
+❯ 幫我重構一下
+✻ Boogieing… (3m 18s · ↓ 11.0k tokens)
+╭────────────────────────────────────────────╮
+│ ❯                                          │
+╰────────────────────────────────────────────╯
+  tony. | pt | HAI4.5 | 5h:- | 7d:-
+";
+
+    #[test]
+    fn live_activity_reports_the_real_stuck_frame() {
+        assert_eq!(live_reply("claude", BOOGIEING), None);
+        assert_eq!(live_activity("claude", BOOGIEING).unwrap(), "Boogieing… (3m 18s · ↓ 11.0k tokens)");
+    }
+
+    /// The spinner verb is randomised and the glyph set grows between CLI releases, so an
+    /// unknown glyph — or none at all — must still be recognised by shape alone.
+    #[test]
+    fn live_activity_falls_back_to_shape_for_unknown_glyphs() {
+        let unknown = "❯ go\n⣾ Puttering… (12s · ↑ 1.2k tokens)\n";
+        assert_eq!(live_activity("claude", unknown).unwrap(), "Puttering… (12s · ↑ 1.2k tokens)");
+        let bare = "❯ go\nSimmering… (1m 4s)\n";
+        assert_eq!(live_activity("claude", bare).unwrap(), "Simmering… (1m 4s)");
+    }
+
+    /// …but the shape test must not swallow ordinary prose that happens to use an ellipsis.
+    #[test]
+    fn activity_shape_ignores_prose() {
+        assert!(!is_activity_shape("等一下… (我先看看)"));
+        assert!(!is_activity_shape("好的… (see the note below)"));
+        assert!(is_activity_shape("Boogieing… (3m 18s · ↓ 11.0k tokens)"));
+        assert!(is_activity_shape("✢ Improvising… (5s)"));
+    }
+
+    /// Before the prompt echo there is nothing to report (the previous turn's spinner must
+    /// not leak into this turn).
+    #[test]
+    fn live_activity_ignores_the_previous_turn() {
+        let screen = "❯ echo 1\n✻ Worked for 9s\n❯ echo 2\n";
+        assert_eq!(live_activity("claude", screen), None);
+    }
+
     #[test]
     fn grok_decor_strip_keeps_prose_times() {
         assert_eq!(strip_grok_decor("     GROK-OK                 2:09 AM   █"), "     GROK-OK");
         assert_eq!(strip_grok_decor("meet at 2:09 PM"), "meet at 2:09 PM");
         assert_eq!(strip_grok_decor("plain line █"), "plain line");
+    }
+
+    /// The CLI-typed prompt is read back off the pane's own echo — the line `after_last_prompt_echo`
+    /// stops just past. The *last* echo wins, so an earlier turn's prompt is never reported.
+    #[test]
+    fn last_prompt_echo_text_reads_what_the_user_typed() {
+        assert_eq!(last_prompt_echo_text("claude", TWO_TURNS).as_deref(), Some("echo 2"));
+        assert_eq!(last_prompt_echo_text("claude", NOT_LOGGED_IN).as_deref(), Some("echo 1"));
+        assert_eq!(last_prompt_echo_text("codex", "› 幫我看一下這個 bug\n  thinking…\n").as_deref(), Some("幫我看一下這個 bug"));
+    }
+
+    /// grok's echo row carries the right-aligned clock and the scrollbar glyph; neither is
+    /// part of the prompt.
+    #[test]
+    fn last_prompt_echo_text_strips_grok_decor() {
+        let screen = "❯ Reply with GROK-OK                    2:09 AM   █\n     GROK-OK\n";
+        assert_eq!(last_prompt_echo_text("grok", screen).as_deref(), Some("Reply with GROK-OK"));
+    }
+
+    /// No echo on screen, an empty prompt box, or a CLI we have no prefix for: report nothing
+    /// rather than a made-up prompt (`begin_external_turn` then opens the turn with no user
+    /// message at all).
+    #[test]
+    fn last_prompt_echo_text_is_none_without_an_echo() {
+        assert_eq!(last_prompt_echo_text("claude", "⏺ orphaned reply\n"), None);
+        assert_eq!(last_prompt_echo_text("claude", "❯\n"), None);
+        assert_eq!(last_prompt_echo_text("claude", "❯    \n"), None);
+        assert_eq!(last_prompt_echo_text("unknown", "❯ hello\n"), None);
     }
 }

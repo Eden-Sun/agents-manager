@@ -211,6 +211,14 @@ async fn handle_status(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
         crate::lifecycle::cancel_stall(app, &run.id).await;
     }
 
+    // An agent that starts working with no turn in flight was prompted from the tmux pane, not
+    // from the web. Open the external turn now so the UI streams it live; waiting for the Stop
+    // hook would leave the conversation blank for the whole run. A turn already in flight means
+    // this is the web's own prompt taking effect — leave it alone.
+    if prev != "working" && status == "working" && matches!(crate::db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
+        crate::lifecycle::begin_external_turn(app, &run).await;
+    }
+
     // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
     if prev == "working" && status == "idle" {
         crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;

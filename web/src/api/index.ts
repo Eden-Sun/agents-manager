@@ -9,6 +9,7 @@ import { HttpTransport } from './transport'
 import type { SocketHandlers, Transport } from './transport'
 import type {
   AppState,
+  Attachment,
   DirListing,
   GroupChatResult,
   GroupMessagesPage,
@@ -68,10 +69,16 @@ export async function fetchProjectMessages(projectId: string, limit = 200, befor
  * SPEC §13.4 `POST /api/projects/:id/chat`. The daemon resolves `@all` / `@<bot>` itself;
  * no valid mention → 400 `{error:"no_mention", bots}` (surfaces as an `ApiError`).
  */
-export async function sendGroupChat(projectId: string, text: string, clientRequestId: string): Promise<GroupChatResult> {
+export async function sendGroupChat(
+  projectId: string,
+  text: string,
+  clientRequestId: string,
+  attachments: string[] = [],
+): Promise<GroupChatResult> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/chat`, {
     text,
     client_request_id: clientRequestId,
+    ...(attachments.length ? { attachments } : {}),
   })
   const o = isRec(raw) ? raw : {}
   return {
@@ -206,10 +213,16 @@ export async function interruptBot(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/interrupt`)
 }
 
-export async function sendPrompt(botId: string, text: string, clientRequestId: string): Promise<PromptResult> {
+export async function sendPrompt(
+  botId: string,
+  text: string,
+  clientRequestId: string,
+  attachments: string[] = [],
+): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
     text,
     client_request_id: clientRequestId,
+    ...(attachments.length ? { attachments } : {}),
   })
   const o = isRec(raw) ? raw : {}
   const delivery = str(pick(o, 'delivery'), 'pending') as TurnDelivery
@@ -229,6 +242,30 @@ export async function sendKeys(botId: string, keys: string[], expectRunId: strin
 
 export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
+}
+
+// ---------------------------------------------------------- attachments
+
+/**
+ * `POST /api/bots/:id/attachments?name=…` with the raw image as the body. The daemon puts
+ * the file on the bot's host and returns the metadata the prompt needs.
+ */
+export async function uploadAttachment(botId: string, file: File): Promise<Attachment> {
+  const qs = new URLSearchParams({ name: file.name || 'image' })
+  const raw = await transport.upload(`/bots/${encodeURIComponent(botId)}/attachments?${qs.toString()}`, file)
+  const o = isRec(raw) ? raw : {}
+  return {
+    id: str(pick(o, 'id')),
+    name: str(pick(o, 'name'), file.name || 'image'),
+    mime: str(pick(o, 'mime'), file.type || 'image/png'),
+    size: num(pick(o, 'size'), file.size),
+    path: str(pick(o, 'path')),
+  }
+}
+
+/** An object URL for a stored attachment (the bytes sit behind the UI token). */
+export function attachmentUrl(id: string): Promise<string> {
+  return transport.blobUrl(`/attachments/${encodeURIComponent(id)}`)
 }
 
 // ------------------------------------------------------------------ v4.0

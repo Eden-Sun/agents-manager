@@ -30,6 +30,9 @@ const MASTER_UP_TIMEOUT: Duration = Duration::from_secs(20);
 /// One-shot `ssh <host> '<script>'` budget.
 const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `ssh_put` budget — an attachment is bigger than a script, so it gets more room.
+const SSH_PUT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Short directory for AF_UNIX paths (control socket + forwarded herdr socket).
 pub fn short_dir() -> PathBuf {
     use std::os::unix::fs::MetadataExt;
@@ -159,6 +162,43 @@ impl HostConn {
             bail!("ssh {} failed ({}): {}", cfg.ssh, out.status, if err.is_empty() { "no stderr".into() } else { err });
         }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    /// Stream raw bytes into `path` on the remote (parent directories created first).
+    ///
+    /// `ssh_exec` pipes the *script* through stdin, so it cannot also carry a payload;
+    /// this variant puts the script in argv and keeps stdin for the file itself. The
+    /// budget is larger than `SSH_EXEC_TIMEOUT` because an image is not a one-liner.
+    pub async fn ssh_put(&self, path: &str, data: &[u8]) -> Result<()> {
+        let Some(cfg) = &self.cfg else { bail!("ssh_put called on the local host") };
+        let dir = match path.rsplit_once('/') {
+            Some((d, _)) if !d.is_empty() => d,
+            _ => ".",
+        };
+        let script = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
+        // ssh joins its command argv with spaces and hands the result to the *remote login
+        // shell*, so the script has to survive one more round of word splitting: quote it
+        // as a single argument to `/bin/sh -c`.
+        let remote = format!("/bin/sh -c {}", sh_quote(&script));
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().with_context(|| format!("spawn ssh {}", cfg.ssh))?;
+        if let Some(mut sin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            sin.write_all(data).await.with_context(|| format!("write {} to {}", path, cfg.ssh))?;
+            sin.shutdown().await.ok();
+        }
+        let out = tokio::time::timeout(SSH_PUT_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!("ssh to {} timed out writing {}", cfg.ssh, path))?
+            .with_context(|| format!("run ssh {}", cfg.ssh))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            bail!("ssh {} could not write {} ({}): {}", cfg.ssh, path, out.status, if err.is_empty() { "no stderr".into() } else { err });
+        }
+        Ok(())
     }
 
     /// Same, but with the remote PATH fixed up first (SPEC §11.2 `remote_path`).

@@ -8,8 +8,9 @@ use crate::db;
 use crate::lifecycle::{self, LcError};
 use crate::state::App;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -54,6 +55,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/stop", post(stop_bot))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/prompt", post(prompt_bot))
+        .route(
+            "/bots/{id}/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::max(crate::attach::MAX_BYTES + 4096)),
+        )
+        .route("/attachments/{id}", get(get_attachment))
         .route("/bots/{id}/keys", post(keys_bot))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
@@ -893,6 +899,9 @@ async fn interrupt_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
 struct PromptIn {
     text: String,
     client_request_id: Option<String>,
+    /// Attachment ids from `POST /bots/:id/attachments`, in display order.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 
 async fn prompt_bot(
@@ -901,8 +910,47 @@ async fn prompt_bot(
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    let out = lifecycle::prompt(&app, &id, &b.text, &crid).await?;
+    let out = lifecycle::prompt_with(&app, &id, &b.text, &crid, &b.attachments).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+/// `POST /api/bots/:id/attachments?name=<filename>` with the raw image as the body.
+///
+/// Raw bytes rather than multipart: the composer only ever sends one file per call, and it
+/// keeps the daemon free of a form-parsing dependency.
+async fn upload_attachment(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, LcError> {
+    let name = q.get("name").map(String::as_str).unwrap_or("image").trim();
+    let name = if name.is_empty() { "image" } else { name };
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|m| m.split(';').next().unwrap_or(m).trim().to_string())
+        .unwrap_or_default();
+    if !crate::attach::is_image(&mime) {
+        return Err(LcError::Bad(format!("only images can be attached (Content-Type was `{mime}`)")));
+    }
+    // `{:#}` so the ssh / filesystem cause reaches the UI, not just "copy attachment to …".
+    let a = crate::attach::save(&app, &id, name, &mime, &body)
+        .await
+        .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    Ok((StatusCode::OK, Json(crate::attach::to_json(&a))).into_response())
+}
+
+/// The stored bytes, for the UI's thumbnail (fetched with the token, then blob-URL'd).
+async fn get_attachment(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let (mime, data) = crate::attach::read(&app, &id).await.map_err(|e| LcError::NotFound(e.to_string()))?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, max-age=31536000".into())],
+        data,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -975,7 +1023,7 @@ async fn project_chat(
     Json(b): Json<PromptIn>,
 ) -> Response {
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    match crate::group::chat(&app, &id, &b.text, &crid).await {
+    match crate::group::chat(&app, &id, &b.text, &crid, &b.attachments).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(crate::group::Response400::Lc(e)) => e.into_response(),
         Err(crate::group::Response400::NoMention(bots)) => (

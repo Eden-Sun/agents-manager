@@ -229,6 +229,30 @@ pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
     process_locked(app, body).await
 }
 
+/// Whitespace collapsed, so a prompt echo the pane wrapped across columns still compares equal
+/// to the hook's single-line copy of the same text.
+fn squash_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Should the Stop hook's `user` payload be stored on a turn that already carries `existing`
+/// user messages?
+///
+/// A turn opened by `lifecycle::begin_external_turn` already holds the prompt echo scraped off
+/// the pane — the *same* text the hook reports, except the pane can wrap or clip it at the
+/// column width. Comparing for equality alone would let a clipped echo through as a second
+/// bubble, so a containment either way counts as the same message.
+fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
+    let inc = squash_ws(incoming);
+    if inc.is_empty() {
+        return false;
+    }
+    !existing.iter().any(|e| {
+        let e = squash_ws(e);
+        !e.is_empty() && (e.contains(&inc) || inc.contains(&e))
+    })
+}
+
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
@@ -332,6 +356,19 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .bind(&t.id)
                 .execute(&app.db)
                 .await?;
+                // This turn may be one `begin_external_turn` opened when the user typed into the
+                // pane — claim it instead of opening a second one at step 5. Its user message
+                // was scraped off the prompt echo, so only store the hook's copy (codex sends
+                // `input-messages`) when it is not the same text we already have. A `web` turn
+                // always has its user message from the composer, so it never takes this branch.
+                if t.origin == "external" {
+                    if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        let have = db::turn_user_messages(&app.db, &t.id).await?;
+                        if hook_user_is_new(&have, u) {
+                            lifecycle::insert_message(app, &conv, Some(&t.id), "user", u, "hook", false, None).await?;
+                        }
+                    }
+                }
                 if !body_text.is_empty() {
                     lifecycle::insert_message(app, &conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?;
                 }
@@ -505,6 +542,126 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
     }
 }
 
+
+#[cfg(test)]
+mod external_claim_tests {
+    use super::*;
+
+    /// The prompt echo scraped off the pane and the hook's own copy are the same message,
+    /// however the pane wrapped or clipped it.
+    #[test]
+    fn hook_user_dedups_against_the_scraped_echo() {
+        let echo = vec!["Reply with exactly MERGED-OK".to_string()];
+        assert!(!hook_user_is_new(&echo, "Reply with exactly MERGED-OK"));
+        // The pane wrapped the echo across two columns; the hook sends one line.
+        assert!(!hook_user_is_new(&vec!["Reply with\n  exactly MERGED-OK".into()], "Reply with exactly MERGED-OK"));
+        // The pane clipped the echo at the column width.
+        assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
+    }
+
+    /// …but a genuinely different prompt, or a turn that has no user message at all (the echo
+    /// was off screen), must still be stored.
+    #[test]
+    fn hook_user_is_stored_when_it_is_not_the_echo() {
+        assert!(hook_user_is_new(&[], "Reply with exactly MERGED-OK"));
+        assert!(hook_user_is_new(&vec!["echo 1".into()], "echo 2"));
+        // Nothing to store.
+        assert!(!hook_user_is_new(&[], "   "));
+    }
+
+    /// A throwaway on-disk database (`db::open` needs a path) seeded with one running bot.
+    /// The directory removes itself when the returned guard drops.
+    struct TmpDb(std::path::PathBuf);
+    impl Drop for TmpDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn fixture() -> (TmpDb, sqlx::SqlitePool, String, String) {
+        let dir = std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = db::open(&dir.join("t.db")).await.unwrap();
+        let now = db::now();
+        for q in [
+            "INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp/p','p',?)",
+            "INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','tok',?)",
+            "INSERT INTO conversations (id,bot_id,created_at) VALUES ('c','b',?)",
+            "INSERT INTO runs (id,bot_id,state,agent_status,pane_id,started_at) VALUES ('r','b','running','working','%1',?)",
+        ] {
+            sqlx::query(q).bind(&now).execute(&pool).await.unwrap();
+        }
+        (TmpDb(dir), pool, "r".to_string(), "c".to_string())
+    }
+
+    /// The Stop hook must *claim* the in-flight turn `begin_external_turn` opened when the user
+    /// typed into the pane, not open a second one. Step 4 of `process_locked` looks the target
+    /// up with exactly this query, so an `external` / `in_flight` turn has to come back from it
+    /// — otherwise the handler falls through to step 5 and inserts a duplicate.
+    #[tokio::test]
+    async fn stop_hook_finds_the_open_external_turn() {
+        let (_tmp, pool, run, conv) = fixture().await;
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at)
+             VALUES ('t',?,?,'external','in_flight','ok',?)",
+        )
+        .bind(&conv)
+        .bind(&run)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let found = db::in_flight_turn(&pool, &run).await.unwrap().expect("step 4 must claim the external turn");
+        assert_eq!(found.id, "t");
+        assert_eq!(found.origin, "external");
+        // `delivery` must be `ok` or the §4.3 terminal fallback refuses to close the turn.
+        assert_eq!(found.delivery, "ok");
+
+        // Claiming it is the same UPDATE a web turn gets; afterwards nothing is in flight, so a
+        // retried hook dedups instead of opening a second turn.
+        sqlx::query("UPDATE turns SET status='completed', completed_at=?, native_turn_id='u' WHERE id=? AND status='in_flight'")
+            .bind(&now)
+            .bind("t")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(db::in_flight_turn(&pool, &run).await.unwrap().is_none());
+    }
+
+    /// The scraped echo lives on the turn as a `hook`-sourced user message; that is what the
+    /// dedup in step 4 compares the hook's `input-messages` against.
+    #[tokio::test]
+    async fn turn_user_messages_returns_the_scraped_echo() {
+        let (_tmp, pool, run, conv) = fixture().await;
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at)
+             VALUES ('t',?,?,'external','in_flight','ok',?)",
+        )
+        .bind(&conv)
+        .bind(&run)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at)
+             VALUES ('m',?, 't','user','echo 1','hook',?)",
+        )
+        .bind(&conv)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let have = db::turn_user_messages(&pool, "t").await.unwrap();
+        assert_eq!(have, vec!["echo 1".to_string()]);
+        assert!(!hook_user_is_new(&have, "echo 1"));
+        assert!(hook_user_is_new(&have, "echo 2"));
+    }
+}
 
 #[cfg(test)]
 mod codex_title_tests {

@@ -6,10 +6,12 @@ import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, Message } from '../api/types'
 import { attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
+import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
+import { GearIcon } from './Icons'
 import { IssuesBar } from './IssuesBar'
 import { KindTag } from './KindTag'
 import { QuotaStrip } from './QuotaStrip'
@@ -84,6 +86,7 @@ export function Bubble({
         ) : (
           msg.content
         )}
+        {msg.attachments.length ? <MessageAttachments items={msg.attachments} /> : null}
       </div>
     </article>
   )
@@ -93,23 +96,31 @@ export function Bubble({
  * The in-flight turn's tail: a live bubble with the partial reply (`turn_progress`, API.md
  * v3.9) once there is text, otherwise the typing indicator. Styled like an assistant bubble
  * so it turns into the final message in place.
+ *
+ * The meta line is three-state: streaming text → 「輸出中…」; no text but an `activity` row
+ * (API.md v4.1, e.g. `Thinking… (12s · ↑ 1.2k tokens)`) → that row verbatim, so a long
+ * thinking / tool phase is not silent; neither → 「等待回覆（hook）…」. `activity` comes
+ * straight off the terminal, so it is rendered as plain text, never Markdown.
  */
 export function LiveBubble({
   text,
+  activity,
   from,
   kind,
 }: {
   text: string | null
+  activity?: string | null
   from?: ReactNode
   kind?: BotKind
 }) {
+  const act = activity?.trim() ? activity.trim() : null
   return (
     <article className={`msg assistant live${text ? ' streaming' : ''}`} aria-live="polite">
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
-          <span>{text ? '輸出中…' : '等待回覆（hook）…'}</span>
+          <span>{text ? '輸出中…' : (act ?? '等待回覆（hook）…')}</span>
         </div>
       </div>
       <div className={`bubble${text ? ' md' : ''}`}>
@@ -166,6 +177,7 @@ function MessageList({ botId }: { botId: string }) {
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
   const liveText = useStore((s) => liveReplyOf(s, botId)?.text ?? null)
+  const liveActivity = useStore((s) => liveReplyOf(s, botId)?.activity ?? null)
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
 
@@ -173,7 +185,7 @@ function MessageList({ botId }: { botId: string }) {
   useLayoutEffect(() => {
     const el = ref.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [messages, working, liveText])
+  }, [messages, working, liveText, liveActivity])
 
   const list = messages ?? []
 
@@ -197,7 +209,7 @@ function MessageList({ botId }: { botId: string }) {
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} />)
       )}
-      {inFlight || working ? <LiveBubble text={liveText} /> : null}
+      {inFlight || working ? <LiveBubble text={liveText} activity={liveActivity} /> : null}
     </div>
   )
 }
@@ -207,6 +219,7 @@ function Composer({
   inputRef,
   hideLock,
   forceFocus,
+  files,
 }: {
   botId: string
   inputRef: RefObject<HTMLTextAreaElement | null>
@@ -214,6 +227,8 @@ function Composer({
   hideLock?: boolean
   /** Empty chat: focus as soon as the composer is usable. */
   forceFocus?: boolean
+  /** Owned by `ChatPanel` so a drop anywhere in the chat area lands here. */
+  files: ReturnType<typeof useAttachments>
 }) {
   // `composerState` builds a fresh object every call, so it must be compared shallowly —
   // returning it raw from the selector would spin `useSyncExternalStore`.
@@ -243,15 +258,21 @@ function Composer({
 
   const submit = () => {
     const body = text.trim()
-    if (!body || state.disabled || sending) return
+    // An image on its own is a valid message; text is only required when there is none.
+    if ((!body && files.ids.length === 0) || state.disabled || sending || files.uploading) return
     setSending(true)
-    void sendPrompt(botId, body).then((ok) => {
+    void sendPrompt(botId, body, files.ids).then((ok) => {
       setSending(false)
-      if (ok) setText('')
+      if (ok) {
+        setText('')
+        files.clear()
+      }
     })
   }
 
   const showLock = !hideLock && state.disabled && Boolean(state.reason)
+
+  const nothingToSend = !text.trim() && files.ids.length === 0
 
   return (
     <div className="composer">
@@ -270,14 +291,23 @@ function Composer({
           ) : null}
         </div>
       ) : null}
+      <AttachTray items={files.items} onRemove={files.remove} disabled={sending} />
       <div className="composer-box">
+        <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
         <textarea
           ref={ref}
           value={text}
           disabled={state.disabled || sending}
-          placeholder={state.disabled ? state.reason || '目前無法送出訊息' : '輸入訊息…'}
-          title="Enter 送出，Shift+Enter 換行"
+          placeholder={state.disabled ? state.reason || '目前無法送出訊息' : '輸入訊息…（圖片可直接拖放或貼上）'}
+          title="Enter 送出，Shift+Enter 換行；圖片可拖放或貼上"
           onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
+            if (imgs.length === 0) return
+            // Only swallow the paste when it really carries images, so copied text still lands.
+            e.preventDefault()
+            files.add(imgs)
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
@@ -285,8 +315,14 @@ function Composer({
             }
           }}
         />
-        <button type="button" className="send-btn" disabled={state.disabled || sending || !text.trim()} onClick={submit}>
-          {sending ? '送出中…' : '送出'}
+        <button
+          type="button"
+          className="send-btn"
+          disabled={state.disabled || sending || files.uploading || nothingToSend}
+          title={files.uploading ? '圖片上傳中…' : undefined}
+          onClick={submit}
+        >
+          {sending ? '送出中…' : files.uploading ? '上傳中…' : '送出'}
         </button>
       </div>
     </div>
@@ -316,6 +352,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const attachCommand = useStore((s) => attachCommandOf(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
+  // Images live outside the store: they only matter until the send that carries them.
+  // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
+  const files = useAttachments(botId)
+  const drop = useDropTarget(files.add, !botId)
 
   const messages = useStore((s) => (botId ? s.messages[botId] : undefined))
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
@@ -386,7 +426,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             data-tip={`設定 · ${bot.name}`}
             onClick={() => (settingsOpen ? closeSettings() : openSettings(botId))}
           >
-            ⚙
+            <GearIcon />
           </button>
         </div>
         <span
@@ -481,7 +521,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </EmptyState>
         )
       ) : (
-        <div className="chat">
+        <div className={`chat${drop.over ? ' dropping' : ''}`} {...drop.props}>
+          {drop.over ? <DropVeil /> : null}
           <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
           {blocked ? <BlockedPanel botId={botId} /> : null}
           <MessageList botId={botId} />
@@ -499,7 +540,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </button>
             </div>
           ) : null}
-          <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} />
+          <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}

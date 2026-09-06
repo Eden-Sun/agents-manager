@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_conv_time ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS messages_turn ON messages(turn_id);
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id),
+  name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
+  -- Where the daemon can read the bytes back (UI thumbnails).
+  local_path TEXT NOT NULL,
+  -- Absolute path on the bot's host; this is what the agent is told to read.
+  agent_path TEXT NOT NULL, host TEXT NOT NULL,
+  message_id TEXT REFERENCES messages(id),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attachments_msg ON attachments(message_id);
 "#;
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
@@ -104,6 +115,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("bots", "persona", "ALTER TABLE bots ADD COLUMN persona TEXT"),
         // SPEC §13: project group chat stamps every message of one send with a group id.
         ("messages", "group_id", "ALTER TABLE messages ADD COLUMN group_id TEXT"),
+        // Images dropped into the composer: a JSON array of {id, name, mime, size, path}.
+        ("messages", "attachments_json", "ALTER TABLE messages ADD COLUMN attachments_json TEXT"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -331,6 +344,8 @@ pub struct Message {
     /// SPEC §13: set on every message produced by one `POST /projects/:id/chat` send
     /// (the per-bot user copies and the "skipped" system notes); NULL otherwise.
     pub group_id: Option<String>,
+    /// JSON array of the images sent with this message (`attach.rs`); NULL when there are none.
+    pub attachments_json: Option<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
 }
@@ -449,6 +464,15 @@ pub async fn agent_name_for_bot(pool: &SqlitePool, bot: &Bot) -> Result<String> 
 /// started under, so a rename of the project label (or a legacy bare-name run) keeps working.
 pub fn run_target(run: &Run, bot: &Bot) -> String {
     run.agent_name.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| bot.name.clone())
+}
+
+/// The user messages already stored on a turn — used to keep the Stop hook from re-adding a
+/// prompt that was already scraped off the pane's prompt echo.
+pub async fn turn_user_messages(pool: &SqlitePool, turn_id: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at")
+        .bind(turn_id)
+        .fetch_all(pool)
+        .await?)
 }
 
 pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Turn>> {

@@ -5,6 +5,7 @@ import { parseMentions } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
+import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { IssuesBar } from './IssuesBar'
@@ -118,6 +119,11 @@ function GroupMessageList({ projectId }: { projectId: string }) {
   const liveText = useStore(
     useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.text ?? null]))),
   )
+  // …and the spinner row (API.md v4.1 `turn_progress.activity`) for members that are still
+  // only thinking, so their bubble says what is happening instead of "等待回覆（hook）…".
+  const liveActivity = useStore(
+    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.activity ?? null]))),
+  )
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const rows = useMemo(() => foldRows(messages ?? []), [messages])
@@ -126,7 +132,7 @@ function GroupMessageList({ projectId }: { projectId: string }) {
   useLayoutEffect(() => {
     const el = ref.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [rows, typing.length, liveText])
+  }, [rows, typing.length, liveText, liveActivity])
 
   return (
     <div
@@ -176,6 +182,7 @@ function GroupMessageList({ projectId }: { projectId: string }) {
         <LiveBubble
           key={`typing-${t.id}`}
           text={liveText[t.id] ?? null}
+          activity={liveActivity[t.id] ?? null}
           kind={t.kind}
           from={
             <span className="msg-speaker">
@@ -202,7 +209,16 @@ function mentionAtCaret(text: string, caret: number): { start: number; query: st
   return { start: caret - m[2].length - 1, query: m[2] }
 }
 
-function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: RefObject<HTMLTextAreaElement | null> }) {
+function GroupComposer({
+  projectId,
+  inputRef,
+  files,
+}: {
+  projectId: string
+  inputRef: RefObject<HTMLTextAreaElement | null>
+  /** Owned by `GroupChatPanel` so a drop anywhere in the chat area lands here. */
+  files: ReturnType<typeof useAttachments>
+}) {
   // `groupComposerState` builds a fresh object (with an array) every call; flatten it to
   // primitives so the shallow comparison is stable.
   const state = useStore(
@@ -304,13 +320,15 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
 
   const submit = () => {
     const body = text.trim()
-    if (!body || state.disabled || sending || targets.length === 0) return
+    // Unlike a bot chat, a group send always needs text: the recipients come from it.
+    if (!body || state.disabled || sending || files.uploading || targets.length === 0) return
     setSending(true)
-    void sendGroupChat(projectId, body).then((res) => {
+    void sendGroupChat(projectId, body, files.ids).then((res) => {
       setSending(false)
       if (res) {
         setText('')
         setCaret(0)
+        files.clear()
       }
     })
   }
@@ -355,7 +373,9 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
           )
         })}
       </div>
+      <AttachTray items={files.items} onRemove={files.remove} disabled={sending} />
       <div className="composer-box">
+        <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
         {showPop ? (
           <ul className="mention-pop" role="listbox" aria-label="選擇收件 Bot">
             {candidates.map((c, i) => (
@@ -389,6 +409,12 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
             setActive(0)
           }}
           onClick={syncCaret}
+          onPaste={(e) => {
+            const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
+            if (imgs.length === 0) return
+            e.preventDefault()
+            files.add(imgs)
+          }}
           onKeyUp={(e) => {
             if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) syncCaret()
           }}
@@ -425,11 +451,17 @@ function GroupComposer({ projectId, inputRef }: { projectId: string; inputRef: R
         <button
           type="button"
           className="send-btn"
-          disabled={state.disabled || sending || !text.trim() || targets.length === 0}
-          title={targets.length === 0 ? '請選擇收件者（上方 chip 或 @mention）' : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`}
+          disabled={state.disabled || sending || files.uploading || !text.trim() || targets.length === 0}
+          title={
+            files.uploading
+              ? '圖片上傳中…'
+              : targets.length === 0
+                ? '請選擇收件者（上方 chip 或 @mention）'
+                : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`
+          }
           onClick={submit}
         >
-          {sending ? '送出中…' : '送出'}
+          {sending ? '送出中…' : files.uploading ? '上傳中…' : '送出'}
         </button>
       </div>
       {/* Only while there is something to say: no mention yet, or the resolved recipient list. */}
@@ -465,6 +497,10 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const requestOpenBotSheet = useStore((s) => s.requestOpenBotSheet)
   const attachCommand = useStore((s) => attachCommandOf(s, projectId))
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  // Attachments are project-scoped, so any member can receive the upload; held here so a
+  // drop anywhere in the group chat area is accepted.
+  const files = useAttachments(members[0]?.id ?? null)
+  const drop = useDropTarget(files.add, memberCount === 0)
 
   if (!project) {
     return (
@@ -542,10 +578,11 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           為此專案建立第一個 Bot 後，即可在群組中交代任務。
         </EmptyState>
       ) : (
-        <div className="chat">
+        <div className={`chat${drop.over ? ' dropping' : ''}`} {...drop.props}>
+          {drop.over ? <DropVeil /> : null}
           <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
           <GroupMessageList projectId={projectId} />
-          <GroupComposer projectId={projectId} inputRef={composerRef} />
+          <GroupComposer projectId={projectId} inputRef={composerRef} files={files} />
         </div>
       )}
     </>

@@ -4,6 +4,7 @@ import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { attachCommandOf, botLamp, projectHostName, toolsOfHost, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
+import { GearIcon, MoreIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
@@ -105,7 +106,7 @@ function BotRow({ botId }: { botId: string }) {
           data-tip={`設定 · ${bot.name}`}
           onClick={() => openSettings(botId)}
         >
-          ⚙
+          <GearIcon />
         </button>
         <div className="bot-menu" ref={menuRef}>
           <button
@@ -114,11 +115,11 @@ function BotRow({ botId }: { botId: string }) {
             aria-label={`${bot.name} 的操作選單`}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
-            title={`${active ? '停止' : '啟動'} ${bot.name}`}
-            data-tip={`${active ? '停止' : '啟動'} · ${bot.name}`}
+            title={`${bot.name} 的操作選單（${active ? '停止' : '啟動'}、設定）`}
+            data-tip={`更多操作 · ${bot.name}`}
             onClick={() => setMenuOpen((v) => !v)}
           >
-            ⋯
+            <MoreIcon />
           </button>
           {menuOpen ? (
             <div className="bot-menu-pop" role="menu">

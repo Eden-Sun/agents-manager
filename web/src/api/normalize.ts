@@ -13,6 +13,7 @@
 import type {
   AgentStatus,
   AppState,
+  Attachment,
   Bot,
   BotKind,
   GroupMessage,
@@ -282,6 +283,36 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
   }
 }
 
+/**
+ * `messages.attachments_json` — a JSON array the daemon stamps onto the user message.
+ * Tolerates the parsed-array form too, in case the daemon ever inlines it.
+ */
+export function toAttachments(v: unknown): Attachment[] {
+  let raw: unknown = v
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return []
+    try {
+      raw = JSON.parse(raw) as unknown
+    } catch {
+      return []
+    }
+  }
+  const out: Attachment[] = []
+  for (const item of arr(raw)) {
+    if (!isRec(item)) continue
+    const id = str(item.id)
+    if (!id) continue
+    out.push({
+      id,
+      name: str(item.name, id),
+      mime: str(item.mime, 'image/png'),
+      size: num(item.size),
+      path: str(item.path),
+    })
+  }
+  return out
+}
+
 export function toMessage(v: unknown, botId?: string): Message | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id', 'message_id'))
@@ -296,6 +327,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     source: oneOf<MessageSource>(v.source, SOURCES, 'system'),
     incomplete: bool(v.incomplete),
     group_id: optStr(pick(v, 'group_id', 'groupId')),
+    attachments: toAttachments(pick(v, 'attachments_json', 'attachments')),
     created_at: str(v.created_at),
   }
 }

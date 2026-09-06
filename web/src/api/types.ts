@@ -200,6 +200,16 @@ export interface Turn {
   completed_at: string | null
 }
 
+/** One image sent with a user message (`daemon/src/attach.rs`). */
+export interface Attachment {
+  id: string
+  name: string
+  mime: string
+  size: number
+  /** Absolute path on the bot's host — what the agent was told to read. */
+  path: string
+}
+
 export interface Message {
   id: string
   conversation_id: string
@@ -214,6 +224,8 @@ export interface Message {
    * （每個收件 bot 的 user 副本、以及「未送達」的 system 註記）；其他訊息為 null。
    */
   group_id: string | null
+  /** 隨這則訊息拖放進來的圖片；沒有附件時為空陣列。 */
+  attachments: Attachment[]
   created_at: string
 }
 

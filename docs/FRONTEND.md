@@ -583,15 +583,23 @@ mock 與輸入框共用；後端仍是最終裁決者。
 
 ### 即時輸出（WS `turn_progress`）
 
-- **store**：`liveReply: Record<botId, {turnId, text, revision}>`。`turn_progress` 更新（同 turn 只接受 revision 不倒退）；
-  同 turn 的 assistant `message_added`、或 `turn_updated` 離開 `in_flight` 時清掉。
-  選擇器 `liveReplyOf(state, botId)` 只在該 turn 仍是 `inFlightTurn` 且文字非空白時回傳，避免殘留。
-- **ChatPanel / GroupChatPanel**：訊息列最後的 `LiveBubble`（`.msg.assistant.live`）：有文字時 `.streaming`
-  以 Markdown 渲染、邊框帶 accent、右下角閃爍游標、meta 顯示「輸出中…」；沒有文字時維持 typing 點 +
-  「等待回覆（hook）…」。群組視圖每個進行中的成員各一個，帶 bot 徽章。內容變長時只在使用者原本就在
-  底部（距底 < 80px）才自動捲到底。
-- **mock**：`prompt` 後每 0.5 秒推 3 幀（`slow` 4 幀）`turn_progress`（回覆前綴），約 2.4 秒送最終
-  `message_added`。`REPLIES` 多一則 ``` ```\n1\n``` ``` 用來驗證單 fence 的顯示。
+- **store**：`liveReply: Record<botId, {turnId, text, activity, revision}>`。`turn_progress` 更新（同 turn 只接受 revision 不倒退）；
+  同 turn 的 assistant `message_added`、或 `turn_updated` 離開 `in_flight` 時清掉（清除時機未變）。
+  選擇器 `liveReplyOf(state, botId)` 只在該 turn 仍是 `inFlightTurn`，且 **`text` 或 `activity` 至少一個非空白**時回傳。
+  > v4.1 前的守衛是「`text` 非空白」，會把「只有 activity、還沒有 text」的幀整個丟掉——正是純思考階段氣泡卡在
+  > 「等待回覆（hook）…」的直接原因。
+- **ChatPanel / GroupChatPanel**：訊息列最後的 `LiveBubble`（`.msg.assistant.live`），meta 三態：
+  1. 有 `text` → `.streaming`，以 Markdown 渲染、邊框帶 accent、右下角閃爍游標、meta 顯示「輸出中…」；
+  2. 沒有 `text` 但有 `activity` → 氣泡本體維持 typing 點，meta 直接顯示該活動字串（例如
+     `Thinking… (12s · ↑ 1.2k tokens)`）。**activity 來自終端畫面，當純文字渲染，不走 Markdown。**
+  3. 兩者皆無 → typing 點 +「等待回覆（hook）…」。
+
+  群組視圖每個進行中的成員各一個（`liveText[botId]` / `liveActivity[botId]`），帶 bot 徽章。內容變長時只在
+  使用者原本就在底部（距底 < 80px）才自動捲到底。
+- **mock**：`prompt` 後先每 0.2 秒推 2 幀「只有 `activity`、`text` 為空」的思考幀（`Thinking… (2s …)`、
+  `Reading files… (4s …)`），再每 0.5 秒推 3 幀（`slow` 4 幀）`turn_progress`（回覆前綴 + `activity: 'Writing…'`），
+  約 2.4 秒送最終 `message_added`。`REPLIES` 多一則 ``` ```\n1\n``` ``` 用來驗證單 fence 的顯示。
+  → `VITE_MOCK=1` 可直接重現並驗收三態。
 
 ### 驗收截圖（UI polish；亦見下方 v4.0 重拍）
 
@@ -623,6 +631,19 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 
 1. **即時氣泡的前幾幀可能是 TUI 雜訊**（真後端看到 `✢ Improvising…`、`Tip: …` 各出現約 0.7 秒），
    這是 daemon 端 `turn_progress` 的過濾範圍；前端只把全空白的幀當成「沒有文字」。
+
+   反向的情況更痛：**過濾太乾淨時整幀變空**。agent 在純思考／跑工具階段，畫面上只有 spinner 行、框線與
+   狀態列，全被 `clean_screen()` / `is_noise()` 濾掉 → `text` 一直是空字串、與上一幀相同 → daemon 一幀都不發 →
+   氣泡永遠停在「等待回覆（hook）…」，思考愈久空窗愈長。v4.1 的解法是**旁路**而非放寬過濾（`clean_screen()`
+   同時餵最終回覆的 `terminal_fallback`，動不得）：daemon 另外算 `live_activity()` 取該回合最後一行 spinner 行，
+   以獨立的 `turn_progress.activity` 欄位送出，`text` 或 `activity` 任一變化就發幀；前端把它顯示在 meta 列，
+   不進氣泡本文、不進 DB。
+
+   真實現場樣本：卡住 3 分鐘時 pane 上只有 `✻ Boogieing… (3m 18s · ↓ 11.0k tokens)`。**動詞是隨機挑的**
+   （`Thinking` / `Boogieing` / `Improvising` / `Puttering` / `Simmering`…），**不可字面比對**；glyph 集合
+   （`✻ ✽ ✶ ✳ ✢ ·`，grok `◆`）也會隨版本增減，所以另有一條 glyph-independent 的形狀比對
+   （`<單字>… (…)` + 括號內含 `tokens` 或 `12s` / `3m` 時間樣式），兩條取聯集。
+   括號內秒數每 0.7 秒都在變 → `activity` 幾乎每幀都不同、每幀都發，這是刻意的（計時會跳），**不加去抖／節流**。
 2. **不同 bot 的相鄰回覆**在群組視圖也套用同側收緊（-4px），靠 meta 列的徽章區分。
 3. **狀態字隱藏 idle / offline** 後，離線 bot 只靠空心燈號辨識；hover 列或看啟動 / 停止鈕可確認。
 4. **≤1080 寬時標題列的狀態字整個隱藏**（沿用原規則），run / pane tooltip 也跟著不可見。
@@ -752,3 +773,42 @@ mock（`VITE_MOCK=1 npx vite --port 5190`，headless Chrome CDP 9370，獨立 `-
 | P2 空狀態、icon/tab/鍵盤 | `215-ui-narrow-900` | 已實作 |
 
 驗證方式：`node` 驅動 headless Chrome（CDP）對真 daemon（127.0.0.1:7788）截圖，主控台零例外。
+
+## 圖片拖放（API.md「圖片附件」，2026-09-06 新增）
+
+**三種放圖方式**，單一 bot 對話與專案群組聊天都支援：
+
+1. **拖放**——放到對話區任何地方（不只輸入框）。整個 `.chat` 是 drop target，拖曳時蓋一層虛線
+   veil（`DropVeil`）。`dragenter` / `dragleave` 會對每個子元素各觸發一次，所以 `useDropTarget`
+   用計數器記深度，指標掃過氣泡時 veil 不會閃爍。
+2. **貼上**——在輸入框 `Cmd+V`。只有剪貼簿真的帶圖片時才 `preventDefault()`，貼文字照常。
+3. **📎 按鈕**——輸入框左側，開系統檔案選擇器（`accept="image/*"`，可多選）。
+
+**流程**：檔案一進來就上傳（`POST /bots/:id/attachments`），輸入框上方出現待送縮圖列
+（`AttachTray`，上傳中/失敗都有狀態），送出時只帶回傳的 id。上傳未完成時送出鈕顯示「上傳中…」
+並停用。送出成功才清空縮圖列。
+
+**已送出的訊息**：user 氣泡下方顯示縮圖（`MessageAttachments`），點開是 lightbox（Esc 或點背景
+關閉），底下那行 code 是該圖在 **agent 主機上**的絕對路徑。
+
+**實作位置**：`components/Attachments.tsx`（`useAttachments` / `useDropTarget` / `AttachTray` /
+`AttachPicker` / `MessageAttachments`）。附件狀態由 `ChatPanel` / `GroupChatPanel` 持有再傳給
+composer——drop 目標是整個對話區，狀態放在 composer 裡就接不到。
+
+**注意**：只收圖片，單檔 12 MB；非圖片會跳通知並略過。縮圖的位元組在 token 之後，所以是 fetch
+成 blob 再轉 object URL（`api.attachmentUrl`），同一個 id 全 app 共用一個 URL。
+
+**mock 模式**：`MockTransport.upload` 把位元組留在記憶體，`blobUrl` 直接回傳它，所以
+`VITE_MOCK=1` 也能完整走完拖放到縮圖的流程。
+
+驗收截圖（真實 daemon + 真實 claude bot，2026-09-06）：`230-drop-veil-dark`（拖曳中的 veil）、
+`231/232-drop-tray`（待送縮圖，深/淺色）、`234-sent-thumb-dark`（已送出的氣泡縮圖）、
+`235-lightbox-dark`（放大檢視）、`236-paste-tray-dark`（貼上）。實測 claude 讀得到圖：
+問「圖上寫什麼」回「PURPLE 42 / 三隻藍色小鳥」，問背景色回「深海軍藍 #12203C 一類」。
+遠端 host（m4p，經 ssh）上傳後遠端檔案 SHA 與本機相同。
+
+**Bot 列的 ⚙ / ⋯（2026-09-06 調整）**：原本是 13px 的 ⚙ / ⋯ 文字符號，字形是髮絲線，壓在選中列
+的藍色底上幾乎看不見。改成 `components/Icons.tsx` 的 SVG（`GearIcon` 實線齒輪、`MoreIcon` 三個
+實心圓點），16px、`currentColor`，靜置色從 `--text-faint` 提到 `--text-dim`，選中列再提到
+`--text`；hover / 選單開啟時是 accent 藍。注意選中列那條規則要寫 `:not(:hover)`——它和 hover
+規則 specificity 相同，否則會靠出現順序把 hover 的藍色蓋掉。截圖：`240`/`241`/`242`。
