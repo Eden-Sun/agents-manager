@@ -155,14 +155,13 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
  *
  * 身份是全域設定，但它指到的帳號**每台主機各自登入**（`CLAUDE_CONFIG_DIR` 在每台機器都
  * 展得開，帳號卻不一定在），所以要標的是「這個身份在 bot 會跑的那台主機上」能不能用。
- * 未登入**不停用**按鈕：使用者可能正打算去登入。
+ * 未登入**不停用**按鈕：使用者可能正打算去登入（登入入口在下面的「帳號」那一段）。
  */
 export function IdentityOptions({
   kind,
   host,
   value,
   onChange,
-  login,
   recheck = true,
 }: {
   kind: BotKind
@@ -172,15 +171,6 @@ export function IdentityOptions({
   onChange: (v: string) => void
   /** 組隊三張卡並排時不重複「重新偵測」。 */
   recheck?: boolean
-  /**
-   * 有 run 正在跑時，「它現在用的那個身份」旁邊直接給一個登入入口——標了「未登入」的身份
-   * 旁邊按得到，是最短的動線。
-   *
-   * 只掛在 `identity` 這一個身份上：`/login` 是送進**那個 run 的 TUI**，登進去的也就是那個
-   * run 展開的設定檔，掛在別的身份旁邊會是騙人的。新增 Bot / 開團的表單還沒有 run 可以送，
-   * 所以整個是選配。
-   */
-  login?: { identity: string; busy: boolean; onLogin: () => void }
 }) {
   // Select the stable array and filter outside: a selector that returns a fresh array
   // re-renders forever (React #185).
@@ -229,17 +219,6 @@ export function IdentityOptions({
                 <span className="identity-logged-out" title={warn.title}>
                   {warn.mark}
                 </span>
-              ) : null}
-              {login && login.identity === i.name ? (
-                <button
-                  type="button"
-                  className="identity-recheck"
-                  disabled={login.busy}
-                  title={`對這個 Bot 送 /login，用 ${i.name} 的設定登入。它會停在登入畫面，完成前不能工作。`}
-                  onClick={login.onLogin}
-                >
-                  {login.busy ? '送出中…' : '登入'}
-                </button>
               ) : null}
             </span>
           )
@@ -486,19 +465,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             fast={fast}
             onFast={setFast}
           />
-          <IdentityOptions
-            kind={bot.kind}
-            host={host}
-            value={identity}
-            onChange={setIdentity}
-            // 掛在 bot **存檔的**身份上，不是編輯中的 `identity`：正在跑的那個 run 是用存檔
-            // 的那一個起來的，`/login` 也就是登進那一個。
-            login={
-              running && canLoginInSession(bot.kind)
-                ? { identity: bot.identity ?? '', busy: loginBusy, onLogin: () => setLoginOpen(true) }
-                : undefined
-            }
-          />
+          {/* 這一排本來會在「目前這個 run 用的身份」旁邊再插一顆底線樣式的「登入」。
+              它送的 `/login` 跟下面「帳號」那顆一模一樣，卻夾在一排藥丸狀的選項中間，
+              讀起來像多了一個身份可以選。留下面那顆——它有標題、有說明，也有登完之後的
+              「重新偵測」。 */}
+          <IdentityOptions kind={bot.kind} host={host} value={identity} onChange={setIdentity} />
           {canLoginInSession(bot.kind) ? (
             <div className="field">
               <span>帳號</span>
