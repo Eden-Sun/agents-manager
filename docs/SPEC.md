@@ -132,6 +132,8 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 - 觸發：Turn `in_flight` 且 `delivery = ok`，agent 狀態由 `working` 轉為 **`idle`**（`blocked` 不觸發），5 秒內未收到 hook。
 - 執行：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`；成功才 `agent.read {source: recent_unwrapped, lines: 200}`，取上次游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 規則抽回覆（Claude：`⏺ ` 開頭；Codex：`• ` 開頭；grok **無標記**，一律走下一條的 `clean_screen`，§12.3）。
 - 無回覆標記時（v3.2）改用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner 與 `⚠` 提示，保留 `⎿` 工具結果行（去掉符號）；仍為空 → 「（終端沒有可辨識的回覆）」。不再把整個畫面塞進氣泡。
+- **回音剝除**（v4.2 補強）：畫面上只有 `❯ <第一行>` 那列算回音，多行 prompt 的第 2..n 行會留在畫面上，所以再逐行比對把它們去掉。逐行比對在**極窄的 pane** 下必定失敗——TUI 自己就把文字排成一欄、每列一個字（herdr 的 `recent_unwrapped` 只還原終端軟換行，還原不了 TUI 的排版），於是整個 prompt 曾被當成回覆存起來、在 UI 上直立成一條字柱。因此加了**去空白比對**的後備：把兩邊的所有空白字元拿掉再比，且要求候選文字**開頭**就是 prompt 的一段結尾（至少 8 個字元），候選本身若只是那段結尾的片段就整個是回音。
+- **無法辨識就說無法辨識**：剝完是空的 → 「（終端沒有可辨識的回覆）」；剝完仍是一欄單字元（`is_shredded`：≥6 行且 ≥70% 的行只有 1–2 個字）→ 「（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）」。窄 pane 會把字與字之間的空白吃掉，重組不回來，所以不猜。
 - 存為 assistant Message `source = terminal_fallback`、`incomplete = 1`。**之後晚到的 hook 不覆蓋**（去重後丟棄並 log），避免跨回合錯配。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
@@ -222,6 +224,22 @@ label = "foo"
 4. **orphan pane 回收**（第一階段）：DB 中 `exited/stopped` Run 記錄的 `pane_id` 若仍存在於 snapshot 且無 agent → `pane.close`。
 5. 重建各 active Run 的狀態訂閱。
 
+### 6.5.1 採用使用者的 Herdr `default` session
+
+daemon 另以唯讀優先的方式觀察本機 Herdr `default` session（socket 為
+`~/.config/herdr/herdr.sock`），不替它啟動 server。每次啟動、事件重連及定期輪詢時：
+
+1. 取得 `agent.list`；只處理支援的 `claude` / `codex` / `grok` agent。
+2. 以 agent 的 `foreground_cwd`（沒有時用 `cwd`）與既有 local Project 的 canonical path
+   **完全相等**來配對；不自動建立 Project，也不採用其他工作目錄或普通 shell pane。
+3. 找到既有採用紀錄就更新其 Run；否則建立一個 `herdr_session = "default"` 的 Bot 設定並
+   建立 `adopted = 1` 的 active Run。Bot 設定寫回 `config.toml`，因此 daemon 重啟後仍保留。
+4. default session 的 workspace 不寫入 `projects.workspace_id`；default pane 消失只會結束 Run，
+   不會由 daemon 回收或關閉該使用者 pane。
+
+default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 default socket；沒有 hook
+注入的既有 agent 仍透過 pane status 與 terminal fallback 更新對話。
+
 ### 6.6 事件處理
 - `pane.agent_status_changed`：更新 Run `agent_status`；`working→idle` 啟動備援計時（§4.3）；推 WS。
 - `pane.exited` / `pane.closed`：對應 Run → `exited`，in-flight Turn → `failed`。
@@ -280,7 +298,7 @@ label = "foo"
 - 專案結構：`daemon/`（單一 crate，bin `agents-managerd`，子命令 `serve` / `hook`）、`web/`。
 
 ## 9. 非目標（第一階段）
-遠端存取、遠端 herdr、xterm.js 串流、bot 互相對話（使用者對多個 bot 的群組發言見 §13）、diff 檢視、共用使用者 default session、transcript 回補、Codex notify chain、`toml_edit` 保註解、WS terminal 推送、未讀計數（§13 群組視圖的前端記憶體計數除外）、Project 刪除時關 workspace。
+遠端存取、遠端 herdr、xterm.js 串流、bot 互相對話（使用者對多個 bot 的群組發言見 §13）、diff 檢視、transcript 回補、Codex notify chain、`toml_edit` 保註解、WS terminal 推送、未讀計數（§13 群組視圖的前端記憶體計數除外）、Project 刪除時關 workspace。
 
 
 ## 11. 遠端主機（Remote hosts，v3.1）

@@ -674,13 +674,6 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Resolve the herdr client for a bot through its project's host.
-async fn client_for_bot(app: &Arc<App>, bot_id: &str) -> LcResult<HerdrClient> {
-    app.herdr_for_bot(bot_id)
-        .await
-        .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for bot `{bot_id}`")))
-}
-
 async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> {
     app.herdr_for_run(run)
         .await
@@ -1317,6 +1310,10 @@ pub async fn prompt_grouped(
 
 // ---------------------------------------------------------------- live progress (v3.9)
 
+/// Consecutive unchanged polls at an empty composer before we stop trusting `agent_status`
+/// and complete the Turn ourselves. ~14s: long enough that a merely slow hook still wins.
+const IDLE_POLLS: u32 = 20;
+
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(700);
 const PROGRESS_MAX: Duration = Duration::from_secs(40 * 60);
 
@@ -1339,6 +1336,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
         // What we sent, so the pane's echo of it can be stripped back off every frame.
         let sent = db::turn_user_messages(&app2.db, &turn_id).await.unwrap_or_default();
         let mut last = (String::new(), String::new(), String::new());
+        let mut quiet = 0u32;
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
             if started.elapsed() > PROGRESS_MAX {
@@ -1361,11 +1359,31 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             let alert = live_alert(&bot.kind, &read.text).unwrap_or_default();
             if live != last.0 || activity != last.1 || alert != last.2 {
                 last = (live.clone(), activity.clone(), alert.clone());
+                quiet = 0;
                 app2.emit(
                     "turn_progress",
                     json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "activity": activity, "alert": alert, "revision": read.revision}),
                 )
                 .await;
+                continue;
+            }
+            // §4.3's fallback is armed by `working -> idle`, which is herdr's reading of the
+            // pane. When that reading sticks (observed 2026-09-06: grok finished and sat at an
+            // empty composer while herdr still reported `working`, its title spinner never
+            // cleared) no hook and no fallback ever completes the Turn, and the UI waits for
+            // ever. So also believe the pane directly: an empty composer plus nothing changing
+            // is the agent telling us it wants input. `blocked` is excluded — SPEC §4.3 keeps
+            // it out of the fallback because a modal is not an ended turn.
+            let blocked = matches!(db::run(&app2.db, &run_id).await, Ok(Some(r)) if r.agent_status == "blocked");
+            if blocked || !pane_awaits_input(&bot.kind, &read.text) {
+                quiet = 0;
+                continue;
+            }
+            quiet += 1;
+            if quiet >= IDLE_POLLS {
+                tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
+                let _ = try_fallback(&app2, &run_id).await;
+                break;
             }
         }
         app2.progress_pollers.lock().await.remove(&run_id);
@@ -1465,6 +1483,22 @@ fn is_elapsed_token(s: &str) -> bool {
     !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
+/// Is the agent sitting at an **empty** composer, i.e. waiting for input?
+///
+/// The marker alone on a row, once the box frame is stripped — grok draws its composer as
+/// `│ ❯      │` inside `╭──╮ / ╰─ Grok ─╯`, so the bare `s == "❯"` test `clean_screen` uses
+/// never matches there. Only the tail is searched because the composer is always at the bottom.
+///
+/// Note this is true while the agent is *working* too (claude keeps the empty composer on
+/// screen under the spinner), so it is only meaningful together with "nothing changed".
+fn pane_awaits_input(kind: &str, text: &str) -> bool {
+    let Some(marker) = prompt_echo_prefix(kind).and_then(|p| p.trim_end().chars().next()) else { return false };
+    text.lines().rev().take(12).any(|l| {
+        let mut chars = l.chars().filter(|c| !"│┃╭╮╰╯─━ \t".contains(*c));
+        chars.next() == Some(marker) && chars.next().is_none()
+    })
+}
+
 /// Drop the tail of the user's own prompt from the head of what we scraped.
 ///
 /// A multi-line prompt echoes as **one** `❯ <first line>` marker row followed by its remaining
@@ -1474,7 +1508,9 @@ fn is_elapsed_token(s: &str) -> bool {
 fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
     let want: Vec<&str> = prompt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if want.len() < 2 {
-        return text.to_string();
+        // A one-line prompt leaves no tail for the line-wise match — but a narrow pane can
+        // still have shredded that one line across many rows, which the squashed match sees.
+        return strip_echoed_prompt_squashed(text, prompt).unwrap_or_else(|| text.to_string());
     }
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
@@ -1495,9 +1531,81 @@ fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
     // Only strip once the whole tail matched. A partial match means the pane wrapped the text
     // (or the agent opened by quoting us), and eating half a real reply is worse than a echo.
     if w < want.len() {
-        return text.to_string();
+        return strip_echoed_prompt_squashed(text, prompt).unwrap_or_else(|| text.to_string());
     }
     lines[i..].join("\n").trim().to_string()
+}
+
+/// Whitespace-insensitive fallback for [`strip_echoed_prompt`].
+///
+/// A very narrow pane lays the echo out **one character per line**, so no line of it can ever
+/// equal a line of what we sent and the line-wise match above always gives up — which is how a
+/// whole prompt came back stored as the agent's reply, rendered as a vertical column of glyphs.
+///
+/// Compare with every whitespace character removed instead. To keep a real reply safe this
+/// still demands that the candidate *opens* with a tail of the prompt, at least
+/// [`SQUASH_MIN`] characters of it; a candidate that is itself only a fragment of that tail is
+/// pure echo and leaves nothing behind.
+const SQUASH_MIN: usize = 8;
+
+fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
+    let ps: Vec<char> = prompt.chars().filter(|c| !c.is_whitespace()).collect();
+    let ts: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if ps.len() < SQUASH_MIN || ts.is_empty() {
+        return None;
+    }
+    // Longest tail of the prompt that the candidate opens with. The head is what the `❯ ` row
+    // took away, so the tail is what survives on screen.
+    let mut matched = 0;
+    for k in 0..ps.len() {
+        let suf = &ps[k..];
+        if suf.len() < SQUASH_MIN {
+            break;
+        }
+        if ts.len() >= suf.len() {
+            if ts[..suf.len()] == *suf {
+                matched = suf.len();
+                break;
+            }
+        } else if suf[..ts.len()] == *ts {
+            // The candidate ran out inside the echo: all of it is echo.
+            return Some(String::new());
+        }
+    }
+    if matched == 0 {
+        return None;
+    }
+    // Drop that many non-whitespace characters off the front of the original text.
+    let mut n = 0;
+    let mut cut = text.len();
+    for (i, c) in text.char_indices() {
+        if n == matched {
+            cut = i;
+            break;
+        }
+        if !c.is_whitespace() {
+            n += 1;
+        }
+    }
+    if n < matched {
+        return Some(String::new());
+    }
+    Some(text[cut..].trim().to_string())
+}
+
+/// Has the pane shredded its output into a column of single characters?
+///
+/// herdr's `recent_unwrapped` undoes the *terminal's* soft wrapping, not the TUI's own layout:
+/// in a pane a few columns wide the agent itself lays text out one glyph per row, and the
+/// spaces between words fall off the ends of those rows entirely. Nothing can reconstruct that,
+/// so the honest move is to say so rather than store a vertical column as the reply.
+fn is_shredded(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.len() < 6 {
+        return false;
+    }
+    let narrow = lines.iter().filter(|l| l.chars().count() <= 2).count();
+    narrow * 10 >= lines.len() * 7
 }
 
 /// Does this row have the *shape* of a spinner frame — `<Verb>… (3m 18s · ↓ 11.0k tokens)` —
@@ -1815,6 +1923,15 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     // 2..n on screen and they would be stored as the agent's answer.
     let sent = db::turn_user_messages(&app.db, &turn.id).await.unwrap_or_default();
     let reply = sent.iter().fold(reply, |acc, p| strip_echoed_prompt(&acc, p));
+    // What is left has to be worth storing. An empty string means the capture was nothing but
+    // our own prompt coming back; a shredded one means the pane is too narrow to read at all.
+    let reply = if reply.trim().is_empty() {
+        "（終端沒有可辨識的回覆）".to_string()
+    } else if is_shredded(&reply) {
+        "（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）".to_string()
+    } else {
+        reply
+    };
 
     sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
         .bind(read.revision as i64)
@@ -2346,6 +2463,36 @@ mod extract_tests {
         assert_eq!(strip_echoed_prompt(text, SENT), "好的，我來處理。");
     }
 
+    /// Real capture (2026-09-06): the pane was a couple of columns wide, so the echo of
+    /// 「不要依剩餘量重排 固定 cc0 cc1 codex grok」came back one glyph per line and the
+    /// line-wise match never fired — the whole prompt got stored as the agent's reply.
+    #[test]
+    fn a_prompt_shredded_one_glyph_per_line_is_still_recognised_as_the_echo() {
+        let sent = "不要依剩餘量重排 固定 cc0 cc1 codex grok";
+        let shredded = "要\n依\n剩\n餘\n量\n重\n排\n固\n定\nc\nc\n0\nc\nc\n1\nc\no\nd\ne\nx\ng\nr\no\nk";
+        assert_eq!(strip_echoed_prompt(shredded, sent), "");
+        // …and with a real answer after it, only the echo goes.
+        let with_reply = format!("{shredded}\n好\n的");
+        assert_eq!(strip_echoed_prompt(&with_reply, sent), "好\n的");
+    }
+
+    #[test]
+    fn the_squashed_strip_does_not_eat_a_reply_that_merely_starts_alike() {
+        // Shares only three characters with the prompt: nowhere near SQUASH_MIN.
+        assert_eq!(strip_echoed_prompt("不要這樣做，我改用別的方法。", SENT), "不要這樣做，我改用別的方法。");
+        // No prompt at all to match against.
+        assert_eq!(strip_echoed_prompt("PONG", "hi"), "PONG");
+    }
+
+    #[test]
+    fn shredded_output_is_recognised() {
+        assert!(is_shredded("要\n依\n剩\n餘\n量\n重\n排\n固\n定"));
+        // A normal reply is not shredded, however many short lines it happens to have.
+        assert!(!is_shredded("好的，我來處理。\n第一步：讀設定。\n第二步：改程式。"));
+        // Too few lines to judge.
+        assert!(!is_shredded("要\n依\n剩"));
+    }
+
     #[test]
     fn strip_echoed_prompt_leaves_a_partial_match_alone() {
         // The pane wrapped line 2 away: dropping half a real reply is worse than a duplicate.
@@ -2353,6 +2500,49 @@ mod extract_tests {
         assert_eq!(strip_echoed_prompt(text, SENT), text);
         // A single-line prompt has no tail to strip.
         assert_eq!(strip_echoed_prompt("PONG", "ping"), "PONG");
+    }
+
+    /// Real capture (2026-09-06) from the stuck grok pane `w8:pK`: grok had finished and was
+    /// sitting at an empty composer, but herdr still reported `agent_status: working`, so
+    /// nothing ever completed the Turn. The box frame is why `clean_screen`'s bare `s == "❯"`
+    /// test does not see this.
+    const GROK_AWAITING: &str = "\
+     一
+     次
+     。
+             █
+
+  Help impro
+  Off by
+  default.
+
+  ╭────────╮
+  │ ❯      │
+  ╰─ Grok ─╯
+
+  Shift+Tab:
+";
+
+    #[test]
+    fn an_empty_composer_is_recognised_through_the_box_frame() {
+        assert!(pane_awaits_input("grok", GROK_AWAITING));
+        assert!(pane_awaits_input("claude", "⏺ done\n╭────╮\n│ ❯  │\n╰────╯\n"));
+        assert!(pane_awaits_input("codex", "• done\n╭────╮\n│ ›  │\n╰────╯\n"));
+        // Claude keeps the empty composer on screen while working, which is exactly why the
+        // caller pairs this with "nothing changed for N polls" rather than trusting it alone.
+        assert!(pane_awaits_input("claude", THINKING_ONLY));
+    }
+
+    #[test]
+    fn a_composer_with_text_in_it_is_not_awaiting_input() {
+        assert!(!pane_awaits_input("grok", "╭────────╮\n│ ❯ hi   │\n╰─ Grok ─╯\n"));
+        assert!(!pane_awaits_input("claude", "⏺ still writing the answer\n"));
+        // Only the tail is searched: an old empty prompt scrolled far up must not count.
+        let mut s = String::from("╭──╮\n│ ❯ │\n╰──╯\n");
+        for _ in 0..20 {
+            s.push_str("output line\n");
+        }
+        assert!(!pane_awaits_input("claude", &s));
     }
 
     #[test]
