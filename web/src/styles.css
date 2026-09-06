@@ -2106,6 +2106,14 @@ button:disabled {
   margin-bottom: 8px;
 }
 
+/* 「輸入框關著」不一定是壞事：team 正常做完也會走到這裡。做完用中性的收尾色，
+   警示色留給中止與失敗。 */
+.composer-lock.ok {
+  color: var(--status-ok);
+  background: var(--bg-sunken);
+  border-color: color-mix(in srgb, var(--status-ok) 35%, transparent);
+}
+
 /* Not a warning: the turn is still running, but the message is safely parked. */
 .composer-queued {
   display: flex;

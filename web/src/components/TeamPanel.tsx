@@ -458,10 +458,11 @@ const EVENT_KIND_LABEL: Record<string, string> = { note: '系統', phase: '階�
 function eventText(ev: TeamEvent): string | null {
   const p = ev.payload
   if (ev.kind === 'merge') {
+    // 左邊那顆小標已經寫著「合併」，這裡只說結果——否則整列讀起來是「合併 合併衝突：…」。
     const branch = typeof p.branch === 'string' ? p.branch : ''
-    if (p.result === 'ok') return `已合併 ${branch}${typeof p.sha === 'string' ? `（${p.sha}）` : ''}`
+    if (p.result === 'ok') return `完成：${branch}${typeof p.sha === 'string' ? `（${p.sha}）` : ''}`
     const files = Array.isArray(p.conflict_files) ? p.conflict_files.join('、') : ''
-    return `合併衝突：${branch}${files ? ` — ${files}` : ''}`
+    return `衝突：${branch}${files ? ` — ${files}` : ''}`
   }
   if (ev.kind === 'phase') {
     // 階段代號（`finishing → done`）是 daemon 的字，時間軸是給人看的：兩邊都翻成中文。
@@ -1168,8 +1169,10 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         <Timeline teamId={teamId} />
         {terminal ? (
           <div className="composer group-composer team-composer">
-            <div className="composer-lock" role="status">
-              <span>⛔ Team {TEAM_PHASE_LABEL[team.phase]}，成員已停止。需要保留現場就先看 worktree，處理完再按「清理」。</span>
+            {/* 做完是好事，不是警告：`done` 用中性／成功色，中止與失敗才留警示色。
+                原本那顆 ⛔ 是紅的，跟琥珀色的框、跟「已完成」三個字都對不上。 */}
+            <div className={`composer-lock${team.phase === 'done' ? ' ok' : ''}`} role="status">
+              <span>Team {TEAM_PHASE_LABEL[team.phase]}，成員已停止。需要保留現場就先看 worktree，處理完再按「清理」。</span>
             </div>
           </div>
         ) : (
