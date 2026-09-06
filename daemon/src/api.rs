@@ -802,6 +802,9 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
         if let Err(e) = crate::quota::refresh_codex(&app).await {
             tracing::warn!(error = %e, "codex quota refresh failed");
         }
+        if let Err(e) = crate::quota_grok::refresh_grok(&app).await {
+            tracing::warn!(error = %e, "grok quota refresh failed");
+        }
     }
     Ok(Json(crate::quota::snapshot(&app).await))
 }

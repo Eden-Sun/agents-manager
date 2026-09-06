@@ -391,7 +391,41 @@ grok 1.0.13 的 TUI **沒有**每次啟動注入 hook 的旗標（`--settings` /
 - `identities[].kind` 亦允許 `grok`。
 - API：`POST /projects/:id/bots` / `POST /identities` 的 kind 驗證改為 `claude | codex | grok`，錯誤訊息 `kind must be claude, codex or grok`。
 
-### 12.6 驗收
+### 12.6 額度：`/usage` 探測
+
+grok CLI 沒有 `usage` 子命令，也沒有可查額度的 RPC；數字只存在 TUI 的 `/usage` 對話框裡。daemon 因此開一個**用完即丟**的 herdr workspace 探測：
+
+1. `workspace.create`（`focus:false`，label `am-quota-grok`，cwd = 家目錄）
+2. `agent.start` kind `grok`、無額外 argv，名稱 `amquota<6碼>`（不在 DB 裡，對帳永遠不會把它當成 bot）
+3. `agent.wait` 到 `idle|working|blocked`，再等 3 秒讓輸入列畫好
+4. `pane.send_text "/usage"` → 0.8 秒 → `pane.send_keys ["Enter"]`
+5. 每 0.9 秒 `pane.read visible 120`，最多 25 秒，直到畫面解析得出額度
+6. `workspace.close`（放在 `Drop` 裡，錯誤路徑也會關）
+
+畫面（去掉框線）長這樣：
+
+```text
+Context usage  Usage limit  Session info
+Weekly limit (SuperGrok)
+████░░░░░░░░░░░░░░░░░░░░░░░░░░  14%
+Resets: September 12, 16:28
+```
+
+解析規則（`daemon/src/quota_grok.rs`）：
+
+- 標題列 `<window> limit (<plan>)` → window 含 `week` 進 `seven_day`、含 `hour` 進 `five_hour`；括號內是 plan。
+- 百分比只認**同時有 `█`/`░` 的列**，所以「Context usage」分頁的百分比不會被誤判成額度。
+- `Resets:` 沒有年份，以當下年份補；補完若已過期超過一天則進位到隔年。時間視為本機時區，輸出 RFC3339 UTC。
+
+頻率：啟動時一次，之後每 **30 秒**（使用者指定）；`GET /api/quota?refresh=1` 也會觸發一次。grok 目前只回報週額度，所以 `five_hour` 為 `null`，UI 只畫一條血條。
+
+| # | 內容 | 結果（2026-09-06，本機） |
+|---|---|---|
+| Q1 | 探測 pane 跑 `/usage` | 對話框在 ~4 秒內出現，`Weekly limit (SuperGrok) 14% Resets: September 12, 16:28` |
+| Q2 | `GET /api/quota` 的 `grok` | `{"plan":"SuperGrok","five_hour":null,"seven_day":{"used_pct":14.0,"resets_at":"2026-09-12T08:28:00.000Z"},"source":"grok-usage"}`，與 TUI 逐字相符 |
+| Q3 | 額度列 | 三個 kind 同列：claude 2 條、codex 2 條、grok 1 條（`docs/screenshots/227-quota-grok-1400.png`） |
+
+### 12.7 驗收
 | # | 內容 | 結果（2026-09-06，本機） |
 |---|---|---|
 | G1 | 建 `am-grok` → start | 4 秒 `running/idle`，argv `grok --always-approve`，pane w8:pB；`~/.grok/hooks/agents-manager.json` 與 `~/.config/agents-manager/grok-hook.sh` 已寫入 |

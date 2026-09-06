@@ -519,6 +519,18 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   box-sizing: border-box;
+  flex: 0 0 auto;
+}
+
+/* 身份是辨識關鍵，先讓模型名截字。 */
+.bot-sub .model-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  line-height: 20px;
 }
 
 /* The lamp already says idle / offline; only transitional or attention states get words. */
@@ -621,9 +633,10 @@ button:disabled {
   justify-content: center;
 }
 
-/* Gear + ⋯ menu: only on hover / focus / selection so the row stays calm. */
+/* Gear + run button: only on hover / focus / selection so the row stays calm.
+   `.confirming` = the stop confirmation is up, which must not make them fade out. */
 .bot-actions .gear,
-.bot-actions .bot-menu-btn {
+.bot-actions .bot-run-btn {
   opacity: 0;
   transition: opacity 0.12s ease;
 }
@@ -631,78 +644,46 @@ button:disabled {
 .bot-row:hover .gear,
 .bot-row:focus-within .gear,
 .bot-row.selected .gear,
-.bot-row.menu-open .gear,
+.bot-row.confirming .gear,
 .bot-actions .gear[aria-expanded='true'],
-.bot-row:hover .bot-menu-btn,
-.bot-row:focus-within .bot-menu-btn,
-.bot-row.selected .bot-menu-btn,
-.bot-row.menu-open .bot-menu-btn,
-.bot-menu-btn[aria-expanded='true'] {
+.bot-row:hover .bot-run-btn,
+.bot-row:focus-within .bot-run-btn,
+.bot-row.selected .bot-run-btn,
+.bot-row.confirming .bot-run-btn {
   opacity: 1;
 }
 
 @media (hover: none) {
   .bot-actions .gear,
-  .bot-actions .bot-menu-btn {
+  .bot-actions .bot-run-btn {
     opacity: 1;
   }
 }
 
-.bot-menu {
-  position: relative;
-}
-
-.bot-menu-btn {
+/* One click, no menu: ▶ starts, ■ stops (stop confirms first). */
+.bot-run-btn {
   width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 0;
 }
 
-.bot-menu-pop {
-  position: absolute;
-  top: calc(100% + 2px);
-  right: 0;
-  z-index: 20;
-  min-width: 112px;
-  padding: 4px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+.bot-run-btn.start:hover:not(:disabled) {
+  color: var(--lamp-green);
+  background: color-mix(in srgb, var(--lamp-green) 16%, transparent);
 }
 
-.bot-menu-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 12.5px;
-  line-height: 1.4;
-}
-
-.bot-menu-item:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.bot-menu-item.danger {
+.bot-run-btn.stop:hover:not(:disabled) {
   color: var(--danger);
-}
-
-.bot-menu-item.danger:hover:not(:disabled) {
   background: var(--danger-soft);
 }
 
-.bot-menu-item:disabled {
-  opacity: 0.5;
+.bot-run-btn:disabled {
+  opacity: 0.45;
 }
 
 .bot-row .mini-btn {
@@ -1380,6 +1361,18 @@ button:disabled {
   box-sizing: border-box;
 }
 
+/* Same row, but under the bubble — the live turn's status follows the growing output. */
+.msg-meta-below {
+  width: 100%;
+  height: 18px;
+  min-height: 18px;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
 .msg-meta-left {
   display: inline-flex;
   align-items: center;
@@ -1562,6 +1555,34 @@ button:disabled {
   border-radius: 6px;
   padding: 4px 10px;
   margin-bottom: 8px;
+}
+
+/* Not a warning: the turn is still running, but the message is safely parked. */
+.composer-queued {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-bottom: 8px;
+}
+
+.composer-queued-label {
+  flex: none;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.composer-queued-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-box {
@@ -2397,6 +2418,12 @@ button:disabled {
   font-family: var(--font-mono);
   line-height: 1.6;
 }
+.identity-badge.is-default {
+  background: transparent;
+  color: var(--text-dim);
+  border-color: var(--border);
+  font-weight: 500;
+}
 .identity-row {
   display: flex;
   align-items: flex-start;
@@ -2452,9 +2479,7 @@ button:disabled {
 }
 
 .icon-btn.gear:hover:not(:disabled),
-.icon-btn.gear[aria-expanded='true'],
-.bot-menu-btn:hover:not(:disabled),
-.bot-menu-btn[aria-expanded='true'] {
+.icon-btn.gear[aria-expanded='true'] {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
@@ -2463,33 +2488,46 @@ button:disabled {
    contrast than --text-dim to read as a control rather than decoration. Same specificity as
    the hover rule above, so it must exclude hover/open explicitly or it would win by order. */
 .bot-row.selected .icon-btn.gear:not(:hover):not([aria-expanded='true']),
-.bot-row.selected .bot-menu-btn:not(:hover):not([aria-expanded='true']) {
+.bot-row.selected .bot-run-btn:not(:hover) {
   color: var(--text);
 }
 
-/* Right drawer over the chat body; main-head stays visible. */
-.bot-settings {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
+/* Pop-up anchored to the gear that opened it (falls back to centred). */
+.bs-scrim {
+  position: fixed;
+  inset: 0;
   z-index: 40;
-  width: clamp(440px, 520px, 560px);
-  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: rgb(0 0 0 / 24%);
+}
+
+.bot-settings {
+  position: relative;
+  width: min(520px, 100%);
+  max-height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
-@media (width <= 1180px) {
-  .bot-settings {
-    width: 100%;
-    left: 0;
-    border-left: 0;
-  }
+/* First paint is only for measuring the card; don't show it centred for a frame. */
+.bot-settings.measuring {
+  visibility: hidden;
+}
+
+/* left/top come from the anchor measurement in BotSettingsPanel. */
+.bot-settings.anchored {
+  position: fixed;
+  margin: 0;
+  max-height: calc(100vh - 24px);
 }
 
 .bs-head {
@@ -3451,7 +3489,9 @@ button:disabled {
 }
 
 .msg-meta-above .msg-from,
-.msg-meta-above .msg-time {
+.msg-meta-above .msg-time,
+.msg-meta-below .msg-from,
+.msg-meta-below .msg-time {
   color: var(--text-dim);
 }
 

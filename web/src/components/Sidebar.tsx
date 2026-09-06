@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from '../api'
 import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
-import { attachCommandOf, botLamp, projectHostName, toolsOfHost, useStore } from '../store/store'
+import { anchorOf, attachCommandOf, botLamp, projectHostName, toolsOfHost, useStore } from '../store/store'
 import type { SocketStatus } from '../store/store'
-import { GearIcon, MoreIcon } from './Icons'
+import { GearIcon, PlayIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
@@ -37,36 +37,16 @@ function BotRow({ botId }: { botId: string }) {
   const lamp = useStore((s) => botLamp(s, botId))
   const selected = useStore((s) => s.selectedBotId === botId)
   const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
-  const busyStop = useStore((s) => Boolean(s.busy[`stop:${botId}`]))
   const selectBot = useStore((s) => s.selectBot)
   const startBot = useStore((s) => s.startBot)
-  const stopBot = useStore((s) => s.stopBot)
   const openSettings = useStore((s) => s.openSettings)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!menuOpen) return
-    const onDoc = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenuOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menuOpen])
 
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
 
   return (
     <div
-      className={`bot-row${selected ? ' selected' : ''}${menuOpen ? ' menu-open' : ''}`}
+      className={`bot-row${selected ? ' selected' : ''}`}
       role="option"
       aria-selected={selected}
       tabIndex={0}
@@ -88,13 +68,13 @@ function BotRow({ botId }: { botId: string }) {
         </span>
         <span className="bot-sub">
           <KindTag kind={bot.kind} />
+          {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
+          <IdentityBadge name={bot.identity} showDefault />
           {bot.model ? (
             <span className="model-tag" title={`模型：${bot.model}`}>
               {bot.model}
             </span>
-          ) : (
-            <IdentityBadge name={bot.identity} />
-          )}
+          ) : null}
         </span>
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
@@ -104,66 +84,23 @@ function BotRow({ botId }: { botId: string }) {
           title={`設定 ${bot.name}（模型、身份、autostart…）`}
           aria-label={`設定 ${bot.name}`}
           data-tip={`設定 · ${bot.name}`}
-          onClick={() => openSettings(botId)}
+          onClick={(e) => openSettings(botId, anchorOf(e.currentTarget))}
         >
           <GearIcon />
         </button>
-        <div className="bot-menu" ref={menuRef}>
+        {active ? null : (
           <button
             type="button"
-            className="icon-btn bot-menu-btn icon-tip"
-            aria-label={`${bot.name} 的操作選單`}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            title={`${bot.name} 的操作選單（${active ? '停止' : '啟動'}、設定）`}
-            data-tip={`更多操作 · ${bot.name}`}
-            onClick={() => setMenuOpen((v) => !v)}
+            className="icon-btn bot-run-btn start icon-tip"
+            disabled={busyStart}
+            aria-label={`啟動 ${bot.name}`}
+            title={`啟動 ${bot.name}`}
+            data-tip={`啟動 · ${bot.name}`}
+            onClick={() => void startBot(botId)}
           >
-            <MoreIcon />
+            <PlayIcon />
           </button>
-          {menuOpen ? (
-            <div className="bot-menu-pop" role="menu">
-              {active ? (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="bot-menu-item danger"
-                  disabled={busyStop}
-                  onClick={() => {
-                    setMenuOpen(false)
-                    void stopBot(botId)
-                  }}
-                >
-                  停止
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="bot-menu-item"
-                  disabled={busyStart}
-                  onClick={() => {
-                    setMenuOpen(false)
-                    void startBot(botId)
-                  }}
-                >
-                  啟動
-                </button>
-              )}
-              <button
-                type="button"
-                role="menuitem"
-                className="bot-menu-item"
-                onClick={() => {
-                  setMenuOpen(false)
-                  openSettings(botId)
-                }}
-              >
-                設定
-              </button>
-            </div>
-          ) : null}
-        </div>
+        )}
       </span>
     </div>
   )

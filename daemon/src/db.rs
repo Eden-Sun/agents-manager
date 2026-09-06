@@ -109,6 +109,9 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         ("bots", "identity", "ALTER TABLE bots ADD COLUMN identity TEXT"),
         ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
         ("runs", "agent_name", "ALTER TABLE runs ADD COLUMN agent_name TEXT"),
+        // What the agent calls itself right now (its terminal title, e.g. Claude Code's
+        // one-line summary of the task it is on).
+        ("runs", "agent_title", "ALTER TABLE runs ADD COLUMN agent_title TEXT"),
         ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
         ("bots", "effort", "ALTER TABLE bots ADD COLUMN effort TEXT"),
         ("bots", "fast", "ALTER TABLE bots ADD COLUMN fast INTEGER NOT NULL DEFAULT 0"),
@@ -308,6 +311,9 @@ pub struct Run {
     /// The herdr agent name this run was started (or adopted) under. `None` on rows from
     /// before the column existed; `run_target` falls back to the bot's bare name then.
     pub agent_name: Option<String>,
+    /// The agent's self-chosen label — herdr's `terminal_title_stripped`, which for Claude
+    /// Code is its running summary of the current task. NULL until one is seen.
+    pub agent_title: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub last_read_revision: Option<i64>,

@@ -827,22 +827,30 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
       "account": null
     },
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
-    "grok": null
+    "grok": {
+      "five_hour": null,
+      "seven_day": {"used_pct": 14.0, "resets_at": "2026-09-12T08:28:00.000Z"},
+      "plan": "SuperGrok",
+      "updated_at": "2026-09-06T10:00:00.000Z",
+      "source": "grok-usage"
+    }
   }
 }
 ```
 
 - `kinds` 的 key：`codex`、`claude`、`grok`，以及有 identity 的 claude bot 另存一份 `claude:<identity>`
-  （`account` = identity 名稱）。**沒有資料的 kind 為 `null`**（grok 目前一律 `null`；沒裝 codex 也是 `null`；
-  claude 在第一個 StatusLine 事件到達前為 `null`）。
+  （`account` = identity 名稱）。**沒有資料的 kind 為 `null`**（沒裝該 CLI 就是 `null`；
+  claude 在第一個 StatusLine 事件到達前為 `null`，grok 在第一次 `/usage` 探測回來前為 `null`）。
 - `used_pct` 為 0–100 的數字；`resets_at` 為 RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
-- `?refresh=1`：立刻重讀 codex（claude 是被動收到的，refresh 對它無效）。
+- `?refresh=1`：立刻重讀 codex 與 grok（claude 是被動收到的，refresh 對它無效）。grok 的探測要開一個 pane，最久約 25 秒。
 - 來源：
   - **codex**：daemon 啟動後與每 5 分鐘用本機 `codex app-server` 的 `account/rateLimits/read`。
   - **claude**：由 daemon 注入 claude 的 `statusLine` 指令（`agents-managerd statusline …`）把 Claude Code 餵給 statusline 的 JSON
     （`rate_limits.five_hour / seven_day`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；daemon 不建 Turn，只更新額度。
     使用者原本的 statusLine 指令仍會被執行、pane 顯示不變。
-  - **grok**：無來源，固定 `null`。
+  - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒開一個用完即丟的 herdr pane 跑 grok、送 `/usage`、
+    讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
+    `Weekly limit (SuperGrok)` 的括號，`source` = `grok-usage`。
 
 ### 12.5 WS `quota_updated`
 

@@ -68,6 +68,10 @@ pub struct PaneInfo {
 pub struct AgentInfo {
     pub name: Option<String>,
     pub agent: Option<String>,
+    /// The pane's title with the spinner glyph removed — what the agent currently calls
+    /// itself. herdr 0.8.2 reports it on `agent.list` / `agent.get`.
+    #[serde(default)]
+    pub terminal_title_stripped: Option<String>,
     pub agent_status: AgentStatus,
     pub workspace_id: String,
     pub tab_id: String,
@@ -270,6 +274,18 @@ impl HerdrClient {
 
     pub async fn pane_read(&self, pane_id: &str, source: &str, lines: u32) -> Result<PaneRead> {
         self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines}), "read").await
+    }
+
+    /// Type literal text into a pane (no Enter). Used by the grok quota probe (SPEC §12.4).
+    pub async fn pane_send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        self.call("pane.send_text", json!({"pane_id": pane_id, "text": text})).await?;
+        Ok(())
+    }
+
+    /// Send named key presses to a pane, e.g. `["Enter"]`, `["Escape"]`.
+    pub async fn pane_send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
+        self.call("pane.send_keys", json!({"pane_id": pane_id, "keys": keys})).await?;
+        Ok(())
     }
 
     // ----- agent -----

@@ -21,12 +21,18 @@ export function GearIcon() {
   )
 }
 
-export function MoreIcon() {
+export function PlayIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
-      <circle cx="3.2" cy="8" r="1.35" fill="currentColor" />
-      <circle cx="8" cy="8" r="1.35" fill="currentColor" />
-      <circle cx="12.8" cy="8" r="1.35" fill="currentColor" />
+      <path d="M5 3.4l7 4.6-7 4.6z" fill="currentColor" />
+    </svg>
+  )
+}
+
+export function StopIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <rect x="4" y="4" width="8" height="8" rx="1.4" fill="currentColor" />
     </svg>
   )
 }
