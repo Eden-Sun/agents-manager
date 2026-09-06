@@ -812,3 +812,34 @@ composer——drop 目標是整個對話區，狀態放在 composer 裡就接不
 實心圓點），16px、`currentColor`，靜置色從 `--text-faint` 提到 `--text-dim`，選中列再提到
 `--text`；hover / 選單開啟時是 accent 藍。注意選中列那條規則要寫 `:not(:hover)`——它和 hover
 規則 specificity 相同，否則會靠出現順序把 hover 的藍色蓋掉。截圖：`240`/`241`/`242`。
+
+## 回合進行中也能輸入（2026-09-06）
+
+以前一有 in-flight turn，composer 就整個鎖住（黃色「上一則訊息仍在進行中」）。現在改成：
+
+- **輸入框永遠可打字**——`composerState` 把 in-flight 從 `disabled` 拆成新的 `queued`。真正
+  不能輸入的情況（未啟動、blocked、主機斷線、delivery unknown）才維持 `disabled`。
+- **送出會排隊**——daemon 一個 run 同時只允許一個 in-flight turn（`turns_one_in_flight`
+  unique index），直接送會 409。所以 `queued` 時按送出是寫進 store 的 `queuedSends[botId]`
+  （每個 bot 最多一則），輸入框與待送圖片照常清空，上方出現藍色「已排隊，這回合結束後送出」
+  條，可以按「取消」把文字放回輸入框。
+- **回合一結束自動送出**——`turn_updated` 離開 `in_flight` 時呼叫 `flushQueued`。延遲 350ms
+  等其他 frame 落地，送出前再檢查一次 `composerState`：若 bot 變成 blocked 或又有新的
+  in-flight turn，就保留排隊內容不送，避免吃 409 把訊息弄丟。
+- `groupComposerState` 的 `sendable` 要的是「現在就能送」，所以判斷式是
+  `!cs.disabled && !cs.queued`——群組送出不排隊，維持原本「送不了就 skip」的語意。
+
+**「輸出中…」移到氣泡下方**（`msg-meta-below`）：一般訊息的 meta 仍在氣泡上方，只有進行中的
+LiveBubble 例外——輸出一直往下長，狀態放在成長的那一端才跟得上視線。
+
+驗收（真實 daemon + am-codex，2026-09-06）：`250-live-meta-below-dark`（標籤在氣泡下方）、
+`251-queue-typing-dark`（回合中打字，送出鈕變「排隊送出」）、`252/253-queued-strip`（排隊條，
+深/淺色）、`254-queue-sent-dark`（回合結束後自動送出，兩則依序抵達）。
+
+**Bot 列的操作鍵（2026-09-06 再簡化）**：⋯ 選單裡原本只有「停止/啟動」和「設定」，而「設定」
+旁邊就是 ⚙——同一件事兩個入口。拿掉「設定」後選單只剩一項，選單本身就沒有存在意義了，所以
+⋯ 直接換成單一的執行鍵：停著顯示 ▶（`PlayIcon`，hover 綠），跑著顯示 ■（`StopIcon`，hover
+紅）。少一次點擊。停止仍會先跳 `ConfirmDialog`（會對 pane 送 ctrl+c），這是把操作從選單搬到
+一鍵之後必要的防呆；啟動無害，直接執行。`.bot-row` 的 `menu-open` 隨之更名為 `confirming`
+（確認框開著時，圖示不要淡出）。截圖：`260`/`261`（■ 停止，深/淺色）、`262`（▶ 啟動）、
+`263`（停止確認框）。

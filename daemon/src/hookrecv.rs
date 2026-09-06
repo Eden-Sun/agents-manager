@@ -269,6 +269,14 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
     }
 
+    // Codex's usage-reset hint is a standalone TUI row, not `last-assistant-message`. Give the
+    // pane a moment to render it after the notify hook, then capture it under the same bot lock.
+    if body.provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
+        if let Some(r) = run.as_ref() {
+            lifecycle::schedule_codex_notice_capture(app, &bot.id, &r.id);
+        }
+    }
+
     match kind {
         HookKind::Ignore(reason) => {
             tracing::debug!(reason, "hook ignored");

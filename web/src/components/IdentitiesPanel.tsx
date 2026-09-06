@@ -28,8 +28,16 @@ export function envToText(env: Record<string, string>): string {
     .join('\n')
 }
 
-export function IdentityBadge({ name }: { name: string | null }) {
-  if (!name) return null
+export function IdentityBadge({ name, showDefault }: { name: string | null; showDefault?: boolean }) {
+  // 沒指定身份時仍要標出來，不然 cc0（本機預設）和 cc1 在列表上長得一樣。
+  if (!name) {
+    if (!showDefault) return null
+    return (
+      <span className="identity-badge is-default" title="身份：不指定（本機預設）">
+        預設
+      </span>
+    )
+  }
   return (
     <span className="identity-badge" title={`身份：${name}`}>
       {name}

@@ -67,11 +67,20 @@ export function ApiModelFields({
     if (!hasFast && fast) onFast(false)
   }, [hasFast, fast, onFast])
 
+  // Same for the effort: the levels are per-model, so one carried over from the previously
+  // selected model can be rejected outright — codex answers `-c model_reasoning_effort="max"`
+  // on gpt-5.5 with `400 unsupported_value`. Falling back to null just omits the flag.
+  // This also heals a bot whose stored effort predates a model change, once its panel opens.
+  useEffect(() => {
+    if (effort !== null && efforts.length > 0 && !efforts.includes(effort)) onEffort(null)
+  }, [efforts, effort, onEffort])
+
   const pickModel = (id: string | null) => {
     setCustom(false)
     onModel(id)
     const next = (id && models.find((m) => m.id === id)) || defaultModel
     if (!(next?.service_tiers.some((t) => t.id === FAST_TIER) ?? false) && fast) onFast(false)
+    if (effort !== null && !(next?.efforts ?? []).includes(effort)) onEffort(null)
   }
 
   return (

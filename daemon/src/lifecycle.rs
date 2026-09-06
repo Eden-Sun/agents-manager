@@ -821,6 +821,12 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
             }
         }
     }
+    // Codex renders account notices as standalone TUI history rows rather than part of an
+    // agent turn. They are not included in `notify`'s `last-assistant-message`, so take a
+    // delayed pane snapshot once the startup screen has had time to render.
+    if bot.kind == "codex" {
+        schedule_codex_notice_capture(app, &bot.id, run_id);
+    }
     app.emit_bot_status(&bot.id).await;
     Ok(())
 }
@@ -879,6 +885,62 @@ async fn set_run(app: &Arc<App>, run_id: &str, state: &str, agent_status: &str) 
         .bind(run_id)
         .execute(&app.db)
         .await;
+}
+
+// ---------------------------------------------------------------- Codex account notices
+
+/// Codex draws this hint in the startup / idle transcript, outside any agent turn. It is not
+/// part of `agent-turn-complete`, so terminal inspection is the only source available to us.
+const CODEX_NOTICE_DELAY: Duration = Duration::from_millis(500);
+
+/// Schedule a best-effort read after Codex has time to paint its startup or post-turn hint.
+/// The task re-checks the run id so a delayed read from an old run cannot land on a new one.
+pub fn schedule_codex_notice_capture(app: &Arc<App>, bot_id: &str, run_id: &str) {
+    let app = app.clone();
+    let bot_id = bot_id.to_string();
+    let run_id = run_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(CODEX_NOTICE_DELAY).await;
+        let lock = app.bot_lock(&bot_id).await;
+        let _g = lock.lock().await;
+        if let Err(e) = capture_codex_usage_notices(&app, &bot_id, &run_id).await {
+            tracing::debug!(bot = %bot_id, run = %run_id, error = ?e, "codex notice capture failed");
+        }
+    });
+}
+
+/// Read and persist newly seen Codex usage-reset hints. The caller must hold the bot lock.
+pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> anyhow::Result<()> {
+    let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
+    if run.id != expected_run_id {
+        return Ok(());
+    }
+    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    if bot.kind != "codex" {
+        return Ok(());
+    }
+    let Some(pane_id) = run.pane_id.as_deref() else { return Ok(()) };
+    let host = db::bot_host(&app.db, bot_id).await?;
+    let Some(client) = app.herdr_for(&host).await else { return Ok(()) };
+    let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
+    let conversation_id = db::conversation_id(&app.db, bot_id).await?;
+
+    for notice in codex_usage_notice_lines(&read.text) {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages
+             WHERE conversation_id=? AND role='system' AND source='system' AND content=?)",
+        )
+        .bind(&conversation_id)
+        .bind(&notice)
+        .fetch_one(&app.db)
+        .await?;
+        if exists != 0 {
+            continue;
+        }
+        insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
+        tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- stop / interrupt
@@ -1316,6 +1378,35 @@ fn is_elapsed_token(s: &str) -> bool {
 /// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
 /// a parenthesised status carrying `tokens` or a duration. A false positive only ever reaches
 /// `turn_progress.activity`, never a stored message.
+fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
+    let want: Vec<&str> = prompt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if want.len() < 2 {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    // The `❯ <first line>` marker row is already gone, so resume at the prompt's second line.
+    let mut w = 1;
+    while i < lines.len() && w < want.len() {
+        let l = lines[i].trim();
+        if l.is_empty() {
+            i += 1;
+            continue;
+        }
+        if l != want[w] {
+            break;
+        }
+        i += 1;
+        w += 1;
+    }
+    // Only strip once the whole tail matched. A partial match means the pane wrapped the text
+    // (or the agent opened by quoting us), and eating half a real reply is worse than a echo.
+    if w < want.len() {
+        return text.to_string();
+    }
+    lines[i..].join("\n").trim().to_string()
+}
+
 fn is_activity_shape(s: &str) -> bool {
     // A leading decoration glyph is ignored here; the caller strips it from what it reports.
     let body = match s.chars().next() {
@@ -1528,6 +1619,11 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
         if let Err(e) = try_fallback(&app2, &run_id).await {
             tracing::warn!(error = ?e, "terminal fallback failed");
         }
+        // A Codex usage-reset hint can be rendered after the turn's notify hook has already
+        // completed it. Capture it even when there is no longer an in-flight turn to fall back.
+        if let Err(e) = capture_codex_usage_notices(&app2, &bot_id, &run_id).await {
+            tracing::debug!(error = ?e, "codex notice capture failed");
+        }
         app2.fallback_timers.lock().await.remove(&run_id);
     });
     timers.insert(key, h);
@@ -1732,6 +1828,40 @@ fn strip_grok_decor(line: &str) -> String {
     s
 }
 
+/// Extract the standalone Codex usage-reset hint from a pane snapshot. Codex has used both
+/// `•` and `■` for this kind of account notice across CLI releases; neither glyph belongs in
+/// the stored system message.
+fn codex_usage_notice_line(line: &str) -> Option<String> {
+    let body = line
+        .trim()
+        .strip_prefix('•')
+        .or_else(|| line.trim().strip_prefix('■'))
+        .map(str::trim_start)
+        .unwrap_or_else(|| line.trim());
+    let lower = body.to_ascii_lowercase();
+    if lower.starts_with("you have ")
+        && lower.contains("usage limit reset")
+        && lower.contains("available")
+        && lower.contains("run /usage")
+    {
+        Some(body.to_string())
+    } else {
+        None
+    }
+}
+
+fn codex_usage_notice_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if let Some(notice) = codex_usage_notice_line(line) {
+            if !out.iter().any(|seen| seen == &notice) {
+                out.push(notice);
+            }
+        }
+    }
+    out
+}
+
 /// No reply marker found: keep whatever the agent printed after the last prompt echo,
 /// minus TUI chrome. Tool-result lines (`⎿ …`) are kept because they usually carry the
 /// actual error ("Not logged in · Please run /login").
@@ -1762,7 +1892,9 @@ fn clean_screen(kind: &str, text: &str) -> Option<String> {
                 continue;
             }
         }
-        if is_noise(s) || (grok && is_grok_noise(s)) {
+        // `is_noise` only knows the spinner glyphs we have seen; `is_activity_shape` catches the
+        // rest by shape, so a frame like `✛ Generating… (4s · thinking)` cannot reach a message.
+        if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
             continue;
         }
         // An empty prompt box means the transcript ended.
@@ -1855,6 +1987,32 @@ mod extract_tests {
   tony. | pt | HAI4.5 | 5h:- | 7d:-
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 ";
+
+    const CODEX_STARTUP: &str = "\
+╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                  │
+╰────────────────────────────────────────────╯
+
+  Tip: Use /init to create an AGENTS.md.
+
+• You have 1 usage limit reset available. Run /usage to use one.
+
+› Write tests for @filename
+";
+
+    #[test]
+    fn codex_usage_reset_hint_is_captured_without_the_bullet() {
+        assert_eq!(
+            codex_usage_notice_lines(CODEX_STARTUP),
+            vec!["You have 1 usage limit reset available. Run /usage to use one."],
+        );
+        // Older Codex builds used a square marker and pluralised the noun.
+        assert_eq!(
+            codex_usage_notice_line(" ■ You have 2 usage limit resets available. Run /usage to use one."),
+            Some("You have 2 usage limit resets available. Run /usage to use one.".into()),
+        );
+        assert!(codex_usage_notice_line("• ordinary assistant text").is_none());
+    }
 
     #[test]
     fn clean_screen_keeps_only_tool_result_lines() {

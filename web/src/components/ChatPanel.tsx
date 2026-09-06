@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, Message } from '../api/types'
-import { attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { anchorOf, attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedPanel } from './BlockedPanel'
@@ -116,13 +116,6 @@ export function LiveBubble({
   const act = activity?.trim() ? activity.trim() : null
   return (
     <article className={`msg assistant live${text ? ' streaming' : ''}`} aria-live="polite">
-      <div className="msg-meta msg-meta-above">
-        <div className="msg-meta-left">
-          {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
-          {from ? <span className="msg-from">{from}</span> : null}
-          <span>{text ? '輸出中…' : (act ?? '等待回覆（hook）…')}</span>
-        </div>
-      </div>
       <div className={`bubble${text ? ' md' : ''}`}>
         {text ? (
           <>
@@ -132,6 +125,15 @@ export function LiveBubble({
         ) : (
           <TypingDots />
         )}
+      </div>
+      {/* Below the bubble, unlike a finished message: the status belongs at the growing
+          edge of the output, which is where the eye already is. */}
+      <div className="msg-meta msg-meta-below">
+        <div className="msg-meta-left">
+          {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
+          {from ? <span className="msg-from">{from}</span> : null}
+          <span>{text ? '輸出中…' : (act ?? '等待回覆（hook）…')}</span>
+        </div>
       </div>
     </article>
   )
@@ -236,6 +238,9 @@ function Composer({
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
+  const queueSend = useStore((s) => s.queueSend)
+  const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
+  const queued = useStore((s) => s.queuedSends[botId] ?? null)
   // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
   // bots / tabs and reloading keep it; it is cleared only on a successful send.
   const draftKey = `bot:${botId}` as const
@@ -260,6 +265,14 @@ function Composer({
     const body = text.trim()
     // An image on its own is a valid message; text is only required when there is none.
     if ((!body && files.ids.length === 0) || state.disabled || sending || files.uploading) return
+    // A turn is still running: park the message instead of eating a 409. The store sends it
+    // as soon as that turn ends.
+    if (state.queued) {
+      queueSend(botId, body, files.ids)
+      setText('')
+      files.clear()
+      return
+    }
     setSending(true)
     void sendPrompt(botId, body, files.ids).then((ok) => {
       setSending(false)
@@ -276,6 +289,25 @@ function Composer({
 
   return (
     <div className="composer">
+      {queued ? (
+        <div className="composer-queued" role="status">
+          <span className="composer-queued-label">已排隊，這回合結束後送出：</span>
+          <span className="composer-queued-text" title={queued.text}>
+            {queued.text || `（${queued.attachments.length} 張圖片）`}
+          </span>
+          <button
+            type="button"
+            className="mini-btn"
+            title="取消排隊，把訊息放回輸入框"
+            onClick={() => {
+              cancelQueuedSend(botId)
+              setText(queued.text)
+            }}
+          >
+            取消
+          </button>
+        </div>
+      ) : null}
       {showLock ? (
         <div className="composer-lock" role="status">
           <span>⛔ {state.reason}</span>
@@ -298,7 +330,13 @@ function Composer({
           ref={ref}
           value={text}
           disabled={state.disabled || sending}
-          placeholder={state.disabled ? state.reason || '目前無法送出訊息' : '輸入訊息…（圖片可直接拖放或貼上）'}
+          placeholder={
+            state.disabled
+              ? state.reason || '目前無法送出訊息'
+              : state.queued
+                ? '這回合還在跑，先打下一則…（送出會排隊）'
+                : '輸入訊息…（圖片可直接拖放或貼上）'
+          }
           title="Enter 送出，Shift+Enter 換行；圖片可拖放或貼上"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -319,10 +357,10 @@ function Composer({
           type="button"
           className="send-btn"
           disabled={state.disabled || sending || files.uploading || nothingToSend}
-          title={files.uploading ? '圖片上傳中…' : undefined}
+          title={files.uploading ? '圖片上傳中…' : state.queued ? '這回合結束後自動送出' : undefined}
           onClick={submit}
         >
-          {sending ? '送出中…' : files.uploading ? '上傳中…' : '送出'}
+          {sending ? '送出中…' : files.uploading ? '上傳中…' : state.queued ? '排隊送出' : '送出'}
         </button>
       </div>
     </div>
@@ -424,7 +462,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             aria-expanded={settingsOpen}
             title={`設定 ${bot.name}（模型、身份、autostart、刪除）`}
             data-tip={`設定 · ${bot.name}`}
-            onClick={() => (settingsOpen ? closeSettings() : openSettings(botId))}
+            onClick={(e) => (settingsOpen ? closeSettings() : openSettings(botId, anchorOf(e.currentTarget)))}
           >
             <GearIcon />
           </button>

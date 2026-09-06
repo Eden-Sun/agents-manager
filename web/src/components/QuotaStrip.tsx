@@ -7,17 +7,18 @@ import { KindIcon, KIND_LABEL } from './KindTag'
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
  *
- * Decision (Codex sol, docs/UI-DECISIONS.md follow-up): three equal always-on pills were
- * wrong — the kinds do not have the same data capability. grok's CLI cannot report quota at
- * all, so it never takes strip space and is explained in the popover instead. The strip
- * keeps every queryable kind (claude, codex) permanently visible; only the *windows* per kind
- * collapse below 1100px, never a whole kind. Drawn as frameless health bars: the fill length
- * carries the level, colour only reinforces it, so it survives greyscale. Full numbers live in
- * the tooltip and popover.
+ * Decision (Codex sol, docs/UI-DECISIONS.md follow-up): the strip keeps every kind that has
+ * reported quota permanently visible; only the *windows* per kind collapse below 1100px, never
+ * a whole kind. Drawn as frameless health bars: the fill length carries the level, colour only
+ * reinforces it, so it survives greyscale. Full numbers live in the tooltip and popover.
+ *
+ * The kinds do not report the same windows: claude and codex have both 5h and 7d, grok only a
+ * weekly one (scraped from its `/usage` dialog, SPEC §12.6). A kind therefore draws one bar per
+ * window it actually reports — never a filler bar for a window that does not exist.
  */
 
-/** Only these can ever report quota; grok has no such CLI surface. */
-const QUERYABLE: BotKind[] = ['claude', 'codex']
+/** Every kind can report quota; grok arrives from the `/usage` probe. */
+const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok']
 
 type Level = 'crit' | 'warn' | 'ok'
 
@@ -65,8 +66,9 @@ function label(kind: BotKind, q: KindQuota | null): string {
   const parts = [KIND_LABEL[kind]]
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  parts.push(five === null ? '5 小時額度無資料' : `5 小時剩餘 ${five}%`)
-  parts.push(seven === null ? '7 天額度無資料' : `7 天剩餘 ${seven}%`)
+  if (five === null && seven === null) parts.push('額度尚未取得')
+  if (five !== null) parts.push(`5 小時剩餘 ${five}%`)
+  if (seven !== null) parts.push(`7 天剩餘 ${seven}%`)
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
   if (q?.seven_day?.resets_at) parts.push(`7 天 ${fmtTime(q.seven_day.resets_at)} 重置`)
   return parts.join('，')
@@ -87,12 +89,14 @@ function Bar({ pct }: { pct: number | null }) {
   )
 }
 
-/** Frameless, compact: kind glyph + one bar per window (collapsed shows the worst one). */
+/** Frameless, compact: kind glyph + one bar per reported window (collapsed shows the worst). */
 function Gauge({ kind, collapsed }: { kind: BotKind; collapsed: boolean }) {
   const q = useStore((s) => s.quota[kind] ?? null)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  const w = worstWindow(q)
+  // Only windows this kind actually reports; a lone hatched bar when it reports none yet.
+  const present = [five, seven].filter((v): v is number => v !== null)
+  const bars = collapsed ? [worstWindow(q).pct] : present.length ? present : [null]
 
   return (
     <span className={`quota-hp ${kind} ${worst(q).level}`} title={label(kind, q)} aria-label={label(kind, q)}>
@@ -100,7 +104,9 @@ function Gauge({ kind, collapsed }: { kind: BotKind; collapsed: boolean }) {
         <KindIcon kind={kind} />
       </span>
       <span className="quota-bars">
-        {collapsed ? <Bar pct={w.pct} /> : <><Bar pct={five} /><Bar pct={seven} /></>}
+        {bars.map((pct, i) => (
+          <Bar key={i} pct={pct} />
+        ))}
       </span>
     </span>
   )
@@ -125,20 +131,26 @@ function PopRow({ kind }: { kind: BotKind }) {
       </div>
       {!supported ? (
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
-      ) : !known ? (
-        <p className="quota-pop-note">尚未取得（啟動一個 {KIND_LABEL[kind]} bot 後回報）</p>
+      ) : !known || (five === null && seven === null) ? (
+        <p className="quota-pop-note">
+          {kind === 'grok' ? '背景查詢中' : `尚未取得（啟動一個 ${KIND_LABEL[kind]} bot 後回報）`}
+        </p>
       ) : (
         <>
-          <div className="quota-pop-line">
-            <span>5 小時</span>
-            <span className={`quota-row ${levelOf(five)}`}>剩 {pctText(five)}</span>
-            <span className="quota-reset">{fmtTime(q?.five_hour?.resets_at)} 重置</span>
-          </div>
-          <div className="quota-pop-line">
-            <span>7 天</span>
-            <span className={`quota-row ${levelOf(seven)}`}>剩 {pctText(seven)}</span>
-            <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)} 重置</span>
-          </div>
+          {five !== null ? (
+            <div className="quota-pop-line">
+              <span>5 小時</span>
+              <span className={`quota-row ${levelOf(five)}`}>剩 {pctText(five)}</span>
+              <span className="quota-reset">{fmtTime(q?.five_hour?.resets_at)} 重置</span>
+            </div>
+          ) : null}
+          {seven !== null ? (
+            <div className="quota-pop-line">
+              <span>{kind === 'grok' ? '每週' : '7 天'}</span>
+              <span className={`quota-row ${levelOf(seven)}`}>剩 {pctText(seven)}</span>
+              <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)} 重置</span>
+            </div>
+          ) : null}
           {q?.updated_at ? <p className="quota-pop-note">更新於 {fmtTime(q.updated_at)}</p> : null}
         </>
       )}

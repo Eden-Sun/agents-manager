@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { EFFORT_OPTIONS, MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
 import type { BotKind, PatchBotInput } from '../api/types'
@@ -218,6 +218,40 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
+  // 彈窗貼著觸發它的齒輪開，超出視窗才翻邊/夾住；沒有 anchor（例如鍵盤流程）就置中。
+  const anchor = useStore((s) => s.settingsAnchor)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = cardRef.current
+    if (!el || !anchor) {
+      setPos(null)
+      return
+    }
+    const place = () => {
+      const gap = 8
+      const margin = 12
+      const { offsetWidth: w, offsetHeight: h } = el
+      let left = anchor.right + gap
+      if (left + w + margin > window.innerWidth) left = anchor.left - gap - w
+      left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - w - margin))
+      const top = Math.min(Math.max(margin, anchor.top - gap), Math.max(margin, window.innerHeight - h - margin))
+      setPos({ left, top })
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
+  }, [anchor])
+
+  // Esc 關閉：實際行為（髒表單要先確認）在 render 時塞進 ref，避免 effect 依賴整個表單狀態。
+  const escRef = useRef<() => void>(() => {})
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') escRef.current()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
@@ -234,8 +268,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }, [botId])
 
   if (!bot) {
+    escRef.current = closeSettings
     return (
-      <div className="bot-settings" role="dialog" aria-label="Bot 設定">
+      <div className="bs-scrim" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && closeSettings()}>
+      <div className="bot-settings" role="dialog" aria-modal="true" aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -244,6 +280,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           </button>
         </div>
         <p className="msg-empty">這個 Bot 已不存在。</p>
+      </div>
       </div>
     )
   }
@@ -281,8 +318,20 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     closeSettings()
   }
 
+  escRef.current = () => {
+    if (!deleteOpen && !closeConfirmOpen) requestClose()
+  }
+
   return (
-    <div className="bot-settings" role="dialog" aria-label={`${bot.name} 的設定`}>
+    <div className="bs-scrim" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && requestClose()}>
+    <div
+      ref={cardRef}
+      className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
+      style={pos ? { left: pos.left, top: pos.top } : undefined}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${bot.name} 的設定`}
+    >
       <div className="bs-head">
         <strong>Bot 設定</strong>
         <KindTag kind={bot.kind} />
@@ -430,6 +479,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           void removeBot(botId)
         }}
       />
+    </div>
     </div>
   )
 }

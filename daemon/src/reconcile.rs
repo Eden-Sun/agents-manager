@@ -140,6 +140,9 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                     }
                 }
                 crate::events::watch_pane(app, host, &agent.pane_id).await;
+                if bot.kind == "codex" {
+                    crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run.id);
+                }
                 tracing::info!(host, bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
             }
             (Some(run), None) => {
@@ -169,6 +172,9 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                     .execute(&app.db)
                     .await?;
                 crate::events::watch_pane(app, host, &agent.pane_id).await;
+                if bot.kind == "codex" {
+                    crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run_id);
+                }
                 tracing::info!(host, bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
             }
             (None, None) => {}

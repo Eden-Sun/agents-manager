@@ -32,6 +32,15 @@ import { BOT_KINDS } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
+
+/** 觸發按鈕的 viewport 矩形（只留彈窗定位需要的四邊）。 */
+export type SettingsAnchor = { left: number; right: number; top: number; bottom: number }
+
+/** 從觸發元素取 anchor：DOMRect 直接存進 store 會帶著一堆用不到的欄位。 */
+export function anchorOf(el: Element): SettingsAnchor {
+  const r = el.getBoundingClientRect()
+  return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }
+}
 /** v4.0 global preference: how a bot's kind is shown (icon glyph or the word). */
 export type KindDisplay = 'icon' | 'text'
 
@@ -125,9 +134,21 @@ export interface LiveReply {
   revision: number
 }
 
+/** 排隊中的一則送出（`queuedSends`）。 */
+export interface QueuedSend {
+  text: string
+  attachments: string[]
+}
+
 export interface ComposerState {
+  /** 完全不能輸入（未啟動、blocked、主機斷線、送達狀態未知…）。 */
   disabled: boolean
   reason: string
+  /**
+   * 這一回合還在跑：可以照常打字，按送出會排進佇列，等回合結束自動送出
+   * （daemon 一個 run 同時只允許一個 in-flight turn，直接送會 409）。
+   */
+  queued: boolean
   inFlightTurnId: string | null
   unknownTurnId: string | null
 }
@@ -170,6 +191,12 @@ interface StoreState {
   liveReply: Record<string, LiveReply>
 
   /**
+   * 在回合進行中按下送出的訊息（每個 bot 最多一則）。回合一結束就自動送出；
+   * 使用者也可以在送出前取消或改寫。
+   */
+  queuedSends: Record<string, QueuedSend>
+
+  /**
    * SPEC §13 group view. Non-null = the right pane shows this project's group timeline
    * instead of `selectedBotId`'s conversation (the bot selection is kept for when the
    * user switches back).
@@ -185,6 +212,8 @@ interface StoreState {
   rightTab: RightTab
   /** 開著「Bot 設定」面板的 bot id（null = 面板關閉）。 */
   settingsBotId: string | null
+  /** 觸發設定的按鈕位置（viewport 座標），彈窗會貼著它開；null = 置中。 */
+  settingsAnchor: SettingsAnchor | null
   /** Sidebar consumes this to open the「新增 Bot」sheet for a project. */
   openBotSheetFor: string | null
   notices: Notice[]
@@ -199,7 +228,7 @@ interface StoreState {
   /** `POST /projects/:id/chat`; null = failed (reason already shown as a notice). */
   sendGroupChat: (projectId: string, text: string, attachments?: string[]) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
-  openSettings: (botId: string) => void
+  openSettings: (botId: string, anchor?: SettingsAnchor | null) => void
   closeSettings: () => void
   /** Ask the Sidebar to open its「新增 Bot」sheet for this project. */
   requestOpenBotSheet: (projectId: string) => void
@@ -238,6 +267,11 @@ interface StoreState {
   dismissToolHint: () => void
   /** Empty text removes the draft. */
   setDraft: (key: DraftKey, text: string) => void
+
+  /** 回合進行中按送出：排隊，等這回合結束再送。 */
+  queueSend: (botId: string, text: string, attachments: string[]) => void
+  /** 取消排隊中的送出（訊息會退回輸入框，由呼叫端決定）。 */
+  cancelQueuedSend: (botId: string) => void
 }
 
 let noticeSeq = 0
@@ -271,6 +305,7 @@ export const useStore = create<StoreState>((set, get) => ({
   messages: {},
   loadedBots: {},
   liveReply: {},
+  queuedSends: {},
 
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
@@ -280,6 +315,7 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
   settingsBotId: null,
+  settingsAnchor: null,
   openBotSheetFor: null,
   notices: [],
   busy: {},
@@ -418,12 +454,18 @@ export const useStore = create<StoreState>((set, get) => ({
   setRightTab: (rightTab) => set({ rightTab, settingsBotId: null }),
 
   /** 設定面板永遠對著「目前選取的 bot」，所以開啟時順便切過去。 */
-  openSettings: (botId) => {
-    set({ selectedBotId: botId, selectedProjectId: null, rightTab: 'chat', settingsBotId: botId })
+  openSettings: (botId, anchor = null) => {
+    set({
+      selectedBotId: botId,
+      selectedProjectId: null,
+      rightTab: 'chat',
+      settingsBotId: botId,
+      settingsAnchor: anchor,
+    })
     if (!get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
-  closeSettings: () => set({ settingsBotId: null }),
+  closeSettings: () => set({ settingsBotId: null, settingsAnchor: null }),
 
   requestOpenBotSheet: (projectId) => set({ openBotSheetFor: projectId }),
   clearOpenBotSheet: () => set({ openBotSheetFor: null }),
@@ -463,6 +505,14 @@ export const useStore = create<StoreState>((set, get) => ({
     await guarded(set, get, `intr:${botId}`, async () => {
       await api.interruptBot(botId)
     })
+  },
+
+  queueSend(botId, text, attachments) {
+    set((st) => ({ queuedSends: { ...st.queuedSends, [botId]: { text, attachments } } }))
+  },
+
+  cancelQueuedSend(botId) {
+    set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
   },
 
   async sendPrompt(botId, text, attachments = []) {
@@ -901,6 +951,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         liveReply:
           turn.status !== 'in_flight' && s.liveReply[botId]?.turnId === turn.id ? withoutKey(s.liveReply, botId) : s.liveReply,
       }))
+      // The turn that was blocking the composer is over: send whatever was queued behind it.
+      if (turn.status !== 'in_flight') flushQueued(botId)
       return
     }
     case 'turn_progress': {
@@ -948,6 +1000,26 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
 function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
   const { [key]: _dropped, ...rest } = map
   return rest
+}
+
+/**
+ * Send the message queued behind a turn that has just finished.
+ *
+ * The short delay lets the rest of the frame land (`run_updated` may still flip
+ * `agent_status`), and the composer state is re-checked at the last moment so a bot that
+ * went `blocked` — or that already has another turn in flight — keeps the queued text
+ * instead of losing it to a 409.
+ */
+function flushQueued(botId: string) {
+  setTimeout(() => {
+    const s = useStore.getState()
+    const pending = s.queuedSends[botId]
+    if (!pending) return
+    const cs = composerState(s, botId)
+    if (cs.disabled || cs.queued) return
+    useStore.setState({ queuedSends: withoutKey(s.queuedSends, botId) })
+    void s.sendPrompt(botId, pending.text, pending.attachments)
+  }, 350)
 }
 
 /** Patch connection state onto the known hosts without losing their config fields. */
@@ -1023,7 +1095,7 @@ export function unknownDeliveryTurn(state: StoreState, botId: string): Turn | nu
 
 /** SPEC §3.2 / §6.3: why the composer is locked. */
 export function composerState(state: StoreState, botId: string | null): ComposerState {
-  const base: ComposerState = { disabled: true, reason: '', inFlightTurnId: null, unknownTurnId: null }
+  const base: ComposerState = { disabled: true, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
   if (!botId) return { ...base, reason: '請先在左側選擇一個 Bot' }
   const bot = state.bots.find((b) => b.id === botId)
   const hostName = bot ? projectHostName(state, bot.project_id) : 'local'
@@ -1047,9 +1119,10 @@ export function composerState(state: StoreState, botId: string | null): Composer
   }
   const inflight = inFlightTurn(state, botId)
   if (inflight) {
-    return { ...base, reason: '上一則訊息仍在進行中，等待回覆或按「中斷」', inFlightTurnId: inflight.id }
+    // Not `disabled`: the user keeps typing, and a send is queued rather than refused.
+    return { ...base, disabled: false, queued: true, reason: '這回合還在跑，送出會排到結束後', inFlightTurnId: inflight.id }
   }
-  return { disabled: false, reason: '', inFlightTurnId: null, unknownTurnId: null }
+  return { disabled: false, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
 }
 
 const NO_TOOLS: ToolMap = toToolMap(undefined)
@@ -1113,7 +1186,12 @@ export function groupComposerState(state: StoreState, projectId: string | null):
   if (!projectId) return { disabled: true, reason: '', sendable: [] }
   const members = state.bots.filter((b) => b.project_id === projectId)
   if (members.length === 0) return { disabled: true, reason: '這個 Project 還沒有 Bot', sendable: [] }
-  const sendable = members.filter((b) => !composerState(state, b.id).disabled).map((b) => b.id)
+  const sendable = members
+    .filter((b) => {
+      const cs = composerState(state, b.id)
+      return !cs.disabled && !cs.queued
+    })
+    .map((b) => b.id)
   if (sendable.length === 0) {
     const first = composerState(state, members[0].id).reason
     return { disabled: true, reason: `專案內沒有可送訊息的 Bot（${first}）`, sendable }

@@ -20,6 +20,7 @@ mod lifecycle;
 mod models;
 mod projection;
 mod quota;
+mod quota_grok;
 mod reconcile;
 mod state;
 mod statusline_cmd;
@@ -193,7 +194,10 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
     quota::spawn_codex_poller(app.clone());
+    quota_grok::spawn_grok_poller(app.clone());
     github::spawn_detect_all(app.clone());
+    // Agent titles (what each agent calls itself) — no herdr event for it, so it polls.
+    events::spawn_title_poller(app.clone());
 
     {
         let app2 = app.clone();

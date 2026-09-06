@@ -224,3 +224,54 @@ async fn handle_status(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
         crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;
     }
 }
+
+// ---------------------------------------------------------------- agent titles
+
+/// How often the agents' self-chosen titles are refreshed.
+///
+/// There is no herdr event for a title change, so this polls. One `agent.list` per host
+/// covers every run on it, and a write only happens when the text actually changed.
+const TITLE_POLL: Duration = Duration::from_secs(4);
+
+/// Keep `runs.agent_title` in step with what each agent currently calls itself
+/// (`terminal_title_stripped` — for Claude Code, a running summary of its task).
+pub fn spawn_title_poller(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(TITLE_POLL).await;
+            for conn in app.hosts.list().await {
+                if !conn.is_local() && !conn.is_connected() {
+                    continue;
+                }
+                let Some(client) = app.herdr_for(&conn.name).await else { continue };
+                let Ok(agents) = client.agent_list().await else { continue };
+                for a in agents {
+                    let (Some(name), Some(title)) = (a.name.as_deref(), a.terminal_title_stripped.as_deref()) else {
+                        continue;
+                    };
+                    let title = title.trim();
+                    if title.is_empty() {
+                        continue;
+                    }
+                    // Match on the agent name the run was started under; only live runs.
+                    let row = sqlx::query_as::<_, (String, String, Option<String>)>(
+                        &format!("SELECT id, bot_id, agent_title FROM runs WHERE agent_name = ? AND state IN {} LIMIT 1", crate::db::ACTIVE_STATES),
+                    )
+                    .bind(name)
+                    .fetch_optional(&app.db)
+                    .await;
+                    let Ok(Some((run_id, bot_id, current))) = row else { continue };
+                    if current.as_deref() == Some(title) {
+                        continue;
+                    }
+                    let _ = sqlx::query("UPDATE runs SET agent_title = ? WHERE id = ?")
+                        .bind(title)
+                        .bind(&run_id)
+                        .execute(&app.db)
+                        .await;
+                    app.emit_bot_status(&bot_id).await;
+                }
+            }
+        }
+    });
+}
