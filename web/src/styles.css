@@ -17,6 +17,13 @@
   --text-dim: #5e6a78;
   --text-faint: #5e6a78;
   --accent: #2f6fe4;
+  /*
+   * 同一個藍當「文字」用不夠：#2f6fe4 在它自己的淡底上只有 4.00:1（選取列 --bg-active）、
+   * 4.13:1（選取中的 team 節點），在白底也只有 4.6。文字另開一階深的同色系（白底 5.58、
+   * 淡底 4.79），邊框、標記、按鈕底色仍然用 --accent——非文字只要 3:1。
+   * 深色主題的 #7aa5f8 在同樣那些底上都有 6:1 以上，所以那邊 ink 就是 accent 本身。
+   */
+  --accent-ink: #2a63cd;
   --accent-text: #ffffff;
   --accent-soft: #e6eeff;
 
@@ -85,6 +92,8 @@
     --text-dim: #a3afbf;
     --text-faint: #96a2b3;
     --accent: #7aa5f8;
+    /* 深色的 accent 當文字已經夠亮（實測最低 6.1:1），不需要另一階。 */
+    --accent-ink: #7aa5f8;
     --accent-text: #0f1115;
     --accent-soft: #26375c;
 
@@ -345,7 +354,7 @@ button:disabled {
 }
 
 .mem-badge.remote .mem-k {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
   font-weight: 650;
 }
@@ -580,7 +589,7 @@ button:disabled {
 }
 .icon-btn.add:hover:not(:disabled),
 .icon-btn.add[aria-expanded='true'] {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -591,7 +600,7 @@ button:disabled {
 }
 .project-head .icon-btn.add:hover:not(:disabled),
 .project-head .icon-btn.add[aria-expanded='true'] {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 .inline-form {
@@ -1074,7 +1083,7 @@ button:disabled {
 
 .mini-btn.primary:not(:disabled) {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .mini-btn.danger:not(:disabled) {
@@ -1852,7 +1861,7 @@ button:disabled {
 }
 
 .msg.live .msg-meta {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .msg.rail .bubble.rail,
@@ -1864,7 +1873,7 @@ button:disabled {
 .link-btn {
   border: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-ink);
   padding: 2px 0;
   font-size: 11.5px;
   text-decoration: underline;
@@ -2066,7 +2075,7 @@ button:disabled {
 .recipient-chip.on {
   border-color: var(--accent);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .recipient-chip.all {
@@ -2114,7 +2123,7 @@ button:disabled {
 .composer-queued-label {
   flex: none;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .composer-queued-text {
@@ -2198,7 +2207,7 @@ button:disabled {
   box-shadow: var(--shadow);
   font-size: 15px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .attach-tray {
@@ -2287,7 +2296,7 @@ button:disabled {
 }
 
 .attach-pick:hover:not(:disabled) {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* Sent images, inside the bubble. */
@@ -2424,7 +2433,7 @@ button:disabled {
 
 .jump-bottom:hover {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* The bot's own status bar, mirrored from the pane. One line, scrolls if it overflows. */
@@ -2540,7 +2549,7 @@ button:disabled {
 
 .sl-pick-btn:hover .sl-v,
 .sl-pick-btn[aria-expanded='true'] .sl-v {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .model-quick-pop {
@@ -3058,7 +3067,7 @@ button:disabled {
   border: none;
   padding: 1px 4px;
   border-radius: 4px;
-  color: var(--accent);
+  color: var(--accent-ink);
   cursor: pointer;
   font-family: var(--font-mono);
   white-space: nowrap;
@@ -3188,7 +3197,7 @@ button:disabled {
 }
 .dirpicker-row:hover .dirpicker-enter,
 .dirpicker-row.sel .dirpicker-enter {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-left-color: var(--border);
 }
 .dirpicker-enter:hover:not(:disabled) {
@@ -3261,7 +3270,7 @@ button:disabled {
 
 .attach-btn:hover:not(:disabled),
 .attach-btn.on {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -3413,7 +3422,7 @@ button:disabled {
   padding: 3px 8px;
 }
 .bubble.md th { background: var(--bg-sunken); }
-.bubble.md a { color: var(--accent); }
+.bubble.md a { color: var(--accent-ink); }
 .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 
 /* ------------------------------------------------------- remote hosts (§11.6) */
@@ -3427,7 +3436,7 @@ button:disabled {
   border-radius: 3px;
   border: 1px solid var(--border-strong);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
   white-space: nowrap;
 }
@@ -3573,7 +3582,7 @@ button:disabled {
   padding: 0 6px;
   border-radius: 8px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
   border: 1px solid transparent;
   font-family: var(--font-mono);
   line-height: 1.6;
@@ -3678,7 +3687,7 @@ button.model-tag {
 button.model-tag:hover,
 button.model-tag[aria-expanded='true'] {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .icon-btn.gear {
@@ -3690,7 +3699,7 @@ button.model-tag[aria-expanded='true'] {
 
 .icon-btn.gear:hover:not(:disabled),
 .icon-btn.gear[aria-expanded='true'] {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
@@ -3702,7 +3711,7 @@ button.model-tag[aria-expanded='true'] {
 }
 
 .icon-btn.menu-btn:hover:not(:disabled) {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
@@ -3795,7 +3804,7 @@ button.model-tag[aria-expanded='true'] {
 
 .bs-banner.ok {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .bs-banner > span {
@@ -3966,7 +3975,7 @@ button.model-tag[aria-expanded='true'] {
 .project-label-btn:hover .project-label,
 .project-head.selected .project-label,
 .project-label-btn.selected .project-label {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .project-label-btn.selected {
@@ -3975,7 +3984,7 @@ button.model-tag[aria-expanded='true'] {
 
 .project-head.selected .project-group-icon,
 .project-label-btn.selected .project-group-icon {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .project-head > .host-badge {
@@ -4013,7 +4022,7 @@ button.model-tag[aria-expanded='true'] {
   border-radius: 3px;
   border: 1px solid var(--border-strong);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .group-head .main-title {
@@ -4121,7 +4130,7 @@ button.model-tag[aria-expanded='true'] {
 .bot-badge.all {
   background: var(--accent-soft);
   border-color: transparent;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -4483,7 +4492,7 @@ button.model-tag[aria-expanded='true'] {
   border: 1px solid var(--border-strong);
   border-radius: 3px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
 }
 
@@ -5144,7 +5153,7 @@ button.model-tag[aria-expanded='true'] {
 
 .issues-btn.on .issues-count {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* Popover anchored below the button (same shape as .quota-pop / .mention-pop). */
@@ -5262,7 +5271,7 @@ button.model-tag[aria-expanded='true'] {
 }
 
 .issue-title:hover {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: underline;
 }
 
@@ -5359,13 +5368,13 @@ button.model-tag[aria-expanded='true'] {
 /* IssuesBar 每列的「組隊」：跟「插入」同一組 mini-btn，只是用 accent 標出來。 */
 .mini-btn.team-btn:not(:disabled) {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* ---------------------------------------------------------- 共用小元件 */
 
 .team-icon {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-size: 15px;
   line-height: 1;
 }
@@ -5470,7 +5479,7 @@ button.team-workers:disabled {
 }
 .team-role.pm {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .team-role.reviewer {
   background: var(--warn-soft);
@@ -5575,7 +5584,7 @@ button.team-workers:disabled {
 }
 
 .team-pr {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-size: 11px;
   text-decoration: none;
 }
@@ -5913,7 +5922,7 @@ button.team-workers:disabled {
 
 /* daemon 代轉的訊息：`pm → dev-1`。和「你 → …」用不同顏色，免得誤以為是自己送的。 */
 .msg-targets.relay {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* merge / phase / note 事件插成一條系統列。 */
@@ -5982,7 +5991,7 @@ button.team-workers:disabled {
   display: none;
 }
 .am-chip-action {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
 }
 .am-chip-detail {
@@ -6122,7 +6131,7 @@ button.team-workers:disabled {
 }
 .team-node-chev:hover:not(:disabled),
 .team-node-chev:focus-visible {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
@@ -6153,7 +6162,7 @@ button.team-workers:disabled {
   background: var(--bg-hover);
 }
 .team-node.collapsed .team-node-btn {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-weight: 650;
 }
 .team-node-label {
@@ -6169,7 +6178,7 @@ button.team-workers:disabled {
   border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
   font-size: 11px;
   font-weight: 700;
   line-height: 1.4;
@@ -6503,7 +6512,7 @@ button.run-debug-toggle:hover {
 }
 
 .main-status.pane-toggle.on .pane-chev {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* 標題列底下的識別列：跟 `.team-subhead` 同一個調性（沉底色 + 分隔線）。 */
@@ -6642,7 +6651,7 @@ button.run-debug-toggle:hover {
 }
 
 .identity-recheck:hover:not(:disabled) {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .identity-recheck:disabled {
