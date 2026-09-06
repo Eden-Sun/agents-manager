@@ -110,19 +110,162 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
             .fetch_one(&app.db)
             .await
             .unwrap_or_default();
+        let should_flush_queue = t.status != "in_flight" && t.status != "queued";
         app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
         // SPEC-team §3: the same transition on the internal bus. Every path that takes a
         // turn out of `in_flight` (hook match, terminal fallback, watchdog, stop, interrupt)
         // funnels through here, so team schedulers only need this one subscription.
         app.publish_turn(crate::state::TurnEvent {
-            bot_id,
+            bot_id: bot_id.clone(),
             turn_id: t.id.clone(),
             status: t.status.clone(),
             delivery: t.delivery.clone(),
             team_id: t.team_id.clone(),
             team_event_id: t.team_event_id.clone(),
         });
+        // The queue is daemon-owned. Schedule after publishing so the next prompt cannot race
+        // the completion event, and let the per-bot lock serialize it with hooks / status events.
+        if should_flush_queue {
+            schedule_flush_queued(app, &bot_id);
+        }
     }
+}
+
+/// Hand the oldest queued prompt to the agent, if it can take one right now.
+///
+/// The caller already holds the bot lock, which is what makes the `queued -> in_flight`
+/// promotion safe: `turns_one_in_flight` and `turns_one_queued` are both unique indexes, so
+/// losing a race here would be an error rather than a no-op. Every early return leaves the
+/// turn queued for the next transition to retry — the queue is durable, so "not now" is
+/// always a safe answer. That holds *after* the claim as well: anything that gives up
+/// between `queued -> in_flight` and the `agent.prompt` RPC calls `requeue_turn`, because a
+/// turn left `in_flight` with `delivery='pending'` has no other way out.
+async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
+    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return Ok(()) };
+    let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
+    // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
+    let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
+    if run.state != "running" || run.agent_status == "blocked" {
+        return Ok(());
+    }
+    if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+        return Ok(());
+    }
+    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    let text = turn.prompt_text.clone().unwrap_or_default();
+    if text.trim().is_empty() {
+        // Nothing deliverable: drop it rather than leave the queue permanently blocked.
+        let _ = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='queued'")
+            .bind(db::now())
+            .bind(&turn.id)
+            .execute(&app.db)
+            .await;
+        emit_turn(app, &turn.id).await;
+        return Ok(());
+    }
+
+    // Claim it first. If the CAS loses, another flush got there and this one has nothing to do.
+    let claimed = sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=? AND status='queued'")
+        .bind(&run.id)
+        .bind(&turn.id)
+        .execute(&app.db)
+        .await?;
+    if claimed.rows_affected() == 0 {
+        return Ok(());
+    }
+    emit_turn(app, &turn.id).await;
+
+    // Everything between the claim and the RPC must put the turn *back* on the queue if it
+    // gives up. Nothing else in the daemon finishes a turn that is `in_flight` with
+    // `delivery='pending'`: `arm_stall`, `arm_progress` and `try_fallback` all require
+    // `delivery == "ok"`, so a turn abandoned here would sit in flight until the run ended
+    // — blocking every later `prompt()` with 409 "a turn is already in flight" — and this is
+    // a background task, so the user would never see why.
+    let client = match client_for_run(app, &run).await {
+        Ok(c) => c,
+        Err(e) => {
+            requeue_turn(app, &turn.id, bot_id, &format!("no herdr client: {e:?}")).await;
+            return Ok(());
+        }
+    };
+    let res = client
+        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": &text}), Duration::from_secs(10))
+        .await;
+    let delivery = match res {
+        Ok(_) => "ok",
+        Err(e) => {
+            let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
+            if blocked {
+                let _ = sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=?")
+                    .bind(db::now())
+                    .bind(&turn.id)
+                    .execute(&app.db)
+                    .await;
+                let _ = insert_message(app, &conv, Some(&turn.id), "system", &format!("delivery failed: {e}"), "system", false, None).await;
+                emit_turn(app, &turn.id).await;
+                return Ok(());
+            }
+            // Deliberately *not* requeued: the RPC was sent and we do not know whether the
+            // agent took it, so putting the same text back on the queue could deliver it
+            // twice. `delivery='unknown'` is the designed, user-visible parking state —
+            // `prompt()` refuses the next prompt with "abandon it first" and names this turn.
+            tracing::warn!(bot = %bot_id, error = %e, "queued prompt delivery unknown");
+            "unknown"
+        }
+    };
+    let _ = sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(&turn.id).execute(&app.db).await;
+    emit_turn(app, &turn.id).await;
+    if delivery == "ok" {
+        arm_stall(app, &run.id, bot_id, &turn.id).await;
+        arm_progress(app, &run.id, bot_id, &turn.id).await;
+    }
+    Ok(())
+}
+
+/// Undo a `queued -> in_flight` claim that never became a delivery.
+///
+/// Only ever called while the bot lock is held and only for a turn this flush claimed
+/// itself, so the `turns_one_queued` unique index cannot be violated: the row going back is
+/// the very one that was taken out of the queue a moment ago, and nothing else can have
+/// queued behind it in between. `run_id` goes back to NULL too — a turn that was never
+/// delivered does not belong to that run.
+async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str) {
+    match sqlx::query("UPDATE turns SET status='queued', run_id=NULL WHERE id=? AND status='in_flight'")
+        .bind(turn_id)
+        .execute(&app.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt put back on the queue");
+        }
+        Ok(_) => return,
+        Err(e) => {
+            tracing::error!(bot = %bot_id, turn = %turn_id, %reason, error = %e,
+                            "could not put a claimed prompt back on the queue");
+            return;
+        }
+    }
+    emit_turn(app, turn_id).await;
+}
+
+/// Wake the durable prompt queue after a turn or Run transition. The task deliberately does
+/// nothing in tests; tests drive the DB state machine directly and must not race a background
+/// RPC attempt.
+pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let app = app.clone();
+    let bot_id = bot_id.to_string();
+    tokio::spawn(async move {
+        // Let the caller finish its current event / status write before taking the same lock.
+        tokio::task::yield_now().await;
+        let lock = app.bot_lock(&bot_id).await;
+        let _g = lock.lock().await;
+        if let Err(e) = flush_queued_locked(&app, &bot_id).await {
+            tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush failed");
+        }
+    });
 }
 
 // ---------------------------------------------------------------- run state
@@ -606,7 +749,7 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
             _ => {}
         }
     }
-    // grok: `--reasoning-effort low|medium|high` (verified: `grok --help`, unknown value → error)
+    // grok: `--reasoning-effort low|medium|high|xhigh` (per model; grok-4.5 rejects xhigh)
     // codex: `-c model_reasoning_effort="<x>"` (values from `model/list`); claude: nothing.
     if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         match bot.kind.as_str() {
@@ -782,6 +925,99 @@ pub fn bot_cwd<'a>(bot: &'a db::Bot, project: &'a db::Project) -> &'a str {
     }
 }
 
+/// What the bot's tab is called on herdr's tab bar. The bot's own nickname, so the user can
+/// tell which tab is which — a label herdr would otherwise number `1`, `2`, `3`.
+pub fn tab_label(bot: &db::Bot) -> String {
+    let n = bot.name.trim();
+    if n.is_empty() {
+        "bot".to_string()
+    } else {
+        n.to_string()
+    }
+}
+
+/// Close `tab_id` when nothing is left in it.
+///
+/// The one place that decides "is this tab now empty?", shared by every caller that takes a
+/// pane out of a tab: stopping a run, cleaning up after a failed start, and moving a pane to
+/// a tab of its own. Deliberately quiet and idempotent — herdr reaps a tab whose last pane
+/// closes, and `pane.move` reports the emptied tab it closed itself, so finding the tab
+/// already gone is the *expected* outcome, not a failure worth surfacing.
+///
+/// A tab that still holds panes is left alone: that is a run from before the one-bot-one-tab
+/// change (split into a shared tab), or panes the user arranged by hand.
+async fn close_tab_if_empty(client: &crate::herdr::HerdrClient, workspace_id: &str, tab_id: &str) {
+    let tabs = match client.tab_list(workspace_id).await {
+        Ok(t) => t,
+        // Never guess when herdr cannot be asked: closing a tab we cannot see the contents
+        // of could take a pane the user is working in with it.
+        Err(e) => {
+            tracing::debug!(workspace_id, tab_id, error = %e, "tab.list failed; leaving the tab alone");
+            return;
+        }
+    };
+    match tabs.iter().find(|t| t.tab_id == tab_id) {
+        None => {} // herdr already reaped it
+        Some(t) if t.pane_count == 0 => {
+            if let Err(e) = client.tab_close(tab_id).await {
+                tracing::debug!(tab_id, error = %e, "tab.close failed");
+            }
+        }
+        Some(_) => {}
+    }
+}
+
+/// Close a run's pane and, when that leaves its tab empty, the tab as well.
+///
+/// `tab_id` is `None` for runs started before one-bot-one-tab: their pane was split into a
+/// tab it shares, so only the pane goes.
+pub(crate) async fn close_pane_and_tab(
+    client: &crate::herdr::HerdrClient,
+    workspace_id: Option<&str>,
+    tab_id: Option<&str>,
+    pane_id: &str,
+) {
+    let _ = client.pane_close(pane_id).await;
+    let ws = workspace_id.filter(|w| !w.trim().is_empty());
+    if let (Some(ws), Some(tab)) = (ws, tab_id.filter(|t| !t.trim().is_empty())) {
+        close_tab_if_empty(client, ws, tab).await;
+    }
+}
+
+/// The pane a starting run gets: **one bot, one tab**.
+///
+/// This used to `pane.split` inside the project's single tab, so N bots meant N panes
+/// carving up one screen width. Seven of them in a 185-column workspace left the narrowest
+/// at 18 columns, and below roughly 31 an agent's TUI reflows to a few glyphs a row *without
+/// writing the spaces* — the user cannot read it and the terminal fallback recovers only
+/// fragments (`is_shredded`). Splitting the roomiest pane rather than the first slowed that
+/// down without fixing it, because the width being divided never grew.
+///
+/// Tabs of one workspace do **not** share width, so `tab.create` is what actually scales:
+/// five bots become five tabs of the full 185 columns each. It takes the same arguments as
+/// `pane.split` and hands back the new tab's root pane, so everything downstream —
+/// `agent.start`, the pane subscription, the run mapping — is unchanged.
+///
+/// `focus` is always false: starting a bot must not yank the user out of the tab they are
+/// reading. `fresh_root` is the root pane of a workspace we *just* created, which is already
+/// a tab of its own holding exactly one pane, so it is used as-is rather than doubled.
+async fn acquire_run_pane(
+    client: &crate::herdr::HerdrClient,
+    workspace_id: &str,
+    cwd: &str,
+    label: &str,
+    env: &Value,
+    fresh_root: Option<crate::herdr::PaneInfo>,
+) -> anyhow::Result<crate::herdr::PaneInfo> {
+    match fresh_root {
+        Some(p) => Ok(p),
+        // A team workspace (SPEC-team §6.4a) keeps its root pane: it is a plain shell sitting
+        // at the team root, a useful place for the user to stand while watching, and
+        // reclaiming it would mean re-homing a pane that is already running a shell.
+        None => client.tab_create(workspace_id, cwd, label, env.clone()).await,
+    }
+}
+
 async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_id: &str) -> LcResult<()> {
     let host = project.host.clone();
     let session = app
@@ -809,66 +1045,82 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     let env = pane_env(app, bot, &host, run_id, hook_port).await;
 
     // 2. workspace
-    let mut fresh_root: Option<String> = None;
+    let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
+    // SPEC-team §6.4a: a team member's panes belong to the **team's** workspace, not the
+    // project's. This is an extension of SPEC §2's "one workspace per project", not a breach
+    // of it: the project's workspace is untouched, the team simply owns another one. The
+    // team's workspace is created up front by `team::create`, so a member that cannot find
+    // it fails to start rather than quietly filling the user's own workspace with four
+    // throw-away panes — the reconcile then reports `workspace_missing`.
+    let team_ws: Option<String> = match bot.team_id.as_deref() {
+        Some(tid) if session.as_str() != "default" => {
+            let t = db::team(&app.db, tid).await.map_err(up)?;
+            let ws = t
+                .and_then(|t| t.workspace_id)
+                .filter(|w| !w.trim().is_empty())
+                .ok_or_else(|| LcError::Upstream("this team has no workspace".into()))?;
+            if client.workspace_get(&ws).await.map_err(up)?.is_none() {
+                return Err(LcError::Upstream(format!("the team's workspace {ws} is gone")));
+            }
+            Some(ws)
+        }
+        _ => None,
+    };
     // `projects.workspace_id` belongs to the manager's configured session. An imported bot
     // lives in the user's default session, so it must not overwrite that mapping or cause the
     // next named-session reconcile to clear it.
-    let workspace_id = match (session.as_str() != "default", project.workspace_id.as_deref()) {
-        (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
-        _ => {
-            let (ws, root) =
-                client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
-            if session != "default" {
-                sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
-                    .bind(&ws.workspace_id)
-                    .bind(&project.id)
-                    .execute(&app.db)
-                    .await
-                    .map_err(up)?;
+    let workspace_id = match team_ws {
+        Some(ws) => ws,
+        None => match (session.as_str() != "default", project.workspace_id.as_deref()) {
+            (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
+            _ => {
+                let (ws, root) =
+                    client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
+                if session != "default" {
+                    sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
+                        .bind(&ws.workspace_id)
+                        .bind(&project.id)
+                        .execute(&app.db)
+                        .await
+                        .map_err(up)?;
+                }
+                fresh_root = Some(root);
+                ws.workspace_id
             }
-            fresh_root = Some(root.pane_id.clone());
-            ws.workspace_id
-        }
+        },
     };
 
     // 3. pane
     //
     // SPEC-team §2.2: the pane's cwd is `bots.cwd` when the bot has one (a team member lives
-    // in its own worktree), otherwise the project's path. The *workspace* is still created at
-    // `project.path` — one workspace per project stays true.
-    let cwd = bot_cwd(bot, project);
-    let pane_id = match fresh_root {
-        Some(p) => p,
-        None => {
-            let panes = client.pane_list(Some(&workspace_id)).await.map_err(up)?;
-            let first = panes.first().map(|p| p.pane_id.clone()).ok_or_else(|| {
-                LcError::Upstream(format!("workspace {workspace_id} has no panes to split"))
-            })?;
-            // Always splitting the *first* pane halves it every time: the sixth bot in a
-            // workspace ended up 6 columns wide, at which the agent's TUI lays text out one
-            // glyph per row and the terminal fallback cannot read anything. Split the pane with
-            // the most room instead, along its longer axis, which grows a grid rather than a
-            // cascade. `pane.layout` is best-effort — fall back to the old behaviour.
-            let (target, dir) = match client.pane_rects(&workspace_id).await {
-                Ok(rects) if !rects.is_empty() => {
-                    let (id, w, h) = rects
-                        .into_iter()
-                        .max_by_key(|(_, w, h)| (*w as u64) * (*h as u64))
-                        .expect("non-empty");
-                    // A terminal cell is about twice as tall as it is wide, so compare the
-                    // pane's *visual* proportions, not its cell counts.
-                    (id, if w >= h * 2 { "right" } else { "down" })
-                }
-                _ => (first, "right"),
-            };
-            client.pane_split(&target, dir, cwd, env.clone()).await.map_err(up)?.pane_id
+    // in its own worktree), otherwise the project's path.
+    //
+    // For a **team member** that fallback is forbidden (§6.1 #1): the project path is the
+    // user's own checkout, and an agent started there can commit whatever the user had in
+    // progress. So a team member's cwd goes through `team::checked_member_cwd`, which
+    // demands it be inside the team's worktree root, and a member that fails it never gets
+    // a pane at all rather than getting the wrong one.
+    let checked;
+    let cwd = match bot.team_id.as_deref() {
+        Some(tid) => {
+            let t = db::team(&app.db, tid)
+                .await
+                .map_err(up)?
+                .ok_or_else(|| LcError::Upstream("this bot's team is gone".into()))?;
+            checked = crate::team::checked_member_cwd(&t, project, bot).map_err(LcError::Upstream)?;
+            checked.as_str()
         }
+        None => bot_cwd(bot, project),
     };
+    let root = acquire_run_pane(&client, &workspace_id, cwd, &tab_label(bot), &env, fresh_root).await.map_err(up)?;
+    let pane_id = root.pane_id;
+    let tab_id = root.tab_id;
 
     // 4. persist mapping + generate hook injection
-    sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ? WHERE id = ?")
+    sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
         .bind(&workspace_id)
         .bind(&pane_id)
+        .bind(&tab_id)
         .bind(run_id)
         .execute(&app.db)
         .await
@@ -889,7 +1141,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .await
         .map_err(up)?;
     if let Err(e) = client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
-        let _ = client.pane_close(&pane_id).await;
+        close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
         return Err(up(e));
     }
 
@@ -909,7 +1161,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
             match client.agent_get(&agent).await {
                 Ok(Some(info)) => set_run(app, run_id, "running", info.agent_status.normalized().as_str()).await,
                 _ => {
-                    let _ = client.pane_close(&pane_id).await;
+                    close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
                     return Err(up(e));
                 }
             }
@@ -1003,7 +1255,8 @@ pub fn schedule_codex_notice_capture(app: &Arc<App>, bot_id: &str, run_id: &str)
     });
 }
 
-/// Read and persist newly seen Codex usage-reset hints. The caller must hold the bot lock.
+/// Read and persist newly seen Codex account notices (reset available **or** hard limit hit).
+/// The caller must hold the bot lock.
 pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> anyhow::Result<()> {
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
     if run.id != expected_run_id {
@@ -1030,8 +1283,24 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         if exists != 0 {
             continue;
         }
-        insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
+        insert_message(app, &conversation_id, None, "system", &notice, "system", false, Some(&read.text)).await?;
         tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
+        if codex_limit_hit_line(&notice).is_some() {
+            apply_codex_limit_hit_quota(app, &notice).await;
+            // Unlock the composer: a limit hit is a failed turn, not a silent idle.
+            if let Some(turn) = db::in_flight_turn(&app.db, &run.id).await? {
+                let res = sqlx::query(
+                    "UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'",
+                )
+                .bind(db::now())
+                .bind(&turn.id)
+                .execute(&app.db)
+                .await?;
+                if res.rows_affected() > 0 {
+                    emit_turn(app, &turn.id).await;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1069,9 +1338,11 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     // The pane belongs to this Run either way: once the agent is gone (or refused to go)
-    // we close it, otherwise a bare shell pane would linger until the next reconcile.
+    // we close it, otherwise a bare shell pane would linger until the next reconcile. And
+    // when the run owned its tab (started with `tab.create`, or moved into one) the tab goes
+    // with it, so stopping bots does not leave a row of empty tabs behind.
     if let Some(p) = run.pane_id.as_deref() {
-        let _ = client.pane_close(p).await;
+        close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
     }
     if !gone {
         tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
@@ -1137,6 +1408,68 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     Ok(())
 }
 
+/// Give a *running* bot a tab of its own — the retrofit for every bot started before
+/// one-bot-one-tab, which is sitting in a pane split off a shared tab.
+///
+/// This is a move, not a restart. herdr keeps the `pane_id` across `pane.move` (verified
+/// against 0.8.2), so the run's mapping, its pane subscription, the progress poller and any
+/// turn in flight all carry on untouched; only `tab_id` changes. Nothing is sent to the
+/// agent, so a bot mid-answer does not notice.
+///
+/// Idempotent: a pane that already owns its tab is left exactly where it is. Moving it again
+/// would not be a no-op on herdr's side — it builds a *new* tab and closes the old one, which
+/// renumbers the user's tab bar for nothing.
+pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let pane_id = run
+        .pane_id
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| LcError::NotFound("pane".into()))?;
+    let client = client_for_run(app, &run).await?;
+
+    // Where the pane actually is right now — `runs.tab_id` is NULL for every run started the
+    // old way, and stale if the user dragged the pane about themselves.
+    let pane = client.pane_get(&pane_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("pane".into()))?;
+    let workspace_id = pane.workspace_id.clone();
+    let current_tab = pane.tab_id.clone();
+
+    let solo = client
+        .tab_list(&workspace_id)
+        .await
+        .map_err(up)?
+        .into_iter()
+        .find(|t| t.tab_id == current_tab)
+        .map(|t| t.pane_count <= 1)
+        .unwrap_or(false);
+    let tab_id = if solo {
+        current_tab
+    } else {
+        let (new_tab, previous) = client.pane_move_to_new_tab(&pane_id, &tab_label(&bot)).await.map_err(up)?;
+        // Belt to two braces: the `solo` check above means we only ever move out of a tab
+        // that still holds something, and herdr closes a tab its move emptied anyway. The
+        // shared tidy-up runs regardless because it is idempotent, and because it is the one
+        // place that decides a tab may go — a second opinion here would be a second bug.
+        if !previous.is_empty() && previous != new_tab {
+            close_tab_if_empty(&client, &workspace_id, &previous).await;
+        }
+        new_tab
+    };
+
+    sqlx::query("UPDATE runs SET workspace_id = ?, tab_id = ? WHERE id = ?")
+        .bind(&workspace_id)
+        .bind(&tab_id)
+        .bind(&run.id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    app.emit_bot_status(bot_id).await;
+    Ok(())
+}
+
 pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_run_id: Option<String>) -> LcResult<()> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -1152,9 +1485,28 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
     Ok(())
 }
 
+/// Build the TUI slash command for a live setting, or `None` if this kind/field
+/// has no in-session command (caller then reports `needs_restart`).
+fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {
+    match (kind, field) {
+        ("grok", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
+        ("grok", "model") => {
+            let mut line = format!("/model {value}");
+            if let Some(e) = effort.map(str::trim).filter(|s| !s.is_empty()) {
+                line.push(' ');
+                line.push_str(&e.to_ascii_lowercase());
+            }
+            Some(line)
+        }
+        ("claude", "model") => Some(format!("/model {value}")),
+        _ => None,
+    }
+}
+
 /// 有些設定不用重啟就能改：agent 的 TUI 自己有 slash 指令。
 ///
 /// * grok `effort` → `/effort <level>`（grok 1.0.13 `04-slash-commands.md`）
+/// * grok `model` → `/model <id>`；bot 同時有 effort 時帶第二參數（`/model grok-4.6 high`）
 /// * claude `model` → `/model <alias>`（alias 同 `claude --model`：opus / sonnet / haiku / fable…）
 ///
 /// 回傳 `true` = 已經送進去（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
@@ -1171,10 +1523,8 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, field: &str) -> bo
     };
     // 清成「不指定」沒有 slash 指令可用（`/effort` 與 `/model` 都一定要帶值）。
     let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else { return false };
-    let line = match (bot.kind.as_str(), field) {
-        ("grok", "effort") => format!("/effort {}", value.to_ascii_lowercase()),
-        ("claude", "model") => format!("/model {value}"),
-        _ => return false,
+    let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
+        return false;
     };
     let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
     if run.state != "running" || run.agent_status == "working" || run.agent_status == "blocked" {
@@ -1196,6 +1546,41 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, field: &str) -> bo
     }
     tracing::info!(bot_id, line, "applied live via slash command");
     true
+}
+
+#[cfg(test)]
+mod live_slash_tests {
+    use super::live_slash_command;
+
+    #[test]
+    fn grok_effort_and_model() {
+        assert_eq!(
+            live_slash_command("grok", "effort", "HIGH", None).as_deref(),
+            Some("/effort high")
+        );
+        assert_eq!(
+            live_slash_command("grok", "model", "grok-4.6", Some("high")).as_deref(),
+            Some("/model grok-4.6 high")
+        );
+        assert_eq!(
+            live_slash_command("grok", "model", "grok-4.5", None).as_deref(),
+            Some("/model grok-4.5")
+        );
+        assert_eq!(
+            live_slash_command("grok", "model", "grok-4.5", Some("  ")).as_deref(),
+            Some("/model grok-4.5")
+        );
+    }
+
+    #[test]
+    fn claude_model_and_unknown_are_unchanged() {
+        assert_eq!(
+            live_slash_command("claude", "model", "opus", None).as_deref(),
+            Some("/model opus")
+        );
+        assert_eq!(live_slash_command("codex", "model", "gpt-5.5", None), None);
+        assert_eq!(live_slash_command("claude", "effort", "high", None), None);
+    }
 }
 
 // ---------------------------------------------------------------- prompt
@@ -1650,6 +2035,16 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
     Some(text[cut..].trim().to_string())
 }
 
+/// How many columns wide this run's pane currently is, for the "too narrow to read" message.
+/// Best effort: it only ever decorates a diagnostic, so any failure just means less detail.
+async fn pane_columns(app: &Arc<App>, run: &db::Run) -> Option<u32> {
+    let pane = run.pane_id.clone()?;
+    let ws = run.workspace_id.clone()?;
+    let client = client_for_run(app, run).await.ok()?;
+    let rects = client.pane_rects(&ws).await.ok()?;
+    rects.into_iter().find(|(id, _, _)| *id == pane).map(|(_, w, _)| w)
+}
+
 /// Has the pane shredded its output into a column of single characters?
 ///
 /// herdr's `recent_unwrapped` undoes the *terminal's* soft wrapping, not the TUI's own layout:
@@ -1660,6 +2055,14 @@ fn is_shredded(text: &str) -> bool {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if lines.len() < 6 {
         return false;
+    }
+    // The widest row is the decisive one: whatever the mix of glyphs and word fragments, no
+    // pane whose longest line is a few characters is holding a readable answer. Counting short
+    // lines alone missed the real case (`w8:pK`, 31 columns, grok's borders eating most of
+    // them) — its rows were `381K` / `Hel` / `Off` / `by`, so only half were ≤ 2 chars while
+    // the *widest* was 4.
+    if lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) <= 6 {
+        return true;
     }
     let narrow = lines.iter().filter(|l| l.chars().count() <= 2).count();
     narrow * 10 >= lines.len() * 7
@@ -1749,6 +2152,20 @@ fn live_activity(kind: &str, text: &str) -> Option<String> {
 /// errors (which is neither short nor retry-shaped, and rarely both) out of the banner.
 fn live_alert(kind: &str, text: &str) -> Option<String> {
     const RETRY_TOKENS: [&str; 6] = ["retry", "retrying", "attempt", "reconnect", "重試", "retries"];
+    // Codex hard limit may be wrapped across many narrow-pane rows — use the multi-line scanner.
+    if kind == "codex" {
+        if let Some(hit) = codex_usage_notice_lines(text)
+            .into_iter()
+            .find(|n| codex_limit_hit_line(n).is_some())
+        {
+            if hit.chars().count() <= ACTIVITY_MAX {
+                return Some(hit);
+            }
+            let mut cut: String = hit.chars().take(ACTIVITY_MAX).collect::<String>().trim_end().to_string();
+            cut.push('…');
+            return Some(cut);
+        }
+    }
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let mut found: Option<String> = None;
@@ -1973,6 +2390,43 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
+
+    // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
+    // Scan both the fresh slice and the full snapshot — the banner may sit above the cursor.
+    if bot.kind == "codex" {
+        if let Some(hit) = codex_usage_notice_lines(&fresh)
+            .into_iter()
+            .chain(codex_usage_notice_lines(&read.text))
+            .find(|n| codex_limit_hit_line(n).is_some())
+        {
+            sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?")
+                .bind(db::now())
+                .bind(&turn.id)
+                .execute(&app.db)
+                .await?;
+            insert_message(
+                app,
+                &turn.conversation_id,
+                Some(&turn.id),
+                "system",
+                &hit,
+                "system",
+                false,
+                Some(&read.text),
+            )
+            .await?;
+            apply_codex_limit_hit_quota(app, &hit).await;
+            sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
+                .bind(read.revision as i64)
+                .bind(tail_hash(&read.text))
+                .bind(run_id)
+                .execute(&app.db)
+                .await?;
+            emit_turn(app, &turn.id).await;
+            return Ok(());
+        }
+    }
+
     let reply = extract_reply(&bot.kind, &fresh)
         .or_else(|| clean_screen(&bot.kind, &fresh))
         .unwrap_or_else(|| "（終端沒有可辨識的回覆）".to_string());
@@ -1985,7 +2439,16 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     let reply = if reply.trim().is_empty() {
         "（終端沒有可辨識的回覆）".to_string()
     } else if is_shredded(&reply) {
-        "（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）".to_string()
+        // Name the pane and its width: "too narrow" is not actionable when the user has a
+        // dozen panes open and no idea which one, or how much wider it needs to be.
+        let how_wide = match pane_columns(app, &run).await {
+            Some(w) => format!("目前 {w} 欄，"),
+            None => String::new(),
+        };
+        format!(
+            "（pane {pane_id} 太窄，{how_wide}輸出在終端就被切成單字元，無法還原。\
+             把它拉寬一點就會恢復；這只影響終端備援，hook 取得的回覆不受影響。）"
+        )
     } else {
         reply
     };
@@ -2180,16 +2643,210 @@ fn codex_usage_notice_line(line: &str) -> Option<String> {
     }
 }
 
+/// `ERROR: You've hit your usage limit. Upgrade to Pro …, or try again at Aug 8th, 2025 1:47 PM.`
+fn codex_limit_hit_line(line: &str) -> Option<String> {
+    let raw = line.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Drop a leading spinner / bullet so `• ERROR: …` still matches.
+    let s = match raw.chars().next() {
+        Some(c) if !c.is_alphanumeric() => raw[c.len_utf8()..].trim(),
+        _ => raw,
+    };
+    let body = s
+        .strip_prefix("ERROR:")
+        .or_else(|| s.strip_prefix("Error:"))
+        .or_else(|| s.strip_prefix("error:"))
+        .map(str::trim_start)
+        .unwrap_or(s);
+    let lower = body.to_ascii_lowercase();
+    let hit = lower.contains("hit your usage limit")
+        || (lower.contains("usage limit") && (lower.contains("try again") || lower.contains("upgrade to")));
+    if !hit {
+        return None;
+    }
+    // Keep a stable ERROR: prefix so the chat styles it as a hard failure.
+    if s.to_ascii_lowercase().starts_with("error:") {
+        Some(s.to_string())
+    } else {
+        Some(format!("ERROR: {body}"))
+    }
+}
+
+fn strip_codex_bullet(line: &str) -> &str {
+    line.trim()
+        .strip_prefix('•')
+        .or_else(|| line.trim().strip_prefix('■'))
+        .map(str::trim_start)
+        .unwrap_or_else(|| line.trim())
+}
+
 fn codex_usage_notice_lines(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for line in text.lines() {
-        if let Some(notice) = codex_usage_notice_line(line) {
-            if !out.iter().any(|seen| seen == &notice) {
-                out.push(notice);
+    let push = |out: &mut Vec<String>, notice: String| {
+        if !out.iter().any(|seen| seen == &notice) {
+            out.push(notice);
+        }
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if let Some(notice) = codex_limit_hit_line(line).or_else(|| codex_usage_notice_line(line)) {
+            push(&mut out, notice);
+            i += 1;
+            continue;
+        }
+        // Narrow panes wrap the hard-limit banner across many rows:
+        //   ■ You've hit your usage
+        //   limit. Upgrade to Pro
+        //   …
+        //   try again at 1:32 PM.
+        let head = strip_codex_bullet(line);
+        let head_low = head.to_ascii_lowercase();
+        let looks_hit = head_low.contains("hit your usage")
+            || (head_low.contains("error") && head_low.contains("usage"))
+            || head_low.contains("you've hit");
+        if looks_hit {
+            let mut parts: Vec<&str> = vec![head];
+            let mut j = i + 1;
+            while j < lines.len() && parts.len() < 16 {
+                let t = lines[j].trim();
+                if t.is_empty() || t.starts_with('›') || t.starts_with('❯') || t.starts_with('╭') || t.starts_with('╰') {
+                    break;
+                }
+                // Model-picker chrome under the input box — stop.
+                if t.to_ascii_lowercase().starts_with("gpt-") || t.contains("max fas") {
+                    break;
+                }
+                parts.push(t);
+                j += 1;
+            }
+            let joined = parts.join(" ");
+            if let Some(notice) = codex_limit_hit_line(&joined) {
+                push(&mut out, notice);
+                i = j;
+                continue;
             }
         }
+        i += 1;
     }
     out
+}
+
+fn month_num_token(tok: &str) -> Option<u32> {
+    const M: [&str; 12] =
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let t = tok.trim_matches(|c: char| !c.is_alphabetic()).to_ascii_lowercase();
+    if t.len() < 3 {
+        return None;
+    }
+    M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
+}
+
+/// `try again at Aug 8th, 2025 1:47 PM` → RFC3339 UTC, if present.
+fn parse_codex_try_again(notice: &str) -> Option<String> {
+    use chrono::{Local, NaiveDate, TimeZone};
+    let low = notice.to_ascii_lowercase();
+    let rest = low.split("try again at").nth(1)?.trim();
+    let mut month = None;
+    let mut day = None;
+    let mut year = None;
+    let mut hour = None;
+    let mut minute = 0u32;
+    let mut pm = false;
+    for tok in rest.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()) {
+        if month.is_none() {
+            if let Some(m) = month_num_token(tok) {
+                month = Some(m);
+                continue;
+            }
+        }
+        let digits: String = tok.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            // The notice ends in a full stop, so the last token is `pm.` — an exact match here
+            // silently loses the meridiem and reports a reset twelve hours early.
+            match tok.trim_matches(|c: char| !c.is_ascii_alphanumeric()) {
+                "pm" => pm = true,
+                "am" => pm = false,
+                _ => {}
+            }
+            continue;
+        }
+        if let Some((h, m)) = tok.split_once(':') {
+            if let (Ok(h), Ok(m)) = (
+                h.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>(),
+                m.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>(),
+            ) {
+                hour = Some(h);
+                minute = m;
+                let tail = tok.to_ascii_lowercase();
+                if tail.contains("pm") {
+                    pm = true;
+                } else if tail.contains("am") {
+                    pm = false;
+                }
+                continue;
+            }
+        }
+        match digits.len() {
+            4 => year = digits.parse().ok(),
+            _ if day.is_none() => day = digits.parse().ok(),
+            _ if hour.is_none() => hour = digits.parse().ok(),
+            _ => {}
+        }
+        if tok.to_ascii_lowercase().ends_with("pm") {
+            pm = true;
+        } else if tok.to_ascii_lowercase().ends_with("am") {
+            pm = false;
+        }
+    }
+    let (month, day, year, mut hour) = (month?, day?, year?, hour?);
+    if pm && hour < 12 {
+        hour += 12;
+    }
+    if !pm && hour == 12 {
+        hour = 0;
+    }
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
+    let dt = Local.from_local_datetime(&naive).earliest()?;
+    Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// When Codex prints a hard limit-hit, mirror it onto the `codex` quota row so the strip
+/// shows empty immediately (the rate-limits RPC can lag a turn behind the TUI).
+async fn apply_codex_limit_hit_quota(app: &Arc<App>, notice: &str) {
+    let resets = parse_codex_try_again(notice);
+    let mut q = app
+        .quotas
+        .lock()
+        .await
+        .get("codex")
+        .cloned()
+        .unwrap_or_else(|| crate::quota::Quota {
+            five_hour: None,
+            seven_day: None,
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "codex-limit-hit".into(),
+            account: None,
+        });
+    // Prefer marking the 5h window (the burst limit); fall back to 7d if that is all we have.
+    let win = crate::quota::Window { used_pct: 100.0, resets_at: resets.clone() };
+    if q.five_hour.is_some() || q.seven_day.is_none() {
+        q.five_hour = Some(win);
+    } else if let Some(existing) = q.seven_day.as_mut() {
+        existing.used_pct = 100.0;
+        if resets.is_some() {
+            existing.resets_at = resets;
+        }
+    } else {
+        q.seven_day = Some(win);
+    }
+    q.updated_at = crate::db::now();
+    q.source = "codex-limit-hit".into();
+    crate::quota::set(app, "codex", q).await;
 }
 
 /// No reply marker found: keep whatever the agent printed after the last prompt echo,
@@ -2342,6 +2999,72 @@ mod extract_tests {
             Some("You have 2 usage limit resets available. Run /usage to use one.".into()),
         );
         assert!(codex_usage_notice_line("• ordinary assistant text").is_none());
+    }
+
+    const CODEX_LIMIT_HIT: &str = "\
+ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), \
+or try again at Aug 8th, 2025 1:47 PM.
+";
+
+    #[test]
+    fn codex_limit_hit_is_captured_as_notice() {
+        let lines = codex_usage_notice_lines(CODEX_LIMIT_HIT);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].to_ascii_lowercase().contains("hit your usage limit"));
+        assert!(lines[0].starts_with("ERROR:"));
+        assert_eq!(
+            codex_limit_hit_line(
+                "ERROR: You've hit your usage limit. Upgrade to Pro, or try again at Sep 6th, 2026 3:00 PM."
+            )
+            .map(|s| s.contains("hit your usage limit")),
+            Some(true),
+        );
+        assert!(codex_limit_hit_line("• ordinary assistant text").is_none());
+    }
+
+    /// Real pane when Codex wraps the banner at ~28 columns.
+    const CODEX_LIMIT_HIT_WRAPPED: &str = "\
+› ping
+
+■ You've hit your usage
+limit. Upgrade to Pro
+(https://chatgpt.com/ex
+plore/pro),
+visit
+https://chatgpt.com/cod
+ex/settings/usage
+to purchase more
+credits or try again at
+1:32 PM.
+
+› Ask Codex to do anyt
+
+  gpt-5.6-luna max fas…
+";
+
+    #[test]
+    fn codex_limit_hit_survives_narrow_pane_wrap() {
+        let lines = codex_usage_notice_lines(CODEX_LIMIT_HIT_WRAPPED);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let n = lines[0].to_ascii_lowercase();
+        assert!(n.contains("hit your usage"));
+        assert!(n.contains("limit"));
+        assert!(n.contains("try again"));
+    }
+
+    #[test]
+    fn codex_try_again_at_parses_reset() {
+        let r = parse_codex_try_again(
+            "ERROR: You've hit your usage limit. Upgrade to Pro, or try again at Aug 8th, 2025 1:47 PM.",
+        )
+        .unwrap();
+        assert!(r.starts_with("2025-08-08T"), "{r}");
+    }
+
+    #[test]
+    fn live_alert_surfaces_codex_limit_hit() {
+        let alert = live_alert("codex", CODEX_LIMIT_HIT).unwrap();
+        assert!(alert.to_ascii_lowercase().contains("hit your usage limit"));
     }
 
     #[test]
@@ -2592,6 +3315,15 @@ mod extract_tests {
         assert!(!is_shredded("好的，我來處理。\n改了三個檔案：\n- a.rs\n- b.rs\n- c.rs\n都跑過測試了。\n"));
         // Too little to judge: a two-line answer is not evidence of a broken pane.
         assert!(!is_shredded("好\n的\n"));
+
+        // Verbatim from `w8:pK` (2026-09-06): 31 columns, most of them eaten by grok's borders.
+        // Only half of these rows are ≤ 2 chars, so counting short lines alone let it through —
+        // the widest row being 4 characters is what actually gives it away.
+        let real = "381K\n❯\n█\n█\n▼\nHel\nOff\nby\ndef\nau…\n";
+        assert!(is_shredded(real));
+
+        // The width rule must not fire on a narrow *but legible* reply.
+        assert!(!is_shredded("已修好。\n改了 db.rs。\n測試全過。\n沒有其他影響。\n重啟後生效。\n請確認。\n"));
     }
 
     #[test]
@@ -2723,5 +3455,407 @@ mod extract_tests {
         assert_eq!(last_prompt_echo_text("claude", "❯\n"), None);
         assert_eq!(last_prompt_echo_text("claude", "❯    \n"), None);
         assert_eq!(last_prompt_echo_text("unknown", "❯ hello\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod flush_queue_tests {
+    //! The durable prompt queue's claim step, driven straight at the sqlite state machine.
+    //! `schedule_flush_queued` is a no-op under `cfg!(test)`, so these call
+    //! `flush_queued_locked` themselves — which is also the only way to observe what the
+    //! background task would have done.
+    use super::*;
+    use crate::team::testing as tt;
+
+    struct Fixture {
+        env: tt::Env,
+        bot_id: String,
+        conv: String,
+        run_id: String,
+        turn_id: String,
+    }
+
+    /// A bot with a running run and one queued prompt behind it. `session` is what the run
+    /// claims to live on: `"test"` is the one the mock herdr answers, anything else makes
+    /// `client_for_run` fail — which is exactly the shape of a host that dropped out between
+    /// the prompt being queued and the flush trying to deliver it.
+    async fn queued(session: &str) -> Fixture {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'q','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent',?,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(session)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,'web','queued','pending','ping',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        Fixture { env, bot_id, conv, run_id, turn_id }
+    }
+
+    async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
+        sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// **The regression.** The flush claims the turn (`queued -> in_flight`) *before* it has
+    /// a herdr client. When that lookup then fails the turn used to be abandoned mid-claim:
+    /// `in_flight` with `delivery='pending'`, which nothing finishes — `arm_stall`,
+    /// `arm_progress` and `try_fallback` all require `delivery == "ok"` — so the composer
+    /// said "回合進行中" for ever and every later `prompt()` was refused with 409 "a turn is
+    /// already in flight". It must go back on the queue instead.
+    #[tokio::test]
+    async fn a_claim_that_cannot_be_delivered_goes_back_on_the_queue() {
+        let f = queued("no-such-session").await;
+        let app = f.env.app.clone();
+
+        flush_queued_locked(&app, &f.bot_id).await.expect("the flush itself does not error");
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued", "the claim was undone, not left in flight");
+        assert_eq!(t.delivery, "pending");
+        assert_eq!(t.run_id, None, "an undelivered turn does not belong to that run");
+        assert!(t.completed_at.is_none(), "it was requeued, not failed");
+        // The two consequences of the bug, checked directly.
+        assert!(
+            db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none(),
+            "nothing is in flight, so the next prompt is not refused with 409",
+        );
+        assert_eq!(
+            db::queued_turn(&app.db, &f.conv).await.unwrap().map(|q| q.id),
+            Some(f.turn_id.clone()),
+            "the durable queue still holds it, so a later transition retries the delivery",
+        );
+
+        // And it really is retryable: the same call against a reachable session claims it
+        // again, so requeueing did not poison `turns_one_queued` or the CAS.
+        sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?")
+            .bind(&f.run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "in_flight", "the retry got to claim it");
+        assert_eq!(t.run_id.as_deref(), Some(f.run_id.as_str()));
+    }
+
+    /// The other side of the same coin: once the RPC has actually gone out, a failure is
+    /// **not** requeued. We do not know whether the agent took the text, so replaying it
+    /// could deliver the same prompt twice; `delivery='unknown'` is the designed parking
+    /// state and `prompt()` names that turn in its "abandon it first" conflict.
+    ///
+    /// (The mock herdr answers `agent.prompt` with `unsupported`, which is a delivery
+    /// failure that is not `agent_blocked` — precisely this case.)
+    #[tokio::test]
+    async fn a_failure_after_the_rpc_is_parked_as_unknown_not_requeued() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "in_flight");
+        assert_eq!(t.delivery, "unknown");
+        assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none(), "not put back on the queue");
+    }
+
+    /// An empty queued prompt is still dropped rather than requeued — an unchanged path,
+    /// pinned here because "always put it back" would turn it into an infinite queue.
+    #[tokio::test]
+    async fn an_empty_queued_prompt_is_still_failed_not_requeued() {
+        let f = queued("no-such-session").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET prompt_text = '   ' WHERE id = ?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "failed");
+        assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    //! One bot, one tab (and the retrofit for the bots that predate it).
+    //!
+    //! These drive the real functions against the mock herdr in `team::testing`, which keeps
+    //! genuine tab/pane bookkeeping — so "the tab was closed" is a fact about the server's
+    //! state, not about which RPC we happened to send. The mock deliberately does **not**
+    //! reap a tab when its last pane closes, though herdr 0.8.2 does: that is the only way to
+    //! see whether the daemon tidies up on its own rather than leaning on the server.
+    use super::*;
+    use crate::team::testing as tt;
+
+    async fn a_bot(env: &tt::Env, name: &str) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?)",
+        )
+        .bind(&id)
+        .bind(&env.project_id)
+        .bind(name)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn run_row(app: &Arc<App>, id: &str) -> db::Run {
+        sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// A run that is `running` on `pane_id`, with whatever `tab_id` the caller says.
+    async fn running_on(app: &Arc<App>, bot_id: &str, ws: &str, pane: &str, tab: Option<&str>) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'agent','test',?)",
+        )
+        .bind(&id)
+        .bind(bot_id)
+        .bind(ws)
+        .bind(pane)
+        .bind(tab)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// **The change.** Starting a bot asks for a *tab*, not a split of somebody else's pane,
+    /// and hands back that tab's root pane. `pane.split` is never sent — which is the whole
+    /// point: panes of one tab divide a fixed width between them, tabs do not.
+    #[tokio::test]
+    async fn a_starting_bot_gets_a_tab_of_its_own() {
+        let env = tt::env().await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+
+        let e = json!({"AM_BOT_ID": "b1", "AM_HOOK_TOKEN": "tok"});
+        let first = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &e, None).await.unwrap();
+        let second = acquire_run_pane(&client, &ws.workspace_id, "/tmp/worktree", "bravo", &e, None).await.unwrap();
+
+        assert!(!env.herdr.methods().iter().any(|m| m == "pane.split"), "a bot is never split into a shared tab");
+        assert_ne!(first.tab_id, second.tab_id, "two bots, two tabs — they do not share a width");
+        assert_ne!(first.tab_id, root.tab_id, "and neither lands in the workspace's own tab");
+        for t in [&first.tab_id, &second.tab_id] {
+            assert_eq!(env.herdr.tab(t).unwrap().panes.len(), 1, "each tab holds exactly the one bot's pane");
+        }
+
+        // The call itself: same cwd/env contract as the old `pane.split`, the bot's nickname
+        // on the tab bar, and never stealing focus from whatever the user is reading.
+        let p = env.herdr.first_call("tab.create").expect("tab.create was called");
+        assert_eq!(p["workspace_id"], json!(ws.workspace_id));
+        assert_eq!(p["cwd"], json!("/tmp/p"));
+        assert_eq!(p["label"], json!("alfa"));
+        assert_eq!(p["focus"], json!(false), "starting a bot must not yank the user's focus");
+        assert_eq!(p["env"]["AM_BOT_ID"], json!("b1"));
+        assert_eq!(p["env"]["AM_HOOK_TOKEN"], json!("tok"));
+    }
+
+    /// A workspace we just created is already one tab with one pane in it, so the first bot
+    /// in a fresh project sits in the root pane rather than opening a second, empty tab.
+    #[tokio::test]
+    async fn the_first_bot_in_a_fresh_workspace_reuses_its_root_pane() {
+        let env = tt::env().await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+
+        let got =
+            acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), Some(root.clone())).await.unwrap();
+
+        assert_eq!(got.pane_id, root.pane_id);
+        assert_eq!(got.tab_id, root.tab_id);
+        assert!(env.herdr.first_call("tab.create").is_none(), "no second tab for a workspace that is one already");
+        assert_eq!(env.herdr.tabs_in(&ws.workspace_id).len(), 1);
+    }
+
+    /// Stopping a bot takes its tab with it, so a day of starting and stopping does not leave
+    /// a row of empty tabs across the top of the workspace.
+    #[tokio::test]
+    async fn stopping_a_bot_closes_the_tab_it_owned() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), None).await.unwrap();
+
+        let bot = a_bot(&env, "alfa").await;
+        running_on(&app, &bot, &ws.workspace_id, &pane.pane_id, Some(&pane.tab_id)).await;
+
+        assert!(stop_bot(&app, &bot).await.unwrap());
+
+        assert!(env.herdr.tab(&pane.tab_id).is_none(), "the bot's own tab went with it");
+        assert_eq!(env.herdr.tabs_in(&ws.workspace_id).len(), 1, "only the workspace's own tab is left");
+    }
+
+    /// The other half of the same rule: a pane that *shares* its tab — every bot started
+    /// before this change, and anything the user split by hand — only loses the pane. Closing
+    /// the tab there would take a neighbour's agent down with it.
+    #[tokio::test]
+    async fn stopping_a_bot_in_a_shared_tab_leaves_the_tab_alone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        // The old world: two bots split into the workspace's single tab.
+        let neighbour = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let mine = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        assert_eq!(mine.tab_id, neighbour.tab_id);
+
+        let bot = a_bot(&env, "alfa").await;
+        // `tab_id` recorded even though the tab is shared — reconcile fills it in from herdr
+        // for old runs too, so "has a tab id" must not be what decides to close the tab.
+        running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, Some(&mine.tab_id)).await;
+
+        assert!(stop_bot(&app, &bot).await.unwrap());
+
+        let tab = env.herdr.tab(&mine.tab_id).expect("the shared tab survives");
+        assert!(!tab.panes.contains(&mine.pane_id), "our pane is gone");
+        assert!(tab.panes.contains(&neighbour.pane_id), "the neighbour's agent is untouched");
+    }
+
+    /// The retrofit endpoint: a bot already running in a shared tab is given one of its own.
+    /// It is a move, so the `pane_id` — everything the run, its subscription and any turn in
+    /// flight are keyed by — must survive unchanged.
+    #[tokio::test]
+    async fn moving_a_running_bot_gives_it_a_tab_without_changing_its_pane() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let neighbour = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let mine = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let bot = a_bot(&env, "alfa").await;
+        // NULL tab_id: exactly what a run started before the column existed looks like.
+        let run = running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, None).await;
+
+        move_pane_to_own_tab(&app, &bot).await.unwrap();
+
+        let r = run_row(&app, &run).await;
+        assert_eq!(r.pane_id.as_deref(), Some(mine.pane_id.as_str()), "a move, not a restart: same pane");
+        assert_eq!(r.state, "running");
+        let tab = r.tab_id.expect("the new tab was recorded on the run");
+        assert_ne!(tab, mine.tab_id);
+        assert_eq!(env.herdr.tab(&tab).unwrap().panes, vec![mine.pane_id.clone()], "it has the tab to itself");
+        assert_eq!(env.herdr.first_call("pane.move").unwrap()["destination"]["label"], json!("alfa"));
+        assert_eq!(env.herdr.first_call("pane.move").unwrap()["focus"], json!(false));
+        // The tab it left still holds the neighbour, so it is not closed.
+        assert!(env.herdr.tab(&neighbour.tab_id).unwrap().panes.contains(&neighbour.pane_id));
+    }
+
+    /// The tidy-up both paths share, on its own. It is the *only* thing that decides a tab
+    /// may go, and it decides it from herdr's pane count rather than from anything we
+    /// recorded — a tab still holding a pane is somebody's live agent.
+    ///
+    /// It also has to be quiet about a tab that is already gone: herdr 0.8.2 reaps a tab when
+    /// its last pane closes and `pane.move` closes the tab it emptied, so "not found" is the
+    /// ordinary outcome in production, and only the mock (which does not reap) ever reaches
+    /// the `tab.close` below.
+    #[tokio::test]
+    async fn the_tidy_up_closes_an_empty_tab_and_only_an_empty_one() {
+        let env = tt::env().await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let alone = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), None).await.unwrap();
+        let busy = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "bravo", &json!({}), None).await.unwrap();
+
+        // Occupied: left alone.
+        close_tab_if_empty(&client, &ws.workspace_id, &busy.tab_id).await;
+        assert!(env.herdr.tab(&busy.tab_id).is_some());
+
+        // Emptied: closed.
+        client.pane_close(&alone.pane_id).await.unwrap();
+        close_tab_if_empty(&client, &ws.workspace_id, &alone.tab_id).await;
+        assert!(env.herdr.tab(&alone.tab_id).is_none());
+
+        // Already gone: not an error, and nothing else is touched.
+        close_tab_if_empty(&client, &ws.workspace_id, &alone.tab_id).await;
+        assert!(env.herdr.tab(&busy.tab_id).is_some());
+    }
+
+    /// Idempotence. A pane that already owns its tab is left exactly where it is: on herdr a
+    /// second move is *not* a no-op — it builds a new tab and closes the old one, renumbering
+    /// the user's tab bar for nothing.
+    #[tokio::test]
+    async fn moving_a_bot_that_already_owns_its_tab_changes_nothing() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let mine = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), None).await.unwrap();
+
+        let bot = a_bot(&env, "alfa").await;
+        let run = running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, None).await;
+
+        move_pane_to_own_tab(&app, &bot).await.unwrap();
+
+        assert!(env.herdr.first_call("pane.move").is_none(), "nothing to move");
+        let r = run_row(&app, &run).await;
+        assert_eq!(r.tab_id.as_deref(), Some(mine.tab_id.as_str()), "the tab it already had is recorded");
+        assert_eq!(env.herdr.tab(&mine.tab_id).unwrap().panes, vec![mine.pane_id]);
+    }
+
+    /// No active run, or a run with no pane behind it, is a 404 — not a 502 and not a panic.
+    #[tokio::test]
+    async fn moving_a_bot_that_is_not_running_is_a_not_found() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = a_bot(&env, "alfa").await;
+
+        assert!(matches!(move_pane_to_own_tab(&app, &bot).await, Err(LcError::NotFound(_))));
+
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at)
+             VALUES (?,?,'running','idle','test',?)",
+        )
+        .bind(&id)
+        .bind(&bot)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert!(matches!(move_pane_to_own_tab(&app, &bot).await, Err(LcError::NotFound(_))));
     }
 }

@@ -4,8 +4,9 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toModels, toQuota, toState, toTerminal, num, str, isRec, optStr, pick, arr } from './normalize'
+import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, num, str, isRec, optStr, pick, arr } from './normalize'
 import { HttpTransport } from './transport'
+import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
 import type {
   AppState,
@@ -25,10 +26,17 @@ import type {
   MessagesPage,
   NewBotInput,
   NewProjectInput,
+  NewTeamInput,
   PatchBotInput,
   PatchBotResult,
+  PatchTeamInput,
   PromptResult,
   BotKind,
+  TeamBranchDisposal,
+  TeamControlAction,
+  TeamDetail,
+  TeamEvent,
+  TeamTaskDecision,
   TerminalSnapshot,
   TerminalSource,
   TurnDelivery,
@@ -116,13 +124,41 @@ export async function fetchTerminal(
 }
 
 /**
+ * `POST /api/bots/:id/pane/move-to-tab` → `200 {}`.
+ *
+ * 把 bot 現有的 pane 從共用分頁搬到同 workspace 的新分頁（daemon 端對應 herdr 的
+ * `pane.move` + `destination.type = "new_tab"`）。同一分頁裡的 pane 互搶寬度，不同分頁不會，
+ * 所以這是把窄到讀不了的 pane 救回來的唯一可預期做法（`pane.resize` 是零和的、`zoom` 只放大字）。
+ *
+ * **搬的是既有 pane，不是重開**：`pane_id` 不變，run / 事件訂閱 / 正在跑的回合都不受影響。
+ */
+export async function movePaneToTab(botId: string): Promise<void> {
+  await transport.request('POST', `/bots/${encodeURIComponent(botId)}/pane/move-to-tab`)
+}
+
+/**
+ * 「這版 daemon 沒有 `pane/move-to-tab` 這個端點」與真正的失敗分開（docs/FRONTEND.md §8）。
+ *
+ * 現行 daemon 對 `/api/bots/:id/` 底下的未知路徑回的是**裸 405、空 body**（已實測 2026-09-06），
+ * 所以 405 / 501 一律當成沒實作；404 只在**沒有機器碼**時才算——daemon 自己的 404 一定帶
+ * `{error, what}`，那是「這個 bot 不見了」，不是「這版沒有這個功能」。
+ */
+export function isPaneMoveUnsupported(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false
+  if (e.status === 405 || e.status === 501) return true
+  if (e.status !== 404) return false
+  return !e.body.error && !e.body.what
+}
+
+/**
  * `GET /api/fs/dirs?host=<name>&path=` — SPEC §11.5. `host` omitted / `"local"` lists the
  * daemon's own filesystem; anything else is listed over ssh on that host.
  */
-export async function listDirs(path?: string, host?: string): Promise<DirListing> {
+export async function listDirs(path?: string, host?: string, hidden?: boolean): Promise<DirListing> {
   const params = new URLSearchParams()
   if (path) params.set('path', path)
   if (host && host !== 'local') params.set('host', host)
+  if (hidden) params.set('hidden', '1')
   const q = params.toString()
   const raw = await transport.request('GET', `/fs/dirs${q ? `?${q}` : ''}`)
   const r = isRec(raw) ? raw : {}
@@ -305,6 +341,88 @@ export async function fetchIssues(projectId: string, opts: { state?: 'open' | 'c
 /** `GET /api/projects/:id/issues/:number` — with the full body. */
 export async function fetchIssue(projectId: string, number: number): Promise<IssueDetail | null> {
   return toIssueDetail(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues/${number}`))
+}
+
+// -------------------------------------------------------- Issue Team（SPEC-team §10）
+
+/**
+ * 這批端點在舊 daemon 上並不存在。呼叫端一律用 `isTeamsUnsupported()` 判斷，
+ * 把「daemon 還沒有 team」跟真正的錯誤分開（docs/FRONTEND.md §8：缺端點要靜默退回）。
+ */
+export function isTeamsUnsupported(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false
+  if (e.status === 405 || e.status === 501) return true
+  if (e.status !== 404) return false
+  // daemon 自己的 404 一定帶機器碼（`{error:"not_found", what:"team"}`）——那是「這個 team
+  // 不見了」，不是「這版 daemon 沒有 team」。路由根本不存在時回的是裸 404。
+  return !e.body.error && !e.body.what
+}
+
+/** `POST /api/projects/:id/teams` → `{team_id}`。 */
+export async function createTeam(projectId: string, input: NewTeamInput): Promise<string> {
+  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/teams`, input)
+  return isRec(raw) ? str(pick(raw, 'team_id', 'id')) : ''
+}
+
+/** `GET /api/teams/:id` — team 物件 + tasks + base/worktree。 */
+export async function fetchTeam(teamId: string): Promise<TeamDetail | null> {
+  return toTeamDetail(await transport.request('GET', `/teams/${encodeURIComponent(teamId)}`), teamId)
+}
+
+/** `GET /api/teams/:id/events?before=&limit=` — 倒序分頁、正序回傳。 */
+export async function fetchTeamEvents(teamId: string, limit = 100, before?: string): Promise<TeamEvent[]> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (before) q.set('before', before)
+  return toTeamEvents(await transport.request('GET', `/teams/${encodeURIComponent(teamId)}/events?${q.toString()}`))
+}
+
+/** `POST /api/teams/:id/{pause|resume|approve|abort|cleanup}`。 */
+export async function controlTeam(teamId: string, action: TeamControlAction, body?: unknown): Promise<void> {
+  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/${action}`, body)
+}
+
+/**
+ * `DELETE /api/teams/:id?branches=keep|delete`（SPEC-team §6.5a）。
+ *
+ * 與 `cleanup` 不同：**任何 phase 都可以刪**（非終態時等於先 abort 再刪），而且連
+ * `teams` / `team_tasks` / `team_events` 的紀錄一起移除。成員的對話訊息保留。
+ * 冪等：team 不存在回 `404 {error:"not_found", what:"team"}`，呼叫端當成功處理。
+ */
+export async function deleteTeam(teamId: string, branches: TeamBranchDisposal = 'keep'): Promise<void> {
+  await transport.request('DELETE', `/teams/${encodeURIComponent(teamId)}?branches=${branches}`)
+}
+
+/** daemon 回的「這個 team 不存在」（與「這版 daemon 沒有 team 端點」不同，見 `isTeamsUnsupported`）。 */
+export function isTeamNotFound(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404 && e.body.what === 'team'
+}
+
+/** `PATCH /api/teams/:id {budget?, supervised?, deliver?}`。 */
+export async function patchTeam(teamId: string, input: PatchTeamInput): Promise<void> {
+  await transport.request('PATCH', `/teams/${encodeURIComponent(teamId)}`, input)
+}
+
+/** `POST /api/teams/:id/say {text, to, client_request_id}` — 使用者插話（不計預算）。 */
+export async function sayToTeam(teamId: string, text: string, to: string, clientRequestId: string): Promise<void> {
+  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/say`, { text, to, client_request_id: clientRequestId })
+}
+
+/** `POST /api/teams/:id/answer {text}` — 回覆 PM 的 `ask_user`（等同 say + resume）。 */
+export async function answerTeam(teamId: string, text: string): Promise<void> {
+  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/answer`, { text })
+}
+
+/** `POST /api/teams/:id/tasks/:tid/decide {action, note?}`。 */
+export async function decideTeamTask(
+  teamId: string,
+  taskId: string,
+  action: TeamTaskDecision,
+  note?: string,
+): Promise<void> {
+  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/tasks/${encodeURIComponent(taskId)}/decide`, {
+    action,
+    ...(note ? { note } : {}),
+  })
 }
 
 /** `crypto.randomUUID()` with a fallback for non-secure origins. */

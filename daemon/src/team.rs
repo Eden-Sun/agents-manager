@@ -1,0 +1,3138 @@
+//! Issue Team (`docs/SPEC-team.md`) — data layer, REST surface and WS events.
+//!
+//! What is here (stage 1 items 1, 2, 4, 5 of SPEC-team §13):
+//!
+//! * the `teams` / `team_tasks` / `team_events` rows and the JSON shapes of §10;
+//! * creating a team: validation, the DB record, and the member Bots (ordinary `bots` rows
+//!   carrying `managed_by='team'`, so every existing start / stop / prompt / hook / reconcile
+//!   path works on them unchanged — SPEC-team §5.2);
+//! * the control endpoints (pause / resume / approve / abort / cleanup / PATCH / say /
+//!   answer / decide) and the three WS events.
+//!
+//! The scheduler event loop, the `am-team` protocol and the task state machine live next
+//! door in `team_sched.rs`; every git and `gh` command lives in `team_git.rs`. This module
+//! owns creation (including the §6.2 worktree layout), the reads, and the control endpoints.
+
+use crate::config::LOCAL_HOST;
+use crate::db;
+use crate::lifecycle::{self, LcError, LcResult};
+use crate::state::App;
+use crate::team_git as tg;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+// ---------------------------------------------------------------- constants
+
+/// SPEC-team §12 #7: one reviewer serialises review, so more than four workers only queue.
+pub const MAX_WORKERS: u32 = 4;
+pub const DEFAULT_WORKER_COUNT: u32 = 2;
+pub const DEFAULT_BASE_REF: &str = "HEAD";
+
+/// SPEC-team §12 #1 — **user decision, overriding the proposal's `pr`**: `git push` to
+/// origin is an outward-facing, hard-to-take-back action, so a team leaves a local branch
+/// unless a PR was explicitly asked for. Both values remain supported.
+pub const DEFAULT_DELIVER: &str = "branch";
+pub const DELIVERS: [&str; 2] = ["branch", "pr"];
+
+/// SPEC-team §12 #3: full-auto by default; the supervised gates are opt-in.
+pub const DEFAULT_SUPERVISED: bool = false;
+
+/// SPEC-team §8.1. `paused` keeps the phase it will return to in `resume_phase`.
+pub const TERMINAL_PHASES: [&str; 3] = ["done", "aborted", "failed"];
+/// Task states a user `decide` may act on (SPEC-team §10.5).
+pub const DECIDABLE_STATES: [&str; 3] = ["exhausted", "blocked_by_worker", "rebasing"];
+
+pub fn is_terminal(phase: &str) -> bool {
+    TERMINAL_PHASES.contains(&phase)
+}
+
+// ---------------------------------------------------------------- budget
+
+/// SPEC-team §9.2 / §12 #2 — the defaults are the user's ruling, not a proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Budget {
+    pub max_relays: i64,
+    pub max_review_rounds: i64,
+    pub max_wall_clock_min: i64,
+    pub quota_stop_pct: f64,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self { max_relays: 40, max_review_rounds: 2, max_wall_clock_min: 120, quota_stop_pct: 90.0 }
+    }
+}
+
+/// Every field optional: used both by `POST /teams` (`budget`) and `PATCH /teams/:id`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BudgetPatch {
+    #[serde(default)]
+    pub max_relays: Option<i64>,
+    #[serde(default)]
+    pub max_review_rounds: Option<i64>,
+    #[serde(default)]
+    pub max_wall_clock_min: Option<i64>,
+    #[serde(default)]
+    pub quota_stop_pct: Option<f64>,
+}
+
+impl Budget {
+    /// Parse a stored `budget_json`; a corrupt value falls back to the defaults rather than
+    /// failing a read of the whole team.
+    pub fn from_json(s: &str) -> Budget {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+
+    /// Apply a partial patch, rejecting values that would make the loop guards useless.
+    pub fn apply(&mut self, p: &BudgetPatch) -> Result<(), String> {
+        if let Some(v) = p.max_relays {
+            if !(1..=1000).contains(&v) {
+                return Err("max_relays must be between 1 and 1000".into());
+            }
+            self.max_relays = v;
+        }
+        if let Some(v) = p.max_review_rounds {
+            if !(0..=20).contains(&v) {
+                return Err("max_review_rounds must be between 0 and 20".into());
+            }
+            self.max_review_rounds = v;
+        }
+        if let Some(v) = p.max_wall_clock_min {
+            if !(1..=10_080).contains(&v) {
+                return Err("max_wall_clock_min must be between 1 and 10080".into());
+            }
+            self.max_wall_clock_min = v;
+        }
+        if let Some(v) = p.quota_stop_pct {
+            if !v.is_finite() || !(1.0..=100.0).contains(&v) {
+                return Err("quota_stop_pct must be between 1 and 100".into());
+            }
+            self.quota_stop_pct = v;
+        }
+        Ok(())
+    }
+}
+
+/// SPEC-team §9.2 — `usage_json`. Written by the scheduler; read by the UI's budget bar.
+pub fn empty_usage() -> Value {
+    json!({"relays": 0, "review_rounds_total": 0, "elapsed_min": 0, "per_bot": {}})
+}
+
+// ---------------------------------------------------------------- request shapes (§10.1)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleSpec {
+    pub kind: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default)]
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub persona_extra: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkersSpec {
+    /// 1–4, default 2.
+    #[serde(default)]
+    pub count: Option<u32>,
+    pub kind: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default)]
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub persona_extra: Option<String>,
+}
+
+impl WorkersSpec {
+    pub fn role(&self) -> RoleSpec {
+        RoleSpec {
+            kind: self.kind.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            fast: self.fast,
+            identity: self.identity.clone(),
+            persona_extra: self.persona_extra.clone(),
+        }
+    }
+    pub fn resolved_count(&self) -> u32 {
+        self.count.unwrap_or(DEFAULT_WORKER_COUNT)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTeam {
+    pub issue_number: i64,
+    pub pm: RoleSpec,
+    pub workers: WorkersSpec,
+    /// Explicit `null` = no reviewer; `reported → merging` directly (SPEC-team §8.2).
+    #[serde(default)]
+    pub reviewer: Option<RoleSpec>,
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub deliver: Option<String>,
+    #[serde(default)]
+    pub supervised: Option<bool>,
+    #[serde(default)]
+    pub budget: Option<BudgetPatch>,
+}
+
+/// The issue a team is built around, already resolved (via `gh`, or supplied by a test).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IssueRef {
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    /// The issue body, verbatim. It becomes `ISSUE.md` and is never put in a prompt.
+    pub body: String,
+}
+
+// ---------------------------------------------------------------- naming (§7.3, §6.2)
+
+/// The team's short hash: the last 6 alphanumerics of its ULID, lowercased — the same trick
+/// `config::agent_name` uses for bots.
+pub fn tid6(team_id: &str) -> String {
+    let tail: String = team_id
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        "team".into()
+    } else {
+        tail
+    }
+}
+
+/// SPEC-team §6.2: the integration branch, `team/i<issue>-<tid6>`.
+pub fn integration_branch(issue_number: i64, tid6: &str) -> String {
+    format!("team/i{issue_number}-{tid6}")
+}
+
+/// A task branch, `<integration>-t<seq>-<worker short name>`.
+///
+/// **Deviation from SPEC-team §6.2, forced by git.** The spec asks for
+/// `team/i42-k3f9x2/t1-dev-1` alongside an integration branch called `team/i42-k3f9x2`, and
+/// git cannot hold both: refs are files, so `refs/heads/team/i42-k3f9x2` being a file makes
+/// `refs/heads/team/i42-k3f9x2/t1-dev-1` impossible —
+/// `fatal: cannot lock ref …: 'refs/heads/team/i42-k3f9x2' exists`.
+///
+/// The `/` is therefore a `-`. Everything else about the name is unchanged, the branches
+/// still sort together under `team/`, and the integration branch keeps the name §6.2, §10.2
+/// and the UI all use. (The alternative — moving the integration branch to
+/// `team/i42-k3f9x2/main` — would have renamed the branch the user is handed at the end.)
+pub fn task_branch(integration: &str, seq: i64, worker_short: &str) -> String {
+    format!("{integration}-t{seq}-{worker_short}")
+}
+
+/// SPEC-team §6.2: `<data_dir>/teams/<team_id>` — **outside** the repository, so the user's
+/// checkout gains no files at all and its cleanliness does not depend on any ignore rule.
+pub fn worktree_root(app: &Arc<App>, team_id: &str) -> String {
+    app.data_dir.join("teams").join(team_id).to_string_lossy().to_string()
+}
+
+/// The directory name a member's worktree gets under the team root (§6.2).
+pub fn member_dir(role: &str, index: u32) -> String {
+    match role {
+        "pm" => "main".into(),
+        "reviewer" => "reviewer".into(),
+        _ => format!("dev-{index}"),
+    }
+}
+
+/// SPEC-team §7.3: a member's nickname inside the project — `i42-pm`, `i42-dev-1`, `i42-rev`.
+pub fn member_nick(issue_number: i64, role: &str, index: u32) -> String {
+    match role {
+        "pm" => format!("i{issue_number}-pm"),
+        "reviewer" => format!("i{issue_number}-rev"),
+        _ => format!("i{issue_number}-dev-{index}"),
+    }
+}
+
+/// The name the `am-team` protocol uses (`dev-1`): the nickname without its `i<issue>-` prefix.
+pub fn short_name(nick: &str, issue_number: i64) -> String {
+    nick.strip_prefix(&format!("i{issue_number}-")).unwrap_or(nick).to_string()
+}
+
+// ---------------------------------------------------------------- role personas (§7.1)
+
+/// A short, path-free role persona — what a member is created with, before its worktree
+/// exists. `full_persona` replaces it with the appendix A text once the layout is on disk.
+fn role_persona(role: &str, issue_number: i64, extra: Option<&str>) -> Option<String> {
+    let base = match role {
+        "pm" => format!(
+            "你是 issue #{issue_number} 的 PM。你不寫程式、不 commit：把 issue 拆成互不重疊的 task 派給執行者，\
+             收回報後決定下一步，全部完成後寫摘要。不確定就問使用者。"
+        ),
+        "reviewer" => format!(
+            "你是 issue #{issue_number} 的 reviewer。唯讀：可以跑 build / test，不要 commit、不要改檔。\
+             判斷變更是否正確、是否符合 issue、是否會破壞其他部分，打回票時要具體到檔案與行為。"
+        ),
+        _ => format!(
+            "你是 issue #{issue_number} 的執行者。只在指派給你的工作目錄裡工作：不要 cd 出去、不要動別人的目錄、\
+             不要 git push、不要切換分支。每個邏輯段落 git commit，完成後回報改了什麼、如何驗證。"
+        ),
+    };
+    let extra = extra.map(str::trim).filter(|s| !s.is_empty());
+    Some(match extra {
+        Some(e) => format!("{base}\n\n{e}"),
+        None => base,
+    })
+}
+
+/// SPEC-team appendix A.1–A.3: the persona a member actually runs with — its own path, the
+/// integration branch, and who else is on the team. Written after the worktrees exist,
+/// because until then there are no paths to name.
+fn full_persona(
+    role: &str,
+    issue_number: i64,
+    short: &str,
+    cwd: &str,
+    integration: &str,
+    roster: &str,
+    extra: Option<&str>,
+) -> String {
+    let base = match role {
+        "pm" => format!(
+            "你是 issue #{issue_number} 的 PM，暱稱 `{short}`。你不寫程式、不 commit。\
+             你的 cwd `{cwd}` 是整合分支 `{integration}` 的 worktree，只當唯讀參考（你改了東西會讓整合停下來）。\n\
+             成員：{roster}\n\
+             工作：讀 `.agents-manager/team/ISSUE.md` 與 `.agents-manager/team/TEAM.md`（都在你的 cwd 內），\
+             把 issue 拆成互不重疊（以檔案 / 模組切分）的 task，用 `dispatch` 派給執行者；\
+             收到回報後決定下一步；所有 task 合併後 `done` 並寫摘要。不確定就 `ask_user`。\n\
+             合併與分支由 daemon 用 git 處理，你不需要（也不可以）自己 merge。"
+        ),
+        "reviewer" => format!(
+            "你是 issue #{issue_number} 的 reviewer，暱稱 `{short}`。你的 cwd `{cwd}` 會被 daemon checkout 到待審分支（detached HEAD）。\n\
+             成員：{roster}\n\
+             唯讀：可以跑 build / test，不要 commit、不要改檔、不要切換分支。\
+             用 `git diff {integration}...HEAD` 看變更。判斷是否正確、是否符合 issue、是否會破壞其他部分；\
+             用 `verdict` 回覆，`request_changes` 時 `must_fix` 要具體到檔案與行為。"
+        ),
+        _ => format!(
+            "你是 issue #{issue_number} 的執行者 `{short}`。你的 cwd `{cwd}` 是你專屬的 git worktree，\
+             你只能在這裡工作：不要 `cd` 出去、不要動 `../`、不要進入使用者的主 checkout、\
+             不要 `git push`、不要自己切換分支（分支由 daemon 建好並 checkout）。\n\
+             成員：{roster}\n\
+             整合分支是 `{integration}`。每個邏輯段落 `git commit`。完成後用 `report` 回報：\
+             `summary` 說明改了什麼、如何驗證。做不下去用 `status: blocked` 說明原因。\
+             背景資料在 `.agents-manager/team/ISSUE.md`（在你的 cwd 內）。"
+        ),
+    };
+    match extra.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(e) => format!("{base}\n\n{e}"),
+        None => base,
+    }
+}
+
+/// `ISSUE.md` — the issue's full text, written once so no relay ever has to carry it
+/// (appendix A: "issue 全文永遠走各 worktree 內的 ISSUE.md，不塞進 prompt").
+fn issue_md(issue: &IssueRef) -> String {
+    format!(
+        "# Issue #{n} — {title}\n\n{url}\n\n---\n\n{body}\n",
+        n = issue.number,
+        title = issue.title,
+        url = issue.url,
+        body = if issue.body.trim().is_empty() { "（這個 issue 沒有內文）" } else { issue.body.trim() },
+    )
+}
+
+/// `TEAM.md` — who is who, where they live, and the protocol in one page.
+fn team_md(issue: &IssueRef, branch: &str, root: &str, members: &[(String, String, String)]) -> String {
+    let mut s = format!(
+        "# Team · issue #{n}\n\n- 整合分支：`{branch}`\n- team 根目錄：`{root}`\n- 合併由 daemon 用 `git merge --no-ff` 執行，agent 不要自己合併\n\n## 成員\n\n| 短名 | 角色 | cwd |\n|---|---|---|\n",
+        n = issue.number,
+    );
+    for (short, role, cwd) in members {
+        s.push_str(&format!("| `{short}` | {role} | `{cwd}` |\n"));
+    }
+    s.push_str(
+        "\n## 協定\n\n每則回覆的**最後**要有一個 ```am-team fenced 區塊（一個 JSON 物件）。daemon 只讀最後一個。\n\n\
+         - pm：`dispatch` / `wait` / `done` / `ask_user` / `abort`\n\
+         - worker：`report`（`status: done | blocked`）\n\
+         - reviewer：`verdict`（`result: approve | request_changes`）\n\n\
+         區塊之外的文字給人看，區塊給系統看。\n",
+    );
+    s
+}
+
+// ---------------------------------------------------------------- JSON shapes (§10.2–§10.4)
+
+pub fn task_json(t: &db::TeamTask) -> Value {
+    json!({
+        "id": t.id,
+        "team_id": t.team_id,
+        "seq": t.seq,
+        "title": t.title,
+        "brief": t.brief,
+        "files": serde_json::from_str::<Value>(&t.files_json).unwrap_or_else(|_| json!([])),
+        "worker_bot_id": t.worker_bot_id,
+        "branch": t.branch,
+        "state": t.state,
+        "round": t.round,
+        "rebase_attempts": t.rebase_attempts,
+        "last_report": t.last_report,
+        "last_verdict": t.last_verdict,
+        "merge_sha": t.merge_sha,
+        "created_at": t.created_at,
+        "updated_at": t.updated_at,
+    })
+}
+
+pub fn event_json(e: &db::TeamEvent) -> Value {
+    json!({
+        "id": e.id,
+        "team_id": e.team_id,
+        // Per-team insertion order. Clients that merge live `team_event` frames into a loaded
+        // page should sort and de-duplicate on this, not on `id` or `created_at`.
+        "seq": e.seq,
+        "kind": e.kind,
+        "from_bot_id": e.from_bot_id,
+        "to_bot_id": e.to_bot_id,
+        "task_id": e.task_id,
+        "turn_id": e.turn_id,
+        "status": e.status,
+        "payload": serde_json::from_str::<Value>(&e.payload_json).unwrap_or_else(|_| json!({})),
+        "created_at": e.created_at,
+    })
+}
+
+/// Counts per task state plus `total` — the §10.2 `tasks_summary`.
+pub fn tasks_summary(tasks: &[db::TeamTask]) -> Value {
+    let mut m = serde_json::Map::new();
+    for t in tasks {
+        let n = m.get(&t.state).and_then(|v| v.as_i64()).unwrap_or(0);
+        m.insert(t.state.clone(), json!(n + 1));
+    }
+    m.insert("total".into(), json!(tasks.len()));
+    Value::Object(m)
+}
+
+/// The team object of `GET /api/state` (SPEC-team §10.2).
+pub async fn team_json(app: &Arc<App>, t: &db::Team) -> Value {
+    let members = db::team_members(&app.db, &t.id).await.unwrap_or_default();
+    let tasks = db::team_tasks(&app.db, &t.id).await.unwrap_or_default();
+    json!({
+        "id": t.id,
+        "project_id": t.project_id,
+        "issue_number": t.issue_number,
+        "issue_title": t.issue_title,
+        "issue_url": t.issue_url,
+        "phase": t.phase,
+        "pause_reason": t.pause_reason,
+        "resume_phase": t.resume_phase,
+        "branch": t.branch,
+        "deliver": t.deliver,
+        "supervised": t.supervised == 1,
+        "members": members.iter().map(|b| json!({
+            "bot_id": b.id,
+            "role": b.team_role,
+            "name": b.name,
+            "short": short_name(&b.name, t.issue_number),
+            "deleted": b.deleted_at.is_some(),
+        })).collect::<Vec<_>>(),
+        "tasks_summary": tasks_summary(&tasks),
+        "budget": Budget::from_json(&t.budget_json),
+        "usage": serde_json::from_str::<Value>(&t.usage_json).unwrap_or_else(|_| empty_usage()),
+        "pr_url": t.pr_url,
+        "summary": t.summary,
+        "created_at": t.created_at,
+        "started_at": t.started_at,
+        "ended_at": t.ended_at,
+    })
+}
+
+/// `projects[].teams[]` for `GET /api/state`.
+pub async fn teams_json_for_project(app: &Arc<App>, project_id: &str) -> Vec<Value> {
+    let teams = db::teams_of_project(&app.db, project_id).await.unwrap_or_default();
+    let mut out = Vec::with_capacity(teams.len());
+    for t in &teams {
+        out.push(team_json(app, t).await);
+    }
+    out
+}
+
+/// The `team` field on a bot in `GET /api/state`: `{team_id, role} | null`.
+pub fn bot_team_json(b: &db::Bot) -> Value {
+    match (&b.team_id, &b.team_role) {
+        (Some(id), role) => json!({"team_id": id, "role": role}),
+        _ => Value::Null,
+    }
+}
+
+// ---------------------------------------------------------------- WS events (§10.6)
+
+async fn emit_team_changed(app: &Arc<App>, t: &db::Team) {
+    app.emit(
+        "team_changed",
+        json!({
+            "team_id": t.id,
+            "project_id": t.project_id,
+            "phase": t.phase,
+            "pause_reason": t.pause_reason,
+            "usage": serde_json::from_str::<Value>(&t.usage_json).unwrap_or_else(|_| empty_usage()),
+        }),
+    )
+    .await;
+}
+
+async fn emit_task_updated(app: &Arc<App>, task: &db::TeamTask) {
+    app.emit("team_task_updated", json!({"team_id": task.team_id, "task": task_json(task)})).await;
+}
+
+async fn emit_team_event(app: &Arc<App>, e: &db::TeamEvent) {
+    app.emit("team_event", json!({"team_id": e.team_id, "event": event_json(e)})).await;
+}
+
+// ---------------------------------------------------------------- row helpers
+
+fn any_err<E: std::fmt::Display>(e: E) -> LcError {
+    LcError::Upstream(e.to_string())
+}
+
+pub async fn load(app: &Arc<App>, team_id: &str) -> LcResult<db::Team> {
+    db::team(&app.db, team_id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("team".into()))
+}
+
+/// Append one `team_events` row and push it on the WS.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_event(
+    app: &Arc<App>,
+    team_id: &str,
+    kind: &str,
+    from_bot_id: Option<&str>,
+    to_bot_id: Option<&str>,
+    task_id: Option<&str>,
+    status: Option<&str>,
+    payload: Value,
+) -> LcResult<db::TeamEvent> {
+    let id = db::ulid();
+    let now = db::now();
+    let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
+    // `seq` is picked inside the INSERT: SQLite serialises writers, so the sub-select and the
+    // row it numbers are one statement under one write lock and two concurrent events cannot
+    // land on the same number. The UNIQUE(team_id, seq) index is the belt to that braces —
+    // if it ever did fire, retrying re-reads MAX(seq) and takes the next one.
+    const SQL: &str = "INSERT INTO team_events
+         (id, team_id, seq, kind, from_bot_id, to_bot_id, task_id, turn_id, status, payload_json, created_at)
+         VALUES (?,?,(SELECT COALESCE(MAX(seq),0)+1 FROM team_events WHERE team_id = ?),?,?,?,?,NULL,?,?,?)";
+    let mut attempt = 0;
+    loop {
+        let r = sqlx::query(SQL)
+            .bind(&id)
+            .bind(team_id)
+            .bind(team_id)
+            .bind(kind)
+            .bind(from_bot_id)
+            .bind(to_bot_id)
+            .bind(task_id)
+            .bind(status)
+            .bind(&payload_json)
+            .bind(&now)
+            .execute(&app.db)
+            .await;
+        match r {
+            Ok(_) => break,
+            Err(e) => {
+                let dup = e.as_database_error().map(|d| d.is_unique_violation()).unwrap_or(false);
+                attempt += 1;
+                if !dup || attempt >= 3 {
+                    return Err(any_err(e));
+                }
+            }
+        }
+    }
+    let e = sqlx::query_as::<_, db::TeamEvent>("SELECT * FROM team_events WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&app.db)
+        .await
+        .map_err(any_err)?;
+    emit_team_event(app, &e).await;
+    Ok(e)
+}
+
+/// Move a team to `phase`, record the transition and push `team_changed`.
+pub async fn set_phase(
+    app: &Arc<App>,
+    team_id: &str,
+    phase: &str,
+    pause_reason: Option<&str>,
+    resume_phase: Option<&str>,
+) -> LcResult<db::Team> {
+    let before = load(app, team_id).await?;
+    let ended_at = if is_terminal(phase) { Some(db::now()) } else { None };
+    sqlx::query(
+        "UPDATE teams SET phase = ?, pause_reason = ?, resume_phase = ?,
+           ended_at = COALESCE(?, ended_at) WHERE id = ?",
+    )
+    .bind(phase)
+    .bind(pause_reason)
+    .bind(resume_phase)
+    .bind(ended_at)
+    .bind(team_id)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+    record_event(
+        app,
+        team_id,
+        "phase",
+        None,
+        None,
+        None,
+        None,
+        json!({"from": before.phase, "to": phase, "reason": pause_reason}),
+    )
+    .await?;
+    let after = load(app, team_id).await?;
+    emit_team_changed(app, &after).await;
+    Ok(after)
+}
+
+// ---------------------------------------------------------------- validation
+
+/// The same identity rule as `POST /projects/:id/bots`.
+async fn check_identity(app: &Arc<App>, identity: &Option<String>, kind: &str) -> LcResult<Option<String>> {
+    let Some(name) = identity.clone().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
+    let cfg = app.cfg.get().await;
+    let Some(i) = cfg.identities.iter().find(|i| i.name == name) else {
+        return Err(LcError::NotFound("identity".into()));
+    };
+    if i.kind != kind {
+        return Err(LcError::Bad(format!("identity `{name}` is for {} but this role is {kind}", i.kind)));
+    }
+    Ok(Some(name))
+}
+
+/// A role spec with `kind` / `effort` / `identity` checked and normalised.
+struct CheckedRole {
+    kind: String,
+    model: Option<String>,
+    effort: Option<String>,
+    fast: bool,
+    identity: Option<String>,
+    persona_extra: Option<String>,
+}
+
+async fn check_role(app: &Arc<App>, r: &RoleSpec, label: &str) -> LcResult<CheckedRole> {
+    if !crate::config::valid_kind(&r.kind) {
+        return Err(LcError::Bad(format!("{label}.kind must be {}", crate::config::kinds_list())));
+    }
+    let effort = crate::config::normalize_effort(&r.kind, r.effort.as_deref())
+        .map_err(|e| LcError::Bad(format!("{label}: {e}")))?;
+    let identity = check_identity(app, &r.identity, &r.kind).await?;
+    Ok(CheckedRole {
+        kind: r.kind.clone(),
+        model: r.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+        effort,
+        fast: r.fast,
+        identity,
+        persona_extra: r.persona_extra.clone().filter(|s| !s.trim().is_empty()),
+    })
+}
+
+/// SPEC-team §4.5 / §9.2: refuse to start a team on a kind that is already near its cap.
+/// Kinds with no quota data are never blocked.
+async fn check_quota(app: &Arc<App>, roles: &[&CheckedRole], stop_pct: f64) -> LcResult<()> {
+    let q = app.quotas.lock().await.clone();
+    for r in roles {
+        let keys = match &r.identity {
+            Some(i) => vec![format!("{}:{i}", r.kind), r.kind.clone()],
+            None => vec![r.kind.clone()],
+        };
+        for k in keys {
+            let Some(quota) = q.get(&k) else { continue };
+            for w in [&quota.five_hour, &quota.seven_day].into_iter().flatten() {
+                if w.used_pct >= stop_pct {
+                    return Err(LcError::BadValue(
+                        json!({"error": "quota_low", "kind": r.kind, "used_pct": w.used_pct}),
+                    ));
+                }
+            }
+            break; // the identity row wins when it exists
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- create (§10.1)
+
+/// Resolve the issue through the existing `gh issue view` path.
+async fn resolve_issue(app: &Arc<App>, project_id: &str, number: i64) -> LcResult<IssueRef> {
+    if number <= 0 {
+        return Err(LcError::Bad("issue_number must be positive".into()));
+    }
+    let v = crate::github::get_issue(app, project_id, number as u64).await?;
+    let i = v.get("issue").cloned().unwrap_or(Value::Null);
+    let title = i.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let url = i.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let body = i.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Ok(IssueRef { number, title, url, body })
+}
+
+/// `POST /api/projects/:id/teams`.
+pub async fn create(app: &Arc<App>, project_id: &str, req: CreateTeam) -> LcResult<Value> {
+    let issue = resolve_issue(app, project_id, req.issue_number).await?;
+    create_with_issue(app, project_id, req, issue).await
+}
+
+/// `create` with the issue already resolved. Split out so the whole validation + DB path can
+/// be exercised without a GitHub round trip.
+pub async fn create_with_issue(
+    app: &Arc<App>,
+    project_id: &str,
+    req: CreateTeam,
+    issue: IssueRef,
+) -> LcResult<Value> {
+    let project = db::project(&app.db, project_id)
+        .await
+        .map_err(any_err)?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+
+    let worker_count = req.workers.resolved_count();
+    if worker_count < 1 || worker_count > MAX_WORKERS {
+        return Err(LcError::Bad(format!("workers.count must be between 1 and {MAX_WORKERS}")));
+    }
+    let deliver = req.deliver.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_DELIVER.into());
+    if !DELIVERS.contains(&deliver.as_str()) {
+        return Err(LcError::Bad("deliver must be `branch` or `pr`".into()));
+    }
+    let base_ref = req.base.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_BASE_REF.into());
+    let supervised = req.supervised.unwrap_or(DEFAULT_SUPERVISED);
+    let mut budget = Budget::default();
+    if let Some(p) = &req.budget {
+        budget.apply(p).map_err(LcError::Bad)?;
+    }
+
+    let pm = check_role(app, &req.pm, "pm").await?;
+    let workers = check_role(app, &req.workers.role(), "workers").await?;
+    let reviewer = match &req.reviewer {
+        Some(r) => Some(check_role(app, r, "reviewer").await?),
+        None => None,
+    };
+    let mut quota_roles: Vec<&CheckedRole> = vec![&pm, &workers];
+    if let Some(r) = &reviewer {
+        quota_roles.push(r);
+    }
+    check_quota(app, &quota_roles, budget.quota_stop_pct).await?;
+
+    // SPEC-team §13: the first stage is local-host only. Everything below would work over
+    // `run_on_host` / `ssh_put`, but nothing has been tested against a remote checkout yet,
+    // and half-tested git on someone else's machine is not a thing to ship.
+    if project.host != LOCAL_HOST {
+        return Err(LcError::Bad(format!(
+            "teams are local-host only in this stage; project `{}` lives on `{}`",
+            project.label, project.host
+        )));
+    }
+
+    let team_id = db::ulid();
+    let t6 = tid6(&team_id);
+    let branch = integration_branch(issue.number, &t6);
+    let root = worktree_root(app, &team_id);
+
+    // SPEC-team §7.4 / appendix C: `base_sha` and `worktree_root` are `NOT NULL`, so both
+    // are resolved **before** the row is written. The directories themselves can come later —
+    // the paths are computed, not discovered.
+    if !tg::is_inside_work_tree(app, &project.host, &project.path).await {
+        return Err(LcError::BadValue(json!({"error": "not_a_git_repo", "path": project.path})));
+    }
+    let base_sha = tg::resolve_commit(app, &project.host, &project.path, &base_ref)
+        .await
+        .map_err(|e| LcError::Bad(e.to_string()))?;
+    let worktree_root = root.clone();
+
+    let roles_json = json!({
+        "pm": role_spec_json(&pm),
+        "workers": {"count": worker_count, "spec": role_spec_json(&workers)},
+        "reviewer": reviewer.as_ref().map(role_spec_json),
+    });
+    let now = db::now();
+    sqlx::query(
+        "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, pause_reason, resume_phase,
+           base_ref, base_sha, branch, worktree_root, deliver, supervised, roles_json, budget_json, usage_json,
+           pr_url, summary, created_at, started_at, ended_at)
+         VALUES (?,?,?,?,?,'starting',NULL,NULL,?,?,?,?,?,?,?,?,?,NULL,NULL,?,NULL,NULL)",
+    )
+    .bind(&team_id)
+    .bind(&project.id)
+    .bind(issue.number)
+    .bind(&issue.title)
+    .bind(&issue.url)
+    .bind(&base_ref)
+    .bind(&base_sha)
+    .bind(&branch)
+    .bind(&worktree_root)
+    .bind(&deliver)
+    .bind(supervised as i64)
+    .bind(serde_json::to_string(&roles_json).unwrap_or_else(|_| "{}".into()))
+    .bind(serde_json::to_string(&budget).unwrap_or_else(|_| "{}".into()))
+    .bind(serde_json::to_string(&empty_usage()).unwrap_or_else(|_| "{}".into()))
+    .bind(&now)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+
+    // SPEC-team §6.2 / appendix C: the integration branch, then one worktree per member,
+    // all under `<data_dir>/teams/<id>/` — outside the repository. The only commands aimed
+    // at the user's checkout are `branch` and `worktree add`, neither of which writes a byte
+    // into its working tree.
+    let mut plan: Vec<(&'static str, u32, &CheckedRole)> = vec![("pm", 0, &pm)];
+    for n in 1..=worker_count {
+        plan.push(("worker", n, &workers));
+    }
+    if let Some(r) = &reviewer {
+        plan.push(("reviewer", 0, r));
+    }
+    let dirs: Vec<String> = plan.iter().map(|(role, i, _)| format!("{root}/{}", member_dir(role, *i))).collect();
+
+    let mut created: Vec<String> = Vec::new();
+    // Filled in by the §6.4a step below; `None` until then so an early failure knows there
+    // is no workspace to close.
+    let mut workspace_id: Option<String>;
+    let build = async {
+        tg::create_branch(app, &project.host, &project.path, &branch, &base_sha)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        for (i, (role, _, _)) in plan.iter().enumerate() {
+            // Only `main/` may hold the integration branch — git refuses the same branch in
+            // two worktrees, so everyone else starts detached at the base commit (§6.2).
+            let (rev, detach) =
+                if *role == "pm" { (branch.as_str(), false) } else { (base_sha.as_str(), true) };
+            tg::worktree_add(app, &project.host, &project.path, &dirs[i], rev, detach)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+        }
+        Ok::<(), LcError>(())
+    }
+    .await;
+    if let Err(e) = build {
+        rollback_create(app, &project, &team_id, &created, &root, &dirs, None).await;
+        return Err(e);
+    }
+
+    // SPEC-team §6.4a: the team gets its **own** herdr workspace, rooted at the team
+    // directory, created after the worktrees and before the members. Four-plus panes would
+    // otherwise be squeezed into the workspace the user is actually working in, and a team
+    // is temporary where a project's workspace is permanent. If it cannot be created the
+    // whole team fails — falling back to the project's workspace would leave throw-away
+    // panes in the user's own space, which is the thing this exists to prevent.
+    match make_workspace(app, &project, &team_id, &root, &issue).await {
+        Ok(ws) => workspace_id = Some(ws),
+        Err(e) => {
+            rollback_create(app, &project, &team_id, &created, &root, &dirs, None).await;
+            return Err(e);
+        }
+    }
+    if let Err(e) = sqlx::query("UPDATE teams SET workspace_id = ? WHERE id = ?")
+        .bind(&workspace_id)
+        .bind(&team_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)
+    {
+        rollback_create(app, &project, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+        return Err(e);
+    }
+
+    for (i, (role, index, spec)) in plan.iter().enumerate() {
+        let nick = member_nick(issue.number, role, *index);
+        match insert_member(app, &project, &team_id, &nick, &t6, role, issue.number, spec, &dirs[i]).await {
+            Ok(bot_id) => created.push(bot_id),
+            Err(e) => {
+                // SPEC-team §6.5: a half-built team is torn down rather than left behind.
+                rollback_create(app, &project, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+                return Err(e);
+            }
+        }
+    }
+
+    // The docs and the real personas need the roster, so they come after the members exist.
+    let members = db::team_members(&app.db, &team_id).await.map_err(any_err)?;
+    let roster: Vec<(String, String, String)> = members
+        .iter()
+        .map(|b| {
+            (
+                short_name(&b.name, issue.number),
+                b.team_role.clone().unwrap_or_default(),
+                b.cwd.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let issue_doc = issue_md(&issue);
+    let team_doc = team_md(&issue, &branch, &root, &roster);
+    let docs = async {
+        // The originals live at the team root; each worktree gets an ignored copy inside the
+        // member's own cwd so the agent never has to read across directories (§6.2).
+        tg::put_file(app, &project.host, &format!("{root}/ISSUE.md"), &issue_doc)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        tg::put_file(app, &project.host, &format!("{root}/TEAM.md"), &team_doc)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        for d in &dirs {
+            tg::write_team_docs(app, &project.host, d, &issue_doc, &team_doc)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+        }
+        Ok::<(), LcError>(())
+    }
+    .await;
+    if let Err(e) = docs {
+        rollback_create(app, &project, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+        return Err(e);
+    }
+
+    let roster_line: String =
+        roster.iter().map(|(s, r, c)| format!("`{s}`（{r}，cwd `{c}`）")).collect::<Vec<_>>().join("、");
+    for b in &members {
+        let role = b.team_role.clone().unwrap_or_default();
+        let spec = match role.as_str() {
+            "pm" => &pm,
+            "reviewer" => reviewer.as_ref().unwrap_or(&workers),
+            _ => &workers,
+        };
+        let p = full_persona(
+            &role,
+            issue.number,
+            &short_name(&b.name, issue.number),
+            b.cwd.as_deref().unwrap_or_default(),
+            &branch,
+            &roster_line,
+            spec.persona_extra.as_deref(),
+        );
+        let _ = sqlx::query("UPDATE bots SET persona = ? WHERE id = ?").bind(&p).bind(&b.id).execute(&app.db).await;
+    }
+
+    record_event(
+        app,
+        &team_id,
+        "phase",
+        None,
+        None,
+        None,
+        None,
+        json!({"from": Value::Null, "to": "starting", "reason": "team created"}),
+    )
+    .await?;
+
+    for b in &created {
+        app.emit("bot_changed", json!({"bot_id": b})).await;
+    }
+    let t = load(app, &team_id).await?;
+    emit_team_changed(app, &t).await;
+    app.emit("project_changed", json!({"project_id": project.id})).await;
+    spawn_scheduler(app, &team_id);
+    Ok(json!({"team_id": team_id}))
+}
+
+fn role_spec_json(r: &CheckedRole) -> Value {
+    json!({
+        "kind": r.kind, "model": r.model, "effort": r.effort, "fast": r.fast,
+        "identity": r.identity, "persona_extra": r.persona_extra,
+    })
+}
+
+/// Insert one team member straight into `bots` — **not** through config.toml (SPEC-team §5.3).
+#[allow(clippy::too_many_arguments)]
+async fn insert_member(
+    app: &Arc<App>,
+    project: &db::Project,
+    team_id: &str,
+    nick: &str,
+    tid6: &str,
+    role: &str,
+    issue_number: i64,
+    spec: &CheckedRole,
+    cwd: &str,
+) -> LcResult<String> {
+    // §7.3: a second team on the same issue would collide on the nickname; disambiguate with
+    // the team hash before giving up.
+    let mut name = nick.to_string();
+    if name_taken(app, &project.id, &name).await? {
+        name = format!("{nick}-{tid6}");
+        if name_taken(app, &project.id, &name).await? {
+            return Err(LcError::conflict("team member name already in use", json!({"name": name})));
+        }
+    }
+    if !crate::config::valid_bot_name(&name) {
+        return Err(LcError::Bad(format!("team member name `{name}`: {}", crate::config::BOT_NAME_RE)));
+    }
+    let id = db::ulid();
+    sqlx::query(
+        "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart,
+           inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, hook_token, created_at)
+         VALUES (?,?,?,?,?,?,?,?,'[]',0,1,1,?,'{}','team',?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(&project.id)
+    .bind(&name)
+    .bind(&spec.kind)
+    .bind(&spec.model)
+    .bind(&spec.effort)
+    .bind(spec.fast as i64)
+    .bind(role_persona(role, issue_number, spec.persona_extra.as_deref()))
+    .bind(&spec.identity)
+    .bind(team_id)
+    .bind(role)
+    // §2.2: the member's own worktree. `start_inner` already puts `pane.split` here.
+    .bind(cwd)
+    .bind(crate::projection::new_token())
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+    db::conversation_id(&app.db, &id).await.map_err(any_err)?;
+    Ok(id)
+}
+
+async fn name_taken(app: &Arc<App>, project_id: &str, name: &str) -> LcResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL",
+    )
+    .bind(project_id)
+    .bind(name)
+    .fetch_one(&app.db)
+    .await
+    .map_err(any_err)?;
+    Ok(n > 0)
+}
+
+/// Creation failed partway (SPEC-team §6.5: "建 team 失敗（任何一步）走同一個 cleanup").
+/// Soft-delete the members, unwind whatever worktrees exist, and park the team in `failed`
+/// so the failure is visible and `cleanup` still works on it.
+#[allow(clippy::too_many_arguments)]
+async fn rollback_create(
+    app: &Arc<App>,
+    project: &db::Project,
+    team_id: &str,
+    created: &[String],
+    root: &str,
+    dirs: &[String],
+    workspace_id: Option<&str>,
+) {
+    let now = db::now();
+    for b in created {
+        let _ = sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(b).execute(&app.db).await;
+    }
+    close_workspace(app, project, workspace_id).await;
+    remove_worktrees(app, project, root, dirs).await;
+    let _ = sqlx::query("UPDATE teams SET phase='failed', pause_reason=NULL, ended_at=? WHERE id=?")
+        .bind(&now)
+        .bind(team_id)
+        .execute(&app.db)
+        .await;
+}
+
+// ---------------------------------------------------------------- the team's workspace (§6.4a)
+
+/// The herdr client and session a team's panes live on. A team is a project-local thing, so
+/// it always uses the host's configured named session — never the user's `default` one.
+async fn team_herdr(app: &Arc<App>, project: &db::Project) -> LcResult<(crate::herdr::HerdrClient, String)> {
+    let session = app
+        .session_for_host(&project.host)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?;
+    if !app.session_connected(&project.host, &session).await {
+        return Err(LcError::conflict("host is not connected", json!({"host": project.host})));
+    }
+    let client = app
+        .herdr_for_session(&project.host, &session)
+        .await
+        .ok_or_else(|| LcError::Upstream(format!("Herdr session `{session}` is not configured")))?;
+    Ok((client, session))
+}
+
+/// SPEC-team §6.4a: `workspace.create` rooted at the team directory, labelled so the user can
+/// tell it apart from their project workspace at a glance.
+async fn make_workspace(
+    app: &Arc<App>,
+    project: &db::Project,
+    team_id: &str,
+    root: &str,
+    issue: &IssueRef,
+) -> LcResult<String> {
+    let (client, _) = team_herdr(app, project).await?;
+    let label = format!("{} · team #{} {}", project.label, issue.number, issue.title);
+    let label: String = label.chars().take(80).collect();
+    let (ws, _root_pane) = client
+        .workspace_create(root, &label, json!({}))
+        .await
+        .map_err(|e| LcError::Upstream(format!("could not create the team workspace: {e}")))?;
+    tracing::info!(team = team_id, workspace = %ws.workspace_id, "created the team workspace");
+    Ok(ws.workspace_id)
+}
+
+/// `workspace.close` — one call takes every member pane with it, which is the point of
+/// giving a team its own workspace in the first place (§6.4a).
+async fn close_workspace(app: &Arc<App>, project: &db::Project, workspace_id: Option<&str>) {
+    let Some(ws) = workspace_id.filter(|w| !w.trim().is_empty()) else { return };
+    let Ok((client, _)) = team_herdr(app, project).await else { return };
+    if let Err(e) = client.workspace_close(ws).await {
+        tracing::warn!(workspace = ws, error = %e, "closing the team workspace failed");
+    }
+}
+
+/// SPEC-team §6.5, and **the order is the whole point**: `worktree remove` (which deletes
+/// the `.git/worktrees/<name>/` registration) → `worktree prune` → delete the directory.
+/// Removing the directory first leaves an orphan registration that `git worktree list`
+/// reports as `prunable` for ever, and blocks re-using the same path without `add -f`.
+///
+/// **Both destructive calls are guarded by the §6.1 containment invariant**, because both of
+/// them take a raw database value and hand it to something that deletes without asking:
+/// `worktree remove --force --force` throws away uncommitted work in whatever it is pointed
+/// at, and `remove_dir` is a literal `rm -rf` of `teams.worktree_root`. `bots.cwd` and
+/// `teams.worktree_root` are not trustworthy on their own — a team written by a build that
+/// predated the worktree layout had `worktree_root = ''` and every member pointing at the
+/// user's main checkout. Today git happens to refuse `worktree remove` on a *main* working
+/// tree, but it will happily remove a linked worktree the user made by hand, and `rm -rf`
+/// refuses nothing at all. So: a directory is only removed if it is inside the team root and
+/// outside the checkout (`removable_member_dir`), and the root is only deleted if it is not
+/// the checkout, not inside it, and not a parent of it (`removable_root`).
+async fn remove_worktrees(app: &Arc<App>, project: &db::Project, root: &str, dirs: &[String]) {
+    let root = root.trim();
+    if root.is_empty() {
+        return;
+    }
+    for d in dirs {
+        if let Err(why) = removable_member_dir(project, root, d) {
+            tracing::warn!(worktree = %d, root = %root, project = %project.path, %why,
+                           "refusing to `worktree remove` a directory outside the team root");
+            continue;
+        }
+        let out = tg::worktree_remove(app, &project.host, &project.path, d).await;
+        if !out.ok() {
+            tracing::debug!(worktree = %d, error = %out.message(), "worktree remove reported an error");
+        }
+    }
+    tg::worktree_prune(app, &project.host, &project.path).await;
+    if let Err(why) = removable_root(project, root) {
+        tracing::warn!(root = %root, project = %project.path, %why,
+                       "refusing to delete the team root: it is not safely outside the project checkout");
+        return;
+    }
+    tg::remove_dir(app, &project.host, root).await;
+}
+
+/// May `worktree remove --force --force` be pointed at `dir`? Only inside the team root, and
+/// never inside the user's checkout — the same two tests `checked_member_cwd` applies before
+/// any git command runs in a member's cwd, so a directory that was never legal to *work* in
+/// is not legal to *delete* either.
+pub fn removable_member_dir(project: &db::Project, root: &str, dir: &str) -> Result<(), String> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Err("empty path".into());
+    }
+    if is_within(&project.path, dir) {
+        return Err(format!("`{dir}` is inside the project checkout `{}`", project.path));
+    }
+    if !is_within(root, dir) {
+        return Err(format!("`{dir}` is outside the team root `{root}`"));
+    }
+    Ok(())
+}
+
+/// May the team root be `rm -rf`'d? Not if it is the checkout, inside it, or above it.
+/// The last case is the one string equality misses: a `worktree_root` of `/Users/me` is
+/// neither equal to nor inside the checkout, and deleting it takes the checkout with it.
+pub fn removable_root(project: &db::Project, root: &str) -> Result<(), String> {
+    let root = root.trim();
+    if root.is_empty() {
+        return Err("empty worktree_root".into());
+    }
+    if is_within(&project.path, root) {
+        return Err(format!("team root `{root}` is the project checkout `{}` or inside it", project.path));
+    }
+    if is_within(root, &project.path) {
+        return Err(format!("team root `{root}` contains the project checkout `{}`", project.path));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- reads (§10.3, §10.4)
+
+/// `GET /api/teams/:id`.
+pub async fn detail(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    let tasks = db::team_tasks(&app.db, &t.id).await.map_err(any_err)?;
+    let mut v = team_json(app, &t).await;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("tasks".into(), json!(tasks.iter().map(task_json).collect::<Vec<_>>()));
+        o.insert("base_ref".into(), json!(t.base_ref));
+        o.insert("base_sha".into(), json!(t.base_sha));
+        o.insert("worktree_root".into(), json!(t.worktree_root));
+        o.insert(
+            "roles".into(),
+            serde_json::from_str::<Value>(&t.roles_json).unwrap_or_else(|_| json!({})),
+        );
+    }
+    Ok(v)
+}
+
+/// `GET /api/teams/:id/events?before=&limit=` — paginated backwards, returned ascending
+/// (the same contract as `GET /projects/:id/messages`: `before` is the **id** of the oldest
+/// event the caller already holds).
+///
+/// Ordering is by `team_events.seq`, not by the ULID. A ULID's timestamp only has millisecond
+/// resolution, and one scheduler step writes several events inside a single millisecond — the
+/// relative order of those ULIDs is then random, so both "oldest first" and the `before=`
+/// cursor were non-deterministic. `seq` is the per-team write order, so a page is exactly the
+/// slice the caller asked for, with no gaps and no repeats.
+pub async fn events(app: &Arc<App>, team_id: &str, before: Option<&str>, limit: i64) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    let limit = limit.clamp(1, 500);
+    // The cursor stays an event id (the front end just echoes `events[0].id` back); it is
+    // resolved to that event's `seq` here.
+    let before_seq: Option<i64> = match before {
+        None => None,
+        Some(b) => Some(
+            sqlx::query_scalar::<_, i64>("SELECT seq FROM team_events WHERE team_id = ? AND id = ?")
+                .bind(&t.id)
+                .bind(b)
+                .fetch_optional(&app.db)
+                .await
+                .map_err(any_err)?
+                .ok_or_else(|| LcError::Bad(format!("`before` is not an event of this team: {b}")))?,
+        ),
+    };
+    let rows = match before_seq {
+        Some(s) => sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(&t.id)
+        .bind(s)
+        .bind(limit + 1)
+        .fetch_all(&app.db)
+        .await,
+        None => sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id = ? ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(&t.id)
+        .bind(limit + 1)
+        .fetch_all(&app.db)
+        .await,
+    }
+    .map_err(any_err)?;
+    let has_more = rows.len() as i64 > limit;
+    let mut evs: Vec<db::TeamEvent> = rows.into_iter().take(limit as usize).collect();
+    evs.reverse();
+    Ok(json!({
+        "team_id": t.id,
+        "events": evs.iter().map(event_json).collect::<Vec<_>>(),
+        "has_more": has_more,
+    }))
+}
+
+// ---------------------------------------------------------------- control (§10.5)
+
+/// `POST /api/teams/:id/pause`. Idempotent: pausing a paused team is a no-op.
+pub async fn pause(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if is_terminal(&t.phase) {
+        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+    }
+    if t.phase == "paused" {
+        return Ok(json!({}));
+    }
+    set_phase(app, team_id, "paused", Some("user"), Some(&t.phase)).await?;
+    Ok(json!({}))
+}
+
+/// `POST /api/teams/:id/resume`.
+pub async fn resume(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
+    resume_inner(app, team_id, false).await
+}
+
+/// `POST /api/teams/:id/approve` — release one supervised gate (SPEC-team §4.6).
+pub async fn approve(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
+    resume_inner(app, team_id, true).await
+}
+
+async fn resume_inner(app: &Arc<App>, team_id: &str, gate_only: bool) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if t.phase != "paused" {
+        return Err(LcError::conflict("team is not paused", json!({"phase": t.phase})));
+    }
+    let reason = t.pause_reason.clone().unwrap_or_default();
+    if gate_only && !reason.starts_with("gate:") {
+        return Err(LcError::conflict("team is not waiting at a supervised gate", json!({"pause_reason": reason})));
+    }
+    // Before anything else: a team is only allowed to move again if its layout still holds.
+    // Pressing "continue" on an orphaned team used to revive it — including one whose members
+    // pointed at the user's own checkout — because `resume` went straight to
+    // `spawn_scheduler` without re-running the checks the boot path does.
+    if let Some(project) = db::project(&app.db, &t.project_id).await.map_err(any_err)? {
+        if let Err(e) = check_workspace(app, &project, &t).await {
+            return Err(LcError::conflict("the team's workspace is gone", json!({"detail": e})));
+        }
+        if let Err(e) = check_worktrees(app, &project, &t).await {
+            return Err(LcError::conflict("the team's worktrees are not usable", json!({"detail": e})));
+        }
+    }
+    // §10.5: resuming out of `member_lost` needs the member back first.
+    if reason.starts_with("member_lost") {
+        for b in db::team_members(&app.db, &t.id).await.map_err(any_err)? {
+            if b.deleted_at.is_some() {
+                continue;
+            }
+            if db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_none() {
+                return Err(LcError::conflict("member not running", json!({"bot_id": b.id, "name": b.name})));
+            }
+        }
+    }
+    // §4.6: releasing a gate is recorded, so the scheduler can tell "this gate was approved"
+    // from "this gate has never been raised" after a restart, with no in-memory flag.
+    if gate_only {
+        let gate = reason.trim_start_matches("gate:").to_string();
+        record_event(app, team_id, "note", None, None, None, None, json!({"action": "gate_release", "gate": gate}))
+            .await?;
+    }
+    let back = t.resume_phase.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "planning".into());
+    set_phase(app, team_id, &back, None, None).await?;
+    spawn_scheduler(app, team_id);
+    Ok(json!({}))
+}
+
+/// `POST /api/teams/:id/abort` — the only irreversible user action (SPEC-team §9.2).
+pub async fn abort(app: &Arc<App>, team_id: &str, reason: Option<&str>) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if is_terminal(&t.phase) {
+        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+    }
+    set_phase(app, team_id, "aborting", None, None).await?;
+    record_event(app, team_id, "note", None, None, None, None, json!({"action": "abort", "reason": reason})).await?;
+    for b in db::team_members(&app.db, &t.id).await.map_err(any_err)? {
+        if b.deleted_at.is_some() {
+            continue;
+        }
+        if let Err(e) = lifecycle::stop_bot(app, &b.id).await {
+            tracing::warn!(bot = %b.name, error = ?e, "team abort: stop_bot failed");
+        }
+    }
+    set_phase(app, team_id, "aborted", None, None).await?;
+    Ok(json!({}))
+}
+
+/// `POST /api/teams/:id/cleanup` — terminal teams only (SPEC-team §6.5, §12 #6: never automatic).
+pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if !is_terminal(&t.phase) {
+        return Err(LcError::conflict("team is still running", json!({"phase": t.phase})));
+    }
+    let now = db::now();
+    let mut removed = Vec::new();
+    // Collected before the members are soft-deleted: `bots.cwd` *is* the worktree list.
+    let members = db::team_members(&app.db, &t.id).await.map_err(any_err)?;
+    let dirs: Vec<String> =
+        members.iter().filter_map(|b| b.cwd.clone()).filter(|c| !c.trim().is_empty()).collect();
+    for b in members {
+        if b.deleted_at.is_none() {
+            let _ = lifecycle::stop_bot(app, &b.id).await;
+            sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?")
+                .bind(&now)
+                .bind(&b.id)
+                .execute(&app.db)
+                .await
+                .map_err(any_err)?;
+            let host = db::bot_host(&app.db, &b.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+            lifecycle::purge_bot_dir(app, &b.id, &host).await;
+        }
+        removed.push(b.id.clone());
+        app.emit("bot_changed", json!({"bot_id": b.id})).await;
+    }
+    // §6.5: remove → prune → rmdir. Branches (integration and task) are kept for ever by
+    // design — they are cheap, they are the audit trail, and deleting the user's history is
+    // not the daemon's call.
+    if let Ok(Some(project)) = db::project(&app.db, &t.project_id).await {
+        // §6.4a: one `workspace.close` takes every member pane with it.
+        close_workspace(app, &project, t.workspace_id.as_deref()).await;
+        remove_worktrees(app, &project, &t.worktree_root, &dirs).await;
+    }
+    let _ = sqlx::query("UPDATE teams SET workspace_id = NULL WHERE id = ?").bind(team_id).execute(&app.db).await;
+    record_event(
+        app,
+        team_id,
+        "note",
+        None,
+        None,
+        None,
+        None,
+        json!({"action": "cleanup", "members": removed, "worktrees_removed": dirs, "branches_kept": t.branch}),
+    )
+    .await?;
+    let t = load(app, team_id).await?;
+    emit_team_changed(app, &t).await;
+    app.emit("project_changed", json!({"project_id": t.project_id})).await;
+    Ok(json!({}))
+}
+
+/// `DELETE /api/teams/:id?branches=keep|delete` — SPEC-team §6.5a.
+///
+/// `cleanup` tidies the site and **keeps the record**; `delete` removes the record too. Both
+/// exist because they answer different questions: "I am done looking at this" versus "get it
+/// off my screen".
+///
+/// Three things it deliberately does **not** destroy:
+///
+/// * the members' conversations — the same rule as deleting a Bot (SPEC §6.4). What was
+///   removed is the container and its scheduling log, not what anyone said;
+/// * the branches, unless `branches=delete` was asked for explicitly. That flag is the only
+///   path in the whole feature that throws work away;
+/// * anything on a remote. A pushed branch is outward-facing and only a human retracts it.
+///
+/// Any phase may be deleted (unlike `cleanup`): a live team is stopped on the way out.
+/// Idempotent — a second delete is a 404 with `{"error":"not_found","what":"team"}`.
+pub async fn delete(app: &Arc<App>, team_id: &str, delete_branches: bool) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    let project = db::project(&app.db, &t.project_id).await.map_err(any_err)?;
+    let members = db::team_members(&app.db, &t.id).await.map_err(any_err)?;
+    let dirs: Vec<String> =
+        members.iter().filter_map(|b| b.cwd.clone()).filter(|c| !c.trim().is_empty()).collect();
+
+    // §6.5a: the UI gets a "this is happening" frame before any of the slow parts. `deleting`
+    // is not a `teams.phase` value (the CHECK constraint has no such state and the row is
+    // about to be gone anyway) — it exists only on the wire.
+    app.emit(
+        "team_changed",
+        json!({"team_id": t.id, "project_id": t.project_id, "phase": "deleting", "pause_reason": null,
+               "usage": serde_json::from_str::<Value>(&t.usage_json).unwrap_or_else(|_| empty_usage())}),
+    )
+    .await;
+
+    // 1. stop the members. A non-terminal team is aborted on the way out.
+    //
+    // Every step here is best-effort, on purpose: this whole function's contract is "the team
+    // record goes away", and a transient failure on any one member (a busy connection, a slow
+    // host) must not leave the team stuck forever with no way to retry cleanly. A `?` here once
+    // did exactly that — one failed `UPDATE` aborted the function before the `teams` row was
+    // ever touched, and the only way out was manual SQL surgery on the live database.
+    let now = db::now();
+    let mut member_ids = Vec::new();
+    for b in &members {
+        if b.deleted_at.is_none() {
+            let _ = lifecycle::stop_bot(app, &b.id).await;
+            if let Err(e) = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(&b.id)
+                .execute(&app.db)
+                .await
+            {
+                tracing::warn!(bot = %b.id, error = %e, "team delete: soft-deleting a member failed");
+            }
+            let host = db::bot_host(&app.db, &b.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+            lifecycle::purge_bot_dir(app, &b.id, &host).await;
+        }
+        // The bot row and its conversation stay: `deleted_at` is the same soft delete
+        // `DELETE /bots/:id` uses, so the timeline survives (SPEC §6.4).
+        member_ids.push(b.id.clone());
+    }
+
+    // 2. worktrees (remove → prune → rmdir, §6.5), then the workspace (§6.4a).
+    let mut removed_branches: Vec<String> = Vec::new();
+    if let Some(p) = &project {
+        remove_worktrees(app, p, &t.worktree_root, &dirs).await;
+        close_workspace(app, p, t.workspace_id.as_deref()).await;
+        if delete_branches {
+            // The only destructive path there is. Task branches first, then the integration
+            // branch, so a `-D` failure on one leaves the rest recoverable. Remote branches
+            // are never touched — pushing was a human decision and so is unpushing.
+            let tasks = db::team_tasks(&app.db, &t.id).await.unwrap_or_default();
+            for b in tasks.iter().map(|x| x.branch.clone()).chain(std::iter::once(t.branch.clone())) {
+                // Belt to the braces of `branches=delete` being opt-in: only ever a branch
+                // this feature could have created. A hand-edited `team_tasks.branch` must
+                // not be able to turn a delete into "remove the user's work".
+                if !b.starts_with("team/") {
+                    tracing::warn!(branch = %b, "team delete: refusing to remove a branch outside `team/`");
+                    continue;
+                }
+                let out = tg::git(app, &p.host, &p.path, &["branch", "-D", &b], tg::GIT_TIMEOUT).await;
+                match out {
+                    Ok(o) if o.ok() => removed_branches.push(b),
+                    Ok(o) => tracing::warn!(branch = %b, error = %o.message(), "team delete: branch -D failed"),
+                    Err(e) => tracing::warn!(branch = %b, error = %e, "team delete: branch -D failed"),
+                }
+            }
+        }
+    }
+
+    // 3. the rows. Children first — `team_events` / `team_tasks` reference `teams(id)`.
+    sqlx::query("DELETE FROM team_events WHERE team_id = ?").bind(team_id).execute(&app.db).await.map_err(any_err)?;
+    sqlx::query("DELETE FROM team_tasks WHERE team_id = ?").bind(team_id).execute(&app.db).await.map_err(any_err)?;
+    sqlx::query("DELETE FROM teams WHERE id = ?").bind(team_id).execute(&app.db).await.map_err(any_err)?;
+    // The bots keep `team_id` so their surviving messages can still say which team they were
+    // in; they are soft-deleted, so nothing lists them any more.
+
+    for b in &member_ids {
+        app.emit("bot_changed", json!({"bot_id": b})).await;
+    }
+    app.emit("team_changed", json!({"team_id": t.id, "project_id": t.project_id, "deleted": true})).await;
+    app.emit("project_changed", json!({"project_id": t.project_id})).await;
+    Ok(json!({"deleted": true, "branches_deleted": removed_branches}))
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PatchTeam {
+    #[serde(default)]
+    pub budget: Option<BudgetPatch>,
+    #[serde(default)]
+    pub supervised: Option<bool>,
+    #[serde(default)]
+    pub deliver: Option<String>,
+}
+
+/// `PATCH /api/teams/:id` — top up the budget, flip supervised, change the delivery mode.
+pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if is_terminal(&t.phase) {
+        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+    }
+    let mut budget = Budget::from_json(&t.budget_json);
+    if let Some(bp) = &p.budget {
+        budget.apply(bp).map_err(LcError::Bad)?;
+    }
+    let deliver = match &p.deliver {
+        None => t.deliver.clone(),
+        Some(d) if DELIVERS.contains(&d.as_str()) => d.clone(),
+        Some(_) => return Err(LcError::Bad("deliver must be `branch` or `pr`".into())),
+    };
+    let supervised = p.supervised.unwrap_or(t.supervised == 1);
+    sqlx::query("UPDATE teams SET budget_json = ?, deliver = ?, supervised = ? WHERE id = ?")
+        .bind(serde_json::to_string(&budget).unwrap_or_else(|_| "{}".into()))
+        .bind(&deliver)
+        .bind(supervised as i64)
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    record_event(
+        app,
+        team_id,
+        "note",
+        None,
+        None,
+        None,
+        None,
+        json!({"action": "patch", "budget": budget, "deliver": deliver, "supervised": supervised}),
+    )
+    .await?;
+    let t = load(app, team_id).await?;
+    emit_team_changed(app, &t).await;
+    Ok(json!({}))
+}
+
+/// Resolve the `to` field of `say`: a role (`pm` / `reviewer` / `rev` / `dev-1`), a bot id,
+/// or a member's nickname.
+pub async fn resolve_member(app: &Arc<App>, t: &db::Team, to: &str) -> LcResult<db::Bot> {
+    let want = to.trim().trim_start_matches('@');
+    if want.is_empty() {
+        return Err(LcError::Bad("to must not be empty".into()));
+    }
+    let members: Vec<db::Bot> =
+        db::team_members(&app.db, &t.id).await.map_err(any_err)?.into_iter().filter(|b| b.deleted_at.is_none()).collect();
+    let lower = want.to_ascii_lowercase();
+    let by_role = match lower.as_str() {
+        "pm" => Some("pm"),
+        "reviewer" | "rev" => Some("reviewer"),
+        _ => None,
+    };
+    if let Some(role) = by_role {
+        if let Some(b) = members.iter().find(|b| b.team_role.as_deref() == Some(role)) {
+            return Ok(b.clone());
+        }
+    }
+    if let Some(b) = members.iter().find(|b| b.id == want) {
+        return Ok(b.clone());
+    }
+    if let Some(b) = members.iter().find(|b| {
+        b.name.to_ascii_lowercase() == lower || short_name(&b.name, t.issue_number).to_ascii_lowercase() == lower
+    }) {
+        return Ok(b.clone());
+    }
+    Err(LcError::NotFound("team member".into()))
+}
+
+/// `POST /api/teams/:id/say` — the user talking into the team.
+///
+/// Recorded as a `kind:"user"` event and **not** counted against `max_relays` (SPEC-team
+/// §4.5): only the daemon's own relays burn budget.
+pub async fn say(
+    app: &Arc<App>,
+    team_id: &str,
+    text: &str,
+    to: &str,
+    client_request_id: &str,
+) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if text.trim().is_empty() {
+        return Err(LcError::Bad("text must not be empty".into()));
+    }
+    if is_terminal(&t.phase) {
+        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+    }
+    let bot = resolve_member(app, &t, to).await?;
+    let crid = if client_request_id.trim().is_empty() { db::ulid() } else { client_request_id.to_string() };
+    let ev = record_event(
+        app,
+        team_id,
+        "user",
+        None,
+        Some(&bot.id),
+        None,
+        None,
+        json!({"text": text, "to": bot.name}),
+    )
+    .await?;
+    let out = lifecycle::prompt_grouped(app, &bot.id, text, &crid, None, None, &[]).await?;
+    // Stamp the team on the rows the ordinary prompt path just created so the team timeline
+    // and `turns.team_id` line up without touching `lifecycle`.
+    let _ = sqlx::query("UPDATE messages SET team_id = ? WHERE id = ?")
+        .bind(team_id)
+        .bind(&out.message_id)
+        .execute(&app.db)
+        .await;
+    let _ = sqlx::query("UPDATE turns SET team_id = ?, team_event_id = ? WHERE id = ?")
+        .bind(team_id)
+        .bind(&ev.id)
+        .bind(&out.turn_id)
+        .execute(&app.db)
+        .await;
+    let _ = sqlx::query("UPDATE team_events SET turn_id = ? WHERE id = ?")
+        .bind(&out.turn_id)
+        .bind(&ev.id)
+        .execute(&app.db)
+        .await;
+    Ok(json!({
+        "team_id": t.id, "event_id": ev.id,
+        "bot_id": bot.id, "bot_name": bot.name,
+        "turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery,
+    }))
+}
+
+/// `POST /api/teams/:id/answer` — reply to the PM's `ask_user`: a `say` to the PM plus a
+/// resume when that is what the team is waiting on.
+pub async fn answer(app: &Arc<App>, team_id: &str, text: &str, client_request_id: &str) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    let mut out = say(app, team_id, text, "pm", client_request_id).await?;
+    let waiting = t.phase == "paused" && t.pause_reason.as_deref().map(|r| r.starts_with("ask_user")).unwrap_or(false);
+    if waiting {
+        resume(app, team_id).await?;
+    }
+    if let Some(o) = out.as_object_mut() {
+        o.insert("resumed".into(), json!(waiting));
+    }
+    Ok(out)
+}
+
+/// `POST /api/teams/:id/tasks/:tid/decide` — the human unblocking one task (SPEC-team §8.2).
+pub async fn decide(
+    app: &Arc<App>,
+    team_id: &str,
+    task_id: &str,
+    action: &str,
+    note: Option<&str>,
+) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if is_terminal(&t.phase) {
+        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+    }
+    let task = db::team_task(&app.db, task_id)
+        .await
+        .map_err(any_err)?
+        .filter(|x| x.team_id == t.id)
+        .ok_or_else(|| LcError::NotFound("task".into()))?;
+    if !DECIDABLE_STATES.contains(&task.state.as_str()) {
+        return Err(LcError::conflict(
+            "task is not waiting for a decision",
+            json!({"task_id": task.id, "state": task.state}),
+        ));
+    }
+    let next = match action {
+        "rework" => "working",
+        "force_merge" => "merging",
+        "skip" => "skipped",
+        _ => return Err(LcError::Bad("action must be rework, force_merge or skip".into())),
+    };
+    sqlx::query("UPDATE team_tasks SET state = ?, updated_at = ? WHERE id = ?")
+        .bind(next)
+        .bind(db::now())
+        .bind(&task.id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    record_event(
+        app,
+        team_id,
+        "note",
+        None,
+        Some(&task.worker_bot_id),
+        Some(&task.id),
+        None,
+        json!({"action": action, "note": note, "from": task.state, "to": next}),
+    )
+    .await?;
+    let updated = db::team_task(&app.db, &task.id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("task".into()))?;
+    emit_task_updated(app, &updated).await;
+    // `rework` needs the worker told what to do; `force_merge` is picked up by the merge
+    // queue on the scheduler's next pass; `skip` needs nothing further.
+    if action == "rework" {
+        crate::team_sched::relay_rework_decision(app, &t, &updated, note).await?;
+    }
+    spawn_scheduler(app, team_id);
+    Ok(json!({"task": task_json(&updated)}))
+}
+
+// ---------------------------------------------------------------- scheduler seam (§3)
+
+/// SPEC-team §3 — start (or re-use) this team's event loop. The loop itself is
+/// `team_sched::spawn`; calling this twice for one team is a no-op, which is why `create`,
+/// `resume`, `decide` and `respawn_schedulers` can all call it without coordinating.
+pub fn spawn_scheduler(app: &Arc<App>, team_id: &str) {
+    crate::team_sched::spawn(app, team_id);
+}
+
+/// SPEC-team §7.5 / §6.5: after a daemon restart every non-terminal team gets its scheduler
+/// back, and every project that has one gets a `git worktree prune` — which collects the
+/// registrations of worktrees a user deleted by hand while the daemon was down.
+///
+/// Nothing is restored from memory: the scheduler re-reads `teams`, `team_tasks` and the
+/// pending rows of `team_events`, and carries on from there. A pending relay is re-sent with
+/// the same `client_request_id`, so a turn that actually made it out is not duplicated.
+pub async fn respawn_schedulers(app: &Arc<App>) {
+    let teams = db::live_teams(&app.db).await.unwrap_or_default();
+    if teams.is_empty() {
+        return;
+    }
+    tracing::info!(count = teams.len(), "resuming teams after restart");
+    let mut pruned: std::collections::BTreeSet<String> = Default::default();
+    for t in teams {
+        if let Ok(Some(p)) = db::project(&app.db, &t.project_id).await {
+            if pruned.insert(p.id.clone()) {
+                tg::worktree_prune(app, &p.host, &p.path).await;
+            }
+            // §6.4a: the workspace its panes live in must still exist, or the members have
+            // nowhere to start. Same treatment as a missing worktree: pause, do not guess.
+            if let Err(reason) = check_workspace(app, &p, &t).await {
+                let _ = record_event(
+                    app,
+                    &t.id,
+                    "note",
+                    None,
+                    None,
+                    None,
+                    None,
+                    json!({"action": "workspace_missing", "detail": reason}),
+                )
+                .await;
+                if t.phase != "paused" {
+                    let _ = set_phase(app, &t.id, "paused", Some("workspace_missing"), Some(&t.phase)).await;
+                }
+                continue;
+            }
+            // §6.5: a team whose worktrees vanished cannot be continued blindly.
+            if let Err(reason) = check_worktrees(app, &p, &t).await {
+                let _ = record_event(
+                    app,
+                    &t.id,
+                    "note",
+                    None,
+                    None,
+                    None,
+                    None,
+                    json!({"action": "worktree_missing", "detail": reason}),
+                )
+                .await;
+                if t.phase != "paused" {
+                    let _ = set_phase(app, &t.id, "paused", Some("worktree_missing"), Some(&t.phase)).await;
+                }
+                continue;
+            }
+        }
+        spawn_scheduler(app, &t.id);
+    }
+}
+
+/// SPEC-team §6.4a: the team's workspace must still be there. A host that is not connected
+/// is *not* a missing workspace — that is a transient condition the ordinary lamp already
+/// shows, and pausing on it would fire every time herdr restarts a second later than us.
+async fn check_workspace(app: &Arc<App>, project: &db::Project, t: &db::Team) -> Result<(), String> {
+    let Some(ws) = t.workspace_id.as_deref().filter(|w| !w.trim().is_empty()) else {
+        return Err("this team has no workspace".into());
+    };
+    let Ok((client, _)) = team_herdr(app, project).await else { return Ok(()) };
+    match client.workspace_get(ws).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(format!("workspace {ws} is gone")),
+        Err(_) => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------- the cwd invariant (§6.1 #1)
+
+/// Is `child` `dir` itself, or inside it? Compared on path components, so `/a/b` does not
+/// contain `/a/bc`, and resolved through symlinks when both ends exist.
+///
+/// `""` contains nothing — that is what makes the `worktree_root = ''` shape fail every
+/// containment test rather than pass them all. `/` is the opposite and has to be spelled out,
+/// because trimming its trailing slash would otherwise turn it into `""`: filesystem root
+/// contains every absolute path there is.
+pub fn is_within(dir: &str, child: &str) -> bool {
+    let norm = |s: &str| {
+        let t = s.trim();
+        let trimmed = t.trim_end_matches('/');
+        if trimmed.is_empty() {
+            return if t.starts_with('/') { "/".to_string() } else { String::new() };
+        }
+        std::fs::canonicalize(trimmed).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| trimmed.to_string())
+    };
+    let (d, c) = (norm(dir), norm(child));
+    if d.is_empty() || c.is_empty() {
+        return false;
+    }
+    if d == "/" {
+        return c.starts_with('/');
+    }
+    c == d || c.starts_with(&format!("{d}/"))
+}
+
+/// **The invariant that keeps a team away from the user's checkout.**
+///
+/// Every worktree-level git command a team runs — `checkout -b` at dispatch, `add -A &&
+/// commit` at report, `checkout --detach` at review — takes its `-C` from `bots.cwd`. If that
+/// value is ever the project's own path, one `add -A` sweeps whatever the user had in
+/// progress into a task branch. That is not hypothetical: a team created by a build that
+/// predated the worktree layout had `worktree_root = ''` and all four members pointing at
+/// the main checkout, which had 55 uncommitted files in it at the time.
+///
+/// So the check is a **path containment test, not a null check** — the broken shape had an
+/// explicit cwd, not a missing one — and it is the single function every caller uses:
+/// `Ctx::wt` (the scheduler's git target), `start_inner` (before a pane is ever opened) and
+/// `check_worktrees` / `resume` (before a paused team is allowed to move again).
+pub fn checked_member_cwd(team: &db::Team, project: &db::Project, bot: &db::Bot) -> Result<String, String> {
+    let root = team.worktree_root.trim();
+    if root.is_empty() {
+        return Err(format!("team {} has no worktree_root", team.id));
+    }
+    let cwd = bot.cwd.as_deref().map(str::trim).unwrap_or("");
+    if cwd.is_empty() {
+        return Err(format!("member `{}` has no cwd", bot.name));
+    }
+    // The user's checkout, and anything inside it, is off limits — §6.1 #1 is the whole
+    // reason the worktrees live in the data directory in the first place.
+    if is_within(&project.path, cwd) {
+        return Err(format!("member `{}` cwd `{cwd}` is inside the project checkout `{}`", bot.name, project.path));
+    }
+    if !is_within(root, cwd) {
+        return Err(format!("member `{}` cwd `{cwd}` is outside the team root `{root}`", bot.name));
+    }
+    Ok(cwd.to_string())
+}
+
+/// The integration worktree, `<root>/main`, checked the same way (§6.3: the daemon merges
+/// there and nowhere else).
+pub fn checked_main_wt(team: &db::Team, project: &db::Project) -> Result<String, String> {
+    let root = team.worktree_root.trim();
+    if root.is_empty() {
+        return Err(format!("team {} has no worktree_root", team.id));
+    }
+    if is_within(&project.path, root) {
+        return Err(format!("team root `{root}` is inside the project checkout `{}`", project.path));
+    }
+    Ok(format!("{}/main", root.trim_end_matches('/')))
+}
+
+/// Every member of a team, checked. `Ok(())` means no git command this team runs can reach
+/// the user's checkout.
+pub fn check_layout(team: &db::Team, project: &db::Project, members: &[db::Bot]) -> Result<(), String> {
+    checked_main_wt(team, project)?;
+    for b in members.iter().filter(|b| b.deleted_at.is_none()) {
+        checked_member_cwd(team, project, b)?;
+    }
+    Ok(())
+}
+
+/// Two paths naming the same directory. String equality is not enough on macOS, where
+/// `/var` is a symlink to `/private/var`: the daemon stores the path it was given and git
+/// reports the resolved one, so the two never matched and every team looked as if its
+/// worktrees had vanished.
+fn same_path(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim_end_matches('/').to_string();
+    if norm(a) == norm(b) {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Every member's cwd must be inside the team root **and** still be a registered worktree
+/// (SPEC-team §6.5).
+///
+/// The containment test comes first and is the important half. Comparing against
+/// `git worktree list` alone was blind to the shape that actually happened: the user's main
+/// checkout is the *first line* of that list, so a member whose cwd had become
+/// `<project.path>` passed the "your worktree still exists" check with flying colours. The
+/// main checkout is therefore excluded from `have` as well.
+async fn check_worktrees(app: &Arc<App>, project: &db::Project, t: &db::Team) -> Result<(), String> {
+    let members = db::team_members(&app.db, &t.id).await.unwrap_or_default();
+    check_layout(t, project, &members)?;
+    let want: Vec<String> = members
+        .iter()
+        .filter(|b| b.deleted_at.is_none())
+        .filter_map(|b| b.cwd.clone())
+        .filter(|c| !c.trim().is_empty())
+        .collect();
+    if want.is_empty() {
+        return Ok(());
+    }
+    let have: Vec<String> = tg::worktree_paths(app, &project.host, &project.path)
+        .await
+        .into_iter()
+        .filter(|h| !same_path(h, &project.path))
+        .collect();
+    let missing: Vec<&String> = want.iter().filter(|w| !have.iter().any(|h| same_path(h, w))).collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+    }
+}
+
+/// SPEC-team §6.5 / §6.4a on every reconcile pass, not only at boot: a team whose worktrees
+/// or workspace went away — or whose layout no longer satisfies the §6.1 invariant — is
+/// paused where a human can see it.
+/// The per-host entry point reconcile actually uses. Reconciliation is always scoped to one
+/// host — pane and workspace ids are only unique within that host's herdr session — so a pass
+/// over `local` must not go looking for a remote team's worktrees (and vice versa).
+pub async fn reconcile_teams_on_host(app: &Arc<App>, host: &str) {
+    reconcile_teams_inner(app, Some(host)).await;
+}
+
+async fn reconcile_teams_inner(app: &Arc<App>, host: Option<&str>) {
+    for t in db::live_teams(&app.db).await.unwrap_or_default() {
+        if t.phase == "paused" || t.phase == "aborting" {
+            continue;
+        }
+        let Ok(Some(p)) = db::project(&app.db, &t.project_id).await else { continue };
+        if host.map(|h| p.host != h).unwrap_or(false) {
+            continue;
+        }
+        let bad = match check_workspace(app, &p, &t).await {
+            Err(e) => Some(("workspace_missing", e)),
+            Ok(()) => check_worktrees(app, &p, &t).await.err().map(|e| ("worktree_missing", e)),
+        };
+        if let Some((reason, detail)) = bad {
+            let _ = record_event(app, &t.id, "note", None, None, None, None, json!({"action": reason, "detail": detail}))
+                .await;
+            let _ = set_phase(app, &t.id, "paused", Some(reason), Some(&t.phase)).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tid6_takes_the_last_six_alphanumerics() {
+        assert_eq!(tid6("01JQZK3F9X2ABCDEF"), "abcdef");
+        assert_eq!(tid6("01JQZK3F9X2"), "k3f9x2");
+        assert_eq!(tid6(""), "team");
+    }
+
+    /// §6.1 #1. Reported 2026-09-06: a team created by a build that predated `team_git.rs`
+    /// got `worktree_root = ''` and all four members' `cwd` written as the user's checkout,
+    /// with 55 uncommitted files in it. Nothing was damaged — the run paused on a PM question
+    /// before any worker reported — but a single `git add -A && commit` would have swallowed
+    /// the lot. `is_within` is the whole of the containment decision, so pin its edges.
+    #[test]
+    fn containment_rejects_the_users_own_checkout() {
+        let proj = "/Users/u/project/agents-manager";
+        // The incident itself: cwd *is* the checkout. Equality has to count as "inside".
+        assert!(is_within(proj, proj));
+        assert!(is_within(proj, "/Users/u/project/agents-manager/daemon/src"));
+        // A trailing slash on either side is the same directory, not a different one.
+        assert!(is_within(&format!("{proj}/"), proj));
+
+        // A shared textual prefix is not containment — the classic way this check goes wrong.
+        assert!(!is_within(proj, "/Users/u/project/agents-manager-2"));
+        assert!(!is_within("/a/b", "/a/bc"));
+        // The team root is elsewhere entirely, which is the point of putting it in the data dir.
+        assert!(!is_within(proj, "/Users/u/.config/agents-manager/teams/01ABC/dev-1"));
+
+        let root = "/Users/u/.config/agents-manager/teams/01ABC";
+        assert!(is_within(root, &format!("{root}/dev-1")));
+        assert!(!is_within(root, "/Users/u/.config/agents-manager/teams/01ABCD/dev-1"));
+        // An empty side can never contain anything: `worktree_root = ''` must not pass.
+        assert!(!is_within("", proj));
+        assert!(!is_within(root, ""));
+        // …but `/` is not the empty string, however much trimming its slash looks like it.
+        // It contains every absolute path, which is what makes `rm -rf /` fail the guard.
+        assert!(is_within("/", proj));
+        assert!(is_within("/", "/"));
+        assert!(!is_within(proj, "/"));
+        assert!(!is_within("/", "relative/path"));
+    }
+
+    #[test]
+    fn branch_names_follow_6_2() {
+        let b = integration_branch(42, "k3f9x2");
+        assert_eq!(b, "team/i42-k3f9x2");
+        // A `/` here would be impossible: `refs/heads/team/i42-k3f9x2` is a file, so git
+        // cannot also create `refs/heads/team/i42-k3f9x2/t1-dev-1` under it.
+        assert_eq!(task_branch(&b, 1, "dev-1"), "team/i42-k3f9x2-t1-dev-1");
+        assert!(task_branch(&b, 1, "dev-1").starts_with(&b), "task branches still sort with theirs");
+    }
+
+    #[test]
+    fn member_nicknames_and_short_names() {
+        assert_eq!(member_nick(42, "pm", 0), "i42-pm");
+        assert_eq!(member_nick(42, "worker", 2), "i42-dev-2");
+        assert_eq!(member_nick(42, "reviewer", 0), "i42-rev");
+        assert_eq!(short_name("i42-dev-2", 42), "dev-2");
+        assert_eq!(short_name("i42-pm", 42), "pm");
+        // A member of another issue keeps its full name.
+        assert_eq!(short_name("i7-pm", 42), "i7-pm");
+        // Every generated nickname must survive the bot-name rule.
+        for n in [member_nick(42, "pm", 0), member_nick(42, "worker", 4), member_nick(42, "reviewer", 0)] {
+            assert!(crate::config::valid_bot_name(&n), "{n}");
+        }
+    }
+
+    #[test]
+    fn budget_defaults_are_the_user_ruling() {
+        let b = Budget::default();
+        assert_eq!(b.max_relays, 40);
+        assert_eq!(b.max_review_rounds, 2);
+        assert_eq!(b.max_wall_clock_min, 120);
+        assert_eq!(b.quota_stop_pct, 90.0);
+        // And they round-trip through the stored JSON.
+        let s = serde_json::to_string(&b).unwrap();
+        assert_eq!(Budget::from_json(&s), b);
+        assert_eq!(Budget::from_json("not json"), b);
+    }
+
+    #[test]
+    fn budget_patch_merges_and_validates() {
+        let mut b = Budget::default();
+        b.apply(&BudgetPatch { max_relays: Some(80), ..Default::default() }).unwrap();
+        assert_eq!(b.max_relays, 80);
+        assert_eq!(b.max_review_rounds, 2, "untouched fields keep their value");
+        assert!(b.apply(&BudgetPatch { max_relays: Some(0), ..Default::default() }).is_err());
+        assert!(b.apply(&BudgetPatch { quota_stop_pct: Some(101.0), ..Default::default() }).is_err());
+        assert!(b.apply(&BudgetPatch { max_wall_clock_min: Some(0), ..Default::default() }).is_err());
+        assert_eq!(b.max_relays, 80, "a rejected patch changes nothing else");
+    }
+
+    #[test]
+    fn deliver_default_is_branch_not_pr() {
+        // SPEC-team §12 #1 proposes `pr`; the user chose `branch`.
+        assert_eq!(DEFAULT_DELIVER, "branch");
+        assert!(DELIVERS.contains(&"pr"));
+        assert!(!DEFAULT_SUPERVISED);
+        assert_eq!(MAX_WORKERS, 4);
+    }
+
+    #[test]
+    fn tasks_summary_counts_by_state() {
+        let t = |state: &str| db::TeamTask {
+            id: db::ulid(),
+            team_id: "t".into(),
+            seq: 1,
+            title: String::new(),
+            brief: String::new(),
+            files_json: "[]".into(),
+            worker_bot_id: "b".into(),
+            branch: String::new(),
+            state: state.into(),
+            round: 0,
+            rebase_attempts: 0,
+            last_report: None,
+            last_verdict: None,
+            merge_sha: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let s = tasks_summary(&[t("working"), t("working"), t("merged")]);
+        assert_eq!(s["working"], 2);
+        assert_eq!(s["merged"], 1);
+        assert_eq!(s["total"], 3);
+        assert_eq!(tasks_summary(&[])["total"], 0);
+    }
+
+    #[test]
+    fn phase_terminality() {
+        for p in ["done", "aborted", "failed"] {
+            assert!(is_terminal(p));
+        }
+        for p in ["starting", "planning", "working", "finishing", "paused", "aborting"] {
+            assert!(!is_terminal(p));
+        }
+    }
+
+    fn proj(path: &str) -> db::Project {
+        db::Project {
+            id: "p".into(),
+            path: path.into(),
+            label: "p".into(),
+            host: LOCAL_HOST.into(),
+            workspace_id: None,
+            deleted_at: None,
+            created_at: String::new(),
+        }
+    }
+
+    /// The two guards in front of `remove_worktrees`' destructive calls, at the level of the
+    /// paths themselves. Same incident shape as `containment_rejects_the_users_own_checkout`,
+    /// but on the *delete* side: `worktree remove --force --force` and `rm -rf` were the only
+    /// two places `bots.cwd` / `teams.worktree_root` reached a destructive command without
+    /// ever passing `check_layout`.
+    #[test]
+    fn only_directories_inside_the_team_root_may_be_removed() {
+        let p = proj("/Users/u/project/agents-manager");
+        let root = "/Users/u/.config/agents-manager/teams/01ABC";
+
+        assert!(removable_member_dir(&p, root, &format!("{root}/dev-1")).is_ok());
+        assert!(removable_member_dir(&p, root, root).is_ok(), "the root itself is inside itself");
+
+        // The incident's own shape: cwd is the checkout.
+        assert!(removable_member_dir(&p, root, &p.path).is_err());
+        // A linked worktree the *user* made by hand. git will not save us here — it refuses
+        // only the main working tree — and `--force --force` would take their uncommitted
+        // work with it.
+        assert!(removable_member_dir(&p, root, &format!("{}/.claude/worktrees/foo", p.path)).is_err());
+        // Anywhere else at all.
+        assert!(removable_member_dir(&p, root, "/Users/u/somewhere-else").is_err());
+        assert!(removable_member_dir(&p, root, "/Users/u/.config/agents-manager/teams/01ABCD/dev-1").is_err());
+        assert!(removable_member_dir(&p, root, "  ").is_err());
+        assert!(removable_member_dir(&p, "", &format!("{root}/dev-1")).is_err(), "`worktree_root = ''` contains nothing");
+    }
+
+    /// `remove_dir` is a literal `rm -rf` of a database column, so it gets the strictest of
+    /// the two: not the checkout, not inside it, and — the case string equality misses — not
+    /// a directory that *contains* the checkout.
+    #[test]
+    fn the_team_root_is_never_rm_rfd_near_the_checkout() {
+        let p = proj("/Users/u/project/agents-manager");
+        assert!(removable_root(&p, "/Users/u/.config/agents-manager/teams/01ABC").is_ok());
+
+        assert!(removable_root(&p, &p.path).is_err(), "the checkout itself");
+        assert!(removable_root(&p, "/Users/u/project/agents-manager/").is_err(), "…with a trailing slash");
+        assert!(removable_root(&p, "/Users/u/project/agents-manager/.claude/worktrees").is_err(), "inside it");
+        assert!(removable_root(&p, "/Users/u/project").is_err(), "a parent takes the checkout with it");
+        assert!(removable_root(&p, "/Users/u").is_err());
+        assert!(removable_root(&p, "/").is_err());
+        assert!(removable_root(&p, "").is_err(), "the `worktree_root = ''` shape");
+        assert!(removable_root(&p, "   ").is_err());
+        // A shared prefix is still not containment.
+        assert!(removable_root(&p, "/Users/u/project/agents-manager-2").is_ok());
+    }
+}
+
+#[cfg(test)]
+pub mod testing {
+    //! Shared fixtures for the team tests (here and in `team_sched`).
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex as StdMutex;
+
+    /// A stand-in herdr server speaking the real newline-JSON protocol on a real unix socket:
+    /// one request per connection, `{"id","method","params"}` in, `{"id","result"}` out.
+    ///
+    /// It answers what creating a team needs (`ping`, the three `workspace.*` calls of §6.4a)
+    /// plus the tab / pane bookkeeping the one-bot-one-tab work turns on: `tab.create`,
+    /// `tab.list`, `tab.close`, `pane.split`, `pane.close`, `pane.get`, `pane.move`, and the
+    /// `session.snapshot` / `agent.list` pair a reconcile runs on. It stops there, deliberately:
+    /// `agent.start`, hook injection and `ensure_kind_installed` probing for a real CLI belong
+    /// to a live agent, and a mock that pretended otherwise would be testing itself.
+    ///
+    /// One place it knowingly differs from herdr 0.8.2: closing a tab's last pane does **not**
+    /// reap the tab here, though the real server does. That is on purpose — the daemon must
+    /// tidy the tab up itself rather than rely on that, and only a mock that leaves the empty
+    /// tab standing can show whether it did.
+    #[derive(Debug, Clone)]
+    pub struct MockTab {
+        pub tab_id: String,
+        pub workspace_id: String,
+        pub label: String,
+        pub panes: Vec<String>,
+    }
+
+    pub struct MockHerdr {
+        pub workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
+        /// Tabs in creation order, each holding its panes.
+        pub tabs: Arc<StdMutex<Vec<MockTab>>>,
+        /// Every `(method, params)` the daemon sent, so a test can assert *how* it asked —
+        /// "started through `tab.create`, never `pane.split`" is only checkable here.
+        pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
+        /// What `agent.list` and `agent.get` answer with. A test fills this in to describe
+        /// the agents herdr is supposed to be running.
+        pub agents: Arc<StdMutex<Vec<Value>>>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for MockHerdr {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
+
+    /// The mock's whole mutable world, so one lock covers a request.
+    #[derive(Clone)]
+    struct MockState {
+        workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
+        tabs: Arc<StdMutex<Vec<MockTab>>>,
+        calls: Arc<StdMutex<Vec<(String, Value)>>>,
+        agents: Arc<StdMutex<Vec<Value>>>,
+        seq: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl MockState {
+        fn next(&self) -> u64 {
+            self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+        fn pane_json(&self, pane_id: &str, tab: &MockTab, cwd: Option<&Value>) -> Value {
+            json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
+                   "cwd": cwd.cloned().unwrap_or(Value::Null), "agent": null, "agent_status": null})
+        }
+        fn tab_json(t: &MockTab) -> Value {
+            json!({"tab_id": t.tab_id, "workspace_id": t.workspace_id, "label": t.label,
+                   "pane_count": t.panes.len()})
+        }
+        /// Add a tab holding one fresh pane. Returns (tab, pane_id).
+        fn new_tab(&self, workspace_id: &str, label: &str) -> (MockTab, String) {
+            let n = self.next();
+            let tab = MockTab {
+                tab_id: format!("{workspace_id}:t{n}"),
+                workspace_id: workspace_id.to_string(),
+                label: label.to_string(),
+                panes: vec![format!("{workspace_id}:p{n}")],
+            };
+            let pane = tab.panes[0].clone();
+            self.tabs.lock().unwrap().push(tab.clone());
+            (tab, pane)
+        }
+        fn find_pane(&self, pane_id: &str) -> Option<MockTab> {
+            self.tabs.lock().unwrap().iter().find(|t| t.panes.iter().any(|p| p == pane_id)).cloned()
+        }
+    }
+
+    impl MockHerdr {
+        pub fn start(socket: std::path::PathBuf) -> MockHerdr {
+            let _ = std::fs::remove_file(&socket);
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bind mock herdr socket");
+            let state = MockState {
+                workspaces: Default::default(),
+                tabs: Default::default(),
+                calls: Default::default(),
+                agents: Default::default(),
+                seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            };
+            let (workspaces, tabs, calls, agents) =
+                (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
+            let handle = tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let st = state.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                        let (r, mut w) = stream.into_split();
+                        let mut line = String::new();
+                        if BufReader::new(r).read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let req: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
+                        let id = req.get("id").cloned().unwrap_or(Value::Null);
+                        let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+                        let params = req.get("params").cloned().unwrap_or(json!({}));
+                        st.calls.lock().unwrap().push((method.clone(), params.clone()));
+                        let wid_of = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                        let out = match method.as_str() {
+                            "ping" => json!({"id": id, "result": {"version": "mock", "protocol": 20}}),
+                            "workspace.create" => {
+                                let wid = format!("ws-{}", st.next());
+                                let label = params.get("label").and_then(Value::as_str).unwrap_or("").to_string();
+                                st.workspaces.lock().unwrap().insert(wid.clone(), label.clone());
+                                let (tab, pane) = st.new_tab(&wid, &label);
+                                json!({"id": id, "result": {
+                                    "workspace": {"workspace_id": wid, "label": label, "pane_count": 1},
+                                    "tab": MockState::tab_json(&tab),
+                                    "root_pane": st.pane_json(&pane, &tab, params.get("cwd"))}})
+                            }
+                            "workspace.get" => {
+                                let wid = wid_of("workspace_id");
+                                match st.workspaces.lock().unwrap().get(&wid).cloned() {
+                                    Some(label) => json!({"id": id, "result": {"workspace":
+                                        {"workspace_id": wid, "label": label, "pane_count": 1}}}),
+                                    None => json!({"id": id, "error": {"code": "not_found", "message": "no such workspace"}}),
+                                }
+                            }
+                            "workspace.close" => {
+                                let wid = wid_of("workspace_id");
+                                st.workspaces.lock().unwrap().remove(&wid);
+                                st.tabs.lock().unwrap().retain(|t| t.workspace_id != wid);
+                                json!({"id": id, "result": {}})
+                            }
+                            "tab.create" => {
+                                let wid = wid_of("workspace_id");
+                                let label = params.get("label").and_then(Value::as_str).unwrap_or("").to_string();
+                                if !st.workspaces.lock().unwrap().contains_key(&wid) {
+                                    json!({"id": id, "error": {"code": "workspace_not_found", "message": wid}})
+                                } else {
+                                    let (tab, pane) = st.new_tab(&wid, &label);
+                                    json!({"id": id, "result": {"type": "tab_created",
+                                        "tab": MockState::tab_json(&tab),
+                                        "root_pane": st.pane_json(&pane, &tab, params.get("cwd"))}})
+                                }
+                            }
+                            "tab.list" => {
+                                let wid = wid_of("workspace_id");
+                                let tabs: Vec<Value> = st
+                                    .tabs
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .filter(|t| wid.is_empty() || t.workspace_id == wid)
+                                    .map(MockState::tab_json)
+                                    .collect();
+                                json!({"id": id, "result": {"type": "tab_list", "tabs": tabs}})
+                            }
+                            "tab.close" => {
+                                let tid = wid_of("tab_id");
+                                let mut tabs = st.tabs.lock().unwrap();
+                                let before = tabs.len();
+                                tabs.retain(|t| t.tab_id != tid);
+                                if tabs.len() == before {
+                                    json!({"id": id, "error": {"code": "tab_not_found", "message": tid}})
+                                } else {
+                                    json!({"id": id, "result": {"type": "ok"}})
+                                }
+                            }
+                            "pane.split" => {
+                                let target = wid_of("target_pane_id");
+                                let mut tabs = st.tabs.lock().unwrap();
+                                match tabs.iter_mut().find(|t| t.panes.iter().any(|p| *p == target)) {
+                                    None => json!({"id": id, "error": {"code": "pane_not_found", "message": target}}),
+                                    Some(t) => {
+                                        let pane = format!("{}:p{}", t.workspace_id, st.next());
+                                        t.panes.push(pane.clone());
+                                        json!({"id": id, "result": {"type": "pane_info", "pane":
+                                            json!({"pane_id": pane, "workspace_id": t.workspace_id,
+                                                   "tab_id": t.tab_id, "cwd": params.get("cwd"),
+                                                   "agent": null, "agent_status": null})}})
+                                    }
+                                }
+                            }
+                            "pane.close" => {
+                                // NB: no tab reaping — see the type comment.
+                                let pid = wid_of("pane_id");
+                                let mut tabs = st.tabs.lock().unwrap();
+                                for t in tabs.iter_mut() {
+                                    t.panes.retain(|p| *p != pid);
+                                }
+                                json!({"id": id, "result": {"type": "ok"}})
+                            }
+                            "pane.get" => {
+                                let pid = wid_of("pane_id");
+                                match st.find_pane(&pid) {
+                                    Some(t) => json!({"id": id, "result": {"type": "pane_info",
+                                        "pane": st.pane_json(&pid, &t, None)}}),
+                                    None => json!({"id": id, "error": {"code": "pane_not_found", "message": pid}}),
+                                }
+                            }
+                            "pane.move" => {
+                                let pid = wid_of("pane_id");
+                                let label = params
+                                    .get("destination")
+                                    .and_then(|d| d.get("label"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                match st.find_pane(&pid) {
+                                    None => json!({"id": id, "error": {"code": "pane_not_found", "message": pid}}),
+                                    Some(prev) => {
+                                        // Take it out of its old tab (left standing, empty or not)
+                                        // and give it a brand new one, keeping the pane id.
+                                        st.tabs.lock().unwrap().iter_mut().for_each(|t| t.panes.retain(|p| *p != pid));
+                                        let n = st.next();
+                                        let tab = MockTab {
+                                            tab_id: format!("{}:t{n}", prev.workspace_id),
+                                            workspace_id: prev.workspace_id.clone(),
+                                            label,
+                                            panes: vec![pid.clone()],
+                                        };
+                                        st.tabs.lock().unwrap().push(tab.clone());
+                                        json!({"id": id, "result": {"type": "pane_move", "move_result": {
+                                            "changed": true,
+                                            "previous_pane_id": pid,
+                                            "previous_workspace_id": prev.workspace_id,
+                                            "previous_tab_id": prev.tab_id,
+                                            "created_tab": MockState::tab_json(&tab),
+                                            "pane": st.pane_json(&pid, &tab, None)}}})
+                                    }
+                                }
+                            }
+                            "session.snapshot" => {
+                                let tabs = st.tabs.lock().unwrap().clone();
+                                let names: Vec<String> = st
+                                    .agents
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .filter_map(|a| a.get("pane_id").and_then(Value::as_str).map(String::from))
+                                    .collect();
+                                let panes: Vec<Value> = tabs
+                                    .iter()
+                                    .flat_map(|t| t.panes.iter())
+                                    .map(|p| json!({"pane_id": p, "agent": if names.contains(p) { json!("x") } else { Value::Null }}))
+                                    .collect();
+                                let wss: Vec<Value> = st
+                                    .workspaces
+                                    .lock()
+                                    .unwrap()
+                                    .keys()
+                                    .map(|w| json!({"workspace_id": w}))
+                                    .collect();
+                                json!({"id": id, "result": {"type": "session_snapshot", "snapshot":
+                                    {"workspaces": wss, "panes": panes,
+                                     "tabs": tabs.iter().map(MockState::tab_json).collect::<Vec<_>>()}}})
+                            }
+                            "agent.list" => {
+                                json!({"id": id, "result": {"agents": st.agents.lock().unwrap().clone()}})
+                            }
+                            "agent.get" => {
+                                let target = wid_of("target");
+                                let found = st
+                                    .agents
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|a| a.get("name").and_then(Value::as_str) == Some(target.as_str()))
+                                    .cloned();
+                                match found {
+                                    Some(a) => json!({"id": id, "result": {"agent": a}}),
+                                    None => json!({"id": id, "error": {"code": "not_found", "message": target}}),
+                                }
+                            }
+                            other => json!({"id": id, "error": {"code": "unsupported",
+                                            "message": format!("mock herdr does not implement {other}")}}),
+                        };
+                        let mut bytes = serde_json::to_vec(&out).unwrap();
+                        bytes.push(b'\n');
+                        let _ = w.write_all(&bytes).await;
+                        let _ = w.flush().await;
+                    });
+                }
+            });
+            MockHerdr { workspaces, tabs, calls, agents, handle }
+        }
+
+        pub fn count(&self) -> usize {
+            self.workspaces.lock().unwrap().len()
+        }
+
+        /// The methods the daemon called, in order.
+        pub fn methods(&self) -> Vec<String> {
+            self.calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
+        }
+
+        /// The params of the first call to `method`, if it was made at all.
+        pub fn first_call(&self, method: &str) -> Option<Value> {
+            self.calls.lock().unwrap().iter().find(|(m, _)| m == method).map(|(_, p)| p.clone())
+        }
+
+        pub fn tab(&self, tab_id: &str) -> Option<MockTab> {
+            self.tabs.lock().unwrap().iter().find(|t| t.tab_id == tab_id).cloned()
+        }
+
+        pub fn tabs_in(&self, workspace_id: &str) -> Vec<MockTab> {
+            self.tabs.lock().unwrap().iter().filter(|t| t.workspace_id == workspace_id).cloned().collect()
+        }
+    }
+
+    pub struct Env {
+        pub app: Arc<App>,
+        pub project_id: String,
+        /// The user's checkout — the thing §6.1 promises never to write to.
+        pub repo: std::path::PathBuf,
+        pub dir: std::path::PathBuf,
+        pub herdr: MockHerdr,
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A daemon with a real sqlite file, a real (throw-away) git repository as its project,
+    /// and a mock herdr behind the socket.
+    ///
+    /// The data directory is deliberately a **sibling** of the repository, not a child: that
+    /// is the §6.2 guarantee under test, and putting `teams/` inside the checkout would make
+    /// every "the user's tree stayed clean" assertion vacuous.
+    pub async fn env() -> Env {
+        let dir = std::env::temp_dir().join(format!("am-team-{}", db::ulid()));
+        let repo = dir.join("repo");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        crate::team_git::testing::init_repo(&repo);
+        let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
+        let sock = data.join("herdr.sock");
+        let herdr = MockHerdr::start(sock.clone());
+        let client = crate::herdr::HerdrClient::new(sock);
+        let app = App::new(
+            pool,
+            client.clone(),
+            client,
+            cfg,
+            data.clone(),
+            data.join("agents-managerd"),
+            7799,
+            "test-token".into(),
+            "test".into(),
+        );
+        app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let pid = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?, 'local', ?)")
+            .bind(&pid)
+            .bind(repo.to_string_lossy().to_string())
+            .bind("proj")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        Env { app, project_id: pid, repo, dir, herdr }
+    }
+
+    pub fn role(kind: &str) -> RoleSpec {
+        RoleSpec { kind: kind.into(), model: None, effort: None, fast: false, identity: None, persona_extra: None }
+    }
+
+    pub fn workers_spec(kind: &str, count: Option<u32>) -> WorkersSpec {
+        WorkersSpec {
+            count,
+            kind: kind.into(),
+            model: None,
+            effort: None,
+            fast: false,
+            identity: None,
+            persona_extra: None,
+        }
+    }
+
+    pub fn req(count: Option<u32>, reviewer: bool) -> CreateTeam {
+        CreateTeam {
+            issue_number: 42,
+            pm: role("codex"),
+            workers: workers_spec("claude", count),
+            reviewer: reviewer.then(|| role("grok")),
+            base: None,
+            deliver: None,
+            supervised: None,
+            budget: None,
+        }
+    }
+
+    pub fn issue() -> IssueRef {
+        IssueRef {
+            number: 42,
+            title: "make it work".into(),
+            url: "https://example.invalid/42".into(),
+            body: "讓它動起來。".into(),
+        }
+    }
+
+    pub async fn make_team(app: &Arc<App>, pid: &str, r: CreateTeam) -> String {
+        create_with_issue(app, pid, r, issue()).await.unwrap()["team_id"].as_str().unwrap().to_string()
+    }
+
+    /// A `runs` row that looks running to every precondition in `prompt_grouped`, without a
+    /// live agent behind it. The RPC that follows fails, which is `delivery = "unknown"` —
+    /// a real §9.1 outcome, and the one that lets a relay's DB side be tested end to end.
+    pub async fn fake_run(app: &Arc<App>, bot_id: &str) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1',?, 'agent', 'test', ?)",
+        )
+        .bind(&id)
+        .bind(bot_id)
+        .bind(format!("pane-{bot_id}"))
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        id
+    }
+}
+
+#[cfg(test)]
+mod api_tests {
+    use super::testing::*;
+    use super::*;
+
+    /// §10.1 defaults: 2 workers + a reviewer, `deliver=branch`, `supervised=false`, the
+    /// §12 budget — and the members are ordinary `bots` rows tagged `managed_by='team'`.
+    #[tokio::test]
+    async fn create_writes_the_team_and_its_members() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(None, true)).await;
+
+        let t = load(&app, &tid).await.unwrap();
+        assert_eq!(t.phase, "starting");
+        assert_eq!(t.deliver, "branch", "§12 #1: the user's default is `branch`, not `pr`");
+        assert_eq!(t.supervised, 0);
+        assert_eq!(t.base_ref, "HEAD");
+        assert_eq!(t.issue_number, 42);
+        assert_eq!(t.branch, integration_branch(42, &tid6(&tid)));
+        assert_eq!(Budget::from_json(&t.budget_json), Budget::default());
+        // §7.4: both NOT NULL columns were resolved before the row was written.
+        assert_eq!(t.base_sha.len(), 40, "base_sha is a real commit");
+        assert_eq!(t.worktree_root, worktree_root(&app, &tid));
+
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        assert_eq!(members.len(), 4, "pm + 2 workers + reviewer");
+        let roles: Vec<&str> = members.iter().map(|m| m.team_role.as_deref().unwrap()).collect();
+        assert_eq!(roles, vec!["pm", "worker", "worker", "reviewer"]);
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["i42-pm", "i42-dev-1", "i42-dev-2", "i42-rev"]);
+        for m in &members {
+            assert_eq!(m.managed_by, "team");
+            assert_eq!(m.team_id.as_deref(), Some(tid.as_str()));
+            assert!(m.cwd.is_some(), "a member always has an explicit cwd");
+            assert!(m.persona.is_some());
+            // Every member has a conversation, so the timeline works from minute one.
+            assert!(db::conversation_id(&app.db, &m.id).await.is_ok());
+        }
+        assert_eq!(members[0].kind, "codex");
+        assert_eq!(members[1].kind, "claude");
+        assert_eq!(members[3].kind, "grok");
+
+        // The creation is logged.
+        let evs = events(&app, &tid, None, 100).await.unwrap();
+        assert_eq!(evs["events"][0]["kind"], "phase");
+        assert_eq!(evs["events"][0]["payload"]["to"], "starting");
+
+        // …and none of this reached config.toml (SPEC-team §5.3).
+        assert!(app.cfg.get().await.projects.is_empty());
+
+        // T1 (§13): the §6.2 layout is real on disk, and it is outside the repository.
+        let root = std::path::PathBuf::from(&t.worktree_root);
+        assert!(root.starts_with(&app.data_dir), "the team root lives under the data dir, not the repo");
+        assert!(!root.starts_with(&e.repo));
+        assert!(root.join("ISSUE.md").exists() && root.join("TEAM.md").exists());
+        assert!(std::fs::read_to_string(root.join("ISSUE.md")).unwrap().contains("讓它動起來"));
+        for (i, m) in members.iter().enumerate() {
+            let cwd = std::path::PathBuf::from(m.cwd.clone().unwrap());
+            let want = root.join(member_dir(m.team_role.as_deref().unwrap(), i as u32));
+            assert_eq!(cwd, want, "{} lives in its own worktree", m.name);
+            assert!(cwd.join(".git").exists(), "{} is a real worktree", m.name);
+            // The doc copies are inside the member's cwd and ignored (§6.2).
+            let docs = cwd.join(".agents-manager/team");
+            assert!(docs.join("ISSUE.md").exists() && docs.join("TEAM.md").exists());
+            assert_eq!(std::fs::read_to_string(docs.join(".gitignore")).unwrap(), "*\n");
+            assert!(m.persona.as_deref().unwrap().contains(m.cwd.as_deref().unwrap()), "the persona names its cwd");
+        }
+        // The PM holds the integration branch; everyone else is detached (§6.2).
+        let g = |d: &std::path::Path, a: &[&str]| crate::team_git::testing::run(d, a);
+        assert_eq!(g(&root.join("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), t.branch);
+        assert_eq!(g(&root.join("dev-1"), &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
+
+        // §6.4a: the team got its own workspace, and it is not the project's.
+        assert_eq!(e.herdr.count(), 1);
+        assert!(t.workspace_id.is_some());
+        assert_eq!(
+            db::project(&app.db, &pid).await.unwrap().unwrap().workspace_id,
+            None,
+            "the project's own workspace was never touched"
+        );
+
+        // T8's core promise, checked at creation time: nothing was written into the checkout.
+        assert_eq!(g(&e.repo, &["status", "--porcelain"]), "");
+        assert_eq!(g(&e.repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 5);
+    }
+
+    /// §6.4a: if the workspace cannot be made, the whole team fails and unwinds — it must
+    /// never fall back to the project's workspace, which is the user's own working space.
+    #[tokio::test]
+    async fn a_team_without_a_workspace_is_not_created() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        // Pull the socket out from under it: `workspace.create` now fails.
+        app.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(create_with_issue(&app, &pid, req(Some(1), false), issue()).await.is_err());
+        // The row is parked in `failed` and every worktree it had built is gone again.
+        let teams = db::teams_of_project(&app.db, &pid).await.unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].phase, "failed");
+        assert!(!std::path::Path::new(&teams[0].worktree_root).exists(), "the half-built root was removed");
+        let listed = crate::team_git::testing::run(&e.repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(listed.matches("worktree ").count(), 1, "no orphan registrations: {listed}");
+    }
+
+    /// The TOML projection must not soft-delete team members just because they are not in
+    /// config.toml (SPEC-team §5.3 — the one exception to the projection rule).
+    #[tokio::test]
+    async fn projection_leaves_team_members_alone() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|m| m.deleted_at.is_none()), "team members survive a reprojection");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_bad_input() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let bad = |r: CreateTeam| async { create_with_issue(&app, &pid, r, issue()).await };
+
+        // §12 #7: at most four executors.
+        let mut r = req(Some(5), false);
+        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
+        r = req(Some(0), false);
+        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
+        // unknown kind
+        r = req(Some(1), false);
+        r.pm.kind = "gemini".into();
+        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
+        // deliver must be branch | pr
+        r = req(Some(1), false);
+        r.deliver = Some("merge".into());
+        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
+        // budget bounds
+        r = req(Some(1), false);
+        r.budget = Some(BudgetPatch { max_relays: Some(-1), ..Default::default() });
+        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
+        // an effort the kind does not accept
+        r = req(Some(1), false);
+        r.workers.effort = Some("turbo".into());
+        r.workers.kind = "codex".into();
+        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
+        // an unknown project
+        assert!(matches!(create_with_issue(&app, "nope", req(None, false), issue()).await, Err(LcError::NotFound(_))));
+        // nothing was written by any of those
+        assert!(db::teams_of_project(&app.db, &pid).await.unwrap().is_empty());
+    }
+
+    /// §9.2: a kind already at or above `quota_stop_pct` refuses the team with a
+    /// machine-readable 400.
+    #[tokio::test]
+    async fn create_refuses_when_quota_is_low() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        app.quotas.lock().await.insert(
+            "claude".into(),
+            crate::quota::Quota {
+                five_hour: Some(crate::quota::Window { used_pct: 93.0, resets_at: None }),
+                seven_day: None,
+                plan: None,
+                updated_at: db::now(),
+                source: "test".into(),
+                account: None,
+            },
+        );
+        match create_with_issue(&app, &pid, req(Some(1), false), issue()).await {
+            Err(LcError::BadValue(v)) => {
+                assert_eq!(v["error"], "quota_low");
+                assert_eq!(v["kind"], "claude");
+                assert_eq!(v["used_pct"], 93.0);
+            }
+            other => panic!("expected quota_low, got {other:?}"),
+        }
+        // Raising the team's own threshold above the reading lets it through (§12 #4).
+        let mut r = req(Some(1), false);
+        r.budget = Some(BudgetPatch { quota_stop_pct: Some(95.0), ..Default::default() });
+        assert!(create_with_issue(&app, &pid, r, issue()).await.is_ok());
+    }
+
+    /// §7.3: a second team on the same issue disambiguates the member nicknames.
+    #[tokio::test]
+    async fn a_second_team_on_the_same_issue_gets_suffixed_names() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let a = make_team(&app, &pid, req(Some(1), false)).await;
+        let b = make_team(&app, &pid, req(Some(1), false)).await;
+        assert_ne!(a, b);
+        let names: Vec<String> = db::team_members(&app.db, &b).await.unwrap().into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec![format!("i42-pm-{}", tid6(&b)), format!("i42-dev-1-{}", tid6(&b))]);
+    }
+
+    /// §10.5 pause / resume / approve, including the `gate:` restriction.
+    #[tokio::test]
+    async fn pause_resume_and_approve() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        set_phase(&app, &tid, "working", None, None).await.unwrap();
+
+        assert!(resume(&app, &tid).await.is_err(), "resuming a running team is a conflict");
+        pause(&app, &tid).await.unwrap();
+        let t = load(&app, &tid).await.unwrap();
+        assert_eq!(t.phase, "paused");
+        assert_eq!(t.resume_phase.as_deref(), Some("working"));
+        pause(&app, &tid).await.unwrap(); // idempotent
+        assert_eq!(load(&app, &tid).await.unwrap().resume_phase.as_deref(), Some("working"));
+
+        // `approve` only releases a supervised gate.
+        assert!(approve(&app, &tid).await.is_err());
+        resume(&app, &tid).await.unwrap();
+        let t = load(&app, &tid).await.unwrap();
+        assert_eq!(t.phase, "working");
+        assert!(t.pause_reason.is_none() && t.resume_phase.is_none());
+
+        set_phase(&app, &tid, "paused", Some("gate:merge"), Some("working")).await.unwrap();
+        approve(&app, &tid).await.unwrap();
+        assert_eq!(load(&app, &tid).await.unwrap().phase, "working");
+    }
+
+    /// §10.5: `member_lost` will not resume while a member is still down.
+    #[tokio::test]
+    async fn resume_refuses_while_a_member_is_lost() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        set_phase(&app, &tid, "paused", Some("member_lost:i42-dev-1"), Some("working")).await.unwrap();
+        match resume(&app, &tid).await {
+            Err(LcError::Conflict(v)) => assert_eq!(v["reason"], "member not running"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    /// §10.5 abort → aborted (terminal), then cleanup soft-deletes the members.
+    /// §12 #6: cleanup never happens on its own.
+    #[tokio::test]
+    async fn abort_then_cleanup() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), true)).await;
+
+        assert!(cleanup(&app, &tid).await.is_err(), "cleanup needs a terminal team");
+        abort(&app, &tid, Some("changed my mind")).await.unwrap();
+        let t = load(&app, &tid).await.unwrap();
+        assert_eq!(t.phase, "aborted");
+        assert!(t.ended_at.is_some());
+        assert!(is_terminal(&t.phase));
+        assert!(abort(&app, &tid, None).await.is_err(), "aborting twice is a conflict");
+        assert!(patch(&app, &tid, PatchTeam::default()).await.is_err(), "a finished team cannot be patched");
+        // Members are still there until the user asks for a cleanup.
+        assert!(db::team_members(&app.db, &tid).await.unwrap().iter().all(|m| m.deleted_at.is_none()));
+
+        cleanup(&app, &tid).await.unwrap();
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        assert_eq!(members.len(), 3);
+        assert!(members.iter().all(|m| m.deleted_at.is_some()), "cleanup soft-deletes every member");
+        // The team row and its log survive (§6.5: the history stays).
+        assert!(db::team(&app.db, &tid).await.unwrap().is_some());
+    }
+
+    /// §10.5 PATCH: top up the budget, flip supervised, switch the delivery mode.
+    #[tokio::test]
+    async fn patch_merges_budget_and_validates_deliver() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        patch(
+            &app,
+            &tid,
+            PatchTeam {
+                budget: Some(BudgetPatch { max_relays: Some(80), ..Default::default() }),
+                supervised: Some(true),
+                deliver: Some("pr".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let t = load(&app, &tid).await.unwrap();
+        let b = Budget::from_json(&t.budget_json);
+        assert_eq!(b.max_relays, 80);
+        assert_eq!(b.max_review_rounds, 2, "the other fields are untouched");
+        assert_eq!(t.supervised, 1);
+        assert_eq!(t.deliver, "pr");
+        assert!(patch(&app, &tid, PatchTeam { deliver: Some("push".into()), ..Default::default() }).await.is_err());
+    }
+
+    /// §10.2 / §10.3 shapes, and §10.4's backwards pagination.
+    #[tokio::test]
+    async fn state_detail_and_event_pagination() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(2), true)).await;
+
+        let teams = teams_json_for_project(&app, &pid).await;
+        assert_eq!(teams.len(), 1);
+        let t = &teams[0];
+        assert_eq!(t["id"], tid.as_str());
+        assert_eq!(t["phase"], "starting");
+        assert_eq!(t["deliver"], "branch");
+        assert_eq!(t["supervised"], false);
+        assert_eq!(t["members"].as_array().unwrap().len(), 4);
+        assert_eq!(t["members"][1]["short"], "dev-1");
+        assert_eq!(t["tasks_summary"]["total"], 0);
+        assert_eq!(t["budget"]["max_relays"], 40);
+        assert_eq!(t["usage"]["relays"], 0);
+
+        let d = detail(&app, &tid).await.unwrap();
+        assert_eq!(d["tasks"], json!([]));
+        assert_eq!(d["base_ref"], "HEAD");
+        assert_eq!(d["roles"]["workers"]["count"], 2);
+        assert_eq!(d["roles"]["reviewer"]["kind"], "grok");
+        assert!(matches!(detail(&app, "nope").await, Err(LcError::NotFound(_))));
+
+        // The bot's `team` field on `GET /state`.
+        let member = db::team_members(&app.db, &tid).await.unwrap().remove(0);
+        assert_eq!(bot_team_json(&member), json!({"team_id": tid, "role": "pm"}));
+
+        for i in 0..5 {
+            record_event(&app, &tid, "note", None, None, None, None, json!({"n": i})).await.unwrap();
+        }
+        let page = events(&app, &tid, None, 2).await.unwrap();
+        let evs = page["events"].as_array().unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(page["has_more"], true);
+        assert_eq!(evs[0]["payload"]["n"], 3, "a page is oldest-first inside itself");
+        assert_eq!(evs[1]["payload"]["n"], 4);
+        let older = events(&app, &tid, evs[0]["id"].as_str(), 100).await.unwrap();
+        assert_eq!(older["has_more"], false);
+        assert_eq!(older["events"].as_array().unwrap().len(), 4, "3 notes + the creation event");
+    }
+
+    /// §10.5 decide: only tasks that are actually stuck, and only the three actions.
+    #[tokio::test]
+    async fn decide_moves_a_stuck_task() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let worker = db::team_members(&app.db, &tid).await.unwrap().remove(1);
+        let task_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, round, created_at, updated_at)
+             VALUES (?,?,1,'t','b',?,'br','working',2,?,?)",
+        )
+        .bind(&task_id)
+        .bind(&tid)
+        .bind(&worker.id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // `working` is not a decidable state.
+        assert!(matches!(decide(&app, &tid, &task_id, "rework", None).await, Err(LcError::Conflict(_))));
+        sqlx::query("UPDATE team_tasks SET state='exhausted' WHERE id=?").bind(&task_id).execute(&app.db).await.unwrap();
+        assert!(matches!(decide(&app, &tid, &task_id, "burn", None).await, Err(LcError::Bad(_))));
+        let out = decide(&app, &tid, &task_id, "rework", Some("one more round")).await.unwrap();
+        assert_eq!(out["task"]["state"], "working");
+        assert_eq!(db::team_task(&app.db, &task_id).await.unwrap().unwrap().state, "working");
+        assert!(matches!(decide(&app, &tid, "no-such-task", "skip", None).await, Err(LcError::NotFound(_))));
+
+        // force_merge / skip
+        sqlx::query("UPDATE team_tasks SET state='blocked_by_worker' WHERE id=?").bind(&task_id).execute(&app.db).await.unwrap();
+        assert_eq!(decide(&app, &tid, &task_id, "skip", None).await.unwrap()["task"]["state"], "skipped");
+    }
+
+    /// §10.4 must be deterministic even when a whole scheduler step is written inside one
+    /// millisecond — a ULID only has millisecond resolution, so ordering by `id` was a coin
+    /// flip. 60 events back to back, then read them page by page and check the log is exactly
+    /// the write order, with no gap and no repeat.
+    #[tokio::test]
+    async fn the_event_log_keeps_its_write_order_within_one_millisecond() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        // The creation event is already there; number the rest from 0.
+        const N: i64 = 60;
+        let mut ids = Vec::new();
+        for i in 0..N {
+            ids.push(record_event(&app, &tid, "note", None, None, None, None, json!({"n": i})).await.unwrap());
+        }
+        // The burst really does put several events in the same millisecond — the case where
+        // ULID ordering is a coin flip, and the reason this test exists.
+        let mut per_ms: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for e in &ids {
+            *per_ms.entry(e.created_at.as_str()).or_default() += 1;
+        }
+        assert!(
+            per_ms.values().any(|n| *n >= 2),
+            "expected at least one millisecond with two events; got {per_ms:?}"
+        );
+        // `seq` is dense and in write order regardless.
+        assert_eq!(ids.iter().map(|e| e.seq).collect::<Vec<_>>(), (2..=N + 1).collect::<Vec<_>>());
+
+        // One big page: oldest first, matching the write order exactly.
+        let all = events(&app, &tid, None, 500).await.unwrap();
+        let got: Vec<i64> = all["events"].as_array().unwrap().iter().skip(1).map(|e| e["payload"]["n"].as_i64().unwrap()).collect();
+        assert_eq!(got, (0..N).collect::<Vec<_>>());
+
+        // Page backwards with the `before` cursor and rebuild the same list.
+        let mut walked: Vec<Value> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = events(&app, &tid, cursor.as_deref(), 7).await.unwrap();
+            let evs = page["events"].as_array().unwrap().clone();
+            // Each page is oldest-first inside itself.
+            let seqs: Vec<i64> = evs.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+            let mut sorted = seqs.clone();
+            sorted.sort_unstable();
+            assert_eq!(seqs, sorted, "a page is oldest-first inside itself");
+            cursor = evs.first().and_then(|e| e["id"].as_str()).map(String::from);
+            let mut front = evs;
+            front.append(&mut walked);
+            walked = front;
+            if page["has_more"] != true {
+                break;
+            }
+        }
+        let seqs: Vec<i64> = walked.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+        assert_eq!(seqs, (1..=N + 1).collect::<Vec<_>>(), "paging covers every event once, in order");
+
+        // A cursor that is not an event of this team is a 400, not a silently wrong page.
+        assert!(matches!(events(&app, &tid, Some("not-an-event"), 10).await, Err(LcError::Bad(_))));
+    }
+
+    /// §10.5 say: the recipient can be a role, a short name, a nickname or a bot id; an
+    /// unknown one is a 404 and nothing is delivered without a running member.
+    #[tokio::test]
+    async fn say_resolves_the_recipient() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(2), true)).await;
+        let t = load(&app, &tid).await.unwrap();
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+
+        for (to, expect) in [("pm", "i42-pm"), ("dev-2", "i42-dev-2"), ("i42-rev", "i42-rev"), ("rev", "i42-rev")] {
+            assert_eq!(resolve_member(&app, &t, to).await.unwrap().name, expect, "to={to}");
+        }
+        assert_eq!(resolve_member(&app, &t, &members[0].id).await.unwrap().id, members[0].id);
+        assert_eq!(resolve_member(&app, &t, "@pm").await.unwrap().name, "i42-pm");
+        assert!(matches!(resolve_member(&app, &t, "nobody").await, Err(LcError::NotFound(_))));
+
+        assert!(matches!(say(&app, &tid, "  ", "pm", "c1").await, Err(LcError::Bad(_))));
+        assert!(matches!(say(&app, &tid, "hi", "nobody", "c1").await, Err(LcError::NotFound(_))));
+        // The member is not running, so the ordinary prompt path refuses it.
+        assert!(say(&app, &tid, "hi", "pm", "c1").await.is_err());
+    }
+
+    /// §6.5a end to end: `branches=delete` on a team whose members are still (apparently)
+    /// running must still stop them, remove every row, and never bail out halfway — the
+    /// `teams` row disappearing is the one thing this call promises no matter what else
+    /// on the way out succeeds or fails.
+    #[tokio::test]
+    async fn delete_removes_everything_even_with_live_members() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(None, true)).await;
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        for m in &members {
+            let _ = fake_run(&app, &m.id).await;
+        }
+        delete(&app, &tid, true).await.unwrap();
+        assert!(load(&app, &tid).await.is_err(), "the team row is gone");
+        assert!(db::team_tasks(&app.db, &tid).await.unwrap().is_empty());
+        assert!(events(&app, &tid, None, 10).await.is_err(), "its events are gone with it");
+        for m in &members {
+            assert!(db::bot(&app.db, &m.id).await.unwrap().unwrap().deleted_at.is_some(), "{} was soft-deleted", m.name);
+        }
+    }
+
+    /// A hand-made linked worktree of the user's own, so `remove_worktrees` is pointed at
+    /// exactly the shape git does **not** protect: `worktree remove --force --force` refuses
+    /// a *main* working tree ("fatal: '…' is a main working tree") and nothing else, so a
+    /// `bots.cwd` naming one of these would have thrown the user's uncommitted work away.
+    fn user_worktree(repo: &std::path::Path) -> String {
+        let wt = repo.join(".claude/worktrees/foo");
+        crate::team_git::testing::run(repo, &["worktree", "add", "--detach", &wt.to_string_lossy(), "HEAD"]);
+        std::fs::write(wt.join("mine.txt"), "work the user has not committed\n").unwrap();
+        wt.to_string_lossy().to_string()
+    }
+
+    /// **The `--force --force` guard.** `dirs` comes straight from `bots.cwd` and never went
+    /// through `check_layout`, so cleanup / delete would hand git whatever the column said.
+    #[tokio::test]
+    async fn cleanup_refuses_to_remove_a_worktree_outside_the_team_root() {
+        let e = env().await;
+        let app = e.app.clone();
+        let project = db::project(&app.db, &e.project_id).await.unwrap().unwrap();
+        let mine = user_worktree(&e.repo);
+        // A perfectly ordinary team root, so only the *member* paths are in question.
+        let root = app.data_dir.join("teams/01ABC");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.to_string_lossy().to_string();
+
+        remove_worktrees(
+            &app,
+            &project,
+            &root,
+            &[mine.clone(), e.repo.to_string_lossy().to_string(), "/tmp/somewhere-else".into()],
+        )
+        .await;
+
+        assert!(std::path::Path::new(&mine).exists(), "the user's own worktree survived");
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&mine).join("mine.txt")).unwrap(),
+            "work the user has not committed\n",
+        );
+        let listed = crate::team_git::testing::run(&e.repo, &["worktree", "list", "--porcelain"]);
+        assert!(listed.contains(&mine), "still a registered worktree: {listed}");
+        assert!(e.repo.join("README.md").exists(), "the checkout is intact");
+        // The legitimate half still happened: the team root itself was removed.
+        assert!(!std::path::Path::new(&root).exists(), "the team root was still cleaned up");
+    }
+
+    /// **The `rm -rf` guard.** `remove_dir` is `remove_dir_all` locally and `rm -rf` over ssh,
+    /// applied to whatever `teams.worktree_root` holds — the single most destructive call in
+    /// the feature and, before this, the only one with no check in front of it. The `''`
+    /// value the incident actually had is covered by the existing empty-root early return;
+    /// these are the values that would have got through it.
+    #[tokio::test]
+    async fn the_team_root_is_not_deleted_when_it_endangers_the_checkout() {
+        let e = env().await;
+        let app = e.app.clone();
+        let project = db::project(&app.db, &e.project_id).await.unwrap().unwrap();
+        let inside = e.repo.join("sub/dir");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::write(inside.join("keep.txt"), "keep\n").unwrap();
+
+        for root in [
+            e.repo.to_string_lossy().to_string(),          // the checkout itself
+            format!("{}/", e.repo.to_string_lossy()),      // …with a trailing slash
+            inside.to_string_lossy().to_string(),          // inside it
+            e.dir.to_string_lossy().to_string(),           // a parent of it
+        ] {
+            remove_worktrees(&app, &project, &root, &[]).await;
+            assert!(e.repo.join("README.md").exists(), "the checkout survived root = `{root}`");
+            assert!(inside.join("keep.txt").exists(), "nothing inside it was touched either (root = `{root}`)");
+        }
+
+        // …and a root that really is the team's own is still deleted, so the guard did not
+        // just turn cleanup off.
+        let root = app.data_dir.join("teams/01ABC");
+        std::fs::create_dir_all(&root).unwrap();
+        remove_worktrees(&app, &project, &root.to_string_lossy(), &[]).await;
+        assert!(!root.exists(), "a real team root is still removed");
+    }
+}

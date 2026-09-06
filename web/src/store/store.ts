@@ -30,7 +30,7 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
 import { BOT_KINDS, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
@@ -397,6 +397,12 @@ interface StoreState {
   /** `POST /projects/:id/teams`；成功後自動 `selectTeam`。null = 失敗。 */
   createTeam: (projectId: string, input: NewTeamInput) => Promise<string | null>
   controlTeam: (teamId: string, action: TeamControlAction) => Promise<boolean>
+  /**
+   * `DELETE /teams/:id?branches=`（SPEC-team §6.5a）——任何 phase 都可以刪。
+   * `branches: 'delete'` 會連分支一起 `git branch -D`，UI 必須先二次確認。
+   * team 已經不在（404 not_found）也算成功：本地照樣清乾淨。
+   */
+  removeTeam: (teamId: string, branches?: TeamBranchDisposal) => Promise<boolean>
   patchTeam: (teamId: string, input: PatchTeamInput) => Promise<boolean>
   /** `POST /teams/:id/say`（`to` = `pm` 或 bot_id）。 */
   sayToTeam: (teamId: string, text: string, to: string) => Promise<boolean>
@@ -859,6 +865,9 @@ export const useStore = create<StoreState>((set, get) => ({
         const ids = botsOfProject(get(), bot.project_id).map((b) => b.id)
         const at = ids.indexOf(botId)
         if (at >= 0) get().moveBot(id, ids[at + 1] === id ? null : (ids[at + 1] ?? null))
+        // Same as the 新增 Bot form, which starts what it just created: a clone is asked for
+        // when you want another one of these *now*, so leaving it stopped only adds a click.
+        await get().startBot(id)
       }
       return id
     } finally {
@@ -1054,6 +1063,11 @@ export const useStore = create<StoreState>((set, get) => ({
     if (projectId && !get().loadedProjects[projectId]) await get().loadGroupMessages(projectId)
     try {
       const [detail, events] = await Promise.all([api.fetchTeam(teamId), api.fetchTeamEvents(teamId)])
+      // 舊 daemon 的 SPA fallback 會對 `/api/teams/:id` 回 200 + index.html，解不出 team。
+      if (!detail && !get().teams[teamId]) {
+        set({ teamsSupported: false, teamLaunch: null, selectedTeamId: null })
+        return
+      }
       set((s) => ({
         teamDetail: detail ? { ...s.teamDetail, [teamId]: detail } : s.teamDetail,
         teams: detail ? { ...s.teams, [teamId]: { ...(s.teams[teamId] ?? {}), ...stripDetail(detail) } } : s.teams,
@@ -1063,6 +1077,12 @@ export const useStore = create<StoreState>((set, get) => ({
       if (pid && !get().loadedProjects[pid]) await get().loadGroupMessages(pid)
     } catch (e) {
       if (markTeamsUnsupported(set, get, e)) return
+      if (api.isTeamNotFound(e)) {
+        // 這個 team 已經不在了（多半是剛被刪掉——`refreshState` 尾巴的重載會跟刪除賽跑，
+        // 別的視窗刪的也一樣）。靜靜清掉本地痕跡就好，不要跳錯誤。
+        set((s) => forgetTeamPatch(s, teamId, true))
+        return
+      }
       get().notify('error', `載入 Team 失敗：${errText(e)}`)
     }
   },
@@ -1094,25 +1114,31 @@ export const useStore = create<StoreState>((set, get) => ({
     await guarded(set, get, `team:${teamId}:${action}`, async () => {
       await api.controlTeam(teamId, action)
       ok = true
-      if (action === 'cleanup') {
-        set((s) => ({
-          selectedTeamId: s.selectedTeamId === teamId ? null : s.selectedTeamId,
-          teamDetail: withoutKey(s.teamDetail, teamId),
-          teamEvents: withoutKey(s.teamEvents, teamId),
-          teamUnread: withoutKey(s.teamUnread, teamId),
-          drafts: (() => {
-            const drafts = withoutKey(s.drafts, `team:${teamId}`)
-            writeDrafts(drafts)
-            return drafts
-          })(),
-          draftCursors: (() => {
-            const draftCursors = withoutKey(s.draftCursors, `team:${teamId}`)
-            writeDraftCursors(draftCursors)
-            return draftCursors
-          })(),
-        }))
-      }
+      // `cleanup` 收現場但**留下 `teams` 這一列**（SPEC-team §6.5），所以 row 不動，
+      // 只丟掉細節與草稿；`delete` 才是連紀錄一起移除的那條路（§6.5a，見 `removeTeam`）。
+      if (action === 'cleanup') set((s) => forgetTeamPatch(s, teamId, false))
       await get().refreshState()
+    })
+    return ok
+  },
+
+  async removeTeam(teamId, branches = 'keep') {
+    const team = get().teams[teamId]
+    let ok = false
+    await guarded(set, get, `team:${teamId}:delete`, async () => {
+      try {
+        await api.deleteTeam(teamId, branches)
+      } catch (e) {
+        // 舊 daemon 根本沒有這個端點（裸 404 / 405）→ 靜默關掉整組 team UI。
+        if (markTeamsUnsupported(set, get, e)) return
+        // 冪等（§6.5a）：已經不在了就當成功——本地照樣清乾淨，不要跳錯誤。
+        if (!api.isTeamNotFound(e)) throw e
+      }
+      ok = true
+      set((s) => forgetTeamPatch(s, teamId, true))
+      await get().refreshState()
+      const label = team ? `Team #${team.issue_number}` : 'Team'
+      get().notify('info', branches === 'delete' ? `已刪除 ${label}（含分支）` : `已刪除 ${label}（分支保留）`)
     })
     return ok
   },
@@ -1161,6 +1187,30 @@ export const useStore = create<StoreState>((set, get) => ({
     return ok
   },
 }))
+
+/**
+ * 抹掉某個 team 的本地痕跡（`cleanup` / `delete` / WS `deleted:true` 共用）。
+ *
+ * `dropRow` 才把 `teams` 這一列拿掉：`cleanup` 在 daemon 端會保留 row（SPEC-team §6.5），
+ * 本地先刪掉只會讓節點閃一下又被 `refreshState` 補回來；`delete`（§6.5a）才是真的沒了。
+ * 正選著這個 team 時把選取放掉 —— `refreshState` 會把選取退回既有的 bot，
+ * 不會留在一個已經不存在的 team 上變成白畫面。
+ */
+function forgetTeamPatch(s: StoreState, teamId: string, dropRow: boolean): Partial<StoreState> {
+  const drafts = withoutKey(s.drafts, `team:${teamId}`)
+  const draftCursors = withoutKey(s.draftCursors, `team:${teamId}`)
+  writeDrafts(drafts)
+  writeDraftCursors(draftCursors)
+  return {
+    selectedTeamId: s.selectedTeamId === teamId ? null : s.selectedTeamId,
+    ...(dropRow ? { teams: withoutKey(s.teams, teamId) } : {}),
+    teamDetail: withoutKey(s.teamDetail, teamId),
+    teamEvents: withoutKey(s.teamEvents, teamId),
+    teamUnread: withoutKey(s.teamUnread, teamId),
+    drafts,
+    draftCursors,
+  }
+}
 
 /** `TeamDetail` 的 `Team` 部分（`teams` map 只存共同欄位，細節留在 `teamDetail`）。 */
 function stripDetail(detail: TeamDetail): Team {
@@ -1409,6 +1459,16 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (!isRec(data)) return
       const teamId = str(pick(data, 'team_id', 'id'))
       if (!teamId) return
+      if (bool(pick(data, 'deleted'), false)) {
+        // SPEC-team §6.5a：刪除完成的那一則。節點要立刻消失（成員的 `bot_changed` 會另外來），
+        // 而且不能 `refreshState` 把它撈回來——這一列在 daemon 端已經不存在了。
+        set((s) => forgetTeamPatch(s, teamId, true))
+        void get().refreshState()
+        return
+      }
+      // §6.5a 的「刪除中」phase 不在 `TeamPhase` 裡，`toTeam` 的 `oneOf` 會 fallback 成
+      // `starting`，節點反而顯示「啟動中」。刪除完成馬上會推 `deleted:true`，這一則略過。
+      if (str(pick(data, 'phase')) === 'deleting') return
       const existing = get().teams[teamId]
       if (!existing) {
         // A team this client has not seen yet (just created elsewhere): pull the full record.
@@ -1421,8 +1481,13 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         teams: { ...s.teams, [teamId]: merged },
         teamDetail: s.teamDetail[teamId] ? { ...s.teamDetail, [teamId]: { ...s.teamDetail[teamId], ...merged } } : s.teamDetail,
       }))
-      if (existing.phase !== merged.phase && TEAM_TERMINAL_PHASES.includes(merged.phase)) {
-        get().notify('info', `Team #${merged.issue_number} ${TEAM_PHASE_LABEL[merged.phase]}`)
+      if (existing.phase !== merged.phase) {
+        if (TEAM_TERMINAL_PHASES.includes(merged.phase)) {
+          get().notify('info', `Team #${merged.issue_number} ${TEAM_PHASE_LABEL[merged.phase]}`)
+        }
+        // `summary` / `base_*` / `worktree_root` 只在 `GET /teams/:id` 上，phase 一動就重抓
+        // （只對開著的 team，不會變成每則事件一次請求）。
+        if (get().selectedTeamId === teamId) void get().loadTeam(teamId)
       }
       return
     }
@@ -1541,6 +1606,38 @@ export function botLamp(state: StoreState, botId: string): Lamp {
   if (bot && projectHostName(state, bot.project_id) !== 'local') return 'disconnected'
   const connected = bot?.herdr_session === 'default' ? state.defaultConnected : state.connected
   return lampOf(state.runs[botId], connected)
+}
+
+/** 哪一個視窗在警告——只用來標文字，不是判斷門檻。 */
+export type QuotaWarningWindow = '5h' | '7d' | '週'
+
+export interface QuotaWarning {
+  critical: boolean
+  /** 觸發 critical 的那個視窗剩餘 %（兩個都 critical 時取剩得比較少的那個）。 */
+  pct: number
+  window: QuotaWarningWindow
+}
+
+/**
+ * 這個 bot 用的那組額度是不是快用完了。門檻本身不在這裡判斷——`critical` 是 daemon 算好
+ * 直接讀旗標（見 docs/API.md §12.4）；這裡只是把 bot 對到它的額度 key，再挑出要顯示的
+ * 視窗與剩餘 %（純顯示用的數字，不是另一次門檻判斷）。
+ * 側欄 bot 列用來決定要不要整列反灰、警語要寫什麼。
+ */
+export function botQuotaWarning(quota: QuotaMap, kind: BotKind, identity: string | null): QuotaWarning | null {
+  const key = identity ? `${kind}:${identity}` : kind
+  let q = quota[key]
+  // cc0／空 env 的預設身份可能沒有自己的 key，額度會落在裸的 kind 上（同 QuotaStrip 的規則）。
+  if (q == null && identity === 'cc0') q = quota[kind]
+  if (!q) return null
+  const five = q.five_hour?.critical ? { pct: Math.max(0, Math.round(100 - q.five_hour.used_pct)), window: '5h' as const } : null
+  const sevenWindow: QuotaWarningWindow = kind === 'grok' ? '週' : '7d'
+  const seven = q.seven_day?.critical
+    ? { pct: Math.max(0, Math.round(100 - q.seven_day.used_pct)), window: sevenWindow }
+    : null
+  if (!five && !seven) return null
+  const worse = five && seven ? (five.pct <= seven.pct ? five : seven) : (five ?? seven)!
+  return { critical: true, pct: worse.pct, window: worse.window }
 }
 
 /**

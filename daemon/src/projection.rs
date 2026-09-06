@@ -102,11 +102,11 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
                    model=excluded.model, effort=excluded.effort, fast=excluded.fast, persona=excluded.persona, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
-                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, deleted_at=NULL",
+                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, herdr_session=excluded.herdr_session, deleted_at=NULL",
             )
             .bind(&bid)
             .bind(&pid)
@@ -123,6 +123,7 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             .bind(b.auto_approve as i64)
             .bind(&b.identity)
             .bind(&env_json)
+            .bind(&b.herdr_session)
             .bind(&token)
             .bind(&now)
             .execute(pool)
@@ -132,7 +133,14 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
     }
 
     // 2. soft-delete rows no longer in the TOML.
+    //
+    // SPEC-team §5.3: team members are the one exception. They are daemon-owned runtime
+    // objects (`managed_by='team'`) that deliberately never enter config.toml, so the
+    // "not in the TOML ⇒ deleted" rule must not touch them.
     for b in db::live_bots(pool).await? {
+        if b.managed_by == "team" {
+            continue;
+        }
         if !live_bots.contains(&b.id) {
             sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(&b.id).execute(pool).await?;
             tracing::info!(bot = %b.name, "bot removed from config.toml; soft-deleted");

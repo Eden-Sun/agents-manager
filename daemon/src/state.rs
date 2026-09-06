@@ -23,10 +23,38 @@ pub struct WsEvent {
     pub data: Value,
 }
 
+/// SPEC-team §3: an internal "this turn is no longer in flight" notification.
+///
+/// Deliberately **not** a WS event: the WS bus is the front end's, with a 200-entry ring
+/// buffer and a `resync` escape hatch, which is fine for a UI and useless for a scheduler
+/// that must not miss a single turn. Everything that leaves `turns.status = 'in_flight'`
+/// (hook match, terminal fallback, stall watchdog, stop, interrupt) goes through
+/// `lifecycle::emit_turn`, so publishing there covers every path.
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnEvent {
+    pub bot_id: String,
+    pub turn_id: String,
+    /// `in_flight` | `completed` | `completed_fallback` | `failed`.
+    pub status: String,
+    pub delivery: String,
+    pub team_id: Option<String>,
+    pub team_event_id: Option<String>,
+}
+
+impl TurnEvent {
+    /// Whether this turn has finished (the only transition a scheduler acts on).
+    #[allow(dead_code)]
+    pub fn is_done(&self) -> bool {
+        self.status != "in_flight"
+    }
+}
+
 pub struct App {
     pub db: SqlitePool,
     /// The local herdr client. Prefer `herdr_for(host)` — SPEC §11.3.6.
     pub herdr: HerdrClient,
+    /// The user's local Herdr `default` session. It is observed when present, never spawned.
+    pub default_herdr: HerdrClient,
     /// `local` plus every configured `[[hosts]]` entry.
     pub hosts: HostManager,
     pub cfg: ConfigStore,
@@ -36,15 +64,20 @@ pub struct App {
     pub ui_token: String,
     pub herdr_session: String,
     pub connected: std::sync::atomic::AtomicBool,
+    pub default_connected: std::sync::atomic::AtomicBool,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     bus: broadcast::Sender<WsEvent>,
+    /// SPEC-team §3: internal turn-completion bus the team schedulers subscribe to.
+    turn_bus: broadcast::Sender<TurnEvent>,
     seq: AtomicU64,
     ring: Mutex<VecDeque<WsEvent>>,
-    /// (host, pane_id) -> per-run agent_status subscription task
-    pub pane_watchers: Mutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>,
-    /// host -> global event subscription task
-    pub global_watchers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// (host, session, pane_id) -> per-run agent_status subscription task
+    pub pane_watchers: Mutex<HashMap<(String, String, String), tokio::task::JoinHandle<()>>>,
+    /// (host, session) -> global event subscription task
+    pub global_watchers: Mutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>,
+    /// Serializes discovery/config projection against a default-session event and poll tick.
+    pub default_sync_lock: Mutex<()>,
     /// run_id -> pending terminal-fallback timer
     pub fallback_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> prompt-stall watchdog (delivered but the agent never went `working`)
@@ -67,6 +100,7 @@ impl App {
     pub fn new(
         db: SqlitePool,
         herdr: HerdrClient,
+        default_herdr: HerdrClient,
         cfg: ConfigStore,
         data_dir: PathBuf,
         exe: PathBuf,
@@ -75,10 +109,12 @@ impl App {
         herdr_session: String,
     ) -> Arc<Self> {
         let (bus, _) = broadcast::channel(1024);
+        let (turn_bus, _) = broadcast::channel(1024);
         Arc::new(Self {
             db,
             hosts: HostManager::new(herdr.clone()),
             herdr,
+            default_herdr,
             cfg,
             data_dir,
             exe,
@@ -86,12 +122,15 @@ impl App {
             ui_token,
             herdr_session,
             connected: std::sync::atomic::AtomicBool::new(false),
+            default_connected: std::sync::atomic::AtomicBool::new(false),
             locks: Mutex::new(HashMap::new()),
             bus,
+            turn_bus,
             seq: AtomicU64::new(0),
             ring: Mutex::new(VecDeque::new()),
             pane_watchers: Mutex::new(HashMap::new()),
             global_watchers: Mutex::new(HashMap::new()),
+            default_sync_lock: Mutex::new(()),
             fallback_timers: Mutex::new(HashMap::new()),
             stall_timers: Mutex::new(HashMap::new()),
             progress_pollers: Mutex::new(HashMap::new()),
@@ -108,11 +147,72 @@ impl App {
         self.hosts.client(host).await
     }
 
-    /// The herdr client for a bot, resolved through its project's host.
-    #[allow(dead_code)]
-    pub async fn herdr_for_bot(&self, bot_id: &str) -> Option<HerdrClient> {
-        let host = crate::db::bot_host(&self.db, bot_id).await.ok()?;
-        self.hosts.client(&host).await
+    /// The configured session for a host. A bot may override the local host with `default`.
+    pub async fn session_for_host(&self, host: &str) -> Option<String> {
+        if host == LOCAL_HOST {
+            Some(self.herdr_session.clone())
+        } else {
+            self.hosts.get(host).await.and_then(|c| c.cfg.as_ref().map(|cfg| cfg.herdr_session.clone()))
+        }
+    }
+
+    /// Resolve a client for an explicit host/session pair. The local default session is a
+    /// second socket, not another HostConn, and is intentionally never started by the daemon.
+    pub async fn herdr_for_session(&self, host: &str, session: &str) -> Option<HerdrClient> {
+        if host == LOCAL_HOST {
+            if session == "default" {
+                return Some(self.default_herdr.clone());
+            }
+            return (session == self.herdr_session).then(|| self.herdr.clone());
+        }
+        let conn = self.hosts.get(host).await?;
+        let expected = conn.cfg.as_ref()?.herdr_session.as_str();
+        (expected == session).then(|| conn.client.clone())
+    }
+
+    /// Resolve the effective session for a bot. Remote bots always use their host's configured
+    /// named session; only local imported bots can point at `default`.
+    pub async fn session_for_bot(&self, bot: &crate::db::Bot, host: &str) -> Option<String> {
+        if host == LOCAL_HOST {
+            Some(bot.herdr_session.clone().unwrap_or_else(|| self.herdr_session.clone()))
+        } else {
+            self.session_for_host(host).await
+        }
+    }
+
+    pub async fn session_connected(&self, host: &str, session: &str) -> bool {
+        if host == LOCAL_HOST {
+            if session == "default" {
+                return self.default_connected.load(Ordering::SeqCst);
+            }
+            return session == self.herdr_session && self.connected.load(Ordering::SeqCst);
+        }
+        let Some(conn) = self.hosts.get(host).await else { return false };
+        conn.cfg.as_ref().map(|cfg| cfg.herdr_session == session).unwrap_or(false) && conn.is_connected()
+    }
+
+    pub async fn bot_connected(&self, bot_id: &str) -> bool {
+        let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await else { return false };
+        let host = crate::db::bot_host(&self.db, bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+        let Some(session) = self.session_for_bot(&bot, &host).await else { return false };
+        self.session_connected(&host, &session).await
+    }
+
+    /// Effective session for an existing run. New runs store it explicitly; old rows inherit
+    /// their bot/project session so restarts remain compatible.
+    pub async fn session_for_run(&self, run: &crate::db::Run) -> Option<String> {
+        if let Some(session) = run.herdr_session.clone().filter(|s| !s.is_empty()) {
+            return Some(session);
+        }
+        let bot = crate::db::bot(&self.db, &run.bot_id).await.ok()??;
+        let host = crate::db::bot_host(&self.db, &run.bot_id).await.ok()?;
+        self.session_for_bot(&bot, &host).await
+    }
+
+    pub async fn herdr_for_run(&self, run: &crate::db::Run) -> Option<HerdrClient> {
+        let host = crate::db::bot_host(&self.db, &run.bot_id).await.ok()?;
+        let session = self.session_for_run(run).await?;
+        self.herdr_for_session(&host, &session).await
     }
 
     /// Whether the host a bot lives on is currently usable (drives `lamp`).
@@ -134,6 +234,24 @@ impl App {
 
     pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
         self.bus.subscribe()
+    }
+
+    /// SPEC-team §3: subscribe to turn completions. There is no ring buffer here — a
+    /// subscriber that lags gets `RecvError::Lagged` and must re-read the DB.
+    #[allow(dead_code)]
+    pub fn subscribe_turns(&self) -> broadcast::Receiver<TurnEvent> {
+        self.turn_bus.subscribe()
+    }
+
+    /// Publish a turn transition. Sending with no subscribers is not an error.
+    pub fn publish_turn(&self, ev: TurnEvent) {
+        let _ = self.turn_bus.send(ev);
+    }
+
+    /// How many team schedulers are currently listening (for tests / diagnostics).
+    #[allow(dead_code)]
+    pub fn turn_subscribers(&self) -> usize {
+        self.turn_bus.receiver_count()
     }
 
     pub async fn emit(&self, kind: &str, data: Value) {
@@ -181,7 +299,8 @@ impl App {
                     "bot_id": bot.id,
                     "run": run,
                     "host": host,
-                    "connected": self.host_connected(&host).await,
+                    "herdr_session": bot.herdr_session,
+                    "connected": self.bot_connected(bot_id).await,
                 }),
             )
             .await;
@@ -207,10 +326,19 @@ pub async fn emit_daemon_status(app: &Arc<App>) {
             "herdr_connected": herdr_connected,
             // Deprecated alias kept for older clients.
             "connected": herdr_connected,
+            "default_connected": app.default_connected.load(Ordering::SeqCst),
             "hosts": hosts_json(app).await,
         }),
     )
     .await;
+}
+
+/// Update the observed user's default-session link without touching the manager's configured
+/// named-session link. The UI uses this separate flag for imported default-session bots.
+pub async fn set_default_connected(app: &Arc<App>, connected: bool) {
+    if app.default_connected.swap(connected, Ordering::SeqCst) != connected {
+        emit_daemon_status(app).await;
+    }
 }
 
 /// Push `host_changed` plus a refreshed `daemon_status`, and re-lamp that host's bots.
@@ -233,6 +361,9 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
     let client = HerdrClient::new(sock.clone());
     if client.ping().await.is_ok() {
         return Ok(client);
+    }
+    if session == "default" {
+        anyhow::bail!("herdr default session is not running; refusing to start the user's session")
     }
     tracing::info!(session, socket = %sock.display(), "herdr socket not reachable; spawning server");
     std::fs::create_dir_all(log_dir).ok();

@@ -27,6 +27,7 @@ impl IntoResponse for LcError {
             LcError::NotFound(what) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "what": what}))).into_response(),
             LcError::Conflict(v) => (StatusCode::CONFLICT, Json(v)).into_response(),
             LcError::Bad(m) => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "message": m}))).into_response(),
+            LcError::BadValue(v) => (StatusCode::BAD_REQUEST, Json(v)).into_response(),
             LcError::Upstream(m) => {
                 (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream", "message": m}))).into_response()
             }
@@ -49,11 +50,24 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/github/refresh", post(refresh_github))
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
+        // SPEC-team §10
+        .route("/projects/{id}/teams", post(create_team))
+        .route("/teams/{id}", get(get_team).patch(patch_team).delete(delete_team))
+        .route("/teams/{id}/events", get(get_team_events))
+        .route("/teams/{id}/pause", post(pause_team))
+        .route("/teams/{id}/resume", post(resume_team))
+        .route("/teams/{id}/approve", post(approve_team))
+        .route("/teams/{id}/abort", post(abort_team))
+        .route("/teams/{id}/cleanup", post(cleanup_team))
+        .route("/teams/{id}/say", post(say_team))
+        .route("/teams/{id}/answer", post(answer_team))
+        .route("/teams/{tid}/tasks/{task_id}/decide", post(decide_team_task))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/stop", post(stop_bot))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
+        .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
         .route(
             "/bots/{id}/attachments",
@@ -188,11 +202,11 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
     let mut out = Vec::new();
     for p in projects {
-        // SPEC §11.6: a bot on a disconnected host lamps `disconnected`.
-        let host_up = app.host_connected(&p.host).await;
         let mut bl = Vec::new();
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = db::active_run(&app.db, &b.id).await.map_err(any_err)?;
+            let queued_turn = db::queued_turn_for_bot(&app.db, &b.id).await.map_err(any_err)?;
+            let bot_connected = app.bot_connected(&b.id).await;
             bl.push(json!({
                 "id": b.id,
                 "project_id": b.project_id,
@@ -208,10 +222,17 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "auto_approve": b.auto_approve == 1,
                 "identity": b.identity,
                 "env": b.env(),
+                "herdr_session": b.herdr_session.clone(),
+                // SPEC-team §10.2: `user` for config.toml bots, `team` for team members.
+                "managed_by": b.managed_by,
+                "cwd": b.cwd,
+                "team": crate::team::bot_team_json(b),
                 // herdr agent name: the live run's, else what the next start will use.
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
-                "lamp": lamp(host_up, run.as_ref()),
+                // The queued web prompt is durable in SQLite; the UI only renders this state.
+                "queued_turn": queued_turn,
+                "lamp": lamp(bot_connected, run.as_ref()),
                 "unread": 0,
             }));
         }
@@ -219,12 +240,15 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "id": p.id, "path": p.path, "label": p.label, "host": p.host,
             "workspace_id": p.workspace_id,
             "github": crate::github::cached(app, &p.id).await,
-            "bots": bl
+            "bots": bl,
+            // SPEC-team §10.2
+            "teams": crate::team::teams_json_for_project(app, &p.id).await,
         }));
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
         "connected": connected,
+        "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,
         "hosts": hosts_list(app).await,
         "identities": app.cfg.get().await.identities,
@@ -254,16 +278,19 @@ struct NewProject {
 struct DirsQuery {
     path: Option<String>,
     host: Option<String>,
+    /// `1` / `true` also lists dot-directories (`.config`, `.claude`, …).
+    hidden: Option<String>,
 }
 
 /// Directory browser for the "new project" picker. Lists only directories (no files),
-/// hides dot-entries, never follows into unreadable places, and reports the parent.
+/// hides dot-entries unless `hidden=1`, never follows into unreadable places, and reports the parent.
 async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
     // SPEC §11.5: the same JSON, produced by a remote `sh` snippet.
     let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    let hidden = matches!(q.hidden.as_deref(), Some("1" | "true" | "yes"));
     if host != LOCAL_HOST {
         let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
-        let v = crate::hosts::remote_list_dirs(&conn, q.path.as_deref())
+        let v = crate::hosts::remote_list_dirs(&conn, q.path.as_deref(), hidden)
             .await
             .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
         return Ok(Json(v));
@@ -282,7 +309,7 @@ async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> R
             for ent in std::fs::read_dir(&path)? {
                 let Ok(ent) = ent else { continue };
                 let name = ent.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') {
+                if name.starts_with('.') && !hidden {
                     continue;
                 }
                 let Ok(ft) = ent.file_type() else { continue };
@@ -394,11 +421,155 @@ async fn get_issue(State(app): State<Arc<App>>, Path((id, number)): Path<(String
     Ok(Json(crate::github::get_issue(&app, &id, number).await?))
 }
 
+// ---------------------------------------------------------------- SPEC-team §10: teams
+
+/// `POST /api/projects/:id/teams` — 200 `{team_id}`; the members are created but not started
+/// yet, so the caller follows along on the WS.
+async fn create_team(
+    State(app): State<Arc<App>>,
+    Path(pid): Path<String>,
+    Json(b): Json<crate::team::CreateTeam>,
+) -> Result<Response, LcError> {
+    let out = crate::team::create(&app, &pid, b).await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+/// `GET /api/teams/:id` — the state object plus `tasks[]`, `roles`, base and worktree root.
+async fn get_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::team::detail(&app, &id).await?))
+}
+
+/// `DELETE /api/teams/:id?branches=keep|delete` — SPEC-team §6.5a.
+///
+/// Any phase; a live team is stopped on the way out. `branches=delete` is the one flag that
+/// destroys work, so it is opt-in and never inferred; anything else (including a typo) is
+/// read as `keep`. Remote branches are never touched.
+async fn delete_team(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Response, LcError> {
+    let branches = q.get("branches").map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
+    if !branches.is_empty() && !["keep", "delete"].contains(&branches.as_str()) {
+        return Err(LcError::Bad("branches must be `keep` or `delete`".into()));
+    }
+    let out = crate::team::delete(&app, &id, branches == "delete").await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+/// `GET /api/teams/:id/events?before=&limit=` — the team log, oldest-first within a page.
+async fn get_team_events(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, LcError> {
+    let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
+    let before = q.get("before").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    Ok(Json(crate::team::events(&app, &id, before, limit).await?))
+}
+
+async fn patch_team(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<crate::team::PatchTeam>,
+) -> Result<Response, LcError> {
+    Ok((StatusCode::OK, Json(crate::team::patch(&app, &id, b).await?)).into_response())
+}
+
+async fn pause_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok((StatusCode::OK, Json(crate::team::pause(&app, &id).await?)).into_response())
+}
+
+async fn resume_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok((StatusCode::OK, Json(crate::team::resume(&app, &id).await?)).into_response())
+}
+
+async fn approve_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok((StatusCode::OK, Json(crate::team::approve(&app, &id).await?)).into_response())
+}
+
+#[derive(Deserialize)]
+struct AbortTeam {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn abort_team(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    body: Option<Json<AbortTeam>>,
+) -> Result<Response, LcError> {
+    let reason = body.and_then(|Json(b)| b.reason).filter(|s| !s.trim().is_empty());
+    Ok((StatusCode::OK, Json(crate::team::abort(&app, &id, reason.as_deref()).await?)).into_response())
+}
+
+async fn cleanup_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok((StatusCode::OK, Json(crate::team::cleanup(&app, &id).await?)).into_response())
+}
+
+#[derive(Deserialize)]
+struct SayIn {
+    text: String,
+    /// `pm` (default) | `reviewer` | a member short name | a bot id.
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    client_request_id: Option<String>,
+}
+
+async fn say_team(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<SayIn>,
+) -> Result<Response, LcError> {
+    let to = b.to.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "pm".into());
+    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    Ok((StatusCode::OK, Json(crate::team::say(&app, &id, &b.text, &to, &crid).await?)).into_response())
+}
+
+#[derive(Deserialize)]
+struct AnswerIn {
+    text: String,
+    #[serde(default)]
+    client_request_id: Option<String>,
+}
+
+async fn answer_team(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<AnswerIn>,
+) -> Result<Response, LcError> {
+    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    Ok((StatusCode::OK, Json(crate::team::answer(&app, &id, &b.text, &crid).await?)).into_response())
+}
+
+#[derive(Deserialize)]
+struct DecideIn {
+    action: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn decide_team_task(
+    State(app): State<Arc<App>>,
+    Path((tid, task_id)): Path<(String, String)>,
+    Json(b): Json<DecideIn>,
+) -> Result<Response, LcError> {
+    let out = crate::team::decide(&app, &tid, &task_id, &b.action, b.note.as_deref()).await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
     for b in bots.iter().filter(|b| b.project_id == id) {
         if db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": b.id})));
+        }
+    }
+    // SPEC-team §5.4: a live team owns bots and worktrees under this project.
+    for t in db::teams_of_project(&app.db, &id).await.map_err(any_err)? {
+        if !crate::team::is_terminal(&t.phase) {
+            return Err(LcError::conflict("team is still running", json!({"team_id": t.id, "phase": t.phase})));
         }
     }
     app.cfg
@@ -497,6 +668,7 @@ async fn create_bot(
                 auto_approve: b.auto_approve.unwrap_or(true),
                 identity: identity.clone(),
                 env: env.clone(),
+                herdr_session: None,
             });
             Ok(())
         })
@@ -634,6 +806,30 @@ async fn patch_bot(
         .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { any_err(e) })?;
     reproject(&app).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
+    // 有 slash 指令可以當場套用的欄位（grok effort / model、claude model）：
+    // 只動這些欄位的話就不用重啟。grok 改模型時可以順便帶 effort（TUI `/model <id> <effort>`）。
+    let extras = |skip: &[&str]| {
+        let hit = |name: &str, present: bool| present && !skip.contains(&name);
+        hit("model", b.model.is_some())
+            || hit("effort", b.effort.is_some())
+            || b.fast.is_some()
+            || b.persona.is_some()
+            || b.args.is_some()
+            || b.identity.is_some()
+            || b.env.is_some()
+            || b.auto_approve.is_some()
+            || b.inject_hooks.is_some()
+    };
+    let live_field = match kind.as_str() {
+        "grok" if b.model.is_some() && !extras(&["model", "effort"]) => Some("model"),
+        "grok" if b.effort.is_some() && !extras(&["effort"]) => Some("effort"),
+        "claude" if b.model.is_some() && !extras(&["model"]) => Some("model"),
+        _ => None,
+    };
+    let needs_restart = match live_field {
+        Some(f) if needs_restart => !lifecycle::apply_live_setting(&app, &id, f).await,
+        _ => needs_restart,
+    };
     Ok((StatusCode::OK, Json(json!({"needs_restart": needs_restart}))).into_response())
 }
 
@@ -802,6 +998,9 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
         if let Err(e) = crate::quota::refresh_codex(&app).await {
             tracing::warn!(error = %e, "codex quota refresh failed");
         }
+        if let Err(e) = crate::quota_claude::refresh_claude(&app).await {
+            tracing::warn!(error = %e, "claude quota refresh failed");
+        }
         if let Err(e) = crate::quota_grok::refresh_grok(&app).await {
             tracing::warn!(error = %e, "grok quota refresh failed");
         }
@@ -895,6 +1094,15 @@ async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result
 
 async fn interrupt_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     lifecycle::interrupt_bot(&app, &id).await?;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// Move a running bot's pane into a tab of its own, so it stops sharing the workspace's
+/// width with its neighbours. The retrofit for bots started before one-bot-one-tab; the bot
+/// keeps running throughout. 404 when there is no active run or no pane behind it, 502 when
+/// herdr refuses; already-solo is a 200 that changes nothing.
+async fn move_bot_pane_to_tab(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    lifecycle::move_pane_to_own_tab(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
@@ -1053,16 +1261,24 @@ async fn get_terminal(
         return Err(LcError::Bad("bad source".into()));
     }
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
-    let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
     let client = app
-        .herdr_for(&host)
+        .herdr_for_run(&run)
         .await
-        .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))?;
+        .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))?;
     let read = client.pane_read(&pane, &source, lines).await.map_err(any_err)?;
+    // Pane geometry, so the UI can explain an unreadable snapshot instead of just showing it:
+    // below roughly 60 columns a TUI agent lays its own text out one fragment per row and the
+    // spaces fall off the ends, which no amount of parsing recovers (observed on `w8:pK` at 31).
+    // Best effort — a snapshot is still worth returning without it.
+    let (columns, rows) = match client.pane_size(&pane).await {
+        Ok(Some((w, h))) => (Some(w), Some(h)),
+        _ => (None, None),
+    };
     Ok(Json(json!({
         "bot_id": id, "run_id": run.id, "pane_id": pane,
         "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,
         "agent_status": run.agent_status,
+        "columns": columns, "rows": rows,
     })))
 }
 
