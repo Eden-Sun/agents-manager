@@ -251,13 +251,23 @@ function IssueQueue({ teamId }: { teamId: string }) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   const removeTeamIssue = useStore((s) => s.removeTeamIssue)
   const busy = useStore((s) => s.busy)
-  const [open, setOpen] = useState(true)
+  // 預設收起來：整段的重點（幾個、交付幾個）摘要那一行就寫完了，展開的清單卻會把群組對話
+  // 擠掉半個畫面。有 issue 失敗時才自動打開——那是唯一需要你逐列看的情況。
+  // 使用者自己按過之後就聽他的（`null` = 還沒表態）。
+  const [override, setOverride] = useState<boolean | null>(null)
   const issues = team?.issues ?? []
   if (!team || issues.length < 2) return null
   const sum = team.issues_summary
+  const open = override ?? sum.failed > 0
   return (
     <section className="team-queue">
-      <button type="button" className="disclosure sub" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+      <button
+        type="button"
+        className="disclosure sub"
+        aria-expanded={open}
+        title={open ? '收起 issue 佇列' : '展開 issue 佇列'}
+        onClick={() => setOverride(!open)}
+      >
         <span className="chev">{open ? '▼' : '▶'}</span> issue 佇列
         <span className="hint">
           {sum.total} 個 · 已交付 {sum.done}
@@ -311,7 +321,8 @@ function TaskList({ teamId }: { teamId: string }) {
   const names = useStore(useShallow((s) => Object.fromEntries(teamMemberBots(s, teamId).map((b) => [b.id, teamShortName(b.name)]))))
   const decide = useStore((s) => s.decideTeamTask)
   const busy = useStore((s) => s.busy)
-  const [open, setOpen] = useState(true)
+  // 同 `IssueQueue`：預設收起，只有「需要你」的 task 會把它推開，因為那是你非看不可的。
+  const [override, setOverride] = useState<boolean | null>(null)
 
   const grouped = useMemo(() => {
     const map = new Map<string, TeamTask[]>()
@@ -324,9 +335,18 @@ function TaskList({ teamId }: { teamId: string }) {
 
   if (tasks.length === 0) return null
 
+  const needsUser = tasks.some((t) => TEAM_TASK_NEEDS_USER.includes(t.state))
+  const open = override ?? needsUser
+
   return (
     <div className="team-tasks">
-      <button type="button" className="disclosure sub" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+      <button
+        type="button"
+        className="disclosure sub"
+        aria-expanded={open}
+        title={open ? '收起 Task 清單' : '展開 Task 清單'}
+        onClick={() => setOverride(!open)}
+      >
         <span className="chev">{open ? '▼' : '▶'}</span> Task（{tasks.length}）
         <span className="disclosure-note">
           {grouped.map(([col, list]) => `${col} ${list.length}`).join(' ・ ')}
