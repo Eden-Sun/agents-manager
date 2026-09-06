@@ -2935,9 +2935,19 @@ button:disabled {
     display: none;
   }
 
-  /* 額度在 Team 標題列同樣讓位：這一列在手機只需要回答「我在看哪一個 team」與「怎麼回去」。
-     額度在每個 bot 的對話標題列都還在，也還在環境設定裡。 */
-  .team-head > .quota-strip {
+  /* 額度在 Team 與群組標題列同樣讓位：這兩列在手機只需要回答「我在看什麼」與「怎麼回去」。
+     額度在每個 bot 的對話標題列都還在。 */
+  .team-head > .quota-strip,
+  .group-head > .quota-strip {
+    display: none;
+  }
+
+  /*
+   * 群組標題列在 390px 排到 451px：成員燈號列被壓成 0px（等於看不到），而「關閉群組」
+   * 整顆被推出畫面——手機上就沒有路可以回單一 bot 的對話了。成員在輸入框上方的收件者
+   * chip 列本來就一個個列著，這裡讓位。
+   */
+  .group-head > .members {
     display: none;
   }
 
