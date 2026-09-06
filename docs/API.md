@@ -544,6 +544,7 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 - **`needs_restart`**：`true` 表示這次修改要等 bot 重啟後才會生效（有 active Run，且本次動到會影響啟動 argv / env 的欄位：`model`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`）。
   - 例外（TUI slash 指令當場套用）：**只**改該欄位、Run 在 `running` 且不忙（非 working / blocked、沒有 in-flight turn）、新值不是清成 `null` 時，daemon 會往 pane 送對應的 slash 指令（`pane.send_text` → 0.8s → `Enter`）並回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
     - grok `effort` → `/effort <level>`
+    - grok `model` → `/model <id>`；若這次 PATCH 也帶了 `effort`（或 bot 本來就有），第二參數一併送（`/model grok-4.6 high`）
     - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）
   沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
   前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
@@ -711,7 +712,7 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
 - `bot.name` 是暱稱：1–32 字、不可含空白或 `@ , : ;`，允許 CJK；`PATCH /bots/:id {name}` 在 run 執行中也可改（回 `needs_restart:false`），herdr 不受影響。
 - `bot.agent_name`（唯讀）= `<project slug>-<bot id 尾 6 碼>`，例如 `agents-manager-rbmyf7`。
-- `bot.effort: "low"|"medium"|"high"|null`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；只有 grok 會注入 `--reasoning-effort`；其他值 400）。
+- `bot.effort: "low"|"medium"|"high"|"xhigh"|null`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；只有 grok / codex 會注入；claude 清成 null；其他值 400）。
 - `@mention` 解析（daemon 與前端一致）：token 為連續非空白、非標點字元，支援 `@小幫手，看一下`；送給 bot 的文字會去掉 mention 與其後的 `, : ; ，：；、`。
 
 
@@ -776,7 +777,7 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 | kind | source | 來源 | efforts | service_tiers |
 |---|---|---|---|---|
 | `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型自己的 `supportedReasoningEfforts`（可能含 `none/minimal/low/medium/high/xhigh/max/ultra`） | 每個模型自己的 `serviceTiers`（目前只有 `priority` = Fast） |
-| `grok` | `grok-cli` | `grok models` 文字輸出 | 固定 `["low","medium","high"]` | `[]` |
+| `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 時退回 `["low","medium","high"]`） | 依模型（grok-4.6 含 `xhigh`；grok-4.5 為 low/medium/high） | `[]` |
 | `claude` | `static` | 靜態 | `[]`（claude 不注入 effort） | `[]` |
 
 - `display_name` / `description` 可能為空字串；`default_effort` 可能為 `null`。
@@ -800,7 +801,7 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
 **`effort` 驗證改為 kind 相依**（`POST` / `PATCH` 皆同，違反 → 400）：
 
-- `grok`：`low | medium | high`
+- `grok`：`low | medium | high | xhigh`（啟動時若該模型不支援會被丟掉，例如 grok-4.5 不接受 xhigh）
 - `codex`：`none | minimal | low | medium | high | xhigh | max | ultra`
 - `claude`：任何值都被清成 `null`（不報錯）
 
@@ -824,15 +825,15 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 {
   "kinds": {
     "codex": {
-      "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z"},
-      "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z"},
+      "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z", "low": false, "critical": false},
+      "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "plan": "pro",
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "codex-app-server"
     },
     "claude": {
-      "five_hour": {"used_pct": 3.0, "resets_at": "2026-09-06T14:00:00.000Z"},
-      "seven_day": {"used_pct": 22.0, "resets_at": "2026-09-12T08:00:00.000Z"},
+      "five_hour": {"used_pct": 97.0, "resets_at": "2026-09-06T14:00:00.000Z", "low": true, "critical": true},
+      "seven_day": {"used_pct": 22.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "plan": null,
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "statusline",
@@ -841,7 +842,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
     "grok": {
       "five_hour": null,
-      "seven_day": {"used_pct": 14.0, "resets_at": "2026-09-12T08:28:00.000Z"},
+      "seven_day": {"used_pct": 14.0, "resets_at": "2026-09-12T08:28:00.000Z", "low": false, "critical": false},
       "plan": "SuperGrok",
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "grok-usage"
@@ -854,12 +855,20 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
   （`account` = identity 名稱）。**沒有資料的 kind 為 `null`**（沒裝該 CLI 就是 `null`；
   claude 在第一個 StatusLine 事件到達前為 `null`，grok 在第一次 `/usage` 探測回來前為 `null`）。
 - `used_pct` 為 0–100 的數字；`resets_at` 為 RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
-- `?refresh=1`：立刻重讀 codex 與 grok（claude 是被動收到的，refresh 對它無效）。grok 的探測要開一個 pane，最久約 25 秒。
+- `low` / `critical` 為 daemon 算好的門檻旗標（`daemon/src/quota.rs` 的 `LOW_REMAINING_PCT` = 30、
+  `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
+  前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；
+  `critical` → 該 bot 在側欄 bot 列上要有提示（用哪組額度見 §12.4 的 key 對應）。
+- `?refresh=1`：立刻重讀 codex、claude（`/usage` pane 探測）與 grok。claude / grok 的探測要開 pane，最久各約 25 秒。
 - 來源：
   - **codex**：daemon 啟動後與每 5 分鐘用本機 `codex app-server` 的 `account/rateLimits/read`。
-  - **claude**：由 daemon 注入 claude 的 `statusLine` 指令（`agents-managerd statusline …`）把 Claude Code 餵給 statusline 的 JSON
-    （`rate_limits.five_hour / seven_day`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；daemon 不建 Turn，只更新額度。
-    使用者原本的 statusLine 指令仍會被執行、pane 顯示不變。
+  - **claude**：兩路並存。
+    1. **statusLine 推送**（bot 對話中）：daemon 注入的 `statusLine` 指令把 `rate_limits.five_hour / seven_day`
+       POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；不建 Turn。`source` = `statusline`。
+    2. **`/usage` pane 探測**（背景，每 60 秒）：與 grok 相同，在專屬 `am-quota` herdr session 開用完即丟的 pane
+       跑 claude、送 `/usage`、解析 `Current session` / `Current week (all models)` 兩條；每個有獨立
+       `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）。
+       `source` = `claude-usage`。
   - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒在專屬的 `am-quota` herdr session（永不 attach，
     因此版面夠寬）開一個用完即丟的 pane 跑 grok、送 `/usage`、讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
     `Weekly limit (SuperGrok)` 的括號，`source` = `grok-usage`。

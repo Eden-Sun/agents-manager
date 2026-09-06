@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { BotKind, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
-import { BOT_KINDS } from '../api/types'
+import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
 import { useStore } from '../store/store'
 import { KindIcon, KIND_LABEL } from './KindTag'
 
@@ -16,8 +15,9 @@ import { KindIcon, KIND_LABEL } from './KindTag'
  * weekly one (scraped from its `/usage` dialog, SPEC §12.6). A kind therefore draws one bar per
  * window it actually reports — never a filler bar for a window that does not exist.
  *
- * Claude may also report per-identity keys (`claude:cc1`, …). Each such key gets its own gauge
- * (same icon + small identity label), so cc0/default and cc1 both show when both exist.
+ * Claude identities (`cc0`, `cc1`, …) each get their own gauge on the strip (icon + identity
+ * label). The bare `claude` quota key is the default account — when a `cc0` (or empty-env)
+ * identity exists it is shown as that label, not as an unlabeled Claude row.
  */
 
 /** Every kind can report quota; grok arrives from the `/usage` probe. */
@@ -32,18 +32,23 @@ function remaining(w: QuotaWindow | null | undefined): number | null {
   return w ? Math.max(0, Math.round(100 - w.used_pct)) : null
 }
 
-function levelOf(pct: number | null): Level {
-  if (pct === null) return 'ok'
-  if (pct < 10) return 'crit'
-  if (pct < 30) return 'warn'
+/**
+ * daemon 算好的旗標決定顏色（見 docs/API.md §12.4）——不在前端另外用 pct 寫死門檻，
+ * 否則會跟 daemon 的 low/critical 各說各話（條紅了側欄卻沒警告，或反過來）。
+ */
+function levelOf(w: { low: boolean; critical: boolean } | null | undefined): Level {
+  if (!w) return 'ok'
+  if (w.critical) return 'crit'
+  if (w.low) return 'warn'
   return 'ok'
 }
 
-function worst(q: KindQuota | null): { pct: number | null; level: Level } {
-  const vals = [remaining(q?.five_hour), remaining(q?.seven_day)].filter((n): n is number => n !== null)
-  if (!vals.length) return { pct: null, level: 'ok' }
-  const pct = Math.min(...vals)
-  return { pct, level: levelOf(pct) }
+/** 兩個窗口取最嚴重的旗標，一樣不碰 pct 數字。 */
+function worst(q: KindQuota | null): Level {
+  const windows = [q?.five_hour, q?.seven_day].filter((w): w is QuotaWindow => w != null)
+  if (windows.some((w) => w.critical)) return 'crit'
+  if (windows.some((w) => w.low)) return 'warn'
+  return 'ok'
 }
 
 /** The window that is closest to running out — what the collapsed pill shows. */
@@ -78,9 +83,17 @@ function label(entry: QuotaEntry, q: KindQuota | null): string {
   const seven = remaining(q?.seven_day)
   if (five === null && seven === null) parts.push('額度尚未取得')
   if (five !== null) parts.push(`5 小時剩餘 ${five}%`)
-  if (seven !== null) parts.push(`7 天剩餘 ${seven}%`)
+  if (seven !== null) {
+    parts.push(entry.kind === 'grok' ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
+  }
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
-  if (q?.seven_day?.resets_at) parts.push(`7 天 ${fmtTime(q.seven_day.resets_at)} 重置`)
+  if (q?.seven_day?.resets_at) {
+    parts.push(
+      entry.kind === 'grok'
+        ? `每週 ${fmtTime(q.seven_day.resets_at)} 重置`
+        : `7 天 ${fmtTime(q.seven_day.resets_at)} 重置`,
+    )
+  }
   return parts.join('，')
 }
 
@@ -94,34 +107,94 @@ function parseQuotaKey(key: string): QuotaEntry | null {
   return { key, kind, identity }
 }
 
-/**
- * Keys to draw: every base kind present in the map, plus each `kind:identity` that has its own
- * row. Base kinds with a null placeholder (daemon always emits them) still count as "present"
- * so the strip stays stable; identity keys only appear once they have reported.
- */
-function collectEntries(quota: QuotaMap): QuotaEntry[] {
-  const out: QuotaEntry[] = []
-  const seen = new Set<string>()
-  for (const kind of QUERYABLE) {
-    if (kind in quota) {
-      out.push({ key: kind, kind, identity: null })
-      seen.add(kind)
-    }
-  }
-  for (const key of Object.keys(quota)) {
-    if (seen.has(key)) continue
-    const entry = parseQuotaKey(key)
-    if (!entry || !entry.identity) continue
-    if (quota[key] == null) continue
-    out.push(entry)
-    seen.add(key)
-  }
-  return out
+function claudeIdentities(identities: Identity[]): Identity[] {
+  return identities
+    .filter((i) => i.kind === 'claude')
+    .slice()
+    .sort((a, b) => {
+      if (a.name === 'cc0') return -1
+      if (b.name === 'cc0') return 1
+      return a.name.localeCompare(b.name)
+    })
 }
 
-function kindRank(kind: BotKind): number {
-  const i = QUERYABLE.indexOf(kind)
-  return i === -1 ? QUERYABLE.length : i
+/** Empty-env identity (typically `cc0`) shares the bare `claude` quota key with no-identity bots. */
+function isDefaultClaudeIdentity(idn: Identity): boolean {
+  return idn.name === 'cc0' || Object.keys(idn.env).length === 0
+}
+
+/**
+ * Quota map key for a Claude identity. Prefers `claude:<name>`; the default/cc0 identity
+ * falls back to bare `claude` when that is where statusline data landed.
+ */
+function claudeQuotaKey(quota: QuotaMap, idn: Identity, bareClaimed: boolean): { key: string; claimedBare: boolean } {
+  const keyed = `claude:${idn.name}`
+  if (quota[keyed] != null) return { key: keyed, claimedBare: false }
+  if (!bareClaimed && isDefaultClaudeIdentity(idn) && 'claude' in quota) {
+    return { key: 'claude', claimedBare: true }
+  }
+  return { key: keyed, claimedBare: false }
+}
+
+function entryReactKey(entry: QuotaEntry): string {
+  return entry.identity ? `${entry.kind}:${entry.identity}` : entry.key
+}
+
+/**
+ * Strip / popover entries in a **fixed** order — never by remaining %:
+ *   cc0 → cc1 → (other claude identities) → codex → grok
+ * When no Claude identities are configured, bare `claude` stands in for the Claude slot.
+ */
+function collectEntries(quota: QuotaMap, identities: Identity[]): QuotaEntry[] {
+  const out: QuotaEntry[] = []
+  const seenSlots = new Set<string>()
+  const claudeIds = claudeIdentities(identities)
+
+  const push = (entry: QuotaEntry) => {
+    const slot = entryReactKey(entry)
+    if (seenSlots.has(slot)) return
+    seenSlots.add(slot)
+    out.push(entry)
+  }
+
+  // 1) Claude identities first (cc0, cc1, …)
+  if (claudeIds.length > 0) {
+    let bareClaimed = false
+    const bareOwner = claudeIds.find((i) => i.name === 'cc0') ?? claudeIds.find(isDefaultClaudeIdentity) ?? null
+    for (const idn of claudeIds) {
+      const useBare = bareOwner !== null && idn.name === bareOwner.name
+      const resolved = useBare
+        ? claudeQuotaKey(quota, idn, bareClaimed)
+        : { key: `claude:${idn.name}`, claimedBare: false }
+      if (resolved.claimedBare) bareClaimed = true
+      push({ key: resolved.key, kind: 'claude', identity: idn.name })
+    }
+  } else if ('claude' in quota) {
+    push({ key: 'claude', kind: 'claude', identity: null })
+  }
+
+  // Orphan claude:<id> keys not in the identities list (still after known ones, before codex)
+  for (const key of Object.keys(quota).sort()) {
+    const entry = parseQuotaKey(key)
+    if (!entry || entry.kind !== 'claude' || !entry.identity) continue
+    if (quota[key] == null) continue
+    push(entry)
+  }
+
+  // 2) codex, then grok — fixed kind order, no remaining-% sort
+  for (const kind of ['codex', 'grok'] as const) {
+    if (kind in quota) push({ key: kind, kind, identity: null })
+  }
+
+  // Any other kind:identity orphans (future-proof), after the fixed kinds
+  for (const key of Object.keys(quota).sort()) {
+    const entry = parseQuotaKey(key)
+    if (!entry || !entry.identity || entry.kind === 'claude') continue
+    if (quota[key] == null) continue
+    push(entry)
+  }
+
+  return out
 }
 
 /** Shape + colour, so the level survives greyscale and colour blindness. */
@@ -129,48 +202,187 @@ function RiskDot({ level }: { level: Level }) {
   return <span className={`quota-risk ${level}`} aria-hidden="true" />
 }
 
-/** One window as a health bar: length carries the level, colour only reinforces it. */
-function Bar({ pct }: { pct: number | null }) {
-  const lv = levelOf(pct)
+/** 每個窗口有多長：位置刻度就是拿「離重置還有多久」去除這個。 */
+const WINDOW_MS: Record<'5h' | '7d' | '週', number> = {
+  '5h': 5 * 3_600_000,
+  '7d': 7 * 86_400_000,
+  '週': 7 * 86_400_000,
+}
+
+/**
+ * 重置刻度在條上的位置：剩 3 小時、窗口 5 小時 → 60%。時間過去刻度就往左走，
+ * 碰到左緣就是要重置了。拿不到 `resets_at` 時不畫。
+ */
+function resetMark(resetsAt: string | null | undefined, span: number, now: number): number | null {
+  if (!resetsAt) return null
+  const t = new Date(resetsAt).getTime()
+  if (Number.isNaN(t)) return null
+  const left = t - now
+  if (left <= 0) return 0
+  return Math.min(100, (left / span) * 100)
+}
+
+/** `2h13m` / `4d0h` / `12m`——和狀態列那條同一種寫法。 */
+function fmtLeft(ms: number): string {
+  if (ms <= 0) return '即將重置'
+  const m = Math.floor(ms / 60_000)
+  const h = Math.floor(m / 60)
+  const d = Math.floor(h / 24)
+  if (d > 0) return `${d}d${h % 24}h`
+  if (h > 0) return `${h}h${m % 60}m`
+  return `${m}m`
+}
+
+/** 每分鐘動一次就夠：刻度是分鐘級的。 */
+function useMinuteNow(): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+  return now
+}
+
+/** Health bar; daemon-decided `low` / `critical` (see docs/API.md §12.4) drive both colour and the countdown number. */
+function Bar({
+  pct,
+  low,
+  critical,
+  mark,
+  markTitle,
+}: {
+  pct: number | null
+  low: boolean
+  critical: boolean
+  mark: number | null
+  markTitle?: string
+}) {
+  const lv = levelOf({ low, critical })
   return (
-    <span className={`quota-bar ${lv}${pct === null ? ' nodata' : ''}`}>
-      <span className="quota-bar-fill" style={{ width: pct === null ? '0%' : `${pct}%` }} />
+    <span className="quota-bar-row">
+      <span className="quota-bar-wrap">
+        <span className={`quota-bar ${lv}${pct === null ? ' nodata' : ''}`}>
+          <span className="quota-bar-fill" style={{ width: pct === null ? '0%' : `${pct}%` }} />
+        </span>
+        {/* 黑針＝下次 reset 的位置（剩餘時間 ÷ 窗口長度）。 */}
+        {mark !== null ? <span className="quota-bar-mark" style={{ left: `${mark}%` }} title={markTitle} /> : null}
+      </span>
+      {low ? (
+        <span className={`quota-bar-pct ${lv}`} aria-hidden="true">
+          {pct}
+        </span>
+      ) : null}
     </span>
   )
 }
 
-/** Frameless, compact: kind glyph (+ identity) + one bar per reported window (collapsed = worst). */
-function Gauge({ entry, collapsed }: { entry: QuotaEntry; collapsed: boolean }) {
-  const q = useStore((s) => s.quota[entry.key] ?? null)
+type WindowBar = { name: '5h' | '7d' | '週'; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
+
+/** grok only reports a weekly window (stored in seven_day) — never call it 7d. */
+function weekLabel(kind: BotKind): '7d' | '週' {
+  return kind === 'grok' ? '週' : '7d'
+}
+
+/** Frameless, compact: icon above identity, bars to the right — keeps label glued to its bars. */
+function Gauge({ entry, collapsed, focused }: { entry: QuotaEntry; collapsed: boolean; focused: boolean }) {
+  const q = useStore((s) => {
+    if (entry.identity) {
+      const keyed = `${entry.kind}:${entry.identity}`
+      if (s.quota[keyed] != null) return s.quota[keyed]
+    }
+    return s.quota[entry.key] ?? null
+  })
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  // Only windows this kind actually reports; a lone hatched bar when it reports none yet.
-  const present = [five, seven].filter((v): v is number => v !== null)
-  const bars = collapsed ? [worstWindow(q).pct] : present.length ? present : [null]
+  const now = useMinuteNow()
+  // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
+  let windows: WindowBar[]
+  if (collapsed) {
+    const w = worstWindow(q)
+    const src = w.name === '5h' ? q?.five_hour : q?.seven_day
+    windows = [
+      {
+        name: w.name === '7d' ? weekLabel(entry.kind) : w.name,
+        pct: w.pct,
+        resetsAt: src?.resets_at ?? null,
+        low: src?.low ?? false,
+        critical: src?.critical ?? false,
+      },
+    ]
+  } else if (five === null && seven === null) {
+    windows = [{ name: entry.kind === 'grok' ? '週' : '5h', pct: null, resetsAt: null, low: false, critical: false }]
+  } else {
+    windows = []
+    if (five !== null) {
+      windows.push({
+        name: '5h',
+        pct: five,
+        resetsAt: q?.five_hour?.resets_at ?? null,
+        low: q?.five_hour?.low ?? false,
+        critical: q?.five_hour?.critical ?? false,
+      })
+    }
+    if (seven !== null) {
+      windows.push({
+        name: weekLabel(entry.kind),
+        pct: seven,
+        resetsAt: q?.seven_day?.resets_at ?? null,
+        low: q?.seven_day?.low ?? false,
+        critical: q?.seven_day?.critical ?? false,
+      })
+    }
+  }
   const title = label(entry, q)
+  const accessibleTitle = focused ? `目前選取的 ${title}` : title
 
   return (
-    <span className={`quota-hp ${entry.kind} ${worst(q).level}`} title={title} aria-label={title}>
-      <span className="quota-kind" aria-hidden="true">
-        <KindIcon kind={entry.kind} />
-      </span>
-      {entry.identity ? (
-        <span className="quota-identity" aria-hidden="true">
-          {entry.identity}
+    <span
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}`}
+      title={accessibleTitle}
+      aria-label={accessibleTitle}
+      aria-current={focused ? 'true' : undefined}
+    >
+      <span className="quota-head" aria-hidden="true">
+        <span className="quota-kind">
+          <KindIcon kind={entry.kind} />
         </span>
-      ) : null}
-      <span className="quota-bars">
-        {bars.map((pct, i) => (
-          <Bar key={i} pct={pct} />
-        ))}
+        {entry.identity ? <span className="quota-identity">{entry.identity}</span> : null}
+      </span>
+      <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
+        {windows.map((w) => {
+          const span = WINDOW_MS[w.name]
+          const mark = resetMark(w.resetsAt, span, now)
+          const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
+          return (
+            <span key={w.name} className="quota-window">
+              <span className="quota-window-name">{w.name}</span>
+              <Bar
+                pct={w.pct}
+                low={w.low}
+                critical={w.critical}
+                mark={mark}
+                markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
+              />
+            </span>
+          )
+        })}
       </span>
     </span>
   )
 }
 
 function PopRow({ entry }: { entry: QuotaEntry }) {
-  const q = useStore((s) => s.quota[entry.key] ?? null)
-  const known = useStore((s) => entry.key in s.quota)
+  const q = useStore((s) => {
+    if (entry.identity) {
+      const keyed = `${entry.kind}:${entry.identity}`
+      if (s.quota[keyed] != null) return s.quota[keyed]
+    }
+    return s.quota[entry.key] ?? null
+  })
+  const known = useStore((s) => {
+    if (entry.identity && `${entry.kind}:${entry.identity}` in s.quota) return true
+    return entry.key in s.quota
+  })
   const supported = QUERYABLE.includes(entry.kind)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
@@ -182,7 +394,7 @@ function PopRow({ entry }: { entry: QuotaEntry }) {
           <KindIcon kind={entry.kind} />
         </span>
         <span className="quota-name">{entryLabel(entry)}</span>
-        {supported ? <RiskDot level={worst(q).level} /> : null}
+        {supported ? <RiskDot level={worst(q)} /> : null}
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
       </div>
       {!supported ? (
@@ -196,14 +408,14 @@ function PopRow({ entry }: { entry: QuotaEntry }) {
           {five !== null ? (
             <div className="quota-pop-line">
               <span>5 小時</span>
-              <span className={`quota-row ${levelOf(five)}`}>剩 {pctText(five)}</span>
+              <span className={`quota-row ${levelOf(q?.five_hour)}`}>剩 {pctText(five)}</span>
               <span className="quota-reset">{fmtTime(q?.five_hour?.resets_at)} 重置</span>
             </div>
           ) : null}
           {seven !== null ? (
             <div className="quota-pop-line">
               <span>{entry.kind === 'grok' ? '每週' : '7 天'}</span>
-              <span className={`quota-row ${levelOf(seven)}`}>剩 {pctText(seven)}</span>
+              <span className={`quota-row ${levelOf(q?.seven_day)}`}>剩 {pctText(seven)}</span>
               <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)} 重置</span>
             </div>
           ) : null}
@@ -214,8 +426,16 @@ function PopRow({ entry }: { entry: QuotaEntry }) {
   )
 }
 
-export function QuotaStrip({ focusKind }: { focusKind?: BotKind | null }) {
+export function QuotaStrip({
+  focusKind,
+  focusIdentity,
+}: {
+  focusKind?: BotKind | null
+  /** Selected bot's identity; null = default / cc0 account. */
+  focusIdentity?: string | null
+}) {
   const quota = useStore((s) => s.quota)
+  const identities = useStore((s) => s.identities)
   const [width, setWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1440))
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
@@ -242,34 +462,11 @@ export function QuotaStrip({ focusKind }: { focusKind?: BotKind | null }) {
     }
   }, [open])
 
-  /** Critical first, then warning, then by remaining; focused kind wins a tie; identities follow base. */
-  const ordered = useMemo(() => {
-    const rank: Record<Level, number> = { crit: 0, warn: 1, ok: 2 }
-    return collectEntries(quota)
-      .map((entry) => ({ entry, ...worst(quota[entry.key] ?? null) }))
-      .sort((a, b) => {
-        if (rank[a.level] !== rank[b.level]) return rank[a.level] - rank[b.level]
-        const av = a.pct ?? 101
-        const bv = b.pct ?? 101
-        if (av !== bv) return av - bv
-        if (a.entry.kind === focusKind && b.entry.kind !== focusKind) return -1
-        if (b.entry.kind === focusKind && a.entry.kind !== focusKind) return 1
-        if (a.entry.kind !== b.entry.kind) return kindRank(a.entry.kind) - kindRank(b.entry.kind)
-        // Same kind: base row first, then identity name.
-        if (!a.entry.identity && b.entry.identity) return -1
-        if (a.entry.identity && !b.entry.identity) return 1
-        return (a.entry.identity ?? '').localeCompare(b.entry.identity ?? '')
-      })
-      .map((x) => x.entry)
-  }, [quota, focusKind])
+  /** Fixed: cc0 → cc1 → codex → grok. No remaining-% / focus reshuffle. */
+  const ordered = useMemo(() => collectEntries(quota, identities), [quota, identities])
 
-  /** Popover lists every base kind, then any identity rows that have reported. */
-  const popEntries = useMemo(() => {
-    const base: QuotaEntry[] = BOT_KINDS.map((kind) => ({ key: kind, kind, identity: null }))
-    const extras = collectEntries(quota).filter((e) => e.identity)
-    extras.sort((a, b) => kindRank(a.kind) - kindRank(b.kind) || (a.identity ?? '').localeCompare(b.identity ?? ''))
-    return [...base, ...extras]
-  }, [quota])
+  /** Same fixed order as the strip (Claude identities expanded). */
+  const popEntries = useMemo(() => collectEntries(quota, identities), [quota, identities])
 
   if (ordered.length === 0) return null
 
@@ -287,14 +484,30 @@ export function QuotaStrip({ focusKind }: { focusKind?: BotKind | null }) {
         title="所有額度"
         onClick={() => setOpen((v) => !v)}
       >
-        {ordered.map((entry) => (
-          <Gauge key={entry.key} entry={entry} collapsed={collapsed} />
-        ))}
+        {ordered.map((entry) => {
+          let focused = false
+          if (focusKind && entry.kind === focusKind) {
+            if (entry.kind !== 'claude') {
+              focused = true
+            } else {
+              const focusId =
+                focusIdentity && focusIdentity.trim()
+                  ? focusIdentity.trim()
+                  : claudeIdentities(identities).some((i) => i.name === 'cc0')
+                    ? 'cc0'
+                    : null
+              focused = focusId ? entry.identity === focusId : !entry.identity
+            }
+          }
+          return (
+            <Gauge key={entryReactKey(entry)} entry={entry} collapsed={collapsed} focused={focused} />
+          )
+        })}
       </button>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label="所有額度">
           {popEntries.map((entry) => (
-            <PopRow key={entry.key} entry={entry} />
+            <PopRow key={entryReactKey(entry)} entry={entry} />
           ))}
         </div>
       ) : null}

@@ -2,25 +2,70 @@
 //!
 //! * codex: polled from the local `codex app-server` (`account/rateLimits/read`) at start-up,
 //!   every 5 min and on `?refresh=1`.
-//! * claude: pushed by the daemon-injected statusLine command (`StatusLine` hook event);
-//!   keyed `claude` for bots with no identity, or `claude:<identity>` when the bot runs under one
-//!   (identity bots do not overwrite the default-account `claude` row).
+//! * claude: statusLine push while a bot is chatting, **plus** a background `/usage` pane probe
+//!   every 60 s — see [`crate::quota_claude`]. Keyed `claude` for the default account, or
+//!   `claude:<identity>` when probing / receiving under an identity (identity rows do not
+//!   overwrite the default-account `claude` row).
 //! * grok: scraped from the TUI's `/usage` dialog in a throwaway pane every 30 s — see
 //!   [`crate::quota_grok`]; grok exposes no CLI or RPC surface for it.
 
 use crate::state::App;
 use anyhow::Result;
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
 pub const CODEX_POLL: Duration = Duration::from_secs(300);
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// Remaining % below which the strip shows the number, not just the bar (requirement: this
+/// decision is the daemon's, not the UI's — the UI only reads [`Window::low`] off the wire).
+pub const LOW_REMAINING_PCT: f64 = 30.0;
+
+/// Remaining % below which the sidebar bot row surfaces a warning — see [`Window::critical`].
+pub const CRITICAL_REMAINING_PCT: f64 = 5.0;
+
+/// Serialises throwaway `/usage` probes in the shared `am-quota` herdr session so a
+/// `?refresh=1` and the background pollers (claude + grok) never fight over the same pane.
+pub async fn probe_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Window {
     pub used_pct: f64,
     pub resets_at: Option<String>,
+}
+
+impl Window {
+    fn remaining_pct(&self) -> f64 {
+        (100.0 - self.used_pct).max(0.0)
+    }
+
+    /// Remaining < [`LOW_REMAINING_PCT`] — the strip should show the number.
+    pub fn low(&self) -> bool {
+        self.remaining_pct() < LOW_REMAINING_PCT
+    }
+
+    /// Remaining < [`CRITICAL_REMAINING_PCT`] — the sidebar bot row should warn.
+    pub fn critical(&self) -> bool {
+        self.remaining_pct() < CRITICAL_REMAINING_PCT
+    }
+}
+
+/// Manual impl (rather than `#[derive(Serialize)]`) so `low` / `critical` go over the wire as
+/// computed fields — every call site still just builds a plain `{used_pct, resets_at}` struct.
+impl Serialize for Window {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut st = s.serialize_struct("Window", 4)?;
+        st.serialize_field("used_pct", &self.used_pct)?;
+        st.serialize_field("resets_at", &self.resets_at)?;
+        st.serialize_field("low", &self.low())?;
+        st.serialize_field("critical", &self.critical())?;
+        st.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

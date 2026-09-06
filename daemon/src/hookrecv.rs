@@ -74,6 +74,34 @@ enum HookKind {
     Ignore(String),
 }
 
+/// The email claude is logged in as for this bot, read the way the user's own statusline
+/// script does (`oauthAccount.emailAddress` in `.claude.json`). The identity decides which
+/// config directory that is; `None` when it cannot be read.
+fn claude_account_email(bot: &db::Bot) -> Option<String> {
+    let home = dirs::home_dir()?;
+    // `env_json` may pin CLAUDE_CONFIG_DIR (that is how cc0 / cc1 are kept apart).
+    let cfg_dir = serde_json::from_str::<Value>(&bot.env_json)
+        .ok()
+        .and_then(|e| e.get("CLAUDE_CONFIG_DIR").and_then(|v| v.as_str()).map(String::from))
+        .map(|d| {
+            let d = d.replace("$HOME", &home.to_string_lossy());
+            std::path::PathBuf::from(d)
+        });
+    // Default config dir keeps its json at ~/.claude.json; a custom one keeps it inside.
+    let path = match cfg_dir {
+        Some(d) => d.join(".claude.json"),
+        None => home.join(".claude.json"),
+    };
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let email = v.get("oauthAccount")?.get("emailAddress")?.as_str()?.trim().to_string();
+    if email.is_empty() {
+        None
+    } else {
+        Some(email)
+    }
+}
+
 fn classify(provider: &str, p: &Value) -> HookKind {
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(String::from);
     match provider {
@@ -283,6 +311,33 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::StatusLine => {
+            // The rendered status bar, for the chat header. Written only when it changed —
+            // claude refreshes this line often and every write would wake every client.
+            if let Some(r) = &run {
+                let text = body.payload.get("status_line").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+                // The rest of the payload (context window, model, cost, limits) so the web
+                // bar can be fuller than the pane's single line. `status_line` itself is
+                // stored separately, so drop it from the copy.
+                let mut rich = body.payload.clone();
+                if let Some(o) = rich.as_object_mut() {
+                    o.remove("status_line");
+                    o.remove("hook_event_name");
+                    if let Some(email) = claude_account_email(&bot) {
+                        o.insert("account_email".into(), serde_json::json!(email));
+                    }
+                }
+                let rich = serde_json::to_string(&rich).ok();
+                let changed = text != r.status_line.as_deref() || rich != r.status_json;
+                if changed {
+                    let _ = sqlx::query("UPDATE runs SET status_line = COALESCE(?, status_line), status_json = ? WHERE id = ?")
+                        .bind(text)
+                        .bind(&rich)
+                        .bind(&r.id)
+                        .execute(&app.db)
+                        .await;
+                    app.emit_bot_status(&bot.id).await;
+                }
+            }
             // Quota only. Bots with an identity write `claude:<identity>` alone so they do not
             // overwrite the default-account `claude` row (cc0 / no-identity bots keep that key).
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());

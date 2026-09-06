@@ -9,7 +9,8 @@
 //!   2. runs the user's *own* statusLine command (from `$CLAUDE_CONFIG_DIR/settings.json`,
 //!      default `~/.claude/settings.json`) on the same input and relays its stdout verbatim,
 //!      so the pane's status bar looks exactly as it would without the daemon. No command
-//!      configured → empty output.
+//!      configured → empty output. That same text rides along in the POST as `status_line`,
+//!      so the web UI can show the bot's real status bar, not an approximation of it.
 //!
 //! Budget ≤ 2 s; never exits non-zero; never panics past `run`.
 
@@ -41,8 +42,12 @@ fn inner(args: StatuslineArgs) {
     let deadline = Instant::now() + TOTAL_BUDGET;
     let input = read_stdin_capped(STDIN_BUDGET);
 
-    // 1. report the quota (background thread; we do not wait for it past the deadline).
-    let poster = slim_payload(&input).map(|payload| {
+    // 1. the user's own status line, on the same input. Runs *before* the POST so the text
+    // can ride along with it; it is the pane's own output, so it must not be delayed either.
+    let status_line = user_statusline_command().and_then(|cmd| relay_user_command(&cmd, &input, deadline));
+
+    // 2. report the quota + that text (background thread; not waited for past the deadline).
+    let poster = slim_payload(&input, status_line.as_deref()).map(|payload| {
         let body = serde_json::json!({
             "bot_id": args.bot,
             "provider": "claude",
@@ -59,11 +64,6 @@ fn inner(args: StatuslineArgs) {
         std::thread::spawn(move || post(&body, &token, port, deadline))
     });
 
-    // 2. the user's own status line, on the same input.
-    if let Some(cmd) = user_statusline_command() {
-        relay_user_command(&cmd, &input, deadline);
-    }
-
     // Give the POST the rest of the budget, then leave regardless.
     if let Some(h) = poster {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -78,15 +78,23 @@ fn inner(args: StatuslineArgs) {
 
 /// The fields the daemon cares about, plus the event name. `None` when stdin was not a JSON
 /// object (nothing to report).
-pub fn slim_payload(input: &str) -> Option<serde_json::Value> {
+pub fn slim_payload(input: &str, status_line: Option<&str>) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(input).ok()?;
     let o = v.as_object()?;
     let mut out = serde_json::Map::new();
     out.insert("hook_event_name".into(), serde_json::json!("StatusLine"));
-    for k in ["session_id", "rate_limits", "model", "context_window", "version", "cwd"] {
-        if let Some(x) = o.get(k) {
-            out.insert(k.into(), x.clone());
+    // Everything claude sends *except* the transcript path: the web UI has room for the
+    // full picture (context window, model, cost…), where the pane's one line does not.
+    // The transcript is a file path the daemon tracks elsewhere and never needs here.
+    for (k, v) in o {
+        if k == "transcript_path" {
+            continue;
         }
+        out.insert(k.clone(), v.clone());
+    }
+    // The rendered status bar itself, so the UI can show exactly what the pane shows.
+    if let Some(t) = status_line.map(str::trim).filter(|t| !t.is_empty()) {
+        out.insert("status_line".into(), serde_json::json!(t));
     }
     Some(serde_json::Value::Object(out))
 }
@@ -118,8 +126,9 @@ pub fn statusline_command_from_settings(text: &str) -> Option<String> {
     Some(cmd)
 }
 
-/// Run `sh -c <cmd>` with `input` on stdin and copy its stdout to ours. Killed at the deadline.
-fn relay_user_command(cmd: &str, input: &str, deadline: Instant) {
+/// Run `sh -c <cmd>` with `input` on stdin and copy its stdout to ours, returning that text
+/// (ANSI stripped) for the daemon. Killed at the deadline.
+fn relay_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<String> {
     let mut child = match Command::new("/bin/sh")
         .arg("-c")
         .arg(cmd)
@@ -131,7 +140,7 @@ fn relay_user_command(cmd: &str, input: &str, deadline: Instant) {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "agents-managerd statusline: spawn user command: {e}");
-            return;
+            return None;
         }
     };
     if let Some(mut sin) = child.stdin.take() {
@@ -153,13 +162,23 @@ fn relay_user_command(cmd: &str, input: &str, deadline: Instant) {
     match rx.recv_timeout(remaining) {
         Ok(buf) => {
             let _ = child.wait();
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(&buf);
-            let _ = out.flush();
+            {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(&buf);
+                let _ = out.flush();
+            }
+            let text = crate::github::strip_ansi(&String::from_utf8_lossy(&buf));
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         }
         Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
+            None
         }
     }
 }
@@ -201,14 +220,18 @@ mod tests {
     fn slim_payload_keeps_only_quota_fields() {
         let v = slim_payload(
             r#"{"session_id":"s","transcript_path":"/x","rate_limits":{"five_hour":{"used_percentage":3,"resets_at":1}},"model":{"id":"m"},"context_window":{"used_percentage":40},"cost":{"total_cost_usd":1}}"#,
+            Some("me | proj | 5h:12%"),
         )
         .unwrap();
         assert_eq!(v["hook_event_name"], "StatusLine");
         assert_eq!(v["rate_limits"]["five_hour"]["used_percentage"], 3);
         assert!(v.get("transcript_path").is_none());
-        assert!(v.get("cost").is_none());
-        assert!(slim_payload("not json").is_none());
-        assert!(slim_payload("[1]").is_none());
+        assert_eq!(v["cost"]["total_cost_usd"], 1);
+        assert_eq!(v["status_line"], "me | proj | 5h:12%");
+        assert!(slim_payload("not json", None).is_none());
+        assert!(slim_payload("[1]", None).is_none());
+        // Blank / whitespace-only output is not a status line.
+        assert!(slim_payload(r#"{"session_id":"s"}"#, Some("  ")).unwrap().get("status_line").is_none());
     }
 
     #[test]
