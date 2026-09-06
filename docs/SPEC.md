@@ -338,6 +338,15 @@ label = "foo@m4p"
    - 原因：非互動 ssh 工作階段讀不到使用者的登入 Keychain（`security` 回 errSecInteractionNotAllowed，錯誤 36），在該 herdr 底下啟動的 Claude Code 會顯示「Not logged in」即使主機已登入；GUI 網域的 LaunchAgent 跑在桌面工作階段，Keychain 已解鎖。附帶好處：ssh 斷線或 herdr 當掉 launchd 會自動拉起。
 2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> -R <hook_port>:127.0.0.1:<daemon port> <target>`。
    - `<local.sock>` 與 `<ctl>` 必須放在**短路徑**（macOS AF_UNIX 上限 104 bytes）：`/tmp/agents-manager-<uid>/<host>.sock`、`<host>.ctl`。
+   - **反向通道的埠先探測再要**（v4.2）：`ExitOnForwardFailure=yes` 是刻意的——沒有 hook 通道的 master 沒有用——但它也代表遠端那個埠只要被佔住，**每一次重連都會以 `exit status: 255` 收場**，而使用者只看得到 `ssh master exited immediately`，log 裡的 `remote port forwarding failed for listen port <p>` 藏在另一行。實測就是這樣：一條沒清乾淨的舊 ssh 通道把 7788 佔了 51 分鐘，遠端全程連不上。
+     所以起 master 之前先在遠端跑一段探測（走 stdin，token 不會進遠端 argv）：
+     | 狀況 | 判斷 | 動作 |
+     |---|---|---|
+     | 沒人聽 | `lsof -iTCP:<p> -sTCP:LISTEN` 無結果 | 照常帶 `-R` |
+     | 活的（是我們的） | `curl 127.0.0.1:<p>/api/session` 回應含**本 daemon 的 ui token** | 通道還在，**不帶 `-R`** 直接沿用；再要一次只會讓 sshd 綁不上而拖垮整個 master |
+     | 死的（是我們的） | 沒有回應，且持有者是本登入帳號的 `sshd` | `kill` 它、收回埠，然後帶 `-R`（log：`reclaimed the hook port from a dead ssh tunnel`） |
+     | 別人的 | 沒有回應，持有者不是 `sshd` | **不搶**，直接報錯並指名持有者，建議改該 host 的 `hook_port` |
+     探測本身是 best-effort：ssh 問不到就當「沒人聽」照常嘗試，讓 ssh 自己講。
 3. 以 `HerdrClient::new(<local.sock>)` 取得與本機完全相同的 client；`ping` 成功 → `connected`。
 4. 健康檢查：每 10 秒 `ping`；失敗或 master 程序退出 → 標 `disconnected`、指數退避（1s→30s）重建 master → 成功後對該 host 執行對帳（§6.5）並重建事件訂閱。
 5. daemon 退出時關閉 master（`ssh -O exit`）；遠端 herdr server 與 agent 保持存活。
