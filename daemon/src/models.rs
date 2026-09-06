@@ -4,8 +4,10 @@
 //!   own; locally we drive it with a tokio child (write three lines, read stdout until the
 //!   matching id, kill), remotely with a `sh` pipeline that feeds stdin, waits a few seconds
 //!   and lets `awk` cut the stream at the answer.
-//! * grok: `grok models` text output.
-//! * claude: static `opus / sonnet / haiku` (no list API).
+//! * grok: `grok models` text output; per-model `reasoning_efforts` from
+//!   `~/.grok/models_cache.json` when present; default effort from that cache (or
+//!   `~/.grok/config.toml`'s `default_reasoning_effort` as a fallback).
+//! * claude: static `opus / sonnet / haiku / fable` (no list API).
 
 use crate::config::LOCAL_HOST;
 use crate::hosts::sh_quote;
@@ -184,6 +186,7 @@ pub fn grok_models_from_text(text: &str) -> Vec<Value> {
                 "description": "",
                 "is_default": is_default,
                 "default_effort": Value::Null,
+                // Fallback when models_cache.json is missing; enriched per-model below.
                 "efforts": ["low", "medium", "high"],
                 "service_tiers": [],
             })
@@ -191,8 +194,92 @@ pub fn grok_models_from_text(text: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Preferred display / validation order for known grok effort ids.
+const GROK_EFFORT_ORDER: &[&str] = &["low", "medium", "high", "xhigh"];
+
+/// Sort known grok efforts low→xhigh; keep any unknown ids at the end in input order.
+fn sort_grok_efforts(ids: Vec<String>) -> Vec<String> {
+    let mut known: Vec<String> = GROK_EFFORT_ORDER
+        .iter()
+        .filter(|k| ids.iter().any(|id| id == *k))
+        .map(|s| (*s).to_string())
+        .collect();
+    for id in ids {
+        if !known.iter().any(|k| k == &id) {
+            known.push(id);
+        }
+    }
+    known
+}
+
+/// Per-model efforts from `~/.grok/models_cache.json`:
+/// `models.<id>.info.reasoning_efforts[{id|value, default}]`.
+/// Returns `(efforts ascending, default_effort)` when the model entry exists.
+fn grok_efforts_from_cache(cache: &Value, model_id: &str) -> Option<(Vec<String>, Option<String>)> {
+    let efforts = cache
+        .pointer(&format!("/models/{model_id}/info/reasoning_efforts"))?
+        .as_array()?;
+    if efforts.is_empty() {
+        return None;
+    }
+    let mut ids = Vec::new();
+    let mut default = None;
+    for e in efforts {
+        let Some(id) = e
+            .get("value")
+            .or_else(|| e.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if e.get("default").and_then(|d| d.as_bool()) == Some(true) {
+            default = Some(id.clone());
+        }
+        if !ids.iter().any(|x| x == &id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return None;
+    }
+    Some((sort_grok_efforts(ids), default))
+}
+
+/// Overlay per-model efforts / defaults from models_cache; fall back to config.toml's
+/// `default_reasoning_effort` when a model has no cache default.
+fn enrich_grok_models(mut models: Vec<Value>, cache_text: &str, cfg_text: &str) -> Vec<Value> {
+    let cache: Value = serde_json::from_str(cache_text).unwrap_or(Value::Null);
+    let cfg_default = grok_default_effort_from_config(cfg_text);
+    for v in &mut models {
+        let Some(obj) = v.as_object_mut() else { continue };
+        let id = obj.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if let Some((efforts, def)) = grok_efforts_from_cache(&cache, &id) {
+            obj.insert("efforts".into(), json!(efforts));
+            let default_effort = def.or_else(|| cfg_default.clone());
+            obj.insert("default_effort".into(), json!(default_effort));
+        } else if let Some(eff) = &cfg_default {
+            obj.insert("default_effort".into(), json!(eff));
+        }
+    }
+    models
+}
+
+/// `~/.grok/config.toml`'s `[models] default_reasoning_effort = "high"` — installer-written,
+/// and a fallback when `models_cache.json` has no per-model default. `grok models` itself
+/// never reports effort levels.
+fn grok_default_effort_from_config(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("default_reasoning_effort")?.trim_start();
+        let value = rest.strip_prefix('=')?.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
 pub fn claude_static_models() -> Vec<Value> {
-    ["opus", "sonnet", "haiku"]
+    // `claude --model` 的 alias（`claude --help`：'fable'、'opus'、'sonnet'…）。
+    ["opus", "sonnet", "haiku", "fable"]
         .iter()
         .enumerate()
         .map(|(i, id)| {
@@ -238,6 +325,32 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str) -> Result<Value> {
             if m.is_empty() {
                 bail!("could not parse `grok models` output:\n{}", text.trim());
             }
+            let (cfg_text, cache_text) = if host == LOCAL_HOST {
+                let cfg = tokio::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg("cat \"$HOME/.grok/config.toml\" 2>/dev/null")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+                let cache = tokio::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg("cat \"$HOME/.grok/models_cache.json\" 2>/dev/null")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+                (cfg, cache)
+            } else if let Some(conn) = app.hosts.get(host).await {
+                let cfg = conn.ssh_exec("cat \"$HOME/.grok/config.toml\" 2>/dev/null\n").await.unwrap_or_default();
+                let cache = conn.ssh_exec("cat \"$HOME/.grok/models_cache.json\" 2>/dev/null\n").await.unwrap_or_default();
+                (cfg, cache)
+            } else {
+                (String::new(), String::new())
+            };
+            let m = enrich_grok_models(m, &cache_text, &cfg_text);
             ("grok-cli", m)
         }
         "claude" => ("static", claude_static_models()),
@@ -281,6 +394,32 @@ mod tests {
         assert_eq!(m[1]["id"], "grok-4.5");
         assert_eq!(m[1]["is_default"], true);
         assert_eq!(m[1]["efforts"][2], "high");
+    }
+
+    #[test]
+    fn grok_cache_enriches_per_model_efforts() {
+        let t = "Default model: grok-4.5\n\nAvailable models:\n  - grok-4.6\n  * grok-4.5 (default)\n";
+        let m = grok_models_from_text(t);
+        let cache = json!({
+            "models": {
+                "grok-4.6": {"info": {"reasoning_efforts": [
+                    {"id": "xhigh", "value": "xhigh", "default": false},
+                    {"id": "high", "value": "high", "default": true},
+                    {"id": "medium", "value": "medium", "default": false},
+                    {"id": "low", "value": "low", "default": false}
+                ]}},
+                "grok-4.5": {"info": {"reasoning_efforts": [
+                    {"id": "high", "value": "high", "default": true},
+                    {"id": "medium", "value": "medium", "default": false},
+                    {"id": "low", "value": "low", "default": false}
+                ]}}
+            }
+        });
+        let m = enrich_grok_models(m, &cache.to_string(), "default_reasoning_effort = \"medium\"\n");
+        assert_eq!(m[0]["efforts"], json!(["low", "medium", "high", "xhigh"]));
+        assert_eq!(m[0]["default_effort"], "high");
+        assert_eq!(m[1]["efforts"], json!(["low", "medium", "high"]));
+        assert_eq!(m[1]["default_effort"], "high");
     }
 
     #[test]

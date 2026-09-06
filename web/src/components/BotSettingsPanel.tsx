@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { EFFORT_OPTIONS, MODEL_CUSTOM, MODEL_DEFAULT, MODEL_OPTIONS } from '../api/types'
+import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, PatchBotInput } from '../api/types'
 import { projectHostName, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -38,64 +37,6 @@ export function modelHint(kind: BotKind): string {
   }
 }
 
-/**
- * 模型下拉：常用別名 + 「（預設）」+「自訂…」（任意字串）。
- * `null` = 不帶 `--model`，由 agent CLI 自己決定。
- */
-export function ModelField({
-  kind,
-  value,
-  onChange,
-  hint,
-}: {
-  kind: BotKind
-  value: string | null
-  onChange: (v: string | null) => void
-  hint?: ReactNode
-}) {
-  const opts = MODEL_OPTIONS[kind]
-  const known = value === null || opts.includes(value)
-  const [customMode, setCustomMode] = useState(false)
-  const custom = customMode || !known
-
-  return (
-    <label className="field">
-      <span>模型</span>
-      <select
-        value={custom ? MODEL_CUSTOM : (value ?? MODEL_DEFAULT)}
-        onChange={(e) => {
-          const v = e.target.value
-          if (v === MODEL_CUSTOM) {
-            setCustomMode(true)
-            return
-          }
-          setCustomMode(false)
-          onChange(v === MODEL_DEFAULT ? null : v)
-        }}
-      >
-        <option value={MODEL_DEFAULT}>使用 CLI 預設</option>
-        {opts.map((m) => (
-          <option key={m} value={m}>
-            {m}
-          </option>
-        ))}
-        <option value={MODEL_CUSTOM}>自訂…</option>
-      </select>
-      {custom ? (
-        <input
-          type="text"
-          value={value ?? ''}
-          placeholder={opts[0]}
-          spellCheck={false}
-          aria-label="自訂模型名稱"
-          onChange={(e) => onChange(e.target.value ? e.target.value : null)}
-        />
-      ) : null}
-      {hint ? <span className="hint">{hint}</span> : null}
-    </label>
-  )
-}
-
 /** grok only: reasoning effort as a row of options (daemon → `--reasoning-effort`). */
 export function EffortField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
   return (
@@ -106,8 +47,8 @@ export function EffortField({ value, onChange }: { value: string | null; onChang
           預設
         </button>
         {EFFORT_OPTIONS.map((e) => (
-          <button key={e} type="button" className={`opt${value === e ? ' on' : ''}`} onClick={() => onChange(e)}>
-            {e}
+          <button key={e} type="button" className={`opt${value === e ? ' on' : ''}`} title={e} onClick={() => onChange(e)}>
+            {effortLabel(e)}
           </button>
         ))}
       </div>
@@ -220,6 +161,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const nameRef = useRef<HTMLInputElement>(null)
   // 彈窗貼著觸發它的齒輪開，超出視窗才翻邊/夾住；沒有 anchor（例如鍵盤流程）就置中。
   const anchor = useStore((s) => s.settingsAnchor)
+  const running = useStore((s) => {
+    const r = s.runs[botId]
+    return r ? r.state !== 'stopped' && r.state !== 'exited' : false
+  })
   const cardRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   useLayoutEffect(() => {
@@ -369,7 +314,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       ) : null}
       {banner === 'saved' ? (
         <div className="bs-banner ok" role="status">
-          <span>✓ 已儲存（Bot 未在執行中，下次啟動就會套用）。</span>
+          <span>
+            {running
+              ? '✓ 已套用，不用重啟。'
+              : '✓ 已儲存（Bot 未在執行中，下次啟動就會套用）。'}
+          </span>
         </div>
       ) : null}
 
@@ -396,20 +345,16 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             ) : null}
           </label>
 
-          {bot.kind === 'claude' ? (
-            <ModelField kind={bot.kind} value={model} onChange={setModel} />
-          ) : (
-            <ApiModelFields
-              kind={bot.kind}
-              host={host}
-              model={model}
-              onModel={setModel}
-              effort={effort}
-              onEffort={setEffort}
-              fast={fast}
-              onFast={setFast}
-            />
-          )}
+          <ApiModelFields
+            kind={bot.kind}
+            host={host}
+            model={model}
+            onModel={setModel}
+            effort={effort}
+            onEffort={setEffort}
+            fast={fast}
+            onFast={setFast}
+          />
           <IdentityOptions kind={bot.kind} value={identity} onChange={setIdentity} />
           <PersonaField value={persona} onChange={setPersona} />
         </form>
@@ -470,8 +415,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         }
         confirmLabel="刪除"
         danger
-        requireText={bot.name}
-        requireTextLabel={`請輸入完整名稱「${bot.name}」以確認刪除`}
         width={360}
         onCancel={() => setDeleteOpen(false)}
         onConfirm={() => {
