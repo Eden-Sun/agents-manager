@@ -40,9 +40,13 @@ export const KIND_TITLE: Record<BotKind, string> = {
   grok: 'Grok',
 }
 
+/**
+ * 訊息時間只到分。秒數在對話裡沒有人在讀，但它是每一則訊息旁邊都有的一串數字——
+ * 精確到秒的完整時間仍在 `title` 裡。（Team 時間軸是事件記錄，那邊保留秒。）
+ */
 function timeOf(iso: string): string {
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false })
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })
 }
 
 /**

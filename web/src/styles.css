@@ -2914,6 +2914,21 @@ button:disabled {
     display: none;
   }
 
+  /*
+   * 「↓ 最新」在桌機浮在氣泡右邊的空白上，手機沒有那塊空白——它就直接蓋在最後一則
+   * 訊息的字上。縮成一顆只有箭頭的圓鈕，蓋住的面積從約 130px 變成 34px。
+   */
+  .jump-bottom {
+    right: 12px;
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .jump-bottom > span {
+    display: none;
+  }
+
   .context-bar {
     gap: 8px;
     padding: 4px 10px;
