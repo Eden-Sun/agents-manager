@@ -6115,6 +6115,8 @@ button.team-workers:disabled {
 }
 .team-node-head.selected {
   background: var(--bg-active);
+  /* 同 `.bot-row.selected`：`--text-faint` 在 --bg-active 上只有 4.49:1（深色）。 */
+  --text-faint: var(--text-dim);
 }
 .team-node-chev {
   display: inline-flex;
