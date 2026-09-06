@@ -64,6 +64,18 @@ pub struct HostConn {
     generation: std::sync::atomic::AtomicU64,
 }
 
+/// What the remote's hook port is already doing when we get there.
+#[derive(Debug, PartialEq)]
+enum HookForward {
+    /// Nothing is listening — request the reverse forward as usual.
+    Free,
+    /// A forward that still reaches *this* daemon is up; asking for a second one would only
+    /// make `sshd` refuse to bind and take the whole master down with it.
+    Live,
+    /// Something else owns the port and it is not ours to take.
+    Busy(String),
+}
+
 impl HostConn {
     fn local(client: HerdrClient) -> Arc<Self> {
         Arc::new(Self {
@@ -329,8 +341,66 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         Ok(sock)
     }
 
+
+    /// Decide what to do about the remote hook port before asking sshd to bind it.
+    ///
+    /// `ExitOnForwardFailure=yes` is deliberate — a master without the hook tunnel is useless —
+    /// but it also means one stale listener kills every reconnect attempt forever, with nothing
+    /// but `remote port forwarding failed for listen port <p>` to go on. That is exactly what an
+    /// ssh session that died without cleaning up leaves behind: the port stays bound by an
+    /// orphaned `sshd-session` that answers nothing.
+    ///
+    /// So: probe it. A forward that still answers `/api/session` with our own token is live and
+    /// gets reused. One that answers nothing and is held by an `sshd` of our own login is a
+    /// corpse of a previous master — kill it and take the port back. Anything else is somebody
+    /// else's and is reported by name instead of being stolen.
+    async fn probe_hook_forward(&self, hook_port: u16, ui_token: &str) -> HookForward {
+        let script = format!(
+            r#"
+P={hook_port}
+TOKEN='{ui_token}'
+pids() {{ lsof -nP -iTCP:$P -sTCP:LISTEN -t 2>/dev/null | sort -u; }}
+[ -z "$(pids)" ] && {{ echo AM_FWD=free; exit 0; }}
+body=$(curl -s -m 3 "http://127.0.0.1:$P/api/session" 2>/dev/null || true)
+case "$body" in *"$TOKEN"*) echo AM_FWD=live; exit 0;; esac
+for pid in $(pids); do
+  cmd=$(ps -o comm= -p "$pid" 2>/dev/null)
+  case "$cmd" in
+    *sshd*) kill "$pid" 2>/dev/null && echo "AM_KILLED=$pid" ;;
+    *) echo "AM_BUSY=$pid $cmd" ;;
+  esac
+done
+sleep 1
+[ -z "$(pids)" ] && echo AM_FWD=free || echo AM_FWD=busy
+"#
+        );
+        let out = match self.ssh_exec_path(&script).await {
+            Ok(o) => o,
+            // Probing is best-effort: if we cannot ask, just try the forward and let ssh say.
+            Err(e) => {
+                tracing::debug!(host = %self.name, error = %e, "hook port probe failed");
+                return HookForward::Free;
+            }
+        };
+        let mut owners = Vec::new();
+        for line in out.lines() {
+            if let Some(pid) = line.strip_prefix("AM_KILLED=") {
+                tracing::info!(host = %self.name, hook_port, pid = pid.trim(), "reclaimed the hook port from a dead ssh tunnel");
+            } else if let Some(who) = line.strip_prefix("AM_BUSY=") {
+                owners.push(who.trim().to_string());
+            }
+        }
+        if out.contains("AM_FWD=live") {
+            return HookForward::Live;
+        }
+        if out.contains("AM_FWD=free") {
+            return HookForward::Free;
+        }
+        HookForward::Busy(if owners.is_empty() { "unknown process".into() } else { owners.join(", ") })
+    }
+
     /// SPEC §11.3.2 — bring up (or replace) the ssh master with both forwards.
-    async fn start_master(&self, remote_sock: &str, daemon_port: u16) -> Result<()> {
+    async fn start_master(&self, remote_sock: &str, daemon_port: u16, ui_token: &str) -> Result<()> {
         let cfg = self.cfg.as_ref().unwrap();
         let dir = short_dir();
         std::fs::create_dir_all(&dir).ok();
@@ -344,6 +414,14 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         self.kill_master().await;
 
         let hook_port = self.hook_port(daemon_port);
+        let forward = self.probe_hook_forward(hook_port, ui_token).await;
+        if let HookForward::Busy(who) = &forward {
+            bail!("the remote's hook port {hook_port} is held by {who}, which is not one of our ssh tunnels; free it or give this host a different `hook_port`");
+        }
+        let reuse = forward == HookForward::Live;
+        if reuse {
+            tracing::info!(host = %self.name, hook_port, "reusing the hook forward that is already up");
+        }
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.arg("-N")
             .arg("-M")
@@ -355,10 +433,11 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
             .arg("-o")
             .arg("StreamLocalBindUnlink=yes")
             .arg("-L")
-            .arg(format!("{}:{}", local_sock.display(), remote_sock))
-            .arg("-R")
-            .arg(format!("{hook_port}:127.0.0.1:{daemon_port}"))
-            .arg(&cfg.ssh);
+            .arg(format!("{}:{}", local_sock.display(), remote_sock));
+        if !reuse {
+            cmd.arg("-R").arg(format!("{hook_port}:127.0.0.1:{daemon_port}"));
+        }
+        cmd.arg(&cfg.ssh);
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         cmd.kill_on_drop(false);
         let mut child = cmd.spawn().context("spawn ssh master")?;
@@ -382,7 +461,10 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         loop {
             if let Some(m) = self.master.lock().await.as_mut() {
                 if let Ok(Some(st)) = m.try_wait() {
-                    bail!("ssh master exited immediately ({st}); check credentials / forwards");
+                    bail!(
+                            "ssh master exited immediately ({st}); \
+                             check credentials, and whether the remote's hook port {hook_port} is free"
+                        );
                 }
             }
             if self.client.ping().await.is_ok() {
@@ -431,7 +513,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
             }
             let attempt = async {
                 let sock = conn.ensure_remote_session().await?;
-                conn.start_master(&sock, app.port).await?;
+                conn.start_master(&sock, app.port, &app.ui_token).await?;
                 Ok::<_, anyhow::Error>(())
             }
             .await;
