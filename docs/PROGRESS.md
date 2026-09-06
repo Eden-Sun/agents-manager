@@ -520,6 +520,21 @@ CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany           <- ✅ 展開成「該 h
 9. **遠端 `~/.config/agents-manager/bots/<id>/` 不會被清掉**：DELETE Bot 只刪本機設定，
    遠端的 `hook.sh` / `claude-settings.json` / `hook.log` 留著（下次同 bot id 會覆寫）。
 
+10. **群組時間軸的 ULID 同毫秒排序隱患**（2026-09-06 發現，尚未修）：
+    `group::messages` 以 `ORDER BY m.id DESC` + `WHERE m.id < ?` 分頁，依賴 ULID 時間有序；
+    但 ULID 只有毫秒級時間戳，**同毫秒內建立的列排序由隨機位決定**。`chat()` 對 N 個 bot
+    各插一筆 user 副本全在同一毫秒內，所以時間軸理論上可能亂序、`before=` 游標剛好切在
+    一次群組發言中間時可能漏或重。
+    - 影響輕微：同一次發言的 N 份副本前端本來就用 `group_id` 折成一顆氣泡，順序不影響觀感。
+    - **`team_events` 踩到同一個問題且會實際重現**（scheduler 一步派多個 worker，同毫秒連寫
+      多筆），表現為 `state_detail_and_event_pagination` 間歇性失敗；已用 per-team 的 `seq`
+      欄位修掉。
+    - **建議修法（零成本）**：`messages` 沒有宣告 `WITHOUT ROWID`，它的 `rowid` 天生就是
+      單調插入序。`group::messages` / `get_messages` 改用 `rowid` 排序，`before=` 對外仍傳
+      message id、由後端解析成 `rowid` 比較（前端契約不變，與 team events 一致）。
+      不需新增欄位、不需回填、不需 migration。
+      （`team_events` 沒用 `rowid` 是因為要 **per-team** 的號，`messages` 只要全域單調就夠。）
+
 
 ## v3.2 — prompt-stall watchdog 與備援擷取清理（2026-09-06）
 

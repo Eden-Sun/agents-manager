@@ -8,7 +8,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 1. `GET /api/session` — **不需 token**，但 daemon 會檢查 `Host` 必須是 `127.0.0.1:<port>` /
    `localhost:<port>` / `[::1]:<port>`，且 `Origin`（若有）為本機。
    ```json
-   { "token": "6a03b0754e3b9d333aa7d79363cab160", "port": 7788 }
+   { "token": "<32 hex chars>", "port": 7788 }
    ```
 2. 其餘 `/api/*` 需 header `X-AM-Token: <token>`。缺或錯 → `401 {"error":"missing or bad X-AM-Token"}`。
 3. WebSocket：`/ws?token=<token>`（可加 `&since=<seq>`）。
@@ -36,6 +36,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 {
   "daemon_seq": 6,
   "connected": true,
+  "default_connected": true,
   "herdr_session": "agents-manager",
   "projects": [
     {
@@ -303,6 +304,8 @@ Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到
 
 - `hosts` **必定含 `local`**，且 `local` 永遠排在第一個；`local` 的 `ssh` / `ssh_port` /
   `remote_path` / `hook_port` 為 `null`，`connected` = 本機 herdr 連線狀態（與頂層 `connected` 同值）。
+- `default_connected` 是本機使用者 Herdr `default` session 的觀察連線狀態；採用該 session 的 Bot
+  只依這個欄位判斷，不會因 manager 的 named session 狀態誤亮或誤灰。
 - UI 的「主機」下拉可直接用這個陣列；sidebar 的 host 徽章在 `project.host !== "local"` 時才顯示。
 - `error` 為 `null` 或人類可讀的錯誤字串（ssh 認證失敗、herdr 起不來、ping 失敗…）。
 - `projects[].host` 永遠存在，本機專案為 `"local"`。
@@ -539,7 +542,9 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 ```
 
 - **`needs_restart`**：`true` 表示這次修改要等 bot 重啟後才會生效（有 active Run，且本次動到會影響啟動 argv / env 的欄位：`model`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`）。
-  - 例外（grok）：**只**改 `effort`、bot 是 grok、Run 在 `running` 且不忙（非 working / blocked、沒有 in-flight turn）、新值不是清成 `null` 時，daemon 會往 pane 送 grok TUI 的 `/effort <level>`（`pane.send_text` → 0.8s → `Enter`）當場套用，回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
+  - 例外（TUI slash 指令當場套用）：**只**改該欄位、Run 在 `running` 且不忙（非 working / blocked、沒有 in-flight turn）、新值不是清成 `null` 時，daemon 會往 pane 送對應的 slash 指令（`pane.send_text` → 0.8s → `Enter`）並回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
+    - grok `effort` → `/effort <level>`
+    - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）
   沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
   前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
 - **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
