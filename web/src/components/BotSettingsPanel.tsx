@@ -422,7 +422,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
       {banner === 'restart' ? (
         <div className="bs-banner warn" role="status">
-          <span>⚠️ 已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
+          {/* 同上：`.bs-banner.warn` 的琥珀色已經說了這是提醒。 */}
+          <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
           <button
             type="button"
             className="btn primary"
