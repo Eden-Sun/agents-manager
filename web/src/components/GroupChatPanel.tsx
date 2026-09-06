@@ -6,7 +6,7 @@ import type { Bot, GroupMessage } from '../api/types'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
-import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
+import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, useScrollTail } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { IssuesBar } from './IssuesBar'
 import { QuotaStrip } from './QuotaStrip'
@@ -129,25 +129,12 @@ function GroupMessageList({ projectId }: { projectId: string }) {
   const liveAlert = useStore(
     useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.alert ?? null]))),
   )
-  const ref = useRef<HTMLDivElement>(null)
-  const stick = useRef(true)
   const rows = useMemo(() => foldRows(messages ?? []), [messages])
-
-  // Follow the tail (new rows, live output growing) only while the user is at the bottom.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [rows, typing.length, liveText, liveActivity])
+  const tail = useScrollTail([rows, typing.length, liveText, liveActivity])
 
   return (
-    <div
-      className="msg-list group"
-      ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-      }}
-    >
+    <div className="msg-list-wrap">
+    <div className="msg-list group" ref={tail.ref} onScroll={tail.onScroll}>
       {rows.length === 0 ? (
         <EmptyState
           loading={!loaded}
@@ -195,8 +182,12 @@ function GroupMessageList({ projectId }: { projectId: string }) {
               {t.name} · {KIND_TITLE[t.kind]}
             </span>
           }
+          /* 群組裡一個成員卡住不該拖住其他人：逃生門掛在各自的泡泡上。 */
+          action={<AbandonTurnAction botId={t.id} />}
         />
       ))}
+    </div>
+    <JumpToBottom show={!tail.atBottom && rows.length > 0} onClick={tail.toBottom} />
     </div>
   )
 }

@@ -4,16 +4,19 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
-import { anchorOf, attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { effortLabel } from '../api/types'
+import { anchorOf, attachCommandOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
 import { ConfirmDialog } from './ConfirmDialog'
+import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { GearIcon } from './Icons'
 import { IssuesBar } from './IssuesBar'
 import { KindTag } from './KindTag'
+import { ModelQuickPicker } from './ModelPicker'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
@@ -112,12 +115,15 @@ export function LiveBubble({
   alert,
   from,
   kind,
+  action,
 }: {
   text: string | null
   activity?: string | null
   alert?: string | null
   from?: ReactNode
   kind?: BotKind
+  /** 這一泡泡專屬的逃生門（`AbandonTurnAction`）；放在狀態列右端，沒有就不佔位。 */
+  action?: ReactNode
 }) {
   const act = activity?.trim() ? activity.trim() : null
   const warn = alert?.trim() ? alert.trim() : null
@@ -141,6 +147,7 @@ export function LiveBubble({
           {from ? <span className="msg-from">{from}</span> : null}
           <span>{text ? '輸出中…' : (act ?? '等待回覆（hook）…')}</span>
         </div>
+        {action ?? null}
       </div>
       {warn ? (
         <p className="live-alert" role="status">
@@ -188,6 +195,165 @@ export function TypingDots() {
   )
 }
 
+/**
+ * "Jump to the newest" for a scrollback list.
+ *
+ * `stick` (a ref) already decides whether the list should follow new output, but a ref
+ * cannot drive rendering — so the same measurement is mirrored into state, and the button
+ * only exists while the user has actually scrolled away from the tail.
+ */
+export function useScrollTail(deps: unknown[]) {
+  const ref = useRef<HTMLDivElement>(null)
+  const stick = useRef(true)
+  const [atBottom, setAtBottom] = useState(true)
+
+  // Follow the tail (new messages, live output growing) only while the user is at the bottom.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (el && stick.current) el.scrollTop = el.scrollHeight
+    // The list this hook serves decides what "changed" means.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps)
+
+  const onScroll = (e: { currentTarget: HTMLDivElement }) => {
+    const el = e.currentTarget
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    stick.current = near
+    setAtBottom((prev) => (prev === near ? prev : near))
+  }
+
+  const toBottom = () => {
+    const el = ref.current
+    if (!el) return
+    stick.current = true
+    // Jump, don't animate: a long scrollback makes `smooth` take seconds, and the point of
+    // the button is to get there at once. The list keeps following the tail afterwards.
+    el.scrollTop = el.scrollHeight
+    setAtBottom(true)
+  }
+
+  return { ref, onScroll, atBottom, toBottom }
+}
+
+export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => void }) {
+  if (!show) return null
+  return (
+    <button type="button" className="jump-bottom" title="捲到最新訊息" aria-label="捲到最新訊息" onClick={onClick}>
+      <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+        <path d="M8 2.6v9.2M4.2 8.4L8 12.2l3.8-3.8" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <span>最新</span>
+    </button>
+  )
+}
+
+/**
+ * 這個回合跑多久之後，才把「強制中止」露出來（秒）。
+ *
+ * 刻意不是立刻出現：正常回合開頭本來就會有一段只在想、沒有輸出的時間，那時候按這顆只會
+ * 弄壞好好的回合。等一分鐘之後還停在「等待回覆（hook）…」，才比較像是收尾判斷失準。
+ */
+const ABANDON_AFTER_S = 60
+
+function elapsedLabel(sec: number): string {
+  if (sec < 90) return `${Math.floor(sec)} 秒`
+  const m = Math.floor(sec / 60)
+  return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 小時 ${m % 60} 分`
+}
+
+/**
+ * 卡住時的逃生門：`POST /api/turns/:id/abandon`，把這個回合標成 failed，讓 composer 解鎖。
+ *
+ * 跟標題列的「中斷」是兩件事：「中斷」是對 pane 送 esc（要 agent 停手），這裡完全不碰 agent，
+ * 只推翻 daemon 這邊「回合還在跑」的認定。所以它不放在標題列——放在 live 泡泡的狀態列右端，
+ * 也就是使用者盯著「等待回覆（hook）…」出不來時眼睛已經在的地方，而且一分鐘後才出現。
+ */
+export function AbandonTurnAction({ botId }: { botId: string }) {
+  const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
+  const createdAt = useStore((s) => inFlightTurn(s, botId)?.created_at ?? null)
+  const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? '這個 Bot')
+  const abandonTurn = useStore((s) => s.abandonTurn)
+  // 確認框記的是「替哪個 turn 開的」而不是單純的布林：回合換人 / 結束時對話框自己就關了，
+  // 不需要一個只為了 setState 的 effect（也不會誤把確認套到下一個回合上）。
+  const [openFor, setOpenFor] = useState<string | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  // 只有真的有回合在跑才計時。turnId 換人時 `now` 可能還是舊的，算出來的 elapsed 會偏小 →
+  // 按鈕晚幾秒才出現，這個方向是安全的（寧可晚出現，不要對剛開始的回合誘導誤按）。
+  useEffect(() => {
+    if (!turnId) return
+    const t = setInterval(() => setNow(Date.now()), 5000)
+    return () => clearInterval(t)
+  }, [turnId])
+
+  const startedMs = createdAt ? Date.parse(createdAt) : Number.NaN
+  const elapsed = Number.isFinite(startedMs) ? (now - startedMs) / 1000 : 0
+
+  if (!turnId || elapsed < ABANDON_AFTER_S) return null
+
+  return (
+    <>
+      <button
+        type="button"
+        className="live-abandon"
+        title={`強制中止：把這個回合標成失敗、解開輸入框（已進行 ${elapsedLabel(elapsed)}）。\n不會叫 agent 停手——那是「中斷」做的事。`}
+        onClick={() => setOpenFor(turnId)}
+      >
+        強制中止 · 已 {elapsedLabel(elapsed)}
+      </button>
+      <ConfirmDialog
+        open={openFor === turnId}
+        title="強制中止這個回合"
+        width={420}
+        body={
+          <>
+            <p className="abandon-note">
+              把 <strong>{botName}</strong> 目前這個回合標成 <strong>failed</strong>，立刻解開輸入框。用在 UI
+              判成「還在等回覆」但 agent 其實早就回完的時候。
+            </p>
+            <p className="abandon-note">
+              這<strong>不是</strong>叫 agent 停手——送 esc 給 agent 的是標題列的「中斷」。這裡只推翻 daemon
+              這邊的紀錄，agent 那頭照樣在跑。
+            </p>
+            <p className="abandon-note">
+              <strong>不可逆</strong>：之後 agent 真的回話，daemon 已經配不回這個回合，那則回覆不會出現在對話裡。
+            </p>
+          </>
+        }
+        confirmLabel="強制中止"
+        danger
+        onConfirm={() => {
+          setOpenFor(null)
+          void abandonTurn(botId, turnId)
+        }}
+        onCancel={() => setOpenFor(null)}
+      />
+    </>
+  )
+}
+
+/**
+ * debug 用的 run 識別列：herdr 那邊的 pane / agent / workspace / session，加上 daemon 這邊的
+ * run id。以前只有 `.main-status` 的 tooltip 藏著 pane_id，要 hover 又不能複製。
+ *
+ * 收在標題列底下、預設收合：常態使用不需要它，但要 debug 時一鍵就能全部攤開來複製。
+ */
+function RunDebugBar({ botId }: { botId: string }) {
+  const run = useStore((s) => s.runs[botId] ?? null)
+  const agentName = useStore((s) => s.bots.find((b) => b.id === botId)?.agent_name ?? null)
+  if (!run) return null
+  return (
+    <div className="run-debug" role="group" aria-label="Run 識別資訊">
+      <span className="run-debug-hint">識別</span>
+      <CopyChip label="pane" value={run.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
+      <CopyChip label="agent" value={agentName ?? ''} title="herdr agent 名稱：herdr agent list 裡對應的那個" />
+      <CopyChip label="session" value={run.herdr_session ?? ''} title="pane 所屬的 herdr session" />
+      <CopyChip label="workspace" value={run.workspace_id ?? ''} title="herdr workspace id" />
+      <CopyChip label="run" value={run.id} title="daemon DB 的 run id：turn 與 message 都掛在它底下" />
+    </div>
+  )
+}
+
 function MessageList({ botId }: { botId: string }) {
   const messages = useStore((s) => s.messages[botId])
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
@@ -196,26 +362,13 @@ function MessageList({ botId }: { botId: string }) {
   const liveText = useStore((s) => liveReplyOf(s, botId)?.text ?? null)
   const liveActivity = useStore((s) => liveReplyOf(s, botId)?.activity ?? null)
   const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
-  const ref = useRef<HTMLDivElement>(null)
-  const stick = useRef(true)
-
-  // Follow the tail (new messages, live output growing) only while the user is at the bottom.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [messages, working, liveText, liveActivity, liveAlert])
+  const tail = useScrollTail([messages, working, liveText, liveActivity, liveAlert])
 
   const list = messages ?? []
 
   return (
-    <div
-      className="msg-list"
-      ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-      }}
-    >
+    <div className="msg-list-wrap">
+    <div className="msg-list" ref={tail.ref} onScroll={tail.onScroll}>
       {list.length === 0 ? (
         <EmptyState
           loading={!loaded}
@@ -227,7 +380,11 @@ function MessageList({ botId }: { botId: string }) {
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} />)
       )}
-      {inFlight || working ? <LiveBubble text={liveText} activity={liveActivity} alert={liveAlert} /> : null}
+      {inFlight || working ? (
+        <LiveBubble text={liveText} activity={liveActivity} alert={liveAlert} action={<AbandonTurnAction botId={botId} />} />
+      ) : null}
+    </div>
+    <JumpToBottom show={!tail.atBottom && list.length > 0} onClick={tail.toBottom} />
     </div>
   )
 }
@@ -509,7 +666,19 @@ function derivedStatus(
   }
 }
 
-function StatusLineBar({ status, text }: { status: StatusInfo | null; text: string | null }) {
+function StatusLineBar({
+  status,
+  text,
+  botId,
+  kind,
+  host,
+}: {
+  status: StatusInfo | null
+  text: string | null
+  botId: string
+  kind: BotKind
+  host: string
+}) {
   const line = text?.trim() ?? ''
   if (!status) {
     if (!line) return null
@@ -526,7 +695,11 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
       : null
   const five = status.five_hour_resets_at ? untilShort(status.five_hour_resets_at) : ''
   const seven = status.seven_day_resets_at ? untilShort(status.seven_day_resets_at) : ''
-  const modelExtra = [status.effort, status.fast_mode ? 'fast' : null, status.thinking ? 'thinking' : null]
+  const modelExtra = [
+    status.effort ? effortLabel(status.effort) : null,
+    status.fast_mode ? 'fast' : null,
+    status.thinking ? 'thinking' : null,
+  ]
     .filter(Boolean)
     .join(' · ')
 
@@ -540,10 +713,21 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
         </SlItem>
       ) : null}
       {status.model_name ? (
-        <SlItem k="模型" title={status.model_id ?? undefined}>
-          {status.model_name}
-          {modelExtra ? <span className="sl-dim"> · {modelExtra}</span> : null}
-        </SlItem>
+        <span className="sl-item sl-pick-wrap">
+          <ModelQuickPicker
+            botId={botId}
+            kind={kind}
+            host={host}
+            className="sl-pick-btn"
+            title={status.model_id ? `點一下改模型（${status.model_id}）` : '點一下改模型'}
+          >
+            <span className="sl-k">模型</span>
+            <span className="sl-v">
+              {status.model_name}
+              {modelExtra ? <span className="sl-dim"> · {modelExtra}</span> : null}
+            </span>
+          </ModelQuickPicker>
+        </span>
       ) : null}
       {status.context_used_pct !== null ? (
         <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
@@ -589,6 +773,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const attachCommand = useStore((s) => attachCommandOf(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
+  // debug 用的 run 識別列（pane / agent / run id）預設收合，不佔常態版面。
+  const [runDebugOpen, setRunDebugOpen] = useState(false)
   // claude hands us its statusLine payload; the other kinds render their status line inside
   // their own TUI, so it is rebuilt from what the store already knows.
   const statusInfo = useStore(
@@ -664,9 +850,15 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <PersonaMark persona={bot.persona} />
           <KindTag kind={bot.kind} />
           {bot.model ? (
-            <span className="model-tag" title={`模型：${bot.model}`}>
+            <ModelQuickPicker
+              botId={botId}
+              kind={bot.kind}
+              host={hostName}
+              className="model-tag"
+              title={`點一下改模型（${bot.model}）`}
+            >
               {bot.model}
-            </span>
+            </ModelQuickPicker>
           ) : null}
           <HostBadge host={hostName} connected={hostUp} />
           <button
@@ -681,12 +873,23 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <GearIcon />
           </button>
         </div>
-        <span
-          className={`main-status ${lamp}`}
-          title={run ? `run ${run.id}${run.pane_id ? ` ・ pane ${run.pane_id}` : ''}` : undefined}
-        >
-          {LAMP_LABEL[lamp]}
-        </span>
+        {/* 燈號文字順便當識別列的開關：它本來就是藏 run / pane tooltip 的地方，而且標題列
+            已經滿了，多一顆按鈕會把 bot 名字擠掉。沒有 run 時就只是一段文字。 */}
+        {run ? (
+          <button
+            type="button"
+            className={`main-status ${lamp} run-debug-toggle${runDebugOpen ? ' on' : ''}`}
+            aria-expanded={runDebugOpen}
+            title="展開 / 收合 run 識別資訊（pane、agent、session、workspace、run id），debug 用"
+            onClick={() => setRunDebugOpen((v) => !v)}
+          >
+            {LAMP_LABEL[lamp]} {runDebugOpen ? '▴' : '▾'}
+          </button>
+        ) : (
+          <span className={`main-status ${lamp}`}>{LAMP_LABEL[lamp]}</span>
+        )}
+        {/* pane 名稱是 debug 的第一手資料：看得見、點一下就複製，不再只藏在 tooltip 裡。 */}
+        <CopyChip label="pane" value={run?.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
         <span className="spacer" />
         <ToolsHintIcon />
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} />
@@ -738,8 +941,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           )}
         </div>
       </div>
+      {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
-      <StatusLineBar status={statusInfo} text={run?.status_line ?? null} />
+      <StatusLineBar status={statusInfo} text={run?.status_line ?? null} botId={botId} kind={bot.kind} host={hostName} />
 
       <ConfirmDialog
         open={stopConfirmOpen}
@@ -769,7 +973,20 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         active ? (
           <TerminalTab botId={botId} />
         ) : (
-          <EmptyState title="終端尚未就緒" icon="▭">
+          <EmptyState
+            title="終端尚未就緒"
+            icon="▭"
+            action={
+              <button
+                type="button"
+                className="btn primary"
+                disabled={Boolean(busy[`start:${botId}`])}
+                onClick={() => void startBot(botId)}
+              >
+                啟動 {bot.name}
+              </button>
+            }
+          >
             Bot 未在執行中，沒有可讀取的終端。請先啟動 Bot。
           </EmptyState>
         )

@@ -134,16 +134,39 @@ export class HttpTransport implements Transport {
       ws.onclose = () => {
         if (closed) return
         handlers.onStatus('closed')
-        // Exponential backoff, capped at 10s.
-        const delay = Math.min(10_000, 500 * 2 ** attempt) + Math.random() * 250
+        // Exponential backoff, capped at 3s — a dropped daemon usually comes back fast and
+        // the UI is unusable until it does, so waiting 10s for a retry is worse than the
+        // extra attempts.
+        const delay = Math.min(3_000, 250 * 2 ** attempt) + Math.random() * 150
         attempt += 1
         timer = setTimeout(connect, delay)
       }
     }
 
+    // 回到分頁 / 網路回來時不要等 backoff 跑完，直接重試一次。
+    const retryNow = () => {
+      if (closed) return
+      if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      attempt = 0
+      connect()
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') retryNow()
+    }
+    window.addEventListener('online', retryNow)
+    window.addEventListener('focus', retryNow)
+    document.addEventListener('visibilitychange', onVisible)
+
     connect()
     return () => {
       closed = true
+      window.removeEventListener('online', retryNow)
+      window.removeEventListener('focus', retryNow)
+      document.removeEventListener('visibilitychange', onVisible)
       if (timer) clearTimeout(timer)
       sock?.close()
     }
