@@ -3535,6 +3535,7 @@ button:disabled {
 .disclosure.sub {
   font-size: 11px;
   font-weight: 500;
+  min-height: 24px;
   padding: 3px 2px;
 }
 
@@ -5496,6 +5497,10 @@ button.team-workers {
   cursor: pointer;
   font: inherit;
   font-size: 11px;
+  /* 可按的東西一律墊到 24px 高（WCAG 2.2 的最小目標），字級與間距不動。 */
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
 }
 
 button.team-workers:hover:not(:disabled) {
@@ -5624,6 +5629,7 @@ button.team-workers:disabled {
   align-items: center;
   gap: 5px;
   max-width: 340px;
+  min-height: 24px;
   padding: 2px 7px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -5662,6 +5668,10 @@ button.team-workers:disabled {
 }
 
 .team-pr {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 2px;
   color: var(--accent-ink);
   font-size: 11px;
   text-decoration: none;
