@@ -11,6 +11,11 @@ import type { DirListing } from '../api/types'
  * (or Enter / →, or the row's ›) walks into it, and the primary button takes whatever is
  * highlighted — so a folder three levels down is one click away instead of three.
  */
+/** Long folder names would otherwise stretch the primary button past the sidebar. */
+function short(name: string) {
+  return name.length > 14 ? `${name.slice(0, 13)}…` : name
+}
+
 export function DirPicker({
   initial,
   host,
@@ -226,7 +231,7 @@ export function DirPicker({
           value={filter}
           spellCheck={false}
           autoFocus
-          placeholder="輸入以篩選這層資料夾…（↑↓ 選擇、Enter 進入）"
+          placeholder="篩選這層資料夾…"
           onChange={(e) => {
             setFilter(e.target.value)
             setSel(e.target.value ? 0 : -1)
@@ -284,15 +289,25 @@ export function DirPicker({
       </div>
 
       <div className="dirpicker-foot">
-        <span className="hint dirpicker-cur" title={target}>
-          {target}
-        </span>
+        <div className="dirpicker-target">
+          <span className="lbl">選擇</span>
+          <span className="hint dirpicker-cur" title={target}>
+            {target}
+          </span>
+        </div>
         <div className="dirpicker-actions">
+          <span className="dirpicker-keys">Enter 進入 · ⌘↩ 選擇 · ← 上一層</span>
           <button type="button" className="btn" onClick={onCancel}>
             取消
           </button>
-          <button type="button" className="btn primary" disabled={!listing || busy} onClick={() => onPick(target)}>
-            {selected ? `選擇「${selected.name}」` : '選擇這一層'}
+          <button
+            type="button"
+            className="btn primary"
+            disabled={!listing || busy}
+            title={target}
+            onClick={() => onPick(target)}
+          >
+            {selected ? `選擇「${short(selected.name)}」` : '選擇這一層'}
           </button>
         </div>
       </div>
