@@ -2842,8 +2842,10 @@ button:disabled {
 }
 
 @media (width <= 1160px) {
-  /* 模型後綴（`· 高 · thinking`）與主機標在設定面板／側欄都看得到，先讓出寬度。 */
-  .bot-head .model-tag-extra,
+  /* 主機標在設定面板／側欄都看得到，先讓出寬度。
+     模型後綴（`· 高 · thinking`）本來也在這裡讓位，但那是 pane chip 還佔著位子時寫的規則；
+     量過之後標題列在 1024–1160 還有幾百 px 空著，只留一顆孤零零的 `fable` 反而更難看。
+     它現在只在手機讓位——那邊整顆模型徽章都收起來了。 */
   .bot-head .host-badge {
     display: none;
   }
