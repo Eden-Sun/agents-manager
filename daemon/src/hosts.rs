@@ -729,22 +729,24 @@ fn cfg_differs(a: &HostCfg, b: &HostCfg) -> bool {
 // ---------------------------------------------------------------- remote fs (§11.5)
 
 /// `GET /api/fs/dirs?host=` for a remote host. Same JSON shape as the local branch.
-pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>) -> Result<serde_json::Value> {
+pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool) -> Result<serde_json::Value> {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
         None => "$HOME".to_string(),
         Some(p) if p == "~" => "$HOME".to_string(),
         Some(p) if p.starts_with("~/") => format!("$HOME/{}", &p[2..]),
         Some(p) => sh_quote(p),
     };
+    // `.*/` only when asked for; the glob is quoted into the loop so an empty match is skipped below.
+    let globs = if hidden { "*/ .*/" } else { "*/" };
     let script = format!(
         r#"cd -- {target} 2>/dev/null || {{ printf 'AM_ERR=no such directory\n'; exit 0; }}
 printf 'AM_HOME=%s\n' "$HOME"
 printf 'AM_PATH=%s\n' "$(pwd -P)"
 printf 'AM_PARENT=%s\n' "$(dirname -- "$(pwd -P)")"
-for d in */ ; do
+for d in {globs} ; do
   [ -d "$d" ] || continue
   n=${{d%/}}
-  case "$n" in '*') continue;; esac
+  case "$n" in '*'|'.*'|.|..) continue;; esac
   if [ -e "$n/.git" ]; then g=1; else g=0; fi
   printf 'AM_D\t%s\t%s\n' "$n" "$g"
 done
@@ -768,8 +770,8 @@ done
             let mut it = v.trim_end_matches('\n').splitn(2, '\t');
             let name = it.next().unwrap_or("").to_string();
             let git = it.next().unwrap_or("0") == "1";
-            if name.is_empty() || name.starts_with('.') {
-                continue; // hidden directories are skipped, like the local branch
+            if name.is_empty() || (name.starts_with('.') && !hidden) {
+                continue; // hidden directories are skipped unless asked for, like the local branch
             }
             let full = if cwd == "/" { format!("/{name}") } else { format!("{cwd}/{name}") };
             entries.push(json!({"name": name, "path": full, "git": git}));
