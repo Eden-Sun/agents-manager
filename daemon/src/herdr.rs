@@ -58,6 +58,8 @@ pub struct PaneInfo {
     pub workspace_id: String,
     pub tab_id: String,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
     pub agent: Option<String>,
     pub agent_status: Option<AgentStatus>,
     #[serde(default)]
@@ -77,6 +79,8 @@ pub struct AgentInfo {
     pub tab_id: String,
     pub pane_id: String,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
     #[serde(default)]
     pub interactive_ready: bool,
     #[serde(default)]
@@ -151,7 +155,13 @@ impl HerdrClient {
 
     pub fn session_socket(session: &str) -> PathBuf {
         let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join(".config/herdr/sessions").join(session).join("herdr.sock")
+        if session == "default" {
+            // Herdr's user-facing default session predates named sessions and keeps its
+            // socket directly under ~/.config/herdr (not ~/.config/herdr/sessions/default).
+            base.join(".config/herdr/herdr.sock")
+        } else {
+            base.join(".config/herdr/sessions").join(session).join("herdr.sock")
+        }
     }
 
     fn next_id(&self) -> String {
@@ -277,6 +287,21 @@ impl HerdrClient {
     }
 
     /// Type literal text into a pane (no Enter). Used by the grok quota probe (SPEC §12.4).
+    /// Pane rectangles for a workspace's active tab, so a caller can pick *which* pane to
+    /// split instead of always taking the first one.
+    pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
+        let v = self.call("pane.layout", json!({"workspace_id": workspace_id})).await?;
+        let panes = v.get("layout").and_then(|l| l.get("panes")).and_then(|p| p.as_array()).cloned().unwrap_or_default();
+        Ok(panes
+            .iter()
+            .filter_map(|p| {
+                let id = p.get("pane_id")?.as_str()?.to_string();
+                let r = p.get("rect")?;
+                Some((id, r.get("width")?.as_u64()? as u32, r.get("height")?.as_u64()? as u32))
+            })
+            .collect())
+    }
+
     pub async fn pane_send_text(&self, pane_id: &str, text: &str) -> Result<()> {
         self.call("pane.send_text", json!({"pane_id": pane_id, "text": text})).await?;
         Ok(())

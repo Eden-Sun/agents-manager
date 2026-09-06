@@ -564,6 +564,39 @@ fn persona_args(bot: &db::Bot) -> Vec<String> {
 }
 
 /// `bot.model` as CLI args, inserted between the daemon's own flags and `identity.args`.
+/// Drop `bot.effort` when the chosen model does not accept it.
+///
+/// The levels are **per model** (`model/list` reports `supportedReasoningEfforts`), so an effort
+/// left over from a previous model is rejected outright: codex answers `-c
+/// model_reasoning_effort="max"` on `gpt-5.5` with `400 unsupported_value … Supported values are
+/// 'none', 'low', 'medium', 'high', and 'xhigh'`, and every turn of that Run fails. The UI
+/// already prevents the pairing, but the stored value can predate that, be edited by hand, or
+/// come from `config.toml`.
+///
+/// Silence is deliberate on every uncertain path — an unreachable CLI, an unknown model, an
+/// empty list — because dropping a *valid* effort would quietly downgrade the agent. Only a
+/// model we can see, whose list we can read, and which does not contain this value, is filtered.
+async fn effort_checked(app: &Arc<App>, bot: &db::Bot, host: &str) -> db::Bot {
+    let Some(effort) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
+    let Some(model) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
+    let Ok(list) = crate::models::list(app, host, &bot.kind, false).await else { return bot.clone() };
+    let Some(entry) = list
+        .get("models")
+        .and_then(|m| m.as_array())
+        .and_then(|a| a.iter().find(|m| m.get("id").and_then(|i| i.as_str()) == Some(model)))
+    else {
+        return bot.clone();
+    };
+    let Some(efforts) = entry.get("efforts").and_then(|e| e.as_array()).filter(|a| !a.is_empty()) else { return bot.clone() };
+    if efforts.iter().any(|e| e.as_str() == Some(effort)) {
+        return bot.clone();
+    }
+    tracing::warn!(bot = %bot.name, model, effort, "model does not accept this reasoning effort; starting without it");
+    let mut out = bot.clone();
+    out.effort = None;
+    out
+}
+
 fn model_args(bot: &db::Bot) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -808,10 +841,27 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         Some(p) => p,
         None => {
             let panes = client.pane_list(Some(&workspace_id)).await.map_err(up)?;
-            let target = panes.first().map(|p| p.pane_id.clone()).ok_or_else(|| {
+            let first = panes.first().map(|p| p.pane_id.clone()).ok_or_else(|| {
                 LcError::Upstream(format!("workspace {workspace_id} has no panes to split"))
             })?;
-            client.pane_split(&target, "right", cwd, env.clone()).await.map_err(up)?.pane_id
+            // Always splitting the *first* pane halves it every time: the sixth bot in a
+            // workspace ended up 6 columns wide, at which the agent's TUI lays text out one
+            // glyph per row and the terminal fallback cannot read anything. Split the pane with
+            // the most room instead, along its longer axis, which grows a grid rather than a
+            // cascade. `pane.layout` is best-effort — fall back to the old behaviour.
+            let (target, dir) = match client.pane_rects(&workspace_id).await {
+                Ok(rects) if !rects.is_empty() => {
+                    let (id, w, h) = rects
+                        .into_iter()
+                        .max_by_key(|(_, w, h)| (*w as u64) * (*h as u64))
+                        .expect("non-empty");
+                    // A terminal cell is about twice as tall as it is wide, so compare the
+                    // pane's *visual* proportions, not its cell counts.
+                    (id, if w >= h * 2 { "right" } else { "down" })
+                }
+                _ => (first, "right"),
+            };
+            client.pane_split(&target, dir, cwd, env.clone()).await.map_err(up)?.pane_id
         }
     };
 
@@ -826,7 +876,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
     args.extend(persona_args(bot));
-    args.extend(model_args(bot));
+    args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot).await);
     args.extend(bot.args());
 
@@ -1102,22 +1152,29 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
     Ok(())
 }
 
-/// grok 的推理強度可以在執行中改：TUI 有 `/effort <level>`（grok 1.0.13
-/// `04-slash-commands.md`），所以不必為了改 effort 重啟整個 session。
+/// 有些設定不用重啟就能改：agent 的 TUI 自己有 slash 指令。
 ///
-/// 回傳 `true` = 已經送進去（呼叫端就不用回 `needs_restart`）。做不到的情況一律回
-/// `false`（不是 grok、沒在跑、正在忙、清成「CLI 預設」——那個沒有對應的 slash 指令），
+/// * grok `effort` → `/effort <level>`（grok 1.0.13 `04-slash-commands.md`）
+/// * claude `model` → `/model <alias>`（alias 同 `claude --model`：opus / sonnet / haiku / fable…）
+///
+/// 回傳 `true` = 已經送進去（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
+/// （kind 不符、沒在跑、正在忙、或清成「CLI 預設」——那個沒有對應的 slash 指令），
 /// 讓呼叫端退回原本的「重啟才生效」。
-pub async fn apply_grok_effort_live(app: &Arc<App>, bot_id: &str) -> bool {
+pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, field: &str) -> bool {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
-    if bot.kind != "grok" {
-        return false;
-    }
-    // 清成「不指定」沒有 slash 指令可用（/effort 一定要帶 level）。
-    let Some(level) = bot.effort.as_deref().map(str::to_ascii_lowercase).filter(|s| !s.is_empty()) else {
-        return false;
+    let value = match field {
+        "effort" => bot.effort.as_deref(),
+        "model" => bot.model.as_deref(),
+        _ => None,
+    };
+    // 清成「不指定」沒有 slash 指令可用（`/effort` 與 `/model` 都一定要帶值）。
+    let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else { return false };
+    let line = match (bot.kind.as_str(), field) {
+        ("grok", "effort") => format!("/effort {}", value.to_ascii_lowercase()),
+        ("claude", "model") => format!("/model {value}"),
+        _ => return false,
     };
     let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
     if run.state != "running" || run.agent_status == "working" || run.agent_status == "blocked" {
@@ -1130,14 +1187,14 @@ pub async fn apply_grok_effort_live(app: &Arc<App>, bot_id: &str) -> bool {
     let Some(pane_id) = run.pane_id.clone() else { return false };
     let Ok(client) = client_for_run(app, &run).await else { return false };
     // 和 grok 額度探測同一套：先打字，等輸入列畫好，再送 Enter。
-    if client.pane_send_text(&pane_id, &format!("/effort {level}")).await.is_err() {
+    if client.pane_send_text(&pane_id, &line).await.is_err() {
         return false;
     }
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     if client.pane_send_keys(&pane_id, &["Enter"]).await.is_err() {
         return false;
     }
-    tracing::info!(bot_id, level, "grok effort applied live via /effort");
+    tracing::info!(bot_id, line, "applied live via slash command");
     true
 }
 
@@ -2522,6 +2579,20 @@ mod extract_tests {
 
   Shift+Tab:
 ";
+
+    /// Real capture (2026-09-06): pane `w8:pK` was so narrow that every CJK character wrapped
+    /// onto its own row, and the fallback stored the user's own prompt back as the reply.
+    /// `strip_echoed_prompt` cannot help here — the wrap points do not line up with what we
+    /// sent, so it correctly refuses to strip a partial match.
+    #[test]
+    fn a_pane_too_narrow_to_read_is_recognised() {
+        let shredded = "要\n依\n剩\n餘\n量\n重\n排\n固\n定\nc\nc\n0\nHelp impro\n";
+        assert!(is_shredded(shredded));
+        // A normal reply must never be mistaken for one, however short its lines are.
+        assert!(!is_shredded("好的，我來處理。\n改了三個檔案：\n- a.rs\n- b.rs\n- c.rs\n都跑過測試了。\n"));
+        // Too little to judge: a two-line answer is not evidence of a broken pane.
+        assert!(!is_shredded("好\n的\n"));
+    }
 
     #[test]
     fn an_empty_composer_is_recognised_through_the_box_frame() {
