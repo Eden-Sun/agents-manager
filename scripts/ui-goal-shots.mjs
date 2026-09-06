@@ -7,7 +7,7 @@ const URL_BASE = 'http://127.0.0.1:5173/?token=' + TOKEN
 const OUT = process.env.OUT ?? '/tmp/am-ui-goal'
 mkdirSync(OUT, { recursive: true })
 const PORT = 9378
-const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', `--remote-debugging-port=${PORT}`, '--disable-gpu', '--hide-scrollbars', '--no-first-run', `--user-data-dir=${OUT}/cdp-profile-goal`, '--window-size=1440,900', URL_BASE], { stdio: 'ignore' })
+const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', `--remote-debugging-port=${PORT}`, '--disable-gpu', '--hide-scrollbars', '--no-first-run', `--user-data-dir=/tmp/am-ui-goal-profile`, '--window-size=1440,900', URL_BASE], { stdio: 'ignore' })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let ws, id = 0; const pending = new Map()
 const send = (m, p = {}) => { const i = ++id; ws.send(JSON.stringify({ id: i, method: m, params: p })); return new Promise((res, rej) => pending.set(i, { res, rej })) }
