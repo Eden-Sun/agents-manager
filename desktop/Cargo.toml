@@ -12,3 +12,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 toml = "0.8"
 dirs = "5"
+
+[target.'cfg(unix)'.dependencies]
+# Quit sends the daemon SIGTERM first: its graceful shutdown is what closes the ssh
+# ControlMasters (SPEC §11.3.5), and `CommandChild::kill` is SIGKILL.
+libc = "0.2"

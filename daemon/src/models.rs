@@ -279,13 +279,16 @@ fn grok_default_effort_from_config(text: &str) -> Option<String> {
 
 pub fn claude_static_models() -> Vec<Value> {
     // `claude --model` 的 alias（`claude --help`：'fable'、'opus'、'sonnet'…）。
+    // `efforts` 是 `claude --help` 對 `--effort` 列的那五級，對每個 alias 都一樣（claude 沒有
+    // 像 codex `model/list` 那種 per-model 清單）；不指定就不帶旗標，由 CLI 決定。
+    let efforts: Vec<Value> = crate::config::efforts_for_kind("claude").iter().map(|e| json!(e)).collect();
     ["opus", "sonnet", "haiku", "fable"]
         .iter()
         .enumerate()
         .map(|(i, id)| {
             json!({
                 "id": id, "display_name": id, "description": "", "is_default": i == 0,
-                "default_effort": Value::Null, "efforts": [], "service_tiers": [],
+                "default_effort": Value::Null, "efforts": efforts, "service_tiers": [],
             })
         })
         .collect()

@@ -72,6 +72,11 @@ export interface Host {
   attach_command: string
   /** v4.0：該主機上各 agent CLI 的偵測結果。 */
   tools: ToolMap
+  /**
+   * v4.0：每個 `[[identities]]` 在「這台主機上」的登入狀態（daemon 的 `hosts[].identities`）。
+   * 身份是全域設定，但它指到的帳號是不是能用因主機而異，所以這是 per-host 的。
+   */
+  identity_status: IdentityStatusMap
 }
 
 /** v4.0 `hosts[].tools.<kind>`。`logged_in` 為 null = 未知（例如 CLI 沒有可查的登入狀態）。 */
@@ -88,10 +93,48 @@ export type ToolMap = Record<BotKind, ToolStatus>
 export const TOOL_UNKNOWN: ToolStatus = { installed: true, path: null, version: null, logged_in: null }
 
 /**
+ * v4.0 `hosts[].identities.<name>`：某個身份在該主機上的登入狀態。
+ * `logged_in` 為 null = 問不到（CLI 沒裝、偵測失敗），不等於未登入。
+ */
+export interface IdentityStatus {
+  name: string
+  kind: BotKind
+  logged_in: boolean | null
+  /** 登入的是誰（claude 是 e-mail、codex 是 `ChatGPT`、grok 是 `grok.com`）。 */
+  account: string | null
+  /** claude 的 `subscriptionType`（`max` / `team` …）。 */
+  plan: string | null
+  /**
+   * `config` = config.toml 的 `[[identities]]`（可編輯、可刪）；
+   * `shell` = daemon 從這台主機登入 shell 的 `ccN` alias 認出來的（唯讀，SPEC §15）。
+   */
+  source: 'config' | 'shell'
+  /** 這台主機上這個身份指到的設定目錄（`cc0` 這種預設帳號沒有）。顯示用。 */
+  config_dir: string | null
+}
+
+/** key = 身份名稱。缺的身份代表這台主機還沒偵測過。 */
+export type IdentityStatusMap = Record<string, IdentityStatus>
+
+/**
  * 本機的保留 host id。`GET /api/state` 的 `hosts[]` 第一筆一定是它（ssh 等欄位為 null），
  * 但 `normalize.toState()` 會把它濾掉：store 的 `hosts` 只含遠端主機，本機狀態看 `connected`。
  */
 export const LOCAL_HOST = 'local'
+
+/**
+ * 額度 map 的 key（SPEC §14）：本機是裸的 `claude` / `claude:cc1`，遠端主機加前綴
+ * （`m4p/claude`）。daemon 用同一條規則組 key。
+ */
+export function quotaKey(host: string, base: string): string {
+  return !host || host === LOCAL_HOST ? base : `${host}/${base}`
+}
+
+/** `m4p/claude:cc1` → `m4p`；裸 key（本機）→ `local`。 */
+export function hostOfQuotaKey(key: string): string {
+  const i = key.indexOf('/')
+  return i > 0 ? key.slice(0, i) : LOCAL_HOST
+}
 
 export interface NewHostInput {
   name: string
@@ -345,6 +388,8 @@ export interface AppState {
   attach_command: string
   /** v4.0：本機的工具偵測（`hosts[0].tools`）。 */
   tools: ToolMap
+  /** v4.0：本機的身份登入偵測（`hosts[0].identities`）。 */
+  identity_status: IdentityStatusMap
   hosts: Host[]
   identities: Identity[]
   projects: Project[]
@@ -503,6 +548,11 @@ export interface PatchBotResult {
  */
 /** grok 的靜態 effort（`GET /api/models` 失敗時退回；實際清單以模型為準，grok-4.6 含 xhigh）。 */
 export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'] as const
+/**
+ * claude 的 `--effort`（2.1+；`claude --help`：low, medium, high, xhigh, max）。
+ * TUI 的 `/effort` 是拉桿（←/→ 調整、Enter 確認），沒有帶參數的形式，所以改了要重啟才生效。
+ */
+export const CLAUDE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 /** codex 的靜態 effort（API.md §12.2；`GET /api/models` 失敗時退回）。 */
 export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
 
@@ -575,16 +625,43 @@ export interface QuotaWindow {
   critical: boolean
 }
 
+/** `GET /api/mem` / WS `mem_updated`（SPEC §15）：herdr 進程樹的常駐記憶體。 */
+export interface HostMem {
+  host: string
+  /** herdr 本身 */
+  herdr_bytes: number
+  /** 它底下的 pane / agent CLI */
+  agents_bytes: number
+  total_bytes: number
+  processes: number
+  /** 這台量不到時的原因；此時數字都是 0，不是「真的 0」。 */
+  error: string | null
+}
+
+export interface MemSnapshot {
+  total_bytes: number
+  herdr_bytes: number
+  agents_bytes: number
+  processes: number
+  hosts: HostMem[]
+}
+
 export interface KindQuota {
   five_hour: QuotaWindow | null
   seven_day: QuotaWindow | null
   plan: string | null
   updated_at: string
+  /** 這份額度是在哪台主機讀到的（`local` 或 `hosts[].name`）。 */
+  host: string
 }
 
 /**
  * `GET /api/quota` → `{kinds: {...}}`。key 為 kind（`claude` / `codex` / `grok`）或
  * `<kind>:<identity>`（例如 `claude:cc1`）；null = 該 kind 沒有額度資訊。
+ *
+ * 額度是**按主機**分開的（SPEC §14）：本機用裸 key，遠端主機在前面加自己的名字
+ * （`m4p/claude`、`m4p/claude:cc1`）。header 的額度列一次只看一台主機——目前檢視的
+ * bot／專案所在的那台——所以遠端 bot 的 statusline 不會蓋到本機那列。
  */
 export type QuotaMap = Record<string, KindQuota | null>
 
@@ -726,8 +803,50 @@ export interface TeamMember {
 /** `tasks_summary`：以 task 狀態為 key 的計數（daemon 只保證 `total` 與有值的狀態）。 */
 export type TeamTasksSummary = Partial<Record<TeamTaskState, number>> & { total: number }
 
+/** SPEC-team §2.3：issue 佇列裡的一項。 */
+export type TeamIssueState = 'queued' | 'working' | 'done' | 'failed' | 'skipped'
+
+export interface TeamIssue {
+  id: string
+  seq: number
+  issue_number: number
+  issue_title: string
+  issue_url: string
+  state: TeamIssueState
+  /** 開始處理後才有：這個 issue 自己的整合分支。 */
+  branch: string | null
+  summary: string | null
+  pr_url: string | null
+  issue_closed_at: string | null
+  /** 佇列跳過它的原因（`merge_conflict` / `review_exhausted` / `pm_abort`）。 */
+  fail_reason: string | null
+  started_at: string | null
+  ended_at: string | null
+}
+
+export interface TeamIssuesSummary {
+  total: number
+  done: number
+  failed: number
+  queued: number
+}
+
+export const TEAM_ISSUE_STATES: readonly TeamIssueState[] = ['queued', 'working', 'done', 'failed', 'skipped']
+
+export const TEAM_ISSUE_STATE_LABEL: Record<TeamIssueState, string> = {
+  queued: '待處理',
+  working: '進行中',
+  done: '已交付',
+  failed: '失敗',
+  skipped: '略過',
+}
+
 /** SPEC-team §10.2 `GET /api/state` 的 team 物件。 */
 export interface Team {
+  /** §2.3：整個 issue 佇列。下面的 `issue_*` 是「當前這一項」的鏡像。 */
+  issues: TeamIssue[]
+  current_issue_id: string | null
+  issues_summary: TeamIssuesSummary
   id: string
   project_id: string
   issue_number: number
@@ -744,6 +863,8 @@ export interface Team {
   budget: TeamBudget
   usage: TeamUsage
   pr_url: string | null
+  /** SPEC-team §10.7：使用者從這個 team 關掉 issue 的時間；null = 沒關過（daemon 不會自己關）。 */
+  issue_closed_at: string | null
   created_at: string
   started_at: string | null
   ended_at: string | null
@@ -752,6 +873,8 @@ export interface Team {
 /** SPEC-team §10.3 `GET /api/teams/:id` 的一件 task。 */
 export interface TeamTask {
   id: string
+  /** §2.3：這個 task 屬於佇列裡的哪一個 issue。 */
+  issue_id: string | null
   seq: number
   title: string
   brief: string
@@ -805,7 +928,8 @@ export interface TeamWorkersSpec extends TeamRoleSpec {
 
 /** `POST /api/projects/:id/teams` 的 body。 */
 export interface NewTeamInput {
-  issue_number: number
+  /** §2.3：依序處理的 issue 佇列。 */
+  issue_numbers: number[]
   pm: TeamRoleSpec
   workers: TeamWorkersSpec
   /** null = 不審查，`reported` 直接進整合。 */
@@ -821,6 +945,14 @@ export interface PatchTeamInput {
   budget?: Partial<TeamBudget>
   supervised?: boolean
   deliver?: TeamDeliver
+}
+
+/** SPEC-team §10.7 `POST /api/teams/:id/close-issue` 的回應。 */
+export interface TeamIssueClosed {
+  number: number
+  url: string
+  /** 這個 issue 在呼叫之前就已經是 closed（別人先關的，或 PR 關掉的）。 */
+  already_closed: boolean
 }
 
 export type TeamControlAction = 'pause' | 'resume' | 'approve' | 'abort' | 'cleanup'

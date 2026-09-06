@@ -344,11 +344,21 @@ pub async fn set_default_connected(app: &Arc<App>, connected: bool) {
 /// Push `host_changed` plus a refreshed `daemon_status`, and re-lamp that host's bots.
 pub async fn emit_host_changed(app: &Arc<App>, conn: &HostConn) {
     let connected = if conn.is_local() { app.connected.load(Ordering::SeqCst) } else { conn.is_connected() };
-    app.emit(
-        "host_changed",
-        json!({"name": conn.name, "connected": connected, "error": conn.error_string().await}),
-    )
-    .await;
+    // Carry the detection cache along: `spawn_detect` emits this event precisely because the
+    // tools / identity answers just changed, and the UI has no other push for them.
+    let detected = app.tools.lock().await.get(&conn.name).cloned();
+    let mut ev = serde_json::Map::new();
+    ev.insert("name".into(), json!(conn.name));
+    ev.insert("connected".into(), json!(connected));
+    ev.insert("error".into(), json!(conn.error_string().await));
+    // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
+    if let Some(d) = detected {
+        ev.insert("tools".into(), json!(d.tools));
+        ev.insert("identities".into(), json!(d.identities));
+        ev.insert("shell_identities".into(), json!(d.shell_identities));
+        ev.insert("tools_checked_at".into(), json!(d.checked_at));
+    }
+    app.emit("host_changed", Value::Object(ev)).await;
     emit_daemon_status(app).await;
     for b in crate::db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
         app.emit_bot_status(&b.id).await;

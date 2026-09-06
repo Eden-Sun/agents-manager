@@ -340,13 +340,16 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             }
             // Quota only. Bots with an identity write `claude:<identity>` alone so they do not
             // overwrite the default-account `claude` row (cc0 / no-identity bots keep that key).
+            // It is always stored under the bot's **host**: a remote bot reports the remote
+            // account's limits, which must not land on the local row (SPEC §14).
+            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
-                    crate::quota::set(app, &format!("claude:{idn}"), q).await;
+                    crate::quota::set(app, &host, &format!("claude:{idn}"), q).await;
                 }
             } else if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
-                crate::quota::set(app, "claude", q).await;
+                crate::quota::set(app, &host, "claude", q).await;
             }
             // The statusLine also carries the session id — backfill it like SessionStart does.
             if let (Some(r), Some(sid)) = (&run, body.payload.get("session_id").and_then(|v| v.as_str())) {

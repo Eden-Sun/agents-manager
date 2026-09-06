@@ -13,6 +13,8 @@ import {
   hostArray,
   lampOf,
   toKindQuota,
+  toMemSnapshot,
+  toIdentityStatusMap,
   toToolMap,
   optStr,
   sortById,
@@ -30,8 +32,8 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, GroupMessage, Host, HostResult, Identity, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
-import { BOT_KINDS, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -251,6 +253,10 @@ interface StoreState {
   attachCommand: string
   /** v4.0: agent CLI detection on the local machine (`hosts[0].tools`). */
   localTools: ToolMap
+  /** v4.0: per-identity login detection on the local machine (`hosts[0].identities`). */
+  localIdentityStatus: IdentityStatusMap
+  /** SPEC §15: `GET /api/mem` + WS `mem_updated`；null = 舊 daemon 沒有這支。 */
+  mem: MemSnapshot | null
   /** v4.0: `GET /api/quota` + WS `quota_updated`; key = kind or `kind:identity`. */
   quota: QuotaMap
   /** v4.0: `GET /api/models` cache, keyed `kind@host`; null = fetch failed (use static list). */
@@ -329,6 +335,8 @@ interface StoreState {
   bootstrap: () => Promise<void>
   refreshState: () => Promise<void>
   selectBot: (botId: string | null) => void
+  /** ↑/↓ 換 bot：以側邊欄看到的順序往前 / 後選一個（頭尾繞回去）。 */
+  selectAdjacentBot: (dir: -1 | 1) => void
   /** Open the §13 group view of a project (null = back to the selected bot). */
   selectProject: (projectId: string | null) => void
   loadGroupMessages: (projectId: string) => Promise<void>
@@ -349,6 +357,11 @@ interface StoreState {
   startBot: (botId: string) => Promise<void>
   stopBot: (botId: string) => Promise<void>
   interruptBot: (botId: string) => Promise<void>
+  /**
+   * 對正在跑的 bot 送 `/login`，讓它的 TUI 進入登入 / 切換帳號流程。
+   * `true` = 已經送進去（agent 現在停在登入畫面）；`false` = 沒送出，原因已經跳通知。
+   */
+  loginBot: (botId: string) => Promise<boolean>
   /** `attachments` 是 `POST /bots/:id/attachments` 回傳的 id（拖放進來的圖片）。 */
   sendPrompt: (botId: string, text: string, attachments?: string[]) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
@@ -371,9 +384,12 @@ interface StoreState {
 
   // v4.0
   loadQuota: () => Promise<void>
+  loadMem: () => Promise<void>
   loadModels: (kind: BotKind, host: string) => Promise<ModelInfo[] | null>
   /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
+  /** v4.0: re-run CLI + per-identity login detection on one host (`''` / `local` = this machine). */
+  refreshTools: (host: string) => Promise<boolean>
   setKindDisplay: (mode: KindDisplay) => void
   dismissToolHint: () => void
   /** Empty text removes the draft. */
@@ -404,11 +420,22 @@ interface StoreState {
    */
   removeTeam: (teamId: string, branches?: TeamBranchDisposal) => Promise<boolean>
   patchTeam: (teamId: string, input: PatchTeamInput) => Promise<boolean>
+  /**
+   * `POST /teams/:id/close-issue`（SPEC-team §10.7）——把 team 對應的 GitHub issue 關掉。
+   *
+   * 只有 `phase === 'done'` 的 team 有這個動作，而且**永遠是使用者按出來的**：daemon 不會
+   * 自己關 issue，UI 也要先二次確認（這是會寫到 GitHub 的動作）。
+   */
+  closeTeamIssue: (teamId: string) => Promise<boolean>
   /** `POST /teams/:id/say`（`to` = `pm` 或 bot_id）。 */
   sayToTeam: (teamId: string, text: string, to: string) => Promise<boolean>
   /** `POST /teams/:id/answer` — 回覆 PM 的 `ask_user`。 */
   answerTeam: (teamId: string, text: string) => Promise<boolean>
   decideTeamTask: (teamId: string, taskId: string, action: TeamTaskDecision, note?: string) => Promise<boolean>
+  /** `POST /teams/:id/issues`（SPEC-team §2.3）——執行中續加 issue 到佇列。 */
+  addTeamIssues: (teamId: string, issueNumbers: number[]) => Promise<boolean>
+  /** `DELETE /teams/:id/issues/:issue_id` — 只能移除還沒開始的。 */
+  removeTeamIssue: (teamId: string, issueId: string) => Promise<boolean>
 }
 
 let noticeSeq = 0
@@ -417,6 +444,50 @@ function errText(e: unknown): string {
   if (e instanceof ApiError) return `${e.message}（HTTP ${e.status}）`
   if (e instanceof Error) return e.message
   return String(e)
+}
+
+/**
+ * `POST /bots/:id/login` 送不出去的理由，翻成使用者看得懂的一句話。
+ *
+ * daemon 那邊回的是穩定的機器 key（`login_unsupported` / `not_running` / `agent_busy` /
+ * `turn_in_flight` / `no_pane`），文案留在這裡：使用者是明確按了「登入」，該知道現在為什麼
+ * 不行、以及要先做什麼。認不出來的就退回一般錯誤字串。
+ */
+function loginErrText(e: unknown): string {
+  if (!(e instanceof ApiError)) return errText(e)
+  const kind = typeof e.body.kind === 'string' ? e.body.kind : '這個 agent'
+  switch (e.body.error === 'login_unsupported' ? 'login_unsupported' : e.body.reason) {
+    case 'login_unsupported':
+      return `${kind} 的 TUI 沒有登入指令，只能到它跑的那台主機上執行 \`${kind} login\`。`
+    case 'not_running':
+      return '這個 bot 沒在跑。先啟動它，再按登入。'
+    case 'agent_busy':
+      return 'agent 正在忙，這時候打字會被吃掉。等它停下來再按。'
+    case 'turn_in_flight':
+      return '有回合還在進行中，登入指令會被當成那個提問的一部分。等這回合結束再按。'
+    case 'no_pane':
+      return '找不到這個 bot 的終端機畫面，可能已經被關掉了。重啟這個 bot 再試。'
+    default:
+      return errText(e)
+  }
+}
+
+/**
+ * 一頁 `GET .../messages` 回來時，要從舊的清單裡留下哪些訊息。
+ *
+ * 不能整包換掉：這個請求飛在半路的時候，socket 可能已經送來 `message_added`（切 bot 的當下
+ * 正好有回覆進來，就會被舊的那一頁蓋掉）。但也不能全留——resync 的責任正是把過期狀態改對，
+ * 只加不刪就修不掉了。
+ *
+ * 界線是「這一頁最新的一筆」：比它舊又不在頁裡的，daemon 那邊已經沒有了；比它新的，只可能是
+ * 請求送出之後才進來的。頁是空的就退回請求送出的時刻（`startedAt`）。
+ */
+function keptAfterPage<T extends { id: string; created_at: string }>(existing: T[], page: T[], startedAt: string): T[] {
+  let newest = ''
+  for (const m of page) if (m.created_at > newest) newest = m.created_at
+  const cutoff = newest || startedAt
+  const seen = new Set(page.map((m) => m.id))
+  return existing.filter((m) => !seen.has(m.id) && m.created_at > cutoff)
 }
 
 export const useStore = create<StoreState>((set, get) => ({
@@ -430,7 +501,9 @@ export const useStore = create<StoreState>((set, get) => ({
   hosts: [],
   attachCommand: 'herdr --session agents-manager',
   localTools: toToolMap(undefined),
+  localIdentityStatus: {},
   quota: {},
+  mem: null,
   models: {},
   kindDisplay: readKindDisplay(),
   toolHintDismissed: false,
@@ -488,6 +561,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     connectSocket(set, get)
     void get().loadQuota()
+    void get().loadMem()
   },
 
   async refreshState() {
@@ -515,6 +589,7 @@ export const useStore = create<StoreState>((set, get) => ({
         hosts: st.hosts,
         attachCommand: st.attach_command,
         localTools: st.tools,
+        localIdentityStatus: st.identity_status,
         identities: st.identities,
         projects: st.projects,
         bots: st.bots,
@@ -542,6 +617,11 @@ export const useStore = create<StoreState>((set, get) => ({
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
+  selectAdjacentBot: (dir) => {
+    const next = adjacentBotId(get(), get().selectedBotId, dir)
+    if (next) get().selectBot(next)
+  },
+
   selectProject: (projectId) => {
     set((s) => ({
       selectedProjectId: projectId,
@@ -556,11 +636,19 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async loadGroupMessages(projectId) {
     try {
+      const startedAt = new Date().toISOString()
       const page = await api.fetchProjectMessages(projectId)
-      set((s) => ({
-        groupMessages: { ...s.groupMessages, [projectId]: page.messages },
-        loadedProjects: { ...s.loadedProjects, [projectId]: true },
-      }))
+      set((s) => {
+        // 同 `loadMessages`：請求飛在半路時進來的 `message_added` 不能被舊的那一頁蓋掉。
+        const kept = keptAfterPage(s.groupMessages[projectId] ?? [], page.messages, startedAt)
+        return {
+          groupMessages: {
+            ...s.groupMessages,
+            [projectId]: kept.length > 0 ? sortById([...page.messages, ...kept]) : page.messages,
+          },
+          loadedProjects: { ...s.loadedProjects, [projectId]: true },
+        }
+      })
     } catch (e) {
       get().notify('error', `載入群組訊息失敗：${errText(e)}`)
     }
@@ -648,12 +736,20 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async loadMessages(botId) {
     try {
+      const startedAt = new Date().toISOString()
       const page = await api.fetchMessages(botId)
       set((s) => {
+        const kept = keptAfterPage(s.messages[botId] ?? [], page.messages, startedAt)
         const turns: Record<string, Turn> = {}
+        // `sendPrompt` 在這個請求飛出去之後塞的本地 in_flight turn 要留著：它是輸入框的鎖，
+        // 被清掉的話下一次送出會撞上 daemon 的 409。頁裡有的還是以頁為準（放棄回合就是這樣
+        // 把 in_flight 改掉的）。
+        for (const t of Object.values(s.turns[botId] ?? {})) {
+          if (t.status === 'in_flight' && t.created_at >= startedAt) turns[t.id] = t
+        }
         for (const t of page.turns) turns[t.id] = t
         return {
-          messages: { ...s.messages, [botId]: page.messages },
+          messages: { ...s.messages, [botId]: kept.length > 0 ? sortByTime([...page.messages, ...kept]) : page.messages },
           turns: { ...s.turns, [botId]: turns },
           loadedBots: { ...s.loadedBots, [botId]: true },
         }
@@ -681,6 +777,25 @@ export const useStore = create<StoreState>((set, get) => ({
     await guarded(set, get, `intr:${botId}`, async () => {
       await api.interruptBot(botId)
     })
+  },
+
+  async loginBot(botId) {
+    const key = `login:${botId}`
+    if (get().busy[key]) return false
+    set((s) => ({ busy: { ...s.busy, [key]: true } }))
+    try {
+      await api.loginBot(botId)
+      return true
+    } catch (e) {
+      get().notify('error', `送不出登入指令：${loginErrText(e)}`)
+      return false
+    } finally {
+      set((s) => {
+        const busy = { ...s.busy }
+        delete busy[key]
+        return { busy }
+      })
+    }
   },
 
   queueSend(botId, text, attachments) {
@@ -864,7 +979,8 @@ export const useStore = create<StoreState>((set, get) => ({
       if (id) {
         const ids = botsOfProject(get(), bot.project_id).map((b) => b.id)
         const at = ids.indexOf(botId)
-        if (at >= 0) get().moveBot(id, ids[at + 1] === id ? null : (ids[at + 1] ?? null))
+        // 已經緊接在本尊後面就別動；傳 null 在 moveBot 裡是「移到最後」，正好是這裡不要的。
+        if (at >= 0 && ids[at + 1] !== id) get().moveBot(id, ids[at + 1] ?? null)
         // Same as the 新增 Bot form, which starts what it just created: a clone is asked for
         // when you want another one of these *now*, so leaving it stopped only adds a click.
         await get().startBot(id)
@@ -960,6 +1076,14 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  async loadMem() {
+    try {
+      set({ mem: await api.fetchMem() })
+    } catch {
+      /* older daemon without /mem: the header just shows nothing */
+    }
+  },
+
   async loadModels(kind, host) {
     const key = `${kind}@${host || 'local'}`
     const cached = get().models[key]
@@ -971,6 +1095,30 @@ export const useStore = create<StoreState>((set, get) => ({
     } catch {
       set((s) => ({ models: { ...s.models, [key]: null } }))
       return null
+    }
+  },
+
+  async refreshTools(host) {
+    const key = `tools:${host || 'local'}`
+    set((s) => ({ busy: { ...s.busy, [key]: true } }))
+    try {
+      const res = await api.refreshTools(host)
+      const target = host || 'local'
+      if (target === 'local') {
+        set({ localTools: res.tools, localIdentityStatus: res.identity_status })
+      } else {
+        set((s) => ({
+          hosts: s.hosts.map((h) =>
+            h.name === target ? { ...h, tools: res.tools, identity_status: res.identity_status } : h,
+          ),
+        }))
+      }
+      return true
+    } catch (e) {
+      get().notify('error', `重新偵測 ${host || '本機'} 失敗：${errText(e)}`)
+      return false
+    } finally {
+      set((s) => ({ busy: { ...s.busy, [key]: false } }))
     }
   },
 
@@ -1099,7 +1247,7 @@ export const useStore = create<StoreState>((set, get) => ({
       await get().refreshState()
       if (id) {
         get().selectTeam(id)
-        get().notify('info', `已建立 Team（issue #${input.issue_number}），成員啟動中…`)
+        get().notify('info', `已建立 Team（${input.issue_numbers.map((n) => `#${n}`).join('、')}），成員啟動中…`)
       }
       return id || null
     } catch (e) {
@@ -1154,6 +1302,23 @@ export const useStore = create<StoreState>((set, get) => ({
     return ok
   },
 
+  async closeTeamIssue(teamId) {
+    const team = get().teams[teamId]
+    let ok = false
+    await guarded(set, get, `team:${teamId}:close-issue`, async () => {
+      const out = await api.closeTeamIssue(teamId)
+      ok = true
+      await get().loadTeam(teamId)
+      await get().refreshState()
+      const n = out.number || team?.issue_number || 0
+      get().notify(
+        'info',
+        out.already_closed ? `issue #${n} 本來就已經關閉了` : `已關閉 issue #${n}`,
+      )
+    })
+    return ok
+  },
+
   async sayToTeam(teamId, text, to) {
     try {
       await api.sayToTeam(teamId, text, to, api.newClientRequestId())
@@ -1181,6 +1346,25 @@ export const useStore = create<StoreState>((set, get) => ({
     let ok = false
     await guarded(set, get, `team:${teamId}:decide:${taskId}`, async () => {
       await api.decideTeamTask(teamId, taskId, action, note)
+      ok = true
+      await get().loadTeam(teamId)
+    })
+    return ok
+  },
+  async addTeamIssues(teamId, issueNumbers) {
+    let ok = false
+    await guarded(set, get, `team:${teamId}:add-issues`, async () => {
+      await api.addTeamIssues(teamId, issueNumbers)
+      ok = true
+      await get().loadTeam(teamId)
+      get().notify('info', `已加入佇列：${issueNumbers.map((n) => `#${n}`).join('、')}`)
+    })
+    return ok
+  },
+  async removeTeamIssue(teamId, issueId) {
+    let ok = false
+    await guarded(set, get, `team:${teamId}:remove-issue:${issueId}`, async () => {
+      await api.removeTeamIssue(teamId, issueId)
       ok = true
       await get().loadTeam(teamId)
     })
@@ -1331,6 +1515,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         set({
           connected: bool(pick(data, 'connected'), get().connected),
           ...(pick(data, 'tools') !== undefined ? { localTools: toToolMap(pick(data, 'tools')) } : {}),
+          ...(pick(data, 'identities') !== undefined
+            ? { localIdentityStatus: toIdentityStatusMap(pick(data, 'identities')) }
+            : {}),
         })
         return
       }
@@ -1441,17 +1628,24 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       })
       return
     }
+    case 'mem_updated': {
+      set({ mem: toMemSnapshot(data) })
+      return
+    }
     case 'quota_updated': {
-      // v4.0: `{kind, quota}` (or a whole `{kinds}` map).
+      // v4.0: `{kind, host, quota}` (or a whole `{kinds}` map). `kind` 是完整的 map key，
+      // 遠端主機帶 `<host>/` 前綴（SPEC §14）。
       if (!isRec(data)) return
       const kinds = pick(data, 'kinds')
       if (isRec(kinds)) {
-        set((s) => ({ quota: { ...s.quota, ...Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v)])) } }))
+        set((s) => ({
+          quota: { ...s.quota, ...Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v, k)])) },
+        }))
         return
       }
       const kind = str(pick(data, 'kind'))
       if (!kind) return
-      set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota')) } }))
+      set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota'), kind) } }))
       return
     }
     case 'team_changed': {
@@ -1568,9 +1762,14 @@ function mergeHosts(current: Host[], updates: unknown[]): Host[] {
         ? null
         : h.error
     const tools = u.tools !== undefined ? toToolMap(u.tools) : h.tools
-    if (connected === h.connected && error === h.error && tools === h.tools) return h
+    // `host_changed` only carries `identities` when the daemon has a detection result; an
+    // absent field means "unchanged", never "no identities".
+    const identityStatus = u.identities !== undefined ? toIdentityStatusMap(u.identities) : h.identity_status
+    if (connected === h.connected && error === h.error && tools === h.tools && identityStatus === h.identity_status) {
+      return h
+    }
     changed = true
-    return { ...h, connected, error, tools }
+    return { ...h, connected, error, tools, identity_status: identityStatus }
   })
   return changed ? next : current
 }
@@ -1624,11 +1823,17 @@ export interface QuotaWarning {
  * 視窗與剩餘 %（純顯示用的數字，不是另一次門檻判斷）。
  * 側欄 bot 列用來決定要不要整列反灰、警語要寫什麼。
  */
-export function botQuotaWarning(quota: QuotaMap, kind: BotKind, identity: string | null): QuotaWarning | null {
-  const key = identity ? `${kind}:${identity}` : kind
-  let q = quota[key]
+export function botQuotaWarning(
+  quota: QuotaMap,
+  kind: BotKind,
+  identity: string | null,
+  host: string = LOCAL_HOST,
+): QuotaWarning | null {
+  // 額度按主機分（SPEC §14）：遠端 bot 只看它自己那台的數字。
+  const scoped = (base: string) => quotaKey(host, base)
+  let q = quota[scoped(identity ? `${kind}:${identity}` : kind)]
   // cc0／空 env 的預設身份可能沒有自己的 key，額度會落在裸的 kind 上（同 QuotaStrip 的規則）。
-  if (q == null && identity === 'cc0') q = quota[kind]
+  if (q == null && identity === 'cc0') q = quota[scoped(kind)]
   if (!q) return null
   const five = q.five_hour?.critical ? { pct: Math.max(0, Math.round(100 - q.five_hour.used_pct)), window: '5h' as const } : null
   const sevenWindow: QuotaWarningWindow = kind === 'grok' ? '週' : '7d'
@@ -1655,6 +1860,32 @@ export function botsOfProject(
   const known = list.filter((b) => rank.has(b.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!)
   const added = list.filter((b) => !rank.has(b.id))
   return [...known, ...added]
+}
+
+/**
+ * Every bot id in the order the sidebar paints them: projects top to bottom, and inside each
+ * the user's own drag order. This is what ↑/↓ walks — the visual order, not `bots[]`.
+ */
+export function orderedBotIds(state: { projects: Project[]; bots: Bot[]; botOrder: Record<string, string[]> }): string[] {
+  const out: string[] = []
+  for (const p of state.projects) for (const b of botsOfProject(state, p.id)) out.push(b.id)
+  // A bot whose project vanished from the list would otherwise be unreachable by keyboard.
+  for (const b of state.bots) if (!out.includes(b.id)) out.push(b.id)
+  return out
+}
+
+/** The neighbour `dir` steps away, wrapping at both ends; null when there is nothing to move to. */
+export function adjacentBotId(
+  state: { projects: Project[]; bots: Bot[]; botOrder: Record<string, string[]> },
+  from: string | null,
+  dir: -1 | 1,
+): string | null {
+  const ids = orderedBotIds(state)
+  if (ids.length === 0) return null
+  const at = from ? ids.indexOf(from) : -1
+  // Nothing selected yet: ↓ starts at the top, ↑ at the bottom.
+  if (at < 0) return dir === 1 ? ids[0] : ids[ids.length - 1]
+  return ids[(at + dir + ids.length) % ids.length]
 }
 
 export function inFlightTurn(state: StoreState, botId: string): Turn | null {
@@ -1709,11 +1940,44 @@ export function composerState(state: StoreState, botId: string | null): Composer
 }
 
 const NO_TOOLS: ToolMap = toToolMap(undefined)
+const NO_IDENTITY_STATUS: IdentityStatusMap = {}
 
 /** v4.0: the tools map for a host name (`local` = the daemon's machine). Stable references. */
 export function toolsOfHost(state: StoreState, host: string): ToolMap {
   if (!host || host === 'local') return state.localTools
   return state.hosts.find((h) => h.name === host)?.tools ?? NO_TOOLS
+}
+
+/**
+ * v4.0: per-identity login state **on one host**. An identity is global config, but whether
+ * its account is usable is a property of the machine the bot will run on, so every caller
+ * has to say which host it means. Stable references (safe as a zustand selector).
+ */
+/**
+ * 這台主機上「可以拿來啟動 bot」的身份：config.toml 的 `[[identities]]`，加上 daemon 從那台
+ * 主機的登入 shell 認出來的 `ccN` alias（SPEC §15）。同名時 config 優先——daemon 那邊
+ * (`tools::identities_for_host`) 用的是同一條規則。
+ *
+ * 是純函式而不是 selector：兩個輸入都是 store 裡的穩定引用，元件端用 `useMemo` 合併，
+ * 避免每次 render 都回一個新陣列（React #185）。
+ */
+export function identitiesOfHost(all: Identity[], status: IdentityStatusMap): Identity[] {
+  const out = all.slice()
+  for (const st of Object.values(status)) {
+    if (st.source !== 'shell' || out.some((i) => i.name === st.name)) continue
+    out.push({
+      name: st.name,
+      kind: st.kind,
+      env: st.config_dir ? { CLAUDE_CONFIG_DIR: st.config_dir } : {},
+      args: [],
+    })
+  }
+  return out
+}
+
+export function identityStatusOfHost(state: StoreState, host: string): IdentityStatusMap {
+  if (!host || host === 'local') return state.localIdentityStatus
+  return state.hosts.find((h) => h.name === host)?.identity_status ?? NO_IDENTITY_STATUS
 }
 
 /** v4.0: `[host, kind]` pairs where the CLI is reported missing (local first). */

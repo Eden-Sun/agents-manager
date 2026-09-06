@@ -61,6 +61,40 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 
 不改任何既有 `CHECK`（`turns.origin` 維持 `web`；SQLite 改 CHECK 要重建表，SPEC §12.5 加 grok 時的教訓），team 語意全部靠新欄位。
 
+### 2.3 Issue 佇列（一組隊伍解多個 issue）
+
+一個 Team 帶一份 **issue 佇列**，依 `seq` 順序處理。**PM 與 reviewer 全程是同兩個 bot**（保住累積的上下文），
+**每個 issue 換一批執行者**，每個 issue 有自己的整合分支並各自交付。
+
+- 新表 `team_issues`：`(team_id, seq)` 與 `(team_id, issue_number)` 唯一，
+  `state ∈ {queued, working, done, failed, skipped}`，各自帶 `branch` / `base_sha` / `summary` / `pr_url` / `fail_reason`。
+- `teams` 的 `issue_number` / `issue_title` / `issue_url` / `branch` / `pr_url` / `summary` / `issue_closed_at`
+  **保留為「當前這一項的鏡像」**，換 issue 時由 daemon 同步。既有查詢、`team_json`、UI 標題都不必改。
+- `team_tasks.issue_id` / `team_events.issue_id`：additive、可為 NULL。舊資料由開機遷移回填成該 team 唯一的那個 issue。
+- **不新增 `phase` 值、不新增 `team_events.kind` 值**（兩者都是 CHECK 約束，改了要重建表）。
+  issue 邊界事件走 `kind='note'` + `payload.action ∈ {issue_started, issue_finished, issue_failed, issues_queued, issue_unqueued, issue_start_failed}`。
+
+**分支與 base**：每個 issue 都從 team 建立時解析的 `base_sha` 切自己的 `team/i<issue>-<tid6>`，
+彼此獨立、也不受使用者中途合併的影響。PM 的 `main/` worktree 不搬家，只切分支（切之前要求乾淨，跟合併前同一條規則）。
+
+**目錄**：`main/` 與 `reviewer/` 全程固定（這兩個角色從不重啟，`bots.cwd` 只在開 pane 時讀）；
+執行者是 `i<seq>-dev-<n>`，issue 結束就 `git worktree remove`。
+
+**命名**：成員暱稱改為 team 範圍 —— `t<tid6>-pm`、`t<tid6>-rev`、`t<tid6>-i<seq>-dev-<n>`。
+協定短名（`pm` / `rev` / `dev-1`）不變。舊 team 的 `i<issue>-` 前綴仍然剝得掉。
+
+**persona**：PM 與 reviewer 的 persona **不得**提到 issue 號或分支名（persona 只在 agent 啟動時套用，而它們不重啟）。
+每個 issue 會變的東西一律走 `ISSUE.md` / `TEAM.md`（每次邊界重寫）與一則 `next_issue` relay。
+
+**預算**：`max_relays` 與 `max_wall_clock_min` 改為**每個 issue** 計算（relay 依 `issue_id` 過濾、時間從
+`team_issues.started_at` 起算）。單 issue 的 team 數值完全等價。
+
+**失敗處理**：`DECISION_PAUSES`（`merge_conflict` / `review_exhausted` / `pm_abort`）發生時，
+**若佇列還有下一個**，該 issue 標成 `failed`（保留分支）並自動前進；佇列空了才照舊 `paused` 等使用者 `decide`。
+其餘 pause 原因是團隊級問題，一律暫停整隊。
+
+**最後一個 issue**：`finish` 照舊停掉所有成員、寫 `done`，**不動 worktree** —— 清理仍是 `cleanup` 這個人工動作。
+
 ### 2.2 `bots.cwd`（新，通用欄位）
 
 `start_inner` 目前 `pane.split { cwd: project.path }`；改為 `bot.cwd.unwrap_or(project.path)`。這是 team 成員能住在 worktree 的**唯一**必要改動，
@@ -512,6 +546,44 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | `team_event` | `{"team_id", "event": <10.4 的事件物件>}` |
 
 成員的 `bot_status` / `message_added` / `turn_updated` / `turn_progress` 照舊；message 物件多 `team_id` / `relay_from`，turn 物件多 `team_id` / `team_event_id`。前端靠 `bot.team` 把它們歸到 TeamPanel。
+
+### 10.6a Issue 佇列（§2.3）
+
+| 方法 | 路徑 | body | 回應 |
+|---|---|---|---|
+| POST | `/teams/{id}/issues` | `{"issue_numbers":[n,…]}`（或單數 `{"issue_number":n}`） | `200 {issues:[…]}`；終態 team 回 409，重複的 issue 回 409 |
+| DELETE | `/teams/{id}/issues/{issue_id}` | — | `200 {}`；只有 `state="queued"` 可移除，其餘回 409 |
+
+`POST /projects/{id}/teams` 的 body 改用 `issue_numbers: [n,…]`（依序處理）；舊的 `issue_number` 仍然接受，
+等同一個元素的佇列。上限 `MAX_QUEUED_ISSUES = 20`。
+
+`GET /api/state` 與 `GET /teams/{id}` 的 team 物件多三個欄位：`issues[]`（每項見 §2.3）、`current_issue_id`、
+`issues_summary {total, done, failed, queued}`。`team_changed` 是淺層 patch，前端要對 `issues[]` 做明確合併。
+
+### 10.7 `POST /teams/{id}/close-issue` — 完成後關掉 issue（經使用者同意）
+
+| 方法 | 路徑 | body | 回應 |
+|---|---|---|---|
+| POST | `/teams/{id}/close-issue` | 省略、`{}`、`{"comment": "…"}` 或 `{"comment": ""}` | `200 {number, url, title, repo, state:"CLOSED", already_closed}` |
+
+規則（兩條，缺一不可）：
+
+1. **只有 `phase === "done"` 的 team**。`done` 的定義是 PM 宣告完成**且** daemon 驗證所有 task 進入終態（§8.3）；
+   `aborted` / `failed` / 還在跑的一律 `409 {"error":"conflict","phase":"…"}`。
+2. **只有使用者**。scheduler 沒有任何一條路徑會呼叫它——這個端點存在的唯一理由，就是讓 UI 在 team 完成後
+   問一次「要不要關掉 issue」，issue 是因為有人按了按鈕才關的。**不做自動關閉，也不做「N 分鐘後自動關」**。
+
+其他：
+
+- `comment` 省略 → daemon 寫預設留言（PM 總結、整合分支與 base、已合併的 task 與 commit；`deliver=pr` 附 PR 連結，
+  否則明寫「這條分支還沒有合併進<base>、也沒有開 PR，若最後沒有採用請重開這個 issue」）。傳空字串 → 不留言。
+- 關過一次就 `409 {"error":"conflict","closed_at":"…"}`（`teams.issue_closed_at`，additive migration）。
+- 別人先關掉的 issue 回 `200 already_closed:true`，**不會重複留言**：使用者要的狀態已經成立。
+- 專案沒有 GitHub origin → `400 project has no GitHub origin`（UI 也不會顯示按鈕）。
+- 成功後推 `team_changed`，並在 team 日誌留一則 `note {action:"issue_closed", by:"user", number, url, already_closed, comment}`。
+
+> 為什麼不做成 `deliver` 的第三種模式（`branch | pr | close`）：`deliver` 是 team 跑完自己會做的事，
+> 而關 issue 依定義要等人點頭；把它塞進 `deliver` 等於讓 daemon 自動關 issue，正是這一節要避免的。
 
 ---
 

@@ -245,10 +245,39 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
         updated_at: crate::db::now(),
         source: "claude-usage".into(),
         account: account.map(String::from),
+        host: LOCAL_HOST.into(),
     })
 }
 
 // ------------------------------------------------------------------ probe
+
+/// Where the probe runs for `host`.
+///
+/// Local keeps its dedicated `am-quota` session (SPEC §12.6) so nothing shows up in the
+/// user's own herdr. A remote host has exactly **one** forwarded socket — the daemon's own
+/// named session — so the probe borrows that one: it is the daemon's session, not the user's,
+/// and the throwaway workspace (label `am-quota-claude*`, agent `amquota…`) is not in the DB,
+/// so reconcile never mistakes it for a bot.
+async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
+    if host == LOCAL_HOST {
+        return probe_client().await;
+    }
+    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    if !conn.is_connected() {
+        return Err(anyhow!("host `{host}` is not connected"));
+    }
+    app.herdr_for(host).await.ok_or_else(|| anyhow!("no herdr client for `{host}`"))
+}
+
+/// `$HOME` on `host` (the local home for `local`), used for the probe cwd and `~` expansion.
+async fn host_home(app: &Arc<App>, host: &str) -> String {
+    if let Some(conn) = app.hosts.get(host).await {
+        if let Ok(h) = conn.home().await {
+            return h;
+        }
+    }
+    dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into())
+}
 
 async fn probe_client() -> Result<HerdrClient> {
     let client = HerdrClient::new(HerdrClient::session_socket(PROBE_SESSION));
@@ -277,8 +306,12 @@ pub async fn sweep_stale(app: &Arc<App>) {
     if let Ok(c) = probe_client().await {
         clients.push(c);
     }
-    if let Some(c) = app.herdr_for(LOCAL_HOST).await {
-        clients.push(c);
+    // Local session (older builds probed there) plus every connected remote session, where
+    // the probe lives by design.
+    for host in crate::quota::pollable_hosts(app).await {
+        if let Some(c) = app.herdr_for(&host).await {
+            clients.push(c);
+        }
     }
     for c in clients {
         let Ok(list) = c.workspace_list().await else { continue };
@@ -325,29 +358,33 @@ impl Drop for Probe {
     }
 }
 
-/// One account probe. `env` is the pane env (e.g. `CLAUDE_CONFIG_DIR` for cc1).
-/// Caller must hold [`crate::quota::probe_lock`].
+/// One account probe on `host`. `env` is the pane env (e.g. `CLAUDE_CONFIG_DIR` for cc1).
+/// `base_key` is the host-less quota key (`claude` / `claude:cc1`).
+/// Caller must hold [`crate::quota::probe_lock`] for that host.
 async fn refresh_claude_account(
     app: &Arc<App>,
-    kind_key: &str,
+    host: &str,
+    base_key: &str,
     account: Option<&str>,
     env: BTreeMap<String, String>,
 ) -> Result<bool> {
-    if !app.tools.lock().await.contains_key(LOCAL_HOST) {
-        crate::tools::detect(app, LOCAL_HOST).await?;
+    if !app.tools.lock().await.contains_key(host) {
+        crate::tools::detect(app, host).await?;
     }
-    if crate::tools::cached_path(app, LOCAL_HOST, "claude").await.is_none() {
+    if crate::tools::cached_path(app, host, "claude").await.is_none() {
         return Ok(false);
     }
 
-    let client = probe_client().await?;
+    let client = client_for(app, host).await?;
     // Prefer a cwd Claude already trusts; $HOME can trip the first-run workspace trust dialog
-    // (agent stays `blocked`) for a fresh CLAUDE_CONFIG_DIR like cc1.
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| p.display().to_string())
-        .or_else(|| dirs::home_dir().map(|p| p.display().to_string()))
-        .unwrap_or_else(|| "/tmp".into());
+    // (agent stays `blocked`) for a fresh CLAUDE_CONFIG_DIR like cc1. Remote hosts have no
+    // "our cwd" to prefer, so they use the remote $HOME.
+    let home = host_home(app, host).await;
+    let cwd = if host == LOCAL_HOST {
+        std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or(home)
+    } else {
+        home
+    };
     let label = match account {
         Some(a) if !a.is_empty() => format!("{PROBE_LABEL_PREFIX}-{a}"),
         _ => PROBE_LABEL_PREFIX.to_string(),
@@ -380,18 +417,48 @@ async fn refresh_claude_account(
         probe.close().await;
         return Err(anyhow!("claude probe pane never became an available shell"));
     }
-    // Idle only — `blocked` is usually the workspace-trust / login dialog, not a usable TUI.
-    match client.agent_wait(&name, &[AgentStatus::Idle], 90_000).await {
-        Ok(_) => {}
-        Err(e) => {
-            // Try dismissing a trust prompt, then wait for idle once more.
-            tracing::debug!(error = %e, "claude probe not idle; trying to clear a dialog");
-            let _ = client.pane_send_keys(&pane_id, &["Enter"]).await;
-            tokio::time::sleep(Duration::from_millis(800)).await;
-            if let Err(e2) = client.agent_wait(&name, &[AgentStatus::Idle], 30_000).await {
-                probe.close().await;
-                return Err(e2);
+    // `blocked` means a dialog, not a usable TUI — but it is worth waiting *for*, because it
+    // comes back in seconds while `idle` alone would burn the full 90 s timeout first.
+    let up = client.agent_wait(&name, &[AgentStatus::Idle, AgentStatus::Blocked], 90_000).await;
+    let blocked = matches!(&up, Ok(a) if a.agent_status == AgentStatus::Blocked) || up.is_err();
+    if blocked {
+        tracing::debug!(host, "claude probe not idle; looking at the dialog on screen");
+        // Answer it from what is actually drawn. The first-run workspace-trust dialog has its
+        // cursor on **No, exit** (`crate::trust`), so a blind Enter *quits claude* — measured
+        // on m4p, 2026-09-06 — and every later key then lands in the shell. Anything else
+        // (a plain confirmation) still takes the bare Enter.
+        let mut cleared = false;
+        for attempt in 0..2u32 {
+            let screen = client.pane_read(&pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+            let low = screen.to_ascii_lowercase();
+            // 滿意度問卷擋在前面時，Enter 等於替使用者打了一個分數（游標停在哪一格還不確定）。
+            // 它只認 0（[`crate::tui_prompts`]），而且按完就沒事了，所以走自己的分支。
+            if crate::tui_prompts::is_feedback_survey(&screen) {
+                tracing::info!(host, "claude 滿意度問卷擋在探測前面：自動選 0（Dismiss）");
+                let _ = client.pane_send_keys(&pane_id, &["0"]).await;
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                if client.agent_wait(&name, &[AgentStatus::Idle], 30_000).await.is_ok() {
+                    cleared = true;
+                    break;
+                }
+                continue;
             }
+            if low.contains("trust this folder") || low.contains("do you trust") {
+                let _ = client.pane_send_keys(&pane_id, &["Down"]).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            let _ = client.pane_send_keys(&pane_id, &["Enter"]).await;
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            if client.agent_wait(&name, &[AgentStatus::Idle], 30_000).await.is_ok() {
+                cleared = true;
+                break;
+            }
+            tracing::debug!(host, attempt, "claude probe still not idle after answering a dialog");
+        }
+        if !cleared {
+            let last = client.pane_read(&pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+            probe.close().await;
+            return Err(anyhow!("claude probe on {host} never became idle; screen:\n{}", last.trim()));
         }
     }
     // Let the TUI finish drawing its input line before the slash command.
@@ -406,7 +473,7 @@ async fn refresh_claude_account(
         tokio::time::sleep(Duration::from_millis(900)).await;
         last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
         if let Some(q) = parse_claude_usage(&last, Local::now(), account) {
-            crate::quota::set(app, kind_key, q).await;
+            crate::quota::set(app, host, base_key, q).await;
             probe.close().await;
             return Ok(true);
         }
@@ -416,23 +483,38 @@ async fn refresh_claude_account(
         }
     }
     probe.close().await;
-    tracing::debug!(account = ?account, screen = %last, "claude /usage did not render plan bars");
-    Err(anyhow!("claude `/usage` did not report plan limits within {DIALOG_TIMEOUT:?}"))
+    tracing::debug!(host, account = ?account, screen = %last, "claude /usage did not render plan bars");
+    Err(anyhow!("claude `/usage` on {host} did not report plan limits within {DIALOG_TIMEOUT:?}"))
 }
 
-/// Default account + every Claude identity with a distinct config dir.
-pub async fn refresh_claude(app: &Arc<App>) -> Result<bool> {
-    let _guard = crate::quota::probe_lock().await;
-    let home = dirs::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/tmp".into());
-    let cfg = app.cfg.get().await;
+/// Was `updated_at` written within `window`? Unparsable timestamps count as stale.
+fn fresher_than(updated_at: &str, window: Duration) -> bool {
+    let Ok(t) = chrono::DateTime::parse_from_rfc3339(updated_at) else { return false };
+    match chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).to_std() {
+        Ok(age) => age < window,
+        // Negative age (clock skew) — treat as fresh rather than probing on every cycle.
+        Err(_) => true,
+    }
+}
+
+/// Default account + every Claude identity with a distinct config dir, on `host`.
+pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
+    let _guard = crate::quota::probe_lock(host).await;
+    // `~` in an identity's env expands against the *probed* host's home, not the daemon's.
+    let home = host_home(app, host).await;
+    // `[[identities]]` plus the `ccN` aliases discovered on *this* host (SPEC §15): cc1 is a
+    // different account on m4p than it is here, and each gets its own probe there.
+    let identities = crate::tools::identities_for_host(app, host).await;
     let mut targets: Vec<(String, Option<String>, BTreeMap<String, String>)> = Vec::new();
 
     // Bare default account (also covers empty-env identities like cc0).
     targets.push(("claude".into(), None, BTreeMap::new()));
 
-    for id in cfg.identities.iter().filter(|i| i.kind == "claude") {
+    // Login state from the tools pass: an account the CLI itself says is not logged in would
+    // just park the probe on the login screen for the whole 25 s dialog timeout, every cycle.
+    // It comes back the moment detection sees it logged in again.
+    let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+    for id in identities.iter().filter(|i| i.kind == "claude") {
         let mut env = BTreeMap::new();
         for (k, v) in &id.env {
             env.insert(k.clone(), expand_home(v, &home));
@@ -441,16 +523,30 @@ pub async fn refresh_claude(app: &Arc<App>) -> Result<bool> {
             // Same credentials as the default account — strip already maps cc0 → `claude`.
             continue;
         }
+        if logins.get(&id.name).map(|i| i.logged_in) == Some(Some(false)) {
+            tracing::debug!(host, identity = %id.name, "identity is not logged in here; skipping its quota probe");
+            continue;
+        }
         targets.push((format!("claude:{}", id.name), Some(id.name.clone()), env));
     }
 
     let mut any = false;
     let mut saw_missing = false;
     for (key, account, env) in targets {
-        match refresh_claude_account(app, &key, account.as_deref(), env).await {
+        // A bot chatting under this account already pushes its limits through the statusLine
+        // hook. Opening a whole TUI to re-read what arrived seconds ago is pure cost — and
+        // with `cc0`…`cc6` discovered from the shell (SPEC §15) there can be several accounts
+        // per host, so this is what keeps one 60 s cycle from turning into a queue of probes.
+        if let Some(q) = app.quotas.lock().await.get(&crate::quota::quota_key(host, &key)) {
+            if q.source == "statusline" && fresher_than(&q.updated_at, CLAUDE_POLL) {
+                any = true;
+                continue;
+            }
+        }
+        match refresh_claude_account(app, host, &key, account.as_deref(), env).await {
             Ok(true) => any = true,
             Ok(false) => saw_missing = true,
-            Err(e) => tracing::warn!(key = %key, error = %e, "claude quota refresh failed"),
+            Err(e) => tracing::warn!(host, key = %key, error = %e, "claude quota refresh failed"),
         }
     }
     if saw_missing && !any {
@@ -459,14 +555,18 @@ pub async fn refresh_claude(app: &Arc<App>) -> Result<bool> {
     Ok(any || !saw_missing)
 }
 
+/// Start-up + every 60 s, for `local` and every connected remote host (one host at a time:
+/// each probe opens a real TUI, and the hosts share nothing but this loop).
 pub fn spawn_claude_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
         loop {
-            match refresh_claude(&app).await {
-                Ok(true) => {}
-                Ok(false) => tracing::info!("claude not installed locally; claude quota stays null"),
-                Err(e) => tracing::warn!(error = %e, "claude quota refresh failed"),
+            for host in crate::quota::pollable_hosts(&app).await {
+                match refresh_claude(&app, &host).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::info!(host = %host, "claude not installed; claude quota stays null"),
+                    Err(e) => tracing::warn!(host = %host, error = %e, "claude quota refresh failed"),
+                }
             }
             tokio::time::sleep(CLAUDE_POLL).await;
         }

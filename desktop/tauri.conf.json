@@ -39,8 +39,7 @@
     "copyright": "",
     "shortDescription": "Local multi-agent manager on top of herdr",
     "macOS": {
-      "minimumSystemVersion": "13.0",
-      "exceptionDomain": "localhost"
+      "minimumSystemVersion": "13.0"
     }
   }
 }

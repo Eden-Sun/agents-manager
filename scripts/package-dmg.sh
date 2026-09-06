@@ -22,8 +22,12 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 # ---------------------------------------------------------------- 0. preflight
 step "preflight"
 [ "$(uname -s)" = Darwin ] || die "macOS only"
-command -v cargo >/dev/null || die "cargo not found — install Rust from https://rustup.rs"
-command -v npm   >/dev/null || die "npm not found — install Node.js 20+"
+# The bundle is arm64-only, and an Intel host would build one it cannot launch.
+[ "$(uname -m)" = arm64 ] || die "Apple Silicon only — this host is $(uname -m); see docs/PACKAGING.md"
+command -v cargo  >/dev/null || die "cargo not found — install Rust from https://rustup.rs"
+# A Homebrew Rust has cargo but no rustup, and the target below is added with rustup.
+command -v rustup >/dev/null || die "rustup not found — the $TARGET target needs it; install Rust from https://rustup.rs"
+command -v npm    >/dev/null || die "npm not found — install Node.js 20+"
 xcode-select -p >/dev/null 2>&1 || die "Xcode command line tools missing — run: xcode-select --install"
 rustup target list --installed | grep -qx "$TARGET" || rustup target add "$TARGET"
 
@@ -37,7 +41,10 @@ if [ "${SKIP_WEB:-}" = 1 ] && [ -f web/dist/index.html ]; then
   step "web ui (skipped, reusing web/dist)"
 else
   step "web ui"
-  ( cd web && { [ -d node_modules ] && npm install --no-audit --no-fund || npm ci --no-audit --no-fund; } && npm run build )
+  # if/else, not `A && B || C`: a *failing* install must stop here, not fall through to `npm ci`.
+  ( cd web \
+    && if [ -d node_modules ]; then npm install --no-audit --no-fund; else npm ci --no-audit --no-fund; fi \
+    && npm run build )
 fi
 [ -f web/dist/index.html ] || die "web/dist/index.html missing after the frontend build"
 

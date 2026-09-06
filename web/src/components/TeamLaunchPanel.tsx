@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import * as api from '../api'
-import type { BotKind, IssueDetail, KindQuota, TeamBudget, TeamDeliver, TeamRoleSpec } from '../api/types'
+import type { BotKind, Issue, IssueDetail, KindQuota, TeamBudget, TeamDeliver, TeamRoleSpec } from '../api/types'
 import {
   BOT_KINDS,
   TEAM_BUDGET_DEFAULTS,
-  TEAM_QUOTA_WARN_PCT,
   TEAM_WORKERS_DEFAULT,
   TEAM_WORKERS_MAX,
 } from '../api/types'
 import { projectHostName, toolsOfHost, useStore } from '../store/store'
 import { IdentityOptions, PersonaField } from './BotSettingsPanel'
-import { KindIcon, KindTag } from './KindTag'
+import { HostBadge } from './HostsPanel'
+import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
+import { QuotaStrip } from './QuotaStrip'
 
 /**
  * SPEC-team §11.2 — 「組隊」的設定 sheet（右側主區域，不是 modal；同 UI-DECISIONS 的
@@ -74,40 +75,6 @@ function worstUsedPct(q: KindQuota | null | undefined): number | null {
   return vals.length ? Math.max(...vals) : null
 }
 
-/**
- * §9.2 的額度預覽。用 `QuotaStrip` 同一組 class（`quota-hp` / `quota-bars` / `quota-bar`），
- * 顯示的是**剩餘**，和頂欄的量條一致。
- */
-function QuotaPill({ kind, identity, stopPct }: { kind: BotKind; identity: string | null; stopPct: number }) {
-  const key = identity ? `${kind}:${identity}` : kind
-  const q = useStore((s) => s.quota[key] ?? s.quota[kind] ?? null)
-  const used = worstUsedPct(q)
-  const left = used === null ? null : Math.max(0, Math.round(100 - used))
-  const level = used === null ? 'ok' : used >= stopPct ? 'crit' : used >= TEAM_QUOTA_WARN_PCT ? 'warn' : 'ok'
-  const title =
-    used === null
-      ? `${kind}${identity ? ` · ${identity}` : ''}：尚未取得額度資訊（不會擋建立）`
-      : `${kind}${identity ? ` · ${identity}` : ''}：最吃緊的視窗已用 ${Math.round(used)}%，剩 ${left}%`
-  return (
-    <span className={`quota-hp ${kind} ${level} team-quota-pill`} title={title}>
-      <span className="quota-kind" aria-hidden="true">
-        <KindIcon kind={kind} />
-      </span>
-      {identity ? (
-        <span className="quota-identity" aria-hidden="true">
-          {identity}
-        </span>
-      ) : null}
-      <span className="quota-bars">
-        <span className={`quota-bar ${level}${left === null ? ' nodata' : ''}`}>
-          <span className="quota-bar-fill" style={{ width: left === null ? '0%' : `${left}%` }} />
-        </span>
-      </span>
-      <span className="team-quota-num">{left === null ? '—' : `${left}%`}</span>
-    </span>
-  )
-}
-
 function RoleCard({
   title,
   hint,
@@ -137,48 +104,56 @@ function RoleCard({
         <span className="team-card-title">{title}</span>
         {head}
       </header>
-      <p className="team-card-hint">{hint}</p>
-      {disabled ? null : (
-        <>
-          <div className="field">
-            <span>kind</span>
-            <div className="opt-group kinds" role="radiogroup" aria-label={`${title} kind`}>
-              {BOT_KINDS.map((k) => {
-                const missing = !tools[k].installed
-                return (
-                  <button
-                    key={k}
-                    type="button"
-                    role="radio"
-                    aria-checked={spec.kind === k}
-                    className={`opt${spec.kind === k ? ' on' : ''}`}
-                    disabled={missing}
-                    title={missing ? `${host === 'local' ? '本機' : host} 尚未安裝 ${k}` : k}
-                    onClick={() => onSpec({ ...emptySpec(k), persona_extra: spec.persona_extra })}
-                  >
-                    <KindTag kind={k} />
-                    <span className="opt-label">{k}</span>
-                    {missing ? <span className="kind-missing-reason">未安裝</span> : null}
-                  </button>
-                )
-              })}
+      <div className="team-card-body">
+        <p className="team-card-hint">{hint}</p>
+        {disabled ? null : (
+          <>
+            <div className="field">
+              <span>kind</span>
+              <div className="opt-group kinds" role="radiogroup" aria-label={`${title} kind`}>
+                {BOT_KINDS.map((k) => {
+                  const missing = !tools[k].installed
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      role="radio"
+                      aria-checked={spec.kind === k}
+                      className={`opt${spec.kind === k ? ' on' : ''}`}
+                      disabled={missing}
+                      title={missing ? `${host === 'local' ? '本機' : host} 尚未安裝 ${k}` : k}
+                      onClick={() => onSpec({ ...emptySpec(k), persona_extra: spec.persona_extra })}
+                    >
+                      <KindTag kind={k} />
+                      <span className="opt-label">{k}</span>
+                      {missing ? <span className="kind-missing-reason">未安裝</span> : null}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
-          </div>
-          <ApiModelFields
-            kind={spec.kind}
-            host={host}
-            model={spec.model}
-            onModel={(v) => patch({ model: v })}
-            effort={spec.effort}
-            onEffort={(v) => patch({ effort: v })}
-            fast={spec.fast}
-            onFast={(v) => patch({ fast: v })}
-          />
-          <IdentityOptions kind={spec.kind} value={spec.identity ?? ''} onChange={(v) => patch({ identity: v || null })} />
-          {extra}
-          <PersonaField value={spec.persona_extra} onChange={(v) => patch({ persona_extra: v })} collapsible />
-        </>
-      )}
+            <ApiModelFields
+              kind={spec.kind}
+              host={host}
+              model={spec.model}
+              onModel={(v) => patch({ model: v })}
+              effort={spec.effort}
+              onEffort={(v) => patch({ effort: v })}
+              fast={spec.fast}
+              onFast={(v) => patch({ fast: v })}
+            />
+            <IdentityOptions
+              kind={spec.kind}
+              host={host}
+              value={spec.identity ?? ''}
+              onChange={(v) => patch({ identity: v || null })}
+              recheck={false}
+            />
+            {extra}
+            <PersonaField value={spec.persona_extra} onChange={(v) => patch({ persona_extra: v })} collapsible />
+          </>
+        )}
+      </div>
     </section>
   )
 }
@@ -227,8 +202,16 @@ export function TeamLaunchPanel({
   issueNumber: number
   onOpenSidebar: () => void
 }) {
+  // §2.3：這個 team 要依序處理的 issue 佇列。點「組隊」的那一個是第一項。
+  const [queue, setQueue] = useState<number[]>([issueNumber])
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [candidates, setCandidates] = useState<Issue[] | null>(null)
   const project = useStore((s) => s.projects.find((p) => p.id === projectId) ?? null)
   const host = useStore((s) => projectHostName(s, projectId))
+  const hostUp = useStore((s) => {
+    const h = projectHostName(s, projectId)
+    return h === 'local' || (s.hosts.find((x) => x.name === h)?.connected ?? false)
+  })
   const tools = useStore((s) => toolsOfHost(s, host))
   const quota = useStore((s) => s.quota)
   const createTeam = useStore((s) => s.createTeam)
@@ -276,6 +259,18 @@ export function TeamLaunchPanel({
     const used = worstUsedPct(quota[key] ?? quota[r.spec.kind])
     return used !== null && used >= budget.quota_stop_pct
   })
+  useEffect(() => {
+    if (!pickerOpen || candidates) return
+    let live = true
+    api
+      .fetchIssues(projectId, { state: 'open', limit: 100 })
+      .then((l) => live && setCandidates(l))
+      .catch(() => live && setCandidates([]))
+    return () => {
+      live = false
+    }
+  }, [pickerOpen, candidates, projectId])
+
   const missingCli = roles.find((r) => !tools[r.spec.kind].installed)
   const ghReady = Boolean(project?.github)
   const canSubmit = !busy && !blockedKind && !missingCli && Boolean(project)
@@ -285,7 +280,7 @@ export function TeamLaunchPanel({
     setBusy(true)
     writeBudget(budget)
     void createTeam(projectId, {
-      issue_number: issueNumber,
+      issue_numbers: queue,
       pm,
       workers: { ...worker, count },
       reviewer: hasReviewer ? reviewer : null,
@@ -306,7 +301,7 @@ export function TeamLaunchPanel({
 
   return (
     <>
-      <div className="main-head team-head">
+      <div className="main-head team-head team-launch-head">
         <button
           type="button"
           className="btn menu-btn icon-tip"
@@ -322,12 +317,16 @@ export function TeamLaunchPanel({
             ⚙
           </span>
           <strong>組隊</strong>
+          <span className="team-project" title={project.path}>
+            <span className="team-project-label">{project.label}</span>
+            <HostBadge host={host} connected={hostUp} />
+          </span>
           <span className="team-tag">#{issueNumber}</span>
         </div>
         <span className="spacer" />
-        <span className="main-status" title={project.path}>
-          {project.label}
-        </span>
+        {/* 組隊是最花額度的一個動作（多個成員各自跑），所以決定按不按「建立並啟動」之前，
+            這裡就要看得到剩多少——跟聊天頁、群組頁、team 頁同一條 `.quota-strip`。 */}
+        <QuotaStrip host={host} />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={closeTeamLaunch} title="不建立 team，回到原本的畫面">
             取消
@@ -363,6 +362,59 @@ export function TeamLaunchPanel({
               </button>
               {bodyOpen ? <pre className="team-issue-body">{issue.body}</pre> : null}
             </>
+          ) : null}
+        </section>
+
+        {/* §2.3：同一組隊伍依序解多個 issue —— PM 與 reviewer 不變，每個 issue 換一批執行者。 */}
+        <section className="team-queue-edit">
+          <div className="team-queue-head">
+            <strong>issue 佇列</strong>
+            <span className="hint">依序處理，共 {queue.length} 個</span>
+            <span className="spacer" />
+            <button type="button" className="mini-btn" onClick={() => setPickerOpen((v) => !v)}>
+              {pickerOpen ? '收起' : '＋ 加入 issue'}
+            </button>
+          </div>
+          <ol className="team-queue-list">
+            {queue.map((n, i) => (
+              <li key={n}>
+                <span className="issue-num">#{n}</span>
+                <span className="team-queue-title">{n === issueNumber ? (issue?.title ?? '') : ''}</span>
+                {queue.length > 1 ? (
+                  <button
+                    type="button"
+                    className="mini-btn"
+                    title="從佇列移除"
+                    onClick={() => setQueue((q) => q.filter((x) => x !== n))}
+                  >
+                    移除
+                  </button>
+                ) : null}
+                {i === 0 ? <span className="hint">先做這個</span> : null}
+              </li>
+            ))}
+          </ol>
+          {pickerOpen ? (
+            <div className="team-queue-picker">
+              {candidates === null ? (
+                <p className="hint">讀取中…</p>
+              ) : candidates.filter((c) => !queue.includes(c.number)).length === 0 ? (
+                <p className="hint">沒有其他開啟中的 issue。</p>
+              ) : (
+                candidates
+                  .filter((c) => !queue.includes(c.number))
+                  .map((c) => (
+                    <button
+                      key={c.number}
+                      type="button"
+                      className="team-queue-cand"
+                      onClick={() => setQueue((q) => [...q, c.number])}
+                    >
+                      <span className="issue-num">#{c.number}</span> {c.title}
+                    </button>
+                  ))
+              )}
+            </div>
           ) : null}
         </section>
 
@@ -427,7 +479,7 @@ export function TeamLaunchPanel({
           <header className="team-card-head">
             <span className="team-card-title">交付與預算</span>
           </header>
-
+          <div className="team-card-body">
           <div className="field">
             <span>交付方式</span>
             <div className="opt-group" role="radiogroup" aria-label="交付方式">
@@ -513,35 +565,27 @@ export function TeamLaunchPanel({
             />
           </div>
           <span className="hint">上限只會讓 team「暫停」，不會中止；暫停後可以加碼再繼續。這些數字會記住下次沿用。</span>
+          </div>
         </section>
 
-        <section className="team-card team-quota">
-          <header className="team-card-head">
-            <span className="team-card-title">額度預覽</span>
-            <span className="team-card-note">
-              最多約 {budget.max_relays} 次轉送 × {count + 1 + (hasReviewer ? 1 : 0)} 位成員
-            </span>
-          </header>
-          <div className="team-quota-row">
-            {roles.map((r) => (
-              <span key={r.label} className="team-quota-item">
-                <span className="team-quota-role">{r.label}</span>
-                <QuotaPill kind={r.spec.kind} identity={r.spec.identity} stopPct={budget.quota_stop_pct} />
-              </span>
-            ))}
+        {/* 「額度預覽」那張卡拿掉了：標題列的額度條就是同一組數字，而且一直在畫面上。
+            留下來的是兩個**擋建立**的警告——它們不是預覽，是按下去會出事的理由，所以移到
+            按鈕正上方，只有真的成立時才出現。 */}
+        {blockedKind || missingCli ? (
+          <div className="team-launch-blocks">
+            {blockedKind ? (
+              <p className="team-block" role="alert">
+                {blockedKind.label} 用的 {blockedKind.spec.kind} 額度已達停手線（{budget.quota_stop_pct}%），現在建立 team 會馬上暫停。
+                請換 kind / 身份，或把停手線調高。
+              </p>
+            ) : null}
+            {missingCli ? (
+              <p className="team-block" role="alert">
+                {missingCli.label} 選的 {missingCli.spec.kind} 在{host === 'local' ? '本機' : host}尚未安裝。
+              </p>
+            ) : null}
           </div>
-          {blockedKind ? (
-            <p className="team-block" role="alert">
-              {blockedKind.label} 用的 {blockedKind.spec.kind} 額度已達停手線（{budget.quota_stop_pct}%），現在建立 team 會馬上暫停。
-              請換 kind / 身份，或把停手線調高。
-            </p>
-          ) : null}
-          {missingCli ? (
-            <p className="team-block" role="alert">
-              {missingCli.label} 選的 {missingCli.spec.kind} 在{host === 'local' ? '本機' : host}尚未安裝。
-            </p>
-          ) : null}
-        </section>
+        ) : null}
 
         <div className="team-launch-actions">
           <button type="button" className="btn" onClick={closeTeamLaunch}>

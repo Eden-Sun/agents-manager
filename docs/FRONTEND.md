@@ -42,16 +42,20 @@ web/src/
     mentions.ts    # SPEC §13 的 @mention 規則（與 daemon/src/group.rs 同一套；輸入框與 mock 共用）
     index.ts       # 依 VITE_MOCK 選 transport，對外只暴露具名 API 函式
   store/store.ts   # 單一 Zustand store：server state 鏡像 + UI state + WS 事件處理
+  hooks/
+    useTerminalSnapshot.ts # `GET /terminal` 輪詢（blocked 面板與全畫面共用，可 pause）
+    usePaneKeys.ts         # 鍵名對照（KeyboardEvent → herdr）＋ 依序送鍵的佇列、KEYPAD 按鍵列
   components/
     Sidebar.tsx    # Project 分組、狀態燈、start/stop、新增 Project / Bot 表單
     ChatPanel.tsx  # 標題列、對話/終端分頁、氣泡列表、輸入框（export Bubble）
     GroupChatPanel.tsx # SPEC §13 專案群組聊天：成員燈號列、合併時間軸、@mention 自動完成
     BotSettingsPanel.tsx # Bot 設定（改名 / 模型 / args / 身份 / env / 刪除），另 export ModelField
-    BlockedPanel.tsx # blocked 時的終端快照 + 按鍵面板
+    BlockedPanel.tsx # blocked 時對話上方的終端快照 + 按鍵面板
+    BlockedModal.tsx # blocked 時自動彈出的全畫面 herdr 終端（鍵盤直通 + 按鍵列）
     TerminalTab.tsx  # recent_unwrapped 唯讀快照 + 刷新
     StatusLamp.tsx   # §2.2 合成燈號
     AttachButton.tsx # v4.0：一鍵複製 hosts[].attach_command
-    QuotaStrip.tsx   # v4.0：頂欄 5h/7d 剩餘額度（掛在 Chat/Group 標題列）
+    QuotaStrip.tsx   # v4.0：頂欄 5h/7d 剩餘額度（掛在 Chat/Group 標題列；一次顯示一台主機，SPEC §14）
     Tools.tsx        # v4.0：工具徽章、可收合缺 CLI 提示、用現有 agent 安裝
     KindTag.tsx      # v4.0：kind 圖示/文字全域切換（localStorage）
     ModelPicker.tsx  # v4.0：GET /api/models 驅動的模型 / effort / Fast
@@ -80,7 +84,7 @@ web/src/
 | `GET /messages` → `{messages(正序), turns, has_more}` | `turns` 用來判斷 in-flight / delivery 警示 |
 | `GET /terminal` → `{text, revision, truncated, agent_status}` | blocked 面板每秒輪詢 `visible`、終端分頁手動刷新 `recent_unwrapped` |
 | WS `{seq, type, data}`、`resync` | 記錄最高 `seq`，重連帶 `?since=`；`resync` → 重新 `GET /state` + 目前 bot 的 messages |
-| keys 鍵名 `enter/esc/y/n/up/down/ctrl+c` | 按鍵面板使用同一組字串，並帶 `expect_run_id` |
+| keys 鍵名 `enter/esc/y/n/up/down/ctrl+c` | 按鍵面板使用同一組字串，並帶 `expect_run_id`；鍵盤直通另外送單一字元與 `ctrl+`／`alt+`／`shift+` 組合（herdr 0.8.2 實測皆收） |
 
 **一處刻意的差異**：API.md §6 建議 `source = "hook"` 不加標籤。本 UI 依 SPEC §3.2
 （「assistant 氣泡顯示來源標籤（hook / terminal-fallback）」）兩種都顯示標籤，
@@ -131,12 +135,29 @@ web/src/
 （REVIEW B10）：直接跳通知並 `loadMessages`，輸入框保持可用、文字留在框裡讓使用者重送。
 只有 `pending` / `ok` / `unknown` 才會先在 `turns` map 補一筆，讓輸入框在 WS 事件抵達前就鎖住。
 
-### blocked 面板
+### blocked 面板與全畫面終端
 
-`agent_status = blocked` 時，在聊天視窗上方展開：等寬字體的 `visible` 快照（每 1 秒輪詢
-`GET /api/bots/:id/terminal?source=visible&lines=40`），下方是
-`Enter / Esc / y / n / ↑ / ↓ / ctrl+c` 按鍵按鈕，呼叫 `POST /api/bots/:id/keys` 並帶
-`expect_run_id`。
+`agent_status = blocked` 時有兩層畫面，兩邊共用 `useTerminalSnapshot` 與 `usePaneKeys`：
+
+1. **全畫面（`BlockedModal`）**：blocked 之後 1 秒（`AUTO_OPEN_DELAY_MS`）**自動彈出**，
+   `visible` 200 行，每秒更新。那一秒是留給 daemon 的：claude 的滿意度問卷之類的東西
+   （SPEC §3.1 `tui_prompts`）它自己會按掉，不該為了那個閃一個全畫面視窗出來。
+   要決定「按 y 還是 n」得看到完整的對話框，對話上方那塊 300px 的截角不夠。
+   只彈**目前正在看的**那個 bot：別的 bot 進 blocked 交給側欄紅點，不打斷手上的事。
+   關掉之後不再自動彈回來，直到這個 bot 離開 blocked 又再進去一次（那是另一個問題）。
+2. **面板（`BlockedPanel`）**：聊天視窗上方的 `visible` 40 行快照，全畫面關掉後的留守，
+   標題列有「展開全畫面」把它叫回來。全畫面開著時面板暫停輪詢，一個 bot 只有一條
+   `GET /terminal` 在跑。
+
+兩邊都有 `Enter / Esc / y / n / ↑ / ↓ / ctrl+c` 按鍵列（`POST /api/bots/:id/keys`，帶
+`expect_run_id`）。全畫面另有**鍵盤直通**（預設開）：`herdrKeyFromEvent` 把 `KeyboardEvent`
+翻成 herdr 鍵名直接送進 pane——具名鍵 `enter/esc/tab/backspace/up/down/left/right/f1…f12`、
+任何單一字元（空白寫成 `space`）、`ctrl+` / `alt+` / `shift+` 組合。⌘ 系列留給瀏覽器（⌘C 要能
+複製終端上的錯誤訊息），`home / end / pageup / pagedown / delete` herdr 不收，留著捲畫面。
+直通開著時 **Esc 也會送給 agent**，關閉只走 ✕ 或點視窗外；這句話就寫在視窗頁尾。
+
+送鍵走一條佇列：正在送的時候按下的鍵先累積，下一輪一次送出（`agent.send_keys` 吃陣列，
+順序由它保證）。一顆鍵一個請求的話，打字快一點就會亂序。
 
 ### 終端分頁
 
@@ -199,6 +220,7 @@ __amMock.disconnect() / __amMock.reconnect()  // 模擬 daemon 與 herdr 斷線�
 | `06-reply-hook.png` | 收到 `source = hook` 的回覆 |
 | `07-reply-fallback.png` | `source = terminal_fallback` 回覆，標「可能不完整」 |
 | `08-blocked.png` | blocked 面板：終端快照 + 按鍵列，輸入框顯示鎖定原因 |
+| `340-blocked-modal.png` / `341-blocked-panel-after-close.png` / `342-blocked-modal-dark.png` | blocked 自動彈出的全畫面終端、關掉後的留守面板、深色（`scripts/demo-blocked.mjs`） |
 | `09-after-keys.png` | 按 `y` 之後恢復並收到回覆 |
 | `10-terminal-tab.png` | 終端分頁（`recent_unwrapped` + 刷新） |
 | `10b-socket-reconnecting.png` / `10c-after-resync.png` | 斷線 → 重連 → `resync` 後訊息數不變（7 → 7） |
@@ -259,7 +281,331 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
 
 ## 目錄選擇器（2026-09-05 新增）
 
-新增 Project 表單的「瀏覽…」按鈕會開啟 `DirPicker`（`web/src/components/DirPicker.tsx`），透過 `GET /api/fs/dirs` 逐層瀏覽：上一層、家目錄、麵包屑、手動輸入路徑、單擊進入子目錄、雙擊直接選取、「選擇此目錄」帶回表單並自動填 label。mock 模式有一棵假目錄樹。截圖 `docs/screenshots/40-42`。
+新增 Project 表單的「瀏覽…」按鈕會開啟 `DirPicker`（`web/src/components/DirPicker.tsx`），透過 `GET /api/fs/dirs` 逐層瀏覽。互動照 macOS 開檔面板：
+
+- **單擊列 = 選取**（highlight），主按鈕跟著變成「選擇「foo」」，深層資料夾不必先進去就能選。
+- **進入下一層**：雙擊該列、按列右側的 `›`、鍵盤 `Enter` 或 `→`。
+- **上一層**：`↑` 按鈕、麵包屑、鍵盤 `←` 或 `Backspace`；回上層時會自動把剛離開的那層 highlight 起來。
+- **麵包屑**：家目錄折成 `⌂`，過長路徑橫向捲動不換行；右側 `✎` 切成手動輸入路徑（`Esc` 取回麵包屑）。
+- **篩選框**（自動 focus）：即時過濾這一層，`↑↓` 移動 highlight、`⌘Enter` 直接選取 highlight、`Esc` 先清篩選再取消。
+- **「隱藏資料夾」勾選框**：打 `hidden=1`，把 `.claude`、`.config` 這類目錄一起列出。
+- **版面**：選擇器用 flex 撐滿整個 popup——清單 `flex:1` 吃掉剩下的高度（可點範圍盡量大），只有清單自己捲，麵包屑與底部按鈕永遠釘在畫面上；長檔名一律 ellipsis，清單 `overflow-x: hidden`，不會有橫向捲動蓋掉點擊區。帶選擇器的 popup 由 `.modal:has(.dirpicker)` 固定成 660×760（`--modal-w` CSS 變數讓 CSS 蓋得過元件傳入的寬度）。
+- 底部固定顯示「選擇 <完整路徑>」，帶回表單時自動填 label。mock 模式有一棵假目錄樹（含隱藏目錄，`Downloads` 底下有 24 個項目可以測捲動與篩選）。
+
+驅動腳本 `scripts/demo-picker2.mjs`（先 `VITE_MOCK=1 npx vite --port 5307`），截圖裁到側邊欄：
+
+| 檔案 | 內容 |
+|---|---|
+| `310-picker2-home.png` | 開啟時停在家目錄，麵包屑 `⌂`，篩選框已 focus |
+| `311-picker2-selected-row.png` | 單擊 `project` → 該列 highlight，主按鈕變「選擇「project」」 |
+| `312-picker2-filter.png` | 進到 `⌂/project` 後輸入 `age` → 只剩 `agents-manager`（帶 `git` 標記）且自動 highlight |
+| `313-picker2-keyboard.png` | 篩選框內 `↑↓` 移動 highlight |
+| `314-picker2-hidden.png` | 勾「隱藏資料夾」→ 多出 `.claude` / `.config` |
+| `315-picker2-picked.png` | 「選擇「project」」帶回表單，label 自動填 `project` |
+| `316-picker2-dark.png` | 深色主題；同時驗證再次開啟時會停在上次選的路徑 |
+| `317-picker2-long-short-window.png` | 560px 矮視窗 + 24 個項目：清單撐滿剩餘高度並自己捲（`scrollHeight>clientHeight`、無橫向捲動），底部按鈕仍在畫面內 |
+
+舊版截圖 `40-42` 保留為對照。
+
+
+## 左上角：herdr 佔用的 RAM 總量（SPEC §15，2026-09-06 加）
+
+側邊欄標題列（`Agents Manager` 右邊）多了一格 `RAM 1.5G`，是**所有 herdr 進程樹**現在吃掉的
+常駐記憶體——herdr 自己 ＋ 它底下的 pane 與 agent CLI，所有主機加總。
+
+- 資料來自 `GET /api/mem` 與 WS `mem_updated`（見 docs/API.md），store 存在 `mem`。
+- tooltip 拆給你看：`herdr 本身 X · 底下的 agent Y` / `N 個 process` / 每一台主機各多少 /
+  「每 15 秒更新一次」。
+- **有主機量不到時數字旁邊標 `*`**（`.mem-badge.partial`），tooltip 寫那台為什麼量不到。
+  總和悄悄變小比沒有數字更糟，所以寧可標示不完整。
+- 舊 daemon 沒有 `/api/mem` → `mem` 是 null → 整格不出現（不顯示假的 0）。
+- 數字用 tabular-nums 等寬，跳動時不會把旁邊的東西推來推去。
+
+mock 依「執行中的 bot 各吃一份」推算（claude 820M / codex 640M / grok 410M ＋ herdr 48M/台），
+所以啟動、停止 bot 與主機斷線都真的會讓上面那格動。驗收 `node scripts/demo-membadge.mjs`：
+
+```
+idle            RAM 48M    herdr 本身 48M · 底下的 agent 0     1 個 process
+one bot up      RAM 868M   herdr 本身 48M · 底下的 agent 820M  3 個 process
+two bots up     RAM 1.5G   herdr 本身 48M · 底下的 agent 1.4G  5 個 process
+host added      RAM 1.5G   local：1.5G ／ m4p：48M
+that host down  RAM 1.5G*  m4p：量不到（未連線）              partial=true
+```
+
+截圖 `400-membadge-idle.png`、`401-membadge-running.png`、`402-membadge-partial.png`。
+
+> 沒有在真機上核對過數字：這個沙箱裡的 `ps` 只看得到自己的 31 個 process（連我自己起的
+> vite 都看不到），也沒有跑著的 herdr。演算法有 4 個單元測試（`daemon/src/memstat.rs`）；
+> daemon 本身不在沙箱裡跑，`ps` 會看到完整的樹。**要注意的一個假設**：這裡算的是
+> 「herdr 的子孫」，如果 herdr 是把 pane 丟給 init 領養（double fork）而不是自己當父程序，
+> agent 那一半會是 0——真機上看到 `agents 0` 但明明有 bot 在跑，就是踩到這個。
+
+
+## 版面巡檢與兩個修正（2026-09-06）
+
+`node scripts/audit-pages.mjs`（先 `cd web && VITE_MOCK=1 npx vite --port 5411 --strictPort`；
+`W=1280` 可換寬度）會把每個畫面走一遍——bot 對話 / bot 設定 / 終端分頁 / 群組 / 組隊 /
+team 面板 / 三個 popup——對每個可見元素做三種機械檢查：
+
+1. **相鄰兄弟互相重疊**（就是 team 成員列出事的那種），
+2. **子元素畫到不會裁切也不會捲動的父容器外面**，
+3. **任何超出視窗右緣的東西**，外加整份文件有沒有橫向捲動。
+
+（`svg` 內部的 path 會互相重疊是正常的，所以整棵 svg 子樹排除。）
+
+這一輪抓到並修掉的：
+
+- **team 成員列擠成一團**（使用者回報：`pm dev- dev- dev- dev-4 rev` 疊在一起）。
+  成因是我上一輪把 `.member` 改成群組用的 26px 圓形圖示，但 TeamPanel 的成員籤**共用同一個
+  class**，於是 `pm` / `dev-1` / `rev` 這些短名被塞進 26px 的圓裡。
+  修法：`.member` 還原成原本的膠囊，群組那版改用 `.member.member-icon`——
+  team 那邊短名本身就是角色徽章（SPEC-team §7.3），本來就不能只剩圖示。
+  實測 6 個成員（pm + dev-1…4 + rev）在 1600 與 1100 兩個寬度下相鄰重疊都是 0。
+- **組隊頁「issue 全文」的 disclosure 凸出卡片 13px**：`.disclosure` 是 `width: 100%`，
+  `.team-issue` 又給了左右 14px margin，加起來就超出去。改成 `width: auto`。
+
+修完九個畫面在 1600 / 1280 兩個寬度下全部 clean。截圖 `380-audit-bot-chat.png`、
+`381-audit-group.png`、`382-audit-team.png`、`383-team-members-fixed.png`。
+
+## Bot 改名：點標題就改（2026-09-06 加）
+
+暱稱是拿來分辨兩個 claude 的，改的頻率高，本來卻只能進設定面板改（三次點擊）。
+現在標題列的名字本身就是欄位（`BotNameField`）：
+
+- 點一下 → 變成輸入框，內容全選；`Enter` 存檔、`Esc` 取消、失焦等同 `Enter`。
+- 驗證跟設定面板同一條規則：1–32 字、不能有空白或 `@ , : ;`（CJK 可以）。
+  不合法時邊框轉紅，按 `Enter` 只會還原，不會送出。
+- 走 `PATCH /bots/:id {name}`，**run 執行中也能改**（docs/API.md：herdr 的 agent 名稱是從
+  bot id 推出來的，不受暱稱影響）。改完側邊欄同步更新。
+- 別處（設定面板、另一個分頁）改了名字時，只要沒有正在編輯就會蓋掉本地草稿。
+- **側邊欄也能改**（`variant="row"`）：未選取的那一列，第一下還是「開啟這個 bot」；
+  **已選取**的那一列，點名字就進編輯——就是檔案總管那種「點一下、再點一下改名」。
+  兩種意思因此不會搶同一個手勢，而不是二選一。取消選取時若還開著輸入框會自動收掉。
+- 元件在 `components/BotNameField.tsx`，標題列用 `variant="head"`（點一下直接改），
+  側邊欄用 `variant="row"` + `armed={selected}`。側邊欄那版**不是 `<button>`**：
+  那一列本身是 listbox option 兼拖曳來源，包一顆按鈕會讓它不能拖也不合語意。
+
+驗收 `node scripts/demo-rename.mjs`：
+
+```
+click name      editing=true  value="am-claude"        ← 全選
+space in name   invalid=true                            ← 邊框轉紅
+Enter (invalid) headerName="am-claude"                  ← 還原，沒送出
+Enter (valid)   headerName="前端-1"  sidebar="前端-1,…"  ← 標題與側邊欄一起更新
+Escape          headerName="前端-1"                     ← 草稿丟掉
+```
+
+```
+--- sidebar ---
+click other row selected=am-codex  editingInRow=false   ← 選取移動，沒有開編輯器
+click its name  editingInRow=true                        ← 已選取的那一列才進編輯
+Enter           names="前端-1,後端-2,am-grok"            ← 側邊欄與標題列一起更新
+```
+
+截圖 `390-rename-editing.png`、`391-rename-done.png`、`392-rename-sidebar.png`。
+
+
+## 組隊（TeamLaunchPanel）標題列也掛額度（2026-09-06 加）
+
+組隊是最花額度的一個動作（多個成員各自跑），但 `⚙ 組隊 · <project> · #<issue>` 這條標題列
+原本沒有額度——要按「建立並啟動」之前得先切回別的畫面看。現在跟聊天頁 / 群組頁 / team 頁
+同一條 `.quota-strip`（`<QuotaStrip host={host} />`，放在 `spacer` 與 `.head-actions` 之間）。
+
+`.team-launch-head` 本來就帶 `team-head`，所以上面那條收縮契約（額度與操作 `flex: none`、
+標題讓步）直接適用。量測 `node scripts/demo-launchquota.mjs`：1600 / 1280 / 1100 三個寬度下
+額度右緣分別是 1534 / 1214 / 1034，取消鈕 1584 / 1264 / 1084，都在視窗內且無水平捲動。
+
+**同時把面板裡的「額度預覽」卡拿掉**（`QuotaPill` 與 `.team-quota*` 樣式一併刪）：那張卡跟
+標題列的額度條是同一組數字，而標題列一直在畫面上。卡片裡原本還放了兩段**擋建立**的警告，
+那不是預覽而是「按下去會出事」的理由，所以移到「建立並啟動」正上方（`.team-launch-blocks`），
+只有成立時才出現：
+
+- `blockedKind`：某個角色用的 kind 額度已達停手線 → 建立後會馬上暫停。
+- `missingCli`：某個角色選的 CLI 在該主機沒安裝（UI 上那個選項本來就是 disabled，這條是防守用）。
+
+驗收把停手線壓到最低（`stop line 1%`）逼出第一條：`blocks:1`、文字完整、
+`aboveActions:true`（就貼在按鈕上方，也就是原本那張卡的位置）。
+截圖 `370-launch-header-quota.png`、`371-launch-block-alert.png`。
+
+
+## Bot 標題列：狀態文字換成 pane id（2026-09-06 改）
+
+`執行中 ▾` / `閒置 ▾` 那一格是把左邊的燈號再用文字講一次。狀態看燈就好（`StatusLamp` 自己
+帶 tooltip），這格改放 **pane id**——debug 時真正要抄的那一串：
+
+- 有 run 才出現，內容是 `run.pane_id`（例：`w1:pA`）＋一個小 `▾`。
+- 點一下展開 / 收合底下的識別列（`.run-debug`：pane、agent、session、workspace、run id，
+  每個都可點擊複製），跟原本的開關是同一個。
+- tooltip 寫 `pane <id>（<狀態>）· 點一下展開…`，所以狀態文字沒有真的消失，只是不再常駐。
+- 顏色保持中性（mono、`--text-dim`），不跟著 lamp 變色——狀態的顏色語彙留給燈號。
+- 沒有 run 時整格不渲染（原本會留一段「離線」文字）。燈號已經說了。
+
+驗收 `node scripts/demo-panetoggle.mjs`：
+
+```
+stopped bot | slot=null                 lamp title=離線
+running bot | slot="w1:pA▾"  detailOpen=false
+after click | slot="w1:pA▴"  detailOpen=true
+click again | slot="w1:pA▾"  detailOpen=false
+```
+
+截圖 `360-pane-toggle-closed.png`、`361-pane-toggle-open.png`。
+
+
+## 群組標題列：成員只留圖示＋數量、attach 只留群組（2026-09-06 改）
+
+- **`AttachButton` 從 bot 對話頁拿掉**（`ChatPanel` 的兩處：已選 bot 的標題列、與「未選擇 Bot」
+  的空狀態列）。herdr session 是**專案層級**的，同一個專案的所有 bot 共用一個，
+  所以在每個 bot 的標題列各放一顆只是重複。現在只有群組標題列有（`GroupChatPanel`）。
+  另外兩處保留：側邊欄 project 列（滑過才出現）與「環境設定 → 主機」（那是**主機**層級的
+  attach 指令，不是專案的）。
+- **`MemberStrip` 不再列出成員名字**：一個成員一顆 26px 的圓形 kind 圖示，狀態燈掛在右下角，
+  hover 才顯示 `名稱：狀態`，點下去照樣開那個 bot 的單獨對話。名字在側邊欄本來就有。
+- **數量搬到圖示旁邊**（`.members-count`）：原本 `N 個成員` 在額度條的另一邊，跟圖示隔著半個
+  標題列。專案完整路徑的 tooltip 移到標題的 `<strong title=…>`。
+
+量測（`node scripts/demo-groupmembers.mjs`，先 `cd web && VITE_MOCK=1 npx vite --port 5411 --strictPort`）：
+
+| | 改前 | 改後 |
+|---|---|---|
+| 3 個成員的 `.members` 寬度 | 約 330px（三顆帶名字的 chip） | **135px**（三顆 26px 圖示＋「3 個成員」） |
+| bot 對話頁的 attach 按鈕 | 有 | 無 |
+| 群組標題列的 attach 按鈕 | 有 | 有 |
+| 點成員圖示 | 開該 bot 的單獨對話 | 一樣（`stillGroup:false`、標題 `am-claude`） |
+
+截圖 `350-group-members-icons.png`。
+
+
+## 鍵盤換 bot（2026-09-06 新增）
+
+| 按鍵 | 位置 | 行為 |
+|---|---|---|
+| `↑` / `↓` | 焦點在側邊欄某一列 bot 上 | 換到上／下一個 bot，**焦點跟著跳到新的那一列**（listbox 標準行為），並 `scrollIntoView` |
+| `⌥↑` / `⌥↓` | 任何地方（輸入框裡也算） | 換到上／下一個 bot，**焦點留在原地**，打到一半的字不會掉 |
+| `⌥↑` / `⌥↓` | 焦點在某一列 bot 上 | 維持原本的「排序」語意（跟相鄰那列交換），不是換 bot |
+| `Enter` / `Space` | 焦點在某一列 bot 上 | 選取（原有行為） |
+
+- 順序是**側邊欄看到的順序**：專案由上而下，專案內用使用者拖出來的 `botOrder`
+  （`orderedBotIds()`）；頭尾會繞回去（`adjacentBotId()`，兩個都在 `store/store.ts`）。
+- 沒有選任何 bot 時（例如正在看群組或 team），`⌥↓` 從第一個開始、`⌥↑` 從最後一個開始。
+- 全域監聽器（`App.tsx` 的 `useBotSwitchKeys`）刻意跳過三種情況：`e.defaultPrevented`、
+  焦點在 `.bot-row` 內（那裡 `⌥` 是排序）、以及畫面上有 `.modal-backdrop` / `.confirm-backdrop`
+  （對話框開著的時候鍵盤是它的）。**單獨的 `↑`/`↓` 全域不攔**——那是輸入框、select、
+  終端各自的鍵。
+- 選到新的 bot 後焦點會落到 composer（既有行為），所以「⌥↑↓ 挑 bot → 直接打字」是順的。
+
+驗收 `node scripts/demo-botkeys.mjs`（先 `cd web && VITE_MOCK=1 npx vite --port 5411 --strictPort`）：
+
+```
+↓ in sidebar  selected=am-codex  focused=am-codex     ← 選取與焦點一起走
+plain ↓ (composer)  selected 不變，textarea 內容 "打到一半的字" 保留
+⌥↓ (composer)  selected=am-grok   focused=textarea    ← 焦點沒被搶走
+↑ from first   selected=am-grok（繞到最後一個）
+⌥↓ in a row    順序 am-claude,am-codex → am-codex,am-claude（排序沒被換 bot 蓋掉）
+```
+
+截圖 `340-botkeys-sidebar.png`。
+
+
+## Bot 聊天頁：三排 chrome 併成兩排（2026-09-06 改）
+
+原本標題列下面還疊了兩條各佔一整排、卻都填不滿的橫條：statusline（帳號／模型／context／5h／7d／花費／版本）
+與 issues bar（repo chip）。現在合成一排 `.context-bar`：
+
+- **左邊**：issues repo chip；**右邊**：statusline 欄位，中間一條分隔線。
+- 只有 statusline 那一半 `overflow-x: auto`。`.issues-pop` 是 `.issues-bar` 內的絕對定位彈窗，
+  外面只要有 `overflow` 祖先就會被裁掉，所以捲動不能掛在整排上。
+- issues chip 只在「對話」分頁出現（終端沒有輸入框可以插入 issue），statusline 兩個分頁都在。
+- 兩邊都沒東西時整排不渲染（`hasStatus` 用傳的，因為 `<StatusLineBar>` 即使 return null 也是個 truthy element）。
+
+順手砍掉重複資訊：
+
+| 原本在 statusline | 現在 |
+|---|---|
+| `5h 85% · 剩 10m`、`7d 27% · 剩 20h10m` | 拿掉——右上角額度條就是這兩個數字 |
+| `模型 Opus 5 · 高 · thinking` | 併進標題列的 model badge（`Opus 5 · 高 · thinking`，`· 高 · thinking` 用 `.model-tag-extra` 淡色） |
+| — | badge 原本 `bot.model` 為 null（＝由 CLI 決定）時整個不顯示；現在會退回 statusline 回報的實際模型，用虛線邊框（`.model-tag.reported`）標示「這是 CLI 選的，不是你設定的」 |
+
+標題列的收縮順序也一併補上（跟上一節 Team 標題列同一套契約）：`.main-title` `overflow: hidden`，
+bot 名稱 `min-width: 4.5em` 不會被擠不見，model badge `min-width: 4em` 不會縮成空盒子，
+⚙ 設定鈕移到名稱後面（cluster 是從尾巴開始裁的，而 badge 都在別處看得到、設定鈕沒有）。
+
+量測（`node scripts/demo-contextbar.mjs`，先 `cd web && VITE_MOCK=1 npx vite --port 5411 --strictPort`；
+mock 現在會給 claude bot 一份真實形狀的 statusLine payload）：
+
+| 視窗寬 | header 以下 chrome 高度 | bot 名稱 | ⚙ | quota 右緣 | actions 右緣 |
+|---|---|---|---|---|---|
+| 1920 | 35px（原本 statusline + issues 兩排） | 可見 74px | 可見 | 1614 | 1904 |
+| 1440 | 35px | 可見 63px | 可見 | 1134 | 1424 |
+| 1280 | 35px | 可見 63px | 可見 | 974 | 1264 |
+
+issues 彈窗展開高度 468px、沒有被 `.context-bar` 裁到。
+截圖：`329-contextbar-after-1920.png`、`330-contextbar-after.png`、
+`331-contextbar-issues-open.png`、`332-contextbar-terminal.png`。
+
+
+## 標題列（`.main-head`）的收縮契約（2026-09-06 修）
+
+Team 面板長標題（`Team · #1 群組時間軸的 ULID 同毫秒排序隱患…`）加上「已暫停・成員啟動失敗」與
+「交付：留分支」兩顆 badge 時，右邊的額度（`.quota-strip`）與操作按鈕會被推出視窗、cc1 只剩半截。
+
+根因：`.group-head .main-title { flex: none }` 也套到 TeamPanel（`main-head group-head team-head`），
+所以整串標題＋badge 完全不能收縮，只能把右邊的東西往外推。
+
+契約（`web/src/styles.css`）：
+
+- `.main-head > .quota-strip`、`.main-head > .head-actions`：`flex: none`，**永遠完整可見**。
+- `.team-head .main-title`：`flex: 1 1 auto; min-width: 0; overflow: hidden`。
+  `overflow: hidden` 是必要的——badge 有 padding 撐出的寬度下限，少了它一旦被擠扁就會畫到
+  BudgetMeter 上面。
+- `.team-head .main-title strong`：`min-width: 6em`，標題可以被截斷但不會整個消失
+  （「現在在哪個 team」是最不能不見的資訊），完整標題留在 tooltip。
+- `.team-head .team-phase / .team-deliver`：`flex: 0 1 auto` + ellipsis，空間不夠時先讓步。
+- GroupChatPanel 的 `.group-head .main-title { flex: none }` 沒動，ChatPanel 也沒動。
+
+量測（`node scripts/verify-main-head-layout.mjs`，先 `cd web && VITE_MOCK=1 npx vite --port 5411 --strictPort`，
+腳本會自己在 mock 裡建一個 team、注入問題標題，並用同一份 CSS 的 `!important` 還原修正前狀態當對照）：
+
+| 視窗寬 | 修正前 quota 右緣 | 修正後 quota 右緣 | 修正後 actions 右緣 |
+|---|---|---|---|
+| 1440 | 1679（超出 +427px） | 1236 | 1424 |
+| 1100 | 1564（超出 +652px） | 900 | 1088 |
+
+1800 / 1600 / 1440 / 1280 / 1100 / 1024 全部 `overflow none`、無水平捲動。
+截圖：`main-head-quota-clip-before(-1100).png`、`main-head-quota-clip-after(-1100).png`、
+`main-head-group-chat-after.png`、`main-head-chat-after.png`。
+
+已知限制：約 1150px 以下，`budget + quota + actions` 三塊固定寬度就吃掉整條標題列，標題會被完全裁掉。
+`QuotaStrip` 的 `collapsed`（`width < 1100`）目前只換樣式、**寬度仍是 434px**，沒有真的省空間；
+要讓窄視窗也看得到標題，得先讓 collapsed 真的縮寬（另案）。
+
+
+## 新增 Project / 新增 Bot / 環境設定 = popup（2026-09-06 改）
+
+這三個原本都長在側欄裡：前兩個把整個側欄換掉（頂部一顆「←」返回），環境設定是底部的
+disclosure 往上展開、把 bot 清單擠掉。現在統一改成置中 popup（`components/Modal.tsx`）：
+
+- 背景是半透明遮罩，**bot 清單留在後面看得到**，關掉就回到原本的捲動位置。
+- 三種關法一致：`Esc`、右上角 `✕`、點遮罩。popup 內層若自己吃掉 `Esc`（例如目錄選擇器會先
+  退回表單），`Modal` 看 `defaultPrevented` 就不會跟著關 —— 一次只關一層。
+- 開啟時自動 focus body 裡第一個可輸入元素。
+- body 沿用 `.sheet-body` class，所以 P1 那批表單樣式（欄位高 40px、間距 16px、
+  `.sheet-body:has(> .dirpicker)` 的撐高規則）原封不動繼續套用。
+- 「環境設定」popup 寬 560，內容分成「主機 / 身分 / 顯示」三段（`.env-sec`），
+  比原本擠在側欄底部好讀；側欄底部只剩一顆帶齒輪 icon 的按鈕與摘要文字。
+
+`.new-bot-sheet` / `.new-project-sheet` / `.sheet-head` 這三個 class 隨之退場。
+驗收腳本 `scripts/demo-popups.mjs`：
+
+| 檔案 | 內容 |
+|---|---|
+| `320-popup-project.png` | 新增 Project popup，後面看得到 bot 清單 |
+| `321-popup-project-picker.png` | popup 內開目錄選擇器：660×760、清單高 523px、底部按鈕仍在畫面內 |
+| `322-popup-bot.png` | 新增 Bot popup，標題列帶 project 名稱；高度隨內容收合 |
+| `323-popup-env.png` | 環境設定 popup，主機／身分／顯示三段 |
+| `324-popup-env-dark.png` | 同上，深色主題 |
+
+腳本同時斷言：選擇器內按 `Esc` 只退回表單（popup 仍開），再按一次才關；`✕` 與點遮罩都會關。
 
 
 ## 遠端主機（SPEC §11.6，2026-09-06 新增）
@@ -286,7 +632,7 @@ Project 可以位於另一台機器（daemon 透過 SSH 轉發連遠端 herdr）
 
 ### UI
 
-- **sidebar 底部「主機」disclosure**（`components/HostsPanel.tsx`）：右側顯示 `本機 + N ・ M 個未連線`。
+- **「環境設定」popup 裡的「主機」段**（`components/HostsPanel.tsx`）：側欄底部按鈕右側顯示 `本機 + N ・ M 個未連線`。
   每個 host 一列：連線燈（綠 / 灰）、名稱、使用中的 Project 數、`ssh 目標:port ・ session`、
   未連線時的錯誤字串、「重連」（`POST /hosts/:name/reconnect`）與「✕」刪除
   （`DELETE /hosts/:name`；仍有 Project 使用會被後端 409 擋下並顯示 reason）。
@@ -670,12 +1016,17 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 
 ### 8.3 模型 / effort / Fast
 
-- `GET /api/models?kind=&host=` → `ModelPicker.ApiModelFields`（codex / grok）。
+- `GET /api/models?kind=&host=` → `ModelPicker.ApiModelFields`（三種 kind 都走它）。
   選模型後顯示該模型的 `efforts`；`service_tiers` 含 `priority` 才顯示 Fast 開關。
   切到無 Fast 的模型會清掉 `fast`。
-- claude 仍用靜態 `ModelField`（opus / sonnet / haiku）。
+- claude 的模型是 daemon 端的靜態清單（opus / sonnet / haiku / fable），**v4.1 起帶
+  `--effort` 的五級**（low / medium / high / xhigh / max，每個 alias 都一樣）。因為不隨模型
+  變，強度那列不顯示「依 <模型>」的註記；也沒有 slash 形式（claude 的 `/effort` 是拉桿），
+  所以改強度一定是「重啟後才會套用」。
 - 失敗或舊 daemon（可能回 SPA HTML 200）：退回 `MODEL_OPTIONS`；codex 另帶
-  `CODEX_EFFORT_OPTIONS`，grok 帶 `EFFORT_OPTIONS`。Fast 在靜態清單不顯示（無 tiers）。
+  `CODEX_EFFORT_OPTIONS`，grok 帶 `EFFORT_OPTIONS`，claude 帶 `CLAUDE_EFFORT_OPTIONS`。
+  Fast 在靜態清單不顯示（無 tiers）。
+- 截圖：`353-claude-effort.png`（`node scripts/demo-claude-effort.mjs`）。
 - `bot.fast` / `bot.persona` 貫穿 types → normalize → mock → 新增表單 → 設定面板。
 
 ### 8.4 額度列
@@ -686,6 +1037,36 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 - `claude:<identity>`（例如 `claude:cc1`）各自獨立一條 gauge，kind 圖示旁以小字標身份名稱；
   與預設帳號的 `claude` 列並存（cc0 / cc1 都在時就會看到兩條 Claude）。
 - 失敗 / 空 map → 整列不渲染。
+
+**一次一台主機**（SPEC §14）。store 的 `quota` 是全部主機的合併 map，key 在遠端帶 `<host>/` 前綴
+（`m4p/claude:cc1`），每筆另有 `host`。`QuotaStrip` 收一個 `host` prop：
+
+- 來源：ChatPanel → 該 bot 專案的 host；GroupChatPanel → Project 的 host；TeamPanel → Team 專案的
+  host；沒選任何東西 → `local`。
+- 元件內先 `scopeToHost()` 把 map 投影成該主機的裸 key，原本那套「cc0 → cc1 → codex → grok」的固定
+  排序完全不必知道主機存在；讀 store 時再用 `quotaKey(host, base)` 組回完整 key。
+- 遠端在條的最左邊掛一個主機名牌 `.quota-host`，**本機不掛**（預設狀態，多一個「本機」只會吃掉標題列
+  寬度；那裡本來就有 `HostBadge`）。gauge 的 tooltip 一律以主機名開頭，popover 標題是「本機額度」/
+  「m4p 的額度」。
+- 側欄 bot 列的 critical 警告（`botQuotaWarning`）也吃 host，遠端 bot 讀它自己那台的列。
+- 截圖：`340-quota-host-local.png`（本機）、`341-quota-host-remote.png`（m4p）、
+  `342-quota-host-remote-pop.png`（popover）、`343`〜`345`（切回本機 / 深色 / 1040 寬）；
+  重跑 `node scripts/demo-quota-host.mjs`（需 `VITE_MOCK=1 npx vite --port 5311`）。
+
+### 8.4.1 身份清單的來源（SPEC §15）
+
+- store 的 `identities` 仍是 config.toml 那一份；每台主機另外有 `hosts[].identity_status`
+  （本機是 `localIdentityStatus`），裡面除了登入狀態還帶 `source`（`config` / `shell`）與
+  `config_dir`。
+- `identitiesOfHost(all, status)`（`store.ts`）把兩者合起來：config 先，同名的 shell 身份讓位——
+  和 daemon 的 `tools::identities_for_host` 同一條規則。它是**純函式**，元件端用 `useMemo`
+  （回新陣列的 selector 會無限 re-render，React #185）。
+- 用它的地方：`IdentityOptions`（新增 Bot / Bot 設定 / 開團的身份選項，吃 bot 會跑的那台 host）、
+  `QuotaStrip`（額度列一次一台，身份也要跟著那一台）、側欄腳的身份計數（本機）。
+- `IdentitiesPanel` 下半段列出各主機 shell 認來的身份（`.identity-shell-block`）：唯讀，沒有刪除鈕，
+  寫明是哪台主機、指到哪個 `CLAUDE_CONFIG_DIR`。同名被 config 蓋掉的不重複列。
+- 截圖：`350-identities-shell-local.png`、`351-identities-shell-two-hosts.png`、
+  `352-bot-settings-identity-options.png`；重跑 `node scripts/demo-identity-shell.mjs`。
 
 ### 8.5 工具偵測與安裝
 
@@ -889,8 +1270,25 @@ epoch 秒好和 claude 的欄位共用同一個 renderer）。沒有帳號就把
 `run.status`（它的資料更多，還有 context 和花費）。
 
 **點模型改（2026-09-06）**：狀態列的「模型 …」和標題列的模型標籤都是按鈕，開出
-`ModelQuickPicker`（模型清單；grok / codex 還有強度）。選了就 `PATCH /api/bots/:id`。
+`ModelQuickPicker`（模型清單，三種 kind 現在都有強度）。選了就 `PATCH /api/bots/:id`。
 claude / grok 執行中會走 TUI slash 指令當場套用（grok `/model <id> [effort]`、`/effort`；
-claude `/model`）；codex 仍要重啟。
+claude `/model`）；claude 的**強度**與 codex 的任何改動仍要重啟。
 
 grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它的那條只會有目錄與模型。
+
+## Team 完成後的「關閉 issue」提議（SPEC-team §10.7）
+
+`TeamPanel` 在 `phase === 'done'`、`issue_closed_at` 為 null、且該專案有 GitHub origin 時，在 PM 總結
+下面顯示一列提議（`.team-close-issue`）與一顆「關閉 issue #N」按鈕；按下去先出 `ConfirmDialog`
+（說明會留什麼留言、以及分支還沒合併進 base 這件事），確認後才呼叫 `POST /teams/:id/close-issue`。
+
+- **不做自動關閉**：這一列是提議，不是進度；daemon 端也拒絕在非 `done` 的 team 上關 issue。
+- 關掉後標題列的 issue 連結變成「issue #N · 已關閉」，提議列消失（`issue_closed_at` 有值）。
+- 專案沒有 GitHub origin 時整列不顯示（後端會回 400，但使用者不該先看到一顆按不動的按鈕）。
+
+### timeline 不再吞掉沒有 `text` 的 note
+
+`eventText()` 原本只認 `payload.text`，所以 `member_start_failed` / `pretrust_failed` /
+`protocol_error` / `issue_closed` 這些帶結構化欄位的 note 會回 `null`，整列不渲染——成員啟動失敗時
+畫面上只剩一個灰燈與「已暫停：成員已離線」，原因明明就在 team 日誌裡卻看不到。現在四種 action 各給
+一句人話，其餘 note 至少顯示 `action` 與可讀欄位。

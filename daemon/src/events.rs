@@ -172,6 +172,20 @@ pub async fn watch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
     watch_pane_on_session(app, host, &session, pane_id).await;
 }
 
+/// Generation of the watcher currently registered for a pane, only ever read or written
+/// while holding `pane_watchers`. A watcher that ends by itself has to take its own map entry
+/// with it — `watch_pane_on_session` treats a present key as "already watching", so a
+/// leftover entry meant that pane could never be subscribed again: the bot's lamp froze at
+/// its adoption-time status and neither `cancel_stall` nor `begin_external_turn` ever fired
+/// (§6.6) — but it must not evict a *newer* watcher installed for the same pane meanwhile.
+fn watcher_gens() -> &'static std::sync::Mutex<std::collections::HashMap<PaneKey, u64>> {
+    static G: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PaneKey, u64>>> =
+        std::sync::OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+type PaneKey = (String, String, String);
+
 /// Open (or replace) the per-run `pane.agent_status_changed` subscription for an explicit session.
 pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
     let key = (host.to_string(), session.to_string(), pane_id.to_string());
@@ -179,10 +193,17 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
     if g.contains_key(&key) {
         return;
     }
+    let generation = {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        watcher_gens().lock().unwrap().insert(key.clone(), n);
+        n
+    };
     let app2 = app.clone();
     let pid = pane_id.to_string();
     let hst = host.to_string();
     let sess = session.to_string();
+    let own = key.clone();
     let handle = tokio::spawn(async move {
         let mut backoff = Duration::from_millis(250);
         loop {
@@ -208,8 +229,19 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));
         }
+        forget_watcher(&app2, own, generation).await;
     });
     g.insert(key, handle);
+}
+
+/// Drop a watcher's own registration, on every path out of its loop.
+async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64) {
+    let mut watchers = app.pane_watchers.lock().await;
+    let mut gens = watcher_gens().lock().unwrap();
+    if gens.get(&key) == Some(&generation) {
+        gens.remove(&key);
+        watchers.remove(&key);
+    }
 }
 
 pub async fn unwatch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
@@ -218,12 +250,10 @@ pub async fn unwatch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
 }
 
 pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
-    if let Some(h) = app
-        .pane_watchers
-        .lock()
-        .await
-        .remove(&(host.to_string(), session.to_string(), pane_id.to_string()))
-    {
+    let key = (host.to_string(), session.to_string(), pane_id.to_string());
+    let mut watchers = app.pane_watchers.lock().await;
+    watcher_gens().lock().unwrap().remove(&key);
+    if let Some(h) = watchers.remove(&key) {
         h.abort();
     }
 }
@@ -262,6 +292,15 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     // The agent reacted to the prompt: the stall watchdog is no longer needed.
     if status == "working" || status == "blocked" {
         crate::lifecycle::cancel_stall(app, &run.id).await;
+    }
+
+    // 剛停下來等人回答的話，先看一眼是不是 claude 那份滿意度問卷——是的話 daemon 自己按 0，
+    // 使用者不必為了一個跟工作無關的問題被彈窗打斷（§3.2）。其他 blocked 原封不動。
+    if prev != "blocked" && status == "blocked" {
+        let (app2, run2) = (app.clone(), run.clone());
+        tokio::spawn(async move {
+            crate::tui_prompts::dismiss_if_survey(&app2, &run2).await;
+        });
     }
 
     // An agent that starts working with no turn in flight was prompted from the tmux pane, not

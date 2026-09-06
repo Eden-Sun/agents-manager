@@ -9,6 +9,7 @@ import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDro
 import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, useScrollTail } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { IssuesBar } from './IssuesBar'
+import { KindIcon } from './KindTag'
 import { QuotaStrip } from './QuotaStrip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
@@ -78,6 +79,7 @@ function foldRows(list: GroupMessage[]): Row[] {
   return rows
 }
 
+/** Icons + a count, nothing else: who is in the group is the sidebar's job. */
 function MemberStrip({ projectId }: { projectId: string }) {
   const members = useStore(useShallow((s) => s.bots.filter((b) => b.project_id === projectId)))
   const selectBot = useStore((s) => s.selectBot)
@@ -86,17 +88,33 @@ function MemberStrip({ projectId }: { projectId: string }) {
       {members.map((b) => (
         <MemberChip key={b.id} bot={b} onOpen={() => selectBot(b.id)} />
       ))}
-      {members.length === 0 ? <span className="hint">（尚無 Bot）</span> : null}
+      {members.length === 0 ? (
+        <span className="hint">（尚無 Bot）</span>
+      ) : (
+        <span className="members-count">{members.length} 個成員</span>
+      )}
     </div>
   )
 }
 
+/**
+ * Icon only. The names used to be spelled out here, which cost the header ~90px per member
+ * to repeat what the sidebar already lists; the count lives in `.main-status` next to the
+ * strip, and the name is one hover away.
+ */
 function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
   const lamp = useStore((s) => botLamp(s, bot.id))
   return (
-    <button type="button" className="member" role="listitem" title={`${bot.name}：${LAMP_LABEL[lamp]}（點擊開啟單獨對話）`} onClick={onOpen}>
-      <StatusLamp lamp={lamp} />
-      <span className={`bot-badge ${bot.kind}`}>{bot.name}</span>
+    <button
+      type="button"
+      className={`member member-icon ${bot.kind}`}
+      role="listitem"
+      title={`${bot.name}：${LAMP_LABEL[lamp]}（點擊開啟單獨對話）`}
+      aria-label={`${bot.name}：${LAMP_LABEL[lamp]}`}
+      onClick={onOpen}
+    >
+      <KindIcon kind={bot.kind} />
+      <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
     </button>
   )
 }
@@ -559,17 +577,14 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           <span className="group-icon" aria-hidden="true">
             ⌗
           </span>
-          <strong>{project.label}</strong>
+          <strong title={project.path}>{project.label}</strong>
           <span className="group-tag">群組</span>
           <HostBadge host={hostName} connected={hostUp} />
         </div>
         <MemberStrip projectId={projectId} />
         <span className="spacer" />
         <ToolsHintIcon />
-        <QuotaStrip />
-        <span className="main-status" title={project.path}>
-          {memberCount} 個成員
-        </span>
+        <QuotaStrip host={hostName} />
         <AttachButton command={attachCommand} compact />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={() => selectProject(null)} title="回到單一 Bot 的對話">

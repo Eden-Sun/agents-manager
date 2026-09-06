@@ -18,6 +18,7 @@ mod hook_cmd;
 mod hookrecv;
 mod hosts;
 mod lifecycle;
+mod memstat;
 mod models;
 mod projection;
 mod quota;
@@ -30,6 +31,8 @@ mod team;
 mod team_git;
 mod team_sched;
 mod tools;
+mod trust;
+mod tui_prompts;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -214,6 +217,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
     quota::spawn_codex_poller(app.clone());
+    memstat::spawn_poller(app.clone());
     quota_claude::spawn_claude_poller(app.clone());
     quota_grok::spawn_grok_poller(app.clone());
     github::spawn_detect_all(app.clone());
@@ -221,6 +225,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     team::respawn_schedulers(&app).await;
     // Agent titles (what each agent calls itself) — no herdr event for it, so it polls.
     events::spawn_title_poller(app.clone());
+    tui_prompts::spawn_survey_watcher(app.clone());
 
     {
         let app2 = app.clone();
@@ -246,7 +251,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     tracing::info!(%addr, "listening");
     // SPEC §11.3.5: close every ssh master on the way out; remote herdr servers stay alive.
     let shutdown_app = app.clone();
-    axum::serve(listener, router)
+    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async move {
             let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
             match term.as_mut() {

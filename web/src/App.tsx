@@ -59,6 +59,30 @@ function ConnBanner() {
   )
 }
 
+/**
+ * ⌥↑ / ⌥↓ switches bot from anywhere, so you can move between bots without leaving the
+ * composer. Plain ↑/↓ is left alone: it belongs to whatever has focus (the composer's own
+ * text, the sidebar listbox, a select). Inside a bot row ⌥↑/↓ already means "reorder", and
+ * a dialog owns the keyboard while it is open — both are skipped here.
+ */
+function useBotSwitchKeys() {
+  const selectAdjacentBot = useStore((s) => s.selectAdjacentBot)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.metaKey || e.ctrlKey || e.isComposing) return
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+      if (e.defaultPrevented) return
+      const target = e.target instanceof Element ? e.target : null
+      if (target?.closest('.bot-row')) return
+      if (document.querySelector('.modal-backdrop, .confirm-backdrop')) return
+      e.preventDefault()
+      selectAdjacentBot(e.key === 'ArrowUp' ? -1 : 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selectAdjacentBot])
+}
+
 export default function App() {
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
@@ -67,11 +91,15 @@ export default function App() {
   // SPEC-team §11.5：`teamLaunch` / `selectedTeamId` 與 `selectedProjectId` 互斥。
   const teamLaunch = useStore((s) => s.teamLaunch)
   const teamId = useStore((s) => s.selectedTeamId)
+  // 只為了下面那個 key：ChatPanel 自己從 store 讀 selectedBotId。
+  const botId = useStore((s) => s.selectedBotId)
   const [drawer, setDrawer] = useState(false)
 
   useEffect(() => {
     void bootstrap()
   }, [bootstrap])
+
+  useBotSwitchKeys()
 
   if (!ready) {
     return (
@@ -120,7 +148,10 @@ export default function App() {
         ) : groupProjectId ? (
           <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
-          <ChatPanel onOpenSidebar={() => setDrawer(true)} />
+          // 跟 TeamPanel / GroupChatPanel 一樣要 key：換 bot 就重新掛載，還沒送出的圖片
+          // （useAttachments）、捲動位置等本地狀態才不會跟著跑到下一個 bot 身上。草稿存在
+          // store 裡（依 bot 分開），不受重新掛載影響。
+          <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />
         )}
       </main>
       <Notices />

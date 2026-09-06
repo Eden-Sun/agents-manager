@@ -2,20 +2,22 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
-import { CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, MODEL_OPTIONS, effortLabel } from '../api/types'
+import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, MODEL_OPTIONS, effortLabel } from '../api/types'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
 /**
  * v4.0 model / effort / fast, driven by `GET /api/models?kind=&host=`.
- * Claude is static on the daemon (opus / sonnet / haiku / fable, no efforts);
+ * Claude is static on the daemon (opus / sonnet / haiku / fable, all with the same five
+ * `--effort` levels — claude has no per-model list the way codex does);
  * codex and grok come from their CLIs. When the call fails the static
  * `MODEL_OPTIONS` list (and kind-specific efforts) is used instead, so the
  * form still works against an older daemon.
  */
 
 function staticModels(kind: BotKind): ModelInfo[] {
-  const efforts = kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : []
+  const efforts =
+    kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
   return MODEL_OPTIONS[kind].map((id, i) => ({
     id,
     display_name: id,
@@ -100,16 +102,10 @@ export function ApiModelFields({
           <button
             type="button"
             className={`opt${model === null && !customMode ? ' on' : ''}`}
-            title={
-              kind === 'claude'
-                ? '不帶 --model，由這個專案的 Claude 設定決定'
-                : defaultModel
-                  ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）`
-                  : '不帶 -m'
-            }
+            title={defaultModel ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）` : '不帶 -m'}
             onClick={() => pickModel(null)}
           >
-            {kind === 'claude' ? '不指定模型（專案預設）' : '使用 CLI 預設'}
+            使用 CLI 預設
           </button>
           {models.map((m) => (
             <button
@@ -142,7 +138,10 @@ export function ApiModelFields({
         <div className="field">
           <span>
             強度
-            {current && current.id !== model ? <span className="field-note">依 {current.display_name}</span> : null}
+            {/* claude 的五級跟模型無關（`claude --help` 就那一組），標「依 <模型>」會是假資訊。 */}
+            {current && current.id !== model && kind !== 'claude' ? (
+              <span className="field-note">依 {current.display_name}</span>
+            ) : null}
             {/* grok 的 TUI 有 /effort，daemon 會直接送進去；codex 只能重啟。 */}
             {kind === 'grok' ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
           </span>

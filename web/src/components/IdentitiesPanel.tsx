@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { BotKind } from '../api/types'
+import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
@@ -45,6 +45,47 @@ export function IdentityBadge({ name, showDefault }: { name: string | null; show
   )
 }
 
+/**
+ * 一個身份在每台主機上的登入狀態。
+ *
+ * 身份是全域設定，但它指到的帳號是**每台主機各自登入**的：`CLAUDE_CONFIG_DIR` 在每台機器
+ * 都展得開，那個資料夾裡卻不一定有能用的帳號。所以這裡一台一台列，而不是給一個總結。
+ * `null` = 問不到（CLI 沒裝、還沒偵測），標「未知」而不是「未登入」。
+ */
+function IdentityHostLogins({ name }: { name: string }) {
+  const localStatus = useStore((s) => s.localIdentityStatus[name])
+  const hosts = useStore((s) => s.hosts)
+  const rows: { host: string; label: string; state: boolean | null; account: string | null }[] = [
+    { host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null },
+  ]
+  for (const h of hosts) {
+    const st = h.identity_status[name]
+    rows.push({ host: h.name, label: h.name, state: h.connected ? (st?.logged_in ?? null) : null, account: st?.account ?? null })
+  }
+  return (
+    <span className="identity-logins">
+      {rows.map((r) => {
+        const text = r.state === true ? '已登入' : r.state === false ? '未登入' : '未知'
+        const title =
+          r.state === true
+            ? `${r.label}：已登入${r.account ? `（${r.account}）` : ''}`
+            : r.state === false
+              ? `${r.label}：這個身份沒有登入，用它啟動的 bot 會停在登入畫面`
+              : `${r.label}：問不到登入狀態（CLI 沒裝、主機沒連上，或還沒偵測過）`
+        return (
+          <span
+            key={r.host}
+            className={`identity-login is-${r.state === true ? 'ok' : r.state === false ? 'out' : 'unknown'}`}
+            title={title}
+          >
+            {r.label} {text}
+          </span>
+        )
+      })}
+    </span>
+  )
+}
+
 function IdentityRow({ name }: { name: string }) {
   const ident = useStore((s) => s.identities.find((i) => i.name === name))
   const used = useStore((s) => s.bots.filter((b) => b.identity === name).length)
@@ -62,6 +103,7 @@ function IdentityRow({ name }: { name: string }) {
         <span className="identity-detail" title={envText}>
           {envText ? envText.replace(/\n/g, ' ・ ') : '（無 env）'}
         </span>
+        <IdentityHostLogins name={ident.name} />
       </span>
       <button
         type="button"
@@ -130,6 +172,59 @@ function NewIdentityForm() {
   )
 }
 
+/**
+ * 從各主機 shell 認出來的 `ccN`（SPEC §15）。唯讀：它們是使用者 zshrc 裡的 alias，
+ * 這裡只負責讓人看見「daemon 認到了什麼、指到哪個設定目錄、登入了沒」。
+ * 同名的 config 身份會蓋過它，所以已經在上面列出來的就不重複列。
+ */
+function ShellIdentities() {
+  const configured = useStore((s) => s.identities)
+  const local = useStore((s) => s.localIdentityStatus)
+  const hosts = useStore((s) => s.hosts)
+  const rows: { host: string; label: string; st: IdentityStatus }[] = []
+  const collect = (host: string, label: string, map: IdentityStatusMap) => {
+    for (const st of Object.values(map)) {
+      if (st.source !== 'shell') continue
+      if (configured.some((i) => i.name === st.name)) continue
+      rows.push({ host, label, st })
+    }
+  }
+  collect('local', '本機', local)
+  for (const h of hosts) collect(h.name, h.name, h.identity_status)
+  if (rows.length === 0) return null
+  return (
+    <div className="identity-shell-block">
+      <p className="hint">
+        以下是從各主機登入 shell 的 <code>ccN</code> alias 認出來的身份（<code>~/.zshrc</code> 等），
+        可以直接指派給 Bot；要改就改那台主機的 alias。
+      </p>
+      {rows.map(({ host, label, st }) => (
+        <div className="identity-row is-shell" key={`${host}:${st.name}`}>
+          <span className="identity-main">
+            <span className="identity-name">
+              <IdentityBadge name={st.name} />
+              <KindTag kind={st.kind} />
+              <span className="host-count">{label}</span>
+            </span>
+            <span className="identity-detail" title={st.config_dir ?? '預設帳號（無 CLAUDE_CONFIG_DIR）'}>
+              {st.config_dir ? `CLAUDE_CONFIG_DIR=${st.config_dir}` : '（預設帳號）'}
+            </span>
+            {/* 和 config 那些列同一種 chip 容器，否則單獨一顆會被 flex 拉成整行寬。 */}
+            <span className="identity-logins">
+              <span
+                className={`identity-login is-${st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'}`}
+                title={st.account ?? undefined}
+              >
+                {label} {st.logged_in === true ? '已登入' : st.logged_in === false ? '未登入' : '未知'}
+              </span>
+            </span>
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function IdentitiesPanel() {
   const identities = useStore((s) => s.identities)
   return (
@@ -138,6 +233,7 @@ export function IdentitiesPanel() {
       {identities.map((i) => (
         <IdentityRow key={i.name} name={i.name} />
       ))}
+      <ShellIdentities />
       <NewIdentityForm />
     </div>
   )

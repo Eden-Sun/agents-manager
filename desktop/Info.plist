@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Tauri merges any Info.plist sitting next to tauri.conf.json into the generated one.
+<!-- Tauri merges any Info.plist sitting next to tauri.conf.json into the generated one, and
+     the merge is per top-level key: whichever side writes NSAppTransportSecurity wins the
+     whole dict. So this file is the single source for ATS and tauri.conf.json deliberately
+     does not set `bundle.macOS.exceptionDomain`.
      WKWebView refuses plain http:// under App Transport Security; the UI is served by
-     agents-managerd on loopback, so localhost needs an explicit exception. -->
+     agents-managerd on loopback and the shell always navigates to `localhost` (never the
+     bare IP), so that one domain is all that needs an exception. -->
 <plist version="1.0">
 <dict>
   <key>NSAppTransportSecurity</key>
@@ -12,11 +16,6 @@
     <key>NSExceptionDomains</key>
     <dict>
       <key>localhost</key>
-      <dict>
-        <key>NSExceptionAllowsInsecureHTTPLoads</key>
-        <true/>
-      </dict>
-      <key>127.0.0.1</key>
       <dict>
         <key>NSExceptionAllowsInsecureHTTPLoads</key>
         <true/>

@@ -9,7 +9,7 @@ use crate::lifecycle::{self, LcError};
 use crate::state::App;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -59,6 +59,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/teams/{id}/approve", post(approve_team))
         .route("/teams/{id}/abort", post(abort_team))
         .route("/teams/{id}/cleanup", post(cleanup_team))
+        // SPEC-team §2.3: the issue queue of a running team.
+        .route("/teams/{id}/issues", post(add_team_issues))
+        .route("/teams/{id}/issues/{issue_id}", delete(remove_team_issue))
+        .route("/teams/{id}/close-issue", post(close_team_issue))
         .route("/teams/{id}/say", post(say_team))
         .route("/teams/{id}/answer", post(answer_team))
         .route("/teams/{tid}/tasks/{task_id}/decide", post(decide_team_task))
@@ -67,6 +71,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/stop", post(stop_bot))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
+        .route("/bots/{id}/login", post(login_bot))
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
         .route(
@@ -85,6 +90,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/tools/install", post(install_tool))
         .route("/models", get(get_models))
         .route("/quota", get(get_quota))
+        .route("/mem", get(get_mem))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
@@ -101,10 +107,15 @@ pub fn router(app: Arc<App>) -> Router {
 
 // ---------------------------------------------------------------- auth
 
-fn host_is_local(headers: &HeaderMap, port: u16) -> bool {
-    let Some(h) = headers.get("host").and_then(|v| v.to_str().ok()) else { return false };
-    let expected = [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")];
-    expected.iter().any(|e| e == h)
+/// The peer address of the TCP connection, **not** the `Host` header: the header is chosen
+/// freely by the caller, so with `server.listen = "0.0.0.0:…"` anyone on the LAN could ask
+/// for the UI token with `curl -H 'Host: localhost:…'`. Needs the router to be served with
+/// `into_make_service_with_connect_info::<SocketAddr>()` (main.rs).
+fn peer_is_local(peer: &std::net::SocketAddr) -> bool {
+    match peer.ip() {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|m| m.is_loopback()),
+    }
 }
 
 /// A5: parse the Origin and compare the **host** exactly. `starts_with` used to let
@@ -141,8 +152,12 @@ async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
     next.run(req).await
 }
 
-async fn get_session(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if !host_is_local(&headers, app.port) || !origin_is_local(&headers, app.port) {
+async fn get_session(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !peer_is_local(&peer) || !origin_is_local(&headers, app.port) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "non-local request"}))).into_response();
     }
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
@@ -190,6 +205,11 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             // v4.0
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
             "tools": t.map(|x| json!(x.tools)),
+            // v4.0: per-identity login state *on this host* (same shape as `tools`), covering
+            // both `[[identities]]` and the `ccN` aliases read off this host (SPEC §15).
+            "identities": t.map(|x| json!(x.identities)),
+            // v4.1: the raw `ccN` aliases this host defines (env unexpanded, as written).
+            "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
         }));
     }
@@ -484,6 +504,65 @@ async fn resume_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
     Ok((StatusCode::OK, Json(crate::team::resume(&app, &id).await?)).into_response())
 }
 
+/// `POST /api/teams/:id/close-issue` — SPEC-team §10.7.
+///
+/// The user's consent *is* this request: the daemon never closes an issue on its own, and the
+/// UI only offers the action on a team that reached `done`.
+#[derive(serde::Deserialize)]
+struct CloseIssueBody {
+    /// Absent = the daemon writes its own summary comment; `""` = close with no comment.
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+/// The body is read as bytes rather than `Json<…>` because every field in it is optional:
+/// `POST` with no body at all, with `{}`, or with a JSON content-type and an empty body all
+/// mean the same thing ("close it, write the default comment"), and `Json` rejects the last
+/// two with a parse error.
+async fn close_team_issue(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, LcError> {
+    let comment = match std::str::from_utf8(&body).unwrap_or("").trim() {
+        "" => None,
+        s => {
+            serde_json::from_str::<CloseIssueBody>(s).map_err(|e| LcError::Bad(format!("bad body: {e}")))?.comment
+        }
+    };
+    Ok((StatusCode::OK, Json(crate::team::close_issue(&app, &id, comment).await?)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct AddIssues {
+    #[serde(default)]
+    issue_numbers: Vec<i64>,
+    /// Single-issue convenience, matching `POST /projects/:id/teams`.
+    #[serde(default)]
+    issue_number: Option<i64>,
+}
+
+async fn add_team_issues(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<AddIssues>,
+) -> Result<Response, LcError> {
+    let mut ns = b.issue_numbers;
+    if let Some(n) = b.issue_number {
+        if !ns.contains(&n) {
+            ns.push(n);
+        }
+    }
+    Ok((StatusCode::OK, Json(crate::team::add_issues(&app, &id, &ns).await?)).into_response())
+}
+
+async fn remove_team_issue(
+    State(app): State<Arc<App>>,
+    Path((id, issue_id)): Path<(String, String)>,
+) -> Result<Response, LcError> {
+    Ok((StatusCode::OK, Json(crate::team::remove_queued_issue(&app, &id, &issue_id).await?)).into_response())
+}
+
 async fn approve_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     Ok((StatusCode::OK, Json(crate::team::approve(&app, &id).await?)).into_response())
 }
@@ -613,11 +692,11 @@ struct NewBot {
     env: Option<BTreeMap<String, String>>,
 }
 
-/// `None` = no identity requested; `Some(name)` = must exist and match `kind`.
-async fn check_identity(app: &Arc<App>, identity: &Option<String>, kind: &str) -> Result<Option<String>, LcError> {
+/// `None` = no identity requested; `Some(name)` = must exist **on that bot's host** and match
+/// `kind` — the list is `[[identities]]` plus that host's `ccN` aliases (SPEC §15).
+async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, kind: &str) -> Result<Option<String>, LcError> {
     let Some(name) = identity.clone().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
-    let cfg = app.cfg.get().await;
-    let Some(id) = cfg.identities.iter().find(|i| i.name == name) else {
+    let Some(id) = crate::tools::identity_for_host(app, host, &name).await else {
         return Err(LcError::NotFound("identity".into()));
     };
     if id.kind != kind {
@@ -637,7 +716,13 @@ async fn create_bot(
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
-    let identity = check_identity(&app, &b.identity, &b.kind).await?;
+    // The identity has to exist on the *project's* host — `cc1` is a different account there.
+    let host = db::project(&app.db, &pid)
+        .await
+        .map_err(any_err)?
+        .map(|p| p.host)
+        .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
     // v4.0: effort is kind-dependent (claude → always None).
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
@@ -756,7 +841,8 @@ async fn patch_bot(
     };
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
-            check_identity(&app, &Some(name.clone()), &kind).await?;
+            let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+            check_identity(&app, &host, &Some(name.clone()), &kind).await?;
         }
     }
     app.cfg
@@ -824,6 +910,7 @@ async fn patch_bot(
         "grok" if b.model.is_some() && !extras(&["model", "effort"]) => Some("model"),
         "grok" if b.effort.is_some() && !extras(&["effort"]) => Some("effort"),
         "claude" if b.model.is_some() && !extras(&["model"]) => Some("model"),
+        "claude" if b.effort.is_some() && !extras(&["effort"]) => Some("effort"),
         _ => None,
     };
     let needs_restart = match live_field {
@@ -948,7 +1035,17 @@ async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) ->
     if let Some(conn) = app.hosts.get(&name).await {
         crate::state::emit_host_changed(&app, &conn).await;
     }
-    Ok((StatusCode::OK, Json(json!({"name": name, "tools": ht.tools, "tools_checked_at": ht.checked_at}))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "name": name,
+            "tools": ht.tools,
+            "identities": ht.identities,
+            "shell_identities": ht.shell_identities,
+            "tools_checked_at": ht.checked_at,
+        })),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -992,17 +1089,37 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
     Ok(Json(v))
 }
 
-/// `GET /api/quota?refresh=1`
+/// `GET /api/quota?refresh=1&host=`
+///
+/// `host` narrows a refresh to one host (default: `local` plus every connected remote one).
+/// The body is always the full map — one entry per host + kind (SPEC §14).
+/// Live RSS of every herdr process tree we can reach (SPEC §15). The poller pushes
+/// `mem_updated` when it moves; this is here for the first paint and for anyone polling.
+async fn get_mem(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    Ok(Json(serde_json::to_value(crate::memstat::sample(&app).await).map_err(any_err)?))
+}
+
 async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
     if flag(&q.get("refresh").cloned()) {
-        if let Err(e) = crate::quota::refresh_codex(&app).await {
-            tracing::warn!(error = %e, "codex quota refresh failed");
-        }
-        if let Err(e) = crate::quota_claude::refresh_claude(&app).await {
-            tracing::warn!(error = %e, "claude quota refresh failed");
-        }
-        if let Err(e) = crate::quota_grok::refresh_grok(&app).await {
-            tracing::warn!(error = %e, "grok quota refresh failed");
+        let hosts = match q.get("host").map(String::as_str).filter(|h| !h.is_empty()) {
+            Some(h) => {
+                if app.hosts.get(h).await.is_none() {
+                    return Err(LcError::NotFound(format!("unknown host `{h}`")));
+                }
+                vec![h.to_string()]
+            }
+            None => crate::quota::pollable_hosts(&app).await,
+        };
+        for host in hosts {
+            if let Err(e) = crate::quota::refresh_codex(&app, &host).await {
+                tracing::warn!(host = %host, error = %e, "codex quota refresh failed");
+            }
+            if let Err(e) = crate::quota_claude::refresh_claude(&app, &host).await {
+                tracing::warn!(host = %host, error = %e, "claude quota refresh failed");
+            }
+            if let Err(e) = crate::quota_grok::refresh_grok(&app, &host).await {
+                tracing::warn!(host = %host, error = %e, "grok quota refresh failed");
+            }
         }
     }
     Ok(Json(crate::quota::snapshot(&app).await))
@@ -1048,6 +1165,10 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     }
     reproject(&app).await?;
     app.emit("identities_changed", json!({})).await;
+    // A new identity has no login answer on any host yet; ask each one in the background.
+    for c in app.hosts.list().await {
+        crate::tools::spawn_detect(app.clone(), c.name.clone());
+    }
     Ok((StatusCode::OK, Json(json!({"name": b.name}))).into_response())
 }
 
@@ -1065,6 +1186,16 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
         })
         .await
         .map_err(any_err)?;
+    // Drop the stale per-host login rows rather than leaving a deleted identity on the strip.
+    // A `ccN` alias of the same name is a *different* entry (SPEC §15) and survives: it is put
+    // back from that host's `shell_identities`, which the config never owned.
+    for ht in app.tools.lock().await.values_mut() {
+        ht.identities.remove(&name);
+        if let Some(i) = ht.shell_identities.iter().find(|i| i.name == name) {
+            let dir = i.env.get("CLAUDE_CONFIG_DIR").cloned();
+            ht.identities.insert(name.clone(), crate::tools::IdentityInfo::shell(&i.name, &i.kind, dir));
+        }
+    }
     reproject(&app).await?;
     app.emit("identities_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -1095,6 +1226,18 @@ async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result
 async fn interrupt_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     lifecycle::interrupt_bot(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// 對正在跑的 bot 送登入指令：它的 TUI 會切進登入 / 切換帳號流程（claude 與 grok 的
+/// `/login`），在使用者完成之前這個 bot 不能工作。這裡只負責把指令送進去——登入完成與否
+/// 由 `POST /hosts/:name/tools/refresh` 重新偵測。
+///
+/// 404 = 沒有這個 bot；400 `login_unsupported` = 這個 kind 的 TUI 沒有登入指令（codex）；
+/// 409 = 現在送不出去（`not_running` / `agent_busy` / `turn_in_flight` / `no_pane`）；
+/// 502 = herdr 拒絕。
+async fn login_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let out = lifecycle::login(&app, &id).await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 /// Move a running bot's pane into a tab of its own, so it stops sharing the workspace's

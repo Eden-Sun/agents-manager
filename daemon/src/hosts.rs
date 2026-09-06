@@ -663,6 +663,9 @@ impl HostManager {
         }
         c.kill_master().await;
         c.connected.store(false, Ordering::SeqCst);
+        // Its quota rows would otherwise linger in the map (and, keyed `<gone>/claude`, read
+        // as local ones downstream) — SPEC §14.
+        app.quotas.lock().await.retain(|k, _| !k.starts_with(&format!("{name}/")));
         app.emit("host_changed", json!({"name": name, "connected": false, "error": "removed"})).await;
         crate::state::emit_daemon_status(app).await;
         tracing::info!(host = %name, "host removed");
@@ -731,9 +734,11 @@ fn cfg_differs(a: &HostCfg, b: &HostCfg) -> bool {
 /// `GET /api/fs/dirs?host=` for a remote host. Same JSON shape as the local branch.
 pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool) -> Result<serde_json::Value> {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
-        None => "$HOME".to_string(),
-        Some(p) if p == "~" => "$HOME".to_string(),
-        Some(p) if p.starts_with("~/") => format!("$HOME/{}", &p[2..]),
+        None => "\"$HOME\"".to_string(),
+        Some(p) if p == "~" => "\"$HOME\"".to_string(),
+        // The tail is user input: it has to be quoted like every other branch, so only the
+        // `$HOME` expansion stays outside the quotes (itself quoted, for a home with spaces).
+        Some(p) if p.starts_with("~/") => format!("\"$HOME\"/{}", sh_quote(&p[2..])),
         Some(p) => sh_quote(p),
     };
     // `.*/` only when asked for; the glob is quoted into the loop so an empty match is skipped below.
@@ -790,9 +795,11 @@ done
 /// Validate + canonicalize a project path on a remote host.
 pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String> {
     let target = if path == "~" {
-        "$HOME".to_string()
+        "\"$HOME\"".to_string()
     } else if let Some(rest) = path.strip_prefix("~/") {
-        format!("$HOME/{rest}")
+        // Quote the tail like every other branch (it is user input); only the `$HOME`
+        // expansion stays outside the quotes, itself quoted for a home with spaces.
+        format!("\"$HOME\"/{}", sh_quote(rest))
     } else {
         sh_quote(path)
     };

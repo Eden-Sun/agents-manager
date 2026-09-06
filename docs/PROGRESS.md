@@ -801,3 +801,97 @@ AM_DATA_DIR=/tmp/am-v40
 3. **codex `developer_instructions`**：經 `-c` TOML basic string 注入，實測會出現在回覆尾端（`[PERSONA-CODEX]`）。
 4. **statusline**：daemon 寫入 bot 專屬 `claude-settings.json` 的 `statusLine`，不改使用者 `~/.claude/settings.json`；子命令會再 exec 使用者自己的 statusLine。
 5. **issues 快取** 2 分鐘；models 快取 10 分鐘；`?refresh=1` 皆可跳過。
+
+## v4.1 — 第一次跑通 issue team（PM → RD → reviewer，2026-09-06）
+
+目標：對 issue #1 組一次隊，三個角色都用 `claude` + `sonnet` + identity `cc2`，`deliver=branch`。
+先前數次嘗試都失敗（repo 裡留下 `team/i1-3nyen1`、`team/i1-qjjpa4` 兩個 0 commit 的孤兒分支）。
+
+### 根因：`herdr::fit_command_line` 的裁切迴圈永不收斂
+
+`agent.start` 的命令列上限 900 bytes，超長的參數（team 產生的 PM persona，719 bytes）會被裁切並補上
+`…（後略）` 標記。預算只扣了猜測的 12 bytes，但標記實際是 **15 bytes**，於是超出量 ≤ 3 bytes 時
+「砍 15 補 15」，長度原地打轉：719 → 704 → 719 → …，每圈寫一行 WARN。
+
+實測後果：team start 讓 daemon 卡在這個迴圈，**六分鐘寫了 11 GB 的 `daemon.log`**（sparse，實佔 1.3 GB
+且持續成長），磁碟從 62 GB 掉到 49 GB；team 停在 `starting`，`abort` 也救不回來（迴圈在同一條執行緒上）。
+既有測試沒抓到，是因為它用 1200 bytes 的超長值——超出量夠大時迴圈會收斂。
+
+修法（`daemon/src/herdr.rs`）：標記長度改用 `TRIM_MARK.len()` 計入預算，另加「這一圈沒把參數變短就跳出」
+的保險。迴歸測試 `a_command_that_only_just_overshoots_still_converges` 掃過 1/2/3/4/15/16/40 bytes 的
+超出量（真的退化的話這個測試會卡住而不是失敗）。`cargo test` 196 passed。
+
+### 這次的實跑結果（正式 daemon 7788）
+
+| 階段 | 結果 |
+|---|---|
+| create | `POST /projects/…/teams` → team `01M1V10M…`；3 個 worktree 在 `<data_dir>/teams/<id>/`，使用者 checkout 未被碰 |
+| starting → planning | 13 秒；PM 收到 first relay（要它先讀 ISSUE.md / TEAM.md） |
+| planning → working | PM 拆出 t1 派給 dev-1（分支 `team/i1-9hsdsq-t1-dev-1`） |
+| working | dev-1 9 分鐘完成 `group.rs` / `api.rs` 的 rowid 分頁修正 + 兩個迴歸測試，`report` 回 PM |
+| reviewing → merged | reviewer `approve`；daemon `git merge --no-ff` 進 `team/i1-9hsdsq`（`8b1d5080`） |
+| finishing → done | PM `done` + 摘要；三個成員自動停掉。全程 15 分鐘、8 relays、review round 0 |
+
+整合分支自測：`cargo test -p agents-managerd` → **169 passed**（含 team 新增的
+`message_pagination_tests` / api 對應測試）。
+
+### 觀察到、還沒處理的
+
+1. **協定格式錯誤偏多**：PM 連錯 2 次（第一次沒 `tasks`、第二次缺 `to`/`brief`）、reviewer 連錯 2 次
+   （`verdict.result` 不合法），都是靠 repair prompt 救回來的——上限就是 2 次，再錯一次整個 team 會
+   `paused(protocol_error)` 等人。第一則 relay 沒有附協定範例，只叫 agent 去讀 `TEAM.md`。
+2. **task 標題是 `task`**：PM 沒給 `title`，dispatch 事件與 UI 都只顯示 `task`。
+3. **PM 摘要誤判**：它說「預設 embed-ui feature 因 `assets.rs` 的 rust-embed 問題編譯失敗，建議另開 issue」。
+   實際上是 worktree 裡沒有 `web/dist`（不進 git 的建置產物）；補一個 placeholder 後預設 feature 編譯與
+   測試全過。worktree 佈局應該把這件事講給成員知道。
+4. 前次失敗留下的 `team/i1-3nyen1` / `team/i1-qjjpa4` 兩個分支都是 0 commit，可以直接刪。
+
+## v4.2 — 完成後經同意關 issue、成員啟動競態（2026-09-06）
+
+### 1. `POST /api/teams/:id/close-issue`（SPEC-team §10.7）
+
+team 跑完之後，UI 問一次「要不要順手關掉 issue」，按下去才關。兩條硬規則：**只有 `phase === "done"`**
+（PM 宣告完成且 daemon 驗證所有 task 終態；aborted / failed 一律 409）、**只有使用者**（scheduler 沒有任何
+一條路徑會呼叫它，也不做「N 分鐘後自動關」）。
+
+- 預設留言：PM 總結 + 整合分支與 base + 已合併的 task/commit；`deliver=pr` 附 PR 連結，否則明寫
+  「這條分支還沒有合併進<base>、也沒有開 PR，若最後沒有採用請重開這個 issue」。`comment:""` = 不留言。
+  `base_ref` 是 `HEAD` 時寫成「預設分支」——`HEAD` 對 issue 的讀者沒有意義。
+- 關過一次 → 409（`teams.issue_closed_at`，additive migration）；別人先關掉的 → `200 already_closed:true`
+  且**不重複留言**；沒有 GitHub origin → 400（UI 也不顯示按鈕）。
+- body 用 `Bytes` 而不是 `Json<…>` 解：沒有 body、`{}`、以及「有 JSON content-type 但 body 是空的」
+  都要當成同一件事（後兩者用 `Json` 會被擋成 400，實測踩到）。
+- 前端：`TeamPanel` 在 `done` 且未關過且專案有 GitHub 時顯示提議列 + 二次確認對話框；標題列的 issue 連結
+  關掉後顯示「· 已關閉」。mock 也實作了同一組守則（沒有真的 GitHub）。
+
+實測（正式 daemon + 真的 GitHub，`Eden-Sun/agents-manager#1`）：reopen → `POST close-issue` → issue CLOSED、
+留言內容正確（CJK / backtick / markdown 都沒被 `sh_quote` 弄壞）→ 第二次呼叫 409 → 清掉 `issue_closed_at`
+再打一次得到 `already_closed:true` 且沒有第二則留言。無 body / 空 body 兩種呼叫都 200。
+
+### 2. `agent.start` 撞上「pane 還不是可用的 shell」
+
+使用者的 issue #46 team（pm + 4 個 codex 執行者 + reviewer）啟動時 `i46-dev-1` 沒起來，team 停在
+`paused(member_lost)`，畫面上完全沒有原因。team 日誌裡其實有：
+
+```
+member_start_failed i46-dev-1: herdr error agent_pane_busy: agent target pane w1A:p3 is not an available shell
+```
+
+`tab.create` / `pane.split` 一回來，pane 裡的互動 shell 還沒就緒；連續啟動六個成員時第二個剛好撞上。
+`quota_claude` 早就對同一個 herdr 回答重試（10 次退避），**唯獨 bot 啟動路徑沒有**。
+
+- `lifecycle::start_bot`：`agent.start` 遇到 `agent_pane_busy` / `not an available shell` 重試 10 次
+  （300ms 起、每次 +200ms），其他錯誤照舊立刻收 pane。新增 `pane_not_ready()`（先比對 herdr 錯誤碼）。
+- `team_sched`：成員啟動失敗時**同時寫一則 system 訊息到該成員的對話**（原本只進 team 日誌）。
+- `TeamPanel`：沒有 `text` 的 note 以前整列被丟掉——`member_start_failed` / `pretrust_failed` /
+  `protocol_error` / `issue_closed` 各給一句人話，其餘 note 至少顯示 `action` 與欄位，不再靜默消失。
+
+驗收：手動重啟 `i46-dev-1` 成功（同一份 argv）→ 證實是競態不是設定問題；修好後重啟 daemon、`resume`
+該 team → dispatch 送達、t1 進入 `working`。`cargo test` 198 passed。
+
+### 3. 順帶
+
+- 另一個 session 在 09:55 用 `DELETE /teams/:id?branches=delete` 把 v4.1 那個 team 連整合分支一起刪了；
+  commit 還在物件庫，已用 `git branch team/i1-9hsdsq 8b1d508` 救回。
+- codex 的 persona 走 `-c developer_instructions="…"`，被 `fit_command_line` 裁切時會**切掉結尾的引號**
+  （實測命令列上看得到），TOML 因此不合法。codex 目前沒有因此拒絕啟動，但這是未爆彈，尚未修。

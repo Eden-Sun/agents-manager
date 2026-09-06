@@ -40,6 +40,9 @@ xattr -dr com.apple.quarantine /Applications/AgentsManager.app
 zsh -lic 'which herdr claude codex grok'
 
 # 用獨立資料目錄 / 埠號跑一份，不動到正式設定
+# 埠號一定要先寫進 config.toml：沒有這個檔的話殼會退回預設 7788，反而接到正式的 daemon
+mkdir -p /tmp/am-test
+printf '[server]\nlisten = "127.0.0.1:7799"\n' > /tmp/am-test/config.toml
 AM_DATA_DIR=/tmp/am-test /Applications/AgentsManager.app/Contents/MacOS/AgentsManager
 ```
 
@@ -134,6 +137,9 @@ App 啟動後、spawn daemon 之前，殼會先做一次 preflight（`desktop/sr
 3. `claude` / `codex` / `grok` 三個一個都沒有時，只在 stderr 印警告，照常啟動 —
    daemon 自己會偵測並回報給 UI，沒有 agent CLI 只是開不了 bot，不是啟動失敗。
 4. 若埠上**已經有 daemon 在跑**，整段 preflight 跳過（那隻顯然已經跑起來了），直接接上去。
+   這裡不是只探 TCP 連得上就算數：殼會發一個 `GET /api/session`，確認回應真的是
+   agents-managerd 的形狀才接。埠被別的程式佔住時，畫面會直接說是誰佔住、怎麼查，
+   而不是把視窗導到那個陌生的網頁。
 
 要新增必檢指令，改 `REQUIRED_CLIS`（`(binary, 安裝指令)` 的陣列）即可，
 畫面文案會自動跟著列出來。
@@ -149,12 +155,16 @@ App 啟動後、spawn daemon 之前，殼會先做一次 preflight（`desktop/sr
 **設定與資料照舊**：`~/.config/agents-manager/`（config.toml、sqlite、ui-token）。
 App 版和終端機版共用同一份，不會另開一套。
 
-**已經有 daemon 在跑時**：殼會先探 `127.0.0.1:<port>`，探得到就直接接上去、不再 spawn，
-關掉 App 也不會殺掉那個 daemon。只有自己 spawn 出來的才會在退出時收掉。
+**已經有 daemon 在跑時**：殼會先對 `127.0.0.1:<port>` 發 `GET /api/session`，確認是 agents-managerd
+才直接接上去、不再 spawn，關掉 App 也不會殺掉那個 daemon。只有自己 spawn 出來的才會在退出時收掉。
+埠上是別的程式時不會接，會顯示錯誤畫面。
 
 **Port 從設定檔讀**：`[server] listen`，讀不到就用預設 `127.0.0.1:7788`。
 
-**關掉 App = 關掉 daemon**（自己啟動的那個；正常 Cmd-Q 或「結束」才會收，被 `kill -9` 之類強制中止時 daemon 會留下來變成孤兒，下次開 App 會直接接上去）。herdr 裡的 agent 不受影響，會繼續活著，
+**關掉 App = 關掉 daemon**（自己啟動的那個）：先送 **SIGTERM**，daemon 的 graceful shutdown
+會關掉所有 ssh ControlMaster（SPEC §11.3.5）；1.5 秒內沒收乾淨才補 SIGKILL。
+App 自己被 `kill -9` 之類強制中止時來不及做這件事，daemon 會留下來變成孤兒，
+下次開 App 會直接接上去。herdr 裡的 agent 不受影響，會繼續活著，
 下次開 App 由 reconcile 接回來。要 daemon 常駐就用終端機跑 `agents-managerd serve`，
 App 會自動附掛上去。
 
@@ -166,6 +176,10 @@ hook 設定（`daemon/src/lifecycle.rs` 的 `hook_cmd_parts`）。從 App 啟動
 
 **只有 arm64**。Intel Mac 不支援；要支援得裝 `x86_64-apple-darwin` target 並改用
 `universal-apple-darwin`（Tauri 支援，但 sidecar 也要跟著出 universal binary）。
+
+**ATS 設定只有一份**：`desktop/Info.plist`。Tauri 是以最上層 key 為單位合併 plist，
+`bundle.macOS.exceptionDomain` 和手寫的 `NSAppTransportSecurity` 會互相蓋掉整塊，
+所以 `tauri.conf.json` 刻意不設 `exceptionDomain`。殼一律導向 `localhost`，不用裸 IP。
 
 **看 log**：從終端機 `open -a AgentsManager` 沒有 stderr。直接跑主程式
 （見〈指令速查〉）daemon 的 tracing 才會轉發到同一個 stderr。

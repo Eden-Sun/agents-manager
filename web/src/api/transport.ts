@@ -113,16 +113,30 @@ export class HttpTransport implements Transport {
 
     const connect = () => {
       if (closed) return
+      // 先把上一條 socket 徹底斷乾淨再開新的。CLOSING 中的 socket 過得了 `retryNow` 的檢查，
+      // 它的 onclose 之後才會補跑，那時 `closed` 還是 false——狀態會被它改成 closed、還會再排
+      // 一次 connect，最後變成兩條都活著、每個 frame 收兩次。
+      if (sock) {
+        const old = sock
+        sock = null
+        old.onopen = null
+        old.onmessage = null
+        old.onerror = null
+        old.onclose = null
+        old.close()
+      }
       handlers.onStatus('connecting')
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
       const qs = new URLSearchParams({ token: this.token, since: String(handlers.since()) })
       const ws = new WebSocket(`${scheme}://${location.host}/ws?${qs.toString()}`)
       sock = ws
       ws.onopen = () => {
+        if (sock !== ws) return
         attempt = 0
         handlers.onStatus('open')
       }
       ws.onmessage = (ev: MessageEvent<string>) => {
+        if (sock !== ws) return
         try {
           const frame = JSON.parse(ev.data) as { seq?: number; type: string; data?: unknown }
           if (frame && typeof frame.type === 'string') handlers.onFrame(frame)
@@ -132,7 +146,8 @@ export class HttpTransport implements Transport {
       }
       ws.onerror = () => ws.close()
       ws.onclose = () => {
-        if (closed) return
+        // 已經被新的連線取代掉的話什麼都別做（狀態和重連都歸新的那條管）。
+        if (closed || sock !== ws) return
         handlers.onStatus('closed')
         // Exponential backoff, capped at 3s — a dropped daemon usually comes back fast and
         // the UI is unusable until it does, so waiting 10s for a retry is worse than the
