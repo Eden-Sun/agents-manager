@@ -885,7 +885,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               }
             >
               {bot.model ?? statusInfo?.model_name}
-              {modelExtra ? <span className="model-tag-extra">· {modelExtra}</span> : null}
+              {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
             </ModelQuickPicker>
           ) : null}
         </div>
