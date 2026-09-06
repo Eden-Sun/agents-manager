@@ -204,6 +204,7 @@ export function DirPicker({
                   type="button"
                   className={`crumb${i === crumbs.length - 1 ? ' cur' : ''}`}
                   disabled={busy}
+                  title={c.path}
                   onClick={() => load(c.path)}
                 >
                   {c.label}
@@ -295,8 +296,8 @@ export function DirPicker({
             {target}
           </span>
         </div>
+        <div className="dirpicker-keys">↩ 進入 · ⌘↩ 直接選擇 · ← 上一層 · ↑↓ 移動</div>
         <div className="dirpicker-actions">
-          <span className="dirpicker-keys">Enter 進入 · ⌘↩ 選擇 · ← 上一層</span>
           <button type="button" className="btn" onClick={onCancel}>
             取消
           </button>
