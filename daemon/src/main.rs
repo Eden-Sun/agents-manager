@@ -8,6 +8,7 @@ mod api;
 mod assets;
 mod attach;
 mod config;
+mod default_session;
 mod db;
 mod events;
 mod github;
@@ -20,10 +21,14 @@ mod lifecycle;
 mod models;
 mod projection;
 mod quota;
+mod quota_claude;
 mod quota_grok;
 mod reconcile;
 mod state;
 mod statusline_cmd;
+mod team;
+mod team_git;
+mod team_sched;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -152,6 +157,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         tracing::warn!(got = pong.protocol, expected = herdr::EXPECTED_PROTOCOL, "unexpected herdr protocol version");
     }
     tracing::info!(version = %pong.version, protocol = pong.protocol, "herdr ping ok");
+    let default_herdr = herdr::HerdrClient::new(herdr::HerdrClient::session_socket(default_session::SESSION));
 
     let addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
     let ui_token = load_or_create_ui_token(&dir)?;
@@ -159,6 +165,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     let app = state::App::new(
         pool,
         herdr_client,
+        default_herdr,
         store,
         dir.clone(),
         exe,
@@ -178,7 +185,20 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     if let Err(e) = reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
         tracing::error!(error = ?e, "initial reconcile failed");
     }
+    // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
+    reconcile::rearm_progress(&app).await;
     events::spawn_global(app.clone()).await;
+
+    // Observe the user's default session when it is separate from the manager's named session.
+    // A default session is never spawned by the daemon; the event subscription and poller are
+    // both best-effort until the user has one running.
+    if app.herdr_session != default_session::SESSION {
+        if let Err(e) = default_session::sync(&app).await {
+            tracing::debug!(session = default_session::SESSION, error = ?e, "initial default session sync skipped");
+        }
+        events::spawn_global_for_session(app.clone(), config::LOCAL_HOST.to_string(), default_session::SESSION.to_string()).await;
+    }
+    default_session::spawn_poller(app.clone());
 
     if dev_watch_all_panes {
         if let Ok(panes) = app.herdr.pane_list(None).await {
@@ -194,8 +214,11 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
     quota::spawn_codex_poller(app.clone());
+    quota_claude::spawn_claude_poller(app.clone());
     quota_grok::spawn_grok_poller(app.clone());
     github::spawn_detect_all(app.clone());
+    // SPEC-team §7.5: bring back a scheduler for every team that is not in a terminal phase.
+    team::respawn_schedulers(&app).await;
     // Agent titles (what each agent calls itself) — no herdr event for it, so it polls.
     events::spawn_title_poller(app.clone());
 

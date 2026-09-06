@@ -5,7 +5,7 @@
  * daemon's own `daemon/src/api.rs` handlers, which these were checked against:
  *
  *   GET  /api/session          -> {token, port}
- *   GET  /api/state            -> {daemon_seq, connected, herdr_session, hosts:[...],
+ *   GET  /api/state            -> {daemon_seq, connected, default_connected, herdr_session, hosts:[...],
  *                                  projects:[{id,path,label,workspace_id,host,
  *                                             bots:[{...,args,autostart,inject_hooks,run,lamp,unread}]}]}
  *   POST /api/hosts            -> {name, connected, error?}       (SPEC §11.6)
@@ -129,7 +129,7 @@ export interface Bot {
    * daemon 會把它翻成 `--model <值>`（claude）/ `-m <值>`（codex、grok）。
    */
   model: string | null
-  /** reasoning effort（grok：low | medium | high；codex：依 `GET /api/models` 的 `efforts`）；null = CLI 預設 */
+  /** reasoning effort（grok：low | medium | high | xhigh；codex：依 `GET /api/models` 的 `efforts`）；null = CLI 預設 */
   effort: string | null
   /** v4.0：codex 的 fast / priority service tier（`--fast`）。 */
   fast: boolean
@@ -144,7 +144,31 @@ export interface Bot {
   identity: string | null
   /** 額外注入 pane 的環境變數（覆蓋 identity.env） */
   env: Record<string, string>
+  /** Herdr session override; `default` means this bot was discovered in the user's session. */
+  herdr_session: string | null
+  /**
+   * SPEC-team §2.1：`user` = 使用者建立（受 TOML 投影管轄）；`team` = daemon 替某個 Team
+   * 建立的臨時成員。舊 daemon 沒有這個欄位時一律當 `user`。
+   */
+  managed_by: BotManagedBy
+  /** SPEC-team §2.1：team 成員身分；null = 一般 bot。 */
+  team: BotTeamRef | null
+  /** SPEC-team §2.2：pane 的工作目錄；null = 用 `project.path`。 */
+  cwd: string | null
+  /**
+   * herdr 那邊的 agent 名稱（`GET /api/state` 的 `bots[].agent_name`）。有 active run 時是
+   * 這個 run 實際用的名字，否則是「下次啟動會用的」。debug 時要拿它去 herdr 對照 pane。
+   * 舊 daemon 沒有這個欄位 → null。
+   */
+  agent_name: string | null
   created_at: string
+}
+
+export type BotManagedBy = 'user' | 'team'
+
+export interface BotTeamRef {
+  team_id: string
+  role: TeamRole
 }
 
 /**
@@ -181,12 +205,47 @@ export interface Run {
   workspace_id: string | null
   pane_id: string | null
   adopted: boolean
+  /** Effective Herdr session; old daemons may omit it and the normalizer returns null. */
+  herdr_session: string | null
   /** agent 目前替自己取的名字（herdr `terminal_title_stripped`，claude 會寫成當前任務摘要）。 */
   agent_title: string | null
+  /** pane 底下那條狀態列的原文（claude 自訂 statusLine 的輸出，已去 ANSI）。 */
+  status_line: string | null
+  /** statusLine 的完整原始資料——網頁版顯示的就是它，不受終端寬度壓縮。 */
+  status: StatusInfo | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string
   ended_at: string | null
+}
+
+/**
+ * claude statusLine 傳進來的完整資訊（`daemon/src/statusline_cmd.rs`）。
+ *
+ * 使用者的 statusLine 腳本為了塞進終端一行會縮寫（email 只取前 5 碼、模型縮成 `OP5`），
+ * 網頁沒有這個限制，所以直接用原始欄位。
+ */
+export interface StatusInfo {
+  /** claude 登入的帳號（daemon 從 `.claude.json` 的 oauthAccount 讀）。 */
+  account_email: string | null
+  model_name: string | null
+  model_id: string | null
+  effort: string | null
+  thinking: boolean
+  fast_mode: boolean
+  /** context window：已用百分比、已用 token、總容量。 */
+  context_used_pct: number | null
+  context_used_tokens: number | null
+  context_size: number | null
+  five_hour_pct: number | null
+  /** epoch 秒 */
+  five_hour_resets_at: number | null
+  seven_day_pct: number | null
+  seven_day_resets_at: number | null
+  cost_usd: number | null
+  cwd: string | null
+  version: string | null
+  session_name: string | null
 }
 
 export interface Turn {
@@ -228,6 +287,10 @@ export interface Message {
   group_id: string | null
   /** 隨這則訊息拖放進來的圖片；沒有附件時為空陣列。 */
   attachments: Attachment[]
+  /** SPEC-team §2.1：這則訊息屬於哪個 Team；null = 一般訊息。 */
+  team_id: string | null
+  /** SPEC-team §2.1：relay 的來源 bot_id（daemon 代轉時的說話者）；null = 使用者 / daemon 自己。 */
+  relay_from: string | null
   created_at: string
 }
 
@@ -276,6 +339,8 @@ export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
 export interface AppState {
   daemon_seq: number
   connected: boolean
+  /** The observed user's Herdr default session; separate from the manager session. */
+  default_connected: boolean
   /** v4.0：本機的 attach 指令（`hosts[0]`，reserved `local` 的 `attach_command`）。 */
   attach_command: string
   /** v4.0：本機的工具偵測（`hosts[0].tools`）。 */
@@ -284,6 +349,8 @@ export interface AppState {
   identities: Identity[]
   projects: Project[]
   bots: Bot[]
+  /** SPEC-team §10.2：`projects[].teams[]` 攤平；舊 daemon 沒有這個欄位時為空陣列。 */
+  teams: Team[]
   /** active runs, keyed by bot_id downstream */
   runs: Run[]
   turns: Turn[]
@@ -294,6 +361,10 @@ export interface TerminalSnapshot {
   revision: number | null
   truncated: boolean
   source: TerminalSource
+  pane_id: string | null
+  /** Pane geometry; null on an older daemon that does not report it. */
+  columns: number | null
+  rows: number | null
 }
 
 export interface PromptResult {
@@ -430,21 +501,46 @@ export interface PatchBotResult {
  * 各 kind 的常用模型別名（下拉選單用；使用者仍可用「自訂…」輸入任意字串）。
  * 空字串 = `（預設）`，送出時轉成 `null`。
  */
-/** grok 的靜態 effort（`GET /api/models` 失敗時退回）。 */
-export const EFFORT_OPTIONS = ['low', 'medium', 'high'] as const
+/** grok 的靜態 effort（`GET /api/models` 失敗時退回；實際清單以模型為準，grok-4.6 含 xhigh）。 */
+export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'] as const
 /** codex 的靜態 effort（API.md §12.2；`GET /api/models` 失敗時退回）。 */
 export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
 
+/** 強度按鈕／狀態列顯示用中文標籤（值仍送英文 API id）。 */
+export function effortLabel(level: string): string {
+  switch (level) {
+    case 'none':
+      return '無'
+    case 'minimal':
+      return '最低'
+    case 'low':
+      return '低'
+    case 'medium':
+      return '中'
+    case 'high':
+      return '高'
+    case 'xhigh':
+      return '最高'
+    case 'max':
+      return 'Max'
+    case 'ultra':
+      return 'Ultra'
+    default:
+      return level
+  }
+}
+
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
-  claude: ['opus', 'sonnet', 'haiku'],
-  codex: ['gpt-5.5', 'gpt-5.6-luna', 'gpt-6-astra'],
+  // `claude --model` 的 alias（含 Fable 5.1）。
+  claude: ['opus', 'sonnet', 'haiku', 'fable'],
+  codex: ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-6-astra'],
   // `grok models`（grok 1.0.13，2026-09-06）：grok-4.6（預設）、grok-4.5
   grok: ['grok-4.6', 'grok-4.5'],
 }
 
 /** 「（預設）」與「自訂…」在 `<select>` 裡的 sentinel 值。 */
 export const MODEL_DEFAULT = ''
-export const MODEL_CUSTOM = ' custom'
+export const MODEL_CUSTOM = 'custom'
 
 // ------------------------------------------------------------------ v4.0
 
@@ -470,6 +566,13 @@ export interface QuotaWindow {
   used_pct: number
   /** ISO 時間；daemon 可能給 null */
   resets_at: string | null
+  /**
+   * daemon 算好的門檻旗標（`LOW_REMAINING_PCT` = 30）——額度條要不要把剩餘數字顯示出來，
+   * 由 API server 決定，UI 不可自己用 `used_pct` 寫死比較。
+   */
+  low: boolean
+  /** daemon 算好的門檻旗標（`CRITICAL_REMAINING_PCT` = 5）——bot 側欄列要不要提示。 */
+  critical: boolean
 }
 
 export interface KindQuota {
@@ -511,4 +614,309 @@ export interface IssueLabel {
 /** `GET /api/projects/:id/issues/:number` — 含完整 `body`。 */
 export interface IssueDetail extends Issue {
   body: string
+}
+
+// ------------------------------------------------------------ Issue Team（SPEC-team）
+
+/** SPEC-team §8.1 team phase。終態：`done | aborted | failed`。 */
+export type TeamPhase =
+  | 'starting'
+  | 'planning'
+  | 'working'
+  | 'finishing'
+  | 'done'
+  | 'paused'
+  | 'aborting'
+  | 'aborted'
+  | 'failed'
+
+export const TEAM_PHASES: readonly TeamPhase[] = [
+  'starting',
+  'planning',
+  'working',
+  'finishing',
+  'done',
+  'paused',
+  'aborting',
+  'aborted',
+  'failed',
+]
+
+/** 終態（只剩 cleanup 可做）。 */
+export const TEAM_TERMINAL_PHASES: readonly TeamPhase[] = ['done', 'aborted', 'failed']
+
+export type TeamRole = 'pm' | 'worker' | 'reviewer'
+
+/** SPEC-team §6.4 交付方式。**預設 `branch`**（使用者裁決；`pr` 會 push 到 origin）。 */
+export type TeamDeliver = 'branch' | 'pr'
+
+/** SPEC-team §8.2 task 狀態機。終態：`merged | skipped | failed`。 */
+export type TeamTaskState =
+  | 'queued'
+  | 'working'
+  | 'reported'
+  | 'reviewing'
+  | 'changes_requested'
+  | 'exhausted'
+  | 'blocked_by_worker'
+  | 'rebasing'
+  | 'merging'
+  | 'merged'
+  | 'skipped'
+  | 'failed'
+
+export const TEAM_TASK_STATES: readonly TeamTaskState[] = [
+  'queued',
+  'working',
+  'reported',
+  'reviewing',
+  'changes_requested',
+  'exhausted',
+  'blocked_by_worker',
+  'rebasing',
+  'merging',
+  'merged',
+  'skipped',
+  'failed',
+]
+
+/** 需要人介入的 task 狀態（看板「需要你」欄；`decide` 只在這些狀態有效）。 */
+export const TEAM_TASK_NEEDS_USER: readonly TeamTaskState[] = ['exhausted', 'blocked_by_worker']
+
+export type TeamEventKind = 'relay' | 'phase' | 'merge' | 'note' | 'user'
+export type TeamEventStatus = 'pending' | 'delivered' | 'dropped'
+
+/** SPEC-team §9.2 預算物件。使用者裁決的預設值。 */
+export interface TeamBudget {
+  max_relays: number
+  max_review_rounds: number
+  max_wall_clock_min: number
+  quota_stop_pct: number
+}
+
+export const TEAM_BUDGET_DEFAULTS: TeamBudget = {
+  max_relays: 40,
+  max_review_rounds: 2,
+  max_wall_clock_min: 120,
+  quota_stop_pct: 90,
+}
+
+/** SPEC-team §7.1：執行者 1–4（使用者裁決的上限），預設 2。 */
+export const TEAM_WORKERS_MAX = 4
+export const TEAM_WORKERS_DEFAULT = 2
+
+/** 建 team 時的額度預檢門檻（§9.2）：≥70% 已用 → 黃色警告。 */
+export const TEAM_QUOTA_WARN_PCT = 70
+
+/** SPEC-team §9.2 `usage_json`。 */
+export interface TeamUsage {
+  relays: number
+  review_rounds_total: number
+  elapsed_min: number
+  per_bot: Record<string, { turns: number }>
+}
+
+export const TEAM_USAGE_EMPTY: TeamUsage = { relays: 0, review_rounds_total: 0, elapsed_min: 0, per_bot: {} }
+
+export interface TeamMember {
+  bot_id: string
+  role: TeamRole
+}
+
+/** `tasks_summary`：以 task 狀態為 key 的計數（daemon 只保證 `total` 與有值的狀態）。 */
+export type TeamTasksSummary = Partial<Record<TeamTaskState, number>> & { total: number }
+
+/** SPEC-team §10.2 `GET /api/state` 的 team 物件。 */
+export interface Team {
+  id: string
+  project_id: string
+  issue_number: number
+  issue_title: string
+  issue_url: string
+  phase: TeamPhase
+  /** `paused` 的機器碼原因（例：`budget_relays`、`member_lost:dev-1`、`gate:merge`）。 */
+  pause_reason: string | null
+  branch: string
+  deliver: TeamDeliver
+  supervised: boolean
+  members: TeamMember[]
+  tasks_summary: TeamTasksSummary
+  budget: TeamBudget
+  usage: TeamUsage
+  pr_url: string | null
+  created_at: string
+  started_at: string | null
+  ended_at: string | null
+}
+
+/** SPEC-team §10.3 `GET /api/teams/:id` 的一件 task。 */
+export interface TeamTask {
+  id: string
+  seq: number
+  title: string
+  brief: string
+  files: string[]
+  worker_bot_id: string
+  branch: string
+  state: TeamTaskState
+  round: number
+  last_report: string | null
+  last_verdict: string | null
+  merge_sha: string | null
+  updated_at: string
+}
+
+/** SPEC-team §10.3 `GET /api/teams/:id` = state 的 team 物件 + 這些。 */
+export interface TeamDetail extends Team {
+  tasks: TeamTask[]
+  summary: string | null
+  base_ref: string
+  base_sha: string
+  worktree_root: string
+}
+
+/** SPEC-team §10.4 `GET /api/teams/:id/events` 的一則。 */
+export interface TeamEvent {
+  id: string
+  kind: TeamEventKind
+  from_bot_id: string | null
+  to_bot_id: string | null
+  task_id: string | null
+  turn_id: string | null
+  status: TeamEventStatus | null
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+/** SPEC-team §10.1 一張角色卡的設定。 */
+export interface TeamRoleSpec {
+  kind: BotKind
+  model: string | null
+  effort: string | null
+  fast: boolean
+  identity: string | null
+  persona_extra: string
+}
+
+export interface TeamWorkersSpec extends TeamRoleSpec {
+  /** 1–`TEAM_WORKERS_MAX` */
+  count: number
+}
+
+/** `POST /api/projects/:id/teams` 的 body。 */
+export interface NewTeamInput {
+  issue_number: number
+  pm: TeamRoleSpec
+  workers: TeamWorkersSpec
+  /** null = 不審查，`reported` 直接進整合。 */
+  reviewer: TeamRoleSpec | null
+  base: string
+  deliver: TeamDeliver
+  supervised: boolean
+  budget: TeamBudget
+}
+
+/** `PATCH /api/teams/:id`。只送有變更的欄位。 */
+export interface PatchTeamInput {
+  budget?: Partial<TeamBudget>
+  supervised?: boolean
+  deliver?: TeamDeliver
+}
+
+export type TeamControlAction = 'pause' | 'resume' | 'approve' | 'abort' | 'cleanup'
+export type TeamTaskDecision = 'rework' | 'force_merge' | 'skip'
+/**
+ * SPEC-team §6.5a：`DELETE /teams/:id?branches=` 的處置。
+ * `keep`（預設）留下整合分支與所有 task 分支；`delete` 才 `git branch -D`
+ * ——唯一會銷毀工作成果的路徑，UI 必須二次確認。遠端分支一律不動。
+ */
+export type TeamBranchDisposal = 'keep' | 'delete'
+
+export const TEAM_PHASE_LABEL: Record<TeamPhase, string> = {
+  starting: '啟動中',
+  planning: '規劃中',
+  working: '進行中',
+  finishing: '收尾中',
+  done: '已完成',
+  paused: '已暫停',
+  aborting: '中止中',
+  aborted: '已中止',
+  failed: '失敗',
+}
+
+/** phase chip 的視覺分級（樣式 class 尾綴）。 */
+export function teamPhaseTone(phase: TeamPhase): 'busy' | 'run' | 'warn' | 'ok' | 'dim' {
+  switch (phase) {
+    case 'starting':
+      return 'busy'
+    case 'planning':
+    case 'working':
+    case 'finishing':
+      return 'run'
+    case 'paused':
+      return 'warn'
+    case 'done':
+      return 'ok'
+    default:
+      return 'dim'
+  }
+}
+
+export const TEAM_ROLE_LABEL: Record<TeamRole, string> = {
+  pm: 'PM',
+  worker: '執行者',
+  reviewer: 'Reviewer',
+}
+
+export const TEAM_TASK_STATE_LABEL: Record<TeamTaskState, string> = {
+  queued: '待派',
+  working: '進行中',
+  reported: '已回報',
+  reviewing: '審查中',
+  changes_requested: '待修正',
+  exhausted: '審查回合用盡',
+  blocked_by_worker: '執行者卡住',
+  rebasing: 'rebase 中',
+  merging: '整合中',
+  merged: '已合併',
+  skipped: '已跳過',
+  failed: '失敗',
+}
+
+/** SPEC-team §4.5 / §7.5 / §8.1 的 `pause_reason` 機器碼 → 中文。 */
+const TEAM_PAUSE_LABEL: Record<string, string> = {
+  user: '你按了暫停',
+  budget_relays: '轉送次數用完',
+  budget_time: '時間預算用完',
+  quota_low: '額度過低',
+  review_exhausted: '審查回合用盡',
+  pm_repeat: 'PM 重複派同一件工作',
+  pm_abort: 'PM 認為做不下去',
+  ask_user: 'PM 有問題要問你',
+  protocol_error: 'am-team 區塊解析失敗',
+  member_failed: '成員啟動失敗',
+  member_lost: '成員已離線',
+  member_blocked: '成員等待終端回應',
+  delivery_unknown: '上一則轉送的送達狀態未知',
+  merge_conflict: '合併衝突無法自動解決',
+  integration_dirty: '整合分支的工作樹不乾淨',
+  worktree_missing: 'worktree 目錄不見了',
+  deliver_failed: '交付失敗（push / gh）',
+  upstream: 'herdr / DB 錯誤',
+  'gate:dispatch': '等待放行：派工',
+  'gate:merge': '等待放行：合併',
+  'gate:deliver': '等待放行：交付',
+}
+
+/** `member_lost:dev-1` → 「成員已離線（dev-1）」；未知碼原樣顯示。 */
+export function teamPauseLabel(reason: string | null): string {
+  if (!reason) return ''
+  if (TEAM_PAUSE_LABEL[reason]) return TEAM_PAUSE_LABEL[reason]
+  const i = reason.indexOf(':')
+  if (i > 0) {
+    const head = reason.slice(0, i)
+    const detail = reason.slice(i + 1)
+    if (TEAM_PAUSE_LABEL[head]) return `${TEAM_PAUSE_LABEL[head]}（${detail}）`
+  }
+  return reason
 }

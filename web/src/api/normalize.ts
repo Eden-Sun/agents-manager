@@ -16,6 +16,22 @@ import type {
   Attachment,
   Bot,
   BotKind,
+  BotManagedBy,
+  BotTeamRef,
+  Team,
+  TeamBudget,
+  TeamDeliver,
+  TeamDetail,
+  TeamEvent,
+  TeamEventKind,
+  TeamEventStatus,
+  TeamMember,
+  TeamPhase,
+  TeamRole,
+  TeamTask,
+  TeamTaskState,
+  TeamTasksSummary,
+  TeamUsage,
   GroupMessage,
   GroupMessagesPage,
   Host,
@@ -37,6 +53,7 @@ import type {
   Project,
   Run,
   RunState,
+  StatusInfo,
   TerminalSnapshot,
   TerminalSource,
   Turn,
@@ -44,7 +61,14 @@ import type {
   TurnOrigin,
   TurnStatus,
 } from './types'
-import { BOT_KINDS, TOOL_UNKNOWN } from './types'
+import {
+  BOT_KINDS,
+  TEAM_BUDGET_DEFAULTS,
+  TEAM_PHASES,
+  TEAM_TASK_STATES,
+  TEAM_USAGE_EMPTY,
+  TOOL_UNKNOWN,
+} from './types'
 
 type Rec = Record<string, unknown>
 
@@ -95,6 +119,10 @@ const DELIVERIES = ['pending', 'ok', 'unknown', 'failed'] as const
 const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
+const TEAM_ROLES = ['pm', 'worker', 'reviewer'] as const
+const TEAM_EVENT_KINDS = ['relay', 'phase', 'merge', 'note', 'user'] as const
+const TEAM_EVENT_STATUSES = ['pending', 'delivered', 'dropped'] as const
+const TEAM_DELIVERS = ['branch', 'pr'] as const
 
 /**
  * SPEC §11.6 `hosts[]`. The daemon may report the connection flag as `connected` /
@@ -212,8 +240,34 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
       return typeof i === 'string' && i.trim() ? i : null
     })(),
     env: envMap(pick(v, 'env', 'env_json')),
+    // SPEC-team §2.1：舊 daemon 沒有這些欄位 → `user` / null / null（行為與 team 之前相同）。
+    managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'team'], 'user'),
+    team: toBotTeamRef(v),
+    cwd: optStr(pick(v, 'cwd')),
+    herdr_session: optStr(pick(v, 'herdr_session', 'session')),
+    // debug 用的 herdr agent 名稱；舊 daemon 不送就是 null（UI 那顆晶片自己不渲染）。
+    agent_name: optStr(pick(v, 'agent_name', 'agentName')),
     created_at: str(v.created_at),
   }
+}
+
+/**
+ * `bots[].team` 可能是 `{team_id, role}`（API.md 形狀），也可能攤平成 `bots[].team_id` /
+ * `bots[].team_role`（SQLite 直出）。
+ *
+ * 注意：**不能**把 `id` 當成 team_id 的別名——那是 bot 自己的主鍵，會讓每個一般 bot 都被
+ * 誤判成 team 成員（sidebar 會整個空掉）。
+ */
+function toBotTeamRef(v: Rec): BotTeamRef | null {
+  const nested = pick(v, 'team')
+  if (isRec(nested)) {
+    const teamId = optStr(pick(nested, 'team_id', 'id'))
+    if (!teamId) return null
+    return { team_id: teamId, role: oneOf<TeamRole>(pick(nested, 'role', 'team_role'), TEAM_ROLES, 'worker') }
+  }
+  const teamId = optStr(pick(v, 'team_id'))
+  if (!teamId) return null
+  return { team_id: teamId, role: oneOf<TeamRole>(pick(v, 'team_role'), TEAM_ROLES, 'worker') }
 }
 
 /** `{K: V}` or a JSON string of one; anything else → `{}`. */
@@ -245,6 +299,47 @@ export function toIdentity(v: unknown): Identity | null {
   }
 }
 
+/** `runs.status_json` — a JSON string (or an already-parsed object) from the daemon. */
+export function toStatusInfo(v: unknown): StatusInfo | null {
+  let raw: unknown = v
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return null
+    try {
+      raw = JSON.parse(raw) as unknown
+    } catch {
+      return null
+    }
+  }
+  if (!isRec(raw)) return null
+  const ctx = isRec(raw.context_window) ? raw.context_window : {}
+  const limits = isRec(raw.rate_limits) ? raw.rate_limits : {}
+  const five = isRec(limits.five_hour) ? limits.five_hour : {}
+  const seven = isRec(limits.seven_day) ? limits.seven_day : {}
+  const model = isRec(raw.model) ? raw.model : {}
+  const cost = isRec(raw.cost) ? raw.cost : {}
+  const workspace = isRec(raw.workspace) ? raw.workspace : {}
+  const numOrNull = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null)
+  return {
+    account_email: optStr(raw.account_email),
+    model_name: optStr(pick(model, 'display_name')),
+    model_id: optStr(pick(model, 'id')),
+    effort: optStr(isRec(raw.effort) ? pick(raw.effort, 'level') : undefined),
+    thinking: isRec(raw.thinking) ? bool(pick(raw.thinking, 'enabled')) : false,
+    fast_mode: bool(raw.fast_mode),
+    context_used_pct: numOrNull(pick(ctx, 'used_percentage')),
+    context_used_tokens: numOrNull(pick(ctx, 'total_input_tokens')),
+    context_size: numOrNull(pick(ctx, 'context_window_size')),
+    five_hour_pct: numOrNull(pick(five, 'used_percentage')),
+    five_hour_resets_at: numOrNull(pick(five, 'resets_at')),
+    seven_day_pct: numOrNull(pick(seven, 'used_percentage')),
+    seven_day_resets_at: numOrNull(pick(seven, 'resets_at')),
+    cost_usd: numOrNull(pick(cost, 'total_cost_usd')),
+    cwd: optStr(pick(workspace, 'current_dir')) ?? optStr(raw.cwd),
+    version: optStr(raw.version),
+    session_name: optStr(raw.session_name),
+  }
+}
+
 export function toRun(v: unknown, botId?: string): Run | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id', 'run_id'))
@@ -258,7 +353,10 @@ export function toRun(v: unknown, botId?: string): Run | null {
     workspace_id: optStr(v.workspace_id),
     pane_id: optStr(v.pane_id),
     adopted: bool(v.adopted),
+    herdr_session: optStr(pick(v, 'herdr_session', 'session')),
     agent_title: optStr(pick(v, 'agent_title', 'agentTitle')),
+    status_line: optStr(pick(v, 'status_line', 'statusLine')),
+    status: toStatusInfo(pick(v, 'status_json', 'status')),
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),
@@ -329,6 +427,8 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     incomplete: bool(v.incomplete),
     group_id: optStr(pick(v, 'group_id', 'groupId')),
     attachments: toAttachments(pick(v, 'attachments_json', 'attachments')),
+    team_id: optStr(pick(v, 'team_id', 'teamId')),
+    relay_from: optStr(pick(v, 'relay_from', 'relayFrom')),
     created_at: str(v.created_at),
   }
 }
@@ -371,6 +471,7 @@ export function toState(raw: unknown): AppState {
   const identities: Identity[] = []
   const projects: Project[] = []
   const bots: Bot[] = []
+  const teams: Team[] = []
   const runs: Run[] = []
   const turns: Turn[] = []
 
@@ -402,9 +503,18 @@ export function toState(raw: unknown): AppState {
     projects.push(project)
     if (isRec(p)) {
       for (const b of arr(pick(p, 'bots', 'bot_list'))) collectBot(b, project.id)
+      // SPEC-team §10.2；舊 daemon 沒有 `teams` → 空陣列，UI 的 team 區塊自然消失。
+      for (const t of arr(pick(p, 'teams', 'team_list'))) {
+        const team = toTeam(t, project.id)
+        if (team && !teams.some((x) => x.id === team.id)) teams.push(team)
+      }
     }
   }
   for (const b of arr(pick(root, 'bots', 'bot_list'))) collectBot(b)
+  for (const t of arr(pick(root, 'teams', 'team_list'))) {
+    const team = toTeam(t)
+    if (team && !teams.some((x) => x.id === team.id)) teams.push(team)
+  }
 
   for (const r of arr(pick(root, 'runs', 'active_runs', 'activeRuns'))) {
     const run = toRun(r)
@@ -431,12 +541,14 @@ export function toState(raw: unknown): AppState {
   return {
     daemon_seq: num(pick(root, 'daemon_seq', 'seq'), 0),
     connected: bool(pick(root, 'connected', 'herdr_connected'), true),
+    default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,
     tools: localTools,
     hosts,
     identities,
     projects,
     bots,
+    teams,
     runs,
     turns,
   }
@@ -493,7 +605,8 @@ export function lampOf(run: Run | undefined | null, connected: boolean): Lamp {
 }
 
 export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapshot {
-  if (typeof raw === 'string') return { text: raw, revision: null, truncated: false, source }
+  if (typeof raw === 'string')
+    return { text: raw, revision: null, truncated: false, source, pane_id: null, columns: null, rows: null }
   const o = isRec(raw) ? raw : {}
   const textRaw = pick(o, 'text', 'content', 'data', 'output', 'snapshot', 'lines')
   const text = Array.isArray(textRaw) ? textRaw.map((l) => str(l)).join('\n') : str(textRaw)
@@ -503,6 +616,10 @@ export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapsh
     revision: rev === undefined ? null : num(rev, 0),
     truncated: bool(o.truncated),
     source: oneOf<TerminalSource>(pick(o, 'source'), ['visible', 'recent_unwrapped'], source),
+    pane_id: optStr(pick(o, 'pane_id')),
+    // Absent on an older daemon: the UI must fall back to saying nothing, not to a wrong size.
+    columns: o.columns === undefined || o.columns === null ? null : num(o.columns, 0) || null,
+    rows: o.rows === undefined || o.rows === null ? null : num(o.rows, 0) || null,
   }
 }
 
@@ -558,6 +675,10 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   return {
     used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct', 'used'), 0))),
     resets_at: optStr(pick(v, 'resets_at', 'reset_at')),
+    // 門檻在 daemon 算好（見 docs/API.md §12.4）；舊 daemon 沒有這兩個欄位時預設 false，
+    // 額度條退回「只有長條」的行為，不在前端自己補算。
+    low: bool(pick(v, 'low'), false),
+    critical: bool(pick(v, 'critical'), false),
   }
 }
 
@@ -626,4 +747,160 @@ export function toIssueDetail(raw: unknown): IssueDetail | null {
 
 function root_issue(raw: Record<string, unknown>): unknown {
   return raw.issue ?? raw
+}
+
+// -------------------------------------------------------- Issue Team（SPEC-team §10）
+
+export function toTeamBudget(v: unknown): TeamBudget {
+  const o = isRec(v) ? v : {}
+  return {
+    max_relays: num(pick(o, 'max_relays'), TEAM_BUDGET_DEFAULTS.max_relays),
+    max_review_rounds: num(pick(o, 'max_review_rounds'), TEAM_BUDGET_DEFAULTS.max_review_rounds),
+    max_wall_clock_min: num(pick(o, 'max_wall_clock_min'), TEAM_BUDGET_DEFAULTS.max_wall_clock_min),
+    quota_stop_pct: num(pick(o, 'quota_stop_pct'), TEAM_BUDGET_DEFAULTS.quota_stop_pct),
+  }
+}
+
+export function toTeamUsage(v: unknown): TeamUsage {
+  if (!isRec(v)) return { ...TEAM_USAGE_EMPTY, per_bot: {} }
+  const perBot: TeamUsage['per_bot'] = {}
+  const raw = pick(v, 'per_bot')
+  if (isRec(raw)) {
+    for (const [k, val] of Object.entries(raw)) perBot[k] = { turns: num(isRec(val) ? pick(val, 'turns') : val, 0) }
+  }
+  return {
+    relays: num(pick(v, 'relays'), 0),
+    review_rounds_total: num(pick(v, 'review_rounds_total'), 0),
+    elapsed_min: num(pick(v, 'elapsed_min'), 0),
+    per_bot: perBot,
+  }
+}
+
+function toTasksSummary(v: unknown): TeamTasksSummary {
+  const o = isRec(v) ? v : {}
+  const out: TeamTasksSummary = { total: num(pick(o, 'total'), 0) }
+  for (const st of TEAM_TASK_STATES) {
+    if (o[st] !== undefined) out[st] = num(o[st], 0)
+  }
+  return out
+}
+
+function toMembers(v: unknown): TeamMember[] {
+  const out: TeamMember[] = []
+  for (const m of arr(v)) {
+    if (!isRec(m)) continue
+    const botId = str(pick(m, 'bot_id', 'id'))
+    if (!botId) continue
+    out.push({ bot_id: botId, role: oneOf<TeamRole>(pick(m, 'role', 'team_role'), TEAM_ROLES, 'worker') })
+  }
+  return out
+}
+
+export function toTeam(v: unknown, projectId?: string): Team | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id', 'team_id'))
+  if (!id) return null
+  return {
+    id,
+    project_id: str(pick(v, 'project_id'), projectId ?? ''),
+    issue_number: num(pick(v, 'issue_number', 'issue'), 0),
+    issue_title: str(pick(v, 'issue_title', 'title')),
+    issue_url: str(pick(v, 'issue_url', 'url')),
+    phase: oneOf<TeamPhase>(pick(v, 'phase'), TEAM_PHASES, 'starting'),
+    pause_reason: optStr(pick(v, 'pause_reason')),
+    branch: str(pick(v, 'branch')),
+    deliver: oneOf<TeamDeliver>(pick(v, 'deliver'), TEAM_DELIVERS, 'branch'),
+    supervised: bool(pick(v, 'supervised'), false),
+    members: toMembers(pick(v, 'members')),
+    tasks_summary: toTasksSummary(pick(v, 'tasks_summary')),
+    budget: toTeamBudget(pick(v, 'budget', 'budget_json')),
+    usage: toTeamUsage(pick(v, 'usage', 'usage_json')),
+    pr_url: optStr(pick(v, 'pr_url')),
+    created_at: str(pick(v, 'created_at')),
+    started_at: optStr(pick(v, 'started_at')),
+    ended_at: optStr(pick(v, 'ended_at')),
+  }
+}
+
+export function toTeamTask(v: unknown): TeamTask | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id', 'task_id'))
+  if (!id) return null
+  return {
+    id,
+    seq: num(pick(v, 'seq'), 0),
+    title: str(pick(v, 'title')),
+    brief: str(pick(v, 'brief')),
+    files: arr(pick(v, 'files', 'files_json')).map((f) => str(f)).filter(Boolean),
+    worker_bot_id: str(pick(v, 'worker_bot_id', 'bot_id')),
+    branch: str(pick(v, 'branch')),
+    state: oneOf<TeamTaskState>(pick(v, 'state'), TEAM_TASK_STATES, 'queued'),
+    round: num(pick(v, 'round'), 0),
+    last_report: optStr(pick(v, 'last_report')),
+    last_verdict: optStr(pick(v, 'last_verdict')),
+    merge_sha: optStr(pick(v, 'merge_sha')),
+    updated_at: str(pick(v, 'updated_at')),
+  }
+}
+
+export function toTeamDetail(raw: unknown, teamId: string): TeamDetail | null {
+  const root = isRec(raw) && isRec(raw.team) ? raw.team : raw
+  const base = toTeam(root)
+  if (!base) return null
+  const o = isRec(root) ? root : {}
+  const outer = isRec(raw) ? raw : {}
+  const tasks: TeamTask[] = []
+  for (const t of arr(pick(o, 'tasks') ?? pick(outer, 'tasks'))) {
+    const task = toTeamTask(t)
+    if (task) tasks.push(task)
+  }
+  return {
+    ...base,
+    id: base.id || teamId,
+    tasks: tasks.sort((a, b) => a.seq - b.seq),
+    summary: optStr(pick(o, 'summary') ?? pick(outer, 'summary')),
+    base_ref: str(pick(o, 'base_ref') ?? pick(outer, 'base_ref'), 'HEAD'),
+    base_sha: str(pick(o, 'base_sha') ?? pick(outer, 'base_sha')),
+    worktree_root: str(pick(o, 'worktree_root') ?? pick(outer, 'worktree_root')),
+  }
+}
+
+export function toTeamEvent(v: unknown): TeamEvent | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id', 'event_id'))
+  if (!id) return null
+  const payload = pick(v, 'payload', 'payload_json')
+  let parsed: unknown = payload
+  if (typeof payload === 'string') {
+    try {
+      parsed = JSON.parse(payload)
+    } catch {
+      parsed = { text: payload }
+    }
+  }
+  return {
+    id,
+    kind: oneOf<TeamEventKind>(pick(v, 'kind'), TEAM_EVENT_KINDS, 'note'),
+    from_bot_id: optStr(pick(v, 'from_bot_id')),
+    to_bot_id: optStr(pick(v, 'to_bot_id')),
+    task_id: optStr(pick(v, 'task_id')),
+    turn_id: optStr(pick(v, 'turn_id')),
+    status: (() => {
+      const s = pick(v, 'status')
+      return s === undefined ? null : oneOf<TeamEventStatus>(s, TEAM_EVENT_STATUSES, 'delivered')
+    })(),
+    payload: isRec(parsed) ? parsed : {},
+    created_at: str(pick(v, 'created_at')),
+  }
+}
+
+export function toTeamEvents(raw: unknown): TeamEvent[] {
+  const root = isRec(raw) ? raw : {}
+  const list = Array.isArray(raw) ? raw : arr(pick(root, 'events', 'items'))
+  const out: TeamEvent[] = []
+  for (const e of list) {
+    const ev = toTeamEvent(e)
+    if (ev) out.push(ev)
+  }
+  return sortById(out)
 }

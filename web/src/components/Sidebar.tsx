@@ -1,18 +1,30 @@
 import { useEffect, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { MOCK_MODE } from '../api'
 import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
-import { anchorOf, attachCommandOf, botLamp, projectHostName, toolsOfHost, useStore } from '../store/store'
+import {
+  anchorOf,
+  attachCommandOf,
+  botLamp,
+  botQuotaWarning,
+  botsOfProject,
+  projectHostName,
+  toolsOfHost,
+  useStore,
+} from '../store/store'
 import type { SocketStatus } from '../store/store'
-import { GearIcon, PlayIcon } from './Icons'
+import { CloneIcon, GearIcon, PlayIcon, TrashIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { ConfirmDialog } from './ConfirmDialog'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
-import { ModelField, IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
+import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { AttachButton } from './AttachButton'
-import { KindDisplayToggle, KindTag } from './KindTag'
+import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
+import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
@@ -31,15 +43,44 @@ function shortPath(path: string, max = 30): string {
   return path.length <= max ? path : `…${path.slice(-(max - 1))}`
 }
 
-function BotRow({ botId }: { botId: string }) {
+/** 拖曳中的一列，以及游標落在哪一列的哪一半（插入線畫在那裡）。 */
+type DragState = { id: string; projectId: string; overId: string | null; edge: 'before' | 'after' } | null
+
+function BotRow({
+  botId,
+  drag,
+  onDrag,
+  onDropAt,
+  onNudge,
+}: {
+  botId: string
+  drag: DragState
+  onDrag: (next: DragState) => void
+  onDropAt: (dragId: string, overId: string, edge: 'before' | 'after') => void
+  onNudge: (botId: string, dir: -1 | 1) => void
+}) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
   const lamp = useStore((s) => botLamp(s, botId))
+  // SPEC：bot 對應額度 critical（daemon 算好，見 docs/API.md §12.4）時，整列反灰＋警語。
+  // `botQuotaWarning` 每次都 new 一個新物件，跟 ChatPanel 的 `composerState` 同一個坑
+  // （見 ChatPanel.tsx 的 `useShallow(composerState)`）——要淺比較，否則 useSyncExternalStore 會判斷
+  // 每次快照都變了而無限重渲染／噴 getSnapshot 警告，整個側欄的 bot 列都不會 render。
+  const quotaWarning = useStore(
+    useShallow((s) => {
+      const b = s.bots.find((x) => x.id === botId)
+      return b ? botQuotaWarning(s.quota, b.kind, b.identity) : null
+    }),
+  )
   const selected = useStore((s) => s.selectedBotId === botId)
   const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const selectBot = useStore((s) => s.selectBot)
   const startBot = useStore((s) => s.startBot)
   const openSettings = useStore((s) => s.openSettings)
+  const cloneBot = useStore((s) => s.cloneBot)
+  const busyClone = useStore((s) => Boolean(s.busy[`clone:${botId}`]))
+  const removeBot = useStore((s) => s.removeBot)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const agentTitle = useStore((s) => {
     const r = s.runs[botId]
     const t = r?.agent_title?.trim()
@@ -51,18 +92,56 @@ function BotRow({ botId }: { botId: string }) {
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
 
+  const dragging = drag?.id === botId
+  // 只在同一個專案內排序：跨專案拖曳不畫插入線，也不會有動作。
+  const sameProject = drag?.projectId === bot.project_id
+  const dropEdge = drag && sameProject && drag.id !== botId && drag.overId === botId ? drag.edge : null
+
+  /** 落點：拖到上半 = 插在這列之前，下半 = 插在這列之後。 */
+  const edgeAt = (e: { currentTarget: HTMLElement; clientY: number }): 'before' | 'after' => {
+    const r = e.currentTarget.getBoundingClientRect()
+    return e.clientY < r.top + r.height / 2 ? 'before' : 'after'
+  }
+
   return (
     <div
-      className={`bot-row${selected ? ' selected' : ''}`}
+      className={`bot-row${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
+        dropEdge ? ` drop-${dropEdge}` : ''
+      }${deleteOpen ? ' confirming' : ''}${quotaWarning ? ' quota-critical' : ''}`}
       role="option"
       aria-selected={selected}
       tabIndex={0}
+      draggable
       onClick={() => selectBot(botId)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           selectBot(botId)
         }
+        // 鍵盤也要能排序：Alt + ↑/↓（拖曳不是每個人都能用）。
+        if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          e.preventDefault()
+          onNudge(botId, e.key === 'ArrowUp' ? -1 : 1)
+        }
+      }}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', botId)
+        onDrag({ id: botId, projectId: bot.project_id, overId: null, edge: 'before' })
+      }}
+      onDragEnd={() => onDrag(null)}
+      onDragOver={(e) => {
+        if (!drag || drag.id === botId || !sameProject) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+        const edge = edgeAt(e)
+        if (drag.overId !== botId || drag.edge !== edge) onDrag({ ...drag, overId: botId, edge })
+      }}
+      onDrop={(e) => {
+        if (!drag || drag.id === botId || !sameProject) return
+        e.preventDefault()
+        onDropAt(drag.id, botId, edgeAt(e))
+        onDrag(null)
       }}
     >
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
@@ -85,7 +164,15 @@ function BotRow({ botId }: { botId: string }) {
           <KindTag kind={bot.kind} />
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
           <IdentityBadge name={bot.identity} showDefault />
-          {bot.model ? (
+          {quotaWarning ? (
+            // 額度 critical：警語取代模型標籤（側欄窄，優先顯示這個）；文字撐不下就截斷，完整內容看 title。
+            <span
+              className="bot-quota-warn"
+              title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaWarning.window} 額度剩 ${quotaWarning.pct}%，快用完了`}
+            >
+              ⚠ 額度剩 {quotaWarning.pct}%
+            </span>
+          ) : bot.model ? (
             <span className="model-tag" title={`模型：${bot.model}`}>
               {bot.model}
             </span>
@@ -93,15 +180,36 @@ function BotRow({ botId }: { botId: string }) {
         </span>
       </span>
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
+        {/* 這一列的選單就兩個鍵，上下疊：開同類分身 / 設定。 */}
+        <span className="bot-menu">
+          <button
+            type="button"
+            className="icon-btn menu-btn icon-tip"
+            disabled={busyClone}
+            aria-label={`開 ${bot.name} 的同類分身並啟動（同 kind、模型、身份、人設）`}
+            data-tip={`開同類分身並啟動 · ${bot.name}`}
+            onClick={() => void cloneBot(botId)}
+          >
+            <CloneIcon />
+          </button>
+          <button
+            type="button"
+            className="icon-btn menu-btn gear icon-tip"
+            aria-label={`設定 ${bot.name}（模型、身份、autostart…）`}
+            data-tip={`設定 · ${bot.name}`}
+            onClick={(e) => openSettings(botId, anchorOf(e.currentTarget))}
+          >
+            <GearIcon />
+          </button>
+        </span>
         <button
           type="button"
-          className="icon-btn gear icon-tip"
-          title={`設定 ${bot.name}（模型、身份、autostart…）`}
-          aria-label={`設定 ${bot.name}`}
-          data-tip={`設定 · ${bot.name}`}
-          onClick={(e) => openSettings(botId, anchorOf(e.currentTarget))}
+          className="icon-btn bot-delete-btn icon-tip"
+          aria-label={`刪除 ${bot.name}`}
+          data-tip={`刪除 · ${bot.name}`}
+          onClick={() => setDeleteOpen(true)}
         >
-          <GearIcon />
+          <TrashIcon />
         </button>
         {active ? null : (
           <button
@@ -109,7 +217,6 @@ function BotRow({ botId }: { botId: string }) {
             className="icon-btn bot-run-btn start icon-tip"
             disabled={busyStart}
             aria-label={`啟動 ${bot.name}`}
-            title={`啟動 ${bot.name}`}
             data-tip={`啟動 · ${bot.name}`}
             onClick={() => void startBot(botId)}
           >
@@ -117,6 +224,24 @@ function BotRow({ botId }: { botId: string }) {
           </button>
         )}
       </span>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title="刪除 Bot"
+        body={
+          <>
+            確定刪除 <strong>{bot.name}</strong>？會停止並關閉它的終端 pane，設定從 config.toml 移除；對話紀錄會保留。
+          </>
+        }
+        confirmLabel="刪除"
+        danger
+        width={340}
+        onCancel={() => setDeleteOpen(false)}
+        onConfirm={() => {
+          setDeleteOpen(false)
+          void removeBot(botId)
+        }}
+      />
     </div>
   )
 }
@@ -393,11 +518,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           })}
         </div>
       </div>
-      {kind === 'claude' ? (
-        <ModelField kind={kind} value={model} onChange={setModel} />
-      ) : (
-        <ApiModelFields kind={kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
-      )}
+      <ApiModelFields kind={kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
       <IdentityOptions kind={kind} value={identity} onChange={setIdentity} />
       <label className="field">
         <span>名稱</span>
@@ -485,6 +606,31 @@ export function Sidebar() {
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
+  const botOrder = useStore((s) => s.botOrder)
+  const moveBot = useStore((s) => s.moveBot)
+  const [drag, setDrag] = useState<DragState>(null)
+
+  /** 拖放：落在 overId 的上/下半 → 插到它前面 / 後面（後面 = 下一列的前面）。 */
+  const dropAt = (dragId: string, overId: string, edge: 'before' | 'after') => {
+    const bot = bots.find((b) => b.id === overId)
+    if (!bot) return
+    const ids = botsOfProject({ bots, botOrder }, bot.project_id).map((b) => b.id)
+    const at = ids.indexOf(overId)
+    if (at < 0) return
+    const beforeId = edge === 'before' ? overId : (ids[at + 1] ?? null)
+    moveBot(dragId, beforeId === dragId ? null : beforeId)
+  }
+
+  /** Alt + ↑/↓：跟相鄰的那列交換。 */
+  const nudge = (botId: string, dir: -1 | 1) => {
+    const bot = bots.find((b) => b.id === botId)
+    if (!bot) return
+    const ids = botsOfProject({ bots, botOrder }, bot.project_id).map((b) => b.id)
+    const at = ids.indexOf(botId)
+    const to = at + dir
+    if (at < 0 || to < 0 || to >= ids.length) return
+    moveBot(botId, dir === -1 ? ids[to] : (ids[to + 1] ?? null))
+  }
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
   const hostsDown = hosts.filter((h) => !h.connected).length
@@ -576,7 +722,8 @@ export function Sidebar() {
           </p>
         ) : null}
         {projects.map((p) => {
-          const list = bots.filter((b) => b.project_id === p.id)
+          // SPEC-team §11.4：team 成員縮排列在 Team 節點底下，不與一般 bot 混排。
+          const list = botsOfProject({ bots, botOrder }, p.id).filter((b) => b.team === null)
           const projectSelected = selectedProjectId === p.id
           return (
             <section className="project" key={p.id}>
@@ -622,8 +769,11 @@ export function Sidebar() {
                   </button>
                 </div>
               ) : (
-                list.map((b) => <BotRow key={b.id} botId={b.id} />)
+                list.map((b) => (
+                  <BotRow key={b.id} botId={b.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} />
+                ))
               )}
+              <TeamNodes projectId={p.id} />
             </section>
           )
         })}

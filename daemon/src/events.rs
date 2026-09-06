@@ -1,9 +1,11 @@
 //! herdr event subscription topology (SPEC §3.1, §11.3.6) and event handling (§6.6).
 //!
-//! - one global connection **per host**: pane.exited / pane.closed / workspace.closed / pane.agent_detected
+//! - one global connection **per host/session**: pane.exited / pane.closed / workspace.closed /
+//!   pane.agent_detected
 //! - one connection per active Run: pane.agent_status_changed {pane_id}
 //!
-//! pane ids are only unique within a host, so every lookup is keyed by `(host, pane_id)`.
+//! pane ids are only unique within a Herdr session, so every lookup is keyed by
+//! `(host, session, pane_id)`.
 //!
 //! herdr is inconsistent about event naming (`pane.agent_status_changed` uses dots,
 //! `pane_updated` uses underscores), so every name is normalized before matching.
@@ -19,17 +21,27 @@ fn norm(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// Start (or restart) the global subscription for one host. Replacing the old task and
+/// Start (or restart) the global subscription for one host's configured session. Replacing the old task and
 /// registering the new one happens under one lock, so two quick calls cannot leave two
 /// loops running (each of which would reconcile independently).
 pub async fn spawn_global_for_host(app: Arc<App>, host: String) {
+    let Some(session) = app.session_for_host(&host).await else {
+        tracing::warn!(host, "cannot start global subscription without a configured session");
+        return;
+    };
+    spawn_global_for_session(app, host, session).await;
+}
+
+/// Start (or restart) a global subscription for an explicit host/session pair.
+pub async fn spawn_global_for_session(app: Arc<App>, host: String, session: String) {
     let mut g = app.global_watchers.lock().await;
-    if let Some(old) = g.remove(&host) {
+    let key = (host.clone(), session.clone());
+    if let Some(old) = g.remove(&key) {
         old.abort();
     }
-    let (a, h) = (app.clone(), host.clone());
-    let t = tokio::spawn(async move { global_loop(a, h).await });
-    g.insert(host, t);
+    let (a, h, s) = (app.clone(), host.clone(), session.clone());
+    let t = tokio::spawn(async move { global_loop(a, h, s).await });
+    g.insert(key, t);
 }
 
 /// Local host convenience (kept for `main.rs`).
@@ -37,11 +49,12 @@ pub async fn spawn_global(app: Arc<App>) {
     spawn_global_for_host(app, LOCAL_HOST.to_string()).await;
 }
 
-async fn global_loop(app: Arc<App>, host: String) {
-    let is_local = host == LOCAL_HOST;
+async fn global_loop(app: Arc<App>, host: String, session: String) {
+    let is_local_main = host == LOCAL_HOST && session == app.herdr_session.as_str();
+    let is_local_default = host == LOCAL_HOST && session == "default";
     let mut backoff = Duration::from_millis(250);
     loop {
-        let Some(client) = app.herdr_for(&host).await else {
+        let Some(client) = app.herdr_for_session(&host, &session).await else {
             tracing::info!(host = %host, "host gone; stopping global subscription");
             return;
         };
@@ -54,37 +67,50 @@ async fn global_loop(app: Arc<App>, host: String) {
         match client.subscribe(subs).await {
             Ok(mut rx) => {
                 backoff = Duration::from_millis(250);
-                if is_local {
+                if is_local_main {
                     app.connected.store(true, Ordering::SeqCst);
                     crate::state::emit_daemon_status(&app).await;
                 }
-                tracing::info!(host = %host, "global herdr event subscription established");
+                if is_local_default {
+                    crate::state::set_default_connected(&app, true).await;
+                }
+                tracing::info!(host = %host, session = %session, "global herdr event subscription established");
                 // Reconcile after every (re)connect.
-                if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
-                    tracing::error!(host = %host, error = ?e, "reconcile failed");
+                if is_local_default {
+                    if let Err(e) = crate::default_session::sync(&app).await {
+                        tracing::debug!(host = %host, session = %session, error = ?e, "default session sync failed");
+                    }
+                } else if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
+                    tracing::error!(host = %host, session = %session, error = ?e, "reconcile failed");
                 }
                 while let Some(ev) = rx.recv().await {
-                    handle_global(&app, &host, &ev).await;
+                    handle_global(&app, &host, &session, &ev).await;
                 }
-                if is_local {
+                if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
                     crate::state::emit_daemon_status(&app).await;
                 }
-                tracing::warn!(host = %host, "global herdr event subscription dropped");
+                if is_local_default {
+                    crate::state::set_default_connected(&app, false).await;
+                }
+                tracing::warn!(host = %host, session = %session, "global herdr event subscription dropped");
             }
             Err(e) => {
-                if is_local {
+                if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
                     // A6: tell the UI right away, otherwise the lamp stays green until a
                     // later attempt succeeds.
                     crate::state::emit_daemon_status(&app).await;
                 }
-                tracing::warn!(host = %host, error = %e, "herdr subscribe failed");
+                if is_local_default {
+                    crate::state::set_default_connected(&app, false).await;
+                }
+                tracing::debug!(host = %host, session = %session, error = %e, "herdr subscribe failed");
             }
         }
         // A remote host's reconnect is owned by its HostConn supervisor: stop retrying here
         // once the host is down, and let the supervisor respawn us after the master is back.
-        if !is_local && !app.host_connected(&host).await {
+        if host != LOCAL_HOST && !app.host_connected(&host).await {
             tracing::info!(host = %host, "host disconnected; global subscription yields to the supervisor");
             return;
         }
@@ -93,48 +119,62 @@ async fn global_loop(app: Arc<App>, host: String) {
     }
 }
 
-async fn handle_global(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
+async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
     let name = norm(&ev.event);
     match name.as_str() {
         "pane_exited" | "pane_closed" => {
             let Some(pane_id) = ev.data.get("pane_id").and_then(|v| v.as_str()) else { return };
             tracing::info!(host, pane_id, event = %ev.event, "pane gone");
-            end_runs_for_pane(app, host, pane_id).await;
+            end_runs_for_pane(app, host, session, pane_id).await;
         }
         "workspace_closed" => {
             let Some(ws) = ev.data.get("workspace_id").and_then(|v| v.as_str()) else { return };
             tracing::info!(host, workspace_id = ws, "workspace closed");
-            let _ = sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ?")
-                .bind(ws)
-                .bind(host)
-                .execute(&app.db)
-                .await;
             for b in crate::db::live_bots_on_host(&app.db, host).await.unwrap_or_default() {
                 if let Ok(Some(r)) = crate::db::active_run(&app.db, &b.id).await {
-                    if r.workspace_id.as_deref() == Some(ws) {
+                    if r.workspace_id.as_deref() == Some(ws) && app.session_for_run(&r).await.as_deref() == Some(session) {
                         crate::lifecycle::mark_run_exited(app, &r.id, "workspace closed").await;
                     }
                 }
             }
-            app.emit("project_changed", json!({})).await;
+            if app.session_for_host(host).await.as_deref() == Some(session) {
+                let _ = sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ?")
+                    .bind(ws)
+                    .bind(host)
+                    .execute(&app.db)
+                    .await;
+                app.emit("project_changed", json!({})).await;
+            }
         }
         "pane_agent_detected" => {
-            tracing::debug!(host, data = %ev.data, "pane.agent_detected");
+            tracing::debug!(host, session, data = %ev.data, "pane.agent_detected");
+            if host == LOCAL_HOST && session == "default" {
+                if let Err(e) = crate::default_session::sync(app).await {
+                    tracing::debug!(host, session, error = ?e, "default session sync after agent detection failed");
+                }
+            }
         }
-        other => tracing::trace!(host, event = other, "unhandled global herdr event"),
+        other => tracing::trace!(host, session, event = other, "unhandled global herdr event"),
     }
 }
 
-async fn end_runs_for_pane(app: &Arc<App>, host: &str, pane_id: &str) {
-    for r in crate::db::active_runs_for_pane(&app.db, host, pane_id).await.unwrap_or_default() {
+async fn end_runs_for_pane(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
+    let fallback = app.session_for_host(host).await.unwrap_or_default();
+    for r in crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await.unwrap_or_default() {
         crate::lifecycle::mark_run_exited(app, &r.id, "pane exited").await;
     }
-    unwatch_pane(app, host, pane_id).await;
+    unwatch_pane_on_session(app, host, session, pane_id).await;
 }
 
-/// Open (or replace) the per-run `pane.agent_status_changed` subscription.
+/// Open (or replace) the per-run status subscription in the host's configured session.
 pub async fn watch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
-    let key = (host.to_string(), pane_id.to_string());
+    let Some(session) = app.session_for_host(host).await else { return };
+    watch_pane_on_session(app, host, &session, pane_id).await;
+}
+
+/// Open (or replace) the per-run `pane.agent_status_changed` subscription for an explicit session.
+pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
+    let key = (host.to_string(), session.to_string(), pane_id.to_string());
     let mut g = app.pane_watchers.lock().await;
     if g.contains_key(&key) {
         return;
@@ -142,24 +182,26 @@ pub async fn watch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
     let app2 = app.clone();
     let pid = pane_id.to_string();
     let hst = host.to_string();
+    let sess = session.to_string();
     let handle = tokio::spawn(async move {
         let mut backoff = Duration::from_millis(250);
         loop {
-            let Some(client) = app2.herdr_for(&hst).await else { break };
+            let Some(client) = app2.herdr_for_session(&hst, &sess).await else { break };
             let subs = vec![json!({"type": "pane.agent_status_changed", "pane_id": pid})];
             match client.subscribe(subs).await {
                 Ok(mut rx) => {
                     backoff = Duration::from_millis(250);
-                    tracing::info!(host = %hst, pane_id = %pid, "watching pane agent status");
+                    tracing::info!(host = %hst, session = %sess, pane_id = %pid, "watching pane agent status");
                     while let Some(ev) = rx.recv().await {
-                        handle_status(&app2, &hst, &ev).await;
+                        handle_status(&app2, &hst, &sess, &ev).await;
                     }
-                    tracing::warn!(host = %hst, pane_id = %pid, "pane status subscription dropped");
+                    tracing::warn!(host = %hst, session = %sess, pane_id = %pid, "pane status subscription dropped");
                 }
-                Err(e) => tracing::warn!(host = %hst, pane_id = %pid, error = %e, "pane status subscribe failed"),
+                Err(e) => tracing::debug!(host = %hst, session = %sess, pane_id = %pid, error = %e, "pane status subscribe failed"),
             }
             // Stop retrying once the run is no longer active.
-            let still = crate::db::active_runs_for_pane(&app2.db, &hst, &pid).await.unwrap_or_default().len();
+            let fallback = app2.session_for_host(&hst).await.unwrap_or_default();
+            let still = crate::db::active_runs_for_pane(&app2.db, &hst, &pid, &sess, &fallback).await.unwrap_or_default().len();
             if still == 0 {
                 break;
             }
@@ -171,12 +213,22 @@ pub async fn watch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
 }
 
 pub async fn unwatch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
-    if let Some(h) = app.pane_watchers.lock().await.remove(&(host.to_string(), pane_id.to_string())) {
+    let Some(session) = app.session_for_host(host).await else { return };
+    unwatch_pane_on_session(app, host, &session, pane_id).await;
+}
+
+pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
+    if let Some(h) = app
+        .pane_watchers
+        .lock()
+        .await
+        .remove(&(host.to_string(), session.to_string(), pane_id.to_string()))
+    {
         h.abort();
     }
 }
 
-async fn handle_status(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
+async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
     let name = norm(&ev.event);
     if name != "pane_agent_status_changed" {
         tracing::trace!(event = %ev.event, "unhandled pane event");
@@ -190,9 +242,10 @@ async fn handle_status(app: &Arc<App>, host: &str, ev: &crate::herdr::Event) {
         .map(|s| if s == "done" { "idle" } else { s })
         .unwrap_or("unknown")
         .to_string();
-    tracing::info!(host, pane_id, status = %status, "pane.agent_status_changed");
+    tracing::info!(host, session, pane_id, status = %status, "pane.agent_status_changed");
 
-    let Some(run) = crate::db::active_runs_for_pane(&app.db, host, pane_id).await.unwrap_or_default().into_iter().next()
+    let fallback = app.session_for_host(host).await.unwrap_or_default();
+    let Some(run) = crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await.unwrap_or_default().into_iter().next()
     else {
         return;
     };
@@ -259,33 +312,51 @@ pub fn spawn_title_poller(app: Arc<App>) {
                 if !conn.is_local() && !conn.is_connected() {
                     continue;
                 }
-                let Some(client) = app.herdr_for(&conn.name).await else { continue };
-                let Ok(agents) = client.agent_list().await else { continue };
-                for a in agents {
-                    let (Some(name), Some(raw)) = (a.name.as_deref(), a.terminal_title_stripped.as_deref()) else {
-                        continue;
-                    };
-                    let Some(title) = clean_title(raw) else { continue };
-                    let title = title.as_str();
-                    // Match on the agent name the run was started under; only live runs.
-                    let row = sqlx::query_as::<_, (String, String, Option<String>)>(
-                        &format!("SELECT id, bot_id, agent_title FROM runs WHERE agent_name = ? AND state IN {} LIMIT 1", crate::db::ACTIVE_STATES),
-                    )
-                    .bind(name)
-                    .fetch_optional(&app.db)
-                    .await;
-                    let Ok(Some((run_id, bot_id, current))) = row else { continue };
-                    if current.as_deref() == Some(title) {
-                        continue;
-                    }
-                    let _ = sqlx::query("UPDATE runs SET agent_title = ? WHERE id = ?")
-                        .bind(title)
-                        .bind(&run_id)
-                        .execute(&app.db)
-                        .await;
-                    app.emit_bot_status(&bot_id).await;
-                }
+                let Some(session) = app.session_for_host(&conn.name).await else { continue };
+                let Some(client) = app.herdr_for_session(&conn.name, &session).await else { continue };
+                poll_titles(&app, &conn.name, &session, &session, &client).await;
+            }
+            // The default session is not represented by HostManager. It may contain agents
+            // imported into the UI, so keep their live titles current as well.
+            if app.herdr_session != "default" && app.default_connected.load(Ordering::SeqCst) {
+                let fallback = app.herdr_session.clone();
+                let client = app.default_herdr.clone();
+                poll_titles(&app, LOCAL_HOST, "default", &fallback, &client).await;
             }
         }
     });
+}
+
+async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session: &str, client: &crate::herdr::HerdrClient) {
+    let Ok(agents) = client.agent_list().await else { return };
+    for a in agents {
+        let (Some(name), Some(raw)) = (a.name.as_deref(), a.terminal_title_stripped.as_deref()) else {
+            continue;
+        };
+        let Some(title) = clean_title(raw) else { continue };
+        let title = title.as_str();
+        // Match on both the agent name and session; named and default sessions may reuse names.
+        let row = sqlx::query_as::<_, (String, String, Option<String>)>(
+            &format!(
+                "SELECT id, bot_id, agent_title FROM runs WHERE agent_name = ? AND state IN {} AND COALESCE(herdr_session, ?) = ? LIMIT 1",
+                crate::db::ACTIVE_STATES
+            ),
+        )
+        .bind(name)
+        .bind(fallback_session)
+        .bind(session)
+        .fetch_optional(&app.db)
+        .await;
+        let Ok(Some((run_id, bot_id, current))) = row else { continue };
+        if current.as_deref() == Some(title) {
+            continue;
+        }
+        let _ = sqlx::query("UPDATE runs SET agent_title = ? WHERE id = ?")
+            .bind(title)
+            .bind(&run_id)
+            .execute(&app.db)
+            .await;
+        app.emit_bot_status(&bot_id).await;
+    }
+    let _ = host; // kept in the helper signature for session-scoped tracing/debugging callers
 }

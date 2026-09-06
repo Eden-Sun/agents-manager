@@ -266,10 +266,34 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 
 不提供「合進使用者目前分支」——那會碰主 checkout，違反本文 §6.1 第 1 條。使用者想要就自己 `git merge team/...`。
 
+### 6.4a Team 自己的 herdr workspace（2026-09-06 使用者要求）
+
+**每個 team 開一個獨立的 herdr workspace**，成員的 pane 都 split 在它裡面，`teams.workspace_id` 記錄。
+
+- 建立時機：解出 `base_sha`、建好 worktree 之後、建成員 bot 之前。路徑用 team 根目錄 `<data_dir>/teams/<team_id>/`。
+- 為什麼不共用 Project 的 workspace：一個 team 會塞進 4+ 個 pane，混進使用者平常在看的 workspace 裡會把它擠爆，而且 team 是**臨時**的、Project 是常駐的，生命週期不同。分開之後「關掉整個 team」就等於關掉一個 workspace，乾淨。
+- 這是 SPEC §2「一個 Project 對應一個 workspace」的**延伸而非違反**：Project 的 workspace 照舊，team 的是另外一個，只是它的擁有者是 team 而不是 Project。
+- workspace 建不出來 → 整個建 team 失敗並走 §6.5 的 cleanup，不要退回去用 Project 的 workspace（那會把臨時 pane 留在使用者的工作區裡）。
+- 清理 / 刪除時關掉它（見 §6.5、§6.5a）。對帳發現 workspace 不存在 → `paused(workspace_missing)`，比照 `worktree_missing`。
+
 ### 6.5 清理
 - `POST /teams/:id/cleanup`（team 在終態時）：停成員（若還活著）→ 對每個 worktree `git -C <project.path> worktree remove --force <path>`（被鎖住時再加一次 `--force`）→ `git -C <project.path> worktree prune` → 刪 `<data_dir>/teams/<id>/`（此時只剩 `ISSUE.md` / `TEAM.md`）→ 成員 bot 標 `deleted_at`（訊息保留，同 SPEC §6.4）。**分支一律保留**（便宜、可追溯；使用者自己刪）。順序很重要：先 `remove`/`prune` 再刪目錄，否則 `.git/worktrees/` 留下孤兒登記項（§6.2「git 元資料」）。
 - 建 team 失敗（任何一步）走同一個 cleanup，避免留下半套 worktree。
 - 對帳時（SPEC §6.5）對每個有 team 的 project 跑 `git worktree prune`，收掉目錄已被人手動刪除的登記項；若某個 active team 的 worktree 目錄不見了 → `paused(worktree_missing)`。
+
+### 6.5a 刪除（2026-09-06 使用者要求）
+
+`cleanup` 是「收掉現場但**留下紀錄**」——`teams` 這一列還在，UI 仍看得到這個 team 與它的時間軸。使用者要的是能把它整個移除。
+
+**`DELETE /api/teams/:id?branches=keep|delete`（預設 `keep`）**
+
+- **任何 phase 都可以刪**，不像 `cleanup` 只限終態。非終態時等於「先 abort 再刪」：停所有成員 → 走 §6.5 的 worktree 清理 → 關掉 team 的 workspace（§6.4a）→ 刪 `team_events` / `team_tasks` / `teams` 三張表的列 → 成員 bot 標 `deleted_at`。
+- **成員的對話訊息保留**（同 SPEC §6.4 刪 Bot 的既有語意）。刪掉的是 team 這個容器與它的排程紀錄，不是使用者與 agent 講過的話。
+- **分支預設保留**。`?branches=delete` 才會 `git branch -D` 掉整合分支與所有 task 分支——**唯一會銷毀工作成果的路徑**，UI 必須明示「已合併的內容也會消失」並要求二次確認。已經 push 過的遠端分支**一律不動**（那是對外的東西，只有人能決定）。
+- 冪等：team 不存在回 `404 {"error":"not_found","what":"team"}`；重複刪不報錯。
+- 刪除中推 `team_changed`（phase `deleting`）→ 完成推一則帶 `deleted: true` 的 `team_changed` 與 `bot_changed` ×N，讓前端把節點移掉。
+
+> `cleanup` 與 `delete` 並存，語意不同：`cleanup` 收現場、留紀錄（可以事後翻 task 與 relay）；`delete` 連紀錄一起移除。UI 兩個都要有，`delete` 走 `ConfirmDialog`。
 
 ### 6.6 遠端主機
 所有 git / gh 指令走 `github.rs::run_on_host`（本機 `/bin/sh -c`、遠端 `ssh_exec_path`）。`<data_dir>` 在遠端 = 該主機的 `~/.config/agents-manager`（與 `lifecycle::remote_bot_dir` 同一套家目錄展開）。`ISSUE.md` / `TEAM.md` 與各 worktree 內的副本用 `hosts.rs::ssh_put` 寫入。**第一階段只做本機**（§13）。
@@ -473,6 +497,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | POST | `/teams/{id}/approve` | — | supervised 閘門放行；非 `paused(gate:*)` 409 |
 | POST | `/teams/{id}/abort` | `{"reason"?}` | `200 {}`；停所有成員 |
 | POST | `/teams/{id}/cleanup` | — | 非終態 409；成功 `200 {}`，推 `bot_changed` ×N + `team_changed` |
+| DELETE | `/teams/{id}` | `?branches=keep\|delete`（預設 `keep`）| **任何 phase 都可刪**（§6.5a）：非終態時先停成員 → 清 worktree → 關 workspace → 刪三張表的列 → 成員 bot 標 `deleted_at`（訊息保留）。`branches=delete` 才 `git branch -D`，遠端分支一律不動。成功 `200 {}` 並推帶 `deleted: true` 的 `team_changed` + `bot_changed` ×N；不存在 `404 {"error":"not_found","what":"team"}` |
 | PATCH | `/teams/{id}` | `{"budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr"}` | `200 {}`；終態 409 |
 | POST | `/teams/{id}/say` | `{"text", "to", "client_request_id"}`；`to` 接受**角色**（`pm` / `reviewer`）、**短名**（`dev-1`，同 §4.4 協定用的）、**暱稱**（`i42-pm`）、**bot_id**，可帶 `@` 前綴 | 使用者插話（記 `kind:user`，不計預算），走 §13 群組路徑；回同 `POST chat` 的單筆 `sent` |
 | POST | `/teams/{id}/tasks/{tid}/decide` | `{"action": "rework" \| "force_merge" \| "skip", "note"?}` | 只在 task `exhausted` / `blocked_by_worker` / rebase 用盡時有效；其餘 409 |
@@ -620,6 +645,7 @@ CREATE TABLE IF NOT EXISTS teams (
   phase TEXT NOT NULL CHECK (phase IN ('starting','planning','working','finishing','done','paused','aborting','aborted','failed')),
   pause_reason TEXT, resume_phase TEXT,
   base_ref TEXT NOT NULL, base_sha TEXT NOT NULL, branch TEXT NOT NULL, worktree_root TEXT NOT NULL,
+  workspace_id TEXT,
   deliver TEXT NOT NULL CHECK (deliver IN ('branch','pr')),
   supervised INTEGER NOT NULL DEFAULT 0,
   roles_json TEXT NOT NULL,            -- 建立時的 pm / workers / reviewer 設定（供 UI 與重建）

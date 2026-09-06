@@ -1,0 +1,176 @@
+import { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
+import type { Bot, Team } from '../api/types'
+import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, TEAM_TERMINAL_PHASES, teamPauseLabel, teamPhaseTone } from '../api/types'
+import { botLamp, teamMemberBots, teamShortName, teamsOfProject, useStore } from '../store/store'
+import { KindTag } from './KindTag'
+import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { TeamDeleteDialog } from './TeamDeleteDialog'
+
+/**
+ * SPEC-team §11.4 — sidebar 裡 Project 底下的 Team 節點。
+ *
+ * 成員 bot 縮排列在節點下，**不與一般 bot 混排**（`Sidebar` 那邊會把 `bot.team` 非 null 的
+ * 濾掉）。終態的節點轉灰並提供「清理」。舊 daemon 沒有 `teams` → 這個元件整個不畫。
+ */
+
+function MemberRow({ bot }: { bot: Bot }) {
+  const lamp = useStore((s) => botLamp(s, bot.id))
+  const selected = useStore((s) => s.selectedBotId === bot.id && s.selectedTeamId === null)
+  const selectBot = useStore((s) => s.selectBot)
+  const role = bot.team?.role ?? 'worker'
+  return (
+    <div
+      className={`bot-row team-member-row${selected ? ' selected' : ''}`}
+      role="option"
+      aria-selected={selected}
+      tabIndex={0}
+      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}\ncwd ${bot.cwd ?? '（專案根目錄）'}`}
+      onClick={() => selectBot(bot.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          selectBot(bot.id)
+        }
+      }}
+    >
+      <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
+      <span className="bot-main">
+        <span className="bot-name">
+          <span className={`team-role ${role}`}>{TEAM_ROLE_LABEL[role]}</span>
+          {teamShortName(bot.name)}
+        </span>
+        <span className="bot-sub">
+          <KindTag kind={bot.kind} />
+          {bot.model ? (
+            <span className="model-tag" title={`模型：${bot.model}`}>
+              {bot.model}
+            </span>
+          ) : null}
+        </span>
+      </span>
+    </div>
+  )
+}
+
+function TeamNode({ team }: { team: Team }) {
+  const selected = useStore((s) => s.selectedTeamId === team.id)
+  const unread = useStore((s) => s.teamUnread[team.id] ?? 0)
+  const members = useStore(useShallow((s) => teamMemberBots(s, team.id)))
+  const selectTeam = useStore((s) => s.selectTeam)
+  const controlTeam = useStore((s) => s.controlTeam)
+  const busy = useStore((s) => Boolean(s.busy[`team:${team.id}:cleanup`]))
+  const deleting = useStore((s) => Boolean(s.busy[`team:${team.id}:delete`]))
+  const [open, setOpen] = useState(true)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const terminal = TEAM_TERMINAL_PHASES.includes(team.phase)
+  const tone = teamPhaseTone(team.phase)
+  const title = `${team.issue_title || `issue #${team.issue_number}`}`
+
+  return (
+    <div className={`team-node${terminal ? ' terminal' : ''}${open ? '' : ' collapsed'}`}>
+      <div className={`team-node-head${selected ? ' selected' : ''}`}>
+        <button
+          type="button"
+          className="icon-btn team-node-chev"
+          aria-expanded={open}
+          aria-label={open ? '收合成員' : '展開成員'}
+          title={open ? `收合 ${members.length} 位成員` : `展開 ${members.length} 位成員`}
+          onClick={(e) => {
+            e.stopPropagation()
+            setOpen((v) => !v)
+          }}
+        >
+          <span className="chev">{open ? '▼' : '▶'}</span>
+        </button>
+        <button
+          type="button"
+          className="team-node-btn"
+          aria-pressed={selected}
+          title={`開啟 Team：#${team.issue_number} ${title}\nphase ${TEAM_PHASE_LABEL[team.phase]}${team.pause_reason ? `（${teamPauseLabel(team.pause_reason)}）` : ''}\n分支 ${team.branch}`}
+          onClick={() => selectTeam(team.id)}
+        >
+          <span className="team-icon" aria-hidden="true">
+            ⚙
+          </span>
+          <span className="team-node-label">
+            #{team.issue_number} {title}
+          </span>
+          <span className={`team-phase-dot ${tone}`} aria-hidden="true" />
+          {!open ? (
+            <span className="team-collapsed-label">
+              已收合 · {members.length} 位
+            </span>
+          ) : null}
+          {unread > 0 ? (
+            <span className="unread-badge" title={`${unread} 則未讀的成員回覆`}>
+              {unread > 99 ? '99+' : unread}
+            </span>
+          ) : null}
+        </button>
+        {terminal ? (
+          <button
+            type="button"
+            className="icon-btn icon-tip"
+            disabled={busy}
+            title="清理：移除成員與 worktree（分支保留）"
+            aria-label={`清理 Team #${team.issue_number}`}
+            data-tip={`清理 · #${team.issue_number}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              void controlTeam(team.id, 'cleanup')
+            }}
+          >
+            ✕
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="icon-btn icon-tip danger"
+          disabled={deleting}
+          title={`刪除 Team #${team.issue_number}：連紀錄一起移除${terminal ? '' : '（進行中，會先停止所有成員）'}\n訊息與分支預設保留`}
+          aria-label={`刪除 Team #${team.issue_number}`}
+          data-tip={`刪除 · #${team.issue_number}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            setConfirmDelete(true)
+          }}
+        >
+          <TrashIcon />
+        </button>
+      </div>
+      {open
+        ? members.map((b) => <MemberRow key={b.id} bot={b} />)
+        : null}
+      {confirmDelete ? <TeamDeleteDialog teamId={team.id} onClose={() => setConfirmDelete(false)} /> : null}
+    </div>
+  )
+}
+
+/** 側邊欄的「刪除 Team」：`✕`（清理）已經被用掉了，刪除得看得出來是另一件事。 */
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <path
+        d="M2.6 4.2h10.8M6.4 4.2V2.9h3.2v1.3M4 4.2l.7 8.3a1.2 1.2 0 001.2 1.1h4.2a1.2 1.2 0 001.2-1.1l.7-8.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+export function TeamNodes({ projectId }: { projectId: string }) {
+  const teams = useStore(useShallow((s) => teamsOfProject(s, projectId)))
+  if (teams.length === 0) return null
+  return (
+    <div className="team-nodes">
+      {teams.map((t) => (
+        <TeamNode key={t.id} team={t} />
+      ))}
+    </div>
+  )
+}

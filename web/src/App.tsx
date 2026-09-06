@@ -3,6 +3,8 @@ import { MOCK_MODE } from './api'
 import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { Sidebar } from './components/Sidebar'
+import { TeamLaunchPanel } from './components/TeamLaunchPanel'
+import { TeamPanel } from './components/TeamPanel'
 import { useStore } from './store/store'
 
 function Notices() {
@@ -26,6 +28,19 @@ function Notices() {
 function ConnBanner() {
   const connected = useStore((s) => s.connected)
   const socket = useStore((s) => s.socket)
+  const refreshState = useStore((s) => s.refreshState)
+  // socket 通、herdr 斷：daemon 之後會推狀態，但別乾等——每 3 秒（和回到分頁時）自己抓一次。
+  const herdrDown = socket === 'open' && !connected
+  useEffect(() => {
+    if (!herdrDown) return
+    const tick = () => void refreshState()
+    const id = setInterval(tick, 3_000)
+    window.addEventListener('focus', tick)
+    return () => {
+      clearInterval(id)
+      window.removeEventListener('focus', tick)
+    }
+  }, [herdrDown, refreshState])
   if (socket === 'open' && connected) return null
   const label =
     socket !== 'open'
@@ -37,6 +52,9 @@ function ConnBanner() {
     <div className="conn-banner" role="status">
       <span className={`conn-dot ${socket === 'open' && !connected ? 'closed' : socket}`} />
       <span>{label}</span>
+      <button type="button" className="btn conn-retry" onClick={() => void refreshState()}>
+        立即重試
+      </button>
     </div>
   )
 }
@@ -46,6 +64,9 @@ export default function App() {
   const bootError = useStore((s) => s.bootError)
   const bootstrap = useStore((s) => s.bootstrap)
   const groupProjectId = useStore((s) => s.selectedProjectId)
+  // SPEC-team §11.5：`teamLaunch` / `selectedTeamId` 與 `selectedProjectId` 互斥。
+  const teamLaunch = useStore((s) => s.teamLaunch)
+  const teamId = useStore((s) => s.selectedTeamId)
   const [drawer, setDrawer] = useState(false)
 
   useEffect(() => {
@@ -87,7 +108,16 @@ export default function App() {
       {drawer ? <button type="button" className="scrim" aria-label="關閉側邊欄" onClick={() => setDrawer(false)} /> : null}
       <main className="main">
         <ConnBanner />
-        {groupProjectId ? (
+        {teamLaunch ? (
+          <TeamLaunchPanel
+            key={`${teamLaunch.projectId}:${teamLaunch.issueNumber}`}
+            projectId={teamLaunch.projectId}
+            issueNumber={teamLaunch.issueNumber}
+            onOpenSidebar={() => setDrawer(true)}
+          />
+        ) : teamId ? (
+          <TeamPanel key={teamId} teamId={teamId} onOpenSidebar={() => setDrawer(true)} />
+        ) : groupProjectId ? (
           <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
           <ChatPanel onOpenSidebar={() => setDrawer(true)} />

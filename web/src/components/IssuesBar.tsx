@@ -55,7 +55,11 @@ function errorText(e: unknown): string {
 export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string; draftKey: DraftKey; inputRef: RefObject<HTMLTextAreaElement | null> }) {
   const github = useStore((s) => s.projects.find((p) => p.id === projectId)?.github ?? null)
   const setDraft = useStore((s) => s.setDraft)
+  const setDraftCursor = useStore((s) => s.setDraftCursor)
   const notify = useStore((s) => s.notify)
+  // SPEC-team §11.1：舊 daemon 沒有 team 端點時 `teamsSupported` 會翻成 false，這顆按鈕靜默消失。
+  const teamsSupported = useStore((s) => s.teamsSupported)
+  const openTeamLaunch = useStore((s) => s.openTeamLaunch)
   const [open, setOpen] = useState(false)
   const [state, setState] = useState<IssueState>(readState)
   const [q, setQ] = useState('')
@@ -150,6 +154,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     const text = `${before}${pad}${snippet}${tail}${after}`
     setDraft(draftKey, text)
     const pos = before.length + pad.length + snippet.length
+    setDraftCursor(draftKey, pos)
     requestAnimationFrame(() => {
       const ta = inputRef.current
       if (!ta) return
@@ -244,6 +249,19 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
                     </div>
                   </div>
                   <div className="issue-actions">
+                    {teamsSupported ? (
+                      <button
+                        type="button"
+                        className="mini-btn team-btn"
+                        title="為這個 issue 建立一個 team（PM + 執行者 + reviewer，各自獨立的 worktree）"
+                        onClick={() => {
+                          openTeamLaunch(projectId, i.number)
+                          setOpen(false)
+                        }}
+                      >
+                        組隊
+                      </button>
+                    ) : null}
                     <button type="button" className="mini-btn" title="插入「#號 標題」與連結到輸入框游標處" onClick={() => insertRef(i)}>
                       插入
                     </button>

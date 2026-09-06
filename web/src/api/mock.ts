@@ -10,7 +10,8 @@
  *   - text containing `slow`                 → the reply takes ~8s (good for testing the composer lock)
  *
  * Dev helpers on `window.__amMock`: `resync()`, `dropSocket()`, `block(botId)`, `disconnect()`,
- * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts).
+ * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts), `paneSqueeze(n)` /
+ * `paneMoveOff()` / `paneMoveOn()`（窄 pane 警示與「移到自己的分頁」的退回路徑）。
  */
 
 import { parseMentions } from './mentions'
@@ -32,6 +33,12 @@ function ulid(prefix: string): string {
 }
 const now = () => new Date().toISOString()
 
+/**
+ * herdr workspace 的總欄數（實測 2026-09-06 的那台是 185）。同一個分頁裡的 pane 平分它，
+ * 自己獨佔一個分頁的就全拿——`pane.move → new_tab` 之所以有效就是因為分頁之間不互搶。
+ */
+const WORKSPACE_COLUMNS = 185
+
 interface MockRun {
   id: string
   bot_id: string
@@ -39,6 +46,8 @@ interface MockRun {
   agent_status: 'idle' | 'working' | 'blocked' | 'unknown'
   workspace_id: string | null
   pane_id: string | null
+  /** pane 佔著自己的分頁（`pane.move → new_tab` 之後）；false = 跟其他 pane 擠預設分頁。 */
+  own_tab: boolean
   adopted: number
   native_session_id: string | null
   transcript_path: string | null
@@ -193,6 +202,14 @@ interface MockTeamEvent {
   created_at: string
 }
 
+/**
+ * daemon 自己發的 relay（首則指派、合併通知、修復提示）在 `messages.relay_from` 上放的哨符。
+ *
+ * SPEC-team §2.1 把 `relay_from = NULL` 同時當成「使用者」與「daemon 自己」，前端因此分不出
+ * 「你 → pm」跟「daemon → pm」。這裡用一個非 bot_id 的字串，UI 認不出來就顯示成 daemon。
+ */
+const DAEMON_SENDER = 'daemon'
+
 /** 一行 am-team fenced 區塊（UI 會把它折成 chip）。 */
 function amTeam(obj: Rec): string {
   return '```am-team\n' + JSON.stringify(obj, null, 2) + '\n```'
@@ -259,6 +276,7 @@ const MODELS: Record<BotKind, Rec[]> = {
     { id: 'opus', display_name: 'Opus', description: '最強推理', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'sonnet', display_name: 'Sonnet', description: '速度與品質平衡', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'haiku', display_name: 'Haiku', description: '最快、最省', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'fable', display_name: 'Fable', description: 'Fable 5.1', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
   ],
   codex: [
     {
@@ -286,6 +304,15 @@ const MODELS: Record<BotKind, Rec[]> = {
       ],
     },
     {
+      id: 'gpt-5.6-sol',
+      display_name: 'GPT-5.6 Sol',
+      description: '可靠的日常 agentic workhorse',
+      is_default: false,
+      default_effort: 'low',
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      service_tiers: [],
+    },
+    {
       id: 'gpt-6-astra',
       display_name: 'GPT-6 Astra',
       description: '規格審視 / 深度推理（無 fast tier）',
@@ -296,8 +323,8 @@ const MODELS: Record<BotKind, Rec[]> = {
     },
   ],
   grok: [
-    { id: 'grok-4.6', display_name: 'Grok 4.6', description: 'grok CLI 預設', is_default: true, default_effort: 'medium', efforts: ['low', 'medium', 'high'], service_tiers: [] },
-    { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'medium', efforts: ['low', 'medium', 'high'], service_tiers: [] },
+    { id: 'grok-4.6', display_name: 'Grok 4.6', description: 'grok CLI 預設', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high'], service_tiers: [] },
   ],
 }
 
@@ -348,6 +375,19 @@ export class MockTransport implements Transport {
   private conversations = new Map<string, string>()
   /** Uploaded attachment bytes, so the mock UI can render its own thumbnails. */
   private blobs = new Map<string, Blob>()
+
+  /** Dev helper：模擬「舊 daemon 完全沒有 team 端點」（`__amMock.teamsOff()`）。 */
+  private teamsDisabled = false
+
+  /** Dev helper：模擬「daemon 還沒有 `pane/move-to-tab`」（`__amMock.paneMoveOff()`）。 */
+  private paneMoveDisabled = false
+
+  /**
+   * herdr 預設分頁裡已經有幾個**不是 bot** 的 pane（使用者自己的 shell 之類）。demo 預設就塞得夠擠，
+   * 這樣 `VITE_MOCK=1` 一開終端分頁就看得到窄 pane 警示與「移到自己的分頁」按鈕。
+   * `__amMock.paneSqueeze(n)` 可以調鬆調緊。
+   */
+  private foreignPanes = 5
 
   private seq = 0
   private connected = true
@@ -495,7 +535,9 @@ export class MockTransport implements Transport {
     const seg = rawPath.split('/').filter(Boolean)
 
     if (method === 'GET' && rawPath === '/state') return this.state()
-    if (method === 'GET' && rawPath === '/fs/dirs') return this.dirs(q.get('path') ?? '', q.get('host') ?? '')
+    if (method === 'GET' && rawPath === '/fs/dirs') {
+      return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
+    }
     if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '')
     if (method === 'GET' && rawPath === '/quota') return { kinds: this.quota }
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
@@ -512,10 +554,12 @@ export class MockTransport implements Transport {
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'messages') return this.projectMessages(seg[1], q)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'chat') return this.projectChat(seg[1], b)
-    if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'teams') return this.createTeam(seg[1], b)
+    if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'teams' && !this.teamsDisabled) {
+      return this.createTeam(seg[1], b)
+    }
 
     // ---- SPEC-team §10 -------------------------------------------------
-    if (seg[0] === 'teams' && seg.length >= 2) {
+    if (seg[0] === 'teams' && seg.length >= 2 && !this.teamsDisabled) {
       const teamId = seg[1]
       if (method === 'GET' && seg.length === 2) return this.teamDetail(teamId)
       if (method === 'GET' && seg[2] === 'events') return { team_id: teamId, events: this.teamEventsOf(teamId) }
@@ -528,6 +572,9 @@ export class MockTransport implements Transport {
       if (method === 'POST' && seg[2] === 'approve') return this.approveTeam(teamId)
       if (method === 'POST' && seg[2] === 'abort') return this.abortTeam(teamId)
       if (method === 'POST' && seg[2] === 'cleanup') return this.cleanupTeam(teamId)
+      if (method === 'DELETE' && seg.length === 2) {
+        return this.deleteTeam(teamId, q.get('branches') === 'delete' ? 'delete' : 'keep')
+      }
     }
 
     if (seg[0] === 'bots' && seg.length >= 2) {
@@ -546,6 +593,7 @@ export class MockTransport implements Transport {
         if (action === 'interrupt') return this.interrupt(botId)
         if (action === 'prompt') return this.prompt(botId, b)
         if (action === 'keys') return this.keys(botId, b)
+        if (action === 'pane' && seg[3] === 'move-to-tab' && !this.paneMoveDisabled) return this.movePaneToTab(botId)
       }
     }
 
@@ -632,7 +680,7 @@ export class MockTransport implements Transport {
   }
 
   /** SPEC §11.5: the same JSON shape for local and remote; `host` picks the tree. */
-  private dirs(path: string, host: string) {
+  private dirs(path: string, host: string, hidden = false) {
     const remote = host && host !== 'local' ? this.host(host) : null
     if (remote && !remote.connected) {
       throw new ApiError(502, { error: 'upstream', message: `主機 ${remote.name} 未連線：${remote.error ?? 'ssh 中斷'}` }, 'upstream')
@@ -643,7 +691,8 @@ export class MockTransport implements Transport {
       ? {
           '/': ['Users', 'opt', 'tmp'],
           '/Users': [user],
-          [home]: ['work', 'src', 'Documents'],
+          [home]: ['work', 'src', 'Documents', '.config'],
+          [`${home}/.config`]: [],
           [`${home}/work`]: ['api-server', 'web-client', 'scratch'],
           [`${home}/work/api-server`]: ['crates'],
           [`${home}/src`]: ['herdr'],
@@ -652,7 +701,9 @@ export class MockTransport implements Transport {
       : {
           '/': ['Users', 'opt', 'tmp'],
           '/Users': ['me'],
-          '/Users/me': ['project', 'Documents', 'Downloads'],
+          '/Users/me': ['project', 'Documents', 'Downloads', '.claude', '.config'],
+          '/Users/me/.claude': ['projects'],
+          '/Users/me/.config': [],
           '/Users/me/project': ['foo', 'bar', 'agents-manager'],
           '/Users/me/project/foo': ['src'],
           '/Users/me/Documents': [],
@@ -662,7 +713,7 @@ export class MockTransport implements Transport {
       ? new Set([`${home}/work/api-server`, `${home}/work/web-client`, `${home}/src/herdr`])
       : new Set(['/Users/me/project/foo', '/Users/me/project/agents-manager'])
     const cur = path && (path in tree || path.startsWith(`${home}/`)) ? path : home
-    const kids = tree[cur] ?? []
+    const kids = (tree[cur] ?? []).filter((n) => hidden || !n.startsWith('.'))
     const parent = cur === '/' ? null : cur.slice(0, cur.lastIndexOf('/')) || '/'
     return {
       path: cur,
@@ -802,7 +853,7 @@ export class MockTransport implements Transport {
     h.connected = connected
     h.error = connected ? null : 'ssh master 已退出（mock 模擬斷線）'
     this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
-    this.emit('daemon_status', { herdr_connected: this.connected, connected: this.connected, hosts: this.hostMap() })
+    this.emit('daemon_status', { herdr_connected: this.connected, connected: this.connected, default_connected: false, hosts: this.hostMap() })
     for (const b of this.botsOnHost(h.name)) this.emitBotStatus(b.id)
   }
 
@@ -825,6 +876,27 @@ export class MockTransport implements Transport {
     return this.runs.find(
       (r) => r.bot_id === botId && (r.state === 'starting' || r.state === 'running' || r.state === 'stopping'),
     )
+  }
+
+  /** 共用預設分頁的 pane 平分 `WORKSPACE_COLUMNS`，自己一個分頁的獨佔全寬。 */
+  private paneColumns(run: MockRun): number {
+    if (run.own_tab) return WORKSPACE_COLUMNS
+    const shared =
+      this.foreignPanes +
+      this.runs.filter((r) => !r.own_tab && r.workspace_id === run.workspace_id && this.activeRun(r.bot_id) === r).length
+    return Math.max(8, Math.floor(WORKSPACE_COLUMNS / Math.max(1, shared)))
+  }
+
+  /**
+   * `POST /bots/:id/pane/move-to-tab` — 對應 herdr 的 `pane.move` +
+   * `destination.type = "new_tab"`。搬的是**既有** pane：`pane_id` 不變，run 也不重開。
+   */
+  private movePaneToTab(botId: string) {
+    const run = this.activeRun(botId)
+    if (!run) throw new ApiError(409, { error: 'conflict', reason: '這個 bot 沒有在跑的 pane' }, 'conflict')
+    run.own_tab = true
+    this.emitBotStatus(botId)
+    return {}
   }
 
   private conv(botId: string): string {
@@ -874,6 +946,7 @@ export class MockTransport implements Transport {
     return {
       daemon_seq: this.seq,
       connected: this.connected,
+      default_connected: false,
       herdr_session: 'agents-manager',
       identities: this.identities.map((i) => ({ ...i, env: { ...i.env }, args: [...i.args] })),
       // API.md: the reserved `local` entry is always first, with null ssh fields.
@@ -932,13 +1005,15 @@ export class MockTransport implements Transport {
               managed_by: b.managed_by,
               team: b.team_id && b.team_role ? { team_id: b.team_id, role: b.team_role } : null,
               cwd: b.cwd,
+              // daemon 是 `slug(project.label)-<bot id 末 6 碼小寫>`，mock 照抄夠用來驗 UI。
+              agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
               run,
               in_flight_turn: this.turns.find((t) => run && t.run_id === run.id && t.status === 'in_flight') ?? null,
               unread: 0,
             }
           }),
-        // SPEC-team §10.2
-        teams: this.teams.filter((t) => t.project_id === p.id).map((t) => this.teamJson(t)),
+        // SPEC-team §10.2；`teamsDisabled` 時整個欄位不存在（模擬舊 daemon）。
+        ...(this.teamsDisabled ? {} : { teams: this.teams.filter((t) => t.project_id === p.id).map((t) => this.teamJson(t)) }),
       })),
     }
   }
@@ -1081,10 +1156,13 @@ export class MockTransport implements Transport {
     // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟；只改 autostart → false。
     const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
     let needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
-    // grok 的 effort 在執行中用 TUI 的 `/effort` 當場套用（daemon 端同樣邏輯）：
-    // 只動 effort、bot 是 grok、而且不是清成「CLI 預設」的話就不用重啟。
-    const onlyEffort = b.effort !== undefined && LAUNCH_FIELDS.filter((k) => k !== 'effort').every((k) => b[k] === undefined)
-    if (needs_restart && onlyEffort && bot.kind === 'grok' && bot.effort) needs_restart = false
+    // TUI slash 指令當場套用（daemon `apply_live_setting` 同一套條件）：
+    // grok `/effort`、grok `/model`（可順便帶 effort）、claude `/model`。清成 CLI 預設沒有對應指令。
+    const only = (...fields: string[]) =>
+      fields.every((f) => b[f] !== undefined) && LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
+    if (needs_restart && bot.kind === 'grok' && only('effort') && bot.effort) needs_restart = false
+    if (needs_restart && bot.kind === 'grok' && (only('model') || only('model', 'effort')) && bot.model) needs_restart = false
+    if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
     return { needs_restart }
   }
 
@@ -1146,7 +1224,10 @@ export class MockTransport implements Transport {
       state: 'starting',
       agent_status: 'unknown',
       workspace_id: 'ws_demo',
-      pane_id: ulid('pane'),
+      // herdr 的 pane id 是 `w<workspace>:p<pane>` 這種短字串（不是 ULID）；版面壓力差很多，
+      // mock 也照這個形狀走才驗得出標題列擠不擠。
+      pane_id: `w${this.runs.length + 1}:p${String.fromCharCode(65 + (this.runs.length % 26))}`,
+      own_tab: false,
       adopted: 0,
       native_session_id: null,
       transcript_path: null,
@@ -1548,7 +1629,16 @@ export class MockTransport implements Transport {
           : ['⏺ 已完成上一個回合。', '', '> ', '  ? for shortcuts']
     const all = [...head, ...body]
     const text = all.slice(Math.max(0, all.length - lines)).join('\n')
-    return { text, revision: this.seq, truncated: all.length > lines, source }
+    return {
+      text,
+      revision: this.seq,
+      truncated: all.length > lines,
+      source,
+      pane_id: run?.pane_id ?? null,
+      // pane 幾何：窄 pane 警示與「移到自己的分頁」按鈕都靠這個欄位判斷。
+      columns: run ? this.paneColumns(run) : null,
+      rows: run ? 27 : null,
+    }
   }
 
   // ------------------------------------------------------- Issue Team (SPEC-team)
@@ -1843,14 +1933,34 @@ export class MockTransport implements Transport {
     const short = (b: MockBot) => b.name.replace(/^i\d+-/, '')
     // 有 reviewer 時，挑一件 task 走一次 request_changes，讓 round 機制看得到。
     const reworkAt = workers.length > 1 ? 1 : 0
-    const tasks: MockTeamTask[] = []
+    // Task 物件先建好（步驟閉包要用），但要到 dispatch 那一步才進 `this.teamTasks`。
+    const tasks: MockTeamTask[] = workers.map((w, i) => {
+      const seed = TEAM_TASK_SEEDS[i % TEAM_TASK_SEEDS.length]
+      return {
+        id: ulid('task'),
+        team_id: t.id,
+        seq: i + 1,
+        title: seed.title,
+        brief: seed.brief,
+        files: [...seed.files],
+        worker_bot_id: w.id,
+        branch: `${t.branch}/t${i + 1}-${short(w)}`,
+        state: 'queued',
+        round: 0,
+        last_report: null,
+        last_verdict: null,
+        merge_sha: null,
+        created_at: now(),
+        updated_at: now(),
+      }
+    })
 
     steps.push(() => {
       this.setPhase(t, 'planning')
       if (pmBot) {
         this.teamRelay(
           t,
-          null,
+          DAEMON_SENDER,
           pmBot.id,
           `Issue #${t.issue_number}「${t.issue_title}」。全文在 \`.agents-manager/team/ISSUE.md\`。\n目前有 ${workers.length} 位執行者可派：${workers.map(short).join('、')}。請先讀取檔案再派工。`,
         )
@@ -1858,29 +1968,10 @@ export class MockTransport implements Transport {
     })
 
     steps.push(() => {
-      workers.forEach((w, i) => {
-        const seed = TEAM_TASK_SEEDS[i % TEAM_TASK_SEEDS.length]
-        const task: MockTeamTask = {
-          id: ulid('task'),
-          team_id: t.id,
-          seq: i + 1,
-          title: seed.title,
-          brief: seed.brief,
-          files: [...seed.files],
-          worker_bot_id: w.id,
-          branch: `${t.branch}/t${i + 1}-${short(w)}`,
-          state: 'queued',
-          round: 0,
-          last_report: null,
-          last_verdict: null,
-          merge_sha: null,
-          created_at: now(),
-          updated_at: now(),
-        }
+      for (const task of tasks) {
         this.teamTasks.push(task)
-        tasks.push(task)
         this.emitTask(task)
-      })
+      }
       if (pmBot) {
         this.teamReply(
           t,
@@ -1940,7 +2031,7 @@ export class MockTransport implements Transport {
       this.emitTask(task)
       this.teamEvent(t.id, 'merge', { branch: task.branch, result: 'ok', sha: task.merge_sha }, { task_id: task.id })
       if (pmBot) {
-        this.teamRelay(t, null, pmBot.id, `t${task.seq}「${task.title}」已合併進 ${t.branch}（${task.merge_sha}）。`, task.id)
+        this.teamRelay(t, DAEMON_SENDER, pmBot.id, `t${task.seq}「${task.title}」已合併進 ${t.branch}（${task.merge_sha}）。`, task.id)
       }
     }
 
@@ -2117,6 +2208,35 @@ export class MockTransport implements Transport {
     return {}
   }
 
+  /**
+   * `DELETE /api/teams/:id?branches=keep|delete`（SPEC-team §6.5a）。
+   *
+   * 與 `cleanup` 的差別：**任何 phase 都可以刪**（非終態時等於先 abort 再刪），而且連
+   * `teams` / `team_tasks` / `team_events` 的紀錄一起移除。成員 bot 走 `deleteBot`，
+   * 所以**對話訊息保留**。`branches=delete` 在 mock 裡沒有真的 repo 可以動，只把「分支已刪」
+   * 記進 console，讓兩條路徑在驗收時分得出來。不存在 → `this.team()` 丟 404（冪等）。
+   */
+  private deleteTeam(id: string, branches: 'keep' | 'delete') {
+    const t = this.team(id)
+    const timer = this.teamTimers.get(id)
+    if (timer) clearTimeout(timer)
+    this.teamTimers.delete(id)
+    this.teamSteps.delete(id)
+    // 刪除中：真 daemon 會先推這一則（phase `deleting`）。
+    this.emit('team_changed', { team_id: id, project_id: t.project_id, phase: 'deleting' })
+    for (const m of t.members) {
+      if (this.bots.some((b) => b.id === m.bot_id)) this.deleteBot(m.bot_id)
+    }
+    this.teams = this.teams.filter((x) => x.id !== id)
+    this.teamTasks = this.teamTasks.filter((x) => x.team_id !== id)
+    this.teamEvents = this.teamEvents.filter((x) => x.team_id !== id)
+    if (branches === 'delete') {
+      console.info(`[mock] git branch -D ${t.branch}（含所有 task 分支）；遠端分支不動`)
+    }
+    this.emit('team_changed', { team_id: id, project_id: t.project_id, deleted: true })
+    return {}
+  }
+
   private patchTeam(id: string, b: Rec) {
     const t = this.team(id)
     if (t.phase === 'done' || t.phase === 'aborted' || t.phase === 'failed') {
@@ -2212,7 +2332,7 @@ export class MockTransport implements Transport {
     this.connected = v
     // SPEC §11.6: `daemon_status` carries `herdr_connected` + a per-host map. `connected`
     // is kept for the pre-§11 shape.
-    this.emit('daemon_status', { herdr_connected: v, connected: v, hosts: this.hostMap() })
+    this.emit('daemon_status', { herdr_connected: v, connected: v, default_connected: false, hosts: this.hostMap() })
     for (const b of this.bots) this.emitBotStatus(b.id)
   }
 
@@ -2226,6 +2346,35 @@ export class MockTransport implements Transport {
   }
 
   /**
+   * Dev helper: 模擬舊 daemon —— `/api/teams*` 全部落到「查無此路由」的裸 404，
+   * `GET /state` 也不再有 `projects[].teams`。用來驗前端的優雅退回。
+   */
+  /**
+   * Dev helper: 預設分頁裡塞幾個外來 pane。數字越大，bot 的 pane 越窄
+   * （`WORKSPACE_COLUMNS / (n + 共用分頁的 run 數)`），用來驗窄 pane 警示。
+   */
+  setForeignPanes(n: number) {
+    this.foreignPanes = Math.max(0, Math.floor(n))
+  }
+
+  /** Dev helper: 模擬舊 daemon —— `POST /bots/:id/pane/move-to-tab` 落到查無此路由的 404。 */
+  setPaneMoveSupported(on: boolean) {
+    this.paneMoveDisabled = !on
+  }
+
+  setTeamsSupported(on: boolean) {
+    this.teamsDisabled = !on
+    if (!on) {
+      for (const id of [...this.teamTimers.keys()]) {
+        clearTimeout(this.teamTimers.get(id)!)
+        this.teamTimers.delete(id)
+      }
+      this.teamSteps.clear()
+    }
+    this.emit('project_changed', {})
+  }
+
+  /**
    * Dev helper: 用任意原因把某個 team 停下來，驗 paused 橫幅
    * （例：`__amMock.teamPause('review_exhausted')`；省略 id = 最後一個 team）。
    */
@@ -2235,6 +2384,8 @@ export class MockTransport implements Transport {
     const timer = this.teamTimers.get(t.id)
     if (timer) clearTimeout(timer)
     this.teamTimers.delete(t.id)
+    // 已經是 paused 時也要能換原因（驗各種橫幅文案用）。
+    if (t.phase === 'paused') t.phase = t.resume_phase ?? 'working'
     this.pauseWith(t, reason)
   }
 
@@ -2268,8 +2419,14 @@ function installDevHelpers(mock: MockTransport) {
     hosts: () => mock.hostNames(),
     // SPEC-team
     teams: () => mock.teamIds(),
+    teamsOff: () => mock.setTeamsSupported(false),
+    teamsOn: () => mock.setTeamsSupported(true),
     teamPause: (reason = 'budget_relays', teamId?: string) => mock.forceTeamPause(reason, teamId),
     teamNeedsUser: (state: 'exhausted' | 'blocked_by_worker' = 'exhausted', teamId?: string) =>
       mock.forceTeamNeedsUser(state, teamId),
+    // 窄 pane / 移到自己的分頁
+    paneSqueeze: (n = 5) => mock.setForeignPanes(n),
+    paneMoveOff: () => mock.setPaneMoveSupported(false),
+    paneMoveOn: () => mock.setPaneMoveSupported(true),
   }
 }
