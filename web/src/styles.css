@@ -936,8 +936,9 @@ button:disabled {
 }
 
 /* 選取中的那一列，操作鍵是常駐的——所以這一列（也只有這一列）照舊把寬度讓出來，
-   免得第三行的 agent 標題跑到按鍵底下。寬度是固定的，不會因為 hover 而跳動。 */
-.bot-row.selected .bot-main {
+   免得第三行的 agent 標題跑到按鍵底下。寬度是固定的，不會因為 hover 而跳動。
+   `:has` 是必要的：team 成員列也用 `.bot-row`，但它沒有那排按鍵，讓寬度只是白讓。 */
+.bot-row.selected:has(.bot-actions) .bot-main {
   padding-right: 64px;
 }
 
@@ -951,7 +952,7 @@ button:disabled {
     pointer-events: auto;
   }
 
-  .bot-row.selected .bot-main {
+  .bot-row.selected:has(.bot-actions) .bot-main {
     padding-right: 0;
   }
 }
@@ -6054,11 +6055,54 @@ button.team-workers:disabled {
   box-shadow: inset 4px 0 0 var(--accent), 0 1px 2px rgb(27 36 48 / 8%);
 }
 .team-node-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
   min-height: 36px;
   padding: 3px 6px 3px 5px;
+}
+
+/*
+ * 清理（✕）與刪除（🗑）本來常駐在側欄每一個 team 上，刪除還是紅的——側欄一眼望去
+ * 全是不可逆的動作。跟 `.bot-actions` 同一套：疊在列上，只有 hover / 鍵盤 focus 才浮出來。
+ * 選取中的那個 team 也不常駐——它的清理／刪除在主面板標題列本來就有一份。
+ */
+.team-node-actions {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 18px;
+  background: linear-gradient(to right, transparent, var(--bg-panel) 14px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 1;
+}
+
+.team-node-head:hover .team-node-actions,
+.team-node-head:focus-within .team-node-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.team-node-head.selected .team-node-actions {
+  background: linear-gradient(to right, transparent, var(--bg-active) 14px);
+}
+
+@media (hover: none) {
+  .team-node-actions {
+    position: static;
+    transform: none;
+    padding-left: 0;
+    background: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 .team-node-head.selected {
   background: var(--bg-active);

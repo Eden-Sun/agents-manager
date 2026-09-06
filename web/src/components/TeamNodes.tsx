@@ -109,6 +109,10 @@ function TeamNode({ team }: { team: Team }) {
             </span>
           ) : null}
         </button>
+        {/* 清理與刪除都是不可逆的，卻本來常駐在側欄每一個 team 上（刪除還是紅的）。
+            收進一個只在 hover / 鍵盤 focus 時浮出來的殼——選取中的那個 team 也不常駐，
+            它的清理／刪除在主面板標題列本來就有。 */}
+        <span className="team-node-actions">
         {terminal ? (
           <button
             type="button"
@@ -139,6 +143,7 @@ function TeamNode({ team }: { team: Team }) {
         >
           <TrashIcon />
         </button>
+        </span>
       </div>
       {open
         ? members.map((b) => <MemberRow key={b.id} bot={b} />)
