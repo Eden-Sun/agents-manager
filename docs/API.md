@@ -539,6 +539,7 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 ```
 
 - **`needs_restart`**：`true` 表示這次修改要等 bot 重啟後才會生效（有 active Run，且本次動到會影響啟動 argv / env 的欄位：`model`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`）。
+  - 例外（grok）：**只**改 `effort`、bot 是 grok、Run 在 `running` 且不忙（非 working / blocked、沒有 in-flight turn）、新值不是清成 `null` 時，daemon 會往 pane 送 grok TUI 的 `/effort <level>`（`pane.send_text` → 0.8s → `Enter`）當場套用，回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
   沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
   前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
 - **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
@@ -713,7 +714,7 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
 回合 `in_flight` 且 `delivery=ok` 時，daemon 每 0.7 秒讀一次 pane（`recent_unwrapped`），把 prompt 回音之後、去掉 TUI 雜訊與回覆標記的文字推成：
 ```json
-{"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","activity":"Thinking… (12s · ↑ 1.2k tokens)","revision":42}}
+{"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","activity":"Thinking… (12s · ↑ 1.2k tokens)","alert":"","revision":42}}
 ```
 
 - `text`：目前為止的部分回覆（同最終訊息的清理規則）。
@@ -727,7 +728,13 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
   括號內的秒數每次輪詢都在變，因此 `activity` 幾乎每 0.7 秒都不同、每次都發幀——這是**預期且想要**的行為（前端計時會跟著跳），daemon 與前端都**不做**去抖或節流。
 
-只在 `text` 或 `activity` **任一**變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
+- `alert`（**選填**，v4.2 新增）：畫面上的**重試／API 錯誤橫幅**，例如 claude 的 `API error · Retrying in 0s · attempt 1/10`、codex 的 `stream error: 503 upstream; retrying 2/5 in 1s`。沒有就送空字串。同樣是純文字、不寫 DB、不進最終訊息，上限 120 字元。
+
+  **為什麼需要它**：CLI 在重試上游失敗時，回合仍然 `in_flight`、spinner 仍然在轉、`activity` 仍然正常，UI 看起來完全健康——實際上 agent 卡在那裡重試。`alert` 是唯一會說出這件事的訊號，前端把它畫成氣泡下方的警示列（`docs/screenshots/280-live-alert-light.png` / `281-…-dark.png`）。
+
+  辨識同樣**只看形狀不看字面**：該回合畫面上最後一行「夠短（≤240 字元）」且**同時**滿足「說了 error／錯誤／overloaded」與「帶重試 token（retry／retrying／attempt／reconnect／retries／重試）」；或該行以 `API error` 開頭。兩個條件都要，是為了把 agent 自己在回覆裡談論錯誤的散文擋在外面。
+
+只在 `text`、`activity` 或 `alert` **任一**變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
 
 > 為什麼要 `activity`：清理管線（`clean_screen` / `is_noise`）把 spinner 行、框線與狀態列整行濾掉，而 agent 在**純思考／跑工具**的階段畫面上就只剩這些。整頁被濾成空字串後 `text` 一直沒變化 → 一幀都不發 → 前端氣泡永遠停在「等待回覆（hook）…」。`activity` 是繞過清理的獨立旁路，讓進度透出而不污染回覆內容。
 
@@ -1037,3 +1044,45 @@ object URL，不能直接塞進 `<img src>`。
   像 `- Thinking - <task> - grok`），標題若只是 CLI 自己的名字（`Claude Code`、`codex`…）
   就當作沒有，維持 `null`。
 - run 結束後不會清除，但 UI 只在 run 還活著時讀它。
+
+### `run.status_line`（2026-09-06 新增）
+
+`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件再多一個欄位：bot 自己那條狀態列的原文。
+
+```json
+{"id":"01M1…","status_line":"hunta | agents-manager | OP5 42% | 5h:59%(rst 3h 25m) | 7d:73%(rst 5d 4h) | F5:61%"}
+```
+
+- 來源是**使用者自己的** claude `statusLine` 命令。daemon 的 `agents-managerd statusline`
+  本來就會代跑它並把 stdout 原樣送回 pane（v4.0）；現在同一份輸出（ANSI 已 strip）也放進
+  POST 給 `/hook/claude` 的 payload（`status_line`），存進 `runs.status_line`。
+- 只有 claude 有：codex / grok 沒有 statusLine 機制，欄位維持 `null`；使用者沒設定
+  `statusLine.command` 時也是 `null`。
+- claude 刷新得很勤，所以 daemon 只在文字**變了**才寫 DB 並推 `bot_status`。
+- 順序上，使用者的命令跑在 POST 之前（要拿它的輸出），整體仍在 statusline 的 1.9 秒預算內。
+
+### `bot.herdr_session` / `run.herdr_session`（2026-09-06 新增）
+
+- 一般 Bot 的 `herdr_session` 為 `null`，表示沿用 Project host 的設定 session。
+- 從使用者本機 `default` session 自動採用的 Bot 會帶 `herdr_session: "default"`，其 active
+  Run 也會帶相同值；這讓 prompt、keys、terminal 與狀態事件不會送到 manager 的 named session。
+- default session 的採用條件是支援的 agent kind 且 `foreground_cwd` / `cwd` 與既有 local
+  Project 路徑完全相同；普通 pane 不會出現在 state 裡。
+
+### `run.status_json`（2026-09-06 新增，接續 `run.status_line`）
+
+`status_line` 是使用者腳本壓縮過的一行；`status_json` 是**壓縮前**的原始資料，給網頁用
+（`statusline_cmd` 除了 `transcript_path` 之外整份轉發）：
+
+```json
+{"account_email":"…@gmail.com","model":{"display_name":"Opus 5 (1M context)","id":"claude-opus-5"},
+ "context_window":{"used_percentage":44,"total_input_tokens":442000,"context_window_size":1000000},
+ "rate_limits":{"five_hour":{"used_percentage":55,"resets_at":1788671400}, "seven_day":{…}},
+ "cost":{"total_cost_usd":50.89}, "effort":{"level":"high"}, "thinking":{"enabled":true},
+ "session_name":"…", "version":"2.1.261", "workspace":{"current_dir":"…"}}
+```
+
+- `account_email` 是 daemon 補上的（payload 本身沒有）：照使用者腳本的做法讀
+  `.claude.json` 的 `oauthAccount.emailAddress`，identity 決定是哪個設定目錄，因此
+  cc0 / cc1 各自對得上自己的帳號。
+- 一樣只在內容變動時寫入並推 `bot_status`。

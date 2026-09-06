@@ -124,6 +124,11 @@ function GroupMessageList({ projectId }: { projectId: string }) {
   const liveActivity = useStore(
     useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.activity ?? null]))),
   )
+  // …and any retry / API-error banner (API.md v4.2 `turn_progress.alert`), which must be visible
+  // per member: in a group one bot can be stuck retrying while the others answer normally.
+  const liveAlert = useStore(
+    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.alert ?? null]))),
+  )
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const rows = useMemo(() => foldRows(messages ?? []), [messages])
@@ -183,6 +188,7 @@ function GroupMessageList({ projectId }: { projectId: string }) {
           key={`typing-${t.id}`}
           text={liveText[t.id] ?? null}
           activity={liveActivity[t.id] ?? null}
+          alert={liveAlert[t.id] ?? null}
           kind={t.kind}
           from={
             <span className="msg-speaker">
@@ -230,12 +236,18 @@ function GroupComposer({
   const sendable = useMemo(() => state.sendableKey.split(',').filter(Boolean), [state.sendableKey])
   const members = useStore(useShallow((s) => s.bots.filter((b) => b.project_id === projectId)))
   const sendGroupChat = useStore((s) => s.sendGroupChat)
+  const notify = useStore((s) => s.notify)
   // v4.0: draft per group in the store (localStorage-backed); the `@` popup state stays local.
   const draftKey = `group:${projectId}` as const
   const text = useStore((s) => s.drafts[draftKey] ?? '')
   const setDraft = useStore((s) => s.setDraft)
+  const setDraftCursor = useStore((s) => s.setDraftCursor)
   const setText = (v: string) => setDraft(draftKey, v)
-  const [caret, setCaret] = useState(0)
+  const caret = useStore((s) => {
+    const value = s.drafts[draftKey] ?? ''
+    const saved = s.draftCursors[draftKey]?.start ?? value.length
+    return Math.max(0, Math.min(value.length, saved))
+  })
   const [sending, setSending] = useState(false)
   const [popOpen, setPopOpen] = useState(true)
   const [active, setActive] = useState(0)
@@ -243,10 +255,21 @@ function GroupComposer({
 
   const loaded = useStore((s) => Boolean(s.loadedProjects[projectId]))
   const empty = useStore((s) => (s.groupMessages[projectId]?.length ?? 0) === 0)
+  const focusEmpty = loaded && empty
 
-  useEffect(() => {
-    if (!state.disabled) ref.current?.focus()
-  }, [state.disabled, projectId, ref, loaded && empty])
+  // Restore the group draft's last selection after a reload / project switch. The group
+  // composer uses the same persisted caret data as the per-bot composer.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const currentText = useStore.getState().drafts[draftKey] ?? ''
+    const saved = useStore.getState().draftCursors[draftKey]
+    const max = currentText.length
+    const start = Math.max(0, Math.min(max, saved?.start ?? max))
+    const end = Math.max(start, Math.min(max, saved?.end ?? start))
+    el.focus()
+    el.setSelectionRange(start, end)
+  }, [state.disabled, draftKey, ref, focusEmpty])
 
   useEffect(() => {
     const el = ref.current
@@ -276,7 +299,7 @@ function GroupComposer({
   const writeDraft = (next: string) => {
     setText(next)
     const pos = next.length
-    setCaret(pos)
+    setDraftCursor(draftKey, pos)
     requestAnimationFrame(() => {
       const el = ref.current
       if (!el) return
@@ -306,7 +329,7 @@ function GroupComposer({
     const insert = `@${c.name} `
     const pos = before.length + insert.length
     setText(before + insert + after)
-    setCaret(pos)
+    setDraftCursor(draftKey, pos)
     setPopOpen(true)
     setActive(0)
     // Put the caret right after the completion once React has flushed the new value.
@@ -321,13 +344,18 @@ function GroupComposer({
   const submit = () => {
     const body = text.trim()
     // Unlike a bot chat, a group send always needs text: the recipients come from it.
-    if (!body || state.disabled || sending || files.uploading || targets.length === 0) return
+    if (!body || targets.length === 0) return
+    // 打字沒被鎖，送不出去就講原因，別默默吃掉 Enter。
+    if (state.disabled) {
+      notify('error', state.reason || '目前無法送出訊息')
+      return
+    }
+    if (sending || files.uploading) return
     setSending(true)
     void sendGroupChat(projectId, body, files.ids).then((res) => {
       setSending(false)
       if (res) {
         setText('')
-        setCaret(0)
         files.clear()
       }
     })
@@ -335,7 +363,7 @@ function GroupComposer({
 
   const syncCaret = () => {
     const el = ref.current
-    if (el) setCaret(el.selectionStart ?? el.value.length)
+    if (el) setDraftCursor(draftKey, el.selectionStart ?? el.value.length, el.selectionEnd ?? el.selectionStart ?? el.value.length)
   }
 
   return (
@@ -399,25 +427,26 @@ function GroupComposer({
         <textarea
           ref={ref}
           value={text}
-          disabled={state.disabled || sending}
-          placeholder={state.disabled ? '目前無法送出訊息' : '@bot 或 @all …'}
+          /* 連線斷了也讓人繼續打（草稿會存），只是送不出去。 */
+          disabled={sending}
+          placeholder={state.disabled ? `${state.reason || '目前無法送出訊息'}——可以先打，恢復後再送` : '@bot 或 @all …'}
           title="以 @<bot> 或 @all 指定收件者；Enter 送出，Shift+Enter 換行"
           onChange={(e) => {
             setText(e.target.value)
-            setCaret(e.target.selectionStart ?? e.target.value.length)
+            setDraftCursor(draftKey, e.target.selectionStart ?? e.target.value.length, e.target.selectionEnd ?? e.target.value.length)
             setPopOpen(true)
             setActive(0)
           }}
+          onSelect={syncCaret}
           onClick={syncCaret}
+          onBlur={syncCaret}
           onPaste={(e) => {
             const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
             if (imgs.length === 0) return
             e.preventDefault()
             files.add(imgs)
           }}
-          onKeyUp={(e) => {
-            if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) syncCaret()
-          }}
+          onKeyUp={syncCaret}
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing) return
             if (showPop) {

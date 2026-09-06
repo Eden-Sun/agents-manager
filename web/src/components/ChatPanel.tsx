@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { BotKind, Message } from '../api/types'
+import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { anchorOf, attachCommandOf, botLamp, composerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
@@ -101,19 +101,26 @@ export function Bubble({
  * (API.md v4.1, e.g. `Thinking… (12s · ↑ 1.2k tokens)`) → that row verbatim, so a long
  * thinking / tool phase is not silent; neither → 「等待回覆（hook）…」. `activity` comes
  * straight off the terminal, so it is rendered as plain text, never Markdown.
+ *
+ * `alert` (API.md v4.2) is the one thing that outranks all of it: while the CLI is retrying an
+ * upstream failure the spinner keeps spinning and the turn stays in flight, so the bubble would
+ * otherwise look perfectly healthy. It gets its own warning row under the meta line.
  */
 export function LiveBubble({
   text,
   activity,
+  alert,
   from,
   kind,
 }: {
   text: string | null
   activity?: string | null
+  alert?: string | null
   from?: ReactNode
   kind?: BotKind
 }) {
   const act = activity?.trim() ? activity.trim() : null
+  const warn = alert?.trim() ? alert.trim() : null
   return (
     <article className={`msg assistant live${text ? ' streaming' : ''}`} aria-live="polite">
       <div className={`bubble${text ? ' md' : ''}`}>
@@ -135,6 +142,14 @@ export function LiveBubble({
           <span>{text ? '輸出中…' : (act ?? '等待回覆（hook）…')}</span>
         </div>
       </div>
+      {warn ? (
+        <p className="live-alert" role="status">
+          <span className="live-alert-mark" aria-hidden="true">
+            !
+          </span>
+          {warn}
+        </p>
+      ) : null}
     </article>
   )
 }
@@ -180,6 +195,7 @@ function MessageList({ botId }: { botId: string }) {
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
   const liveText = useStore((s) => liveReplyOf(s, botId)?.text ?? null)
   const liveActivity = useStore((s) => liveReplyOf(s, botId)?.activity ?? null)
+  const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
 
@@ -187,7 +203,7 @@ function MessageList({ botId }: { botId: string }) {
   useLayoutEffect(() => {
     const el = ref.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [messages, working, liveText, liveActivity])
+  }, [messages, working, liveText, liveActivity, liveAlert])
 
   const list = messages ?? []
 
@@ -211,7 +227,7 @@ function MessageList({ botId }: { botId: string }) {
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} />)
       )}
-      {inFlight || working ? <LiveBubble text={liveText} activity={liveActivity} /> : null}
+      {inFlight || working ? <LiveBubble text={liveText} activity={liveActivity} alert={liveAlert} /> : null}
     </div>
   )
 }
@@ -240,19 +256,31 @@ function Composer({
   const interruptBot = useStore((s) => s.interruptBot)
   const queueSend = useStore((s) => s.queueSend)
   const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
+  const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
   // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
   // bots / tabs and reloading keep it; it is cleared only on a successful send.
   const draftKey = `bot:${botId}` as const
   const text = useStore((s) => s.drafts[draftKey] ?? '')
   const setDraft = useStore((s) => s.setDraft)
+  const setDraftCursor = useStore((s) => s.setDraftCursor)
   const setText = (v: string) => setDraft(draftKey, v)
   const [sending, setSending] = useState(false)
   const ref = inputRef
 
-  useEffect(() => {
-    if (!state.disabled) ref.current?.focus()
-  }, [state.disabled, botId, ref, forceFocus])
+  // A focused controlled textarea defaults to the beginning after a reload or bot switch.
+  // Restore the saved selection after React has put this bot's draft value into the DOM.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const currentText = useStore.getState().drafts[draftKey] ?? ''
+    const saved = useStore.getState().draftCursors[draftKey]
+    const max = currentText.length
+    const start = Math.max(0, Math.min(max, saved?.start ?? max))
+    const end = Math.max(start, Math.min(max, saved?.end ?? start))
+    el.focus()
+    el.setSelectionRange(start, end)
+  }, [state.disabled, draftKey, ref, forceFocus])
 
   useEffect(() => {
     const el = ref.current
@@ -264,7 +292,13 @@ function Composer({
   const submit = () => {
     const body = text.trim()
     // An image on its own is a valid message; text is only required when there is none.
-    if ((!body && files.ids.length === 0) || state.disabled || sending || files.uploading) return
+    if (!body && files.ids.length === 0) return
+    // 打字沒被鎖，所以 Enter 也可能落在「送不出去」的狀態：說一聲，別默默吃掉。
+    if (state.disabled) {
+      notify('error', state.reason || '目前無法送出訊息')
+      return
+    }
+    if (sending || files.uploading) return
     // A turn is still running: park the message instead of eating a 409. The store sends it
     // as soon as that turn ends.
     if (state.queued) {
@@ -287,6 +321,11 @@ function Composer({
 
   const nothingToSend = !text.trim() && files.ids.length === 0
 
+  const syncCursor = () => {
+    const el = ref.current
+    if (el) setDraftCursor(draftKey, el.selectionStart, el.selectionEnd)
+  }
+
   return (
     <div className="composer">
       {queued ? (
@@ -300,9 +339,10 @@ function Composer({
             className="mini-btn"
             title="取消排隊，把訊息放回輸入框"
             onClick={() => {
-              cancelQueuedSend(botId)
-              setText(queued.text)
-            }}
+            cancelQueuedSend(botId)
+            setText(queued.text)
+            setDraftCursor(draftKey, queued.text.length)
+          }}
           >
             取消
           </button>
@@ -329,16 +369,24 @@ function Composer({
         <textarea
           ref={ref}
           value={text}
-          disabled={state.disabled || sending}
+          /* 連線斷了也讓人繼續打（草稿本來就會存），只是送不出去。 */
+          disabled={sending}
           placeholder={
             state.disabled
-              ? state.reason || '目前無法送出訊息'
+              ? `${state.reason || '目前無法送出訊息'}——可以先打，恢復後再送`
               : state.queued
                 ? '這回合還在跑，先打下一則…（送出會排隊）'
                 : '輸入訊息…（圖片可直接拖放或貼上）'
           }
           title="Enter 送出，Shift+Enter 換行；圖片可拖放或貼上"
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value)
+            setDraftCursor(draftKey, e.target.selectionStart, e.target.selectionEnd)
+          }}
+          onSelect={syncCursor}
+          onClick={syncCursor}
+          onBlur={syncCursor}
+          onKeyUp={syncCursor}
           onPaste={(e) => {
             const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
             if (imgs.length === 0) return
@@ -367,6 +415,157 @@ function Composer({
   )
 }
 
+/** 168800 → `169k`, 1000000 → `1M`. */
+function compactTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000
+    return `${m >= 10 || Number.isInteger(m) ? Math.round(m) : m.toFixed(1)}M`
+  }
+  if (n >= 1000) return `${Math.round(n / 1000)}k`
+  return String(n)
+}
+
+/** claude sends these as raw floats (28.000000000000004); one decimal at most. */
+function pct(n: number): string {
+  const r = Math.round(n * 10) / 10
+  return `${Number.isInteger(r) ? r : r.toFixed(1)}%`
+}
+
+/** epoch seconds → `3h25m` / `12m` / `5d4h`, or '' once it is in the past. */
+function untilShort(epochSeconds: number): string {
+  const ms = epochSeconds * 1000 - Date.now()
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const mins = Math.floor(ms / 60000)
+  const d = Math.floor(mins / 1440)
+  const h = Math.floor((mins % 1440) / 60)
+  const m = mins % 60
+  if (d > 0) return `${d}d${h}h`
+  if (h > 0) return `${h}h${m}m`
+  return `${m}m`
+}
+
+function SlItem({ k, children, title }: { k: string; children: ReactNode; title?: string }) {
+  return (
+    <span className="sl-item" title={title}>
+      <span className="sl-k">{k}</span>
+      <span className="sl-v">{children}</span>
+    </span>
+  )
+}
+
+/**
+ * The bot's status bar.
+ *
+ * The pane's own line is written for a terminal's width — the user's script trims the
+ * account to five characters and the model to `OP5` to make it fit. The browser has room,
+ * so this renders the *original* statusLine fields instead (`run.status`): the whole email,
+ * the real model name, and the context window, which the compressed line has no space for.
+ * `status_line` (the pane's exact text) stays as the tooltip, and as the fallback for a bot
+ * whose payload has not arrived yet. Bots without a statusLine (codex / grok) show nothing.
+ */
+/**
+ * A status bar for the kinds that have no statusLine *hook*.
+ *
+ * codex renders its own status line inside the TUI (`[tui] status_line` in
+ * `~/.codex/config.toml` — model, cwd, 5h, weekly), and grok likewise; neither can hand it
+ * to us the way claude's statusLine command does, and reading it back off the pane would
+ * only get the terminal-width-truncated version (`~/…`). Every field it shows is already
+ * in the store, so build it from there instead — same shape as claude's, no truncation.
+ */
+function derivedStatus(
+  kind: BotKind,
+  model: string | null,
+  effort: string | null,
+  fast: boolean,
+  cwd: string | null,
+  quota: KindQuota | null,
+): StatusInfo | null {
+  if (!model && !quota && !cwd) return null
+  const win = (w: QuotaWindow | null | undefined) => ({
+    pct: typeof w?.used_pct === 'number' ? w.used_pct : null,
+    // The quota API gives an ISO string; the bar wants epoch seconds.
+    at: w?.resets_at ? Math.floor(new Date(w.resets_at).getTime() / 1000) || null : null,
+  })
+  const five = win(quota?.five_hour)
+  const seven = win(quota?.seven_day)
+  return {
+    account_email: null,
+    model_name: model,
+    model_id: null,
+    effort,
+    thinking: false,
+    fast_mode: kind === 'codex' && fast,
+    context_used_pct: null,
+    context_used_tokens: null,
+    context_size: null,
+    five_hour_pct: five.pct,
+    five_hour_resets_at: five.at,
+    seven_day_pct: seven.pct,
+    seven_day_resets_at: seven.at,
+    cost_usd: null,
+    cwd,
+    version: null,
+    session_name: null,
+  }
+}
+
+function StatusLineBar({ status, text }: { status: StatusInfo | null; text: string | null }) {
+  const line = text?.trim() ?? ''
+  if (!status) {
+    if (!line) return null
+    return (
+      <div className="statusline-bar" role="status" title={line}>
+        <span className="statusline-text mono">{line}</span>
+      </div>
+    )
+  }
+
+  const ctxDetail =
+    status.context_used_tokens !== null && status.context_size !== null
+      ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
+      : null
+  const five = status.five_hour_resets_at ? untilShort(status.five_hour_resets_at) : ''
+  const seven = status.seven_day_resets_at ? untilShort(status.seven_day_resets_at) : ''
+  const modelExtra = [status.effort, status.fast_mode ? 'fast' : null, status.thinking ? 'thinking' : null]
+    .filter(Boolean)
+    .join(' · ')
+
+  return (
+    <div className="statusline-bar" role="status" title={line || undefined}>
+      {status.account_email ? (
+        <SlItem k="帳號">{status.account_email}</SlItem>
+      ) : status.cwd ? (
+        <SlItem k="目錄" title={status.cwd}>
+          {status.cwd.replace(/^\/Users\/[^/]+/, '~')}
+        </SlItem>
+      ) : null}
+      {status.model_name ? (
+        <SlItem k="模型" title={status.model_id ?? undefined}>
+          {status.model_name}
+          {modelExtra ? <span className="sl-dim"> · {modelExtra}</span> : null}
+        </SlItem>
+      ) : null}
+      {status.context_used_pct !== null ? (
+        <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
+          {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
+        </SlItem>
+      ) : null}
+      {status.five_hour_pct !== null ? (
+        <SlItem k="5h">
+          {pct(status.five_hour_pct)}{five ? <span className="sl-dim"> · 剩 {five}</span> : null}
+        </SlItem>
+      ) : null}
+      {status.seven_day_pct !== null ? (
+        <SlItem k="7d">
+          {pct(status.seven_day_pct)}{seven ? <span className="sl-dim"> · 剩 {seven}</span> : null}
+        </SlItem>
+      ) : null}
+      {status.cost_usd !== null ? <SlItem k="花費">${status.cost_usd.toFixed(2)}</SlItem> : null}
+      {status.version ? <SlItem k="版本">{status.version}</SlItem> : null}
+    </div>
+  )
+}
+
 export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
@@ -390,6 +589,21 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const attachCommand = useStore((s) => attachCommandOf(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
+  // claude hands us its statusLine payload; the other kinds render their status line inside
+  // their own TUI, so it is rebuilt from what the store already knows.
+  const statusInfo = useStore(
+    useShallow((s): StatusInfo | null => {
+      const b = s.bots.find((x) => x.id === s.selectedBotId)
+      if (!b) return null
+      const r = s.runs[b.id] ?? null
+      if (r?.status) return r.status
+      if (b.kind === 'claude') return null
+      const key = b.identity ? `${b.kind}:${b.identity}` : b.kind
+      const q = s.quota[key] ?? s.quota[b.kind] ?? null
+      const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
+      return derivedStatus(b.kind, b.model, b.effort, b.fast, path, q)
+    }),
+  )
   // Images live outside the store: they only matter until the send that carries them.
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId)
@@ -475,7 +689,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </span>
         <span className="spacer" />
         <ToolsHintIcon />
-        <QuotaStrip focusKind={bot.kind} />
+        <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} />
         <AttachButton command={attachCommand} compact />
         <div className="tabs" role="tablist">
           <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
@@ -525,6 +739,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </div>
       </div>
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
+      <StatusLineBar status={statusInfo} text={run?.status_line ?? null} />
 
       <ConfirmDialog
         open={stopConfirmOpen}
