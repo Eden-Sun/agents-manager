@@ -32,11 +32,16 @@ export function BlockedPanel({
           {paused ? (
             '全畫面開著，畫面在上面那個視窗'
           ) : (
-            <>
-              終端 <code>visible</code> 快照，每秒更新
-              {snap?.revision !== null && snap?.revision !== undefined ? `（revision ${snap.revision}）` : ''}
+            /* `visible` 是抓法、`revision` 是對帳用的序號：兩個都收進 tooltip。
+               條上留下的是「這是即時的嗎」與「有沒有被截斷」。 */
+            <span
+              title={`終端 visible 快照${
+                snap?.revision !== null && snap?.revision !== undefined ? `・revision ${snap.revision}` : ''
+              }`}
+            >
+              終端畫面，每秒更新
               {snap?.truncated ? '・已截斷' : ''}
-            </>
+            </span>
           )}
         </span>
         {onExpand ? (
@@ -52,7 +57,9 @@ export function BlockedPanel({
             {k.label}
           </button>
         ))}
-        <span className="hint">按鍵會帶 expect_run_id，Run 不符時後端回 409</span>
+        {/* 本來寫的是 `按鍵會帶 expect_run_id，Run 不符時後端回 409`——那是 API 的約定，
+            不是使用者要知道的事。他要知道的是這顆按下去安不安全。 */}
+        <span className="hint">按鍵只會送到目前這個 Run；bot 中途重啟就不會誤送。</span>
       </div>
     </section>
   )

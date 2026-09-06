@@ -80,11 +80,15 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
       >
         <div className="modal-head">
           <strong className="blocked-title">● {bot?.name ?? 'agent'} 需要回應</strong>
-          <span className="modal-sub">
-            終端 <code>visible</code> 全畫面，每秒更新
+          {/* 同 `BlockedPanel` / 終端分頁：抓法（`visible`）與對帳序號（`revision`）收進
+              tooltip，條上留下你會用到的——這是哪個 pane、幾欄幾列。 */}
+          <span
+            className="modal-sub"
+            title={`終端 visible 全畫面${snap?.revision != null ? `・revision ${snap.revision}` : ''}`}
+          >
+            終端畫面，每秒更新
             {snap?.pane_id ? `・pane ${snap.pane_id}` : ''}
             {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
-            {snap?.revision != null ? `・revision ${snap.revision}` : ''}
           </span>
           <button type="button" className="icon-btn" aria-label="關閉" title="關閉" onClick={onClose}>
             ✕
