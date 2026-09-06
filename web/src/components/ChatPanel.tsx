@@ -5,6 +5,7 @@ import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { effortLabel, quotaKey } from '../api/types'
+import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedModal } from './BlockedModal'
@@ -360,8 +361,10 @@ function MessageList({ botId }: { botId: string }) {
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
-  const liveText = useStore((s) => liveReplyOf(s, botId)?.text ?? null)
-  const liveActivity = useStore((s) => liveReplyOf(s, botId)?.activity ?? null)
+  // 擷取來的即時文字先過濾掉 CLI 自己的狀態列 / 提示行（`cleanLiveText`），濾光了就回 null，
+  // 讓氣泡退回顯示活動摘要。
+  const liveText = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
+  const liveActivity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
   const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
   const tail = useScrollTail([messages, working, liveText, liveActivity, liveAlert])
 

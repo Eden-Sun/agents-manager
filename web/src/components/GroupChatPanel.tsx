@@ -3,6 +3,7 @@ import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { parseMentions } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
+import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
@@ -136,12 +137,12 @@ function GroupMessageList({ projectId }: { projectId: string }) {
   // v3.9 live output per member: bot_id → partial text (only for the in-flight turn). A
   // fresh object each call, but its values are strings, so `useShallow` settles.
   const liveText = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.text ?? null]))),
+    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveText(liveReplyOf(s, b.id)?.text)]))),
   )
   // …and the spinner row (API.md v4.1 `turn_progress.activity`) for members that are still
   // only thinking, so their bubble says what is happening instead of "等待回覆…".
   const liveActivity = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.activity ?? null]))),
+    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveActivity(liveReplyOf(s, b.id)?.activity)]))),
   )
   // …and any retry / API-error banner (API.md v4.2 `turn_progress.alert`), which must be visible
   // per member: in a group one bot can be stuck retrying while the others answer normally.
