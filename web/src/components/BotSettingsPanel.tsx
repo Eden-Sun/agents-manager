@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
@@ -187,7 +188,7 @@ export function IdentityOptions({
   const status = useStore((s) => identityStatusOfHost(s, host))
   const refreshTools = useStore((s) => s.refreshTools)
   const busy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
-  // config 的身份加上這台主機 shell 裡的 `ccN`（SPEC §15）。
+  // config 的身份加上這台主機 shell 裡的 `ccN`（SPEC §16）。
   const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === 'claude'), [all, status])
   if (kind !== 'claude' || identities.length === 0) return null
   const hostLabel = !host || host === 'local' ? '本機' : host
@@ -320,6 +321,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
+  // 這張卡是 aria-modal 對話框，鍵盤就該關在裡面，關掉時再還給開啟它的齒輪。開場落在名稱
+  // 欄位；巢狀的刪除／關閉確認自己會再疊一層 trap，這層會讓位給它。
+  useFocusTrap(true, cardRef, { initialFocus: () => nameRef.current })
+
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
     const b = useStore.getState().bots.find((x) => x.id === botId)
@@ -338,7 +343,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     escRef.current = closeSettings
     return (
       <div className="bs-scrim" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && closeSettings()}>
-      <div className="bot-settings" role="dialog" aria-modal="true" aria-label="Bot 設定">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal="true" aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />

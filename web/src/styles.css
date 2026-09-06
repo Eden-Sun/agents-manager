@@ -36,6 +36,16 @@
   --lamp-greyyellow: #b7a55a;
   --lamp-offline: #b9bec7;
 
+  /*
+   * 燈號色是給「一顆點」用的，同一個色當文字讀就不夠：淺色主題下 --lamp-blue 對白底只有
+   * 3.9:1、--lamp-green 3.3:1、--lamp-yellow 2.4:1，全都在 4.5:1 以下。狀態「文字」另開一組
+   * 加深過的 token，燈號本身維持原色（非文字不受 4.5:1 拘束，而且要亮才看得見）。
+   */
+  --status-working: #1a5fc8;
+  --status-blocked: #c2311c;
+  --status-ok: #166b3c;
+  --status-warn: #8a6400;
+
   --danger: #c23a28;
   --danger-soft: #fbe8e5;
   --warn: #8a6400;
@@ -43,6 +53,10 @@
 
   --term-bg: #f7f8fa;
   --term-text: #24272d;
+
+  /* 對話的閱讀寬度。1180px 在寬螢幕上一行會拉到八十幾個字，眼睛回行時會跳行；
+     收到 1000px（訊息泡泡另有自己的上限）。composer 與停止列共用同一個值才對得齊。 */
+  --chat-max: 1000px;
 
   --radius: 8px;
   --radius-lg: 14px;
@@ -54,44 +68,54 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #15191f;
-    --bg-panel: #1d222a;
-    --bg-side: #15191f;
-    --bg-sunken: #1a1f27;
-    --bg-hover: #262c35;
-    --bg-active: #262c35;
-    --border: #3c4653;
-    --border-strong: #4a5565;
-    --text: #f1f4f8;
-    --text-dim: #a8b2c0;
-    --text-faint: #a8b2c0;
-    --accent: #6a96f7;
+    /*
+     * 深色的層級是「畫布 < 側欄 < 沉陷 < 面板」四階，每一階都看得出來（過去 --bg 與
+     * --bg-side 同色，側欄跟畫布黏成一片）；選取色從 hover 分家，選到哪一列才讀得出來。
+     * 整體壓低亮度與彩度：純白字（#f1f4f8）在暗底上會炫光，改成偏灰的 #e5e9f0。
+     */
+    --bg: #12161c;
+    --bg-panel: #1e242d;
+    --bg-side: #171c23;
+    --bg-sunken: #191e26;
+    --bg-hover: #262d38;
+    --bg-active: #2c3950;
+    --border: #39434f;
+    --border-strong: #4d5867;
+    --text: #e5e9f0;
+    --text-dim: #a3afbf;
+    --text-faint: #96a2b3;
+    --accent: #7aa5f8;
     --accent-text: #0f1115;
-    --accent-soft: #243456;
+    --accent-soft: #26375c;
 
-    --bubble-user: #3b66cc;
-    --bubble-user-text: #f4f6fb;
-    --bubble-assistant: #1d222a;
-    --bubble-assistant-border: #3c4653;
+    --bubble-user: #3f68cf;
+    --bubble-user-text: #f2f5fb;
+    --bubble-assistant: #232a35;
+    --bubble-assistant-border: #39434f;
     --bubble-shadow: none;
-    --bubble-system: #262c35;
-    --code-bg: rgb(0 0 0 / 28%);
+    --bubble-system: #262d38;
+    --code-bg: rgb(0 0 0 / 26%);
 
-    --lamp-green: #35c274;
-    --lamp-blue: #5b9cff;
-    --lamp-red: #f0654f;
-    --lamp-yellow: #eab138;
-    --lamp-grey: #7c848f;
-    --lamp-greyyellow: #b1a06a;
+    --lamp-green: #3fc27d;
+    --lamp-blue: #6ba6ff;
+    --lamp-red: #ff7b64;
+    --lamp-yellow: #e8b451;
+    --lamp-grey: #7f8794;
+    --lamp-greyyellow: #b4a473;
     --lamp-offline: #4a505a;
 
-    --danger: #f08070;
-    --danger-soft: #3a2320;
-    --warn: #e5bd66;
-    --warn-soft: #362d16;
+    --status-working: #7fb0ff;
+    --status-blocked: #ff9483;
+    --status-ok: #52cb8b;
+    --status-warn: #e3bd72;
 
-    --term-bg: #101317;
-    --term-text: #cfd4dc;
+    --danger: #ff8b78;
+    --danger-soft: #38241f;
+    --warn: #e3bd72;
+    --warn-soft: #332b18;
+
+    --term-bg: #0e1116;
+    --term-text: #cbd1da;
 
     --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 18px rgb(0 0 0 / 28%);
   }
@@ -264,7 +288,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-sunken);
-  font-size: 10px;
+  font-size: 10.5px;
   line-height: 1.6;
   cursor: default;
 }
@@ -329,10 +353,10 @@ button:disabled {
 }
 
 .mock-badge {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 650;
   letter-spacing: 0.04em;
-  padding: 1px 6px;
+  padding: 1px 7px;
   border-radius: 999px;
   background: var(--warn-soft);
   color: var(--warn);
@@ -478,8 +502,8 @@ button:disabled {
   width: 100%;
   min-width: 0;
   font-size: 11px;
-  line-height: 1.3;
-  color: var(--text-dim);
+  line-height: 1.35;
+  color: var(--text-faint);
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
@@ -487,13 +511,20 @@ button:disabled {
   text-align: left;
 }
 
+/* 沒有標籤的圖示鍵預設只有字高（~20px），滑鼠與觸控都不好按；給一個 28px 的底線，
+   需要更大的地方（標題列、專案列）自己再往上加。 */
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
   border: 0;
   background: transparent;
   color: var(--text-faint);
-  padding: 0 4px;
-  border-radius: 4px;
-  font-size: 12px;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 12.5px;
   line-height: 1.4;
 }
 
@@ -623,14 +654,18 @@ button:disabled {
   gap: 2px;
 }
 
+/* 側欄的層級：bot 名字是第一順位（大、實），kind／model／身份那排是背景資訊（見
+   `.bot-sub`，用 --text-faint 往後退一階），狀態字才用彩色把視線拉回來。 */
 .bot-name {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
   font-size: 14px;
-  font-weight: 600;
-  line-height: 1.25;
+  font-weight: 650;
+  letter-spacing: 0.005em;
+  color: var(--text);
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -666,12 +701,12 @@ button:disabled {
 .bot-sub {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
   height: 20px;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.4;
-  color: var(--text-dim);
+  color: var(--text-faint);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -739,11 +774,11 @@ button:disabled {
 }
 
 .bot-state.working {
-  color: var(--lamp-blue);
+  color: var(--status-working);
 }
 
 .bot-state.blocked {
-  color: var(--lamp-red);
+  color: var(--status-blocked);
   font-weight: 600;
 }
 
@@ -753,11 +788,11 @@ button:disabled {
 }
 
 .kind-tag {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 650;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  padding: 0 5px;
+  padding: 0 6px;
   border-radius: 3px;
   border: 1px solid var(--border-strong);
   color: var(--text-dim);
@@ -825,10 +860,10 @@ button:disabled {
 }
 
 .bot-actions .menu-btn {
-  width: 28px;
-  height: 22px;
-  min-width: 28px;
-  min-height: 22px;
+  width: 30px;
+  height: 24px;
+  min-width: 30px;
+  min-height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -867,10 +902,10 @@ button:disabled {
 }
 
 .bot-delete-btn {
-  width: 28px;
-  height: 22px;
-  min-width: 28px;
-  min-height: 22px;
+  width: 30px;
+  height: 24px;
+  min-width: 30px;
+  min-height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -894,7 +929,7 @@ button:disabled {
 }
 
 .bot-run-btn.start:hover:not(:disabled) {
-  color: var(--lamp-green);
+  color: var(--status-ok);
   background: color-mix(in srgb, var(--lamp-green) 16%, transparent);
 }
 
@@ -913,13 +948,17 @@ button:disabled {
 }
 
 .mini-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
   border: 1px solid var(--border-strong);
   background: transparent;
   color: var(--text-dim);
   border-radius: 6px;
-  font-size: 11px;
-  line-height: 1.5;
-  padding: 1px 8px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  padding: 1px 10px;
   white-space: nowrap;
 }
 
@@ -1226,11 +1265,11 @@ button:disabled {
 }
 
 .main-status.working {
-  color: var(--lamp-blue);
+  color: var(--status-working);
 }
 
 .main-status.blocked {
-  color: var(--lamp-red);
+  color: var(--status-blocked);
   font-weight: 600;
 }
 
@@ -1406,10 +1445,10 @@ button:disabled {
   min-height: 0;
   overflow-y: auto;
   width: 100%;
-  max-width: 1180px;
+  max-width: var(--chat-max);
   margin: 0 auto;
-  padding: 16px 24px;
-  scroll-padding: 16px 0;
+  padding: 20px 28px 24px;
+  scroll-padding: 20px 0;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -1505,9 +1544,9 @@ button:disabled {
   height: 48px;
   min-height: 48px;
   width: 100%;
-  max-width: 1180px;
+  max-width: var(--chat-max);
   margin: 0 auto;
-  padding: 0 24px;
+  padding: 0 28px;
   box-sizing: border-box;
   border-top: 1px solid var(--border);
   background: var(--warn-soft);
@@ -1552,8 +1591,8 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-width: min(840px, 78%);
-  margin-top: 24px;
+  max-width: min(680px, 88%);
+  margin-top: 22px;
 }
 
 .msg:first-child {
@@ -1566,31 +1605,32 @@ button:disabled {
   margin-top: 12px;
 }
 
+/* 一行大約 60–75 個字元是舒服的閱讀寬度；助理的段落較長，給它比使用者多一點。 */
 .msg.user {
   align-self: flex-end;
   align-items: flex-end;
-  max-width: min(640px, 78%);
+  max-width: min(560px, 82%);
 }
 
 .msg.assistant {
   align-self: flex-start;
-  max-width: min(840px, 78%);
+  max-width: min(680px, 88%);
 }
 
 .msg.system {
   align-self: center;
-  max-width: min(680px, 90%);
+  max-width: min(560px, 90%);
   align-items: center;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .bubble {
   min-width: 0;
   min-height: 36px;
-  padding: 10px 14px;
+  padding: 11px 15px;
   border-radius: 14px;
   font-size: 15px;
-  line-height: 24px;
+  line-height: 25px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   box-sizing: border-box;
@@ -1656,15 +1696,15 @@ button:disabled {
   border: 0;
   background: transparent;
   color: var(--accent);
-  padding: 0;
-  font-size: 10.5px;
+  padding: 2px 0;
+  font-size: 11.5px;
   text-decoration: underline;
 }
 
 .msg.system .bubble {
   background: var(--bubble-system);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: 12px;
   text-align: center;
   border-radius: 999px;
   padding: 3px 12px;
@@ -1674,10 +1714,10 @@ button:disabled {
 .msg-meta {
   display: flex;
   align-items: center;
-  gap: 5px;
-  min-height: 14px;
-  font-size: 10px;
-  line-height: 1.3;
+  gap: 6px;
+  min-height: 16px;
+  font-size: 11px;
+  line-height: 1.35;
   color: var(--text-faint);
   padding: 0 3px;
   white-space: nowrap;
@@ -1685,8 +1725,8 @@ button:disabled {
 
 .msg-meta-above {
   width: 100%;
-  height: 18px;
-  min-height: 18px;
+  height: 20px;
+  min-height: 20px;
   justify-content: space-between;
   gap: 8px;
   box-sizing: border-box;
@@ -1695,8 +1735,8 @@ button:disabled {
 /* Same row, but under the bubble — the live turn's status follows the growing output. */
 .msg-meta-below {
   width: 100%;
-  height: 18px;
-  min-height: 18px;
+  height: 20px;
+  min-height: 20px;
   justify-content: space-between;
   gap: 8px;
   box-sizing: border-box;
@@ -1755,9 +1795,9 @@ button:disabled {
 }
 
 .src-tag {
-  font-size: 9.5px;
-  line-height: 1.3;
-  padding: 0 4px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  padding: 0 5px;
   border-radius: 3px;
   border: 1px solid var(--border);
   color: var(--text-faint);
@@ -1815,12 +1855,12 @@ button:disabled {
 
 .composer {
   width: 100%;
-  max-width: 1180px;
+  max-width: var(--chat-max);
   margin: 0 auto;
   box-sizing: border-box;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
-  padding: 12px 24px;
+  padding: 12px 28px;
   min-height: 76px;
 }
 
@@ -2584,6 +2624,38 @@ button:disabled {
 
 /* ---------------------------------------------------------- responsive */
 
+/*
+ * 標題列擠成一團是窄視窗最明顯的毛病。分三段讓：先收邊距，再丟掉重複出現的資訊
+ * （模型後綴、主機標），最後才丟 pane 那顆 debug 鍵。名字、燈號、設定鍵、分頁全程保留。
+ */
+@media (width <= 1240px) {
+  .main-head {
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .tab {
+    padding: 0 11px;
+  }
+
+  .head-actions {
+    gap: 4px;
+  }
+}
+
+@media (width <= 1160px) {
+  /* 模型後綴（`· 高 · thinking`）與主機標在設定面板／側欄都看得到，先讓出寬度。 */
+  .bot-head .model-tag-extra,
+  .bot-head .host-badge {
+    display: none;
+  }
+
+  .main-head {
+    gap: 6px;
+    padding: 0 10px;
+  }
+}
+
 @media (width <= 1080px) {
   /* Keep the tabs intact; the run/pane detail is the first thing to go. */
   .main-status {
@@ -2593,6 +2665,10 @@ button:disabled {
   /* Keep the dot, drop its label. */
   .conn-label {
     display: none;
+  }
+
+  .tab {
+    padding: 0 9px;
   }
 }
 
@@ -4153,9 +4229,9 @@ button.model-tag[aria-expanded='true'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.1;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   font-family: var(--font-mono);
@@ -4523,7 +4599,7 @@ button.model-tag[aria-expanded='true'] {
   font-weight: 700;
 }
 
-.tool-badge.ok .tool-mark { color: var(--lamp-green); }
+.tool-badge.ok .tool-mark { color: var(--status-ok); }
 .tool-badge.missing .tool-mark { color: var(--danger); }
 .tool-badge.nologin .tool-mark { color: var(--warn); }
 
@@ -5027,11 +5103,11 @@ button.model-tag[aria-expanded='true'] {
 }
 .team-phase.busy {
   border-color: var(--lamp-yellow);
-  color: var(--lamp-yellow);
+  color: var(--status-warn);
 }
 .team-phase.run {
   border-color: var(--lamp-blue);
-  color: var(--lamp-blue);
+  color: var(--status-working);
 }
 .team-phase.warn {
   border-color: var(--warn);
@@ -5040,7 +5116,7 @@ button.model-tag[aria-expanded='true'] {
 }
 .team-phase.ok {
   border-color: var(--lamp-green);
-  color: var(--lamp-green);
+  color: var(--status-ok);
 }
 
 .team-role {
@@ -5151,7 +5227,7 @@ button.model-tag[aria-expanded='true'] {
 }
 .team-copy-ok {
   flex: none;
-  color: var(--lamp-green);
+  color: var(--status-ok);
 }
 
 .team-base {
@@ -5299,11 +5375,11 @@ button.model-tag[aria-expanded='true'] {
 }
 .team-issue-state.working {
   border-color: var(--lamp-blue);
-  color: var(--lamp-blue);
+  color: var(--status-working);
 }
 .team-issue-state.done {
   border-color: var(--lamp-green);
-  color: var(--lamp-green);
+  color: var(--status-ok);
 }
 .team-issue-state.failed,
 .team-issue-state.skipped {
@@ -5432,14 +5508,14 @@ button.model-tag[aria-expanded='true'] {
 .team-task-state.merged,
 .team-task-state.skipped {
   border-color: var(--lamp-green);
-  color: var(--lamp-green);
+  color: var(--status-ok);
 }
 .team-task-state.working,
 .team-task-state.reviewing,
 .team-task-state.merging,
 .team-task-state.rebasing {
   border-color: var(--lamp-blue);
-  color: var(--lamp-blue);
+  color: var(--status-working);
 }
 .team-task-state.exhausted,
 .team-task-state.blocked_by_worker,

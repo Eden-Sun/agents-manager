@@ -138,7 +138,7 @@ function GroupMessageList({ projectId }: { projectId: string }) {
     useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.text ?? null]))),
   )
   // …and the spinner row (API.md v4.1 `turn_progress.activity`) for members that are still
-  // only thinking, so their bubble says what is happening instead of "等待回覆（hook）…".
+  // only thinking, so their bubble says what is happening instead of "等待回覆…".
   const liveActivity = useStore(
     useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.activity ?? null]))),
   )
