@@ -21,6 +21,17 @@ export function GearIcon() {
   )
 }
 
+/** 溢位選單（`⋯`）：把不常按、又不該常駐在標題列上的動作收起來。 */
+export function MoreIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <circle cx="3.4" cy="8" r="1.35" fill="currentColor" />
+      <circle cx="8" cy="8" r="1.35" fill="currentColor" />
+      <circle cx="12.6" cy="8" r="1.35" fill="currentColor" />
+    </svg>
+  )
+}
+
 /** 「開同類分身」：兩張疊在一起的卡片。 */
 export function CloneIcon() {
   return (
