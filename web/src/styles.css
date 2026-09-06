@@ -5784,6 +5784,12 @@ button.team-workers:disabled {
   flex-direction: column;
 }
 
+/* 靠右的那一側（你送的、daemon 代轉的）：底下的 chip 跟著氣泡靠右。 */
+.team-msg-row.from-user > .am-chips,
+.team-msg-row.from-user > .team-msg-bare {
+  justify-content: flex-end;
+}
+
 /* daemon 代轉的訊息：`pm → dev-1`。和「你 → …」用不同顏色，免得誤以為是自己送的。 */
 .msg-targets.relay {
   color: var(--accent);
@@ -5819,6 +5825,16 @@ button.team-workers:disabled {
 }
 
 /* am-team 區塊折成一行 chip，點開才看 JSON。 */
+/* 只剩協定提醒的那種轉送：沒有氣泡可畫，發話標記自己站一列。 */
+.team-msg-bare {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 .am-chips {
   display: flex;
   flex-wrap: wrap;
