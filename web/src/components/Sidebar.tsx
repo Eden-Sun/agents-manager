@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { MOCK_MODE } from '../api'
-import type { BotKind } from '../api/types'
+import type { BotKind, HostMem } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import {
+  adjacentBotId,
   anchorOf,
   attachCommandOf,
   botLamp,
   botQuotaWarning,
   botsOfProject,
+  identitiesOfHost,
   projectHostName,
   toolsOfHost,
   useStore,
@@ -19,9 +21,11 @@ import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
+import { Modal } from './Modal'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { AttachButton } from './AttachButton'
+import { BotNameField } from './BotNameField'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
@@ -34,6 +38,45 @@ function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boo
     <span className="conn" title={`WebSocket: ${socket} / herdr: ${connected ? 'connected' : 'disconnected'}`}>
       <span className={`conn-dot ${socket === 'open' && !connected ? 'closed' : socket}`} />
       <span className="conn-label">{label}</span>
+    </span>
+  )
+}
+
+/** 1.4G / 820M / 64M — 一格寬度就要看得懂，所以個位數才給小數。 */
+function humanBytes(n: number): string {
+  if (n <= 0) return '0'
+  const g = n / 1024 ** 3
+  if (g >= 1) return `${g < 10 ? g.toFixed(1) : Math.round(g)}G`
+  const m = n / 1024 ** 2
+  if (m >= 1) return `${Math.round(m)}M`
+  return `${Math.max(1, Math.round(n / 1024))}K`
+}
+
+/**
+ * 所有 herdr 進程樹目前佔的常駐記憶體（SPEC §15）。標題列右邊那一格，
+ * tooltip 拆成「herdr 本身 / 底下的 agent」以及每一台主機。
+ *
+ * 舊 daemon 沒有 `/api/mem` → `mem` 是 null → 整格不出現（不要顯示假的 0）。
+ */
+function MemBadge() {
+  const mem = useStore((s) => s.mem)
+  if (!mem || (mem.total_bytes === 0 && mem.processes === 0)) return null
+  const failed = mem.hosts.filter((h: HostMem) => h.error)
+  const lines = [
+    `herdr 本身 ${humanBytes(mem.herdr_bytes)} · 底下的 agent ${humanBytes(mem.agents_bytes)}`,
+    `${mem.processes} 個 process`,
+    '',
+    ...mem.hosts.map((h: HostMem) =>
+      h.error ? `${h.host}：量不到（${h.error}）` : `${h.host}：${humanBytes(h.total_bytes)}（${h.processes} 個 process）`,
+    ),
+    '',
+    '每 15 秒更新一次',
+  ]
+  return (
+    <span className={`mem-badge${failed.length > 0 ? ' partial' : ''}`} title={lines.join('\n')}>
+      <span className="mem-k">RAM</span>
+      <span className="mem-v">{humanBytes(mem.total_bytes)}</span>
+      {failed.length > 0 ? <span className="mem-partial" aria-hidden="true">*</span> : null}
     </span>
   )
 }
@@ -52,12 +95,14 @@ function BotRow({
   onDrag,
   onDropAt,
   onNudge,
+  onStep,
 }: {
   botId: string
   drag: DragState
   onDrag: (next: DragState) => void
   onDropAt: (dragId: string, overId: string, edge: 'before' | 'after') => void
   onNudge: (botId: string, dir: -1 | 1) => void
+  onStep: (botId: string, dir: -1 | 1) => void
 }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
@@ -69,7 +114,8 @@ function BotRow({
   const quotaWarning = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
-      return b ? botQuotaWarning(s.quota, b.kind, b.identity) : null
+      // 額度按主機分（SPEC §14）：遠端 bot 要看它自己那台的數字，不是本機的。
+      return b ? botQuotaWarning(s.quota, b.kind, b.identity, projectHostName(s, b.project_id)) : null
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
@@ -110,6 +156,7 @@ function BotRow({
       }${deleteOpen ? ' confirming' : ''}${quotaWarning ? ' quota-critical' : ''}`}
       role="option"
       aria-selected={selected}
+      data-bot-id={botId}
       tabIndex={0}
       draggable
       onClick={() => selectBot(botId)}
@@ -118,11 +165,17 @@ function BotRow({
           e.preventDefault()
           selectBot(botId)
         }
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+        const dir = e.key === 'ArrowUp' ? -1 : 1
         // 鍵盤也要能排序：Alt + ↑/↓（拖曳不是每個人都能用）。
-        if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        if (e.altKey) {
           e.preventDefault()
-          onNudge(botId, e.key === 'ArrowUp' ? -1 : 1)
+          onNudge(botId, dir)
+          return
         }
+        // 沒按 Alt 就是換 bot——listbox 本來就該這樣走，焦點跟著跳到新的那一列。
+        e.preventDefault()
+        onStep(botId, dir)
       }}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
@@ -146,8 +199,8 @@ function BotRow({
     >
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
       <span className="bot-main">
-        <span className="bot-name">
-          {bot.name}
+        {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
+        <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
           <PersonaMark persona={bot.persona} />
           {/* While it is up, what the agent calls itself says more than "執行中" — for claude
               that is its own summary of the task. blocked / starting / stopping still win:
@@ -159,7 +212,7 @@ function BotRow({
           ) : (
             <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>
           )}
-        </span>
+        </BotNameField>
         <span className="bot-sub">
           <KindTag kind={bot.kind} />
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
@@ -429,7 +482,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           name,
           kind,
           model,
-          effort: kind === 'claude' ? null : effort,
+          effort,
           fast: kind === 'codex' ? fast : undefined,
           persona: persona.trim() || null,
           autostart: false,
@@ -519,7 +572,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         </div>
       </div>
       <ApiModelFields kind={kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
-      <IdentityOptions kind={kind} value={identity} onChange={setIdentity} />
+      <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />
       <label className="field">
         <span>名稱</span>
         <input
@@ -601,7 +654,13 @@ export function Sidebar() {
   const selectProject = useStore((s) => s.selectProject)
   const removeProject = useStore((s) => s.removeProject)
   const [open, setOpen] = useState<'project' | 'env' | null>(null)
-  const identityCount = useStore((s) => s.identities.length)
+  // config 的身份加上本機 shell 認到的 `ccN`（SPEC §15）——腳註寫的是「這台機器有幾個身份」。
+  const configuredIdentities = useStore((s) => s.identities)
+  const localIdentityStatus = useStore((s) => s.localIdentityStatus)
+  const identityCount = useMemo(
+    () => identitiesOfHost(configuredIdentities, localIdentityStatus).length,
+    [configuredIdentities, localIdentityStatus],
+  )
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
@@ -618,7 +677,10 @@ export function Sidebar() {
     const at = ids.indexOf(overId)
     if (at < 0) return
     const beforeId = edge === 'before' ? overId : (ids[at + 1] ?? null)
-    moveBot(dragId, beforeId === dragId ? null : beforeId)
+    // 「插在自己前面」就是放回原位 → 什麼都不做。不能傳 null：在 store 裡 beforeId === null
+    // 是「移到最後」，那會把原地放下變成掉到清單尾巴。
+    if (beforeId === dragId) return
+    moveBot(dragId, beforeId)
   }
 
   /** Alt + ↑/↓：跟相鄰的那列交換。 */
@@ -630,6 +692,20 @@ export function Sidebar() {
     const to = at + dir
     if (at < 0 || to < 0 || to >= ids.length) return
     moveBot(botId, dir === -1 ? ids[to] : (ids[to + 1] ?? null))
+  }
+
+  /** ↑/↓：換到相鄰的 bot，焦點跟著走（不然下一次按鍵還是從舊的那一列算）。 */
+  const step = (botId: string, dir: -1 | 1) => {
+    const st = useStore.getState()
+    const next = adjacentBotId(st, botId, dir)
+    if (!next) return
+    st.selectBot(next)
+    // The row for `next` may be a fresh element (or scrolled out); focus after React paints it.
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-bot-id="${next}"]`)
+      el?.focus()
+      el?.scrollIntoView({ block: 'nearest' })
+    })
   }
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
@@ -655,63 +731,12 @@ export function Sidebar() {
   const botSheetProject = botFormFor ? projects.find((p) => p.id === botFormFor) : null
   const botSheetLabel = botSheetProject?.label ?? '選擇 Project'
 
-  if (botSheetOpen) {
-    return (
-      <>
-        <div className="sidebar-head">
-          <h1>Agents Manager</h1>
-          {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-          <ConnBadge socket={socket} connected={connected} />
-        </div>
-        <div className="new-bot-sheet">
-          <div className="sheet-head">
-            <button type="button" className="icon-btn" aria-label="返回" title="返回清單" onClick={closeBotSheet}>
-              ←
-            </button>
-            <strong title={botSheetProject?.path}>
-              新增 Bot · {botSheetLabel}
-            </strong>
-          </div>
-          <div className="sheet-body inline-form">
-            <NewBotForm
-              key={botFormFor ?? 'pick'}
-              initialProjectId={botFormFor ?? undefined}
-              onDone={closeBotSheet}
-            />
-          </div>
-        </div>
-      </>
-    )
-  }
-
-  if (open === 'project') {
-    return (
-      <>
-        <div className="sidebar-head">
-          <h1>Agents Manager</h1>
-          {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-          <ConnBadge socket={socket} connected={connected} />
-        </div>
-        <div className="new-project-sheet">
-          <div className="sheet-head">
-            <button type="button" className="icon-btn" aria-label="返回" title="返回清單" onClick={() => setOpen(null)}>
-              ←
-            </button>
-            <strong>新增 Project</strong>
-          </div>
-          <div className="sheet-body">
-            <NewProjectForm onDone={() => setOpen(null)} />
-          </div>
-        </div>
-      </>
-    )
-  }
-
   return (
     <>
       <div className="sidebar-head">
         <h1>Agents Manager</h1>
         {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
+        <MemBadge />
         <ConnBadge socket={socket} connected={connected} />
       </div>
 
@@ -732,34 +757,36 @@ export function Sidebar() {
                 onClick={() => selectProject(p.id)}
               >
                 <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} />
-                <ProjectAttach projectId={p.id} />
-                <button
-                  type="button"
-                  className="icon-btn add icon-tip"
-                  title={`在「${p.label}」新增 Bot`}
-                  aria-label={`在 ${p.label} 新增 Bot`}
-                  data-tip={`新增 Bot · ${p.label}`}
-                  aria-expanded={false}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    openBotSheet(p.id)
-                  }}
-                >
-                  ＋
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn icon-tip"
-                  title={`刪除專案「${p.label}」（所有 Bot 需先停止）`}
-                  aria-label={`刪除專案 ${p.label}`}
-                  data-tip={`刪除專案 · ${p.label}`}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (confirm(`刪除 Project「${p.label}」？（不會刪除目錄）`)) void removeProject(p.id)
-                  }}
-                >
-                  ✕
-                </button>
+                <span className="project-head-actions">
+                  <ProjectAttach projectId={p.id} />
+                  <button
+                    type="button"
+                    className="icon-btn add icon-tip"
+                    title={`在「${p.label}」新增 Bot`}
+                    aria-label={`在 ${p.label} 新增 Bot`}
+                    data-tip={`新增 Bot · ${p.label}`}
+                    aria-expanded={false}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openBotSheet(p.id)
+                    }}
+                  >
+                    ＋
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn icon-tip"
+                    title={`刪除專案「${p.label}」（所有 Bot 需先停止）`}
+                    aria-label={`刪除專案 ${p.label}`}
+                    data-tip={`刪除專案 · ${p.label}`}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (confirm(`刪除 Project「${p.label}」？（不會刪除目錄）`)) void removeProject(p.id)
+                    }}
+                  >
+                    ✕
+                  </button>
+                </span>
               </header>
               {list.length === 0 ? (
                 <div className="project-empty">
@@ -770,7 +797,7 @@ export function Sidebar() {
                 </div>
               ) : (
                 list.map((b) => (
-                  <BotRow key={b.id} botId={b.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} />
+                  <BotRow key={b.id} botId={b.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
                 ))
               )}
               <TeamNodes projectId={p.id} />
@@ -792,24 +819,48 @@ export function Sidebar() {
         <button
           type="button"
           className="disclosure"
+          aria-haspopup="dialog"
           aria-expanded={open === 'env'}
-          onClick={() => setOpen(open === 'env' ? null : 'env')}
+          onClick={() => setOpen('env')}
         >
-          <span className="chev">{open === 'env' ? '▼' : '▶'}</span> 環境設定
+          <GearIcon /> 環境設定
           <span className="disclosure-note">
             {hosts.length === 0 ? '本機' : `本機 + ${hosts.length}`}
             {hostsDown > 0 ? ` ・ ${hostsDown} 未連線` : ''}
             {` ・ 身分 ${identityCount}`}
           </span>
         </button>
-        {open === 'env' ? (
-          <div className="env-panel">
-            <HostsPanel />
-            <IdentitiesPanel />
-            <KindDisplayToggle />
-          </div>
-        ) : null}
       </div>
+
+      <Modal open={open === 'project'} title="新增 Project" onClose={() => setOpen(null)}>
+        <NewProjectForm onDone={() => setOpen(null)} />
+      </Modal>
+
+      <Modal
+        open={botSheetOpen}
+        title="新增 Bot"
+        subtitle={<span title={botSheetProject?.path}>{botSheetLabel}</span>}
+        onClose={closeBotSheet}
+      >
+        <NewBotForm key={botFormFor ?? 'pick'} initialProjectId={botFormFor ?? undefined} onDone={closeBotSheet} />
+      </Modal>
+
+      <Modal open={open === 'env'} title="環境設定" width={560} onClose={() => setOpen(null)}>
+        <div className="env-panel">
+          <section className="env-sec">
+            <h3>主機</h3>
+            <HostsPanel />
+          </section>
+          <section className="env-sec">
+            <h3>身分</h3>
+            <IdentitiesPanel />
+          </section>
+          <section className="env-sec">
+            <h3>顯示</h3>
+            <KindDisplayToggle />
+          </section>
+        </div>
+      </Modal>
     </>
   )
 }

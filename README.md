@@ -40,13 +40,20 @@
 
 ![群組聊天](docs/screenshots/212-ui-group-dark.png)
 
-**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 走 `/model`，grok 還有 per-model 的 reasoning effort（4.6 才有 `xhigh`，4.5 沒有），codex 改模型後需要重啟。身份（`cc0` / `cc1`）只對 claude。
+**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+）且換模型走 `/model` 當場套用、改強度要重啟；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），`/model` 與 `/effort` 都能當場套用；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
 
 ![Bot 設定](docs/screenshots/310-grok-settings.png)
 
-**額度** — 標題列常駐 claude / codex / grok 的 5h / 7d（grok 只有週視窗）。claude 可依身份拆條（cc0 / cc1）。剩餘低於門檻時顯示數字；更低時側欄 bot 列會警告。門檻由 daemon 計算，前端只讀 `low` / `critical`。
+**額度** — 標題列常駐 claude / codex / grok 的 5h / 7d（grok 只有週視窗）。claude 可依身份拆條（cc0 / cc1 / …）。剩餘低於門檻時顯示數字；更低時側欄 bot 列會警告。門檻由 daemon 計算，前端只讀 `low` / `critical`。
+
+額度是**按主機**分的（[SPEC §14](docs/SPEC.md)）：這條列一次只看一台——預設本機，點進 ssh 主機上的 bot 或專案就換成那台，並掛上主機名牌。遠端的數字同樣是 daemon 去那台讀回來的（codex 走 ssh RPC，claude / grok 在那台開一個用完即丟的 pane 問 `/usage`）。
 
 ![額度條](docs/screenshots/231-quota-order-labeled.png)
+![遠端主機的額度](docs/screenshots/341-quota-host-remote.png)
+
+**身份 cc0～cc6** — 多帳號不必再寫設定：daemon 會讀每台主機登入 shell 裡的 `alias ccN='CLAUDE_CONFIG_DIR=… claude …'`，把 `cc0`～`cc6` 當成可指派的身份（[SPEC §15](docs/SPEC.md)）。同一個 `cc1` 在本機和遠端可以是不同帳號——它跟著那台機器的 alias 走。手寫的 `[[identities]]` 仍然有效，同名時以它為準。
+
+![身份](docs/screenshots/350-identities-shell-local.png)
 
 **Team 面板** — 從 Issues 列對某個 GitHub issue 按「組 team」：選 PM / 執行者（1–4）/ reviewer 的 kind，daemon 在資料目錄下建 git worktree 與獨立 herdr workspace，使用者自己的 checkout 不動。側欄出現 team 節點，主區是成員燈號、轉送時間軸、task 清單與暫停 / 插話 / 中止。
 

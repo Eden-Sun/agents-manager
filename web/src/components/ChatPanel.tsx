@@ -5,11 +5,12 @@ import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { effortLabel } from '../api/types'
-import { anchorOf, attachCommandOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
-import { AttachButton } from './AttachButton'
+import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
+import { BlockedModal } from './BlockedModal'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
+import { BotNameField } from './BotNameField'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
@@ -20,7 +21,7 @@ import { ModelQuickPicker } from './ModelPicker'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
-import { ToolsHint, ToolsHintIcon } from './Tools'
+import { ToolsHint } from './Tools'
 
 const SOURCE_LABEL: Record<string, string> = {
   hook: 'hook',
@@ -588,19 +589,6 @@ function pct(n: number): string {
   return `${Number.isInteger(r) ? r : r.toFixed(1)}%`
 }
 
-/** epoch seconds → `3h25m` / `12m` / `5d4h`, or '' once it is in the past. */
-function untilShort(epochSeconds: number): string {
-  const ms = epochSeconds * 1000 - Date.now()
-  if (!Number.isFinite(ms) || ms <= 0) return ''
-  const mins = Math.floor(ms / 60000)
-  const d = Math.floor(mins / 1440)
-  const h = Math.floor((mins % 1440) / 60)
-  const m = mins % 60
-  if (d > 0) return `${d}d${h}h`
-  if (h > 0) return `${h}h${m}m`
-  return `${m}m`
-}
-
 function SlItem({ k, children, title }: { k: string; children: ReactNode; title?: string }) {
   return (
     <span className="sl-item" title={title}>
@@ -666,19 +654,33 @@ function derivedStatus(
   }
 }
 
-function StatusLineBar({
-  status,
-  text,
-  botId,
-  kind,
-  host,
-}: {
-  status: StatusInfo | null
-  text: string | null
-  botId: string
-  kind: BotKind
-  host: string
-}) {
+/**
+ * `高 · fast · thinking` — the model's *settings*, as opposed to its name. Lives next to the
+ * model badge in the header now; the status bar used to carry its own copy of both.
+ */
+function modelExtraOf(status: StatusInfo | null): string {
+  if (!status) return ''
+  return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null, status.thinking ? 'thinking' : null]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+/**
+ * One row for the repo chip + the status fields. `hasStatus` is passed rather than inferred:
+ * `<StatusLineBar>` is a truthy element even on the render where it returns null, so the row
+ * would keep a hairline border for a bot that has no status line at all.
+ */
+function ContextBar({ issues, status, hasStatus }: { issues: ReactNode; status: ReactNode; hasStatus: boolean }) {
+  if (!issues && !hasStatus) return null
+  return (
+    <div className="context-bar">
+      {issues}
+      {hasStatus ? status : null}
+    </div>
+  )
+}
+
+function StatusLineBar({ status, text }: { status: StatusInfo | null; text: string | null }) {
   const line = text?.trim() ?? ''
   if (!status) {
     if (!line) return null
@@ -693,16 +695,6 @@ function StatusLineBar({
     status.context_used_tokens !== null && status.context_size !== null
       ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
       : null
-  const five = status.five_hour_resets_at ? untilShort(status.five_hour_resets_at) : ''
-  const seven = status.seven_day_resets_at ? untilShort(status.seven_day_resets_at) : ''
-  const modelExtra = [
-    status.effort ? effortLabel(status.effort) : null,
-    status.fast_mode ? 'fast' : null,
-    status.thinking ? 'thinking' : null,
-  ]
-    .filter(Boolean)
-    .join(' · ')
-
   return (
     <div className="statusline-bar" role="status" title={line || undefined}>
       {status.account_email ? (
@@ -712,36 +704,9 @@ function StatusLineBar({
           {status.cwd.replace(/^\/Users\/[^/]+/, '~')}
         </SlItem>
       ) : null}
-      {status.model_name ? (
-        <span className="sl-item sl-pick-wrap">
-          <ModelQuickPicker
-            botId={botId}
-            kind={kind}
-            host={host}
-            className="sl-pick-btn"
-            title={status.model_id ? `點一下改模型（${status.model_id}）` : '點一下改模型'}
-          >
-            <span className="sl-k">模型</span>
-            <span className="sl-v">
-              {status.model_name}
-              {modelExtra ? <span className="sl-dim"> · {modelExtra}</span> : null}
-            </span>
-          </ModelQuickPicker>
-        </span>
-      ) : null}
       {status.context_used_pct !== null ? (
         <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
           {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
-        </SlItem>
-      ) : null}
-      {status.five_hour_pct !== null ? (
-        <SlItem k="5h">
-          {pct(status.five_hour_pct)}{five ? <span className="sl-dim"> · 剩 {five}</span> : null}
-        </SlItem>
-      ) : null}
-      {status.seven_day_pct !== null ? (
-        <SlItem k="7d">
-          {pct(status.seven_day_pct)}{seven ? <span className="sl-dim"> · 剩 {seven}</span> : null}
         </SlItem>
       ) : null}
       {status.cost_usd !== null ? <SlItem k="花費">${status.cost_usd.toFixed(2)}</SlItem> : null}
@@ -750,10 +715,12 @@ function StatusLineBar({
   )
 }
 
+/** blocked 到「自動彈出全畫面終端」之間的緩衝，見下方 armed 的說明。 */
+const AUTO_OPEN_DELAY_MS = 1000
+
 export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
-  const project = useStore((s) => s.projects.find((p) => p.id === s.bots.find((b) => b.id === s.selectedBotId)?.project_id) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
@@ -767,12 +734,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const openSettings = useStore((s) => s.openSettings)
   const closeSettings = useStore((s) => s.closeSettings)
   const startBot = useStore((s) => s.startBot)
-  const stopBot = useStore((s) => s.stopBot)
-  const interruptBot = useStore((s) => s.interruptBot)
   const busy = useStore((s) => s.busy)
-  const attachCommand = useStore((s) => attachCommandOf(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
   // debug 用的 run 識別列（pane / agent / run id）預設收合，不佔常態版面。
   const [runDebugOpen, setRunDebugOpen] = useState(false)
   // claude hands us its statusLine payload; the other kinds render their status line inside
@@ -790,6 +753,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       return derivedStatus(b.kind, b.model, b.effort, b.fast, path, q)
     }),
   )
+  const modelExtra = modelExtraOf(statusInfo)
   // Images live outside the store: they only matter until the send that carries them.
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId)
@@ -799,6 +763,35 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
   const chatEmpty = messagesLoaded && (messages?.length ?? 0) === 0
   const composerReason = useStore((s) => (botId ? composerState(s, botId).reason : ''))
+
+  /**
+   * agent 需要回應時，整個 herdr 畫面自己跳出來——判斷「該按 y 還是 n」要看的是完整的對話框，
+   * 不是對話上方那塊 300px 的截角。只彈**現在正在看的**這個 bot：別的 bot 進 blocked 留給側欄
+   * 的紅點，不打斷手上的事。
+   *
+   * 關掉之後不會再自己彈回來（`dismissed`），直到這個 bot 離開 blocked 又再進去一次——那是另一
+   * 個問題，值得再問一次。手動「展開全畫面」隨時可以叫回來。
+   *
+   * 狀態轉換在 render 當下算完（比對上一次的 bot / blocked），不放進 effect：從 effect 裡
+   * setState 會多跑一輪 render，而這個彈窗要跟紅燈同一幀出現。
+   */
+  const blockedNow = run?.agent_status === 'blocked'
+  const [blockedUi, setBlockedUi] = useState({ bot: botId ?? '', blocked: false, armed: false, open: false, dismissed: false })
+  if (blockedUi.bot !== (botId ?? '') || blockedUi.blocked !== blockedNow) {
+    const sameBot = blockedUi.bot === (botId ?? '')
+    // 離開 blocked（或換了 bot）就把「關掉過」忘掉，下一次 blocked 才會再自己彈出來。
+    const dismissed = sameBot && blockedNow ? blockedUi.dismissed : false
+    const armed = blockedNow && !dismissed
+    setBlockedUi({ bot: botId ?? '', blocked: blockedNow, armed, open: armed && blockedUi.open, dismissed })
+  }
+  // 有些 blocked 是 daemon 自己會按掉的（claude 的滿意度問卷 → `tui_prompts`），一秒內就過去了。
+  // 等一下再彈，免得為了那種東西閃一個全畫面視窗出來。
+  useEffect(() => {
+    if (!blockedUi.armed) return
+    const t = setTimeout(() => setBlockedUi((u) => (u.armed ? { ...u, armed: false, open: true } : u)), AUTO_OPEN_DELAY_MS)
+    return () => clearTimeout(t)
+  }, [blockedUi.armed])
+  const blockedFull = blockedUi.open
 
   if (!botId || !bot) {
     return (
@@ -816,9 +809,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </button>
           <span className="main-status">未選擇 Bot</span>
           <span className="spacer" />
-          <ToolsHintIcon />
           <QuotaStrip />
-          <AttachButton command={attachCommand} />
         </div>
         <EmptyState title="尚未選擇 Bot" icon="◎">
           從左側選擇一個 Bot，或先新增 Project 與 Bot。
@@ -828,12 +819,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   }
 
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
-  const blocked = run?.agent_status === 'blocked'
+  const blocked = blockedNow
   const settingsOpen = settingsBotId === botId
+  const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
 
   return (
     <>
-      <div className="main-head">
+      <div className="main-head bot-head">
         <button
           type="button"
           className="btn menu-btn icon-tip"
@@ -845,55 +837,68 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ☰
         </button>
         <div className="main-title">
-          <StatusLamp lamp={lamp} />
-          <strong>{bot.name}</strong>
-          <PersonaMark persona={bot.persona} />
-          <KindTag kind={bot.kind} />
-          {bot.model ? (
+          <div className="main-title-row">
+            <StatusLamp lamp={lamp} />
+            <BotNameField botId={botId} name={bot.name} />
+            {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
+                header is busy, and the settings button is the one thing in here that is not
+                repeated somewhere else — the badges all are. */}
+            <button
+              type="button"
+              className="icon-btn gear icon-tip"
+              aria-label={`${bot.name} 的設定`}
+              aria-expanded={settingsOpen}
+              title={`設定 ${bot.name}（模型、身份、autostart、刪除）`}
+              data-tip={`設定 · ${bot.name}`}
+              onClick={(e) => (settingsOpen ? closeSettings() : openSettings(botId, anchorOf(e.currentTarget)))}
+            >
+              <GearIcon />
+            </button>
+            <PersonaMark persona={bot.persona} />
+            <KindTag kind={bot.kind} />
+            <HostBadge host={hostName} connected={hostUp} />
+          </div>
+          {/* `bot.model` is what was *configured* (null = 由 CLI 自己決定); the statusLine
+              reports what the CLI actually loaded, so fall back to that rather than
+              showing nothing. The settings (`高 · thinking`) ride along as a dim suffix —
+              they used to cost the status bar its own 模型 field. Second row under the name
+              so the identity row above doesn't have to yield space to it. */}
+          {bot.model || statusInfo?.model_name ? (
             <ModelQuickPicker
               botId={botId}
               kind={bot.kind}
               host={hostName}
-              className="model-tag"
-              title={`點一下改模型（${bot.model}）`}
+              className={`model-tag${bot.model ? '' : ' reported'}`}
+              title={
+                bot.model
+                  ? `點一下改模型（${bot.model}）`
+                  : `CLI 預設，實際載入 ${statusInfo?.model_name}。點一下改模型`
+              }
             >
-              {bot.model}
+              {bot.model ?? statusInfo?.model_name}
+              {modelExtra ? <span className="model-tag-extra"> · {modelExtra}</span> : null}
             </ModelQuickPicker>
           ) : null}
-          <HostBadge host={hostName} connected={hostUp} />
-          <button
-            type="button"
-            className="icon-btn gear icon-tip"
-            aria-label={`${bot.name} 的設定`}
-            aria-expanded={settingsOpen}
-            title={`設定 ${bot.name}（模型、身份、autostart、刪除）`}
-            data-tip={`設定 · ${bot.name}`}
-            onClick={(e) => (settingsOpen ? closeSettings() : openSettings(botId, anchorOf(e.currentTarget)))}
-          >
-            <GearIcon />
-          </button>
         </div>
-        {/* 燈號文字順便當識別列的開關：它本來就是藏 run / pane tooltip 的地方，而且標題列
-            已經滿了，多一顆按鈕會把 bot 名字擠掉。沒有 run 時就只是一段文字。 */}
-        {run ? (
+        {/* pane id 而不是狀態文字：狀態看左邊的燈號就好（它自己帶 tooltip），這個位置留給
+            debug 時真正要抄的那串。點一下展開整組識別資訊（agent / session / workspace / run）。
+            沒有 pane 就什麼都不放——燈號已經說了它沒在跑。 */}
+        {run?.pane_id ? (
           <button
             type="button"
-            className={`main-status ${lamp} run-debug-toggle${runDebugOpen ? ' on' : ''}`}
+            className={`main-status pane-toggle run-debug-toggle${runDebugOpen ? ' on' : ''}`}
             aria-expanded={runDebugOpen}
-            title="展開 / 收合 run 識別資訊（pane、agent、session、workspace、run id），debug 用"
+            title={`pane ${run.pane_id}（${LAMP_LABEL[lamp]}）· 點一下展開 run 識別資訊：agent、session、workspace、run id`}
             onClick={() => setRunDebugOpen((v) => !v)}
           >
-            {LAMP_LABEL[lamp]} {runDebugOpen ? '▴' : '▾'}
+            <span className="pane-id">{run.pane_id}</span>
+            <span className="pane-chev" aria-hidden="true">
+              {runDebugOpen ? '▴' : '▾'}
+            </span>
           </button>
-        ) : (
-          <span className={`main-status ${lamp}`}>{LAMP_LABEL[lamp]}</span>
-        )}
-        {/* pane 名稱是 debug 的第一手資料：看得見、點一下就複製，不再只藏在 tooltip 裡。 */}
-        <CopyChip label="pane" value={run?.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
+        ) : null}
         <span className="spacer" />
-        <ToolsHintIcon />
-        <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} />
-        <AttachButton command={attachCommand} compact />
+        <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         <div className="tabs" role="tablist">
           <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
             對話
@@ -908,66 +913,24 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             終端
           </button>
         </div>
-        <div className="head-actions">
-          <button
-            type="button"
-            className="mini-btn interrupt-btn"
-            disabled={!active}
-            title={`中斷 ${bot.name} 目前回合（esc）`}
-            onClick={() => void interruptBot(botId)}
-          >
-            中斷
-          </button>
-          {active ? (
-            <button
-              type="button"
-              className="mini-btn danger stop-btn"
-              disabled={Boolean(busy[`stop:${botId}`])}
-              title={`停止 ${bot.name}`}
-              onClick={() => setStopConfirmOpen(true)}
-            >
-              停止
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="mini-btn primary"
-              disabled={Boolean(busy[`start:${botId}`])}
-              title={`啟動 ${bot.name}`}
-              onClick={() => void startBot(botId)}
-            >
-              啟動
-            </button>
-          )}
-        </div>
       </div>
       {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
-      <StatusLineBar status={statusInfo} text={run?.status_line ?? null} botId={botId} kind={bot.kind} host={hostName} />
-
-      <ConfirmDialog
-        open={stopConfirmOpen}
-        title="停止 Bot"
-        body={
-          <>
-            確定停止 <strong>{bot.name}</strong>
-            {project ? (
-              <>
-                （專案 <strong>{project.label}</strong>）
-              </>
-            ) : null}
-            ？會對 pane 送出 ctrl+c，必要時關閉終端。
-          </>
+      {/* The repo chip and the status bar were a row each; neither fills one, so they share.
+          The issues popup must stay outside an `overflow` box, hence the scrolling is on the
+          status half only. The chip is chat-only — the terminal tab has no composer to insert into. */}
+      <ContextBar
+        issues={
+          tab === 'chat' && !settingsOpen ? (
+            <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
+          ) : null
         }
-        confirmLabel="停止"
-        danger
-        width={360}
-        onCancel={() => setStopConfirmOpen(false)}
-        onConfirm={() => {
-          setStopConfirmOpen(false)
-          void stopBot(botId)
-        }}
+        status={<StatusLineBar status={statusInfo} text={run?.status_line ?? null} />}
+        hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
       />
+
+
+      {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
       {tab === 'terminal' && !settingsOpen ? (
         active ? (
@@ -993,8 +956,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       ) : (
         <div className={`chat${drop.over ? ' dropping' : ''}`} {...drop.props}>
           {drop.over ? <DropVeil /> : null}
-          <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
-          {blocked ? <BlockedPanel botId={botId} /> : null}
+          {blocked ? (
+            <BlockedPanel
+              botId={botId}
+              paused={blockedFull}
+              onExpand={() => setBlockedUi((u) => ({ ...u, armed: false, open: true }))}
+            />
+          ) : null}
           <MessageList botId={botId} />
           {!active ? (
             <div className="bot-stopped-bar" role="status">

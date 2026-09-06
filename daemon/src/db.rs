@@ -108,9 +108,33 @@ CREATE TABLE IF NOT EXISTS teams (
   roles_json TEXT NOT NULL,
   budget_json TEXT NOT NULL, usage_json TEXT NOT NULL DEFAULT '{}',
   pr_url TEXT, summary TEXT,
+  -- When the user closed the issue from the finished team (never automatic; see team::close_issue).
+  issue_closed_at TEXT,
   created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT
 );
 CREATE INDEX IF NOT EXISTS teams_project ON teams(project_id);
+-- SPEC-team §2.3: the team's issue queue. One team works a list of issues in `seq` order,
+-- keeping the same PM and reviewer throughout and taking a fresh set of workers per issue.
+--
+-- `teams` keeps its scalar `issue_*` / `branch` / `base_sha` / `pr_url` / `summary` columns as
+-- a mirror of whichever row here is `working` (or the last one finished). That is what lets
+-- every existing query, `team_json` and the UI keep working unchanged, and it avoids rebuilding
+-- `teams` just to drop three NOT NULLs (SPEC §12.5: SQLite cannot edit a CHECK in place).
+CREATE TABLE IF NOT EXISTS team_issues (
+  id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
+  seq INTEGER NOT NULL,
+  issue_number INTEGER NOT NULL, issue_title TEXT NOT NULL, issue_url TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','working','done','failed','skipped')),
+  -- Filled when the issue starts: each issue cuts its own integration branch from `base_ref`.
+  branch TEXT, base_sha TEXT,
+  summary TEXT, pr_url TEXT, issue_closed_at TEXT,
+  -- Why the queue moved past this one without delivering it (a `DECISION_PAUSES` reason).
+  fail_reason TEXT,
+  created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS team_issues_seq ON team_issues(team_id, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS team_issues_number ON team_issues(team_id, issue_number);
+CREATE INDEX IF NOT EXISTS team_issues_open ON team_issues(team_id, state) WHERE state IN ('queued','working');
 CREATE TABLE IF NOT EXISTS team_tasks (
   id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
   seq INTEGER NOT NULL, title TEXT NOT NULL, brief TEXT NOT NULL, files_json TEXT NOT NULL DEFAULT '[]',
@@ -237,6 +261,14 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // simply have no workspace, which the reconcile reports as `workspace_missing`
         // rather than crashing the daemon on startup.
         ("teams", "workspace_id", "ALTER TABLE teams ADD COLUMN workspace_id TEXT"),
+        // When the user closed the team's GitHub issue. NULL = still open, or never asked —
+        // closing is always an explicit human action, so an old row simply has nothing here.
+        ("teams", "issue_closed_at", "ALTER TABLE teams ADD COLUMN issue_closed_at TEXT"),
+        // SPEC-team §2.3: which queued issue this task / event belongs to. Nullable because
+        // every row written before the queue existed belongs to the team's one and only issue,
+        // which the backfill below fills in.
+        ("team_tasks", "issue_id", "ALTER TABLE team_tasks ADD COLUMN issue_id TEXT"),
+        ("team_events", "issue_id", "ALTER TABLE team_events ADD COLUMN issue_id TEXT"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -251,6 +283,32 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS messages_group ON messages(group_id) WHERE group_id IS NOT NULL")
         .execute(&pool)
         .await?;
+    // SPEC-team §2.3: give every pre-queue team the one-row queue it always implicitly had.
+    // The id is derived from the team id rather than a fresh ULID so the backfill is
+    // idempotent, and the `NOT EXISTS` guard means it only ever runs once per team.
+    sqlx::query(
+        "INSERT INTO team_issues
+           (id, team_id, seq, issue_number, issue_title, issue_url, state,
+            branch, base_sha, summary, pr_url, issue_closed_at, created_at, started_at, ended_at)
+         SELECT t.id || '-i1', t.id, 1, t.issue_number, t.issue_title, t.issue_url,
+                CASE t.phase WHEN 'done' THEN 'done'
+                             WHEN 'failed' THEN 'failed'
+                             WHEN 'aborted' THEN 'failed'
+                             ELSE 'working' END,
+                t.branch, t.base_sha, t.summary, t.pr_url, t.issue_closed_at,
+                t.created_at, t.started_at, t.ended_at
+           FROM teams t
+          WHERE NOT EXISTS (SELECT 1 FROM team_issues i WHERE i.team_id = t.id)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE team_tasks SET issue_id = (SELECT i.id FROM team_issues i
+           WHERE i.team_id = team_tasks.team_id ORDER BY i.seq LIMIT 1)
+         WHERE issue_id IS NULL",
+    )
+    .execute(&pool)
+    .await?;
     // SPEC-team §10.4: `team_events.seq` replaced the ULID as the log's order. A file written
     // by an earlier build of this branch has the column added by the ALTER above with every
     // row at 0, so number the existing rows (by id, the best order that file has) before the
@@ -625,6 +683,9 @@ pub struct Team {
     pub usage_json: String,
     pub pr_url: Option<String>,
     pub summary: Option<String>,
+    /// When the user closed the issue from this team (SPEC-team §10.7). `None` = the issue was
+    /// never closed from here; nothing in the daemon ever sets it without a human asking.
+    pub issue_closed_at: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
@@ -635,6 +696,9 @@ pub struct Team {
 pub struct TeamTask {
     pub id: String,
     pub team_id: String,
+    /// Which queued issue this task belongs to (SPEC-team §2.3). `None` only on a row that
+    /// predates the queue and whose team has since been deleted.
+    pub issue_id: Option<String>,
     pub seq: i64,
     pub title: String,
     pub brief: String,
@@ -660,6 +724,8 @@ pub struct TeamEvent {
     /// `id`: several events written inside one millisecond get ULIDs whose relative order is
     /// random, which made §10.4's "oldest first" contract non-deterministic.
     pub seq: i64,
+    /// The queued issue this event happened under; `None` for team-level events.
+    pub issue_id: Option<String>,
     pub kind: String,
     pub from_bot_id: Option<String>,
     pub to_bot_id: Option<String>,
@@ -669,6 +735,30 @@ pub struct TeamEvent {
     pub payload_json: String,
     pub created_at: String,
 }
+
+/// SPEC-team §2.3 — one entry in a team's issue queue.
+#[derive(Debug, Clone, FromRow, serde::Serialize)]
+pub struct TeamIssue {
+    pub id: String,
+    pub team_id: String,
+    pub seq: i64,
+    pub issue_number: i64,
+    pub issue_title: String,
+    pub issue_url: String,
+    pub state: String,
+    pub branch: Option<String>,
+    pub base_sha: Option<String>,
+    pub summary: Option<String>,
+    pub pr_url: Option<String>,
+    pub issue_closed_at: Option<String>,
+    pub fail_reason: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+}
+
+/// The queue states that still owe work; the queue is done when none are left.
+pub const OPEN_ISSUE_STATES: &str = "('queued','working')";
 
 pub const ACTIVE_STATES: &str = "('starting','running','stopping')";
 
@@ -710,6 +800,50 @@ pub async fn team_tasks(pool: &SqlitePool, team_id: &str) -> Result<Vec<TeamTask
 
 pub async fn team_task(pool: &SqlitePool, id: &str) -> Result<Option<TeamTask>> {
     Ok(sqlx::query_as::<_, TeamTask>("SELECT * FROM team_tasks WHERE id = ?").bind(id).fetch_optional(pool).await?)
+}
+
+/// A team's whole issue queue, in working order.
+pub async fn team_issues(pool: &SqlitePool, team_id: &str) -> Result<Vec<TeamIssue>> {
+    Ok(sqlx::query_as::<_, TeamIssue>("SELECT * FROM team_issues WHERE team_id = ? ORDER BY seq")
+        .bind(team_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn team_issue(pool: &SqlitePool, id: &str) -> Result<Option<TeamIssue>> {
+    Ok(sqlx::query_as::<_, TeamIssue>("SELECT * FROM team_issues WHERE id = ?").bind(id).fetch_optional(pool).await?)
+}
+
+/// The issue the team is on right now, or `None` between issues / once the queue is empty.
+pub async fn current_team_issue(pool: &SqlitePool, team_id: &str) -> Result<Option<TeamIssue>> {
+    Ok(sqlx::query_as::<_, TeamIssue>(
+        "SELECT * FROM team_issues WHERE team_id = ? AND state = 'working' ORDER BY seq LIMIT 1",
+    )
+    .bind(team_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// The next issue waiting to be picked up, if any.
+pub async fn next_queued_issue(pool: &SqlitePool, team_id: &str) -> Result<Option<TeamIssue>> {
+    Ok(sqlx::query_as::<_, TeamIssue>(
+        "SELECT * FROM team_issues WHERE team_id = ? AND state = 'queued' ORDER BY seq LIMIT 1",
+    )
+    .bind(team_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// The tasks of one issue, in dispatch order. Task `seq` stays team-global (its unique index
+/// is `(team_id, seq)`), so this filters on `issue_id`, not on a per-issue counter.
+pub async fn team_tasks_of_issue(pool: &SqlitePool, team_id: &str, issue_id: &str) -> Result<Vec<TeamTask>> {
+    Ok(sqlx::query_as::<_, TeamTask>(
+        "SELECT * FROM team_tasks WHERE team_id = ? AND issue_id = ? ORDER BY seq",
+    )
+    .bind(team_id)
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn bot(pool: &SqlitePool, id: &str) -> Result<Option<Bot>> {

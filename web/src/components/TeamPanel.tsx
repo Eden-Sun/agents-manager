@@ -2,11 +2,13 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Bot, GroupMessage, TeamEvent, TeamTask, TeamTaskState } from '../api/types'
 import {
+  LOCAL_HOST,
   TEAM_PHASE_LABEL,
   TEAM_ROLE_LABEL,
   TEAM_TASK_NEEDS_USER,
   TEAM_TASK_STATE_LABEL,
   TEAM_TERMINAL_PHASES,
+  TEAM_ISSUE_STATE_LABEL,
   teamPauseLabel,
   teamPhaseTone,
 } from '../api/types'
@@ -151,6 +153,70 @@ function MemberStrip({ teamId }: { teamId: string }) {
 
 // ---------------------------------------------------------------- tasks
 
+/**
+ * SPEC-team §2.3 的 issue 佇列。一組隊伍依序解多個 issue：PM 與 reviewer 全程不變，
+ * 每個 issue 換一批執行者、各自一條整合分支、各自交付。
+ *
+ * 只有一個 issue 時整段不顯示 —— 標題列已經寫著那個 issue，再列一次是雜訊。
+ */
+function IssueQueue({ teamId }: { teamId: string }) {
+  const team = useStore((s) => s.teams[teamId] ?? null)
+  const removeTeamIssue = useStore((s) => s.removeTeamIssue)
+  const busy = useStore((s) => s.busy)
+  const [open, setOpen] = useState(true)
+  const issues = team?.issues ?? []
+  if (!team || issues.length < 2) return null
+  const sum = team.issues_summary
+  return (
+    <section className="team-queue">
+      <button type="button" className="disclosure sub" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className="chev">{open ? '▼' : '▶'}</span> issue 佇列
+        <span className="hint">
+          {sum.total} 個 · 已交付 {sum.done}
+          {sum.failed > 0 ? ` · 失敗 ${sum.failed}` : ''}
+          {sum.queued > 0 ? ` · 待處理 ${sum.queued}` : ''}
+        </span>
+      </button>
+      {open ? (
+        <ol className="team-queue-rows">
+          {issues.map((i) => {
+            const current = i.id === team.current_issue_id
+            const key = `team:${teamId}:remove-issue:${i.id}`
+            return (
+              <li key={i.id} className={current ? 'current' : undefined}>
+                <span className="team-queue-seq">{i.seq}</span>
+                <a className="issue-title" href={i.issue_url} target="_blank" rel="noreferrer">
+                  <span className="issue-num">#{i.issue_number}</span> {i.issue_title}
+                </a>
+                <span className={`team-issue-state ${i.state}`}>{TEAM_ISSUE_STATE_LABEL[i.state]}</span>
+                {/* 失敗的保留分支，事後還查得到，所以把原因和分支都寫出來。 */}
+                {i.fail_reason ? <span className="hint">{teamPauseLabel(i.fail_reason)}</span> : null}
+                {i.branch ? <code className="team-queue-branch">{i.branch}</code> : null}
+                {i.pr_url ? (
+                  <a className="mini-btn" href={i.pr_url} target="_blank" rel="noreferrer">
+                    PR
+                  </a>
+                ) : null}
+                {i.state === 'queued' ? (
+                  <button
+                    type="button"
+                    className="mini-btn"
+                    disabled={Boolean(busy[key])}
+                    onClick={() => void removeTeamIssue(teamId, i.id)}
+                    title="從佇列移除（還沒開始的才能移除）"
+                  >
+                    移除
+                  </button>
+                ) : null}
+              </li>
+            )
+          })}
+        </ol>
+      ) : null}
+    </section>
+  )
+}
+
 function TaskList({ teamId }: { teamId: string }) {
   const tasks = useStore(useShallow((s) => s.teamDetail[teamId]?.tasks ?? []))
   const maxRounds = useStore((s) => s.teams[teamId]?.budget.max_review_rounds ?? 2)
@@ -261,7 +327,31 @@ function eventText(ev: TeamEvent): string | null {
     const reason = typeof p.reason === 'string' && p.reason ? `（${teamPauseLabel(p.reason)}）` : ''
     return `${from} → ${to}${reason}`
   }
-  if (ev.kind === 'note') return typeof p.text === 'string' ? p.text : null
+  if (ev.kind === 'note') {
+    if (typeof p.text === 'string') return p.text
+    // A note without `text` used to render as nothing at all, which is how a member that
+    // failed to start became an unexplained grey lamp: the reason was in the team log the
+    // whole time and the panel dropped it. Known actions get a sentence; anything else
+    // still shows up, as its action plus whatever fields it carries.
+    const action = typeof p.action === 'string' ? p.action : ''
+    const bot = typeof p.bot === 'string' ? p.bot : ''
+    const error = typeof p.error === 'string' ? p.error : ''
+    if (action === 'member_start_failed') return `成員 ${bot} 啟動失敗：${error}`
+    if (action === 'pretrust_failed') return `無法預先信任工作目錄：${error}`
+    if (action === 'protocol_error') {
+      return `${bot} 的回覆沒有可用的 am-team 區塊（第 ${typeof p.attempt === 'number' ? p.attempt : 1} 次）：${error}`
+    }
+    if (action === 'issue_closed') {
+      const n = typeof p.number === 'number' ? p.number : ''
+      return p.already_closed === true ? `issue #${n} 本來就已經關閉` : `已關閉 issue #${n}`
+    }
+    if (!action) return null
+    const rest = Object.entries(p)
+      .filter(([k, v]) => k !== 'action' && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'))
+      .map(([k, v]) => `${k}=${String(v)}`)
+      .join('，')
+    return rest ? `${action}：${rest}` : action
+  }
   return null
 }
 
@@ -566,7 +656,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
     const members = teamMemberBots(s, teamId)
     return members.find((b) => b.team?.role === 'pm')?.kind ?? members[0]?.kind ?? null
   })
-  const [confirm, setConfirm] = useState<'abort' | 'cleanup' | 'delete' | null>(null)
+  const closeTeamIssue = useStore((s) => s.closeTeamIssue)
+  const [confirm, setConfirm] = useState<'abort' | 'cleanup' | 'delete' | 'close-issue' | null>(null)
 
   if (!team) {
     return (
@@ -583,6 +674,9 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const paused = team.phase === 'paused'
   const gated = paused && (team.pause_reason ?? '').startsWith('gate:')
   const budgetPause = paused && (team.pause_reason === 'budget_relays' || team.pause_reason === 'budget_time')
+  // SPEC-team §10.7：只有「真的做完」的 team 能關 issue（中止 / 失敗的不行），關過就不再問，
+  // 沒有 GitHub origin 的 project 也沒得關。daemon 不會自己關——這顆按鈕就是那個「同意」。
+  const canCloseIssue = team.phase === 'done' && !team.issue_closed_at && Boolean(project?.github)
 
   return (
     <>
@@ -614,7 +708,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         </div>
         <span className="spacer" />
         <BudgetMeter teamId={teamId} />
-        <QuotaStrip focusKind={memberKind} />
+        <QuotaStrip focusKind={memberKind} host={project?.host ?? LOCAL_HOST} />
         <div className="head-actions">
           {gated ? (
             <button
@@ -710,8 +804,15 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           </a>
         ) : null}
         {team.issue_url ? (
-          <a className="team-pr" href={team.issue_url} target="_blank" rel="noreferrer">
+          <a
+            className="team-pr"
+            href={team.issue_url}
+            target="_blank"
+            rel="noreferrer"
+            title={team.issue_closed_at ? `已於 ${team.issue_closed_at} 從這個 Team 關閉` : undefined}
+          >
             issue #{team.issue_number}
+            {team.issue_closed_at ? ' · 已關閉' : ''}
           </a>
         ) : null}
         <span className="spacer" />
@@ -747,7 +848,27 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         </div>
       ) : null}
 
+      {canCloseIssue ? (
+        <div className="team-close-issue" role="note">
+          <span className="team-close-issue-text">
+            Team 已完成。要一併關掉 <strong>issue #{team.issue_number}</strong> 嗎？daemon 會附上完成留言
+            （PM 總結、整合分支與已合併的 commit
+            {team.deliver === 'pr' ? '、PR 連結' : '，並註明分支還沒合併進 base'}）。
+          </span>
+          <button
+            type="button"
+            className="mini-btn primary"
+            disabled={Boolean(busy[`team:${teamId}:close-issue`])}
+            title="在 GitHub 上關閉這個 issue（會留下完成留言）"
+            onClick={() => setConfirm('close-issue')}
+          >
+            關閉 issue #{team.issue_number}
+          </button>
+        </div>
+      ) : null}
+
       <div className="chat team-chat">
+        <IssueQueue teamId={teamId} />
         <TaskList teamId={teamId} />
         <Timeline teamId={teamId} />
         {terminal ? (
@@ -805,6 +926,40 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         onConfirm={() => {
           setConfirm(null)
           void controlTeam(teamId, 'cleanup')
+        }}
+      />
+      <ConfirmDialog
+        open={confirm === 'close-issue'}
+        title={`關閉 issue #${team.issue_number}？`}
+        body={
+          <>
+            <p>
+              會在 GitHub 上把這個 issue 標成 closed，並留下一則完成留言（PM 總結、整合分支{' '}
+              <code>{team.branch}</code> 與已合併的 commit）。<strong>這是對外的動作</strong>，但隨時可以在
+              GitHub 上重開。
+            </p>
+            {team.deliver === 'pr' && team.pr_url ? null : (
+              <p>
+                留言會註明
+                <strong>
+                  這條分支還沒有合併進
+                  {detail?.base_ref && detail.base_ref !== 'HEAD' ? ` ${detail.base_ref}` : '預設分支'}、也沒有開 PR
+                </strong>
+                ，
+                以免之後有人以為修正已經上線。
+              </p>
+            )}
+            <p className="hint">
+              Team #{team.issue_number} {team.issue_title}
+              {project?.github ? ` · ${project.github.owner}/${project.github.repo}` : ''}
+            </p>
+          </>
+        }
+        confirmLabel="關閉 issue"
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          setConfirm(null)
+          void closeTeamIssue(teamId)
         }}
       />
       {confirm === 'delete' ? <TeamDeleteDialog teamId={teamId} onClose={() => setConfirm(null)} /> : null}

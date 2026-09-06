@@ -11,6 +11,7 @@
  */
 
 import type {
+  MemSnapshot,
   AgentStatus,
   AppState,
   Attachment,
@@ -28,6 +29,9 @@ import type {
   TeamMember,
   TeamPhase,
   TeamRole,
+  TeamIssue,
+  TeamIssuesSummary,
+  TeamIssueState,
   TeamTask,
   TeamTaskState,
   TeamTasksSummary,
@@ -36,6 +40,7 @@ import type {
   GroupMessagesPage,
   Host,
   Identity,
+  IdentityStatusMap,
   InstallToolResult,
   Issue,
   IssueDetail,
@@ -63,8 +68,10 @@ import type {
 } from './types'
 import {
   BOT_KINDS,
+  hostOfQuotaKey,
   TEAM_BUDGET_DEFAULTS,
   TEAM_PHASES,
+  TEAM_ISSUE_STATES,
   TEAM_TASK_STATES,
   TEAM_USAGE_EMPTY,
   TOOL_UNKNOWN,
@@ -145,7 +152,32 @@ export function toHost(v: unknown): Host | null {
       str(pick(v, 'attach_command', 'attach')) ||
       `herdr --remote ${str(pick(v, 'ssh', 'target', 'ssh_target'))} --session ${str(pick(v, 'herdr_session', 'session'), 'agents-manager')}`,
     tools: toToolMap(pick(v, 'tools')),
+    identity_status: toIdentityStatusMap(pick(v, 'identities', 'identity_status')),
   }
+}
+
+/**
+ * v4.0 `hosts[].identities`：身份在這台主機上的登入狀態。缺欄位 / 讀不懂的一律當「未知」
+ * （`logged_in: null`），絕不把問不到說成未登入。
+ */
+export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
+  const root = isRec(raw) ? raw : {}
+  const out: IdentityStatusMap = {}
+  for (const [key, v] of Object.entries(root)) {
+    if (!isRec(v)) continue
+    const li = pick(v, 'logged_in', 'loggedIn')
+    out[key] = {
+      name: str(pick(v, 'name')) || key,
+      kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
+      logged_in: typeof li === 'boolean' ? li : null,
+      account: optStr(pick(v, 'account', 'email')),
+      plan: optStr(pick(v, 'plan', 'subscriptionType')),
+      // 舊 daemon 沒有這兩個欄位：一律當成 config 來源（唯一會被編輯的那種）。
+      source: str(pick(v, 'source')) === 'shell' ? 'shell' : 'config',
+      config_dir: optStr(pick(v, 'config_dir')),
+    }
+  }
+  return out
 }
 
 /** v4.0 `tools`：缺的 kind 視為未知（`TOOL_UNKNOWN`），不會誤報「缺少」。 */
@@ -478,6 +510,7 @@ export function toState(raw: unknown): AppState {
   const session = str(pick(root, 'herdr_session'), 'agents-manager')
   let attachCommand = `herdr --session ${session}`
   let localTools = toToolMap(undefined)
+  let localIdentityStatus: IdentityStatusMap = {}
   for (const h of hostArray(pick(root, 'hosts', 'host_list'))) {
     // API.md: `hosts[0]` is always the reserved `local` entry (ssh fields null). The UI
     // models the local machine separately (`state.connected`), so drop it here — keeping
@@ -487,6 +520,7 @@ export function toState(raw: unknown): AppState {
     if (host.name === 'local') {
       if (isRec(h) && str(pick(h, 'attach_command', 'attach'))) attachCommand = str(pick(h, 'attach_command', 'attach'))
       localTools = host.tools
+      localIdentityStatus = host.identity_status
       continue
     }
     if (!hosts.some((x) => x.name === host.name)) hosts.push(host)
@@ -544,6 +578,7 @@ export function toState(raw: unknown): AppState {
     default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,
     tools: localTools,
+    identity_status: localIdentityStatus,
     hosts,
     identities,
     projects,
@@ -682,14 +717,18 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   }
 }
 
-/** 一個 kind 的額度；null 代表沒有資訊。 */
-export function toKindQuota(v: unknown): KindQuota | null {
+/**
+ * 一個 kind 的額度；null 代表沒有資訊。
+ * `key` 只用來補 `host`：舊 daemon 不送 `host`，就從 `m4p/claude` 這種 key 前綴推回來。
+ */
+export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   if (!isRec(v)) return null
   return {
     five_hour: toQuotaWindow(pick(v, 'five_hour', '5h')),
     seven_day: toQuotaWindow(pick(v, 'seven_day', '7d')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
+    host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),
   }
 }
 
@@ -698,7 +737,7 @@ export function toQuota(raw: unknown): QuotaMap {
   const root = isRec(raw) ? raw : {}
   const kinds = isRec(root.kinds) ? root.kinds : root
   const out: QuotaMap = {}
-  for (const [k, v] of Object.entries(kinds)) out[k] = toKindQuota(v)
+  for (const [k, v] of Object.entries(kinds)) out[k] = toKindQuota(v, k)
   return out
 }
 
@@ -806,6 +845,10 @@ export function toTeam(v: unknown, projectId?: string): Team | null {
     issue_number: num(pick(v, 'issue_number', 'issue'), 0),
     issue_title: str(pick(v, 'issue_title', 'title')),
     issue_url: str(pick(v, 'issue_url', 'url')),
+    // §2.3：舊 daemon 不送這三個，佇列就退化成「只有當前這一個 issue」。
+    issues: arr(pick(v, 'issues')).map(toTeamIssue).filter((x): x is TeamIssue => x !== null),
+    current_issue_id: optStr(pick(v, 'current_issue_id')),
+    issues_summary: toIssuesSummary(pick(v, 'issues_summary')),
     phase: oneOf<TeamPhase>(pick(v, 'phase'), TEAM_PHASES, 'starting'),
     pause_reason: optStr(pick(v, 'pause_reason')),
     branch: str(pick(v, 'branch')),
@@ -816,9 +859,41 @@ export function toTeam(v: unknown, projectId?: string): Team | null {
     budget: toTeamBudget(pick(v, 'budget', 'budget_json')),
     usage: toTeamUsage(pick(v, 'usage', 'usage_json')),
     pr_url: optStr(pick(v, 'pr_url')),
+    issue_closed_at: optStr(pick(v, 'issue_closed_at')),
     created_at: str(pick(v, 'created_at')),
     started_at: optStr(pick(v, 'started_at')),
     ended_at: optStr(pick(v, 'ended_at')),
+  }
+}
+
+export function toTeamIssue(v: unknown): TeamIssue | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id'))
+  if (!id) return null
+  return {
+    id,
+    seq: num(pick(v, 'seq'), 0),
+    issue_number: num(pick(v, 'issue_number'), 0),
+    issue_title: str(pick(v, 'issue_title')),
+    issue_url: str(pick(v, 'issue_url')),
+    state: oneOf<TeamIssueState>(pick(v, 'state'), TEAM_ISSUE_STATES, 'queued'),
+    branch: optStr(pick(v, 'branch')),
+    summary: optStr(pick(v, 'summary')),
+    pr_url: optStr(pick(v, 'pr_url')),
+    issue_closed_at: optStr(pick(v, 'issue_closed_at')),
+    fail_reason: optStr(pick(v, 'fail_reason')),
+    started_at: optStr(pick(v, 'started_at')),
+    ended_at: optStr(pick(v, 'ended_at')),
+  }
+}
+
+function toIssuesSummary(v: unknown): TeamIssuesSummary {
+  const r = isRec(v) ? v : {}
+  return {
+    total: num(pick(r, 'total'), 0),
+    done: num(pick(r, 'done'), 0),
+    failed: num(pick(r, 'failed'), 0),
+    queued: num(pick(r, 'queued'), 0),
   }
 }
 
@@ -828,6 +903,7 @@ export function toTeamTask(v: unknown): TeamTask | null {
   if (!id) return null
   return {
     id,
+    issue_id: optStr(pick(v, 'issue_id')),
     seq: num(pick(v, 'seq'), 0),
     title: str(pick(v, 'title')),
     brief: str(pick(v, 'brief')),
@@ -903,4 +979,26 @@ export function toTeamEvents(raw: unknown): TeamEvent[] {
     if (ev) out.push(ev)
   }
   return sortById(out)
+}
+
+
+/** `GET /api/mem` / WS `mem_updated`（SPEC §15）。舊 daemon 沒有這支 → 全 0，UI 就不顯示。 */
+export function toMemSnapshot(v: unknown): MemSnapshot {
+  const r = isRec(v) ? v : {}
+  const n = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0)
+  const hosts = (Array.isArray(r.hosts) ? r.hosts : []).filter(isRec).map((h) => ({
+    host: str(h.host),
+    herdr_bytes: n(h.herdr_bytes),
+    agents_bytes: n(h.agents_bytes),
+    total_bytes: n(h.total_bytes),
+    processes: n(h.processes),
+    error: h.error == null ? null : str(h.error),
+  }))
+  return {
+    total_bytes: n(r.total_bytes),
+    herdr_bytes: n(r.herdr_bytes),
+    agents_bytes: n(r.agents_bytes),
+    processes: n(r.processes),
+    hosts,
+  }
 }

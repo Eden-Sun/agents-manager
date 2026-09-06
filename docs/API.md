@@ -115,8 +115,35 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed） |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；該 Turn 既非 in-flight 也非 delivery=unknown → 409 |
+| POST | `/api/bots/{id}/login` | — | `200 {"run_id":"...","kind":"claude","command":"/login"}`；見下 |
 
 `keys` 可用的鍵名由 herdr 驗證，常用：`enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
+
+### 4.1 登入 / 切換帳號
+
+`POST /api/bots/{id}/login` 把登入用的 slash 指令打進**正在跑的** bot 自己的 TUI，讓它進入
+登入流程。daemon 只負責送指令：agent 接著會停在登入畫面（通常會開瀏覽器），**在使用者完成
+之前那個 bot 不能工作**；登入完成與否由 `POST /api/hosts/{name}/tools/refresh` 重新偵測。
+
+各 kind 的指令（實測 CLI 的 slash 補完選單，非推測）：
+
+| kind | 指令 | 出處 |
+|---|---|---|
+| `claude` | `/login` | claude 2.1.263 選單：「Sign in with your Anthropic account」 |
+| `grok` | `/login` | grok 1.0.13 選單：「Log in or re-authenticate with your account」；另見 `~/.grok/docs/user-guide/04-slash-commands.md` §Account and Billing |
+| `codex` | **無** | codex 0.153.4 的選單只有 `/logout`，登入要在 TUI 外面跑 `codex login` |
+
+錯誤（`error` / `reason` 是穩定的機器 key，文案由前端翻）：
+
+| 狀況 | 回應 |
+|---|---|
+| 沒有這個 bot | `404 {"error":"not_found","what":"bot"}` |
+| 這個 kind 的 TUI 沒有登入指令 | `400 {"error":"login_unsupported","kind":"codex","message":"..."}` |
+| 沒在跑 / run 不是 `running` | `409 {"error":"conflict","reason":"not_running",...}` |
+| agent 正在忙（`working` / `blocked`） | `409 {"error":"conflict","reason":"agent_busy",...}` |
+| 有回合進行中（會被吃成 prompt 的一部分） | `409 {"error":"conflict","reason":"turn_in_flight",...}` |
+| run 沒有 pane 可以打字 | `409 {"error":"conflict","reason":"no_pane",...}` |
+| herdr 拒絕 | `502 {"error":"upstream","message":"..."}` |
 
 ## 5. 送訊息
 
@@ -257,9 +284,10 @@ UI 標籤建議：
    `message_added` 推回來——請用 `message.id` 去重，不要用本地暫存氣泡重複顯示。
 
 
-## GET /api/fs/dirs?path=
+## GET /api/fs/dirs?path=&hidden=
 
-目錄瀏覽（新增 Project 的目錄選擇器用）。`path` 省略或空白時為家目錄；支援 `~` 前綴。只列子目錄，略過 `.` 開頭項目；symlink 指向目錄者也列出。
+目錄瀏覽（新增 Project 的目錄選擇器用）。`path` 省略或空白時為家目錄；支援 `~` 前綴。只列子目錄；symlink 指向目錄者也列出。
+`.` 開頭的隱藏目錄預設略過，帶 `hidden=1`（或 `true` / `yes`）才會一起列出——選擇器的「隱藏資料夾」勾選框就是打這個參數（本機與 `host=` 遠端行為一致）。
 
 ```json
 {"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me",
@@ -272,6 +300,32 @@ UI 標籤建議：
 ## bot.auto_approve（2026-09-06 新增）
 
 每個 bot 的布林欄位，預設 `true`。啟動時 daemon 依 kind 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`（等同 `--dangerously-bypass-approvals-and-sandbox`）、grok `--always-approve`（等同 `--permission-mode bypassPermissions`）。`POST /projects/:id/bots` 與 `PATCH /bots/:id` 皆接受 `auto_approve`。舊資料庫啟動時自動 `ALTER TABLE` 補欄位。
+
+
+## GET /api/mem（SPEC §15，2026-09-06 新增）
+
+herdr 這一側現在佔多少常駐記憶體。左上角那一格用的就是這支。
+
+**量的是整棵 herdr 進程樹**：`herdr` 本身 ＋ 它底下的 pane 與 agent CLI。錢是花在 pane 裡那個
+`claude` 上，只報 herdr daemon 自己沒有意義。判定方式是「執行檔名等於 `herdr`」的 process 當
+樹根（`grep herdr` 這種 argv 裡剛好有這個字的不算），再把子孫全部加總；herdr 底下再開 herdr
+只算一次。
+
+```json
+{"total_bytes":1610612736,"herdr_bytes":50331648,"agents_bytes":1560281088,"processes":5,
+ "hosts":[{"host":"local","herdr_bytes":50331648,"agents_bytes":1560281088,
+           "total_bytes":1610612736,"processes":5,"error":null},
+          {"host":"m4p","herdr_bytes":0,"agents_bytes":0,"total_bytes":0,"processes":0,
+           "error":"未連線"}]}
+```
+
+- 每台主機一次 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走既有的 ssh master），RSS 由 KiB 換成 bytes。
+- **量不到的主機用 `error` 回報，不會從清單消失**：總和悄悄變小比沒有數字更糟。UI 會在數字旁
+  標星號。
+- daemon 每 15 秒取樣一次，**變化超過 1 MiB 才**推 WS `mem_updated`（frame 與這支同形狀）；
+  這支端點任何時候都可以直接問。
+
+舊 daemon 沒有這支 → 前端拿不到就整格不顯示。
 
 
 ## 遠端主機 hosts（SPEC §11.6，2026-09-06 新增）
@@ -376,9 +430,9 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
 **遠端 project 的 `path` 不做本機 canonicalize**（本機不存在該路徑）：daemon 會透過 ssh 檢查該目錄
 存在並取得遠端 canonical path，失敗 → `400`。
 
-### `GET /api/fs/dirs?host=<name>&path=<path>`
+### `GET /api/fs/dirs?host=<name>&path=<path>&hidden=`
 
-`host` 可省（預設 `local`）。指定 host 時，daemon 透過 ssh 列出**遠端**目錄，回傳格式與本機完全相同：
+`host` 可省（預設 `local`）。指定 host 時，daemon 透過 ssh 列出**遠端**目錄，回傳格式與本機完全相同（`hidden=1` 同樣會把 `.` 開頭的目錄一起列出）：
 
 ```json
 {"path":"/Users/m4p/work","parent":"/Users/m4p","home":"/Users/m4p",
@@ -451,8 +505,41 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
 }
 ```
 
-- `identities` 一定存在（沒設定時為 `[]`）。
+- `identities` 一定存在（沒設定時為 `[]`）。**這是 config.toml 的那一份**；每台主機另外還有從它自己
+  登入 shell 認出來的 `ccN`（見下方「shell 認出來的身份」）。
 - 每個 bot 物件都有 `identity`（`string | null`）與 `env`（物件，預設 `{}`）。
+
+### shell 認出來的身份 `ccN`（v4.1，SPEC §15）
+
+daemon 在每台主機的工具偵測裡順便讀那台登入 shell 的 alias（`"$SHELL" -lic alias`，讀不到時退回
+`~/.zshrc`），把 `cc0`…`cc6` 當成身份用，**不寫回 config.toml**：
+
+```json
+{
+  "name": "m4p", "…": "…",
+  "shell_identities": [
+    {"name": "cc0", "kind": "claude", "env": {}, "args": []},
+    {"name": "cc1", "kind": "claude", "env": {"CLAUDE_CONFIG_DIR": "$HOME/.claude-ccompany"}, "args": []}
+  ],
+  "identities": {
+    "cc0": {"name":"cc0","kind":"claude","logged_in":true,"account":"me@example.com","plan":"max","source":"config"},
+    "cc1": {"name":"cc1","kind":"claude","logged_in":true,"account":"ops@example.com","source":"shell",
+            "config_dir":"/Users/m4p/.claude-ccompany"}
+  }
+}
+```
+
+- `shell_identities`：那台主機讀到的原始 `ccN`（`env` 未展開，就是 alias 裡的字面值）。
+- `identities.<name>.source`：`config`（config.toml 的 `[[identities]]`，可編輯 / 可刪）或 `shell`
+  （alias 認來的，唯讀）。舊 daemon 沒有這個欄位 → 一律當 `config`。
+- `identities.<name>.config_dir`：該身份在**這台**指到的設定目錄，`$HOME` 已用那台的家目錄展開；
+  `cc0` 這種預設帳號沒有這個欄位。
+- 只取 alias 開頭的 `CLAUDE_CONFIG_DIR=`；alias 裡的旗標（`--dangerously-skip-permissions` 等）
+  **不會**被帶進來，授權旗標仍由 daemon 的 `auto_approve` 決定，所以 `args` 一定是 `[]`。
+- 同名時 config 的那一個勝出（`tools::identities_for_host`），bot 啟動、identity 驗證、額度探測與 UI
+  選單走的都是這條合併規則。
+- `identity` 的存在性是**在該 bot / 專案的 host 上**檢查的：本機有 `cc2`、遠端沒有時，把遠端 bot 設成
+  `cc2` 會拿到 `404 {"error":"not_found","what":"identity"}`。
 
 ### bot 建立 / 修改
 
@@ -464,7 +551,8 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
 
 - `identity` 省略 = 不變（PATCH）／`null`（POST）；傳 `null` 或 `""` 可解除綁定。
 - `env` 省略 = 不變（PATCH）／`{}`（POST）；傳整個物件會**取代**既有的 env。
-- 指定不存在的 identity → `404 {"error":"not_found","what":"identity"}`。
+- 指定不存在的 identity → `404 {"error":"not_found","what":"identity"}`（存在與否看的是那個 bot 所在
+  主機的清單：config.toml 的 `[[identities]]` ∪ 那台 shell 的 `ccN`）。
 - identity 的 kind 與 bot kind 不符 → `400`。
 
 ### `POST /api/identities`
@@ -546,6 +634,8 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
     - grok `effort` → `/effort <level>`
     - grok `model` → `/model <id>`；若這次 PATCH 也帶了 `effort`（或 bot 本來就有），第二參數一併送（`/model grok-4.6 high`）
     - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）
+    - claude `effort` **沒有** slash 形式：TUI 的 `/effort` 是一條拉桿（←/→ 調整、Enter 確認，實測 2.1.263），
+      送不進一個確定的值，所以改 claude 的強度一律回 `needs_restart: true`
   沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
   前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
 - **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
@@ -712,7 +802,10 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
 - `bot.name` 是暱稱：1–32 字、不可含空白或 `@ , : ;`，允許 CJK；`PATCH /bots/:id {name}` 在 run 執行中也可改（回 `needs_restart:false`），herdr 不受影響。
 - `bot.agent_name`（唯讀）= `<project slug>-<bot id 尾 6 碼>`，例如 `agents-manager-rbmyf7`。
-- `bot.effort: "low"|"medium"|"high"|"xhigh"|null`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；只有 grok / codex 會注入；claude 清成 null；其他值 400）。
+- `bot.effort`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；值依 kind，其他值 400）：
+  - `claude`：`low|medium|high|xhigh|max|null` → `--effort <level>`（claude **2.1+**；v4.1 起支援）。
+  - `grok`：`low|medium|high|xhigh|null` → `--reasoning-effort <level>`。
+  - `codex`：`none|minimal|low|medium|high|xhigh|max|ultra|null` → `-c model_reasoning_effort="<level>"`。
 - `@mention` 解析（daemon 與前端一致）：token 為連續非空白、非標點字元，支援 `@小幫手，看一下`；送給 bot 的文字會去掉 mention 與其後的 `, : ; ，：；、`。
 
 
@@ -778,11 +871,11 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 |---|---|---|---|---|
 | `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型自己的 `supportedReasoningEfforts`（可能含 `none/minimal/low/medium/high/xhigh/max/ultra`） | 每個模型自己的 `serviceTiers`（目前只有 `priority` = Fast） |
 | `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 時退回 `["low","medium","high"]`） | 依模型（grok-4.6 含 `xhigh`；grok-4.5 為 low/medium/high） | `[]` |
-| `claude` | `static` | 靜態 | `[]`（claude 不注入 effort） | `[]` |
+| `claude` | `static` | 靜態（`opus / sonnet / haiku / fable`） | `["low","medium","high","xhigh","max"]` — `claude --help` 對 `--effort` 列的五級，**每個 alias 都一樣**（claude 沒有 per-model 清單） | `[]` |
 
 - `display_name` / `description` 可能為空字串；`default_effort` 可能為 `null`。
 - 失敗（CLI 不存在、逾時、解析失敗、ssh 失敗）→ `502 {"error":"upstream","message":"…"}`，
-  **前端應退回靜態清單**（claude：`opus / sonnet / haiku`；codex / grok 由前端自備）。
+  **前端應退回靜態清單**（claude：`opus / sonnet / haiku / fable` 加上那五級 effort；codex / grok 由前端自備）。
 - `kind` 不合法 → 400；`host` 不存在 → `404 {"error":"not_found","what":"host"}`。
 
 ### 12.2 `bot.fast`（布林，預設 `false`）
@@ -819,7 +912,11 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 
 範例：`{"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":2222,"herdr_session":"agents-manager","attach_command":"herdr --remote ssh://m4p@100.112.229.82:2222 --session agents-manager", …}`
 
-### 12.4 額度 `GET /api/quota`
+### 12.4 額度 `GET /api/quota?refresh=1&host=<name>`
+
+額度是**按主機**分開的（SPEC §14）：本機用裸 key，遠端主機把自己的名字加在前面
+（`m4p/claude`、`m4p/claude:cc1`、`m4p/codex`、`m4p/grok`），每筆另有 `host` 欄位。
+每台主機（`local` + 每個 `hosts[]`）的三個基本 kind 一定都在 map 裡，沒資料就是 `null`。
 
 ```json
 {
@@ -829,7 +926,8 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
       "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "plan": "pro",
       "updated_at": "2026-09-06T10:00:00.000Z",
-      "source": "codex-app-server"
+      "source": "codex-app-server",
+      "host": "local"
     },
     "claude": {
       "five_hour": {"used_pct": 97.0, "resets_at": "2026-09-06T14:00:00.000Z", "low": true, "critical": true},
@@ -837,38 +935,55 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
       "plan": null,
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "statusline",
-      "account": null
+      "account": null,
+      "host": "local"
     },
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
+    "m4p/claude": { "…": "m4p 上讀到的同一組欄位，host = \"m4p\"" },
+    "m4p/codex": { "…": "同上" },
     "grok": {
       "five_hour": null,
       "seven_day": {"used_pct": 14.0, "resets_at": "2026-09-12T08:28:00.000Z", "low": false, "critical": false},
       "plan": "SuperGrok",
       "updated_at": "2026-09-06T10:00:00.000Z",
-      "source": "grok-usage"
+      "source": "grok-usage",
+      "host": "local"
     }
   }
 }
 ```
 
 - `kinds` 的 key：`codex`、`claude`、`grok`，以及有 identity 的 claude bot 另存一份 `claude:<identity>`
-  （`account` = identity 名稱）。**沒有資料的 kind 為 `null`**（沒裝該 CLI 就是 `null`；
-  claude 在第一個 StatusLine 事件到達前為 `null`，grok 在第一次 `/usage` 探測回來前為 `null`）。
+  （`account` = identity 名稱）；遠端主機的同一組 key 前面加 `<host>/`。**沒有資料的 kind 為 `null`**
+  （沒裝該 CLI 就是 `null`；claude 在第一個 StatusLine 事件到達前為 `null`，grok 在第一次 `/usage`
+  探測回來前為 `null`）。host 名不含 `/`，所以 key 永遠拆得回 `(host, kind[:identity])`；不屬於任何
+  現存主機的 `<host>/…` key 不會出現在回應裡（主機一被移除就連同它的額度一起丟掉）。
+- `host`：這筆是在哪台主機讀到的（`local` 或 `hosts[].name`）。UI 的標題列一次只顯示一台
+  （看哪個 bot / 專案就是哪一台），所以遠端 bot 的 statusLine 不會蓋掉本機那列。
 - `used_pct` 為 0–100 的數字；`resets_at` 為 RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
 - `low` / `critical` 為 daemon 算好的門檻旗標（`daemon/src/quota.rs` 的 `LOW_REMAINING_PCT` = 30、
   `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
   前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；
   `critical` → 該 bot 在側欄 bot 列上要有提示（用哪組額度見 §12.4 的 key 對應）。
-- `?refresh=1`：立刻重讀 codex、claude（`/usage` pane 探測）與 grok。claude / grok 的探測要開 pane，最久各約 25 秒。
-- 來源：
-  - **codex**：daemon 啟動後與每 5 分鐘用本機 `codex app-server` 的 `account/rateLimits/read`。
+- `?refresh=1`：立刻重讀 codex、claude（`/usage` pane 探測）與 grok，對象是 `local` 加上每一台**已連線**
+  的遠端主機；加 `&host=<name>` 只重讀那一台（主機不存在 → 404）。claude / grok 的探測要開 pane，
+  最久各約 25 秒，多台是依序跑的。
+- 背景輪詢的節奏不變（codex 5 分、claude 60 秒、grok 30 秒），每一輪把 `local` 與每一台已連線遠端
+  **併發**跑一次——一次探測要數十秒，序列跑會把本機的週期拉長（SPEC §14.3）。
+- 來源（每一台主機各自跑一份）：
+  - **codex**：daemon 啟動後與每 5 分鐘用該主機的 `codex app-server` 的 `account/rateLimits/read`
+    （遠端走 ssh）。
   - **claude**：兩路並存。
     1. **statusLine 推送**（bot 對話中）：daemon 注入的 `statusLine` 指令把 `rate_limits.five_hour / seven_day`
        POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；不建 Turn。`source` = `statusline`。
     2. **`/usage` pane 探測**（背景，每 60 秒）：與 grok 相同，在專屬 `am-quota` herdr session 開用完即丟的 pane
        跑 claude、送 `/usage`、解析 `Current session` / `Current week (all models)` 兩條；每個有獨立
-       `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）。
-       `source` = `claude-usage`。
+       `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）；identity
+       清單是**該主機**的（含它 shell 的 `ccN`，SPEC §15）。兩種情況跳過不探：該列在 60 秒內剛被
+       statusLine 更新過，或工具偵測說這個身份在這台沒登入（否則只會停在登入畫面燒掉 25 秒逾時）。
+       `source` = `claude-usage`。**遠端主機**的探測改開在 daemon 自己在那台上的 named session
+       （遠端只有一條被轉發的 socket），cwd 與 identity env 的 `~` 都用遠端的 `$HOME`（SPEC §14.2）。
+       statusLine 則依 bot 所在主機寫入對應的列。
   - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒在專屬的 `am-quota` herdr session（永不 attach，
     因此版面夠寬）開一個用完即丟的 pane 跑 grok、送 `/usage`、讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
     `Weekly limit (SuperGrok)` 的括號，`source` = `grok-usage`。
@@ -876,10 +991,11 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 ### 12.5 WS `quota_updated`
 
 ```json
-{"seq":57,"type":"quota_updated","data":{"kind":"claude","quota":{ "five_hour":{…},"seven_day":{…},"plan":null,"updated_at":"…","source":"statusline","account":null }}}
+{"seq":57,"type":"quota_updated","data":{"kind":"m4p/claude","host":"m4p","quota":{ "five_hour":{…},"seven_day":{…},"plan":null,"updated_at":"…","source":"statusline","account":null,"host":"m4p" }}}
 ```
 
-`kind` 為 `kinds` 的 key（含 `claude:<identity>`）。每次額度數值更新時推送；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
+`kind` 為 `kinds` 的完整 key（含 `claude:<identity>`，遠端主機含 `<host>/` 前綴），`host` 是同一個值的
+方便欄位。每次額度數值更新時推送；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
 
 ### 12.6 工具偵測 `hosts[].tools`
 

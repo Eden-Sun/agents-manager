@@ -193,6 +193,7 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
         updated_at: crate::db::now(),
         source: "grok-usage".into(),
         account: None,
+        host: LOCAL_HOST.into(),
     })
 }
 
@@ -234,8 +235,12 @@ pub async fn sweep_stale(app: &Arc<App>) {
     if let Ok(c) = probe_client().await {
         clients.push(c);
     }
-    if let Some(c) = app.herdr_for(LOCAL_HOST).await {
-        clients.push(c);
+    // The local session (where probes used to run) plus every connected remote session, which
+    // is where a remote probe lives by design — see [`client_for`].
+    for host in crate::quota::pollable_hosts(app).await {
+        if let Some(c) = app.herdr_for(&host).await {
+            clients.push(c);
+        }
     }
     for c in clients {
         let Ok(list) = c.workspace_list().await else { continue };
@@ -265,19 +270,35 @@ impl Drop for Probe {
     }
 }
 
-/// One grok quota read. `Ok(false)` = grok is not installed locally (quota stays null).
-pub async fn refresh_grok(app: &Arc<App>) -> Result<bool> {
-    let _guard = crate::quota::probe_lock().await;
+/// Where the probe runs for `host` — see [`crate::quota_claude::client_for`] for why a remote
+/// host borrows the daemon's own forwarded session instead of its own `am-quota` one.
+async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
+    if host == LOCAL_HOST {
+        return probe_client().await;
+    }
+    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    if !conn.is_connected() {
+        return Err(anyhow!("host `{host}` is not connected"));
+    }
+    app.herdr_for(host).await.ok_or_else(|| anyhow!("no herdr client for `{host}`"))
+}
+
+/// One grok quota read on `host`. `Ok(false)` = grok is not installed there (quota stays null).
+pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
+    let _guard = crate::quota::probe_lock(host).await;
     // The start-up poller can beat CLI detection to the cache; an empty cache is "unknown",
     // not "missing", so detect once rather than reporting grok as uninstalled for 30 minutes.
-    if !app.tools.lock().await.contains_key(LOCAL_HOST) {
-        crate::tools::detect(app, LOCAL_HOST).await?;
+    if !app.tools.lock().await.contains_key(host) {
+        crate::tools::detect(app, host).await?;
     }
-    if crate::tools::cached_path(app, LOCAL_HOST, "grok").await.is_none() {
+    if crate::tools::cached_path(app, host, "grok").await.is_none() {
         return Ok(false);
     }
-    let client = probe_client().await?;
-    let cwd = dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into());
+    let client = client_for(app, host).await?;
+    let cwd = match app.hosts.get(host).await {
+        Some(conn) => conn.home().await.unwrap_or_else(|_| "/tmp".into()),
+        None => dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into()),
+    };
     let (ws, pane) = client.workspace_create(&cwd, PROBE_LABEL, json!({})).await?;
     let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone() };
     let pane_id = pane.pane_id.clone();
@@ -300,25 +321,27 @@ pub async fn refresh_grok(app: &Arc<App>) -> Result<bool> {
         tokio::time::sleep(Duration::from_millis(900)).await;
         last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
         if let Some(q) = parse_grok_usage(&last, Local::now()) {
-            crate::quota::set(app, "grok", q).await;
+            crate::quota::set(app, host, "grok", q).await;
             drop(probe);
             return Ok(true);
         }
     }
     drop(probe);
-    tracing::debug!(screen = %last, "grok /usage did not render a limit row");
-    Err(anyhow!("grok `/usage` did not report a limit within {DIALOG_TIMEOUT:?}"))
+    tracing::debug!(host, screen = %last, "grok /usage did not render a limit row");
+    Err(anyhow!("grok `/usage` on {host} did not report a limit within {DIALOG_TIMEOUT:?}"))
 }
 
-/// Start-up + every 30 min.
+/// Start-up + every 30 s, for `local` and every connected remote host.
 pub fn spawn_grok_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
         loop {
-            match refresh_grok(&app).await {
-                Ok(true) => {}
-                Ok(false) => tracing::info!("grok not installed locally; grok quota stays null"),
-                Err(e) => tracing::warn!(error = %e, "grok quota refresh failed"),
+            for host in crate::quota::pollable_hosts(&app).await {
+                match refresh_grok(&app, &host).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::info!(host = %host, "grok not installed; grok quota stays null"),
+                    Err(e) => tracing::warn!(host = %host, error = %e, "grok quota refresh failed"),
+                }
             }
             tokio::time::sleep(GROK_POLL).await;
         }

@@ -9,7 +9,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,11 @@ const SIDECAR: &str = "agents-managerd";
 const BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 /// A login shell that stalls (rc waiting on input, slow version manager) must not stall the app.
 const PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+/// Quit must feel instant, so the daemon gets this long to honour SIGTERM before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_millis(1500);
+/// The splash page may still be loading when an error arrives, so the shell re-publishes it
+/// for this long; the page also picks the state up itself on load.
+const REPORT_WINDOW: Duration = Duration::from_secs(5);
 
 /// Without these the daemon cannot get off the ground, so the shell says so up front instead
 /// of letting the boot time out with nothing to go on. `(binary, how to install it)`.
@@ -34,6 +41,19 @@ const AGENT_CLIS: &[&str] = &["claude", "codex", "grok"];
 /// The sidecar we spawned, so `RunEvent::Exit` can stop it. Stays `None` when the user
 /// already had a daemon running in a terminal — that one is not ours to kill.
 static DAEMON: Mutex<Option<CommandChild>> = Mutex::new(None);
+/// Set on quit. The boot thread checks it around `spawn()`, whose window is otherwise long
+/// enough for a quit to miss the child entirely and leave it orphaned.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+/// What is (or is not) sitting on the daemon's port.
+#[derive(PartialEq)]
+enum Port {
+    Free,
+    /// Answers `GET /api/session` the way agents-managerd does.
+    Daemon,
+    /// Something is listening, but it is not ours — attaching would show a stranger's page.
+    Foreign,
+}
 
 fn main() {
     let addr = daemon_addr();
@@ -51,8 +71,9 @@ fn main() {
         .expect("build tauri app")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
+                EXITING.store(true, Ordering::SeqCst);
                 if let Some(child) = DAEMON.lock().unwrap().take() {
-                    let _ = child.kill();
+                    stop_daemon(child);
                 }
             }
         });
@@ -60,8 +81,18 @@ fn main() {
 
 fn boot(handle: tauri::AppHandle, addr: SocketAddr) {
     // A daemon already running in a terminal wins: attach to it, skip the preflight (it
-    // evidently found what it needed), and leave it alone on quit.
-    if !probe(addr) {
+    // evidently found what it needed), and leave it alone on quit. The check has to identify
+    // the daemon, not just find a listener — otherwise any process holding the port would
+    // have the window navigated to it.
+    let running = match identify(addr) {
+        Port::Daemon => true,
+        Port::Free => false,
+        Port::Foreign => {
+            report(&handle, format!("{{kind:\"taken\",addr:{:?}}}", addr.to_string()));
+            return;
+        }
+    };
+    if !running {
         let env = login_env();
         let path = env
             .get("PATH")
@@ -85,7 +116,10 @@ fn boot(handle: tauri::AppHandle, addr: SocketAddr) {
         }
     }
     let deadline = Instant::now() + BOOT_TIMEOUT;
-    while !probe(addr) {
+    while identify(addr) != Port::Daemon {
+        if EXITING.load(Ordering::SeqCst) {
+            return;
+        }
         if Instant::now() >= deadline {
             fail(&handle, addr);
             return;
@@ -114,19 +148,64 @@ fn show(handle: &tauri::AppHandle, url: &str) {
 /// so no second page has to be bundled.
 fn fail(handle: &tauri::AppHandle, addr: SocketAddr) {
     eprintln!("agents-managerd did not come up on {addr}");
-    let Some(w) = handle.get_webview_window("main") else { return };
     // `{:?}` on the String gives a quoted, escaped JS literal.
-    let js = format!("window.amFailed && window.amFailed({:?})", addr.to_string());
-    if let Err(e) = w.eval(&js) {
-        eprintln!("eval failed: {e}");
+    report(handle, format!("{{kind:\"failed\",addr:{:?}}}", addr.to_string()));
+}
+
+/// Publish an error state to the splash page. A preflight can finish before the page's
+/// `<script>` has run, and a single `eval` then vanishes silently — leaving the spinner up
+/// forever — so park the state in `window.amPending` (which the page also reads on load) and
+/// keep re-publishing it for a bounded while in case the document itself was not there yet.
+fn report(handle: &tauri::AppHandle, state: String) {
+    let Some(w) = handle.get_webview_window("main") else { return };
+    let js = format!("window.amPending = {state}; window.amRender && window.amRender();");
+    let deadline = Instant::now() + REPORT_WINDOW;
+    loop {
+        if let Err(e) = w.eval(&js) {
+            eprintln!("eval failed: {e}");
+            return;
+        }
+        if Instant::now() >= deadline || EXITING.load(Ordering::SeqCst) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// SIGTERM, then SIGKILL. Only the graceful path closes the ssh ControlMasters
+/// (SPEC §11.3.5), and `CommandChild::kill` is a bare SIGKILL.
+fn stop_daemon(child: CommandChild) {
+    #[cfg(unix)]
+    {
+        let pid = child.pid() as libc::pid_t;
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            let deadline = Instant::now() + TERM_GRACE;
+            while Instant::now() < deadline {
+                // ESRCH once the shell plugin's reader thread has reaped it.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    let _ = child.kill();
 }
 
 fn spawn_daemon(
     handle: &tauri::AppHandle,
     env: HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The quit handler can only stop what it can see, so bracket the spawn with the flag:
+    // a quit arriving mid-`spawn()` would otherwise find `DAEMON` still empty.
+    if EXITING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let (mut rx, child) = handle.shell().sidecar(SIDECAR)?.args(["serve"]).envs(env).spawn()?;
+    if EXITING.load(Ordering::SeqCst) {
+        stop_daemon(child);
+        return Ok(());
+    }
     *DAEMON.lock().unwrap() = Some(child);
     // The daemon's tracing output is the only diagnostic a packaged build has; forward it to
     // our stderr so running the bundle's binary from a terminal shows it (docs/PACKAGING.md §3).
@@ -150,15 +229,12 @@ fn report_missing(handle: &tauri::AppHandle, missing: &[&(&str, &str)]) {
     for (bin, hint) in missing {
         eprintln!("required command `{bin}` not found on PATH — install it with: {hint}");
     }
-    let Some(w) = handle.get_webview_window("main") else { return };
     let list = missing
         .iter()
         .map(|(bin, hint)| format!("[{bin:?},{hint:?}]"))
         .collect::<Vec<_>>()
         .join(",");
-    if let Err(e) = w.eval(&format!("window.amMissing && window.amMissing([{list}])")) {
-        eprintln!("eval failed: {e}");
-    }
+    report(handle, format!("{{kind:\"missing\",missing:[{list}]}}"));
 }
 
 /// `which`, against a PATH we were handed rather than our own environment.
@@ -178,8 +254,40 @@ fn resolve(path: &str, bin: &str) -> Option<std::path::PathBuf> {
     )
 }
 
-fn probe(addr: SocketAddr) -> bool {
-    TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+/// Who owns `addr`? A bare TCP connect is not enough: whatever holds the port would be taken
+/// for the daemon and shown in the window, so ask it for `GET /api/session` and insist on the
+/// answer agents-managerd gives (`daemon/src/api.rs`). Hand-rolled to keep the shell's
+/// dependency list at "tauri plus two small crates".
+fn identify(addr: SocketAddr) -> Port {
+    let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(400)) else {
+        return Port::Free;
+    };
+    let io = Duration::from_millis(1500);
+    let _ = s.set_read_timeout(Some(io));
+    let _ = s.set_write_timeout(Some(io));
+    // `/api/session` is rejected unless `Host` is loopback; when the daemon listens on a real
+    // interface it answers 403 instead, which still only agents-managerd does at this path.
+    let host = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
+        format!("127.0.0.1:{}", addr.port())
+    } else {
+        addr.to_string()
+    };
+    let req = format!("GET /api/session HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if s.write_all(req.as_bytes()).is_err() {
+        return Port::Foreign;
+    }
+    let mut buf = Vec::new();
+    if s.take(64 * 1024).read_to_end(&mut buf).is_err() && buf.is_empty() {
+        return Port::Foreign;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let ok = text.starts_with("HTTP/1.1 200") && text.contains("\"token\"") && text.contains("\"port\"");
+    let non_local = text.starts_with("HTTP/1.1 403") && text.contains("non-local request");
+    if ok || non_local {
+        Port::Daemon
+    } else {
+        Port::Foreign
+    }
 }
 
 /// `[server] listen` from the daemon's config, falling back to SPEC §5's default.

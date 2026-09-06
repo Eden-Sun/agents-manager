@@ -4,11 +4,12 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, num, str, isRec, optStr, pick, arr } from './normalize'
+import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
 import type {
+  MemSnapshot,
   AppState,
   Attachment,
   DirListing,
@@ -16,6 +17,7 @@ import type {
   GroupMessagesPage,
   GroupSkipReason,
   HostResult,
+  IdentityStatusMap,
   InstallToolResult,
   Issue,
   IssueDetail,
@@ -34,11 +36,13 @@ import type {
   BotKind,
   TeamBranchDisposal,
   TeamControlAction,
+  TeamIssueClosed,
   TeamDetail,
   TeamEvent,
   TeamTaskDecision,
   TerminalSnapshot,
   TerminalSource,
+  ToolMap,
   TurnDelivery,
 } from './types'
 
@@ -249,6 +253,20 @@ export async function interruptBot(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/interrupt`)
 }
 
+/**
+ * `POST /api/bots/:id/login` — 對這個**正在跑的** bot 的 TUI 送 `/login`，讓它進入
+ * 登入 / 切換帳號流程。回傳實際送進去的那一行。
+ *
+ * 只是把指令送進去而已：agent 接著會停在登入畫面（通常還會開瀏覽器），完成與否得靠
+ * `refreshTools` 重新偵測。失敗一律是 `ApiError`，理由在 `body.error` / `body.reason`
+ * （`login_unsupported` / `not_running` / `agent_busy` / `turn_in_flight` / `no_pane`）。
+ */
+export async function loginBot(botId: string): Promise<{ command: string; kind: string }> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/login`)
+  const o = isRec(raw) ? raw : {}
+  return { command: str(pick(o, 'command'), '/login'), kind: str(pick(o, 'kind')) }
+}
+
 export async function sendPrompt(
   botId: string,
   text: string,
@@ -318,6 +336,22 @@ export async function fetchQuota(): Promise<QuotaMap> {
   return toQuota(await transport.request('GET', '/quota'))
 }
 
+/** `GET /api/mem` — herdr 進程樹的常駐記憶體（SPEC §15）。 */
+export async function fetchMem(): Promise<MemSnapshot> {
+  return toMemSnapshot(await transport.request('GET', '/mem'))
+}
+
+/**
+ * `POST /api/hosts/:name/tools/refresh` — re-runs CLI + per-identity login detection on that
+ * host. Detection otherwise only happens when the host (re)connects, so this is what the user
+ * reaches for right after logging an account in.
+ */
+export async function refreshTools(host: string): Promise<{ tools: ToolMap; identity_status: IdentityStatusMap }> {
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/refresh`)
+  const rec = isRec(raw) ? raw : {}
+  return { tools: toToolMap(rec.tools), identity_status: toIdentityStatusMap(rec.identities) }
+}
+
 /**
  * `POST /api/hosts/:name/tools/install {kind, via_bot_id}` — asks a running bot on that
  * host to install + log in the given agent CLI (as a prompt in its own pane).
@@ -364,6 +398,19 @@ export async function createTeam(projectId: string, input: NewTeamInput): Promis
   return isRec(raw) ? str(pick(raw, 'team_id', 'id')) : ''
 }
 
+/** `POST /api/teams/:id/issues`（SPEC-team §2.3）——把 issue 追加到執行中 team 的佇列。 */
+export async function addTeamIssues(teamId: string, issueNumbers: number[]): Promise<void> {
+  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/issues`, { issue_numbers: issueNumbers })
+}
+
+/** `DELETE /api/teams/:id/issues/:issue_id` — 只能移除還沒開始的（`queued`）。 */
+export async function removeTeamIssue(teamId: string, issueId: string): Promise<void> {
+  await transport.request(
+    'DELETE',
+    `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+  )
+}
+
 /** `GET /api/teams/:id` — team 物件 + tasks + base/worktree。 */
 export async function fetchTeam(teamId: string): Promise<TeamDetail | null> {
   return toTeamDetail(await transport.request('GET', `/teams/${encodeURIComponent(teamId)}`), teamId)
@@ -390,6 +437,26 @@ export async function controlTeam(teamId: string, action: TeamControlAction, bod
  */
 export async function deleteTeam(teamId: string, branches: TeamBranchDisposal = 'keep'): Promise<void> {
   await transport.request('DELETE', `/teams/${encodeURIComponent(teamId)}?branches=${branches}`)
+}
+
+/**
+ * `POST /api/teams/:id/close-issue`（SPEC-team §10.7）→ `{number, url, state, already_closed}`。
+ *
+ * 只有 `phase === 'done'` 的 team 能呼叫，而且**只由使用者按下按鈕觸發**——daemon 不會自己關 issue。
+ * `comment` 省略時 daemon 寫預設的完成留言（PM 總結 + 整合分支 + 已合併的 commit，
+ * 沒有 PR 時會註明「分支還沒合併進 base」）；傳空字串則不留言。
+ * 別人已經先關掉的 issue 回 `already_closed: true`，不是錯誤。
+ */
+export async function closeTeamIssue(teamId: string, comment?: string): Promise<TeamIssueClosed> {
+  const raw = await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/close-issue`, {
+    ...(comment === undefined ? {} : { comment }),
+  })
+  const o = isRec(raw) ? raw : {}
+  return {
+    number: num(pick(o, 'number'), 0),
+    url: str(pick(o, 'url')),
+    already_closed: o.already_closed === true,
+  }
 }
 
 /** daemon 回的「這個 team 不存在」（與「這版 daemon 沒有 team 端點」不同，見 `isTeamsUnsupported`）。 */

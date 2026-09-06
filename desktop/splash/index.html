@@ -40,25 +40,47 @@
     document.getElementById('hint').innerHTML = hint
   }
 
-  // Called by the shell when a required CLI is not on the login shell's PATH.
-  window.amMissing = (missing) => {
-    const names = missing.map(([bin]) => '<code>' + esc(bin) + '</code>').join('、')
-    const cmds = missing.map(([, hint]) => '<div class="cmd">' + esc(hint) + '</div>').join('')
-    bad(
-      '缺少必要的指令：' + missing.map(([bin]) => bin).join('、'),
-      '找不到 ' + names + '。請先安裝：' + cmds +
-      '<div class="note">安裝完成後重開 AgentsManager。若已安裝但仍出現這則訊息，' +
-      '表示它不在登入 shell 的 PATH 內 — 在終端機執行 ' +
-      '<code>zsh -lic \'which herdr\'</code> 確認。</div>',
-    )
+  const render = {
+    // A required CLI is not on the login shell's PATH.
+    missing: ({ missing }) => {
+      const names = missing.map(([bin]) => '<code>' + esc(bin) + '</code>').join('、')
+      const cmds = missing.map(([, hint]) => '<div class="cmd">' + esc(hint) + '</div>').join('')
+      bad(
+        '缺少必要的指令：' + missing.map(([bin]) => bin).join('、'),
+        '找不到 ' + names + '。請先安裝：' + cmds +
+        '<div class="note">安裝完成後重開 AgentsManager。若已安裝但仍出現這則訊息，' +
+        '表示它不在登入 shell 的 PATH 內 — 在終端機執行 ' +
+        '<code>zsh -lic \'which herdr\'</code> 確認。</div>',
+      )
+    },
+
+    // The daemon never bound its port.
+    failed: ({ addr }) =>
+      bad(
+        'agents-managerd 沒有在 ' + esc(addr) + ' 上啟動。',
+        '從終端機執行下面這行，看 daemon 的錯誤訊息：' +
+        '<div class="cmd">/Applications/AgentsManager.app/Contents/MacOS/AgentsManager</div>',
+      ),
+
+    // Something is listening on the port, but it does not answer like agents-managerd.
+    taken: ({ addr }) =>
+      bad(
+        '連接埠 ' + esc(addr) + ' 被其他程式佔用了。',
+        '那個位址上有東西在聽，但它不是 agents-managerd，所以沒有接上去。' +
+        '先找出佔用的程式：' +
+        '<div class="cmd">lsof -nP -iTCP:' + esc(String(addr).split(':').pop()) + ' -sTCP:LISTEN</div>' +
+        '<div class="note">把它關掉後重開 AgentsManager，' +
+        '或在 <code>~/.config/agents-manager/config.toml</code> 的 ' +
+        '<code>[server] listen</code> 改用別的埠號。</div>',
+      ),
   }
 
-  // Called by the shell when the daemon never bound its port.
-  window.amFailed = (addr) => {
-    bad(
-      'agents-managerd 沒有在 ' + esc(addr) + ' 上啟動。',
-      '從終端機執行下面這行，看 daemon 的錯誤訊息：' +
-      '<div class="cmd">/Applications/AgentsManager.app/Contents/MacOS/AgentsManager</div>',
-    )
+  // The shell may eval before this script has run, so it parks the state in `window.amPending`
+  // and re-publishes it for a few seconds; either side can be the one that gets there first.
+  window.amRender = () => {
+    const p = window.amPending
+    if (!p || !render[p.kind]) return
+    render[p.kind](p)
   }
+  window.amRender()
 </script>

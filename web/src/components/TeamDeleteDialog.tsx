@@ -11,8 +11,8 @@ import { ConfirmDialog } from './ConfirmDialog'
  *
  * 兩種強度：
  * - `branches=keep`（**預設**）：一般確認。列出會發生的事，並明說訊息與分支都留著。
- * - `branches=delete`：唯一會銷毀工作成果的路徑 → `danger` 樣式 + 紅色警示塊 +
- *   要輸入 team 短名（`i42`）才能按。checkbox 每次開啟都重設回「不刪」。
+ * - `branches=delete`：唯一會銷毀工作成果的路徑 → `danger` 樣式 + 紅色警示塊。勾選這個
+ *   checkbox 本身就是那一次額外確認，所以不再要求輸入 team 短名；checkbox 每次開啟都重設回「不刪」。
  *
  * 非終態時多一段「會先停止所有成員」的說明（刪除不像 cleanup 限終態）。
  *
@@ -30,22 +30,17 @@ export function TeamDeleteDialog({ teamId, onClose }: { teamId: string; onClose:
 
   const hard = branches === 'delete'
   const terminal = TEAM_TERMINAL_PHASES.includes(team.phase)
-  const shortName = `i${team.issue_number}`
   const memberCount = team.members.length
 
   // Sidebar 的 team 節點是 `overflow: hidden` 的，對話框在那裡面會被裁掉一角，
   // 所以一律 portal 到 body（TeamPanel 那邊本來就沒問題，共用同一條路徑比較不會漏）。
   return createPortal(
     <ConfirmDialog
-      // key 讓強度切換時整個重掛：輸入到一半的確認字串不會跟著保留下來。
-      key={branches}
       open
       width={hard ? 420 : 380}
       title={hard ? `永久刪除 Team #${team.issue_number} 與它的分支？` : `刪除 Team #${team.issue_number}？`}
       danger={hard}
       confirmLabel={hard ? '刪除 Team 與分支' : '刪除 Team'}
-      requireText={hard ? shortName : undefined}
-      requireTextLabel={hard ? `請輸入「${shortName}」以確認連同分支一起刪除` : undefined}
       body={
         <div className="team-delete-body">
           {terminal ? null : (

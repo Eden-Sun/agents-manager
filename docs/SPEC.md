@@ -1,6 +1,9 @@
 # Agents Manager 規格書（v3.6）
 
 > 修訂紀錄
+> - v4.1（2026-09-06）：新增 §16「claude 的 `--effort`」：claude 2.1+ 的五級強度（low…max）納入 `bot.effort`，啟動注入 `--effort`，`GET /api/models` 的 claude 清單帶同一組 `efforts`；TUI 的 `/effort` 是拉桿，所以改 claude 強度一律 `needs_restart`。
+> - v4.1（2026-09-06）：新增 §15「從 shell 認出來的身份 cc0～cc6」：daemon 在工具偵測時順便讀該主機登入 shell 的 `ccN` alias（`~/.zshrc` 為退路），只取 `CLAUDE_CONFIG_DIR`、不取旗標，結果放在 `hosts[].shell_identities` 與 `hosts[].identities.<name>.source/config_dir`，**不寫回 config.toml**；bot 啟動、identity 驗證、額度探測與 UI 選單一律改用 `identities_for_host(host)`（config 優先）；額度探測跳過「statusLine 剛更新過」與「這台沒登入」的身份。
+> - v3.9（2026-09-06）：新增 §14「每台主機各自的額度」：quota map key 加上 `<host>/` 前綴、`quota.host` 欄位；codex RPC / claude statusLine / claude 與 grok 的 `/usage` 探測全部跟著主機走（遠端探測借 daemon 在該主機的 named session）；三個 poller 改為對 `local` + 每台已連線遠端各跑一輪、`probe_lock` 改 per host；`GET /api/quota` 新增 `host=`、WS `quota_updated` 多帶 `host`；標題列額度條一次只顯示一台並在遠端掛主機名牌。
 > - v3.6（2026-09-06）：新增 §12「grok 支援」（第三種 kind：xAI grok CLI 1.0.13）與附錄 F（grok 實測：CLI 旗標、hook 機制與 payload、終端標記、身份隔離）。grok 無每次啟動的 hook 注入旗標，改由 daemon 寫入 `<GROK_HOME>/hooks/agents-manager.json` + 以 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` 分派的固定腳本；pane env 新增 `AM_HOOK_TOKEN`；`bots.kind` CHECK 重建加入 `grok`。
 > - v0（2026-09-05）：初稿。
 > - v1（2026-09-05）：依 Codex（gpt-6-astra）第一輪審視與本機實測修訂：回覆來源改為 hooks / notify 為主、終端輸出為備援；資料模型拆出 Bot / Run / Conversation / Turn；socket 契約回填正文；補對帳、ownership、送訊息交易語義、本機存取驗證。
@@ -91,6 +94,10 @@ origin:   web | external                     （external = 非本系統送出、
 - **session 管理**：啟動時若 socket 不可連，spawn `herdr --session <name> server`（detached，stdout/stderr 導向 log），輪詢 socket 最多 10 秒。daemon 退出不停 herdr server。
 - **per-bot 鎖**：每個 `bot_id` 一把 `tokio::sync::Mutex`，start / stop / prompt / hook 配對 / spool 重放 / 對帳都在鎖內執行。
 - **hook receiver**：`POST /hook/claude|codex|grok`，驗 per-bot token → **入佇列後立即回 200** → 背景配對（§6.7）。
+- **自動關掉滿意度問卷**：Claude Code 的 `How is Claude doing this session?`（`1: Bad  2: Fine  3: Good  0: Dismiss`）
+  會讓 agent 停下來等人回答，卻跟工作無關 → daemon 認出畫面後一律送 `0`（`tui_prompts`）。
+  進 `blocked` 的事件當下看一次，另每 10 秒巡邏 `blocked` / `idle` 的 Run；額度探測 pane 同一套判斷
+  （那裡對對話框按的 Enter 會變成替使用者評分）。其他等人回答的畫面一概不動。
 
 ### 3.2 React 前端
 
@@ -98,6 +105,8 @@ origin:   web | external                     （external = 非本系統送出、
 - 版面：左側 sidebar 依 Project 分組列出 Bot（狀態燈）；右側為選定 Bot 的聊天視窗。
 - 聊天視窗：氣泡（user / assistant / system），底部輸入框；assistant 氣泡顯示來源標籤（hook / terminal-fallback），fallback 標示「可能不完整」。
 - `blocked`：顯示終端 `visible` 快照（每 1 秒輪詢），提供按鍵按鈕（Enter / Esc / y / n / ↑ / ↓ / ctrl+c）。
+  另**自動彈出全畫面終端**（只針對目前檢視中的 bot，關掉後同一次 blocked 不再彈），視窗內鍵盤直通
+  herdr `agent.send_keys`（單一字元與 ctrl/alt/shift 組合），⌘ 系列留給瀏覽器。
 - 終端分頁：唯讀文字快照（手動刷新）。不做 xterm.js。
 - 設定：新增 Project（目錄）與 Bot（名稱、kind、args、autostart），寫回 TOML。
 
@@ -361,7 +370,7 @@ label = "foo@m4p"
 - spool 重放：對帳時 `ssh <host> 'f=~/.config/agents-manager/bots/<id>/hook-spool.jsonl; [ -f "$f" ] && mv "$f" "$f.replaying" && cat "$f.replaying" && rm "$f.replaying"'`，逐行依 §6.7 處理。
 
 ### 11.5 目錄選擇器
-`GET /api/fs/dirs?host=<name>&path=` 對遠端執行一段 sh：`cd <path> && pwd && for d in */ .[!.]*/; do [ -d "$d" ] && printf '%s\t%s\n' "${d%/}" "$([ -d "$d/.git" ] && echo 1 || echo 0)"; done`，daemon 解析後回傳與本機相同的 JSON（`home` 以 `echo $HOME` 取得；`~` 前綴展開）。隱藏目錄仍略過。
+`GET /api/fs/dirs?host=<name>&path=` 對遠端執行一段 sh：`cd <path> && pwd && for d in */ .[!.]*/; do [ -d "$d" ] && printf '%s\t%s\n' "${d%/}" "$([ -d "$d/.git" ] && echo 1 || echo 0)"; done`，daemon 解析後回傳與本機相同的 JSON（`home` 以 `echo $HOME` 取得；`~` 前綴展開）。隱藏目錄預設略過，`hidden=1` 才列出（本機／遠端一致）。
 
 ### 11.6 API 與 UI
 - `GET /api/state` 新增 `hosts: [{name, ssh, herdr_session, connected, error?}]`；`projects[].host`（`"local"` 或 host name）。
@@ -527,6 +536,192 @@ WS：沿用 `message_added`（已含 `bot_id`；`message.group_id` 新增）與 
 | G4 | 沒有 mention | `400 {error:"no_mention", bots:[…]}` |
 | G5 | `limit=3` / `before=<id>` | `has_more` 與游標分頁正確 |
 
+## 14. 每台主機各自的額度（v3.9）
+
+標題列的額度條原本只有一組數字，而且不管在看哪一台主機都是同一組：codex 走本機 `codex app-server`、
+claude / grok 的 `/usage` 探測開在本機、遠端 bot 的 statusLine 也直接蓋在裸的 `claude` key 上。
+於是**遠端 bot 的數字會覆蓋本機的那一列**，而且沒有任何地方看得到遠端主機還剩多少。
+
+規則：**額度屬於它被讀到的那台主機**。標題列一次只顯示一台——預設本機，點進 ssh 主機上的 bot 或
+專案時就換成那台（使用者決定：切換顯示，不並列）。
+
+### 14.1 Key 與資料形狀
+- map key：本機維持裸的 `claude` / `claude:cc1` / `codex` / `grok`；遠端主機加自己的名字當前綴：
+  `m4p/claude`、`m4p/claude:cc1`、`m4p/codex`、`m4p/grok`（與 `GET /api/models` 的 `host/kind` 快取同形）。
+  host 名的字集是 `[a-z][a-z0-9_-]{0,31}`，不含 `/` 或 `:`，所以這個 key 永遠拆得回來。
+- 每筆 quota 多一個 `host` 欄位（`local` 或 `hosts[].name`）。`quota::set(app, host, base_key, q)` 統一
+  蓋章：呼叫端只給「裸 key」，key 前綴與 `host` 欄位都由它組，沒有哪個路徑能把遠端讀數存進本機那列。
+- 主機被刪掉時連它的額度列一起刪；`GET /api/quota` 的快照也會丟掉不屬於任何現存主機的 `<host>/…` key
+  （否則下游會把它當成本機的裸 key 讀）。
+
+### 14.2 三個來源都跟著主機走
+- **codex**：`codex_rpc(app, host, "account/rateLimits/read")` — 本機直接跑，遠端走既有的 `ssh_exec_path`。
+- **claude statusLine**：hook 進來時查 `bot_host(bot_id)`，寫進那台主機的列。遠端 bot 的 hook 本來就會
+  經反向通道回到 daemon，所以遠端只要有 bot 在對話就有即時數字，不必等探測。
+- **claude / grok `/usage` 探測**：§12.6 那套流程原封不動，只是換一個 herdr client。
+  - 本機：仍是專屬的 `am-quota` session（不打擾使用者、版面夠寬）。
+  - 遠端：借 **daemon 自己在那台上的 named session**（`agents-manager`）。遠端只有一條被轉發的 socket
+    （§11.3），再開一個 `am-quota` session 等於要多一條轉發；而那個 session 本來就是 daemon 開的、
+    不是使用者的，探測 workspace 的 label 仍是 `am-quota-claude*` / `am-quota-grok`、agent 名仍是
+    `amquota<6碼>`（不在 DB 裡），對帳不會把它當 bot。`sweep_stale()` 現在會掃本機 `am-quota` 加上
+    每一台已連線主機的 session。
+  - 探測的 cwd 與 identity env 裡的 `~` 都用**那台主機的 `$HOME`**（`HostConn::home()`）。
+  - `agent.wait` 的條件是 `idle | blocked`：卡在對話框時 `blocked` 幾秒就回來，只等 `idle` 得先燒完
+    90 秒逾時。`blocked` 時**先讀畫面再決定按鍵**：認得出工作區信任對話框（`trust this folder` /
+    `do you trust`）就送 Down + Enter，其餘才送裸的 Enter。順序很重要——那個對話框的游標停在
+    **No, exit**（`crate::trust` 的老問題），2026-09-06 在 m4p 實測：先送 Enter 等於直接把 claude
+    關掉，之後每一個鍵都打進 shell（畫面留下 `zsh: no such file or directory: /usage`）。答過一次
+    之後 claude 自己記下信任，後續探測就直接 idle。
+
+### 14.3 輪詢
+三個 poller 的節奏不變（codex 5 分、claude 60 秒、grok 30 秒），每一輪對 **`local` 加上每一台已連線的
+遠端主機**各跑一次（使用者決定：所有已連線遠端都持續輪詢，不只在檢視時），**同一輪的各主機併發**
+（`JoinSet`）：一次探測要數十秒，序列跑三台會把本機的週期拉成好幾分鐘。斷線的主機直接跳過，
+連上後下一輪自然補回來。`probe_lock` 從單一全域鎖改成 **per host**，所以併發不會互相踩；同一台上的
+多個 identity 仍是一個一個探（它們共用 pane）。`GET /api/quota?refresh=1` 則維持依序，回應才好預期。
+
+### 14.4 API / WS
+- `GET /api/quota?refresh=1[&host=<name>]`：`refresh` 預設重讀 `local` + 每一台已連線主機；給 `host=`
+  就只重讀那一台（不存在 → 404）。回應永遠是完整的 map（每台主機都有三個基本 kind 的 key，沒資料為 `null`）。
+- WS `quota_updated` 的 `kind` 是完整 map key（含 `<host>/` 前綴），另外多帶一個 `host` 欄位。
+
+### 14.5 UI
+- 標題列額度條吃一個 `host`：ChatPanel 用該 bot 專案的 host、群組聊天用 Project 的 host、Team 面板用
+  Team 專案的 host，沒選任何東西時是本機。
+- 遠端時在條的最左邊掛一個主機名牌（`.quota-host`）；**本機不掛**——本機是預設狀態，多一個「本機」
+  標籤只會佔掉標題列寬度。每個 gauge 的 tooltip 一律以主機名開頭，popover 標題寫「本機額度」/「m4p 的額度」。
+- 側欄 bot 列的 critical 警告改讀該 bot 所在主機的列；Team 的 `quota_stop_pct` 閘門讀 Team 專案主機的列。
+
+### 14.6 驗收（2026-09-06，mock backend；`node scripts/demo-quota-host.mjs`）
+| # | 內容 | 結果 |
+|---|---|---|
+| H1 | 選本機 bot | 額度條無主機名牌，cc0 5h 82% / cc1 5h 15% / codex 5h 37%（`docs/screenshots/340-quota-host-local.png`） |
+| H2 | 新增 m4p、開遠端 project + bot 並選進去 | 條上出現 `m4p` 名牌，數字換成該台的 cc0 5h 54% / cc1 5h 93% / codex 5h 4%（`341-quota-host-remote.png`） |
+| H3 | 展開 popover | 標題「m4p 的額度」，四列都是 m4p 的（`342-quota-host-remote-pop.png`） |
+| H4 | 切回本機 bot | 數字與名牌回到 H1 的狀態（`343-quota-host-back-to-local.png`） |
+| H5 | 深色 / 1040 寬收合 | 名牌與收合後的單一窗口都正常（`344-quota-host-remote-dark.png`、`345-quota-host-remote-narrow.png`） |
+| H6 | 移除主機 | 該台的 `<host>/…` 列從 map 中消失，條回到本機 |
+
+真後端（本機 daemon + `m4p@100.112.229.82`，2026-09-06）：
+
+| # | 內容 | 結果 |
+|---|---|---|
+| H7 | 本機三個來源 | `claude` 5h 64% / 7d 26%（`claude-usage`）、`codex` 5h 100% / 7d 34%（`codex-app-server`）、`grok` 週 54%（`grok-usage`），每筆 `host:"local"` |
+| H8 | 加入 m4p 後 `GET /api/quota` | 立刻多出 `m4p/claude`、`m4p/codex`、`m4p/grok` 三個 key（尚未輪詢到 → `null`） |
+| H9 | `?refresh=1&host=m4p` 的 codex | `m4p/codex` = 5h 0% / 7d 34%、plan `plus`、`host:"m4p"`，走 ssh 的 `codex app-server` |
+| H10 | m4p 沒裝 grok | `grok not installed; grok quota stays null host=m4p`，`m4p/grok` 保持 `null`（不重試、不報錯） |
+| H11 | 遠端 claude `/usage`（照 §14.2 的鍵序在 m4p 的 herdr session 手動重跑） | Down + Enter 通過信任對話框後，`/usage` 畫出 `Current session 0% used` / `Current week (all models) 33% used`，正是 `parse_claude_usage` 吃的格式；探測 workspace 收乾淨 |
+
+> H11 沒有走 daemon 跑完：驗證當下本機已經有一個正式 daemon（:7788）在管同一台 m4p，兩個 daemon 會搶
+> 同一條 ssh master 與 `/tmp/agents-manager-<uid>/m4p.sock`（`hosts::short_dir()` 只用 uid 命名），
+> 測試 daemon 的探測進行到一半 master 就被踢掉（`ssh master exited`）。要端到端跑遠端 claude 探測，
+> 得先停掉另一個 daemon。
+
+## 15. 從 shell 認出來的身份 cc0～cc6（v4.1）
+
+多帳號的人本來就已經把帳號寫在 shell 裡了：
+
+```sh
+# ~/.zshrc
+alias cc0='claude --dangerously-skip-permissions'
+alias cc1='CLAUDE_CONFIG_DIR=$HOME/.claude-cc1 claude --dangerously-skip-permissions'
+alias cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-permissions'
+```
+
+所以 daemon 直接讀它，`cc0`…`cc6` 不必再手寫一份 `[[identities]]`。
+
+### 15.1 怎麼讀
+偵測跟在既有的工具偵測（§12 的 `tools` 那一支）後面，同一個腳本、同一次 ssh：
+
+```sh
+al=$( "${SHELL:-/bin/sh}" -lic 'alias' 2>/dev/null )   # 走登入 shell：zshrc / bashrc / 被 source 的都算
+[ -n "$al" ] || al=$(cat "$HOME/.zshrc" 2>/dev/null)    # $SHELL 不是互動 shell 時的退路
+printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
+```
+
+解析規則（`tools::parse_shell_identities`）：
+
+- 名字必須正好是 `cc0`…`cc6`；`cc`、`cc7`、`ccx` 不算。
+- 命令裡必須真的跑 `claude`（或 `…/claude`），否則跳過——`cc1` 指向別的東西不是我們的事。
+- 只取**開頭**的 `CLAUDE_CONFIG_DIR=`（前面只能是其它 `VAR=value`）。`claude --settings CLAUDE_CONFIG_DIR=…`
+  這種寫在旗標裡的不算。值到第一個未引用的空白為止，引號會剝掉。
+- **旗標一律不取**（使用者決定）：`--dangerously-skip-permissions` 這類授權旗標由 daemon 的
+  `auto_approve` 決定，兩邊各自注入只會打架。所以 `args` 永遠是空的。
+- 同名重複取最後一個，跟 shell 自己解析 alias 的規則一致。
+- 沒有 `CLAUDE_CONFIG_DIR` 的（典型是 `cc0`）→ **env 為空**的身份，也就是預設帳號；額度列本來就把
+  它折到裸的 `claude` key 上（§14.1）。
+
+### 15.2 每台主機各一份
+發現到的身份**不寫回 `config.toml`**（使用者決定）：`cc1` 在本機是 `~/.claude-cc1`，在 m4p 是
+`~/.claude-ccompany`——同一個名字、不同帳號，寫成全域設定就會在遠端跑錯帳號。它們跟著該主機的
+偵測結果走：
+
+- `hosts[].shell_identities`：那台主機讀到的 `ccN`（`cc0`…`cc6` 順序），每次偵測重讀。
+- `hosts[].identities.<name>`：登入狀態，多兩個欄位 `source`（`config` / `shell`）與 `config_dir`
+  （已用**那台**的 `$HOME` 展開，顯示用）。
+- 合併規則只有一條，`tools::identities_for_host()`：**config.toml 的 `[[identities]]` 先，同名的
+  shell 身份讓位**。手寫的永遠贏得過猜出來的。
+
+### 15.3 誰在用
+| 用途 | 之前 | 現在 |
+|---|---|---|
+| 啟動 bot 的 pane env / args | `cfg.identities` | `identities_for_host(bot 的 host)` |
+| `POST /projects/:id/bots`、`PATCH /bots/:id`、開團的 role 驗證 | 全域查名字 | 在**該 bot / 專案的 host** 上查 |
+| claude 額度探測的 targets（§14） | `cfg.identities` | 該主機的清單，各自一個 `claude:<name>` 列 |
+| UI 身份選項 / 身份面板 / 側欄計數 | `state.identities` | config ∪ 該主機的 shell 身份（標得出來源） |
+
+`[[identities]]` 本身沒有變：仍可手寫、可從 UI 新增與刪除，也仍然是唯一可編輯的那種。從 shell 認來的
+是唯讀的——要改就去改那台主機的 alias。
+
+### 15.4 探測節流
+`cc0`…`cc6` 全開的話，一台主機最多 7 個 claude 帳號，每個帳號的 `/usage` 探測要開一次 TUI（~25 秒），
+一輪 60 秒根本跑不完。所以額度探測（§14.3）多兩個跳過條件：
+
+- 該身份的列在 **`CLAUDE_POLL` 內剛被 statusLine 更新過** → 不探（有 bot 在對話的帳號本來就有即時數字）。
+- 工具偵測說該身份在這台**沒有登入**（`logged_in == false`）→ 不探（它只會停在登入畫面，把 25 秒的
+  對話框逾時燒掉）。等哪次偵測看到它登入了，下一輪自然恢復。
+
+### 15.5 驗收
+mock（`node scripts/demo-identity-shell.mjs`，需 `VITE_MOCK=1 npx vite --port 5311`）：
+
+| # | 內容 | 結果 |
+|---|---|---|
+| I1 | 環境設定 → 身分 | config 的 cc0 / cc1 可刪；虛線下方是「從 shell 認來的」cc2 → `/Users/me/.claude-cc2`，唯讀（`docs/screenshots/350-identities-shell-local.png`） |
+| I2 | 加一台 m4p | 同一個 `cc2` 多出一列，指到 `/Users/m4p/.claude-ccompany`——同名不同帳號（`351-identities-shell-two-hosts.png`） |
+| I3 | Bot 設定的身份選項 | `不指定身分 / cc0 / cc1 / cc2`，cc2 的 tooltip 寫明「來自本機的 shell alias（ccN），不是 config.toml」與登入的帳號（`352-bot-settings-identity-options.png`） |
+| I4 | 額度列 | 本機 cc0 / cc1 / cc2 三條，切到 m4p 後同樣三條但數字是那台的（`320`〜`325`，§14.6） |
+
+真後端（本機 daemon，`~/.zshrc` 有 cc0 / cc1 / cc2）：
+
+| # | 內容 | 結果 |
+|---|---|---|
+| I5 | `GET /api/state` 的 `hosts[0].identities` | `cc0`（無 `config_dir`，已登入）、`cc1`（`/Users/…/.claude-cc1`，**未登入**）、`cc2`（`/Users/…/.claude-cc2`，已登入，帳號與 cc0 不同），三個都是 `source: "shell"` |
+| I6 | 額度 | `claude:cc2` 由 `/usage` 探測填上；未登入的 `cc1` 依 §15.4 被跳過，不再每分鐘燒一次 25 秒逾時 |
+
+## 16. claude 的 `--effort`（v4.1）
+
+claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），所以 `bot.effort`
+不再只對 codex / grok 有效：
+
+- `config::efforts_for_kind("claude")` = 那五級；`normalize_effort` 不再把 claude 一律清成 `None`
+  （不合法的值照樣 400，例如 codex 的 `none` 或 TUI 才有的 `ultracode`）。
+- 啟動注入 `--effort <level>`（小寫），位置與其它 kind 的強度相同（daemon 旗標 → persona → model
+  → effort → identity.args → bot.args）。
+- `GET /api/models` 的 claude 靜態清單每個 alias 都帶同一組 `efforts`——claude 沒有 codex
+  `model/list` 那種 per-model 清單，所以 UI 的強度列不標「依 <模型>」。
+- **不能**當場套用：TUI 的 `/effort` 是一條拉桿（`←/→ to adjust · Enter to confirm`，2.1.263 實測），
+  沒有 `/effort high` 這種帶參數的形式，所以 `PATCH /bots/:id {effort}` 對 claude 一律回
+  `needs_restart: true`（`live_slash_command` 只認 claude 的 `model`）。
+
+實測（2026-09-06，claude 2.1.263，本機與 m4p 同版）：
+
+| # | 內容 | 結果 |
+|---|---|---|
+| E1 | `claude -p --effort high --model haiku` | 正常回覆 |
+| E2 | `claude -p --effort bogus` | `Warning: Unknown --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.` — 只是警告，不會讓 run 掛掉 |
+| E3 | TUI 打 `/effort` | 出現拉桿：`low medium high xhigh max ultracode`（`ultracode` = xhigh + workflows，只有 TUI 有，CLI 不吃），`←/→ to adjust · Enter to confirm` |
+| E4 | UI | Bot 設定的「強度」列對 claude 出現（預設 / 低 / 中 / 高 / 最高 / Max），改了底部顯示「已變更：effort」，儲存回 needs_restart（`docs/screenshots/353-claude-effort.png`） |
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。
@@ -645,6 +840,13 @@ case "$OUT" in 2*) ;; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
 exit 0
 ```
 - 使用者權限的測試 sshd：`/usr/sbin/sshd -f <cfg>`，cfg 指定 `Port 2222`、`ListenAddress 127.0.0.1`、自產 HostKey、`AuthorizedKeysFile`、`StrictModes no`、`AllowStreamLocalForwarding yes`、`StreamLocalBindUnlink yes`、`UsePAM no`；可正常登入與轉發，不需 sudo、不改系統設定。
+
+
+**額度探測相關（2026-09-06 補測）**：遠端 `/usage` 探測開在 daemon 自己的遠端 session（§14.2）。第一次在
+遠端家目錄開 claude 會跳工作區信任對話框，游標在 **No, exit**——先送 Enter 會把 claude 關掉，之後的鍵
+全部打進 shell；正確順序是 **Down 再 Enter**，答過一次就不再問。同機若已有另一個 daemon 在管同一台遠端，
+兩者會搶同一條 ssh master 與 `/tmp/agents-manager-<uid>/<host>.sock`，症狀是 `ssh master exited` 與
+`herdr closed connection without a response (agent.wait)`。
 
 ## 附錄 F：grok CLI 實測（2026-09-06，grok 1.0.13 `5e9a58528b76`，macOS，herdr 0.8.2）
 

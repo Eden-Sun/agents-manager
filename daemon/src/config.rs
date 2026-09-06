@@ -163,27 +163,28 @@ pub const BOT_NAME_RE: &str = "1–32 個字，不可含空白或 @ , : ;";
 /// Supported agent kinds (SPEC §2, §12). Also the herdr `agent.start` `kind` value.
 pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
 
-/// Effort values a kind accepts (v4.0, kind-dependent). claude accepts none: its effort is
-/// always normalised to `None` without an error.
+/// Effort values a kind accepts (v4.0, kind-dependent).
 ///
 /// grok includes `xhigh` (grok-4.6+; verified `--reasoning-effort xhigh -m grok-4.6`). The
 /// per-model list from `GET /api/models` may be narrower (e.g. grok-4.5 is low/medium/high);
 /// `effort_checked` drops a stored value the chosen model rejects.
+///
+/// claude gained `--effort <low|medium|high|xhigh|max>` in 2.1 (verified on 2.1.263:
+/// `claude -p --effort high` works, and an unknown value is only a warning — it falls back to
+/// the default rather than failing the run).
 pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
     match kind {
+        "claude" => &["low", "medium", "high", "xhigh", "max"],
         "grok" => &["low", "medium", "high", "xhigh"],
         "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         _ => &[],
     }
 }
 
-/// Normalise a requested effort for `kind`: trims / lowercases, `""` → `None`, claude → `None`.
+/// Normalise a requested effort for `kind`: trims / lowercases, `""` → `None`.
 /// `Err(msg)` when the value is not one this kind accepts.
 pub fn normalize_effort(kind: &str, e: Option<&str>) -> Result<Option<String>, String> {
     let Some(e) = e.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
-    if kind == "claude" {
-        return Ok(None);
-    }
     let v = e.to_ascii_lowercase();
     let allowed = efforts_for_kind(kind);
     if allowed.contains(&v.as_str()) {
@@ -448,7 +449,12 @@ mod v40_tests {
         assert_eq!(normalize_effort("codex", Some("xhigh")).unwrap(), Some("xhigh".into()));
         assert_eq!(normalize_effort("codex", Some("none")).unwrap(), Some("none".into()));
         assert!(normalize_effort("codex", Some("turbo")).is_err());
-        assert_eq!(normalize_effort("claude", Some("high")).unwrap(), None);
+        // claude gained `--effort` in 2.1: low…max, and `ultracode` is a TUI-only slider
+        // position, not a CLI value.
+        assert_eq!(normalize_effort("claude", Some("High")).unwrap(), Some("high".into()));
+        assert_eq!(normalize_effort("claude", Some("max")).unwrap(), Some("max".into()));
+        assert!(normalize_effort("claude", Some("none")).is_err());
+        assert!(normalize_effort("claude", Some("ultracode")).is_err());
         assert_eq!(normalize_effort("codex", Some("")).unwrap(), None);
         assert_eq!(normalize_effort("codex", None).unwrap(), None);
     }

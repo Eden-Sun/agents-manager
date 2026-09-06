@@ -1,6 +1,6 @@
-//! v4.0 — rate-limit quota per kind (`GET /api/quota`, WS `quota_updated`).
+//! v4.0 — rate-limit quota per host + kind (`GET /api/quota`, WS `quota_updated`).
 //!
-//! * codex: polled from the local `codex app-server` (`account/rateLimits/read`) at start-up,
+//! * codex: polled from that host's `codex app-server` (`account/rateLimits/read`) at start-up,
 //!   every 5 min and on `?refresh=1`.
 //! * claude: statusLine push while a bot is chatting, **plus** a background `/usage` pane probe
 //!   every 60 s — see [`crate::quota_claude`]. Keyed `claude` for the default account, or
@@ -8,12 +8,20 @@
 //!   overwrite the default-account `claude` row).
 //! * grok: scraped from the TUI's `/usage` dialog in a throwaway pane every 30 s — see
 //!   [`crate::quota_grok`]; grok exposes no CLI or RPC surface for it.
+//!
+//! Every quota belongs to the host it was read on (SPEC §14): the local host keeps the bare
+//! keys (`claude`, `claude:cc1`, `codex`, `grok`) and a remote host prefixes them with its name
+//! (`m4p/claude`, `m4p/claude:cc1`, …), the same shape `GET /api/models` caches under. The
+//! header strip shows one host at a time — the host of the bot / project being viewed — so a
+//! remote bot's statusLine must never land on the local row.
 
+use crate::config::LOCAL_HOST;
 use crate::state::App;
 use anyhow::Result;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,11 +34,43 @@ pub const LOW_REMAINING_PCT: f64 = 30.0;
 /// Remaining % below which the sidebar bot row surfaces a warning — see [`Window::critical`].
 pub const CRITICAL_REMAINING_PCT: f64 = 5.0;
 
-/// Serialises throwaway `/usage` probes in the shared `am-quota` herdr session so a
-/// `?refresh=1` and the background pollers (claude + grok) never fight over the same pane.
-pub async fn probe_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+/// Serialises throwaway `/usage` probes **per host** so a `?refresh=1` and the background
+/// pollers (claude + grok) never fight over the same pane. One lock per host: a slow ssh
+/// probe on `m4p` must not hold up the local one.
+pub async fn probe_lock(host: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    static LOCKS: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    let map = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let lock = map.lock().await.entry(host.to_string()).or_default().clone();
+    lock.lock_owned().await
+}
+
+/// Quota map key for a host: bare on `local`, `<host>/…` everywhere else.
+pub fn quota_key(host: &str, base: &str) -> String {
+    if host == LOCAL_HOST {
+        base.to_string()
+    } else {
+        format!("{host}/{base}")
+    }
+}
+
+/// The host a quota map key belongs to, given the hosts that exist (`local` for anything else).
+pub fn host_of_key<'a>(key: &'a str, hosts: &[String]) -> (&'a str, &'a str) {
+    match key.split_once('/') {
+        Some((h, base)) if hosts.iter().any(|n| n == h) => (h, base),
+        _ => (LOCAL_HOST, key),
+    }
+}
+
+/// `local` plus every remote host that is currently connected — the hosts worth polling.
+pub async fn pollable_hosts(app: &Arc<App>) -> Vec<String> {
+    app.hosts
+        .list()
+        .await
+        .into_iter()
+        .filter(|c| c.is_local() || c.is_connected())
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +116,9 @@ pub struct Quota {
     pub updated_at: String,
     pub source: String,
     pub account: Option<String>,
+    /// Host this was read on. Parsers build `local`; [`set`] stamps the real one, so no call
+    /// site can store a remote reading under a local key by forgetting a field.
+    pub host: String,
 }
 
 fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
@@ -125,6 +168,7 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
         updated_at: crate::db::now(),
         source: "codex-app-server".into(),
         account: None,
+        host: LOCAL_HOST.into(),
     })
 }
 
@@ -150,31 +194,46 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
         updated_at: crate::db::now(),
         source: "statusline".into(),
         account: account.map(String::from),
+        host: LOCAL_HOST.into(),
     })
 }
 
-/// Store + push `quota_updated`.
-pub async fn set(app: &Arc<App>, kind_key: &str, q: Quota) {
-    app.quotas.lock().await.insert(kind_key.to_string(), q.clone());
-    app.emit("quota_updated", json!({"kind": kind_key, "quota": q})).await;
+/// Store + push `quota_updated`. `base` is the host-less key (`claude`, `claude:cc1`, …);
+/// the stored key and `quota.host` are both derived from `host` here.
+pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
+    q.host = host.to_string();
+    let key = quota_key(host, base);
+    app.quotas.lock().await.insert(key.clone(), q.clone());
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": q})).await;
 }
 
-/// `GET /api/quota` body: every known key, with the three base kinds always present.
+/// `GET /api/quota` body: every known key, with the three base kinds always present **per
+/// host** (so the strip can show empty bars for a host that has not reported yet). Keys for
+/// hosts that no longer exist are dropped rather than shown under the wrong host.
 pub async fn snapshot(app: &Arc<App>) -> Value {
+    let hosts = app.hosts.names().await;
     let q = app.quotas.lock().await;
     let mut m = serde_json::Map::new();
-    for k in crate::config::KINDS {
-        m.insert(k.to_string(), q.get(k).map(|x| json!(x)).unwrap_or(Value::Null));
+    for h in &hosts {
+        for k in crate::config::KINDS {
+            let key = quota_key(h, k);
+            m.insert(key.clone(), q.get(&key).map(|x| json!(x)).unwrap_or(Value::Null));
+        }
     }
     for (k, v) in q.iter() {
-        m.insert(k.clone(), json!(v));
+        // `foo/claude` with no `foo` host left in the config would otherwise be read as a
+        // local key by everything downstream — drop it instead.
+        let orphan = k.contains('/') && host_of_key(k, &hosts).0 == LOCAL_HOST;
+        if !orphan {
+            m.insert(k.clone(), json!(v));
+        }
     }
     json!({"kinds": Value::Object(m)})
 }
 
-/// One codex refresh (local host). `Ok(false)` = codex not installed here (quota stays null).
-pub async fn refresh_codex(app: &Arc<App>) -> Result<bool> {
-    let r = crate::models::codex_rpc(app, crate::config::LOCAL_HOST, "account/rateLimits/read", json!({})).await;
+/// One codex refresh on `host`. `Ok(false)` = codex not installed there (quota stays null).
+pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
+    let r = crate::models::codex_rpc(app, host, "account/rateLimits/read", json!({})).await;
     let r = match r {
         Ok(v) => v,
         Err(e) if e.to_string().contains("is not installed") => return Ok(false),
@@ -182,21 +241,23 @@ pub async fn refresh_codex(app: &Arc<App>) -> Result<bool> {
     };
     match quota_from_codex(&r) {
         Some(q) => {
-            set(app, "codex", q).await;
+            set(app, host, "codex", q).await;
             Ok(true)
         }
         None => anyhow::bail!("unexpected rateLimits shape: {r}"),
     }
 }
 
-/// Start-up + every 5 min.
+/// Start-up + every 5 min, for `local` and every connected remote host.
 pub fn spawn_codex_poller(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
-            match refresh_codex(&app).await {
-                Ok(true) => {}
-                Ok(false) => tracing::info!("codex not installed locally; codex quota stays null"),
-                Err(e) => tracing::warn!(error = %e, "codex quota refresh failed"),
+            for host in pollable_hosts(&app).await {
+                match refresh_codex(&app, &host).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
+                    Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
+                }
             }
             tokio::time::sleep(CODEX_POLL).await;
         }
@@ -220,6 +281,60 @@ mod tests {
         assert!(q.seven_day.unwrap().resets_at.unwrap().starts_with("2026-"));
         assert_eq!(q.plan.as_deref(), Some("plus"));
         assert_eq!(q.source, "codex-app-server");
+    }
+
+    #[test]
+    fn keys_are_host_scoped() {
+        assert_eq!(quota_key("local", "claude"), "claude");
+        assert_eq!(quota_key("local", "claude:cc1"), "claude:cc1");
+        assert_eq!(quota_key("m4p", "claude:cc1"), "m4p/claude:cc1");
+        let hosts = vec!["local".to_string(), "m4p".to_string()];
+        assert_eq!(host_of_key("claude", &hosts), ("local", "claude"));
+        assert_eq!(host_of_key("m4p/claude:cc1", &hosts), ("m4p", "claude:cc1"));
+        // A key for a host that is gone must not be read as a local one.
+        assert_eq!(host_of_key("gone/claude", &hosts), ("local", "gone/claude"));
+    }
+
+    /// The snapshot always carries the three base kinds for every live host, and drops rows
+    /// belonging to hosts that no longer exist (rather than folding them into `local`).
+    #[tokio::test]
+    async fn snapshot_covers_live_hosts_only() {
+        let dir = std::env::temp_dir().join(format!("am-quota-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = crate::db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
+        let app = App::new(
+            pool,
+            client.clone(),
+            client,
+            cfg,
+            dir.clone(),
+            dir.join("agents-managerd"),
+            7799,
+            "t".into(),
+            "test".into(),
+        );
+        let q = Quota {
+            five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
+            seven_day: None,
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "claude:cc1", q.clone()).await;
+        app.quotas.lock().await.insert("gone/claude".into(), q);
+
+        let snap = snapshot(&app).await;
+        let kinds = snap["kinds"].as_object().unwrap().clone();
+        for k in crate::config::KINDS {
+            assert!(kinds.contains_key(k), "missing base kind {k}");
+        }
+        assert_eq!(kinds["claude:cc1"]["host"], "local");
+        assert!(!kinds.contains_key("gone/claude"), "orphan host key was kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

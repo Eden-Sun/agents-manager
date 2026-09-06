@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
-import { useStore } from '../store/store'
+import { LOCAL_HOST, quotaKey } from '../api/types'
+import { identitiesOfHost, identityStatusOfHost, useStore } from '../store/store'
 import { KindIcon, KIND_LABEL } from './KindTag'
 
 /**
@@ -18,13 +19,52 @@ import { KindIcon, KIND_LABEL } from './KindTag'
  * Claude identities (`cc0`, `cc1`, …) each get their own gauge on the strip (icon + identity
  * label). The bare `claude` quota key is the default account — when a `cc0` (or empty-env)
  * identity exists it is shown as that label, not as an unlabeled Claude row.
+ *
+ * 額度是按主機分開的（SPEC §14）。這條列一次只顯示**一台**主機：預設本機，看的是
+ * 遠端 bot／專案時就換成那台，並在最左邊掛一個主機名稱標籤（本機不掛，維持原樣）。
+ * store 裡遠端的 key 帶 `<host>/` 前綴，這裡先投影成裸 key 再跑原本那套排序規則。
  */
 
 /** Every kind can report quota; grok arrives from the `/usage` probe. */
 const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok']
 
-/** One strip / popover row: base kind or `kind:identity`. */
-type QuotaEntry = { key: string; kind: BotKind; identity: string | null }
+/** One strip / popover row: base kind or `kind:identity`, plus the host-scoped map key. */
+type QuotaEntry = { key: string; fullKey: string; kind: BotKind; identity: string | null }
+
+/** 只留下屬於 `host` 的額度，並把 key 還原成裸的（`m4p/claude:cc1` → `claude:cc1`）。 */
+function scopeToHost(quota: QuotaMap, host: string): QuotaMap {
+  const out: QuotaMap = {}
+  const prefix = `${host}/`
+  for (const [k, v] of Object.entries(quota)) {
+    if (host === LOCAL_HOST) {
+      if (!k.includes('/')) out[k] = v
+    } else if (k.startsWith(prefix)) {
+      out[k.slice(prefix.length)] = v
+    }
+  }
+  return out
+}
+
+/** 這台主機在 UI 上的名字。 */
+function hostLabel(host: string): string {
+  return host === LOCAL_HOST ? '本機' : host
+}
+
+/** 標題／aria 用的說法：「本機額度」對上「m4p 的額度」。 */
+function quotaTitle(host: string): string {
+  return host === LOCAL_HOST ? '本機額度' : `${host} 的額度`
+}
+
+/** 一列額度對應的 store 值：身份專屬的 key 優先，沒有才退回這列自己的 key。 */
+function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
+  return useStore((s) => {
+    if (entry.identity) {
+      const keyed = quotaKey(host, `${entry.kind}:${entry.identity}`)
+      if (s.quota[keyed] != null) return s.quota[keyed]
+    }
+    return s.quota[entry.fullKey] ?? null
+  })
+}
 
 type Level = 'crit' | 'warn' | 'ok'
 
@@ -104,7 +144,7 @@ function parseQuotaKey(key: string): QuotaEntry | null {
   if (!QUERYABLE.includes(kind)) return null
   const identity = i === -1 ? null : key.slice(i + 1) || null
   if (identity !== null && !identity) return null
-  return { key, kind, identity }
+  return { key, fullKey: key, kind, identity }
 }
 
 function claudeIdentities(identities: Identity[]): Identity[] {
@@ -136,7 +176,7 @@ function claudeQuotaKey(quota: QuotaMap, idn: Identity, bareClaimed: boolean): {
   return { key: keyed, claimedBare: false }
 }
 
-function entryReactKey(entry: QuotaEntry): string {
+function entryReactKey(entry: Omit<QuotaEntry, 'fullKey'>): string {
   return entry.identity ? `${entry.kind}:${entry.identity}` : entry.key
 }
 
@@ -144,17 +184,21 @@ function entryReactKey(entry: QuotaEntry): string {
  * Strip / popover entries in a **fixed** order — never by remaining %:
  *   cc0 → cc1 → (other claude identities) → codex → grok
  * When no Claude identities are configured, bare `claude` stands in for the Claude slot.
+ *
+ * `host` 決定看哪一台的數字：先把 map 投影成該主機的裸 key，最後再把 `fullKey` 補回去，
+ * 所以底下這套排序規則完全不必知道主機的存在。
  */
-function collectEntries(quota: QuotaMap, identities: Identity[]): QuotaEntry[] {
+function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string): QuotaEntry[] {
+  const quota = scopeToHost(quotaAll, host)
   const out: QuotaEntry[] = []
   const seenSlots = new Set<string>()
   const claudeIds = claudeIdentities(identities)
 
-  const push = (entry: QuotaEntry) => {
+  const push = (entry: Omit<QuotaEntry, 'fullKey'>) => {
     const slot = entryReactKey(entry)
     if (seenSlots.has(slot)) return
     seenSlots.add(slot)
-    out.push(entry)
+    out.push({ ...entry, fullKey: quotaKey(host, entry.key) })
   }
 
   // 1) Claude identities first (cc0, cc1, …)
@@ -284,14 +328,18 @@ function weekLabel(kind: BotKind): '7d' | '週' {
 }
 
 /** Frameless, compact: icon above identity, bars to the right — keeps label glued to its bars. */
-function Gauge({ entry, collapsed, focused }: { entry: QuotaEntry; collapsed: boolean; focused: boolean }) {
-  const q = useStore((s) => {
-    if (entry.identity) {
-      const keyed = `${entry.kind}:${entry.identity}`
-      if (s.quota[keyed] != null) return s.quota[keyed]
-    }
-    return s.quota[entry.key] ?? null
-  })
+function Gauge({
+  entry,
+  host,
+  collapsed,
+  focused,
+}: {
+  entry: QuotaEntry
+  host: string
+  collapsed: boolean
+  focused: boolean
+}) {
+  const q = useEntryQuota(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const now = useMinuteNow()
@@ -332,7 +380,8 @@ function Gauge({ entry, collapsed, focused }: { entry: QuotaEntry; collapsed: bo
       })
     }
   }
-  const title = label(entry, q)
+  // 主機名寫進 tooltip：條上只掛得下一個小標籤，但滑過去要能確定是哪一台的數字。
+  const title = `${hostLabel(host)} · ${label(entry, q)}`
   const accessibleTitle = focused ? `目前選取的 ${title}` : title
 
   return (
@@ -371,17 +420,11 @@ function Gauge({ entry, collapsed, focused }: { entry: QuotaEntry; collapsed: bo
   )
 }
 
-function PopRow({ entry }: { entry: QuotaEntry }) {
-  const q = useStore((s) => {
-    if (entry.identity) {
-      const keyed = `${entry.kind}:${entry.identity}`
-      if (s.quota[keyed] != null) return s.quota[keyed]
-    }
-    return s.quota[entry.key] ?? null
-  })
+function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
+  const q = useEntryQuota(entry, host)
   const known = useStore((s) => {
-    if (entry.identity && `${entry.kind}:${entry.identity}` in s.quota) return true
-    return entry.key in s.quota
+    if (entry.identity && quotaKey(host, `${entry.kind}:${entry.identity}`) in s.quota) return true
+    return entry.fullKey in s.quota
   })
   const supported = QUERYABLE.includes(entry.kind)
   const five = remaining(q?.five_hour)
@@ -429,13 +472,23 @@ function PopRow({ entry }: { entry: QuotaEntry }) {
 export function QuotaStrip({
   focusKind,
   focusIdentity,
+  host = LOCAL_HOST,
 }: {
   focusKind?: BotKind | null
   /** Selected bot's identity; null = default / cc0 account. */
   focusIdentity?: string | null
+  /**
+   * 要顯示哪一台主機的額度（SPEC §14）。預設本機；選到 ssh 主機上的 bot／專案時
+   * 傳它的 host，數字就換成 daemon 從那台讀回來的。
+   */
+  host?: string
 }) {
   const quota = useStore((s) => s.quota)
-  const identities = useStore((s) => s.identities)
+  const configured = useStore((s) => s.identities)
+  // 這台主機認得的身份：config 的加上它 shell 裡的 `ccN`（SPEC §15）。遠端的 cc1 可能指到
+  // 跟本機不同的帳號，額度列本來就一次只看一台，所以身份清單也要跟著那一台。
+  const idStatus = useStore((s) => identityStatusOfHost(s, host))
+  const identities = useMemo(() => identitiesOfHost(configured, idStatus), [configured, idStatus])
   const [width, setWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1440))
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
@@ -463,27 +516,35 @@ export function QuotaStrip({
   }, [open])
 
   /** Fixed: cc0 → cc1 → codex → grok. No remaining-% / focus reshuffle. */
-  const ordered = useMemo(() => collectEntries(quota, identities), [quota, identities])
+  const ordered = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
 
   /** Same fixed order as the strip (Claude identities expanded). */
-  const popEntries = useMemo(() => collectEntries(quota, identities), [quota, identities])
+  const popEntries = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
 
   if (ordered.length === 0) return null
+
+  const remote = host !== LOCAL_HOST
 
   // Both queryable kinds always stay on the bar; only the per-kind windows collapse.
   const collapsed = width < 1100
 
   return (
-    <div className="quota-strip" ref={wrap} aria-label="額度">
+    <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
       <button
         type="button"
         className={`quota-open${collapsed ? ' collapsed' : ''}`}
         aria-expanded={open}
         aria-haspopup="dialog"
-        aria-label="所有額度"
-        title="所有額度"
+        aria-label={`所有${quotaTitle(host)}`}
+        title={`所有${quotaTitle(host)}`}
         onClick={() => setOpen((v) => !v)}
       >
+        {/* 遠端才掛主機名：本機是預設狀態，多一個「本機」標籤只會佔掉標題列的寬度。 */}
+        {remote ? (
+          <span className="quota-host" aria-hidden="true">
+            {host}
+          </span>
+        ) : null}
         {ordered.map((entry) => {
           let focused = false
           if (focusKind && entry.kind === focusKind) {
@@ -500,14 +561,15 @@ export function QuotaStrip({
             }
           }
           return (
-            <Gauge key={entryReactKey(entry)} entry={entry} collapsed={collapsed} focused={focused} />
+            <Gauge key={entryReactKey(entry)} entry={entry} host={host} collapsed={collapsed} focused={focused} />
           )
         })}
       </button>
       {open ? (
-        <div className="quota-pop" role="dialog" aria-label="所有額度">
+        <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>
+          <div className="quota-pop-title">{quotaTitle(host)}</div>
           {popEntries.map((entry) => (
-            <PopRow key={entryReactKey(entry)} entry={entry} />
+            <PopRow key={entryReactKey(entry)} entry={entry} host={host} />
           ))}
         </div>
       ) : null}

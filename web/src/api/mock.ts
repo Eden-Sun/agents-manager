@@ -51,8 +51,35 @@ interface MockRun {
   adopted: number
   native_session_id: string | null
   transcript_path: string | null
+  /** claude 的 statusLine hook payload（`runs.status_json` 的形狀，見 normalize.toStatusInfo）。 */
+  status: Record<string, unknown> | null
+  /** pane 上那一行被終端寬度壓縮過的原文，UI 拿它當 tooltip / fallback。 */
+  status_line: string | null
   started_at: string
   ended_at: string | null
+}
+
+/**
+ * A claude statusLine payload, shaped like the real hook's JSON (`normalize.toStatusInfo`
+ * parses this exact tree). Values mirror a real session so the status bar is exercised at
+ * a realistic width rather than with `1%` placeholders.
+ */
+function claudeStatusJson(cwd: string): Record<string, unknown> {
+  const inHours = (h: number) => Math.floor(Date.now() / 1000) + h * 3600
+  return {
+    account_email: 'tony.lin@robinstech.com.tw',
+    model: { id: 'claude-opus-5', display_name: 'Opus 5' },
+    effort: { level: 'high' },
+    thinking: { enabled: true },
+    context_window: { used_percentage: 26, total_input_tokens: 263000, context_window_size: 1000000 },
+    rate_limits: {
+      five_hour: { used_percentage: 85, resets_at: inHours(0.17) },
+      seven_day: { used_percentage: 27, resets_at: inHours(20) },
+    },
+    cost: { total_cost_usd: 18.67 },
+    workspace: { current_dir: cwd },
+    version: '2.1.263',
+  }
 }
 
 interface MockTurn {
@@ -166,6 +193,8 @@ interface MockTeam {
   members: { bot_id: string; role: TeamRole }[]
   pr_url: string | null
   summary: string | null
+  /** SPEC-team §10.7：使用者從這個 team 關掉 issue 的時間（mock 不碰真的 GitHub）。 */
+  issue_closed_at: string | null
   created_at: string
   started_at: string | null
   ended_at: string | null
@@ -255,6 +284,8 @@ interface MockHost {
   error: string | null
   /** v4.0 tool detection on that host */
   tools: Record<BotKind, MockTool>
+  /** v4.0 per-identity login state on that host, keyed by identity name. */
+  identities: Record<string, MockIdentityStatus>
 }
 
 interface MockTool {
@@ -264,6 +295,19 @@ interface MockTool {
   logged_in: boolean | null
 }
 
+/** v4.0 `hosts[].identities.<name>` — 身份在「那一台」上的登入狀態。 */
+interface MockIdentityStatus {
+  name: string
+  kind: BotKind
+  logged_in: boolean | null
+  account?: string
+  plan?: string
+  /** `config` = config.toml 的 `[[identities]]`；`shell` = 那台主機 zshrc 的 `ccN`（SPEC §15）。 */
+  source: 'config' | 'shell'
+  /** shell 來源的 `CLAUDE_CONFIG_DIR`（`cc0` 這種預設帳號沒有）。 */
+  config_dir?: string
+}
+
 const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
   claude: { installed: true, path: '/opt/homebrew/bin/claude', version: '2.1.40', logged_in: true },
   codex: { installed: true, path: '/opt/homebrew/bin/codex', version: '0.68.0', logged_in: true },
@@ -271,12 +315,15 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
 }
 
 /** v4.0 `GET /api/models` catalogue (what the CLIs report on 2026-09-06). */
+/** claude 2.1 的 `--effort`：每個 alias 都是同一組五級（不像 codex 是 per-model）。 */
+const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+
 const MODELS: Record<BotKind, Rec[]> = {
   claude: [
-    { id: 'opus', display_name: 'Opus', description: '最強推理', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'sonnet', display_name: 'Sonnet', description: '速度與品質平衡', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'haiku', display_name: 'Haiku', description: '最快、最省', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'fable', display_name: 'Fable', description: 'Fable 5.1', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'opus', display_name: 'Opus', description: '最強推理', is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
+    { id: 'sonnet', display_name: 'Sonnet', description: '速度與品質平衡', is_default: true, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
+    { id: 'haiku', display_name: 'Haiku', description: '最快、最省', is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
+    { id: 'fable', display_name: 'Fable', description: 'Fable 5.1', is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
   ],
   codex: [
     {
@@ -351,10 +398,38 @@ export class MockTransport implements Transport {
     codex: { ...TOOLS_ALL_OK.codex, logged_in: false },
     grok: { installed: false, path: null, version: null, logged_in: null },
   }
+  /**
+   * v4.0：身份在本機的登入狀態。cc0 有帳號、cc1 沒有——這正是遠端主機最常見的落差，
+   * mock 讓身份選擇器的「未登入」標記在沒有 daemon 時也看得到。
+   */
+  /**
+   * 本機每個身份的登入狀態。`cc2` 是從 zshrc 的 alias 認來的（SPEC §15）——config 裡沒有它，
+   * 一樣可以指派給 Bot，UI 要標得出兩種來源的差別。
+   */
+  private localIdentityStatus: Record<string, MockIdentityStatus> = {
+    cc0: { name: 'cc0', kind: 'claude', logged_in: true, account: 'me@example.com', plan: 'max', source: 'config' },
+    cc1: { name: 'cc1', kind: 'claude', logged_in: false, source: 'config' },
+    cc2: {
+      name: 'cc2',
+      kind: 'claude',
+      logged_in: true,
+      account: 'me+2@example.com',
+      plan: 'pro',
+      source: 'shell',
+      config_dir: '/Users/me/.claude-cc2',
+    },
+  }
+  /**
+   * 額度按主機分（SPEC §14）：裸 key 是本機，遠端主機加 `<host>/` 前綴。
+   * 新增遠端主機時 `seedHostQuota()` 會補上那台的列，數字故意和本機不同——切過去
+   * 要看得出來換了一台，而不是同一組數字。
+   */
   private quota: Record<string, Rec | null> = {
-    claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 40, resets_at: inHours(70) }, plan: 'Max 20x', updated_at: now() },
-    'claude:cc1': { five_hour: { used_pct: 85, resets_at: inHours(1.1) }, seven_day: { used_pct: 30, resets_at: inHours(120) }, plan: 'Pro', updated_at: now() },
-    codex: { five_hour: { used_pct: 63, resets_at: inHours(3.2) }, seven_day: { used_pct: 88, resets_at: inHours(41) }, plan: 'Plus', updated_at: now() },
+    claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 40, resets_at: inHours(70) }, plan: 'Max 20x', updated_at: now(), host: 'local' },
+    'claude:cc1': { five_hour: { used_pct: 85, resets_at: inHours(1.1) }, seven_day: { used_pct: 30, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
+    // zshrc 認來的身份也有自己的額度列（SPEC §15）。
+    'claude:cc2': { five_hour: { used_pct: 24, resets_at: inHours(3.8) }, seven_day: { used_pct: 51, resets_at: inHours(88) }, plan: 'Pro', updated_at: now(), host: 'local' },
+    codex: { five_hour: { used_pct: 63, resets_at: inHours(3.2) }, seven_day: { used_pct: 88, resets_at: inHours(41) }, plan: 'Plus', updated_at: now(), host: 'local' },
     grok: null,
   }
   private identities: MockIdentity[] = [
@@ -516,7 +591,7 @@ export class MockTransport implements Transport {
       const fh = q.five_hour as Rec
       fh.used_pct = Math.min(100, Number(fh.used_pct) + 1)
       q.updated_at = now()
-      this.emit('quota_updated', { kind: 'codex', quota: q })
+      this.emit('quota_updated', { kind: 'codex', host: 'local', quota: q })
     }, 20000)
     return () => {
       if (this.handlers === handlers) {
@@ -540,7 +615,9 @@ export class MockTransport implements Transport {
     }
     if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '')
     if (method === 'GET' && rawPath === '/quota') return { kinds: this.quota }
+    if (method === 'GET' && rawPath === '/mem') return this.mem()
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
 
     if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)
     if (seg[0] === 'identities' && seg.length === 2 && method === 'DELETE') return this.deleteIdentity(decodeURIComponent(seg[1]))
@@ -572,6 +649,7 @@ export class MockTransport implements Transport {
       if (method === 'POST' && seg[2] === 'approve') return this.approveTeam(teamId)
       if (method === 'POST' && seg[2] === 'abort') return this.abortTeam(teamId)
       if (method === 'POST' && seg[2] === 'cleanup') return this.cleanupTeam(teamId)
+      if (method === 'POST' && seg[2] === 'close-issue') return this.closeTeamIssue(teamId, b)
       if (method === 'DELETE' && seg.length === 2) {
         return this.deleteTeam(teamId, q.get('branches') === 'delete' ? 'delete' : 'keep')
       }
@@ -591,6 +669,7 @@ export class MockTransport implements Transport {
         if (action === 'stop') return this.stop(botId)
         if (action === 'restart') return this.restart(botId)
         if (action === 'interrupt') return this.interrupt(botId)
+        if (action === 'login') return this.login(botId)
         if (action === 'prompt') return this.prompt(botId, b)
         if (action === 'keys') return this.keys(botId, b)
         if (action === 'pane' && seg[3] === 'move-to-tab' && !this.paneMoveDisabled) return this.movePaneToTab(botId)
@@ -679,6 +758,41 @@ export class MockTransport implements Transport {
     return { turn_id: res.turn_id }
   }
 
+  /**
+   * SPEC §15：herdr 進程樹的常駐記憶體。mock 用「每個執行中的 bot 各吃一份」推出來，
+   * 這樣啟動 / 停止 bot 時上面那格真的會動，看得出它連著什麼。
+   */
+  private mem() {
+    const HERDR = 48 * 1024 * 1024
+    const PER_BOT: Record<string, number> = { claude: 820, codex: 640, grok: 410 }
+    const hosts = [{ name: 'local' as string, connected: true }, ...this.hosts.map((h) => ({ name: h.name, connected: h.connected }))]
+    const rows = hosts.map((h) => {
+      if (!h.connected) {
+        return { host: h.name, herdr_bytes: 0, agents_bytes: 0, total_bytes: 0, processes: 0, error: '未連線' }
+      }
+      const pids = new Set(this.projects.filter((p) => p.host === h.name).map((p) => p.id))
+      const live = this.bots.filter((b) => pids.has(b.project_id) && this.activeRun(b.id))
+      const agents = live.reduce((n, b) => n + (PER_BOT[b.kind] ?? 500) * 1024 * 1024, 0)
+      // herdr + 一個 shell + 每個 bot 一個 CLI
+      const processes = live.length === 0 ? 1 : 1 + live.length * 2
+      return {
+        host: h.name,
+        herdr_bytes: HERDR,
+        agents_bytes: agents,
+        total_bytes: HERDR + agents,
+        processes,
+        error: null,
+      }
+    })
+    return {
+      total_bytes: rows.reduce((n, r) => n + r.total_bytes, 0),
+      herdr_bytes: rows.reduce((n, r) => n + r.herdr_bytes, 0),
+      agents_bytes: rows.reduce((n, r) => n + r.agents_bytes, 0),
+      processes: rows.reduce((n, r) => n + r.processes, 0),
+      hosts: rows,
+    }
+  }
+
   /** SPEC §11.5: the same JSON shape for local and remote; `host` picks the tree. */
   private dirs(path: string, host: string, hidden = false) {
     const remote = host && host !== 'local' ? this.host(host) : null
@@ -707,7 +821,8 @@ export class MockTransport implements Transport {
           '/Users/me/project': ['foo', 'bar', 'agents-manager'],
           '/Users/me/project/foo': ['src'],
           '/Users/me/Documents': [],
-          '/Users/me/Downloads': [],
+          // A long level, so the picker's scrolling and filtering can actually be exercised.
+          '/Users/me/Downloads': Array.from({ length: 24 }, (_, i) => `dl-${String(i + 1).padStart(2, '0')}`),
         }
     const gitDirs = remote
       ? new Set([`${home}/work/api-server`, `${home}/work/web-client`, `${home}/src/herdr`])
@@ -744,6 +859,9 @@ export class MockTransport implements Transport {
       env,
       args: Array.isArray(b.args) ? b.args.map(String) : [],
     })
+    // 新身份在每一台上都還沒偵測過：daemon 會補跑一次偵測，mock 直接給「未知」。
+    this.localIdentityStatus[name] = { name, kind: toKind(b.kind), logged_in: null, source: 'config' }
+    for (const h of this.hosts) h.identities[name] = { name, kind: toKind(b.kind), logged_in: null, source: 'config' }
     this.emit('identities_changed', {})
     return {}
   }
@@ -754,8 +872,21 @@ export class MockTransport implements Transport {
       throw new ApiError(409, { error: 'conflict', reason: `仍有 ${used.length} 個 Bot 使用身份 ${name}` }, 'conflict')
     }
     this.identities = this.identities.filter((x) => x.name !== name)
+    delete this.localIdentityStatus[name]
+    for (const h of this.hosts) delete h.identities[name]
     this.emit('identities_changed', {})
     return {}
+  }
+
+  /**
+   * v4.0 `POST /api/hosts/:name/tools/refresh` — 重跑 CLI + 每個身份的登入偵測。
+   * mock 不會憑空生出帳號，所以答案和上一次一樣；重點是端點形狀與 busy 狀態。
+   */
+  private refreshTools(host: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    const identities = remote ? remote.identities : this.localIdentityStatus
+    return { name: remote?.name ?? 'local', tools, identities, tools_checked_at: now() }
   }
 
   // -------------------------------------------------------------- hosts (§11.6)
@@ -802,14 +933,52 @@ export class MockTransport implements Transport {
       error: null,
       // A fresh remote box: claude + codex present, grok missing (exercises the tools hint).
       tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null } },
+      // 遠端新機器：預設身份登得進去，另一組 `CLAUDE_CONFIG_DIR` 還沒登入。
+      identities: {
+        ...Object.fromEntries(
+          this.identities.map((i) => [
+            i.name,
+            Object.keys(i.env).length === 0
+              ? { name: i.name, kind: i.kind, logged_in: true, account: `${name}@example.com`, source: 'config' as const }
+              : { name: i.name, kind: i.kind, logged_in: false, source: 'config' as const },
+          ]),
+        ),
+        // 那台自己 zshrc 裡的 `ccN`：同一個名字，指到的卻是那台的目錄（SPEC §15）。
+        cc2: {
+          name: 'cc2',
+          kind: 'claude' as BotKind,
+          logged_in: true,
+          account: `ops@${name}.example.com`,
+          source: 'shell' as const,
+          config_dir: `/Users/${name}/.claude-ccompany`,
+        },
+      },
     }
     // API.md: an existing name is an update (disconnect, then reconnect with the new config).
     this.hosts = this.hosts.filter((x) => x.name !== name)
     this.hosts.push(h)
     await sleep(700) // ssh master + remote `herdr session list` take a moment
     this.dial(h)
+    this.seedHostQuota(h)
     this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
+    this.emitMem()
     return { name: h.name, connected: h.connected, error: h.error }
+  }
+
+  /** 那台主機上的 daemon 輪詢會回報的額度（連上才有；斷線的主機留空）。 */
+  private seedHostQuota(h: MockHost) {
+    if (!h.connected) return
+    const rows: Record<string, Rec | null> = {
+      [`${h.name}/claude`]: { five_hour: { used_pct: 46, resets_at: inHours(1.6) }, seven_day: { used_pct: 12, resets_at: inHours(96) }, plan: 'Max 5x', updated_at: now(), host: h.name },
+      [`${h.name}/claude:cc1`]: { five_hour: { used_pct: 7, resets_at: inHours(4.1) }, seven_day: { used_pct: 71, resets_at: inHours(58) }, plan: 'Pro', updated_at: now(), host: h.name },
+      [`${h.name}/claude:cc2`]: { five_hour: { used_pct: 62, resets_at: inHours(2.2) }, seven_day: { used_pct: 18, resets_at: inHours(101) }, plan: 'Max 5x', updated_at: now(), host: h.name },
+      [`${h.name}/codex`]: { five_hour: { used_pct: 96, resets_at: inHours(0.7) }, seven_day: { used_pct: 33, resets_at: inHours(120) }, plan: 'Plus', updated_at: now(), host: h.name },
+      [`${h.name}/grok`]: null,
+    }
+    Object.assign(this.quota, rows)
+    for (const [kind, quota] of Object.entries(rows)) {
+      this.emit('quota_updated', { kind, host: h.name, quota })
+    }
   }
 
   private deleteHost(name: string) {
@@ -827,6 +996,10 @@ export class MockTransport implements Transport {
       )
     }
     this.hosts = this.hosts.filter((x) => x.name !== name)
+    // daemon 也是這樣做的：主機沒了，它的額度列不留在 map 裡（SPEC §14）。
+    for (const k of Object.keys(this.quota)) {
+      if (k.startsWith(`${name}/`)) delete this.quota[k]
+    }
     this.emit('host_changed', { name, connected: false, error: 'removed' })
     this.emit('project_changed', {})
     return {}
@@ -836,6 +1009,7 @@ export class MockTransport implements Transport {
     const h = this.host(name)
     await sleep(600)
     this.dial(h)
+    this.seedHostQuota(h)
     this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
     for (const b of this.botsOnHost(h.name)) this.emitBotStatus(b.id)
     return { name: h.name, connected: h.connected, error: h.error }
@@ -844,6 +1018,11 @@ export class MockTransport implements Transport {
   private botsOnHost(name: string): MockBot[] {
     const pids = new Set(this.projects.filter((p) => p.host === name).map((p) => p.id))
     return this.bots.filter((b) => pids.has(b.project_id))
+  }
+
+  /** A host going up or down changes what can be sampled, so the total changes with it. */
+  private emitMem() {
+    this.emit('mem_updated', this.mem())
   }
 
   /** Dev helper: flip a host up / down the way the daemon's health check would. */
@@ -855,6 +1034,7 @@ export class MockTransport implements Transport {
     this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
     this.emit('daemon_status', { herdr_connected: this.connected, connected: this.connected, default_connected: false, hosts: this.hostMap() })
     for (const b of this.botsOnHost(h.name)) this.emitBotStatus(b.id)
+    this.emitMem()
   }
 
   hostNames(): string[] {
@@ -910,6 +1090,9 @@ export class MockTransport implements Transport {
 
   private emitBotStatus(botId: string) {
     this.emit('bot_status', { bot_id: botId, run: this.activeRun(botId) ?? null, connected: this.connected })
+    // The real poller samples on a timer; here the only thing that moves the number is a
+    // run starting or stopping, so ride that instead of burning a `setInterval`.
+    this.emit('mem_updated', this.mem())
   }
 
   private addMessage(
@@ -962,6 +1145,7 @@ export class MockTransport implements Transport {
           error: null,
           attach_command: 'herdr --session agents-manager',
           tools: this.localTools,
+          identities: this.localIdentityStatus,
         },
         ...this.hosts.map((h) => ({
           name: h.name,
@@ -974,6 +1158,7 @@ export class MockTransport implements Transport {
           error: h.error,
           attach_command: `herdr --remote ${h.ssh}${h.ssh_port !== 22 ? ` -p ${h.ssh_port}` : ''} --session ${h.herdr_session}`,
           tools: h.tools,
+          identities: h.identities,
         })),
       ],
       projects: this.projects.map((p) => ({
@@ -1231,6 +1416,8 @@ export class MockTransport implements Transport {
       adopted: 0,
       native_session_id: null,
       transcript_path: null,
+      status: null,
+      status_line: null,
       started_at: now(),
       ended_at: null,
     }
@@ -1241,6 +1428,12 @@ export class MockTransport implements Transport {
       run.state = 'running'
       run.agent_status = 'idle'
       run.native_session_id = ulid('sess')
+      // Only claude ships a statusLine hook; the other kinds render theirs inside the TUI,
+      // which is exactly why ChatPanel rebuilds a status bar for them from the store.
+      if (this.bot(botId).kind === 'claude') {
+        run.status = claudeStatusJson(this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? '~')
+        run.status_line = 'tony… | OP5 | 26% | 5h 85% | 7d 27% | $18.67'
+      }
       this.emitBotStatus(botId)
       this.addMessage({
         conversation_id: this.conv(botId),
@@ -1297,6 +1490,45 @@ export class MockTransport implements Transport {
       incomplete: 0,
     })
     return { ok: true }
+  }
+
+  /**
+   * `POST /api/bots/:id/login` — 對這個 bot 的 TUI 送 `/login`。
+   *
+   * 擋下來的理由跟 daemon 同一組 key，好讓前端的文案對照表在 mock 下也走得到；codex 沒有
+   * TUI 內的登入指令，所以是 400 而不是 409。
+   */
+  private login(botId: string) {
+    const bot = this.bots.find((x) => x.id === botId)
+    if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
+    if (bot.kind === 'codex') {
+      throw new ApiError(
+        400,
+        { error: 'login_unsupported', kind: bot.kind, message: 'codex has no in-session login command' },
+        'bad request',
+      )
+    }
+    const run = this.activeRun(botId)
+    if (!run) throw new ApiError(409, { error: 'conflict', reason: 'not_running', bot_id: botId }, 'conflict')
+    if (run.state !== 'running') {
+      throw new ApiError(409, { error: 'conflict', reason: 'not_running', bot_id: botId, run_id: run.id }, 'conflict')
+    }
+    if (run.agent_status === 'working' || run.agent_status === 'blocked') {
+      throw new ApiError(409, { error: 'conflict', reason: 'agent_busy', bot_id: botId, run_id: run.id }, 'conflict')
+    }
+    if (this.turns.some((t) => t.run_id === run.id && t.status === 'in_flight')) {
+      throw new ApiError(409, { error: 'conflict', reason: 'turn_in_flight', bot_id: botId, run_id: run.id }, 'conflict')
+    }
+    this.addMessage({
+      conversation_id: this.conv(botId),
+      turn_id: null,
+      bot_id: botId,
+      role: 'system',
+      content: '已送出 /login，agent 會停在登入畫面，完成登入前不會工作。',
+      source: 'system',
+      incomplete: 0,
+    })
+    return { run_id: run.id, kind: bot.kind, command: '/login' }
   }
 
   private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
@@ -1669,6 +1901,7 @@ export class MockTransport implements Transport {
       budget: { ...t.budget },
       usage: { ...t.usage, per_bot: { ...t.usage.per_bot } },
       pr_url: t.pr_url,
+      issue_closed_at: t.issue_closed_at,
       created_at: t.created_at,
       started_at: t.started_at,
       ended_at: t.ended_at,
@@ -1877,6 +2110,7 @@ export class MockTransport implements Transport {
       members: [],
       pr_url: null,
       summary: null,
+      issue_closed_at: null,
       created_at: now(),
       started_at: now(),
       ended_at: null,
@@ -2189,6 +2423,34 @@ export class MockTransport implements Transport {
       this.setPhase(t, 'aborted')
     }, 700)
     return {}
+  }
+
+  /**
+   * `POST /api/teams/:id/close-issue`（SPEC-team §10.7）。
+   *
+   * 守則跟 daemon 一樣、也只有這兩條：**只有 `done` 的 team**、**只關一次**。mock 沒有真的
+   * GitHub，所以只把 `issue_closed_at` 記下來並發一則 `issue_closed` 事件——驗收要看的是
+   * 「按鈕只在完成後出現、按過就變成已關閉」這件事。
+   */
+  private closeTeamIssue(id: string, b: Rec) {
+    const t = this.team(id)
+    if (t.phase !== 'done') {
+      throw new ApiError(409, { error: 'conflict', reason: 'issue 只能從已完成的 team 關閉', phase: t.phase }, 'conflict')
+    }
+    if (t.issue_closed_at) {
+      throw new ApiError(409, { error: 'conflict', reason: 'issue 已經從這個 team 關過了' }, 'conflict')
+    }
+    t.issue_closed_at = new Date().toISOString()
+    this.teamEvent(id, 'note', {
+      action: 'issue_closed',
+      by: 'user',
+      number: t.issue_number,
+      url: t.issue_url,
+      already_closed: false,
+      comment: typeof b.comment === 'string' ? b.comment : null,
+    })
+    this.emitTeam(t)
+    return { number: t.issue_number, url: t.issue_url, state: 'CLOSED', already_closed: false }
   }
 
   private cleanupTeam(id: string) {

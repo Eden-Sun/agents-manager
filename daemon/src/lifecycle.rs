@@ -40,6 +40,21 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+/// herdr's "the pane exists but its shell is not ready for an agent yet" answer.
+///
+/// It is a timing answer, not a failure: the shell settles a few hundred milliseconds later.
+/// Matched on the error code first, with the message as a fallback because the same condition
+/// reaches some call sites already flattened into a string.
+fn pane_not_ready(e: &anyhow::Error) -> bool {
+    if let Some(h) = e.downcast_ref::<HerdrError>() {
+        if h.code == "agent_pane_busy" || h.message.contains("not an available shell") {
+            return true;
+        }
+    }
+    let s = e.to_string();
+    s.contains("agent_pane_busy") || s.contains("not an available shell")
+}
+
 // ---------------------------------------------------------------- messages
 
 pub async fn insert_message(
@@ -656,9 +671,10 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
         None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
     };
 
-    let cfg = app.cfg.get().await;
+    // Identities are per host (SPEC §15): `[[identities]]` plus the `ccN` aliases discovered
+    // on *this* machine, so `cc1` picks up the config dir that machine's shell means by it.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(id) = cfg.identities.iter().find(|i| i.name == idn) {
+        if let Some(id) = crate::tools::identity_for_host(app, host, idn).await {
             for (k, v) in &id.env {
                 env.insert(k.clone(), json!(crate::config::expand_home(v, &home)));
             }
@@ -750,9 +766,11 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
         }
     }
     // grok: `--reasoning-effort low|medium|high|xhigh` (per model; grok-4.5 rejects xhigh)
-    // codex: `-c model_reasoning_effort="<x>"` (values from `model/list`); claude: nothing.
+    // codex: `-c model_reasoning_effort="<x>"` (values from `model/list`)
+    // claude: `--effort low|medium|high|xhigh|max` (2.1+; an unknown value is only a warning)
     if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         match bot.kind.as_str() {
+            "claude" => out.extend(["--effort".to_string(), e.to_lowercase()]),
             "grok" => out.extend(["--reasoning-effort".to_string(), e.to_lowercase()]),
             "codex" => out.extend(["-c".to_string(), format!("model_reasoning_effort=\"{}\"", e.to_lowercase())]),
             _ => {}
@@ -814,10 +832,14 @@ mod model_args_tests {
         assert_eq!(a, vec!["-m", "grok-4.6", "--reasoning-effort", "low"]);
     }
 
+    /// claude takes `--effort` (2.1+) but never the codex Fast tier.
     #[test]
-    fn claude_never_gets_effort_or_fast() {
+    fn claude_gets_effort_but_not_fast() {
         let a = model_args(&bot("claude", Some("opus"), Some("high"), true));
-        assert_eq!(a, vec!["--model", "opus"]);
+        assert_eq!(a, vec!["--model", "opus", "--effort", "high"]);
+        let a = model_args(&bot("claude", None, Some("MAX"), false));
+        assert_eq!(a, vec!["--effort", "max"], "the level goes out lowercase");
+        assert!(model_args(&bot("claude", None, None, true)).is_empty());
     }
 
     #[test]
@@ -837,17 +859,11 @@ mod model_args_tests {
     }
 }
 
-/// Extra CLI args contributed by the bot's identity.
-async fn identity_args(app: &Arc<App>, bot: &db::Bot) -> Vec<String> {
+/// Extra CLI args contributed by the bot's identity on `host`. Discovered `ccN` identities
+/// carry no args by design — the flags in the alias are the user's shell habit, not ours.
+async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String> {
     let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
-    app.cfg
-        .get()
-        .await
-        .identities
-        .iter()
-        .find(|i| i.name == idn)
-        .map(|i| i.args.clone())
-        .unwrap_or_default()
+    crate::tools::identity_for_host(app, host, idn).await.map(|i| i.args).unwrap_or_default()
 }
 
 async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> {
@@ -1112,6 +1128,19 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         }
         None => bot_cwd(bot, project),
     };
+    // A directory the CLI has not seen before opens with "Is this a project you trust?", and
+    // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
+    // sits at the prompt looking `idle` and silently eats the first message. Record the trust
+    // first. Only local hosts, and only when the path is not already trusted, so in practice
+    // this touches the user's config once per new directory (SPEC-team §7.4 does the same for
+    // team worktrees, which are new by construction).
+    if project.host == LOCAL_HOST {
+        let mut b = bot.clone();
+        b.cwd = Some(cwd.to_string());
+        for w in crate::trust::pretrust_members(app, std::slice::from_ref(&b)).await {
+            tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
+        }
+    }
     let root = acquire_run_pane(&client, &workspace_id, cwd, &tab_label(bot), &env, fresh_root).await.map_err(up)?;
     let pane_id = root.pane_id;
     let tab_id = root.tab_id;
@@ -1129,7 +1158,7 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     let mut args = injected;
     args.extend(persona_args(bot));
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
-    args.extend(identity_args(app, bot).await);
+    args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());
 
     // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
@@ -1140,9 +1169,32 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .execute(&app.db)
         .await
         .map_err(up)?;
-    if let Err(e) = client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
+    // A freshly created pane is not an available shell the instant `tab.create` /
+    // `pane.split` returns — herdr answers `agent_pane_busy: … is not an available shell`
+    // until the interactive shell has settled. Observed 2026-09-06: starting a six-member
+    // team started five agents and lost `dev-1` to exactly that, 300 ms in; the team then
+    // paused on `member_lost` with nothing on screen to explain it. `quota_claude` already
+    // retries this same herdr answer — the bot start path is the one that did not.
+    let mut started = false;
+    for attempt in 0..10u32 {
+        match client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
+            Ok(_) => {
+                started = true;
+                break;
+            }
+            Err(e) if pane_not_ready(&e) => {
+                tracing::debug!(bot = %bot.name, attempt, error = %e, "pane is not an available shell yet");
+                tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
+            }
+            Err(e) => {
+                close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
+                return Err(up(e));
+            }
+        }
+    }
+    if !started {
         close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
-        return Err(up(e));
+        return Err(up(format!("pane {pane_id} never became an available shell")));
     }
 
     // 6. per-run status subscription
@@ -1286,7 +1338,8 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         insert_message(app, &conversation_id, None, "system", &notice, "system", false, Some(&read.text)).await?;
         tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         if codex_limit_hit_line(&notice).is_some() {
-            apply_codex_limit_hit_quota(app, &notice).await;
+            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+            apply_codex_limit_hit_quota(app, &host, &notice).await;
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
             if let Some(turn) = db::in_flight_turn(&app.db, &run.id).await? {
                 let res = sqlx::query(
@@ -1489,7 +1542,7 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
 /// has no in-session command (caller then reports `needs_restart`).
 fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {
     match (kind, field) {
-        ("grok", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
+        ("grok", "effort") | ("claude", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
         ("grok", "model") => {
             let mut line = format!("/model {value}");
             if let Some(e) = effort.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1508,6 +1561,10 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 /// * grok `effort` → `/effort <level>`（grok 1.0.13 `04-slash-commands.md`）
 /// * grok `model` → `/model <id>`；bot 同時有 effort 時帶第二參數（`/model grok-4.6 high`）
 /// * claude `model` → `/model <alias>`（alias 同 `claude --model`：opus / sonnet / haiku / fable…）
+/// * claude `effort` → `/effort <level>`（2.1.263 實測：`/effort low` 直接套用並回
+///   `Set effort level to low (saved as your default for new sessions)`。不帶參數的 `/effort`
+///   才是那條拉桿。**注意副作用**：claude 會把它存成該帳號之後新 session 的預設值，這是 CLI
+///   的行為，只有 TUI 上按 `s` 才是「只有這次」——daemon 沒有那個選項。）
 ///
 /// 回傳 `true` = 已經送進去（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
 /// （kind 不符、沒在跑、正在忙、或清成「CLI 預設」——那個沒有對應的 slash 指令），
@@ -1527,25 +1584,132 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, field: &str) -> bo
         return false;
     };
     let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
-    if run.state != "running" || run.agent_status == "working" || run.agent_status == "blocked" {
-        return false;
-    }
-    // 正在跑的回合會把這行吃成 prompt 的一部分。
-    if !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
-        return false;
-    }
-    let Some(pane_id) = run.pane_id.clone() else { return false };
+    let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
+    let Ok(pane_id) = slash_gate(&run, in_flight) else { return false };
     let Ok(client) = client_for_run(app, &run).await else { return false };
-    // 和 grok 額度探測同一套：先打字，等輸入列畫好，再送 Enter。
-    if client.pane_send_text(&pane_id, &line).await.is_err() {
-        return false;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    if client.pane_send_keys(&pane_id, &["Enter"]).await.is_err() {
+    if send_slash_line(&client, &pane_id, &line).await.is_err() {
         return false;
     }
     tracing::info!(bot_id, line, "applied live via slash command");
     true
+}
+
+/// 現在不能把一行 slash 指令送進 agent 輸入列的理由。
+///
+/// `apply_live_setting` 只需要知道「不行」（它會退回「重啟才生效」），但使用者自己按下
+/// 「登入」時，靜默失敗就是個 bug ——所以理由要拿得出來。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashBlocked {
+    /// 沒有正在跑的 run，或 run 已經不是 `running`。
+    NotRunning,
+    /// agent 自己在忙（`working` / `blocked`）：這時打的字會被吃掉，或掉進權限提示裡。
+    AgentBusy,
+    /// 有回合正在飛，這一行會變成那個 prompt 的一部分。
+    TurnInFlight,
+    /// run 沒有 pane 可以打字（舊資料，或 herdr 那邊已經收掉了）。
+    NoPane,
+}
+
+impl SlashBlocked {
+    /// 給 API body 用的機器可讀理由；文案由前端依這個 key 翻。
+    pub fn reason(self) -> &'static str {
+        match self {
+            SlashBlocked::NotRunning => "not_running",
+            SlashBlocked::AgentBusy => "agent_busy",
+            SlashBlocked::TurnInFlight => "turn_in_flight",
+            SlashBlocked::NoPane => "no_pane",
+        }
+    }
+}
+
+/// 這個 run 現在能不能被打字？能的話回它的 pane id。
+///
+/// 純函式，好讓每一條擋下來的理由都測得到——`apply_live_setting` 與 `login` 共用同一組
+/// 判斷，兩邊就不會各自漂走。
+fn slash_gate(run: &db::Run, turn_in_flight: bool) -> Result<String, SlashBlocked> {
+    if run.state != "running" {
+        return Err(SlashBlocked::NotRunning);
+    }
+    if run.agent_status == "working" || run.agent_status == "blocked" {
+        return Err(SlashBlocked::AgentBusy);
+    }
+    if turn_in_flight {
+        return Err(SlashBlocked::TurnInFlight);
+    }
+    run.pane_id
+        .clone()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .ok_or(SlashBlocked::NoPane)
+}
+
+/// 把一行 slash 指令打進 agent 的輸入列並送出。
+///
+/// 和 grok 額度探測同一套：先打字，等輸入列畫好，再送 Enter。`"/login\n"` 一次送會被
+/// TUI 當成貼上多行，不會送出。
+async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcResult<()> {
+    client.pane_send_text(pane_id, line).await.map_err(up)?;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    client.pane_send_keys(pane_id, &["Enter"]).await.map_err(up)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- login
+
+/// 這個 kind 在 TUI 裡登入 / 換帳號的 slash 指令，沒有就是 `None`。
+///
+/// 這是實際問過 CLI 的結果，不是猜的（每個都在拋棄式 herdr session 裡開起 TUI，打前綴看
+/// 補完選單）：
+///
+/// * `claude` 2.1.263 → `/login`，選單說明「Sign in with your Anthropic account」。
+/// * `grok` 1.0.13 → `/login`，選單說明「Log in or re-authenticate with your account」；
+///   另見 `~/.grok/docs/user-guide/04-slash-commands.md` 的 “Account and Billing”。
+/// * `codex` 0.153.4 → **沒有**。它的 slash 選單只有 `/logout`（`/logi` 完全沒有補完項），
+///   登入得在 TUI 外面跑 `codex login`。所以這裡回 `None`：送一個不存在的 slash 指令進去，
+///   codex 只會把 `/login` 當成一般 prompt 丟給模型，比報錯還糟。
+pub fn login_slash_command(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" | "grok" => Some("/login"),
+        _ => None,
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct LoginOut {
+    pub run_id: String,
+    pub kind: String,
+    /// 實際送進 TUI 的那一行，讓前端／log 講得出送了什麼。
+    pub command: String,
+}
+
+/// 對一個**正在跑的** bot 送登入指令，讓它的 TUI 進入登入 / 切換帳號流程。
+///
+/// 走的路和 `apply_live_setting` 一模一樣（同一個 gate、同一套打字節奏），差別只在錯誤語意：
+/// 這裡是使用者明確按了按鈕，送不出去就要說明白為什麼，而不是靜悄悄地不做。
+///
+/// 送出後 agent 會停在登入畫面（通常還會開瀏覽器），在使用者完成之前它不能工作——daemon
+/// 不去等、也不去替使用者完成，登入完成與否由 `POST /hosts/:name/tools/refresh` 重新偵測。
+pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let Some(line) = login_slash_command(&bot.kind) else {
+        return Err(LcError::BadValue(json!({
+            "error": "login_unsupported",
+            "kind": bot.kind,
+            "message": format!("{} has no in-session login command", bot.kind),
+        })));
+    };
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| {
+        LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
+    })?;
+    let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some();
+    let pane_id = slash_gate(&run, in_flight)
+        .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
+    let client = client_for_run(app, &run).await?;
+    send_slash_line(&client, &pane_id, line).await?;
+    tracing::info!(bot_id, kind = %bot.kind, line, "sent login slash command");
+    Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
 }
 
 #[cfg(test)]
@@ -1572,14 +1736,97 @@ mod live_slash_tests {
         );
     }
 
+    /// claude takes both, but its `/model` has no second parameter the way grok's does.
     #[test]
-    fn claude_model_and_unknown_are_unchanged() {
+    fn claude_model_and_effort() {
         assert_eq!(
-            live_slash_command("claude", "model", "opus", None).as_deref(),
+            live_slash_command("claude", "model", "opus", Some("high")).as_deref(),
             Some("/model opus")
         );
+        assert_eq!(
+            live_slash_command("claude", "effort", "MAX", None).as_deref(),
+            Some("/effort max")
+        );
+        // codex has no slash for either (0.153.4).
         assert_eq!(live_slash_command("codex", "model", "gpt-5.5", None), None);
-        assert_eq!(live_slash_command("claude", "effort", "high", None), None);
+        assert_eq!(live_slash_command("codex", "effort", "high", None), None);
+    }
+}
+
+#[cfg(test)]
+mod login_slash_tests {
+    use super::{login_slash_command, slash_gate, SlashBlocked};
+    use crate::db;
+
+    /// 一個「可以打字」的 run；每個測試只動它想證明的那一格。
+    fn run(state: &str, agent_status: &str, pane_id: Option<&str>) -> db::Run {
+        db::Run {
+            id: "r1".into(),
+            bot_id: "b1".into(),
+            state: state.into(),
+            agent_status: agent_status.into(),
+            workspace_id: Some("w1".into()),
+            pane_id: pane_id.map(str::to_string),
+            tab_id: Some("w1:t1".into()),
+            adopted: 0,
+            agent_name: None,
+            herdr_session: None,
+            agent_title: None,
+            status_line: None,
+            status_json: None,
+            native_session_id: None,
+            transcript_path: None,
+            last_read_revision: None,
+            last_read_tail_hash: None,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            ended_at: None,
+        }
+    }
+
+    /// claude 與 grok 的 TUI 都有 `/login`；codex 沒有（只有 `/logout`），所以它得是 `None`
+    /// ——回一個「不支援」比送一個不存在的指令進去好。
+    #[test]
+    fn only_claude_and_grok_can_log_in_from_the_tui() {
+        assert_eq!(login_slash_command("claude"), Some("/login"));
+        assert_eq!(login_slash_command("grok"), Some("/login"));
+        assert_eq!(login_slash_command("codex"), None);
+        assert_eq!(login_slash_command(""), None);
+        assert_eq!(login_slash_command("Claude"), None);
+    }
+
+    #[test]
+    fn an_idle_running_pane_is_typeable() {
+        assert_eq!(slash_gate(&run("running", "idle", Some("w1:p1")), false), Ok("w1:p1".into()));
+        // 「不知道」不是「在忙」：擋掉它只會讓按鈕在正常狀態下也按不動。
+        assert_eq!(slash_gate(&run("running", "unknown", Some("w1:p1")), false), Ok("w1:p1".into()));
+    }
+
+    #[test]
+    fn each_reason_is_reported_separately() {
+        assert_eq!(slash_gate(&run("stopped", "idle", Some("w1:p1")), false), Err(SlashBlocked::NotRunning));
+        assert_eq!(slash_gate(&run("exited", "idle", Some("w1:p1")), false), Err(SlashBlocked::NotRunning));
+        assert_eq!(slash_gate(&run("running", "working", Some("w1:p1")), false), Err(SlashBlocked::AgentBusy));
+        assert_eq!(slash_gate(&run("running", "blocked", Some("w1:p1")), false), Err(SlashBlocked::AgentBusy));
+        assert_eq!(slash_gate(&run("running", "idle", Some("w1:p1")), true), Err(SlashBlocked::TurnInFlight));
+        assert_eq!(slash_gate(&run("running", "idle", None), false), Err(SlashBlocked::NoPane));
+        // 空字串的 pane id 和沒有 pane 是同一件事。
+        assert_eq!(slash_gate(&run("running", "idle", Some("  ")), false), Err(SlashBlocked::NoPane));
+    }
+
+    /// 停掉的 run 就算同時在忙也先報「沒在跑」：那是使用者要先處理的那一件事。
+    #[test]
+    fn the_reasons_are_checked_in_the_order_the_user_would_fix_them() {
+        assert_eq!(slash_gate(&run("stopped", "working", None), true), Err(SlashBlocked::NotRunning));
+        assert_eq!(slash_gate(&run("running", "working", None), true), Err(SlashBlocked::AgentBusy));
+        assert_eq!(slash_gate(&run("running", "idle", None), true), Err(SlashBlocked::TurnInFlight));
+    }
+
+    #[test]
+    fn reasons_are_stable_wire_keys() {
+        assert_eq!(SlashBlocked::NotRunning.reason(), "not_running");
+        assert_eq!(SlashBlocked::AgentBusy.reason(), "agent_busy");
+        assert_eq!(SlashBlocked::TurnInFlight.reason(), "turn_in_flight");
+        assert_eq!(SlashBlocked::NoPane.reason(), "no_pane");
     }
 }
 
@@ -2372,6 +2619,18 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     }
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(()) };
 
+    // Read the pane *before* the turn is claimed. Marking it complete first and then failing
+    // on the session or the read left the turn `completed_fallback` with no assistant message,
+    // no `turn_updated` on the wire (only `emit_turn` sends one) and no `schedule_flush_queued`
+    // — a locked composer and a queued prompt that never went out. Failing here instead leaves
+    // the turn in flight, which the next `working -> idle` edge re-arms.
+    let pane_id = run.pane_id.clone().unwrap_or_default();
+    let client = app
+        .herdr_for_run(&run)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
+    let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
+
     // CAS: only one writer wins the turn.
     let res = sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
@@ -2383,12 +2642,6 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
-    let pane_id = run.pane_id.clone().unwrap_or_default();
-    let client = app
-        .herdr_for_run(&run)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
-    let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
 
     // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
@@ -2415,7 +2668,8 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
                 Some(&read.text),
             )
             .await?;
-            apply_codex_limit_hit_quota(app, &hit).await;
+            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+            apply_codex_limit_hit_quota(app, &host, &hit).await;
             sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
                 .bind(read.revision as i64)
                 .bind(tail_hash(&read.text))
@@ -2814,15 +3068,16 @@ fn parse_codex_try_again(notice: &str) -> Option<String> {
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-/// When Codex prints a hard limit-hit, mirror it onto the `codex` quota row so the strip
-/// shows empty immediately (the rate-limits RPC can lag a turn behind the TUI).
-async fn apply_codex_limit_hit_quota(app: &Arc<App>, notice: &str) {
+/// When Codex prints a hard limit-hit, mirror it onto that host's `codex` quota row so the
+/// strip shows empty immediately (the rate-limits RPC can lag a turn behind the TUI).
+async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
     let resets = parse_codex_try_again(notice);
+    let key = crate::quota::quota_key(host, "codex");
     let mut q = app
         .quotas
         .lock()
         .await
-        .get("codex")
+        .get(&key)
         .cloned()
         .unwrap_or_else(|| crate::quota::Quota {
             five_hour: None,
@@ -2831,6 +3086,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, notice: &str) {
             updated_at: crate::db::now(),
             source: "codex-limit-hit".into(),
             account: None,
+            host: host.to_string(),
         });
     // Prefer marking the 5h window (the burst limit); fall back to 7d if that is all we have.
     let win = crate::quota::Window { used_pct: 100.0, resets_at: resets.clone() };
@@ -2846,7 +3102,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, notice: &str) {
     }
     q.updated_at = crate::db::now();
     q.source = "codex-limit-hit".into();
-    crate::quota::set(app, "codex", q).await;
+    crate::quota::set(app, host, "codex", q).await;
 }
 
 /// No reply marker found: keep whatever the agent printed after the last prompt echo,
@@ -3659,6 +3915,34 @@ mod tab_tests {
         .await
         .unwrap();
         id
+    }
+
+    /// Every start pre-trusts its own working directory, not just a team's worktree. A project
+    /// pointed at a directory claude has never opened hits the same "Is this a project you
+    /// trust?" prompt, whose cursor starts on *No, exit* — 2026-09-06 that killed every team,
+    /// and an ordinary bot in a fresh checkout fails the same way.
+    #[tokio::test]
+    async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
+        let dir = std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid()));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = dir.join(".claude.json");
+        std::fs::write(&store, "{\"numStartups\":7}").unwrap();
+
+        let cwd = repo.to_string_lossy().to_string();
+        let wrote = crate::trust::mark_trusted("claude", &store, &[crate::trust::canonical(&cwd)]).unwrap();
+        assert!(wrote, "a directory the CLI has not seen is recorded");
+
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        assert_eq!(v["numStartups"], 7, "the CLI's own state survives the merge");
+        let key = crate::trust::canonical(&cwd);
+        assert_eq!(v["projects"][&key]["hasTrustDialogAccepted"], true);
+        // The key has to be the resolved path: on macOS `/tmp` is a symlink and the CLI
+        // compares against its own `getcwd()`, so an unresolved key silently does nothing.
+        assert!(!key.starts_with("/tmp/"), "the recorded path is canonical, got {key}");
+
+        assert!(!crate::trust::mark_trusted("claude", &store, &[key]).unwrap(), "already trusted: left alone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The change.** Starting a bot asks for a *tab*, not a split of somebody else's pane,

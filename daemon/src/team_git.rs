@@ -287,13 +287,15 @@ pub async fn deliver_pr(
     // `.git` is a *file* pointing at the real git dir, so `cat > <wt>/.git/…` fails with
     // "not a directory" — and since the push has already happened by then, every `pr`
     // delivery would push and then fail, and every resume would push again.
+    //
+    // It is written with `put_file`, not a heredoc: a quoted delimiter still ends at a line
+    // that *is* the delimiter, and the body is model output derived from a GitHub issue, so
+    // an issue could smuggle shell commands into the delivery script that way.
     let body_path = format!("{}/pr-body.txt", team_root.trim_end_matches('/'));
+    put_file(app, host, &body_path, &body.replace("\r\n", "\n")).await?;
     let script = format!(
-        "cat > {} <<'AM_TEAM_PR_BODY_EOF'\n{}\nAM_TEAM_PR_BODY_EOF\n\
-         gh pr create --repo {} --head {} --base {} --title {} --body-file {}\n\
+        "gh pr create --repo {} --head {} --base {} --title {} --body-file {}\n\
          rc=$?; rm -f {}; exit $rc",
-        sh_quote(&body_path),
-        body.replace("\r\n", "\n"),
         sh_quote(repo_slug),
         sh_quote(branch),
         sh_quote(base_branch),

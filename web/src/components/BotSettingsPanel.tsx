@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { EFFORT_OPTIONS, effortLabel } from '../api/types'
-import type { BotKind, PatchBotInput } from '../api/types'
-import { projectHostName, useStore } from '../store/store'
+import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
+import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
@@ -104,34 +104,149 @@ export function PersonaMark({ persona }: { persona: string | null }) {
   )
 }
 
-/** claude only: identity as a row of options（無下拉）. Renders nothing when there are no identities. */
+/**
+ * 這個 kind 的 TUI 有沒有「不離開 session 就能登入 / 換帳號」的 slash 指令。
+ *
+ * claude 2.1.263 與 grok 1.0.13 都有 `/login`；**codex 0.153.4 沒有**——它的 slash 選單
+ * 只有 `/logout`，登入得在 TUI 外面跑 `codex login`。daemon 那邊同一份判斷在
+ * `lifecycle::login_slash_command`，對不上時後端會回 400 `login_unsupported`。
+ */
+function canLoginInSession(kind: BotKind): boolean {
+  return kind === 'claude' || kind === 'grok'
+}
+
+/**
+ * 一個身份在**目標主機**上的登入狀態，翻成 UI 用的一句話。
+ *
+ * `logged_in === null` 是「問不到」，不是「沒登入」——CLI 沒裝、偵測失敗、或這台主機還沒
+ * 偵測過都會落在這裡，所以不出警語，免得把不知道講成壞掉。
+ */
+function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
+  if (!st || st.logged_in !== false) return null
+  return {
+    mark: '未登入',
+    title: `這個身份在 ${hostLabel} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 ${hostLabel} 用這個身份的設定登入，再回來按「重新偵測」。`,
+  }
+}
+
+/** 已登入時把帳號寫進 title，讓使用者一眼確認選到的是哪個帳號。 */
+function identityTitle(env: Record<string, string>, st: IdentityStatus | undefined, hostLabel: string): string {
+  const envText = Object.entries(env)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ')
+  const parts = [envText]
+  if (st?.logged_in === true) {
+    parts.push(`${hostLabel}：已登入${st.account ? ` — ${st.account}` : ''}${st.plan ? `（${st.plan}）` : ''}`)
+  } else if (st?.logged_in === false) {
+    parts.push(`${hostLabel}：未登入`)
+  } else {
+    parts.push(`${hostLabel}：登入狀態未知`)
+  }
+  // 從 shell alias 認到的身份不在 config.toml 裡，改不了也刪不掉——講清楚它從哪來。
+  if (st?.source === 'shell') {
+    parts.push(`來自 ${hostLabel} 的 shell alias（ccN），不是 config.toml`)
+  }
+  return parts.filter(Boolean).join('\n')
+}
+
+/**
+ * claude only: identity as a row of options（無下拉）. Renders nothing when there are no identities.
+ *
+ * 身份是全域設定，但它指到的帳號**每台主機各自登入**（`CLAUDE_CONFIG_DIR` 在每台機器都
+ * 展得開，帳號卻不一定在），所以要標的是「這個身份在 bot 會跑的那台主機上」能不能用。
+ * 未登入**不停用**按鈕：使用者可能正打算去登入。
+ */
 export function IdentityOptions({
   kind,
+  host,
   value,
   onChange,
+  login,
+  recheck = true,
 }: {
   kind: BotKind
+  /** bot 會跑在哪台主機（`''` / `local` = 本機）。 */
+  host: string
   value: string
   onChange: (v: string) => void
+  /** 組隊三張卡並排時不重複「重新偵測」。 */
+  recheck?: boolean
+  /**
+   * 有 run 正在跑時，「它現在用的那個身份」旁邊直接給一個登入入口——標了「未登入」的身份
+   * 旁邊按得到，是最短的動線。
+   *
+   * 只掛在 `identity` 這一個身份上：`/login` 是送進**那個 run 的 TUI**，登進去的也就是那個
+   * run 展開的設定檔，掛在別的身份旁邊會是騙人的。新增 Bot / 開團的表單還沒有 run 可以送，
+   * 所以整個是選配。
+   */
+  login?: { identity: string; busy: boolean; onLogin: () => void }
 }) {
   // Select the stable array and filter outside: a selector that returns a fresh array
   // re-renders forever (React #185).
   const all = useStore((s) => s.identities)
-  const identities = all.filter((i) => i.kind === 'claude')
+  const status = useStore((s) => identityStatusOfHost(s, host))
+  const refreshTools = useStore((s) => s.refreshTools)
+  const busy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
+  // config 的身份加上這台主機 shell 裡的 `ccN`（SPEC §15）。
+  const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === 'claude'), [all, status])
   if (kind !== 'claude' || identities.length === 0) return null
+  const hostLabel = !host || host === 'local' ? '本機' : host
   return (
     <div className="field">
-      <span>身份</span>
+      <span>
+        身份
+        {recheck ? (
+          <button
+            type="button"
+            className="identity-recheck"
+            disabled={busy}
+            title={`重新問 ${hostLabel} 上的 CLI 每個身份是否已登入`}
+            onClick={() => void refreshTools(host)}
+          >
+            {busy ? '偵測中…' : '重新偵測'}
+          </button>
+        ) : null}
+      </span>
       <div className="opt-group" role="radiogroup" aria-label="identity">
         <button type="button" className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
           不指定身分（本機預設）
         </button>
-        {identities.map((i) => (
-          <button key={i.name} type="button" className={`opt${value === i.name ? ' on' : ''}`} title={Object.entries(i.env).map(([k, v]) => `${k}=${v}`).join(' ')} onClick={() => onChange(i.name)}>
-            {i.name}
-          </button>
-        ))}
+        {identities.map((i) => {
+          const st = status[i.name]
+          const warn = identityWarning(st, hostLabel)
+          return (
+            <span key={i.name} className="opt-wrap">
+              <button
+                type="button"
+                className={`opt${value === i.name ? ' on' : ''}`}
+                title={identityTitle(i.env, st, hostLabel)}
+                onClick={() => onChange(i.name)}
+              >
+                {i.name}
+              </button>
+              {warn ? (
+                <span className="identity-logged-out" title={warn.title}>
+                  {warn.mark}
+                </span>
+              ) : null}
+              {login && login.identity === i.name ? (
+                <button
+                  type="button"
+                  className="identity-recheck"
+                  disabled={login.busy}
+                  title={`對這個 Bot 送 /login，用 ${i.name} 的設定登入。它會停在登入畫面，完成前不能工作。`}
+                  onClick={login.onLogin}
+                >
+                  {login.busy ? '送出中…' : '登入'}
+                </button>
+              ) : null}
+            </span>
+          )
+        })}
       </div>
+      {identities.some((i) => status[i.name]?.logged_in === false) ? (
+        <span className="hint">標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面。</span>
+      ) : null}
     </div>
   )
 }
@@ -145,6 +260,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const restartBot = useStore((s) => s.restartBot)
   const removeBot = useStore((s) => s.removeBot)
   const notify = useStore((s) => s.notify)
+  const loginBot = useStore((s) => s.loginBot)
+  const refreshTools = useStore((s) => s.refreshTools)
+  const loginBusy = useStore((s) => s.busy[`login:${botId}`] === true)
+  const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
 
   const [name, setName] = useState(bot?.name ?? '')
   const [model, setModel] = useState<string | null>(bot?.model ?? null)
@@ -158,6 +277,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [restarting, setRestarting] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
+  const [loginOpen, setLoginOpen] = useState(false)
+  /** 送出過一次之後才冒出「重新偵測」——沒送過就沒有東西需要重新偵測。 */
+  const [loginSent, setLoginSent] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   // 彈窗貼著觸發它的齒輪開，超出視窗才翻邊/夾住；沒有 anchor（例如鍵盤流程）就置中。
   const anchor = useStore((s) => s.settingsAnchor)
@@ -231,11 +353,14 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
 
   const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
+  // `host` 在本機專案上可能是 `''` 也可能是字面的 `local`，兩個都得寫成「本機」——照
+  // `IdentityOptions` 的同一條規則，兩處講法才一致。
+  const hostLabel = !host || host === 'local' ? '本機' : host
 
   const patch: PatchBotInput = {}
   if (name !== bot.name) patch.name = name
   if (model !== bot.model) patch.model = model
-  if (bot.kind !== 'claude' && effort !== bot.effort) patch.effort = effort
+  if (effort !== bot.effort) patch.effort = effort
   if (bot.kind === 'codex' && fast !== bot.fast) patch.fast = fast
   if ((persona.trim() || null) !== bot.persona) patch.persona = persona.trim() || null
   if (bot.kind === 'claude' && (identity || null) !== bot.identity) patch.identity = identity || null
@@ -264,7 +389,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
 
   escRef.current = () => {
-    if (!deleteOpen && !closeConfirmOpen) requestClose()
+    if (!deleteOpen && !closeConfirmOpen && !loginOpen) requestClose()
   }
 
   return (
@@ -355,7 +480,81 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             fast={fast}
             onFast={setFast}
           />
-          <IdentityOptions kind={bot.kind} value={identity} onChange={setIdentity} />
+          <IdentityOptions
+            kind={bot.kind}
+            host={host}
+            value={identity}
+            onChange={setIdentity}
+            // 掛在 bot **存檔的**身份上，不是編輯中的 `identity`：正在跑的那個 run 是用存檔
+            // 的那一個起來的，`/login` 也就是登進那一個。
+            login={
+              running && canLoginInSession(bot.kind)
+                ? { identity: bot.identity ?? '', busy: loginBusy, onLogin: () => setLoginOpen(true) }
+                : undefined
+            }
+          />
+          {canLoginInSession(bot.kind) ? (
+            <div className="field">
+              <span>帳號</span>
+              <div className="bs-login-row">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={!running || loginBusy}
+                  title={
+                    running
+                      ? `對 ${bot.name} 的 ${bot.kind} 送 /login`
+                      : '這個 Bot 沒在跑，沒有畫面可以送指令'
+                  }
+                  onClick={() => setLoginOpen(true)}
+                >
+                  {loginBusy ? '送出中…' : '登入 / 切換帳號'}
+                </button>
+                {loginSent ? (
+                  <button
+                    type="button"
+                    className="identity-recheck"
+                    disabled={toolsBusy}
+                    title={`重新問 ${hostLabel} 上的 CLI 現在登入了誰`}
+                    onClick={() => void refreshTools(host)}
+                  >
+                    {toolsBusy ? '偵測中…' : '登入好了，重新偵測'}
+                  </button>
+                ) : null}
+              </div>
+              <span className="hint">
+                {running ? (
+                  <>
+                    會對這個 Bot 的 {bot.kind} 送 <code>/login</code>：畫面切到登入流程，通常會跳出瀏覽器要你在那邊完成。
+                    <strong>完成之前這個 Bot 不能工作。</strong>
+                  </>
+                ) : (
+                  '這個 Bot 沒在跑，沒有畫面可以送指令。先啟動它再回來按。'
+                )}
+              </span>
+            </div>
+          ) : (
+            // codex 的 TUI 只有 `/logout`——與其給一個按了必定失敗的按鈕，不如直接說要去哪裡
+            // 登入。「重新偵測」還是留著：使用者在別的地方登完，回來就是按它。
+            <div className="field">
+              <span>帳號</span>
+              <div className="bs-login-row">
+                <button
+                  type="button"
+                  className="identity-recheck"
+                  disabled={toolsBusy}
+                  title={`重新問 ${hostLabel} 上的 CLI 現在登入了誰`}
+                  onClick={() => void refreshTools(host)}
+                >
+                  {toolsBusy ? '偵測中…' : '重新偵測'}
+                </button>
+              </div>
+              <span className="hint">
+                {bot.kind} 的 TUI 沒有登入指令（只有 <code>/logout</code>），沒辦法從這裡登入。
+                請在 {hostLabel} 上執行 <code>{bot.kind} login</code>，再回來按「重新偵測」。
+              </span>
+            </div>
+          )}
           <PersonaField value={persona} onChange={setPersona} />
         </form>
 
@@ -380,6 +579,33 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           {saving ? '儲存中…' : '儲存'}
         </button>
       </div>
+
+      {/* 送 `/login` 不是「按了就登入好了」：畫面會跑到 agent 那邊，而且在使用者完成之前
+          那個 Bot 不能工作。這三件事在按下去**之前**講清楚，按鈕才誠實。 */}
+      <ConfirmDialog
+        open={loginOpen}
+        title="送出登入指令？"
+        body={
+          <>
+            會對 <strong>{bot.name}</strong> 的 agent 送 <code>/login</code>。它的畫面會切到登入流程，通常會開瀏覽器要你在那邊完成登入。
+            <br />
+            <strong>在你完成登入之前，這個 Bot 不能工作</strong>——這期間送給它的訊息會卡住。
+            <br />
+            登入完成後回到這裡按「重新偵測」，身份狀態才會更新。
+          </>
+        }
+        confirmLabel="送出 /login"
+        width={400}
+        onCancel={() => setLoginOpen(false)}
+        onConfirm={() => {
+          setLoginOpen(false)
+          void loginBot(botId).then((ok) => {
+            if (!ok) return
+            setLoginSent(true)
+            notify('info', `已送出 /login 給 ${bot.name}，請到它的畫面完成登入`)
+          })
+        }}
+      />
 
       <ConfirmDialog
         open={closeConfirmOpen}

@@ -170,6 +170,50 @@ fn fold_newlines(arg: &str) -> String {
     arg.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join(" ")
 }
 
+/// Roughly how many bytes of command line `agent.start` can actually type into a shell.
+/// Measured 2026-09-06: a launch whose line reached 1256 bytes stopped after 1019, mid-word,
+/// and Enter never arrived — the agent simply never started, and sixty seconds later the only
+/// symptom was `agent_not_running`. Keep a margin under the observed cliff.
+const MAX_COMMAND_BYTES: usize = 900;
+
+/// What a trimmed argument ends with, so the loss is visible to whoever reads the persona.
+/// Its byte length is part of the trim arithmetic — see `fit_command_line`.
+const TRIM_MARK: &str = "…（後略）";
+
+/// Trim the longest argument until the whole command fits.
+///
+/// Silent truncation is the worst outcome here: the shell is left holding half a line, the CLI
+/// never runs, and nothing says why. A shortened `--append-system-prompt` still launches, and
+/// the detail it loses is by convention also on disk (a team member's `TEAM.md`). The marker
+/// makes the loss visible to whoever reads the persona.
+fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
+    let total = |a: &[String]| a.iter().map(|s| s.len() + 3).sum::<usize>();
+    while total(&args) > MAX_COMMAND_BYTES {
+        let Some((i, _)) = args.iter().enumerate().max_by_key(|(_, s)| s.len()) else { break };
+        let over = total(&args) - MAX_COMMAND_BYTES;
+        // The marker is glued back on after the cut, so **its own bytes have to come out of
+        // the budget too**. Charging a guessed 12 instead of its real 15 made a small
+        // overshoot cut exactly as many bytes as the marker added back: 719 → 704 → 719 → …
+        // for as long as the process lived, one WARN line per pass. (Observed 2026-09-06:
+        // a team start filled the daemon log with 11 GB in six minutes.)
+        let keep = args[i].len().saturating_sub(over + TRIM_MARK.len());
+        if keep < 40 {
+            break; // Nothing left worth trimming; let herdr answer for it rather than send junk.
+        }
+        // Char boundary, not byte: a cut through a multi-byte character panics.
+        let cut = (0..=keep).rev().find(|n| args[i].is_char_boundary(*n)).unwrap_or(0);
+        let trimmed = format!("{}{TRIM_MARK}", &args[i][..cut]);
+        // Belt and braces: whatever the arithmetic above, a pass that does not actually
+        // shorten the argument must stop the loop rather than spin on it.
+        if trimmed.len() >= args[i].len() {
+            break;
+        }
+        tracing::warn!(arg = i, from = args[i].len(), to = trimmed.len(), "trimming an over-long agent argument");
+        args[i] = trimmed;
+    }
+    args
+}
+
 impl HerdrClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self { socket: socket.into(), seq: Default::default() }
@@ -431,6 +475,7 @@ impl HerdrClient {
     /// Asynchronous on the socket: returns with `launch_pending: true`; follow with `agent_wait`.
     pub async fn agent_start(&self, name: &str, kind: &str, pane_id: &str, args: &[String], timeout_ms: u64) -> Result<AgentInfo> {
         let args: Vec<String> = args.iter().map(|a| fold_newlines(a)).collect();
+        let args = fit_command_line(args);
         self.call_as(
             "agent.start",
             json!({"name": name, "kind": kind, "pane_id": pane_id, "args": args, "timeout_ms": timeout_ms}),
@@ -518,11 +563,53 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod arg_tests {
-    use super::fold_newlines;
+    use super::{fit_command_line, fold_newlines, MAX_COMMAND_BYTES};
 
     /// Reported 2026-09-06: a team failed to start with `invalid_agent_argument` because the
     /// generated PM persona spans four lines. Verified against herdr 0.8.2 that a newline is
     /// the only character it refuses, so folding is enough — and nothing else may change.
+    /// 2026-09-06: a PM persona carrying four absolute worktree paths made the launch command
+    /// 1256 bytes; the shell took 1019 of them, stopped mid-word, and Enter never arrived. The
+    /// team then failed on `agent_not_running` with nothing on screen to explain it.
+    #[test]
+    fn an_over_long_command_is_trimmed_rather_than_truncated_by_the_shell() {
+        let long = "你是 issue #1 的 PM，暱稱 `pm`。".repeat(40); // ~1200 bytes of CJK
+        let args = vec!["--dangerously-skip-permissions".to_string(), "--append-system-prompt".to_string(), long.clone()];
+        let out = fit_command_line(args);
+
+        let total: usize = out.iter().map(|s| s.len() + 3).sum();
+        assert!(total <= MAX_COMMAND_BYTES, "the whole line fits, got {total} bytes");
+        // The flags survive; only the oversized value gives ground.
+        assert_eq!(out[0], "--dangerously-skip-permissions");
+        assert_eq!(out[1], "--append-system-prompt");
+        assert!(out[2].len() < long.len() && out[2].ends_with("…（後略）"), "the loss is visible");
+        assert!(long.starts_with(out[2].trim_end_matches("…（後略）")), "what is kept is a real prefix");
+
+        // A command that already fits is returned byte-for-byte.
+        let short = vec!["--model".to_string(), "sonnet".to_string()];
+        assert_eq!(fit_command_line(short.clone()), short);
+    }
+
+    /// Regression, 2026-09-06: a team start hung the daemon in this loop and wrote 11 GB of
+    /// identical WARN lines. A line that overshoots by only a few bytes cut fewer bytes than
+    /// the trim marker adds back, so the argument never got shorter. Any overshoot from 1 byte
+    /// upwards must converge — this test hangs rather than fails if it ever regresses.
+    #[test]
+    fn a_command_that_only_just_overshoots_still_converges() {
+        for overshoot in [1usize, 2, 3, 4, 15, 16, 40] {
+            let flag = "--append-system-prompt";
+            // total() charges len + 3 per argument.
+            let value_len = MAX_COMMAND_BYTES + overshoot - (flag.len() + 3) - 3;
+            let args = vec![flag.to_string(), "x".repeat(value_len)];
+            let out = fit_command_line(args);
+
+            let total: usize = out.iter().map(|s| s.len() + 3).sum();
+            assert!(total <= MAX_COMMAND_BYTES, "overshoot {overshoot}: still {total} bytes");
+            assert_eq!(out[0], flag);
+            assert!(out[1].len() < value_len, "overshoot {overshoot}: the value did shrink");
+        }
+    }
+
     #[test]
     fn only_newlines_are_folded() {
         assert_eq!(fold_newlines("你是 issue #1 的 PM。\n成員：`pm`、`dev-1`。\n合併由 daemon 處理。"),
