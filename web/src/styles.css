@@ -2816,18 +2816,24 @@ button:disabled {
   color: var(--danger);
 }
 
+/* 關閉鍵：本來是 `opacity: 0.6` 的繼承色——在錯誤通知上就是 0.6 的紅，對比掉到 3.3 左右。
+   改用固定的次要文字色，全不透明；錯誤的訊號由左邊那條 rail 與邊框負責。 */
 .notice button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   border: 0;
   background: transparent;
-  color: inherit;
-  opacity: 0.6;
+  color: var(--text-dim);
   padding: 0 4px;
   border-radius: 4px;
   line-height: 1.3;
 }
 
 .notice button:hover {
-  opacity: 1;
+  color: var(--text);
   background: var(--bg-hover);
 }
 
