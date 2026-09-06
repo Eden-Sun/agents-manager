@@ -5,3 +5,12 @@
 .DS_Store
 .vite/
 .claude/worktrees/
+
+# local secrets / runtime data — never belong in this repo
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+ui-token
+
