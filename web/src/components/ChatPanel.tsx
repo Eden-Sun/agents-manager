@@ -5,6 +5,7 @@ import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { effortLabel, quotaKey } from '../api/types'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
@@ -430,6 +431,7 @@ function Composer({
   // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
   // bots / tabs and reloading keep it; it is cleared only on a successful send.
   const draftKey = `bot:${botId}` as const
+  const phone = useMediaQuery(PHONE_QUERY)
   const text = useStore((s) => s.drafts[draftKey] ?? '')
   const setDraft = useStore((s) => s.setDraft)
   const setDraftCursor = useStore((s) => s.setDraftCursor)
@@ -542,12 +544,14 @@ function Composer({
           value={text}
           /* 連線斷了也讓人繼續打（草稿本來就會存），只是送不出去。 */
           disabled={sending}
+          /* 手機用短版：括號裡那句在 390px 會把輸入框撐成兩行，而且觸控裝置也拖放不了檔案。
+             完整說明留在 `title`（桌機 hover 看得到）。 */
           placeholder={
             state.disabled
-              ? `${state.reason || '目前無法送出訊息'}——可以先打，恢復後再送`
+              ? `${state.reason || '目前無法送出訊息'}${phone ? '' : '——可以先打，恢復後再送'}`
               : state.queued
-                ? '這回合還在跑，先打下一則…（送出會排隊）'
-                : '輸入訊息…（圖片可直接拖放或貼上）'
+                ? `這回合還在跑，先打下一則…${phone ? '' : '（送出會排隊）'}`
+                : `輸入訊息…${phone ? '' : '（圖片可直接拖放或貼上）'}`
           }
           title="Enter 送出，Shift+Enter 換行；圖片可拖放或貼上"
           onChange={(e) => {
