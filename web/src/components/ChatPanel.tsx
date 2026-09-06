@@ -592,9 +592,9 @@ function pct(n: number): string {
   return `${Number.isInteger(r) ? r : r.toFixed(1)}%`
 }
 
-function SlItem({ k, children, title }: { k: string; children: ReactNode; title?: string }) {
+function SlItem({ k, children, title, className }: { k: string; children: ReactNode; title?: string; className?: string }) {
   return (
-    <span className="sl-item" title={title}>
+    <span className={`sl-item${className ? ' ' + className : ''}`} title={title}>
       <span className="sl-k">{k}</span>
       <span className="sl-v">{children}</span>
     </span>
@@ -703,7 +703,10 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
   return (
     <div className="statusline-bar" role="status" title={line || undefined}>
       {status.account_email ? (
-        <SlItem k="帳號">{status.account_email}</SlItem>
+        // 手機上這一欄最長也最不急（側欄與設定都看得到），`sl-account` 讓 CSS 把它收掉。
+        <SlItem k="帳號" className="sl-account">
+          {status.account_email}
+        </SlItem>
       ) : status.cwd ? (
         <SlItem k="目錄" title={status.cwd}>
           {status.cwd.replace(/^\/Users\/[^/]+/, '~')}

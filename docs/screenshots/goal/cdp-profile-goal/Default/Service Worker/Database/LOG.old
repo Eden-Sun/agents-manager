@@ -1,2 +1,3 @@
-2026/09/07-02:52:07.273 86be83 Creating DB /Users/m1pro/project/agents-manager/docs/screenshots/goal/cdp-profile-goal/Default/Service Worker/Database since it was missing.
-2026/09/07-02:52:07.283 86be83 Reusing MANIFEST /Users/m1pro/project/agents-manager/docs/screenshots/goal/cdp-profile-goal/Default/Service Worker/Database/MANIFEST-000001
+2026/09/07-02:56:37.498 876063 Reusing MANIFEST /Users/m1pro/project/agents-manager/docs/screenshots/goal/cdp-profile-goal/Default/Service Worker/Database/MANIFEST-000001
+2026/09/07-02:56:37.498 876063 Recovering log #3
+2026/09/07-02:56:37.499 876063 Reusing old log /Users/m1pro/project/agents-manager/docs/screenshots/goal/cdp-profile-goal/Default/Service Worker/Database/000003.log 

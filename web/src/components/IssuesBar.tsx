@@ -195,7 +195,9 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
           <circle cx="8" cy="8" r="2" fill="currentColor" />
         </svg>
         <span className="issues-repo">
-          {github.owner}/{github.repo}
+          {/* owner 在手機上是這一列最先讓位的東西：同一畫面沒有第二個 repo 可混淆。 */}
+          <span className="issues-owner">{github.owner}/</span>
+          {github.repo}
         </span>
         <span className="issues-count">{openCount === null ? 'Issues' : `${openCount >= 100 ? '100+' : openCount} open`}</span>
       </button>
