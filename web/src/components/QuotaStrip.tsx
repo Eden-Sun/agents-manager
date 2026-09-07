@@ -499,11 +499,10 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
       ) : !known || (five === null && seven === null) ? (
         <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>
-          {/* 「偵測不到」不等於「沒登入」：登入探測走 ssh，而 claude 有些帳號的憑證放在
-              Keychain 裡，非登入 shell 讀不到，於是答 `loggedIn: false`——m4p 的 cc1 就是
-              這樣，它在 pane 裡其實好好的。所以這裡寫「偵測不到」並給出兩條路。 */}
+          {/* 登入偵測改在該主機的 herdr pane 裡跑（claude 是 `claude auth status --json`），
+              看得到 Keychain，所以這裡的「沒登入」就是真的沒登入，直接叫使用者去登入。 */}
           {loggedOut
-            ? `${hostLabel(host)} 上偵測不到這個帳號的登入（憑證若在 Keychain 裡，ssh 探測看不到）。在那台跑一個 ${KIND_LABEL[entry.kind]} bot，它回報後就會有數字。`
+            ? `${hostLabel(host)} 上這個帳號未登入，請在 Bot 設定按登入 / 切換帳號。`
             : entry.kind === 'grok'
               ? '背景查詢中'
               : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}

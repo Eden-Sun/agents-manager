@@ -1173,9 +1173,9 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
   `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
   前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；
   `critical` → 該 bot 在側欄 bot 列上要有提示（用哪組額度見 §12.4 的 key 對應）。
-- `?refresh=1`：立刻重讀 codex、claude（`/usage` pane 探測）與 grok，對象是 `local` 加上每一台**已連線**
-  的遠端主機；加 `&host=<name>` 只重讀那一台（主機不存在 → 404）。claude / grok 的探測要開 pane，
-  最久各約 25 秒，多台是依序跑的。
+- `?refresh=1`：立刻重讀 codex、claude（`claude -p "/usage"` pane 探測）與 grok，對象是 `local` 加上
+  每一台**已連線**的遠端主機；加 `&host=<name>` 只重讀那一台（主機不存在 → 404）。claude / grok 的探測
+  要開 pane（claude 最久 40 秒、grok 25 秒），多台是依序跑的。
 - 背景輪詢的節奏不變（codex 5 分、claude 60 秒、grok 30 秒），每一輪把 `local` 與每一台已連線遠端
   **併發**跑一次——一次探測要數十秒，序列跑會把本機的週期拉長（SPEC §14.3）。
 - 來源（每一台主機各自跑一份）：
@@ -1185,15 +1185,27 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
     1. **statusLine 推送**（bot 對話中）：daemon 注入的 `statusLine` 指令把 `rate_limits.five_hour / seven_day`
        （若哪天多了 `rate_limits.fable` 也會一起收；實測 2.1.263 的 payload 只有前兩個桶，所以 statusLine
        來源的 `fable` 目前都是 `null`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；不建 Turn。`source` = `statusline`。
-    2. **`/usage` pane 探測**（背景，每 60 秒）：與 grok 相同，在專屬 `am-quota` herdr session 開用完即丟的 pane
-       跑 claude、送 `/usage`、解析 `Current session` / `Current week (all models)` 兩條，Max 方案另外多一條
-       `Current week (Fable)`（標題大小寫不敏感）→ `fable`，其餘 model-specific 的週列（Sonnet / Opus）仍忽略；每個有獨立
-       `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）；identity
-       清單是**該主機**的（含它 shell 的 `ccN`，SPEC §16）。兩種情況跳過不探：該列在 60 秒內剛被
-       statusLine 更新過，或工具偵測說這個身份在這台沒登入（否則只會停在登入畫面燒掉 25 秒逾時）。
-       `source` = `claude-usage`。**遠端主機**的探測改開在 daemon 自己在那台上的 named session
-       （遠端只有一條被轉發的 socket），cwd 與 identity env 的 `~` 都用遠端的 `$HOME`（SPEC §14.2）。
-       statusLine 則依 bot 所在主機寫入對應的列。
+    2. **`claude -p "/usage"` pane 探測**（背景，每 60 秒）：在專屬 `am-quota` herdr session 開用完即丟的
+       pane，在裡面跑**一行**指令：`claude auth status --json` 接 `claude -p "/usage"`，輸出用
+       `AM_AUTH_BEGIN` / `AM_AUTH_END` / `AM_USAGE_DONE=` 三個標記包起來，用 `pane.read`
+       （`source = recent_unwrapped`）等到最後那個標記出現（逾時 40 秒）。`-p` 印的是純文字，一條桶子一行：
+
+       ```text
+       Current session: 47% used · resets Sep 7 at 9:59pm (Asia/Taipei)
+       Current week (all models): 15% used · resets Sep 14 at 11:59am (Asia/Taipei)
+       Current week (Fable): 23% used · resets Sep 14 at 11:59am (Asia/Taipei)
+       ```
+
+       依序對應 `five_hour` / `seven_day` / `fable`（Max 方案才有第三條，標題大小寫不敏感），其餘
+       model-specific 的週列（Sonnet / Opus）仍忽略；`plan` 取自同一次 `auth status` 的 `subscriptionType`。
+       **不再有 TUI 對話框、first-run 信任視窗與滿意度問卷要對付**（`-p` 一律不問），也**不再用 ssh 探登入**。
+       每個有獨立 `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）；
+       identity 清單是**該主機**的（含它 shell 的 `ccN`，SPEC §16）。跳過不探的條件：該列在 60 秒內剛被
+       statusLine 更新過**且**這個身份的 `logged_in` 已經知道（登入答案是搭同一次探測回來的，所以還沒有
+       答案的身份仍值得開一次 pane）。沒登入時 `/usage` 只印一段成本摘要、一條桶子都沒有 → 該身份被
+       park 30 分鐘（其餘失敗 5 分鐘），下一輪再試。`source` = `claude-usage`。**遠端主機**的探測開在
+       daemon 自己在那台上的 named session（遠端只有一條被轉發的 socket），cwd 與 identity env 的 `~`
+       都用遠端的 `$HOME`（SPEC §14.2）。statusLine 則依 bot 所在主機寫入對應的列。
   - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒在專屬的 `am-quota` herdr session（永不 attach，
     因此版面夠寬）開一個用完即丟的 pane 跑 grok、送 `/usage`、讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
     `Weekly limit (SuperGrok)` 的括號，`source` = `grok-usage`。
@@ -1228,6 +1240,12 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 - `path` / `version`：`command -v` 與 `<kind> --version` 的輸出（第一行，trim）；沒裝為 `null`。
 - `logged_in`：`true | false | null`（判不了為 `null`）。判斷依據：claude `~/.claude/.credentials.json`（或 Keychain
   `Claude Code-credentials`）存在；codex `~/.codex/auth.json` 存在；grok `~/.grok/` 下有 auth 檔。
+- **`hosts[].identities[]` 的 `logged_in` / `account` / `plan` 是分開一條路**：codex 與 grok 走這裡的 ssh
+  探測（`codex login status` / `grok models`），**claude 不走 ssh**——非登入的 ssh session 讀不到 macOS
+  Keychain，會對明明能用的帳號答 `loggedIn: false`（m4p 的 cc1 就是這樣）。claude 改在該主機的
+  `am-quota` herdr pane 裡跑 `claude auth status --json`，和 §12.4 的 `/usage` 是**同一次**探測，
+  `email` → `account`、`subscriptionType` → `plan`；因此 claude 身份的登入狀態在第一輪額度輪詢
+  （最多 60 秒）之後才會從 `null` 變成真正的答案，變了會推 WS `host_changed`。
 - host 尚未偵測（例如遠端還沒連上）時 `tools` 為 `null`、`tools_checked_at` 為 `null`。
 - `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測，回 `200 {"name":"m4p","tools":{…},"tools_checked_at":"…"}`
   （host 不存在 404；ssh 失敗 502）。重新偵測後亦推 WS `host_changed`（前端重新 `GET /api/state`）。
