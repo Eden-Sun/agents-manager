@@ -199,13 +199,38 @@ export function DropVeil({ label = '放開以附加圖片' }: { label?: string }
   )
 }
 
-/** Pending thumbnails above the textarea. */
+/**
+ * Pending thumbnails above the textarea.
+ *
+ * 40px 只夠數「附了幾張」，認不出是哪一張截圖，所以 hover（鍵盤則是 focus）會在托盤正上方
+ * 浮一張滿對話框寬度的預覽：絕對定位，版面一格都不動，等比例縮到對話區高度以內。
+ */
 export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; onRemove: (key: string) => void; disabled?: boolean }) {
+  const [peek, setPeek] = useState<string | null>(null)
   if (items.length === 0) return null
+  // 預覽開著時那張被移掉，就當作沒開。
+  const peeked = items.find((it) => it.key === peek) ?? null
+  const off = (key: string) => setPeek((k) => (k === key ? null : k))
   return (
     <div className="attach-tray" role="list" aria-label="待送出的圖片">
+      {peeked ? (
+        <div className="attach-peek" aria-hidden="true">
+          <img src={peeked.previewUrl} alt="" />
+          <span className="attach-peek-cap">
+            {peeked.name} · {formatSize(peeked.size)}
+          </span>
+        </div>
+      ) : null}
       {items.map((it) => (
-        <div key={it.key} className={`attach-thumb${it.error ? ' failed' : ''}${it.id ? '' : ' uploading'}`} role="listitem">
+        <div
+          key={it.key}
+          className={`attach-thumb${it.error ? ' failed' : ''}${it.id ? '' : ' uploading'}${peek === it.key ? ' peeking' : ''}`}
+          role="listitem"
+          onMouseEnter={() => setPeek(it.key)}
+          onMouseLeave={() => off(it.key)}
+          onFocus={() => setPeek(it.key)}
+          onBlur={() => off(it.key)}
+        >
           <img src={it.previewUrl} alt={it.name} />
           <span className="attach-thumb-name" title={`${it.name} · ${formatSize(it.size)}`}>
             {it.name}

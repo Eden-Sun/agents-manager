@@ -29,8 +29,17 @@ import { useStore } from '../store/store'
 /** Collapsed / expanded is a layout preference, so it — and only it — is remembered. */
 const OPEN_KEY = 'am.shelf.open'
 
-/** Preview box width; its image is capped at 320px tall (and by the room actually there). */
+/** Fallback preview width, used when there is no conversation on screen to measure. */
 const PEEK_W = 300
+
+/**
+ * 預覽要跟托盤裡的縮圖一樣大就白開了：一律撐到對話框那麼寬（`.chat` 就是聊天／群組共用的
+ * 那一欄），高度仍由 `--peek-avail` 夾住。量不到就退回固定寬度。
+ */
+function peekWidth(): number {
+  const w = document.querySelector('.chat')?.getBoundingClientRect().width ?? 0
+  return w > PEEK_W ? Math.round(w - 24) : PEEK_W
+}
 /** A short delay, so sweeping the pointer down the rail does not flash every card. */
 const PEEK_HOVER_MS = 180
 /** Touch: a long press opens the preview — a plain tap still means 「放進對話」. */
@@ -499,7 +508,7 @@ function ShelfPeek({ item, at, above }: { item: ShelfItem; at: PeekAt; above: bo
   const avail = above ? Math.max(96, at.boundTop - 18) : window.innerHeight - 16
   const style: CSSProperties = {
     '--peek-avail': `${avail}px`,
-    width: `min(${PEEK_W}px, calc(100vw - 24px))`,
+    width: `min(${peekWidth()}px, calc(100vw - 24px))`,
     // 量完之前先放在畫面外：layout effect 會在同一次繪製前補上真正的位置。
     left: pos ? pos.left : -9999,
     top: pos ? pos.top : 0,
