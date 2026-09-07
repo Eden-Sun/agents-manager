@@ -338,3 +338,22 @@
   進度是掃一眼就要看到的。分母是佇列總數，分子把「正在做的那一個」算進去（交付 1、做第 2 → 2/20）。
 - 秒級計時只在這一段自己 `setInterval`，team 結束後停掉，不讓整個 TeamPanel 每秒重繪。
 - 截圖：`docs/screenshots/team-progress/`。
+
+## Bot 設定改成非模態：不再有蓋住整個 app 的遮罩（2026-09-08）
+
+- **問題**：`.bs-scrim` 是一層 `position: fixed; inset: 0` 的深色遮罩（58% ＋ 2px 模糊），
+  只為了接「點外面關閉」這一下。代價是設定一開，整個 app 就被蓋住也點不到：拖圖進對話框
+  失效（drop 事件全被遮罩吃掉）、旁邊的 bot 點不到、額度條與 git 列也按不了。
+  這張卡本來就貼著齒輪開，形狀是 popover，卻用了 modal 的代價。
+- **決策**：遮罩降級成純擺放用的框（`pointer-events: none`、無底色、無模糊），卡片自己
+  `pointer-events: auto`。關閉改成 document 上的 `pointerdown`（卡片外按一下，滑鼠與觸控同一條路）
+  加上原本的 Escape；髒表單一樣先跳「放棄未儲存的變更？」。同時拿掉 `aria-modal` 與 focus trap
+  ——背景可以點，卻把 Tab 關在卡片裡（焦點一離開就被搶回去）會自相矛盾。開場焦點仍落在名稱欄位。
+- **界線**：真正的 modal 保留遮罩——`Modal`（新增 Project／新增 Bot／環境設定）的 `.modal-backdrop`、
+  `ConfirmDialog`（刪除、放棄變更）的 `.confirm-backdrop`、`BlockedModal` / `MemPaneModal`、
+  ≤1024px 側欄抽屜的 `.scrim`、圖片放大的 `.lightbox`。這些都是「先回答我再繼續」，遮罩是對的。
+  其餘 popover（`HeadMoreMenu`、`MemPopover`、`ModelPicker`、`Tools`、`IssuesBar`、`AttachButton`）
+  本來就用 document 監聽關閉，沒有全螢幕 click-catcher，不用改。
+- **代價**：設定開著時鍵盤可以 Tab 到背景去，也不再自動把焦點還給齒輪。換到的是「開著設定
+  照樣能用整個 app」——包含把圖片拖進對話框。
+- 截圖：`docs/screenshots/scroll-and-overlay/`。

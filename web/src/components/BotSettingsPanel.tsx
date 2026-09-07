@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
-import { useFocusTrap } from '../hooks/useFocusTrap'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -290,9 +289,29 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
-  // 這張卡是 aria-modal 對話框，鍵盤就該關在裡面，關掉時再還給開啟它的齒輪。開場落在名稱
-  // 欄位；巢狀的刪除／關閉確認自己會再疊一層 trap，這層會讓位給它。
-  useFocusTrap(true, cardRef, { initialFocus: () => nameRef.current })
+  // 點卡片外面就關（髒表單一樣先問）。以前是靠鋪滿全螢幕的 `.bs-scrim` 接這一下，代價是
+  // 整個 app 被蓋住——設定開著就不能拖圖進對話、不能點旁邊的 bot。改成 document 上的
+  // pointerdown：不需要任何一層擋住背景的 div，滑鼠與觸控也走同一條路。
+  // 疊在上面的確認框走 portal，不在卡片裡，所以要一起放行。
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const card = cardRef.current
+      if (!card || !(e.target instanceof Node)) return
+      if (card.contains(e.target)) return
+      const el = e.target instanceof Element ? e.target : e.target.parentElement
+      if (el?.closest('.confirm-backdrop, .modal-backdrop')) return
+      escRef.current()
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [])
+
+  // 開場落在名稱欄位。不再 trap 鍵盤：這張卡貼著齒輪開、背景也照常能用，把 Tab 關在裡面
+  // 會跟「非模態」自相矛盾（焦點一離開就被搶回來，等於背景還是不能點）。
+  useEffect(() => {
+    const t = requestAnimationFrame(() => nameRef.current?.focus())
+    return () => cancelAnimationFrame(t)
+  }, [])
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
@@ -311,8 +330,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   if (!bot) {
     escRef.current = closeSettings
     return (
-      <div className="bs-scrim" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && closeSettings()}>
-      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal="true" aria-label="Bot 設定">
+      <div className="bs-scrim" role="presentation">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -367,13 +386,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
 
   return (
-    <div className="bs-scrim" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && requestClose()}>
+    <div className="bs-scrim" role="presentation">
     <div
       ref={cardRef}
       className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
       style={pos ? { left: pos.left, top: pos.top } : undefined}
       role="dialog"
-      aria-modal="true"
       aria-label={`${bot.name} 的設定`}
     >
       <div className="bs-head">
