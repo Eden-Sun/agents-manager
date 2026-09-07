@@ -54,6 +54,31 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     t.contains("how is claude doing") && t.contains("dismiss")
 }
 
+/// 這個畫面是不是 Claude Code 開場的登入選單（`CLAUDE_CONFIG_DIR` 指到一個還沒登入的目錄）：
+///
+/// ```text
+/// Select login method:
+/// ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise
+///   2. Anthropic Console account · API usage billing
+/// ```
+///
+/// 停在這裡的 agent 對 herdr 看起來是活的、也收得下字，但送進去的 prompt 只是在選單上打字，
+/// 回合會一直掛著。所以 [`crate::lifecycle`] 送 prompt 前先看一眼，中了就直接 409 `needs_login`。
+pub fn is_login_menu(screen: &str) -> bool {
+    let t = flatten(screen);
+    t.contains("select login method") && (t.contains("claude account with subscription") || t.contains("anthropic console account"))
+}
+
+/// 這個 Run 的 pane 現在是不是停在登入選單上。讀不到畫面就當不是——那不是這裡要擋的事。
+pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
+    let Some(pane) = run.pane_id.clone() else { return false };
+    let Some(client) = app.herdr_for_run(run).await else { return false };
+    match client.pane_read(&pane, "visible", 80).await {
+        Ok(r) => is_login_menu(&r.text),
+        Err(_) => false,
+    }
+}
+
 /// 這個 Run 的 pane 若正停在那份問卷上就替它按 `0`。回傳是否真的按了。
 pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
@@ -95,6 +120,14 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recognises_the_login_menu_even_when_wrapped() {
+        let screen = "Welcome to Claude Code v2.1.263\n\nSelect login\n method:\n\n❯ 1. Claude account with subscription · Pro, Max\n   2. Anthropic Console account · API usage billing\n";
+        assert!(super::is_login_menu(screen));
+        assert!(!super::is_login_menu("❯ 1. Yes, proceed\n  2. No, exit\nIs this a project you trust?"));
+        assert!(!super::is_login_menu("the user asked about 'select login method' in the docs"));
+    }
+
     use super::*;
 
     const SURVEY: &str = r#"

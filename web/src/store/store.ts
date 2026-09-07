@@ -1186,6 +1186,12 @@ export const useStore = create<StoreState>((set, get) => ({
       }))
       return true
     } catch (e) {
+      // daemon 送之前看了 pane 一眼：claude 停在開場的登入選單。它自己也在對話裡插了一則
+      // system 訊息說怎麼登入，這裡只把通知講白，不要只給一個「HTTP 409」。
+      if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
+        get().notify('error', typeof e.body.message === 'string' ? e.body.message : '這個 claude 還沒登入，先到「終端」分頁完成登入。')
+        return false
+      }
       get().notify('error', errText(e))
       return false
     }

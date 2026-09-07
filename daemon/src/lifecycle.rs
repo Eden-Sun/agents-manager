@@ -2749,6 +2749,19 @@ pub async fn prompt_grouped(
     if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
         return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
     }
+    // A claude whose CLAUDE_CONFIG_DIR has never logged in opens on "Select login method"
+    // and looks idle to herdr; a prompt sent there just types into the menu and the turn
+    // hangs until the stall timer gives up. Look at the screen first and say so instead.
+    if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(app, &run).await {
+        let identity = bot.identity.clone().unwrap_or_default();
+        let hint = if identity.is_empty() {
+            "這個 claude 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。".to_string()
+        } else {
+            format!("身份 `{identity}` 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。")
+        };
+        let _ = insert_message(app, &conv, None, "system", &hint, "system", false, None).await;
+        return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
+    }
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status IN ('in_flight','completed','completed_fallback') LIMIT 1",
     )
