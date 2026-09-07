@@ -4,7 +4,7 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr } from './normalize'
+import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
@@ -44,6 +44,7 @@ import type {
   TerminalSource,
   ToolMap,
   TurnDelivery,
+ProjectSubmodule,
 } from './types'
 
 export const MOCK_MODE = import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true'
@@ -363,8 +364,12 @@ export async function installTool(host: string, kind: BotKind, viaBotId: string)
 }
 
 /** `GET /api/projects/:id/issues?state=&limit=&q=` (v4.0; the daemon shells out to `gh`). */
-export async function fetchIssues(projectId: string, opts: { state?: 'open' | 'closed'; limit?: number; q?: string } = {}): Promise<Issue[]> {
+export async function fetchIssues(
+  projectId: string,
+  opts: { state?: 'open' | 'closed'; limit?: number; q?: string; repo?: string } = {},
+): Promise<Issue[]> {
   const q = new URLSearchParams()
+  if (opts.repo) q.set('repo', opts.repo)
   if (opts.state) q.set('state', opts.state)
   if (opts.limit) q.set('limit', String(opts.limit))
   if (opts.q) q.set('q', opts.q)
@@ -373,8 +378,22 @@ export async function fetchIssues(projectId: string, opts: { state?: 'open' | 'c
 }
 
 /** `GET /api/projects/:id/issues/:number` — with the full body. */
-export async function fetchIssue(projectId: string, number: number): Promise<IssueDetail | null> {
-  return toIssueDetail(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues/${number}`))
+export async function fetchIssue(projectId: string, number: number, repo = ''): Promise<IssueDetail | null> {
+  const qs = repo ? `?repo=${encodeURIComponent(repo)}` : ''
+  return toIssueDetail(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues/${number}${qs}`))
+}
+
+/**
+ * `GET /api/projects/:id/submodules` — the project's git submodules with their GitHub origins.
+ * 舊 daemon 沒有這個端點：裸 404 當成「沒有 submodule」，不是錯誤。
+ */
+export async function fetchSubmodules(projectId: string): Promise<ProjectSubmodule[]> {
+  try {
+    return toSubmodules(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/submodules`))
+  } catch (e) {
+    if (isTeamsUnsupported(e)) return []
+    throw e
+  }
 }
 
 // -------------------------------------------------------- Issue Team（SPEC-team §10）

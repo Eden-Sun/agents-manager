@@ -197,10 +197,13 @@ function NumberField({
 export function TeamLaunchPanel({
   projectId,
   issueNumber,
+  repo = '',
   onOpenSidebar,
 }: {
   projectId: string
   issueNumber: number
+  /** 要解的是專案哪個 submodule 的 issue；`''` = 專案本身。 */
+  repo?: string
   onOpenSidebar: () => void
 }) {
   // §2.3：這個 team 要依序處理的 issue 佇列。點「組隊」的那一個是第一項。
@@ -237,13 +240,13 @@ export function TeamLaunchPanel({
   useEffect(() => {
     let alive = true
     api
-      .fetchIssue(projectId, issueNumber)
+      .fetchIssue(projectId, issueNumber, repo)
       .then((d) => alive && setIssue(d))
       .catch((e: unknown) => alive && setIssueError(e instanceof Error ? e.message : String(e)))
     return () => {
       alive = false
     }
-  }, [projectId, issueNumber])
+  }, [projectId, issueNumber, repo])
 
   const roles = useMemo(
     () => [
@@ -265,13 +268,13 @@ export function TeamLaunchPanel({
     if (!pickerOpen || candidates) return
     let live = true
     api
-      .fetchIssues(projectId, { state: 'open', limit: 100 })
+      .fetchIssues(projectId, { state: 'open', limit: 100, repo })
       .then((l) => live && setCandidates(l))
       .catch(() => live && setCandidates([]))
     return () => {
       live = false
     }
-  }, [pickerOpen, candidates, projectId])
+  }, [pickerOpen, candidates, projectId, repo])
 
   const missingCli = roles.find((r) => !tools[r.spec.kind].installed)
   const ghReady = Boolean(project?.github)
@@ -283,6 +286,7 @@ export function TeamLaunchPanel({
     writeBudget(budget)
     void createTeam(projectId, {
       issue_numbers: queue,
+      ...(repo ? { repo } : {}),
       pm,
       workers: { ...worker, count },
       reviewer: hasReviewer ? reviewer : null,
@@ -323,6 +327,11 @@ export function TeamLaunchPanel({
             <span className="team-project-label">{project.label}</span>
             <HostBadge host={host} connected={hostUp} />
           </span>
+          {repo ? (
+            <span className="team-repo mono" title={`這個 issue 屬於專案的 submodule ${repo}`}>
+              {repo}
+            </span>
+          ) : null}
           <span className="team-tag">#{issueNumber}</span>
         </div>
         <span className="spacer" />

@@ -95,7 +95,7 @@ function TeamNode({ team }: { team: Team }) {
             ⚙
           </span>
           <span className="team-node-label">
-            #{team.issue_number} {title}
+            {team.repo ? <span className="team-node-repo mono">{team.repo}</span> : null}#{team.issue_number} {title}
           </span>
           <span className={`team-phase-dot ${tone}`} aria-hidden="true" />
           {!open ? (

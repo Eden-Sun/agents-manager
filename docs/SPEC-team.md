@@ -95,6 +95,17 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 
 **最後一個 issue**：`finish` 照舊停掉所有成員、寫 `done`，**不動 worktree** —— 清理仍是 `cleanup` 這個人工動作。
 
+### 2.4 Submodule 的 issue（2026-09-07）
+
+專案的 git submodule 各自是一個 repo、各自有 GitHub issue。一個 team 可以指定 `repo`（相對於專案根目錄的 submodule 路徑，`""` = 專案本身），之後：
+
+- **一切 git 操作都在 `<project.path>/<repo>` 裡**：`resolve_commit`、`create_branch`、`worktree add / remove / prune`、`branch -D`、`remote_base_branch`。submodule 的 gitdir 在 `.git/modules/<repo>`，`git worktree add` 對它照樣可用；成員的 cwd 因此是 submodule 的 worktree，改的、commit 的都是 submodule 的內容。
+- **GitHub 操作都對 submodule 的 origin**：issue 讀取、`deliver=pr` 的 `gh pr create`、使用者按下的 close-issue。
+- **驗證**：`repo` 必須是 `git config --file .gitmodules` 列出的路徑之一（這份清單是唯一能把使用者輸入變成 git 工作目錄的東西），且該 submodule 有 GitHub origin；否則 400。
+- `teams.repo TEXT NOT NULL DEFAULT ''`（additive）；`TEAM.md` 多一行說明成員的 cwd 是哪個 submodule 的 worktree。
+- UI：IssuesBar 在專案有（掛 GitHub 的）submodule 時多一個 repo 選單；組隊會帶著它；team 標題與側欄節點在 `#號` 前面標 submodule 路徑。
+- **不做**：跨 repo 的單一 team（一個 team 同時改 root 與 submodule）——那是兩個 team；root 裡的 submodule 指標更新仍是人工動作。
+
 ### 2.2 `bots.cwd`（新，通用欄位）
 
 `start_inner` 目前 `pane.split { cwd: project.path }`；改為 `bot.cwd.unwrap_or(project.path)`。這是 team 成員能住在 worktree 的**唯一**必要改動，

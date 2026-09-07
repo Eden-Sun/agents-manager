@@ -1235,8 +1235,8 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  openTeamLaunch: (projectId, issueNumber) =>
-    set({ teamLaunch: { projectId, issueNumber }, selectedTeamId: null, settingsBotId: null }),
+  openTeamLaunch: (projectId, issueNumber, repo = '') =>
+    set({ teamLaunch: { projectId, issueNumber, repo }, selectedTeamId: null, settingsBotId: null }),
 
   closeTeamLaunch: () => set({ teamLaunch: null }),
 

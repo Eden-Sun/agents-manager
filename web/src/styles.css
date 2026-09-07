@@ -5312,6 +5312,31 @@ button.model-tag[aria-expanded='true'] {
   background: var(--bg-panel);
 }
 
+/* submodule 選單：跟搜尋框同高，在「open / closed」分頁前面。 */
+.issues-repo-pick {
+  flex: none;
+  max-width: 46%;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+/* team 標題 / 側欄節點 / 組隊頁：submodule 路徑放在 #號前面，用 mono 退一階。 */
+.team-repo,
+.team-node-repo {
+  margin-right: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .issues-tools input[type='search'] {
   flex: 1;
   min-width: 0;

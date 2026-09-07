@@ -52,6 +52,13 @@ export interface ProjectGithub {
   url: string
 }
 
+/** `GET /api/projects/:id/submodules` 的一項：專案裡的 git submodule 與它自己的 GitHub origin。 */
+export interface ProjectSubmodule {
+  /** 相對於專案根目錄的路徑（`.gitmodules` 的 `path`）。 */
+  path: string
+  github: ProjectGithub | null
+}
+
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
 export interface Host {
   /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */
@@ -865,6 +872,8 @@ export interface Team {
   pr_url: string | null
   /** SPEC-team §10.7：使用者從這個 team 關掉 issue 的時間；null = 沒關過（daemon 不會自己關）。 */
   issue_closed_at: string | null
+  /** 這個 team 處理的是專案哪個 submodule 的 issue；`''` = 專案本身。 */
+  repo: string
   created_at: string
   started_at: string | null
   ended_at: string | null
@@ -931,6 +940,8 @@ export interface TeamWorkersSpec extends TeamRoleSpec {
 export interface NewTeamInput {
   /** §2.3：依序處理的 issue 佇列。 */
   issue_numbers: number[]
+  /** 要解的是哪個 submodule 的 issue（相對路徑）；省略 = 專案本身。 */
+  repo?: string
   pm: TeamRoleSpec
   workers: TeamWorkersSpec
   /** null = 不審查，`reported` 直接進整合。 */

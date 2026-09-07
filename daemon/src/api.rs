@@ -48,6 +48,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/messages", get(get_project_messages))
         .route("/projects/{id}/chat", post(project_chat))
         .route("/projects/{id}/github/refresh", post(refresh_github))
+        .route("/projects/{id}/submodules", get(get_submodules))
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
         // SPEC-team §10
@@ -425,6 +426,24 @@ struct IssuesQuery {
     limit: Option<u32>,
     q: Option<String>,
     refresh: Option<String>,
+    /// Submodule path (relative to the project); absent or empty = the project itself.
+    repo: Option<String>,
+}
+
+/// `GET /api/projects/:id/submodules?refresh=1` — the project's `.gitmodules` entries with
+/// their GitHub origins, so the UI can offer a submodule's issues next to the project's.
+async fn get_submodules(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<IssuesQuery>,
+) -> Result<Json<Value>, LcError> {
+    let p = db::project(&app.db, &id)
+        .await
+        .map_err(any_err)?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let subs = crate::github::list_submodules(&app, &p, flag(&q.refresh)).await?;
+    Ok(Json(json!({"project_id": id, "submodules": subs})))
 }
 
 async fn get_issues(
@@ -433,12 +452,17 @@ async fn get_issues(
     Query(q): Query<IssuesQuery>,
 ) -> Result<Json<Value>, LcError> {
     let state = q.state.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "open".into());
-    let v = crate::github::list_issues(&app, &id, &state, q.limit.unwrap_or(30), q.q.as_deref(), flag(&q.refresh)).await?;
+    let repo = q.repo.clone().unwrap_or_default();
+    let v = crate::github::list_issues(&app, &id, &repo, &state, q.limit.unwrap_or(30), q.q.as_deref(), flag(&q.refresh)).await?;
     Ok(Json(v))
 }
 
-async fn get_issue(State(app): State<Arc<App>>, Path((id, number)): Path<(String, u64)>) -> Result<Json<Value>, LcError> {
-    Ok(Json(crate::github::get_issue(&app, &id, number).await?))
+async fn get_issue(
+    State(app): State<Arc<App>>,
+    Path((id, number)): Path<(String, u64)>,
+    Query(q): Query<IssuesQuery>,
+) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::github::get_issue(&app, &id, q.repo.as_deref().unwrap_or(""), number).await?))
 }
 
 // ---------------------------------------------------------------- SPEC-team §10: teams

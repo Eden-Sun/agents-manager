@@ -936,7 +936,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
             ⚙
           </span>
           <strong title={team.issue_title}>
-            Team · #{team.issue_number} {team.issue_title}
+            Team · {team.repo ? <span className="team-repo mono" title={`submodule ${team.repo}`}>{team.repo}</span> : null}#{team.issue_number} {team.issue_title}
           </strong>
           <span className={`team-phase ${teamPhaseTone(team.phase)}`} title={team.pause_reason ? teamPauseLabel(team.pause_reason) : undefined}>
             {TEAM_PHASE_LABEL[team.phase]}

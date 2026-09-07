@@ -24,6 +24,34 @@ const GH_TIMEOUT: Duration = Duration::from_secs(40);
 /// `body_excerpt` length in characters.
 const EXCERPT_CHARS: usize = 300;
 
+/// A git submodule of a project: where it is (relative to the project) and what it points at.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Submodule {
+    pub path: String,
+    pub github: Option<GithubInfo>,
+}
+
+/// `<project.path>/<repo>`; `repo = ""` is the project itself.
+pub fn repo_path(project_path: &str, repo: &str) -> String {
+    let r = repo.trim().trim_matches('/');
+    if r.is_empty() {
+        project_path.to_string()
+    } else {
+        format!("{}/{r}", project_path.trim_end_matches('/'))
+    }
+}
+
+/// Reject anything that is not a plain relative path: no `..`, no absolute, no empty segments.
+pub fn valid_repo_rel(repo: &str) -> bool {
+    let r = repo.trim();
+    if r.is_empty() {
+        return true;
+    }
+    !r.starts_with('/')
+        && !r.contains('\\')
+        && r.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GithubInfo {
     pub owner: String,
@@ -168,6 +196,41 @@ pub fn spawn_detect_all(app: Arc<App>) {
     spawn_detect_host(app, LOCAL_HOST.to_string());
 }
 
+/// `GET /api/projects/:id/submodules` — every `.gitmodules` entry, with its own GitHub origin
+/// when it has one. Cached like the issue list; `refresh` bypasses the cache.
+pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> Result<Vec<Submodule>, LcError> {
+    if !refresh {
+        if let Some((at, v)) = app.submodules_cache.lock().await.get(&p.id) {
+            if at.elapsed() < ISSUES_TTL {
+                return Ok(v.clone());
+            }
+        }
+    }
+    // One round trip: each line is `<path>|<origin url or empty>`. A submodule that is listed
+    // but not checked out has no `.git`, so its origin comes back empty and it is still listed.
+    let script = format!(
+        "{PATH_FIX}cd {} || exit 0\n\
+         test -f .gitmodules || exit 0\n\
+         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | awk '{{print $2}}' | while IFS= read -r p; do\n\
+           printf '%s|%s\\n' \"$p\" \"$(git -C \"$p\" remote get-url origin 2>/dev/null)\"\n\
+         done",
+        sh_quote(&p.path)
+    );
+    let out = run_on_host(app, &p.host, &script, GIT_TIMEOUT).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let mut subs = Vec::new();
+    for line in strip_ansi(&out).lines() {
+        let Some((path, url)) = line.split_once('|') else { continue };
+        let path = path.trim().trim_matches('/').to_string();
+        if path.is_empty() || !valid_repo_rel(&path) {
+            continue;
+        }
+        subs.push(Submodule { path, github: parse_github_remote(url) });
+    }
+    subs.sort_by(|a, b| a.path.cmp(&b.path));
+    app.submodules_cache.lock().await.insert(p.id.clone(), (Instant::now(), subs.clone()));
+    Ok(subs)
+}
+
 /// The cached value for `GET /api/state` (`None` = unknown / not GitHub → `null`).
 pub async fn cached(app: &Arc<App>, project_id: &str) -> Option<GithubInfo> {
     app.github.lock().await.get(project_id).cloned().flatten()
@@ -220,12 +283,28 @@ pub fn issue_summary(v: &Value) -> Value {
     })
 }
 
-async fn project_with_github(app: &Arc<App>, project_id: &str) -> Result<(db::Project, GithubInfo), LcError> {
+/// The project and the GitHub origin of `repo` within it: the project's own when `repo` is
+/// empty, otherwise the submodule's. A `repo` that is not a listed submodule is a 400 — the
+/// list is the only thing that turns a user-supplied path into a directory git runs in.
+async fn project_with_github(app: &Arc<App>, project_id: &str, repo: &str) -> Result<(db::Project, GithubInfo), LcError> {
     let p = db::project(&app.db, project_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let repo = repo.trim().trim_matches('/');
+    if !repo.is_empty() {
+        if !valid_repo_rel(repo) {
+            return Err(LcError::Bad(format!("repo `{repo}` is not a relative path")));
+        }
+        let subs = list_submodules(app, &p, false).await?;
+        let sub = subs
+            .iter()
+            .find(|s| s.path == repo)
+            .ok_or_else(|| LcError::Bad(format!("`{repo}` is not a submodule of this project")))?;
+        let gh = sub.github.clone().ok_or_else(|| LcError::Bad(format!("submodule `{repo}` has no GitHub origin")))?;
+        return Ok((p, gh));
+    }
     let gh = match cached(app, &p.id).await {
         Some(g) => g,
         None => detect_project(app, &p).await.ok_or_else(|| LcError::Bad("project has no GitHub origin".into()))?,
@@ -237,6 +316,7 @@ async fn project_with_github(app: &Arc<App>, project_id: &str) -> Result<(db::Pr
 pub async fn list_issues(
     app: &Arc<App>,
     project_id: &str,
+    repo: &str,
     state: &str,
     limit: u32,
     q: Option<&str>,
@@ -248,8 +328,8 @@ pub async fn list_issues(
     };
     let limit = limit.clamp(1, 100);
     let q = q.map(str::trim).filter(|s| !s.is_empty());
-    let (p, gh) = project_with_github(app, project_id).await?;
-    let key = format!("{}|{state}|{limit}|{}", p.id, q.unwrap_or(""));
+    let (p, gh) = project_with_github(app, project_id, repo).await?;
+    let key = format!("{}|{repo}|{state}|{limit}|{}", p.id, q.unwrap_or(""));
     if !refresh {
         if let Some((at, v)) = app.issues_cache.lock().await.get(&key) {
             if at.elapsed() < ISSUES_TTL {
@@ -271,6 +351,7 @@ pub async fn list_issues(
     let v = json!({
         "project_id": p.id,
         "repo": gh.slug(),
+        "repo_path": repo.trim().trim_matches('/'),
         "source": "gh",
         "fetched_at": db::now(),
         "issues": arr.iter().map(issue_summary).collect::<Vec<_>>(),
@@ -280,8 +361,8 @@ pub async fn list_issues(
 }
 
 /// `GET /api/projects/:id/issues/:number` — full body, uncached.
-pub async fn get_issue(app: &Arc<App>, project_id: &str, number: u64) -> Result<Value, LcError> {
-    let (p, gh) = project_with_github(app, project_id).await?;
+pub async fn get_issue(app: &Arc<App>, project_id: &str, repo: &str, number: u64) -> Result<Value, LcError> {
+    let (p, gh) = project_with_github(app, project_id, repo).await?;
     let cmd = format!(
         "{PATH_FIX}gh issue view {number} --repo {} --json number,title,state,labels,url,updatedAt,author,body",
         sh_quote(&gh.slug())
@@ -294,7 +375,7 @@ pub async fn get_issue(app: &Arc<App>, project_id: &str, number: u64) -> Result<
         o.remove("body_excerpt");
         o.insert("body".into(), json!(v.get("body").and_then(|b| b.as_str()).unwrap_or("")));
     }
-    Ok(json!({"project_id": p.id, "repo": gh.slug(), "issue": issue}))
+    Ok(json!({"project_id": p.id, "repo": gh.slug(), "repo_path": repo.trim().trim_matches('/'), "issue": issue}))
 }
 
 /// `gh issue close` — the daemon's only write to GitHub outside `deliver=pr`.
@@ -310,10 +391,11 @@ pub async fn get_issue(app: &Arc<App>, project_id: &str, number: u64) -> Result<
 pub async fn close_issue(
     app: &Arc<App>,
     project_id: &str,
+    repo: &str,
     number: u64,
     comment: Option<&str>,
 ) -> Result<Value, LcError> {
-    let (p, gh) = project_with_github(app, project_id).await?;
+    let (p, gh) = project_with_github(app, project_id, repo).await?;
     let slug = gh.slug();
     let view = format!(
         "{PATH_FIX}gh issue view {number} --repo {} --json number,state,url,title",
