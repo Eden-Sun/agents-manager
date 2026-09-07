@@ -2342,6 +2342,23 @@ button:disabled {
   color: var(--accent-ink);
 }
 
+/* 「看目前內容」：輸出中的半成品預設收著，這顆是唯一的入口，做成連結樣式跟旁邊的狀態字對齊。 */
+.live-peek {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-ink);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.live-peek:hover {
+  color: var(--text);
+}
+
 .msg.rail .bubble.rail,
 .bubble.rail {
   border-left: 3px solid var(--border-strong);
