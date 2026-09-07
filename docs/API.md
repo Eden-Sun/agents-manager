@@ -193,7 +193,12 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 409 的 `reason` 可能是：`bot has no active run`、`run is not running`、
 `agent is blocked; answer the prompt first`、`a turn is already in flight`、
-`a previous turn has unknown delivery; abandon it first`。
+`a previous turn has unknown delivery; abandon it first`、`needs_login`。
+
+`needs_login`（2026-09-08）：claude 的 pane 正停在開場的「Select login method」選單（那個
+`CLAUDE_CONFIG_DIR` 還沒登入過）。送 prompt 前 daemon 會先讀一次 pane 畫面；中了就不建 turn、
+直接回 `{"error":"conflict","reason":"needs_login","identity":"cc2","message":"…"}`，並在對話裡
+插一則 system 訊息說明怎麼登入。以前這種情況 prompt 會被打進選單、回合掛到 stall 才失敗。
 
 ## 6. 讀訊息
 
