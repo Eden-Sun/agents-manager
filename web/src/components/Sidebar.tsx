@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { MOCK_MODE } from '../api'
 import type { BotKind } from '../api/types'
@@ -759,7 +759,10 @@ export function Sidebar() {
         ) : null}
         {projects.map((p) => {
           // SPEC-team §11.4：team 成員縮排列在 Team 節點底下，不與一般 bot 混排。
-          const list = botsOfProject({ bots, botOrder }, p.id).filter((b) => b.team === null)
+          const all = botsOfProject({ bots, botOrder }, p.id).filter((b) => b.team === null)
+          // 子 agent（bot 自己用 herdr 開的，名稱帶父 agent 前綴）縮排在父 bot 底下，不參與拖曳排序。
+          const list = all.filter((b) => !b.parent_bot_id)
+          const childrenOf = (id: string) => all.filter((b) => b.parent_bot_id === id)
           const projectSelected = selectedProjectId === p.id
           return (
             <section className="project" key={p.id}>
@@ -811,7 +814,14 @@ export function Sidebar() {
                 </div>
               ) : (
                 list.map((b) => (
-                  <BotRow key={b.id} botId={b.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
+                  <Fragment key={b.id}>
+                    <BotRow botId={b.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
+                    {childrenOf(b.id).map((c) => (
+                      <div key={c.id} className="bot-child">
+                        <BotRow botId={c.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
+                      </div>
+                    ))}
+                  </Fragment>
                 ))
               )}
               <TeamNodes projectId={p.id} />

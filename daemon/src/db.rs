@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS bots (
   team_role TEXT,
   cwd TEXT,
   herdr_session TEXT,
+  -- A herdr agent the bot itself spawned (named `<parent agent name>-<suffix>`), adopted by
+  -- the reconcile and shown under its parent. NULL = a top-level bot.
+  parent_bot_id TEXT,
   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL;
@@ -226,6 +229,7 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         ("runs", "tab_id", "ALTER TABLE runs ADD COLUMN tab_id TEXT"),
         ("runs", "herdr_session", "ALTER TABLE runs ADD COLUMN herdr_session TEXT"),
         ("teams", "repo", "ALTER TABLE teams ADD COLUMN repo TEXT NOT NULL DEFAULT ''"),
+        ("bots", "parent_bot_id", "ALTER TABLE bots ADD COLUMN parent_bot_id TEXT"),
         // What the agent calls itself right now (its terminal title, e.g. Claude Code's
         // one-line summary of the task it is on).
         ("runs", "agent_title", "ALTER TABLE runs ADD COLUMN agent_title TEXT"),
@@ -423,9 +427,10 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
                team_role TEXT,
                cwd TEXT,
                herdr_session TEXT,
+               parent_bot_id TEXT,
                hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
-            "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, hook_token, deleted_at, created_at)
-               SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, hook_token, deleted_at, created_at FROM bots",
+            "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at)
+               SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at FROM bots",
             "DROP TABLE bots",
             "ALTER TABLE bots_new RENAME TO bots",
             "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
@@ -556,6 +561,8 @@ pub struct Bot {
     pub cwd: Option<String>,
     /// Herdr session override. `Some("default")` identifies an imported user-session bot.
     pub herdr_session: Option<String>,
+    /// The bot whose agent spawned this one (`<parent agent name>-<suffix>`); None = top-level.
+    pub parent_bot_id: Option<String>,
     #[serde(skip_serializing)]
     pub hook_token: String,
     pub deleted_at: Option<String>,

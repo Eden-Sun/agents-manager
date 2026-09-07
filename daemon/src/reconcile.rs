@@ -8,6 +8,7 @@ use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::state::App;
 use anyhow::Result;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -99,6 +100,11 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     }
 
     let bots = db::live_bots_on_host(&app.db, host).await?;
+    // Every herdr agent name a bot claimed in this pass; what is left over is a stranger,
+    // and a stranger named `<some bot's agent name>-<suffix>` is that bot's child (below).
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // `(agent name, bot id)` of every bot, for the prefix match.
+    let mut parents: Vec<(String, db::Bot)> = Vec::new();
     for bot in bots {
         // A local bot imported from the user's default session is reconciled by
         // default_session::sync; it must not be marked exited because it is absent from the
@@ -120,6 +126,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         // Names this bot may be running under: the run's recorded name, the current
         // `<project>-<bot>` scheme, and the legacy bare bot name (runs from before v3.5).
         let computed = db::agent_name_for_bot(&app.db, &bot).await?;
+        parents.push((computed.clone(), bot.clone()));
         let mut candidates: Vec<String> = Vec::new();
         if let Some(r) = &active {
             if let Some(n) = r.agent_name.clone().filter(|s| !s.is_empty()) {
@@ -158,6 +165,9 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 }
             }
         }
+        if let Some(n) = &found_name {
+            claimed.insert(n.clone());
+        }
         match (active, found.as_ref()) {
             (Some(run), Some(agent)) => {
                 let agent: &crate::herdr::AgentInfo = agent;
@@ -193,6 +203,17 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             (Some(run), None) => {
                 tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
                 crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
+                // A spawned child exists only as long as its pane: retire it with the run,
+                // keeping its conversation the way any deleted bot keeps it.
+                if bot.managed_by == "child" {
+                    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+                        .bind(db::now())
+                        .bind(&bot.id)
+                        .execute(&app.db)
+                        .await?;
+                    app.emit("project_changed", json!({"project_id": bot.project_id})).await;
+                    tracing::info!(host, bot = %bot.name, "reconcile: spawned child retired with its pane");
+                }
             }
             (None, Some(agent)) => {
                 let run_id = db::ulid();
@@ -227,6 +248,79 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             (None, None) => {}
         }
         app.emit_bot_status(&bot.id).await;
+    }
+
+    // Spawned children: an agent nobody claimed whose name is `<parent agent name>-<suffix>`
+    // becomes a `managed_by='child'` bot under that parent, with an adopted run. The parent's
+    // persona (`lifecycle::spawn_rule`) is what tells the agent to name its children that way.
+    // Longest prefix wins, so a grandchild lands under the child, not the grandparent.
+    let mut new_children = 0usize;
+    for agent in agents.iter() {
+        let Some(name) = agent.name.as_deref() else { continue };
+        if claimed.contains(name) {
+            continue;
+        }
+        let parent = parents
+            .iter()
+            .filter(|(pn, _)| name.len() > pn.len() + 1 && name.starts_with(pn.as_str()) && name.as_bytes()[pn.len()] == b'-')
+            .max_by_key(|(pn, _)| pn.len());
+        let Some((parent_name, parent)) = parent else { continue };
+        let suffix = &name[parent_name.len() + 1..];
+        let child_name = if crate::config::valid_bot_name(suffix) { suffix.to_string() } else { name.to_string() };
+        let kind = agent
+            .agent
+            .as_deref()
+            .filter(|k| crate::config::valid_kind(k))
+            .unwrap_or(parent.kind.as_str())
+            .to_string();
+        let bot_id = db::ulid();
+        let now = db::now();
+        // Hooks are never injected here (the pane was started by the parent, not by us), so the
+        // child's replies come from the terminal fallback; that is the same as any adopted run.
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve,
+               identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, created_at)
+             VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',NULL,NULL,?,?,?,?,?)",
+        )
+        .bind(&bot_id)
+        .bind(&parent.project_id)
+        .bind(&child_name)
+        .bind(&kind)
+        .bind(&parent.identity)
+        .bind(agent.cwd.clone())
+        .bind(&session)
+        .bind(&parent.id)
+        .bind(db::ulid())
+        .bind(&now)
+        .execute(&app.db)
+        .await?;
+        let run_id = db::ulid();
+        let status = agent.agent_status.normalized().as_str().to_string();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running',?,?,?,?,1,?,?,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(&status)
+        .bind(&agent.workspace_id)
+        .bind(&agent.pane_id)
+        .bind(&agent.tab_id)
+        .bind(name)
+        .bind(&session)
+        .bind(&now)
+        .execute(&app.db)
+        .await?;
+        claimed.insert(name.to_string());
+        crate::events::watch_pane_on_session(app, host, &session, &agent.pane_id).await;
+        app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+        app.emit_bot_status(&bot_id).await;
+        new_children += 1;
+        tracing::info!(host, parent = %parent.name, child = %child_name, agent = %name, pane = %agent.pane_id,
+                       "reconcile: adopted a spawned child agent");
+    }
+    if new_children > 0 {
+        app.emit("project_changed", json!({})).await;
     }
 
     // Orphan pane recovery: panes we created for finished runs that no longer host an agent.

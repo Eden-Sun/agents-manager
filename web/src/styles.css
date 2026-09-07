@@ -689,6 +689,16 @@ button:disabled {
   bottom: -1px;
 }
 
+/* 子 agent：縮排一階、左邊一條細線把它掛在父 bot 下面（跟 team 成員同一種視覺語言）。 */
+.bot-child {
+  margin-left: 18px;
+  border-left: 1px solid var(--border);
+}
+
+.bot-child .bot-row {
+  padding-left: 10px;
+}
+
 .bot-row.selected {
   background: var(--bg-active);
   border-left-color: var(--accent);

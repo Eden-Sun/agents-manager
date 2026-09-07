@@ -246,6 +246,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "herdr_session": b.herdr_session.clone(),
                 // SPEC-team §10.2: `user` for config.toml bots, `team` for team members.
                 "managed_by": b.managed_by,
+                "parent_bot_id": b.parent_bot_id,
                 "cwd": b.cwd,
                 "team": crate::team::bot_team_json(b),
                 // herdr agent name: the live run's, else what the next start will use.
@@ -952,6 +953,14 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
     // SPEC §6.4: stop first (ctrl+c x2, pane closed on timeout), then drop the config entry.
     let _ = lifecycle::stop_bot(&app, &id).await;
+    // A spawned child never entered config.toml, so the projection cannot retire it.
+    if bot.managed_by == "child" {
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
+        lifecycle::purge_bot_dir(&app, &id, &host).await;
+        app.emit("bot_changed", json!({"bot_id": id})).await;
+        app.emit("project_changed", json!({"project_id": bot.project_id})).await;
+        return Ok((StatusCode::OK, Json(json!({}))).into_response());
+    }
     app.cfg
         .update(|cfg| {
             for p in cfg.projects.iter_mut() {

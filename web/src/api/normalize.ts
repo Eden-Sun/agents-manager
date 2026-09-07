@@ -273,8 +273,9 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     })(),
     env: envMap(pick(v, 'env', 'env_json')),
     // SPEC-team §2.1：舊 daemon 沒有這些欄位 → `user` / null / null（行為與 team 之前相同）。
-    managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'team'], 'user'),
+    managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'team', 'child'], 'user'),
     team: toBotTeamRef(v),
+    parent_bot_id: optStr(pick(v, 'parent_bot_id')),
     cwd: optStr(pick(v, 'cwd')),
     herdr_session: optStr(pick(v, 'herdr_session', 'session')),
     // debug 用的 herdr agent 名稱；舊 daemon 不送就是 null（UI 那顆晶片自己不渲染）。
