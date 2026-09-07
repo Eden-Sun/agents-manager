@@ -2862,7 +2862,15 @@ export class MockTransport implements Transport {
     if (t.issues.length + numbers.length > 20) {
       throw new ApiError(400, { error: 'bad_request', message: 'at most 20 issues per team' }, 'bad request')
     }
-    const duplicate = numbers.find((number, index) => numbers.slice(0, index).includes(number) || t.issues.some((issue) => issue.issue_number === number))
+    // SPEC-team §2.3：只有還在佇列上（`queued` / `working`）的同號 issue 才擋；做完 / 失敗 /
+    // 略過的可以再排一次（新的一列，舊的留著當紀錄）。
+    const duplicate = numbers.find(
+      (number, index) =>
+        numbers.slice(0, index).includes(number) ||
+        t.issues.some(
+          (issue) => issue.issue_number === number && (issue.state === 'queued' || issue.state === 'working'),
+        ),
+    )
     if (duplicate !== undefined) {
       throw new ApiError(409, { error: 'conflict', reason: 'issue already queued', issue_number: duplicate }, 'conflict')
     }

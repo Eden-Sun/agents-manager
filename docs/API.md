@@ -1338,6 +1338,23 @@ daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機
 `POST /api/projects/{id}/teams` 的 body 也接受 `repo`：team 的 worktree、分支、合併、PR 與關 issue 全部在**那個 submodule 的 repo** 裡進行；
 team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4。
 
+#### `POST /api/teams/{id}/issues` 的 409（2026-09-07 修正）
+
+追加 issue 到 team 佇列（`{"issue_numbers":[57,58]}`，或單數 `{"issue_number":57}`），成功回 `200 {"issues":[…]}`。
+409 的 `reason` 有三種：
+
+| `reason` | 何時 | extra |
+|---|---|---|
+| `team is finished` | `aborted` / `failed` 的 team（`done` 且未 cleanup 則放行並 reopen，SPEC-team §2.5） | `phase` |
+| `team is cleaned up` | `done` 但已 cleanup（沒有活著的 PM 可以接手） | `phase` |
+| `issue already queued` | 同號 issue **還在佇列上**，也就是該 `team_issues` 列的 `state` 是 `queued` 或 `working`；同一個請求裡自己重複（`[57, 57]`）也算 | `issue_number` |
+
+**`issue already queued` 只看還在佇列上的列**：`done` / `failed` / `skipped` 是做完那一趟的紀錄，
+同一個 issue **可以再排一次**（失敗後重試、或想再做一趟），舊列留著、新列取下一個 `seq`，
+第 n 趟的整合分支是 `team/i<issue>-<tid6>-r<n>`。詳見 SPEC-team §2.3「再排同一個 issue」。
+> 修正前是拿**全部**列（含 `done` / `failed` / `skipped`）比對 issue 號，所以一個 issue 在同一隊做過一次
+> 就永遠不能再排，UI 只會看到「追加 issue 失敗：issue already queued」。
+
 ## 子 agent（bot 自己開的 pane，2026-09-07 新增）
 
 daemon 起的每個 agent 都帶一段預設人設（`lifecycle::child_agent_rules`，接在使用者的 `bot.persona` 前面）：

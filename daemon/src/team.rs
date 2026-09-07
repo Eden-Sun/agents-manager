@@ -55,6 +55,14 @@ pub fn is_terminal(phase: &str) -> bool {
     TERMINAL_PHASES.contains(&phase)
 }
 
+/// SPEC-team §2.3: the `team_issues` states that still hold a place in the queue — waiting to
+/// start, or being worked right now. The other three (`done` / `failed` / `skipped`) are
+/// finished records: they stay in the log for good, but they no longer reserve the issue
+/// number, so the same issue can be queued again as a later `seq`.
+pub fn is_open_issue_state(state: &str) -> bool {
+    state == "queued" || state == "working"
+}
+
 // ---------------------------------------------------------------- budget
 
 /// SPEC-team §9.2 / §12 #2 — the defaults are the user's ruling, not a proposal.
@@ -262,7 +270,33 @@ pub fn tid6(team_id: &str) -> String {
 
 /// SPEC-team §6.2: the integration branch, `team/i<issue>-<tid6>`.
 pub fn integration_branch(issue_number: i64, tid6: &str) -> String {
-    format!("team/i{issue_number}-{tid6}")
+    integration_branch_pass(issue_number, tid6, 1)
+}
+
+/// The integration branch for the `pass`-th time this team takes on this issue number
+/// (1-based). §2.3 lets a `done` / `failed` / `skipped` issue be queued again, and the branch
+/// from the earlier pass is still there — branches are never deleted except by `delete`
+/// (§6.5) — so `git checkout -b` on the same name would simply fail. The second and later
+/// passes therefore get a `-r<pass>` suffix; the first keeps the plain §6.2 name, so nothing
+/// that already exists is renamed.
+pub fn integration_branch_pass(issue_number: i64, tid6: &str, pass: usize) -> String {
+    if pass <= 1 {
+        format!("team/i{issue_number}-{tid6}")
+    } else {
+        format!("team/i{issue_number}-{tid6}-r{pass}")
+    }
+}
+
+/// The integration branch for one queue row: how many times this team has taken on that issue
+/// number, counting this row, decides which pass it is.
+async fn issue_branch(app: &Arc<App>, team_id: &str, q: &db::TeamIssue) -> LcResult<String> {
+    let pass = db::team_issues(&app.db, team_id)
+        .await
+        .map_err(any_err)?
+        .iter()
+        .filter(|i| i.issue_number == q.issue_number && i.seq <= q.seq)
+        .count();
+    Ok(integration_branch_pass(q.issue_number, &tid6(team_id), pass))
 }
 
 /// A task branch, `<integration>-t<seq>-<worker short name>`.
@@ -1228,10 +1262,16 @@ async fn check_add_issues(app: &Arc<App>, t: &db::Team, numbers: &[i64]) -> LcRe
     if existing.len() + numbers.len() > MAX_QUEUED_ISSUES {
         return Err(LcError::Bad(format!("at most {MAX_QUEUED_ISSUES} issues per team")));
     }
-    // Duplicates inside the request itself count too — `[57, 57]` would otherwise queue #57
-    // twice and the second pass would never be startable.
+    // "Already queued" means still **on** the queue: `queued` (waiting) or `working` (running).
+    // A `done` / `failed` / `skipped` row is a finished record, not a claim on the issue
+    // number, so the same issue can be queued again — a failed one to retry it, a delivered
+    // one because the user wants another pass. The old row stays in the log and the new one
+    // takes the next `seq` (§2.3). Duplicates inside the request itself count too: `[57, 57]`
+    // would otherwise queue #57 twice and the second pass would never be startable.
     if let Some(issue_number) = numbers.iter().enumerate().find_map(|(index, issue)| {
-        (numbers[..index].contains(issue) || existing.iter().any(|i| i.issue_number == *issue)).then_some(*issue)
+        (numbers[..index].contains(issue)
+            || existing.iter().any(|i| i.issue_number == *issue && is_open_issue_state(&i.state)))
+            .then_some(*issue)
     }) {
         return Err(LcError::conflict("issue already queued", json!({"issue_number": issue_number})));
     }
@@ -1381,7 +1421,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
         .map_err(any_err)?
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     let t6 = tid6(team_id);
-    let branch = integration_branch(q.issue_number, &t6);
+    let branch = issue_branch(app, team_id, q).await?;
     let root = t.worktree_root.clone();
     let main_wt = checked_main_wt(&t, &project).map_err(LcError::Bad)?;
 
@@ -2002,10 +2042,13 @@ pub async fn close_issue_for(
     let t = load(app, team_id).await?;
     let target = match issue_id {
         Some(id) => db::team_issue(&app.db, id).await.map_err(any_err)?.filter(|i| i.team_id == team_id),
+        // No `issue_id` means "the one `teams` mirrors", i.e. the latest pass on that number —
+        // §2.3 lets the same issue be queued more than once, so search from the back.
         None => db::team_issues(&app.db, team_id)
             .await
             .map_err(any_err)?
             .into_iter()
+            .rev()
             .find(|i| i.issue_number == t.issue_number),
     }
     .ok_or_else(|| LcError::NotFound("issue".into()))?;
@@ -3855,6 +3898,94 @@ mod api_tests {
         assert_eq!(tail[2].0, "phase");
         assert_eq!((tail[2].1["from"].as_str(), tail[2].1["to"].as_str()), (Some("done"), Some("starting")));
         assert_eq!(tail[2].1["reason"], "reopen");
+    }
+
+    /// §2.3: "already queued" is `queued` / `working` only. A `done` / `failed` / `skipped`
+    /// entry is the record of a finished pass, so the same issue can go back on the queue —
+    /// the retry after a failure, or a second pass someone asks for. Before this, one pass
+    /// over #42 made #42 unqueueable in that team for ever, which is what the UI hit as
+    /// `409 issue already queued`.
+    #[tokio::test]
+    async fn a_finished_issue_can_be_queued_again() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(1), false)).await;
+        let set_state = |state: &'static str| {
+            let (db, tid) = (e.app.db.clone(), tid.clone());
+            async move {
+                sqlx::query("UPDATE team_issues SET state=? WHERE team_id=?")
+                    .bind(state)
+                    .bind(&tid)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        };
+
+        for state in ["done", "failed", "skipped"] {
+            set_state(state).await;
+            let t = load(&e.app, &tid).await.unwrap();
+            assert!(
+                check_add_issues(&e.app, &t, &[42]).await.is_ok(),
+                "a {state} #42 no longer holds the number"
+            );
+        }
+        // The two states that do hold it: the queue would otherwise have two live entries for
+        // one issue and the second could never be started.
+        for state in ["queued", "working"] {
+            set_state(state).await;
+            let t = load(&e.app, &tid).await.unwrap();
+            match check_add_issues(&e.app, &t, &[42]).await {
+                Err(LcError::Conflict(v)) => {
+                    assert_eq!(v["reason"], "issue already queued");
+                    assert_eq!(v["issue_number"], 42);
+                }
+                other => panic!("expected a conflict for a {state} #42, got {other:?}"),
+            }
+        }
+        // A duplicate inside one request is still a conflict, whatever the queue holds.
+        set_state("done").await;
+        let t = load(&e.app, &tid).await.unwrap();
+        match check_add_issues(&e.app, &t, &[42, 42]).await {
+            Err(LcError::Conflict(v)) => assert_eq!(v["issue_number"], 42),
+            other => panic!("expected a conflict for [42, 42], got {other:?}"),
+        }
+    }
+
+    /// The second pass appends a row instead of touching the first, and takes its own branch:
+    /// the first pass's `team/i42-<tid6>` is still in the repo (§6.5 never deletes branches),
+    /// so `checkout -b` on the same name would fail.
+    #[tokio::test]
+    async fn a_second_pass_appends_a_row_with_its_own_branch() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(1), false)).await;
+        sqlx::query("UPDATE team_issues SET state='failed', fail_reason='merge_conflict' WHERE team_id=?")
+            .bind(&tid)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        add_resolved_issues(&e.app, &tid, vec![issue()], false).await.unwrap();
+        let queue = db::team_issues(&e.app.db, &tid).await.unwrap();
+        assert_eq!(queue.len(), 2, "the failed pass is kept as the record");
+        assert_eq!((queue[0].seq, queue[0].state.as_str()), (1, "failed"));
+        assert_eq!((queue[1].seq, queue[1].issue_number, queue[1].state.as_str()), (2, 42, "queued"));
+
+        let t6 = tid6(&tid);
+        assert_eq!(issue_branch(&e.app, &tid, &queue[0]).await.unwrap(), format!("team/i42-{t6}"));
+        assert_eq!(issue_branch(&e.app, &tid, &queue[1]).await.unwrap(), format!("team/i42-{t6}-r2"));
+
+        // The partial unique index is the backstop: two *open* rows on one number stay
+        // impossible even if a caller bypasses `check_add_issues`.
+        let dup = sqlx::query(
+            "INSERT INTO team_issues (id, team_id, seq, issue_number, issue_title, issue_url, state, created_at)
+             VALUES (?,?,3,42,'t','u','queued',?)",
+        )
+        .bind(db::ulid())
+        .bind(&tid)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await;
+        assert!(dup.is_err(), "team_issues_number_open still forbids a second live #42");
     }
 
     /// §2.5.2: `reopen` is an auditable phase transition, not a paused state, and it clears
