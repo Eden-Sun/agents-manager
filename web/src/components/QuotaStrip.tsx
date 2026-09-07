@@ -521,6 +521,38 @@ function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: stri
   )
 }
 
+/**
+ * 條上那一格身分卡下緣的停用開關——主要入口就在這裡，數字正下方，一眼看得到。
+ * popover 裡那份（`DisableToggle`）留著當詳細版，兩邊共用同一份狀態。
+ */
+function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }) {
+  const q = useEntryQuota(entry, host)
+  const disabledMap = useDisabledQuota()
+  const key = quotaDisableKey(host, entry.kind, entry.identity)
+  const off = isQuotaDisabled(disabledMap, key)
+  const name = `${hostLabel(host)} · ${entryLabel(entry)}`
+  return (
+    <label
+      className={`quota-cell-toggle${off ? ' on' : ''}`}
+      title={
+        off
+          ? `${name} 已暫時停用：它底下的 Bot 收在側欄外，額度視窗 reset 後自動回來。`
+          : `暫時停用 ${name}：它底下的 Bot 先從側欄收起來，額度視窗 reset 後自動回來。`
+      }
+    >
+      <input
+        type="checkbox"
+        aria-label={`暫時停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`}
+        checked={off}
+        onChange={() => setQuotaDisabled(key, !off, off ? null : nextResetOf(q, Date.now()))}
+      />
+      <span className="quota-cell-toggle-text" aria-hidden="true">
+        {off ? '已停用' : '停用'}
+      </span>
+    </label>
+  )
+}
+
 /** codex 沒有 `/login`，一律開 shell 跑 `codex login`。 */
 function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
   const command = useStore((s) => cliLoginCommand('codex', identityEnv(s, host, 'codex', identity)))
@@ -702,15 +734,10 @@ export function QuotaStrip({
 
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
-      <button
-        type="button"
-        className={`quota-open${collapsed ? ' collapsed' : ''}`}
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        aria-label={`所有${quotaTitle(host)}`}
-        title={`所有${quotaTitle(host)}`}
-        onClick={() => setOpen((v) => !v)}
-      >
+      {/* 這排本來整個是一顆 `<button>`。停用開關要長在每一格身分卡裡（數字正下方），
+          checkbox 不能塞在 button 裡，所以改成一個容器：每一格自己有「點開 popover」的
+          按鈕，開關是它的兄弟節點。點條子照樣打開 popover，行為沒變。 */}
+      <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
         {/* 遠端才掛主機名：本機是預設狀態，多一個「本機」標籤只會佔掉標題列的寬度。 */}
         {remote ? (
           <span className="quota-host" aria-hidden="true">
@@ -733,15 +760,35 @@ export function QuotaStrip({
             }
           }
           return (
-            <Gauge key={entryReactKey(entry)} entry={entry} host={host} collapsed={collapsed} compact={compact} focused={focused} />
+            <span className="quota-cell" key={entryReactKey(entry)}>
+              <button
+                type="button"
+                className="quota-cell-open"
+                aria-expanded={open}
+                aria-haspopup="dialog"
+                aria-label={`所有${quotaTitle(host)}`}
+                title={`所有${quotaTitle(host)}`}
+                onClick={() => setOpen((v) => !v)}
+              >
+                <Gauge entry={entry} host={host} collapsed={collapsed} compact={compact} focused={focused} />
+              </button>
+              <StripDisableToggle entry={entry} host={host} />
+            </span>
           )
         })}
         {hidden > 0 ? (
-          <span className="quota-more" title={`還有 ${hidden} 組額度，點開看`}>
+          <button
+            type="button"
+            className="quota-more"
+            aria-expanded={open}
+            aria-haspopup="dialog"
+            title={`還有 ${hidden} 組額度，點開看`}
+            onClick={() => setOpen((v) => !v)}
+          >
             +{hidden}
-          </span>
+          </button>
         ) : null}
-      </button>
+      </div>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>
           <div className="quota-pop-title">{quotaTitle(host)}</div>

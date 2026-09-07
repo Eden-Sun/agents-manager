@@ -1207,6 +1207,11 @@ export function Sidebar() {
                   )
                 })
               )}
+              {/* 被停用的身分收走了幾個。清單非空時當一行腳註——執行中／有未讀的現在也會被收，
+                  不留一句話交代的話，使用者會以為 bot 不見了。 */}
+              {!projectShut && list.length > 0 && hiddenCount > 0 ? (
+                <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>
+              ) : null}
               {projectShut ? null : <TeamNodes projectId={p.id} />}
             </section>
           )
