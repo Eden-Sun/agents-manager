@@ -948,7 +948,13 @@ export function Sidebar() {
             沒有符合「{query}」的 Bot。
           </p>
         ) : null}
-        {projects.length === 0 ? (
+        {/* 斷線或重連中拿不到 state 時，空清單是「還不知道」，不是「沒有專案」——
+            daemon 重啟那幾秒曾把這句誤當成引導畫面顯示出來。 */}
+        {projects.length === 0 && socket !== 'open' ? (
+          <p className="hint" style={{ padding: '12px 14px' }}>
+            正在連線 daemon，稍等一下就會列出 Project…
+          </p>
+        ) : projects.length === 0 ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
             尚未設定任何 Project。請用下方的「新增 Project」開始。
           </p>

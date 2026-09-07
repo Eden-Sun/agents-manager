@@ -701,6 +701,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const st = await api.fetchState()
     const seq = acceptStateSeq(appliedStateSeq, st.daemon_seq)
     if (seq === null) return
+    // A daemon that has just come back can answer with an empty snapshot for a moment. While
+    // the socket is not open that is "not yet", not "everything was deleted": keep what we
+    // have rather than blanking the sidebar into the "no projects" onboarding.
+    if (st.projects.length === 0 && get().projects.length > 0 && get().socket !== 'open') return
     appliedStateSeq = seq
     const runs: Record<string, Run | null> = {}
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
