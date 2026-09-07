@@ -1116,7 +1116,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             className="btn menu-btn icon-tip"
             onClick={onOpenSidebar}
             aria-label="開啟側邊欄"
-            title="開啟側邊欄"
             data-tip="開啟側邊欄"
           >
             ☰
@@ -1147,7 +1146,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           className="btn menu-btn icon-tip"
           onClick={onOpenSidebar}
           aria-label="開啟側邊欄"
-          title="開啟側邊欄"
           data-tip="開啟側邊欄"
         >
           ☰
@@ -1165,7 +1163,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               className="icon-btn gear icon-tip"
               aria-label={`${bot.name} 的設定`}
               aria-expanded={settingsOpen}
-              title={`設定 ${bot.name}（模型、身份、autostart、刪除）`}
               data-tip={`設定 · ${bot.name}`}
               onClick={(e) => (settingsOpen ? closeSettings() : openSettings(botId, anchorOf(e.currentTarget)))}
             >

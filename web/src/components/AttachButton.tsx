@@ -60,7 +60,6 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
         className={`icon-btn attach-btn icon-tip${open ? ' on' : ''}${copied === 'ok' ? ' copied' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={open ? '關閉 attach 指令' : `複製 attach 指令：${command}`}
         aria-label={open ? '關閉 attach 指令' : '複製 attach 指令'}
         data-tip={open ? '關閉 attach 指令 · 終端' : '複製 attach 指令 · 終端'}
         onClick={onMainClick}

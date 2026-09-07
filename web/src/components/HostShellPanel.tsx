@@ -287,7 +287,6 @@ export function HostShellPanel({
           className="btn menu-btn icon-tip"
           onClick={onOpenSidebar}
           aria-label="開啟側邊欄"
-          title="開啟側邊欄"
           data-tip="開啟側邊欄"
         >
           ☰

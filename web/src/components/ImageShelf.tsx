@@ -271,14 +271,13 @@ export function ImageShelf() {
               type="button"
               className="icon-btn shelf-add icon-tip"
               aria-label="加入圖片到暫存區"
-              title={`加入圖片到暫存區（也可以拖進來或貼上）·單檔上限 ${formatSize(MAX_BYTES)}`}
               data-tip="加入圖片 · 暫存"
               onClick={() => picker.current?.click()}
             >
               ＋
             </button>
             {count > 0 ? (
-              <button type="button" className="icon-btn shelf-clear icon-tip" aria-label="清空暫存區" title="清空暫存區" data-tip="清空 · 暫存" onClick={clear}>
+              <button type="button" className="icon-btn shelf-clear icon-tip" aria-label="清空暫存區" data-tip="清空 · 暫存" onClick={clear}>
                 ✕
               </button>
             ) : null}
@@ -287,7 +286,6 @@ export function ImageShelf() {
               className="icon-btn shelf-fold icon-tip"
               aria-expanded={true}
               aria-label="收合圖片暫存區"
-              title="收合圖片暫存區"
               data-tip="收合 · 暫存"
               onClick={() => setOpenPersisted(false)}
             >
