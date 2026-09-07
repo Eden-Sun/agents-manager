@@ -1,5 +1,5 @@
-import type { BotKind, Identity } from '../api/types'
-import { projectHostName, useStore } from '../store/store'
+import type { BotKind } from '../api/types'
+import { identityStatusOfHost, projectHostName, useStore } from '../store/store'
 
 /** store 沒 export state 型別，這裡就地取——不動共用的 `store.ts`。 */
 type StoreState = ReturnType<typeof useStore.getState>
@@ -41,18 +41,37 @@ export function findLoginTargetId(
   return bot?.id ?? null
 }
 
+/** 各 kind 在 TUI 外面登入的 CLI 指令（claude 2.1.263 有 `auth login`、grok 1.0.13 有 `login`）。 */
+const CLI_LOGIN: Record<BotKind, string> = {
+  claude: 'claude auth login',
+  codex: 'codex login',
+  grok: 'grok login',
+}
+
 /**
  * 要打進主機 shell 的那一行。
  *
- * 身份的本體是 env（`Identity.env`，codex 通常是 `CODEX_HOME`）：不帶著它就會登到預設帳號，
- * 使用者按了半天還是那個沒登入的身份沒動。所以有 env 就用 `env K=V … codex login` 前綴；
- * 找不到那個身份（例如它是主機 shell 的 `ccN` alias，設定在那台機器上、這裡看不到 env）
- * 就送裸的 `codex login`——alias 的殼本來就已經把 env 帶好了。
+ * 身份的本體是 env（config 身份的 `Identity.env`；shell 的 `ccN` alias 只認得 `CLAUDE_CONFIG_DIR`，
+ * 由 `IdentityStatus.config_dir` 帶回來）：不帶著它就會登到預設帳號，使用者按了半天還是那個
+ * 沒登入的身份沒動。所以有 env 就用 `env K=V … <cli> login` 前綴；沒有（預設帳號 cc0，或這裡
+ * 看不到 env）就送裸的指令。
  */
-export function codexLoginCommand(identity: Identity | undefined): string {
-  const env = identity ? Object.entries(identity.env) : []
-  if (env.length === 0) return 'codex login'
-  return `env ${env.map(([k, v]) => `${k}=${shellQuote(v)}`).join(' ')} codex login`
+export function cliLoginCommand(kind: BotKind, env: Record<string, string>): string {
+  const entries = Object.entries(env)
+  if (entries.length === 0) return CLI_LOGIN[kind]
+  return `env ${entries.map(([k, v]) => `${k}=${shellQuote(v)}`).join(' ')} ${CLI_LOGIN[kind]}`
+}
+
+/**
+ * 從 store 湊出某身份在某主機上的 env：config 的 `[[identities]]` 優先，否則用該主機
+ * `identity_status` 回報的 `config_dir`（`ccN` alias），兩邊都沒有就是預設帳號、空物件。
+ */
+export function identityEnv(s: StoreState, host: string, kind: BotKind, identity: string | null): Record<string, string> {
+  if (!identity) return {}
+  const cfg = s.identities.find((i) => i.kind === kind && i.name === identity)
+  if (cfg) return cfg.env
+  const dir = identityStatusOfHost(s, host)[identity]?.config_dir
+  return dir && kind === 'claude' ? { CLAUDE_CONFIG_DIR: dir } : {}
 }
 
 /** 只求安全：一律單引號包起來，內部的單引號用 `'\''` 收尾再接。 */

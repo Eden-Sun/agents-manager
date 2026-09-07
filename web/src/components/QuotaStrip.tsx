@@ -3,8 +3,9 @@ import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, useStore } from '../store/store'
 import { KindIcon, KIND_LABEL } from './KindTag'
-import { QuotaLoginCodex } from './QuotaLogin-codex'
+import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
+import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
@@ -475,6 +476,12 @@ function Gauge({
   )
 }
 
+/** codex 沒有 `/login`，一律開 shell 跑 `codex login`。 */
+function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
+  const command = useStore((s) => cliLoginCommand('codex', identityEnv(s, host, 'codex', identity)))
+  return <QuotaLoginShell host={host} hostLabel={hostLabel(host)} kind="codex" command={command} />
+}
+
 function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const q = useEntryQuota(entry, host)
   const known = useStore((s) => {
@@ -514,9 +521,9 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           </p>
           {loggedOut ? (
             entry.kind === 'codex' ? (
-              <QuotaLoginCodex host={host} hostLabel={hostLabel(host)} identity={entry.identity} />
+              <CodexShellLogin host={host} identity={entry.identity} />
             ) : (
-              <QuotaLoginSlash kind={entry.kind} host={host} identity={entry.identity} />
+              <QuotaLoginSlash kind={entry.kind} host={host} hostLabel={hostLabel(host)} identity={entry.identity} />
             )
           ) : null}
         </>
