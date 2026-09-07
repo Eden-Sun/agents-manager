@@ -59,17 +59,21 @@ export function Bubble({
   msg,
   from,
   kind,
+  flash,
 }: {
   msg: Message
   from?: ReactNode
   kind?: BotKind
+  /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
+  flash?: boolean
 }) {
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
   const rail = system || msg.source === 'hook' || msg.source === 'system'
 
   return (
-    <article className={`msg ${msg.role}${rail ? ' rail' : ''}`}>
+    /* `data-msg-id`：唯一能從清單外面（浮窗、之後的搜尋）指回某一則訊息的把手。 */
+    <article className={`msg ${msg.role}${rail ? ' rail' : ''}${flash ? ' flash' : ''}`} data-msg-id={msg.id}>
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
@@ -261,6 +265,80 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
 }
 
 /**
+ * 「這回合的提問」浮窗：回合跑起來之後，把使用者最後送出的那則問題釘在對話區最上方。
+ *
+ * 為什麼要有它：回合一長，agent 的輸出會把提問推到捲軸上面幾千 px 之外，而「它到底在做
+ * 我交代的哪件事」正是這段等待裡唯一想確認的事。這時候要嘛往回捲（就失去了輸出的尾巴），
+ * 要嘛憑記憶——兩個都不好。
+ *
+ * 為什麼是浮窗而不是一條固定的列：它只在回合進行中存在，若佔掉版面高度，每個回合的開始
+ * 與結束都會讓整串訊息上下跳一次。浮在最上方只蓋住捲軸最上緣（那裡通常是舊訊息），
+ * 而「↓ 最新」與 composer 都在下方，不受影響。
+ *
+ * 互動是兩段的：夾成三行 → 點一下展開全文 → 再點一下捲到那則訊息並閃一下。第二段之後
+ * 收回夾行狀態——人已經被送到訊息本身了，浮窗不必再佔著三行以上。內容本來就短（沒被夾）
+ * 時沒有第一段，一點就直接捲過去。
+ */
+function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
+  // 關閉與展開都綁在 turn 上：換回合就自動回到「夾三行、沒關過」，不需要 effect 去清。
+  const [ui, setUi] = useState({ turn: turnId, closed: false, open: false })
+  if (ui.turn !== turnId) setUi({ turn: turnId, closed: false, open: false })
+  const bodyRef = useRef<HTMLButtonElement>(null)
+  // 只有真的被夾掉才有「展開」這一段；短提問一點就走。夾行狀態下量，展開後沿用上次的值。
+  const [clamped, setClamped] = useState(false)
+  useLayoutEffect(() => {
+    const el = bodyRef.current
+    if (!el || ui.open) return
+    setClamped(el.scrollHeight - el.clientHeight > 2)
+  }, [msg.content, ui.open])
+
+  if (ui.closed) return null
+
+  const body = msg.content.trim() || (msg.attachments.length ? `（${msg.attachments.length} 張圖片）` : '（空白訊息）')
+  const jumpable = !clamped || ui.open
+
+  return (
+    <div className="lastq-slot">
+      <div className={`lastq${ui.open ? ' open' : ''}`} role="region" aria-label="這回合的提問">
+        <div className="lastq-head">
+          <span className="lastq-tag">這回合的提問</span>
+          <time className="lastq-time" dateTime={msg.created_at} title={msg.created_at}>
+            {timeOf(msg.created_at)}
+          </time>
+          {clamped ? <span className="lastq-hint">{ui.open ? '再點一下 · 捲到這則' : '點一下 · 展開全文'}</span> : null}
+          <button
+            type="button"
+            className="lastq-x"
+            aria-label="關閉這回合的提問浮窗"
+            title="關閉。這一回合不會再出現，下一回合會再顯示"
+            onClick={() => setUi((u) => ({ ...u, closed: true }))}
+          >
+            ×
+          </button>
+        </div>
+        <button
+          ref={bodyRef}
+          type="button"
+          className="lastq-body"
+          aria-expanded={ui.open}
+          title={jumpable ? '捲到這則訊息' : '展開全文'}
+          onClick={() => {
+            if (!jumpable) {
+              setUi((u) => ({ ...u, open: true }))
+              return
+            }
+            onJump()
+            setUi((u) => ({ ...u, open: false }))
+          }}
+        >
+          {body}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
  * 這個回合跑多久之後，才把「強制中止」露出來（秒）。
  *
  * 刻意不是立刻出現：正常回合開頭本來就會有一段只在想、沒有輸出的時間，那時候按這顆只會
@@ -366,11 +444,31 @@ function RunDebugBar({ botId }: { botId: string }) {
   )
 }
 
+/**
+ * 這回合要回想的那則提問：優先找**這個回合自己**的 user 訊息，沒有（bot / team 起頭的回合）
+ * 才退回整串的最後一則。退回的那則仍然是「使用者最後說的話」，比什麼都不顯示有用。
+ */
+function lastAskOf(list: Message[], turnId: string): Message | null {
+  let newest: Message | null = null
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]
+    if (m.role !== 'user') continue
+    if (m.turn_id === turnId) return m
+    if (!newest) newest = m
+  }
+  return newest
+}
+
+/** 捲過去之後那則訊息閃多久（毫秒）。 */
+const FLASH_MS = 1600
+
 function MessageList({ botId }: { botId: string }) {
   const messages = useStore((s) => s.messages[botId])
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
+  const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
+  const [flashId, setFlashId] = useState<string | null>(null)
   // 擷取來的即時文字先過濾掉 CLI 自己的狀態列 / 提示行（`cleanLiveText`），濾光了就回 null，
   // 讓氣泡退回顯示活動摘要。
   const liveText = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
@@ -378,7 +476,32 @@ function MessageList({ botId }: { botId: string }) {
   const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
   const tail = useScrollTail([messages, working, liveText, liveActivity, liveAlert])
 
+  useEffect(() => {
+    if (!flashId) return
+    const t = setTimeout(() => setFlashId(null), FLASH_MS)
+    return () => clearTimeout(t)
+  }, [flashId])
+
   const list = messages ?? []
+  const lastAsk = turnId ? lastAskOf(list, turnId) : null
+
+  /**
+   * 捲到某一則訊息。用 rect 差而不是 `offsetTop`：`.msg-list` 自己沒有 `position`，
+   * offsetParent 會落到 `.msg-list-wrap` 上，算出來的值差一個 padding。
+   * `scrollIntoView` 也不用——它會連帶捲動外層容器。
+   */
+  const jumpTo = (id: string) => {
+    const box = tail.ref.current
+    const el = box?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`)
+    if (!box || !(el instanceof HTMLElement)) return
+    const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
+    // 浮窗自己蓋住最上緣，多留一點空間，免得捲過去正好被它蓋掉。
+    const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    box.scrollTo({ top: Math.max(0, top - 72), behavior: still ? 'auto' : 'smooth' })
+    // 先關再開：連按兩次時 class 一直掛著，CSS 動畫不會自己重播（也順便重設熄滅的計時器）。
+    setFlashId(null)
+    requestAnimationFrame(() => setFlashId(id))
+  }
 
   return (
     <div className="msg-list-wrap">
@@ -392,12 +515,13 @@ function MessageList({ botId }: { botId: string }) {
           {loaded ? '在下方輸入框寫下第一則訊息。' : '載入訊息中…'}
         </EmptyState>
       ) : (
-        list.map((m) => <Bubble key={m.id} msg={m} />)
+        list.map((m) => <Bubble key={m.id} msg={m} flash={m.id === flashId} />)
       )}
       {inFlight || working ? (
         <LiveBubble text={liveText} activity={liveActivity} alert={liveAlert} action={<AbandonTurnAction botId={botId} />} />
       ) : null}
     </div>
+    {turnId && lastAsk ? <LastAskPeek key={botId} msg={lastAsk} turnId={turnId} onJump={() => jumpTo(lastAsk.id)} /> : null}
     <JumpToBottom show={!tail.atBottom && list.length > 0} onClick={tail.toBottom} />
     </div>
   )
