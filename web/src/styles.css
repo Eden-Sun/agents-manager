@@ -3039,20 +3039,24 @@ p.project-quota-hidden {
 .lastq::after {
   content: '';
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 60%;
   pointer-events: none;
-  background: linear-gradient(105deg, transparent 30%, rgb(255 255 255 / 0.18) 50%, transparent 70%);
-  background-size: 250% 100%;
+  background: linear-gradient(105deg, transparent 0%, rgb(255 255 255 / 0.18) 50%, transparent 100%);
+  /* 只動 transform（compositor 就能做），不動 background-position——後者每一幀都要重繪整張氣泡。 */
+  will-change: transform;
   animation: lastq-sweep 2.4s ease-in-out infinite;
 }
 
 @keyframes lastq-sweep {
   0% {
-    background-position: 120% 0;
+    transform: translateX(-100%);
   }
 
   100% {
-    background-position: -120% 0;
+    transform: translateX(170%);
   }
 }
 
