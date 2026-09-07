@@ -1045,7 +1045,7 @@ pub async fn create_with_issues(
     let mut created: Vec<String> = Vec::new();
     // Filled in by the §6.4a step below; `None` until then so an early failure knows there
     // is no workspace to close.
-    let mut workspace_id: Option<String>;
+    let workspace_id: Option<String>;
     let build = async {
         tg::create_branch(app, &project.host, &git_dir, &branch, &base_sha)
             .await
