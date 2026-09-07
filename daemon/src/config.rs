@@ -27,7 +27,7 @@ pub fn default_host() -> String {
 /// Reserved host name for "this machine".
 pub const LOCAL_HOST: &str = "local";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
@@ -41,7 +41,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotCfg {
     /// ULID. Missing on hand-written files; filled in and written back on first load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,7 +90,7 @@ pub struct BotCfg {
 
 /// A named set of env vars + args, applied to a bot at start time. Lets several bots of the
 /// same kind run under different accounts (e.g. claude's `CLAUDE_CONFIG_DIR`, grok's `GROK_HOME`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdentityCfg {
     /// Unique id, `[a-z][a-z0-9_-]{0,31}`.
     pub name: String,
@@ -105,7 +105,7 @@ pub struct IdentityCfg {
 }
 
 /// SPEC §11.2 — a remote machine reached over SSH, running its own herdr.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostCfg {
     /// Unique id, `[a-z][a-z0-9_-]{0,31}`. `"local"` is reserved.
     pub name: String,
@@ -130,7 +130,7 @@ pub struct HostCfg {
     pub hook_port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -143,7 +143,7 @@ pub struct ProjectCfg {
     pub bots: Vec<BotCfg>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigFile {
     #[serde(default)]
     pub server: ServerConfig,
@@ -386,10 +386,102 @@ impl ConfigStore {
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
-        write_atomic(&self.path, &next)?;
+        // Only touch the file when the closure actually changed something: a full serde
+        // rewrite drops comments / unknown keys, so a no-op update must not clobber them
+        // (issue #38 — startup projection used to rewrite the file on every boot).
+        if next != g.cfg {
+            write_atomic(&self.path, &next)?;
+            g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
+        }
         g.cfg = next;
-        g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
         Ok(out)
+    }
+}
+
+/// Shape of the TOML we understand, used to report keys serde would otherwise drop silently.
+///
+/// Unknown keys are a *warning*, not an error: an older daemon must still start on a file
+/// written by a newer one (forward compatibility), but a typo (`auto_start`) must not vanish
+/// without a trace either.
+enum Schema {
+    Table(&'static [(&'static str, Schema)]),
+    Array(&'static Schema),
+    /// Free-form value (`env` maps, scalars) — never descended into.
+    Any,
+}
+
+const BOT_SCHEMA: Schema = Schema::Table(&[
+    ("id", Schema::Any),
+    ("name", Schema::Any),
+    ("kind", Schema::Any),
+    ("model", Schema::Any),
+    ("effort", Schema::Any),
+    ("fast", Schema::Any),
+    ("persona", Schema::Any),
+    ("args", Schema::Any),
+    ("autostart", Schema::Any),
+    ("inject_hooks", Schema::Any),
+    ("auto_approve", Schema::Any),
+    ("identity", Schema::Any),
+    ("env", Schema::Any),
+    ("herdr_session", Schema::Any),
+]);
+
+const PROJECT_SCHEMA: Schema = Schema::Table(&[
+    ("id", Schema::Any),
+    ("path", Schema::Any),
+    ("label", Schema::Any),
+    ("host", Schema::Any),
+    ("bots", Schema::Array(&BOT_SCHEMA)),
+]);
+
+const IDENTITY_SCHEMA: Schema =
+    Schema::Table(&[("name", Schema::Any), ("kind", Schema::Any), ("env", Schema::Any), ("args", Schema::Any)]);
+
+const HOST_SCHEMA: Schema = Schema::Table(&[
+    ("name", Schema::Any),
+    ("ssh", Schema::Any),
+    ("ssh_port", Schema::Any),
+    ("ssh_opts", Schema::Any),
+    ("herdr_session", Schema::Any),
+    ("remote_path", Schema::Any),
+    ("hook_port", Schema::Any),
+]);
+
+const CONFIG_SCHEMA: Schema = Schema::Table(&[
+    ("server", Schema::Table(&[("listen", Schema::Any), ("herdr_session", Schema::Any)])),
+    ("identities", Schema::Array(&IDENTITY_SCHEMA)),
+    ("hosts", Schema::Array(&HOST_SCHEMA)),
+    ("projects", Schema::Array(&PROJECT_SCHEMA)),
+]);
+
+/// Dotted paths (`projects[0].bots[1].auto_start`) of every key in `text` that `ConfigFile`
+/// does not know about. Empty when the text is not valid TOML — `toml::from_str` reports that.
+pub fn unknown_keys(text: &str) -> Vec<String> {
+    let Ok(value) = text.parse::<toml::Value>() else { return Vec::new() };
+    let mut out = Vec::new();
+    walk_unknown(&value, &CONFIG_SCHEMA, String::new(), &mut out);
+    out
+}
+
+fn walk_unknown(value: &toml::Value, schema: &Schema, path: String, out: &mut Vec<String>) {
+    match (schema, value) {
+        (Schema::Table(fields), toml::Value::Table(t)) => {
+            for (k, v) in t {
+                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                match fields.iter().find(|(name, _)| *name == k) {
+                    Some((_, sub)) => walk_unknown(v, sub, child, out),
+                    None => out.push(child),
+                }
+            }
+        }
+        (Schema::Array(item), toml::Value::Array(items)) => {
+            for (i, v) in items.iter().enumerate() {
+                walk_unknown(v, item, format!("{path}[{i}]"), out);
+            }
+        }
+        // Wrong value type (e.g. `projects = 1`): serde reports it as a parse error.
+        _ => {}
     }
 }
 
@@ -402,6 +494,9 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let cfg: ConfigFile = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    for key in unknown_keys(&text) {
+        tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
+    }
     let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     Ok((cfg, mtime))
 }
@@ -489,5 +584,69 @@ mod agent_name_tests {
         assert!(!valid_bot_name("has space"));
         assert!(!valid_bot_name("a@b"));
         assert!(!valid_bot_name(&"x".repeat(33)));
+    }
+}
+
+#[cfg(test)]
+mod issue38_tests {
+    use super::{unknown_keys, ConfigFile, ConfigStore};
+
+    const SAMPLE: &str = r#"# top comment
+[[projects]]
+path = "/tmp"
+label = "proj"
+id = "01PROJ"
+
+[[projects.bots]]
+id = "01BOT"
+name = "a"
+kind = "claude"
+auto_start = true   # typo for autostart
+"#;
+
+    #[test]
+    fn unknown_keys_are_reported_with_paths() {
+        let keys = unknown_keys(SAMPLE);
+        assert_eq!(keys, vec!["projects[0].bots[0].auto_start"]);
+
+        let keys = unknown_keys("[server]\nport = 1\n[[hosts]]\nname = \"m\"\nssh = \"x\"\nherdr-session = \"s\"\n");
+        // toml::Table is a sorted map, so the order is alphabetical rather than file order.
+        assert_eq!(keys, vec!["hosts[0].herdr-session", "server.port"]);
+
+        // Free-form maps are never descended into.
+        assert!(unknown_keys("[[identities]]\nname = \"i\"\nkind = \"claude\"\n[identities.env]\nFOO = \"1\"\n").is_empty());
+        assert!(unknown_keys("").is_empty());
+    }
+
+    #[test]
+    fn unknown_keys_are_still_parsed_leniently() {
+        let cfg: ConfigFile = toml::from_str(SAMPLE).unwrap();
+        assert!(!cfg.projects[0].bots[0].autostart, "typo'd key must not silently apply");
+    }
+
+    #[tokio::test]
+    async fn noop_update_leaves_the_file_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("am-config-issue38-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        let dirty = store.update(|_cfg| Ok(false)).await.unwrap();
+        assert!(!dirty);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SAMPLE, "comments and typos survive a no-op update");
+
+        // A real change still writes back (and the typo'd key is then gone — known trade-off).
+        store
+            .update(|cfg| {
+                cfg.projects[0].bots[0].autostart = true;
+                Ok(true)
+            })
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("autostart = true"));
+        assert!(!text.contains("# top comment"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

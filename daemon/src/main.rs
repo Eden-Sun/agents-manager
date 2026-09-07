@@ -64,7 +64,8 @@ enum Cmd {
         provider: String,
         #[arg(long)]
         bot: String,
-        #[arg(long)]
+        /// Optional; falls back to `$AM_HOOK_TOKEN` (preferred — keeps the token out of `ps`).
+        #[arg(long, default_value = "")]
         token: String,
         #[arg(long, default_value_t = 7788)]
         port: u16,
@@ -77,7 +78,8 @@ enum Cmd {
     Statusline {
         #[arg(long)]
         bot: String,
-        #[arg(long)]
+        /// Optional; falls back to `$AM_HOOK_TOKEN` (preferred — keeps the token out of `ps`).
+        #[arg(long, default_value = "")]
         token: String,
         #[arg(long, default_value_t = 7788)]
         port: u16,

@@ -320,18 +320,15 @@ pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) {
 
 // ---------------------------------------------------------------- hook injection
 
+/// The hook / statusLine command line for a *local* bot. The token is deliberately **not**
+/// on the argv (issue #43: `ps` shows every user the full command line, and the statusLine
+/// runs on every redraw); the subcommands read `AM_HOOK_TOKEN` from the pane env instead.
 fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
-    vec![
-        app.exe.to_string_lossy().to_string(),
-        "hook".into(),
-        provider.into(),
-        "--bot".into(),
-        bot.id.clone(),
-        "--token".into(),
-        bot.hook_token.clone(),
-        "--port".into(),
-        app.port.to_string(),
-    ]
+    hook_cmd_parts_for(&app.exe.to_string_lossy(), app.port, &bot.id, provider)
+}
+
+fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str) -> Vec<String> {
+    vec![exe.into(), "hook".into(), provider.into(), "--bot".into(), bot_id.into(), "--port".into(), port.to_string()]
 }
 
 /// SPEC appendix E — the POSIX sh + curl hook installed on remote hosts (no daemon binary there).
@@ -618,7 +615,7 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
                 "statusLine": {"type": "command", "command": statusline}
             });
             let path = dir.join("claude-settings.json");
-            std::fs::write(&path, serde_json::to_vec_pretty(&settings)?)?;
+            write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
             vec!["--settings".into(), path.to_string_lossy().to_string()]
         }
         "codex" => {
@@ -635,6 +632,21 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
     };
     out.extend(hook_args);
     Ok(out)
+}
+
+/// Write a file only its owner can read (0600): bot settings may carry secrets.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        f.write_all(bytes)?;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, bytes)
 }
 
 fn shell_join(parts: &[String]) -> String {
@@ -654,8 +666,9 @@ async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_
     env.insert("AM_RUN_ID".into(), json!(run_id));
     // On a remote host this is the reverse-forwarded port, not the daemon's own.
     env.insert("AM_PORT".into(), json!(hook_port.to_string()));
-    // SPEC §12: grok's hook is a global dispatcher that can only learn the bot from the pane
-    // env, so the token rides along too (claude / codex still get it on the command line).
+    // The hook token rides in the pane env for every kind: grok's global dispatcher can only
+    // learn the bot from there (SPEC §12), and the local claude / codex hook commands read
+    // `AM_HOOK_TOKEN` too so the token never shows up in `ps` (issue #43).
     // Omitting it is how `inject_hooks = false` is honoured for grok: the dispatcher exits 0.
     if bot.inject_hooks != 0 {
         env.insert("AM_HOOK_TOKEN".into(), json!(bot.hook_token));
@@ -755,7 +768,9 @@ fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
 async fn effort_checked(app: &Arc<App>, bot: &db::Bot, host: &str) -> db::Bot {
     let Some(effort) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     let Some(model) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
-    let Ok(list) = crate::models::list(app, host, &bot.kind, false).await else { return bot.clone() };
+    // The `efforts` array does not depend on identity (same five levels for every claude
+    // account); only the default-effort *hint* would, and this path never reads that field.
+    let Ok(list) = crate::models::list(app, host, &bot.kind, None, false).await else { return bot.clone() };
     let Some(entry) = list
         .get("models")
         .and_then(|m| m.as_array())
@@ -798,6 +813,32 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
         out.extend(["-c".to_string(), "service_tier=\"priority\"".to_string()]);
     }
     out
+}
+
+#[cfg(test)]
+mod hook_cmd_parts_tests {
+    use super::{hook_cmd_parts_for, write_private};
+
+    /// Issue #43: the hook / statusLine command line must not carry the token.
+    #[test]
+    fn hook_cmd_parts_has_no_token() {
+        let parts = hook_cmd_parts_for("/usr/bin/agents-managerd", 7788, "b1", "claude");
+        assert_eq!(parts, vec!["/usr/bin/agents-managerd", "hook", "claude", "--bot", "b1", "--port", "7788"]);
+        assert!(!parts.iter().any(|p| p == "--token"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("am-write-private-{}.json", std::process::id()));
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[cfg(test)]
@@ -1530,6 +1571,79 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     Ok(())
 }
 
+/// **強制**結束這個 bot 目前的回合（`POST /api/bots/:id/abort`）。
+///
+/// [`interrupt_bot`] 是「請 agent 停下來」：`esc` 送不出去（pane 沒了、herdr 斷線、run 不在了）
+/// 就整個失敗，那一回合仍然掛在 `in_flight`，輸入框跟著鎖死，使用者只剩「停掉整個 bot」這條路。
+/// 這支的語義相反——**先保證 DB 這邊解開**，送鍵只是順帶：
+///
+/// * `esc` 盡力送一次，失敗只記在回應裡（`keys_sent: false`），不影響其餘步驟；
+/// * in-flight 的回合標成 `failed` 並留一則系統訊息；
+/// * `delivery = unknown` 的回合也一併收掉——它同樣會鎖住輸入框（§6.3），而使用者要的是「現在
+///   就能再打字」，不是分兩個按鈕點兩次。
+///
+/// 沒有 active run 時**不是**錯誤：run 已經沒了、回合卻還掛著，正是最需要這支的情況。
+pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?;
+
+    let mut keys_sent = false;
+    let mut key_error: Option<String> = None;
+    if let Some(r) = run.as_ref() {
+        let target = db::run_target(r, &bot);
+        match client_for_run(app, r).await {
+            Ok(c) => match c.agent_send_keys(&target, &["esc".to_string()]).await {
+                Ok(()) => keys_sent = true,
+                Err(e) => key_error = Some(format!("{e:#}")),
+            },
+            Err(e) => key_error = Some(format!("{e:?}")),
+        }
+    }
+
+    let mut aborted: Vec<String> = Vec::new();
+    if let Some(r) = run.as_ref() {
+        if let Ok(Some(t)) = db::in_flight_turn(&app.db, &r.id).await {
+            aborted.push(t.id.clone());
+        }
+        fail_in_flight(app, &r.id, "回合已由使用者強制中止").await;
+    }
+    // Unknown-delivery turns live on the bot, not on one run: a stopped run can leave one
+    // behind, and `prompt()` refuses the next message until it is cleared.
+    let unknown = sqlx::query_as::<_, db::Turn>(
+        "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         WHERE c.bot_id = ? AND (t.status = 'in_flight' OR t.delivery = 'unknown')",
+    )
+    .bind(bot_id)
+    .fetch_all(&app.db)
+    .await
+    .map_err(up)?;
+    for t in unknown {
+        if aborted.contains(&t.id) && t.delivery != "unknown" {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE turns SET status='failed',
+             delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END,
+             completed_at=? WHERE id=?",
+        )
+        .bind(db::now())
+        .bind(&t.id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+        if !aborted.contains(&t.id) {
+            let _ = insert_message(app, &t.conversation_id, Some(&t.id), "system", "回合已由使用者強制中止", "system", false, None).await;
+            aborted.push(t.id.clone());
+        }
+        emit_turn(app, &t.id).await;
+    }
+
+    tracing::info!(bot = %bot.name, keys_sent, aborted = aborted.len(), "turn(s) force-aborted by user");
+    Ok(json!({"aborted": aborted, "keys_sent": keys_sent, "key_error": key_error}))
+}
+
 /// Give a *running* bot a tab of its own — the retrofit for every bot started before
 /// one-bot-one-tab, which is sitting in a pane split off a shared tab.
 ///
@@ -1779,6 +1893,70 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
     send_slash_line(&client, &pane_id, line).await?;
     tracing::info!(bot_id, kind = %bot.kind, line, "sent login slash command");
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
+}
+
+#[cfg(test)]
+mod abort_tests {
+    use super::*;
+
+    /// The whole point of `abort_turns`: it works when talking to the agent does **not**.
+    /// This App has no herdr behind its socket, so `esc` cannot be delivered — and the turn
+    /// must still come out of `in_flight`, which is what unlocks the composer.
+    #[tokio::test]
+    async fn unlocks_even_when_the_keys_cannot_be_sent() {
+        let dir = std::env::temp_dir().join(format!("am-abort-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
+        let app = crate::state::App::new(
+            pool,
+            client.clone(),
+            client,
+            cfg,
+            dir.clone(),
+            dir.join("agents-managerd"),
+            7799,
+            "t".into(),
+            "test".into(),
+        );
+
+        let (pid, bid, rid, cid) = (db::ulid(), db::ulid(), db::ulid(), db::ulid());
+        let now = db::now();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,'local',?)")
+            .bind(&pid).bind("/tmp/p").bind("p").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,?,?,?)")
+            .bind(&bid).bind(&pid).bind("b").bind("claude").bind("tok").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, pane_id, started_at) VALUES (?,?,'running','w1:p1',?)")
+            .bind(&rid).bind(&bid).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)")
+            .bind(&cid).bind(&bid).bind(&now).execute(&app.db).await.unwrap();
+        // One turn stuck in flight, and one older turn whose delivery never came back — both
+        // block the next prompt, so both have to go.
+        let (t_flight, t_unknown) = (db::ulid(), db::ulid());
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&t_flight).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','failed','unknown',?)")
+            .bind(&t_unknown).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
+
+        let out = abort_turns(&app, &bid).await.expect("abort must not fail just because the keys did");
+        assert_eq!(out["keys_sent"], false, "no herdr behind the socket");
+        let aborted = out["aborted"].as_array().unwrap();
+        assert_eq!(aborted.len(), 2, "both the in-flight and the unknown-delivery turn: {out}");
+
+        let flight: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
+            .bind(&t_flight).fetch_one(&app.db).await.unwrap();
+        assert_eq!(flight, ("failed".into(), "ok".into()), "in-flight turn is closed, delivery untouched");
+        let unknown: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
+            .bind(&t_unknown).fetch_one(&app.db).await.unwrap();
+        assert_eq!(unknown, ("failed".into(), "failed".into()), "unknown delivery is resolved, not left to block");
+        assert!(db::in_flight_turn(&app.db, &rid).await.unwrap().is_none(), "nothing left in flight");
+
+        // Idempotent: nothing to abort the second time round.
+        let again = abort_turns(&app, &bid).await.unwrap();
+        assert_eq!(again["aborted"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -2778,6 +2956,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     // 2..n on screen and they would be stored as the agent's answer.
     let sent = db::turn_user_messages(&app.db, &turn.id).await.unwrap_or_default();
     let reply = sent.iter().fold(reply, |acc, p| strip_echoed_prompt(&acc, p));
+
     // What is left has to be worth storing. An empty string means the capture was nothing but
     // our own prompt coming back; a shredded one means the pane is too narrow to read at all.
     let reply = if reply.trim().is_empty() {

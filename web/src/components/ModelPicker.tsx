@@ -32,6 +32,7 @@ function staticModels(kind: BotKind): ModelInfo[] {
 export function ApiModelFields({
   kind,
   host,
+  identity,
   model,
   onModel,
   effort,
@@ -41,6 +42,11 @@ export function ApiModelFields({
 }: {
   kind: BotKind
   host: string
+  /**
+   * claude only：這個 bot／角色目前選的身份。只影響「預設」那顆按鈕顯示的提示（那個身份
+   * 的 `settings.json` 目前設的強度，SPEC §17.1）——不指定就是預設帳號。
+   */
+  identity?: string | null
   model: string | null
   onModel: (v: string | null) => void
   effort: string | null
@@ -48,14 +54,15 @@ export function ApiModelFields({
   fast: boolean
   onFast: (v: boolean) => void
 }) {
-  const key = `${kind}@${host || 'local'}`
+  const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
   const loadModels = useStore((s) => s.loadModels)
   const [custom, setCustom] = useState(false)
 
   useEffect(() => {
-    if (cached === undefined) void loadModels(kind, host)
-  }, [cached, kind, host, loadModels])
+    // null = last fetch failed; the store retries once the cooldown has passed (issue #26).
+    if (cached == null) void loadModels(kind, host, identity)
+  }, [cached, kind, host, identity, loadModels])
 
   const loading = cached === undefined
   const fromApi = Array.isArray(cached) && cached.length > 0
@@ -156,8 +163,8 @@ export function ApiModelFields({
               className={`opt${effort === null ? ' on' : ''}`}
               title={
                 current?.default_effort
-                  ? `不帶 --reasoning-effort（模型預設 ${effortLabel(current.default_effort)}）`
-                  : '不帶 --reasoning-effort'
+                  ? `不帶 ${effortFlagName(kind)}（${defaultEffortNote(kind)} ${effortLabel(current.default_effort)}）`
+                  : `不帶 ${effortFlagName(kind)}`
               }
               onClick={() => onEffort(null)}
             >
@@ -168,10 +175,15 @@ export function ApiModelFields({
                 key={e}
                 type="button"
                 className={`opt${effort === e ? ' on' : ''}`}
-                title={current?.default_effort === e ? `模型預設強度：${effortLabel(e)}` : e}
+                title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : e}
                 onClick={() => onEffort(e)}
               >
                 {effortLabel(e)}
+                {current?.default_effort === e ? (
+                  <span className="effort-recommended" aria-hidden="true">
+                    廠推薦
+                  </span>
+                ) : null}
               </button>
             ))}
           </div>
@@ -196,6 +208,21 @@ export function ApiModelFields({
       ) : null}
     </>
   )
+}
+
+/** 不指定強度時，daemon 到底不帶哪個旗標——三個 kind 各自的名字不同。 */
+function effortFlagName(kind: BotKind): string {
+  return kind === 'claude' ? '--effort' : '--reasoning-effort'
+}
+
+/**
+ * 「預設」按鈕括號裡那個值是從哪來的：codex / grok 是那個模型自己回報的
+ * `default_effort`（API / cache 檔），claude 則是**帳號的 `settings.json`**
+ * （`effortLevel` 或 per-model override，SPEC §17.1）——不是模型內建的，講清楚才不會
+ * 誤以為換帳號也不會變。
+ */
+function defaultEffortNote(kind: BotKind): string {
+  return kind === 'claude' ? '帳號目前設定' : '模型預設'
 }
 
 /** Kinds whose TUI can take `/model` (or grok `/effort`) without a restart. */
@@ -228,10 +255,11 @@ export function ModelQuickPicker({
   title?: string
   children: ReactNode
 }) {
-  const key = `${kind}@${host || 'local'}`
+  const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
+  const identity = bot?.identity ?? null
+  const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
   const loadModels = useStore((s) => s.loadModels)
-  const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const patchBot = useStore((s) => s.patchBot)
   const notify = useStore((s) => s.notify)
   const patching = useStore((s) => Boolean(s.busy[`patch:${botId}`]))
@@ -241,8 +269,8 @@ export function ModelQuickPicker({
   const popRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (open && cached === undefined) void loadModels(kind, host)
-  }, [open, cached, kind, host, loadModels])
+    if (open && cached == null) void loadModels(kind, host, identity)
+  }, [open, cached, kind, host, identity, loadModels])
 
   useLayoutEffect(() => {
     if (!open) {
@@ -366,9 +394,15 @@ export function ModelQuickPicker({
                   type="button"
                   className={`opt${effort === e ? ' on' : ''}`}
                   disabled={patching}
+                  title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : undefined}
                   onClick={() => pickEffort(e)}
                 >
                   {effortLabel(e)}
+                  {current?.default_effort === e ? (
+                    <span className="effort-recommended" aria-hidden="true">
+                      廠推薦
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>

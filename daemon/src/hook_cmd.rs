@@ -40,6 +40,16 @@ pub struct HookArgs {
     pub payload_arg: Option<String>,
 }
 
+/// The bot token: `--token` when given, else `$AM_HOOK_TOKEN` from the pane env (issue #43:
+/// the daemon no longer puts it on the command line, where `ps` shows it to every user).
+pub fn hook_token(arg: &str) -> String {
+    if !arg.is_empty() {
+        arg.to_string()
+    } else {
+        std::env::var("AM_HOOK_TOKEN").unwrap_or_default()
+    }
+}
+
 /// Entry point. Never panics, never touches stdout. The caller exits 0 unconditionally.
 pub fn run(args: HookArgs) {
     // A panic would print a multi-line backtrace-ish message to stderr; keep it to one line.
@@ -86,7 +96,8 @@ fn inner(args: HookArgs) {
         std::env::var("AM_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(7788)
     };
 
-    match post(&body, &args.provider, &args.token, port, deadline) {
+    let token = hook_token(&args.token);
+    match post(&body, &args.provider, &token, port, deadline) {
         Ok(()) => {}
         Err(e) => {
             log_line(&args.bot, &format!("post failed: {e}"));
@@ -249,6 +260,18 @@ fn log_line(bot_id: &str, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_token_wins_over_env() {
+        assert_eq!(hook_token("cli"), "cli");
+    }
+
+    #[test]
+    fn empty_token_reads_env_or_stays_empty() {
+        // Env-dependent, so only the empty branch is asserted deterministically.
+        let from_env = std::env::var("AM_HOOK_TOKEN").unwrap_or_default();
+        assert_eq!(hook_token(""), from_env);
+    }
 
     #[test]
     fn object_payload_passes_through() {

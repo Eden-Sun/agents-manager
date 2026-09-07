@@ -425,7 +425,7 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
 }
 
 /// `$HOME` on `host` (the daemon's own home for `local`), for expanding identity env values.
-async fn host_home(app: &Arc<App>, host: &str) -> String {
+pub(crate) async fn host_home(app: &Arc<App>, host: &str) -> String {
     if let Some(conn) = app.hosts.get(host).await {
         if let Ok(h) = conn.home().await {
             return h;
