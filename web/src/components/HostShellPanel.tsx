@@ -56,10 +56,14 @@ const KEYS: { label: string; keys: string[]; title: string }[] = [
   { label: 'Enter', keys: ['enter'], title: '只按 Enter' },
 ]
 
-/** 顯示用的短 cwd：`/Users/m1pro/project/agents-manager` → `~/project/agents-manager` 太猜， */
-/** 所以只在超長時從左邊截，尾巴（你現在在哪）一定看得到。 */
-function shortCwd(cwd: string): string {
-  return cwd.length <= 44 ? cwd : `…${cwd.slice(-43)}`
+/**
+ * 標題列只放 cwd 的最後兩段（`project/agents-manager`），完整路徑在 tooltip。
+ * 倒數第二段另外包起來，手機寬度用 CSS 藏掉，只剩最後一段。
+ */
+function cwdTail(cwd: string): { parent: string; leaf: string } {
+  const seg = cwd.split('/').filter(Boolean)
+  if (seg.length === 0) return { parent: '', leaf: cwd || '/' }
+  return { parent: seg.length > 1 ? seg[seg.length - 2] : '', leaf: seg[seg.length - 1] }
 }
 
 export function HostShellPanel({
@@ -236,7 +240,8 @@ export function HostShellPanel({
           <strong>{host === 'local' ? '本機 shell' : `${host} shell`}</strong>
           <HostBadge host={host} connected={hostUp} />
           <span className="shell-cwd mono" title={cwd}>
-            {shortCwd(cwd)}
+            {cwdTail(cwd).parent ? <span className="shell-cwd-parent">{cwdTail(cwd).parent}/</span> : null}
+            {cwdTail(cwd).leaf}
           </span>
         </div>
         <span className="spacer" />

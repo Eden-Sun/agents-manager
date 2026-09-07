@@ -221,11 +221,17 @@ button:disabled {
   transform: translateX(-50%) translateY(0);
 }
 
-/* 側欄那幾顆鍵貼著面板右緣，置中的泡泡會被 sidebar 裁掉：改成靠右邊展開。 */
+/* 側欄那幾顆鍵貼著面板右緣，置中的泡泡會被 sidebar 裁掉：改成靠右邊展開。
+   `white-space: normal` 是必要的：上面那條規則是 `nowrap`，`max-width` 就形同虛設，
+   一句「開同類分身並啟動 · C1-Fable」會撐成 250px 以上、直接從側欄左緣漏出去。
+   （按鍵的 `data-tip` 也已經拿掉重複的 bot 名字——泡泡就長在那一列旁邊。） */
 .bot-actions .icon-tip[data-tip]::after {
   left: auto;
   right: 0;
   transform: translateY(2px);
+  white-space: normal;
+  width: max-content;
+  max-width: 168px;
 }
 
 .bot-actions .icon-tip[data-tip]:hover::after,
@@ -233,23 +239,11 @@ button:disabled {
   transform: translateY(0);
 }
 
-/* 兩顆疊在一起：下面那顆的泡泡往下開，才不會蓋住上面那顆。 */
-.bot-menu .icon-tip[data-tip]:last-child::after {
-  top: calc(100% + 6px);
-  bottom: auto;
-  transform: translateY(-2px);
-}
-
-.bot-menu .icon-tip[data-tip]:last-child:hover::after,
-.bot-menu .icon-tip[data-tip]:last-child:focus-visible::after {
-  transform: translateY(0);
-}
-
 /* ------------------------------------------------------------------ shell */
 
 .app {
   display: grid;
-  /* 側欄、主面板，加上右緣的圖片暫存區（`auto`：收合 38px、展開 208px 都由它自己決定）。 */
+  /* 側欄、主面板，加上右緣的圖片暫存區（`auto`：收合 38px、展開 184px 都由它自己決定）。 */
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto;
   height: 100%;
   overflow: hidden;
@@ -445,6 +439,55 @@ button:disabled {
   border: 1px solid currentcolor;
 }
 
+/* 搜尋列：貼在清單上方，跟著側欄捲不動（清單自己捲）。 */
+.bot-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bot-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.bot-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.bot-search-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.bot-search-clear {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.bot-search-clear:hover {
+  color: var(--text);
+}
+
 .sidebar-scroll {
   flex: 1;
   min-height: 0;
@@ -497,8 +540,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 0;
-  padding-left: 18px;
-  background: linear-gradient(to right, transparent, var(--bg-sunken) 14px);
+  padding-left: 0;
+  background: var(--bg-sunken);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
@@ -506,11 +549,11 @@ button:disabled {
 }
 
 .project-head.selected .project-head-actions {
-  background: linear-gradient(to right, transparent, var(--bg-active) 14px);
+  background: var(--bg-active);
 }
 
 .project-head:hover:not(.selected) .project-head-actions {
-  background: linear-gradient(to right, transparent, var(--bg-hover) 14px);
+  background: var(--bg-hover);
 }
 
 .project-head-actions .icon-btn,
@@ -552,11 +595,7 @@ button:disabled {
 }
 
 .project-head.selected:hover .project-head-actions {
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%) 14px
-  );
+  background: color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%);
 }
 
 /* Focus must read differently from hover + selected. */
@@ -646,7 +685,10 @@ button:disabled {
   align-items: center;
   gap: 9px;
   width: 100%;
-  height: 52px;
+  /* `min-height`, not `height`: the P1 spec fixes the row at 52px, which is right for the
+     two-line case (name, then badges). A bot with a persona has a third line and needs 60px,
+     and a fixed height made that content paint 4px above and below the row instead — usually
+     invisible as text, glaring once the name became an editable box with a border. */
   min-height: 52px;
   padding: 4px 8px 4px 14px;
   border: 0;
@@ -690,6 +732,35 @@ button:disabled {
 }
 
 /* 子 agent：縮排一階、左邊一條細線把它掛在父 bot 下面（跟 team 成員同一種視覺語言）。 */
+/* 有子 agent 的父列前面的收合鈕。收合時把數量帶上——不然收起來就看不出底下有東西。 */
+.bot-kids-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  margin-left: -8px;
+  padding: 2px 2px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.bot-kids-toggle:hover {
+  color: var(--text);
+}
+
+.bot-kids-toggle .chev {
+  font-size: 8px;
+}
+
+.bot-kids-n {
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .bot-child {
   margin-left: 18px;
   border-left: 1px solid var(--border);
@@ -793,12 +864,53 @@ button:disabled {
   background: var(--bg-panel);
 }
 
+/* In the sidebar the field has to occupy exactly the box the name occupied. The shared
+   rule's `padding` + `border` + `margin-left: -4px` made it 22px tall and pulled it 4px
+   left, which grew the row's first line and let the white box paint above the row and
+   outside `.bot-main` — over the row above it. `box-sizing` + a height matched to the
+   name's own line box keeps the row exactly as tall as it was. */
 .bot-name-input.row {
   align-self: flex-start;
+  box-sizing: border-box;
   max-width: 100%;
+  height: 18px;
+  margin-left: -3px;
+  padding: 0 2px;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.25;
+}
+
+/* 搜尋命中的對話片段：一行、可截斷，數字在前才知道有幾則。 */
+.bot-hit {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.bot-hit-n {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.bot-hit-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: italic;
+}
+
+.bot-search-hits {
+  color: var(--accent);
 }
 
 .bot-sub {
@@ -966,12 +1078,17 @@ button:disabled {
   right: 6px;
   top: 50%;
   transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  gap: 2px;
+  /* 2×2。格子是寫死的（見 `.act-*`），所以啟動鍵出現／消失時其他三顆不會換位置。 */
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  grid-template-rows: repeat(2, auto);
+  align-items: stretch;
+  gap: 0;
   flex: none;
-  padding-left: 20px;
-  background: linear-gradient(to right, transparent, var(--bg-panel) 16px);
+  /* 純色，不做漸層淡出：那層 fade 會把底下的徽章糊掉一段，看起來像陰影。
+     `padding-left: 0` 一併拿掉——那 20px 只是為了讓漸層有地方淡。 */
+  padding-left: 0;
+  background: var(--bg-panel);
   pointer-events: none;
   z-index: 1;
 }
@@ -985,18 +1102,19 @@ button:disabled {
 }
 
 .bot-row:hover:not(.selected) .bot-actions {
-  background: linear-gradient(to right, transparent, var(--bg-hover) 16px);
+  background: var(--bg-hover);
 }
 
 .bot-row.selected .bot-actions {
-  background: linear-gradient(to right, transparent, var(--bg-active) 16px);
+  background: var(--bg-active);
 }
 
 /* 選取中的那一列，操作鍵是常駐的——所以這一列（也只有這一列）照舊把寬度讓出來，
    免得第三行的 agent 標題跑到按鍵底下。寬度是固定的，不會因為 hover 而跳動。
    `:has` 是必要的：team 成員列也用 `.bot-row`，但它沒有那排按鍵，讓寬度只是白讓。 */
 .bot-row.selected:has(.bot-actions) .bot-main {
-  padding-right: 64px;
+  /* 2×2 的按鍵區：兩欄寬，不是四顆並排的一長條。 */
+  padding-right: 72px;
 }
 
 @media (hover: none) {
@@ -1014,51 +1132,50 @@ button:disabled {
   }
 }
 
-/* 這一列的選單：分身在上、設定在下，兩顆疊成一欄。 */
-.bot-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* 固定格位：左上 分身、右上 設定、左下 啟動（執行中時空著，也是之後第四顆的位置）、
+   右下 刪除。讀序的最後一格留給唯一不可逆的操作。 */
+.bot-actions .act-clone {
+  grid-area: 1 / 1;
+}
+.bot-actions .act-gear {
+  grid-area: 1 / 2;
+}
+.bot-actions .act-run {
+  grid-area: 2 / 1;
+}
+.bot-actions .act-del {
+  grid-area: 2 / 2;
 }
 
 .bot-actions .menu-btn {
-  width: 30px;
-  height: 24px;
-  min-width: 30px;
-  min-height: 24px;
+  /* 2×2 撐滿整塊，格與格之間不留縫：點擊區越大越好，而這塊區域的大小是固定的，
+     留白只是把可點面積讓給空氣。34×26 × 2×2 = 68×52，正好是一列的高度。 */
+  width: 34px;
+  height: 26px;
+  min-width: 34px;
+  min-height: 26px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-/* Menu + run + delete button: only on hover / focus / selection so the row stays calm.
-   `.confirming` = the stop/delete confirmation is up, which must not make them fade out. */
-.bot-actions .bot-menu,
-.bot-actions .bot-run-btn,
-.bot-actions .bot-delete-btn {
+/* The whole row of buttons fades in together: only on hover / focus / selection so the list
+   stays calm. `.confirming` = the stop/delete confirmation is up, which must not fade them. */
+.bot-actions .icon-btn {
   opacity: 0;
   transition: opacity 0.12s ease;
 }
 
-.bot-row:hover .bot-menu,
-.bot-row:focus-within .bot-menu,
-.bot-row.selected .bot-menu,
-.bot-row.confirming .bot-menu,
-.bot-row:hover .bot-run-btn,
-.bot-row:focus-within .bot-run-btn,
-.bot-row.selected .bot-run-btn,
-.bot-row.confirming .bot-run-btn,
-.bot-row:hover .bot-delete-btn,
-.bot-row:focus-within .bot-delete-btn,
-.bot-row.selected .bot-delete-btn,
-.bot-row.confirming .bot-delete-btn {
+.bot-row:hover .bot-actions .icon-btn,
+.bot-row:focus-within .bot-actions .icon-btn,
+.bot-row.selected .bot-actions .icon-btn,
+.bot-row.confirming .bot-actions .icon-btn {
   opacity: 1;
 }
 
 @media (hover: none) {
-  .bot-actions .bot-menu,
-  .bot-actions .bot-run-btn,
-  .bot-actions .bot-delete-btn {
+  .bot-actions .icon-btn {
     opacity: 1;
   }
 }
@@ -1586,6 +1703,12 @@ button:disabled {
   justify-content: center;
   gap: 1px;
   overflow: hidden;
+  /* Not decoration: the status lamp is this cluster's first child and its `working` state
+     draws a pulsing ring 4px outside its own box (`.lamp-working::after`, `inset: -4px`).
+     A clip boundary flush with the lamp sliced that ring's left half off. The padding moves
+     the boundary out; the negative margin puts the content back where it was. */
+  padding-left: 5px;
+  margin-left: -5px;
 }
 
 .bot-head .main-title-row > strong,
@@ -1969,6 +2092,28 @@ button:disabled {
   margin-bottom: 0;
 }
 
+/* 終端備援訊息底下的「完整終端畫面」：預設收合，展開才佔版面。 */
+.msg-snapshot {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.msg-snapshot-body {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .msg-meta-left {
   display: inline-flex;
   align-items: center;
@@ -2159,6 +2304,13 @@ button:disabled {
   color: var(--status-ok);
   background: var(--bg-sunken);
   border-color: color-mix(in srgb, var(--status-ok) 35%, transparent);
+}
+
+/* 回合進行中的那一條不是警告——它只是「現在可以中斷」的入口，所以走中性色。 */
+.composer-lock.running {
+  color: var(--text-dim);
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
 }
 
 /* Not a warning: the turn is still running, but the message is safely parked. */
@@ -2930,6 +3082,24 @@ button:disabled {
 
 /* -------------------------------------------------------------- notices */
 
+/* 通知上的動作（刪除後的「復原」）：看得出可以按，但不搶掉關閉鈕。 */
+.notice-action {
+  flex: none;
+  margin-right: 4px;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.notice-action:hover {
+  background: rgb(255 255 255 / 18%);
+}
+
 .notices {
   position: fixed;
   right: 16px;
@@ -3196,7 +3366,19 @@ button:disabled {
   }
 
   /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
-  .main-head .quota-more {
+  .main-head /* 這個身份在這台主機沒登入：條子永遠會是空的，所以在名字上就講清楚，
+   不要讓人以為是還沒回報。 */
+.quota-identity.logged-out {
+  color: var(--warn);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.quota-pop-note.warn {
+  color: var(--warn);
+}
+
+.quota-more {
     display: none;
   }
 
@@ -3825,6 +4007,44 @@ button:disabled {
   flex: none;
 }
 
+.host-shells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.host-shell {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.host-shell.active {
+  border-color: var(--accent);
+}
+
+.host-shell-open {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 1px 2px;
+  cursor: pointer;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-shell-open:hover {
+  color: var(--text);
+}
+
 .host-result {
   margin: 6px 0 2px;
   padding: 5px 8px;
@@ -3976,9 +4196,11 @@ button.model-tag {
   font-weight: 500;
 }
 
+/* `-`，不是 `·`：使用者指名要這個字元（「effort不要那個。改用-」）。它被改成 `·`、又被改成
+   什麼都沒有，來回三次了——要換之前先問他。 */
 .model-tag-extra::before {
-  content: '·';
-  margin: 0 2px 0 3px;
+  content: '-';
+  margin: 0 1px 0 2px;
 }
 
 button.model-tag:hover,
@@ -4578,6 +4800,26 @@ button.model-tag[aria-expanded='true'] {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-text);
+}
+
+/* 強度按鈕上的「廠推薦」小標：原廠（Anthropic / OpenAI / xAI）自己講的、這個模型 /
+   帳號現在實際會落在哪一級（見 docs/API.md §12.1 的 `default_effort`），不是我們猜的。
+   直接標在按鈕上而不是只藏在 title 裡，才不必 hover 才看得到。 */
+.opt-group .opt .effort-recommended {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  line-height: 1.5;
+}
+
+.opt-group .opt.on .effort-recommended {
+  background: rgb(255 255 255 / 25%);
+  color: inherit;
 }
 
 /* -------------------------------------------------------- confirm dialog */
@@ -6421,8 +6663,8 @@ button.team-workers:disabled {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding-left: 18px;
-  background: linear-gradient(to right, transparent, var(--bg-panel) 14px);
+  padding-left: 0;
+  background: var(--bg-panel);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
@@ -6436,7 +6678,7 @@ button.team-workers:disabled {
 }
 
 .team-node-head.selected .team-node-actions {
-  background: linear-gradient(to right, transparent, var(--bg-active) 14px);
+  background: var(--bg-active);
 }
 
 @media (hover: none) {
@@ -7036,6 +7278,60 @@ button.run-debug-toggle:hover {
   color: var(--text-faint);
 }
 
+/* 遠端 / 本機 gh 登入（HostsPanel 列、IssuesBar 錯誤列） */
+.gh-auth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.gh-auth.ok .gh-auth-label {
+  color: var(--text-dim);
+}
+
+.gh-auth.out .gh-auth-label,
+.gh-auth.missing .gh-auth-label {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.gh-login-cta {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  justify-items: start;
+}
+
+.gh-device {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.gh-device-lead {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.gh-device-err {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.gh-device-link {
+  font-size: 12px;
+}
+
 /* --------------------------------------------- image shelf (cross-conversation staging)
 
    The third cell of `.app`: a rail on the right on desktop, a strip along the bottom at
@@ -7354,59 +7650,6 @@ button.run-debug-toggle:hover {
   }
 }
 
-/* 遠端 / 本機 gh 登入（HostsPanel 列、IssuesBar 錯誤列） */
-.gh-auth {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.gh-auth.ok .gh-auth-label {
-  color: var(--text-dim);
-}
-
-.gh-auth.out .gh-auth-label,
-.gh-auth.missing .gh-auth-label {
-  color: var(--warn);
-  font-weight: 600;
-}
-
-.gh-login-cta {
-  display: grid;
-  gap: 8px;
-  margin-top: 8px;
-  justify-items: start;
-}
-
-.gh-device {
-  display: grid;
-  gap: 6px;
-  width: 100%;
-  padding: 8px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-}
-
-.gh-device-lead {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text);
-}
-
-.gh-device-err {
-  margin: 0;
-  font-size: 12px;
-  color: var(--danger);
-}
-
-.gh-device-link {
-  font-size: 12px;
-}
 /* hover / focus（觸控是長按）的放大預覽。刻意浮在托盤**外面**：桌機在窄欄左側、
    底部托盤時在卡片上方，所以永遠不會蓋住卡片自己的移除鍵——`pointer-events: none`
    又讓它連攔都攔不到。位置由 `ShelfPeek` 量完自己再放，`--peek-avail` 是上方真正剩下的
@@ -7446,6 +7689,7 @@ button.run-debug-toggle:hover {
 .shelf-card.peeking .shelf-card-main {
   border-color: var(--accent);
 }
+
 /* --------------------------------------------------------- 主機 shell（HostShellPanel）
 
    對某台主機開著的那個 shell。版面就是「標題列 / 抓法列 / 終端 / 一行輸入 / 按鍵列」，
@@ -7567,7 +7811,11 @@ button.run-debug-toggle:hover {
   }
 
   .shell-cwd {
-    /* 標題列在窄螢幕已經很滿：路徑收到剩尾巴，完整值留在 tooltip。 */
-    max-width: 44vw;
+    /* 標題列在窄螢幕已經很滿：路徑收到剩最後一段，完整值留在 tooltip。 */
+    max-width: 36vw;
+  }
+
+  .shell-cwd-parent {
+    display: none;
   }
 }
