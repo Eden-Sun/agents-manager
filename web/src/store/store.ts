@@ -206,6 +206,10 @@ export interface Notice {
 }
 
 /** WS `turn_progress` (API.md v3.9): the partial reply of an in-flight turn. */
+/** `turn_progress` 合併間隔（毫秒）：同一個 bot 在這段時間內只套用最後一個 frame。 */
+const LIVE_THROTTLE_MS = 250
+const liveThrottle = new Map<string, { apply: null | (() => void) }>()
+
 export interface LiveReply {
   turnId: string
   text: string
@@ -1788,12 +1792,28 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       const activity = str(pick(data, 'activity'))
       const alert = str(pick(data, 'alert'))
       const revision = Number(pick(data, 'revision') ?? 0) || 0
-      set((s) => {
-        const prev = s.liveReply[botId]
-        // Frames can only move forward within a turn; a new turn always replaces.
-        if (prev && prev.turnId === turnId && prev.revision > revision) return {}
-        return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision } } }
-      })
+      // 多個 agent 同時串流時每秒進來好幾個 frame；每個都 set 就每個都 render。同一個 bot
+      // 250 ms 內只留最後一個（頭一個立刻套用，之後的合併到下一拍），畫面看不出差別。
+      const pendingKey = botId
+      const apply = () =>
+        set((s) => {
+          const prev = s.liveReply[botId]
+          // Frames can only move forward within a turn; a new turn always replaces.
+          if (prev && prev.turnId === turnId && prev.revision > revision) return {}
+          return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision } } }
+        })
+      const slot = liveThrottle.get(pendingKey)
+      if (slot) {
+        slot.apply = apply
+        return
+      }
+      apply()
+      const entry = { apply: null as null | (() => void) }
+      liveThrottle.set(pendingKey, entry)
+      setTimeout(() => {
+        liveThrottle.delete(pendingKey)
+        entry.apply?.()
+      }, LIVE_THROTTLE_MS)
       return
     }
     case 'mem_updated': {
