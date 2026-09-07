@@ -75,18 +75,23 @@ export function ApiModelFields({
   const efforts = current?.efforts ?? []
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
-  // Drop Fast when the chosen model (or the static fallback) has no priority tier.
+  // Drop Fast when the chosen model has no priority tier. Only ever act on a real API list:
+  // while the list is loading (or when the fetch failed) `models` is the static fallback, and
+  // letting it "correct" the stored value wipes Fast whenever the key changes — e.g. picking
+  // another identity, which must not touch anything but `identity`.
   useEffect(() => {
+    if (!fromApi) return
     if (!hasFast && fast) onFast(false)
-  }, [hasFast, fast, onFast])
+  }, [fromApi, hasFast, fast, onFast])
 
   // Same for the effort: the levels are per-model, so one carried over from the previously
   // selected model can be rejected outright — codex answers `-c model_reasoning_effort="max"`
   // on gpt-5.5 with `400 unsupported_value`. Falling back to null just omits the flag.
   // This also heals a bot whose stored effort predates a model change, once its panel opens.
   useEffect(() => {
+    if (!fromApi) return
     if (effort !== null && efforts.length > 0 && !efforts.includes(effort)) onEffort(null)
-  }, [efforts, effort, onEffort])
+  }, [fromApi, efforts, effort, onEffort])
 
   const pickModel = (id: string | null) => {
     setCustom(false)
