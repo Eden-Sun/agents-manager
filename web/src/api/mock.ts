@@ -733,6 +733,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/mem') return this.mem()
     if (method === 'GET' && rawPath === '/mem/processes') return this.memProcesses(q.get('host') ?? 'local')
     if (method === 'POST' && rawPath === '/mem/processes/kill') return this.killMemProcess(b)
+    if (method === 'GET' && rawPath === '/mem/processes/pane') return this.memPane(q.get('host') ?? 'local', q.get('pane_id') ?? '')
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
@@ -901,7 +902,24 @@ export class MockTransport implements Transport {
    * 兩個 bot（可以「停止 bot」）、兩個使用者自己開的 pane、一個讀不到環境的 unknown，
    * 因為 popover 要證明的正是「哪些能砍」，不是數字本身。
    */
+  private memPane(host: string, paneId: string) {
+    const lines = [
+      `$ claude --dangerously-skip-permissions`,
+      '',
+      '> 幫我看一下 web/src/store/store.ts 的 refreshState 為什麼會清掉草稿',
+      '',
+      '⏺ 我看了 store.ts，refreshState 會整批換掉 bots slice……',
+      '',
+      '╭──────────────────────────────────────────────╮',
+      '│ >                                            │',
+      '╰──────────────────────────────────────────────╯',
+      `  ${host} · ${paneId}`,
+    ]
+    return { host, pane_id: paneId, source: 'visible', text: lines.join('\n'), revision: 3, truncated: false, columns: 120, rows: 40 }
+  }
+
   private memProcesses(host: string) {
+    // 每列都帶 socket_path：真 daemon 從環境讀，這裡固定一個。
     const live = this.bots.filter((x) => this.activeRun(x.id)).slice(0, 2)
     const mb = (n: number) => n * 1024 * 1024
     const rows = [
@@ -912,6 +930,7 @@ export class MockTransport implements Transport {
         exe: b.kind,
         argv: `${b.kind} --dangerously-skip-permissions`,
         pane_id: `w168:p${i + 1}`,
+        socket_path: '/Users/me/.config/herdr/sessions/agents-manager/herdr.sock',
         bot_id: b.id,
         bot_name: b.name,
         project_id: b.project_id,
@@ -926,6 +945,7 @@ export class MockTransport implements Transport {
         exe: 'claude',
         argv: 'claude --dangerously-skip-permissions',
         pane_id: 'wM:pB',
+        socket_path: '/Users/me/.config/herdr/herdr.sock',
         bot_id: null,
         bot_name: null,
         project_id: null,

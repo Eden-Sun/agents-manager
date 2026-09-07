@@ -1,5 +1,6 @@
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
+import { linkifyTerm } from './TermLinks'
 
 /**
  * SPEC §3.2：agent `blocked` 時對話上方的終端快照 + 按鍵面板。
@@ -50,7 +51,7 @@ export function BlockedPanel({
           </button>
         ) : null}
       </div>
-      <pre className="term blocked-term">{body}</pre>
+      <pre className="term blocked-term">{linkifyTerm(body, snap?.columns)}</pre>
       <div className="keypad">
         {KEYPAD.map((k) => (
           <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => press(k.keys)}>

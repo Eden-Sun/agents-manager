@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { isPaneMoveUnsupported, movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
+import { linkifyTerm } from './TermLinks'
 
 /**
  * Below this many columns a TUI agent lays its own text out a fragment per row and the spaces
@@ -165,7 +166,7 @@ export function TerminalTab({ botId }: { botId: string }) {
           </div>
         </div>
       ) : null}
-      <pre className="term">{body}</pre>
+      <pre className="term">{linkifyTerm(body, snap?.columns)}</pre>
     </div>
   )
 }

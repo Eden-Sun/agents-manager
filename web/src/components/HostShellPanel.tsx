@@ -5,6 +5,7 @@ import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
+import { linkifyTerm } from './TermLinks'
 
 /**
  * 對某台主機（本機或遠端）開著的那個 shell：終端快照 + 一行指令輸入。
@@ -217,7 +218,7 @@ export function HostShellPanel({
     if (!snap.text.trim() && source === 'recent_unwrapped') {
       return '（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）'
     }
-    return snap.text
+    return linkifyTerm(snap.text, snap.columns)
   }, [err, snap, source])
 
   return (

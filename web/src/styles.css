@@ -2922,20 +2922,21 @@ button:disabled {
 /*
  * 「這回合的提問」浮窗（`LastAskPeek`）。
  *
- * 貼著 `.msg-list-wrap` 的上緣浮著，不佔版面高度——回合開始／結束時整串訊息才不會上下跳。
+ * 貼著 `.msg-list-wrap` 的下緣浮著（2026-09-08 從上緣移下來：使用者要它跟眼睛看的地方在一起），
+ * 不佔版面高度——回合開始／結束時整串訊息才不會上下跳。
  * 用跟 `.msg-list` 一樣的 lane（`--chat-max` + 同樣的左右 padding），所以它跟訊息對得齊；
  * `.lastq-slot` 本身不吃指標事件，只有卡片吃，浮窗兩側的訊息仍然可以選取。
  * 底色是不透明的：它蓋在文字上，半透明只會讓兩層字疊在一起。
  */
 .lastq-slot {
   position: absolute;
-  top: 0;
+  bottom: 0;
   left: 0;
   right: 0;
   z-index: 14;
   margin: 0 auto;
   max-width: var(--chat-max);
-  padding: 10px 28px 0;
+  padding: 0 28px 10px;
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -3676,7 +3677,7 @@ button:disabled {
   /* 訊息區在 390px 只剩 14px 的左右 padding，浮窗跟著收才對得齊；兩行就夠，390px 的
      三行加上標題列會蓋掉將近四分之一的畫面。 */
   .lastq-slot {
-    padding: 8px 14px 0;
+    padding: 0 14px 8px;
   }
 
   .lastq-body {
@@ -8420,6 +8421,56 @@ button.run-debug-toggle:hover {
   color: var(--text-dim);
 }
 
+/* 「自己開的 pane」是一顆按鈕：點開那個 pane 現在的畫面。長得跟字一樣，只多一個小箭頭。 */
+.mem-pop-peek {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mem-pop-peek:hover,
+.mem-pop-peek[aria-expanded='true'] {
+  color: var(--text);
+}
+
+.mem-pop-caret {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.mem-pop-table tr.is-peeking td {
+  border-bottom-color: transparent;
+}
+
+.mem-pop-preview-row td {
+  padding: 0 0 8px;
+}
+
+.mem-pop-preview {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre;
+}
+
 .mem-pop-act {
   display: flex;
   align-items: center;
@@ -8458,4 +8509,33 @@ button.run-debug-toggle:hover {
   margin: 0;
   color: var(--text-faint);
   font-size: 11px;
+}
+
+/* --------------------------------------------- 終端畫面裡的 URL（TermLinks.tsx）
+   點一下複製，不開新分頁：登入連結貼到別處才是使用者要的。字型與行高沿用 `.term`，
+   只加底線與 accent 色，折行後接回來的完整 URL 一整條都可點。 */
+.term-link {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent-ink);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  white-space: inherit;
+  word-break: break-all;
+}
+
+.term-link:hover,
+.term-link:focus-visible {
+  text-decoration-style: solid;
+  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+}
+
+.term-link-ok {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-panel);
+  font-size: 11px;
+  text-decoration: none;
 }

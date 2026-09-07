@@ -52,7 +52,7 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 /// own, and the daemon does not put things into it (`state::ensure_session` draws the same
 /// line). A host that is configured but down fails here rather than after opening a pane, so
 /// nothing unusable ever reaches the registry.
-async fn client_for(app: &Arc<App>, host: &str) -> LcResult<(HerdrClient, String)> {
+pub(crate) async fn client_for(app: &Arc<App>, host: &str) -> LcResult<(HerdrClient, String)> {
     if app.hosts.get(host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
