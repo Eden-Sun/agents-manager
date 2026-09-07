@@ -8,6 +8,7 @@ import {
   adjacentBotId,
   anchorOf,
   botLamp,
+  botQuotaLevel,
   botQuotaWarning,
   botMatches,
   botsOfProject,
@@ -137,6 +138,13 @@ function BotRow({
       const b = s.bots.find((x) => x.id === botId)
       // 額度按主機分（SPEC §14）：遠端 bot 要看它自己那台的數字，不是本機的。
       return b ? botQuotaWarning(s.quota, b.kind, b.identity, projectHostName(s, b.project_id)) : null
+    }),
+  )
+  // 黃燈（low）也要在側欄看得到：同一個淺比較的坑，一樣用 useShallow。
+  const quotaLevel = useStore(
+    useShallow((s) => {
+      const b = s.bots.find((x) => x.id === botId)
+      return b ? botQuotaLevel(s.quota, b.kind, b.identity, projectHostName(s, b.project_id)) : null
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
@@ -270,7 +278,7 @@ function BotRow({
         ) : null}
         <span className="bot-sub">
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
-          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} quota={quotaLevel} />
           {quotaWarning ? (
             // 額度 critical：警語取代模型標籤（側欄窄，優先顯示這個）；文字撐不下就截斷，完整內容看 title。
             <span
