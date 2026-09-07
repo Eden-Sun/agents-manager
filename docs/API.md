@@ -112,7 +112,8 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 |---|---|---|---|
 | POST | `/api/bots/{id}/start` | — | `200 {"run_id":"..."}`；已有 active Run → `409 {"error":"conflict","reason":"active run already exists","run_id":"..."}`；herdr 失敗 502 |
 | POST | `/api/bots/{id}/stop` | — | `200 {}`；本來就沒有 Run → `204`（無 body） |
-| POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed） |
+| POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed）；送不出 `esc` → 502，Turn **維持** in-flight |
+| POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}` — **強制**結束目前回合，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；該 Turn 既非 in-flight 也非 delivery=unknown → 409 |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id":"...","kind":"claude","command":"/login"}`；見下 |
@@ -144,6 +145,22 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | 有回合進行中（會被吃成 prompt 的一部分） | `409 {"error":"conflict","reason":"turn_in_flight",...}` |
 | run 沒有 pane 可以打字 | `409 {"error":"conflict","reason":"no_pane",...}` |
 | herdr 拒絕 | `502 {"error":"upstream","message":"..."}` |
+
+### 4.2 強制中止 `POST /api/bots/{id}/abort`
+
+`interrupt` 的語義是「請 agent 停下來」：`esc` 送不出去（pane 沒了、herdr 斷線、run 已經不在）
+就整個失敗，那一回合仍掛在 `in_flight`，輸入框跟著鎖死，使用者只剩「停掉整個 bot」。
+
+`abort` 反過來——**先保證解鎖**，送鍵只是順帶：
+
+- `esc` 盡力送一次，成功與否寫在 `keys_sent`（失敗時 `key_error` 帶原因），**不影響**其餘步驟。
+- in-flight 的回合標成 `failed`，並在對話裡留一則系統訊息「回合已由使用者強制中止」。
+- 同一個 bot 底下 `delivery = "unknown"` 的回合一併收掉（改成 `failed`）——它同樣會擋住下一則
+  prompt（§5），使用者要的是「現在就能再打字」，不是分兩顆按鈕點兩次。
+- **沒有 active run 不是錯誤**：run 已經沒了、回合卻還掛著，正是最需要這支的情況。
+- bot 不存在 → `404`。回合本來就沒有卡住 → `200 {"aborted":[]}`（冪等）。
+
+註：agent 那頭可能還在跑（`esc` 沒送成功時），daemon 只是不再等它；真的要停就 `stop`。
 
 ## 5. 送訊息
 
@@ -457,7 +474,7 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
 
 | mode | 行為 |
 |---|---|
-| `auto` | 已可用 → 原樣回。否則若有有效但非 active 的帳號 → `switch`；active 失效則 logout 該帳號。遠端且本機已登入 → `copy`。其餘 → `device`。 |
+| `auto` | 已可用 → 原樣回。否則若有有效但非 active 的帳號 → `switch`。遠端且本機已登入 → `copy`。其餘 → `device`。 |
 | `switch` | `gh auth switch --hostname github.com --user <user>`。沒給 `user` 就切到第一個有效的非 active 帳號。 |
 | `copy` | 本機 `gh auth token` 經 ssh **stdin** 餵給遠端 `gh auth login --with-token --insecure-storage`（token 不進 argv、不進 log）。只適用遠端。 |
 | `device` | daemon 向 GitHub 要裝置碼，立刻回 `pending`；背景輪詢，授權後同樣 `--with-token` 餵給該主機。 |
@@ -1005,10 +1022,17 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
 ## 12. v4.0：模型清單、fast 模式、attach 指令、額度
 
-### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>`
+### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>&identity=<name>`
 
-列出某 host 上某 kind 可用的模型。`host` 省略 = `local`。daemon 端快取 **10 分鐘**（key = host+kind），
-`?refresh=1` 強制重抓。遠端 host 透過 ssh（`HostConn::ssh_exec_path`）在遠端跑同樣的管線。
+列出某 host 上某 kind 可用的模型。`host` 省略 = `local`。daemon 端快取 **10 分鐘**（key =
+host+kind+identity），`?refresh=1` 強制重抓。遠端 host 透過 ssh（`HostConn::ssh_exec_path`）
+在遠端跑同樣的管線。
+
+`identity`（**claude only**，v4.2）：claude 的 `default_effort` 不是模型內建的，是那個帳號
+`settings.json` 目前的設定（見下表與 SPEC §17.1）；`identity` 決定讀哪個
+`CLAUDE_CONFIG_DIR/settings.json`（走 `identities_for_host`，含 SPEC §16 那些 shell 認來的
+`ccN`）。省略、或給一個不存在 / 非 claude 的名字，一律退回預設帳號的 `~/.claude/settings.json`
+——不是錯誤，只是沒有那個身份專屬的提示。codex / grok 忽略這個參數。
 
 ```json
 {
@@ -1036,7 +1060,16 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 | `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 時退回 `["low","medium","high"]`） | 依模型（grok-4.6 含 `xhigh`；grok-4.5 為 low/medium/high） | `[]` |
 | `claude` | `static` | 靜態（`opus / sonnet / haiku / fable`） | `["low","medium","high","xhigh","max"]` — `claude --help` 對 `--effort` 列的五級，**每個 alias 都一樣**（claude 沒有 per-model 清單） | `[]` |
 
-- `display_name` / `description` 可能為空字串；`default_effort` 可能為 `null`。
+`default_effort`：codex / grok 是那個模型自己回報的值；**claude 讀 `identity` 那個帳號的
+`settings.json`**——`effortLevel`（全域）先墊底，`modelSettings.<真實 model id>.effortLevel`
+（per-model 覆寫）蓋過去。真實 id（`claude-opus-5` 這種）不是啟動用的 alias，比對用子字串
+（含 `opus`/`sonnet`/`haiku`/`fable` 哪個字就算命中）。兩者都沒有、檔案讀不到、或不是合法
+JSON → **`"high"`**（claude 自己的內建預設；官方文件 `code.claude.com/docs/en/model-config`：
+「`high`…The default on every model except Opus 4.7」，`opus/sonnet/haiku/fable` 都不是
+Opus 4.7；也拿一個從未動過 effort 的乾淨帳號實測過，`/effort` 拉桿確實停在 `high`）。
+
+- `display_name` / `description` 可能為空字串；`default_effort` claude 一律有值（見上），
+  codex / grok 仍可能為 `null`（該模型沒回報預設）。
 - 失敗（CLI 不存在、逾時、解析失敗、ssh 失敗）→ `502 {"error":"upstream","message":"…"}`，
   **前端應退回靜態清單**（claude：`opus / sonnet / haiku / fable` 加上那五級 effort；codex / grok 由前端自備）。
 - `kind` 不合法 → 400；`host` 不存在 → `404 {"error":"not_found","what":"host"}`。
@@ -1296,10 +1329,19 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 daemon 起的每個 agent 都帶一條預設人設（`lifecycle::spawn_rule`，接在使用者的 `bot.persona` 前面）：
 「你的 agent 名稱是 `<agent_name>`；用 herdr 開子 pane / 子 agent 時名稱必須以 `<agent_name>-` 為前綴」。
 
-對帳（`reconcile`）時，herdr 裡沒有任何 bot 認領、名稱又是 `<某 bot 的 agent_name>-<字尾>` 的 agent，
-會被建成那個 bot 的**子 bot**：`managed_by = "child"`、`parent_bot_id = <父 bot id>`、`name = <字尾>`、
-kind 取 herdr 偵測到的（偵測不到就沿用父的）、identity 沿用父的、不注入 hook（回覆走終端擷取）。
-同時建一筆 `adopted = 1` 的 run，之後跟一般 bot 一樣有燈號、對話、終端。前綴取最長匹配，所以孫代掛在子代下面。
+對帳（`reconcile`）時，herdr 裡沒有任何 bot 認領的 agent 會被建成某個 bot 的**子 bot**：
+`managed_by = "child"`、`parent_bot_id = <父 bot id>`、kind 取 herdr 偵測到的（偵測不到就沿用父的）、
+identity 沿用父的、不注入 hook（回覆走終端擷取）。同時建一筆 `adopted = 1` 的 run，之後跟一般 bot 一樣有燈號、對話、終端。
+
+認父的線索有兩條，**血緣優先**（SPEC §6.5a）：
+
+1. **血緣**：一個 bot 一個 tab，所以子 pane 一定 split 在父的 tab 裡。這個 agent 的 `tab_id` 等於某個 bot
+   活動 run 的 `tab_id` → 就是那個 bot 的子 agent。人設只是請求（agent 會忘、codex / grok 可能沒讀），
+   tab 是事實，因此不管子 agent 叫什麼名字都追得到。同一 tab 內有父也有已認領的子時取名字前綴最長的，
+   平手取非 `child` 的那個，孫代因此掛在子代下面。
+2. **名字前綴**：`<某 bot 的 agent_name>-<字尾>`，最長匹配。跨 tab 與 team workspace 只有這條。
+
+子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
 
 - `GET /api/state` 的 bot 物件多 `parent_bot_id`（頂層為 `null`），`managed_by` 多一個值 `child`。
 - 子 bot 不進 config.toml；pane 消失時 daemon 把它 `deleted_at`（對話保留）。`DELETE /api/bots/{id}` 對子 bot 直接停 pane 並軟刪。

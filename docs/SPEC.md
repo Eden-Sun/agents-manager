@@ -1,6 +1,7 @@
 # Agents Manager 規格書（v3.6）
 
 > 修訂紀錄
+> - v4.2（2026-09-07）：新增 §17.1「預設提示從哪來」：`GET /api/models` 新增 `identity=` 參數，claude 的 `default_effort` 改讀那個身份的 `settings.json`（`effortLevel` 全域 + `modelSettings.<真實 id>.effortLevel` per-model 覆寫，以 alias 子字串比對），兩者都沒有時落回 claude 官方文件記載、並經真機驗證的內建預設 `high`（初版誤回 `null`，已修正）；UI 的「預設」按鈕與 tooltip 因此顯示真正會生效的強度而不是空話；模型快取 key 多一段身份。
 > - v4.1（2026-09-06）：新增 §17「claude 的 `--effort`」：claude 2.1+ 的五級強度（low…max）納入 `bot.effort`，啟動注入 `--effort`，`GET /api/models` 的 claude 清單帶同一組 `efforts`；執行中改強度走 TUI 的 `/effort <level>` 當場套用（帶參數才行，不帶參數是拉桿；claude 會順手存成該帳號的預設）。
 > - v4.1（2026-09-06）：新增 §16「從 shell 認出來的身份 cc0～cc6」：daemon 在工具偵測時順便讀該主機登入 shell 的 `ccN` alias（`~/.zshrc` 為退路），只取 `CLAUDE_CONFIG_DIR`、不取旗標，結果放在 `hosts[].shell_identities` 與 `hosts[].identities.<name>.source/config_dir`，**不寫回 config.toml**；bot 啟動、identity 驗證、額度探測與 UI 選單一律改用 `identities_for_host(host)`（config 優先）；額度探測跳過「statusLine 剛更新過」與「這台沒登入」的身份。
 > - v3.9（2026-09-06）：新增 §14「每台主機各自的額度」：quota map key 加上 `<host>/` 前綴、`quota.host` 欄位；codex RPC / claude statusLine / claude 與 grok 的 `/usage` 探測全部跟著主機走（遠端探測借 daemon 在該主機的 named session）；三個 poller 改為對 `local` + 每台已連線遠端各跑一輪、`probe_lock` 改 per host；`GET /api/quota` 新增 `host=`、WS `quota_updated` 多帶 `host`；標題列額度條一次只顯示一台並在遠端掛主機名牌。
@@ -243,6 +244,19 @@ label = "foo"
 3. agent 清單中 `name` 匹配某 Bot 但 DB 無 active Run → 建 Run（`running`，`adopted=1`），沿用同一 Conversation。
 4. **orphan pane 回收**（第一階段）：DB 中 `exited/stopped` Run 記錄的 `pane_id` 若仍存在於 snapshot 且無 agent → `pane.close`。
 5. 重建各 active Run 的狀態訂閱。
+
+### 6.5a 子 agent 認領（血緣優先，2026-09-07）
+
+一個 bot 一個 tab。對帳走完上面的逐 bot 迴圈後，`agent.list` 裡**沒有任何 bot 認領**的 agent 依序試兩條線索：
+
+1. **血緣（優先）**：它的 `tab_id` 等於某個 bot 活動 run 的 `tab_id`（該 bot 的 agent 這一輪在 herdr 裡還在）
+   → 那個 bot 的子 agent。子 pane 是從父 pane split 出來的，所以它必然在父的 tab 裡；這是機制，
+   不需要 agent 配合。同一個 tab 裡有多個 bot（父 + 已認領的子）時，取名字前綴最長的那個，
+   平手時取非 `child` 的那個 bot——孫代因此掛在子代下面。
+2. **名字前綴**：名稱是 `<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 與 team workspace 的情況只有這條線索。
+
+兩條都命中時以血緣為準。認領後走同一條既有路徑：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run、
+同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 
@@ -718,7 +732,8 @@ claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），
 - 啟動注入 `--effort <level>`（小寫），位置與其它 kind 的強度相同（daemon 旗標 → persona → model
   → effort → identity.args → bot.args）。
 - `GET /api/models` 的 claude 靜態清單每個 alias 都帶同一組 `efforts`——claude 沒有 codex
-  `model/list` 那種 per-model 清單，所以 UI 的強度列不標「依 <模型>」。
+  `model/list` 那種 per-model 清單，所以 UI 的強度列不標「依 <模型>」。`default_effort`
+  倒是會依身份而變，見 §17.1。
 - **可以當場套用**：`/effort <level>` 帶參數就直接生效（2.1.263 實測，畫面回
   `Set effort level to low (saved as your default for new sessions)`）；不帶參數的 `/effort`
   才是那條拉桿（`←/→ to adjust · Enter to confirm`）。所以 `PATCH /bots/:id {effort}` 走
@@ -728,7 +743,37 @@ claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），
   `/effort <level>` 會順手把它存成該帳號之後新 session 的預設強度。TUI 的拉桿有「按 `s` 只
   套用這一次」，但那條路要靠方向鍵定位，送不出確定的值，所以 daemon 用帶參數的形式。
 
-實測（2026-09-06，claude 2.1.263，本機與 m4p 同版）：
+### 17.1 「預設」提示從哪來（v4.2）
+
+「不指定強度」在 codex / grok 一直都會標出那個模型自己回報的預設值（`預設（中）`）；claude
+之前只寫「預設」——不是不能顯示，是 claude 根本沒有這種 per-model API，那個值其實是**帳號的
+`settings.json`**：
+
+```json
+{
+  "effortLevel": "high",
+  "modelSettings": { "claude-opus-5": { "effortLevel": "low" } }
+}
+```
+
+- `effortLevel`：全域預設，`claude --effort` 沒帶值時整個帳號的落點。
+- `modelSettings.<真實 model id>.effortLevel`：per-model 覆寫。**真實 id 不是我們啟動時用的
+  alias**（`claude --model opus` 實際跑的是 `claude-opus-5`，`/status` 的 `Model:` 行會印出這個
+  對照），所以比對用**子字串**——`per_model` 的 key 含有 `opus`/`sonnet`/`haiku`/`fable` 哪個字
+  就算命中。驗證過本機與 m4p 目前存在的每一個 key 都吻合這個規則；不吻合的話就是沒有提示，不會
+  猜錯。
+- 兩者都沒有、檔案讀不到、或不是合法 JSON → 落回 **claude 自己的內建預設 `high`**（v4.2 初版
+  在這裡回過 `null`——查了官方文件才發現查錯了，見下方 E10 那條）。
+- 走身份：`GET /api/models?kind=claude&host=&identity=` 的 `identity` 決定讀哪個
+  `CLAUDE_CONFIG_DIR/settings.json`（`identities_for_host`，SPEC §16——shell 認來的 `ccN` 一樣
+  適用）；不指定或指定到不存在 / 非 claude 的身份，一律退回預設帳號的 `~/.claude/settings.json`。
+  本機讀檔、遠端經 ssh `cat`，與 grok 的 `models_cache.json` 走同一套模式。
+- 快取 key 因此多一段身份（`{host}/{kind}/{identity}`，10 分鐘 TTL）：換身份不會沿用上一個身份
+  的提示。
+- UI 的 tooltip 把來源講清楚——「不帶 --effort（帳號目前設定 高）」——不寫「模型預設」，因為
+  那個值換一個身份就不一樣，不是模型本身內建的。
+
+實測（2026-09-06/07，claude 2.1.263，本機與 m4p 同版）：
 
 | # | 內容 | 結果 |
 |---|---|---|
@@ -736,7 +781,15 @@ claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），
 | E2 | `claude -p --effort bogus` | `Warning: Unknown --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.` — 只是警告，不會讓 run 掛掉 |
 | E3 | TUI 打 `/effort`（不帶參數） | 出現拉桿：`low medium high xhigh max ultracode`（`ultracode` = xhigh + workflows，只有 TUI 有，CLI 不吃），`←/→ to adjust · Enter to confirm · s for this session only` |
 | E4 | TUI 打 `/effort low` | 直接套用：`⎿ Set effort level to low (saved as your default for new sessions): …`，狀態列變成 `○ low · /effort`；再開拉桿 ▲ 停在 low |
-| E5 | UI | Bot 設定的「強度」列對 claude 出現（預設 / 低 / 中 / 高 / 最高 / Max）並標「執行中改會即時套用，不用重啟」（`docs/screenshots/353-claude-effort.png`） |
+| E5 | UI（v4.1） | Bot 設定的「強度」列對 claude 出現（預設 / 低 / 中 / 高 / 最高 / Max）並標「執行中改會即時套用，不用重啟」（`docs/screenshots/353-claude-effort.png`） |
+| E6 | `/status` 對照 alias → 真實 id | `Model: sonnet (claude-sonnet-5)`；本機 `~/.claude/settings.json` 另存了 `claude-opus-5` 的覆寫 |
+| E7 | `GET /api/models?kind=claude`（本機，無 identity） | `opus→low`（覆寫）、`sonnet/haiku/fable→high`（全域） |
+| E8 | 同上，`identity=cc1`（`~/.claude-ccompany`） | 四個 alias 都是 `medium`（該帳號只有全域，沒有 per-model 覆寫） |
+| E9 | 同上，`identity=` 不存在的名字 | 退回預設帳號的結果，與 E7 相同 |
+| E10 | mock（`node scripts/demo-effort-default-hint.mjs`） | 不指定身份 `預設（高）`；選 Opus 後變 `預設（低）`；切到 cc1 變 `預設（中）`；切到 cc2（沒設過）落回 `預設（高）`（`docs/screenshots/362`〜`365`） |
+| E11 | claude 官方文件 `code.claude.com/docs/en/model-config`「Choose an effort level」 | 逐字：「`high` \| Balances token usage and intelligence. **The default on every model except Opus 4.7**」（Opus 4.7 預設 `xhigh`）——`opus`/`sonnet`/`haiku`/`fable` 四個 alias 都不是 Opus 4.7 |
+| E12 | 真機驗證 E11：一個 `settings.json` 從沒碰過 effort 的乾淨帳號（cc2），開 claude 直接切到 Sonnet | 開場橫幅印 `Sonnet 5 with high effort`，狀態列 `● high · /effort`，`/effort` 拉桿 ▲ 停在 `high`——證實 §17.1 那個 `null` 是查漏了，已改回 `high` |
+| E13 | 同帳號（cc2）換成 `--model haiku` | `/effort`（不帶參數）一樣開得出拉桿，五級都在，▲ 停在 `high`——haiku 支援 effort，且預設同樣是 `high`（E11 的官方表格沒列 haiku，但實機行為以這條為準） |
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
