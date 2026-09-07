@@ -117,6 +117,40 @@ function writeSelection(sel: Selection) {
 /** Read once at module load so the store's initial state is already the restored selection. */
 const initialSelection = readSelection()
 
+const SHELL_VIEW_KEY = 'am.shellView'
+
+type ShellView = { host: string; paneId: string; cwd: string }
+
+/**
+ * 開著的主機 shell 也鏡射到 localStorage：重新整理要回到同一個 shell，不是回到對話。
+ * pane 在這段時間可能已經被關掉，所以 `bootstrap` 會拿 `GET /api/hosts/:host/shells` 對一次，
+ * 不在了就清掉。
+ */
+function readShellView(): ShellView | null {
+  try {
+    const raw = localStorage.getItem(SHELL_VIEW_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    if (!isRec(parsed)) return null
+    const host = optStr(pick(parsed, 'host'))
+    const paneId = optStr(pick(parsed, 'paneId'))
+    if (!host || !paneId) return null
+    return { host, paneId, cwd: optStr(pick(parsed, 'cwd')) ?? '' }
+  } catch {
+    return null
+  }
+}
+
+function writeShellView(v: ShellView | null) {
+  try {
+    if (v) localStorage.setItem(SHELL_VIEW_KEY, JSON.stringify(v))
+    else localStorage.removeItem(SHELL_VIEW_KEY)
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+const initialShellView = readShellView()
+
 /**
  * Composer drafts survive bot / group / team / tab switches and reloads.
  * Key: `bot:<id>` | `group:<projectId>` | `team:<teamId>`.
@@ -498,6 +532,8 @@ interface StoreState {
   viewHostShell: (shell: HostShell) => void
   /** 只關掉面板，shell 留著（回來還接得回去）。 */
   closeShellView: () => void
+  /** 開機時對 localStorage 還原的 `shellView` 驗一次 pane 還在不在（不在就清掉）。 */
+  restoreShellView: () => Promise<void>
   /** 真的結束這個 shell（`DELETE …/shells/:pane_id`）並關掉面板。 */
   endHostShell: (host: string, paneId: string) => Promise<void>
 
@@ -658,7 +694,7 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedTeamId: initialSelection.teamId,
   teamsSupported: true,
   teamLaunch: null,
-  shellView: null,
+  shellView: initialShellView,
   hostShellSupported: true,
 
   selectedBotId: initialSelection.botId,
@@ -687,6 +723,7 @@ export const useStore = create<StoreState>((set, get) => ({
       // 開機時還原的 team 選取要在這裡補抓細節（`refreshState` 不再幫忙載 team，issue #23）。
       const team = get().selectedTeamId
       if (team) await get().loadTeam(team)
+      await get().restoreShellView()
       set({ ready: true, bootError: null })
     } catch (e) {
       set({ ready: false, bootError: errText(e) })
@@ -1521,14 +1558,9 @@ export const useStore = create<StoreState>((set, get) => ({
         const existing = cwd ? [] : await api.fetchHostShells(host)
         const reuse = existing.length > 0 ? existing[existing.length - 1] : null
         const shell = reuse ?? (await api.openHostShell(host, cwd))
-        set({
-          shellView: { host, paneId: shell.pane_id, cwd: shell.cwd },
-          selectedBotId: null,
-          selectedProjectId: null,
-          selectedTeamId: null,
-          teamLaunch: null,
-          settingsBotId: null,
-        })
+        // 不動 selectedBotId：shell 掛在目前這個 bot 的標題列底下（2026-09-08），
+        // 使用者要的是「在這個 bot 旁邊開個終端」，不是離開對話。
+        set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
         ok = true
       } catch (e) {
         // 缺端點不是失敗，是這版 daemon 沒有這個功能：入口收掉，不跳錯誤。
@@ -1540,16 +1572,21 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   viewHostShell: (shell) =>
-    set({
-      shellView: { host: shell.host, paneId: shell.pane_id, cwd: shell.cwd },
-      selectedBotId: null,
-      selectedProjectId: null,
-      selectedTeamId: null,
-      teamLaunch: null,
-      settingsBotId: null,
-    }),
+    set({ shellView: { host: shell.host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null }),
 
   closeShellView: () => set({ shellView: null }),
+
+  async restoreShellView() {
+    const v = get().shellView
+    if (!v) return
+    try {
+      const alive = await api.fetchHostShells(v.host)
+      if (!alive.some((sh) => sh.pane_id === v.paneId)) set({ shellView: null })
+    } catch (e) {
+      if (api.isHostShellUnsupported(e)) set({ shellView: null, hostShellSupported: false })
+      // 主機暫時連不上就先留著：面板自己會顯示讀取失敗，使用者可以按「關閉」。
+    }
+  },
 
   async endHostShell(host, paneId) {
     await guarded(set, get, `shell:${host}:${paneId}`, async () => {
@@ -1816,7 +1853,12 @@ function markTeamsUnsupported(set: SetFn, get: GetFn, e: unknown): boolean {
 // `openSettings`, `addBot`, `removeBot`/`removeProject` and `refreshState`'s own "the selected
 // bot is gone" fallback are all covered — as is anything added later.
 let lastSelection = initialSelection
+let lastShellView = initialShellView
 useStore.subscribe((s) => {
+  if (s.shellView !== lastShellView) {
+    lastShellView = s.shellView
+    writeShellView(s.shellView)
+  }
   if (
     s.selectedBotId === lastSelection.botId &&
     s.selectedProjectId === lastSelection.projectId &&
