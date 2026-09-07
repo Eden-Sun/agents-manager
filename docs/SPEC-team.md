@@ -200,7 +200,7 @@ PM 的價值在它記得這個 repo、記得上一個 issue 的取捨。停掉�
   沿用 IssuesBar 的 issue 挑選器亦可），送 `store.addTeamIssues`（store 已有，之前沒有任何元件呼叫）。
   已 cleanup 的 team（PM bot `deleted_at` 非空，或 daemon 回 409 `team is cleaned up`）不顯示這顆按鈕。
 - 送出後 `team_changed` 會把 phase 推成 `starting` → `planning`，既有面板自動切回進行中視圖（composer 解鎖、成員 lamp 亮起）。
-- Timeline 多兩種 note 的呈現：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）、`member_context_lost`（「PM 沒能續接先前對話，已改為新對話」）。
+- Timeline 多兩種 note 的呈現：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）、`member_context_lost`（「PM 沒能續接先前對話（<原因>），改為新對話」）；`why` 為 `no_session_id`→「找不到先前的 session」、`unsupported_kind`→「這個 agent 不支援原生續接」、`resume_mismatch`→「續接後的 session 不一致」，未知代碼→「未知原因」。
 - `IssueQueue` 目前 `issues.length < 2` 就不畫；reopen 後至少 2 個，會自然出現。
 
 #### 2.5.6 驗收條件
