@@ -692,6 +692,35 @@ export interface MemSnapshot {
   hosts: HostMem[]
 }
 
+/** `GET /api/mem/processes` 的一列（SPEC §15.2）：那個 RAM 數字裡的一個程序。 */
+export interface MemProcess {
+  pid: number
+  ppid: number
+  rss_bytes: number
+  /** 執行檔名，路徑已剝掉：`claude` / `codex` / `zsh`。 */
+  exe: string
+  argv: string
+  /** herdr 注入的 pane（`w168:p1`）；讀不到環境時 null。 */
+  pane_id: string | null
+  /** AG Man 起的 bot 才有；bot 已刪也還在，此時 `bot_name` 為 null。 */
+  bot_id: string | null
+  bot_name: string | null
+  project_id: string | null
+  owner: MemOwner
+  /** 自己 ＋ 所有子孫的 RSS，也就是「砍掉能省多少」。清單依它降冪。 */
+  subtree_bytes: number
+  children: number
+}
+
+/** `bot` 要走「停止 bot」；`pane` / `unknown` 才可以直接送訊號。 */
+export type MemOwner = 'bot' | 'pane' | 'herdr' | 'unknown'
+
+export interface MemProcesses {
+  host: string
+  sampled_at: string
+  processes: MemProcess[]
+}
+
 /** `GET /api/search/messages` 的一列：這個 bot 的對話裡命中幾次，以及最新一次的前後文。 */
 export interface MessageHit {
   hits: number

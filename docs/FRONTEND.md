@@ -56,6 +56,8 @@ web/src/
     StatusLamp.tsx   # §2.2 合成燈號
     AttachButton.tsx # v4.0：一鍵複製 hosts[].attach_command
     QuotaStrip.tsx   # v4.0：頂欄 5h/7d 剩餘額度（掛在 Chat/Group 標題列；一次顯示一台主機，SPEC §14）
+    MemBadge.tsx     # RAM 那一格（SPEC §15）；點得開，內容交給 MemPopover
+    MemPopover.tsx   # RAM 展開的程序清單 + 結束/停止 bot（SPEC §15.2）
     Tools.tsx        # v4.0：工具徽章、可收合缺 CLI 提示、用現有 agent 安裝
     KindTag.tsx      # v4.0：kind 圖示/文字全域切換（localStorage）
     ModelPicker.tsx  # v4.0：GET /api/models 驅動的模型 / effort / Fast

@@ -11,6 +11,9 @@
  */
 
 import type {
+  MemOwner,
+  MemProcess,
+  MemProcesses,
   MemSnapshot,
   AgentStatus,
   AppState,
@@ -1042,6 +1045,34 @@ export function toTeamEvents(raw: unknown): TeamEvent[] {
   return sortById(out)
 }
 
+
+/** daemon 之外的字串一律當 `unknown`：多一個不認得的分類會讓「可以砍嗎」變成猜的。 */
+function toOwner(v: unknown): MemOwner {
+  const s = str(v)
+  return s === 'bot' || s === 'pane' || s === 'herdr' ? s : 'unknown'
+}
+
+/** `GET /api/mem/processes`（SPEC §15.2）。舊 daemon 沒有這支 → 空清單。 */
+export function toMemProcesses(v: unknown): MemProcesses {
+  const r = isRec(v) ? v : {}
+  const rows: MemProcess[] = arr(r.processes)
+    .filter(isRec)
+    .map((p) => ({
+      pid: num(p.pid),
+      ppid: num(p.ppid),
+      rss_bytes: num(p.rss_bytes),
+      exe: str(p.exe),
+      argv: str(p.argv),
+      pane_id: p.pane_id == null ? null : str(p.pane_id),
+      bot_id: p.bot_id == null ? null : str(p.bot_id),
+      bot_name: p.bot_name == null ? null : str(p.bot_name),
+      project_id: p.project_id == null ? null : str(p.project_id),
+      owner: toOwner(p.owner),
+      subtree_bytes: num(p.subtree_bytes),
+      children: num(p.children),
+    }))
+  return { host: str(r.host), sampled_at: str(r.sampled_at), processes: rows }
+}
 
 /** `GET /api/mem` / WS `mem_updated`（SPEC §15）。舊 daemon 沒有這支 → 全 0，UI 就不顯示。 */
 export function toMemSnapshot(v: unknown): MemSnapshot {

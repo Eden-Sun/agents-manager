@@ -8303,3 +8303,159 @@ button.run-debug-toggle:hover {
 .sl-item.sl-warn {
   color: var(--status-warn);
 }
+
+/* ── RAM 那格點開的程序清單（SPEC §15.2）──────────────────────────────────
+   排版語彙沿用額度 popover（`.quota-pop`）：同一條標題列上的兩顆徽章點開來應該長得像
+   同一個東西。差別只在這張是表格——使用者要在幾十列裡比大小、找出哪些能砍。 */
+.mem-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.mem-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.mem-open .mem-badge {
+  cursor: pointer;
+}
+
+.mem-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 560px;
+  max-width: 92vw;
+  max-height: 460px;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.mem-pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mem-pop-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+
+.mem-pop-refresh {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mem-pop-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.mem-pop-table th {
+  padding: 0 6px 4px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+  font-weight: 600;
+  text-align: left;
+}
+
+.mem-pop-table td {
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: baseline;
+}
+
+/* bot 那幾列淡一點：它們不是這張清單的重點，重點是「可以砍的」那些。 */
+.mem-pop-table tr.is-bot {
+  color: var(--text-faint);
+}
+
+.mem-pop-size {
+  width: 52px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* argv 一律一行，全文在 tooltip 裡——換行會讓「哪一列比較大」變得難掃。 */
+.mem-pop-argv {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.mem-pop-owner {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.mem-pop-act {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.mem-pop-act button {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mem-pop-act button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.mem-pop-act button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mem-pop-err {
+  margin: 0;
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.mem-pop-empty,
+.mem-pop-foot {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}

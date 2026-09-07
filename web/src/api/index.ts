@@ -4,11 +4,12 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
 import type {
+  MemProcesses,
   MemSnapshot,
   MessageHit,
   AppState,
@@ -417,6 +418,28 @@ export async function restoreBot(botId: string): Promise<boolean> {
 /** `GET /api/mem` — herdr 進程樹的常駐記憶體（SPEC §15）。 */
 export async function fetchMem(): Promise<MemSnapshot> {
   return toMemSnapshot(await transport.request('GET', '/mem'))
+}
+
+/**
+ * `GET /api/mem/processes?host=…` — 那個數字是由哪些程序組成的（SPEC §15.2）。
+ * 舊 daemon 沒有這支 → 空清單，popover 顯示「這台 daemon 還不會列」而不是壞掉。
+ */
+export async function fetchMemProcesses(host: string): Promise<MemProcesses> {
+  try {
+    return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`))
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return { host, sampled_at: '', processes: [] }
+    throw e
+  }
+}
+
+/**
+ * `POST /api/mem/processes/kill` — 結束一個 herdr 樹裡的程序（SPEC §15.2）。
+ * daemon 會重新取樣再判定，並擋掉 herdr 本身（400）與 bot（409）；錯誤原樣往上丟，
+ * 呼叫端把 daemon 的訊息照著顯示，不在前端另外猜一套說法。
+ */
+export async function killMemProcess(host: string, pid: number, signal: 'TERM' | 'KILL' = 'TERM'): Promise<void> {
+  await transport.request('POST', '/mem/processes/kill', { host, pid, signal })
 }
 
 /**

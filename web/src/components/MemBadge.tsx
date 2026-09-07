@@ -1,5 +1,6 @@
 import { useStore } from '../store/store'
 import { LOCAL_HOST } from '../api/types'
+import { MemPopover } from './MemPopover'
 
 /** 1.4G / 820M / 64M — 一格寬度就要看得懂，所以個位數才給小數。 */
 export function humanBytes(n: number): string {
@@ -44,10 +45,13 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
     '算的是「跑在 herdr pane 裡的一切」，不只是這裡管的 bot。',
     '每 15 秒更新一次。',
   ]
+  // 點得開：一個總數看不出「哪些是我自己開的、可以砍」，明細見 `MemPopover`（SPEC §15.2）。
   return (
-    <span className={`mem-badge${remote ? ' remote' : ''}`} title={tip.join('\n')}>
-      <span className="mem-k">{remote ? `@${host}` : 'RAM'}</span>
-      <span className="mem-v">{humanBytes(row.total_bytes)}</span>
-    </span>
+    <MemPopover host={host}>
+      <span className={`mem-badge${remote ? ' remote' : ''}`} title={`${tip.join('\n')}\n\n點一下看有哪些程序。`}>
+        <span className="mem-k">{remote ? `@${host}` : 'RAM'}</span>
+        <span className="mem-v">{humanBytes(row.total_bytes)}</span>
+      </span>
+    </MemPopover>
   )
 }
