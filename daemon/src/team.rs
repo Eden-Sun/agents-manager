@@ -3507,6 +3507,7 @@ pub mod testing {
             7799,
             "test-token".into(),
             "test".into(),
+            false,
         );
         app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let pid = db::ulid();

@@ -2666,6 +2666,7 @@ mod scenarios {
             7799,
             "t".into(),
             "test".into(),
+            false,
         );
         app2.connected.store(true, std::sync::atomic::Ordering::SeqCst);
 
