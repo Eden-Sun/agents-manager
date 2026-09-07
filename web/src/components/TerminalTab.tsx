@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useScrollTail } from '../hooks/useScrollTail'
 import { isPaneMoveUnsupported, movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
@@ -87,6 +88,10 @@ export function TerminalTab({ botId }: { botId: string }) {
     return tight ? squeeze(snap.text) : snap.text
   }, [err, snap, tight])
 
+  // 終端的「現在」在最下面：一進分頁、換 bot、每次刷新都要看到最新輸出，除非使用者
+  // 自己往上捲去翻 scrollback（`useScrollTail` 的 stick 判斷）。
+  const tail = useScrollTail<HTMLPreElement>([body])
+
   return (
     <div className="term-pane">
       <div className="term-bar">
@@ -166,7 +171,8 @@ export function TerminalTab({ botId }: { botId: string }) {
           </div>
         </div>
       ) : null}
-      <pre className="term">{linkifyTerm(body, snap?.columns)}</pre>
+      {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
+      <pre className="term" ref={tail.ref} onScroll={tail.onScroll}>{linkifyTerm(body, snap?.columns)}</pre>
     </div>
   )
 }
