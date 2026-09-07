@@ -27,7 +27,7 @@ step "preflight"
 command -v cargo  >/dev/null || die "cargo not found — install Rust from https://rustup.rs"
 # A Homebrew Rust has cargo but no rustup, and the target below is added with rustup.
 command -v rustup >/dev/null || die "rustup not found — the $TARGET target needs it; install Rust from https://rustup.rs"
-command -v npm    >/dev/null || die "npm not found — install Node.js 20+"
+command -v bun    >/dev/null || die "bun not found — install from https://bun.sh"
 xcode-select -p >/dev/null 2>&1 || die "Xcode command line tools missing — run: xcode-select --install"
 rustup target list --installed | grep -qx "$TARGET" || rustup target add "$TARGET"
 
@@ -41,10 +41,7 @@ if [ "${SKIP_WEB:-}" = 1 ] && [ -f web/dist/index.html ]; then
   step "web ui (skipped, reusing web/dist)"
 else
   step "web ui"
-  # if/else, not `A && B || C`: a *failing* install must stop here, not fall through to `npm ci`.
-  ( cd web \
-    && if [ -d node_modules ]; then npm install --no-audit --no-fund; else npm ci --no-audit --no-fund; fi \
-    && npm run build )
+  ( cd web && bun install --frozen-lockfile && bun run build )
 fi
 [ -f web/dist/index.html ] || die "web/dist/index.html missing after the frontend build"
 
@@ -58,8 +55,8 @@ cp -f "target/$TARGET/release/agents-managerd" "desktop/binaries/agents-managerd
 
 # ---------------------------------------------------------------- 3. .app
 step "desktop shell (tauri)"
-( cd desktop && { [ -d node_modules ] || npm install --no-audit --no-fund; } \
-  && npx --no-install tauri build --target "$TARGET" --bundles app )
+( cd desktop && { [ -d node_modules ] || bun install --frozen-lockfile; } \
+  && bunx --no-install tauri build --target "$TARGET" --bundles app )
 [ -d "$BUNDLE" ] || die "expected $BUNDLE"
 
 # ---------------------------------------------------------------- 4. ad-hoc sign

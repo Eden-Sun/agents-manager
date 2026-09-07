@@ -99,20 +99,31 @@ flowchart LR
 
 ## 安裝與啟動
 
-需要：Rust（`cargo`）、Node.js、已安裝的 [herdr](https://herdr.dev)（本專案實測 0.8.2，socket protocol 20），以及至少一種 agent CLI（`claude` / `codex` / `grok`）。
+需要：Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)（本專案實測 0.8.2，socket protocol 20），以及至少一種 agent CLI（`claude` / `codex` / `grok`）。
 
 ```bash
 git clone git@github.com:Eden-Sun/agents-manager.git
 cd agents-manager
 
+# 一次跑起 daemon（127.0.0.1:7788）+ Vite dev server（http://localhost:5173）
+cargo dev
+# ...
+cargo down    # 兩個都停掉
+```
+
+`cargo dev` / `cargo down` 是 `xtask/` 的別名（見 `.cargo/config.toml`），行為是 `cargo build --bin agents-managerd` + `bun install` 之後，把 daemon 與 `vite --host` 當成一般子行程啟動，PID 記在 `target/dev.pids`，log 在 `target/dev-logs/`。
+
+也可以手動分開跑：
+
+```bash
 # daemon（監聽 127.0.0.1:7788；首次啟動會寫 ~/.config/agents-manager/）
 cargo build --release
 ./target/release/agents-managerd serve
 
 # 另一個終端：前端 dev server（Vite 把 /api、/hook、/ws 代理到 7788）
 cd web
-npm install
-npm run dev          # http://localhost:5173
+bun install
+bun run dev          # http://localhost:5173
 ```
 
 開發期也可以 `cargo run -- serve`（debug build）。`vite.config.ts` 必須 `changeOrigin: true`：daemon 檢查 `Host` 必須是 `127.0.0.1:<port>` / `localhost:<port>`，不改寫 Host 會拿到 403。
@@ -121,10 +132,10 @@ npm run dev          # http://localhost:5173
 
 ```bash
 cd web
-VITE_MOCK=1 npm run dev
+VITE_MOCK=1 bun run dev
 ```
 
-release 二進位預設開 `embed-ui`：先 `cd web && npm run build` 再 `cargo build --release`，之後開 `http://127.0.0.1:7788` 即可，不必另開 Vite。
+release 二進位預設開 `embed-ui`：先 `cd web && bun run build` 再 `cargo build --release`，之後開 `http://127.0.0.1:7788` 即可，不必另開 Vite。
 
 設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫）。`config.toml`、SQLite、`ui-token` 都在那裡，**不要**提交進 git。
 
