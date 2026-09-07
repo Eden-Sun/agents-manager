@@ -8438,9 +8438,9 @@ button.run-debug-toggle:hover {
   white-space: nowrap;
 }
 
-.mem-pop-peek:hover,
-.mem-pop-peek[aria-expanded='true'] {
+.mem-pop-peek:hover {
   color: var(--text);
+  text-decoration: underline;
 }
 
 .mem-pop-caret {
@@ -8448,27 +8448,15 @@ button.run-debug-toggle:hover {
   opacity: 0.7;
 }
 
-.mem-pop-table tr.is-peeking td {
-  border-bottom-color: transparent;
+/* pane 視窗：跟 BlockedModal 同寬，終端畫面幾乎原樣；沒有按鍵列，所以底部 padding 收掉。 */
+.modal.mem-pane-modal {
+  padding-bottom: 0;
 }
 
-.mem-pop-preview-row td {
-  padding: 0 0 8px;
-}
-
-.mem-pop-preview {
-  margin: 0;
-  max-height: 220px;
-  overflow: auto;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: pre;
+.term.mem-pane-term {
+  margin: 0 16px 16px;
+  flex: 1 1 auto;
+  min-height: 200px;
 }
 
 .mem-pop-act {
