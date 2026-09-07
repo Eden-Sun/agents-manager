@@ -291,7 +291,8 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 
 1. frontmatter 的 `description` 換成 AG Man 的版本。herdr 原文寫「只有使用者明確提到 Herdr 才用，
    不要只因為工作可能受益於背景終端或平行處理就用」，對住在 AG Man 裡的 bot 剛好相反：開子 agent 就是重點。
-2. body 最前面插一段 **AG Man 規則**（`lifecycle::child_agent_rules`）：子 agent 命名、
+2. body 最前面插一段 **AG Man 規則**（`lifecycle::child_agent_rules`）：開新的之前先 `herdr agent list`
+   找自己底下閒置的 child 來重用、子 agent 命名、
    `herdr pane split --pane "$HERDR_PANE_ID"`（或 `--current`）、不要 `git stash` / `--autostash`、
    子 agent 會被掛在自己底下追蹤、帳號與 hook 會自動帶進子 pane。
 
