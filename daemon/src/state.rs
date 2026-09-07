@@ -84,6 +84,10 @@ pub struct App {
     pub stall_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> live-progress poller (streams the partial reply while a turn is in flight)
     pub progress_pollers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// run_id -> when that run last emitted a `turn_progress` frame (API.md: at most 4/s per run).
+    /// Kept on `App` rather than inside the poller task so re-arming a poller — a new turn on the
+    /// same run — cannot restart the budget and burst.
+    pub progress_emitted: Mutex<HashMap<String, std::time::Instant>>,
     /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
     /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
@@ -141,6 +145,7 @@ impl App {
             fallback_timers: Mutex::new(HashMap::new()),
             stall_timers: Mutex::new(HashMap::new()),
             progress_pollers: Mutex::new(HashMap::new()),
+            progress_emitted: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             tools: Mutex::new(HashMap::new()),

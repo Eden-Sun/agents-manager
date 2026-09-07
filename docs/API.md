@@ -977,13 +977,24 @@ hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok �
 
   ⚠️ **spinner 的動詞是隨機的**（`Thinking`、`Boogieing`、`Improvising`、`Puttering`、`Simmering`…），任何字面比對都是錯的；glyph 集合也會隨 CLI 版本增減，所以白名單只是快路徑，真正撐住的是第 2 條的形狀比對。
 
-  括號內的秒數每次輪詢都在變，因此 `activity` 幾乎每 0.7 秒都不同、每次都發幀——這是**預期且想要**的行為（前端計時會跟著跳），daemon 與前端都**不做**去抖或節流。
+  括號內的秒數每次輪詢都在變，因此 `activity` 幾乎每 0.7 秒都不同、每次都想發幀——這是**預期且想要**的行為（前端計時會跟著跳）。發幀的頻率上限見下面的「發幀節流」。
 
 - `alert`（**選填**，v4.2 新增）：畫面上的**重試／API 錯誤橫幅**，例如 claude 的 `API error · Retrying in 0s · attempt 1/10`、codex 的 `stream error: 503 upstream; retrying 2/5 in 1s`。沒有就送空字串。同樣是純文字、不寫 DB、不進最終訊息，上限 120 字元。
 
   **為什麼需要它**：CLI 在重試上游失敗時，回合仍然 `in_flight`、spinner 仍然在轉、`activity` 仍然正常，UI 看起來完全健康——實際上 agent 卡在那裡重試。`alert` 是唯一會說出這件事的訊號，前端把它畫成氣泡下方的警示列（`docs/screenshots/280-live-alert-light.png` / `281-…-dark.png`）。
 
   辨識同樣**只看形狀不看字面**：該回合畫面上最後一行「夠短（≤240 字元）」且**同時**滿足「說了 error／錯誤／overloaded」與「帶重試 token（retry／retrying／attempt／reconnect／retries／重試）」；或該行以 `API error` 開頭。兩個條件都要，是為了把 agent 自己在回覆裡談論錯誤的散文擋在外面。
+
+### 發幀節流（v4.3）
+
+**同一個 `run_id` 每秒最多 4 個 `turn_progress` frame。** 兩幀之間至少隔 250 毫秒；在這段窗內產生的幀
+會被**合併**——daemon 只留最新的那一個，中間的狀態不會補送（`text` / `activity` 本來就是「目前為止」
+的快照，不是增量，丟掉中間態不會漏內容）。窗一開就把手上最新的那個送出去；回合結束、poller 收工時，
+還壓在手上的最後一幀會**無條件**補送，所以回覆的最後狀態不會卡住。
+
+實務上 0.7 秒的輪詢間隔本來就低於這個上限，所以正常串流看不出差別；這條是**協定保證**，讓前端可以
+依此估算負載（多個 agent 同時串流時，每個 bot 的上界是 4 frame/s），也讓輪詢間隔之後調快時不會
+一次把幀數乘上去。前端另有自己的合併（同一個 bot 250 毫秒內只套用最後一幀，見 docs/FRONTEND.md）。
 
 只在 `text`、`activity` 或 `alert` **任一**變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
 
