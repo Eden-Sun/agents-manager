@@ -511,26 +511,25 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         <>
           {five !== null ? (
             <div className="quota-pop-line">
-              <span>5 小時</span>
+              <span className="quota-win">5h</span>
               <span className={`quota-row ${levelOf(q?.five_hour)}`}>剩 {pctText(five)}</span>
-              <span className="quota-reset">{fmtTime(q?.five_hour?.resets_at)} 重置</span>
+              <span className="quota-reset">{fmtTime(q?.five_hour?.resets_at)}</span>
             </div>
           ) : null}
           {seven !== null ? (
             <div className="quota-pop-line">
-              <span>{entry.kind === 'grok' ? '每週' : '7 天'}</span>
+              <span className="quota-win">{entry.kind === 'grok' ? '週' : '7d'}</span>
               <span className={`quota-row ${levelOf(q?.seven_day)}`}>剩 {pctText(seven)}</span>
-              <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)} 重置</span>
+              <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)}</span>
             </div>
           ) : null}
           {fable !== null ? (
             <div className="quota-pop-line">
-              <span>Fable 每週</span>
+              <span className="quota-win">Fable</span>
               <span className={`quota-row ${levelOf(q?.fable)}`}>剩 {pctText(fable)}</span>
-              <span className="quota-reset">{fmtTime(q?.fable?.resets_at)} 重置</span>
+              <span className="quota-reset">{fmtTime(q?.fable?.resets_at)}</span>
             </div>
           ) : null}
-          {q?.updated_at ? <p className="quota-pop-note">更新於 {fmtTime(q.updated_at)}</p> : null}
         </>
       )}
     </div>
@@ -592,6 +591,11 @@ export function QuotaStrip({
   if (ordered.length === 0) return null
 
   const remote = host !== LOCAL_HOST
+  const freshest = popEntries
+    .map((e) => quota[e.fullKey]?.updated_at ?? null)
+    .filter((x): x is string => Boolean(x))
+    .sort()
+    .pop()
 
   // Both queryable kinds always stay on the bar; only the per-kind windows collapse.
   const collapsed = width < 1100
@@ -666,6 +670,8 @@ export function QuotaStrip({
           {popEntries.map((entry) => (
             <PopRow key={entryReactKey(entry)} entry={entry} host={host} />
           ))}
+          {/* 一行就夠：每個帳號各印一次「更新於」時，那幾個時間差不到一分鐘。 */}
+          {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · 時間為重置時刻</p> : null}
         </div>
       ) : null}
     </div>

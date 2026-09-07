@@ -29,13 +29,29 @@ export function envToText(env: Record<string, string>): string {
     .join('\n')
 }
 
-export function IdentityBadge({ name, showDefault }: { name: string | null; showDefault?: boolean }) {
-  // 沒指定身份時仍要標出來，不然 cc0（本機預設）和 cc1 在列表上長得一樣。
+export function IdentityBadge({
+  name,
+  showDefault,
+  kind,
+}: {
+  name: string | null
+  showDefault?: boolean
+  kind?: BotKind
+}) {
+  // 沒指定身份時仍要標出來，不然本機預設和 cc1 在列表上長得一樣。
   if (!name) {
     if (!showDefault) return null
+    // claude 的本機預設帳號就是 cc0；其他 kind 沒有這套身分。
+    if (kind && kind !== 'claude') {
+      return (
+        <span className="identity-badge is-default" title="身份：不指定（本機預設）">
+          預設
+        </span>
+      )
+    }
     return (
-      <span className="identity-badge is-default" title="身份：不指定（本機預設）">
-        預設
+      <span className="identity-badge" title="身份：不指定（本機預設 cc0）">
+        cc0
       </span>
     )
   }

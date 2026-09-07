@@ -101,6 +101,7 @@ function BotRow({
   hit,
   childCount = 0,
   collapsed = false,
+  compact = false,
   onToggleChildren,
   drag,
   onDrag,
@@ -114,6 +115,8 @@ function BotRow({
   /** 這個 bot 底下有幾個子 agent；0 = 不顯示收合鈕。 */
   childCount?: number
   collapsed?: boolean
+  /** 子 agent 列：單行、不重複 kind，只留身份／模型。 */
+  compact?: boolean
   onToggleChildren?: () => void
   drag: DragState
   onDrag: (next: DragState) => void
@@ -157,7 +160,8 @@ function BotRow({
   if (!bot) return null
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
   // 標題只在選取中的那一列展開成一行——一次只有一列，清單的掃讀節奏不會被打亂。
-  const showTitle = Boolean(agentTitle) && selected
+  // 子 agent 列是單行，標題留在 tooltip，不把樹撐高。
+  const showTitle = Boolean(agentTitle) && selected && !compact
 
   const dragging = drag?.id === botId
   // 只在同一個專案內排序：跨專案拖曳不畫插入線，也不會有動作。
@@ -172,14 +176,14 @@ function BotRow({
 
   return (
     <div
-      className={`bot-row${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
+      className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
-      }${deleteOpen ? ' confirming' : ''}${quotaWarning ? ' quota-critical' : ''}`}
+      }${deleteOpen ? ' confirming' : ''}${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
       role="option"
       aria-selected={selected}
       data-bot-id={botId}
       tabIndex={0}
-      draggable
+      draggable={!compact}
       onClick={() => selectBot(botId)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -244,14 +248,17 @@ function BotRow({
         </span>
       ) : null}
       <span className="bot-main">
-        {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
-        <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
-          <PersonaMark persona={bot.persona} />
-          {/* agent 自己的標題不再跟名字擠同一行——那樣兩邊各剩六個字
-              （`C0-畫面修改者 資料夾…`）。選取中的那一列給它自己一行（見下面），
-              其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
-          {showTitle ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
-        </BotNameField>
+        <span className="bot-ident">
+          <KindTag kind={bot.kind} className="bot-kind" />
+          {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
+          <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
+            {compact ? null : <PersonaMark persona={bot.persona} />}
+            {/* agent 自己的標題不再跟名字擠同一行——那樣兩邊各剩六個字
+                （`C0-畫面修改者 資料夾…`）。選取中的那一列給它自己一行（見下面），
+                其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
+            {showTitle || compact ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
+          </BotNameField>
+        </span>
         {/* 對話內容命中時，把命中的那一段秀出來——只說「命中」不告訴你命中什麼，
             等於要你一個一個點進去確認。 */}
         {hit ? (
@@ -261,9 +268,8 @@ function BotRow({
           </span>
         ) : null}
         <span className="bot-sub">
-          <KindTag kind={bot.kind} />
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
-          <IdentityBadge name={bot.identity} showDefault />
+          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
           {quotaWarning ? (
             // 額度 critical：警語取代模型標籤（側欄窄，優先顯示這個）；文字撐不下就截斷，完整內容看 title。
             <span
@@ -288,16 +294,18 @@ function BotRow({
           位置寫死才不會讓刪除鍵在 bot 起停時跳到別的角落。讀序是左上→右上→左下→右下，
           所以不可逆的刪除排在最後一格。左下在執行中時是空的——那格就是之後第四顆的位置。 */}
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          className="icon-btn menu-btn act-clone icon-tip"
-          disabled={busyClone}
-          aria-label={`開 ${bot.name} 的同類分身並啟動（同 kind、模型、身份、人設）`}
-          data-tip="開同類分身並啟動"
-          onClick={() => void cloneBot(botId)}
-        >
-          <CloneIcon />
-        </button>
+        {compact ? null : (
+          <button
+            type="button"
+            className="icon-btn menu-btn act-clone icon-tip"
+            disabled={busyClone}
+            aria-label={`開 ${bot.name} 的同類分身並啟動（同 kind、模型、身份、人設）`}
+            data-tip="開同類分身並啟動"
+            onClick={() => void cloneBot(botId)}
+          >
+            <CloneIcon />
+          </button>
+        )}
         <button
           type="button"
           className="icon-btn menu-btn gear act-gear icon-tip"
@@ -307,7 +315,7 @@ function BotRow({
         >
           <GearIcon />
         </button>
-        {active ? null : (
+        {compact || active ? null : (
           <button
             type="button"
             className="icon-btn menu-btn bot-run-btn start act-run icon-tip"
@@ -1084,13 +1092,24 @@ export function Sidebar() {
                         onNudge={nudge}
                         onStep={step}
                       />
-                      {shut
-                        ? null
-                        : kids.map((c) => (
-                            <div key={c.id} className="bot-child">
-                              <BotRow botId={c.id} hit={hits[c.id]} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
+                      {shut || kids.length === 0 ? null : (
+                        <div className="bot-kids" role="group" aria-label={`${b.name} 的 ${kids.length} 個子 agent`}>
+                          {kids.map((c, i) => (
+                            <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}`}>
+                              <BotRow
+                                compact
+                                botId={c.id}
+                                hit={hits[c.id]}
+                                drag={drag}
+                                onDrag={setDrag}
+                                onDropAt={dropAt}
+                                onNudge={nudge}
+                                onStep={step}
+                              />
                             </div>
                           ))}
+                        </div>
+                      )}
                     </Fragment>
                   )
                 })
