@@ -457,11 +457,11 @@ function Gauge({
         <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
         </span>
-        {entry.identity ? (
-          <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {entry.identity}
-          </span>
-        ) : null}
+        {/* claude 才有身分名（cc0 / cc1 …）；codex、grok 就寫 kind 自己的名字。三種 kind 的左欄
+            因此都是「圖示 / 名稱 / 開關」三層，開關一律貼在名稱正下方，不會有一格歪掉。 */}
+        <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
+          {entry.identity ?? entry.kind}
+        </span>
         {/* 停用開關跟圖示／名稱同一直欄，貼在名稱正下方：右邊那幾條進度條的高度不變，
             整格也就不會因為它變高。 */}
         <StripDisableToggle entry={entry} host={host} />

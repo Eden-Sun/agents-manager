@@ -168,7 +168,15 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     tracing::info!(version = %pong.version, protocol = pong.protocol, "herdr ping ok");
     let default_herdr = herdr::HerdrClient::new(herdr::HerdrClient::session_socket(default_session::SESSION));
 
-    let addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
+    let mut addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
+    // `AM_DEV_LAN=1` (set by `cargo dev`, never by a plain `serve`): bind every interface
+    // instead of just loopback, so another device on the LAN can reach this daemon directly
+    // without going through the Vite proxy. Paired with `App::allow_lan` relaxing the peer
+    // and Origin checks below — binding alone would still 403 everything non-local.
+    let dev_lan = std::env::var("AM_DEV_LAN").as_deref() == Ok("1");
+    if dev_lan {
+        addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    }
     let ui_token = load_or_create_ui_token(&dir)?;
     let exe = std::env::current_exe()?;
     let app = state::App::new(
@@ -181,6 +189,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         addr.port(),
         ui_token,
         cfg.server.herdr_session.clone(),
+        dev_lan,
     );
     app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(local) = app.hosts.get("local").await {
