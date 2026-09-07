@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
-import { identitiesOfHost, identityStatusOfHost, useStore } from '../store/store'
+import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
@@ -79,7 +79,9 @@ function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
 function useLoggedOut(entry: QuotaEntry, host: string): boolean {
   return useStore((s) => {
     const name = entry.identity
-    if (!name) return false
+    // 預設帳號（沒有身份名）看的是 `tools.<kind>.logged_in`：grok / codex 沒登入時一直寫
+    // 「背景查詢中」，其實是永遠查不到。
+    if (!name) return toolsOfHost(s, host)[entry.kind]?.logged_in === false
     return identityStatusOfHost(s, host)[name]?.logged_in === false
   })
 }
