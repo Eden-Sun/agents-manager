@@ -6,7 +6,6 @@ import type { Bot, BotKind, MessageHit } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import {
   adjacentBotId,
-  anchorOf,
   botLamp,
   botQuotaLevel,
   botQuotaWarning,
@@ -20,7 +19,7 @@ import {
 } from '../store/store'
 import type { SocketStatus } from '../store/store'
 import { quotaHiddenBotIds, useDisabledQuota } from '../store/quotaHide'
-import { CloneIcon, GearIcon, PlayIcon, TerminalIcon, TrashIcon } from './Icons'
+import { GearIcon, TerminalIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
 import { projectDeleteBlockers } from './projectDeleteGuard'
@@ -34,6 +33,7 @@ import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
 import { ModelTag } from './ModelTag'
+import { BotRowMenu } from './BotRowMenu'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
 import { QuickAddBots } from './QuickAddBots'
 import { ApiModelFields } from './ModelPicker'
@@ -128,7 +128,6 @@ function BotRow({
   onStep: (botId: string, dir: -1 | 1) => void
 }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
-  const run = useStore((s) => s.runs[botId] ?? null)
   const lamp = useStore((s) => botLamp(s, botId))
   // SPEC：bot 對應額度 critical（daemon 算好，見 docs/API.md §12.4）時，整列反灰＋警語。
   // `botQuotaWarning` 每次都 new 一個新物件，跟 ChatPanel 的 `composerState` 同一個坑
@@ -151,14 +150,7 @@ function BotRow({
   const selected = useStore((s) => s.selectedBotId === botId)
   // 已完成但還沒被看到的回合數（store/unread.ts）。0 = 不佔位。
   const unread = useStore((s) => s.botUnread[botId] ?? 0)
-  const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const selectBot = useStore((s) => s.selectBot)
-  const startBot = useStore((s) => s.startBot)
-  const openSettings = useStore((s) => s.openSettings)
-  const cloneBot = useStore((s) => s.cloneBot)
-  const busyClone = useStore((s) => Boolean(s.busy[`clone:${botId}`]))
-  const removeBot = useStore((s) => s.removeBot)
-  const [deleteOpen, setDeleteOpen] = useState(false)
   const agentTitle = useStore((s) => {
     const r = s.runs[botId]
     const t = r?.agent_title?.trim()
@@ -168,7 +160,6 @@ function BotRow({
   })
 
   if (!bot) return null
-  const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
   // 標題只在選取中的那一列展開成一行——一次只有一列，清單的掃讀節奏不會被打亂。
   // 子 agent 列是單行，標題留在 tooltip，不把樹撐高。
   const showTitle = Boolean(agentTitle) && selected && !compact
@@ -188,7 +179,7 @@ function BotRow({
     <div
       className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
-      }${deleteOpen ? ' confirming' : ''}${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
+      }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
       role="option"
       aria-selected={selected}
       data-bot-id={botId}
@@ -312,71 +303,8 @@ function BotRow({
           </span>
         ) : null}
       </span>
-      {/* 一排（貼齊名字那行，不換行），每顆有固定的格子（`grid-area`，不是照出現順序排）：
-          啟動鍵只在停止時存在，格位寫死才不會讓刪除鍵在 bot 起停時左右跳；它排在最左邊，
-          不在時那格塌成 0，右邊三顆位置不動。讀序由左到右，不可逆的刪除排在最後一格。 */}
-      <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
-        {compact ? null : (
-          <button
-            type="button"
-            className="icon-btn menu-btn act-clone icon-tip"
-            disabled={busyClone}
-            aria-label={`開 ${bot.name} 的同類分身並啟動（同 kind、模型、身份、人設）`}
-            data-tip="開同類分身並啟動"
-            onClick={() => void cloneBot(botId)}
-          >
-            <CloneIcon />
-          </button>
-        )}
-        <button
-          type="button"
-          className="icon-btn menu-btn gear act-gear icon-tip"
-          aria-label={`設定 ${bot.name}（模型、身份、autostart…）`}
-          data-tip="設定"
-          onClick={(e) => openSettings(botId, anchorOf(e.currentTarget))}
-        >
-          <GearIcon />
-        </button>
-        {compact || active ? null : (
-          <button
-            type="button"
-            className="icon-btn menu-btn bot-run-btn start act-run icon-tip"
-            disabled={busyStart}
-            aria-label={`啟動 ${bot.name}`}
-            data-tip="啟動"
-            onClick={() => void startBot(botId)}
-          >
-            <PlayIcon />
-          </button>
-        )}
-        <button
-          type="button"
-          className="icon-btn menu-btn bot-delete-btn act-del icon-tip"
-          aria-label={`刪除 ${bot.name}`}
-          data-tip="刪除"
-          onClick={() => setDeleteOpen(true)}
-        >
-          <TrashIcon />
-        </button>
-      </span>
+      <BotRowMenu botId={botId} compact={compact} />
 
-      <ConfirmDialog
-        open={deleteOpen}
-        title="刪除 Bot"
-        body={
-          <>
-            確定刪除 <strong>{bot.name}</strong>？會停止並關閉它的終端 pane，設定從 config.toml 移除；對話紀錄會保留。
-          </>
-        }
-        confirmLabel="刪除"
-        danger
-        width={340}
-        onCancel={() => setDeleteOpen(false)}
-        onConfirm={() => {
-          setDeleteOpen(false)
-          void removeBot(botId)
-        }}
-      />
     </div>
   )
 }
