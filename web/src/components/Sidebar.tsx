@@ -704,12 +704,16 @@ function ProjectTitle({
   path,
   hostUp,
   folded,
+  draggable,
 }: {
   projectId: string
   label: string
   host: string
   path: string
   hostUp: boolean
+  /** 標題列是專案的拖曳把手（搜尋中不能拖）；提示掛在這顆鍵上而不是外層 header——
+   *  header 的 `title` 會被 `＋` / `⋯` 繼承，跟它們的 `data-tip` 泡泡疊成兩個提示。 */
+  draggable?: boolean
   /**
    * 專案收起來時，底下每個 bot 的未讀加總掛回標題上——不然收合等於把徽章藏起來。
    * 選擇性：收合是側欄自己的本地狀態，沒傳就是沒收合。
@@ -754,7 +758,7 @@ function ProjectTitle({
     <button
       type="button"
       className={`project-label-btn${selected ? ' selected' : ''}`}
-      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}`}
+      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}${draggable ? '\n拖曳可調整專案順序' : ''}`}
       aria-pressed={selected}
       onClick={(e) => {
         e.stopPropagation()
@@ -1058,7 +1062,9 @@ export function Sidebar() {
                 // 抓標題列拖：整個專案（含底下的 bot）一起搬。bot 列自己也是拖曳來源，
                 // 但它的 dragstart 不會冒泡到這裡（它有自己的 handler 且 pdrag 不設）。
                 draggable={!query}
-                title={query ? undefined : '拖曳可調整專案順序'}
+                // 拖曳提示掛在 `ProjectTitle` 上，不掛這裡：`title` 會被沒有自己 title 的
+                // 子孫繼承，掛在 header 上時 `＋` / `⋯` 一 hover 就同時冒出原生 tooltip
+                // 與自製的 `data-tip` 泡泡（兩個提示疊在一起）。
                 onDragStart={(e) => {
                   e.stopPropagation()
                   e.dataTransfer.effectAllowed = 'move'
@@ -1080,7 +1086,7 @@ export function Sidebar() {
                 >
                   <span className="chev">{projectShut ? '▶' : '▼'}</span>
                 </button>
-                <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} folded={projectShut} />
+                <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} folded={projectShut} draggable={!query} />
                 <span className="project-head-actions">
                   <button
                     type="button"
