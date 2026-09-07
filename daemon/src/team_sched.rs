@@ -872,13 +872,15 @@ async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .filter(|i| i.state == "done")
         .max_by_key(|i| i.seq)
         .ok_or_else(|| LcError::Upstream("cannot reopen a team with no completed issue".into()))?;
-    team::retire_issue_workers(app, team_id, &previous.id).await;
-
     let ctx = Ctx::load(app, team_id).await?;
     for e in crate::trust::pretrust_members(app, &ctx.members).await {
         tracing::warn!(team = %team_id, error = %e, "could not pre-trust a team worktree on reopen");
         note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
     }
+    // Trust the existing worktrees before retiring the last batch. This keeps the reopen
+    // sequence safe for a retry: any member that remains to be started already has its path
+    // trusted, while retirement itself stays idempotent for deleted workers.
+    team::retire_issue_workers(app, team_id, &previous.id).await;
     for b in &ctx.members {
         if !matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer")) {
             continue;

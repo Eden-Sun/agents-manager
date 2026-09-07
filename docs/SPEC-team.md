@@ -686,7 +686,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/teams/{id}/close-issue` | 省略、`{}`、`{"comment": "…"}` 或 `{"comment": ""}` | `200 {number, url, title, repo, state:"CLOSED", already_closed}` |
+| POST | `/teams/{id}/close-issue` | 省略、`{}`、`{"comment": "…"}`、`{"comment": ""}` 或 `{"issue_id":"…", "comment":"…"}` | `200 {number, url, title, repo, state:"CLOSED", already_closed}` |
 
 規則（兩條，缺一不可）：
 
