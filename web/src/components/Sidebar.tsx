@@ -19,6 +19,7 @@ import {
   useStore,
 } from '../store/store'
 import type { SocketStatus } from '../store/store'
+import { quotaHiddenBotIds, useDisabledQuota } from '../store/quotaHide'
 import { CloneIcon, GearIcon, PlayIcon, TerminalIcon, TrashIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -822,6 +823,14 @@ export function Sidebar() {
   const [drag, setDrag] = useState<DragState>(null)
   const shellSupported = useStore((s) => s.hostShellSupported)
   const openHostShell = useStore((s) => s.openHostShell)
+  /**
+   * 頂端額度卡片上被勾成「暫時停用」的身分／kind：它們底下的 bot 先從清單收起來。
+   * 到了額度視窗的 reset 時刻，`quotaHide` 那邊的 timer 會把該格掃掉並通知所有訂閱者，
+   * 這裡就跟著重算——bot 自己回到清單上，不用重新整理。
+   */
+  const disabledQuota = useDisabledQuota()
+  const hiddenQuotaIds = useStore(useShallow((s) => quotaHiddenBotIds(s, disabledQuota)))
+  const hiddenQuota = useMemo(() => new Set(hiddenQuotaIds), [hiddenQuotaIds])
   /** 收合起來的父 bot；記在 localStorage，重新整理後不會全部又攤開。 */
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try {
@@ -1028,9 +1037,12 @@ export function Sidebar() {
               hit.has(b.id) ||
               (b.parent_bot_id ? hit.has(b.parent_bot_id) : every.some((c) => c.parent_bot_id === b.id && hit.has(c.id))),
           )
+          // 身分被停用的先收起來。搜尋中不收：搜到的東西藏起來等於沒搜到（同「搜尋中一律展開」）。
+          const shown = query ? all : all.filter((b) => !hiddenQuota.has(b.id))
+          const hiddenCount = all.length - shown.length
           // 子 agent（bot 自己用 herdr 開的，名稱帶父 agent 前綴）縮排在父 bot 底下，不參與拖曳排序。
-          const list = all.filter((b) => !b.parent_bot_id)
-          const childrenOf = (id: string) => all.filter((b) => b.parent_bot_id === id)
+          const list = shown.filter((b) => !b.parent_bot_id)
+          const childrenOf = (id: string) => shown.filter((b) => b.parent_bot_id === id)
           const projectSelected = selectedProjectId === p.id
           // 搜尋中一律展開：命中的 bot 藏在收合的專案裡等於沒搜到。
           const projectShut = shutProjects.has(p.id) && !query
@@ -1145,6 +1157,10 @@ export function Sidebar() {
                 <button type="button" className="project-folded" onClick={() => toggleProject(p.id)}>
                   {all.length} 個 Bot·點一下展開
                 </button>
+              ) : list.length === 0 && hiddenCount > 0 ? (
+                // 整張卡片的 bot 都被停用的身分收走了：留一行說明，不要留一張空卡片，
+                // 也不要在這裡冒出「此專案尚無 Bot」的引導——它們只是被藏起來，沒有不見。
+                <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>
               ) : list.length === 0 ? (
                 <div className="project-empty">
                   <span className="project-empty-title">此專案尚無 Bot</span>

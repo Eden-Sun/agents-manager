@@ -2248,6 +2248,15 @@ button:disabled {
   padding: 8px 14px 12px;
 }
 
+/* 整張卡片的 bot 都被「額度快用完就收起來」收走時的那一行。刻意做得比 `.project-empty`
+   還安靜——它不是空專案，只是這一刻看不到，額度 reset 後自己會回來。 */
+.project-quota-hidden {
+  margin: 0;
+  padding: 8px 14px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .quick-add {
   display: flex;
   flex-wrap: wrap;
@@ -3330,35 +3339,6 @@ button:disabled {
   border-left: 1px solid var(--border);
 }
 
-.statusline-bar {
-  display: flex;
-  align-items: center;
-  flex: none;
-  gap: 8px;
-  padding: 5px 24px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-sunken);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.statusline-bar::-webkit-scrollbar {
-  display: none;
-}
-
-.statusline-text {
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-dim);
-  white-space: pre;
-}
-
-/* One field of the status bar: a quiet key, then the value. */
-.sl-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  flex: none;
 /* 快速 git（`GitBar`）：repo chip 旁邊的 `+N −M ↑a ↓b` 與 commit / push / pull。 */
 .git-bar {
   display: inline-flex;
@@ -3413,6 +3393,35 @@ button:disabled {
   font-size: 12px;
 }
 
+.statusline-bar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  padding: 5px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.statusline-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.statusline-text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre;
+}
+
+/* One field of the status bar: a quiet key, then the value. */
+.sl-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  flex: none;
   font-size: 11px;
   line-height: 1.5;
   white-space: nowrap;
@@ -5938,6 +5947,49 @@ button.model-tag[aria-expanded='true'] {
   gap: 4px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
+  /* 整格可點＝切換「暫時停用」。 */
+  cursor: pointer;
+}
+
+/* 停用態要一眼看得出來，不能只剩一個小勾：整格降透明度，名字劃掉。
+   量表本身不劃線——數字還是要看得懂，那正是使用者停用它的理由。 */
+.quota-pop-row.off {
+  opacity: 0.5;
+}
+
+.quota-pop-row.off .quota-name {
+  text-decoration: line-through;
+}
+
+/* 沒有 plan 標籤時由它把左邊的空白吃掉，勾選格一律貼右。 */
+.quota-disable {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.quota-disable input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.quota-disable-note {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* 條上那一格：停用中的降透明度＋劃掉身份標籤，不用點開 popover 就知道側欄少了誰。 */
+.quota-hp.off {
+  opacity: 0.45;
+}
+
+.quota-hp.off .quota-identity {
+  text-decoration: line-through;
 }
 
 .quota-pop-row:last-child {

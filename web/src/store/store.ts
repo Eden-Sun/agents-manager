@@ -341,7 +341,7 @@ export interface ComposerState {
   unknownTurnId: string | null
 }
 
-interface StoreState {
+export interface StoreState {
   ready: boolean
   bootError: string | null
   socket: SocketStatus
