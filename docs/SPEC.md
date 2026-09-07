@@ -280,6 +280,25 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 
 子 agent 要指定自己的 pane 時用 herdr 自己注入的 `$HERDR_PANE_ID`（或 `--current`），不需要另外一個變數。
 
+### 6.5c 給 claude 注入 herdr skill（2026-09-07）
+
+啟動 claude bot 前，daemon 把 `herdr --skill` 的輸出寫到那個身份的
+`$CLAUDE_CONFIG_DIR/skills/herdr/SKILL.md`（沒設就是 `~/.claude/skills/…`；遠端用 ssh 跑 `herdr --skill` 再寫回去）。
+內容相同就不寫——那是使用者自己的 claude 設定，每次啟動都改一次 mtime 只是雜訊。
+
+寫進去之前改兩個地方：
+
+1. frontmatter 的 `description` 換成 AG Man 的版本。herdr 原文寫「只有使用者明確提到 Herdr 才用，
+   不要只因為工作可能受益於背景終端或平行處理就用」，對住在 AG Man 裡的 bot 剛好相反：開子 agent 就是重點。
+2. body 最前面插一段 **AG Man 規則**（`lifecycle::child_agent_rules`）：子 agent 命名、
+   `herdr pane split --pane "$HERDR_PANE_ID"`（或 `--current`）、不要 `git stash` / `--autostash`、
+   子 agent 會被掛在自己底下追蹤、帳號與 hook 會自動帶進子 pane。
+
+herdr 自己寫的 CLI 說明原樣保留，所以 herdr 升級會把新文字一起帶進來。裝不起來只留 warning，claude 沒有 skill 照常跑。
+
+`child_agent_rules` 是**同一份文字來源**：claude 的 skill、以及三種 kind 的 persona
+（`--append-system-prompt` / `--rules` / `developer_instructions`）都用它，所以 codex / grok 拿到的是同一段規則。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另以唯讀優先的方式觀察本機 Herdr `default` session（socket 為

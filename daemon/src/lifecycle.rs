@@ -702,7 +702,7 @@ async fn pane_env(
     let mut env = serde_json::Map::new();
     env.insert("AM_BOT_ID".into(), json!(bot.id));
     // The name the herdr shim prefixes a child agent with (SPEC §6.5b), and the same name the
-    // persona quotes (`spawn_rule`).
+    // persona quotes (`child_agent_rules`).
     env.insert("AM_AGENT_NAME".into(), json!(agent_name));
     if let Some(dir) = shim_dir {
         // Best effort only: a login shell re-runs the user's profile after this, and on macOS
@@ -773,25 +773,170 @@ pub fn toml_basic_string(s: &str) -> String {
     out
 }
 
-/// The one rule every daemon-started agent carries, ahead of `bot.persona`: a child pane it
-/// opens through herdr must be named `<its own agent name>-<suffix>`, which is what lets the
-/// reconcile file that child under this bot (`managed_by='child'`) instead of losing it.
-pub fn spawn_rule(agent_name: &str) -> String {
+/// **The one text.** Everything the daemon has to say to an agent about opening sub-agents,
+/// delivered wherever that agent can hear it: the persona for all three kinds
+/// (`persona_args`) and, for claude, the top of the injected herdr skill
+/// (`herdr_skill_doc`). One source, so the three never drift apart.
+///
+/// The naming rule is no longer load-bearing — the reconcile claims a child by descent
+/// (SPEC §6.5a) and the PATH shim prefixes the name anyway (§6.5b) — but saying it keeps the
+/// agent's own mental model matching what it sees in the sidebar.
+pub fn child_agent_rules(agent_name: &str) -> String {
     format!(
-        "你在 agents-manager 裡的 agent 名稱是 `{agent_name}`。\
-         若要用 herdr 開子 pane / 子 agent（`herdr agent start <名稱> …`），名稱**必須**以 `{agent_name}-` 為前綴\
-         （例：`{agent_name}-review`、`{agent_name}-ui`），管理器才會把它掛在你底下追蹤；不照做的子 agent 不會被管理。"
+        "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。\
+需要開子任務或平行工作時，就用 herdr 開子 agent，並照這些規則：\n\
+\n\
+- **命名**：`herdr agent start <名稱> …` 的名稱要以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
+PATH 上的 herdr 會自動幫你補，但自己寫對比較清楚。\n\
+- **開 pane**：`herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。不要省略目標——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
+- **帳號與 hook 會自動帶進子 pane**（`CLAUDE_CONFIG_DIR`、`AM_*`），不要自己覆蓋這些環境變數。\n\
+- **不要 `git stash` 或 `--autostash`**：同一個工作樹上可能有別的 agent 還沒提交的改動。\n\
+- 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示），做完請自己把它的 pane 收掉。"
     )
 }
 
+/// What `herdr --skill`'s own front matter says, replaced. The upstream description is
+/// 「只有使用者明確提到 Herdr 才用……不要只因為工作可能受益於背景終端或平行處理就用」, which is
+/// exactly backwards for a bot living inside AG Man: opening sub-agents is the point.
+const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr 的 pane、tab、workspace 與子 agent。\
+需要開子任務、平行工作、或把工作分給另一個 agent 時就用這個 skill，並照裡面的 AG Man 規則命名與開 pane。";
+
+/// Turn `herdr --skill`'s output into the copy this bot should read: our own description in
+/// the front matter, and `child_agent_rules` as the first section of the body.
+///
+/// Only the description line inside the front matter is touched; the rest of herdr's document
+/// is the CLI's own authority on its commands and is passed through untouched, so a herdr
+/// upgrade brings its new text along.
+fn herdr_skill_doc(raw: &str, agent_name: &str) -> String {
+    let rules = format!("## AG Man 規則（先讀這段）\n\n{}\n", child_agent_rules(agent_name));
+    let lines: Vec<&str> = raw.lines().collect();
+    // Front matter is `---` … `---`; without one, put ours in front and leave the rest alone.
+    let end = if lines.first().map(|l| l.trim_end()) == Some("---") {
+        lines.iter().skip(1).position(|l| l.trim_end() == "---").map(|i| i + 1)
+    } else {
+        None
+    };
+    let Some(end) = end else {
+        return format!("{rules}\n{raw}");
+    };
+    let mut out = String::new();
+    let mut replaced = false;
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 && i < end && line.starts_with("description:") {
+            out.push_str("description: \"");
+            out.push_str(HERDR_SKILL_DESC);
+            out.push_str("\"\n");
+            replaced = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if i == end {
+            if !replaced {
+                // No description to replace: the front matter is not what we expected, so add
+                // ours to the body rather than editing a document we do not understand.
+                tracing::debug!("herdr --skill has no description line; leaving its front matter alone");
+            }
+            out.push('\n');
+            out.push_str(&rules);
+        }
+    }
+    out
+}
+
+/// claude reads skills from `$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md` (default
+/// `~/.claude/skills`). Write herdr's own skill there, with `child_agent_rules` on top, so a
+/// claude bot knows how to open a sub-agent *and* how AG Man wants it done — without the user
+/// having to install anything.
+///
+/// Per identity, not per bot: the file lives in the identity's config dir, so five bots on
+/// `cc2` write the same bytes. Idempotent on purpose — same content, no write — because the
+/// file is in the user's own claude config and a rewrite on every start is noise in their
+/// backups.
+async fn install_herdr_skill(app: &Arc<App>, bot: &db::Bot, project: &db::Project, env: &Value, agent_name: &str) {
+    if bot.kind != "claude" {
+        return;
+    }
+    // A unit test must never write into the developer's own `~/.claude` — that is where the
+    // no-identity fallback lands. The interesting half, the rewrite, is covered directly by
+    // `herdr_skill_doc`'s tests.
+    if cfg!(test) {
+        return;
+    }
+    let cfg_dir = env.get("CLAUDE_CONFIG_DIR").and_then(|v| v.as_str()).map(str::to_string);
+    let result = if project.host == LOCAL_HOST {
+        install_herdr_skill_local(cfg_dir, agent_name).await
+    } else {
+        match app.hosts.get(&project.host).await {
+            Some(conn) => install_herdr_skill_remote(&conn, cfg_dir, agent_name).await,
+            None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
+        }
+    };
+    if let Err(e) = result {
+        // Never fatal: the skill is a convenience, and claude works without it.
+        tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the herdr skill");
+    }
+}
+
+async fn install_herdr_skill_local(cfg_dir: Option<String>, agent_name: &str) -> anyhow::Result<()> {
+    let out = tokio::process::Command::new("herdr").arg("--skill").output().await?;
+    if !out.status.success() {
+        anyhow::bail!("`herdr --skill` failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let doc = herdr_skill_doc(&String::from_utf8_lossy(&out.stdout), agent_name);
+    let base = match cfg_dir {
+        Some(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
+        _ => dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?.join(".claude"),
+    };
+    let dir = base.join("skills").join("herdr");
+    let path = dir.join("SKILL.md");
+    if std::fs::read_to_string(&path).map(|c| c == doc).unwrap_or(false) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, doc)?;
+    tracing::info!(path = %path.display(), "herdr skill installed for claude");
+    Ok(())
+}
+
+async fn install_herdr_skill_remote(
+    conn: &HostConn,
+    cfg_dir: Option<String>,
+    agent_name: &str,
+) -> anyhow::Result<()> {
+    let raw = conn.ssh_exec("herdr --skill").await?;
+    if !raw.contains("name:") {
+        anyhow::bail!("`herdr --skill` on `{}` did not look like a skill file", conn.name);
+    }
+    let doc = herdr_skill_doc(&raw, agent_name);
+    let base = match cfg_dir {
+        Some(d) if !d.trim().is_empty() => d,
+        _ => format!("{}/.claude", conn.home().await?),
+    };
+    let dir = format!("{base}/skills/herdr");
+    // Written through a temp file and `cmp`, so an unchanged skill leaves the user's mtime
+    // alone exactly as the local path does.
+    let script = format!(
+        "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/.SKILL.md.new\" <<'AM_SKILL_EOF'\n{doc}\nAM_SKILL_EOF\nif cmp -s \"$D/.SKILL.md.new\" \"$D/SKILL.md\" 2>/dev/null; then rm -f \"$D/.SKILL.md.new\"; else mv \"$D/.SKILL.md.new\" \"$D/SKILL.md\"; fi\nprintf 'AM_SKILL_OK\\n'\n",
+        dir = sh_quote(&dir),
+        doc = doc.trim_end(),
+    );
+    let out = conn.ssh_exec(&script).await?;
+    if !out.contains("AM_SKILL_OK") {
+        anyhow::bail!("remote herdr skill install did not confirm:\n{}", out.trim());
+    }
+    tracing::info!(host = %conn.name, dir, "herdr skill installed for claude");
+    Ok(())
+}
+
 /// v4.0: `bot.persona` appended to the agent's system prompt, per kind. Sits right after the
-/// daemon's own flags (before model / effort). The daemon's own rule (`spawn_rule`) comes
+/// daemon's own flags (before model / effort). The daemon's own rules (`child_agent_rules`) come
 /// first; the user's text follows it.
 fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
     let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let p = match user {
-        Some(u) => format!("{}\n\n{u}", spawn_rule(agent_name)),
-        None => spawn_rule(agent_name),
+        Some(u) => format!("{}\n\n{u}", child_agent_rules(agent_name)),
+        None => child_agent_rules(agent_name),
     };
     let p = p.as_str();
     match bot.kind.as_str() {
@@ -953,11 +1098,38 @@ mod model_args_tests {
         assert!(model_args(&bot("claude", None, None, true)).is_empty());
     }
 
+    /// The injected herdr skill: our description replaces herdr's own (which tells the agent
+    /// *not* to use it unless the user says "Herdr" — backwards inside AG Man), our rules go
+    /// first in the body, and everything herdr wrote about its own CLI survives untouched.
+    #[test]
+    fn the_herdr_skill_is_rewritten_for_ag_man() {
+        let raw = "---\nname: herdr\ndescription: \"Control Herdr… Use only when the user explicitly mentions Herdr.\"\n---\n\n# Herdr\n\nherdr organizes terminals.\n";
+        let doc = super::herdr_skill_doc(raw, "proj-abc123");
+        assert!(doc.starts_with("---\nname: herdr\ndescription: \""), "front matter is kept, description replaced:\n{doc}");
+        assert!(!doc.contains("Use only when the user explicitly mentions Herdr"), "herdr's own description is gone");
+        assert!(doc.contains("需要開子任務"), "ours says to use it for sub-tasks");
+        assert!(doc.contains("## AG Man 規則"), "the rules lead the body");
+        assert!(doc.contains("`proj-abc123-`"), "the naming rule quotes this agent's name");
+        assert!(doc.contains("git stash"), "the no-stash rule is carried");
+        assert!(doc.contains("$HERDR_PANE_ID"), "how to split its own pane");
+        assert!(doc.contains("herdr organizes terminals."), "herdr's own body survives");
+        // The rules must come before herdr's text, not after it.
+        assert!(doc.find("AG Man 規則").unwrap() < doc.find("herdr organizes").unwrap());
+    }
+
+    /// A document without front matter is not edited — our rules simply go in front of it.
+    #[test]
+    fn a_skill_without_front_matter_is_not_rewritten() {
+        let doc = super::herdr_skill_doc("# Herdr\n\nbody\n", "p-1");
+        assert!(doc.starts_with("## AG Man 規則"));
+        assert!(doc.ends_with("# Herdr\n\nbody\n"));
+    }
+
     #[test]
     fn persona_per_kind() {
-        use super::{persona_args, spawn_rule, toml_basic_string};
+        use super::{child_agent_rules, persona_args, toml_basic_string};
         let mut b = bot("claude", None, None, false);
-        let rule = spawn_rule("proj-abc123");
+        let rule = child_agent_rules("proj-abc123");
         b.persona = Some("回覆結尾一律加上 [PERSONA-OK]".into());
         let want = format!("{rule}\n\n回覆結尾一律加上 [PERSONA-OK]");
         assert_eq!(persona_args(&b, "proj-abc123"), vec!["--append-system-prompt".to_string(), want.clone()]);
@@ -1298,11 +1470,14 @@ async fn start_inner(
         Some(c) => c.hook_port(app.port),
         None => app.port,
     };
-    // The agent name is decided here because both the persona (`spawn_rule`) and the shim
+    // The agent name is decided here because both the persona (`child_agent_rules`) and the shim
     // (`AM_AGENT_NAME`) quote it.
     let agent = crate::config::agent_name(&project.label, &bot.id);
     let shim_dir = install_shim(app, bot, project).await;
     let env = pane_env(app, bot, &host, run_id, hook_port, &agent, shim_dir.as_deref()).await;
+    // SPEC §6.5c: claude learns herdr from a skill, not from the persona — the persona has no
+    // room for a CLI reference, and `herdr --skill` is the CLI's own.
+    install_herdr_skill(app, bot, project, &env, &agent).await;
 
     // 2. workspace
     let mut fresh_root: Option<crate::herdr::PaneInfo> = None;

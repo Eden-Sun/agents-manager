@@ -1,6 +1,6 @@
 //! The `herdr` PATH shim (SPEC §6.5b).
 //!
-//! `lifecycle::spawn_rule` asks an agent to name its children `<parent>-<suffix>` and the
+//! `lifecycle::child_agent_rules` asks an agent to name its children `<parent>-<suffix>` and the
 //! reconcile picks them up from that. Asking is not a mechanism: an agent forgets, renames,
 //! or was started as codex / grok and never read the rule, and the child becomes a sub-task
 //! nobody can see. Descent (`reconcile`'s tab match) recovers those; this shim stops them

@@ -34,6 +34,8 @@
 - 驗證：daemon 在 127.0.0.1:7788（token `~/.config/agents-manager/ui-token`，header `X-AM-Token`）。重啟由派工者做；你先用測試與 `sh` 跑 shim 驗。
 
 ## 進度
-- [ ] 1 血緣認領
-- [ ] 2 PATH shim
-- [ ] 3 herdr skill 注入
+- [x] 1 血緣認領（`reconcile.rs`，tab 優先、前綴備援，含孫代測試）
+- [x] 2 PATH shim（`herdr_shim.rs` + `lifecycle.rs`；pane env 的 PATH 不夠，另外對 pane shell 送 `export PATH`）
+- [x] 3 herdr skill 注入（`lifecycle.rs`；`child_agent_rules` 成為 skill 與三種 persona 的同一份文字）
+
+備註：`AM_PANE_ID` 沒有加——pane_id 在組 pane env 時還不存在（pane 是之後才開的），而 herdr 自己已經注入 `$HERDR_PANE_ID`，規則與 skill 都改用它。
