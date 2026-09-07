@@ -13,8 +13,8 @@
  *
  * A store of its own rather than a slice of `useStore`: that one mirrors parts of itself to
  * localStorage and has `refreshState` replace whole slices from the daemon, neither of
- * which a `File` or an object URL survives. Reloading the page empties the shelf, which is
- * what the feature asks for.
+ * which a `File` or an object URL survives. Items are mirrored to IndexedDB by
+ * `shelfPersist.ts` so a reload keeps them for `SHELF_TTL_MS` after they were parked.
  */
 
 import { create } from 'zustand'
@@ -34,6 +34,9 @@ export const MAX_BYTES = 12 * 1024 * 1024
  */
 export const SHELF_MAX = 24
 
+/** How long a parked image survives, counted from when it was parked (SPEC: 30 分鐘). */
+export const SHELF_TTL_MS = 30 * 60 * 1000
+
 /** The drag payload for an internal shelf → composer drag; the value is the item key. */
 export const SHELF_MIME = 'application/x-am-shelf'
 
@@ -44,6 +47,8 @@ export interface ShelfItem {
   size: number
   /** `createObjectURL(file)`, revoked when the item leaves the shelf. */
   url: string
+  /** `Date.now()` when parked; the item is dropped `SHELF_TTL_MS` later, reload or not. */
+  addedAt: number
 }
 
 /**
@@ -69,6 +74,10 @@ interface ShelfState {
   filesFor: (keys: string[]) => File[]
   markHanded: (keys: string[]) => void
   setSink: (sink: ShelfSink | null) => void
+  /** Restore items read back from IndexedDB on page load (keeps their original `addedAt`). */
+  restore: (items: { key: string; file: File; addedAt: number }[]) => void
+  /** Drop everything older than `SHELF_TTL_MS`. Returns the keys removed. */
+  expire: () => string[]
 }
 
 let seq = 0
@@ -103,6 +112,7 @@ export const useShelf = create<ShelfState>((set, get) => ({
         name: file.name || '圖片',
         size: file.size,
         url: URL.createObjectURL(file),
+        addedAt: Date.now(),
       })
     }
     result.added = accepted.length
@@ -131,6 +141,30 @@ export const useShelf = create<ShelfState>((set, get) => ({
   },
 
   setSink: (sink) => set({ sink }),
+
+  restore: (items) =>
+    set((s) => {
+      const have = new Set(s.items.map((it) => it.key))
+      const back: ShelfItem[] = []
+      for (const it of items) {
+        if (have.has(it.key) || s.items.length + back.length >= SHELF_MAX) continue
+        const n = Number(it.key.replace(/^s/, ''))
+        if (Number.isFinite(n) && n > seq) seq = n
+        back.push({ key: it.key, file: it.file, name: it.file.name || '圖片', size: it.file.size, url: URL.createObjectURL(it.file), addedAt: it.addedAt })
+      }
+      if (!back.length) return {}
+      return { items: [...s.items, ...back].sort((a, b) => a.addedAt - b.addedAt) }
+    }),
+
+  expire: () => {
+    const cutoff = Date.now() - SHELF_TTL_MS
+    const gone = get().items.filter((it) => it.addedAt < cutoff)
+    if (!gone.length) return []
+    for (const it of gone) URL.revokeObjectURL(it.url)
+    const keys = gone.map((it) => it.key)
+    set((s) => ({ items: s.items.filter((it) => !keys.includes(it.key)), handed: s.handed.filter((k) => !keys.includes(k)) }))
+    return keys
+  },
 }))
 
 /**

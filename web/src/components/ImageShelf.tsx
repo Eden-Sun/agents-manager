@@ -290,7 +290,7 @@ export function ImageShelf() {
               <p className="shelf-empty">
                 {phone
                   ? '用 ＋ 把圖片放這裡，之後點一下就進對話。'
-                  : '把圖片拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project 都在，重新整理就清空。'}
+                  : '把圖片拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project 都在，重新整理也還在，放進來 30 分鐘後自動清掉。'}
               </p>
             ) : (
               items.map((it) => (
