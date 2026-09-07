@@ -8,7 +8,7 @@
 ## 專案長相
 - `daemon/`：Rust（axum + sqlx/SQLite），唯一狀態源；透過 herdr socket 管 pane，hook 為主、終端快照為備援。
 - `web/`：React + zustand，只做投影；dev 用 `cd web && npx vite`（5173，走真 daemon），mock 用 `VITE_MOCK=1`。
-- 正式 UI 嵌在 daemon 二進位裡：前端改完要 `npm run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
+- 正式 UI 嵌在 daemon 二進位裡：前端改完要 `bun run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
 
 ## 開工前
 1. `git status`：工作樹常有**其他 agent 未提交的改動**。那些不是你的，不要動、不要 `git stash`、不要 `--autostash`、不要 `git checkout -- <file>`。
@@ -23,7 +23,7 @@
 
 ## 驗證（收尾前必跑）
 - daemon：`cargo build --release -p agents-managerd` 與 `cargo test -p agents-managerd`。
-- web：`cd web && npx tsc --noEmit && npx oxlint src && npm run build`（既有 warning 不算，新增的要清）。
+- web：`cd web && bunx tsc --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
 - UI 改動要看真畫面：`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`（headless Chrome 七張）或 ego-browser；截圖放 `docs/screenshots/<feature>/`。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
