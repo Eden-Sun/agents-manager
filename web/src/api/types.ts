@@ -68,7 +68,6 @@ export interface Host {
   ssh_port: number
   herdr_session: string
   remote_path: string
-  hook_port: number
   connected: boolean
   /** 連線失敗原因（ssh / herdr），連線正常時為 null */
   error: string | null
@@ -149,7 +148,6 @@ export interface NewHostInput {
   ssh_port?: number
   herdr_session?: string
   remote_path?: string
-  hook_port?: number
   /** 額外的 ssh 參數，原樣附加到每個 ssh 指令（例：`["-i","~/.ssh/id_x"]`） */
   ssh_opts?: string[]
 }
@@ -194,7 +192,6 @@ export const HOST_DEFAULTS = {
   ssh_port: 22,
   herdr_session: 'agents-manager',
   remote_path: '/opt/homebrew/bin:$HOME/.local/bin',
-  hook_port: 7788,
 } as const
 
 export interface Bot {

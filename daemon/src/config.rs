@@ -124,8 +124,9 @@ pub struct HostCfg {
     /// PATH a non-interactive ssh shell is missing; prefixed to the remote PATH.
     #[serde(default)]
     pub remote_path: String,
-    /// Port on the remote 127.0.0.1 that is reverse-forwarded to the daemon.
-    /// Defaults to the daemon's own port.
+    /// Ignored since v4.3 (SPEC §11.4): remote hooks report through that host's own herdr and
+    /// leave their payload in a spool file, so there is no reverse forward and no port to pick.
+    /// Still parsed — and warned about once — so an older config keeps loading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_port: Option<u16>,
 }

@@ -231,7 +231,6 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   const [sshPort, setSshPort] = useState(String(HOST_DEFAULTS.ssh_port))
   const [session, setSession] = useState<string>(HOST_DEFAULTS.herdr_session)
   const [remotePath, setRemotePath] = useState<string>(HOST_DEFAULTS.remote_path)
-  const [hookPort, setHookPort] = useState(String(HOST_DEFAULTS.hook_port))
   const [sshOpts, setSshOpts] = useState('')
   const [advanced, setAdvanced] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -253,7 +252,6 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
           ssh_port: Number(sshPort) || HOST_DEFAULTS.ssh_port,
           herdr_session: session.trim() || HOST_DEFAULTS.herdr_session,
           remote_path: remotePath.trim(),
-          hook_port: Number(hookPort) || HOST_DEFAULTS.hook_port,
           ...(sshOpts.trim() ? { ssh_opts: sshOpts.trim().split(/\s+/) } : {}),
         }).then((res) => {
           setBusy(false)
@@ -311,10 +309,6 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
               spellCheck={false}
               onChange={(e) => setRemotePath(e.target.value)}
             />
-          </label>
-          <label className="field">
-            <span>hook_port（遠端 127.0.0.1 上的反向轉發埠）</span>
-            <input type="text" value={hookPort} spellCheck={false} onChange={(e) => setHookPort(e.target.value)} />
           </label>
           <label className="field">
             <span>ssh_opts（額外 ssh 參數，以空白分隔）</span>

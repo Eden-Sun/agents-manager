@@ -217,7 +217,6 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "ssh_opts": c.cfg.as_ref().map(|x| x.ssh_opts.clone()).unwrap_or_default(),
             "herdr_session": c.cfg.as_ref().map(|x| x.herdr_session.clone()).unwrap_or_else(|| app.herdr_session.clone()),
             "remote_path": c.cfg.as_ref().map(|x| x.remote_path.clone()),
-            "hook_port": c.cfg.as_ref().and_then(|x| x.hook_port),
             "connected": connected,
             "error": c.error_string().await,
             // v4.0
@@ -1079,6 +1078,7 @@ struct NewHost {
     ssh_opts: Option<Vec<String>>,
     herdr_session: Option<String>,
     remote_path: Option<String>,
+    /// Accepted so an older client still posts cleanly; ignored since v4.3 (SPEC §11.4).
     hook_port: Option<u16>,
 }
 
@@ -1100,8 +1100,12 @@ async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Res
         ssh_opts: b.ssh_opts.unwrap_or_default(),
         herdr_session: b.herdr_session.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "agents-manager".into()),
         remote_path: b.remote_path.unwrap_or_default(),
-        hook_port: b.hook_port,
+        // v4.3: dropped on the way in, so saving a host from the UI also clears a stale value.
+        hook_port: None,
     };
+    if b.hook_port.is_some() {
+        tracing::warn!(host = %b.name, "hook_port is ignored since v4.3 (remote hooks report through herdr; see SPEC §11.4)");
+    }
     let c2 = cfg.clone();
     app.cfg
         .update(move |f| {

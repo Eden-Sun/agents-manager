@@ -299,7 +299,6 @@ interface MockHost {
   ssh_port: number
   herdr_session: string
   remote_path: string
-  hook_port: number
   connected: boolean
   error: string | null
   /** v4.0 tool detection on that host */
@@ -1157,7 +1156,6 @@ export class MockTransport implements Transport {
       ssh_port: Number(b.ssh_port ?? 22) || 22,
       herdr_session: String(b.herdr_session ?? '') || 'agents-manager',
       remote_path: String(b.remote_path ?? ''),
-      hook_port: Number(b.hook_port ?? 7788) || 7788,
       connected: false,
       error: null,
       // A fresh remote box: claude + codex present, grok missing (exercises the tools hint).
@@ -1369,7 +1367,6 @@ export class MockTransport implements Transport {
           ssh_port: null,
           herdr_session: 'agents-manager',
           remote_path: null,
-          hook_port: null,
           connected: this.connected,
           error: null,
           attach_command: 'herdr --session agents-manager',
@@ -1382,7 +1379,6 @@ export class MockTransport implements Transport {
           ssh_port: h.ssh_port,
           herdr_session: h.herdr_session,
           remote_path: h.remote_path,
-          hook_port: h.hook_port,
           connected: h.connected,
           error: h.error,
           attach_command: `herdr --remote ${h.ssh}${h.ssh_port !== 22 ? ` -p ${h.ssh_port}` : ''} --session ${h.herdr_session}`,
