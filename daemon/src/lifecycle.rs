@@ -2673,6 +2673,22 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
 
+    // Decide from the screen *before* claiming the turn. A spinner still turning (`✢ Baking…`,
+    // `· Philosophising… (33m)`) is the agent mid-thought whatever herdr's status says; claiming
+    // the turn here stored that chrome as the answer and closed the turn under the real reply
+    // (observed 2026-09-07 11:17). Leaving it in flight is safe: the next `working -> idle`
+    // edge and the idle-prompt poller both re-arm this.
+    if pane_still_busy(&read.text) {
+        tracing::debug!(run_id, "pane still shows a spinner; not completing the turn from it");
+        return Ok(false);
+    }
+    let fresh_probe = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
+    let probe = extract_reply(&bot.kind, &fresh_probe).or_else(|| clean_screen(&bot.kind, &fresh_probe)).unwrap_or_default();
+    if is_tool_progress(&probe) {
+        tracing::debug!(run_id, "pane is still mid-tool-call; not completing the turn from it");
+        return Ok(false);
+    }
+
     // CAS: only one writer wins the turn.
     let res = sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
@@ -2759,6 +2775,47 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     .await?;
     emit_turn(app, &turn.id).await;
     Ok(true)
+}
+
+/// Is this capture nothing but "a tool is running"?
+///
+/// `Running 1 shell command…` (note the ellipsis — the finished form is `Ran 4 shell commands`)
+/// and the `Tip:` line Claude Code parks at the bottom are not an answer. Requiring *every*
+/// non-empty line to be one of those keeps a real reply that merely mentions the word from
+/// being thrown away, and requiring at least one `Running …` line keeps a lone `Tip:` line
+/// (a different symptom) out of this branch.
+/// Glyphs the CLIs animate in front of an in-progress verb (`✢ Baking…`, `· Thinking…`,
+/// `⠦ Thinking… 52s`). Claude Code rotates through a whole set; the braille block is codex/grok.
+fn is_spinner_glyph(c: char) -> bool {
+    "✻✽✶✳✢✣✤✥✦✧✩✪✫✬✭✮✯✰✱✲✴✵✷✸✹✺✻✼✾❋·∗*".contains(c) || ('\u{2800}'..='\u{28FF}').contains(&c)
+}
+
+/// `<glyph> <Verb>…` with nothing that says it finished (`· done 11:35 PM`, `for 9s`).
+fn is_spinner_line(s: &str) -> bool {
+    let s = s.trim();
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    if !is_spinner_glyph(first) {
+        return false;
+    }
+    let rest = chars.as_str().trim_start();
+    let Some(verb) = rest.split_whitespace().next() else { return false };
+    verb.ends_with('…') && !rest.contains("· done") && !rest.contains(" for ")
+}
+
+/// The pane is mid-turn: a spinner is still turning somewhere on it.
+fn pane_still_busy(screen: &str) -> bool {
+    screen.lines().any(is_spinner_line)
+}
+
+fn is_tool_progress(reply: &str) -> bool {
+    let lines: Vec<&str> = reply.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return false;
+    }
+    let running = |l: &str| l.starts_with("Running ") && l.ends_with('…');
+    let noise = |l: &str| running(l) || l.starts_with("Tip: ") || l.contains("esc to interrupt");
+    lines.iter().any(|l| running(l)) && lines.iter().all(|l| noise(l))
 }
 
 // ------------------------------------------------- hookless runs: the terminal is the source
@@ -3049,7 +3106,11 @@ fn is_noise(s: &str) -> bool {
         return false;
     }
     let first = s.chars().next().unwrap_or(' ');
-    if "▐▝▛▜█╭╮╰╯│▔✻✽✶✳⏵⚠·".contains(first) {
+    if "▐▝▛▜█╭╮╰╯│▔⏵⚠✗✘".contains(first) || is_spinner_glyph(first) {
+        return true;
+    }
+    // Claude Code's update nag; the "Tip:" below is its sibling.
+    if s.contains("Auto-update failed") {
         return true;
     }
     if s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_' || c == ' ') {
@@ -3425,8 +3486,9 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
         if !s.is_empty() && s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_') {
             break;
         }
-        // Skip the spinner / status line ("✻ Crunched for 9s · done 11:35 PM").
-        if s.starts_with('✻') || s.starts_with('✽') || s.starts_with('✶') || s.starts_with('·') {
+        // Skip the spinner / status line ("✻ Crunched for 9s · done 11:35 PM") and the chrome
+        // that sits next to it (`Tip:`, `✗ Auto-update failed`).
+        if s.chars().next().map(is_spinner_glyph).unwrap_or(false) || is_noise(s) {
             continue;
         }
         let cleaned = s.strip_prefix(marker).unwrap_or(t).to_string();
@@ -3681,6 +3743,44 @@ credits or try again at
     #[test]
     fn grok_banner_is_skipped_as_a_block() {
         assert_eq!(clean_screen("grok", GROK_SCREEN_NARROW).unwrap(), "GROK-FALLBACK");
+    }
+
+    #[test]
+    fn a_mid_tool_call_screen_is_not_an_answer() {
+        // The exact shape that closed a turn with the wrong content (2026-09-07).
+        assert!(is_tool_progress("Running 1 shell command…\n\nTip: Run /install-slack-app to use it"));
+        assert!(is_tool_progress("Running 4 shell commands…"));
+        assert!(is_tool_progress("  Running 1 shell command…  \n  esc to interrupt  "));
+    }
+
+    #[test]
+    fn a_turning_spinner_means_the_turn_is_not_over() {
+        // The exact screen that closed a turn with chrome as its answer (2026-09-07 11:17).
+        let screen = "⏺ 上一句回覆\n\n✢ Baking…\n  ⎿  Tip: Use /memory to view and manage Claude memory\n✗ Auto-update failed · Run claude doctor\n❯ ";
+        assert!(pane_still_busy(screen));
+        assert!(pane_still_busy("· Philosophising… (33m 33s · ↓ 94.9k tokens)"));
+        assert!(pane_still_busy("⠦ Thinking… 52s"));
+        // Finished-spinner lines are not "busy".
+        assert!(!pane_still_busy("✻ Crunched for 9s · done 11:35 PM\n❯ "));
+        assert!(!pane_still_busy("✻ Baked for 25m 50s · done 11:01 AM"));
+        assert!(!pane_still_busy("⏺ 做完了。\n❯ "));
+        // And none of that chrome survives into a stored reply.
+        let screen = "❯ hi\n✢ Baking…\nTip: Use /memory\n✗ Auto-update failed · Run claude doctor\n⏺ 真正的回覆\n╭───╮\n│ ❯ │\n╰───╯";
+        assert_eq!(extract_reply("claude", screen).unwrap(), "真正的回覆");
+        assert_eq!(clean_screen("claude", screen).unwrap(), "⏺ 真正的回覆");
+        // Chrome alone is nothing at all — never a stored "reply".
+        assert!(clean_screen("claude", "❯ hi\n✢ Baking…\nTip: Use /memory\n✗ Auto-update failed · Run claude doctor\n❯ ").is_none());
+    }
+
+    #[test]
+    fn a_real_reply_is_still_stored() {
+        // Finished tools (`Ran`, no ellipsis) come with the answer; do not throw that away.
+        assert!(!is_tool_progress("Ran 4 shell commands\n\n已追加給同一個 agent 一起做。"));
+        // A reply that merely talks about running commands is a reply.
+        assert!(!is_tool_progress("我會 Running 1 shell command… 之後再回報結果"));
+        // A lone Tip line is a different symptom and must not be swallowed here.
+        assert!(!is_tool_progress("Tip: Run /ultrareview for a cloud-based review"));
+        assert!(!is_tool_progress(""));
     }
 
     /// Claude mid-turn with nothing printed yet: spinner + input box + status bar only.
