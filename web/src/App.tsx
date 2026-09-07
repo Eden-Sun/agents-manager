@@ -10,6 +10,36 @@ import { Sidebar } from './components/Sidebar'
 import { TeamLaunchPanel } from './components/TeamLaunchPanel'
 import { TeamPanel } from './components/TeamPanel'
 import { useStore } from './store/store'
+import { totalUnread } from './store/unread'
+
+/**
+ * 掛 `(N)` 之前的原始標題。要把既有的 `(N)` 剝掉再存：模組不一定在乾淨的文件上載入
+ * （HMR、同址導覽），照抄下來就會疊成 `(1) (2) Agents Manager`。
+ */
+const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title).replace(/^\(\d+\+?\)\s*/, '')
+
+/**
+ * 未讀的兩件全域雜事：分頁標題的 `(N)`，以及「視窗回到前景 = 現在開著的那個對話被讀到了」。
+ *
+ * 前景這一段一定要有：使用者常常是把分頁切走、回來才看到回覆。沒有它的話，人在畫面前面
+ * 看著訊息，徽章卻還亮著（進來的當下他不在，clear 的時機就永遠不會到）。
+ */
+function useUnread() {
+  const total = useStore((s) => totalUnread(s.botUnread))
+  const markCurrentRead = useStore((s) => s.markCurrentRead)
+  useEffect(() => {
+    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${BASE_TITLE}` : BASE_TITLE
+  }, [total])
+  useEffect(() => {
+    const seen = () => markCurrentRead()
+    window.addEventListener('focus', seen)
+    document.addEventListener('visibilitychange', seen)
+    return () => {
+      window.removeEventListener('focus', seen)
+      document.removeEventListener('visibilitychange', seen)
+    }
+  }, [markCurrentRead])
+}
 
 function Notices() {
   const notices = useStore((s) => s.notices)
@@ -111,6 +141,7 @@ export default function App() {
   }, [bootstrap])
 
   useBotSwitchKeys()
+  useUnread()
 
   // Picking anything in the drawer navigates the main panel, which the drawer is covering —
   // close it so the result is visible. Rotating to landscape (or any resize past the

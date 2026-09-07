@@ -1385,3 +1385,53 @@ focus 立即；`Escape`、捲動、resize、拖曳開始都會收掉。
 拖第二張進 B 的對話（`dataTransfer` 只有 `application/x-am-shelf`，key=s2，上傳成功）→
 卡片 focus 後 Enter 再放一張、Delete 移除一張 → 淺色、收合握把、拖曳中的 pad → 390px
 手機底部托盤（點一下放進對話）與收合列。
+
+## 已完成（未讀）（2026-09-07 加）
+
+回合狀態多一段中間值：**進行中 → 已完成（未讀）→ 已完成（已讀）**。取捨寫在
+`docs/UI-DECISIONS.md`；這裡是實作與驗收。
+
+**檔案**：`web/src/store/unread.ts`（純函式 ＋ localStorage，附 `unread.test.ts`）。
+`store.ts` 只掛最小的 hook，daemon 完全沒有改動——未讀是「這個瀏覽器的人看過什麼」，
+協定裡沒有它的位置。
+
+**記帳的時機**（`store.ts` 的 `handleFrame`）：
+
+- `message_added` 的 assistant 訊息、以及 `turn_updated` 進終態，都算「一個回合完成」。
+  同一個回合兩者都會來，`takeTurnCompletion(botId, turnId)` 讓它只跳一次；沒有 assistant
+  訊息的回合（中止、只有終端輸出）靠後者才不會漏掉。
+- 完成的當下如果**不是**「正在看它」就 +1。「正在看」＝ `selectedBotId` 是它、而且沒有群組 /
+  team / shell 蓋在上面、而且 `document.visibilityState === 'visible'`、而且
+  `document.hasFocus()`（`windowActive()`）。
+- 同一則回覆也記一份在它專案的群組聊天上（`groupUnread`，§13.6 本來就有，現在跟著同一套
+  可見性規則走，而且會存下來）。team 成員就是 bot，走的是同一條路，不必另外處理。
+
+**清成已讀**：`selectBot` / `selectProject`（視窗在前景時）、以及 `App.tsx` 的
+`useUnread()` 在 `focus` / `visibilitychange` 時把「現在開著的那個」標成已讀。
+
+**畫面**：側欄 bot 列在狀態燈右邊加 `.unread-turns`（`!2`，accent 方角小標）；專案收合時
+把底下所有 bot 的未讀加總掛在專案標題上；分頁標題掛 `(N)` 前綴（只算 bot 那一邊，
+群組的是同一批回覆的第二份帳）。
+
+**localStorage**（都用 try/catch 包住，無痕視窗只是不跨重整）：
+
+| key | 內容 |
+| --- | --- |
+| `am.readMarks` | `{"bot:<id>" \| "group:<projectId>": {at, id}}` — 最後已讀的訊息時間與 id |
+| `am.unread` | `{"bot:<id>" \| "group:<projectId>": n}` — 未讀回合數的快照 |
+
+兩份都存的理由：重整後只有正在看的那個 bot 會載入訊息，其他的一則都沒有，光靠標記算不出
+數字；而光靠數字會跟真實訊息漂移。訊息真的載進來時 `recountBot` 用標記重算一次校正。
+每次 `GET /api/state` 之後 `pruneUnread()` 把已經不存在的 bot / project 的帳丟掉。
+
+**驗收**：
+
+- `cd web && node --test --experimental-strip-types src/store/unread.test.ts`（11 項）。
+- `node scripts/demo-unread.mjs`（mock @ 5311）：送出後切到別的 bot → 那一列出現 `!1`、
+  分頁標題 `(1)`；收合專案 → 標題掛上 `!1`；點回去 → 徽章與 `(N)` 都清掉，
+  `am.readMarks` 推到最後一則。截圖 `docs/screenshots/unread/440`、`441`、`443`。
+- `node scripts/demo-unread-persist.mjs`（真 daemon @ 5173，只讀畫面 ＋ 寫 localStorage，
+  不對任何 bot 送訊息）：帳本寫進 localStorage → 重整後徽章 `!3`、標題 `(3)` 還在；
+  把分頁改成 `hidden` ＋ `hasFocus()=false` 再點進那個 bot → **不會**清掉（並且
+  `recountBot` 用假的 2020 年標記從真實訊息重算出整串歷史的回合數）；改回 visible 並丟一個
+  `visibilitychange` → 立刻清成已讀。截圖 `docs/screenshots/unread/444`–`446`。

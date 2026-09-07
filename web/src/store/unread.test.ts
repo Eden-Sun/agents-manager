@@ -1,0 +1,113 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import type { Message } from '../api/types.ts'
+import { countUnreadTurns, isUnread, loadCounts, loadMarks, markOfMessages, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, totalUnread } from './unread.ts'
+
+/** node 沒有 localStorage；這裡只要 get/set 兩支。 */
+function stubStorage() {
+  const map = new Map<string, string>()
+  ;(globalThis as unknown as { localStorage: unknown }).localStorage = {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => void map.set(k, v),
+  }
+  return map
+}
+
+function msg(id: string, role: Message['role'], created_at: string, turn_id: string | null = null): Message {
+  return {
+    id,
+    conversation_id: 'c1',
+    turn_id,
+    role,
+    content: id,
+    source: 'hook',
+    incomplete: false,
+    group_id: null,
+    attachments: [],
+    team_id: null,
+    relay_from: null,
+    terminal_snapshot: null,
+    created_at,
+  }
+}
+
+test('沒有標記 = 全部未讀，但只算 assistant', () => {
+  const ms = [msg('1', 'user', '2026-09-07T00:00:01Z'), msg('2', 'assistant', '2026-09-07T00:00:02Z', 't1')]
+  assert.equal(countUnreadTurns(ms, undefined), 1)
+})
+
+test('同一個回合的多則回覆只算一個未讀', () => {
+  const ms = [
+    msg('1', 'assistant', '2026-09-07T00:00:01Z', 't1'),
+    msg('2', 'assistant', '2026-09-07T00:00:02Z', 't1'),
+    msg('3', 'assistant', '2026-09-07T00:00:03Z', 't2'),
+  ]
+  assert.equal(countUnreadTurns(ms, undefined), 2)
+})
+
+test('沒有 turn_id 的回覆各自算一個回合', () => {
+  const ms = [msg('1', 'assistant', '2026-09-07T00:00:01Z'), msg('2', 'assistant', '2026-09-07T00:00:02Z')]
+  assert.equal(countUnreadTurns(ms, undefined), 2)
+})
+
+test('標記之後的才算未讀；標記那一則自己已讀', () => {
+  const ms = [
+    msg('1', 'assistant', '2026-09-07T00:00:01Z', 't1'),
+    msg('2', 'assistant', '2026-09-07T00:00:02Z', 't2'),
+    msg('3', 'assistant', '2026-09-07T00:00:03Z', 't3'),
+  ]
+  assert.equal(countUnreadTurns(ms, { at: '2026-09-07T00:00:02Z', id: '2' }), 1)
+})
+
+test('時間戳撞在一起時靠 id 分辨標記那一則', () => {
+  const same = '2026-09-07T00:00:02Z'
+  assert.equal(isUnread({ id: 'a', created_at: same }, { at: same, id: 'a' }), false)
+  assert.equal(isUnread({ id: 'b', created_at: same }, { at: same, id: 'a' }), true)
+})
+
+test('markOfMessages 取時間最大的那一則（清單沒排序也一樣）', () => {
+  const ms = [msg('2', 'assistant', '2026-09-07T00:00:09Z'), msg('1', 'user', '2026-09-07T00:00:01Z')]
+  assert.deepEqual(markOfMessages(ms), { at: '2026-09-07T00:00:09Z', id: '2' })
+  assert.equal(markOfMessages([]), null)
+})
+
+test('同一個回合的 message_added 與 turn_updated 只跳一次', () => {
+  resetTurnCompletions()
+  assert.equal(takeTurnCompletion('b1', 't1'), true)
+  assert.equal(takeTurnCompletion('b1', 't1'), false)
+  // 不同 bot 的同名 turn 是不同回合。
+  assert.equal(takeTurnCompletion('b2', 't1'), true)
+})
+
+test('totalUnread 只加 bot——群組未讀是同一批回覆的第二份帳', () => {
+  assert.equal(totalUnread({ a: 2, b: 1 }), 3)
+})
+
+test('未讀數與已讀標記存得回來（跨重整的那一段）', () => {
+  stubStorage()
+  saveCounts({ bots: { b1: 2 }, groups: { p1: 1 } })
+  saveMarks({ 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2' } })
+  assert.deepEqual(loadCounts(), { bots: { b1: 2 }, groups: { p1: 1 } })
+  assert.deepEqual(loadMarks(), { 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2' } })
+})
+
+test('0 不寫進去；讀不到 / 壞掉的內容當作全部已讀', () => {
+  const map = stubStorage()
+  saveCounts({ bots: { b1: 0 }, groups: {} })
+  assert.equal(map.get('am.unread'), '{}')
+  map.set('am.unread', 'not json')
+  map.set('am.readMarks', '[1,2]')
+  assert.deepEqual(loadCounts(), { bots: {}, groups: {} })
+  assert.deepEqual(loadMarks(), {})
+})
+
+test('localStorage 整支不能用時不會炸（無痕視窗）', () => {
+  ;(globalThis as unknown as { localStorage: unknown }).localStorage = {
+    getItem: () => { throw new Error('denied') },
+    setItem: () => { throw new Error('denied') },
+  }
+  assert.deepEqual(loadCounts(), { bots: {}, groups: {} })
+  assert.deepEqual(loadMarks(), {})
+  saveCounts({ bots: { b1: 1 }, groups: {} })
+  saveMarks({ 'bot:b1': { at: 'x', id: 'y' } })
+})
