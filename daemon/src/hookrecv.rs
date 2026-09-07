@@ -410,7 +410,14 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
-                    crate::quota::set(app, &host, &format!("claude:{idn}"), q).await;
+                    // 空 env 的身份（cc0）跟預設帳號是同一組憑證，`/usage` 探測也是寫進裸的
+                    // `claude`。這裡若另開一列 `claude:cc0`，那一列永遠沒有探測才讀得到的
+                    // Fable 週窗，頂端那條就只有 cc0 少一條 F。同一個帳號寫同一個 key。
+                    let default_account = crate::tools::identity_for_host(app, &host, idn)
+                        .await
+                        .is_some_and(|i| i.env.is_empty());
+                    let key = if default_account { "claude".to_string() } else { format!("claude:{idn}") };
+                    crate::quota::set(app, &host, &key, q).await;
                 }
             } else if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
                 crate::quota::set(app, &host, "claude", q).await;
