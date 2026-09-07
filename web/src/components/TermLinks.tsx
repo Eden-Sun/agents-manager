@@ -17,20 +17,49 @@ const MIN_WRAP_WIDTH = 40
 
 type Piece = { text: string; url: string | null }
 
+/** 這一行接得上上一行的 URL 嗎（開頭是連續的網址字元，不是空白也不是別的符號）。 */
+function continuesUrl(line: string | undefined): boolean {
+  return line !== undefined && line.length > 0 && !/^\s/.test(line) && URL_CHARS.test(line[0])
+}
+
+/** 整行都是網址字元、一個空白都沒有——軟折行中段的長相。 */
+function isFullWrap(line: string | undefined, width: number): boolean {
+  return line !== undefined && line.length === width && !/\s/.test(line) && continuesUrl(line)
+}
+
+/**
+ * 第 `i` 行的 URL 剛好跑到行尾——這是終端把它折下去了，還是它本來就在這裡結束？
+ *
+ * 不能只看「這行是不是畫面上最長的一行」：claude 的登入畫面有一條 185 欄的框線，URL 卻是
+ * 在 78 欄折的，拿最長行當寬度時每一段 URL 都「沒塞滿」，於是只有第一行被 linkify、複製到的
+ * 是腰斬的網址（實測 2026-09-08）。所以改成三條各自獨立的證據，中一條就接：
+ *
+ *   (a) 下一行是「剛好同寬、整行沒有空白」的續行——只有軟折行會長這樣，跟畫面上其他東西
+ *       多寬無關。折成三行以上的長 URL 都吃這條。
+ *   (b) 這行的長度剛好等於終端的 `columns`：典型的硬折行，就算只折一次也算數。
+ *   (c) 這行剛好是畫面上最長的一行（舊行為，`observed`）：折一次、又不知道 columns 時的後路。
+ *
+ * 都不中就不接——寧可漏接也不要把真正換行的相鄰兩行黏成一條假網址。
+ */
+function wrapsToNextLine(lines: string[], i: number, columns: number | null | undefined, longest: number): boolean {
+  const width = lines[i].length
+  if (width === 0 || !continuesUrl(lines[i + 1])) return false
+  // 比終端還寬的一行不可能是折行的結果（多半是快照裡的裝飾線）。
+  if (columns && columns > 0 && width > columns) return false
+  if (isFullWrap(lines[i + 1], width)) return true
+  if (columns && columns > 0 && width === columns) return true
+  return width >= MIN_WRAP_WIDTH && width === longest
+}
+
 /** 逐行拆成「純文字」與「URL 片段（帶完整 URL）」。導出是為了測試。 */
 export function termPieces(text: string, columns?: number | null): Piece[][] {
   const lines = text.split('\n')
-  // 折行寬度不能只信 `columns`：pane 現在 185 欄，但那段輸出可能是在較窄時印的（實測
-  // 2026-09-08：185 欄的 pane 裡 URL 每 78 字就折），所以拿「畫面上最長的一行」跟 columns
-  // 取小的當寬度——硬折行的 URL 一定會把那個寬度塞滿。
-  // 太短就不算折行（畫面上只有一條短 URL 加提示字元時，最長那行不是寬度）。
   const longest = Math.max(0, ...lines.map((l) => l.length))
-  const observed = longest >= MIN_WRAP_WIDTH ? longest : 0
-  const width = columns && columns > 0 ? Math.min(columns, observed || columns) : observed
   const rows: Piece[][] = []
-  // 上一行的 URL 跑到行尾且那行塞滿了 → 這一行開頭的連續非空白是它的延續。
-  let carry: { url: string; frags: Piece[] } | null = null
-  for (const line of lines) {
+  // 上一行的 URL 跑到行尾且判定為折行 → 這一行開頭的連續非空白是它的延續。
+  let carry: { url: string; frags: Piece[]; width: number } | null = null
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     const row: Piece[] = []
     let from = 0
     if (carry) {
@@ -41,7 +70,8 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
         carry.url += m[0]
         row.push(piece)
         from = m[0].length
-        if (line.length < width) {
+        // 整行都是這條 URL 而且跟上一行等寬 → 還會再折下去；否則 URL 就在這一行結束。
+        if (from !== line.length || line.length !== carry.width) {
           for (const f of carry.frags) f.url = trimPunct(carry.url)
           carry = null
         }
@@ -50,16 +80,16 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
         carry = null
       }
     }
-    if (carry === null || from < line.length) {
+    if (from < line.length) {
       const rest = line.slice(from)
       let last = 0
       for (const m of rest.matchAll(URL_RE)) {
         const at = m.index ?? 0
         if (at > last) row.push({ text: rest.slice(last, at), url: null })
-        const endsLine = at + m[0].length === rest.length && line.length >= width && width > 0
+        const endsLine = at + m[0].length === rest.length && wrapsToNextLine(lines, i, columns, longest)
         const piece: Piece = { text: m[0], url: endsLine ? null : trimPunct(m[0]) }
         row.push(piece)
-        if (endsLine) carry = { url: m[0], frags: [piece] }
+        if (endsLine) carry = { url: m[0], frags: [piece], width: line.length }
         last = at + m[0].length
       }
       if (last < rest.length) row.push({ text: rest.slice(last), url: null })
