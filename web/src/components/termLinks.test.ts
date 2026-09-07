@@ -35,3 +35,14 @@ test('連續折兩行，最後一段沒塞滿就停', () => {
 test('句尾標點不算', () => {
   assert.deepEqual(urlsOf(termPieces('go https://a.example/x.', 80)), [['https://a.example/x.', 'https://a.example/x']])
 })
+
+test('輸出是在比 columns 窄的時候印的：拿最長的一行當折行寬度', () => {
+  const l1 = "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id"
+  const l2 = '=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.'
+  const l3 = 'd4WT3wVFX-JmdZbLPqMA'
+  const l4 = 'Paste code here if prompted >'
+  const rows = termPieces([l1, l2, l3, l4].join('\n'), 185)
+  const full = l1.slice(35) + l2 + l3
+  assert.deepEqual(urlsOf(rows), [[l1.slice(35), full], [l2, full], [l3, full]])
+  assert.equal(rows[3][0].text, l4)
+})

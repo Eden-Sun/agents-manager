@@ -12,12 +12,21 @@ import { TermLink } from './TermLink'
 const URL_CHARS = /[^\s<>"'`）」』]/
 const URL_RE = /https?:\/\/[^\s<>"'`）」』]+/g
 
+/** 終端不會窄到這個以下；比這短的「最長一行」只是內容短，不是折行寬度。 */
+const MIN_WRAP_WIDTH = 40
+
 type Piece = { text: string; url: string | null }
 
 /** 逐行拆成「純文字」與「URL 片段（帶完整 URL）」。導出是為了測試。 */
 export function termPieces(text: string, columns?: number | null): Piece[][] {
   const lines = text.split('\n')
-  const width = columns && columns > 0 ? columns : Math.max(0, ...lines.map((l) => l.length))
+  // 折行寬度不能只信 `columns`：pane 現在 185 欄，但那段輸出可能是在較窄時印的（實測
+  // 2026-09-08：185 欄的 pane 裡 URL 每 78 字就折），所以拿「畫面上最長的一行」跟 columns
+  // 取小的當寬度——硬折行的 URL 一定會把那個寬度塞滿。
+  // 太短就不算折行（畫面上只有一條短 URL 加提示字元時，最長那行不是寬度）。
+  const longest = Math.max(0, ...lines.map((l) => l.length))
+  const observed = longest >= MIN_WRAP_WIDTH ? longest : 0
+  const width = columns && columns > 0 ? Math.min(columns, observed || columns) : observed
   const rows: Piece[][] = []
   // 上一行的 URL 跑到行尾且那行塞滿了 → 這一行開頭的連續非空白是它的延續。
   let carry: { url: string; frags: Piece[] } | null = null
