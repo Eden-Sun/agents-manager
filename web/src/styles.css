@@ -848,6 +848,13 @@ button:disabled {
   font-size: 9px;
 }
 
+/* 收合鈕裡的小燈：子 agent 還在忙／卡住時透出來，比列上的燈小一號，不搶父列自己那顆。 */
+.bot-kids-lamp {
+  width: 6px;
+  height: 6px;
+  margin-left: 1px;
+}
+
 .bot-kids-n {
   font-size: 10px;
   font-weight: 650;
