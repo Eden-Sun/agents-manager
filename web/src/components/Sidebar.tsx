@@ -7,7 +7,6 @@ import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import {
   adjacentBotId,
   anchorOf,
-  attachCommandOf,
   botLamp,
   botQuotaWarning,
   botMatches,
@@ -28,7 +27,6 @@ import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
-import { AttachButton } from './AttachButton'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
@@ -746,12 +744,6 @@ function ProjectTitle({
   )
 }
 
-/** Hover-only「在終端開啟」for a project head (its host's attach command). */
-function ProjectAttach({ projectId }: { projectId: string }) {
-  const command = useStore((s) => attachCommandOf(s, projectId))
-  return <AttachButton command={command} compact />
-}
-
 export function Sidebar() {
   const projects = useStore((s) => s.projects)
   const bots = useStore((s) => s.bots)
@@ -1019,7 +1011,6 @@ export function Sidebar() {
                 </button>
                 <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} folded={projectShut} />
                 <span className="project-head-actions">
-                  <ProjectAttach projectId={p.id} />
                   <button
                     type="button"
                     className="icon-btn add icon-tip"
