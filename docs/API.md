@@ -1127,6 +1127,20 @@ daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機
 `POST /api/projects/{id}/teams` 的 body 也接受 `repo`：team 的 worktree、分支、合併、PR 與關 issue 全部在**那個 submodule 的 repo** 裡進行；
 team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4。
 
+## 子 agent（bot 自己開的 pane，2026-09-07 新增）
+
+daemon 起的每個 agent 都帶一條預設人設（`lifecycle::spawn_rule`，接在使用者的 `bot.persona` 前面）：
+「你的 agent 名稱是 `<agent_name>`；用 herdr 開子 pane / 子 agent 時名稱必須以 `<agent_name>-` 為前綴」。
+
+對帳（`reconcile`）時，herdr 裡沒有任何 bot 認領、名稱又是 `<某 bot 的 agent_name>-<字尾>` 的 agent，
+會被建成那個 bot 的**子 bot**：`managed_by = "child"`、`parent_bot_id = <父 bot id>`、`name = <字尾>`、
+kind 取 herdr 偵測到的（偵測不到就沿用父的）、identity 沿用父的、不注入 hook（回覆走終端擷取）。
+同時建一筆 `adopted = 1` 的 run，之後跟一般 bot 一樣有燈號、對話、終端。前綴取最長匹配，所以孫代掛在子代下面。
+
+- `GET /api/state` 的 bot 物件多 `parent_bot_id`（頂層為 `null`），`managed_by` 多一個值 `child`。
+- 子 bot 不進 config.toml；pane 消失時 daemon 把它 `deleted_at`（對話保留）。`DELETE /api/bots/{id}` 對子 bot 直接停 pane 並軟刪。
+- UI：側欄把子 bot 縮排掛在父 bot 底下。
+
 ## 圖片附件（2026-09-06 新增）
 
 CLI agent 只吃文字（`agent.prompt`），所以「拖一張圖進對話」是**先把檔案放到 bot 所在主機**，

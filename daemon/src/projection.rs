@@ -138,7 +138,8 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
     // objects (`managed_by='team'`) that deliberately never enter config.toml, so the
     // "not in the TOML ⇒ deleted" rule must not touch them.
     for b in db::live_bots(pool).await? {
-        if b.managed_by == "team" {
+        // Same for `child`: an agent the bot spawned, adopted by the reconcile.
+        if b.managed_by != "user" {
             continue;
         }
         if !live_bots.contains(&b.id) {

@@ -203,6 +203,8 @@ export interface Bot {
   managed_by: BotManagedBy
   /** SPEC-team §2.1：team 成員身分；null = 一般 bot。 */
   team: BotTeamRef | null
+  /** 由哪個 bot 的 agent 用 herdr 開出來的子 agent（名稱 `<父 agent 名>-<字尾>`）；null = 頂層。 */
+  parent_bot_id: string | null
   /** SPEC-team §2.2：pane 的工作目錄；null = 用 `project.path`。 */
   cwd: string | null
   /**
@@ -214,7 +216,7 @@ export interface Bot {
   created_at: string
 }
 
-export type BotManagedBy = 'user' | 'team'
+export type BotManagedBy = 'user' | 'team' | 'child'
 
 export interface BotTeamRef {
   team_id: string

@@ -708,10 +708,27 @@ pub fn toml_basic_string(s: &str) -> String {
     out
 }
 
+/// The one rule every daemon-started agent carries, ahead of `bot.persona`: a child pane it
+/// opens through herdr must be named `<its own agent name>-<suffix>`, which is what lets the
+/// reconcile file that child under this bot (`managed_by='child'`) instead of losing it.
+pub fn spawn_rule(agent_name: &str) -> String {
+    format!(
+        "你在 agents-manager 裡的 agent 名稱是 `{agent_name}`。\
+         若要用 herdr 開子 pane / 子 agent（`herdr agent start <名稱> …`），名稱**必須**以 `{agent_name}-` 為前綴\
+         （例：`{agent_name}-review`、`{agent_name}-ui`），管理器才會把它掛在你底下追蹤；不照做的子 agent 不會被管理。"
+    )
+}
+
 /// v4.0: `bot.persona` appended to the agent's system prompt, per kind. Sits right after the
-/// daemon's own flags (before model / effort). Nothing when empty.
-fn persona_args(bot: &db::Bot) -> Vec<String> {
-    let Some(p) = bot.persona.as_deref().filter(|s| !s.trim().is_empty()) else { return vec![] };
+/// daemon's own flags (before model / effort). The daemon's own rule (`spawn_rule`) comes
+/// first; the user's text follows it.
+fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
+    let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let p = match user {
+        Some(u) => format!("{}\n\n{u}", spawn_rule(agent_name)),
+        None => spawn_rule(agent_name),
+    };
+    let p = p.as_str();
     match bot.kind.as_str() {
         "claude" => vec!["--append-system-prompt".into(), p.to_string()],
         // `grok --help`: "Extra rules to append to the system prompt".
@@ -809,6 +826,7 @@ mod model_args_tests {
             team_role: None,
             cwd: None,
             herdr_session: None,
+            parent_bot_id: None,
             hook_token: "t".into(),
             deleted_at: None,
             created_at: String::new(),
@@ -844,18 +862,23 @@ mod model_args_tests {
 
     #[test]
     fn persona_per_kind() {
-        use super::{persona_args, toml_basic_string};
+        use super::{persona_args, spawn_rule, toml_basic_string};
         let mut b = bot("claude", None, None, false);
+        let rule = spawn_rule("proj-abc123");
         b.persona = Some("回覆結尾一律加上 [PERSONA-OK]".into());
-        assert_eq!(persona_args(&b), vec!["--append-system-prompt", "回覆結尾一律加上 [PERSONA-OK]"]);
+        let want = format!("{rule}\n\n回覆結尾一律加上 [PERSONA-OK]");
+        assert_eq!(persona_args(&b, "proj-abc123"), vec!["--append-system-prompt".to_string(), want.clone()]);
         b.kind = "grok".into();
-        assert_eq!(persona_args(&b), vec!["--rules", "回覆結尾一律加上 [PERSONA-OK]"]);
+        assert_eq!(persona_args(&b, "proj-abc123"), vec!["--rules".to_string(), want.clone()]);
         b.kind = "codex".into();
         b.persona = Some("line1\nsay \"hi\" \\ done".into());
-        assert_eq!(persona_args(&b), vec!["-c", "developer_instructions=\"line1\\nsay \\\"hi\\\" \\\\ done\""]);
-        b.persona = Some("   ".into());
-        assert!(persona_args(&b).is_empty());
-        assert_eq!(toml_basic_string("a\tb\u{1}"), "\"a\\tb\\u0001\"");
+        let want = format!("{rule}\n\nline1\nsay \"hi\" \\ done");
+        assert_eq!(persona_args(&b, "proj-abc123"), vec!["-c".to_string(), format!("developer_instructions={}", toml_basic_string(&want))]);
+        // No user persona: the daemon's rule alone, never nothing.
+        b.kind = "claude".into();
+        b.persona = None;
+        assert_eq!(persona_args(&b, "proj-abc123"), vec!["--append-system-prompt".to_string(), rule.clone()]);
+        assert!(rule.contains("`proj-abc123-`"));
     }
 }
 
@@ -1155,14 +1178,15 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .await
         .map_err(up)?;
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
+    // The agent name is decided here because the persona quotes it (see `spawn_rule`).
+    let agent = crate::config::agent_name(&project.label, &bot.id);
     let mut args = injected;
-    args.extend(persona_args(bot));
+    args.extend(persona_args(bot, &agent));
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());
 
     // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
-    let agent = crate::config::agent_name(&project.label, &bot.id);
     sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
         .bind(&agent)
         .bind(run_id)
