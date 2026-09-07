@@ -16,10 +16,8 @@ import type { DragEvent } from 'react'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
-
-/** Same ceiling as `attach::MAX_BYTES`, checked here so the error is instant. */
-const MAX_BYTES = 12 * 1024 * 1024
 
 export function isImageFile(f: File): boolean {
   return f.type.startsWith('image/')
@@ -108,14 +106,31 @@ export function useAttachments(uploadTo: string | null) {
   return { items, add, remove, clear, ids, uploading }
 }
 
-/** Drag-and-drop wiring for a composer area: `props` on the drop target, plus the overlay. */
+/**
+ * Drag-and-drop wiring for a composer area: `props` on the drop target, plus the overlay.
+ *
+ * Two kinds of drag land here and both end up in the same `onFiles`: files from the OS, and
+ * an image dragged out of the shelf (the cross-conversation staging area), which carries
+ * only its shelf key — the `File` itself is still parked in the shelf store and is fetched
+ * back on drop. That is deliberate: the shelf never uploads, so the bytes reach the daemon
+ * exactly here, addressed to the bot the user dropped them on.
+ */
 export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boolean) {
   const [over, setOver] = useState(false)
   // dragenter/dragleave fire for every child element; count them so the overlay does not
   // flicker as the pointer crosses the textarea.
   const depth = useRef(0)
 
-  const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
+  const shelfKeys = (e: DragEvent): string[] =>
+    (e.dataTransfer?.getData(SHELF_MIME) || '')
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean)
+
+  const hasFiles = (e: DragEvent) => {
+    const types = Array.from(e.dataTransfer?.types ?? [])
+    return types.includes('Files') || types.includes(SHELF_MIME)
+  }
 
   const props = {
     onDragEnter: (e: DragEvent) => {
@@ -140,7 +155,9 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
       e.preventDefault()
       depth.current = 0
       setOver(false)
-      onFiles(Array.from(e.dataTransfer?.files ?? []))
+      // A shelf drag exposes no `files`; resolve its keys back to the parked `File`s.
+      const keys = shelfKeys(e)
+      onFiles(keys.length ? shelfFilesFor(keys) : Array.from(e.dataTransfer?.files ?? []))
     },
   }
 
@@ -219,7 +236,7 @@ export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) =
   )
 }
 
-function ImageIcon() {
+export function ImageIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
       <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />

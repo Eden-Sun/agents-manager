@@ -9,6 +9,7 @@ import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, useScrollTail } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
+import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
 import { KindIcon } from './KindTag'
 import { MemBadge } from './MemBadge'
@@ -542,6 +543,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   // drop anywhere in the group chat area is accepted.
   const files = useAttachments(members[0]?.id ?? null)
   const drop = useDropTarget(files.add, memberCount === 0)
+  // 同 ChatPanel：讓右側圖片暫存區把「點一下」的圖片交給這個群組草稿。
+  useShelfSink(files.add, memberCount > 0 ? `${project?.label ?? ''} 群組` : null)
 
   if (!project) {
     return (

@@ -249,7 +249,8 @@ button:disabled {
 
 .app {
   display: grid;
-  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr);
+  /* 側欄、主面板，加上右緣的圖片暫存區（`auto`：收合 38px、展開 208px 都由它自己決定）。 */
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto;
   height: 100%;
   overflow: hidden;
 }
@@ -6872,4 +6873,319 @@ button.run-debug-toggle:hover {
 
 .identity-login.is-unknown {
   color: var(--text-faint);
+}
+
+/* --------------------------------------------- image shelf (cross-conversation staging)
+
+   The third cell of `.app`: a rail on the right on desktop, a strip along the bottom at
+   the drawer breakpoint. A grid cell rather than a floating panel, so it never covers the
+   timeline or the composer — and it lives outside `main`, so it survives every bot /
+   project / team switch with its images intact. See
+   `docs/goals/image-drop-tray-2026-09-07.md`. */
+
+.shelf {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-side);
+}
+
+/* 208px：剛好放得下「圖片暫存」＋張數＋三顆鍵，再窄標題就會被裁掉。 */
+.shelf.open {
+  width: 208px;
+}
+
+.shelf-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Same 60px as `.main-head`, so the two headers read as one line across the window. */
+.shelf-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 60px;
+  min-height: 60px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+
+.shelf-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.shelf-count {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* `.icon-btn`'s hover is red because most of its users delete something; here only 「清空」 does. */
+.shelf-head .icon-btn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.shelf-head .shelf-clear:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.shelf-add {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.shelf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.shelf-empty {
+  margin: 0;
+  padding: 4px 2px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+.shelf-card {
+  position: relative;
+  flex: none;
+}
+
+/* The whole card is the button: click / Enter hands the image to the open conversation. */
+.shelf-card-main {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  text-align: left;
+  cursor: grab;
+}
+
+.shelf-card-main:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.shelf-card-main img {
+  width: 100%;
+  height: 74px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  pointer-events: none;
+}
+
+.shelf-card-name {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shelf-card-size {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* Handed to a conversation: the image stays parked (the same screenshot often goes to
+   several bots), so the only feedback is this short flash. */
+.shelf-card.handed .shelf-card-main {
+  border-color: var(--status-ok);
+}
+
+.shelf-card.handed .shelf-card-size {
+  color: var(--status-ok);
+  font-weight: 600;
+}
+
+.shelf-card-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.shelf-card-x:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.shelf.dropping .shelf-body {
+  background: var(--accent-soft);
+}
+
+.shelf-veil {
+  position: absolute;
+  inset: 6px;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Collapsed: a vertical grab handle, wide enough to read but not to matter. */
+.shelf-handle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 38px;
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.shelf-handle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.shelf-handle-label {
+  writing-mode: vertical-rl;
+  letter-spacing: 1px;
+}
+
+/*
+ * A 38px handle is not a target you can hit while dragging a file, so during an OS file
+ * drag the collapsed rail grows this pad. Absolutely positioned on purpose: widening the
+ * grid column mid-drag would reflow the chat under the pointer.
+ */
+.shelf-pad {
+  position: absolute;
+  top: 50%;
+  right: 46px;
+  z-index: 22;
+  translate: 0 -50%;
+  width: 168px;
+  padding: 22px 12px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.shelf-pad.over {
+  background: var(--accent-soft);
+}
+
+/*
+ * ≤1024px is where the sidebar becomes a drawer and the shelf becomes a bottom strip:
+ * one horizontally scrolling row of thumbnails, still a grid cell so the composer keeps
+ * its own space. Touch has no HTML5 drag, so tapping a card is the way in and out here.
+ */
+@media (width <= 1024px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .shelf {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    max-height: 46vh;
+  }
+
+  .shelf.open {
+    width: auto;
+  }
+
+  .shelf-head {
+    height: 42px;
+    min-height: 42px;
+  }
+
+  .shelf-list {
+    flex-direction: row;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .shelf-card {
+    width: 104px;
+  }
+
+  .shelf-card-main img {
+    height: 64px;
+  }
+
+  .shelf-empty {
+    padding: 2px 4px;
+  }
+
+  .shelf-handle {
+    flex-direction: row;
+    justify-content: center;
+    width: 100%;
+    height: 38px;
+    padding: 0;
+    gap: 8px;
+  }
+
+  .shelf-handle-label {
+    writing-mode: horizontal-tb;
+  }
+
+  /* No file drags on touch, and the pad would sit on top of the composer anyway. */
+  .shelf-pad {
+    display: none;
+  }
 }

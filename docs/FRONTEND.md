@@ -1325,3 +1325,49 @@ grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它
 `protocol_error` / `issue_closed` 這些帶結構化欄位的 note 會回 `null`，整列不渲染——成員啟動失敗時
 畫面上只剩一個灰燈與「已暫停：成員已離線」，原因明明就在 team 日誌裡卻看不到。現在四種 action 各給
 一句人話，其餘 note 至少顯示 `action` 與可讀欄位。
+
+## 圖片暫存托盤（跨對話，2026-09-07 加）
+
+手上有一張圖、但想給的是**另一隻** bot：以前只能先切過去再拖，因為附件托盤是每個草稿自己的
+（換 bot 就重新掛載）。現在畫面多了第三格「圖片暫存」——**不屬於任何對話**的暫存區。
+
+**位置**：`.app` grid 的第三欄。桌機在右緣（收合 38px 直立握把，展開 208px），`≤1024px`
+變成底部一條橫向捲動的托盤（`grid-template-rows: 1fr auto`）。是 grid 的一格、不是浮動面板，
+所以永遠不會蓋住訊息或輸入框。元件 `<ImageShelf />` 掛在 `App.tsx` 的 `main` **外面**，
+換 bot / project / team 都不會 unmount，圖片自然跨得過去。收 / 展記在 `localStorage`
+（`am.shelf.open`）——只有這個版面偏好會存，圖片不存。
+
+**狀態**：`store/shelf.ts` 自己一個 zustand store（`useShelf`），刻意不進主 store：主 store
+會把草稿鏡射到 localStorage、`refreshState` 會整批換掉 slice，`File` 與 object URL 兩者都撐不過。
+每張是 `{ key, file, name, size, url }`，`url` 是 `createObjectURL`，移除 / 清空時 revoke；
+重新整理頁面就空了（daemon 不知道有這一層）。單檔 12 MB（`MAX_BYTES`，與 `attach::MAX_BYTES`
+同一個數字，現在由 `shelf.ts` 擁有、`Attachments.tsx` 反過來 import），張數上限 24
+（`SHELF_MAX`，暫存區會一直活著，需要一條記憶體護欄）。
+
+**進**：拖到暫存區、暫存區自己的 ＋ 檔案選擇器（手機唯一入口）、暫存區內有 focus 時貼上。
+**這三條路都只 cache、不上傳**——附件 id 綁收件 bot 的 project（`attach::resolve`），
+先上傳給誰都是錯的。
+
+**出**（上傳就發生在這一刻，對著使用者真的選的那隻 bot）：
+
+- **點一下縮圖** → 進「目前這個對話」的附件托盤。哪個對話算目前的，由掛著的
+  `ChatPanel` / `GroupChatPanel` 用 `useShelfSink(files.add, 名稱)` 註冊到 shelf store；
+  ChatPanel 在終端分頁時不註冊（那時托盤不在畫面上，圖會像憑空消失）。沒有 sink（Team 面板、
+  還沒選 bot）時給一則 notice，不會默默吞掉。
+- **拖進對話**（桌機）：item `draggable`，`dataTransfer` 只帶自訂 mime
+  `application/x-am-shelf`（值是 shelf key）。`useDropTarget` 認這個 type，drop 時用 key
+  回 shelf 取 `File` 再走原本的 `files.add`——所以兩個 panel 的 drop 接線一行都沒改。
+- **鍵盤**：卡片是 `<button>`，Enter / Space 放進目前對話，Delete / Backspace 移除。
+
+**複製語意，不是搬移**：放進對話後暫存區仍留著（同一張截圖常要餵好幾隻 bot），只在卡片上閃
+一下綠色「已放入」。要清掉自己按 × 或標題列的 ✕。誤觸不會弄丟圖。
+
+**收合時的 drop pad**：38px 的握把在拖著檔案時根本瞄不到，所以偵測到視窗上有檔案拖曳
+（window 層的 `dragenter`/`dragleave` 計數）就在握把旁浮出一塊虛線 pad。它是 `position: absolute`
+——把 grid 欄位撐寬會在指標底下 reflow 整個對話區。手機沒有檔案拖曳，那塊直接 `display: none`。
+
+**驗收**（真 daemon，headless Chrome 走完整條路）：兩張圖 drop 進暫存 → 開 bot A 點第一張
+（tray 出現、上傳完成、暫存**仍是 2 張**）→ 換 bot B（暫存還在、B 的 tray 是空的）→ 從暫存
+拖第二張進 B 的對話（`dataTransfer` 只有 `application/x-am-shelf`，key=s2，上傳成功）→
+卡片 focus 後 Enter 再放一張、Delete 移除一張 → 淺色、收合握把、拖曳中的 pad → 390px
+手機底部托盤（點一下放進對話）與收合列。
