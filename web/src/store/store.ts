@@ -32,7 +32,10 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
+import { acceptStateSeq, singleFlight } from './singleFlight'
+import { botStatusConnTarget } from './botStatusConn'
 import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
@@ -195,6 +198,11 @@ export interface Notice {
   id: number
   kind: 'error' | 'info'
   text: string
+  /**
+   * 一個可以按的動作（目前只有刪除 bot 之後的「復原」）。撤銷放在通知上而不是另開一個
+   * 面板：誤刪的當下人就在看那則通知，多開一層反而更遠。
+   */
+  action?: { label: string; run: () => void | Promise<void> }
 }
 
 /** WS `turn_progress` (API.md v3.9): the partial reply of an in-flight turn. */
@@ -259,8 +267,12 @@ interface StoreState {
   mem: MemSnapshot | null
   /** v4.0: `GET /api/quota` + WS `quota_updated`; key = kind or `kind:identity`. */
   quota: QuotaMap
-  /** v4.0: `GET /api/models` cache, keyed `kind@host`; null = fetch failed (use static list). */
-  models: Record<string, ModelInfo[] | null>
+  /** v4.0: `GET /api/models` cache, keyed `kind@host@identity`; null = fetch failed (use static list). */
+  models: ModelsCache
+  /** issue #26: when a `models[key]` fetch last failed; retried after `MODELS_RETRY_MS`. */
+  modelsFailedAt: Record<string, number>
+  /** Forget every cached model list for `host` (the host came back / tools were re-detected). */
+  dropHostModels: (host: string) => void
   kindDisplay: KindDisplay
   /** The "host is missing <kind>" banner, closed for this page load. */
   toolHintDismissed: boolean
@@ -317,7 +329,8 @@ interface StoreState {
    */
   teamsSupported: boolean
   /** TeamLaunchPanel（右側暫時性 sheet）；null = 未開啟。 */
-  teamLaunch: { projectId: string; issueNumber: number } | null
+  teamLaunch: { projectId: string; issueNumber: number; repo: string } | null
+
   /**
    * 非 null = 主面板顯示 `HostShellPanel`（與上面每一個選取互斥，而且優先）。
    *
@@ -330,7 +343,6 @@ interface StoreState {
    * 「開 shell」的入口從此靜默消失（docs/FRONTEND.md §8）。
    */
   hostShellSupported: boolean
-
 
   selectedBotId: string | null
   rightTab: RightTab
@@ -364,12 +376,14 @@ interface StoreState {
   requestOpenBotSheet: (projectId: string) => void
   clearOpenBotSheet: () => void
   loadMessages: (botId: string) => Promise<void>
-  notify: (kind: Notice['kind'], text: string) => void
+  notify: (kind: Notice['kind'], text: string, action?: Notice['action']) => void
   dismiss: (id: number) => void
 
   startBot: (botId: string) => Promise<void>
   stopBot: (botId: string) => Promise<void>
   interruptBot: (botId: string) => Promise<void>
+  /** 強制結束目前回合（送不送得出 `esc` 都解鎖）。 */
+  abortBot: (botId: string) => Promise<void>
   /**
    * 對正在跑的 bot 送 `/login`，讓它的 TUI 進入登入 / 切換帳號流程。
    * `true` = 已經送進去（agent 現在停在登入畫面）；`false` = 沒送出，原因已經跳通知。
@@ -394,22 +408,24 @@ interface StoreState {
   removeBot: (botId: string) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
+
   /**
    * 在某台主機開一個 shell 並切到 `HostShellPanel`。已經有活著的就接回**最新那個**，
    * 不再多開：按第二次「開 shell」想看的是剛剛那個，不是一個空白的新終端。
    * false = 沒開起來（原因已經跳通知，或這版 daemon 沒有這個功能）。
    */
   openHostShell: (host: string, cwd?: string) => Promise<boolean>
+  /** 切到一個**已經開著**的 shell（環境設定裡的清單點回去用），不打 API、不新開。 */
+  viewHostShell: (shell: HostShell) => void
   /** 只關掉面板，shell 留著（回來還接得回去）。 */
   closeShellView: () => void
   /** 真的結束這個 shell（`DELETE …/shells/:pane_id`）並關掉面板。 */
   endHostShell: (host: string, paneId: string) => Promise<void>
 
-
   // v4.0
   loadQuota: () => Promise<void>
   loadMem: () => Promise<void>
-  loadModels: (kind: BotKind, host: string) => Promise<ModelInfo[] | null>
+  loadModels: (kind: BotKind, host: string, identity?: string | null) => Promise<ModelInfo[] | null>
   /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
   /** v4.0: re-run CLI + per-identity login detection on one host (`''` / `local` = this machine). */
@@ -432,7 +448,7 @@ interface StoreState {
   /** 載入 `GET /teams/:id` + `/events` + 該專案的合併時間軸。 */
   loadTeam: (teamId: string) => Promise<void>
   /** IssuesBar 的「組隊」：開啟 TeamLaunchPanel。 */
-  openTeamLaunch: (projectId: string, issueNumber: number) => void
+  openTeamLaunch: (projectId: string, issueNumber: number, repo?: string) => void
   closeTeamLaunch: () => void
   /** `POST /projects/:id/teams`；成功後自動 `selectTeam`。null = 失敗。 */
   createTeam: (projectId: string, input: NewTeamInput) => Promise<string | null>
@@ -514,6 +530,9 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
   return existing.filter((m) => !seen.has(m.id) && m.created_at > cutoff)
 }
 
+/** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
+let appliedStateSeq = 0
+
 export const useStore = create<StoreState>((set, get) => ({
   ready: false,
   bootError: null,
@@ -529,6 +548,7 @@ export const useStore = create<StoreState>((set, get) => ({
   quota: {},
   mem: null,
   models: {},
+  modelsFailedAt: {},
   kindDisplay: readKindDisplay(),
   toolHintDismissed: false,
   drafts: readDrafts(),
@@ -567,11 +587,12 @@ export const useStore = create<StoreState>((set, get) => ({
   notices: [],
   busy: {},
 
-  notify: (kind, text) => {
+  notify: (kind, text, action) => {
     noticeSeq += 1
     const id = noticeSeq
-    set((s) => ({ notices: [...s.notices, { id, kind, text }] }))
-    setTimeout(() => get().dismiss(id), kind === 'error' ? 8000 : 4000)
+    set((s) => ({ notices: [...s.notices, { id, kind, text, action }] }))
+    // 帶動作的通知留久一點：4 秒不夠一個人意識到自己按錯了。
+    setTimeout(() => get().dismiss(id), action ? 15000 : kind === 'error' ? 8000 : 4000)
   },
 
   dismiss: (id) => set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })),
@@ -580,6 +601,9 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       await api.session()
       await get().refreshState()
+      // 開機時還原的 team 選取要在這裡補抓細節（`refreshState` 不再幫忙載 team，issue #23）。
+      const team = get().selectedTeamId
+      if (team) await get().loadTeam(team)
       set({ ready: true, bootError: null })
     } catch (e) {
       set({ ready: false, bootError: errText(e) })
@@ -590,8 +614,13 @@ export const useStore = create<StoreState>((set, get) => ({
     void get().loadMem()
   },
 
-  async refreshState() {
+  // issue #23：single-flight + trailing——一次操作連發 N 個 frame 只換來一、兩次 `GET /api/state`，
+  // 回應也因此天生有序。`acceptStateSeq` 是額外保險，比已套用過的 `daemon_seq` 舊的快照直接丟。
+  refreshState: singleFlight(async () => {
     const st = await api.fetchState()
+    const seq = acceptStateSeq(appliedStateSeq, st.daemon_seq)
+    if (seq === null) return
+    appliedStateSeq = seq
     const runs: Record<string, Run | null> = {}
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
     set((s) => {
@@ -634,9 +663,9 @@ export const useStore = create<StoreState>((set, get) => ({
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
     const proj = get().selectedProjectId
     if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
-    const team = get().selectedTeamId
-    if (team) await get().loadTeam(team)
-  },
+    // team 細節不在這裡重抓：`selectTeam`、`team_changed`（phase 有變）與 `resync` 各自負責，
+    // 否則每次 state 刷新都多 2-3 個 team 請求，還會跟刪除賽跑（issue #23）。
+  }),
 
   selectBot: (botId) => {
     set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, shellView: null, rightTab: 'chat', settingsBotId: null })
@@ -803,6 +832,23 @@ export const useStore = create<StoreState>((set, get) => ({
   async interruptBot(botId) {
     await guarded(set, get, `intr:${botId}`, async () => {
       await api.interruptBot(botId)
+    })
+  },
+
+  /**
+   * 強制中止：不管 `esc` 送不送得出去，都把卡住的回合收掉、把輸入框解開。
+   * `esc` 沒送成功時講清楚——bot 那頭可能還在跑，只是這邊不再等它。
+   */
+  async abortBot(botId) {
+    await guarded(set, get, `abort:${botId}`, async () => {
+      const r = await api.abortBot(botId)
+      const n = r.aborted.length
+      get().notify(
+        r.keys_sent ? 'info' : 'error',
+        r.keys_sent
+          ? `已中止 ${n} 個回合`
+          : `已中止 ${n} 個回合，但 esc 送不進終端——agent 那邊可能還在跑，必要時停掉 Bot`,
+      )
     })
   },
 
@@ -1046,8 +1092,21 @@ export const useStore = create<StoreState>((set, get) => ({
     const siblings = bot ? s0.bots.filter((b) => b.project_id === bot.project_id) : []
     const i = siblings.findIndex((b) => b.id === botId)
     const next = (siblings[i + 1] ?? siblings[i - 1] ?? null)?.id ?? null
+    const name = bot?.name ?? 'Bot'
     try {
       await api.deleteBot(botId)
+      // 刪除本來就是軟的（daemon 只設 `deleted_at`，對話全留著），所以復原是真的復原，
+      // 不是重新建一個同名的空 bot。
+      get().notify('info', `已刪除 ${name}`, {
+        label: '復原',
+        run: async () => {
+          const ok = await api.restoreBot(botId)
+          if (ok) {
+            await get().refreshState()
+            get().selectBot(botId)
+          }
+        },
+      })
       set((s) => {
         const drafts = withoutKey(s.drafts, `bot:${botId}`)
         const draftCursors = withoutKey(s.draftCursors, `bot:${botId}`)
@@ -1111,18 +1170,35 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  async loadModels(kind, host) {
-    const key = `${kind}@${host || 'local'}`
+  async loadModels(kind, host, identity) {
+    // claude 的清單本身不因身份而變，但 `default_effort`（那個身份的 `settings.json`）會，
+    // 所以身份要進快取 key，否則切身份不會換到正確的「預設」提示（SPEC §17.1）。
+    const key = modelsKey(kind, host, identity)
     const cached = get().models[key]
-    if (cached !== undefined) return cached
+    // issue #26：失敗不是永久的（主機斷線、CLI 還沒裝、daemon 快取沒暖），
+    // null 只擋 MODELS_RETRY_MS，之後再開面板就會重打。
+    if (!shouldFetchModels(cached, get().modelsFailedAt[key], Date.now())) return cached ?? null
     try {
-      const list = await api.fetchModels(kind, host)
-      set((s) => ({ models: { ...s.models, [key]: list } }))
+      const list = await api.fetchModels(kind, host, identity)
+      set((s) => {
+        const { [key]: _gone, ...failed } = s.modelsFailedAt
+        return { models: { ...s.models, [key]: list }, modelsFailedAt: failed }
+      })
       return list
     } catch {
-      set((s) => ({ models: { ...s.models, [key]: null } }))
+      set((s) => ({
+        models: { ...s.models, [key]: null },
+        modelsFailedAt: { ...s.modelsFailedAt, [key]: Date.now() },
+      }))
       return null
     }
+  },
+
+  dropHostModels(host) {
+    set((s) => ({
+      models: dropHostModels(s.models, host),
+      modelsFailedAt: dropHostModels(s.modelsFailedAt, host),
+    }))
   },
 
   async refreshTools(host) {
@@ -1140,6 +1216,8 @@ export const useStore = create<StoreState>((set, get) => ({
           ),
         }))
       }
+      // The CLI may have just been installed: let ModelPicker fetch the real list again.
+      get().dropHostModels(target)
       return true
     } catch (e) {
       get().notify('error', `重新偵測 ${host || '本機'} 失敗：${errText(e)}`)
@@ -1215,6 +1293,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   readTerminal: (botId, source, lines) => api.fetchTerminal(botId, source, lines),
+
   // ------------------------------------------------------- 主機 shell
 
   async openHostShell(host, cwd) {
@@ -1246,6 +1325,16 @@ export const useStore = create<StoreState>((set, get) => ({
     return ok
   },
 
+  viewHostShell: (shell) =>
+    set({
+      shellView: { host: shell.host, paneId: shell.pane_id, cwd: shell.cwd },
+      selectedBotId: null,
+      selectedProjectId: null,
+      selectedTeamId: null,
+      teamLaunch: null,
+      settingsBotId: null,
+    }),
+
   closeShellView: () => set({ shellView: null }),
 
   async endHostShell(host, paneId) {
@@ -1256,7 +1345,6 @@ export const useStore = create<StoreState>((set, get) => ({
       )
     })
   },
-
 
   // ------------------------------------------------------------ SPEC-team
 
@@ -1580,6 +1668,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (!isRec(data)) return
       const name = str(pick(data, 'name', 'host'))
       if (!name) return
+      // issue #26: a host that just came back may now answer `GET /api/models`.
+      const wasConnected = name === 'local'
+        ? get().connected
+        : get().hosts.find((h) => h.name === name)?.connected ?? false
+      if (!wasConnected && bool(pick(data, 'connected'), false)) get().dropHostModels(name)
       if (name === 'local') {
         // The reserved local entry maps onto `connected`, not the hosts list.
         set({
@@ -1612,15 +1705,20 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       const run = toRun(record ? (record.run ?? null) : null, botId)
       const bot = get().bots.find((b) => b.id === botId)
       const defaultSession = str(record ? pick(record, 'herdr_session') : undefined) === 'default' || bot?.herdr_session === 'default'
+      // bot_status.connected is the state of the host/session the bot lives on (#20). A remote
+      // bot must never flip the global herdr flag; it only patches its own host entry.
+      const host = str(record ? pick(record, 'host') : undefined) || projectHostName(get(), bot?.project_id ?? null)
+      const target = botStatusConnTarget({
+        connected: record && record.connected !== undefined ? bool(record.connected, true) : undefined,
+        host,
+        defaultSession,
+      })
       set((s) => ({
         runs: { ...s.runs, [botId]: run },
-        // bot_status.connected is per effective session. Keep the legacy global connected field
-        // for manager-session bots, but never let a default-session bot disconnect the whole UI.
-        ...(record && record.connected !== undefined && !defaultSession
-          ? { connected: bool(record.connected, true) }
-          : {}),
-        ...(record && record.connected !== undefined && defaultSession
-          ? { defaultConnected: bool(record.connected, s.defaultConnected) }
+        ...(target.kind === 'global' ? { connected: target.connected } : {}),
+        ...(target.kind === 'default' ? { defaultConnected: target.connected } : {}),
+        ...(target.kind === 'host'
+          ? { hosts: mergeHosts(s.hosts, [{ name: target.host, connected: target.connected }]) }
           : {}),
       }))
       return
@@ -1956,6 +2054,43 @@ export function adjacentBotId(
   // Nothing selected yet: ↓ starts at the top, ↑ at the bottom.
   if (at < 0) return dir === 1 ? ids[0] : ids[ids.length - 1]
   return ids[(at + dir + ids.length) % ids.length]
+}
+
+/**
+ * 一個 bot 身上「可以被搜到」的全部文字。
+ *
+ * 搜尋要能用你**記得的任何一件事**找到它——不只是名字。實務上你會記得的是「那個在 pt 上
+ * 跑 opus 的」「那個 reviewer」「那個標題寫著資料夾選擇的」，所以專案、主機、kind、身分、
+ * 模型、人設、agent 目前的標題全都算進去。
+ */
+export function botSearchText(state: StoreState, bot: Bot): string {
+  const project = state.projects.find((p) => p.id === bot.project_id)
+  const run = state.runs[bot.id] ?? null
+  return [
+    bot.name,
+    bot.kind,
+    bot.identity ?? '預設',
+    bot.model ?? '',
+    bot.persona ?? '',
+    run?.agent_title ?? '',
+    bot.team?.role ?? '',
+    project?.label ?? '',
+    project?.path ?? '',
+    project?.host === LOCAL_HOST ? '本機 local' : (project?.host ?? ''),
+  ]
+    .join(' ')
+    .toLowerCase()
+}
+
+/**
+ * 每個字（以空白分隔）都要命中，順序不拘：`opus pt` 找得到「pt 專案裡跑 opus 的那個」。
+ * 空字串代表沒有在搜尋，一律視為命中。
+ */
+export function botMatches(state: StoreState, bot: Bot, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return true
+  const hay = botSearchText(state, bot)
+  return terms.every((t) => hay.includes(t))
 }
 
 export function inFlightTurn(state: StoreState, botId: string): Turn | null {

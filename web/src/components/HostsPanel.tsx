@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import type { HostResult } from '../api/types'
+import { useEffect, useState } from 'react'
+import * as api from '../api'
+import type { HostResult, HostShell } from '../api/types'
 import { HOST_DEFAULTS } from '../api/types'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
@@ -69,6 +70,73 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
   )
 }
 
+/**
+ * 這台主機目前開著的 shell（`GET /api/hosts/:name/shells`）：點一下切回去（接既有的，不新開），
+ * 或直接結束。清單在列出現、面板切換、結束之後重讀；主機沒連線或這版 daemon 沒端點時不畫。
+ */
+function HostShellList({ host, connected }: { host: string; connected: boolean }) {
+  const supported = useStore((s) => s.hostShellSupported)
+  const current = useStore((s) => s.shellView)
+  const viewHostShell = useStore((s) => s.viewHostShell)
+  const endHostShell = useStore((s) => s.endHostShell)
+  const busy = useStore((s) => s.busy)
+  const opening = Boolean(busy[`shell:${host}`])
+  const [shells, setShells] = useState<HostShell[]>([])
+  const [tick, setTick] = useState(0)
+  const enabled = supported && connected
+
+  useEffect(() => {
+    if (!enabled) return
+    let alive = true
+    void api.fetchHostShells(host).then(
+      (list) => {
+        if (alive) setShells(list)
+      },
+      () => {
+        /* 讀不到就當沒有：這只是清單，開 shell 那顆按鈕自己會報錯 */
+      },
+    )
+    return () => {
+      alive = false
+    }
+  }, [enabled, host, tick, current, opening])
+
+  if (!enabled || shells.length === 0) return null
+  return (
+    <span className="host-shells">
+      {shells.map((sh) => {
+        const active = current?.host === host && current.paneId === sh.pane_id
+        const ending = Boolean(busy[`shell:${host}:${sh.pane_id}`])
+        return (
+          <span key={sh.pane_id} className={`host-shell${active ? ' active' : ''}`}>
+            <button
+              type="button"
+              className="host-shell-open mono"
+              title={`回到這個 shell（pane ${sh.pane_id}）\n${sh.cwd}`}
+              onClick={(e) => {
+                const btn = e.currentTarget
+                viewHostShell(sh)
+                closeEnclosingPopup(btn)
+              }}
+            >
+              ❯ {sh.cwd.split('/').filter(Boolean).slice(-2).join('/') || sh.cwd}
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              disabled={ending}
+              title="結束這個 shell"
+              onClick={() => void endHostShell(host, sh.pane_id).then(() => setTick((t) => t + 1))}
+            >
+              ✕
+            </button>
+          </span>
+        )
+      })}
+    </span>
+  )
+}
+
 function HostRow({ name }: { name: string }) {
   const host = useStore((s) => s.hosts.find((h) => h.name === name))
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === name).length)
@@ -102,6 +170,7 @@ function HostRow({ name }: { name: string }) {
         )}
         <ToolBadges host={host.name} tools={host.tools} />
         <GhHostStatus host={host.name} />
+        <HostShellList host={host.name} connected={host.connected} />
       </span>
       <span className="host-actions">
         <AttachButton command={host.attach_command} compact />
@@ -131,11 +200,19 @@ function HostRow({ name }: { name: string }) {
         title="刪除主機"
         body={
           <>
-            要把 <strong>{name}</strong> 從清單移除嗎？遠端的 herdr 與 agent 都不受影響，
+            要把 <strong>{name}</strong>（ssh {host.ssh}
+            {host.ssh_port !== 22 ? `:${host.ssh_port}` : ''}）從清單移除嗎？遠端的 herdr 與 agent 都不受影響，
             只是這台不再出現在 Project 的主機選項裡。
+            {projectCount > 0 ? (
+              <>
+                <br />
+                <strong>仍有 {projectCount} 個 Project 在用這台主機</strong>，需先刪除或搬走那些 Project 才能移除。
+              </>
+            ) : null}
           </>
         }
         confirmLabel="刪除主機"
+        confirmDisabled={projectCount > 0}
         danger
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => {
@@ -279,6 +356,7 @@ function LocalHostRow() {
         <span className="host-ssh">{attach}</span>
         <ToolBadges host="local" tools={tools} />
         <GhHostStatus host="local" />
+        <HostShellList host="local" connected={connected} />
       </span>
       <span className="host-actions">
         <AttachButton command={attach} compact />
