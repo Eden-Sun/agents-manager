@@ -731,6 +731,8 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '', q.get('identity') ?? '')
     if (method === 'GET' && rawPath === '/quota') return { kinds: this.quota }
     if (method === 'GET' && rawPath === '/mem') return this.mem()
+    if (method === 'GET' && rawPath === '/mem/processes') return this.memProcesses(q.get('host') ?? 'local')
+    if (method === 'POST' && rawPath === '/mem/processes/kill') return this.killMemProcess(b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
@@ -892,6 +894,92 @@ export class MockTransport implements Transport {
       this.emit('host_changed', { name: remote?.name ?? 'local', connected: true, error: null, tools })
     }, 3500)
     return { turn_id: res.turn_id }
+  }
+
+  /**
+   * SPEC §15.2：那個數字是由哪些程序組成的。固定五列，把四種 owner 都演一次——
+   * 兩個 bot（可以「停止 bot」）、兩個使用者自己開的 pane、一個讀不到環境的 unknown，
+   * 因為 popover 要證明的正是「哪些能砍」，不是數字本身。
+   */
+  private memProcesses(host: string) {
+    const live = this.bots.filter((x) => this.activeRun(x.id)).slice(0, 2)
+    const mb = (n: number) => n * 1024 * 1024
+    const rows = [
+      ...live.map((b, i) => ({
+        pid: 59400 + i,
+        ppid: 37845,
+        rss_bytes: mb(390 - i * 40),
+        exe: b.kind,
+        argv: `${b.kind} --dangerously-skip-permissions`,
+        pane_id: `w168:p${i + 1}`,
+        bot_id: b.id,
+        bot_name: b.name,
+        project_id: b.project_id,
+        owner: 'bot',
+        subtree_bytes: mb(398 - i * 40),
+        children: 2,
+      })),
+      {
+        pid: 51987,
+        ppid: 37845,
+        rss_bytes: mb(234),
+        exe: 'claude',
+        argv: 'claude --dangerously-skip-permissions',
+        pane_id: 'wM:pB',
+        bot_id: null,
+        bot_name: null,
+        project_id: null,
+        owner: 'pane',
+        subtree_bytes: mb(234),
+        children: 0,
+      },
+      {
+        pid: 1635,
+        ppid: 37845,
+        rss_bytes: mb(191),
+        exe: 'claude',
+        argv: 'claude --resume ed714d36-ba9e-4d0f-8e8d-d0bd206329d9',
+        pane_id: 'wH:pC',
+        bot_id: null,
+        bot_name: null,
+        project_id: null,
+        owner: 'pane',
+        subtree_bytes: mb(203),
+        children: 3,
+      },
+      {
+        pid: 88450,
+        ppid: 88031,
+        rss_bytes: mb(23),
+        exe: 'node',
+        argv: 'node scripts/dev-proxy.mjs',
+        pane_id: null,
+        bot_id: null,
+        bot_name: null,
+        project_id: null,
+        owner: 'unknown',
+        subtree_bytes: mb(23),
+        children: 0,
+      },
+    ].sort((a, b2) => b2.subtree_bytes - a.subtree_bytes)
+    return { host, sampled_at: new Date().toISOString(), processes: rows }
+  }
+
+  /** 照 daemon 的擋法：不在清單裡 400、bot 409；其餘就從清單上消失並推 `mem_updated`。 */
+  private killMemProcess(b: Rec) {
+    const host = typeof b.host === 'string' ? b.host : 'local'
+    const pid = typeof b.pid === 'number' ? b.pid : -1
+    const row = this.memProcesses(host).processes.find((p) => p.pid === pid)
+    if (!row) throw new ApiError(400, { error: 'bad_request', message: `pid ${pid} 不在 ${host} 的 herdr 樹裡` }, 'bad request')
+    if (row.owner === 'bot') {
+      throw new ApiError(
+        409,
+        { error: 'conflict', reason: 'bot_process', message: '這是 AG Man 的 bot，請用停止 bot' },
+        'conflict',
+      )
+    }
+    this.emit('mem_updated', this.mem())
+    return { host, pid, signal: typeof b.signal === 'string' ? b.signal : 'TERM', exe: row.exe, freed_bytes: row.subtree_bytes }
   }
 
   /**
