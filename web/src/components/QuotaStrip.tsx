@@ -367,6 +367,8 @@ function Gauge({
   collapsed,
   compact,
   focused,
+  open,
+  onOpen,
 }: {
   entry: QuotaEntry
   host: string
@@ -374,6 +376,9 @@ function Gauge({
   /** 手機：條子縮成一顆 chip，剩餘量改用數字寫出來（見 `QuotaStrip` 的 `compact`）。 */
   compact: boolean
   focused: boolean
+  /** popover 開著沒（給 `aria-expanded`）。 */
+  open: boolean
+  onOpen: () => void
 }) {
   const q = useEntryQuota(entry, host)
   const loggedOut = useLoggedOut(entry, host)
@@ -440,17 +445,35 @@ function Gauge({
     <span
       className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${off ? ' off' : ''}`}
       title={accessibleTitle}
-      aria-label={accessibleTitle}
       aria-current={focused ? 'true' : undefined}
+      // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
+      // 不放行就會一次開一次關。
+      onClick={(e) => {
+        if ((e.target as HTMLElement).closest('input, button')) return
+        onOpen()
+      }}
     >
-      <span className="quota-head" aria-hidden="true">
-        <span className="quota-kind">
+      <span className="quota-head">
+        <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
         </span>
         {entry.identity ? (
-          <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`}>{entry.identity}</span>
+          <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
+            {entry.identity}
+          </span>
         ) : null}
+        {/* 停用開關跟圖示／名稱同一直欄，貼在名稱正下方：右邊那幾條進度條的高度不變，
+            整格也就不會因為它變高。 */}
+        <StripDisableToggle entry={entry} host={host} />
       </span>
+      <button
+        type="button"
+        className="quota-bars-open"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={accessibleTitle}
+        onClick={onOpen}
+      >
       {compact ? (
         /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
            （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
@@ -479,6 +502,7 @@ function Gauge({
         })}
       </span>
       )}
+      </button>
     </span>
   )
 }
@@ -522,7 +546,8 @@ function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: stri
 }
 
 /**
- * 條上那一格身分卡下緣的停用開關——主要入口就在這裡，數字正下方，一眼看得到。
+ * 條上的停用開關——主要入口就在這裡，貼在 kind 圖示／身分名底下的同一直欄。
+ * 條子很擠，所以只留方塊本身：說明走 `aria-label`，滑過去用既有的 `.icon-tip` 泡泡。
  * popover 裡那份（`DisableToggle`）留著當詳細版，兩邊共用同一份狀態。
  */
 function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }) {
@@ -530,25 +555,23 @@ function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
-  const name = `${hostLabel(host)} · ${entryLabel(entry)}`
+  const short = entryLabel(entry)
+  const name = `${hostLabel(host)} · ${short}`
   return (
     <label
-      className={`quota-cell-toggle${off ? ' on' : ''}`}
-      title={
-        off
-          ? `${name} 已暫時停用：它底下的 Bot 收在側欄外，額度視窗 reset 後自動回來。`
-          : `暫時停用 ${name}：它底下的 Bot 先從側欄收起來，額度視窗 reset 後自動回來。`
-      }
+      className={`quota-cell-toggle icon-tip${off ? ' on' : ''}`}
+      data-tip={off ? `${short} 已停用 · 額度 reset 後自動回來` : `停用 ${short} · 底下的 Bot 先收起來`}
     >
       <input
         type="checkbox"
-        aria-label={`暫時停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`}
+        aria-label={
+          off
+            ? `解除停用 ${name}（底下的 Bot 回到側欄）`
+            : `停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`
+        }
         checked={off}
         onChange={() => setQuotaDisabled(key, !off, off ? null : nextResetOf(q, Date.now()))}
       />
-      <span className="quota-cell-toggle-text" aria-hidden="true">
-        {off ? '已停用' : '停用'}
-      </span>
     </label>
   )
 }
@@ -760,20 +783,16 @@ export function QuotaStrip({
             }
           }
           return (
-            <span className="quota-cell" key={entryReactKey(entry)}>
-              <button
-                type="button"
-                className="quota-cell-open"
-                aria-expanded={open}
-                aria-haspopup="dialog"
-                aria-label={`所有${quotaTitle(host)}`}
-                title={`所有${quotaTitle(host)}`}
-                onClick={() => setOpen((v) => !v)}
-              >
-                <Gauge entry={entry} host={host} collapsed={collapsed} compact={compact} focused={focused} />
-              </button>
-              <StripDisableToggle entry={entry} host={host} />
-            </span>
+            <Gauge
+              key={entryReactKey(entry)}
+              entry={entry}
+              host={host}
+              collapsed={collapsed}
+              compact={compact}
+              focused={focused}
+              open={open}
+              onOpen={() => setOpen((v) => !v)}
+            />
           )
         })}
         {hidden > 0 ? (
