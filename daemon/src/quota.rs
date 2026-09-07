@@ -355,6 +355,7 @@ mod tests {
             7799,
             "t".into(),
             "test".into(),
+            false,
         );
         let q = Quota {
             five_hour: Some(Window { used_pct: 10.0, resets_at: None }),

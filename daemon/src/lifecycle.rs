@@ -2506,6 +2506,7 @@ mod abort_tests {
             7799,
             "t".into(),
             "test".into(),
+            false,
         );
 
         let (pid, bid, rid, cid) = (db::ulid(), db::ulid(), db::ulid(), db::ulid());
