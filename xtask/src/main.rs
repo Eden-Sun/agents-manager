@@ -2,8 +2,10 @@
 //! (agents-managerd + the Vite dev server) as background processes.
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 fn repo_root() -> PathBuf {
     // xtask lives at <repo>/xtask, CARGO_MANIFEST_DIR is <repo>/xtask.
@@ -77,8 +79,13 @@ fn dev(root: &Path) {
         // non-localhost Origin; the daemon's anti-CSRF check rejects that unless told to allow
         // it. `agents-managerd serve` run directly stays secure-by-default — this is dev-only.
         .env("AM_ALLOW_LAN_ORIGIN", "1")
+        .stdin(Stdio::null())
         .stdout(Stdio::from(daemon_log.try_clone().unwrap()))
         .stderr(Stdio::from(daemon_log))
+        // Its own process group *and* detached stdin: without this, Ctrl-C on `cargo dev`'s
+        // terminal, or the terminal/session closing, sends SIGINT/SIGHUP to the daemon along
+        // with it, even though `cargo dev` itself already exited.
+        .process_group(0)
         .spawn()
         .expect("spawn agents-managerd");
 
@@ -86,8 +93,10 @@ fn dev(root: &Path) {
     let web = Command::new(root.join("web/node_modules/.bin/vite"))
         .arg("--host")
         .current_dir(root.join("web"))
+        .stdin(Stdio::null())
         .stdout(Stdio::from(web_log.try_clone().unwrap()))
         .stderr(Stdio::from(web_log))
+        .process_group(0)
         .spawn()
         .expect("spawn vite dev server");
 
@@ -100,6 +109,48 @@ fn dev(root: &Path) {
     println!("daemon pid={} log={}", daemon.id(), logs.join("daemon.log").display());
     println!("web    pid={} log={}", web.id(), logs.join("web.log").display());
     println!("run `cargo down` to stop both.");
+
+    println!("\nlistening:");
+    for (name, pid) in [("daemon", daemon.id()), ("web", web.id())] {
+        // The daemon does a herdr handshake before it binds, so poll instead of a fixed
+        // sleep — a flat delay long enough for that would just slow down the common case.
+        let mut lines = Vec::new();
+        for _ in 0..50 {
+            let out = Command::new("lsof")
+                .args(["-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN", "-P", "-n"])
+                .output();
+            if let Ok(o) = out {
+                if !o.stdout.is_empty() {
+                    lines = String::from_utf8_lossy(&o.stdout).lines().skip(1).map(str::to_string).collect();
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if lines.is_empty() {
+            println!("  {name}: not listening yet (check {}/{name}.log)", logs.display());
+        } else {
+            for line in lines {
+                println!("  {name}: {line}");
+            }
+        }
+    }
+
+    if let Some(url) = vite_local_url(&logs.join("web.log")) {
+        println!("\nopen: {url}");
+    }
+}
+
+/// Vite prints `➜  Local:   http://localhost:<port>/` once it's up; pull that out instead of
+/// assuming 5173, since it picks the next free port when that one's taken.
+fn vite_local_url(log: &Path) -> Option<String> {
+    let text = fs::read_to_string(log).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.split("Local:").nth(1) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
 }
 
 fn down(root: &Path) {
@@ -116,10 +167,19 @@ fn down(root: &Path) {
         // Kill the whole process group is overkill here; `cargo run` and `npm run dev`
         // both exec into the real child on macOS/Linux, so a plain kill is enough.
         let status = Command::new("kill").arg(pid.to_string()).status();
-        match status {
-            Ok(s) if s.success() => println!("stopped pid {pid}"),
-            _ => eprintln!("pid {pid} was already gone"),
+        if !matches!(status, Ok(s) if s.success()) {
+            eprintln!("pid {pid} was already gone");
+            continue;
         }
+        // Wait for it to actually exit — a following `cargo dev` binding the same port
+        // (e.g. the daemon's 7788) would otherwise race a socket the kernel hasn't freed yet.
+        for _ in 0..50 {
+            if Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| !s.success()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        println!("stopped pid {pid}");
     }
 
     fs::remove_file(&path).ok();
