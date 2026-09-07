@@ -211,7 +211,18 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
 pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     q.host = host.to_string();
     let key = quota_key(host, base);
-    app.quotas.lock().await.insert(key.clone(), q.clone());
+    let mut quotas = app.quotas.lock().await;
+    // Sources do not all know the same windows. Claude's statusLine reports 5h / 7d only and
+    // fires every few seconds while a bot is chatting, so without this it wiped the Fable
+    // reading the `/usage` probe had just made (cc1 showed 5h / 7d and no F bar while the idle
+    // accounts kept theirs). A window the new reading does not carry keeps the previous value.
+    if q.fable.is_none() {
+        if let Some(prev) = quotas.get(&key) {
+            q.fable = prev.fable.clone();
+        }
+    }
+    quotas.insert(key.clone(), q.clone());
+    drop(quotas);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": q})).await;
 }
 
@@ -274,6 +285,28 @@ pub fn spawn_codex_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_statusline_reading_keeps_the_probes_fable_window() {
+        let app = crate::team::testing::env().await.app.clone();
+        let probe = Quota {
+            five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
+            seven_day: Some(Window { used_pct: 20.0, resets_at: None }),
+            fable: Some(Window { used_pct: 66.0, resets_at: None }),
+            plan: None, updated_at: crate::db::now(), source: "claude-usage".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "claude:cc1", probe).await;
+        let status = Quota {
+            five_hour: Some(Window { used_pct: 11.0, resets_at: None }),
+            seven_day: Some(Window { used_pct: 21.0, resets_at: None }),
+            fable: None,
+            plan: None, updated_at: crate::db::now(), source: "statusline".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "claude:cc1", status).await;
+        let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "claude:cc1")).cloned().unwrap();
+        assert_eq!(got.five_hour.unwrap().used_pct, 11.0, "the fresher 5h wins");
+        assert_eq!(got.fable.unwrap().used_pct, 66.0, "the Fable window the statusLine cannot see survives");
+    }
+
     use super::*;
 
     #[test]
