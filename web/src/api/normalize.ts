@@ -751,6 +751,8 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   return {
     five_hour: toQuotaWindow(pick(v, 'five_hour', '5h')),
     seven_day: toQuotaWindow(pick(v, 'seven_day', '7d')),
+    // 舊 daemon 沒有這個欄位 → null，額度條就完全不畫 Fable 那條。
+    fable: toQuotaWindow(pick(v, 'fable')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
     host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),
