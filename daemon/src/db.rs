@@ -340,24 +340,20 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
     sqlx::query("DROP INDEX IF EXISTS projects_host_path").execute(&pool).await?;
     // SPEC §11: `path` used to be UNIQUE across every machine. The same directory can now
     // exist on several hosts, so rebuild the table with a UNIQUE(host, path) index instead.
-    // The whole rebuild must run on ONE connection: `PRAGMA foreign_keys` is per-connection.
     {
         let mut conn = pool.acquire().await?;
+        recover_stale_rebuild(&mut conn, "projects").await?;
         let projects_ddl: Option<String> =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'")
                 .fetch_optional(&mut *conn)
                 .await?;
-        let stale_rebuild: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects_new'")
-                .fetch_one(&mut *conn)
-                .await?;
         let needs_rebuild = projects_ddl.as_deref().map(|d| d.contains("path TEXT NOT NULL UNIQUE")).unwrap_or(false);
-        if needs_rebuild || stale_rebuild > 0 {
+        if needs_rebuild {
             tracing::info!("migrating projects.path UNIQUE -> UNIQUE(host, path)");
-            sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
-            sqlx::query("PRAGMA legacy_alter_table=ON").execute(&mut *conn).await?;
-            let steps: Vec<&str> = if needs_rebuild {
-                vec![
+            rebuild_table(
+                &mut conn,
+                "projects",
+                &[
                     "DROP TABLE IF EXISTS projects_new",
                     "CREATE TABLE projects_new (
                        id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
@@ -367,25 +363,91 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
                        SELECT id, path, label, host, workspace_id, deleted_at, created_at FROM projects",
                     "DROP TABLE projects",
                     "ALTER TABLE projects_new RENAME TO projects",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL",
-                ]
-            } else {
-                // A previous run died between DROP and RENAME; finish the job.
-                vec![
-                    "ALTER TABLE projects_new RENAME TO projects",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL",
-                ]
-            };
-            for stmt in steps {
-                sqlx::query(stmt).execute(&mut *conn).await.with_context(|| format!("migrate projects: {stmt}"))?;
-            }
-            sqlx::query("PRAGMA legacy_alter_table=OFF").execute(&mut *conn).await?;
-            sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
+                ],
+            )
+            .await?;
         }
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL")
+            .execute(&mut *conn)
+            .await?;
     }
     migrate_bots_kind_check(&pool).await?;
     migrate_turn_status_check(&pool).await?;
     Ok(())
+}
+
+/// Run one "rebuild the table" migration (`CREATE xxx_new` / `INSERT … SELECT` / `DROP xxx` /
+/// `ALTER xxx_new RENAME TO xxx`) as a single transaction on ONE connection.
+///
+/// Why a transaction: SQLite DDL is transactional, so the daemon can die at any point in the
+/// dance and the next start sees either the untouched old table or the finished new one —
+/// never an empty `xxx` next to a full `xxx_new` (#34). `PRAGMA foreign_keys` is a no-op
+/// inside a transaction, so both pragmas are set outside it; they are per-connection, which
+/// is why the caller must hand over the connection it inspected the schema on.
+/// `legacy_alter_table=ON` keeps the rename from rewriting the FKs of tables that reference
+/// `xxx(id)` by name, so the ids stay valid.
+async fn rebuild_table(conn: &mut sqlx::SqliteConnection, table: &str, steps: &[&str]) -> Result<()> {
+    sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
+    sqlx::query("PRAGMA legacy_alter_table=ON").execute(&mut *conn).await?;
+    let result: Result<()> = async {
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        for stmt in steps {
+            sqlx::query(stmt).execute(&mut *tx).await.with_context(|| format!("migrate {table}: {stmt}"))?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+    // Restore the pragmas even when the transaction rolled back, so a later statement on this
+    // connection does not silently run without FK enforcement.
+    sqlx::query("PRAGMA legacy_alter_table=OFF").execute(&mut *conn).await?;
+    sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
+    result
+}
+
+async fn table_exists(conn: &mut sqlx::SqliteConnection, table: &str) -> Result<bool> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+        .bind(table)
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(n > 0)
+}
+
+async fn row_count(conn: &mut sqlx::SqliteConnection, table: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}")).fetch_one(&mut *conn).await?)
+}
+
+/// Deal with a `<table>_new` scratch table left behind by a build that ran the rebuild
+/// without a transaction and died half-way (the bug in #34). By the time this runs, `SCHEMA`
+/// has already put an (empty) `<table>` back, so the rule is simply: never drop the copy
+/// that holds the data.
+///
+/// * `<table>_new` empty → it is a leftover scratch copy, drop it.
+/// * `<table>_new` has rows and `<table>` is empty → the old code died between `DROP` and
+///   `RENAME`; finish the job by swapping `<table>_new` in (in a transaction).
+/// * both have rows → something we do not understand; refuse to start rather than guess.
+async fn recover_stale_rebuild(conn: &mut sqlx::SqliteConnection, table: &str) -> Result<()> {
+    let scratch = format!("{table}_new");
+    if !table_exists(conn, &scratch).await? {
+        return Ok(());
+    }
+    let in_scratch = row_count(conn, &scratch).await?;
+    if in_scratch == 0 {
+        tracing::warn!("dropping empty scratch table {scratch} left by an interrupted migration");
+        sqlx::query(&format!("DROP TABLE {scratch}")).execute(&mut *conn).await?;
+        return Ok(());
+    }
+    let in_table = if table_exists(conn, table).await? { row_count(conn, table).await? } else { 0 };
+    if in_table > 0 {
+        anyhow::bail!(
+            "both {table} ({in_table} rows) and {scratch} ({in_scratch} rows) hold data after an \
+             interrupted migration; refusing to guess which one to keep — inspect the database by hand"
+        );
+    }
+    tracing::warn!("finishing an interrupted rebuild of {table}: swapping in {scratch} ({in_scratch} rows)");
+    let drop_old = format!("DROP TABLE IF EXISTS {table}");
+    let rename = format!("ALTER TABLE {scratch} RENAME TO {table}");
+    rebuild_table(conn, table, &[&drop_old, &rename]).await
 }
 
 /// SPEC §12: `bots.kind` gained `grok`. SQLite cannot edit a CHECK constraint, so a database
@@ -394,59 +456,48 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
 /// rename does not rewrite their FKs and the ids stay valid.
 async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
     let mut conn = pool.acquire().await?;
+    recover_stale_rebuild(&mut conn, "bots").await?;
     let ddl: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='bots'")
         .fetch_optional(&mut *conn)
         .await?;
-    let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bots_new'")
-        .fetch_one(&mut *conn)
-        .await?;
     let needs_rebuild = ddl.as_deref().map(|d| d.contains("kind IN ('claude','codex'))")).unwrap_or(false);
-    if !needs_rebuild && stale == 0 {
-        return Ok(());
+    if needs_rebuild {
+        tracing::info!("migrating bots.kind CHECK -> ('claude','codex','grok')");
+        rebuild_table(
+            &mut conn,
+            "bots",
+            &[
+                "DROP TABLE IF EXISTS bots_new",
+                "CREATE TABLE bots_new (
+                   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                   name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
+                   model TEXT,
+                   effort TEXT,
+                   fast INTEGER NOT NULL DEFAULT 0,
+                   persona TEXT,
+                   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
+                   inject_hooks INTEGER NOT NULL DEFAULT 1,
+                   auto_approve INTEGER NOT NULL DEFAULT 1,
+                   identity TEXT,
+                   env_json TEXT NOT NULL DEFAULT '{}',
+                   managed_by TEXT NOT NULL DEFAULT 'user',
+                   team_id TEXT,
+                   team_role TEXT,
+                   cwd TEXT,
+                   herdr_session TEXT,
+                   parent_bot_id TEXT,
+                   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
+                "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at)
+                   SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at FROM bots",
+                "DROP TABLE bots",
+                "ALTER TABLE bots_new RENAME TO bots",
+            ],
+        )
+        .await?;
     }
-    tracing::info!("migrating bots.kind CHECK -> ('claude','codex','grok')");
-    sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
-    sqlx::query("PRAGMA legacy_alter_table=ON").execute(&mut *conn).await?;
-    let steps: Vec<&str> = if needs_rebuild {
-        vec![
-            "DROP TABLE IF EXISTS bots_new",
-            "CREATE TABLE bots_new (
-               id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-               name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
-               model TEXT,
-               effort TEXT,
-               fast INTEGER NOT NULL DEFAULT 0,
-               persona TEXT,
-               args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
-               inject_hooks INTEGER NOT NULL DEFAULT 1,
-               auto_approve INTEGER NOT NULL DEFAULT 1,
-               identity TEXT,
-               env_json TEXT NOT NULL DEFAULT '{}',
-               managed_by TEXT NOT NULL DEFAULT 'user',
-               team_id TEXT,
-               team_role TEXT,
-               cwd TEXT,
-               herdr_session TEXT,
-               parent_bot_id TEXT,
-               hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
-            "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at)
-               SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at FROM bots",
-            "DROP TABLE bots",
-            "ALTER TABLE bots_new RENAME TO bots",
-            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
-        ]
-    } else {
-        // A previous run died between DROP and RENAME; finish the job.
-        vec![
-            "ALTER TABLE bots_new RENAME TO bots",
-            "CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL",
-        ]
-    };
-    for stmt in steps {
-        sqlx::query(stmt).execute(&mut *conn).await.with_context(|| format!("migrate bots: {stmt}"))?;
-    }
-    sqlx::query("PRAGMA legacy_alter_table=OFF").execute(&mut *conn).await?;
-    sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL")
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 
@@ -454,61 +505,50 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
 /// CHECK constraint in place, so rebuild the table once while preserving every existing row.
 async fn migrate_turn_status_check(pool: &SqlitePool) -> Result<()> {
     let mut conn = pool.acquire().await?;
+    recover_stale_rebuild(&mut conn, "turns").await?;
     let ddl: Option<String> =
         sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='turns'")
             .fetch_optional(&mut *conn)
             .await?;
-    let stale: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turns_new'")
-            .fetch_one(&mut *conn)
-            .await?;
     let needs_rebuild = ddl.as_deref().map(|d| !d.contains("status IN ('queued'")).unwrap_or(false);
-    if !needs_rebuild {
-        // A failed migration can leave a scratch table behind after the real table has
-        // already been rebuilt. It is safe to discard that empty scratch copy.
-        if stale > 0 {
-            sqlx::query("DROP TABLE IF EXISTS turns_new").execute(&mut *conn).await?;
-        }
-        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued ON turns(conversation_id) WHERE status = 'queued'")
-            .execute(&mut *conn)
-            .await?;
-        return Ok(());
+    if needs_rebuild {
+        tracing::info!("migrating turns.status CHECK to include queued prompts");
+        rebuild_table(
+            &mut conn,
+            "turns",
+            &[
+                "DROP TABLE IF EXISTS turns_new",
+                "CREATE TABLE turns_new (
+                   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                   run_id TEXT REFERENCES runs(id),
+                   origin TEXT NOT NULL CHECK (origin IN ('web','external')),
+                   status TEXT NOT NULL CHECK (status IN ('queued','in_flight','completed','completed_fallback','failed')),
+                   delivery TEXT NOT NULL DEFAULT 'pending' CHECK (delivery IN ('pending','ok','unknown','failed')),
+                   client_request_id TEXT,
+                   native_session_id TEXT, native_turn_id TEXT,
+                   team_id TEXT, team_event_id TEXT,
+                   created_at TEXT NOT NULL, completed_at TEXT, prompt_text TEXT
+                )",
+                "INSERT INTO turns_new (id, conversation_id, run_id, origin, status, delivery, client_request_id,
+                   native_session_id, native_turn_id, team_id, team_event_id, created_at, completed_at, prompt_text)
+                 SELECT id, conversation_id, run_id, origin, status, delivery, client_request_id,
+                   native_session_id, native_turn_id, team_id, team_event_id, created_at, completed_at, prompt_text
+                 FROM turns",
+                "DROP TABLE turns",
+                "ALTER TABLE turns_new RENAME TO turns",
+            ],
+        )
+        .await?;
     }
-
-    tracing::info!("migrating turns.status CHECK to include queued prompts");
-    sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
-    sqlx::query("PRAGMA legacy_alter_table=ON").execute(&mut *conn).await?;
-    let steps = [
-        "DROP TABLE IF EXISTS turns_new",
-        "CREATE TABLE turns_new (
-           id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
-           run_id TEXT REFERENCES runs(id),
-           origin TEXT NOT NULL CHECK (origin IN ('web','external')),
-           status TEXT NOT NULL CHECK (status IN ('queued','in_flight','completed','completed_fallback','failed')),
-           delivery TEXT NOT NULL DEFAULT 'pending' CHECK (delivery IN ('pending','ok','unknown','failed')),
-           client_request_id TEXT,
-           native_session_id TEXT, native_turn_id TEXT,
-           team_id TEXT, team_event_id TEXT,
-           created_at TEXT NOT NULL, completed_at TEXT, prompt_text TEXT
-        )",
-        "INSERT INTO turns_new (id, conversation_id, run_id, origin, status, delivery, client_request_id,
-           native_session_id, native_turn_id, team_id, team_event_id, created_at, completed_at, prompt_text)
-         SELECT id, conversation_id, run_id, origin, status, delivery, client_request_id,
-           native_session_id, native_turn_id, team_id, team_event_id, created_at, completed_at, prompt_text
-         FROM turns",
-        "DROP TABLE turns",
-        "ALTER TABLE turns_new RENAME TO turns",
+    for stmt in [
         "CREATE UNIQUE INDEX IF NOT EXISTS turns_one_in_flight ON turns(run_id) WHERE status = 'in_flight'",
         "CREATE UNIQUE INDEX IF NOT EXISTS turns_one_queued ON turns(conversation_id) WHERE status = 'queued'",
         "CREATE UNIQUE INDEX IF NOT EXISTS turns_client_req ON turns(conversation_id, client_request_id) WHERE client_request_id IS NOT NULL",
         "CREATE UNIQUE INDEX IF NOT EXISTS turns_native ON turns(native_session_id, native_turn_id) WHERE native_turn_id IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS turns_conv_time ON turns(conversation_id, created_at)",
-    ];
-    for stmt in steps {
+    ] {
         sqlx::query(stmt).execute(&mut *conn).await.with_context(|| format!("migrate turns: {stmt}"))?;
     }
-    sqlx::query("PRAGMA legacy_alter_table=OFF").execute(&mut *conn).await?;
-    sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -1125,6 +1165,208 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
             let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {t}")).fetch_one(&pool).await.unwrap();
             assert_eq!(n, 0);
         }
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build an `OLD_SCHEMA` file with one project / bot / conversation and `n` turns.
+    async fn old_file_with_turns(file: &std::path::Path, n: usize) {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display()))
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+        for stmt in OLD_SCHEMA.split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&pool).await.unwrap();
+            }
+        }
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','old','claude','tok',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES ('c1','b1',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for i in 0..n {
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES (?,'c1','web','completed',?)")
+                .bind(format!("t{i}"))
+                .bind(now())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+    }
+
+    /// #34: a build without the transaction could die between `DROP TABLE turns` and
+    /// `ALTER TABLE turns_new RENAME TO turns`, leaving every turn in `turns_new` and no
+    /// `turns` at all. On the next start `SCHEMA` recreates an empty `turns`; the old code
+    /// then dropped `turns_new` — all conversation history gone. The recovery must instead
+    /// swap the full scratch table back in.
+    #[tokio::test]
+    async fn a_rebuild_interrupted_between_drop_and_rename_keeps_every_turn() {
+        let dir = tmp_dir();
+        let file = dir.join("half-migrated.sqlite3");
+        old_file_with_turns(&file, 3).await;
+        {
+            // Reproduce the crash window by hand: copy `turns` into `turns_new`, drop `turns`.
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display())).unwrap();
+            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            // `turns_new` has the shape the real migration gives it (the old build got that
+            // far); the only thing missing is the RENAME.
+            sqlx::query(
+                "CREATE TABLE turns_new (
+                   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                   run_id TEXT REFERENCES runs(id),
+                   origin TEXT NOT NULL CHECK (origin IN ('web','external')),
+                   status TEXT NOT NULL CHECK (status IN ('queued','in_flight','completed','completed_fallback','failed')),
+                   delivery TEXT NOT NULL DEFAULT 'pending' CHECK (delivery IN ('pending','ok','unknown','failed')),
+                   client_request_id TEXT, native_session_id TEXT, native_turn_id TEXT,
+                   team_id TEXT, team_event_id TEXT,
+                   created_at TEXT NOT NULL, completed_at TEXT, prompt_text TEXT)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO turns_new (id, conversation_id, origin, status, created_at)
+                 SELECT id, conversation_id, origin, status, created_at FROM turns",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("DROP TABLE turns").execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+
+        let pool = open(&file).await.expect("a half-migrated database opens");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 3, "the turns that sat in turns_new were swapped back in");
+        let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='turns_new'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stale, 0, "no scratch table is left behind");
+        // The recovered table is queryable through the daemon's own accessor, and the file
+        // opens a second time without touching anything.
+        assert!(queued_turn_for_bot(&pool, "b1").await.unwrap().is_none());
+        pool.close().await;
+        let pool = open(&file).await.expect("re-open is a no-op");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 3);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same window for `projects`: the old code's "finish the job" branch renamed
+    /// `projects_new` over a `projects` that `SCHEMA` had already recreated, and the daemon
+    /// failed to start forever. Now the empty copy is the one that goes.
+    #[tokio::test]
+    async fn a_projects_rebuild_interrupted_between_drop_and_rename_still_opens() {
+        let dir = tmp_dir();
+        let file = dir.join("half-migrated-projects.sqlite3");
+        old_file_with_turns(&file, 0).await;
+        {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display())).unwrap();
+            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query("PRAGMA foreign_keys=OFF").execute(&pool).await.unwrap();
+            sqlx::query("CREATE TABLE projects_new AS SELECT * FROM projects").execute(&pool).await.unwrap();
+            sqlx::query("DROP TABLE projects").execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+        let pool = open(&file).await.expect("a half-migrated projects table does not brick the daemon");
+        let p = project(&pool, "p1").await.unwrap().expect("the project row survived");
+        assert_eq!(p.label, "p");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An *empty* leftover scratch table (the rebuild died before the INSERT) is just dropped.
+    #[tokio::test]
+    async fn an_empty_scratch_table_is_dropped() {
+        let dir = tmp_dir();
+        let file = dir.join("empty-scratch.sqlite3");
+        old_file_with_turns(&file, 2).await;
+        {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display())).unwrap();
+            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query("CREATE TABLE turns_new AS SELECT * FROM turns WHERE 0").execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+        let pool = open(&file).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 2);
+        let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='turns_new'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stale, 0);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When both the real table and the scratch copy hold rows, refuse rather than guess.
+    #[tokio::test]
+    async fn two_populated_copies_refuse_to_open() {
+        let dir = tmp_dir();
+        let file = dir.join("ambiguous.sqlite3");
+        old_file_with_turns(&file, 2).await;
+        {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display())).unwrap();
+            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            sqlx::query("CREATE TABLE turns_new AS SELECT * FROM turns").execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+        let err = match open(&file).await {
+            Ok(_) => panic!("must not pick one copy silently"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("turns_new"), "error names the scratch table: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rebuild whose middle step fails leaves the old table exactly as it was (the whole
+    /// dance is one transaction) and the connection with its pragmas restored.
+    #[tokio::test]
+    async fn a_failing_rebuild_rolls_back_and_restores_pragmas() {
+        let dir = tmp_dir();
+        let file = dir.join("rollback.sqlite3");
+        old_file_with_turns(&file, 2).await;
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display())).unwrap().foreign_keys(true);
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let err = rebuild_table(
+            &mut conn,
+            "turns",
+            &[
+                "CREATE TABLE turns_new AS SELECT * FROM turns",
+                "DROP TABLE turns",
+                "THIS IS NOT SQL",
+                "ALTER TABLE turns_new RENAME TO turns",
+            ],
+        )
+        .await
+        .expect_err("the bad statement fails the rebuild");
+        assert!(format!("{err:#}").contains("migrate turns"), "{err:#}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(n, 2, "DROP TABLE turns was rolled back");
+        let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='turns_new'")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(stale, 0, "the scratch table was rolled back too");
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys").fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(fk, 1, "foreign_keys is back on after the failure");
+        drop(conn);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

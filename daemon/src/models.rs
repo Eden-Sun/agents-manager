@@ -274,12 +274,19 @@ fn enrich_grok_models(mut models: Vec<Value>, cache_text: &str, cfg_text: &str) 
 /// `~/.grok/config.toml`'s `[models] default_reasoning_effort = "high"` — installer-written,
 /// and a fallback when `models_cache.json` has no per-model default. `grok models` itself
 /// never reports effort levels.
+///
+/// Parsed as real TOML (so `# comments`, `'single quotes'` and table scoping behave), accepting
+/// both the top-level and the `[models]` spelling; a top-level key wins over the table's.
 fn grok_default_effort_from_config(text: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("default_reasoning_effort")?.trim_start();
-        let value = rest.strip_prefix('=')?.trim().trim_matches('"');
-        (!value.is_empty()).then(|| value.to_string())
-    })
+    let doc: toml::Value = toml::from_str(text).ok()?;
+    let pick = |v: &toml::Value| {
+        v.get("default_reasoning_effort")?
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    pick(&doc).or_else(|| doc.get("models").and_then(pick))
 }
 
 /// `settings.json`'s `effortLevel` (account default) and `modelSettings.<real-id>.effortLevel`
@@ -676,6 +683,35 @@ mod tests {
         assert_eq!(m[0]["default_effort"], "high");
         assert_eq!(m[1]["efforts"], json!(["low", "medium", "high"]));
         assert_eq!(m[1]["default_effort"], "high");
+    }
+
+    #[test]
+    fn grok_config_effort_top_level_with_trailing_comment() {
+        let cfg = "default_reasoning_effort = \"high\"  # 2026-09\n";
+        assert_eq!(grok_default_effort_from_config(cfg).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn grok_config_effort_models_table_and_single_quotes() {
+        let cfg = "[models]\ndefault_reasoning_effort = 'medium' # note\n";
+        assert_eq!(grok_default_effort_from_config(cfg).as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn grok_config_effort_top_level_wins_over_models_table() {
+        let cfg = "default_reasoning_effort = \"high\"\n[models]\ndefault_reasoning_effort = \"low\"\n";
+        assert_eq!(grok_default_effort_from_config(cfg).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn grok_config_effort_ignores_other_tables_and_junk() {
+        // A same-named key under an unrelated table is not the global default.
+        let cfg = "[models.\"grok-4.5\"]\ndefault_reasoning_effort = \"low\"\n";
+        assert_eq!(grok_default_effort_from_config(cfg), None);
+        assert_eq!(grok_default_effort_from_config("default_reasoning_effort = \"\"\n"), None);
+        assert_eq!(grok_default_effort_from_config("default_reasoning_effort = 3\n"), None);
+        assert_eq!(grok_default_effort_from_config("not toml = = =\n"), None);
+        assert_eq!(grok_default_effort_from_config(""), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! `agents-managerd statusline --bot <id> --token <t> --port <p>` — Claude Code's statusLine
+//! `agents-managerd statusline --bot <id> --port <p>` (token via `$AM_HOOK_TOKEN`) — Claude Code's statusLine
 //! command for daemon-started claude bots (v4.0).
 //!
 //! Claude Code pipes a JSON object (`rate_limits`, `model`, `context_window`, `session_id`,
@@ -60,7 +60,7 @@ fn inner(args: StatuslineArgs) {
         } else {
             std::env::var("AM_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(7788)
         };
-        let token = args.token.clone();
+        let token = crate::hook_cmd::hook_token(&args.token);
         std::thread::spawn(move || post(&body, &token, port, deadline))
     });
 
