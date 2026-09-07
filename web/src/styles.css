@@ -8771,6 +8771,16 @@ button.run-debug-toggle:hover {
 /* 專案標題列的鍵在卡片最上緣，往上開的泡泡會被 `.sidebar-scroll` 裁掉（見上面那條
    `overflow-x: hidden`）——第一張卡片尤其明顯，泡泡只露出半截。改成往下開、靠右對齊，
    泡泡就落在卡片內部，不會被捲動容器的上緣切到。 */
+
+/* 往下開之後泡泡會蓋到第一列 bot，而 `.bot-actions` 是 `position: absolute; z-index: 1`
+   加不透明底色（`--bg-panel`）——跟這排的 `z-index: 1` 平手，DOM 在後面就贏，於是泡泡
+   右半截被那塊底色蓋掉，看起來像文字被裁了。泡泡自己的 `z-index: 40` 救不了：這排有
+   `z-index` 又是 positioned，本身就是一個 stacking context，40 只在裡面有效。把整排抬到
+   bot 列之上，泡泡（跟 `⋯` 的選單）才能整個蓋在下面的列上。 */
+.project-head-actions {
+  z-index: 3;
+}
+
 .project-head-actions .icon-tip[data-tip]::after {
   left: auto;
   right: 0;
