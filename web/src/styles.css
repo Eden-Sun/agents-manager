@@ -945,62 +945,13 @@ button:disabled {
   font-size: 10.5px;
 }
 
-.bot-row.compact .bot-actions {
-  display: flex;
-  align-items: center;
-  grid: none;
-  top: 0;
-  bottom: 0;
-  right: 0;
-  height: auto;
-  transform: none;
-  padding: 0 4px 0 16px;
-  background: transparent;
-}
-
-.bot-row.compact:hover:not(.selected) .bot-actions,
-.bot-row.compact:focus-within:not(.selected) .bot-actions {
-  background: linear-gradient(to right, transparent, var(--bg-hover) 14px);
-}
-
-.bot-row.compact.selected:hover .bot-actions,
-.bot-row.compact.selected:focus-within .bot-actions,
-.bot-row.compact.confirming .bot-actions {
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%) 14px
-  );
-}
-
-.bot-row.compact .bot-actions .menu-btn {
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
-  min-height: 28px;
+.bot-row.compact .bot-actions .menu-btn,
+.bot-row.compact .bot-actions .head-menu-btn {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
   border-radius: 6px;
-}
-
-/* 子列比父列矮，常駐 2×2 鍵會把名字吃掉。選取中也只在 hover 才浮出來。 */
-.bot-row.compact.selected:has(.bot-actions) .bot-main {
-  padding-right: 0;
-}
-
-.bot-row.compact.selected .bot-actions .icon-btn {
-  opacity: 0;
-}
-
-.bot-row.compact.selected:hover .bot-actions .icon-btn,
-.bot-row.compact.selected:focus-within .bot-actions .icon-btn,
-.bot-row.compact.confirming .bot-actions .icon-btn {
-  opacity: 1;
-}
-
-/* hover 時徽章讓位給按鍵，避免 cc1 跟齒輪疊在一起。 */
-.bot-row.compact:hover .bot-sub,
-.bot-row.compact:focus-within .bot-sub,
-.bot-row.compact.confirming .bot-sub {
-  opacity: 0;
 }
 
 /* 32px 列高，往上開的泡泡會蓋到上一列（截圖裡 rspec 身上那顆白「設定」）。改開左邊。 */
@@ -1391,126 +1342,26 @@ button:disabled {
 }
 
 /*
- * 這一排操作鍵本來只是 `opacity: 0`：看不見，卻照樣佔著每一列尾端 62px——四分之一的列寬。
- * 名字與徽章被擠掉的寬度，全是被它吃走的（`grok-4.6 · 中` 就差這幾 px 被截）。改成疊在列上
- * （跟 `.project-head-actions` 同一套做法），背後補一段漸層，浮出來時蓋住的那一小截才會
- * 看起來像「被蓋住」而不是「被切斷」。
+ * 這一排收成一顆 `⋯`（BotRowMenu）之後就不再疊在名字上，也不用 hover 才浮出來：
+ * 固定一格，任何側欄寬度與觸控裝置都是同一套排法（原本 overlay + `@media (hover: none)`
+ * 兩份規則，寬度一變就有一邊壞掉）。
  */
 .bot-actions {
-  position: absolute;
-  right: 6px;
-  /* 貼齊第一行（名字那行），不再整列垂直置中：2×2 的第二排正好壓在身份／模型徽章上，
-     看起來就像按鍵「換行」掉到第二行跟 tag 擠成一團。高度只蓋第一行，第二行整條讓給徽章。 */
-  top: 4px;
-  height: 22px;
-  transform: none;
-  /* 一排、不換行。格子仍是寫死的（見 `.act-*`），所以啟動鍵出現／消失時其他三顆不會位移：
-     它的格子排在最左邊，沒有它時那格塌成 0，右邊三顆相對右緣的位置不動。 */
-  display: grid;
-  grid-template-columns: repeat(4, auto);
-  grid-template-rows: 1fr;
-  align-items: stretch;
-  gap: 0;
+  position: static;
+  display: flex;
+  align-items: center;
   flex: none;
-  white-space: nowrap;
-  /* 純色，不做漸層淡出：那層 fade 會把底下的徽章糊掉一段，看起來像陰影。
-     `padding-left: 0` 一併拿掉——那 20px 只是為了讓漸層有地方淡。 */
-  padding-left: 0;
-  background: var(--bg-panel);
-  pointer-events: none;
-  z-index: 1;
-}
-
-/* 按鍵自己的淡入淡出照舊（見下面的 opacity 規則）；這裡只管「浮出來時能不能點」。 */
-.bot-row:hover .bot-actions,
-.bot-row:focus-within .bot-actions,
-.bot-row.selected .bot-actions,
-.bot-row.confirming .bot-actions {
+  transform: none;
+  padding: 0;
+  background: none;
   pointer-events: auto;
 }
 
-.bot-row:hover:not(.selected) .bot-actions {
-  background: var(--bg-hover);
-}
 
-.bot-row.selected .bot-actions {
-  background: var(--bg-active);
-}
-
-/* 選取＋hover 的列有自己的混色底；這排按鍵縮成一行之後，少了這條就是名字旁邊
-   多出一塊比整列暗的長方形。 */
-.bot-row.selected:hover .bot-actions {
-  background: color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%);
-}
-
-/* 選取中的那一列，操作鍵是常駐的——所以這一列（也只有這一列）照舊把寬度讓出來。
-   讓位的是名字那行（按鍵就疊在它上面）：撐不下時名字自己 ellipsis，不會把按鍵擠掉。
-   徽章與 agent 標題那兩行拿回整列寬度。停止中的列多一顆啟動鍵，多讓 32px。
-   `:has` 是必要的：team 成員列也用 `.bot-row`，但它沒有那排按鍵，讓寬度只是白讓。 */
-.bot-row.selected:not(.compact):has(.bot-actions) .bot-ident {
-  padding-right: 100px;
-}
-
-.bot-row.selected:not(.compact):has(.act-run) .bot-ident {
-  padding-right: 132px;
-}
-
-@media (hover: none) {
-  /* 沒有 hover 的裝置上這排永遠顯示，疊著就會擋住名字：回到原本佔位的排法。 */
-  .bot-actions {
-    position: static;
-    height: auto;
-    transform: none;
-    padding-left: 0;
-    background: none;
-    pointer-events: auto;
-  }
-
-  /* 排進版面之後不必再壓成一行的高度，點擊區回到 32px（觸控沒有 hover，這排永遠在）。 */
-  .bot-actions .menu-btn {
-    height: 32px;
-    min-height: 32px;
-  }
-
-  .bot-row.selected:not(.compact):has(.bot-actions) .bot-ident,
-  .bot-row.selected:not(.compact):has(.act-run) .bot-ident {
-    padding-right: 0;
-  }
-}
-
-/* 固定格位：啟動（執行中時空著，那格塌成 0）、分身、設定、刪除。
-   讀序的最後一格留給唯一不可逆的操作。 */
-.bot-actions .act-run {
-  grid-area: 1 / 1;
-}
-.bot-actions .act-clone {
-  grid-area: 1 / 2;
-}
-.bot-actions .act-gear {
-  grid-area: 1 / 3;
-}
-.bot-actions .act-del {
-  grid-area: 1 / 4;
-}
-
-.bot-actions .menu-btn {
-  /* 一排撐滿整塊，格與格之間不留縫：點擊區越大越好，而這塊區域的大小是固定的，
-     留白只是把可點面積讓給空氣。32×22，四顆並排剛好蓋住第一行的尾巴。 */
-  width: 32px;
-  height: 22px;
-  min-width: 32px;
-  min-height: 22px;
-  border-radius: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-
-/* The whole row of buttons fades in together: only on hover / focus / selection so the list
-   stays calm. `.confirming` = the stop/delete confirmation is up, which must not fade them. */
+/* `⋯` 常駐但低調：沒 hover 時淡一點，hover / focus / 選取時滿版。不做 opacity: 0——
+   看不見的按鍵在觸控裝置上等於不存在，而它現在有自己的格子，不會蓋到名字。 */
 .bot-actions .icon-btn {
-  opacity: 0;
+  opacity: 0.55;
   transition: opacity 0.12s ease;
 }
 
