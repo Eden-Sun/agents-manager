@@ -364,3 +364,16 @@
 - **代價**：設定開著時鍵盤可以 Tab 到背景去，也不再自動把焦點還給齒輪。換到的是「開著設定
   照樣能用整個 app」——包含把圖片拖進對話框。
 - 截圖：`docs/screenshots/scroll-and-overlay/`。
+
+## 側欄 Team 節點不再套一張卡（2026-09-08）
+
+- **問題**：專案已經是側欄裡的分組容器（border + radius + 底色）。Team 再畫一張卡（另一條
+  邊框、另一個圓角、另一層底色、左邊再加 accent rail），就是框中框。掃讀時外框、內框、
+  選取列三條線搶視線，成員名字被擠進更窄的一欄，跟上面的子 agent 樹也對不上。
+- **決策**：Team 節點跟子 agent 同一種語言——標題列 + 左邊一條樹，成員掛在節點下面。
+  不再有內層 border / radius / 底色。收合只靠「已收合 · N 位」那顆 pill 與字重，不另外
+  整塊上色。選取列跟 bot 列一樣：`--bg-active` + 左側 3px accent。既有 class 契約
+  （`.team-node`、`.team-node-head`、`.team-member-row`）保留。
+- **代價**：收合的 team 不再是一塊醒目的 accent 卡，掃過去可能少一個「這裡有東西」的色塊；
+  換到的是專案卡裡只剩一層框，成員列跟一般 bot、子 agent 用同一套縮排。
+- 截圖：`docs/screenshots/team-node-flat/`。
