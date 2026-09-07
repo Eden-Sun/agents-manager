@@ -15,6 +15,7 @@ mod gh_auth;
 mod github;
 mod group;
 mod herdr;
+mod herdr_shim;
 mod hook_cmd;
 mod hookrecv;
 mod hosts;

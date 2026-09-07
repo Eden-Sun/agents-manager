@@ -1343,6 +1343,12 @@ identity 沿用父的、不注入 hook（回覆走終端擷取）。同時建一
 
 子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
 
+**herdr PATH shim**（SPEC §6.5b）：daemon 在 `<bot 目錄>/bin/herdr` 放一支 `sh` 包裝腳本並放到 pane 的 `PATH` 最前面，
+把命名從「請求」變成「機制」——`herdr agent start <名稱>` 會自動補上 `$AM_AGENT_NAME-` 前綴，
+`herdr pane split` / `tab create` 會自動用 `--env` 把父的帳號（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）與
+hook 環境（`AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` / `AM_RUN_ID` / `AM_AGENT_NAME`）帶進子 pane，
+其餘子指令原樣轉發。pane env 因此多 `AM_AGENT_NAME`。子 agent 指定自己的 pane 用 herdr 注入的 `$HERDR_PANE_ID` 或 `--current`。
+
 - `GET /api/state` 的 bot 物件多 `parent_bot_id`（頂層為 `null`），`managed_by` 多一個值 `child`。
 - 子 bot 不進 config.toml；pane 消失時 daemon 把它 `deleted_at`（對話保留）。`DELETE /api/bots/{id}` 對子 bot 直接停 pane 並軟刪。
 - UI：側欄把子 bot 縮排掛在父 bot 底下。
