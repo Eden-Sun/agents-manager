@@ -134,6 +134,25 @@ export function countUnreadTurns(messages: readonly Message[], mark: ReadMark | 
   return turns.size
 }
 
+/**
+ * `message_added` 要用哪個 key 記下「這個回合完成了」。
+ *
+ * `turn_updated` 記的一定是 `turn.id`，所以這裡也必須落在同一個 key 上，`takeTurnCompletion`
+ * 才擋得住重複。訊息有 `turn_id` 就用它；沒有的話（daemon 對 assistant 訊息一律有帶，這是
+ * 防禦性的那條路）掛在這個 bot **最近**的那個回合上——ULID 的字典序就是時間序，而且
+ * `message_added` 和 `turn_updated` 誰先到都指到同一個回合。兩個 frame 都用 `turn.id` 記，
+ * 一個回合就只跳一下。
+ *
+ * 連一個回合都還不知道時才退回 `msg:<id>`：那時沒有 `turn_updated` 會來記第二次，而未讀
+ * 徽章不能因為少了一個 id 就不亮。
+ */
+export function completionKey(msg: Pick<Message, 'id' | 'turn_id'>, knownTurnIds: readonly string[]): string {
+  if (msg.turn_id) return msg.turn_id
+  let latest: string | null = null
+  for (const id of knownTurnIds) if (!latest || id > latest) latest = id
+  return latest ?? `msg:${msg.id}`
+}
+
 /** 這串訊息讀完之後的已讀標記（最後一則）。空的話回 `null`。 */
 export function markOfMessages(messages: readonly Message[]): ReadMark | null {
   let best: ReadMark | null = null
