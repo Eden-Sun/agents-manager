@@ -63,6 +63,10 @@ pub struct App {
     pub port: u16,
     pub ui_token: String,
     pub herdr_session: String,
+    /// Set only by `cargo dev` (`AM_DEV_LAN=1`): the daemon is bound to every interface for
+    /// direct LAN access, so the peer-address and Origin checks accept RFC1918 too, not just
+    /// loopback. A plain `agents-managerd serve` never sets this and stays localhost-only.
+    pub allow_lan: bool,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
 
@@ -118,6 +122,7 @@ impl App {
         port: u16,
         ui_token: String,
         herdr_session: String,
+        allow_lan: bool,
     ) -> Arc<Self> {
         let (bus, _) = broadcast::channel(1024);
         let (turn_bus, _) = broadcast::channel(1024);
@@ -132,6 +137,7 @@ impl App {
             port,
             ui_token,
             herdr_session,
+            allow_lan,
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             locks: Mutex::new(HashMap::new()),
