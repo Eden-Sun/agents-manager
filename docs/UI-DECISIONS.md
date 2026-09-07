@@ -250,3 +250,15 @@
 - **重新整理回到同一個 shell。** `shellView` 鏡射到 `am.shellView`；`bootstrap` 用
   `GET /api/hosts/:host/shells` 對一次 pane 還在不在，不在就清掉（不會停在一個讀不到的畫面）。
 - 截圖：`docs/screenshots/shell-embedded/`。
+
+---
+
+## 專案拖曳排序（2026-09-08）
+
+- **抓專案標題列拖，整個專案連同底下的 bot 一起搬。** 跟 bot 列同一套視覺（拖的變淡、落點一條 accent 線，
+  上半插前、下半插後），使用者不用學第二種手勢。
+- **順序只存瀏覽器（`am.projectOrder`），跟 `botOrder` 一樣。** 這是「我這台怎麼看」的偏好，不是專案的屬性；
+  daemon 的 `config.toml` 順序不動，別台機器各有各的。沒列到的新專案接在最後。
+- **搜尋中不能拖。** 搜尋時清單是過濾過的、沒命中的專案被藏起來，那時候拖出來的順序沒有意義。
+- **鍵盤 ↑/↓ 換 bot 走的也是這個順序**（`orderedBotIds()` 改吃 `orderedProjects()`）。
+

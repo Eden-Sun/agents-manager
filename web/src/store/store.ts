@@ -73,6 +73,7 @@ export type KindDisplay = 'icon' | 'text'
 
 const KIND_DISPLAY_KEY = 'am.kindDisplay'
 const BOT_ORDER_KEY = 'am.botOrder'
+const PROJECT_ORDER_KEY = 'am.projectOrder'
 const DRAFTS_KEY = 'am.drafts'
 const DRAFT_CURSORS_KEY = 'am.draftCursors'
 const SELECTION_KEY = 'am.selection'
@@ -228,6 +229,24 @@ function readBotOrder(): Record<string, string[]> {
     return out
   } catch {
     return {}
+  }
+}
+
+function readProjectOrder(): string[] {
+  try {
+    const raw = localStorage.getItem(PROJECT_ORDER_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeProjectOrder(order: string[]) {
+  try {
+    localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(order))
+  } catch {
+    /* storage unavailable: the order still holds for this page */
   }
 }
 
@@ -444,6 +463,8 @@ interface StoreState {
   settingsAnchor: SettingsAnchor | null
   /** 使用者拖出來的 bot 順序，key = project id（見 `botsOfProject`）。 */
   botOrder: Record<string, string[]>
+  /** 側欄專案的拖曳順序（project id），同 `botOrder` 只存瀏覽器；沒列到的接在後面。 */
+  projectOrder: string[]
   /** Sidebar consumes this to open the「新增 Bot」sheet for a project. */
   openBotSheetFor: string | null
   notices: Notice[]
@@ -465,6 +486,8 @@ interface StoreState {
   openSettings: (botId: string, anchor?: SettingsAnchor | null) => void
   /** 把 `botId` 移到 `beforeId` 之前（`beforeId = null` = 移到最後）。同專案內才有效。 */
   moveBot: (botId: string, beforeId: string | null) => void
+  /** 把專案移到 `beforeId` 之前；null = 移到最後。 */
+  moveProject: (projectId: string, beforeId: string | null) => void
   closeSettings: () => void
   /** Ask the Sidebar to open its「新增 Bot」sheet for this project. */
   requestOpenBotSheet: (projectId: string) => void
@@ -702,6 +725,7 @@ export const useStore = create<StoreState>((set, get) => ({
   settingsBotId: null,
   settingsAnchor: null,
   botOrder: readBotOrder(),
+  projectOrder: readProjectOrder(),
   openBotSheetFor: null,
   notices: [],
   busy: {},
@@ -934,6 +958,20 @@ export const useStore = create<StoreState>((set, get) => ({
       const botOrder = { ...s.botOrder, [pid]: next }
       writeBotOrder(botOrder)
       return { botOrder }
+    })
+  },
+
+  moveProject: (projectId, beforeId) => {
+    set((s) => {
+      if (projectId === beforeId || !s.projects.some((p) => p.id === projectId)) return {}
+      const current = orderedProjects(s).map((p) => p.id)
+      const rest = current.filter((id) => id !== projectId)
+      const at = beforeId === null ? rest.length : rest.indexOf(beforeId)
+      if (beforeId !== null && at < 0) return {}
+      const next = [...rest.slice(0, at), projectId, ...rest.slice(at)]
+      if (next.join() === current.join()) return {}
+      writeProjectOrder(next)
+      return { projectOrder: next }
     })
   },
 
@@ -2367,6 +2405,17 @@ export function botQuotaWarning(
 }
 
 /**
+ * 側欄的專案，套上使用者拖出來的順序；`projectOrder` 沒列到的（剛新增的）依 daemon 的順序接在後面。
+ */
+export function orderedProjects(state: { projects: Project[]; projectOrder: string[] }): Project[] {
+  if (state.projectOrder.length === 0) return state.projects
+  const rank = new Map(state.projectOrder.map((id, i) => [id, i]))
+  const known = state.projects.filter((p) => rank.has(p.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!)
+  const added = state.projects.filter((p) => !rank.has(p.id))
+  return [...known, ...added]
+}
+
+/**
  * 某個 project 的 bot，套上使用者拖曳出來的順序。`botOrder` 裡沒有的（剛新增的）
  * 依 daemon 回來的順序接在後面，所以拖過的清單不會因為新增 bot 而重排。
  */
@@ -2387,9 +2436,14 @@ export function botsOfProject(
  * Every bot id in the order the sidebar paints them: projects top to bottom, and inside each
  * the user's own drag order. This is what ↑/↓ walks — the visual order, not `bots[]`.
  */
-export function orderedBotIds(state: { projects: Project[]; bots: Bot[]; botOrder: Record<string, string[]> }): string[] {
+export function orderedBotIds(state: {
+  projects: Project[]
+  projectOrder: string[]
+  bots: Bot[]
+  botOrder: Record<string, string[]>
+}): string[] {
   const out: string[] = []
-  for (const p of state.projects) for (const b of botsOfProject(state, p.id)) out.push(b.id)
+  for (const p of orderedProjects(state)) for (const b of botsOfProject(state, p.id)) out.push(b.id)
   // A bot whose project vanished from the list would otherwise be unreachable by keyboard.
   for (const b of state.bots) if (!out.includes(b.id)) out.push(b.id)
   return out
@@ -2397,7 +2451,7 @@ export function orderedBotIds(state: { projects: Project[]; bots: Bot[]; botOrde
 
 /** The neighbour `dir` steps away, wrapping at both ends; null when there is nothing to move to. */
 export function adjacentBotId(
-  state: { projects: Project[]; bots: Bot[]; botOrder: Record<string, string[]> },
+  state: { projects: Project[]; projectOrder: string[]; bots: Bot[]; botOrder: Record<string, string[]> },
   from: string | null,
   dir: -1 | 1,
 ): string | null {
