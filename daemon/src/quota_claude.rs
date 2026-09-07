@@ -523,7 +523,21 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             // Same credentials as the default account — strip already maps cc0 → `claude`.
             continue;
         }
-        if logins.get(&id.name).map(|i| i.logged_in) == Some(Some(false)) {
+        // The login probe runs over ssh, and claude keeps some accounts' credentials in the
+        // macOS Keychain rather than in `<CLAUDE_CONFIG_DIR>/.credentials.json`. A non-login
+        // ssh session cannot read the Keychain, so `auth status` answers `loggedIn: false` for
+        // an account that works perfectly inside a herdr pane — m4p's `cc1` is exactly that.
+        // Skipping on that answer alone left the identity with no quota at all until some bot
+        // happened to push a statusLine. So the answer only gates the probe while nothing has
+        // ever contradicted it: one statusLine from a real bot under this account is proof
+        // that it *is* logged in, whatever ssh can see.
+        let ever_reported = app
+            .quotas
+            .lock()
+            .await
+            .get(&crate::quota::quota_key(host, &format!("claude:{}", id.name)))
+            .is_some_and(|q| q.source == "statusline");
+        if !ever_reported && logins.get(&id.name).map(|i| i.logged_in) == Some(Some(false)) {
             tracing::debug!(host, identity = %id.name, "identity is not logged in here; skipping its quota probe");
             continue;
         }

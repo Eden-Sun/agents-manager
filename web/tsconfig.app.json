@@ -4,7 +4,9 @@
     "target": "es2023",
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
-    "types": ["vite/client"],
+    // `node`：`src/**/*.test.ts` 用 `node:test` / `node:assert` 跑單元測試，沒有它整包
+    // build 會紅（@types/node 早就在 devDependencies 裡，只是沒被納入）。
+    "types": ["vite/client", "node"],
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 

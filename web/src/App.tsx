@@ -50,6 +50,18 @@ function Notices() {
       {notices.map((n) => (
         <div key={n.id} className={`notice ${n.kind}`}>
           <span style={{ flex: 1 }}>{n.text}</span>
+          {n.action ? (
+            <button
+              type="button"
+              className="notice-action"
+              onClick={() => {
+                void n.action?.run()
+                dismiss(n.id)
+              }}
+            >
+              {n.action.label}
+            </button>
+          ) : null}
           <button type="button" onClick={() => dismiss(n.id)} aria-label="關閉">
             ✕
           </button>

@@ -12,6 +12,11 @@ export interface ConfirmDialogProps {
   /** When set, confirm stays disabled until the input equals this string. */
   requireText?: string
   requireTextLabel?: string
+  /**
+   * Confirm stays disabled regardless of the typed text — for a delete the daemon would
+   * 409 anyway (project with an active run, host / identity still in use); the body says why.
+   */
+  confirmDisabled?: boolean
   width?: number
   onConfirm: () => void
   onCancel: () => void
@@ -30,6 +35,7 @@ export function ConfirmDialog({
   danger = false,
   requireText,
   requireTextLabel,
+  confirmDisabled = false,
   width = 360,
   onConfirm,
   onCancel,
@@ -113,7 +119,7 @@ export function ConfirmDialog({
               aria-label={requireTextLabel ?? `輸入 ${requireText}`}
               onChange={(e) => setTyped(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && matched) {
+                if (e.key === 'Enter' && matched && !confirmDisabled) {
                   e.preventDefault()
                   onConfirm()
                 }
@@ -128,7 +134,7 @@ export function ConfirmDialog({
           <button
             type="button"
             className={`btn${danger ? ' danger' : ' primary'}`}
-            disabled={!matched}
+            disabled={!matched || confirmDisabled}
             onClick={onConfirm}
           >
             {confirmLabel}

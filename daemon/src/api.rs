@@ -89,6 +89,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/turns/{id}/abandon", post(abandon_turn))
+        .route("/bots/{id}/abort", post(abort_bot))
         .route("/hosts", post(create_host))
         .route("/hosts/{name}", delete(delete_host))
         .route("/hosts/{name}/reconnect", post(reconnect_host))
@@ -105,6 +106,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/models", get(get_models))
         .route("/quota", get(get_quota))
         .route("/mem", get(get_mem))
+        .route("/search/messages", get(search_messages))
+        .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
@@ -551,6 +554,9 @@ struct CloseIssueBody {
     /// Absent = the daemon writes its own summary comment; `""` = close with no comment.
     #[serde(default)]
     comment: Option<String>,
+    /// Optional queued-issue id. Omitted keeps the legacy current-issue behaviour.
+    #[serde(default)]
+    issue_id: Option<String>,
 }
 
 /// The body is read as bytes rather than `Json<…>` because every field in it is optional:
@@ -562,13 +568,14 @@ async fn close_team_issue(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, LcError> {
-    let comment = match std::str::from_utf8(&body).unwrap_or("").trim() {
-        "" => None,
+    let (issue_id, comment) = match std::str::from_utf8(&body).unwrap_or("").trim() {
+        "" => (None, None),
         s => {
-            serde_json::from_str::<CloseIssueBody>(s).map_err(|e| LcError::Bad(format!("bad body: {e}")))?.comment
+            let b = serde_json::from_str::<CloseIssueBody>(s).map_err(|e| LcError::Bad(format!("bad body: {e}")))?;
+            (b.issue_id, b.comment)
         }
     };
-    Ok((StatusCode::OK, Json(crate::team::close_issue(&app, &id, comment).await?)).into_response())
+    Ok((StatusCode::OK, Json(crate::team::close_issue_for(&app, &id, issue_id.as_deref(), comment).await?)).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -991,6 +998,76 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
 }
 
 
+/// `POST /api/bots/:id/restore` — 把誤刪的 bot 放回來。
+///
+/// 刪除本來就是軟的（`bots.deleted_at`，對話與訊息完整留著），所以「恢復」就是把 config.toml
+/// 的條目寫回去、讓 projection 把 `deleted_at` 清掉——歷史會跟著整個回來。
+///
+/// 唯一救不回的是 bot 的工作目錄（刪除時 `purge_bot_dir` 真的砍了）：那裡面是 hook 設定與
+/// 包裝腳本，下次啟動會重新產生，所以不影響復原。
+///
+/// `managed_by = "child"` 的 bot 從來沒進過 config.toml，projection 不管它，直接清欄位。
+async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    // `db::bot` 不過濾 deleted_at，所以軟刪除的也拿得到——這裡要的就是它。
+    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.deleted_at.is_none() {
+        return Err(LcError::conflict("bot is not deleted", json!({"bot_id": id})));
+    }
+    // 名字在專案內要唯一（docs/API.md）：同名的已經被建回來時，講清楚而不是默默失敗。
+    let taken: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL AND id <> ?",
+    )
+    .bind(&bot.project_id)
+    .bind(&bot.name)
+    .bind(&id)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(any_err)?;
+    if let Some(other) = taken {
+        return Err(LcError::conflict(
+            "bot name already in use in this project",
+            json!({"bot_id": id, "name": bot.name, "taken_by": other}),
+        ));
+    }
+    if bot.managed_by == "child" {
+        sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
+    } else {
+        let entry = crate::config::BotCfg {
+            id: Some(bot.id.clone()),
+            name: bot.name.clone(),
+            kind: bot.kind.clone(),
+            model: bot.model.clone(),
+            effort: bot.effort.clone(),
+            fast: bot.fast != 0,
+            persona: bot.persona.clone(),
+            args: serde_json::from_str(&bot.args_json).unwrap_or_default(),
+            autostart: bot.autostart != 0,
+            inject_hooks: bot.inject_hooks != 0,
+            auto_approve: bot.auto_approve != 0,
+            identity: bot.identity.clone(),
+            env: serde_json::from_str(&bot.env_json).unwrap_or_default(),
+            herdr_session: None,
+        };
+        let pid = bot.project_id.clone();
+        app.cfg
+            .update(move |cfg| {
+                let Some(p) = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) else {
+                    anyhow::bail!("the project this bot belonged to is gone")
+                };
+                if !p.bots.iter().any(|b| b.id.as_deref() == Some(entry.id.as_deref().unwrap_or_default())) {
+                    p.bots.push(entry.clone());
+                }
+                Ok(())
+            })
+            .await
+            .map_err(any_err)?;
+        reproject(&app).await?;
+    }
+    app.emit("bot_changed", json!({"bot_id": id})).await;
+    app.emit("project_changed", json!({"project_id": bot.project_id})).await;
+    Ok((StatusCode::OK, Json(json!({"bot_id": id}))).into_response())
+}
+
 // ---------------------------------------------------------------- hosts (§11.6)
 
 #[derive(Deserialize)]
@@ -1068,6 +1145,75 @@ async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> R
 async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let (connected, error) = app.hosts.reconnect(&app, &name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
+}
+
+// ---------------------------------------------------------------- v4.0: tools / models / quota
+
+/// `POST /api/hosts/:name/tools/refresh` — re-run CLI detection now.
+async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    if app.hosts.get(&name).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let ht = crate::tools::detect(&app, &name).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    if let Some(conn) = app.hosts.get(&name).await {
+        crate::state::emit_host_changed(&app, &conn).await;
+    }
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "name": name,
+            "tools": ht.tools,
+            "identities": ht.identities,
+            "shell_identities": ht.shell_identities,
+            "tools_checked_at": ht.checked_at,
+        })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct InstallTool {
+    kind: String,
+    via_bot_id: String,
+}
+
+/// `POST /api/hosts/:name/tools/install` — ask a running agent on that host to install + log in.
+async fn install_tool(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Json(b): Json<InstallTool>,
+) -> Result<Response, LcError> {
+    let out = crate::tools::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
+    Ok((StatusCode::OK, Json(json!({"turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery})))
+        .into_response())
+}
+
+/// `GET /api/hosts/:name/gh` — whether `gh` on that host can talk to GitHub.
+async fn get_gh_status(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    let v = crate::gh_auth::status(&app, &name).await?;
+    Ok((StatusCode::OK, Json(v)).into_response())
+}
+
+#[derive(Default, Deserialize)]
+struct GhLoginBody {
+    mode: Option<String>,
+    user: Option<String>,
+}
+
+/// `POST /api/hosts/:name/gh/login` — auto / copy / device / switch. See API.md.
+async fn login_gh(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Json(b): Json<GhLoginBody>,
+) -> Result<Response, LcError> {
+    let v = crate::gh_auth::login(&app, &name, b.mode.as_deref(), b.user.as_deref()).await?;
+    Ok((StatusCode::OK, Json(v)).into_response())
+}
+
+/// `POST /api/hosts/:name/gh/cancel` — drop an in-flight device-flow login.
+async fn cancel_gh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    let v = crate::gh_auth::cancel(&app, &name).await?;
+    Ok((StatusCode::OK, Json(v)).into_response())
 }
 
 // ---------------------------------------------------------------- host shells
@@ -1148,75 +1294,6 @@ async fn close_host_shell(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-// ---------------------------------------------------------------- v4.0: tools / models / quota
-
-/// `POST /api/hosts/:name/tools/refresh` — re-run CLI detection now.
-async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
-    if app.hosts.get(&name).await.is_none() {
-        return Err(LcError::NotFound("host".into()));
-    }
-    let ht = crate::tools::detect(&app, &name).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
-    if let Some(conn) = app.hosts.get(&name).await {
-        crate::state::emit_host_changed(&app, &conn).await;
-    }
-    Ok((
-        StatusCode::OK,
-        Json(json!({
-            "name": name,
-            "tools": ht.tools,
-            "identities": ht.identities,
-            "shell_identities": ht.shell_identities,
-            "tools_checked_at": ht.checked_at,
-        })),
-    )
-        .into_response())
-}
-
-#[derive(Deserialize)]
-struct InstallTool {
-    kind: String,
-    via_bot_id: String,
-}
-
-/// `POST /api/hosts/:name/tools/install` — ask a running agent on that host to install + log in.
-async fn install_tool(
-    State(app): State<Arc<App>>,
-    Path(name): Path<String>,
-    Json(b): Json<InstallTool>,
-) -> Result<Response, LcError> {
-    let out = crate::tools::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
-    Ok((StatusCode::OK, Json(json!({"turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery})))
-        .into_response())
-}
-
-/// `GET /api/hosts/:name/gh` — whether `gh` on that host can talk to GitHub.
-async fn get_gh_status(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
-    let v = crate::gh_auth::status(&app, &name).await?;
-    Ok((StatusCode::OK, Json(v)).into_response())
-}
-
-#[derive(Default, Deserialize)]
-struct GhLoginBody {
-    mode: Option<String>,
-    user: Option<String>,
-}
-
-/// `POST /api/hosts/:name/gh/login` — auto / copy / device / switch. See API.md.
-async fn login_gh(
-    State(app): State<Arc<App>>,
-    Path(name): Path<String>,
-    Json(b): Json<GhLoginBody>,
-) -> Result<Response, LcError> {
-    let v = crate::gh_auth::login(&app, &name, b.mode.as_deref(), b.user.as_deref()).await?;
-    Ok((StatusCode::OK, Json(v)).into_response())
-}
-
-/// `POST /api/hosts/:name/gh/cancel` — drop an in-flight device-flow login.
-async fn cancel_gh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
-    let v = crate::gh_auth::cancel(&app, &name).await?;
-    Ok((StatusCode::OK, Json(v)).into_response())
-}
-
 #[derive(Deserialize)]
 struct ModelsQuery {
     kind: String,
@@ -1249,6 +1326,106 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
 ///
 /// `host` narrows a refresh to one host (default: `local` plus every connected remote one).
 /// The body is always the full map — one entry per host + kind (SPEC §14).
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn like_wildcards_typed_by_the_user_are_literal() {
+        assert_eq!(like_escape("100%"), r"100\%");
+        assert_eq!(like_escape("a_b"), r"a\_b");
+        assert_eq!(like_escape(r"c:\path"), r"c:\\path");
+        assert_eq!(like_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn the_snippet_is_taken_around_the_hit_not_from_the_start() {
+        let long = format!("{}命中在很後面{}", "前".repeat(80), "後".repeat(80));
+        let s = snippet_around(&long, "命中", 30);
+        assert!(s.contains("命中"), "the hit itself must be in the window: {s}");
+        assert!(s.starts_with('…'), "an elided head is marked: {s}");
+        assert!(s.chars().count() <= 34, "and the window stays small: {s}");
+    }
+
+    #[test]
+    fn a_hit_at_the_start_needs_no_leading_ellipsis() {
+        let s = snippet_around("資料夾選擇介面的問題", "資料夾", 90);
+        assert_eq!(s, "資料夾選擇介面的問題");
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `%` and `_` are LIKE wildcards and `\` is the escape we declare: a user typing any of
+/// them means the character, not the pattern.
+fn like_escape(q: &str) -> String {
+    q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// A window around the first hit, so the caller sees *why* the message matched rather than
+/// its first 80 characters. Character-based, not byte-based: the content is mostly CJK.
+fn snippet_around(content: &str, needle_lower: &str, width: usize) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let lower: Vec<char> = content.to_lowercase().chars().collect();
+    let hay: String = lower.iter().collect();
+    let at = hay.find(needle_lower).map_or(0, |b| hay[..b].chars().count());
+    let start = at.saturating_sub(width / 3);
+    let end = (start + width).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `GET /api/search/messages?q=` — which bots have said (or been told) this.
+///
+/// Plain `LIKE`, no FTS: the table is small (hundreds to low thousands of rows) and a scan
+/// measures at ~20ms, so an index and its migration would cost more than they save. Revisit
+/// if `messages` ever grows by an order of magnitude.
+async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuery>) -> Result<Json<Value>, LcError> {
+    let needle = q.q.unwrap_or_default();
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Ok(Json(json!({"q": "", "bots": []})));
+    }
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let pattern = format!("%{}%", like_escape(needle));
+    let rows: Vec<(String, i64, String)> = sqlx::query_as(
+        r#"SELECT c.bot_id, COUNT(*) AS hits,
+                  (SELECT m2.content FROM messages m2
+                     JOIN conversations c2 ON c2.id = m2.conversation_id
+                    WHERE c2.bot_id = c.bot_id AND m2.content LIKE ?1 ESCAPE '\'
+                    ORDER BY m2.created_at DESC LIMIT 1) AS newest
+             FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.content LIKE ?1 ESCAPE '\'
+            GROUP BY c.bot_id
+            ORDER BY hits DESC
+            LIMIT ?2"#,
+    )
+    .bind(&pattern)
+    .bind(limit)
+    .fetch_all(&app.db)
+    .await
+    .map_err(any_err)?;
+
+    let lower = needle.to_lowercase();
+    let bots: Vec<Value> = rows
+        .into_iter()
+        .map(|(bot_id, hits, newest)| json!({"bot_id": bot_id, "hits": hits, "snippet": snippet_around(&newest, &lower, 90)}))
+        .collect();
+    Ok(Json(json!({"q": needle, "bots": bots})))
+}
+
 /// Live RSS of every herdr process tree we can reach (SPEC §15). The poller pushes
 /// `mem_updated` when it moves; this is here for the first paint and for anyone polling.
 async fn get_mem(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
@@ -1382,6 +1559,12 @@ async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result
 async fn interrupt_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     lifecycle::interrupt_bot(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// `POST /api/bots/:id/abort` — 強制結束目前回合（送不送得出 `esc` 都解鎖）。
+async fn abort_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let out = lifecycle::abort_turns(&app, &id).await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 /// 對正在跑的 bot 送登入指令：它的 TUI 會切進登入 / 切換帳號流程（claude 與 grok 的

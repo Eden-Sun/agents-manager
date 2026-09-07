@@ -117,11 +117,11 @@ function entryLabel(entry: QuotaEntry): string {
   return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
 }
 
-function label(entry: QuotaEntry, q: KindQuota | null): string {
+function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false): string {
   const parts = [entryLabel(entry)]
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  if (five === null && seven === null) parts.push('額度尚未取得')
+  if (five === null && seven === null) parts.push(loggedOut ? '這台主機偵測不到登入，額度尚未取得' : '額度尚未取得')
   if (five !== null) parts.push(`5 小時剩餘 ${five}%`)
   if (seven !== null) {
     parts.push(entry.kind === 'grok' ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
@@ -343,6 +343,12 @@ function Gauge({
   focused: boolean
 }) {
   const q = useEntryQuota(entry, host)
+  const loggedOut = useStore((s) => {
+    const name = entry.identity
+    if (!name) return false
+    const map = host === LOCAL_HOST ? s.localIdentityStatus : (s.hosts.find((h) => h.name === host)?.identity_status ?? {})
+    return map[name]?.logged_in === false
+  })
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const now = useMinuteNow()
@@ -384,7 +390,7 @@ function Gauge({
     }
   }
   // 主機名寫進 tooltip：條上只掛得下一個小標籤，但滑過去要能確定是哪一台的數字。
-  const title = `${hostLabel(host)} · ${label(entry, q)}`
+  const title = `${hostLabel(host)} · ${label(entry, q, loggedOut)}`
   const accessibleTitle = focused ? `目前選取的 ${title}` : title
 
   return (
@@ -398,7 +404,9 @@ function Gauge({
         <span className="quota-kind">
           <KindIcon kind={entry.kind} />
         </span>
-        {entry.identity ? <span className="quota-identity">{entry.identity}</span> : null}
+        {entry.identity ? (
+          <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`}>{entry.identity}</span>
+        ) : null}
       </span>
       {compact ? (
         /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
@@ -439,6 +447,14 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
     return entry.fullKey in s.quota
   })
   const supported = QUERYABLE.includes(entry.kind)
+  // 這個身份在**這台**主機上有沒有登入。cc1 在本機是一個帳號、在 m4p 可能根本沒登入過，
+  // 所以要看 host 的 `identity_status`，不是全域那份 `[[identities]]`。
+  const loggedOut = useStore((s) => {
+    const name = entry.identity
+    if (!name) return false
+    const map = host === LOCAL_HOST ? s.localIdentityStatus : (s.hosts.find((h) => h.name === host)?.identity_status ?? {})
+    return map[name]?.logged_in === false
+  })
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
 
@@ -455,8 +471,15 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       {!supported ? (
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
       ) : !known || (five === null && seven === null) ? (
-        <p className="quota-pop-note">
-          {entry.kind === 'grok' ? '背景查詢中' : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
+        <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>
+          {/* 「偵測不到」不等於「沒登入」：登入探測走 ssh，而 claude 有些帳號的憑證放在
+              Keychain 裡，非登入 shell 讀不到，於是答 `loggedIn: false`——m4p 的 cc1 就是
+              這樣，它在 pane 裡其實好好的。所以這裡寫「偵測不到」並給出兩條路。 */}
+          {loggedOut
+            ? `${hostLabel(host)} 上偵測不到這個帳號的登入（憑證若在 Keychain 裡，ssh 探測看不到）。在那台跑一個 ${KIND_LABEL[entry.kind]} bot，它回報後就會有數字。`
+            : entry.kind === 'grok'
+              ? '背景查詢中'
+              : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
         </p>
       ) : (
         <>

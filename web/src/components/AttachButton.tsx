@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { TerminalIcon } from './Icons'
 
 /**
  * v4.0 "open in terminal": one-click copy of the host's `herdr …` attach command
@@ -69,10 +70,7 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.7" fill="none" strokeLinecap="round" />
           </svg>
         ) : (
-          <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
-            <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
-            <path d="M4.5 6l2.5 2-2.5 2M8.5 10.5h3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <TerminalIcon />
         )}
         {compact ? null : <span className="attach-label">{copied === 'ok' ? '已複製' : '在終端開啟'}</span>}
       </button>

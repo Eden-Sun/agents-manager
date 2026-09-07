@@ -1034,7 +1034,7 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
 
 ### 8.3 模型 / effort / Fast
 
-- `GET /api/models?kind=&host=` → `ModelPicker.ApiModelFields`（三種 kind 都走它）。
+- `GET /api/models?kind=&host=&identity=` → `ModelPicker.ApiModelFields`（三種 kind 都走它）。
   選模型後顯示該模型的 `efforts`；`service_tiers` 含 `priority` 才顯示 Fast 開關。
   切到無 Fast 的模型會清掉 `fast`。
 - claude 的模型是 daemon 端的靜態清單（opus / sonnet / haiku / fable），**v4.1 起帶
@@ -1047,6 +1047,29 @@ mock（`VITE_MOCK=1 npx vite --port 5186`，headless Chrome CDP 9360，1440×900
   Fast 在靜態清單不顯示（無 tiers）。
 - 截圖：`353-claude-effort.png`（`node scripts/demo-claude-effort.mjs`）。
 - `bot.fast` / `bot.persona` 貫穿 types → normalize → mock → 新增表單 → 設定面板。
+
+**「預設」提示現在會提示（v4.2，SPEC §17.1）** — claude 的 `default_effort` 不是模型內建的，
+是那個身份的 `settings.json`（`effortLevel` 全域 + per-model 覆寫），所以「預設」按鈕改身份
+要跟著換數字：
+
+- `ApiModelFields` / `ModelQuickPicker` 都吃一個 `identity?: string | null`，跟著它一起放進
+  `store.models` 的快取 key（`${kind}@${host}@${identity}`）——不放的話切身份不會重抓，會沿用
+  上一個身份的提示。四個呼叫點（`BotSettingsPanel`、`Sidebar` 新增 Bot 表單、
+  `TeamLaunchPanel`、`TeamPanel.WorkersChip`）都已經把當下選的 `identity` 傳進去；
+  `ModelQuickPicker` 直接讀 `bot.identity`（它本來就對著一個現成的 bot）。
+- tooltip 用 `defaultEffortNote(kind)` 分開講：codex / grok 寫「模型預設」，claude 寫
+  「帳號目前設定」——同一個模型換帳號會不一樣，不能講成模型內建的。旗標名稱也分開
+  （`effortFlagName`：claude 是 `--effort`，其餘是 `--reasoning-effort`）。
+- **標記不只藏在 tooltip 裡**（2026-09-07 加）：`default_effort` 對到的那顆強度按鈕上直接掛一個
+  「廠推薦」小標（`.effort-recommended`），三種 kind 共用同一段渲染邏輯，所以 codex / grok 跟
+  claude 一樣不必 hover 就看得到——不管 API/帳號設定回報的是哪一級，永遠精準標在那一顆上，不是
+  寫死某個特定等級。`ApiModelFields`（完整表單）與 `ModelQuickPicker`（標題列的緊湊版）都有。
+  截圖 `366-effort-mark-claude/codex/grok.png`（`node scripts/demo-effort-mark.mjs`）。
+- 驗收 `node scripts/demo-effort-default-hint.mjs`：不指定身份「預設（高）」→ 選 Opus 後帳號的
+  per-model 覆寫蓋過全域，變「預設（低）」→ 切到 cc1（只有全域）變「預設（中）」→ 切到 cc2
+  （什麼都沒設過）落回 claude 內建預設，仍是「預設（高）」，**不是**空白的「預設」——這點初版做
+  錯過（回 `null`），查了 claude 官方文件（`code.claude.com/docs/en/model-config`）加真機驗證
+  才發現 `high` 才是沒設定時真正會發生的事。截圖 `362`〜`365`。
 
 ### 8.4 額度列
 
@@ -1295,6 +1318,19 @@ claude `/model`、`/effort <level>`）；codex 仍要重啟。
 
 grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它的那條只會有目錄與模型。
 
+## 強制中止一個回合（2026-09-07 加）
+
+輸入框被鎖住時（回合還在跑，或上一回合送達狀態未知），那一條 `composer-lock` 除了原本的
+「放棄該回合」「中斷回覆」之外多一顆紅框的 **強制中止**：
+
+- 「中斷回覆」是請 agent 停（`POST /bots/:id/interrupt` → 送 `esc`）。`esc` 送不進去時
+  ——pane 沒了、herdr 斷線、agent 不理——那支會 502，回合仍卡在 in-flight，輸入框繼續鎖著。
+- 「強制中止」走 `POST /bots/:id/abort`（`store.abortBot`）：先解鎖，送鍵只是順帶。回應的
+  `keys_sent` 為 false 時前端用 error 色的 notice 講清楚「agent 那頭可能還在跑，必要時停掉 Bot」，
+  不會假裝什麼都好了。
+- in-flight 與 `delivery=unknown` 兩種卡法都收，所以使用者不必先按「放棄該回合」再按一次別的。
+- 按鈕在請求期間顯示「中止中…」並 disabled（`busy['abort:<botId>']`）。
+
 ## Team 成員的身分（2026-09-07 加）
 
 一個 team 常常一個角色一個帳號（分散額度），所以 `identity` 要看得見，不能只留在 tooltip：
@@ -1323,10 +1359,36 @@ grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它
 
 ### timeline 不再吞掉沒有 `text` 的 note
 
-`eventText()` 原本只認 `payload.text`，所以 `member_start_failed` / `pretrust_failed` /
+`describeEvent()`（`components/teamPanelLogic.ts`）原本只認 `payload.text`，所以 `member_start_failed` / `pretrust_failed` /
 `protocol_error` / `issue_closed` 這些帶結構化欄位的 note 會回 `null`，整列不渲染——成員啟動失敗時
 畫面上只剩一個灰燈與「已暫停：成員已離線」，原因明明就在 team 日誌裡卻看不到。現在四種 action 各給
 一句人話，其餘 note 至少顯示 `action` 與可讀欄位。
+
+## done 的 Team 追加 issue 繼續（SPEC-team §2.5，2026-09-07 加）
+
+跑完但還沒清理的 team 現場都在（`main/` 與 `reviewer/` worktree、PM 對話、整合分支），
+所以「順便把 #57 也做了」不必重新組隊。
+
+- **done 卡片**多一列 `.team-reopen-issue` 與一顆「追加 issue 繼續」：展開一個輸入框，
+  issue 號以逗號或空白分隔（`#57, 58` 也吃），送 `store.addTeamIssues`。
+- **顯示條件**是 `canReopenTeam(team, unavailable)`（`components/teamPanelLogic.ts`）：
+  `phase === 'done'` 且 `members` 裡 role `pm` 那一筆的 `deleted` 不為 true。cleanup / delete
+  會把成員軟刪除，daemon 的 `team_json` 用 `deleted` 把這件事送上來。
+- daemon 回 `409 {"reason":"team is cleaned up"}` 時記進 `store.teamReopenUnavailable[teamId]`
+  並 toast，按鈕當場收掉——那個 409 是永久的，讓使用者再按一次沒有意義。
+- 送出後 `team_changed` 把 phase 推成 `starting` → `planning`，面板自動切回進行中視圖
+  （composer 解鎖、成員 lamp 亮起）。`done` 的 composer-lock 文字也改成講這條路。
+- **`IssueQueue` 每一列**在 `state === 'done'`、`issue_closed_at` 為 null 且專案有 GitHub origin
+  時給一顆「關閉 issue」小按鈕，走跟 done 卡片同一個 `ConfirmDialog`，但帶
+  `closeTeamIssue(teamId, issue.id)` → body 的 `issue_id`（§2.5.4）。沒有它的話，reopen 之後
+  `teams.issue_number` 已經換成新 issue，上一個 issue 就再也關不掉了。
+- **timeline** 兩則新 note：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）與
+  `member_context_lost`（「PM 沒能續接先前對話，已改為新對話」）。`done → starting` 那則 phase
+  事件的 reason `reopen` 也在 `TEAM_PAUSE_LABEL` 裡翻成「使用者追加 issue」——它不是暫停原因，
+  但時間軸用同一張表翻譯 reason。
+- 單元測試 `node --test --experimental-strip-types src/components/teamPanelLogic.test.ts`（3 項）。
+  mock（`VITE_MOCK=1`）對 `done` 的 team 收下追加、推成 `starting`，1 秒後 `planning` 並補上
+  上述兩則 note 與 `next_issue` relay，整段流程看得到。
 
 ## 圖片暫存托盤（跨對話，2026-09-07 加）
 

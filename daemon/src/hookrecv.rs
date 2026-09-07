@@ -308,6 +308,39 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     })
 }
 
+/// Consume the one-shot native session request written for a reopened Team member. Claude
+/// reports its identity in `SessionStart`; Codex and Grok have no equivalent hook, so callers
+/// pass their first completed turn instead. Clearing the column before recording a mismatch
+/// makes retries idempotent and prevents duplicate timeline notes.
+async fn consume_resume_session(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    run: &db::Run,
+    reported_session_id: Option<&str>,
+) -> Result<()> {
+    let Some(expected) = run.resume_session_id.as_deref() else { return Ok(()) };
+    // A hook that carries no session id proves nothing either way (codex's notify payload does
+    // not always have `thread-id`). Leave the marker for the next hook rather than reading the
+    // silence as "the CLI opened a new conversation".
+    let Some(reported) = reported_session_id else { return Ok(()) };
+    let mismatch = reported != expected;
+    let consumed = sqlx::query("UPDATE runs SET resume_session_id = NULL WHERE id = ? AND resume_session_id IS NOT NULL")
+        .bind(&run.id)
+        .execute(&app.db)
+        .await?;
+    // A second hook may arrive with a stale in-memory `Run` snapshot. Only the request that
+    // actually cleared the marker is allowed to record the mismatch note.
+    if consumed.rows_affected() == 0 {
+        return Ok(());
+    }
+    if mismatch {
+        lifecycle::member_context_lost(app, bot, "resume_mismatch")
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    }
+    Ok(())
+}
+
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
@@ -393,7 +426,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::Identity { session_id, transcript_path } => {
-            if let Some(r) = run {
+            if let Some(r) = &run {
+                // Claude reports the native id in SessionStart. Codex and Grok are checked on
+                // their first completed turn instead; an identity-shaped hook from either
+                // provider must not consume the one-shot request early.
+                if body.provider == "claude" {
+                    consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
+                }
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(?, native_session_id),
                      transcript_path = COALESCE(?, transcript_path) WHERE id = ?",
@@ -408,6 +447,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+            // Claude's SessionStart is authoritative for its resume check. Codex and Grok
+            // identify the continued session on the first completed turn instead.
+            if body.provider == "codex" || body.provider == "grok" {
+                if let Some(r) = &run {
+                    consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
+                }
+            }
             // Backfill run identity opportunistically (Codex has no SessionStart equivalent;
             // grok's SessionStart carries no transcript path).
             if let Some(r) = &run {
@@ -757,6 +803,123 @@ mod external_claim_tests {
         assert_eq!(have, vec!["echo 1".to_string()]);
         assert!(!hook_user_is_new(&have, "echo 1"));
         assert!(hook_user_is_new(&have, "echo 2"));
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use crate::team::testing::{env, make_team, req, Env};
+
+    async fn fixture() -> (Env, db::Bot, db::Run) {
+        let e = env().await;
+        let team_id = make_team(&e.app, &e.project_id, req(Some(1), false)).await;
+        let bot = db::team_members(&e.app.db, &team_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("pm"))
+            .unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, started_at, resume_session_id)
+             VALUES (?,?,'running','idle','ws-1',?,?,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot.id)
+        .bind(format!("pane-{}", bot.id))
+        .bind(db::now())
+        .bind("native-expected")
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let run = db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap();
+        (e, bot, run)
+    }
+
+    /// A provider that reports exactly the requested native id consumes the marker without
+    /// creating a `member_context_lost` event.
+    #[tokio::test]
+    async fn matching_resume_session_id_is_accepted_once() {
+        let (e, bot, run) = fixture().await;
+        consume_resume_session(&e.app, &bot, &run, Some("native-expected"))
+            .await
+            .unwrap();
+        let remaining: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?")
+            .bind(&run.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(remaining, None);
+        let lost: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND json_extract(payload_json,'$.action')='member_context_lost'",
+        )
+        .bind(bot.team_id.as_deref().unwrap())
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(lost, 0);
+    }
+
+    /// A hook with no session id is not evidence of a new conversation. The marker survives so
+    /// the next hook — the one that does carry an id — gets to decide.
+    #[tokio::test]
+    async fn a_hook_without_a_session_id_leaves_the_request_pending() {
+        let (e, bot, run) = fixture().await;
+        consume_resume_session(&e.app, &bot, &run, None).await.unwrap();
+        let remaining: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?")
+            .bind(&run.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(remaining.as_deref(), Some("native-expected"));
+        let lost: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND json_extract(payload_json,'$.action')='member_context_lost'",
+        )
+        .bind(bot.team_id.as_deref().unwrap())
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(lost, 0);
+    }
+
+    /// A provider that ignores or misroutes the requested id is recorded once, and the user
+    /// sees the same explanation in the member conversation.
+    #[tokio::test]
+    async fn mismatching_resume_session_id_records_context_loss() {
+        let (e, bot, run) = fixture().await;
+        consume_resume_session(&e.app, &bot, &run, Some("native-other"))
+            .await
+            .unwrap();
+        // A duplicate hook can still hold the pre-consumption snapshot; the SQL guard keeps
+        // the one-shot mismatch note from appearing twice.
+        consume_resume_session(&e.app, &bot, &run, Some("native-other"))
+            .await
+            .unwrap();
+        let payload: String = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND json_extract(payload_json,'$.action')='member_context_lost'",
+        )
+        .bind(bot.team_id.as_deref().unwrap())
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["why"], "resume_mismatch");
+        let content: String = sqlx::query_scalar(
+            "SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id
+             WHERE c.bot_id=? AND m.role='system' AND m.content='沒能續接先前對話，這是新的一段'",
+        )
+        .bind(&bot.id)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(content, "沒能續接先前對話，這是新的一段");
+        let remaining: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?")
+            .bind(&run.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(remaining, None);
     }
 }
 

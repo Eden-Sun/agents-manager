@@ -708,18 +708,33 @@ pub async fn set_phase(
 ) -> LcResult<db::Team> {
     let before = load(app, team_id).await?;
     let ended_at = if is_terminal(phase) { Some(db::now()) } else { None };
-    sqlx::query(
-        "UPDATE teams SET phase = ?, pause_reason = ?, resume_phase = ?,
-           ended_at = COALESCE(?, ended_at) WHERE id = ?",
-    )
-    .bind(phase)
-    .bind(pause_reason)
-    .bind(resume_phase)
-    .bind(ended_at)
-    .bind(team_id)
-    .execute(&app.db)
-    .await
-    .map_err(any_err)?;
+    // Reopen is a transition out of a terminal phase, not a pause. Keep its audit reason in
+    // the phase event, while the row itself must remain resumable with no pause marker and no
+    // stale terminal timestamp (§2.5.2).
+    if phase == "starting" && pause_reason == Some("reopen") {
+        sqlx::query(
+            "UPDATE teams SET phase = ?, pause_reason = NULL, resume_phase = NULL,
+               ended_at = NULL WHERE id = ?",
+        )
+        .bind(phase)
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    } else {
+        sqlx::query(
+            "UPDATE teams SET phase = ?, pause_reason = ?, resume_phase = ?,
+               ended_at = COALESCE(?, ended_at) WHERE id = ?",
+        )
+        .bind(phase)
+        .bind(pause_reason)
+        .bind(resume_phase)
+        .bind(ended_at)
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    }
     record_event(
         app,
         team_id,
@@ -1140,27 +1155,102 @@ pub async fn create_with_issues(
 
 // ---------------------------------------------------------------- the issue queue (§2.3)
 
+/// Reopen uses the role choices persisted at Team creation. Validate them again before any
+/// issue is resolved or inserted: the identities/quota snapshot may have changed while the
+/// finished Team was waiting for the user.
+async fn validate_reopen_roles(app: &Arc<App>, t: &db::Team, host: &str) -> LcResult<()> {
+    let roles: Value = serde_json::from_str(&t.roles_json).unwrap_or(Value::Null);
+    let pm_spec: RoleSpec = roles
+        .get("pm")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .ok_or_else(|| LcError::Upstream("team roles_json has no pm spec".into()))?;
+    let pm = check_role(app, host, &pm_spec, "pm").await?;
+    let (_, workers) = queued_worker_role(app, t, host).await?;
+    let reviewer = match roles.get("reviewer") {
+        Some(v) if !v.is_null() => {
+            let spec: RoleSpec = serde_json::from_value(v.clone())
+                .map_err(|_| LcError::Upstream("team roles_json has an invalid reviewer spec".into()))?;
+            Some(check_role(app, host, &spec, "reviewer").await?)
+        }
+        _ => None,
+    };
+    let mut quota_roles: Vec<&CheckedRole> = vec![&pm, &workers];
+    if let Some(r) = &reviewer {
+        quota_roles.push(r);
+    }
+    check_quota(app, host, &quota_roles, Budget::from_json(&t.budget_json).quota_stop_pct).await
+}
+
 /// `POST /api/teams/:id/issues` — append to the queue of a running team.
+///
+/// SPEC-team §2.5.1: `done` is the one terminal phase that takes new issues. The site is still
+/// there (worktrees, PM/reviewer conversations, integration branch), so appending pulls the
+/// team back into the §2.3 queue instead of asking the user to build a new one. `aborted` and
+/// `failed` have no site worth continuing from and keep the old refusal.
 pub async fn add_issues(app: &Arc<App>, team_id: &str, numbers: &[i64]) -> LcResult<Value> {
     let t = load(app, team_id).await?;
-    if is_terminal(&t.phase) {
+    // Everything that can be refused without talking to GitHub is refused here, so a rejected
+    // request costs no `gh issue view` round trip and writes nothing.
+    let reopening = check_add_issues(app, &t, numbers).await?;
+    let mut resolved = Vec::with_capacity(numbers.len());
+    for n in numbers {
+        resolved.push(resolve_issue(app, &t.project_id, &t.repo, *n).await?);
+    }
+    add_resolved_issues(app, team_id, resolved, reopening).await
+}
+
+/// The GitHub-free half of [`add_issues`]: every guard, plus whether this is a §2.5 reopen.
+async fn check_add_issues(app: &Arc<App>, t: &db::Team, numbers: &[i64]) -> LcResult<bool> {
+    if is_terminal(&t.phase) && t.phase != "done" {
         return Err(LcError::conflict("team is finished", json!({"phase": t.phase})));
     }
     if numbers.is_empty() {
         return Err(LcError::Bad("issue_numbers must not be empty".into()));
     }
-    let existing = db::team_issues(&app.db, team_id).await.map_err(any_err)?;
+    let existing = db::team_issues(&app.db, &t.id).await.map_err(any_err)?;
+    let reopening = t.phase == "done";
+    if reopening {
+        // §2.5.1: "not cleaned up" is the PM member bot still being there. `cleanup` and
+        // `delete` both stamp `deleted_at`; `workspace_id` is unreliable on teams built
+        // before §6.4a, which is why the member row is the judge.
+        let members = db::team_members(&app.db, &t.id).await.map_err(any_err)?;
+        let pm_live = members.iter().any(|b| b.team_role.as_deref() == Some("pm") && b.deleted_at.is_none());
+        if !pm_live {
+            return Err(LcError::conflict("team is cleaned up", json!({"phase": t.phase})));
+        }
+        let project = db::project(&app.db, &t.project_id)
+            .await
+            .map_err(any_err)?
+            .ok_or_else(|| LcError::NotFound("project".into()))?;
+        validate_reopen_roles(app, t, &project.host).await?;
+    }
     if existing.len() + numbers.len() > MAX_QUEUED_ISSUES {
         return Err(LcError::Bad(format!("at most {MAX_QUEUED_ISSUES} issues per team")));
     }
+    // Duplicates inside the request itself count too — `[57, 57]` would otherwise queue #57
+    // twice and the second pass would never be startable.
+    if let Some(issue_number) = numbers.iter().enumerate().find_map(|(index, issue)| {
+        (numbers[..index].contains(issue) || existing.iter().any(|i| i.issue_number == *issue)).then_some(*issue)
+    }) {
+        return Err(LcError::conflict("issue already queued", json!({"issue_number": issue_number})));
+    }
+    Ok(reopening)
+}
+
+/// `add_issues` with the queue already resolved, mirroring `create` / `create_with_issues`:
+/// the whole insert + reopen path can be exercised without a GitHub round trip.
+async fn add_resolved_issues(
+    app: &Arc<App>,
+    team_id: &str,
+    resolved: Vec<IssueRef>,
+    reopening: bool,
+) -> LcResult<Value> {
+    let existing = db::team_issues(&app.db, team_id).await.map_err(any_err)?;
     let mut next_seq = existing.iter().map(|i| i.seq).max().unwrap_or(0) + 1;
     let now = db::now();
-    let mut added = Vec::new();
-    for n in numbers {
-        if existing.iter().any(|i| i.issue_number == *n) {
-            return Err(LcError::conflict("issue already queued", json!({"issue_number": n})));
-        }
-        let iss = resolve_issue(app, &t.project_id, &t.repo, *n).await?;
+    let mut added = Vec::with_capacity(resolved.len());
+    for iss in resolved {
         sqlx::query(
             "INSERT INTO team_issues (id, team_id, seq, issue_number, issue_title, issue_url, state, created_at)
              VALUES (?,?,?,?,?,?, 'queued', ?)",
@@ -1189,6 +1279,28 @@ pub async fn add_issues(app: &Arc<App>, team_id: &str, numbers: &[i64]) -> LcRes
         json!({"action": "issues_queued", "issue_numbers": added}),
     )
     .await?;
+    if reopening {
+        record_event(
+            app,
+            team_id,
+            "note",
+            None,
+            None,
+            None,
+            None,
+            json!({
+                "action": "team_reopened",
+                "by": "user",
+                "issue_numbers": added,
+                "from_phase": "done",
+            }),
+        )
+        .await?;
+        // `set_phase` clears the stale terminal timestamp and keeps `pause_reason` NULL while
+        // preserving "reopen" in the phase event for the audit log.
+        set_phase(app, team_id, "starting", Some("reopen"), None).await?;
+        spawn_scheduler(app, team_id);
+    }
     let t = load(app, team_id).await?;
     emit_team_changed(app, &t).await;
     Ok(json!({"issues": db::team_issues(&app.db, team_id).await.map_err(any_err)?.iter().map(issue_json).collect::<Vec<_>>()}))
@@ -1845,6 +1957,19 @@ pub fn close_comment(t: &db::Team, tasks: &[db::TeamTask]) -> String {
     s
 }
 
+/// The same default comment, but with the branch/summary/PR belonging to a particular queued
+/// issue rather than the scalar mirror on `teams`.
+pub fn close_comment_for_issue(t: &db::Team, issue: &db::TeamIssue, tasks: &[db::TeamTask]) -> String {
+    let mut mirror = t.clone();
+    mirror.issue_number = issue.issue_number;
+    mirror.issue_title = issue.issue_title.clone();
+    mirror.branch = issue.branch.clone().unwrap_or_else(|| t.branch.clone());
+    mirror.base_sha = issue.base_sha.clone().unwrap_or_else(|| t.base_sha.clone());
+    mirror.summary = issue.summary.clone().or_else(|| t.summary.clone());
+    mirror.pr_url = issue.pr_url.clone().or_else(|| t.pr_url.clone());
+    close_comment(&mirror, tasks)
+}
+
 fn short_sha(sha: &str) -> String {
     sha.chars().take(8).collect()
 }
@@ -1862,32 +1987,62 @@ fn short_sha(sha: &str) -> String {
 /// Already closed on GitHub (someone did it by hand, or a `deliver=pr` PR closed it) is
 /// success, not an error: the row is stamped so the offer stops being shown.
 pub async fn close_issue(app: &Arc<App>, team_id: &str, comment: Option<String>) -> LcResult<Value> {
+    close_issue_for(app, team_id, None, comment).await
+}
+
+/// Close one queued issue. `issue_id = None` preserves the original endpoint's meaning — the
+/// row mirrored by `teams.issue_number`; the IssueQueue passes an id so a finished Team can
+/// close an earlier issue without accidentally acting on the latest one.
+pub async fn close_issue_for(
+    app: &Arc<App>,
+    team_id: &str,
+    issue_id: Option<&str>,
+    comment: Option<String>,
+) -> LcResult<Value> {
     let t = load(app, team_id).await?;
-    if t.phase != "done" {
+    let target = match issue_id {
+        Some(id) => db::team_issue(&app.db, id).await.map_err(any_err)?.filter(|i| i.team_id == team_id),
+        None => db::team_issues(&app.db, team_id)
+            .await
+            .map_err(any_err)?
+            .into_iter()
+            .find(|i| i.issue_number == t.issue_number),
+    }
+    .ok_or_else(|| LcError::NotFound("issue".into()))?;
+    if target.state != "done" {
         return Err(LcError::conflict(
             "the issue can only be closed from a finished team",
-            json!({"phase": t.phase}),
+            json!({"state": target.state, "phase": t.phase}),
         ));
     }
-    if let Some(at) = &t.issue_closed_at {
+    if let Some(at) = &target.issue_closed_at {
         return Err(LcError::conflict("the issue was already closed from this team", json!({"closed_at": at})));
     }
-    let tasks = db::team_tasks(&app.db, &t.id).await.map_err(any_err)?;
+    let tasks = db::team_tasks_of_issue(&app.db, &t.id, &target.id).await.map_err(any_err)?;
     // An explicit empty string is "close it without a comment"; absent is "write the default".
     let body = match comment {
         Some(c) if c.trim().is_empty() => None,
         Some(c) => Some(c),
-        None => Some(close_comment(&t, &tasks)),
+        None => Some(close_comment_for_issue(&t, &target, &tasks)),
     };
-    let out = crate::github::close_issue(app, &t.project_id, &t.repo, t.issue_number as u64, body.as_deref()).await?;
+    let out = crate::github::close_issue(app, &t.project_id, &t.repo, target.issue_number as u64, body.as_deref()).await?;
 
     let now = db::now();
-    sqlx::query("UPDATE teams SET issue_closed_at = ? WHERE id = ?")
+    sqlx::query("UPDATE team_issues SET issue_closed_at = ? WHERE id = ?")
         .bind(&now)
-        .bind(&t.id)
+        .bind(&target.id)
         .execute(&app.db)
         .await
         .map_err(any_err)?;
+    // Keep the legacy mirror in sync only when the target is the mirrored/current issue.
+    if target.issue_number == t.issue_number {
+        sqlx::query("UPDATE teams SET issue_closed_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&t.id)
+            .execute(&app.db)
+            .await
+            .map_err(any_err)?;
+    }
     record_event(
         app,
         &t.id,
@@ -1899,7 +2054,7 @@ pub async fn close_issue(app: &Arc<App>, team_id: &str, comment: Option<String>)
         json!({
             "action": "issue_closed",
             "by": "user",
-            "number": t.issue_number,
+            "number": target.issue_number,
             "url": out.get("url").cloned().unwrap_or(Value::Null),
             "already_closed": out.get("already_closed").cloned().unwrap_or(Value::Bool(false)),
             "comment": body,
@@ -2863,8 +3018,9 @@ pub mod testing {
     /// `session.snapshot` / `agent.list` pair a reconcile runs on, plus the two calls that make
     /// a pane readable — `pane.read` (`set_screen`) and `pane.process_info` (`set_argv`), which
     /// is all an adopted, hook-less agent can be observed through. It stops there, deliberately:
-    /// `agent.start`, hook injection and `ensure_kind_installed` probing for a real CLI belong
-    /// to a live agent, and a mock that pretended otherwise would be testing itself.
+    /// `agent.start` / `agent.wait` are also covered with lightweight bookkeeping so the reopen
+    /// scheduler can exercise the real lifecycle path; hook injection and
+    /// `ensure_kind_installed` probing for a real CLI still belong to a live agent.
     ///
     /// One place it knowingly differs from herdr 0.8.2: closing a tab's last pane does **not**
     /// reap the tab here, though the real server does. That is on purpose — the daemon must
@@ -3139,7 +3295,68 @@ pub mod testing {
                                         {"pane_id": pid, "foreground_processes": []}}}),
                                     Some(argv) => json!({"id": id, "result": {"process_info": {"pane_id": pid,
                                         "foreground_processes": [{"argv": argv, "argv0": argv.first().cloned(),
-                                                                  "cwd": "/tmp/p", "pid": 1}]}}}),
+                                        "cwd": "/tmp/p", "pid": 1}]}}}),
+                                }
+                            }
+                            "agent.send_keys" => {
+                                let target = wid_of("target");
+                                let ctrl_c = params
+                                    .get("keys")
+                                    .and_then(Value::as_array)
+                                    .map(|keys| keys.iter().any(|k| k.as_str() == Some("ctrl+c")))
+                                    .unwrap_or(false);
+                                if ctrl_c {
+                                    st.agents
+                                        .lock()
+                                        .unwrap()
+                                        .retain(|a| a.get("name").and_then(Value::as_str) != Some(target.as_str()));
+                                }
+                                json!({"id": id, "result": {}})
+                            }
+                            "agent.start" => {
+                                let name = wid_of("name");
+                                let kind = wid_of("kind");
+                                let pane_id = wid_of("pane_id");
+                                let args = params
+                                    .get("args")
+                                    .and_then(Value::as_array)
+                                    .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>())
+                                    .unwrap_or_default();
+                                let tab = st.find_pane(&pane_id);
+                                let (workspace_id, tab_id, cwd) = tab
+                                    .map(|t| (t.workspace_id, t.tab_id, params.get("cwd").and_then(Value::as_str).unwrap_or("/tmp/p").to_string()))
+                                    .unwrap_or_else(|| ("ws-1".into(), "tab-1".into(), "/tmp/p".into()));
+                                let agent = json!({
+                                    "name": name,
+                                    "agent": kind,
+                                    "agent_status": "idle",
+                                    "workspace_id": workspace_id,
+                                    "tab_id": tab_id,
+                                    "pane_id": pane_id,
+                                    "cwd": cwd,
+                                    "interactive_ready": true,
+                                    "launch_pending": false,
+                                    "state_change_seq": 1,
+                                    "revision": 1,
+                                });
+                                st.argvs.lock().unwrap().insert(pane_id, args);
+                                let mut agents = st.agents.lock().unwrap();
+                                agents.retain(|a| a.get("name") != Some(&Value::String(name.clone())));
+                                agents.push(agent.clone());
+                                json!({"id": id, "result": {"agent": agent}})
+                            }
+                            "agent.wait" => {
+                                let target = wid_of("target");
+                                match st
+                                    .agents
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|a| a.get("name").and_then(Value::as_str) == Some(target.as_str()))
+                                    .cloned()
+                                {
+                                    Some(agent) => json!({"id": id, "result": {"agent": agent}}),
+                                    None => json!({"id": id, "error": {"code": "not_found", "message": target}}),
                                 }
                             }
                             "agent.list" => {
@@ -3550,6 +3767,115 @@ mod api_tests {
         assert!(a_names.iter().all(|n| !names.contains(n)), "{a_names:?} vs {names:?}");
     }
 
+    /// §2.5.1: only an uncleaned `done` Team may be reopened. Other terminal states keep the
+    /// old finished guard, and a cleaned Team has no live PM to continue the conversation.
+    #[tokio::test]
+    async fn reopen_refuses_aborted_failed_and_cleaned_up() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        for phase in ["aborted", "failed"] {
+            let tid = make_team(&app, &pid, req(Some(1), false)).await;
+            set_phase(&app, &tid, phase, None, None).await.unwrap();
+            let before = db::team_issues(&app.db, &tid).await.unwrap().len();
+            match add_issues(&app, &tid, &[57]).await {
+                Err(LcError::Conflict(v)) => assert_eq!(v["reason"], "team is finished"),
+                other => panic!("expected finished conflict for {phase}, got {other:?}"),
+            }
+            assert_eq!(db::team_issues(&app.db, &tid).await.unwrap().len(), before);
+        }
+
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        set_phase(&app, &tid, "done", None, None).await.unwrap();
+        let pm = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("pm"))
+            .unwrap();
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&pm.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let before = db::team_issues(&app.db, &tid).await.unwrap().len();
+        match add_issues(&app, &tid, &[57]).await {
+            Err(LcError::Conflict(v)) => {
+                assert_eq!(v["reason"], "team is cleaned up");
+                assert_eq!(v["phase"], "done");
+            }
+            other => panic!("expected cleaned-up conflict, got {other:?}"),
+        }
+        assert_eq!(db::team_issues(&app.db, &tid).await.unwrap().len(), before);
+    }
+
+    /// §2.5.6 #1: appending to an uncleaned `done` team queues the issue **and** puts the team
+    /// back on the road to `planning`. `add_issues` itself needs `gh`, so the test drives the
+    /// two halves it is made of — the same pair the endpoint calls.
+    #[tokio::test]
+    async fn reopen_queues_the_issue_and_restarts_the_team() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(1), true)).await;
+        sqlx::query("UPDATE team_issues SET state='done' WHERE team_id=?")
+            .bind(&tid)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        set_phase(&e.app, &tid, "done", None, None).await.unwrap();
+        let before = events(&e.app, &tid, None, 500).await.unwrap()["events"].as_array().unwrap().len();
+
+        let t = load(&e.app, &tid).await.unwrap();
+        assert!(check_add_issues(&e.app, &t, &[43]).await.unwrap(), "a done team appends as a reopen");
+        add_resolved_issues(&e.app, &tid, vec![issue2()], true).await.unwrap();
+
+        let queue = db::team_issues(&e.app.db, &tid).await.unwrap();
+        assert_eq!(queue.len(), 2);
+        assert_eq!((queue[1].seq, queue[1].issue_number, queue[1].state.as_str()), (2, 43, "queued"));
+
+        // The reopen leaves the team resumable, not paused, and drops the terminal stamp.
+        let t = load(&e.app, &tid).await.unwrap();
+        assert_eq!(t.phase, "starting");
+        assert!(t.pause_reason.is_none());
+        assert!(t.ended_at.is_none());
+
+        let evs = events(&e.app, &tid, None, 500).await.unwrap();
+        let evs = evs["events"].as_array().unwrap();
+        let tail: Vec<(String, Value)> =
+            evs[before..].iter().map(|v| (v["kind"].as_str().unwrap().to_string(), v["payload"].clone())).collect();
+        assert_eq!(tail.len(), 3, "issues_queued, team_reopened, then the phase move: {tail:?}");
+        assert_eq!(tail[0].0, "note");
+        assert_eq!(tail[0].1["action"], "issues_queued");
+        assert_eq!(tail[0].1["issue_numbers"], json!([43]));
+        assert_eq!(tail[1].0, "note");
+        assert_eq!(tail[1].1["action"], "team_reopened");
+        assert_eq!(tail[1].1["by"], "user");
+        assert_eq!(tail[1].1["from_phase"], "done");
+        assert_eq!(tail[1].1["issue_numbers"], json!([43]));
+        assert_eq!(tail[2].0, "phase");
+        assert_eq!((tail[2].1["from"].as_str(), tail[2].1["to"].as_str()), (Some("done"), Some("starting")));
+        assert_eq!(tail[2].1["reason"], "reopen");
+    }
+
+    /// §2.5.2: `reopen` is an auditable phase transition, not a paused state, and it clears
+    /// the stale terminal timestamp so the team can be resumed again later.
+    #[tokio::test]
+    async fn reopen_phase_clears_terminal_markers() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(1), false)).await;
+        set_phase(&e.app, &tid, "done", None, None).await.unwrap();
+        assert!(load(&e.app, &tid).await.unwrap().ended_at.is_some());
+        let reopened = set_phase(&e.app, &tid, "starting", Some("reopen"), None).await.unwrap();
+        assert_eq!(reopened.phase, "starting");
+        assert!(reopened.pause_reason.is_none());
+        assert!(reopened.resume_phase.is_none());
+        assert!(reopened.ended_at.is_none());
+        let evs = events(&e.app, &tid, None, 100).await.unwrap();
+        let payload = evs["events"].as_array().unwrap().last().unwrap()["payload"].clone();
+        assert_eq!(payload["from"], "done");
+        assert_eq!(payload["to"], "starting");
+        assert_eq!(payload["reason"], "reopen");
+    }
+
     /// §10.5 pause / resume / approve, including the `gate:` restriction.
     #[tokio::test]
     async fn pause_resume_and_approve() {
@@ -3599,8 +3925,15 @@ mod api_tests {
         assert!(matches!(close_issue(&app, &tid, None).await, Err(LcError::Conflict(_))));
 
         // Done, but already closed from here once: refused rather than commented on twice.
+        let closed_at = db::now();
+        sqlx::query("UPDATE team_issues SET state='done', issue_closed_at=? WHERE team_id=?")
+            .bind(&closed_at)
+            .bind(&tid)
+            .execute(&app.db)
+            .await
+            .unwrap();
         sqlx::query("UPDATE teams SET phase='done', issue_closed_at=? WHERE id=?")
-            .bind(db::now())
+            .bind(&closed_at)
             .bind(&tid)
             .execute(&app.db)
             .await
@@ -3609,6 +3942,61 @@ mod api_tests {
             Err(LcError::Conflict(v)) => assert!(v["closed_at"].is_string()),
             other => panic!("expected a conflict, got {other:?}"),
         }
+    }
+
+    /// §10.7 / §2.5: after a reopen the queue id, rather than the team's scalar mirror, selects
+    /// the issue to close. A queued continuation must still be refused before any GitHub call;
+    /// the finished row's own branch and summary are what the default comment would use.
+    #[tokio::test]
+    async fn close_issue_after_reopen_targets_the_finished_issue() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(1), false), vec![issue(), issue2()]).await;
+        let queue = db::team_issues(&app.db, &tid).await.unwrap();
+        let finished_id = queue[0].id.clone();
+        let queued_id = queue[1].id.clone();
+        let finished_at = db::now();
+        sqlx::query(
+            "UPDATE team_issues SET state='done', branch='team/i42-finished', base_sha='1234567890abcdef',
+             summary='第一個 issue 的完成摘要', pr_url='https://github.com/o/r/pull/42', ended_at=? WHERE id=?",
+        )
+        .bind(&finished_at)
+        .bind(&finished_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        set_phase(&app, &tid, "done", None, None).await.unwrap();
+        let reopened = set_phase(&app, &tid, "starting", Some("reopen"), None).await.unwrap();
+
+        match close_issue_for(&app, &tid, Some(&queued_id), None).await {
+            Err(LcError::Conflict(v)) => {
+                assert_eq!(v["error"], "conflict");
+                assert_eq!(v["state"], "queued");
+                assert_eq!(v["phase"], "starting");
+            }
+            other => panic!("expected the queued continuation to be refused, got {other:?}"),
+        }
+
+        // §2.5.4 / §2.5.6 #7: the "already closed from here" guard reads the queue row, not
+        // `teams.issue_closed_at` — which `start_issue` clears on every new issue, and which
+        // therefore cannot remember that #42 was closed.
+        sqlx::query("UPDATE team_issues SET issue_closed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&finished_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(load(&app, &tid).await.unwrap().issue_closed_at.is_none(), "the mirror was never stamped");
+        match close_issue_for(&app, &tid, Some(&finished_id), None).await {
+            Err(LcError::Conflict(v)) => assert!(v["closed_at"].is_string(), "{v}"),
+            other => panic!("expected the second close to be refused, got {other:?}"),
+        }
+
+        let finished = db::team_issue(&app.db, &finished_id).await.unwrap().unwrap();
+        let comment = close_comment_for_issue(&reopened, &finished, &[]);
+        assert!(comment.contains("第一個 issue 的完成摘要"), "the finished row supplies the summary: {comment}");
+        assert!(comment.contains("team/i42-finished"), "the finished row supplies the branch: {comment}");
+        assert!(comment.contains("https://github.com/o/r/pull/42"), "the finished row supplies the PR: {comment}");
     }
 
     /// §10.7: what the comment says. The `deliver=branch` caveat is the load-bearing part —

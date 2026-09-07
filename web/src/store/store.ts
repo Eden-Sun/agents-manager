@@ -376,6 +376,8 @@ interface StoreState {
   teamEvents: Record<string, TeamEvent[]>
   /** 該 team 的視圖沒開著時進來的成員回覆數（僅記憶體）。 */
   teamUnread: Record<string, number>
+  /** done team 清理後追加 issue 會固定得到 409；記住它以隱藏不可再用的按鈕。 */
+  teamReopenUnavailable: Record<string, boolean>
   /** 非 null = 右側顯示 TeamPanel（與 `selectedProjectId` 互斥）。 */
   selectedTeamId: string | null
   /**
@@ -535,7 +537,7 @@ interface StoreState {
    * 只有 `phase === 'done'` 的 team 有這個動作，而且**永遠是使用者按出來的**：daemon 不會
    * 自己關 issue，UI 也要先二次確認（這是會寫到 GitHub 的動作）。
    */
-  closeTeamIssue: (teamId: string) => Promise<boolean>
+  closeTeamIssue: (teamId: string, issueId?: string) => Promise<boolean>
   /** `POST /teams/:id/say`（`to` = `pm` 或 bot_id）。 */
   sayToTeam: (teamId: string, text: string, to: string) => Promise<boolean>
   /** `POST /teams/:id/answer` — 回覆 PM 的 `ask_user`。 */
@@ -644,6 +646,7 @@ export const useStore = create<StoreState>((set, get) => ({
   teamDetail: {},
   teamEvents: {},
   teamUnread: {},
+  teamReopenUnavailable: {},
   selectedTeamId: initialSelection.teamId,
   teamsSupported: true,
   teamLaunch: null,
@@ -1636,11 +1639,11 @@ export const useStore = create<StoreState>((set, get) => ({
     return ok
   },
 
-  async closeTeamIssue(teamId) {
+  async closeTeamIssue(teamId, issueId) {
     const team = get().teams[teamId]
     let ok = false
     await guarded(set, get, `team:${teamId}:close-issue`, async () => {
-      const out = await api.closeTeamIssue(teamId)
+      const out = await api.closeTeamIssue(teamId, issueId ? { issue_id: issueId } : undefined)
       ok = true
       await get().loadTeam(teamId)
       await get().refreshState()
@@ -1686,13 +1689,32 @@ export const useStore = create<StoreState>((set, get) => ({
     return ok
   },
   async addTeamIssues(teamId, issueNumbers) {
+    const key = `team:${teamId}:add-issues`
+    if (get().busy[key]) return false
     let ok = false
-    await guarded(set, get, `team:${teamId}:add-issues`, async () => {
+    set((s) => ({ busy: { ...s.busy, [key]: true } }))
+    try {
       await api.addTeamIssues(teamId, issueNumbers)
       ok = true
+      set((s) => ({ teamReopenUnavailable: withoutKey(s.teamReopenUnavailable, teamId) }))
       await get().loadTeam(teamId)
       get().notify('info', `已加入佇列：${issueNumbers.map((n) => `#${n}`).join('、')}`)
-    })
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return false
+      // §2.5.1：cleanup 過的 done team 永遠回這個 409，重試也沒用——記住它，把按鈕收掉。
+      if (e instanceof ApiError && e.status === 409 && e.body.reason === 'team is cleaned up') {
+        set((s) => ({ teamReopenUnavailable: { ...s.teamReopenUnavailable, [teamId]: true } }))
+        get().notify('info', '這個 Team 已經清理，無法追加 issue。')
+      } else {
+        get().notify('error', `追加 issue 失敗：${errText(e)}`)
+      }
+    } finally {
+      set((s) => {
+        const busy = { ...s.busy }
+        delete busy[key]
+        return { busy }
+      })
+    }
     return ok
   },
   async removeTeamIssue(teamId, issueId) {
@@ -1725,6 +1747,7 @@ function forgetTeamPatch(s: StoreState, teamId: string, dropRow: boolean): Parti
     teamDetail: withoutKey(s.teamDetail, teamId),
     teamEvents: withoutKey(s.teamEvents, teamId),
     teamUnread: withoutKey(s.teamUnread, teamId),
+    teamReopenUnavailable: withoutKey(s.teamReopenUnavailable, teamId),
     drafts,
     draftCursors,
   }
@@ -2513,26 +2536,11 @@ export function teamMemberBots(state: StoreState, teamId: string | null): Bot[] 
     .sort((a, b) => rank[a.team?.role ?? 'worker'] - rank[b.team?.role ?? 'worker'] || a.name.localeCompare(b.name))
 }
 
-/** SPEC-team §7.3：`i42-dev-1` → `dev-1`（am-team 區塊裡的短名）。 */
 /**
- * `ttxka1d-i2-dev-1` → `dev-1`, `ttxka1d-pm` → `pm`, `i42-rev` → `rev`.
- *
- * Team members are named `<team slug>-[i<issue>-]<role>`; the slug and issue number are the
- * same for every member on the screen, so they are pure noise in a chip that sits next to
- * five siblings. The full name stays in the chip's tooltip.
+ * SPEC-team §7.3 的短名。定義在 `api/types.ts`（純模組，`teamPanelLogic` 這種可單獨跑
+ * `node --test` 的檔案才能用），這裡照舊 re-export，元件的 import 路徑不變。
  */
-export function teamShortName(botName: string): string {
-  // Only peel a prefix when what is left still reads as a role, so an already-short
-  // `dev-1` is not shortened to `1`.
-  const role = /^(pm|rev|reviewer|dev|worker)(-|$)/i
-  let out = botName
-  for (let i = 0; i < 2 && !role.test(out); i += 1) {
-    const peeled = out.replace(/^[a-z0-9]+-/i, '')
-    if (peeled === out) break
-    out = peeled
-  }
-  return role.test(out) ? out : botName
-}
+export { teamShortName } from '../api/types'
 
 export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
   if (!projectId) return { disabled: true, reason: '', sendable: [] }

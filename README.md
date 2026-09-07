@@ -32,17 +32,21 @@
 
 數字越大的檔名通常越新。下面幾張是目前 UI，不是早期 demo。
 
-**主畫面對話** — 側欄依專案列出 bot 與燈號；右側是選定 bot 的氣泡、即時輸出、排隊中的下一則、額度條與中斷 / 停止。回覆來源標在氣泡上（`hook` 或 `terminal_fallback`）。
+**主畫面對話** — 側欄依專案列出 bot 與燈號；右側是選定 bot 的氣泡、即時輸出、排隊中的下一則與額度條。回覆來源標在氣泡上（`hook` 或 `terminal_fallback`）。側欄左上角是 `AG Man ｜ pane N ｜ RAM …`：現在開著幾個 herdr pane、所有 herdr 進程樹吃掉多少記憶體。
 
-![主畫面對話](docs/screenshots/250-live-meta-below-dark.png)
+![主畫面對話](docs/screenshots/360-readme-chat-dark.png)
+
+**回合進行中可以中止** — 回合在跑時輸入框不鎖（可以先打、送出排隊），上面那條給兩個出口：「中斷回覆」請 agent 停手（送 `esc`）；**強制中止**不等 agent，直接把回合收掉、解開輸入框——`esc` 送不進去（pane 沒了、herdr 斷線、agent 不理）時就靠它，不必停掉整個 bot。
+
+![強制中止](docs/screenshots/358-abort-button.png)
 
 **群組聊天** — 一個 Project 就是一個群組。`@<bot>` / `@all` 扇出給成員，每人各自一個 Turn；時間軸把同一次發言折成一顆氣泡。沒寫 mention 不會送出。
 
-![群組聊天](docs/screenshots/212-ui-group-dark.png)
+![群組聊天](docs/screenshots/361-readme-group-dark.png)
 
 **Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+），模型與強度都能靠 TUI 的 `/model` / `/effort` 當場套用；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），同樣當場套用；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
 
-![Bot 設定](docs/screenshots/310-grok-settings.png)
+![Bot 設定](docs/screenshots/353-claude-effort.png)
 
 **額度** — 標題列常駐 claude / codex / grok 的 5h / 7d（grok 只有週視窗）。claude 可依身份拆條（cc0 / cc1 / …）。剩餘低於門檻時顯示數字；更低時側欄 bot 列會警告。門檻由 daemon 計算，前端只讀 `low` / `critical`。
 
@@ -55,9 +59,11 @@
 
 ![身份](docs/screenshots/350-identities-shell-local.png)
 
-**Team 面板** — 從 Issues 列對某個 GitHub issue 按「組 team」：選 PM / 執行者（1–4）/ reviewer 的 kind，daemon 在資料目錄下建 git worktree 與獨立 herdr workspace，使用者自己的 checkout 不動。側欄出現 team 節點，主區是成員燈號、轉送時間軸、task 清單與暫停 / 插話 / 中止。
+**Team 面板** — 從 Issues 列對某個 GitHub issue 按「組 team」：逐角色選 kind / 模型 / 強度 / **身分**（PM 用 cc2、執行者用預設帳號這種分法很常見），daemon 在資料目錄下建 git worktree 與獨立 herdr workspace，使用者自己的 checkout 不動。側欄出現 team 節點，主區是成員燈號、轉送時間軸、task 清單與暫停 / 插話 / 中止。成員的身分兩邊都標得出來。
 
-截圖集裡**還沒有** Team 面板的獨立畫面（功能仍早期、畫面每天都在變）。入口在 Issues 列，實作見 [`docs/SPEC-team.md`](docs/SPEC-team.md)。**Scheduler 是第一刀原型**：會跑、會在預算 / 協定 / 額度觸頂時暫停、daemon 重啟會把它拉回來，但還不穩定，請當實驗功能。
+![Team 面板](docs/screenshots/357-team-member-identity.png)
+
+實作見 [`docs/SPEC-team.md`](docs/SPEC-team.md)。**Scheduler 是第一刀原型**：會跑、會在預算 / 協定 / 額度觸頂時暫停、daemon 重啟會把它拉回來，但還不穩定，請當實驗功能。
 
 ## 安裝與啟動
 
