@@ -2015,9 +2015,32 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let target = db::run_target(&run, &bot);
-    client_for_run(app, &run).await?.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
+    let client = client_for_run(app, &run).await?;
+    client.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
     fail_in_flight(app, &run.id, "interrupted by user").await;
+    clear_restored_prompt(&client, &run, &bot).await;
     Ok(())
+}
+
+/// claude 在**還沒吐出第一個字**（thinking 階段）就被 `esc` 打斷時，會把那則 prompt 原封不動放回
+/// 輸入框（2026-09-08 實測；串流中或工具執行中被打斷則不會）。放著不管，下一則 `agent.prompt`
+/// 的貼上會直接接在後面，agent 收到的是「舊 prompt + 新 prompt」黏成一句——使用者看到的就是
+/// 「中斷後再下指令沒反應／照舊做」。所以中斷後看一眼 composer：有字就 `ctrl+c` 清掉（claude 的
+/// 單次 ctrl+c 在有字時只清輸入框，不會退出）。只做給 claude；純粹是保險，失敗不報錯。
+async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bot) {
+    if bot.kind != "claude" {
+        return;
+    }
+    let Some(pane) = run.pane_id.as_deref() else { return };
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let Ok(read) = client.pane_read(pane, "visible", 80).await else { return };
+    if composer_text(&bot.kind, &read.text).is_none() {
+        return;
+    }
+    match client.pane_send_keys(pane, &["ctrl+c"]).await {
+        Ok(()) => tracing::info!(run = %run.id, "interrupt put the prompt back into the composer; cleared it"),
+        Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not clear the restored prompt from the composer"),
+    }
 }
 
 /// **強制**結束這個 bot 目前的回合（`POST /api/bots/:id/abort`）。
@@ -2040,11 +2063,15 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 
     let mut keys_sent = false;
     let mut key_error: Option<String> = None;
+    let mut client: Option<HerdrClient> = None;
     if let Some(r) = run.as_ref() {
         let target = db::run_target(r, &bot);
         match client_for_run(app, r).await {
             Ok(c) => match c.agent_send_keys(&target, &["esc".to_string()]).await {
-                Ok(()) => keys_sent = true,
+                Ok(()) => {
+                    keys_sent = true;
+                    client = Some(c);
+                }
                 Err(e) => key_error = Some(format!("{e:#}")),
             },
             Err(e) => key_error = Some(format!("{e:?}")),
@@ -2057,6 +2084,9 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
             aborted.push(t.id.clone());
         }
         fail_in_flight(app, &r.id, "回合已由使用者強制中止").await;
+        if let Some(c) = client.as_ref() {
+            clear_restored_prompt(c, r, &bot).await;
+        }
     }
     // Unknown-delivery turns live on the bot, not on one run: a stopped run can leave one
     // behind, and `prompt()` refuses the next message until it is cleared.
