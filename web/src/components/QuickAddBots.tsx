@@ -9,7 +9,7 @@ import { KindTag } from './KindTag'
  * cc0/cc1/…，加上其他已安裝的 kind），點一下就建好並啟動，省掉開表單挑 kind 挑身份。
  * 不能用的（CLI 未安裝、身份沒登入）不列，列出來的都保證可行。
  */
-type Choice = { key: string; kind: BotKind; identity: string | null; label: string; title: string }
+type Choice = { key: string; kind: BotKind; identity: string | null; label: string; title: string; loggedOut: boolean }
 
 function nextName(base: string, projectId: string, bots: { project_id: string; name: string }[]): string {
   const taken = new Set(bots.filter((b) => b.project_id === projectId).map((b) => b.name))
@@ -33,20 +33,32 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
     const out: Choice[] = []
     for (const kind of BOT_KINDS) {
       if (!tools[kind]?.installed) continue
-      // 沒登入的身份開起來只會停在登入畫面，等於不可行——不列。
-      const ids = identitiesOfHost(allIdentities, status).filter((i) => i.kind === kind && status[i.name]?.logged_in !== false)
+      const ids = identitiesOfHost(allIdentities, status).filter((i) => i.kind === kind)
       if (ids.length === 0) {
-        out.push({ key: kind, kind, identity: null, label: kind, title: `在 ${hostLabel} 開一個 ${kind}` })
+        // 沒登入的按下去只會停在登入畫面：留著讓人看得到這個 kind，但點不下去。
+        const loggedOut = tools[kind].logged_in === false
+        out.push({
+          key: kind,
+          kind,
+          identity: null,
+          label: kind,
+          title: loggedOut ? `${kind} 在 ${hostLabel} 尚未登入` : `在 ${hostLabel} 開一個 ${kind}`,
+          loggedOut,
+        })
         continue
       }
       for (const i of ids) {
         const st = status[i.name]
+        const loggedOut = st?.logged_in === false
         out.push({
           key: `${kind}:${i.name}`,
           kind,
           identity: i.name,
           label: i.name,
-          title: `${kind} · ${i.name}${st?.account ? ` — ${st.account}` : ''}（${hostLabel}）`,
+          title: loggedOut
+            ? `${i.name} 在 ${hostLabel} 尚未登入`
+            : `${kind} · ${i.name}${st?.account ? ` — ${st.account}` : ''}（${hostLabel}）`,
+          loggedOut,
         })
       }
     }
@@ -79,12 +91,13 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           key={c.key}
           type="button"
           className="quick-add-chip"
-          disabled={busy !== null}
+          disabled={busy !== null || c.loggedOut}
           title={c.title}
           onClick={() => pick(c)}
         >
           <KindTag kind={c.kind} />
           <span className="quick-add-label">{busy === c.key ? '建立中…' : c.label}</span>
+          {c.loggedOut ? <span className="quick-add-out">未登入</span> : null}
         </button>
       ))}
     </div>
