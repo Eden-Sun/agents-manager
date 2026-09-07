@@ -178,10 +178,14 @@ export function LiveBubble({
 }) {
   const act = activity?.trim() ? activity.trim() : null
   const warn = alert?.trim() ? alert.trim() : null
+  // 有字也先不攤開（2026-09-08）：還在長的半成品逐字跳，讀了也是白讀，而且會把整串訊息
+  // 一直往下推。預設只留「輸出中…」，使用者想看才點開；這一回合內記住選擇。
+  const [open, setOpen] = useState(false)
+  const showText = Boolean(text) && open
   return (
-    <article className={`msg assistant live${text ? ' streaming' : ''}`} aria-live="polite">
-      <div className={`bubble${text ? ' md' : ''}`}>
-        {text ? (
+    <article className={`msg assistant live${showText ? ' streaming' : ''}`} aria-live="polite">
+      <div className={`bubble${showText ? ' md' : ''}`}>
+        {showText ? (
           <>
             <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
             <span className="caret" aria-hidden="true" />
@@ -197,6 +201,11 @@ export function LiveBubble({
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
           <span>{text ? '輸出中…' : (act ?? '等待回覆…')}</span>
+          {text ? (
+            <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+              {open ? '收起內容' : `看目前內容（${text.length} 字）`}
+            </button>
+          ) : null}
         </div>
         {action ?? null}
       </div>
