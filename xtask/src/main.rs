@@ -75,10 +75,6 @@ fn dev(root: &Path) {
     let daemon = Command::new(root.join("target/debug/agents-managerd"))
         .arg("serve")
         .current_dir(root)
-        // Dev is reached from other devices on the LAN (`vite --host`), whose browsers send a
-        // non-localhost Origin; the daemon's anti-CSRF check rejects that unless told to allow
-        // it. `agents-managerd serve` run directly stays secure-by-default — this is dev-only.
-        .env("AM_ALLOW_LAN_ORIGIN", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(daemon_log.try_clone().unwrap()))
         .stderr(Stdio::from(daemon_log))

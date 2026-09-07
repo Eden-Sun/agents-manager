@@ -63,11 +63,6 @@ pub struct App {
     pub port: u16,
     pub ui_token: String,
     pub herdr_session: String,
-    /// `AM_ALLOW_LAN_ORIGIN=1` — accept RFC1918 Origins, not just localhost, so the dev UI
-    /// reached over the LAN (e.g. `vite --host`) doesn't fail the anti-CSRF Origin check.
-    /// Off by default: this widens who can drive the daemon to anyone on the LAN who can
-    /// get a browser to send it a request with such an Origin.
-    pub allow_lan_origin: bool,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
 
@@ -137,7 +132,6 @@ impl App {
             port,
             ui_token,
             herdr_session,
-            allow_lan_origin: std::env::var("AM_ALLOW_LAN_ORIGIN").as_deref() == Ok("1"),
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             locks: Mutex::new(HashMap::new()),
