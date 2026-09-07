@@ -2622,8 +2622,16 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
-        if let Err(e) = try_fallback(&app2, &run_id).await {
-            tracing::warn!(error = ?e, "terminal fallback failed");
+        match try_fallback(&app2, &run_id).await {
+            // No turn to fall back on. For a run with no hooks that is not "nothing happened":
+            // the agent just finished answering and the only record of it is on the pane.
+            Ok(false) => {
+                if let Err(e) = capture_hookless_turn_locked(&app2, &run_id, false).await {
+                    tracing::warn!(error = ?e, "hookless terminal capture failed");
+                }
+            }
+            Ok(true) => {}
+            Err(e) => tracing::warn!(error = ?e, "terminal fallback failed"),
         }
         // A Codex usage-reset hint can be rendered after the turn's notify hook has already
         // completed it. Capture it even when there is no longer an in-flight turn to fall back.
@@ -2635,13 +2643,15 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
     timers.insert(key, h);
 }
 
-async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(()) };
-    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(()) };
+/// `Ok(true)` when a turn was actually completed from the pane, `Ok(false)` when there was
+/// nothing to fall back on (no in-flight turn, or one whose delivery we do not trust).
+async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
+    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
+    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(false) };
     if turn.delivery != "ok" {
-        return Ok(());
+        return Ok(false);
     }
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(()) };
+    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
 
     // Read the pane *before* the turn is claimed. Marking it complete first and then failing
     // on the session or the read left the turn `completed_fallback` with no assistant message,
@@ -2662,7 +2672,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
         .execute(&app.db)
         .await?;
     if res.rows_affected() == 0 {
-        return Ok(());
+        return Ok(false);
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
@@ -2694,14 +2704,9 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
             .await?;
             let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
             apply_codex_limit_hit_quota(app, &host, &hit).await;
-            sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
-                .bind(read.revision as i64)
-                .bind(tail_hash(&read.text))
-                .bind(run_id)
-                .execute(&app.db)
-                .await?;
+            remember_pane_cursor(app, run_id, &read).await?;
             emit_turn(app, &turn.id).await;
-            return Ok(());
+            return Ok(true);
         }
     }
 
@@ -2731,12 +2736,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
         reply
     };
 
-    sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
-        .bind(read.revision as i64)
-        .bind(tail_hash(&read.text))
-        .bind(run_id)
-        .execute(&app.db)
-        .await?;
+    remember_pane_cursor(app, run_id, &read).await?;
 
     insert_message(
         app,
@@ -2750,6 +2750,209 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<()> {
     )
     .await?;
     emit_turn(app, &turn.id).await;
+    Ok(true)
+}
+
+// ------------------------------------------------- hookless runs: the terminal is the source
+
+/// An adopted run whose bot has no hooks injected.
+///
+/// Nothing will ever POST a `user_prompt` / `stop` payload for such a run, so §4.3's terminal
+/// snapshot is not a *fallback* here — it is the only place its conversation can come from.
+/// The `managed_by='child'` bots `reconcile` adopts (one agent spawning another) are all like
+/// this: their pane was started by their parent, so the 終端 tab showed what they were saying
+/// while 對話 stayed empty.
+fn is_hookless(bot: &db::Bot, run: &db::Run) -> bool {
+    run.adopted != 0 && bot.inject_hooks == 0
+}
+
+/// Longest terminal-scraped reply stored for a hookless turn. The snapshot is 200 lines of
+/// scrollback, so a capture anywhere near this is a screen rather than a message; cutting it
+/// keeps one adoption from writing a novel into the conversation.
+const HOOKLESS_REPLY_MAX: usize = 6000;
+
+/// How long after adoption the pane is read. An agent herdr has only just detected is often
+/// still painting its banner, and its `agent_status` settles a moment after the pane appears.
+const ADOPTED_CAPTURE_DELAY: Duration = Duration::from_secs(2);
+
+/// Store the exchange a hookless run has just finished as a turn of its own.
+///
+/// The ordinary path needs the daemon to have watched the whole turn: `begin_external_turn`
+/// opens it on the `-> working` edge and `try_fallback` closes it on the way back to `idle`.
+/// An adopted pane is routinely picked up *mid-answer* — reconcile runs when herdr detects the
+/// child agent, by which time its parent has already prompted it — so `working -> idle` arrives
+/// with no turn in flight and the reply used to be dropped on the floor. This writes it as a
+/// finished `external` turn instead, from the same snapshot, through the same noise filters.
+///
+/// `seed` is the one-shot capture done at adoption, when the exchange on screen is already
+/// over. It is refused unless the conversation is still empty, so re-adopting a bot (which
+/// happens on every daemon restart and every event-stream reconnect) cannot copy one screen in
+/// twice.
+///
+/// The caller must hold the bot lock. Returns whether anything was stored.
+async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) -> anyhow::Result<bool> {
+    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
+    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+    if !is_hookless(&bot, &run) || run.state != "running" {
+        return Ok(false);
+    }
+    // §4.3 keeps `blocked` out of the fallback, and for the same reason: a modal waiting for an
+    // answer is not an ended turn, and the question on screen is not a reply.
+    if run.agent_status == "blocked" {
+        return Ok(false);
+    }
+    // An in-flight turn belongs to `try_fallback`; capturing here as well would store the
+    // reply twice.
+    if db::in_flight_turn(&app.db, run_id).await?.is_some() {
+        return Ok(false);
+    }
+    let Some(pane_id) = run.pane_id.clone() else { return Ok(false) };
+    let conv = db::conversation_id(&app.db, &run.bot_id).await?;
+    if seed && conversation_message_count(app, &conv).await? > 0 {
+        return Ok(false);
+    }
+    let client = app
+        .herdr_for_run(&run)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
+    let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
+    let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
+    // What the user (or the parent agent) typed. The pane echo is the only record of it —
+    // there is no hook payload to read it from, ever.
+    let echo = last_prompt_echo_text(&bot.kind, &fresh);
+    // Where does this exchange begin? With a cursor, at the cursor. Without one the snapshot
+    // is the whole scrollback and only the prompt echo says where the last turn started, so
+    // with neither we just remember the cursor and wait for the next edge — storing screens of
+    // older turns as one message is worse than storing nothing.
+    if run.last_read_tail_hash.is_none() && echo.is_none() {
+        remember_pane_cursor(app, run_id, &read).await?;
+        return Ok(false);
+    }
+    let scraped = extract_reply(&bot.kind, &fresh).or_else(|| clean_screen(&bot.kind, &fresh));
+    let reply = match (&echo, scraped) {
+        (Some(p), Some(r)) => strip_echoed_prompt(&r, p),
+        (None, Some(r)) => r,
+        (_, None) => String::new(),
+    };
+    // Nothing readable on screen: move the cursor on and say nothing. Unlike `try_fallback`
+    // there is no turn waiting to be closed, so a 「（終端沒有可辨識的回覆）」 bubble here would
+    // be noise nobody asked for.
+    if reply.trim().is_empty() || is_shredded(&reply) {
+        remember_pane_cursor(app, run_id, &read).await?;
+        return Ok(false);
+    }
+    // The screen need not have moved since the last edge (herdr reports `working -> idle` more
+    // than once for a single answer, and the cursor only matches when the tail is still on
+    // screen), so an identical reply is the same reply.
+    if last_assistant_content(app, &conv).await.as_deref().map(str::trim) == Some(reply.trim()) {
+        remember_pane_cursor(app, run_id, &read).await?;
+        return Ok(false);
+    }
+    let reply = truncate_hookless_reply(reply);
+
+    let tid = db::ulid();
+    let now = db::now();
+    sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at)
+         VALUES (?,?,?,'external','completed_fallback','ok',?,?)",
+    )
+    .bind(&tid)
+    .bind(&conv)
+    .bind(run_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(&app.db)
+    .await?;
+    if let Some(text) = echo.as_deref() {
+        insert_message(app, &conv, Some(&tid), "user", text, "terminal_fallback", false, None).await?;
+        // 對話 is ordered by message id, and a ULID is only ordered by its millisecond — two
+        // messages written in the same one sort at random, which here would put the reply
+        // above the prompt that caused it. This is the only place the daemon writes both
+        // halves of an exchange back to back, so it is the only place that has to wait.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    insert_message(app, &conv, Some(&tid), "assistant", &reply, "terminal_fallback", true, Some(&read.text)).await?;
+    remember_pane_cursor(app, run_id, &read).await?;
+    emit_turn(app, &tid).await;
+    tracing::info!(run = %run_id, turn = %tid, bot = %bot.name, seed, "hookless turn captured from the pane");
+    Ok(true)
+}
+
+/// [`capture_hookless_turn_locked`] for a caller that does not already hold the bot lock.
+async fn capture_hookless_turn(app: &Arc<App>, run_id: &str, bot_id: &str, seed: bool) -> anyhow::Result<bool> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    capture_hookless_turn_locked(app, run_id, seed).await
+}
+
+/// Give a freshly adopted hookless run whatever its pane can tell us.
+///
+/// Called by `reconcile` for every adopted agent, off the reconcile's own task because that
+/// holds the bot lock and both paths here take it.
+///
+/// * still `working`: open the `external` turn now, exactly as if we had watched the user type
+///   — the answer then streams into 對話 live and `try_fallback` closes the turn as usual.
+/// * already `idle`: the exchange is over, so store it once (`seed`), otherwise the
+///   conversation stays empty until somebody prompts the agent again.
+pub fn spawn_adopted_capture(app: &Arc<App>, run_id: &str, bot_id: &str) {
+    let (app, run_id, bot_id) = (app.clone(), run_id.to_string(), bot_id.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(ADOPTED_CAPTURE_DELAY).await;
+        let (Ok(Some(run)), Ok(Some(bot))) = (db::run(&app.db, &run_id).await, db::bot(&app.db, &bot_id).await) else {
+            return;
+        };
+        if !is_hookless(&bot, &run) {
+            return;
+        }
+        if run.agent_status == "working" {
+            begin_external_turn(&app, &run).await;
+            return;
+        }
+        // `blocked` / `unknown` are refused inside the capture: neither is a finished turn.
+        if let Err(e) = capture_hookless_turn(&app, &run_id, &bot_id, true).await {
+            tracing::debug!(run = %run_id, error = ?e, "adopted pane capture failed");
+        }
+    });
+}
+
+fn truncate_hookless_reply(reply: String) -> String {
+    if reply.chars().count() <= HOOKLESS_REPLY_MAX {
+        return reply;
+    }
+    let mut cut: String = reply.chars().take(HOOKLESS_REPLY_MAX).collect::<String>().trim_end().to_string();
+    cut.push_str("\n（終端擷取到此截斷）");
+    cut
+}
+
+async fn conversation_message_count(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
+        .bind(conversation_id)
+        .fetch_one(&app.db)
+        .await?)
+}
+
+/// The newest `assistant` message of a conversation — the duplicate guard for terminal
+/// capture, which re-reads a screen that may not have changed since the previous edge.
+async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Record how far into the pane we have read, so the next capture starts after it.
+async fn remember_pane_cursor(app: &Arc<App>, run_id: &str, read: &crate::herdr::PaneRead) -> anyhow::Result<()> {
+    sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
+        .bind(read.revision as i64)
+        .bind(tail_hash(&read.text))
+        .bind(run_id)
+        .execute(&app.db)
+        .await?;
     Ok(())
 }
 
@@ -4165,5 +4368,196 @@ mod tab_tests {
         .await
         .unwrap();
         assert!(matches!(move_pane_to_own_tab(&app, &bot).await, Err(LcError::NotFound(_))));
+    }
+}
+
+#[cfg(test)]
+mod hookless_capture_tests {
+    //! 對話 for a run the daemon did not start and never injected hooks into: a spawned child
+    //! agent (`managed_by='child'`). Everything it says has to be scraped off its pane, so
+    //! these drive `capture_hookless_turn_locked` at a mock herdr holding a real screen.
+    use super::*;
+    use crate::team::testing as tt;
+
+    /// A finished claude exchange, as `recent_unwrapped` renders it: the prompt echo, the
+    /// reply, the status line, and the empty composer below the rule.
+    const EXCHANGE: &str = "\
+❯ 幫我看一下 lifecycle.rs
+  ⎿  Read lifecycle.rs (4308 lines)
+⏺ 看完了：try_fallback 只認 in-flight turn。
+
+✻ Worked for 9s · done 11:35 PM
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+";
+
+    struct Child {
+        env: tt::Env,
+        bot_id: String,
+        conv: String,
+        run_id: String,
+    }
+
+    /// An adopted, hook-less bot sitting in `pane-1`, with `screen` on that pane.
+    /// `hooks` / `adopted` are the two flags that decide whether the terminal is the source.
+    async fn child(status: &str, screen: &str, hooks: i64, adopted: i64) -> Child {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, managed_by, hook_token, created_at)
+             VALUES (?,?,'lastq','claude','[]',0,?,'child','tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(hooks)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running',?,'ws-1','pane-1','tab-1',?,'parent-lastq','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(status)
+        .bind(adopted)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.set_screen("pane-1", screen);
+        Child { env, bot_id, conv, run_id }
+    }
+
+    async fn messages(app: &Arc<App>, conv: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as::<_, (String, String, String)>(
+            // Ordered the way `GET /api/bots/{id}/messages` orders it, so a test sees what 對話 shows.
+            "SELECT role, content, source FROM messages WHERE conversation_id = ? ORDER BY id",
+        )
+        .bind(conv)
+        .fetch_all(&app.db)
+        .await
+        .unwrap()
+    }
+
+    /// **The bug.** A child agent's `working -> idle` edge arrives with no turn in flight —
+    /// the daemon adopted the pane mid-answer, so it never saw the `-> working` edge that
+    /// opens one — and `try_fallback` bails on that, which left 對話 empty for a bot whose
+    /// 終端 tab was full of text. The edge now becomes a turn of its own.
+    #[tokio::test]
+    async fn a_finished_exchange_on_the_pane_becomes_a_turn() {
+        let c = child("idle", EXCHANGE, 0, 1).await;
+        let app = c.env.app.clone();
+
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap(), "the screen holds an exchange");
+
+        let msgs = messages(&app, &c.conv).await;
+        assert_eq!(msgs.len(), 2, "one prompt, one reply: {msgs:?}");
+        assert_eq!(msgs[0].0, "user");
+        assert_eq!(msgs[0].1, "幫我看一下 lifecycle.rs", "what was typed straight into the pane");
+        assert_eq!(msgs[0].2, "terminal_fallback");
+        assert_eq!(msgs[1].0, "assistant");
+        assert_eq!(
+            msgs[1].1, "看完了：try_fallback 只認 in-flight turn。",
+            "the `⏺` reply, with the status line and the composer chrome dropped",
+        );
+        assert_eq!(msgs[1].2, "terminal_fallback");
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id = ?")
+            .bind(&c.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((t.origin.as_str(), t.status.as_str()), ("external", "completed_fallback"));
+        assert_eq!(t.run_id.as_deref(), Some(c.run_id.as_str()));
+        assert!(t.completed_at.is_some(), "nothing is left in flight, so the composer is not locked");
+    }
+
+    /// herdr reports `working -> idle` more than once for one answer, and a re-adoption reads
+    /// the same screen again. Neither may grow the conversation.
+    #[tokio::test]
+    async fn the_same_screen_is_never_stored_twice() {
+        let c = child("idle", EXCHANGE, 0, 1).await;
+        let app = c.env.app.clone();
+
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap(), "nothing new on the pane");
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap(), "and the adoption seed is one-shot");
+
+        assert_eq!(messages(&app, &c.conv).await.len(), 2);
+    }
+
+    /// The next prompt typed into the pane is a second turn, not an addition to the first.
+    #[tokio::test]
+    async fn the_next_exchange_is_its_own_turn() {
+        let c = child("idle", EXCHANGE, 0, 1).await;
+        let app = c.env.app.clone();
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+
+        c.env.herdr.set_screen("pane-1", &format!("{EXCHANGE}❯ 再看一次\n⏺ 修好了。\n"));
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+
+        let msgs = messages(&app, &c.conv).await;
+        assert_eq!(msgs.len(), 4, "{msgs:?}");
+        assert_eq!(msgs[2].1, "再看一次");
+        assert_eq!(msgs[3].1, "修好了。");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ?")
+            .bind(&c.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turns, 2);
+    }
+
+    /// A bot whose pane *we* started keeps hooks as its source of truth (SPEC §4.3: the
+    /// snapshot is the備援, not the record), so this path must not touch it — a hook reply is
+    /// complete, a scrape is not.
+    #[tokio::test]
+    async fn a_run_with_hooks_is_left_to_its_hooks() {
+        let c = child("idle", EXCHANGE, 1, 1).await;
+        let app = c.env.app.clone();
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+        assert!(messages(&app, &c.conv).await.is_empty());
+
+        // Same for a run the daemon started itself, hooks or not.
+        let own = child("idle", EXCHANGE, 0, 0).await;
+        let app = own.env.app.clone();
+        assert!(!capture_hookless_turn_locked(&app, &own.run_id, false).await.unwrap());
+        assert!(messages(&app, &own.conv).await.is_empty());
+    }
+
+    /// Without a cursor the snapshot is the whole scrollback, and the prompt echo is the only
+    /// thing marking where the last turn began. With neither, storing "the screen" would drop
+    /// several turns into one bubble — so it stores nothing and just remembers the cursor.
+    #[tokio::test]
+    async fn a_screen_with_no_prompt_echo_is_not_guessed_at() {
+        let c = child("idle", "⏺ 一段沒有頭的舊輸出\n", 0, 1).await;
+        let app = c.env.app.clone();
+
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+        assert!(messages(&app, &c.conv).await.is_empty());
+        assert!(
+            db::run(&app.db, &c.run_id).await.unwrap().unwrap().last_read_tail_hash.is_some(),
+            "the cursor moved, so the next real exchange is read from here",
+        );
+    }
+
+    /// The adoption seed only ever fires into an empty conversation: a bot is re-adopted on
+    /// every daemon restart and every event-stream reconnect, and its last exchange is still
+    /// on screen each time.
+    #[tokio::test]
+    async fn the_adoption_seed_refuses_a_conversation_that_already_has_messages() {
+        let c = child("idle", EXCHANGE, 0, 1).await;
+        let app = c.env.app.clone();
+        insert_message(&app, &c.conv, None, "user", "早先的訊息", "web", false, None).await.unwrap();
+
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
+        assert_eq!(messages(&app, &c.conv).await.len(), 1);
+        let _ = &c.bot_id;
     }
 }

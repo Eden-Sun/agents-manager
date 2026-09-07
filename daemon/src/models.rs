@@ -383,9 +383,142 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, refresh: bool) -> Resu
     Ok(v)
 }
 
+// ---------------------------------------------------------------- what a running CLI is on
+
+/// The model / reasoning effort a **running** CLI was launched with, read off its own argv.
+///
+/// This is the inverse of `lifecycle::model_args`. It exists for agents the daemon did not
+/// start — an adopted pane, above all the `managed_by='child'` bots `reconcile` picks up when
+/// one agent spawns another: nothing in our database says which model they are on, so the
+/// sidebar badge would forever read 「預設」. `pane.process_info` reports the pane's foreground
+/// argv (`["claude","--dangerously-skip-permissions","--model","opus"]`), which is exactly
+/// what we would have passed ourselves.
+///
+/// Both `--flag value` and `--flag=value` are accepted, and so are the abbreviations each CLI
+/// takes (`-m`). The effort is normalised through [`crate::config::normalize_effort`], so a
+/// value this kind does not accept comes back as `None` rather than poisoning `bots.effort`.
+/// Anything unrecognised is `None` — an unset field is honest, a guessed one is not.
+pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, Option<String>) {
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
+    // codex takes its effort as a config assignment (`-c model_reasoning_effort="high"`), and
+    // will take the model the same way, so both flag styles have to be understood.
+    let assignment = |s: &str, key: &str| -> Option<String> {
+        let (k, v) = s.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().trim_matches('"').trim_matches('\'').to_string())
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        // `--flag=value` first: splitting it up front keeps the match arms below to one shape.
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) if f.starts_with('-') => (f, Some(v.to_string())),
+            _ => (arg, None),
+        };
+        let mut next = |i: &mut usize| -> Option<String> {
+            if let Some(v) = inline.clone() {
+                return Some(v);
+            }
+            let v = argv.get(*i + 1)?.clone();
+            // A missing value (`--model` last, or `--model --effort high`) is not a value.
+            if v.starts_with('-') {
+                return None;
+            }
+            *i += 1;
+            Some(v)
+        };
+        match flag {
+            "--model" | "-m" => model = next(&mut i).or(model),
+            "--effort" | "--reasoning-effort" => effort = next(&mut i).or(effort),
+            "-c" | "--config" => {
+                if let Some(v) = next(&mut i) {
+                    effort = assignment(&v, "model_reasoning_effort").or(effort);
+                    model = assignment(&v, "model").or(model);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let model = model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    let effort = effort.and_then(|e| crate::config::normalize_effort(kind, Some(&e)).ok().flatten());
+    (model, effort)
+}
+
+/// grok's fallback: before it has a task to name itself after, its terminal title *is* the
+/// model and effort — `Grok 4.6 (xhigh)`. Only ever consulted when the argv carried neither
+/// (the user launched it bare and picked a model with `/model` inside the TUI).
+pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) {
+    let t = title.trim();
+    let Some(rest) = t.strip_prefix("Grok ").or_else(|| t.strip_prefix("grok ")) else {
+        return (None, None);
+    };
+    let mut it = rest.split_whitespace();
+    // `4.6` -> the `grok-4.6` id the model list and `-m` both use.
+    let model = it
+        .next()
+        .map(|v| v.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.'))
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .map(|v| format!("grok-{v}"));
+    let effort = it
+        .next()
+        .map(|v| v.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .and_then(|v| crate::config::normalize_effort("grok", Some(v)).ok().flatten());
+    (model, effort)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The argv shapes `herdr pane process-info` actually reported on this machine,
+    /// 2026-09-07 (a claude child pane and a grok one).
+    #[test]
+    fn model_and_effort_are_read_off_a_running_cli() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            model_effort_from_argv("claude", &argv(&["claude", "--dangerously-skip-permissions", "--model", "opus"])),
+            (Some("opus".into()), None)
+        );
+        assert_eq!(
+            model_effort_from_argv("grok", &argv(&["grok", "--always-approve", "-m", "grok-4.6", "--reasoning-effort", "high"])),
+            (Some("grok-4.6".into()), Some("high".into()))
+        );
+        assert_eq!(
+            model_effort_from_argv("claude", &argv(&["claude", "--model=sonnet", "--effort=xhigh"])),
+            (Some("sonnet".into()), Some("xhigh".into()))
+        );
+        assert_eq!(
+            model_effort_from_argv(
+                "codex",
+                &argv(&["codex", "-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"max\"", "-c", "service_tier=\"priority\""])
+            ),
+            (Some("gpt-5.6-sol".into()), Some("max".into()))
+        );
+    }
+
+    /// Nothing is guessed: a bare CLI stays unset, and an effort the kind does not accept
+    /// (`max` is claude/codex only) is dropped rather than stored for grok.
+    #[test]
+    fn unparseable_argv_leaves_the_fields_unset() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(model_effort_from_argv("claude", &argv(&["claude", "--dangerously-skip-permissions"])), (None, None));
+        assert_eq!(model_effort_from_argv("grok", &argv(&["grok", "--reasoning-effort", "max"])), (None, None));
+        // A flag whose value is missing must not swallow the next flag.
+        assert_eq!(
+            model_effort_from_argv("claude", &argv(&["claude", "--model", "--effort", "high"])),
+            (None, Some("high".into()))
+        );
+    }
+
+    #[test]
+    fn grok_falls_back_to_its_terminal_title() {
+        assert_eq!(grok_title_model_effort("Grok 4.6 (xhigh)"), (Some("grok-4.6".into()), Some("xhigh".into())));
+        assert_eq!(grok_title_model_effort("Grok 4.6"), (Some("grok-4.6".into()), None));
+        // A title the agent has renamed to its task says nothing about the model.
+        assert_eq!(grok_title_model_effort("遠端主機 gh 登入 API 與 UI - grok"), (None, None));
+        assert_eq!(grok_title_model_effort("Grok Code Fast"), (None, None));
+    }
 
     #[test]
     fn grok_text_parses() {

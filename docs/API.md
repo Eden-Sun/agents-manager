@@ -1215,6 +1215,16 @@ kind 取 herdr 偵測到的（偵測不到就沿用父的）、identity 沿用�
 - `GET /api/state` 的 bot 物件多 `parent_bot_id`（頂層為 `null`），`managed_by` 多一個值 `child`。
 - 子 bot 不進 config.toml；pane 消失時 daemon 把它 `deleted_at`（對話保留）。`DELETE /api/bots/{id}` 對子 bot 直接停 pane 並軟刪。
 - UI：側欄把子 bot 縮排掛在父 bot 底下。
+- 子 bot 的**對話**來自終端擷取（SPEC §4.3）：pane 不是 daemon 開的、沒有注入 hook，所以 pane 的
+  `working → idle` 就是回合邊界——daemon 從 `recent_unwrapped` 快照擷取這一段（沿用既有的雜訊過濾與回音剝除），
+  寫成一筆 `origin = external` / `status = completed_fallback` 的 Turn：prompt 回音存成 user 訊息、抽出的回覆
+  存成 `source = terminal_fallback`、`incomplete = 1` 的 assistant 訊息。認領當下 agent 還在 `working` 的話
+  改開一筆 in-flight Turn，回覆就跟一般 bot 一樣即時串流；已經 idle 則只在對話**還是空的**時候補記螢幕上那一輪。
+- 子 bot 的 `model` / `effort` 從 pane 的 `pane.process_info` argv 反推（claude `--model` / `--effort`、
+  codex `-m` / `-c model_reasoning_effort=…`、grok `-m` / `--reasoning-effort`，grok 另可退回終端標題
+  `Grok 4.6 (xhigh)`），認領時寫進 `bots.model` / `bots.effort`，於是 `GET /api/state` 的 `model` / `effort`
+  與側欄徽章直接就對。解析不到留 `null`（UI 顯示「預設」）；**只補空值**——TUI 裡的 `/model` 改不到 argv，
+  已經記錄的值不會被下一次對帳蓋回去。
 
 ## 圖片附件（2026-09-06 新增）
 

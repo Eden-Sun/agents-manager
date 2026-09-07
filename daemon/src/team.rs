@@ -2860,7 +2860,9 @@ pub mod testing {
     /// It answers what creating a team needs (`ping`, the three `workspace.*` calls of §6.4a)
     /// plus the tab / pane bookkeeping the one-bot-one-tab work turns on: `tab.create`,
     /// `tab.list`, `tab.close`, `pane.split`, `pane.close`, `pane.get`, `pane.move`, and the
-    /// `session.snapshot` / `agent.list` pair a reconcile runs on. It stops there, deliberately:
+    /// `session.snapshot` / `agent.list` pair a reconcile runs on, plus the two calls that make
+    /// a pane readable — `pane.read` (`set_screen`) and `pane.process_info` (`set_argv`), which
+    /// is all an adopted, hook-less agent can be observed through. It stops there, deliberately:
     /// `agent.start`, hook injection and `ensure_kind_installed` probing for a real CLI belong
     /// to a live agent, and a mock that pretended otherwise would be testing itself.
     ///
@@ -2880,6 +2882,10 @@ pub mod testing {
         pub workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
         /// Tabs in creation order, each holding its panes.
         pub tabs: Arc<StdMutex<Vec<MockTab>>>,
+        /// `pane.read` answers, per pane id: the terminal snapshot a test wants scraped.
+        pub screens: Arc<StdMutex<BTreeMap<String, String>>>,
+        /// `pane.process_info` answers, per pane id: the argv the pane's CLI is running with.
+        pub argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
         /// Every `(method, params)` the daemon sent, so a test can assert *how* it asked —
         /// "started through `tab.create`, never `pane.split`" is only checkable here.
         pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
@@ -2902,6 +2908,8 @@ pub mod testing {
         tabs: Arc<StdMutex<Vec<MockTab>>>,
         calls: Arc<StdMutex<Vec<(String, Value)>>>,
         agents: Arc<StdMutex<Vec<Value>>>,
+        screens: Arc<StdMutex<BTreeMap<String, String>>>,
+        argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
         seq: Arc<std::sync::atomic::AtomicU64>,
     }
 
@@ -2944,10 +2952,13 @@ pub mod testing {
                 tabs: Default::default(),
                 calls: Default::default(),
                 agents: Default::default(),
+                screens: Default::default(),
+                argvs: Default::default(),
                 seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             };
             let (workspaces, tabs, calls, agents) =
                 (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
+            let (screens, argvs) = (state.screens.clone(), state.argvs.clone());
             let handle = tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
                     let st = state.clone();
@@ -3114,6 +3125,23 @@ pub mod testing {
                                     {"workspaces": wss, "panes": panes,
                                      "tabs": tabs.iter().map(MockState::tab_json).collect::<Vec<_>>()}}})
                             }
+                            "pane.read" => {
+                                let pid = wid_of("pane_id");
+                                let text = st.screens.lock().unwrap().get(&pid).cloned().unwrap_or_default();
+                                json!({"id": id, "result": {"type": "pane_read", "read": {
+                                    "pane_id": pid, "source": params.get("source").cloned().unwrap_or(json!("recent_unwrapped")),
+                                    "format": "text", "text": text, "revision": 1, "truncated": false}}})
+                            }
+                            "pane.process_info" => {
+                                let pid = wid_of("pane_id");
+                                match st.argvs.lock().unwrap().get(&pid).cloned() {
+                                    None => json!({"id": id, "result": {"process_info":
+                                        {"pane_id": pid, "foreground_processes": []}}}),
+                                    Some(argv) => json!({"id": id, "result": {"process_info": {"pane_id": pid,
+                                        "foreground_processes": [{"argv": argv, "argv0": argv.first().cloned(),
+                                                                  "cwd": "/tmp/p", "pid": 1}]}}}),
+                                }
+                            }
                             "agent.list" => {
                                 json!({"id": id, "result": {"agents": st.agents.lock().unwrap().clone()}})
                             }
@@ -3141,7 +3169,7 @@ pub mod testing {
                     });
                 }
             });
-            MockHerdr { workspaces, tabs, calls, agents, handle }
+            MockHerdr { workspaces, tabs, calls, agents, screens, argvs, handle }
         }
 
         pub fn count(&self) -> usize {
@@ -3156,6 +3184,16 @@ pub mod testing {
         /// The params of the first call to `method`, if it was made at all.
         pub fn first_call(&self, method: &str) -> Option<Value> {
             self.calls.lock().unwrap().iter().find(|(m, _)| m == method).map(|(_, p)| p.clone())
+        }
+
+        /// What `pane.read` will answer for `pane_id`.
+        pub fn set_screen(&self, pane_id: &str, text: &str) {
+            self.screens.lock().unwrap().insert(pane_id.to_string(), text.to_string());
+        }
+
+        /// What `pane.process_info` will report as the pane's foreground argv.
+        pub fn set_argv(&self, pane_id: &str, argv: &[&str]) {
+            self.argvs.lock().unwrap().insert(pane_id.to_string(), argv.iter().map(|s| s.to_string()).collect());
         }
 
         pub fn tab(&self, tab_id: &str) -> Option<MockTab> {
