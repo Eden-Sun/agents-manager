@@ -6983,6 +6983,60 @@ button.team-workers:disabled {
 
 /* ---------------------------------------------------------------- issue 佇列（SPEC-team §2.3）
    一組隊伍依序解多個 issue。沿用 .team-tasks 的視覺：同樣是主區上方的一段可收合清單。 */
+/* issue 佇列的進度：走到第幾個 + 跑多久。常駐、不隨折疊收起來（見 UI-DECISIONS）。 */
+.team-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.team-progress-count {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.team-progress-total {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.team-progress-bar {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 60px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.team-progress-done {
+  background: var(--status-ok);
+}
+
+.team-progress-fail {
+  background: var(--danger);
+}
+
+.team-progress-time {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.team-progress-time strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .team-queue {
   flex: none;
   border-bottom: 1px solid var(--border);
