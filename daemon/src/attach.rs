@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
@@ -30,7 +30,7 @@ pub const MAX_BYTES: usize = 12 * 1024 * 1024;
 /// Directory (relative to the project root) that holds a bot's dropped images.
 const SUBDIR: &str = ".agents-manager/attachments";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: String,
     pub name: String,

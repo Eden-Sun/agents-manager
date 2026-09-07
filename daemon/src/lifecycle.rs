@@ -160,7 +160,11 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
-    if run.state != "running" || run.agent_status == "blocked" {
+    // `working` holds the queue too: a turn can be closed (fallback, hook) while the TUI is
+    // still drawing its last answer, and a prompt pasted into claude at that moment loses its
+    // Enter — the text sits in the composer and the turn stalls (2026-09-07 11:21). The
+    // `working -> idle` edge re-schedules this flush.
+    if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {
         return Ok(());
     }
     if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
@@ -2739,7 +2743,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
         let started = std::time::Instant::now();
         let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
         // What we sent, so the pane's echo of it can be stripped back off every frame.
-        let sent = db::turn_user_messages(&app2.db, &turn_id).await.unwrap_or_default();
+        let sent = turn_echo_texts(&app2, &turn_id).await;
         let mut last = (String::new(), String::new(), String::new());
         let mut quiet = 0u32;
         // The newest frame not yet on the wire, held back by this run's 4/s budget.
@@ -2909,6 +2913,77 @@ fn pane_awaits_input(kind: &str, text: &str) -> bool {
     })
 }
 
+/// Every form of "what we sent this turn" worth matching a pane echo against.
+///
+/// The timeline stores what the user *typed*; a prompt carrying images was delivered with
+/// `attach::deliver_text` appended (「附加圖片（請讀取這個檔案來查看）：」 plus the paths), and
+/// that appendix is exactly what came back on screen and got stored as an answer
+/// (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07). The delivered form comes first so the fold in
+/// the callers strips the longer text before the shorter one.
+async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
+    let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await.unwrap_or_default();
+    let mut out = Vec::new();
+    for (content, attachments) in rows {
+        if let Some(json) = attachments.as_deref() {
+            if let Ok(items) = serde_json::from_str::<Vec<crate::attach::Attachment>>(json) {
+                let delivered = crate::attach::deliver_text(&content, &items);
+                if delivered != content {
+                    out.push(delivered);
+                }
+            }
+        }
+        out.push(content);
+    }
+    out
+}
+
+/// The reply this snapshot actually contains, with every echo of our own prompt taken back
+/// off — `None` when nothing survives.
+///
+/// The three pieces (`after_last_prompt_echo` drops the `❯ …` row, `extract_reply` /
+/// `clean_screen` drop the chrome, `strip_echoed_prompt` drops lines 2..n of what we sent)
+/// only mean "the agent said something" when they are applied together, so callers get them
+/// as one function. A screen holding nothing but our own prompt is not an answer and must
+/// not be stored as one.
+fn screen_reply(kind: &str, text: &str, sent: &[String]) -> Option<String> {
+    let raw = extract_reply(kind, text).or_else(|| clean_screen(kind, text))?;
+    let stripped = sent.iter().fold(raw, |acc, p| strip_echoed_prompt(&acc, p));
+    let stripped = stripped.trim();
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Trailing-ellipsis marker a TUI leaves where it clipped the echo of a long prompt.
+const ELLIPSES: [&str; 2] = ["…", "..."];
+
+/// `s` without a trailing `…` / `...`, or `None` if it had none.
+fn without_ellipsis(s: &str) -> Option<&str> {
+    ELLIPSES.iter().find_map(|e| s.strip_suffix(e)).map(str::trim_end)
+}
+
+fn squash(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Does this screen line read as "the rest of the prompt, clipped"?
+///
+/// grok renders a multi-line prompt as its first line on the `❯` row and everything after it
+/// squeezed onto one row ending in `…`. That row can never equal a line of what we sent, so
+/// the line-wise match below gives up on it and the whole appendix is stored as the agent's
+/// answer. Requiring the visible part to be a prefix of the *remaining* prompt (and at least
+/// [`SQUASH_MIN`] characters of it) keeps a real reply that merely ends in `…` safe.
+fn is_clipped_echo(line: &str, rest: &[&str]) -> bool {
+    let Some(body) = without_ellipsis(line.trim()) else { return false };
+    let body = squash(body);
+    if body.chars().count() < SQUASH_MIN {
+        return false;
+    }
+    squash(&rest.join("")).starts_with(&body)
+}
+
 /// Drop the tail of the user's own prompt from the head of what we scraped.
 ///
 /// A multi-line prompt echoes as **one** `❯ <first line>` marker row followed by its remaining
@@ -2933,6 +3008,12 @@ fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
             continue;
         }
         if l != want[w] {
+            // The TUI may have clipped the rest of the echo onto this one row; if so, the
+            // whole tail is accounted for and nothing of it is left on screen.
+            if is_clipped_echo(l, &want[w..]) {
+                i += 1;
+                w = want.len();
+            }
             break;
         }
         i += 1;
@@ -3178,6 +3259,117 @@ fn live_alert(kind: &str, text: &str) -> Option<String> {
 
 const STALL_SECS: u64 = 12;
 
+/// How many rows above the bottom the composer can start. The input box is always the last
+/// thing drawn, but it grows with the text in it (and claude draws a hint row under it).
+const COMPOSER_TAIL: usize = 24;
+
+/// How much of the head of our prompt has to be visible in the composer before we believe it
+/// is our text sitting there. Long enough that a coincidence is implausible, short enough to
+/// survive a TUI that decorates what it pasted (claude turns an attached path into
+/// `[Image #6]` and puts it *in front* of the text, so this is a `contains`, not a prefix).
+const COMPOSER_HEAD: usize = 12;
+
+/// Never match on a fragment this short — a two-character prompt is in every screen.
+const COMPOSER_HEAD_MIN: usize = 4;
+
+/// Strip a row's box drawing / scrollbar decoration so its text can be read.
+fn undecorate_row(line: &str) -> String {
+    let s = strip_grok_decor(line);
+    s.trim().trim_start_matches('│').trim_end_matches('│').trim().to_string()
+}
+
+/// Is this row the horizontal rule that closes the composer?
+fn is_rule_row(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| "─━-=_╭╮╰╯".contains(c))
+}
+
+/// The text currently sitting in the agent's input box, or `None` when the box is empty (or
+/// this CLI has no echo marker we know).
+///
+/// The composer is the **last** `❯ …` / `› …` row on screen plus its continuation rows, so it
+/// is looked for from the bottom. An empty box is `pane_awaits_input`'s job: without that
+/// guard the search would walk back into the transcript and hand back the echo of a prompt
+/// that *was* accepted.
+fn composer_text(kind: &str, screen: &str) -> Option<String> {
+    let marker = prompt_echo_prefix(kind)?.trim_end();
+    if pane_awaits_input(kind, screen) {
+        return None;
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let from = lines.len().saturating_sub(COMPOSER_TAIL);
+    let tail = &lines[from..];
+    let idx = tail.iter().rposition(|l| {
+        let t = undecorate_row(l);
+        t.starts_with(marker) && !t[marker.len()..].trim().is_empty()
+    })?;
+    let mut out: Vec<String> = Vec::new();
+    for (n, line) in tail[idx..].iter().enumerate() {
+        let row = undecorate_row(line);
+        let body = if n == 0 { row[marker.len()..].trim().to_string() } else { row };
+        if n > 0 && (body.is_empty() || is_rule_row(&body)) {
+            break;
+        }
+        out.push(body);
+    }
+    let joined = out.join("\n").trim().to_string();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
+/// Is the prompt we just sent still lying **unsent** in the input box?
+///
+/// Observed 2026-09-07 11:21: a multi-line prompt (text + attachment path) went into claude's
+/// composer while the session was busy compacting, the trailing Enter was swallowed with the
+/// paste, and twelve seconds later the turn was failed as a stall — with the message still
+/// visible in the box, one keystroke from being sent.
+fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
+    let Some(box_text) = composer_text(kind, screen) else { return false };
+    let needle: String = squash(sent).chars().take(COMPOSER_HEAD).collect();
+    if needle.chars().count() < COMPOSER_HEAD_MIN {
+        return false;
+    }
+    squash(&box_text).contains(&needle)
+}
+
+/// Wait this long after delivering a **multi-line** prompt before checking whether the TUI
+/// took it. Long enough for the box to be drawn, short enough that the user does not sit
+/// through the full stall deadline for a keystroke we can supply ourselves.
+const NUDGE_EARLY_SECS: u64 = 3;
+
+/// After re-sending Enter, how long the agent gets to react before the turn is failed.
+const NUDGE_GRACE_SECS: u64 = 8;
+
+/// If our prompt is still in the input box and the agent is idle, press Enter for it.
+///
+/// Returns whether an Enter was actually sent. Every reason to do nothing (turn gone, agent
+/// already working, no pane, nothing recognisable in the box) is a plain `false`: this is a
+/// best-effort rescue in front of the stall report, never a source of errors of its own.
+async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> bool {
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
+    if run.agent_status == "working" || run.agent_status == "blocked" {
+        return false;
+    }
+    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok") {
+        return false;
+    }
+    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
+    let Some(pane) = run.pane_id.clone() else { return false };
+    let Ok(client) = client_for_run(app, &run).await else { return false };
+    let Ok(read) = client.pane_read(&pane, "visible", 80).await else { return false };
+    if !sent.iter().any(|p| composer_holds_prompt(&bot.kind, &read.text, p)) {
+        return false;
+    }
+    if let Err(e) = client.pane_send_keys(&pane, &["Enter"]).await {
+        tracing::warn!(error = ?e, run_id, "could not re-send Enter for an unsent prompt");
+        return false;
+    }
+    tracing::warn!(run_id, turn = %turn_id, "prompt was still in the composer; re-sent Enter");
+    true
+}
+
 /// After a delivered prompt the agent must leave `idle` within `STALL_SECS`; otherwise the
 /// Turn would sit `in_flight` forever (e.g. Claude "Not logged in", or a modal we cannot see)
 /// and the composer would stay locked. Cancelled by the first `working` / `blocked` event.
@@ -3192,10 +3384,34 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
     let turn_id = turn_id.to_string();
     let key = run_id.clone();
     let h = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(STALL_SECS)).await;
+        // What we handed the agent, for the "still in the input box" check below.
+        let sent = turn_echo_texts(&app2, &turn_id).await;
+        let mut nudged = false;
+        // Every prompt gets an early look, not only multi-line ones: a single line pasted
+        // while the TUI is still busy loses its Enter just the same, and the user should not
+        // sit through the full deadline for a keystroke we can supply ourselves.
+        tokio::time::sleep(Duration::from_secs(NUDGE_EARLY_SECS)).await;
+        {
+            let lock = app2.bot_lock(&bot_id).await;
+            let _g = lock.lock().await;
+            nudged = nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
+        }
+        tokio::time::sleep(Duration::from_secs(STALL_SECS - NUDGE_EARLY_SECS)).await;
+        // Deadline. One more look before giving up: if the text is *still* sitting there,
+        // press Enter and give the agent a grace period rather than reporting a stall.
+        {
+            let lock = app2.bot_lock(&bot_id).await;
+            let _g = lock.lock().await;
+            if nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await {
+                nudged = true;
+            }
+        }
+        if nudged {
+            tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;
+        }
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
-        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id).await {
+        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged).await {
             tracing::warn!(error = ?e, "stall watchdog failed");
         }
         app2.stall_timers.lock().await.remove(&run_id);
@@ -3209,7 +3425,13 @@ pub async fn cancel_stall(app: &Arc<App>, run_id: &str) {
     }
 }
 
-async fn fail_stalled_turn(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) -> anyhow::Result<()> {
+async fn fail_stalled_turn(
+    app: &Arc<App>,
+    run_id: &str,
+    bot_id: &str,
+    turn_id: &str,
+    nudged: bool,
+) -> anyhow::Result<()> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(()) };
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Ok(());
@@ -3230,7 +3452,7 @@ async fn fail_stalled_turn(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: 
             }
         }
     }
-    let reason = stall_reason(&hints);
+    let reason = stall_reason(&hints, nudged);
     let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
         .bind(turn_id)
@@ -3264,8 +3486,15 @@ fn stall_hint_lines(screen: &str) -> Vec<String> {
 
 /// Neutral wording: state the symptom, quote the screen, and mention the keychain caveat.
 /// Never claim the agent "is not logged in" — the host may be logged in and stuck for other reasons.
-fn stall_reason(hints: &[String]) -> String {
+fn stall_reason(hints: &[String], nudged: bool) -> String {
     let head = format!("agent 在 {STALL_SECS} 秒內沒有對訊息作出反應。");
+    // `nudged` means the text was still visible in the input box and we pressed Enter for it
+    // — the user should hear that, both as the likely cause and as something already tried.
+    let head = if nudged {
+        format!("{head}訊息還留在輸入框沒送出（TUI 忙碌時會把多行文字當成貼上，吞掉最後的 Enter），已嘗試補送一次 Enter，等 {NUDGE_GRACE_SECS} 秒仍沒有反應。")
+    } else {
+        head
+    };
     if hints.is_empty() {
         return format!("{head}請查看終端分頁。");
     }
@@ -3423,19 +3652,22 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         }
     }
 
-    let reply = extract_reply(&bot.kind, &fresh)
-        .or_else(|| clean_screen(&bot.kind, &fresh))
-        .unwrap_or_else(|| "（終端沒有可辨識的回覆）".to_string());
     // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
     // 2..n on screen and they would be stored as the agent's answer.
-    let sent = db::turn_user_messages(&app.db, &turn.id).await.unwrap_or_default();
-    let reply = sent.iter().fold(reply, |acc, p| strip_echoed_prompt(&acc, p));
+    let sent = turn_echo_texts(app, &turn.id).await;
+    let Some(reply) = screen_reply(&bot.kind, &fresh, &sent) else {
+        // Nothing but our own prompt (or an empty screen). The turn is already closed, so the
+        // composer unlocks either way — storing the echo back as an `incomplete` assistant
+        // message would only put words in the agent's mouth.
+        tracing::info!(turn = %turn.id, "terminal fallback saw only our own prompt; storing no reply");
+        remember_pane_cursor(app, run_id, &read).await?;
+        emit_turn(app, &turn.id).await;
+        return Ok(true);
+    };
 
-    // What is left has to be worth storing. An empty string means the capture was nothing but
-    // our own prompt coming back; a shredded one means the pane is too narrow to read at all.
-    let reply = if reply.trim().is_empty() {
-        "（終端沒有可辨識的回覆）".to_string()
-    } else if is_shredded(&reply) {
+    // What is left has to be worth storing. A shredded capture means the pane is too narrow
+    // to read at all.
+    let reply = if is_shredded(&reply) {
         // Name the pane and its width: "too narrow" is not actionable when the user has a
         // dozen panes open and no idea which one, or how much wider it needs to be.
         let how_wide = match pane_columns(app, &run).await {
@@ -4068,6 +4300,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
         .unwrap_or_else(|| crate::quota::Quota {
             five_hour: None,
             seven_day: None,
+            fable: None,
             plan: None,
             updated_at: crate::db::now(),
             source: "codex-limit-hit".into(),
@@ -4429,6 +4662,163 @@ credits or try again at
   ╰──────────────────────────────────── Grok 4.5 (high) · always-approve ─╯
   Shift+Tab:mode  │  Ctrl+.:shortcuts
 ";
+
+    /// grok's echo of a prompt that carried an attachment (message
+    /// `01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07): the first line goes on the `❯` row and
+    /// everything after it is squeezed onto one row and clipped with `…`. That row used to be
+    /// stored as grok's answer.
+    const GROK_ATTACHMENT_ECHO: &str = "\
+
+   main ~/project/agents-manager                                          250K / 500K
+
+
+     ❯ 是否能有更好的ui表示法                                                7:25 PM
+
+       附加圖片（請讀取這個檔案來查看）： …
+
+
+     ◆ user_prompt_submit  [hooks: 1]
+
+                                                                                       █
+
+    ⠴ Waiting for response… 16s                                       16s ⇣250k [stop]
+
+  Help improve Grok                                                 [Opt out] [Opt in]
+  Off by default. Opt-in to allow SpaceXAI to retain coding data,
+  e.g., prompts, traces, & metrics, for training and debugging
+  purposes. Change anytime via settings.
+  Read Terms and Privacy Policy.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                │
+  ╰─────────────────────────────────────────────── Grok 4.6 (high) · always-approve ─╯
+
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+.:shortcuts
+";
+
+    /// What the agent was actually handed for that turn: what the user typed, plus the
+    /// attachment block `attach::deliver_text` appends.
+    const SENT_WITH_ATTACHMENT: &str = "是否能有更好的ui表示法\n\n附加圖片（請讀取這個檔案來查看）：\n/Users/m1pro/project/agents-manager/.agents-manager/attachments/01M1XSTPGPMTZ3HYENTBP36125-2026-09-07---7-25-01.png";
+
+    /// The screen really does read as an answer until the echo is taken off — that is why it
+    /// was stored — and the clipped row really is all that is left of it.
+    #[test]
+    fn a_clipped_attachment_echo_is_not_an_answer() {
+        assert_eq!(clean_screen("grok", GROK_ATTACHMENT_ECHO).unwrap(), "附加圖片（請讀取這個檔案來查看）： …");
+        let sent = vec![SENT_WITH_ATTACHMENT.to_string()];
+        assert_eq!(screen_reply("grok", GROK_ATTACHMENT_ECHO, &sent), None);
+    }
+
+    /// Only the *delivered* text carries the attachment block; matching against what the
+    /// timeline stores (the typed line alone) is what let the echo through.
+    #[test]
+    fn the_typed_line_alone_does_not_cover_the_echo() {
+        let typed = vec!["是否能有更好的ui表示法".to_string()];
+        assert!(screen_reply("grok", GROK_ATTACHMENT_ECHO, &typed).is_some());
+    }
+
+    /// A real reply after the clipped echo survives — only the echo is taken off.
+    #[test]
+    fn a_reply_after_a_clipped_echo_survives() {
+        let screen = GROK_ATTACHMENT_ECHO.replace(
+            "附加圖片（請讀取這個檔案來查看）： …",
+            "附加圖片（請讀取這個檔案來查看）： …\n\n     好的，我看過圖了。",
+        );
+        let sent = vec![SENT_WITH_ATTACHMENT.to_string()];
+        assert_eq!(screen_reply("grok", &screen, &sent).unwrap(), "好的，我看過圖了。");
+    }
+
+    /// The clipped-echo rule keys on the *content*, not on the `…`: an answer that merely
+    /// trails off must not be eaten.
+    #[test]
+    fn a_reply_that_merely_ends_in_an_ellipsis_is_kept() {
+        let text = "不太確定，讓我先看看那個檔案…";
+        assert_eq!(strip_echoed_prompt(text, SENT_WITH_ATTACHMENT), text);
+    }
+
+    /// ...and neither is a fragment too short to be sure about.
+    #[test]
+    fn a_short_clipped_line_is_not_treated_as_an_echo() {
+        assert!(!is_clipped_echo("附加…", &["附加圖片（請讀取這個檔案來查看）："]));
+        assert!(is_clipped_echo("附加圖片（請讀取這個檔案來查看）： …", &["附加圖片（請讀取這個檔案來查看）：", "/tmp/a.png"]));
+    }
+
+    // ---- the composer check behind the stall watchdog's Enter nudge ----
+
+    /// claude 2.1.263 while a 673k-token session was compacting (2026-09-07 11:21): the
+    /// prompt went in as a paste, the trailing Enter was swallowed, and the text sat in the
+    /// box until the turn was failed as a stall.
+    const CLAUDE_UNSENT_PROMPT: &str = "\
+❯ 直接做，且要確保claude裝有herdr 的skill
+
+  Ran 3 shell commands
+
+⏺ 已派出 agents-manager-6verqr-track（pane w8:p25），正在讀 config / state 開始做。
+
+✻ Worked for 2m 14s · done 3:34 PM
+                                                new task? /clear to save 673k tokens
+──────────────────────────────────────────────────────────────────────────────────
+❯ [Image #6]試著對claude max方案增加 fable用量的讀取
+  附加圖片（請讀取這個檔案來查看）：
+──────────────────────────────────────────────────────────────────────────────────
+  tony. | agents-manager | Fable 5.1 67% | 5h:- | 7d:92%(rst 6d 16h) | F5:85%   /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+";
+
+    const SENT_UNSENT_PROMPT: &str = "試著對claude max方案增加 fable用量的讀取\n\n附加圖片（請讀取這個檔案來查看）：\n/Users/m1pro/project/agents-manager/.agents-manager/attachments/x.png";
+
+    #[test]
+    fn an_unsent_prompt_is_seen_in_the_composer() {
+        // The box, not the transcript echo above it — and claude's `[Image #6]` decoration
+        // in front of our text does not hide it.
+        assert_eq!(
+            composer_text("claude", CLAUDE_UNSENT_PROMPT).unwrap(),
+            "[Image #6]試著對claude max方案增加 fable用量的讀取\n附加圖片（請讀取這個檔案來查看）："
+        );
+        assert!(composer_holds_prompt("claude", CLAUDE_UNSENT_PROMPT, SENT_UNSENT_PROMPT));
+    }
+
+    /// What claude really draws after `❯` is U+00A0, not a space (pane read 2026-09-07
+    /// 20:0x, `❯\u{a0}[Image #6]…`). The marker must not care which blank follows it.
+    #[test]
+    fn a_no_break_space_after_the_marker_still_reads_as_the_composer() {
+        let screen = CLAUDE_UNSENT_PROMPT.replace("❯ [Image #6]", "❯\u{a0}[Image #6]");
+        assert!(composer_text("claude", &screen).is_some());
+        assert!(composer_holds_prompt("claude", &screen, SENT_UNSENT_PROMPT));
+        assert!(!pane_awaits_input("claude", &screen));
+    }
+
+    /// The prompt *was* taken: the box is empty and the echo is only in the transcript. No
+    /// Enter must be sent here — pressing it would submit an empty prompt.
+    #[test]
+    fn an_accepted_prompt_leaves_the_composer_empty() {
+        let screen = CLAUDE_UNSENT_PROMPT.replace(
+            "❯ [Image #6]試著對claude max方案增加 fable用量的讀取\n  附加圖片（請讀取這個檔案來查看）：",
+            "❯",
+        );
+        assert_eq!(composer_text("claude", &screen), None);
+        assert!(!composer_holds_prompt("claude", &screen, SENT_UNSENT_PROMPT));
+    }
+
+    /// Someone else's text in the box is not ours.
+    #[test]
+    fn other_text_in_the_composer_is_not_our_prompt() {
+        assert!(!composer_holds_prompt("claude", CLAUDE_UNSENT_PROMPT, "完全不一樣的另一個問題"));
+        // grok's empty box (`│ ❯ │`) reads as empty through its border glyphs too.
+        assert_eq!(composer_text("grok", GROK_SCREEN), None);
+    }
+
+    /// A prompt too short to identify is never matched — every screen contains "hi".
+    #[test]
+    fn a_very_short_prompt_is_not_matched() {
+        assert!(!composer_holds_prompt("claude", CLAUDE_UNSENT_PROMPT, "試"));
+    }
+
+    #[test]
+    fn the_stall_message_says_an_enter_was_re_sent() {
+        assert!(stall_reason(&[], true).contains("補送"));
+        assert!(!stall_reason(&[], false).contains("補送"));
+    }
 
     #[test]
     fn grok_banner_is_skipped_as_a_block() {

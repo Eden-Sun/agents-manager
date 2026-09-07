@@ -327,6 +327,8 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
     if prev == "working" && status == "idle" {
         crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;
+        // A prompt queued while the agent was still working waits for exactly this edge.
+        crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
     }
 }
 
