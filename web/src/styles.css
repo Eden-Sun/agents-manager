@@ -7556,6 +7556,48 @@ button.team-workers:disabled {
   line-height: 1.4;
   white-space: nowrap;
 }
+/* 標題正下方的進度／耗時。跟 `.team-collapsed-label` 不同，這一行不隨收合消失——
+   「跑到哪、跑多久」是掃過側欄時唯一想知道的兩件事，藏進 tooltip 等於沒有。
+   縮排對齊標題（左邊讓開 chevron 的 28px + gap），跑動中整行轉 accent。 */
+.team-issue-progress {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 8px 5px 39px;
+  color: var(--text-dim);
+}
+
+.team-issue-progress.running {
+  color: var(--accent-ink);
+}
+
+.tip-count {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.tip-total {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.tip-elapsed {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.team-node.terminal .team-issue-progress {
+  color: var(--text-faint);
+}
+
 .team-phase-dot {
   flex: none;
   width: 8px;

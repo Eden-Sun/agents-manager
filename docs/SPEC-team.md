@@ -107,6 +107,19 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 > 改這條之前，一個 issue 在同一隊做過（或失敗過）一次就永遠不能再排，UI 的「追加 issue」只會回
 > `409 issue already queued`。全表唯一的舊索引 `team_issues_number` 由開機遷移 `DROP`。
 
+**UI 的進度口徑（2026-09-08）**：daemon 沒有、也不打算有一個現成的「回合數／總回合數」，
+所以側欄 team 卡片與佇列進度條上的 `N/M` 是前端從既有欄位算出來的
+（`web/src/components/teamProgress.ts`，附 `teamProgress.test.ts`）：
+
+- **有佇列**（`issues_summary.total >= 2`）：`N` = `done + failed + (當前那一項是 working ? 1 : 0)`，
+  夾在 `total` 以內；`M` = `issues_summary.total`。也就是「正在做第幾個 issue」——交付 1 個、
+  正在做第 2 個 → `2/20`，全部結束時 `20/20`。
+- **單一 issue**：改數步驟，`N` = `tasks_summary` 裡 `merged` + `skipped` + `failed` 的和，
+  `M` = `tasks_summary.total`。PM 還沒拆 task 時 `total` 是 0，UI 就只報耗時、不報計數。
+- **耗時**：從**當前這一項**的 `team_issues.started_at` 起算（跟 §9 的 `max_wall_clock_min` 同一個起點），
+  凍結在該項的 `ended_at`；佇列裡沒有對應那一項的舊 team 退回 `teams.started_at` / `ended_at`，
+  整隊結束時一律凍結（否則做完的卡片會一直跳秒）。
+
 ### 2.4 Submodule 的 issue（2026-09-07）
 
 專案的 git submodule 各自是一個 repo、各自有 GitHub issue。一個 team 可以指定 `repo`（相對於專案根目錄的 submodule 路徑，`""` = 專案本身），之後：
