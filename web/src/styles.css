@@ -2674,7 +2674,9 @@ button:disabled {
   place-items: center;
   border: 2px dashed var(--accent);
   border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--accent-soft) 82%, transparent);
+  /* 幾乎透明：拖圖進來時對話還要看得見（macOS 截圖縮圖拖曳時整片糊掉很難判斷丟在哪）。
+     只留虛線框＋中央小標籤，別加 backdrop-filter。 */
+  background: color-mix(in srgb, var(--accent-soft) 12%, transparent);
   pointer-events: none;
 }
 
@@ -7738,6 +7740,9 @@ button.run-debug-toggle:hover {
 
 .shelf {
   position: relative;
+  /* 高於 `.drop-veil`（20）與 `.shelf-pad`（22）以外的對話層：拖曳中的對話遮罩不能把
+     暫存區的 drop 目標蓋掉，不然截圖縮圖永遠丟不進暫存。 */
+  z-index: 30;
   display: flex;
   min-width: 0;
   min-height: 0;
