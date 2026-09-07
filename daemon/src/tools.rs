@@ -281,17 +281,54 @@ pub async fn identity_for_host(app: &Arc<App>, host: &str, name: &str) -> Option
 /// `.credentials.json` being absent proves nothing. Every one of these is read-only and
 /// answers for whatever env it is given.
 ///
-/// * claude — `auth status --json` (`loggedIn`, `email`, `subscriptionType`)
+/// * claude — **not here**: `auth status --json` over a non-login ssh session cannot read the
+///   macOS Keychain, so it answers `loggedIn: false` for accounts that work fine. It runs in a
+///   herdr pane instead, alongside `/usage` ([`crate::quota_claude`]), and the answer lands
+///   back here through [`record_identity_login`].
 /// * codex  — `login status` (`Logged in using …` / `Not logged in`)
 /// * grok   — `models` (`You are logged in with …` / `You are not authenticated.`); grok has
 ///   no `status` subcommand, and `models` is already how `models.rs` talks to it.
 pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
-        "claude" => Some(&["auth", "status", "--json"]),
         "codex" => Some(&["login", "status"]),
         "grok" => Some(&["models"]),
         _ => None,
     }
+}
+
+/// The claude arguments the pane probe uses. Kept next to [`login_status_args`] so the two
+/// stay in step even though claude deliberately no longer goes through the ssh pass.
+pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
+
+/// Write one identity's login answer into the cached `HostTools`, creating the row if the
+/// tools pass has not seen this identity yet. Returns whether anything actually changed, so
+/// the caller only pushes `host_changed` when the UI would see something new.
+pub async fn record_identity_login(
+    app: &Arc<App>,
+    host: &str,
+    name: &str,
+    logged_in: Option<bool>,
+    account: Option<String>,
+    plan: Option<String>,
+) -> bool {
+    let mut all = app.tools.lock().await;
+    let Some(ht) = all.get_mut(host) else { return false };
+    let Some(info) = ht.identities.get_mut(name) else { return false };
+    // A pane answer of "could not tell" must not erase what we already knew.
+    if logged_in.is_none() && account.is_none() && plan.is_none() {
+        return false;
+    }
+    let before = (info.logged_in, info.account.clone(), info.plan.clone());
+    if logged_in.is_some() {
+        info.logged_in = logged_in;
+    }
+    if account.is_some() {
+        info.account = account;
+    }
+    if plan.is_some() {
+        info.plan = plan;
+    }
+    before != (info.logged_in, info.account.clone(), info.plan.clone())
 }
 
 /// One identity to ask about, already resolved for a specific host.
@@ -307,7 +344,7 @@ pub struct IdentityProbe {
 
 /// A shell-assignable variable name. Config is user-written, and these values are `export`ed
 /// into a script, so anything else is dropped rather than quoted around.
-fn valid_env_name(k: &str) -> bool {
+pub(crate) fn valid_env_name(k: &str) -> bool {
     !k.is_empty()
         && !k.starts_with(|c: char| c.is_ascii_digit())
         && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -339,7 +376,7 @@ pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
 
 /// Read one CLI's answer → `(logged_in, account, plan)`. Anything unrecognised stays `None`
 /// ("could not tell"), never `Some(false)`.
-fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option<String>, Option<String>) {
+pub(crate) fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option<String>, Option<String>) {
     let text = body.trim();
     if text.is_empty() {
         return (None, None, None);
@@ -699,23 +736,32 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     #[test]
     fn identity_script_exports_env_per_subshell() {
         let sh = identity_probe_sh(&[
-            probe("cc0", "claude", &[]),
-            probe("cc1", "claude", &[("CLAUDE_CONFIG_DIR", "/Users/m4p/.claude-ccompany")]),
+            probe("gk0", "grok", &[]),
+            probe("cx1", "codex", &[("CODEX_HOME", "/Users/m4p/.codex-alt")]),
         ]);
-        assert!(sh.contains("AM_IDENT_BEGIN %s\\n' 'cc0'"));
-        assert!(sh.contains("AM_IDENT_END %s\\n' 'cc1'"));
-        // cc0 has no env of its own, so its subshell must not carry cc1's.
-        let cc0 = sh.split("AM_IDENT_BEGIN %s\\n' 'cc0'").nth(1).unwrap().split("AM_IDENT_END").next().unwrap();
-        assert!(!cc0.contains("CLAUDE_CONFIG_DIR"));
-        assert!(cc0.contains("exec '/opt/homebrew/bin/claude' 'auth' 'status' '--json'"));
-        assert!(sh.contains("CLAUDE_CONFIG_DIR='/Users/m4p/.claude-ccompany'; export CLAUDE_CONFIG_DIR;"));
+        assert!(sh.contains("AM_IDENT_BEGIN %s\\n' 'gk0'"));
+        assert!(sh.contains("AM_IDENT_END %s\\n' 'cx1'"));
+        // gk0 has no env of its own, so its subshell must not carry cx1's.
+        let gk0 = sh.split("AM_IDENT_BEGIN %s\\n' 'gk0'").nth(1).unwrap().split("AM_IDENT_END").next().unwrap();
+        assert!(!gk0.contains("CODEX_HOME"));
+        assert!(gk0.contains("exec '/opt/homebrew/bin/grok' 'models'"));
+        assert!(sh.contains("CODEX_HOME='/Users/m4p/.codex-alt'; export CODEX_HOME;"));
         // stdin closed: none of these CLIs may wait for a TTY.
         assert!(sh.contains("</dev/null"));
     }
 
+    /// claude 不走這條 ssh 路（憑證可能在 Keychain 裡，非登入 shell 看不到），
+    /// 它的登入答案由 [`crate::quota_claude`] 的 pane 探測帶回來。
+    #[test]
+    fn claude_is_not_asked_over_ssh() {
+        assert!(login_status_args("claude").is_none());
+        let sh = identity_probe_sh(&[probe("cc1", "claude", &[("CLAUDE_CONFIG_DIR", "/Users/m4p/.claude-ccompany")])]);
+        assert_eq!(sh, "");
+    }
+
     #[test]
     fn identity_script_drops_env_names_that_are_not_shell_identifiers() {
-        let sh = identity_probe_sh(&[probe("cc1", "claude", &[("OK_VAR", "1"), ("bad name", "2"), ("2BAD", "3")])]);
+        let sh = identity_probe_sh(&[probe("cx1", "codex", &[("OK_VAR", "1"), ("bad name", "2"), ("2BAD", "3")])]);
         assert!(sh.contains("OK_VAR='1'"));
         assert!(!sh.contains("bad name"));
         assert!(!sh.contains("2BAD"));
@@ -754,9 +800,10 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(!m.contains_key("c"));
     }
 
+    /// claude 例外（見 [`claude_is_not_asked_over_ssh`]）；其餘每種 CLI 都要有一條 ssh 問法。
     #[test]
-    fn every_kind_has_a_login_question() {
-        for k in crate::config::KINDS {
+    fn every_other_kind_has_a_login_question() {
+        for k in crate::config::KINDS.iter().filter(|k| **k != "claude") {
             assert!(login_status_args(k).is_some(), "{k} has no login status command");
         }
         assert!(login_status_args("nope").is_none());

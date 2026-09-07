@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -1016,6 +1017,26 @@ pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
     .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string()))
 }
 
+/// Every identity that has a live bot run on `host` right now.
+///
+/// A bot chatting under `cc1` on that host is proof the account *is* logged in there, whatever
+/// the last `claude auth status` answered — see [`crate::quota_claude`]. Unlike the in-memory
+/// statusLine trace this survives a daemon restart, because it is just the run table.
+pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BTreeSet<String>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT b.identity FROM runs r
+           JOIN bots b ON b.id = r.bot_id
+           JOIN projects p ON p.id = b.project_id
+          WHERE r.state IN ('starting','running','stopping')
+            AND p.host = ? AND b.deleted_at IS NULL
+            AND b.identity IS NOT NULL AND b.identity <> ''",
+    )
+    .bind(host)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Active runs sitting on `pane_id` in a host/session. `fallback_session` is used for old rows
 /// whose effective session was not stored yet.
 pub async fn active_runs_for_pane(
@@ -1755,5 +1776,46 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
+    /// The daemon-restart-proof half of the claude quota gate: an identity with a live run on a
+    /// host counts as logged in there, whatever the last `auth status` said (see
+    /// [`crate::quota_claude::should_probe_identity`]).
+    #[tokio::test]
+    async fn live_identities_are_per_host_and_only_count_active_runs() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("live.sqlite3")).await.unwrap();
+        for (id, host) in [("pl", "local"), ("pm", "m4p")] {
+            sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,?,?)")
+                .bind(id).bind(format!("/tmp/{id}")).bind(id).bind(host).bind(now())
+                .execute(&pool).await.unwrap();
+        }
+        // (bot, project, identity, run state)
+        let bots = [
+            ("b1", "pm", "cc1", "running"),
+            ("b2", "pm", "cc2", "stopped"),   // ended — proves nothing
+            ("b3", "pl", "cc3", "running"),   // another host
+            ("b4", "pm", "", "running"),      // no identity (default account)
+            ("b5", "pm", "cc4", "starting"),  // still counts
+        ];
+        for (b, p, ident, state) in bots {
+            sqlx::query(
+                "INSERT INTO bots (id, project_id, name, kind, hook_token, identity, created_at) VALUES (?,?,?,'claude','tok',?,?)",
+            )
+            .bind(b).bind(p).bind(b).bind(ident).bind(now())
+            .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO runs (id, bot_id, state, started_at) VALUES (?,?,?,?)")
+                .bind(format!("r{b}")).bind(b).bind(state).bind(now())
+                .execute(&pool).await.unwrap();
+        }
+        let live = live_identities_on_host(&pool, "m4p").await.unwrap();
+        assert_eq!(live, ["cc1".to_string(), "cc4".to_string()].into_iter().collect());
+        assert_eq!(live_identities_on_host(&pool, "local").await.unwrap(), ["cc3".to_string()].into_iter().collect());
+
+        // A deleted bot stops vouching for its account.
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b1'").bind(now()).execute(&pool).await.unwrap();
+        assert_eq!(live_identities_on_host(&pool, "m4p").await.unwrap(), ["cc4".to_string()].into_iter().collect());
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
