@@ -1124,9 +1124,6 @@ export function Sidebar() {
                 <div className="project-empty">
                   <span className="project-empty-title">此專案尚無 Bot</span>
                   <QuickAddBots projectId={p.id} />
-                  <button type="button" className="btn primary empty-add-btn" onClick={() => openBotSheet(p.id)}>
-                    新增 Bot…
-                  </button>
                 </div>
               ) : (
                 list.map((b) => {

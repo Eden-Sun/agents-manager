@@ -2244,6 +2244,11 @@ button:disabled {
   cursor: default;
 }
 
+.quick-add-out {
+  font-size: 11px;
+  color: var(--warn);
+}
+
 .quick-add-label {
   font-weight: 600;
 }
