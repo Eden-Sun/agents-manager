@@ -6,16 +6,26 @@
 
 ## 架構
 
-```
-┌──────────────┐  REST + WebSocket   ┌────────────────────────┐  Unix socket (JSON lines)  ┌─────────────────────┐
-│ React 前端    │ ◄────────────────► │ Rust daemon (axum)      │ ◄────────────────────────► │ herdr headless server│
-│ (Vite)       │                     │  herdr client           │                            │ session=agents-mgr   │
-└──────────────┘                     │  registry + state       │                            └──────────┬──────────┘
-                                     │  conversation store     │      hook / notify HTTP               │ panes
-                                     │  hook receiver  ◄───────┼───────────────────────────────┐ ┌────▼────────────┐
-                                     └────────┬────────────────┘                               └─┤ claude / codex  │
-                                              │ SQLite + config.toml                               │ / grok          │
-                                     ~/.config/agents-manager/                                     └─────────────────┘
+```mermaid
+flowchart LR
+    web["React 前端 (Vite)"]
+    subgraph daemon["Rust daemon (axum)"]
+        direction TB
+        d1["herdr client"]
+        d2["registry + state"]
+        d3["conversation store"]
+        d4["hook receiver"]
+    end
+    store[("SQLite + config.toml<br/>~/.config/agents-manager/")]
+    subgraph herdr["herdr headless server (session=agents-mgr)"]
+        direction TB
+        panes["panes: claude / codex / grok"]
+    end
+
+    web <-- "REST + WebSocket" --> daemon
+    daemon <-- "Unix socket (JSON lines)" --> herdr
+    panes -- "hook / notify HTTP" --> d4
+    daemon --- store
 ```
 
 三者分工：
