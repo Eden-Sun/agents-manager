@@ -1352,6 +1352,18 @@ mod search_tests {
         let s = snippet_around("資料夾選擇介面的問題", "資料夾", 90);
         assert_eq!(s, "資料夾選擇介面的問題");
     }
+
+    /// `İ.to_lowercase()` is two chars, so the lowercased copy is *longer* than the original:
+    /// a hit position measured in it used to index past the end of the original and panic
+    /// (`/search/messages` answered 500 for any message holding one).
+    #[test]
+    fn a_hit_after_a_char_that_grows_when_lowercased_stays_in_bounds() {
+        let content = format!("{}命中", "İ".repeat(40));
+        let s = snippet_around(&content, "命中", 90);
+        assert!(s.contains("命中"), "the hit is in the window: {s}");
+        let s = snippet_around(&content, "i\u{307}", 90);
+        assert!(s.starts_with('İ'), "and a lowercase needle still matches the original: {s}");
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1366,13 +1378,29 @@ fn like_escape(q: &str) -> String {
     q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// Where `needle_lower` (already lowercase) first appears in `chars`, compared
+/// case-insensitively — as an index into `chars` itself.
+///
+/// Not `content.to_lowercase().find(..)`: lowercasing is not one char per char. `İ` becomes
+/// two (`i` + a combining dot), so an index taken from the lowercased copy can point past the
+/// end of the original — and slicing `chars` with it panicked the whole `/search/messages`
+/// into a 500. Comparing char by char keeps every index in the original's coordinates.
+fn find_ci(chars: &[char], needle_lower: &str) -> Option<usize> {
+    (0..=chars.len()).find(|&at| starts_with_ci(&chars[at..], needle_lower))
+}
+
+/// Does `hay` start with `needle_lower`, ignoring case? Each haystack char is expanded by
+/// `char::to_lowercase` (one char can yield several) and matched against the needle in order.
+fn starts_with_ci(hay: &[char], needle_lower: &str) -> bool {
+    let mut lows = hay.iter().flat_map(|c| c.to_lowercase());
+    needle_lower.chars().all(|w| lows.next() == Some(w))
+}
+
 /// A window around the first hit, so the caller sees *why* the message matched rather than
 /// its first 80 characters. Character-based, not byte-based: the content is mostly CJK.
 fn snippet_around(content: &str, needle_lower: &str, width: usize) -> String {
     let chars: Vec<char> = content.chars().collect();
-    let lower: Vec<char> = content.to_lowercase().chars().collect();
-    let hay: String = lower.iter().collect();
-    let at = hay.find(needle_lower).map_or(0, |b| hay[..b].chars().count());
+    let at = find_ci(&chars, needle_lower).unwrap_or(0);
     let start = at.saturating_sub(width / 3);
     let end = (start + width).min(chars.len());
     let mut out = String::new();
