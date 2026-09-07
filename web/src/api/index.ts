@@ -32,6 +32,7 @@ import type {
   MessagesPage,
   NewBotInput,
   NewProjectInput,
+  PatchProjectInput,
   NewTeamInput,
   PatchBotInput,
   PatchBotResult,
@@ -209,6 +210,14 @@ export async function reconnectHost(name: string): Promise<HostResult> {
 export async function createProject(input: NewProjectInput): Promise<string> {
   const raw = await transport.request('POST', '/projects', input)
   return isRec(raw) ? str(pick(raw, 'project_id', 'id')) : ''
+}
+
+/**
+ * `PATCH /api/projects/:id` (API.md §3). Renaming is never blocked by a live run: the label
+ * only feeds the `agent_name` slug of the *next* start.
+ */
+export async function patchProject(projectId: string, input: PatchProjectInput): Promise<void> {
+  await transport.request('PATCH', `/projects/${encodeURIComponent(projectId)}`, input)
 }
 
 export async function deleteProject(projectId: string): Promise<void> {

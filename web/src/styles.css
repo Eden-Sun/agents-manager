@@ -4741,6 +4741,84 @@ button.model-tag[aria-expanded='true'] {
   grid-column: 2;
 }
 
+/* 專案標題就是改名欄位（比照 `.bot-name`）：選取中的專案再點一次標題才進編輯，
+   未選取時第一下仍然是「開這個專案」。 */
+.project-label.renamable {
+  cursor: text;
+  padding: 0 3px;
+  margin-left: -3px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+
+.project-label.renamable:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-panel);
+}
+
+/* 側欄的輸入框要剛好佔住標題原本那格，不然那一列會變高、白框會蓋到上一列。 */
+.project-label-input.row {
+  grid-row: 1;
+  grid-column: 2;
+  justify-self: start;
+  box-sizing: border-box;
+  max-width: 100%;
+  height: 19px;
+  padding: 0 2px;
+  margin-left: -3px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* 群組聊天標頭：跟 `.bot-name-btn` / `.bot-name-input` 同一個外觀。 */
+.project-label-head-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: text;
+  overflow: hidden;
+}
+
+.project-label-head-btn > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-label-head-btn:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.project-label-input.head {
+  max-width: 16em;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.project-label-input.bad {
+  border-color: var(--danger);
+}
+
 .project-label-btn .unread-badge {
   grid-row: 1;
   grid-column: 3;

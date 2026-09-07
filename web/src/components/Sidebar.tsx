@@ -30,6 +30,7 @@ import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { AttachButton } from './AttachButton'
 import { BotNameField } from './BotNameField'
+import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
 import { ModelTag } from './ModelTag'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
@@ -701,21 +702,15 @@ function ProjectTitle({
     folded ? s.bots.reduce((n, b) => (b.project_id === projectId ? n + (s.botUnread[b.id] ?? 0) : n), 0) : 0,
   )
   const selectProject = useStore((s) => s.selectProject)
-  return (
-    <button
-      type="button"
-      className={`project-label-btn${selected ? ' selected' : ''}`}
-      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}`}
-      aria-pressed={selected}
-      onClick={(e) => {
-        e.stopPropagation()
-        selectProject(projectId)
-      }}
-    >
+  // An `<input>` may not live inside a `<button>`, so renaming swaps the whole row for a
+  // plain `<div>` wearing the same class — the row keeps its size and the field gets focus.
+  const [editing, setEditing] = useState(false)
+  const inner = (
+    <>
       <span className="project-group-icon" aria-hidden="true">
         ⌗
       </span>
-      <span className="project-label">{label}</span>
+      <ProjectNameField projectId={projectId} label={label} variant="row" armed={selected} editing={editing} onEditing={setEditing} />
       {unread > 0 ? (
         <span className="unread-badge" title={`${unread} 則未讀的群組回覆`}>
           {unread > 99 ? '99+' : unread}
@@ -730,6 +725,23 @@ function ProjectTitle({
       <span className="project-path" title={path}>
         {shortPath(path, 36)}
       </span>
+    </>
+  )
+  if (editing) {
+    return <div className={`project-label-btn${selected ? ' selected' : ''}`}>{inner}</div>
+  }
+  return (
+    <button
+      type="button"
+      className={`project-label-btn${selected ? ' selected' : ''}`}
+      title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}`}
+      aria-pressed={selected}
+      onClick={(e) => {
+        e.stopPropagation()
+        selectProject(projectId)
+      }}
+    >
+      {inner}
     </button>
   )
 }

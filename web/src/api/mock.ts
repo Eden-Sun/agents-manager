@@ -757,6 +757,7 @@ export class MockTransport implements Transport {
 
     if (method === 'POST' && rawPath === '/projects') return this.addProject(b)
     if (method === 'DELETE' && seg[0] === 'projects' && seg.length === 2) return this.deleteProject(seg[1])
+    if (method === 'PATCH' && seg[0] === 'projects' && seg.length === 2) return this.patchProject(seg[1], b)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'bots') return this.addBot(seg[1], b)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'messages') return this.projectMessages(seg[1], q)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'submodules') return { project_id: seg[1], submodules: [] }
@@ -1452,6 +1453,18 @@ export class MockTransport implements Transport {
     this.projects.push(p)
     this.emit('project_changed', { project_id: p.id })
     return { project_id: p.id }
+  }
+
+  private patchProject(id: string, b: Rec) {
+    const p = this.projects.find((x) => x.id === id)
+    if (!p) throw new ApiError(404, { reason: 'project' }, 'not_found')
+    if (b.label !== undefined) {
+      const label = String(b.label ?? '').trim()
+      if (!label) throw new ApiError(400, { reason: 'project label must not be empty' }, 'bad_request')
+      p.label = label
+    }
+    this.emit('project_changed', { project_id: id })
+    return { project_id: id, needs_restart: false }
   }
 
   private deleteProject(id: string) {

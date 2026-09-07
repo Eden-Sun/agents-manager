@@ -7,6 +7,7 @@ import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
+import { ProjectNameField } from './ProjectNameField'
 import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, LoadEarlier, useScrollTail } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { useShelfSink } from './ImageShelf'
@@ -545,6 +546,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   // drop anywhere in the group chat area is accepted.
   const files = useAttachments(members[0]?.id ?? null)
   const drop = useDropTarget(files.add, memberCount === 0)
+  const [renaming, setRenaming] = useState(false)
   // 同 ChatPanel：讓右側圖片暫存區把「點一下」的圖片交給這個群組草稿。
   useShelfSink(files.add, memberCount > 0 ? `${project?.label ?? ''} 群組` : null)
 
@@ -585,7 +587,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           <span className="group-icon" aria-hidden="true">
             ⌗
           </span>
-          <strong title={project.path}>{project.label}</strong>
+          <ProjectNameField projectId={projectId} label={project.label} editing={renaming} onEditing={setRenaming} />
           <span className="group-tag">群組</span>
           <HostBadge host={hostName} connected={hostUp} />
         </div>

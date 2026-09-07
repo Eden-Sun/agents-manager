@@ -48,7 +48,7 @@ pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
-        .route("/projects/{id}", delete(delete_project))
+        .route("/projects/{id}", patch(patch_project).delete(delete_project))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
         .route("/projects/{id}/chat", post(project_chat))
@@ -681,6 +681,48 @@ async fn decide_team_task(
 ) -> Result<Response, LcError> {
     let out = crate::team::decide(&app, &tid, &task_id, &b.action, b.note.as_deref()).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+#[derive(Deserialize)]
+struct PatchProject {
+    label: Option<String>,
+}
+
+/// `PATCH /api/projects/:id` `{"label"}` — rename a project. Never blocked by a live run:
+/// a bot's herdr identity is derived from its bot id, so only the legacy names and the
+/// `agent_name` slug of the *next* start follow the label, hence `needs_restart: false`.
+async fn patch_project(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<PatchProject>,
+) -> Result<Response, LcError> {
+    let label = match &b.label {
+        None => None,
+        Some(l) => {
+            let l = l.trim();
+            if l.is_empty() {
+                return Err(LcError::Bad("project label must not be empty".into()));
+            }
+            Some(l.to_string())
+        }
+    };
+    app.cfg
+        .update(|cfg| {
+            let p = cfg
+                .projects
+                .iter_mut()
+                .find(|p| p.id.as_deref() == Some(id.as_str()))
+                .ok_or_else(|| anyhow::anyhow!("no-project"))?;
+            if let Some(l) = &label {
+                p.label = l.clone();
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { any_err(e) })?;
+    reproject(&app).await?;
+    app.emit("project_changed", json!({"project_id": id})).await;
+    Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
 }
 
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
@@ -1331,6 +1373,58 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
 ///
 /// `host` narrows a refresh to one host (default: `local` plus every connected remote one).
 /// The body is always the full map — one entry per host + kind (SPEC §14).
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    /// `PATCH /api/projects/:id {label}` renames in place and never asks for a restart:
+    /// the label only feeds the `agent_name` slug of the next start.
+    #[tokio::test]
+    async fn patch_renames_the_project_and_rejects_a_blank_label() {
+        let e = crate::team::testing::env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        // `testing::env` only seeds the db row; the rename edits config.toml, so register it.
+        app.cfg
+            .update(|cfg| {
+                cfg.projects.push(crate::config::ProjectCfg {
+                    id: Some(pid.clone()),
+                    path: e.repo.to_string_lossy().to_string(),
+                    label: "proj".into(),
+                    host: "local".into(),
+                    bots: vec![],
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let res = patch_project(
+            State(app.clone()),
+            Path(pid.clone()),
+            Json(PatchProject { label: Some("  改過的名字  ".into()) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let p = db::project(&app.db, &pid).await.unwrap().unwrap();
+        assert_eq!(p.label, "改過的名字", "the label is trimmed and projected into the db");
+        assert!(app.cfg.get().await.projects.iter().any(|x| x.label == "改過的名字"), "and written to config.toml");
+
+        // Blank is a 400, and the old label survives.
+        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("   ".into()) }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "blank label is a 400, got {err:?}");
+        assert_eq!(db::project(&app.db, &pid).await.unwrap().unwrap().label, "改過的名字");
+
+        // An unknown project is a 404.
+        let err = patch_project(State(app), Path("nope".into()), Json(PatchProject { label: Some("x".into()) }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LcError::NotFound(_)), "unknown project is a 404, got {err:?}");
+    }
+}
+
 #[cfg(test)]
 mod search_tests {
     use super::*;

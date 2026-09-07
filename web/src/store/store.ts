@@ -32,7 +32,7 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -481,6 +481,8 @@ interface StoreState {
   cloneBot: (botId: string) => Promise<string | null>
   /** `PATCH /api/bots/:id` — 回傳 `needs_restart`，失敗回 null（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
+  /** `PATCH /api/projects/:id` — 目前只有 label（改名）。true = 已套用。 */
+  patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
   restartBot: (botId: string) => Promise<boolean>
   removeBot: (botId: string) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
@@ -1328,6 +1330,19 @@ export const useStore = create<StoreState>((set, get) => ({
     } catch (e) {
       get().notify('error', errText(e))
     }
+  },
+
+  async patchProject(projectId, input) {
+    if (Object.keys(input).length === 0) return false
+    let ok = false
+    try {
+      await api.patchProject(projectId, input)
+      await get().refreshState()
+      ok = true
+    } catch (e) {
+      get().notify('error', errText(e))
+    }
+    return ok
   },
 
   async removeProject(projectId) {

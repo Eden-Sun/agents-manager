@@ -538,6 +538,10 @@ export interface NewProjectInput {
   host?: string
 }
 
+export interface PatchProjectInput {
+  label?: string
+}
+
 export interface DirEntry {
   name: string
   path: string
