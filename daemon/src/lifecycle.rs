@@ -2083,6 +2083,40 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
     Ok(())
 }
 
+/// `POST /api/bots/:id/text` — 把一段（可能多行的）文字打進 bot 的 pane，選擇性按 Enter。
+///
+/// 和 `send_keys` 的差別就是「文字」和「鍵」的差別：`agent.send_keys` 吃鍵名，`\n` 不是
+/// 鍵名，多行文字拆成鍵名會整段掉。Enter 也一樣要**另外**用 `pane.send_keys` 送——`\n`
+/// 在 `pane.send_text` 裡是貼上的換行，不是送出（同 `shell::send_text`）。
+///
+/// 不擋 `agent_status`：這條路的用途正是「回合跑到一半時再補一句」（前端的「併送」），
+/// 那時 agent 本來就是 working。
+pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, expect_run_id: Option<String>) -> LcResult<()> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    if let Some(exp) = expect_run_id {
+        if exp != run.id {
+            return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
+        }
+    }
+    let pane_id = run
+        .pane_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| LcError::NotFound("pane".into()))?
+        .to_string();
+    let client = client_for_run(app, &run).await?;
+    if !text.is_empty() {
+        client.pane_send_text(&pane_id, text).await.map_err(up)?;
+    }
+    if enter {
+        client.pane_send_keys(&pane_id, &["enter"]).await.map_err(up)?;
+    }
+    Ok(())
+}
+
 /// Build the TUI slash command for a live setting, or `None` if this kind/field
 /// has no in-session command (caller then reports `needs_restart`).
 fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {

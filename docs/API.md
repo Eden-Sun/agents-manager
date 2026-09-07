@@ -115,10 +115,17 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed）；送不出 `esc` → 502，Turn **維持** in-flight |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}` — **強制**結束目前回合，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
+| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?:"..."}` | `200 {}`；Run 沒有 pane → 404；`expect_run_id` 不符 → 409 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；該 Turn 既非 in-flight 也非 delivery=unknown → 409 |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id":"...","kind":"claude","command":"/login"}`；見下 |
 
 `keys` 可用的鍵名由 herdr 驗證，常用：`enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
+
+**文字要用 `/text`，不要用 `/keys`。** `keys` 送的是鍵名，`\n` 不是任何一顆鍵的名字；一段
+多行文字拆成鍵名會在半路被擋掉。`/text` 走 `pane.send_text`（herdr 眼中的貼上，換行原樣
+留著），`enter`（預設 `true`）之後**另外**送一個 `enter` 鍵才是送出——同
+`/api/hosts/{name}/shells/{pane_id}/text`。這條不看 `agent_status`：它的用途正是回合跑到一半
+時再補一句（前端的「併送」）。
 
 ### 4.1 登入 / 切換帳號
 

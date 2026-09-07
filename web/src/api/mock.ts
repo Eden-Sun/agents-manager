@@ -806,6 +806,7 @@ export class MockTransport implements Transport {
         if (action === 'login') return this.login(botId)
         if (action === 'prompt') return this.prompt(botId, b)
         if (action === 'keys') return this.keys(botId, b)
+        if (action === 'text') return this.text(botId, b)
         if (action === 'pane' && seg[3] === 'move-to-tab' && !this.paneMoveDisabled) return this.movePaneToTab(botId)
       }
     }
@@ -1980,6 +1981,17 @@ export class MockTransport implements Transport {
       }
     }
     return { ok: true, keys }
+  }
+
+  /** `POST /bots/:id/text` — 整段文字打進 pane。多行原樣留著，Enter 是分開的一顆鍵。 */
+  private text(botId: string, b: Rec) {
+    const run = this.activeRun(botId)
+    if (!run) throw new ApiError(409, { reason: 'Bot 未在執行中' }, 'conflict')
+    const expect = b.expect_run_id
+    if (typeof expect === 'string' && expect !== run.id) {
+      throw new ApiError(409, { reason: 'expect_run_id 與目前 Run 不符', run_id: run.id }, 'conflict')
+    }
+    return { ok: true, text: String(b.text ?? ''), enter: b.enter !== false }
   }
 
   private setIdle(botId: string) {

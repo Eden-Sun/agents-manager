@@ -86,6 +86,7 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/attachments/{id}", get(get_attachment))
         .route("/bots/{id}/keys", post(keys_bot))
+        .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/turns/{id}/abandon", post(abandon_turn))
@@ -1682,6 +1683,20 @@ struct KeysIn {
 
 async fn keys_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<KeysIn>) -> Result<Response, LcError> {
     lifecycle::send_keys(&app, &id, b.keys, b.expect_run_id).await?;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+#[derive(Deserialize)]
+struct TextIn {
+    text: String,
+    /// 打完字要不要按 Enter。預設要——呼叫端要的幾乎都是「送出這句」。
+    enter: Option<bool>,
+    expect_run_id: Option<String>,
+}
+
+/// `POST /api/bots/:id/text` — 把整段文字打進 bot 的 pane（多行照原樣），預設接一個 Enter。
+async fn text_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<TextIn>) -> Result<Response, LcError> {
+    lifecycle::send_text(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 

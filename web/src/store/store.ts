@@ -463,6 +463,11 @@ interface StoreState {
   /** `attachments` 是 `POST /bots/:id/attachments` 回傳的 id（拖放進來的圖片）。 */
   sendPrompt: (botId: string, text: string, attachments?: string[]) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
+  /**
+   * 把一整段（可能多行的）文字打進 bot 的 pane，`enter` 決定要不要順手送出。
+   * 多行內容要走這裡：`sendKeys` 吃的是鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。
+   */
+  sendText: (botId: string, text: string, enter: boolean) => Promise<boolean>
   abandonTurn: (botId: string, turnId: string) => Promise<void>
   addHost: (input: NewHostInput) => Promise<HostResult | null>
   addIdentity: (input: NewIdentityInput) => Promise<boolean>
@@ -1109,6 +1114,16 @@ export const useStore = create<StoreState>((set, get) => ({
       await api.sendKeys(botId, keys, get().runs[botId]?.id ?? null)
     } catch (e) {
       get().notify('error', `送出按鍵失敗：${errText(e)}`)
+    }
+  },
+
+  async sendText(botId, text, enter) {
+    try {
+      await api.sendText(botId, text, enter, get().runs[botId]?.id ?? null)
+      return true
+    } catch (e) {
+      get().notify('error', `送出文字失敗：${errText(e)}`)
+      return false
     }
   },
 

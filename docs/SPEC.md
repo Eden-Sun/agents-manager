@@ -357,6 +357,7 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
 | POST | `/bots/:id/interrupt` | 送 esc |
 | POST | `/bots/:id/prompt` | `{text, client_request_id}` → 200 `{turn_id, message_id, delivery}`；409 見 §6.3 |
 | POST | `/bots/:id/keys` | `{keys:[...], expect_run_id}`；run 不符 409 |
+| POST | `/bots/:id/text` | `{text, enter?, expect_run_id}`——整段文字打進 pane（多行原樣），預設接 Enter |
 | POST | `/turns/:id/abandon` | in-flight / delivery=unknown → `failed` |
 | GET | `/bots/:id/messages?before=&limit=` | 倒序分頁 |
 | GET | `/projects/:id/messages?before=&limit=` | 群組時間軸：該 Project 所有 bot 的訊息合併，每則帶 `bot_id` / `bot_name`（§13） |
