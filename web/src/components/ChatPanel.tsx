@@ -17,6 +17,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { GearIcon } from './Icons'
+import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
 import { KindTag } from './KindTag'
 import { ModelQuickPicker } from './ModelPicker'
@@ -786,6 +787,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId)
   const drop = useDropTarget(files.add, !botId)
+  // 右側圖片暫存區要知道「現在這個對話」是誰：點暫存縮圖時，圖片就落進這個托盤（也就是
+  // 上傳給這隻 bot）。終端分頁時這個托盤不在畫面上，就別接收——圖會像憑空消失。
+  useShelfSink(files.add, botId && bot && (tab !== 'terminal' || settingsBotId === botId) ? bot.name : null)
 
   const messages = useStore((s) => (botId ? s.messages[botId] : undefined))
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))

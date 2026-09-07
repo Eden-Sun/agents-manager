@@ -4,6 +4,7 @@ import { useFocusTrap } from './hooks/useFocusTrap'
 import { MOBILE_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
+import { ImageShelf } from './components/ImageShelf'
 import { Sidebar } from './components/Sidebar'
 import { TeamLaunchPanel } from './components/TeamLaunchPanel'
 import { TeamPanel } from './components/TeamPanel'
@@ -202,6 +203,9 @@ export default function App() {
           <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />
         )}
       </main>
+      {/* 版面上的第三格（桌機在右緣、≤1024px 在底部），刻意掛在 `main` 外面：換 bot /
+          project / team 都不會 unmount，暫存的圖片才跨得過去。 */}
+      <ImageShelf />
       <Notices />
     </div>
   )
