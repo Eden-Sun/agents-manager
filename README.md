@@ -36,6 +36,12 @@
 
 ![主畫面對話](docs/screenshots/360-readme-chat-dark.png)
 
+側欄可以搜尋 bot、在列上直接改暱稱，每列的操作鈕（啟動 / 停止 / 設定 / 刪除）排成 2×2；燈號是環狀，看得出「連線中」與「在跑」的差別。
+
+回合狀態多了一段 **已完成（未讀）**：bot 回完但你還沒看，側欄列與折疊起來的專案標題都會掛上未讀徽章，切到那個對話（或分頁回到前景）才清掉；未讀狀態重新整理不會丟。
+
+![未讀徽章](docs/screenshots/unread/440-unread-badge.png)
+
 **回合進行中可以中止** — 回合在跑時輸入框不鎖（可以先打、送出排隊），上面那條給兩個出口：「中斷回覆」請 agent 停手（送 `esc`）；**強制中止**不等 agent，直接把回合收掉、解開輸入框——`esc` 送不進去（pane 沒了、herdr 斷線、agent 不理）時就靠它，不必停掉整個 bot。
 
 ![強制中止](docs/screenshots/358-abort-button.png)
@@ -63,7 +69,23 @@
 
 ![Team 面板](docs/screenshots/357-team-member-identity.png)
 
-實作見 [`docs/SPEC-team.md`](docs/SPEC-team.md)。**Scheduler 是第一刀原型**：會跑、會在預算 / 協定 / 額度觸頂時暫停、daemon 重啟會把它拉回來，但還不穩定，請當實驗功能。
+實作見 [`docs/SPEC-team.md`](docs/SPEC-team.md)。**Scheduler 是第一刀原型**：會跑、會在預算 / 協定 / 額度觸頂時暫停、daemon 重啟會把它拉回來，但還不穩定，請當實驗功能。team 可以整個中止；成員自己開出去的子 agent 也會被認領回 team 底下。
+
+**子 agent 追蹤** — bot 在 pane 裡用 herdr 再開子 agent（平行子任務、reviewer 之類）時，AG Man 會把它掛在父 bot 底下，而不是變成一個沒人管的 pane。這靠三層機制，不靠 agent 自覺：
+
+- **pane 血緣**：一個 bot 一個 tab，對帳時凡是 split 在某個 bot 活動 run 那個 tab 裡的 agent，一律當它的子代；名字前綴只是跨 tab / team workspace 的備援。孫代照樣掛在子代下面。
+- **herdr PATH shim**：daemon 起的每個 pane，PATH 最前面放一支包裝過的 `herdr`。`agent start <name>` 自動補上 `<父 agent 名>-` 前綴；`pane split` / `tab create` 自動把父的帳號（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）與 hook 環境用 `--env` 帶下去——herdr 的 pane 是 server 生的，不會繼承呼叫端 shell，沒有這段子 pane 會用預設帳號起來、也收不到 hook。
+- **herdr skill**：啟動 claude bot 前，daemon 把 `herdr --skill` 寫進該身份的 `skills/herdr/SKILL.md`（內容相同就不動），前面插一段 AG Man 規則：命名、`pane split --pane "$HERDR_PANE_ID"`、不要 `git stash`。codex / grok 在 persona 裡拿到同一份文字。
+
+**主機 shell** — 主機列（含遠端）可以直接開一個 shell：裝工具、看 log、清 worktree，不必另外開終端 ssh。畫面是終端快照加一行指令輸入，附 Ctrl+C / Esc 鈕，↑↓ 翻歷史；只能操作 daemon 自己開的 pane。開著的 shell 列在主機列上，可以點回去或結束。
+
+![遠端主機 shell](docs/screenshots/host-shell/433-remote-shell-light.png)
+
+**遠端 `gh` 登入** — issue / team 功能靠該主機上的 `gh`。遠端沒登入時，主機列給一顆按鈕，daemon 依序試：切到已有效的帳號 → 丟掉失效的 active 帳號再切 → 把本機 `gh auth token` 經 ssh stdin 轉發過去（不進 argv、不落 log）→ 最後才走 GitHub 裝置碼，UI 顯示 `user_code` 與連結。
+
+**圖片暫存托盤** — 畫面右緣一條常駐托盤，圖片可以先 drop 進去再切到別的 bot，拖或點進那個對話的附件托盤一起送出。跨 bot / project / team 都在，只存記憶體，重新整理就清空。
+
+![圖片托盤](docs/screenshots/231-drop-tray-dark.png)
 
 ## 安裝與啟動
 
@@ -121,12 +143,15 @@ release 二進位預設開 `embed-ui`：先 `cd web && npm run build` 再 `cargo
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | 實作進度、驗收紀錄、**已知問題** |
 | [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令契約與時序測試 |
 | [`docs/PACKAGING.md`](docs/PACKAGING.md) | 打包成 macOS `.dmg`（Apple Silicon、ad-hoc 簽章）|
+| [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 已定案的 UI 取捨 |
+| [`docs/goals/`](docs/goals/) | 每項功能的目標、設計與實測紀錄（子 agent 追蹤、主機 shell、遠端 gh 登入、圖片托盤、UI 打磨） |
 | [`docs/screenshots/`](docs/screenshots/) | 歷次 UI 截圖 |
 
 後端 / 前端交接筆記在 `docs/HANDOFF-BACKEND.md`、`docs/HANDOFF-FRONTEND.md`。
 
 ## 現況
 
-- 單 bot 對話、群組 `@mention`、遠端 host（SSH + 反向 hook）、額度條、身份、圖片附件，是正在用的路徑。
+- 單 bot 對話、群組 `@mention`、遠端 host（SSH + 反向 hook）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領，是正在用的路徑。
+- 判斷邏輯（專案刪除守門、team 面板狀態、bot 燈號）抽成純函式，用 `node --test` 跑；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。
 - **Issue Team 的 scheduler 仍早期**：能組隊、轉送、暫停，但不是穩定產品。協定解析失敗、預算觸頂都會 `paused`，不會自己無限轉。
 - 已知問題（Codex hook 未在真帳號驗完、群組時間軸 ULID 同毫秒排序等）寫在 [`docs/PROGRESS.md`](docs/PROGRESS.md) 的「已知問題」。
