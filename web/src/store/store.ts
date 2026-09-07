@@ -318,6 +318,19 @@ interface StoreState {
   teamsSupported: boolean
   /** TeamLaunchPanel（右側暫時性 sheet）；null = 未開啟。 */
   teamLaunch: { projectId: string; issueNumber: number } | null
+  /**
+   * 非 null = 主面板顯示 `HostShellPanel`（與上面每一個選取互斥，而且優先）。
+   *
+   * 刻意不寫進 localStorage 的選取記憶：`paneId` 活不過 daemon 重啟，記住它只會在下次
+   * 開啟時指向一個已經不存在的 shell。
+   */
+  shellView: { host: string; paneId: string; cwd: string } | null
+  /**
+   * false = 這版 daemon 沒有 `/api/hosts/:name/shells`。第一次撞到就翻成 false，
+   * 「開 shell」的入口從此靜默消失（docs/FRONTEND.md §8）。
+   */
+  hostShellSupported: boolean
+
 
   selectedBotId: string | null
   rightTab: RightTab
@@ -381,6 +394,17 @@ interface StoreState {
   removeBot: (botId: string) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
+  /**
+   * 在某台主機開一個 shell 並切到 `HostShellPanel`。已經有活著的就接回**最新那個**，
+   * 不再多開：按第二次「開 shell」想看的是剛剛那個，不是一個空白的新終端。
+   * false = 沒開起來（原因已經跳通知，或這版 daemon 沒有這個功能）。
+   */
+  openHostShell: (host: string, cwd?: string) => Promise<boolean>
+  /** 只關掉面板，shell 留著（回來還接得回去）。 */
+  closeShellView: () => void
+  /** 真的結束這個 shell（`DELETE …/shells/:pane_id`）並關掉面板。 */
+  endHostShell: (host: string, paneId: string) => Promise<void>
+
 
   // v4.0
   loadQuota: () => Promise<void>
@@ -531,6 +555,8 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedTeamId: initialSelection.teamId,
   teamsSupported: true,
   teamLaunch: null,
+  shellView: null,
+  hostShellSupported: true,
 
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
@@ -613,7 +639,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   selectBot: (botId) => {
-    set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, rightTab: 'chat', settingsBotId: null })
+    set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, shellView: null, rightTab: 'chat', settingsBotId: null })
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
@@ -627,6 +653,7 @@ export const useStore = create<StoreState>((set, get) => ({
       selectedProjectId: projectId,
       selectedTeamId: null,
       teamLaunch: null,
+      shellView: null,
       rightTab: 'chat',
       settingsBotId: null,
       groupUnread: projectId ? { ...s.groupUnread, [projectId]: 0 } : s.groupUnread,
@@ -1188,6 +1215,48 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   readTerminal: (botId, source, lines) => api.fetchTerminal(botId, source, lines),
+  // ------------------------------------------------------- 主機 shell
+
+  async openHostShell(host, cwd) {
+    if (!get().hostShellSupported) return false
+    let ok = false
+    await guarded(set, get, `shell:${host}`, async () => {
+      try {
+        // 先看有沒有活著的：一台主機通常只需要一個 shell，而按第二次「開 shell」想回到的
+        // 是剛剛那個終端（裡面還有上一個指令的輸出），不是一片空白。指定了 cwd 就是明確
+        // 要「在那個目錄」開一個，這時不接回舊的。
+        const existing = cwd ? [] : await api.fetchHostShells(host)
+        const reuse = existing.length > 0 ? existing[existing.length - 1] : null
+        const shell = reuse ?? (await api.openHostShell(host, cwd))
+        set({
+          shellView: { host, paneId: shell.pane_id, cwd: shell.cwd },
+          selectedBotId: null,
+          selectedProjectId: null,
+          selectedTeamId: null,
+          teamLaunch: null,
+          settingsBotId: null,
+        })
+        ok = true
+      } catch (e) {
+        // 缺端點不是失敗，是這版 daemon 沒有這個功能：入口收掉，不跳錯誤。
+        if (!api.isHostShellUnsupported(e)) throw e
+        set({ hostShellSupported: false })
+      }
+    })
+    return ok
+  },
+
+  closeShellView: () => set({ shellView: null }),
+
+  async endHostShell(host, paneId) {
+    await guarded(set, get, `shell:${host}:${paneId}`, async () => {
+      await api.closeHostShell(host, paneId)
+      set((s) =>
+        s.shellView && s.shellView.host === host && s.shellView.paneId === paneId ? { shellView: null } : {},
+      )
+    })
+  },
+
 
   // ------------------------------------------------------------ SPEC-team
 
@@ -1196,6 +1265,7 @@ export const useStore = create<StoreState>((set, get) => ({
       selectedTeamId: teamId,
       selectedProjectId: null,
       teamLaunch: null,
+      shellView: null,
       rightTab: 'chat',
       settingsBotId: null,
       teamUnread: teamId ? { ...s.teamUnread, [teamId]: 0 } : s.teamUnread,
@@ -1236,7 +1306,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   openTeamLaunch: (projectId, issueNumber, repo = '') =>
-    set({ teamLaunch: { projectId, issueNumber, repo }, selectedTeamId: null, settingsBotId: null }),
+    set({ teamLaunch: { projectId, issueNumber, repo }, selectedTeamId: null, shellView: null, settingsBotId: null }),
 
   closeTeamLaunch: () => set({ teamLaunch: null }),
 
