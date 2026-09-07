@@ -1086,9 +1086,14 @@ export function Sidebar() {
                   {all.length} 個 Bot·點一下展開
                 </button>
               ) : list.length === 0 && hiddenCount > 0 ? (
-                // 整張卡片的 bot 都被停用的身分收走了：留一行說明，不要留一張空卡片，
-                // 也不要在這裡冒出「此專案尚無 Bot」的引導——它們只是被藏起來，沒有不見。
-                <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>
+                // 整張卡片一顆可用的 bot 都不剩了，那就跟空專案長一樣：同一個 `.project-empty`
+                // 容器、同一排快速新增。差別只在標題——「已隱藏」而不是「尚無」，使用者才知道
+                // bot 沒有不見，只是所屬身分被停用了。停用中的那幾顆 chip 在 `QuickAddBots`
+                // 裡是 disabled，不然只會再開一顆同樣沒額度的。
+                <div className="project-empty">
+                  <span className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</span>
+                  <QuickAddBots projectId={p.id} />
+                </div>
               ) : list.length === 0 ? (
                 <div className="project-empty">
                   <span className="project-empty-title">此專案尚無 Bot</span>

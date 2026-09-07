@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, useStore } from '../store/store'
+import { isQuotaDisabled, quotaDisableKey, useDisabledQuota } from '../store/quotaHide'
 import { KindTag } from './KindTag'
 
 /**
@@ -9,7 +10,16 @@ import { KindTag } from './KindTag'
  * cc0/cc1/…，加上其他已安裝的 kind），點一下就建好並啟動，省掉開表單挑 kind 挑身份。
  * 不能用的（CLI 未安裝、身份沒登入）不列，列出來的都保證可行。
  */
-type Choice = { key: string; kind: BotKind; identity: string | null; label: string; title: string; loggedOut: boolean }
+type Choice = {
+  key: string
+  kind: BotKind
+  identity: string | null
+  label: string
+  title: string
+  loggedOut: boolean
+  /** 這個身分在額度條上被勾成「暫時停用」了（見 store/quotaHide.ts）。 */
+  quotaOff: boolean
+}
 
 function nextName(base: string, projectId: string, bots: { project_id: string; name: string }[]): string {
   const taken = new Set(bots.filter((b) => b.project_id === projectId).map((b) => b.name))
@@ -26,6 +36,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   const tools = useStore((s) => toolsOfHost(s, host))
   const allIdentities = useStore((s) => s.identities)
   const status = useStore((s) => identityStatusOfHost(s, host))
+  const disabledQuota = useDisabledQuota()
   const [busy, setBusy] = useState<string | null>(null)
   const hostLabel = !host || host === 'local' ? '本機' : host
 
@@ -37,33 +48,43 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
       if (ids.length === 0) {
         // 沒登入的按下去只會停在登入畫面：留著讓人看得到這個 kind，但點不下去。
         const loggedOut = tools[kind].logged_in === false
+        const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, null))
         out.push({
           key: kind,
           kind,
           identity: null,
           label: kind,
-          title: loggedOut ? `${kind} 在 ${hostLabel} 尚未登入` : `在 ${hostLabel} 開一個 ${kind}`,
+          title: quotaOff
+            ? `${kind} 已在額度條上暫時停用——現在開一顆同樣沒額度可用`
+            : loggedOut
+              ? `${kind} 在 ${hostLabel} 尚未登入`
+              : `在 ${hostLabel} 開一個 ${kind}`,
           loggedOut,
+          quotaOff,
         })
         continue
       }
       for (const i of ids) {
         const st = status[i.name]
         const loggedOut = st?.logged_in === false
+        const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, i.name))
         out.push({
           key: `${kind}:${i.name}`,
           kind,
           identity: i.name,
           label: i.name,
-          title: loggedOut
-            ? `${i.name} 在 ${hostLabel} 尚未登入`
-            : `${kind} · ${i.name}${st?.account ? ` — ${st.account}` : ''}（${hostLabel}）`,
+          title: quotaOff
+            ? `${i.name} 已在額度條上暫時停用——現在開一顆同樣沒額度可用`
+            : loggedOut
+              ? `${i.name} 在 ${hostLabel} 尚未登入`
+              : `${kind} · ${i.name}${st?.account ? ` — ${st.account}` : ''}（${hostLabel}）`,
           loggedOut,
+          quotaOff,
         })
       }
     }
     return out
-  }, [tools, allIdentities, status, hostLabel])
+  }, [tools, allIdentities, status, hostLabel, host, disabledQuota])
 
   if (choices.length === 0) return null
 
@@ -90,14 +111,19 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
         <button
           key={c.key}
           type="button"
-          className="quick-add-chip"
-          disabled={busy !== null || c.loggedOut}
+          className={`quick-add-chip${c.quotaOff ? ' quota-off' : ''}`}
+          // 停用中的身分點下去只會多一顆同樣沒額度的 bot——跟「未登入」一樣列出來但不給點。
+          disabled={busy !== null || c.loggedOut || c.quotaOff}
           title={c.title}
           onClick={() => pick(c)}
         >
           <KindTag kind={c.kind} />
           <span className="quick-add-label">{busy === c.key ? '建立中…' : c.label}</span>
-          {c.loggedOut ? <span className="quick-add-out">未登入</span> : null}
+          {c.quotaOff ? (
+            <span className="quick-add-out">已停用</span>
+          ) : c.loggedOut ? (
+            <span className="quick-add-out">未登入</span>
+          ) : null}
         </button>
       ))}
     </div>
