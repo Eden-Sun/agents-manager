@@ -1053,6 +1053,21 @@ pub async fn turn_user_messages(pool: &SqlitePool, turn_id: &str) -> Result<Vec<
         .await?)
 }
 
+/// The same rows, each with its `attachments_json`. The timeline stores what the user
+/// *typed*; what the agent was actually handed also carries the attachment paths
+/// (`attach::deliver_text`), and only that fuller text matches the echo on the pane.
+pub async fn turn_user_messages_with_attachments(
+    pool: &SqlitePool,
+    turn_id: &str,
+) -> Result<Vec<(String, Option<String>)>> {
+    Ok(sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT content, attachments_json FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at",
+    )
+    .bind(turn_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Turn>> {
     Ok(sqlx::query_as::<_, Turn>("SELECT * FROM turns WHERE run_id = ? AND status = 'in_flight'")
         .bind(run_id)
