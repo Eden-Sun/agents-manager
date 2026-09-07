@@ -10,7 +10,7 @@
 import { useSyncExternalStore } from 'react'
 import { LOCAL_HOST } from '../api/types'
 import type { BotKind } from '../api/types'
-import { botLamp, projectHostName, type StoreState } from './store'
+import { projectHostName, type StoreState } from './store'
 
 export const QUOTA_DISABLED_KEY = 'am.disabledQuotaKeys'
 
@@ -24,12 +24,6 @@ export type DisabledMap = Readonly<Record<string, number | null>>
 export function quotaDisableKey(host: string, kind: BotKind, identity: string | null): string {
   return `${host || LOCAL_HOST}|${kind}|${identity ?? ''}`
 }
-
-/**
- * 這些燈號代表「使用者正在等這一列」——正在跑、正在起、或卡住等回答。
- * 就算所屬身分被停用也一定要留在清單上（見 docs/UI-DECISIONS.md）。
- */
-const BUSY_LAMPS = new Set(['working', 'starting', 'blocked'])
 
 function load(): Record<string, number | null> {
   try {
@@ -138,12 +132,11 @@ export function quotaHiddenBotIds(state: StoreState, map: DisabledMap): string[]
   if (Object.keys(map).length === 0) return []
   const hideable = new Set<string>()
   for (const b of state.bots) {
+    // 停用是明講的動作（「這個帳號的先別給我看」），所以不留例外：執行中與有未讀的也一起收。
+    // 早期版本把它們留在清單上，結果實測時整批 cc1 都有未讀，勾了等於沒反應（見
+    // docs/UI-DECISIONS.md）。收掉多少由專案卡片上那行「N 個 Bot 已隱藏」交代。
     const key = quotaDisableKey(projectHostName(state, b.project_id), b.kind, b.identity)
-    if (!isQuotaDisabled(map, key)) continue
-    // 使用者正在等的東西不藏：執行中／啟動中／卡住，或有還沒看過的回合。
-    if (BUSY_LAMPS.has(botLamp(state, b.id))) continue
-    if ((state.botUnread[b.id] ?? 0) > 0) continue
-    hideable.add(b.id)
+    if (isQuotaDisabled(map, key)) hideable.add(b.id)
   }
   const kept = new Set<string>()
   for (const b of state.bots) {
