@@ -306,3 +306,15 @@
 - 狀態存 `am.disabledQuotaKeys`（localStorage，key = `<host>|<kind>|<identity>`），跟
   `am.collapsedProjects` 同一類：純前端的檢視偏好，daemon 不需要知道。
 - 截圖：`docs/screenshots/quota-hide/`。
+
+## bot 列的操作鍵：一顆常駐的 `⋯`（2026-09-08）
+
+- **問題**：四顆 icon（分身／設定／啟動／刪除）疊在名字那行、hover 才浮出來。側欄一窄就蓋住名字，
+  觸控裝置沒有 hover 只能靠 `@media (hover: none)` 另開一套「排進版面」的規則——同一件事兩份排版，
+  寬度或裝置一變就有一邊壞掉，選取列還得靠 `padding-right: 100/132px` 硬讓位。
+- **決策**：收成一顆固定格位的 `⋯`（`BotRowMenu`，沿用 project 標題列的 `HeadMoreMenu`）。
+  常駐、不透明度 0.55，hover／focus／選取時滿版；不再用 `opacity: 0`，看不見的按鍵在觸控上等於不存在。
+  選單內容依序：設定…／啟動（停止時才有）／開同類分身並啟動／刪除…（危險項目最後，走確認框）。
+- **代價**：常用的「設定」多一次點擊。換到的是單一套排版（父列、子 agent 列、任何寬度、觸控與鍵盤都一樣）
+  與名字不再被蓋住；早期那條「操作 icon 只在 selected/hover/focus 顯示」在這一列改為常駐。
+- 截圖：`docs/screenshots/bot-row-menu/`。
