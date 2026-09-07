@@ -132,6 +132,29 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
     return types.includes('Files') || types.includes(SHELF_MIME)
   }
 
+  // A drag that starts outside the window (a macOS screenshot thumbnail) can end without ever
+  // giving us the matching `dragleave` — the depth stays > 0 and the veil sticks around,
+  // swallowing the rest of the interaction. Reset on the window-level end-of-drag events, same
+  // as `useFileDragActive` in the shelf.
+  useEffect(() => {
+    const reset = () => {
+      depth.current = 0
+      setOver(false)
+    }
+    const onWindowLeave = (e: globalThis.DragEvent) => {
+      // relatedTarget === null means the pointer left the window itself, not just an element.
+      if (e.relatedTarget === null) reset()
+    }
+    window.addEventListener('drop', reset)
+    window.addEventListener('dragend', reset)
+    window.addEventListener('dragleave', onWindowLeave)
+    return () => {
+      window.removeEventListener('drop', reset)
+      window.removeEventListener('dragend', reset)
+      window.removeEventListener('dragleave', onWindowLeave)
+    }
+  }, [])
+
   const props = {
     onDragEnter: (e: DragEvent) => {
       if (disabled || !hasFiles(e)) return
