@@ -316,6 +316,18 @@ export async function sendKeys(botId: string, keys: string[], expectRunId: strin
   })
 }
 
+/**
+ * `POST /bots/:id/text` — 把一整段文字打進 bot 的 pane（daemon 端是 `pane.send_text`），
+ * `enter` 決定要不要接一個 Enter。多行文字走這裡，不要拆成 `sendKeys` 的鍵名。
+ */
+export async function sendText(botId: string, text: string, enter: boolean, expectRunId: string | null): Promise<void> {
+  await transport.request('POST', `/bots/${encodeURIComponent(botId)}/text`, {
+    text,
+    enter,
+    ...(expectRunId ? { expect_run_id: expectRunId } : {}),
+  })
+}
+
 export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
 }

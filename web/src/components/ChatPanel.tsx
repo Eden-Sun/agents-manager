@@ -7,6 +7,7 @@ import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../ap
 import { effortLabel, quotaKey } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
+import { typeAlongside } from '../store/alongside'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedModal } from './BlockedModal'
@@ -606,7 +607,7 @@ function Composer({
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const queueSend = useStore((s) => s.queueSend)
   const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
-  const sendKeys = useStore((s) => s.sendKeys)
+  const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
   // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
@@ -702,11 +703,11 @@ function Composer({
     if (!body) return
     if (queued) cancelQueuedSend(botId)
     setSending(true)
-    // 一個字元一個鍵：`agent.send_keys` 吃的是鍵名陣列（見 hooks/usePaneKeys）。
-    await sendKeys(botId, [...body].map((c) => (c === ' ' ? 'space' : c)))
-    await sendKeys(botId, ['enter'])
+    // 整段文字走 `POST /bots/:id/text`，Enter 由 daemon 另外送（見 store/alongside.ts）：
+    // 拆成鍵名的舊寫法會把多行內容的 `\n` 當成一顆不存在的鍵，內容送不完整。
+    const ok = await typeAlongside({ sendText }, botId, body)
     setSending(false)
-    setText('')
+    if (ok) setText('')
   }
 
   /**
