@@ -1366,15 +1366,20 @@ button:disabled {
 .bot-actions {
   position: absolute;
   right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  /* 2×2。格子是寫死的（見 `.act-*`），所以啟動鍵出現／消失時其他三顆不會換位置。 */
+  /* 貼齊第一行（名字那行），不再整列垂直置中：2×2 的第二排正好壓在身份／模型徽章上，
+     看起來就像按鍵「換行」掉到第二行跟 tag 擠成一團。高度只蓋第一行，第二行整條讓給徽章。 */
+  top: 4px;
+  height: 22px;
+  transform: none;
+  /* 一排、不換行。格子仍是寫死的（見 `.act-*`），所以啟動鍵出現／消失時其他三顆不會位移：
+     它的格子排在最左邊，沒有它時那格塌成 0，右邊三顆相對右緣的位置不動。 */
   display: grid;
-  grid-template-columns: repeat(2, auto);
-  grid-template-rows: repeat(2, auto);
+  grid-template-columns: repeat(4, auto);
+  grid-template-rows: 1fr;
   align-items: stretch;
   gap: 0;
   flex: none;
+  white-space: nowrap;
   /* 純色，不做漸層淡出：那層 fade 會把底下的徽章糊掉一段，看起來像陰影。
      `padding-left: 0` 一併拿掉——那 20px 只是為了讓漸層有地方淡。 */
   padding-left: 0;
@@ -1399,56 +1404,74 @@ button:disabled {
   background: var(--bg-active);
 }
 
-/* 選取中的那一列，操作鍵是常駐的——所以這一列（也只有這一列）照舊把寬度讓出來，
-   免得第三行的 agent 標題跑到按鍵底下。寬度是固定的，不會因為 hover 而跳動。
+/* 選取＋hover 的列有自己的混色底；這排按鍵縮成一行之後，少了這條就是名字旁邊
+   多出一塊比整列暗的長方形。 */
+.bot-row.selected:hover .bot-actions {
+  background: color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%);
+}
+
+/* 選取中的那一列，操作鍵是常駐的——所以這一列（也只有這一列）照舊把寬度讓出來。
+   讓位的是名字那行（按鍵就疊在它上面）：撐不下時名字自己 ellipsis，不會把按鍵擠掉。
+   徽章與 agent 標題那兩行拿回整列寬度。停止中的列多一顆啟動鍵，多讓 32px。
    `:has` 是必要的：team 成員列也用 `.bot-row`，但它沒有那排按鍵，讓寬度只是白讓。 */
-.bot-row.selected:has(.bot-actions) .bot-sub,
-.bot-row.selected:has(.bot-actions) .bot-agent-title {
-  /* 按鍵疊在列上：只讓徽章／標題讓位，名字那行仍用滿寬。 */
-  padding-right: 72px;
+.bot-row.selected:not(.compact):has(.bot-actions) .bot-ident {
+  padding-right: 100px;
+}
+
+.bot-row.selected:not(.compact):has(.act-run) .bot-ident {
+  padding-right: 132px;
 }
 
 @media (hover: none) {
-  /* 沒有 hover 的裝置上這排永遠顯示，疊著就會擋住徽章：回到原本佔位的排法。 */
+  /* 沒有 hover 的裝置上這排永遠顯示，疊著就會擋住名字：回到原本佔位的排法。 */
   .bot-actions {
     position: static;
+    height: auto;
     transform: none;
     padding-left: 0;
     background: none;
     pointer-events: auto;
   }
 
-  .bot-row.selected:has(.bot-actions) .bot-main {
+  /* 排進版面之後不必再壓成一行的高度，點擊區回到 32px（觸控沒有 hover，這排永遠在）。 */
+  .bot-actions .menu-btn {
+    height: 32px;
+    min-height: 32px;
+  }
+
+  .bot-row.selected:not(.compact):has(.bot-actions) .bot-ident,
+  .bot-row.selected:not(.compact):has(.act-run) .bot-ident {
     padding-right: 0;
   }
 }
 
-/* 固定格位：左上 分身、右上 設定、左下 啟動（執行中時空著，也是之後第四顆的位置）、
-   右下 刪除。讀序的最後一格留給唯一不可逆的操作。 */
-.bot-actions .act-clone {
+/* 固定格位：啟動（執行中時空著，那格塌成 0）、分身、設定、刪除。
+   讀序的最後一格留給唯一不可逆的操作。 */
+.bot-actions .act-run {
   grid-area: 1 / 1;
 }
-.bot-actions .act-gear {
+.bot-actions .act-clone {
   grid-area: 1 / 2;
 }
-.bot-actions .act-run {
-  grid-area: 2 / 1;
+.bot-actions .act-gear {
+  grid-area: 1 / 3;
 }
 .bot-actions .act-del {
-  grid-area: 2 / 2;
+  grid-area: 1 / 4;
 }
 
 .bot-actions .menu-btn {
-  /* 2×2 撐滿整塊，格與格之間不留縫：點擊區越大越好，而這塊區域的大小是固定的，
-     留白只是把可點面積讓給空氣。34×26 × 2×2 = 68×52，正好是一列的高度。 */
-  width: 34px;
-  height: 26px;
-  min-width: 34px;
-  min-height: 26px;
+  /* 一排撐滿整塊，格與格之間不留縫：點擊區越大越好，而這塊區域的大小是固定的，
+     留白只是把可點面積讓給空氣。32×22，四顆並排剛好蓋住第一行的尾巴。 */
+  width: 32px;
+  height: 22px;
+  min-width: 32px;
+  min-height: 22px;
   border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
 }
 
 /* The whole row of buttons fades in together: only on hover / focus / selection so the list
@@ -2192,6 +2215,39 @@ button:disabled {
   padding: 8px 14px 12px;
 }
 
+.quick-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.quick-add-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.quick-add-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.quick-add-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.quick-add-label {
+  font-weight: 600;
+}
+
 .project-empty-title {
   font-size: 12.5px;
   font-weight: 600;
@@ -2745,10 +2801,52 @@ button:disabled {
 }
 
 .attach-tray {
+  /* 放大預覽貼著托盤上緣浮出去，所以定位基準在這裡（也就決定了預覽的寬度＝對話框寬度）。 */
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+/* Hover / focus 的滿版預覽：絕對定位在托盤正上方，浮在訊息串上，不推開任何東西。 */
+.attach-peek {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 24;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+.attach-peek img {
+  max-width: 100%;
+  /* 等比例，而且不長過對話區——超過的話預覽會從畫面上緣被切掉。 */
+  max-height: min(52vh, 460px);
+  object-fit: contain;
+  border-radius: var(--radius);
+}
+
+.attach-peek-cap {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.attach-thumb.peeking {
+  border-color: var(--accent);
 }
 
 .attach-thumb {
@@ -8249,9 +8347,11 @@ button.run-debug-toggle:hover {
 
 .shelf-peek img {
   display: block;
-  width: 100%;
-  /* 需求的 240–320px 大圖，再讓可用高度把它壓下來（34px 是檔名那行 + padding）。 */
-  max-height: min(320px, 60vh, calc(var(--peek-avail, 60vh) - 34px));
+  /* 盒子已經是對話框那麼寬；圖只到自己的原尺寸為止（小圖放大只會糊），置中留白。 */
+  max-width: 100%;
+  margin: 0 auto;
+  /* 可用高度說了算（34px 是檔名那行 + padding）。 */
+  max-height: min(60vh, calc(var(--peek-avail, 60vh) - 34px));
   object-fit: contain;
   border-radius: 6px;
   background: var(--bg-hover);

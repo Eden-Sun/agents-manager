@@ -33,6 +33,7 @@ import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
 import { ModelTag } from './ModelTag'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
+import { QuickAddBots } from './QuickAddBots'
 import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
@@ -290,9 +291,9 @@ function BotRow({
           </span>
         ) : null}
       </span>
-      {/* 2×2，每顆有固定的格子（`grid-area`，不是照出現順序排）：啟動鍵只在停止時存在，
-          位置寫死才不會讓刪除鍵在 bot 起停時跳到別的角落。讀序是左上→右上→左下→右下，
-          所以不可逆的刪除排在最後一格。左下在執行中時是空的——那格就是之後第四顆的位置。 */}
+      {/* 一排（貼齊名字那行，不換行），每顆有固定的格子（`grid-area`，不是照出現順序排）：
+          啟動鍵只在停止時存在，格位寫死才不會讓刪除鍵在 bot 起停時左右跳；它排在最左邊，
+          不在時那格塌成 0，右邊三顆位置不動。讀序由左到右，不可逆的刪除排在最後一格。 */}
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
         {compact ? null : (
           <button
@@ -1122,8 +1123,9 @@ export function Sidebar() {
               ) : list.length === 0 ? (
                 <div className="project-empty">
                   <span className="project-empty-title">此專案尚無 Bot</span>
+                  <QuickAddBots projectId={p.id} />
                   <button type="button" className="btn primary empty-add-btn" onClick={() => openBotSheet(p.id)}>
-                    新增 Bot
+                    新增 Bot…
                   </button>
                 </div>
               ) : (
