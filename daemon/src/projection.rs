@@ -57,7 +57,11 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                         bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
                     }
                     if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
+                        // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
+                        // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
+                        // owns those, so an unknown name is only an error outside that set.
                         match identities.iter().find(|i| i.name == idn) {
+                            None if crate::tools::SHELL_IDENTITY_NAMES.contains(&idn) => {}
                             None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
                             Some(i) if i.kind != b.kind => {
                                 bail!("identity `{idn}` is for {} but bot `{}` is {}", i.kind, b.name, b.kind)
