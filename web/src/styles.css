@@ -4587,6 +4587,22 @@ button:disabled {
   border-color: var(--border);
   font-weight: 500;
 }
+/* 額度黃／紅：跟頂端 QuotaStrip 同一組門檻（daemon 的 low / critical），
+   側欄才不會出現「上面黃了下面還是灰的」。 */
+.identity-badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.identity-badge.crit {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.identity-badge-pct {
+  margin-left: 4px;
+  font-weight: 700;
+}
 .identity-row {
   display: flex;
   align-items: flex-start;

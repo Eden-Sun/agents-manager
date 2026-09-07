@@ -2404,6 +2404,41 @@ export function botQuotaWarning(
   return { critical: true, pct: worse.pct, window: worse.window }
 }
 
+/** 側欄身份徽章用：低額度時跟頂端 QuotaStrip 一樣變黃／變紅，並帶上剩餘 %。 */
+export interface QuotaLevel {
+  level: 'warn' | 'crit'
+  /** 觸發的那個視窗剩餘 %（多個同時觸發時取剩最少的）。 */
+  pct: number
+  window: string
+}
+
+/**
+ * 這個 bot 用的那組額度目前的燈號。跟 `botQuotaWarning` 的差別是連 `low`（黃）也算——
+ * 頂端 QuotaStrip 已經黃了，側欄的 `cc1` 卻還是灰的，看起來像兩套數字。門檻一樣由 daemon
+ * 決定（docs/API.md §12.4），這裡只挑出要顯示的視窗與剩餘 %。
+ */
+export function botQuotaLevel(
+  quota: QuotaMap,
+  kind: BotKind,
+  identity: string | null,
+  host: string = LOCAL_HOST,
+): QuotaLevel | null {
+  const scoped = (base: string) => quotaKey(host, base)
+  let q = quota[scoped(identity ? `${kind}:${identity}` : kind)]
+  if (q == null && identity === 'cc0') q = quota[scoped(kind)]
+  if (!q) return null
+  const pick = (w: { used_pct: number; low: boolean; critical: boolean } | null | undefined, name: string) =>
+    w && (w.low || w.critical)
+      ? { level: (w.critical ? 'crit' : 'warn') as 'warn' | 'crit', pct: Math.max(0, Math.round(100 - w.used_pct)), window: name }
+      : null
+  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, kind === 'grok' ? '週' : '7d'), pick(q.fable, 'F')].filter(
+    (x): x is QuotaLevel => x !== null,
+  )
+  if (hits.length === 0) return null
+  // 紅優先於黃；同色取剩最少的那個視窗。
+  return hits.sort((a, b) => (a.level === b.level ? a.pct - b.pct : a.level === 'crit' ? -1 : 1))[0]
+}
+
 /**
  * 側欄的專案，套上使用者拖出來的順序；`projectOrder` 沒列到的（剛新增的）依 daemon 的順序接在後面。
  */
