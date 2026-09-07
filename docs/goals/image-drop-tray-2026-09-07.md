@@ -75,3 +75,28 @@
 淺色 / 收合握把 / 拖曳中的 drop pad → 390px 手機底部托盤與收合列。
 `npx tsc --noEmit`、`npx oxlint src`（0 error）、`npm run build` 皆通過；
 `scripts/ui-goal-shots.mjs` 七張整體版面重拍，其他面板沒被擠壞。
+
+## 追加需求：縮圖放大預覽（2026-09-07 同日）
+
+**需求**：托盤裡的縮圖 hover 要浮出 240–320px 的大圖，鍵盤 focus 同樣，手機用長按 / 點一下
+切換，且不能蓋住托盤自己的移除鍵。
+
+**設計**：`ShelfPeek`（`ImageShelf.tsx`），300px 寬、圖片最高 320px，fixed 定位。
+
+- **錨點是托盤的邊，不是卡片的邊**：桌機貼著窄欄左緣、底部托盤時在整條托盤上方。實測發現
+  只避開卡片會壓到標題列的 ＋ / ✕ / »，所以 `PeekAt` 同時記卡片 rect 與托盤 rect
+  （`boundTop` / `boundLeft`）；再加 `pointer-events: none`，移除鍵永遠點得到。
+- **高度受可用空間壓制**：`--peek-avail` = 托盤上方剩下的高度，CSS 用
+  `min(320px, 60vh, calc(var(--peek-avail) - 34px))`。橫著拿的手機（844×390）是圖片縮小，
+  不是預覽被夾回托盤身上。位置在 `useLayoutEffect` 量完自己才放，一次繪製到位。
+- **開 / 收**：hover 180ms 延遲（滑過一排不閃）、focus 立即、觸控長按 450ms；
+  pointerout / blur / `Escape` / 捲動 / resize / 開始拖曳都收。預覽開著的卡片加 `.peeking`
+  藍框，一排縮圖裡看得出在看哪張。
+- **觸控不動用「點一下」**：那是手機唯一的主要動線（放進對話）。長按開預覽並吞掉它產生的
+  click，預覽開著時再點一下是收起來。`.shelf-card-main` 關掉 iOS callout 與文字選取。
+
+**驗收**（真 daemon + headless Chrome，`ALL OK`）：hover 120ms 還沒出現、370ms 出現；
+框寬 300（240–320 內）、不重疊卡片 / 移除鍵 / 整個托盤、留在畫面內、`pointer-events: none`；
+focus 開同一張並顯示該檔名，`Escape` 收；390×844 長按開（那次長按**沒有**把圖放進對話）、
+再點一下收、之後正常點一下才放進對話；844×390 橫向預覽縮到 204px 高且仍在托盤之上。
+深淺色各拍一張，`scripts/ui-goal-shots.mjs` 七張版面重跑無異常。

@@ -6991,8 +6991,11 @@ button.run-debug-toggle:hover {
   flex: none;
 }
 
-/* The whole card is the button: click / Enter hands the image to the open conversation. */
+/* The whole card is the button: click / Enter hands the image to the open conversation.
+   A long press there opens the preview, so the iOS callout / text selection has to go. */
 .shelf-card-main {
+  -webkit-touch-callout: none;
+  user-select: none;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -7252,4 +7255,43 @@ button.run-debug-toggle:hover {
 
 .gh-device-link {
   font-size: 12px;
+}
+/* hover / focus（觸控是長按）的放大預覽。刻意浮在托盤**外面**：桌機在窄欄左側、
+   底部托盤時在卡片上方，所以永遠不會蓋住卡片自己的移除鍵——`pointer-events: none`
+   又讓它連攔都攔不到。位置由 `ShelfPeek` 量完自己再放，`--peek-avail` 是上方真正剩下的
+   高度（橫著拿的手機只剩一點點，圖就跟著縮，而不是被夾回托盤上面）。 */
+.shelf-peek {
+  position: fixed;
+  z-index: 40;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+.shelf-peek img {
+  display: block;
+  width: 100%;
+  /* 需求的 240–320px 大圖，再讓可用高度把它壓下來（34px 是檔名那行 + padding）。 */
+  max-height: min(320px, 60vh, calc(var(--peek-avail, 60vh) - 34px));
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--bg-hover);
+}
+
+.shelf-peek-cap {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 預覽開著的那張卡片自己也標一下，不然在一排縮圖裡看不出正在看哪張。 */
+.shelf-card.peeking .shelf-card-main {
+  border-color: var(--accent);
 }
