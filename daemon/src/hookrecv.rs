@@ -575,25 +575,51 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     }
 }
 
-/// SPEC §11.4 — the same rename-and-drain dance, but on a remote host over ssh.
-async fn replay_spool_remote(app: &Arc<App>, bot_id: &str, host: &str) -> Result<usize> {
+// ---------------------------------------------------------------- remote drain (§11.4.3)
+
+/// Separates the spool lines from the single-slot `hook-status.json` in one drain's output.
+const STATUS_MARKER: &str = "---AM-STATUS---";
+
+/// How long one bot's drains are merged into one ssh (§11.4.4).
+const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The event can beat the spool write; retry once, still ahead of the 5s terminal fallback.
+const DRAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One scan per connected host, every 30s, for the status events that never arrived (§11.4.4).
+const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Split a drain's stdout into the spool lines and the optional statusLine JSON.
+fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
+    let mut lines = Vec::new();
+    let mut status: Option<String> = None;
+    let mut it = text.lines();
+    for line in it.by_ref() {
+        if line.trim() == STATUS_MARKER {
+            status = Some(it.collect::<Vec<_>>().join("\n"));
+            break;
+        }
+        let l = line.trim();
+        if !l.is_empty() {
+            lines.push(l);
+        }
+    }
+    (lines, status.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+}
+
+/// SPEC §11.4.3 — rename the remote spool aside, replay every line, and pick up the
+/// statusLine slot file in the same ssh. Returns how many spool lines were replayed.
+pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let Some(conn) = app.hosts.get(host).await else { return Ok(0) };
     if !conn.is_connected() {
         return Ok(0);
     }
-    let script = format!(
-        "d=\"$HOME/.config/agents-manager/bots/{id}\"\nf=\"$d/hook-spool.jsonl\"\n         if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\";          elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n         if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; rm -f \"$f.replaying\"; fi\n",
-        id = bot_id
-    );
-    let text = conn.ssh_exec(&script).await?;
+    let text = conn.ssh_exec(&drain_script(bot_id)).await?;
+    let (lines, status) = parse_drain_output(&text);
     let mut n = 0usize;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
+    for line in lines {
         match serde_json::from_str::<HookBody>(line) {
             Ok(b) => {
                 if b.bot_id != bot_id {
@@ -611,17 +637,169 @@ async fn replay_spool_remote(app: &Arc<App>, bot_id: &str, host: &str) -> Result
             Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line; dropped"),
         }
     }
+    if let Some(raw) = status {
+        match status_body(bot_id, &raw) {
+            Some(b) => {
+                if let Err(e) = process_locked(app, &b).await {
+                    tracing::warn!(error = ?e, "remote statusline replay failed");
+                }
+            }
+            None => tracing::warn!(bot_id, host, "unparseable remote hook-status.json; dropped"),
+        }
+    }
     if n > 0 {
         tracing::info!(bot_id, host, replayed = n, "remote hook spool replayed");
     }
     Ok(n)
 }
 
+/// The remote sh: spool → `.replaying` → stdout → gone, then the statusLine slot (§11.4.5).
+fn drain_script(bot_id: &str) -> String {
+    format!(
+        "d=\"$HOME/.config/agents-manager/bots/{id}\"\n\
+         f=\"$d/hook-spool.jsonl\"\n\
+         if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\"; \
+         elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n\
+         if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; rm -f \"$f.replaying\"; fi\n\
+         s=\"$d/hook-status.json\"\n\
+         if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
+        id = bot_id,
+        marker = STATUS_MARKER
+    )
+}
+
+/// The statusLine slot file as a `HookBody` for the existing `HookKind::StatusLine` branch.
+fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
+    let mut payload: Value = serde_json::from_str(raw).ok()?;
+    // hook.sh already stamps it; a hand-written or older file may not.
+    if let Some(o) = payload.as_object_mut() {
+        o.insert("hook_event_name".into(), json!("StatusLine"));
+    } else {
+        return None;
+    }
+    Some(HookBody {
+        bot_id: bot_id.to_string(),
+        provider: "claude".into(),
+        payload,
+        received_at: Some(db::now()),
+        truncated: false,
+    })
+}
+
+#[derive(Default)]
+struct DrainGate {
+    last: Option<std::time::Instant>,
+    again: bool,
+}
+
+fn drain_gates() -> &'static std::sync::Mutex<std::collections::HashMap<String, DrainGate>> {
+    static G: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, DrainGate>>> =
+        std::sync::OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+/// `true` when this trigger owns the next ssh; `false` when it was merged into the drain that
+/// is still inside the window (which then runs once more on its way out).
+fn gate_admit(g: &mut DrainGate, now: std::time::Instant) -> bool {
+    if let Some(last) = g.last {
+        if now.duration_since(last) < DRAIN_WINDOW {
+            g.again = true;
+            return false;
+        }
+    }
+    g.last = Some(now);
+    g.again = false;
+    true
+}
+
+/// Take the "somebody asked again while we were draining" flag.
+fn gate_take_again(g: &mut DrainGate) -> bool {
+    std::mem::take(&mut g.again)
+}
+
+/// SPEC §11.4.4 — `drain_remote` with the 1s merge window and the T+2s empty-handed retry.
+/// Awaited by `events::handle_status`; the follow-up runs on its own task.
+pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
+    {
+        let mut g = drain_gates().lock().unwrap();
+        let e = g.entry(bot_id.to_string()).or_default();
+        if !gate_admit(e, std::time::Instant::now()) {
+            tracing::debug!(bot_id, host, "drain merged into the one in the window");
+            return Ok(0);
+        }
+    }
+    let n = drain_remote(app, host, bot_id).await?;
+    let again = {
+        let mut g = drain_gates().lock().unwrap();
+        gate_take_again(g.entry(bot_id.to_string()).or_default())
+    };
+    // A merged trigger is served right after the window; an empty drain means the hook may
+    // still be writing its line (§11.4.4), so look once more before the fallback takes over.
+    let delay = if again {
+        Some(DRAIN_WINDOW)
+    } else if n == 0 {
+        Some(DRAIN_RETRY)
+    } else {
+        None
+    };
+    if let Some(d) = delay {
+        let (app2, host2, bot2) = (app.clone(), host.to_string(), bot_id.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(d).await;
+            if let Err(e) = drain_remote(&app2, &host2, &bot2).await {
+                tracing::debug!(bot_id = %bot2, host = %host2, error = ?e, "follow-up drain failed");
+            }
+        });
+    }
+    Ok(n)
+}
+
+/// SPEC §11.4.4 — one ssh per connected host every 30s, listing the bot dirs that have
+/// something to drain (a lost status event, or a host that had no `herdr` on PATH).
+pub fn spawn_spool_scanner(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SCAN_EVERY).await;
+            for conn in app.hosts.list().await {
+                if conn.is_local() || !conn.is_connected() {
+                    continue;
+                }
+                let pending = match conn.ssh_exec(SCAN_SCRIPT).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
+                        continue;
+                    }
+                };
+                let ids: std::collections::HashSet<&str> =
+                    pending.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+                if ids.is_empty() {
+                    continue;
+                }
+                for b in db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
+                    if !ids.contains(b.id.as_str()) {
+                        continue;
+                    }
+                    if let Err(e) = drain_remote_coalesced(&app, &conn.name, &b.id).await {
+                        tracing::debug!(bot = %b.name, host = %conn.name, error = ?e, "scanned drain failed");
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Loops the bot dirs on the host and prints the ids that have spool or statusLine material.
+const SCAN_SCRIPT: &str = "for d in \"$HOME/.config/agents-manager/bots\"/*/; do \
+     [ -d \"$d\" ] || continue; b=$(basename \"$d\"); \
+     if [ -f \"$d/hook-spool.jsonl\" ] || [ -f \"$d/hook-spool.jsonl.replaying\" ] || [ -f \"$d/hook-status.json\" ]; \
+     then echo \"$b\"; fi; done\n";
+
 /// SPEC §4.4.6: take the per-bot lock, rename the spool aside, replay each line, delete.
 pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
     if host != crate::config::LOCAL_HOST {
-        return replay_spool_remote(app, bot_id, &host).await;
+        return drain_remote(app, &host, bot_id).await;
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -685,6 +863,73 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
     }
 }
 
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn spool_lines_and_the_status_slot_come_apart() {
+        let out = "{\"bot_id\":\"b\"}\n{\"bot_id\":\"b\",\"provider\":\"claude\"}\n\n---AM-STATUS---\n{\n  \"session_id\": \"s\"\n}\n";
+        let (lines, status) = parse_drain_output(out);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(status.as_deref(), Some("{\n  \"session_id\": \"s\"\n}"));
+    }
+
+    /// No statusLine file: everything is spool, and nothing is mistaken for a status blob.
+    #[test]
+    fn output_without_the_marker_is_all_spool() {
+        let (lines, status) = parse_drain_output("{\"bot_id\":\"b\"}\n");
+        assert_eq!(lines, vec!["{\"bot_id\":\"b\"}"]);
+        assert!(status.is_none());
+        let (lines, status) = parse_drain_output("");
+        assert!(lines.is_empty() && status.is_none());
+    }
+
+    /// An empty slot file must not turn into an unparseable statusline warning.
+    #[test]
+    fn an_empty_status_slot_is_no_status() {
+        let (_, status) = parse_drain_output("---AM-STATUS---\n\n");
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn the_status_slot_becomes_a_claude_statusline_hook() {
+        let b = status_body("bot1", "{\"session_id\":\"s\"}").expect("body");
+        assert_eq!(b.provider, "claude");
+        assert_eq!(b.bot_id, "bot1");
+        assert!(matches!(classify(&b.provider, &b.payload), HookKind::StatusLine));
+        assert!(status_body("bot1", "not json").is_none());
+        // A JSON scalar is not a payload we can stamp.
+        assert!(status_body("bot1", "3").is_none());
+    }
+
+    /// §11.4.4: the second `working -> idle` of the same turn rides on the first drain's ssh,
+    /// and the first drain notices it has to look once more on its way out.
+    #[test]
+    fn a_second_trigger_inside_the_window_is_merged() {
+        let mut g = DrainGate::default();
+        let t0 = Instant::now();
+        assert!(gate_admit(&mut g, t0));
+        assert!(!gate_admit(&mut g, t0 + Duration::from_millis(200)));
+        assert!(!gate_admit(&mut g, t0 + Duration::from_millis(900)));
+        assert!(gate_take_again(&mut g));
+        assert!(!gate_take_again(&mut g), "the flag is consumed once");
+        // Past the window the next trigger opens its own ssh again.
+        assert!(gate_admit(&mut g, t0 + DRAIN_WINDOW + Duration::from_millis(1)));
+        assert!(!g.again);
+    }
+
+    #[test]
+    fn the_drain_script_takes_the_spool_and_the_status_slot() {
+        let s = drain_script("botX");
+        assert!(s.contains("bots/botX"));
+        assert!(s.contains("mv \"$f\" \"$f.replaying\""));
+        assert!(s.contains("hook-status.json"));
+        assert!(s.contains(STATUS_MARKER));
+    }
+}
 
 #[cfg(test)]
 mod external_claim_tests {

@@ -368,10 +368,10 @@ Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到
   "herdr_session": "agents-manager",
   "hosts": [
     {"name":"local","ssh":null,"ssh_port":null,"ssh_opts":[],"herdr_session":"agents-manager",
-     "remote_path":null,"hook_port":null,"connected":true,"error":null},
+     "remote_path":null,"connected":true,"error":null},
     {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"ssh_opts":[],
      "herdr_session":"agents-manager","remote_path":"/opt/homebrew/bin:$HOME/.local/bin",
-     "hook_port":7788,"connected":false,"error":"ssh master exited immediately (exit status: 255)"}
+     "connected":false,"error":"ssh master exited immediately (exit status: 255)"}
   ],
   "projects": [
     {"id":"01M1...","path":"/Users/m4p/work/foo","label":"foo@m4p","host":"m4p",
@@ -381,7 +381,7 @@ Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到
 ```
 
 - `hosts` **必定含 `local`**，且 `local` 永遠排在第一個；`local` 的 `ssh` / `ssh_port` /
-  `remote_path` / `hook_port` 為 `null`，`connected` = 本機 herdr 連線狀態（與頂層 `connected` 同值）。
+  `remote_path` 為 `null`，`connected` = 本機 herdr 連線狀態（與頂層 `connected` 同值）。
 - `default_connected` 是本機使用者 Herdr `default` session 的觀察連線狀態；採用該 session 的 Bot
   只依這個欄位判斷，不會因 manager 的 named session 狀態誤亮或誤灰。
 - UI 的「主機」下拉可直接用這個陣列；sidebar 的 host 徽章在 `project.host !== "local"` 時才顯示。
@@ -405,7 +405,6 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
   "ssh_port": 22,
   "herdr_session": "agents-manager",
   "remote_path": "/opt/homebrew/bin:$HOME/.local/bin",
-  "hook_port": 7788,
   "ssh_opts": ["-i", "/path/to/key"]
 }
 ```
@@ -417,7 +416,7 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
 | `ssh_port` | | `22` |
 | `herdr_session` | | `"agents-manager"` |
 | `remote_path` | | `""`（非互動 ssh shell 缺少的 PATH，會前置到遠端 PATH） |
-| `hook_port` | | daemon 自己的 port（預設 7788） |
+| `hook_port` | | v4.3 起**忽略**（仍接受，只為相容舊 client）。遠端 hook 改走該機器自己的 herdr 上報狀態、payload 寫進 spool 檔由 daemon 讀回，沒有反向轉發也沒有埠可挑，見 SPEC §11.4 |
 | `ssh_opts` | | `[]`，額外的 ssh 參數，原樣附加到每個 ssh 指令（例：`["-i","~/.ssh/id_x"]`） |
 
 回應 `200`（同步等待第一次連線結果，最長約 35 秒）：
@@ -657,7 +656,7 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
 
 啟動 Run 時：
 
-- **pane env** = daemon 既有注入（`AM_BOT_ID` / `AM_RUN_ID` / `AM_PORT` /
+- **pane env** = daemon 既有注入（`AM_BOT_ID` / `AM_RUN_ID` / `AM_PORT`（v4.3 起只有本機 bot 帶，遠端 hook 不打 HTTP） /
   `CLAUDE_CODE_CHILD_SESSION` / `CLAUDECODE`）∪ `identity.env` ∪ `bot.env`，後者覆蓋前者。
 - **args** = daemon 注入（`--dangerously-skip-permissions` / `--settings` …）
   ++ `identity.args` ++ `bot.args`。
@@ -967,7 +966,7 @@ Project 底下**所有存活 bot** 的訊息合併，以 `message.id`（ULID，�
 
 第三種 kind：xAI grok CLI（1.0.13）。`POST /projects/:id/bots`、`POST /identities` 的 `kind` 接受 `claude | codex | grok`（其他值 → `400 {"error":"bad_request","message":"kind must be claude, codex or grok"}`）。前端與 mock 都已有 `grok` 選項與 `am-grok` 種子。
 
-啟動時 daemon 注入：`auto_approve` → `--always-approve`；`model` → `-m <model>`；hook **不走 argv**（grok 沒有每次啟動的 hook 旗標），改為寫入 `<GROK_HOME>/hooks/agents-manager.json` + `~/.config/agents-manager/grok-hook.sh`，靠 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` 分派到正確的 bot；`inject_hooks = false` 時不給 `AM_HOOK_TOKEN`，hook 變成 no-op，回覆走 `terminal_fallback`。
+啟動時 daemon 注入：`auto_approve` → `--always-approve`；`model` → `-m <model>`；hook **不走 argv**（grok 沒有每次啟動的 hook 旗標），改為寫入 `<GROK_HOME>/hooks/agents-manager.json` + `~/.config/agents-manager/grok-hook.sh`，靠 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN`（本機另有 `AM_PORT`）分派到正確的 bot；`inject_hooks = false` 時不給 `AM_HOOK_TOKEN`，hook 變成 no-op，回覆走 `terminal_fallback`。
 
 hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok 的 stdin JSON：`hookEventName: "stop"`、`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`、`reason: "end_turn"`、`stopHookActive`）。`reason ≠ end_turn`（session 結束時的觀察用 Stop）與 `session_end` 會被忽略；`session_start` 只回填 `runs.native_session_id`。
 

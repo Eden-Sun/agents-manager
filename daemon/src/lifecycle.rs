@@ -335,23 +335,32 @@ fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str) -> Vec
     vec![exe.into(), "hook".into(), provider.into(), "--bot".into(), bot_id.into(), "--port".into(), port.to_string()]
 }
 
-/// SPEC appendix E — the POSIX sh + curl hook installed on remote hosts (no daemon binary there).
+/// SPEC §11.4 — the POSIX sh hook installed on remote hosts (no daemon binary there).
+///
+/// v4.3: nothing calls home over HTTP any more. The payload is appended to the bot's spool
+/// file and the *state* is reported to this machine's own herdr (`pane report-agent`), whose
+/// event stream the daemon is already subscribed to over the forwarded socket. The daemon
+/// drains the spool when it sees that state change (§11.4.3).
 pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
-PROVIDER="$1"; BOT="$2"; TOKEN="$3"; PORT="$4"; shift 4
+PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
+# Argument 4 used to be the reverse-forwarded daemon port. Agents started by an older daemon
+# still pass it (their argv was fixed at launch), so accept and ignore a numeric one.
+if [ $# -gt 0 ]; then case "$1" in ''|*[!0-9]*) ;; *) shift ;; esac; fi
 LIMIT=1048576
-# v4.0 statusLine mode: POST the rate limits as a `StatusLine` claude event (fire-and-forget,
-# never spooled), then run the user's own statusLine command on the same input so the pane
-# shows exactly what it would without the daemon. Budget: ~2 s, always exit 0.
+DIR="$HOME/.config/agents-manager/bots/$BOT"
+mkdir -p "$DIR" 2>/dev/null
+: "$TOKEN"   # kept for argv compatibility; the spool file is already only ours to read
+
+# v4.0 statusLine mode: the rate limits arrive on every repaint, so they go to a single-slot
+# file the daemon picks up with the next drain (§11.4.5) — never the spool, which is a queue.
+# Then run the user's own statusLine command on the same input so the pane looks unchanged.
 if [ "$PROVIDER" = "statusline" ]; then
   INPUT=$(head -c $LIMIT)
   case "$INPUT" in
     '{}'|'') ;;
     '{'*)
-      NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-      PAYLOAD='{"hook_event_name":"StatusLine",'"${INPUT#\{}"
-      BODY=$(printf '{"bot_id":"%s","provider":"claude","payload":%s,"received_at":"%s","truncated":false}' "$BOT" "$PAYLOAD" "$NOW")
-      ( NO_PROXY=127.0.0.1 curl -s -m 2 --connect-timeout 0.3 -o /dev/null -X POST "http://127.0.0.1:$PORT/hook/claude" \
-          -H 'Content-Type: application/json' -H "X-AM-Bot-Token: $TOKEN" --data-binary "$BODY" >/dev/null 2>&1 & ) ;;
+      printf '{"hook_event_name":"StatusLine",%s' "${INPUT#\{}" > "$DIR/hook-status.json.tmp" 2>/dev/null \
+        && mv -f "$DIR/hook-status.json.tmp" "$DIR/hook-status.json" 2>/dev/null ;;
   esac
   CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
   CMD=""
@@ -383,12 +392,75 @@ case "$PAYLOAD" in
 esac
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":%s}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW" "$TRUNC")
-DIR="$HOME/.config/agents-manager/bots/$BOT"
-mkdir -p "$DIR"
-OUT=$(NO_PROXY=127.0.0.1 curl -s -m 2 --connect-timeout 0.3 -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/hook/$PROVIDER" \
-  -H 'Content-Type: application/json' -H "X-AM-Bot-Token: $TOKEN" --data-binary "$BODY" 2>>"$DIR/hook.log") || OUT=fail
-# 4xx means the daemon will never accept this line (deleted bot / bad token): do not spool it.
-case "$OUT" in 2*) ;; 4*) printf '%s rejected %s\n' "$NOW" "$OUT" >> "$DIR/hook.log";; *) printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl";; esac
+# Spool FIRST: the daemon reads this file the moment it sees the state change below, so the
+# line has to be there before herdr is told anything.
+printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl"
+
+# ---- tell this host's herdr what the agent is doing (SPEC §11.4.2)
+[ -n "${HERDR_PANE_ID:-}" ] || exit 0
+HERDR="${AM_REAL_HERDR:-}"
+if [ -z "$HERDR" ] || [ ! -x "$HERDR" ]; then HERDR=$(command -v herdr 2>/dev/null); fi
+if [ -z "$HERDR" ]; then printf '%s herdr not found; spooled only\n' "$NOW" >> "$DIR/hook.log"; exit 0; fi
+am_herdr() {
+  if [ -n "${HERDR_SESSION:-}" ]; then "$HERDR" --session "$HERDR_SESSION" "$@"; else "$HERDR" "$@"; fi
+}
+# `--seq` is monotonic per (pane, source) and anything <= the last one is dropped, so this has
+# to keep climbing: nanoseconds where python3 exists (herdr's own integration does the same),
+# else <epoch seconds><3-digit counter>, which is still seconds*1000 + n.
+am_seq() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(time.time_ns())' 2>/dev/null && return 0
+  fi
+  _n=0
+  [ -f "$DIR/hook-seq" ] && _n=$(cat "$DIR/hook-seq" 2>/dev/null)
+  case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+  _n=$(( (_n + 1) % 1000 ))
+  printf '%s\n' "$_n" > "$DIR/hook-seq" 2>/dev/null
+  printf '%s%03d\n' "$(date +%s)" "$_n"
+}
+# One string field out of a single-line JSON object. Coarse on purpose (see below).
+am_str() {
+  printf '%s' "$PAYLOAD" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+# The classification that matters lives in the daemon (`hookrecv::classify`). All this needs
+# to decide is "did a turn just end" — a wrong guess here would only cost a late sweep, while
+# a wrong guess about *content* would swallow a reply.
+STATE=""
+START=0
+case "$PROVIDER" in
+  claude)
+    case "$PAYLOAD" in *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*) STATE=idle ;; esac
+    case "$PAYLOAD" in *'"stop_hook_active":true'*|*'"stop_hook_active": true'*) STATE="" ;; esac
+    case "$PAYLOAD" in *'"hook_event_name":"SessionStart"'*|*'"hook_event_name": "SessionStart"'*) START=1 ;; esac
+    ;;
+  codex)
+    case "$PAYLOAD" in *'"type":"agent-turn-complete"'*|*'"type": "agent-turn-complete"'*) STATE=idle ;; esac
+    ;;
+  grok)
+    case "$PAYLOAD" in *'"hookEventName":"stop"'*|*'"hook_event_name":"stop"'*) STATE=idle ;; esac
+    case "$PAYLOAD" in *'"reason":"shutdown"'*|*'"stopHookActive":true'*|*'"stop_hook_active":true'*) STATE="" ;; esac
+    case "$PAYLOAD" in *'"hookEventName":"session_start"'*|*'"hook_event_name":"session_start"'*) START=1 ;; esac
+    ;;
+esac
+[ "$START" = 1 ] || [ -n "$STATE" ] || exit 0
+SID=$(am_str session_id)
+[ -n "$SID" ] || SID=$(am_str sessionId)
+[ -n "$SID" ] || SID=$(am_str thread-id)
+TP=$(am_str transcript_path)
+[ -n "$TP" ] || TP=$(am_str transcriptPath)
+SEQ=$(am_seq)
+if [ "$START" = 1 ]; then
+  # herdr 0.8.2 emits no event for this and does not surface it; best effort, for herdr's own
+  # bookkeeping. The daemon still learns the session id from the spooled payload.
+  set -- pane report-agent-session "$HERDR_PANE_ID" --source "agents-manager:$BOT" --agent "$PROVIDER" --seq "$SEQ"
+else
+  # Only ever `idle`: there is no "the agent started" hook, and herdr's own terminal detection
+  # already reports `working` / `blocked`. Reporting those here would just fight it.
+  set -- pane report-agent "$HERDR_PANE_ID" --source "agents-manager:$BOT" --agent "$PROVIDER" --state "$STATE" --seq "$SEQ"
+fi
+[ -n "$SID" ] && set -- "$@" --agent-session-id "$SID"
+[ -n "$TP" ] && set -- "$@" --agent-session-path "$TP"
+am_herdr "$@" >/dev/null 2>>"$DIR/hook.log"
 exit 0
 "#;
 
@@ -412,7 +484,7 @@ pub const REMOTE_GROK_DISPATCH_SH: &str = r#"#!/bin/sh
 [ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
 H="$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh"
 [ -x "$H" ] || exit 0
-exec "$H" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN" "${AM_PORT:-7788}"
+exec "$H" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN"
 "#;
 
 /// Local dispatcher: runs the daemon binary's `hook grok` subcommand.
@@ -505,28 +577,17 @@ pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<Rem
 }
 
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
-async fn install_remote_hook(
-    conn: &HostConn,
-    bot: &db::Bot,
-    hook_port: u16,
-) -> anyhow::Result<RemoteHookPaths> {
+async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<RemoteHookPaths> {
     let p = remote_bot_dir(conn, &bot.id).await?;
     let cmd = shell_join(&[
         p.hook_sh.clone(),
         "claude".into(),
         bot.id.clone(),
         bot.hook_token.clone(),
-        hook_port.to_string(),
     ]);
-    // v4.0: `hook.sh statusline <bot> <token> <port>` POSTs the rate limits, then execs the
-    // user's own statusLine command (read from the remote ~/.claude/settings.json).
-    let statusline = shell_join(&[
-        p.hook_sh.clone(),
-        "statusline".into(),
-        bot.id.clone(),
-        bot.hook_token.clone(),
-        hook_port.to_string(),
-    ]);
+    // v4.0: `hook.sh statusline <bot> <token>` overwrites the single-slot `hook-status.json`
+    // (§11.4.5), then execs the user's own statusLine command (remote ~/.claude/settings.json).
+    let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), bot.hook_token.clone()]);
     let settings = json!({
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
@@ -549,6 +610,36 @@ async fn install_remote_hook(
     }
     tracing::info!(host = %conn.name, bot = %bot.name, dir = %p.dir, "remote hook installed");
     Ok(p)
+}
+
+/// SPEC §11.4.7 — rewrite a *live* remote run's hook material without restarting it.
+///
+/// Reconcile calls this for every remote run it keeps, so that an agent launched by an older
+/// daemon starts spooling + reporting through herdr the moment we come back. The agent's own
+/// argv is fixed at launch and cannot be rewritten, which is exactly why `hook.sh` still
+/// accepts (and ignores) the old 4th port argument.
+pub async fn refresh_remote_hook(app: &Arc<App>, bot: &db::Bot) -> anyhow::Result<()> {
+    if bot.inject_hooks == 0 {
+        return Ok(());
+    }
+    let project = db::project(&app.db, &bot.project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("bot `{}` has no project", bot.id))?;
+    if project.host == LOCAL_HOST {
+        return Ok(());
+    }
+    let conn = app
+        .hosts
+        .get(&project.host)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
+    install_remote_hook(&conn, bot).await?;
+    if bot.kind == "grok" {
+        // The dispatcher is global and static, but its `hook.sh` argv changed in v4.3.
+        let env: Value = serde_json::from_str(&bot.env_json).unwrap_or_else(|_| json!({}));
+        install_remote_grok_hook(&conn, &env).await?;
+    }
+    Ok(())
 }
 
 /// Put the `herdr` shim (SPEC §6.5b) where this bot's pane can reach it, and answer with the
@@ -594,15 +685,14 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         return Ok(out);
     }
 
-    // ---- remote project: POSIX sh hook over the reverse tunnel
+    // ---- remote project: POSIX sh hook, reporting through that host's own herdr (§11.4)
     if project.host != LOCAL_HOST {
         let conn = app
             .hosts
             .get(&project.host)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
-        let hook_port = conn.hook_port(app.port);
-        let paths = install_remote_hook(&conn, bot, hook_port).await?;
+        let paths = install_remote_hook(&conn, bot).await?;
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
@@ -612,7 +702,6 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
                     "codex".to_string(),
                     bot.id.clone(),
                     bot.hook_token.clone(),
-                    hook_port.to_string(),
                 ];
                 vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
             }
@@ -699,7 +788,6 @@ async fn pane_env(
     bot: &db::Bot,
     host: &str,
     run_id: &str,
-    hook_port: u16,
     agent_name: &str,
     shim_dir: Option<&str>,
 ) -> Value {
@@ -720,8 +808,11 @@ async fn pane_env(
     }
     // diagnostics only; hook identity is per-bot
     env.insert("AM_RUN_ID".into(), json!(run_id));
-    // On a remote host this is the reverse-forwarded port, not the daemon's own.
-    env.insert("AM_PORT".into(), json!(hook_port.to_string()));
+    // Only the local hook commands talk HTTP to the daemon; a remote pane has no port to
+    // call home on since v4.3 (§11.4.6), so it is not told about one.
+    if host == LOCAL_HOST {
+        env.insert("AM_PORT".into(), json!(app.port.to_string()));
+    }
     // The hook token rides in the pane env for every kind: grok's global dispatcher can only
     // learn the bot from there (SPEC §12), and the local claude / codex hook commands read
     // `AM_HOOK_TOKEN` too so the token never shows up in `ps` (issue #43).
@@ -1470,15 +1561,11 @@ async fn start_inner(
         let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         return Err(LcError::Bad(reason));
     }
-    let hook_port = match app.hosts.get(&host).await {
-        Some(c) => c.hook_port(app.port),
-        None => app.port,
-    };
     // The agent name is decided here because both the persona (`child_agent_rules`) and the shim
     // (`AM_AGENT_NAME`) quote it.
     let agent = crate::config::agent_name(&project.label, &bot.id);
     let shim_dir = install_shim(app, bot, project).await;
-    let env = pane_env(app, bot, &host, run_id, hook_port, &agent, shim_dir.as_deref()).await;
+    let env = pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await;
     // SPEC §6.5c: claude learns herdr from a skill, not from the persona — the persona has no
     // room for a CLI reference, and `herdr --skill` is the CLI's own.
     install_herdr_skill(app, bot, project, &env, &agent).await;
@@ -5815,5 +5902,243 @@ mod progress_rate_tests {
     #[test]
     fn force_ignores_the_budget() {
         assert!(progress_due(Some(&Instant::now()), true));
+    }
+}
+
+#[cfg(test)]
+mod remote_hook_tests {
+    //! SPEC §11.4.2 — `REMOTE_HOOK_SH` is a shell script, so the only test worth writing runs it
+    //! with `/bin/sh` against a fake `$HOME` and a fake `herdr` that records its argv. It has no
+    //! coverage on the remote host itself, which is why the classification stays coarse here and
+    //! the real one lives in `hookrecv::classify`.
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    struct Sandbox {
+        dir: std::path::PathBuf,
+        bot: String,
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn write_exec(path: &std::path::Path, body: &str) {
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        drop(f);
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    impl Sandbox {
+        /// `with_herdr = false` is the §11.4.2 "no herdr on this host" path (acceptance H5).
+        fn new(with_herdr: bool) -> Self {
+            let dir = std::env::temp_dir().join(format!("am-hook-{}", crate::db::ulid()));
+            std::fs::create_dir_all(&dir).unwrap();
+            write_exec(&dir.join("hook.sh"), super::REMOTE_HOOK_SH);
+            if with_herdr {
+                // Records one invocation per line so `--seq` ordering stays observable.
+                write_exec(
+                    &dir.join("herdr"),
+                    "#!/bin/sh\n{ for a in \"$@\"; do printf '%s ' \"$a\"; done; printf '\\n'; } >> \"$AM_TEST_LOG\"\n",
+                );
+            }
+            Sandbox { dir, bot: "b-test".into() }
+        }
+
+        fn bot_dir(&self) -> std::path::PathBuf {
+            self.dir.join(".config/agents-manager/bots").join(&self.bot)
+        }
+
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.bot_dir().join(name)).unwrap_or_default()
+        }
+
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.join("herdr.log"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+
+        /// Runs `hook.sh <argv…>` with `stdin`, answering `(stdout, exit_ok)`.
+        fn run(&self, argv: &[&str], stdin: &str) -> (String, bool) {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg(self.dir.join("hook.sh"));
+            cmd.args(argv);
+            cmd.env_clear();
+            cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            cmd.env("HOME", &self.dir);
+            cmd.env("AM_TEST_LOG", self.dir.join("herdr.log"));
+            cmd.env("HERDR_PANE_ID", "p1");
+            cmd.env("HERDR_SESSION", "am-test");
+            let herdr = self.dir.join("herdr");
+            if herdr.exists() {
+                cmd.env("AM_REAL_HERDR", &herdr);
+            }
+            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut ch = cmd.spawn().unwrap();
+            ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+            let out = ch.wait_with_output().unwrap();
+            (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+        }
+    }
+
+    const STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}"#;
+
+    #[test]
+    fn claude_stop_spools_then_reports_idle() {
+        let sb = Sandbox::new(true);
+        let (out, ok) = sb.run(&["claude", &sb.bot, "tok"], STOP);
+        assert!(ok, "the hook must always exit 0");
+        assert_eq!(out, "", "the hook must always keep stdout empty (§4.4)");
+        let spool = sb.read("hook-spool.jsonl");
+        assert_eq!(spool.lines().count(), 1);
+        assert!(spool.contains(r#""bot_id":"b-test""#) && spool.contains(r#""provider":"claude""#));
+        assert!(spool.contains(r#""hook_event_name":"Stop""#));
+        let calls = sb.calls();
+        assert_eq!(calls.len(), 1, "one report per turn end: {calls:?}");
+        let c = &calls[0];
+        assert!(c.contains("--session am-test "), "{c}");
+        assert!(c.contains("pane report-agent p1 "), "{c}");
+        assert!(c.contains("--source agents-manager:b-test "), "{c}");
+        assert!(c.contains("--agent claude "), "{c}");
+        assert!(c.contains("--state idle "), "{c}");
+        assert!(c.contains("--agent-session-id s-1"), "{c}");
+        assert!(c.contains("--agent-session-path /tmp/t.jsonl"), "{c}");
+        // `--message` costs a fork and never reaches the subscriber (§11.4.1).
+        assert!(!c.contains("--message"), "{c}");
+    }
+
+    #[test]
+    fn nested_stop_and_grok_shutdown_spool_without_reporting() {
+        let sb = Sandbox::new(true);
+        sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"Stop","stop_hook_active":true}"#);
+        sb.run(&["grok", &sb.bot, "tok"], r#"{"hookEventName":"stop","reason":"shutdown"}"#);
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 2, "both still spool");
+        assert!(sb.calls().is_empty(), "neither is a turn ending: {:?}", sb.calls());
+    }
+
+    #[test]
+    fn grok_end_turn_reports_idle() {
+        let sb = Sandbox::new(true);
+        sb.run(&["grok", &sb.bot, "tok"], r#"{"hookEventName":"stop","reason":"end_turn","sessionId":"g-9"}"#);
+        let calls = sb.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains("--agent grok ") && calls[0].contains("--state idle "), "{:?}", calls);
+        assert!(calls[0].contains("--agent-session-id g-9"), "{:?}", calls);
+    }
+
+    #[test]
+    fn codex_takes_the_payload_from_argv() {
+        let sb = Sandbox::new(true);
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"c-3"}"#;
+        sb.run(&["codex", &sb.bot, "tok", payload], "");
+        assert!(sb.read("hook-spool.jsonl").contains("agent-turn-complete"));
+        let calls = sb.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].contains("--state idle ") && calls[0].contains("--agent-session-id c-3"), "{calls:?}");
+    }
+
+    #[test]
+    fn session_start_only_reports_the_session() {
+        let sb = Sandbox::new(true);
+        sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"SessionStart","session_id":"s-2"}"#);
+        let calls = sb.calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].contains("pane report-agent-session p1 "), "{calls:?}");
+        assert!(!calls[0].contains("--state"), "a session start says nothing about the state: {calls:?}");
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
+    }
+
+    #[test]
+    fn without_herdr_it_spools_and_says_so() {
+        let sb = Sandbox::new(false);
+        let (out, ok) = sb.run(&["claude", &sb.bot, "tok"], STOP);
+        assert!(ok);
+        assert_eq!(out, "");
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
+        assert!(sb.read("hook.log").contains("herdr not found; spooled only"));
+    }
+
+    #[test]
+    fn the_legacy_port_argument_changes_nothing() {
+        // H7: agents launched by an older daemon have `7788` welded into their argv.
+        let with = Sandbox::new(true);
+        with.run(&["claude", &with.bot, "tok", "7788"], STOP);
+        let without = Sandbox::new(true);
+        without.run(&["claude", &without.bot, "tok"], STOP);
+        // `received_at` and `--seq` are wall clock, so they are the two things allowed to differ.
+        let strip = |c: Vec<String>| -> Vec<String> {
+            c.iter().map(|l| l.split(" --seq ").next().unwrap_or(l).to_string()).collect()
+        };
+        let undate = |s: String| -> String {
+            match (s.find(r#","received_at""#), s.find(r#","truncated""#)) {
+                (Some(a), Some(b)) => format!("{}{}", &s[..a], &s[b..]),
+                _ => s,
+            }
+        };
+        assert_eq!(undate(with.read("hook-spool.jsonl")), undate(without.read("hook-spool.jsonl")));
+        assert_eq!(strip(with.calls()), strip(without.calls()));
+    }
+
+    #[test]
+    fn statusline_overwrites_a_single_slot_and_runs_the_user_command() {
+        let sb = Sandbox::new(true);
+        let cfg = sb.dir.join(".claude");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"printf USERLINE"}}"#,
+        )
+        .unwrap();
+        sb.run(&["statusline", &sb.bot, "tok"], r#"{"cost":{"a":1}}"#);
+        let (out, ok) = sb.run(&["statusline", &sb.bot, "tok", "7788"], r#"{"cost":{"b":2}}"#);
+        assert!(ok);
+        assert_eq!(out, "USERLINE", "stdout is the user's own status line, nothing else");
+        let slot = sb.read("hook-status.json");
+        assert_eq!(slot.lines().count(), 1, "single slot, not a queue: {slot}");
+        assert!(slot.starts_with(r#"{"hook_event_name":"StatusLine","cost":{"b":2}}"#), "{slot}");
+        assert_eq!(sb.read("hook-spool.jsonl"), "", "the status line never enters the spool (§11.4.5)");
+        assert!(sb.calls().is_empty(), "the status line reports no state");
+    }
+
+    #[test]
+    fn seq_is_strictly_increasing() {
+        let sb = Sandbox::new(true);
+        sb.run(&["claude", &sb.bot, "tok"], STOP);
+        sb.run(&["claude", &sb.bot, "tok"], STOP);
+        let seqs: Vec<u128> = sb
+            .calls()
+            .iter()
+            .map(|c| {
+                c.split(" --seq ").nth(1).unwrap().split_whitespace().next().unwrap().parse::<u128>().unwrap()
+            })
+            .collect();
+        assert_eq!(seqs.len(), 2, "{:?}", sb.calls());
+        assert!(seqs[1] > seqs[0], "herdr drops a seq that did not grow: {seqs:?}");
+    }
+
+    #[test]
+    fn without_a_pane_id_it_only_spools() {
+        let sb = Sandbox::new(true);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg(sb.dir.join("hook.sh")).args(["claude", &sb.bot, "tok"]);
+        cmd.env_clear();
+        cmd.env("PATH", "/usr/bin:/bin");
+        cmd.env("HOME", &sb.dir);
+        cmd.env("AM_TEST_LOG", sb.dir.join("herdr.log"));
+        cmd.env("AM_REAL_HERDR", sb.dir.join("herdr"));
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut ch = cmd.spawn().unwrap();
+        ch.stdin.take().unwrap().write_all(STOP.as_bytes()).unwrap();
+        assert!(ch.wait().unwrap().success());
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
+        assert!(sb.calls().is_empty(), "no pane to report against");
     }
 }

@@ -1,4 +1,4 @@
-# Agents Manager 規格書（v3.6）
+# Agents Manager 規格書（v4.3）
 
 > 修訂紀錄
 > - v4.2（2026-09-07）：新增 §17.1「預設提示從哪來」：`GET /api/models` 新增 `identity=` 參數，claude 的 `default_effort` 改讀那個身份的 `settings.json`（`effortLevel` 全域 + `modelSettings.<真實 id>.effortLevel` per-model 覆寫，以 alias 子字串比對），兩者都沒有時落回 claude 官方文件記載、並經真機驗證的內建預設 `high`（初版誤回 `null`，已修正）；UI 的「預設」按鈕與 tooltip 因此顯示真正會生效的強度而不是空話；模型快取 key 多一段身份。
@@ -163,6 +163,7 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 4. 失敗 → 以 `O_APPEND` 追加一行 JSON 到 `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫入失敗只記自己的 log 檔（`hook.log`），仍 exit 0。
 5. `--port` 來自 command 列（不依賴 env）；env `AM_PORT` 為備援。
 6. daemon 端 spool 重放：取得 per-bot 鎖 → rename spool 為 `.replaying` → 逐行依 §6.7 處理 → 刪檔 → 釋放鎖。重放期間該 bot 的 HTTP hook 在鎖外等待（因同一把鎖）。
+7. **遠端 bot（v4.3）不走 HTTP**：第 3 點的 POST 換成「寫 spool + `herdr pane report-agent`」，第 4 點的 spool 從備援變成唯一內容通道，觸發重放的是 herdr 狀態事件。完整規則見 §11.4。
 
 ## 5. 設定檔
 
@@ -316,7 +317,7 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
 注入的既有 agent 仍透過 pane status 與 terminal fallback 更新對話。
 
 ### 6.6 事件處理
-- `pane.agent_status_changed`：更新 Run `agent_status`；`working→idle` 啟動備援計時（§4.3）；推 WS。
+- `pane.agent_status_changed`：更新 Run `agent_status`；`working→idle` 啟動備援計時（§4.3）；推 WS。遠端 run 另外先 drain 一次該 bot 的 spool（§11.4.3）。
 - `pane.exited` / `pane.closed`：對應 Run → `exited`，in-flight Turn → `failed`。
 - `workspace.closed`：`projects.workspace_id = NULL`，其下 Run → `exited`。
 - `pane.agent_detected`：僅 log。
@@ -385,9 +386,11 @@ Project 可以位於另一台機器：該機器上有自己的 herdr，agent 在
 ```
 本機 daemon ──(ssh -M master)──► 遠端 sshd
    │  -L <本機短路徑>.sock : ~/.config/herdr/sessions/<session>/herdr.sock   （herdr RPC / 事件）
-   │  -R <hook_port> : 127.0.0.1:<daemon port>                               （遠端 hook 回呼）
    └─ ssh <host> '<sh 指令>'                                                 （放 hook 腳本、settings、讀 spool、列目錄）
 ```
+
+**沒有反向轉發**（v4.3）：遠端 hook 不再打 HTTP 回本機，狀態走 herdr 事件、內容走 spool 檔（§11.4）。
+`-R` 與 `hook_port` 一起拿掉的理由見 §11.4 開頭。
 
 ### 11.2 設定
 ```toml
@@ -397,7 +400,7 @@ ssh = "m4p@100.112.229.82"         # ssh 目標；可含 ssh_config 別名；por
 ssh_port = 22
 herdr_session = "agents-manager"   # 遠端 named session（絕不使用遠端 default session）
 remote_path = "/opt/homebrew/bin:$HOME/.local/bin"   # 非互動 ssh shell 缺少的 PATH，前置到 PATH
-hook_port = 7788                   # 遠端 127.0.0.1 上反向轉發的埠；與 daemon 埠相同即可，衝突時改
+# hook_port = 7788                 # v4.3 起未使用（見 §11.4）；還在檔案裡的話會被忽略並 warn 一次
 
 [[projects]]
 host = "m4p"                       # 缺省 = 本機
@@ -411,39 +414,167 @@ label = "foo@m4p"
 每個 host 一個 `HostConn`：
 1. **ensure remote session**（v3.4）：遠端為 macOS 且 ssh 使用者就是 `/dev/console` 的擁有者時，寫入 `~/Library/LaunchAgents/dev.agents-manager.herdr-<session>.plist`（`ProgramArguments = herdr --session <session> server`、`KeepAlive`、`RunAtLoad`、`ProcessType Interactive`、PATH 含 `remote_path`）並 `launchctl bootstrap gui/<uid>`；若已載入則沿用；若原本有 nohup 起的 server 先 `herdr --session <session> server stop` 再交給 launchd。非 macOS、無桌面登入或 launchctl 失敗 → 退回 `( trap '' HUP; herdr --session <session> server & )`。
    - 原因：非互動 ssh 工作階段讀不到使用者的登入 Keychain（`security` 回 errSecInteractionNotAllowed，錯誤 36），在該 herdr 底下啟動的 Claude Code 會顯示「Not logged in」即使主機已登入；GUI 網域的 LaunchAgent 跑在桌面工作階段，Keychain 已解鎖。附帶好處：ssh 斷線或 herdr 當掉 launchd 會自動拉起。
-2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> -R <hook_port>:127.0.0.1:<daemon port> <target>`。
+2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> <target>`。
    - `<local.sock>` 與 `<ctl>` 必須放在**短路徑**（macOS AF_UNIX 上限 104 bytes）：`/tmp/agents-manager-<uid>/<host>.sock`、`<host>.ctl`。
-   - **反向通道的埠先探測再要**（v4.2）：`ExitOnForwardFailure=yes` 是刻意的——沒有 hook 通道的 master 沒有用——但它也代表遠端那個埠只要被佔住，**每一次重連都會以 `exit status: 255` 收場**，而使用者只看得到 `ssh master exited immediately`，log 裡的 `remote port forwarding failed for listen port <p>` 藏在另一行。實測就是這樣：一條沒清乾淨的舊 ssh 通道把 7788 佔了 51 分鐘，遠端全程連不上。
-     所以起 master 之前先在遠端跑一段探測（走 stdin，token 不會進遠端 argv）：
-     | 狀況 | 判斷 | 動作 |
-     |---|---|---|
-     | 沒人聽 | `lsof -iTCP:<p> -sTCP:LISTEN` 無結果 | 照常帶 `-R` |
-     | 活的（是我們的） | `curl 127.0.0.1:<p>/api/session` 回應含**本 daemon 的 ui token** | 通道還在，**不帶 `-R`** 直接沿用；再要一次只會讓 sshd 綁不上而拖垮整個 master |
-     | 死的（是我們的） | 沒有回應，且持有者是本登入帳號的 `sshd` | `kill` 它、收回埠，然後帶 `-R`（log：`reclaimed the hook port from a dead ssh tunnel`） |
-     | 別人的 | 沒有回應，持有者不是 `sshd` | **不搶**，直接報錯並指名持有者，建議改該 host 的 `hook_port` |
-     探測本身是 best-effort：ssh 問不到就當「沒人聽」照常嘗試，讓 ssh 自己講。
+   - 只剩 `-L` 一條轉發。`ExitOnForwardFailure=yes` 仍然保留：沒有 herdr socket 的 master 沒有用；但這條是**本機**綁定、由 `StreamLocalBindUnlink=yes` 自己收拾，不會像舊的 `-R` 那樣被遠端的殘留佔用卡死。
+   - v4.2 的「反向通道埠探測」表（`AM_FWD=free|live|busy`、殺掉死掉的 sshd 收回埠）連同 `-R` 一起移除：遠端已經不需要任何 daemon 的埠。歷史原因見 §11.4。
 3. 以 `HerdrClient::new(<local.sock>)` 取得與本機完全相同的 client；`ping` 成功 → `connected`。
 4. 健康檢查：每 10 秒 `ping`；失敗或 master 程序退出 → 標 `disconnected`、指數退避（1s→30s）重建 master → 成功後對該 host 執行對帳（§6.5）並重建事件訂閱。
 5. daemon 退出時關閉 master（`ssh -O exit`）；遠端 herdr server 與 agent 保持存活。
 6. `App` 由單一 `herdr` 改為 `hosts: HashMap<String, HostConn>`，`"local"` 為既有本機 client；所有用到 `app.herdr` 的地方改為 `app.herdr_for(project.host)`。pane watcher、fallback timer 等以 `(host, pane_id)` 為鍵。對帳與全域事件訂閱逐 host 執行。
 
-### 11.4 遠端 hook
-遠端沒有 `agents-managerd` 二進位，改用 **POSIX sh + curl** 腳本（附錄 E 已實測可通過反向通道打到 daemon）：
-- daemon 在啟動 Run 時透過 ssh 寫入遠端 `~/.config/agents-manager/bots/<bot_id>/hook.sh`（內容固定，見附錄 E）與 `claude-settings.json`；`chmod +x`。
-- claude args：`--settings <遠端絕對路徑>`；codex：`-c notify=["<遠端 hook.sh>","codex","<bot_id>","<token>","<hook_port>"]`；grok（v3.6）：不加 args，另寫遠端 `~/.config/agents-manager/grok-hook.sh`（分派到 `bots/$AM_BOT_ID/hook.sh grok …`）與 `<GROK_HOME>/hooks/agents-manager.json`（§12.2）。`hook.sh` 對 provider ≠ codex 一律讀 stdin，grok 不需改。
-- 腳本契約與 §4.4 相同：≤3 秒、exit 0、空 stdout、失敗寫遠端 `hook-spool.jsonl`。
-- daemon 的 `/hook/*` **不做** Host 檢查（只驗 per-bot token），因為經反向通道的請求 Host 為 `127.0.0.1:<hook_port>`。
-- spool 重放：對帳時 `ssh <host> 'f=~/.config/agents-manager/bots/<id>/hook-spool.jsonl; [ -f "$f" ] && mv "$f" "$f.replaying" && cat "$f.replaying" && rm "$f.replaying"'`，逐行依 §6.7 處理。
+### 11.4 遠端 hook：herdr 事件 + spool 檔（v4.3）
+
+遠端沒有 `agents-managerd` 二進位，hook 仍是 daemon 寫過去的 **POSIX sh** 腳本；改掉的是它「怎麼把事情講回來」。
+
+**為什麼不再用反向埠**：v3.1–v4.2 的做法是 `ssh -R <hook_port>:127.0.0.1:<daemon port>`，遠端 hook 用 curl 打
+`http://127.0.0.1:<hook_port>/hook/<provider>`。這條路有兩個結構性問題：
+1. `ExitOnForwardFailure=yes` 讓「遠端那個埠被佔」等於**整台主機標為未連線**——連 herdr 都連不上，UI 只看得到
+   `ssh master exited immediately`。實測有過一條沒清乾淨的舊 ssh 通道把埠佔了 51 分鐘。
+2. `hook_port` 預設等於 daemon 埠 7788，遠端只要自己也跑一份 agents-manager 就必撞。
+
+而 daemon 早就有一條到遠端的可靠通道：`-L` 轉發的 herdr socket。所以改成**混合路徑**：
+
+| 走什麼 | 用什麼 | 為什麼 |
+|---|---|---|
+| 狀態（working / idle / blocked、native session id） | 遠端 hook 呼叫該機器上的 `herdr pane report-agent` | 事件經 herdr socket 自然回到 daemon，不需要任何額外通道 |
+| 內容（完整事件 JSON：`last_assistant_message`、`prompt_id`、`transcript_path`…） | 追加到遠端 `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl` | herdr 事件**不帶** hook 的 payload（見下），內容只能落地再由 daemon 讀 |
+
+本機 bot 完全不受影響：仍走 `agents-managerd hook <provider>` → HTTP `POST /hook/<provider>`（§4.4）。
+
+#### 11.4.1 herdr 端的事實（0.8.2 實測，2026-09-07，附錄 E 補記）
+- `herdr pane report-agent <PANE_ID> --source <ID> --agent <LABEL> --state <idle|working|blocked|unknown>
+  [--message <TEXT>] [--seq <N>] [--agent-session-id <ID>] [--agent-session-path <PATH>]`。
+- 狀態**真的**會變成訂閱端收得到的 `pane.agent_status_changed`，事件 data 為
+  `{pane_id, workspace_id, agent, agent_status}`——**沒有** `message`、`source`、`seq`、`agent_session_id`。
+  所以 `--message` 不能拿來送內容，只能當人看的旁註；內容一律走 spool。
+- `--seq` 是**每個 `(pane, source)` 各自**的單調計數：小於等於上一次的會被丟掉（實測 `seq=11` 之後送 `seq=5` 不生效，
+  換一個 `--source` 則從 1 開始就生效）。所以每個 bot 用自己固定的 `source`，`seq` 必須嚴格遞增。
+- `herdr pane report-agent-session …` 在 0.8.2 **不發任何事件**，也沒出現在 `api snapshot` / `agent list`。
+  因此它只當「告訴 herdr 這個 pane 的 native session」的 best-effort，**daemon 不靠它拿 session id**——
+  session id 從 spool 的 payload 讀（§6.7 原本就這樣做）。
+- 狀態上報與 herdr 自己的終端偵測**並存**：同一個 pane 兩邊都會報。相同的狀態不會再發一次事件，
+  所以「終端偵測先報了 idle、hook 隨後才寫 spool」是真實存在的競態，daemon 端要用 §11.4.4 的重試補。
+
+#### 11.4.2 遠端 `hook.sh` 的行為
+路徑不變：`~/.config/agents-manager/bots/<bot_id>/hook.sh`，由 daemon 在每次啟動 Run（與 reconcile 修好 hook 時）覆寫。
+
+argv 維持 `hook.sh <provider> <bot_id> <token> [port]`——**第 4 個參數保留但忽略**，因為 codex 的 `-c notify=[…]`
+與 grok 分派腳本的 argv 是啟動當下寫死的，升級 daemon 時遠端還活著的 agent 仍會用舊 argv 呼叫。`token` 同理保留，
+內容仍寫進 spool 行（daemon 重放時可驗），但不再有 HTTP 可打，因此不再需要 curl。
+
+每個 provider 的行為：
+
+| provider | payload 來源 | 上報狀態 | 寫 spool |
+|---|---|---|---|
+| `claude` | stdin（≤1 MiB，超過截斷並標 `truncated`） | `SessionStart` → 不報狀態（只 `report-agent-session`）；`Stop` 且 `stop_hook_active=false` → `--state idle` | 兩者都寫 |
+| `codex` | argv 最後一個參數（JSON） | `agent-turn-complete` → `--state idle` | 寫 |
+| `grok` | stdin | `session_start` → 只 `report-agent-session`；`stop` 且 `reason=end_turn` 且 `stopHookActive=false` → `--state idle`；`reason=shutdown` → 不報 | 寫（分類仍由 daemon 做，見下） |
+| `statusline` | stdin | 不報狀態 | **不進 spool**，見 §11.4.5 |
+
+- **腳本不做語意判斷**：`hook.sh` 只用最粗的字串比對決定「這是不是回合結束」（`"stop_hook_active":true` / `"reason":"shutdown"`
+  出現就不報 idle），其餘一律照寫 spool，真正的分類仍然只在 daemon 的 `hookrecv::classify`（§6.7 / §12.3）。
+  理由：遠端腳本沒有測試，錯了很難查；漏報一次狀態最多晚一點被掃到，錯誤分類會直接吃掉訊息。
+- 寫檔順序：**先寫 spool，再 `report-agent`**。反過來會讓 daemon 收到事件時 spool 還沒有那一行。
+- spool 行格式與 §6.7 / §4.4.4 完全相同（`{bot_id, provider, payload, received_at, truncated}`），一行一筆，`O_APPEND`。
+- `report-agent` 的欄位怎麼填：
+
+  | 欄位 | 值 |
+  |---|---|
+  | `<PANE_ID>`（位置參數） | `$HERDR_PANE_ID`（herdr 注入 pane env；沒有就跳過整個上報） |
+  | `--source` | `agents-manager:<bot_id>`——固定、每個 bot 一個，`--seq` 的單調性以此為界 |
+  | `--agent` | bot 的 kind（`claude` / `codex` / `grok`），與 herdr 的 agent label 一致 |
+  | `--state` | 只送 `idle`（回合結束）。`working` 由 herdr 的終端偵測負責——hook 沒有「開始工作」的事件，硬報會跟偵測互相蓋 |
+  | `--seq` | 嚴格遞增：有 `python3` 用 `time.time_ns()`（與 herdr 官方 integration 同法），否則 `date +%s` 乘 1000 再加 `$DIR/hook-seq` 的計數（mod 1000） |
+  | `--agent-session-id` | payload 裡的 native session id（claude `session_id` / grok `sessionId` / codex `thread-id`），缺就不帶 |
+  | `--agent-session-path` | `transcript_path` / `transcriptPath`，缺就不帶 |
+  | `--message` | 不填。事件不帶它，填了只是浪費 |
+
+- 找 herdr：`${AM_REAL_HERDR:-}`（daemon 已在 pane env 給過真 binary 路徑，§6.5b）→ `command -v herdr`。都找不到就**只寫 spool**、
+  在 `hook.log` 記一行、`exit 0`：daemon 仍會在終端偵測的 `working → idle` 上把它掃回來，只是慢一點。
+- session 選擇：`herdr` 在 pane 內靠 `HERDR_SOCKET_PATH` / `HERDR_SESSION` 自己找對 session；腳本在 `HERDR_SESSION`
+  有值時明確帶 `--session "$HERDR_SESSION"`。
+- 契約仍是 §4.4：wall-clock ≤3 秒、永遠 `exit 0`、永遠空 stdout（grok 的 Stop hook 會把 stdout 當 decision）。
+  `report-agent` 加 `timeout`／背景化不必要——它是本機 unix socket，實測 <20 ms。
+
+#### 11.4.3 daemon 端：收到狀態事件 → 讀 spool → 重放
+`events::handle_status`（§6.6）在**遠端** run 上多一步。時序（全部在 per-bot 鎖內，鎖與 HTTP hook 共用同一把）：
+
+1. 收到該 pane 的 `pane.agent_status_changed`；照舊更新 `runs.agent_status`、推 WS。
+2. 若 host ≠ `local` 且（`working → idle` 或 `→ blocked`）→ 觸發 **drain**（`hookrecv::replay_spool`，既有的
+   `replay_spool_remote` 路徑）：
+   `ssh <host>` 一段 sh：`hook-spool.jsonl` → `mv` 成 `hook-spool.jsonl.replaying`（已存在 `.replaying` 表示上次中途死掉，
+   把新的接在它後面）→ `cat` 出來 → `rm`。daemon 逐行 `serde_json::from_str::<HookBody>` 後走 §6.7 的配對，最後刪檔。
+3. drain 是 **await 的**（預算 4 秒），成功後才 `arm_fallback`（§4.3）——這樣終端快照備援只有在 hook 真的沒來時才會贏；
+   drain 失敗或逾時就照舊 arm，`completed_fallback` 的 CAS 保證不會兩邊都寫。
+4. 冪等：`.replaying` 的 rename 是遠端的原子操作，取到的行已離開 spool；重放本身再靠 §6.7 的
+   `(native_session_id, native_turn_id)` 去重，所以「同一輪 herdr 報兩次 idle」「daemon 重啟後又掃一次」都只會寫一則訊息。
+5. per-bot 鎖：drain 全程持鎖，同一個 bot 不會有兩條 drain 同時 `mv`；不同 bot 之間互不阻塞。
+
+#### 11.4.4 遲到、重複與遺失
+- **重複事件**：herdr 同一輪可能報兩次 `working → idle`。第二次 drain 只會拿到空檔案，成本是一次 ssh。
+  因此同一個 bot 的 drain 有 **1 秒的合併窗**：窗內的第二次觸發只把「還要再跑一次」記下來，不另開 ssh。
+- **事件先到、spool 後寫**（腳本被 kill、檔案系統慢）：第一次 drain 拿不到 → 在 **T+2 秒**再 drain 一次（仍早於 5 秒的
+  終端備援），還是沒有就讓備援接手。
+- **狀態事件整個遺失**（herdr 重啟、訂閱斷線、終端偵測先報了 idle 使 hook 的上報成為 no-op）：
+  - 每台已連線 host **每 30 秒**掃一次「有 in-flight Turn 或 spool 檔存在」的 bot，做一次 drain（一台一次 ssh，
+    腳本內迴圈所有 bot 目錄，不是每個 bot 一次 ssh）。
+  - host 重連、daemon 啟動對帳（§6.5）照舊對每個 bot drain 一次（既有 `replay_host`）。
+- **遲到的 hook**：drain 出來的行對應的 Turn 已經被終端備援收成 `completed_fallback` → 依 §4.3 的既有規則
+  **丟棄不覆蓋**，只 log。
+- **bot 已刪除**：`process_locked` 已擋（`deleted_at`）；遠端 spool 檔在 bot 刪除時一併 `rm -rf` bot 目錄。
+- **host 斷線期間**：hook 照樣寫 spool（本機檔案，不需要 daemon 在），重連後由 `replay_host` 全部補進來。這正是
+  spool 原本的用途，只是現在它從「失敗才走」變成「一律走」。
+
+#### 11.4.5 statusLine（額度）怎麼走
+claude 的 statusLine 每次重繪都會被呼叫（idle 時也會），量大且沒有回合語意，**不進 spool**（會把 spool 撐爆，
+而且它只在下一次回合結束才被讀到，資訊已經過期）。改為**單槽檔**：
+
+- `hook.sh statusline <bot> <token> [port]`：把 stdin 的 JSON 加上 `"hook_event_name":"StatusLine"` 後
+  **覆寫**（不是追加）遠端 `~/.config/agents-manager/bots/<bot_id>/hook-status.json`，然後照舊 exec 使用者自己的
+  statusLine 命令（讀遠端 `~/.claude/settings.json`，v4.0 邏輯不變）。不呼叫 `report-agent`。
+- daemon 在**每次 drain 的同一段 ssh**裡順便 `cat` 這個檔（存在才讀，讀完 `rm`），內容當成一則
+  `provider=claude`、`payload.hook_event_name=StatusLine` 的 `HookBody` 丟給 `hookrecv::process_locked`，
+  走既有的 `HookKind::StatusLine` 分支（寫 `runs.status_line` / `status_json`，§14）。
+- 也就是說遠端額度的更新頻率 = drain 的頻率（回合結束時，或最多 30 秒一次的掃描），而不是每次重繪。UI 上的差別
+  只有「額度數字最多晚 30 秒」，可以接受。
+
+#### 11.4.6 `hook_port` 的相容處理
+- `config.toml` 的 `hosts[].hook_port` **繼續被解析**（舊設定檔不能因此開不起來），但只做一件事：
+  daemon 啟動或該 host 重新設定時 `warn` 一次
+  `host <name>: hook_port is ignored since v4.3 (remote hooks report through herdr; see SPEC §11.4)`。
+- `POST /api/hosts` 仍接受 `hook_port` 欄位（忽略）；`GET /api/state` 的 host 物件**不再**回傳它。
+  UI 的主機表單移除該輸入框（`docs/API.md` §主機 同步）。
+- `HostConn::hook_port()`、`probe_hook_forward()`、`HookForward` 一併刪除；pane env 不再帶 `AM_PORT`（遠端）。
+
+#### 11.4.7 遷移
+- `hook.sh` / `claude-settings.json` / grok 分派腳本本來就在**每次啟動 Run 時覆寫**，所以新版 daemon 一啟動 bot
+  就是新腳本。
+- 還活著的舊 run：daemon 啟動與 host 重連的對帳（§6.5）對每個被保留的 run 重寫一次遠端 hook 素材
+  （`install_remote_hook` 抽成可獨立呼叫的 `refresh_remote_hook`），舊 argv 因為第 4 個參數被忽略而仍然可用。
+- 舊的遠端 `hook-spool.jsonl` 格式沒變，直接被新的 drain 讀走。
+- 使用者不需要做任何事；`hook_port` 留在 config 裡也不會壞。
+
+#### 11.4.8 驗收條件
+| # | 內容 | 期望 |
+|---|---|---|
+| H1 | 遠端 claude bot 送 prompt | 回覆 `source=hook`；daemon log 依序 `pane.agent_status_changed idle` → `remote hook spool replayed replayed=1` |
+| H2 | 遠端 7788 被別的程序佔住 | host 仍 `connected`、bot 正常回覆（不再有 `-R`） |
+| H3 | daemon 停機時遠端送一輪 | 遠端 spool 多一行；daemon 起來後對帳把它補進對話，不重複 |
+| H4 | 同一輪 herdr 報兩次 idle | 只寫一則 assistant 訊息（合併窗 + §6.7 去重） |
+| H5 | 遠端沒有 `herdr` 在 PATH | 回合仍在 30 秒內被掃回來（`source=hook`），log 有 `herdr not found; spooled only` |
+| H6 | 遠端額度 | 回合結束後 `runs.status_json` 有 `rate_limits`，UI 主機額度條更新 |
+| H7 | 舊 argv | 手動用 `hook.sh claude <bot> <token> 7788` 呼叫，第 4 參數被忽略、行為與 3 參數相同 |
 
 ### 11.5 目錄選擇器
 `GET /api/fs/dirs?host=<name>&path=` 對遠端執行一段 sh：`cd <path> && pwd && for d in */ .[!.]*/; do [ -d "$d" ] && printf '%s\t%s\n' "${d%/}" "$([ -d "$d/.git" ] && echo 1 || echo 0)"; done`，daemon 解析後回傳與本機相同的 JSON（`home` 以 `echo $HOME` 取得；`~` 前綴展開）。隱藏目錄預設略過，`hidden=1` 才列出（本機／遠端一致）。
 
 ### 11.6 API 與 UI
 - `GET /api/state` 新增 `hosts: [{name, ssh, herdr_session, connected, error?}]`；`projects[].host`（`"local"` 或 host name）。
-- `POST /api/hosts {name, ssh, ssh_port?, herdr_session?, remote_path?, hook_port?}` → 寫 TOML、立即嘗試連線、回 `{name, connected, error?}`；`DELETE /api/hosts/:name`（需無 project 使用）；`POST /api/hosts/:name/reconnect`。
+- `POST /api/hosts {name, ssh, ssh_port?, herdr_session?, remote_path?}` → 寫 TOML、立即嘗試連線、回 `{name, connected, error?}`（v4.3：`hook_port` 仍被接受但忽略，見 §11.4.6）；`DELETE /api/hosts/:name`（需無 project 使用）；`POST /api/hosts/:name/reconnect`。
 - `POST /api/projects` 新增 `host?`。
 - WS `daemon_status` 改為 `{herdr_connected, hosts: {<name>: {connected, error?}}}`；`host_changed {name, connected, error?}`。
-- UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單多一個「主機」下拉（本機 + 已設定 hosts），選擇器隨主機切換；新增「主機」管理表單（名稱、ssh 目標、port、session、remote_path），列出各 host 連線狀態與重連按鈕；host 斷線時該 host 的 bot 燈號為 `disconnected`（灰）。
+- UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單多一個「主機」下拉（本機 + 已設定 hosts），選擇器隨主機切換；新增「主機」管理表單（名稱、ssh 目標、port、session、remote_path；v4.3 移除 hook_port），列出各 host 連線狀態與重連按鈕；host 斷線時該 host 的 bot 燈號為 `disconnected`（灰）。
 
 ### 11.7 第一階段不做
 遠端密碼 / 互動認證、跳板（ProxyJump 交給 ssh_config）、遠端 transcript 回補、多 daemon。
@@ -471,7 +602,7 @@ grok 1.0.13 的 TUI **沒有**每次啟動注入 hook 的旗標（`--settings` /
      [ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
      exec '<abs agents-managerd>' hook grok --bot "$AM_BOT_ID" --token "$AM_HOOK_TOKEN" --port "${AM_PORT:-7788}"
      ```
-     遠端版改為 `exec "$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN" "${AM_PORT:-7788}"`。
+     遠端版改為 `exec "$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN"`（v4.3 起遠端不需要埠；舊分派腳本多帶的第 4 個參數會被 `hook.sh` 忽略）。
    - `<GROK_HOME>/hooks/agents-manager.json`：`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"<分派腳本絕對路徑>","timeout":5}]}],"Stop":[…同…]}}`。`GROK_HOME` 取自 identity.env ∪ bot.env（已展開 `$HOME`），缺省 `~/.grok`。
 2. pane env 多帶 `AM_HOOK_TOKEN`（§6.2.3）。**`inject_hooks = false` 時不給 `AM_HOOK_TOKEN`**，分派腳本立即 `exit 0`，等同未注入（實測走 `terminal_fallback`）。
 3. 使用者自己開的 grok（無 `AM_BOT_ID`）只多付一次 `sh` 啟動的成本，行為不變。hook 失敗對 grok 是 fail-open，且 Stop hook 的 stdout 必須空（JSON 會被當成 decision）——子命令契約 §4.4 已保證。
@@ -484,7 +615,7 @@ grok 1.0.13 的 TUI **沒有**每次啟動注入 hook 的旗標（`--settings` /
   - `stop` 且 `reason = "end_turn"` 且 `stopHookActive = false` → TurnComplete（`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`）。`reason = "shutdown"`（session 結束時再觸發一次的觀察用 Stop）→ 忽略。
   - `session_end` / 其他 → 忽略。
 - 終端備援：grok 回覆是**無標記**的縮排純文字，右側帶 `h:mm AM|PM` 時戳與捲軸字元 `█`。`extract_reply` 對 grok 回 `None`，`clean_screen` 對 grok 另外：去掉行尾 `█` 與右對齊時戳、跳過 `◆ …`（hook / thinking 事件）、`Worked for …  stop [hooks: N]`、`<cwd>  15K / 500K` 標頭、`[stable]`、`Shift+Tab:mode │ Ctrl+.:shortcuts` 頁尾，並把「Help improve Grok … Read Terms and Privacy Policy.」整塊（會依寬度換行）跳過。prompt 回音字元與 Claude 相同為 `❯ `。
-- 遠端 host：`REMOTE_HOOK_SH` 對 provider ≠ codex 讀 stdin，grok payload 以 `{` 開頭 → 原樣塞進 body，不需第三種分支。
+- 遠端 host：`REMOTE_HOOK_SH` 對 provider ≠ codex 讀 stdin，grok payload 以 `{` 開頭 → 原樣塞進 spool 行，不需第三種分支；`stop` 的 `reason=shutdown` 不上報狀態（§11.4.2）。
 
 ### 12.4 身份隔離
 `GROK_HOME`（預設 `~/.grok`）等同 Claude 的 `CLAUDE_CONFIG_DIR`：config.toml、`auth.json`、`sessions/`、`hooks/` 全部跟著走。identity 設 `GROK_HOME=$HOME/.grok-work` 即可用另一個帳號；daemon 會把 hooks 檔寫到該 `GROK_HOME/hooks/`。
@@ -553,7 +684,7 @@ Resets: September 12, 16:28
 |---|---|---|
 | R1 | HostManager | 設定 host `m4p`（`m4p@100.112.229.82`）→ daemon log 出現 remote session ensured、master up、ping ok；`kill` master 程序 → 30 秒內自動重連並對帳 |
 | R2 | 遠端 Project / Bot | UI 新增 host、以選擇器選 `/Users/m4p` 下目錄建 Project、新增 claude bot → start → 遇 trust 提示 `blocked` → 按鍵 ↓ Enter → idle |
-| R3 | 遠端 hook | 送 prompt → 回覆來源 `hook`；daemon 停機時遠端 spool 增加一行，重啟後補入 |
+| R3 | 遠端 hook | 送 prompt → 回覆來源 `hook`（狀態走 herdr 事件、內容走 spool，§11.4）；daemon 停機時遠端 spool 增加一行，重啟後補入。細項見 §11.4.8 |
 | R4 | 本機不受影響 | 既有本機 bot 行為與 M1–M8 驗收相同 |
 | R5 | 開發測試 | `scripts/dev-sshd.sh` 以使用者權限起 127.0.0.1:2222 的 sshd（不改系統設定），以 `host = "loop"`（ssh 到 127.0.0.1:2222、session `am-loop`）跑 R1–R3 的自動化版本 |
 
@@ -958,6 +1089,18 @@ exit 0
 全部打進 shell；正確順序是 **Down 再 Enter**，答過一次就不再問。同機若已有另一個 daemon 在管同一台遠端，
 兩者會搶同一條 ssh master 與 `/tmp/agents-manager-<uid>/<host>.sock`，症狀是 `ssh master exited` 與
 `herdr closed connection without a response (agent.wait)`。
+
+**herdr `pane report-agent` 實測（2026-09-07，本機 herdr 0.8.2，用完即丟的 `am-hookspec` session）**——v4.3 遠端 hook 改走 herdr 事件的依據：
+
+| 觀察 | 結果 |
+|---|---|
+| `pane report-agent <pane> --source am:test --agent claude --state working/idle --seq N` | 訂閱端收到 `pane.agent_status_changed`，data 只有 `{pane_id, workspace_id, agent, agent_status}` |
+| `--message` | **不出現在事件裡**，`api snapshot` 也沒有；不能拿來送內容 |
+| `--seq` | 每個 `(pane, source)` 各自單調：`seq=11` 之後送 `seq=5` 不生效；換 `--source` 後從 1 開始就生效 |
+| `--agent-session-id` / `pane report-agent-session` | 0.8.2 **不發事件**，`api snapshot` / `agent list` 也看不到（只有 `state_change_seq` 會動）；native session id 仍只能從 payload 取 |
+| 狀態同時來自終端偵測 | 兩邊並存；相同狀態不會重發事件，所以「偵測先報 idle」會讓 hook 的上報變成 no-op（§11.4.4 用定時掃描補） |
+| pane env | herdr 注入 `HERDR_ENV=1`、`HERDR_PANE_ID`、`HERDR_SESSION`、`HERDR_SOCKET_PATH`、`HERDR_TAB_ID`、`HERDR_WORKSPACE_ID`；hook 用 `HERDR_PANE_ID` 就能自報 |
+| herdr 官方 integration（`herdr integration install claude|grok`） | 只在 SessionStart 呼叫 `pane.report_agent_session`，狀態完全交給終端偵測；`seq` 用 `time.time_ns()` |
 
 ## 附錄 F：grok CLI 實測（2026-09-06，grok 1.0.13 `5e9a58528b76`，macOS，herdr 0.8.2）
 

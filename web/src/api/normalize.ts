@@ -146,7 +146,6 @@ export function toHost(v: unknown): Host | null {
     ssh_port: num(pick(v, 'ssh_port', 'port'), 22),
     herdr_session: str(pick(v, 'herdr_session', 'session'), 'agents-manager'),
     remote_path: str(pick(v, 'remote_path', 'path')),
-    hook_port: num(pick(v, 'hook_port'), 0),
     connected: bool(pick(v, 'connected', 'ok', 'up'), false),
     error: optStr(pick(v, 'error', 'last_error', 'message', 'reason')),
     attach_command:

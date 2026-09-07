@@ -17,6 +17,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// How long `handle_status` waits for a remote drain before letting the fallback arm (§11.4.3).
+const DRAIN_BUDGET: Duration = Duration::from_secs(4);
+
 fn norm(name: &str) -> String {
     name.replace('.', "_")
 }
@@ -322,6 +325,20 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     // this is the web's own prompt taking effect — leave it alone.
     if prev != "working" && status == "working" && matches!(crate::db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
         crate::lifecycle::begin_external_turn(app, &run).await;
+    }
+
+    // §11.4.3: a remote run reports its status through herdr but leaves the payload in a
+    // spool file on that host. Drain it *before* arming the fallback, so the terminal
+    // snapshot only wins when the hook really never came. Budgeted, because this watcher's
+    // next event waits behind it; a timeout just falls through to the fallback (whose CAS
+    // keeps the two from both writing).
+    if host != LOCAL_HOST && ((prev == "working" && status == "idle") || (prev != "blocked" && status == "blocked")) {
+        let drain = crate::hookrecv::drain_remote_coalesced(app, host, &run.bot_id);
+        match tokio::time::timeout(DRAIN_BUDGET, drain).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(host, bot_id = %run.bot_id, error = ?e, "remote drain failed"),
+            Err(_) => tracing::warn!(host, bot_id = %run.bot_id, "remote drain timed out"),
+        }
     }
 
     // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
