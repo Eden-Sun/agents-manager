@@ -1,5 +1,5 @@
 [workspace]
-members = ["daemon", "desktop"]
+members = ["daemon", "desktop", "xtask"]
 resolver = "2"
 
 [profile.release]
