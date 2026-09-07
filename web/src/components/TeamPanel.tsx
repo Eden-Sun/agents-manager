@@ -30,6 +30,7 @@ import { CopyChip } from './CopyChip'
 import { Modal } from './Modal'
 import { ApiModelFields } from './ModelPicker'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
+import { TeamQueueProgress } from './TeamQueueProgress'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
@@ -411,6 +412,8 @@ function IssueQueue({
   const open = override ?? sum.failed > 0
   return (
     <section className="team-queue">
+      {/* 進度條常駐在折疊列上方：走到第幾個、跑了多久是掃一眼就要看到的，不該藏在展開後。 */}
+      <TeamQueueProgress team={team} />
       <button
         type="button"
         className="disclosure sub"
