@@ -13,6 +13,8 @@ import type {
   AppState,
   Attachment,
   DirListing,
+  GhLoginMode,
+  GhStatus,
   GroupChatResult,
   GroupMessagesPage,
   GroupSkipReason,
@@ -361,6 +363,60 @@ export async function installTool(host: string, kind: BotKind, viaBotId: string)
   return toInstallResult(
     await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/install`, { kind, via_bot_id: viaBotId }),
   )
+}
+
+function toGhStatus(raw: unknown, fallbackName: string): GhStatus {
+  const o = isRec(raw) ? raw : {}
+  const pendingRaw = isRec(o.pending) ? o.pending : null
+  return {
+    name: str(pick(o, 'name'), fallbackName),
+    installed: o.installed === true,
+    path: optStr(pick(o, 'path')),
+    logged_in: o.logged_in === true,
+    account: optStr(pick(o, 'account')),
+    accounts: arr(o.accounts)
+      .filter(isRec)
+      .map((a) => ({
+        login: str(pick(a, 'login')),
+        active: a.active === true,
+        ok: a.ok === true,
+      }))
+      .filter((a) => a.login),
+    mode: optStr(pick(o, 'mode')),
+    pending: pendingRaw
+      ? {
+          user_code: str(pick(pendingRaw, 'user_code')),
+          verification_uri: str(pick(pendingRaw, 'verification_uri'), 'https://github.com/login/device'),
+          verification_uri_complete: optStr(pick(pendingRaw, 'verification_uri_complete')),
+          expires_in: num(pick(pendingRaw, 'expires_in'), 0),
+        }
+      : null,
+    error: optStr(pick(o, 'error')),
+  }
+}
+
+/** `GET /api/hosts/:name/gh` — 該主機的 GitHub CLI 登入狀態。 */
+export async function fetchGhStatus(host: string): Promise<GhStatus> {
+  const name = host || 'local'
+  return toGhStatus(await transport.request('GET', `/hosts/${encodeURIComponent(name)}/gh`), name)
+}
+
+/** `POST /api/hosts/:name/gh/login` — auto / copy / device / switch。 */
+export async function loginGh(host: string, mode: GhLoginMode = 'auto', user?: string): Promise<GhStatus> {
+  const name = host || 'local'
+  return toGhStatus(
+    await transport.request('POST', `/hosts/${encodeURIComponent(name)}/gh/login`, {
+      mode,
+      ...(user ? { user } : {}),
+    }),
+    name,
+  )
+}
+
+/** `POST /api/hosts/:name/gh/cancel` — 放棄進行中的裝置碼。 */
+export async function cancelGhLogin(host: string): Promise<GhStatus> {
+  const name = host || 'local'
+  return toGhStatus(await transport.request('POST', `/hosts/${encodeURIComponent(name)}/gh/cancel`), name)
 }
 
 /** `GET /api/projects/:id/issues?state=&limit=&q=` (v4.0; the daemon shells out to `gh`). */

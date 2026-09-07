@@ -161,6 +161,34 @@ export interface HostResult {
   error: string | null
 }
 
+/** `GET|POST /api/hosts/:name/gh` — 該主機上 GitHub CLI 能不能用。 */
+export interface GhAccount {
+  login: string
+  active: boolean
+  ok: boolean
+}
+
+export interface GhPending {
+  user_code: string
+  verification_uri: string
+  verification_uri_complete: string | null
+  expires_in: number
+}
+
+export type GhLoginMode = 'auto' | 'copy' | 'device' | 'switch'
+
+export interface GhStatus {
+  name: string
+  installed: boolean
+  path: string | null
+  logged_in: boolean
+  account: string | null
+  accounts: GhAccount[]
+  mode: string | null
+  pending: GhPending | null
+  error: string | null
+}
+
 /** §11.2 進階欄位的預設值（表單預填，與 daemon 的預設一致）。 */
 export const HOST_DEFAULTS = {
   ssh_port: 22,

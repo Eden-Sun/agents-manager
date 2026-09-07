@@ -213,6 +213,44 @@ impl HostConn {
         Ok(())
     }
 
+    /// Run a script on the remote with `data` piped to stdin.
+    ///
+    /// `ssh_exec` uses stdin for the script itself, so a payload (a gh token, a file)
+    /// has to go this way: script in argv, bytes on stdin. Same quoting as `ssh_put`.
+    /// Stdout is returned; failures report stderr only (stdout may be sensitive).
+    pub async fn ssh_exec_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
+        let Some(cfg) = &self.cfg else { bail!("ssh_exec_stdin called on the local host") };
+        let remote = format!("/bin/sh -c {}", sh_quote(script));
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().with_context(|| format!("spawn ssh {}", cfg.ssh))?;
+        if let Some(mut sin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            sin.write_all(data).await.with_context(|| format!("write stdin to {}", cfg.ssh))?;
+            sin.shutdown().await.ok();
+        }
+        let out = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!("ssh to {} timed out", cfg.ssh))?
+            .with_context(|| format!("run ssh {}", cfg.ssh))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            bail!("ssh {} failed ({}): {}", cfg.ssh, out.status, if err.is_empty() { "no stderr".into() } else { err });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    /// `ssh_exec_stdin` with SPEC §11.2 `remote_path` prepended.
+    pub async fn ssh_exec_path_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
+        let prefix = match self.cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default() {
+            p if p.trim().is_empty() => String::new(),
+            p => format!("export PATH={}:$PATH\n", p),
+        };
+        self.ssh_exec_stdin(&format!("{prefix}{script}"), data, timeout).await
+    }
+
     /// Same, but with the remote PATH fixed up first (SPEC §11.2 `remote_path`).
     pub async fn ssh_exec_path(&self, script: &str) -> Result<String> {
         let prefix = match self.cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default() {

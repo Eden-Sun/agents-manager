@@ -420,6 +420,80 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
 
 `local` 亦可呼叫（重新 ping 本機 herdr）。找不到 host → `404`。
 
+### `GET /api/hosts/{name}/gh`（2026-09-07）
+
+該主機上的 GitHub CLI 登入狀態。issue 列表與 team 都靠這台上的 `gh`，遠端主機沒登入（或作用中帳號的 token 失效）時，`GET /projects/{id}/issues` 會 502。`name = local` 是本機。
+
+```json
+{
+  "name": "m4p",
+  "installed": true,
+  "path": "/opt/homebrew/bin/gh",
+  "logged_in": false,
+  "account": "eddysun-alt",
+  "accounts": [
+    {"login": "eddysun-alt", "active": true, "ok": false},
+    {"login": "Eden-Sun", "active": false, "ok": true}
+  ],
+  "mode": null,
+  "pending": null,
+  "error": null
+}
+```
+
+- `logged_in`：**作用中**帳號的 `gh auth status --json` 為 `success` 才是 `true`。有帳號但 token 401 仍是 `false`。
+- `pending`：進行中的裝置碼（見下一支），不含 `device_code`、不含 token。
+- host 不存在 → 404；ssh 失敗 → 502。`gh` 沒裝時 `installed: false`、`logged_in: false`（仍 200）。
+
+### `POST /api/hosts/{name}/gh/login`
+
+在 UI 裡對該主機做 `gh` 登入，不必 ssh 過去。body：
+
+```json
+{ "mode": "auto", "user": null }
+```
+
+`mode` 可省，預設 `auto`。`user` 只在 `switch` 時用。
+
+| mode | 行為 |
+|---|---|
+| `auto` | 已可用 → 原樣回。否則若有有效但非 active 的帳號 → `switch`；active 失效則 logout 該帳號。遠端且本機已登入 → `copy`。其餘 → `device`。 |
+| `switch` | `gh auth switch --hostname github.com --user <user>`。沒給 `user` 就切到第一個有效的非 active 帳號。 |
+| `copy` | 本機 `gh auth token` 經 ssh **stdin** 餵給遠端 `gh auth login --with-token --insecure-storage`（token 不進 argv、不進 log）。只適用遠端。 |
+| `device` | daemon 向 GitHub 要裝置碼，立刻回 `pending`；背景輪詢，授權後同樣 `--with-token` 餵給該主機。 |
+
+回應形狀同 GET，外加實際走的 `mode`。`device` 當下：
+
+```json
+{
+  "name": "m4p",
+  "installed": true,
+  "logged_in": false,
+  "mode": "device",
+  "pending": {
+    "user_code": "WDJB-MJHT",
+    "verification_uri": "https://github.com/login/device",
+    "verification_uri_complete": "https://github.com/login/device?user_code=WDJB-MJHT",
+    "expires_in": 899
+  }
+}
+```
+
+之後前端每 ~2 秒 `GET …/gh`：`logged_in: true` 即完成；`error` 有字則失敗（過期 / 拒絕）。token、`device_code` 絕不出現在 JSON 或 log。
+
+| 狀況 | 回應 |
+|---|---|
+| host 不存在 | `404 {"error":"not_found","what":"host"}` |
+| `mode` 不合法 | `400` |
+| `copy` 打在 `local` | `400` |
+| `copy` 但本機 gh 未登入 | `409 {"error":"conflict","reason":"local_gh_not_logged_in"}` |
+| 沒有可切的帳號 | `400` |
+| ssh / gh / GitHub API 失敗 | `502 {"error":"upstream","message":"…"}`（message 已打碼，不含 token） |
+
+### `POST /api/hosts/{name}/gh/cancel`
+
+放棄進行中的裝置碼。回應同 GET（`mode: "cancel"`，`pending: null`）。
+
 ### `POST /api/projects` 新增 `host`
 
 ```json
@@ -1097,6 +1171,7 @@ daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機
 
 - `project.github` 為 `null` → `400 {"error":"bad_request","message":"project has no GitHub origin"}`。
 - `gh` 不存在 / 未登入 / 執行失敗 → `502 {"error":"upstream","message":"gh 未安裝或未登入…"}`。
+  遠端主機請走 `POST /api/hosts/{name}/gh/login`（見上方），不要叫使用者自己 ssh。
 - project 不存在 → 404。
 
 #### `GET /api/projects/{id}/issues/{number}`

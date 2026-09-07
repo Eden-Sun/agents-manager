@@ -96,6 +96,8 @@ pub struct App {
     pub issues_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
     /// Submodules per project (`GET /projects/:id/submodules`), 2 min.
     pub submodules_cache: Mutex<HashMap<String, (std::time::Instant, Vec<crate::github::Submodule>)>>,
+    /// In-flight GitHub device-flow logins, keyed by host name. Memory only; never persisted.
+    pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
 }
 
 impl App {
@@ -142,6 +144,7 @@ impl App {
             github: Mutex::new(HashMap::new()),
             issues_cache: Mutex::new(HashMap::new()),
             submodules_cache: Mutex::new(HashMap::new()),
+            gh_device: Mutex::new(HashMap::new()),
         })
     }
 
