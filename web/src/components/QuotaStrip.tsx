@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
+import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
@@ -380,6 +381,7 @@ function Gauge({
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
   const now = useMinuteNow()
+  const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
   if (collapsed) {
@@ -429,11 +431,14 @@ function Gauge({
   }
   // 主機名寫進 tooltip：條上只掛得下一個小標籤，但滑過去要能確定是哪一台的數字。
   const title = `${hostLabel(host)} · ${label(entry, q, loggedOut)}`
-  const accessibleTitle = focused ? `目前選取的 ${title}` : title
+  // 停用中的那一格在條上也要看得出來，不然得先點開 popover 才知道側欄少了誰。
+  const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
+  const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
+  const accessibleTitle = focused ? `目前選取的 ${withOff}` : withOff
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}`}
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${off ? ' off' : ''}`}
       title={accessibleTitle}
       aria-label={accessibleTitle}
       aria-current={focused ? 'true' : undefined}
@@ -478,6 +483,44 @@ function Gauge({
   )
 }
 
+/**
+ * 這一格「暫時停用」時，什麼時候自動解除——這組額度最近一次還沒到的 reset 時刻。
+ * 三個視窗都沒有時間就回 null（那格只能手動解除）。
+ */
+function nextResetOf(q: KindQuota | null, now: number): number | null {
+  let next: number | null = null
+  for (const w of [q?.five_hour, q?.seven_day, q?.fable]) {
+    if (!w?.resets_at) continue
+    const t = Date.parse(w.resets_at)
+    if (Number.isNaN(t) || t <= now) continue
+    if (next === null || t < next) next = t
+  }
+  return next
+}
+
+/**
+ * 「暫時停用這個身分」的勾選格。額度快用完時勾起來，它底下的 bot 就先從側欄收起來，
+ * 額度視窗 reset 到了自動解除（見 docs/UI-DECISIONS.md）。
+ *
+ * 卡片整格可點：`PopRow` 的 `onClick` 會轉呼叫這裡，所以這顆 input 只要管自己的鍵盤與
+ * 勾選語意——`aria-label` 講完整句，卡片上的字只是提示。
+ */
+function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
+  return (
+    <span className="quota-disable">
+      <input
+        type="checkbox"
+        aria-label={`暫時停用 ${name}（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）`}
+        checked={on}
+        onChange={onToggle}
+      />
+      <span className="quota-disable-note" aria-hidden="true">
+        {on ? '已停用' : '停用'}
+      </span>
+    </span>
+  )
+}
+
 /** codex 沒有 `/login`，一律開 shell 跑 `codex login`。 */
 function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
   const command = useStore((s) => cliLoginCommand('codex', identityEnv(s, host, 'codex', identity)))
@@ -495,9 +538,21 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
+  const disabledMap = useDisabledQuota()
+  const key = quotaDisableKey(host, entry.kind, entry.identity)
+  const off = isQuotaDisabled(disabledMap, key)
+  const toggle = () => setQuotaDisabled(key, !off, off ? null : nextResetOf(q, Date.now()))
 
   return (
-    <div className="quota-pop-row">
+    <div
+      className={`quota-pop-row${off ? ' off' : ''}`}
+      // 整格可點：點卡片本身就等於切換那顆 checkbox。從 checkbox 自己或登入鈕發出來的
+      // 點擊要放行，不然會一次切換兩下／順手把登入按鈕吃掉。
+      onClick={(e) => {
+        if ((e.target as HTMLElement).closest('input, button, a, select, textarea')) return
+        toggle()
+      }}
+    >
       <div className="quota-pop-head">
         <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
@@ -505,6 +560,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         <span className="quota-name">{entryLabel(entry)}</span>
         {supported ? <RiskDot level={worst(q)} /> : null}
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
+        <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />
       </div>
       {!supported ? (
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
