@@ -1128,6 +1128,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
     "claude": {
       "five_hour": {"used_pct": 97.0, "resets_at": "2026-09-06T14:00:00.000Z", "low": true, "critical": true},
       "seven_day": {"used_pct": 22.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
+      "fable": {"used_pct": 39.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "plan": null,
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "statusline",
@@ -1157,6 +1158,10 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 - `host`：這筆是在哪台主機讀到的（`local` 或 `hosts[].name`）。UI 的標題列一次只顯示一台
   （看哪個 bot / 專案就是哪一台），所以遠端 bot 的 statusLine 不會蓋掉本機那列。
 - `used_pct` 為 0–100 的數字；`resets_at` 為 RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
+- `fable`：Claude **Max 方案**才有的 Fable 週額度（`/usage` 的 `Current week (Fable)`），欄位型別與
+  `seven_day` 完全相同（也是週窗，只是只算 Fable 那一份）。沒有這條桶子的方案／來源（codex、grok、
+  非 Max 帳號）一律 `null`——**額度條在 `null` 時完全不畫這條，也不佔位**；有值時在 5h / 7d 之後多一條
+  標籤 `F` 的同款長條。舊 daemon 沒有這個欄位，前端讀不到就當 `null`（相容）。
 - `low` / `critical` 為 daemon 算好的門檻旗標（`daemon/src/quota.rs` 的 `LOW_REMAINING_PCT` = 30、
   `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
   前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；
@@ -1171,9 +1176,11 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
     （遠端走 ssh）。
   - **claude**：兩路並存。
     1. **statusLine 推送**（bot 對話中）：daemon 注入的 `statusLine` 指令把 `rate_limits.five_hour / seven_day`
-       POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；不建 Turn。`source` = `statusline`。
+       （若哪天多了 `rate_limits.fable` 也會一起收；實測 2.1.263 的 payload 只有前兩個桶，所以 statusLine
+       來源的 `fable` 目前都是 `null`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；不建 Turn。`source` = `statusline`。
     2. **`/usage` pane 探測**（背景，每 60 秒）：與 grok 相同，在專屬 `am-quota` herdr session 開用完即丟的 pane
-       跑 claude、送 `/usage`、解析 `Current session` / `Current week (all models)` 兩條；每個有獨立
+       跑 claude、送 `/usage`、解析 `Current session` / `Current week (all models)` 兩條，Max 方案另外多一條
+       `Current week (Fable)`（標題大小寫不敏感）→ `fable`，其餘 model-specific 的週列（Sonnet / Opus）仍忽略；每個有獨立
        `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）；identity
        清單是**該主機**的（含它 shell 的 `ccN`，SPEC §16）。兩種情況跳過不探：該列在 60 秒內剛被
        statusLine 更新過，或工具偵測說這個身份在這台沒登入（否則只會停在登入畫面燒掉 25 秒逾時）。
@@ -1187,7 +1194,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 ### 12.5 WS `quota_updated`
 
 ```json
-{"seq":57,"type":"quota_updated","data":{"kind":"m4p/claude","host":"m4p","quota":{ "five_hour":{…},"seven_day":{…},"plan":null,"updated_at":"…","source":"statusline","account":null,"host":"m4p" }}}
+{"seq":57,"type":"quota_updated","data":{"kind":"m4p/claude","host":"m4p","quota":{ "five_hour":{…},"seven_day":{…},"fable":null,"plan":null,"updated_at":"…","source":"statusline","account":null,"host":"m4p" }}}
 ```
 
 `kind` 為 `kinds` 的完整 key（含 `claude:<identity>`，遠端主機含 `<host>/` 前綴），`host` 是同一個值的

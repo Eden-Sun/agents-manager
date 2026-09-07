@@ -700,6 +700,8 @@ export interface MessageHit {
 export interface KindQuota {
   five_hour: QuotaWindow | null
   seven_day: QuotaWindow | null
+  /** Max 方案才有的 Fable 週額度（`Current week (Fable)`），跟 `seven_day` 同型；沒有就是 null。 */
+  fable: QuotaWindow | null
   plan: string | null
   updated_at: string
   /** 這份額度是在哪台主機讀到的（`local` 或 `hosts[].name`）。 */

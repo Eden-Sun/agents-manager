@@ -20,8 +20,9 @@
 //! Resets Sep 11 at 2pm (Asia/Taipei)
 //! ```
 //!
-//! `Current session` → `five_hour`; `Current week (all models)` → `seven_day`. Model-specific
-//! weekly rows (Fable / Sonnet / Opus) are ignored so the strip keeps one weekly bar.
+//! `Current session` → `five_hour`；`Current week (all models)` → `seven_day`；Max 方案才有的
+//! `Current week (Fable)` → `fable`（一樣是週窗，只算 Fable 那一份）。其餘 model-specific 的
+//! 週列（Sonnet / Opus）仍舊忽略，額度條上只多 Fable 這一條。
 //!
 //! Each configured Claude identity is probed separately (empty-env / `cc0` shares the bare
 //! `claude` key with the default account).
@@ -191,16 +192,25 @@ fn is_week_all_models_header(line: &str) -> bool {
     t.starts_with("current week") && (t.contains("all models") || t == "current week")
 }
 
+/// `Current week (Fable)` — Max 方案的 Fable 專屬週窗（大小寫不敏感）。
+fn is_week_fable_header(line: &str) -> bool {
+    let t = line.trim().to_ascii_lowercase();
+    t.starts_with("current week") && t.contains("fable")
+}
+
 /// The whole `/usage` screen → Quota, or `None` when the plan bars are not on screen yet.
 pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&str>) -> Option<Quota> {
     let lines: Vec<String> = screen.lines().map(clean).filter(|l| !l.is_empty()).collect();
     let mut five: Option<Window> = None;
     let mut seven: Option<Window> = None;
+    let mut fable: Option<Window> = None;
     let mut i = 0;
     while i < lines.len() {
         let header = &lines[i];
         let kind = if is_session_header(header) {
             Some("five")
+        } else if is_week_fable_header(header) {
+            Some("fable")
         } else if is_week_all_models_header(header) {
             Some("seven")
         } else {
@@ -230,6 +240,7 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
             match kind {
                 Some("five") => five = Some(w),
                 Some("seven") => seven = Some(w),
+                Some("fable") => fable = Some(w),
                 _ => {}
             }
         }
@@ -241,6 +252,7 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
     Some(Quota {
         five_hour: five,
         seven_day: seven,
+        fable,
         plan: None,
         updated_at: crate::db::now(),
         source: "claude-usage".into(),
@@ -469,10 +481,26 @@ async fn refresh_claude_account(
 
     let deadline = tokio::time::Instant::now() + DIALOG_TIMEOUT;
     let mut last = String::new();
+    // 第一次解析成功但沒有 Fable 那條時的寬限：`Current week (Fable)` 排在最後一段，實測會晚
+    // 幾百毫秒才畫出來，馬上收工會讓 Max 帳號的第三條時有時無（比沒有更糟）。非 Max 的帳號
+    // 頂多多等這幾秒，不會拖到整個 25 秒逾時。
+    let fable_grace = Duration::from_secs(4);
+    let mut first: Option<(tokio::time::Instant, Quota)> = None;
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(900)).await;
         last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
         if let Some(q) = parse_claude_usage(&last, Local::now(), account) {
+            let done = q.fable.is_some()
+                || first.as_ref().is_some_and(|(t, _)| t.elapsed() >= fable_grace);
+            let q = match (done, first.take()) {
+                // 寬限期內拿到 Fable 就用新的；等滿了就用當初那份。
+                (true, Some((_, prev))) if q.fable.is_none() => prev,
+                (true, _) => q,
+                (false, prev) => {
+                    first = Some(prev.unwrap_or_else(|| (tokio::time::Instant::now(), q)));
+                    continue;
+                }
+            };
             crate::quota::set(app, host, base_key, q).await;
             probe.close().await;
             return Ok(true);
@@ -625,14 +653,50 @@ mod tests {
         let q = parse_claude_usage(SCREEN, at("2026-09-06T10:00:00+08:00"), Some("cc0")).unwrap();
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 78.0);
         assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 31.0);
-        // Fable-only weekly must not overwrite all-models.
+        // Fable-only weekly must not overwrite all-models — it gets its own window.
         assert_ne!(q.seven_day.as_ref().unwrap().used_pct, 39.0);
+        assert_eq!(q.fable.as_ref().unwrap().used_pct, 39.0);
+        let fable_reset = q.fable.as_ref().unwrap().resets_at.as_deref().unwrap();
+        assert!(fable_reset.starts_with("2026-09-11"), "{fable_reset}");
         assert_eq!(q.source, "claude-usage");
         assert_eq!(q.account.as_deref(), Some("cc0"));
         let five_reset = q.five_hour.as_ref().unwrap().resets_at.as_deref().unwrap();
         assert!(five_reset.contains("T05:20:00") || five_reset.contains("T13:20:00"), "{five_reset}");
         let week_reset = q.seven_day.as_ref().unwrap().resets_at.as_deref().unwrap();
         assert!(week_reset.starts_with("2026-09-11"), "{week_reset}");
+    }
+
+    /// 沒有 Fable 那條（非 Max 方案）時 `fable` 要留空，UI 才不會多畫一條空的。
+    #[test]
+    fn no_fable_row_leaves_the_window_empty() {
+        const NO_FABLE: &str = r#"
+   Current session
+   ███████████████████████████████████████            78% used
+   Resets 1:20pm (Asia/Taipei)
+
+   Current week (all models)
+   ███████████████▌                                   31% used
+   Resets Sep 11 at 2pm (Asia/Taipei)
+"#;
+        let q = parse_claude_usage(NO_FABLE, at("2026-09-06T10:00:00+08:00"), None).unwrap();
+        assert_eq!(q.seven_day.unwrap().used_pct, 31.0);
+        assert!(q.fable.is_none());
+    }
+
+    /// 標題大小寫不固定（`FABLE` / `fable`），一律要認得。
+    #[test]
+    fn fable_header_is_case_insensitive() {
+        const LOUD: &str = r#"
+   Current session
+   ███████████████████████████████████████            78% used
+   Resets 1:20pm (Asia/Taipei)
+
+   CURRENT WEEK (FABLE)
+   ███████████████████▌                               39% used
+   Resets Sep 11 at 2pm (Asia/Taipei)
+"#;
+        let q = parse_claude_usage(LOUD, at("2026-09-06T10:00:00+08:00"), None).unwrap();
+        assert_eq!(q.fable.unwrap().used_pct, 39.0);
     }
 
     #[test]

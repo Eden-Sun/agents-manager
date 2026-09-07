@@ -112,6 +112,9 @@ impl Serialize for Window {
 pub struct Quota {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
+    /// Max 方案才有的 Fable 週額度（`Current week (Fable)`）。跟 [`Quota::seven_day`] 同型
+    /// 也同樣是週窗，只是只算 Fable 那一份；沒有這條桶子的方案／來源就是 `None`，UI 完全不畫。
+    pub fable: Option<Window>,
     pub plan: Option<String>,
     pub updated_at: String,
     pub source: String,
@@ -164,6 +167,7 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
     Some(Quota {
         five_hour: five,
         seven_day: seven,
+        fable: None,
         plan: rl.get("planType").and_then(|x| x.as_str()).map(String::from),
         updated_at: crate::db::now(),
         source: "codex-app-server".into(),
@@ -184,12 +188,16 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
     };
     let five = window(rl.get("five_hour"));
     let seven = window(rl.get("seven_day"));
+    // Max 方案的 Fable 週桶。實測（2026-09-07）真的 statusLine payload 裡只有 `five_hour` /
+    // `seven_day` 兩個 key，所以這裡只是「有就收」——桶名兩種寫法都認，沒有就維持 `None`。
+    let fable = window(rl.get("fable")).or_else(|| window(rl.get("seven_day_fable")));
     if five.is_none() && seven.is_none() {
         return None;
     }
     Some(Quota {
         five_hour: five,
         seven_day: seven,
+        fable,
         plan: None,
         updated_at: crate::db::now(),
         source: "statusline".into(),
@@ -318,6 +326,7 @@ mod tests {
         let q = Quota {
             five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
             seven_day: None,
+            fable: None,
             plan: None,
             updated_at: crate::db::now(),
             source: "test".into(),
@@ -344,8 +353,21 @@ mod tests {
             "seven_day":{"used_percentage":22,"resets_at":1789179340}}});
         let q = quota_from_statusline(&p, Some("cc1")).unwrap();
         assert_eq!(q.five_hour.unwrap().used_pct, 3.5);
+        assert!(q.fable.is_none());
         assert_eq!(q.account.as_deref(), Some("cc1"));
         assert_eq!(q.source, "statusline");
         assert!(quota_from_statusline(&json!({"model": {}}), None).is_none());
+    }
+
+    /// 若哪天 statusLine 真的多一個 fable 桶，它要落在 `fable`，不能蓋掉週窗。
+    #[test]
+    fn statusline_picks_up_a_fable_bucket_if_it_appears() {
+        let p = json!({"rate_limits":{
+            "five_hour":{"used_percentage":3.5,"resets_at":1788650185},
+            "seven_day":{"used_percentage":22,"resets_at":1789179340},
+            "fable":{"used_percentage":61,"resets_at":1789179340}}});
+        let q = quota_from_statusline(&p, None).unwrap();
+        assert_eq!(q.seven_day.unwrap().used_pct, 22.0);
+        assert_eq!(q.fable.unwrap().used_pct, 61.0);
     }
 }

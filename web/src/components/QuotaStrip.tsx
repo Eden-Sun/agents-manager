@@ -85,20 +85,24 @@ function levelOf(w: { low: boolean; critical: boolean } | null | undefined): Lev
 
 /** 兩個窗口取最嚴重的旗標，一樣不碰 pct 數字。 */
 function worst(q: KindQuota | null): Level {
-  const windows = [q?.five_hour, q?.seven_day].filter((w): w is QuotaWindow => w != null)
+  const windows = [q?.five_hour, q?.seven_day, q?.fable].filter((w): w is QuotaWindow => w != null)
   if (windows.some((w) => w.critical)) return 'crit'
   if (windows.some((w) => w.low)) return 'warn'
   return 'ok'
 }
 
 /** The window that is closest to running out — what the collapsed pill shows. */
-function worstWindow(q: KindQuota | null): { name: '5h' | '7d'; pct: number | null } {
+function worstWindow(q: KindQuota | null): { name: WindowName; pct: number | null } {
+  const cands: { name: WindowName; pct: number }[] = []
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  if (five === null && seven === null) return { name: '5h', pct: null }
-  if (five === null) return { name: '7d', pct: seven }
-  if (seven === null) return { name: '5h', pct: five }
-  return five <= seven ? { name: '5h', pct: five } : { name: '7d', pct: seven }
+  const fable = remaining(q?.fable)
+  if (five !== null) cands.push({ name: '5h', pct: five })
+  if (seven !== null) cands.push({ name: '7d', pct: seven })
+  // 沒有 Fable 桶就不進來，收合的膠囊也不會憑空多一個窗口。
+  if (fable !== null) cands.push({ name: 'F', pct: fable })
+  if (cands.length === 0) return { name: '5h', pct: null }
+  return cands.reduce((a, b) => (b.pct < a.pct ? b : a))
 }
 
 function fmtTime(iso: string | null | undefined): string {
@@ -126,6 +130,8 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false): strin
   if (seven !== null) {
     parts.push(entry.kind === 'grok' ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
   }
+  const fable = remaining(q?.fable)
+  if (fable !== null) parts.push(`Fable 每週剩餘 ${fable}%`)
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
   if (q?.seven_day?.resets_at) {
     parts.push(
@@ -134,6 +140,7 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false): strin
         : `7 天 ${fmtTime(q.seven_day.resets_at)} 重置`,
     )
   }
+  if (q?.fable?.resets_at) parts.push(`Fable ${fmtTime(q.fable.resets_at)} 重置`)
   return parts.join('，')
 }
 
@@ -246,11 +253,16 @@ function RiskDot({ level }: { level: Level }) {
   return <span className={`quota-risk ${level}`} aria-hidden="true" />
 }
 
+/** 額度條上的窗口名稱：`F` 是 Max 方案的 Fable 週窗，只有 claude 有。 */
+type WindowName = '5h' | '7d' | '週' | 'F'
+
 /** 每個窗口有多長：位置刻度就是拿「離重置還有多久」去除這個。 */
-const WINDOW_MS: Record<'5h' | '7d' | '週', number> = {
+const WINDOW_MS: Record<WindowName, number> = {
   '5h': 5 * 3_600_000,
   '7d': 7 * 86_400_000,
   '週': 7 * 86_400_000,
+  // Fable 也是週窗，刻度跟 7d 同一把尺。
+  F: 7 * 86_400_000,
 }
 
 /**
@@ -320,7 +332,7 @@ function Bar({
   )
 }
 
-type WindowBar = { name: '5h' | '7d' | '週'; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
+type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
 
 /** grok only reports a weekly window (stored in seven_day) — never call it 7d. */
 function weekLabel(kind: BotKind): '7d' | '週' {
@@ -351,12 +363,13 @@ function Gauge({
   })
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
+  const fable = remaining(q?.fable)
   const now = useMinuteNow()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
   if (collapsed) {
     const w = worstWindow(q)
-    const src = w.name === '5h' ? q?.five_hour : q?.seven_day
+    const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
     windows = [
       {
         name: w.name === '7d' ? weekLabel(entry.kind) : w.name,
@@ -386,6 +399,16 @@ function Gauge({
         resetsAt: q?.seven_day?.resets_at ?? null,
         low: q?.seven_day?.low ?? false,
         critical: q?.seven_day?.critical ?? false,
+      })
+    }
+    // Max 方案的 Fable 週額度：daemon 有回報才多這一條，沒有就不畫也不佔位。
+    if (fable !== null) {
+      windows.push({
+        name: 'F',
+        pct: fable,
+        resetsAt: q?.fable?.resets_at ?? null,
+        low: q?.fable?.low ?? false,
+        critical: q?.fable?.critical ?? false,
       })
     }
   }
@@ -457,6 +480,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   })
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
+  const fable = remaining(q?.fable)
 
   return (
     <div className="quota-pop-row">
@@ -495,6 +519,13 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
               <span>{entry.kind === 'grok' ? '每週' : '7 天'}</span>
               <span className={`quota-row ${levelOf(q?.seven_day)}`}>剩 {pctText(seven)}</span>
               <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)} 重置</span>
+            </div>
+          ) : null}
+          {fable !== null ? (
+            <div className="quota-pop-line">
+              <span>Fable 每週</span>
+              <span className={`quota-row ${levelOf(q?.fable)}`}>剩 {pctText(fable)}</span>
+              <span className="quota-reset">{fmtTime(q?.fable?.resets_at)} 重置</span>
             </div>
           ) : null}
           {q?.updated_at ? <p className="quota-pop-note">更新於 {fmtTime(q.updated_at)}</p> : null}

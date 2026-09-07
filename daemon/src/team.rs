@@ -3729,6 +3729,7 @@ mod api_tests {
             crate::quota::Quota {
                 five_hour: Some(crate::quota::Window { used_pct: 93.0, resets_at: None }),
                 seven_day: None,
+                fable: None,
                 plan: None,
                 updated_at: db::now(),
                 source: "test".into(),
