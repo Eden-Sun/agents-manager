@@ -2253,6 +2253,45 @@ const IDLE_POLLS: u32 = 20;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(700);
 const PROGRESS_MAX: Duration = Duration::from_secs(40 * 60);
 
+/// Smallest gap between two `turn_progress` frames for the same run: 4 frames a second.
+///
+/// The poll interval alone is not a rate limit. It bounds one poller, but the budget it
+/// implies restarts every time a poller is (re-)armed, and `arm_progress` runs once per turn
+/// — so a run that churns turns can hand the UI a burst, and lowering `PROGRESS_INTERVAL`
+/// would silently multiply the frames every browser tab has to render. This is the ceiling
+/// the wire contract promises (docs/API.md), enforced where the frames are emitted.
+const PROGRESS_MIN_GAP: Duration = Duration::from_millis(250);
+
+/// How long a run's last-emit timestamp is worth keeping once nothing is emitting.
+const PROGRESS_STALE: Duration = Duration::from_secs(60);
+
+/// Does this run's budget allow a frame right now? Split out of `flush_progress` so the rule
+/// itself can be tested without standing up an `App`.
+fn progress_due(last: Option<&std::time::Instant>, force: bool) -> bool {
+    force || last.is_none_or(|t| t.elapsed() >= PROGRESS_MIN_GAP)
+}
+
+/// Ship the frame held for `run_id`, if the run's 4/s budget allows it right now.
+///
+/// Frames are *merged*, not queued: `pending` only ever holds the newest one, so a frame that
+/// arrives inside the window replaces the one waiting there and the intermediate states are
+/// never sent. `force` skips the budget check — used once the poller is done, so the last
+/// state of the reply is not left sitting in `pending`.
+async fn flush_progress(app: &Arc<App>, run_id: &str, pending: &mut Option<Value>, force: bool) {
+    let Some(frame) = pending.take() else { return };
+    let mut emitted = app.progress_emitted.lock().await;
+    if !progress_due(emitted.get(run_id), force) {
+        *pending = Some(frame);
+        return;
+    }
+    emitted.insert(run_id.to_string(), std::time::Instant::now());
+    // The map outlives its poller on purpose (a new turn on the same run must not get a fresh
+    // budget), so drop entries no live run can still be rate-limited by.
+    emitted.retain(|_, t| t.elapsed() < PROGRESS_STALE);
+    drop(emitted);
+    app.emit("turn_progress", frame).await;
+}
+
 /// While a turn is in flight, poll the pane and push the partial reply as `turn_progress`
 /// so the UI can render it as it is being written. Stops by itself once the turn is no
 /// longer `in_flight` (hook / fallback / watchdog / stop all end it).
@@ -2273,6 +2312,8 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
         let sent = db::turn_user_messages(&app2.db, &turn_id).await.unwrap_or_default();
         let mut last = (String::new(), String::new(), String::new());
         let mut quiet = 0u32;
+        // The newest frame not yet on the wire, held back by this run's 4/s budget.
+        let mut pending: Option<Value> = None;
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
             if started.elapsed() > PROGRESS_MAX {
@@ -2296,13 +2337,14 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             if live != last.0 || activity != last.1 || alert != last.2 {
                 last = (live.clone(), activity.clone(), alert.clone());
                 quiet = 0;
-                app2.emit(
-                    "turn_progress",
+                pending = Some(
                     json!({"bot_id": bot_id, "run_id": run_id, "turn_id": turn_id, "text": live, "activity": activity, "alert": alert, "revision": read.revision}),
-                )
-                .await;
+                );
+                flush_progress(&app2, &run_id, &mut pending, false).await;
                 continue;
             }
+            // Nothing new to say, but a frame may still be waiting on the budget.
+            flush_progress(&app2, &run_id, &mut pending, false).await;
             // §4.3's fallback is armed by `working -> idle`, which is herdr's reading of the
             // pane. When that reading sticks (observed 2026-09-06: grok finished and sat at an
             // empty composer while herdr still reported `working`, its title spinner never
@@ -2322,6 +2364,8 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
                 break;
             }
         }
+        // Whatever was held back by the budget is the last thing the UI could still use.
+        flush_progress(&app2, &run_id, &mut pending, true).await;
         app2.progress_pollers.lock().await.remove(&run_id);
     });
     pollers.insert(key, h);
@@ -4883,5 +4927,39 @@ mod hookless_capture_tests {
         assert!(!capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
         assert_eq!(messages(&app, &c.conv).await.len(), 1);
         let _ = &c.bot_id;
+    }
+}
+
+#[cfg(test)]
+mod progress_rate_tests {
+    use super::{progress_due, PROGRESS_MIN_GAP};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_gap_is_the_documented_four_frames_a_second() {
+        assert_eq!(PROGRESS_MIN_GAP * 4, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_run_that_has_not_emitted_yet_goes_out_at_once() {
+        assert!(progress_due(None, false));
+    }
+
+    #[test]
+    fn a_frame_inside_the_window_is_held_back() {
+        assert!(!progress_due(Some(&Instant::now()), false));
+    }
+
+    #[test]
+    fn the_window_opens_again_once_the_gap_has_passed() {
+        let last = Instant::now() - PROGRESS_MIN_GAP - Duration::from_millis(1);
+        assert!(progress_due(Some(&last), false));
+    }
+
+    /// The poller's last frame must never be left sitting in `pending` just because the turn
+    /// happened to end inside the window — that is what `force` is for.
+    #[test]
+    fn force_ignores_the_budget() {
+        assert!(progress_due(Some(&Instant::now()), true));
     }
 }
