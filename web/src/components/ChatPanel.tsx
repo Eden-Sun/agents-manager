@@ -1,6 +1,6 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
@@ -55,7 +55,12 @@ function timeOf(iso: string): string {
  * One message, shown in full (long content scrolls with the list — nothing is folded).
  * Metadata (speaker / recipients + time) always sits ABOVE the bubble (18px row).
  */
-export function Bubble({
+/**
+ * 一則訊息。`memo`：串流中每個 `turn_progress`（每秒兩三個）都會讓 `MessageList` 重新
+ * render，沒有 memo 的話畫面上每一則的 react-markdown 都跟著重新解析——200 則時每個 tick
+ * 一兩百毫秒的 long task（issue #8）。訊息物件本身不會變，所以 shallow 比較就夠。
+ */
+export const Bubble = memo(function Bubble({
   msg,
   from,
   kind,
@@ -107,8 +112,35 @@ export function Bubble({
           msg.content
         )}
         {msg.attachments.length ? <MessageAttachments items={msg.attachments} /> : null}
+        <TerminalSnapshot msg={msg} />
       </div>
     </article>
+  )
+})
+
+/**
+ * The whole pane as it looked when a terminal-fallback message was captured.
+ *
+ * `content` is a slice cut out of this, and the cut is what goes wrong: the fallback fires
+ * 5s after a `working -> idle` edge, so a screen that still says `Running 1 shell command…`
+ * gets stored as the reply while the real answer prints a moment later. The daemon has kept
+ * the full screen all along (`messages.terminal_snapshot`, already on the wire) — it just was
+ * not shown anywhere, so the answer looked lost when it was one click away.
+ */
+function TerminalSnapshot({ msg }: { msg: Message }) {
+  const [open, setOpen] = useState(false)
+  const snap = msg.terminal_snapshot?.trim()
+  if (!snap) return null
+  // Nothing to expand when the cut kept everything there was.
+  if (snap === msg.content.trim()) return null
+  return (
+    <div className="msg-snapshot">
+      <button type="button" className="disclosure sub" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className="chev">{open ? '▼' : '▶'}</span> 完整終端畫面
+        <span className="disclosure-note">{snap.length} 字</span>
+      </button>
+      {open ? <pre className="msg-snapshot-body">{snap}</pre> : null}
+    </div>
   )
 }
 
