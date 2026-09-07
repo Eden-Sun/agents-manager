@@ -2491,6 +2491,142 @@ button:disabled {
   color: var(--accent-ink);
 }
 
+/*
+ * 「這回合的提問」浮窗（`LastAskPeek`）。
+ *
+ * 貼著 `.msg-list-wrap` 的上緣浮著，不佔版面高度——回合開始／結束時整串訊息才不會上下跳。
+ * 用跟 `.msg-list` 一樣的 lane（`--chat-max` + 同樣的左右 padding），所以它跟訊息對得齊；
+ * `.lastq-slot` 本身不吃指標事件，只有卡片吃，浮窗兩側的訊息仍然可以選取。
+ * 底色是不透明的：它蓋在文字上，半透明只會讓兩層字疊在一起。
+ */
+.lastq-slot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 14;
+  margin: 0 auto;
+  max-width: var(--chat-max);
+  padding: 10px 28px 0;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.lastq {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent-soft) 50%, var(--bg-panel));
+  box-shadow: var(--shadow);
+}
+
+.lastq-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.lastq-tag {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+
+.lastq-time {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 兩個都寫 `margin-left: auto`：有提示時提示吃掉剩餘空間、× 貼右；沒有時換 × 自己貼右。 */
+.lastq-hint,
+.lastq-x {
+  margin-left: auto;
+}
+
+.lastq-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lastq-x {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.lastq-x:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/*
+ * 夾成三行。長提問常常是一整段規格，攤開來會蓋掉半個對話區；三行足夠認出「是哪一題」，
+ * 要全文再點開。展開後給它 40vh 的上限並自己捲，不讓一則超長訊息把整個對話蓋掉。
+ */
+.lastq-body {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.lastq-body:hover {
+  color: var(--accent-ink);
+}
+
+.lastq.open .lastq-body {
+  display: block;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+/* 從浮窗捲過去之後閃一下，否則捲完只會看到一堆長得一樣的氣泡，不知道停在哪。 */
+.msg.flash .bubble {
+  animation: msg-flash 1.6s ease-out;
+}
+
+@keyframes msg-flash {
+  0%,
+  55% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+
+  100% {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
 /* The bot's own status bar, mirrored from the pane. One line, scrolls if it overflows. */
 /* The repo chip and the status fields share one row (they were a row each and neither
    filled one). Only the status half scrolls: `.issues-pop` is absolutely positioned inside
@@ -3077,6 +3213,21 @@ button:disabled {
 
   .jump-bottom > span {
     display: none;
+  }
+
+  /* 訊息區在 390px 只剩 14px 的左右 padding，浮窗跟著收才對得齊；兩行就夠，390px 的
+     三行加上標題列會蓋掉將近四分之一的畫面。 */
+  .lastq-slot {
+    padding: 8px 14px 0;
+  }
+
+  .lastq-body {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .lastq.open .lastq-body {
+    max-height: 34vh;
   }
 
   .context-bar {
