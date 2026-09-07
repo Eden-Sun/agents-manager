@@ -152,6 +152,19 @@ async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
                 if let Err(e) = crate::default_session::sync(app).await {
                     tracing::debug!(host, session, error = ?e, "default session sync after agent detection failed");
                 }
+            } else if app.session_for_host(host).await.as_deref() == Some(session) {
+                // A new agent in the manager's own session: most often a child pane a bot just
+                // opened (`<parent>-<suffix>`, see `reconcile`), which nobody would otherwise
+                // notice until the next restart. Off this task, and a beat late, so an agent
+                // that is still settling reports its name and kind.
+                let app = app.clone();
+                let host = host.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
+                        tracing::debug!(host = %host, error = ?e, "reconcile after agent detection failed");
+                    }
+                });
             }
         }
         other => tracing::trace!(host, session, event = other, "unhandled global herdr event"),
