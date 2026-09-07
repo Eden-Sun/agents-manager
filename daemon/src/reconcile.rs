@@ -317,7 +317,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     //
     // **Descent first.** One bot, one tab: an unclaimed agent sitting in a bot's tab was
     // spawned from that bot's pane, whatever it named itself. That is a mechanism, where the
-    // `<parent agent name>-<suffix>` naming the persona asks for (`lifecycle::spawn_rule`) is
+    // `<parent agent name>-<suffix>` naming the persona asks for (`lifecycle::child_agent_rules`) is
     // only a request — an agent that forgets it, or a codex/grok that never read it, used to
     // vanish into an untracked sub-task.
     //

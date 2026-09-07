@@ -1326,8 +1326,15 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 
 ## 子 agent（bot 自己開的 pane，2026-09-07 新增）
 
-daemon 起的每個 agent 都帶一條預設人設（`lifecycle::spawn_rule`，接在使用者的 `bot.persona` 前面）：
-「你的 agent 名稱是 `<agent_name>`；用 herdr 開子 pane / 子 agent 時名稱必須以 `<agent_name>-` 為前綴」。
+daemon 起的每個 agent 都帶一段預設人設（`lifecycle::child_agent_rules`，接在使用者的 `bot.persona` 前面）：
+自己的 agent 名稱、子 agent 的命名前綴、`herdr pane split --pane "$HERDR_PANE_ID"`、
+不要 `git stash` / `--autostash`、子 agent 會被掛在自己底下追蹤。三種 kind 都用同一份文字
+（claude `--append-system-prompt`、grok `--rules`、codex `developer_instructions`）。
+
+**claude 另外拿到 herdr skill**（SPEC §6.5c）：啟動前 daemon 把 `herdr --skill` 寫到
+`$CLAUDE_CONFIG_DIR/skills/herdr/SKILL.md`（預設 `~/.claude/skills`），frontmatter 的 `description`
+換成 AG Man 的版本（原文是「只有使用者明確提到 Herdr 才用」，這裡改成「需要開子任務 / 平行工作就用」），
+body 最前面插上同一份 AG Man 規則。內容相同就不寫。
 
 對帳（`reconcile`）時，herdr 裡沒有任何 bot 認領的 agent 會被建成某個 bot 的**子 bot**：
 `managed_by = "child"`、`parent_bot_id = <父 bot id>`、kind 取 herdr 偵測到的（偵測不到就沿用父的）、
