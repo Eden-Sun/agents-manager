@@ -848,8 +848,8 @@ claude / grok 的 `/usage` 探測開在本機、遠端 bot 的 statusLine 也直
 「砍掉這個能省多少」。
 
 「自己開的 pane wM:pB」對使用者是亂碼：十個 claude 哪個是哪個，得看畫面才知道。所以 owner 那格
-點得開，底下攤出那個 pane 現在畫面上的最後 40 行（`GET /api/mem/processes/pane`，走 herdr
-`pane.read visible`，不需要那個 pane 是我們開的），跟著清單每 15 秒一起重讀；只讀、純文字，
+點得開，開一個跟 BlockedModal 同寬的視窗顯示那個 pane 現在的畫面（`GET /api/mem/processes/pane`，走 herdr
+`pane.read visible`，不需要那個 pane 是我們開的），每 2 秒重讀；只讀、純文字，
 不給打字——這裡是決定砍不砍的地方，要操作它就去 herdr。bot 那幾列不給看，它有自己的終端分頁。
 
 砍之前**一定重新取樣**再判定，不信前端送來的那一列：pid 會被回收，過期的一列不能讓 `kill`

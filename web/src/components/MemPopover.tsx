@@ -1,9 +1,10 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
-import { fetchMemPane, fetchMemProcesses, killMemProcess } from '../api'
-import type { MemProcess, MemProcesses, TerminalSnapshot } from '../api/types'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { fetchMemProcesses, killMemProcess } from '../api'
+import type { MemProcess, MemProcesses } from '../api/types'
 import { LOCAL_HOST } from '../api/types'
 import { useStore } from '../store/store'
 import { humanBytes } from './MemBadge'
+import { MemPaneModal } from './MemPaneModal'
 
 /**
  * 「RAM 4.5G」點開之後的那張清單（SPEC §15.2）。
@@ -27,33 +28,6 @@ function ownerLabel(p: MemProcess): string {
   if (p.owner === 'pane') return `自己開的 pane ${p.pane_id ?? ''}`.trim()
   if (p.owner === 'herdr') return 'herdr'
   return '?'
-}
-
-/**
- * 「自己開的 pane wM:pB」底下攤開的那一塊：那個 pane 現在畫面上的字（`GET /mem/processes/pane`）。
- * pane id 對使用者是亂碼，畫面上的最後幾行才認得出「這是哪一個 claude」。只讀 visible、
- * 純文字、不能打字——這裡是決定砍不砍，不是操作它的地方。
- */
-function PanePreview({ host, paneId, socket, tick }: { host: string; paneId: string; socket: string | null; tick: number }) {
-  const [snap, setSnap] = useState<TerminalSnapshot | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  useEffect(() => {
-    let alive = true
-    fetchMemPane(host, paneId, socket, 40)
-      .then((s) => {
-        if (!alive) return
-        setSnap(s)
-        setErr(null)
-      })
-      .catch((e: unknown) => alive && setErr(e instanceof Error ? e.message : '讀不到'))
-    return () => {
-      alive = false
-    }
-  }, [host, paneId, socket, tick])
-  if (err) return <p className="mem-pop-err">{err}</p>
-  if (!snap) return <p className="mem-pop-empty">讀取畫面…</p>
-  const text = snap.text.replace(/\s+$/, '')
-  return <pre className="mem-pop-preview">{text || '（畫面是空的）'}</pre>
 }
 
 /** 一列的動作按鈕：bot 走「停止 bot」，其餘 TERM → 「強制」。 */
@@ -147,7 +121,10 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent) => {
-      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
+      const t = e.target as Node
+      // pane 視窗是 portal 到 body 的，不在 `wrap` 裡；點它不算「點到外面」。
+      if ((t as Element).closest?.('.mem-pane-backdrop')) return
+      if (wrap.current && !wrap.current.contains(t)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -162,9 +139,8 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
 
   const title = host === LOCAL_HOST ? '本機' : host
   const rows = data?.processes ?? []
-  // 攤開的是「哪個 pane」而不是「哪一列」：同一個 pane 底下的兩個程序共用一份畫面。
-  const [previewPane, setPreviewPane] = useState<string | null>(null)
-  const tick = data?.sampled_at ?? ''
+  // 點「自己開的 pane」開的那個視窗（`MemPaneModal`）；清單留在後面不關。
+  const [peek, setPeek] = useState<MemProcess | null>(null)
 
   return (
     <div className="mem-wrap" ref={wrap}>
@@ -202,44 +178,28 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
               <tbody>
                 {rows.map((p) => {
                   const canPeek = p.owner !== 'bot' && !!p.pane_id
-                  const peeking = canPeek && previewPane === p.pane_id
                   return (
-                    <Fragment key={p.pid}>
-                      <tr className={`${p.owner === 'bot' ? 'is-bot' : ''}${peeking ? ' is-peeking' : ''}`}>
-                        <td className="mem-pop-size" title={`自己 ${humanBytes(p.rss_bytes)}，連同 ${p.children} 個子程序`}>
-                          {humanBytes(p.subtree_bytes)}
-                        </td>
-                        <td className="mem-pop-argv" title={p.argv}>
-                          {p.argv}
-                        </td>
-                        <td className="mem-pop-owner">
-                          {canPeek ? (
-                            <button
-                              type="button"
-                              className="mem-pop-peek"
-                              aria-expanded={peeking}
-                              title={peeking ? '收起畫面' : '看這個 pane 現在畫面上的字'}
-                              onClick={() => setPreviewPane(peeking ? null : p.pane_id)}
-                            >
-                              {ownerLabel(p)}
-                              <span className="mem-pop-caret" aria-hidden="true">{peeking ? '▾' : '▸'}</span>
-                            </button>
-                          ) : (
-                            ownerLabel(p)
-                          )}
-                        </td>
-                        <td>
-                          <RowAction p={p} host={host} onDone={() => void load()} />
-                        </td>
-                      </tr>
-                      {peeking && p.pane_id ? (
-                        <tr className="mem-pop-preview-row">
-                          <td colSpan={4}>
-                            <PanePreview host={host} paneId={p.pane_id} socket={p.socket_path} tick={tick.length} />
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
+                    <tr key={p.pid} className={p.owner === 'bot' ? 'is-bot' : ''}>
+                      <td className="mem-pop-size" title={`自己 ${humanBytes(p.rss_bytes)}，連同 ${p.children} 個子程序`}>
+                        {humanBytes(p.subtree_bytes)}
+                      </td>
+                      <td className="mem-pop-argv" title={p.argv}>
+                        {p.argv}
+                      </td>
+                      <td className="mem-pop-owner">
+                        {canPeek ? (
+                          <button type="button" className="mem-pop-peek" title="開一個視窗看這個 pane 現在的畫面" onClick={() => setPeek(p)}>
+                            {ownerLabel(p)}
+                            <span className="mem-pop-caret" aria-hidden="true">↗</span>
+                          </button>
+                        ) : (
+                          ownerLabel(p)
+                        )}
+                      </td>
+                      <td>
+                        <RowAction p={p} host={host} onDone={() => void load()} />
+                      </td>
+                    </tr>
                   )
                 })}
               </tbody>
@@ -248,6 +208,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
           <p className="mem-pop-foot">結束的是那個 pane 裡的程序，pane 本身還在。</p>
         </div>
       ) : null}
+      {open && peek ? <MemPaneModal host={host} p={peek} onClose={() => setPeek(null)} /> : null}
     </div>
   )
 }
