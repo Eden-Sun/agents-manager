@@ -37,6 +37,23 @@ import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from '
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { botStatusConnTarget } from './botStatusConn'
+import {
+  botKey,
+  completesTurn,
+  countUnreadTurns,
+  groupKey,
+  loadCounts,
+  loadMarks,
+  markNow,
+  markOfMessages,
+  pruneMarks,
+  pruneUnread,
+  saveCounts,
+  saveMarks,
+  takeTurnCompletion,
+  windowActive,
+  type ReadMark,
+} from './unread'
 import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
@@ -195,6 +212,23 @@ function readKindDisplay(): KindDisplay {
   }
 }
 
+/**
+ * 未讀（見 `store/unread.ts`）：帳本存在 localStorage，store 只掛最小的 hook。
+ * 已讀標記留在模組層而不進 state——沒有任何畫面直接讀它，進 state 只會多一次 render。
+ */
+const initialUnread = loadCounts()
+let readMarks = loadMarks()
+
+/** 記下某個對話讀到哪裡。`key` 是 `bot:<id>` 或 `group:<projectId>`。 */
+function setReadMark(key: string, mark: ReadMark) {
+  readMarks = { ...readMarks, [key]: mark }
+  saveMarks(readMarks)
+}
+
+function persistUnread(s: { botUnread: Record<string, number>; groupUnread: Record<string, number> }) {
+  saveCounts({ bots: s.botUnread, groups: s.groupUnread })
+}
+
 export interface Notice {
   id: number
   kind: 'error' | 'info'
@@ -304,6 +338,11 @@ interface StoreState {
   /** 上面那顆按鈕正在抓（同一個 key 不重複發）。 */
   loadingMore: Record<string, boolean>
   /**
+   * bot id → 已完成但使用者還沒看到的回合數（進行中 → 已完成（未讀）→ 已完成（已讀）的中間段）。
+   * 純前端的帳，daemon 不知情；跨重整保留在 localStorage（`store/unread.ts`）。
+   */
+  botUnread: Record<string, number>
+  /**
    * bot_id → partial reply of its in-flight turn (`turn_progress`). Cleared when that turn's
    * assistant `message_added` arrives or `turn_updated` leaves `in_flight`. Render it only
    * while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows.
@@ -396,6 +435,16 @@ interface StoreState {
   loadMessages: (botId: string) => Promise<void>
   /** issue #25：往前補一頁對話（`before=` 目前最舊的一則）。 */
   loadEarlierMessages: (botId: string) => Promise<void>
+  /** 把這個 bot 的對話標成已讀（徽章清掉、已讀標記推到最後一則）。 */
+  markBotRead: (botId: string) => void
+  /** 把這個 project 的群組聊天標成已讀。 */
+  markGroupRead: (projectId: string) => void
+  /** 視窗回到前景時：現在開著的那個對話就是被看到的那個。 */
+  markCurrentRead: () => void
+  /** 訊息載進來之後用已讀標記重算未讀數——存下來的數字只是重整前的快照。 */
+  recountBot: (botId: string) => void
+  /** 丟掉已經不存在的 bot / project 的未讀帳（每次 `GET /api/state` 之後）。 */
+  pruneUnread: () => void
   notify: (kind: Notice['kind'], text: string, action?: Notice['action']) => void
   dismiss: (id: number) => void
 
@@ -582,13 +631,14 @@ export const useStore = create<StoreState>((set, get) => ({
   loadedBots: {},
   moreMessages: {},
   loadingMore: {},
+  botUnread: initialUnread.bots,
   liveReply: {},
   queuedSends: {},
 
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
   loadedProjects: {},
-  groupUnread: {},
+  groupUnread: initialUnread.groups,
 
   teams: {},
   teamDetail: {},
@@ -681,6 +731,7 @@ export const useStore = create<StoreState>((set, get) => ({
         selectedTeamId: selectedTeam,
       }
     })
+    get().pruneUnread()
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
     const proj = get().selectedProjectId
@@ -691,6 +742,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
   selectBot: (botId) => {
     set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, shellView: null, rightTab: 'chat', settingsBotId: null })
+    // 點進來就是看到了——但只有視窗真的在前景才算（程式化的選取可能發生在背景分頁）。
+    if (botId && windowActive()) get().markBotRead(botId)
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
   },
 
@@ -700,15 +753,15 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   selectProject: (projectId) => {
-    set((s) => ({
+    set({
       selectedProjectId: projectId,
       selectedTeamId: null,
       teamLaunch: null,
       shellView: null,
       rightTab: 'chat',
       settingsBotId: null,
-      groupUnread: projectId ? { ...s.groupUnread, [projectId]: 0 } : s.groupUnread,
-    }))
+    })
+    if (projectId && windowActive()) get().markGroupRead(projectId)
     if (projectId) void get().loadGroupMessages(projectId)
   },
 
@@ -856,6 +909,8 @@ export const useStore = create<StoreState>((set, get) => ({
           moreMessages: { ...s.moreMessages, [botId]: page.has_more },
         }
       })
+      // 有訊息可比對了：重整後存下來的數字只是快照，這裡用已讀標記算出真正的未讀回合數。
+      get().recountBot(botId)
     } catch (e) {
       get().notify('error', `載入訊息失敗：${errText(e)}`)
     }
@@ -883,6 +938,57 @@ export const useStore = create<StoreState>((set, get) => ({
     } finally {
       set((s) => ({ loadingMore: withoutKey(s.loadingMore, botId) }))
     }
+  },
+
+  markBotRead: (botId) => {
+    setReadMark(botKey(botId), markOfMessages(get().messages[botId] ?? []) ?? markNow())
+    if (!get().botUnread[botId]) return
+    set((s) => ({ botUnread: withoutKey(s.botUnread, botId) }))
+    persistUnread(get())
+  },
+
+  markGroupRead: (projectId) => {
+    setReadMark(groupKey(projectId), markOfMessages(get().groupMessages[projectId] ?? []) ?? markNow())
+    if (!get().groupUnread[projectId]) return
+    set((s) => ({ groupUnread: withoutKey(s.groupUnread, projectId) }))
+    persistUnread(get())
+  },
+
+  markCurrentRead: () => {
+    if (!windowActive()) return
+    const s = get()
+    if (s.selectedProjectId) {
+      get().markGroupRead(s.selectedProjectId)
+      return
+    }
+    if (s.selectedTeamId || s.shellView) return
+    if (s.selectedBotId) get().markBotRead(s.selectedBotId)
+  },
+
+  pruneUnread: () => {
+    const s = get()
+    const liveBot = (id: string) => s.bots.some((b) => b.id === id)
+    const liveProject = (id: string) => s.projects.some((p) => p.id === id)
+    readMarks = pruneMarks(readMarks, liveBot, liveProject)
+    saveMarks(readMarks)
+    const botUnread = pruneUnread(s.botUnread, liveBot)
+    const groupUnread = pruneUnread(s.groupUnread, liveProject)
+    if (Object.keys(botUnread).length === Object.keys(s.botUnread).length && Object.keys(groupUnread).length === Object.keys(s.groupUnread).length) return
+    set({ botUnread, groupUnread })
+    persistUnread(get())
+  },
+
+  recountBot: (botId) => {
+    const s = get()
+    // 正在看著它就不是「未讀」，是「剛剛讀完」——直接把標記推到最後一則。
+    if (viewingBot(s, botId) && windowActive()) {
+      get().markBotRead(botId)
+      return
+    }
+    const n = countUnreadTurns(s.messages[botId] ?? [], readMarks[botKey(botId)])
+    if ((s.botUnread[botId] ?? 0) === n) return
+    set((cur) => ({ botUnread: n > 0 ? { ...cur.botUnread, [botId]: n } : withoutKey(cur.botUnread, botId) }))
+    persistUnread(get())
   },
 
   async startBot(botId) {
@@ -1693,6 +1799,37 @@ function connectSocket(set: SetFn, get: GetFn) {
 
 let resyncPending = false
 
+/** 使用者現在看的是不是這個 bot 的對話（群組 / team / shell 都會蓋掉它）。 */
+function viewingBot(s: StoreState, botId: string): boolean {
+  return s.selectedBotId === botId && !s.selectedProjectId && !s.selectedTeamId && !s.shellView
+}
+
+/**
+ * 一個回合完成了：assistant 訊息到達、或 `turn_updated` 進終態——同一個回合這兩件事都會
+ * 發生，`takeTurnCompletion` 負責只算一次。使用者當下不在看（選的是別的 bot、分頁在背景、
+ * 或視窗沒 focus）就記成未讀，等他真的點進來再清。
+ */
+function noteTurnDone(set: SetFn, get: GetFn, botId: string, turnId: string) {
+  if (viewingBot(get(), botId) && windowActive()) {
+    get().markBotRead(botId)
+    return
+  }
+  if (!takeTurnCompletion(botId, turnId)) return
+  set((s) => ({ botUnread: { ...s.botUnread, [botId]: (s.botUnread[botId] ?? 0) + 1 } }))
+  persistUnread(get())
+}
+
+/** 同上，但帳記在專案的群組聊天上（§13.6 的未讀本來就是以 project 為單位）。 */
+function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: string) {
+  if (get().selectedProjectId === projectId && windowActive()) {
+    get().markGroupRead(projectId)
+    return
+  }
+  if (!takeTurnCompletion(`group:${projectId}`, turnId)) return
+  set((s) => ({ groupUnread: { ...s.groupUnread, [projectId]: (s.groupUnread[projectId] ?? 0) + 1 } }))
+  persistUnread(get())
+}
+
 function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string; data?: unknown }) {
   if (typeof frame.seq === 'number') {
     set((s) => ({ lastSeq: Math.max(s.lastSeq, frame.seq as number) }))
@@ -1828,9 +1965,6 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
             patch.groupMessages = { ...s.groupMessages, [pid]: cut.list }
             if (cut.trimmed) more[pid] = true
           }
-          if (msg.role !== 'user' && s.selectedProjectId !== pid) {
-            patch.groupUnread = { ...s.groupUnread, [pid]: (s.groupUnread[pid] ?? 0) + 1 }
-          }
         }
         // SPEC-team §11.5: the team timeline reads the same `groupMessages` rows (filtered by
         // `team_id`), so only the unread counter is team-specific here.
@@ -1840,6 +1974,14 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (Object.keys(more).length > 0) patch.moreMessages = { ...s.moreMessages, ...more }
         return patch
       })
+      // 一則 assistant 訊息 = 一個回合完成。記未讀要在 set 之後：`markBotRead` 的標記是從
+      // 已經含這則訊息的清單推出來的。team 成員也是 bot，走的是同一條路。
+      if (completesTurn(msg)) {
+        const turnId = msg.turn_id ?? `msg:${msg.id}`
+        noteTurnDone(set, get, botId, turnId)
+        const pid = get().bots.find((b) => b.id === botId)?.project_id
+        if (pid) noteGroupTurnDone(set, get, pid, turnId)
+      }
       return
     }
     case 'turn_updated': {
@@ -1854,7 +1996,13 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           turn.status !== 'in_flight' && s.liveReply[botId]?.turnId === turn.id ? withoutKey(s.liveReply, botId) : s.liveReply,
       }))
       // The turn that was blocking the composer is over: send whatever was queued behind it.
-      if (turn.status !== 'in_flight') flushQueued(botId)
+      if (turn.status !== 'in_flight') {
+        flushQueued(botId)
+        // 沒有 assistant 訊息的回合（被中止、只有終端輸出）也要算完成，否則它永遠不會亮。
+        noteTurnDone(set, get, botId, turn.id)
+        const pid = get().bots.find((b) => b.id === botId)?.project_id
+        if (pid) noteGroupTurnDone(set, get, pid, turn.id)
+      }
       return
     }
     case 'turn_progress': {

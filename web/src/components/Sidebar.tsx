@@ -123,6 +123,8 @@ function BotRow({
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
+  // 已完成但還沒被看到的回合數（store/unread.ts）。0 = 不佔位。
+  const unread = useStore((s) => s.botUnread[botId] ?? 0)
   const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const selectBot = useStore((s) => s.selectBot)
   const startBot = useStore((s) => s.startBot)
@@ -205,6 +207,13 @@ function BotRow({
     >
       {/* 沒展開標題的列，agent 的標題掛在燈號的 tooltip 上，資訊沒有掉。 */}
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
+      {/* 「已完成（未讀）」：燈號說的是**現在**在做什麼，這顆說的是**你還沒看過**幾回合——
+          兩件不同的事，所以是兩個記號，並排在名字前面。`!` 讓它就算被截斷也不會被讀成模型參數。 */}
+      {unread > 0 ? (
+        <span className="unread-turns" title={`${unread} 個回合已完成，還沒看過`}>
+          !{unread > 99 ? '99+' : unread}
+        </span>
+      ) : null}
       <span className="bot-main">
         {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
         <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
@@ -612,9 +621,30 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
  * SPEC §13.5/§13.6: the project title opens the group view; unread replies pile up on it.
  * v4.0: the whole row (label + host + path) is the hit area, ≥ 32px tall.
  */
-function ProjectTitle({ projectId, label, host, path, hostUp }: { projectId: string; label: string; host: string; path: string; hostUp: boolean }) {
+function ProjectTitle({
+  projectId,
+  label,
+  host,
+  path,
+  hostUp,
+  folded,
+}: {
+  projectId: string
+  label: string
+  host: string
+  path: string
+  hostUp: boolean
+  /**
+   * 專案收起來時，底下每個 bot 的未讀加總掛回標題上——不然收合等於把徽章藏起來。
+   * 選擇性：收合是側欄自己的本地狀態，沒傳就是沒收合。
+   */
+  folded?: boolean
+}) {
   const selected = useStore((s) => s.selectedProjectId === projectId)
   const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
+  const foldedUnread = useStore((s) =>
+    folded ? s.bots.reduce((n, b) => (b.project_id === projectId ? n + (s.botUnread[b.id] ?? 0) : n), 0) : 0,
+  )
   const selectProject = useStore((s) => s.selectProject)
   return (
     <button
@@ -634,6 +664,11 @@ function ProjectTitle({ projectId, label, host, path, hostUp }: { projectId: str
       {unread > 0 ? (
         <span className="unread-badge" title={`${unread} 則未讀的群組回覆`}>
           {unread > 99 ? '99+' : unread}
+        </span>
+      ) : null}
+      {foldedUnread > 0 ? (
+        <span className="unread-turns" title={`收合的 Bot 裡有 ${foldedUnread} 個回合已完成，還沒看過`}>
+          !{foldedUnread > 99 ? '99+' : foldedUnread}
         </span>
       ) : null}
       <HostBadge host={host} connected={hostUp} />

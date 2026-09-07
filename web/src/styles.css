@@ -4546,6 +4546,25 @@ button.model-tag[aria-expanded='true'] {
   text-align: center;
 }
 
+/* 「已完成（未讀）」的回合數。跟 `.unread-badge`（群組未讀）同一個 accent 家族，但不是
+   圓丸而是方角小標＋前面一個 `!`：它跟狀態燈並排，形狀不同才不會被看成第二顆燈。 */
+.unread-turns {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.bot-row .unread-turns {
+  margin-left: -2px;
+}
+
 .group-tag {
   font-size: 11px;
   font-weight: 650;
