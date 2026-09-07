@@ -12,6 +12,7 @@ import {
   botMatches,
   botsOfProject,
   identitiesOfHost,
+  orderedProjects,
   projectHostName,
   toolsOfHost,
   useStore,
@@ -744,8 +745,28 @@ function ProjectTitle({
   )
 }
 
+/** 拖曳中的專案，以及游標落在哪個專案的哪一半。與 bot 的 `DragState` 分開：兩種拖曳不互相干擾。 */
+type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
+
 export function Sidebar() {
-  const projects = useStore((s) => s.projects)
+  const rawProjects = useStore((s) => s.projects)
+  const projectOrder = useStore((s) => s.projectOrder)
+  const moveProject = useStore((s) => s.moveProject)
+  const projects = useMemo(() => orderedProjects({ projects: rawProjects, projectOrder }), [rawProjects, projectOrder])
+  const [pdrag, setPdrag] = useState<ProjectDrag>(null)
+  /** 專案落點：上半 = 插在這個專案之前，下半 = 之後。 */
+  const projectEdgeAt = (e: { currentTarget: HTMLElement; clientY: number }): 'before' | 'after' => {
+    const r = e.currentTarget.getBoundingClientRect()
+    return e.clientY < r.top + r.height / 2 ? 'before' : 'after'
+  }
+  const dropProjectAt = (dragId: string, overId: string, edge: 'before' | 'after') => {
+    const ids = projects.map((p) => p.id)
+    const at = ids.indexOf(overId)
+    if (at < 0) return
+    const beforeId = edge === 'before' ? overId : (ids[at + 1] ?? null)
+    if (beforeId === dragId) return
+    moveProject(dragId, beforeId)
+  }
   const bots = useStore((s) => s.bots)
   const hosts = useStore((s) => s.hosts)
   const socket = useStore((s) => s.socket)
@@ -990,11 +1011,40 @@ export function Sidebar() {
           const projectShut = shutProjects.has(p.id) && !query
           // 搜尋時，整個專案都沒有命中的就不佔版面——留一個空的專案標題只是雜訊。
           if (query && list.length === 0) return null
+          const pDragging = pdrag?.id === p.id
+          const pDropEdge = pdrag && pdrag.id !== p.id && pdrag.overId === p.id ? pdrag.edge : null
           return (
-            <section className="project" key={p.id}>
+            <section
+              className={`project${pDragging ? ' dragging' : ''}${pDropEdge ? ` drop-${pDropEdge}` : ''}`}
+              key={p.id}
+              onDragOver={(e) => {
+                if (!pdrag || pdrag.id === p.id) return
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                const edge = projectEdgeAt(e)
+                if (pdrag.overId !== p.id || pdrag.edge !== edge) setPdrag({ ...pdrag, overId: p.id, edge })
+              }}
+              onDrop={(e) => {
+                if (!pdrag || pdrag.id === p.id) return
+                e.preventDefault()
+                dropProjectAt(pdrag.id, p.id, projectEdgeAt(e))
+                setPdrag(null)
+              }}
+            >
               <header
                 className={`project-head${projectSelected ? ' selected' : ''}`}
                 onClick={() => selectProject(p.id)}
+                // 抓標題列拖：整個專案（含底下的 bot）一起搬。bot 列自己也是拖曳來源，
+                // 但它的 dragstart 不會冒泡到這裡（它有自己的 handler 且 pdrag 不設）。
+                draggable={!query}
+                title={query ? undefined : '拖曳可調整專案順序'}
+                onDragStart={(e) => {
+                  e.stopPropagation()
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData('text/plain', `project:${p.id}`)
+                  setPdrag({ id: p.id, overId: null, edge: 'before' })
+                }}
+                onDragEnd={() => setPdrag(null)}
               >
                 {/* 收合鈕吃掉自己的 click，不然會連帶把整個專案選起來（開群組對話）。 */}
                 <button

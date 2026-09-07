@@ -506,7 +506,7 @@ click again | slot="w1:pA▾"  detailOpen=false
 | `⌥↑` / `⌥↓` | 焦點在某一列 bot 上 | 維持原本的「排序」語意（跟相鄰那列交換），不是換 bot |
 | `Enter` / `Space` | 焦點在某一列 bot 上 | 選取（原有行為） |
 
-- 順序是**側邊欄看到的順序**：專案由上而下，專案內用使用者拖出來的 `botOrder`
+- 順序是**側邊欄看到的順序**：專案依使用者拖出來的 `projectOrder`（`orderedProjects()`），專案內用 `botOrder`
   （`orderedBotIds()`）；頭尾會繞回去（`adjacentBotId()`，兩個都在 `store/store.ts`）。
 - 沒有選任何 bot 時（例如正在看群組或 team），`⌥↓` 從第一個開始、`⌥↑` 從最後一個開始。
 - 全域監聽器（`App.tsx` 的 `useBotSwitchKeys`）刻意跳過三種情況：`e.defaultPrevented`、

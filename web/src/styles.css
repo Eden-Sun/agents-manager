@@ -503,6 +503,40 @@ button:disabled {
   background: var(--bg-panel);
 }
 
+/* 專案拖曳排序：跟 bot 列同一套視覺——拖的那個變淡，落點畫一條 accent 線。 */
+.project {
+  position: relative;
+}
+
+.project.dragging {
+  opacity: 0.4;
+}
+
+.project.drop-before::before,
+.project.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.project.drop-before::before {
+  top: -6px;
+}
+
+.project.drop-after::after {
+  bottom: -6px;
+}
+
+.project-head[draggable='true'] {
+  cursor: grab;
+}
+
 .project:last-child {
   margin-bottom: 0;
 }
