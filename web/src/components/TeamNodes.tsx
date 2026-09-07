@@ -4,6 +4,7 @@ import type { Bot, Team } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, TEAM_TERMINAL_PHASES, teamPauseLabel, teamPhaseTone } from '../api/types'
 import { botLamp, teamMemberBots, teamShortName, teamsOfProject, useStore } from '../store/store'
 import { IdentityBadge } from './IdentitiesPanel'
+import { TrashIcon } from './Icons'
 import { KindTag } from './KindTag'
 import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
@@ -153,21 +154,6 @@ function TeamNode({ team }: { team: Team }) {
   )
 }
 
-/** 側邊欄的「刪除 Team」：`✕`（清理）已經被用掉了，刪除得看得出來是另一件事。 */
-function TrashIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
-      <path
-        d="M2.6 4.2h10.8M6.4 4.2V2.9h3.2v1.3M4 4.2l.7 8.3a1.2 1.2 0 001.2 1.1h4.2a1.2 1.2 0 001.2-1.1l.7-8.3"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.35"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
 
 export function TeamNodes({ projectId }: { projectId: string }) {
   const teams = useStore(useShallow((s) => teamsOfProject(s, projectId)))

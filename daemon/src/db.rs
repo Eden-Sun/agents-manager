@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS runs (
   agent_name TEXT, herdr_session TEXT,
   native_session_id TEXT, transcript_path TEXT,
   last_read_revision INTEGER, last_read_tail_hash TEXT,
-  started_at TEXT NOT NULL, ended_at TEXT
+  started_at TEXT NOT NULL, ended_at TEXT,
+  -- Native session requested by a reopen. Cleared by the first identity/turn hook.
+  resume_session_id TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
@@ -271,6 +273,8 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // When the user closed the team's GitHub issue. NULL = still open, or never asked —
         // closing is always an explicit human action, so an old row simply has nothing here.
         ("teams", "issue_closed_at", "ALTER TABLE teams ADD COLUMN issue_closed_at TEXT"),
+        // Native session requested by a done-team reopen. NULL for ordinary starts and old runs.
+        ("runs", "resume_session_id", "ALTER TABLE runs ADD COLUMN resume_session_id TEXT"),
         // SPEC-team §2.3: which queued issue this task / event belongs to. Nullable because
         // every row written before the queue existed belongs to the team's one and only issue,
         // which the backfill below fills in.
@@ -306,6 +310,18 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
                 t.created_at, t.started_at, t.ended_at
            FROM teams t
           WHERE NOT EXISTS (SELECT 1 FROM team_issues i WHERE i.team_id = t.id)",
+    )
+    .execute(&pool)
+    .await?;
+    // A database upgraded after the issue queue migration can already have a one-row queue,
+    // but rows created by an intermediate build may not have copied the old team mirror's
+    // close stamp. Keep the queue row authoritative while preserving the old value.
+    sqlx::query(
+        "UPDATE team_issues SET issue_closed_at = (
+             SELECT t.issue_closed_at FROM teams t
+              WHERE t.id = team_issues.team_id AND t.issue_number = team_issues.issue_number
+         )
+          WHERE issue_closed_at IS NULL",
     )
     .execute(&pool)
     .await?;
@@ -653,6 +669,9 @@ pub struct Run {
     pub last_read_tail_hash: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
+    /// The native session id a reopen asked the CLI to continue. It is consumed by the first
+    /// identity hook (Claude) or first completed turn hook (Codex/Grok).
+    pub resume_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -929,6 +948,19 @@ pub async fn active_run(pool: &SqlitePool, bot_id: &str) -> Result<Option<Run>> 
 
 pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_optional(pool).await?)
+}
+
+/// The most recent native session from an ended run. Reopen deliberately does not resume an
+/// active run: the scheduler only calls this after the team has reached `done`.
+pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT native_session_id FROM runs
+          WHERE bot_id = ? AND ended_at IS NOT NULL AND native_session_id IS NOT NULL
+          ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub async fn all_active_runs(pool: &SqlitePool) -> Result<Vec<Run>> {
@@ -1443,6 +1475,96 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         let p2 = open(&file).await.unwrap();
         assert_eq!(columns(&p2, "bots").await, before);
         p2.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reopen only considers a native session from an ended run. An active run, and an ended
+    /// run whose provider never reported an id, must not steal the continuation slot.
+    #[tokio::test]
+    async fn last_native_session_id_uses_the_latest_ended_run() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("sessions.sqlite3")).await.unwrap();
+        let at = now();
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','pm','claude','tok',?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, state, native, started, ended) in [
+            ("r-old", "stopped", Some("native-old"), "2026-09-07T00:00:00Z", Some("2026-09-07T00:01:00Z")),
+            ("r-active", "running", Some("native-active"), "2026-09-07T02:00:00Z", None),
+            ("r-new", "exited", Some("native-new"), "2026-09-07T03:00:00Z", Some("2026-09-07T03:01:00Z")),
+            ("r-no-id", "stopped", None, "2026-09-07T04:00:00Z", Some("2026-09-07T04:01:00Z")),
+        ] {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
+                 VALUES (?,?, 'stopped', 'unknown', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind("b1")
+            .bind(native)
+            .bind(started)
+            .bind(ended)
+            .execute(&pool)
+            .await
+            .unwrap();
+            if state != "stopped" {
+                sqlx::query("UPDATE runs SET state=? WHERE id=?").bind(state).bind(id).execute(&pool).await.unwrap();
+            }
+        }
+        assert_eq!(last_native_session_id(&pool, "b1").await.unwrap().as_deref(), Some("native-new"));
+        assert_eq!(last_native_session_id(&pool, "missing").await.unwrap(), None);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A queue row can already exist when an older build is upgraded. Preserve the legacy
+    /// scalar close stamp on that row so the per-issue close guard is not reset by migration.
+    #[tokio::test]
+    async fn issue_closed_at_is_backfilled_for_an_existing_queue_row() {
+        let dir = tmp_dir();
+        let file = dir.join("closed-issue.sqlite3");
+        let pool = open(&file).await.unwrap();
+        let at = now();
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, base_ref, base_sha,
+               branch, worktree_root, deliver, roles_json, budget_json, issue_closed_at, created_at)
+             VALUES ('tm1','p1',42,'done','https://example.invalid/42','done','HEAD','base','team/i42-x','/tmp/team',
+                     'branch','{}','{}',?,?)",
+        )
+        .bind(&at)
+        .bind(&at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO team_issues (id, team_id, seq, issue_number, issue_title, issue_url, state,
+               branch, base_sha, created_at)
+             VALUES ('tm1-i1','tm1',1,42,'done','https://example.invalid/42','done','team/i42-x','base',?)",
+        )
+        .bind(&at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let pool = open(&file).await.unwrap();
+        let stamp: Option<String> = sqlx::query_scalar("SELECT issue_closed_at FROM team_issues WHERE id='tm1-i1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stamp.as_deref(), Some(at.as_str()));
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -458,6 +458,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           <ApiModelFields
             kind={bot.kind}
             host={host}
+            identity={identity || null}
             model={model}
             onModel={setModel}
             effort={effort}

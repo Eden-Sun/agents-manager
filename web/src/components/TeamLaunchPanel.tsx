@@ -136,6 +136,7 @@ function RoleCard({
             <ApiModelFields
               kind={spec.kind}
               host={host}
+              identity={spec.identity}
               model={spec.model}
               onModel={(v) => patch({ model: v })}
               effort={spec.effort}

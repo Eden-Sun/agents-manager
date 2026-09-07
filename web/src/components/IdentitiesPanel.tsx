@@ -121,12 +121,19 @@ function IdentityRow({ name }: { name: string }) {
         title="刪除身份"
         body={
           <>
-            要把身份 <strong>{name}</strong> 移除嗎？
-            {used > 0 ? `目前還有 ${used} 個 Bot 用它。` : '目前沒有 Bot 在用它。'}
-            已經登入的帳號本身不受影響。
+            要把身份 <strong>{name}</strong> 移除嗎？已經登入的帳號本身不受影響。
+            {used > 0 ? (
+              <>
+                <br />
+                <strong>仍有 {used} 個 Bot 綁著這個身份</strong>，需先把那些 Bot 改用別的身份或移除。
+              </>
+            ) : (
+              ' 目前沒有 Bot 在用它。'
+            )}
           </>
         }
         confirmLabel="刪除身份"
+        confirmDisabled={used > 0}
         danger
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => {

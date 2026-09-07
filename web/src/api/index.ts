@@ -10,6 +10,7 @@ import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
 import type {
   MemSnapshot,
+  MessageHit,
   AppState,
   Attachment,
   DirListing,
@@ -261,6 +262,20 @@ export async function interruptBot(botId: string): Promise<void> {
 }
 
 /**
+ * `POST /api/bots/:id/abort` — **強制**結束目前回合。`interrupt` 是「請 agent 停下來」，
+ * `esc` 送不出去就整個失敗、回合仍卡在 in-flight；這支反過來，先保證解鎖，送鍵只是順帶
+ * （`keys_sent` 告訴你送成功沒有）。
+ */
+export async function abortBot(botId: string): Promise<{ aborted: string[]; keys_sent: boolean }> {
+  const r = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/abort`)
+  const o = isRec(r) ? r : {}
+  return {
+    aborted: Array.isArray(o.aborted) ? o.aborted.map((x) => String(x)) : [],
+    keys_sent: o.keys_sent === true,
+  }
+}
+
+/**
  * `POST /api/bots/:id/login` — 對這個**正在跑的** bot 的 TUI 送 `/login`，讓它進入
  * 登入 / 切換帳號流程。回傳實際送進去的那一行。
  *
@@ -332,15 +347,50 @@ export function attachmentUrl(id: string): Promise<string> {
 // ------------------------------------------------------------------ v4.0
 
 /** `GET /api/models?kind=&host=` — the agent CLI's model catalogue on that host. */
-export async function fetchModels(kind: BotKind, host?: string): Promise<ModelInfo[]> {
+/**
+ * `identity` (claude only) picks whose `settings.json` the "預設" effort hint is read from
+ * (SPEC §17.1) — omit it for the default account. An unknown name just falls back to that
+ * account, so it is safe to pass through whatever the form currently has selected.
+ */
+export async function fetchModels(kind: BotKind, host?: string, identity?: string | null): Promise<ModelInfo[]> {
   const q = new URLSearchParams({ kind })
   if (host && host !== 'local') q.set('host', host)
+  if (identity) q.set('identity', identity)
   return toModels(await transport.request('GET', `/models?${q.toString()}`))
 }
 
 /** `GET /api/quota` — per-kind 5h / 7d usage. */
 export async function fetchQuota(): Promise<QuotaMap> {
   return toQuota(await transport.request('GET', '/quota'))
+}
+
+/**
+ * `GET /api/search/messages?q=` — 哪些 bot 的對話裡出現過這段文字。
+ * 舊 daemon 沒有這支 → 丟出來由呼叫端當成「沒有訊息命中」。
+ */
+export async function searchMessages(q: string): Promise<Record<string, MessageHit>> {
+  const raw = await transport.request('GET', `/search/messages?q=${encodeURIComponent(q)}`)
+  const r = isRec(raw) ? raw : {}
+  const out: Record<string, MessageHit> = {}
+  for (const row of Array.isArray(r.bots) ? r.bots : []) {
+    if (!isRec(row)) continue
+    const id = str(row.bot_id)
+    if (id) out[id] = { hits: num(row.hits, 0), snippet: str(row.snippet) }
+  }
+  return out
+}
+
+/**
+ * `POST /api/bots/:id/restore` — 把誤刪的 bot 放回來（連同它全部的對話）。
+ * 舊 daemon 沒有這支 → false，呼叫端顯示失敗而不是假裝成功。
+ */
+export async function restoreBot(botId: string): Promise<boolean> {
+  try {
+    await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restore`)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** `GET /api/mem` — herdr 進程樹的常駐記憶體（SPEC §15）。 */
@@ -596,17 +646,27 @@ export async function deleteTeam(teamId: string, branches: TeamBranchDisposal = 
   await transport.request('DELETE', `/teams/${encodeURIComponent(teamId)}?branches=${branches}`)
 }
 
+export interface CloseTeamIssueInput {
+  /** 省略 = daemon 寫預設的完成留言；空字串 = 不留言。 */
+  comment?: string
+  /**
+   * SPEC-team §2.5.4：要關的是佇列裡哪一筆。省略 = `teams.issue_number` 對到的那一筆
+   * （reopen 之前唯一存在的行為）。reopen 之後鏡像已經換成新 issue，要回頭關上一個就得帶它。
+   */
+  issue_id?: string
+}
+
 /**
  * `POST /api/teams/:id/close-issue`（SPEC-team §10.7）→ `{number, url, state, already_closed}`。
  *
- * 只有 `phase === 'done'` 的 team 能呼叫，而且**只由使用者按下按鈕觸發**——daemon 不會自己關 issue。
- * `comment` 省略時 daemon 寫預設的完成留言（PM 總結 + 整合分支 + 已合併的 commit，
- * 沒有 PR 時會註明「分支還沒合併進 base」）；傳空字串則不留言。
- * 別人已經先關掉的 issue 回 `already_closed: true`，不是錯誤。
+ * 只有 `state === 'done'` 的那一筆 issue 能關，而且**只由使用者按下按鈕觸發**——daemon 不會
+ * 自己關 issue。預設留言是 PM 總結 + 整合分支 + 已合併的 commit（沒有 PR 時會註明「分支還沒
+ * 合併進 base」）。別人已經先關掉的 issue 回 `already_closed: true`，不是錯誤。
  */
-export async function closeTeamIssue(teamId: string, comment?: string): Promise<TeamIssueClosed> {
+export async function closeTeamIssue(teamId: string, input?: CloseTeamIssueInput): Promise<TeamIssueClosed> {
   const raw = await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/close-issue`, {
-    ...(comment === undefined ? {} : { comment }),
+    ...(input?.comment === undefined ? {} : { comment: input.comment }),
+    ...(input?.issue_id === undefined ? {} : { issue_id: input.issue_id }),
   })
   const o = isRec(raw) ? raw : {}
   return {

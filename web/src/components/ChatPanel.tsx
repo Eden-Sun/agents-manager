@@ -602,8 +602,11 @@ function Composer({
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
+  const abortBot = useStore((s) => s.abortBot)
+  const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const queueSend = useStore((s) => s.queueSend)
   const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
+  const sendKeys = useStore((s) => s.sendKeys)
   const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
   // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
@@ -666,7 +669,52 @@ function Composer({
     })
   }
 
-  const showLock = !hideLock && state.disabled && Boolean(state.reason)
+  /** 排隊中的那一則優先，否則是輸入框裡打到一半的字。 */
+  const pending = queued?.text ?? text
+
+  /**
+   * 中止目前這一輪，然後立刻把待送的內容送出去。
+   *
+   * 分成兩步而不是一個 API：`abortBot` 只把 turn 標成失敗並解鎖，agent 那頭可能還在跑，
+   * 所以要等它回來、確認鎖開了才送——不然新的 prompt 會撞上還沒清掉的 in-flight turn。
+   */
+  const abortAndSend = async () => {
+    const body = pending.trim()
+    const ids = queued ? queued.attachments : files.ids
+    if (!body && ids.length === 0) return
+    if (queued) cancelQueuedSend(botId)
+    setSending(true)
+    await abortBot(botId)
+    const ok = await sendPrompt(botId, body, ids)
+    setSending(false)
+    if (ok) {
+      setText('')
+      files.clear()
+    }
+  }
+
+  /**
+   * 直接把文字打進 pane，不建立新回合。等同你自己在終端裡輸入：CLI 會自己排,
+   * 回覆併在目前這一輪。送出後把輸入框清掉，因為字已經出去了。
+   */
+  const sendAlongside = async () => {
+    const body = pending.trim()
+    if (!body) return
+    if (queued) cancelQueuedSend(botId)
+    setSending(true)
+    // 一個字元一個鍵：`agent.send_keys` 吃的是鍵名陣列（見 hooks/usePaneKeys）。
+    await sendKeys(botId, [...body].map((c) => (c === ' ' ? 'space' : c)))
+    await sendKeys(botId, ['enter'])
+    setSending(false)
+    setText('')
+  }
+
+  /**
+   * 這條的舊條件是「輸入框被鎖住」，但回合進行中並不鎖（可以先打、送出排隊），結果
+   * **對話跑起來之後反而沒有任何中斷入口**——連本來就寫在這裡的「中斷回覆」都不會出現，
+   * 使用者只能去停掉整個 bot。所以 in-flight 也顯示這一條，只是語氣不同（`.running`）。
+   */
+  const showLock = !hideLock && Boolean(state.reason) && (state.disabled || Boolean(state.inFlightTurnId))
 
   const nothingToSend = !text.trim() && files.ids.length === 0
 
@@ -698,7 +746,7 @@ function Composer({
         </div>
       ) : null}
       {showLock ? (
-        <div className="composer-lock" role="status">
+        <div className={`composer-lock${state.disabled ? '' : ' running'}`} role="status">
           {/* 拿掉 ⛔：emoji 吃不到 `color`（OS 自己上色），跟琥珀色的框對不上，
               每個平台長得也不一樣。框與文字本身已經是訊號。 */}
           <span>{state.reason}</span>
@@ -710,6 +758,45 @@ function Composer({
           {state.inFlightTurnId ? (
             <button type="button" className="mini-btn" title="請 Bot 中斷目前回覆，Bot 仍保持啟動" onClick={() => void interruptBot(botId)}>
               中斷回覆
+            </button>
+          ) : null}
+          {/* 這兩顆是「我不想等」的兩種答案，差別在要不要留住目前這一輪的回覆。 */}
+          {state.inFlightTurnId && pending.trim() ? (
+            <>
+              <button
+                type="button"
+                className="mini-btn"
+                disabled={aborting || sending}
+                title={`中止目前這一輪，然後立刻送出：${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`}
+                onClick={() => void abortAndSend()}
+              >
+                中止並取代
+              </button>
+              {/* 併行不是「同時跑兩輪」——daemon 一次只認一個 turn（SPEC §2），第二輪的回覆
+                  沒有辦法跟 hook 對上。這顆做的是「直接打進 pane」，跟你自己在終端裡插一句話
+                  完全一樣：CLI 自己決定何時處理，回覆會併在目前這一輪裡。 */}
+              <button
+                type="button"
+                className="mini-btn"
+                disabled={sending}
+                title="不建立新回合，直接把文字打進終端（等同你自己在 pane 裡輸入）。回覆會併在目前這一輪，不會單獨成為一則訊息。"
+                onClick={() => void sendAlongside()}
+              >
+                併行送入
+              </button>
+            </>
+          ) : null}
+          {/* 「中斷回覆」是請 agent 停；`esc` 送不進去（pane 沒了、herdr 斷、agent 不理）時
+              那一回合會一直卡著、輸入框跟著鎖死。這顆反過來：先解鎖，送鍵只是順帶。 */}
+          {state.inFlightTurnId || state.unknownTurnId ? (
+            <button
+              type="button"
+              className="mini-btn danger"
+              disabled={aborting}
+              title="不等 agent 回應，直接把這回合標成失敗並解開輸入框。Bot 仍保持啟動——它那頭可能還在跑。"
+              onClick={() => void abortBot(botId)}
+            >
+              {aborting ? '中止中…' : '強制中止'}
             </button>
           ) : null}
         </div>

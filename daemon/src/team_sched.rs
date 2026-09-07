@@ -838,6 +838,120 @@ async fn open_task_of(app: &Arc<App>, team_id: &str, worker: &str) -> LcResult<O
 
 // ---------------------------------------------------------------- startup (§7.4)
 
+/// Record a member that would not start, in both places the user looks: the team timeline
+/// (`member_start_failed`) and the member's own conversation. Shared by `startup` and
+/// `reopen_startup` — the two differ only in what they do *after* the report.
+async fn report_member_start_failure(app: &Arc<App>, team_id: &str, bot: &db::Bot, error: &str) -> LcResult<()> {
+    note(app, team_id, json!({"action": "member_start_failed", "bot": bot.name, "error": error})).await?;
+    // Also say it where the user is actually looking. Without this the only symptom is a grey
+    // lamp and `paused(member_lost)`: the reason lived in the team log alone, and the panel
+    // does not render a note that carries no `text`.
+    if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
+        let _ = lifecycle::insert_message(
+            app,
+            &conv,
+            None,
+            "system",
+            &format!("這個成員沒能啟動：{error}。修好原因後在這裡按「啟動」，再回 Team 面板按「繼續」。"),
+            "system",
+            false,
+            None,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// Start a done Team's long-lived members for a queued continuation. The old issue's workers
+/// are retired first; PM/reviewer keep their bot ids, worktrees and conversations, and ask the
+/// lifecycle layer to resume their last native session when the provider supports it.
+async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let issues = db::team_issues(&app.db, team_id).await.map_err(up)?;
+    let previous = issues
+        .into_iter()
+        .filter(|i| i.state == "done")
+        .max_by_key(|i| i.seq)
+        .ok_or_else(|| LcError::Upstream("cannot reopen a team with no completed issue".into()))?;
+    team::retire_issue_workers(app, team_id, &previous.id).await;
+
+    let ctx = Ctx::load(app, team_id).await?;
+    for e in crate::trust::pretrust_members(app, &ctx.members).await {
+        tracing::warn!(team = %team_id, error = %e, "could not pre-trust a team worktree on reopen");
+        note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
+    }
+    for b in &ctx.members {
+        if !matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer")) {
+            continue;
+        }
+        if db::active_run(&app.db, &b.id).await.map_err(up)?.is_some() {
+            continue;
+        }
+        if let Err(e) = lifecycle::start_bot_with(app, &b.id, lifecycle::StartOpts { resume_native: true }).await {
+            report_member_start_failure(app, team_id, b, &format!("{e:?}")).await?;
+            // §2.5.2: a reopen that cannot bring PM or reviewer back pauses in place. It must
+            // **not** take §7.4's `failed + cleanup` road — that would throw away a finished
+            // issue's worktrees over a start error the user can just fix and resume.
+            let reason = format!("member_failed:{}", team::short_name(&b.name, team_id));
+            pause(app, &ctx.team, &reason).await?;
+            return Ok(());
+        }
+    }
+
+    sqlx::query("UPDATE teams SET started_at = COALESCE(started_at, ?) WHERE id = ?")
+        .bind(db::now())
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+
+    let next = db::next_queued_issue(&app.db, team_id).await.map_err(up)?;
+    let Some(next) = next else {
+        return Err(LcError::Upstream("reopened team has no queued issue".into()));
+    };
+    if let Err(e) = team::start_issue(app, team_id, &next, false).await {
+        note(
+            app,
+            team_id,
+            json!({"action": "issue_start_failed", "issue_number": next.issue_number, "error": format!("{e:?}")}),
+        )
+        .await?;
+        let ctx = Ctx::load(app, team_id).await?;
+        pause(app, &ctx.team, "upstream").await?;
+        return Ok(());
+    }
+    start_issue_workers(app, team_id).await?;
+    let pm = Ctx::load(app, team_id).await?.pm().cloned();
+    let context_lost = match pm {
+        Some(pm) => pm_context_lost_after_latest_reopen(app, team_id, &pm.id).await,
+        None => false,
+    };
+    hand_issue_to_pm(app, team_id, false, Some(context_lost)).await
+}
+
+/// Whether the PM received a `member_context_lost` note after the latest reopen action. The
+/// scheduler uses this durable event rather than an in-memory flag, so a daemon restart between
+/// starting the member and sending the relay preserves the wording choice.
+async fn pm_context_lost_after_latest_reopen(app: &Arc<App>, team_id: &str, pm_id: &str) -> bool {
+    let events = sqlx::query_as::<_, db::TeamEvent>("SELECT * FROM team_events WHERE team_id = ? ORDER BY seq")
+        .bind(team_id)
+        .fetch_all(&app.db)
+        .await
+        .unwrap_or_default();
+    let latest_reopen = events.iter().filter_map(|e| {
+        let p: Value = serde_json::from_str(&e.payload_json).ok()?;
+        (p.get("action").and_then(|v| v.as_str()) == Some("team_reopened")).then_some(e.seq)
+    }).max();
+    let Some(reopen_seq) = latest_reopen else { return false };
+    events.iter().any(|e| {
+        e.seq > reopen_seq
+            && e.to_bot_id.as_deref() == Some(pm_id)
+            && serde_json::from_str::<Value>(&e.payload_json)
+                .ok()
+                .and_then(|p| p.get("action").and_then(|v| v.as_str()).map(|a| a == "member_context_lost"))
+                .unwrap_or(false)
+    })
+}
+
 /// Phase `starting`: bring the members up one at a time, then hand the issue to the PM.
 /// Re-entrant — a member that is already running is left alone, which is what makes this
 /// safe to call again after a restart.
@@ -845,6 +959,11 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let ctx = Ctx::load(app, team_id).await?;
     if ctx.team.phase != "starting" {
         return Ok(());
+    }
+    // A normal creation has a working first issue. A done-team reopen has only a queued issue;
+    // that distinction is durable and survives a daemon restart.
+    if ctx.issue.is_none() && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_some() {
+        return reopen_startup(app, team_id).await;
     }
     // The §6.2 worktrees are directories claude and codex have never seen, and both stop the
     // first interactive run in one on a "do you trust this folder?" dialog — with the cursor
@@ -864,24 +983,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
             continue;
         }
         if let Err(e) = lifecycle::start_bot(app, &b.id).await {
-            let msg = format!("{e:?}");
-            note(app, team_id, json!({"action": "member_start_failed", "bot": b.name, "error": msg})).await?;
-            // Also say it where the user is actually looking. Without this the only symptom is
-            // a grey lamp and `paused(member_lost)`: the reason lived in the team log alone,
-            // and the panel does not render a note that carries no `text`.
-            if let Ok(conv) = db::conversation_id(&app.db, &b.id).await {
-                let _ = lifecycle::insert_message(
-                    app,
-                    &conv,
-                    None,
-                    "system",
-                    &format!("這個成員沒能啟動：{msg}。修好原因後在這裡按「啟動」，再回 Team 面板按「繼續」。"),
-                    "system",
-                    false,
-                    None,
-                )
-                .await;
-            }
+            report_member_start_failure(app, team_id, b, &format!("{e:?}")).await?;
             // §7.4: no PM, no team. A worker short is survivable; a missing reviewer is a
             // decision for the human ("merge unreviewed" or "try again").
             match b.team_role.as_deref() {
@@ -1823,7 +1925,7 @@ async fn close_issue_and_advance(
     if !keep {
         start_issue_workers(app, team_id).await?;
     }
-    hand_issue_to_pm(app, team_id, keep).await
+    hand_issue_to_pm(app, team_id, keep, None).await
 }
 
 /// Start the executors `start_issue` just created (the PM and the reviewer are already up).
@@ -1879,7 +1981,12 @@ async fn end_team(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
 /// Appendix A.1's first relay, re-sent for each issue in the queue. The PM is the same agent
 /// across the whole queue, so this is the message that tells it the subject changed — and that
 /// its executors are different people now.
-async fn hand_issue_to_pm(app: &Arc<App>, team_id: &str, kept_workers: bool) -> LcResult<()> {
+async fn hand_issue_to_pm(
+    app: &Arc<App>,
+    team_id: &str,
+    kept_workers: bool,
+    context_lost: Option<bool>,
+) -> LcResult<()> {
     team::set_phase(app, team_id, "planning", None, None).await?;
     let ctx = Ctx::load(app, team_id).await?;
     let Some(pm) = ctx.pm() else { return Ok(()) };
@@ -1896,9 +2003,14 @@ async fn hand_issue_to_pm(app: &Arc<App>, team_id: &str, kept_workers: bool) -> 
     } else {
         format!("執行者換了一批，現在可派的是：{who}（共 {k} 位）。", who = names.join("、"), k = names.len())
     };
+    let context_line = match context_lost {
+        Some(true) => "你是重新啟動的 PM，先前的對話不在了；先讀 `.agents-manager/team/TEAM.md` 與 `ISSUE.md`。",
+        Some(false) => "這是你原本那段對話的延續，先前 issue 的內容你都記得。",
+        None => "",
+    };
     let text = format!(
         "換下一個 issue：#{n}「{title}」。全文在 `.agents-manager/team/ISSUE.md`（已更新）。{who_line}\
-         請重新讀取 `.agents-manager/team/ISSUE.md` 與 `TEAM.md` 再派工，先前 issue 的 task 一律不要再提。{tail}",
+         {context_line}請重新讀取 `.agents-manager/team/ISSUE.md` 與 `TEAM.md` 再派工，先前 issue 的 task 一律不要再提。{tail}",
         n = ctx.team.issue_number,
         title = ctx.team.issue_title,
     );
@@ -2075,6 +2187,183 @@ mod scenarios {
         json!({"action":"dispatch","tasks":[
             {"to":"dev-1","title":"A","brief":"做 A","files":["a.txt"]},
             {"to":"dev-2","title":"B","brief":"做 B","files":["b.txt"]}]})
+    }
+
+    fn issue3() -> crate::team::IssueRef {
+        crate::team::IssueRef {
+            number: 44,
+            title: "and one more".into(),
+            url: "https://example.invalid/44".into(),
+            body: "再來一個。".into(),
+        }
+    }
+
+    /// Make the current queue row look like the completed issue that a real `finish` pass
+    /// leaves behind. Keeping this small DB helper in the scenario module lets the reopen
+    /// tests focus on the boundary without pretending an agent produced a protocol reply.
+    async fn settle_current_issue(s: &S) -> db::TeamIssue {
+        let current = db::current_team_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
+        let at = db::now();
+        sqlx::query("UPDATE team_issues SET state='done', summary='完成這個 issue', ended_at=? WHERE id=?")
+            .bind(&at)
+            .bind(&current.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "done", None, None).await.unwrap();
+        db::team_issue(&s.app().db, &current.id).await.unwrap().unwrap()
+    }
+
+    async fn enter_reopen(s: &S) {
+        settle_current_issue(s).await;
+        crate::team::set_phase(s.app(), &s.tid, "starting", Some("reopen"), None).await.unwrap();
+    }
+
+    /// §2.5.3 / §2.5.4: the old workers are retired, while the long-lived PM/reviewer and
+    /// integration worktree stay put; the new issue gets a fresh per-issue worker batch and
+    /// its own integration branch cut from the team's base.
+    #[tokio::test]
+    async fn reopen_retires_last_workers_and_builds_a_new_batch() {
+        let s = S::with_issues(1, true, vec![issue(), issue2()]).await;
+        let before = s.ctx().await;
+        let pm = before.pm().unwrap().clone();
+        let reviewer = before.reviewer().unwrap().clone();
+        let old_worker = before.workers()[0].clone();
+        let old_worker_cwd = old_worker.cwd.clone().unwrap();
+        let pm_cwd = pm.cwd.clone().unwrap();
+        let reviewer_cwd = reviewer.cwd.clone().unwrap();
+        let base_sha = before.team.base_sha.clone();
+
+        // §2.5.6 #8: a spec changed while the team was still running is what the new batch is
+        // built from — `start_issue` reads `roles_json.workers.spec`, not the retired bots.
+        // (`patch` itself refuses a terminal team, so this has to happen before `done`.)
+        crate::team::patch(
+            s.app(),
+            &s.tid,
+            crate::team::PatchTeam {
+                workers: Some(crate::team::WorkersPatch { model: Some(Some("sonnet".into())), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        enter_reopen(&s).await;
+        crate::team::retire_issue_workers(s.app(), &s.tid, &before.issue.as_ref().unwrap().id).await;
+        let next = db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
+        crate::team::start_issue(s.app(), &s.tid, &next, false).await.unwrap();
+
+        let after = s.ctx().await;
+        assert_eq!(after.pm().unwrap().id, pm.id);
+        assert_eq!(after.pm().unwrap().cwd.as_deref(), Some(pm_cwd.as_str()));
+        assert_eq!(after.reviewer().unwrap().id, reviewer.id);
+        assert_eq!(after.reviewer().unwrap().cwd.as_deref(), Some(reviewer_cwd.as_str()));
+        assert!(db::bot(&s.app().db, &old_worker.id).await.unwrap().unwrap().deleted_at.is_some());
+        assert!(!std::path::Path::new(&old_worker_cwd).exists(), "the previous worker worktree is retired");
+
+        let workers = after.workers();
+        assert_eq!(workers.len(), 1);
+        assert_ne!(workers[0].id, old_worker.id);
+        assert_eq!(workers[0].kind, "claude");
+        assert_eq!(workers[0].model.as_deref(), Some("sonnet"), "the new batch uses the patched spec");
+        assert!(workers[0].cwd.as_deref().unwrap().ends_with("/i2-dev-1"));
+        let t = after.team;
+        assert_eq!(t.branch, crate::team::integration_branch(43, &crate::team::tid6(&s.tid)));
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), t.branch);
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "HEAD"]), base_sha);
+    }
+
+    /// §2.5.3: a PM/reviewer start failure pauses the reopened Team in place. It must not
+    /// turn the Team into `failed` or invoke cleanup, because the user can repair and resume
+    /// the same member.
+    #[tokio::test]
+    async fn reopen_pauses_on_member_failed_instead_of_cleanup() {
+        let s = S::with_issues(1, false, vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        let root = s.team().await.worktree_root;
+        enter_reopen(&s).await;
+        s.app().connected.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        reopen_startup(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_eq!(t.phase, "paused");
+        assert_eq!(t.pause_reason.as_deref(), Some("member_failed:pm"));
+        assert!(t.ended_at.is_none());
+        assert!(std::path::Path::new(&root).exists(), "the team root was not cleaned up");
+        assert!(db::bot(&s.app().db, &pm.id).await.unwrap().unwrap().deleted_at.is_none());
+        assert!(db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().is_some());
+    }
+
+    /// §2.5.5: the hand-over relay explicitly distinguishes a successful native continuation
+    /// from a fresh PM conversation, while both variants still target the next issue.
+    #[tokio::test]
+    async fn reopen_hands_next_issue_to_pm() {
+        let s = S::with_issues(1, false, vec![issue(), issue2()]).await;
+        let first = settle_current_issue(&s).await;
+        crate::team::retire_issue_workers(s.app(), &s.tid, &first.id).await;
+        crate::team::set_phase(s.app(), &s.tid, "starting", Some("reopen"), None).await.unwrap();
+        let next = db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
+        crate::team::start_issue(s.app(), &s.tid, &next, false).await.unwrap();
+
+        hand_issue_to_pm(s.app(), &s.tid, false, Some(false)).await.unwrap();
+        let relays: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT seq, payload_json, to_bot_id FROM team_events WHERE team_id=? AND kind='relay' ORDER BY seq",
+        )
+        .bind(&s.tid)
+        .fetch_all(&s.app().db)
+        .await
+        .unwrap();
+        let first_payload: Value = serde_json::from_str(&relays.last().unwrap().1).unwrap();
+        assert_eq!(relays.last().unwrap().2.as_deref(), Some(s.bot("pm", 0).await.id.as_str()));
+        assert_eq!(first_payload["action"], "next_issue");
+        assert!(first_payload["text"].as_str().unwrap().contains("這是你原本那段對話的延續，先前 issue 的內容你都記得"));
+
+        hand_issue_to_pm(s.app(), &s.tid, false, Some(true)).await.unwrap();
+        let relays: Vec<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND kind='relay' ORDER BY seq",
+        )
+        .bind(&s.tid)
+        .fetch_all(&s.app().db)
+        .await
+        .unwrap();
+        let second: Value = serde_json::from_str(relays.last().unwrap()).unwrap();
+        assert!(second["text"].as_str().unwrap().contains("你是重新啟動的 PM，先前的對話不在了；先讀"));
+        assert_eq!(s.team().await.phase, "planning");
+    }
+
+    /// §2.5.6: after one continuation reaches `done`, the same Team can be reopened again and
+    /// its next queued issue becomes the new current row.
+    #[tokio::test]
+    async fn reopen_twice() {
+        let s = S::with_issues(1, false, vec![issue(), issue2(), issue3()]).await;
+        let pm_id = s.bot("pm", 0).await.id;
+
+        // Entered through `startup`, which is the only caller in production: `starting` with no
+        // working issue but a queued one is what tells it this is a reopen (§2.5.2).
+        enter_reopen(&s).await;
+        startup(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.team().await.phase, "planning");
+
+        // §2.5.6 #9: a daemon restart inside the reopen must not build a second worker batch.
+        // `start_issue` already made the queue row `working`, so `startup` takes the ordinary
+        // road and only re-checks members.
+        let workers_before: Vec<String> = s.ctx().await.workers().iter().map(|b| b.id.clone()).collect();
+        crate::team::set_phase(s.app(), &s.tid, "starting", None, None).await.unwrap();
+        startup(s.app(), &s.tid).await.unwrap();
+        let workers_after: Vec<String> = s.ctx().await.workers().iter().map(|b| b.id.clone()).collect();
+        assert_eq!(workers_after, workers_before);
+
+        crate::lifecycle::stop_bot(s.app(), &pm_id).await.unwrap();
+
+        settle_current_issue(&s).await;
+        crate::team::set_phase(s.app(), &s.tid, "starting", Some("reopen"), None).await.unwrap();
+        reopen_startup(s.app(), &s.tid).await.unwrap();
+
+        let current = db::current_team_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
+        assert_eq!(current.issue_number, 44);
+        assert_eq!(s.team().await.phase, "planning");
+        assert_eq!(db::team_issues(&s.app().db, &s.tid).await.unwrap().iter().filter(|i| i.state == "done").count(), 2);
     }
 
     /// **T2** — the PM dispatches two tasks and each lands on the right worker, with its own

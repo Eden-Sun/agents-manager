@@ -1,14 +1,16 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
+import * as api from '../api'
 import { MOCK_MODE } from '../api'
-import type { BotKind } from '../api/types'
-import { BOT_KINDS } from '../api/types'
+import type { Bot, BotKind, MessageHit } from '../api/types'
+import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import {
   adjacentBotId,
   anchorOf,
   attachCommandOf,
   botLamp,
   botQuotaWarning,
+  botMatches,
   botsOfProject,
   identitiesOfHost,
   projectHostName,
@@ -16,9 +18,10 @@ import {
   useStore,
 } from '../store/store'
 import type { SocketStatus } from '../store/store'
-import { CloneIcon, GearIcon, PlayIcon, TrashIcon } from './Icons'
+import { CloneIcon, GearIcon, PlayIcon, TerminalIcon, TrashIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
+import { projectDeleteBlockers } from './projectDeleteGuard'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
@@ -95,6 +98,10 @@ type DragState = { id: string; projectId: string; overId: string | null; edge: '
 
 function BotRow({
   botId,
+  hit,
+  childCount = 0,
+  collapsed = false,
+  onToggleChildren,
   drag,
   onDrag,
   onDropAt,
@@ -102,6 +109,12 @@ function BotRow({
   onStep,
 }: {
   botId: string
+  /** 這一列是因為對話內容命中而留下來的話，把命中的前後文一起顯示。 */
+  hit?: MessageHit
+  /** 這個 bot 底下有幾個子 agent；0 = 不顯示收合鈕。 */
+  childCount?: number
+  collapsed?: boolean
+  onToggleChildren?: () => void
   drag: DragState
   onDrag: (next: DragState) => void
   onDropAt: (dragId: string, overId: string, edge: 'before' | 'after') => void
@@ -206,6 +219,22 @@ function BotRow({
       }}
     >
       {/* 沒展開標題的列，agent 的標題掛在燈號的 tooltip 上，資訊沒有掉。 */}
+      {/* 收合鈕排在燈號前面。收起來時把數量帶上——不然收合後就看不出底下還有東西。 */}
+      {childCount > 0 && onToggleChildren ? (
+        <button
+          type="button"
+          className={`bot-kids-toggle${collapsed ? ' shut' : ''}`}
+          aria-expanded={!collapsed}
+          title={collapsed ? `展開 ${childCount} 個子 agent` : `收合 ${childCount} 個子 agent`}
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleChildren()
+          }}
+        >
+          <span className="chev">{collapsed ? '▶' : '▼'}</span>
+          {collapsed ? <span className="bot-kids-n">{childCount}</span> : null}
+        </button>
+      ) : null}
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
       {/* 「已完成（未讀）」：燈號說的是**現在**在做什麼，這顆說的是**你還沒看過**幾回合——
           兩件不同的事，所以是兩個記號，並排在名字前面。`!` 讓它就算被截斷也不會被讀成模型參數。 */}
@@ -223,6 +252,14 @@ function BotRow({
               其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
           {showTitle ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
         </BotNameField>
+        {/* 對話內容命中時，把命中的那一段秀出來——只說「命中」不告訴你命中什麼，
+            等於要你一個一個點進去確認。 */}
+        {hit ? (
+          <span className="bot-hit" title={`對話中有 ${hit.hits} 則提到`}>
+            <span className="bot-hit-n">{hit.hits}</span>
+            <span className="bot-hit-text">{hit.snippet}</span>
+          </span>
+        ) : null}
         <span className="bot-sub">
           <KindTag kind={bot.kind} />
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
@@ -247,50 +284,50 @@ function BotRow({
           </span>
         ) : null}
       </span>
+      {/* 2×2，每顆有固定的格子（`grid-area`，不是照出現順序排）：啟動鍵只在停止時存在，
+          位置寫死才不會讓刪除鍵在 bot 起停時跳到別的角落。讀序是左上→右上→左下→右下，
+          所以不可逆的刪除排在最後一格。左下在執行中時是空的——那格就是之後第四顆的位置。 */}
       <span className="bot-actions" onClick={(e) => e.stopPropagation()}>
-        {/* 這一列的選單就兩個鍵，上下疊：開同類分身 / 設定。 */}
-        <span className="bot-menu">
-          <button
-            type="button"
-            className="icon-btn menu-btn icon-tip"
-            disabled={busyClone}
-            aria-label={`開 ${bot.name} 的同類分身並啟動（同 kind、模型、身份、人設）`}
-            data-tip={`開同類分身並啟動 · ${bot.name}`}
-            onClick={() => void cloneBot(botId)}
-          >
-            <CloneIcon />
-          </button>
-          <button
-            type="button"
-            className="icon-btn menu-btn gear icon-tip"
-            aria-label={`設定 ${bot.name}（模型、身份、autostart…）`}
-            data-tip={`設定 · ${bot.name}`}
-            onClick={(e) => openSettings(botId, anchorOf(e.currentTarget))}
-          >
-            <GearIcon />
-          </button>
-        </span>
         <button
           type="button"
-          className="icon-btn bot-delete-btn icon-tip"
-          aria-label={`刪除 ${bot.name}`}
-          data-tip={`刪除 · ${bot.name}`}
-          onClick={() => setDeleteOpen(true)}
+          className="icon-btn menu-btn act-clone icon-tip"
+          disabled={busyClone}
+          aria-label={`開 ${bot.name} 的同類分身並啟動（同 kind、模型、身份、人設）`}
+          data-tip="開同類分身並啟動"
+          onClick={() => void cloneBot(botId)}
         >
-          <TrashIcon />
+          <CloneIcon />
+        </button>
+        <button
+          type="button"
+          className="icon-btn menu-btn gear act-gear icon-tip"
+          aria-label={`設定 ${bot.name}（模型、身份、autostart…）`}
+          data-tip="設定"
+          onClick={(e) => openSettings(botId, anchorOf(e.currentTarget))}
+        >
+          <GearIcon />
         </button>
         {active ? null : (
           <button
             type="button"
-            className="icon-btn bot-run-btn start icon-tip"
+            className="icon-btn menu-btn bot-run-btn start act-run icon-tip"
             disabled={busyStart}
             aria-label={`啟動 ${bot.name}`}
-            data-tip={`啟動 · ${bot.name}`}
+            data-tip="啟動"
             onClick={() => void startBot(botId)}
           >
             <PlayIcon />
           </button>
         )}
+        <button
+          type="button"
+          className="icon-btn menu-btn bot-delete-btn act-del icon-tip"
+          aria-label={`刪除 ${bot.name}`}
+          data-tip="刪除"
+          onClick={() => setDeleteOpen(true)}
+        >
+          <TrashIcon />
+        </button>
       </span>
 
       <ConfirmDialog
@@ -586,7 +623,17 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           })}
         </div>
       </div>
-      <ApiModelFields kind={kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
+      <ApiModelFields
+        kind={kind}
+        host={host}
+        identity={identity || null}
+        model={model}
+        onModel={setModel}
+        effort={effort}
+        onEffort={setEffort}
+        fast={fast}
+        onFast={setFast}
+      />
       <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />
       <label className="field">
         <span>名稱</span>
@@ -705,6 +752,9 @@ export function Sidebar() {
   // 刪 Project 本來是 `window.confirm()`：整個 app 只有這裡（與主機／身分）跳原生對話框，
   // 沒有專案全名以外的說明，也沒有 focus trap。改用跟其他刪除一致的 `ConfirmDialog`。
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
+  const runs = useStore((s) => s.runs)
+  const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
+  const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
   const [botSheetOpen, setBotSheetOpen] = useState(false)
   const openBotSheetFor = useStore((s) => s.openBotSheetFor)
@@ -712,6 +762,82 @@ export function Sidebar() {
   const botOrder = useStore((s) => s.botOrder)
   const moveBot = useStore((s) => s.moveBot)
   const [drag, setDrag] = useState<DragState>(null)
+  const shellSupported = useStore((s) => s.hostShellSupported)
+  const openHostShell = useStore((s) => s.openHostShell)
+  /** 收合起來的父 bot；記在 localStorage，重新整理後不會全部又攤開。 */
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('am.collapsedChildren')
+      return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+    } catch {
+      return new Set()
+    }
+  })
+  const toggleChildren = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(id)) next.add(id)
+      try {
+        localStorage.setItem('am.collapsedChildren', JSON.stringify([...next]))
+      } catch {
+        /* 無痕視窗 / 關掉儲存：收合仍然有效，只是不跨重整記住 */
+      }
+      return next
+    })
+  /** 收合起來的專案；跟子 agent 那組同一個模式，各自一個 localStorage key。 */
+  const [shutProjects, setShutProjects] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('am.collapsedProjects')
+      return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+    } catch {
+      return new Set()
+    }
+  })
+  const toggleProject = (id: string) =>
+    setShutProjects((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(id)) next.add(id)
+      try {
+        localStorage.setItem('am.collapsedProjects', JSON.stringify([...next]))
+      } catch {
+        /* 同上：收合仍然有效，只是不跨重整記住 */
+      }
+      return next
+    })
+  const [query, setQuery] = useState('')
+  /**
+   * 訊息內容的命中（`GET /api/search/messages`）。屬性比對是本地的、即時的；內容要問
+   * daemon，所以 debounce 250ms，並用 `seq` 擋掉晚回來的舊請求覆蓋新結果。
+   */
+  const [hits, setHits] = useState<Record<string, MessageHit>>({})
+  const hitSeq = useRef(0)
+  useEffect(() => {
+    const q = query.trim()
+    if (!q) {
+      setHits({})
+      return
+    }
+    const mine = ++hitSeq.current
+    const id = setTimeout(() => {
+      void api
+        .searchMessages(q)
+        .then((r) => {
+          if (hitSeq.current === mine) setHits(r)
+        })
+        // 舊 daemon 沒有這支：屬性搜尋照常運作，只是沒有內容命中。
+        .catch(() => {
+          if (hitSeq.current === mine) setHits({})
+        })
+    }, 250)
+    return () => clearTimeout(id)
+  }, [query])
+  // 比對讀的是整個 store（專案、run 的 agent 標題…），所以在這裡取一次 state 就好。
+  const matches = (bot: Bot) => botMatches(useStore.getState(), bot, query) || bot.id in hits
+  // 只數「真的命中」的，不含為了讓子 agent 有地方掛而一起顯示的父 bot。
+  const matchCount = query ? bots.filter((b) => b.team === null && matches(b)).length : bots.length
+  // 只數跟 `matchCount` 同一群的（team 成員列由 TeamNodes 自己畫，不在這個計數裡），
+  // 不然會出現「1 個符合（3 個含對話）」這種自相矛盾的數字。
+  const hitCount = bots.filter((b) => b.team === null && b.id in hits).length
 
   /** 拖放：落在 overId 的上/下半 → 插到它前面 / 後面（後面 = 下一列的前面）。 */
   const dropAt = (dragId: string, overId: string, edge: 'before' | 'after') => {
@@ -786,7 +912,42 @@ export function Sidebar() {
         <ConnBadge socket={socket} connected={connected} />
       </div>
 
+      {/* 搜尋 bot：名字、專案、主機、kind、身分、模型、人設、agent 目前的標題都算數，
+          因為你記得的往往不是名字（見 store 的 `botSearchText`）。 */}
+      <div className="bot-search">
+        <input
+          type="search"
+          className="bot-search-input"
+          value={query}
+          spellCheck={false}
+          placeholder="搜尋 bot…（名稱、專案、模型、人設）"
+          aria-label="搜尋 bot"
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation()
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              setQuery('')
+            }
+          }}
+        />
+        {query ? (
+          <span className="bot-search-count" title={hitCount ? `其中 ${hitCount} 個是對話內容命中` : undefined}>
+            {matchCount} 個符合
+            {hitCount ? <span className="bot-search-hits">（{hitCount} 個含對話）</span> : null}
+            <button type="button" className="bot-search-clear" title="清除搜尋（Esc）" onClick={() => setQuery('')}>
+              ✕
+            </button>
+          </span>
+        ) : null}
+      </div>
+
       <div className="sidebar-scroll" role="listbox" aria-label="Bot 清單">
+        {query && matchCount === 0 ? (
+          <p className="hint" style={{ padding: '12px 14px' }}>
+            沒有符合「{query}」的 Bot。
+          </p>
+        ) : null}
         {projects.length === 0 ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
             尚未設定任何 Project。請用下方的「新增 Project」開始。
@@ -794,18 +955,43 @@ export function Sidebar() {
         ) : null}
         {projects.map((p) => {
           // SPEC-team §11.4：team 成員縮排列在 Team 節點底下，不與一般 bot 混排。
-          const all = botsOfProject({ bots, botOrder }, p.id).filter((b) => b.team === null)
+          const every = botsOfProject({ bots, botOrder }, p.id).filter((b) => b.team === null)
+          // 命中的子 agent 要連父 bot 一起留著（不然它沒有地方掛，會整個消失）；
+          // 父 bot 命中時，它底下的子 agent 也一起顯示，當作它的脈絡。
+          const hit = new Set(every.filter((b) => matches(b)).map((b) => b.id))
+          const all = every.filter(
+            (b) =>
+              hit.has(b.id) ||
+              (b.parent_bot_id ? hit.has(b.parent_bot_id) : every.some((c) => c.parent_bot_id === b.id && hit.has(c.id))),
+          )
           // 子 agent（bot 自己用 herdr 開的，名稱帶父 agent 前綴）縮排在父 bot 底下，不參與拖曳排序。
           const list = all.filter((b) => !b.parent_bot_id)
           const childrenOf = (id: string) => all.filter((b) => b.parent_bot_id === id)
           const projectSelected = selectedProjectId === p.id
+          // 搜尋中一律展開：命中的 bot 藏在收合的專案裡等於沒搜到。
+          const projectShut = shutProjects.has(p.id) && !query
+          // 搜尋時，整個專案都沒有命中的就不佔版面——留一個空的專案標題只是雜訊。
+          if (query && list.length === 0) return null
           return (
             <section className="project" key={p.id}>
               <header
                 className={`project-head${projectSelected ? ' selected' : ''}`}
                 onClick={() => selectProject(p.id)}
               >
-                <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} />
+                {/* 收合鈕吃掉自己的 click，不然會連帶把整個專案選起來（開群組對話）。 */}
+                <button
+                  type="button"
+                  className={`project-fold${projectShut ? ' shut' : ''}`}
+                  aria-expanded={!projectShut}
+                  title={projectShut ? `展開 ${p.label}（${all.length} 個 Bot）` : `收合 ${p.label}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    toggleProject(p.id)
+                  }}
+                >
+                  <span className="chev">{projectShut ? '▶' : '▼'}</span>
+                </button>
+                <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} folded={projectShut} />
                 <span className="project-head-actions">
                   <ProjectAttach projectId={p.id} />
                   <button
@@ -826,6 +1012,28 @@ export function Sidebar() {
                       破壞性的動作肩並肩，而且在選取中的專案上是常駐的。跟 Team 標題列
                       同一顆 `⋯`。 */}
                   <HeadMoreMenu label={`更多動作 · ${p.label}`}>
+                    {/* 開 shell 原本只長在「環境設定 → 主機」裡，要開一個 shell 得先想到它在
+                        設定頁。從專案開才是常態：主機跟目錄都已經知道了（`openHostShell`
+                        吃 cwd），不必再選一次。 */}
+                    {shellSupported ? (
+                      <button
+                        type="button"
+                        className="head-menu-item"
+                        role="menuitem"
+                        disabled={!hostUp(p.host)}
+                        title={
+                          hostUp(p.host)
+                            ? `在 ${p.host === 'local' ? '本機' : p.host} 的 ${p.path} 開一個 shell`
+                            : '主機未連線，開不了 shell'
+                        }
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void openHostShell(p.host, p.path)
+                        }}
+                      >
+                        在這裡開 shell
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="head-menu-item danger"
@@ -840,7 +1048,11 @@ export function Sidebar() {
                   </HeadMoreMenu>
                 </span>
               </header>
-              {list.length === 0 ? (
+              {projectShut ? (
+                <button type="button" className="project-folded" onClick={() => toggleProject(p.id)}>
+                  {all.length} 個 Bot·點一下展開
+                </button>
+              ) : list.length === 0 ? (
                 <div className="project-empty">
                   <span className="project-empty-title">此專案尚無 Bot</span>
                   <button type="button" className="btn primary empty-add-btn" onClick={() => openBotSheet(p.id)}>
@@ -848,18 +1060,36 @@ export function Sidebar() {
                   </button>
                 </div>
               ) : (
-                list.map((b) => (
-                  <Fragment key={b.id}>
-                    <BotRow botId={b.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
-                    {childrenOf(b.id).map((c) => (
-                      <div key={c.id} className="bot-child">
-                        <BotRow botId={c.id} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
-                      </div>
-                    ))}
-                  </Fragment>
-                ))
+                list.map((b) => {
+                  const kids = childrenOf(b.id)
+                  // 搜尋中一律展開：把命中的子 agent 藏在收合的父列底下等於沒搜到。
+                  const shut = kids.length > 0 && collapsed.has(b.id) && !query
+                  return (
+                    <Fragment key={b.id}>
+                      <BotRow
+                        botId={b.id}
+                        hit={hits[b.id]}
+                        childCount={kids.length}
+                        collapsed={shut}
+                        onToggleChildren={() => toggleChildren(b.id)}
+                        drag={drag}
+                        onDrag={setDrag}
+                        onDropAt={dropAt}
+                        onNudge={nudge}
+                        onStep={step}
+                      />
+                      {shut
+                        ? null
+                        : kids.map((c) => (
+                            <div key={c.id} className="bot-child">
+                              <BotRow botId={c.id} hit={hits[c.id]} drag={drag} onDrag={setDrag} onDropAt={dropAt} onNudge={nudge} onStep={step} />
+                            </div>
+                          ))}
+                    </Fragment>
+                  )
+                })
               )}
-              <TeamNodes projectId={p.id} />
+              {projectShut ? null : <TeamNodes projectId={p.id} />}
             </section>
           )
         })}
@@ -874,6 +1104,19 @@ export function Sidebar() {
             新增 Bot
           </button>
         </div>
+
+        {/* 本機 shell 擺在最外層：這是「我想打個指令」最短的路徑，不該埋在設定頁裡。 */}
+        {shellSupported ? (
+          <button
+            type="button"
+            className="disclosure"
+            title="在本機開一個 shell，直接下指令"
+            onClick={() => void openHostShell(LOCAL_HOST)}
+          >
+            <TerminalIcon /> 開 shell
+            <span className="disclosure-note">本機</span>
+          </button>
+        ) : null}
 
         <button
           type="button"
@@ -909,11 +1152,24 @@ export function Sidebar() {
         title="刪除 Project"
         body={
           <>
-            要把 <strong>{deleteProject?.label}</strong> 從清單移除嗎？磁碟上的目錄與其中的檔案都不會動，
-            這個 Project 底下的 Bot 需要先停止。
+            要把 <strong>{deleteProject?.label}</strong>
+            {deleteTarget ? (
+              <>
+                （{deleteTarget.host === LOCAL_HOST ? '本機' : deleteTarget.host} <code>{deleteTarget.path}</code>）
+              </>
+            ) : null}{' '}
+            從清單移除嗎？磁碟上的目錄與其中的檔案都不會動
+            {deleteBlockers.total > 0 ? `，底下 ${deleteBlockers.total} 個 Bot 的設定會一起移除` : ''}。
+            {deleteBlockers.active > 0 ? (
+              <>
+                <br />
+                <strong>仍有 {deleteBlockers.active} 個 Bot 在跑</strong>，需先停止才能刪除。
+              </>
+            ) : null}
           </>
         }
         confirmLabel="刪除 Project"
+        confirmDisabled={deleteBlockers.active > 0}
         danger
         onCancel={() => setDeleteProject(null)}
         onConfirm={() => {

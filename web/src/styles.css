@@ -568,6 +568,16 @@ button:disabled {
   flex: none;
 }
 
+/* The opaque 3 × 36px action strip stays absolute so casual header hover does not resize the
+   title. Once the project/actions are deliberately active, the header reserves 112px on the
+   right: the strip's 108px plus its 4px inset, mirroring the selected bot-row reservation. */
+.project-head.selected,
+.project-head:has(.project-head-actions:hover),
+.project-head:focus-within,
+.project-head:has(.head-menu-pop) {
+  padding-right: 112px;
+}
+
 .project-head:hover .project-head-actions,
 .project-head:focus-within .project-head-actions {
   opacity: 1;
@@ -733,6 +743,44 @@ button:disabled {
 
 /* 子 agent：縮排一階、左邊一條細線把它掛在父 bot 下面（跟 team 成員同一種視覺語言）。 */
 /* 有子 agent 的父列前面的收合鈕。收合時把數量帶上——不然收起來就看不出底下有東西。 */
+/* 專案的收合箭頭。跟子 agent 那顆同一種語彙，只是在標題列的最前面。 */
+.project-fold {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px 4px 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.project-fold:hover {
+  color: var(--text);
+}
+
+.project-fold .chev {
+  font-size: 9px;
+}
+
+/* 收合後留一條可點的細列：不然一個收起來的專案看起來就像沒有 bot。 */
+.project-folded {
+  display: block;
+  width: 100%;
+  padding: 5px 14px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-folded:hover {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
 .bot-kids-toggle {
   display: inline-flex;
   align-items: center;
@@ -6281,6 +6329,36 @@ button.team-workers:disabled {
 .team-close-issue-text {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* done Team 的延續入口：和關閉 issue 同樣是提示列，但它不是外部寫入動作。 */
+.team-reopen-issue {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.team-reopen-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.team-reopen-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.team-reopen-label {
+  flex: none;
+}
+.team-reopen-form .text-input {
+  min-width: 120px;
+  flex: 1 1 auto;
 }
 
 /* ---------------------------------------------------------- task 清單 */

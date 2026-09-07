@@ -373,6 +373,12 @@ export interface Message {
   team_id: string | null
   /** SPEC-team §2.1：relay 的來源 bot_id（daemon 代轉時的說話者）；null = 使用者 / daemon 自己。 */
   relay_from: string | null
+  /**
+   * `terminal_fallback` 訊息當下的**整個 pane 畫面**。`content` 是從裡面裁出來的那段，
+   * 裁錯時（例如剛好抓到「Running 1 shell command…」）真正的回覆還在這裡面。
+   * 其他來源的訊息是 null。
+   */
+  terminal_snapshot: string | null
   created_at: string
 }
 
@@ -609,28 +615,14 @@ export const CLAUDE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] a
 /** codex 的靜態 effort（API.md §12.2；`GET /api/models` 失敗時退回）。 */
 export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
 
-/** 強度按鈕／狀態列顯示用中文標籤（值仍送英文 API id）。 */
+/**
+ * 強度按鈕／狀態列顯示用的字——**不翻譯**，就是原廠自己的字（`claude --help` / codex
+ * `model/list` / grok CLI 都是這樣拼的），只把首字母大寫成標題的樣子（`high` → `High`）。
+ * 用中文詞（低/中/高）會跟原廠文件、CLI 畫面（`● high · /effort`）對不起來，使用者查資料
+ * 或截圖對照時反而多一層翻譯要核對。
+ */
 export function effortLabel(level: string): string {
-  switch (level) {
-    case 'none':
-      return '無'
-    case 'minimal':
-      return '最低'
-    case 'low':
-      return '低'
-    case 'medium':
-      return '中'
-    case 'high':
-      return '高'
-    case 'xhigh':
-      return '最高'
-    case 'max':
-      return 'Max'
-    case 'ultra':
-      return 'Ultra'
-    default:
-      return level
-  }
+  return level ? level.charAt(0).toUpperCase() + level.slice(1) : level
 }
 
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
@@ -697,6 +689,12 @@ export interface MemSnapshot {
   agents_bytes: number
   processes: number
   hosts: HostMem[]
+}
+
+/** `GET /api/search/messages` 的一列：這個 bot 的對話裡命中幾次，以及最新一次的前後文。 */
+export interface MessageHit {
+  hits: number
+  snippet: string
 }
 
 export interface KindQuota {
@@ -851,6 +849,8 @@ export const TEAM_USAGE_EMPTY: TeamUsage = { relays: 0, review_rounds_total: 0, 
 export interface TeamMember {
   bot_id: string
   role: TeamRole
+  /** cleanup soft-deletes the member bot but keeps it in the Team record. */
+  deleted?: boolean
 }
 
 /** `tasks_summary`：以 task 狀態為 key 的計數（daemon 只保證 `total` 與有值的狀態）。 */
@@ -1107,6 +1107,27 @@ const TEAM_PAUSE_LABEL: Record<string, string> = {
   'gate:dispatch': '等待放行：派工',
   'gate:merge': '等待放行：合併',
   'gate:deliver': '等待放行：交付',
+  // 不是暫停原因，是 `done → starting` 這則 phase 事件的 reason（SPEC-team §2.5.2）；
+  // 時間軸用同一張表翻譯 reason，少了它會印出英文代碼。
+  reopen: '使用者追加 issue',
+}
+
+/**
+ * SPEC-team §7.3：`ttxka1d-i2-dev-1` → `dev-1`, `ttxka1d-pm` → `pm`, `i42-rev` → `rev`.
+ *
+ * Team 成員的名字是 `<team slug>-[i<issue>-]<role>`；同一個畫面上五個成員的 slug 與 issue
+ * 號完全一樣，擺在彼此旁邊時純粹是雜訊。完整名字留在 tooltip 裡。
+ */
+export function teamShortName(botName: string): string {
+  // 只有在剝掉前綴之後「還讀得出角色」時才剝，否則已經很短的 `dev-1` 會被縮成 `1`。
+  const role = /^(pm|rev|reviewer|dev|worker)(-|$)/i
+  let out = botName
+  for (let i = 0; i < 2 && !role.test(out); i += 1) {
+    const peeled = out.replace(/^[a-z0-9]+-/i, '')
+    if (peeled === out) break
+    out = peeled
+  }
+  return role.test(out) ? out : botName
 }
 
 /** `member_lost:dev-1` → 「成員已離線（dev-1）」；未知碼原樣顯示。 */

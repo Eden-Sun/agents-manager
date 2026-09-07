@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Bot, GroupMessage, TeamEvent, TeamTask, TeamTaskState } from '../api/types'
+import type { Bot, GroupMessage, TeamEvent, TeamIssue, TeamTask, TeamTaskState } from '../api/types'
 import {
   LOCAL_HOST,
   TEAM_PHASE_LABEL,
@@ -33,6 +33,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { canReopenTeam, describeEvent } from './teamPanelLogic'
 
 /**
  * SPEC-team §11.3 — 一個進行中 team 的視圖。骨架沿用 `GroupChatPanel`：標題列 + 成員燈號列 +
@@ -238,7 +239,17 @@ function WorkersChip({ teamId, host, disabled }: { teamId: string; host: string;
             void save()
           }}
         >
-          <ApiModelFields kind={spec.kind} host={host} model={model} onModel={setModel} effort={effort} onEffort={setEffort} fast={fast} onFast={setFast} />
+          <ApiModelFields
+            kind={spec.kind}
+            host={host}
+            identity={spec.identity}
+            model={model}
+            onModel={setModel}
+            effort={effort}
+            onEffort={setEffort}
+            fast={fast}
+            onFast={setFast}
+          />
           <fieldset className="field">
             <span>何時生效</span>
             <div className="opt-group" role="radiogroup" aria-label="何時生效">
@@ -277,7 +288,15 @@ function WorkersChip({ teamId, host, disabled }: { teamId: string; host: string;
  *
  * 只有一個 issue 時整段不顯示 —— 標題列已經寫著那個 issue，再列一次是雜訊。
  */
-function IssueQueue({ teamId }: { teamId: string }) {
+function IssueQueue({
+  teamId,
+  projectHasGithub,
+  onCloseIssue,
+}: {
+  teamId: string
+  projectHasGithub: boolean
+  onCloseIssue: (issue: TeamIssue) => void
+}) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   const removeTeamIssue = useStore((s) => s.removeTeamIssue)
   const busy = useStore((s) => s.busy)
@@ -310,6 +329,7 @@ function IssueQueue({ teamId }: { teamId: string }) {
           {issues.map((i) => {
             const current = i.id === team.current_issue_id
             const key = `team:${teamId}:remove-issue:${i.id}`
+            const closeKey = `team:${teamId}:close-issue`
             return (
               <li key={i.id} className={current ? 'current' : undefined}>
                 <span className="team-queue-seq">{i.seq}</span>
@@ -324,6 +344,17 @@ function IssueQueue({ teamId }: { teamId: string }) {
                   <a className="mini-btn" href={i.pr_url} target="_blank" rel="noreferrer">
                     PR
                   </a>
+                ) : null}
+                {i.state === 'done' && !i.issue_closed_at && projectHasGithub ? (
+                  <button
+                    type="button"
+                    className="mini-btn primary"
+                    disabled={Boolean(busy[closeKey])}
+                    onClick={() => onCloseIssue(i)}
+                    title="在 GitHub 上關閉這個 issue（會留下完成留言）"
+                  >
+                    關閉 issue
+                  </button>
                 ) : null}
                 {i.state === 'queued' ? (
                   <button
@@ -454,115 +485,6 @@ type Row =
 /** 時間軸左邊那顆小標：事件種類的中文（`note` 這種 daemon 用詞不進畫面）。 */
 const EVENT_KIND_LABEL: Record<string, string> = { note: '系統', phase: '階段', merge: '合併' }
 
-function eventText(ev: TeamEvent): string | null {
-  const p = ev.payload
-  if (ev.kind === 'merge') {
-    // 左邊那顆小標已經寫著「合併」，這裡只說結果——否則整列讀起來是「合併 合併衝突：…」。
-    const branch = typeof p.branch === 'string' ? p.branch : ''
-    if (p.result === 'ok') return `完成：${branch}${typeof p.sha === 'string' ? `（${p.sha}）` : ''}`
-    const files = Array.isArray(p.conflict_files) ? p.conflict_files.join('、') : ''
-    return `衝突：${branch}${files ? ` — ${files}` : ''}`
-  }
-  if (ev.kind === 'phase') {
-    // 階段代號（`finishing → done`）是 daemon 的字，時間軸是給人看的：兩邊都翻成中文。
-    const to = phaseLabel(p.to)
-    const from = phaseLabel(p.from)
-    const reason = typeof p.reason === 'string' && p.reason ? `（${teamPauseLabel(p.reason)}）` : ''
-    return `${from} → ${to}${reason}`
-  }
-  if (ev.kind === 'note') {
-    if (typeof p.text === 'string') return p.text
-    return noteText(p)
-  }
-  return null
-}
-
-/** `finishing` → `收尾中`；不認得的（或空的）就原樣回去，總比空白好。 */
-function phaseLabel(v: unknown): string {
-  const raw = typeof v === 'string' ? v : ''
-  return (TEAM_PHASE_LABEL as Record<string, string>)[raw] ?? raw
-}
-
-/**
- * `note` 事件的人話。
- *
- * 這些 payload 本來是 daemon 寫給自己的記錄，時間軸卻直接把 `action：k=v` 印出來
- * （`note reply_ok：role=pm`、`note issue_finished：branch=…，seq=6`）。時間軸是給人看的，
- * 所以：常見的記帳事件翻成一句話；純粹重複旁邊那則訊息的（`reply_ok`）直接不顯示；
- * 其餘（多半是失敗）保留 `action：欄位` 的原樣——那些欄位就是你要拿去查的東西。
- */
-function noteText(p: Record<string, unknown>): string | null {
-  const str = (k: string): string => (typeof p[k] === 'string' ? (p[k] as string) : '')
-  const num = (k: string): string => (typeof p[k] === 'number' ? String(p[k]) : '')
-  const action = str('action')
-  if (!action) return null
-  // note 的 payload 帶的是完整成員名（`ttxka1d-i2-rev`）；畫面上其他地方一律用短名。
-  const bot = teamShortName(str('bot'))
-  const error = str('error')
-  const issue = num('issue_number')
-  switch (action) {
-    // 成員回覆本身就在時間軸上、就在這一列旁邊，再記一次「他回了」是純重複。
-    case 'reply_ok':
-      return null
-    case 'member_start_failed':
-      return `成員 ${bot} 啟動失敗：${error}`
-    case 'pretrust_failed':
-      return `無法預先信任工作目錄：${error}`
-    case 'protocol_error':
-      return `${bot} 的回覆沒有可用的 am-team 區塊（第 ${num('attempt') || 1} 次）：${error}`
-    case 'issue_closed': {
-      const n = num('number')
-      return p.already_closed === true ? `issue #${n} 本來就已經關閉` : `已關閉 issue #${n}`
-    }
-    case 'issues_queued': {
-      const list = Array.isArray(p.issue_numbers) ? p.issue_numbers.map((n) => `#${String(n)}`).join('、') : ''
-      return list ? `已排入佇列：${list}` : '已排入佇列'
-    }
-    case 'issue_unqueued':
-      return `已從佇列移除 issue #${issue}`
-    case 'issue_started':
-      return `開始處理 issue #${issue}${num('seq') ? `（佇列第 ${num('seq')} 個）` : ''}`
-    case 'issue_finished':
-      return `issue #${issue} 完成`
-    case 'issue_failed':
-      return `issue #${issue} 失敗${str('reason') ? `（${teamPauseLabel(str('reason'))}）` : ''}`
-    case 'issue_start_failed':
-      return `issue #${issue} 啟動失敗：${error}`
-    case 'gate':
-      return `等你放行：${str('gate')}`
-    case 'gate_release':
-      return `已放行：${str('gate')}`
-    case 'abort':
-      return `已中止${str('reason') ? `（${teamPauseLabel(str('reason'))}）` : ''}`
-    case 'pm_abort':
-      return `PM 要求中止${str('reason') ? `（${teamPauseLabel(str('reason'))}）` : ''}`
-    case 'worker_plan':
-      return p.keep === true ? '下一個 issue 沿用同一批執行者' : '下一個 issue 換一批執行者'
-    case 'pm_repeat':
-      return `PM 又把同一件事派給 ${teamShortName(str('to'))}`
-    case 'auto_commit':
-      return `已幫 ${bot} 把沒提交的變更 commit`
-    case 'pr_created':
-      return `已 push ${str('pushed')} 並開 PR`
-    case 'deliver_downgraded':
-      return '這個 project 沒有 GitHub origin，改成只留整合分支'
-    case 'delivered':
-      return str('deliver') === 'pr' ? '已交付：PR' : `已交付：留下整合分支 ${str('branch')}`
-    case 'cleanup':
-      return '已清理：移除成員與 worktree（分支保留）'
-    case 'patch':
-      return '設定已更新'
-    default: {
-      // 不認得的（幾乎都是失敗）照舊把欄位攤開——那是唯一能查下去的線索。
-      const rest = Object.entries(p)
-        .filter(([k, v]) => k !== 'action' && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'))
-        .map(([k, v]) => `${k}=${String(v)}`)
-        .join('，')
-      return rest ? `${action}：${rest}` : action
-    }
-  }
-}
-
 function Timeline({ teamId }: { teamId: string }) {
   // The rows come from the project's merged timeline (SPEC-team §11.3). Select the *stable*
   // array from the store and filter in a memo — a selector that builds a new array on every
@@ -594,7 +516,7 @@ function Timeline({ teamId }: { teamId: string }) {
     for (const e of events ?? []) {
       // relay / user 事件本身就是時間軸上的訊息，不重複畫一次。
       if (e.kind === 'relay' || e.kind === 'user') continue
-      if (!eventText(e)) continue
+      if (!describeEvent(e)) continue
       out.push({ key: `e:${e.id}`, sort: e.created_at || e.id, kind: 'event', event: e })
     }
     return out.sort((a, b) => a.sort.localeCompare(b.sort) || a.key.localeCompare(b.key))
@@ -624,7 +546,7 @@ function Timeline({ teamId }: { teamId: string }) {
             return (
               <div key={r.key} className={`team-sys ${r.event.kind}`} role="note">
                 <span className="team-sys-kind">{EVENT_KIND_LABEL[r.event.kind] ?? r.event.kind}</span>
-                <span className="team-sys-text">{eventText(r.event)}</span>
+                <span className="team-sys-text">{describeEvent(r.event)}</span>
                 <time className="msg-time" dateTime={r.event.created_at} title={r.event.created_at}>
                   {timeOf(r.event.created_at)}
                 </time>
@@ -897,7 +819,13 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
     return members.find((b) => b.team?.role === 'pm')?.kind ?? members[0]?.kind ?? null
   })
   const closeTeamIssue = useStore((s) => s.closeTeamIssue)
+  const addTeamIssues = useStore((s) => s.addTeamIssues)
+  const notify = useStore((s) => s.notify)
+  const canReopen = useStore((s) => canReopenTeam(team, s.teamReopenUnavailable[teamId] === true))
   const [confirm, setConfirm] = useState<'abort' | 'cleanup' | 'delete' | 'close-issue' | null>(null)
+  const [reopenOpen, setReopenOpen] = useState(false)
+  const [reopenText, setReopenText] = useState('')
+  const [issueToClose, setIssueToClose] = useState<TeamIssue | null>(null)
 
   if (!team) {
     return (
@@ -1099,6 +1027,56 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
 
       {detail?.summary && terminal ? <TeamSummary text={detail.summary} /> : null}
 
+      {canReopen ? (
+        <div className="team-reopen-issue" role="note">
+          {reopenOpen ? (
+            <form
+              className="team-reopen-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                const parts = reopenText.split(/[\s,]+/).map((part) => part.replace(/^#/, '').trim()).filter(Boolean)
+                const numbers = Array.from(new Set(parts.map(Number)))
+                if (!numbers.length || numbers.some((number) => !Number.isInteger(number) || number <= 0)) {
+                  notify('error', '請輸入以逗號或空白分隔的正整數 issue number。')
+                  return
+                }
+                void addTeamIssues(teamId, numbers).then((ok) => {
+                  if (ok) {
+                    setReopenText('')
+                    setReopenOpen(false)
+                  }
+                })
+              }}
+            >
+              <label className="team-reopen-label" htmlFor={`team-reopen-${teamId}`}>
+                追加 issue 繼續
+              </label>
+              <input
+                id={`team-reopen-${teamId}`}
+                className="text-input"
+                value={reopenText}
+                onChange={(event) => setReopenText(event.target.value)}
+                placeholder="57, 58"
+                autoFocus
+              />
+              <button type="button" className="mini-btn" onClick={() => setReopenOpen(false)}>
+                取消
+              </button>
+              <button type="submit" className="mini-btn primary" disabled={Boolean(busy[`team:${teamId}:add-issues`])}>
+                繼續
+              </button>
+            </form>
+          ) : (
+            <>
+              <span className="team-reopen-text">Team 已完成，成員已停止。可追加 issue 繼續處理。</span>
+              <button type="button" className="mini-btn primary" onClick={() => setReopenOpen(true)}>
+                追加 issue 繼續
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+
       {canCloseIssue ? (
         <div className="team-close-issue" role="note">
           <span className="team-close-issue-text">
@@ -1119,7 +1097,11 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
       ) : null}
 
       <div className="chat team-chat">
-        <IssueQueue teamId={teamId} />
+        <IssueQueue
+          teamId={teamId}
+          projectHasGithub={Boolean(project?.github)}
+          onCloseIssue={setIssueToClose}
+        />
         <TaskList teamId={teamId} />
         <Timeline teamId={teamId} />
         {terminal ? (
@@ -1127,7 +1109,11 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
             {/* 做完是好事，不是警告：`done` 用中性／成功色，中止與失敗才留警示色。
                 原本那顆 ⛔ 是紅的，跟琥珀色的框、跟「已完成」三個字都對不上。 */}
             <div className={`composer-lock${team.phase === 'done' ? ' ok' : ''}`} role="status">
-              <span>Team {TEAM_PHASE_LABEL[team.phase]}，成員已停止。需要保留現場就先看 worktree，處理完再按「清理」。</span>
+              <span>
+                {team.phase === 'done'
+                  ? 'Team 已完成，成員已停止。要繼續可「追加 issue 繼續」；不需要現場就按「清理」。'
+                  : `Team ${TEAM_PHASE_LABEL[team.phase]}，成員已停止。需要保留現場就先看 worktree，處理完再按「清理」。`}
+              </span>
             </div>
           </div>
         ) : (
@@ -1213,6 +1199,27 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         onConfirm={() => {
           setConfirm(null)
           void closeTeamIssue(teamId)
+        }}
+      />
+      <ConfirmDialog
+        open={issueToClose !== null}
+        title={issueToClose ? `關閉 issue #${issueToClose.issue_number}？` : '關閉 issue？'}
+        body={
+          issueToClose ? (
+            <>
+              <p>
+                會在 GitHub 上把這個 issue 標成 closed，並留下一則完成留言。<strong>這是對外的動作</strong>，但隨時可以在 GitHub 上重開。
+              </p>
+              <p className="hint">#{issueToClose.issue_number} {issueToClose.issue_title}</p>
+            </>
+          ) : null
+        }
+        confirmLabel="關閉 issue"
+        onCancel={() => setIssueToClose(null)}
+        onConfirm={() => {
+          const issue = issueToClose
+          setIssueToClose(null)
+          if (issue) void closeTeamIssue(teamId, issue.id)
         }}
       />
       {confirm === 'delete' ? <TeamDeleteDialog teamId={teamId} onClose={() => setConfirm(null)} /> : null}

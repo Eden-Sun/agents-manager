@@ -64,6 +64,22 @@ export function StopIcon() {
   )
 }
 
+/** 提示符加底線：終端的通用符號，跟其他 icon 同一套線寬。 */
+export function TerminalIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <path
+        d="M3.5 4.5l3 3-3 3M8.5 11.5h4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function TrashIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">

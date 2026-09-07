@@ -464,6 +464,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     attachments: toAttachments(pick(v, 'attachments_json', 'attachments')),
     team_id: optStr(pick(v, 'team_id', 'teamId')),
     relay_from: optStr(pick(v, 'relay_from', 'relayFrom')),
+    terminal_snapshot: optStr(pick(v, 'terminal_snapshot', 'terminalSnapshot')),
     created_at: str(v.created_at),
   }
 }
@@ -869,7 +870,11 @@ function toMembers(v: unknown): TeamMember[] {
     if (!isRec(m)) continue
     const botId = str(pick(m, 'bot_id', 'id'))
     if (!botId) continue
-    out.push({ bot_id: botId, role: oneOf<TeamRole>(pick(m, 'role', 'team_role'), TEAM_ROLES, 'worker') })
+    out.push({
+      bot_id: botId,
+      role: oneOf<TeamRole>(pick(m, 'role', 'team_role'), TEAM_ROLES, 'worker'),
+      deleted: bool(pick(m, 'deleted'), false),
+    })
   }
   return out
 }

@@ -6,10 +6,10 @@ import { effortLabel } from '../api/types'
  *
  * Effort belongs next to the model name because the two are one setting in practice: the same
  * `opus` at `低` and at `高` behave nothing alike, and the model name alone cannot tell them
- * apart. It used to be joined with `-` (`opus-高`) to say so, but glued to the name that reads
- * as part of the model's *id* — `grok-4.6-中` looks like a release of grok. `·` plus the
- * quieter colour keeps them one chip while saying they are two facts. `fast` / `thinking`
- * stay in the tooltip: these rows are narrow enough that a third segment gets ellipsized.
+ * apart. The separator is `-` (`opus-高`) **because the user asked for it by name** — it was
+ * briefly changed to `·`, and then to nothing at all (`grok-4.6中`), so: do not change it back
+ * without asking them. `fast` / `thinking` stay in the tooltip: these rows are narrow enough
+ * that a third segment gets ellipsized away.
  *
  * The effort shown is what the CLI **reported** when it has said (the statusLine payload),
  * falling back to what the bot is configured with before it has ever run.
@@ -32,6 +32,7 @@ export function ModelTag({ botId }: { botId: string }) {
   return (
     <span className="model-tag" title={`模型：${bot.model ?? '（CLI 預設）'}${detail ? ` · ${detail}` : ''}`}>
       {bot.model ?? 'CLI 預設'}
+      {/* 分隔符在 CSS 的 `.model-tag-extra::before`，不要在這裡再加一個。 */}
       {chipExtra ? <span className="model-tag-extra">{chipExtra}</span> : null}
     </span>
   )

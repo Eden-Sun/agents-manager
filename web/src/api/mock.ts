@@ -163,6 +163,8 @@ interface MockProject {
 /** v4.0 fake `gh issue list` for the seeded project. */
 const ISSUES: Rec[] = [
   { number: 42, title: '群組聊天：刪掉的 bot 歷史不再出現在合併時間軸', state: 'open', labels: [{ name: 'bug', color: 'd73a4a' }, { name: 'group-chat', color: '0e8a16' }], author: 'edansun', updated_at: inHours(-3), body: '重現步驟：\n1. 在群組視圖送 `@all` \n2. 刪掉其中一個 bot\n3. 重新整理\n\n預期：歷史仍在；實際：只剩存活 bot 的訊息。\n\n相關：`GET /projects/:id/messages` 只合併現存 bot。' },
+  { number: 57, title: '追加 issue 後繼續 Team', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'team', color: '5319e7' }], author: 'edansun', updated_at: inHours(-1), body: 'done 的 Team 可以追加下一個 issue，沿用 PM 與 reviewer 的對話。' },
+  { number: 58, title: '為 Team reopen 補上事件紀錄', state: 'open', labels: [{ name: 'test', color: '7057ff' }], author: 'edansun', updated_at: inHours(-2), body: '追加 issue 時要在 timeline 留下 team_reopened。' },
   { number: 41, title: '即時輸出前幾幀是 TUI 雜訊（✢ Improvising…）', state: 'open', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'polish', color: 'fbca04' }], author: 'edansun', updated_at: inHours(-9), body: '`turn_progress` 的前 1–2 幀會帶 Claude Code 的 spinner 文字，應在 daemon 端過濾。' },
   { number: 40, title: 'Bot 設定：codex 模型 / effort / fast 從 `GET /api/models` 取', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-20), body: '目前是靜態清單。改為 API 驅動，失敗退回靜態清單。' },
   { number: 39, title: '主機面板顯示三個 kind 的工具偵測徽章', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'm4p-bot', updated_at: inHours(-30), body: '已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。' },
@@ -192,11 +194,28 @@ interface MockTeam {
   budget: TeamBudget
   usage: { relays: number; review_rounds_total: number; elapsed_min: number; per_bot: Record<string, { turns: number }> }
   members: { bot_id: string; role: TeamRole }[]
+  issues: MockTeamIssue[]
   pr_url: string | null
   summary: string | null
   /** SPEC-team §10.7：使用者從這個 team 關掉 issue 的時間（mock 不碰真的 GitHub）。 */
   issue_closed_at: string | null
   created_at: string
+  started_at: string | null
+  ended_at: string | null
+}
+
+interface MockTeamIssue {
+  id: string
+  seq: number
+  issue_number: number
+  issue_title: string
+  issue_url: string
+  state: 'queued' | 'working' | 'done' | 'failed' | 'skipped'
+  branch: string | null
+  summary: string | null
+  pr_url: string | null
+  issue_closed_at: string | null
+  fail_reason: string | null
   started_at: string | null
   ended_at: string | null
 }
@@ -432,6 +451,34 @@ const MODELS: Record<BotKind, Rec[]> = {
     { id: 'grok-4.6', display_name: 'Grok 4.6', description: 'grok CLI 預設', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
     { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high'], service_tiers: [] },
   ],
+}
+
+/**
+ * claude 的 `default_effort` 不是模型內建的，是那個帳號 `settings.json` 的 `effortLevel`
+ * （全域）加上 `modelSettings.<真實 model id>.effortLevel`（per-model 覆寫，SPEC §17.1）。
+ * 這裡的三組數字照真機實測抄過來，好讓 demo 換身份時看到的是真的會發生的情況：
+ * 預設帳號／cc0 全域 high、opus 被覆寫成 low；cc1 只有全域 medium；cc2 兩者都沒設過。
+ *
+ * cc2 沒設過不代表沒有預設——claude 自己的內建預設是 `high`（Claude Code 官方文件
+ * `code.claude.com/docs/en/model-config`：「`high`…The default on every model except
+ * Opus 4.7」；2026-09-07 拿一個乾淨的 cc2 帳號實測也印出 `Sonnet 5 with high effort`）。
+ * `opus`/`sonnet`/`haiku`/`fable` 沒有一個對到 Opus 4.7，所以那個例外在這裡用不到。
+ */
+const CLAUDE_BUILTIN_DEFAULT_EFFORT = 'high'
+
+const CLAUDE_ACCOUNT_EFFORT: Record<string, { global?: string; overrides?: Record<string, string> }> = {
+  '': { global: 'high', overrides: { opus: 'low' } },
+  cc0: { global: 'high', overrides: { opus: 'low' } },
+  cc1: { global: 'medium' },
+  cc2: {},
+}
+
+function claudeModelsForIdentity(identity: string): Rec[] {
+  const cfg = CLAUDE_ACCOUNT_EFFORT[identity] ?? CLAUDE_ACCOUNT_EFFORT['']
+  return MODELS.claude.map((m) => ({
+    ...m,
+    default_effort: cfg.overrides?.[String(m.id)] ?? cfg.global ?? CLAUDE_BUILTIN_DEFAULT_EFFORT,
+  }))
 }
 
 function inHours(h: number): string {
@@ -682,7 +729,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/fs/dirs') {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
     }
-    if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '')
+    if (method === 'GET' && rawPath === '/models') return this.models(q.get('kind') ?? '', q.get('host') ?? '', q.get('identity') ?? '')
     if (method === 'GET' && rawPath === '/quota') return { kinds: this.quota }
     if (method === 'GET' && rawPath === '/mem') return this.mem()
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
@@ -702,7 +749,6 @@ export class MockTransport implements Transport {
       if (method === 'POST' && seg[4] === 'text') return this.shellText(host, pane, String(b.text ?? ''), b.enter !== false)
       if (method === 'POST' && seg[4] === 'keys') return this.shellKeys(host, pane, b.keys)
     }
-
 
     if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)
     if (seg[0] === 'identities' && seg.length === 2 && method === 'DELETE') return this.deleteIdentity(decodeURIComponent(seg[1]))
@@ -727,6 +773,7 @@ export class MockTransport implements Transport {
       if (method === 'GET' && seg.length === 2) return this.teamDetail(teamId)
       if (method === 'GET' && seg[2] === 'events') return { team_id: teamId, events: this.teamEventsOf(teamId) }
       if (method === 'PATCH' && seg.length === 2) return this.patchTeam(teamId, b)
+      if (method === 'POST' && seg[2] === 'issues' && seg.length === 3) return this.addTeamIssues(teamId, b)
       if (method === 'POST' && seg[2] === 'tasks' && seg[4] === 'decide') return this.decideTask(teamId, seg[3], b)
       if (method === 'POST' && seg[2] === 'say') return this.teamSay(teamId, b)
       if (method === 'POST' && seg[2] === 'answer') return this.teamAnswer(teamId, b)
@@ -755,6 +802,7 @@ export class MockTransport implements Transport {
         if (action === 'stop') return this.stop(botId)
         if (action === 'restart') return this.restart(botId)
         if (action === 'interrupt') return this.interrupt(botId)
+    if (action === 'abort') return this.abort(botId)
         if (action === 'login') return this.login(botId)
         if (action === 'prompt') return this.prompt(botId, b)
         if (action === 'keys') return this.keys(botId, b)
@@ -797,8 +845,8 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** v4.0 `GET /api/models?kind=&host=` — unknown kind → 400; a down host → 502. */
-  private models(kind: string, host: string) {
+  /** v4.0 `GET /api/models?kind=&host=&identity=` — unknown kind → 400; a down host → 502. */
+  private models(kind: string, host: string, identity: string) {
     if (!BOT_KINDS.includes(kind as BotKind)) {
       throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
     }
@@ -806,7 +854,8 @@ export class MockTransport implements Transport {
     if (remote && !remote.connected) {
       throw new ApiError(502, { error: 'upstream', message: `主機 ${remote.name} 未連線` }, 'upstream')
     }
-    return { kind, host: remote?.name ?? 'local', models: MODELS[kind as BotKind] }
+    const models = kind === 'claude' ? claudeModelsForIdentity(identity) : MODELS[kind as BotKind]
+    return { kind, host: remote?.name ?? 'local', models }
   }
 
   /**
@@ -1674,6 +1723,36 @@ export class MockTransport implements Transport {
   }
 
   /**
+   * `POST /api/bots/:id/abort` — 強制結束目前回合（daemon 的 `abort_turns`）。
+   * 和 `interrupt` 的差別就在這裡：沒有 active run 也不是錯誤，掛著的回合照收。
+   */
+  private abort(botId: string) {
+    const run = this.activeRun(botId)
+    const stuck = this.turns.filter((t) => {
+      const conv = this.conversations.get(botId)
+      if (t.conversation_id !== conv) return false
+      return t.status === 'in_flight' || t.delivery === 'unknown'
+    })
+    for (const t of stuck) {
+      this.updateTurn(t, { status: 'failed', delivery: t.delivery === 'unknown' ? 'failed' : t.delivery, completed_at: now() })
+      this.addMessage({
+        conversation_id: t.conversation_id,
+        turn_id: t.id,
+        bot_id: botId,
+        role: 'system',
+        content: '回合已由使用者強制中止',
+        source: 'system',
+        incomplete: 0,
+      })
+    }
+    if (run) {
+      run.agent_status = 'idle'
+      this.emitBotStatus(botId)
+    }
+    return { aborted: stuck.map((t) => t.id), keys_sent: Boolean(run), key_error: run ? null : 'no active run' }
+  }
+
+  /**
    * `POST /api/bots/:id/login` — 對這個 bot 的 TUI 送 `/login`。
    *
    * 擋下來的理由跟 daemon 同一組 key，好讓前端的文案對照表在 mock 下也走得到；codex 沒有
@@ -2186,8 +2265,17 @@ export class MockTransport implements Transport {
     const tasks = this.teamTasks.filter((x) => x.team_id === t.id)
     const summary: Rec = { total: tasks.length }
     for (const task of tasks) summary[task.state] = Number(summary[task.state] ?? 0) + 1
+    const issuesSummary = {
+      total: t.issues.length,
+      done: t.issues.filter((issue) => issue.state === 'done').length,
+      failed: t.issues.filter((issue) => issue.state === 'failed' || issue.state === 'skipped').length,
+      queued: t.issues.filter((issue) => issue.state === 'queued').length,
+    }
     return {
       id: t.id,
+      issues: t.issues.map((issue) => ({ ...issue })),
+      current_issue_id: t.issues.find((issue) => issue.state === 'working')?.id ?? null,
+      issues_summary: issuesSummary,
       project_id: t.project_id,
       issue_number: t.issue_number,
       issue_title: t.issue_title,
@@ -2197,7 +2285,7 @@ export class MockTransport implements Transport {
       branch: t.branch,
       deliver: t.deliver,
       supervised: t.supervised,
-      members: t.members.map((m) => ({ ...m })),
+      members: t.members.map((m) => ({ ...m, deleted: !this.bots.some((bot) => bot.id === m.bot_id) })),
       tasks_summary: summary,
       budget: { ...t.budget },
       usage: { ...t.usage, per_bot: { ...t.usage.per_bot } },
@@ -2411,6 +2499,21 @@ export class MockTransport implements Transport {
       budget,
       usage: { relays: 0, review_rounds_total: 0, elapsed_min: 0, per_bot: {} },
       members: [],
+      issues: [{
+        id: ulid('issue'),
+        seq: 1,
+        issue_number: issueNumber,
+        issue_title: String(issue.title),
+        issue_url: `${p.github.url}/issues/${issueNumber}`,
+        state: 'working',
+        branch,
+        summary: null,
+        pr_url: null,
+        issue_closed_at: null,
+        fail_reason: null,
+        started_at: now(),
+        ended_at: null,
+      }],
       pr_url: null,
       summary: null,
       issue_closed_at: null,
@@ -2635,6 +2738,13 @@ export class MockTransport implements Transport {
       } else {
         this.teamEvent(t.id, 'note', { text: `整合分支 ${t.branch} 已留在 repo（未 push）。` })
       }
+      const current = t.issues.find((issue) => issue.state === 'working')
+      if (current) {
+        current.state = 'done'
+        current.summary = t.summary
+        current.pr_url = t.pr_url
+        current.ended_at = now()
+      }
       this.setPhase(t, 'done')
       for (const m of t.members) this.stop(m.bot_id)
     })
@@ -2728,6 +2838,89 @@ export class MockTransport implements Transport {
     return {}
   }
 
+  /** `POST /api/teams/:id/issues` — exercise the done-team continuation in the manual mock. */
+  private addTeamIssues(id: string, b: Rec) {
+    const t = this.team(id)
+    if (t.phase === 'aborted' || t.phase === 'failed') {
+      throw new ApiError(409, { error: 'conflict', reason: 'team is finished', phase: t.phase }, 'conflict')
+    }
+    const raw = Array.isArray(b.issue_numbers) ? b.issue_numbers : b.issue_number === undefined ? [] : [b.issue_number]
+    const numbers = raw.map((number) => Number(number)).filter((number) => Number.isInteger(number) && number > 0)
+    if (!numbers.length) throw new ApiError(400, { error: 'bad_request', message: 'issue_numbers must not be empty' }, 'bad request')
+    if (t.issues.length + numbers.length > 20) {
+      throw new ApiError(400, { error: 'bad_request', message: 'at most 20 issues per team' }, 'bad request')
+    }
+    const duplicate = numbers.find((number, index) => numbers.slice(0, index).includes(number) || t.issues.some((issue) => issue.issue_number === number))
+    if (duplicate !== undefined) {
+      throw new ApiError(409, { error: 'conflict', reason: 'issue already queued', issue_number: duplicate }, 'conflict')
+    }
+    if (t.phase === 'done' && !t.members.some((member) => member.role === 'pm' && this.bots.some((bot) => bot.id === member.bot_id))) {
+      throw new ApiError(409, { error: 'conflict', reason: 'team is cleaned up', phase: t.phase }, 'conflict')
+    }
+
+    const p = this.projects.find((project) => project.id === t.project_id)
+    const added: MockTeamIssue[] = []
+    for (const number of numbers) {
+      const source = ISSUES.find((issue) => issue.number === number)
+      if (!source) throw new ApiError(502, { error: 'upstream', message: `gh: issue #${number} not found` }, 'upstream')
+      const entry: MockTeamIssue = {
+        id: ulid('issue'),
+        seq: (t.issues.at(-1)?.seq ?? 0) + 1,
+        issue_number: number,
+        issue_title: String(source.title),
+        issue_url: `${p?.github?.url ?? 'https://github.com/me/repo'}/issues/${number}`,
+        state: 'queued',
+        branch: null,
+        summary: null,
+        pr_url: null,
+        issue_closed_at: null,
+        fail_reason: null,
+        started_at: null,
+        ended_at: null,
+      }
+      t.issues.push(entry)
+      added.push(entry)
+    }
+    this.teamEvent(id, 'note', { action: 'issues_queued', issue_numbers: numbers })
+
+    if (t.phase === 'done') {
+      this.teamEvent(id, 'note', { action: 'team_reopened', by: 'user', issue_numbers: numbers, from_phase: 'done' })
+      const pm = this.memberBot(t, 'pm')
+      if (pm) {
+        this.teamEvent(id, 'note', { action: 'member_context_lost', bot: pm.name, role: 'pm', why: 'no_session_id' }, { to_bot_id: pm.id })
+        if (!this.activeRun(pm.id)) this.start(pm.id)
+      }
+      const rev = this.memberBot(t, 'reviewer')
+      if (rev && !this.activeRun(rev.id)) this.start(rev.id)
+      t.ended_at = null
+      this.setPhase(t, 'starting', 'reopen')
+      setTimeout(() => {
+        if (t.phase !== 'starting') return
+        const next = t.issues.find((issue) => issue.state === 'queued')
+        if (!next) return
+        next.state = 'working'
+        next.started_at = now()
+        next.branch = `team/i${next.issue_number}-${t.id.slice(-6).toLowerCase()}`
+        t.issue_number = next.issue_number
+        t.issue_title = next.issue_title
+        t.issue_url = next.issue_url
+        t.branch = next.branch
+        t.summary = null
+        t.pr_url = null
+        t.issue_closed_at = null
+        this.teamEvent(id, 'note', { action: 'issue_started', issue_number: next.issue_number, seq: next.seq, branch: next.branch })
+        this.setPhase(t, 'planning')
+        const currentPm = this.memberBot(t, 'pm')
+        if (currentPm) {
+          this.teamRelay(t, DAEMON_SENDER, currentPm.id, `換下一個 issue：#${next.issue_number}「${next.issue_title}」。你是重新啟動的 PM，先前的對話不在了；先讀 \`.agents-manager/team/TEAM.md\` 與 \`ISSUE.md\` 再派工。`)
+        }
+        this.emitTeam(t)
+      }, 1000)
+    }
+    this.emitTeam(t)
+    return { issues: t.issues.map((issue) => ({ ...issue })) }
+  }
+
   /**
    * `POST /api/teams/:id/close-issue`（SPEC-team §10.7）。
    *
@@ -2737,23 +2930,28 @@ export class MockTransport implements Transport {
    */
   private closeTeamIssue(id: string, b: Rec) {
     const t = this.team(id)
-    if (t.phase !== 'done') {
-      throw new ApiError(409, { error: 'conflict', reason: 'issue 只能從已完成的 team 關閉', phase: t.phase }, 'conflict')
+    const target = typeof b.issue_id === 'string'
+      ? t.issues.find((issue) => issue.id === b.issue_id)
+      : t.issues.find((issue) => issue.issue_number === t.issue_number)
+    if (!target) throw new ApiError(404, { error: 'not_found', what: 'issue' }, 'not found')
+    if (target.state !== 'done') {
+      throw new ApiError(409, { error: 'conflict', state: target.state, phase: t.phase }, 'conflict')
     }
-    if (t.issue_closed_at) {
+    if (target.issue_closed_at) {
       throw new ApiError(409, { error: 'conflict', reason: 'issue 已經從這個 team 關過了' }, 'conflict')
     }
-    t.issue_closed_at = new Date().toISOString()
+    target.issue_closed_at = new Date().toISOString()
+    if (target.issue_number === t.issue_number) t.issue_closed_at = target.issue_closed_at
     this.teamEvent(id, 'note', {
       action: 'issue_closed',
       by: 'user',
-      number: t.issue_number,
-      url: t.issue_url,
+      number: target.issue_number,
+      url: target.issue_url,
       already_closed: false,
       comment: typeof b.comment === 'string' ? b.comment : null,
     })
     this.emitTeam(t)
-    return { number: t.issue_number, url: t.issue_url, state: 'CLOSED', already_closed: false }
+    return { number: target.issue_number, url: target.issue_url, state: 'CLOSED', already_closed: false }
   }
 
   private cleanupTeam(id: string) {
@@ -2931,7 +3129,6 @@ export class MockTransport implements Transport {
   setHostShellsSupported(on: boolean) {
     this.hostShellsDisabled = !on
   }
-
 
   setTeamsSupported(on: boolean) {
     this.teamsDisabled = !on

@@ -106,6 +106,104 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 - UI：IssuesBar 在專案有（掛 GitHub 的）submodule 時多一個 repo 選單；組隊會帶著它；team 標題與側欄節點在 `#號` 前面標 submodule 路徑。
 - **不做**：跨 repo 的單一 team（一個 team 同時改 root 與 submodule）——那是兩個 team；root 裡的 submodule 指標更新仍是人工動作。
 
+### 2.5 Reopen：done 之後追加 issue（2026-09-07）
+
+一個跑完（`phase=done`）但**還沒 cleanup** 的 team，現場都還在：`main/` 與 `reviewer/` worktree、PM 與 reviewer 的對話、
+整合分支、team workspace。使用者常在這時才想到「順便把 #57 也做了」，目前只能重新組一隊，PM 對這個 codebase 累積的脈絡全部丟掉。
+本節讓 `POST /teams/{id}/issues` 對 `done` 放行，把 team 從 `done` 拉回佇列流程；**這只是 §2.3「佇列前進」的一個新入口，不是另一套流程**。
+
+#### 2.5.1 放行條件
+
+- `add_issues` 目前對所有終態一律 `409 team is finished`。改為：**`done` 且未 cleanup → 放行並觸發 reopen**；`aborted` / `failed` 仍 409（它們沒有可靠的現場可續，使用者請重新組隊）。
+- 「未 cleanup」的判準是 **PM 成員 bot 的 `deleted_at IS NULL`**（`cleanup` 與 `delete` 都會標它；`workspace_id` 在 §6.4a 之前建的舊 team 上不可靠）。
+  已 cleanup 的 `done` 回 `409 {"error":"conflict","reason":"team is cleaned up","phase":"done"}`。
+- 其餘驗證不變：issue 存在（`gh issue view`）、不重複、總數 ≤ `MAX_QUEUED_ISSUES`、kind 已安裝、額度未低於 `quota_stop_pct`（reopen 等於一次啟動，套 §7.4 建 team 時的額度檢查）。
+- 非 `done` 的正常執行中 team 走原路徑（只排隊，不動 phase）；本節只描述 `done` 分支。
+
+#### 2.5.2 daemon 流程
+
+同步部分（在 `add_issues` 內，回 200 之前）：
+
+1. 寫入 `team_issues`（`state='queued'`，`seq` 接續），照舊記 `issues_queued`。
+2. 記 `team_events` note：`{action:"team_reopened", by:"user", issue_numbers:[…], from_phase:"done"}`。
+3. `UPDATE teams SET ended_at = NULL`；`set_phase("starting")`（phase 事件 `done → starting`，reason `reopen`）。
+   `starting` 是必要的中繼站：成員要先起來才能 `planning`，而 §7.4 的 `startup` 只在 `starting` 跑。
+4. `spawn_scheduler`（`live_teams` 以 phase 篩選，daemon 重啟後 `respawn_schedulers` 也會自然接手）。
+
+背景部分（scheduler 的 `startup`，判斷「這是 reopen」的條件是 **`starting` 且沒有 `working` 的 issue、但有 `queued` 的 issue**）：
+
+5. **收掉上一批執行者**：最後一個 issue 結束時 `end_team` 只停成員、不 retire（§2.3「最後一個 issue」），
+   所以它的 worker 還掛在 `bots`（`deleted_at IS NULL`、cwd 在 `i<seq>-dev-<n>`）。對最後一個 `done` 的 issue 跑 `retire_issue_workers`
+   （停 pane、標 `deleted_at`、`worktree remove`）。**不讀 `worker_plan.keep`**：那是 PM 在上一個 issue 結束時對「下一個」的判斷，
+   當時它以為沒有下一個；reopen 一律換新批。
+6. **PM 與 reviewer 原地重啟**：對兩者各呼叫 `start_bot`，帶 §2.5.3 的續接選項。
+   worktree `main/`、`reviewer/` 與 `bots.cwd` 完全不動；persona 不含 issue 號（§2.3），所以重啟後套同一份 persona 是對的。
+   - PM 起不來 → `paused(member_failed:<pm>)`，**不是** `failed + cleanup`（§7.4 那條是建 team 失敗才適用；reopen 失敗不能把做完的成果清掉）。使用者修好後 `start` 該 bot 再 `resume`，scheduler 回到 `starting` 重跑本段。
+   - reviewer 起不來 → 同 §7.4：`paused(member_failed:<rev>)`。
+7. **建新一批執行者**：依 `roles_json.workers.spec` / `count`，走既有 `start_issue(next, keep_workers=false)`
+   （切 `main/` 到新整合分支 `team/i<issue>-<tid6>`、`worktree add` `i<seq>-dev-<n>`、insert 成員、重寫 `ISSUE.md` / `TEAM.md`、鏡像 `teams` 欄位），
+   再 `start_issue_workers`。`start_issue` 對 `main/` 的「必須乾淨」檢查照舊，髒了 → note `issue_start_failed` + `paused(upstream)`。
+8. **交給 PM**：`hand_issue_to_pm(kept_workers=false)` —— `set_phase("planning")` 並送 `next_issue` relay。relay 文字多一句視 §2.5.3 結果而定：
+   續接成功 →「這是同一段對話的延續」；退回新對話 →「你是重新啟動的 PM，先前的對話不在了，請先讀 `TEAM.md` 與 `ISSUE.md`」。
+
+之後就是普通的 §2.3 佇列：PM 派工、審查、合併、交付、`issue_finished`，佇列空了再回 `done`。
+**再 reopen 幾次都可以**，每次都是一組新的 `team_issues` 列與一則 `team_reopened`。
+
+#### 2.5.3 PM 脈絡保留：`start_bot` 用 native session 續接
+
+PM 的價值在它記得這個 repo、記得上一個 issue 的取捨。停掉的 pane 救不回來，但 CLI 自己的對話可以：
+
+- `runs.native_session_id` 目前**已由 hook 回填**（claude `SessionStart` 的 `session_id`、codex notify 的 `thread-id`、grok 的 `sessionId`），只是 `start_bot` 從來不讀。
+  它在 `db::Run` 的預設值是 `None`，實際上 claude / codex 的 run 幾乎都有值。
+- `start_bot` 加一個選項（例如 `start_bot_with(app, bot_id, StartOpts { resume_native: bool })`；既有 `start_bot` = `resume_native=false`，**使用者手動啟動的行為完全不變**）。
+  `resume_native=true` 時：取該 bot **最近一個已結束的 run** 的 `native_session_id`（`ORDER BY started_at DESC`），依 kind 組指令：
+
+  | kind | 續接方式 | 備註 |
+  |---|---|---|
+  | `claude` | argv 多 `--resume <session_id>` | 其餘旗標（`--settings`、`--append-system-prompt`、`--model`…）照舊。session 檔案按 cwd 存放，PM 的 cwd 沒變所以找得到 |
+  | `codex` | `codex resume <thread_id>` 子指令形式，其餘 `-c …` / `--yolo` 旗標接在後面 | 若該版 codex 不接受這組旗標，視為續接失敗 |
+  | `grok` | 不支援 | 一律新對話 |
+
+- **拿不到就退回新對話**：沒有 session id、kind 不支援、或 CLI 啟動後 `SessionStart` 回報的 `session_id` 與要求續接的不同（表示 CLI 靜默開了新對話）
+  → 照常啟動，但記 note `{action:"member_context_lost", bot, role, why:"no_session_id"|"unsupported_kind"|"resume_mismatch"}`，
+  並在該成員對話插一則 system 訊息說明。§2.5.2 第 8 步的 relay 據此換句。
+- 續接**不是** reopen 專屬：`resume` 後由使用者手動 `start` 的成員仍是新對話（維持現狀）；只有 daemon 自己重啟 PM / reviewer 的路徑帶 `resume_native=true`。
+  要不要開放給一般 bot 是另一個題目，不在本節。
+
+#### 2.5.4 預算、關 issue、鏡像欄位
+
+- **預算不變**：`max_relays` / `max_wall_clock_min` 本來就按 issue 算（§2.3），新 issue 從自己的 `team_issues.started_at` 起算、relay 依 `issue_id` 過濾。`quota_stop_pct` 在 reopen 時檢查一次，之後照常。
+- **`close-issue` 在 reopen 後仍對做完的 issue 有效**。目前 §10.7 只寫 `teams.issue_closed_at`（當前鏡像），`team_issues.issue_closed_at` 欄位存在卻沒人寫；`start_issue` 換 issue 時又把鏡像清成 NULL，
+  等於「做完 #42、reopen 做 #57」之後，#42 有沒有關過就查不到了。改法：
+  1. `close_issue` **同時**寫 `team_issues.issue_closed_at`（`WHERE team_id=? AND issue_number=?`），並以那一列判斷「關過一次 409」。
+  2. `POST /teams/{id}/close-issue` body 多一個可選 `issue_id`；省略 = 當前鏡像（`teams.issue_number`）。§10.7 規則 1 從「team `phase=done`」改為**「該 `team_issues` 列 `state='done'`」**——
+     team 整體 `done` 時當前鏡像必然 `state='done'`，所以舊行為是新規則的特例；reopen 進行中也能回頭關 #42。規則 2（只有使用者按）不變。
+  3. `teams.issue_closed_at` 維持「當前鏡像」語意：只在關的是當前 issue 時更新；`start_issue` 清 NULL 的行為保留（新 issue 本來就沒關過）。
+  4. UI：`IssueQueue` 每一列 `state='done'` 且未關的 issue 給「關閉 issue」小按鈕（同一個 `ConfirmDialog`，帶 `issue_id`）；既有 done 卡片的大按鈕不動。
+- **`ISSUE.md` / `TEAM.md`**：由 `start_issue` 重寫，內容只提新 issue；上一個 issue 的成果留在它自己的整合分支與 `team_issues.summary`。
+
+#### 2.5.5 UI
+
+- `TeamPanel` 的 done 卡片（目前只有 composer-lock 文字 + 「清理」）多一顆 **「追加 issue 繼續」**：點了展開一個 issue 號輸入（多個以逗號或空白分隔，
+  沿用 IssuesBar 的 issue 挑選器亦可），送 `store.addTeamIssues`（store 已有，之前沒有任何元件呼叫）。
+  已 cleanup 的 team（PM bot `deleted_at` 非空，或 daemon 回 409 `team is cleaned up`）不顯示這顆按鈕。
+- 送出後 `team_changed` 會把 phase 推成 `starting` → `planning`，既有面板自動切回進行中視圖（composer 解鎖、成員 lamp 亮起）。
+- Timeline 多兩種 note 的呈現：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）、`member_context_lost`（「PM 沒能續接先前對話，已改為新對話」）。
+- `IssueQueue` 目前 `issues.length < 2` 就不畫；reopen 後至少 2 個，會自然出現。
+
+#### 2.5.6 驗收條件
+
+1. `done` 且未 cleanup 的 team `POST /teams/{id}/issues {"issue_numbers":[57]}` → 200；`team_events` 依序出現 `issues_queued`、`team_reopened`、phase `done→starting`、`issue_started`、phase `starting→planning`、一則 `next_issue` relay（`to=pm`）。
+2. 同一 team 在 `aborted` / `failed` 呼叫 → `409 team is finished`；`done` 但已 `cleanup` → `409 team is cleaned up`。兩者都不寫任何 `team_issues` 列。
+3. reopen 後 PM 與 reviewer 的 `bot_id`、`bots.cwd`、`main/` 與 `reviewer/` 目錄都與 reopen 前相同；上一個 issue 的 worker bot 全部 `deleted_at` 非空、worktree 已移除；新 worker 的 `cwd` 是 `i<新seq>-dev-<n>`、kind/model/effort 等於 `roles_json.workers.spec`。
+4. `main/` 的 HEAD 在 `team/i57-<tid6>`，且該分支的第一個 commit 是 team 建立時的 `base_sha`。
+5. PM 是 claude 且上一個 run 有 `native_session_id` → 新 run 的 argv 含 `--resume <該 id>`，啟動後 `SessionStart` 回報同一個 `session_id`，沒有 `member_context_lost` note。把 `native_session_id` 清成 NULL 再 reopen → 照常啟動，有 `member_context_lost{why:"no_session_id"}`，relay 文字含「重新啟動」那句。
+6. 第二個 issue 跑完、佇列空 → 回 `done`，`teams.ended_at` 重新寫入；再 reopen 一次仍成立（1–5 可重複）。
+7. reopen 進行中對 #42（`state='done'`）`POST close-issue {"issue_id":…}` → 200，`team_issues.issue_closed_at` 有值、`teams.issue_closed_at`（鏡像 #57）仍為 NULL；再關一次 → 409。#57 尚未 done 時對它 close → 409。
+8. `PATCH /teams/{id}` 的 `workers` 設定改過之後 reopen，新批執行者採用改後的 `roles_json.workers.spec`。
+9. daemon 在 `starting`（reopen 中）被重啟 → `respawn_schedulers` 接手，不重複建 worker（`start_issue` 只在沒有 `working` issue 時跑）。
+10. 使用者手動 `POST /bots/{pm}/start` 的 argv **不含** `--resume`（既有行為不變）。
+
 ### 2.2 `bots.cwd`（新，通用欄位）
 
 `start_inner` 目前 `pane.split { cwd: project.path }`；改為 `bot.cwd.unwrap_or(project.path)`。這是 team 成員能住在 worktree 的**唯一**必要改動，
@@ -411,7 +509,8 @@ starting ──成員全部 running──► planning ──PM dispatch──►
 
 - `paused` 保存 `resume_phase`；`resume` 回到原 phase 並重送 pending relay。
 - `finishing`：deliver=`pr` 時 push + `gh pr create`；`branch` 時只寫摘要。成功 → `done`（停成員）。
-- 終態：`done | aborted | failed`。終態後只剩 `cleanup`。
+- 終態：`done | aborted | failed`。終態後只剩 `cleanup`——**例外**：`done` 且未 cleanup 的 team 可由使用者追加 issue 而 reopen，
+  走 `done ──追加 issue──► starting ──成員重啟、建新執行者──► planning`（§2.5）；`aborted` / `failed` 沒有這條路。
 
 ### 8.2 Task state
 
@@ -562,7 +661,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/teams/{id}/issues` | `{"issue_numbers":[n,…]}`（或單數 `{"issue_number":n}`） | `200 {issues:[…]}`；終態 team 回 409，重複的 issue 回 409 |
+| POST | `/teams/{id}/issues` | `{"issue_numbers":[n,…]}`（或單數 `{"issue_number":n}`） | `200 {issues:[…]}`；`aborted` / `failed` 回 409，**`done` 且未 cleanup 則放行並 reopen（§2.5）**，`done` 但已 cleanup 回 `409 {"reason":"team is cleaned up"}`，重複的 issue 回 409 |
 | DELETE | `/teams/{id}/issues/{issue_id}` | — | `200 {}`；只有 `state="queued"` 可移除，其餘回 409 |
 
 `POST /projects/{id}/teams` 的 body 改用 `issue_numbers: [n,…]`（依序處理）；舊的 `issue_number` 仍然接受，
@@ -581,6 +680,8 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 
 1. **只有 `phase === "done"` 的 team**。`done` 的定義是 PM 宣告完成**且** daemon 驗證所有 task 進入終態（§8.3）；
    `aborted` / `failed` / 還在跑的一律 `409 {"error":"conflict","phase":"…"}`。
+   > §2.5.4 把這條放寬成「**該 `team_issues` 列 `state='done'`**」，並讓 body 多一個可選 `issue_id`（省略 = 當前鏡像）；
+   > team 整體 `done` 時當前 issue 必然 `done`，所以原本的行為是新規則的特例。reopen 後回頭關上一個 issue 走這條。
 2. **只有使用者**。scheduler 沒有任何一條路徑會呼叫它——這個端點存在的唯一理由，就是讓 UI 在 team 完成後
    問一次「要不要關掉 issue」，issue 是因為有人按了按鈕才關的。**不做自動關閉，也不做「N 分鐘後自動關」**。
 
