@@ -107,6 +107,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/models", get(get_models))
         .route("/quota", get(get_quota))
         .route("/mem", get(get_mem))
+        .route("/mem/processes", get(get_mem_processes))
+        .route("/mem/processes/kill", post(kill_mem_process))
         .route("/search/messages", get(search_messages))
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
@@ -1557,6 +1559,38 @@ async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuer
 /// `mem_updated` when it moves; this is here for the first paint and for anyone polling.
 async fn get_mem(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     Ok(Json(serde_json::to_value(crate::memstat::sample(&app).await).map_err(any_err)?))
+}
+
+/// SPEC §15.4: what that RAM number is made of on one host, so the user can see which
+/// processes are theirs to reclaim and which belong to a bot.
+async fn get_mem_processes(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    if app.hosts.get(&host).await.is_none() {
+        return Err(LcError::NotFound(format!("unknown host `{host}`")));
+    }
+    crate::memproc::processes(&app, &host).await.map(Json).map_err(|e| LcError::Upstream(format!("{e:#}")))
+}
+
+/// SPEC §15.4: signal one process inside a herdr tree. The guard rails (must be in the tree,
+/// never herdr, never a bot) live in `memproc::kill`, which re-samples first.
+async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Result<Json<Value>, LcError> {
+    let host = body.get("host").and_then(|v| v.as_str()).unwrap_or(crate::config::LOCAL_HOST).to_string();
+    let Some(pid) = body.get("pid").and_then(|v| v.as_i64()) else {
+        return Err(LcError::Bad("pid required".into()));
+    };
+    let signal = body.get("signal").and_then(|v| v.as_str()).unwrap_or("TERM");
+    if app.hosts.get(&host).await.is_none() {
+        return Err(LcError::NotFound(format!("unknown host `{host}`")));
+    }
+    match crate::memproc::kill(&app, &host, pid as i32, signal).await {
+        Err(e) => Err(LcError::Upstream(format!("{e:#}"))),
+        Ok(Ok(v)) => Ok(Json(v)),
+        Ok(Err(crate::memproc::KillDenied::NotInTree)) => Err(LcError::Bad(format!("pid {pid} 不在 {host} 的 herdr 樹裡"))),
+        Ok(Err(crate::memproc::KillDenied::Herdr)) => Err(LcError::Bad("不能砍 herdr 本身".into())),
+        Ok(Err(crate::memproc::KillDenied::Bot(id))) => {
+            Err(LcError::conflict("bot_process", json!({"bot_id": id, "message": "這是 AG Man 的 bot，請用停止 bot"})))
+        }
+    }
 }
 
 async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {

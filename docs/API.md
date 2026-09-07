@@ -353,6 +353,48 @@ herdr 這一側現在佔多少常駐記憶體。左上角那一格用的就是�
 舊 daemon 沒有這支 → 前端拿不到就整格不顯示。
 
 
+## GET /api/mem/processes（SPEC §15.2，2026-09-08 新增）
+
+`GET /api/mem/processes?host=local`（`host` 省略 = `local`；不認得的主機回 404）。
+那一格的數字是由哪些程序組成的，以及**哪些是使用者自己開的、可以砍**。
+
+```json
+{"host":"local","sampled_at":"2026-09-08T04:11:02Z","processes":[
+  {"pid":59407,"ppid":37845,"rss_bytes":412000000,"exe":"claude",
+   "argv":"claude --dangerously-skip-permissions",
+   "pane_id":"w168:p1","bot_id":"b3","bot_name":"opus","project_id":"p1",
+   "owner":"bot","subtree_bytes":420000000,"children":3}]}
+```
+
+- `owner`：`bot`（環境有 `AM_BOT_ID`）、`pane`（只有 `HERDR_PANE_ID`，使用者自己開的）、
+  `herdr`（herdr 本身，不會出現在清單裡）、`unknown`（兩個都讀不到）。判定規則見 SPEC §15.2。
+- `bot_id` 查得到就補 `bot_name` / `project_id`；bot 已刪仍回 `bot_id`、`owner` 仍是 `bot`。
+- `subtree_bytes` = 自己 ＋ 所有子孫的 RSS，也就是「砍掉這個能省多少」；清單依它降冪。
+- 只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 `subtree_bytes ≥ 8 MiB` 的，
+  其餘併進父程序的 `subtree_bytes`。
+- 一次取樣同時拿樹與環境（macOS `ps -Ewwo`、Linux `/proc/<pid>/environ`），遠端走 ssh。
+
+## POST /api/mem/processes/kill（SPEC §15.2，2026-09-08 新增）
+
+```json
+{"host":"local","pid":59407,"signal":"TERM"}
+```
+
+`signal` 省略 = `TERM`，只認 `TERM` / `KILL`。成功回
+`{"host":"local","pid":59407,"signal":"TERM","exe":"claude","freed_bytes":420000000}`，
+並立刻取樣推一次 `mem_updated`。
+
+**送訊號前一定重新取樣再判定**（pid 會被回收）：
+
+| 情況 | 回應 |
+|---|---|
+| pid 不在該主機的 herdr 樹裡 | 400 `pid … 不在 … 的 herdr 樹裡` |
+| 該 pid 就是 `herdr` | 400 `不能砍 herdr 本身` |
+| `owner == "bot"` | 409 `{"error":"conflict","reason":"bot_process","bot_id":"b3","message":"這是 AG Man 的 bot，請用停止 bot"}` |
+
+砍 bot 走既有的 `POST /bots/{id}/stop`，那條路才會記錄停止。
+
+
 ## 遠端主機 hosts（SPEC §11.6，2026-09-06 新增）
 
 Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到遠端 herdr。UI 操作方式完全相同，
