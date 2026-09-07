@@ -149,9 +149,15 @@ function TeamNode({ team }: { team: Team }) {
       </div>
       {/* 進度與耗時貼在標題正下方，不隨成員收合消失：這兩個數字是掃過側欄時唯一想知道的。 */}
       <TeamIssueProgress team={team} />
-      {open
-        ? members.map((b) => <MemberRow key={b.id} bot={b} />)
-        : null}
+      {open ? (
+        <div className="team-node-members" role="group" aria-label={`${members.length} 位成員`}>
+          {members.map((b, i) => (
+            <div key={b.id} className={`team-member${i === members.length - 1 ? ' last' : ''}`}>
+              <MemberRow bot={b} />
+            </div>
+          ))}
+        </div>
+      ) : null}
       {confirmDelete ? <TeamDeleteDialog teamId={team.id} onClose={() => setConfirmDelete(false)} /> : null}
     </div>
   )

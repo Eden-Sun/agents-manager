@@ -32,7 +32,7 @@ export function TeamDeleteDialog({ teamId, onClose }: { teamId: string; onClose:
   const terminal = TEAM_TERMINAL_PHASES.includes(team.phase)
   const memberCount = team.members.length
 
-  // Sidebar 的 team 節點是 `overflow: hidden` 的，對話框在那裡面會被裁掉一角，
+  // 側欄清單自己會裁切（`.sidebar-scroll` 的 overflow），對話框掛在節點裡會被切掉一角，
   // 所以一律 portal 到 body（TeamPanel 那邊本來就沒問題，共用同一條路徑比較不會漏）。
   return createPortal(
     <ConfirmDialog
