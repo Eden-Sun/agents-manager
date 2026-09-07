@@ -927,6 +927,43 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
         .session_for_bot(&bot, &project.host)
         .await
         .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?;
+    // An identity the host does not know would be dropped from the pane env without a word,
+    // and the CLI would run as whatever that machine's default login is (observed on m4p:
+    // a `cc1` bot answering as cc0). Refuse instead; not-logged-in gets a system message
+    // below so the user can still `/login` from inside.
+    if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
+        if crate::tools::identity_for_host(app, &project.host, idn).await.is_none() {
+            return Err(LcError::conflict(
+                "identity is not known on this host",
+                json!({"identity": idn, "host": project.host,
+                       "hint": format!("主機 {} 沒有 `{idn}` 這個身份（config.toml 的 [[identities]] 或該機 zshrc 的 ccN alias）；先在那台建好，或到主機設定按「重新偵測」", project.host)}),
+            ));
+        }
+        let not_logged_in = app
+            .tools
+            .lock()
+            .await
+            .get(&project.host)
+            .and_then(|t| t.identities.get(idn))
+            .map(|i| i.logged_in == Some(false))
+            .unwrap_or(false);
+        if not_logged_in {
+            tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "identity not logged in on host; the CLI will use the machine's default login");
+            if let Ok(conv) = db::conversation_id(&app.db, bot_id).await {
+                let _ = insert_message(
+                    app,
+                    &conv,
+                    None,
+                    "system",
+                    &format!("身份 `{idn}` 在 {} 沒有登入：claude 會退回這台機器預設（cc0）的帳號執行。啟動後請按「登入 / 切換帳號」登入 `{idn}`。", project.host),
+                    "system",
+                    false,
+                    None,
+                )
+                .await;
+            }
+        }
+    }
 
     // 1. INSERT Run before touching herdr (SPEC §6.2.1).
     let run_id = db::ulid();

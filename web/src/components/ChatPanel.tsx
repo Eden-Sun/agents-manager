@@ -777,6 +777,7 @@ function derivedStatus(
   const seven = win(quota?.seven_day)
   return {
     account_email: null,
+    account_warning: null,
     model_name: model,
     model_id: null,
     effort,
@@ -840,7 +841,11 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
       : null
   return (
     <div className="statusline-bar" role="status" title={line || undefined}>
-      {status.account_email ? (
+      {status.account_warning ? (
+        <SlItem k="帳號" className="sl-account sl-warn" title={status.account_warning}>
+          ⚠ 未登入，用的是預設帳號
+        </SlItem>
+      ) : status.account_email ? (
         // 手機上這一欄最長也最不急（側欄與設定都看得到），`sl-account` 讓 CSS 把它收掉。
         <SlItem k="帳號" className="sl-account">
           {status.account_email}
