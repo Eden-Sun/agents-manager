@@ -132,6 +132,19 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             if let Some(n) = r.agent_name.clone().filter(|s| !s.is_empty()) {
                 candidates.push(n);
             }
+        } else if bot.managed_by == "child" {
+            // No live run: the herdr name its last run carried is still how to find it.
+            if let Some(n) = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT agent_name FROM runs WHERE bot_id = ? ORDER BY started_at DESC LIMIT 1",
+            )
+            .bind(&bot.id)
+            .fetch_optional(&app.db)
+            .await?
+            .flatten()
+            .filter(|s| !s.is_empty())
+            {
+                candidates.push(n);
+            }
         }
         let label: String = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?")
             .bind(&bot.project_id)
@@ -139,9 +152,14 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             .await?
             .unwrap_or_default();
         let legacy = crate::config::agent_name_legacy(&label, &bot.name);
-        for n in [computed.clone(), legacy, bot.name.clone()] {
-            if !candidates.contains(&n) {
-                candidates.push(n);
+        // A spawned child is only ever the herdr agent it was adopted from: its run's name.
+        // The computed `<project>-<hash>` name would match a pane the daemon started for it
+        // by mistake, and the bare name is whatever suffix the parent picked.
+        if bot.managed_by != "child" {
+            for n in [computed.clone(), legacy, bot.name.clone()] {
+                if !candidates.contains(&n) {
+                    candidates.push(n);
+                }
             }
         }
         let mut found: Option<crate::herdr::AgentInfo> = None;
@@ -279,27 +297,52 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             .filter(|k| crate::config::valid_kind(k))
             .unwrap_or(parent.kind.as_str())
             .to_string();
-        let bot_id = db::ulid();
         let now = db::now();
-        // Hooks are never injected here (the pane was started by the parent, not by us), so the
-        // child's replies come from the terminal fallback; that is the same as any adopted run.
-        sqlx::query(
-            "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve,
-               identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, created_at)
-             VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',NULL,NULL,?,?,?,?,?)",
+        // The same child coming back (its pane was closed and reopened, or its run was ended
+        // by something other than the reconcile) is the same bot: `bots_name_project_live`
+        // would refuse a second live row under that name anyway. Reuse it, new run.
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM bots WHERE project_id = ? AND name = ? AND managed_by = 'child' AND deleted_at IS NULL",
         )
-        .bind(&bot_id)
         .bind(&parent.project_id)
         .bind(&child_name)
-        .bind(&kind)
-        .bind(&parent.identity)
-        .bind(agent.cwd.clone())
-        .bind(&session)
-        .bind(&parent.id)
-        .bind(db::ulid())
-        .bind(&now)
-        .execute(&app.db)
+        .fetch_optional(&app.db)
         .await?;
+        let bot_id = match existing {
+            Some(id) => {
+                sqlx::query("UPDATE bots SET parent_bot_id = ?, cwd = COALESCE(?, cwd), kind = ? WHERE id = ?")
+                    .bind(&parent.id)
+                    .bind(agent.cwd.clone())
+                    .bind(&kind)
+                    .bind(&id)
+                    .execute(&app.db)
+                    .await?;
+                id
+            }
+            None => {
+                let bot_id = db::ulid();
+                // Hooks are never injected here (the pane was started by the parent, not by
+                // us), so the child's replies come from the terminal fallback.
+                sqlx::query(
+                    "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve,
+                       identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, created_at)
+                     VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',NULL,NULL,?,?,?,?,?)",
+                )
+                .bind(&bot_id)
+                .bind(&parent.project_id)
+                .bind(&child_name)
+                .bind(&kind)
+                .bind(&parent.identity)
+                .bind(agent.cwd.clone())
+                .bind(&session)
+                .bind(&parent.id)
+                .bind(db::ulid())
+                .bind(&now)
+                .execute(&app.db)
+                .await?;
+                bot_id
+            }
+        };
         let run_id = db::ulid();
         let status = agent.agent_status.normalized().as_str().to_string();
         sqlx::query(

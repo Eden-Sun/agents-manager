@@ -908,6 +908,14 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
+    // A spawned child (`managed_by='child'`) only ever exists as the pane its parent opened;
+    // starting one here would open a second, unrelated pane under the same bot.
+    if bot.managed_by == "child" {
+        return Err(LcError::conflict(
+            "a spawned child is started by its parent agent, not from here",
+            json!({"parent_bot_id": bot.parent_bot_id}),
+        ));
+    }
     if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }
