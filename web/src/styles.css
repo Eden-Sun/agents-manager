@@ -1809,6 +1809,23 @@ button:disabled {
   box-sizing: border-box;
 }
 
+/* issue #25：對話只留最近 500 則，更早的按這顆補回來（`LoadEarlier`）。 */
+.load-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 0 0 12px;
+}
+
+.load-earlier .btn {
+  font-size: 12px;
+  padding: 4px 12px;
+  opacity: 0.75;
+}
+
+.load-earlier .btn:hover:not(:disabled) {
+  opacity: 1;
+}
+
 /* Unified empty / loading / error state for the main area. */
 .msg-empty {
   margin: auto;

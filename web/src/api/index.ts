@@ -68,8 +68,11 @@ export async function fetchState(): Promise<AppState> {
   return toState(await transport.request('GET', '/state'))
 }
 
-export async function fetchMessages(botId: string, limit = 200): Promise<MessagesPage> {
-  const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/messages?limit=${limit}`)
+/** API.md §6: `before` = 目前最舊一則的 id，用來往前翻（issue #25 的「載入更早的訊息」）。 */
+export async function fetchMessages(botId: string, limit = 200, before?: string): Promise<MessagesPage> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (before) q.set('before', before)
+  const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/messages?${q.toString()}`)
   return toMessagesPage(raw, botId)
 }
 
