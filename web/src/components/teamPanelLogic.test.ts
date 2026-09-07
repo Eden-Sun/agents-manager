@@ -23,7 +23,15 @@ test('describeEvent explains reopen and lost native context notes', () => {
   )
   assert.equal(
     describeEvent({ ...base, payload: { action: 'member_context_lost', bot: 'team-pm', role: 'pm', why: 'no_session_id' } } as TeamEvent),
-    'PM 沒能續接先前對話，已改為新對話',
+    'PM 沒能續接先前對話（找不到先前的 session），改為新對話',
+  )
+  assert.equal(
+    describeEvent({ ...base, payload: { action: 'member_context_lost', bot: 'team-reviewer', role: 'reviewer', why: 'unsupported_kind' } } as TeamEvent),
+    'Reviewer 沒能續接先前對話（這個 agent 不支援原生續接），改為新對話',
+  )
+  assert.equal(
+    describeEvent({ ...base, payload: { action: 'member_context_lost', bot: 'team-pm', role: 'pm', why: 'resume_mismatch' } } as TeamEvent),
+    'PM 沒能續接先前對話（續接後的 session 不一致），改為新對話',
   )
 })
 
