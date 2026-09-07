@@ -278,7 +278,7 @@ function BotRow({
         ) : null}
         <span className="bot-sub">
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
-          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} quota={quotaLevel} />
+          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
           {quotaWarning ? (
             // 額度 critical：警語取代模型標籤（側欄窄，優先顯示這個）；文字撐不下就截斷，完整內容看 title。
             <span
@@ -288,7 +288,19 @@ function BotRow({
               ⚠ 額度剩 {quotaWarning.pct}%
             </span>
           ) : (
-            <ModelTag botId={botId} />
+            <>
+              <ModelTag botId={botId} />
+              {/* 額度黃燈：頂端 QuotaStrip 已經黃了，側欄不提示等於兩套數字。只在還沒到
+                  critical 時出現（critical 走上面那條警語，不重複佔位）。 */}
+              {quotaLevel ? (
+                <span
+                  className={`bot-quota-chip ${quotaLevel.level}`}
+                  title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaLevel.window} 額度剩 ${quotaLevel.pct}%`}
+                >
+                  {quotaLevel.window} {quotaLevel.pct}%
+                </span>
+              ) : null}
+            </>
           )}
         </span>
         {/* agent 對自己工作的一句話（claude 的 pane 標題）。只有選取中的那一列給它一整行：

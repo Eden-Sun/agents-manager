@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
-import type { QuotaLevel } from '../store/store'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
@@ -34,40 +33,31 @@ export function IdentityBadge({
   name,
   showDefault,
   kind,
-  quota,
 }: {
   name: string | null
   showDefault?: boolean
   kind?: BotKind
-  /** 這個身份的額度燈號（`botQuotaLevel`）。有值就跟頂端的條同色，並在名字後面帶剩餘 %。 */
-  quota?: QuotaLevel | null
 }) {
-  const q = quota ? ` ${quota.level}` : ''
-  const qTitle = quota ? `｜${quota.window} 額度剩 ${quota.pct}%` : ''
-  const pct = quota ? <span className="identity-badge-pct">{quota.pct}</span> : null
   // 沒指定身份時仍要標出來，不然本機預設和 cc1 在列表上長得一樣。
   if (!name) {
     if (!showDefault) return null
     // claude 的本機預設帳號就是 cc0；其他 kind 沒有這套身分。
     if (kind && kind !== 'claude') {
       return (
-        <span className={`identity-badge is-default${q}`} title={`身份：不指定（本機預設）${qTitle}`}>
+        <span className="identity-badge is-default" title="身份：不指定（本機預設）">
           預設
-          {pct}
         </span>
       )
     }
     return (
-      <span className={`identity-badge${q}`} title={`身份：不指定（本機預設 cc0）${qTitle}`}>
+      <span className="identity-badge" title="身份：不指定（本機預設 cc0）">
         cc0
-        {pct}
       </span>
     )
   }
   return (
-    <span className={`identity-badge${q}`} title={`身份：${name}${qTitle}`}>
+    <span className="identity-badge" title={`身份：${name}`}>
       {name}
-      {pct}
     </span>
   )
 }

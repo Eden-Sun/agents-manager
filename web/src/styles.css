@@ -492,6 +492,15 @@ button:disabled {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /*
+   * 側欄只該有一條（直的）捲軸。`overflow-y: auto` 會讓 x 軸也變成 auto，而 icon 鍵的
+   * 提示泡泡（`.icon-tip[data-tip]::after`）是 `left: 50%` + `translateX(-50%)`：
+   * transform 不算進版面，所以每顆貼右緣的鍵都往右多撐出半個泡泡寬（實測整條清單
+   * scrollWidth 324 vs clientWidth 287）。結果就是清單底下多一條橫捲軸、卡片還能被
+   * 左右拖動，看起來像 bot 清單自己有一層捲動容器。x 軸關掉，泡泡本來就靠 transform
+   * 顯示在正確位置，畫面上不會少東西。
+   */
+  overflow-x: hidden;
   padding: 8px 8px 16px;
 }
 
@@ -1245,6 +1254,30 @@ button:disabled {
   color: var(--danger);
   font-weight: 600;
   cursor: default;
+}
+
+/* 額度提示（`5h 16%`）：跟頂端 QuotaStrip 同一組 low/critical 門檻，排在模型標籤後面。 */
+.bot-quota-chip {
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.bot-quota-chip.crit {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 /* 身份是辨識關鍵，先讓模型名截字。 */
@@ -4586,22 +4619,6 @@ button:disabled {
   color: var(--text-dim);
   border-color: var(--border);
   font-weight: 500;
-}
-/* 額度黃／紅：跟頂端 QuotaStrip 同一組門檻（daemon 的 low / critical），
-   側欄才不會出現「上面黃了下面還是灰的」。 */
-.identity-badge.warn {
-  background: var(--warn-soft);
-  color: var(--warn);
-  border-color: var(--warn);
-}
-.identity-badge.crit {
-  background: var(--danger-soft);
-  color: var(--danger);
-  border-color: var(--danger);
-}
-.identity-badge-pct {
-  margin-left: 4px;
-  font-weight: 700;
 }
 .identity-row {
   display: flex;
