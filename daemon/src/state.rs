@@ -64,8 +64,9 @@ pub struct App {
     pub ui_token: String,
     pub herdr_session: String,
     /// Set only by `cargo dev` (`AM_DEV_LAN=1`): the daemon is bound to every interface for
-    /// direct LAN access, so the peer-address and Origin checks accept RFC1918 too, not just
-    /// loopback. A plain `agents-managerd serve` never sets this and stays localhost-only.
+    /// direct LAN/Tailscale/etc access, so the peer-address and Origin checks accept any peer,
+    /// not just loopback. A plain `agents-managerd serve` never sets this and stays
+    /// localhost-only.
     pub allow_lan: bool,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
