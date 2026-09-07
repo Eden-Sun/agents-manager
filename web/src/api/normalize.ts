@@ -641,8 +641,19 @@ export function lampOf(run: Run | undefined | null, connected: boolean): Lamp {
           ? 'working'
           : run.agent_status === 'blocked'
             ? 'blocked'
-            : 'unknown'
+            : // 剛起來的 run 還沒有任何 hook／快照分類（實測 claude 要 ~20 秒才回第一個狀態）。
+              // 這段期間標「狀態未知」會讓剛新增的 bot 看起來是壞的、像沒生出來；它其實正在開。
+              // 只在起跑後 90 秒內這樣說，之後真的問不到狀態才是 `unknown`。
+              justStarted(run)
+              ? 'starting'
+              : 'unknown'
   }
+}
+
+/** run 是不是剛起來（< 90 秒）。時間戳讀不出來時當作不是，寧可標 unknown 也不要一直說「啟動中」。 */
+function justStarted(run: Run): boolean {
+  const t = Date.parse(run.started_at)
+  return Number.isNaN(t) ? false : Date.now() - t < 90_000
 }
 
 export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapshot {
