@@ -121,7 +121,6 @@ function TeamNode({ team }: { team: Team }) {
             type="button"
             className="icon-btn icon-tip"
             disabled={busy}
-            title="清理：移除成員與 worktree（分支保留）"
             aria-label={`清理 Team #${team.issue_number}`}
             data-tip={`清理 · #${team.issue_number}`}
             onClick={(e) => {
@@ -136,7 +135,6 @@ function TeamNode({ team }: { team: Team }) {
           type="button"
           className="icon-btn icon-tip danger"
           disabled={deleting}
-          title={`刪除 Team #${team.issue_number}：連紀錄一起移除${terminal ? '' : '（進行中，會先停止所有成員）'}\n訊息與分支預設保留`}
           aria-label={`刪除 Team #${team.issue_number}`}
           data-tip={`刪除 · #${team.issue_number}`}
           onClick={(e) => {

@@ -274,7 +274,6 @@ export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) =
         className="icon-btn attach-pick icon-tip"
         disabled={disabled}
         aria-label="附加圖片"
-        title="附加圖片（也可以直接拖進來或貼上）"
         data-tip="附加圖片 · 拖放 / 貼上"
         onClick={() => ref.current?.click()}
       >

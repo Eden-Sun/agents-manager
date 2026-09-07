@@ -39,7 +39,6 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={label}
-        title={label}
         data-tip={open ? undefined : label}
         onClick={() => setOpen((v) => !v)}
       >

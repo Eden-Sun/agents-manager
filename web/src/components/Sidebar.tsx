@@ -1085,7 +1085,6 @@ export function Sidebar() {
                   <button
                     type="button"
                     className="icon-btn add icon-tip"
-                    title={`在「${p.label}」新增 Bot`}
                     aria-label={`在 ${p.label} 新增 Bot`}
                     data-tip={`新增 Bot · ${p.label}`}
                     aria-expanded={false}
