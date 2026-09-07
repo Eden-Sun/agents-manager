@@ -6,6 +6,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { effortLabel, quotaKey } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useScrollTail } from '../hooks/useScrollTail'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
@@ -254,46 +255,6 @@ export function TypingDots() {
       <i />
     </span>
   )
-}
-
-/**
- * "Jump to the newest" for a scrollback list.
- *
- * `stick` (a ref) already decides whether the list should follow new output, but a ref
- * cannot drive rendering — so the same measurement is mirrored into state, and the button
- * only exists while the user has actually scrolled away from the tail.
- */
-export function useScrollTail(deps: unknown[]) {
-  const ref = useRef<HTMLDivElement>(null)
-  const stick = useRef(true)
-  const [atBottom, setAtBottom] = useState(true)
-
-  // Follow the tail (new messages, live output growing) only while the user is at the bottom.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-    // The list this hook serves decides what "changed" means.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
-
-  const onScroll = (e: { currentTarget: HTMLDivElement }) => {
-    const el = e.currentTarget
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-    stick.current = near
-    setAtBottom((prev) => (prev === near ? prev : near))
-  }
-
-  const toBottom = () => {
-    const el = ref.current
-    if (!el) return
-    stick.current = true
-    // Jump, don't animate: a long scrollback makes `smooth` take seconds, and the point of
-    // the button is to get there at once. The list keeps following the tail afterwards.
-    el.scrollTop = el.scrollHeight
-    setAtBottom(true)
-  }
-
-  return { ref, onScroll, atBottom, toBottom }
 }
 
 /**
