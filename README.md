@@ -85,7 +85,7 @@ flowchart LR
 
 - **pane 血緣**：一個 bot 一個 tab，對帳時凡是 split 在某個 bot 活動 run 那個 tab 裡的 agent，一律當它的子代；名字前綴只是跨 tab / team workspace 的備援。孫代照樣掛在子代下面。
 - **herdr PATH shim**：daemon 起的每個 pane，PATH 最前面放一支包裝過的 `herdr`。`agent start <name>` 自動補上 `<父 agent 名>-` 前綴；`pane split` / `tab create` 自動把父的帳號（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）與 hook 環境用 `--env` 帶下去——herdr 的 pane 是 server 生的，不會繼承呼叫端 shell，沒有這段子 pane 會用預設帳號起來、也收不到 hook。
-- **herdr skill**：啟動 claude bot 前，daemon 把 `herdr --skill` 寫進該身份的 `skills/herdr/SKILL.md`（內容相同就不動），前面插一段 AG Man 規則：命名、`pane split --pane "$HERDR_PANE_ID"`、不要 `git stash`。codex / grok 在 persona 裡拿到同一份文字。
+- **herdr skill**：啟動 claude bot 前，daemon 把 `herdr --skill` 寫進該身份的 `skills/herdr/SKILL.md`（內容相同就不動），前面插一段 AG Man 規則：先重用閒置的 child、命名、`pane split --pane "$HERDR_PANE_ID"`、不要 `git stash`。codex / grok 在 persona 裡拿到同一份文字。
 
 **主機 shell** — 主機列（含遠端）可以直接開一個 shell：裝工具、看 log、清 worktree，不必另外開終端 ssh。畫面是終端快照加一行指令輸入，附 Ctrl+C / Esc 鈕，↑↓ 翻歷史；只能操作 daemon 自己開的 pane。開著的 shell 列在主機列上，可以點回去或結束。
 

@@ -881,6 +881,8 @@ pub fn child_agent_rules(agent_name: &str) -> String {
         "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。\
 需要開子任務或平行工作時，就用 herdr 開子 agent，並照這些規則：\n\
 \n\
+- **先找閒置的 child**：開新的子 agent 前先 `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent；\
+有就直接 `herdr agent prompt <名稱> \"…\"` 交下一份工作，不要每件事都開一顆新的（除非使用者指定要新開一個）。\n\
 - **命名**：`herdr agent start <名稱> …` 的名稱要以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
 PATH 上的 herdr 會自動幫你補，但自己寫對比較清楚。\n\
 - **開 pane**：`herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。不要省略目標——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
@@ -1206,6 +1208,7 @@ mod model_args_tests {
         assert!(doc.contains("## AG Man 規則"), "the rules lead the body");
         assert!(doc.contains("`proj-abc123-`"), "the naming rule quotes this agent's name");
         assert!(doc.contains("git stash"), "the no-stash rule is carried");
+        assert!(doc.contains("herdr agent list"), "reuse an idle child before opening a new one");
         assert!(doc.contains("$HERDR_PANE_ID"), "how to split its own pane");
         assert!(doc.contains("herdr organizes terminals."), "herdr's own body survives");
         // The rules must come before herdr's text, not after it.
