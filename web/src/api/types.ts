@@ -702,6 +702,8 @@ export interface MemProcess {
   argv: string
   /** herdr 注入的 pane（`w168:p1`）；讀不到環境時 null。 */
   pane_id: string | null
+  /** 那個 pane 所屬 herdr session 的 socket（pane id 是 per-session 的）；讀不到時 null。 */
+  socket_path: string | null
   /** AG Man 起的 bot 才有；bot 已刪也還在，此時 `bot_name` 為 null。 */
   bot_id: string | null
   bot_name: string | null

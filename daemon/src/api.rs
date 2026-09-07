@@ -109,6 +109,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/mem", get(get_mem))
         .route("/mem/processes", get(get_mem_processes))
         .route("/mem/processes/kill", post(kill_mem_process))
+        .route("/mem/processes/pane", get(get_mem_pane))
         .route("/search/messages", get(search_messages))
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
@@ -1569,6 +1570,21 @@ async fn get_mem_processes(State(app): State<Arc<App>>, Query(q): Query<HashMap<
         return Err(LcError::NotFound(format!("unknown host `{host}`")));
     }
     crate::memproc::processes(&app, &host).await.map(Json).map_err(|e| LcError::Upstream(format!("{e:#}")))
+}
+
+/// `GET /api/mem/processes/pane?host=&pane_id=&socket=&lines=` — the visible text of one pane in the
+/// RAM list, so "自己開的 pane wM:pB" can be told apart from the other nine.
+async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    let Some(pane_id) = q.get("pane_id").filter(|p| !p.is_empty()) else {
+        return Err(LcError::Bad("pane_id required".into()));
+    };
+    let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(40).clamp(1, 500);
+    if app.hosts.get(&host).await.is_none() {
+        return Err(LcError::NotFound(format!("unknown host `{host}`")));
+    }
+    let socket = q.get("socket").map(String::as_str);
+    Ok(Json(crate::memproc::pane_preview(&app, &host, pane_id, socket, lines).await?))
 }
 
 /// SPEC §15.4: signal one process inside a herdr tree. The guard rails (must be in the tree,

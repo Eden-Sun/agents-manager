@@ -424,6 +424,16 @@ export async function fetchMem(): Promise<MemSnapshot> {
  * `GET /api/mem/processes?host=…` — 那個數字是由哪些程序組成的（SPEC §15.2）。
  * 舊 daemon 沒有這支 → 空清單，popover 顯示「這台 daemon 還不會列」而不是壞掉。
  */
+/** `GET /api/mem/processes/pane` — 清單裡「自己開的 pane」現在畫面上的字（SPEC §15.2）。 */
+export async function fetchMemPane(host: string, paneId: string, socket: string | null, lines = 40): Promise<TerminalSnapshot> {
+  const sock = socket ? `&socket=${encodeURIComponent(socket)}` : ''
+  const raw = await transport.request(
+    'GET',
+    `/mem/processes/pane?host=${encodeURIComponent(host)}&pane_id=${encodeURIComponent(paneId)}${sock}&lines=${lines}`,
+  )
+  return toTerminal(raw, 'visible')
+}
+
 export async function fetchMemProcesses(host: string): Promise<MemProcesses> {
   try {
     return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`))

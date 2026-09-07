@@ -1064,6 +1064,7 @@ export function toMemProcesses(v: unknown): MemProcesses {
       exe: str(p.exe),
       argv: str(p.argv),
       pane_id: p.pane_id == null ? null : str(p.pane_id),
+      socket_path: p.socket_path == null ? null : str(p.socket_path),
       bot_id: p.bot_id == null ? null : str(p.bot_id),
       bot_name: p.bot_name == null ? null : str(p.bot_name),
       project_id: p.project_id == null ? null : str(p.project_id),

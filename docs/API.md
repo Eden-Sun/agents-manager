@@ -395,6 +395,23 @@ herdr 這一側現在佔多少常駐記憶體。左上角那一格用的就是�
 砍 bot 走既有的 `POST /bots/{id}/stop`，那條路才會記錄停止。
 
 
+## GET /api/mem/processes/pane（SPEC §15.2，2026-09-08 新增）
+
+`?host=local&pane_id=wM:pB&socket=/Users/me/.config/herdr/herdr.sock&lines=40`（`lines` 1–500，預設 40）。
+`socket` 是清單那列的 `socket_path`：**pane id 是 per herdr session 的**，使用者自己開的 pane 多半在 `default`
+session 而不是 `agents-manager`，daemon 就直接連那個 socket 讀（只限本機；遠端給了 `socket` 回 400）。
+省略 `socket` 時走該主機設定的 session。回那個 pane 現在畫面上的字，
+形狀同 `GET /api/hosts/{name}/shells/{pane_id}/terminal`，但 `source` 固定 `visible`，而且
+**不要求那個 pane 是 AG Man 開的**——清單裡的 pane 正是使用者自己開的。只讀不寫；沒有對應的
+text / keys 端點。
+
+```json
+{ "host":"local","pane_id":"wM:pB","source":"visible","text":"…","revision":12,"truncated":false,"columns":185,"rows":54 }
+```
+
+主機沒接上 herdr → 502；`pane_id` 缺 → 400；pane 不存在 → herdr 的錯誤照回（502）。
+
+
 ## 遠端主機 hosts（SPEC §11.6，2026-09-06 新增）
 
 Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到遠端 herdr。UI 操作方式完全相同，

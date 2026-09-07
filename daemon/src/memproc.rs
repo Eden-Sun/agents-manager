@@ -53,6 +53,9 @@ pub struct MemProcess {
     pub exe: String,
     pub argv: String,
     pub pane_id: Option<String>,
+    /// `HERDR_SOCKET_PATH` from the environment: pane ids are per herdr session, and a
+    /// user's own panes usually live in `default`, not in ours. Needed to read the pane back.
+    pub socket_path: Option<String>,
     pub bot_id: Option<String>,
     pub bot_name: Option<String>,
     pub project_id: Option<String>,
@@ -68,6 +71,7 @@ pub struct MemProcess {
 struct Raw {
     p_index: usize,
     pane_id: Option<String>,
+    socket_path: Option<String>,
     bot_id: Option<String>,
     owner: &'static str,
     subtree_bytes: u64,
@@ -173,8 +177,9 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
         let blob = envs.get(&pid);
         let bot_id = blob.and_then(|b| env_value(b, "AM_BOT_ID"));
         let pane_id = blob.and_then(|b| env_value(b, "HERDR_PANE_ID"));
+        let socket_path = blob.and_then(|b| env_value(b, "HERDR_SOCKET_PATH"));
         let owner = owner_of(is_herdr(p), bot_id.as_deref(), pane_id.as_deref());
-        raws.push(Raw { p_index: i, pane_id, bot_id, owner, subtree_bytes: bytes, children: kids });
+        raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, owner, subtree_bytes: bytes, children: kids });
     }
     (procs, raws)
 }
@@ -196,6 +201,7 @@ fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
                 exe: exe_name(&p.argv).to_string(),
                 argv: p.argv.clone(),
                 pane_id: r.pane_id.clone(),
+                socket_path: r.socket_path.clone(),
                 bot_id: r.bot_id.clone(),
                 bot_name: None,
                 project_id: None,
@@ -250,6 +256,39 @@ pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
         "host": host,
         "sampled_at": chrono::Utc::now().to_rfc3339(),
         "processes": rows,
+    }))
+}
+
+/// `GET /api/mem/processes/pane` — what is on screen in one pane of the list (SPEC §15.2).
+///
+/// The list says "自己開的 pane wM:pB", which tells the user nothing about *which* of their
+/// ten claude sessions that is. The pane's visible text answers it. Any pane herdr knows is
+/// readable — unlike `shell::read` there is no registration to check, these panes were
+/// never ours — but only the last `lines` visible rows, plain text, never keys or input.
+pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Option<&str>, lines: u32) -> crate::lifecycle::LcResult<Value> {
+    use crate::lifecycle::LcError;
+    // Local panes from another herdr session (the user's own `default`, typically): talk to
+    // that session's socket directly. It is the same user's socket — the process list just
+    // told us the path — so this is no wider than what `herdr` in their shell can do.
+    let client = match socket.filter(|s| !s.is_empty()) {
+        Some(path) if host == crate::config::LOCAL_HOST => {
+            if !std::path::Path::new(path).exists() {
+                return Err(LcError::Upstream(format!("herdr socket `{path}` 不在了")));
+            }
+            crate::herdr::HerdrClient::new(path)
+        }
+        Some(_) => return Err(LcError::Bad("遠端主機只能讀它設定的那個 herdr session".into())),
+        None => crate::api::shell::client_for(app, host).await?.0,
+    };
+    let read = client.pane_read(pane_id, "visible", lines).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let (columns, rows) = match client.pane_size(pane_id).await {
+        Ok(Some((w, h))) => (Some(w), Some(h)),
+        _ => (None, None),
+    };
+    Ok(json!({
+        "host": host, "pane_id": pane_id,
+        "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,
+        "columns": columns, "rows": rows,
     }))
 }
 
