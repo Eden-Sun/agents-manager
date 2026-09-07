@@ -1336,11 +1336,6 @@ async fn add_resolved_issues(
             }),
         )
         .await?;
-        sqlx::query("UPDATE teams SET ended_at = NULL WHERE id = ?")
-            .bind(team_id)
-            .execute(&app.db)
-            .await
-            .map_err(any_err)?;
         // `set_phase` clears the stale terminal timestamp and keeps `pause_reason` NULL while
         // preserving "reopen" in the phase event for the audit log.
         set_phase(app, team_id, "starting", Some("reopen"), None).await?;
