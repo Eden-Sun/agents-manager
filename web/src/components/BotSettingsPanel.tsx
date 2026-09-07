@@ -3,6 +3,7 @@ import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
+import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
@@ -103,17 +104,6 @@ export function PersonaMark({ persona }: { persona: string | null }) {
       </svg>
     </span>
   )
-}
-
-/**
- * 這個 kind 的 TUI 有沒有「不離開 session 就能登入 / 換帳號」的 slash 指令。
- *
- * claude 2.1.263 與 grok 1.0.13 都有 `/login`；**codex 0.153.4 沒有**——它的 slash 選單
- * 只有 `/logout`，登入得在 TUI 外面跑 `codex login`。daemon 那邊同一份判斷在
- * `lifecycle::login_slash_command`，對不上時後端會回 400 `login_unsupported`。
- */
-function canLoginInSession(kind: BotKind): boolean {
-  return kind === 'claude' || kind === 'grok'
 }
 
 /**
