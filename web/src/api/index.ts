@@ -778,3 +778,49 @@ export function newClientRequestId(): string {
 
 export { num }
 export type { SocketHandlers }
+
+// -------------------------------------------------------- 快速 git（chat 標題列的 chip，2026-09-08）
+
+export interface GitSummary {
+  git: boolean
+  branch: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  changed: number
+  untracked: number
+  insertions: number
+  deletions: number
+}
+
+/** `GET /api/projects/:id/git`。舊 daemon 沒這支端點（404）→ `{git:false}`，chip 靜默消失。 */
+export async function fetchGit(projectId: string): Promise<GitSummary> {
+  const none: GitSummary = { git: false, branch: null, upstream: null, ahead: 0, behind: 0, changed: 0, untracked: 0, insertions: 0, deletions: 0 }
+  let raw: unknown
+  try {
+    raw = await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/git`)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return none
+    throw e
+  }
+  const o = isRec(raw) ? raw : {}
+  if (pick(o, 'git') !== true) return none
+  return {
+    git: true,
+    branch: optStr(pick(o, 'branch')),
+    upstream: optStr(pick(o, 'upstream')),
+    ahead: num(pick(o, 'ahead')),
+    behind: num(pick(o, 'behind')),
+    changed: num(pick(o, 'changed')),
+    untracked: num(pick(o, 'untracked')),
+    insertions: num(pick(o, 'insertions')),
+    deletions: num(pick(o, 'deletions')),
+  }
+}
+
+/** `POST …/git/commit`（`git add -A && git commit`）、`…/git/push`、`…/git/pull --rebase --no-autostash`。回 git 的輸出。 */
+export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull', message?: string): Promise<string> {
+  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/git/${op}`, op === 'commit' ? { message } : undefined)
+  const o = isRec(raw) ? raw : {}
+  return str(pick(o, 'output'), '')
+}

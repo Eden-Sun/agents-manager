@@ -54,6 +54,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/chat", post(project_chat))
         .route("/projects/{id}/github/refresh", post(refresh_github))
         .route("/projects/{id}/submodules", get(get_submodules))
+        .route("/projects/{id}/git", get(get_git))
+        .route("/projects/{id}/git/commit", post(git_commit))
+        .route("/projects/{id}/git/push", post(git_push))
+        .route("/projects/{id}/git/pull", post(git_pull))
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
         // SPEC-team §10
@@ -464,6 +468,28 @@ async fn get_submodules(
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     let subs = crate::github::list_submodules(&app, &p, flag(&q.refresh)).await?;
     Ok(Json(json!({"project_id": id, "submodules": subs})))
+}
+
+// ---------------------------------------------------------------- quick git (chat header chip)
+
+async fn get_git(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    Ok(Json(serde_json::to_value(crate::git_quick::summary(&app, &id).await?).unwrap_or_default()))
+}
+
+async fn git_commit(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<crate::git_quick::CommitBody>,
+) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::git_quick::commit(&app, &id, &b.message).await?))
+}
+
+async fn git_push(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::git_quick::push(&app, &id).await?))
+}
+
+async fn git_pull(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::git_quick::pull(&app, &id).await?))
 }
 
 async fn get_issues(
