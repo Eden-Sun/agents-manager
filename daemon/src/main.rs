@@ -220,6 +220,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
 
     // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
+    tools::spawn_alias_poller(app.clone());
     quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());
     quota_claude::spawn_claude_poller(app.clone());

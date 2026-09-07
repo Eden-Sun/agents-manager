@@ -110,11 +110,26 @@ pub struct HostTools {
     pub checked_at: String,
 }
 
+/// The `ccN` alias half of the probe, on its own so the poller can re-run just this part
+/// every minute without a CLI round trip (SPEC §16.5).
+macro_rules! alias_sh {
+    () => {
+        r#"
+al=$( "${SHELL:-/bin/sh}" -lic 'alias' 2>/dev/null )
+[ -n "$al" ] || al=$(cat "$HOME/.zshrc" 2>/dev/null)
+printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]=" | while IFS= read -r line; do
+  printf 'AM_ALIAS %s\n' "$line"
+done
+"#
+    };
+}
+pub const ALIAS_SH: &str = alias_sh!();
+
 /// The probe. Every line is `AM_<WHAT> <kind> <value>`; a missing value means unknown.
 /// claude's login on macOS lives in the Keychain: `security find-generic-password` without
 /// `-w` needs no unlock, but a non-interactive session can still be refused — that case is
 /// reported as unknown rather than "not logged in".
-pub const PROBE_SH: &str = r#"
+pub const PROBE_SH: &str = concat!(r#"
 for k in claude codex grok; do
   p=$( "${SHELL:-/bin/sh}" -lic "command -v $k" 2>/dev/null | tail -1 )
   [ -n "$p" ] || p=$(command -v "$k" 2>/dev/null)
@@ -139,12 +154,7 @@ fi
 if [ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then printf 'AM_LOGIN codex 1\n'; else printf 'AM_LOGIN codex 0\n'; fi
 GH="${GROK_HOME:-$HOME/.grok}"
 if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
-al=$( "${SHELL:-/bin/sh}" -lic 'alias' 2>/dev/null )
-[ -n "$al" ] || al=$(cat "$HOME/.zshrc" 2>/dev/null)
-printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]=" | while IFS= read -r line; do
-  printf 'AM_ALIAS %s\n' "$line"
-done
-"#;
+"#, alias_sh!());
 
 pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
     let mut m: BTreeMap<String, ToolInfo> = crate::config::KINDS.iter().map(|k| (k.to_string(), ToolInfo::default())).collect();
@@ -593,6 +603,52 @@ pub fn spawn_detect(app: Arc<App>, host: String) {
                 }
             }
             Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),
+        }
+    });
+}
+
+/// How often the `ccN` aliases are re-read. Cheap (one login shell, no CLI), so a new
+/// alias in `~/.zshrc` shows up within a minute instead of at the next daemon restart.
+const ALIAS_POLL_EVERY: Duration = Duration::from_secs(60);
+
+/// Read only the aliases off `host`; `None` when the host is unreachable.
+async fn poll_aliases(app: &Arc<App>, host: &str) -> Option<Vec<crate::config::IdentityCfg>> {
+    let out = if host == LOCAL_HOST {
+        run_local(ALIAS_SH, PROBE_TIMEOUT).await
+    } else {
+        let conn = app.hosts.get(host).await?;
+        if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        conn.ssh_exec_path(ALIAS_SH).await
+    };
+    match out {
+        Ok(o) => Some(parse_shell_identities(&o)),
+        Err(e) => {
+            tracing::debug!(host, error = %e, "alias poll failed");
+            None
+        }
+    }
+}
+
+/// Every [`ALIAS_POLL_EVERY`] compare each host's `ccN` aliases with the cached detection
+/// and run a full [`detect`] only when the set changed (a name added, removed, or pointed
+/// at a different `CLAUDE_CONFIG_DIR`). Hosts with no cache yet are left to their own
+/// first detection, which runs on connect.
+pub fn spawn_alias_poller(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(ALIAS_POLL_EVERY).await;
+            for name in app.hosts.names().await {
+                let Some(cached) = app.tools.lock().await.get(&name).map(|t| t.shell_identities.clone()) else { continue };
+                let Some(now) = poll_aliases(&app, &name).await else { continue };
+                if now == cached {
+                    continue;
+                }
+                tracing::info!(host = %name, before = ?cached.iter().map(|i| &i.name).collect::<Vec<_>>(),
+                    after = ?now.iter().map(|i| &i.name).collect::<Vec<_>>(), "ccN aliases changed; re-detecting");
+                spawn_detect(app.clone(), name);
+            }
         }
     });
 }
