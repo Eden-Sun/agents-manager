@@ -9,6 +9,7 @@ import { KindTag } from './KindTag'
 import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
+import { TeamIssueProgress } from './TeamIssueProgress'
 
 /**
  * SPEC-team §11.4 — sidebar 裡 Project 底下的 Team 節點。
@@ -146,6 +147,8 @@ function TeamNode({ team }: { team: Team }) {
         </button>
         </span>
       </div>
+      {/* 進度與耗時貼在標題正下方，不隨成員收合消失：這兩個數字是掃過側欄時唯一想知道的。 */}
+      <TeamIssueProgress team={team} />
       {open
         ? members.map((b) => <MemberRow key={b.id} bot={b} />)
         : null}
