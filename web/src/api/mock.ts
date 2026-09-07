@@ -11,7 +11,8 @@
  *
  * Dev helpers on `window.__amMock`: `resync()`, `dropSocket()`, `block(botId)`, `disconnect()`,
  * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts), `paneSqueeze(n)` /
- * `paneMoveOff()` / `paneMoveOn()`（窄 pane 警示與「移到自己的分頁」的退回路徑）。
+ * `paneMoveOff()` / `paneMoveOn()`（窄 pane 警示與「移到自己的分頁」的退回路徑）、
+ * `hostShellsOff()` / `hostShellsOn()`（主機 shell 的缺端點退回路徑）。
  */
 
 import { parseMentions } from './mentions'
@@ -295,6 +296,20 @@ interface MockTool {
   logged_in: boolean | null
 }
 
+/** `POST /api/hosts/:name/shells` 開出來的假 shell（有真的行緩衝，見 `shellText`）。 */
+interface MockShell {
+  host: string
+  pane_id: string
+  tab_id: string
+  workspace_id: string
+  cwd: string
+  created_at: string
+  /** 已經「印出去」的行。 */
+  lines: string[]
+  /** 還在提示符後面、還沒按 Enter 的字。 */
+  typed: string
+}
+
 interface MockGh {
   installed: boolean
   path: string
@@ -501,6 +516,13 @@ export class MockTransport implements Transport {
   /** Dev helper：模擬「daemon 還沒有 `pane/move-to-tab`」（`__amMock.paneMoveOff()`）。 */
   private paneMoveDisabled = false
 
+  /** `POST /api/hosts/:name/shells` 開出來的假 shell，key = `<host>/<pane_id>`。 */
+  private shells = new Map<string, MockShell>()
+  private shellSeq = 0
+
+  /** Dev helper：模擬「這版 daemon 沒有主機 shell」（`__amMock.hostShellsOff()`）。 */
+  private hostShellsDisabled = false
+
   /** `GET|POST /api/hosts/:name/gh` — 本機預設已登入；新加的遠端主機預設跟 m4p 一樣（active token 失效、另有可切帳號）。 */
   private gh = new Map<string, MockGh>()
 
@@ -668,6 +690,19 @@ export class MockTransport implements Transport {
     if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'login' && method === 'POST') return this.ghLogin(seg[1], b)
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'cancel' && method === 'POST') return this.ghCancel(seg[1])
+    if (seg[0] === 'hosts' && seg[2] === 'shells' && !this.hostShellsDisabled) {
+      const host = decodeURIComponent(seg[1])
+      const pane = seg[3] ? decodeURIComponent(seg[3]) : ''
+      if (method === 'POST' && !pane) return this.openShell(host, String(b.cwd ?? ''))
+      if (method === 'GET' && !pane) return { host, shells: this.shellsOf(host), max: 8 }
+      if (method === 'DELETE' && pane && seg.length === 4) return this.closeShell(host, pane)
+      if (method === 'GET' && seg[4] === 'terminal') {
+        return this.shellTerminal(host, pane, q.get('source') ?? 'visible', Number(q.get('lines') ?? 200))
+      }
+      if (method === 'POST' && seg[4] === 'text') return this.shellText(host, pane, String(b.text ?? ''), b.enter !== false)
+      if (method === 'POST' && seg[4] === 'keys') return this.shellKeys(host, pane, b.keys)
+    }
+
 
     if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)
     if (seg[0] === 'identities' && seg.length === 2 && method === 'DELETE') return this.deleteIdentity(decodeURIComponent(seg[1]))
@@ -1977,6 +2012,126 @@ export class MockTransport implements Transport {
     return { group_id: crid, project_id: projectId, sent, skipped }
   }
 
+  // ---------------------------------------------------------------- 主機 shell
+
+  /**
+   * `POST /api/hosts/:name/shells` 起的假 shell。有一個真的行緩衝，`shellText` 會依指令
+   * 追加輸出——`VITE_MOCK=1` 下要能看出「打了、送了、終端有反應」，不然這個面板的
+   * 輸入框、歷史與按鍵列在 mock 裡全都試不出來。
+   */
+  private openShell(host: string, cwd: string) {
+    if (host !== 'local') {
+      const h = this.host(host)
+      if (!h.connected) throw new ApiError(502, { error: 'upstream', message: `host \`${host}\` is not connected` }, 'upstream')
+    } else if (!this.connected) {
+      throw new ApiError(502, { error: 'upstream', message: 'host `local` is not connected' }, 'upstream')
+    }
+    if (this.shellsOf(host).length >= 8) {
+      throw new ApiError(409, { error: 'conflict', reason: 'too_many_shells', host, max: 8 }, 'conflict')
+    }
+    const dir = cwd.trim() || this.projects.find((p) => p.host === host)?.path || (host === 'local' ? '/Users/m1pro' : `/Users/${host}`)
+    const shell: MockShell = {
+      host,
+      pane_id: `w9:s${++this.shellSeq}`,
+      tab_id: `w9:t${this.shellSeq}`,
+      workspace_id: 'w9',
+      cwd: dir,
+      created_at: now(),
+      lines: [`Last login: ${now().slice(11, 19)} on ttys00${this.shellSeq}`, ''],
+      typed: '',
+    }
+    this.shells.set(`${host}/${shell.pane_id}`, shell)
+    return this.shellJson(shell)
+  }
+
+  private shellJson(s: MockShell) {
+    const { host, pane_id, tab_id, workspace_id, cwd, created_at } = s
+    return { host, pane_id, tab_id, workspace_id, cwd, created_at }
+  }
+
+  private shellsOf(host: string) {
+    return [...this.shells.values()].filter((s) => s.host === host).map((s) => this.shellJson(s))
+  }
+
+  /** 白名單就是這張表：不是 mock 自己開的 pane 一律 404，跟 daemon 同一條規則。 */
+  private shell(host: string, paneId: string): MockShell {
+    const s = this.shells.get(`${host}/${paneId}`)
+    if (!s) throw new ApiError(404, { error: 'not_found', what: 'shell' }, 'shell not found')
+    return s
+  }
+
+  private closeShell(host: string, paneId: string) {
+    this.shells.delete(`${host}/${paneId}`)
+    return {}
+  }
+
+  private shellTerminal(host: string, paneId: string, source: string, lines: number) {
+    const s = this.shell(host, paneId)
+    const all = [...s.lines, `${s.cwd.split('/').pop() ?? '~'} % ${s.typed}`]
+    const shown = all.slice(Math.max(0, all.length - lines))
+    return {
+      host,
+      pane_id: paneId,
+      cwd: s.cwd,
+      source,
+      text: shown.join('\n'),
+      revision: this.seq,
+      truncated: all.length > lines,
+      columns: 120,
+      rows: 30,
+    }
+  }
+
+  private shellText(host: string, paneId: string, text: string, enter: boolean) {
+    const s = this.shell(host, paneId)
+    s.typed += text
+    if (!enter) return {}
+    const cmd = s.typed.trim()
+    s.typed = ''
+    s.lines.push(`${s.cwd.split('/').pop() ?? '~'} % ${cmd}`)
+    if (cmd === 'clear') {
+      s.lines = []
+      return {}
+    }
+    const echo = /^echo\s+(.*)$/.exec(cmd)
+    if (cmd === '') {
+      /* 只按 Enter：提示符再來一行就好 */
+    } else if (echo) {
+      s.lines.push(echo[1].replace(/^["']|["']$/g, ''))
+    } else if (cmd === 'pwd') {
+      s.lines.push(s.cwd)
+    } else if (cmd === 'hostname') {
+      s.lines.push(host === 'local' ? 'm1pro.local' : `${host}.local`)
+    } else if (cmd.startsWith('ls')) {
+      s.lines.push('Cargo.toml  daemon      docs        web')
+    } else if (cmd === 'gh auth status') {
+      s.lines.push('github.com', '  ✓ Logged in to github.com account Eden-Sun (keyring)', '  - Active account: true')
+    } else {
+      s.lines.push(`zsh: command not found: ${cmd.split(/\s+/)[0]}`)
+    }
+    s.lines.push('')
+    return {}
+  }
+
+  private shellKeys(host: string, paneId: string, keys: unknown) {
+    const s = this.shell(host, paneId)
+    const list = Array.isArray(keys) ? keys.map((k) => String(k)) : []
+    if (list.length === 0) throw new ApiError(400, { error: 'bad_request', message: 'keys must not be empty' }, 'bad request')
+    for (const k of list) {
+      if (k === 'ctrl+c') {
+        s.lines.push(`${s.cwd.split('/').pop() ?? '~'} % ${s.typed}^C`, '')
+        s.typed = ''
+      } else if (k === 'esc' || k === 'tab') {
+        /* 在假 shell 裡沒有可觀察的效果，但不能是錯誤：真的 shell 也收得下 */
+      } else if (k === 'enter') {
+        this.shellText(host, paneId, '', true)
+      } else if (k === 'up' || k === 'down') {
+        /* 真 shell 會走它自己的歷史；mock 不模擬 */
+      }
+    }
+    return {}
+  }
+
   private terminal(botId: string, source: string, lines: number) {
     const bot = this.bot(botId)
     const run = this.activeRun(botId)
@@ -2772,6 +2927,12 @@ export class MockTransport implements Transport {
     this.paneMoveDisabled = !on
   }
 
+  /** Dev helper: 模擬舊 daemon —— `/api/hosts/:name/shells*` 全部落到查無此路由的裸 404。 */
+  setHostShellsSupported(on: boolean) {
+    this.hostShellsDisabled = !on
+  }
+
+
   setTeamsSupported(on: boolean) {
     this.teamsDisabled = !on
     if (!on) {
@@ -2838,5 +2999,8 @@ function installDevHelpers(mock: MockTransport) {
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     paneMoveOff: () => mock.setPaneMoveSupported(false),
     paneMoveOn: () => mock.setPaneMoveSupported(true),
+    // 主機 shell
+    hostShellsOff: () => mock.setHostShellsSupported(false),
+    hostShellsOn: () => mock.setHostShellsSupported(true),
   }
 }

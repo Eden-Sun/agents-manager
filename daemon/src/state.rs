@@ -98,6 +98,9 @@ pub struct App {
     pub submodules_cache: Mutex<HashMap<String, (std::time::Instant, Vec<crate::github::Submodule>)>>,
     /// In-flight GitHub device-flow logins, keyed by host name. Memory only; never persisted.
     pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
+    /// Plain shells this daemon opened on a host (`POST /hosts/:name/shells`). Memory only:
+    /// it doubles as the whitelist for sending keys, and a restart must not inherit one.
+    pub host_shells: crate::api::shell::Registry,
 }
 
 impl App {
@@ -145,6 +148,7 @@ impl App {
             issues_cache: Mutex::new(HashMap::new()),
             submodules_cache: Mutex::new(HashMap::new()),
             gh_device: Mutex::new(HashMap::new()),
+            host_shells: Default::default(),
         })
     }
 

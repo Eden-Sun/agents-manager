@@ -21,6 +21,11 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+/// The host-shell endpoints' implementation. Declared here rather than in `main.rs` because
+/// this file is its only caller; the file itself sits alongside the other modules.
+#[path = "shell.rs"]
+pub mod shell;
+
 impl IntoResponse for LcError {
     fn into_response(self) -> Response {
         match self {
@@ -92,6 +97,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/gh", get(get_gh_status))
         .route("/hosts/{name}/gh/login", post(login_gh))
         .route("/hosts/{name}/gh/cancel", post(cancel_gh))
+        .route("/hosts/{name}/shells", get(list_host_shells).post(open_host_shell))
+        .route("/hosts/{name}/shells/{pane_id}", delete(close_host_shell))
+        .route("/hosts/{name}/shells/{pane_id}/terminal", get(get_host_shell_terminal))
+        .route("/hosts/{name}/shells/{pane_id}/text", post(host_shell_text))
+        .route("/hosts/{name}/shells/{pane_id}/keys", post(host_shell_keys))
         .route("/models", get(get_models))
         .route("/quota", get(get_quota))
         .route("/mem", get(get_mem))
@@ -1058,6 +1068,84 @@ async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> R
 async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let (connected, error) = app.hosts.reconnect(&app, &name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
+}
+
+// ---------------------------------------------------------------- host shells
+
+#[derive(Default, Deserialize)]
+struct NewShell {
+    cwd: Option<String>,
+}
+
+/// `POST /api/hosts/:name/shells` — open a plain shell pane on that host.
+async fn open_host_shell(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    body: Option<Json<NewShell>>,
+) -> Result<Response, LcError> {
+    let cwd = body.and_then(|Json(b)| b.cwd);
+    let s = shell::open(&app, &name, cwd.as_deref()).await?;
+    Ok((StatusCode::OK, Json(json!(s))).into_response())
+}
+
+/// `GET /api/hosts/:name/shells` — the shells still alive on that host.
+async fn list_host_shells(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    let shells = shell::list(&app, &name).await?;
+    Ok((StatusCode::OK, Json(json!({"host": name, "shells": shells, "max": shell::MAX_PER_HOST}))).into_response())
+}
+
+/// `GET /api/hosts/:name/shells/:pane_id/terminal?source=&lines=` — shape as §7.
+async fn get_host_shell_terminal(
+    State(app): State<Arc<App>>,
+    Path((name, pane_id)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, LcError> {
+    let source = q.get("source").cloned().unwrap_or_else(|| "visible".into());
+    let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
+    Ok(Json(shell::read(&app, &name, &pane_id, &source, lines).await?))
+}
+
+#[derive(Deserialize)]
+struct ShellTextIn {
+    text: String,
+    /// Defaults to true: typing a line and *not* running it is the unusual case.
+    enter: Option<bool>,
+}
+
+/// `POST /api/hosts/:name/shells/:pane_id/text` — type a line into the shell.
+async fn host_shell_text(
+    State(app): State<Arc<App>>,
+    Path((name, pane_id)): Path<(String, String)>,
+    Json(b): Json<ShellTextIn>,
+) -> Result<Response, LcError> {
+    shell::send_text(&app, &name, &pane_id, &b.text, b.enter.unwrap_or(true)).await?;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// Deliberately not `KeysIn`: a shell has no run, so there is no `expect_run_id` to honour
+/// and accepting one would only look as though it did something.
+#[derive(Deserialize)]
+struct ShellKeysIn {
+    keys: Vec<String>,
+}
+
+/// `POST /api/hosts/:name/shells/:pane_id/keys` — ctrl+c / esc / arrows.
+async fn host_shell_keys(
+    State(app): State<Arc<App>>,
+    Path((name, pane_id)): Path<(String, String)>,
+    Json(b): Json<ShellKeysIn>,
+) -> Result<Response, LcError> {
+    shell::send_keys(&app, &name, &pane_id, &b.keys).await?;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// `DELETE /api/hosts/:name/shells/:pane_id` — close it (idempotent).
+async fn close_host_shell(
+    State(app): State<Arc<App>>,
+    Path((name, pane_id)): Path<(String, String)>,
+) -> Result<Response, LcError> {
+    shell::close(&app, &name, &pane_id).await?;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
 // ---------------------------------------------------------------- v4.0: tools / models / quota

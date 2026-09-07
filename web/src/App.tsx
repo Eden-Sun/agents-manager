@@ -4,6 +4,7 @@ import { useFocusTrap } from './hooks/useFocusTrap'
 import { MOBILE_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
+import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
 import { Sidebar } from './components/Sidebar'
 import { TeamLaunchPanel } from './components/TeamLaunchPanel'
@@ -94,6 +95,8 @@ export default function App() {
   // SPEC-team §11.5：`teamLaunch` / `selectedTeamId` 與 `selectedProjectId` 互斥。
   const teamLaunch = useStore((s) => s.teamLaunch)
   const teamId = useStore((s) => s.selectedTeamId)
+  // 主機 shell：同樣與上面每一個互斥，而且排在最前面——它是使用者剛剛按出來的暫時性視圖。
+  const shellView = useStore((s) => s.shellView)
   // 只為了下面那個 key：ChatPanel 自己從 store 讀 selectedBotId。
   const botId = useStore((s) => s.selectedBotId)
   const [drawer, setDrawer] = useState(false)
@@ -115,7 +118,7 @@ export default function App() {
   // Compared during render rather than from an effect: that is React's own answer for
   // "adjust state when a prop changes", and it avoids the extra paint of the stale open
   // drawer that a post-render effect would leave on screen for a frame.
-  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${teamId ?? ''}|${teamLaunch ? `${teamLaunch.projectId}:${teamLaunch.issueNumber}` : ''}`
+  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${teamId ?? ''}|${teamLaunch ? `${teamLaunch.projectId}:${teamLaunch.issueNumber}` : ''}|${shellView ? `${shellView.host}:${shellView.paneId}` : ''}`
   const [lastNav, setLastNav] = useState({ selection, isMobile })
   if (lastNav.selection !== selection || lastNav.isMobile !== isMobile) {
     setLastNav({ selection, isMobile })
@@ -184,7 +187,15 @@ export default function App() {
       ) : null}
       <main className="main">
         <ConnBanner />
-        {teamLaunch ? (
+        {shellView ? (
+          <HostShellPanel
+            key={`${shellView.host}:${shellView.paneId}`}
+            host={shellView.host}
+            paneId={shellView.paneId}
+            cwd={shellView.cwd}
+            onOpenSidebar={() => setDrawer(true)}
+          />
+        ) : teamLaunch ? (
           <TeamLaunchPanel
             key={`${teamLaunch.projectId}:${teamLaunch.repo}:${teamLaunch.issueNumber}`}
             projectId={teamLaunch.projectId}

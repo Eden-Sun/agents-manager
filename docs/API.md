@@ -494,6 +494,84 @@ host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 
 
 放棄進行中的裝置碼。回應同 GET（`mode: "cancel"`，`pending: null`）。
 
+## 主機 shell（2026-09-07 新增）
+
+在某台主機（`local` 或設定過的 `[[hosts]]`）開一個**純 shell** 的 herdr pane，用來裝工具、看 log、跑 `gh auth status`、清 worktree 這類雜事。沒有 agent、沒有 run、沒有 turn，也不發任何 WebSocket 事件——狀態就是那張終端快照，由呼叫端自己輪詢。
+
+daemon 只認**它自己開的** pane：每一支端點（`POST …/shells` 以外）都先在記憶體的清單裡找 `(host, pane_id)`，找不到就 404 `{"error":"not_found","what":"shell"}`。這張清單不落地，所以 daemon 重啟後所有舊 pane 一律不認（也就不可能拿 bot 的 pane_id 來送鍵）。
+
+pane 開在該主機**manager 的那個 session**（`[server] herdr_session` / `hosts[].herdr_session`）。本機的 `default` session 是使用者自己的，daemon 不會往裡面開東西。
+
+### `POST /api/hosts/{name}/shells`
+
+```json
+{ "cwd": "/Users/m4p/work/foo" }
+```
+
+`cwd` 可省（body 也可以整個省）：省略時取該主機任一 live project 的 `path`，都沒有就用該主機的 `$HOME`。
+
+```json
+{
+  "host": "m4p",
+  "pane_id": "wPQ:p1",
+  "tab_id": "wPQ:t1",
+  "workspace_id": "wPQ",
+  "cwd": "/Users/m4p",
+  "herdr_session": "agents-manager",
+  "created_at": "2026-09-07T03:19:40.911Z"
+}
+```
+
+- workspace 先**借**該主機某個 project 的（用 `workspace.get` 確認還在），借到就 `tab.create` 開一個新分頁；都借不到才 `workspace.create`（標籤 `shell`）並直接用它的 root pane。新建的 workspace **不會**寫回 `projects.workspace_id`。
+- `cwd` 回的是 herdr **實際**開起來的目錄，不一定等於送進來的那個。
+- 每台主機最多 8 個：超過 → `409 {"error":"conflict","reason":"too_many_shells","host":"…","max":8}`。
+- host 不存在 → 404；主機沒連線 → `502 {"error":"upstream","message":"host \`m4p\` is not connected"}`。
+
+### `GET /api/hosts/{name}/shells`
+
+```json
+{ "host": "m4p", "max": 8, "shells": [ { …同上… } ] }
+```
+
+回之前會對每一列打 `pane.get`，pane 已經不在（使用者在 herdr 裡自己關掉）就從清單移除再回。herdr 問不到（不是「不在」）時保留該列，交給下一次輪詢——問不到不等於死掉。
+
+### `GET /api/hosts/{name}/shells/{pane_id}/terminal?source=visible&lines=200`
+
+形狀比照 §7，只是主體是 host / pane 而不是 bot / run：
+
+```json
+{
+  "host": "m4p", "pane_id": "wPQ:p1", "cwd": "/Users/m4p",
+  "source": "visible", "text": "……純文字，已去 ANSI……",
+  "revision": 0, "truncated": false,
+  "columns": 185, "rows": 54
+}
+```
+
+`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000（預設 200）。
+
+⚠️ `recent` / `recent_unwrapped` 只給**已經捲出畫面**的內容：還沒捲過的 pane 兩者都回 `text: ""` + `truncated: true`，而 `visible` 是有內容的（實測 2026-09-07，herdr 0.8.2）。前端要把這件事說出來，不要顯示一片空白。
+
+### `POST /api/hosts/{name}/shells/{pane_id}/text`
+
+```json
+{ "text": "echo hi", "enter": true }
+```
+
+`enter` 可省（預設 `true`）。Enter 是獨立的一次 `pane.send_keys(["enter"])`，**不是**文字裡的 `\n`——對 herdr 來說換行是「貼上」而不是「按下 Enter」。`text` 允許空字串：`{"text":"","enter":true}` 就是「只按 Enter」。回 `200 {}`。
+
+### `POST /api/hosts/{name}/shells/{pane_id}/keys`
+
+```json
+{ "keys": ["ctrl+c"] }
+```
+
+鍵名原樣送 herdr `pane.send_keys`，daemon 不翻譯（同 `POST /bots/{id}/keys`：`enter` / `esc` / `tab` / `up` / `down` / 單一字元 / `ctrl+c` 這種疊修飾詞）。空陣列 → 400。回 `200 {}`。
+
+### `DELETE /api/hosts/{name}/shells/{pane_id}`
+
+`pane.close`，若這樣讓分頁空了就連分頁一起收。**冪等**：清單裡沒有那一列也回 `200 {}`（已經沒了就是成功）。只有連主機都解析不出來才是錯誤。
+
 ### `POST /api/projects` 新增 `host`
 
 ```json

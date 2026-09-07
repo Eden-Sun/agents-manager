@@ -26,6 +26,49 @@ export function HostBadge({ host, connected }: { host: string; connected: boolea
   )
 }
 
+/**
+ * 收掉包著這個面板的彈窗（這裡是「環境設定」）。
+ *
+ * shell 開在主面板上，而這張清單是彈窗裡的一頁——不收掉的話按完「開 shell」什麼都沒發生，
+ * 因為新面板正好被蓋在後面。走的是 `Modal` 自己記載的關閉路徑（Escape，而且它會比對事件
+ * 的 target，所以彈窗疊彈窗時只收最裡面那一層），而不是另外拉一條 store 狀態：這個彈窗的
+ * 開關是 `Sidebar` 的本地狀態，模擬它自己的關閉動作才不會讓兩邊對不上。
+ */
+function closeEnclosingPopup(from: HTMLElement | null) {
+  if (!from?.closest('.modal-backdrop')) return
+  from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+}
+
+/**
+ * 「開 shell」——在那台主機開（或接回）一個純 shell 並切到 `HostShellPanel`。
+ *
+ * 主機沒連線時停用而不是隱藏：使用者要看得出「這顆在這裡、現在不能按、因為主機斷了」。
+ * 這版 daemon 沒有這支端點時整顆消失（`hostShellSupported`，docs/FRONTEND.md §8）。
+ */
+function OpenShellButton({ host, connected }: { host: string; connected: boolean }) {
+  const supported = useStore((s) => s.hostShellSupported)
+  const busy = useStore((s) => Boolean(s.busy[`shell:${host}`]))
+  const openHostShell = useStore((s) => s.openHostShell)
+  if (!supported) return null
+  return (
+    <button
+      type="button"
+      className="mini-btn"
+      disabled={busy || !connected}
+      title={connected ? '在這台主機開一個 shell，直接下指令' : '主機未連線，開不了 shell'}
+      onClick={(e) => {
+        const btn = e.currentTarget
+        // 失敗就把彈窗留著：原因（通知）與「重連」都在這一頁上。
+        void openHostShell(host).then((ok) => {
+          if (ok) closeEnclosingPopup(btn)
+        })
+      }}
+    >
+      {busy ? '開啟中…' : '開 shell'}
+    </button>
+  )
+}
+
 function HostRow({ name }: { name: string }) {
   const host = useStore((s) => s.hosts.find((h) => h.name === name))
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === name).length)
@@ -62,6 +105,7 @@ function HostRow({ name }: { name: string }) {
       </span>
       <span className="host-actions">
         <AttachButton command={host.attach_command} compact />
+        <OpenShellButton host={host.name} connected={host.connected} />
         <button
           type="button"
           className="mini-btn"
@@ -238,6 +282,7 @@ function LocalHostRow() {
       </span>
       <span className="host-actions">
         <AttachButton command={attach} compact />
+        <OpenShellButton host="local" connected={connected} />
       </span>
     </div>
   )

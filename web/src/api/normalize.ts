@@ -38,6 +38,7 @@ import type {
   TeamUsage,
   GroupMessage,
   GroupMessagesPage,
+  HostShell,
   Host,
   Identity,
   IdentityStatusMap,
@@ -657,6 +658,27 @@ export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapsh
     columns: o.columns === undefined || o.columns === null ? null : num(o.columns, 0) || null,
     rows: o.rows === undefined || o.rows === null ? null : num(o.rows, 0) || null,
   }
+}
+
+/** `POST /api/hosts/:name/shells` 的一列。`pane_id` 是空的就當這筆不存在（見 `toHostShells`）。 */
+export function toHostShell(raw: unknown, fallbackHost: string): HostShell {
+  const o = isRec(raw) ? raw : {}
+  return {
+    host: str(pick(o, 'host'), fallbackHost),
+    pane_id: str(pick(o, 'pane_id')),
+    tab_id: str(pick(o, 'tab_id')),
+    workspace_id: str(pick(o, 'workspace_id')),
+    cwd: str(pick(o, 'cwd')),
+    created_at: str(pick(o, 'created_at')),
+  }
+}
+
+/** `GET /api/hosts/:name/shells` → `{shells:[…]}`。沒有 `pane_id` 的列丟掉：整個面板都靠它定位。 */
+export function toHostShells(raw: unknown, fallbackHost: string): HostShell[] {
+  const o = isRec(raw) ? raw : {}
+  return arr(o.shells)
+    .map((s) => toHostShell(s, fallbackHost))
+    .filter((s) => s.pane_id)
 }
 
 /** Best-effort bot_id for a WS payload that may carry it directly or on a nested entity. */

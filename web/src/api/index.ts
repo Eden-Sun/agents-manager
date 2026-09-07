@@ -4,7 +4,7 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
@@ -19,6 +19,7 @@ import type {
   GroupMessagesPage,
   GroupSkipReason,
   HostResult,
+  HostShell,
   IdentityStatusMap,
   InstallToolResult,
   Issue,
@@ -417,6 +418,84 @@ export async function loginGh(host: string, mode: GhLoginMode = 'auto', user?: s
 export async function cancelGhLogin(host: string): Promise<GhStatus> {
   const name = host || 'local'
   return toGhStatus(await transport.request('POST', `/hosts/${encodeURIComponent(name)}/gh/cancel`), name)
+}
+
+// ------------------------------------------------------------------ 主機 shell
+
+/**
+ * `POST /api/hosts/:name/shells` — 在某台主機開一個純 shell pane（沒有 agent、沒有 run）。
+ *
+ * `cwd` 省略時由 daemon 挑（該主機的某個 project，都沒有就 `$HOME`），回傳的一律是**實際**
+ * 開起來的目錄。`pane_id` 只在 daemon 這一輪有效：它同時是白名單的 key，daemon 重啟後
+ * 舊的 pane 一律不認。
+ */
+export async function openHostShell(host: string, cwd?: string): Promise<HostShell> {
+  const name = host || 'local'
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/shells`, cwd ? { cwd } : {})
+  return toHostShell(raw, name)
+}
+
+/** `GET /api/hosts/:name/shells` — 這台主機上還活著的 shell（daemon 會順手掃掉死掉的）。 */
+export async function fetchHostShells(host: string): Promise<HostShell[]> {
+  const name = host || 'local'
+  return toHostShells(await transport.request('GET', `/hosts/${encodeURIComponent(name)}/shells`), name)
+}
+
+/** `GET /api/hosts/:name/shells/:pane_id/terminal` — 形狀同 `GET /bots/:id/terminal`。 */
+export async function readHostShell(
+  host: string,
+  paneId: string,
+  source: TerminalSource,
+  lines: number,
+): Promise<TerminalSnapshot> {
+  const raw = await transport.request(
+    'GET',
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/terminal?source=${source}&lines=${lines}`,
+  )
+  return toTerminal(raw, source)
+}
+
+/**
+ * `POST /api/hosts/:name/shells/:pane_id/text` — 把一行字打進 shell。
+ *
+ * `enter` 是 daemon 端獨立的一次按鍵，不是文字裡的 `\n`（對 herdr 來說換行是「貼上」而不是
+ * 「按 Enter」）。空字串 + `enter` = 只按 Enter，這在提示符前是真的會用到的動作。
+ */
+export async function sendHostShellText(host: string, paneId: string, text: string, enter = true): Promise<void> {
+  await transport.request(
+    'POST',
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/text`,
+    { text, enter },
+  )
+}
+
+/** `POST /api/hosts/:name/shells/:pane_id/keys` — 鍵名原樣送 herdr（同 `usePaneKeys`）。 */
+export async function sendHostShellKeys(host: string, paneId: string, keys: string[]): Promise<void> {
+  await transport.request(
+    'POST',
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/keys`,
+    { keys },
+  )
+}
+
+/** `DELETE /api/hosts/:name/shells/:pane_id` — 結束這個 shell。已經沒了也算成功。 */
+export async function closeHostShell(host: string, paneId: string): Promise<void> {
+  await transport.request(
+    'DELETE',
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}`,
+  )
+}
+
+/**
+ * 「這版 daemon 沒有主機 shell」與真正的失敗分開（docs/FRONTEND.md §8），判準同
+ * `isPaneMoveUnsupported`：405 / 501 一律當沒實作；404 只在**沒有機器碼**時算——daemon 自己的
+ * 404 一定帶 `{error, what}`，那是「主機不見了」或「這個 shell 已經關了」，不是缺功能。
+ */
+export function isHostShellUnsupported(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false
+  if (e.status === 405 || e.status === 501) return true
+  if (e.status !== 404) return false
+  return !e.body.error && !e.body.what
 }
 
 /** `GET /api/projects/:id/issues?state=&limit=&q=` (v4.0; the daemon shells out to `gh`). */

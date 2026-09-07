@@ -449,6 +449,20 @@ export interface TerminalSnapshot {
   rows: number | null
 }
 
+/**
+ * `POST /api/hosts/:name/shells` — 一個 daemon 幫我們在某台主機開的純 shell pane
+ * （沒有 agent、沒有 run）。`pane_id` 是後續每一支端點的把手，只在 daemon 這一輪有效。
+ */
+export interface HostShell {
+  host: string
+  pane_id: string
+  tab_id: string
+  workspace_id: string
+  /** herdr 實際開起來的目錄，不一定等於要求的那個。 */
+  cwd: string
+  created_at: string
+}
+
 export interface PromptResult {
   turn_id: string
   message_id: string | null
