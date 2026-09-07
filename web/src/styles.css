@@ -2973,19 +2973,56 @@ button:disabled {
   padding: 0 28px 10px;
   box-sizing: border-box;
   pointer-events: none;
+  /* 靠右、跟使用者氣泡同寬（2026-09-08）：它就是「剛送出去的那則」，長得像使用者氣泡
+     才讀得出「這題還在跑」；置中的卡片看起來像系統通知。 */
+  display: flex;
+  justify-content: flex-end;
 }
 
 .lastq {
   pointer-events: auto;
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 7px 8px 9px 12px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--accent-soft) 50%, var(--bg-panel));
+  max-width: min(560px, 82%);
+  min-width: 260px;
+  padding: 7px 8px 9px 14px;
+  border: 0;
+  border-radius: 14px;
+  border-bottom-right-radius: 4px;
+  background: var(--bubble-user);
+  color: var(--bubble-user-text);
   box-shadow: var(--shadow);
+}
+
+/* 「進行中」的感覺：一道亮光每 2.4 秒從左掃到右，像訊息還在送、還在等回覆。
+   只掃光、不動位置，才不會跟底下正在長的輸出互搶注意力。 */
+.lastq::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 30%, rgb(255 255 255 / 0.18) 50%, transparent 70%);
+  background-size: 250% 100%;
+  animation: lastq-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes lastq-sweep {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lastq::after {
+    animation: none;
+  }
 }
 
 .lastq-head {
@@ -2996,15 +3033,28 @@ button:disabled {
 }
 
 .lastq-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
   font-weight: 700;
-  color: var(--accent-ink);
+  color: var(--bubble-user-text);
   white-space: nowrap;
+}
+
+/* 標籤前一顆會呼吸的點：跟側欄「執行中」的燈同一個語言。 */
+.lastq-tag::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: blink 1.2s ease-in-out infinite;
 }
 
 .lastq-time {
   font-size: 11px;
-  color: var(--text-faint);
+  color: rgb(255 255 255 / 0.7);
   font-variant-numeric: tabular-nums;
 }
 
@@ -3016,7 +3066,7 @@ button:disabled {
 
 .lastq-hint {
   font-size: 11px;
-  color: var(--text-faint);
+  color: rgb(255 255 255 / 0.7);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3031,14 +3081,14 @@ button:disabled {
   border: 0;
   border-radius: 6px;
   background: none;
-  color: var(--text-dim);
+  color: rgb(255 255 255 / 0.75);
   font-size: 15px;
   line-height: 1;
 }
 
 .lastq-x:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: rgb(255 255 255 / 0.18);
+  color: #fff;
 }
 
 /*
@@ -3059,13 +3109,14 @@ button:disabled {
   font: inherit;
   font-size: 13px;
   line-height: 20px;
-  color: var(--text);
+  color: var(--bubble-user-text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .lastq-body:hover {
-  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .lastq.open .lastq-body {
