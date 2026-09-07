@@ -3,6 +3,8 @@ import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, useStore } from '../store/store'
 import { KindIcon, KIND_LABEL } from './KindTag'
+import { QuotaLoginCodex } from './QuotaLogin-codex'
+import { QuotaLoginSlash } from './QuotaLoginSlash'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
@@ -498,15 +500,26 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       {!supported ? (
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
       ) : !known || (five === null && seven === null) ? (
-        <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>
-          {/* 登入偵測改在該主機的 herdr pane 裡跑（claude 是 `claude auth status --json`），
-              看得到 Keychain，所以這裡的「沒登入」就是真的沒登入，直接叫使用者去登入。 */}
-          {loggedOut
-            ? `${hostLabel(host)} 上這個帳號未登入，請在 Bot 設定按登入 / 切換帳號。`
-            : entry.kind === 'grok'
-              ? '背景查詢中'
-              : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
-        </p>
+        <>
+          <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>
+            {/* 登入偵測改在該主機的 herdr pane 裡跑（claude 是 `claude auth status --json`），
+                看得到 Keychain，所以這裡的「沒登入」就是真的沒登入，直接叫使用者去登入。 */}
+            {loggedOut
+              ? // 後半句「請去 Bot 設定按登入」由下面那顆按鈕取代：claude / grok 直接送 `/login`，
+                // codex 沒有 `/login`，改開 shell 跑 `codex login`。
+                `${hostLabel(host)} 上這個帳號未登入。`
+              : entry.kind === 'grok'
+                ? '背景查詢中'
+                : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
+          </p>
+          {loggedOut ? (
+            entry.kind === 'codex' ? (
+              <QuotaLoginCodex host={host} hostLabel={hostLabel(host)} identity={entry.identity} />
+            ) : (
+              <QuotaLoginSlash kind={entry.kind} host={host} identity={entry.identity} />
+            )
+          ) : null}
+        </>
       ) : (
         <>
           {five !== null ? (
