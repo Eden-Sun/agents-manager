@@ -355,6 +355,7 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
   const numOrNull = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null)
   return {
     account_email: optStr(raw.account_email),
+    account_warning: optStr(raw.account_warning),
     model_name: optStr(pick(model, 'display_name')),
     model_id: optStr(pick(model, 'id')),
     effort: optStr(isRec(raw.effort) ? pick(raw.effort, 'level') : undefined),

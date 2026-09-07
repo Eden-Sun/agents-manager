@@ -74,10 +74,37 @@ enum HookKind {
     Ignore(String),
 }
 
+/// What the run's status bar should say about the account: `(email, warning)`.
+///
+/// The identity's login state **on the bot's host** is the authority (`tools` probes each
+/// host with `claude auth status`). Reading `.claude.json` off the daemon's own disk was wrong
+/// twice over for a remote bot (issue #4): the wrong machine, and a file whose `oauthAccount`
+/// is only metadata — on m4p `cc1` carried tony.lin's e-mail while the CLI, with no login in
+/// that config dir, quietly fell back to the machine's legacy Keychain entry and ran as cc0.
+/// That case is exactly the warning: identity set, host says not logged in.
+async fn claude_account(app: &Arc<App>, bot: &db::Bot) -> (Option<String>, Option<String>) {
+    let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    let idn = bot.identity.as_deref().filter(|s| !s.is_empty());
+    let info = {
+        let tools = app.tools.lock().await;
+        tools.get(&host).and_then(|t| idn.and_then(|n| t.identities.get(n)).or_else(|| t.identities.get("cc0")).cloned())
+    };
+    match (idn, info) {
+        (Some(name), Some(i)) if i.logged_in == Some(false) => (
+            None,
+            Some(format!("身份 {name} 在 {host} 沒有登入：claude 會退回這台機器 Keychain 裡預設（cc0）的帳號執行。請在這個 Bot 按「登入 / 切換帳號」。")),
+        ),
+        (_, Some(i)) if i.logged_in == Some(true) && i.account.is_some() => (i.account, None),
+        // No probe result for this host yet: fall back to the file, local only.
+        (_, _) if host == crate::config::LOCAL_HOST => (claude_account_email_file(bot), None),
+        _ => (None, None),
+    }
+}
+
 /// The email claude is logged in as for this bot, read the way the user's own statusline
 /// script does (`oauthAccount.emailAddress` in `.claude.json`). The identity decides which
-/// config directory that is; `None` when it cannot be read.
-fn claude_account_email(bot: &db::Bot) -> Option<String> {
+/// config directory that is; `None` when it cannot be read. Local disk only.
+fn claude_account_email_file(bot: &db::Bot) -> Option<String> {
     let home = dirs::home_dir()?;
     // `env_json` may pin CLAUDE_CONFIG_DIR (that is how cc0 / cc1 are kept apart).
     let cfg_dir = serde_json::from_str::<Value>(&bot.env_json)
@@ -322,8 +349,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 if let Some(o) = rich.as_object_mut() {
                     o.remove("status_line");
                     o.remove("hook_event_name");
-                    if let Some(email) = claude_account_email(&bot) {
+                    let (email, warning) = claude_account(app, &bot).await;
+                    if let Some(email) = email {
                         o.insert("account_email".into(), serde_json::json!(email));
+                    }
+                    if let Some(w) = warning {
+                        o.insert("account_warning".into(), serde_json::json!(w));
                     }
                 }
                 let rich = serde_json::to_string(&rich).ok();

@@ -306,8 +306,10 @@ export interface Run {
  * 網頁沒有這個限制，所以直接用原始欄位。
  */
 export interface StatusInfo {
-  /** claude 登入的帳號（daemon 從 `.claude.json` 的 oauthAccount 讀）。 */
+  /** claude 登入的帳號（daemon 依該主機的身份登入狀態回報）。 */
   account_email: string | null
+  /** 身份在該主機沒登入、實際跑的是預設帳號時的警告。 */
+  account_warning: string | null
   model_name: string | null
   model_id: string | null
   effort: string | null

@@ -7819,3 +7819,8 @@ button.run-debug-toggle:hover {
     display: none;
   }
 }
+
+/* 身份沒登入、實際用預設帳號時的狀態列提示。 */
+.sl-item.sl-warn {
+  color: var(--status-warn);
+}
