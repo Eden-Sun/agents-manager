@@ -4,6 +4,7 @@ import { HOST_DEFAULTS } from '../api/types'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
+import { GhHostStatus } from './GhAuth'
 import { ToolBadges } from './Tools'
 
 /**
@@ -57,6 +58,7 @@ function HostRow({ name }: { name: string }) {
           </span>
         )}
         <ToolBadges host={host.name} tools={host.tools} />
+        <GhHostStatus host={host.name} />
       </span>
       <span className="host-actions">
         <AttachButton command={host.attach_command} compact />
@@ -232,6 +234,7 @@ function LocalHostRow() {
         </span>
         <span className="host-ssh">{attach}</span>
         <ToolBadges host="local" tools={tools} />
+        <GhHostStatus host="local" />
       </span>
       <span className="host-actions">
         <AttachButton command={attach} compact />

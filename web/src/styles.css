@@ -7199,3 +7199,57 @@ button.run-debug-toggle:hover {
     display: none;
   }
 }
+
+/* 遠端 / 本機 gh 登入（HostsPanel 列、IssuesBar 錯誤列） */
+.gh-auth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.gh-auth.ok .gh-auth-label {
+  color: var(--text-dim);
+}
+
+.gh-auth.out .gh-auth-label,
+.gh-auth.missing .gh-auth-label {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.gh-login-cta {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  justify-items: start;
+}
+
+.gh-device {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.gh-device-lead {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.gh-device-err {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.gh-device-link {
+  font-size: 12px;
+}

@@ -295,6 +295,50 @@ interface MockTool {
   logged_in: boolean | null
 }
 
+interface MockGh {
+  installed: boolean
+  path: string
+  logged_in: boolean
+  account: string | null
+  accounts: { login: string; active: boolean; ok: boolean }[]
+  pending: {
+    user_code: string
+    verification_uri: string
+    verification_uri_complete: string | null
+    expires_in: number
+    started: number
+  } | null
+  error: string | null
+}
+
+function mockGhLoggedIn(): MockGh {
+  return {
+    installed: true,
+    path: '/opt/homebrew/bin/gh',
+    logged_in: true,
+    account: 'Eden-Sun',
+    accounts: [{ login: 'Eden-Sun', active: true, ok: true }],
+    pending: null,
+    error: null,
+  }
+}
+
+/** m4p 實測形狀：作用中 token 失效，另有一個有效但非 active 的帳號。 */
+function mockGhNeedsSwitch(): MockGh {
+  return {
+    installed: true,
+    path: '/opt/homebrew/bin/gh',
+    logged_in: false,
+    account: 'eddysun-alt',
+    accounts: [
+      { login: 'eddysun-alt', active: true, ok: false },
+      { login: 'Eden-Sun', active: false, ok: true },
+    ],
+    pending: null,
+    error: null,
+  }
+}
+
 /** v4.0 `hosts[].identities.<name>` — 身份在「那一台」上的登入狀態。 */
 interface MockIdentityStatus {
   name: string
@@ -457,6 +501,9 @@ export class MockTransport implements Transport {
   /** Dev helper：模擬「daemon 還沒有 `pane/move-to-tab`」（`__amMock.paneMoveOff()`）。 */
   private paneMoveDisabled = false
 
+  /** `GET|POST /api/hosts/:name/gh` — 本機預設已登入；新加的遠端主機預設跟 m4p 一樣（active token 失效、另有可切帳號）。 */
+  private gh = new Map<string, MockGh>()
+
   /**
    * herdr 預設分頁裡已經有幾個**不是 bot** 的 pane（使用者自己的 shell 之類）。demo 預設就塞得夠擠，
    * 這樣 `VITE_MOCK=1` 一開終端分頁就看得到窄 pane 警示與「移到自己的分頁」按鈕。
@@ -618,6 +665,9 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/mem') return this.mem()
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
+    if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
+    if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'login' && method === 'POST') return this.ghLogin(seg[1], b)
+    if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'cancel' && method === 'POST') return this.ghCancel(seg[1])
 
     if (method === 'POST' && rawPath === '/identities') return this.addIdentity(b)
     if (seg[0] === 'identities' && seg.length === 2 && method === 'DELETE') return this.deleteIdentity(decodeURIComponent(seg[1]))
@@ -888,6 +938,99 @@ export class MockTransport implements Transport {
     const tools = remote ? remote.tools : this.localTools
     const identities = remote ? remote.identities : this.localIdentityStatus
     return { name: remote?.name ?? 'local', tools, identities, tools_checked_at: now() }
+  }
+
+  private ghKey(name: string): string {
+    const n = decodeURIComponent(name || 'local')
+    if (n === 'local' || !n) return 'local'
+    this.host(n)
+    return n
+  }
+
+  private ghOf(name: string): MockGh {
+    const key = this.ghKey(name)
+    let g = this.gh.get(key)
+    if (!g) {
+      g = key === 'local' ? mockGhLoggedIn() : mockGhNeedsSwitch()
+      this.gh.set(key, g)
+    }
+    if (g.pending && Date.now() - g.pending.started > 1600) {
+      Object.assign(g, mockGhLoggedIn(), { pending: null, error: null })
+    }
+    return g
+  }
+
+  private ghJson(name: string, mode: string | null) {
+    const key = this.ghKey(name)
+    const g = this.ghOf(key)
+    const pending = g.pending
+      ? {
+          user_code: g.pending.user_code,
+          verification_uri: g.pending.verification_uri,
+          verification_uri_complete: g.pending.verification_uri_complete,
+          expires_in: Math.max(0, g.pending.expires_in - Math.floor((Date.now() - g.pending.started) / 1000)),
+        }
+      : null
+    return {
+      name: key,
+      installed: g.installed,
+      path: g.path,
+      logged_in: g.logged_in,
+      account: g.account,
+      accounts: g.accounts,
+      mode,
+      pending,
+      error: g.error,
+    }
+  }
+
+  private ghStatus(name: string) {
+    return this.ghJson(name, null)
+  }
+
+  private ghLogin(name: string, b: Rec) {
+    const key = this.ghKey(name)
+    const mode = String(b.mode ?? 'auto').trim() || 'auto'
+    if (!['auto', 'copy', 'device', 'switch'].includes(mode)) {
+      throw new ApiError(400, { error: 'bad_request', message: `mode must be auto, copy, device or switch (got ${mode})` }, 'bad request')
+    }
+    const g = this.ghOf(key)
+    if (!g.installed) throw new ApiError(502, { error: 'upstream', message: 'gh 未安裝（brew install gh）' }, 'upstream')
+    if (mode === 'copy' && key === 'local') {
+      throw new ApiError(400, { error: 'bad_request', message: 'copy 只適用遠端主機（本機請用裝置碼）' }, 'bad request')
+    }
+    const finish = (used: string) => {
+      Object.assign(g, mockGhLoggedIn(), { pending: null, error: null })
+      return this.ghJson(key, used)
+    }
+    if (mode === 'auto' && g.logged_in) return this.ghJson(key, 'auto')
+    if ((mode === 'auto' || mode === 'switch') && g.accounts.some((a) => a.ok && !a.active)) return finish('switch')
+    if ((mode === 'auto' && key !== 'local') || mode === 'copy') {
+      if (!this.ghOf('local').logged_in) {
+        throw new ApiError(409, { error: 'conflict', reason: 'local_gh_not_logged_in', message: '本機 gh 尚未登入，無法轉發 token；改用裝置碼' }, 'conflict')
+      }
+      return finish('copy')
+    }
+    if (mode === 'switch') {
+      throw new ApiError(400, { error: 'bad_request', message: '沒有可切換的有效 gh 帳號' }, 'bad request')
+    }
+    g.pending = {
+      user_code: 'WDJB-MJHT',
+      verification_uri: 'https://github.com/login/device',
+      verification_uri_complete: 'https://github.com/login/device?user_code=WDJB-MJHT',
+      expires_in: 900,
+      started: Date.now(),
+    }
+    g.error = null
+    return this.ghJson(key, 'device')
+  }
+
+  private ghCancel(name: string) {
+    const key = this.ghKey(name)
+    const g = this.ghOf(key)
+    g.pending = null
+    g.error = null
+    return this.ghJson(key, 'cancel')
   }
 
   // -------------------------------------------------------------- hosts (§11.6)

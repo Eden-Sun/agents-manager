@@ -5,6 +5,7 @@ import { ApiError } from '../api/types'
 import type { Issue, ProjectSubmodule } from '../api/types'
 import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
+import { GhLoginButton, isGhAuthError } from './GhAuth'
 
 /**
  * v4.0 GitHub issues (`GET /api/projects/:id/issues`, via `gh` on the daemon). A thin bar
@@ -46,7 +47,7 @@ function labelStyle(color: string | null) {
 
 function errorText(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 502) return `gh 無法使用：${e.message}（請在 daemon 主機執行 gh auth login）`
+    if (e.status === 502) return `gh 無法使用：${e.message}`
     return `${e.message}（HTTP ${e.status}）`
   }
   return e instanceof Error ? e.message : String(e)
@@ -54,6 +55,7 @@ function errorText(e: unknown): string {
 
 export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string; draftKey: DraftKey; inputRef: RefObject<HTMLTextAreaElement | null> }) {
   const github = useStore((s) => s.projects.find((p) => p.id === projectId)?.github ?? null)
+  const host = useStore((s) => s.projects.find((p) => p.id === projectId)?.host ?? 'local')
   const setDraft = useStore((s) => s.setDraft)
   const setDraftCursor = useStore((s) => s.setDraftCursor)
   const notify = useStore((s) => s.notify)
@@ -66,6 +68,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const [issues, setIssues] = useState<Issue[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [authError, setAuthError] = useState(false)
   const [openCount, setOpenCount] = useState<number | null>(null)
   const [fetching, setFetching] = useState<number | null>(null)
   // 專案的 submodule（有自己 GitHub origin 的才能選）與目前選的那個：`''` = 專案本身。
@@ -110,6 +113,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
       const id = ++seq.current
       setLoading(true)
       setError(null)
+      setAuthError(false)
       try {
         const list = await api.fetchIssues(projectId, { state: st, limit: 50, q: query.trim() || undefined, repo })
         if (id !== seq.current) return
@@ -118,6 +122,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
       } catch (e) {
         if (id !== seq.current) return
         setIssues(null)
+        setAuthError(isGhAuthError(e))
         setError(errorText(e))
       } finally {
         if (id === seq.current) setLoading(false)
@@ -125,6 +130,10 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     },
     [projectId, repo],
   )
+
+  const retryIssues = useCallback(() => {
+    void load(state, q)
+  }, [load, state, q])
 
   // Query changes are debounced 300 ms; the state toggle refetches immediately.
   useEffect(() => {
@@ -269,7 +278,8 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
           </div>
           {error ? (
             <div className="issues-status err" role="alert">
-              {error}
+              <div>{error}</div>
+              {authError ? <GhLoginButton host={host} onLoggedIn={retryIssues} /> : null}
             </div>
           ) : loading && !issues ? (
             <div className="issues-status">載入中…</div>

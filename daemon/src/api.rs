@@ -89,6 +89,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/reconnect", post(reconnect_host))
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
+        .route("/hosts/{name}/gh", get(get_gh_status))
+        .route("/hosts/{name}/gh/login", post(login_gh))
+        .route("/hosts/{name}/gh/cancel", post(cancel_gh))
         .route("/models", get(get_models))
         .route("/quota", get(get_quota))
         .route("/mem", get(get_mem))
@@ -1098,18 +1101,49 @@ async fn install_tool(
         .into_response())
 }
 
+/// `GET /api/hosts/:name/gh` — whether `gh` on that host can talk to GitHub.
+async fn get_gh_status(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    let v = crate::gh_auth::status(&app, &name).await?;
+    Ok((StatusCode::OK, Json(v)).into_response())
+}
+
+#[derive(Default, Deserialize)]
+struct GhLoginBody {
+    mode: Option<String>,
+    user: Option<String>,
+}
+
+/// `POST /api/hosts/:name/gh/login` — auto / copy / device / switch. See API.md.
+async fn login_gh(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Json(b): Json<GhLoginBody>,
+) -> Result<Response, LcError> {
+    let v = crate::gh_auth::login(&app, &name, b.mode.as_deref(), b.user.as_deref()).await?;
+    Ok((StatusCode::OK, Json(v)).into_response())
+}
+
+/// `POST /api/hosts/:name/gh/cancel` — drop an in-flight device-flow login.
+async fn cancel_gh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+    let v = crate::gh_auth::cancel(&app, &name).await?;
+    Ok((StatusCode::OK, Json(v)).into_response())
+}
+
 #[derive(Deserialize)]
 struct ModelsQuery {
     kind: String,
     host: Option<String>,
     refresh: Option<String>,
+    /// claude only: whose `settings.json` the "預設" effort hint is read from. Not required to
+    /// exist — an unknown or wrong-kind name just falls back to the default account (SPEC §17.1).
+    identity: Option<String>,
 }
 
 fn flag(v: &Option<String>) -> bool {
     matches!(v.as_deref().map(str::trim), Some("1") | Some("true") | Some("yes"))
 }
 
-/// `GET /api/models?kind=&host=&refresh=1`
+/// `GET /api/models?kind=&host=&identity=&refresh=1`
 async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -> Result<Json<Value>, LcError> {
     if !crate::config::valid_kind(&q.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
@@ -1118,7 +1152,8 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
     if app.hosts.get(&host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
-    let v = crate::models::list(&app, &host, &q.kind, flag(&q.refresh)).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty());
+    let v = crate::models::list(&app, &host, &q.kind, identity, flag(&q.refresh)).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok(Json(v))
 }
 

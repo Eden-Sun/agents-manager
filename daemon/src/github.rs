@@ -117,7 +117,7 @@ async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration
 /// PATH prefix so `gh` / `git` from Homebrew are found even from a launchd daemon.
 /// Also kill color forcing: some agent / IDE shells export `CLICOLOR_FORCE=1`, and
 /// `gh --json` then pretty-prints with ANSI — which breaks `serde_json`.
-const PATH_FIX: &str = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"\n\
+pub(crate) const PATH_FIX: &str = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"\n\
 export NO_COLOR=1\nunset CLICOLOR_FORCE FORCE_COLOR CLICOLOR 2>/dev/null\n";
 
 /// Strip CSI / OSC ANSI sequences so a colored `gh` dump is still parseable.

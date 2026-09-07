@@ -59,7 +59,8 @@ web/src/
     Tools.tsx        # v4.0：工具徽章、可收合缺 CLI 提示、用現有 agent 安裝
     KindTag.tsx      # v4.0：kind 圖示/文字全域切換（localStorage）
     ModelPicker.tsx  # v4.0：GET /api/models 驅動的模型 / effort / Fast
-    IssuesBar.tsx    # v4.0：專案 github 非 null 時的 Issues 下拉
+    IssuesBar.tsx    # v4.0：專案 github 非 null 時的 Issues 下拉（未登入時可從錯誤列登入該主機的 gh）
+    GhAuth.tsx       # 遠端／本機 `GET|POST /api/hosts/:name/gh`：HostsPanel 列上的狀態 + IssuesBar 的「登入」鈕
     HostsPanel.tsx / IdentitiesPanel.tsx / DirPicker.tsx
   styles.css       # 全部 CSS（淺色在 :root，深色在 prefers-color-scheme）
   App.tsx / main.tsx
@@ -85,6 +86,7 @@ web/src/
 | `GET /terminal` → `{text, revision, truncated, agent_status}` | blocked 面板每秒輪詢 `visible`、終端分頁手動刷新 `recent_unwrapped` |
 | WS `{seq, type, data}`、`resync` | 記錄最高 `seq`，重連帶 `?since=`；`resync` → 重新 `GET /state` + 目前 bot 的 messages |
 | keys 鍵名 `enter/esc/y/n/up/down/ctrl+c` | 按鍵面板使用同一組字串，並帶 `expect_run_id`；鍵盤直通另外送單一字元與 `ctrl+`／`alt+`／`shift+` 組合（herdr 0.8.2 實測皆收） |
+| `GET\|POST /api/hosts/:name/gh` 登入遠端 gh | `GhAuth.tsx`：HostsPanel 列上的狀態；IssuesBar 在 502 未登入時出「登入」鈕。token 不會進前端 state |
 
 **一處刻意的差異**：API.md §6 建議 `source = "hook"` 不加標籤。本 UI 依 SPEC §3.2
 （「assistant 氣泡顯示來源標籤（hook / terminal-fallback）」）兩種都顯示標籤，
