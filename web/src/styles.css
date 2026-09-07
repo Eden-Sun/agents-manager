@@ -2099,13 +2099,30 @@ button:disabled {
   padding: 8px 14px 12px;
 }
 
-/* 整張卡片的 bot 都被「額度快用完就收起來」收走時的那一行。刻意做得比 `.project-empty`
-   還安靜——它不是空專案，只是這一刻看不到，額度 reset 後自己會回來。 */
+/* 「N 個 Bot 已隱藏（額度不足）」。兩個位置共用：一顆可用的都不剩時當 `.project-empty`
+   的標題（跟「此專案尚無 Bot」同一個位子、同一排快速新增），還有剩的時候當卡片底部的腳註。 */
 .project-quota-hidden {
   margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+/* 腳註那顆是獨立的 `<p>`，要自己的內距；`.project-empty` 裡的那顆 `<span>` 沿用容器的。 */
+p.project-quota-hidden {
   padding: 8px 14px 12px;
   font-size: 11px;
-  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* 已在額度條上停用的身分：列出來但點不下去——再開一顆也是同一組沒額度的帳號。
+   跟額度卡片同一套語彙（劃掉名字），`:disabled` 已經把整顆降透明。 */
+.quick-add-chip.quota-off .quick-add-label {
+  text-decoration: line-through;
+}
+
+.quick-add-chip.quota-off .quick-add-out {
+  color: var(--text-faint);
 }
 
 .quick-add {
@@ -4673,7 +4690,12 @@ button.model-tag[aria-expanded='true'] {
   color: var(--text);
 }
 
-/* Pop-up anchored to the gear that opened it (falls back to centred). */
+/* Pop-up anchored to the gear that opened it (falls back to centred).
+
+   只是一層擺放用的框，不是遮罩：這張卡貼著齒輪開，形狀就是 popover，把整個 app 反灰又
+   吃掉點擊，等於開個設定就不能拖圖進對話、不能點旁邊的 bot。`pointer-events: none` 讓它
+   完全不擋背景，關閉改由 document 的 pointerdown（外面按一下）與 Escape 負責；真正的
+   modal（新增 Bot、刪除確認）才留 `.modal-backdrop` / `.confirm-backdrop` 的遮罩。 */
 .bs-scrim {
   position: fixed;
   inset: 0;
@@ -4682,14 +4704,13 @@ button.model-tag[aria-expanded='true'] {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  /* 14% 幾乎等於沒有罩子：底下的對話照樣完整可讀，跟設定面板搶注意力。這個面板本來就
-     是 modal（focus trap、Escape 關閉、點外面關閉），罩子就該跟其他對話框一致。 */
-  background: rgb(16 20 28 / 58%);
-  backdrop-filter: blur(2px);
+  pointer-events: none;
 }
 
 .bot-settings {
   position: relative;
+  /* 框是穿透的，卡片自己要收回點擊。 */
+  pointer-events: auto;
   width: min(520px, 100%);
   max-height: 100%;
   min-height: 0;
