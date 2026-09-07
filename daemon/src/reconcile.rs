@@ -265,7 +265,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 // A run with no hooks (a spawned child, above all) has nothing but its pane to
                 // build a conversation from, and the daemon was not watching while it was down.
                 crate::lifecycle::spawn_adopted_capture(app, &run.id, &bot.id);
-                sync_pane_model(app, &client, &bot, agent).await;
+                sync_pane_model(app, host, &client, &bot, agent).await;
                 // SPEC §11.4.7: a run we keep may have been started by a pre-v4.3 daemon, whose
                 // `hook.sh` still curls a port that no longer exists. Rewriting the material is
                 // one ssh per bot, so it runs off-path — reconcile must not wait on the network.
@@ -327,7 +327,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                     crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run_id);
                 }
                 crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot.id);
-                sync_pane_model(app, &client, &bot, agent).await;
+                sync_pane_model(app, host, &client, &bot, agent).await;
                 tracing::info!(host, bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
             }
             (None, None) => {}
@@ -445,7 +445,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         // running on (we did not choose its model, its own argv did).
         crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot_id);
         if let Ok(Some(child)) = db::bot(&app.db, &bot_id).await {
-            sync_pane_model(app, &client, &child, agent).await;
+            sync_pane_model(app, host, &client, &child, agent).await;
         }
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
         app.emit_bot_status(&bot_id).await;
@@ -507,7 +507,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
 ///   exactly what `apply_live_setting` sends when the model is changed from the UI), so a
 ///   value that is already recorded is left alone. A field we could not parse stays NULL —
 ///   「預設」 is honest, a guess is not.
-async fn sync_pane_model(app: &Arc<App>, client: &crate::herdr::HerdrClient, bot: &db::Bot, agent: &crate::herdr::AgentInfo) {
+async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::HerdrClient, bot: &db::Bot, agent: &crate::herdr::AgentInfo) {
     if bot.managed_by != "child" || (bot.model.is_some() && bot.effort.is_some()) {
         return;
     }
@@ -531,6 +531,14 @@ async fn sync_pane_model(app: &Arc<App>, client: &crate::herdr::HerdrClient, bot
         let (tm, te) = crate::models::grok_title_model_effort(agent.terminal_title_stripped.as_deref().unwrap_or(""));
         model = model.or(tm);
         effort = effort.or(te);
+    }
+    // claude's argv rarely carries `--effort` (`herdr agent start … -- --model opus` is the usual
+    // shape), yet the CLI still runs at that account's default level; resolve it the same way
+    // the model list's "預設" hint does, so the sidebar chip reads `opus · High` and not just `opus`.
+    if bot.kind == "claude" && effort.is_none() && bot.effort.is_none() {
+        if let Some(alias) = model.as_deref().or(bot.model.as_deref()) {
+            effort = Some(crate::models::claude_default_effort(app, host, bot.identity.as_deref(), alias).await);
+        }
     }
     let model = model.filter(|_| bot.model.is_none());
     let effort = effort.filter(|_| bot.effort.is_none());

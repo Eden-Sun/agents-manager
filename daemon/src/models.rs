@@ -359,6 +359,22 @@ async fn read_claude_effort_settings(app: &Arc<App>, host: &str, config_dir: Opt
 /// Opus 4.7, so the one documented exception never applies here.
 const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
 
+/// What "不帶 `--effort`" resolves to for `alias` on this account: the per-model override in
+/// that identity's `settings.json`, else its account-wide `effortLevel`, else the CLI's
+/// built-in default. Used to fill in a spawned child's effort — its argv never says, but the
+/// CLI still runs at *some* level and the sidebar should show it.
+pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<&str>, alias: &str) -> String {
+    let dir = claude_config_dir(app, host, identity).await;
+    let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await;
+    let alias = alias.to_ascii_lowercase();
+    per_model
+        .iter()
+        .find(|(k, _)| k.to_ascii_lowercase().contains(&alias))
+        .map(|(_, v)| v.clone())
+        .or(global)
+        .unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string())
+}
+
 pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>) -> Vec<Value> {
     // `claude --model` 的 alias（`claude --help`：'fable'、'opus'、'sonnet'…）。
     // `efforts` 是 `claude --help` 對 `--effort` 列的那五級，對每個 alias 都一樣（claude 沒有
