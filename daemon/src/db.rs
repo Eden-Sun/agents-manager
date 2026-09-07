@@ -140,7 +140,11 @@ CREATE TABLE IF NOT EXISTS team_issues (
   created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS team_issues_seq ON team_issues(team_id, seq);
-CREATE UNIQUE INDEX IF NOT EXISTS team_issues_number ON team_issues(team_id, issue_number);
+-- SPEC-team §2.3: an issue number is unique among the rows still **on** the queue, not among
+-- every row ever queued. A `done` / `failed` / `skipped` entry is a finished record, so the
+-- same issue can be queued again as a new `seq` (a re-run after a failure, or a second pass
+-- someone asks for) while the old row stays in the log.
+CREATE UNIQUE INDEX IF NOT EXISTS team_issues_number_open ON team_issues(team_id, issue_number) WHERE state IN ('queued','working');
 CREATE INDEX IF NOT EXISTS team_issues_open ON team_issues(team_id, state) WHERE state IN ('queued','working');
 CREATE TABLE IF NOT EXISTS team_tasks (
   id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
@@ -348,6 +352,11 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS team_events_seq ON team_events(team_id, seq)")
         .execute(&pool)
         .await?;
+    // SPEC-team §2.3: `(team_id, issue_number)` used to be unique over *every* row, which made
+    // an issue that had already been done (or had failed) unqueueable for ever. The partial
+    // index in SCHEMA replaces it: uniqueness now only covers the rows still on the queue.
+    // Old rows can never violate it — the index it replaces was stricter.
+    sqlx::query("DROP INDEX IF EXISTS team_issues_number").execute(&pool).await?;
     // Bot names used to be unique across the whole daemon; since the herdr agent name is now
     // `<project>-<bot>`, uniqueness is per project.
     sqlx::query("DROP INDEX IF EXISTS bots_name_live").execute(&pool).await?;

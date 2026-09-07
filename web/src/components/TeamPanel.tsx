@@ -826,6 +826,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const [reopenOpen, setReopenOpen] = useState(false)
   const [reopenText, setReopenText] = useState('')
   const [issueToClose, setIssueToClose] = useState<TeamIssue | null>(null)
+  // 「追加 issue」正在飛的那一刻：按鈕與輸入都收起來，重送只會換到一個 409。
+  const addBusy = Boolean(busy[`team:${teamId}:add-issues`])
 
   if (!team) {
     return (
@@ -1034,6 +1036,9 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
               className="team-reopen-form"
               onSubmit={(event) => {
                 event.preventDefault()
+                // 送出中就不再收第二次（Enter 很容易連按）。store 那邊也有同一把 busy 鎖，
+                // 這裡擋掉是為了連驗證訊息都不要重複跳。
+                if (addBusy) return
                 const parts = reopenText.split(/[\s,]+/).map((part) => part.replace(/^#/, '').trim()).filter(Boolean)
                 const numbers = Array.from(new Set(parts.map(Number)))
                 if (!numbers.length || numbers.some((number) => !Number.isInteger(number) || number <= 0)) {
@@ -1057,13 +1062,14 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                 value={reopenText}
                 onChange={(event) => setReopenText(event.target.value)}
                 placeholder="57, 58"
+                disabled={addBusy}
                 autoFocus
               />
-              <button type="button" className="mini-btn" onClick={() => setReopenOpen(false)}>
+              <button type="button" className="mini-btn" onClick={() => setReopenOpen(false)} disabled={addBusy}>
                 取消
               </button>
-              <button type="submit" className="mini-btn primary" disabled={Boolean(busy[`team:${teamId}:add-issues`])}>
-                繼續
+              <button type="submit" className="mini-btn primary" disabled={addBusy}>
+                {addBusy ? '追加中…' : '繼續'}
               </button>
             </form>
           ) : (

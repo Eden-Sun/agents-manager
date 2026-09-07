@@ -1721,6 +1721,11 @@ export const useStore = create<StoreState>((set, get) => ({
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'team is cleaned up') {
         set((s) => ({ teamReopenUnavailable: { ...s.teamReopenUnavailable, [teamId]: true } }))
         get().notify('info', '這個 Team 已經清理，無法追加 issue。')
+      } else if (e instanceof ApiError && e.status === 409 && e.body.reason === 'issue already queued') {
+        // §2.3：只有還在佇列上（待處理 / 進行中）的同號 issue 會擋。原文是 `issue already
+        // queued`，對使用者只是一句英文——直接說是哪一號、以及它已經在佇列裡了。
+        const n = typeof e.body.issue_number === 'number' ? e.body.issue_number : null
+        get().notify('info', n === null ? '這個 issue 已在佇列裡。' : `#${n} 已在佇列裡。`)
       } else {
         get().notify('error', `追加 issue 失敗：${errText(e)}`)
       }

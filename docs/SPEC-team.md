@@ -66,7 +66,8 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 一個 Team 帶一份 **issue 佇列**，依 `seq` 順序處理。**PM 與 reviewer 全程是同兩個 bot**（保住累積的上下文），
 執行者**預設每個 issue 換一批**，但 PM 在 `done` 時可用 `workers: keep` 決定沿用（依它對執行者上下文長度與相關性的判斷）；每個 issue 有自己的整合分支並各自交付。
 
-- 新表 `team_issues`：`(team_id, seq)` 與 `(team_id, issue_number)` 唯一，
+- 新表 `team_issues`：`(team_id, seq)` 唯一；`(team_id, issue_number)` **只在還在佇列上的列之間唯一**
+  （partial unique index `team_issues_number_open`，`WHERE state IN ('queued','working')`，見下方「再排同一個 issue」），
   `state ∈ {queued, working, done, failed, skipped}`，各自帶 `branch` / `base_sha` / `summary` / `pr_url` / `fail_reason`。
 - `teams` 的 `issue_number` / `issue_title` / `issue_url` / `branch` / `pr_url` / `summary` / `issue_closed_at`
   **保留為「當前這一項的鏡像」**，換 issue 時由 daemon 同步。既有查詢、`team_json`、UI 標題都不必改。
@@ -95,6 +96,17 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 
 **最後一個 issue**：`finish` 照舊停掉所有成員、寫 `done`，**不動 worktree** —— 清理仍是 `cleanup` 這個人工動作。
 
+**再排同一個 issue（2026-09-07）**：「已在佇列」只算 `queued` 與 `working` 這兩個狀態。
+`done` / `failed` / `skipped` 是**做完那一趟的紀錄**，不再佔住 issue 號，所以同一個 issue 可以再排一次
+（失敗後重試、或使用者看了成果想再做一趟）：**舊列原封不動留著當紀錄，新列取下一個 `seq`**。
+只有同號 issue 還在佇列上（`queued` / `working`）才回
+`409 {"error":"conflict","reason":"issue already queued","issue_number":n}`；同一個請求裡自己重複（`[57, 57]`）也算。
+第 n 趟（n ≥ 2）的整合分支是 `team/i<issue>-<tid6>-r<n>`（§6.2）——第一趟那條分支還在
+（`cleanup` 與 `finish` 從不刪分支，§6.5），同名 `git checkout -b` 會直接失敗。
+`POST /teams/{id}/close-issue` 省略 `issue_id` 時取**最後一趟**（`teams` 的鏡像就是它）。
+> 改這條之前，一個 issue 在同一隊做過（或失敗過）一次就永遠不能再排，UI 的「追加 issue」只會回
+> `409 issue already queued`。全表唯一的舊索引 `team_issues_number` 由開機遷移 `DROP`。
+
 ### 2.4 Submodule 的 issue（2026-09-07）
 
 專案的 git submodule 各自是一個 repo、各自有 GitHub issue。一個 team 可以指定 `repo`（相對於專案根目錄的 submodule 路徑，`""` = 專案本身），之後：
@@ -117,7 +129,7 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 - `add_issues` 目前對所有終態一律 `409 team is finished`。改為：**`done` 且未 cleanup → 放行並觸發 reopen**；`aborted` / `failed` 仍 409（它們沒有可靠的現場可續，使用者請重新組隊）。
 - 「未 cleanup」的判準是 **PM 成員 bot 的 `deleted_at IS NULL`**（`cleanup` 與 `delete` 都會標它；`workspace_id` 在 §6.4a 之前建的舊 team 上不可靠）。
   已 cleanup 的 `done` 回 `409 {"error":"conflict","reason":"team is cleaned up","phase":"done"}`。
-- 其餘驗證不變：issue 存在（`gh issue view`）、不重複、總數 ≤ `MAX_QUEUED_ISSUES`、kind 已安裝、額度未低於 `quota_stop_pct`（reopen 等於一次啟動，套 §7.4 建 team 時的額度檢查）。
+- 其餘驗證不變：issue 存在（`gh issue view`）、不與佇列上的同號重複（§2.3「再排同一個 issue」）、總數 ≤ `MAX_QUEUED_ISSUES`、kind 已安裝、額度未低於 `quota_stop_pct`（reopen 等於一次啟動，套 §7.4 建 team 時的額度檢查）。
 - 非 `done` 的正常執行中 team 走原路徑（只排隊，不動 phase）；本節只描述 `done` 分支。
 
 #### 2.5.2 daemon 流程
@@ -352,7 +364,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | 項目 | 規則 |
 |---|---|
 | `tid6` | `team_id` 尾 6 碼小寫（與 SPEC §2 agent_name 的 hash 同法） |
-| 整合分支 | `team/i<issue>-<tid6>`，從 `base_sha` 建立。`base` 預設 = 建 team 時主 checkout 的 `HEAD`（記 `base_ref` / `base_sha`）；使用者可改成任何 ref |
+| 整合分支 | `team/i<issue>-<tid6>`，從 `base_sha` 建立。`base` 預設 = 建 team 時主 checkout 的 `HEAD`（記 `base_ref` / `base_sha`）；使用者可改成任何 ref。同一隊**第 n 趟**做同一個 issue（§2.3「再排同一個 issue」，n ≥ 2）用 `team/i<issue>-<tid6>-r<n>`，因為前幾趟的分支還在 |
 | task 分支 | `team/i<issue>-<tid6>/t<seq>-<worker暱稱>`，**派工當下**從整合分支 HEAD 建立（後派的 task 自動包含先前已合併的工作） |
 | worker worktree | 建 team 時 `git -C <project.path> worktree add --detach <data_dir>/teams/<id>/dev-1 <base_sha>`；派工時 `git -C <wt> checkout -b <task branch> <integration HEAD>`（worktree 固定、分支隨 task） |
 | reviewer worktree | 建 team 時 `--detach`；送審時 daemon 先 `git -C <wt> checkout --detach <task branch>`，讓 reviewer 能在該分支上跑 build / test |
@@ -661,7 +673,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/teams/{id}/issues` | `{"issue_numbers":[n,…]}`（或單數 `{"issue_number":n}`） | `200 {issues:[…]}`；`aborted` / `failed` 回 409，**`done` 且未 cleanup 則放行並 reopen（§2.5）**，`done` 但已 cleanup 回 `409 {"reason":"team is cleaned up"}`，重複的 issue 回 409 |
+| POST | `/teams/{id}/issues` | `{"issue_numbers":[n,…]}`（或單數 `{"issue_number":n}`） | `200 {issues:[…]}`；`aborted` / `failed` 回 409，**`done` 且未 cleanup 則放行並 reopen（§2.5）**，`done` 但已 cleanup 回 `409 {"reason":"team is cleaned up"}`；同號 issue **還在佇列上**（`queued` / `working`）回 `409 {"reason":"issue already queued","issue_number":n}`，`done` / `failed` / `skipped` 的同號 issue **可以再排**（新列，§2.3） |
 | DELETE | `/teams/{id}/issues/{issue_id}` | — | `200 {}`；只有 `state="queued"` 可移除，其餘回 409 |
 
 `POST /projects/{id}/teams` 的 body 改用 `issue_numbers: [n,…]`（依序處理）；舊的 `issue_number` 仍然接受，
