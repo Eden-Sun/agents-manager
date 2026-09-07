@@ -7,13 +7,18 @@
 //! * grok: `grok models` text output; per-model `reasoning_efforts` from
 //!   `~/.grok/models_cache.json` when present; default effort from that cache (or
 //!   `~/.grok/config.toml`'s `default_reasoning_effort` as a fallback).
-//! * claude: static `opus / sonnet / haiku / fable` (no list API).
+//! * claude: static `opus / sonnet / haiku / fable` (no list API); `default_effort` per
+//!   alias comes from that identity's `settings.json` on that host (`effortLevel` account
+//!   default, overridden per real model id by `modelSettings.<id>.effortLevel` — matched to
+//!   an alias by substring, e.g. `claude-opus-5` for `opus`), so "預設" tells you what it
+//!   actually resolves to instead of just "unspecified".
 
-use crate::config::LOCAL_HOST;
+use crate::config::{expand_home, LOCAL_HOST};
 use crate::hosts::sh_quote;
 use crate::state::App;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -277,7 +282,77 @@ fn grok_default_effort_from_config(text: &str) -> Option<String> {
     })
 }
 
-pub fn claude_static_models() -> Vec<Value> {
+/// `settings.json`'s `effortLevel` (account default) and `modelSettings.<real-id>.effortLevel`
+/// (per-model override) → `(global, per_model)`. Anything unreadable or unparsable is
+/// `(None, {})` — a hint that cannot be read is just no hint, never an error.
+///
+/// Real model ids (`claude-opus-5`, `claude-sonnet-5`, `claude-fable-5-1`, …) aren't the
+/// aliases this CLI is started with (`opus`, `sonnet`, `fable`); [`claude_static_models`]
+/// matches an override to an alias by substring, which holds for every id seen so far
+/// (verified against local + m4p `settings.json`, 2026-09-07).
+pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<String, String>) {
+    let mut per_model = BTreeMap::new();
+    let Ok(v) = serde_json::from_str::<Value>(text) else { return (None, per_model) };
+    let global = v.get("effortLevel").and_then(|x| x.as_str()).map(str::to_string);
+    if let Some(obj) = v.get("modelSettings").and_then(|x| x.as_object()) {
+        for (model_id, settings) in obj {
+            if let Some(e) = settings.get("effortLevel").and_then(|x| x.as_str()) {
+                per_model.insert(model_id.clone(), e.to_string());
+            }
+        }
+    }
+    (global, per_model)
+}
+
+/// `identity`'s `CLAUDE_CONFIG_DIR` on `host`, already expanded against that host's home —
+/// `None` means the default account (`~/.claude`). `identity` not existing on this host, or
+/// not being a claude identity, is silently the default account too: a bad hint is nothing
+/// worth failing the model list over.
+async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> Option<String> {
+    let name = identity?;
+    let idn = crate::tools::identity_for_host(app, host, name).await?;
+    if idn.kind != "claude" {
+        return None;
+    }
+    let dir = idn.env.get("CLAUDE_CONFIG_DIR")?;
+    let home = crate::tools::host_home(app, host).await;
+    Some(expand_home(dir, &home))
+}
+
+/// Read + parse that account's `settings.json` on `host`. `config_dir` is [`claude_config_dir`]'s
+/// output (`None` = `~/.claude`).
+async fn read_claude_effort_settings(app: &Arc<App>, host: &str, config_dir: Option<&str>) -> (Option<String>, BTreeMap<String, String>) {
+    let script = match config_dir {
+        Some(dir) => format!("cat {}/settings.json 2>/dev/null", sh_quote(dir)),
+        None => "cat \"$HOME/.claude/settings.json\" 2>/dev/null".to_string(),
+    };
+    let text = if host == LOCAL_HOST {
+        tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    } else if let Some(conn) = app.hosts.get(host).await {
+        conn.ssh_exec(&format!("{script}\n")).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    parse_claude_effort_settings(&text)
+}
+
+/// claude's own built-in default once neither an account-wide `effortLevel` nor a per-model
+/// override applies. Verified two ways, 2026-09-07: Claude Code's own docs
+/// (`code.claude.com/docs/en/model-config`, "Choose an effort level") say "`high` … The default
+/// on every model except Opus 4.7"; and directly against the CLI — a fresh identity with an
+/// empty `settings.json` (no `effortLevel`, no `modelSettings`) started at `Sonnet 5 with high
+/// effort` and its `/effort` slider's ▲ sat on `high`. None of our four aliases resolve to
+/// Opus 4.7, so the one documented exception never applies here.
+const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
+
+pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>) -> Vec<Value> {
     // `claude --model` 的 alias（`claude --help`：'fable'、'opus'、'sonnet'…）。
     // `efforts` 是 `claude --help` 對 `--effort` 列的那五級，對每個 alias 都一樣（claude 沒有
     // 像 codex `model/list` 那種 per-model 清單）；不指定就不帶旗標，由 CLI 決定。
@@ -286,16 +361,22 @@ pub fn claude_static_models() -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(i, id)| {
+            // A real model id containing the alias (`claude-opus-5` for `opus`) wins over the
+            // account-wide default, which in turn wins over the CLI's own built-in default —
+            // that is exactly what "不帶 --effort" resolves to for *this* model.
+            let overridden = per_model.iter().find(|(k, _)| k.to_ascii_lowercase().contains(id)).map(|(_, v)| v.clone());
+            let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string());
             json!({
                 "id": id, "display_name": id, "description": "", "is_default": i == 0,
-                "default_effort": Value::Null, "efforts": efforts, "service_tiers": [],
+                "default_effort": default_effort, "efforts": efforts, "service_tiers": [],
             })
         })
         .collect()
 }
 
-/// Uncached fetch.
-pub async fn fetch(app: &Arc<App>, host: &str, kind: &str) -> Result<Value> {
+/// Uncached fetch. `identity` (claude only) picks whose `settings.json` the "預設" effort
+/// hint is read from; `None` is the default account.
+pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
     let (source, models) = match kind {
         "codex" => {
             let r = codex_rpc(app, host, "model/list", json!({"includeHidden": false})).await?;
@@ -356,7 +437,11 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str) -> Result<Value> {
             let m = enrich_grok_models(m, &cache_text, &cfg_text);
             ("grok-cli", m)
         }
-        "claude" => ("static", claude_static_models()),
+        "claude" => {
+            let config_dir = claude_config_dir(app, host, identity).await;
+            let (global, per_model) = read_claude_effort_settings(app, host, config_dir.as_deref()).await;
+            ("static", claude_static_models(global.as_deref(), &per_model))
+        }
         other => bail!("unknown kind `{other}`"),
     };
     Ok(json!({
@@ -368,9 +453,9 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str) -> Result<Value> {
     }))
 }
 
-/// Cached fetch (10 min per host+kind); `refresh` bypasses the cache.
-pub async fn list(app: &Arc<App>, host: &str, kind: &str, refresh: bool) -> Result<Value> {
-    let key = format!("{host}/{kind}");
+/// Cached fetch (10 min per host+kind+identity); `refresh` bypasses the cache.
+pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
+    let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
     if !refresh {
         if let Some((at, v)) = app.models_cache.lock().await.get(&key) {
             if at.elapsed() < CACHE_TTL {
@@ -378,7 +463,7 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, refresh: bool) -> Resu
             }
         }
     }
-    let v = fetch(app, host, kind).await?;
+    let v = fetch(app, host, kind, identity).await?;
     app.models_cache.lock().await.insert(key, (Instant::now(), v.clone()));
     Ok(v)
 }
@@ -518,6 +603,41 @@ mod tests {
         // A title the agent has renamed to its task says nothing about the model.
         assert_eq!(grok_title_model_effort("遠端主機 gh 登入 API 與 UI - grok"), (None, None));
         assert_eq!(grok_title_model_effort("Grok Code Fast"), (None, None));
+    }
+
+    /// Real `settings.json` shapes seen on this machine and on m4p, 2026-09-07: an account
+    /// with a global default and one override, and a host with only an override (no global).
+    #[test]
+    fn claude_effort_hint_prefers_the_per_model_override() {
+        let (global, per_model) = parse_claude_effort_settings(
+            r#"{"effortLevel":"high","modelSettings":{"claude-opus-5":{"effortLevel":"low"}}}"#,
+        );
+        assert_eq!(global.as_deref(), Some("high"));
+        assert_eq!(per_model.get("claude-opus-5").map(String::as_str), Some("low"));
+
+        let models = claude_static_models(global.as_deref(), &per_model);
+        let of = |id: &str| models.iter().find(|m| m["id"] == id).unwrap()["default_effort"].as_str().map(String::from);
+        assert_eq!(of("opus"), Some("low".into()), "per-model override wins");
+        assert_eq!(of("sonnet"), Some("high".into()), "falls back to the account default");
+
+        // m4p: no top-level `effortLevel`, only a fable override.
+        let (global2, per_model2) =
+            parse_claude_effort_settings(r#"{"modelSettings":{"claude-fable-5-1":{"effortLevel":"low"}}}"#);
+        assert_eq!(global2, None);
+        let models2 = claude_static_models(global2.as_deref(), &per_model2);
+        let of2 = |id: &str| models2.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
+        assert_eq!(of2("fable"), json!("low"));
+        // No override and no global: not a guess — this is what the CLI itself defaults to,
+        // verified against a fresh cc2 identity whose `settings.json` has never mentioned
+        // effort (`Sonnet 5 with high effort`, `/effort` slider ▲ on `high`).
+        assert_eq!(of2("opus"), json!("high"));
+
+        // Unreadable / not JSON: no override, no global — same built-in fallback.
+        let (g3, m3) = parse_claude_effort_settings("");
+        assert_eq!(g3, None);
+        assert!(m3.is_empty());
+        let models3 = claude_static_models(g3.as_deref(), &m3);
+        assert_eq!(models3[0]["default_effort"], json!("high"));
     }
 
     #[test]
