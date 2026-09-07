@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { countUnreadTurns, isUnread, loadCounts, loadMarks, markOfMessages, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, totalUnread } from './unread.ts'
+import { completionKey, countUnreadTurns, isUnread, loadCounts, loadMarks, markOfMessages, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, totalUnread } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -110,4 +110,37 @@ test('localStorage 整支不能用時不會炸（無痕視窗）', () => {
   assert.deepEqual(loadMarks(), {})
   saveCounts({ bots: { b1: 1 }, groups: {} })
   saveMarks({ 'bot:b1': { at: 'x', id: 'y' } })
+})
+
+// ---------------------------------------------------------- 一個回合只跳一下
+
+test('有 turn_id 就用 turn_id 記帳', () => {
+  assert.equal(completionKey(msg('m1', 'assistant', '2026-09-07T00:00:01Z', 't1'), ['t1']), 't1')
+})
+
+test('沒有 turn_id 時掛在最近的回合上，跟 turn_updated 同一個 key', () => {
+  const m = msg('m1', 'assistant', '2026-09-07T00:00:01Z')
+  assert.equal(completionKey(m, ['t1', 't3', 't2']), 't3')
+})
+
+test('連一個回合都不知道時才退回 msg:<id>', () => {
+  assert.equal(completionKey(msg('m1', 'assistant', '2026-09-07T00:00:01Z'), []), 'msg:m1')
+})
+
+/**
+ * 這就是重複計數的那個 bug：沒有 turn_id 的回覆先被 `message_added` 記一次、`turn_updated`
+ * 再記一次，`takeTurnCompletion` 兩個 key 對不上，一則回覆讓徽章跳兩下。兩種 frame 順序都要
+ * 只跳一次。
+ */
+test('message_added 與 turn_updated 不管誰先到，同一個回合只記一次', () => {
+  for (const messageFirst of [true, false]) {
+    resetTurnCompletions()
+    const m = msg('m1', 'assistant', '2026-09-07T00:00:01Z')
+    // `turn_updated`（in_flight）已經讓 store 認得這個回合，兩條路都看得到它。
+    const known = ['t1']
+    const hits = messageFirst
+      ? [takeTurnCompletion('b1', completionKey(m, known)), takeTurnCompletion('b1', 't1')]
+      : [takeTurnCompletion('b1', 't1'), takeTurnCompletion('b1', completionKey(m, known))]
+    assert.deepEqual(hits.filter(Boolean).length, 1, `messageFirst=${messageFirst}`)
+  }
 })

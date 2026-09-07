@@ -1484,11 +1484,17 @@ focus 立即；`Escape`、捲動、resize、拖曳開始都會收掉。
 
 兩份都存的理由：重整後只有正在看的那個 bot 會載入訊息，其他的一則都沒有，光靠標記算不出
 數字；而光靠數字會跟真實訊息漂移。訊息真的載進來時 `recountBot` 用標記重算一次校正。
+
+**一個回合只跳一下**：同一個回合會先來 `message_added`（assistant）再來 `turn_updated`
+（終態），兩個都算「完成」，所以 `takeTurnCompletion` 去重。兩邊必須用**同一個 key**：
+`turn_updated` 用的是 `turn.id`，而沒有帶 `turn_id` 的訊息由 `completionKey()` 掛到這個 bot
+最近的那個回合上（退回 `msg:<id>` 只在連一個回合都還不知道時）。用 `msg:<id>` 記第一次、
+`turn.id` 記第二次的話，一則回覆會讓徽章加二。
 每次 `GET /api/state` 之後 `pruneUnread()` 把已經不存在的 bot / project 的帳丟掉。
 
 **驗收**：
 
-- `cd web && node --test --experimental-strip-types src/store/unread.test.ts`（11 項）。
+- `cd web && node --test --experimental-strip-types src/store/unread.test.ts`（15 項）。
 - `node scripts/demo-unread.mjs`（mock @ 5311）：送出後切到別的 bot → 那一列出現 `!1`、
   分頁標題 `(1)`；收合專案 → 標題掛上 `!1`；點回去 → 徽章與 `(N)` 都清掉，
   `am.readMarks` 推到最後一則。截圖 `docs/screenshots/unread/440`、`441`、`443`。

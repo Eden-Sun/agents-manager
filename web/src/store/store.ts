@@ -40,6 +40,7 @@ import { botStatusConnTarget } from './botStatusConn'
 import {
   botKey,
   completesTurn,
+  completionKey,
   countUnreadTurns,
   groupKey,
   loadCounts,
@@ -2015,7 +2016,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // 一則 assistant 訊息 = 一個回合完成。記未讀要在 set 之後：`markBotRead` 的標記是從
       // 已經含這則訊息的清單推出來的。team 成員也是 bot，走的是同一條路。
       if (completesTurn(msg)) {
-        const turnId = msg.turn_id ?? `msg:${msg.id}`
+        // 同一個回合只記一次：沒有 `turn_id` 的訊息也要跟 `turn_updated` 落在同一個 key 上，
+        // 否則這裡記 `msg:<id>`、回合終態再記 `turn.id`，一則回覆讓徽章跳兩下。
+        const turnId = completionKey(msg, Object.keys(get().turns[botId] ?? {}))
         noteTurnDone(set, get, botId, turnId)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
         if (pid) noteGroupTurnDone(set, get, pid, turnId)
