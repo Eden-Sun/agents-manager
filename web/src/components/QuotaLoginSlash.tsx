@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
-import { canLoginInSession, findLoginTargetId } from '../lib/quotaLogin'
+import { canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv } from '../lib/quotaLogin'
+import { QuotaLoginShell } from './QuotaLoginShell'
 import { ConfirmDialog } from './ConfirmDialog'
 
 /**
@@ -11,7 +12,17 @@ import { ConfirmDialog } from './ConfirmDialog'
  * 這些 kind 的 TUI 有 `/login`，那就直接在這裡送——目標是同 host、同 kind、同身份、還在跑的那個 bot
  * （`findLoginTarget`）。沒有在跑的就 disabled，因為 `/login` 要送進活著的 pane。
  */
-export function QuotaLoginSlash({ kind, host, identity }: { kind: BotKind; host: string; identity: string | null }) {
+export function QuotaLoginSlash({
+  kind,
+  host,
+  hostLabel,
+  identity,
+}: {
+  kind: BotKind
+  host: string
+  hostLabel: string
+  identity: string | null
+}) {
   const botId = useStore((s) => findLoginTargetId(s, host, kind, identity))
   const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? null)
   const loginBot = useStore((s) => s.loginBot)
@@ -22,9 +33,13 @@ export function QuotaLoginSlash({ kind, host, identity }: { kind: BotKind; host:
   const [confirmOpen, setConfirmOpen] = useState(false)
   /** 送出過一次之後才冒出「重新偵測」——沒送過就沒有東西需要重新偵測。 */
   const [loginSent, setLoginSent] = useState(false)
+  const shellCommand = useStore((s) => cliLoginCommand(kind, identityEnv(s, host, kind, identity)))
 
   // codex 沒有 `/login`，走 `QuotaLogin-codex`；這裡擋一下免得被誤用時給出壞按鈕。
   if (!canLoginInSession(kind)) return null
+  // 沒有正在跑的 Bot 就沒有畫面可以送 `/login`。與其給一顆灰掉的按鈕叫使用者先去開 bot，
+  // 不如走 codex 那條路：開該主機的 shell 跑 `<cli> login`，登的是同一個身份。
+  if (!botId) return <QuotaLoginShell host={host} hostLabel={hostLabel} kind={kind} command={shellCommand} />
 
   return (
     <div className="bs-login-row">
