@@ -196,10 +196,11 @@ function BotRow({
         }
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
         const dir = e.key === 'ArrowUp' ? -1 : 1
-        // 鍵盤也要能排序：Alt + ↑/↓（拖曳不是每個人都能用）。
+        // 鍵盤也要能排序：Alt + ↑/↓（拖曳不是每個人都能用）。只有父列可以換位置——
+        // 子 agent 跟著父列走，拖曳同樣不開放（`draggable={!compact}`），兩邊一致。
         if (e.altKey) {
           e.preventDefault()
-          onNudge(botId, dir)
+          if (!compact) onNudge(botId, dir)
           return
         }
         // 沒按 Alt 就是換 bot——listbox 本來就該這樣走，焦點跟著跳到新的那一列。
@@ -871,10 +872,17 @@ export function Sidebar() {
   }
 
   /** Alt + ↑/↓：跟相鄰的那列交換。 */
+  /**
+   * Alt + ↑/↓ 換位置。只動父列：子 agent 是掛在父列底下畫的，順序由父列決定，
+   * 自己搬沒有意義；而父列要跳過的也是「下一個父列」，不是夾在中間的子 agent
+   * （原本把子 agent 也算進索引，往下一格常常等於原地不動）。
+   */
   const nudge = (botId: string, dir: -1 | 1) => {
     const bot = bots.find((b) => b.id === botId)
-    if (!bot) return
-    const ids = botsOfProject({ bots, botOrder }, bot.project_id).map((b) => b.id)
+    if (!bot || bot.parent_bot_id) return
+    const ids = botsOfProject({ bots, botOrder }, bot.project_id)
+      .filter((b) => !b.parent_bot_id)
+      .map((b) => b.id)
     const at = ids.indexOf(botId)
     const to = at + dir
     if (at < 0 || to < 0 || to >= ids.length) return
