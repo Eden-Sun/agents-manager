@@ -50,6 +50,36 @@ pub async fn rearm_progress(app: &Arc<App>) {
     }
 }
 
+/// A bot that can own children in this pass: the herdr name it is running under and — one
+/// bot, one tab — the tab its live agent is sitting in. The tab is what makes descent
+/// observable: whatever a spawned agent called itself, it is in its parent's tab.
+struct Parent {
+    agent_name: String,
+    tab_id: Option<String>,
+    bot: db::Bot,
+}
+
+/// How long `name` matches `parent` as a `<parent>-<suffix>` prefix; 0 when it does not.
+fn prefix_score(parent: &str, name: &str) -> usize {
+    if name.len() > parent.len() + 1 && name.starts_with(parent) && name.as_bytes()[parent.len()] == b'-' {
+        parent.len()
+    } else {
+        0
+    }
+}
+
+/// A child claimed by descent has no prefix to strip, so its bot name is herdr's agent name
+/// with the characters `valid_bot_name` forbids dropped and the rest cut to 32.
+fn child_name_from_agent(name: &str) -> String {
+    let cleaned: String =
+        name.chars().filter(|c| !c.is_whitespace() && !matches!(c, '@' | ',' | ':' | ';')).take(32).collect();
+    if cleaned.is_empty() {
+        "child".to_string()
+    } else {
+        cleaned
+    }
+}
+
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let Some(session) = app.session_for_host(host).await else {
         anyhow::bail!("unknown host `{host}`");
@@ -103,8 +133,8 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // Every herdr agent name a bot claimed in this pass; what is left over is a stranger,
     // and a stranger named `<some bot's agent name>-<suffix>` is that bot's child (below).
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // `(agent name, bot id)` of every bot, for the prefix match.
-    let mut parents: Vec<(String, db::Bot)> = Vec::new();
+    // Every bot that could be a parent this pass, for the descent and prefix matches.
+    let mut parents: Vec<Parent> = Vec::new();
     for bot in bots {
         // A local bot imported from the user's default session is reconciled by
         // default_session::sync; it must not be marked exited because it is absent from the
@@ -126,7 +156,6 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         // Names this bot may be running under: the run's recorded name, the current
         // `<project>-<bot>` scheme, and the legacy bare bot name (runs from before v3.5).
         let computed = db::agent_name_for_bot(&app.db, &bot).await?;
-        parents.push((computed.clone(), bot.clone()));
         let mut candidates: Vec<String> = Vec::new();
         if let Some(r) = &active {
             if let Some(n) = r.agent_name.clone().filter(|s| !s.is_empty()) {
@@ -186,6 +215,15 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         if let Some(n) = &found_name {
             claimed.insert(n.clone());
         }
+        // A bot only owns a tab while herdr still lists its agent; a bot whose run is about to
+        // be exited below adopts nobody.
+        parents.push(Parent {
+            // The name it is *actually* running under, which for a spawned child is the one
+            // its parent picked, not the `<project>-<hash>` we would have computed.
+            agent_name: found_name.clone().unwrap_or_else(|| computed.clone()),
+            tab_id: found.as_ref().map(|a| a.tab_id.clone()),
+            bot: bot.clone(),
+        });
         match (active, found.as_ref()) {
             (Some(run), Some(agent)) => {
                 let agent: &crate::herdr::AgentInfo = agent;
@@ -274,23 +312,40 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         app.emit_bot_status(&bot.id).await;
     }
 
-    // Spawned children: an agent nobody claimed whose name is `<parent agent name>-<suffix>`
-    // becomes a `managed_by='child'` bot under that parent, with an adopted run. The parent's
-    // persona (`lifecycle::spawn_rule`) is what tells the agent to name its children that way.
-    // Longest prefix wins, so a grandchild lands under the child, not the grandparent.
+    // Spawned children: an agent nobody claimed becomes a `managed_by='child'` bot under the
+    // parent it descends from, with an adopted run.
+    //
+    // **Descent first.** One bot, one tab: an unclaimed agent sitting in a bot's tab was
+    // spawned from that bot's pane, whatever it named itself. That is a mechanism, where the
+    // `<parent agent name>-<suffix>` naming the persona asks for (`lifecycle::spawn_rule`) is
+    // only a request — an agent that forgets it, or a codex/grok that never read it, used to
+    // vanish into an untracked sub-task.
+    //
+    // The prefix match is kept for the cases descent cannot see: a child in another tab, or a
+    // team workspace. Within the matching tab the longest prefix still wins, so a grandchild
+    // lands under the child rather than the grandparent; with no prefix at all the tab's own
+    // bot (not a child adopted into it) takes it.
     let mut new_children = 0usize;
     for agent in agents.iter() {
         let Some(name) = agent.name.as_deref() else { continue };
         if claimed.contains(name) {
             continue;
         }
-        let parent = parents
+        let by_tab = parents
             .iter()
-            .filter(|(pn, _)| name.len() > pn.len() + 1 && name.starts_with(pn.as_str()) && name.as_bytes()[pn.len()] == b'-')
-            .max_by_key(|(pn, _)| pn.len());
-        let Some((parent_name, parent)) = parent else { continue };
-        let suffix = &name[parent_name.len() + 1..];
-        let child_name = if crate::config::valid_bot_name(suffix) { suffix.to_string() } else { name.to_string() };
+            .filter(|p| p.tab_id.as_deref() == Some(agent.tab_id.as_str()))
+            .max_by_key(|p| (prefix_score(&p.agent_name, name), u8::from(p.bot.managed_by != "child")));
+        let by_prefix =
+            parents.iter().filter(|p| prefix_score(&p.agent_name, name) > 0).max_by_key(|p| p.agent_name.len());
+        let Some(entry) = by_tab.or(by_prefix) else { continue };
+        let (parent_name, parent) = (&entry.agent_name, &entry.bot);
+        let child_name = match prefix_score(parent_name, name) {
+            0 => child_name_from_agent(name),
+            n => {
+                let suffix = &name[n + 1..];
+                if crate::config::valid_bot_name(suffix) { suffix.to_string() } else { child_name_from_agent(name) }
+            }
+        };
         let kind = agent
             .agent
             .as_deref()
@@ -645,6 +700,124 @@ mod compat_tests {
         sqlx::query("UPDATE bots SET model='sonnet' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         assert_eq!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().model.as_deref(), Some("sonnet"));
+    }
+
+    /// **Descent, not naming.** A child that ignored the naming rule — `helper`, no parent
+    /// prefix — is still claimed, because it is sitting in its parent's tab. This is the whole
+    /// point: the prefix was a request to the agent, the tab is a fact about the pane.
+    #[tokio::test]
+    async fn a_stranger_in_a_bots_tab_is_claimed_as_its_child() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        // The child's pane is a split of the parent's, so it shares the parent's tab.
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        assert_eq!(kid_pane.tab_id, root.tab_id, "precondition: one bot, one tab");
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": "helper", "agent": "codex", "agent_status": "working",
+                   "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kid = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .expect("the stranger in the tab was adopted as a child");
+        assert_eq!(kid.name, "helper", "no prefix to strip: herdr's own agent name");
+        assert_eq!(kid.kind, "codex", "a child need not be the parent's CLI");
+        assert_eq!(kid.managed_by, "child");
+        let r = run_of(&app, &kid.id).await.unwrap();
+        assert_eq!(r.adopted, 1);
+        assert_eq!(r.pane_id.as_deref(), Some(kid_pane.pane_id.as_str()));
+
+        // Idempotent: a second pass reuses the bot rather than making a twin.
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ? AND deleted_at IS NULL")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// Descent decides *which* bot, and inside the tab the longest prefix still decides the
+    /// depth: a grandchild named after the child lands under the child, not the top bot.
+    #[tokio::test]
+    async fn a_grandchild_in_the_same_tab_lands_under_the_child() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let grand_pane = client.pane_split(&kid_pane.pane_id, "down", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let kid_agent = format!("{parent_agent}-lastq");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let agent_json = |name: &str, pane: &str, tab: &str| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": tab, "pane_id": pane, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![
+            agent_json(&parent_agent, &root.pane_id, &root.tab_id),
+            agent_json(&kid_agent, &kid_pane.pane_id, &kid_pane.tab_id),
+        ];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let kid = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+
+        // Now a grandchild appears, in the very same tab, named after the child.
+        env.herdr.agents.lock().unwrap().push(agent_json(
+            &format!("{kid_agent}-deep"),
+            &grand_pane.pane_id,
+            &grand_pane.tab_id,
+        ));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let grand = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = 'deep'")
+            .fetch_one(&app.db)
+            .await
+            .expect("the grandchild was adopted");
+        assert_eq!(grand.parent_bot_id.as_deref(), Some(kid.id.as_str()), "under the child, not the top bot");
     }
 
     /// The unhappy path is unchanged: a run whose agent herdr no longer lists is exited,
