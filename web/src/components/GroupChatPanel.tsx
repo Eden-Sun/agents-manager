@@ -7,7 +7,7 @@ import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
-import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, useScrollTail } from './ChatPanel'
+import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, LoadEarlier, useScrollTail } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
@@ -151,11 +151,13 @@ function GroupMessageList({ projectId }: { projectId: string }) {
     useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.alert ?? null]))),
   )
   const rows = useMemo(() => foldRows(messages ?? []), [messages])
+  const loadEarlier = useStore((s) => s.loadEarlierGroupMessages)
   const tail = useScrollTail([rows, typing.length, liveText, liveActivity])
 
   return (
     <div className="msg-list-wrap">
     <div className="msg-list group" ref={tail.ref} onScroll={tail.onScroll}>
+      <LoadEarlier id={projectId} onLoad={loadEarlier} />
       {rows.length === 0 ? (
         <EmptyState
           loading={!loaded}

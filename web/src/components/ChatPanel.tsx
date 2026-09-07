@@ -284,6 +284,25 @@ export function useScrollTail(deps: unknown[]) {
   return { ref, onScroll, atBottom, toBottom }
 }
 
+/**
+ * 「載入更早的訊息」（issue #25）。
+ *
+ * store 只留每個對話最近 `MESSAGE_CAP` 則——第一頁本來就可能有 `has_more`，開一整天之後
+ * 更早的也會被截掉。這顆按鈕釘在清單最上方，按下去走 `before=` 分頁把上一頁接回去。
+ */
+export function LoadEarlier({ id, onLoad }: { id: string; onLoad: (id: string) => void }) {
+  const show = useStore((s) => Boolean(s.moreMessages[id]))
+  const loading = useStore((s) => Boolean(s.loadingMore[id]))
+  if (!show) return null
+  return (
+    <div className="load-earlier">
+      <button type="button" className="btn" disabled={loading} onClick={() => onLoad(id)}>
+        {loading ? '載入中…' : '載入更早的訊息'}
+      </button>
+    </div>
+  )
+}
+
 export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => void }) {
   if (!show) return null
   return (
@@ -506,6 +525,7 @@ function MessageList({ botId }: { botId: string }) {
   const liveText = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
   const liveActivity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
   const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
+  const loadEarlier = useStore((s) => s.loadEarlierMessages)
   const tail = useScrollTail([messages, working, liveText, liveActivity, liveAlert])
 
   useEffect(() => {
@@ -538,6 +558,7 @@ function MessageList({ botId }: { botId: string }) {
   return (
     <div className="msg-list-wrap">
     <div className="msg-list" ref={tail.ref} onScroll={tail.onScroll}>
+      <LoadEarlier id={botId} onLoad={loadEarlier} />
       {list.length === 0 ? (
         <EmptyState
           loading={!loaded}

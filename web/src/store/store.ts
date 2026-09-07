@@ -34,6 +34,7 @@ import {
 import { ApiError } from '../api/types'
 import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
+import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { botStatusConnTarget } from './botStatusConn'
 import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
@@ -210,6 +211,9 @@ export interface Notice {
 const LIVE_THROTTLE_MS = 250
 const liveThrottle = new Map<string, { apply: null | (() => void) }>()
 
+/** issue #25：「載入更早的訊息」一次補幾則（與第一頁同大小）。 */
+const PAGE_SIZE = 200
+
 export interface LiveReply {
   turnId: string
   text: string
@@ -292,6 +296,14 @@ interface StoreState {
   messages: Record<string, Message[]>
   loadedBots: Record<string, boolean>
   /**
+   * issue #25：`messages[botId]` / `groupMessages[projectId]` 前面還有更早的沒載進來
+   * ——第一頁的 `has_more`，或後來被 `MESSAGE_CAP` 截掉的。true 時對話最上方出現
+   * 「載入更早的訊息」，按下去走 `before=` 分頁。key 是 bot id 或 project id。
+   */
+  moreMessages: Record<string, boolean>
+  /** 上面那顆按鈕正在抓（同一個 key 不重複發）。 */
+  loadingMore: Record<string, boolean>
+  /**
    * bot_id → partial reply of its in-flight turn (`turn_progress`). Cleared when that turn's
    * assistant `message_added` arrives or `turn_updated` leaves `in_flight`. Render it only
    * while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows.
@@ -369,6 +381,8 @@ interface StoreState {
   /** Open the §13 group view of a project (null = back to the selected bot). */
   selectProject: (projectId: string | null) => void
   loadGroupMessages: (projectId: string) => Promise<void>
+  /** issue #25：往前補一頁群組時間軸（`before=` 目前最舊的一則）。 */
+  loadEarlierGroupMessages: (projectId: string) => Promise<void>
   /** `POST /projects/:id/chat`; null = failed (reason already shown as a notice). */
   sendGroupChat: (projectId: string, text: string, attachments?: string[]) => Promise<GroupChatResult | null>
   setRightTab: (tab: RightTab) => void
@@ -380,6 +394,8 @@ interface StoreState {
   requestOpenBotSheet: (projectId: string) => void
   clearOpenBotSheet: () => void
   loadMessages: (botId: string) => Promise<void>
+  /** issue #25：往前補一頁對話（`before=` 目前最舊的一則）。 */
+  loadEarlierMessages: (botId: string) => Promise<void>
   notify: (kind: Notice['kind'], text: string, action?: Notice['action']) => void
   dismiss: (id: number) => void
 
@@ -564,6 +580,8 @@ export const useStore = create<StoreState>((set, get) => ({
   turns: {},
   messages: {},
   loadedBots: {},
+  moreMessages: {},
+  loadingMore: {},
   liveReply: {},
   queuedSends: {},
 
@@ -632,7 +650,7 @@ export const useStore = create<StoreState>((set, get) => ({
       for (const t of st.turns) {
         const botId = t.bot_id ?? st.bots.find((b) => runs[b.id]?.id === t.run_id)?.id
         if (!botId) continue
-        turns[botId] = { ...(turns[botId] ?? {}), [t.id]: t }
+        turns[botId] = pruneTurns({ ...(turns[botId] ?? {}), [t.id]: t })
       }
       const selected =
         s.selectedBotId && st.bots.some((b) => b.id === s.selectedBotId)
@@ -707,10 +725,33 @@ export const useStore = create<StoreState>((set, get) => ({
             [projectId]: kept.length > 0 ? sortById([...page.messages, ...kept]) : page.messages,
           },
           loadedProjects: { ...s.loadedProjects, [projectId]: true },
+          moreMessages: { ...s.moreMessages, [projectId]: page.has_more },
         }
       })
     } catch (e) {
       get().notify('error', `載入群組訊息失敗：${errText(e)}`)
+    }
+  },
+
+  async loadEarlierGroupMessages(projectId) {
+    const s0 = get()
+    const oldest = s0.groupMessages[projectId]?.[0]
+    if (!oldest || s0.loadingMore[projectId]) return
+    set((s) => ({ loadingMore: { ...s.loadingMore, [projectId]: true } }))
+    try {
+      const page = await api.fetchProjectMessages(projectId, PAGE_SIZE, oldest.id)
+      set((s) => {
+        const have = new Set((s.groupMessages[projectId] ?? []).map((m) => m.id))
+        const older = page.messages.filter((m) => !have.has(m.id))
+        return {
+          groupMessages: { ...s.groupMessages, [projectId]: [...older, ...(s.groupMessages[projectId] ?? [])] },
+          moreMessages: { ...s.moreMessages, [projectId]: page.has_more && older.length > 0 },
+        }
+      })
+    } catch (e) {
+      get().notify('error', `載入更早的群組訊息失敗：${errText(e)}`)
+    } finally {
+      set((s) => ({ loadingMore: withoutKey(s.loadingMore, projectId) }))
     }
   },
 
@@ -812,10 +853,35 @@ export const useStore = create<StoreState>((set, get) => ({
           messages: { ...s.messages, [botId]: kept.length > 0 ? sortByTime([...page.messages, ...kept]) : page.messages },
           turns: { ...s.turns, [botId]: turns },
           loadedBots: { ...s.loadedBots, [botId]: true },
+          moreMessages: { ...s.moreMessages, [botId]: page.has_more },
         }
       })
     } catch (e) {
       get().notify('error', `載入訊息失敗：${errText(e)}`)
+    }
+  },
+
+  async loadEarlierMessages(botId) {
+    const s0 = get()
+    const oldest = s0.messages[botId]?.[0]
+    if (!oldest || s0.loadingMore[botId]) return
+    set((s) => ({ loadingMore: { ...s.loadingMore, [botId]: true } }))
+    try {
+      const page = await api.fetchMessages(botId, PAGE_SIZE, oldest.id)
+      set((s) => {
+        const have = new Set((s.messages[botId] ?? []).map((m) => m.id))
+        const older = page.messages.filter((m) => !have.has(m.id))
+        return {
+          messages: { ...s.messages, [botId]: [...older, ...(s.messages[botId] ?? [])] },
+          // 補回來的那一頁不再往 `turns` 灌：那個 map 只服務 `inFlightTurn` /
+          // `unknownDeliveryTurn`，往回翻的舊回合對它們沒有意義（issue #25 的 `pruneTurns`）。
+          moreMessages: { ...s.moreMessages, [botId]: page.has_more && older.length > 0 },
+        }
+      })
+    } catch (e) {
+      get().notify('error', `載入更早的訊息失敗：${errText(e)}`)
+    } finally {
+      set((s) => ({ loadingMore: withoutKey(s.loadingMore, botId) }))
     }
   },
 
@@ -1381,7 +1447,7 @@ export const useStore = create<StoreState>((set, get) => ({
       set((s) => ({
         teamDetail: detail ? { ...s.teamDetail, [teamId]: detail } : s.teamDetail,
         teams: detail ? { ...s.teams, [teamId]: { ...(s.teams[teamId] ?? {}), ...stripDetail(detail) } } : s.teams,
-        teamEvents: { ...s.teamEvents, [teamId]: events },
+        teamEvents: { ...s.teamEvents, [teamId]: capList(events, TEAM_EVENT_CAP).list },
       }))
       const pid = detail?.project_id
       if (pid && !get().loadedProjects[pid]) await get().loadGroupMessages(pid)
@@ -1738,9 +1804,14 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       }
       set((s) => {
         const patch: Partial<StoreState> = {}
-        const existing = s.messages[botId] ?? []
-        if (!existing.some((m) => m.id === msg.id)) {
-          patch.messages = { ...s.messages, [botId]: sortByTime([...existing, msg]) }
+        const more: Record<string, boolean> = {}
+        // issue #25：接在尾端（幾乎永遠如此）就只是 push，不再對整包重排；滿了就從頭截掉，
+        // 並把「還有更早的」打開，讓使用者自己分頁補回來。
+        const grown = insertSorted(s.messages[botId] ?? [], msg, byTime)
+        if (grown) {
+          const cut = capList(grown, MESSAGE_CAP)
+          patch.messages = { ...s.messages, [botId]: cut.list }
+          if (cut.trimmed) more[botId] = true
         }
         // The final reply supersedes the live (partial) one.
         if (msg.role === 'assistant' && s.liveReply[botId] && (!msg.turn_id || s.liveReply[botId].turnId === msg.turn_id)) {
@@ -1751,8 +1822,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (bot) {
           const pid = bot.project_id
           const group = s.groupMessages[pid]
-          if (group && !group.some((m) => m.id === msg.id)) {
-            patch.groupMessages = { ...s.groupMessages, [pid]: sortById([...group, { ...msg, bot_id: botId, bot_name: bot.name }]) }
+          const grownGroup = group ? insertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byId) : null
+          if (grownGroup) {
+            const cut = capList(grownGroup, MESSAGE_CAP)
+            patch.groupMessages = { ...s.groupMessages, [pid]: cut.list }
+            if (cut.trimmed) more[pid] = true
           }
           if (msg.role !== 'user' && s.selectedProjectId !== pid) {
             patch.groupUnread = { ...s.groupUnread, [pid]: (s.groupUnread[pid] ?? 0) + 1 }
@@ -1763,6 +1837,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (msg.team_id && msg.role !== 'user' && s.selectedTeamId !== msg.team_id) {
           patch.teamUnread = { ...s.teamUnread, [msg.team_id]: (s.teamUnread[msg.team_id] ?? 0) + 1 }
         }
+        if (Object.keys(more).length > 0) patch.moreMessages = { ...s.moreMessages, ...more }
         return patch
       })
       return
@@ -1772,7 +1847,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       const turn = toTurn(unwrap(data, 'turn'), botId ?? undefined)
       if (!turn || !botId) return
       set((s) => ({
-        turns: { ...s.turns, [botId]: { ...(s.turns[botId] ?? {}), [turn.id]: turn } },
+        // issue #25：這個 map 只有 `inFlightTurn` / `unknownDeliveryTurn` 兩個讀者，
+        // 收掉的舊回合沒人再看——沒選到的 bot 更是只增不減，所以每次都順手剪一下。
+        turns: { ...s.turns, [botId]: pruneTurns({ ...(s.turns[botId] ?? {}), [turn.id]: turn }) },
         liveReply:
           turn.status !== 'in_flight' && s.liveReply[botId]?.turnId === turn.id ? withoutKey(s.liveReply, botId) : s.liveReply,
       }))
@@ -1897,7 +1974,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         const list = s.teamEvents[teamId]
         if (!list) return {}
         if (list.some((x) => x.id === ev.id)) return {}
-        return { teamEvents: { ...s.teamEvents, [teamId]: [...list, ev] } }
+        // issue #25：時間軸只往後長。這裡沒有分頁可以補，舊事件就直接丟。
+        return { teamEvents: { ...s.teamEvents, [teamId]: capList([...list, ev], TEAM_EVENT_CAP).list } }
       })
       return
     }
