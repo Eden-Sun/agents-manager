@@ -39,14 +39,16 @@ function MemberRow({ bot }: { bot: Bot }) {
     >
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
       <span className="bot-main">
-        <span className="bot-name">
-          <span className={`team-role ${role}`}>{TEAM_ROLE_LABEL[role]}</span>
-          {teamShortName(bot.name)}
+        <span className="bot-ident">
+          <KindTag kind={bot.kind} className="bot-kind" />
+          <span className="bot-name">
+            <span className={`team-role ${role}`}>{TEAM_ROLE_LABEL[role]}</span>
+            {teamShortName(bot.name)}
+          </span>
         </span>
         <span className="bot-sub">
-          <KindTag kind={bot.kind} />
           {/* 和一般 bot 列同一條規則：同一個 CLI 的兩個帳號要分得出來（SPEC §16）。 */}
-          <IdentityBadge name={bot.identity} showDefault />
+          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
           {/* 和一般 bot 列同一顆籤：模型＋強度。 */}
           <ModelTag botId={bot.id} />
         </span>

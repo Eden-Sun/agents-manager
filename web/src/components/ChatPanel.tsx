@@ -1141,6 +1141,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="main-title">
           <div className="main-title-row">
             <StatusLamp lamp={lamp} />
+            <KindTag kind={bot.kind} />
             <BotNameField botId={botId} name={bot.name} />
             {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
                 header is busy, and the settings button is the one thing in here that is not
@@ -1157,7 +1158,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               <GearIcon />
             </button>
             <PersonaMark persona={bot.persona} />
-            <KindTag kind={bot.kind} />
             <HostBadge host={hostName} connected={hostUp} />
           </div>
           {/* `bot.model` is what was *configured* (null = 由 CLI 自己決定); the statusLine

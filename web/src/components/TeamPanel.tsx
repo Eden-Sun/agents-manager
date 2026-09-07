@@ -1,6 +1,7 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Bot, GroupMessage, TeamEvent, TeamIssue, TeamTask, TeamTaskState } from '../api/types'
+import * as api from '../api'
+import type { Bot, GroupMessage, Issue, TeamEvent, TeamIssue, TeamTask, TeamTaskState } from '../api/types'
 import {
   LOCAL_HOST,
   TEAM_PHASE_LABEL,
@@ -168,7 +169,7 @@ function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
       {/* SPEC-team §7.3：短名本身就是角色徽章（`pm` / `dev-1` / `rev`），不再重複一次角色字。 */}
       <span className={`bot-badge ${bot.kind} team-role-badge ${role}`}>{short}</span>
       {/* 一個 team 常常一個角色一個帳號（分散額度），所以身分要看得見，不能只留在 tooltip。 */}
-      <IdentityBadge name={bot.identity} showDefault />
+      <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
       {task ? <span className="team-member-task">t{task.seq}</span> : null}
     </button>
   )
@@ -277,6 +278,106 @@ function WorkersChip({ teamId, host, disabled }: { teamId: string; host: string;
         </form>
       </Modal>
     </>
+  )
+}
+
+/**
+ * 從**還開著的** issue 裡勾要追加的那幾個。
+ *
+ * 原本只有一個 `57, 58` 的文字框——那要求使用者先去別的地方查號碼、再背回來打。open issue
+ * 這個 app 本來就抓得到（`GET /projects/:id/issues`，IssuesBar 用的同一支），所以直接列出來勾。
+ * 已經在文字框裡的號碼會回填成勾選狀態，兩個入口共用同一份值。
+ *
+ * `queue` 是這隊現在的 issue 佇列，用來過濾候選（SPEC-team §2.3）：
+ * 還在佇列上的（`queued` / `working`）勾了只會換來一個 409，所以**不列**；
+ * 做完 / 失敗 / 略過的可以再排一次，列出來並標「再做一次」，讓使用者知道這是第二趟。
+ */
+function OpenIssuePicker({
+  projectId,
+  queue,
+  picked,
+  onPick,
+}: {
+  projectId: string
+  queue: TeamIssue[]
+  picked: string
+  onPick: (nums: number[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [issues, setIssues] = useState<Issue[] | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const wrap = useRef<HTMLDivElement>(null)
+
+  const chosen = new Set(
+    picked
+      .split(/[^0-9]+/)
+      .map((x) => Number(x))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  )
+  // 「已在佇列」只算還沒做完的兩個狀態，跟 daemon 的 409 判準同一條。
+  const onQueue = new Set(queue.filter((i) => i.state === 'queued' || i.state === 'working').map((i) => i.issue_number))
+  const finished = new Set(queue.filter((i) => !onQueue.has(i.issue_number)).map((i) => i.issue_number))
+  const candidates = issues?.filter((i) => !onQueue.has(i.number)) ?? null
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+
+  useEffect(() => {
+    if (!open || issues || !projectId) return
+    void api
+      .fetchIssues(projectId, { state: 'open', limit: 100 })
+      .then(setIssues)
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
+  }, [open, issues, projectId])
+
+  const toggle = (n: number) => {
+    const next = new Set(chosen)
+    if (!next.delete(n)) next.add(n)
+    onPick([...next].sort((a, b) => a - b))
+  }
+
+  return (
+    <div className="issue-pick" ref={wrap}>
+      <button
+        type="button"
+        className="mini-btn"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="從還開著的 issue 裡勾選"
+        onClick={() => setOpen((v) => !v)}
+      >
+        勾選 open issue ▾
+      </button>
+      {open ? (
+        <div className="issue-pick-pop" role="listbox" aria-label="開啟中的 issue">
+          {err ? <p className="hint">讀取失敗：{err}</p> : null}
+          {!err && !issues ? <p className="hint">讀取中…</p> : null}
+          {candidates?.length === 0 ? (
+            <p className="hint">{issues?.length ? '開啟中的 issue 都已經在佇列裡了。' : '沒有開啟中的 issue。'}</p>
+          ) : null}
+          {candidates?.map((i) => (
+            <label key={i.number} className={`issue-pick-row${chosen.has(i.number) ? ' on' : ''}`}>
+              <input type="checkbox" checked={chosen.has(i.number)} onChange={() => toggle(i.number)} />
+              <span className="issue-num">#{i.number}</span>
+              <span className="issue-pick-title" title={i.title}>
+                {i.title}
+              </span>
+              {finished.has(i.number) ? (
+                <span className="issue-pick-redo" title="這隊做過這個 issue 了；再排一次會是新的一趟，舊的紀錄留著">
+                  再做一次
+                </span>
+              ) : null}
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -1056,6 +1157,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
               <label className="team-reopen-label" htmlFor={`team-reopen-${teamId}`}>
                 追加 issue 繼續
               </label>
+              {/* 打字輸入編號留著（記得號碼時最快），但主要入口是右邊的下拉勾選：
+                  要追加哪個 issue 通常是「看標題挑」，不是「背號碼」。 */}
               <input
                 id={`team-reopen-${teamId}`}
                 className="text-input"
@@ -1064,6 +1167,12 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                 placeholder="57, 58"
                 disabled={addBusy}
                 autoFocus
+              />
+              <OpenIssuePicker
+                projectId={project?.id ?? ''}
+                queue={team.issues}
+                picked={reopenText}
+                onPick={(nums) => setReopenText(nums.join(', '))}
               />
               <button type="button" className="mini-btn" onClick={() => setReopenOpen(false)} disabled={addBusy}>
                 取消
