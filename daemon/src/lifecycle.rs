@@ -3523,9 +3523,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
-            if nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await {
-                nudged = true;
-            }
+            nudged |= nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
         if nudged {
             tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;

@@ -143,7 +143,10 @@ fn peer_is_local(peer: &std::net::SocketAddr) -> bool {
 /// local port and its proxy forwards the browser's Origin verbatim (`web/vite.config.ts` only
 /// rewrites `Host`), so pinning it would reject every dev-server request. Cross-origin reads
 /// still need the UI token.
-fn origin_is_local(headers: &HeaderMap, _port: u16) -> bool {
+///
+/// `allow_lan_origin` additionally accepts RFC1918 hosts, for `AM_ALLOW_LAN_ORIGIN=1` — see
+/// `App::allow_lan_origin`. Widens the trusted-Origin set to the whole LAN; opt-in only.
+fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan_origin: bool) -> bool {
     let Some(o) = headers.get("origin").and_then(|v| v.to_str().ok()) else { return true };
     let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else { return false };
     // Reject anything with a path / userinfo; an Origin is scheme + host + optional port.
@@ -155,12 +158,20 @@ fn origin_is_local(headers: &HeaderMap, _port: u16) -> bool {
         Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
         _ => rest,
     };
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    if matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return true;
+    }
+    allow_lan_origin && host.parse::<std::net::Ipv4Addr>().is_ok_and(|v4| is_rfc1918(v4))
+}
+
+fn is_rfc1918(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
 }
 
 async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
     let headers = req.headers().clone();
-    if !origin_is_local(&headers, app.port) {
+    if !origin_is_local(&headers, app.port, app.allow_lan_origin) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
     }
     let tok = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -175,7 +186,7 @@ async fn get_session(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !peer_is_local(&peer) || !origin_is_local(&headers, app.port) {
+    if !peer_is_local(&peer) || !origin_is_local(&headers, app.port, app.allow_lan_origin) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "non-local request"}))).into_response();
     }
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
@@ -1819,7 +1830,7 @@ async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !origin_is_local(&headers, app.port) {
+    if !origin_is_local(&headers, app.port, app.allow_lan_origin) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if q.get("token").map(|s| s.as_str()) != Some(app.ui_token.as_str()) {

@@ -507,7 +507,7 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
             Some((f, v)) if f.starts_with('-') => (f, Some(v.to_string())),
             _ => (arg, None),
         };
-        let mut next = |i: &mut usize| -> Option<String> {
+        let next = |i: &mut usize| -> Option<String> {
             if let Some(v) = inline.clone() {
                 return Some(v);
             }

@@ -47,7 +47,7 @@ fn dev(root: &Path) {
     fs::create_dir_all(&logs).expect("create log dir");
 
     // Build first so `dev` doesn't return before the binary exists, and so we can
-    // spawn the real binary directly (spawning through `cargo run`/`npm run` would
+    // spawn the real binary directly (spawning through `cargo run`/`bun run` would
     // leave `cargo down` killing a wrapper process instead of the actual server).
     let build = Command::new("cargo")
         .args(["build", "--bin", "agents-managerd"])
@@ -59,10 +59,24 @@ fn dev(root: &Path) {
         std::process::exit(1);
     }
 
+    let install = Command::new("bun")
+        .arg("install")
+        .current_dir(root.join("web"))
+        .status()
+        .expect("run bun install (is bun on PATH?)");
+    if !install.success() {
+        eprintln!("bun install failed, aborting.");
+        std::process::exit(1);
+    }
+
     let daemon_log = fs::File::create(logs.join("daemon.log")).expect("create daemon.log");
     let daemon = Command::new(root.join("target/debug/agents-managerd"))
         .arg("serve")
         .current_dir(root)
+        // Dev is reached from other devices on the LAN (`vite --host`), whose browsers send a
+        // non-localhost Origin; the daemon's anti-CSRF check rejects that unless told to allow
+        // it. `agents-managerd serve` run directly stays secure-by-default — this is dev-only.
+        .env("AM_ALLOW_LAN_ORIGIN", "1")
         .stdout(Stdio::from(daemon_log.try_clone().unwrap()))
         .stderr(Stdio::from(daemon_log))
         .spawn()
@@ -75,7 +89,7 @@ fn dev(root: &Path) {
         .stdout(Stdio::from(web_log.try_clone().unwrap()))
         .stderr(Stdio::from(web_log))
         .spawn()
-        .expect("spawn vite dev server (did you run `npm install` in web/?)");
+        .expect("spawn vite dev server");
 
     fs::write(
         pid_file(root),
