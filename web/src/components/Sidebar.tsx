@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import { MOCK_MODE } from '../api'
-import type { Bot, BotKind, MessageHit } from '../api/types'
+import type { Bot, BotKind, Lamp, MessageHit } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import {
   adjacentBotId,
@@ -104,6 +104,7 @@ function BotRow({
   hit,
   childCount = 0,
   collapsed = false,
+  kidsLamp = null,
   compact = false,
   onToggleChildren,
   drag,
@@ -118,6 +119,8 @@ function BotRow({
   /** 這個 bot 底下有幾個子 agent；0 = 不顯示收合鈕。 */
   childCount?: number
   collapsed?: boolean
+  /** 收合時底下子 agent 最要緊的燈號（blocked > working）；null = 沒有在忙的，不畫。 */
+  kidsLamp?: Lamp | null
   /** 子 agent 列：單行、不重複 kind，只留身份／模型。 */
   compact?: boolean
   onToggleChildren?: () => void
@@ -230,7 +233,11 @@ function BotRow({
           type="button"
           className={`bot-kids-toggle${collapsed ? ' shut' : ''}`}
           aria-expanded={!collapsed}
-          title={collapsed ? `展開 ${childCount} 個子 agent` : `收合 ${childCount} 個子 agent`}
+          title={
+            collapsed
+              ? `展開 ${childCount} 個子 agent${kidsLamp ? `（有子 agent ${LAMP_LABEL[kidsLamp]}）` : ''}`
+              : `收合 ${childCount} 個子 agent`
+          }
           onClick={(e) => {
             e.stopPropagation()
             onToggleChildren()
@@ -238,6 +245,8 @@ function BotRow({
         >
           <span className="chev">{collapsed ? '▶' : '▼'}</span>
           {collapsed ? <span className="bot-kids-n">{childCount}</span> : null}
+          {/* 收起來時子 agent 的燈號跟著藏了；還在忙／卡住的那顆要透出來，不然收合等於把它藏掉。 */}
+          {collapsed && kidsLamp ? <span className={`bot-kids-lamp lamp lamp-${kidsLamp}`} aria-hidden="true" /> : null}
         </button>
       ) : null}
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
@@ -699,6 +708,17 @@ function ProjectTitle({
   )
 }
 
+/** 一群子 agent 裡最要緊的燈號：blocked > working；都不是就 null（idle / done 不值得在父列上亮）。 */
+function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | null {
+  let out: Lamp | null = null
+  for (const id of ids) {
+    const l = botLamp(st, id)
+    if (l === 'blocked') return 'blocked'
+    if (l === 'working') out = 'working'
+  }
+  return out
+}
+
 /** 拖曳中的專案，以及游標落在哪個專案的哪一半。與 bot 的 `DragState` 分開：兩種拖曳不互相干擾。 */
 type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
 
@@ -740,6 +760,8 @@ export function Sidebar() {
   // 沒有專案全名以外的說明，也沒有 focus trap。改用跟其他刪除一致的 `ConfirmDialog`。
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
   const runs = useStore((s) => s.runs)
+  // 父列收合時要看子 agent 的燈號；`runs` 已訂閱，子 agent 狀態變了這裡就會重畫。
+  const lampState = useMemo(() => ({ ...useStore.getState(), runs }), [runs])
   const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
@@ -1104,6 +1126,8 @@ export function Sidebar() {
                   const kids = childrenOf(b.id)
                   // 搜尋中一律展開：把命中的子 agent 藏在收合的父列底下等於沒搜到。
                   const shut = kids.length > 0 && collapsed.has(b.id) && !query
+                  // 收合時把子 agent 裡最要緊的燈號帶到父列：卡住的優先於在忙的，其餘不畫。
+                  const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
                   return (
                     <Fragment key={b.id}>
                       <BotRow
@@ -1111,6 +1135,7 @@ export function Sidebar() {
                         hit={hits[b.id]}
                         childCount={kids.length}
                         collapsed={shut}
+                        kidsLamp={kidsLamp}
                         onToggleChildren={() => toggleChildren(b.id)}
                         drag={drag}
                         onDrag={setDrag}
