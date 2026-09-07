@@ -66,6 +66,21 @@ function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
   })
 }
 
+/**
+ * 這個身份在**這台**主機上有沒有被判定為沒登入。
+ *
+ * cc1 在本機是一個帳號、在 m4p 可能根本沒登入過，所以要看那台 host 的 `identity_status`，
+ * 不是全域那份 `[[identities]]`。條子（`Gauge`）和 popover（`PopRow`）講的是同一件事，
+ * 兩邊共用這一支——各寫一份的話，判斷會慢慢漂走。
+ */
+function useLoggedOut(entry: QuotaEntry, host: string): boolean {
+  return useStore((s) => {
+    const name = entry.identity
+    if (!name) return false
+    return identityStatusOfHost(s, host)[name]?.logged_in === false
+  })
+}
+
 type Level = 'crit' | 'warn' | 'ok'
 
 function remaining(w: QuotaWindow | null | undefined): number | null {
@@ -355,12 +370,7 @@ function Gauge({
   focused: boolean
 }) {
   const q = useEntryQuota(entry, host)
-  const loggedOut = useStore((s) => {
-    const name = entry.identity
-    if (!name) return false
-    const map = host === LOCAL_HOST ? s.localIdentityStatus : (s.hosts.find((h) => h.name === host)?.identity_status ?? {})
-    return map[name]?.logged_in === false
-  })
+  const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
@@ -470,14 +480,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
     return entry.fullKey in s.quota
   })
   const supported = QUERYABLE.includes(entry.kind)
-  // 這個身份在**這台**主機上有沒有登入。cc1 在本機是一個帳號、在 m4p 可能根本沒登入過，
-  // 所以要看 host 的 `identity_status`，不是全域那份 `[[identities]]`。
-  const loggedOut = useStore((s) => {
-    const name = entry.identity
-    if (!name) return false
-    const map = host === LOCAL_HOST ? s.localIdentityStatus : (s.hosts.find((h) => h.name === host)?.identity_status ?? {})
-    return map[name]?.logged_in === false
-  })
+  const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
