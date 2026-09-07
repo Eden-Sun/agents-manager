@@ -20,6 +20,7 @@ mod hook_cmd;
 mod hookrecv;
 mod hosts;
 mod lifecycle;
+mod memproc;
 mod memstat;
 mod models;
 mod projection;

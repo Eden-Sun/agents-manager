@@ -51,21 +51,21 @@ pub struct MemSnapshot {
     pub hosts: Vec<HostMem>,
 }
 
-struct Proc {
-    pid: i32,
-    ppid: i32,
-    rss_kib: u64,
-    argv: String,
+pub(crate) struct Proc {
+    pub pid: i32,
+    pub ppid: i32,
+    pub rss_kib: u64,
+    pub argv: String,
 }
 
 /// The command's own name, with the path and any interpreter prefix stripped:
 /// `/opt/homebrew/bin/herdr --session x` → `herdr`.
-fn exe_name(argv: &str) -> &str {
+pub(crate) fn exe_name(argv: &str) -> &str {
     let first = argv.split_whitespace().next().unwrap_or("");
     first.rsplit('/').next().unwrap_or(first)
 }
 
-fn parse_ps(out: &str) -> Vec<Proc> {
+pub(crate) fn parse_ps(out: &str) -> Vec<Proc> {
     let mut v = Vec::new();
     for line in out.lines() {
         let mut it = line.split_whitespace();
@@ -80,6 +80,43 @@ fn parse_ps(out: &str) -> Vec<Proc> {
     v
 }
 
+/// Whether this process *is* the herdr binary (not merely something mentioning it).
+pub(crate) fn is_herdr(p: &Proc) -> bool {
+    exe_name(&p.argv) == "herdr"
+}
+
+/// ppid -> child pids, for walking a tree downwards.
+pub(crate) fn child_index(procs: &[Proc]) -> HashMap<i32, Vec<i32>> {
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for p in procs {
+        children.entry(p.ppid).or_default().push(p.pid);
+    }
+    children
+}
+
+/// The pids of the herdr **roots**: a process whose executable is `herdr` and which has no
+/// herdr ancestor — otherwise a `herdr` that shells out to `herdr` would be counted twice.
+pub(crate) fn herdr_roots(procs: &[Proc], by_pid: &HashMap<i32, &Proc>) -> Vec<i32> {
+    procs
+        .iter()
+        .filter(|p| {
+            if !is_herdr(p) {
+                return false;
+            }
+            let mut cur = p.ppid;
+            for _ in 0..64 {
+                let Some(parent) = by_pid.get(&cur) else { return true };
+                if is_herdr(parent) {
+                    return false;
+                }
+                cur = parent.ppid;
+            }
+            true
+        })
+        .map(|p| p.pid)
+        .collect()
+}
+
 /// Sum the herdr trees in one `ps` dump.
 ///
 /// A herdr **root** is a process whose own executable is `herdr` and whose parent is not
@@ -89,32 +126,16 @@ fn parse_ps(out: &str) -> Vec<Proc> {
 pub fn sum_herdr(out: &str, host: &str) -> HostMem {
     let procs = parse_ps(out);
     let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
-    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-    for p in &procs {
-        children.entry(p.ppid).or_default().push(p.pid);
-    }
-
-    let is_herdr = |p: &Proc| exe_name(&p.argv) == "herdr";
-    // Walk up to the top: a herdr under another herdr is not its own root.
-    let has_herdr_ancestor = |p: &Proc| {
-        let mut cur = p.ppid;
-        for _ in 0..64 {
-            let Some(parent) = by_pid.get(&cur) else { return false };
-            if is_herdr(parent) {
-                return true;
-            }
-            cur = parent.ppid;
-        }
-        false
-    };
+    let children = child_index(&procs);
+    let roots = herdr_roots(&procs, &by_pid);
 
     let mut herdr_bytes = 0u64;
     let mut agents_bytes = 0u64;
     let mut processes = 0u32;
     let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
-    for root in procs.iter().filter(|p| is_herdr(p) && !has_herdr_ancestor(p)) {
-        let mut stack = vec![root.pid];
+    for root in roots {
+        let mut stack = vec![root];
         while let Some(pid) = stack.pop() {
             if !seen.insert(pid) {
                 continue;

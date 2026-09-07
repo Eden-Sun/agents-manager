@@ -814,6 +814,43 @@ claude / grok 的 `/usage` 探測開在本機、遠端 bot 的 statusLine 也直
 > 測試 daemon 的探測進行到一半 master 就被踢掉（`ssh master exited`）。要端到端跑遠端 claude 探測，
 > 得先停掉另一個 daemon。
 
+## 15. herdr 這一側的記憶體（v4.0）
+
+左上角那一格回答的是「這些 agent 現在花我多少記憶體」。
+
+### 15.1 量什麼
+整棵 **herdr 進程樹**：`herdr` 本身 ＋ 它底下的 pane 與 agent CLI。錢花在 pane 裡那個 `claude`
+上，只報 herdr daemon 自己沒有意義。樹根 = 執行檔名等於 `herdr` 的 process（argv 裡剛好有這個
+字的不算，例如 `grep herdr`），herdr 底下再開 herdr 只算一次。每台主機每 15 秒一次
+`ps -Awwo pid=,ppid=,rss=,args=`（遠端走既有 ssh master），變化超過 1 MiB 才推 `mem_updated`。
+量不到的主機用 `error` 回報而不是從清單消失。端點見 `docs/API.md` 的 `GET /api/mem`。
+
+### 15.2 展開看程序 / 砍程序（2026-09-08）
+一台機器底下常常有十幾個 `claude`，其中一半是使用者自己開的 pane 或舊的 `--resume`，
+不是 AG Man 管的 bot——但從那一個總數看不出來哪些可以砍。所以那一格可以展開成清單。
+
+**owner 判定完全讀 process 的環境變數，不讀我們自己的帳本**：daemon 起 bot 時注入
+`AM_BOT_ID`（`lifecycle.rs`），herdr 對每個 pane 注入 `HERDR_PANE_ID`，而環境會被子孫繼承，
+所以 pane 底下好幾層的 CLI 一樣帶得到。這樣連「這個 daemon 開機前就在跑」的程序也判得對，
+帳本永遠做不到這件事。macOS 用 `ps -Ewwo pid=,args=` 讀得到同一個 user 的環境，Linux 讀
+`/proc/<pid>/environ`。
+
+| owner | 條件 | UI |
+|---|---|---|
+| `bot` | 環境有 `AM_BOT_ID`（bot 已刪也算，`bot_id` 照回） | 「停止 bot」 |
+| `pane` | 只有 `HERDR_PANE_ID` | 「結束」→ 再按一次「強制」 |
+| `herdr` | 執行檔就是 `herdr` | 不列、不可砍 |
+| `unknown` | 兩個都讀不到 | 同 `pane` |
+
+清單只列 `claude` / `codex` / `grok` / `node` / `bash` / `zsh` / `sh` / `fish` 且
+`subtree_bytes ≥ 8 MiB` 的；其餘（幾十個 node worker、短命的 helper）併進父程序的
+`subtree_bytes`，不把清單變成 process explorer。排序用 `subtree_bytes`，因為使用者要的答案是
+「砍掉這個能省多少」。
+
+砍之前**一定重新取樣**再判定，不信前端送來的那一列：pid 會被回收，過期的一列不能讓 `kill`
+逃出 herdr 樹。不在樹裡 → 400，`herdr` 本身 → 400，`owner=bot` → 409（bot 走既有的
+`POST /bots/{id}/stop`，那條路才會記錄停止）。砍完立刻取樣並推一次 `mem_updated`。
+
 ## 16. 從 shell 認出來的身份 cc0～cc6（v4.1）
 
 多帳號的人本來就已經把帳號寫在 shell 裡了：
