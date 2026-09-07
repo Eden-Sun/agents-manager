@@ -1401,12 +1401,15 @@ grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它
 變成底部一條橫向捲動的托盤（`grid-template-rows: 1fr auto`）。是 grid 的一格、不是浮動面板，
 所以永遠不會蓋住訊息或輸入框。元件 `<ImageShelf />` 掛在 `App.tsx` 的 `main` **外面**，
 換 bot / project / team 都不會 unmount，圖片自然跨得過去。收 / 展記在 `localStorage`
-（`am.shelf.open`）——只有這個版面偏好會存，圖片不存。
+（`am.shelf.open`）；圖片本身鏡射到 IndexedDB（見下）。
 
 **狀態**：`store/shelf.ts` 自己一個 zustand store（`useShelf`），刻意不進主 store：主 store
 會把草稿鏡射到 localStorage、`refreshState` 會整批換掉 slice，`File` 與 object URL 兩者都撐不過。
-每張是 `{ key, file, name, size, url }`，`url` 是 `createObjectURL`，移除 / 清空時 revoke；
-重新整理頁面就空了（daemon 不知道有這一層）。單檔 12 MB（`MAX_BYTES`，與 `attach::MAX_BYTES`
+每張是 `{ key, file, name, size, url, addedAt }`，`url` 是 `createObjectURL`，移除 / 清空時 revoke。
+`store/shelfPersist.ts`（`main.tsx` 啟動時呼叫 `startShelfPersistence()`）把每張 `File` 存進
+IndexedDB `am-shelf`，載入時讀回並 `restore()`，之後 subscribe store 差異做 put / delete；
+從放進去起 `SHELF_TTL_MS`（30 分鐘）後 `expire()` 清掉，載入時與每分鐘各掃一次。IndexedDB
+不能用時靜默退回純記憶體。daemon 不知道有這一層。單檔 12 MB（`MAX_BYTES`，與 `attach::MAX_BYTES`
 同一個數字，現在由 `shelf.ts` 擁有、`Attachments.tsx` 反過來 import），張數上限 24
 （`SHELF_MAX`，暫存區會一直活著，需要一條記憶體護欄）。
 
