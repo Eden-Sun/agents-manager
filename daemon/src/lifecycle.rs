@@ -528,7 +528,9 @@ async fn install_remote_hook(
             "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
         },
-        "statusLine": {"type": "command", "command": statusline}
+        "statusLine": {"type": "command", "command": statusline},
+            // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
+            "outputStyle": "Concise"
     });
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
@@ -543,6 +545,32 @@ async fn install_remote_hook(
     }
     tracing::info!(host = %conn.name, bot = %bot.name, dir = %p.dir, "remote hook installed");
     Ok(p)
+}
+
+/// Put the `herdr` shim (SPEC §6.5b) where this bot's pane can reach it, and answer with the
+/// directory to prepend to its PATH. A host we cannot write to is not a reason to refuse to
+/// start a bot: the reconcile's descent match still tracks whatever the agent spawns.
+async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
+    let installed = if project.host == LOCAL_HOST {
+        crate::herdr_shim::install_local(&app.bot_dir(&bot.id))
+            .map(|d| d.to_string_lossy().into_owned())
+            .map_err(anyhow::Error::from)
+    } else {
+        match app.hosts.get(&project.host).await {
+            Some(conn) => match remote_bot_dir(&conn, &bot.id).await {
+                Ok(p) => crate::herdr_shim::install_remote(&conn, &p.dir).await,
+                Err(e) => Err(e),
+            },
+            None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
+        }
+    };
+    match installed {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the herdr shim");
+            None
+        }
+    }
 }
 
 /// Returns the daemon-injected CLI args that go *before* the bot's own args.
@@ -572,7 +600,8 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         let hook_port = conn.hook_port(app.port);
         let paths = install_remote_hook(&conn, bot, hook_port).await?;
         let hook_args: Vec<String> = match bot.kind.as_str() {
-            "claude" => vec!["--settings".into(), paths.settings],
+            // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
+            "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
             "codex" => {
                 let parts = vec![
                     paths.hook_sh,
@@ -612,11 +641,13 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
                     "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
                     "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
                 },
-                "statusLine": {"type": "command", "command": statusline}
+                "statusLine": {"type": "command", "command": statusline},
+            // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
+            "outputStyle": "Concise"
             });
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
-            vec!["--settings".into(), path.to_string_lossy().to_string()]
+            vec!["--settings".into(), path.to_string_lossy().to_string(), "--verbose".into()]
         }
         "codex" => {
             let parts = hook_cmd_parts(app, bot, "codex");
@@ -659,9 +690,30 @@ fn shell_join(parts: &[String]) -> String {
 
 /// Pane env = daemon-injected ∪ identity.env ∪ bot.env (later wins). `$HOME` / `~` in the
 /// identity's and bot's values expand against *that host's* home.
-async fn pane_env(app: &Arc<App>, bot: &db::Bot, host: &str, run_id: &str, hook_port: u16) -> Value {
+async fn pane_env(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    host: &str,
+    run_id: &str,
+    hook_port: u16,
+    agent_name: &str,
+    shim_dir: Option<&str>,
+) -> Value {
     let mut env = serde_json::Map::new();
     env.insert("AM_BOT_ID".into(), json!(bot.id));
+    // The name the herdr shim prefixes a child agent with (SPEC §6.5b), and the same name the
+    // persona quotes (`spawn_rule`).
+    env.insert("AM_AGENT_NAME".into(), json!(agent_name));
+    if let Some(dir) = shim_dir {
+        // Best effort only: a login shell re-runs the user's profile after this, and on macOS
+        // `path_helper` plus `brew shellenv` push us back behind the real herdr. The pane's
+        // own shell is told to prepend it again in `start_inner`, which is what actually wins.
+        let path = match std::env::var("PATH") {
+            Ok(p) if host == LOCAL_HOST => format!("{dir}:{p}"),
+            _ => format!("{dir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+        };
+        env.insert("PATH".into(), json!(path));
+    }
     // diagnostics only; hook identity is per-bot
     env.insert("AM_RUN_ID".into(), json!(run_id));
     // On a remote host this is the reverse-forwarded port, not the daemon's own.
@@ -938,13 +990,30 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> 
 
 // ---------------------------------------------------------------- start
 
+/// Options that affect how a new native agent session is started.
+///
+/// Ordinary starts keep the existing behaviour. A done Team's PM and reviewer opt into native
+/// session continuation when the scheduler reopens the Team.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StartOpts {
+    pub resume_native: bool,
+}
+
 pub async fn start_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    start_bot_with(app, bot_id, StartOpts::default()).await
+}
+
+pub async fn start_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    start_bot_locked(app, bot_id).await
+    start_bot_locked_with(app, bot_id, opts).await
 }
 
 pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    start_bot_locked_with(app, bot_id, StartOpts::default()).await
+}
+
+pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
@@ -1026,7 +1095,7 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
     }
     app.emit_bot_status(bot_id).await;
 
-    match start_inner(app, &bot, &project, &run_id).await {
+    match start_inner(app, &bot, &project, &run_id, opts).await {
         Ok(()) => Ok(run_id),
         Err(e) => {
             let _ = sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?")
@@ -1038,6 +1107,62 @@ pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> 
             Err(e)
         }
     }
+}
+
+/// CLI-specific native-session continuation arguments.
+///
+/// Claude accepts `--resume <session>`. Codex's `resume` is a subcommand and therefore must
+/// be the first pair of arguments passed to the CLI. Grok has no supported native resume form.
+fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'static str> {
+    if session_id.trim().is_empty() {
+        return Err("no_session_id");
+    }
+    match kind {
+        "claude" => Ok(vec!["--resume".into(), session_id.into()]),
+        "codex" => Ok(vec!["resume".into(), session_id.into()]),
+        "grok" => Err("unsupported_kind"),
+        _ => Err("unsupported_kind"),
+    }
+}
+
+/// Tell a Team bot and its conversation that its old native context could not be continued.
+/// Ordinary bots only get a trace entry: the Team timeline is the durable, user-facing record
+/// of this distinction.
+pub(crate) async fn member_context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> LcResult<()> {
+    let Some(team_id) = bot.team_id.as_deref() else {
+        tracing::info!(bot = %bot.name, why, "native session continuation unavailable; starting a new conversation");
+        return Ok(());
+    };
+    crate::team::record_event(
+        app,
+        team_id,
+        "note",
+        None,
+        Some(&bot.id),
+        None,
+        None,
+        json!({
+            "action": "member_context_lost",
+            "bot": bot.name,
+            "role": bot.team_role,
+            "why": why,
+        }),
+    )
+    .await?;
+    let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
+    insert_message(
+        app,
+        &conv,
+        None,
+        "system",
+        "沒能續接先前對話，這是新的一段",
+        "system",
+        false,
+        None,
+    )
+    .await
+    .map_err(up)?;
+    Ok(())
 }
 
 /// SPEC-team §2.2: the directory a bot's pane starts in. `bots.cwd` when set (a team member
@@ -1143,7 +1268,13 @@ async fn acquire_run_pane(
     }
 }
 
-async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_id: &str) -> LcResult<()> {
+async fn start_inner(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    project: &db::Project,
+    run_id: &str,
+    opts: StartOpts,
+) -> LcResult<()> {
     let host = project.host.clone();
     let session = app
         .session_for_bot(bot, &host)
@@ -1167,7 +1298,11 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         Some(c) => c.hook_port(app.port),
         None => app.port,
     };
-    let env = pane_env(app, bot, &host, run_id, hook_port).await;
+    // The agent name is decided here because both the persona (`spawn_rule`) and the shim
+    // (`AM_AGENT_NAME`) quote it.
+    let agent = crate::config::agent_name(&project.label, &bot.id);
+    let shim_dir = install_shim(app, bot, project).await;
+    let env = pane_env(app, bot, &host, run_id, hook_port, &agent, shim_dir.as_deref()).await;
 
     // 2. workspace
     let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
@@ -1264,13 +1399,48 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
         .await
         .map_err(up)?;
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
-    // The agent name is decided here because the persona quotes it (see `spawn_rule`).
-    let agent = crate::config::agent_name(&project.label, &bot.id);
     let mut args = injected;
     args.extend(persona_args(bot, &agent));
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());
+
+    // Reopen only: resolve the previous ended native session after the normal start preflight,
+    // so a missing/unsupported continuation still gets an ordinary agent pane. The requested
+    // id is persisted before `agent.start`; the hook receiver consumes it on the first identity
+    // or completed-turn callback and can then detect a provider that ignored/misrouted resume.
+    let resume = if opts.resume_native {
+        match db::last_native_session_id(&app.db, &bot.id).await.map_err(up)? {
+            Some(session_id) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
+                Ok(resume_args) => Some((session_id, resume_args)),
+                Err(why) => {
+                    member_context_lost(app, bot, why).await?;
+                    None
+                }
+            },
+            _ => {
+                member_context_lost(app, bot, "no_session_id").await?;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some((session_id, resume_args)) = resume {
+        if bot.kind == "codex" {
+            let mut resumed = resume_args;
+            resumed.extend(args);
+            args = resumed;
+        } else {
+            args.extend(resume_args);
+        }
+        sqlx::query("UPDATE runs SET resume_session_id = ? WHERE id = ?")
+            .bind(&session_id)
+            .bind(run_id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+    }
 
     // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
     sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
@@ -1285,6 +1455,19 @@ async fn start_inner(app: &Arc<App>, bot: &db::Bot, project: &db::Project, run_i
     // team started five agents and lost `dev-1` to exactly that, 300 ms in; the team then
     // paused on `member_lost` with nothing on screen to explain it. `quota_claude` already
     // retries this same herdr answer — the bot start path is the one that did not.
+    // SPEC §6.5b: the pane env's `PATH` is not enough to put the shim in front of the real
+    // herdr. herdr starts the pane's shell as a *login* shell, so the user's profile runs
+    // afterwards and rebuilds `PATH` — measured on macOS 2026-09-07, `/etc/zprofile`'s
+    // `path_helper` plus `brew shellenv` left the shim behind `/opt/homebrew/bin`, where it
+    // never gets looked at. Typing the prepend into the pane's own shell happens after the
+    // profile, so it is the one that holds. Sent before `agent.start`, which is what the
+    // agent then inherits; if the shell is not up yet the pty buffers it.
+    if let Some(dir) = shim_dir.as_deref() {
+        let line = format!(" export PATH={}:\"$PATH\"\n", sh_quote(dir));
+        if let Err(e) = client.pane_send_text(&pane_id, &line).await {
+            tracing::warn!(bot = %bot.name, pane = %pane_id, error = %e, "could not prepend the herdr shim to the pane PATH");
+        }
+    }
     let mut started = false;
     for attempt in 0..10u32 {
         match client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
@@ -1896,6 +2079,77 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
 }
 
 #[cfg(test)]
+mod resume_args_tests {
+    use super::{resume_args_by_kind, start_bot, start_bot_with, stop_bot, StartOpts};
+    use crate::db;
+    use crate::team::testing::{env, make_team, req, Env};
+    use serde_json::Value;
+
+    fn started_args(e: &Env) -> Vec<Vec<String>> {
+        e.herdr
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "agent.start")
+            .filter_map(|(_, params)| {
+                params
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|args| args.iter().filter_map(Value::as_str).map(String::from).collect())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn provider_resume_arguments_are_exact() {
+        assert_eq!(resume_args_by_kind("claude", "sid-1").unwrap(), vec!["--resume", "sid-1"]);
+        assert_eq!(resume_args_by_kind("codex", "sid-1").unwrap(), vec!["resume", "sid-1"]);
+        assert_eq!(resume_args_by_kind("grok", "sid-1"), Err("unsupported_kind"));
+        assert_eq!(resume_args_by_kind("claude", ""), Err("no_session_id"));
+    }
+
+    /// SPEC-team §2.5.6 #10: continuation is opt-in. The scheduler's reopen path asks for it
+    /// explicitly and gets `--resume <id>`; the same bot started the way the user's button
+    /// starts it gets a fresh conversation, with the very same id sitting in `runs`.
+    #[tokio::test]
+    async fn native_resume_is_opt_in() {
+        let e = env().await;
+        let mut team_req = req(Some(1), false);
+        team_req.pm.kind = "claude".into();
+        let team_id = make_team(&e.app, &e.project_id, team_req).await;
+        let pm = db::team_members(&e.app.db, &team_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("pm"))
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
+             VALUES (?,?,'stopped','idle',?,?,?)",
+        )
+        .bind(db::ulid())
+        .bind(&pm.id)
+        .bind("native-previous")
+        .bind("2026-09-07T00:00:00Z")
+        .bind("2026-09-07T00:01:00Z")
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true }).await.unwrap();
+        let args = started_args(&e).pop().unwrap();
+        assert!(args.windows(2).any(|w| w == ["--resume", "native-previous"]));
+        stop_bot(&e.app, &pm.id).await.unwrap();
+
+        start_bot(&e.app, &pm.id).await.unwrap();
+        let args = started_args(&e).pop().unwrap();
+        assert!(!args.contains(&"--resume".into()));
+        stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+}
+
+#[cfg(test)]
 mod abort_tests {
     use super::*;
 
@@ -2027,6 +2281,7 @@ mod login_slash_tests {
             last_read_tail_hash: None,
             started_at: "2026-01-01T00:00:00Z".into(),
             ended_at: None,
+            resume_session_id: None,
         }
     }
 

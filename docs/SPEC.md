@@ -258,6 +258,28 @@ label = "foo"
 兩條都命中時以血緣為準。認領後走同一條既有路徑：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run、
 同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
 
+### 6.5b herdr PATH shim（把命名規則變成機制，2026-09-07）
+
+daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/herdr`
+（遠端走 `hook.sh` 同一條 ssh 路徑，`<remote bot dir>/bin/herdr`），並把那個目錄放到 pane 的 `PATH` 最前面。
+
+- `herdr agent start <name> …`：`<name>` 不是以 `$AM_AGENT_NAME-` 開頭就自動補上前綴（截到 herdr 的 32 字上限），
+  並在 stderr 印一行說明。旗標可以在名字前面，`--kind` / `--pane` / `--timeout` 的值不會被誤認成名字，`--` 之後原封不動。
+- `herdr pane split` / `pane new` / `tab create`：原樣轉發，另外補上 `--env`
+  把 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、`AM_AGENT_NAME`、`PATH` 帶下去
+  ——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒有這一段子 pane 會用使用者的預設帳號起來、也拿不到 hook token。
+  呼叫端自己給過的同名 `--env` 保留不動。
+- 其他子指令 `exec` 真正的 herdr：`$AM_REAL_HERDR`，否則掃 `PATH` 取第一個不是自己所在目錄的 `herdr`。
+
+`pane_env` 因此多 `AM_AGENT_NAME`（= run 的 agent 名）與 `PATH`。
+
+**PATH 只靠 pane env 是不夠的**：herdr 用 **login shell** 開 pane，使用者的 profile 在那之後才跑並重建 `PATH`
+（2026-09-07 實測 macOS：`/etc/zprofile` 的 `path_helper` 加 `brew shellenv` 會把 shim 擠到 `/opt/homebrew/bin` 後面）。
+所以 daemon 在 `agent.start` 前再對 pane 自己的 shell `pane.send_text` 一行 ` export PATH=<dir>:"$PATH"`——
+它跑在 profile 之後，才是真正生效的那一次。裝不起來（遠端 ssh 失敗等）不會擋 bot 啟動：§6.5a 的血緣認領仍然追得到。
+
+子 agent 要指定自己的 pane 時用 herdr 自己注入的 `$HERDR_PANE_ID`（或 `--current`），不需要另外一個變數。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另以唯讀優先的方式觀察本機 Herdr `default` session（socket 為
