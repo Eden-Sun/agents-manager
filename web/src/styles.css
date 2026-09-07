@@ -8767,3 +8767,22 @@ button.run-debug-toggle:hover {
   font-size: 11px;
   text-decoration: none;
 }
+
+/* 專案標題列的鍵在卡片最上緣，往上開的泡泡會被 `.sidebar-scroll` 裁掉（見上面那條
+   `overflow-x: hidden`）——第一張卡片尤其明顯，泡泡只露出半截。改成往下開、靠右對齊，
+   泡泡就落在卡片內部，不會被捲動容器的上緣切到。 */
+.project-head-actions .icon-tip[data-tip]::after {
+  left: auto;
+  right: 0;
+  bottom: auto;
+  top: calc(100% + 6px);
+  transform: translateY(-2px);
+  white-space: normal;
+  width: max-content;
+  max-width: 200px;
+}
+
+.project-head-actions .icon-tip[data-tip]:hover::after,
+.project-head-actions .icon-tip[data-tip]:focus-visible::after {
+  transform: translateY(0);
+}
