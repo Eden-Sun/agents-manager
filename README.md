@@ -113,7 +113,7 @@ cargo down    # 兩個都停掉
 
 `cargo dev` / `cargo down` 是 `xtask/` 的別名（見 `.cargo/config.toml`），行為是 `cargo build --bin agents-managerd` + `bun install` 之後，把 daemon 與 `vite --host` 當成一般子行程啟動，PID 記在 `target/dev.pids`，log 在 `target/dev-logs/`。
 
-`cargo dev` 額外帶 `AM_DEV_LAN=1`：daemon 改 bind 每張網卡（不只 loopback），peer 位址與 Origin 檢查也放行區網（RFC1918），這樣同一區網的手機/其他機器可以直接連 `:7788` 或 `:5173`，不必再過 SSH tunnel。純跑 `agents-managerd serve`（沒有這個環境變數）永遠只 bind `127.0.0.1`、只認本機——這是刻意的：拿掉 loopback 限制等於讓區網任何人都能拿到 UI token，只有明確跑 dev 才接受這個風險。
+`cargo dev` 額外帶 `AM_DEV_LAN=1`：daemon 改 bind 每張網卡（不只 loopback），peer 位址與 Origin 檢查也整個放行（不只 RFC1918——Tailscale 之類 overlay network 用的是 100.64.0.0/10，硬列白名單追不完，`AM_DEV_LAN` 本身就是那個「我知道我在幹嘛」的開關），這樣同一區網或 Tailscale 上的手機/其他機器可以直接連 `:7788` 或 `:5173`，不必再過 SSH tunnel。純跑 `agents-managerd serve`（沒有這個環境變數）永遠只 bind `127.0.0.1`、只認本機——這是刻意的：拿掉 loopback 限制等於讓任何搆得到這台機器的人都能拿到 UI token，只有明確跑 dev 才接受這個風險。
 
 也可以手動分開跑：
 

@@ -138,18 +138,18 @@ pub fn router(app: Arc<App>) -> Router {
 /// `into_make_service_with_connect_info::<SocketAddr>()` (main.rs).
 ///
 /// `allow_lan` (only ever set by `cargo dev`'s `AM_DEV_LAN=1`, which also binds every
-/// interface — see `main.rs`) additionally accepts RFC1918 peers, since binding 0.0.0.0 while
-/// still rejecting every LAN peer would make the daemon reachable but useless from the LAN.
+/// interface — see `main.rs`) accepts any peer. Binding 0.0.0.0 while still rejecting
+/// everything non-loopback would make the daemon reachable but useless; and "LAN" in practice
+/// includes overlay networks like Tailscale (100.64.0.0/10), not just RFC1918, so an allowlist
+/// of ranges chases an open-ended set. `allow_lan` is itself the explicit dev-only opt-in.
 fn peer_is_local(peer: &std::net::SocketAddr, allow_lan: bool) -> bool {
+    if allow_lan {
+        return true;
+    }
     match peer.ip() {
-        std::net::IpAddr::V4(v4) => v4.is_loopback() || (allow_lan && is_rfc1918(v4)),
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
         std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|m| m.is_loopback()),
     }
-}
-
-fn is_rfc1918(ip: std::net::Ipv4Addr) -> bool {
-    let [a, b, ..] = ip.octets();
-    a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
 }
 
 /// A5: parse the Origin and compare the **host** exactly. `starts_with` used to let
@@ -160,8 +160,11 @@ fn is_rfc1918(ip: std::net::Ipv4Addr) -> bool {
 /// rewrites `Host`), so pinning it would reject every dev-server request. Cross-origin reads
 /// still need the UI token.
 ///
-/// `allow_lan` additionally accepts RFC1918 hosts — see `peer_is_local` above; same rationale.
+/// `allow_lan` accepts any Origin — see `peer_is_local` above; same rationale.
 fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
+    if allow_lan {
+        return true;
+    }
     let Some(o) = headers.get("origin").and_then(|v| v.to_str().ok()) else { return true };
     let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else { return false };
     // Reject anything with a path / userinfo; an Origin is scheme + host + optional port.
@@ -173,10 +176,7 @@ fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
         Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
         _ => rest,
     };
-    if matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
-        return true;
-    }
-    allow_lan && host.parse::<std::net::Ipv4Addr>().is_ok_and(is_rfc1918)
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
