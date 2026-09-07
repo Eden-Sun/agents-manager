@@ -94,6 +94,8 @@ pub struct App {
     pub github: Mutex<HashMap<String, Option<crate::github::GithubInfo>>>,
     /// v4.0: `GET /projects/:id/issues` cache (2 min).
     pub issues_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
+    /// Submodules per project (`GET /projects/:id/submodules`), 2 min.
+    pub submodules_cache: Mutex<HashMap<String, (std::time::Instant, Vec<crate::github::Submodule>)>>,
 }
 
 impl App {
@@ -139,6 +141,7 @@ impl App {
             tools: Mutex::new(HashMap::new()),
             github: Mutex::new(HashMap::new()),
             issues_cache: Mutex::new(HashMap::new()),
+            submodules_cache: Mutex::new(HashMap::new()),
         })
     }
 

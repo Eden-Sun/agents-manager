@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS teams (
   pr_url TEXT, summary TEXT,
   -- When the user closed the issue from the finished team (never automatic; see team::close_issue).
   issue_closed_at TEXT,
+  -- Submodule path (relative to the project) the team works in; '' = the project itself.
+  repo TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT
 );
 CREATE INDEX IF NOT EXISTS teams_project ON teams(project_id);
@@ -223,6 +225,7 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // Reconcile backfills it from herdr, so old runs are adopted, never failed, for it.
         ("runs", "tab_id", "ALTER TABLE runs ADD COLUMN tab_id TEXT"),
         ("runs", "herdr_session", "ALTER TABLE runs ADD COLUMN herdr_session TEXT"),
+        ("teams", "repo", "ALTER TABLE teams ADD COLUMN repo TEXT NOT NULL DEFAULT ''"),
         // What the agent calls itself right now (its terminal title, e.g. Claude Code's
         // one-line summary of the task it is on).
         ("runs", "agent_title", "ALTER TABLE runs ADD COLUMN agent_title TEXT"),
@@ -686,6 +689,8 @@ pub struct Team {
     /// When the user closed the issue from this team (SPEC-team §10.7). `None` = the issue was
     /// never closed from here; nothing in the daemon ever sets it without a human asking.
     pub issue_closed_at: Option<String>,
+    /// Submodule path (relative to the project) this team works in; empty = the project itself.
+    pub repo: String,
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,

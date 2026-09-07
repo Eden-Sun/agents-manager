@@ -1110,6 +1110,23 @@ daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機
 
 錯誤同上（找不到 issue 也是 502，message 含 gh 的輸出）。
 
+#### submodule 的 issue（2026-09-07 新增）
+
+專案若有 git submodule，submodule 自己的 GitHub issue 也能看、也能組隊。
+
+`GET /api/projects/{id}/submodules?refresh=1` — `.gitmodules` 列出的每一個，帶各自的 origin（快取 2 分鐘）：
+
+```json
+{"project_id":"…","submodules":[{"path":"vendor/foo","github":{"owner":"acme","repo":"foo","url":"https://github.com/acme/foo"}},
+                                {"path":"tools/bar","github":null}]}
+```
+
+上面兩個 issue 端點都多一個查詢參數 `repo=<submodule path>`（相對於專案根目錄；省略或空字串 = 專案本身），
+回應多 `repo_path` 回顯。`repo` 不在 submodule 清單裡 → `400`；該 submodule 沒有 GitHub origin → `400`。
+
+`POST /api/projects/{id}/teams` 的 body 也接受 `repo`：team 的 worktree、分支、合併、PR 與關 issue 全部在**那個 submodule 的 repo** 裡進行；
+team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4。
+
 ## 圖片附件（2026-09-06 新增）
 
 CLI agent 只吃文字（`agent.prompt`），所以「拖一張圖進對話」是**先把檔案放到 bot 所在主機**，

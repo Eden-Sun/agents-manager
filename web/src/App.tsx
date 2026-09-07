@@ -185,9 +185,10 @@ export default function App() {
         <ConnBanner />
         {teamLaunch ? (
           <TeamLaunchPanel
-            key={`${teamLaunch.projectId}:${teamLaunch.issueNumber}`}
+            key={`${teamLaunch.projectId}:${teamLaunch.repo}:${teamLaunch.issueNumber}`}
             projectId={teamLaunch.projectId}
             issueNumber={teamLaunch.issueNumber}
+            repo={teamLaunch.repo}
             onOpenSidebar={() => setDrawer(true)}
           />
         ) : teamId ? (

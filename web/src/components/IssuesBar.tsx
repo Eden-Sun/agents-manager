@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import * as api from '../api'
 import { ApiError } from '../api/types'
-import type { Issue } from '../api/types'
+import type { Issue, ProjectSubmodule } from '../api/types'
 import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
 
@@ -68,22 +68,42 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const [error, setError] = useState<string | null>(null)
   const [openCount, setOpenCount] = useState<number | null>(null)
   const [fetching, setFetching] = useState<number | null>(null)
+  // 專案的 submodule（有自己 GitHub origin 的才能選）與目前選的那個：`''` = 專案本身。
+  // 兩者都掛在 projectId 上，換專案就自然歸零，不用在 effect 裡 setState。
+  const [subsFor, setSubsFor] = useState<{ pid: string; subs: ProjectSubmodule[] }>({ pid: '', subs: [] })
+  const [repoFor, setRepoFor] = useState<{ pid: string; repo: string }>({ pid: '', repo: '' })
+  const submodules = subsFor.pid === projectId ? subsFor.subs : []
+  const repo = repoFor.pid === projectId ? repoFor.repo : ''
+  const setRepo = (r: string) => setRepoFor({ pid: projectId, repo: r })
   const wrap = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const seq = useRef(0)
 
-  // Open-issue count for the button (once per project).
+  // Submodules once per project; the picker only appears when at least one is on GitHub.
   useEffect(() => {
     if (!github) return
     let alive = true
     api
-      .fetchIssues(projectId, { state: 'open', limit: 100 })
+      .fetchSubmodules(projectId)
+      .then((subs) => alive && setSubsFor({ pid: projectId, subs: subs.filter((s) => s.github) }))
+      .catch(() => alive && setSubsFor({ pid: projectId, subs: [] }))
+    return () => {
+      alive = false
+    }
+  }, [projectId, github])
+
+  // Open-issue count for the button (once per project and repo).
+  useEffect(() => {
+    if (!github) return
+    let alive = true
+    api
+      .fetchIssues(projectId, { state: 'open', limit: 100, repo })
       .then((list) => alive && setOpenCount(list.length))
       .catch(() => alive && setOpenCount(null))
     return () => {
       alive = false
     }
-  }, [projectId, github])
+  }, [projectId, github, repo])
 
   const load = useCallback(
     async (st: IssueState, query: string) => {
@@ -91,7 +111,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
       setLoading(true)
       setError(null)
       try {
-        const list = await api.fetchIssues(projectId, { state: st, limit: 50, q: query.trim() || undefined })
+        const list = await api.fetchIssues(projectId, { state: st, limit: 50, q: query.trim() || undefined, repo })
         if (id !== seq.current) return
         setIssues(list)
         if (st === 'open' && !query.trim()) setOpenCount(list.length)
@@ -103,7 +123,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
         if (id === seq.current) setLoading(false)
       }
     },
-    [projectId],
+    [projectId, repo],
   )
 
   // Query changes are debounced 300 ms; the state toggle refetches immediately.
@@ -131,6 +151,9 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   }, [open])
 
   if (!github) return null
+
+  // 按鈕上顯示目前選的 repo（submodule 的 slug 或專案自己的）。
+  const shown = submodules.find((s) => s.path === repo)?.github ?? github
 
   const pickState = (st: IssueState) => {
     setState(st)
@@ -169,7 +192,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const insertFull = async (i: Issue) => {
     setFetching(i.number)
     try {
-      const d = await api.fetchIssue(projectId, i.number)
+      const d = await api.fetchIssue(projectId, i.number, repo)
       const body = (d?.body ?? '').trim()
       const quoted = body ? body.split('\n').map((l) => `> ${l}`).join('\n') : '> （沒有內容）'
       insert(`#${i.number} ${i.title}\n${i.url}\n${quoted}`)
@@ -196,8 +219,8 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
         </svg>
         <span className="issues-repo">
           {/* owner 在手機上是這一列最先讓位的東西：同一畫面沒有第二個 repo 可混淆。 */}
-          <span className="issues-owner">{github.owner}/</span>
-          {github.repo}
+          <span className="issues-owner">{shown.owner}/</span>
+          {shown.repo}
         </span>
         {/* 數字還沒回來時本來會顯示 `Issues`——一個長得像計數的藥丸裡放一個單字，讀起來
             像壞掉的數字。沒有數字就不畫這顆；repo 名與 tooltip 已經說明這是什麼。 */}
@@ -216,6 +239,25 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
               spellCheck={false}
               onChange={(e) => setQ(e.target.value)}
             />
+            {submodules.length > 0 ? (
+              <select
+                className="issues-repo-pick"
+                aria-label="哪個 repo 的 issue"
+                title="這個專案有 submodule：選要看哪個 repo 的 issue（組隊也會在那個 repo 裡進行）"
+                value={repo}
+                onChange={(e) => {
+                  setRepo(e.target.value)
+                  setIssues(null)
+                }}
+              >
+                <option value="">{github.owner}/{github.repo}</option>
+                {submodules.map((s) => (
+                  <option key={s.path} value={s.path}>
+                    {s.path} · {s.github?.owner}/{s.github?.repo}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <div className="tabs small" role="tablist">
               <button type="button" className="tab" role="tab" aria-selected={state === 'open'} onClick={() => pickState('open')}>
                 open
@@ -261,7 +303,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
                         className="mini-btn team-btn"
                         title="為這個 issue 建立一個 team（PM + 執行者 + reviewer，各自獨立的 worktree）"
                         onClick={() => {
-                          openTeamLaunch(projectId, i.number)
+                          openTeamLaunch(projectId, i.number, repo)
                           setOpen(false)
                         }}
                       >

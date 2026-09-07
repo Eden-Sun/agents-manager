@@ -65,7 +65,7 @@ import type {
   TurnDelivery,
   TurnOrigin,
   TurnStatus,
- TeamWorkerSpec } from './types'
+ TeamWorkerSpec, ProjectSubmodule } from './types'
 import {
   BOT_KINDS,
   hostOfQuotaKey,
@@ -772,6 +772,21 @@ export function toIssue(v: unknown): Issue | null {
   }
 }
 
+export function toSubmodules(raw: unknown): ProjectSubmodule[] {
+  const root = isRec(raw) ? raw : {}
+  const out: ProjectSubmodule[] = []
+  for (const v of arr(pick(root, 'submodules'))) {
+    if (!isRec(v)) continue
+    const path = str(v.path)
+    if (!path) continue
+    const g = v.github
+    const github =
+      isRec(g) && str(g.owner) && str(g.repo) ? { owner: str(g.owner), repo: str(g.repo), url: str(g.url) } : null
+    out.push({ path, github })
+  }
+  return out
+}
+
 export function toIssues(raw: unknown): Issue[] {
   const root = isRec(raw) ? raw : {}
   return arr(pick(root, 'issues', 'items')).map(toIssue).filter((i): i is Issue => i !== null)
@@ -860,6 +875,7 @@ export function toTeam(v: unknown, projectId?: string): Team | null {
     usage: toTeamUsage(pick(v, 'usage', 'usage_json')),
     pr_url: optStr(pick(v, 'pr_url')),
     issue_closed_at: optStr(pick(v, 'issue_closed_at')),
+    repo: str(pick(v, 'repo')),
     created_at: str(pick(v, 'created_at')),
     started_at: optStr(pick(v, 'started_at')),
     ended_at: optStr(pick(v, 'ended_at')),

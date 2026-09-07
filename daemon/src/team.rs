@@ -199,9 +199,16 @@ pub struct CreateTeam {
     pub supervised: Option<bool>,
     #[serde(default)]
     pub budget: Option<BudgetPatch>,
+    /// Submodule path (relative to the project) whose issues this team works; empty/absent =
+    /// the project itself. Must be a listed submodule with a GitHub origin.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 impl CreateTeam {
+    pub fn repo_rel(&self) -> String {
+        self.repo.as_deref().unwrap_or("").trim().trim_matches('/').to_string()
+    }
     /// The requested queue, de-duplicated and in the order given. Rejects an empty request so
     /// a team can never exist with nothing to do.
     pub fn issue_list(&self) -> Result<Vec<i64>, String> {
@@ -427,9 +434,14 @@ fn issue_md(issue: &IssueRef) -> String {
 }
 
 /// `TEAM.md` — who is who, where they live, and the protocol in one page.
-fn team_md(issue: &IssueRef, branch: &str, root: &str, members: &[(String, String, String)]) -> String {
+fn team_md(issue: &IssueRef, branch: &str, root: &str, repo: &str, members: &[(String, String, String)]) -> String {
+    let repo_line = if repo.is_empty() {
+        String::new()
+    } else {
+        format!("- 這個 issue 屬於專案的 submodule `{repo}`：每個成員的 cwd 都是**該 submodule** 的 worktree，分支與 PR 也都在 submodule 的 repo\n")
+    };
     let mut s = format!(
-        "# Team · issue #{n}\n\n- 整合分支：`{branch}`\n- team 根目錄：`{root}`\n- 合併由 daemon 用 `git merge --no-ff` 執行，agent 不要自己合併\n\n## 成員\n\n| 短名 | 角色 | cwd |\n|---|---|---|\n",
+        "# Team · issue #{n}\n\n- 整合分支：`{branch}`\n- team 根目錄：`{root}`\n{repo_line}- 合併由 daemon 用 `git merge --no-ff` 執行，agent 不要自己合併\n\n## 成員\n\n| 短名 | 角色 | cwd |\n|---|---|---|\n",
         n = issue.number,
     );
     for (short, role, cwd) in members {
@@ -556,6 +568,7 @@ pub async fn team_json(app: &Arc<App>, t: &db::Team) -> Value {
         "budget": Budget::from_json(&t.budget_json),
         "usage": serde_json::from_str::<Value>(&t.usage_json).unwrap_or_else(|_| empty_usage()),
         "pr_url": t.pr_url,
+        "repo": t.repo,
         "summary": t.summary,
         "issue_closed_at": t.issue_closed_at,
         "created_at": t.created_at,
@@ -796,11 +809,16 @@ async fn check_quota(app: &Arc<App>, host: &str, roles: &[&CheckedRole], stop_pc
 // ---------------------------------------------------------------- create (§10.1)
 
 /// Resolve the issue through the existing `gh issue view` path.
-async fn resolve_issue(app: &Arc<App>, project_id: &str, number: i64) -> LcResult<IssueRef> {
+/// The directory git runs in for this team: the project checkout, or the submodule inside it.
+pub fn repo_path(project: &db::Project, repo: &str) -> String {
+    crate::github::repo_path(&project.path, repo)
+}
+
+async fn resolve_issue(app: &Arc<App>, project_id: &str, repo: &str, number: i64) -> LcResult<IssueRef> {
     if number <= 0 {
         return Err(LcError::Bad("issue_number must be positive".into()));
     }
-    let v = crate::github::get_issue(app, project_id, number as u64).await?;
+    let v = crate::github::get_issue(app, project_id, repo, number as u64).await?;
     let i = v.get("issue").cloned().unwrap_or(Value::Null);
     let title = i.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let url = i.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -811,9 +829,10 @@ async fn resolve_issue(app: &Arc<App>, project_id: &str, number: i64) -> LcResul
 /// `POST /api/projects/:id/teams`.
 pub async fn create(app: &Arc<App>, project_id: &str, req: CreateTeam) -> LcResult<Value> {
     let numbers = req.issue_list().map_err(LcError::Bad)?;
+    let repo = req.repo_rel();
     let mut issues = Vec::with_capacity(numbers.len());
     for n in numbers {
-        issues.push(resolve_issue(app, project_id, n).await?);
+        issues.push(resolve_issue(app, project_id, &repo, n).await?);
     }
     create_with_issues(app, project_id, req, issues).await
 }
@@ -870,6 +889,21 @@ pub async fn create_with_issues(
         )));
     }
 
+    // A submodule team: `repo` must be one of the project's listed submodules (the list is
+    // what turns a user-supplied path into a directory git runs in), and it must be checked
+    // out — an empty submodule directory has no commits to branch from.
+    let repo = req.repo_rel();
+    if !repo.is_empty() {
+        if !crate::github::valid_repo_rel(&repo) {
+            return Err(LcError::Bad(format!("repo `{repo}` is not a relative path")));
+        }
+        let subs = crate::github::list_submodules(app, &project, false).await?;
+        if !subs.iter().any(|s| s.path == repo) {
+            return Err(LcError::Bad(format!("`{repo}` is not a submodule of this project")));
+        }
+    }
+    let git_dir = repo_path(&project, &repo);
+
     let team_id = db::ulid();
     let t6 = tid6(&team_id);
     let branch = integration_branch(issue.number, &t6);
@@ -878,10 +912,10 @@ pub async fn create_with_issues(
     // SPEC-team §7.4 / appendix C: `base_sha` and `worktree_root` are `NOT NULL`, so both
     // are resolved **before** the row is written. The directories themselves can come later —
     // the paths are computed, not discovered.
-    if !tg::is_inside_work_tree(app, &project.host, &project.path).await {
-        return Err(LcError::BadValue(json!({"error": "not_a_git_repo", "path": project.path})));
+    if !tg::is_inside_work_tree(app, &project.host, &git_dir).await {
+        return Err(LcError::BadValue(json!({"error": "not_a_git_repo", "path": git_dir})));
     }
-    let base_sha = tg::resolve_commit(app, &project.host, &project.path, &base_ref)
+    let base_sha = tg::resolve_commit(app, &project.host, &git_dir, &base_ref)
         .await
         .map_err(|e| LcError::Bad(e.to_string()))?;
     let worktree_root = root.clone();
@@ -895,8 +929,8 @@ pub async fn create_with_issues(
     sqlx::query(
         "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, pause_reason, resume_phase,
            base_ref, base_sha, branch, worktree_root, deliver, supervised, roles_json, budget_json, usage_json,
-           pr_url, summary, created_at, started_at, ended_at)
-         VALUES (?,?,?,?,?,'starting',NULL,NULL,?,?,?,?,?,?,?,?,?,NULL,NULL,?,NULL,NULL)",
+           pr_url, summary, repo, created_at, started_at, ended_at)
+         VALUES (?,?,?,?,?,'starting',NULL,NULL,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,NULL,NULL)",
     )
     .bind(&team_id)
     .bind(&project.id)
@@ -912,6 +946,7 @@ pub async fn create_with_issues(
     .bind(serde_json::to_string(&roles_json).unwrap_or_else(|_| "{}".into()))
     .bind(serde_json::to_string(&budget).unwrap_or_else(|_| "{}".into()))
     .bind(serde_json::to_string(&empty_usage()).unwrap_or_else(|_| "{}".into()))
+    .bind(&repo)
     .bind(&now)
     .execute(&app.db)
     .await
@@ -963,7 +998,7 @@ pub async fn create_with_issues(
     // is no workspace to close.
     let mut workspace_id: Option<String>;
     let build = async {
-        tg::create_branch(app, &project.host, &project.path, &branch, &base_sha)
+        tg::create_branch(app, &project.host, &git_dir, &branch, &base_sha)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
         for (i, (role, _, _)) in plan.iter().enumerate() {
@@ -971,7 +1006,7 @@ pub async fn create_with_issues(
             // two worktrees, so everyone else starts detached at the base commit (§6.2).
             let (rev, detach) =
                 if *role == "pm" { (branch.as_str(), false) } else { (base_sha.as_str(), true) };
-            tg::worktree_add(app, &project.host, &project.path, &dirs[i], rev, detach)
+            tg::worktree_add(app, &project.host, &git_dir, &dirs[i], rev, detach)
                 .await
                 .map_err(|e| LcError::Upstream(e.to_string()))?;
         }
@@ -979,7 +1014,7 @@ pub async fn create_with_issues(
     }
     .await;
     if let Err(e) = build {
-        rollback_create(app, &project, &team_id, &created, &root, &dirs, None).await;
+        rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, None).await;
         return Err(e);
     }
 
@@ -992,7 +1027,7 @@ pub async fn create_with_issues(
     match make_workspace(app, &project, &team_id, &root, &issue).await {
         Ok(ws) => workspace_id = Some(ws),
         Err(e) => {
-            rollback_create(app, &project, &team_id, &created, &root, &dirs, None).await;
+            rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, None).await;
             return Err(e);
         }
     }
@@ -1003,7 +1038,7 @@ pub async fn create_with_issues(
         .await
         .map_err(any_err)
     {
-        rollback_create(app, &project, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+        rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
         return Err(e);
     }
 
@@ -1013,7 +1048,7 @@ pub async fn create_with_issues(
             Ok(bot_id) => created.push(bot_id),
             Err(e) => {
                 // SPEC-team §6.5: a half-built team is torn down rather than left behind.
-                rollback_create(app, &project, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+                rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
                 return Err(e);
             }
         }
@@ -1032,7 +1067,7 @@ pub async fn create_with_issues(
         })
         .collect();
     let issue_doc = issue_md(&issue);
-    let team_doc = team_md(&issue, &branch, &root, &roster);
+    let team_doc = team_md(&issue, &branch, &root, &repo, &roster);
     let docs = async {
         // The originals live at the team root; each worktree gets an ignored copy inside the
         // member's own cwd so the agent never has to read across directories (§6.2).
@@ -1051,7 +1086,7 @@ pub async fn create_with_issues(
     }
     .await;
     if let Err(e) = docs {
-        rollback_create(app, &project, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+        rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
         return Err(e);
     }
 
@@ -1125,7 +1160,7 @@ pub async fn add_issues(app: &Arc<App>, team_id: &str, numbers: &[i64]) -> LcRes
         if existing.iter().any(|i| i.issue_number == *n) {
             return Err(LcError::conflict("issue already queued", json!({"issue_number": n})));
         }
-        let iss = resolve_issue(app, &t.project_id, *n).await?;
+        let iss = resolve_issue(app, &t.project_id, &t.repo, *n).await?;
         sqlx::query(
             "INSERT INTO team_issues (id, team_id, seq, issue_number, issue_title, issue_url, state, created_at)
              VALUES (?,?,?,?,?,?, 'queued', ?)",
@@ -1207,8 +1242,8 @@ async fn queued_worker_role(app: &Arc<App>, t: &db::Team, host: &str) -> LcResul
 
 /// Re-read the issue from GitHub so `ISSUE.md` carries its current body. Falls back to what
 /// the queue already knows: a queued issue is worth starting even when `gh` is unavailable.
-async fn refresh_issue(app: &Arc<App>, project_id: &str, q: &db::TeamIssue) -> IssueRef {
-    match resolve_issue(app, project_id, q.issue_number).await {
+async fn refresh_issue(app: &Arc<App>, project_id: &str, repo: &str, q: &db::TeamIssue) -> IssueRef {
+    match resolve_issue(app, project_id, repo, q.issue_number).await {
         Ok(i) if !i.title.trim().is_empty() => i,
         _ => IssueRef {
             number: q.issue_number,
@@ -1257,7 +1292,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
     for n in 1..=count {
         let spec = spec.as_ref().expect("spec is loaded when workers are created");
         let dir = format!("{root}/{}", member_dir("worker", n, q.seq));
-        tg::worktree_add(app, &project.host, &project.path, &dir, &t.base_sha, true)
+        tg::worktree_add(app, &project.host, &repo_path(&project, &t.repo), &dir, &t.base_sha, true)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
         let nick = member_nick(&t6, "worker", n, q.seq);
@@ -1267,7 +1302,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
     }
 
     // Docs last: they name every member, so the roster has to exist first.
-    let issue = refresh_issue(app, &t.project_id, q).await;
+    let issue = refresh_issue(app, &t.project_id, &t.repo, q).await;
     let members = db::team_members(&app.db, team_id).await.map_err(any_err)?;
     let live: Vec<&db::Bot> = members.iter().filter(|b| b.deleted_at.is_none()).collect();
     let roster: Vec<(String, String, String)> = live
@@ -1277,7 +1312,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
         })
         .collect();
     let issue_doc = issue_md(&issue);
-    let team_doc = team_md(&issue, &branch, &root, &roster);
+    let team_doc = team_md(&issue, &branch, &root, &t.repo, &roster);
     tg::put_file(app, &project.host, &format!("{root}/ISSUE.md"), &issue_doc)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -1363,10 +1398,10 @@ pub async fn retire_issue_workers(app: &Arc<App>, team_id: &str, issue_id: &str)
             tracing::warn!(team = team_id, dir = %cwd, why, "refusing to remove a worker worktree");
             continue;
         }
-        tg::worktree_remove(app, &project.host, &project.path, &cwd).await;
+        tg::worktree_remove(app, &project.host, &repo_path(&project, &t.repo), &cwd).await;
         app.emit("bot_changed", json!({"bot_id": b.id})).await;
     }
-    tg::worktree_prune(app, &project.host, &project.path).await;
+    tg::worktree_prune(app, &project.host, &repo_path(&project, &t.repo)).await;
 }
 
 /// Close out whatever an issue left open: `team_tasks_one_open_per_worker` is unique on the
@@ -1462,6 +1497,7 @@ async fn name_taken(app: &Arc<App>, project_id: &str, name: &str) -> LcResult<bo
 async fn rollback_create(
     app: &Arc<App>,
     project: &db::Project,
+    repo: &str,
     team_id: &str,
     created: &[String],
     root: &str,
@@ -1473,7 +1509,7 @@ async fn rollback_create(
         let _ = sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(b).execute(&app.db).await;
     }
     close_workspace(app, project, workspace_id).await;
-    remove_worktrees(app, project, root, dirs).await;
+    remove_worktrees(app, project, repo, root, dirs).await;
     let _ = sqlx::query("UPDATE teams SET phase='failed', pause_reason=NULL, ended_at=? WHERE id=?")
         .bind(&now)
         .bind(team_id)
@@ -1546,7 +1582,8 @@ async fn close_workspace(app: &Arc<App>, project: &db::Project, workspace_id: Op
 /// refuses nothing at all. So: a directory is only removed if it is inside the team root and
 /// outside the checkout (`removable_member_dir`), and the root is only deleted if it is not
 /// the checkout, not inside it, and not a parent of it (`removable_root`).
-async fn remove_worktrees(app: &Arc<App>, project: &db::Project, root: &str, dirs: &[String]) {
+async fn remove_worktrees(app: &Arc<App>, project: &db::Project, repo: &str, root: &str, dirs: &[String]) {
+    let git_dir = repo_path(project, repo);
     let root = root.trim();
     if root.is_empty() {
         return;
@@ -1557,12 +1594,12 @@ async fn remove_worktrees(app: &Arc<App>, project: &db::Project, root: &str, dir
                            "refusing to `worktree remove` a directory outside the team root");
             continue;
         }
-        let out = tg::worktree_remove(app, &project.host, &project.path, d).await;
+        let out = tg::worktree_remove(app, &project.host, &git_dir, d).await;
         if !out.ok() {
             tracing::debug!(worktree = %d, error = %out.message(), "worktree remove reported an error");
         }
     }
-    tg::worktree_prune(app, &project.host, &project.path).await;
+    tg::worktree_prune(app, &project.host, &git_dir).await;
     if let Err(why) = removable_root(project, root) {
         tracing::warn!(root = %root, project = %project.path, %why,
                        "refusing to delete the team root: it is not safely outside the project checkout");
@@ -1842,7 +1879,7 @@ pub async fn close_issue(app: &Arc<App>, team_id: &str, comment: Option<String>)
         Some(c) => Some(c),
         None => Some(close_comment(&t, &tasks)),
     };
-    let out = crate::github::close_issue(app, &t.project_id, t.issue_number as u64, body.as_deref()).await?;
+    let out = crate::github::close_issue(app, &t.project_id, &t.repo, t.issue_number as u64, body.as_deref()).await?;
 
     let now = db::now();
     sqlx::query("UPDATE teams SET issue_closed_at = ? WHERE id = ?")
@@ -1907,7 +1944,7 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     if let Ok(Some(project)) = db::project(&app.db, &t.project_id).await {
         // §6.4a: one `workspace.close` takes every member pane with it.
         close_workspace(app, &project, t.workspace_id.as_deref()).await;
-        remove_worktrees(app, &project, &t.worktree_root, &dirs).await;
+        remove_worktrees(app, &project, &t.repo, &t.worktree_root, &dirs).await;
     }
     let _ = sqlx::query("UPDATE teams SET workspace_id = NULL WHERE id = ?").bind(team_id).execute(&app.db).await;
     record_event(
@@ -2005,7 +2042,7 @@ pub async fn delete(app: &Arc<App>, team_id: &str, delete_branches: bool) -> LcR
     // 3. worktrees (remove → prune → rmdir, §6.5), then the workspace (§6.4a).
     let mut removed_branches: Vec<String> = Vec::new();
     if let Some(p) = &project {
-        remove_worktrees(app, p, &t.worktree_root, &dirs).await;
+        remove_worktrees(app, p, &t.repo, &t.worktree_root, &dirs).await;
         close_workspace(app, p, t.workspace_id.as_deref()).await;
         if delete_branches {
             // The only destructive path there is. Task branches first, then the integration
@@ -2020,7 +2057,7 @@ pub async fn delete(app: &Arc<App>, team_id: &str, delete_branches: bool) -> LcR
                     tracing::warn!(branch = %b, "team delete: refusing to remove a branch outside `team/`");
                     continue;
                 }
-                let out = tg::git(app, &p.host, &p.path, &["branch", "-D", &b], tg::GIT_TIMEOUT).await;
+                let out = tg::git(app, &p.host, &repo_path(p, &t.repo), &["branch", "-D", &b], tg::GIT_TIMEOUT).await;
                 match out {
                     Ok(o) if o.ok() => removed_branches.push(b),
                     Ok(o) => tracing::warn!(branch = %b, error = %o.message(), "team delete: branch -D failed"),
@@ -2370,8 +2407,8 @@ pub async fn respawn_schedulers(app: &Arc<App>) {
     let mut pruned: std::collections::BTreeSet<String> = Default::default();
     for t in teams {
         if let Ok(Some(p)) = db::project(&app.db, &t.project_id).await {
-            if pruned.insert(p.id.clone()) {
-                tg::worktree_prune(app, &p.host, &p.path).await;
+            if pruned.insert(format!("{}/{}", p.id, t.repo)) {
+                tg::worktree_prune(app, &p.host, &repo_path(&p, &t.repo)).await;
             }
             // §6.4a: the workspace its panes live in must still exist, or the members have
             // nowhere to start. Same treatment as a missing worktree: pause, do not guess.
@@ -2549,10 +2586,11 @@ async fn check_worktrees(app: &Arc<App>, project: &db::Project, t: &db::Team) ->
     if want.is_empty() {
         return Ok(());
     }
-    let have: Vec<String> = tg::worktree_paths(app, &project.host, &project.path)
+    let git_dir = repo_path(project, &t.repo);
+    let have: Vec<String> = tg::worktree_paths(app, &project.host, &git_dir)
         .await
         .into_iter()
-        .filter(|h| !same_path(h, &project.path))
+        .filter(|h| !same_path(h, &git_dir))
         .collect();
     let missing: Vec<&String> = want.iter().filter(|w| !have.iter().any(|h| same_path(h, w))).collect();
     if missing.is_empty() {
@@ -3203,6 +3241,7 @@ pub mod testing {
 
     pub fn req(count: Option<u32>, reviewer: bool) -> CreateTeam {
         CreateTeam {
+            repo: None,
             issue_numbers: None,
             issue_number: Some(42),
             pm: role("codex"),
@@ -3868,6 +3907,7 @@ mod api_tests {
         remove_worktrees(
             &app,
             &project,
+            "",
             &root,
             &[mine.clone(), e.repo.to_string_lossy().to_string(), "/tmp/somewhere-else".into()],
         )
@@ -3905,7 +3945,7 @@ mod api_tests {
             inside.to_string_lossy().to_string(),          // inside it
             e.dir.to_string_lossy().to_string(),           // a parent of it
         ] {
-            remove_worktrees(&app, &project, &root, &[]).await;
+            remove_worktrees(&app, &project, "", &root, &[]).await;
             assert!(e.repo.join("README.md").exists(), "the checkout survived root = `{root}`");
             assert!(inside.join("keep.txt").exists(), "nothing inside it was touched either (root = `{root}`)");
         }
@@ -3914,7 +3954,7 @@ mod api_tests {
         // just turn cleanup off.
         let root = app.data_dir.join("teams/01ABC");
         std::fs::create_dir_all(&root).unwrap();
-        remove_worktrees(&app, &project, &root.to_string_lossy(), &[]).await;
+        remove_worktrees(&app, &project, "", &root.to_string_lossy(), &[]).await;
         assert!(!root.exists(), "a real team root is still removed");
     }
 }

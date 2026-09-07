@@ -1685,7 +1685,15 @@ async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     }
     let summary = ctx.team.summary.clone().unwrap_or_default();
     if ctx.team.deliver == "pr" {
-        let gh = crate::github::cached(app, &ctx.team.project_id).await;
+        // A submodule team delivers to the submodule's repo, not the project's.
+        let gh = if ctx.team.repo.is_empty() {
+            crate::github::cached(app, &ctx.team.project_id).await
+        } else {
+            crate::github::list_submodules(app, &ctx.project, false)
+                .await
+                .ok()
+                .and_then(|subs| subs.into_iter().find(|s| s.path == ctx.team.repo).and_then(|s| s.github))
+        };
         match gh {
             None => {
                 // §6.4: not a GitHub project (or `gh` unusable) → quietly become `branch`.
@@ -1694,7 +1702,7 @@ async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
                 .await?;
             }
             Some(info) => {
-                let base = tg::remote_base_branch(app, ctx.host(), &ctx.project.path, &ctx.team.base_ref).await;
+                let base = tg::remote_base_branch(app, ctx.host(), &team::repo_path(&ctx.project, &ctx.team.repo), &ctx.team.base_ref).await;
                 let title = format!("{} (#{})", ctx.team.issue_title, ctx.team.issue_number);
                 let body = format!("{summary}\n\nCloses #{}", ctx.team.issue_number);
                 match tg::deliver_pr(
