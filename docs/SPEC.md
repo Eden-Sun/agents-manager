@@ -144,6 +144,16 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 - **回音剝除**（v4.2 補強）：畫面上只有 `❯ <第一行>` 那列算回音，多行 prompt 的第 2..n 行會留在畫面上，所以再逐行比對把它們去掉。逐行比對在**極窄的 pane** 下必定失敗——TUI 自己就把文字排成一欄、每列一個字（herdr 的 `recent_unwrapped` 只還原終端軟換行，還原不了 TUI 的排版），於是整個 prompt 曾被當成回覆存起來、在 UI 上直立成一條字柱。因此加了**去空白比對**的後備：把兩邊的所有空白字元拿掉再比，且要求候選文字**開頭**就是 prompt 的一段結尾（至少 8 個字元），候選本身若只是那段結尾的片段就整個是回音。
 - **無法辨識就說無法辨識**：剝完是空的 → 「（終端沒有可辨識的回覆）」；剝完仍是一欄單字元（`is_shredded`：≥6 行且 ≥70% 的行只有 1–2 個字）→ 「（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）」。窄 pane 會把字與字之間的空白吃掉，重組不回來，所以不猜。
 - 存為 assistant Message `source = terminal_fallback`、`incomplete = 1`。**之後晚到的 hook 不覆蓋**（去重後丟棄並 log），避免跨回合錯配。
+- **沒有 hook 的 run（v4.2）**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的
+  子 agent，見 §6.5a）永遠等不到 hook，終端快照對它不是備援而是**唯一來源**。所以這種 run 的 `working → idle`
+  若沒有 in-flight Turn，不再什麼都不做，而是用同一份快照補一筆 `origin = external`、`status =
+  completed_fallback` 的 Turn：prompt 回音記成 user 訊息，抽出來的回覆記成 `source = terminal_fallback` 的
+  assistant 訊息。認領當下 agent 還在 `working` 時則先開一筆 in-flight Turn（等同「看到使用者在 pane 裡打字」），
+  回覆照常即時串流、照常由本節收尾。
+  - 邊界：沒有游標（`last_read_tail_hash`）時要求畫面上有 prompt 回音，否則整個 scrollback 會被當成一則訊息；
+    擷取不到就只推進游標、不寫訊息（沒有 Turn 在等答案，「（終端沒有可辨識的回覆）」只是噪音）。
+  - 去重與上限：游標 + 與上一則 assistant 訊息比對（herdr 同一輪可能報兩次 `working → idle`；重啟會再讀到同一
+    個畫面），單則上限 6000 字；認領時的補記只在對話**還是空的**時候做一次。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
 1. wall-clock ≤ 3 秒；**永遠 exit 0；永遠空 stdout**（即使錯誤也不印 JSON）。

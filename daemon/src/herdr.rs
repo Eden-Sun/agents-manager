@@ -116,6 +116,22 @@ pub struct Pong {
     pub protocol: u32,
 }
 
+/// One foreground process of a pane (`pane.process_info`).
+///
+/// `argv` is the only field the daemon reads today: for an **adopted** agent — a pane started
+/// by someone else, so nothing in our own database says what it was launched with — the CLI's
+/// own flags are the only evidence of its model and reasoning effort
+/// (`["claude","--dangerously-skip-permissions","--model","opus"]`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProcessInfo {
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub argv0: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("herdr error {code}: {message}")]
 pub struct HerdrError {
@@ -366,6 +382,18 @@ impl HerdrClient {
     /// split instead of always taking the first one.
     pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
         self.rects(json!({"workspace_id": workspace_id})).await
+    }
+
+    /// What is running in a pane right now, front process first.
+    ///
+    /// herdr wraps the payload as `{"process_info":{"foreground_processes":[…]}}`. A pane with
+    /// nothing in the foreground answers with an empty list rather than an error, so callers
+    /// treat "no argv" and "no answer" the same way.
+    pub async fn pane_process_info(&self, pane_id: &str) -> Result<Vec<ProcessInfo>> {
+        let v = self.call("pane.process_info", json!({"pane_id": pane_id})).await?;
+        let info = v.get("process_info").unwrap_or(&v);
+        let Some(list) = info.get("foreground_processes") else { return Ok(Vec::new()) };
+        Ok(serde_json::from_value(list.clone())?)
     }
 
     /// One pane's own size. `pane.layout` keyed by `workspace_id` only ever describes that

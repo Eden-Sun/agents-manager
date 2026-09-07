@@ -198,6 +198,10 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 if bot.kind == "codex" {
                     crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run.id);
                 }
+                // A run with no hooks (a spawned child, above all) has nothing but its pane to
+                // build a conversation from, and the daemon was not watching while it was down.
+                crate::lifecycle::spawn_adopted_capture(app, &run.id, &bot.id);
+                sync_pane_model(app, &client, &bot, agent).await;
                 tracing::info!(host, bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
             }
             (Some(run), None) => {
@@ -243,6 +247,8 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 if bot.kind == "codex" {
                     crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run_id);
                 }
+                crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot.id);
+                sync_pane_model(app, &client, &bot, agent).await;
                 tracing::info!(host, bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
             }
             (None, None) => {}
@@ -313,6 +319,13 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         .await?;
         claimed.insert(name.to_string());
         crate::events::watch_pane_on_session(app, host, &session, &agent.pane_id).await;
+        // The child's pane is the only source for both halves of its identity: what it is
+        // saying (no hooks were injected, so §4.3's snapshot is all there is) and what it is
+        // running on (we did not choose its model, its own argv did).
+        crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot_id);
+        if let Ok(Some(child)) = db::bot(&app.db, &bot_id).await {
+            sync_pane_model(app, &client, &child, agent).await;
+        }
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
         app.emit_bot_status(&bot_id).await;
         new_children += 1;
@@ -354,6 +367,68 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // reconcile is always per-host (pane / workspace ids are only unique within a session).
     crate::team::reconcile_teams_on_host(app, host).await;
     Ok(())
+}
+
+/// Fill in a child bot's `model` / `effort` from what its CLI is actually running.
+///
+/// A spawned child was launched by another agent, so nothing in our database says what it is
+/// on and the sidebar badge reads 「預設」 for a pane that is quite deliberately on `opus`.
+/// `pane.process_info` reports the pane's foreground argv — the same flags `model_args` would
+/// have produced — and grok additionally spells both out in its terminal title
+/// (`Grok 4.6 (xhigh)`) until it renames itself after its task.
+///
+/// Two deliberate limits:
+/// * **children only.** For any other bot `bots.model` is the user's own setting, and for a
+///   `managed_by='user'` bot the TOML projection writes it back to `config.toml` — reading a
+///   model off a process and storing it there would be the daemon overwriting configuration
+///   with a guess.
+/// * **fills, never corrects.** argv cannot see a later `/model` typed into the TUI (which is
+///   exactly what `apply_live_setting` sends when the model is changed from the UI), so a
+///   value that is already recorded is left alone. A field we could not parse stays NULL —
+///   「預設」 is honest, a guess is not.
+async fn sync_pane_model(app: &Arc<App>, client: &crate::herdr::HerdrClient, bot: &db::Bot, agent: &crate::herdr::AgentInfo) {
+    if bot.managed_by != "child" || (bot.model.is_some() && bot.effort.is_some()) {
+        return;
+    }
+    let procs = match client.pane_process_info(&agent.pane_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(bot = %bot.name, pane = %agent.pane_id, error = %e, "pane.process_info unavailable");
+            return;
+        }
+    };
+    // The agent CLI is the front process; anything it shells out to (`git`, a pager) has an
+    // argv of its own, so pick the one that looks like the CLI and fall back to the first.
+    let argv: &[String] = procs
+        .iter()
+        .find(|p| p.argv.first().map(|a| a.contains(bot.kind.as_str())).unwrap_or(false))
+        .or_else(|| procs.iter().find(|p| !p.argv.is_empty()))
+        .map(|p| p.argv.as_slice())
+        .unwrap_or(&[]);
+    let (mut model, mut effort) = crate::models::model_effort_from_argv(&bot.kind, argv);
+    if bot.kind == "grok" && (model.is_none() || effort.is_none()) {
+        let (tm, te) = crate::models::grok_title_model_effort(agent.terminal_title_stripped.as_deref().unwrap_or(""));
+        model = model.or(tm);
+        effort = effort.or(te);
+    }
+    let model = model.filter(|_| bot.model.is_none());
+    let effort = effort.filter(|_| bot.effort.is_none());
+    if model.is_none() && effort.is_none() {
+        return;
+    }
+    // COALESCE, so a field the argv did not mention keeps whatever it had.
+    if let Err(e) = sqlx::query("UPDATE bots SET model = COALESCE(?, model), effort = COALESCE(?, effort) WHERE id = ?")
+        .bind(&model)
+        .bind(&effort)
+        .bind(&bot.id)
+        .execute(&app.db)
+        .await
+    {
+        tracing::warn!(bot = %bot.name, error = ?e, "cannot record the model a child agent is running");
+        return;
+    }
+    tracing::info!(bot = %bot.name, pane = %agent.pane_id, ?model, ?effort, "reconcile: read the child's model off its argv");
+    app.emit("bot_changed", json!({"bot_id": bot.id})).await;
 }
 
 #[cfg(test)]
@@ -466,6 +541,67 @@ mod compat_tests {
         assert_eq!(r.adopted, 1);
         assert_eq!(r.pane_id.as_deref(), Some(pane.pane_id.as_str()));
         assert_eq!(r.tab_id.as_deref(), Some(pane.tab_id.as_str()));
+    }
+
+    /// A spawned child is adopted with the model and effort its CLI is actually running:
+    /// nothing in the database chose them (its parent started the pane), so the only evidence
+    /// is the pane's own argv. Without this the sidebar badge says 「預設」 for a child quite
+    /// deliberately launched on `opus`.
+    #[tokio::test]
+    async fn a_spawned_child_is_adopted_with_the_model_its_argv_names() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let kid_agent = format!("{parent_agent}-lastq");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": kid_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+        // What each pane is really running. The parent's says `haiku` — and must be ignored,
+        // because a user bot's model is the user's setting, not something we read back.
+        env.herdr.set_argv(&root.pane_id, &["claude", "--dangerously-skip-permissions", "--model", "haiku"]);
+        env.herdr.set_argv(&kid_pane.pane_id, &["claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]);
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kid = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .expect("the child was adopted");
+        assert_eq!(kid.name, "lastq");
+        assert_eq!(kid.model.as_deref(), Some("opus"), "read off `--model`");
+        assert_eq!(kid.effort.as_deref(), Some("high"), "read off `--effort`");
+        assert_eq!(kid.inject_hooks, 0, "still no hooks: 對話 comes from the terminal");
+
+        let p = db::bot(&app.db, &parent).await.unwrap().unwrap();
+        assert_eq!(p.model, None, "a user bot's model is configuration, never scraped from its process");
+
+        // A second reconcile does not undo a model the user has since changed from the UI
+        // (`/model` inside the TUI leaves argv untouched, so argv must not win a rematch).
+        sqlx::query("UPDATE bots SET model='sonnet' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().model.as_deref(), Some("sonnet"));
     }
 
     /// The unhappy path is unchanged: a run whose agent herdr no longer lists is exited,
