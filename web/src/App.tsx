@@ -230,7 +230,9 @@ export default function App() {
       ) : null}
       <main className="main">
         <ConnBanner />
-        {shellView ? (
+        {/* 選著 bot 時 shell 掛在 ChatPanel 的標題列底下（當第三個分頁）；其他選取
+            （group / team / 沒選）才整個換成 shell 面板。 */}
+        {shellView && (teamLaunch || teamId || groupProjectId || !botId) ? (
           <HostShellPanel
             key={`${shellView.host}:${shellView.paneId}`}
             host={shellView.host}

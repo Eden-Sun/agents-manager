@@ -48,6 +48,36 @@ function writeHistory(map: HistoryMap) {
   }
 }
 
+/**
+ * 還沒送出的那一行指令，依 `host/paneId` 各存一份。換 bot、關掉面板、重新整理都留著——
+ * 打到一半的長指令不該因為切去看一眼對話就沒了。
+ */
+const DRAFT_KEY = 'am.shellDrafts'
+
+function readDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : null
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (typeof v === 'string' && v) out[k] = v
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeDraft(key: string, text: string) {
+  try {
+    const map = readDrafts()
+    if (text) map[key] = text
+    else delete map[key]
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(map))
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 /** 送給 daemon（再原樣送 herdr）的鍵名，同 `usePaneKeys` 的契約。 */
 const KEYS: { label: string; keys: string[]; title: string }[] = [
   { label: 'ctrl+c', keys: ['ctrl+c'], title: '中斷正在跑的指令' },
@@ -72,11 +102,14 @@ export function HostShellPanel({
   paneId,
   cwd,
   onOpenSidebar,
+  embedded = false,
 }: {
   host: string
   paneId: string
   cwd: string
-  onOpenSidebar: () => void
+  onOpenSidebar?: () => void
+  /** 掛在 ChatPanel 標題列底下當分頁：不畫自己的 `main-head`，主機與關閉鍵改放抓法列。 */
+  embedded?: boolean
 }) {
   const closeShellView = useStore((s) => s.closeShellView)
   const endHostShell = useStore((s) => s.endHostShell)
@@ -90,7 +123,15 @@ export function HostShellPanel({
   /** `visible` = 終端現在長什麼樣（shell 的常態）；`recent_unwrapped` = 連捲上去的一起看。 */
   const [source, setSource] = useState<TerminalSource>('visible')
   const [lines, setLines] = useState(200)
-  const [text, setText] = useState('')
+  const target = `${host}/${paneId}`
+  const [text, setTextState] = useState(() => readDrafts()[target] ?? '')
+  const setText = useCallback(
+    (v: string) => {
+      setTextState(v)
+      writeDraft(target, v)
+    },
+    [target],
+  )
   const [sending, setSending] = useState(false)
   const [confirmEnd, setConfirmEnd] = useState(false)
   const [history, setHistory] = useState<HistoryMap>(readHistory)
@@ -100,13 +141,12 @@ export function HostShellPanel({
 
   // 換 shell 時清畫面是 render 當下就該有的結果，不是一個 effect：留著上一個主機的終端內容
   // 不只是舊資料，是「另一台機器的畫面」，一眼看過去會以為是這一台的。
-  const target = `${host}/${paneId}`
   const [lastTarget, setLastTarget] = useState(target)
   if (lastTarget !== target) {
     setLastTarget(target)
     setSnap(null)
     setErr(null)
-    setText('')
+    setTextState(readDrafts()[target] ?? '')
     setHistAt(-1)
   }
 
@@ -170,7 +210,7 @@ export function HostShellPanel({
         setSending(false)
       }
     },
-    [host, paneId, refresh, remember],
+    [host, paneId, refresh, remember, setText],
   )
 
   const pressKeys = useCallback(
@@ -221,8 +261,26 @@ export function HostShellPanel({
     return linkifyTerm(snap.text, snap.columns)
   }, [err, snap, source])
 
+  const headActions = (
+    <div className="head-actions">
+      <button type="button" className="mini-btn" onClick={closeShellView} title="只關掉這個畫面，shell 留著">
+        關閉
+      </button>
+      <button
+        type="button"
+        className="mini-btn danger"
+        disabled={ending}
+        onClick={() => setConfirmEnd(true)}
+        title="關掉這個 shell 的 pane"
+      >
+        {ending ? '結束中…' : '結束 shell'}
+      </button>
+    </div>
+  )
+
   return (
     <>
+      {embedded ? null : (
       <div className="main-head shell-head">
         <button
           type="button"
@@ -246,24 +304,19 @@ export function HostShellPanel({
           </span>
         </div>
         <span className="spacer" />
-        <div className="head-actions">
-          <button type="button" className="mini-btn" onClick={closeShellView} title="只關掉這個畫面，shell 留著">
-            關閉
-          </button>
-          <button
-            type="button"
-            className="mini-btn danger"
-            disabled={ending}
-            onClick={() => setConfirmEnd(true)}
-            title="關掉這個 shell 的 pane"
-          >
-            {ending ? '結束中…' : '結束 shell'}
-          </button>
-        </div>
+        {headActions}
       </div>
+      )}
 
       <div className="shell-pane">
         <div className="term-bar shell-bar">
+          {embedded ? (
+            <span className="hint" title={cwd}>
+              <strong>{host === 'local' ? '本機 shell' : `${host} shell`}</strong>
+              <HostBadge host={host} connected={hostUp} />
+              <span className="shell-cwd mono">{cwdTail(cwd).leaf}</span>
+            </span>
+          ) : null}
           <label className="conn">
             檢視
             <select value={source} onChange={(e) => setSource(e.target.value as TerminalSource)}>
@@ -293,6 +346,7 @@ export function HostShellPanel({
           {snap?.truncated ? <span className="hint">已截斷</span> : null}
           <span className="spacer" />
           <span className="hint term-bar-note">每秒更新，指令送出後立刻重讀</span>
+          {embedded ? headActions : null}
         </div>
 
         {err && snap ? (

@@ -17,6 +17,7 @@ import { BotNameField } from './BotNameField'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
+import { HostShellPanel } from './HostShellPanel'
 import { GearIcon } from './Icons'
 import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
@@ -1027,6 +1028,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   })
   const tab = useStore((s) => s.rightTab)
   const setRightTab = useStore((s) => s.setRightTab)
+  const shellView = useStore((s) => s.shellView)
+  const closeShellView = useStore((s) => s.closeShellView)
   const settingsBotId = useStore((s) => s.settingsBotId)
   const openSettings = useStore((s) => s.openSettings)
   const closeSettings = useStore((s) => s.closeSettings)
@@ -1123,6 +1126,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
   const blocked = blockedNow
   const settingsOpen = settingsBotId === botId
+  /** 主機 shell 當第三個分頁：標題列不變，只有下面的內容換成終端（2026-09-08）。 */
+  const shellOpen = shellView !== null && !settingsOpen
   const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
 
   return (
@@ -1206,18 +1211,35 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
         <div className="tabs" role="tablist">
-          <button type="button" className="tab" role="tab" aria-selected={tab === 'chat' && !settingsOpen} onClick={() => setRightTab('chat')}>
+          <button
+            type="button"
+            className="tab"
+            role="tab"
+            aria-selected={tab === 'chat' && !settingsOpen && !shellOpen}
+            onClick={() => {
+              closeShellView()
+              setRightTab('chat')
+            }}
+          >
             對話
           </button>
           <button
             type="button"
             className="tab"
             role="tab"
-            aria-selected={tab === 'terminal' && !settingsOpen}
-            onClick={() => setRightTab('terminal')}
+            aria-selected={tab === 'terminal' && !settingsOpen && !shellOpen}
+            onClick={() => {
+              closeShellView()
+              setRightTab('terminal')
+            }}
           >
             終端
           </button>
+          {shellOpen ? (
+            <button type="button" className="tab" role="tab" aria-selected title="主機 shell（按「關閉」回到對話）">
+              shell
+            </button>
+          ) : null}
         </div>
       </div>
       {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
@@ -1238,7 +1260,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
 
       {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
-      {tab === 'terminal' && !settingsOpen ? (
+      {shellOpen && shellView ? (
+        <HostShellPanel key={`${shellView.host}:${shellView.paneId}`} host={shellView.host} paneId={shellView.paneId} cwd={shellView.cwd} embedded />
+      ) : tab === 'terminal' && !settingsOpen ? (
         active ? (
           <TerminalTab botId={botId} />
         ) : (

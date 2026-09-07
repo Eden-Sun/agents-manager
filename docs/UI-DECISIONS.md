@@ -239,3 +239,14 @@
   折、還是認不出來——所以改成跟 `BlockedModal` 同寬的視窗（`MemPaneModal`），畫面幾乎原樣、
   每 2 秒重讀、捲到底。只讀，不給打字（要操作去 herdr 或終端分頁）。清單留在視窗後面不關，Esc
   只關視窗，看完回去按「結束」。bot 那幾列不給看——它們有自己的終端分頁，也不是要砍的對象。
+## 2026-09-08 主機 shell 掛在 bot 標題列底下、草稿與畫面都跨 reload
+
+- **shell 不再整個換掉主區。** 選著 bot 時按「開 shell」，bot 的標題列（名稱、額度、對話／終端分頁）
+  留在原位，shell 當第三個分頁「shell」出現在下面；主機名、cwd、「關閉」「結束 shell」移到抓法列。
+  使用者要的是「在這個 bot 旁邊開個終端」，不是離開對話——之前整頁換掉連自己在哪個 bot 都看不到。
+  沒選 bot（group / team / 空）時維持原本的整頁 shell 面板。`selectedBotId` 因此不再被開 shell 清掉。
+- **未送出的指令存著。** `am.shellDrafts`（localStorage，key = `host/paneId`）：切去看對話、關掉面板、
+  重新整理回來都還在。打到一半的長指令不該因為看一眼對話就沒了。
+- **重新整理回到同一個 shell。** `shellView` 鏡射到 `am.shellView`；`bootstrap` 用
+  `GET /api/hosts/:host/shells` 對一次 pane 還在不在，不在就清掉（不會停在一個讀不到的畫面）。
+- 截圖：`docs/screenshots/shell-embedded/`。
