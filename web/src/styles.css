@@ -3324,7 +3324,8 @@ button:disabled {
   background: transparent;
 }
 
-.context-bar > .issues-bar + .statusline-bar {
+.context-bar > .issues-bar + .statusline-bar,
+.context-bar > .git-bar + .statusline-bar {
   padding-left: 10px;
   border-left: 1px solid var(--border);
 }
@@ -3358,6 +3359,60 @@ button:disabled {
   align-items: baseline;
   gap: 5px;
   flex: none;
+/* 快速 git（`GitBar`）：repo chip 旁邊的 `+N −M ↑a ↓b` 與 commit / push / pull。 */
+.git-bar {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.git-stat,
+.git-ab {
+  display: inline-flex;
+  gap: 5px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.git-stat.dirty .git-ins {
+  color: var(--lamp-green);
+}
+
+.git-stat.dirty .git-del {
+  color: var(--danger);
+}
+
+.git-ab {
+  color: var(--accent-ink);
+}
+
+.git-bar .mini-btn {
+  height: 24px;
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.git-commit-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-commit-msg {
+  width: 260px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
   font-size: 11px;
   line-height: 1.5;
   white-space: nowrap;

@@ -21,6 +21,7 @@ import { HostShellPanel } from './HostShellPanel'
 import { GearIcon } from './Icons'
 import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
+import { GitBar } from './GitBar'
 import { KindTag } from './KindTag'
 import { ModelQuickPicker } from './ModelPicker'
 import { MemBadge } from './MemBadge'
@@ -1256,7 +1257,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       <ContextBar
         issues={
           tab === 'chat' && !settingsOpen ? (
-            <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
+            <>
+              <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
+              <GitBar projectId={bot.project_id} />
+            </>
           ) : null
         }
         status={<StatusLineBar status={statusInfo} text={run?.status_line ?? null} />}

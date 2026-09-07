@@ -1584,3 +1584,30 @@ object URL，不能直接塞進 `<img src>`。
   `.claude.json` 的 `oauthAccount.emailAddress`，identity 決定是哪個設定目錄，因此
   cc0 / cc1 各自對得上自己的帳號。
 - 一樣只在內容變動時寫入並推 `bot_status`。
+
+## 快速 git（chat 標題列的 chip，2026-09-08 新增）
+
+專案 checkout 的 `+N −M ↑a ↓b` 與 commit / push / pull 三顆按鈕。都在專案的 host 上、專案的目錄裡跑
+（本機直接跑、遠端走 ssh），不開 worktree、不切分支。
+
+### `GET /api/projects/{id}/git`
+
+```json
+{"git":true,"branch":"main","upstream":"origin/main","ahead":0,"behind":0,
+ "changed":7,"untracked":3,"insertions":246,"deletions":9}
+```
+
+- `git:false`（其他欄位省略）= 那個目錄不是 git repo（或沒裝 git）；前端把整條收掉。
+- `changed` = 有改動的已追蹤檔案數（`status --porcelain=v2`），`insertions` / `deletions` 來自
+  `diff --shortstat HEAD`（未追蹤檔不算行數）。`branch` 在 detached HEAD 時是 `null`。
+
+### `POST /api/projects/{id}/git/commit` `{"message": "…"}`
+
+`git add -A && git commit -m <message>`。`200 {"ok":true,"output":"…"}`；訊息空白 → `400`；
+沒有變更 → `409 {"error":"conflict","reason":"nothing_to_commit"}`；git 失敗 →
+`409 {"reason":"git_commit_failed","output":"<git 的輸出>"}`。
+
+### `POST /api/projects/{id}/git/push`、`POST /api/projects/{id}/git/pull`
+
+push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull：`git pull --rebase --no-autostash`
+（不 stash 別的 agent 的半成品）。回應同 commit（`git_push_failed` / `git_pull_failed`）。逾時 180 秒。

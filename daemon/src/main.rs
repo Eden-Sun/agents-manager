@@ -12,6 +12,7 @@ mod default_session;
 mod db;
 mod events;
 mod gh_auth;
+mod git_quick;
 mod github;
 mod group;
 mod herdr;
