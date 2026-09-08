@@ -470,9 +470,11 @@ function Gauge({
         </span>
         {/* claude 才有身分名（cc0 / cc1 …）；codex、grok 就寫 kind 自己的名字。三種 kind 的左欄
             因此都是「圖示 / 名稱 / 開關」三層，開關一律貼在名稱正下方，不會有一格歪掉。 */}
-        <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-          {entry.identity ?? entry.kind}
-        </span>
+        {compact && !entry.identity ? null : (
+          <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
+            {entry.identity ?? entry.kind}
+          </span>
+        )}
         {/* 停用開關跟圖示／名稱同一直欄，貼在名稱正下方：右邊那幾條進度條的高度不變，
             整格也就不會因為它變高。 */}
         <StripDisableToggle entry={entry} host={host} />
@@ -491,7 +493,7 @@ function Gauge({
         <span className="quota-compact">
           <span className="quota-window-name">{windows[0].name}</span>
           <span className="quota-compact-pct">
-            {windows[0].pct === null ? '無資料' : `剩 ${fmtPct(windows[0].pct)}%`}
+            {windows[0].pct === null ? '無資料' : `${fmtPct(windows[0].pct)}%`}
           </span>
         </span>
       ) : (
@@ -728,6 +730,11 @@ export function QuotaStrip({
     }
   }, [open])
 
+  useEffect(() => {
+    if (width > 640) return
+    wrap.current?.querySelector('.quota-hp.focused')?.scrollIntoView({ inline: 'center', block: 'nearest' })
+  }, [width, focusKind, focusIdentity])
+
   /** Fixed: cc0 → cc1 → codex → grok. No remaining-% / focus reshuffle. */
   const ordered = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
 
@@ -765,7 +772,8 @@ export function QuotaStrip({
         return id ? e.identity === id : !e.identity
       }) ?? null)
     : null
-  const shown = tight ? [focusEntry ?? ordered[0]] : ordered
+  // 手機一顆 chip 看不見其他 kind。改把全部身分／kind 攤在一列裡橫向捲。
+  const shown = compact ? ordered : tight ? [focusEntry ?? ordered[0]] : ordered
   const hidden = ordered.length - shown.length
 
   return (
