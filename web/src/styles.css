@@ -3669,6 +3669,20 @@ p.project-quota-hidden {
   tab-size: 4;
 }
 
+/*
+ * 折行模式（`components/termWrap.ts` 的開關，手機預設開）。終端的字是固定格線，折行會把
+ * TUI 畫的框線與對齊弄亂——但在 390px 上不折行等於整個右半邊都讀不到，那更糟。
+ * `break-all` 是必要的：終端的一行常常是一整條沒有空白的路徑或網址，只靠 `pre-wrap` 它
+ * 仍然會撐出橫向捲軸。`overflow-x: hidden` 收掉殘留的一兩 px 溢出（`.term-link` 是 inline，
+ * 折行後每一段都還是可點的）。
+ */
+.term.term-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  overflow-x: hidden;
+}
+
 .term.blocked-term {
   max-height: 300px;
 }

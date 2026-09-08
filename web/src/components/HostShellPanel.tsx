@@ -6,6 +6,7 @@ import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './TermLinks'
+import { setTermWrap, useTermWrap } from './termWrap'
 
 /**
  * 對某台主機（本機或遠端）開著的那個 shell：終端快照 + 一行指令輸入。
@@ -123,6 +124,8 @@ export function HostShellPanel({
   /** `visible` = 終端現在長什麼樣（shell 的常態）；`recent_unwrapped` = 連捲上去的一起看。 */
   const [source, setSource] = useState<TerminalSource>('visible')
   const [lines, setLines] = useState(200)
+  // 折不折行跟終端分頁共用一個開關（手機預設折、桌機預設不折）。
+  const wrap = useTermWrap()
   const target = `${host}/${paneId}`
   const [text, setTextState] = useState(() => readDrafts()[target] ?? '')
   const setText = useCallback(
@@ -338,6 +341,11 @@ export function HostShellPanel({
           <button type="button" className="mini-btn" onClick={refresh} title="立刻重讀一次（平常每秒自己更新）">
             刷新
           </button>
+          {/* 手機預設折行、桌機預設不折，跟終端分頁共用同一個開關。 */}
+          <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
+            <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
+            換行
+          </label>
           <span className="hint term-pane-chip" title={`herdr pane ${paneId}`}>
             pane <code>{paneId}</code>
             {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
@@ -355,7 +363,7 @@ export function HostShellPanel({
           </div>
         ) : null}
 
-        <pre className="term shell-term">{body}</pre>
+        <pre className={`term shell-term${wrap ? ' term-wrap' : ''}`}>{body}</pre>
 
         <form
           className="shell-input"
