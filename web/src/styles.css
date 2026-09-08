@@ -9451,6 +9451,21 @@ button.run-debug-toggle:hover {
   }
 }
 
+/* 通知（`.notices`）在手機改從上面出現。桌機的右下角是空的，390px 的右下角是輸入框加
+   送出鍵，而 `.shelf`（z-index 30）比 `.notices`（20）高——「已中止 1 個回合」這種通知
+   於是蓋在送出鍵上、下半截還被圖片暫存那條 bar 切掉（2026-09-08 於 390px 實測）。
+   改成貼上緣、跨滿寬度，並抬到 80（高於 `.shelf` 的 30，低於 modal 的 900）。 */
+@media (width <= 640px) {
+  .notices {
+    top: calc(env(safe-area-inset-top) + 8px);
+    right: 8px;
+    bottom: auto;
+    left: 8px;
+    z-index: 80;
+    max-width: none;
+  }
+}
+
 /* 專案的 git 工具列（`GitBar`）在 390px 排不下：`commit / push / pull` 被右邊界切掉，
    而整條 `.context-bar` 不能自己捲——`.issues-pop` 是絕對定位在 `.issues-bar` 裡，任何
    `overflow` 祖先都會把那個泡泡剪掉。所以捲的是 git 這一段自己。 */
