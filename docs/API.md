@@ -1451,13 +1451,15 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
  "reviewer": {"identity": "cc2", "model": null}}
 ```
 
-三個 key 同一個形狀 `{"kind"?, "model"?, "effort"?, "fast"?, "identity"?, "apply"?}`。
-省略一個欄位 = 不動；`model` / `effort` / `identity` 送 `null` = 清成該 kind 的預設。
+三個 key 同一個形狀 `{"kind"?, "model"?, "effort"?, "fast"?, "identity"?, "apply"?}`；
+`workers` 多一個 `count`（併行數）。省略一個欄位 = 不動；`model` / `effort` / `identity` 送 `null` = 清成該 kind 的預設。
+回應是 `{"applied": "now" | "next_batch"}`。
 
 | 欄位 | 行為 |
 |---|---|
 | `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（下一批執行者、reopen 重建的成員都照它），並更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員重啟（進行中的工作會斷），預設 `next` 等重啟或換批 |
 | `kind` | **換一個 bot**：同名、同 cwd 建新 kind 的成員，舊的停掉並軟刪（訊息保留），未做完的 task 跟著搬，新成員直接啟動。`apply` 對它沒有意義。詳見 SPEC-team §7.6 |
+| `count`（只有 `workers`，2026-09-08） | 併行數 1–4（其他值 400）。**改大**當場建並啟動 `dev-(舊n+1)`…`dev-新n`，接著立刻把佇列裡的 task 補上去 → `{"applied":"now"}`。**改小**只寫進 `roles_json`，下一批執行者才生效，多出來的做完手上那筆就不再被派 → `{"applied":"next_batch"}` |
 
 錯誤：kind 未安裝 / `effort` 對不上該 kind → `400`；`identity` 不存在 → `404 {"error":"not_found","what":"identity"}`，
 身分的 kind 對不上 → `400`；這隊沒有 reviewer 而送了 `reviewer` → `400`；

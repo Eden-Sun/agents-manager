@@ -324,7 +324,9 @@ pub fn parse_block(text: &str) -> Result<Value, String> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchItem {
-    pub to: String,
+    /// Whom the PM named, if it named anyone. `None` — the normal case since §4.5 became a
+    /// worker pool — means "whichever executor is free next".
+    pub to: Option<String>,
     pub title: String,
     pub brief: String,
     pub files: Vec<String>,
@@ -373,11 +375,13 @@ impl Action {
                     let to = s(t, "to");
                     let title = s(t, "title");
                     let brief = s(t, "brief");
-                    if to.is_empty() || brief.is_empty() {
-                        return Err("每筆 task 都需要 to 與 brief".into());
+                    // §4.5: `to` is optional — the daemon assigns from the pool. Naming an
+                    // executor still works, and still means that one and no other.
+                    if brief.is_empty() {
+                        return Err("每筆 task 都需要 brief".into());
                     }
                     out.push(DispatchItem {
-                        to,
+                        to: Some(to).filter(|t| !t.is_empty()),
                         title: if title.is_empty() { "task".into() } else { title },
                         brief,
                         files: list(t, "files"),
@@ -822,8 +826,17 @@ async fn emit_task(app: &Arc<App>, task_id: &str) {
     }
 }
 
+/// The executor a task belongs to. Only a task still waiting in the queue for a free slot
+/// (§4.5) has none, and every caller of this is past that point — a relay with no recipient
+/// would be dropped silently, so this is an error rather than an empty string.
+fn task_owner(t: &db::TeamTask) -> LcResult<&str> {
+    t.worker_bot_id
+        .as_deref()
+        .ok_or_else(|| LcError::Upstream(format!("task t{} has no executor yet", t.seq)))
+}
+
 /// The task a worker is currently on. The DB's partial unique index guarantees there is at
-/// most one (§4.5 dispatch cap).
+/// most one — that is what makes `workers.count` a parallelism limit (§4.5).
 async fn open_task_of(app: &Arc<App>, team_id: &str, worker: &str) -> LcResult<Option<db::TeamTask>> {
     sqlx::query_as::<_, db::TeamTask>(
         "SELECT * FROM team_tasks WHERE team_id = ? AND worker_bot_id = ?
@@ -1023,7 +1036,8 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let names: Vec<String> = ctx.workers().iter().map(|w| ctx.short(w)).collect();
     let text = format!(
         "Issue #{n}「{title}」。全文在 `.agents-manager/team/ISSUE.md`（在你的 cwd 內）。\
-         目前有 {k} 位執行者可派：{who}。請先讀取 `.agents-manager/team/ISSUE.md` 與 `TEAM.md` 再派工。",
+         併行數 {k}（執行者：{who}）——`dispatch` 不用指定 `to`，派幾筆都可以，超過併行數的會排隊。\
+         請先讀取 `.agents-manager/team/ISSUE.md` 與 `TEAM.md` 再派工。",
         n = ctx.team.issue_number,
         title = ctx.team.issue_title,
         k = names.len(),
@@ -1094,6 +1108,10 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
         return Ok(false);
     }
     ctx.check_layout()?;
+    // 0. §4.5: give any free executor the next queued task. This is the one place the pool
+    //    refills, so it has to run before the states below move a task into a terminal one —
+    //    and again on the next sweep, which is what `changed` below buys.
+    fill_workers(app, &ctx).await?;
     let tasks = issue_tasks(app, team_id, ctx.issue_id()).await?;
 
     // 1. a reported task goes to review, or — with no reviewer — straight to the merge queue.
@@ -1127,7 +1145,7 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
                     integ = ctx.team.branch,
                     report = t.last_report.clone().unwrap_or_default(),
                 );
-                enqueue(app, team_id, Some(&t.worker_bot_id), &rev.id, Some(&t.id), "review", text).await?;
+                enqueue(app, team_id, t.worker_bot_id.as_deref(), &rev.id, Some(&t.id), "review", text).await?;
                 changed = true;
             }
         }
@@ -1147,6 +1165,7 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
         if !merge_one(app, &ctx, &t).await? {
             return Ok(false); // paused
         }
+        // A merge frees a slot, so the next sweep's `fill_workers` has something to do.
         changed = true;
     }
     Ok(changed)
@@ -1231,7 +1250,7 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
                 seq = t.seq,
                 files = if files.is_empty() { "見 git 輸出".into() } else { files.join("、") },
             );
-            enqueue(app, &ctx.team.id, None, &t.worker_bot_id, Some(&t.id), "rebase", text).await?;
+            enqueue(app, &ctx.team.id, None, task_owner(&t)?, Some(&t.id), "rebase", text).await?;
             Ok(true)
         }
     }
@@ -1416,9 +1435,17 @@ async fn consecutive_repairs(app: &Arc<App>, team_id: &str, bot_id: &str) -> i64
 
 // ---------------------------------------------------------------- PM
 
+/// §4.5 — the PM hands over a batch of tasks; the daemon decides who runs them and when.
+///
+/// Two halves, deliberately separate. **Intake** writes every item as a `queued` row (with a
+/// worker only when the PM named one) and nothing else: no branch, no relay. **Fill**
+/// ([`fill_workers`]) is what actually starts work, and it runs whenever a slot might have
+/// opened. That split is why the PM may dispatch ten tasks against a parallelism of two —
+/// eight simply wait — and why `gate:dispatch` can stop between "the plan is recorded" and
+/// "the executors are told".
 async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchItem>) -> LcResult<()> {
     let mut rejected: Vec<String> = Vec::new();
-    let mut created: Vec<(String, String)> = Vec::new(); // (task_id, worker short)
+    let mut created: Vec<String> = Vec::new(); // task shorthand (`t3`), for the gate note
     let existing = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
     // `team_tasks_seq` is unique per **team**, not per issue: the second issue's first task
     // must continue the numbering (t2, t3…) or the INSERT below collides with t1 of the
@@ -1426,32 +1453,41 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
     let mut next_seq = db::team_tasks(&app.db, &ctx.team.id).await.map_err(up)?.iter().map(|t| t.seq).max().unwrap_or(0);
     // §6.3: overlapping `files` are a warning to the PM, never a refusal.
     let mut overlaps: Vec<String> = Vec::new();
+    // The same brief twice inside one issue is a loop, whoever it was aimed at (§4.5). Since
+    // the daemon now picks the executor, "same brief to the same worker" would no longer
+    // catch the PM re-sending its whole plan — the brief alone is the identity.
+    let mut briefs: Vec<String> = existing
+        .iter()
+        .map(|t| t.brief.trim().to_string())
+        .collect();
 
     for it in items {
-        let want = it.to.trim().trim_start_matches('@').to_ascii_lowercase();
-        let Some(worker) = ctx
-            .workers()
-            .into_iter()
-            .find(|w| {
-                w.id == it.to || w.name.to_ascii_lowercase() == want || ctx.short(w).to_ascii_lowercase() == want
-            })
-            .cloned()
-        else {
-            rejected.push(format!("`{}` 不是這個 team 的執行者", it.to));
-            continue;
+        // A named executor is still honoured — but a busy one is now a queue to join, not a
+        // refusal: the task simply waits for *that* worker instead of any worker.
+        let worker = match &it.to {
+            None => None,
+            Some(to) => {
+                let want = to.trim().trim_start_matches('@').to_ascii_lowercase();
+                let Some(w) = ctx
+                    .workers()
+                    .into_iter()
+                    .find(|w| {
+                        w.id == *to || w.name.to_ascii_lowercase() == want || ctx.short(w).to_ascii_lowercase() == want
+                    })
+                    .cloned()
+                else {
+                    rejected.push(format!("`{to}` 不是這個 team 的執行者"));
+                    continue;
+                };
+                Some(w)
+            }
         };
-        // §4.5 dispatch cap: one open task per worker.
-        if open_task_of(app, &ctx.team.id, &worker.id).await?.is_some() {
-            rejected.push(format!("`{}` 還有未完成的 task", ctx.short(&worker)));
-            continue;
-        }
-        // §4.5: the same brief to the same worker twice is a loop, not a plan.
-        if existing.iter().any(|t| t.worker_bot_id == worker.id && t.brief.trim() == it.brief.trim()) {
-            note(app, &ctx.team.id, json!({"action": "pm_repeat", "to": ctx.short(&worker), "brief": it.brief}))
-                .await?;
+        if briefs.iter().any(|b| b == it.brief.trim()) {
+            note(app, &ctx.team.id, json!({"action": "pm_repeat", "brief": it.brief})).await?;
             pause(app, &ctx.team, "pm_repeat").await?;
             return Ok(());
         }
+        briefs.push(it.brief.trim().to_string());
         for other in existing.iter().filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str())) {
             let of: Vec<String> = serde_json::from_str(&other.files_json).unwrap_or_default();
             for f in &it.files {
@@ -1462,22 +1498,15 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         }
 
         next_seq += 1;
-        let short = ctx.short(&worker);
-        let branch = team::task_branch(&ctx.team.branch, next_seq, &short);
-        // §6.2: cut from the integration branch **now**, so this task already contains
-        // everything merged before it.
-        let worker_wt = ctx.wt(&worker)?;
-        if let Err(e) = tg::checkout_task_branch(app, ctx.host(), &worker_wt, &branch, &ctx.team.branch).await {
-            note(app, &ctx.team.id, json!({"action": "branch_failed", "branch": branch, "error": e.to_string()}))
-                .await?;
-            pause(app, &ctx.team, "upstream").await?;
-            return Ok(());
-        }
+        // The branch **name** is settled now so the row is complete and the PM can be told
+        // about it; the branch itself is cut in `fill_workers`, at the moment the task
+        // actually starts, so §6.2 still holds (it contains everything merged before it).
+        let branch = team::task_branch(&ctx.team.branch, next_seq);
         let task_id = db::ulid();
         let now = db::now();
         sqlx::query(
-            "INSERT INTO team_tasks (id, team_id, issue_id, seq, title, brief, files_json, worker_bot_id, branch,
-               state, round, rebase_attempts, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'queued',0,0,?,?)",
+            "INSERT INTO team_tasks (id, team_id, issue_id, seq, title, brief, files_json, want_worker_bot_id,
+               branch, state, round, rebase_attempts, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'queued',0,0,?,?)",
         )
         .bind(&task_id)
         .bind(&ctx.team.id)
@@ -1486,7 +1515,7 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         .bind(&it.title)
         .bind(&it.brief)
         .bind(serde_json::to_string(&it.files).unwrap_or_else(|_| "[]".into()))
-        .bind(&worker.id)
+        .bind(worker.as_ref().map(|w| w.id.clone()))
         .bind(&branch)
         .bind(&now)
         .bind(&now)
@@ -1494,20 +1523,7 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         .await
         .map_err(up)?;
         emit_task(app, &task_id).await;
-
-        let text = format!(
-            "Task t{seq}「{title}」（分支 `{branch}` 已建好並 checkout 在你的 cwd）。\n\n{brief}\n\n\
-             相關檔案：{files}\n\
-             只在你的 cwd 工作：不要 cd 出去、不要動 ../、不要 git push、不要切換分支。\
-             每個邏輯段落 `git commit`，完成後用 `report` 回報。",
-            seq = next_seq,
-            title = it.title,
-            branch = branch,
-            brief = it.brief,
-            files = if it.files.is_empty() { "（未指定）".into() } else { it.files.join("、") },
-        );
-        enqueue(app, &ctx.team.id, Some(&pm.id), &worker.id, Some(&task_id), "dispatch", text).await?;
-        created.push((task_id, short));
+        created.push(format!("t{next_seq}"));
     }
 
     if !created.is_empty() && ctx.team.phase != "working" {
@@ -1523,10 +1539,115 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         }
         enqueue(app, &ctx.team.id, None, &pm.id, None, "note", msg).await?;
     }
-    // §4.6 gate:dispatch — hold the freshly queued relays until a human says go.
+    // §4.6 gate:dispatch — the plan is on record, but nothing has been cut or sent yet, so
+    // this is exactly where a human gets to look before the executors start moving.
     if !created.is_empty() && !gate_open(app, &ctx.team, "dispatch").await {
         let ctx2 = Ctx::load(app, &ctx.team.id).await?;
-        hold_gate(app, &ctx2, "dispatch", json!({"tasks": created.iter().map(|c| &c.1).collect::<Vec<_>>()})).await?;
+        hold_gate(app, &ctx2, "dispatch", json!({"tasks": created})).await?;
+        return Ok(());
+    }
+    let ctx = Ctx::load(app, &ctx.team.id).await?;
+    fill_workers(app, &ctx).await?;
+    // Tell the PM what its batch actually became — but only when the answer is not simply
+    // "all of it is running". Every note here becomes a prompt the PM has to answer, so a
+    // confirmation of what it just asked for would cost a whole turn to say nothing. The
+    // A.4 table under each batch of reports carries the same counts for free.
+    if !created.is_empty() {
+        let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+        let n = ctx.workers().len();
+        let running: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.worker_bot_id.is_some() && !["merged", "skipped", "failed"].contains(&t.state.as_str()))
+            .map(|t| {
+                let who = t.worker_bot_id.as_deref().and_then(|w| ctx.by_id(w)).map(|b| ctx.short(b)).unwrap_or_default();
+                format!("t{}→{who}", t.seq)
+            })
+            .collect();
+        let waiting = tasks.iter().filter(|t| t.worker_bot_id.is_none()).count();
+        if waiting > 0 {
+            let msg = format!(
+                "收到 {got} 筆。併行數 {n}：現在跑 {m} 筆（{who}），排隊 {waiting} 筆——排隊的會在有執行者空下來時自動派出，你不用再派一次。",
+                got = created.len(),
+                m = running.len(),
+                who = if running.is_empty() { "無".into() } else { running.join("、") },
+            );
+            enqueue(app, &ctx.team.id, None, &pm.id, None, "note", msg).await?;
+        }
+    }
+    Ok(())
+}
+
+/// §4.5 — fill the free executor slots right now, called from outside the scheduler loop:
+/// releasing `gate:dispatch`, resuming a paused team, or raising the parallelism. All three
+/// are user actions whose whole point is that work starts, so they cannot wait for the next
+/// background pass. A no-op when nothing is queued or nobody is free.
+pub async fn fill_now(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let ctx = Ctx::load(app, team_id).await?;
+    fill_workers(app, &ctx).await
+}
+
+/// §4.5 — hand queued tasks to whichever executors are free, in `seq` order.
+///
+/// This is the whole of the pool: `workers.count` executors exist, the DB's
+/// `team_tasks_one_open_per_worker` index means each can hold exactly one unfinished task, so
+/// "free" is simply "has no open task". Called after intake, after every task reaches a
+/// terminal state, on resume, and on each scheduler pass — always the same function, never a
+/// background loop of its own.
+async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
+    if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "paused" || ctx.team.phase == "aborting" {
+        return Ok(());
+    }
+    for worker in ctx.workers() {
+        // A worker with no live run is deliberately *not* skipped here. §9.1 says an
+        // undeliverable member is a pause, never a skip, and that is what `flush` does with
+        // the relay this loop queues. Skipping instead would leave the queue quietly starved
+        // with the team still reading as `working`.
+        if open_task_of(app, &ctx.team.id, &worker.id).await?.is_some() {
+            continue;
+        }
+        // The earliest queued task that is either unassigned or was addressed to this one.
+        let Some(t) = issue_tasks(app, &ctx.team.id, ctx.issue_id())
+            .await?
+            .into_iter()
+            .find(|t| {
+                t.state == "queued"
+                    && t.worker_bot_id.is_none()
+                    && t.want_worker_bot_id.as_deref().map(|w| w == worker.id).unwrap_or(true)
+            })
+        else {
+            continue;
+        };
+        // §6.2: cut from the integration branch **now** — at the moment the task starts, not
+        // when it was planned — so it already contains everything merged before it.
+        let worker_wt = ctx.wt(worker)?;
+        if let Err(e) = tg::checkout_task_branch(app, ctx.host(), &worker_wt, &t.branch, &ctx.team.branch).await {
+            note(app, &ctx.team.id, json!({"action": "branch_failed", "branch": t.branch, "error": e.to_string()}))
+                .await?;
+            pause(app, &ctx.team, "upstream").await?;
+            return Ok(());
+        }
+        sqlx::query("UPDATE team_tasks SET worker_bot_id = ?, updated_at = ? WHERE id = ?")
+            .bind(&worker.id)
+            .bind(db::now())
+            .bind(&t.id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+        emit_task(app, &t.id).await;
+        let files: Vec<String> = serde_json::from_str(&t.files_json).unwrap_or_default();
+        let text = format!(
+            "Task t{seq}「{title}」（分支 `{branch}` 已建好並 checkout 在你的 cwd）。\n\n{brief}\n\n\
+             相關檔案：{files}\n\
+             只在你的 cwd 工作：不要 cd 出去、不要動 ../、不要 git push、不要切換分支。\
+             每個邏輯段落 `git commit`，完成後用 `report` 回報。",
+            seq = t.seq,
+            title = t.title,
+            branch = t.branch,
+            brief = t.brief,
+            files = if files.is_empty() { "（未指定）".into() } else { files.join("、") },
+        );
+        let pm_id = ctx.pm().map(|p| p.id.clone());
+        enqueue(app, &ctx.team.id, pm_id.as_deref(), &worker.id, Some(&t.id), "dispatch", text).await?;
     }
     Ok(())
 }
@@ -1575,7 +1696,11 @@ async fn pm_done(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, summary: &str, keep_wo
     let open: Vec<String> = tasks
         .iter()
         .filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str()))
-        .map(|t| format!("t{}（{}）", t.seq, t.state))
+        .map(|t| match t.worker_bot_id {
+            // §4.5: a task nobody has picked up yet is still work the PM cannot call done.
+            None => format!("t{}（排隊中）", t.seq),
+            Some(_) => format!("t{}（{}）", t.seq, t.state),
+        })
         .collect();
     if !open.is_empty() {
         enqueue(
@@ -1699,8 +1824,20 @@ async fn task_table(app: &Arc<App>, team_id: &str) -> String {
     if tasks.is_empty() {
         return String::new();
     }
-    let rows: Vec<String> = tasks.iter().map(|t| format!("t{}「{}」= {}", t.seq, t.title, t.state)).collect();
-    format!("目前 task 狀態：{}", rows.join("；"))
+    let rows: Vec<String> = tasks
+        .iter()
+        .map(|t| match t.worker_bot_id {
+            None => format!("t{}「{}」= 排隊中", t.seq, t.title),
+            Some(_) => format!("t{}「{}」= {}", t.seq, t.title, t.state),
+        })
+        .collect();
+    // §4.5: the PM plans against the parallelism, so say what it currently is.
+    let n = Ctx::load(app, team_id).await.map(|c| c.workers().len()).unwrap_or(0);
+    let running = tasks
+        .iter()
+        .filter(|t| t.worker_bot_id.is_some() && !["merged", "skipped", "failed"].contains(&t.state.as_str()))
+        .count();
+    format!("目前 task 狀態（併行 {running}/{n}）：{}", rows.join("；"))
 }
 
 // ---------------------------------------------------------------- reviewer
@@ -1748,7 +1885,7 @@ async fn verdict(
         fix = if must_fix.is_empty() { "（未列出）".into() } else { must_fix.join("；") },
         br = task.branch,
     );
-    enqueue(app, &ctx.team.id, Some(&rev.id), &task.worker_bot_id, Some(&task.id), "rework", text).await?;
+    enqueue(app, &ctx.team.id, Some(&rev.id), task_owner(&task)?, Some(&task.id), "rework", text).await?;
     Ok(())
 }
 
@@ -1773,7 +1910,7 @@ pub async fn relay_rework_decision(
             None => String::new(),
         },
     );
-    enqueue(app, &team.id, None, &task.worker_bot_id, Some(&task.id), "rework", text).await.map(|_| ())
+    enqueue(app, &team.id, None, task_owner(task)?, Some(&task.id), "rework", text).await.map(|_| ())
 }
 
 // ---------------------------------------------------------------- deliver (§6.4, §8.1)
@@ -1999,9 +2136,9 @@ async fn hand_issue_to_pm(
         .count();
     let tail = if queued > 0 { format!("這個 issue 完成後，佇列裡還有 {queued} 個。") } else { String::new() };
     let who_line = if kept_workers {
-        format!("執行者照你的決定沿用上一個 issue 那批：{who}（共 {k} 位），他們記得先前的工作。", who = names.join("、"), k = names.len())
+        format!("執行者照你的決定沿用上一個 issue 那批：{who}（併行數 {k}），他們記得先前的工作。", who = names.join("、"), k = names.len())
     } else {
-        format!("執行者換了一批，現在可派的是：{who}（共 {k} 位）。", who = names.join("、"), k = names.len())
+        format!("執行者換了一批，現在是：{who}（併行數 {k}）。", who = names.join("、"), k = names.len())
     };
     let context_line = match context_lost {
         Some(true) => "你是重新啟動的 PM，先前的對話不在了；先讀 `.agents-manager/team/TEAM.md` 與 `ISSUE.md`。",
@@ -2377,9 +2514,9 @@ mod scenarios {
         let tasks = s.tasks().await;
         assert_eq!(tasks.len(), 2);
         let (d1, d2) = (s.bot("worker", 0).await, s.bot("worker", 1).await);
-        assert_eq!(tasks[0].worker_bot_id, d1.id);
-        assert_eq!(tasks[1].worker_bot_id, d2.id);
-        assert_eq!(tasks[0].branch, "team/i42-".to_string() + &crate::team::tid6(&s.tid) + "-t1-dev-1");
+        assert_eq!(tasks[0].worker_bot_id.as_deref(), Some(d1.id.as_str()));
+        assert_eq!(tasks[1].worker_bot_id.as_deref(), Some(d2.id.as_str()));
+        assert_eq!(tasks[0].branch, "team/i42-".to_string() + &crate::team::tid6(&s.tid) + "-t1");
         assert_eq!(tasks[0].state, "queued");
         assert_eq!(s.team().await.phase, "working", "the first dispatch moves the team to `working`");
 
@@ -2852,7 +2989,7 @@ mod scenarios {
         assert_eq!(s.e.herdr.count(), 0, "§6.4a: the team's workspace was closed");
         let branches = git(&s.e.repo, &["branch", "--list"]);
         assert!(branches.contains(&t.branch), "branches are kept: {branches}");
-        assert!(branches.contains("-t1-dev-1"));
+        assert!(branches.contains("-t1"));
         // The record survives a cleanup — that is what distinguishes it from a delete.
         assert!(db::team(&s.app().db, &s.tid).await.unwrap().is_some());
     }
@@ -2977,9 +3114,161 @@ mod scenarios {
         assert_eq!(s.pending(&pm).await.len(), 2);
     }
 
-    /// §4.5 dispatch cap — one open task per worker, and never the same brief twice.
+    /// §4.5 (2026-09-08) — the worker pool. Three tasks against a parallelism of one: the
+    /// first runs, the other two wait with nobody on them, and each is handed over — and only
+    /// then cut from the integration branch — as the one before it merges.
     #[tokio::test]
-    async fn the_dispatch_cap_refuses_seconds_and_repeats() {
+    async fn a_parallelism_of_one_runs_the_queue_one_at_a_time() {
+        let s = S::new(1, false).await;
+        s.arm().await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(
+            &pm,
+            json!({"action":"dispatch","tasks":[
+                {"title":"A","brief":"做 A"},{"title":"B","brief":"做 B"},{"title":"C","brief":"做 C"}]}),
+        )
+        .await;
+
+        let tasks = s.tasks().await;
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(
+            tasks[0].worker_bot_id.as_deref(),
+            Some(d1.id.as_str()),
+            "t1 is on the one executor"
+        );
+        assert!(
+            tasks[1].worker_bot_id.is_none() && tasks[2].worker_bot_id.is_none(),
+            "t2/t3 are queued"
+        );
+        assert!(
+            tasks.iter().all(|t| t.want_worker_bot_id.is_none()),
+            "the PM named nobody"
+        );
+        let branches = git(&s.e.repo, &["branch", "--list"]);
+        assert!(branches.contains(&tasks[0].branch), "t1's branch is cut");
+        assert!(
+            !branches.contains(&tasks[1].branch),
+            "t2's branch waits until t2 starts"
+        );
+
+        // t1 through to merged; the freed slot picks up t2 in the same sweep.
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        s.reply(
+            &d1,
+            json!({"action":"report","status":"done","summary":"好了"}),
+        )
+        .await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        let tasks = s.tasks().await;
+        assert_eq!(tasks[0].state, "merged");
+        assert_eq!(
+            tasks[1].worker_bot_id.as_deref(),
+            Some(d1.id.as_str()),
+            "t2 was handed over automatically"
+        );
+        assert!(tasks[2].worker_bot_id.is_none(), "t3 is still queued");
+        assert!(
+            git(&s.e.repo, &["branch", "--list"]).contains(&tasks[1].branch),
+            "cut now, not at dispatch"
+        );
+        // §6.2: cut from the integration branch *now*, so it already carries t1's merge.
+        assert_eq!(git(&s.wt("dev-1"), &["show", "HEAD:a.txt"]), "v1");
+    }
+
+    /// §4.5 — a task the PM addressed to a busy executor waits for **that** executor, even
+    /// with another one free.
+    #[tokio::test]
+    async fn a_named_task_waits_for_its_own_executor() {
+        let s = S::new(2, false).await;
+        s.arm().await;
+        let pm = s.bot("pm", 0).await;
+        let (d1, d2) = (s.bot("worker", 0).await, s.bot("worker", 1).await);
+        s.reply(
+            &pm,
+            json!({"action":"dispatch","tasks":[
+                {"to":"dev-1","title":"A","brief":"做 A"},{"to":"dev-1","title":"B","brief":"做 B"}]}),
+        )
+        .await;
+        let tasks = s.tasks().await;
+        assert_eq!(tasks[0].worker_bot_id.as_deref(), Some(d1.id.as_str()));
+        assert!(
+            tasks[1].worker_bot_id.is_none(),
+            "dev-2 must not pick up dev-1's task"
+        );
+        assert_eq!(tasks[1].want_worker_bot_id.as_deref(), Some(d1.id.as_str()));
+        assert!(open_task_of(s.app(), &s.tid, &d2.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// §8.3 — `done` counts the queue too: a task nobody has started yet is still open work.
+    #[tokio::test]
+    async fn done_is_refused_while_tasks_are_still_queued() {
+        let s = S::new(1, false).await;
+        s.arm().await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"title":"A","brief":"做 A"},{"title":"B","brief":"做 B"}]}))
+            .await;
+        // Take the running one out of the way; the queued one alone must still block `done`.
+        set_task_state(s.app(), &s.tasks().await[0].id, "merged")
+            .await
+            .unwrap();
+        s.reply(&pm, json!({"action":"done","summary":"完成"}))
+            .await;
+        assert_ne!(s.team().await.phase, "finishing", "the queue is not empty");
+        let p = s.pending(&pm).await;
+        let last: Value = serde_json::from_str(&p.last().unwrap().payload_json).unwrap();
+        let text = last["text"].as_str().unwrap();
+        assert!(
+            text.contains("還不能 `done`") && text.contains("排隊中"),
+            "{text}"
+        );
+    }
+
+    /// §4.4 — `to` is optional now; `brief` never was.
+    #[test]
+    fn dispatch_parses_without_a_recipient_but_not_without_a_brief() {
+        let a = Action::parse(
+            "pm",
+            &json!({"action":"dispatch","tasks":[{"title":"A","brief":"做 A"}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            Action::Dispatch(vec![DispatchItem {
+                to: None,
+                title: "A".into(),
+                brief: "做 A".into(),
+                files: vec![]
+            }])
+        );
+        let named = Action::parse(
+            "pm",
+            &json!({"action":"dispatch","tasks":[{"to":"dev-1","brief":"b"}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            named,
+            Action::Dispatch(vec![DispatchItem {
+                to: Some("dev-1".into()),
+                title: "task".into(),
+                brief: "b".into(),
+                files: vec![]
+            }])
+        );
+        assert!(Action::parse(
+            "pm",
+            &json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A"}]})
+        )
+        .unwrap_err()
+        .contains("brief"));
+    }
+
+    /// §4.5 — a named executor that is busy is a queue to join, not a refusal; an unknown
+    /// one is still refused; the same brief twice is still a loop.
+    #[tokio::test]
+    async fn a_named_busy_worker_queues_and_a_repeat_still_pauses() {
         let s = S::new(1, false).await;
         let pm = s.bot("pm", 0).await;
         let one = |brief: &str| {
@@ -2988,20 +3277,19 @@ mod scenarios {
         s.reply(&pm, one("做 A")).await;
         assert_eq!(s.tasks().await.len(), 1);
 
-        // A second task for a busy worker is refused, and the PM is told why.
+        // A second task for the same busy worker is queued behind the first, not rejected.
         s.reply(&pm, one("做 B")).await;
-        assert_eq!(s.tasks().await.len(), 1, "still one");
-        let p = s.pending(&pm).await;
-        let last: Value = serde_json::from_str(&p.last().unwrap().payload_json).unwrap();
-        assert!(last["text"].as_str().unwrap().contains("還有未完成的 task"));
-        // An unknown recipient is refused the same way, not silently dropped.
+        let tasks = s.tasks().await;
+        assert_eq!(tasks.len(), 2, "the second one is on the queue");
+        assert!(tasks[1].worker_bot_id.is_none(), "nobody is on it yet");
+        assert_eq!(tasks[1].want_worker_bot_id.as_deref(), Some(s.bot("worker", 0).await.id.as_str()));
+        // An unknown recipient is refused, not silently dropped.
         s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-9","title":"C","brief":"做 C"}]})).await;
         let p = s.pending(&pm).await;
         let last: Value = serde_json::from_str(&p.last().unwrap().payload_json).unwrap();
         assert!(last["text"].as_str().unwrap().contains("dev-9"));
 
-        // The identical brief again, once the worker is free, is a loop → pause.
-        set_task_state(s.app(), &s.tasks().await[0].id, "merged").await.unwrap();
+        // The identical brief again is a loop → pause, whoever it was aimed at.
         s.reply(&pm, one("做 A")).await;
         let t = s.team().await;
         assert_eq!(t.pause_reason.as_deref(), Some("pm_repeat"));

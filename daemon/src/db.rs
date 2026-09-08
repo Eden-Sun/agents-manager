@@ -150,7 +150,14 @@ CREATE INDEX IF NOT EXISTS team_issues_open ON team_issues(team_id, state) WHERE
 CREATE TABLE IF NOT EXISTS team_tasks (
   id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
   seq INTEGER NOT NULL, title TEXT NOT NULL, brief TEXT NOT NULL, files_json TEXT NOT NULL DEFAULT '[]',
-  worker_bot_id TEXT NOT NULL REFERENCES bots(id), branch TEXT NOT NULL,
+  -- SPEC-team §4.5 (2026-09-08): NULL = queued but not yet assigned. The executors are a
+  -- pool of `workers.count` slots, so a task waits in the queue until one of them is free.
+  worker_bot_id TEXT REFERENCES bots(id),
+  -- The executor the PM *named*, when it named one. Separate from `worker_bot_id` because a
+  -- named-but-busy executor is a queue to join, and `team_tasks_one_open_per_worker` would
+  -- refuse a second open row carrying the same `worker_bot_id`.
+  want_worker_bot_id TEXT REFERENCES bots(id),
+  branch TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('queued','working','reported','reviewing','changes_requested','exhausted',
                                        'blocked_by_worker','rebasing','merging','merged','skipped','failed')),
   round INTEGER NOT NULL DEFAULT 0, rebase_attempts INTEGER NOT NULL DEFAULT 0,
@@ -289,6 +296,8 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // which the backfill below fills in.
         ("team_tasks", "issue_id", "ALTER TABLE team_tasks ADD COLUMN issue_id TEXT"),
         ("team_events", "issue_id", "ALTER TABLE team_events ADD COLUMN issue_id TEXT"),
+        // SPEC-team §4.5 (2026-09-08): whom the PM asked for, when it asked for anyone.
+        ("team_tasks", "want_worker_bot_id", "ALTER TABLE team_tasks ADD COLUMN want_worker_bot_id TEXT"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -400,6 +409,62 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL")
             .execute(&mut *conn)
             .await?;
+    }
+    // SPEC-team §4.5 (2026-09-08): the executors became a pool of `workers.count` parallel
+    // slots, so a dispatched task can sit in the queue with **no** worker yet. That needs
+    // `worker_bot_id` NULL-able, which SQLite cannot do in place — rebuild the table.
+    // `team_tasks_one_open_per_worker` stays a partial UNIQUE on the column: NULL is exempt
+    // from UNIQUE in SQLite, which is exactly the "many unassigned, one open each" rule.
+    {
+        let mut conn = pool.acquire().await?;
+        recover_stale_rebuild(&mut conn, "team_tasks").await?;
+        let notnull: Option<i64> = sqlx::query_scalar(
+            "SELECT \"notnull\" FROM pragma_table_info('team_tasks') WHERE name = 'worker_bot_id'",
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+        if notnull == Some(1) {
+            tracing::info!("migrating team_tasks.worker_bot_id NOT NULL -> nullable");
+            rebuild_table(
+                &mut conn,
+                "team_tasks",
+                &[
+                    "DROP TABLE IF EXISTS team_tasks_new",
+                    "CREATE TABLE team_tasks_new (
+                       id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
+                       seq INTEGER NOT NULL, title TEXT NOT NULL, brief TEXT NOT NULL,
+                       files_json TEXT NOT NULL DEFAULT '[]',
+                       worker_bot_id TEXT REFERENCES bots(id), want_worker_bot_id TEXT,
+                       branch TEXT NOT NULL,
+                       state TEXT NOT NULL CHECK (state IN ('queued','working','reported','reviewing','changes_requested','exhausted',
+                                                            'blocked_by_worker','rebasing','merging','merged','skipped','failed')),
+                       round INTEGER NOT NULL DEFAULT 0, rebase_attempts INTEGER NOT NULL DEFAULT 0,
+                       last_report TEXT, last_verdict TEXT, merge_sha TEXT,
+                       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, issue_id TEXT)",
+                    "INSERT INTO team_tasks_new (id, team_id, seq, title, brief, files_json, worker_bot_id,
+                       want_worker_bot_id, branch, state, round, rebase_attempts, last_report, last_verdict,
+                       merge_sha, created_at, updated_at, issue_id)
+                       SELECT id, team_id, seq, title, brief, files_json, worker_bot_id,
+                              want_worker_bot_id, branch, state, round, rebase_attempts, last_report, last_verdict,
+                              merge_sha, created_at, updated_at, issue_id
+                         FROM team_tasks",
+                    "DROP TABLE team_tasks",
+                    "ALTER TABLE team_tasks_new RENAME TO team_tasks",
+                ],
+            )
+            .await?;
+            sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS team_tasks_seq ON team_tasks(team_id, seq)",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS team_tasks_one_open_per_worker ON team_tasks(worker_bot_id)
+                   WHERE state NOT IN ('merged','skipped','failed')",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
     }
     migrate_bots_kind_check(&pool).await?;
     migrate_turn_status_check(&pool).await?;
@@ -792,7 +857,10 @@ pub struct TeamTask {
     pub title: String,
     pub brief: String,
     pub files_json: String,
-    pub worker_bot_id: String,
+    /// Which executor is on it. `None` = queued, waiting for a free slot (§4.5).
+    pub worker_bot_id: Option<String>,
+    /// The executor the PM named in its `dispatch`, if it named one. `None` = any (§4.5).
+    pub want_worker_bot_id: Option<String>,
     pub branch: String,
     pub state: String,
     pub round: i64,
@@ -1644,6 +1712,87 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// SPEC-team §4.5 (2026-09-08) — a database written with the old `worker_bot_id NOT NULL`
+    /// opens with the column nullable, the two indexes back in place, and its rows intact.
+    #[tokio::test]
+    async fn team_tasks_worker_becomes_nullable_and_keeps_its_rows() {
+        let dir = tmp_dir();
+        let path = dir.join("old.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            seed(&pool).await;
+            // Put the table back the way it was before this migration existed.
+            sqlx::query("DROP TABLE team_tasks")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "CREATE TABLE team_tasks (
+                   id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id), seq INTEGER NOT NULL,
+                   title TEXT NOT NULL, brief TEXT NOT NULL, files_json TEXT NOT NULL DEFAULT '[]',
+                   worker_bot_id TEXT NOT NULL, branch TEXT NOT NULL, state TEXT NOT NULL,
+                   round INTEGER NOT NULL DEFAULT 0, rebase_attempts INTEGER NOT NULL DEFAULT 0,
+                   last_report TEXT, last_verdict TEXT, merge_sha TEXT,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
+                 VALUES ('t1','tm1',1,'A','做 A','w1','b-t1','working',?,?)",
+            )
+            .bind(now())
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+        let pool = open(&path).await.unwrap();
+        let notnull: i64 = sqlx::query_scalar(
+            "SELECT \"notnull\" FROM pragma_table_info('team_tasks') WHERE name = 'worker_bot_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(notnull, 0, "the column is nullable now");
+        let rows = team_tasks(&pool, "tm1").await.unwrap();
+        assert_eq!(rows.len(), 1, "the row survived the rebuild");
+        assert_eq!(rows[0].worker_bot_id.as_deref(), Some("w1"));
+        assert!(
+            rows[0].want_worker_bot_id.is_none(),
+            "the added column reads as NULL"
+        );
+
+        // Two unassigned tasks do not collide: NULL is exempt from UNIQUE in SQLite, which is
+        // exactly the "many queued, one open each" rule the pool needs.
+        for (id, seq) in [("t2", 2), ("t3", 3)] {
+            sqlx::query(
+                "INSERT INTO team_tasks (id, team_id, seq, title, brief, branch, state, created_at, updated_at)
+                 VALUES (?,'tm1',?,'B','做 B','b','queued',?,?)",
+            )
+            .bind(id)
+            .bind(seq)
+            .bind(now())
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // …while one-open-task-per-worker still holds for the assigned ones.
+        assert!(
+            sqlx::query(
+                "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
+                 VALUES ('t4','tm1',4,'C','做 C','w1','b','queued','x','x')",
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "w1 already has an open task"
+        );
     }
 
     /// The team tables behave: FK to the project, per-team task ordering, the
