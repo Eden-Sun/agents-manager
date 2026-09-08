@@ -19,6 +19,19 @@ import { totalUnread } from './store/unread'
 const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title).replace(/^\(\d+\+?\)\s*/, '')
 
 /**
+ * 抽屜蓋在主面板上，所以「點下去會換頁」的東西點完就要收起來。選取真的變了那一半由
+ * `App` 裡的 render 期比較負責；這裡補的是選取**沒**變的那一半——開抽屜看一眼、再點回
+ * 本來就選著的那顆 bot（最常見的一種點法），`selectBot` 什麼都沒改，抽屜就賴在原地。
+ *
+ * 用 capture 是因為列上的收合鍵與 `⋯` 選單會 `stopPropagation()`，冒泡階段收不到；
+ * 它們與改名、＋ 都不是導覽，所以另外列一組排除。會在抽屜裡開對話框的按鈕（新增 Bot、
+ * 刪除專案…）一樣要留著抽屜：抽屜一收，`inert` 就把那張對話框一起關進去了。
+ */
+const DRAWER_NAV = '.bot-row, .project-head, .team-node-btn'
+const DRAWER_STAY =
+  '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions, .team-node-chev'
+
+/**
  * 未讀的兩件全域雜事：分頁標題的 `(N)`，以及「視窗回到前景 = 現在開著的那個對話被讀到了」。
  *
  * 前景這一段一定要有：使用者常常是把分頁切走、回來才看到回覆。沒有它的話，人在畫面前面
@@ -141,6 +154,8 @@ export default function App() {
   const shellView = useStore((s) => s.shellView)
   // 只為了下面那個 key：ChatPanel 自己從 store 讀 selectedBotId。
   const botId = useStore((s) => s.selectedBotId)
+  // 設定面板開在主面板那一側（`ChatPanel` 裡貼著齒輪），所以它一開，抽屜也該讓開。
+  const settingsBotId = useStore((s) => s.settingsBotId)
   const [drawer, setDrawer] = useState(false)
   // Below this width the sidebar is an off-canvas drawer (styles.css `@media (width <= 1024px)`);
   // above it, it is a plain column that is always on screen and must stay reachable.
@@ -161,7 +176,7 @@ export default function App() {
   // Compared during render rather than from an effect: that is React's own answer for
   // "adjust state when a prop changes", and it avoids the extra paint of the stale open
   // drawer that a post-render effect would leave on screen for a frame.
-  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${teamId ?? ''}|${teamLaunch ? `${teamLaunch.projectId}:${teamLaunch.issueNumber}` : ''}|${shellView ? `${shellView.host}:${shellView.paneId}` : ''}`
+  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${teamId ?? ''}|${teamLaunch ? `${teamLaunch.projectId}:${teamLaunch.issueNumber}` : ''}|${shellView ? `${shellView.host}:${shellView.paneId}` : ''}|${settingsBotId ?? ''}`
   const [lastNav, setLastNav] = useState({ selection, isMobile })
   if (lastNav.selection !== selection || lastNav.isMobile !== isMobile) {
     setLastNav({ selection, isMobile })
@@ -222,6 +237,11 @@ export default function App() {
         // On desktop it is a visible column, so it must never be inert.
         inert={isMobile && !drawer}
         {...(drawerOpen ? { role: 'dialog' as const, 'aria-modal': true, 'aria-label': '側邊欄' } : {})}
+        onClickCapture={(e) => {
+          if (!drawerOpen || !(e.target instanceof Element)) return
+          if (!e.target.closest(DRAWER_NAV) || e.target.closest(DRAWER_STAY)) return
+          setDrawer(false)
+        }}
       >
         <Sidebar />
       </aside>
