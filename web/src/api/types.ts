@@ -290,6 +290,11 @@ export interface Run {
   status_line: string | null
   /** statusLine 的完整原始資料——網頁版顯示的就是它，不受終端寬度壓縮。 */
   status: StatusInfo | null
+  /**
+   * claude 已經把新版下載好、等重啟才會換過去時的那句話
+   * （`Update installed · Restart to update`）。沒有更新在等就是 null。
+   */
+  update_notice: string | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string
@@ -985,7 +990,8 @@ export interface TeamDetail extends Team {
   base_ref: string
   base_sha: string
   worktree_root: string
-  workers: TeamWorkerSpec | null
+  /** `GET /teams/:id` 的 `roles`：三個角色各自是用什麼設定建出來的。 */
+  roles: TeamRoles
 }
 
 /** SPEC-team §10.4 `GET /api/teams/:id/events` 的一則。 */
@@ -1037,17 +1043,57 @@ export interface PatchTeamInput {
   budget?: Partial<TeamBudget>
   supervised?: boolean
   deliver?: TeamDeliver
-  /** 改執行者的模型設定；`apply: 'now'` 會重啟現有的 worker，預設只對下一批生效。 */
-  workers?: { model?: string | null; effort?: string | null; fast?: boolean; apply?: 'next' | 'now' }
+  /** SPEC-team §10.5：三個角色同一個形狀，各自獨立送。 */
+  workers?: TeamRolePatch
+  pm?: TeamRolePatch
+  reviewer?: TeamRolePatch
 }
 
-/** `roles_json.workers.spec`：執行者是用什麼設定建出來的（`GET /teams/:id` 的 `roles`）。 */
+/**
+ * 一個角色可改的欄位。省略 = 不動，`null` = 清成該 kind 的預設。
+ *
+ * `kind` 是特別的：成員跑哪個 CLI 是開 pane 時決定的，所以改 kind 一定是**換一個 bot**
+ * （SPEC-team §7.6），`apply` 管不到它；該成員正在跑一個 turn 時 daemon 回 409 `member busy`。
+ */
+export interface TeamRolePatch {
+  kind?: BotKind
+  model?: string | null
+  effort?: string | null
+  fast?: boolean
+  identity?: string | null
+  apply?: 'next' | 'now'
+}
+
+/** `roles_json.<role>`：那個角色是用什麼設定建出來的（`GET /teams/:id` 的 `roles`）。 */
 export interface TeamWorkerSpec {
   kind: BotKind
   model: string | null
   effort: string | null
   fast: boolean
   identity: string | null
+}
+
+/** 三個角色的 spec；`null` = 這隊沒有這個角色（例如建立時沒選 reviewer）。 */
+export interface TeamRoles {
+  pm: TeamWorkerSpec | null
+  workers: TeamWorkerSpec | null
+  reviewer: TeamWorkerSpec | null
+}
+
+/** `PatchTeamInput` 的 key，也是 daemon `roles_json` 的 key。 */
+export type TeamRoleKey = 'pm' | 'workers' | 'reviewer'
+
+export const TEAM_ROLE_KEYS: readonly TeamRoleKey[] = ['pm', 'workers', 'reviewer']
+
+export const TEAM_ROLE_KEY_LABEL: Record<TeamRoleKey, string> = {
+  pm: 'PM',
+  workers: '執行者',
+  reviewer: 'Reviewer',
+}
+
+/** 側欄成員列的 `bot.team.role` → `roles_json` 的 key。 */
+export function roleKeyOfMember(role: TeamRole): TeamRoleKey {
+  return role === 'worker' ? 'workers' : role
 }
 
 /** SPEC-team §10.7 `POST /api/teams/:id/close-issue` 的回應。 */

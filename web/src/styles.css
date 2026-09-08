@@ -4379,6 +4379,44 @@ p.project-quota-hidden {
   text-decoration: line-through;
 }
 
+/* claude 有新版等著重啟套用。跟 `.host-badge` 同一套 chip 尺寸，但它點得下去，
+   所以多給一點左右內距與 hover。顏色沿用 accent-soft，不另開一組。 */
+.update-badge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 0 7px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.update-badge:hover:not(:disabled) {
+  border-color: var(--accent-ink);
+}
+
+.update-badge.busy,
+.update-badge:disabled {
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
+  color: var(--text-faint);
+  cursor: default;
+}
+
+/* 側欄只放一個點——真正的按鈕在 header。 */
+.bot-update-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-ink);
+  cursor: help;
+}
+
 .disclosure-note {
   margin-left: auto;
   font-size: 11px;

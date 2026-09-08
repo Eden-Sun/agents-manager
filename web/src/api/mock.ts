@@ -56,6 +56,8 @@ interface MockRun {
   status: Record<string, unknown> | null
   /** pane 上那一行被終端寬度壓縮過的原文，UI 拿它當 tooltip / fallback。 */
   status_line: string | null
+  /** claude 有新版下載好、等重啟才會套用（`runs.update_notice`）。null = 沒有。 */
+  update_notice: string | null
   started_at: string
   ended_at: string | null
 }
@@ -1766,6 +1768,7 @@ export class MockTransport implements Transport {
       transcript_path: null,
       status: null,
       status_line: null,
+      update_notice: null,
       started_at: now(),
       ended_at: null,
     }
@@ -1781,6 +1784,8 @@ export class MockTransport implements Transport {
       if (this.bot(botId).kind === 'claude') {
         run.status = claudeStatusJson(this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? '~')
         run.status_line = 'tony… | OP5 | 26% | 5h 85% | 7d 27% | $18.67'
+        // `am-claude` 帶著「有新版等著重啟」，header 的 UpdateBadge 與側欄小點才有東西可截。
+        if (this.bot(botId).name === 'am-claude') run.update_notice = 'Update installed · Restart to update'
       }
       this.emitBotStatus(botId)
       this.addMessage({
