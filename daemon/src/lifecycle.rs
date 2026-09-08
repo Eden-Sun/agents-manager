@@ -888,7 +888,15 @@ PATH 上的 herdr 會自動幫你補，但自己寫對比較清楚。\n\
 - **開 pane**：`herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。不要省略目標——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
 - **帳號與 hook 會自動帶進子 pane**（`CLAUDE_CONFIG_DIR`、`AM_*`），不要自己覆蓋這些環境變數。\n\
 - **不要 `git stash` 或 `--autostash`**：同一個工作樹上可能有別的 agent 還沒提交的改動。\n\
-- 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示），做完請自己把它的 pane 收掉。"
+- 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示），做完請自己把它的 pane 收掉。\n\
+\n\
+瀏覽器的用法：\n\
+\n\
+- **一律用 ego lite**（`ego-browser` skill），不要開 Chrome、不要用其他 headless / 內建的瀏覽器工具。\n\
+- **一個 bot 最多一個分頁**（你和你的子 agent 各自算一個）：用 `openOrReuseTab` 在同一個分頁裡換頁，\
+不要為了每個網址開新分頁；同一個 task space 重複用（`useOrCreateTaskSpace(\"{agent_name}\")`）。\n\
+- **bot 結束就關分頁**：工作做完、或子 agent 收掉之前，先 `closeTab` / `completeTaskSpace(…, {{ keep: false }})`；\
+分頁留著不關，RAM 就是這樣被吃掉的。"
     )
 }
 
@@ -1242,6 +1250,10 @@ mod model_args_tests {
         b.persona = None;
         assert_eq!(persona_args(&b, "proj-abc123"), vec!["--append-system-prompt".to_string(), rule.clone()]);
         assert!(rule.contains("`proj-abc123-`"));
+        // 瀏覽器規則：只用 ego lite、一個 bot 一個分頁、bot 結束就關分頁，task space 用自己的名字。
+        assert!(rule.contains("ego lite"));
+        assert!(rule.contains("useOrCreateTaskSpace(\"proj-abc123\")"));
+        assert!(rule.contains("{ keep: false }"));
     }
 }
 
