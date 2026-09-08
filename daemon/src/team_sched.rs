@@ -14,7 +14,7 @@
 //!   reply that arrives while the team is paused is still recorded.
 //! * [`startup`] — phase `starting`: start the members, then hand the issue to the PM.
 //!
-//! # The seven loop guards of §4.5, and where each one lives
+//! # The loop guards of §4.5, and where each one lives
 //!
 //! | § | guard | here |
 //! |---|---|---|
@@ -23,10 +23,11 @@
 //! | relay budget | `max_relays`, repair prompts included | [`flush`] refuses to deliver past the cap → `paused(budget_relays)` |
 //! | review rounds | `max_review_rounds` | [`Verdict::request_changes`] handling → `exhausted` + `paused(review_exhausted)` |
 //! | dispatch cap | one open task per worker; no identical repeat | [`dispatch`] (plus the DB's partial unique index) |
+//! | PM stall | no task left to wait for, then repeated `wait` | [`wait`] nudges once, then `paused(pm_stalled)` |
 //! | wall clock | `max_wall_clock_min` | [`gates`] |
 //! | quota | `quota_stop_pct` per relay | [`gates`] and again inside [`flush`] |
 //!
-//! And the eighth rule that binds them: **every one of those pauses, never aborts** (§4.5
+//! And the final rule that binds them: **every one of those pauses, never aborts** (§4.5
 //! last row). `aborting` is reachable from `POST /teams/:id/abort` alone.
 
 use crate::db;
@@ -1652,10 +1653,11 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     Ok(())
 }
 
-/// §8.3: a PM that says `wait` when there is nothing left to wait for gets one nudge, once.
+/// §8.3: a PM that says `wait` when there is nothing left to wait for gets one nudge; the next
+/// such reply pauses the team until a user decides what to do.
 async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
-    if tasks.is_empty() || !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
+    if !tasks.is_empty() && !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
         return Ok(());
     }
     let Some(pm) = ctx.pm() else { return Ok(()) };
@@ -1674,6 +1676,19 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             .and_then(|p| p.get("action").and_then(Value::as_str).map(String::from))
             .unwrap_or_default();
         if a == "nudge" {
+            if ctx.team.phase != "paused" {
+                pause(app, &ctx.team, "pm_stalled").await?;
+                enqueue(
+                    app,
+                    &ctx.team.id,
+                    None,
+                    &pm.id,
+                    None,
+                    "nudge",
+                    "PM 連續兩次回覆 `wait`，team 已暫停，等使用者決定。".into(),
+                )
+                .await?;
+            }
             return Ok(());
         }
     }
@@ -1685,6 +1700,23 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         None,
         "nudge",
         format!("所有 {} 個 task 都已進入終態。請 `done`（附 summary）或再 `dispatch`。", tasks.len()),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// §8.3: resume a `pm_stalled` team with a fresh prompt instead of leaving the PM idle.
+pub async fn nudge_pm_after_resume(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let ctx = Ctx::load(app, team_id).await?;
+    let Some(pm) = ctx.pm() else { return Ok(()) };
+    enqueue(
+        app,
+        team_id,
+        None,
+        &pm.id,
+        None,
+        "nudge",
+        "team 已恢復執行。請 `done`（附 summary）或再 `dispatch`。".into(),
     )
     .await
     .map(|_| ())
@@ -3295,9 +3327,9 @@ mod scenarios {
         assert_eq!(t.pause_reason.as_deref(), Some("pm_repeat"));
     }
 
-    /// §8.3 — `done` is verified, not taken on trust, and `wait` with nothing left nudges once.
+    /// §8.3 — `done` is verified, and repeated `wait` after all work is done pauses a stalled PM.
     #[tokio::test]
-    async fn done_is_checked_and_wait_nudges_once() {
+    async fn done_is_checked_and_wait_pauses_a_stalled_pm() {
         let s = S::new(1, false).await;
         let pm = s.bot("pm", 0).await;
         s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
@@ -3312,10 +3344,46 @@ mod scenarios {
         let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
         assert_eq!(last["action"], "nudge");
         s.reply(&pm, json!({"action":"wait"})).await;
-        assert_eq!(s.pending(&pm).await.len(), n, "only one nudge, not a nudge loop");
+        let team = s.team().await;
+        assert_eq!(team.phase, "paused");
+        assert_eq!(team.pause_reason.as_deref(), Some("pm_stalled"));
+        assert_eq!(s.pending(&pm).await.len(), n + 1, "the pause explanation is queued once");
+        let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
+        assert_eq!(last["action"], "nudge");
+        assert!(last["text"].as_str().unwrap().contains("已暫停，等使用者決定"));
+    }
 
-        s.reply(&pm, json!({"action":"done","summary":"真的完成了"})).await;
-        assert_eq!(s.team().await.phase, "finishing");
+    #[tokio::test]
+    async fn resuming_pm_stalled_nudges_pm_again() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        set_task_state(s.app(), &s.tasks().await[0].id, "merged").await.unwrap();
+        s.reply(&pm, json!({"action":"wait"})).await;
+        s.reply(&pm, json!({"action":"wait"})).await;
+        assert_eq!(s.team().await.pause_reason.as_deref(), Some("pm_stalled"));
+
+        s.arm().await;
+        crate::team::resume(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.team().await.phase, "working");
+        let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
+        assert_eq!(last["action"], "nudge");
+        assert!(last["text"].as_str().unwrap().contains("`done`"));
+        assert!(last["text"].as_str().unwrap().contains("`dispatch`"));
+    }
+
+    #[tokio::test]
+    async fn waiting_twice_without_tasks_pauses_the_team() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"wait"})).await;
+        let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
+        assert_eq!(last["action"], "nudge");
+        s.reply(&pm, json!({"action":"wait"})).await;
+        let team = s.team().await;
+        assert_eq!(team.phase, "paused");
+        assert_eq!(team.pause_reason.as_deref(), Some("pm_stalled"));
+
     }
 
     /// §4.5 wall clock and quota — both pause, neither aborts.
