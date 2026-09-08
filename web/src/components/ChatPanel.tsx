@@ -56,6 +56,14 @@ function timeOf(iso: string): string {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })
 }
 
+/** Codex 帳號提示是給 TUI 看的（`Run /usage`）；對話裡只說還有幾次重置。 */
+function systemNoticeText(content: string): string {
+  const m = content.match(/^You have (\d+) usage limit resets? available\b/i)
+  if (!m) return content
+  const n = m[1]
+  return n === '1' ? 'Codex 還有 1 次額度重置可用' : `Codex 還有 ${n} 次額度重置可用`
+}
+
 /**
  * One message, shown in full (long content scrolls with the list — nothing is folded).
  * Metadata (speaker / recipients + time) always sits ABOVE the bubble (18px row).
@@ -114,7 +122,7 @@ export const Bubble = memo(function Bubble({
         ) : msg.role === 'assistant' && !fallback ? (
           <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
         ) : (
-          msg.content
+          system ? systemNoticeText(msg.content) : msg.content
         )}
         {msg.attachments.length ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
@@ -131,9 +139,13 @@ export const Bubble = memo(function Bubble({
  * gets stored as the reply while the real answer prints a moment later. The daemon has kept
  * the full screen all along (`messages.terminal_snapshot`, already on the wire) — it just was
  * not shown anywhere, so the answer looked lost when it was one click away.
+ *
+ * 只掛在 `terminal_fallback` 上。Codex 帳號提示也曾把整片啟動畫面存進來，塞進系統 pill
+ * 會變成框中框（框線、model/directory、Tip，兩千字沒人要讀）。
  */
 function TerminalSnapshot({ msg }: { msg: Message }) {
   const [open, setOpen] = useState(false)
+  if (msg.source !== 'terminal_fallback') return null
   const snap = msg.terminal_snapshot?.trim()
   if (!snap) return null
   // Nothing to expand when the cut kept everything there was.
