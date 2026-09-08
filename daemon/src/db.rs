@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS teams (
   issue_number INTEGER NOT NULL, issue_title TEXT NOT NULL, issue_url TEXT NOT NULL,
   phase TEXT NOT NULL CHECK (phase IN ('starting','planning','working','finishing','done','paused','aborting','aborted','failed')),
   pause_reason TEXT, resume_phase TEXT,
+  -- SPEC-team §4.5: the structured "who, how bad" behind `pause_reason`, snapshotted at the
+  -- moment of the pause. NULL for the reasons that need no detail, and for old rows.
+  pause_detail_json TEXT,
   base_ref TEXT NOT NULL, base_sha TEXT NOT NULL, branch TEXT NOT NULL, worktree_root TEXT NOT NULL,
   -- SPEC-team §6.4a: the team's own herdr workspace. Nullable: a row written by an earlier
   -- build has none, and `NULL` is exactly what the reconcile treats as `workspace_missing`.
@@ -289,6 +292,9 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // When the user closed the team's GitHub issue. NULL = still open, or never asked —
         // closing is always an explicit human action, so an old row simply has nothing here.
         ("teams", "issue_closed_at", "ALTER TABLE teams ADD COLUMN issue_closed_at TEXT"),
+        // SPEC-team §4.5: JSON detail for the current `pause_reason` (which member, which
+        // quota window, how much is left). Nullable — a pause with nothing to say has none.
+        ("teams", "pause_detail_json", "ALTER TABLE teams ADD COLUMN pause_detail_json TEXT"),
         // Native session requested by a done-team reopen. NULL for ordinary starts and old runs.
         ("runs", "resume_session_id", "ALTER TABLE runs ADD COLUMN resume_session_id TEXT"),
         // SPEC-team §2.3: which queued issue this task / event belongs to. Nullable because
@@ -820,6 +826,9 @@ pub struct Team {
     pub issue_url: String,
     pub phase: String,
     pub pause_reason: Option<String>,
+    /// SPEC-team §4.5: JSON detail for `pause_reason` — for `quota_low`, which members are
+    /// out of quota, on which window, and when it resets. `None` when the reason says it all.
+    pub pause_detail_json: Option<String>,
     pub resume_phase: Option<String>,
     pub base_ref: String,
     pub base_sha: String,

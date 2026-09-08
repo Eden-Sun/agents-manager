@@ -195,6 +195,8 @@ interface MockTeam {
   issue_url: string
   phase: TeamPhase
   pause_reason: string | null
+  /** SPEC-team §4.5：`quota_low` 是誰的額度不夠（daemon 的 `pause_detail`）。 */
+  pause_detail: Rec | null
   resume_phase: TeamPhase | null
   base_ref: string
   base_sha: string
@@ -2436,6 +2438,7 @@ export class MockTransport implements Transport {
       issue_url: t.issue_url,
       phase: t.phase,
       pause_reason: t.pause_reason,
+      pause_detail: t.pause_detail,
       branch: t.branch,
       deliver: t.deliver,
       supervised: t.supervised,
@@ -2495,6 +2498,7 @@ export class MockTransport implements Transport {
       project_id: t.project_id,
       phase: t.phase,
       pause_reason: t.pause_reason,
+      pause_detail: t.pause_detail,
       usage: { ...t.usage },
     })
   }
@@ -2528,10 +2532,11 @@ export class MockTransport implements Transport {
     return ev
   }
 
-  private setPhase(t: MockTeam, phase: TeamPhase, reason: string | null = null) {
+  private setPhase(t: MockTeam, phase: TeamPhase, reason: string | null = null, detail: Rec | null = null) {
     const from = t.phase
     t.phase = phase
     t.pause_reason = phase === 'paused' ? reason : null
+    t.pause_detail = phase === 'paused' ? detail : null
     if (phase === 'done' || phase === 'aborted' || phase === 'failed') t.ended_at = now()
     this.teamEvent(t.id, 'phase', { from, to: phase, reason })
     this.emitTeam(t)
@@ -2644,6 +2649,7 @@ export class MockTransport implements Transport {
       issue_url: `${p.github.url}/issues/${issueNumber}`,
       phase: 'starting',
       pause_reason: null,
+      pause_detail: null,
       resume_phase: null,
       base_ref: String(b.base ?? 'HEAD') || 'HEAD',
       base_sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
@@ -2987,7 +2993,48 @@ export class MockTransport implements Transport {
   private pauseWith(t: MockTeam, reason: string) {
     if (t.phase === 'paused') return
     t.resume_phase = t.phase
-    this.setPhase(t, 'paused', reason)
+    this.setPhase(t, 'paused', reason, reason === 'quota_low' ? this.quotaLowDetail(t) : null)
+  }
+
+  /**
+   * SPEC-team §4.5：`quota_low` 的「是誰」。daemon 是拿每個成員的 kind / identity 去查它那台
+   * 主機的額度；mock 照同一條路走一遍自己的 `quota` 表，這樣橫幅的文案在 `VITE_MOCK=1`
+   * 底下也驗得到（`__amMock.teamPause('quota_low')`）。
+   */
+  private quotaLowDetail(t: MockTeam): Rec {
+    const stopPct = t.budget.quota_stop_pct
+    const members: Rec[] = []
+    for (const m of t.members) {
+      const bot = this.bots.find((b) => b.id === m.bot_id)
+      if (!bot) continue
+      const q = this.quota[bot.identity ? `${bot.kind}:${bot.identity}` : bot.kind] ?? this.quota[bot.kind]
+      if (!q) continue
+      const windows: [string, Rec | null][] = [
+        ['five_hour', (q.five_hour ?? null) as Rec | null],
+        ['seven_day', (q.seven_day ?? null) as Rec | null],
+      ]
+      const worst = windows
+        .filter((w): w is [string, Rec] => w[1] !== null)
+        .sort((a, b) => Number(b[1].used_pct ?? 0) - Number(a[1].used_pct ?? 0))[0]
+      if (!worst) continue
+      const usedPct = Number(worst[1].used_pct ?? 0)
+      if (usedPct < stopPct) continue
+      members.push({
+        bot_id: bot.id,
+        name: bot.name,
+        short: bot.name.replace(/^i\d+-/, ''),
+        role: m.role,
+        kind: bot.kind,
+        identity: bot.identity,
+        host: 'local',
+        window: worst[0],
+        used_pct: usedPct,
+        remaining_pct: Math.max(0, 100 - usedPct),
+        resets_at: worst[1].resets_at ?? null,
+      })
+    }
+    members.sort((a, b) => Number(b.used_pct) - Number(a.used_pct))
+    return { stop_pct: stopPct, members }
   }
 
   private pauseTeam(id: string) {
@@ -3010,6 +3057,7 @@ export class MockTransport implements Transport {
     }
     t.phase = t.resume_phase ?? 'working'
     t.pause_reason = null
+    t.pause_detail = null
     t.resume_phase = null
     this.teamEvent(t.id, 'phase', { from: 'paused', to: t.phase, reason: 'resume' })
     this.emitTeam(t)
@@ -3396,7 +3444,34 @@ export class MockTransport implements Transport {
     this.teamTimers.delete(t.id)
     // 已經是 paused 時也要能換原因（驗各種橫幅文案用）。
     if (t.phase === 'paused') t.phase = t.resume_phase ?? 'working'
+    // `quota_low` 是額度掉下去才發生的事，光把原因塞進去、額度還是 18% 的話，橫幅要寫的
+    // 「rev（cc2）5h 額度剩 4%」就無中生有。先讓成員的額度真的見底，再讓它停。
+    if (reason === 'quota_low') this.starveMemberQuota(t)
     this.pauseWith(t, reason)
+  }
+
+  /**
+   * Dev helper 的一半：把 team 成員用到的額度打到 `quota_stop_pct` 以上（最多兩個帳號，
+   * 這樣「最嚴重的那個 + 另有 N 位」兩種文案都驗得到），並照常推 `quota_updated`。
+   */
+  private starveMemberQuota(t: MockTeam) {
+    const stop = t.budget.quota_stop_pct
+    const keys: string[] = []
+    for (const m of t.members) {
+      const bot = this.bots.find((b) => b.id === m.bot_id)
+      if (!bot) continue
+      const key = bot.identity && this.quota[`${bot.kind}:${bot.identity}`] ? `${bot.kind}:${bot.identity}` : bot.kind
+      if (this.quota[key] && !keys.includes(key)) keys.push(key)
+    }
+    keys.slice(0, 2).forEach((key, i) => {
+      const q = this.quota[key]
+      if (!q) return
+      const w = (q.five_hour ?? q.seven_day) as Rec | null
+      if (!w) return
+      w.used_pct = Math.min(99, stop + 6 - i * 2)
+      q.updated_at = now()
+      this.emit('quota_updated', { kind: key, host: 'local', quota: q })
+    })
   }
 
   /** Dev helper: 把某個 team 的第一件未完成 task 推進「需要你」欄。 */

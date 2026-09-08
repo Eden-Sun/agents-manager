@@ -10,7 +10,7 @@ import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamIssueProgress } from './TeamIssueProgress'
-import { teamPauseAction } from './teamPanelLogic'
+import { teamPauseAction, teamPauseDetailLines } from './teamPanelLogic'
 
 /**
  * SPEC-team §11.4 — sidebar 裡 Project 底下的 Team 節點。
@@ -97,7 +97,8 @@ function TeamPausedRow({ team }: { team: Team }) {
 
   return (
     <div className="team-paused-row">
-      <span className="team-paused-why" title={reason ?? undefined}>
+      {/* 側欄這一列窄，寫不下整句「rev（cc2）5h 額度剩 4%」；名字進 tooltip，全文在面板橫幅。 */}
+      <span className="team-paused-why" title={[reason, teamPauseDetailLines(team)].filter(Boolean).join('\n') || undefined}>
         已暫停{label ? ` · ${label}` : ''}
       </span>
       {action !== null ? (
