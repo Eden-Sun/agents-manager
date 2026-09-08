@@ -1,5 +1,6 @@
 import { useStore } from '../store/store'
 import { effortLabel } from '../api/types'
+import { shortModel } from '../lib/shortModel'
 
 /**
  * `opus · 高` — the model a bot is on, with its reasoning effort next to it.
@@ -28,7 +29,7 @@ export function ModelTag({ botId }: { botId: string }) {
   // `bot.model` is null when the bot is left on whatever the CLI picks. Once the CLI has
   // said what that is (statusLine `model_name`), show it — the same thing the chat header
   // shows — instead of a literal `CLI 預設` that reads as a different model (2026-09-08).
-  const shown = bot.model ?? reported?.model_name ?? null
+  const shown = shortModel(bot.kind, bot.model ?? reported?.model_name ?? null)
   if (!shown && !chipExtra) return null
 
   return (

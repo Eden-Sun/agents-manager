@@ -802,6 +802,15 @@ async fn pane_env(
     // The name the herdr shim prefixes a child agent with (SPEC §6.5b), and the same name the
     // persona quotes (`child_agent_rules`).
     env.insert("AM_AGENT_NAME".into(), json!(agent_name));
+    // 母 bot 的 kind / 模型 / 強度：herdr shim 在子 agent 沒指定 `--model` 時拿來補（SPEC §6.5b），
+    // 不然子 agent 跑 CLI 預設、側欄冒出一顆對不上的模型。沒設就不給，shim 也就不補。
+    env.insert("AM_KIND".into(), json!(bot.kind));
+    if let Some(m) = bot.model.as_deref().filter(|m| !m.trim().is_empty()) {
+        env.insert("AM_MODEL".into(), json!(m));
+    }
+    if let Some(e) = bot.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+        env.insert("AM_EFFORT".into(), json!(e));
+    }
     if let Some(dir) = shim_dir {
         // Best effort only: a login shell re-runs the user's profile after this, and on macOS
         // `path_helper` plus `brew shellenv` push us back behind the real herdr. The pane's
