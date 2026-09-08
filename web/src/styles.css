@@ -3843,19 +3843,7 @@ p.project-quota-hidden {
   }
 
   /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
-  .main-head /* 這個身份在這台主機沒登入：條子永遠會是空的，所以在名字上就講清楚，
-   不要讓人以為是還沒回報。 */
-.quota-identity.logged-out {
-  color: var(--warn);
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
-}
-
-.quota-pop-note.warn {
-  color: var(--warn);
-}
-
-.quota-more {
+  .main-head .quota-more {
     display: none;
   }
 
@@ -5722,6 +5710,18 @@ button.model-tag[aria-expanded='true'] {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   font-family: var(--font-mono);
+}
+
+/* 這個身份在這台主機沒登入：條子永遠會是空的，所以在名字上就講清楚，
+   不要讓人以為是還沒回報。 */
+.quota-identity.logged-out {
+  color: var(--warn);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.quota-pop-note.warn {
+  color: var(--warn);
 }
 
 .quota-kind {
