@@ -710,7 +710,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
       if (ok) setDraft(draftKey, '')
     })
   }
-  const enterToSend = useEnterToSend(() => submit())
+  const enterToSend = useEnterToSend(ref, () => submit())
 
   return (
     <div className="composer group-composer team-composer">
