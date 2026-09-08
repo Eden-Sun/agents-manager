@@ -146,7 +146,11 @@ pub fn spawn(app: &Arc<App>, team_id: &str) {
             }
             tokio::select! {
                 ev = turns.recv() => match ev {
-                    Ok(t) if t.team_id.as_deref() == Some(team_id.as_str()) && t.is_done() => {
+                    // A relay turn carries `team_id`; a user's group-chat turn to a member does
+                    // not (`turns.team_id` is NULL), so it is matched through the bot instead —
+                    // its reply may still carry a block (`on_turn_done`).
+                    Ok(t) if t.is_done() && (t.team_id.as_deref() == Some(team_id.as_str())
+                        || (t.team_id.is_none() && member_of(&app, &team_id, &t.bot_id).await)) => {
                         if let Err(e) = on_turn_done(&app, &team_id, &t.bot_id, &t.turn_id, &t.status).await {
                             tracing::warn!(team = %team_id, error = ?e, "team scheduler: turn handling failed");
                         }
@@ -1281,6 +1285,18 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
 // ---------------------------------------------------------------- replies (§4.4 → §8.2)
 
 /// A member's turn ended: find its reply and run it through the protocol.
+/// Is `bot_id` a live member of `team_id`? Used to route a member's non-relay turns.
+async fn member_of(app: &Arc<App>, team_id: &str, bot_id: &str) -> bool {
+    sqlx::query_scalar::<_, String>("SELECT team_id FROM bots WHERE id = ? AND deleted_at IS NULL")
+        .bind(bot_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(team_id)
+}
+
 pub async fn on_turn_done(
     app: &Arc<App>,
     team_id: &str,
