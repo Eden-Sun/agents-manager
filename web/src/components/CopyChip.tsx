@@ -1,3 +1,4 @@
+import { copyText } from '../lib/copyText'
 import { useState } from 'react'
 
 /**
@@ -29,13 +30,11 @@ export function CopyChip({
       className={`team-copy${done ? ' done' : ''}${className ? ' ' + className : ''}`}
       title={`${title}\n${value}（點擊複製）`}
       onClick={() => {
-        void navigator.clipboard
-          ?.writeText(value)
-          .then(() => {
-            setDone(true)
-            setTimeout(() => setDone(false), 1200)
-          })
-          .catch(() => undefined)
+        void copyText(value).then((ok) => {
+          if (!ok) return
+          setDone(true)
+          setTimeout(() => setDone(false), 1200)
+        })
       }}
     >
       <span className="team-copy-label">{label}</span>
