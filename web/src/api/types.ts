@@ -300,6 +300,14 @@ export interface Run {
    * （`Update installed · Restart to update`）。沒有更新在等就是 null。
    */
   update_notice: string | null
+  /**
+   * 上一回合被 API 斷線截斷時，pane 上那行原文
+   * （`API Error: Connection lost mid-response. The response above may be incomplete.`）。
+   * hook 與 herdr 都會把這種回合報成 done，所以「看起來做完了」不代表真的做完——
+   * daemon 把那行掛在 run 上（`runs.turn_error`），null = 上一回合是正常收尾的。
+   * 下一回合一開始就會被清掉。
+   */
+  turn_error: string | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string

@@ -58,6 +58,8 @@ interface MockRun {
   status_line: string | null
   /** claude 有新版下載好、等重啟才會套用（`runs.update_notice`）。null = 沒有。 */
   update_notice: string | null
+  /** 上一回合被 API 斷線截斷時 pane 上那行原文（`runs.turn_error`）。null = 正常收尾。 */
+  turn_error: string | null
   started_at: string
   ended_at: string | null
 }
@@ -1791,6 +1793,7 @@ export class MockTransport implements Transport {
       status: null,
       status_line: null,
       update_notice: null,
+      turn_error: null,
       started_at: now(),
       ended_at: null,
     }
@@ -1808,6 +1811,10 @@ export class MockTransport implements Transport {
         run.status_line = 'tony… | OP5 | 26% | 5h 85% | 7d 27% | $18.67'
         // `am-claude` 帶著「有新版等著重啟」，header 的 UpdateBadge 與側欄小點才有東西可截。
         if (this.bot(botId).name === 'am-claude') run.update_notice = 'Update installed · Restart to update'
+        // 同一顆再帶上「上一回合被 API 斷線截斷」：header 的 TurnErrorBadge 與側欄紅點才截得到。
+        if (this.bot(botId).name === 'am-claude') {
+          run.turn_error = 'API Error: Connection lost mid-response. The response above may be incomplete.'
+        }
       }
       this.emitBotStatus(botId)
       this.addMessage({

@@ -165,6 +165,8 @@ function BotRow({
   })
 
   const hasUpdate = useStore((s) => s.runs[botId]?.update_notice ?? null)
+  // 上一回合被 API 斷線截斷（`runs.turn_error`）。燈號是綠的，這顆才是「其實沒做完」。
+  const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
 
   if (!bot) return null
   // 佔位列：分身剛按下去、daemon 還沒建好。灰的、不能點、不能拖，只告訴你「它會出現在這裡」。
@@ -291,6 +293,13 @@ function BotRow({
             {/* claude 有新版等著重啟套用時的小點。只是提示——真正點得下去的那顆在 header
                 （`UpdateBadge`），側欄這裡窄到放不下一顆按鈕。 */}
             {hasUpdate ? <span className="bot-update-dot" title={`${hasUpdate}｜重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）`} /> : null}
+            {/* 側欄放不下一顆按鈕，但這件事不能只留在 tooltip：燈號說 idle、實際上回合是斷的。
+                所以給它一個看得見的紅記號，點進去 header 那顆 chip 有原文與「重送上一則」。 */}
+            {turnError ? (
+              <span className="bot-turn-error" title={`${turnError}｜這一回合被 API 中斷，回應不完整。點進去可以重送上一則`}>
+                ⚠ 中斷
+              </span>
+            ) : null}
             {showTitle || compact ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
           </BotNameField>
         </span>

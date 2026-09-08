@@ -397,6 +397,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     status_line: optStr(pick(v, 'status_line', 'statusLine')),
     status: toStatusInfo(pick(v, 'status_json', 'status')),
     update_notice: optStr(pick(v, 'update_notice', 'updateNotice')),
+    turn_error: optStr(pick(v, 'turn_error', 'turnError')),
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),

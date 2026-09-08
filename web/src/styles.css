@@ -4671,6 +4671,81 @@ p.project-quota-hidden {
   cursor: help;
 }
 
+/* 「回合被中斷（API 錯誤）」——SPEC §4.3a。
+   紅的、在標題列上、點得下去：燈號說 idle 的時候，這是唯一告訴你「其實沒做完」的東西，
+   所以它不能是 tooltip，也不能跟 .update-badge 一樣是 accent 色（那顆是好消息）。 */
+.turn-error-badge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 0 7px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.turn-error-badge:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* portal 到 body 再 fixed 定位（見 TurnErrorBadge 的註解）：標題列那一列會被對話區蓋住。 */
+.turn-error-pop {
+  position: fixed;
+  z-index: 50;
+  width: min(420px, calc(100vw - 16px));
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.turn-error-why {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.turn-error-raw {
+  margin: 0 0 10px;
+  padding: 7px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.turn-error-act {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 側欄的那個記號。點不下去（列本身就是按鈕），但要看得見，不能只有 tooltip。 */
+.bot-turn-error {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--danger);
+  color: #fff;
+  white-space: nowrap;
+}
+
 .disclosure-note {
   margin-left: auto;
   font-size: 11px;
