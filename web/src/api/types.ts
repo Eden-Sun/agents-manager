@@ -1191,6 +1191,7 @@ const TEAM_PAUSE_LABEL: Record<string, string> = {
   user: '你按了暫停',
   budget_relays: '轉送次數用完',
   budget_time: '時間預算用完',
+  pm_stalled: 'PM 連續等待，等使用者決定',
   quota_low: '額度過低',
   review_exhausted: '審查回合用盡',
   pm_repeat: 'PM 重複派同一件工作',
