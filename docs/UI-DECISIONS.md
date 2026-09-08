@@ -508,3 +508,40 @@
 - 量測：`docs/screenshots/btn-contrast/audit.json`（before 114 筆 → after 10 筆，
   對比不合格 10 → 0、focus 環不合格 13 → 0）。
   截圖：`docs/screenshots/btn-contrast/before-*.png` 與 `after-*.png`。
+
+## 手機第二輪：終端折行，與標題列第二行拆成兩列（2026-09-08）
+
+第一輪（上面「手機 RWD：兩個斷點」）的斷點與讓位順序不動，這裡補的是它沒處理到的兩件事。
+現況與目標見 `docs/goals/mobile-rwd-round2-2026-09-08.md`，截圖在
+`docs/screenshots/mobile-rwd/round2-before/` 與 `round2-after/`。
+
+### 終端快照在手機預設折行（可切換）
+
+- **問題**：390px 大概只看得到 45 欄。一個 185 欄的 pane（實測 `C1-fable`）每一行都被右邊
+  裁掉，只能一行一行橫捲——等於整個右半邊讀不到。
+- **決策**：`.term` 多一個 `.term-wrap`（`white-space: pre-wrap` + `word-break: break-all`），
+  預設值跟著 `PHONE_QUERY` 走：手機折、桌機不折。term-bar 上一顆「換行」核取方塊可以兩邊
+  互換，選擇記在 `localStorage`（`am.term.wrap`），使用者按過就永遠優先於斷點。狀態放在
+  `components/termWrap.ts` 的 module scope，`TerminalTab` / `BlockedPanel` / `HostShellPanel`
+  共用，切一次三個面板一起換。
+- **代價**：折行會把 TUI 畫的框線與對齊弄亂——所以桌機的預設維持不折。手機上「讀得到」贏過
+  「排得漂亮」，而且一顆開關就能換回去。
+- `break-all` 是必要的，不是保險：終端的一行常常是一整條沒有空白的路徑或網址，只有
+  `pre-wrap` 時它仍然會撐出橫向捲軸。`.term-link` 是 `all: unset`（行內）且本來就帶
+  `word-break: break-all`，折行後每一段仍然可點、複製到的仍是接回來的完整 URL。
+
+### 標題列第二行拆成兩列（不是收進 `⋯`）
+
+- **問題**：`.context-bar` 在 390px 排到約 700px。`commit` 那顆剛好被右邊界切成一半，而
+  橫捲列在觸控裝置上沒有捲軸可看——使用者只會覺得那顆按鈕壞了。
+- **決策**：**拆兩列**，不收進 `⋯` 選單。理由是這一條混了兩種東西：repo 狀態與 git 動作是
+  **會按的**（收進選單等於多兩下才 commit 得到），context 與花費是**只看的**（不該為了看一個
+  百分比去橫捲）。所以第一列留給 repo + git（照舊橫捲，第一輪那組 scroll shadow 漸層留著），
+  第二列給 `.statusline-bar`：`flex: 1 0 100%` 把它擠下去，字級 11 → 12px，排不下就換行而不是
+  橫捲，數字 `tabular-nums`。
+- **代價**：標題列底下多佔約 20px。換到的是 git 那三顆一次全部露出來（實測 390px 下
+  `rt 0 open · +3 −2 ?4 · commit · push · pull` 完整可見，第一列不必再捲）。
+- `.statusline-text`（daemon 給的原始 statusline，`white-space: pre`）折不了行，那一種仍舊
+  橫捲；`overflow-x: auto` 因此留著，只是有拆成欄位時永遠用不到。
+- 帳號欄在手機是 `display: none`，但它還是 `.sl-item + .sl-item` 的前一個兄弟——context 開頭
+  因此多出一條沒有左鄰居的分隔線。自己一列之後那條線特別顯眼，所以補了一條把它拿掉。

@@ -9467,6 +9467,65 @@ button.run-debug-toggle:hover {
   }
 }
 
+/* 標題列第二行（`.context-bar`）在 390px 是一條排到 700px 的橫捲列：`commit` 那顆剛好被
+   右邊界切成一半，而橫捲列在觸控裝置上沒有捲軸可看——使用者只會覺得那顆按鈕壞了。
+   （`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 2。）
+
+   拆成兩行，因為這一條其實混了兩種東西：repo 狀態與 git 動作是**會按的**（要按到，所以
+   那一段照舊橫捲，漸層陰影也留著），context 與花費是**只看的**（不該為了看一個百分比去
+   橫捲）。看的那一半讓它佔滿第二行、放大到 12px、排不下就換行。
+
+   `.statusline-text`（daemon 給的原始 statusline，`white-space: pre`）折不了行，那一種
+   仍舊橫捲——`overflow-x: auto` 因此留著，只是有拆成欄位時它永遠用不到。 */
+@media (width <= 640px) {
+  .context-bar {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  /* `1 0 100%`：整行寬 + 不許縮，於是它一定被擠到第二行，第一行留給 repo 與 git。 */
+  .context-bar > .statusline-bar {
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  /* 自己一行就不需要跟前面那段畫分隔線了。 */
+  .context-bar > .issues-bar + .statusline-bar,
+  .context-bar > .git-bar + .statusline-bar {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  /* 11px 的數字在手機上是裝飾不是資訊（同本檔上面那條 12px 的下限）。 */
+  .context-bar .sl-item,
+  .context-bar .sl-k,
+  .context-bar .sl-v {
+    font-size: 12px;
+  }
+
+  /* 換行之後 context 與花費不一定同一列，等寬數字才不會每次刷新都左右跳。 */
+  .context-bar .sl-v {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 目錄那一欄可能是一整條路徑：讓它縮、截尾，而不是把整列推到畫面外。 */
+  .context-bar .sl-item {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 帳號欄在手機是 `display: none`，但它還是 `.sl-item + .sl-item` 的前一個兄弟——
+     於是 context 開頭多出一條沒有左鄰居的分隔線。自己一行之後那條線特別顯眼。 */
+  .context-bar .sl-item.sl-account + .sl-item {
+    padding-left: 0;
+    border-left: 0;
+    margin-left: 0;
+  }
+}
+
 /* 標題列在 390px 只回答「這是誰、在做什麼、去哪一頁」。名字被截成五個字（`C1-fa…`），
    右邊卻擺著一顆 190px 的額度 chip——它右邊那幾個欄位在點開的 popover 裡本來就有。
    讓出來的寬度全部回到名字身上。 */
