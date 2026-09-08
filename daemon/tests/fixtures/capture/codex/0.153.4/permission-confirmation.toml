@@ -1,0 +1,6 @@
+still_busy = false
+awaits_input = true
+noise_lines = [2, 6]
+source = "synthetic"
+note = "Sanitized approval menu; the command and choice are waiting for the user."
+

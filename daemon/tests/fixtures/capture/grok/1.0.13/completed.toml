@@ -1,0 +1,7 @@
+still_busy = false
+awaits_input = true
+reply = "GROK-OK"
+noise_lines = [1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18]
+source = "synthetic"
+note = "Copied from the lifecycle GROK_SCREEN regression sample with a sanitized scratch path."
+

@@ -1,0 +1,6 @@
+still_busy = true
+awaits_input = false
+activity = "Thinking… (52s · ↑ 1.2k tokens)"
+noise_lines = [2]
+source = "synthetic"
+

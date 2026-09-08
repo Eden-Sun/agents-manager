@@ -1,0 +1,5 @@
+❯ 修正這個問題
+✢ Baking…
+  ⎿  Tip: Use /memory to view and manage Claude memory
+✗ Auto-update failed · Run claude doctor
+
