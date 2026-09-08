@@ -32,6 +32,7 @@ import { HostBadge, HostsPanel } from './HostsPanel'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
+import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
@@ -937,9 +938,13 @@ export function Sidebar() {
         {/* 縮寫是為了把寬度讓給右邊那排徽章；全名留在 title 裡。 */}
         <h1 title="Agents Manager">AG Man</h1>
         {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-        <PaneBadge />
-        <MemBadge />
-        <ConnBadge socket={socket} connected={connected} />
+        {/* 兩列：上面 pane / RAM / 連線，下面瀏覽器分頁數對齊 pane 那欄（TabsBadge）。 */}
+        <div className="head-badges">
+          <PaneBadge />
+          <MemBadge />
+          <ConnBadge socket={socket} connected={connected} />
+          <TabsBadge />
+        </div>
       </div>
 
       {/* 搜尋 bot：名字、專案、主機、kind、身分、模型、人設、agent 目前的標題都算數，
