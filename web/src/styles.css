@@ -293,9 +293,65 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 46px;
-  padding: 0 14px;
+  min-height: 46px;
+  padding: 4px 14px;
   border-bottom: 1px solid var(--border);
+}
+
+/* 徽章群：第一列 pane / RAM / 連線，第二列瀏覽器分頁數（有瀏覽器才有），靠左對齊 pane 那欄。 */
+.head-badges {
+  margin-left: auto;
+  display: grid;
+  grid-template-columns: auto auto auto;
+  column-gap: 8px;
+  row-gap: 3px;
+  align-items: center;
+  justify-items: start;
+}
+
+.head-badges .tabs-badge {
+  grid-column: 1 / 3;
+}
+
+/* 本機瀏覽器分頁數 / 吃的 RAM。跟 pane / RAM 同一種徽章，超線才變琥珀色。 */
+.tabs-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: default;
+}
+
+.tabs-badge .tabs-k {
+  color: var(--text-faint);
+  letter-spacing: 0.03em;
+}
+
+.tabs-badge .tabs-v {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabs-badge .tabs-sep {
+  margin: 0 2px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.tabs-badge.hot {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+
+.tabs-badge.hot .tabs-v {
+  color: var(--warn);
 }
 
 /* 現在開著幾個 herdr pane。和 RAM 那格同一種徽章：都是「整套系統現在佔多少」，
@@ -401,9 +457,13 @@ button:disabled {
   white-space: nowrap;
 }
 
-/* 第一個徽章把剩下的空白吃掉，標題貼左、徽章群貼右。 */
-.sidebar-head h1 + * {
+/* 標題貼左、徽章群（`.head-badges`）貼右；MOCK 徽章夾在中間時也照樣。 */
+.sidebar-head h1 + .mock-badge {
   margin-left: auto;
+}
+
+.sidebar-head h1 + .mock-badge + .head-badges {
+  margin-left: 0;
 }
 
 .conn {
