@@ -595,7 +595,10 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<R
         },
         "statusLine": {"type": "command", "command": statusline},
             // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
-            "outputStyle": "Concise"
+            "outputStyle": "Concise",
+            // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
+            // once per config dir; this is the record accepting it writes (2026-09-08).
+            "skipDangerousModePermissionPrompt": true
     });
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
@@ -736,7 +739,10 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
                 },
                 "statusLine": {"type": "command", "command": statusline},
             // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
-            "outputStyle": "Concise"
+            "outputStyle": "Concise",
+            // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
+            // once per config dir; this is the record accepting it writes (2026-09-08).
+            "skipDangerousModePermissionPrompt": true
             });
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
