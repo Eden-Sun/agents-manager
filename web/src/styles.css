@@ -9370,6 +9370,25 @@ button.run-debug-toggle:hover {
     height: 100dvh;
   }
 
+  /* 標題列要一直在最上面（2026-09-08 使用者回報：手機上打字時整頁被推走、header 不見）。
+     iOS 鍵盤彈出時會把「整個文件」往上捲，就算版面是 grid + 100dvh 也一樣；把 body 釘住
+     （fixed + inset 0）它就沒有東西可捲，鍵盤只會縮 dvh。`overscroll-behavior` 擋掉橡皮筋。
+     另外 `.main-head` 加 sticky 當保險：真的還是捲到，標題列也貼在上緣。 */
+  html,
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  .main-head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+  }
+
   /* 底部的三樣東西都要避開 home indicator：各自原本的內距再加上那一塊。 */
   .composer {
     padding-bottom: calc(12px + env(safe-area-inset-bottom));
