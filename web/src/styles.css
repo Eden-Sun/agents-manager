@@ -9145,3 +9145,18 @@ button.run-debug-toggle:hover {
     font-size: 12px;
   }
 }
+
+/* 圖片暫存在手機上預設是收起來的那一條（`ImageShelf` 的 `readOpen` fallback）：展開的
+   托盤在 390px 會吃掉約 120px（標題列＋提示字），而它是「等一下也許會用到」的東西，
+   不該先從對話身上扣一塊。剩下的一條 36px 帶著圖示、張數與展開鍵，資訊沒有掉。 */
+@media (width <= 640px) {
+  .shelf-handle {
+    height: 36px;
+  }
+
+  /* 打字時鍵盤已經吃掉半個畫面，這一條就先讓開。只收「沒展開」的那一條：展開的托盤是
+     使用者自己按開的，而且卡片不能在手指瞄準的時候被一條忽隱忽現的 bar 推走。 */
+  .shelf.typing {
+    display: none;
+  }
+}
