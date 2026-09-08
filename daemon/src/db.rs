@@ -1062,13 +1062,16 @@ pub async fn conversation_id(pool: &SqlitePool, bot_id: &str) -> Result<String> 
         return Ok(row);
     }
     let id = ulid();
-    sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)")
+    sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?) ON CONFLICT(bot_id) DO NOTHING")
         .bind(&id)
         .bind(bot_id)
         .bind(now())
         .execute(pool)
         .await?;
-    Ok(id)
+    Ok(sqlx::query_scalar::<_, String>("SELECT id FROM conversations WHERE bot_id = ?")
+        .bind(bot_id)
+        .fetch_one(pool)
+        .await?)
 }
 
 /// Bots on one host (join through their project), in creation order.
@@ -1596,6 +1599,44 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         let p2 = open(&file).await.unwrap();
         assert_eq!(columns(&p2, "bots").await, before);
         p2.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn conversation_id_is_race_safe() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("conversation-race.sqlite3")).await.unwrap();
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','bot','claude','tok',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut calls = tokio::task::JoinSet::new();
+        for _ in 0..20 {
+            let pool = pool.clone();
+            calls.spawn(async move { conversation_id(&pool, "b1").await });
+        }
+
+        let mut ids = Vec::new();
+        while let Some(result) = calls.join_next().await {
+            ids.push(result.unwrap().unwrap());
+        }
+        assert_eq!(ids.len(), 20);
+        assert!(ids.iter().all(|id| id == &ids[0]));
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE bot_id = 'b1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
