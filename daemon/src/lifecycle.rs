@@ -3449,6 +3449,12 @@ fn live_alert(kind: &str, text: &str) -> Option<String> {
         if !says_error {
             continue;
         }
+        // Data, not a banner (2026-09-08): a JSON blob or a `|`-separated row the agent printed
+        // (`62|note||{"action":"protocol_error","attempt":3,…}` from a sqlite dump) says
+        // "error" and "attempt" without anyone retrying anything.
+        if s.contains('{') || s.contains('}') || s.matches('|').count() >= 2 {
+            continue;
+        }
         let retrying = RETRY_TOKENS.iter().any(|t| low.contains(t));
         if !retrying && !low.starts_with("api error") {
             continue;
@@ -4859,6 +4865,12 @@ credits or try again at
         // Long prose that happens to contain both stays out.
         let prose = format!("The {} error means we should retry the request later on.", "x".repeat(300));
         assert!(live_alert("claude", &prose).is_none());
+        // Printed data that happens to say error + attempt: a sqlite row / JSON blob (seen 2026-09-08).
+        let row = r#"62|note||{"action":"protocol_error","attempt":3,"bot":"t1-dev-2","error":"report.status 必須是 done 或 blocked"}|06:12"#;
+        assert!(live_alert("claude", row).is_none());
+        assert!(live_alert("claude", r#"{"error":"timeout","retry":true}"#).is_none());
+        // …but a real banner still gets through.
+        assert!(live_alert("claude", "API error · Retrying in 2s · attempt 2/10").is_some());
     }
 
     #[test]
