@@ -531,6 +531,25 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 
 team 狀態全部在 DB（§2.1），記憶體只有 scheduler 的 mpsc 與計時器。
 
+### 7.6 換成員 kind = 換 bot（2026-09-08）
+
+`PATCH /teams/{id}` 的三個角色（§10.5）都能改 `kind`，但 **`kind` 不是一個可以就地改的欄位**：
+成員跑哪一個 CLI 是 `agent.start` 開 pane 時決定的，把 `bots.kind` 改掉只會讓那一列跟正在跑的
+行程對不上（模型清單、hook 寫法、身分規則全部跟著 kind 走）。所以 daemon 換一個 bot：
+
+1. **先擋**：該角色的任一成員有 in-flight turn → `409 {"reason":"member busy", "role", "bot_id", "name"}`。
+   把成員從一個跑到一半的 turn 底下抽掉，等於把整隊在等的那則回覆丟掉；請使用者先暫停。
+2. **停掉並軟刪舊 bot**（`deleted_at`，訊息與對話保留——那是這一隊的紀錄）。
+3. **同名、同 cwd、同 `team_role` 建一個新 kind 的成員**（`insert_member`，接著補上 `full_persona`）。
+   同名是重點：協定短名（`pm` / `dev-1`）就是路由鍵，改名等於換一個座位。
+4. **未終態的 `team_tasks.worker_bot_id` 指到新 bot**（`team_tasks_one_open_per_worker` 是對 bot 唯一的，
+   舊 bot 留著一件沒結的 task 會把這個座位永遠卡住）。
+5. **`roles_json.<role>` 寫成新的 spec**，下一批執行者、reopen 之後重建的成員都照它。
+6. **啟動新成員**（pretrust + `start_bot`）。沒有 run 的成員在 PM 下一次派工時就是 `member_lost`，
+   而 `resume` 本來就要求每個成員都在跑。啟動失敗記一筆 `member_start_failed`，不讓整個 PATCH 失敗。
+
+**phase 一律不動**：`paused` 的隊伍維持 `paused`，由使用者按「繼續」；跑動中的隊伍就帶著新成員繼續。
+
 ---
 
 ## 8. E. 流程狀態機
@@ -683,10 +702,24 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | POST | `/teams/{id}/abort` | `{"reason"?}` | `200 {}`；停所有成員 |
 | POST | `/teams/{id}/cleanup` | — | 非終態 409；成功 `200 {}`，推 `bot_changed` ×N + `team_changed` |
 | DELETE | `/teams/{id}` | `?branches=keep\|delete`（預設 `keep`）| **任何 phase 都可刪**（§6.5a）：非終態時先停成員 → 清 worktree → 關 workspace → 刪三張表的列 → 成員 bot 標 `deleted_at`（訊息保留）。`branches=delete` 才 `git branch -D`，遠端分支一律不動。成功 `200 {}` 並推帶 `deleted: true` 的 `team_changed` + `bot_changed` ×N；不存在 `404 {"error":"not_found","what":"team"}` |
-| PATCH | `/teams/{id}` | `{"budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "workers"?: {"model"?, "effort"?, "fast"?, "apply"?: "next"\|"now"}}` | `200 {}`；終態 409。`workers` 改執行者的模型設定：一律寫回 `roles_json.workers.spec`（下一批據此建立）並更新現有 worker bot 的欄位；`apply: "now"` 再把有 run 的 worker 逐一重啟（進行中的工作會中斷），預設 `next` 只等重啟或換批時生效 |
+| PATCH | `/teams/{id}` | `{"budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "pm"?: <角色>, "workers"?: <角色>, "reviewer"?: <角色>}` | `200 {}`；終態 409。三個角色同一個形狀，見下表 |
 | POST | `/teams/{id}/say` | `{"text", "to", "client_request_id"}`；`to` 接受**角色**（`pm` / `reviewer`）、**短名**（`dev-1`，同 §4.4 協定用的）、**暱稱**（`i42-pm`）、**bot_id**，可帶 `@` 前綴 | 使用者插話（記 `kind:user`，不計預算），走 §13 群組路徑；回同 `POST chat` 的單筆 `sent` |
 | POST | `/teams/{id}/tasks/{tid}/decide` | `{"action": "rework" \| "force_merge" \| "skip", "note"?}` | 只在 task `exhausted` / `blocked_by_worker` / rebase 用盡時有效；其餘 409 |
 | POST | `/teams/{id}/answer` | `{"text"}` | 回 PM 的 `ask_user`；等同 `say` 到 pm + `resume` |
+
+**角色（`pm` / `workers` / `reviewer`，2026-09-08）**：`{"kind"?, "model"?, "effort"?, "fast"?, "identity"?, "apply"?}`。
+省略一個 key = 不動它；`model` / `effort` / `identity` 送 `null` = 清成該 kind 的預設。
+
+| 欄位 | 行為 |
+|---|---|
+| `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（`workers` 是 `roles_json.workers.spec`），**下一批據此建立**，同時更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員逐一重啟（進行中的工作會中斷）；預設 `next` 只等重啟或換批時生效 |
+| `kind` | **換 bot**（§7.6）：同名、同 cwd 建一個新 kind 的成員，舊的停掉並 `deleted_at`（訊息保留），未終態的 task 指到新 bot，新成員直接啟動。`apply` 對 `kind` 沒有意義 |
+| `apply` | `next`（預設）/ `now`；其他值 `400 {"message":"<role>.apply must be `next` or `now`…"}` |
+
+驗證同建立時（`check_role`）：kind 必須是已安裝的三種之一、`effort` 對得上該 kind、`identity` 存在且 kind 相符（`404 identity` / `400`）。
+這隊沒有 reviewer 時 `reviewer` 回 `400 {"message":"this team has no reviewer"}`——加一個 reviewer 要 worktree 與啟動，不是 PATCH 做的事。
+換 `kind` 時該角色有成員正在跑一個 turn → `409 {"reason":"member busy","role","bot_id","name"}`（先暫停再改）。
+每次 PATCH 記一筆 `team_events` 的 `note`：`{"action":"patch", …, "roles": {"<role>": {"role","from","to","model","effort","fast","identity","apply","restarted","swapped"}}}`。
 
 ### 10.6 WebSocket
 

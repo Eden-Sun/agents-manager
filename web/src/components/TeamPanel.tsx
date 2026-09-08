@@ -27,10 +27,9 @@ import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
 import { ConfirmDialog } from './ConfirmDialog'
 import { IdentityBadge } from './IdentitiesPanel'
 import { CopyChip } from './CopyChip'
-import { Modal } from './Modal'
-import { ApiModelFields } from './ModelPicker'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamQueueProgress } from './TeamQueueProgress'
+import { TeamRoleEditor } from './TeamRoleEditor'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
@@ -199,89 +198,6 @@ function MemberStrip({ teamId }: { teamId: string }) {
  * （下一批據此建立）；「立即重啟生效」才會把現在有 run 的 worker 重啟——進行中的 task 會斷，
  * 所以預設是「下一批」。PM 與 reviewer 不在這裡改：它們全程不重啟，要改走各自的 Bot 設定。
  */
-function WorkersChip({ teamId, host, disabled }: { teamId: string; host: string; disabled: boolean }) {
-  const spec = useStore((s) => s.teamDetail[teamId]?.workers ?? null)
-  const patchTeam = useStore((s) => s.patchTeam)
-  const busy = useStore((s) => Boolean(s.busy[`team:${teamId}:patch`]))
-  const [open, setOpen] = useState(false)
-  const [model, setModel] = useState<string | null>(null)
-  const [effort, setEffort] = useState<string | null>(null)
-  const [fast, setFast] = useState(false)
-  const [apply, setApply] = useState<'next' | 'now'>('next')
-  if (!spec) return null
-  const label = spec.model ?? '預設模型'
-  const openIt = () => {
-    setModel(spec.model)
-    setEffort(spec.effort)
-    setFast(spec.fast)
-    setApply('next')
-    setOpen(true)
-  }
-  const save = async () => {
-    const ok = await patchTeam(teamId, { workers: { model, effort, fast, apply } })
-    if (ok) setOpen(false)
-  }
-  return (
-    <>
-      <button
-        type="button"
-        className="team-deliver team-workers"
-        disabled={disabled}
-        title={`執行者目前用 ${spec.kind} · ${label}${spec.effort ? ` · ${effortLabel(spec.effort)}` : ''}${spec.fast ? ' · fast' : ''}\n點擊修改（下一批生效，或立即重啟）`}
-        onClick={openIt}
-      >
-        執行者：{label}
-        {spec.effort ? ` · ${effortLabel(spec.effort)}` : ''}
-      </button>
-      <Modal open={open} title="執行者的模型" subtitle={`${spec.kind}，${host === LOCAL_HOST ? '本機' : host}`} onClose={() => setOpen(false)}>
-        <form
-          className="sheet-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            void save()
-          }}
-        >
-          <ApiModelFields
-            kind={spec.kind}
-            host={host}
-            identity={spec.identity}
-            model={model}
-            onModel={setModel}
-            effort={effort}
-            onEffort={setEffort}
-            fast={fast}
-            onFast={setFast}
-          />
-          <fieldset className="field">
-            <span>何時生效</span>
-            <div className="opt-group" role="radiogroup" aria-label="何時生效">
-              <button type="button" className={`opt${apply === 'next' ? ' on' : ''}`} role="radio" aria-checked={apply === 'next'} onClick={() => setApply('next')}>
-                下一批執行者
-              </button>
-              <button type="button" className={`opt${apply === 'now' ? ' on' : ''}`} role="radio" aria-checked={apply === 'now'} onClick={() => setApply('now')}>
-                立即重啟現有執行者
-              </button>
-            </div>
-            <span className="hint">
-              {apply === 'now'
-                ? '有 run 的執行者會馬上停掉再啟動，進行中的 task 會斷，PM 之後要重派。'
-                : '現有執行者照舊跑到換批或重啟；PM 用 done.workers=keep 沿用時不會自動套用。'}
-            </span>
-          </fieldset>
-          <div className="form-actions">
-            <button type="button" className="btn" onClick={() => setOpen(false)}>
-              取消
-            </button>
-            <button type="submit" className="btn primary" disabled={busy}>
-              {apply === 'now' ? '儲存並重啟' : '儲存'}
-            </button>
-          </div>
-        </form>
-      </Modal>
-    </>
-  )
-}
-
 /**
  * 從**還開著的** issue 裡勾要追加的那幾個。
  *
@@ -1068,7 +984,9 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         <span className={`team-deliver ${team.deliver}`} title={team.deliver === 'pr' ? '完成時會 push 到 origin 並開 PR' : '完成時只留下整合分支，不 push'}>
           {team.deliver === 'pr' ? '交付：PR' : '交付：留分支'}
         </span>
-        <WorkersChip teamId={teamId} host={project?.host ?? LOCAL_HOST} disabled={terminal} />
+        {/* PM / 執行者 / Reviewer 各一列。原本這裡只有「執行者：<模型>」一顆籤，
+            另外兩個角色從 UI 上完全改不到（SPEC-team §10.5）。 */}
+        <TeamRoleEditor teamId={teamId} host={project?.host ?? LOCAL_HOST} disabled={terminal} />
         <span className="team-sep" aria-hidden="true" />
         {/* 成員燈號列自成一列：標題列放不下（issue 標題很長），而且成員是常看的東西。 */}
         <MemberStrip teamId={teamId} />

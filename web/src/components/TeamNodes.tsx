@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Bot, Team } from '../api/types'
-import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, TEAM_TERMINAL_PHASES, teamPauseLabel, teamPhaseTone } from '../api/types'
+import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, TEAM_TERMINAL_PHASES, roleKeyOfMember, teamPauseLabel, teamPhaseTone } from '../api/types'
 import { botLamp, teamMemberBots, teamShortName, teamsOfProject, useStore } from '../store/store'
 import { IdentityBadge } from './IdentitiesPanel'
 import { TrashIcon } from './Icons'
@@ -23,7 +23,9 @@ function MemberRow({ bot }: { bot: Bot }) {
   const lamp = useStore((s) => botLamp(s, bot.id))
   const selected = useStore((s) => s.selectedBotId === bot.id && s.selectedTeamId === null)
   const selectBot = useStore((s) => s.selectBot)
+  const openTeamRole = useStore((s) => s.openTeamRole)
   const role = bot.team?.role ?? 'worker'
+  const teamId = bot.team?.team_id ?? null
   return (
     <div
       className={`bot-row team-member-row${selected ? ' selected' : ''}`}
@@ -55,6 +57,22 @@ function MemberRow({ bot }: { bot: Bot }) {
           <ModelTag botId={bot.id} />
         </span>
       </span>
+      {/* 齒輪開的是 **Team 的角色設定**，不是 bot 設定：team 成員是從 `roles_json` 建出來的，
+          只改這一列的 bot 不會動到那份 spec，下一批又會跑回舊設定（SPEC-team §10.5）。 */}
+      {teamId ? (
+        <button
+          type="button"
+          className="icon-btn icon-tip team-member-gear"
+          aria-label={`${TEAM_ROLE_LABEL[role]}的 Team 設定`}
+          data-tip={`${TEAM_ROLE_LABEL[role]} 設定`}
+          onClick={(e) => {
+            e.stopPropagation()
+            openTeamRole(teamId, roleKeyOfMember(role))
+          }}
+        >
+          ⚙
+        </button>
+      ) : null}
     </div>
   )
 }

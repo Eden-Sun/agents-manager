@@ -178,6 +178,15 @@ const ISSUES: Rec[] = [
 
 // ------------------------------------------------------------ SPEC-team（mock）
 
+interface MockRoleSpec {
+  kind: BotKind
+  model: string | null
+  effort: string | null
+  fast: boolean
+  identity: string | null
+  persona_extra: string
+}
+
 interface MockTeam {
   id: string
   project_id: string
@@ -196,6 +205,8 @@ interface MockTeam {
   budget: TeamBudget
   usage: { relays: number; review_rounds_total: number; elapsed_min: number; per_bot: Record<string, { turns: number }> }
   members: { bot_id: string; role: TeamRole }[]
+  /** `roles_json`：三個角色各自是用什麼設定建出來的（SPEC-team §10.5 的 PATCH 目標）。 */
+  roles: { pm: MockRoleSpec; workers: { count: number; spec: MockRoleSpec }; reviewer: MockRoleSpec | null }
   issues: MockTeamIssue[]
   pr_url: string | null
   summary: string | null
@@ -2458,6 +2469,7 @@ export class MockTransport implements Transport {
       base_ref: t.base_ref,
       base_sha: t.base_sha,
       worktree_root: t.worktree_root,
+      roles: t.roles,
     }
   }
 
@@ -2569,7 +2581,7 @@ export class MockTransport implements Transport {
     return id ? this.bots.find((b) => b.id === id) : undefined
   }
 
-  private roleSpec(v: unknown): { kind: BotKind; model: string | null; effort: string | null; fast: boolean; identity: string | null; persona_extra: string } {
+  private roleSpec(v: unknown): MockRoleSpec {
     const o = (v ?? {}) as Rec
     return {
       kind: toKind(o.kind),
@@ -2633,6 +2645,7 @@ export class MockTransport implements Transport {
       budget,
       usage: { relays: 0, review_rounds_total: 0, elapsed_min: 0, per_bot: {} },
       members: [],
+      roles: { pm, workers: { count: workers.count, spec: workers }, reviewer },
       issues: [{
         id: ulid('issue'),
         seq: 1,
@@ -3154,8 +3167,41 @@ export class MockTransport implements Transport {
     }
     if (b.supervised !== undefined) t.supervised = b.supervised === true
     if (b.deliver === 'pr' || b.deliver === 'branch') t.deliver = b.deliver
+    for (const role of ['pm', 'workers', 'reviewer'] as const) {
+      if (!b[role] || typeof b[role] !== 'object') continue
+      this.patchTeamRole(t, role, b[role] as Rec)
+    }
     this.emitTeam(t)
     return {}
+  }
+
+  /**
+   * SPEC-team §10.5 的一個角色。改 `kind` = 換 bot（§7.6）：舊的移出 `members`、
+   * 新的接同一個名字與 cwd；其餘欄位只是把 spec 與現有成員的欄位對齊。
+   */
+  private patchTeamRole(t: MockTeam, role: 'pm' | 'workers' | 'reviewer', p: Rec) {
+    const spec = role === 'workers' ? t.roles.workers.spec : t.roles[role]
+    if (!spec) throw new ApiError(400, { error: 'bad_request', message: '這個 team 沒有 reviewer' }, 'bad request')
+    const teamRole: TeamRole = role === 'workers' ? 'worker' : role
+    const fromKind = spec.kind
+    if (typeof p.kind === 'string') spec.kind = toKind(p.kind)
+    if (p.model !== undefined) spec.model = typeof p.model === 'string' && p.model.trim() ? p.model.trim() : null
+    if (p.effort !== undefined) spec.effort = typeof p.effort === 'string' && p.effort.trim() ? p.effort.trim() : null
+    if (p.fast !== undefined) spec.fast = p.fast === true
+    if (p.identity !== undefined) {
+      spec.identity = typeof p.identity === 'string' && p.identity.trim() ? p.identity.trim() : null
+    }
+    for (const m of t.members.filter((x) => x.role === teamRole)) {
+      const bot = this.bots.find((x) => x.id === m.bot_id)
+      if (!bot) continue
+      if (spec.kind !== fromKind) bot.kind = spec.kind
+      bot.model = spec.model
+      bot.effort = spec.effort
+      bot.fast = spec.fast ? 1 : 0
+      bot.identity = spec.identity
+      this.emit('bot_changed', { bot_id: bot.id })
+    }
+    this.teamEvent(t.id, 'note', { action: 'patch', role, from: fromKind, to: spec.kind })
   }
 
   private teamSay(id: string, b: Rec) {

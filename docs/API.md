@@ -1437,6 +1437,32 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 > 修正前是拿**全部**列（含 `done` / `failed` / `skipped`）比對 issue 號，所以一個 issue 在同一隊做過一次
 > 就永遠不能再排，UI 只會看到「追加 issue 失敗：issue already queued」。
 
+#### `PATCH /api/teams/{id}` 的角色（2026-09-08 新增）
+
+改預算 / supervised / deliver 之外，三個角色也能就地改：
+
+```json
+{"pm":       {"model": "opus", "effort": "high", "apply": "now"},
+ "workers":  {"kind": "grok"},
+ "reviewer": {"identity": "cc2", "model": null}}
+```
+
+三個 key 同一個形狀 `{"kind"?, "model"?, "effort"?, "fast"?, "identity"?, "apply"?}`。
+省略一個欄位 = 不動；`model` / `effort` / `identity` 送 `null` = 清成該 kind 的預設。
+
+| 欄位 | 行為 |
+|---|---|
+| `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（下一批執行者、reopen 重建的成員都照它），並更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員重啟（進行中的工作會斷），預設 `next` 等重啟或換批 |
+| `kind` | **換一個 bot**：同名、同 cwd 建新 kind 的成員，舊的停掉並軟刪（訊息保留），未做完的 task 跟著搬，新成員直接啟動。`apply` 對它沒有意義。詳見 SPEC-team §7.6 |
+
+錯誤：kind 未安裝 / `effort` 對不上該 kind → `400`；`identity` 不存在 → `404 {"error":"not_found","what":"identity"}`，
+身分的 kind 對不上 → `400`；這隊沒有 reviewer 而送了 `reviewer` → `400`；
+換 `kind` 時該角色有成員正在跑一個 turn → `409 {"error":"conflict","reason":"member busy","role","bot_id","name"}`（先 `pause` 再改）。
+終態的 team 一律 `409`。
+
+前端在 TeamPanel 副標題列畫成三列（`TeamRoleEditor.tsx`），側欄成員列的齒輪也開同一份表單——
+**不要**改用 `PATCH /api/bots/{id}`：那只會改到那一列 bot，`roles_json` 不動，下一批又跑回舊設定。
+
 ## 子 agent（bot 自己開的 pane，2026-09-07 新增）
 
 daemon 起的每個 agent 都帶一段預設人設（`lifecycle::child_agent_rules`，接在使用者的 `bot.persona` 前面）：

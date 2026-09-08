@@ -6666,25 +6666,43 @@ button.model-tag[aria-expanded='true'] {
   white-space: nowrap;
 }
 
-/* 執行者模型 chip：跟交付 chip 同一款，但是可以按的。 */
-button.team-workers {
-  cursor: pointer;
-  font: inherit;
-  font-size: 11px;
-  /* 可按的東西一律墊到 24px 高（WCAG 2.2 的最小目標），字級與間距不動。 */
-  display: inline-flex;
+/* 三個角色各一列（`TeamRoleEditor`）。原本這裡是一顆「執行者：<模型>」的 chip，
+   另外兩個角色從 UI 上完全改不到；三列排在副標題列裡，窄畫面自己折。 */
+.team-roles {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  min-height: 24px;
+  gap: 4px 10px;
+  min-width: 0;
 }
 
-button.team-workers:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--text);
+.team-role-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 1px 6px 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  /* 可按的東西一律墊到 24px 高（WCAG 2.2 的最小目標）。 */
+  min-height: 26px;
 }
 
-button.team-workers:disabled {
-  cursor: default;
-  opacity: 0.6;
+.team-role-name {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.team-role-spec {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .team-deliver.pr {
@@ -7724,6 +7742,28 @@ button.team-workers:disabled {
 
 .bot-row.team-member-row {
   padding-left: 4px;
+}
+
+/* 成員列的齒輪：開的是 Team 的角色設定，不是 bot 設定。跟 team 節點的動作一樣只在
+   hover / 鍵盤 focus 時浮出來——常駐三顆齒輪會把已經很擠的成員列再擠掉一截。 */
+.team-member-gear {
+  flex: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.bot-row.team-member-row:hover .team-member-gear,
+.bot-row.team-member-row:focus-within .team-member-gear {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .team-member-gear {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* ---------------------------------------------------------- TeamLaunchPanel */

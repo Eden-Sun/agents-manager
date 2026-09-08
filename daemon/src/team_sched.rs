@@ -2241,7 +2241,7 @@ mod scenarios {
             s.app(),
             &s.tid,
             crate::team::PatchTeam {
-                workers: Some(crate::team::WorkersPatch { model: Some(Some("sonnet".into())), ..Default::default() }),
+                workers: Some(crate::team::RolePatch { model: Some(Some("sonnet".into())), ..Default::default() }),
                 ..Default::default()
             },
         )

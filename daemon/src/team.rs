@@ -2291,14 +2291,27 @@ pub struct PatchTeam {
     #[serde(default)]
     pub deliver: Option<String>,
     #[serde(default)]
-    pub workers: Option<WorkersPatch>,
+    pub workers: Option<RolePatch>,
+    #[serde(default)]
+    pub pm: Option<RolePatch>,
+    #[serde(default)]
+    pub reviewer: Option<RolePatch>,
 }
 
-/// Change the executors' model mid-run. `apply = "next"` (default) only rewrites the spec the
-/// next batch is created from; `apply = "now"` also updates the live workers and restarts
-/// them, which drops whatever they were in the middle of.
+/// Change one role mid-run (§10.5). All three roles take the same shape.
+///
+/// `apply = "next"` (default) only rewrites the spec in `roles_json`, which is what the next
+/// batch of executors is created from; `apply = "now"` also restarts the live members, which
+/// drops whatever they were in the middle of. `kind` is the exception: a member's CLI is
+/// decided when its pane starts, so changing it always swaps the bot (see [`swap_member`])
+/// no matter what `apply` says.
+///
+/// `Option<Option<String>>` on purpose: an absent key leaves the field alone, an explicit
+/// `null` clears it back to the kind's default.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct WorkersPatch {
+pub struct RolePatch {
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub model: Option<Option<String>>,
     #[serde(default)]
@@ -2306,7 +2319,44 @@ pub struct WorkersPatch {
     #[serde(default)]
     pub fast: Option<bool>,
     #[serde(default)]
+    pub identity: Option<Option<String>>,
+    #[serde(default)]
     pub apply: Option<String>,
+}
+
+/// Where one role lives: the key in `roles_json`, and the `bots.team_role` its members carry.
+struct RoleSlot {
+    /// `roles_json` key **and** the label used in error messages / the `patch` note.
+    key: &'static str,
+    team_role: &'static str,
+}
+
+const ROLE_SLOTS: [RoleSlot; 3] = [
+    RoleSlot { key: "pm", team_role: "pm" },
+    RoleSlot { key: "workers", team_role: "worker" },
+    RoleSlot { key: "reviewer", team_role: "reviewer" },
+];
+
+/// `roles_json` nests the executors one level deeper (`workers.count` sits beside the spec);
+/// the other two roles *are* the spec.
+fn read_role_spec(roles: &Value, key: &str) -> Option<RoleSpec> {
+    let v = if key == "workers" { roles.get("workers")?.get("spec")? } else { roles.get(key)? };
+    serde_json::from_value(v.clone()).ok()
+}
+
+fn write_role_spec(roles: &mut Value, key: &str, spec: Value) {
+    if key == "workers" {
+        if let Some(w) = roles.get_mut("workers").and_then(Value::as_object_mut) {
+            w.insert("spec".into(), spec);
+        }
+    } else if let Some(o) = roles.as_object_mut() {
+        o.insert(key.into(), spec);
+    }
+}
+
+/// `Some(None)` (an explicit `null`) clears the field; whitespace counts as empty.
+fn patched_opt(v: &Option<String>) -> Option<String> {
+    v.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
 }
 
 /// `PATCH /api/teams/:id` — top up the budget, flip supervised, change the delivery mode.
@@ -2326,60 +2376,19 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
     };
     let supervised = p.supervised.unwrap_or(t.supervised == 1);
     let mut roles: Value = serde_json::from_str(&t.roles_json).unwrap_or_else(|_| json!({}));
-    let mut restarted: Vec<String> = Vec::new();
-    let mut workers_note = Value::Null;
-    if let Some(wp) = &p.workers {
-        let apply_now = match wp.apply.as_deref().map(str::trim) {
-            None | Some("") | Some("next") => false,
-            Some("now") => true,
-            Some(other) => return Err(LcError::Bad(format!("workers.apply must be `next` or `now`, not `{other}`"))),
+    // One note entry per role that was actually touched, so the timeline says *what* changed.
+    let mut role_notes = serde_json::Map::new();
+    for slot in ROLE_SLOTS.iter() {
+        let rp = match slot.key {
+            "pm" => p.pm.as_ref(),
+            "workers" => p.workers.as_ref(),
+            _ => p.reviewer.as_ref(),
         };
-        let project = db::project(&app.db, &t.project_id).await.map_err(any_err)?;
-        let host = project.as_ref().map(|p| p.host.clone()).unwrap_or_else(|| LOCAL_HOST.to_string());
-        let mut spec: RoleSpec = roles
-            .get("workers")
-            .and_then(|w| w.get("spec"))
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .ok_or_else(|| LcError::Upstream("team roles_json has no worker spec".into()))?;
-        if let Some(m) = &wp.model {
-            spec.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        }
-        if let Some(e) = &wp.effort {
-            spec.effort = e.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        }
-        if let Some(f) = wp.fast {
-            spec.fast = f;
-        }
-        let checked = check_role(app, &host, &spec, "workers").await?;
-        if let Some(w) = roles.get_mut("workers").and_then(Value::as_object_mut) {
-            w.insert("spec".into(), role_spec_json(&checked));
-        }
-        // The live batch: the spec is what they were started from, so the same fields move
-        // with it. Without `apply = "now"` they keep running as they are until replaced.
-        let members = db::team_members(&app.db, team_id).await.map_err(any_err)?;
-        for b in members.iter().filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker")) {
-            sqlx::query("UPDATE bots SET model = ?, effort = ?, fast = ? WHERE id = ?")
-                .bind(&checked.model)
-                .bind(&checked.effort)
-                .bind(checked.fast as i64)
-                .bind(&b.id)
-                .execute(&app.db)
-                .await
-                .map_err(any_err)?;
-            app.emit("bot_changed", json!({"bot_id": b.id})).await;
-            if apply_now && db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
-                match crate::lifecycle::restart_bot(app, &b.id).await {
-                    Ok(_) => restarted.push(short_name(&b.name, team_id)),
-                    Err(e) => tracing::warn!(bot = %b.name, error = ?e, "team worker restart after model change failed"),
-                }
-            }
-        }
-        workers_note = json!({
-            "model": checked.model, "effort": checked.effort, "fast": checked.fast,
-            "apply": if apply_now { "now" } else { "next" }, "restarted": restarted,
-        });
+        let Some(rp) = rp else { continue };
+        let note = patch_role(app, &t, slot, rp, &mut roles).await?;
+        role_notes.insert(slot.key.into(), note);
     }
+    let workers_note = role_notes.get("workers").cloned().unwrap_or(Value::Null);
     sqlx::query("UPDATE teams SET budget_json = ?, deliver = ?, supervised = ?, roles_json = ? WHERE id = ?")
         .bind(serde_json::to_string(&budget).unwrap_or_else(|_| "{}".into()))
         .bind(&deliver)
@@ -2397,12 +2406,226 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
         None,
         None,
         None,
-        json!({"action": "patch", "budget": budget, "deliver": deliver, "supervised": supervised, "workers": workers_note}),
+        json!({
+            "action": "patch", "budget": budget, "deliver": deliver, "supervised": supervised,
+            // `workers` stays at the top level: it is what every reader of this note has
+            // parsed since §10.5 existed. `roles` is the full picture (pm / workers / reviewer).
+            "workers": workers_note, "roles": Value::Object(role_notes),
+        }),
     )
     .await?;
     let t = load(app, team_id).await?;
     emit_team_changed(app, &t).await;
     Ok(json!({}))
+}
+
+/// One role's half of [`patch`] (§10.5). Rewrites `roles_json` — which is what the next batch
+/// of executors is built from — and then brings the live members into line.
+///
+/// `model` / `effort` / `fast` / `identity` are plain column updates; `apply = "now"` restarts
+/// the members so the change takes effect immediately. `kind` cannot be a column update at
+/// all: which CLI a member runs is decided when its pane starts, so a new kind means a new
+/// bot ([`swap_member`]).
+async fn patch_role(
+    app: &Arc<App>,
+    t: &db::Team,
+    slot: &RoleSlot,
+    rp: &RolePatch,
+    roles: &mut Value,
+) -> LcResult<Value> {
+    let apply_now = match rp.apply.as_deref().map(str::trim) {
+        None | Some("") | Some("next") => false,
+        Some("now") => true,
+        Some(other) => {
+            return Err(LcError::Bad(format!("{}.apply must be `next` or `now`, not `{other}`", slot.key)))
+        }
+    };
+    let project = db::project(&app.db, &t.project_id)
+        .await
+        .map_err(any_err)?
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let mut spec = read_role_spec(roles, slot.key).ok_or_else(|| match slot.key {
+        // A team built without a reviewer has no spec to edit — and adding one mid-run would
+        // need a worktree and a whole startup, which is not what a PATCH is for.
+        "reviewer" => LcError::Bad("this team has no reviewer".into()),
+        k => LcError::Upstream(format!("team roles_json has no {k} spec")),
+    })?;
+    let from_kind = spec.kind.clone();
+    if let Some(k) = &rp.kind {
+        spec.kind = k.trim().to_string();
+    }
+    if let Some(m) = &rp.model {
+        spec.model = patched_opt(m);
+    }
+    if let Some(e) = &rp.effort {
+        spec.effort = patched_opt(e);
+    }
+    if let Some(f) = rp.fast {
+        spec.fast = f;
+    }
+    if let Some(i) = &rp.identity {
+        spec.identity = patched_opt(i);
+    }
+    // Unchanged from before: kind installed, effort valid for that kind, identity present and
+    // belonging to that same kind — all resolved on the team's host.
+    let checked = check_role(app, &project.host, &spec, slot.key).await?;
+    write_role_spec(roles, slot.key, role_spec_json(&checked));
+
+    let live: Vec<db::Bot> = db::team_members(&app.db, &t.id)
+        .await
+        .map_err(any_err)?
+        .into_iter()
+        .filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some(slot.team_role))
+        .collect();
+    let mut restarted: Vec<String> = Vec::new();
+    let mut swapped: Vec<Value> = Vec::new();
+
+    if checked.kind != from_kind {
+        // Refuse before touching anything: swapping a member out from under a turn that is
+        // still running loses the reply the team is waiting for. The user pauses first.
+        for b in &live {
+            if let Some(run) = db::active_run(&app.db, &b.id).await.map_err(any_err)? {
+                if db::in_flight_turn(&app.db, &run.id).await.map_err(any_err)?.is_some() {
+                    return Err(LcError::conflict(
+                        "member busy",
+                        json!({"role": slot.key, "bot_id": b.id, "name": short_name(&b.name, &t.id)}),
+                    ));
+                }
+            }
+        }
+        for b in &live {
+            let new_id = swap_member(app, &project, t, b, &checked).await?;
+            swapped.push(json!({"name": short_name(&b.name, &t.id), "from_bot_id": b.id, "to_bot_id": new_id}));
+        }
+    } else {
+        // The spec is what these members were started from, so the same fields move with it.
+        // Without `apply = "now"` they keep running as they are until they are replaced.
+        for b in &live {
+            sqlx::query("UPDATE bots SET model = ?, effort = ?, fast = ?, identity = ? WHERE id = ?")
+                .bind(&checked.model)
+                .bind(&checked.effort)
+                .bind(checked.fast as i64)
+                .bind(&checked.identity)
+                .bind(&b.id)
+                .execute(&app.db)
+                .await
+                .map_err(any_err)?;
+            app.emit("bot_changed", json!({"bot_id": b.id})).await;
+            if apply_now && db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
+                match crate::lifecycle::restart_bot(app, &b.id).await {
+                    Ok(_) => restarted.push(short_name(&b.name, &t.id)),
+                    Err(e) => {
+                        tracing::warn!(bot = %b.name, error = ?e, "team member restart after a patch failed")
+                    }
+                }
+            }
+        }
+    }
+    Ok(json!({
+        "role": slot.key, "kind": checked.kind, "from": from_kind, "to": checked.kind,
+        "model": checked.model, "effort": checked.effort, "fast": checked.fast,
+        "identity": checked.identity,
+        "apply": if apply_now { "now" } else { "next" },
+        "restarted": restarted, "swapped": swapped,
+    }))
+}
+
+/// §7.6 — changing a member's `kind` means replacing the bot.
+///
+/// The CLI a member runs is chosen when its pane starts, so flipping `bots.kind` under a
+/// running agent only makes the row lie about the process. Instead: stop and soft-delete the
+/// old bot (its messages stay — the conversation is the team's log), insert a new one with the
+/// **same name, cwd and role**, hand it the unfinished tasks, and start it.
+///
+/// The phase is deliberately left alone. A `paused` team stays paused so the user presses
+/// 「繼續」 when they are ready; a running one carries on with the new member in place.
+async fn swap_member(
+    app: &Arc<App>,
+    project: &db::Project,
+    t: &db::Team,
+    old: &db::Bot,
+    spec: &CheckedRole,
+) -> LcResult<String> {
+    let role = old.team_role.clone().unwrap_or_default();
+    let cwd = old.cwd.clone().unwrap_or_default();
+    let _ = crate::lifecycle::stop_bot(app, &old.id).await;
+    // Soft-delete first: `insert_member` refuses a name that is still taken, and the point of
+    // the swap is that the new member keeps the name the protocol already routes to.
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+        .bind(db::now())
+        .bind(&old.id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    let new_id =
+        insert_member(app, project, &t.id, &old.name, &tid6(&t.id), &role, t.issue_number, spec, &cwd).await?;
+
+    // The full persona, the same one `create` writes once the layout exists — the short one
+    // `insert_member` leaves behind has none of the dispatch / verdict protocol.
+    let roster: Vec<String> = db::team_members(&app.db, &t.id)
+        .await
+        .map_err(any_err)?
+        .iter()
+        .filter(|b| b.deleted_at.is_none())
+        .map(|b| format!("`{}`（{}）", short_name(&b.name, &t.id), b.team_role.clone().unwrap_or_default()))
+        .collect();
+    let persona = full_persona(
+        &role,
+        t.issue_number,
+        &short_name(&old.name, &t.id),
+        &cwd,
+        &t.branch,
+        &roster.join("、"),
+        spec.persona_extra.as_deref(),
+    );
+    sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
+        .bind(&persona)
+        .bind(&new_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+
+    // `team_tasks_one_open_per_worker` is unique on the bot, so an unfinished task left on the
+    // retired bot would block every future dispatch to this seat.
+    sqlx::query(
+        "UPDATE team_tasks SET worker_bot_id = ?, updated_at = ?
+          WHERE team_id = ? AND worker_bot_id = ? AND state NOT IN ('merged','skipped','failed')",
+    )
+    .bind(&new_id)
+    .bind(db::now())
+    .bind(&t.id)
+    .bind(&old.id)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+
+    // A member with no run is `member_lost` the moment the PM dispatches to it, and `resume`
+    // refuses to move until every member is running — so start it here, the same way
+    // `start_issue_workers` does for a fresh batch. A failure is noted, not fatal: the user
+    // can fix the cause and press 啟動 on the bot.
+    if let Ok(Some(bot)) = db::bot(&app.db, &new_id).await {
+        for e in crate::trust::pretrust_members(app, std::slice::from_ref(&bot)).await {
+            tracing::warn!(team = %t.id, error = %e, "could not pre-trust a swapped member's worktree");
+        }
+    }
+    if let Err(e) = crate::lifecycle::start_bot(app, &new_id).await {
+        let msg = format!("{e:?}");
+        tracing::warn!(bot = %old.name, error = %msg, "swapped team member failed to start");
+        record_event(
+            app,
+            &t.id,
+            "note",
+            None,
+            None,
+            None,
+            None,
+            json!({"action": "member_start_failed", "bot": old.name, "error": msg}),
+        )
+        .await?;
+    }
+    app.emit("bot_changed", json!({"bot_id": old.id})).await;
+    app.emit("bot_changed", json!({"bot_id": new_id})).await;
+    Ok(new_id)
 }
 
 /// Resolve the `to` field of `say`: a role (`pm` / `reviewer` / `rev` / `dev-1`), a bot id,
@@ -4235,7 +4458,7 @@ mod api_tests {
                 budget: Some(BudgetPatch { max_relays: Some(80), ..Default::default() }),
                 supervised: Some(true),
                 deliver: Some("pr".into()),
-                workers: None,
+                ..Default::default()
             },
         )
         .await
@@ -4247,6 +4470,155 @@ mod api_tests {
         assert_eq!(t.supervised, 1);
         assert_eq!(t.deliver, "pr");
         assert!(patch(&app, &tid, PatchTeam { deliver: Some("push".into()), ..Default::default() }).await.is_err());
+    }
+
+    /// §10.5: the three roles are editable, and only the fields that were sent move.
+    #[tokio::test]
+    async fn patch_edits_each_role_without_touching_the_others() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), true)).await;
+        patch(
+            &app,
+            &tid,
+            PatchTeam {
+                pm: Some(RolePatch { model: Some(Some("gpt-5.6-luna".into())), ..Default::default() }),
+                reviewer: Some(RolePatch { effort: Some(Some("low".into())), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let t = load(&app, &tid).await.unwrap();
+        let roles: Value = serde_json::from_str(&t.roles_json).unwrap();
+        assert_eq!(roles["pm"]["model"], "gpt-5.6-luna");
+        assert_eq!(roles["pm"]["kind"], "codex", "kind is untouched when it is not sent");
+        assert_eq!(roles["reviewer"]["effort"], "low");
+        assert_eq!(roles["workers"]["spec"]["kind"], "claude", "the other roles do not move");
+
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        let pm = members.iter().find(|b| b.team_role.as_deref() == Some("pm")).unwrap();
+        assert_eq!(pm.model.as_deref(), Some("gpt-5.6-luna"), "the live member follows the spec");
+        assert!(members.iter().all(|b| b.deleted_at.is_none()), "nothing is swapped without a kind change");
+    }
+
+    /// §7.6: a member's CLI is fixed when its pane starts, so a new `kind` is a new bot —
+    /// same name, same cwd, same seat, and the unfinished work moves with it.
+    #[tokio::test]
+    async fn patch_changes_worker_kind_swaps_bot() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let old = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("worker"))
+            .unwrap();
+        assert_eq!(old.kind, "claude");
+        let task_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
+             VALUES (?,?,1,'t','b',?,'br','working',?,?)",
+        )
+        .bind(&task_id)
+        .bind(&tid)
+        .bind(&old.id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        patch(
+            &app,
+            &tid,
+            PatchTeam {
+                workers: Some(RolePatch { kind: Some("grok".into()), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        let gone = members.iter().find(|b| b.id == old.id).unwrap();
+        assert!(gone.deleted_at.is_some(), "the old bot is retired, and its messages stay with it");
+        let new = members
+            .iter()
+            .find(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker"))
+            .expect("a replacement worker");
+        assert_eq!(new.kind, "grok");
+        assert_eq!(new.name, old.name, "the seat keeps its name — the protocol routes by it");
+        assert_eq!(new.cwd, old.cwd, "and its worktree");
+        let owner: String = sqlx::query_scalar("SELECT worker_bot_id FROM team_tasks WHERE id = ?")
+            .bind(&task_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(owner, new.id, "the unfinished task follows the seat");
+        let t = load(&app, &tid).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&t.roles_json).unwrap()["workers"]["spec"]["kind"], "grok");
+    }
+
+    /// A swap in the middle of a turn would throw away the reply the team is waiting for.
+    #[tokio::test]
+    async fn patch_refuses_a_kind_swap_while_the_member_is_mid_turn() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let worker = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("worker"))
+            .unwrap();
+        let run_id = fake_run(&app, &worker.id).await;
+        let conv = db::conversation_id(&app.db, &worker.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, created_at) VALUES (?,?,?,'web','in_flight',?)",
+        )
+        .bind(db::ulid())
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let err = patch(
+            &app,
+            &tid,
+            PatchTeam {
+                workers: Some(RolePatch { kind: Some("grok".into()), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "member busy"), "{err:?}");
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        assert!(members.iter().all(|b| b.deleted_at.is_none()), "and nothing is retired on the way out");
+    }
+
+    /// A team built without a reviewer has no spec to edit — adding one mid-run would need a
+    /// worktree and a startup, which is not what a PATCH does.
+    #[tokio::test]
+    async fn patch_reviewer_on_a_team_that_has_none_is_a_400() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let err = patch(
+            &app,
+            &tid,
+            PatchTeam {
+                reviewer: Some(RolePatch { model: Some(Some("sonnet".into())), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
     }
 
     /// §10.2 / §10.3 shapes, and §10.4's backwards pagination.
