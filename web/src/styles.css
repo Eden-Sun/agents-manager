@@ -9568,6 +9568,22 @@ button.run-debug-toggle:hover {
   }
 }
 
+/* 組隊畫面（`TeamLaunchPanel`）在 390px 逐面掃過只找到這一處：issue 佇列那一列的
+   「先做這個」被擠成兩行（`先做這 / 個`）。標題可以截尾，這個標籤不行。 */
+@media (width <= 640px) {
+  .team-queue-list li > .hint {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  .team-queue-list .team-queue-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 /* 抽屜的標題列（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4）：`AG Man` 加上排成兩列
    的徽章把它撐到 100px——抽屜本來就是滑出來找 bot 的，開頭卻先用掉九分之一的畫面，而那一列
    的內容（app 名字、pane 數、RAM、分頁數）沒有一樣是你滑開抽屜要找的。收成一列。 */
