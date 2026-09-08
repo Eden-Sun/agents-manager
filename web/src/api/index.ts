@@ -233,9 +233,11 @@ export async function deleteIdentity(name: string): Promise<void> {
   await transport.request('DELETE', `/identities/${encodeURIComponent(name)}`)
 }
 
-export async function createBot(projectId: string, input: NewBotInput): Promise<string> {
+export async function createBot(projectId: string, input: NewBotInput): Promise<{ id: string; name: string }> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/bots`, input)
-  return isRec(raw) ? str(pick(raw, 'bot_id', 'id')) : ''
+  const o = isRec(raw) ? raw : {}
+  // 舊 daemon 不回 `name`：那就是送出去的那個。
+  return { id: str(pick(o, 'bot_id', 'id')), name: str(pick(o, 'name'), input.name) }
 }
 
 /**

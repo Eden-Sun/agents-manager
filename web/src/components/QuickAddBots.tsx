@@ -92,6 +92,8 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
     setBusy(c.key)
     void addBot(projectId, {
       name: nextName(c.identity ?? c.kind, projectId, bots),
+      // 這裡算的名字是從瀏覽器的清單來的，剛新增完那一拍可能還沒同步；撞到就讓 daemon 往後找。
+      name_auto: true,
       kind: c.kind,
       model: null,
       effort: null,

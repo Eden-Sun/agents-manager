@@ -796,6 +796,12 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
 #[derive(Deserialize)]
 struct NewBot {
     name: String,
+    /// 2026-09-08: the sidebar's quick-add chips compute `<identity>-<n>` from the browser's
+    /// bot list, which can be a beat behind right after a create — so the second click sent the
+    /// same `cc1-1` and got a 409. With this set the daemon picks the next free suffix itself
+    /// (`name` minus any trailing `-<n>` is the base) and returns the name it used.
+    #[serde(default)]
+    name_auto: bool,
     kind: String,
     /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; omitted / null / "" = the CLI's own default.
     #[serde(default)]
@@ -857,6 +863,7 @@ async fn create_bot(
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
+    let used_name = std::sync::Mutex::new(b.name.clone());
     let res = app
         .cfg
         .update(|cfg| {
@@ -866,12 +873,19 @@ async fn create_bot(
                 .find(|p| p.id.as_deref() == Some(pid.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("no-project"))?;
             // Bot names are unique per project (the herdr agent name is `<project>-<bot>`).
-            if p.bots.iter().any(|x| x.name == b.name) {
-                anyhow::bail!("duplicate-name");
-            }
+            let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
+            let name = if taken(&b.name) {
+                if !b.name_auto {
+                    anyhow::bail!("duplicate-name");
+                }
+                next_free_name(&b.name, &taken)
+            } else {
+                b.name.clone()
+            };
+            *used_name.lock().unwrap() = name.clone();
             p.bots.push(crate::config::BotCfg {
                 id: Some(id.clone()),
-                name: b.name.clone(),
+                name,
                 kind: b.kind.clone(),
                 model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
                 effort: effort.clone(),
@@ -898,7 +912,26 @@ async fn create_bot(
     }
     reproject(&app).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    Ok((StatusCode::OK, Json(json!({"bot_id": id}))).into_response())
+    let name = used_name.into_inner().unwrap_or_default();
+    Ok((StatusCode::OK, Json(json!({"bot_id": id, "name": name}))).into_response())
+}
+
+/// `cc1-1` taken → `cc1-2`, `cc1-3`, …; a name with no numeric suffix (`review`) becomes
+/// `review-2`. Always stays inside the 32-char bot-name limit by trimming the base.
+fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
+    let base = match wanted.rfind('-') {
+        Some(i) if wanted[i + 1..].chars().all(|c| c.is_ascii_digit()) && i + 1 < wanted.len() => &wanted[..i],
+        _ => wanted,
+    };
+    for n in 1u32.. {
+        let suffix = format!("-{n}");
+        let room = 32usize.saturating_sub(suffix.len());
+        let candidate = format!("{}{suffix}", &base[..base.len().min(room)]);
+        if candidate != wanted && !taken(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 #[derive(Deserialize)]
@@ -2051,5 +2084,20 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
                 _ => return,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::next_free_name;
+
+    #[test]
+    fn next_free_name_bumps_the_suffix() {
+        let taken = |n: &str| ["cc1-1", "cc1-2", "review"].contains(&n);
+        assert_eq!(next_free_name("cc1-1", &taken), "cc1-3");
+        assert_eq!(next_free_name("cc1-9", &taken), "cc1-3");
+        assert_eq!(next_free_name("review", &taken), "review-1");
+        let long = "a".repeat(32);
+        assert!(next_free_name(&long, &taken).len() <= 32);
     }
 }
