@@ -1331,7 +1331,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
                        "hint": format!("主機 {} 沒有 `{idn}` 這個身份（config.toml 的 [[identities]] 或該機 zshrc 的 ccN alias）；先在那台建好，或到主機設定按「重新偵測」", project.host)}),
             ));
         }
-        let not_logged_in = app
+        let mut not_logged_in = app
             .tools
             .lock()
             .await
@@ -1339,6 +1339,13 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
             .and_then(|t| t.identities.get(idn))
             .map(|i| i.logged_in == Some(false))
             .unwrap_or(false);
+        // The cache can be half an hour stale after a login (the quota poller parks a
+        // logged-out identity); ask the CLI once before telling the user they are not logged in.
+        if not_logged_in {
+            if let Some(fresh) = crate::tools::recheck_identity_login(app, &project.host, idn).await {
+                not_logged_in = !fresh;
+            }
+        }
         if not_logged_in {
             tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "identity not logged in on host; the CLI will use the machine's default login");
             if let Ok(conv) = db::conversation_id(&app.db, bot_id).await {
