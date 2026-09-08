@@ -377,7 +377,7 @@ function GroupComposer({
       }
     })
   }
-  const enterToSend = useEnterToSend(() => {
+  const enterToSend = useEnterToSend(ref, () => {
     // 手機 Enter：mention 選單開著時先選字，不送。
     if (showPop && candidates.length) pick(candidates[activeIdx])
     else submit()

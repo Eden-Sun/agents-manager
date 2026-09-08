@@ -655,7 +655,7 @@ function Composer({
       }
     })
   }
-  const enterToSend = useEnterToSend(() => submit())
+  const enterToSend = useEnterToSend(ref, () => submit())
 
   /** 排隊中的那一則優先，否則是輸入框裡打到一半的字。 */
   const pending = queued?.text ?? text
