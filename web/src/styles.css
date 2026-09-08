@@ -9128,9 +9128,11 @@ button.run-debug-toggle:hover {
     min-height: 40px;
   }
 
+  /* `.tabs` 自己還有 2px 內距，40 + 4 剛好塞得進 60px 的標題列。 */
   .tab {
-    min-width: 44px;
-    padding: 0 10px;
+    height: 40px;
+    min-width: 40px;
+    padding: 0 8px;
   }
 
   /* 11px 以下的字在手機上是裝飾不是資訊。挑的是真的會被讀的那幾種標籤，不是全站放大：
@@ -9193,5 +9195,28 @@ button.run-debug-toggle:hover {
   .git-commit-msg {
     width: 40vw;
     min-width: 120px;
+  }
+}
+
+/* 標題列在 390px 只回答「這是誰、在做什麼、去哪一頁」。名字被截成五個字（`C1-fa…`），
+   右邊卻擺著一顆 190px 的額度 chip——它右邊那幾個欄位在點開的 popover 裡本來就有。
+   讓出來的寬度全部回到名字身上。 */
+@media (width <= 640px) {
+  /* 身分名（`cc1`）與停用方塊讓位：前者在側欄每一列與點開的 popover 裡都寫著，後者是坐在
+     桌機前才會去按的開關（10px 的方塊本來也不是觸控目標，popover 裡那份完整的還在）。
+     只留 kind 圖示與百分比——`docs/UI-DECISIONS.md`：百分比始終保留。視窗名（`7d` / `F`）
+     一起讓位，它在 chip 自己的 tooltip 與 popover 裡都寫著。 */
+  .main-head .quota-hp .quota-identity,
+  .main-head .quota-hp .quota-cell-toggle,
+  .main-head .quota-hp .quota-compact .quota-window-name {
+    display: none;
+  }
+
+  /* 名字至少十個字。`.main-title` 是 overflow: hidden，這個下限只有在上面兩樣讓出寬度
+     之後才排得下——不然被切掉的會是排在名字後面的齒輪。 */
+  .bot-head .main-title-row > strong,
+  .bot-head .main-title-row > .bot-name-btn,
+  .bot-head .main-title-row > .bot-name-input {
+    min-width: 10ch;
   }
 }
