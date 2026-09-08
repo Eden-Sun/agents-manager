@@ -3189,6 +3189,13 @@ async fn reconcile_teams_inner(app: &Arc<App>, host: Option<&str>) {
         if t.phase == "paused" || t.phase == "aborting" {
             continue;
         }
+        // 正在建立中的 team：`create` 先 INSERT（workspace_id 還是 NULL）、幾百毫秒後才
+        // `workspace.create`。這段空窗被別的 herdr 事件觸發的 reconcile 掃到，就會被判成
+        // workspace_missing 而暫停（2026-09-08 issue #56 實測）。建不成 create 自己會 rollback，
+        // 這裡不用替它判。
+        if t.phase == "starting" && t.workspace_id.as_deref().map_or(true, |w| w.trim().is_empty()) {
+            continue;
+        }
         let Ok(Some(p)) = db::project(&app.db, &t.project_id).await else { continue };
         if host.map(|h| p.host != h).unwrap_or(false) {
             continue;
