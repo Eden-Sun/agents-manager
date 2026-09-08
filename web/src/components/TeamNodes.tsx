@@ -10,6 +10,7 @@ import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamIssueProgress } from './TeamIssueProgress'
+import { teamPauseAction } from './teamPanelLogic'
 
 /**
  * SPEC-team §11.4 — sidebar 裡 Project 底下的 Team 節點。
@@ -54,6 +55,63 @@ function MemberRow({ bot }: { bot: Bot }) {
           <ModelTag botId={bot.id} />
         </span>
       </span>
+    </div>
+  )
+}
+
+/**
+ * 暫停中的隊伍在側欄那一行：**寫出原因**，能推得動的再給一顆按鈕。
+ *
+ * 原本 `paused` 只反映在標題列的一顆褐色點與 tooltip 上（tooltip 要停住游標才看得到，
+ * 等於沒有）。#53 因為 `budget_time` 停了兩個多小時，側欄看起來跟「還在跑」沒兩樣，
+ * 使用者以為卡死——推得動它的兩顆按鈕全在 TeamPanel 裡，要先點進去才知道。
+ *
+ * 按鈕的口徑與 TeamPanel 標題列同一條（`teamPauseAction`）：預算類加碼再繼續，
+ * 其餘可推的直接繼續，要回話／放行／救成員的不給按鈕（那些在面板裡才處理得掉）。
+ */
+function TeamPausedRow({ team }: { team: Team }) {
+  const controlTeam = useStore((s) => s.controlTeam)
+  const patchTeam = useStore((s) => s.patchTeam)
+  const busy = useStore((s) => Boolean(s.busy[`team:${team.id}:resume`] || s.busy[`team:${team.id}:patch`]))
+  const reason = team.pause_reason
+  const action = teamPauseAction(reason)
+  const label = teamPauseLabel(reason)
+
+  return (
+    <div className="team-paused-row">
+      <span className="team-paused-why" title={reason ?? undefined}>
+        已暫停{label ? ` · ${label}` : ''}
+      </span>
+      {action !== null ? (
+        <button
+          type="button"
+          className="mini-btn team-paused-go"
+          disabled={busy}
+          title={
+            action === 'bump'
+              ? '把轉送上限與時間上限各加一倍，然後從暫停的地方繼續'
+              : '從暫停的地方繼續（會重送待送的轉送）'
+          }
+          onClick={(e) => {
+            // 側欄的一列同時是「選取這個 team」的按鈕，按這顆不該順便切畫面。
+            e.stopPropagation()
+            void (async () => {
+              if (action === 'bump') {
+                const ok = await patchTeam(team.id, {
+                  budget: {
+                    max_relays: team.budget.max_relays * 2,
+                    max_wall_clock_min: team.budget.max_wall_clock_min * 2,
+                  },
+                })
+                if (!ok) return
+              }
+              await controlTeam(team.id, 'resume')
+            })()
+          }}
+        >
+          {action === 'bump' ? '加碼並繼續' : '繼續'}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -149,6 +207,7 @@ function TeamNode({ team }: { team: Team }) {
       </div>
       {/* 進度與耗時貼在標題正下方，不隨成員收合消失：這兩個數字是掃過側欄時唯一想知道的。 */}
       <TeamIssueProgress team={team} />
+      {team.phase === 'paused' ? <TeamPausedRow team={team} /> : null}
       {open ? (
         <div className="team-node-members" role="group" aria-label={`${members.length} 位成員`}>
           {members.map((b, i) => (

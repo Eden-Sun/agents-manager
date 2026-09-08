@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import type { Team } from '../api/types'
+import type { TeamCount } from './teamProgress'
 import { fmtDur, teamProgressOf, useLiveClock } from './teamProgress'
 
 /**
@@ -10,30 +11,54 @@ import { fmtDur, teamProgressOf, useLiveClock } from './teamProgress'
  * 在側欄擺一整天，這兩個數字就是你每次掃過去唯一想知道的東西。
  *
  * 為什麼在標題正下方而不是塞進 tooltip 或收合列：tooltip 要停住游標才看得到，等於沒有；
- * 收合列只在收起來時存在。這一行不隨收合消失，字級也拉到跟標題同級（計數 15px 等寬）。
+ * 收合列只在收起來時存在。這一行不隨收合消失，字級也拉到跟標題同級（計數 14px 等寬）。
  * 跑動中用 accent 色、結束轉灰——不用讀字就知道哪一隊還活著。
+ *
+ * 計數帶單位（`issue 2/20 · task 4/5`）：原本只有一個沒頭沒尾的 `2/20`，同一隊已經合併
+ * 4 個 task 卻寫著 2，使用者只能猜那是什麼、並且以為卡住了（issue #53）。
  */
+function Count({ unit, count, title }: { unit: string; count: TeamCount; title: string }) {
+  return (
+    <span className="tip-count" title={title}>
+      <span className="tip-unit">{unit}</span>
+      {count.at}
+      <span className="tip-total">/{count.total}</span>
+    </span>
+  )
+}
+
 export function TeamIssueProgress({ team }: { team: Team }) {
   const ref = useRef<HTMLDivElement>(null)
   const p = teamProgressOf(team)
-  const running = p.startedAt !== null && p.endedAt === null
+  const running = p.startedAt !== null && p.frozenMs === null
   // 只有跑動中才需要每秒重繪；`useLiveClock` 另外會在分頁隱藏／卡片捲出畫面時把 interval 收掉。
   const now = useLiveClock(running, ref)
-  const elapsed = p.startedAt === null ? null : (p.endedAt ?? now) - p.startedAt
-  if (p.total === 0 && elapsed === null) return null
+  const elapsed = p.frozenMs ?? (p.startedAt === null ? null : now - p.startedAt)
+  const queued = p.issues.total > 1
+  if (p.tasks.total === 0 && !queued && elapsed === null) return null
 
-  const unit = p.kind === 'issues' ? 'issue' : '步驟'
   return (
     <div ref={ref} className={`team-issue-progress${running ? ' running' : ''}`}>
-      {p.total > 0 ? (
-        <span className="tip-count" title={`已完成 ${p.at} / ${p.total} 個${unit}`}>
-          {p.at}
-          <span className="tip-total">/{p.total}</span>
-        </span>
+      {queued ? (
+        <Count
+          unit="issue"
+          count={p.issues}
+          title={`正在做第 ${p.issues.at} 個 issue，佇列共 ${p.issues.total} 個`}
+        />
+      ) : null}
+      {p.tasks.total > 0 ? (
+        <Count
+          unit="task"
+          count={p.tasks}
+          title={`這個 issue 已結案 ${p.tasks.at} / ${p.tasks.total} 個 task（合併／略過／失敗）`}
+        />
       ) : null}
       {elapsed !== null ? (
-        <span className="tip-elapsed" title={running ? '這個 issue 開跑到現在' : '這個 issue 的總耗時'}>
-          {running ? '已 ' : '共 '}
+        <span
+          className="tip-elapsed"
+          title={running ? '這個 issue 開跑到現在' : '這個 issue 停下來為止的耗時（暫停中不再累加）'}
+        >
+          {p.endedAt !== null ? '共 ' : '已 '}
           {fmtDur(elapsed)}
         </span>
       ) : null}

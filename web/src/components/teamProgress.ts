@@ -1,31 +1,46 @@
 import { useEffect, useMemo, useReducer, useState } from 'react'
 import type { RefObject } from 'react'
 import type { Team, TeamTaskState } from '../api/types'
+import { TEAM_TERMINAL_PHASES } from '../api/types'
 
 /**
  * 「這張卡跑到哪了、跑了多久」——側欄 team 卡片與 `TeamQueueProgress` 共用的口徑。
  *
- * daemon 沒有一個現成的「回合數／總回合數」，所以計數是從既有欄位算出來的，而且分兩種
- * （見 `TeamProgress.kind`，口徑寫在 docs/SPEC-team.md §2.3）：
- * - 佇列（`issues_summary.total >= 2`）：分子是「正在做第幾個 issue」，跟佇列進度條同一條算式。
- * - 單一 issue：分子是已結案的 task 數（`tasks_summary` 的 merged / skipped / failed），
- *   分母是 `tasks_summary.total`。PM 還沒拆 task 時 total 是 0，那就只報時間、不報計數。
+ * daemon 沒有一個現成的「回合數／總回合數」，所以計數是從既有欄位算出來的（口徑寫在
+ * docs/SPEC-team.md §2.3）。兩個計數**一起回**，呼叫端自己決定畫哪個：
+ * - `issues`：「正在做第幾個 issue」，跟佇列進度條同一條算式；`total <= 1` 就不必畫。
+ * - `tasks`：當前這個 issue 已結案的 task 數（`merged` / `skipped` / `failed`）／`total`。
+ *   PM 還沒拆 task 時 `total` 是 0，那就只報時間。
+ *
+ * 原本只回其中一個、而且沒有單位字（`2/20`）——20 個 issue 的隊伍做完 4 個 task 只看到
+ * 「2/20」，使用者以為是 task 卡在 2。兩個數字都給，並在畫面上寫出 `issue` / `task`。
  */
 
 /** task 進到這些狀態就不會再動了——「完成的步驟」數的是它們。 */
 const SETTLED_TASKS: readonly TeamTaskState[] = ['merged', 'skipped', 'failed']
 
-export type TeamProgressKind = 'issues' | 'tasks'
-
-export interface TeamProgress {
-  kind: TeamProgressKind
-  /** 分子。`total === 0` 時沒有意義，呼叫端不要顯示計數。 */
+/** 一組「第幾個 / 共幾個」。`total === 0` 時沒有意義，呼叫端不要顯示。 */
+export interface TeamCount {
   at: number
   total: number
+}
+
+export interface TeamProgress {
+  /** 佇列走到第幾個；`total <= 1`（沒有佇列）時呼叫端不要顯示。 */
+  issues: TeamCount
+  /** 當前這個 issue 的 task 走到第幾個。 */
+  tasks: TeamCount
   /** 計時器從哪一刻起算（epoch ms）；null = 這個 issue 還沒開跑。 */
   startedAt: number | null
-  /** 跑完凍結在這一刻；null = 還在跑。 */
+  /** 跑完凍結在這一刻；null = 還沒結束。 */
   endedAt: number | null
+  /**
+   * 已經不會再前進的耗時（ms）；null = 還在跑，呼叫端要自己接時鐘。
+   *
+   * `paused` 也算不動了：暫停的隊伍沒人在燒時間，計時器卻照著 `started_at` 一直跳
+   * （#53 停在 119 分卻顯示「已 4 小時 38 分」），看起來像是卡死在跑。終態同理。
+   */
+  frozenMs: number | null
 }
 
 function parse(at: string | null | undefined): number | null {
@@ -54,13 +69,27 @@ export function teamProgressOf(team: Team): TeamProgress {
   // 整隊結束了就算 issue 自己沒寫 ended_at 也要凍結——不然做完的卡片會一直跳秒。
   const endedAt = parse(current?.ended_at) ?? teamEnded
 
-  const queue = team.issues_summary
-  if (queue.total >= 2) {
-    return { kind: 'issues', at: issueQueueAt(team), total: queue.total, startedAt, endedAt }
-  }
   const tasks = team.tasks_summary
-  const at = SETTLED_TASKS.reduce((n, s) => n + (tasks[s] ?? 0), 0)
-  return { kind: 'tasks', at: Math.min(tasks.total, at), total: tasks.total, startedAt, endedAt }
+  const settled = SETTLED_TASKS.reduce((n, s) => n + (tasks[s] ?? 0), 0)
+  return {
+    issues: { at: issueQueueAt(team), total: team.issues_summary.total },
+    tasks: { at: Math.min(tasks.total, settled), total: tasks.total },
+    startedAt,
+    endedAt,
+    frozenMs: frozenMsOf(team, startedAt, endedAt),
+  }
+}
+
+/**
+ * 結束了就用真正的區間；還沒結束但已經停下來（`paused` / 終態沒寫 `ended_at`）就用
+ * daemon 自己算的 `usage.elapsed_min`——它跟 `max_wall_clock_min` 是同一個數字，
+ * 而且暫停之後 scheduler 不再更新它，正好就是「停住的那一刻」。
+ */
+function frozenMsOf(team: Team, startedAt: number | null, endedAt: number | null): number | null {
+  if (startedAt !== null && endedAt !== null) return Math.max(0, endedAt - startedAt)
+  const halted = team.phase === 'paused' || TEAM_TERMINAL_PHASES.includes(team.phase)
+  if (!halted || startedAt === null) return null
+  return Math.max(0, team.usage?.elapsed_min ?? 0) * 60_000
 }
 
 /** `已 3 分 12 秒` 的數字部分。超過一小時就不報秒——那個位數已經沒人在看了。 */
