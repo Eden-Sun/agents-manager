@@ -6,6 +6,7 @@ import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { useEnterToSend } from '../hooks/useEnterToSend'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { ProjectNameField } from './ProjectNameField'
@@ -376,6 +377,11 @@ function GroupComposer({
       }
     })
   }
+  const enterToSend = useEnterToSend(() => {
+    // 手機 Enter：mention 選單開著時先選字，不送。
+    if (showPop && candidates.length) pick(candidates[activeIdx])
+    else submit()
+  })
 
   const syncCaret = () => {
     const el = ref.current
@@ -493,6 +499,7 @@ function GroupComposer({
               submit()
             }
           }}
+          {...enterToSend}
         />
         <button
           type="button"
