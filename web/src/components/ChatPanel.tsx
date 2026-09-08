@@ -20,6 +20,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { UpdateBadge } from './UpdateBadge'
+import { TurnErrorBadge } from './TurnErrorBadge'
 import { HostShellPanel } from './HostShellPanel'
 import { GearIcon } from './Icons'
 import { useShelfSink } from './ImageShelf'
@@ -1149,6 +1150,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <PersonaMark persona={bot.persona} />
             <HostBadge host={hostName} connected={hostUp} />
             <UpdateBadge botId={botId} />
+            <TurnErrorBadge botId={botId} />
           </div>
           {/* `bot.model` is what was *configured* (null = 由 CLI 自己決定); the statusLine
               reports what the CLI actually loaded, so fall back to that rather than
