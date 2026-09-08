@@ -28,3 +28,34 @@
 
 ## 回報
 三到五行：走了幾項、修了幾個（commit hash）、需重啟 daemon（先 build 好不要重啟）、未修的。
+
+
+---
+
+## 收工（2026-09-08，opus）
+
+十項全部走過，一項一項打勾：
+
+- [x] 1 抽屜 — 🔧 `ab18841`（對話框寬度）、🔧 `3a864ec`（環境設定被蓋住）
+- [x] 2 對話頁 — 🔧 `4c6fc2c`（軟鍵盤 Enter）、🔧 `31cce2f`（第一下按不到送出）、🔧 `99f4c41`（齒輪被切）、🔧 `7f7bf04`（通知位置）
+- [x] 3 終端分頁 — ✅
+- [x] 4 Bot 設定 sheet — ✅
+- [x] 5 群組聊天 — ✅
+- [x] 6 Team 面板 — 🔧 `4bec1c3`（角色摘要收不回去）
+- [x] 7 主機／身分／環境設定與 shell — ✅
+- [x] 8 圖片暫存 — ✅
+- [x] 9 額度 popover — ✅
+- [x] 10 通用（無橫向溢出／觸控目標／橫捲） — 🔧 `2f93db7`（40×40）、🔧 `9ec7d34`（欄位 16px）
+
+逐頁截圖與每一項的細節在 `docs/screenshots/mobile-walkthrough/WALKTHROUGH.md`，
+未修的四項也寫在那裡。
+
+環境上的一個偏差：**用 headless Chrome 的 CDP 代替 ego 的 task space**（本檔備援條款）。
+ego-lite 的 task space tab 沒有 web contents，`Page.captureScreenshot` 每次逾時——互動
+可以、截圖不行，而這個任務每一頁都要留圖。模擬參數與 `scripts/ui-mobile-shots.mjs` 同一套。
+
+驗證：`bunx tsc --noEmit -p tsconfig.app.json` 乾淨、`oxlint` 34 個既有 warning 無新增、
+`bun test src/components` 25 pass、`bun run build` 過；`cargo build --release -p agents-managerd`
+與 `cargo test -p agents-managerd` 351 pass。`OUT=/tmp/mshots node scripts/ui-mobile-shots.mjs`
+六張都 `scrollWidth === innerWidth === 390`，`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`
+七張桌面沒走樣。**需要重啟 daemon 才會進到 7788**（已經 build 好，沒有自己重啟）。
