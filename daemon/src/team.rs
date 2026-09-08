@@ -30,7 +30,10 @@ pub const MAX_WORKERS: u32 = 4;
 /// the PM keeps its context for the whole queue — a very long queue would run it out of
 /// window long before the daemon ran out of anything.
 pub const MAX_QUEUED_ISSUES: usize = 20;
-pub const DEFAULT_WORKER_COUNT: u32 = 2;
+/// SPEC-team §7.1 (2026-09-08): this is the **併行數** — how many tasks may run at the same
+/// time — not a headcount the PM has to plan around. One by default: extra parallelism costs
+/// extra quota, so it stays an explicit choice.
+pub const DEFAULT_WORKER_COUNT: u32 = 1;
 pub const DEFAULT_BASE_REF: &str = "HEAD";
 
 /// SPEC-team §12 #1 — **user decision, overriding the proposal's `pr`**: `git push` to
@@ -311,8 +314,12 @@ async fn issue_branch(app: &Arc<App>, team_id: &str, q: &db::TeamIssue) -> LcRes
 /// still sort together under `team/`, and the integration branch keeps the name §6.2, §10.2
 /// and the UI all use. (The alternative — moving the integration branch to
 /// `team/i42-k3f9x2/main` — would have renamed the branch the user is handed at the end.)
-pub fn task_branch(integration: &str, seq: i64, worker_short: &str) -> String {
-    format!("{integration}-t{seq}-{worker_short}")
+///
+/// The executor's short name used to be part of it. Since §4.5 became a worker pool the
+/// branch is named when the task is *planned* and cut when it is *started*, and by then a
+/// different executor may be the one free — so the task's own number is the whole identity.
+pub fn task_branch(integration: &str, seq: i64) -> String {
+    format!("{integration}-t{seq}")
 }
 
 /// SPEC-team §6.2: `<data_dir>/teams/<team_id>` — **outside** the repository, so the user's
@@ -423,8 +430,10 @@ fn full_persona(
              你的 cwd `{cwd}` 是當前整合分支的 worktree，只當唯讀參考（你改了東西會讓整合停下來）。\n\
              長期成員：{roster}\n\
              工作：讀 `.agents-manager/team/ISSUE.md` 與 `.agents-manager/team/TEAM.md`（都在你的 cwd 內），\
-             把當前 issue 拆成互不重疊（以檔案 / 模組切分）的 task，用 `dispatch` 派給執行者；\
-             收到回報後決定下一步；所有 task 合併後 `done` 並寫摘要。不確定就 `ask_user`。\n\
+             把當前 issue 拆成互不重疊（以檔案 / 模組切分）的 task，用 `dispatch` 派工——\
+             **不用指定 `to`**，daemon 會把每筆 task 派給有空的執行者（併行數就是同時能跑幾筆）。\
+             你可以**隨時再 `dispatch`**，不必等前一批做完：多出來的 task 會排隊，跑完一筆就補一筆。\
+             沒事做就 `wait`；收到回報後決定下一步；所有 task 合併後 `done` 並寫摘要。不確定就 `ask_user`。\n\
              這個 team 會依序處理多個 issue：`done` 之後 daemon 會交派下一個 issue。\
              `done` 時由你決定執行者要不要換一批：`\"workers\": \"keep\"` 沿用這批（他們對程式碼的理解還有用、\
              而且對話還不算太長時），`\"workers\": \"replace\"` 換新的（他們的上下文已經很長或已經偏題時）；\
@@ -483,7 +492,7 @@ fn team_md(issue: &IssueRef, branch: &str, root: &str, repo: &str, members: &[(S
     }
     s.push_str(
         "\n## 協定\n\n每則回覆的**最後**要有一個 ```am-team fenced 區塊（一個 JSON 物件）。daemon 只讀最後一個。\n\n\
-         - pm：`dispatch` / `wait` / `done`（可帶 `workers: keep | replace`，決定下一個 issue 是否沿用執行者）/ `ask_user` / `abort`\n\
+         - pm：`dispatch`（每筆要 `brief`，`to` 可省略——daemon 會派給有空的執行者；派幾筆都可以，超過併行數的排隊）/ `wait` / `done`（可帶 `workers: keep | replace`，決定下一個 issue 是否沿用執行者）/ `ask_user` / `abort`\n\
          - worker：`report`（`status: done | blocked`）\n\
          - reviewer：`verdict`（`result: approve | request_changes`）\n\n\
          區塊之外的文字給人看，區塊給系統看。\n",
@@ -1935,6 +1944,11 @@ async fn resume_inner(app: &Arc<App>, team_id: &str, gate_only: bool) -> LcResul
     }
     let back = t.resume_phase.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "planning".into());
     set_phase(app, team_id, &back, None, None).await?;
+    // §4.5: releasing `gate:dispatch` is what actually starts the batch the PM planned, so
+    // the branches are cut and the relays queued here rather than on some later pass.
+    if let Err(e) = crate::team_sched::fill_now(app, team_id).await {
+        tracing::warn!(team = %team_id, error = ?e, "could not hand out queued tasks on resume");
+    }
     spawn_scheduler(app, team_id);
     Ok(json!({}))
 }
@@ -2310,6 +2324,10 @@ pub struct PatchTeam {
 /// `null` clears it back to the kind's default.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RolePatch {
+    /// `workers` only: the parallelism (§7.1). Raising it mid-run creates and starts the
+    /// extra executors at once; lowering it only takes effect for the next batch.
+    #[serde(default)]
+    pub count: Option<u32>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -2388,6 +2406,39 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
         let note = patch_role(app, &t, slot, rp, &mut roles).await?;
         role_notes.insert(slot.key.into(), note);
     }
+    // §10.5 — `workers.count` is the parallelism, and it is the one field whose two
+    // directions differ: more slots are worth having *now* (the queue is already full of
+    // tasks nobody is running), fewer slots cannot retract an executor that is mid-task, so
+    // they wait for the next batch. The extra members are made the same way `start_issue`
+    // makes a fresh batch, then `fill_workers` hands them whatever was queued.
+    let mut applied = "next_batch";
+    if let Some(c) = p.workers.as_ref().and_then(|w| w.count) {
+        if c < 1 || c > MAX_WORKERS {
+            return Err(LcError::Bad(format!(
+                "workers.count must be between 1 and {MAX_WORKERS}"
+            )));
+        }
+        if let Some(w) = roles.get_mut("workers").and_then(Value::as_object_mut) {
+            w.insert("count".into(), json!(c));
+        }
+        let live = db::team_members(&app.db, team_id)
+            .await
+            .map_err(any_err)?
+            .into_iter()
+            .filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker"))
+            .count() as u32;
+        if c > live && !is_terminal(&t.phase) {
+            let spec = read_role_spec(&roles, "workers")
+                .ok_or_else(|| LcError::Upstream("team roles_json has no worker spec".into()))?;
+            let project = db::project(&app.db, &t.project_id)
+                .await
+                .map_err(any_err)?
+                .ok_or_else(|| LcError::NotFound("project".into()))?;
+            let checked = check_role(app, &project.host, &spec, "workers").await?;
+            grow_workers(app, &project, &t, live, c, &checked).await?;
+            applied = "now";
+        }
+    }
     let workers_note = role_notes.get("workers").cloned().unwrap_or(Value::Null);
     sqlx::query("UPDATE teams SET budget_json = ?, deliver = ?, supervised = ?, roles_json = ? WHERE id = ?")
         .bind(serde_json::to_string(&budget).unwrap_or_else(|_| "{}".into()))
@@ -2416,7 +2467,109 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
     .await?;
     let t = load(app, team_id).await?;
     emit_team_changed(app, &t).await;
-    Ok(json!({}))
+    // The new slots are useless until something is put in them, and the queue is where the
+    // work already is (§4.5).
+    if applied == "now" {
+        if let Err(e) = crate::team_sched::fill_now(app, team_id).await {
+            tracing::warn!(team = %team_id, error = ?e, "could not fill the new executor slots right away");
+        }
+    }
+    Ok(json!({"applied": applied}))
+}
+
+/// §10.5 — add executor slots to a running team: `dev-(old+1)` … `dev-(new)`, each with its
+/// own worktree, the same path `start_issue` takes for a fresh batch.
+async fn grow_workers(
+    app: &Arc<App>,
+    project: &db::Project,
+    t: &db::Team,
+    from: u32,
+    to: u32,
+    spec: &CheckedRole,
+) -> LcResult<()> {
+    let t6 = tid6(&t.id);
+    let issue_seq = db::current_team_issue(&app.db, &t.id)
+        .await
+        .map_err(any_err)?
+        .map(|i| i.seq)
+        .unwrap_or(1);
+    let root = t.worktree_root.clone();
+    for n in (from + 1)..=to {
+        let dir = format!("{root}/{}", member_dir("worker", n, issue_seq));
+        tg::worktree_add(
+            app,
+            &project.host,
+            &repo_path(project, &t.repo),
+            &dir,
+            &t.base_sha,
+            true,
+        )
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+        let nick = member_nick(&t6, "worker", n, issue_seq);
+        let bot_id = insert_member(
+            app,
+            project,
+            &t.id,
+            &nick,
+            &t6,
+            "worker",
+            t.issue_number,
+            spec,
+            &dir,
+        )
+        .await?;
+        // The short persona `insert_member` leaves behind has none of the report protocol.
+        let roster: Vec<String> = db::team_members(&app.db, &t.id)
+            .await
+            .map_err(any_err)?
+            .iter()
+            .filter(|b| b.deleted_at.is_none())
+            .map(|b| {
+                format!(
+                    "`{}`（{}）",
+                    short_name(&b.name, &t.id),
+                    b.team_role.clone().unwrap_or_default()
+                )
+            })
+            .collect();
+        let persona = full_persona(
+            "worker",
+            t.issue_number,
+            &short_name(&nick, &t.id),
+            &dir,
+            &t.branch,
+            &roster.join("、"),
+            spec.persona_extra.as_deref(),
+        );
+        sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
+            .bind(&persona)
+            .bind(&bot_id)
+            .execute(&app.db)
+            .await
+            .map_err(any_err)?;
+        if let Ok(Some(bot)) = db::bot(&app.db, &bot_id).await {
+            for e in crate::trust::pretrust_members(app, std::slice::from_ref(&bot)).await {
+                tracing::warn!(team = %t.id, error = %e, "could not pre-trust a new executor's worktree");
+            }
+        }
+        if let Err(e) = crate::lifecycle::start_bot(app, &bot_id).await {
+            tracing::warn!(team = %t.id, error = ?e, "a new executor failed to start");
+            record_event(
+                app,
+                &t.id,
+                "note",
+                None,
+                None,
+                None,
+                None,
+                json!({"action": "member_start_failed", "bot": nick, "error": format!("{e:?}")}),
+            )
+            .await?;
+        }
+        app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+    }
+    Ok(())
 }
 
 /// One role's half of [`patch`] (§10.5). Rewrites `roles_json` — which is what the next batch
@@ -2772,7 +2925,7 @@ pub async fn decide(
         team_id,
         "note",
         None,
-        Some(&task.worker_bot_id),
+        task.worker_bot_id.as_deref(),
         Some(&task.id),
         None,
         json!({"action": action, "note": note, "from": task.state, "to": next}),
@@ -3105,8 +3258,8 @@ mod tests {
         assert_eq!(b, "team/i42-k3f9x2");
         // A `/` here would be impossible: `refs/heads/team/i42-k3f9x2` is a file, so git
         // cannot also create `refs/heads/team/i42-k3f9x2/t1-dev-1` under it.
-        assert_eq!(task_branch(&b, 1, "dev-1"), "team/i42-k3f9x2-t1-dev-1");
-        assert!(task_branch(&b, 1, "dev-1").starts_with(&b), "task branches still sort with theirs");
+        assert_eq!(task_branch(&b, 1), "team/i42-k3f9x2-t1");
+        assert!(task_branch(&b, 1).starts_with(&b), "task branches still sort with theirs");
     }
 
     #[test]
@@ -3181,7 +3334,8 @@ mod tests {
             title: String::new(),
             brief: String::new(),
             files_json: "[]".into(),
-            worker_bot_id: "b".into(),
+            worker_bot_id: Some("b".into()),
+            want_worker_bot_id: None,
             branch: String::new(),
             state: state.into(),
             round: 0,
@@ -3850,9 +4004,10 @@ mod api_tests {
         assert_eq!(t.worktree_root, worktree_root(&app, &tid));
 
         let members = db::team_members(&app.db, &tid).await.unwrap();
-        assert_eq!(members.len(), 4, "pm + 2 workers + reviewer");
+        // §7.1 (2026-09-08): `workers.count` is the parallelism and defaults to 1.
+        assert_eq!(members.len(), 3, "pm + 1 worker + reviewer");
         let roles: Vec<&str> = members.iter().map(|m| m.team_role.as_deref().unwrap()).collect();
-        assert_eq!(roles, vec!["pm", "worker", "worker", "reviewer"]);
+        assert_eq!(roles, vec!["pm", "worker", "reviewer"]);
         let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
         let t6 = tid6(&tid);
         assert_eq!(
@@ -3860,7 +4015,6 @@ mod api_tests {
             vec![
                 format!("t{t6}-pm"),
                 format!("t{t6}-i1-dev-1"),
-                format!("t{t6}-i1-dev-2"),
                 format!("t{t6}-rev")
             ]
         );
@@ -3874,7 +4028,7 @@ mod api_tests {
         }
         assert_eq!(members[0].kind, "codex");
         assert_eq!(members[1].kind, "claude");
-        assert_eq!(members[3].kind, "grok");
+        assert_eq!(members[2].kind, "grok");
 
         // The creation is logged.
         let evs = events(&app, &tid, None, 100).await.unwrap();
@@ -3917,7 +4071,7 @@ mod api_tests {
 
         // T8's core promise, checked at creation time: nothing was written into the checkout.
         assert_eq!(g(&e.repo, &["status", "--porcelain"]), "");
-        assert_eq!(g(&e.repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 5);
+        assert_eq!(g(&e.repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 4);
     }
 
     /// §6.4a: if the workspace cannot be made, the whole team fails and unwinds — it must

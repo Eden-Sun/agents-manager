@@ -301,7 +301,7 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 
 | 角色 | action | 欄位 | 語意 |
 |---|---|---|---|
-| pm | `dispatch` | `tasks:[{to, title, brief, files?[]}]` | 派工。`to` 為成員暱稱（`dev-1`）；一次可派多人；已有未完成 task 的 worker 會被拒（§4.5） |
+| pm | `dispatch` | `tasks:[{to?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒 |
 | pm | `wait` | — | 目前沒事做，等回報 |
 | pm | `done` | `summary`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
@@ -310,6 +310,8 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 | reviewer | `verdict` | `result: approve \| request_changes`, `summary`, `must_fix?[]` | 審查結論 |
 
 daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說「回覆結尾必須有 am-team 區塊、允許哪些 action」。
+
+`dispatch` 每筆必填的只有 `brief`。
 
 **解析失敗處理**（區塊缺失、JSON 壞、action 不合法、`to` 對不到人）：
 1. 記 `team_events{kind:note, payload:{error}}`；
@@ -326,7 +328,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | **狀態驅動** | relay 不是「A 說完就叫 B」，而是「事件讓某個 task 換狀態，狀態決定要送什麼」。同一個 task 在同一狀態下不會重複送同一種 relay。 |
 | **回合預算** | `budget.max_relays`（預設 40）：所有 relay（含修復提示）計數；到頂 → `paused(budget_relays)`。使用者插話不計。 |
 | **審查回合** | 每個 task `budget.max_review_rounds`（預設 2）：`request_changes` 第 N+1 次 → task `exhausted`，team `paused(review_exhausted)`，由人決定強制合併 / 跳過 / 再給一回合。 |
-| **派工上限** | 每個 worker 同時最多 1 個未完成 task；PM 對同一 worker 連續派兩次完全相同的 brief → `paused(pm_repeat)`。 |
+| **併行數**（2026-09-08，原「派工上限」） | `workers.count`（1–4，預設 1）是**同時能跑幾個 task**，不是 PM 要自己分配的人頭。每個執行者同時最多 1 個未完成 task（DB 的 `team_tasks_one_open_per_worker` 保證），所以併行數 n = 最多 n 筆同時在跑。PM 可以隨時 `dispatch`，不必等前一批做完：多的進佇列，跑完一筆補一筆。**同一個 issue 內出現第二次完全相同的 `brief`**（不分執行者）→ `paused(pm_repeat)`。 |
 | **時間** | `budget.max_wall_clock_min`（預設 120）：從 `started_at` 起算，到頂 → `paused(budget_time)`。 |
 | **額度** | 每次送 relay 前查 `quota::get(kind)`：任一週期 `used_pct ≥ budget.quota_stop_pct`（預設 90）→ `paused(quota_low)`；額度沒資料時不擋。 |
 | **停頓不是中止** | 所有上限都只 `paused`，成員 pane 還活著；使用者 `PATCH budget` 後 `resume`。中止只有人能按。 |
@@ -486,13 +488,16 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 
 ## 7. D. 角色與生命週期
 
-### 7.1 角色與人數
+### 7.1 角色與併行數
 
 | 角色 | 數量 | cwd | 可設欄位 | persona 來源 |
 |---|---|---|---|---|
 | `pm` | 恰 1 | `<data_dir>/teams/<id>/main` | kind, model, effort, fast, identity, `persona_extra` | daemon 產生的角色人設（附錄 A.1）+ `persona_extra` |
-| `worker` | 1–4（預設 2） | `<data_dir>/teams/<id>/dev-<n>` | 同上（同一組設定套用到所有 worker；第二階段可逐人不同） | A.2 |
+| `worker` | **併行數** 1–4（預設 1，2026-09-08） | `<data_dir>/teams/<id>/dev-<n>` | 同上（同一組設定套用到所有 worker；第二階段可逐人不同） | A.2 |
 | `reviewer` | 0–1（預設 1） | `<data_dir>/teams/<id>/reviewer` | 同上 | A.3 |
+
+「併行數」是使用者面對的名字，`workers.count` 是 API 欄位名（不改，相容）。它決定同時能跑幾個 task，
+而不是 PM 要自己分配的人頭：daemon 一樣建 n 個執行者 bot（`dev-1`…`dev-n`），但誰做哪一筆由 daemon 決定（§4.5）。
 
 persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `developer_instructions`（API.md §12.8），三種 kind 都有落點。**這是 `persona` 欄位正式進 SPEC 的時機**（本文 §12 第 9 項）。
 
@@ -587,6 +592,8 @@ queued ──relay 送達──► working ──report{done}──► reported 
  report{blocked} ──► blocked_by_worker ──PM 下一則 relay 決定：改派 / 補充 brief（→ working）/ skip
 ```
 
+- `queued` 有兩種（2026-09-08）：`worker_bot_id IS NULL` = 還在佇列裡等併行位，分支**還沒切**；
+  有 `worker_bot_id` = 已經派給某個執行者、relay 還沒送達。前端的 task 列把前者顯示成「排隊中」。
 - 終態：`merged | skipped | failed`。
 - `round` 從 0 起算；`request_changes` 讓 `round += 1`；`round == max_review_rounds` 時再收到 `request_changes` → `exhausted`。
 - 沒有 reviewer（`reviewer: null`）：`reported → merging` 直接整合。
@@ -653,7 +660,7 @@ PM 同時只能收一則 prompt，但兩個 worker 可能幾乎同時回報。�
 |---|---|---|
 | `issue_number` | ✅ | 以 `gh issue view` 取得全文；找不到 → 502（同 issues 端點） |
 | `pm` / `workers.kind` | ✅ | kind 驗證與 `POST bots` 相同；`model / effort / fast / identity` 規則同 API.md §12.2 |
-| `workers.count` | | 1–4，預設 2 |
+| `workers.count` | | **併行數** 1–4，預設 1（2026-09-08）：最多同時跑幾個 task。欄位名沿用 `count` 以相容 |
 | `reviewer` | | 可為 `null`（不審查直接合併） |
 | `base` | | git ref，預設 `HEAD`；解析失敗 400 |
 | `deliver` | | `branch \| pr`，**預設 `branch`**（§12 #1 已裁決）|
@@ -715,6 +722,10 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（`workers` 是 `roles_json.workers.spec`），**下一批據此建立**，同時更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員逐一重啟（進行中的工作會中斷）；預設 `next` 只等重啟或換批時生效 |
 | `kind` | **換 bot**（§7.6）：同名、同 cwd 建一個新 kind 的成員，舊的停掉並 `deleted_at`（訊息保留），未終態的 task 指到新 bot，新成員直接啟動。`apply` 對 `kind` 沒有意義 |
 | `apply` | `next`（預設）/ `now`；其他值 `400 {"message":"<role>.apply must be `next` or `now`…"}` |
+| `count`（只有 `workers`，2026-09-08） | 併行數 1–4，其他值 400。**改大**：當場建並啟動 `dev-(舊n+1)`…`dev-新n`（走 §7.6 的 `insert_member` + pretrust + `start_bot`），啟動後立刻補位，佇列裡的 task 馬上開跑。**改小**：只寫進 `roles_json`，下一批執行者（下一個 issue / `replace`）才生效；多出來的執行者做完手上那筆就不會再被派 |
+
+`PATCH` 的回應是 `{"applied": "now" | "next_batch"}`：`now` = 這次真的當場多開了執行者；
+其餘情況（只改小、只改 spec）都是 `next_batch`。
 
 驗證同建立時（`check_role`）：kind 必須是已安裝的三種之一、`effort` 對得上該 kind、`identity` 存在且 kind 相符（`404 identity` / `400`）。
 這隊沒有 reviewer 時 `reviewer` 回 `400 {"message":"this team has no reviewer"}`——加一個 reviewer 要 worktree 與啟動，不是 PATCH 做的事。
@@ -873,8 +884,9 @@ Project 底下新增 **Team 節點**（`⚙ #42 <title 截斷>` + phase 燈 + �
 ```
 
 ### A.1 PM persona（`bots.persona`）與首則 relay
-- persona：「你是 issue #<n> 的 PM。你不寫程式、不 commit。你的 cwd 是整合分支的 worktree（唯讀參考）。成員：<名單與 cwd>。工作：讀 `.agents-manager/team/ISSUE.md` 與 `.agents-manager/team/TEAM.md`（都在你的 cwd 內），把 issue 拆成互不重疊（以檔案 / 模組切分）的 task，用 `dispatch` 派給執行者；收到回報後決定下一步；所有 task 合併後 `done` 並寫摘要。不確定就 `ask_user`。」
-- 首則 relay：「Issue #<n>「<title>」。全文在 `.agents-manager/team/ISSUE.md`。目前有 <k> 位執行者可派：<短名>。請先讀取檔案再派工。」
+- persona：「你是 issue #<n> 的 PM。你不寫程式、不 commit。你的 cwd 是整合分支的 worktree（唯讀參考）。成員：<名單與 cwd>。工作：讀 `.agents-manager/team/ISSUE.md` 與 `.agents-manager/team/TEAM.md`（都在你的 cwd 內），把 issue 拆成互不重疊（以檔案 / 模組切分）的 task，用 `dispatch` 派工——**不用指定 `to`**，daemon 會派給有空的執行者（併行數就是同時能跑幾筆）。你可以隨時再 `dispatch`，不必等前一批做完：多出來的會排隊，跑完一筆補一筆。沒事做就 `wait`；收到回報後決定下一步；所有 task 合併後 `done` 並寫摘要。不確定就 `ask_user`。」（2026-09-08）
+- 首則 relay：「Issue #<n>「<title>」。全文在 `.agents-manager/team/ISSUE.md`。**併行數 <n>（執行者：<短名>）**——`dispatch` 不用指定 `to`，派幾筆都可以，超過併行數的會排隊。請先讀取檔案再派工。」（2026-09-08）
+- 收單後的 note（只在**有排隊**時送，否則是白白多一輪 turn）：「收到 <N> 筆。併行數 <n>：現在跑 <M> 筆（t1→dev-1…），排隊 <K> 筆——排隊的會在有執行者空下來時自動派出，你不用再派一次。」
 
 ### A.2 worker persona 與派工 relay
 - persona：「你是 <短名>。你的 cwd `<path>` 是專屬 worktree，你只能在這裡工作：不要 `cd` 出去、不要動 `../`、不要 `git push`、不要切換分支。每個邏輯段落 `git commit`。完成後用 `report` 回報：`summary` 說明改了什麼、如何驗證。做不下去用 `status: blocked` 說明原因。」
@@ -890,7 +902,7 @@ Project 底下新增 **Team 節點**（`⚙ #42 <title 截斷>` + phase 燈 + �
 「以下 <N> 則回報：
 1. `dev-1` t1「…」→ `done`：<summary>（已送審 / 已合併 / 衝突處理中）
 2. `dev-2` t2「…」→ `blocked`：<notes>
-目前 task 狀態：<表>。請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。」
+目前 task 狀態（**併行 <M>/<n>**）：<表，還沒有執行者的那幾筆寫「排隊中」>。請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。」（2026-09-08）
 
 relay 內文上限 8 KB（超過截斷並註明「完整內容見時間軸」）；issue 全文永遠走各 worktree 內的 `.agents-manager/team/ISSUE.md`，不塞進 prompt。
 
@@ -915,7 +927,12 @@ CREATE INDEX IF NOT EXISTS teams_project ON teams(project_id);
 CREATE TABLE IF NOT EXISTS team_tasks (
   id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
   seq INTEGER NOT NULL, title TEXT NOT NULL, brief TEXT NOT NULL, files_json TEXT NOT NULL DEFAULT '[]',
-  worker_bot_id TEXT NOT NULL REFERENCES bots(id), branch TEXT NOT NULL,
+  -- 2026-09-08：可 NULL = 已收單但還在排隊，沒有執行者在做（§4.5）。
+  worker_bot_id TEXT REFERENCES bots(id),
+  -- PM 在 dispatch 裡指名的執行者（沒指名就是 NULL）。和 worker_bot_id 分開，是因為
+  -- team_tasks_one_open_per_worker 不允許同一個 worker 有第二列未終態的 task。
+  want_worker_bot_id TEXT REFERENCES bots(id),
+  branch TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('queued','working','reported','reviewing','changes_requested','exhausted',
                                        'blocked_by_worker','rebasing','merging','merged','skipped','failed')),
   round INTEGER NOT NULL DEFAULT 0, rebase_attempts INTEGER NOT NULL DEFAULT 0,
@@ -923,6 +940,7 @@ CREATE TABLE IF NOT EXISTS team_tasks (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS team_tasks_seq ON team_tasks(team_id, seq);
+-- SQLite 的 UNIQUE 不管 NULL，所以「多筆排隊中、每人最多一筆在跑」剛好就是這個索引的語意。
 CREATE UNIQUE INDEX IF NOT EXISTS team_tasks_one_open_per_worker ON team_tasks(worker_bot_id)
   WHERE state NOT IN ('merged','skipped','failed');
 CREATE TABLE IF NOT EXISTS team_events (
