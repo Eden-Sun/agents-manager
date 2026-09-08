@@ -9252,3 +9252,73 @@ button.run-debug-toggle:hover {
     padding: 3px 8px;
   }
 }
+
+/* 對話框在 ≤640 一律變成全螢幕 sheet。桌機的浮窗是「貼著你剛剛按的那顆鍵開」，在 390px
+   上沒有這回事：卡片本來就跟畫面一樣寬，留 24px 的邊只是把可用的表單再縮一圈，鍵盤一
+   彈出來還會把它擠成一條。標題列與底部動作列固定，中間捲動——`.bot-settings` 與 `.modal`
+   本來就是 head / body(flex:1, overflow-y:auto) / foot 的三段式，撐滿就直接成立。 */
+@media (width <= 640px) {
+  .bs-scrim,
+  .modal-backdrop {
+    padding: 0;
+  }
+
+  /* `.anchored` 一起收：`BotSettingsPanel` 在手機不再量齒輪的位置（`anchor` 直接吃 null），
+     這條是保險，免得殘留的 inline left/top 把 sheet 推歪。 */
+  .bot-settings,
+  .bot-settings.anchored {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .bs-head,
+  .bs-banner,
+  .bs-body,
+  .bs-actions {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .bs-actions {
+    height: auto;
+    min-height: 64px;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* `:has(.dirpicker)` 那條的特異性比裸 `.modal` 高，要一起寫進來才蓋得掉。 */
+  .modal,
+  .modal:has(.dirpicker) {
+    width: auto;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .modal-body {
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+
+  /* 這幾張 sheet 是從側欄裡開出來的，而 `.sidebar` 在 ≤1024 是 `position: fixed` 加
+     `z-index: 30`——它自己就是一個 stacking context，`.modal-backdrop` 的 900 只在那裡面
+     有效，蓋不過同樣 30 的圖片暫存。撐滿全螢幕之後這件事才看得出來（底部露出一條
+     「圖片暫存」）。sheet 開著的時候本來也用不到暫存區，收起來最乾脆。 */
+  body:has(.modal-backdrop) .shelf {
+    display: none;
+  }
+
+  /* 關閉鍵是這兩張 sheet 上唯一的退路，不能是 24px 的小叉。 */
+  .modal-head .icon-btn,
+  .bs-head .icon-btn {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+  }
+}

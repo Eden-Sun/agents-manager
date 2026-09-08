@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -251,7 +252,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [loginSent, setLoginSent] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   // 彈窗貼著觸發它的齒輪開，超出視窗才翻邊/夾住；沒有 anchor（例如鍵盤流程）就置中。
-  const anchor = useStore((s) => s.settingsAnchor)
+  // 手機沒有「貼著齒輪」這回事——卡片本來就跟畫面一樣寬，整張是全螢幕 sheet
+  // （styles.css 的 mobile 區塊），量出來的座標只會把它推歪。
+  const phone = useMediaQuery(PHONE_QUERY)
+  const anchor = useStore((s) => (phone ? null : s.settingsAnchor))
   const running = useStore((s) => {
     const r = s.runs[botId]
     return r ? r.state !== 'stopped' && r.state !== 'exited' : false
