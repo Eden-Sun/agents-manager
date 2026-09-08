@@ -687,6 +687,16 @@ export interface HostMem {
   processes: number
   /** 這台量不到時的原因；此時數字都是 0，不是「真的 0」。 */
   error: string | null
+  /** 這台上的 Chromium 系瀏覽器（Chrome / ego）：分頁數與 RSS（2026-09-08）。舊 daemon 沒有 → 空陣列。 */
+  browsers: BrowserMem[]
+}
+
+export interface BrowserMem {
+  name: string
+  /** renderer process 數 ≈ 分頁數。 */
+  tabs: number
+  bytes: number
+  processes: number
 }
 
 export interface MemSnapshot {

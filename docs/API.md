@@ -349,6 +349,10 @@ herdr 這一側現在佔多少常駐記憶體。左上角那一格用的就是�
            "error":"未連線"}]}
 ```
 
+- `hosts[].browsers`（2026-09-08 新增）：同一份 `ps` 裡的 Chromium 系瀏覽器，依 app bundle 分組
+  （`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`）：
+  `[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}]`。`tabs` = `--type=renderer`
+  的 process 數（≈ 分頁數）。**不算進** `total_bytes`；前端在總分頁 ≥ 30 時把左上角那格標紅並顯示分頁數。
 - 每台主機一次 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走既有的 ssh master），RSS 由 KiB 換成 bytes。
 - **量不到的主機用 `error` 回報，不會從清單消失**：總和悄悄變小比沒有數字更糟。UI 會在數字旁
   標星號。

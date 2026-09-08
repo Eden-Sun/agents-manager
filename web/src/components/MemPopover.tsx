@@ -4,6 +4,7 @@ import type { MemProcess, MemProcesses } from '../api/types'
 import { LOCAL_HOST } from '../api/types'
 import { useStore } from '../store/store'
 import { humanBytes } from './MemBadge'
+import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPaneModal } from './MemPaneModal'
 
 /**
@@ -161,6 +162,12 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
               重新整理
             </button>
           </div>
+          {row?.browsers.length ? (
+            <p className={`mem-pop-browsers${tabsTotal(row.browsers) >= TABS_WARN ? ' hot' : ''}`}>
+              瀏覽器 {browsersLine(row.browsers)}
+              {tabsTotal(row.browsers) >= TABS_WARN ? `——超過 ${TABS_WARN} 個分頁，RAM 多半是它們吃的，關一些。` : '（不算在上面的 RAM 裡）'}
+            </p>
+          ) : null}
           {err ? <p className="mem-pop-err">{err}</p> : null}
           {!err && rows.length === 0 ? (
             <p className="mem-pop-empty">{loading ? '取樣中…' : '這台 daemon 還不會列程序（需要重啟成新版）。'}</p>

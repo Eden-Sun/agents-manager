@@ -355,6 +355,25 @@ button:disabled {
 }
 
 /* 量不到的那台：直接顯示「—」，不要拿 0 假裝。 */
+.mem-badge.tabs-hot {
+  border-color: var(--danger);
+}
+
+.mem-tabs {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.mem-pop-browsers {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mem-pop-browsers.hot {
+  color: var(--danger);
+}
+
 .mem-badge.partial .mem-v {
   color: var(--warn);
 }
