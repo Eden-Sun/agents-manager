@@ -204,7 +204,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`
 
-倒序分頁（`before` 傳目前最舊一則的 `id`），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
+倒序分頁（`before` 傳目前最舊一則的 `id`，以插入順序分頁），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
 
 ```json
 {
