@@ -9668,6 +9668,11 @@ button.run-debug-toggle:hover {
     gap: 6px;
   }
 
+  /* 展開之後摘要那一行變成收合鍵，三列排在它下面（不是跟它並排）。 */
+  .team-roles {
+    flex: 1 1 100%;
+  }
+
   .team-roles-summary .chev {
     margin-left: auto;
     color: var(--text-faint);
