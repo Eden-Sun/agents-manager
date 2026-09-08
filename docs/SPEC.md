@@ -277,13 +277,16 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 
 - `herdr agent start <name> …`：`<name>` 不是以 `$AM_AGENT_NAME-` 開頭就自動補上前綴（截到 herdr 的 32 字上限），
   並在 stderr 印一行說明。旗標可以在名字前面，`--kind` / `--pane` / `--timeout` 的值不會被誤認成名字，`--` 之後原封不動。
+  **模型沿用**（2026-09-08）：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時，補上 `-- --model $AM_MODEL`，
+  claude 再補 `--effort $AM_EFFORT`（子 agent 自己有寫的一律尊重；codex 的 `-c model_reasoning_effort=` 也算有寫）。
+  不然子 agent 跑 CLI 預設，側欄多一顆「claude-fable-5-1」跟母 bot 的 `opus` 對不上。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發，另外補上 `--env`
-  把 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、`AM_AGENT_NAME`、`PATH` 帶下去
+  把 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、`AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`PATH` 帶下去
   ——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒有這一段子 pane 會用使用者的預設帳號起來、也拿不到 hook token。
   呼叫端自己給過的同名 `--env` 保留不動。
 - 其他子指令 `exec` 真正的 herdr：`$AM_REAL_HERDR`，否則掃 `PATH` 取第一個不是自己所在目錄的 `herdr`。
 
-`pane_env` 因此多 `AM_AGENT_NAME`（= run 的 agent 名）與 `PATH`。
+`pane_env` 因此多 `AM_AGENT_NAME`（= run 的 agent 名）、`AM_KIND` / `AM_MODEL` / `AM_EFFORT`（母 bot 的設定，沒設就沒有）與 `PATH`。
 
 **PATH 只靠 pane env 是不夠的**：herdr 用 **login shell** 開 pane，使用者的 profile 在那之後才跑並重建 `PATH`
 （2026-09-07 實測 macOS：`/etc/zprofile` 的 `path_helper` 加 `brew shellenv` 會把 shim 擠到 `/opt/homebrew/bin` 後面）。

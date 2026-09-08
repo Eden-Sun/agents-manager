@@ -75,12 +75,23 @@ am_agent_start() {
     _named=0
     _stop=0
     _prev=""
+    _kind=""
+    _has_model=0
+    _has_effort=0
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
         _i=$((_i + 1))
         _orig=$_a
-        if [ "$_named" = 0 ] && [ "$_stop" = 0 ]; then
+        if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
+        if [ "$_stop" = 1 ]; then
+            case "$_a" in
+                --model | --model=*) _has_model=1 ;;
+                --effort | --effort=*) _has_effort=1 ;;
+                -c) : ;;
+                model_reasoning_effort=*) _has_effort=1 ;;
+            esac
+        elif [ "$_named" = 0 ]; then
             case "$_prev" in
                 --kind | --pane | --timeout) : ;;
                 *)
@@ -94,10 +105,25 @@ am_agent_start() {
                     esac
                     ;;
             esac
+        else
+            case "$_a" in
+                --) _stop=1 ;;
+            esac
         fi
         _prev=$_orig
         set -- "$@" "$_a"
     done
+    # 沒指定模型的子 agent 會跑 CLI 的預設（claude 現在是 fable），跟母 bot 明明選的 opus 對不上，
+    # 側欄就多出一顆「claude-fable-5-1」看不懂的。母 bot 的模型／強度在 AM_MODEL / AM_EFFORT，
+    # 同 kind 就補上；自己有寫 --model 的一律尊重。
+    if [ -n "${AM_MODEL:-}" ] && [ "$_has_model" = 0 ] && { [ -z "$_kind" ] || [ "$_kind" = "${AM_KIND:-}" ]; }; then
+        [ "$_stop" = 1 ] || set -- "$@" --
+        set -- "$@" --model "$AM_MODEL"
+        if [ -n "${AM_EFFORT:-}" ] && [ "$_has_effort" = 0 ] && [ "${AM_KIND:-}" = "claude" ]; then
+            set -- "$@" --effort "$AM_EFFORT"
+        fi
+        printf 'agents-manager: 子 agent 沒指定模型，沿用母 bot 的 `%s`\n' "$AM_MODEL" >&2
+    fi
     exec "$AM_HERDR" agent start "$@"
 }
 
@@ -106,7 +132,7 @@ am_agent_start() {
 # own children. Pass the parent's environment down explicitly, without overriding a value the
 # caller set by hand.
 am_forward_with_env() {
-    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_REAL_HERDR PATH; do
+    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         case " $* " in
@@ -242,6 +268,29 @@ mod tests {
             &["agent", "start", "--kind", "claude", "--pane", "w1:p3", "ui", "--", "--model", "opus"],
         );
         assert_eq!(out, ["agent", "start", "--kind", "claude", "--pane", "w1:p3", "p-1-ui", "--", "--model", "opus"]);
+    }
+
+    /// 2026-09-08：子 agent 沒帶 `--model` 就跑 CLI 預設，側欄多一顆「claude-fable-5-1」。母 bot 的
+    /// 模型從 `AM_MODEL` / `AM_EFFORT` 補上；同 kind 才補，自己有寫的不動。
+    #[test]
+    fn a_child_without_a_model_inherits_the_parents() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", "opus"), ("AM_EFFORT", "medium")];
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "claude"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--", "--model", "opus", "--effort", "medium"]);
+        assert!(err.contains("沿用母 bot"), "{err}");
+
+        // 自己寫了 --model：不動，也不補 effort 以外的東西。
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--", "--model", "sonnet"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--", "--model", "sonnet"]);
+
+        // 不同 kind：母 bot 的模型名對它沒意義。
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex"]);
+
+        // 已經有 `--` 但沒有 --model：接在後面。
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--", "--verbose"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "--verbose", "--model", "opus", "--effort", "medium"]);
     }
 
     /// `--pane w1:p3` is a *value*, not the agent name; renaming it would target a pane that
