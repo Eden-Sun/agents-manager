@@ -244,22 +244,25 @@ export function TeamRoleEditor({ teamId, host, disabled }: { teamId: string; hos
   const [open, setOpen] = useState(false)
   const form = editing && !disabled ? <RoleForm teamId={teamId} role={editing} host={host} onClose={closeTeamRole} /> : null
   if (!roles) return null
-  if (phone && !open) {
+  if (phone) {
+    // 摘要那一行永遠在：它同時是展開鍵與收合鍵。只有 `setOpen(true)` 的話，攤開的三列
+    // 在 390px 上就永遠佔著八十幾 px 的標題區，沒有任何路可以收回去（2026-09-08 實測）。
     return (
-      <div className="team-roles is-summary">
+      <div className={`team-roles${open ? '' : ' is-summary'}`}>
         <button
           type="button"
           className="team-role-row team-roles-summary"
-          aria-expanded={false}
-          title="展開 PM / 執行者 / Reviewer 三列，各自可以改 kind、身分、模型"
-          onClick={() => setOpen(true)}
+          aria-expanded={open}
+          title={open ? '收合成一行摘要' : '展開 PM / 執行者 / Reviewer 三列，各自可以改 kind、身分、模型'}
+          onClick={() => setOpen(!open)}
         >
           <span className="team-role-name">角色</span>
-          <span className="team-role-spec mono">{summarize(roles, workerCount)}</span>
+          {open ? null : <span className="team-role-spec mono">{summarize(roles, workerCount)}</span>}
           <span className="chev" aria-hidden="true">
-            ▶
+            {open ? '▼' : '▶'}
           </span>
         </button>
+        {open ? TEAM_ROLE_KEYS.filter((r) => roles[r] !== null).map((r) => <RoleRow key={r} teamId={teamId} role={r} onEdit={() => openTeamRole(teamId, r)} />) : null}
         {form}
       </div>
     )
