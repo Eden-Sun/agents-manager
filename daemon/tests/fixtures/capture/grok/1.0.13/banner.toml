@@ -1,6 +1,6 @@
 still_busy = false
 awaits_input = false
-limit_hit = "Weekly limit left: 7%"
+limit_hit = "Weekly limit left: 7% · Grok 4.6 (low)"
 noise_lines = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
 source = "herdr"
 note = "Real visible snapshot from the existing grok 1.0.13 pane, cropped to the startup banner and sanitized of account data. Startup announcements are banner noise, not a reply."
