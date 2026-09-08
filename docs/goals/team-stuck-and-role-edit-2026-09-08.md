@@ -16,14 +16,14 @@ issue #53 的 team（`01M1YJ8N0WGSF6K9CX5BRXS6E5`）`phase=paused`、`pause_reas
 
 ## 2. 能編輯／換成員角色
 現況：`PATCH /api/teams/{id}` 的 `workers` 只接受 `model` / `effort` / `fast`（`daemon/src/team.rs` `patch` ~2320），`RoleSpec` 其實有 `kind` / `identity` / `persona_extra`。
-- [ ] daemon：`PATCH /teams/{id}` 的 `workers` 多接受 `kind`、`identity`；並新增 `pm` 與 `reviewer` 兩個同形狀的欄位（`{"kind"?,"model"?,"effort"?,"fast"?,"identity"?,"apply"?}`）。
+- [x] daemon：`PATCH /teams/{id}` 的 `workers` 多接受 `kind`、`identity`；並新增 `pm` 與 `reviewer` 兩個同形狀的欄位（`{"kind"?,"model"?,"effort"?,"fast"?,"identity"?,"apply"?}`）。
   - 只改 model/effort/fast/identity：同現有流程，寫回 `roles_json.<role>.spec`、更新該 bot 欄位，`apply:"now"` 就重啟該成員。
   - 改 `kind`：必須換 bot。做法：在同一 host/cwd 用同名規則建一個新 kind 的 member bot（沿用 `create_member`／建 team 時的路徑，含 persona、hooks、team 欄位），停掉舊 bot 並標 `deleted_at`（訊息保留），`team_tasks.worker_bot_id` 未終態的 task 指到新 bot，`roles_json` 更新。team 若在 `paused` 就維持 paused 讓使用者按繼續；若 `working` 且該成員有 in-flight turn，回 409 `{"reason":"member busy"}` 要使用者先暫停。
   - `check_role` 照舊驗 kind 已安裝、identity 存在且 kind 相符。
   - 記一筆 `team_events` note（`action:"patch"` 加 `role`、`from`、`to`）。
-- [ ] `docs/API.md` §10.5 與 `docs/SPEC-team.md` §10.5 更新表格；§7 補一段「換成員 kind = 換 bot」。
-- [ ] web：`TeamPanel.tsx` 現有「執行者模型」那塊改成三個角色各一列（PM / 執行者 / Reviewer），每列可改 kind（`KindTag` 三選一、未安裝的 disabled）、身分（claude 用 `IdentityOptions`）、模型／強度／fast（沿用 `ApiModelFields`），apply 選「下一批 / 立即」。新邏輯放新檔 `TeamRoleEditor.tsx`，`TeamPanel.tsx` 只掛進去。`store.ts` 的 `patchTeam` 型別擴充，`api/mock.ts` 對應。
-- [ ] 側欄成員節點（`TeamNodes.tsx`）的成員列加一個小齒輪或用既有 `openSettings`，點了直接開到 TeamRoleEditor 對應角色（不用開 bot 設定；bot 設定改 team 成員會跟 roles_json 不同步）。
+- [x] `docs/API.md` §10.5 與 `docs/SPEC-team.md` §10.5 更新表格；§7 補一段「換成員 kind = 換 bot」。
+- [x] web：`TeamPanel.tsx` 現有「執行者模型」那塊改成三個角色各一列（PM / 執行者 / Reviewer），每列可改 kind（`KindTag` 三選一、未安裝的 disabled）、身分（claude 用 `IdentityOptions`）、模型／強度／fast（沿用 `ApiModelFields`），apply 選「下一批 / 立即」。新邏輯放新檔 `TeamRoleEditor.tsx`，`TeamPanel.tsx` 只掛進去。`store.ts` 的 `patchTeam` 型別擴充，`api/mock.ts` 對應。
+- [x] 側欄成員節點（`TeamNodes.tsx`）的成員列加一個小齒輪或用既有 `openSettings`，點了直接開到 TeamRoleEditor 對應角色（不用開 bot 設定；bot 設定改 team 成員會跟 roles_json 不同步）。
 
 ## 驗證
 - `cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`（現有 team 測試要過，`resume_refuses_while_a_member_is_lost` 等）；補 `patch_changes_worker_kind_swaps_bot` 之類的 test。
@@ -33,3 +33,12 @@ issue #53 的 team（`01M1YJ8N0WGSF6K9CX5BRXS6E5`）`phase=paused`、`pause_reas
 
 ## 回報
 三到五行：commit hash、驗證數字、需重啟 daemon、沒做到的與原因。
+
+## 收尾備註（2026-09-08）
+- 第 1 項的「2/20」查出來**不是算錯**：那是 issue 序（佇列 20 個），task 那組沒送到畫面上。
+  兩組都畫並寫出單位，見 `docs/SPEC-team.md` §2.3。
+- 第 2 項的 daemon 端只跑得到 `cargo test`（340 passed）：7788 上的是舊二進位，
+  沒重啟就吃不到 `pm` / `reviewer` 兩個新欄位，所以**沒有**對 #53 做實測 PATCH。
+  UI 截圖是拿真 daemon 的 #53 拍的（唯讀，沒按儲存）。**要生效需要重啟 daemon。**
+- `bunx tsc --noEmit` 在 `web/` 其實什麼都沒檢查（`tsconfig.json` 是 `files: []` + references），
+  真的要檢查得跑 `bunx tsc -p tsconfig.app.json --noEmit`。本次是用後者驗的。

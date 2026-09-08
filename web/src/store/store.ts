@@ -32,7 +32,7 @@ import {
   pick,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamRoleKey, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -583,6 +583,15 @@ export interface StoreState {
   // ---- SPEC-team -------------------------------------------------------
   /** 開啟某個 team 的視圖（null = 回到原本的 bot / 群組）。 */
   selectTeam: (teamId: string | null) => void
+  /**
+   * 開著 team 角色編輯的 `{teamId, role}`；null = 沒開。
+   *
+   * 側欄成員列的齒輪與 TeamPanel 的角色列都寫這一格，彈窗只有一份（在 TeamPanel 裡）。
+   */
+  teamRoleEdit: { teamId: string; role: TeamRoleKey } | null
+  /** 選到那個 team 並把角色編輯開在 `role` 上（側欄齒輪用）。 */
+  openTeamRole: (teamId: string, role: TeamRoleKey) => void
+  closeTeamRole: () => void
   /** 載入 `GET /teams/:id` + `/events` + 該專案的合併時間軸。 */
   loadTeam: (teamId: string) => Promise<void>
   /** IssuesBar 的「組隊」：開啟 TeamLaunchPanel。 */
@@ -1643,9 +1652,19 @@ export const useStore = create<StoreState>((set, get) => ({
 
   // ------------------------------------------------------------ SPEC-team
 
+  teamRoleEdit: null,
+
+  openTeamRole: (teamId, role) => {
+    if (get().selectedTeamId !== teamId) get().selectTeam(teamId)
+    set({ teamRoleEdit: { teamId, role } })
+  },
+
+  closeTeamRole: () => set({ teamRoleEdit: null }),
+
   selectTeam: (teamId) => {
     set((s) => ({
       selectedTeamId: teamId,
+      teamRoleEdit: null,
       selectedProjectId: null,
       teamLaunch: null,
       shellView: null,
