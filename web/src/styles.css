@@ -9088,9 +9088,10 @@ button.run-debug-toggle:hover {
 /* ================================================================ mobile (≤ 640px)
 
    手機 RWD（`docs/goals/mobile-rwd-2026-09-08.md`）。斷點只有兩個，兩邊都寫在
-   `hooks/useMediaQuery.ts`：≤1024px 側欄變抽屜（`MOBILE_QUERY`），≤640px 是手機
-   （`PHONE_QUERY`）。上面那個 640 的區塊處理標題列讓位，這裡收的是版面與觸控的通則——
-   一個地方看得完，不要再散到別處。 */
+   `hooks/useMediaQuery.ts`：≤1024px 側欄變抽屜（`DRAWER_QUERY`），≤640px 是手機
+   （`PHONE_QUERY`）。上面那幾個 1240 / 1160 / 1080 只是一階一階收緊邊距與標籤，沒有行為
+   掛在上面，不算斷點。上面那個 640 的區塊處理標題列讓位，從這裡開始收的是版面與觸控的
+   通則——一個地方看得完，不要再散到別處。 */
 
 @media (width <= 640px) {
   /* iOS 的網址列會伸縮，`100%`（＝ large viewport）在鍵盤收起時比看得到的畫面高一截，

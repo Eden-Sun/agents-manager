@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from './api'
 import { useFocusTrap } from './hooks/useFocusTrap'
-import { MOBILE_QUERY, useMediaQuery } from './hooks/useMediaQuery'
+import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
@@ -159,7 +159,7 @@ export default function App() {
   const [drawer, setDrawer] = useState(false)
   // Below this width the sidebar is an off-canvas drawer (styles.css `@media (width <= 1024px)`);
   // above it, it is a plain column that is always on screen and must stay reachable.
-  const isMobile = useMediaQuery(MOBILE_QUERY)
+  const isMobile = useMediaQuery(DRAWER_QUERY)
   const sidebarRef = useRef<HTMLElement>(null)
   const drawerOpen = isMobile && drawer
 
