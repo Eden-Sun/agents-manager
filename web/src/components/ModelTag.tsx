@@ -25,13 +25,18 @@ export function ModelTag({ botId }: { botId: string }) {
     .filter(Boolean)
     .join(' · ')
 
-  // `bot.model` is null when the bot is left on whatever the CLI picks; that used to render
-  // nothing at all, which hid the effort too.
-  if (!bot.model && !chipExtra) return null
+  // `bot.model` is null when the bot is left on whatever the CLI picks. Once the CLI has
+  // said what that is (statusLine `model_name`), show it — the same thing the chat header
+  // shows — instead of a literal `CLI 預設` that reads as a different model (2026-09-08).
+  const shown = bot.model ?? reported?.model_name ?? null
+  if (!shown && !chipExtra) return null
 
   return (
-    <span className="model-tag" title={`模型：${bot.model ?? '（CLI 預設）'}${detail ? ` · ${detail}` : ''}`}>
-      {bot.model ?? 'CLI 預設'}
+    <span
+      className={`model-tag${bot.model ? '' : ' reported'}`}
+      title={`模型：${bot.model ?? (shown ? `CLI 預設，實際載入 ${shown}` : '（CLI 預設）')}${detail ? ` · ${detail}` : ''}`}
+    >
+      {shown ?? 'CLI 預設'}
       {/* 分隔符在 CSS 的 `.model-tag-extra::before`，不要在這裡再加一個。 */}
       {chipExtra ? <span className="model-tag-extra">{chipExtra}</span> : null}
     </span>
