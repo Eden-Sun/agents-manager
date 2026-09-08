@@ -2609,6 +2609,7 @@ mod login_slash_tests {
             agent_title: None,
             status_line: None,
             status_json: None,
+            update_notice: None,
             native_session_id: None,
             transcript_path: None,
             last_read_revision: None,

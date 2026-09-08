@@ -99,6 +99,17 @@ origin:   web | external                     （external = 非本系統送出、
   會讓 agent 停下來等人回答，卻跟工作無關 → daemon 認出畫面後一律送 `0`（`tui_prompts`）。
   進 `blocked` 的事件當下看一次，另每 10 秒巡邏 `blocked` / `idle` 的 Run；額度探測 pane 同一套判斷
   （那裡對對話框按的 Enter 會變成替使用者評分）。其他等人回答的畫面一概不動。
+- **把 claude 的更新通知撈上來**（2026-09-08）：claude 自動更新後只在 pane 最底下那行印
+  `✔ Update installed · Restart to update`，不是事件、不會消失、也不擋回合——使用者要點進終端
+  才看得到。`update_watch` 每 30 秒對每個 `state=running` 的 **claude** run 做一次
+  `pane.read visible 80`，認到就寫進 `runs.update_notice` 並推 `bot_status`，畫面上沒有了
+  就清回 NULL；讀不到畫面則跳過不清。不限 `idle`：那句是回合結束時印的，但使用者送出下一句話
+  之後 run 就是 `working`，通知還在畫面上也還該看得見。
+  認法（`tui_prompts::update_notice`）：`update installed` 與 `restart to update` 兩段都要中，
+  **而且只看畫面最下面 6 行非空白的**——那句就印在 statusLine 那一列。光靠兩段字不夠：
+  2026-09-08 實測，正在寫這個功能的 agent，畫面正文裡同時引到這兩句，照樣中。
+  存在 **run** 而不是 bot，因為等著被套用的更新是這個 claude process 的事，重啟（`POST
+  /api/bots/{id}/restart`，也就是套用更新的動作本身）之後的新 run 本來就沒有它。
 
 ### 3.2 React 前端
 

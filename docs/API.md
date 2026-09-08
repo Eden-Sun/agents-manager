@@ -1590,6 +1590,24 @@ object URL，不能直接塞進 `<img src>`。
   cc0 / cc1 各自對得上自己的帳號。
 - 一樣只在內容變動時寫入並推 `bot_status`。
 
+### `run.update_notice`（2026-09-08 新增）
+
+claude 把新版下載好、等重啟才會換過去時，會在 pane 最底下那行（跟使用者 statusLine 同一行、
+靠右）印一句。daemon 讀到就把它掛在 run 上：
+
+```json
+{"id":"01M1…","update_notice":"Update installed · Restart to update"}
+```
+
+- 沒有更新在等就是 `null`。存的是**固定字串**而不是那一整行——同一行左半邊是 statusLine，
+  每回合都在變。
+- 認法：`update installed` 與 `restart to update` 兩段都要中，且只看畫面最下面 6 行非空白的
+  （那句印在 statusLine 那一列）；否則正文裡引到這兩句的畫面會誤判。
+- `update_watch::spawn_update_watcher` 每 30 秒對每個 `state=running` 的 claude run 做一次
+  `pane.read visible 80`，跟現值不同才寫 DB 並推 `bot_status`；讀不到畫面就跳過（不清除）。
+- 掛在 run 不是 bot：等著套用的更新是這個 claude process 的事，重啟後的新 run 是 `null`。
+- 套用方式沒有新 API，就是既有的 `POST /api/bots/{id}/restart`。
+
 ## 快速 git（chat 標題列的 chip，2026-09-08 新增）
 
 專案 checkout 的 `+N −M ↑a ↓b` 與 commit / push / pull 三顆按鈕。都在專案的 host 上、專案的目錄裡跑
