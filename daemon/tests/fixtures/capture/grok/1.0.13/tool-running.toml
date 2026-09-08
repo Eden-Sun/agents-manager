@@ -1,0 +1,6 @@
+still_busy = true
+awaits_input = false
+activity = "Running 2 shell commands…"
+noise_lines = [3]
+source = "synthetic"
+

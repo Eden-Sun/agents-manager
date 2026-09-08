@@ -1,0 +1,6 @@
+still_busy = false
+awaits_input = true
+reply = "已完成測試，結果如下。"
+noise_lines = [4, 5, 8]
+source = "synthetic"
+

@@ -1,0 +1,7 @@
+still_busy = false
+awaits_input = false
+limit_hit = "You have 1 usage limit reset available. Run /usage to use one."
+noise_lines = [1, 2, 3, 5]
+source = "synthetic"
+note = "This is the usage-reset notice covered by codex_usage_notice_lines, not a hard error."
+

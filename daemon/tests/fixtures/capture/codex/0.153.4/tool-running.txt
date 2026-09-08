@@ -1,0 +1,5 @@
+› 執行命令
+Running 4 shell commands…
+esc to interrupt
+Tip: Run /help for more information
+
