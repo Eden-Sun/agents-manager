@@ -26,8 +26,12 @@ export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {
           <BrowserIcon name={b.name} />
           <span className="tabs-v">
             {b.tabs}
-            <span className="tabs-sep">/</span>
-            {humanBytes(b.bytes)}
+            {/* 位元組數包成自己的 span：手機的抽屜標題列要把徽章排成一列，那一列只放得下
+                分頁數（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4），CSS 才收得掉。 */}
+            <span className="tabs-bytes">
+              <span className="tabs-sep">/</span>
+              {humanBytes(b.bytes)}
+            </span>
           </span>
         </span>
       ))}

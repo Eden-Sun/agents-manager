@@ -9549,6 +9549,50 @@ button.run-debug-toggle:hover {
   }
 }
 
+/* 抽屜的標題列（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4）：`AG Man` 加上排成兩列
+   的徽章把它撐到 100px——抽屜本來就是滑出來找 bot 的，開頭卻先用掉九分之一的畫面，而那一列
+   的內容（app 名字、pane 數、RAM、分頁數）沒有一樣是你滑開抽屜要找的。收成一列。 */
+@media (width <= 640px) {
+  /*
+   * 標題只在視覺上收掉，不從 a11y 樹拿走：它是這一頁唯一的 `<h1>`，螢幕閱讀器靠它知道
+   * 「這是什麼 app」。抽屜裡的東西自己會講它是什麼，所以視覺上不需要再寫一次。
+   */
+  .sidebar-head h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* 兩列的 grid 攤成一列。`h1` 已經是絕對定位，`margin-left: auto` 沒有東西可以推，
+     所以這裡自己補一個推到最右。 */
+  .sidebar-head .head-badges {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    margin-left: 0;
+  }
+
+  .sidebar-head {
+    justify-content: flex-end;
+  }
+
+  /*
+   * 排成一列之後每一格都要縮：`pane 21` → `21`、`RAM 5.4G` → `5.4G`、
+   * 瀏覽器那格只留分頁數（`🌐8 ◎4`）。拿掉的都是標籤與第二個數字——圖示本身就是標籤，
+   * 而「瀏覽器吃了多少 RAM」在點開的 popover 與 tooltip 裡都還在。
+   */
+  .sidebar-head .pane-k,
+  .sidebar-head .mem-k,
+  .sidebar-head .tabs-bytes {
+    display: none;
+  }
+}
+
 /* Team 畫面在 390px（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 3）。這一頁塞了四層
    資訊：標題列、角色、成員、統計。桌機一次全部攤開沒問題，390px 上每一層都被右邊界切掉，
    而且切得看不出「右邊還有東西」。原則跟本檔其他地方一致——會按的要按得到（收進 `⋯` 或
