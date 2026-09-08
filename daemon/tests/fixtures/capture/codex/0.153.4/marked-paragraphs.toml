@@ -1,5 +1,5 @@
 still_busy = false
-awaits_input = true
+awaits_input = false
 reply = """第一段說明輸出範圍。
 
 第二段補充上下文與取捨。
@@ -7,4 +7,3 @@ reply = """第一段說明輸出範圍。
 - 最後一點列出後續步驟。"""
 noise_lines = [8, 9]
 source = "synthetic"
-

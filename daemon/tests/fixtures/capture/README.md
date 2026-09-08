@@ -22,12 +22,12 @@ awaits_input = true
 
 - `reply`：parser 應抽出的完整回覆；沒有這欄表示這張畫面不應產生回覆。
 - `activity`：spinner 或工具進度的描述文字，不含開頭 glyph，例如 `Baking…` 或 `Running 1 shell command…`。
-- `noise_lines`：應判定為 TUI 雜訊的 1-based `.txt` 行號陣列。
+- `noise_lines`：應判定為 TUI 雜訊的 1-based `.txt` 行號陣列；列出的行會被整行排除，不代表回覆中的段落空行也應排除。
 - `limit_hit`：限額／用量提示的完整文字；沒有這欄表示沒有提示。
 - `source`：只有非真實畫面才必須寫 `source = "synthetic"`；真實 pane 快照可寫 `source = "herdr"`。
 - `note`：說明來源、去敏感資料方式，或期望值與既有行為有意不同的原因。
 
-`awaits_input` 僅表示 CLI 正在等使用者處理登入、權限、選單或其他確認；工作中的空 composer 不算等待使用者輸入。`reply` 與 `activity` 都是比對 parser 輸出的全文，包含段落換行。
+`awaits_input` 僅表示 CLI 正在等使用者處理登入、權限、選單或其他確認；工作中的空 composer，以及回覆完成後回到空 composer，都不算等待使用者輸入。`reply` 與 `activity` 都是比對 parser 輸出的全文，包含段落換行；回覆中的空行不可列進 `noise_lines`。
 
 ## 新增 CLI 版本
 
