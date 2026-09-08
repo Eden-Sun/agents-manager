@@ -99,9 +99,9 @@ function remaining(w: QuotaWindow | null | undefined): number | null {
   return left < 10 ? Math.round(left * 10) / 10 : Math.round(left)
 }
 
-/** `remaining` 的顯示字：不到 10 一律帶一位小數（`9.0`），否則整數。 */
+/** `remaining` 的顯示字：不到 10 且有小數才帶一位（`9.8`）；`9.0` 就是 `9`，10 以上整數。 */
 function fmtPct(pct: number): string {
-  return pct < 10 ? pct.toFixed(1) : String(pct)
+  return String(pct)
 }
 
 /**
