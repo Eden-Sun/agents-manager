@@ -886,6 +886,18 @@ button:disabled {
   bottom: -1px;
 }
 
+/* 分身 / 新增按下去那一刻的佔位列：灰、不可點，daemon 建好後原地換成真的那一列。 */
+.bot-row.pending {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: default;
+}
+
+.bot-pending-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* 子 agent：縮排一階、左邊一條細線把它掛在父 bot 下面（跟 team 成員同一種視覺語言）。 */
 /* 有子 agent 的父列前面的收合鈕。收合時把數量帶上——不然收起來就看不出底下有東西。 */
 /* 專案的收合箭頭。跟子 agent 那顆同一種語彙，只是在標題列的最前面。 */

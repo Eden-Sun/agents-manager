@@ -797,6 +797,21 @@ export const useStore = create<StoreState>((set, get) => ({
       const teams: Record<string, Team> = {}
       for (const t of st.teams) teams[t.id] = { ...(s.teams[t.id] ?? {}), ...t }
       const selectedTeam = s.selectedTeamId && teams[s.selectedTeamId] ? s.selectedTeamId : null
+      // 瀏覽器端的佔位列（分身按下去那一刻放的）：同名的真 bot 到了就原地換掉——連它在
+      // `botOrder` 裡的位子一起讓給真的那一列，同一次 set 裡完成，清單不會少一列或跳一下。
+      const keptPending: Bot[] = []
+      let botOrder = s.botOrder
+      for (const b of s.bots) {
+        if (!b.pending) continue
+        const real = st.bots.find((r) => r.project_id === b.project_id && r.name === b.name)
+        if (!real) {
+          keptPending.push(b)
+          continue
+        }
+        const order = (botOrder[b.project_id] ?? []).map((x) => (x === b.id ? real.id : x))
+        botOrder = { ...botOrder, [b.project_id]: order }
+      }
+      if (botOrder !== s.botOrder) writeBotOrder(botOrder)
       return {
         hosts: st.hosts,
         attachCommand: st.attach_command,
@@ -804,7 +819,8 @@ export const useStore = create<StoreState>((set, get) => ({
         localIdentityStatus: st.identity_status,
         identities: st.identities,
         projects: st.projects,
-        bots: st.bots,
+        bots: [...st.bots, ...keptPending],
+        botOrder,
         teams,
         runs,
         turns,
@@ -1324,11 +1340,26 @@ export const useStore = create<StoreState>((set, get) => ({
     const stem = bot.name.replace(/-\d+$/, '') || bot.name
     let n = 2
     while (taken.has(`${stem}-${n}`)) n += 1
+    const name = `${stem}-${n}`
     const key = `clone:${botId}`
-    set((st) => ({ busy: { ...st.busy, [key]: true } }))
+    // 先把一列灰的放進清單、排在本尊後面，使用者按下去就看得到；daemon 回來再換成真的。
+    // 佔位列用假 id，`refreshState` 會保留它直到同名的真 bot 出現。
+    const tempId = `pending:${Date.now().toString(36)}`
+    const placeholder: Bot = { ...bot, id: tempId, name, parent_bot_id: null, team: null, pending: true }
+    const dropPlaceholder = () =>
+      set((st) => ({
+        bots: st.bots.filter((b) => b.id !== tempId),
+        botOrder: { ...st.botOrder, [bot.project_id]: (st.botOrder[bot.project_id] ?? []).filter((id) => id !== tempId) },
+      }))
+    set((st) => {
+      const ids = botsOfProject(st, bot.project_id).map((b) => b.id)
+      const at = ids.indexOf(botId)
+      const order = at >= 0 ? [...ids.slice(0, at + 1), tempId, ...ids.slice(at + 1)] : [...ids, tempId]
+      return { bots: [...st.bots, placeholder], botOrder: { ...st.botOrder, [bot.project_id]: order }, busy: { ...st.busy, [key]: true } }
+    })
     try {
-      const id = await get().addBot(bot.project_id, {
-        name: `${stem}-${n}`,
+      const created = await api.createBot(bot.project_id, {
+        name,
         kind: bot.kind,
         model: bot.model,
         effort: bot.effort,
@@ -1339,29 +1370,26 @@ export const useStore = create<StoreState>((set, get) => ({
         autostart: bot.autostart,
         auto_approve: bot.auto_approve,
       })
-      // 分身排在本尊後面，而不是掉到清單最尾巴。
-      if (id) {
-        const ids = botsOfProject(get(), bot.project_id).map((b) => b.id)
-        const at = ids.indexOf(botId)
-        // 已經緊接在本尊後面就別動；傳 null 在 moveBot 裡是「移到最後」，正好是這裡不要的。
-        if (at >= 0 && ids[at + 1] !== id) get().moveBot(id, ids[at + 1] ?? null)
-        // Same as the 新增 Bot form, which starts what it just created: a clone is asked for
-        // when you want another one of these *now*, so leaving it stopped only adds a click.
-        await get().startBot(id)
+      // 舊版 `createBot` 回 id 字串，新版回 `{id, name}`；兩種都吃。
+      const c = created as unknown as string | { id: string }
+      const id = typeof c === 'string' ? c : c.id
+      if (!id) {
+        dropPlaceholder()
+        return null
       }
-      // 佔位列的位子直接讓給真的那一列，清單不會跳。
-      set((st) => {
-        const order = (st.botOrder[bot.project_id] ?? []).map((x) => (x === tempId ? id : x))
-        const botOrder = { ...st.botOrder, [bot.project_id]: order }
-        writeBotOrder(botOrder)
-        return { botOrder, bots: st.bots.filter((b) => b.id !== tempId) }
-      })
+      // 佔位列留到 `refreshState` 把同名的真 bot 帶回來：那裡會在同一次 set 裡把它換掉並接手
+      // 它在清單裡的位子，中間不會有一瞬間清單少一列或多一列。
       await get().refreshState()
+      if (get().bots.some((b) => b.id === tempId)) dropPlaceholder()
       set({ selectedBotId: id })
       get().notify('info', `已新增 Bot ${name}`)
       // 啟動不等：抓 pane、等 CLI 就緒要好幾秒，那是側欄那顆燈的事，不該卡住這個動作。
       void get().startBot(id)
       return id
+    } catch (e) {
+      dropPlaceholder()
+      get().notify('error', errText(e))
+      return null
     } finally {
       set((st) => ({ busy: { ...st.busy, [key]: false } }))
     }
