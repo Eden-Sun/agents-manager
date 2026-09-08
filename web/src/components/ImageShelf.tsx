@@ -63,12 +63,37 @@ interface PeekAt {
   boundLeft: number
 }
 
-function readOpen(): boolean {
+function readOpen(fallback: boolean): boolean {
   try {
-    return localStorage.getItem(OPEN_KEY) !== '0'
+    const v = localStorage.getItem(OPEN_KEY)
+    return v === null ? fallback : v !== '0'
   } catch {
-    return true
+    return fallback
   }
+}
+
+/**
+ * `true` while a text field somewhere has focus — on a phone that means the on-screen
+ * keyboard is up and roughly half the window is gone. The collapsed bar is the only part of
+ * the shelf that is on screen without being asked for, so it is the part that gets out of
+ * the way; an expanded shelf was opened on purpose and stays (and its cards stay where the
+ * finger is aiming, which a bar that came and went underneath them would not).
+ */
+function useTypingAway(): boolean {
+  const [typing, setTyping] = useState(false)
+  useEffect(() => {
+    const isField = (el: EventTarget | null) =>
+      el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['checkbox', 'radio', 'file'].includes(el.type))
+    const on = (e: FocusEvent) => setTyping(isField(e.target))
+    const off = () => setTyping(false)
+    document.addEventListener('focusin', on)
+    document.addEventListener('focusout', off)
+    return () => {
+      document.removeEventListener('focusin', on)
+      document.removeEventListener('focusout', off)
+    }
+  }, [])
+  return typing
 }
 
 /**
@@ -133,9 +158,12 @@ export function ImageShelf() {
   const addToShelf = useShelf((s) => s.add)
   const clear = useShelf((s) => s.clear)
   const notify = useStore((s) => s.notify)
-  const [open, setOpen] = useState(readOpen)
   // 手機沒有拖放，空狀態那段字也會在 390px 折成兩行、白佔掉底部一段：短版只講點得到的那條路。
   const phone = useMediaQuery(PHONE_QUERY)
+  // 手機預設是收起來的那一條：展開的托盤在 390px 上會吃掉約 120px（標題列＋提示字），
+  // 而它是「等一下也許會用到」的東西，不該從對話身上先扣一塊。桌機仍然預設展開。
+  const [open, setOpen] = useState(() => readOpen(!window.matchMedia(PHONE_QUERY).matches))
+  const typing = useTypingAway()
   // 同一個斷點決定托盤在右邊還是在底部，也就決定預覽要浮在左邊還是上面。
   const atBottom = useMediaQuery(MOBILE_QUERY)
   const fileDrag = useFileDragActive()
@@ -235,7 +263,9 @@ export function ImageShelf() {
   return (
     <aside
       ref={shelfRef}
-      className={`shelf${open ? ' open' : ''}${drop.over ? ' dropping' : ''}${!open && fileDrag ? ' armed' : ''}`}
+      className={`shelf${open ? ' open' : ''}${drop.over ? ' dropping' : ''}${!open && fileDrag ? ' armed' : ''}${
+        !open && typing ? ' typing' : ''
+      }`}
       aria-label="圖片暫存區"
       // Works wherever focus is inside the shelf, including on the collapsed handle.
       onPaste={(e) => {
