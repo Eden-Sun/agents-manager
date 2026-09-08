@@ -1089,6 +1089,23 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+    // 2026-09-08: the children it spawned go with it. They only exist as panes their parent
+    // opened and rows the daemon adopted; left behind they would sit in the sidebar as
+    // orphans with nothing to hang from. Deepest first, each stopped the same way.
+    let mut removed_children = Vec::new();
+    for child in descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev() {
+        let _ = lifecycle::stop_bot(&app, &child.id).await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
+            .bind(db::now())
+            .bind(&child.id)
+            .execute(&app.db)
+            .await
+            .map_err(any_err)?;
+        let child_host = db::bot_host(&app.db, &child.id).await.unwrap_or_else(|_| host.clone());
+        lifecycle::purge_bot_dir(&app, &child.id, &child_host).await;
+        app.emit("bot_changed", json!({"bot_id": child.id})).await;
+        removed_children.push(child.id);
+    }
     // SPEC §6.4: stop first (ctrl+c x2, pane closed on timeout), then drop the config entry.
     let _ = lifecycle::stop_bot(&app, &id).await;
     // A spawned child never entered config.toml, so the projection cannot retire it.
@@ -1097,7 +1114,7 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
         lifecycle::purge_bot_dir(&app, &id, &host).await;
         app.emit("bot_changed", json!({"bot_id": id})).await;
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
-        return Ok((StatusCode::OK, Json(json!({}))).into_response());
+        return Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response());
     }
     app.cfg
         .update(|cfg| {
@@ -1112,7 +1129,26 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     reproject(&app).await?;
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    Ok((StatusCode::OK, Json(json!({}))).into_response())
+    Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
+}
+
+/// Every live `managed_by = 'child'` bot under `root`, parents before their children
+/// (so `.rev()` deletes deepest first). Only spawned children follow the parent: a bot the
+/// user created in config.toml is never someone's child.
+async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<db::Bot>> {
+    let all = db::live_bots(&app.db).await?;
+    let mut out = Vec::new();
+    let mut frontier = vec![root.to_string()];
+    while let Some(pid) = frontier.pop() {
+        for b in all.iter().filter(|b| b.managed_by == "child" && b.parent_bot_id.as_deref() == Some(pid.as_str())) {
+            if out.iter().any(|x: &db::Bot| x.id == b.id) {
+                continue;
+            }
+            frontier.push(b.id.clone());
+            out.push(b.clone());
+        }
+    }
+    Ok(out)
 }
 
 
