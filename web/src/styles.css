@@ -9463,6 +9463,27 @@ button.run-debug-toggle:hover {
 }
 
 /*
+ * 表單欄位在手機一律 ≥16px（2026-09-08）。iOS Safari 只要 `font-size < 16px`，
+ * 一聚焦就把整頁放大到那個欄位——而這一頁的 viewport 沒有（也不該有）`maximum-scale`，
+ * 放大之後釘在最上面的標題列與底下的輸入列全部跑掉，使用者還得自己捏回去。
+ * 390px 上量到兩個：對話輸入框 14px、側欄搜尋框 12px（其餘欄位本來就 ≥16）。
+ * 這條只管**可輸入的欄位**，不是全站放大——`docs/UI-DECISIONS.md` 的「其餘文字下限 12px」
+ * 照舊。
+ */
+@media (width <= 640px) {
+  input:not([type='checkbox'], [type='radio'], [type='file'], [type='range']),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  /* 順帶把欄位本身補到 40 高：搜尋框原本 28，是整個側欄最常點的東西。 */
+  .bot-search-input {
+    min-height: 40px;
+  }
+}
+
+/*
  * 觸控目標下限（2026-09-08 逐頁掃 `button / [role=button] / a / input[type=checkbox]`）。
  * 手指的接觸面約 8–10mm，換算大約 40px；390px 上量到一票 11×18、18×14、26×26 的鍵。
  * 兩種手法：
