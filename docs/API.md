@@ -919,7 +919,10 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 失敗只寫 log、不影響回應）。
 
 - 找不到 bot → `404`。
-- 刪除後推 `bot_changed {bot_id}`；前端重新 `GET /api/state`（該 bot 會從 `projects[].bots` 消失）。
+- **它開的子 agent 一起刪**（2026-09-08）：`managed_by = "child"`、`parent_bot_id` 指到它的 bot（含孫代）
+  先各自停掉、軟刪、清目錄，最深的先；回應 `{"removed_children":["<bot_id>", …]}`。使用者在
+  config.toml 建的 bot 不會是誰的 child，不受影響。
+- 刪除後推 `bot_changed {bot_id}`（每個被連帶刪掉的 child 也各推一次）；前端重新 `GET /api/state`（該 bot 會從 `projects[].bots` 消失）。
 - 訊息歷史仍可用 `GET /api/bots/{id}/messages` 讀到（第一階段不提供「已刪除 bot」的列表 UI）。
 
 ### 10.5 WebSocket
