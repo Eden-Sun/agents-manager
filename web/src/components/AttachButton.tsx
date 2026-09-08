@@ -1,3 +1,4 @@
+import { copyText } from '../lib/copyText'
 import { useEffect, useRef, useState } from 'react'
 import { TerminalIcon } from './Icons'
 
@@ -29,16 +30,10 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
   }, [open])
 
   const copy = async (): Promise<'ok' | 'fail'> => {
-    try {
-      await navigator.clipboard.writeText(command)
-      setCopied('ok')
-      setTimeout(() => setCopied(null), 1600)
-      return 'ok'
-    } catch {
-      setCopied('fail')
-      setTimeout(() => setCopied(null), 1600)
-      return 'fail'
-    }
+    const r = (await copyText(command)) ? 'ok' : 'fail'
+    setCopied(r)
+    setTimeout(() => setCopied(null), 1600)
+    return r
   }
 
   const onMainClick = () => {
