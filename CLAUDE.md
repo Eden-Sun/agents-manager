@@ -26,8 +26,9 @@
 - 不要加新功能、不要順手重構任務以外的東西。
 
 ## 驗證（收尾前必跑）
-- daemon：`cargo build --release -p agents-managerd` 與 `cargo test -p agents-managerd`。
-- web：`cd web && bunx tsc --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
+- 先跑一鍵檢查：`scripts/am-dev-check.sh`。只驗單一側可用 `--daemon-only` 或 `--web-only`。
+- daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy -p agents-managerd`（目前既有 32 個 warning，暫不加 `-D warnings`）。
+- web 個別指令：`cd web && bunx tsc -p tsconfig.app.json --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
 - UI 改動要看真畫面：`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`（headless Chrome 七張）或 ego-browser；截圖放 `docs/screenshots/<feature>/`。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
