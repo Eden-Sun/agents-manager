@@ -1,6 +1,5 @@
 still_busy = false
 awaits_input = true
-noise_lines = [1, 8]
+noise_lines = [1, 7]
 source = "synthetic"
 note = "Sanitized login menu; the menu is a prompt, not an assistant reply."
-
