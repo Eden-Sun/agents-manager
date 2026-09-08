@@ -25,14 +25,19 @@ await shot('m3-chat')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='終端')?.click()`); await sleep(1500)
 await shot('m4-terminal')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='對話')?.click()`); await sleep(500)
-await ev(`document.querySelector('button[aria-label*="選單"], .menu-btn, button.hamburger')?.click()`); await sleep(600)
-// 沒有進行中的 team 時這一下點不到任何東西，抽屜也不會自己收（選取沒變）——那就把它關掉，
-// 免得 m5 拍出來只是 m2 的複本。印一行說明，看圖的人才知道這張為什麼是對話而不是 team。
-const teamHit = await ev(`(() => { const b = document.querySelector('.team-node-btn'); if (!b) return false; b.click(); return true })()`)
-if (!teamHit) { console.log('m5: 目前沒有進行中的 team，改拍收起抽屜後的畫面'); await ev(`document.querySelector('.scrim')?.click()`) }
-await sleep(1500)
-await shot('m5-team')
-// 設定是從標題列的齒輪開的（側欄那顆藏在 `⋯` 選單裡，要先展開才點得到）。
-await ev(`document.querySelector('.main-head .icon-btn.gear')?.click()`); await sleep(1200)
-await shot('m6-settings')
+const openDrawer = () => ev(`document.querySelector('button[aria-label*="選單"], .menu-btn, button.hamburger')?.click()`)
+// team 節點在側欄裡，抽屜要先開。`.team-node-btn` 是它現在的 class；`開啟 Team` 是它 title
+// 的開頭（`TeamNodes.tsx`），class 改名時還接得住。沒有進行中的 team 就整張跳過——
+// 拍一張「其實是對話」的 m5-team 比沒有這張更誤導。
+await openDrawer(); await sleep(600)
+const teamHit = await ev(`(() => { const b = document.querySelector('.team-node-btn, [aria-label^="開啟 Team"], [title^="開啟 Team"]'); if (!b) return false; b.click(); return true })()`)
+if (teamHit) { await sleep(1500); await shot('m5-team') }
+else { console.log('m5-team: 側欄裡沒有 team 節點（目前沒有進行中的 team），跳過這張'); await ev(`document.querySelector('.scrim')?.click()`); await sleep(400) }
+// 設定是 **bot** 標題列上的齒輪：剛剛選的是 team 的話那顆根本不存在，會拍成 team 畫面的
+// 複本。所以先回到一顆 bot，再點齒輪。
+await openDrawer(); await sleep(600)
+await ev(`[...document.querySelectorAll('.bot-row')].find(r=>/C1-fable|c1\\b/i.test(r.textContent))?.click()`); await sleep(1500)
+const gearHit = await ev(`(() => { const b = document.querySelector('.main-head .icon-btn.gear'); if (!b) return false; b.click(); return true })()`)
+if (gearHit) { await sleep(1200); await shot('m6-settings') }
+else console.log('m6-settings: 標題列上找不到設定齒輪，跳過這張')
 chrome.kill(); process.exit(0)
