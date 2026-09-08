@@ -9220,3 +9220,35 @@ button.run-debug-toggle:hover {
     min-width: 10ch;
   }
 }
+
+/* 終端分頁（`TerminalTab` / `HostShellPanel` / `BlockedPanel`）。終端是固定字元格線的東西：
+   在 390px 上多一欄就是多一欄，所以這裡的方向跟其他地方相反——把邊界收窄、字級調小，
+   換視野。 */
+@media (width <= 640px) {
+  /* 上面那個 640 區塊已經把 pane chip 與結尾的說明藏掉，剩下的排得下一行；`wrap` 是
+     保險，行數 select 在別的語系或別的字型下變寬時折行，而不是被切掉。 */
+  .term-bar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  /* 唯讀快照本來就要橫捲；11px 一行多看得到約一成的欄位。這是本檔 ≤640「字級不低於
+     12px」的唯一例外：終端的字是等寬格線，不是要讀的散文，而且橫捲的成本比字小得多。 */
+  .term {
+    font-size: 11px;
+  }
+
+  .term-pane {
+    padding: 10px 12px 12px;
+  }
+
+  /* 七顆鍵（Enter / Esc / y / n / ↑ / ↓ / ctrl+c）在 390px 差二十幾 px 就會把 ctrl+c
+     擠到第二行——中斷鍵掉到下一行是最不該發生的那一種折行。收內距與間距換回來。 */
+  .keypad {
+    gap: 5px;
+  }
+
+  .key-btn {
+    padding: 3px 8px;
+  }
+}
