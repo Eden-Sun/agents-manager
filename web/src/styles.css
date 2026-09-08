@@ -9557,12 +9557,16 @@ button.run-debug-toggle:hover {
     display: none;
   }
 
-  /* 名字至少十個字。`.main-title` 是 overflow: hidden，這個下限只有在上面兩樣讓出寬度
-     之後才排得下——不然被切掉的會是排在名字後面的齒輪。 */
+  /* 名字盡量寬，但**不能有下限**：`.main-title` 是 overflow: hidden，排在名字後面的是齒輪，
+     名字不肯縮的時候被切掉的就是它——而齒輪是手機上進 bot 設定的唯一入口。
+     這裡曾經寫 `min-width: 10ch`（≈88px），額度 chip 一寫成「cc1 F 剩 26%」（91px）之後
+     標題列只剩 125px，10 + 7 + 88 + 7 + 40 = 152 排不下，齒輪就被切成一條 17px 的細縫
+     （2026-09-08 於 390px 量到）。改成 `min-width: 0`：有空位時名字照樣是完整的十個字，
+     不夠時它先截尾（本來就有 ellipsis），齒輪永遠完整。 */
   .bot-head .main-title-row > strong,
   .bot-head .main-title-row > .bot-name-btn,
   .bot-head .main-title-row > .bot-name-input {
-    min-width: 10ch;
+    min-width: 0;
   }
 }
 
