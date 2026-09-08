@@ -462,3 +462,14 @@
   非模態的用意是「開著設定還能拖圖進對話、還能點旁邊的 bot」——那些手勢在 390px 上本來
   就不存在（沒有拖放、旁邊也沒有東西看得到）。桌機仍然是貼著齒輪開的非模態浮窗。
 - 截圖：`docs/screenshots/mobile-rwd/before/`、`docs/screenshots/mobile-rwd/after/`。
+
+## Codex 啟動畫面不要進對話（2026-09-08）
+
+- **問題**：Codex idle splash（框線 banner、model/directory、Tip、`› Ask Codex to do anything`）
+  被當成系統通知存下來，還附上整片 `terminal_snapshot`。系統 pill 被撐成一張大卡，框中框
+  裡是 TUI chrome；`Run /usage` 在這個 UI 也跑不了。
+- **決策**：系統通知只留一行帳號提示（中文「還有 N 次額度重置可用」），不展開終端畫面。
+  `TerminalSnapshot` 只掛在 `terminal_fallback`。「Ask Codex to do anything」不當作用戶
+  輸入回顯。啟動畫面各列當雜訊濾掉，不當 assistant 回覆。
+- **代價**：系統通知底下不能再點開當下的 pane 截圖。那張圖本來就是 splash，不是回覆。
+- 截圖：`docs/screenshots/codex-splash/`。

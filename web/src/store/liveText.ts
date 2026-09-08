@@ -28,6 +28,15 @@ const NOISE: RegExp[] = [
   /^\s*[(（]?\s*(?:esc|escape)\b[^.]*\b(?:to|for)\b/i,
   /^\s*[(（]?\s*\?\s+for\s+shortcuts/i,
   /^\s*(?:⏵⏵|⏸)/,
+  // Codex idle splash（框線裡的 banner、空輸入提示、額度重置提示）。
+  /OpenAI Codex \(v/i,
+  /Ask Codex to do anything/i,
+  /autocompletes slash commands/i,
+  /usage limit reset available/i,
+  /\/model to change/i,
+  /^\s*directory:\s/i,
+  /^permissions:\s*YOLO/i,
+  /Context \d+%\s*used/i,
   // 工具呼叫的排水溝符號：`⏺ Bash(git status)`、`⎿  Read 12 lines`
   /^\s*[⎿⏺]/,
   // spinner 行：`✻ Thinking… (12s · ↑ 1.2k tokens)`

@@ -1936,7 +1936,9 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         if exists != 0 {
             continue;
         }
-        insert_message(app, &conversation_id, None, "system", &notice, "system", false, Some(&read.text)).await?;
+        // Don't attach the pane snapshot: the idle splash is a boxed TUI (model /
+        // directory / Tip / "Ask Codex to do anything"), not a failed cut of a reply.
+        insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
         tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         if codex_limit_hit_line(&notice).is_some() {
             let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
@@ -4196,7 +4198,7 @@ fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
         .iter()
         .rposition(|l| {
             let t = l.trim_start();
-            t.starts_with(echo) && t.len() > echo.len()
+            t.starts_with(echo) && t.len() > echo.len() && !is_codex_idle_prompt(t)
         })
         .map(|i| i + 1)
         .unwrap_or(0)
@@ -4249,6 +4251,24 @@ fn is_noise(s: &str) -> bool {
         return true;
     }
     s.starts_with("Claude Code v") || s.starts_with("Tip:") || s.starts_with("Ask Codex") || s.contains("shift+tab to cycle")
+        || s.contains("OpenAI Codex (v")
+        || s.starts_with(">_ OpenAI Codex")
+        || s.contains("Ask Codex to do")
+        || s.contains("autocompletes slash commands")
+        || s.contains("/model to change")
+        || s.starts_with("directory:")
+        || s.starts_with("permissions: YOLO")
+        || (s.contains("Context ") && s.contains("% used"))
+        || is_codex_idle_prompt(s)
+        || codex_usage_notice_line(s).is_some()
+}
+
+/// Codex idle input: `› Ask Codex to do anything`. Looks like a prompt echo (`› …`) but is
+/// the empty-composer placeholder, not something the user typed.
+fn is_codex_idle_prompt(s: &str) -> bool {
+    let t = s.trim_start();
+    let body = t.strip_prefix("› ").unwrap_or(t).trim();
+    body.to_ascii_lowercase().starts_with("ask codex to do")
 }
 
 /// grok 1.0.13 TUI chrome (appendix F): `◆ …` event / thinking lines, the "Worked for" footer
@@ -4603,7 +4623,11 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
     // A2: only this turn's output counts. Without this the last `⏺` line of the *previous*
     // turn would be handed back as the answer whenever the current turn printed no marker.
     let after_echo = after_last_prompt_echo(kind, &lines);
-    let start = after_echo + lines[after_echo..].iter().rposition(|l| l.trim_start().starts_with(marker))?;
+    let start = after_echo
+        + lines[after_echo..].iter().rposition(|l| {
+            let s = l.trim_start();
+            s.starts_with(marker) && (kind != "codex" || codex_usage_notice_line(s).is_none())
+        })?;
     let mut out: Vec<String> = Vec::new();
     for line in &lines[start..] {
         let t = line.trim_end();
@@ -4681,6 +4705,34 @@ mod extract_tests {
             Some("You have 2 usage limit resets available. Run /usage to use one.".into()),
         );
         assert!(codex_usage_notice_line("• ordinary assistant text").is_none());
+    }
+
+    /// Idle splash as drawn by Codex 0.153 (2026-09-08 screenshot): boxed banner, usage
+    /// hint, empty-composer placeholder. Must not become a user prompt or an assistant reply.
+    const CODEX_IDLE_SPLASH: &str = "\
+╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                  │
+│                                            │
+│ model:        gpt-5.6-luna max  fast   /model to change
+│ directory:    ~/project/hermes-agents/projects/pt
+│ permissions:  YOLO mode
+╰────────────────────────────────────────────╯
+
+  Tip: Type / to open the command popup; Tab autocompletes slash commands.
+
+• You have 1 usage limit reset available. Run /usage to use one.
+
+› Ask Codex to do anything
+
+gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used · 5h 100% left
+";
+
+    #[test]
+    fn codex_idle_splash_is_not_a_reply_or_a_user_prompt() {
+        assert_eq!(clean_screen("codex", CODEX_IDLE_SPLASH), None, "{:?}", clean_screen("codex", CODEX_IDLE_SPLASH));
+        assert_eq!(extract_reply("codex", CODEX_IDLE_SPLASH), None);
+        assert_eq!(last_prompt_echo_text("codex", CODEX_IDLE_SPLASH), None);
+        assert!(codex_usage_notice_lines(CODEX_IDLE_SPLASH).iter().any(|n| n.contains("usage limit reset")));
     }
 
     const CODEX_LIMIT_HIT: &str = "\
