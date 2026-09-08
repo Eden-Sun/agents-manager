@@ -166,6 +166,23 @@ function BotRow({
   const hasUpdate = useStore((s) => s.runs[botId]?.update_notice ?? null)
 
   if (!bot) return null
+  // 佔位列：分身剛按下去、daemon 還沒建好。灰的、不能點、不能拖，只告訴你「它會出現在這裡」。
+  if (bot.pending) {
+    return (
+      <div className="bot-row pending" role="option" aria-selected={false} aria-busy="true" data-bot-id={botId}>
+        <StatusLamp lamp="starting" title={`${bot.name}：建立中`} />
+        <span className="bot-main">
+          <span className="bot-ident">
+            <KindTag kind={bot.kind} className="bot-kind" />
+            <span className="bot-name">{bot.name}</span>
+          </span>
+          <span className="bot-sub">
+            <span className="bot-pending-note">建立中…</span>
+          </span>
+        </span>
+      </div>
+    )
+  }
   // 標題只在選取中的那一列展開成一行——一次只有一列，清單的掃讀節奏不會被打亂。
   // 子 agent 列是單行，標題留在 tooltip，不把樹撐高。
   const showTitle = Boolean(agentTitle) && selected && !compact
