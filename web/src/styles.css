@@ -185,7 +185,7 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid #76a7ff;
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
@@ -756,11 +756,11 @@ button:disabled {
 /* Focus must read differently from hover + selected. */
 .project-head:focus-within:not(.selected) {
   background: color-mix(in srgb, var(--bg-hover) 70%, #76a7ff 30%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #76a7ff 55%, transparent);
+  box-shadow: inset 0 0 0 1px var(--ring);
 }
 
 .project-head.selected:focus-within {
-  box-shadow: inset 0 0 0 1px #76a7ff;
+  box-shadow: inset 0 0 0 1px var(--ring);
 }
 
 .project-label {
@@ -796,7 +796,7 @@ button:disabled {
   min-width: 28px;
   min-height: 28px;
   border: 0;
-  background: transparent;
+  background: var(--btn-ghost-bg);
   color: var(--text-faint);
   padding: 0 5px;
   border-radius: 5px;
@@ -805,8 +805,8 @@ button:disabled {
 }
 
 .icon-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--danger);
+  background: var(--btn-danger-bg-soft);
+  color: var(--btn-danger-fg-soft);
 }
 .icon-btn.add {
   font-weight: 700;
@@ -817,10 +817,11 @@ button:disabled {
   background: var(--accent-soft);
 }
 
-/* Keep ＋/✕ readable on top of the row hover / selected wash. */
+/* Keep ＋/✕ readable on top of the row hover / selected wash. 底色改吃 ghost 的中性 wash：
+   原本那層 14% 的紅 wash 疊在 --bg-active 上，紅字對它只剩 2.93:1。 */
 .project-head .icon-btn:hover:not(:disabled):not(.add) {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
+  background: var(--btn-danger-bg-soft);
+  color: var(--btn-danger-fg-soft);
 }
 .project-head .icon-btn.add:hover:not(:disabled),
 .project-head .icon-btn.add[aria-expanded='true'] {
@@ -1110,12 +1111,12 @@ button:disabled {
 
 .bot-row:focus-visible:not(.selected) {
   background: color-mix(in srgb, var(--bg-hover) 70%, #76a7ff 30%);
-  outline: 2px solid #76a7ff;
+  outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
 
 .bot-row.selected:focus-visible {
-  outline: 2px solid #76a7ff;
+  outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
 
@@ -1482,7 +1483,9 @@ button:disabled {
 /* `⋯` 常駐但低調：沒 hover 時淡一點，hover / focus / 選取時滿版。不做 opacity: 0——
    看不見的按鍵在觸控裝置上等於不存在，而它現在有自己的格子，不會蓋到名字。 */
 .bot-actions .icon-btn {
-  opacity: 0.55;
+  /* 0.55 的 --text-faint 對白底只有 2.26:1，圖示鍵的門檻是 3:1；0.78 是還看得出
+     「比較淡」又過得了門檻的位置（白底 3.47、側欄 3.33、深色面板 4.25）。 */
+  opacity: 0.78;
   transition: opacity 0.12s ease;
 }
 
@@ -1550,9 +1553,9 @@ button:disabled {
   align-items: center;
   justify-content: center;
   min-height: 26px;
-  border: 1px solid var(--border-strong);
-  background: transparent;
-  color: var(--text-dim);
+  border: 1px solid var(--btn-ghost-border);
+  background: var(--btn-ghost-bg);
+  color: var(--btn-ghost-fg);
   border-radius: 6px;
   font-size: 11.5px;
   line-height: 1.4;
@@ -1561,8 +1564,8 @@ button:disabled {
 }
 
 .mini-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--btn-ghost-bg-hover);
+  color: var(--btn-ghost-fg-hover);
 }
 
 .mini-btn.primary:not(:disabled) {
@@ -1631,7 +1634,7 @@ button:disabled {
 }
 
 .head-menu-item.danger:hover:not(:disabled) {
-  background: var(--danger-soft);
+  background: var(--btn-danger-bg-menu);
 }
 
 .head-menu-item:disabled {
@@ -1831,26 +1834,150 @@ button:disabled {
   justify-content: flex-end;
 }
 
+/* ================================================================= buttons
+ * 一組色票、四個變體（ghost / 實心 / primary / danger），外加 banner 上的覆寫。
+ * 起因是兩個實例（`docs/screenshots/btn-contrast/before-*.png`）：
+ *  ‧ `.btn.primary` 沒有自己的 hover 底色，`.btn:hover:not(:disabled)`（0,3,0）
+ *    反而贏過 `.btn.primary`（0,2,0），主鈕一 hover 就變成近白底＋白字，
+ *    在琥珀 banner 上整顆消失（量到 1.18:1／深色 1.36:1）。
+ *  ‧ focus 環寫死 #76a7ff，對白底只有 2.4:1，跟 hover 底色糊在一起。
+ * 收斂成的規則：文字 ≥ 4.5:1、只有圖示的 ≥ 3:1、hover 與常態的底色差 ≥ 8 L*，
+ * focus 環對它坐著的那個面 ≥ 3:1 並用 2px offset 跟按鈕本體隔開。
+ * 量測見 `docs/screenshots/btn-contrast/audit.json`（CDP forcePseudoState 全掃）。
+ */
+:root {
+  /* focus 環。舊的 #76a7ff 太淡（白底 2.4:1）；加深一階的同色系在所有面上都過：
+     白 5.58、側欄 5.24、選取藍 4.79、琥珀 banner 5.04。 */
+  --ring: #2a63cd;
+
+  /* ghost：底本來就是透明的鍵（.icon-btn / .mini-btn）。hover 用「墨色 wash」
+     而不是固定的 --bg-hover——這樣不管坐在白面板、側欄還是琥珀 banner 上，
+     都是把腳下那個面壓深 ~8 L*，不會反過來比周圍還亮。 */
+  --btn-ghost-bg: transparent;
+  --btn-ghost-fg: var(--text-dim);
+  --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 11%, transparent);
+  --btn-ghost-fg-hover: var(--text);
+  --btn-ghost-border: var(--border-strong);
+
+  /* 實心的次要鍵（.btn）：底是面板色，hover 疊同一份 wash。 */
+  --btn-bg: var(--bg-panel);
+  --btn-fg: var(--text);
+  --btn-bg-hover: color-mix(in srgb, var(--text) 11%, var(--bg-panel));
+  --btn-fg-hover: var(--text);
+  --btn-border: var(--border-strong);
+
+  /* primary：底色維持已定案的 --accent，只補一階加深的 hover（ΔL* 9.4、白字 5.9:1）。
+     原本的 `filter: brightness()` 不算底色，才會被 .btn:hover 的底色蓋掉。 */
+  --btn-primary-bg: var(--accent);
+  --btn-primary-fg: var(--accent-text);
+  --btn-primary-bg-hover: #1a56c7;
+  --btn-primary-fg-hover: var(--accent-text);
+  --btn-primary-border: var(--accent);
+
+  /* danger：常態紅字白底、hover 才填滿（既有做法），active 再深一階。 */
+  --btn-danger-bg: var(--danger);
+  --btn-danger-fg: var(--accent-text);
+  --btn-danger-bg-hover: #982d1f;
+  --btn-danger-fg-hover: var(--accent-text);
+  --btn-danger-border: var(--danger);
+  /* 圖示鍵 hover 的紅色淡底。刻意用不透明的 color-mix：原本那層半透明的紅 wash
+     疊在 --bg-active 的選取列上會愈疊愈深，紅字掉到 2.5–2.9:1。 */
+  --btn-danger-bg-soft: color-mix(in srgb, var(--danger) 16%, var(--bg-panel));
+  --btn-danger-fg-soft: var(--danger);
+  /* 選單裡的刪除列是「文字」，門檻 4.5:1；--danger 在白底本來就只有 5.9，底色再壓
+     一階就不夠，所以淺色留原本較淡的 --danger-soft（紅字 4.65:1，回饋靠色相變化）。 */
+  --btn-danger-bg-menu: var(--danger-soft);
+
+  /* accent 變體：齒輪 / ＋ 這種「開東西」的圖示鍵，hover 是淡藍不是紅。 */
+  --btn-accent-bg-hover: color-mix(in srgb, var(--accent) 16%, transparent);
+  --btn-accent-fg-hover: var(--accent-ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* 深色的 --accent 當環已經夠亮（面板 6.37、側欄 6.98、選取藍 4.74）。 */
+    --ring: var(--accent);
+    /* 暗底要壓出同樣的 8 L* 需要多一點墨。 */
+    --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 15%, transparent);
+    --btn-bg-hover: color-mix(in srgb, var(--text) 15%, var(--bg-panel));
+    /* 深色主題的 hover 往亮的方向走（ΔL* 9.6 / 9.8）。 */
+    --btn-primary-bg-hover: #a3c0fa;
+    --btn-danger-bg-hover: #ffb4a8;
+    /* 深色的 --danger-soft 幾乎貼著面板色（ΔL* 2.5），這裡才需要不透明的混色。 */
+    --btn-danger-bg-menu: var(--btn-danger-bg-soft);
+  }
+}
+
 .btn {
-  border: 1px solid var(--border-strong);
-  background: var(--bg-panel);
+  border: 1px solid var(--btn-border);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
   border-radius: 6px;
   padding: 4px 12px;
   font-size: 12px;
 }
 
 .btn:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--btn-bg-hover);
+  color: var(--btn-fg-hover);
 }
 
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-border);
+  color: var(--btn-primary-fg);
 }
 
 .btn.primary:hover:not(:disabled) {
-  filter: brightness(1.08);
+  background: var(--btn-primary-bg-hover);
+  border-color: var(--btn-primary-bg-hover);
+  color: var(--btn-primary-fg-hover);
+}
+
+/*
+ * banner 上的鍵（BotSettingsPanel 的提醒條、team 的 paused 橫幅、通知、終端警示、
+ * 斷線條）。這些條子自己有底色（琥珀 / 紅 / 藍），把 .btn 的白底原封不動放上去，
+ * 遠看是一塊浮起來的白；hover 再換成 --bg-hover 就更亮，等於整顆消失。
+ * 這裡改成透明底 + 墨色 wash，讓它跟著條子走；文字與邊框也脫離 banner 的
+ * 繼承色（琥珀字在琥珀底上讀不出來）。
+ */
+.bs-banner,
+.team-paused,
+.notice,
+.term-warn,
+.conn-banner {
+  --btn-bg: transparent;
+  --btn-bg-hover: var(--btn-ghost-bg-hover);
+  --btn-fg: var(--text);
+  --btn-fg-hover: var(--text);
+  --btn-border: color-mix(in srgb, var(--text) 50%, transparent);
+  --btn-ghost-border: color-mix(in srgb, var(--text) 50%, transparent);
+}
+
+/*
+ * 這些鍵原本 hover 完全沒有底色變化（掃出來 ΔL* = 0）：不是缺 :hover 規則，
+ * 就是只改了框線或底線。統一補上 ghost 的 wash，各自原本的顏色規則不動。
+ */
+.tab:not([aria-selected='true']):hover:not(:disabled),
+.mem-open:hover:not(:disabled) .mem-badge,
+.mem-pop-refresh:hover:not(:disabled),
+.mem-pop-act button:hover:not(:disabled),
+.quota-more:hover:not(:disabled),
+.quota-bars-open:hover:not(:disabled),
+.quota-pop-row:hover,
+.team-copy:hover:not(:disabled),
+button.run-debug-toggle:hover:not(:disabled) {
+  background: var(--btn-ghost-bg-hover);
+  color: var(--btn-ghost-fg-hover);
+}
+
+/* 紅框的小鍵 hover 直接填滿（跟 `.btn.danger` 同一套）：只把底色壓深一階時，
+   紅字對那個灰底只剩 4.3:1。 */
+.mini-btn.danger:hover:not(:disabled),
+.mem-pop-act button.danger:hover:not(:disabled) {
+  background: var(--btn-danger-bg);
+  border-color: var(--btn-danger-bg);
+  color: var(--btn-danger-fg);
 }
 
 /*
@@ -2983,6 +3110,17 @@ p.project-quota-hidden {
   overflow: hidden;
   line-height: 0;
   cursor: zoom-in;
+}
+
+/* 這張卡坐在訊息泡泡上（使用者泡泡是實心藍），--ring 的深藍環在藍底上只有 1.2:1。
+   跟著泡泡的文字色走：藍泡泡上是白環（4.65:1），白泡泡上是深色環。hover 也補上——
+   原本點上去完全沒有回饋。 */
+.msg-attachment {
+  --ring: currentcolor;
+}
+
+.msg-attachment:hover {
+  background: color-mix(in srgb, currentcolor 24%, transparent);
 }
 
 .msg-attachment img {
@@ -4801,10 +4939,17 @@ button.model-tag {
   margin: 0 1px 0 2px;
 }
 
-button.model-tag:hover,
 button.model-tag[aria-expanded='true'] {
   border-color: var(--accent);
   color: var(--accent-ink);
+}
+
+/* hover 跟「開著」分家：hover 加的是底色 wash，字色維持 --text——深色主題的
+   --accent-ink 疊在 wash 上只有 4.14:1，開著時沒有 wash 才夠。 */
+button.model-tag:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--btn-ghost-bg-hover);
+  color: var(--btn-ghost-fg-hover);
 }
 
 .icon-btn.gear {
@@ -4816,8 +4961,8 @@ button.model-tag[aria-expanded='true'] {
 
 .icon-btn.gear:hover:not(:disabled),
 .icon-btn.gear[aria-expanded='true'] {
-  color: var(--accent-ink);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--btn-accent-fg-hover);
+  background: var(--btn-accent-bg-hover);
 }
 
 /* 側欄那一列的兩顆選單鍵（分身 / 設定）共用齒輪的弱化色與 hover 底。 */
@@ -4828,8 +4973,8 @@ button.model-tag[aria-expanded='true'] {
 }
 
 .icon-btn.menu-btn:hover:not(:disabled) {
-  color: var(--accent-ink);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--btn-accent-fg-hover);
+  background: var(--btn-accent-bg-hover);
 }
 
 /* On the selected row the wash is already accent-tinted, so the resting state needs more
@@ -5018,15 +5163,22 @@ button.model-tag[aria-expanded='true'] {
 }
 
 .btn.danger {
-  border-color: var(--danger);
-  color: var(--danger);
-  background: var(--bg-panel);
+  border-color: var(--btn-danger-border);
+  color: var(--btn-danger-bg);
+  background: var(--btn-bg);
   white-space: nowrap;
 }
 
 .btn.danger:hover:not(:disabled) {
-  background: var(--danger);
-  color: var(--accent-text);
+  background: var(--btn-danger-bg);
+  border-color: var(--btn-danger-bg);
+  color: var(--btn-danger-fg);
+}
+
+.btn.danger:active:not(:disabled) {
+  background: var(--btn-danger-bg-hover);
+  border-color: var(--btn-danger-bg-hover);
+  color: var(--btn-danger-fg-hover);
 }
 
 @media (width <= 1080px) {
@@ -5491,9 +5643,9 @@ button.model-tag[aria-expanded='true'] {
   cursor: pointer;
 }
 .opt-group .opt:hover:not(:disabled):not(.on) {
-  background: var(--bg-hover);
+  background: var(--btn-ghost-bg-hover);
   border-color: var(--border-strong);
-  color: var(--text);
+  color: var(--btn-ghost-fg-hover);
 }
 .opt-group .opt.on {
   background: var(--accent);
@@ -5658,8 +5810,8 @@ button.model-tag[aria-expanded='true'] {
 
 /* Sidebar 的 team 節點：刪除（垃圾桶）跟清理（✕）並排，hover 才紅起來。 */
 .team-node-head .icon-btn.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
+  background: var(--btn-danger-bg-soft);
+  color: var(--btn-danger-fg-soft);
 }
 
 /* --------------------------------------------- quota (sol decision, 2026-09-06)
@@ -6218,14 +6370,14 @@ button.model-tag[aria-expanded='true'] {
 
 .install-btn.primary {
   /* Prefer secondary look for install CTAs inside alerts. */
-  background: var(--bg-panel);
-  border-color: var(--border-strong);
-  color: var(--text);
+  background: var(--btn-bg);
+  border-color: var(--btn-border);
+  color: var(--btn-fg);
 }
 
 .install-btn.primary:hover:not(:disabled) {
-  filter: none;
-  background: var(--bg-hover);
+  background: var(--btn-bg-hover);
+  color: var(--btn-fg-hover);
 }
 
 .mini-btn.install-btn {
@@ -7705,6 +7857,12 @@ button.model-tag[aria-expanded='true'] {
 .team-node-btn:hover {
   background: var(--bg-hover);
 }
+
+/* 選取中的那一列要跟 `.bot-row.selected:hover` 用同一招往 accent 走：--bg-hover 的灰
+   疊在 --bg-active 的淡藍上，量到的差是 ΔL* 0.4，等於 hover 沒有反應。 */
+.team-node-head.selected .team-node-btn:hover {
+  background: color-mix(in srgb, var(--bg-active) 78%, var(--accent) 22%);
+}
 .team-node.collapsed .team-node-btn {
   font-weight: 650;
 }
@@ -8504,7 +8662,8 @@ button.run-debug-toggle:hover {
 
 /* `.icon-btn`'s hover is red because most of its users delete something; here only 「清空」 does. */
 .shelf-head .icon-btn:hover:not(:disabled) {
-  color: var(--text);
+  background: var(--btn-ghost-bg-hover);
+  color: var(--btn-ghost-fg-hover);
 }
 
 .shelf-head .shelf-clear:hover:not(:disabled) {
