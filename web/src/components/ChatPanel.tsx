@@ -6,6 +6,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { effortLabel, quotaKey } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useEnterToSend } from '../hooks/useEnterToSend'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
@@ -654,6 +655,7 @@ function Composer({
       }
     })
   }
+  const enterToSend = useEnterToSend(() => submit())
 
   /** 排隊中的那一則優先，否則是輸入框裡打到一半的字。 */
   const pending = queued?.text ?? text
@@ -826,6 +828,7 @@ function Composer({
               submit()
             }
           }}
+          {...enterToSend}
         />
         <button
           type="button"

@@ -14,6 +14,8 @@ import {
   teamPhaseTone,
   effortLabel,
 } from '../api/types'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useEnterToSend } from '../hooks/useEnterToSend'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import {
   botLamp,
@@ -708,6 +710,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
       if (ok) setDraft(draftKey, '')
     })
   }
+  const enterToSend = useEnterToSend(() => submit())
 
   return (
     <div className="composer group-composer team-composer">
@@ -772,6 +775,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
               submit()
             }
           }}
+          {...enterToSend}
         />
         <button
           type="button"
@@ -863,6 +867,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const [issueToClose, setIssueToClose] = useState<TeamIssue | null>(null)
   // 「追加 issue」正在飛的那一刻：按鈕與輸入都收起來，重送只會換到一個 409。
   const addBusy = Boolean(busy[`team:${teamId}:add-issues`])
+  // 390px 的標題列放不下五顆鍵：中止與關閉改從 `⋯` 走（下面 head-actions）。
+  const phone = useMediaQuery(PHONE_QUERY)
 
   if (!team) {
     return (
@@ -966,7 +972,9 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
               暫停
             </button>
           ) : null}
-          {terminal ? (
+          {/* 手機上標題列只放得下 phase chip 與一顆主要動作（放行／繼續／暫停）。中止與關閉
+              不是常按的東西，收進 `⋯`——但一定要收得進去，不能只是藏掉。 */}
+          {phone ? null : terminal ? (
             <button type="button" className="mini-btn danger" title="移除 worktree 與成員 bot（分支保留）" onClick={() => setConfirm('cleanup')}>
               清理
             </button>
@@ -975,10 +983,34 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
               中止
             </button>
           )}
-          <button type="button" className="mini-btn" title="回到這個 Project 的群組聊天" onClick={() => selectProject(team.project_id)}>
-            關閉
-          </button>
+          {phone ? null : (
+            <button type="button" className="mini-btn" title="回到這個 Project 的群組聊天" onClick={() => selectProject(team.project_id)}>
+              關閉
+            </button>
+          )}
           <HeadMoreMenu label="更多 Team 動作">
+            {phone ? (
+              <>
+                <button
+                  type="button"
+                  className="head-menu-item"
+                  role="menuitem"
+                  title="回到這個 Project 的群組聊天"
+                  onClick={() => selectProject(team.project_id)}
+                >
+                  關閉 Team 畫面
+                </button>
+                <button
+                  type="button"
+                  className="head-menu-item danger"
+                  role="menuitem"
+                  title={terminal ? '移除 worktree 與成員 bot（分支保留）' : '中止：停掉所有成員，不可逆'}
+                  onClick={() => setConfirm(terminal ? 'cleanup' : 'abort')}
+                >
+                  {terminal ? '清理 worktree…' : '中止 Team…'}
+                </button>
+              </>
+            ) : null}
             <button
               type="button"
               className="head-menu-item danger"
