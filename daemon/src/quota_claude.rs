@@ -604,6 +604,14 @@ fn unpark(key: &str) {
     backoff_map().lock().unwrap().remove(key);
 }
 
+/// Forget the failure backoff for one identity on one host, so the next poll cycle probes it
+/// again right away. Called after a login recheck says the account is back: a logged-out
+/// identity is parked for 30 minutes, which is exactly how long the popover used to stay
+/// wrong after the user logged in.
+pub fn unpark_identity(host: &str, name: &str) {
+    unpark(&crate::quota::quota_key(host, &format!("claude:{name}")));
+}
+
 /// One account to probe this cycle.
 struct Target {
     /// Host-less quota key (`claude`, `claude:cc1`, …).

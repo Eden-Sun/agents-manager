@@ -341,6 +341,50 @@ pub async fn record_identity_login(
     before != (info.logged_in, info.account.clone(), info.plan.clone())
 }
 
+/// Ask the CLI *right now* whether `name` is logged in on `host`, and update the cache.
+///
+/// The tools pass and the quota poller keep the login state, but the poller parks a
+/// logged-out identity for 30 minutes — so after the user logs in (via the popover's shell
+/// button, or on their own) the cache said "not logged in" until 「重新偵測」. `start_bot`
+/// calls this when the cache says logged-out, before it warns.
+///
+/// Locally this is `claude auth status --json` with the identity's env. Over ssh the answer
+/// can be a false negative (no Keychain), so a remote `false` is **not** written back — only
+/// a positive answer updates the cache there. Returns the fresh answer when there is one.
+pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> Option<bool> {
+    let idn = identity_for_host(app, host, name).await?;
+    let args: Vec<&str> = match idn.kind.as_str() {
+        "claude" => CLAUDE_LOGIN_ARGS.to_vec(),
+        k => login_status_args(k)?.to_vec(),
+    };
+    let bin = cached_path(app, host, &idn.kind).await.unwrap_or_else(|| idn.kind.clone());
+    let home = host_home(app, host).await;
+    let mut script = String::new();
+    for (k, v) in &idn.env {
+        if valid_env_name(k) {
+            script.push_str(&format!("export {k}={}\n", sh_quote(&crate::config::expand_home(v, &home))));
+        }
+    }
+    script.push_str(&format!("{} {} 2>/dev/null </dev/null", sh_quote(&bin), args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ")));
+    let out = if host == LOCAL_HOST {
+        run_local(&script, Duration::from_secs(20)).await.ok()?
+    } else {
+        app.hosts.get(host).await?.ssh_exec_path(&script).await.ok()?
+    };
+    let (logged_in, account, plan) = read_login_answer(&idn.kind, &out);
+    let logged_in = logged_in?;
+    if host != LOCAL_HOST && !logged_in {
+        return None;
+    }
+    if record_identity_login(app, host, name, Some(logged_in), account, plan).await {
+        app.emit("host_changed", serde_json::json!({"host": host})).await;
+    }
+    if logged_in && idn.kind == "claude" {
+        crate::quota_claude::unpark_identity(host, name);
+    }
+    Some(logged_in)
+}
+
 /// One identity to ask about, already resolved for a specific host.
 #[derive(Debug, Clone)]
 pub struct IdentityProbe {
