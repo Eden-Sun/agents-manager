@@ -817,6 +817,33 @@ export function Sidebar() {
       return new Set()
     }
   })
+  // 新建 / 分身 / 程式化選取的 bot 要看得到：那一列可能在收合的專案裡，或在捲出畫面的地方。
+  // 只在「選取的 bot 換了」時做，使用者自己捲動不會被拉回來；也不搶焦點（那是鍵盤 ↑/↓ 的事）。
+  const selectedBotId = useStore((s) => s.selectedBotId)
+  const selectedBotProject = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
+  useEffect(() => {
+    if (!selectedBotId) return
+    if (selectedBotProject && shutProjects.has(selectedBotProject)) {
+      setShutProjects((prev) => {
+        if (!prev.has(selectedBotProject)) return prev
+        const next = new Set(prev)
+        next.delete(selectedBotProject)
+        try {
+          localStorage.setItem('am.collapsedProjects', JSON.stringify([...next]))
+        } catch {
+          /* 同上 */
+        }
+        return next
+      })
+    }
+    // 展開之後那一列才會在 DOM 裡，所以等下一個 frame 再捲。
+    const id = requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-bot-id="${selectedBotId}"]`)?.scrollIntoView({ block: 'nearest' })
+    })
+    return () => cancelAnimationFrame(id)
+    // shutProjects 故意不放進依賴：使用者手動收合正在選取的專案時不該被立刻彈開。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBotId, selectedBotProject])
   const toggleProject = (id: string) =>
     setShutProjects((prev) => {
       const next = new Set(prev)
