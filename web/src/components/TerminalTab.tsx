@@ -4,6 +4,7 @@ import { isPaneMoveUnsupported, movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
 import { linkifyTerm } from './TermLinks'
+import { setTermWrap, useTermWrap } from './termWrap'
 
 /**
  * Below this many columns a TUI agent lays its own text out a fragment per row and the spaces
@@ -40,6 +41,7 @@ export function TerminalTab({ botId }: { botId: string }) {
   const [movedBot, setMovedBot] = useState<string | null>(null)
   const [moveErr, setMoveErr] = useState<{ botId: string; text: string } | null>(null)
   const [noMove, setNoMove] = useState(paneMoveUnsupported)
+  const wrap = useTermWrap()
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -126,6 +128,11 @@ export function TerminalTab({ botId }: { botId: string }) {
           <input type="checkbox" checked={tight} onChange={(e) => setTight(e.target.checked)} />
           壓縮空行
         </label>
+        {/* 手機預設折行（390px 看不到 185 欄的右半邊），桌機預設不折；按過就記在 localStorage。 */}
+        <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
+          <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
+          換行
+        </label>
         <span className="spacer" />
         {/* 這裡本來寫的是開發備忘（「第一階段不做 xterm.js 串流」）。畫面上要說的是這東西
             現在怎麼用，不是它的實作進度。 */}
@@ -172,7 +179,7 @@ export function TerminalTab({ botId }: { botId: string }) {
         </div>
       ) : null}
       {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
-      <pre className="term" ref={tail.ref} onScroll={tail.onScroll}>{linkifyTerm(body, snap?.columns)}</pre>
+      <pre className={`term${wrap ? ' term-wrap' : ''}`} ref={tail.ref} onScroll={tail.onScroll}>{linkifyTerm(body, snap?.columns)}</pre>
     </div>
   )
 }

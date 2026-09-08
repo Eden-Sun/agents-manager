@@ -1,6 +1,7 @@
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { linkifyTerm } from './TermLinks'
+import { useTermWrap } from './termWrap'
 
 /**
  * SPEC §3.2：agent `blocked` 時對話上方的終端快照 + 按鍵面板。
@@ -20,6 +21,8 @@ export function BlockedPanel({
 }) {
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 40, paused })
   const press = usePaneKeys(botId, refresh)
+  // 折不折行跟終端分頁共用一個開關（切換鍵在那條 term-bar 上）。
+  const wrap = useTermWrap()
   // `pre` 是 white-space: pre，內容一律當成一個字串算好再放進去，免得 JSX 的排版縮排跑進畫面。
   const body = err
     ? `讀取終端失敗：${err}`
@@ -51,7 +54,7 @@ export function BlockedPanel({
           </button>
         ) : null}
       </div>
-      <pre className="term blocked-term">{linkifyTerm(body, snap?.columns)}</pre>
+      <pre className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
       <div className="keypad">
         {KEYPAD.map((k) => (
           <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => press(k.keys)}>
