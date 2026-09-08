@@ -134,7 +134,7 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 | --- | --- |
 | `budget_time` / `budget_relays` | 「加碼並繼續」＝ `PATCH` 把 `max_relays`、`max_wall_clock_min` 各 ×2，成功後 `resume`（同 TeamPanel 標題列的兩顆） |
 | `ask_user`、`gate:*`、`member_*` | 不給按鈕，只顯示原因——回答 PM、放行閘門、救成員都得在 TeamPanel 裡做 |
-| 其餘（`user`、`quota_low`、`merge_conflict`…） | 「繼續」＝ `resume` |
+| 其餘（`user`、`quota_low`、`merge_conflict`…） | 「繼續」＝ `resume`（`quota_low` 的成員名單在 tooltip，見 §4.5 `pause_detail`） |
 
 ### 2.4 Submodule 的 issue（2026-09-07）
 
@@ -342,8 +342,29 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | **審查回合** | 每個 task `budget.max_review_rounds`（預設 2）：`request_changes` 第 N+1 次 → task `exhausted`，team `paused(review_exhausted)`，由人決定強制合併 / 跳過 / 再給一回合。 |
 | **併行數**（2026-09-08，原「派工上限」） | `workers.count`（1–4，預設 1）是**同時能跑幾個 task**，不是 PM 要自己分配的人頭。每個執行者同時最多 1 個未完成 task（DB 的 `team_tasks_one_open_per_worker` 保證），所以併行數 n = 最多 n 筆同時在跑。PM 可以隨時 `dispatch`，不必等前一批做完：多的進佇列，跑完一筆補一筆。**同一個 issue 內出現第二次完全相同的 `brief`**（不分執行者）→ `paused(pm_repeat)`。 |
 | **時間** | `budget.max_wall_clock_min`（預設 120）：從 `started_at` 起算，到頂 → `paused(budget_time)`。 |
-| **額度** | 每次送 relay 前查 `quota::get(kind)`：任一週期 `used_pct ≥ budget.quota_stop_pct`（預設 90）→ `paused(quota_low)`；額度沒資料時不擋。 |
+| **額度** | 每次送 relay 前查 `quota::get(kind)`：任一週期 `used_pct ≥ budget.quota_stop_pct`（預設 90）→ `paused(quota_low)`；額度沒資料時不擋。**暫停要指名道姓**（2026-09-09）：`quota_low` 一律附 `pause_detail`（見下），寫明是哪個成員、哪個身分、哪個視窗、剩多少、幾點 reset。 |
 | **停頓不是中止** | 所有上限都只 `paused`，成員 pane 還活著；使用者 `PATCH budget` 後 `resume`。中止只有人能按。 |
+
+**`pause_detail`（2026-09-09 新增）**：`pause_reason` 是機器碼，`quota_low` 這一種光看碼不知道要去處理誰——
+一隊有 pm / dev-1 / dev-2 / rev，各自可能掛在不同身分（`cc0` / `cc2` / codex）上。daemon 因此在暫停的同時
+把當下的額度快照寫進 `teams.pause_detail_json`，`team_json` 與 `team_changed` 以 `pause_detail` 送出：
+
+```json
+{"stop_pct": 90,
+ "members": [{"bot_id": "01M1…", "name": "ttxka1d-i2-rev", "short": "rev", "role": "reviewer",
+              "kind": "claude", "identity": "cc2", "host": "local",
+              "window": "five_hour", "used_pct": 96.0, "remaining_pct": 4.0,
+              "resets_at": "2026-09-09T03:20:00Z"}]}
+```
+
+- `members` 是**當下所有**過線的成員，`used_pct` 由大到小；`window` 是該成員最接近上限的那個視窗
+  （`five_hour` / `seven_day`，即 `GET /api/quota` 的欄位名）。一次列全部的理由是：只寫一個的話，
+  使用者處理完那一個按「繼續」，下一秒又停在同一個原因上。
+- 其他 `pause_reason` 目前都是 `null`（碼本身已經說完了，例如 `member_lost:dev-1`）。
+- **每次 phase 變動都重寫**這個欄位，所以 `resume` 之後不會留下上一次暫停的細節。
+- 舊 daemon 沒有這個欄位 → 前端退回只寫「已暫停：額度過低」的舊文案。
+- UI：TeamPanel 的黃色橫幅寫「已暫停：rev（cc2）5h 額度剩 4%，03:20 才 reset。」，兩位以上寫最嚴重的
+  那一位 + 「（另有 N 位額度也不足）」，完整名單在 `title`；側欄那一列太窄，只把名單放進 tooltip。
 
 ### 4.6 supervised 模式
 
@@ -687,7 +708,7 @@ PM 同時只能收一則 prompt，但兩個 worker 可能幾乎同時回報。�
 ```json
 { "projects": [ { "id": "…", "teams": [
     { "id": "01M1…", "issue_number": 42, "issue_title": "…", "issue_url": "…",
-      "phase": "working", "pause_reason": null, "branch": "team/i42-k3f9x2", "deliver": "pr", "supervised": false,
+      "phase": "working", "pause_reason": null, "pause_detail": null, "branch": "team/i42-k3f9x2", "deliver": "pr", "supervised": false,
       "members": [ {"bot_id": "…", "role": "pm"}, {"bot_id": "…", "role": "worker"}, {"bot_id": "…", "role": "reviewer"} ],
       "tasks_summary": { "queued": 0, "working": 1, "reviewing": 1, "merged": 1, "total": 3 },
 
@@ -748,7 +769,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 
 | type | data |
 |---|---|
-| `team_changed` | `{"team_id", "project_id", "phase", "pause_reason", "usage"}` — phase / 預算用量變化 |
+| `team_changed` | `{"team_id", "project_id", "phase", "pause_reason", "pause_detail", "usage"}` — phase / 預算用量變化 |
 | `team_task_updated` | `{"team_id", "task": <task 物件>}` |
 | `team_event` | `{"team_id", "event": <10.4 的事件物件>}` |
 
@@ -926,6 +947,7 @@ CREATE TABLE IF NOT EXISTS teams (
   issue_number INTEGER NOT NULL, issue_title TEXT NOT NULL, issue_url TEXT NOT NULL,
   phase TEXT NOT NULL CHECK (phase IN ('starting','planning','working','finishing','done','paused','aborting','aborted','failed')),
   pause_reason TEXT, resume_phase TEXT,
+  pause_detail_json TEXT,              -- §4.5：quota_low 是誰的額度不夠（暫停當下的快照）
   base_ref TEXT NOT NULL, base_sha TEXT NOT NULL, branch TEXT NOT NULL, worktree_root TEXT NOT NULL,
   workspace_id TEXT,
   deliver TEXT NOT NULL CHECK (deliver IN ('branch','pr')),

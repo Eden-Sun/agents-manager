@@ -1444,6 +1444,24 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 > 修正前是拿**全部**列（含 `done` / `failed` / `skipped`）比對 issue 號，所以一個 issue 在同一隊做過一次
 > 就永遠不能再排，UI 只會看到「追加 issue 失敗：issue already queued」。
 
+#### team 物件的 `pause_detail`（2026-09-09 新增）
+
+`GET /api/state`、`GET /api/teams/{id}` 的 team 物件與 WS 的 `team_changed` 多一個 `pause_detail`，
+補 `pause_reason` 這個機器碼講不出來的那一半：**是誰**的額度不夠。目前只有 `quota_low` 會帶（其餘 `null`）：
+
+```json
+{"phase":"paused","pause_reason":"quota_low",
+ "pause_detail":{"stop_pct":90,
+   "members":[{"bot_id":"01M1…","name":"ttxka1d-i2-rev","short":"rev","role":"reviewer",
+               "kind":"claude","identity":"cc2","host":"local",
+               "window":"five_hour","used_pct":96.0,"remaining_pct":4.0,
+               "resets_at":"2026-09-09T03:20:00Z"}]}}
+```
+
+`members` 是暫停當下**所有**過線的成員（`used_pct` 由大到小），`window` 是該成員最接近上限的那個視窗，
+名字與 `GET /api/quota` 相同（`five_hour` / `seven_day`）。每次 phase 變動都重寫，`resume` 之後就是 `null`。
+舊 daemon 沒有這個欄位，前端會退回只寫原因的舊文案。詳見 SPEC-team §4.5。
+
 #### `PATCH /api/teams/{id}` 的角色（2026-09-08 新增）
 
 改預算 / supervised / deliver 之外，三個角色也能就地改：

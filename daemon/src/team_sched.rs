@@ -525,6 +525,12 @@ async fn note(app: &Arc<App>, team_id: &str, payload: Value) -> LcResult<()> {
 /// `protocol_error`…) is a team-level problem that the next issue would just hit again, so
 /// those always pause.
 async fn pause(app: &Arc<App>, team: &db::Team, reason: &str) -> LcResult<()> {
+    pause_with_detail(app, team, reason, None).await
+}
+
+/// [`pause`] carrying §4.5's structured detail (which member, which quota window, how much is
+/// left). Everything else about a pause is unchanged — the detail is what the banner reads.
+async fn pause_with_detail(app: &Arc<App>, team: &db::Team, reason: &str, detail: Option<Value>) -> LcResult<()> {
     if team.phase == "paused" || team::is_terminal(&team.phase) || team.phase == "aborting" {
         return Ok(());
     }
@@ -536,7 +542,7 @@ async fn pause(app: &Arc<App>, team: &db::Team, reason: &str) -> LcResult<()> {
             return Box::pin(close_issue_and_advance(app, &team.id, "failed", Some(reason), None)).await;
         }
     }
-    team::set_phase(app, &team.id, "paused", Some(reason), Some(&team.phase)).await?;
+    team::set_phase_detail(app, &team.id, "paused", Some(reason), Some(&team.phase), detail).await?;
     Ok(())
 }
 
@@ -619,12 +625,48 @@ fn elapsed_min_of(t: &db::Team, issue: Option<&db::TeamIssue>) -> i64 {
 
 // ---------------------------------------------------------------- gates (§4.5, §9.2)
 
+/// One member's worst quota window: which member, which identity, which window, how much is
+/// left and when it comes back. `quota_low` used to be a bare code, which told the user a
+/// team had stopped but not *whose* account to go and look at (§4.5).
+struct QuotaHit {
+    bot_id: String,
+    name: String,
+    role: Option<String>,
+    kind: String,
+    identity: Option<String>,
+    host: String,
+    /// `five_hour` / `seven_day` — the window key, exactly as `GET /api/quota` names it.
+    window: &'static str,
+    used_pct: f64,
+    resets_at: Option<String>,
+}
+
+impl QuotaHit {
+    fn to_json(&self, team_id: &str) -> Value {
+        json!({
+            "bot_id": self.bot_id,
+            "name": self.name,
+            "short": team::short_name(&self.name, team_id),
+            "role": self.role,
+            "kind": self.kind,
+            "identity": self.identity,
+            "host": self.host,
+            "window": self.window,
+            "used_pct": self.used_pct,
+            "remaining_pct": (100.0 - self.used_pct).max(0.0),
+            "resets_at": self.resets_at,
+        })
+    }
+}
+
 /// The quota reading for one member's kind (`kind` or `kind:<identity>`) **on the bot's
-/// host** (SPEC §14), if there is one.
-async fn quota_pct(app: &Arc<App>, bot: &db::Bot) -> Option<f64> {
+/// host** (SPEC §14), if there is one. The window returned is the one closest to its cap —
+/// that is the one that stops the team, so that is the one the banner has to name.
+async fn quota_hit(app: &Arc<App>, bot: &db::Bot) -> Option<QuotaHit> {
     let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
     let q = app.quotas.lock().await;
-    let keys: Vec<String> = match bot.identity.as_deref().filter(|s| !s.is_empty()) {
+    let identity = bot.identity.clone().filter(|s| !s.is_empty());
+    let keys: Vec<String> = match identity.as_deref() {
         Some(i) => vec![format!("{}:{i}", bot.kind), bot.kind.clone()],
         None => vec![bot.kind.clone()],
     }
@@ -632,15 +674,54 @@ async fn quota_pct(app: &Arc<App>, bot: &db::Bot) -> Option<f64> {
     .map(|base| crate::quota::quota_key(&host, base))
     .collect();
     for k in keys {
-        if let Some(quota) = q.get(&k) {
-            return [&quota.five_hour, &quota.seven_day]
-                .into_iter()
-                .flatten()
-                .map(|w| w.used_pct)
-                .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))));
-        }
+        let Some(quota) = q.get(&k) else { continue };
+        let worst = [("five_hour", &quota.five_hour), ("seven_day", &quota.seven_day)]
+            .into_iter()
+            .filter_map(|(name, w)| w.as_ref().map(|w| (name, w)))
+            .fold(None, |acc: Option<(&'static str, &crate::quota::Window)>, (name, w)| {
+                Some(match acc {
+                    Some(prev) if prev.1.used_pct >= w.used_pct => prev,
+                    _ => (name, w),
+                })
+            });
+        let (window, w) = worst?;
+        return Some(QuotaHit {
+            bot_id: bot.id.clone(),
+            name: bot.name.clone(),
+            role: bot.team_role.clone(),
+            kind: bot.kind.clone(),
+            identity,
+            host,
+            window,
+            used_pct: w.used_pct,
+            resets_at: w.resets_at.clone(),
+        });
     }
     None
+}
+
+/// Every member at or past `stop_pct`, worst first — the whole list, because two roles on the
+/// same account run out together and naming only one sends the user to fix half the problem.
+async fn quota_low_members(app: &Arc<App>, ctx: &Ctx) -> Vec<QuotaHit> {
+    let mut hits = Vec::new();
+    for b in &ctx.members {
+        if let Some(hit) = quota_hit(app, b).await {
+            if hit.used_pct >= ctx.budget.quota_stop_pct {
+                hits.push(hit);
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.used_pct.total_cmp(&a.used_pct));
+    hits
+}
+
+/// §4.5's `quota_low` pause, with the roster of who ran out attached (§10.6 `pause_detail`).
+async fn pause_quota_low(app: &Arc<App>, ctx: &Ctx, hits: &[QuotaHit]) -> LcResult<()> {
+    let detail = json!({
+        "stop_pct": ctx.budget.quota_stop_pct,
+        "members": hits.iter().map(|h| h.to_json(&ctx.team.id)).collect::<Vec<_>>(),
+    });
+    pause_with_detail(app, &ctx.team, "quota_low", Some(detail)).await
 }
 
 /// Wall clock and quota, checked on every pass. Returns `true` when the team may proceed.
@@ -649,13 +730,10 @@ async fn gates(app: &Arc<App>, ctx: &Ctx) -> LcResult<bool> {
         pause(app, &ctx.team, "budget_time").await?;
         return Ok(false);
     }
-    for b in &ctx.members {
-        if let Some(pct) = quota_pct(app, b).await {
-            if pct >= ctx.budget.quota_stop_pct {
-                pause(app, &ctx.team, "quota_low").await?;
-                return Ok(false);
-            }
-        }
+    let low = quota_low_members(app, ctx).await;
+    if !low.is_empty() {
+        pause_quota_low(app, ctx, &low).await?;
+        return Ok(false);
     }
     Ok(true)
 }
@@ -716,11 +794,12 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             return Ok(());
         }
         // §4.5 quota, re-checked immediately before the send.
-        if let Some(pct) = quota_pct(app, bot).await {
-            if pct >= ctx.budget.quota_stop_pct {
-                pause(app, &ctx.team, "quota_low").await?;
-                return Ok(());
-            }
+        if quota_hit(app, bot).await.is_some_and(|h| h.used_pct >= ctx.budget.quota_stop_pct) {
+            // The recipient is what stops this send, but the banner lists everyone who is out:
+            // resuming only to stop on the next member helps nobody.
+            let low = quota_low_members(app, ctx).await;
+            pause_quota_low(app, ctx, &low).await?;
+            return Ok(());
         }
         // §9.1: an undeliverable member is a pause, never a skip.
         let Some(run) = db::active_run(&app.db, &bot.id).await.map_err(up)? else {
@@ -3442,6 +3521,46 @@ mod scenarios {
         let t = s.team().await;
         assert_eq!(t.pause_reason.as_deref(), Some("quota_low"));
         assert!(!crate::team::is_terminal(&t.phase), "a quota cap never ends a team");
+        // §4.5: the pause has to name *who* ran out, or the user cannot tell which account to
+        // go and look at. Every member is on the same kind here, so all of them are listed.
+        let d = crate::team::pause_detail_json(&t);
+        let members = d["members"].as_array().cloned().unwrap_or_default();
+        assert!(!members.is_empty(), "quota_low with no member named: {d}");
+        assert_eq!(members[0]["window"], "five_hour");
+        assert_eq!(members[0]["kind"], "claude");
+        assert_eq!(members[0]["used_pct"], 97.0);
+        assert_eq!(members[0]["remaining_pct"], 3.0);
+        assert_eq!(members[0]["short"], "dev-1", "the short role name is what the banner prints");
+        assert_eq!(members.len(), 1, "the PM is a codex bot with no quota row: {d}");
+        // A `resume` clears the detail with the pause it described.
+        crate::team::resume(s.app(), &s.tid).await.unwrap();
+        assert!(crate::team::pause_detail_json(&s.team().await).is_null());
+
+        // Two kinds out at once: both are named, worst first, so resuming after fixing one
+        // account does not stop the team again on the other.
+        s.app().quotas.lock().await.insert(
+            "codex".into(),
+            crate::quota::Quota {
+                five_hour: Some(crate::quota::Window { used_pct: 91.0, resets_at: None }),
+                seven_day: Some(crate::quota::Window {
+                    used_pct: 99.0,
+                    resets_at: Some("2026-09-16T03:20:00Z".into()),
+                }),
+                fable: None,
+                plan: None,
+                updated_at: db::now(),
+                source: "test".into(),
+                account: None,
+                host: crate::config::LOCAL_HOST.into(),
+            },
+        );
+        step(s.app(), &s.tid).await.unwrap();
+        let d = crate::team::pause_detail_json(&s.team().await);
+        let members = d["members"].as_array().cloned().unwrap_or_default();
+        assert_eq!(members.len(), 2, "both members are out: {d}");
+        assert_eq!(members[0]["short"], "pm", "worst first");
+        assert_eq!(members[0]["window"], "seven_day", "the window closest to its cap");
+        assert_eq!(members[0]["resets_at"], "2026-09-16T03:20:00Z");
     }
 
     /// §4.6 — the supervised gates hold, and `approve` releases exactly one.

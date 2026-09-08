@@ -30,6 +30,8 @@ import type {
   TeamEventKind,
   TeamEventStatus,
   TeamMember,
+  TeamPauseDetail,
+  TeamPauseQuotaMember,
   TeamPhase,
   TeamRole,
   TeamIssue,
@@ -895,6 +897,35 @@ function toMembers(v: unknown): TeamMember[] {
   return out
 }
 
+/**
+ * SPEC-team §4.5 的 `pause_detail`。只認得 `quota_low` 那一種（`members` 陣列）；
+ * 舊 daemon 不送這個欄位，或送來的形狀不對 → `null`，橫幅退回只寫原因的舊樣子。
+ */
+export function toTeamPauseDetail(v: unknown): TeamPauseDetail | null {
+  if (!isRec(v)) return null
+  const members: TeamPauseQuotaMember[] = []
+  for (const m of arr(pick(v, 'members'))) {
+    if (!isRec(m)) continue
+    const name = str(pick(m, 'name'))
+    const role = str(pick(m, 'role'))
+    members.push({
+      bot_id: str(pick(m, 'bot_id')),
+      name,
+      short: str(pick(m, 'short'), name),
+      role: (TEAM_ROLES as readonly string[]).includes(role) ? (role as TeamRole) : null,
+      kind: str(pick(m, 'kind')),
+      identity: optStr(pick(m, 'identity')),
+      host: str(pick(m, 'host')),
+      window: str(pick(m, 'window')) === 'seven_day' ? 'seven_day' : 'five_hour',
+      used_pct: num(pick(m, 'used_pct'), 0),
+      remaining_pct: num(pick(m, 'remaining_pct'), 0),
+      resets_at: optStr(pick(m, 'resets_at')),
+    })
+  }
+  if (!members.length) return null
+  return { stop_pct: num(pick(v, 'stop_pct'), 0), members }
+}
+
 export function toTeam(v: unknown, projectId?: string): Team | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id', 'team_id'))
@@ -911,6 +942,7 @@ export function toTeam(v: unknown, projectId?: string): Team | null {
     issues_summary: toIssuesSummary(pick(v, 'issues_summary')),
     phase: oneOf<TeamPhase>(pick(v, 'phase'), TEAM_PHASES, 'starting'),
     pause_reason: optStr(pick(v, 'pause_reason')),
+    pause_detail: toTeamPauseDetail(pick(v, 'pause_detail')),
     branch: str(pick(v, 'branch')),
     deliver: oneOf<TeamDeliver>(pick(v, 'deliver'), TEAM_DELIVERS, 'branch'),
     supervised: bool(pick(v, 'supervised'), false),

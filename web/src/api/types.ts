@@ -954,6 +954,32 @@ export const TEAM_ISSUE_STATE_LABEL: Record<TeamIssueState, string> = {
   skipped: '略過',
 }
 
+/** SPEC-team §4.5：`quota_low` 暫停時撞到上限的那一個成員與那一個額度視窗。 */
+export interface TeamPauseQuotaMember {
+  bot_id: string
+  /** 完整 bot 名（`ttxka1d-i2-rev`）。 */
+  name: string
+  /** 面板上寫的短名（`rev`、`dev-1`）。 */
+  short: string
+  role: TeamRole | null
+  kind: string
+  /** 用哪個身分登入的（`cc2`）；null = 這個 kind 只有一個帳號。 */
+  identity: string | null
+  host: string
+  window: 'five_hour' | 'seven_day'
+  used_pct: number
+  remaining_pct: number
+  resets_at: string | null
+}
+
+/** SPEC-team §4.5 / §10.2：`pause_reason` 的結構化細節。目前只有 `quota_low` 會帶。 */
+export interface TeamPauseDetail {
+  /** 當時的 `budget.quota_stop_pct`。 */
+  stop_pct: number
+  /** 全部不夠的成員，最嚴重的在前面。 */
+  members: TeamPauseQuotaMember[]
+}
+
 /** SPEC-team §10.2 `GET /api/state` 的 team 物件。 */
 export interface Team {
   /** §2.3：整個 issue 佇列。下面的 `issue_*` 是「當前這一項」的鏡像。 */
@@ -968,6 +994,8 @@ export interface Team {
   phase: TeamPhase
   /** `paused` 的機器碼原因（例：`budget_relays`、`member_lost:dev-1`、`gate:merge`）。 */
   pause_reason: string | null
+  /** SPEC-team §4.5：機器碼補不完的那一半——`quota_low` 是誰的額度不夠。舊 daemon 沒有 → null。 */
+  pause_detail: TeamPauseDetail | null
   branch: string
   deliver: TeamDeliver
   supervised: boolean

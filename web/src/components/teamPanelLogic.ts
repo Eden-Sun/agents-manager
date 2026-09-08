@@ -1,4 +1,4 @@
-import type { Team, TeamEvent } from '../api/types.ts'
+import type { Team, TeamEvent, TeamPauseQuotaMember } from '../api/types.ts'
 import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, teamPauseLabel, teamShortName } from '../api/types.ts'
 
 /**
@@ -160,4 +160,70 @@ export function teamPauseAction(reason: string | null): TeamPauseAction {
   if (!reason) return 'resume'
   if (reason === 'ask_user' || reason.startsWith('gate:') || reason.startsWith('member_')) return null
   return 'resume'
+}
+
+/**
+ * `quota_low` 的橫幅要**指名道姓**（2026-09-09）。
+ *
+ * 原本只寫「已暫停：額度過低」——隊伍裡有 pm / dev-1 / dev-2 / rev 四個成員、各自可能掛在
+ * 不同帳號（`cc0` / `cc2` / codex）上，使用者看不出要去處理哪一個身分，只能一個一個點開
+ * 成員的 pane 對額度。daemon 現在把撞到上限的成員連同視窗、剩餘 % 與 reset 時間放進
+ * `pause_detail`（SPEC-team §4.5），這裡把它排成一句話。
+ */
+function quotaWindowLabel(m: TeamPauseQuotaMember): string {
+  // grok 的長週期是「每週」不是「7 天」，跟額度列（QuotaStrip）用同一套說法。
+  if (m.window === 'seven_day') return m.kind === 'grok' ? '週' : '7d'
+  return '5h'
+}
+
+/** `2026-09-09T03:20:00Z` → `03:20`；今天以外的還要日期，不然「03:20」會被讀成再幾分鐘。 */
+function quotaResetLabel(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  return d.toLocaleString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    ...(sameDay ? {} : { month: '2-digit', day: '2-digit' }),
+  })
+}
+
+/** `rev（cc2）5h 額度剩 4%，03:20 才 reset`。 */
+export function teamQuotaMemberText(m: TeamPauseQuotaMember): string {
+  const who = m.identity ? `${m.short}（${m.identity}）` : `${m.short}（${m.kind}）`
+  const pct = Math.round(m.remaining_pct)
+  const reset = quotaResetLabel(m.resets_at)
+  // `）` 本來就佔滿一格，後面再補空格會在橫幅上開一個洞。
+  return `${who}${quotaWindowLabel(m)} 額度剩 ${pct}%${reset ? `，${reset} 才 reset` : ''}`
+}
+
+/**
+ * 橫幅裡「已暫停：」後面那一段。`quota_low` 以外的原因照舊用機器碼的中文。
+ *
+ * 兩位以上的話列最嚴重的那個 + 「另有 N 位」——四個成員全列會把橫幅撐成一段文章，
+ * 而全部名單在 `title` 裡（見 `teamPauseDetailTitle`）。
+ */
+export function teamPauseText(team: Team): string {
+  const detail = team.pause_reason === 'quota_low' ? team.pause_detail : null
+  if (!detail?.members.length) return teamPauseLabel(team.pause_reason)
+  const [worst, ...rest] = detail.members
+  return `${teamQuotaMemberText(worst)}${rest.length ? `（另有 ${rest.length} 位額度也不足）` : ''}`
+}
+
+/** 全部額度不足的成員，一行一個；沒有細節就是空字串。 */
+export function teamPauseDetailLines(team: Team): string {
+  const detail = team.pause_reason === 'quota_low' ? team.pause_detail : null
+  if (!detail) return ''
+  return detail.members.map((m) => teamQuotaMemberText(m)).join('\n')
+}
+
+/** 橫幅的 `title`——只有一位時 tooltip 不會比橫幅本身多講什麼，就不掛。 */
+export function teamPauseDetailTitle(team: Team): string | undefined {
+  const detail = team.pause_reason === 'quota_low' ? team.pause_detail : null
+  if (!detail || detail.members.length < 2) return undefined
+  return teamPauseDetailLines(team)
 }

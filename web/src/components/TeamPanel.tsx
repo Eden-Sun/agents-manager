@@ -36,7 +36,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
-import { canReopenTeam, describeEvent } from './teamPanelLogic'
+import { canReopenTeam, describeEvent, teamPauseDetailTitle, teamPauseText } from './teamPanelLogic'
 
 /**
  * SPEC-team §11.3 — 一個進行中 team 的視圖。骨架沿用 `GroupChatPanel`：標題列 + 成員燈號列 +
@@ -885,6 +885,9 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const paused = team.phase === 'paused'
   const gated = paused && (team.pause_reason ?? '').startsWith('gate:')
   const budgetPause = paused && (team.pause_reason === 'budget_relays' || team.pause_reason === 'budget_time')
+  // §4.5：`quota_low` 的橫幅寫得出是誰的額度不夠時，後面那句話也要跟著改——要處理的不是
+  // 「上面的原因」，是那個成員的帳號。
+  const quotaPause = paused && team.pause_reason === 'quota_low' && Boolean(team.pause_detail?.members.length)
   // SPEC-team §10.7：只有「真的做完」的 team 能關 issue（中止 / 失敗的不行），關過就不再問，
   // 沒有 GitHub origin 的 project 也沒得關。daemon 不會自己關——這顆按鈕就是那個「同意」。
   const canCloseIssue = team.phase === 'done' && !team.issue_closed_at && Boolean(project?.github)
@@ -1082,15 +1085,17 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           <span className="team-paused-mark" aria-hidden="true">
             ‖
           </span>
-          <span className="team-paused-text">
-            已暫停{team.pause_reason ? `：${teamPauseLabel(team.pause_reason)}` : ''}。
+          <span className="team-paused-text" title={teamPauseDetailTitle(team)}>
+            已暫停{team.pause_reason ? `：${teamPauseText(team)}` : ''}。
             {budgetPause
               ? '加碼預算後即可繼續，成員都還活著。'
-              : gated
-                ? '這是 supervised 閘門，確認後按「放行」。'
-                : (team.pause_reason ?? '').startsWith('member_')
-                  ? '請先處理該成員（啟動 / 回應終端提示），再按「繼續」。'
-                  : '處理完上面的原因後按「繼續」。'}
+              : quotaPause
+                ? '等額度回來（或把該成員換成別的身分）再按「繼續」。'
+                : gated
+                  ? '這是 supervised 閘門，確認後按「放行」。'
+                  : (team.pause_reason ?? '').startsWith('member_')
+                    ? '請先處理該成員（啟動 / 回應終端提示），再按「繼續」。'
+                    : '處理完上面的原因後按「繼續」。'}
           </span>
         </div>
       ) : null}

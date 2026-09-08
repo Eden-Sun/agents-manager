@@ -596,6 +596,7 @@ pub async fn team_json(app: &Arc<App>, t: &db::Team) -> Value {
         "issue_url": t.issue_url,
         "phase": t.phase,
         "pause_reason": t.pause_reason,
+        "pause_detail": pause_detail_json(t),
         "resume_phase": t.resume_phase,
         "branch": t.branch,
         "deliver": t.deliver,
@@ -640,6 +641,15 @@ pub fn bot_team_json(b: &db::Bot) -> Value {
 
 // ---------------------------------------------------------------- WS events (§10.6)
 
+/// SPEC-team §10.6: `pause_detail` as a JSON value, `null` when the pause has nothing to add
+/// (and when an old row's column cannot be parsed — a broken detail must never hide a pause).
+pub fn pause_detail_json(t: &db::Team) -> Value {
+    t.pause_detail_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or(Value::Null)
+}
+
 async fn emit_team_changed(app: &Arc<App>, t: &db::Team) {
     app.emit(
         "team_changed",
@@ -648,6 +658,7 @@ async fn emit_team_changed(app: &Arc<App>, t: &db::Team) {
             "project_id": t.project_id,
             "phase": t.phase,
             "pause_reason": t.pause_reason,
+            "pause_detail": pause_detail_json(t),
             "usage": serde_json::from_str::<Value>(&t.usage_json).unwrap_or_else(|_| empty_usage()),
         }),
     )
@@ -749,7 +760,23 @@ pub async fn set_phase(
     pause_reason: Option<&str>,
     resume_phase: Option<&str>,
 ) -> LcResult<db::Team> {
+    set_phase_detail(app, team_id, phase, pause_reason, resume_phase, None).await
+}
+
+/// [`set_phase`] plus §4.5's structured `pause_detail` — for the reasons where the code alone
+/// leaves the user guessing (`quota_low`: *whose* account, which window, how much is left).
+/// The column is rewritten on **every** phase change, so a stale detail can never outlive the
+/// pause it described.
+pub async fn set_phase_detail(
+    app: &Arc<App>,
+    team_id: &str,
+    phase: &str,
+    pause_reason: Option<&str>,
+    resume_phase: Option<&str>,
+    pause_detail: Option<Value>,
+) -> LcResult<db::Team> {
     let before = load(app, team_id).await?;
+    let detail_json = pause_detail.as_ref().map(|d| d.to_string());
     let ended_at = if is_terminal(phase) { Some(db::now()) } else { None };
     // Reopen is a transition out of a terminal phase, not a pause. Keep its audit reason in
     // the phase event, while the row itself must remain resumable with no pause marker and no
@@ -757,7 +784,7 @@ pub async fn set_phase(
     if phase == "starting" && pause_reason == Some("reopen") {
         sqlx::query(
             "UPDATE teams SET phase = ?, pause_reason = NULL, resume_phase = NULL,
-               ended_at = NULL WHERE id = ?",
+               pause_detail_json = NULL, ended_at = NULL WHERE id = ?",
         )
         .bind(phase)
         .bind(team_id)
@@ -767,11 +794,12 @@ pub async fn set_phase(
     } else {
         sqlx::query(
             "UPDATE teams SET phase = ?, pause_reason = ?, resume_phase = ?,
-               ended_at = COALESCE(?, ended_at) WHERE id = ?",
+               pause_detail_json = ?, ended_at = COALESCE(?, ended_at) WHERE id = ?",
         )
         .bind(phase)
         .bind(pause_reason)
         .bind(resume_phase)
+        .bind(detail_json)
         .bind(ended_at)
         .bind(team_id)
         .execute(&app.db)
@@ -786,7 +814,7 @@ pub async fn set_phase(
         None,
         None,
         None,
-        json!({"from": before.phase, "to": phase, "reason": pause_reason}),
+        json!({"from": before.phase, "to": phase, "reason": pause_reason, "detail": pause_detail}),
     )
     .await?;
     let after = load(app, team_id).await?;
