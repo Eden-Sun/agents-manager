@@ -9462,6 +9462,85 @@ button.run-debug-toggle:hover {
   }
 }
 
+/*
+ * 觸控目標下限（2026-09-08 逐頁掃 `button / [role=button] / a / input[type=checkbox]`）。
+ * 手指的接觸面約 8–10mm，換算大約 40px；390px 上量到一票 11×18、18×14、26×26 的鍵。
+ * 兩種手法：
+ *   1. 版面本來就有空間的（鍵坐在一個已經 40px 高的容器裡、或整條列本來就 40px 以上），
+ *      直接把鍵撐到 40。
+ *   2. 撐大會推開別人的（摺疊三角這種夾在列首的小鍵），用 padding + 等量負 margin 把
+ *      **可按範圍**放大，畫面上的位置與大小完全不動。
+ * 沒有處理的寫在 `docs/screenshots/mobile-walkthrough/WALKTHROUGH.md`。
+ */
+@media (width <= 640px) {
+  /*
+   * 1. 容器已經夠大，鍵自己撐滿就好。
+   * `.bot-row.compact` 那兩條要寫全：檔案中段的 `.bot-row.compact .bot-actions .head-menu-btn`
+   * 是 0,3,0，比這個 media query 裡既有的 `.bot-actions .head-menu-btn`（0,2,0）高——
+   * media query 不加特異性，所以側欄那 17 顆「⋯」一直維持 26×26。
+   */
+  .bot-row.compact .bot-actions .head-menu-btn,
+  .bot-row.compact .bot-actions .menu-btn,
+  .sidebar .icon-btn,
+  .icon-btn.attach-pick {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* 一列一顆的按鍵：高度補到 40，寬度本來就夠。 */
+  .send-btn,
+  .sidebar .btn,
+  .sidebar .disclosure,
+  .team-node-btn,
+  .mini-btn,
+  .mem-open,
+  .main-head .quota-open,
+  .bot-name-btn {
+    min-height: 40px;
+  }
+
+  /* `.mini-btn` 在同一列可能有三四顆（中斷回覆／強制中止…），撐高不撐寬。 */
+  .mini-btn {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /*
+   * 2. 夾在列首的摺疊三角：撐大會把後面的整排推走，所以只放大可按範圍。
+   * 往左吃到列的內緣、往上下吃滿列高；右邊留給緊接著的按鍵（`.project-label-btn`
+   * 從 x=37 開始、`.bot-row` 的 `.bot-main` 從 x=64 開始），不搶它們的點擊。
+   */
+  .project-fold,
+  .bot-kids-toggle {
+    justify-content: center;
+    padding: 13px 10px;
+    margin: -11px -10px;
+  }
+
+  /* `.bot-kids-toggle` 自己寫死 `width: 18px`，padding 進不去（border-box），用 min-width 撐。
+     `.project-fold` 停在 27×40：再寬就要吃進 `.project-label-btn`（x=37 起）的點擊範圍，
+     而那顆是進群組聊天的入口。 */
+  .bot-kids-toggle {
+    min-width: 40px;
+  }
+
+  /* 額度 chip 裡那顆按鍵只有 12px 高。這顆不能撐高——`.quota-hp` 是一列 flex，
+     它一變高圖示與數字就分成兩行。改成只放大可按範圍（同上面第 2 種手法）。 */
+  .main-head .quota-bars-open,
+  .sidebar .quota-bars-open {
+    padding-top: 14px;
+    padding-bottom: 14px;
+    margin-top: -14px;
+    margin-bottom: -14px;
+  }
+
+  .mem-open {
+    min-width: 40px;
+  }
+}
+
 /* 通知（`.notices`）在手機改從上面出現。桌機的右下角是空的，390px 的右下角是輸入框加
    送出鍵，而 `.shelf`（z-index 30）比 `.notices`（20）高——「已中止 1 個回合」這種通知
    於是蓋在送出鍵上、下半截還被圖片暫存那條 bar 切掉（2026-09-08 於 390px 實測）。
