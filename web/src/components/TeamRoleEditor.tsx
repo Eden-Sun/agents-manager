@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { BotKind, TeamRoleKey, TeamRolePatch, TeamWorkerSpec } from '../api/types'
+import type { BotKind, TeamRoleKey, TeamRolePatch, TeamRoles, TeamWorkerSpec } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST, TEAM_ROLE_KEYS, TEAM_ROLE_KEY_LABEL } from '../api/types'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { toolsOfHost, useStore } from '../store/store'
 import { IdentityOptions } from './BotSettingsPanel'
 import { KindTag } from './KindTag'
@@ -209,18 +210,66 @@ function RoleForm({
  * 側欄成員列的齒輪也開這裡（`openTeamRole`），所以彈窗開在哪個角色由 store 決定，
  * 兩個入口共用同一份表單。
  */
+/** 摘要列上的角色簡稱。`Reviewer` 在 390px 上太長，其他兩個照舊。 */
+const ROLE_SHORT: Record<TeamRoleKey, string> = { pm: 'PM', workers: '執行者', reviewer: 'Rev' }
+
+/**
+ * 收起來時那一行字：`PM fable · 執行者 ×2 gpt-5.6-luna · Rev opus`。
+ * 只留模型（effort / fast / 身分在展開後的三列與表單裡都寫著）——一行要塞得下三個角色。
+ */
+function summarize(roles: TeamRoles, workerCount: number): string {
+  return TEAM_ROLE_KEYS.filter((r) => roles[r] !== null)
+    .map((r) => {
+      const spec = roles[r] as TeamWorkerSpec
+      const count = r === 'workers' && workerCount > 1 ? `×${workerCount} ` : ''
+      return `${ROLE_SHORT[r]} ${count}${spec.model ?? '預設'}`
+    })
+    .join(' · ')
+}
+
 export function TeamRoleEditor({ teamId, host, disabled }: { teamId: string; host: string; disabled: boolean }) {
   const roles = useStore((s) => s.teamDetail[teamId]?.roles ?? null)
   const editing = useStore((s) => (s.teamRoleEdit?.teamId === teamId ? s.teamRoleEdit.role : null))
   const openTeamRole = useStore((s) => s.openTeamRole)
   const closeTeamRole = useStore((s) => s.closeTeamRole)
+  const workerCount = useStore(
+    (s) => s.teamDetail[teamId]?.members.filter((m) => m.role === 'worker' && !m.deleted).length ?? 0,
+  )
+  /*
+   * 三列角色在 390px 各佔一整行，加起來約 200px——副標題列還沒排到成員燈號就用掉四分之一
+   * 的畫面，而角色設定是「開隊時決定、之後很少動」的東西。手機預設收成一行摘要，點了才
+   * 展開回三列（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 3）。
+   */
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [open, setOpen] = useState(false)
+  const form = editing && !disabled ? <RoleForm teamId={teamId} role={editing} host={host} onClose={closeTeamRole} /> : null
   if (!roles) return null
+  if (phone && !open) {
+    return (
+      <div className="team-roles is-summary">
+        <button
+          type="button"
+          className="team-role-row team-roles-summary"
+          aria-expanded={false}
+          title="展開 PM / 執行者 / Reviewer 三列，各自可以改 kind、身分、模型"
+          onClick={() => setOpen(true)}
+        >
+          <span className="team-role-name">角色</span>
+          <span className="team-role-spec mono">{summarize(roles, workerCount)}</span>
+          <span className="chev" aria-hidden="true">
+            ▶
+          </span>
+        </button>
+        {form}
+      </div>
+    )
+  }
   return (
     <div className="team-roles">
       {TEAM_ROLE_KEYS.filter((r) => roles[r] !== null).map((r) => (
         <RoleRow key={r} teamId={teamId} role={r} onEdit={() => openTeamRole(teamId, r)} />
       ))}
-      {editing && !disabled ? <RoleForm teamId={teamId} role={editing} host={host} onClose={closeTeamRole} /> : null}
+      {form}
     </div>
   )
 }

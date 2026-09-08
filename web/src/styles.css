@@ -9549,6 +9549,99 @@ button.run-debug-toggle:hover {
   }
 }
 
+/* Team 畫面在 390px（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 3）。這一頁塞了四層
+   資訊：標題列、角色、成員、統計。桌機一次全部攤開沒問題，390px 上每一層都被右邊界切掉，
+   而且切得看不出「右邊還有東西」。原則跟本檔其他地方一致——會按的要按得到（收進 `⋯` 或
+   讓它捲得動），只看的允許換行。 */
+@media (width <= 640px) {
+  /* 標題列讓出兩顆鍵（中止 / 關閉搬進 `⋯`，見 `TeamPanel.tsx`）之後，phase chip 才有位置。
+     它是 `flex: none`，被切掉是因為 `.main-title` 整塊不夠寬——issue 標題先縮。 */
+  .team-head .main-title > strong {
+    flex: 1 1 auto;
+    min-width: 3ch;
+  }
+
+  /* 角色摘要列（收起來的那一行 `PM fable · 執行者 ×2 … · Rev opus`）。攤開的三列在
+     `.team-roles` 原本的 flex-wrap 下自己會排好，不用另外寫。 */
+  .team-roles.is-summary {
+    flex: 1 1 100%;
+  }
+
+  .team-roles-summary {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .team-roles-summary .chev {
+    margin-left: auto;
+    color: var(--text-faint);
+    font-size: 9px;
+  }
+
+  /*
+   * 成員節點列：`overflow-x: auto` 本來就在了，缺的是兩件事——節點會被壓扁（`.member` 沒有
+   * `flex: none`，於是最後一顆被擠成半顆而不是排到捲軸外），以及觸控裝置上看不到捲軸，
+   * 完全沒有「右邊還有東西」的線索。補 `flex: none` 與 git-bar 那組 scroll shadow：排得下
+   * 時漸層完全不出現，排不下才在邊緣浮出來。
+   */
+  .team-members {
+    scrollbar-width: none;
+    /* 陰影用 `--text` 調出來，不是像 git-bar 那樣寫死黑：這一列坐在深色的 `--bg-sunken` 上，
+       黑影疊上去等於看不見。深色時它是一道淡光，淺色時是一道淡影，兩邊都看得出「還有」。 */
+    background:
+      linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) left / 14px
+        100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) right /
+        14px 100% no-repeat scroll;
+  }
+
+  .team-members::-webkit-scrollbar {
+    display: none;
+  }
+
+  .team-members > .member {
+    flex: none;
+  }
+
+  /* 同一招也給插話列的 `@pm @dev-1 …`：它已經會捲，只是沒有捲軸也沒有邊緣提示。
+     `.composer` 的底是 `--bg-panel`，漸層要跟著換，不然遮蓋色會比周圍亮一階。 */
+  .recipient-row {
+    scrollbar-width: none;
+    background:
+      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) left / 14px
+        100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) right /
+        14px 100% no-repeat scroll;
+  }
+
+  .recipient-row::-webkit-scrollbar {
+    display: none;
+  }
+
+  /*
+   * 統計列（`issue 佇列 10 個 · 已交付 6 · 待處理 3` 與 `Task (16) 併行 2/2 · …`）。這兩條是
+   * 純粹只看的東西，被切掉就是資訊直接消失——它們也不能捲（整條是一顆展開鍵，橫捲會跟
+   * 點擊搶手勢）。所以讓它換行，`margin-left: auto` 也一併取消，不然第二列會靠右對齊。
+   */
+  .disclosure.sub {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .disclosure.sub > .hint,
+  .disclosure.sub > .disclosure-note {
+    margin-left: 0;
+    min-width: 0;
+    white-space: normal;
+    /* 數字每秒都在跳，等寬才不會整列跟著左右晃。 */
+    font-variant-numeric: tabular-nums;
+  }
+}
+
 /* 終端分頁（`TerminalTab` / `HostShellPanel` / `BlockedPanel`）。終端是固定字元格線的東西：
    在 390px 上多一欄就是多一欄，所以這裡的方向跟其他地方相反——把邊界收窄、字級調小，
    換視野。 */
