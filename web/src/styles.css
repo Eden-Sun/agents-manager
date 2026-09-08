@@ -9160,3 +9160,38 @@ button.run-debug-toggle:hover {
     display: none;
   }
 }
+
+/* 專案的 git 工具列（`GitBar`）在 390px 排不下：`commit / push / pull` 被右邊界切掉，
+   而整條 `.context-bar` 不能自己捲——`.issues-pop` 是絕對定位在 `.issues-bar` 裡，任何
+   `overflow` 祖先都會把那個泡泡剪掉。所以捲的是 git 這一段自己。 */
+@media (width <= 640px) {
+  .context-bar > .git-bar {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* 經典的 scroll shadow：`local` 那兩層是跟著內容走的遮蓋色，捲到底時剛好蓋住
+       `scroll` 那兩層的陰影——所以漸層只在真的還有東西沒露出來時才看得見，排得下就
+       完全不出現。 */
+    background:
+      linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 32%), transparent) left / 10px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 32%), transparent) right / 10px 100% no-repeat scroll;
+  }
+
+  .context-bar > .git-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 捲軸裡的東西自己不能再縮，不然又擠回原樣。`+N −M` 排在最前面，捲到 0 就看得到。 */
+  .context-bar > .git-bar > * {
+    flex: none;
+  }
+
+  /* 260px 的訊息框在 390px 上等於逼人橫捲著打字。 */
+  .git-commit-msg {
+    width: 40vw;
+    min-width: 120px;
+  }
+}
