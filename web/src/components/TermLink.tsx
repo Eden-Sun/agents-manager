@@ -40,13 +40,18 @@ export function TermLink({ url, text }: { url: string; text: string }) {
           setDone(true)
           setTimeout(() => setDone(false), 1200)
         }
-        const fail = () => notify('error', '複製失敗，請手動選取網址')
-        const fallback = () => {
-          if (legacyCopy(url)) ok()
-          else fail()
+        // 先走同步的 execCommand：它只認「使用者手勢」，不會跳權限提示。實測 2026-09-08：
+        // `navigator.clipboard.writeText` 在 ego / 部分 Chrome 情境會停在權限提示上，promise
+        // 既不 resolve 也不 reject，畫面就什麼都不說；所以它只當備援，而且不等它。
+        if (legacyCopy(url)) {
+          ok()
+          return
         }
-        if (navigator.clipboard) navigator.clipboard.writeText(url).then(ok, fallback)
-        else fallback()
+        if (!navigator.clipboard) {
+          notify('error', '複製失敗，請手動選取網址')
+          return
+        }
+        navigator.clipboard.writeText(url).then(ok, () => notify('error', '複製失敗，請手動選取網址'))
       }}
     >
       {text}
