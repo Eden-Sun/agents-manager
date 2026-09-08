@@ -1661,6 +1661,24 @@ claude 把新版下載好、等重啟才會換過去時，會在 pane 最底下�
 - 掛在 run 不是 bot：等著套用的更新是這個 claude process 的事，重啟後的新 run 是 `null`。
 - 套用方式沒有新 API，就是既有的 `POST /api/bots/{id}/restart`。
 
+### `run.turn_error`（2026-09-09 新增，SPEC §4.3a）
+
+上一回合被 API 連線中斷截斷時，pane 上那行原文。daemon 在 `working → idle` 的終端掃描裡讀到就掛在
+run 上：
+
+```json
+{"id":"01M1…","turn_error":"API Error: Connection lost mid-response. The response above may be incomplete."}
+```
+
+- 上一回合正常收尾就是 `null`；下一回合一開就會被清回 `null` 並推 `bot_status`。
+- 為什麼需要它：這種回合 hook 照樣送 Stop、herdr 照樣報 idle，`turns.status` 是 `completed`、燈號是
+  綠的。單看既有欄位分不出「做完了」與「斷在半路」。
+- 判定與清除規則見 SPEC §4.3a；命中時對話裡也會多一則釘在該回合上的 `system` 訊息（`incomplete = 1`），
+  內容就是同一行，`terminal_snapshot` 是當時的整張畫面。
+- 回合當下若還是 `in_flight`，會一併收成 `status = failed` 並推 `turn_updated`。
+- **沒有新的重試 API**：UI 的「重送上一則」就是把對話裡最後一則 user 訊息再送一次
+  `POST /api/bots/{id}/prompt`。
+
 ## 快速 git（chat 標題列的 chip，2026-09-08 新增）
 
 專案 checkout 的 `+N −M ↑a ↓b` 與 commit / push / pull 三顆按鈕。都在專案的 host 上、專案的目錄裡跑
