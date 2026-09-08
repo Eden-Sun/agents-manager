@@ -22,6 +22,7 @@ import { quotaHiddenBotIds, useDisabledQuota } from '../store/quotaHide'
 import { GearIcon, TerminalIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { projectDeleteBlockers } from './projectDeleteGuard'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
@@ -747,6 +748,9 @@ function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | nu
 type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
 
 export function Sidebar() {
+  // 搜尋框在 ≤640 是 16px（iOS 聚焦不放大），括號那半句就放不下、會被切在字中間。
+  // 括號裡本來也只是說明「搜尋範圍不只名字」，手機少一行說明比多半個字好。
+  const phone = useMediaQuery(PHONE_QUERY)
   const rawProjects = useStore((s) => s.projects)
   const projectOrder = useStore((s) => s.projectOrder)
   const moveProject = useStore((s) => s.moveProject)
@@ -999,7 +1003,7 @@ export function Sidebar() {
           className="bot-search-input"
           value={query}
           spellCheck={false}
-          placeholder="搜尋 bot…（名稱、專案、模型、人設）"
+          placeholder={phone ? '搜尋 bot…' : '搜尋 bot…（名稱、專案、模型、人設）'}
           aria-label="搜尋 bot"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
