@@ -143,3 +143,21 @@ export function describeEvent(ev: TeamEvent): string | null {
   }
   return null
 }
+
+/**
+ * 暫停中的隊伍在**側欄**能當場做什麼（`TeamNodes`）。TeamPanel 標題列本來就有這幾顆按鈕，
+ * 但要先點進面板才看得到——#53 停在 `budget_time` 兩個多小時，側欄只有一顆褐色點，
+ * 使用者以為是卡死。
+ *
+ * - `bump`：預算類的暫停，加碼（各 ×2）之後直接繼續，同標題列的「加碼預算」＋「繼續」。
+ * - `resume`：原因處理完就能推，側欄給一顆「繼續」。
+ * - `null`：得進面板才處理得掉（要回答 PM、要放行閘門、要先救成員），側欄只寫原因。
+ */
+export type TeamPauseAction = 'bump' | 'resume' | null
+
+export function teamPauseAction(reason: string | null): TeamPauseAction {
+  if (reason === 'budget_time' || reason === 'budget_relays') return 'bump'
+  if (!reason) return 'resume'
+  if (reason === 'ask_user' || reason.startsWith('gate:') || reason.startsWith('member_')) return null
+  return 'resume'
+}

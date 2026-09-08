@@ -7557,8 +7557,9 @@ button.team-workers:disabled {
    縮排對齊標題（左邊讓開 chevron 的 28px + gap），跑動中整行轉 accent。 */
 .team-issue-progress {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px;
+  gap: 2px 8px;
   padding: 0 8px 5px 39px;
   color: var(--text-dim);
 }
@@ -7569,11 +7570,20 @@ button.team-workers:disabled {
 
 .tip-count {
   font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
   line-height: 1.1;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* 單位字（`issue` / `task`）。裸的 `2/20` 誰都猜不出數的是什麼——同一隊已經合併 4 個
+   task 卻寫 2（那是 issue 序），使用者只能理解成「卡在 2」。 */
+.tip-unit {
+  margin-right: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.72;
 }
 
 .tip-total {
@@ -7592,6 +7602,31 @@ button.team-workers:disabled {
 
 .team-node.terminal .team-issue-progress {
   color: var(--text-faint);
+}
+
+/* 暫停中的隊伍：原因寫在卡片上，能推得動的直接給一顆按鈕（見 `TeamPausedRow`）。
+   一顆褐色點加 tooltip 不夠——tooltip 要停住游標才看得到，而暫停的隊伍看起來
+   跟還在跑的一模一樣。跟進度那一行對齊同一條縮排。 */
+.team-paused-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 0 8px 6px 39px;
+}
+
+.team-paused-why {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.team-paused-go {
+  flex: none;
 }
 
 .team-phase-dot {

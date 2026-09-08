@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Team, TeamEvent } from '../api/types.ts'
-import { canReopenTeam, describeEvent } from './teamPanelLogic.ts'
+import { canReopenTeam, describeEvent, teamPauseAction } from './teamPanelLogic.ts'
 
 const team = (deleted = false) => ({
   id: 'team-1',
@@ -40,4 +40,15 @@ test('describeEvent translates the reopen phase reason instead of printing the c
     created_at: '',
   } as TeamEvent
   assert.equal(describeEvent(ev), '已完成 → 啟動中（使用者追加 issue）')
+})
+
+test('側欄暫停列：預算類加碼再繼續，要人回話／放行／救成員的不給按鈕', () => {
+  assert.equal(teamPauseAction('budget_time'), 'bump')
+  assert.equal(teamPauseAction('budget_relays'), 'bump')
+  assert.equal(teamPauseAction('user'), 'resume')
+  assert.equal(teamPauseAction('quota_low'), 'resume')
+  assert.equal(teamPauseAction(null), 'resume')
+  assert.equal(teamPauseAction('ask_user'), null)
+  assert.equal(teamPauseAction('gate:merge'), null)
+  assert.equal(teamPauseAction('member_lost:dev-1'), null)
 })

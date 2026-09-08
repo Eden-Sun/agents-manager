@@ -111,14 +111,30 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 所以側欄 team 卡片與佇列進度條上的 `N/M` 是前端從既有欄位算出來的
 （`web/src/components/teamProgress.ts`，附 `teamProgress.test.ts`）：
 
-- **有佇列**（`issues_summary.total >= 2`）：`N` = `done + failed + (當前那一項是 working ? 1 : 0)`，
-  夾在 `total` 以內；`M` = `issues_summary.total`。也就是「正在做第幾個 issue」——交付 1 個、
-  正在做第 2 個 → `2/20`，全部結束時 `20/20`。
-- **單一 issue**：改數步驟，`N` = `tasks_summary` 裡 `merged` + `skipped` + `failed` 的和，
-  `M` = `tasks_summary.total`。PM 還沒拆 task 時 `total` 是 0，UI 就只報耗時、不報計數。
+- **issue 計數**：`N` = `done + failed + (當前那一項是 working ? 1 : 0)`，夾在 `total` 以內；
+  `M` = `issues_summary.total`。也就是「正在做第幾個 issue」——交付 1 個、正在做第 2 個 → `2/20`，
+  全部結束時 `20/20`。`total <= 1`（沒有佇列）時不畫。
+- **task 計數**：`N` = `tasks_summary` 裡 `merged` + `skipped` + `failed` 的和，`M` = `tasks_summary.total`。
+  這是**當前這一個 issue** 的 task。PM 還沒拆 task 時 `total` 是 0，就不畫計數。
+- **兩個計數同時給，而且要寫出單位**（2026-09-08 修）：側欄原本二選一畫一個裸的 `N/M`，
+  20 個 issue 的隊伍畫的是 issue 序，於是「已合併 4/5 個 task」的隊伍在側欄寫著 `2/20`，
+  使用者只能理解成「卡在 2」（issue #53）。現在畫成 `issue 2/20 · task 4/5`。
 - **耗時**：從**當前這一項**的 `team_issues.started_at` 起算（跟 §9 的 `max_wall_clock_min` 同一個起點），
   凍結在該項的 `ended_at`；佇列裡沒有對應那一項的舊 team 退回 `teams.started_at` / `ended_at`，
   整隊結束時一律凍結（否則做完的卡片會一直跳秒）。
+- **`paused` 與終態也要凍結**（2026-09-08 修）：暫停的隊伍沒人在燒時間，計時器卻照著
+  `started_at` 一路跳（#53 停在 119 分卻寫「已 4 小時 38 分」，看起來像卡死在跑）。
+  沒有 `ended_at` 可用時改讀 daemon 的 `usage.elapsed_min`——它跟 `max_wall_clock_min`
+  是同一個數字，而且 scheduler 在暫停後就不再更新它，正好是停下來的那一刻。
+
+**側欄的暫停列（2026-09-08）**：`phase = paused` 的 team 節點在進度那一行底下多一列，
+**直接寫出**「已暫停 · <pause_reason 的中文>」（不再只有一顆褐色點加 tooltip），並依原因給一顆按鈕：
+
+| `pause_reason` | 側欄按鈕 |
+| --- | --- |
+| `budget_time` / `budget_relays` | 「加碼並繼續」＝ `PATCH` 把 `max_relays`、`max_wall_clock_min` 各 ×2，成功後 `resume`（同 TeamPanel 標題列的兩顆） |
+| `ask_user`、`gate:*`、`member_*` | 不給按鈕，只顯示原因——回答 PM、放行閘門、救成員都得在 TeamPanel 裡做 |
+| 其餘（`user`、`quota_low`、`merge_conflict`…） | 「繼續」＝ `resume` |
 
 ### 2.4 Submodule 的 issue（2026-09-07）
 
