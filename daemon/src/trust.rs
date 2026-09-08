@@ -53,6 +53,10 @@ use crate::state::App;
 
 /// claude's per-project flag inside `.claude.json`.
 const CLAUDE_KEY: &str = "hasTrustDialogAccepted";
+/// The *second* first-run dialog (2026-09-08): a CLAUDE.md that `@imports` a file outside the
+/// cwd (the user's `~/.claude/RTK.md`) stops the TUI on 「Allow external CLAUDE.md file
+/// imports?」, cursor on *No*. Same shape as the trust record, same file, same fix.
+const CLAUDE_EXTERNAL_KEYS: [&str; 2] = ["hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown"];
 /// codex's per-project key inside `config.toml`.
 const CODEX_KEY: &str = "trust_level";
 const CODEX_TRUSTED: &str = "trusted";
@@ -111,9 +115,11 @@ pub fn claude_merge(existing: &str, paths: &[String]) -> Result<Option<String>> 
         let Some(entry) = entry.as_object_mut() else {
             bail!("`projects[{p}]` in `.claude.json` is not an object");
         };
-        if entry.get(CLAUDE_KEY) != Some(&Value::Bool(true)) {
-            entry.insert(CLAUDE_KEY.into(), json!(true));
-            changed = true;
+        for key in std::iter::once(CLAUDE_KEY).chain(CLAUDE_EXTERNAL_KEYS) {
+            if entry.get(key) != Some(&Value::Bool(true)) {
+                entry.insert(key.into(), json!(true));
+                changed = true;
+            }
         }
     }
     if !changed {
@@ -209,9 +215,11 @@ pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> 
 /// daemon's own variables, none of which name a config directory).
 async fn config_env(app: &Arc<App>, bot: &db::Bot, home: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
-    let cfg = app.cfg.get().await;
+    // `identity_for_host`, not `cfg.identities`: a shell-discovered `ccN` (SPEC §16) is not in
+    // config.toml, and looking only there sent cc2's trust record to `~/.claude.json` while
+    // its CLI read `~/.claude-cc2/.claude.json` — so the dialog came up anyway (2026-09-08).
     if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(id) = cfg.identities.iter().find(|i| i.name == name) {
+        if let Some(id) = crate::tools::identity_for_host(app, crate::config::LOCAL_HOST, name).await {
             for (k, v) in &id.env {
                 env.insert(k.clone(), expand_home(v, home));
             }
@@ -350,6 +358,10 @@ mod tests {
 
         // Already trusted → no rewrite at all, so the user's file is never even touched.
         assert!(claude_merge(&out, &["/w".into()]).unwrap().is_none());
+        // The external-imports dialog is pre-answered in the same record.
+        for k in CLAUDE_EXTERNAL_KEYS {
+            assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["projects"]["/w"][k], json!(true));
+        }
 
         // A member's other project keys are preserved when only the flag is missing.
         let out = claude_merge(r#"{"projects":{"/w":{"lastCost":3}}}"#, &["/w".into()]).unwrap().unwrap();
