@@ -385,6 +385,31 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
     Some(logged_in)
 }
 
+/// A headless `claude auth login` (what the popover's 「開 shell 登入」 runs) writes the
+/// credentials but never marks onboarding done, so the next *interactive* `claude` in that
+/// config dir opens on 「Select login method」 even though `auth status` says logged in
+/// (observed on cc2, 2026-09-08). Set `hasCompletedOnboarding` when the account is there and
+/// the flag is not. Local host only; returns whether the file was changed.
+pub fn ensure_claude_onboarded(config_dir: &std::path::Path) -> bool {
+    let path = config_dir.join(".claude.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return false };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    let Some(obj) = v.as_object_mut() else { return false };
+    if obj.get("hasCompletedOnboarding").and_then(|x| x.as_bool()) == Some(true) {
+        return false;
+    }
+    if obj.get("oauthAccount").map(|a| a.is_object()).unwrap_or(false) == false {
+        return false;
+    }
+    obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
+    let Ok(out) = serde_json::to_string_pretty(&v) else { return false };
+    let tmp = path.with_extension("json.am-tmp");
+    if std::fs::write(&tmp, out).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp, &path).is_ok()
+}
+
 /// One identity to ask about, already resolved for a specific host.
 #[derive(Debug, Clone)]
 pub struct IdentityProbe {
@@ -754,6 +779,25 @@ pub async fn install_via_bot(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn onboarding_flag_is_set_only_when_logged_in_and_missing() {
+        let dir = std::env::temp_dir().join(format!("am-onboard-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(".claude.json");
+        // No account: leave it alone (the TUI has to log in anyway).
+        std::fs::write(&f, r#"{"theme":"dark"}"#).unwrap();
+        assert!(!super::ensure_claude_onboarded(&dir));
+        // Account but no flag: set it.
+        std::fs::write(&f, r#"{"oauthAccount":{"emailAddress":"x@y"},"theme":"dark"}"#).unwrap();
+        assert!(super::ensure_claude_onboarded(&dir));
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], true);
+        assert_eq!(v["oauthAccount"]["emailAddress"], "x@y");
+        // Already set: no rewrite.
+        assert!(!super::ensure_claude_onboarded(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
 
     /// Real `alias` output from both machines (2026-09-06): the local box keys cc1/cc2 to

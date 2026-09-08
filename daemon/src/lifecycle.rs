@@ -1346,6 +1346,20 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
                 not_logged_in = !fresh;
             }
         }
+        // Logged in headlessly but never onboarded: the TUI would open on the login menu.
+        if !not_logged_in && bot.kind == "claude" && project.host == crate::config::LOCAL_HOST {
+            if let Some(i) = crate::tools::identity_for_host(app, &project.host, idn).await {
+                let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                let dir = i
+                    .env
+                    .get("CLAUDE_CONFIG_DIR")
+                    .map(|d| crate::config::expand_home(d, &home))
+                    .unwrap_or_else(|| format!("{home}/.claude"));
+                if crate::tools::ensure_claude_onboarded(std::path::Path::new(&dir)) {
+                    tracing::info!(bot = %bot.name, identity = idn, dir, "marked claude onboarding complete so the TUI skips the login menu");
+                }
+            }
+        }
         if not_logged_in {
             tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "identity not logged in on host; the CLI will use the machine's default login");
             if let Ok(conv) = db::conversation_id(&app.db, bot_id).await {
