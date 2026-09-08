@@ -3654,6 +3654,23 @@ mod scenarios {
 
     /// §6.5 — `check_worktrees` used to accept a member whose cwd was the main checkout,
     /// because the main checkout is the first line of `git worktree list`.
+    /// 2026-09-08 issue #56：`create` 先 INSERT、稍後才 `workspace.create`，中間被別的 herdr
+    /// 事件觸發的 reconcile 掃到，team 一出生就 `paused(workspace_missing)`。建立中的 team
+    /// （starting 且還沒有 workspace）reconcile 要放過。
+    #[tokio::test]
+    async fn reconcile_leaves_a_team_that_is_still_being_created_alone() {
+        let s = S::new(1, false).await;
+        sqlx::query("UPDATE teams SET phase = 'starting', workspace_id = NULL WHERE id = ?")
+            .bind(&s.tid)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        crate::team::reconcile_teams_on_host(s.app(), crate::config::LOCAL_HOST).await;
+        let t = s.team().await;
+        assert_eq!(t.phase, "starting");
+        assert_eq!(t.pause_reason, None);
+    }
+
     #[tokio::test]
     async fn the_main_checkout_does_not_count_as_a_team_worktree() {
         let s = S::new(1, false).await;
