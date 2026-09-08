@@ -233,6 +233,11 @@ export interface Bot {
   /** SPEC-team §2.2：pane 的工作目錄；null = 用 `project.path`。 */
   cwd: string | null
   /**
+   * 只存在於瀏覽器：分身 / 新增按下去的那一刻先放進清單的佔位列（灰的、不能點），
+   * daemon 建好之後被真的那一列取代。`id` 是 `pending:` 開頭的假 id。
+   */
+  pending?: boolean
+  /**
    * herdr 那邊的 agent 名稱（`GET /api/state` 的 `bots[].agent_name`）。有 active run 時是
    * 這個 run 實際用的名字，否則是「下次啟動會用的」。debug 時要拿它去 herdr 對照 pane。
    * 舊 daemon 沒有這個欄位 → null。
@@ -562,6 +567,8 @@ export interface DirListing {
 
 export interface NewBotInput {
   name: string
+  /** 名稱撞到時讓 daemon 自己往後找 `<base>-<n>`（快速新增用）；回應會帶實際用的 `name`。 */
+  name_auto?: boolean
   kind: BotKind
   /** `null` / 省略 = 不帶 `--model`（由 CLI 自己決定） */
   effort?: string | null
