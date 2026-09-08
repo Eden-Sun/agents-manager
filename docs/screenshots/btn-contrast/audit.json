@@ -1,0 +1,5468 @@
+{
+ "generated": "2026-09-08",
+ "goal": "docs/goals/btn-hover-contrast-2026-09-08.md",
+ "method": "ego-browser（CDP）掃 http://127.0.0.1:5173：每個可點元素與它的祖先用 CSS.forcePseudoState 強制 hover / focus-visible / active，讀 computed color 與往上合成到第一個不透明底色的實際背景，深淺兩個 prefers-color-scheme 各跑一遍；17 個畫面狀態。腳本與原始資料留在工作階段的暫存區，這裡只留結論。",
+ "thresholds": {
+  "text": ">= 4.5:1",
+  "iconOnly": ">= 3:1",
+  "hoverDeltaLstar": ">= 8",
+  "focusRing": ">= 3:1 對它坐著的那個面（outline-offset 2px）"
+ },
+ "views": [
+  "sidebar",
+  "project-menu",
+  "confirm-project-delete",
+  "bot-menu",
+  "modal-newproject",
+  "modal-newbot",
+  "env-hosts-identities",
+  "mem-pop",
+  "quota-pop",
+  "chat",
+  "model-picker",
+  "head-more-menu",
+  "botsettings",
+  "terminal",
+  "team",
+  "host-shell"
+ ],
+ "summary": {
+  "before": {
+   "total": 114,
+   "contrast": 10,
+   "hover": 41,
+   "focusRing": 91
+  },
+  "after": {
+   "total": 10,
+   "contrast": 0,
+   "hover": 10,
+   "focusRing": 0
+  }
+ },
+ "note": "before 的 focus-ring 是用「環對按鈕自己的底色」算的（91 筆），after 改成 WCAG 2.2 的算法「環對它坐著的那個面」；兩邊都重算過的話 before 仍有 13 筆不合格（寫死的 #76a7ff），after 是 0。剩下的 after 條目都是刻意保留的例外，理由見 docs/UI-DECISIONS.md。",
+ "before": [
+  {
+   "selector": "button.icon-btn icon-tip team-member-gear",
+   "panel": "bot-row",
+   "chain": [
+    "bot-row",
+    "team-member",
+    "team-node-members",
+    "team-node",
+    "team-nodes"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "⚙",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#ffffff",
+     "bg": "#ffffff",
+     "ratio": 1,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#c6d8f7",
+     "ratio": 3.82,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "button.btn primary",
+   "panel": "body",
+   "chain": [],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "送出",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#ffffff",
+     "bg": "#e8edf4",
+     "ratio": 1.18,
+     "L": 93.6,
+     "borderRatio": 3.95
+    },
+    "focus": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#ffffff",
+     "bg": "#e8edf4",
+     "ratio": 1.18,
+     "L": 93.6,
+     "borderRatio": 3.95
+    }
+   },
+   "issues": [
+    "hover:contrast 1.18<3",
+    "active:contrast 1.18<3",
+    "focus:ring-vs-bg 1.94"
+   ]
+  },
+  {
+   "selector": "button.btn primary",
+   "panel": "form-actions",
+   "chain": [
+    "form-actions",
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop"
+   ],
+   "view": "modal-newbot",
+   "theme": "light",
+   "label": "新增並啟動",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#ffffff",
+     "bg": "#e8edf4",
+     "ratio": 1.18,
+     "L": 93.6,
+     "borderRatio": 3.95
+    },
+    "focus": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#ffffff",
+     "bg": "#e8edf4",
+     "ratio": 1.18,
+     "L": 93.6,
+     "borderRatio": 3.95
+    }
+   },
+   "issues": [
+    "hover:contrast 1.18<4.5",
+    "active:contrast 1.18<4.5",
+    "focus:ring-vs-bg 1.94"
+   ]
+  },
+  {
+   "selector": "button.btn primary",
+   "panel": "body",
+   "chain": [],
+   "view": "sidebar",
+   "theme": "dark",
+   "label": "送出",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#0f1115",
+     "bg": "#262d38",
+     "ratio": 1.36,
+     "L": 18.3,
+     "borderRatio": 5.65
+    },
+    "focus": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#0f1115",
+     "bg": "#262d38",
+     "ratio": 1.36,
+     "L": 18.3,
+     "borderRatio": 5.65
+    }
+   },
+   "issues": [
+    "hover:contrast 1.36<3",
+    "active:contrast 1.36<3",
+    "focus:ring-vs-bg 1.02"
+   ]
+  },
+  {
+   "selector": "button.btn primary",
+   "panel": "form-actions",
+   "chain": [
+    "form-actions",
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop"
+   ],
+   "view": "modal-newbot",
+   "theme": "dark",
+   "label": "新增並啟動",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#0f1115",
+     "bg": "#262d38",
+     "ratio": 1.36,
+     "L": 18.3,
+     "borderRatio": 5.65
+    },
+    "focus": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#0f1115",
+     "bg": "#262d38",
+     "ratio": 1.36,
+     "L": 18.3,
+     "borderRatio": 5.65
+    }
+   },
+   "issues": [
+    "hover:contrast 1.36<4.5",
+    "active:contrast 1.36<4.5",
+    "focus:ring-vs-bg 1.02"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "bot-actions",
+    "bot-row",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "claude-1 的操作",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#a6adb5",
+     "bg": "#ffffff",
+     "ratio": 2.26,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#c6d8f7",
+     "ratio": 3.82,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "base:contrast 2.26<3",
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "bot-actions",
+    "bot-row",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "dark",
+   "label": "claude-1 的操作",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#606977",
+     "bg": "#1e242d",
+     "ratio": 2.82,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#ff8b78",
+     "bg": "#262d38",
+     "ratio": 6.08,
+     "L": 18.3
+    },
+    "focus": {
+     "fg": "#96a2b3",
+     "bg": "#3e5274",
+     "ratio": 3.05,
+     "L": 34.6
+    },
+    "active": {
+     "fg": "#ff8b78",
+     "bg": "#262d38",
+     "ratio": 6.08,
+     "L": 18.3
+    }
+   },
+   "issues": [
+    "base:contrast 2.82<3"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip on",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "更多動作 · pt-hub",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#bebddc",
+     "ratio": 2.93,
+     "L": 77.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#bebddc",
+     "ratio": 2.93,
+     "L": 77.6
+    }
+   },
+   "issues": [
+    "hover:contrast 2.93<3",
+    "active:contrast 2.93<3",
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "bot-menu",
+   "theme": "light",
+   "label": "更多動作 · pt-hub",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#bebddc",
+     "ratio": 2.93,
+     "L": 77.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#bebddc",
+     "ratio": 2.93,
+     "L": 77.6
+    }
+   },
+   "issues": [
+    "hover:contrast 2.93<3",
+    "active:contrast 2.93<3",
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip on",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "dark",
+   "label": "更多動作 · pt-hub",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#2c3950",
+     "ratio": 9.54,
+     "L": 23.8
+    },
+    "hover": {
+     "fg": "#ff8b78",
+     "bg": "#585975",
+     "ratio": 2.97,
+     "L": 38.7
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#2c3950",
+     "ratio": 9.54,
+     "L": 23.8
+    },
+    "active": {
+     "fg": "#ff8b78",
+     "bg": "#585975",
+     "ratio": 2.97,
+     "L": 38.7
+    }
+   },
+   "issues": [
+    "hover:contrast 2.97<3",
+    "active:contrast 2.97<3"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "bot-menu",
+   "theme": "dark",
+   "label": "更多動作 · pt-hub",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#96a2b3",
+     "bg": "#2c3950",
+     "ratio": 4.49,
+     "L": 23.8
+    },
+    "hover": {
+     "fg": "#ff8b78",
+     "bg": "#585975",
+     "ratio": 2.97,
+     "L": 38.7
+    },
+    "focus": {
+     "fg": "#96a2b3",
+     "bg": "#2c3950",
+     "ratio": 4.49,
+     "L": 23.8
+    },
+    "active": {
+     "fg": "#ff8b78",
+     "bg": "#585975",
+     "ratio": 2.97,
+     "L": 38.7
+    }
+   },
+   "issues": [
+    "hover:contrast 2.97<3",
+    "active:contrast 2.97<3"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip on",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "bot-actions",
+    "bot-row",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "bot-menu",
+   "theme": "light",
+   "label": "claude-1 的操作",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#767f8d",
+     "bg": "#e6eeff",
+     "ratio": 3.47,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.member member-icon claude",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "claude-1：閒置",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#c2603c",
+     "bg": "#f6f8fa",
+     "ratio": 3.92,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "hover": {
+     "fg": "#c2603c",
+     "bg": "#e8edf4",
+     "ratio": 3.55,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#c2603c",
+     "bg": "#f6f8fa",
+     "ratio": 3.92,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "active": {
+     "fg": "#c2603c",
+     "bg": "#e8edf4",
+     "ratio": 3.55,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.icon-btn head-menu-btn icon-tip",
+   "panel": "head-menu",
+   "chain": [
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "更多動作 · pt-hub",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e3d4d7",
+     "ratio": 3.73,
+     "L": 86.2
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e3d4d7",
+     "ratio": 3.73,
+     "L": 86.2
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.icon-btn icon-tip danger",
+   "panel": "team-node-actions",
+   "chain": [
+    "team-node-actions",
+    "team-node-head",
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "刪除 Team #50",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e1d5e1",
+     "ratio": 3.77,
+     "L": 86.5
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e1d5e1",
+     "ratio": 3.77,
+     "L": 86.5
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.project-fold",
+   "panel": "project-head",
+   "chain": [
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "▼",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#c6d8f7",
+     "ratio": 3.82,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "button.bot-kids-toggle",
+   "panel": "bot-row",
+   "chain": [
+    "bot-row",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "▼",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#c6d8f7",
+     "ratio": 3.82,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "button.msg-attachment",
+   "panel": "body",
+   "chain": [],
+   "view": "chat",
+   "theme": "light",
+   "label": "截圖 2026-09-08 上午9.31.09.png · 143 KB\n/Users/m4p/project/hermes-agents/projects/rt/.agents-manager/attachments/01M1ZA8H4N6N24VDN5ET0XQSC4-2026-09-08---9-31-09.png",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#ffffff",
+     "bg": "#407be6",
+     "ratio": 4.04,
+     "L": 52.9,
+     "borderRatio": 1.47
+    },
+    "hover": {
+     "fg": "#ffffff",
+     "bg": "#407be6",
+     "ratio": 4.04,
+     "L": 52.9,
+     "borderRatio": 1.47
+    },
+    "focus": {
+     "fg": "#ffffff",
+     "bg": "#407be6",
+     "ratio": 4.04,
+     "L": 52.9,
+     "borderRatio": 1.47
+    },
+    "active": {
+     "fg": "#ffffff",
+     "bg": "#407be6",
+     "ratio": 4.04,
+     "L": 52.9,
+     "borderRatio": 1.47
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 1.68"
+   ]
+  },
+  {
+   "selector": "button.msg-attachment",
+   "panel": "body",
+   "chain": [],
+   "view": "chat",
+   "theme": "dark",
+   "label": "截圖 2026-09-08 上午9.31.09.png · 143 KB\n/Users/m4p/project/hermes-agents/projects/rt/.agents-manager/attachments/01M1ZA8H4N6N24VDN5ET0XQSC4-2026-09-08---9-31-09.png",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#f2f5fb",
+     "bg": "#4d73d3",
+     "ratio": 4.08,
+     "L": 50.1,
+     "borderRatio": 1.49
+    },
+    "hover": {
+     "fg": "#f2f5fb",
+     "bg": "#4d73d3",
+     "ratio": 4.08,
+     "L": 50.1,
+     "borderRatio": 1.49
+    },
+    "focus": {
+     "fg": "#f2f5fb",
+     "bg": "#4d73d3",
+     "ratio": 4.08,
+     "L": 50.1,
+     "borderRatio": 1.49
+    },
+    "active": {
+     "fg": "#f2f5fb",
+     "bg": "#4d73d3",
+     "ratio": 4.08,
+     "L": 50.1,
+     "borderRatio": 1.49
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 1.86"
+   ]
+  },
+  {
+   "selector": "button.head-menu-item danger",
+   "panel": "head-menu-pop",
+   "chain": [
+    "head-menu-pop",
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "刪除專案…",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#c23a28",
+     "bg": "#ffffff",
+     "ratio": 5.34,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#fbe8e5",
+     "ratio": 4.52,
+     "L": 93.4
+    },
+    "focus": {
+     "fg": "#c23a28",
+     "bg": "#ffffff",
+     "ratio": 5.34,
+     "L": 100
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#fbe8e5",
+     "ratio": 4.52,
+     "L": 93.4
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn gear icon-tip",
+   "panel": "main-title-row",
+   "chain": [
+    "main-title-row",
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "C1-fable 的設定",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#dee8fb",
+     "ratio": 4.53,
+     "L": 91.8
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#dee8fb",
+     "ratio": 4.53,
+     "L": 91.8
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.mini-btn danger",
+   "panel": "head-actions",
+   "chain": [
+    "head-actions",
+    "main-head"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "結束 shell",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#c23a28",
+     "bg": "#ffffff",
+     "ratio": 5.34,
+     "L": 100,
+     "borderRatio": 5.34
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6,
+     "borderRatio": 4.54
+    },
+    "focus": {
+     "fg": "#c23a28",
+     "bg": "#ffffff",
+     "ratio": 5.34,
+     "L": 100,
+     "borderRatio": 5.34
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6,
+     "borderRatio": 4.54
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn",
+   "panel": "modal-head",
+   "chain": [
+    "modal-head",
+    "modal",
+    "modal-backdrop",
+    "sidebar"
+   ],
+   "view": "modal-newproject",
+   "theme": "light",
+   "label": "✕",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn",
+   "panel": "host-row",
+   "chain": [
+    "host-row",
+    "hosts-panel",
+    "env-sec",
+    "env-panel",
+    "modal-body"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "light",
+   "label": "✕",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.icon-btn",
+   "panel": "bs-head",
+   "chain": [
+    "bs-head"
+   ],
+   "view": "botsettings",
+   "theme": "light",
+   "label": "✕",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#c23a28",
+     "bg": "#e8edf4",
+     "ratio": 4.54,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.opt on",
+   "panel": "opt-group",
+   "chain": [
+    "opt-group",
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop"
+   ],
+   "view": "modal-newbot",
+   "theme": "light",
+   "label": "claude",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "focus": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#ffffff",
+     "bg": "#2f6fe4",
+     "ratio": 4.65,
+     "L": 49,
+     "borderRatio": 1
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.94"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "term-bar",
+   "chain": [
+    "term-bar"
+   ],
+   "view": "terminal",
+   "theme": "light",
+   "label": "刷新",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#e8edf4",
+     "ratio": 4.69,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#e8edf4",
+     "ratio": 4.69,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn add icon-tip",
+   "panel": "project-head-actions",
+   "chain": [
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "＋",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.icon-btn team-node-chev",
+   "panel": "team-node-head",
+   "chain": [
+    "team-node-head",
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "▼",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#e6eeff",
+     "ratio": 4.74,
+     "L": 94,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94,
+     "borderRatio": 2.08
+    },
+    "focus": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94,
+     "borderRatio": 2.08
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94,
+     "borderRatio": 2.08
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.icon-btn attach-pick icon-tip",
+   "panel": "composer-box",
+   "chain": [
+    "composer-box",
+    "composer"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "附加圖片",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#e8edf4",
+     "ratio": 4.74,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#e8edf4",
+     "ratio": 4.74,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.mini-btn primary",
+   "panel": "head-actions",
+   "chain": [
+    "head-actions",
+    "main-head"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "繼續",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#2a63cd",
+     "bg": "#ffffff",
+     "ratio": 5.58,
+     "L": 100,
+     "borderRatio": 4.65
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#e8edf4",
+     "ratio": 4.74,
+     "L": 93.6,
+     "borderRatio": 3.95
+    },
+    "focus": {
+     "fg": "#2a63cd",
+     "bg": "#ffffff",
+     "ratio": 5.58,
+     "L": 100,
+     "borderRatio": 4.65
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#e8edf4",
+     "ratio": 4.74,
+     "L": 93.6,
+     "borderRatio": 3.95
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn attach-btn icon-tip",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "複製 attach 指令",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn attach-btn icon-tip",
+   "panel": "host-actions",
+   "chain": [
+    "host-actions",
+    "host-row",
+    "hosts-panel",
+    "env-sec",
+    "env-panel"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "light",
+   "label": "複製 attach 指令",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.recipient-chip claude on",
+   "panel": "recipient-row",
+   "chain": [
+    "recipient-row",
+    "composer"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "@pm",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94,
+     "borderRatio": 4
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 3.95
+    },
+    "focus": {
+     "fg": "#2a63cd",
+     "bg": "#e6eeff",
+     "ratio": 4.79,
+     "L": 94,
+     "borderRatio": 4
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 3.95
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.mini-btn",
+   "panel": "term-bar",
+   "chain": [
+    "term-bar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "刷新",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#eef1f5",
+     "ratio": 4.87,
+     "L": 95,
+     "borderRatio": 1.73
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#eef1f5",
+     "ratio": 4.87,
+     "L": 95,
+     "borderRatio": 1.73
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.12"
+   ]
+  },
+  {
+   "selector": "button.term-link",
+   "panel": "body",
+   "chain": [],
+   "view": "terminal",
+   "theme": "light",
+   "label": "http://localhost:4399/ap",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#2a63cd",
+     "bg": "#f7f8fa",
+     "ratio": 5.25,
+     "L": 97.6
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#edf2fd",
+     "ratio": 4.97,
+     "L": 95.4
+    },
+    "focus": {
+     "fg": "#2a63cd",
+     "bg": "#edf2fd",
+     "ratio": 4.97,
+     "L": 95.4
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#edf2fd",
+     "ratio": 4.97,
+     "L": 95.4
+    }
+   },
+   "issues": [
+    "hover:weak dL=2.2"
+   ]
+  },
+  {
+   "selector": "button.recipient-chip all",
+   "panel": "recipient-row",
+   "chain": [
+    "recipient-row",
+    "composer"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "@all · 1 個 bot",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#8a6400",
+     "bg": "#f6f8fa",
+     "ratio": 5.05,
+     "L": 97.5,
+     "borderRatio": 3.05
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 2.76
+    },
+    "focus": {
+     "fg": "#8a6400",
+     "bg": "#f6f8fa",
+     "ratio": 5.05,
+     "L": 97.5,
+     "borderRatio": 3.05
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 2.76
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.disclosure",
+   "panel": "sidebar-foot",
+   "chain": [
+    "sidebar-foot",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "開 shell本機",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.issues-btn",
+   "panel": "issues-bar",
+   "chain": [
+    "issues-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "Eden-Sun/rt0 open",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.recipient-chip claude",
+   "panel": "recipient-row",
+   "chain": [
+    "recipient-row",
+    "composer"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "@claude-1",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.host-shell-open mono",
+   "panel": "host-row",
+   "chain": [
+    "host-row",
+    "hosts-panel",
+    "env-sec",
+    "env-panel",
+    "modal-body"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "light",
+   "label": "❯ projects/pt",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.mini-btn",
+   "panel": "host-actions",
+   "chain": [
+    "host-actions",
+    "host-row",
+    "hosts-panel",
+    "env-sec",
+    "env-panel"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "light",
+   "label": "開 shell",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.tab",
+   "panel": "tabs",
+   "chain": [
+    "tabs",
+    "env-sec",
+    "env-panel",
+    "modal-body",
+    "modal"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "light",
+   "label": "文字",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.mem-pop-refresh",
+   "panel": "mem-pop-head",
+   "chain": [
+    "mem-pop-head",
+    "mem-pop",
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "mem-pop",
+   "theme": "light",
+   "label": "重新整理",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button",
+   "panel": "mem-pop-act",
+   "chain": [
+    "mem-pop-act",
+    "mem-pop-table",
+    "mem-pop",
+    "head-badges",
+    "sidebar-head"
+   ],
+   "view": "mem-pop",
+   "theme": "light",
+   "label": "停止 bot",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.46
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.model-tag",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "fableLow · thinking",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#f6f8fa",
+     "ratio": 5.24,
+     "L": 97.5,
+     "borderRatio": 4.37
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#f6f8fa",
+     "ratio": 5.24,
+     "L": 97.5,
+     "borderRatio": 4.37
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.mini-btn",
+   "panel": "git-bar",
+   "chain": [
+    "git-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "commit",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.mini-btn",
+   "panel": "team-role-row",
+   "chain": [
+    "team-role-row",
+    "team-roles",
+    "team-subhead"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "修改",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "summary",
+   "panel": "team-msg-row",
+   "chain": [
+    "team-msg-row"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "協定提醒",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.recipient-chip codex",
+   "panel": "recipient-row",
+   "chain": [
+    "recipient-row",
+    "composer"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "@dev-1",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.btn danger",
+   "panel": "body",
+   "chain": [],
+   "view": "botsettings",
+   "theme": "light",
+   "label": "刪除 Bot",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#c23a28",
+     "bg": "#ffffff",
+     "ratio": 5.34,
+     "L": 100,
+     "borderRatio": 5.34
+    },
+    "hover": {
+     "fg": "#ffffff",
+     "bg": "#c23a28",
+     "ratio": 5.34,
+     "L": 45.1,
+     "borderRatio": 1
+    },
+    "focus": {
+     "fg": "#c23a28",
+     "bg": "#ffffff",
+     "ratio": 5.34,
+     "L": 100,
+     "borderRatio": 5.34
+    },
+    "active": {
+     "fg": "#ffffff",
+     "bg": "#c23a28",
+     "ratio": 5.34,
+     "L": 45.1,
+     "borderRatio": 1
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.mini-btn team-paused-go",
+   "panel": "team-paused-row",
+   "chain": [
+    "team-paused-row",
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "繼續",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.mini-btn",
+   "panel": "head-actions",
+   "chain": [
+    "head-actions",
+    "main-head"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "關閉",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn shelf-add icon-tip",
+   "panel": "shelf-head",
+   "chain": [
+    "shelf-head",
+    "shelf-body",
+    "shelf"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "＋",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.icon-btn shelf-fold icon-tip",
+   "panel": "shelf-head",
+   "chain": [
+    "shelf-head",
+    "shelf-body",
+    "shelf"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "»",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.quota-more",
+   "panel": "quota-open",
+   "chain": [
+    "quota-open",
+    "quota-strip",
+    "main-head"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "+4",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.identity-recheck",
+   "panel": "form",
+   "chain": [
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop",
+    "sidebar"
+   ],
+   "view": "modal-newbot",
+   "theme": "light",
+   "label": "重新偵測",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#ffffff",
+     "ratio": 5.58,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#ffffff",
+     "ratio": 5.58,
+     "L": 100
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.disclosure sub persona-toggle",
+   "panel": "form",
+   "chain": [
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop",
+    "sidebar"
+   ],
+   "view": "modal-newbot",
+   "theme": "light",
+   "label": "▶ 人設（選填）",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.disclosure sub",
+   "panel": "form",
+   "chain": [
+    "form",
+    "hosts-panel",
+    "env-sec",
+    "env-panel",
+    "modal-body"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "light",
+   "label": "▶ 進階（都有預設值）",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.mem-pop-peek",
+   "panel": "mem-pop-owner",
+   "chain": [
+    "mem-pop-owner",
+    "mem-pop-table",
+    "mem-pop",
+    "head-badges",
+    "sidebar-head"
+   ],
+   "view": "mem-pop",
+   "theme": "light",
+   "label": "自己開的 pane wM:p1↗",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.main-status pane-toggle run-debug-toggle",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "w17G:p8▾",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.team-copy",
+   "panel": "team-subhead",
+   "chain": [
+    "team-subhead"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "整合分支team/i50-1rammb",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.56
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.56
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.team-copy desk-only",
+   "panel": "team-subhead",
+   "chain": [
+    "team-subhead"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "worktree/Users/m4p/.conf",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.56
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.56
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100,
+     "borderRatio": 1.96
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.disclosure sub",
+   "panel": "team-queue",
+   "chain": [
+    "team-queue"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "▶ issue 佇列5 個 · 已交付 1 · ",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.disclosure sub",
+   "panel": "team-tasks",
+   "chain": [
+    "team-tasks"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "▶ Task（5）併行 2/2 ・ 進行中 1 ",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#ffffff",
+     "ratio": 5.51,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.quota-more",
+   "panel": "quota-open",
+   "chain": [
+    "quota-open",
+    "quota-strip",
+    "main-head"
+   ],
+   "view": "project-menu",
+   "theme": "dark",
+   "label": "+4",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#96a2b3",
+     "bg": "#1e242d",
+     "ratio": 6.03,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#96a2b3",
+     "bg": "#1e242d",
+     "ratio": 6.03,
+     "L": 14
+    },
+    "focus": {
+     "fg": "#96a2b3",
+     "bg": "#1e242d",
+     "ratio": 6.03,
+     "L": 14
+    },
+    "active": {
+     "fg": "#96a2b3",
+     "bg": "#1e242d",
+     "ratio": 6.03,
+     "L": 14
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.head-menu-item danger",
+   "panel": "head-menu-pop",
+   "chain": [
+    "head-menu-pop",
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll"
+   ],
+   "view": "project-menu",
+   "theme": "dark",
+   "label": "刪除專案…",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#ff8b78",
+     "bg": "#1e242d",
+     "ratio": 6.85,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#ff8b78",
+     "bg": "#38241f",
+     "ratio": 6.4,
+     "L": 16.5
+    },
+    "focus": {
+     "fg": "#ff8b78",
+     "bg": "#1e242d",
+     "ratio": 6.85,
+     "L": 14
+    },
+    "active": {
+     "fg": "#ff8b78",
+     "bg": "#38241f",
+     "ratio": 6.4,
+     "L": 16.5
+    }
+   },
+   "issues": [
+    "hover:weak dL=2.5"
+   ]
+  },
+  {
+   "selector": "button.main-status pane-toggle run-debug-toggle",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "dark",
+   "label": "w17G:p8▾",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.team-copy",
+   "panel": "team-subhead",
+   "chain": [
+    "team-subhead"
+   ],
+   "view": "team",
+   "theme": "dark",
+   "label": "整合分支team/i50-1rammb",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 1.55
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 2.16
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 1.55
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 2.16
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.team-copy desk-only",
+   "panel": "team-subhead",
+   "chain": [
+    "team-subhead"
+   ],
+   "view": "team",
+   "theme": "dark",
+   "label": "worktree/Users/m4p/.conf",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 1.55
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 2.16
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 1.55
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#1e242d",
+     "ratio": 7.02,
+     "L": 14,
+     "borderRatio": 2.16
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.tab",
+   "panel": "tabs",
+   "chain": [
+    "tabs",
+    "env-sec",
+    "env-panel",
+    "modal-body",
+    "modal"
+   ],
+   "view": "env-hosts-identities",
+   "theme": "dark",
+   "label": "文字",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.mem-pop-refresh",
+   "panel": "mem-pop-head",
+   "chain": [
+    "mem-pop-head",
+    "mem-pop",
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "mem-pop",
+   "theme": "dark",
+   "label": "重新整理",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button",
+   "panel": "mem-pop-act",
+   "chain": [
+    "mem-pop-act",
+    "mem-pop-table",
+    "mem-pop",
+    "head-badges",
+    "sidebar-head"
+   ],
+   "view": "mem-pop",
+   "theme": "dark",
+   "label": "停止 bot",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "summary",
+   "panel": "team-msg-row",
+   "chain": [
+    "team-msg-row"
+   ],
+   "view": "team",
+   "theme": "dark",
+   "label": "協定提醒",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.opt on",
+   "panel": "opt-group",
+   "chain": [
+    "opt-group",
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop"
+   ],
+   "view": "modal-newbot",
+   "theme": "dark",
+   "label": "claude",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "focus": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#0f1115",
+     "bg": "#7aa5f8",
+     "ratio": 7.71,
+     "L": 67.9,
+     "borderRatio": 1
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.02"
+   ]
+  },
+  {
+   "selector": "button.quota-bars-open",
+   "panel": "quota-hp",
+   "chain": [
+    "quota-hp",
+    "quota-open",
+    "quota-strip",
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "dark",
+   "label": "5h7dF",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#26375c",
+     "ratio": 9.67,
+     "L": 23.4
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#26375c",
+     "ratio": 9.67,
+     "L": 23.4
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#26375c",
+     "ratio": 9.67,
+     "L": 23.4
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#26375c",
+     "ratio": 9.67,
+     "L": 23.4
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "div.bot-row selected",
+   "panel": "sidebar-scroll",
+   "chain": [
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "!4C1-fablecc1fableLowLis",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#bed2f9",
+     "ratio": 10.27,
+     "L": 83.9
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#bed2f9",
+     "ratio": 10.27,
+     "L": 83.9
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.project-label-btn",
+   "panel": "project-head",
+   "chain": [
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "⌗pt-hub…p/project/hermes",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#c6d8f7",
+     "ratio": 10.86,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9",
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "div.bot-row",
+   "panel": "sidebar-scroll",
+   "chain": [
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "!3claude-1閒置cc1fableLow",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#c6d8f7",
+     "ratio": 10.86,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "div.bot-row has-kids",
+   "panel": "sidebar-scroll",
+   "chain": [
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "▼!11c1-fable-1閒置cc1fable",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#c6d8f7",
+     "ratio": 10.86,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "div.bot-row compact",
+   "panel": "sidebar-scroll",
+   "chain": [
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "docc1opusLow",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#c6d8f7",
+     "ratio": 10.86,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "div.bot-row team-member-row",
+   "panel": "team-member",
+   "chain": [
+    "team-member",
+    "team-node-members",
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "PMpmcc0fableLow⚙",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#c6d8f7",
+     "ratio": 10.86,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 1.67"
+   ]
+  },
+  {
+   "selector": "div.team-node-head",
+   "panel": "team-node",
+   "chain": [
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "dark",
+   "label": "▼⚙#50 [arch] config.toml",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "div.quota-pop-row",
+   "panel": "quota-pop",
+   "chain": [
+    "quota-pop",
+    "quota-strip",
+    "main-head"
+   ],
+   "view": "quota-pop",
+   "theme": "dark",
+   "label": "claude · cc0max停用5h剩 97%",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.team-node-btn",
+   "panel": "team-node-head",
+   "chain": [
+    "team-node-head",
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "⚙#50 [arch] config.toml ",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "hover:weak dL=0.4",
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "sidebar-foot-actions",
+   "chain": [
+    "sidebar-foot-actions",
+    "sidebar-foot",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "新增 Project",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.key-btn",
+   "panel": "keypad",
+   "chain": [
+    "keypad"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "ctrl+c",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 3.95
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 3.95
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.head-menu-item",
+   "panel": "head-menu-pop",
+   "chain": [
+    "head-menu-pop",
+    "head-menu",
+    "project-head-actions",
+    "project-head",
+    "sidebar-scroll"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "在這裡開 shell",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.team-node-btn",
+   "panel": "team-node-head",
+   "chain": [
+    "team-node-head",
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "⚙#50 [arch] config.toml ",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.project-label-head-btn",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "pt-hub",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.32
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.32
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "confirm-actions",
+   "chain": [
+    "confirm-actions",
+    "confirm-dialog",
+    "confirm-backdrop",
+    "sidebar"
+   ],
+   "view": "confirm-project-delete",
+   "theme": "light",
+   "label": "取消",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "form",
+   "chain": [
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop",
+    "sidebar"
+   ],
+   "view": "modal-newproject",
+   "theme": "light",
+   "label": "瀏覽…",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "form-actions",
+   "chain": [
+    "form-actions",
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop"
+   ],
+   "view": "modal-newproject",
+   "theme": "light",
+   "label": "取消",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.opt",
+   "panel": "opt-group",
+   "chain": [
+    "opt-group",
+    "form",
+    "modal-body",
+    "modal",
+    "modal-backdrop"
+   ],
+   "view": "modal-newbot",
+   "theme": "light",
+   "label": "codex",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5,
+     "borderRatio": 1.84
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.bot-name-btn",
+   "panel": "main-title-row",
+   "chain": [
+    "main-title-row",
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "C1-fable",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.32
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.32
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "bs-login-row",
+   "chain": [
+    "bs-login-row",
+    "form"
+   ],
+   "view": "botsettings",
+   "theme": "light",
+   "label": "登入 / 切換帳號",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.btn",
+   "panel": "bs-actions",
+   "chain": [
+    "bs-actions"
+   ],
+   "view": "botsettings",
+   "theme": "light",
+   "label": "關閉",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100,
+     "borderRatio": 1.96
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "button.member team-member",
+   "panel": "team-subhead",
+   "chain": [
+    "team-subhead"
+   ],
+   "view": "team",
+   "theme": "light",
+   "label": "pmcc0",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "div.team-node-head selected",
+   "panel": "team-node",
+   "chain": [
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "▼⚙#50 [arch] config.toml",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.project-label-btn selected",
+   "panel": "project-head",
+   "chain": [
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "⌗pt-hub…p/project/hermes",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.06"
+   ]
+  },
+  {
+   "selector": "button.quota-bars-open",
+   "panel": "quota-hp",
+   "chain": [
+    "quota-hp",
+    "quota-open",
+    "quota-strip",
+    "main-head"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "5h7dF",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e6eeff",
+     "ratio": 13.45,
+     "L": 94
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "span.mem-badge",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "dark",
+   "label": "RAM6.0G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1,
+     "borderRatio": 1.67
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "span.sl-item sl-account",
+   "panel": "statusline-bar",
+   "chain": [
+    "statusline-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "dark",
+   "label": "帳號tony.lin@robinstech.co",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "span.sl-item",
+   "panel": "statusline-bar",
+   "chain": [
+    "statusline-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "dark",
+   "label": "context21% · 209k/1M",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "span.sl-item sl-version",
+   "panel": "statusline-bar",
+   "chain": [
+    "statusline-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "dark",
+   "label": "版本2.1.263",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#191e26",
+     "ratio": 13.74,
+     "L": 11.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.mem-open",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "dark",
+   "label": "RAM6.0G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.mem-open",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "RAM6.0G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "span.mem-badge",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "RAM6.0G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5,
+     "borderRatio": 1.46
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "button.mem-open",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "mem-pop",
+   "theme": "light",
+   "label": "RAM6.0G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "span.sl-item sl-account",
+   "panel": "statusline-bar",
+   "chain": [
+    "statusline-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "帳號tony.lin@robinstech.co",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "span.sl-item",
+   "panel": "statusline-bar",
+   "chain": [
+    "statusline-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "context21% · 209k/1M",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "span.sl-item sl-version",
+   "panel": "statusline-bar",
+   "chain": [
+    "statusline-bar",
+    "context-bar"
+   ],
+   "view": "chat",
+   "theme": "light",
+   "label": "版本2.1.263",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.26"
+   ]
+  },
+  {
+   "selector": "div.team-node-head",
+   "panel": "team-node",
+   "chain": [
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "▼⚙#50 [arch] config.toml",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.4"
+   ]
+  },
+  {
+   "selector": "div.quota-pop-row",
+   "panel": "quota-pop",
+   "chain": [
+    "quota-pop",
+    "quota-strip",
+    "main-head"
+   ],
+   "view": "quota-pop",
+   "theme": "light",
+   "label": "claude · cc0max停用5h剩 97%",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0",
+    "focus:ring-vs-bg 2.4"
+   ]
+  }
+ ],
+ "after": [
+  {
+   "selector": "button.member member-icon claude",
+   "panel": "main-head",
+   "chain": [
+    "main-head"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "claude-1：閒置",
+   "iconOnly": true,
+   "states": {
+    "base": {
+     "fg": "#c2603c",
+     "bg": "#f6f8fa",
+     "ratio": 3.92,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "hover": {
+     "fg": "#c2603c",
+     "bg": "#e8edf4",
+     "ratio": 3.55,
+     "L": 93.6,
+     "borderRatio": 1.67
+    },
+    "focus": {
+     "fg": "#c2603c",
+     "bg": "#f6f8fa",
+     "ratio": 3.92,
+     "L": 97.5,
+     "borderRatio": 1.46
+    },
+    "active": {
+     "fg": "#c2603c",
+     "bg": "#e8edf4",
+     "ratio": 3.55,
+     "L": 93.6,
+     "borderRatio": 1.67
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9"
+   ]
+  },
+  {
+   "selector": "button.term-link",
+   "panel": "body",
+   "chain": [],
+   "view": "terminal",
+   "theme": "light",
+   "label": "http://localhost:4399/ap",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#2a63cd",
+     "bg": "#f7f8fa",
+     "ratio": 5.25,
+     "L": 97.6
+    },
+    "hover": {
+     "fg": "#2a63cd",
+     "bg": "#edf2fd",
+     "ratio": 4.97,
+     "L": 95.4
+    },
+    "focus": {
+     "fg": "#2a63cd",
+     "bg": "#edf2fd",
+     "ratio": 4.97,
+     "L": 95.4
+    },
+    "active": {
+     "fg": "#2a63cd",
+     "bg": "#edf2fd",
+     "ratio": 4.97,
+     "L": 95.4
+    }
+   },
+   "issues": [
+    "hover:weak dL=2.2"
+   ]
+  },
+  {
+   "selector": "summary",
+   "panel": "team-msg-row",
+   "chain": [
+    "team-msg-row"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "協定提醒",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#5e6a78",
+     "bg": "#f6f8fa",
+     "ratio": 5.18,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "summary",
+   "panel": "team-msg-row",
+   "chain": [
+    "team-msg-row"
+   ],
+   "view": "sidebar",
+   "theme": "dark",
+   "label": "協定提醒",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "hover": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "focus": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    },
+    "active": {
+     "fg": "#a3afbf",
+     "bg": "#191e26",
+     "ratio": 7.52,
+     "L": 11.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.project-label-btn",
+   "panel": "project-head",
+   "chain": [
+    "project-head",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "⌗pt-hub…p/project/hermes",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#c6d8f7",
+     "ratio": 10.86,
+     "L": 85.9
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9"
+   ]
+  },
+  {
+   "selector": "div.team-node-head",
+   "panel": "team-node",
+   "chain": [
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "dark",
+   "label": "▼⚙#50 [arch] config.toml",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#1e242d",
+     "ratio": 12.82,
+     "L": 14
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.member team-member",
+   "panel": "team-subhead",
+   "chain": [
+    "team-subhead"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "pmcc0",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#e8edf4",
+     "ratio": 13.31,
+     "L": 93.6
+    }
+   },
+   "issues": [
+    "hover:weak dL=3.9"
+   ]
+  },
+  {
+   "selector": "button.mem-open",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "dark",
+   "label": "RAM4.4G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    },
+    "hover": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    },
+    "focus": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    },
+    "active": {
+     "fg": "#e5e9f0",
+     "bg": "#171c23",
+     "ratio": 14.06,
+     "L": 10.1
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "button.mem-open",
+   "panel": "head-badges",
+   "chain": [
+    "head-badges",
+    "sidebar-head",
+    "sidebar"
+   ],
+   "view": "sidebar",
+   "theme": "light",
+   "label": "RAM4.4G",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#f6f8fa",
+     "ratio": 14.7,
+     "L": 97.5
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  },
+  {
+   "selector": "div.team-node-head",
+   "panel": "team-node",
+   "chain": [
+    "team-node",
+    "team-nodes",
+    "sidebar-scroll",
+    "sidebar"
+   ],
+   "view": "project-menu",
+   "theme": "light",
+   "label": "▼⚙#50 [arch] config.toml",
+   "iconOnly": false,
+   "states": {
+    "base": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "hover": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "focus": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    },
+    "active": {
+     "fg": "#1b2430",
+     "bg": "#ffffff",
+     "ratio": 15.65,
+     "L": 100
+    }
+   },
+   "issues": [
+    "hover:no-change dL=0.0"
+   ]
+  }
+ ]
+}

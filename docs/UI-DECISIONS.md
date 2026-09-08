@@ -473,3 +473,38 @@
   輸入回顯。啟動畫面各列當雜訊濾掉，不當 assistant 回覆。
 - **代價**：系統通知底下不能再點開當下的 pane 截圖。那張圖本來就是 splash，不是回覆。
 - 截圖：`docs/screenshots/codex-splash/`。
+
+## 按鈕色票與 hover / focus 對比（2026-09-08）
+
+- **問題**：`.btn.primary` 沒有自己的 hover 底色，只寫了 `filter: brightness(1.08)`；
+  `.btn:hover:not(:disabled)`（0,3,0）的 `--bg-hover` 反而蓋過 `.btn.primary`（0,2,0）的
+  `--accent`。結果主鈕一 hover 就是近白底＋白字，量到 **1.18:1**（深色 1.36:1），在
+  BotSettingsPanel 的琥珀提醒條上整顆消失。focus 環又寫死 `#76a7ff`，對白底只有 2.4:1，
+  跟 hover 的淺灰底糊在一起。掃描全站 17 個畫面狀態、深淺兩套，共 114 筆不合格。
+- **決策**：styles.css 開一個 `buttons` 區塊，放 `--btn-*` 色票與四個變體
+  （ghost / 實心 / primary / danger）＋ banner 上的覆寫，散落的 hover 規則改成吃 token。
+  門檻：文字 ≥ 4.5:1、只有圖示的 ≥ 3:1、hover 與常態的底色差 ≥ 8 L*、
+  focus 環對**它坐著的那個面** ≥ 3:1（WCAG 2.2 §2.4.13 的算法，2px `outline-offset`
+  讓環落在周圍的面上而不是按鈕自己的底色上）。
+- **ghost 的 hover 用「墨色 wash」而不是固定的 `--bg-hover`**：`color-mix(var(--text) 11%,
+  transparent)`（深色 15%）。固定色是這次出事的根因——它在白面板上剛好比較深，放到琥珀
+  banner 上就變成比周圍還亮。wash 是把腳下那個面壓深，不管坐在哪都成立。
+- **`--ring` 從 `#76a7ff` 換成 `#2a63cd`**（深色維持 `--accent`）。白底 5.58、側欄 5.24、
+  選取藍 4.79、琥珀 banner 5.04。`--accent` 本身不動（那是已定案的），只補一階加深的
+  `--btn-primary-bg-hover: #1a56c7`（ΔL* 9.4、白字 5.9:1）。
+- **紅色鍵的 hover 底用不透明的 `color-mix(var(--danger) 16%, var(--bg-panel))`**：原本那層
+  半透明的紅 wash 疊在選取列的 `--bg-active` 上會愈疊愈深，紅字掉到 2.5–2.9:1。
+  例外是選單裡的刪除列——它是「文字」（門檻 4.5），而 `--danger` 在白底本來就只有 5.9，
+  底色再壓一階就不夠，所以淺色留較淡的 `--danger-soft`，靠色相變化當回饋。
+- **`.bot-actions .icon-btn` 的常態透明度 0.55 → 0.78**：0.55 的 `--text-faint` 對白底只有
+  2.26:1。0.78 仍然看得出「比較淡」，但過得了 3:1（白底 3.47、側欄 3.33）。
+- **刻意留下的例外**（掃描後仍在 `audit.json` 的 after 清單）：
+  - 列（`.bot-row` / `.project-label-btn` / `.team-node-btn` / `.member`）的 hover 仍吃
+    `--bg-hover`，ΔL* 約 3.9。那是全站列選取／hover 的既有分階，改它等於重畫整個側欄；
+    列另外還有指標變化與浮出來的動作鍵。只有「選取中的 team 列」補了一條，因為它疊在
+    `--bg-active` 上時 ΔL* 只有 0.4，等於完全沒反應。
+  - `.mem-open`、`.team-node-head` 是包在真正會變色的那顆外面的透明外殼，掃到的是外殼。
+  - `.term-link`、`<summary>` 是內容裡的行內元素，不套按鈕的那套底色。
+- 量測：`docs/screenshots/btn-contrast/audit.json`（before 114 筆 → after 10 筆，
+  對比不合格 10 → 0、focus 環不合格 13 → 0）。
+  截圖：`docs/screenshots/btn-contrast/before-*.png` 與 `after-*.png`。
