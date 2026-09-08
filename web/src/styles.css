@@ -9084,3 +9084,64 @@ button.run-debug-toggle:hover {
 .project-head-actions .icon-tip[data-tip]:focus-visible::after {
   transform: translateY(0);
 }
+
+/* ================================================================ mobile (≤ 640px)
+
+   手機 RWD（`docs/goals/mobile-rwd-2026-09-08.md`）。斷點只有兩個，兩邊都寫在
+   `hooks/useMediaQuery.ts`：≤1024px 側欄變抽屜（`MOBILE_QUERY`），≤640px 是手機
+   （`PHONE_QUERY`）。上面那個 640 的區塊處理標題列讓位，這裡收的是版面與觸控的通則——
+   一個地方看得完，不要再散到別處。 */
+
+@media (width <= 640px) {
+  /* iOS 的網址列會伸縮，`100%`（＝ large viewport）在鍵盤收起時比看得到的畫面高一截，
+     底部的輸入區就被推到視線外。`dvh` 跟著現在真正看得到的高度走。 */
+  html,
+  body,
+  #root {
+    height: 100dvh;
+  }
+
+  /* 底部的三樣東西都要避開 home indicator：各自原本的內距再加上那一塊。 */
+  .composer {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .shelf {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sidebar-foot {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+
+  /* 觸控目標：Apple / Material 都抓 44 與 48，這裡取 40 當下限——標題列只有 60px 高，
+     再大就撐不下。`.tab` 已經是 36 高，補寬度即可。 */
+  .main-head .icon-btn,
+  .main-head .menu-btn,
+  .main-head .attach .icon-btn,
+  .bot-actions .icon-btn,
+  .bot-actions .head-menu-btn,
+  .project-head-actions .icon-btn {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .tab {
+    min-width: 44px;
+    padding: 0 10px;
+  }
+
+  /* 11px 以下的字在手機上是裝飾不是資訊。挑的是真的會被讀的那幾種標籤，不是全站放大：
+     整體放大會把已經排得剛好的標題列與側欄撐破。 */
+  .term-bar,
+  .git-bar,
+  .git-bar .mini-btn,
+  .main-status,
+  .bs-sub,
+  .hint,
+  .key-btn {
+    font-size: 12px;
+  }
+}
