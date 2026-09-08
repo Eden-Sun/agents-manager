@@ -240,7 +240,8 @@ interface MockTeamTask {
   title: string
   brief: string
   files: string[]
-  worker_bot_id: string
+  /** §4.5：`null` = 還在排隊，還沒有執行者接手。 */
+  worker_bot_id: string | null
   branch: string
   state: TeamTaskState
   round: number
@@ -2729,7 +2730,7 @@ export class MockTransport implements Transport {
     // 有 reviewer 時，挑一件 task 走一次 request_changes，讓 round 機制看得到。
     const reworkAt = workers.length > 1 ? 1 : 0
     // Task 物件先建好（步驟閉包要用），但要到 dispatch 那一步才進 `this.teamTasks`。
-    const tasks: MockTeamTask[] = workers.map((w, i) => {
+    const assigned: MockTeamTask[] = workers.map((w, i) => {
       const seed = TEAM_TASK_SEEDS[i % TEAM_TASK_SEEDS.length]
       return {
         id: ulid('task'),
@@ -2739,7 +2740,7 @@ export class MockTransport implements Transport {
         brief: seed.brief,
         files: [...seed.files],
         worker_bot_id: w.id,
-        branch: `${t.branch}/t${i + 1}-${short(w)}`,
+        branch: `${t.branch}/t${i + 1}`,
         state: 'queued',
         round: 0,
         last_report: null,
@@ -2749,6 +2750,26 @@ export class MockTransport implements Transport {
         updated_at: now(),
       }
     })
+    // §4.5：PM 派的比併行數多，多出來的一筆就排隊——面板要看得到「排隊中」這一列。
+    const queuedSeed = TEAM_TASK_SEEDS[workers.length % TEAM_TASK_SEEDS.length]
+    const extra: MockTeamTask = {
+      id: ulid('task'),
+      team_id: t.id,
+      seq: workers.length + 1,
+      title: queuedSeed.title,
+      brief: queuedSeed.brief,
+      files: [...queuedSeed.files],
+      worker_bot_id: null,
+      branch: `${t.branch}/t${workers.length + 1}`,
+      state: 'queued',
+      round: 0,
+      last_report: null,
+      last_verdict: null,
+      merge_sha: null,
+      created_at: now(),
+      updated_at: now(),
+    }
+    const tasks: MockTeamTask[] = [...assigned, extra]
 
     steps.push(() => {
       this.setPhase(t, 'planning')
@@ -2757,7 +2778,7 @@ export class MockTransport implements Transport {
           t,
           DAEMON_SENDER,
           pmBot.id,
-          `Issue #${t.issue_number}「${t.issue_title}」。全文在 \`.agents-manager/team/ISSUE.md\`。\n目前有 ${workers.length} 位執行者可派：${workers.map(short).join('、')}。請先讀取檔案再派工。`,
+          `Issue #${t.issue_number}「${t.issue_title}」。全文在 \`.agents-manager/team/ISSUE.md\`。\n併行數 ${workers.length}（執行者：${workers.map(short).join('、')}）——dispatch 不用指定 to，超過併行數的會排隊。請先讀取檔案再派工。`,
         )
       }
     })
@@ -2772,12 +2793,11 @@ export class MockTransport implements Transport {
           t,
           pmBot.id,
           `我把 issue #${t.issue_number} 拆成 ${tasks.length} 件互不重疊的 task（以檔案切分）：\n\n` +
-            tasks.map((x) => `- **t${x.seq}**（${short(this.bots.find((b) => b.id === x.worker_bot_id)!)}）${x.title}`).join('\n') +
+            tasks.map((x) => `- **t${x.seq}** ${x.title}`).join('\n') +
             '\n\n' +
             amTeam({
               action: 'dispatch',
               tasks: tasks.map((x) => ({
-                to: short(this.bots.find((b) => b.id === x.worker_bot_id)!),
                 title: x.title,
                 brief: x.brief,
                 files: x.files,
@@ -2789,13 +2809,14 @@ export class MockTransport implements Transport {
 
     steps.push(() => {
       this.setPhase(t, 'working')
-      for (const task of tasks) {
+      // 只有拿到併行位的才會動起來；`extra` 留在 queued，等第一筆合併後才補位。
+      for (const task of assigned) {
         task.state = 'working'
         this.emitTask(task)
         this.teamRelay(
           t,
           pmBot?.id ?? null,
-          task.worker_bot_id,
+          task.worker_bot_id!,
           `Task t${task.seq}「${task.title}」（分支 \`${task.branch}\` 已建好並 checkout）。\n\n${task.brief}\n\n相關檔案：${task.files.join('、')}`,
           task.id,
         )
@@ -2806,13 +2827,13 @@ export class MockTransport implements Transport {
       const seed = TEAM_TASK_SEEDS[(task.seq - 1) % TEAM_TASK_SEEDS.length]
       const body = again ? `已依 reviewer 的意見修正並補測試。\n\n${seed.report}` : seed.report
       task.last_report = body.split('\n')[0]
-      this.teamReply(t, task.worker_bot_id, `${body}\n\n${amTeam({ action: 'report', status: 'done', summary: task.last_report })}`)
+      this.teamReply(t, task.worker_bot_id!, `${body}\n\n${amTeam({ action: 'report', status: 'done', summary: task.last_report })}`)
       task.state = rev ? 'reviewing' : 'merging'
       this.emitTask(task)
       if (rev) {
         this.teamRelay(
           t,
-          task.worker_bot_id,
+          task.worker_bot_id!,
           rev.id,
           `請審查 task t${task.seq}「${task.title}」（分支 \`${task.branch}\`，第 ${task.round + 1} 回）。\n執行者的回報：${task.last_report}`,
           task.id,
@@ -2830,7 +2851,7 @@ export class MockTransport implements Transport {
       }
     }
 
-    tasks.forEach((task, i) => {
+    assigned.forEach((task, i) => {
       steps.push(report(task, false))
       if (rev && i === reworkAt) {
         steps.push(() => {
@@ -2853,7 +2874,7 @@ export class MockTransport implements Transport {
           this.teamRelay(
             t,
             rev.id,
-            task.worker_bot_id,
+            task.worker_bot_id!,
             `Reviewer 打回（第 ${task.round} 回）：${task.last_verdict}。在同一分支繼續，完成後再 report。`,
             task.id,
           )
@@ -2875,6 +2896,31 @@ export class MockTransport implements Transport {
         })
       }
       steps.push(merge(task))
+      // 第一個併行位空出來的那一刻，daemon 才把排隊的那筆派出去（分支也才在這時切）。
+      if (i === 0) {
+        steps.push(() => {
+          extra.worker_bot_id = task.worker_bot_id
+          extra.state = 'working'
+          this.emitTask(extra)
+          this.teamRelay(
+            t,
+            pmBot?.id ?? null,
+            extra.worker_bot_id!,
+            `Task t${extra.seq}「${extra.title}」（分支 \`${extra.branch}\` 已建好並 checkout）。\n\n${extra.brief}`,
+            extra.id,
+          )
+        })
+        steps.push(report(extra, false))
+        if (rev) {
+          steps.push(() => {
+            extra.last_verdict = 'approve：符合 issue 描述'
+            this.teamReply(t, rev.id, `沒問題。\n\n${amTeam({ action: 'verdict', result: 'approve', summary: extra.last_verdict })}`)
+            extra.state = 'merging'
+            this.emitTask(extra)
+          })
+        }
+        steps.push(merge(extra))
+      }
     })
 
     steps.push(() => {

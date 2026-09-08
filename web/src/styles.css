@@ -7301,6 +7301,11 @@ button.model-tag[aria-expanded='true'] {
   color: var(--text-dim);
   font-size: 11px;
 }
+/* §4.5：還沒有執行者接手的 task。比執行者名再淡一階，一眼看得出這一列還沒開始。 */
+.team-task-who.queued {
+  color: var(--text-faint, var(--text-dim));
+  opacity: 0.7;
+}
 .team-task-title {
   flex: 1;
   min-width: 0;

@@ -21,7 +21,7 @@ import { QuotaStrip } from './QuotaStrip'
  * 「新增 Bot 表單改為 sheet」）。
  *
  * 三張角色卡（PM / 執行者 / Reviewer）各自選 kind 與模型（重用 `ApiModelFields`），
- * 執行者多一個 1–{TEAM_WORKERS_MAX} 的人數 stepper，Reviewer 可整張關掉（= 不審查直接合併）。
+ * 執行者多一個 1–{TEAM_WORKERS_MAX} 的併行數 stepper，Reviewer 可整張關掉（= 不審查直接合併）。
  *
  * 使用者裁決過的預設值：`deliver = branch`（**不是** §12 建議的 `pr`——`pr` 會 push 到
  * origin，所以那個選項在 UI 上有明確的紅字說明）、`supervised = false`、執行者上限 4、
@@ -92,7 +92,7 @@ function RoleCard({
   spec: TeamRoleSpec
   onSpec: (next: TeamRoleSpec) => void
   disabled?: boolean
-  /** 卡片標題列右側（執行者的人數 stepper / Reviewer 的開關）。 */
+  /** 卡片標題列右側（執行者的併行數 stepper / Reviewer 的開關）。 */
   head?: ReactNode
   extra?: ReactNode
 }) {
@@ -439,30 +439,30 @@ export function TeamLaunchPanel({
           />
           <RoleCard
             title="執行者"
-            hint={`每人一個獨立 worktree 與分支；同一組設定套用到全部 ${count} 人。`}
+            hint="最多同時跑幾個 task；PM 派幾筆都可以，多的排隊。每個併行位一個獨立 worktree 與分支，這組設定套用到全部。"
             host={host}
             spec={worker}
             onSpec={setWorker}
             head={
-              <span className="team-count" role="group" aria-label="執行者人數">
+              <span className="team-count" role="group" aria-label="併行數">
                 <button
                   type="button"
                   className="mini-btn"
                   disabled={count <= 1}
-                  aria-label="減少一位執行者"
+                  aria-label="減少一個併行位"
                   onClick={() => setCount((c) => Math.max(1, c - 1))}
                 >
                   −
                 </button>
                 <span className="team-count-num" aria-live="polite">
-                  {count} 人
+                  {count} 個
                 </span>
                 <button
                   type="button"
                   className="mini-btn"
                   disabled={count >= TEAM_WORKERS_MAX}
-                  aria-label="增加一位執行者"
-                  title={count >= TEAM_WORKERS_MAX ? `上限 ${TEAM_WORKERS_MAX} 人（reviewer 序列化審查，再多只會排隊）` : undefined}
+                  aria-label="增加一個併行位"
+                  title={count >= TEAM_WORKERS_MAX ? `上限 ${TEAM_WORKERS_MAX} 個（reviewer 序列化審查，再多只會排隊）` : undefined}
                   onClick={() => setCount((c) => Math.min(TEAM_WORKERS_MAX, c + 1))}
                 >
                   ＋

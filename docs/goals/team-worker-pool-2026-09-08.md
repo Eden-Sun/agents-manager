@@ -19,12 +19,12 @@ daemon 一個 commit、web 一個 commit、文件可併入各自的 commit。做
 - `done` 在還有排隊或未終態 task 時照舊 `reject`。
 
 ## 1. daemon
-- [ ] **schema**：`team_tasks.worker_bot_id` 改為可 NULL。SQLite 不能就地改 NOT NULL，照 `team_issues_number` 那次的做法寫開機遷移：
+- [x] **schema**：`team_tasks.worker_bot_id` 改為可 NULL。SQLite 不能就地改 NOT NULL，照 `team_issues_number` 那次的做法寫開機遷移：
   `CREATE TABLE team_tasks_new(...)` → `INSERT INTO … SELECT` → `DROP` → `RENAME` → 重建兩個索引；用 `PRAGMA table_info` 判斷是否已遷移（`notnull == 0` 就跳過）。
   `team_tasks_one_open_per_worker` 保持 partial unique on `worker_bot_id`（NULL 不受唯一約束，正好）。`db::TeamTask.worker_bot_id: Option<String>`，所有讀它的地方（`team.rs` / `team_sched.rs` / `team_json`）跟著改。
-- [ ] `DEFAULT_WORKER_COUNT = 1`（`team.rs:33`）。
-- [ ] **解析**（`team_sched.rs` ~366）：`to` 變成可選；`brief` 仍必填。`DispatchItem.to: Option<String>`。
-- [ ] **dispatch**（~1430–1530）拆成兩段：
+- [x] `DEFAULT_WORKER_COUNT = 1`（`team.rs:33`）。
+- [x] **解析**（`team_sched.rs` ~366）：`to` 變成可選；`brief` 仍必填。`DispatchItem.to: Option<String>`。
+- [x] **dispatch**（~1430–1530）拆成兩段：
   1. **收單**：每筆 task 寫 `team_tasks(state='queued', worker_bot_id = to 對到的 bot 或 NULL, branch = 先算好名字但不 checkout)`。
      `to` 指到的 worker 正忙 → 不再拒絕，改成**指定給他排隊**（`worker_bot_id` 設好但等他空）。`to` 對不到人才拒。
      `pm_repeat`：改成「整個 issue 內同一個 brief 出現第二次」（不分 worker）。檔案重疊警告照舊。
@@ -34,24 +34,24 @@ daemon 一個 commit、web 一個 commit、文件可併入各自的 commit。做
   - `gate:dispatch`（§4.6）：在**收單後、補位前**停，放行後再補位。
   - **phase**：有任何未終態 task（含排隊）就 `working`；全部終態才回 `planning`（既有的 `set_phase(.., "planning")` 條件補上「沒有 queued」）。
   - `done`：有 queued 或未終態 task → reject，訊息寫出還有幾筆排隊。
-- [ ] **PM 那邊的文字**（`team.rs` persona 與 relay 模板，SPEC 附錄 A.1 / A.4）：
+- [x] **PM 那邊的文字**（`team.rs` persona 與 relay 模板，SPEC 附錄 A.1 / A.4）：
   - persona：「用 `dispatch` 派工，**不用指定 `to`**，daemon 會派給有空的執行者（併行數 n）；可以隨時再派，不必等前一批做完；沒事就 `wait`；全部合併後 `done`。」
   - 首則 relay：「併行數 n（執行者：dev-1…）」取代「目前有 k 位執行者可派」。
   - A.4 回報批次的「目前 task 狀態」表加一欄 `排隊中` 與 `(併行 M/n)`。
-- [ ] `PATCH /teams/{id}` 的 `workers.count`：**跑動中改大**→ 當場多建並啟動 `dev-(舊n+1)…dev-新n`（沿用 `insert_member` + `start_bot` + pretrust 那條路，§7.6 已有），啟動後 `fill_workers`；**改小**→ 只寫進 `roles_json`，下一批執行者（下一個 issue / `replace`）才生效，多出來的人做完手上的就不再被派。回應帶 `{"applied": "now" | "next_batch"}`。
-- [ ] 測試（`team_sched.rs` 既有測試框架 `s.reply(...)`）：
+- [x] `PATCH /teams/{id}` 的 `workers.count`：**跑動中改大**→ 當場多建並啟動 `dev-(舊n+1)…dev-新n`（沿用 `insert_member` + `start_bot` + pretrust 那條路，§7.6 已有），啟動後 `fill_workers`；**改小**→ 只寫進 `roles_json`，下一批執行者（下一個 issue / `replace`）才生效，多出來的人做完手上的就不再被派。回應帶 `{"applied": "now" | "next_batch"}`。
+- [x] 測試（`team_sched.rs` 既有測試框架 `s.reply(...)`）：
   - dispatch 三筆、併行 1 → 一筆 working、兩筆 queued 無 worker；第一筆 merged 後第二筆自動派出、分支在那一刻才切。
   - 併行 2、`to` 指定忙碌的 dev-1 → 排在 dev-1 後面，不給 dev-2。
   - `done` 在有 queued 時被 reject。
   - 沒有 `to` 的 dispatch 解析成功；沒有 `brief` 仍失敗。
   - 遷移：舊 schema 的 DB 開起來 `worker_bot_id` 變可 NULL、資料還在。
-- [ ] `docs/SPEC-team.md`：§4.4（`to` 可選）、§4.5「派工上限」改寫成「併行數」、§7.1 表（`worker` 行：併行數 1–4 預設 1）、§8.2 加「`queued` 可未指派」、§10.1 表（`count` 語意）、§10.5 PATCH 的 `applied`、附錄 A.1/A.4、附錄 B 的 SQL。標 2026-09-08。`docs/API.md` 有重複的地方同步。
+- [x] `docs/SPEC-team.md`：§4.4（`to` 可選）、§4.5「派工上限」改寫成「併行數」、§7.1 表（`worker` 行：併行數 1–4 預設 1）、§8.2 加「`queued` 可未指派」、§10.1 表（`count` 語意）、§10.5 PATCH 的 `applied`、附錄 A.1/A.4、附錄 B 的 SQL。標 2026-09-08。`docs/API.md` 有重複的地方同步。
 
 ## 2. web
-- [ ] `TEAM_WORKERS_DEFAULT = 1`（`api/types.ts:873`）；`TeamLaunchPanel.tsx` 那格標籤改「併行數」、單位「人」改成「個」、hint 改成「最多同時跑幾個 task；PM 派幾筆都可以，多的排隊。每個併行位一個獨立 worktree。」
-- [ ] `TeamPanel.tsx` 的 task 列：`worker` 為 null 的顯示「排隊中」（淡色、無執行者名）；標題列 task 計數旁加「併行 M/n」。`teamProgress.ts` 若把 queued 算進 total 就照舊。
-- [ ] `api/types.ts`：`TeamTask.worker_bot_id: string | null`、`normalize.ts` 對應；`api/mock.ts` 給一個有排隊 task 的 team。
-- [ ] `docs/UI-DECISIONS.md` 補「併行數」：為什麼叫併行數不叫人數（使用者關心的是同時跑幾個，不是有幾個 bot）、為什麼預設 1（省額度；多開是明確的選擇）、為什麼 PM 不指定人。`docs/FRONTEND.md` 對應段落。
+- [x] `TEAM_WORKERS_DEFAULT = 1`（`api/types.ts:873`）；`TeamLaunchPanel.tsx` 那格標籤改「併行數」、單位「人」改成「個」、hint 改成「最多同時跑幾個 task；PM 派幾筆都可以，多的排隊。每個併行位一個獨立 worktree。」
+- [x] `TeamPanel.tsx` 的 task 列：`worker` 為 null 的顯示「排隊中」（淡色、無執行者名）；標題列 task 計數旁加「併行 M/n」。`teamProgress.ts` 若把 queued 算進 total 就照舊。
+- [x] `api/types.ts`：`TeamTask.worker_bot_id: string | null`、`normalize.ts` 對應；`api/mock.ts` 給一個有排隊 task 的 team。
+- [x] `docs/UI-DECISIONS.md` 補「併行數」：為什麼叫併行數不叫人數（使用者關心的是同時跑幾個，不是有幾個 bot）、為什麼預設 1（省額度；多開是明確的選擇）、為什麼 PM 不指定人。`docs/FRONTEND.md` 對應段落。
 
 ## 驗證
 - `cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`（HEAD 現在 340 個全過）。
@@ -61,3 +61,24 @@ daemon 一個 commit、web 一個 commit、文件可併入各自的 commit。做
 
 ## 回報
 三到五行：commit hash、驗證數字、需重啟 daemon、沒做到的與原因。
+
+---
+
+## 完成（2026-09-08）
+
+三處與計畫不同，都是實作時才看出來的：
+
+1. **多一個欄位 `team_tasks.want_worker_bot_id`**（additive ALTER，可 NULL）。計畫是把 PM 指名的
+   執行者直接寫進 `worker_bot_id` 讓他排隊，但 `team_tasks_one_open_per_worker` 是對
+   `worker_bot_id` 唯一的：那位執行者手上已經有一筆未終態的 task，第二列根本 INSERT 不進去。
+   拆成兩欄之後語意也更乾淨——`worker_bot_id` 只表示「誰正在做」，補位就是「有空的人來認領
+   `worker_bot_id IS NULL` 且 `want_worker_bot_id` 是自己或 NULL 的最早一筆」。
+2. **`fill_workers` 不因為執行者沒有 run 就跳過他**。計畫寫「對每個在跑的執行者補位」，但那樣
+   一個掉線的執行者會讓佇列悄悄餓死，而 team 還顯示 `working`。照 §9.1（送不到的成員是 pause
+   不是 skip）照樣派給他，由 `flush` 把它變成 `paused(member_lost)`。
+3. **收單後給 PM 的那則 note 只在「真的有排隊」時送**。每一則 note 都會變成 PM 要回的一輪
+   turn；「你派的兩筆都在跑」這種確認等於花一整回合說一句廢話，而同樣的數字 A.4 的狀態表
+   每次回報都會帶。有排隊時才送，因為那時 PM 確實不知道情況。
+
+另外 `task_branch()` 拿掉了執行者短名（`<整合分支>-t<seq>`）：分支名在收單當下就要定下來，
+那時還不知道誰會做。

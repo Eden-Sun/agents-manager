@@ -878,9 +878,13 @@ export const TEAM_BUDGET_DEFAULTS: TeamBudget = {
   quota_stop_pct: 90,
 }
 
-/** SPEC-team §7.1：執行者 1–4（使用者裁決的上限），預設 2。 */
+/**
+ * SPEC-team §7.1：**併行數** 1–4（使用者裁決的上限），預設 1。
+ *
+ * 欄位名還是 `workers.count`（相容），但語意是「最多同時跑幾個 task」，不是「有幾個人」。
+ */
 export const TEAM_WORKERS_MAX = 4
-export const TEAM_WORKERS_DEFAULT = 2
+export const TEAM_WORKERS_DEFAULT = 1
 
 /** 建 team 時的額度預檢門檻（§9.2）：≥70% 已用 → 黃色警告。 */
 export const TEAM_QUOTA_WARN_PCT = 70
@@ -983,7 +987,8 @@ export interface TeamTask {
   title: string
   brief: string
   files: string[]
-  worker_bot_id: string
+  /** §4.5：`null` = 還在排隊，沒有執行者在做。 */
+  worker_bot_id: string | null
   branch: string
   state: TeamTaskState
   round: number
