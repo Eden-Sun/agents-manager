@@ -10013,4 +10013,62 @@ button.run-debug-toggle:hover {
     min-height: 28px;
     align-items: center;
   }
+
+  /*
+   * 一顆 chip 只能代表目前這個 bot 的 kind。把整條額度換成標題列底下獨立的一列，
+   * 所有身分／kind 橫向可捲（跟 git 工具列同一種 scroll shadow）。
+   */
+  .main-head {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 60px;
+    row-gap: 0;
+  }
+
+  .main-head > .quota-strip {
+    flex: 1 1 100%;
+    min-width: 0;
+    order: 20;
+    margin: 0 -8px;
+    padding: 0 8px 6px;
+  }
+
+  .main-head .quota-open {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 2px 0 4px;
+    scrollbar-width: none;
+    background:
+      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 20px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 20px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 28%), transparent) left / 10px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 28%), transparent) right / 10px 100% no-repeat scroll;
+  }
+
+  .main-head .quota-open::-webkit-scrollbar {
+    display: none;
+  }
+
+  .main-head .quota-hp {
+    flex: none;
+  }
+
+  /* 同一列有三個 claude 身分時，沒有 cc0／cc1／cc2 會長得一模一樣。 */
+  .main-head .quota-hp .quota-identity {
+    display: inline;
+    font-size: 12px;
+    max-width: 4.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .team-head > .quota-strip,
+  .group-head > .quota-strip {
+    display: flex;
+  }
+
+  .main-head .quota-more {
+    display: none;
+  }
 }
