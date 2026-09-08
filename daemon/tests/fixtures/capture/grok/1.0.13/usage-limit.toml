@@ -1,0 +1,6 @@
+still_busy = false
+awaits_input = false
+limit_hit = "Weekly limit left: 7% · Grok 4.6 (low)"
+noise_lines = [1, 3, 6]
+source = "synthetic"
+
