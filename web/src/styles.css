@@ -8871,6 +8871,17 @@ button.run-debug-toggle:hover {
     grid-template-rows: minmax(0, 1fr) auto;
   }
 
+  /*
+   * 抽屜開著時把暫存整條收掉。`.sidebar` 在這裡是 `position: fixed` 撐滿整個高度，而這條
+   * bar 是同樣 `z-index: 30` 又排在 DOM 後面——側欄最底下那兩列（「開 shell」「環境設定」）
+   * 就被它蓋住：390px 上「環境設定」量到 y 805..834，bar 是 808..844，點下去開的是暫存區
+   * （2026-09-08 實測）。抽屜開著是在挑 bot，沒有東西要拖進暫存。
+   * 同 `body:has(.modal-backdrop) .shelf`。
+   */
+  body:has(.sidebar.open) .shelf {
+    display: none;
+  }
+
   .shelf {
     border-left: 0;
     border-top: 1px solid var(--border);
