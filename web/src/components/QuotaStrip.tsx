@@ -89,8 +89,19 @@ function useLoggedOut(entry: QuotaEntry, host: string): boolean {
 
 type Level = 'crit' | 'warn' | 'ok'
 
+/**
+ * 剩餘百分比。10 以上取整數；**不到 10 時留一位小數**（2026-09-08）：快用完的時候 9.8 和 9.1
+ * 差一整回合，四捨五入成 10 反而讓人以為還有餘裕。
+ */
 function remaining(w: QuotaWindow | null | undefined): number | null {
-  return w ? Math.max(0, Math.round(100 - w.used_pct)) : null
+  if (!w) return null
+  const left = Math.max(0, 100 - w.used_pct)
+  return left < 10 ? Math.round(left * 10) / 10 : Math.round(left)
+}
+
+/** `remaining` 的顯示字：不到 10 一律帶一位小數（`9.0`），否則整數。 */
+function fmtPct(pct: number): string {
+  return pct < 10 ? pct.toFixed(1) : String(pct)
 }
 
 /**
@@ -135,7 +146,7 @@ function fmtTime(iso: string | null | undefined): string {
 
 /** `5h 81%` / `5h —`; never wraps, always the same shape. */
 function pctText(pct: number | null): string {
-  return pct === null ? '—' : `${pct}%`
+  return pct === null ? '—' : `${fmtPct(pct)}%`
 }
 
 function entryLabel(entry: QuotaEntry): string {
@@ -346,7 +357,7 @@ function Bar({
       </span>
       {low ? (
         <span className={`quota-bar-pct ${lv}`} aria-hidden="true">
-          {pct}
+          {pct === null ? pct : fmtPct(pct)}
         </span>
       ) : null}
     </span>
@@ -479,7 +490,7 @@ function Gauge({
            （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
         <span className="quota-compact">
           <span className="quota-window-name">{windows[0].name}</span>
-          <span className="quota-compact-pct">{windows[0].pct === null ? '無資料' : `${windows[0].pct}%`}</span>
+          <span className="quota-compact-pct">{windows[0].pct === null ? '無資料' : `${fmtPct(windows[0].pct)}%`}</span>
         </span>
       ) : (
       <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
