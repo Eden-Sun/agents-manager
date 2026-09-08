@@ -9790,10 +9790,13 @@ button.run-debug-toggle:hover {
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  /* `:has(.dirpicker)` 那條的特異性比裸 `.modal` 高，要一起寫進來才蓋得掉。 */
+  /* `:has(.dirpicker)` 那條的特異性比裸 `.modal` 高，要一起寫進來才蓋得掉。
+     寬度要 `100%` 不能 `auto`：`.modal-backdrop` 是 `justify-content: center` 的 flex，
+     `auto` 會讓 sheet 收縮成內容寬（390px 上量到 262px，左右各留 64px 的黑邊），
+     說好的「全螢幕 sheet」只有高度成立。 */
   .modal,
   .modal:has(.dirpicker) {
-    width: auto;
+    width: 100%;
     max-width: none;
     height: 100dvh;
     max-height: none;
