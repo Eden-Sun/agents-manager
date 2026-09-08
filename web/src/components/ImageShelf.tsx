@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { MOBILE_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { ImageIcon, formatSize, useDropTarget } from './Attachments'
 import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
 import type { ShelfItem } from '../store/shelf'
@@ -165,7 +165,7 @@ export function ImageShelf() {
   const [open, setOpen] = useState(() => readOpen(!window.matchMedia(PHONE_QUERY).matches))
   const typing = useTypingAway()
   // 同一個斷點決定托盤在右邊還是在底部，也就決定預覽要浮在左邊還是上面。
-  const atBottom = useMediaQuery(MOBILE_QUERY)
+  const atBottom = useMediaQuery(DRAWER_QUERY)
   const fileDrag = useFileDragActive()
   const picker = useRef<HTMLInputElement>(null)
   const shelfRef = useRef<HTMLElement>(null)
