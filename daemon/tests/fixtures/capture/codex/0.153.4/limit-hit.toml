@@ -1,0 +1,6 @@
+still_busy = false
+awaits_input = false
+limit_hit = "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again at Sep 6th, 2026 3:00 PM."
+noise_lines = [3, 4]
+source = "synthetic"
+

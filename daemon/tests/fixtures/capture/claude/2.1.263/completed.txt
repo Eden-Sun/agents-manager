@@ -1,0 +1,10 @@
+❯ 幫我看一下 lifecycle.rs
+  ⎿  Read lifecycle.rs (4308 lines)
+⏺ 看完了：try_fallback 只認 in-flight turn。
+
+✻ Worked for 9s · done 11:35 PM
+────────────────────────────────────────────
+❯
+  tony. | agents-manager | Sonnet 5 | 5h:- | 7d:-
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+

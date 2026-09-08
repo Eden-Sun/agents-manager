@@ -1,0 +1,7 @@
+still_busy = false
+awaits_input = false
+limit_hit = "You've hit your limit · resets at 4:00 PM"
+noise_lines = [3, 4]
+source = "synthetic"
+note = "The quota notice is a sanitized Claude limit screen; no account or reset identity is included."
+

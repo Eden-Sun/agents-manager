@@ -1,0 +1,6 @@
+still_busy = false
+awaits_input = true
+noise_lines = [1, 7]
+source = "synthetic"
+note = "Sanitized sign-in prompt; no account or browser URL is included."
+

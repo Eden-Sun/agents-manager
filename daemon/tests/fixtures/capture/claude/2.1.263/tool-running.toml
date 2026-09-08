@@ -1,0 +1,7 @@
+still_busy = true
+awaits_input = false
+activity = "Running 1 shell command…"
+noise_lines = [3, 4]
+source = "synthetic"
+note = "Reproduces the mid-tool screen covered by the lifecycle is_tool_progress regression test."
+
