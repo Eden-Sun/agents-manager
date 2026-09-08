@@ -26,9 +26,13 @@ await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textCont
 await shot('m4-terminal')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='對話')?.click()`); await sleep(500)
 await ev(`document.querySelector('button[aria-label*="選單"], .menu-btn, button.hamburger')?.click()`); await sleep(600)
-await ev(`[...document.querySelectorAll('.team-node-btn')][0]?.click()`); await sleep(1500)
+// 沒有進行中的 team 時這一下點不到任何東西，抽屜也不會自己收（選取沒變）——那就把它關掉，
+// 免得 m5 拍出來只是 m2 的複本。印一行說明，看圖的人才知道這張為什麼是對話而不是 team。
+const teamHit = await ev(`(() => { const b = document.querySelector('.team-node-btn'); if (!b) return false; b.click(); return true })()`)
+if (!teamHit) { console.log('m5: 目前沒有進行中的 team，改拍收起抽屜後的畫面'); await ev(`document.querySelector('.scrim')?.click()`) }
+await sleep(1500)
 await shot('m5-team')
-await ev(`document.querySelector('button[aria-label*="選單"], .menu-btn, button.hamburger')?.click()`); await sleep(600)
-await ev(`[...document.querySelectorAll('.bot-row')][0]?.querySelector('button[aria-label^="設定"]')?.click()`); await sleep(1200)
+// 設定是從標題列的齒輪開的（側欄那顆藏在 `⋯` 選單裡，要先展開才點得到）。
+await ev(`document.querySelector('.main-head .icon-btn.gear')?.click()`); await sleep(1200)
 await shot('m6-settings')
 chrome.kill(); process.exit(0)
