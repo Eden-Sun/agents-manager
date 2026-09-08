@@ -490,7 +490,9 @@ function Gauge({
            （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
         <span className="quota-compact">
           <span className="quota-window-name">{windows[0].name}</span>
-          <span className="quota-compact-pct">{windows[0].pct === null ? '無資料' : `${fmtPct(windows[0].pct)}%`}</span>
+          <span className="quota-compact-pct">
+            {windows[0].pct === null ? '無資料' : `剩 ${fmtPct(windows[0].pct)}%`}
+          </span>
         </span>
       ) : (
       <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
@@ -798,7 +800,7 @@ export function QuotaStrip({
               key={entryReactKey(entry)}
               entry={entry}
               host={host}
-              collapsed={collapsed}
+              collapsed={collapsed || compact}
               compact={compact}
               focused={focused}
               open={open}

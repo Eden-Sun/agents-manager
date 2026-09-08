@@ -9551,11 +9551,9 @@ button.run-debug-toggle:hover {
 @media (width <= 640px) {
   /* 身分名（`cc1`）與停用方塊讓位：前者在側欄每一列與點開的 popover 裡都寫著，後者是坐在
      桌機前才會去按的開關（10px 的方塊本來也不是觸控目標，popover 裡那份完整的還在）。
-     只留 kind 圖示與百分比——`docs/UI-DECISIONS.md`：百分比始終保留。視窗名（`7d` / `F`）
-     一起讓位，它在 chip 自己的 tooltip 與 popover 裡都寫著。 */
+     視窗名留下——手機沒有 hover，只寫 `26%` 分不出是 5h、7d 還是 Fable。 */
   .main-head .quota-hp .quota-identity,
-  .main-head .quota-hp .quota-cell-toggle,
-  .main-head .quota-hp .quota-compact .quota-window-name {
+  .main-head .quota-hp .quota-cell-toggle {
     display: none;
   }
 
@@ -9823,5 +9821,61 @@ button.run-debug-toggle:hover {
     height: 40px;
     min-width: 40px;
     min-height: 40px;
+  }
+}
+
+/* 手機額度：標題列 chip 寫「哪一個窗口剩多少」；明細改底部 sheet，才讀得完 5h／7d／Fable。 */
+@media (width <= 640px) {
+  .main-head .quota-compact .quota-window-name,
+  .main-head .quota-compact-pct {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .main-head .quota-hp.warn .quota-compact-pct,
+  .main-head .quota-hp.warn .quota-window-name {
+    color: var(--warn);
+  }
+
+  .main-head .quota-hp.crit .quota-compact-pct,
+  .main-head .quota-hp.crit .quota-window-name {
+    color: var(--danger);
+  }
+
+  .bot-quota-chip {
+    font-size: 12px;
+    min-height: 22px;
+  }
+
+  .quota-pop {
+    position: fixed;
+    top: auto;
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: auto;
+    max-width: none;
+    max-height: min(70dvh, 520px);
+    border-radius: 16px 16px 0 0;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    z-index: 80;
+  }
+
+  .quota-pop-title,
+  .quota-pop-line,
+  .quota-pop-note,
+  .quota-pop-foot,
+  .quota-disable-note {
+    font-size: 12px;
+  }
+
+  .quota-disable input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .quota-pop-line {
+    min-height: 28px;
+    align-items: center;
   }
 }
