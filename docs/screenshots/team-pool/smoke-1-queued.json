@@ -1,0 +1,32 @@
+{
+  "note": "重建自 team_events（dispatch t1/t2 於 05:27:12、t3 的 dispatch 直到 05:27:28.805 才發生）與 10 秒輪詢快照（t+33s 觀測到 2 working / 1 queued）。抓拍腳本晚一步啟動，沒能存下當下的原始 response。",
+  "observed_at": "2026-09-08T05:27:21Z",
+  "t_plus_s": 33,
+  "phase": "working",
+  "tasks": [
+    {
+      "seq": 1,
+      "title": "task",
+      "state": "working",
+      "worker_bot_id": "01M1ZQQD0MZN4HXN5214FSNSX4",
+      "branch": "team/i56-ektrk7-t1",
+      "round": 0
+    },
+    {
+      "seq": 2,
+      "title": "task",
+      "state": "working",
+      "worker_bot_id": "01M1ZQQD0MWE75N6C6AWPAJGRX",
+      "branch": "team/i56-ektrk7-t2",
+      "round": 0
+    },
+    {
+      "seq": 3,
+      "title": "task",
+      "state": "queued",
+      "worker_bot_id": null,
+      "branch": "team/i56-ektrk7-t3",
+      "round": 0
+    }
+  ]
+}

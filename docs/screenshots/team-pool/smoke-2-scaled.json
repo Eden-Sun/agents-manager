@@ -1,0 +1,60 @@
+{
+  "captured_at": 1788845284,
+  "t_plus_s": 76,
+  "phase": "done",
+  "patch": {
+    "request": {
+      "workers": {
+        "count": 3
+      }
+    },
+    "response": {
+      "applied": "now"
+    },
+    "at_t_plus_s": 63
+  },
+  "members": [
+    {
+      "role": "pm",
+      "bot_id": "01M1ZQQD0M5QMAFG705KDMCPD1"
+    },
+    {
+      "role": "worker",
+      "bot_id": "01M1ZQQD0MZN4HXN5214FSNSX4"
+    },
+    {
+      "role": "worker",
+      "bot_id": "01M1ZQQD0MWE75N6C6AWPAJGRX"
+    },
+    {
+      "role": "worker",
+      "bot_id": "01M1ZQSBAV3MNVFWRXPFZS4YFW"
+    }
+  ],
+  "tasks": [
+    {
+      "seq": 1,
+      "title": "task",
+      "state": "merged",
+      "worker_bot_id": "01M1ZQQD0MZN4HXN5214FSNSX4",
+      "branch": "team/i56-ektrk7-t1",
+      "round": 0
+    },
+    {
+      "seq": 2,
+      "title": "task",
+      "state": "merged",
+      "worker_bot_id": "01M1ZQQD0MWE75N6C6AWPAJGRX",
+      "branch": "team/i56-ektrk7-t2",
+      "round": 0
+    },
+    {
+      "seq": 3,
+      "title": "task",
+      "state": "merged",
+      "worker_bot_id": "01M1ZQQD0MWE75N6C6AWPAJGRX",
+      "branch": "team/i56-ektrk7-t3",
+      "round": 0
+    }
+  ]
+}
