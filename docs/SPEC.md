@@ -306,6 +306,8 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
    找自己底下閒置的 child 來重用、子 agent 命名、
    `herdr pane split --pane "$HERDR_PANE_ID"`（或 `--current`）、不要 `git stash` / `--autostash`、
    子 agent 會被掛在自己底下追蹤、帳號與 hook 會自動帶進子 pane。
+   另有一段**瀏覽器的用法**（2026-09-08）：一律用 ego lite（`ego-browser` skill）、一個 bot 最多一個分頁
+   （母與子各算一個，task space 用自己的 agent 名）、bot 結束就 `closeTab` / `completeTaskSpace({ keep: false })`。
 
 herdr 自己寫的 CLI 說明原樣保留，所以 herdr 升級會把新文字一起帶進來。裝不起來只留 warning，claude 沒有 skill 照常跑。
 
