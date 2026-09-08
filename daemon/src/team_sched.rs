@@ -1304,9 +1304,6 @@ pub async fn on_turn_done(
     .fetch_optional(&app.db)
     .await
     .map_err(up)?;
-    if ev_kind.as_deref() != Some("relay") {
-        return step(app, team_id).await;
-    }
     let text = sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, id DESC LIMIT 1",
     )
@@ -1315,6 +1312,18 @@ pub async fn on_turn_done(
     .await
     .map_err(up)?
     .unwrap_or_default();
+    if ev_kind.as_deref() != Some("relay") {
+        // Not the scheduler's turn — but if the member *chose* to end it with a valid block
+        // (a user nudged it with「請再 report 一次」after a lost reply, 2026-09-08 #50), that
+        // block is its answer and is applied like any other. An invalid or absent block is
+        // still just conversation: no repair, no attempt charged.
+        let role = ctx.by_id(bot_id).and_then(|b| b.team_role.clone()).unwrap_or_else(|| "worker".into());
+        if status == "completed" && parse_block(&text).and_then(|v| Action::parse(&role, &v)).is_ok() {
+            note(app, team_id, json!({"action": "user_turn_block", "bot": bot_id, "role": role})).await?;
+            let _ = apply_reply(app, team_id, bot_id, &text, status).await;
+        }
+        return step(app, team_id).await;
+    }
     // A reply that could not be applied — an unsafe layout, a git command that failed — is
     // still followed by a `step`, because `step` is what turns that condition into a visible
     // `paused` rather than a warning in the log.

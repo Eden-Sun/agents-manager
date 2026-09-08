@@ -324,6 +324,10 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 記一筆 `note{action: fallback_busy}` 等 hook 把真正的回覆送來。#50 實測：兩個 codex 執行者都因此被算了兩次而整隊
 `paused(protocol_error)`，其實回覆在 36 秒後就到了。
 
+**使用者插話後的回覆（2026-09-08）**：成員回覆使用者插話（`kind=user` 的 turn）本來一律不解析（不能因此吃到修復提示）。
+現在**若那則回覆結尾有合法的 am-team 區塊就照常套用**——回報漏掉時，使用者只要在群組聊天 `@dev-2 請再 report 一次`
+就能把隊伍救回來；沒有區塊或區塊不合法仍當一般對話，不修復、不計次。
+
 **`report` 的寬鬆解析（2026-09-08）**：執行者常把欄位包在 `report` 物件裡、用自己的字眼當 `status`。daemon 接受
 `{"action":"report","report":{…}}` 的巢狀寫法；`status` 同義詞 `completed / complete / finished / success / ok → done`、
 `stuck / failed / need_help → blocked`；沒有 `summary` 時把其餘欄位序列化當摘要給 PM。派工 relay 也改成直接印出固定格式的區塊。
