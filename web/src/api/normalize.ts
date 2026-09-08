@@ -69,7 +69,7 @@ import type {
   TurnDelivery,
   TurnOrigin,
   TurnStatus,
- TeamWorkerSpec, ProjectSubmodule } from './types'
+ TeamWorkerSpec, TeamRoles, ProjectSubmodule } from './types'
 import {
   BOT_KINDS,
   hostOfQuotaKey,
@@ -394,6 +394,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     agent_title: optStr(pick(v, 'agent_title', 'agentTitle')),
     status_line: optStr(pick(v, 'status_line', 'statusLine')),
     status: toStatusInfo(pick(v, 'status_json', 'status')),
+    update_notice: optStr(pick(v, 'update_notice', 'updateNotice')),
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),
@@ -998,13 +999,25 @@ export function toTeamDetail(raw: unknown, teamId: string): TeamDetail | null {
     base_ref: str(pick(o, 'base_ref') ?? pick(outer, 'base_ref'), 'HEAD'),
     base_sha: str(pick(o, 'base_sha') ?? pick(outer, 'base_sha')),
     worktree_root: str(pick(o, 'worktree_root') ?? pick(outer, 'worktree_root')),
-    workers: toWorkerSpec(pick(o, 'roles') ?? pick(outer, 'roles')),
+    roles: toTeamRoles(pick(o, 'roles') ?? pick(outer, 'roles')),
   }
 }
 
-function toWorkerSpec(roles: unknown): TeamWorkerSpec | null {
-  if (!isRec(roles) || !isRec(roles.workers) || !isRec(roles.workers.spec)) return null
-  const sp = roles.workers.spec
+/**
+ * `roles_json` 把執行者多包一層（`workers.count` 跟 spec 平放），PM 與 reviewer 自己就是
+ * spec。沒有那個角色（或舊 daemon 沒送 `roles`）一律是 null，呼叫端就不畫那一列。
+ */
+function toTeamRoles(roles: unknown): TeamRoles {
+  const r = isRec(roles) ? roles : {}
+  return {
+    pm: toRoleSpec(r.pm),
+    workers: toRoleSpec(isRec(r.workers) ? r.workers.spec : null),
+    reviewer: toRoleSpec(r.reviewer),
+  }
+}
+
+function toRoleSpec(sp: unknown): TeamWorkerSpec | null {
+  if (!isRec(sp)) return null
   const kind = str(sp.kind)
   if (kind !== 'claude' && kind !== 'codex' && kind !== 'grok') return null
   return {

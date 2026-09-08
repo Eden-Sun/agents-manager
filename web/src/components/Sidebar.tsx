@@ -162,6 +162,8 @@ function BotRow({
     return l === 'working' || l === 'idle' ? t : ''
   })
 
+  const hasUpdate = useStore((s) => s.runs[botId]?.update_notice ?? null)
+
   if (!bot) return null
   // 標題只在選取中的那一列展開成一行——一次只有一列，清單的掃讀節奏不會被打亂。
   // 子 agent 列是單行，標題留在 tooltip，不把樹撐高。
@@ -267,6 +269,9 @@ function BotRow({
             {/* agent 自己的標題不再跟名字擠同一行——那樣兩邊各剩六個字
                 （`C0-畫面修改者 資料夾…`）。選取中的那一列給它自己一行（見下面），
                 其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
+            {/* claude 有新版等著重啟套用時的小點。只是提示——真正點得下去的那顆在 header
+                （`UpdateBadge`），側欄這裡窄到放不下一顆按鈕。 */}
+            {hasUpdate ? <span className="bot-update-dot" title={`${hasUpdate}｜重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）`} /> : null}
             {showTitle || compact ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
           </BotNameField>
         </span>
