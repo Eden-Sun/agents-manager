@@ -1510,3 +1510,25 @@ focus 立即；`Escape`、捲動、resize、拖曳開始都會收掉。
   把分頁改成 `hidden` ＋ `hasFocus()=false` 再點進那個 bot → **不會**清掉（並且
   `recountBot` 用假的 2020 年標記從真實訊息重算出整串歷史的回合數）；改回 visible 並丟一個
   `visibilitychange` → 立刻清成已讀。截圖 `docs/screenshots/unread/444`–`446`。
+
+
+## 執行者那一格 = 併行數，task 列有「排隊中」（2026-09-08）
+
+`TEAM_WORKERS_DEFAULT` 由 2 改成 **1**（`api/types.ts`）。`TeamLaunchPanel` 的執行者卡：
+stepper 的單位由「人」改成「個」，`aria-label` 改成「併行數」／「增加（減少）一個併行位」，
+hint 改成「最多同時跑幾個 task；PM 派幾筆都可以，多的排隊。每個併行位一個獨立 worktree 與分支」。
+名字與取捨的理由寫在 `docs/UI-DECISIONS.md`。
+
+`TeamTask.worker_bot_id` 現在是 `string | null`（`normalize.ts` 改用 `optStr`），`null` = 還在排隊。
+`TeamPanel` 的 task 列因此分兩種：
+
+- 有執行者 → 照舊顯示短名；
+- `null` → `<span className="team-task-who queued">排隊中</span>`（`.team-task-who.queued`
+  比 `--text-dim` 再淡一階），並帶 title「還沒有執行者接手，有人空下來就會自動派出」。
+
+標題列的 `disclosure-note` 前面多一段 **`併行 M/n`**：`n` 是 team 裡 `team.role === 'worker'`
+的 bot 數，`M` 是有執行者且未進終態（`TASK_TERMINAL = merged | skipped | failed`）的 task 數。
+「3 個 task」不再等於「3 個在跑」，所以這個比值要獨立畫出來。
+
+`api/mock.ts` 的示範 team 多派一筆（`workers.length + 1`）：它以 `worker_bot_id: null` 進場，
+在第一筆合併之後才被指派、切分支、開始跑——mock 走的就是 daemon 的補位順序。

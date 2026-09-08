@@ -969,7 +969,7 @@ export function toTeamTask(v: unknown): TeamTask | null {
     title: str(pick(v, 'title')),
     brief: str(pick(v, 'brief')),
     files: arr(pick(v, 'files', 'files_json')).map((f) => str(f)).filter(Boolean),
-    worker_bot_id: str(pick(v, 'worker_bot_id', 'bot_id')),
+    worker_bot_id: optStr(pick(v, 'worker_bot_id', 'bot_id')),
     branch: str(pick(v, 'branch')),
     state: oneOf<TeamTaskState>(pick(v, 'state'), TEAM_TASK_STATES, 'queued'),
     round: num(pick(v, 'round'), 0),

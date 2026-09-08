@@ -150,6 +150,9 @@ const TASK_COLUMN: Record<TeamTaskState, string> = {
 
 const COLUMN_ORDER = ['需要你', '進行中', '審查中', '整合中', '待派', '完成'] as const
 
+/** §8.2 的終態：這三個以外的 task 都還算在「未完成」裡（含還在排隊的）。 */
+const TASK_TERMINAL: readonly TeamTaskState[] = ['merged', 'skipped', 'failed']
+
 // ---------------------------------------------------------------- members
 
 function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
@@ -179,7 +182,7 @@ function MemberStrip({ teamId }: { teamId: string }) {
   const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
   const tasks = useStore(useShallow((s) => s.teamDetail[teamId]?.tasks ?? []))
   const openTask = (botId: string) =>
-    tasks.find((t) => t.worker_bot_id === botId && t.state !== 'merged' && t.state !== 'skipped' && t.state !== 'failed') ??
+    tasks.find((t) => !!t.worker_bot_id && t.worker_bot_id === botId && t.state !== 'merged' && t.state !== 'skipped' && t.state !== 'failed') ??
     null
   return (
     <div className="members team-members" role="list" aria-label="Team 成員">
@@ -405,6 +408,10 @@ function TaskList({ teamId }: { teamId: string }) {
   // 同 `IssueQueue`：預設收起，只有「需要你」的 task 會把它推開，因為那是你非看不可的。
   const [override, setOverride] = useState<boolean | null>(null)
 
+  // §4.5：使用者關心的是「現在同時跑幾個」，而不是側欄有幾個 bot。
+  const workerCount = useStore((s) => teamMemberBots(s, teamId).filter((b) => b.team?.role === 'worker').length)
+  const running = tasks.filter((t) => !!t.worker_bot_id && !TASK_TERMINAL.includes(t.state)).length
+
   const grouped = useMemo(() => {
     const map = new Map<string, TeamTask[]>()
     for (const t of tasks) {
@@ -430,7 +437,8 @@ function TaskList({ teamId }: { teamId: string }) {
       >
         <span className="chev">{open ? '▼' : '▶'}</span> Task（{tasks.length}）
         <span className="disclosure-note">
-          {grouped.map(([col, list]) => `${col} ${list.length}`).join(' ・ ')}
+          併行 {running}/{workerCount}
+          {grouped.length > 0 ? ` ・ ${grouped.map(([col, list]) => `${col} ${list.length}`).join(' ・ ')}` : ''}
         </span>
       </button>
       {open ? (
@@ -444,7 +452,14 @@ function TaskList({ teamId }: { teamId: string }) {
                 return (
                   <div key={t.id} className={`team-task${needsUser ? ' urgent' : ''}`}>
                     <span className="team-task-id mono">t{t.seq}</span>
-                    <span className="team-task-who">{names[t.worker_bot_id] ?? '—'}</span>
+                    {/* §4.5：沒有執行者 = 還在排隊，說「排隊中」比一個破折號清楚。 */}
+                    {t.worker_bot_id ? (
+                      <span className="team-task-who">{names[t.worker_bot_id] ?? '—'}</span>
+                    ) : (
+                      <span className="team-task-who queued" title="還沒有執行者接手，有人空下來就會自動派出">
+                        排隊中
+                      </span>
+                    )}
                     <span className="team-task-title" title={`${t.brief}\n分支 ${t.branch}`}>
                       {t.title}
                     </span>
