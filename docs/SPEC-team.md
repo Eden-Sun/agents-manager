@@ -319,6 +319,14 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 3. 同一個 relay 最多修復 **2 次**；仍失敗 → team `paused(protocol_error)`，UI 顯示原文讓人判斷。
 
 `completed_fallback`（終端備援、可能不完整）的回覆一律先當「區塊缺失」走修復提示，因為那份文字本來就可能被截掉。
+**例外（2026-09-08）**：備援擷取到的是**還在跑的畫面**（codex 的 `• Working (4s • esc to interrupt)`、claude 的
+`✢ Baking…`、`Running …`）時，那不是回覆而是進度——不送修復提示（會打進正在跑的回合）、也不算一次修復；
+記一筆 `note{action: fallback_busy}` 等 hook 把真正的回覆送來。#50 實測：兩個 codex 執行者都因此被算了兩次而整隊
+`paused(protocol_error)`，其實回覆在 36 秒後就到了。
+
+**`report` 的寬鬆解析（2026-09-08）**：執行者常把欄位包在 `report` 物件裡、用自己的字眼當 `status`。daemon 接受
+`{"action":"report","report":{…}}` 的巢狀寫法；`status` 同義詞 `completed / complete / finished / success / ok → done`、
+`stuck / failed / need_help → blocked`；沒有 `summary` 時把其餘欄位序列化當摘要給 PM。派工 relay 也改成直接印出固定格式的區塊。
 
 ### 4.5 防無限迴圈（多層，缺一不可）
 

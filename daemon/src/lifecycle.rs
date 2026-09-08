@@ -3933,9 +3933,16 @@ fn is_spinner_line(s: &str) -> bool {
     verb.ends_with('…') && !rest.contains("· done") && !rest.contains(" for ")
 }
 
-/// The pane is mid-turn: a spinner is still turning somewhere on it.
+/// The pane is mid-turn: a spinner is still turning somewhere on it. codex's spinner is
+/// `• Working (4s • esc to interrupt)` — no ellipsis verb, so it is matched on its own
+/// (2026-09-08: the fallback scraped a working codex and the team counted it as a bad reply).
 fn pane_still_busy(screen: &str) -> bool {
-    screen.lines().any(is_spinner_line)
+    screen.lines().any(|l| is_spinner_line(l) || is_codex_working_line(l))
+}
+
+fn is_codex_working_line(s: &str) -> bool {
+    let s = s.trim();
+    s.starts_with('•') && s.contains("Working (") && s.contains("esc to interrupt")
 }
 
 fn is_tool_progress(reply: &str) -> bool {

@@ -410,11 +410,33 @@ impl Action {
             }
             ("pm", "abort") => Ok(Action::Abort { reason: s(v, "reason") }),
             ("worker", "report") => {
-                let st = s(v, "status");
-                if !["done", "blocked"].contains(&st.as_str()) {
-                    return Err("report.status 必須是 done 或 blocked".into());
+                // Executors (codex especially) like to nest the payload under `report` and to
+                // pick their own vocabulary for `status`. Read through the nesting and map the
+                // obvious synonyms: a repair round costs a whole turn to say "done" again.
+                let body = v.get("report").filter(|r| r.is_object()).unwrap_or(v);
+                let st = s(body, "status").to_ascii_lowercase();
+                let blocked = match st.as_str() {
+                    "done" | "completed" | "complete" | "finished" | "success" | "ok" => false,
+                    "blocked" | "stuck" | "failed" | "need_help" | "needs_help" | "help" => true,
+                    _ => return Err("report.status 必須是 done 或 blocked".into()),
+                };
+                let mut summary = s(body, "summary");
+                if summary.is_empty() {
+                    // No `summary`: the rest of the object is the summary — the PM needs
+                    // *something* to reason about (commits, what was verified, what is left).
+                    let mut rest = body.clone();
+                    if let Some(o) = rest.as_object_mut() {
+                        o.remove("action");
+                        o.remove("status");
+                        o.remove("notes");
+                    }
+                    summary = if rest.as_object().map_or(true, |o| o.is_empty()) {
+                        if blocked { "（執行者沒有說明）".into() } else { "（執行者沒有摘要）".into() }
+                    } else {
+                        serde_json::to_string(&rest).unwrap_or_default()
+                    };
                 }
-                Ok(Action::Report { blocked: st == "blocked", summary: s(v, "summary"), notes: s(v, "notes") })
+                Ok(Action::Report { blocked, summary, notes: s(body, "notes") })
             }
             ("reviewer", "verdict") => {
                 let r = s(v, "result");
@@ -1348,6 +1370,14 @@ pub async fn apply_reply(
         return repair(app, &ctx, &bot, "上一回合沒有完成").await;
     }
     if status == "completed_fallback" {
+        // A terminal scrape is never trusted as a reply (§4.4, even with a block in it). But
+        // if it caught a *busy* screen (a spinner, `esc to interrupt`) the member is still
+        // working: the real reply comes with the hook, so a repair prompt would land mid-turn
+        // and the attempt would be charged for nothing. Note it and wait.
+        if fallback_caught_busy_screen(text) {
+            note(app, team_id, json!({"action": "fallback_busy", "bot": bot.name, "role": role})).await?;
+            return Ok(());
+        }
         return repair(app, &ctx, &bot, "你的回覆是從終端畫面擷取的，可能不完整").await;
     }
     let action = match parse_block(text).and_then(|v| Action::parse(&role, &v)) {
@@ -1384,6 +1414,17 @@ pub async fn apply_reply(
         Action::Report { blocked, summary, notes } => report(app, &ctx, &bot, blocked, &summary, &notes).await,
         Action::Verdict { approve, summary, must_fix } => verdict(app, &ctx, &bot, approve, &summary, &must_fix).await,
     }
+}
+
+/// The terminal fallback scraped a pane that was still mid-turn: codex's
+/// `• Working (4s • esc to interrupt)`, claude's `✢ Baking…`, or a tool line still running.
+/// Such a "reply" is not the member's answer and must not count against it.
+fn fallback_caught_busy_screen(text: &str) -> bool {
+    text.lines().map(str::trim).any(|l| {
+        l.contains("esc to interrupt")
+            || (l.starts_with('•') && l.contains("Working ("))
+            || (l.starts_with("Running ") && l.ends_with('…'))
+    })
 }
 
 /// §4.4's repair prompt. Two of these back to back for the same member and a human takes over.
@@ -1639,7 +1680,9 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             "Task t{seq}「{title}」（分支 `{branch}` 已建好並 checkout 在你的 cwd）。\n\n{brief}\n\n\
              相關檔案：{files}\n\
              只在你的 cwd 工作：不要 cd 出去、不要動 ../、不要 git push、不要切換分支。\
-             每個邏輯段落 `git commit`，完成後用 `report` 回報。",
+             每個邏輯段落 `git commit`，完成後回覆結尾附一個 am-team 區塊回報，格式固定：\n\
+             ```am-team\n{{\"action\":\"report\",\"status\":\"done\",\"summary\":\"改了什麼、怎麼驗的\"}}\n```\n\
+             做不下去就 `\"status\":\"blocked\"` 並在 summary 說明原因。欄位就這三個，不要包在別的物件裡。",
             seq = t.seq,
             title = t.title,
             branch = t.branch,
@@ -2204,6 +2247,21 @@ mod tests {
 
         // …and the field checks inside an otherwise-allowed action.
         assert!(Action::parse("worker", &json!({"action":"report","status":"maybe"})).is_err());
+        // codex 2026-09-08 (#50): nested payload, its own vocabulary, no `summary`.
+        let nested = json!({"action":"report","report":{"status":"completed","commits":["dafc2c4"],"not_done":["截圖"]}});
+        match Action::parse("worker", &nested).unwrap() {
+            Action::Report { blocked, summary, .. } => {
+                assert!(!blocked);
+                assert!(summary.contains("dafc2c4") && summary.contains("截圖"), "{summary}");
+            }
+            _ => panic!("not a report"),
+        }
+        match Action::parse("worker", &json!({"action":"report","status":"stuck"})).unwrap() {
+            Action::Report { blocked, .. } => assert!(blocked),
+            _ => panic!(),
+        }
+        assert!(super::fallback_caught_busy_screen("• Working (4s • esc to interrupt)\n› Ask Codex to do anything"));
+        assert!(!super::fallback_caught_busy_screen("```am-team\n{\"action\":\"wait\"}\n```"));
         assert!(Action::parse("reviewer", &json!({"action":"verdict","result":"lgtm"})).is_err());
         assert!(Action::parse("pm", &json!({"action":"dispatch","tasks":[]})).is_err());
         assert!(Action::parse("pm", &json!({"action":"dispatch","tasks":[{"to":"dev-1"}]})).is_err());
