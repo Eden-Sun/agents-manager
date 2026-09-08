@@ -1039,6 +1039,14 @@ export class MockTransport implements Transport {
         total_bytes: HERDR + agents,
         processes,
         error: null,
+        // 本機給一組超線的瀏覽器分頁，讓左上角的警示看得到。
+        browsers:
+          h.name === 'local'
+            ? [
+                { name: 'Chrome', tabs: 34, bytes: 3.2 * 1024 ** 3, processes: 41 },
+                { name: 'ego', tabs: 6, bytes: 700 * 1024 ** 2, processes: 9 },
+              ]
+            : [],
       }
     })
     return {

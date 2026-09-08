@@ -1110,6 +1110,12 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
     total_bytes: n(h.total_bytes),
     processes: n(h.processes),
     error: h.error == null ? null : str(h.error),
+    browsers: (Array.isArray(h.browsers) ? h.browsers : []).filter(isRec).map((b) => ({
+      name: str(b.name),
+      tabs: n(b.tabs),
+      bytes: n(b.bytes),
+      processes: n(b.processes),
+    })),
   }))
   return {
     total_bytes: n(r.total_bytes),

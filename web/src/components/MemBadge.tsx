@@ -1,5 +1,6 @@
 import { useStore } from '../store/store'
 import { LOCAL_HOST } from '../api/types'
+import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPopover } from './MemPopover'
 
 /** 1.4G / 820M / 64M — 一格寬度就要看得懂，所以個位數才給小數。 */
@@ -37,10 +38,13 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
   }
   if (row.total_bytes === 0 && row.processes === 0) return null
 
+  const tabs = tabsTotal(row.browsers)
+  const tabsHot = tabs >= TABS_WARN
   const tip = [
     `${remote ? host : '本機'}：herdr 進程樹現在佔用的記憶體`,
     `herdr 本身 ${humanBytes(row.herdr_bytes)} · 底下的 pane 與 CLI ${humanBytes(row.agents_bytes)}`,
     `${row.processes} 個 process`,
+    ...(row.browsers.length ? [`瀏覽器：${browsersLine(row.browsers)}${tabsHot ? `（超過 ${TABS_WARN} 個分頁，關一些）` : ''}`] : []),
     '',
     '算的是「跑在 herdr pane 裡的一切」，不只是這裡管的 bot。',
     '每 15 秒更新一次。',
@@ -48,9 +52,11 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
   // 點得開：一個總數看不出「哪些是我自己開的、可以砍」，明細見 `MemPopover`（SPEC §15.2）。
   return (
     <MemPopover host={host}>
-      <span className={`mem-badge${remote ? ' remote' : ''}`} title={`${tip.join('\n')}\n\n點一下看有哪些程序。`}>
+      <span className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}`} title={`${tip.join('\n')}\n\n點一下看有哪些程序。`}>
         <span className="mem-k">{remote ? `@${host}` : 'RAM'}</span>
         <span className="mem-v">{humanBytes(row.total_bytes)}</span>
+        {/* 分頁數只在超線時冒出來：平常那格只講 herdr，超線才是「RAM 被瀏覽器吃掉」的訊號。 */}
+        {tabsHot ? <span className="mem-tabs" aria-label={`${tabs} 個瀏覽器分頁`}>⧉{tabs}</span> : null}
       </span>
     </MemPopover>
   )

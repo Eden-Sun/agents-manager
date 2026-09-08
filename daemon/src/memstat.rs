@@ -40,6 +40,49 @@ pub struct HostMem {
     pub processes: u32,
     /// Set when this host could not be sampled; the other fields are then 0.
     pub error: Option<String>,
+    /// Chromium-family browsers on this host (Chrome, ego), 2026-09-08: their tab count is the
+    /// other big RAM lever on a workstation, and the UI warns when it runs away.
+    #[serde(default)]
+    pub browsers: Vec<BrowserMem>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrowserMem {
+    /// `Chrome` / `ego`.
+    pub name: String,
+    /// Renderer processes (`--type=renderer`): one per tab as a rule, though Chrome shares a
+    /// renderer between same-site tabs and gives extensions their own — close enough to
+    /// "how many tabs are open" for a warning light.
+    pub tabs: u32,
+    /// RSS of every process belonging to that app bundle, bytes.
+    pub bytes: u64,
+    pub processes: u32,
+}
+
+/// Which browser an argv belongs to, by its app bundle path. Only the two we care about.
+fn browser_of(argv: &str) -> Option<&'static str> {
+    if argv.contains("Google Chrome.app/") || argv.starts_with("/opt/google/chrome/") {
+        Some("Chrome")
+    } else if argv.contains("ego lite.app/") || argv.contains("/ego.app/") {
+        Some("ego")
+    } else {
+        None
+    }
+}
+
+/// Per-browser tab count and RSS from one `ps` dump.
+pub fn sum_browsers(out: &str) -> Vec<BrowserMem> {
+    let mut map: std::collections::BTreeMap<&'static str, BrowserMem> = std::collections::BTreeMap::new();
+    for p in parse_ps(out) {
+        let Some(name) = browser_of(&p.argv) else { continue };
+        let e = map.entry(name).or_insert_with(|| BrowserMem { name: name.into(), tabs: 0, bytes: 0, processes: 0 });
+        e.processes += 1;
+        e.bytes += p.rss_kib * 1024;
+        if p.argv.contains("--type=renderer") {
+            e.tabs += 1;
+        }
+    }
+    map.into_values().collect()
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -160,6 +203,7 @@ pub fn sum_herdr(out: &str, host: &str) -> HostMem {
         total_bytes: herdr_bytes + agents_bytes,
         processes,
         error: None,
+        browsers: sum_browsers(out),
     }
 }
 
@@ -173,6 +217,7 @@ async fn sample_local(host: &str) -> HostMem {
             agents_bytes: 0,
             total_bytes: 0,
             processes: 0,
+            browsers: vec![],
             error: Some(format!("ps exited {}", o.status)),
         },
         Err(e) => HostMem {
@@ -181,6 +226,7 @@ async fn sample_local(host: &str) -> HostMem {
             agents_bytes: 0,
             total_bytes: 0,
             processes: 0,
+            browsers: vec![],
             error: Some(e.to_string()),
         },
     }
@@ -204,6 +250,7 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
                 agents_bytes: 0,
                 total_bytes: 0,
                 processes: 0,
+                browsers: vec![],
                 error: Some("未連線".into()),
             });
             continue;
@@ -216,6 +263,7 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
                 agents_bytes: 0,
                 total_bytes: 0,
                 processes: 0,
+                browsers: vec![],
                 error: Some(format!("{e:#}")),
             }),
         }
@@ -254,6 +302,21 @@ pub fn spawn_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browsers_count_renderers_per_app() {
+        let out = "1 0 100 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
+2 1 200 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/1/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --x\n\
+3 1 300 /Applications/Google Chrome.app/Contents/Frameworks/x/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=utility\n\
+4 0 50 /Applications/ego lite.app/Contents/MacOS/ego lite\n\
+5 4 60 /Applications/ego lite.app/Contents/Frameworks/ego Helper (Renderer).app/Contents/MacOS/ego Helper (Renderer) --type=renderer\n\
+6 4 60 /Applications/ego lite.app/Contents/Frameworks/ego Helper (Renderer).app/Contents/MacOS/ego Helper (Renderer) --type=renderer\n\
+7 0 10 /usr/bin/zsh\n";
+        let b = super::sum_browsers(out);
+        assert_eq!(b.len(), 2);
+        assert_eq!((b[0].name.as_str(), b[0].tabs, b[0].processes, b[0].bytes), ("Chrome", 1, 3, 600 * 1024));
+        assert_eq!((b[1].name.as_str(), b[1].tabs, b[1].processes), ("ego", 2, 3));
+    }
+
     use super::*;
 
     const PS: &str = "\
