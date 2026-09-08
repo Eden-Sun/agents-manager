@@ -1,6 +1,6 @@
 //! Project group chat (SPEC §13): one Project is one group; `@<bot>` / `@all` in the text
 //! picks the recipients, the daemon fans the prompt out to each of them, and the group
-//! timeline is every member bot's conversation merged by message id.
+//! timeline is every member bot's conversation merged by message insertion order.
 //!
 //! No new conversation type: each recipient gets its own Turn + user Message through the
 //! ordinary `lifecycle::prompt` path, stamped with a shared `messages.group_id` so the UI can
@@ -254,8 +254,7 @@ pub enum Response400 {
 }
 
 /// `GET /api/projects/:id/messages?before=&limit=` (SPEC §13.4): every live member bot's
-/// messages merged, paginated backwards by message id (ULID = time-ordered), returned in
-/// ascending order.
+/// messages merged, paginated backwards by SQLite insertion order, returned in ascending order.
 pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, limit: i64) -> LcResult<Value> {
     let project = db::project(&app.db, project_id)
         .await
@@ -267,14 +266,25 @@ pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, li
          JOIN conversations c ON c.id = m.conversation_id
          JOIN bots b ON b.id = c.bot_id
          WHERE b.project_id = ? AND b.deleted_at IS NULL";
-    let rows = match before {
-        Some(b) => sqlx::query_as::<_, db::GroupMessage>(&format!("{BASE} AND m.id < ? ORDER BY m.id DESC LIMIT ?"))
+    let before_rowid = match before {
+        Some(message_id) => Some(
+            sqlx::query_scalar::<_, i64>("SELECT rowid FROM messages WHERE id = ?")
+                .bind(message_id)
+                .fetch_optional(&app.db)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?
+                .ok_or_else(|| LcError::Bad(format!("before message does not exist: {message_id}")))?,
+        ),
+        None => None,
+    };
+    let rows = match before_rowid {
+        Some(rowid) => sqlx::query_as::<_, db::GroupMessage>(&format!("{BASE} AND m.rowid < ? ORDER BY m.rowid DESC LIMIT ?"))
             .bind(&project.id)
-            .bind(b)
+            .bind(rowid)
             .bind(limit + 1)
             .fetch_all(&app.db)
             .await,
-        None => sqlx::query_as::<_, db::GroupMessage>(&format!("{BASE} ORDER BY m.id DESC LIMIT ?"))
+        None => sqlx::query_as::<_, db::GroupMessage>(&format!("{BASE} ORDER BY m.rowid DESC LIMIT ?"))
             .bind(&project.id)
             .bind(limit + 1)
             .fetch_all(&app.db)
@@ -351,5 +361,86 @@ mod strip_tests {
         let cjk = [m("小幫手")];
         assert_eq!(parse_mentions("@小幫手，看一下", &cjk).len(), 1);
         assert_eq!(strip_mentions("@小幫手，看一下", &cjk), "看一下");
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn messages_page_by_rowid_when_ids_are_out_of_order() {
+        let dir = std::env::temp_dir().join(format!("am-group-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
+        let app = App::new(
+            pool,
+            client.clone(),
+            client,
+            cfg,
+            dir.clone(),
+            dir.join("agents-managerd"),
+            7799,
+            "test-token".into(),
+            "test".into(),
+            false,
+        );
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','bot','claude','tok',?)")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES ('c1','b1',?)")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        // Insert in the same millisecond with IDs in reverse lexical order. The rowid order is
+        // the only stable order for the group timeline in this case.
+        let created_at = db::now();
+        let ids = [
+            "01ARZ3NDEKTSV4RRFFQ69G5F3C",
+            "01ARZ3NDEKTSV4RRFFQ69G5F3B",
+            "01ARZ3NDEKTSV4RRFFQ69G5F3A",
+        ];
+        for id in ids {
+            sqlx::query(
+                "INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,'c1','user',?,'web',?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(&created_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+
+        let mut cursor = None;
+        let mut got = Vec::new();
+        let mut has_more = Vec::new();
+        for _ in 0..3 {
+            let page = messages(&app, "p1", cursor.as_deref(), 1).await.unwrap();
+            let page_messages = page["messages"].as_array().unwrap();
+            assert_eq!(page_messages.len(), 1);
+            got.push(page_messages[0]["id"].as_str().unwrap().to_string());
+            has_more.push(page["has_more"].as_bool().unwrap());
+            cursor = Some(page_messages[0]["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(got, ids.into_iter().rev().map(str::to_string).collect::<Vec<_>>());
+        assert_eq!(has_more, vec![true, true, false]);
+
+        let err = messages(&app, "p1", Some("missing-before"), 1).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(message) if message.contains("before") && message.contains("does not exist")));
+
+        app.db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
