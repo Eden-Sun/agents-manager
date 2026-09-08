@@ -99,6 +99,11 @@ flowchart LR
 
 ## 安裝與啟動
 
+[![CI](https://github.com/Eden-Sun/agents-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Eden-Sun/agents-manager/actions/workflows/ci.yml)
+
+每次 push 到 `main` 或建立 Pull Request 都會跑 daemon 與 web 檢查。開發收尾前可在 repo 根目錄執行
+`scripts/am-dev-check.sh`，讓本地檢查與 CI 使用同一組指令；`--daemon-only`／`--web-only` 可只跑一側。
+
 需要：Rust（`cargo`）、[Bun](https://bun.sh)、已安裝的 [herdr](https://herdr.dev)（本專案實測 0.8.2，socket protocol 20），以及至少一種 agent CLI（`claude` / `codex` / `grok`）。
 
 ```bash
