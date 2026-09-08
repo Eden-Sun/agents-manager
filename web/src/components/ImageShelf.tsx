@@ -84,13 +84,47 @@ function useTypingAway(): boolean {
   useEffect(() => {
     const isField = (el: EventTarget | null) =>
       el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['checkbox', 'radio', 'file'].includes(el.type))
-    const on = (e: FocusEvent) => setTyping(isField(e.target))
-    const off = () => setTyping(false)
-    document.addEventListener('focusin', on)
-    document.addEventListener('focusout', off)
+
+    /*
+     * 這一條收起來時是 `display: none`，回來就把它上面的東西整個往上推 36px。要是這件事
+     * 發生在手指「按下去到放開」之間，使用者瞄準的鍵就從指頭底下跑掉了——最常見的正是
+     * 送出鍵：按下去的瞬間輸入框失焦、焦點落到送出鍵上，bar 回來把它上移 36px，`mouseup`
+     * 於是落在「圖片暫存」那一條上，click 只好退回共同祖先 `.app`，訊息沒送出去
+     * （2026-09-08 在 390px 實測，第一下必失敗、第二下才成功）。
+     *
+     * 所以焦點變動一律**延到下一個 task** 才改狀態：`mousedown` → `focusout`/`focusin` →
+     * `mouseup` → `click` 全都在同一個 task 裡跑完，排在後面的 timer 動版面就傷不到它們。
+     * （microtask 不夠：它會插在 mousedown 與 mouseup 之間。）指標還按著時再多等到放開。
+     */
+    let pointerDown = false
+    let pending = false
+    const settle = () => {
+      if (pointerDown) {
+        pending = true
+        return
+      }
+      pending = false
+      setTyping(isField(document.activeElement))
+    }
+    const schedule = () => setTimeout(settle, 0)
+    const down = () => {
+      pointerDown = true
+    }
+    const up = () => {
+      pointerDown = false
+      if (pending) schedule()
+    }
+    document.addEventListener('focusin', schedule)
+    document.addEventListener('focusout', schedule)
+    document.addEventListener('pointerdown', down, true)
+    document.addEventListener('pointerup', up, true)
+    document.addEventListener('pointercancel', up, true)
     return () => {
-      document.removeEventListener('focusin', on)
-      document.removeEventListener('focusout', off)
+      document.removeEventListener('focusin', schedule)
+      document.removeEventListener('focusout', schedule)
+      document.removeEventListener('pointerdown', down, true)
+      document.removeEventListener('pointerup', up, true)
+      document.removeEventListener('pointercancel', up, true)
     }
   }, [])
   return typing
