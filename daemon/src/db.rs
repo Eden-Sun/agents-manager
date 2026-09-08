@@ -244,6 +244,10 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         ("runs", "status_line", "ALTER TABLE runs ADD COLUMN status_line TEXT"),
         // The whole statusLine payload (model, context_window, rate_limits, cost…) as JSON.
         ("runs", "status_json", "ALTER TABLE runs ADD COLUMN status_json TEXT"),
+        // Claude Code's "Update installed · Restart to update" line, once seen on the pane.
+        // On the run, not the bot: the pending update belongs to this claude process, and
+        // restarting it (which is what applies the update) starts a fresh run with NULL here.
+        ("runs", "update_notice", "ALTER TABLE runs ADD COLUMN update_notice TEXT"),
         ("bots", "model", "ALTER TABLE bots ADD COLUMN model TEXT"),
         ("bots", "effort", "ALTER TABLE bots ADD COLUMN effort TEXT"),
         ("bots", "fast", "ALTER TABLE bots ADD COLUMN fast INTEGER NOT NULL DEFAULT 0"),
@@ -673,6 +677,10 @@ pub struct Run {
     /// The statusLine payload verbatim (minus the transcript path), for the richer web
     /// status bar: context window, full model name, cost, rate limits.
     pub status_json: Option<String>,
+    /// The pending-update notice claude prints on its bottom line once it has downloaded a
+    /// new version ("Update installed · Restart to update"). NULL when there is none on
+    /// screen; [`crate::update_watch`] keeps it in step.
+    pub update_notice: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub last_read_revision: Option<i64>,

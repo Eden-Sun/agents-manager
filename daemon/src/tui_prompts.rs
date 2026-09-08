@@ -69,6 +69,33 @@ pub fn is_login_menu(screen: &str) -> bool {
     t.contains("select login method") && (t.contains("claude account with subscription") || t.contains("anthropic console account"))
 }
 
+/// claude 已經把新版下載好、等重啟才會換過去時，畫面最底下那行（跟使用者的 statusLine 同一
+/// 行、靠右）印的：
+///
+/// ```text
+/// ✔ Update installed · Restart to update
+/// ```
+///
+/// 中了就回一句固定的字，而不是整行——那行左半邊還有使用者 statusLine 的內容（模型、用量…），
+/// 每回合都在變，存進 DB 只會一直 emit。
+///
+/// 兩段字都要中，理由同 [`is_feedback_survey`]。但這裡光是「兩段都中」還不夠：2026-09-08 實測，
+/// 正在寫這個功能的那個 agent 的畫面上同時有這兩句**引文**，照樣中。所以只看畫面**最下面**
+/// [`TAIL_LINES`] 行非空白的——真正的通知就印在那條狀態列上，正文捲不到那裡。
+pub fn update_notice(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
+    let t = flatten(&tail);
+    (t.contains("update installed") && t.contains("restart to update")).then(|| UPDATE_NOTICE.to_string())
+}
+
+/// 只認畫面最底下這幾行。那句印在使用者 statusLine 那一行（靠右），底下最多再一行
+/// `⏵⏵ bypass permissions on …`；窄 pane 折行也還在這個範圍內。
+const TAIL_LINES: usize = 6;
+
+/// [`update_notice`] 中了以後存進 `runs.update_notice` 的字，也是 UI tooltip 上的原句。
+pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
+
 /// 這個 Run 的 pane 現在是不是停在登入選單上。讀不到畫面就當不是——那不是這裡要擋的事。
 pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
@@ -167,5 +194,27 @@ mod tests {
         assert!(!is_feedback_survey(""));
         // 只提到 dismiss 的畫面不算——那個字到處都是。
         assert!(!is_feedback_survey("Press 0 to dismiss this notice"));
+    }
+
+    const UPDATE: &str = " hunta | amber | OP5 10% | 3.2k                    ✔ Update installed · Restart to update\n";
+
+    #[test]
+    fn update_notice_is_read_off_the_status_line() {
+        assert_eq!(update_notice(UPDATE).as_deref(), Some(UPDATE_NOTICE));
+        // 窄 pane 折行。
+        assert_eq!(update_notice("│ ✔ Update      │\n│ installed ·   │\n│ Restart to    │\n│ update        │\n").as_deref(), Some(UPDATE_NOTICE));
+        // 只中一半不算——例如 agent 正在讀這份原始碼。
+        assert!(update_notice("✔ Update installed").is_none());
+        assert!(update_notice("restart to update the docs").is_none());
+        assert!(update_notice(SURVEY).is_none());
+        // 正文裡引到這兩句不算——寫這個功能的 agent 的畫面上就是這樣（2026-09-08 實測）。
+        let quoted = format!(
+            "  tooltip 寫原句 `Update installed · Restart to update` 與…\n{}\n{}\n❯\n{}\n  tony. | agents-manager | Fable 5.1 31% | 5h:96%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+            "⏺ Bash(git commit -m \"…\")\n  ⎿  cff77fc docs(goals): plan…\n".repeat(4),
+            "─".repeat(20),
+            "─".repeat(20)
+        );
+        assert!(update_notice(&quoted).is_none());
+        assert!(update_notice("").is_none());
     }
 }
