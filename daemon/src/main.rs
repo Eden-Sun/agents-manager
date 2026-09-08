@@ -37,6 +37,7 @@ mod team_sched;
 mod tools;
 mod trust;
 mod tui_prompts;
+mod turn_error;
 mod update_watch;
 
 use anyhow::{Context, Result};

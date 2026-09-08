@@ -2660,6 +2660,7 @@ mod login_slash_tests {
             status_line: None,
             status_json: None,
             update_notice: None,
+            turn_error: None,
             native_session_id: None,
             transcript_path: None,
             last_read_revision: None,
@@ -2949,6 +2950,8 @@ async fn flush_progress(app: &Arc<App>, run_id: &str, pending: &mut Option<Value
 /// so the UI can render it as it is being written. Stops by itself once the turn is no
 /// longer `in_flight` (hook / fallback / watchdog / stop all end it).
 pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
+    // A new turn is starting: whatever cut the *previous* one short is history (§4.3a).
+    crate::turn_error::clear(app, run_id, bot_id).await;
     let mut pollers = app.progress_pollers.lock().await;
     if let Some(h) = pollers.remove(run_id) {
         h.abort();
@@ -3344,7 +3347,7 @@ fn is_shredded(text: &str) -> bool {
 /// set is a moving target across CLI releases. The bracketed elapsed time / token counter is
 /// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
 /// a parenthesised status carrying `tokens` or a duration.
-fn is_activity_shape(s: &str) -> bool {
+pub(crate) fn is_activity_shape(s: &str) -> bool {
     // A leading decoration glyph is ignored here; the caller strips it from what it reports.
     let body = match s.chars().next() {
         Some(c) if !c.is_alphanumeric() => s[c.len_utf8()..].trim_start(),
@@ -3786,6 +3789,12 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
         // completed it. Capture it even when there is no longer an in-flight turn to fall back.
         if let Err(e) = capture_codex_usage_notices(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "codex notice capture failed");
+        }
+        // §4.3a: the same read also says whether this turn ended or was cut off by the API.
+        // It runs whether or not the fallback fired — a connection lost mid-response still
+        // sends its Stop hook, so the turn is already `completed` by the time we get here.
+        if let Err(e) = crate::turn_error::capture(&app2, &bot_id, &run_id).await {
+            tracing::debug!(error = ?e, "turn error capture failed");
         }
         app2.fallback_timers.lock().await.remove(&run_id);
     });
@@ -4253,7 +4262,7 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
 }
 
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
-fn is_noise(s: &str) -> bool {
+pub(crate) fn is_noise(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }

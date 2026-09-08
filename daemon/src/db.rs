@@ -304,6 +304,10 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         ("team_events", "issue_id", "ALTER TABLE team_events ADD COLUMN issue_id TEXT"),
         // SPEC-team §4.5 (2026-09-08): whom the PM asked for, when it asked for anyone.
         ("team_tasks", "want_worker_bot_id", "ALTER TABLE team_tasks ADD COLUMN want_worker_bot_id TEXT"),
+        // The `API Error: …` line that cut this run's last turn short. On the run, not the
+        // bot, for the same reason as `update_notice`: it belongs to this CLI process, and a
+        // restart starts a fresh run with NULL here. Cleared when the next turn opens.
+        ("runs", "turn_error", "ALTER TABLE runs ADD COLUMN turn_error TEXT"),
     ] {
         let has: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"))
             .bind(col)
@@ -752,6 +756,10 @@ pub struct Run {
     /// new version ("Update installed · Restart to update"). NULL when there is none on
     /// screen; [`crate::update_watch`] keeps it in step.
     pub update_notice: Option<String>,
+    /// The `API Error: …` line the pane showed when this run's last turn ended — the turn was
+    /// cut short by the API, not finished. NULL when the last turn ended cleanly; cleared the
+    /// moment the next turn opens ([`crate::turn_error`]).
+    pub turn_error: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub last_read_revision: Option<i64>,

@@ -167,6 +167,33 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
   - 去重與上限：游標 + 與上一則 assistant 訊息比對（herdr 同一輪可能報兩次 `working → idle`；重啟會再讀到同一
     個畫面），單則上限 6000 字；認領時的補記只在對話**還是空的**時候做一次。
 
+### 4.3a 回合被 API 中斷（v4.4）
+claude 的連線在回應中途掉了，pane 上只會多一行
+
+```
+⏺ API Error: Connection lost mid-response. The response above may be incomplete.
+
+✻ Baked for 5m 21s · done 12:56 AM
+```
+
+然後就收工。**hook 照樣送 Stop、herdr 照樣報 `working → idle`**，於是這個回合被記成 `completed`、
+側欄一顆綠燈——使用者以為做完了，實際上回應是斷的（實測 pane `w168:pE`、`w168:p15`，2026-09-09）。
+
+- 觸發：與 §4.3 同一個 `working → idle` 邊、同一次 `agent.read {source: recent_unwrapped}`。備援有沒有
+  出手都要跑——斷線的回合正是 hook 會照常送 Stop 的那一種，跑到這裡時回合早就 `completed` 了。
+- 判定（`daemon/src/turn_error.rs`）：從畫面**底部往上**掃最多 30 行，剝掉框線與前導記號後，
+  碰到的第一個非 chrome 行若以 `API error`（不分大小寫）開頭就算命中。chrome 沿用 §4.3 的
+  `is_noise` / `is_activity_shape`（spinner、分隔線、狀態列）加上空的輸入框列。
+  - 「最後一件事」是關鍵：`API error · Retrying in 0s · attempt 1/10` 之後 agent 又把答案講完了的話，
+    橫幅還留在畫面上但下面有回覆——那是重試成功，不算中斷。
+- 記錄：那行原文寫進 `runs.turn_error`（在 run 上而不是 bot 上，理由同 `update_notice`：它屬於這個 CLI
+  程序，重啟就是新的 run、欄位為 NULL），並在對話裡補一則釘在該回合上的 `system` 訊息（`incomplete = 1`、
+  附終端快照）。回合若還是 `in_flight` 就一併收成 `failed`，不然輸入框會一直鎖著。
+- 清除：下一個回合一開（`arm_progress`）就把 `turn_error` 設回 NULL 並推 `bot_status`。
+- 同一則錯誤只記一次：`runs.turn_error` 已經是那行就直接返回（同一回合會被掃到好幾次）。
+- UI：側欄那列一個紅色「⚠ 中斷」記號，標題列一顆紅色 chip「⚠ 回合被中斷（API 錯誤）」，點開看得到原文
+  與「重送上一則」（走既有的 `POST /bots/{id}/prompt`，不另開一條路）。見 `docs/UI-DECISIONS.md`。
+
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
 1. wall-clock ≤ 3 秒；**永遠 exit 0；永遠空 stdout**（即使錯誤也不印 JSON）。
 2. 讀 stdin（Claude、grok）上限 1 MiB，超限截斷並標 `truncated`；Codex 取 argv 最後一個參數。
