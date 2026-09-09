@@ -1586,6 +1586,41 @@ async fn acquire_run_pane(
     }
 }
 
+/// Keep pane cleanup for the part of startup that runs after a pane exists. This is deliberately
+/// async rather than a `Drop` guard: `pane.close` and the empty-tab tidy-up must finish before
+/// the start error is returned to the caller.
+struct StartPaneGuard<'a> {
+    client: &'a crate::herdr::HerdrClient,
+    workspace_id: &'a str,
+    tab_id: &'a str,
+    pane_id: &'a str,
+    armed: bool,
+}
+
+impl<'a> StartPaneGuard<'a> {
+    fn new(client: &'a crate::herdr::HerdrClient, workspace_id: &'a str, tab_id: &'a str, pane_id: &'a str) -> Self {
+        Self { client, workspace_id, tab_id, pane_id, armed: true }
+    }
+
+    async fn protect<T>(&mut self, result: LcResult<T>) -> LcResult<T> {
+        if result.is_err() {
+            self.cleanup().await;
+        }
+        result
+    }
+
+    async fn cleanup(&mut self) {
+        if self.armed {
+            close_pane_and_tab(self.client, Some(self.workspace_id), Some(self.tab_id), self.pane_id).await;
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
 async fn start_inner(
     app: &Arc<App>,
     bot: &db::Bot,
@@ -1620,6 +1655,80 @@ async fn start_inner(
     // SPEC §6.5c: claude learns herdr from a skill, not from the persona — the persona has no
     // room for a CLI reference, and `herdr --skill` is the CLI's own.
     install_herdr_skill(app, bot, project, &env, &agent).await;
+
+    // Prepare everything that can fail without a pane. In particular, remote hook injection
+    // may perform an ssh upload, so it must happen before workspace/tab creation.
+    let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
+    let mut args = injected;
+    args.extend(persona_args(bot, &agent));
+    args.extend(model_args(&effort_checked(app, bot, &project.host).await));
+    args.extend(identity_args(app, bot, &project.host).await);
+    args.extend(bot.args());
+
+    // Reopen only: resolve the previous ended native session after the normal start preflight,
+    // so a missing/unsupported continuation still gets an ordinary agent pane. The requested
+    // id is persisted before `agent.start`; the hook receiver consumes it on the first identity
+    // or completed-turn callback and can then detect a provider that ignored/misrouted resume.
+    let resume = if opts.resume_native {
+        match db::last_native_session_id(&app.db, &bot.id).await.map_err(up)? {
+            Some(session_id) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
+                Ok(resume_args) => Some((session_id, resume_args)),
+                Err(why) => {
+                    member_context_lost(app, bot, why).await?;
+                    None
+                }
+            },
+            _ => {
+                member_context_lost(app, bot, "no_session_id").await?;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some((session_id, resume_args)) = resume {
+        if bot.kind == "codex" {
+            let mut resumed = resume_args;
+            resumed.extend(args);
+            args = resumed;
+        } else {
+            args.extend(resume_args);
+        }
+        sqlx::query("UPDATE runs SET resume_session_id = ? WHERE id = ?")
+            .bind(&session_id)
+            .bind(run_id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+    }
+
+    // Resolve the cwd before workspace creation too: a team member with a bad worktree must
+    // not leave the workspace's root pane behind.
+    let checked;
+    let cwd = match bot.team_id.as_deref() {
+        Some(tid) => {
+            let t = db::team(&app.db, tid)
+                .await
+                .map_err(up)?
+                .ok_or_else(|| LcError::Upstream("this bot's team is gone".into()))?;
+            checked = crate::team::checked_member_cwd(&t, project, bot).map_err(LcError::Upstream)?;
+            checked.as_str()
+        }
+        None => bot_cwd(bot, project),
+    };
+    // A directory the CLI has not seen before opens with "Is this a project you trust?", and
+    // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
+    // sits at the prompt looking `idle` and silently eats the first message. Record the trust
+    // first. Only local hosts, and only when the path is not already trusted, so in practice
+    // this touches the user's config once per new directory (SPEC-team §7.4 does the same for
+    // team worktrees, which are new by construction).
+    if project.host == LOCAL_HOST {
+        let mut b = bot.clone();
+        b.cwd = Some(cwd.to_string());
+        for w in crate::trust::pretrust_members(app, std::slice::from_ref(&b)).await {
+            tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
+        }
+    }
 
     // 2. workspace
     let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
@@ -1668,104 +1777,37 @@ async fn start_inner(
     };
 
     // 3. pane
-    //
-    // SPEC-team §2.2: the pane's cwd is `bots.cwd` when the bot has one (a team member lives
-    // in its own worktree), otherwise the project's path.
-    //
-    // For a **team member** that fallback is forbidden (§6.1 #1): the project path is the
-    // user's own checkout, and an agent started there can commit whatever the user had in
-    // progress. So a team member's cwd goes through `team::checked_member_cwd`, which
-    // demands it be inside the team's worktree root, and a member that fails it never gets
-    // a pane at all rather than getting the wrong one.
-    let checked;
-    let cwd = match bot.team_id.as_deref() {
-        Some(tid) => {
-            let t = db::team(&app.db, tid)
-                .await
-                .map_err(up)?
-                .ok_or_else(|| LcError::Upstream("this bot's team is gone".into()))?;
-            checked = crate::team::checked_member_cwd(&t, project, bot).map_err(LcError::Upstream)?;
-            checked.as_str()
-        }
-        None => bot_cwd(bot, project),
-    };
-    // A directory the CLI has not seen before opens with "Is this a project you trust?", and
-    // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
-    // sits at the prompt looking `idle` and silently eats the first message. Record the trust
-    // first. Only local hosts, and only when the path is not already trusted, so in practice
-    // this touches the user's config once per new directory (SPEC-team §7.4 does the same for
-    // team worktrees, which are new by construction).
-    if project.host == LOCAL_HOST {
-        let mut b = bot.clone();
-        b.cwd = Some(cwd.to_string());
-        for w in crate::trust::pretrust_members(app, std::slice::from_ref(&b)).await {
-            tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
-        }
-    }
     let root = acquire_run_pane(&client, &workspace_id, cwd, &tab_label(bot), &env, fresh_root).await.map_err(up)?;
     let pane_id = root.pane_id;
     let tab_id = root.tab_id;
+    let mut pane_guard = StartPaneGuard::new(&client, &workspace_id, &tab_id, &pane_id);
 
-    // 4. persist mapping + generate hook injection
-    sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
-        .bind(&workspace_id)
-        .bind(&pane_id)
-        .bind(&tab_id)
-        .bind(run_id)
-        .execute(&app.db)
-        .await
-        .map_err(up)?;
-    let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
-    let mut args = injected;
-    args.extend(persona_args(bot, &agent));
-    args.extend(model_args(&effort_checked(app, bot, &project.host).await));
-    args.extend(identity_args(app, bot, &project.host).await);
-    args.extend(bot.args());
-
-    // Reopen only: resolve the previous ended native session after the normal start preflight,
-    // so a missing/unsupported continuation still gets an ordinary agent pane. The requested
-    // id is persisted before `agent.start`; the hook receiver consumes it on the first identity
-    // or completed-turn callback and can then detect a provider that ignored/misrouted resume.
-    let resume = if opts.resume_native {
-        match db::last_native_session_id(&app.db, &bot.id).await.map_err(up)? {
-            Some(session_id) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
-                Ok(resume_args) => Some((session_id, resume_args)),
-                Err(why) => {
-                    member_context_lost(app, bot, why).await?;
-                    None
-                }
-            },
-            _ => {
-                member_context_lost(app, bot, "no_session_id").await?;
-                None
-            }
-        }
-    } else {
-        None
-    };
-    if let Some((session_id, resume_args)) = resume {
-        if bot.kind == "codex" {
-            let mut resumed = resume_args;
-            resumed.extend(args);
-            args = resumed;
-        } else {
-            args.extend(resume_args);
-        }
-        sqlx::query("UPDATE runs SET resume_session_id = ? WHERE id = ?")
-            .bind(&session_id)
-            .bind(run_id)
-            .execute(&app.db)
-            .await
-            .map_err(up)?;
-    }
+    // 4. persist mapping. From here until `agent.start` succeeds, every returned error must
+    // close the pane and its now-empty tab.
+    pane_guard
+        .protect(
+            sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
+                .bind(&workspace_id)
+                .bind(&pane_id)
+                .bind(&tab_id)
+                .bind(run_id)
+                .execute(&app.db)
+                .await
+                .map_err(up),
+        )
+        .await?;
 
     // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
-    sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
-        .bind(&agent)
-        .bind(run_id)
-        .execute(&app.db)
-        .await
-        .map_err(up)?;
+    pane_guard
+        .protect(
+            sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
+                .bind(&agent)
+                .bind(run_id)
+                .execute(&app.db)
+                .await
+                .map_err(up),
+        )
+        .await?;
     // A freshly created pane is not an available shell the instant `tab.create` /
     // `pane.split` returns — herdr answers `agent_pane_busy: … is not an available shell`
     // until the interactive shell has settled. Observed 2026-09-06: starting a six-member
@@ -1797,15 +1839,16 @@ async fn start_inner(
                 tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
             }
             Err(e) => {
-                close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
+                pane_guard.cleanup().await;
                 return Err(up(e));
             }
         }
     }
     if !started {
-        close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
+        pane_guard.cleanup().await;
         return Err(up(format!("pane {pane_id} never became an available shell")));
     }
+    pane_guard.disarm();
 
     // 6. per-run status subscription
     crate::events::watch_pane_on_session(app, &host, &session, &pane_id).await;
@@ -5602,6 +5645,42 @@ mod tab_tests {
         .await
         .unwrap();
         id
+    }
+
+    /// A database failure after `workspace.create` still has to remove the root pane and its
+    /// tab. The trigger exercises the same error boundary as either run mapping UPDATE without
+    /// needing a real herdr failure injection.
+    #[tokio::test]
+    async fn a_run_mapping_failure_closes_the_new_pane_and_tab() {
+        let env = tt::env().await;
+        let bot_id = a_bot(&env, "alfa").await;
+        sqlx::query(
+            "CREATE TRIGGER fail_run_mapping BEFORE UPDATE OF workspace_id, pane_id, tab_id ON runs
+             BEGIN SELECT RAISE(ABORT, 'forced run mapping failure'); END",
+        )
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        assert!(start_bot(&env.app, &bot_id).await.is_err());
+
+        let workspace_id = db::project(&env.app.db, &env.project_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_id
+            .expect("workspace.create ran before the mapping failure");
+        assert!(env.herdr.tabs_in(&workspace_id).is_empty(), "the failed start left a tab behind");
+        let methods = env.herdr.methods();
+        assert!(methods.contains(&"pane.close".into()), "cleanup did not close the pane: {methods:?}");
+        assert!(methods.contains(&"tab.close".into()), "cleanup did not close the empty tab: {methods:?}");
+
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id = ? ORDER BY started_at DESC LIMIT 1")
+            .bind(&bot_id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "exited");
     }
 
     async fn run_row(app: &Arc<App>, id: &str) -> db::Run {
