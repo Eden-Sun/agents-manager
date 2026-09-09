@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -310,12 +311,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('pointerdown', onDown, true)
   }, [])
 
-  // 開場落在名稱欄位。不再 trap 鍵盤：這張卡貼著齒輪開、背景也照常能用，把 Tab 關在裡面
-  // 會跟「非模態」自相矛盾（焦點一離開就被搶回來，等於背景還是不能點）。
-  useEffect(() => {
-    const t = requestAnimationFrame(() => nameRef.current?.focus())
-    return () => cancelAnimationFrame(t)
-  }, [])
+  // 設定卡是 modal：開場落在已有的名稱欄位，Tab 留在卡片內，關閉回到齒輪按鈕。
+  useDialogFocus(true, cardRef, { initialFocus: () => nameRef.current })
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
@@ -335,7 +332,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     escRef.current = closeSettings
     return (
       <div className="bs-scrim" role="presentation">
-      <div ref={cardRef} className="bot-settings" role="dialog" aria-label="Bot 設定">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal="true" aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -396,6 +393,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
       style={pos ? { left: pos.left, top: pos.top } : undefined}
       role="dialog"
+      aria-modal="true"
       aria-label={`${bot.name} 的設定`}
     >
       <div className="bs-head">
