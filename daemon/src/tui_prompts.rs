@@ -45,13 +45,77 @@ fn flatten(screen: &str) -> String {
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 問卷在輸入框上方，所以只看畫面尾端；正文就算提到問句和 `dismiss` 也不算。
+const SURVEY_TAIL_LINES: usize = 14;
+const SURVEY_QUESTION_LINES: usize = 3;
+const SURVEY_OPTION_GAP: usize = 3;
+
+fn has_survey_option(line: &str, number: usize, label: &str) -> bool {
+    let needle = format!("{number}:");
+    let mut offset = 0;
+    while let Some(found) = line[offset..].find(&needle) {
+        let start = offset + found;
+        let boundary = line[..start].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric());
+        let rest = line[start + needle.len()..].trim_start();
+        let label_end = rest
+            .char_indices()
+            .nth(label.chars().count())
+            .map_or(rest.len(), |(i, _)| i);
+        let label_boundary = rest[label_end..].chars().next().map_or(true, |c| !c.is_ascii_alphabetic());
+        if boundary && rest[..label_end].eq_ignore_ascii_case(label) && label_boundary {
+            return true;
+        }
+        offset = start + needle.len();
+    }
+    false
+}
+
+fn survey_options(line: &str) -> [bool; 4] {
+    let line = flatten(line);
+    [
+        has_survey_option(&line, 0, "dismiss"),
+        has_survey_option(&line, 1, "bad"),
+        has_survey_option(&line, 2, "fine"),
+        has_survey_option(&line, 3, "good"),
+    ]
+}
+
 /// 這個畫面是不是那份滿意度問卷。
 ///
-/// 兩個條件都要中：問句本身，加上 `dismiss` 這個選項——只有問句可能是別人引用了這段文字
-/// （例如 agent 正在讀這份原始碼），只有 `dismiss` 則太常見。
+/// 問句必須由 TUI 的 `●` / `>` 標記開頭，且在相鄰幾行內跟至少三個真正的選項列
+/// （`0: Dismiss`、`1: Bad`、`2: Fine`、`3: Good`）一起出現。這避免 agent 引用這些
+/// 字串時把整個可見畫面誤認成問卷。
 pub fn is_feedback_survey(screen: &str) -> bool {
-    let t = flatten(screen);
-    t.contains("how is claude doing") && t.contains("dismiss")
+    let lines: Vec<String> = screen
+        .lines()
+        .map(flatten)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = &lines[lines.len().saturating_sub(SURVEY_TAIL_LINES)..];
+    let question = "how is claude doing";
+
+    for start in 0..tail.len() {
+        let marker = tail[start].strip_prefix("● ").or_else(|| tail[start].strip_prefix("> "));
+        if marker.is_none() {
+            continue;
+        }
+        for end in (start + 1)..=tail.len().min(start + SURVEY_QUESTION_LINES) {
+            if !tail[start..end].join(" ").contains(question) {
+                continue;
+            }
+            let option_end = tail.len().min(end + SURVEY_OPTION_GAP);
+            let mut found = [false; 4];
+            for line in &tail[start..option_end] {
+                for (slot, present) in survey_options(line).into_iter().enumerate() {
+                    found[slot] |= present;
+                }
+            }
+            if found.into_iter().filter(|present| *present).count() >= 3 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 這個畫面是不是 Claude Code 開場的登入選單（`CLAUDE_CONFIG_DIR` 指到一個還沒登入的目錄）：
@@ -114,14 +178,26 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
     if !is_feedback_survey(&read.text) {
         return false;
     }
+    {
+        let mut revisions = app.survey_revisions.lock().await;
+        if revisions.get(&run.id) == Some(&read.revision) {
+            return false;
+        }
+        revisions.insert(run.id.clone(), read.revision);
+    }
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
     if let Err(e) = client.pane_send_keys(&pane, &["0"]).await {
+        let mut revisions = app.survey_revisions.lock().await;
+        if revisions.get(&run.id) == Some(&read.revision) {
+            revisions.remove(&run.id);
+        }
         tracing::warn!(run = %run.id, error = %e, "問卷送 0 失敗");
         return false;
     }
     tokio::time::sleep(SETTLE).await;
     // 有的版本要再一個 Enter 才收下選擇。只在畫面**還停在同一份問卷**時才補，免得 Enter 落進
-    // 問卷後面那個真正在等人回答的東西。
+    // 問卷後面那個真正在等人回答的東西。不要用 run.agent_status 守衛：事件路徑傳進來的
+    // Run 是 DB 更新前的複本，idle -> blocked 時會是過期的 idle。
     if matches!(client.pane_read(&pane, "visible", 80).await, Ok(r) if is_feedback_survey(&r.text)) {
         let _ = client.pane_send_keys(&pane, &["enter"]).await;
     }
@@ -171,6 +247,11 @@ mod tests {
 │ (optional)              │
 │   1: Bad    2: Fine     │
 │   3: Good   0: Dismiss  │
+│ ╭──────────────────────╮ │
+│ │ >                    │ │
+│ ╰──────────────────────╯ │
+│ claude | model | 42%      │
+│ ⏵⏵ bypass permissions on │
 "#;
 
     const PERMISSION: &str = r#"
@@ -194,6 +275,19 @@ mod tests {
         assert!(!is_feedback_survey(""));
         // 只提到 dismiss 的畫面不算——那個字到處都是。
         assert!(!is_feedback_survey("Press 0 to dismiss this notice"));
+    }
+
+    #[test]
+    fn quoted_survey_text_is_not_a_survey() {
+        assert!(!is_feedback_survey(include_str!("tui_prompts.rs")));
+        let source = r#"
+pub fn is_feedback_survey(screen: &str) -> bool {
+    let t = flatten(screen);
+    t.contains("how is claude doing") && t.contains("dismiss")
+}
+"#;
+        assert!(!is_feedback_survey(source));
+        assert!(!is_feedback_survey("The transcript quoted how is claude doing and the dismiss option."));
     }
 
     const UPDATE: &str = " hunta | amber | OP5 10% | 3.2k                    ✔ Update installed · Restart to update\n";
