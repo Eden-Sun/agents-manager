@@ -2054,9 +2054,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       resyncPending = true
       void (async () => {
         try {
+          const loadedBotIds = Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
           await get().refreshState()
-          const sel = get().selectedBotId
-          if (sel) await get().loadMessages(sel)
+          for (const botId of loadedBotIds) await get().loadMessages(botId)
           const proj = get().selectedProjectId
           if (proj) await get().loadGroupMessages(proj)
           const team = get().selectedTeamId
@@ -2653,6 +2653,8 @@ export function composerState(state: StoreState, botId: string | null): Composer
     // Not `disabled`: the user keeps typing, and a send is queued rather than refused.
     return { ...base, disabled: false, queued: true, reason: '這回合還在跑，送出會排到結束後', inFlightTurnId: inflight.id }
   }
+  const queued = Object.values(state.turns[botId] ?? {}).find((t) => t.status === 'queued')
+  if (queued) return { ...base, reason: '已有訊息排隊中，等它送出後再試' }
   return { disabled: false, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
 }
 
