@@ -1285,6 +1285,42 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> 
         .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))
 }
 
+/// Close a prompt whose local setup failed after its turn was committed.
+///
+/// The failed delivery and the follow-up events are one operation from the UI's point of view:
+/// a `pending` turn must never be the last state the frontend sees.
+async fn fail_prompt_delivery(app: &Arc<App>, conversation_id: &str, turn_id: &str, reason: &str) {
+    let updated = match sqlx::query(
+        "UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'",
+    )
+    .bind(db::now())
+    .bind(turn_id)
+    .execute(&app.db)
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!(turn = %turn_id, error = %e, "could not fail prompt delivery");
+            return;
+        }
+    };
+    if updated.rows_affected() == 0 {
+        return;
+    }
+    let _ = insert_message(
+        app,
+        conversation_id,
+        Some(turn_id),
+        "system",
+        &format!("delivery failed: {reason}"),
+        "system",
+        false,
+        None,
+    )
+    .await;
+    emit_turn(app, turn_id).await;
+}
+
 // ---------------------------------------------------------------- start
 
 /// Options that affect how a new native agent session is started.
@@ -2825,6 +2861,9 @@ pub async fn prompt_grouped(
     {
         return Err(LcError::conflict("a previous turn has unknown delivery; abandon it first", json!({"turn_id": t.id})));
     }
+    // Resolve the client before committing anything. A run can outlive its host/session, and
+    // this must remain a retryable 502 rather than a turn stuck at `in_flight` / `pending`.
+    let client = client_for_run(app, &run).await?;
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
     let turn_id = db::ulid();
@@ -2855,7 +2894,10 @@ pub async fn prompt_grouped(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    crate::attach::bind(app, &msg_id, &files).await.map_err(up)?;
+    if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
+        fail_prompt_delivery(app, &conv, &turn_id, &format!("attachment binding failed: {e}")).await;
+        return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
+    }
 
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
         .bind(&msg_id)
@@ -2867,8 +2909,7 @@ pub async fn prompt_grouped(
     emit_turn(app, &turn_id).await;
 
     // 4. deliver
-    let res = client_for_run(app, &run)
-        .await?
+    let res = client
         .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": &deliver}), Duration::from_secs(10))
         .await;
     let delivery = match res {
@@ -5573,6 +5614,121 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "failed");
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    struct Fixture {
+        env: tt::Env,
+        bot_id: String,
+        conv: String,
+        run_id: String,
+    }
+
+    async fn fixture(kind: &str, session: &str) -> Fixture {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'prompt-test',?,'[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(kind)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(session)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        Fixture { env, bot_id, conv, run_id }
+    }
+
+    /// A missing run session is rejected before the turn and user message are written, so a
+    /// retry reports the same upstream problem instead of finding a stale in-flight turn.
+    #[tokio::test]
+    async fn an_unavailable_run_session_does_not_create_a_turn() {
+        let f = fixture("codex", "no-such-session").await;
+        let app = f.env.app.clone();
+
+        assert!(matches!(prompt(&app, &f.bot_id, "first", "prompt-1").await, Err(LcError::Upstream(_))));
+        assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none());
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turns, 0, "the unavailable client was checked before INSERT");
+
+        assert!(matches!(prompt(&app, &f.bot_id, "second", "prompt-2").await, Err(LcError::Upstream(_))));
+        assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none());
+    }
+
+    /// Binding can fail after the turn transaction commits (for example, a transient database
+    /// error between the message and attachment updates). The UI must receive a terminal turn
+    /// event instead of being left on the committed `in_flight` / `pending` state.
+    #[tokio::test]
+    async fn an_attachment_bind_failure_closes_the_pending_turn() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let attachment_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, created_at)
+             VALUES (?,?,'image.png','image/png',1,'/tmp/image.png','/tmp/image.png','local',?)",
+        )
+        .bind(&attachment_id)
+        .bind(&f.bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_prompt_attachment_bind
+             BEFORE UPDATE OF message_id ON attachments
+             BEGIN SELECT RAISE(ABORT, 'bind failed'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let mut turn_events = app.subscribe_turns();
+
+        let out = prompt_with(&app, &f.bot_id, "look", "prompt-attachments", &[attachment_id]).await.unwrap();
+        assert_eq!(out.delivery, "failed");
+        assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none());
+        let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?")
+            .bind(&out.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("failed", "failed"));
+        let system: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&out.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(system.contains("attachment binding failed"));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), turn_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.turn_id, out.turn_id);
+        assert_eq!((event.status.as_str(), event.delivery.as_str()), ("failed", "failed"));
     }
 }
 
