@@ -8,6 +8,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -406,8 +408,16 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(errlog));
-    // Detach: the herdr server outlives the daemon.
-    cmd.spawn()?;
+    // Detach: the herdr server outlives the daemon and is not part of its terminal's
+    // foreground process group.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn()?;
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!(?error, "failed waiting for herdr server");
+        }
+    });
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if client.ping().await.is_ok() {
