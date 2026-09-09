@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
@@ -707,6 +708,9 @@ export function QuotaStrip({
   const identities = useMemo(() => identitiesOfHost(configured, idStatus), [configured, idStatus])
   const [width, setWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1440))
   const [open, setOpen] = useState(false)
+  // 手機點某一格只看那一格（2026-09-09 使用者）：記下是哪一格開的；`+N` 與桌面仍看全部。
+  const [only, setOnly] = useState<string | null>(null)
+  const phone = useMediaQuery(PHONE_QUERY)
   const wrap = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -815,7 +819,16 @@ export function QuotaStrip({
                 compact={compact}
                 focused={focused}
                 open={open}
-                onOpen={() => setOpen((v) => !v)}
+                onOpen={() => {
+                  const k = entryReactKey(entry)
+                  if (open && (!phone || only === k)) {
+                    setOpen(false)
+                    setOnly(null)
+                  } else {
+                    setOnly(phone ? k : null)
+                    setOpen(true)
+                  }
+                }}
               />
               {/* 「claude 有更新」貼在 claude 那幾格的**右邊**（多身分時只掛在最後一格後面）：
                   它講的是 claude 這個 kind 的全域狀態，跟量表是同一件事的兩個數字，所以要跟
@@ -831,7 +844,10 @@ export function QuotaStrip({
             aria-expanded={open}
             aria-haspopup="dialog"
             title={`還有 ${hidden} 組額度，點開看`}
-            onClick={() => setOpen((v) => !v)}
+            onClick={() => {
+              setOnly(null)
+              setOpen((v) => !v)
+            }}
           >
             +{hidden}
           </button>
@@ -843,9 +859,14 @@ export function QuotaStrip({
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>
           <div className="quota-pop-title">{quotaTitle(host)}</div>
-          {popEntries.map((entry) => (
+          {(only ? popEntries.filter((e) => entryReactKey(e) === only) : popEntries).map((entry) => (
             <PopRow key={entryReactKey(entry)} entry={entry} host={host} />
           ))}
+          {only && popEntries.length > 1 ? (
+            <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
+              看全部（{popEntries.length}）
+            </button>
+          ) : null}
           {/* 一行就夠：每個帳號各印一次「更新於」時，那幾個時間差不到一分鐘。 */}
           {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · 時間為重置時刻</p> : null}
         </div>
