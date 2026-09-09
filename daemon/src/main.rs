@@ -7,6 +7,7 @@
 mod api;
 mod assets;
 mod attach;
+mod bulk_restart;
 mod codex_live;
 mod config;
 mod default_session;

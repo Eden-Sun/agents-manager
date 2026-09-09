@@ -78,6 +78,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/teams/{id}/answer", post(answer_team))
         .route("/teams/{tid}/tasks/{task_id}/decide", post(decide_team_task))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
+        // SPEC §6.9: 一鍵把等著套用 claude 更新的閒置 bot 全部 exit + resume。放在 `{id}` 那組
+        // 前面——axum 的 `/bots/{id}` 會把 `restart-idle` 當成 bot id 吃掉。
+        .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/stop", post(stop_bot))
@@ -1893,6 +1896,15 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let run_id = lifecycle::start_bot(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
+}
+
+/// SPEC §6.9 — 批次：挑出「帶著 claude 更新且閒置」的 bot，背景一顆一顆 exit + resume。
+///
+/// 立刻回計畫（誰要重啟、誰被跳過與原因），進度與摘要走 WS。一顆 `stop_bot` 最久等十秒，
+/// 五顆就一分鐘——同步做完再回會把 HTTP 連線拖死。
+async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcError> {
+    let plan = crate::bulk_restart::spawn(&app).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    Ok((StatusCode::ACCEPTED, Json(plan)).into_response())
 }
 
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
