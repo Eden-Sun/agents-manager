@@ -3,7 +3,7 @@
 //! config.toml is the authority for the desired Project / Bot set. Rows removed from
 //! the TOML are soft-deleted so their conversation history survives.
 
-use crate::config::{canonical_path, valid_bot_name, ConfigStore};
+use crate::config::{canonical_path, valid_bot_name, valid_id, ConfigStore, ID_RE};
 use crate::db;
 use anyhow::{bail, Result};
 use rand::Rng;
@@ -35,6 +35,11 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                     p.id = Some(db::ulid());
                     dirty = true;
                 }
+                if let Some(id) = p.id.as_deref() {
+                    if !valid_id(id) {
+                        bail!("invalid project id `{id}` for project `{}` (must match {})", p.label, ID_RE);
+                    }
+                }
                 // Only local paths can be canonicalized here; a remote path was already
                 // canonicalized on its host when the project was created (SPEC §11.6).
                 if p.host == crate::config::LOCAL_HOST {
@@ -49,6 +54,16 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
                     if b.id.is_none() {
                         b.id = Some(db::ulid());
                         dirty = true;
+                    }
+                    if let Some(id) = b.id.as_deref() {
+                        if !valid_id(id) {
+                            bail!(
+                                "invalid bot id `{id}` for bot `{}` in project `{}` (must match {})",
+                                b.name,
+                                p.label,
+                                ID_RE
+                            );
+                        }
                     }
                     if !valid_bot_name(&b.name) {
                         bail!("invalid bot name `{}` ({})", b.name, crate::config::BOT_NAME_RE);
@@ -157,4 +172,39 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn projection_error(project_id: &str, bot_id: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("am-projection-id-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text = format!(
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = '{project_id}'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n\n[[projects.bots]]\nid = '{bot_id}'\nname = 'worker'\nkind = 'claude'\n"
+        );
+        std::fs::write(&path, text).unwrap();
+        let store = ConfigStore::load(path).await.unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let error = project_config(&store, &pool).await.unwrap_err().to_string();
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_project_and_bot_ids() {
+        for id in ["../..", "foo/bar", r"..\..", ""] {
+            let error = projection_error(id, "bot-1").await;
+            assert!(error.contains("invalid project id"), "{error}");
+            assert!(error.contains(id), "{error}");
+        }
+        for id in ["../..", "foo/bar", r"..\..", ""] {
+            let error = projection_error("project-1", id).await;
+            assert!(error.contains("invalid bot id"), "{error}");
+            assert!(error.contains("worker") && error.contains("demo"), "{error}");
+        }
+    }
 }
