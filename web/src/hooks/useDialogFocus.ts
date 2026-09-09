@@ -34,6 +34,12 @@ export function focusableIn(root: HTMLElement): HTMLElement[] {
 
 const activeDialogs: symbol[] = []
 
+function inForeignModal(target: Node, root: HTMLElement) {
+  const element = target instanceof Element ? target : target.parentElement
+  const dialog = element?.closest<HTMLElement>('[aria-modal="true"], dialog[open]')
+  return Boolean(dialog && dialog !== root && !root.contains(dialog))
+}
+
 export interface DialogFocusOptions {
   /** A preferred opening target; the first tabbable descendant is the fallback. */
   initialFocus?: () => HTMLElement | null | undefined
@@ -78,6 +84,7 @@ export function useDialogFocus(
       if (!isTop() || event.key !== 'Tab') return
       const root = rootRef.current
       if (!root) return
+      if (document.activeElement && inForeignModal(document.activeElement, root)) return
       const tabbable = focusableIn(root)
       if (tabbable.length === 0) {
         event.preventDefault()
@@ -101,10 +108,7 @@ export function useDialogFocus(
       if (!isTop() || !(event.target instanceof Node)) return
       const root = rootRef.current
       if (!root || root.contains(event.target)) return
-      const foreign = (event.target instanceof Element ? event.target : event.target.parentElement)?.closest(
-        '[aria-modal="true"], dialog[open]',
-      )
-      if (foreign && foreign !== root && !root.contains(foreign)) return
+      if (inForeignModal(event.target, root)) return
       focusInside()
     }
 
