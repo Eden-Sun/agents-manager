@@ -34,6 +34,19 @@ pub const MAX_QUEUED_ISSUES: usize = 20;
 /// time — not a headcount the PM has to plan around. One by default: extra parallelism costs
 /// extra quota, so it stays an explicit choice.
 pub const DEFAULT_WORKER_COUNT: u32 = 1;
+
+/// SPEC-team §4.5 (2026-09-09): `workers.count = 0` means **unlimited** — every issue on the
+/// queue is worked at the same time and the executor count grows with what the PM dispatches.
+/// `0` is a new value of a field that has always been 1–4; those keep their old meaning
+/// exactly (one issue at a time, a fixed pool).
+pub const UNLIMITED_WORKERS: u32 = 0;
+/// Unlimited is unlimited in intent, not in panes. Six issues in flight is already twelve
+/// worktrees and a herdr workspace nobody can read; the seventh waits for one to finish.
+pub const MAX_CONCURRENT_ISSUES: usize = 6;
+/// …and the whole team stops at twelve executors, whatever the per-issue arithmetic says.
+/// This is a pane and quota ceiling, not a budget: the relay budget is counted separately.
+pub const MAX_TEAM_WORKERS: u32 = 12;
+
 pub const DEFAULT_BASE_REF: &str = "HEAD";
 
 /// SPEC-team §12 #1 — **user decision, overriding the proposal's `pr`**: `git push` to
@@ -67,6 +80,35 @@ pub fn is_open_issue_state(state: &str) -> bool {
 }
 
 // ---------------------------------------------------------------- budget
+
+/// The team's stored parallelism, as `roles_json` holds it. `0` = unlimited (§4.5).
+pub fn worker_count_of(t: &db::Team) -> u32 {
+    serde_json::from_str::<Value>(&t.roles_json)
+        .ok()
+        .and_then(|r| r.get("workers").and_then(|w| w.get("count")).and_then(|c| c.as_u64()))
+        .unwrap_or(DEFAULT_WORKER_COUNT as u64)
+        .min(MAX_WORKERS as u64) as u32
+}
+
+/// §4.5: is this team in unlimited mode? Every new code path added for unlimited parallelism
+/// branches on this and on nothing else, so a team with a parallelism of 1–4 never reaches
+/// any of it.
+pub fn is_unlimited(t: &db::Team) -> bool {
+    worker_count_of(t) == UNLIMITED_WORKERS
+}
+
+/// The executors that belong to one issue: their §6.2 directory (and therefore their §7.3
+/// nickname) carries the issue's queue position, which is what keeps two issues' `dev-1`
+/// apart while both are in flight.
+pub fn workers_of_issue<'a>(members: &'a [db::Bot], team_id: &str, issue_seq: i64) -> Vec<&'a db::Bot> {
+    let prefix = format!("t{}-i{issue_seq}-dev-", tid6(team_id));
+    members
+        .iter()
+        .filter(|b| {
+            b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker") && b.name.starts_with(&prefix)
+        })
+        .collect()
+}
 
 /// SPEC-team §9.2 / §12 #2 — the defaults are the user's ruling, not a proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -157,7 +199,7 @@ pub struct RoleSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkersSpec {
-    /// 1–4, default 2.
+    /// `0` = unlimited (§4.5), 1–4 = a fixed parallelism. Default 1.
     #[serde(default)]
     pub count: Option<u32>,
     pub kind: String,
@@ -411,6 +453,7 @@ fn role_persona(role: &str, issue_number: i64, extra: Option<&str>) -> Option<St
 /// SPEC-team appendix A.1–A.3: the persona a member actually runs with — its own path, the
 /// integration branch, and who else is on the team. Written after the worktrees exist,
 /// because until then there are no paths to name.
+#[allow(clippy::too_many_arguments)]
 fn full_persona(
     role: &str,
     issue_number: i64,
@@ -419,6 +462,7 @@ fn full_persona(
     integration: &str,
     roster: &str,
     extra: Option<&str>,
+    unlimited: bool,
 ) -> String {
     let base = match role {
         // Neither of these names the issue or the integration branch: both change when the
@@ -458,6 +502,19 @@ fn full_persona(
              背景資料在 `.agents-manager/team/ISSUE.md`（在你的 cwd 內）。"
         ),
     };
+    // §4.5: in unlimited mode the PM manages several issues at once, so the one thing its
+    // persona must carry is that `issue` is a required field — the rest is in `TEAM.md`,
+    // which is rewritten whenever the set of issues in flight changes.
+    let base = if unlimited && role == "pm" {
+        format!(
+            "{base}\n\n這個 team 的併行數是**無限**：佇列裡的 issue 會同時開工，你會同時管好幾個。\
+             因此 `dispatch` 的**每一筆 task 都必須寫 `issue`（issue 號）**，`done` 也必須寫 `issue`——\
+             `done` 只交付那一個 issue，其他的照跑。哪些 issue 在進行中、各自的整合分支與執行者，\
+             一律以 `.agents-manager/team/TEAM.md` 為準；每個 issue 的全文在 `ISSUE-<n>.md`。"
+        )
+    } else {
+        base
+    };
     match extra.map(str::trim).filter(|s| !s.is_empty()) {
         Some(e) => format!("{base}\n\n{e}"),
         None => base,
@@ -496,6 +553,40 @@ fn team_md(issue: &IssueRef, branch: &str, root: &str, repo: &str, members: &[(S
          - worker：`report`（`status: done | blocked`）\n\
          - reviewer：`verdict`（`result: approve | request_changes`）\n\n\
          區塊之外的文字給人看，區塊給系統看。\n",
+    );
+    s
+}
+
+/// `TEAM.md` for a team in unlimited mode (§4.5): several issues are in flight, so the page
+/// leads with the table of what is running — issue, its integration branch, its `ISSUE-<n>.md`
+/// and its executors — instead of naming one issue in the heading.
+fn team_md_unlimited(
+    working: &[(i64, String, String, Vec<String>)],
+    root: &str,
+    repo: &str,
+    members: &[(String, String, String)],
+) -> String {
+    let repo_line = if repo.is_empty() {
+        String::new()
+    } else {
+        format!("- 這個 team 屬於專案的 submodule `{repo}`：每個成員的 cwd 都是**該 submodule** 的 worktree\n")
+    };
+    let mut s = format!(
+        "# Team · 無限併行（同時進行 {n} 個 issue）\n\n- team 根目錄：`{root}`\n{repo_line}         - 合併由 daemon 用 `git merge --no-ff` 執行，agent 不要自己合併\n\n         ## 進行中的 issue\n\n| issue | 整合分支 | 全文 | 執行者 |\n|---|---|---|---|\n",
+        n = working.len(),
+    );
+    for (number, title, branch, who) in working {
+        s.push_str(&format!(
+            "| #{number}「{title}」 | `{branch}` | `.agents-manager/team/ISSUE-{number}.md` | {who} |\n",
+            who = if who.is_empty() { "（尚未建立）".to_string() } else { who.join("、") },
+        ));
+    }
+    s.push_str("\n## 成員\n\n| 短名 | 角色 | cwd |\n|---|---|---|\n");
+    for (short, role, cwd) in members {
+        s.push_str(&format!("| `{short}` | {role} | `{cwd}` |\n"));
+    }
+    s.push_str(
+        "\n## 協定\n\n每則回覆的**最後**要有一個 ```am-team fenced 區塊（一個 JSON 物件）。daemon 只讀最後一個。\n\n         - pm：`dispatch`（每筆要 `brief` 與 **`issue`（issue 號）**，`to` 可省略）/ `wait` /          `done`（要帶 **`issue`**，只交付那一個 issue）/ `ask_user` / `abort`\n         - worker：`report`（`status: done | blocked`）\n         - reviewer：`verdict`（`result: approve | request_changes`）\n\n         區塊之外的文字給人看，區塊給系統看。\n",
     );
     s
 }
@@ -939,9 +1030,12 @@ pub async fn create_with_issues(
         .ok_or_else(|| LcError::NotFound("project".into()))?;
 
     let worker_count = req.workers.resolved_count();
-    if worker_count < 1 || worker_count > MAX_WORKERS {
-        return Err(LcError::Bad(format!("workers.count must be between 1 and {MAX_WORKERS}")));
+    if worker_count > MAX_WORKERS {
+        return Err(LcError::Bad(format!("workers.count must be 0 (unlimited) or between 1 and {MAX_WORKERS}")));
     }
+    // §4.5 unlimited: the *stored* count stays 0, but the first issue still starts with one
+    // executor — `ensure_workers_for` adds the rest on demand as the PM dispatches.
+    let build_count = if worker_count == UNLIMITED_WORKERS { 1 } else { worker_count };
     let deliver = req.deliver.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_DELIVER.into());
     if !DELIVERS.contains(&deliver.as_str()) {
         return Err(LcError::Bad("deliver must be `branch` or `pr`".into()));
@@ -1070,7 +1164,7 @@ pub async fn create_with_issues(
     // at the user's checkout are `branch` and `worktree add`, neither of which writes a byte
     // into its working tree.
     let mut plan: Vec<(&'static str, u32, &CheckedRole)> = vec![("pm", 0, &pm)];
-    for n in 1..=worker_count {
+    for n in 1..=build_count {
         plan.push(("worker", n, &workers));
     }
     if let Some(r) = &reviewer {
@@ -1198,6 +1292,7 @@ pub async fn create_with_issues(
             &branch,
             &roster_line,
             spec.persona_extra.as_deref(),
+            worker_count == UNLIMITED_WORKERS,
         );
         let _ = sqlx::query("UPDATE bots SET persona = ? WHERE id = ?").bind(&p).bind(&b.id).execute(&app.db).await;
     }
@@ -1501,19 +1596,35 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
         })
         .collect();
     let issue_doc = issue_md(&issue);
-    let team_doc = team_md(&issue, &branch, &root, &t.repo, &roster);
-    tg::put_file(app, &project.host, &format!("{root}/ISSUE.md"), &issue_doc)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
-    tg::put_file(app, &project.host, &format!("{root}/TEAM.md"), &team_doc)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
-    // Every live worktree, not just the new ones: the PM and the reviewer read their own copy.
-    for b in &live {
-        if let Some(cwd) = b.cwd.as_deref().filter(|c| !c.is_empty()) {
-            tg::write_team_docs(app, &project.host, cwd, &issue_doc, &team_doc)
-                .await
-                .map_err(|e| LcError::Upstream(e.to_string()))?;
+    if is_unlimited(&t) {
+        // §4.5 unlimited: one `ISSUE-<n>.md` per issue, because several are open at once and
+        // a single `ISSUE.md` could not say which one a task belongs to. `TEAM.md` lists them
+        // all and is rewritten by `refresh_unlimited_docs` once the whole batch has started.
+        tg::put_file(app, &project.host, &format!("{root}/ISSUE-{}.md", issue.number), &issue_doc)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        for b in &live {
+            if let Some(cwd) = b.cwd.as_deref().filter(|c| !c.is_empty()) {
+                tg::write_issue_doc(app, &project.host, cwd, issue.number, &issue_doc)
+                    .await
+                    .map_err(|e| LcError::Upstream(e.to_string()))?;
+            }
+        }
+    } else {
+        let team_doc = team_md(&issue, &branch, &root, &t.repo, &roster);
+        tg::put_file(app, &project.host, &format!("{root}/ISSUE.md"), &issue_doc)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        tg::put_file(app, &project.host, &format!("{root}/TEAM.md"), &team_doc)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        // Every live worktree, not just the new ones: the PM and the reviewer read their own copy.
+        for b in &live {
+            if let Some(cwd) = b.cwd.as_deref().filter(|c| !c.is_empty()) {
+                tg::write_team_docs(app, &project.host, cwd, &issue_doc, &team_doc)
+                    .await
+                    .map_err(|e| LcError::Upstream(e.to_string()))?;
+            }
         }
     }
 
@@ -1527,6 +1638,9 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
         .execute(&app.db)
         .await
         .map_err(any_err)?;
+    // §2.3: the `teams` scalars mirror the current issue. In unlimited mode there is no such
+    // thing as *the* current issue, so the mirror is only ever the **first** working row (old
+    // UI titles); `sync_issue_mirror` re-establishes that once the batch has started.
     sqlx::query(
         "UPDATE teams SET issue_number = ?, issue_title = ?, issue_url = ?, branch = ?,
            pr_url = NULL, summary = NULL, issue_closed_at = NULL WHERE id = ?",
@@ -1566,12 +1680,32 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
 /// Any task still open is written `failed` first: `team_tasks_one_open_per_worker` is unique on
 /// the bot alone, so a retired worker holding a non-terminal task would block that row forever.
 pub async fn retire_issue_workers(app: &Arc<App>, team_id: &str, issue_id: &str) {
+    retire_workers(app, team_id, issue_id, None).await
+}
+
+/// §4.5 unlimited: retire **only** the executors of `issue`, matched on the queue position in
+/// their §6.2 directory.
+///
+/// [`retire_issue_workers`] retires the team's whole current batch, which is exactly right
+/// when there is one batch (a `done.workers = "keep"` carries `i1-dev-*` into the second
+/// issue, and that batch still has to go when *it* finishes) and catastrophic when six issues
+/// each have their own — closing #42 would stop #43's executors mid-task.
+pub async fn retire_workers_of_issue(app: &Arc<App>, team_id: &str, issue: &db::TeamIssue) {
+    retire_workers(app, team_id, &issue.id, Some(issue.seq)).await
+}
+
+async fn retire_workers(app: &Arc<App>, team_id: &str, issue_id: &str, only_seq: Option<i64>) {
     let Ok(Some(t)) = db::team(&app.db, team_id).await else { return };
     let Ok(Some(project)) = db::project(&app.db, &t.project_id).await else { return };
     fail_open_tasks(app, team_id, issue_id).await;
 
     let members = db::team_members(&app.db, team_id).await.unwrap_or_default();
+    let keep_only: Option<Vec<String>> =
+        only_seq.map(|seq| workers_of_issue(&members, team_id, seq).iter().map(|b| b.id.clone()).collect());
     for b in members.iter().filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker")) {
+        if keep_only.as_ref().is_some_and(|ids| !ids.contains(&b.id)) {
+            continue;
+        }
         // Only this issue's workers: their cwd is the per-issue directory (§6.2).
         let Some(cwd) = b.cwd.clone().filter(|c| !c.is_empty()) else { continue };
         if !cwd.starts_with(&format!("{}/i", t.worktree_root.trim_end_matches('/'))) {
@@ -1591,6 +1725,124 @@ pub async fn retire_issue_workers(app: &Arc<App>, team_id: &str, issue_id: &str)
         app.emit("bot_changed", json!({"bot_id": b.id})).await;
     }
     tg::worktree_prune(app, &project.host, &repo_path(&project, &t.repo)).await;
+}
+
+/// §4.5 unlimited: make sure issue `q` has at least `needed` executors, building them on
+/// demand as the PM dispatches.
+///
+/// Two hard ceilings, both about panes and quota rather than budget: `MAX_WORKERS` per issue
+/// (one reviewer serialises review, so a fifth executor on one issue only queues) and
+/// `MAX_TEAM_WORKERS` across the whole team. Hitting either is not an error — the extra tasks
+/// simply wait, exactly as they do with a finite parallelism.
+///
+/// Returns how many executors the issue has afterwards.
+pub async fn ensure_workers_for(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, needed: u32) -> LcResult<u32> {
+    let t = load(app, team_id).await?;
+    if !is_unlimited(&t) {
+        return Ok(0);
+    }
+    let project = db::project(&app.db, &t.project_id)
+        .await
+        .map_err(any_err)?
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let members: Vec<db::Bot> =
+        db::team_members(&app.db, team_id).await.map_err(any_err)?.into_iter().filter(|b| b.deleted_at.is_none()).collect();
+    let have = workers_of_issue(&members, team_id, q.seq).len() as u32;
+    let want = needed.min(MAX_WORKERS);
+    if want <= have {
+        return Ok(have);
+    }
+    let total = members.iter().filter(|b| b.team_role.as_deref() == Some("worker")).count() as u32;
+    let room = MAX_TEAM_WORKERS.saturating_sub(total);
+    let to = have + (want - have).min(room);
+    if to <= have {
+        record_event(
+            app,
+            team_id,
+            "note",
+            None,
+            None,
+            None,
+            None,
+            json!({"action": "worker_cap", "issue_number": q.issue_number, "team_workers": total,
+                   "cap": MAX_TEAM_WORKERS}),
+        )
+        .await?;
+        return Ok(have);
+    }
+    let (_, spec) = queued_worker_role(app, &t, &project.host).await?;
+    let integration = q.branch.clone().unwrap_or_else(|| t.branch.clone());
+    grow_workers(app, &project, &t, q.seq, &integration, q.issue_number, have, to, &spec).await?;
+    Ok(to)
+}
+
+/// §2.3 / §4.5: point the `teams` scalar mirror at the **first** working issue. With a finite
+/// parallelism that is simply the one issue in flight, which is what `start_issue` already
+/// wrote; in unlimited mode it is the one the old single-issue UI shows in the title.
+pub async fn sync_issue_mirror(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let Some(first) = db::working_team_issues(&app.db, team_id).await.map_err(any_err)?.into_iter().next() else {
+        return Ok(());
+    };
+    let t = load(app, team_id).await?;
+    if t.issue_number == first.issue_number {
+        return Ok(());
+    }
+    sqlx::query("UPDATE teams SET issue_number = ?, issue_title = ?, issue_url = ?, branch = ? WHERE id = ?")
+        .bind(first.issue_number)
+        .bind(&first.issue_title)
+        .bind(&first.issue_url)
+        .bind(first.branch.clone().unwrap_or_else(|| t.branch.clone()))
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    Ok(())
+}
+
+/// §4.5 unlimited: rewrite `TEAM.md` — the one page that says which issues are in flight,
+/// on which branch, with which executors — into every live member's worktree. Called after a
+/// batch of issues starts and after executors are added, so the PM never has to be told in a
+/// relay what a file can carry.
+pub async fn refresh_unlimited_docs(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let t = load(app, team_id).await?;
+    if !is_unlimited(&t) {
+        return Ok(());
+    }
+    let project = db::project(&app.db, &t.project_id)
+        .await
+        .map_err(any_err)?
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    let members: Vec<db::Bot> =
+        db::team_members(&app.db, team_id).await.map_err(any_err)?.into_iter().filter(|b| b.deleted_at.is_none()).collect();
+    let working = db::working_team_issues(&app.db, team_id).await.map_err(any_err)?;
+    let rows: Vec<(i64, String, String, Vec<String>)> = working
+        .iter()
+        .map(|q| {
+            let who = workers_of_issue(&members, team_id, q.seq)
+                .iter()
+                .map(|b| short_name(&b.name, team_id))
+                .collect::<Vec<_>>();
+            (q.issue_number, q.issue_title.clone(), q.branch.clone().unwrap_or_default(), who)
+        })
+        .collect();
+    let roster: Vec<(String, String, String)> = members
+        .iter()
+        .map(|b| {
+            (short_name(&b.name, team_id), b.team_role.clone().unwrap_or_default(), b.cwd.clone().unwrap_or_default())
+        })
+        .collect();
+    let doc = team_md_unlimited(&rows, &t.worktree_root, &t.repo, &roster);
+    tg::put_file(app, &project.host, &format!("{}/TEAM.md", t.worktree_root), &doc)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    for b in &members {
+        if let Some(cwd) = b.cwd.as_deref().filter(|c| !c.is_empty()) {
+            tg::put_file(app, &project.host, &format!("{}/.agents-manager/team/TEAM.md", cwd.trim_end_matches('/')), &doc)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Close out whatever an issue left open: `team_tasks_one_open_per_worker` is unique on the
@@ -2440,14 +2692,23 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
     // they wait for the next batch. The extra members are made the same way `start_issue`
     // makes a fresh batch, then `fill_workers` hands them whatever was queued.
     let mut applied = "next_batch";
+    // §4.5 (2026-09-09): `0` is unlimited and may be switched on or off while the team runs.
+    // Switching **to** 0 starts every queued issue right away; switching **away** from it
+    // starts no further issue — whatever is in flight finishes — and the executor count is
+    // `n` from the next batch on.
+    let mut unlimit_now = false;
     if let Some(c) = p.workers.as_ref().and_then(|w| w.count) {
-        if c < 1 || c > MAX_WORKERS {
+        if c > MAX_WORKERS {
             return Err(LcError::Bad(format!(
-                "workers.count must be between 1 and {MAX_WORKERS}"
+                "workers.count must be 0 (unlimited) or between 1 and {MAX_WORKERS}"
             )));
         }
         if let Some(w) = roles.get_mut("workers").and_then(Value::as_object_mut) {
             w.insert("count".into(), json!(c));
+        }
+        if c == UNLIMITED_WORKERS {
+            unlimit_now = true;
+            applied = "now";
         }
         let live = db::team_members(&app.db, team_id)
             .await
@@ -2455,7 +2716,7 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
             .into_iter()
             .filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker"))
             .count() as u32;
-        if c > live && !is_terminal(&t.phase) {
+        if c != UNLIMITED_WORKERS && c > live && !is_terminal(&t.phase) {
             let spec = read_role_spec(&roles, "workers")
                 .ok_or_else(|| LcError::Upstream("team roles_json has no worker spec".into()))?;
             let project = db::project(&app.db, &t.project_id)
@@ -2463,7 +2724,9 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
                 .map_err(any_err)?
                 .ok_or_else(|| LcError::NotFound("project".into()))?;
             let checked = check_role(app, &project.host, &spec, "workers").await?;
-            grow_workers(app, &project, &t, live, c, &checked).await?;
+            let cur = db::current_team_issue(&app.db, team_id).await.map_err(any_err)?;
+            let issue_seq = cur.as_ref().map(|i| i.seq).unwrap_or(1);
+            grow_workers(app, &project, &t, issue_seq, &t.branch, t.issue_number, live, c, &checked).await?;
             applied = "now";
         }
     }
@@ -2497,6 +2760,11 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
     emit_team_changed(app, &t).await;
     // The new slots are useless until something is put in them, and the queue is where the
     // work already is (§4.5).
+    if unlimit_now && !is_terminal(&t.phase) {
+        if let Err(e) = crate::team_sched::start_issues_up_to_capacity(app, team_id).await {
+            tracing::warn!(team = %team_id, error = ?e, "could not open the queue for unlimited parallelism");
+        }
+    }
     if applied == "now" {
         if let Err(e) = crate::team_sched::fill_now(app, team_id).await {
             tracing::warn!(team = %team_id, error = ?e, "could not fill the new executor slots right away");
@@ -2507,20 +2775,19 @@ pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Valu
 
 /// §10.5 — add executor slots to a running team: `dev-(old+1)` … `dev-(new)`, each with its
 /// own worktree, the same path `start_issue` takes for a fresh batch.
+#[allow(clippy::too_many_arguments)]
 async fn grow_workers(
     app: &Arc<App>,
     project: &db::Project,
     t: &db::Team,
+    issue_seq: i64,
+    integration: &str,
+    issue_number: i64,
     from: u32,
     to: u32,
     spec: &CheckedRole,
 ) -> LcResult<()> {
     let t6 = tid6(&t.id);
-    let issue_seq = db::current_team_issue(&app.db, &t.id)
-        .await
-        .map_err(any_err)?
-        .map(|i| i.seq)
-        .unwrap_or(1);
     let root = t.worktree_root.clone();
     for n in (from + 1)..=to {
         let dir = format!("{root}/{}", member_dir("worker", n, issue_seq));
@@ -2542,7 +2809,7 @@ async fn grow_workers(
             &nick,
             &t6,
             "worker",
-            t.issue_number,
+            issue_number,
             spec,
             &dir,
         )
@@ -2563,12 +2830,13 @@ async fn grow_workers(
             .collect();
         let persona = full_persona(
             "worker",
-            t.issue_number,
+            issue_number,
             &short_name(&nick, &t.id),
             &dir,
-            &t.branch,
+            integration,
             &roster.join("、"),
             spec.persona_extra.as_deref(),
+            is_unlimited(t),
         );
         sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
             .bind(&persona)
@@ -2758,6 +3026,7 @@ async fn swap_member(
         &t.branch,
         &roster.join("、"),
         spec.persona_extra.as_deref(),
+        is_unlimited(t),
     );
     sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
         .bind(&persona)
@@ -4146,10 +4415,9 @@ mod api_tests {
         let (app, pid) = (e.app.clone(), e.project_id.clone());
         let bad = |r: CreateTeam| async { create_with_issues(&app, &pid, r, vec![issue()]).await };
 
-        // §12 #7: at most four executors.
+        // §12 #7: at most four executors. `0` is no longer out of range — §4.5 (2026-09-09)
+        // gave it a meaning, `unlimited`, and it is covered by the unlimited scenarios.
         let mut r = req(Some(5), false);
-        assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
-        r = req(Some(0), false);
         assert!(matches!(bad(r).await, Err(LcError::Bad(_))));
         // unknown kind
         r = req(Some(1), false);
