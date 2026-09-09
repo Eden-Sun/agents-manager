@@ -50,14 +50,26 @@ export function useAttachments(uploadTo: string | null) {
   const notify = useStore((s) => s.notify)
   const [items, setItems] = useState<Pending[]>([])
   const seq = useRef(0)
-  // Object URLs are revoked on unmount only: a thumbnail must stay valid while it is shown.
-  const urls = useRef<string[]>([])
+  const urls = useRef(new Set<string>())
   useEffect(() => {
     const held = urls.current
     return () => {
       for (const u of held) URL.revokeObjectURL(u)
     }
   }, [])
+
+  const revokePreview = useCallback((previewUrl: string) => {
+    URL.revokeObjectURL(previewUrl)
+    urls.current.delete(previewUrl)
+  }, [])
+
+  // Attachments belong to the bot that received their upload; never carry them across bots.
+  useEffect(() => {
+    setItems((prev) => {
+      for (const it of prev) revokePreview(it.previewUrl)
+      return []
+    })
+  }, [revokePreview, uploadTo])
 
   const add = useCallback(
     (files: File[]) => {
@@ -76,7 +88,7 @@ export function useAttachments(uploadTo: string | null) {
           continue
         }
         const previewUrl = URL.createObjectURL(file)
-        urls.current.push(previewUrl)
+        urls.current.add(previewUrl)
         setItems((prev) => [...prev, { key, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null }])
         void api
           .uploadAttachment(uploadTo, file)
@@ -94,10 +106,19 @@ export function useAttachments(uploadTo: string | null) {
   )
 
   const remove = useCallback((key: string) => {
-    setItems((prev) => prev.filter((it) => it.key !== key))
-  }, [])
+    setItems((prev) => {
+      const removed = prev.find((it) => it.key === key)
+      if (removed) revokePreview(removed.previewUrl)
+      return prev.filter((it) => it.key !== key)
+    })
+  }, [revokePreview])
 
-  const clear = useCallback(() => setItems([]), [])
+  const clear = useCallback(() => {
+    setItems((prev) => {
+      for (const it of prev) revokePreview(it.previewUrl)
+      return []
+    })
+  }, [revokePreview])
 
   /** Ids to send; empty while anything is still uploading. */
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
