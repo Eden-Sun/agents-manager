@@ -10,6 +10,7 @@ import {
   TEAM_WORKERS_MAX,
 } from '../api/types'
 import { projectHostName, toolsOfHost, useStore } from '../store/store'
+import { labelStyle } from '../lib/labelStyle'
 import { IdentityOptions, PersonaField } from './BotSettingsPanel'
 import { HostBadge } from './HostsPanel'
 import { KindTag } from './KindTag'
@@ -58,16 +59,6 @@ function writeBudget(b: TeamBudget) {
 
 function emptySpec(kind: BotKind): TeamRoleSpec {
   return { kind, model: null, effort: null, fast: false, identity: null, persona_extra: '' }
-}
-
-/** IssuesBar 的同一套 label 配色。 */
-function labelStyle(color: string | null) {
-  if (!color) return undefined
-  const r = parseInt(color.slice(0, 2), 16)
-  const g = parseInt(color.slice(2, 4), 16)
-  const b = parseInt(color.slice(4, 6), 16)
-  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-  return { background: `#${color}`, color: lum > 0.6 ? '#1b1e23' : '#fff', borderColor: 'transparent' }
 }
 
 /** 某個 kind 目前最吃緊的視窗已用百分比；null = 沒有資料（不擋）。 */
