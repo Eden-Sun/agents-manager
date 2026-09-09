@@ -10615,10 +10615,27 @@ button.run-debug-toggle:hover {
 }
 
 .bot-switcher-name {
+  /* `min-width: 0` 是必要的：flex 子項的預設 `min-width: auto` 會讓它撐開整個泡泡，
+     ellipsis 永遠不會發生（team 的 issue 標題就是這樣長到畫面外的）。 */
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* 標題列上的 team 名字：同樣不能把標題列撐破。 */
+.team-name-btn {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.team-name-btn > strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 手機的「這回合還在跑」那一條（2026-09-09 使用者截圖：一行塞四顆鍵，說明字被擠成一個字

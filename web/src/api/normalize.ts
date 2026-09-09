@@ -941,6 +941,7 @@ export function toTeam(v: unknown, projectId?: string): Team | null {
     issue_number: num(pick(v, 'issue_number', 'issue'), 0),
     issue_title: str(pick(v, 'issue_title', 'title')),
     issue_url: str(pick(v, 'issue_url', 'url')),
+    label: optStr(pick(v, 'label')),
     // §2.3：舊 daemon 不送這三個，佇列就退化成「只有當前這一個 issue」。
     issues: arr(pick(v, 'issues')).map(toTeamIssue).filter((x): x is TeamIssue => x !== null),
     current_issue_id: optStr(pick(v, 'current_issue_id')),

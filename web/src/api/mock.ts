@@ -203,6 +203,8 @@ interface MockTeam {
   issue_number: number
   issue_title: string
   issue_url: string
+  /** 使用者取的短名；null = 用 `#編號 issue 標題`。 */
+  label: string | null
   phase: TeamPhase
   pause_reason: string | null
   /** SPEC-team §4.5：`quota_low` 是誰的額度不夠（daemon 的 `pause_detail`）。 */
@@ -2569,6 +2571,7 @@ export class MockTransport implements Transport {
       project_id: t.project_id,
       issue_number: t.issue_number,
       issue_title: t.issue_title,
+      label: t.label,
       issue_url: t.issue_url,
       phase: t.phase,
       pause_reason: t.pause_reason,
@@ -2785,6 +2788,7 @@ export class MockTransport implements Transport {
       issue_number: issueNumber,
       issue_title: String(issue.title),
       issue_url: `${p.github.url}/issues/${issueNumber}`,
+      label: null,
       phase: 'starting',
       pause_reason: null,
       pause_detail: null,
@@ -3429,6 +3433,12 @@ export class MockTransport implements Transport {
 
   private patchTeam(id: string, b: Rec) {
     const t = this.team(id)
+    // 改名不受終態限制（同 daemon）：名字是事後找東西用的。
+    if (typeof b.label === 'string') {
+      t.label = b.label.trim().slice(0, 60) || null
+      this.emitTeam(t)
+      if (Object.keys(b).length === 1) return {}
+    }
     if (t.phase === 'done' || t.phase === 'aborted' || t.phase === 'failed') {
       throw new ApiError(409, { error: 'conflict', reason: 'team 已在終態' }, 'conflict')
     }
