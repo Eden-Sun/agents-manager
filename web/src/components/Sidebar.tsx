@@ -43,6 +43,7 @@ import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
 
+import { UpgradeIcon } from './UpgradeIcon'
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
     socket === 'open' ? (connected ? '已連線' : 'herdr 中斷') : socket === 'connecting' ? '連線中' : '重連中'
@@ -297,7 +298,7 @@ function BotRow({
                 （`UpdateBadge`），側欄這裡窄到放不下一顆按鈕。 */}
             {hasUpdate ? (
               <span className="bot-update-dot" aria-label="有更新，重啟套用" title={`${hasUpdate}｜重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）`}>
-                ⬆
+                <UpgradeIcon size={11} />
               </span>
             ) : null}
             {/* 側欄放不下一顆按鈕，但這件事不能只留在 tooltip：燈號說 idle、實際上回合是斷的。

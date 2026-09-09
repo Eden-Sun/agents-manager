@@ -10967,3 +10967,13 @@ button.run-debug-toggle:hover {
     padding: 0 6px;
   }
 }
+
+/* 「有新版」的雙 chevron 圖示（UpgradeIcon.tsx）：跟文字基線對齊，顏色吃 currentColor。 */
+.upgrade-icon {
+  flex: none;
+  vertical-align: -1px;
+}
+.update-badge .upgrade-icon,
+.quota-update .upgrade-icon {
+  vertical-align: -2px;
+}
