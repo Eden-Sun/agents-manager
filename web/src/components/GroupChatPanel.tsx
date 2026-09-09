@@ -525,7 +525,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const composerRef = useRef<HTMLTextAreaElement>(null)
   // Attachments are project-scoped, so any member can receive the upload; held here so a
   // drop anywhere in the group chat area is accepted.
-  const files = useAttachments(members[0]?.id ?? null)
+  const files = useAttachments(members[0]?.id ?? null, projectId)
   const drop = useDropTarget(files.add, memberCount === 0)
   const [renaming, setRenaming] = useState(false)
   // 同 ChatPanel：讓右側圖片暫存區把「點一下」的圖片交給這個群組草稿。
