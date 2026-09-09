@@ -413,7 +413,7 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd.spawn()?;
-    tokio::task::spawn_blocking(move || {
+    std::thread::spawn(move || {
         if let Err(error) = child.wait() {
             tracing::warn!(?error, "failed waiting for herdr server");
         }
