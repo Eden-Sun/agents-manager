@@ -311,8 +311,14 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('pointerdown', onDown, true)
   }, [])
 
-  // 設定卡是 modal：開場落在已有的名稱欄位，Tab 留在卡片內，關閉回到齒輪按鈕。
-  useDialogFocus(true, cardRef, { initialFocus: () => nameRef.current })
+  // 桌機設定是貼著齒輪開的非模態浮窗：只把開場焦點放到名稱欄，不攔背景的 Tab，也不還原
+  // 齒輪焦點。手機則是全螢幕 sheet，才啟用共用 modal focus trap。
+  useDialogFocus(phone, cardRef, { initialFocus: () => nameRef.current })
+  useEffect(() => {
+    if (phone) return
+    const raf = requestAnimationFrame(() => nameRef.current?.focus())
+    return () => cancelAnimationFrame(raf)
+  }, [phone])
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
@@ -332,7 +338,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     escRef.current = closeSettings
     return (
       <div className="bs-scrim" role="presentation">
-      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal="true" aria-label="Bot 設定">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal={phone ? 'true' : undefined} aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -393,7 +399,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
       style={pos ? { left: pos.left, top: pos.top } : undefined}
       role="dialog"
-      aria-modal="true"
+      aria-modal={phone ? 'true' : undefined}
       aria-label={`${bot.name} 的設定`}
     >
       <div className="bs-head">
