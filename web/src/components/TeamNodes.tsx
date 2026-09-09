@@ -112,7 +112,9 @@ function TeamPausedRow({ team }: { team: Team }) {
           title={
             action === 'bump'
               ? '把轉送上限與時間上限各加一倍，然後從暫停的地方繼續'
-              : '從暫停的地方繼續（會重送待送的轉送）'
+              : action === 'force'
+                ? '把這個 team 的額度門檻設成 100%（之後不再因額度暫停），然後從暫停的地方繼續'
+                : '從暫停的地方繼續（會重送待送的轉送）'
           }
           onClick={(e) => {
             // 側欄的一列同時是「選取這個 team」的按鈕，按這顆不該順便切畫面。
@@ -126,12 +128,15 @@ function TeamPausedRow({ team }: { team: Team }) {
                   },
                 })
                 if (!ok) return
+              } else if (action === 'force') {
+                const ok = await patchTeam(team.id, { budget: { quota_stop_pct: 100 } })
+                if (!ok) return
               }
               await controlTeam(team.id, 'resume')
             })()
           }}
         >
-          {action === 'bump' ? '加碼並繼續' : '繼續'}
+          {action === 'bump' ? '加碼並繼續' : action === 'force' ? '無視額度繼續' : '繼續'}
         </button>
       ) : null}
     </div>

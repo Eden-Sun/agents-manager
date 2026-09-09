@@ -175,6 +175,13 @@ impl Budget {
     }
 }
 
+/// `quota_stop_pct = 100` means "do not stop on quota at all" (2026-09-09): the user's way of
+/// forcing a `paused(quota_low)` team on when the reading is stale or they simply want to
+/// spend the last few percent. Every quota gate — create, reopen, scheduler — branches here.
+pub fn quota_check_disabled(stop_pct: f64) -> bool {
+    stop_pct >= 100.0
+}
+
 /// SPEC-team §9.2 — `usage_json`. Written by the scheduler; read by the UI's budget bar.
 pub fn empty_usage() -> Value {
     json!({"relays": 0, "review_rounds_total": 0, "elapsed_min": 0, "per_bot": {}})
@@ -685,6 +692,7 @@ pub async fn team_json(app: &Arc<App>, t: &db::Team) -> Value {
         "issue_number": t.issue_number,
         "issue_title": t.issue_title,
         "issue_url": t.issue_url,
+        "label": t.label,
         "phase": t.phase,
         "pause_reason": t.pause_reason,
         "pause_detail": pause_detail_json(t),
@@ -959,6 +967,9 @@ async fn check_role(app: &Arc<App>, host: &str, r: &RoleSpec, label: &str) -> Lc
 /// Kinds with no quota data are never blocked. Quota is per host (SPEC §14), so the rows
 /// consulted are the ones for the project's host.
 async fn check_quota(app: &Arc<App>, host: &str, roles: &[&CheckedRole], stop_pct: f64) -> LcResult<()> {
+    if quota_check_disabled(stop_pct) {
+        return Ok(());
+    }
     let q = app.quotas.lock().await.clone();
     for r in roles {
         let keys: Vec<String> = match &r.identity {
@@ -2578,6 +2589,10 @@ pub async fn delete(app: &Arc<App>, team_id: &str, delete_branches: bool) -> LcR
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PatchTeam {
+    /// 使用者取的短名。`Some("")` / `Some(null)` = 清掉，改回 `#編號 issue 標題`。
+    /// 跟其他欄位不同，已經結束的 team 也能改——名字是給人找東西用的。
+    #[serde(default)]
+    pub label: Option<String>,
     #[serde(default)]
     pub budget: Option<BudgetPatch>,
     #[serde(default)]
@@ -2660,6 +2675,30 @@ fn patched_opt(v: &Option<String>) -> Option<String> {
 /// `PATCH /api/teams/:id` — top up the budget, flip supervised, change the delivery mode.
 pub async fn patch(app: &Arc<App>, team_id: &str, p: PatchTeam) -> LcResult<Value> {
     let t = load(app, team_id).await?;
+    // 改名先做，而且不受 phase 限制：已經結束的 team 一樣要能取個找得到的名字。
+    if let Some(raw) = &p.label {
+        let label = raw.trim();
+        if label.chars().count() > 60 {
+            return Err(LcError::Bad("team 名稱最長 60 個字".into()));
+        }
+        sqlx::query("UPDATE teams SET label = ? WHERE id = ?")
+            .bind(if label.is_empty() { None } else { Some(label) })
+            .bind(team_id)
+            .execute(&app.db)
+            .await
+            .map_err(any_err)?;
+        app.emit("team_changed", json!({"team_id": team_id})).await;
+        // 只送 label 的請求到此為止：不必碰 budget / roles，也不必被 terminal 擋下來。
+        if p.budget.is_none()
+            && p.supervised.is_none()
+            && p.deliver.is_none()
+            && p.workers.is_none()
+            && p.pm.is_none()
+            && p.reviewer.is_none()
+        {
+            return Ok(json!({"applied": "label"}));
+        }
+    }
     if is_terminal(&t.phase) {
         return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
     }
@@ -4472,6 +4511,12 @@ mod api_tests {
         // Raising the team's own threshold above the reading lets it through (§12 #4).
         let mut r = req(Some(1), false);
         r.budget = Some(BudgetPatch { quota_stop_pct: Some(95.0), ..Default::default() });
+        assert!(create_with_issues(&app, &pid, r, vec![issue()]).await.is_ok());
+        // `quota_stop_pct = 100` switches the check off: even a 100% reading goes through.
+        app.quotas.lock().await.get_mut("claude").unwrap().five_hour =
+            Some(crate::quota::Window { used_pct: 100.0, resets_at: None });
+        let mut r = req(Some(1), false);
+        r.budget = Some(BudgetPatch { quota_stop_pct: Some(100.0), ..Default::default() });
         assert!(create_with_issues(&app, &pid, r, vec![issue()]).await.is_ok());
     }
 

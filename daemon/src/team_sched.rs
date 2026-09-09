@@ -799,6 +799,9 @@ async fn quota_hit(app: &Arc<App>, bot: &db::Bot) -> Option<QuotaHit> {
 /// same account run out together and naming only one sends the user to fix half the problem.
 async fn quota_low_members(app: &Arc<App>, ctx: &Ctx) -> Vec<QuotaHit> {
     let mut hits = Vec::new();
+    if team::quota_check_disabled(ctx.budget.quota_stop_pct) {
+        return hits;
+    }
     for b in &ctx.members {
         if let Some(hit) = quota_hit(app, b).await {
             if hit.used_pct >= ctx.budget.quota_stop_pct {
@@ -907,7 +910,9 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             return Ok(());
         }
         // §4.5 quota, re-checked immediately before the send.
-        if quota_hit(app, bot).await.is_some_and(|h| h.used_pct >= ctx.budget.quota_stop_pct) {
+        if !team::quota_check_disabled(ctx.budget.quota_stop_pct)
+            && quota_hit(app, bot).await.is_some_and(|h| h.used_pct >= ctx.budget.quota_stop_pct)
+        {
             // The recipient is what stops this send, but the banner lists everyone who is out:
             // resuming only to stop on the next member helps nobody.
             let low = quota_low_members(app, ctx).await;
