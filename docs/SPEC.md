@@ -244,8 +244,15 @@ label = "foo"
 2. 取得或建立 workspace：`projects.workspace_id` 存在且 `workspace.get` 成功 → 用之；否則 `workspace.create {cwd, label, focus:false}` 並更新映射。
 3. 取得 pane：
    - 若 workspace 剛由本步驟建立 → 用 `root_pane`。
-   - 否則 `pane.split {target_pane_id: <該 workspace 中面積最大的 pane>, direction, cwd, focus:false, env}`。
-     **不是**第一個 pane（v4.2 修正）：一直切第一個會讓它每次減半，實測第 6 個 bot 只剩 **6 欄**，窄到 agent 的 TUI 把文字排成一欄、每列一個字，終端備援完全讀不出東西（§4.3）。改成先 `pane.layout` 取每個 pane 的矩形，挑面積最大的那個，沿長邊切——終端字元格高約為寬的兩倍，所以 `width >= height * 2` 才切 `right`，否則切 `down`。這樣長出來的是網格而不是階梯：同一個 185×54 視窗開 6 個 bot，舊規則最窄 6 欄，新規則最窄 **46 欄**（實測）。`pane.layout` 失敗時退回舊行為。
+   - 否則呼叫 `tab.create {workspace_id, cwd, label, focus:false, env}`，取回該 tab 的 `root_pane`。`label` 由
+     `tab_label(bot)` 產生：使用 `bot.name.trim()`，空字串時為 `"bot"`。因此每個 bot 都有自己的 tab，
+     不再與其他 bot 共用同一 tab 的寬度；`acquire_run_pane` 不呼叫 `pane.split` 或 `pane.layout`。
+   - **v4.2 以前（歷史註記）**：曾用 `pane.split {target_pane_id: <該 workspace 中面積最大的 pane>, direction, cwd, focus:false, env}`。
+     **不是**第一個 pane（v4.2 修正）：一直切第一個會讓它每次減半，實測第 6 個 bot 只剩 **6 欄**，窄到 agent 的 TUI
+     把文字排成一欄、每列一個字，終端備援完全讀不出東西（§4.3）。當時改成先 `pane.layout` 取每個 pane 的矩形，挑面積
+     最大的那個，沿長邊切——終端字元格高約為寬的兩倍，所以 `width >= height * 2` 才切 `right`，否則切 `down`。這樣長出來的
+     是網格而不是階梯：同一個 185×54 視窗開 6 個 bot，舊規則最窄 6 欄，新規則最窄 **46 欄**（實測）。`pane.layout` 失敗時
+     退回舊行為。
    - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`AM_HOOK_TOKEN`（v3.6；`inject_hooks = false` 時不給，grok 的分派腳本以此判斷是否回報）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
    - 失敗 → Run `exited`（`ended_at` 填入），回 502。
 4. 更新 Run 的 `workspace_id` / `pane_id`。產生 hook 注入檔（Claude）或參數（Codex）。
@@ -256,9 +263,22 @@ label = "foo"
    - `blocked` → Run `running`，agent `blocked`（例如 trust 提示），UI 顯示終端。
    - timeout / error → **不**關 pane；`agent.get` 若有 agent → Run `running` / `unknown`；若無 → Run `exited` + `pane.close`。
 
+#### tab 生命週期
+
+停止 Bot 與對帳回收 orphan pane 共用 `close_pane_and_tab`：先呼叫 `pane.close`，再以 `tab.list {workspace_id}`
+確認該 pane 所在的 tab。只有查到該 tab 的 `pane_count == 0` 時才呼叫 `tab.close`；仍有 pane 的共享 tab 一律不動，
+避免連鄰居的 agent 一起關掉。tab 已被 herdr 回收時視為已完成；`tab.list` 失敗則不猜測、不關 tab。舊的
+one-bot-one-tab 以前建立、沒有 `tab_id` 的 Run 只關 pane，不會因而關閉共享 tab。
+
+正在執行的 bot 可由 `POST /api/bots/{id}/pane/move-to-tab` 呼叫 `move_pane_to_own_tab` 搬遷：若目前 tab
+不是該 pane 獨占，就以 bot 的 `tab_label(bot)` 建立新 tab，把 pane 搬過去並更新 Run 的 `tab_id`；pane id、狀態
+訂閱與進行中的 Turn 都不變，且不重新啟動 agent。若 pane 已獨占 tab，端點維持原狀；搬遷後原 tab 仍有其他 pane 時也不關閉。
+
 ### 6.3 送訊息（在 per-bot 鎖內，單一 DB 交易）
-1. 檢查：Run `running`；agent 狀態 ≠ `blocked`；該 Run 無 `in_flight` Turn；無 `delivery=unknown` 的 Turn → 否則 409（body 含原因與既有 `turn_id`）。
-2. 冪等：`client_request_id` 已存在 → 回同一 `turn_id`（200）。
+1. 冪等：先查 `client_request_id`；已存在 → 回同一 `turn_id`（200），**命中冪等時不做後續前置檢查**。
+   同一個 request 重送時，即使已有新的 Turn 在飛，也回原本的 `turn_id`，不回 409。
+2. 前置檢查：Run `running`；agent 狀態 ≠ `blocked`；該 Run 無 `in_flight` Turn；無 `delivery=unknown` 的 Turn
+   → 否則 409（body 含原因與既有 `turn_id`）。
 3. `INSERT turns (status='in_flight', delivery='pending', origin='web')` + user Message；commit；推 WS。
 4. 鎖內呼叫 `agent.prompt {target, text}`（逾時 10 秒）：成功 → `delivery=ok`；`agent_blocked` → `delivery=failed`、`status=failed`；逾時 / 連線錯誤 → `delivery=unknown`（不重送）。
 5. 完成靠 hook（§6.7）或備援（§4.3）。
