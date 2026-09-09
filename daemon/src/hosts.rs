@@ -513,6 +513,9 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                 Err(e) => {
                     let msg = format!("{e:#}");
                     tracing::warn!(host = %conn.name, error = %msg, "host connect failed");
+                    if conn.generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
                     conn.connected.store(false, Ordering::SeqCst);
                     *conn.error.lock().await = Some(msg);
                     crate::state::emit_host_changed(&app, &conn).await;
@@ -811,12 +814,15 @@ mod tests {
     #[tokio::test]
     async fn reconnect_does_not_return_a_stale_error() {
         let env = crate::team::testing::env().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut host_cfg = cfg();
         host_cfg.name = "reconnect-stale-error-test".into();
-        // Port 1 on loopback rejects immediately, so the new attempt reports its own error
-        // during the test instead of depending on an external SSH server.
+        // Keep the TCP connection queued without accepting it, so SSH stays in its initial
+        // handshake past the first 250 ms poll and the stale error is observable if it leaks.
         host_cfg.ssh = "127.0.0.1".into();
-        host_cfg.ssh_port = 1;
+        host_cfg.ssh_port = port;
+        host_cfg.ssh_opts = vec!["-o".into(), "ConnectTimeout=2".into()];
         let conn = HostConn::remote(host_cfg);
         *conn.error.lock().await = Some("previous error".into());
         env.app.hosts.conns.lock().await.insert(conn.name.clone(), conn.clone());
