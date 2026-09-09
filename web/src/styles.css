@@ -10790,3 +10790,21 @@ button.run-debug-toggle:hover {
   font-size: 11px;
   letter-spacing: 0.03em;
 }
+
+/* ---- 手機側欄的額度黃燈（`.bot-quota-chip` / `.bot-quota-warn`）換到第二行的**下方**，
+   不再擠在 kind / 身分 / 模型標籤的右邊（2026-09-09 使用者）。`.bot-sub` 改可換行，
+   黃燈自己整行。 */
+@media (width <= 640px) {
+  .bot-sub {
+    flex-wrap: wrap;
+    row-gap: 3px;
+  }
+
+  .bot-sub .bot-quota-chip,
+  .bot-sub .bot-quota-warn {
+    flex: 1 0 100%;
+    width: fit-content;
+    justify-self: start;
+    margin-left: 0;
+  }
+}
