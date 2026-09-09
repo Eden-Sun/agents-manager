@@ -78,11 +78,15 @@ function systemNoticeText(content: string): string {
 export const Bubble = memo(function Bubble({
   msg,
   from,
+  fromClassName,
+  fromTitle,
   kind,
   flash,
 }: {
   msg: Message
-  from?: ReactNode
+  from?: string
+  fromClassName?: string
+  fromTitle?: string
   kind?: BotKind
   /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
   flash?: boolean
@@ -97,7 +101,11 @@ export const Bubble = memo(function Bubble({
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
-          {from ? <span className="msg-from">{from}</span> : null}
+          {from ? (
+            <span className={`msg-from${fromClassName ? ` ${fromClassName}` : ''}`} title={fromTitle}>
+              {from}
+            </span>
+          ) : null}
           {/* 來源只在「不是正常那條路」時才標。`hook` 是每一則回覆的常態，在每顆氣泡上
               印一次「回覆」等於沒說話；會影響你要不要信這段文字的是另外那幾種——終端
               擷取、對話紀錄、系統通知。 */}
@@ -188,7 +196,7 @@ export function LiveBubble({
   text: string | null
   activity?: string | null
   alert?: string | null
-  from?: ReactNode
+  from?: string
   kind?: BotKind
   /** 這一泡泡專屬的逃生門（`AbandonTurnAction`）；放在狀態列右端，沒有就不佔位。 */
   action?: ReactNode
@@ -235,6 +243,40 @@ export function LiveBubble({
         </p>
       ) : null}
     </article>
+  )
+}
+
+/**
+ * The live tail owns all turn-progress subscriptions. Historical message lists only need
+ * their stable message array; ResizeObserver in `useScrollTail` still follows this bubble as
+ * its height changes without making the list parse every historical Markdown message again.
+ */
+export function LiveReplyBubble({
+  botId,
+  kind,
+  from,
+  abandon = false,
+}: {
+  botId: string
+  kind?: BotKind
+  from?: string
+  abandon?: boolean
+}) {
+  const active = useStore((s) => s.runs[botId]?.agent_status === 'working' || composerState(s, botId).inFlightTurnId !== null)
+  const text = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
+  const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
+  const alert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
+
+  if (!active) return null
+  return (
+    <LiveBubble
+      text={text}
+      activity={activity}
+      alert={alert}
+      kind={kind}
+      from={from}
+      action={abandon ? <AbandonTurnAction botId={botId} /> : undefined}
+    />
   )
 }
 
@@ -504,17 +546,10 @@ const FLASH_MS = 1600
 function MessageList({ botId }: { botId: string }) {
   const messages = useStore((s) => s.messages[botId])
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
-  const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
-  const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
   const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
   const [flashId, setFlashId] = useState<string | null>(null)
-  // 擷取來的即時文字先過濾掉 CLI 自己的狀態列 / 提示行（`cleanLiveText`），濾光了就回 null，
-  // 讓氣泡退回顯示活動摘要。
-  const liveText = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
-  const liveActivity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
-  const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
   const loadEarlier = useStore((s) => s.loadEarlierMessages)
-  const tail = useScrollTail([messages, working, liveText, liveActivity, liveAlert])
+  const tail = useScrollTail([messages, turnId])
 
   useEffect(() => {
     if (!flashId) return
@@ -558,9 +593,7 @@ function MessageList({ botId }: { botId: string }) {
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} flash={m.id === flashId} />)
       )}
-      {inFlight || working ? (
-        <LiveBubble text={liveText} activity={liveActivity} alert={liveAlert} action={<AbandonTurnAction botId={botId} />} />
-      ) : null}
+      <LiveReplyBubble botId={botId} abandon />
     </div>
     {turnId && lastAsk ? <LastAskPeek key={botId} msg={lastAsk} turnId={turnId} onJump={() => jumpTo(lastAsk.id)} /> : null}
     <JumpToBottom show={!tail.atBottom && list.length > 0} onClick={tail.toBottom} />
