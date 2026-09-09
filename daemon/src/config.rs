@@ -43,7 +43,8 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotCfg {
-    /// ULID. Missing on hand-written files; filled in and written back on first load.
+    /// An ASCII id matching `ID_RE`. Missing on hand-written files; filled in and written back
+    /// on first load (normally as a ULID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
@@ -133,6 +134,8 @@ pub struct HostCfg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
+    /// An ASCII id matching `ID_RE`. Missing on hand-written files; filled in and written back
+    /// on first load (normally as a ULID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub path: String,
@@ -158,6 +161,8 @@ pub struct ConfigFile {
 
 /// Strict slug shape used by host and identity names (they end up in file paths / launchd labels).
 pub const SLUG_NAME_RE: &str = "[a-z][a-z0-9_-]{0,31}";
+/// Config IDs are safe to append to local and remote directories.
+pub const ID_RE: &str = "[A-Za-z0-9_-]{1,64}";
 /// Bot names are nicknames (v3.8): shown in the UI and used for `@mention`, never given to herdr.
 pub const BOT_NAME_RE: &str = "1–32 個字，不可含空白或 @ , : ;";
 
@@ -224,6 +229,11 @@ pub fn valid_slug_name(name: &str) -> bool {
         return false;
     }
     it.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+pub fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
 pub fn valid_bot_name(name: &str) -> bool {

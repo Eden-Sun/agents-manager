@@ -34,8 +34,8 @@
 
 | 概念 | 說明 | 主鍵 | herdr 對應 |
 |---|---|---|---|
-| **Project** | 以目錄為單位的分組。目錄路徑正規化（canonical path）後唯一 | `project_id`（ULID） | 一個 `workspace`（本系統建立並記錄 `workspace_id`；對帳發現不存在則設 NULL 並於下次啟動 Bot 時重建） |
-| **Bot** | 使用者定義的 agent 設定：名稱、kind、`model`（v3.3，可為空）、啟動參數。屬於一個 Project | `bot_id`（ULID，永久） | 無直接對應 |
+| **Project** | 以目錄為單位的分組。目錄路徑正規化（canonical path）後唯一 | `project_id`（ASCII `[A-Za-z0-9_-]{1,64}`；缺省時由 daemon 產生 ULID） | 一個 `workspace`（本系統建立並記錄 `workspace_id`；對帳發現不存在則設 NULL 並於下次啟動 Bot 時重建） |
+| **Bot** | 使用者定義的 agent 設定：名稱、kind、`model`（v3.3，可為空）、啟動參數。屬於一個 Project | `bot_id`（ASCII `[A-Za-z0-9_-]{1,64}`；缺省時由 daemon 產生 ULID，永久） | 無直接對應 |
 | **Run** | Bot 的一次執行實例。**每個 Bot 同時最多一個 active Run（DB 部分唯一索引保證）**。欄位含 `agent_name`（v3.5：實際使用的 herdr agent name）、`native_session_id`、`transcript_path`（由 hook 回填，可為 NULL） | `run_id`（ULID） | `pane_id` + herdr agent `name`（v3.8 起 = `agent_name(project.label, bot.id)` = `<label slug>-<id 尾 6 碼>`，與暱稱無關；v3.5 的 `<label>-<name>` 與更早的裸 `bot.name` 由對帳沿用直到重啟） |
 | **Conversation** | 使用者與 Bot 的訊息串。**與 Bot 1:1，跨 Run 延續，第一階段永不拆分** | `conversation_id` | 無 |
 | **Turn** | 一次「prompt → 回覆完成」的回合。**每個 active Run 同時最多一筆 in-flight Turn** | `turn_id` | Claude `prompt_id` / Codex `turn-id` |
@@ -213,12 +213,12 @@ listen = "127.0.0.1:7788"
 herdr_session = "agents-manager"
 
 [[projects]]
-id = "01J..."                 # 缺省時 daemon 首次載入自動補寫
+id = "01JABC1234567890XYZ1234567" # 必須符合 [A-Za-z0-9_-]{1,64}；缺省時 daemon 首次載入自動補寫
 path = "/Users/me/project/foo"
 label = "foo"
 
   [[projects.bots]]
-  id = "01J..."
+  id = "01JABC1234567890XYZ1234567" # 必須符合 [A-Za-z0-9_-]{1,64}
   name = "foo-claude"        # herdr agent name：[a-z][a-z0-9_-]{0,31}，全域唯一
   kind = "claude"            # claude | codex | grok
   args = ["--model", "opus"] # 原生參數，接在 daemon 注入參數之後
