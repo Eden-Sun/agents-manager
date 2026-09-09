@@ -621,9 +621,11 @@ function Composer({
     const max = currentText.length
     const start = Math.max(0, Math.min(max, saved?.start ?? max))
     const end = Math.max(start, Math.min(max, saved?.end ?? start))
+    // 手機不自動 focus（2026-09-09 使用者：切 bot 就彈鍵盤擋住視線，要打字自己點）。
+    if (phone && document.activeElement !== el) return
     el.focus()
     el.setSelectionRange(start, end)
-  }, [state.disabled, draftKey, ref, forceFocus])
+  }, [state.disabled, draftKey, ref, forceFocus, phone])
 
   useEffect(() => {
     const el = ref.current
