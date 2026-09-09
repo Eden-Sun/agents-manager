@@ -1,6 +1,6 @@
 //! Shared daemon state: db pool, herdr client, per-bot locks, WS event bus.
 
-use crate::config::{ConfigStore, LOCAL_HOST};
+use crate::config::{valid_id, ConfigStore, ID_RE, LOCAL_HOST};
 use crate::herdr::HerdrClient;
 use crate::hosts::{HostConn, HostManager};
 use anyhow::Result;
@@ -307,8 +307,11 @@ impl App {
         }
     }
 
-    pub fn bot_dir(&self, bot_id: &str) -> PathBuf {
-        self.data_dir.join("bots").join(bot_id)
+    pub fn bot_dir(&self, bot_id: &str) -> Result<PathBuf> {
+        if !valid_id(bot_id) {
+            anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+        }
+        Ok(self.data_dir.join("bots").join(bot_id))
     }
 
     pub async fn emit_bot_status(&self, bot_id: &str) {

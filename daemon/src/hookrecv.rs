@@ -810,7 +810,7 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let dir = app.bot_dir(bot_id);
+    let dir = app.bot_dir(bot_id)?;
     let spool = dir.join("hook-spool.jsonl");
     if !spool.exists() {
         return Ok(0);
