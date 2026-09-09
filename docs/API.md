@@ -1570,7 +1570,7 @@ X-AM-Token: <token>
   才讀得到）；該目錄會自動寫一個內容為 `*` 的 `.gitignore`，repo 不會看到這些檔案。
 - 專案在遠端 host 時，位元組經 `ssh`（`hosts.rs::ssh_put`）寫到遠端同一路徑，daemon 另存一份
   本機副本供 UI 取縮圖。
-- 只收圖片（`Content-Type` 必須是 `image/*`），單檔上限 12 MB；其餘 `400 bad_request`。
+- 只收圖片（`Content-Type` 必須是 `image/*`）。空 body、超過 12 MB 但未超過 route 的 12 MB + 4 KiB body limit、或其他使用者輸入錯誤回 `400 bad_request`；超過 12 MB + 4 KiB 由 `DefaultBodyLimit` 拒絕並回 `413`（沒有 JSON body）。不存在或已刪除的 bot／project 回 `404 not_found`。
 
 ### `GET /api/attachments/{id}`
 
