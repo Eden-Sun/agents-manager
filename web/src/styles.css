@@ -10575,3 +10575,28 @@ button.run-debug-toggle:hover {
     font-size: 12px;
   }
 }
+
+/* ---- 手機的「追加 issue 繼續」那列（2026-09-09 使用者截圖：label、輸入框、「勾選 open issue」、
+   「取消」把「繼續」擠出右邊界，按不到）。改成兩行：label + 輸入框一整行，三顆鍵在第二行靠右。 */
+@media (width <= 640px) {
+  .team-reopen-form {
+    flex-wrap: wrap;
+    gap: 8px 6px;
+  }
+
+  .team-reopen-form .text-input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  /* `.issue-pick` 是輸入框後第一個東西：讓它獨占新一行的開頭（margin-left:auto 把它推到右邊，
+     整行寬度不夠時 flex-wrap 就會把它連同後面的鍵換到第二行）。 */
+  .team-reopen-form .issue-pick {
+    margin-left: auto;
+  }
+
+  .team-reopen-form .issue-pick,
+  .team-reopen-form > .mini-btn {
+    flex: 0 0 auto;
+  }
+}
