@@ -10,6 +10,7 @@ import { ImageShelf } from './components/ImageShelf'
 import { Sidebar } from './components/Sidebar'
 import { TeamLaunchPanel } from './components/TeamLaunchPanel'
 import { TeamPanel } from './components/TeamPanel'
+import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
 import { totalUnread } from './store/unread'
 
@@ -17,7 +18,11 @@ import { totalUnread } from './store/unread'
  * 掛 `(N)` 之前的原始標題。要把既有的 `(N)` 剝掉再存：模組不一定在乾淨的文件上載入
  * （HMR、同址導覽），照抄下來就會疊成 `(1) (2) Agents Manager`。
  */
-const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title).replace(/^\(\d+\+?\)\s*/, '')
+const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title)
+  .replace(/^\(\d+\+?\)\s*/, '')
+  // 標題現在還帶著「畫面 · 」的前綴（`screenTitle`），同樣要剝掉才不會一路疊上去。
+  .split(' · ')
+  .slice(-1)[0]
 
 /**
  * 抽屜蓋在主面板上，所以「點下去會換頁」的東西點完就要收起來。選取真的變了那一半由
@@ -40,10 +45,14 @@ const DRAWER_STAY =
  */
 function useUnread() {
   const total = useStore((s) => totalUnread(s.botUnread))
+  // 每個畫面有自己的網址，標題就該跟著說出「這是哪一個畫面」——分頁列上分得出來，
+  // 加到主畫面的捷徑也才有名字。
+  const screen = useStore(screenTitle)
   const markCurrentRead = useStore((s) => s.markCurrentRead)
   useEffect(() => {
-    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${BASE_TITLE}` : BASE_TITLE
-  }, [total])
+    const base = screen ? `${screen} · ${BASE_TITLE}` : BASE_TITLE
+    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${base}` : base
+  }, [total, screen])
   useEffect(() => {
     const seen = () => markCurrentRead()
     window.addEventListener('focus', seen)
@@ -171,6 +180,8 @@ export default function App() {
 
   useBotSwitchKeys()
   useUnread()
+  // 抽屜借一格歷史：開著時按上一頁是關抽屜，不是離開這個畫面。
+  useDrawerRoute(drawerOpen, () => setDrawer(false))
 
   // Picking anything in the drawer navigates the main panel, which the drawer is covering —
   // close it so the result is visible. Rotating to landscape (or any resize past the
