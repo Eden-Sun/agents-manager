@@ -203,6 +203,61 @@ claude 的連線在回應中途掉了，pane 上只會多一行
 6. daemon 端 spool 重放：取得 per-bot 鎖 → rename spool 為 `.replaying` → 逐行依 §6.7 處理 → 刪檔 → 釋放鎖。重放期間該 bot 的 HTTP hook 在鎖外等待（因同一把鎖）。
 7. **遠端 bot（v4.3）不走 HTTP**：第 3 點的 POST 換成「寫 spool + `herdr pane report-agent`」，第 4 點的 spool 從備援變成唯一內容通道，觸發重放的是 herdr 狀態事件。完整規則見 §11.4。
 
+### 4.4a 模型／強度／fast：誰決定 runtime，UI 顯示哪一個（v4.4，2026-09-09）
+
+`bots.model` / `bots.effort` / `bots.fast` 是**設定**，不等於那顆 bot 現在真的在跑的東西。三個 kind
+差很多：
+
+| kind | 執行中改 | 怎麼套用 |
+|---|---|---|
+| claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>` 進 TUI |
+| grok | 可以 | 同上（`/model <id> [effort]`、`/effort <level>`） |
+| codex | 可以（2026-09-09 補） | `/model` 的兩層選單 ＋ `/fast` 開關，見下面「codex 的即時套用」 |
+
+`PATCH /api/bots/{id}` 只在**真的送不進去**時才回 `needs_restart: true`（agent 在忙、有回合在飛、沒有
+pane、選單長得不對、回讀對不上）。**回了 `needs_restart` 之後 UI 不可以直接顯示新設定**——
+2026-09-09 的實況就是這樣壞的：AG Man 寫 `gpt-5.6-luna-High`，同一顆 bot 的終端底部 codex 自己印
+`gpt-5.6-luna xhigh fast`（process 的 argv 上確實是 `-c model_reasoning_effort="xhigh"`，只是那是上一次
+啟動送的）。
+
+規則：
+
+- **daemon 記下 runtime**：`start_inner` 在 `agent.start` 前把最終 argv 用 `models::model_effort_from_argv`
+  讀回來，連同 service tier 存進 `runs.runtime_model` / `runtime_effort` / `runtime_fast`。讀 argv 而不是抄
+  `bots`，因為 `effort_checked` 會丟掉該模型不收的等級，使用者自己的 `bot.args` 也可能再帶一個 `-m`。
+- **slash 指令套用成功就同步改**（claude / grok）：runtime 真的換了，記錄要跟著換。
+- **收編的 pane（`adopted`）三個欄位都是 NULL**＝不知道；UI 這時什麼都不比、也不標。
+- **UI 一律顯示 runtime**（`ModelTag`、標題列狀態列都是），設定跟 runtime 不一致時多一顆 `⟳`／
+  「需重啟」chip，按下去就是 `POST /api/bots/{id}/restart`。**不准**靜靜顯示一個還沒生效的值。
+
+**codex 的 fast 要兩個方向都送**（2026-09-09 修）：`service_tier` 少送一次不等於「不要 fast」，而是
+「聽 `~/.codex/config.toml` 的」——而那個檔案常常寫著 `service_tier = "fast"`（TUI 自己的 Fast 開關就寫在
+那裡）。結果是沒勾 fast 的 bot 照樣跑在 fast 上，UI 上卻一個字都沒有。所以 codex 一律帶
+`-c service_tier="priority"`（勾了）或 `-c service_tier=""`（沒勾）；0.153.4 實測後者會讓狀態列的 `fast`
+消失，並印一行 `Configured service tier `` is not advertised … and will be omitted from requests`
+（`⚠` 開頭的行本來就會被終端清洗丟掉，不會變成回覆）。`priority` 是 `model/list` 唯一有廣告的 tier，
+也就是 TUI 上顯示成 `fast` 的那個。
+
+`model` / `effort` 沒有做同樣的「明講預設」：它們的「不指定」在 UI 上就寫成「使用 CLI 預設」，
+CLI 的預設包含使用者的 `config.toml`，這是說得通的；fast 是一顆 on/off，關著就該是真的關著。
+
+**codex 的即時套用**（`daemon/src/codex_live.rs`；0.153.4 在拋棄式 pane 實測）：
+
+- `/model` **不吃參數**。`/model gpt-5.6-sol high` 會被當成一般 prompt 送給模型（浪費一個回合、
+  什麼都沒改）。空的 `/model` + Enter 開 `Select Model and Effort` 編號選單 → 按數字選模型 → 立刻
+  跳出 `Select Reasoning Level for <model>` → 再按一個數字，codex 印
+  `• Model changed to <model> <effort>`。`Max` / `Ultra` 在第一層的 `More reasoning…` 底下再一層。
+- `/fast` 是**開關**（`• Service tier set to priority` / `… default`），沒有「設成 X」的形式，所以只有在
+  `runs.runtime_fast` 跟目標不同時才按——這也是那一欄必須正確的原因。
+- **選單一律用讀的**：號碼與順序來自帳號的模型清單，`(default)` / `(current)` 標記會跑，所以每一步都
+  回讀 pane，比對「號碼後面到兩個空白為止」的 label（第 5 列的說明字串裡有 `Max and Ultra`，
+  拿整行比對會按錯那一列）。
+- 只改強度也要先選模型（選單就是兩層一起問）：bot 沒指定模型時選 `(current)` 那一列。
+- **最後回讀狀態列**（`<model> [<effort>] [fast] · <cwd> · Context …`）確認真的變了；`runs.runtime_*` 存的
+  就是這一行讀到的值，不是我們以為送出去的值。對不上就回 `needs_restart`。
+- 副作用：codex 跟 claude 一樣會把選擇**存成該帳號的預設**（寫進 `~/.codex/config.toml`）。這是 CLI 的
+  行為，不是我們寫的。
+
 ## 5. 設定檔
 
 路徑：`~/.config/agents-manager/config.toml`

@@ -398,6 +398,10 @@ export function toRun(v: unknown, botId?: string): Run | null {
     status: toStatusInfo(pick(v, 'status_json', 'status')),
     update_notice: optStr(pick(v, 'update_notice', 'updateNotice')),
     turn_error: optStr(pick(v, 'turn_error', 'turnError')),
+    // SPEC §4.4a：`runtime_fast` 是 daemon 的 0/1，舊 daemon 三個都沒有 → null（不知道）。
+    runtime_model: optStr(pick(v, 'runtime_model', 'runtimeModel')),
+    runtime_effort: optStr(pick(v, 'runtime_effort', 'runtimeEffort')),
+    runtime_fast: pick(v, 'runtime_fast', 'runtimeFast') == null ? null : bool(pick(v, 'runtime_fast', 'runtimeFast')),
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),

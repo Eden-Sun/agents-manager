@@ -308,6 +308,14 @@ export interface Run {
    * 下一回合一開始就會被清掉。
    */
   turn_error: string | null
+  /**
+   * SPEC §4.4a：這個 run **實際上**在跑的模型／強度／fast，daemon 從真正送出去的 argv 讀回來
+   * （codex 的模型與強度只在啟動時吃得到，`bots` 那份是「下次啟動會用的設定」）。
+   * `null` = 不知道（daemon 沒有親手啟動它，例如被收編的 pane），這時不做任何比對。
+   */
+  runtime_model: string | null
+  runtime_effort: string | null
+  runtime_fast: boolean | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string

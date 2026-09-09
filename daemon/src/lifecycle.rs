@@ -1126,8 +1126,19 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
         }
     }
     // v4.0: codex Fast tier, same key the user's config.toml uses.
-    if bot.fast != 0 && bot.kind == "codex" {
-        out.extend(["-c".to_string(), "service_tier=\"priority\"".to_string()]);
+    //
+    // 2026-09-09: it has to be sent **both ways**. Leaving the flag out does not mean "not
+    // fast", it means "whatever `~/.codex/config.toml` says" — and that file commonly carries
+    // `service_tier = "fast"` (it is what the TUI's own Fast toggle writes). A bot with the box
+    // unchecked therefore came up on the fast tier and said so in its own status line
+    // (`gpt-6-astra low fast · …`) while AG Man showed no fast at all. The empty value is how
+    // codex is told to use no tier: verified on 0.153.4, `-c service_tier=""` drops `fast` from
+    // the status line and warns once that the tier "is not advertised … and will be omitted
+    // from requests", which is exactly the standard tier. `priority` is the only tier these
+    // models advertise (`model/list` → `serviceTiers`), and it is what the TUI shows as `fast`.
+    if bot.kind == "codex" {
+        let tier = if bot.fast != 0 { "priority" } else { "" };
+        out.extend(["-c".to_string(), format!("service_tier=\"{tier}\"")]);
     }
     out
 }
@@ -1198,8 +1209,30 @@ mod model_args_tests {
             a,
             vec!["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\""]
         );
+        // Fast **off** is not the same as "no opinion": without the flag the user's own
+        // `~/.codex/config.toml` (`service_tier = "fast"`) decides, and the bot comes up fast
+        // with nothing in the UI saying so. The empty tier is codex's "use no tier".
         let a = model_args(&bot("codex", None, None, false));
-        assert!(a.is_empty());
+        assert_eq!(a, vec!["-c", "service_tier=\"\""]);
+    }
+
+    /// SPEC §4.4a: what `start_inner` stamps on the run is `model_args` read back through its
+    /// own inverse, so the two must agree — that stamp is the only thing that can tell the UI
+    /// a codex bot is still running the effort it was started with.
+    #[test]
+    fn the_runtime_stamp_reads_back_what_we_passed() {
+        let b = bot("codex", Some("gpt-5.6-luna"), Some("xhigh"), true);
+        let args = model_args(&b);
+        let (model, effort) = crate::models::model_effort_from_argv("codex", &args);
+        assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(effort.as_deref(), Some("xhigh"));
+        assert!(args.iter().any(|a| a.contains("service_tier=\"priority\"")), "fast is a flag we can read back");
+        // A bot on the CLI's own model / effort passes neither, and reads back as neither —
+        // the UI must not turn that into "設定與實際不符". The service tier is always spelled
+        // out, and an empty one reads back as not-fast.
+        let bare = model_args(&bot("codex", None, None, false));
+        assert_eq!(crate::models::model_effort_from_argv("codex", &bare), (None, None));
+        assert!(!bare.iter().any(|a| a.contains("service_tier=\"priority\"")));
     }
 
     #[test]
@@ -1766,6 +1799,20 @@ async fn start_inner(
         .execute(&app.db)
         .await
         .map_err(up)?;
+    // SPEC §4.4a: stamp what this run is actually going to be on, read back off the argv we
+    // are about to hand herdr rather than off `bots`. The two can differ — `effort_checked`
+    // drops a level the model rejects, and the user's own `bot.args` can carry another `-m` —
+    // and `bots` keeps changing under a live run (codex applies model / effort only at start).
+    let (rt_model, rt_effort) = crate::models::model_effort_from_argv(&bot.kind, &args);
+    let rt_fast = i64::from(args.iter().any(|a| a.contains("service_tier=\"priority\"")));
+    sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
+        .bind(&rt_model)
+        .bind(&rt_effort)
+        .bind(rt_fast)
+        .bind(run_id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
     // A freshly created pane is not an available shell the instant `tab.create` /
     // `pane.split` returns — herdr answers `agent_pane_busy: … is not an available shell`
     // until the interactive shell has settled. Observed 2026-09-06: starting a six-member
@@ -2305,7 +2352,7 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
     }
 }
 
-/// 有些設定不用重啟就能改：agent 的 TUI 自己有 slash 指令。
+/// 有些設定不用重啟就能改：agent 的 TUI 自己有辦法當場換。
 ///
 /// * grok `effort` → `/effort <level>`（grok 1.0.13 `04-slash-commands.md`）
 /// * grok `model` → `/model <id>`；bot 同時有 effort 時帶第二參數（`/model grok-4.6 high`）
@@ -2314,15 +2361,43 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 ///   `Set effort level to low (saved as your default for new sessions)`。不帶參數的 `/effort`
 ///   才是那條拉桿。**注意副作用**：claude 會把它存成該帳號之後新 session 的預設值，這是 CLI
 ///   的行為，只有 TUI 上按 `s` 才是「只有這次」——daemon 沒有那個選項。）
+/// * codex `model` / `effort` / `fast` → 走 [`crate::codex_live`]：`/model` 是一個**不吃參數**
+///   的兩層選單、`/fast` 是一個開關，所以那邊是「送鍵、讀畫面、再送鍵」，最後回讀狀態列確認
+///   （2026-09-09 在拋棄式 pane 實測，SPEC §4.4a）。codex 一樣會把選擇存成帳號預設。
 ///
-/// 回傳 `true` = 已經送進去（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
-/// （kind 不符、沒在跑、正在忙、或清成「CLI 預設」——那個沒有對應的 slash 指令），
-/// 讓呼叫端退回原本的「重啟才生效」。
-pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, field: &str) -> bool {
+/// 回傳 `true` = 已經套用（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
+/// （kind 不符、沒在跑、正在忙、選單長得不對、回讀對不上），讓呼叫端退回「重啟才生效」。
+pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> bool {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
-    let value = match field {
+    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
+    let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
+    let Ok(pane_id) = slash_gate(&run, in_flight) else { return false };
+    let Ok(client) = client_for_run(app, &run).await else { return false };
+
+    if bot.kind == "codex" {
+        // 這個 run 現在是不是 fast——`/fast` 是開關，不知道現在的狀態就不能按。
+        let was_fast = run.runtime_fast.map(|v| v != 0);
+        let Some(seen) = crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await else {
+            return false;
+        };
+        // 回讀到的狀態列就是 runtime 的定義（SPEC §4.4a），不是我們以為送出去的東西。
+        let _ = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
+            .bind(&seen.model)
+            .bind(&seen.effort)
+            .bind(i64::from(seen.fast))
+            .bind(&run.id)
+            .execute(&app.db)
+            .await;
+        app.emit_bot_status(bot_id).await;
+        tracing::info!(bot_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast, "codex applied live");
+        return true;
+    }
+
+    // claude / grok：一個欄位一行 slash 指令。
+    let [field] = fields else { return false };
+    let value = match *field {
         "effort" => bot.effort.as_deref(),
         "model" => bot.model.as_deref(),
         _ => None,
@@ -2332,13 +2407,31 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, field: &str) -> bo
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
         return false;
     };
-    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
-    let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
-    let Ok(pane_id) = slash_gate(&run, in_flight) else { return false };
-    let Ok(client) = client_for_run(app, &run).await else { return false };
     if send_slash_line(&client, &pane_id, &line).await.is_err() {
         return false;
     }
+    // SPEC §4.4a: the run really is on the new value now, so the drift marker must clear with
+    // it. Only the field that was sent — `/model` does not touch the effort, and grok's
+    // two-argument form carries the effort the bot already had.
+    let col = match *field {
+        "effort" => "runtime_effort",
+        _ => "runtime_model",
+    };
+    let _ = sqlx::query(&format!("UPDATE runs SET {col} = ? WHERE id = ?"))
+        .bind(value)
+        .bind(&run.id)
+        .execute(&app.db)
+        .await;
+    if *field == "model" && bot.kind == "grok" {
+        if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?")
+                .bind(e.to_ascii_lowercase())
+                .bind(&run.id)
+                .execute(&app.db)
+                .await;
+        }
+    }
+    app.emit_bot_status(bot_id).await;
     tracing::info!(bot_id, line, "applied live via slash command");
     true
 }
@@ -2659,6 +2752,9 @@ mod login_slash_tests {
             agent_title: None,
             status_line: None,
             status_json: None,
+            runtime_model: None,
+            runtime_effort: None,
+            runtime_fast: None,
             update_notice: None,
             turn_error: None,
             native_session_id: None,

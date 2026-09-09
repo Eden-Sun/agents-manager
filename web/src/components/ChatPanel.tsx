@@ -28,6 +28,8 @@ import { IssuesBar } from './IssuesBar'
 import { GitBar } from './GitBar'
 import { KindTag } from './KindTag'
 import { ModelQuickPicker } from './ModelPicker'
+import { RuntimeDriftBadge } from './RuntimeDriftBadge'
+import { runtimeKnown } from '../lib/runtimeDrift'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
@@ -1040,7 +1042,18 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const key = quotaKey(host, b.identity ? `${b.kind}:${b.identity}` : b.kind)
       const q = s.quota[key] ?? s.quota[quotaKey(host, b.kind)] ?? null
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
-      return derivedStatus(b.kind, b.model, b.effort, b.fast, path, q)
+      // SPEC §4.4a：這條狀態列講的是「現在在跑什麼」，所以模型／強度／fast 一律用 run 真正
+      // 啟動時的值（`run.runtime_*`），不是 `bots` 那份「下次啟動才會用的設定」——codex 的
+      // 強度改了不重啟就不會變，照設定畫等於在 UI 上編一條跟終端不符的狀態列。
+      const live = runtimeKnown(r)
+      return derivedStatus(
+        b.kind,
+        live ? r!.runtime_model : b.model,
+        live ? r!.runtime_effort : b.effort,
+        live ? (r!.runtime_fast ?? b.fast) : b.fast,
+        path,
+        q,
+      )
     }),
   )
   const modelExtra = modelExtraOf(statusInfo)
@@ -1150,6 +1163,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <PersonaMark persona={bot.persona} />
             <HostBadge host={hostName} connected={hostUp} />
             <UpdateBadge botId={botId} />
+            <RuntimeDriftBadge botId={botId} />
             <TurnErrorBadge botId={botId} />
           </div>
           {/* `bot.model` is what was *configured* (null = 由 CLI 自己決定); the statusLine

@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS runs (
   native_session_id TEXT, transcript_path TEXT,
   last_read_revision INTEGER, last_read_tail_hash TEXT,
   started_at TEXT NOT NULL, ended_at TEXT,
+  -- SPEC §4.4a: what this run is *actually* on — stamped from the argv it was started with,
+  -- and updated when a slash command changes it live. NULL = the daemon did not start it.
+  runtime_model TEXT, runtime_effort TEXT, runtime_fast INTEGER,
   -- Native session requested by a reopen. Cleared by the first identity/turn hook.
   resume_session_id TEXT
 );
@@ -304,6 +307,12 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         ("teams", "pause_detail_json", "ALTER TABLE teams ADD COLUMN pause_detail_json TEXT"),
         // Native session requested by a done-team reopen. NULL for ordinary starts and old runs.
         ("runs", "resume_session_id", "ALTER TABLE runs ADD COLUMN resume_session_id TEXT"),
+        // SPEC §4.4a: the model / effort / fast tier the running CLI is on, as opposed to the
+        // ones `bots` is configured with. Changing a codex bot's effort only takes effect on
+        // its next start, and the UI showed the new value as if it were live.
+        ("runs", "runtime_model", "ALTER TABLE runs ADD COLUMN runtime_model TEXT"),
+        ("runs", "runtime_effort", "ALTER TABLE runs ADD COLUMN runtime_effort TEXT"),
+        ("runs", "runtime_fast", "ALTER TABLE runs ADD COLUMN runtime_fast INTEGER"),
         // SPEC-team §2.3: which queued issue this task / event belongs to. Nullable because
         // every row written before the queue existed belongs to the team's one and only issue,
         // which the backfill below fills in.
@@ -765,6 +774,15 @@ pub struct Run {
     /// new version ("Update installed · Restart to update"). NULL when there is none on
     /// screen; [`crate::update_watch`] keeps it in step.
     pub update_notice: Option<String>,
+    /// SPEC §4.4a: the model this run's CLI is actually on — read back from the argv it was
+    /// started with (the inverse of `lifecycle::model_args`), and rewritten when a slash
+    /// command applies a change live. `None` on an adopted run, whose argv we never built,
+    /// and on rows written before the column existed: unknown, which the UI shows as nothing.
+    pub runtime_model: Option<String>,
+    /// The reasoning effort this run is actually on. See [`Run::runtime_model`].
+    pub runtime_effort: Option<String>,
+    /// Whether this run is actually on the fast/priority tier. See [`Run::runtime_model`].
+    pub runtime_fast: Option<i64>,
     /// The `API Error: …` line the pane showed when this run's last turn ended — the turn was
     /// cut short by the API, not finished. NULL when the last turn ended cleanly; cleared the
     /// moment the next turn opens ([`crate::turn_error`]).

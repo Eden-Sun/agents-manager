@@ -885,12 +885,21 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 ```
 
 - **`needs_restart`**：`true` 表示這次修改要等 bot 重啟後才會生效（有 active Run，且本次動到會影響啟動 argv / env 的欄位：`model`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`）。
-  - 例外（TUI slash 指令當場套用）：**只**改該欄位、Run 在 `running` 且不忙（非 working / blocked、沒有 in-flight turn）、新值不是清成 `null` 時，daemon 會往 pane 送對應的 slash 指令（`pane.send_text` → 0.8s → `Enter`）並回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
+  - 例外（daemon 直接操作 TUI 當場套用）：這次只動了下列欄位、Run 在 `running` 且不忙（非 working /
+    blocked、沒有 in-flight turn）、新值不是清成 `null`（codex 的 `fast` 例外，它是開關）時，daemon 會操作
+    pane 並回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
     - grok `effort` → `/effort <level>`
     - grok `model` → `/model <id>`；若這次 PATCH 也帶了 `effort`（或 bot 本來就有），第二參數一併送（`/model grok-4.6 high`）
     - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）
     - claude `effort` → `/effort <level>`（2.1.263 實測：帶參數就直接套用；不帶參數的 `/effort` 才是拉桿）。
       **副作用**：claude 會把它一併存成該帳號之後新 session 的預設強度（CLI 行為，TUI 上按 `s` 才是只此一次）
+    - codex `model` / `effort` / `fast`（2026-09-09 新增，0.153.4 實測）→ 不是一行指令，是操作 TUI：
+      `/model` 開「模型」「強度」兩層編號選單（**不吃參數**，`/model gpt-5.6-sol high` 會被當成 prompt
+      送給模型），daemon 讀 pane 找對應的號碼按下去；`fast` 用 `/fast` 這個**開關**，只有在
+      `run.runtime_fast` 跟目標不同時才按。三個欄位可以在同一次 PATCH 一起改。送完會**回讀狀態列**
+      （`<model> [<effort>] [fast] · <cwd> · Context …`）確認真的變了，`run.runtime_*` 存的就是讀回來的值；
+      對不上就回 `needs_restart: true`。**副作用**：codex 同樣會把選擇存成該帳號的預設
+      （`~/.codex/config.toml`）。詳見 SPEC §4.4a
   沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
   前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
 - **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
