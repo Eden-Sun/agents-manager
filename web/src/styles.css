@@ -2886,6 +2886,10 @@ p.project-quota-hidden {
 /* --------------------------------------------------------------- composer */
 
 .composer {
+  /* 永遠不縮：`.chat` 是 flex column，flex 子項預設會被壓扁，而輸入框被壓扁的樣子就是
+     「打到第三行就看不到自己在打什麼」（2026-09-09 使用者截圖，手機鍵盤彈出時）。
+     要讓位的是上面的訊息列，不是正在打字的這一格。 */
+  flex: none;
   width: 100%;
   max-width: var(--chat-max);
   margin: 0 auto;
@@ -9755,6 +9759,19 @@ button.run-debug-toggle:hover {
   /* 底部的三樣東西都要避開 home indicator：各自原本的內距再加上那一塊。 */
   .composer {
     padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  /* 打字時輸入框最高只吃畫面的三分之一，超過就自己捲——`--vvh` 在鍵盤彈出時只剩三百多 px，
+     桌面那個 200px 的上限加上底下的暫存區就超過整個可視高度，於是游標那一行被切掉。 */
+  .composer textarea {
+    max-height: calc(var(--vvh, 100dvh) * 0.33);
+  }
+
+  /* 正在打字時把圖片暫存整條收掉：鍵盤已經吃掉半個畫面，這條再佔一百 px，輸入框就沒地方長。
+     它是「打完字之後才會用到」的東西（點一張圖進對話），收鍵盤（點訊息區）就回來。
+     同 `body:has(.sidebar.open) .shelf` 的理由：現在在做的不是這件事。 */
+  body:has(.composer textarea:focus) .shelf {
+    display: none;
   }
 
   .shelf {
