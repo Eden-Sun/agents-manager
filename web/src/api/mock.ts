@@ -16,7 +16,7 @@
  */
 
 import { parseMentions } from './mentions'
-import { ApiError, BOT_KINDS, TEAM_BUDGET_DEFAULTS, TEAM_WORKERS_MAX } from './types'
+import { ApiError, BOT_KINDS, TEAM_BUDGET_DEFAULTS, TEAM_WORKERS_MAX, TEAM_WORKERS_UNLIMITED } from './types'
 import type { BotKind, TeamBudget, TeamDeliver, TeamPhase, TeamRole, TeamTaskState } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
 
@@ -246,6 +246,8 @@ interface MockTeamTask {
   files: string[]
   /** §4.5：`null` = 還在排隊，還沒有執行者接手。 */
   worker_bot_id: string | null
+  /** §2.3 / §4.5：這筆 task 屬於哪一個佇列項。無限模式下分組就是靠它。 */
+  issue_id: string | null
   branch: string
   state: TeamTaskState
   round: number
@@ -2467,6 +2469,7 @@ export class MockTransport implements Transport {
   private taskJson(task: MockTeamTask): Rec {
     return {
       id: task.id,
+      issue_id: task.issue_id,
       seq: task.seq,
       title: task.title,
       brief: task.brief,
@@ -2631,7 +2634,10 @@ export class MockTransport implements Transport {
 
     const pm = this.roleSpec(b.pm)
     const workersRaw = (b.workers ?? {}) as Rec
-    const workers = { ...this.roleSpec(workersRaw), count: Math.max(1, Math.min(TEAM_WORKERS_MAX, Number(workersRaw.count ?? 2) || 2)) }
+    // §4.5：`0` 是「無限」而不是壞值，所以下限是 0 不是 1。`?? 2` 只在完全沒送時生效。
+    const rawCount = workersRaw.count === undefined ? 2 : Number(workersRaw.count) || 0
+    const workers = { ...this.roleSpec(workersRaw), count: Math.max(0, Math.min(TEAM_WORKERS_MAX, rawCount)) }
+    const unlimited = workers.count === TEAM_WORKERS_UNLIMITED
     const reviewer = b.reviewer === null || b.reviewer === undefined ? null : this.roleSpec(b.reviewer)
     const budget: TeamBudget = { ...TEAM_BUDGET_DEFAULTS, ...((b.budget ?? {}) as Partial<TeamBudget>) }
 
@@ -2721,8 +2727,35 @@ export class MockTransport implements Transport {
       return bot
     }
 
+    // §4.5 無限模式：佇列裡的每個 issue 都同時開工，各自一條整合分支、各自 1 個執行者。
+    if (unlimited) {
+      for (const [idx, n] of queue.slice(1).entries()) {
+        const extra = ISSUES.find((i) => i.number === n)
+        if (!extra) continue
+        team.issues.push({
+          id: ulid('issue'),
+          seq: idx + 2,
+          issue_number: n,
+          issue_title: String(extra.title),
+          issue_url: `${p.github.url}/issues/${n}`,
+          state: 'working',
+          branch: `team/i${n}-${tid6}`,
+          summary: null,
+          pr_url: null,
+          issue_closed_at: null,
+          fail_reason: null,
+          started_at: now(),
+          ended_at: null,
+        })
+      }
+    }
+
     mk('pm', `i${issueNumber}-pm`, pm, `${root}/main`)
-    for (let i = 1; i <= workers.count; i++) mk('worker', `i${issueNumber}-dev-${i}`, workers, `${root}/dev-${i}`)
+    if (unlimited) {
+      for (const q of team.issues) mk('worker', `i${q.seq}-dev-1`, workers, `${root}/i${q.seq}-dev-1`)
+    } else {
+      for (let i = 1; i <= workers.count; i++) mk('worker', `i${issueNumber}-dev-${i}`, workers, `${root}/dev-${i}`)
+    }
     if (reviewer) mk('reviewer', `i${issueNumber}-rev`, reviewer, `${root}/reviewer`)
 
     this.teams.push(team)
@@ -2746,17 +2779,21 @@ export class MockTransport implements Transport {
     // 有 reviewer 時，挑一件 task 走一次 request_changes，讓 round 機制看得到。
     const reworkAt = workers.length > 1 ? 1 : 0
     // Task 物件先建好（步驟閉包要用），但要到 dispatch 那一步才進 `this.teamTasks`。
+    // §4.5 無限模式：第 i 個執行者屬於第 i 個進行中的 issue，task 也跟著掛過去。
+    const working = t.issues.filter((i) => i.state === 'working')
     const assigned: MockTeamTask[] = workers.map((w, i) => {
       const seed = TEAM_TASK_SEEDS[i % TEAM_TASK_SEEDS.length]
+      const own = working.length > 1 ? (working[i] ?? working[0]) : working[0]
       return {
         id: ulid('task'),
         team_id: t.id,
+        issue_id: own?.id ?? null,
         seq: i + 1,
         title: seed.title,
         brief: seed.brief,
         files: [...seed.files],
         worker_bot_id: w.id,
-        branch: `${t.branch}/t${i + 1}`,
+        branch: `${own?.branch ?? t.branch}/t${i + 1}`,
         state: 'queued',
         round: 0,
         last_report: null,
@@ -2771,6 +2808,7 @@ export class MockTransport implements Transport {
     const extra: MockTeamTask = {
       id: ulid('task'),
       team_id: t.id,
+      issue_id: working[0]?.id ?? null,
       seq: workers.length + 1,
       title: queuedSeed.title,
       brief: queuedSeed.brief,

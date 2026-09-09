@@ -1046,6 +1046,8 @@ function toTeamRoles(roles: unknown): TeamRoles {
     pm: toRoleSpec(r.pm),
     workers: toRoleSpec(isRec(r.workers) ? r.workers.spec : null),
     reviewer: toRoleSpec(r.reviewer),
+    // §4.5：`0` 是「無限」而不是「沒有」，所以 0 也要留著，不能用 `|| null` 吃掉。
+    workers_count: isRec(r.workers) && typeof r.workers.count === 'number' ? r.workers.count : null,
   }
 }
 

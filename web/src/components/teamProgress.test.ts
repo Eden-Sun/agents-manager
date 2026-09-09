@@ -132,3 +132,36 @@ test('fmtDur：秒 / 分秒 / 小時分', () => {
   assert.equal(fmtDur(7_800_000), '2 小時 10 分')
   assert.equal(fmtDur(-5), '0 秒')
 })
+
+// ---------------------------------------------------------------- §4.5 無限併行
+
+test('好幾個 issue 同時在跑時，「已開工」數的是全部而不是一個', () => {
+  const p = teamProgressOf(
+    team({
+      issues: [
+        issue({ id: 'a', seq: 1, state: 'done' }),
+        issue({ id: 'b', seq: 2, state: 'working', started_at: '2026-09-09T10:00:00Z' }),
+        issue({ id: 'c', seq: 3, state: 'working', started_at: '2026-09-09T10:05:00Z' }),
+        issue({ id: 'd', seq: 4, state: 'queued' }),
+      ],
+      current_issue_id: 'b',
+      issues_summary: { total: 4, done: 1, failed: 0, queued: 1 },
+    }),
+  )
+  assert.equal(p.workingIssues, 2)
+  assert.deepEqual(p.issues, { at: 3, total: 4 })
+  // 計時取最早開跑的那一個，不是 `current_issue_id` 剛好指到的那一個。
+  assert.equal(p.startedAt, Date.parse('2026-09-09T10:00:00Z'))
+})
+
+test('有限模式一次一個，口徑一個字都沒變', () => {
+  const p = teamProgressOf(
+    team({
+      issues: [issue({ id: 'a', seq: 1, state: 'done' }), issue({ id: 'b', seq: 2, state: 'working' })],
+      current_issue_id: 'b',
+      issues_summary: { total: 2, done: 1, failed: 0, queued: 0 },
+    }),
+  )
+  assert.equal(p.workingIssues, 1)
+  assert.deepEqual(p.issues, { at: 2, total: 2 })
+})

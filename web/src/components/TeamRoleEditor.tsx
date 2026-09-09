@@ -1,6 +1,15 @@
 import { useEffect, useState } from 'react'
 import type { BotKind, TeamRoleKey, TeamRolePatch, TeamRoles, TeamWorkerSpec } from '../api/types'
-import { BOT_KINDS, LOCAL_HOST, TEAM_ROLE_KEYS, TEAM_ROLE_KEY_LABEL } from '../api/types'
+import {
+  BOT_KINDS,
+  LOCAL_HOST,
+  TEAM_MAX_CONCURRENT_ISSUES,
+  TEAM_MAX_TEAM_WORKERS,
+  TEAM_ROLE_KEYS,
+  TEAM_ROLE_KEY_LABEL,
+  TEAM_WORKERS_MAX,
+  TEAM_WORKERS_UNLIMITED,
+} from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { toolsOfHost, useStore } from '../store/store'
 import { IdentityOptions } from './BotSettingsPanel'
@@ -73,6 +82,9 @@ function RoleForm({
   const [fast, setFast] = useState(spec?.fast ?? false)
   const [identity, setIdentity] = useState(spec?.identity ?? '')
   const [apply, setApply] = useState<'next' | 'now'>('next')
+  // §4.5：併行數只有執行者那一列有，`0` = 無限。`null` = 舊 daemon 沒送，那就不畫這一列。
+  const storedCount = useStore((s) => s.teamDetail[teamId]?.roles.workers_count ?? null)
+  const [count, setCount] = useState<number | null>(storedCount)
 
   // 換一個角色（側欄點了另一個成員的齒輪）就整組欄位重讀，不要留著上一個角色的值。
   useEffect(() => {
@@ -83,6 +95,7 @@ function RoleForm({
     setFast(spec.fast)
     setIdentity(spec.identity ?? '')
     setApply('next')
+    setCount(storedCount)
     // 只在切換角色 / team 時重置：spec 每次 loadTeam 都是新物件，跟著它跑會把使用者打到一半的值蓋掉。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, role])
@@ -92,6 +105,7 @@ function RoleForm({
   const save = async () => {
     const body: TeamRolePatch = { model, effort, fast, identity: identity || null, apply }
     if (swapping) body.kind = kind
+    if (role === 'workers' && count !== null && count !== storedCount) body.count = count
     const ok = await patchTeam(teamId, { [role]: body })
     if (ok) onClose()
   }
@@ -149,6 +163,33 @@ function RoleForm({
             </span>
           ) : null}
         </div>
+        {role === 'workers' && count !== null ? (
+          <div className="field">
+            <span>併行數</span>
+            <div className="opt-group" role="radiogroup" aria-label="併行數">
+              {[TEAM_WORKERS_UNLIMITED, 1, 2, 3, 4].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  role="radio"
+                  aria-checked={count === n}
+                  className={`opt${count === n ? ' on' : ''}`}
+                  disabled={n > TEAM_WORKERS_MAX}
+                  onClick={() => setCount(n)}
+                >
+                  <span className="opt-label">{n === TEAM_WORKERS_UNLIMITED ? '∞ 無限' : n}</span>
+                </button>
+              ))}
+            </div>
+            <span className="hint">
+              {count === TEAM_WORKERS_UNLIMITED
+                ? `無限：佇列裡的 issue 同時開工（最多 ${TEAM_MAX_CONCURRENT_ISSUES} 個），每個先 1 個執行者，PM 派多少就開多少（每 issue 最多 ${TEAM_WORKERS_MAX}、全隊最多 ${TEAM_MAX_TEAM_WORKERS}）。存下去立刻生效，額度會很快用掉。`
+                : storedCount === TEAM_WORKERS_UNLIMITED
+                  ? '從無限改回固定：在跑的 issue 做完，之後不再同時開新的，執行者數照這個值。'
+                  : '改大立刻多開執行者並補上排隊的 task；改小要等下一批。'}
+            </span>
+          </div>
+        ) : null}
         <ApiModelFields
           kind={kind}
           host={host}
@@ -221,7 +262,8 @@ function summarize(roles: TeamRoles, workerCount: number): string {
   return TEAM_ROLE_KEYS.filter((r) => roles[r] !== null)
     .map((r) => {
       const spec = roles[r] as TeamWorkerSpec
-      const count = r === 'workers' && workerCount > 1 ? `×${workerCount} ` : ''
+      const unlimited = r === 'workers' && roles.workers_count === TEAM_WORKERS_UNLIMITED
+      const count = unlimited ? '∞ ' : r === 'workers' && workerCount > 1 ? `×${workerCount} ` : ''
       return `${ROLE_SHORT[r]} ${count}${spec.model ?? '預設'}`
     })
     .join(' · ')

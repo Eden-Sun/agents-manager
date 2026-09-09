@@ -39,7 +39,14 @@ export function TeamIssueProgress({ team }: { team: Team }) {
 
   return (
     <div ref={ref} className={`team-issue-progress${running ? ' running' : ''}`}>
-      {queued ? (
+      {queued && p.workingIssues > 1 ? (
+        // §4.5 無限模式：好幾個 issue 同時在跑，「第幾個」講不通——報「進行中 N」。
+        <span className="tip-count" title={`同時進行 ${p.workingIssues} 個 issue，佇列共 ${p.issues.total} 個`}>
+          <span className="tip-unit">issue</span>
+          進行中 {p.workingIssues}
+          <span className="tip-total">/{p.issues.total}</span>
+        </span>
+      ) : queued ? (
         <Count
           unit="issue"
           count={p.issues}
