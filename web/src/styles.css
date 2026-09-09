@@ -10414,4 +10414,14 @@ button.run-debug-toggle:hover {
     padding: 0 8px;
     font-size: 12px;
   }
+
+  /* 「⬆ 有更新 · 重啟套用」在 390px 會把「對話／終端」擠到第二行；手機只留箭頭，字在 title。 */
+  .main-head .update-badge .update-badge-text {
+    display: none;
+  }
+
+  .main-head .update-badge {
+    min-width: 28px;
+    padding: 0 6px;
+  }
 }

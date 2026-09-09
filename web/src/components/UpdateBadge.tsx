@@ -40,7 +40,7 @@ export function UpdateBadge({ botId }: { botId: string }) {
         title={`${notice}\n重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）${busy ? '\n它正在忙，會先問一句' : ''}`}
         onClick={() => (busy ? setConfirming(true) : restart())}
       >
-        {restarting ? '重啟中…' : '⬆ 有更新 · 重啟套用'}
+        {restarting ? '重啟中…' : <>⬆ <span className="update-badge-text">有更新 · 重啟套用</span></>}
       </button>
       <ConfirmRestart open={confirming} name={botName} onCancel={() => setConfirming(false)} onConfirm={restart} />
     </>
