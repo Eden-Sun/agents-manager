@@ -4787,12 +4787,22 @@ p.project-quota-hidden {
 }
 
 /* 側欄只放一個點——真正的按鈕在 header。 */
+/* 側欄的「待升級」記號：跟標題列的 `.update-badge` 同一個 ⬆（2026-09-09 使用者：符號要一致），
+   不再是一顆藍點。 */
 .bot-update-dot {
   flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent-ink);
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
   cursor: help;
 }
 
