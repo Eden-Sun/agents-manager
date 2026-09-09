@@ -998,6 +998,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const canReopen = useStore((s) => canReopenTeam(team, s.teamReopenUnavailable[teamId] === true))
   const [confirm, setConfirm] = useState<'abort' | 'cleanup' | 'delete' | 'close-issue' | null>(null)
   const [reopenOpen, setReopenOpen] = useState(false)
+  // 手機的標題就是切換器（點了是換畫面），改名因此收進 `⋯`。
+  const [renaming, setRenaming] = useState(false)
   const [reopenText, setReopenText] = useState('')
   const [issueToClose, setIssueToClose] = useState<TeamIssue | null>(null)
   const [issuesToClose, setIssuesToClose] = useState<TeamIssue[] | null>(null)
@@ -1046,7 +1048,9 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
             ⚙
           </span>
           {/* 手機：標題就是切換器（同 ChatPanel），不然從 team 要換去別的畫面只能開抽屜。 */}
-          {phone ? (
+          {phone && renaming ? (
+            <TeamNameField teamId={teamId} autoEdit onDone={() => setRenaming(false)} />
+          ) : phone ? (
             <BotSwitcher name={teamTitle(team)} />
           ) : (
             <>
@@ -1153,6 +1157,15 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           <HeadMoreMenu label="更多 Team 動作">
             {phone ? (
               <>
+                <button
+                  type="button"
+                  className="head-menu-item"
+                  role="menuitem"
+                  title="給這個 Team 取一個短名（留白＝改回 issue 標題）"
+                  onClick={() => setRenaming(true)}
+                >
+                  重新命名…
+                </button>
                 <button
                   type="button"
                   className="head-menu-item"

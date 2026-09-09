@@ -65,8 +65,6 @@ export function ApiModelFields({
   const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
   const loadModels = useStore((s) => s.loadModels)
-  const [custom, setCustom] = useState(false)
-
   useEffect(() => {
     // null = last fetch failed; the store retries once the cooldown has passed (issue #26).
     if (cached == null) void loadModels(kind, host, identity)
@@ -77,11 +75,12 @@ export function ApiModelFields({
   const models = fromApi ? cached : staticModels(kind)
   const shownModels = visibleModels(models, model)
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
-  const known = model === null || models.some((m) => m.id === model)
-  const customMode = custom || !known
   // The effort / fast rows follow the chosen model (or the CLI default when unset).
   const current = (model && models.find((m) => m.id === model)) || defaultModel
   const efforts = current?.efforts ?? []
+  // 沒設就顯示「實際會跑的那一個」：模型是 CLI 預設那顆，強度是該模型的廠推薦。
+  const selectedModel = model ?? defaultModel?.id ?? null
+  const selectedEffort = effort ?? current?.default_effort ?? null
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
   // Drop Fast when the chosen model has no priority tier. Only ever act on a real API list:
@@ -103,7 +102,6 @@ export function ApiModelFields({
   }, [fromApi, efforts, effort, onEffort])
 
   const pickModel = (id: string | null) => {
-    setCustom(false)
     onModel(id)
     const next = (id && models.find((m) => m.id === id)) || defaultModel
     if (!(next?.service_tiers.some((t) => t.id === FAST_TIER) ?? false) && fast) onFast(false)
@@ -119,40 +117,22 @@ export function ApiModelFields({
           {/* 三個 kind 的 TUI 都能當場換模型，daemon 會直接操作（codex 走 `/model` 選單）。 */}
           {liveModel(kind) ? <span className="field-note live-note primary">執行中改會即時套用，不用重啟</span> : null}
         </span>
+        {/* 「使用 CLI 預設」與「自訂…」都拿掉（2026-09-09 使用者決定）：清單上就那幾顆，
+            多一顆「預設」等於要人先猜它是誰，多一顆「自訂」則是幾乎沒人走、卻天天佔一格的路。
+            沒設 model 的 bot 直接把 CLI 預設那顆標成選取中——它本來就是會跑的那一個。 */}
         <div className="opt-group models" role="radiogroup" aria-label="model">
-          <button
-            type="button"
-            className={`opt${model === null && !customMode ? ' on' : ''}`}
-            title={defaultModel ? `不帶 -m，由 CLI 決定（目前：${defaultModel.display_name}）` : '不帶 -m'}
-            onClick={() => pickModel(null)}
-          >
-            使用 CLI 預設
-          </button>
           {shownModels.map((m) => (
             <button
               key={m.id}
               type="button"
-              className={`opt${model === m.id && !custom ? ' on' : ''}`}
+              className={`opt${selectedModel === m.id ? ' on' : ''}`}
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               onClick={() => pickModel(m.id)}
             >
               {m.display_name}
             </button>
           ))}
-          <button type="button" className={`opt${customMode ? ' on' : ''}`} onClick={() => setCustom(true)} title="輸入任意模型名稱">
-            自訂…
-          </button>
         </div>
-        {customMode ? (
-          <input
-            type="text"
-            value={model ?? ''}
-            placeholder={defaultModel?.id ?? ''}
-            spellCheck={false}
-            aria-label="自訂模型名稱"
-            onChange={(e) => onModel(e.target.value ? e.target.value : null)}
-          />
-        ) : null}
       </div>
 
       {efforts.length > 0 ? (
@@ -172,24 +152,13 @@ export function ApiModelFields({
               </span>
             ) : null}
           </span>
+          {/* 同模型：不放「預設」那一顆，沒設就把廠推薦的那一級標成選取中。 */}
           <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
-            <button
-              type="button"
-              className={`opt${effort === null ? ' on' : ''}`}
-              title={
-                current?.default_effort
-                  ? `不帶 ${effortFlagName(kind)}（${defaultEffortNote(kind)} ${effortLabel(current.default_effort)}）`
-                  : `不帶 ${effortFlagName(kind)}`
-              }
-              onClick={() => onEffort(null)}
-            >
-              預設{current?.default_effort ? `（${effortLabel(current.default_effort)}）` : ''}
-            </button>
             {efforts.map((e) => (
               <button
                 key={e}
                 type="button"
-                className={`opt${effort === e ? ' on' : ''}`}
+                className={`opt${selectedEffort === e ? ' on' : ''}`}
                 title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : e}
                 onClick={() => onEffort(e)}
               >
@@ -227,10 +196,6 @@ export function ApiModelFields({
   )
 }
 
-/** 不指定強度時，daemon 到底不帶哪個旗標——三個 kind 各自的名字不同。 */
-function effortFlagName(kind: BotKind): string {
-  return kind === 'claude' ? '--effort' : '--reasoning-effort'
-}
 
 /**
  * 「預設」按鈕括號裡那個值是從哪來的：codex / grok 是那個模型自己回報的
