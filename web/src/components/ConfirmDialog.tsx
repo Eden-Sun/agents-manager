@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 
 export interface ConfirmDialogProps {
   open: boolean
@@ -84,9 +84,9 @@ export function ConfirmDialog({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [open])
 
-  // The require-text field when there is one, otherwise Cancel — never Confirm: an accidental
-  // Enter or Space on a just-opened destructive dialog must not go through.
-  useFocusTrap(open, dialogRef, {
+  // Focus the require-text field when present; otherwise focus Cancel — never Confirm, so an
+  // accidental Enter or Space on a just-opened destructive dialog must not go through.
+  useDialogFocus(open, dialogRef, {
     initialFocus: () => (needsMatch ? inputRef.current : cancelRef.current),
   })
 
