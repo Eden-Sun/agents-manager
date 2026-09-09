@@ -74,6 +74,8 @@ enum HookKind {
     Ignore(String),
 }
 
+const DEFAULT_CLAUDE_IDENTITY: &str = "cc0";
+
 /// What the run's status bar should say about the account: `(email, warning)`.
 ///
 /// The identity's login state **on the bot's host** is the authority (`tools` probes each
@@ -82,50 +84,62 @@ enum HookKind {
 /// is only metadata — on m4p `cc1` carried tony.lin's e-mail while the CLI, with no login in
 /// that config dir, quietly fell back to the machine's legacy Keychain entry and ran as cc0.
 /// That case is exactly the warning: identity set, host says not logged in.
-async fn claude_account(app: &Arc<App>, bot: &db::Bot) -> (Option<String>, Option<String>) {
-    let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-    let idn = bot.identity.as_deref().filter(|s| !s.is_empty());
-    let info = {
-        let tools = app.tools.lock().await;
-        tools.get(&host).and_then(|t| idn.and_then(|n| t.identities.get(n)).or_else(|| t.identities.get("cc0")).cloned())
-    };
-    match (idn, info) {
+fn claude_account_from_tools(
+    tools: &std::collections::HashMap<String, crate::tools::HostTools>,
+    host: &str,
+    identity: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let info = tools.get(host).and_then(|t| t.identities.get(identity.unwrap_or(DEFAULT_CLAUDE_IDENTITY)));
+    match (identity, info) {
         (Some(name), Some(i)) if i.logged_in == Some(false) => (
             None,
             Some(format!("身份 {name} 在 {host} 沒有登入：claude 會退回這台機器 Keychain 裡預設（cc0）的帳號執行。請在這個 Bot 按「登入 / 切換帳號」。")),
         ),
-        (_, Some(i)) if i.logged_in == Some(true) && i.account.is_some() => (i.account, None),
-        // No probe result for this host yet: fall back to the file, local only.
-        (_, _) if host == crate::config::LOCAL_HOST => (claude_account_email_file(bot), None),
+        (_, Some(i)) if i.account.is_some() => (i.account.clone(), None),
         _ => (None, None),
     }
 }
 
-/// The email claude is logged in as for this bot, read the way the user's own statusline
-/// script does (`oauthAccount.emailAddress` in `.claude.json`). The identity decides which
-/// config directory that is; `None` when it cannot be read. Local disk only.
-fn claude_account_email_file(bot: &db::Bot) -> Option<String> {
-    let home = dirs::home_dir()?;
-    // `env_json` may pin CLAUDE_CONFIG_DIR (that is how cc0 / cc1 are kept apart).
-    let cfg_dir = serde_json::from_str::<Value>(&bot.env_json)
-        .ok()
-        .and_then(|e| e.get("CLAUDE_CONFIG_DIR").and_then(|v| v.as_str()).map(String::from))
-        .map(|d| {
-            let d = d.replace("$HOME", &home.to_string_lossy());
-            std::path::PathBuf::from(d)
-        });
-    // Default config dir keeps its json at ~/.claude.json; a custom one keeps it inside.
-    let path = match cfg_dir {
-        Some(d) => d.join(".claude.json"),
-        None => home.join(".claude.json"),
-    };
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    let email = v.get("oauthAccount")?.get("emailAddress")?.as_str()?.trim().to_string();
-    if email.is_empty() {
-        None
-    } else {
-        Some(email)
+async fn claude_account(app: &Arc<App>, host: &str, identity: Option<&str>) -> (Option<String>, Option<String>) {
+    let tools = app.tools.lock().await;
+    claude_account_from_tools(&tools, host, identity)
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    fn identity(name: &str, account: &str) -> crate::tools::IdentityInfo {
+        crate::tools::IdentityInfo {
+            name: name.to_string(),
+            kind: "claude".to_string(),
+            logged_in: Some(true),
+            account: Some(account.to_string()),
+            plan: None,
+            source: crate::tools::SOURCE_CONFIG,
+            config_dir: None,
+        }
+    }
+
+    fn host_tools(identity: crate::tools::IdentityInfo) -> crate::tools::HostTools {
+        crate::tools::HostTools {
+            tools: std::collections::BTreeMap::new(),
+            identities: [(identity.name.clone(), identity)].into_iter().collect(),
+            shell_identities: Vec::new(),
+            checked_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn remote_bot_uses_remote_identity_account_not_local_account() {
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("local".to_string(), host_tools(identity("cc1", "local@example.com")));
+        tools.insert("remote".to_string(), host_tools(identity("cc1", "remote@example.com")));
+
+        let (account, warning) = claude_account_from_tools(&tools, "remote", Some("cc1"));
+
+        assert_eq!(account.as_deref(), Some("remote@example.com"));
+        assert_eq!(warning, None);
     }
 }
 
@@ -371,6 +385,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::StatusLine => {
+            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
             // The rendered status bar, for the chat header. Written only when it changed —
             // claude refreshes this line often and every write would wake every client.
             if let Some(r) = &run {
@@ -382,7 +397,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 if let Some(o) = rich.as_object_mut() {
                     o.remove("status_line");
                     o.remove("hook_event_name");
-                    let (email, warning) = claude_account(app, &bot).await;
+                    let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
+                    let (email, warning) = claude_account(app, &host, identity).await;
                     if let Some(email) = email {
                         o.insert("account_email".into(), serde_json::json!(email));
                     }
@@ -406,7 +422,6 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // overwrite the default-account `claude` row (cc0 / no-identity bots keep that key).
             // It is always stored under the bot's **host**: a remote bot reports the remote
             // account's limits, which must not land on the local row (SPEC §14).
-            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
