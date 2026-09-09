@@ -7236,9 +7236,9 @@ button.model-tag:hover:not(:disabled) {
   color: var(--status-working);
 }
 .team-phase.warn {
-  border-color: var(--warn);
-  background: var(--warn-soft);
-  color: var(--warn);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 .team-phase.ok {
   border-color: var(--lamp-green);
@@ -8229,7 +8229,7 @@ button.model-tag:hover:not(:disabled) {
 .team-paused-why {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--warn);
+  color: var(--danger);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.3;
@@ -8254,7 +8254,12 @@ button.model-tag:hover:not(:disabled) {
   background: var(--lamp-blue);
 }
 .team-phase-dot.warn {
-  background: var(--warn);
+  background: var(--danger);
+}
+/* 暫停（不論原因）在側欄一律紅：使用者要一眼掃到哪個隊伍卡住了。 */
+.team-node.paused .team-node-label {
+  color: var(--danger);
+  font-weight: 700;
 }
 .team-phase-dot.ok {
   background: var(--lamp-green);
