@@ -7,6 +7,7 @@ import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../ap
 import { effortLabel, quotaKey } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
+import { useComposerFocus } from '../hooks/useComposerFocus'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
@@ -608,19 +609,7 @@ function Composer({
   const [sending, setSending] = useState(false)
   const ref = inputRef
 
-  // A focused controlled textarea defaults to the beginning after a reload or bot switch.
-  // Restore the saved selection after React has put this bot's draft value into the DOM.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const currentText = useStore.getState().drafts[draftKey] ?? ''
-    const saved = useStore.getState().draftCursors[draftKey]
-    const max = currentText.length
-    const start = Math.max(0, Math.min(max, saved?.start ?? max))
-    const end = Math.max(start, Math.min(max, saved?.end ?? start))
-    el.focus()
-    el.setSelectionRange(start, end)
-  }, [state.disabled, draftKey, ref, forceFocus])
+  useComposerFocus({ draftKey, ref, forceFocus })
 
   useEffect(() => {
     const el = ref.current
