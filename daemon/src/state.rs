@@ -83,10 +83,11 @@ pub struct App {
     pub global_watchers: Mutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>,
     /// Serializes discovery/config projection against a default-session event and poll tick.
     pub default_sync_lock: Mutex<()>,
-    /// run_id -> pending terminal-fallback timer
-    pub fallback_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    /// run_id -> prompt-stall watchdog (delivered but the agent never went `working`)
-    pub stall_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// run_id -> generation of the pending terminal-fallback timer
+    pub fallback_timers: Mutex<HashMap<String, u64>>,
+    /// run_id -> generation of the prompt-stall watchdog (delivered but the agent never went
+    /// `working`)
+    pub stall_timers: Mutex<HashMap<String, u64>>,
     /// run_id -> live-progress poller (streams the partial reply while a turn is in flight)
     pub progress_pollers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> when that run last emitted a `turn_progress` frame (API.md: at most 4/s per run).
