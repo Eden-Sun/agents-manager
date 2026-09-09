@@ -150,13 +150,16 @@ export function describeEvent(ev: TeamEvent): string | null {
  * 使用者以為是卡死。
  *
  * - `bump`：預算類的暫停，加碼（各 ×2）之後直接繼續，同標題列的「加碼預算」＋「繼續」。
+ * - `force`：額度類的暫停（`quota_low`）。額度沒回來前按「繼續」只會被 scheduler 立刻再停一次，
+ *   所以這顆是把 `quota_stop_pct` 設成 100（= 不再擋額度）然後繼續，標成「無視額度繼續」。
  * - `resume`：原因處理完就能推，側欄給一顆「繼續」。
  * - `null`：得進面板才處理得掉（要回答 PM、要放行閘門、要先救成員），側欄只寫原因。
  */
-export type TeamPauseAction = 'bump' | 'resume' | null
+export type TeamPauseAction = 'bump' | 'force' | 'resume' | null
 
 export function teamPauseAction(reason: string | null): TeamPauseAction {
   if (reason === 'budget_time' || reason === 'budget_relays') return 'bump'
+  if (reason === 'quota_low') return 'force'
   if (!reason) return 'resume'
   if (reason === 'ask_user' || reason.startsWith('gate:') || reason.startsWith('member_')) return null
   return 'resume'

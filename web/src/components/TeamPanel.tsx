@@ -1094,6 +1094,21 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                   加碼預算
                 </button>
               ) : null}
+              {team.pause_reason === 'quota_low' && team.budget.quota_stop_pct < 100 ? (
+                <button
+                  type="button"
+                  className="mini-btn"
+                  disabled={Boolean(busy[`team:${teamId}:patch`] || busy[`team:${teamId}:resume`])}
+                  title="把這個 team 的額度門檻設成 100%（之後不再因額度暫停），然後繼續"
+                  onClick={() =>
+                    void patchTeam(teamId, { budget: { quota_stop_pct: 100 } }).then((ok) => {
+                      if (ok) void controlTeam(teamId, 'resume')
+                    })
+                  }
+                >
+                  無視額度繼續
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="mini-btn primary"
@@ -1231,7 +1246,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
             {budgetPause
               ? '加碼預算後即可繼續，成員都還活著。'
               : quotaPause
-                ? '等額度回來（或把該成員換成別的身分）再按「繼續」。'
+                ? '等額度回來（或把該成員換成別的身分）再按「繼續」；要硬推就按「無視額度繼續」。'
                 : gated
                   ? '這是 supervised 閘門，確認後按「放行」。'
                   : (team.pause_reason ?? '').startsWith('member_')

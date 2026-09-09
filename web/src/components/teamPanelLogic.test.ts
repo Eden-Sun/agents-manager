@@ -53,7 +53,7 @@ test('側欄暫停列：預算類加碼再繼續，要人回話／放行／救�
   assert.equal(teamPauseAction('budget_time'), 'bump')
   assert.equal(teamPauseAction('budget_relays'), 'bump')
   assert.equal(teamPauseAction('user'), 'resume')
-  assert.equal(teamPauseAction('quota_low'), 'resume')
+  assert.equal(teamPauseAction('quota_low'), 'force')
   assert.equal(teamPauseAction(null), 'resume')
   assert.equal(teamPauseAction('ask_user'), null)
   assert.equal(teamPauseAction('gate:merge'), null)
