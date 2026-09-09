@@ -825,7 +825,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
       if (ok) setDraft(draftKey, '')
     })
   }
-  const enterToSend = useEnterToSend(ref, () => submit())
+  const enterToSend = useEnterToSend()
 
   return (
     <div className="composer group-composer team-composer">
@@ -885,12 +885,12 @@ function TeamComposer({ teamId }: { teamId: string }) {
           }}
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing) return
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (enterToSend.enterSends && e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               submit()
             }
           }}
-          {...enterToSend}
+          {...enterToSend.props}
         />
         <button
           type="button"
