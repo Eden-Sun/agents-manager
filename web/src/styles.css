@@ -542,6 +542,124 @@ button:disabled {
 }
 
 /* 搜尋列：貼在清單上方，跟著側欄捲不動（清單自己捲）。 */
+/* SPEC §6.9：「claude 有更新 · 重啟 N 顆閒置的 Bot」。整條寬度、只在真的有更新時出現，
+   做完收掉——平常一個 pixel 都不佔，所以它可以放在這麼顯眼的位置而不擋事。 */
+.update-all {
+  flex: none;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+}
+
+.update-all-go {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  border-radius: 5px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+}
+
+.update-all-go:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.update-all-go:disabled {
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.update-all-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: help;
+}
+
+/* 跑起來之後同一條就變成進度，做完變成摘要——不另外開面板。 */
+.update-all.running {
+  background: var(--bg-sunken);
+}
+
+.update-all-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.update-all-line strong {
+  flex: 1;
+  min-width: 0;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-all-x {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.update-all-x:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.update-all-bar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.update-all-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+
+.update-all-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.update-all-list li {
+  display: flex;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.update-all-list li b {
+  flex: none;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.update-all-list.bad li b {
+  color: var(--danger);
+}
+
 .bot-search {
   display: flex;
   align-items: center;
@@ -10235,5 +10353,65 @@ button.run-debug-toggle:hover {
 
   .bot-row.compact .bot-sub .model-tag {
     max-width: none;
+  }
+}
+
+/* ---- 手機的標題列第二行再收一次（2026-09-09 使用者截圖：repo 一行、git 一行、context 一行，
+   三行吃掉 170px）。改成兩行、各 28px：第一行 repo chip 靠左、context / 花費靠右；第二行整寬
+   給 git 動作橫捲（它是會按的，要留完整）。標籤字（`context` / `花費`）在手機上是裝飾，
+   只留數值。 */
+@media (width <= 640px) {
+  .context-bar {
+    padding: 2px 10px;
+    gap: 6px;
+    row-gap: 0;
+  }
+
+  .context-bar > .issues-bar {
+    flex: 0 1 auto;
+    min-width: 0;
+    order: 0;
+    padding: 2px 0;
+    border-bottom: 0;
+    background: transparent;
+  }
+
+  /* 第一行右半：跟 repo chip 同列、靠右、不換行、排不下就自己橫捲（不會遮到 issues-pop：
+     它在 `.issues-bar` 裡，不在這個 overflow 底下）。 */
+  .context-bar > .statusline-bar {
+    flex: 1 1 0;
+    order: 0;
+    min-width: 0;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .context-bar > .git-bar {
+    flex: 1 0 100%;
+    order: 1;
+    padding: 2px 0 3px;
+  }
+
+  .context-bar .sl-k {
+    display: none;
+  }
+
+  /* 目錄在手機上不看（沒地方放）；版本本來就第一個讓位。 */
+  .context-bar .sl-item.sl-version,
+  .context-bar .sl-item[data-k='目錄'] {
+    display: none;
+  }
+
+  .context-bar .mini-btn,
+  .context-bar .git-bar .mini-btn {
+    min-height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
   }
 }

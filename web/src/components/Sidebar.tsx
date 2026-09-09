@@ -38,6 +38,7 @@ import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
 import { QuickAddBots } from './QuickAddBots'
+import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
@@ -1005,6 +1006,9 @@ export function Sidebar() {
           <TabsBadge />
         </div>
       </div>
+
+      {/* claude 有新版等著套用時的那一條（SPEC §6.9）。平常不佔位，只在真的有更新時出現。 */}
+      <UpdateAllBanner />
 
       {/* 搜尋 bot：名字、專案、主機、kind、身分、模型、人設、agent 目前的標題都算數，
           因為你記得的往往不是名字（見 store 的 `botSearchText`）。 */}
