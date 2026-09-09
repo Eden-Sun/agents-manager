@@ -3903,9 +3903,51 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         return Ok(false);
     }
 
+    let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
+
+    // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
+    // Scan both the fresh slice and the full snapshot — the banner may sit above the cursor.
+    let codex_hit = if bot.kind == "codex" {
+        codex_usage_notice_lines(&fresh)
+            .into_iter()
+            .chain(codex_usage_notice_lines(&read.text))
+            .find(|n| codex_limit_hit_line(n).is_some())
+    } else {
+        None
+    };
+
+    // Derive the reply before taking SQLite's write lock. In particular, `pane_columns` may
+    // make a herdr RPC, and `turn_echo_texts` reads through another pool connection.
+    let reply = if codex_hit.is_some() {
+        None
+    } else {
+        // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
+        // 2..n on screen and they would be stored as the agent's answer.
+        let sent = turn_echo_texts(app, &turn.id).await;
+        match screen_reply(&bot.kind, &fresh, &sent) {
+            None => None,
+            Some(reply) => Some(if is_shredded(&reply) {
+                // What is left has to be worth storing. A shredded capture means the pane is too
+                // narrow to read at all.
+                // Name the pane and its width: "too narrow" is not actionable when the user has
+                // a dozen panes open and no idea which one, or how much wider it needs to be.
+                let how_wide = match pane_columns(app, &run).await {
+                    Some(w) => format!("目前 {w} 欄，"),
+                    None => String::new(),
+                };
+                format!(
+                    "（pane {pane_id} 太窄，{how_wide}輸出在終端就被切成單字元，無法還原。\
+                     把它拉寬一點就會恢復；這只影響終端備援，hook 取得的回覆不受影響。）"
+                )
+            } else {
+                reply
+            }),
+        }
+    };
+
     // CAS: only one writer wins the turn. Keep the claim and the resulting message in one
     // transaction so a cancellation or database error cannot leave a completed turn without
-    // its terminal reply.
+    // its terminal reply. All pane / reply derivation above is outside this write transaction.
     let mut tx = app.db.begin().await?;
     let res = sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
@@ -3917,46 +3959,33 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
-    let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
-
-    // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
-    // Scan both the fresh slice and the full snapshot — the banner may sit above the cursor.
-    if bot.kind == "codex" {
-        if let Some(hit) = codex_usage_notice_lines(&fresh)
-            .into_iter()
-            .chain(codex_usage_notice_lines(&read.text))
-            .find(|n| codex_limit_hit_line(n).is_some())
-        {
-            sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?")
-                .bind(db::now())
-                .bind(&turn.id)
-                .execute(&mut *tx)
-                .await?;
-            let message = insert_message_tx(
-                &mut tx,
-                &turn.conversation_id,
-                Some(&turn.id),
-                "system",
-                &hit,
-                "system",
-                false,
-                Some(&read.text),
-            )
+    if let Some(hit) = codex_hit {
+        sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn.id)
+            .execute(&mut *tx)
             .await?;
-            remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
-            tx.commit().await?;
-            emit_message_added(app, &bot.id, message).await;
-            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-            apply_codex_limit_hit_quota(app, &host, &hit).await;
-            emit_turn(app, &turn.id).await;
-            return Ok(true);
-        }
+        let message = insert_message_tx(
+            &mut tx,
+            &turn.conversation_id,
+            Some(&turn.id),
+            "system",
+            &hit,
+            "system",
+            false,
+            Some(&read.text),
+        )
+        .await?;
+        remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
+        tx.commit().await?;
+        emit_message_added(app, &bot.id, message).await;
+        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+        apply_codex_limit_hit_quota(app, &host, &hit).await;
+        emit_turn(app, &turn.id).await;
+        return Ok(true);
     }
 
-    // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
-    // 2..n on screen and they would be stored as the agent's answer.
-    let sent = turn_echo_texts(app, &turn.id).await;
-    let Some(reply) = screen_reply(&bot.kind, &fresh, &sent) else {
+    let Some(reply) = reply else {
         // Nothing but our own prompt (or an empty screen). The turn is already closed, so the
         // composer unlocks either way — storing the echo back as an `incomplete` assistant
         // message would only put words in the agent's mouth.
@@ -3967,24 +3996,6 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         return Ok(true);
     };
 
-    // What is left has to be worth storing. A shredded capture means the pane is too narrow
-    // to read at all.
-    let reply = if is_shredded(&reply) {
-        // Name the pane and its width: "too narrow" is not actionable when the user has a
-        // dozen panes open and no idea which one, or how much wider it needs to be.
-        let how_wide = match pane_columns(app, &run).await {
-            Some(w) => format!("目前 {w} 欄，"),
-            None => String::new(),
-        };
-        format!(
-            "（pane {pane_id} 太窄，{how_wide}輸出在終端就被切成單字元，無法還原。\
-             把它拉寬一點就會恢復；這只影響終端備援，hook 取得的回覆不受影響。）"
-        )
-    } else {
-        reply
-    };
-
-    remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
     let message = insert_message_tx(
         &mut tx,
         &turn.conversation_id,
@@ -3996,6 +4007,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         Some(&read.text),
     )
     .await?;
+    remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
     tx.commit().await?;
     emit_message_added(app, &bot.id, message).await;
     emit_turn(app, &turn.id).await;
