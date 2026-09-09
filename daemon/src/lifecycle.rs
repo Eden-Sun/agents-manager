@@ -2887,7 +2887,7 @@ pub async fn prompt_grouped(
         return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
     }
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
-        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status IN ('in_flight','completed','completed_fallback') LIMIT 1",
+        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
     .bind(&conv)
     .fetch_optional(&app.db)
@@ -3802,28 +3802,40 @@ fn stall_reason(hints: &[String], nudged: bool) -> String {
 }
 
 pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
-    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+    let conversation_id = sqlx::query_scalar::<_, String>("SELECT conversation_id FROM turns WHERE id=?")
         .bind(turn_id)
         .fetch_optional(&app.db)
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id=?")
-        .bind(&t.conversation_id)
+        .bind(&conversation_id)
         .fetch_one(&app.db)
         .await
         .map_err(up)?;
     let lock = app.bot_lock(&bot_id).await;
     let _g = lock.lock().await;
-    if t.status != "in_flight" && t.delivery != "unknown" {
+    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+        .ok_or_else(|| LcError::NotFound("turn".into()))?;
+    if t.status != "in_flight" {
         return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
     }
-    sqlx::query("UPDATE turns SET status='failed', delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END, completed_at=? WHERE id=?")
+    let res = sqlx::query(
+        "UPDATE turns SET status='failed', delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END, completed_at=?
+         WHERE id=? AND status='in_flight'",
+    )
         .bind(db::now())
         .bind(turn_id)
         .execute(&app.db)
         .await
         .map_err(up)?;
+    if res.rows_affected() == 0 {
+        return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
+    }
     let _ = insert_message(app, &t.conversation_id, Some(turn_id), "system", "turn abandoned by user", "system", false, None).await;
     emit_turn(app, turn_id).await;
     Ok(())
@@ -5644,6 +5656,138 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "failed");
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod abandon_tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    async fn completed_turn(status: &str) -> (tt::Env, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'abandon-test','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web',?,'unknown',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(status)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        insert_message(&app, &conversation_id, Some(&turn_id), "assistant", "already complete", "hook", false, None)
+            .await
+            .unwrap();
+        (env, turn_id, conversation_id)
+    }
+
+    #[tokio::test]
+    async fn abandon_of_a_completed_unknown_delivery_turn_is_a_noop_conflict() {
+        for status in ["completed", "completed_fallback"] {
+            let (env, turn_id, conversation_id) = completed_turn(status).await;
+            let app = env.app.clone();
+            let before = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            let before_messages = sqlx::query_as::<_, (String, String, String, String)>(
+                "SELECT id, role, content, source FROM messages WHERE conversation_id=? ORDER BY id",
+            )
+            .bind(&conversation_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+
+            let err = abandon_turn(&app, &turn_id).await.expect_err("completed turns cannot be abandoned");
+            match err {
+                LcError::Conflict(body) => {
+                    assert_eq!(body["reason"], "turn is neither in-flight nor of unknown delivery");
+                    assert_eq!(body["turn_id"], turn_id);
+                }
+                other => panic!("expected conflict, got {other:?}"),
+            }
+
+            let after = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.delivery, before.delivery);
+            assert_eq!(after.completed_at, before.completed_at);
+            let after_messages = sqlx::query_as::<_, (String, String, String, String)>(
+                "SELECT id, role, content, source FROM messages WHERE conversation_id=? ORDER BY id",
+            )
+            .bind(&conversation_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+            assert_eq!(after_messages, before_messages);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_unknown_delivery_turn_does_not_block_a_new_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'prompt-unknown','codex','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,?,'web','completed','unknown',?,?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt_grouped(&app, &bot_id, "next", "request-1", None, None, &[])
+            .await
+            .expect("a completed unknown-delivery row must not block the next prompt");
+        assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");
     }
 }
 
