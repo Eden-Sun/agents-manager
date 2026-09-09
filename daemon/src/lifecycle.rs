@@ -2816,7 +2816,7 @@ pub async fn prompt_grouped(
         return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
     }
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
-        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status IN ('in_flight','completed','completed_fallback') LIMIT 1",
+        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
     .bind(&conv)
     .fetch_optional(&app.db)
@@ -5671,6 +5671,52 @@ mod abandon_tests {
             .unwrap();
             assert_eq!(after_messages, before_messages);
         }
+    }
+
+    #[tokio::test]
+    async fn a_completed_unknown_delivery_turn_does_not_block_a_new_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'prompt-unknown','codex','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,?,'web','completed','unknown',?,?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt_grouped(&app, &bot_id, "next", "request-1", None, None, &[])
+            .await
+            .expect("a completed unknown-delivery row must not block the next prompt");
+        assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");
     }
 }
 

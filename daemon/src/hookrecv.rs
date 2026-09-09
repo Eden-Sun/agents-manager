@@ -498,7 +498,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
             if let Some(t) = target {
                 sqlx::query(
-                    "UPDATE turns SET status='completed', completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
+                    "UPDATE turns SET status='completed', delivery=CASE WHEN delivery='unknown' THEN 'ok' ELSE delivery END,
+                     completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
                 )
                 .bind(db::now())
                 .bind(&session_id)
@@ -941,6 +942,7 @@ mod drain_tests {
 #[cfg(test)]
 mod external_claim_tests {
     use super::*;
+    use crate::team::testing as tt;
 
     /// The prompt echo scraped off the pane and the hook's own copy are the same message,
     /// however the pane wrapped or clipped it.
@@ -987,6 +989,81 @@ mod external_claim_tests {
             sqlx::query(q).bind(&now).execute(&pool).await.unwrap();
         }
         (TmpDb(dir), pool, "r".to_string(), "c".to_string())
+    }
+
+    #[tokio::test]
+    async fn stop_hook_resolves_unknown_delivery_when_it_completes_a_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'hook-unknown','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','unknown',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        process(
+            &app,
+            &HookBody {
+                bot_id,
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "native-session",
+                    "prompt_id": "native-turn",
+                    "last_assistant_message": "hook reply",
+                }),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turn.status, "completed");
+        assert_eq!(turn.delivery, "ok");
+        let assistant_messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'",
+        )
+        .bind(&turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(assistant_messages, 1);
     }
 
     /// The Stop hook must *claim* the in-flight turn `begin_external_turn` opened when the user
