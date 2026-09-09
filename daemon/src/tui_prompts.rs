@@ -46,7 +46,7 @@ fn flatten(screen: &str) -> String {
 }
 
 /// 問卷在輸入框上方，所以只看畫面尾端；正文就算提到問句和 `dismiss` 也不算。
-const SURVEY_TAIL_LINES: usize = 8;
+const SURVEY_TAIL_LINES: usize = 14;
 const SURVEY_QUESTION_LINES: usize = 3;
 const SURVEY_OPTION_GAP: usize = 3;
 
@@ -195,11 +195,9 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
         return false;
     }
     tokio::time::sleep(SETTLE).await;
-    if run.agent_status == "idle" {
-        return true;
-    }
     // 有的版本要再一個 Enter 才收下選擇。只在畫面**還停在同一份問卷**時才補，免得 Enter 落進
-    // 問卷後面那個真正在等人回答的東西。
+    // 問卷後面那個真正在等人回答的東西。不要用 run.agent_status 守衛：事件路徑傳進來的
+    // Run 是 DB 更新前的複本，idle -> blocked 時會是過期的 idle。
     if matches!(client.pane_read(&pane, "visible", 80).await, Ok(r) if is_feedback_survey(&r.text)) {
         let _ = client.pane_send_keys(&pane, &["enter"]).await;
     }
@@ -249,6 +247,11 @@ mod tests {
 │ (optional)              │
 │   1: Bad    2: Fine     │
 │   3: Good   0: Dismiss  │
+│ ╭──────────────────────╮ │
+│ │ >                    │ │
+│ ╰──────────────────────╯ │
+│ claude | model | 42%      │
+│ ⏵⏵ bypass permissions on │
 "#;
 
     const PERMISSION: &str = r#"
