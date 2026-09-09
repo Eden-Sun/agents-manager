@@ -1,7 +1,9 @@
 //! Hook receiver: `POST /hook/{provider}` plus Turn matching (SPEC §6.7) and spool replay (§4.4.6).
 
 use crate::db;
+use crate::config::{valid_id, ID_RE};
 use crate::lifecycle;
+use crate::hosts::sh_quote;
 use crate::state::App;
 use anyhow::Result;
 use axum::extract::{Path, State};
@@ -617,13 +619,16 @@ fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
 /// SPEC §11.4.3 — rename the remote spool aside, replay every line, and pick up the
 /// statusLine slot file in the same ssh. Returns how many spool lines were replayed.
 pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let Some(conn) = app.hosts.get(host).await else { return Ok(0) };
     if !conn.is_connected() {
         return Ok(0);
     }
-    let text = conn.ssh_exec(&drain_script(bot_id)).await?;
+    let text = conn.ssh_exec(&drain_script(bot_id)?).await?;
     let (lines, status) = parse_drain_output(&text);
     let mut n = 0usize;
     for line in lines {
@@ -661,18 +666,21 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
 }
 
 /// The remote sh: spool → `.replaying` → stdout → gone, then the statusLine slot (§11.4.5).
-fn drain_script(bot_id: &str) -> String {
-    format!(
-        "d=\"$HOME/.config/agents-manager/bots/{id}\"\n\
+fn drain_script(bot_id: &str) -> Result<String> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
+    let dir = format!("\"$HOME/.config/agents-manager/bots/\"{}", sh_quote(bot_id));
+    Ok(format!(
+        "d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\"; \
          elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; rm -f \"$f.replaying\"; fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
-        id = bot_id,
         marker = STATUS_MARKER
-    )
+    ))
 }
 
 /// The statusLine slot file as a `HookBody` for the existing `HookKind::StatusLine` branch.
@@ -930,11 +938,18 @@ mod drain_tests {
 
     #[test]
     fn the_drain_script_takes_the_spool_and_the_status_slot() {
-        let s = drain_script("botX");
-        assert!(s.contains("bots/botX"));
+        let s = drain_script("botX").unwrap();
+        assert!(s.contains("bots/\"'botX'"));
         assert!(s.contains("mv \"$f\" \"$f.replaying\""));
         assert!(s.contains("hook-status.json"));
         assert!(s.contains(STATUS_MARKER));
+    }
+
+    #[test]
+    fn the_drain_script_rejects_unsafe_ids() {
+        for id in ["../..", "x/y", r"..\..", "", "x\";id"] {
+            assert!(drain_script(id).is_err(), "unsafe id was accepted: {id:?}");
+        }
     }
 }
 
