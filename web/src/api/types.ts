@@ -687,8 +687,9 @@ export function effortLabel(level: string): string {
 }
 
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
-  // `claude --model` 的 alias（含 Fable 5.1）。
-  claude: ['opus', 'sonnet', 'haiku', 'fable'],
+  // `claude --model` 的 alias（含 Fable 5.1）。由輕到重排（2026-09-09 使用者決定）：
+  // 選單的順序就是這一組的正式順序，`sortModels` 拿它排 API 回來的清單。
+  claude: ['haiku', 'sonnet', 'opus', 'fable'],
   // gpt-5.5 拿掉了（2026-09-09）：上一代的模型還在帳號清單裡，但選單不該把它擺在等同的位置；
   // 真的要用的人走「自訂…」。
   codex: ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-6-astra'],

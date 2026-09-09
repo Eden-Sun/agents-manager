@@ -10807,6 +10807,17 @@ button.run-debug-toggle:hover {
 }
 
 /* Bot 設定最上面的識別列（pane / agent / session / workspace，點一下複製）。 */
+/* 關閉鍵原本跟其他 icon-btn 一樣大，但它是這張卡唯一的出口，而且在角落——手指最容易
+   點偏的位置（2026-09-09 使用者要求放大）。 */
+.bs-close {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  font-size: 20px;
+  line-height: 1;
+}
+
 .bs-idents {
   display: flex;
   align-items: center;
