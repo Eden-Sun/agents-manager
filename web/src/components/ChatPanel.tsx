@@ -1062,6 +1062,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
   const project = useStore((s) => (bot ? (s.projects.find((p) => p.id === bot.project_id) ?? null) : null))
+  const phone = useMediaQuery(PHONE_QUERY)
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const hostUp = useStore((s) => {
