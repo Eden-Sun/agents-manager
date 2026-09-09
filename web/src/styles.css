@@ -6443,6 +6443,11 @@ button.model-tag:hover:not(:disabled) {
   color: var(--danger);
 }
 
+.quota-bar-pct.ok {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
 /* no data: hatched track, no fill */
 .quota-bar.nodata {
   background: repeating-linear-gradient(
@@ -10816,5 +10821,18 @@ button.run-debug-toggle:hover {
 
   .main-head .quota-compact {
     padding-left: 2px;
+  }
+}
+
+/* 1100px 以下標題列已經放不下「⬆ 有更新 · 重啟套用」整句（bot 名被截成 c1-fa…、徽章本身也被切）：
+   跟手機一樣只留箭頭，字在 title。 */
+@media (width <= 1100px) {
+  .main-head .update-badge .update-badge-text {
+    display: none;
+  }
+
+  .main-head .update-badge {
+    min-width: 28px;
+    padding: 0 6px;
   }
 }

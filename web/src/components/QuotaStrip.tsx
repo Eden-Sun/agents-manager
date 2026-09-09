@@ -357,11 +357,11 @@ function Bar({
         {/* 黑針＝下次 reset 的位置（剩餘時間 ÷ 窗口長度）。 */}
         {mark !== null ? <span className="quota-bar-mark" style={{ left: `${mark}%` }} title={markTitle} /> : null}
       </span>
-      {low ? (
-        <span className={`quota-bar-pct ${lv}`} aria-hidden="true">
-          {pct === null ? pct : fmtPct(pct)}
-        </span>
-      ) : null}
+      {/* 數字一律印（UI-DECISIONS：百分比始終保留）：以前只有 low 才印，健康的那行沒有數字，
+          三行右緣參差不齊（2026-09-09 使用者截圖）。健康的用淡色，黃／紅照舊。 */}
+      <span className={`quota-bar-pct ${lv}`} aria-hidden="true">
+        {pct === null ? '—' : fmtPct(pct)}
+      </span>
     </span>
   )
 }
