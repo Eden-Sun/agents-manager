@@ -153,7 +153,7 @@ function TeamNode({ team }: { team: Team }) {
   const title = `${team.issue_title || `issue #${team.issue_number}`}`
 
   return (
-    <div className={`team-node${terminal ? ' terminal' : ''}${open ? '' : ' collapsed'}`}>
+    <div className={`team-node${terminal ? ' terminal' : ''}${team.phase === 'paused' ? ' paused' : ''}${open ? '' : ' collapsed'}`}>
       <div className={`team-node-head${selected ? ' selected' : ''}`}>
         <button
           type="button"
