@@ -5,6 +5,7 @@ import { ApiError } from '../api/types'
 import type { Issue, ProjectSubmodule } from '../api/types'
 import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
+import { labelStyle } from '../lib/labelStyle'
 import { GhLoginButton, isGhAuthError } from './GhAuth'
 
 /**
@@ -33,16 +34,6 @@ function ago(iso: string): string {
   const h = Math.round(m / 60)
   if (h < 48) return `${h} 小時前`
   return `${Math.round(h / 24)} 天前`
-}
-
-/** Readable text colour for a GitHub label hex. */
-function labelStyle(color: string | null) {
-  if (!color) return undefined
-  const r = parseInt(color.slice(0, 2), 16)
-  const g = parseInt(color.slice(2, 4), 16)
-  const b = parseInt(color.slice(4, 6), 16)
-  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-  return { background: `#${color}`, color: lum > 0.6 ? '#1b1e23' : '#fff', borderColor: 'transparent' }
 }
 
 function errorText(e: unknown): string {

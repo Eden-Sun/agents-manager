@@ -904,16 +904,6 @@ function SlItem({ k, children, title, className }: { k: string; children: ReactN
 }
 
 /**
- * The bot's status bar.
- *
- * The pane's own line is written for a terminal's width — the user's script trims the
- * account to five characters and the model to `OP5` to make it fit. The browser has room,
- * so this renders the *original* statusLine fields instead (`run.status`): the whole email,
- * the real model name, and the context window, which the compressed line has no space for.
- * `status_line` (the pane's exact text) stays as the tooltip, and as the fallback for a bot
- * whose payload has not arrived yet. Bots without a statusLine (codex / grok) show nothing.
- */
-/**
  * A status bar for the kinds that have no statusLine *hook*.
  *
  * codex renders its own status line inside the TUI (`[tui] status_line` in

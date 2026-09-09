@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useDialogFocus } from '../hooks/useDialogFocus'
@@ -17,47 +16,6 @@ import { ApiModelFields } from './ModelPicker'
  * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`：契約與型別保留，但這裡既不顯示
  * 也不會出現在 PATCH body 裡（維持 config.toml 既有的值）。
  */
-
-/** 各 kind 的 auto_approve 旗標（daemon `injected_args`）。 */
-export function AutoApproveFlags() {
-  return (
-    <>
-      claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code> / grok{' '}
-      <code>--always-approve</code>
-    </>
-  )
-}
-
-/** 模型欄位下方的提示文字。 */
-export function modelHint(kind: BotKind): string {
-  switch (kind) {
-    case 'claude':
-      return 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
-    case 'codex':
-      return '選「使用 CLI 預設」則不帶 -m，由 codex 自行決定'
-    case 'grok':
-      return '選「使用 CLI 預設」則不帶 -m，由 grok 自行決定（`grok models`：grok-4.6 為預設）'
-  }
-}
-
-/** grok only: reasoning effort as a row of options (daemon → `--reasoning-effort`). */
-export function EffortField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
-  return (
-    <div className="field">
-      <span>強度</span>
-      <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
-        <button type="button" className={`opt${value === null ? ' on' : ''}`} onClick={() => onChange(null)}>
-          預設
-        </button>
-        {EFFORT_OPTIONS.map((e) => (
-          <button key={e} type="button" className={`opt${value === e ? ' on' : ''}`} title={e} onClick={() => onChange(e)}>
-            {effortLabel(e)}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 /** v4.0 人設：auto-growing textarea; empty = null. */
 export function PersonaField({ value, onChange, collapsible }: { value: string; onChange: (v: string) => void; collapsible?: boolean }) {
