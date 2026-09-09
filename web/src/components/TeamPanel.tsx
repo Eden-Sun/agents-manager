@@ -357,10 +357,12 @@ function IssueQueue({
   teamId,
   projectHasGithub,
   onCloseIssue,
+  onCloseAll,
 }: {
   teamId: string
   projectHasGithub: boolean
   onCloseIssue: (issue: TeamIssue) => void
+  onCloseAll: (issues: TeamIssue[]) => void
 }) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   const removeTeamIssue = useStore((s) => s.removeTeamIssue)
@@ -374,6 +376,9 @@ function IssueQueue({
   const sum = team.issues_summary
   const working = issues.filter((i) => i.state === 'working').length
   const open = override ?? sum.failed > 0
+  // 已交付但還沒在 GitHub 上關掉的：兩個以上就給一顆「全部關閉」，不必一列一列按。
+  const closable = issues.filter((i) => i.state === 'done' && !i.issue_closed_at)
+  const closeKey = `team:${teamId}:close-issue`
   return (
     <section className="team-queue">
       {/* 進度條常駐在折疊列上方：走到第幾個、跑了多久是掃一眼就要看到的，不該藏在展開後。 */}
@@ -392,6 +397,17 @@ function IssueQueue({
           {sum.queued > 0 ? ` · 待處理 ${sum.queued}` : ''}
         </span>
       </button>
+      {projectHasGithub && closable.length >= 2 ? (
+        <button
+          type="button"
+          className="mini-btn primary team-queue-close-all"
+          disabled={Boolean(busy[closeKey])}
+          onClick={() => onCloseAll(closable)}
+          title={`在 GitHub 上關閉這 ${closable.length} 個已交付的 issue（各留一則完成留言）`}
+        >
+          關閉全部已交付（{closable.length}）
+        </button>
+      ) : null}
       {open ? (
         <ol className="team-queue-rows">
           {issues.map((i) => {
@@ -982,6 +998,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const [reopenOpen, setReopenOpen] = useState(false)
   const [reopenText, setReopenText] = useState('')
   const [issueToClose, setIssueToClose] = useState<TeamIssue | null>(null)
+  const [issuesToClose, setIssuesToClose] = useState<TeamIssue[] | null>(null)
+  const closeAllTeamIssues = useStore((s) => s.closeAllTeamIssues)
   // 「追加 issue」正在飛的那一刻：按鈕與輸入都收起來，重送只會換到一個 409。
   const addBusy = Boolean(busy[`team:${teamId}:add-issues`])
   // 390px 的標題列放不下五顆鍵：中止與關閉改從 `⋯` 走（下面 head-actions）。
@@ -1305,6 +1323,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           teamId={teamId}
           projectHasGithub={Boolean(project?.github)}
           onCloseIssue={setIssueToClose}
+          onCloseAll={setIssuesToClose}
         />
         <TaskSection teamId={teamId} />
         <Timeline teamId={teamId} />
@@ -1424,6 +1443,32 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           const issue = issueToClose
           setIssueToClose(null)
           if (issue) void closeTeamIssue(teamId, issue.id)
+        }}
+      />
+      <ConfirmDialog
+        open={issuesToClose !== null}
+        title={`關閉 ${issuesToClose?.length ?? 0} 個已交付的 issue？`}
+        body={
+          issuesToClose ? (
+            <>
+              <p>
+                會在 GitHub 上把這些 issue 逐一標成 closed，各留一則完成留言。<strong>這是對外的動作</strong>，但隨時可以在 GitHub 上重開。一個失敗不會擋住其他的。
+              </p>
+              <ul className="hint">
+                {issuesToClose.map((i) => (
+                  <li key={i.id}>
+                    #{i.issue_number} {i.issue_title}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null
+        }
+        confirmLabel="全部關閉"
+        onCancel={() => setIssuesToClose(null)}
+        onConfirm={() => {
+          setIssuesToClose(null)
+          void closeAllTeamIssues(teamId)
         }}
       />
       {confirm === 'delete' ? <TeamDeleteDialog teamId={teamId} onClose={() => setConfirm(null)} /> : null}

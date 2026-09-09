@@ -586,6 +586,11 @@ export interface StoreState {
    * 自己關 issue，UI 也要先二次確認（這是會寫到 GitHub 的動作）。
    */
   closeTeamIssue: (teamId: string, issueId?: string) => Promise<boolean>
+  /**
+   * 一鍵把這隊所有「已交付但還沒關」的 issue 關掉：同一個端點逐一呼叫（daemon 不做批次，
+   * §10.7 的「每一次關閉都是使用者按出來的」不變），一個失敗不擋其他，最後一則通知說結果。
+   */
+  closeAllTeamIssues: (teamId: string) => Promise<{ closed: number; failed: number }>
   /** `POST /teams/:id/say`（`to` = `pm` 或 bot_id）。 */
   sayToTeam: (teamId: string, text: string, to: string) => Promise<boolean>
   /** `POST /teams/:id/answer` — 回覆 PM 的 `ask_user`。 */
@@ -1832,6 +1837,30 @@ export const useStore = create<StoreState>((set, get) => ({
       )
     })
     return ok
+  },
+
+  async closeAllTeamIssues(teamId) {
+    const team = get().teams[teamId]
+    const targets = (team?.issues ?? []).filter((i) => i.state === 'done' && !i.issue_closed_at)
+    let closed = 0
+    let failed = 0
+    const errors: string[] = []
+    await guarded(set, get, `team:${teamId}:close-issue`, async () => {
+      for (const i of targets) {
+        try {
+          await api.closeTeamIssue(teamId, { issue_id: i.id })
+          closed += 1
+        } catch (e) {
+          failed += 1
+          errors.push(`#${i.issue_number}：${errText(e)}`)
+        }
+      }
+      await get().loadTeam(teamId)
+      await get().refreshState()
+    })
+    if (failed === 0) get().notify('info', `已關閉 ${closed} 個 issue`)
+    else get().notify('error', `已關閉 ${closed} 個，${failed} 個失敗：${errors.join('；')}`)
+    return { closed, failed }
   },
 
   async sayToTeam(teamId, text, to) {

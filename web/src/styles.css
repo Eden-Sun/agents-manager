@@ -7694,6 +7694,10 @@ button.model-tag:hover:not(:disabled) {
   gap: 8px;
   align-items: center;
 }
+.team-queue-close-all {
+  margin: 4px 0 0 22px;
+}
+
 .team-queue-list {
   margin: 6px 0 0;
   padding-left: 20px;
