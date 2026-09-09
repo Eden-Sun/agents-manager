@@ -413,9 +413,11 @@ function Gauge({
   const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  // 手機只寫 7d（grok 是「週」）：那是決定「今天還能不能開工」的數字，5h 兩三個小時就回來了。
-  // 收成「最吃緊的那一個」會讓 5h 一低就把 7d 蓋掉；全部列出來又把一顆 chip 撐成三組數字，
-  // 標題列那條就得一直捲（2026-09-09 使用者：只要 7d）。沒有 7d 的帳號才退回最吃緊的那個。
+  // 手機：**7d 常駐**（grok 是「週」）＋任何一個在警戒中的其他窗口。
+  //
+  // 7d 是決定「今天還能不能開工」的數字，5h 兩三個小時就回來了，所以它固定在同一個位置、
+  // 不會被別的窗口擠掉；但「5h 只剩 3%」是現在就會擋住你的事，不能等到點開才知道。所以是
+  // 常駐一個＋例外才追加，而不是收成最差的一個（7d 會被蓋掉）或三個全列（一排捲不完）。
   if (compact && seven !== null) {
     windows = [
       {
@@ -426,6 +428,25 @@ function Gauge({
         critical: q?.seven_day?.critical ?? false,
       },
     ]
+    // 5h / Fable 只有在 daemon 標成 low／critical 時才佔位（門檻見 docs/API.md §12.4）。
+    if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
+      windows.push({
+        name: '5h',
+        pct: five,
+        resetsAt: q?.five_hour?.resets_at ?? null,
+        low: q?.five_hour?.low ?? false,
+        critical: q?.five_hour?.critical ?? false,
+      })
+    }
+    if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
+      windows.push({
+        name: 'F',
+        pct: fable,
+        resetsAt: q?.fable?.resets_at ?? null,
+        low: q?.fable?.low ?? false,
+        critical: q?.fable?.critical ?? false,
+      })
+    }
   } else if (collapsed) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
