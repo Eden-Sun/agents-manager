@@ -30,6 +30,7 @@ import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
 import { ConfirmDialog } from './ConfirmDialog'
 import { IdentityBadge } from './IdentitiesPanel'
 import { CopyChip } from './CopyChip'
+import { BotSwitcher } from './BotSwitcher'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamQueueProgress } from './TeamQueueProgress'
 import { TeamRoleEditor } from './TeamRoleEditor'
@@ -1043,9 +1044,14 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           <span className="team-icon" aria-hidden="true">
             ⚙
           </span>
-          <strong title={team.issue_title}>
-            Team · {team.repo ? <span className="team-repo mono" title={`submodule ${team.repo}`}>{team.repo}</span> : null}#{team.issue_number} {team.issue_title}
-          </strong>
+          {/* 手機：標題就是切換器（同 ChatPanel），不然從 team 要換去別的畫面只能開抽屜。 */}
+          {phone ? (
+            <BotSwitcher name={`#${team.issue_number} ${team.issue_title}`} />
+          ) : (
+            <strong title={team.issue_title}>
+              Team · {team.repo ? <span className="team-repo mono" title={`submodule ${team.repo}`}>{team.repo}</span> : null}#{team.issue_number} {team.issue_title}
+            </strong>
+          )}
           <span className={`team-phase ${teamPhaseTone(team.phase)}`} title={team.pause_reason ? teamPauseLabel(team.pause_reason) : undefined}>
             {TEAM_PHASE_LABEL[team.phase]}
             {paused && team.pause_reason ? ` · ${teamPauseLabel(team.pause_reason)}` : ''}
