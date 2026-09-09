@@ -11002,3 +11002,16 @@ button.run-debug-toggle:hover {
 .quota-window-name.soon {
   color: var(--accent-ink);
 }
+
+/* bot 標題列是兩層（名字列＋模型 chip），齒輪照 `.main-head .icon-btn` 的 36px 會把整個
+   叢集撐到 61px，比 60px 的標題列還高，chip 就壓到底線上（2026-09-10 使用者截圖）。
+   齒輪在名字列縮到 28px，整個叢集也不准超過標題列高。 */
+.bot-head .main-title {
+  max-height: 100%;
+}
+.bot-head .main-title-row > .icon-btn.gear {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+}
