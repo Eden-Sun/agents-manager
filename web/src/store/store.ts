@@ -2022,7 +2022,6 @@ function connectSocket(set: SetFn, get: GetFn) {
       if (socket === 'open') {
         // Re-fetch on every open: a failed frame has already advanced lastSeq, so replaying it
         // would be racy. The full snapshot repairs that gap without rewinding concurrent frames.
-        lastRefreshError = null
         set({ socket, stateStale: false })
         void get().refreshState()
         return
