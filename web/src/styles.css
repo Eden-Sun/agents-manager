@@ -10544,3 +10544,30 @@ button.run-debug-toggle:hover {
   white-space: nowrap;
   font-weight: 600;
 }
+
+/* ---- 手機的「這回合還在跑」那一條（2026-09-09 使用者截圖：一行塞四顆鍵，說明字被擠成一個字
+   一行）。改成說明字自己一整行、鍵在第二行換行排；鍵縮到 30px 高。`.composer-queued` 同理。 */
+@media (width <= 640px) {
+  .composer-lock,
+  .composer-queued {
+    flex-wrap: wrap;
+    gap: 6px 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+
+  .composer-lock > span:first-child,
+  .composer-queued > span:first-child {
+    flex: 1 0 100%;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .composer-lock .mini-btn,
+  .composer-queued .mini-btn {
+    flex: 0 0 auto;
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+}
