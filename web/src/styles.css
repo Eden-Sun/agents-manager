@@ -6592,6 +6592,42 @@ button.model-tag:hover:not(:disabled) {
   flex: none;
 }
 
+/* 條子跟條上那顆量表同一個元件（`Bar`），所以只要給它寬度：這一列是 `圖示+窗口名 | 條 |
+   重置時間`，條佔中間所有剩下的寬。`align-items: baseline` 會把條壓在文字基線上，改成
+   center 才跟兩邊的字對齊。 */
+.quota-pop-line {
+  align-items: center;
+}
+
+.quota-pop-line .quota-bar-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.quota-pop-line .quota-bar-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 條上那顆是固定 38px（標題列很擠），彈出層裡它是主角，拉滿剩下的寬。 */
+.quota-pop-line .quota-bar {
+  flex: 1 1 auto;
+  width: auto;
+  height: 6px;
+}
+
+.quota-pop-line .quota-bar-mark {
+  top: -3px;
+  height: 12px;
+}
+
+/* 條上省掉 `%`（38px 那格擠），彈出層有位置就補回來：不然 `97` 讀起來像次數或分數。
+   `—`（沒資料）不加。 */
+.quota-pop-line .quota-bar-pct:not(.nodata)::after {
+  content: '%';
+  opacity: 0.7;
+}
+
 .quota-reset {
   margin-left: auto;
   color: var(--text-faint);
@@ -10367,10 +10403,30 @@ button.run-debug-toggle:hover {
     z-index: 80;
   }
 
-  /* 手機用圖示代替字：⏱ 5h / 📅 7d / ↻ 重置時間；「剩」不印，數字本身就是剩餘。 */
-  .quota-pop .quota-word,
+  /* 手機用圖示代替字：⏱ 5h / 📅 7d / ↻ 重置時間。 */
   .quota-pop .quota-pop-foot {
     display: none;
+  }
+
+  /* 條上的 chip 在手機是純文字（38px 的量表在那裡沒意義），所以「還剩多少 ／ 什麼時候回來」
+     的圖形版本只在這個彈出層裡看得到——條子給高一點、黑針給粗一點，手機上才看得清楚。 */
+  .quota-pop .quota-pop-line {
+    font-size: 13px;
+    gap: 10px;
+  }
+
+  .quota-pop .quota-bar {
+    height: 10px;
+  }
+
+  .quota-pop .quota-bar-mark {
+    top: -3px;
+    height: 16px;
+    width: 3px;
+  }
+
+  .quota-pop .quota-bar-pct {
+    font-size: 12px;
   }
 
   .quota-pop .quota-ico {
