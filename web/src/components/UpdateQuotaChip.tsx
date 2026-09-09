@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { inFlightTurn, useStore } from '../store/store'
 import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
+import { UpgradeIcon } from './UpgradeIcon'
 
 /**
  * 「claude 有更新」擺在額度列上（SPEC §6.9）。
@@ -58,7 +59,7 @@ export function UpdateQuotaChip() {
         disabled={!finished}
         onClick={finished ? clear : undefined}
       >
-        <span aria-hidden="true">{finished ? (failed.length ? '⚠' : '✓') : '⬆'}</span>
+        <span aria-hidden="true">{finished ? (failed.length ? '⚠' : '✓') : <UpgradeIcon />}</span>
         <span className="quota-update-n" aria-hidden="true">
           {finished ? ok.length : `${done}/${total}`}
         </span>
@@ -84,7 +85,7 @@ export function UpdateQuotaChip() {
         aria-label={label}
         onClick={() => setConfirming(true)}
       >
-        <span aria-hidden="true">⬆</span>
+        <span aria-hidden="true"><UpgradeIcon /></span>
         <span className="quota-update-n" aria-hidden="true">
           {sending ? '…' : readyCount === 0 ? busyCount : readyCount}
         </span>
