@@ -9,6 +9,7 @@ use crate::hosts::{sh_quote, HostConn};
 use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -3603,15 +3604,14 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
 /// and the composer would stay locked. Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
     let mut timers = app.stall_timers.lock().await;
-    if let Some(h) = timers.remove(run_id) {
-        h.abort();
-    }
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    timers.insert(run_id.to_string(), generation);
     let app2 = app.clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
-    let key = run_id.clone();
-    let h = tokio::spawn(async move {
+    tokio::spawn(async move {
         // What we handed the agent, for the "still in the input box" check below.
         let sent = turn_echo_texts(&app2, &turn_id).await;
         let mut nudged = false;
@@ -3622,6 +3622,9 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
+            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+                return;
+            }
             nudged = nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
         tokio::time::sleep(Duration::from_secs(STALL_SECS - NUDGE_EARLY_SECS)).await;
@@ -3630,6 +3633,9 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
+            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+                return;
+            }
             nudged |= nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
         if nudged {
@@ -3637,18 +3643,21 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         }
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
+        if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+            return;
+        }
         if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged).await {
             tracing::warn!(error = ?e, "stall watchdog failed");
         }
-        app2.stall_timers.lock().await.remove(&run_id);
+        let mut timers = app2.stall_timers.lock().await;
+        if timers.get(&run_id) == Some(&generation) {
+            timers.remove(&run_id);
+        }
     });
-    timers.insert(key, h);
 }
 
 pub async fn cancel_stall(app: &Arc<App>, run_id: &str) {
-    if let Some(h) = app.stall_timers.lock().await.remove(run_id) {
-        h.abort();
-    }
+    app.stall_timers.lock().await.remove(run_id);
 }
 
 async fn fail_stalled_turn(
@@ -3763,17 +3772,19 @@ pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
 /// Arm the 5s terminal-fallback timer after a working -> idle transition.
 pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
     let mut timers = app.fallback_timers.lock().await;
-    if let Some(h) = timers.remove(run_id) {
-        h.abort();
-    }
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    timers.insert(run_id.to_string(), generation);
     let app2 = app.clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
-    let key = run_id.clone();
-    let h = tokio::spawn(async move {
+    tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
+        if app2.fallback_timers.lock().await.get(&run_id) != Some(&generation) {
+            return;
+        }
         match try_fallback(&app2, &run_id).await {
             // No turn to fall back on. For a run with no hooks that is not "nothing happened":
             // the agent just finished answering and the only record of it is on the pane.
@@ -3796,9 +3807,11 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
         if let Err(e) = crate::turn_error::capture(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "turn error capture failed");
         }
-        app2.fallback_timers.lock().await.remove(&run_id);
+        let mut timers = app2.fallback_timers.lock().await;
+        if timers.get(&run_id) == Some(&generation) {
+            timers.remove(&run_id);
+        }
     });
-    timers.insert(key, h);
 }
 
 /// `Ok(true)` when a turn was actually completed from the pane, `Ok(false)` when there was
