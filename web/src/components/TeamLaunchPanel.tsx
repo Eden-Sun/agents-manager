@@ -6,8 +6,11 @@ import {
   BOT_KINDS,
   quotaKey,
   TEAM_BUDGET_DEFAULTS,
+  TEAM_MAX_CONCURRENT_ISSUES,
+  TEAM_MAX_TEAM_WORKERS,
   TEAM_WORKERS_DEFAULT,
   TEAM_WORKERS_MAX,
+  TEAM_WORKERS_UNLIMITED,
 } from '../api/types'
 import { projectHostName, toolsOfHost, useStore } from '../store/store'
 import { IdentityOptions, PersonaField } from './BotSettingsPanel'
@@ -21,7 +24,8 @@ import { QuotaStrip } from './QuotaStrip'
  * 「新增 Bot 表單改為 sheet」）。
  *
  * 三張角色卡（PM / 執行者 / Reviewer）各自選 kind 與模型（重用 `ApiModelFields`），
- * 執行者多一個 1–{TEAM_WORKERS_MAX} 的併行數 stepper，Reviewer 可整張關掉（= 不審查直接合併）。
+ * 執行者多一個 1–{TEAM_WORKERS_MAX} 的併行數 stepper 加一顆「∞ 無限」（§4.5），
+ * Reviewer 可整張關掉（= 不審查直接合併）。
  *
  * 使用者裁決過的預設值：`deliver = branch`（**不是** §12 建議的 `pr`——`pr` 會 push 到
  * origin，所以那個選項在 UI 上有明確的紅字說明）、`supervised = false`、執行者上限 4、
@@ -439,7 +443,11 @@ export function TeamLaunchPanel({
           />
           <RoleCard
             title="執行者"
-            hint="最多同時跑幾個 task；PM 派幾筆都可以，多的排隊。每個併行位一個獨立 worktree 與分支，這組設定套用到全部。"
+            hint={
+              count === TEAM_WORKERS_UNLIMITED
+                ? `無限：佇列裡有幾個 issue 就同時做幾個；每個 issue 先 1 個執行者，PM 派多少就開多少（每個 issue 最多 ${TEAM_WORKERS_MAX}、全隊最多 ${TEAM_MAX_TEAM_WORKERS}、同時最多 ${TEAM_MAX_CONCURRENT_ISSUES} 個 issue）。額度會很快用掉。`
+                : '最多同時跑幾個 task；PM 派幾筆都可以，多的排隊。每個併行位一個獨立 worktree 與分支，這組設定套用到全部。'
+            }
             host={host}
             spec={worker}
             onSpec={setWorker}
@@ -455,17 +463,30 @@ export function TeamLaunchPanel({
                   −
                 </button>
                 <span className="team-count-num" aria-live="polite">
-                  {count} 個
+                  {count === TEAM_WORKERS_UNLIMITED ? '∞ 無限' : `${count} 個`}
                 </span>
                 <button
                   type="button"
                   className="mini-btn"
-                  disabled={count >= TEAM_WORKERS_MAX}
+                  disabled={count >= TEAM_WORKERS_MAX || count === TEAM_WORKERS_UNLIMITED}
                   aria-label="增加一個併行位"
-                  title={count >= TEAM_WORKERS_MAX ? `上限 ${TEAM_WORKERS_MAX} 個（reviewer 序列化審查，再多只會排隊）` : undefined}
+                  title={count >= TEAM_WORKERS_MAX ? `上限 ${TEAM_WORKERS_MAX} 個（reviewer 序列化審查，再多只會排隊）；要更多請選「∞ 無限」` : undefined}
                   onClick={() => setCount((c) => Math.min(TEAM_WORKERS_MAX, c + 1))}
                 >
                   ＋
+                </button>
+                {/*
+                 * 「∞」不是「4 再加一」——它換的是排程口徑（issue 級併行，執行者按需長出來），
+                 * 所以是一個獨立的切換，不是 ＋ 按到底。
+                 */}
+                <button
+                  type="button"
+                  className={`mini-btn${count === TEAM_WORKERS_UNLIMITED ? ' is-on' : ''}`}
+                  aria-pressed={count === TEAM_WORKERS_UNLIMITED}
+                  title="無限：佇列裡的 issue 同時開工，執行者數隨 PM 派工放大。額度會很快用掉。"
+                  onClick={() => setCount((c) => (c === TEAM_WORKERS_UNLIMITED ? TEAM_WORKERS_DEFAULT : TEAM_WORKERS_UNLIMITED))}
+                >
+                  ∞
                 </button>
               </span>
             }
@@ -619,7 +640,11 @@ export function TeamLaunchPanel({
               submit()
             }}
           >
-            {busy ? '建立中…' : `建立並啟動（${count + 1 + (hasReviewer ? 1 : 0)} 位成員）`}
+            {busy
+              ? '建立中…'
+              : count === TEAM_WORKERS_UNLIMITED
+                ? `建立並啟動（∞ 無限併行，先 ${2 + (hasReviewer ? 1 : 0)} 位成員）`
+                : `建立並啟動（${count + 1 + (hasReviewer ? 1 : 0)} 位成員）`}
           </button>
         </div>
       </div>

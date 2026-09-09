@@ -7599,6 +7599,42 @@ button.model-tag:hover:not(:disabled) {
   gap: 2px;
   margin-top: 6px;
 }
+/*
+ * §4.5 無限併行：Task 清單先按 issue 分段。每段一條淡淡的左邊界，讓「這幾筆屬於同一個
+ * 整合分支」不用讀分支名就看得出來——多 issue 時那是唯一會搞錯的事。
+ */
+.team-task-issue {
+  border-left: 2px solid var(--line);
+  margin: 8px 0 0 10px;
+  padding-left: 8px;
+}
+.team-task-issue-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.team-task-issue .team-task-list {
+  max-height: none;
+  padding: 0;
+}
+/* 成員列在多 issue 時分段：`#48` 標籤 + 那個 issue 的執行者。 */
+.team-member-issue {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+.team-member-issue-tag {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* 建隊面板的「∞ 無限」切換：選中時跟其他 on 狀態的小按鈕同一個樣子。 */
+.mini-btn.is-on {
+  background: var(--accent-soft, var(--line));
+  color: var(--accent);
+  font-weight: 600;
+}
 .team-task-col {
   color: var(--text-faint);
   font-size: 11px;

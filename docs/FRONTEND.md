@@ -1592,3 +1592,27 @@ hint 改成「最多同時跑幾個 task；PM 派幾筆都可以，多的排隊�
 - `scripts/ui-routes-shots.mjs`（headless Chrome，對 5173 的真 daemon）：直接開 `/bots/<id>`、
   點終端、上一頁、設定開關、`/teams/<id>` reload、壞連結、手機抽屜的上一頁；截圖在
   `docs/screenshots/routes/`。跑法：`BOT=<id> TEAM=<id> PROJECT=<id> OUT=dir node scripts/ui-routes-shots.mjs`。
+
+## 無限併行（`workers.count = 0`，2026-09-09）
+
+SPEC-team §4.5。取捨寫在 `docs/UI-DECISIONS.md`「無限併行」，這裡只記程式在哪。
+
+- `api/types.ts`：`TEAM_WORKERS_UNLIMITED = 0`、`TEAM_MAX_CONCURRENT_ISSUES = 6`、
+  `TEAM_MAX_TEAM_WORKERS = 12`；`TeamRolePatch.count`；`TeamRoles.workers_count`
+  （`roles_json.workers.count`，**`0` 要留著**，別用 `|| null` 吃掉）。
+- `api/normalize.ts`：`toTeamRoles` 帶出 `workers_count`。
+- `TeamLaunchPanel`：執行者卡的 stepper 旁多一顆「∞」切換（`is-on` 樣式），hint 與送出鍵
+  的文案跟著換。它不是「4 再加一」，所以是獨立按鈕而不是 stepper 的一格。
+- `TeamRoleEditor`：執行者的表單多一排併行數（∞ / 1–4），改了才送 `count`；`applied` 由
+  daemon 回（改成 0 一律 `now`）。收合摘要用 `∞` 取代 `×n`。
+- `TeamPanel`：
+  - `IssueQueue` 的「當前」判斷改成 `i.state === 'working'`（可以有好幾列），摘要多「進行中 N」。
+  - `TaskSection` 分岔：>1 個 working 走 `TaskGroupByIssue`（每個 issue 一段，標整合分支與
+    `∞ · 執行者 k · 進行中 m/n`），否則走原本的 `TaskList`。兩者共用 `TaskRows`。
+  - `MemberStrip` 在多 issue 時把執行者按 issue 分段。issue 位置要從 **`bot.name`** 讀
+    （`issueSeqOfMember`）——`teamShortName` 的工作就是把 `i<seq>-` 拿掉，拿短名配對永遠是 null。
+- `teamProgress.ts`：`workingIssuesOf` / `TeamProgress.workingIssues`；`issueQueueAt` 把所有
+  working 都算進「已開工」；計時取**最早**開跑的 working issue。`TeamIssueProgress` 在
+  `workingIssues > 1` 時改印「進行中 N」。
+- `api/mock.ts`：`count = 0` 時把佇列裡的 issue 全部設成 `working`、各給一個 `i<seq>-dev-1`，
+  task 帶 `issue_id`，這樣 mock 就能重現多 issue 的畫面（截圖就是這樣拍的）。

@@ -28,6 +28,11 @@ export interface TeamCount {
 export interface TeamProgress {
   /** 佇列走到第幾個；`total <= 1`（沒有佇列）時呼叫端不要顯示。 */
   issues: TeamCount
+  /**
+   * 同時進行中的 issue 數（SPEC-team §4.5 無限模式）。有限模式恆為 0 或 1，呼叫端只在
+   * `> 1` 時改口徑：「第幾個 / 共幾個」在多個同時進行時是錯的說法。
+   */
+  workingIssues: number
   /** 當前這個 issue 的 task 走到第幾個。 */
   tasks: TeamCount
   /** 計時器從哪一刻起算（epoch ms）；null = 這個 issue 還沒開跑。 */
@@ -55,9 +60,14 @@ function parse(at: string | null | undefined): number | null {
  */
 export function issueQueueAt(team: Team): number {
   const sum = team.issues_summary
-  const current = team.issues.find((i) => i.id === team.current_issue_id) ?? null
   const settled = sum.done + sum.failed
-  return Math.min(sum.total, settled + (current && current.state === 'working' ? 1 : 0))
+  // §4.5 無限模式：同時可能有好幾個 working，全部都算「已經開工的」。
+  return Math.min(sum.total, settled + workingIssuesOf(team))
+}
+
+/** 現在同時有幾個 issue 在跑。有限模式是 0 或 1；無限模式最多 `TEAM_MAX_CONCURRENT_ISSUES`。 */
+export function workingIssuesOf(team: Team): number {
+  return team.issues.filter((i) => i.state === 'working').length
 }
 
 export function teamProgressOf(team: Team): TeamProgress {
@@ -65,7 +75,14 @@ export function teamProgressOf(team: Team): TeamProgress {
   const teamEnded = parse(team.ended_at)
   // 計時從「這個 issue」開跑算起（SPEC-team §2.3：預算本來就是每個 issue 算的）。
   // 佇列裡沒有對應那一項的舊 team 就退回整隊的時間。
-  const startedAt = parse(current?.started_at) ?? parse(team.started_at)
+  // §4.5 無限模式有好幾個 working，`current` 只是第一個；計時取最早開跑的那一個，
+  // 「這隊跑多久了」才不會在第一個 issue 交付後突然跳回幾分鐘前。
+  const oldest = team.issues
+    .filter((i) => i.state === 'working' && i.started_at)
+    .map((i) => parse(i.started_at))
+    .filter((t): t is number => t !== null)
+    .sort((a, b) => a - b)[0]
+  const startedAt = oldest ?? parse(current?.started_at) ?? parse(team.started_at)
   // 整隊結束了就算 issue 自己沒寫 ended_at 也要凍結——不然做完的卡片會一直跳秒。
   const endedAt = parse(current?.ended_at) ?? teamEnded
 
@@ -73,6 +90,7 @@ export function teamProgressOf(team: Team): TeamProgress {
   const settled = SETTLED_TASKS.reduce((n, s) => n + (tasks[s] ?? 0), 0)
   return {
     issues: { at: issueQueueAt(team), total: team.issues_summary.total },
+    workingIssues: workingIssuesOf(team),
     tasks: { at: Math.min(tasks.total, settled), total: tasks.total },
     startedAt,
     endedAt,

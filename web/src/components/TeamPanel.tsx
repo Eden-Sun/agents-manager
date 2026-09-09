@@ -180,12 +180,52 @@ function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
   )
 }
 
+/**
+ * §7.3：執行者的**暱稱**帶著它那個 issue 的佇列位置（`ttxka1d-i9-dev-1`）。無限模式下好幾個
+ * issue 同時在跑，那個 `i<seq>` 是唯一能把「這是誰的執行者」分開的東西。
+ *
+ * 讀的必須是 `bot.name` 而不是短名：`teamShortName` 的工作就是把 `i<seq>-` 拿掉（短名是
+ * 協定用的路由鍵 `dev-1`），拿短名來配對永遠是 null。
+ */
+function issueSeqOfMember(name: string): number | null {
+  const m = /(?:^|-)i(\d+)-dev-/.exec(name)
+  return m ? Number(m[1]) : null
+}
+
 function MemberStrip({ teamId }: { teamId: string }) {
   const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
   const tasks = useStore(useShallow((s) => s.teamDetail[teamId]?.tasks ?? []))
+  const working = useStore(useShallow((s) => (s.teams[teamId]?.issues ?? []).filter((i) => i.state === 'working')))
   const openTask = (botId: string) =>
     tasks.find((t) => !!t.worker_bot_id && t.worker_bot_id === botId && t.state !== 'merged' && t.state !== 'skipped' && t.state !== 'failed') ??
     null
+  // 一個 issue 在跑時分段只會多一條沒有意義的標籤，所以只有多 issue 時才分。
+  if (working.length > 1) {
+    const longLived = members.filter((b) => b.team?.role !== 'worker')
+    return (
+      <div className="members team-members" role="list" aria-label="Team 成員">
+        {longLived.map((b) => (
+          <MemberChip key={b.id} bot={b} task={openTask(b.id)} />
+        ))}
+        {working.map((i) => {
+          const own = members.filter(
+            (b) => b.team?.role === 'worker' && issueSeqOfMember(b.name) === i.seq,
+          )
+          if (own.length === 0) return null
+          return (
+            <span key={i.id} className="team-member-issue" role="listitem">
+              <span className="team-member-issue-tag" title={i.branch ?? undefined}>
+                #{i.issue_number}
+              </span>
+              {own.map((b) => (
+                <MemberChip key={b.id} bot={b} task={openTask(b.id)} />
+              ))}
+            </span>
+          )
+        })}
+      </div>
+    )
+  }
   return (
     <div className="members team-members" role="list" aria-label="Team 成員">
       {members.map((b) => (
@@ -330,6 +370,7 @@ function IssueQueue({
   const issues = team?.issues ?? []
   if (!team || issues.length < 2) return null
   const sum = team.issues_summary
+  const working = issues.filter((i) => i.state === 'working').length
   const open = override ?? sum.failed > 0
   return (
     <section className="team-queue">
@@ -344,7 +385,7 @@ function IssueQueue({
       >
         <span className="chev">{open ? '▼' : '▶'}</span> issue 佇列
         <span className="hint">
-          {sum.total} 個 · 已交付 {sum.done}
+          {sum.total} 個{working > 1 ? ` · 進行中 ${working}` : ''} · 已交付 {sum.done}
           {sum.failed > 0 ? ` · 失敗 ${sum.failed}` : ''}
           {sum.queued > 0 ? ` · 待處理 ${sum.queued}` : ''}
         </span>
@@ -352,7 +393,9 @@ function IssueQueue({
       {open ? (
         <ol className="team-queue-rows">
           {issues.map((i) => {
-            const current = i.id === team.current_issue_id
+            // §4.5 無限模式：同時可以有好幾列 `working`，全部都算「當前」；
+            // `current_issue_id` 只是舊 UI 的鏡像，不能拿來判斷。
+            const current = i.state === 'working' 
             const key = `team:${teamId}:remove-issue:${i.id}`
             const closeKey = `team:${teamId}:close-issue`
             return (
@@ -401,33 +444,18 @@ function IssueQueue({
   )
 }
 
-function TaskList({ teamId }: { teamId: string }) {
+/**
+ * §4.5 無限模式的 Task 清單：先按 issue 分組，每組再按狀態欄分。一個 issue 時完全不分組，
+ * 走原本那條路——把「t1…t9」平鋪在一起，多 issue 時根本看不出哪一筆屬於哪個整合分支。
+ */
+function TaskGroupByIssue({ teamId }: { teamId: string }) {
+  const issues = useStore(useShallow((s) => (s.teams[teamId]?.issues ?? []).filter((i) => i.state === 'working')))
   const tasks = useStore(useShallow((s) => s.teamDetail[teamId]?.tasks ?? []))
-  const maxRounds = useStore((s) => s.teams[teamId]?.budget.max_review_rounds ?? 2)
-  const names = useStore(useShallow((s) => Object.fromEntries(teamMemberBots(s, teamId).map((b) => [b.id, teamShortName(b.name)]))))
-  const decide = useStore((s) => s.decideTeamTask)
-  const busy = useStore((s) => s.busy)
-  // 同 `IssueQueue`：預設收起，只有「需要你」的 task 會把它推開，因為那是你非看不可的。
+  const workers = useStore(useShallow((s) => teamMemberBots(s, teamId).filter((b) => b.team?.role === 'worker')))
   const [override, setOverride] = useState<boolean | null>(null)
-
-  // §4.5：使用者關心的是「現在同時跑幾個」，而不是側欄有幾個 bot。
-  const workerCount = useStore((s) => teamMemberBots(s, teamId).filter((b) => b.team?.role === 'worker').length)
-  const running = tasks.filter((t) => !!t.worker_bot_id && !TASK_TERMINAL.includes(t.state)).length
-
-  const grouped = useMemo(() => {
-    const map = new Map<string, TeamTask[]>()
-    for (const t of tasks) {
-      const col = TASK_COLUMN[t.state]
-      map.set(col, [...(map.get(col) ?? []), t])
-    }
-    return COLUMN_ORDER.filter((c) => map.has(c)).map((c) => [c, map.get(c)!] as const)
-  }, [tasks])
-
-  if (tasks.length === 0) return null
-
   const needsUser = tasks.some((t) => TEAM_TASK_NEEDS_USER.includes(t.state))
   const open = override ?? needsUser
-
+  if (tasks.length === 0) return null
   return (
     <div className="team-tasks">
       <button
@@ -438,13 +466,50 @@ function TaskList({ teamId }: { teamId: string }) {
         onClick={() => setOverride(!open)}
       >
         <span className="chev">{open ? '▼' : '▶'}</span> Task（{tasks.length}）
-        <span className="disclosure-note">
-          併行 {running}/{workerCount}
-          {grouped.length > 0 ? ` ・ ${grouped.map(([col, list]) => `${col} ${list.length}`).join(' ・ ')}` : ''}
-        </span>
+        <span className="disclosure-note">∞ 無限 · {issues.length} 個 issue 同時進行</span>
       </button>
-      {open ? (
-        <div className="team-task-list">
+      {open
+        ? issues.map((i) => {
+            const own = tasks.filter((t) => t.issue_id === i.id)
+            const k = workers.filter((b) => issueSeqOfMember(b.name) === i.seq).length
+            const running = own.filter((t) => !!t.worker_bot_id && !TASK_TERMINAL.includes(t.state)).length
+            return (
+              <div key={i.id} className="team-task-issue">
+                <div className="team-task-issue-head">
+                  <a className="issue-title" href={i.issue_url} target="_blank" rel="noreferrer">
+                    <span className="issue-num">#{i.issue_number}</span> {i.issue_title}
+                  </a>
+                  {i.branch ? <code className="team-queue-branch">{i.branch}</code> : null}
+                  <span className="hint">
+                    ∞ · 執行者 {k} · 進行中 {running}/{own.length}
+                  </span>
+                </div>
+                <TaskRows teamId={teamId} tasks={own} />
+              </div>
+            )
+          })
+        : null}
+    </div>
+  )
+}
+
+
+/** Task 清單的列本身：按狀態欄分組。`TaskList` 與 `TaskGroupByIssue` 共用。 */
+function TaskRows({ teamId, tasks }: { teamId: string; tasks: TeamTask[] }) {
+  const maxRounds = useStore((s) => s.teams[teamId]?.budget.max_review_rounds ?? 2)
+  const names = useStore(useShallow((s) => Object.fromEntries(teamMemberBots(s, teamId).map((b) => [b.id, teamShortName(b.name)]))))
+  const decide = useStore((s) => s.decideTeamTask)
+  const busy = useStore((s) => s.busy)
+  const grouped = useMemo(() => {
+    const map = new Map<string, TeamTask[]>()
+    for (const t of tasks) {
+      const col = TASK_COLUMN[t.state]
+      map.set(col, [...(map.get(col) ?? []), t])
+    }
+    return COLUMN_ORDER.filter((c) => map.has(c)).map((c) => [c, map.get(c)!] as const)
+  }, [tasks])
+  return (
+    <div className="team-task-list">
           {grouped.map(([col, list]) => (
             <div key={col} className="team-task-group">
               <span className={`team-task-col${col === '需要你' ? ' urgent' : ''}`}>{col}</span>
@@ -507,8 +572,58 @@ function TaskList({ teamId }: { teamId: string }) {
               })}
             </div>
           ))}
-        </div>
-      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Task 區塊。無限模式（同時多個 issue）改走 `TaskGroupByIssue`——那時「t1…t9」平鋪在一起
+ * 看不出哪一筆屬於哪個整合分支（§4.5）。
+ */
+function TaskSection({ teamId }: { teamId: string }) {
+  const working = useStore((s) => (s.teams[teamId]?.issues ?? []).filter((i) => i.state === 'working').length)
+  return working > 1 ? <TaskGroupByIssue teamId={teamId} /> : <TaskList teamId={teamId} />
+}
+
+function TaskList({ teamId }: { teamId: string }) {
+  const tasks = useStore(useShallow((s) => s.teamDetail[teamId]?.tasks ?? []))
+  // 同 `IssueQueue`：預設收起，只有「需要你」的 task 會把它推開，因為那是你非看不可的。
+  const [override, setOverride] = useState<boolean | null>(null)
+
+  // §4.5：使用者關心的是「現在同時跑幾個」，而不是側欄有幾個 bot。
+  const workerCount = useStore((s) => teamMemberBots(s, teamId).filter((b) => b.team?.role === 'worker').length)
+  const running = tasks.filter((t) => !!t.worker_bot_id && !TASK_TERMINAL.includes(t.state)).length
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, TeamTask[]>()
+    for (const t of tasks) {
+      const col = TASK_COLUMN[t.state]
+      map.set(col, [...(map.get(col) ?? []), t])
+    }
+    return COLUMN_ORDER.filter((c) => map.has(c)).map((c) => [c, map.get(c)!] as const)
+  }, [tasks])
+
+  if (tasks.length === 0) return null
+
+  const needsUser = tasks.some((t) => TEAM_TASK_NEEDS_USER.includes(t.state))
+  const open = override ?? needsUser
+
+  return (
+    <div className="team-tasks">
+      <button
+        type="button"
+        className="disclosure sub"
+        aria-expanded={open}
+        title={open ? '收起 Task 清單' : '展開 Task 清單'}
+        onClick={() => setOverride(!open)}
+      >
+        <span className="chev">{open ? '▼' : '▶'}</span> Task（{tasks.length}）
+        <span className="disclosure-note">
+          併行 {running}/{workerCount}
+          {grouped.length > 0 ? ` ・ ${grouped.map(([col, list]) => `${col} ${list.length}`).join(' ・ ')}` : ''}
+        </span>
+      </button>
+      {open ? <TaskRows teamId={teamId} tasks={tasks} /> : null}
     </div>
   )
 }
@@ -1189,7 +1304,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           projectHasGithub={Boolean(project?.github)}
           onCloseIssue={setIssueToClose}
         />
-        <TaskList teamId={teamId} />
+        <TaskSection teamId={teamId} />
         <Timeline teamId={teamId} />
         {terminal ? (
           <div className="composer group-composer team-composer">

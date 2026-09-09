@@ -894,12 +894,22 @@ export const TEAM_BUDGET_DEFAULTS: TeamBudget = {
 }
 
 /**
- * SPEC-team §7.1：**併行數** 1–4（使用者裁決的上限），預設 1。
+ * SPEC-team §7.1：**併行數** `0`（無限）或 1–4，預設 1。
  *
  * 欄位名還是 `workers.count`（相容），但語意是「最多同時跑幾個 task」，不是「有幾個人」。
  */
 export const TEAM_WORKERS_MAX = 4
 export const TEAM_WORKERS_DEFAULT = 1
+
+/**
+ * SPEC-team §4.5（2026-09-09）：`count = 0` 是**無限**——佇列裡有幾個 issue 就同時做幾個，
+ * 執行者數隨 PM 派工放大。是一個新的值，不是「沒有執行者」。
+ */
+export const TEAM_WORKERS_UNLIMITED = 0
+/** 無限模式下同時進行的 issue 上限（daemon `MAX_CONCURRENT_ISSUES`）。 */
+export const TEAM_MAX_CONCURRENT_ISSUES = 6
+/** 無限模式下全隊執行者上限（daemon `MAX_TEAM_WORKERS`）。 */
+export const TEAM_MAX_TEAM_WORKERS = 12
 
 /** 建 team 時的額度預檢門檻（§9.2）：≥70% 已用 → 黃色警告。 */
 export const TEAM_QUOTA_WARN_PCT = 70
@@ -1076,7 +1086,7 @@ export interface TeamRoleSpec {
 }
 
 export interface TeamWorkersSpec extends TeamRoleSpec {
-  /** 1–`TEAM_WORKERS_MAX` */
+  /** `TEAM_WORKERS_UNLIMITED`（0，無限）或 1–`TEAM_WORKERS_MAX` */
   count: number
 }
 
@@ -1120,6 +1130,8 @@ export interface TeamRolePatch {
   fast?: boolean
   identity?: string | null
   apply?: 'next' | 'now'
+  /** 只有 `workers` 有：併行數，`TEAM_WORKERS_UNLIMITED`（0）或 1–`TEAM_WORKERS_MAX`。 */
+  count?: number
 }
 
 /** `roles_json.<role>`：那個角色是用什麼設定建出來的（`GET /teams/:id` 的 `roles`）。 */
@@ -1136,6 +1148,11 @@ export interface TeamRoles {
   pm: TeamWorkerSpec | null
   workers: TeamWorkerSpec | null
   reviewer: TeamWorkerSpec | null
+  /**
+   * 併行數（`roles_json.workers.count`）：`0` = 無限。`null` = 舊 daemon 沒送，
+   * 呼叫端退回「數現有的執行者」。
+   */
+  workers_count: number | null
 }
 
 /** `PatchTeamInput` 的 key，也是 daemon `roles_json` 的 key。 */
