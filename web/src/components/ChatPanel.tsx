@@ -16,6 +16,7 @@ import { BlockedModal } from './BlockedModal'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
 import { BotNameField } from './BotNameField'
+import { BotSwitcher } from './BotSwitcher'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
@@ -1197,7 +1198,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <div className="main-title-row">
             <StatusLamp lamp={lamp} />
             <KindTag kind={bot.kind} />
-            <BotNameField botId={botId} name={bot.name} />
+            {/* 手機：點名字是換 bot（BotSwitcher），改名走設定；桌面：點名字直接改。 */}
+            {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
             {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
                 header is busy, and the settings button is the one thing in here that is not
                 repeated somewhere else — the badges all are. */}
