@@ -2834,7 +2834,7 @@ export function teamMemberBots(state: StoreState, teamId: string | null): Bot[] 
  * SPEC-team §7.3 的短名。定義在 `api/types.ts`（純模組，`teamPanelLogic` 這種可單獨跑
  * `node --test` 的檔案才能用），這裡照舊 re-export，元件的 import 路徑不變。
  */
-export { teamShortName } from '../api/types'
+export { teamShortName, teamDisplayName } from '../api/types'
 
 export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
   if (!projectId) return { disabled: true, reason: '', sendable: [] }

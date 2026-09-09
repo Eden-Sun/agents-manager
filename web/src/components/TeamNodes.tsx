@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Bot, Team } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, TEAM_TERMINAL_PHASES, roleKeyOfMember, teamPauseLabel, teamPhaseTone } from '../api/types'
-import { botLamp, teamMemberBots, teamShortName, teamsOfProject, useStore } from '../store/store'
+import { botLamp, teamMemberBots, teamsOfProject, useStore } from '../store/store'
+import { teamDisplayName } from '../api/types'
 import { IdentityBadge } from './IdentitiesPanel'
 import { TrashIcon } from './Icons'
 import { KindTag } from './KindTag'
@@ -26,6 +27,8 @@ function MemberRow({ bot }: { bot: Bot }) {
   const openTeamRole = useStore((s) => s.openTeamRole)
   const role = bot.team?.role ?? 'worker'
   const teamId = bot.team?.team_id ?? null
+  // 無限併行時每個 issue 各有一個 dev-1：同名就帶著 i<seq>-。
+  const siblings = useStore(useShallow((s) => teamMemberBots(s, teamId).map((b) => b.name)))
   return (
     <div
       className={`bot-row team-member-row${selected ? ' selected' : ''}`}
@@ -47,7 +50,7 @@ function MemberRow({ bot }: { bot: Bot }) {
           <KindTag kind={bot.kind} className="bot-kind" />
           <span className="bot-name">
             <span className={`team-role ${role}`}>{TEAM_ROLE_LABEL[role]}</span>
-            {teamShortName(bot.name)}
+            {teamDisplayName(bot.name, siblings)}
           </span>
         </span>
         <span className="bot-sub">

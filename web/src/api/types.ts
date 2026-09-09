@@ -1325,6 +1325,19 @@ export function teamShortName(botName: string): string {
   return role.test(out) ? out : botName
 }
 
+/**
+ * 畫面上的成員名：通常就是 `teamShortName`，但無限併行（§2.3 多 issue 同時進行）時每個 issue
+ * 各有一個 `dev-1`，三個 `dev-1` 擺在一起分不出誰是誰——同名撞到時保留 `i<seq>-` 那一段
+ * （`i2-dev-1`）。`siblings` 是同一隊所有成員的完整名字。協定用的短名不受影響。
+ */
+export function teamDisplayName(botName: string, siblings: readonly string[]): string {
+  const short = teamShortName(botName)
+  const clash = siblings.some((n) => n !== botName && teamShortName(n) === short)
+  if (!clash) return short
+  const m = /(?:^|-)(i\d+-(?:dev|worker)-\d+)$/i.exec(botName)
+  return m ? m[1] : botName
+}
+
 /** `member_lost:dev-1` → 「成員已離線（dev-1）」；未知碼原樣顯示。 */
 export function teamPauseLabel(reason: string | null): string {
   if (!reason) return ''
