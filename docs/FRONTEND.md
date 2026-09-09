@@ -42,6 +42,8 @@ web/src/
     mentions.ts    # SPEC §13 的 @mention 規則（與 daemon/src/group.rs 同一套；輸入框與 mock 共用）
     index.ts       # 依 VITE_MOCK 選 transport，對外只暴露具名 API 函式
   store/store.ts   # 單一 Zustand store：server state 鏡像 + UI state + WS 事件處理
+  store/routeSync.ts # 網址 ↔ store 的雙向同步（pushState / popstate / document.title）
+  lib/routes.ts    # `parse(pathname) → Route` / `build(Route) → pathname`（純函式，有單元測試）
   hooks/
     useTerminalSnapshot.ts # `GET /terminal` 輪詢（blocked 面板與全畫面共用，可 pause）
     usePaneKeys.ts         # 鍵名對照（KeyboardEvent → herdr）＋ 依序送鍵的佇列、KEYPAD 按鍵列
@@ -1532,3 +1534,61 @@ hint 改成「最多同時跑幾個 task；PM 派幾筆都可以，多的排隊�
 
 `api/mock.ts` 的示範 team 多派一筆（`workers.length + 1`）：它以 `worker_bot_id: null` 進場，
 在第一筆合併之後才被指派、切分支、開始跑——mock 走的就是 daemon 的補位順序。
+
+---
+
+## 路由：每個畫面都有自己的 URL（2026-09-09）
+
+以前整個 UI 只有 `/`，選了哪個 bot / project / team 都只是 store 的狀態：重新整理回到首頁、
+上一頁沒作用、也沒辦法把「這個 bot 的對話」貼給別人或加到手機主畫面。現在每個畫面有 path：
+
+| 畫面 | path |
+|---|---|
+| 母 bot / 子 bot 對話 | `/bots/:botId` |
+| 母 bot 終端分頁 | `/bots/:botId/terminal` |
+| Bot 設定（浮窗） | `/bots/:botId/settings` |
+| Project 群組聊天 | `/projects/:projectId` |
+| 組隊（`TeamLaunchPanel`） | `/projects/:projectId/teams/new?issue=<n>` |
+| Team | `/teams/:teamId` |
+| 主機 shell | `/hosts/:host/shells/:paneId` |
+| 首頁（沒選東西） | `/` |
+
+**沒有 router 套件**。`lib/routes.ts` 是一對純函式（`parseRoute` / `buildRoute` / `screenKey`），
+`store/routeSync.ts` 用 `history.pushState` + `popstate` 把它跟 store 接起來。元件完全不知道
+這件事：側欄與所有「開啟 X」的按鈕維持原本的 `onClick`（走 store），**網址是 store 的投影**。
+
+### 三條規則
+
+- **store → 網址**：`routeOf(state)` 依 `App.tsx` 的 render 分支順序（shell > 組隊 > team >
+  project > bot）算出目前的畫面。`screenKey` 一樣就 `replaceState`——對話↔終端不該讓上一頁
+  多一格；不一樣就 `pushState`。設定浮窗刻意算成另一個 `screenKey`：開著時 push，所以「關掉」
+  就是上一頁。
+- **網址 → store**：`popstate` 解析路徑後呼叫對應的 `selectBot` / `selectProject` / `selectTeam`
+  / `openTeamLaunch` / `viewHostShell`。找不到那個東西（bot 被刪、shell 被關）就回首頁並
+  `notify`——連結會過期，靜靜停在一個空畫面比說出來更難懂。
+- **開頁**：先 `parseRoute(location.pathname)`，但**等 `ready`** 才套用（要先有 `GET /api/state`
+  的清單才判斷得出「還在不在」）。網址是 `/` 時尊重 store 從 localStorage 還原的選取，不清空，
+  再把它 `replaceState` 成真正的路徑；localStorage 的選取記憶因此仍然有效，只是多了個網址。
+
+### 幾個邊角
+
+- **token**：`?token=` 只在第一次載入用（`transport.ts` 拿到 `GET /api/session` 就自己快取）。
+  套用路由時的第一次 `replaceState` 會把它從網址上拿掉，分享出去的連結不帶憑證。
+- **手機抽屜**：開的時候借一格歷史（URL 不變，只在 `history.state` 上記 `{am:'drawer'}`），
+  按上一頁就是關抽屜、不換畫面。在抽屜裡點了會換頁的東西時不必特別處理：store 的訂閱比
+  React 的 re-render 早跑，`syncNow` 看到自己站在 `drawer` 那一格就改用 `replaceState`
+  把它換掉。用 ✕ / scrim / Esc 關的則 `history.back()` 把那一格還回去。
+- **`repo` 不進網址**：`/projects/:id/teams/new?issue=<n>` 只帶 issue 編號。從連結進來一律
+  當專案本身的 repo，submodule 的組隊還是要從 Issues 列表點進去（那裡才知道是哪個 submodule）。
+- **`document.title`** 跟著畫面走：`C1-fable · Agents Manager`、`#48 … · Team · Agents Manager`、
+  `mini · shell · Agents Manager`；未讀數仍然掛在最前面（`(3) C1-fable · Agents Manager`）。
+- **SPA fallback**：`daemon/src/assets.rs` 對任何路徑回 `index.html`，`index.html` 引的是絕對
+  路徑（`/assets/…`、`/favicon.svg`），所以 `/bots/x/terminal` 這種多層路徑照樣載得到。
+  Vite dev（`appType: 'spa'` 預設）也一樣，`http://127.0.0.1:5173/bots/<id>` 直接開得起來。
+
+### 驗證
+
+- `web/src/lib/routes.test.ts`：parse/build 對稱、壞路徑回首頁、`?issue=` 保留、id 逸出。
+- `scripts/ui-routes-shots.mjs`（headless Chrome，對 5173 的真 daemon）：直接開 `/bots/<id>`、
+  點終端、上一頁、設定開關、`/teams/<id>` reload、壞連結、手機抽屜的上一頁；截圖在
+  `docs/screenshots/routes/`。跑法：`BOT=<id> TEAM=<id> PROJECT=<id> OUT=dir node scripts/ui-routes-shots.mjs`。
