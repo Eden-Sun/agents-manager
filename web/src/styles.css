@@ -10748,3 +10748,20 @@ button.run-debug-toggle:hover {
   margin: 6px 0 2px;
   width: 100%;
 }
+
+/* Bot 設定最上面的識別列（pane / agent / session / workspace，點一下複製）。 */
+.bs-idents {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.bs-idents-k {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
