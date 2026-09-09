@@ -895,8 +895,10 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
       **副作用**：claude 會把它一併存成該帳號之後新 session 的預設強度（CLI 行為，TUI 上按 `s` 才是只此一次）
     - codex `model` / `effort` / `fast`（2026-09-09 新增，0.153.4 實測）→ 不是一行指令，是操作 TUI：
       `/model` 開「模型」「強度」兩層編號選單（**不吃參數**，`/model gpt-5.6-sol high` 會被當成 prompt
-      送給模型），daemon 讀 pane 找對應的號碼按下去；`fast` 用 `/fast` 這個**開關**，只有在
-      `run.runtime_fast` 跟目標不同時才按。三個欄位可以在同一次 PATCH 一起改。送完會**回讀狀態列**
+      送給模型），daemon 讀 pane 找對應的號碼按下去；`fast` 用 `/fast` 這個**開關**，只有在現在的 tier
+      跟目標不同時才按（先看 `run.runtime_fast`，那一欄是 NULL 的收編 pane 就改讀狀態列）。三個欄位
+      可以在同一次 PATCH 一起改，**只改 `fast` 也走這條**（2026-09-09 修：以前會直接回
+      `needs_restart: true`）。送完會**回讀狀態列**
       （`<model> [<effort>] [fast] · <cwd> · Context …`）確認真的變了，`run.runtime_*` 存的就是讀回來的值；
       對不上就回 `needs_restart: true`。**副作用**：codex 同樣會把選擇存成該帳號的預設
       （`~/.codex/config.toml`）。詳見 SPEC §4.4a

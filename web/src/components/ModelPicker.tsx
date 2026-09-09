@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
-import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, MODEL_OPTIONS, effortLabel } from '../api/types'
+import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, effortLabel } from '../api/types'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
@@ -27,6 +27,14 @@ function staticModels(kind: BotKind): ModelInfo[] {
     efforts,
     service_tiers: [],
   }))
+}
+
+/**
+ * 選單要顯示的清單：拿掉 `HIDDEN_MODELS`（見 types.ts），但**留下這顆 bot 現在選的那個**——
+ * 藏掉一個已經設好的值會讓它靜靜變成「自訂」，看起來像設定被改掉了。
+ */
+function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[] {
+  return models.filter((m) => m.id === selected || !HIDDEN_MODELS.includes(m.id))
 }
 
 export function ApiModelFields({
@@ -67,6 +75,7 @@ export function ApiModelFields({
   const loading = cached === undefined
   const fromApi = Array.isArray(cached) && cached.length > 0
   const models = fromApi ? cached : staticModels(kind)
+  const shownModels = visibleModels(models, model)
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
   const known = model === null || models.some((m) => m.id === model)
   const customMode = custom || !known
@@ -108,7 +117,7 @@ export function ApiModelFields({
           模型
           {loading ? <span className="field-note">載入中…</span> : fromApi ? null : <span className="field-note warn">API 不可用，使用內建清單</span>}
           {/* 三個 kind 的 TUI 都能當場換模型，daemon 會直接操作（codex 走 `/model` 選單）。 */}
-          {liveModel(kind) ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
+          {liveModel(kind) ? <span className="field-note live-note primary">執行中改會即時套用，不用重啟</span> : null}
         </span>
         <div className="opt-group models" role="radiogroup" aria-label="model">
           <button
@@ -119,7 +128,7 @@ export function ApiModelFields({
           >
             使用 CLI 預設
           </button>
-          {models.map((m) => (
+          {shownModels.map((m) => (
             <button
               key={m.id}
               type="button"
@@ -158,7 +167,7 @@ export function ApiModelFields({
                 三個都是 daemon 直接操作。claude 與 codex 會順手把它存成該帳號的預設
                 （CLI 行為，見 SPEC §17 與 §4.4a）。 */}
             {liveEffort(kind) ? (
-              <span className="field-note" title={kind === 'claude' ? 'claude 會同時把它存成之後新 session 的預設強度' : undefined}>
+              <span className="field-note live-note" title={kind === 'claude' ? 'claude 會同時把它存成之後新 session 的預設強度' : undefined}>
                 執行中改會即時套用，不用重啟
               </span>
             ) : null}
@@ -205,7 +214,7 @@ export function ApiModelFields({
               {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
             </span>
             {/* codex 的 `/fast` 是執行中就能切的開關（SPEC §4.4a）。 */}
-            {liveFast(kind) ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
+            {liveFast(kind) ? <span className="field-note live-note">執行中改會即時套用，不用重啟</span> : null}
           </span>
         </label>
       ) : null}
@@ -340,6 +349,7 @@ export function ModelQuickPicker({
   const models = fromApi ? cached : staticModels(kind)
   const loading = open && cached === undefined
   const model = bot?.model ?? null
+  const shownModels = visibleModels(models, model)
   const effort = bot?.effort ?? null
   const current = (model && models.find((m) => m.id === model)) || models.find((m) => m.is_default) || models[0]
   const efforts = current?.efforts ?? []
@@ -398,7 +408,7 @@ export function ModelQuickPicker({
       >
         {loading ? <span className="hint">載入模型清單…</span> : null}
         <div className="opt-group models" role="radiogroup" aria-label="model">
-          {models.map((m) => (
+          {shownModels.map((m) => (
             <button
               key={m.id}
               type="button"

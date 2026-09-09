@@ -769,7 +769,7 @@ sidebar 底部「身份」面板列出 `identities[]`（名稱、kind、env 摘�
 |---|---|
 | 名稱 | 有 active Run 時 `disabled`，下方提示「停止後才能改名」＋「停止並改名」按鈕（stop → 輪詢到 run 進 `stopped` / 消失 → 自動 focus 回輸入框）。前端仍檢查 `[a-z][a-z0-9_-]{0,31}` |
 | kind | 唯讀 |
-| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.5` / `gpt-5.6-sol` / `gpt-5.6-luna` / `gpt-6-astra`，grok = `grok-4.6` / `grok-4.5`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
+| **模型** | `<select>`：`（預設）`＋常用別名＋`自訂…`。claude = `opus` / `sonnet` / `haiku`，codex = `gpt-5.6-sol` / `gpt-5.6-luna` / `gpt-6-astra`（`gpt-5.5` 2026-09-09 起不進選單，見 `HIDDEN_MODELS`；已經設成它的 bot 那顆按鈕照樣留著），grok = `grok-4.6` / `grok-4.5`。選「自訂…」多出一個文字框，可送任意字串；清空 = `null` |
 | args | 空白分隔 |
 | 身份 | 只列同 kind 的 identities；`（無）` = `null` |
 | env | 每行 `KEY=VALUE`（與身份面板共用 `parseEnvText` / `envToText`），整包取代 |

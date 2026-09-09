@@ -248,7 +248,14 @@ CLI 的預設包含使用者的 `config.toml`，這是說得通的；fast 是一
   跳出 `Select Reasoning Level for <model>` → 再按一個數字，codex 印
   `• Model changed to <model> <effort>`。`Max` / `Ultra` 在第一層的 `More reasoning…` 底下再一層。
 - `/fast` 是**開關**（`• Service tier set to priority` / `… default`），沒有「設成 X」的形式，所以只有在
-  `runs.runtime_fast` 跟目標不同時才按——這也是那一欄必須正確的原因。
+  現在的 tier 跟目標不同時才按。優先讀 `runs.runtime_fast`；那一欄是 NULL（收編的 pane）時**改讀狀態列**
+  而不是拒絕——狀態列本來就是 runtime 的定義，拒絕等於收編的 codex 永遠只能靠重啟才切得掉 fast。
+- **live 欄位的閘門要把 `fast` 一起算進去**（2026-09-09 修）：`PATCH` 判斷「這次只動了可即時套用的欄位」
+  的那段（`api.rs` 的 `extras`）漏掉 `fast` 的 skip，於是**只改 fast** 永遠被自己算成「還動了別的」，
+  0.017 秒就回 `needs_restart: true`，pane 上一個鍵都沒送。真機驗證（0.153.4，拋棄式 pane）：
+  `{"fast":true}` → `• Service tier set to priority`、狀態列多一個 `fast`、`runtime_fast=1`；
+  `{"fast":false}` → `• Service tier set to default`、`fast` 消失、`runtime_fast=0`；同值再送一次不會多按
+  一次（沒有新的 `Service tier` 行）；`{"model","effort","fast"}` 一起送 5.7 秒內兩件事都做完。
 - **選單一律用讀的**：號碼與順序來自帳號的模型清單，`(default)` / `(current)` 標記會跑，所以每一步都
   回讀 pane，比對「號碼後面到兩個空白為止」的 label（第 5 列的說明字串裡有 `Max and Ultra`，
   拿整行比對會按錯那一列）。
