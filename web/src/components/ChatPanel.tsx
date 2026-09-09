@@ -658,7 +658,7 @@ function Composer({
       }
     })
   }
-  const enterToSend = useEnterToSend(ref, () => submit())
+  const enterToSend = useEnterToSend()
 
   /** 排隊中的那一則優先，否則是輸入框裡打到一半的字。 */
   const pending = queued?.text ?? text
@@ -826,12 +826,12 @@ function Composer({
             files.add(imgs)
           }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (enterToSend.enterSends && e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
               submit()
             }
           }}
-          {...enterToSend}
+          {...enterToSend.props}
         />
         <button
           type="button"
@@ -946,10 +946,60 @@ function modelExtraOf(status: StatusInfo | null): string {
  * `<StatusLineBar>` is a truthy element even on the render where it returns null, so the row
  * would keep a hairline border for a bot that has no status line at all.
  */
-function ContextBar({ issues, status, hasStatus }: { issues: ReactNode; status: ReactNode; hasStatus: boolean }) {
+function ContextBar({ issues, status, hasStatus, summary }: { issues: ReactNode; status: ReactNode; hasStatus: boolean; summary: string }) {
+  const phone = useMediaQuery(PHONE_QUERY)
+  // 手機預設收起（2026-09-09 使用者：手機不用那麼多 git 資訊）：只留一列摘要 + 展開鍵。
+  // 記在 localStorage，展開過的人下次還是展開的。
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem('am:ctxbar-open') === '1'
+    } catch {
+      return false
+    }
+  })
   if (!issues && !hasStatus) return null
+  if (phone && !open) {
+    return (
+      <div className="context-bar collapsed">
+        <button
+          type="button"
+          className="ctx-toggle"
+          title="展開 repo / git / context"
+          onClick={() => {
+            setOpen(true)
+            try {
+              localStorage.setItem('am:ctxbar-open', '1')
+            } catch {
+              /* 私密模式沒有 localStorage，記不住就算了 */
+            }
+          }}
+        >
+          <span className="ctx-chev" aria-hidden="true">▸</span>
+          <span className="ctx-summary">{summary}</span>
+        </button>
+      </div>
+    )
+  }
   return (
     <div className="context-bar">
+      {phone ? (
+        <button
+          type="button"
+          className="ctx-toggle ctx-toggle-open"
+          title="收起"
+          aria-label="收起 repo / git / context"
+          onClick={() => {
+            setOpen(false)
+            try {
+              localStorage.setItem('am:ctxbar-open', '0')
+            } catch {
+              /* 同上 */
+            }
+          }}
+        >
+          <span className="ctx-chev" aria-hidden="true">▾</span>
+        </button>
+      ) : null}
       {issues}
       {hasStatus ? status : null}
     </div>
@@ -1010,6 +1060,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
+  const project = useStore((s) => (bot ? (s.projects.find((p) => p.id === bot.project_id) ?? null) : null))
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const hostUp = useStore((s) => {
@@ -1259,6 +1310,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         }
         status={<StatusLineBar status={statusInfo} text={run?.status_line ?? null} />}
         hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
+        summary={[
+          project?.github ? project.github.repo : project?.label,
+          statusInfo?.context_used_pct !== null && statusInfo?.context_used_pct !== undefined ? `context ${pct(statusInfo.context_used_pct)}` : null,
+          statusInfo?.cost_usd !== null && statusInfo?.cost_usd !== undefined ? `$${statusInfo.cost_usd.toFixed(2)}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
       />
 
 

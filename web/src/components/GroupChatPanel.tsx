@@ -377,11 +377,7 @@ function GroupComposer({
       }
     })
   }
-  const enterToSend = useEnterToSend(ref, () => {
-    // 手機 Enter：mention 選單開著時先選字，不送。
-    if (showPop && candidates.length) pick(candidates[activeIdx])
-    else submit()
-  })
+  const enterToSend = useEnterToSend()
 
   const syncCaret = () => {
     const el = ref.current
@@ -494,12 +490,12 @@ function GroupComposer({
                 return
               }
             }
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (enterToSend.enterSends && e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               submit()
             }
           }}
-          {...enterToSend}
+          {...enterToSend.props}
         />
         <button
           type="button"
