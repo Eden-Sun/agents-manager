@@ -47,7 +47,7 @@ export function BotSwitcher({ botId, name }: { botId: string; name: string }) {
   }, [open])
 
   // 母 bot：不是子 agent、也不是 team 成員（pm / dev / rev 有自己的 Team 面板）。
-  const mothers = bots.filter((b) => !b.parent_bot_id && !b.team_id)
+  const mothers = bots.filter((b) => !b.parent_bot_id && !b.team)
   const groups = projects
     .map((p) => ({ project: p, bots: mothers.filter((b) => b.project_id === p.id) }))
     .filter((g) => g.bots.length > 0)
