@@ -2654,7 +2654,7 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, disabled: false, queued: true, reason: '這回合還在跑，送出會排到結束後', inFlightTurnId: inflight.id }
   }
   const queued = Object.values(state.turns[botId] ?? {}).find((t) => t.status === 'queued')
-  if (queued) return { ...base, reason: '已有訊息排隊中，等它送出後再試' }
+  if (queued) return { ...base, disabled: false, queued: true, reason: '已有訊息排隊中，等它送出後再試' }
   return { disabled: false, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
 }
 
