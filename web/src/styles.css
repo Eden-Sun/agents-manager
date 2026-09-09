@@ -10147,3 +10147,26 @@ button.run-debug-toggle:hover {
     display: none;
   }
 }
+
+@media (width <= 640px) {
+  /*
+   * 子 agent 在手機不寫名字：一列只擠得下幾個字，`c1-fable-…` 截完也認不出是誰，
+   * 而它是掛在父列底下的——要分辨的是身分與模型，不是名字。名字留在燈號的 tooltip
+   * 與整列的 aria-label（螢幕閱讀器與長按都還讀得到），空出來的寬度給徽章。
+   */
+  .bot-row.compact .bot-name,
+  .bot-row.compact .bot-name-btn {
+    display: none;
+  }
+
+  /* 名字讓出來的寬度給徽章：`opus-Med…` 這種才不會被截成 `f…`。 */
+  .bot-row.compact .bot-sub {
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .bot-row.compact .bot-sub .model-tag {
+    max-width: none;
+  }
+}

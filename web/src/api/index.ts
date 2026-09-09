@@ -250,6 +250,14 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
   return { needs_restart: o.needs_restart === true || o.restart_required === true }
 }
 
+/**
+ * `POST /api/order` — 側欄排序（docs/API.md §5.4）。順序寫回 config.toml 的陣列，
+ * 所以手機與桌機看到的是同一份（以前存 localStorage，每台裝置各自一份）。
+ */
+export async function saveOrder(input: { projects?: string[]; bots?: Record<string, string[]> }): Promise<void> {
+  await transport.request('POST', '/order', input)
+}
+
 /** `POST /api/bots/:id/restart` — stop then start; returns the new run id. */
 export async function restartBot(botId: string): Promise<string> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart`)

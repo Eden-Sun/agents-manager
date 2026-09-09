@@ -743,6 +743,9 @@ export class MockTransport implements Transport {
     const seg = rawPath.split('/').filter(Boolean)
 
     if (method === 'GET' && rawPath === '/state') return this.state()
+    // 排序寫回 daemon（真的那邊會改 config.toml）。mock 只要收下就好：畫面上的順序是
+    // 前端先樂觀套用的，重新整理再從 `/state` 拿。
+    if (method === 'POST' && rawPath === '/order') return { ok: true }
     if (method === 'GET' && rawPath === '/fs/dirs') {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
     }

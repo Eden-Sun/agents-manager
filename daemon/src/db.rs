@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
   host TEXT NOT NULL DEFAULT 'local',
   workspace_id TEXT,
-  deleted_at TEXT, created_at TEXT NOT NULL
+  deleted_at TEXT, created_at TEXT NOT NULL,
+  -- 同 `bots.position`：側欄順序，來自 config.toml 的陣列位置。
+  position INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
@@ -35,7 +37,10 @@ CREATE TABLE IF NOT EXISTS bots (
   -- A herdr agent the bot itself spawned (named `<parent agent name>-<suffix>`), adopted by
   -- the reconcile and shown under its parent. NULL = a top-level bot.
   parent_bot_id TEXT,
-  hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL
+  hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL,
+  -- 側欄順序 = config.toml 陣列裡的位置（`POST /api/order` 寫回去，投影時填這裡）。
+  -- 沒有它的話清單只能照 created_at 排，排序就只能存在瀏覽器，每台裝置各自一份。
+  position INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS bots_name_project_live ON bots(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS runs (
@@ -233,6 +238,8 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
     // Additive migrations for databases created before a column existed.
     for (table, col, ddl) in [
         ("bots", "auto_approve", "ALTER TABLE bots ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1"),
+        ("bots", "position", "ALTER TABLE bots ADD COLUMN position INTEGER NOT NULL DEFAULT 0"),
+        ("projects", "position", "ALTER TABLE projects ADD COLUMN position INTEGER NOT NULL DEFAULT 0"),
         ("projects", "host", "ALTER TABLE projects ADD COLUMN host TEXT NOT NULL DEFAULT 'local'"),
         ("bots", "identity", "ALTER TABLE bots ADD COLUMN identity TEXT"),
         ("bots", "env_json", "ALTER TABLE bots ADD COLUMN env_json TEXT NOT NULL DEFAULT '{}'"),
@@ -407,9 +414,10 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
                     "CREATE TABLE projects_new (
                        id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
                        host TEXT NOT NULL DEFAULT 'local', workspace_id TEXT,
-                       deleted_at TEXT, created_at TEXT NOT NULL)",
-                    "INSERT INTO projects_new (id, path, label, host, workspace_id, deleted_at, created_at)
-                       SELECT id, path, label, host, workspace_id, deleted_at, created_at FROM projects",
+                       deleted_at TEXT, created_at TEXT NOT NULL,
+                       position INTEGER NOT NULL DEFAULT 0)",
+                    "INSERT INTO projects_new (id, path, label, host, workspace_id, deleted_at, created_at, position)
+                       SELECT id, path, label, host, workspace_id, deleted_at, created_at, position FROM projects",
                     "DROP TABLE projects",
                     "ALTER TABLE projects_new RENAME TO projects",
                 ],
@@ -591,9 +599,10 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
                    cwd TEXT,
                    herdr_session TEXT,
                    parent_bot_id TEXT,
-                   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL)",
-                "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at)
-                   SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at FROM bots",
+                   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL,
+                   position INTEGER NOT NULL DEFAULT 0)",
+                "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at, position)
+                   SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at, position FROM bots",
                 "DROP TABLE bots",
                 "ALTER TABLE bots_new RENAME TO bots",
             ],
@@ -1040,13 +1049,13 @@ pub async fn bot(pool: &SqlitePool, id: &str) -> Result<Option<Bot>> {
 }
 
 pub async fn live_bots(pool: &SqlitePool) -> Result<Vec<Bot>> {
-    Ok(sqlx::query_as::<_, Bot>("SELECT * FROM bots WHERE deleted_at IS NULL ORDER BY created_at")
+    Ok(sqlx::query_as::<_, Bot>("SELECT * FROM bots WHERE deleted_at IS NULL ORDER BY position, created_at")
         .fetch_all(pool)
         .await?)
 }
 
 pub async fn live_projects(pool: &SqlitePool) -> Result<Vec<Project>> {
-    Ok(sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY created_at")
+    Ok(sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY position, created_at")
         .fetch_all(pool)
         .await?)
 }

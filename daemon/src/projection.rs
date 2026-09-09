@@ -83,34 +83,36 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
     let mut live_projects: HashSet<String> = HashSet::new();
     let mut live_bots: HashSet<String> = HashSet::new();
 
-    for p in &cfg.projects {
+    for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
         live_projects.insert(pid.clone());
         sqlx::query(
-            "INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,?,?)
+            "INSERT INTO projects (id, path, label, host, position, created_at) VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
-               host=excluded.host, deleted_at=NULL",
+               host=excluded.host, position=excluded.position, deleted_at=NULL",
         )
         .bind(&pid)
         .bind(&p.path)
         .bind(&p.label)
         .bind(&p.host)
+        // 陣列位置就是側欄順序（`POST /api/order` 會重排這個陣列）。
+        .bind(p_at as i64)
         .bind(&now)
         .execute(pool)
         .await?;
 
-        for b in &p.bots {
+        for (b_at, b) in p.bots.iter().enumerate() {
             let bid = b.id.clone().unwrap();
             live_bots.insert(bid.clone());
             let args_json = serde_json::to_string(&b.args)?;
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
             sqlx::query(
-                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, hook_token, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, herdr_session, position, hook_token, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, name=excluded.name, kind=excluded.kind,
                    model=excluded.model, effort=excluded.effort, fast=excluded.fast, persona=excluded.persona, args_json=excluded.args_json, autostart=excluded.autostart, inject_hooks=excluded.inject_hooks,
-                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, herdr_session=excluded.herdr_session, deleted_at=NULL",
+                   auto_approve=excluded.auto_approve, identity=excluded.identity, env_json=excluded.env_json, herdr_session=excluded.herdr_session, position=excluded.position, deleted_at=NULL",
             )
             .bind(&bid)
             .bind(&pid)
@@ -128,6 +130,7 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
             .bind(&b.identity)
             .bind(&env_json)
             .bind(&b.herdr_session)
+            .bind(b_at as i64)
             .bind(&token)
             .bind(&now)
             .execute(pool)
