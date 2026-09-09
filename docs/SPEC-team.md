@@ -774,7 +774,12 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | POST | `/teams/{id}/abort` | `{"reason"?}` | `200 {}`；停所有成員 |
 | POST | `/teams/{id}/cleanup` | — | 非終態 409；成功 `200 {}`，推 `bot_changed` ×N + `team_changed` |
 | DELETE | `/teams/{id}` | `?branches=keep\|delete`（預設 `keep`）| **任何 phase 都可刪**（§6.5a）：非終態時先停成員 → 清 worktree → 關 workspace → 刪三張表的列 → 成員 bot 標 `deleted_at`（訊息保留）。`branches=delete` 才 `git branch -D`，遠端分支一律不動。成功 `200 {}` 並推帶 `deleted: true` 的 `team_changed` + `bot_changed` ×N；不存在 `404 {"error":"not_found","what":"team"}` |
-| PATCH | `/teams/{id}` | `{"budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "pm"?: <角色>, "workers"?: <角色>, "reviewer"?: <角色>}` | `200 {}`；終態 409。三個角色同一個形狀，見下表 |
+| PATCH | `/teams/{id}` | `{"label"?: string, "budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "pm"?: <角色>, "workers"?: <角色>, "reviewer"?: <角色>}` | `200 {}`；終態 409。三個角色同一個形狀，見下表 |
+
+**`label`（2026-09-09 新增）**：使用者自己取的短名，最長 60 字；`""` = 清掉，改回顯示 `#編號 issue 標題`。
+issue 標題常常是一整句規格，手機的標題列與切換器只看得到前幾個字。**唯一不受終態 409 限制的欄位**
+——名字是給人事後找東西用的，已經 done / aborted 的隊伍一樣要能改；只送 `label` 時回 `{"applied":"label"}`。
+`GET /teams/{id}` 與 `GET /api/state` 的 team 物件多一個 `label`（`null` = 沒取）。
 | POST | `/teams/{id}/say` | `{"text", "to", "client_request_id"}`；`to` 接受**角色**（`pm` / `reviewer`）、**短名**（`dev-1`，同 §4.4 協定用的）、**暱稱**（`i42-pm`）、**bot_id**，可帶 `@` 前綴 | 使用者插話（記 `kind:user`，不計預算），走 §13 群組路徑；回同 `POST chat` 的單筆 `sent` |
 | POST | `/teams/{id}/tasks/{tid}/decide` | `{"action": "rework" \| "force_merge" \| "skip", "note"?}` | 只在 task `exhausted` / `blocked_by_worker` / rebase 用盡時有效；其餘 409 |
 | POST | `/teams/{id}/answer` | `{"text"}` | 回 PM 的 `ask_user`；等同 `say` 到 pm + `resume` |

@@ -11,6 +11,7 @@ import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamIssueProgress } from './TeamIssueProgress'
+import { teamTitle } from './TeamNameField'
 import { teamPauseAction, teamPauseDetailLines } from './teamPanelLogic'
 
 /**
@@ -155,7 +156,7 @@ function TeamNode({ team }: { team: Team }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const terminal = TEAM_TERMINAL_PHASES.includes(team.phase)
   const tone = teamPhaseTone(team.phase)
-  const title = `${team.issue_title || `issue #${team.issue_number}`}`
+  const title = teamTitle(team)
 
   return (
     <div className={`team-node${terminal ? ' terminal' : ''}${team.phase === 'paused' ? ' paused' : ''}${open ? '' : ' collapsed'}`}>
@@ -184,7 +185,8 @@ function TeamNode({ team }: { team: Team }) {
             ⚙
           </span>
           <span className="team-node-label">
-            {team.repo ? <span className="team-node-repo mono">{team.repo}</span> : null}#{team.issue_number} {title}
+            {team.repo ? <span className="team-node-repo mono">{team.repo}</span> : null}
+            {title}
           </span>
           <span className={`team-phase-dot ${tone}`} aria-hidden="true" />
           {!open ? (

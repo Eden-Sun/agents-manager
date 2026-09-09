@@ -4,6 +4,7 @@ import { TEAM_PHASE_LABEL, teamPhaseTone } from '../api/types'
 import { botLamp, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
+import { teamTitle } from './TeamNameField'
 
 /**
  * 手機標題列的 bot 名：點一下是**換 bot**，不是改名（2026-09-09 使用者決定）。桌面有側欄，
@@ -18,11 +19,15 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
   const popRef = useRef<HTMLDivElement>(null)
   // `.main-title-row` 會把超出的東西剪掉（標題列忙時裁尾巴），絕對定位在裡面的泡泡整個看不到
   // （2026-09-09 手機實測：點了沒東西可選）。所以泡泡用 portal 掛到 body、fixed 定位在按鈕底下。
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [pos, setPos] = useState<{ top: number; left: number; maxWidth: number } | null>(null)
   useLayoutEffect(() => {
     if (!open) return
     const b = ref.current?.getBoundingClientRect()
-    if (b) setPos({ top: Math.round(b.bottom + 6), left: Math.max(8, Math.round(b.left)) })
+    if (!b) return
+    const left = Math.max(8, Math.round(b.left))
+    // 泡泡是 fixed 且從按鈕的左緣長出來，只有 `max-width: 100vw` 擋不住右邊界——team 的
+    // issue 標題是一整句規格，會一路長到畫面外（2026-09-09 手機截圖）。這裡把右邊界也算進去。
+    setPos({ top: Math.round(b.bottom + 6), left, maxWidth: Math.max(200, window.innerWidth - left - 8) })
   }, [open])
   const selectBot = useStore((s) => s.selectBot)
   const selectTeam = useStore((s) => s.selectTeam)
@@ -79,7 +84,7 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
       </button>
       {open && pos
         ? createPortal(
-            <div ref={popRef} className="bot-switcher-pop" role="listbox" aria-label="切換 bot" style={{ top: pos.top, left: pos.left }}>
+            <div ref={popRef} className="bot-switcher-pop" role="listbox" aria-label="切換 bot" style={{ top: pos.top, left: pos.left, maxWidth: pos.maxWidth }}>
               {groups.map((g) => (
                 <div key={g.project.id} className="bot-switcher-group">
                   <div className="bot-switcher-project">⌗ {g.project.label}</div>
@@ -108,7 +113,7 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
                       role="option"
                       aria-selected={t.id === selectedTeamId}
                       className={`bot-switcher-item team${t.id === selectedTeamId ? ' on' : ''}`}
-                      title={`Team #${t.issue_number}・${TEAM_PHASE_LABEL[t.phase]}`}
+                      title={`Team #${t.issue_number} ${t.issue_title}・${TEAM_PHASE_LABEL[t.phase]}`}
                       onClick={() => {
                         setOpen(false)
                         if (t.id !== selectedTeamId) selectTeam(t.id)
@@ -118,9 +123,7 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
                       <span className="team-icon" aria-hidden="true">
                         ⚙
                       </span>
-                      <span className="bot-switcher-name">
-                        #{t.issue_number} {t.issue_title || `issue #${t.issue_number}`}
-                      </span>
+                      <span className="bot-switcher-name">{teamTitle(t)}</span>
                     </button>
                   ))}
                 </div>

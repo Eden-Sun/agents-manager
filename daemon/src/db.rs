@@ -111,6 +111,9 @@ CREATE INDEX IF NOT EXISTS attachments_msg ON attachments(message_id);
 CREATE TABLE IF NOT EXISTS teams (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
   issue_number INTEGER NOT NULL, issue_title TEXT NOT NULL, issue_url TEXT NOT NULL,
+  -- 使用者自己取的名字（NULL / '' = 沿用 `#編號 issue 標題`）。issue 標題常常是一整句
+  -- 規格，手機上只看得到前八個字；team 又是長時間存在的東西，值得一個短名。
+  label TEXT,
   phase TEXT NOT NULL CHECK (phase IN ('starting','planning','working','finishing','done','paused','aborting','aborted','failed')),
   pause_reason TEXT, resume_phase TEXT,
   -- SPEC-team §4.5: the structured "who, how bad" behind `pause_reason`, snapshotted at the
@@ -305,6 +308,7 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // SPEC-team §4.5: JSON detail for the current `pause_reason` (which member, which
         // quota window, how much is left). Nullable — a pause with nothing to say has none.
         ("teams", "pause_detail_json", "ALTER TABLE teams ADD COLUMN pause_detail_json TEXT"),
+        ("teams", "label", "ALTER TABLE teams ADD COLUMN label TEXT"),
         // Native session requested by a done-team reopen. NULL for ordinary starts and old runs.
         ("runs", "resume_session_id", "ALTER TABLE runs ADD COLUMN resume_session_id TEXT"),
         // SPEC §4.4a: the model / effort / fast tier the running CLI is on, as opposed to the
@@ -859,6 +863,8 @@ pub struct Team {
     pub issue_number: i64,
     pub issue_title: String,
     pub issue_url: String,
+    /// 使用者自己取的短名；`None` / `""` = 用 `#編號 issue 標題`。
+    pub label: Option<String>,
     pub phase: String,
     pub pause_reason: Option<String>,
     /// SPEC-team §4.5: JSON detail for `pause_reason` — for `quota_low`, which members are
