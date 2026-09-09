@@ -44,6 +44,8 @@ import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
 
 import { UpgradeIcon } from './UpgradeIcon'
+import { runtimeKnown } from '../lib/runtimeDrift'
+
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
     socket === 'open' ? (connected ? '已連線' : 'herdr 中斷') : socket === 'connecting' ? '連線中' : '重連中'
@@ -151,7 +153,10 @@ function BotRow({
   const quotaLevel = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
-      return b ? botQuotaLevel(s.quota, b.kind, b.identity, projectHostName(s, b.project_id)) : null
+      // 跟 ModelTag 同一個「現在跑的模型」：run 有報就用 run 的，沒有才看設定。
+      const run = s.runs[botId] ?? null
+      const model = run?.status?.model_name ?? (runtimeKnown(run) ? run!.runtime_model : (b?.model ?? null))
+      return b ? botQuotaLevel(s.quota, b.kind, b.identity, projectHostName(s, b.project_id), model) : null
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)

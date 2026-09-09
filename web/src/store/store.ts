@@ -2572,16 +2572,19 @@ export function botQuotaLevel(
   kind: BotKind,
   identity: string | null,
   host: string = LOCAL_HOST,
+  /** bot 的模型：Fable 週桶只跟跑 fable 的 bot 有關，opus／sonnet 的列不該掛 `F 0%`（2026-09-09 使用者）。 */
+  model: string | null = null,
 ): QuotaLevel | null {
   const scoped = (base: string) => quotaKey(host, base)
   let q = quota[scoped(identity ? `${kind}:${identity}` : kind)]
   if (q == null && identity === 'cc0') q = quota[scoped(kind)]
   if (!q) return null
+  const onFable = (model ?? '').toLowerCase().includes('fable')
   const pick = (w: { used_pct: number; low: boolean; critical: boolean } | null | undefined, name: string) =>
     w && (w.low || w.critical)
       ? { level: (w.critical ? 'crit' : 'warn') as 'warn' | 'crit', pct: Math.max(0, Math.round(100 - w.used_pct)), window: name }
       : null
-  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, kind === 'grok' ? '週' : '7d'), pick(q.fable, 'F')].filter(
+  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, kind === 'grok' ? '週' : '7d'), onFable ? pick(q.fable, 'F') : null].filter(
     (x): x is QuotaLevel => x !== null,
   )
   if (hits.length === 0) return null
