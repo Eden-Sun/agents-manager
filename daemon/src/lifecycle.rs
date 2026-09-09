@@ -1321,6 +1321,16 @@ async fn fail_prompt_delivery(app: &Arc<App>, conversation_id: &str, turn_id: &s
     emit_turn(app, turn_id).await;
 }
 
+async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
+    if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
+        .bind(message_id)
+        .fetch_optional(&app.db)
+        .await
+    {
+        app.emit("message_added", json!({"bot_id": bot_id, "message": m})).await;
+    }
+}
+
 // ---------------------------------------------------------------- start
 
 /// Options that affect how a new native agent session is started.
@@ -2894,17 +2904,12 @@ pub async fn prompt_grouped(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
-        .bind(&msg_id)
-        .fetch_optional(&app.db)
-        .await
-    {
-        app.emit("message_added", json!({"bot_id": bot_id, "message": m})).await;
-    }
     if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
+        emit_prompt_message(app, bot_id, &msg_id).await;
         fail_prompt_delivery(app, &conv, &turn_id, &format!("attachment binding failed: {e}")).await;
         return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
     }
+    emit_prompt_message(app, bot_id, &msg_id).await;
     emit_turn(app, &turn_id).await;
 
     // 4. deliver
@@ -5659,6 +5664,21 @@ mod prompt_tests {
         Fixture { env, bot_id, conv, run_id }
     }
 
+    async fn attachment(app: &Arc<App>, bot_id: &str) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, created_at)
+             VALUES (?,?,'image.png','image/png',1,'/tmp/image.png','/tmp/image.png','local',?)",
+        )
+        .bind(&id)
+        .bind(bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        id
+    }
+
     /// A missing run session is rejected before the turn and user message are written, so a
     /// retry reports the same upstream problem instead of finding a stale in-flight turn.
     #[tokio::test]
@@ -5684,19 +5704,24 @@ mod prompt_tests {
     /// event instead of being left on the committed `in_flight` / `pending` state.
     #[tokio::test]
     async fn an_attachment_bind_failure_closes_the_pending_turn() {
+        let success = fixture("codex", "test").await;
+        let success_app = success.env.app.clone();
+        let success_attachment = attachment(&success_app, &success.bot_id).await;
+        let mut success_events = success_app.subscribe();
+        let success_out = prompt_with(&success_app, &success.bot_id, "look", "prompt-attachments-ok", &[success_attachment])
+            .await
+            .unwrap();
+        let success_event = tokio::time::timeout(std::time::Duration::from_secs(1), success_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(success_event.kind, "message_added");
+        assert_eq!(success_event.data["message"]["id"], success_out.message_id);
+        assert!(!success_event.data["message"]["attachments_json"].is_null());
+
         let f = fixture("codex", "test").await;
         let app = f.env.app.clone();
-        let attachment_id = db::ulid();
-        sqlx::query(
-            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, created_at)
-             VALUES (?,?,'image.png','image/png',1,'/tmp/image.png','/tmp/image.png','local',?)",
-        )
-        .bind(&attachment_id)
-        .bind(&f.bot_id)
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
+        let attachment_id = attachment(&app, &f.bot_id).await;
         sqlx::query(
             "CREATE TRIGGER fail_prompt_attachment_bind
              BEFORE UPDATE OF message_id ON attachments
