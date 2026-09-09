@@ -645,6 +645,28 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
+    // 第二顆 claude：SPEC §6.9 的批次重啟要有「一顆閒置、一顆在忙」才看得出跳過那條規則。
+    this.bots.push({
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'am-claude-2',
+      kind: 'claude',
+      model: null,
+      effort: null,
+      fast: 0,
+      persona: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 1,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'user',
+      team_id: null,
+      team_role: null,
+      cwd: null,
+      created_at: now(),
+    })
     this.bots.push({
       id: ulid('bot'),
       project_id: p.id,
@@ -820,6 +842,11 @@ export class MockTransport implements Transport {
       if (method === 'DELETE' && seg.length === 2) {
         return this.deleteTeam(teamId, q.get('branches') === 'delete' ? 'delete' : 'keep')
       }
+    }
+
+    // SPEC §6.9：批次重啟。要排在下面 `bots/{id}` 那組前面，不然 `restart-idle` 會被當成 bot id。
+    if (method === 'POST' && seg[0] === 'bots' && seg[1] === 'restart-idle' && seg.length === 2) {
+      return this.restartIdle()
     }
 
     if (seg[0] === 'bots' && seg.length >= 2) {
@@ -1774,6 +1801,60 @@ export class MockTransport implements Transport {
     return this.start(botId)
   }
 
+  /**
+   * `POST /api/bots/restart-idle`（SPEC §6.9）：挑閒置的 claude 一顆一顆 exit + resume。
+   *
+   * 判斷規則照 `daemon/src/bulk_restart.rs`：只算 claude、只算帶著 `update_notice` 的 run，
+   * `working` / `blocked` / 回合還在飛 / 不是 `running` 一律跳過。進度用 setTimeout 拉開，
+   * 真實 daemon 一顆要好幾秒——不拉開的話進度條會一閃而過，等於沒有進度可看。
+   */
+  private restartIdle() {
+    const batch_id = ulid('batch')
+    const planned: { bot_id: string; name: string }[] = []
+    const skipped: { bot_id: string; name: string; reason: string; reason_label: string }[] = []
+    for (const bot of this.bots) {
+      if (bot.kind !== 'claude' || bot.managed_by !== 'user') continue
+      const run = this.activeRun(bot.id)
+      if (!run?.update_notice) continue
+      const inFlight = this.turns.some((t) => t.run_id === run.id && t.status === 'in_flight')
+      const why =
+        run.state !== 'running'
+          ? ['not_running', '還在啟動或關閉中']
+          : run.agent_status === 'working'
+            ? ['working', '正在跑，重啟會把這一回合砍掉']
+            : run.agent_status === 'blocked'
+              ? ['blocked', '卡在提問，等人回答']
+              : run.agent_status !== 'idle'
+                ? ['unknown_status', '狀態不明，不確定它在不在忙']
+                : inFlight
+                  ? ['turn_in_flight', '還有一回合沒收掉']
+                  : null
+      if (why) skipped.push({ bot_id: bot.id, name: bot.name, reason: why[0], reason_label: why[1] })
+      else planned.push({ bot_id: bot.id, name: bot.name })
+    }
+    const total = planned.length
+    const ok: { bot_id: string; name: string; run_id: string }[] = []
+    planned.forEach((t, i) => {
+      setTimeout(
+        () => {
+          this.emit('bots_restart_progress', { batch_id, index: i + 1, total, ...t, status: 'restarting' })
+        },
+        600 + i * 1600,
+      )
+      setTimeout(
+        () => {
+          const run_id = this.restart(t.bot_id).run_id
+          ok.push({ ...t, run_id })
+          this.emit('bots_restart_progress', { batch_id, index: i + 1, total, ...t, status: 'ok' })
+          if (ok.length === total) this.emit('bots_restart_done', { batch_id, ok, failed: [], skipped })
+        },
+        1400 + i * 1600,
+      )
+    })
+    if (total === 0) setTimeout(() => this.emit('bots_restart_done', { batch_id, ok: [], failed: [], skipped }), 300)
+    return { batch_id, total, planned, skipped }
+  }
+
   /** `DELETE /api/bots/:id`：有 Run 會先 stop（關 pane），設定移除，對話歷史保留。 */
   private deleteBot(id: string) {
     this.bot(id)
@@ -1840,6 +1921,11 @@ export class MockTransport implements Transport {
         run.status_line = 'tony… | OP5 | 26% | 5h 85% | 7d 27% | $18.67'
         // `am-claude` 帶著「有新版等著重啟」，header 的 UpdateBadge 與側欄小點才有東西可截。
         if (this.bot(botId).name === 'am-claude') run.update_notice = 'Update installed · Restart to update'
+        // 兩顆都等著套用更新，但這顆在忙——批次重啟會跳過它並說出原因（SPEC §6.9）。
+        if (this.bot(botId).name === 'am-claude-2') {
+          run.update_notice = 'Update installed · Restart to update'
+          run.agent_status = 'working'
+        }
         // 同一顆再帶上「上一回合被 API 斷線截斷」：header 的 TurnErrorBadge 與側欄紅點才截得到。
         if (this.bot(botId).name === 'am-claude') {
           run.turn_error = 'API Error: Connection lost mid-response. The response above may be incomplete.'

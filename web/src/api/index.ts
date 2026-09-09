@@ -39,6 +39,8 @@ import type {
   PatchBotResult,
   PatchTeamInput,
   PromptResult,
+  RestartPlan,
+  RestartSkip,
   BotKind,
   TeamBranchDisposal,
   TeamControlAction,
@@ -262,6 +264,41 @@ export async function saveOrder(input: { projects?: string[]; bots?: Record<stri
 export async function restartBot(botId: string): Promise<string> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart`)
   return isRec(raw) ? str(pick(raw, 'run_id')) : ''
+}
+
+/**
+ * SPEC §6.9 — 一鍵把帶著 claude 更新且閒置的 bot 全部 exit + resume。
+ *
+ * 立刻回計畫（誰要重啟、誰被跳過與原因）就結束；實際的重啟在 daemon 背景一顆一顆跑，
+ * 進度與摘要走 WS 的 `bots_restart_progress` / `bots_restart_done`。
+ */
+export async function restartIdleBots(): Promise<RestartPlan> {
+  const raw = await transport.request('POST', '/bots/restart-idle')
+  const o = isRec(raw) ? raw : {}
+  return {
+    batch_id: str(pick(o, 'batch_id')),
+    total: num(pick(o, 'total'), 0),
+    planned: arr(pick(o, 'planned')).flatMap((v) =>
+      isRec(v) ? [{ bot_id: str(pick(v, 'bot_id')), name: str(pick(v, 'name')) }] : [],
+    ),
+    skipped: toRestartSkips(pick(o, 'skipped')),
+  }
+}
+
+/** WS 事件與 REST 回應共用的「被跳過的那幾顆」解析。 */
+export function toRestartSkips(v: unknown): RestartSkip[] {
+  return arr(v).flatMap((x) =>
+    isRec(x)
+      ? [
+          {
+            bot_id: str(pick(x, 'bot_id')),
+            name: str(pick(x, 'name')),
+            reason: str(pick(x, 'reason')),
+            reason_label: str(pick(x, 'reason_label')),
+          },
+        ]
+      : [],
+  )
 }
 
 export async function deleteBot(botId: string): Promise<void> {

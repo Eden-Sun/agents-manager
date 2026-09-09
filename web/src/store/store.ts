@@ -30,9 +30,10 @@ import {
   isRec,
   bool,
   pick,
+  arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamRoleKey, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamRoleKey, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -503,6 +504,15 @@ export interface StoreState {
   /** `PATCH /api/projects/:id` — 目前只有 label（改名）。true = 已套用。 */
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
   restartBot: (botId: string) => Promise<boolean>
+  /**
+   * SPEC §6.9：claude 有更新時，一鍵把**閒置的** claude bot 全部 exit + resume。
+   * 忙的（working / blocked / 回合還在飛）跳過，理由由 daemon 回。
+   */
+  restartIdleBots: () => Promise<void>
+  /** 這一批的進度與結果；null = 現在沒有批次在跑，也沒有摘要要看。 */
+  restartBatch: RestartBatch | null
+  /** 收掉批次摘要（做完之後那張卡上的 ✕）。 */
+  clearRestartBatch: () => void
   removeBot: (botId: string) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
@@ -700,6 +710,7 @@ export const useStore = create<StoreState>((set, get) => ({
   openBotSheetFor: null,
   notices: [],
   busy: {},
+  restartBatch: null,
 
   notify: (kind, text, action) => {
     noticeSeq += 1
@@ -1382,6 +1393,30 @@ export const useStore = create<StoreState>((set, get) => ({
       ok = true
     })
     return ok
+  },
+
+  clearRestartBatch: () => set({ restartBatch: null }),
+
+  async restartIdleBots() {
+    await guarded(set, get, 'restart-idle', async () => {
+      const plan = await api.restartIdleBots()
+      // 先把 daemon 算出來的計畫擺上去——按鈕的數字從這一刻起用它的，不用前端估的。
+      set({
+        restartBatch: {
+          id: plan.batch_id,
+          total: plan.total,
+          done: 0,
+          current: null,
+          ok: [],
+          failed: [],
+          skipped: plan.skipped,
+          finished: plan.total === 0,
+        },
+      })
+      if (plan.total === 0) {
+        get().notify('info', plan.skipped.length > 0 ? '沒有閒置的 Bot 可以重啟（都在忙）' : '沒有等著套用更新的 Bot')
+      }
+    })
   },
 
   async removeBot(botId) {
@@ -2303,6 +2338,59 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         // issue #25：時間軸只往後長。這裡沒有分頁可以補，舊事件就直接丟。
         return { teamEvents: { ...s.teamEvents, [teamId]: capList([...list, ev], TEAM_EVENT_CAP).list } }
       })
+      return
+    }
+    // SPEC §6.9：批次重啟的進度。一顆一顆來，`index` 是第幾顆（1-based）。
+    case 'bots_restart_progress': {
+      if (!isRec(data)) return
+      const batchId = str(pick(data, 'batch_id'))
+      const name = str(pick(data, 'name'))
+      const status = str(pick(data, 'status'))
+      set((s) => {
+        const b = s.restartBatch
+        if (!b || b.id !== batchId) return {}
+        if (status === 'restarting') return { restartBatch: { ...b, current: name } }
+        if (status === 'ok') {
+          return { restartBatch: { ...b, done: b.done + 1, current: null, ok: [...b.ok, name] } }
+        }
+        if (status === 'failed') {
+          const error = str(pick(data, 'error'), '失敗')
+          return { restartBatch: { ...b, done: b.done + 1, current: null, failed: [...b.failed, { name, error }] } }
+        }
+        return {}
+      })
+      return
+    }
+    case 'bots_restart_done': {
+      if (!isRec(data)) return
+      const batchId = str(pick(data, 'batch_id'))
+      const skipped = api.toRestartSkips(pick(data, 'skipped'))
+      const b = get().restartBatch
+      if (!b || b.id !== batchId) return
+      const okNames = arr(pick(data, 'ok')).flatMap((v) => (isRec(v) ? [str(pick(v, 'name'))] : []))
+      const failed = arr(pick(data, 'failed')).flatMap((v) =>
+        isRec(v) ? [{ name: str(pick(v, 'name')), error: str(pick(v, 'error'), '失敗') }] : [],
+      )
+      // daemon 的最終清單是權威；中途漏掉的 frame 到這裡會被補齊。
+      set({
+        restartBatch: {
+          ...b,
+          done: okNames.length + failed.length,
+          current: null,
+          ok: okNames,
+          failed,
+          skipped,
+          finished: true,
+        },
+      })
+      if (okNames.length + failed.length > 0) {
+        const parts = [`成功 ${okNames.length} 顆`]
+        if (skipped.length > 0) parts.push(`跳過 ${skipped.length} 顆`)
+        if (failed.length > 0) parts.push(`失敗 ${failed.length} 顆`)
+        get().notify(failed.length > 0 ? 'error' : 'info', `claude 更新重啟完成：${parts.join(' · ')}`)
+      }
+      // 重啟過的 bot 換了 run，狀態一次撈回來。
+      void get().refreshState()
       return
     }
     case 'identities_changed':

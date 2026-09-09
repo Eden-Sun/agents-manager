@@ -322,6 +322,38 @@ export interface Run {
   ended_at: string | null
 }
 
+/** 批次重啟裡被跳過的那一顆與原因（`POST /api/bots/restart-idle`，SPEC §6.9）。 */
+export interface RestartSkip {
+  bot_id: string
+  name: string
+  /** 機器判讀用：`working` / `blocked` / `turn_in_flight` / `not_running` / `unknown_status`。 */
+  reason: string
+  /** 給人看的那句（daemon 寫好的，前端不另編一套）。 */
+  reason_label: string
+}
+
+/** `POST /api/bots/restart-idle` 立刻回來的計畫；實際進度走 WS。 */
+export interface RestartPlan {
+  batch_id: string
+  total: number
+  planned: { bot_id: string; name: string }[]
+  skipped: RestartSkip[]
+}
+
+/** 前端自己維護的批次狀態（計畫 + 一路收到的 WS 進度）。 */
+export interface RestartBatch {
+  id: string
+  total: number
+  /** 已經跑完的顆數（成功或失敗都算）。 */
+  done: number
+  /** 正在重啟的那顆名字；null = 還沒開始或已經結束。 */
+  current: string | null
+  ok: string[]
+  failed: { name: string; error: string }[]
+  skipped: RestartSkip[]
+  finished: boolean
+}
+
 /**
  * claude statusLine 傳進來的完整資訊（`daemon/src/statusline_cmd.rs`）。
  *
