@@ -30,27 +30,27 @@
 4. **PATCH**：`workers.count` 0↔n 可在跑動中改：改成 0 → 立刻 `start_issues_up_to_capacity`；改成 n → 不再起新 issue，現有的做完，執行者數之後照 n。回 `applied: now`。
 
 ## 1. daemon 核心（`team_sched.rs` / `team.rs` / `db.rs`）
-- [ ] `db`：`team_issues` 允許多列 `working`（檢查有沒有 partial unique 擋住）；新增 `db::working_team_issues(team_id)`；`Ctx.issues`。
-- [ ] 解析：`dispatch.tasks[].issue`、`done.issue`（`Action::Dispatch` items 帶 `issue_id`，`Action::Done { issue_id }`）。
-- [ ] `start_issues_up_to_capacity`、按需建執行者（`ensure_workers_for(issue, needed)`）。
-- [ ] `fill_workers` / `dispatch` / merge / review 全部用 task 的 issue 分支。
-- [ ] 每 issue 的 `ISSUE-<n>.md`、`TEAM.md`、PM persona 與首則／`next_issue` relay 文案、A.4 分組表。
-- [ ] `done` 只收那個 issue：`close_issue(issue)` 不再 advance 單一下一個，而是 `start_issues_up_to_capacity`。
-- [ ] 測試（既有 `S` 框架）：
+- [x] `db`：`team_issues` 允許多列 `working`（檢查有沒有 partial unique 擋住）；新增 `db::working_team_issues(team_id)`；`Ctx.issues`。
+- [x] 解析：`dispatch.tasks[].issue`、`done.issue`（`Action::Dispatch` items 帶 `issue_id`，`Action::Done { issue_id }`）。
+- [x] `start_issues_up_to_capacity`、按需建執行者（`ensure_workers_for(issue, needed)`）。
+- [x] `fill_workers` / `dispatch` / merge / review 全部用 task 的 issue 分支。
+- [x] 每 issue 的 `ISSUE-<n>.md`、`TEAM.md`、PM persona 與首則／`next_issue` relay 文案、A.4 分組表。
+- [x] `done` 只收那個 issue：`close_issue(issue)` 不再 advance 單一下一個，而是 `start_issues_up_to_capacity`。
+- [x] 測試（既有 `S` 框架）：
   - 無限模式、佇列 3 個 issue → 3 個同時 working，各自 1 個執行者、各自整合分支；
   - 對 #A 派 3 筆 → 自動多建 2 個 `iA-dev-2/3`，全隊上限 12 生效；
   - task 分支從**自己的** issue 分支切（改 #B 的分支後 #A 的 task 看不到）；
   - `done{issue:A}` 只交付 A，B 照跑；
   - 有限模式所有既有測試不變。
-- [ ] `docs/SPEC-team.md`：§2.3 加「多 issue 同時進行（無限模式）」、§4.4（`issue` 欄位）、§4.5 表（`0` = 無限）、§7.1、§8.1（phase 不變，issue 各自狀態）、§10.1/§10.5、附錄 A/B。`docs/API.md` 同步。
+- [x] `docs/SPEC-team.md`：§2.3 加「多 issue 同時進行（無限模式）」、§4.4（`issue` 欄位）、§4.5 表（`0` = 無限）、§7.1、§8.1（phase 不變，issue 各自狀態）、§10.1/§10.5、附錄 A/B。`docs/API.md` 同步。
 
 ## 2. web
-- [ ] `TeamLaunchPanel`：併行數控制加「∞ 無限」（count=0），hint：「佇列裡有幾個 issue 就同時做幾個；每個 issue 先 1 個執行者，PM 派多少就開多少（每 issue 最多 4、全隊 12）。額度會很快用掉。」
-- [ ] `TeamRoleEditor`（執行者卡的 PATCH）同樣可以切 0↔n。
-- [ ] `TeamPanel`：issue 佇列列表裡可以有多個「進行中」；Task 表按 issue 分組（每組標 `#n · 整合分支`、併行 M/n 或 `∞ · 執行者 k`）；成員列依 issue 分段（`i9-dev-1`、`i10-dev-1`…）。
-- [ ] 側欄 team 節點：`issue 進行中 2 · task 4/9`。`teamProgress.ts` 跟著改並補測試。
-- [ ] `api/types.ts` / `normalize.ts` / `mock.ts`（mock 給一個無限模式、兩個 issue 同時跑的 team）。
-- [ ] `docs/UI-DECISIONS.md`「無限併行」：為什麼是 issue 級併行而不是把一個 issue 硬拆；為什麼每 issue 先 1 個執行者；為什麼有 6/12 的硬上限（pane 與額度，不是預算）。`docs/FRONTEND.md`。
+- [x] `TeamLaunchPanel`：併行數控制加「∞ 無限」（count=0），hint：「佇列裡有幾個 issue 就同時做幾個；每個 issue 先 1 個執行者，PM 派多少就開多少（每 issue 最多 4、全隊 12）。額度會很快用掉。」
+- [x] `TeamRoleEditor`（執行者卡的 PATCH）同樣可以切 0↔n。
+- [x] `TeamPanel`：issue 佇列列表裡可以有多個「進行中」；Task 表按 issue 分組（每組標 `#n · 整合分支`、併行 M/n 或 `∞ · 執行者 k`）；成員列依 issue 分段（`i9-dev-1`、`i10-dev-1`…）。
+- [x] 側欄 team 節點：`issue 進行中 2 · task 4/9`。`teamProgress.ts` 跟著改並補測試。
+- [x] `api/types.ts` / `normalize.ts` / `mock.ts`（mock 給一個無限模式、兩個 issue 同時跑的 team）。
+- [x] `docs/UI-DECISIONS.md`「無限併行」：為什麼是 issue 級併行而不是把一個 issue 硬拆；為什麼每 issue 先 1 個執行者；為什麼有 6/12 的硬上限（pane 與額度，不是預算）。`docs/FRONTEND.md`。
 
 ## 驗證
 - `cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`（HEAD 358 全過）。
@@ -60,3 +60,19 @@
 
 ## 回報
 三到五行：commit hash、驗證數字、需重啟 daemon、沒做到的與原因（尤其是有限模式有沒有任何行為改變）。
+
+---
+
+## 完成（2026-09-09）
+
+- `fb440e8` daemon 核心 · `8c6a9ac` SPEC/API · `60e9834` web。
+- `cargo test -p agents-managerd` **367 過 0 失**（HEAD 359 全數維持原狀 + 8 個無限模式的新測試）；
+  `cargo build --release` 過。web：`bun test src` 87 過、`bunx tsc --noEmit -p tsconfig.app.json` 乾淨、
+  `bunx oxlint src` 35 個 warning（與 HEAD 相同，新檔案零）、`bun run build` 過。
+- 有限模式（1–4）唯一的行為變動是**沒有**：既有測試一條都沒改邏輯，只改了
+  `create_rejects_bad_input` 裡「`count = 0` 是壞值」那一行斷言——`0` 現在有意義了。
+- 截圖 `docs/screenshots/team-unlimited/`（mock，沒有碰真機的 team）。
+- **需要重啟 daemon 才生效**（新的排程與 API 都在二進位裡）。
+- 沒做到：`MAX_CONCURRENT_ISSUES` / `MAX_TEAM_WORKERS` 沒有做成可調欄位（理由寫在
+  `docs/UI-DECISIONS.md`）；mock 的假 scheduler 只推進第一個 issue 的流程，其餘 issue 停在
+  「已開工、有執行者、task 進行中」——多 issue 的**畫面**都對，但 mock 不會把它們跑完。
