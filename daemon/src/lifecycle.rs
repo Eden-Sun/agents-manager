@@ -2,7 +2,7 @@
 //!
 //! Every public entry point takes the per-bot lock.
 
-use crate::config::LOCAL_HOST;
+use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
 use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
 use crate::hosts::{sh_quote, HostConn};
@@ -571,6 +571,9 @@ pub struct RemoteHookPaths {
 }
 
 pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<RemoteHookPaths> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
     let home = conn.home().await?;
     let dir = format!("{home}/.config/agents-manager/bots/{bot_id}");
     Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
@@ -650,9 +653,11 @@ pub async fn refresh_remote_hook(app: &Arc<App>, bot: &db::Bot) -> anyhow::Resul
 /// start a bot: the reconcile's descent match still tracks whatever the agent spawns.
 async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
     let installed = if project.host == LOCAL_HOST {
-        crate::herdr_shim::install_local(&app.bot_dir(&bot.id))
-            .map(|d| d.to_string_lossy().into_owned())
-            .map_err(anyhow::Error::from)
+        app.bot_dir(&bot.id).and_then(|dir| {
+            crate::herdr_shim::install_local(&dir)
+                .map(|d| d.to_string_lossy().into_owned())
+                .map_err(anyhow::Error::from)
+        })
     } else {
         match app.hosts.get(&project.host).await {
             Some(conn) => match remote_bot_dir(&conn, &bot.id).await {
@@ -720,7 +725,7 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
     }
 
     // ---- local project: the daemon binary is right here
-    let dir = app.bot_dir(&bot.id);
+    let dir = app.bot_dir(&bot.id)?;
     std::fs::create_dir_all(&dir)?;
     let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
@@ -2037,8 +2042,12 @@ pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
 /// Remove a deleted bot's hook material (`~/.config/agents-manager/bots/<id>/`). Best effort:
 /// a remote host that is down only gets a log line — the bot is gone either way.
 pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
+    if !valid_id(bot_id) {
+        tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
+        return;
+    }
     if host == LOCAL_HOST {
-        let dir = app.bot_dir(bot_id);
+        let Ok(dir) = app.bot_dir(bot_id) else { return };
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(dir = %dir.display(), "removed bot config dir"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2059,6 +2068,25 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
     match res {
         Ok(dir) => tracing::info!(host, %dir, "removed remote bot config dir"),
         Err(e) => tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not remove remote bot config dir"),
+    }
+}
+
+#[cfg(test)]
+mod bot_dir_safety_tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    #[tokio::test]
+    async fn invalid_ids_do_not_access_or_remove_local_bot_dirs() {
+        let env = tt::env().await;
+        let protected = env.app.data_dir.join("bots").join("keep");
+        std::fs::create_dir_all(&protected).unwrap();
+
+        for id in ["../..", "foo/bar", r"..\..", ""] {
+            assert!(env.app.bot_dir(id).is_err(), "invalid id was accepted: {id:?}");
+            purge_bot_dir(&env.app, id, LOCAL_HOST).await;
+            assert!(protected.exists(), "purge touched the protected directory for {id:?}");
+        }
     }
 }
 
