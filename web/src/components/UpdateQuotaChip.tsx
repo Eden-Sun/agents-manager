@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { inFlightTurn, useStore } from '../store/store'
 import { updateBatchCounts } from '../lib/updateBatch'
+import { ConfirmDialog } from './ConfirmDialog'
 
 /**
  * 「claude 有更新」擺在額度列上（SPEC §6.9）。
@@ -15,6 +17,11 @@ import { updateBatchCounts } from '../lib/updateBatch'
  *
  * 跑起來之後 chip 自己顯示 `done/total`，做完顯示成功幾顆並且點一下收掉——側欄那條橫幅仍然
  * 畫完整的進度與失敗／跳過名單（`UpdateAllBanner`），這裡是隨處都看得見的那份精簡版。
+ *
+ * **按下去先問一句**：重啟一次動的是好幾顆 bot，而且 chip 上只寫得下一個數字——是哪幾顆、
+ * 哪幾顆在忙會被跳過，只有 tooltip 看得到，滑不到（手機）或沒滑過的人等於盲按。確認框把那份
+ * 名單攤開來再問，這是整個流程裡唯一一個「還來得及反悔」的地方（送出之後是背景序列跑，沒有
+ * 取消）。
  */
 export function UpdateQuotaChip() {
   const batch = useStore((s) => s.restartBatch)
@@ -35,6 +42,7 @@ export function UpdateQuotaChip() {
       .join('\n'),
   )
   const busyCount = busyLines ? busyLines.split('\n').length : 0
+  const [confirming, setConfirming] = useState(false)
 
   if (batch) {
     const { total, done, ok, failed, finished } = batch
@@ -67,18 +75,54 @@ export function UpdateQuotaChip() {
       : `claude 有更新 · 重啟 ${readyCount} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）`
 
   return (
-    <button
-      type="button"
-      className={`quota-update${readyCount === 0 ? ' waiting' : ''}`}
-      disabled={sending || readyCount === 0}
-      title={`${label}${readyCount > 0 ? `：\n${readyNames}` : ''}${busyNote}`}
-      aria-label={label}
-      onClick={() => void restartIdleBots()}
-    >
-      <span aria-hidden="true">⬆</span>
-      <span className="quota-update-n" aria-hidden="true">
-        {sending ? '…' : readyCount === 0 ? busyCount : readyCount}
-      </span>
-    </button>
+    <>
+      <button
+        type="button"
+        className={`quota-update${readyCount === 0 ? ' waiting' : ''}`}
+        disabled={sending || readyCount === 0}
+        title={`${label}${readyCount > 0 ? `：\n${readyNames}` : ''}${busyNote}`}
+        aria-label={label}
+        onClick={() => setConfirming(true)}
+      >
+        <span aria-hidden="true">⬆</span>
+        <span className="quota-update-n" aria-hidden="true">
+          {sending ? '…' : readyCount === 0 ? busyCount : readyCount}
+        </span>
+      </button>
+      <ConfirmDialog
+        open={confirming}
+        title="重啟這些 Bot 來套用 claude 更新？"
+        body={
+          <>
+            <p>
+              以下 <strong>{readyCount}</strong> 顆會結束目前的 agent，再用同一個 session <code>--resume</code>{' '}
+              接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。
+            </p>
+            <ul className="confirm-list">
+              {readyNames.split('、').map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+            {busyCount > 0 ? (
+              <>
+                <p className="confirm-note">另外 {busyCount} 顆在忙，這次會跳過：</p>
+                <ul className="confirm-list dim">
+                  {busyLines.split('\n').map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </>
+        }
+        confirmLabel={`重啟 ${readyCount} 顆`}
+        width={380}
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => {
+          setConfirming(false)
+          void restartIdleBots()
+        }}
+      />
+    </>
   )
 }

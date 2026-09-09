@@ -471,9 +471,10 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
 - 回饋走 WS：`bots_restart_progress`（每顆兩次：`restarting` / `ok` 或 `failed`）與
   `bots_restart_done`（最終的 `ok` / `failed` / `skipped` 三張清單）。前端用它畫「第幾顆 / 共幾顆」
   與最後的摘要，見 `docs/UI-DECISIONS.md`。
-- 入口在**額度列**上（`web/src/components/UpdateQuotaChip.tsx`）：`⬆ N` 一顆 chip，跟每個 kind 的
-  量表排在同一列——「claude 有沒有新版」跟「claude 還剩多少額度」都是這個 kind 的全域狀態，而額度列
-  在每個畫面的標題列上都在。側欄那條（`UpdateAllBanner`）只留按下去之後的進度與失敗／跳過名單。
+- 入口在**額度列**上（`web/src/components/UpdateQuotaChip.tsx`）：`⬆ N` 一顆 chip，**貼在 claude
+  那幾格量表的右邊**——「claude 有沒有新版」跟「claude 還剩多少額度」都是這個 kind 的全域狀態，而額度列
+  在每個畫面的標題列上都在。按下去先跳確認框列出要重啟哪幾顆、會跳過哪幾顆，確認後才打這支 API。
+  側欄那條（`UpdateAllBanner`）只留按下去之後的進度與失敗／跳過名單。
 
 
 ## 7. API
