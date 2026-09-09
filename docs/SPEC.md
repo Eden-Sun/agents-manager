@@ -255,7 +255,7 @@ label = "foo"
      退回舊行為。
    - `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷用）、`AM_PORT`、`AM_HOOK_TOKEN`（v3.6；`inject_hooks = false` 時不給，grok 的分派腳本以此判斷是否回報）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
    - 失敗 → Run `exited`（`ended_at` 填入），回 502。
-4. 更新 Run 的 `workspace_id` / `pane_id`。產生 hook 注入檔（Claude）或參數（Codex）。
+4. 更新 Run 的 `workspace_id` / `pane_id` / `tab_id`。產生 hook 注入檔（Claude）或參數（Codex）。
 5. 先寫 `runs.agent_name = agent_name(project.label, bot.name)`，再 `agent.start {name: <agent_name>, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`（立即回傳 `launch_pending`）。之後所有 herdr 目標（wait / prompt / keys / stop）一律用 `run.agent_name`，缺值時退回 `bot.name`。失敗 → Run `exited` + 盡力 `pane.close`。
 6. 開該 pane 的狀態訂閱連線。
 7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`：
