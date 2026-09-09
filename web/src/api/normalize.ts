@@ -127,7 +127,7 @@ function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T)
 
 const RUN_STATES = ['starting', 'running', 'stopping', 'stopped', 'exited'] as const
 const AGENT_STATUSES = ['idle', 'working', 'blocked', 'unknown'] as const
-const TURN_STATUSES = ['in_flight', 'completed', 'completed_fallback', 'failed'] as const
+const TURN_STATUSES = ['queued', 'in_flight', 'completed', 'completed_fallback', 'failed'] as const
 const DELIVERIES = ['pending', 'ok', 'unknown', 'failed'] as const
 const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
@@ -579,6 +579,8 @@ export function toState(raw: unknown): AppState {
       if (run && !runs.some((x) => x.id === run.id)) runs.push(run)
       const t = toTurn(pick(b, 'in_flight_turn', 'turn'), bot.id)
       if (t && !turns.some((x) => x.id === t.id)) turns.push(t)
+      const queued = toTurn(pick(b, 'queued_turn'), bot.id)
+      if (queued && !turns.some((x) => x.id === queued.id)) turns.push(queued)
     }
   }
 
