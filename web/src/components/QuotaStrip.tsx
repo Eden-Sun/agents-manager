@@ -413,9 +413,20 @@ function Gauge({
   const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  // 手機不收成「最吃緊的那一個」：那樣 5h 一低就把 7d 蓋掉，而 7d 才是決定「今天還能不能開工」
-  // 的那個數字（2026-09-09 使用者：空間夠就常態顯示 7d）。這一列本來就橫向捲，多一組寫得下。
-  if (collapsed && !compact) {
+  // 手機只寫 7d（grok 是「週」）：那是決定「今天還能不能開工」的數字，5h 兩三個小時就回來了。
+  // 收成「最吃緊的那一個」會讓 5h 一低就把 7d 蓋掉；全部列出來又把一顆 chip 撐成三組數字，
+  // 標題列那條就得一直捲（2026-09-09 使用者：只要 7d）。沒有 7d 的帳號才退回最吃緊的那個。
+  if (compact && seven !== null) {
+    windows = [
+      {
+        name: weekLabel(entry.kind),
+        pct: seven,
+        resetsAt: q?.seven_day?.resets_at ?? null,
+        low: q?.seven_day?.low ?? false,
+        critical: q?.seven_day?.critical ?? false,
+      },
+    ]
+  } else if (collapsed) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
     windows = [
