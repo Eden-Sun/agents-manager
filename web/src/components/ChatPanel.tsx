@@ -1079,7 +1079,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const modelExtra = modelExtraOf(statusInfo)
   // Images live outside the store: they only matter until the send that carries them.
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
-  const files = useAttachments(botId)
+  const files = useAttachments(botId, botId)
   const drop = useDropTarget(files.add, !botId)
   // 右側圖片暫存區要知道「現在這個對話」是誰：點暫存縮圖時，圖片就落進這個托盤（也就是
   // 上傳給這隻 bot）。終端分頁時這個托盤不在畫面上，就別接收——圖會像憑空消失。
