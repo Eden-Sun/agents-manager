@@ -72,8 +72,6 @@ export function anchorOf(el: Element): SettingsAnchor {
 export type KindDisplay = 'icon' | 'text'
 
 const KIND_DISPLAY_KEY = 'am.kindDisplay'
-const BOT_ORDER_KEY = 'am.botOrder'
-const PROJECT_ORDER_KEY = 'am.projectOrder'
 const DRAFTS_KEY = 'am.drafts'
 const DRAFT_CURSORS_KEY = 'am.draftCursors'
 const SELECTION_KEY = 'am.selection'
@@ -213,50 +211,9 @@ function writeDraftCursors(cursors: Record<string, DraftCursor>) {
   }
 }
 
-/**
- * 側欄裡每個 project 的 bot 順序（bot id 陣列）。daemon 沒有排序欄位，所以這是純前端偏好，
- * 存在 localStorage；沒被列到的 bot（新增的）沿用 daemon 回來的順序接在後面。
- */
-function readBotOrder(): Record<string, string[]> {
-  try {
-    const raw = localStorage.getItem(BOT_ORDER_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : null
-    if (!isRec(parsed)) return {}
-    const out: Record<string, string[]> = {}
-    for (const [k, v] of Object.entries(parsed)) {
-      if (Array.isArray(v)) out[k] = v.filter((x): x is string => typeof x === 'string')
-    }
-    return out
-  } catch {
-    return {}
-  }
-}
 
-function readProjectOrder(): string[] {
-  try {
-    const raw = localStorage.getItem(PROJECT_ORDER_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : null
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
 
-function writeProjectOrder(order: string[]) {
-  try {
-    localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(order))
-  } catch {
-    /* storage unavailable: the order still holds for this page */
-  }
-}
 
-function writeBotOrder(order: Record<string, string[]>) {
-  try {
-    localStorage.setItem(BOT_ORDER_KEY, JSON.stringify(order))
-  } catch {
-    /* storage unavailable: the order still holds for this page */
-  }
-}
 
 function readKindDisplay(): KindDisplay {
   try {
@@ -462,8 +419,13 @@ export interface StoreState {
   /** 觸發設定的按鈕位置（viewport 座標），彈窗會貼著它開；null = 置中。 */
   settingsAnchor: SettingsAnchor | null
   /** 使用者拖出來的 bot 順序，key = project id（見 `botsOfProject`）。 */
+  /**
+   * 拖曳／Alt+↑↓ 之後的樂觀順序（key = project id）。權威順序是 daemon 回來的陣列
+   * （`POST /api/order` 會把它寫回 config.toml），這裡只是等 `project_changed` 期間的過渡；
+   * 沒被列到的 bot 沿用 daemon 的順序接在後面。
+   */
   botOrder: Record<string, string[]>
-  /** 側欄專案的拖曳順序（project id），同 `botOrder` 只存瀏覽器；沒列到的接在後面。 */
+  /** 側欄專案的樂觀順序（project id），同 `botOrder`；沒列到的接在後面。 */
   projectOrder: string[]
   /** Sidebar consumes this to open the「新增 Bot」sheet for a project. */
   openBotSheetFor: string | null
@@ -733,8 +695,8 @@ export const useStore = create<StoreState>((set, get) => ({
   rightTab: 'chat',
   settingsBotId: null,
   settingsAnchor: null,
-  botOrder: readBotOrder(),
-  projectOrder: readProjectOrder(),
+  botOrder: {},
+  projectOrder: [],
   openBotSheetFor: null,
   notices: [],
   busy: {},
@@ -798,7 +760,8 @@ export const useStore = create<StoreState>((set, get) => ({
       for (const t of st.teams) teams[t.id] = { ...(s.teams[t.id] ?? {}), ...t }
       const selectedTeam = s.selectedTeamId && teams[s.selectedTeamId] ? s.selectedTeamId : null
       // 瀏覽器端的佔位列（分身按下去那一刻放的）：同名的真 bot 到了就原地換掉——連它在
-      // `botOrder` 裡的位子一起讓給真的那一列，同一次 set 裡完成，清單不會少一列或跳一下。
+      // `botOrder`（拖曳後、還沒等到 daemon 回話的樂觀順序）裡的位子一起讓給真的那一列，
+      // 同一次 set 裡完成，清單不會少一列或跳一下。
       const keptPending: Bot[] = []
       let botOrder = s.botOrder
       for (const b of s.bots) {
@@ -811,7 +774,6 @@ export const useStore = create<StoreState>((set, get) => ({
         const order = (botOrder[b.project_id] ?? []).map((x) => (x === b.id ? real.id : x))
         botOrder = { ...botOrder, [b.project_id]: order }
       }
-      if (botOrder !== s.botOrder) writeBotOrder(botOrder)
       return {
         hosts: st.hosts,
         attachCommand: st.attach_command,
@@ -981,7 +943,11 @@ export const useStore = create<StoreState>((set, get) => ({
       const next = [...rest.slice(0, at), botId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
       const botOrder = { ...s.botOrder, [pid]: next }
-      writeBotOrder(botOrder)
+      // 順序存在 daemon（config.toml 的陣列順序），手機與桌機才是同一份。這裡先樂觀套用，
+      // daemon 寫完會回一個 `project_changed`，下一次 `/state` 帶回權威順序。
+      void api.saveOrder({ bots: { [pid]: next } }).catch(() => {
+        get().notify('error', '排序沒存起來（daemon 沒收到），重新整理會回到原本的順序')
+      })
       return { botOrder }
     })
   },
@@ -995,7 +961,9 @@ export const useStore = create<StoreState>((set, get) => ({
       if (beforeId !== null && at < 0) return {}
       const next = [...rest.slice(0, at), projectId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
-      writeProjectOrder(next)
+      void api.saveOrder({ projects: next }).catch(() => {
+        get().notify('error', '排序沒存起來（daemon 沒收到），重新整理會回到原本的順序')
+      })
       return { projectOrder: next }
     })
   },

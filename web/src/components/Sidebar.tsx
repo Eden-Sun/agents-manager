@@ -208,6 +208,8 @@ function BotRow({
       }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
       role="option"
       aria-selected={selected}
+      // 手機的子列不畫名字（見 styles.css），名字改由這裡帶著走。
+      aria-label={compact ? bot.name : undefined}
       data-bot-id={botId}
       tabIndex={0}
       draggable={!compact}

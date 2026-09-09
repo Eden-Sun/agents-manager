@@ -48,6 +48,7 @@ pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
+        .route("/order", post(set_order))
         .route("/projects/{id}", patch(patch_project).delete(delete_project))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
@@ -932,6 +933,61 @@ fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
         }
     }
     unreachable!()
+}
+
+/// `POST /api/order` — 側欄的專案／bot 排序。
+///
+/// 順序本來只存在瀏覽器的 localStorage，所以同一個 daemon 在手機上跟桌機上長得不一樣
+/// （使用者 2026-09-09 回報）。config.toml 的陣列順序本身就是順序，把它寫回去就等於
+/// 全裝置一致，也不用另開一份狀態。沒列到的（別的 client 剛新增的）維持相對順序接在後面。
+#[derive(Deserialize)]
+struct SetOrder {
+    /// 專案 id，由上而下。
+    #[serde(default)]
+    projects: Option<Vec<String>>,
+    /// `project_id` → 該專案的 bot id，由上而下。config.toml 沒有的（child bot）忽略。
+    #[serde(default)]
+    bots: Option<BTreeMap<String, Vec<String>>>,
+}
+
+/// `want` 給的順序排 `items`，沒被點名的維持原相對順序接在後面。
+fn reorder_by<T>(items: &mut Vec<T>, want: &[String], id_of: impl Fn(&T) -> Option<String>) {
+    let rank: BTreeMap<&str, usize> = want.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+    let n = want.len();
+    let mut keyed: Vec<(usize, usize, T)> = std::mem::take(items)
+        .into_iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let r = id_of(&it).and_then(|id| rank.get(id.as_str()).copied()).unwrap_or(n + i);
+            (r, i, it)
+        })
+        .collect();
+    keyed.sort_by_key(|(r, i, _)| (*r, *i));
+    items.extend(keyed.into_iter().map(|(_, _, it)| it));
+}
+
+async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Result<Response, LcError> {
+    if b.projects.is_none() && b.bots.is_none() {
+        return Err(LcError::Bad("order: projects 或 bots 至少要有一個".into()));
+    }
+    app.cfg
+        .update(|cfg| {
+            if let Some(want) = &b.projects {
+                reorder_by(&mut cfg.projects, want, |p| p.id.clone());
+            }
+            if let Some(map) = &b.bots {
+                for p in cfg.projects.iter_mut() {
+                    let Some(want) = p.id.as_deref().and_then(|id| map.get(id)) else { continue };
+                    reorder_by(&mut p.bots, want, |x| x.id.clone());
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(any_err)?;
+    reproject(&app).await?;
+    app.emit("project_changed", json!({"reason": "order"})).await;
+    Ok((StatusCode::OK, Json(json!({"ok": true}))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -2120,6 +2176,38 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
                 _ => return,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::reorder_by;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn puts_the_named_ones_in_the_given_order() {
+        let mut items = ids(&["a", "b", "c"]);
+        reorder_by(&mut items, &ids(&["c", "a", "b"]), |x| Some(x.clone()));
+        assert_eq!(items, ids(&["c", "a", "b"]));
+    }
+
+    /// 別的 client 剛新增、這個請求還不知道的項目：維持原相對順序接在後面，不被丟掉。
+    #[test]
+    fn unnamed_items_keep_their_relative_order_at_the_end() {
+        let mut items = ids(&["a", "new1", "b", "new2"]);
+        reorder_by(&mut items, &ids(&["b", "a"]), |x| Some(x.clone()));
+        assert_eq!(items, ids(&["b", "a", "new1", "new2"]));
+    }
+
+    /// 沒有 id 的（手寫 config 還沒補 id）也一樣不能消失。
+    #[test]
+    fn items_without_an_id_survive() {
+        let mut items = vec![Some("a".to_string()), None, Some("b".to_string())];
+        reorder_by(&mut items, &ids(&["b"]), |x| x.clone());
+        assert_eq!(items, vec![Some("b".to_string()), Some("a".to_string()), None]);
     }
 }
 

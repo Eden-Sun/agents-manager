@@ -627,3 +627,13 @@
 - **理由**：現在網址是拿來貼給別人的。token 是 daemon 的憑證，不該跟著畫面連結一起流出去；
   transport 在 `GET /api/session` 之後本來就自己快取，網址上留著它沒有任何作用。
 
+
+## 手機的子 agent 列不寫名字；排序改由 daemon 保管（2026-09-09）
+
+- **子 agent 在 ≤640px 不顯示名字**：一列擠不下，`c1-fable-…` 截完也認不出是誰；子列真正要
+  分辨的是身分與模型（它掛在哪個父列底下已經由縮排說明了）。名字留在燈號 tooltip 與整列的
+  `aria-label`，讓出來的寬度給模型徽章（原本被截成 `f…`）。桌機不變。
+- **排序不再存 localStorage**：`am.botOrder` / `am.projectOrder` 是每個瀏覽器一份，所以同一個
+  daemon 在手機與桌機上的順序不一樣（使用者回報）。改成 `POST /api/order` 寫回 config.toml 的
+  陣列順序，`projects.position` / `bots.position` 投影進 SQLite，`GET /api/state` 就是權威順序。
+  前端只留拖曳當下的樂觀順序，等 `project_changed` 回來就換成 daemon 的。

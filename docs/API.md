@@ -104,8 +104,19 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | POST | `/api/projects/{id}/bots` | `{"name":"foo-claude","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false}` | `200 {"bot_id":"...","name":"foo-claude"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；名稱重複 409，但 `name_auto:true` 時 daemon 自己往後找 `<base>-<n>`（回應的 `name` 是實際用的） |
 | PATCH | `/api/bots/{id}` | `{"name"?,"model"?,"args"?,"autostart"?,"auto_approve"?,"inject_hooks"?,"identity"?,"env"?}` | `200 {"needs_restart":bool}`；改名時有 active Run → 409（詳見 §10） |
 | DELETE | `/api/bots/{id}` | — | `200 {}`（會先 stop；conversation 與訊息保留，詳見 §10） |
+| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個欄位都沒有 → 400 |
 
 這些操作成功後 daemon 會推 `project_changed` / `bot_changed`，前端收到後重新 `GET /api/state`。
+
+### `POST /api/order`（2026-09-09 新增）
+
+側欄的排序。順序就是 config.toml 裡 `[[projects]]` / `[[projects.bots]]` 的陣列順序，
+所以 `GET /api/state` 回來的順序即是權威——前端不需要（也不該）自己存一份。
+
+- 只送要改的那一半：`projects` 只排專案，`bots` 只排指定專案底下的 bot。
+- **沒被列到的維持原相對順序接在後面**：別的 client 剛新增的項目不會因為這個請求消失或亂序。
+- config.toml 裡沒有的 id（child bot、已刪除的）直接忽略。
+- 成功後推 `project_changed`。
 
 ## 4. Run 控制
 
