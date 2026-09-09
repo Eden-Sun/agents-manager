@@ -187,8 +187,8 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 ```
 
 - `delivery = "ok"`：已送達 agent，等 hook 回覆（或 5 秒後的終端備援）。
-- `delivery = "unknown"`：RPC 逾時，**該 bot 在 abandon / interrupt / stop 之前不能再送 prompt**
-  （再送會 409），UI 應顯示「送出狀態不明」並提供「放棄這回合」按鈕（呼叫 `/api/turns/{id}/abandon`）。
+- `delivery = "unknown"`：RPC 逾時；只要該 Turn 仍是 `status='in_flight'`，**該 bot 在 abandon / interrupt / stop 之前不能再送 prompt**
+  （再送會 409）。Stop hook 完成這個 Turn 時會將 delivery 收成 `ok`；UI 應在仍為 in-flight 時顯示「送出狀態不明」並提供「放棄這回合」按鈕（呼叫 `/api/turns/{id}/abandon`）。
 - `delivery = "failed"`：agent 當下處於 blocked，Turn 直接標 failed。
 
 409 的 `reason` 可能是：`bot has no active run`、`run is not running`、
