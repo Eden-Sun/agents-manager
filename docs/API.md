@@ -117,7 +117,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}` — **強制**結束目前回合，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
 | POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?:"..."}` | `200 {}`；Run 沒有 pane → 404；`expect_run_id` 不符 → 409 |
-| POST | `/api/turns/{id}/abandon` | — | `200 {}`；該 Turn 既非 in-flight 也非 delivery=unknown（以 per-bot lock 內最新狀態及 CAS 判定）→ `409 {"error":"conflict","reason":"turn is neither in-flight nor of unknown delivery","turn_id":"..."}`；409 不新增 system message |
+| POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `status='in_flight'`（包括 `delivery=unknown`）可放棄，其餘以 per-bot lock 內最新狀態及 CAS 判定為 `409 {"error":"conflict","reason":"turn is neither in-flight nor of unknown delivery","turn_id":"..."}`；409 不新增 system message |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id":"...","kind":"claude","command":"/login"}`；見下 |
 
 `keys` 可用的鍵名由 herdr 驗證，常用：`enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
