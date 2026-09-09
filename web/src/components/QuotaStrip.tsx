@@ -413,7 +413,9 @@ function Gauge({
   const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  if (collapsed) {
+  // 手機不收成「最吃緊的那一個」：那樣 5h 一低就把 7d 蓋掉，而 7d 才是決定「今天還能不能開工」
+  // 的那個數字（2026-09-09 使用者：空間夠就常態顯示 7d）。這一列本來就橫向捲，多一組寫得下。
+  if (collapsed && !compact) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
     windows = [
@@ -504,10 +506,12 @@ function Gauge({
         /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
            （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
         <span className="quota-compact">
-          <span className="quota-window-name">{windows[0].name}</span>
-          <span className="quota-compact-pct">
-            {windows[0].pct === null ? '無資料' : `${fmtPct(windows[0].pct)}%`}
-          </span>
+          {windows.map((w) => (
+            <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
+              <span className="quota-window-name">{w.name}</span>
+              <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
+            </span>
+          ))}
         </span>
       ) : (
       <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>

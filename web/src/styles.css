@@ -6375,6 +6375,28 @@ button.model-tag:hover:not(:disabled) {
   text-align: left;
 }
 
+/* 一顆 chip 上並排的每個窗口（5h / 7d / F）。等級的顏色掛在自己身上，不是整格：
+   5h 綠、7d 黃是常見組合，整格只能是一個顏色，那樣就得挑一個說謊。 */
+.quota-compact-win {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.quota-compact-win + .quota-compact-win {
+  margin-left: 8px;
+}
+
+.quota-compact-win.warn .quota-compact-pct,
+.quota-compact-win.warn .quota-window-name {
+  color: var(--warn);
+}
+
+.quota-compact-win.critical .quota-compact-pct,
+.quota-compact-win.critical .quota-window-name {
+  color: var(--danger);
+}
+
 .quota-compact-pct {
   font-size: 11px;
   font-weight: 650;
@@ -10372,13 +10394,15 @@ button.run-debug-toggle:hover {
     color: var(--text-dim);
   }
 
-  .main-head .quota-hp.warn .quota-compact-pct,
-  .main-head .quota-hp.warn .quota-window-name {
+  /* 顏色跟著**每個窗口自己**的等級走，不是整格的最差值：一顆 chip 上同時有 5h 與 7d，
+     整格上色會把還很健康的那個也染黃。 */
+  .main-head .quota-compact-win.warn .quota-compact-pct,
+  .main-head .quota-compact-win.warn .quota-window-name {
     color: var(--warn);
   }
 
-  .main-head .quota-hp.crit .quota-compact-pct,
-  .main-head .quota-hp.crit .quota-window-name {
+  .main-head .quota-compact-win.critical .quota-compact-pct,
+  .main-head .quota-compact-win.critical .quota-window-name {
     color: var(--danger);
   }
 
