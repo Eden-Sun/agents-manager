@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { TEAM_PHASE_LABEL, teamPhaseTone } from '../api/types'
 import { botLamp, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
@@ -7,10 +8,11 @@ import { StatusLamp } from './StatusLamp'
 /**
  * 手機標題列的 bot 名：點一下是**換 bot**，不是改名（2026-09-09 使用者決定）。桌面有側欄，
  * 名字點了直接改；手機側欄收在抽屜裡，換 bot 要開抽屜、找、點、再等抽屜收——太遠。
- * 這裡下拉列出所有**母 bot**（`parent_bot_id` 為 null、沒刪掉），依 project 分組，點了就切。
- * 改名在手機走 Bot 設定的名稱欄。
+ * 這裡下拉列出所有**母 bot**（`parent_bot_id` 為 null、沒刪掉）與該專案的 **team**，依 project
+ * 分組，點了就切。team 也要在這裡（2026-09-09 使用者回報）：手機上 team 一樣是一個「畫面」，
+ * 只能從抽屜進去的話，跟 bot 的切換成本就不對等。改名在手機走 Bot 設定的名稱欄。
  */
-export function BotSwitcher({ botId, name }: { botId: string; name: string }) {
+export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
@@ -23,8 +25,11 @@ export function BotSwitcher({ botId, name }: { botId: string; name: string }) {
     if (b) setPos({ top: Math.round(b.bottom + 6), left: Math.max(8, Math.round(b.left)) })
   }, [open])
   const selectBot = useStore((s) => s.selectBot)
+  const selectTeam = useStore((s) => s.selectTeam)
+  const selectedTeamId = useStore((s) => s.selectedTeamId)
   const projects = useStore((s) => s.projects)
   const bots = useStore((s) => s.bots)
+  const teams = useStore((s) => s.teams)
 
   useEffect(() => {
     if (!open) return
@@ -48,9 +53,14 @@ export function BotSwitcher({ botId, name }: { botId: string; name: string }) {
 
   // 母 bot：不是子 agent、也不是 team 成員（pm / dev / rev 有自己的 Team 面板）。
   const mothers = bots.filter((b) => !b.parent_bot_id && !b.team)
+  const teamList = Object.values(teams).sort((a, b) => a.created_at.localeCompare(b.created_at))
   const groups = projects
-    .map((p) => ({ project: p, bots: mothers.filter((b) => b.project_id === p.id) }))
-    .filter((g) => g.bots.length > 0)
+    .map((p) => ({
+      project: p,
+      bots: mothers.filter((b) => b.project_id === p.id),
+      teams: teamList.filter((t) => t.project_id === p.id),
+    }))
+    .filter((g) => g.bots.length > 0 || g.teams.length > 0)
 
   return (
     <div className="bot-switcher" ref={ref}>
@@ -88,6 +98,29 @@ export function BotSwitcher({ botId, name }: { botId: string; name: string }) {
                       <RowLamp botId={b.id} />
                       <KindTag kind={b.kind} />
                       <span className="bot-switcher-name">{b.name}</span>
+                    </button>
+                  ))}
+                  {/* team 排在該專案的 bot 後面：它是這個專案的「另一種畫面」，不是某顆 bot。 */}
+                  {g.teams.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      role="option"
+                      aria-selected={t.id === selectedTeamId}
+                      className={`bot-switcher-item team${t.id === selectedTeamId ? ' on' : ''}`}
+                      title={`Team #${t.issue_number}・${TEAM_PHASE_LABEL[t.phase]}`}
+                      onClick={() => {
+                        setOpen(false)
+                        if (t.id !== selectedTeamId) selectTeam(t.id)
+                      }}
+                    >
+                      <span className={`team-phase-dot ${teamPhaseTone(t.phase)}`} aria-hidden="true" />
+                      <span className="team-icon" aria-hidden="true">
+                        ⚙
+                      </span>
+                      <span className="bot-switcher-name">
+                        #{t.issue_number} {t.issue_title || `issue #${t.issue_number}`}
+                      </span>
                     </button>
                   ))}
                 </div>
