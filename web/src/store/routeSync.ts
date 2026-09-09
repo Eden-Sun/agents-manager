@@ -243,7 +243,15 @@ export function useDrawerRoute(open: boolean, close: () => void) {
       }
     } else if (markOf() === 'drawer') {
       // 用 ✕ / scrim / Esc 關的：把借來的那一格還回去，歷史才不會愈積愈長。
-      history.back()
+      //
+      // **要延後一個 tick**（2026-09-09 手機點 bot 切不過去）：點側欄的 bot 列時，`App` 的
+      // `onClickCapture` 先關抽屜，React 在 capture 階段結束就把這個 effect 跑掉；bubble
+      // 階段的 `selectBot` 之後才把新路由 replace 到這一格上。若在這裡同步 `back()`，晚到的
+      // popstate 會把畫面拉回上一個 bot。延後再看一次：那一格已經被新路由接手就不用還。
+      const t = setTimeout(() => {
+        if (markOf() === 'drawer') history.back()
+      }, 0)
+      return () => clearTimeout(t)
     }
     return () => {
       drawerOpen = false
