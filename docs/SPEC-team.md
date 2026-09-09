@@ -844,6 +844,10 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 - 專案沒有 GitHub origin → `400 project has no GitHub origin`（UI 也不會顯示按鈕）。
 - 成功後推 `team_changed`，並在 team 日誌留一則 `note {action:"issue_closed", by:"user", number, url, already_closed, comment}`。
 
+**一鍵關閉全部（2026-09-09）**：佇列裡有兩個以上「`done` 且未關」的 issue 時，UI 在佇列摘要旁給「關閉全部已交付（k）」，
+確認一次後**逐一**呼叫同一個端點（前端迴圈，daemon 沒有批次端點——每一次關閉仍是使用者按出來的那一次），
+一個失敗不擋其他，最後一則通知寫幾個成功幾個失敗。
+
 > 為什麼不做成 `deliver` 的第三種模式（`branch | pr | close`）：`deliver` 是 team 跑完自己會做的事，
 > 而關 issue 依定義要等人點頭；把它塞進 `deliver` 等於讓 daemon 自動關 issue，正是這一節要避免的。
 
