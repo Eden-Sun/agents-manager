@@ -67,6 +67,7 @@ web/src/
     IssuesBar.tsx    # v4.0：專案 github 非 null 時的 Issues 下拉（未登入時可從錯誤列登入該主機的 gh）
     GhAuth.tsx       # 遠端／本機 `GET|POST /api/hosts/:name/gh`：HostsPanel 列上的狀態 + IssuesBar 的「登入」鈕
     UpdateBadge.tsx  # claude 有新版等著重啟套用時，標題列上那顆點得下去的 chip（run.update_notice）
+    UpdateQuotaChip.tsx # 額度列上的 `⬆ N`：claude 全域有新版，一次重啟所有閒置的 Bot（SPEC §6.9）
     HostsPanel.tsx / IdentitiesPanel.tsx / DirPicker.tsx
   styles.css       # 全部 CSS（淺色在 :root，深色在 prefers-color-scheme）
   App.tsx / main.tsx

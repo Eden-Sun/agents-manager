@@ -471,12 +471,17 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
 - 回饋走 WS：`bots_restart_progress`（每顆兩次：`restarting` / `ok` 或 `failed`）與
   `bots_restart_done`（最終的 `ok` / `failed` / `skipped` 三張清單）。前端用它畫「第幾顆 / 共幾顆」
   與最後的摘要，見 `docs/UI-DECISIONS.md`。
+- 入口在**額度列**上（`web/src/components/UpdateQuotaChip.tsx`）：`⬆ N` 一顆 chip，跟每個 kind 的
+  量表排在同一列——「claude 有沒有新版」跟「claude 還剩多少額度」都是這個 kind 的全域狀態，而額度列
+  在每個畫面的標題列上都在。側欄那條（`UpdateAllBanner`）只留按下去之後的進度與失敗／跳過名單。
 
 
 ## 7. API
 
 ### 7.1 存取控制
-- bind `127.0.0.1`。
+- bind：開發版一律 bind `0.0.0.0`（每張網卡），只有打包成 macOS app 的執行檔（路徑在
+  `…app/Contents/MacOS/`）才 bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫。見 README 與
+  `daemon/src/main.rs::dev_lan_default`。
 - daemon 啟動時產生 UI token 寫入 `~/.config/agents-manager/ui-token`；`GET /api/session`（檢查 `Host` 為 `127.0.0.1:<port>` 或 `localhost:<port>`）回傳 token；其餘 `/api/*` 需 header `X-AM-Token`；`/ws` 以 `?token=`。同時檢查 `Origin`（若存在）為本機。
 - `/hook/*` 驗 **per-bot** `X-AM-Bot-Token`。
 

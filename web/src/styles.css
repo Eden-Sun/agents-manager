@@ -4215,6 +4215,15 @@ p.project-quota-hidden {
   }
 
   /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
+  /* 手機的額度列是橫向捲的，chip 排在最後就等於捲到底才看得到。黏在右緣：量表從它底下
+     捲過去，提示始終在畫面上。不改 DOM 順序（不用 `order`），焦點順序才不會跟看到的不一樣。 */
+  .main-head .quota-update {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    box-shadow: -6px 0 6px -4px var(--bg-panel);
+  }
+
   .main-head .quota-more {
     display: none;
   }
@@ -6070,6 +6079,59 @@ button.model-tag:hover:not(:disabled) {
   border: 0;
   border-radius: 8px;
   background: transparent;
+}
+
+/* 「claude 有更新」：額度列上的 chip（見 UpdateQuotaChip.tsx）。跟 `.update-badge` 同一套
+   形狀與 accent 配色——那顆講的是「這一顆 bot 有新版」，這顆講的是「claude 全域有新版，
+   閒置的一次全部重啟」，同一件事的兩個尺度，所以不另開一組顏色。 */
+.quota-update {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 650;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.quota-update-n {
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-update:hover:not(:disabled) {
+  border-color: var(--accent-ink);
+}
+
+.quota-update:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 有更新但全都在忙：數字改寫「在忙幾顆」，顏色退成灰的——現在按不動，不該搶眼。 */
+.quota-update.waiting,
+.quota-update:disabled {
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
+  color: var(--text-faint);
+  cursor: default;
+}
+
+/* 跑起來與跑完：詳細名單在側欄那條，這裡只有 `done/total` 與成功幾顆。 */
+.quota-update.running.done {
+  cursor: pointer;
+}
+
+.quota-update.running.bad {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 /* 「還有 N 組」：窄視窗下條子只留焦點那一個，其餘點開 popover 才看。 */

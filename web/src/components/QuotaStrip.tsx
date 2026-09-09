@@ -6,6 +6,7 @@ import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } 
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
+import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 
 /**
@@ -828,6 +829,11 @@ export function QuotaStrip({
             +{hidden}
           </button>
         ) : null}
+        {/* 「claude 有更新」：跟量表同一列，因為它一樣是「這個 kind 現在的全域狀態」，
+            而且額度列在每個畫面的標題列上都在（側欄那條橫幅收起側欄就看不到了）。
+            不受上面的 `shown` 收窄影響——更新是全域的，claude 的量表被收進 popover 時
+            提示不能跟著消失。 */}
+        <UpdateQuotaChip />
       </div>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>
