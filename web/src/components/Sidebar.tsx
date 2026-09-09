@@ -295,7 +295,11 @@ function BotRow({
                 其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
             {/* claude 有新版等著重啟套用時的小點。只是提示——真正點得下去的那顆在 header
                 （`UpdateBadge`），側欄這裡窄到放不下一顆按鈕。 */}
-            {hasUpdate ? <span className="bot-update-dot" title={`${hasUpdate}｜重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）`} /> : null}
+            {hasUpdate ? (
+              <span className="bot-update-dot" aria-label="有更新，重啟套用" title={`${hasUpdate}｜重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）`}>
+                ⬆
+              </span>
+            ) : null}
             {/* 側欄放不下一顆按鈕，但這件事不能只留在 tooltip：燈號說 idle、實際上回合是斷的。
                 所以給它一個看得見的紅記號，點進去 header 那顆 chip 有原文與「重送上一則」。 */}
             {turnError ? (
