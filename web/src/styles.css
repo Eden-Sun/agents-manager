@@ -10790,3 +10790,31 @@ button.run-debug-toggle:hover {
   font-size: 11px;
   letter-spacing: 0.03em;
 }
+
+/* ---- 手機標題列的額度 chip 改成上下兩行（2026-09-09 使用者：黃字要在 kind 下方，不是右邊）：
+   上面 kind 圖示＋身分名，下面「7d 20%」那組黃字；整顆變窄、一列擠得下更多顆。 */
+@media (width <= 640px) {
+  .main-head .quota-hp {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 3px 8px;
+    min-height: 40px;
+  }
+
+  .main-head .quota-hp .quota-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* 兩行的 chip 已經夠高，不需要再拿負 margin 撐可按範圍。 */
+  .main-head .quota-bars-open {
+    padding: 0;
+    margin: 0;
+  }
+
+  .main-head .quota-compact {
+    padding-left: 2px;
+  }
+}
