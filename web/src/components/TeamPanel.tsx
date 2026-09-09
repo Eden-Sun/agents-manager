@@ -23,6 +23,7 @@ import {
   liveReplyOf,
   teamMemberBots,
   teamShortName,
+  teamDisplayName,
   useStore,
 } from '../store/store'
 import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
@@ -161,7 +162,8 @@ function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
   const lamp = useStore((s) => botLamp(s, bot.id))
   const selectBot = useStore((s) => s.selectBot)
   const role = bot.team?.role ?? 'worker'
-  const short = teamShortName(bot.name)
+  const siblings = useStore(useShallow((s) => teamMemberBots(s, bot.team?.team_id ?? null).map((b) => b.name)))
+  const short = teamDisplayName(bot.name, siblings)
   return (
     <button
       type="button"
@@ -497,7 +499,7 @@ function TaskGroupByIssue({ teamId }: { teamId: string }) {
 /** Task 清單的列本身：按狀態欄分組。`TaskList` 與 `TaskGroupByIssue` 共用。 */
 function TaskRows({ teamId, tasks }: { teamId: string; tasks: TeamTask[] }) {
   const maxRounds = useStore((s) => s.teams[teamId]?.budget.max_review_rounds ?? 2)
-  const names = useStore(useShallow((s) => Object.fromEntries(teamMemberBots(s, teamId).map((b) => [b.id, teamShortName(b.name)]))))
+  const names = useStore(useShallow((s) => { const ms = teamMemberBots(s, teamId); const all = ms.map((b) => b.name); return Object.fromEntries(ms.map((b) => [b.id, teamDisplayName(b.name, all)])) }))
   const decide = useStore((s) => s.decideTeamTask)
   const busy = useStore((s) => s.busy)
   const grouped = useMemo(() => {
@@ -647,7 +649,7 @@ function Timeline({ teamId }: { teamId: string }) {
   const events = useStore((s) => s.teamEvents[teamId])
   const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
   const kinds = useMemo(() => Object.fromEntries(members.map((b) => [b.id, b.kind])), [members])
-  const shortNames = useMemo(() => Object.fromEntries(members.map((b) => [b.id, teamShortName(b.name)])), [members])
+  const shortNames = useMemo(() => { const all = members.map((b) => b.name); return Object.fromEntries(members.map((b) => [b.id, teamDisplayName(b.name, all)])) }, [members])
   // 還在回答的成員：一人一顆打字氣泡（沿用單一 bot / 群組的同一套 live 狀態）。
   const typing = useStore(
     useShallow((s) =>
@@ -763,7 +765,7 @@ function Timeline({ teamId }: { teamId: string }) {
           kind={t.kind}
           from={
             <span className="msg-speaker">
-              {teamShortName(t.name)} · {KIND_TITLE[t.kind]}
+              {shortNames[t.id] ?? teamShortName(t.name)} · {KIND_TITLE[t.kind]}
             </span>
           }
         />
@@ -850,7 +852,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
               title={askUser ? '回答 PM 的問題時只會送給 PM' : `送給 ${b.name}`}
               onClick={() => setTo(b.id)}
             >
-              @{teamShortName(b.name)}
+              @{teamDisplayName(b.name, members.map((x) => x.name))}
             </button>
           )
         })}
@@ -896,7 +898,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
           type="button"
           className="send-btn"
           disabled={sending || !text.trim() || !target}
-          title={askUser ? '回答 PM 並繼續' : `送給 @${target ? teamShortName(members.find((b) => b.id === target)?.name ?? '') : ''}`}
+          title={askUser ? '回答 PM 並繼續' : `送給 @${target ? teamDisplayName(members.find((b) => b.id === target)?.name ?? '', members.map((x) => x.name)) : ''}`}
           onClick={submit}
         >
           {sending ? '送出中…' : askUser ? '回答並繼續' : '送出'}
@@ -906,7 +908,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
         <span className="group-targets">
           {askUser
             ? '→ PM（會同時解除暫停）'
-            : `→ @${teamShortName(members.find((b) => b.id === target)?.name ?? '')}・使用者插話不計入 max_relays`}
+            : `→ @${teamDisplayName(members.find((b) => b.id === target)?.name ?? '', members.map((x) => x.name))}・使用者插話不計入 max_relays`}
         </span>
       </div>
     </div>
