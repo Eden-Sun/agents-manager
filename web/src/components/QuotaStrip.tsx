@@ -334,6 +334,17 @@ function fmtLeftLong(ms: number): string {
   return `${m} 分`
 }
 
+/**
+ * 5h 窗口不到一小時就要重置時，窗口名直接換成剩幾分（`12m`）：使用者要能提早準備
+ * （2026-09-09）。回 null 表示照常寫 `5h`。只做 5h——7d／週的重置沒有「等一下就回來」的意義。
+ */
+function soonLabel(name: WindowName, resetsAt: string | null, now: number): string | null {
+  if (name !== '5h' || !resetsAt) return null
+  const left = new Date(resetsAt).getTime() - now
+  if (Number.isNaN(left) || left >= 60 * 60_000) return null
+  return left <= 0 ? '0m' : `${Math.max(1, Math.ceil(left / 60_000))}m`
+}
+
 /** 每分鐘動一次就夠：刻度是分鐘級的。 */
 function useMinuteNow(): number {
   const [now, setNow] = useState(() => Date.now())
@@ -538,12 +549,15 @@ function Gauge({
         /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
            （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
         <span className="quota-compact">
-          {windows.map((w) => (
+          {windows.map((w) => {
+            const soon = soonLabel(w.name, w.resetsAt, now)
+            return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
-              <span className="quota-window-name">{w.name}</span>
+              <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
               <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
             </span>
-          ))}
+            )
+          })}
         </span>
       ) : (
       <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
@@ -551,9 +565,12 @@ function Gauge({
           const span = WINDOW_MS[w.name]
           const mark = resetMark(w.resetsAt, span, now)
           const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
+          const soon = soonLabel(w.name, w.resetsAt, now)
           return (
             <span key={w.name} className="quota-window">
-              <span className="quota-window-name">{w.name}</span>
+              <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
+                {soon ?? w.name}
+              </span>
               <Bar
                 pct={w.pct}
                 low={w.low}
