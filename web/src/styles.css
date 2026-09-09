@@ -9638,7 +9638,8 @@ button.run-debug-toggle:hover {
   html,
   body,
   #root {
-    height: 100dvh;
+    /* `--vvh` 是 `useViewportPin` 寫的 visualViewport 高度：iOS 鍵盤只會動它，dvh 不動。 */
+    height: var(--vvh, 100dvh);
   }
 
   /* 標題列要一直在最上面（2026-09-08 使用者回報：手機上打字時整頁被推走、header 不見）。
