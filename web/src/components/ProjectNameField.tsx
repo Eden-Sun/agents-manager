@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
 
 /**
@@ -58,11 +59,15 @@ export function ProjectNameField({
     }
     void patchProject(projectId, { label: trimmed })
   }
+  // 手機的軟鍵盤 Enter 不走 keydown，見 `useEnterCommit`。
+  const enter = useEnterCommit(inputRef, commit)
+
 
   if (editing) {
     return (
       <input
         ref={inputRef}
+        {...enter}
         type="text"
         className={`project-label-input ${variant}${trimmed ? '' : ' bad'}`}
         value={draft}

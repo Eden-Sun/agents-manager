@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
 
 /**
@@ -62,12 +63,15 @@ export function BotNameField({
     }
     void patchBot(botId, { name: trimmed })
   }
+  // 手機的軟鍵盤 Enter 走 `beforeinput`，不是 keydown（Android 是 keyCode 229）。
+  const enter = useEnterCommit(inputRef, commit)
 
   if (editing) {
     return (
       <input
         ref={inputRef}
         type="text"
+        {...enter}
         className={`bot-name-input ${variant}${trimmed && !valid ? ' bad' : ''}`}
         value={draft}
         spellCheck={false}

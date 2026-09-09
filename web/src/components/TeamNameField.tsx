@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Team } from '../api/types'
+import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
 
 /**
@@ -17,32 +18,49 @@ export function teamTitle(team: Pick<Team, 'label' | 'issue_number' | 'issue_tit
  * 點一下改名（同 `BotNameField` 的做法）。清空送出＝改回 issue 標題。
  * 已經結束的 team 也能改：名字是給人事後找東西用的。
  */
-export function TeamNameField({ teamId, className }: { teamId: string; className?: string }) {
+export function TeamNameField({
+  teamId,
+  className,
+  autoEdit = false,
+  onDone,
+}: {
+  teamId: string
+  className?: string
+  /** 手機是從 `⋯` 的「重新命名」進來的，一開就是編輯狀態。 */
+  autoEdit?: boolean
+  onDone?: () => void
+}) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   const patchTeam = useStore((s) => s.patchTeam)
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
+  const [editing, setEditing] = useState(autoEdit)
+  const [draft, setDraft] = useState(() => (autoEdit ? (team?.label ?? '') : ''))
   const ref = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (editing) ref.current?.select()
   }, [editing])
 
-  if (!team) return null
-  const shown = teamTitle(team)
-
+  // hook 不能在 early return 之後才呼叫，所以 commit 先定義好，team 還沒載進來時它自己不動作。
   const commit = () => {
     setEditing(false)
+    onDone?.()
+    if (!team) return
     const next = draft.trim().slice(0, 60)
     if (next === (team.label ?? '')) return
     void patchTeam(teamId, { label: next })
   }
+  // 手機的軟鍵盤 Enter 不走 keydown，見 `useEnterCommit`。
+  const enter = useEnterCommit(ref, commit)
+
+  if (!team) return null
+  const shown = teamTitle(team)
 
   if (editing) {
     return (
       <input
         ref={ref}
         type="text"
+        {...enter}
         className={`bot-name-input head${className ? ` ${className}` : ''}`}
         value={draft}
         spellCheck={false}
@@ -62,6 +80,7 @@ export function TeamNameField({ teamId, className }: { teamId: string; className
           } else if (e.key === 'Escape') {
             e.preventDefault()
             setEditing(false)
+            onDone?.()
           }
         }}
       />

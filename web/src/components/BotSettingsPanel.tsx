@@ -350,7 +350,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     )
   }
 
-  const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
+  // 名稱不做前端檢查（2026-09-09 使用者決定）：真正的規則在 daemon，擋在這裡只會多一段
+  // 沒人看的紅字，而且它跟 daemon 的規則會慢慢漂走。送出去被拒就照常跳通知。
+  const nameOk = name.trim().length > 0
   // `host` 在本機專案上可能是 `''` 也可能是字面的 `local`，兩個都得寫成「本機」——照
   // `IdentityOptions` 的同一條規則，兩處講法才一致。
   const hostLabel = !host || host === 'local' ? '本機' : host
@@ -464,11 +466,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               type="text"
               value={name}
               spellCheck={false}
+              enterKeyHint="done"
               onChange={(e) => setName(e.target.value)}
             />
-            {name && !nameOk ? (
-              <span className="hint">1–32 個字，不可含空白或 @ , : ;</span>
-            ) : null}
           </label>
 
           <ApiModelFields
