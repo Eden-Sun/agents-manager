@@ -10394,6 +10394,19 @@ button.run-debug-toggle:hover {
     color: var(--text-dim);
   }
 
+  /* 追加的警戒窗口往**下**排，不往右（2026-09-09 使用者要求）：手機這一列是橫向捲的，
+     往右長會把後面的帳號推出畫面，得捲才看得到；往下長只是這一列高一點，五個帳號仍然
+     一眼看完。平常沒有警戒時只有一格，高度不變。 */
+  .main-head .quota-compact {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .main-head .quota-compact-win + .quota-compact-win {
+    margin-left: 0;
+  }
+
   /* 顏色跟著**每個窗口自己**的等級走，不是整格的最差值：一顆 chip 上同時有 5h 與 7d，
      整格上色會把還很健康的那個也染黃。 */
   .main-head .quota-compact-win.warn .quota-compact-pct,
