@@ -37,6 +37,24 @@ function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[
   return models.filter((m) => m.id === selected || !HIDDEN_MODELS.includes(m.id))
 }
 
+/**
+ * 選單順序照 `MODEL_OPTIONS`（claude 是 haiku → sonnet → opus → fable，由輕到重）。
+ *
+ * API 回來的順序是 CLI 自己的，會隨版本換位置；一排按鈕的位置天天變，肌肉記憶就沒了。
+ * 清單上有、`MODEL_OPTIONS` 沒有的（新模型）維持 API 順序接在後面，不會被藏起來。
+ */
+function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
+  const want = MODEL_OPTIONS[kind] ?? []
+  const rank = (id: string) => {
+    const at = want.indexOf(id)
+    return at < 0 ? want.length : at
+  }
+  return models
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => rank(a.m.id) - rank(b.m.id) || a.i - b.i)
+    .map((x) => x.m)
+}
+
 export function ApiModelFields({
   kind,
   host,
@@ -73,7 +91,7 @@ export function ApiModelFields({
   const loading = cached === undefined
   const fromApi = Array.isArray(cached) && cached.length > 0
   const models = fromApi ? cached : staticModels(kind)
-  const shownModels = visibleModels(models, model)
+  const shownModels = sortModels(kind, visibleModels(models, model))
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
   // The effort / fast rows follow the chosen model (or the CLI default when unset).
   const current = (model && models.find((m) => m.id === model)) || defaultModel
@@ -314,7 +332,7 @@ export function ModelQuickPicker({
   const models = fromApi ? cached : staticModels(kind)
   const loading = open && cached === undefined
   const model = bot?.model ?? null
-  const shownModels = visibleModels(models, model)
+  const shownModels = sortModels(kind, visibleModels(models, model))
   const effort = bot?.effort ?? null
   const current = (model && models.find((m) => m.id === model)) || models.find((m) => m.is_default) || models[0]
   const efforts = current?.efforts ?? []

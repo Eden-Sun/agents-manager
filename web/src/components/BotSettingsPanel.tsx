@@ -340,7 +340,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
-          <button type="button" className="icon-btn" onClick={closeSettings} aria-label="關閉設定">
+          <button type="button" className="icon-btn bs-close" onClick={closeSettings} aria-label="關閉設定">
             ✕
           </button>
         </div>
@@ -409,7 +409,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           {project ? ` · ${project.label}` : ''}
         </span>
         <span className="spacer" />
-        <button type="button" className="icon-btn" onClick={requestClose} aria-label="關閉設定" title="關閉，回到對話">
+        <button type="button" className="icon-btn bs-close" onClick={requestClose} aria-label="關閉設定" title="關閉，回到對話">
           ✕
         </button>
       </div>
@@ -647,18 +647,19 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   )
 }
 
-/** Bot 設定裡的識別列：有 run 才有東西可抄。點一下複製（`CopyChip`）。 */
+/**
+ * Bot 設定裡的識別列：有 run 才有東西可抄。點一下複製（`CopyChip`）。
+ *
+ * 只留 pane id（2026-09-09 使用者決定）：agent / session / workspace 幾乎不會被拿去打指令，
+ * 四顆並排卻把這一整列撐成兩行——手機上尤其。要那三個的人在 `herdr pane list` 裡都查得到。
+ */
 function RunIdents({ botId }: { botId: string }) {
   const run = useStore((s) => s.runs[botId] ?? null)
-  const agentName = useStore((s) => s.bots.find((b) => b.id === botId)?.agent_name ?? null)
   if (!run) return null
   return (
     <div className="bs-idents" role="group" aria-label="Run 識別資訊">
       <span className="bs-idents-k">識別</span>
       <CopyChip label="pane" value={run.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
-      <CopyChip label="agent" value={agentName ?? ''} title="herdr agent 名稱：herdr agent list 裡對應的那個" />
-      <CopyChip label="session" value={run.herdr_session ?? ''} title="pane 所屬的 herdr session" />
-      <CopyChip label="workspace" value={run.workspace_id ?? ''} title="herdr workspace id" />
     </div>
   )
 }
