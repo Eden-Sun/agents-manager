@@ -689,10 +689,22 @@ export function effortLabel(level: string): string {
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   // `claude --model` 的 alias（含 Fable 5.1）。
   claude: ['opus', 'sonnet', 'haiku', 'fable'],
-  codex: ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-6-astra'],
+  // gpt-5.5 拿掉了（2026-09-09）：上一代的模型還在帳號清單裡，但選單不該把它擺在等同的位置；
+  // 真的要用的人走「自訂…」。
+  codex: ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-6-astra'],
   // `grok models`（grok 1.0.13，2026-09-06）：grok-4.6（預設）、grok-4.5
   grok: ['grok-4.6', 'grok-4.5'],
 }
+
+/**
+ * 不放進選單的模型 id（2026-09-09）。
+ *
+ * codex 的 `model/list` 還會回上一代的 `gpt-5.5`，但選單把它跟現行的幾顆並排，等於在邀請人
+ * 選一個沒有理由再選的模型。清單是 CLI 給的，daemon 照抄（`/api/models` 要忠實反映 CLI），
+ * 所以過濾發生在**選單這一層**：真的要用的人走「自訂…」；已經設成它的 bot 那顆按鈕照樣留著，
+ * 不然畫面會靜靜地把它顯示成「自訂」。
+ */
+export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5']
 
 /** 「（預設）」與「自訂…」在 `<select>` 裡的 sentinel 值。 */
 export const MODEL_DEFAULT = ''
@@ -1049,6 +1061,8 @@ export interface Team {
   issue_number: number
   issue_title: string
   issue_url: string
+  /** 使用者取的短名；null = 顯示 `#編號 issue 標題`（見 `teamTitle`）。 */
+  label: string | null
   phase: TeamPhase
   /** `paused` 的機器碼原因（例：`budget_relays`、`member_lost:dev-1`、`gate:merge`）。 */
   pause_reason: string | null
@@ -1148,6 +1162,8 @@ export interface NewTeamInput {
 
 /** `PATCH /api/teams/:id`。只送有變更的欄位。 */
 export interface PatchTeamInput {
+  /** 使用者取的短名；`''` = 清掉改回 issue 標題。已結束的 team 也能改。 */
+  label?: string
   budget?: Partial<TeamBudget>
   supervised?: boolean
   deliver?: TeamDeliver

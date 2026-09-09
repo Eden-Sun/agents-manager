@@ -1120,7 +1120,11 @@ async fn patch_bot(
         let hit = |name: &str, present: bool| present && !skip.contains(&name);
         hit("model", b.model.is_some())
             || hit("effort", b.effort.is_some())
-            || b.fast.is_some()
+            // `fast` 也要吃 `skip`：codex 把它列進 live 欄位（`/fast` 開關，SPEC §4.4a），
+            // 漏掉這一層的話「只改 fast」永遠被自己算成「還有別的欄位」，於是連試都不試就回
+            // `needs_restart: true`——2026-09-09 實測：PATCH `{"fast":true}` 0.017 秒就回來，
+            // pane 上一個鍵都沒送。
+            || hit("fast", b.fast.is_some())
             || b.persona.is_some()
             || b.args.is_some()
             || b.identity.is_some()
