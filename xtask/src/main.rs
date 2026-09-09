@@ -75,8 +75,9 @@ fn dev(root: &Path) {
     let daemon = Command::new(root.join("target/debug/agents-managerd"))
         .arg("serve")
         .current_dir(root)
-        // Bind every interface and accept LAN peers/Origins — see main.rs/api.rs. A plain
-        // `agents-managerd serve` never sets this and stays localhost-only.
+        // Bind every interface and accept LAN peers/Origins — see main.rs/api.rs. A dev
+        // binary does this on its own now; kept explicit so `cargo dev` never depends on how
+        // the default is detected.
         .env("AM_DEV_LAN", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(daemon_log.try_clone().unwrap()))

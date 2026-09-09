@@ -63,10 +63,10 @@ pub struct App {
     pub port: u16,
     pub ui_token: String,
     pub herdr_session: String,
-    /// Set only by `cargo dev` (`AM_DEV_LAN=1`): the daemon is bound to every interface for
-    /// direct LAN/Tailscale/etc access, so the peer-address and Origin checks accept any peer,
-    /// not just loopback. A plain `agents-managerd serve` never sets this and stays
-    /// localhost-only.
+    /// True for every dev run of the daemon (see `main.rs::dev_lan_default`): it is bound to
+    /// every interface for direct LAN/Tailscale/etc access, so the peer-address and Origin
+    /// checks accept any peer, not just loopback. Only the packaged macOS app — or an explicit
+    /// `AM_DEV_LAN=0` — stays localhost-only.
     pub allow_lan: bool,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,

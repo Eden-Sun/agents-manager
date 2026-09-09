@@ -141,8 +141,8 @@ pub fn router(app: Arc<App>) -> Router {
 /// for the UI token with `curl -H 'Host: localhost:…'`. Needs the router to be served with
 /// `into_make_service_with_connect_info::<SocketAddr>()` (main.rs).
 ///
-/// `allow_lan` (only ever set by `cargo dev`'s `AM_DEV_LAN=1`, which also binds every
-/// interface — see `main.rs`) accepts any peer. Binding 0.0.0.0 while still rejecting
+/// `allow_lan` (on for every dev run, off inside the packaged macOS app — see
+/// `main.rs::dev_lan_default`, which also binds every interface) accepts any peer. Binding 0.0.0.0 while still rejecting
 /// everything non-loopback would make the daemon reachable but useless; and "LAN" in practice
 /// includes overlay networks like Tailscale (100.64.0.0/10), not just RFC1918, so an allowlist
 /// of ranges chases an open-ended set. `allow_lan` is itself the explicit dev-only opt-in.
