@@ -38,6 +38,17 @@ function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[
 }
 
 /**
+ * 按鈕上寫的字：拿掉整組模型都一樣的前綴（codex 全部都是 `gpt-`），只留真正分辨得出彼此
+ * 的那一段（`gpt-5.6-luna` → `5.6-luna`）。四顆按鈕重複同一個 `gpt-` 只是在吃寬度，手機上
+ * 更是直接把名字擠掉；完整 id 還在 `title` 裡（2026-09-09 使用者決定）。
+ */
+function modelLabel(m: ModelInfo): string {
+  const name = m.display_name || m.id
+  // API 回來的是 `GPT-5.6-Luna`（大寫），id 是 `gpt-5.6-luna`——兩種都要認。
+  return name.replace(/^gpt-/i, '')
+}
+
+/**
  * 選單順序照 `MODEL_OPTIONS`（claude 是 haiku → sonnet → opus → fable，由輕到重）。
  *
  * API 回來的順序是 CLI 自己的，會隨版本換位置；一排按鈕的位置天天變，肌肉記憶就沒了。
@@ -147,7 +158,7 @@ export function ApiModelFields({
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               onClick={() => pickModel(m.id)}
             >
-              {m.display_name}
+              {modelLabel(m)}
             </button>
           ))}
         </div>
@@ -402,7 +413,7 @@ export function ModelQuickPicker({
               disabled={patching}
               onClick={() => pickModel(m.id)}
             >
-              {m.display_name}
+              {modelLabel(m)}
             </button>
           ))}
         </div>
