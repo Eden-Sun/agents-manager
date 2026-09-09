@@ -146,11 +146,6 @@ function fmtTime(iso: string | null | undefined): string {
   return d.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-/** `5h 81%` / `5h —`; never wraps, always the same shape. */
-function pctText(pct: number | null): string {
-  return pct === null ? '—' : `${fmtPct(pct)}%`
-}
-
 function entryLabel(entry: QuotaEntry): string {
   return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
 }
@@ -359,7 +354,7 @@ function Bar({
       </span>
       {/* 數字一律印（UI-DECISIONS：百分比始終保留）：以前只有 low 才印，健康的那行沒有數字，
           三行右緣參差不齊（2026-09-09 使用者截圖）。健康的用淡色，黃／紅照舊。 */}
-      <span className={`quota-bar-pct ${lv}`} aria-hidden="true">
+      <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
         {pct === null ? '—' : fmtPct(pct)}
       </span>
     </span>
@@ -599,8 +594,57 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
   return <QuotaLoginShell host={host} hostLabel={hostLabel(host)} kind="codex" command={command} />
 }
 
+/**
+ * 彈出層裡的一條窗口：`⏱ 5h ▐▇▇▇░░ 20% ↻ 11:00`。
+ *
+ * 條子跟 reset 的黑針跟條上那顆量表用**同一個** `Bar`（2026-09-09 使用者要求：手機點開額度
+ * 要看得到跟電腦一樣的圖示化進度）。手機的條子是純文字 chip（38px 的量表在那裡沒有意義），
+ * 所以「還剩多少 / 什麼時候回來」的圖形版本只剩這裡能看——那就不能只有數字。
+ */
+function PopWindow({
+  icon,
+  name,
+  win,
+  w,
+  now,
+}: {
+  icon: string
+  name: string
+  win: WindowName
+  w: QuotaWindow | null | undefined
+  now: number
+}) {
+  const pct = remaining(w)
+  if (pct === null) return null
+  const left = w?.resets_at ? new Date(w.resets_at).getTime() - now : null
+  return (
+    <div className="quota-pop-line">
+      <span className="quota-win">
+        <span className="quota-ico" aria-hidden="true">
+          {icon}
+        </span>
+        {name}
+      </span>
+      <Bar
+        pct={pct}
+        low={w?.low ?? false}
+        critical={w?.critical ?? false}
+        mark={resetMark(w?.resets_at, WINDOW_MS[win], now)}
+        markTitle={left === null ? undefined : `${name} 還有 ${fmtLeft(left)} 重置`}
+      />
+      <span className="quota-reset">
+        <span className="quota-ico" aria-hidden="true">
+          ↻
+        </span>
+        {fmtTime(w?.resets_at)}
+      </span>
+    </div>
+  )
+}
+
 function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const q = useEntryQuota(entry, host)
+  const now = useMinuteNow()
   const known = useStore((s) => {
     if (entry.identity && quotaKey(host, `${entry.kind}:${entry.identity}`) in s.quota) return true
     return entry.fullKey in s.quota
@@ -609,7 +653,6 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  const fable = remaining(q?.fable)
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
@@ -659,27 +702,9 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         </>
       ) : (
         <>
-          {five !== null ? (
-            <div className="quota-pop-line">
-              <span className="quota-win"><span className="quota-ico" aria-hidden="true">⏱</span>5h</span>
-              <span className={`quota-row ${levelOf(q?.five_hour)}`}><span className="quota-word">剩 </span>{pctText(five)}</span>
-              <span className="quota-reset"><span className="quota-ico" aria-hidden="true">↻</span>{fmtTime(q?.five_hour?.resets_at)}</span>
-            </div>
-          ) : null}
-          {seven !== null ? (
-            <div className="quota-pop-line">
-              <span className="quota-win"><span className="quota-ico" aria-hidden="true">📅</span>{entry.kind === 'grok' ? '週' : '7d'}</span>
-              <span className={`quota-row ${levelOf(q?.seven_day)}`}><span className="quota-word">剩 </span>{pctText(seven)}</span>
-              <span className="quota-reset"><span className="quota-ico" aria-hidden="true">↻</span>{fmtTime(q?.seven_day?.resets_at)}</span>
-            </div>
-          ) : null}
-          {fable !== null ? (
-            <div className="quota-pop-line">
-              <span className="quota-win"><span className="quota-ico" aria-hidden="true">✦</span>Fable</span>
-              <span className={`quota-row ${levelOf(q?.fable)}`}><span className="quota-word">剩 </span>{pctText(fable)}</span>
-              <span className="quota-reset"><span className="quota-ico" aria-hidden="true">↻</span>{fmtTime(q?.fable?.resets_at)}</span>
-            </div>
-          ) : null}
+          <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
+          <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
+          <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} />
         </>
       )}
     </div>
