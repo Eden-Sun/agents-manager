@@ -16,6 +16,7 @@ import {
 } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
+import { useScrollTail } from '../hooks/useScrollTail'
 import {
   botLamp,
   composerState,
@@ -558,9 +559,6 @@ function Timeline({ teamId }: { teamId: string }) {
   const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
   const kinds = useMemo(() => Object.fromEntries(members.map((b) => [b.id, b.kind])), [members])
   const shortNames = useMemo(() => Object.fromEntries(members.map((b) => [b.id, teamShortName(b.name)])), [members])
-  const ref = useRef<HTMLDivElement>(null)
-  const stick = useRef(true)
-
   // Parsing depends on message identity and content, not on live turn-progress state.
   const parsedMessages = useMemo(() => {
     const parsed = new Map<
@@ -590,19 +588,13 @@ function Timeline({ teamId }: { teamId: string }) {
     return out.sort((a, b) => a.sort.localeCompare(b.sort) || a.key.localeCompare(b.key))
   }, [messages, events, parsedMessages])
 
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [rows])
+  const { ref: timelineRef, onScroll: handleTimelineScroll } = useScrollTail([rows])
 
   return (
     <div
       className="msg-list group team-timeline"
-      ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-      }}
+      ref={timelineRef}
+      onScroll={handleTimelineScroll}
     >
       {rows.length === 0 ? (
         <EmptyState loading={messages === null} title={messages === null ? undefined : '等待第一則轉送'} icon={messages === null ? undefined : '⚙'}>
@@ -651,7 +643,11 @@ function Timeline({ teamId }: { teamId: string }) {
                   fromTitle={fromTitle}
                 />
               ) : (
-                <div className="team-msg-bare">{from}</div>
+                <div className="team-msg-bare">
+                  <span className={fromClassName} title={fromTitle}>
+                    {from}
+                  </span>
+                </div>
               )}
               {blocks.length || stripped.footer ? (
                 <div className="am-chips">
