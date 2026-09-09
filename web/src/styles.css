@@ -10319,18 +10319,38 @@ button.run-debug-toggle:hover {
     min-height: 22px;
   }
 
+  /* 貼在額度列正下方（top 由 QuotaStrip 用 rect 算好塞 inline），不是底部 sheet：
+     底部要滑很遠，而且擋住輸入框（2026-09-09 使用者）。 */
   .quota-pop {
     position: fixed;
-    top: auto;
-    right: 0;
-    left: 0;
-    bottom: 0;
+    top: 100px;
+    right: 8px;
+    left: 8px;
+    bottom: auto;
     width: auto;
     max-width: none;
-    max-height: min(70dvh, 520px);
-    border-radius: 16px 16px 0 0;
-    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    max-height: min(60dvh, 480px);
+    border-radius: 12px;
+    padding: 10px 12px;
     z-index: 80;
+  }
+
+  /* 手機用圖示代替字：⏱ 5h / 📅 7d / ↻ 重置時間；「剩」不印，數字本身就是剩餘。 */
+  .quota-pop .quota-word,
+  .quota-pop .quota-pop-foot {
+    display: none;
+  }
+
+  .quota-pop .quota-ico {
+    display: inline-block;
+    width: 1.3em;
+    color: var(--text-faint);
+  }
+
+  /* 「✦ Fable」在 44px 會折成兩行。 */
+  .quota-pop .quota-pop-line > :first-child {
+    width: 64px;
+    white-space: nowrap;
   }
 
   .quota-pop-title,
@@ -10741,6 +10761,11 @@ button.run-debug-toggle:hover {
     max-width: calc(100vw - 16px);
     min-width: calc(100vw - 16px);
   }
+}
+
+/* 桌面不顯示這些圖示（桌面版面有字可放）。 */
+.quota-ico {
+  display: none;
 }
 
 /* 手機額度 sheet 裡的「看全部」：只看一格時多這一顆，點了才展開其他帳號。 */

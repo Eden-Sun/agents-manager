@@ -661,23 +661,23 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         <>
           {five !== null ? (
             <div className="quota-pop-line">
-              <span className="quota-win">5h</span>
-              <span className={`quota-row ${levelOf(q?.five_hour)}`}>剩 {pctText(five)}</span>
-              <span className="quota-reset">{fmtTime(q?.five_hour?.resets_at)}</span>
+              <span className="quota-win"><span className="quota-ico" aria-hidden="true">⏱</span>5h</span>
+              <span className={`quota-row ${levelOf(q?.five_hour)}`}><span className="quota-word">剩 </span>{pctText(five)}</span>
+              <span className="quota-reset"><span className="quota-ico" aria-hidden="true">↻</span>{fmtTime(q?.five_hour?.resets_at)}</span>
             </div>
           ) : null}
           {seven !== null ? (
             <div className="quota-pop-line">
-              <span className="quota-win">{entry.kind === 'grok' ? '週' : '7d'}</span>
-              <span className={`quota-row ${levelOf(q?.seven_day)}`}>剩 {pctText(seven)}</span>
-              <span className="quota-reset">{fmtTime(q?.seven_day?.resets_at)}</span>
+              <span className="quota-win"><span className="quota-ico" aria-hidden="true">📅</span>{entry.kind === 'grok' ? '週' : '7d'}</span>
+              <span className={`quota-row ${levelOf(q?.seven_day)}`}><span className="quota-word">剩 </span>{pctText(seven)}</span>
+              <span className="quota-reset"><span className="quota-ico" aria-hidden="true">↻</span>{fmtTime(q?.seven_day?.resets_at)}</span>
             </div>
           ) : null}
           {fable !== null ? (
             <div className="quota-pop-line">
-              <span className="quota-win">Fable</span>
-              <span className={`quota-row ${levelOf(q?.fable)}`}>剩 {pctText(fable)}</span>
-              <span className="quota-reset">{fmtTime(q?.fable?.resets_at)}</span>
+              <span className="quota-win"><span className="quota-ico" aria-hidden="true">✦</span>Fable</span>
+              <span className={`quota-row ${levelOf(q?.fable)}`}><span className="quota-word">剩 </span>{pctText(fable)}</span>
+              <span className="quota-reset"><span className="quota-ico" aria-hidden="true">↻</span>{fmtTime(q?.fable?.resets_at)}</span>
             </div>
           ) : null}
         </>
@@ -711,6 +711,12 @@ export function QuotaStrip({
   // 手機點某一格只看那一格（2026-09-09 使用者）：記下是哪一格開的；`+N` 與桌面仍看全部。
   const [only, setOnly] = useState<string | null>(null)
   const phone = useMediaQuery(PHONE_QUERY)
+  // 手機的明細貼在額度列正下方、靠上對齊（2026-09-09 使用者：跳在底下太遠）。
+  const [popTop, setPopTop] = useState<number | null>(null)
+  const measure = () => {
+    const r = wrap.current?.getBoundingClientRect()
+    setPopTop(phone && r ? Math.round(r.bottom + 6) : null)
+  }
   const wrap = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -826,6 +832,7 @@ export function QuotaStrip({
                     setOnly(null)
                   } else {
                     setOnly(phone ? k : null)
+                    measure()
                     setOpen(true)
                   }
                 }}
@@ -846,6 +853,7 @@ export function QuotaStrip({
             title={`還有 ${hidden} 組額度，點開看`}
             onClick={() => {
               setOnly(null)
+              measure()
               setOpen((v) => !v)
             }}
           >
@@ -857,7 +865,7 @@ export function QuotaStrip({
         {lastClaude < 0 ? <UpdateQuotaChip /> : null}
       </div>
       {open ? (
-        <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>
+        <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host)}</div>
           {(only ? popEntries.filter((e) => entryReactKey(e) === only) : popEntries).map((entry) => (
             <PopRow key={entryReactKey(entry)} entry={entry} host={host} />
