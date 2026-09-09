@@ -5,7 +5,7 @@
  * 所有等待者共用同一個 promise。這樣 daemon 一次操作連發 N 個 frame，前端最多打
  * 兩次 `GET /api/state`（一次進行中、一次收尾），而且回應天生有序，舊快照不會蓋掉新的。
  */
-export function singleFlight(run: () => Promise<void>): () => Promise<void> {
+export function singleFlight(run: () => Promise<void>, onError?: (e: unknown) => void): () => Promise<void> {
   let inflight: Promise<void> | null = null
   let again = false
   return () => {
@@ -16,7 +16,12 @@ export function singleFlight(run: () => Promise<void>): () => Promise<void> {
     inflight = (async () => {
       do {
         again = false
-        await run()
+        try {
+          await run()
+        } catch (e) {
+          if (!onError) throw e
+          onError(e)
+        }
       } while (again)
     })().finally(() => {
       inflight = null

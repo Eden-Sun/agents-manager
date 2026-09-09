@@ -97,11 +97,13 @@ function Notices() {
 function ConnBanner() {
   const connected = useStore((s) => s.connected)
   const socket = useStore((s) => s.socket)
+  const stateStale = useStore((s) => s.stateStale)
   const refreshState = useStore((s) => s.refreshState)
   // socket 通、herdr 斷：daemon 之後會推狀態，但別乾等——每 3 秒（和回到分頁時）自己抓一次。
   const herdrDown = socket === 'open' && !connected
+  const shouldRetry = herdrDown || stateStale
   useEffect(() => {
-    if (!herdrDown) return
+    if (!shouldRetry) return
     const tick = () => void refreshState()
     const id = setInterval(tick, 3_000)
     window.addEventListener('focus', tick)
@@ -109,13 +111,15 @@ function ConnBanner() {
       clearInterval(id)
       window.removeEventListener('focus', tick)
     }
-  }, [herdrDown, refreshState])
-  if (socket === 'open' && connected) return null
+  }, [refreshState, shouldRetry])
+  if (socket === 'open' && connected && !stateStale) return null
   const label =
     socket !== 'open'
       ? socket === 'connecting'
         ? '正在重新連線 daemon…'
         : '與 daemon 的連線中斷，正在重試…'
+      : stateStale
+        ? '狀態同步失敗，正在重試…'
       : 'daemon 與 herdr 連線中斷，暫時無法送出訊息'
   return (
     <div className="conn-banner" role="status">
