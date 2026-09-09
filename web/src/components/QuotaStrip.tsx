@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
@@ -776,6 +776,8 @@ export function QuotaStrip({
   // 手機一顆 chip 看不見其他 kind。改把全部身分／kind 攤在一列裡橫向捲。
   const shown = compact ? ordered : tight ? [focusEntry ?? ordered[0]] : ordered
   const hidden = ordered.length - shown.length
+  /** 條上最後一格 claude（claude 有多個身分時就是最右邊那一格）；-1 = 這次沒畫到 claude。 */
+  const lastClaude = shown.reduce((at, e, i) => (e.kind === 'claude' ? i : at), -1)
 
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
@@ -789,7 +791,7 @@ export function QuotaStrip({
             {host}
           </span>
         ) : null}
-        {shown.map((entry) => {
+        {shown.map((entry, i) => {
           let focused = false
           if (focusKind && entry.kind === focusKind) {
             if (entry.kind !== 'claude') {
@@ -805,16 +807,21 @@ export function QuotaStrip({
             }
           }
           return (
-            <Gauge
-              key={entryReactKey(entry)}
-              entry={entry}
-              host={host}
-              collapsed={collapsed || compact}
-              compact={compact}
-              focused={focused}
-              open={open}
-              onOpen={() => setOpen((v) => !v)}
-            />
+            <Fragment key={entryReactKey(entry)}>
+              <Gauge
+                entry={entry}
+                host={host}
+                collapsed={collapsed || compact}
+                compact={compact}
+                focused={focused}
+                open={open}
+                onOpen={() => setOpen((v) => !v)}
+              />
+              {/* 「claude 有更新」貼在 claude 那幾格的**右邊**（多身分時只掛在最後一格後面）：
+                  它講的是 claude 這個 kind 的全域狀態，跟量表是同一件事的兩個數字，所以要跟
+                  kind 站在一起，不是被推到整條列的尾巴。 */}
+              {i === lastClaude ? <UpdateQuotaChip /> : null}
+            </Fragment>
           )
         })}
         {hidden > 0 ? (
@@ -829,11 +836,9 @@ export function QuotaStrip({
             +{hidden}
           </button>
         ) : null}
-        {/* 「claude 有更新」：跟量表同一列，因為它一樣是「這個 kind 現在的全域狀態」，
-            而且額度列在每個畫面的標題列上都在（側欄那條橫幅收起側欄就看不到了）。
-            不受上面的 `shown` 收窄影響——更新是全域的，claude 的量表被收進 popover 時
-            提示不能跟著消失。 */}
-        <UpdateQuotaChip />
+        {/* 窄視窗下條上只留焦點那一格，claude 的量表可能整個不在——更新是全域的，提示不能
+            跟著消失，所以沒有 claude 格可貼時退回列尾。 */}
+        {lastClaude < 0 ? <UpdateQuotaChip /> : null}
       </div>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`}>

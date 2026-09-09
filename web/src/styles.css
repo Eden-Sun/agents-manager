@@ -4215,15 +4215,6 @@ p.project-quota-hidden {
   }
 
   /* `+4`：點開 chip 的 popover 本來就列出全部，這 20px 讓給設定鍵。 */
-  /* 手機的額度列是橫向捲的，chip 排在最後就等於捲到底才看得到。黏在右緣：量表從它底下
-     捲過去，提示始終在畫面上。不改 DOM 順序（不用 `order`），焦點順序才不會跟看到的不一樣。 */
-  .main-head .quota-update {
-    position: sticky;
-    right: 0;
-    z-index: 1;
-    box-shadow: -6px 0 6px -4px var(--bg-panel);
-  }
-
   .main-head .quota-more {
     display: none;
   }
@@ -6012,6 +6003,20 @@ button.model-tag:hover:not(:disabled) {
   border-left: 3px solid var(--border-strong);
   background: var(--bg-sunken);
   border-radius: var(--radius);
+}
+
+/* 確認框裡的名單（要重啟哪幾顆 / 會跳過哪幾顆）。單欄、可捲：十顆以上時不能把按鈕擠出畫面。 */
+.confirm-list {
+  margin: 0 0 8px;
+  padding: 0 0 0 18px;
+  max-height: 168px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.confirm-list.dim {
+  color: var(--text-dim);
 }
 
 /* branches=delete 專用的紅色警示塊：唯一救不回來的選項。 */
