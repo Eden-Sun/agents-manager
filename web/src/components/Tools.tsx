@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
-import { missingTools, projectHostName, runningBotsOnHost, toolsOfHost, useStore } from '../store/store'
+import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
 /**
@@ -233,9 +233,4 @@ export function ToolsHint({
       </button>
     </div>
   )
-}
-
-/** Tools of the host a project sits on (used by the new-bot form to disable missing kinds). */
-export function useHostTools(host: string): ToolMap {
-  return useStore((s) => toolsOfHost(s, host))
 }

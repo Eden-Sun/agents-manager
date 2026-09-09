@@ -25,11 +25,6 @@ import { LAMP_LABEL, StatusLamp } from './StatusLamp'
  * conversation merged (by message id); `@<bot>` / `@all` in the composer picks recipients.
  */
 
-/** Left-hand badge on a reply: which bot said it. */
-export function BotBadge({ name, kind }: { name: string; kind?: Bot['kind'] }) {
-  return <span className={`bot-badge${kind ? ` ${kind}` : ''}`}>{name}</span>
-}
-
 const MENTION_RE = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
 
 /** Strip @mentions so chip selection can rewrite the recipient prefix. */
