@@ -226,7 +226,11 @@ pane、選單長得不對、回讀對不上）。**回了 `needs_restart` 之後
   讀回來，連同 service tier 存進 `runs.runtime_model` / `runtime_effort` / `runtime_fast`。讀 argv 而不是抄
   `bots`，因為 `effort_checked` 會丟掉該模型不收的等級，使用者自己的 `bot.args` 也可能再帶一個 `-m`。
 - **slash 指令套用成功就同步改**（claude / grok）：runtime 真的換了，記錄要跟著換。
-- **收編的 pane（`adopted`）三個欄位都是 NULL**＝不知道；UI 這時什麼都不比、也不標。
+- **收編的 pane（`adopted`）**啟動時三個欄位都是 NULL＝不知道；UI 這時什麼都不比、也不標。
+  codex 例外（2026-09-09 補）：它自己把三個值印在狀態列上，所以 reconcile 會讀那一行把 NULL 補起來
+  （`reconcile::fill_codex_runtime`，只補還是 NULL 的）。不補的話 UI 會拿 `bots` 頂上去——實況是
+  `bots.fast = false`、終端的狀態列卻寫著 `fast`，正是這一節禁止的「靜靜顯示一個還沒生效的值」；
+  而且 `/fast` 是開關，沒人知道的 tier 等於沒人切得掉。
 - **UI 一律顯示 runtime**（`ModelTag`、標題列狀態列都是），設定跟 runtime 不一致時多一顆 `⟳`／
   「需重啟」chip，按下去就是 `POST /api/bots/{id}/restart`。**不准**靜靜顯示一個還沒生效的值。
 

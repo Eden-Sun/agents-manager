@@ -487,7 +487,52 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // workspace, pauses the team where they can see it. Scoped to this host's teams, since
     // reconcile is always per-host (pane / workspace ids are only unique within a session).
     crate::team::reconcile_teams_on_host(app, host).await;
+    // SPEC §4.4a: a run the daemon did not start has NULL `runtime_*`, so the UI falls back to
+    // `bots` and quietly claims the CLI is on whatever was configured. codex prints all three
+    // in its own status line, so read it instead of guessing.
+    fill_codex_runtime(app, host, &client).await;
     Ok(())
+}
+
+/// Learn `runs.runtime_model` / `runtime_effort` / `runtime_fast` for codex runs the daemon did
+/// not start (adopted panes, SPEC §4.4a).
+///
+/// Without this the UI shows `bots.fast = false` while the terminal's status line says `fast`,
+/// which is exactly the "靜靜顯示一個還沒生效的值" §4.4a forbids — and `/fast` is a toggle, so a
+/// tier nobody knows is a tier nobody can flip. Only fills what is still NULL: a value written
+/// by a start or by a live apply is already the truth, and re-reading would just race with it.
+async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::HerdrClient) {
+    let rows: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT r.id, r.pane_id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+         WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
+         AND r.runtime_model IS NULL AND r.runtime_effort IS NULL AND r.runtime_fast IS NULL",
+    )
+    .bind(host)
+    .fetch_all(&app.db)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(host, error = ?e, "codex runtime probe: query failed");
+            return;
+        }
+    };
+    for (run_id, pane_id) in rows {
+        let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
+        let Some(seen) = crate::codex_live::parse_status_line(&read.text) else { continue };
+        let _ = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
+            .bind(&seen.model)
+            .bind(&seen.effort)
+            .bind(i64::from(seen.fast))
+            .bind(&run_id)
+            .execute(&app.db)
+            .await;
+        if let Ok(Some(run)) = crate::db::run(&app.db, &run_id).await {
+            app.emit_bot_status(&run.bot_id).await;
+        }
+        tracing::info!(host, run = %run_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast,
+                       "codex runtime read off an adopted pane's status line");
+    }
 }
 
 /// Fill in a child bot's `model` / `effort` from what its CLI is actually running.
