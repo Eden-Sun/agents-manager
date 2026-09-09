@@ -865,7 +865,7 @@ function pct(n: number): string {
 
 function SlItem({ k, children, title, className }: { k: string; children: ReactNode; title?: string; className?: string }) {
   return (
-    <span className={`sl-item${className ? ' ' + className : ''}`} title={title}>
+    <span className={`sl-item${className ? ' ' + className : ''}`} title={title} data-k={k}>
       <span className="sl-k">{k}</span>
       <span className="sl-v">{children}</span>
     </span>
