@@ -15,7 +15,7 @@ use crate::herdr::HerdrClient;
 use crate::state::App;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -567,8 +567,9 @@ impl HostManager {
 
     /// Reconcile the live connection set against `[[hosts]]`. Started supervisors are
     /// left alone when their config is unchanged.
-    pub async fn apply_config(&self, app: &Arc<App>, hosts: &[HostCfg]) {
+    pub async fn apply_config(&self, app: &Arc<App>, hosts: &[HostCfg]) -> HashSet<String> {
         let wanted: HashMap<String, HostCfg> = hosts.iter().map(|h| (h.name.clone(), h.clone())).collect();
+        let mut changed_hosts = HashSet::new();
 
         // Remove hosts that are gone.
         let existing: Vec<Arc<HostConn>> = self.list().await;
@@ -590,6 +591,7 @@ impl HostManager {
             if !changed {
                 continue;
             }
+            changed_hosts.insert(h.name.clone());
             if let Some(c) = cur {
                 c.generation.fetch_add(1, Ordering::SeqCst);
                 if let Some(t) = c.supervisor.lock().await.take() {
@@ -612,6 +614,7 @@ impl HostManager {
             }
             tracing::info!(host = %h.name, ssh = %h.ssh, "host configured");
         }
+        changed_hosts
     }
 
     pub async fn remove(&self, app: &Arc<App>, name: &str) {
@@ -647,9 +650,15 @@ impl HostManager {
         }
         conn.kill_master().await;
         conn.connected.store(false, Ordering::SeqCst);
+        *conn.error.lock().await = None;
         let gen = conn.generation.load(Ordering::SeqCst);
         let t = spawn_supervisor(app.clone(), conn.clone(), gen);
         *conn.supervisor.lock().await = Some(t);
+        self.wait_for_connection(conn).await
+    }
+
+    /// Wait for the first connection attempt to report an outcome. Returns `(connected, error)`.
+    pub async fn wait_for_connection(&self, conn: Arc<HostConn>) -> Option<(bool, Option<String>)> {
         // Give the first attempt a chance so the HTTP caller gets a real answer.
         let deadline = std::time::Instant::now() + MASTER_UP_TIMEOUT + Duration::from_secs(15);
         loop {
@@ -797,5 +806,31 @@ mod tests {
         assert!(!cfg_differs(&a, &b));
         b.ssh_port = 2222;
         assert!(cfg_differs(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn reconnect_does_not_return_a_stale_error() {
+        let env = crate::team::testing::env().await;
+        let mut host_cfg = cfg();
+        host_cfg.name = "reconnect-stale-error-test".into();
+        // Port 1 on loopback rejects immediately, so the new attempt reports its own error
+        // during the test instead of depending on an external SSH server.
+        host_cfg.ssh = "127.0.0.1".into();
+        host_cfg.ssh_port = 1;
+        let conn = HostConn::remote(host_cfg);
+        *conn.error.lock().await = Some("previous error".into());
+        env.app.hosts.conns.lock().await.insert(conn.name.clone(), conn.clone());
+
+        let result = tokio::time::timeout(Duration::from_secs(5), env.app.hosts.reconnect(&env.app, &conn.name))
+            .await
+            .expect("reconnect should not wait for the full timeout")
+            .expect("host should exist");
+        assert!(!result.0);
+        assert_ne!(result.1.as_deref(), Some("previous error"));
+
+        let task = conn.supervisor.lock().await.take();
+        if let Some(task) = task {
+            task.abort();
+        }
     }
 }
