@@ -1402,8 +1402,12 @@ async fn check_add_issues(app: &Arc<App>, t: &db::Team, numbers: &[i64]) -> LcRe
             .ok_or_else(|| LcError::NotFound("project".into()))?;
         validate_reopen_roles(app, t, &project.host).await?;
     }
-    if existing.len() + numbers.len() > MAX_QUEUED_ISSUES {
-        return Err(LcError::Bad(format!("at most {MAX_QUEUED_ISSUES} issues per team")));
+    // The cap is about what the PM still has to hold in its head (§2.3), so only the rows
+    // still **on** the queue count. A team that has delivered 19 issues in batches of five
+    // used to be refused the twentieth batch for good, even though the queue was empty.
+    let open = existing.iter().filter(|i| is_open_issue_state(&i.state)).count();
+    if open + numbers.len() > MAX_QUEUED_ISSUES {
+        return Err(LcError::Bad(format!("at most {MAX_QUEUED_ISSUES} open issues per team ({open} on the queue)")));
     }
     // "Already queued" means still **on** the queue: `queued` (waiting) or `working` (running).
     // A `done` / `failed` / `skipped` row is a finished record, not a claim on the issue

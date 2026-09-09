@@ -820,7 +820,7 @@ issue 標題常常是一整句規格，手機的標題列與切換器只看得�
 | DELETE | `/teams/{id}/issues/{issue_id}` | — | `200 {}`；只有 `state="queued"` 可移除，其餘回 409 |
 
 `POST /projects/{id}/teams` 的 body 改用 `issue_numbers: [n,…]`（依序處理）；舊的 `issue_number` 仍然接受，
-等同一個元素的佇列。上限 `MAX_QUEUED_ISSUES = 20`。
+等同一個元素的佇列。上限 `MAX_QUEUED_ISSUES = 20`，**只算還在佇列上的**（`queued` / `working`；2026-09-09）：已交付／失敗／略過的不佔額，分批追加沒有總數上限。
 
 `GET /api/state` 與 `GET /teams/{id}` 的 team 物件多三個欄位：`issues[]`（每項見 §2.3）、`current_issue_id`、
 `issues_summary {total, done, failed, queued}`。`team_changed` 是淺層 patch，前端要對 `issues[]` 做明確合併。
