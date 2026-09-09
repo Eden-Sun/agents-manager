@@ -631,4 +631,4 @@
 
 - **決策**：三個 composer 都只在 `draftKey` 首次掛載／切換時還原選取；Chat／Group 另外保留空對話的 `forceFocus` 上升沿。自動 focus 前，`document.activeElement` 必須是 `body` 或同一個 `.composer` 內的控制項；Team 只還原選取，不自動 focus。
 - **理由**：Bot 啟動、回合與連線狀態會自行變動，不能因此把設定欄、搜尋框或其他表單的焦點拉回 composer。保留安全情境的 focus，則不犧牲首次進入空對話與主動切換對象時的鍵盤動線。
-- **取捨**：若使用者剛從其他控制項切換對象，焦點會留在該控制項，不會強行跳進 composer；使用者仍可直接點擊輸入框。游標位置恢復與 focus 分開，避免 disabled 等背景狀態重新觸發 focus。
+- **取捨**：側欄 `.bot-row` 是可 focus 的 `div[role="option"][tabIndex="0"]`；點它切換 Bot 後，`document.activeElement` 會留在這列，因此守衛會跳過 composer focus，`forceFocus={chatEmpty && active}` 也不會繞過這個保護。這和從其他控制項切換對象一樣，焦點不會強行跳進 composer；使用者仍可直接點擊輸入框。游標位置恢復與 focus 分開，避免 disabled 等背景狀態重新觸發 focus。
