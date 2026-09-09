@@ -32,6 +32,8 @@ export function formatSize(bytes: number): string {
 /** One image waiting to be sent: uploading, ready (has an id), or failed. */
 export interface Pending {
   key: string
+  /** 名稱｜大小｜修改時間，`useAttachments` 用來擋重複。 */
+  fp: string
   name: string
   size: number
   /** Local preview, available before the upload finishes. */
@@ -50,6 +52,8 @@ export function useAttachments(uploadTo: string | null) {
   const notify = useStore((s) => s.notify)
   const [items, setItems] = useState<Pending[]>([])
   const seq = useRef(0)
+  /** 托盤裡每張圖的指紋（見 `add`），用來擋同一張重複進來。 */
+  const seen = useRef(new Set<string>())
   // Object URLs are revoked on unmount only: a thumbnail must stay valid while it is shown.
   const urls = useRef<string[]>([])
   useEffect(() => {
@@ -69,6 +73,11 @@ export function useAttachments(uploadTo: string | null) {
         return
       }
       for (const file of images) {
+        // 同一張圖（暫存區的同一張卡按兩下、或拖過來又點一下）不要在托盤裡疊第二份——
+        // 2026-09-09 使用者：同一張暫存會重複放入對話。以名稱＋大小＋修改時間認同一張。
+        const fp = `${file.name}|${file.size}|${file.lastModified}`
+        if (seen.current.has(fp)) continue
+        seen.current.add(fp)
         seq.current += 1
         const key = `a${seq.current}`
         if (file.size > MAX_BYTES) {
@@ -77,7 +86,7 @@ export function useAttachments(uploadTo: string | null) {
         }
         const previewUrl = URL.createObjectURL(file)
         urls.current.push(previewUrl)
-        setItems((prev) => [...prev, { key, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null }])
+        setItems((prev) => [...prev, { key, fp, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null }])
         void api
           .uploadAttachment(uploadTo, file)
           .then((a: Attachment) => {
@@ -94,10 +103,17 @@ export function useAttachments(uploadTo: string | null) {
   )
 
   const remove = useCallback((key: string) => {
-    setItems((prev) => prev.filter((it) => it.key !== key))
+    setItems((prev) => {
+      const gone = prev.find((it) => it.key === key)
+      if (gone) seen.current.delete(gone.fp)
+      return prev.filter((it) => it.key !== key)
+    })
   }, [])
 
-  const clear = useCallback(() => setItems([]), [])
+  const clear = useCallback(() => {
+    seen.current.clear()
+    setItems([])
+  }, [])
 
   /** Ids to send; empty while anything is still uploading. */
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))

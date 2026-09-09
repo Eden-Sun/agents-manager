@@ -10977,3 +10977,19 @@ button.run-debug-toggle:hover {
 .quota-update .upgrade-icon {
   vertical-align: -2px;
 }
+
+/* 標題列最上面一排的提示泡泡：往上長會撞到視窗頂端，被裁成一條白色圓角（2026-09-09 使用者截圖：
+   群組列的 attach 鍵旁邊一條白 bar）。這一排一律往下長。 */
+.main-head .icon-tip[data-tip]::after {
+  bottom: auto;
+  top: calc(100% + 6px);
+  transform: translateX(-50%) translateY(-2px);
+}
+.main-head .icon-tip[data-tip]:hover::after,
+.main-head .icon-tip[data-tip]:focus-visible::after {
+  transform: translateX(-50%) translateY(0);
+}
+/* attach 的指令泡泡已經打開時，同一顆鍵的 tooltip 不用再疊上去（鍵按完還留著 focus）。 */
+.attach-btn.on[data-tip]::after {
+  display: none;
+}

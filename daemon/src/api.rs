@@ -1023,6 +1023,63 @@ where
     serde::Deserialize::deserialize(d).map(Some)
 }
 
+/// PATCH for a bot that has no config.toml entry (`managed_by` = `team` / `child`)：
+/// same fields as the TOML branch of `patch_bot`, written straight to `bots`.
+async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &Option<Option<String>>) -> Result<(), LcError> {
+    let mut sets: Vec<String> = Vec::new();
+    let mut vals: Vec<Option<String>> = Vec::new();
+    let mut push = |col: &str, v: Option<String>| {
+        sets.push(format!("{col} = ?"));
+        vals.push(v);
+    };
+    if let Some(idn) = &b.identity {
+        push("identity", idn.clone().filter(|s| !s.trim().is_empty()));
+    }
+    if let Some(e) = &b.env {
+        push("env_json", Some(serde_json::to_string(e).unwrap_or_else(|_| "{}".into())));
+    }
+    if let Some(m) = &b.model {
+        push("model", m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()));
+    }
+    if let Some(e) = effort {
+        push("effort", e.clone());
+    }
+    if let Some(f) = b.fast {
+        push("fast", Some((f as i64).to_string()));
+    }
+    if let Some(p) = &b.persona {
+        push("persona", p.clone().filter(|x| !x.trim().is_empty()));
+    }
+    if let Some(a) = &b.args {
+        push("args_json", Some(serde_json::to_string(a).unwrap_or_else(|_| "[]".into())));
+    }
+    if let Some(a) = b.autostart {
+        push("autostart", Some((a as i64).to_string()));
+    }
+    if let Some(n) = &b.name {
+        push("name", Some(n.clone()));
+    }
+    if let Some(h) = b.inject_hooks {
+        push("inject_hooks", Some((h as i64).to_string()));
+    }
+    if let Some(a) = b.auto_approve {
+        push("auto_approve", Some((a as i64).to_string()));
+    }
+    if sets.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("UPDATE bots SET {} WHERE id = ? AND deleted_at IS NULL", sets.join(", "));
+    let mut q = sqlx::query(&sql);
+    for v in vals {
+        q = q.bind(v);
+    }
+    let n = q.bind(id).execute(&app.db).await.map_err(any_err)?.rows_affected();
+    if n == 0 {
+        return Err(LcError::NotFound("bot".into()));
+    }
+    Ok(())
+}
+
 async fn patch_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -1067,6 +1124,13 @@ async fn patch_bot(
             check_identity(&app, &host, &Some(name.clone()), &kind).await?;
         }
     }
+    // `managed_by != 'user'`（team 成員、agent 自己 spawn 的 child）從來不進 config.toml，
+    // 走 cfg.update 只會拿到 `no-bot` 404——2026-09-09 使用者：child bot 的身分改不了、按儲存沒反應。
+    // 這些直接改 DB 列；projection 不管它們，所以也不用 reproject。
+    let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
+    if managed_by != "user" {
+        patch_unprojected_bot(&app, &id, &b, &effort).await?;
+    } else {
     app.cfg
         .update(|cfg| {
             let bot = cfg
@@ -1113,6 +1177,7 @@ async fn patch_bot(
         .await
         .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { any_err(e) })?;
     reproject(&app).await?;
+    }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     // 有 slash 指令可以當場套用的欄位（grok effort / model、claude model）：
     // 只動這些欄位的話就不用重啟。grok 改模型時可以順便帶 effort（TUI `/model <id> <effort>`）。
