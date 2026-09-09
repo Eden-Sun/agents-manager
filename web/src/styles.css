@@ -10993,3 +10993,12 @@ button.run-debug-toggle:hover {
 .attach-btn.on[data-tip]::after {
   display: none;
 }
+
+/* 5h 不到一小時就重置：窗口名換成剩幾分（`12m`），用 accent 提亮讓人看得到它在倒數。
+   欄寬從固定 16px 放寬，三個字元才塞得下。 */
+.quota-window {
+  grid-template-columns: minmax(16px, auto) auto;
+}
+.quota-window-name.soon {
+  color: var(--accent-ink);
+}
