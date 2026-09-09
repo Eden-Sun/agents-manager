@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { focusableIn, useFocusTrap } from '../hooks/useFocusTrap'
+import { focusableIn, useDialogFocus } from '../hooks/useDialogFocus'
 
 /**
  * Centred popup for the sidebar's three big forms (新增 Project / 新增 Bot / 環境設定).
@@ -34,7 +34,7 @@ export function Modal({
   // field, which is what makes the form usable straight from the keyboard. `focusableIn`
   // rather than a plain query: the first control in a form is often disabled until something
   // else is filled in, and focusing it would silently drop focus on the body.
-  useFocusTrap(open, dialogRef, {
+  useDialogFocus(open, dialogRef, {
     initialFocus: () => (bodyRef.current ? focusableIn(bodyRef.current)[0] : null),
   })
 

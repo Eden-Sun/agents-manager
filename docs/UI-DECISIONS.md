@@ -627,3 +627,10 @@
 - **理由**：現在網址是拿來貼給別人的。token 是 daemon 的憑證，不該跟著畫面連結一起流出去；
   transport 在 `GET /api/session` 之後本來就自己快取，網址上留著它沒有任何作用。
 
+## 自製對話框的鍵盤焦點（2026-09-09）
+
+- **決策**：真正的 modal 共用 `useDialogFocus`；開啟時記住觸發元件，焦點進入指定的初始元件或第一個可聚焦元件，Tab / Shift+Tab 只在對話框內循環，關閉後還原觸發元件。Bot 設定桌機 anchored 分支仍遵守 2026-09-08 的非模態決定，只保留開場 focus 名稱欄；手機全螢幕 sheet 才啟用同一個 hook。
+- `ConfirmDialog` 有要求輸入文字時先 focus 輸入欄，否則先 focus「取消」；避免剛開啟的危險操作被 Enter 或 Space 誤觸。
+- `BotSettingsPanel` 桌機仍是貼著觸發齒輪的非模態浮窗；名稱欄是指定初始焦點，背景可繼續使用。手機全螢幕 sheet 才把焦點留在面板內並還原觸發元件。
+- `BlockedModal` 仍保留終端鍵盤直通；Tab / Shift+Tab 是瀏覽器焦點移動，不送進 agent。代價是直通模式下仍不能用 Esc 關閉，關閉入口維持右上角按鈕與視窗外。
+- **不採用**原生 `<dialog>` + `showModal()`：現有 backdrop、portal 與巢狀確認框的行為不需改寫，改動面較小且保留既有視覺契約。

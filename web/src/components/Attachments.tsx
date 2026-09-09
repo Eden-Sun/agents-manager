@@ -15,7 +15,7 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState }
 import type { DragEvent } from 'react'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
-import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
 
@@ -417,7 +417,7 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
   }, [onClose])
 
   // 打開時焦點進到「關閉」鍵（圖片本身不可聚焦），關掉時退回原本按到的縮圖。
-  useFocusTrap(true, boxRef, { initialFocus: () => closeRef.current })
+  useDialogFocus(true, boxRef, { initialFocus: () => closeRef.current })
 
   return (
     <div
