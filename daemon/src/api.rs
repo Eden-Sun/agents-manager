@@ -1272,8 +1272,15 @@ async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Res
         .await
         .map_err(any_err)?;
     let hosts = app.cfg.get().await.hosts;
-    app.hosts.apply_config(&app, &hosts).await;
-    let (connected, error) = app.hosts.reconnect(&app, &b.name).await.unwrap_or((false, Some("host vanished".into())));
+    let changed_hosts = app.hosts.apply_config(&app, &hosts).await;
+    let (connected, error) = if changed_hosts.contains(&b.name) {
+        match app.hosts.get(&b.name).await {
+            Some(conn) => app.hosts.wait_for_connection(conn).await.unwrap_or((false, Some("host vanished".into()))),
+            None => (false, Some("host vanished".into())),
+        }
+    } else {
+        app.hosts.reconnect(&app, &b.name).await.unwrap_or((false, Some("host vanished".into())))
+    };
     app.emit("host_changed", json!({"name": b.name, "connected": connected, "error": error})).await;
     crate::state::emit_daemon_status(&app).await;
     Ok((StatusCode::OK, Json(json!({"name": b.name, "connected": connected, "error": error}))).into_response())
