@@ -927,6 +927,56 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 - start 失敗的錯誤與 `POST /bots/{id}/start` 相同（502 / 409 / 404）。
 - 過程中會推 `bot_status`（stopping → offline → starting → idle）。
 
+### 10.3a `POST /api/bots/restart-idle`（2026-09-09 新增，SPEC §6.9）
+
+一鍵把「帶著 claude 更新且現在閒置」的 bot 全部 exit + resume。無 body。
+
+```json
+202 {
+  "batch_id": "01M2…",
+  "total": 2,
+  "planned": [{"bot_id":"01M1…","name":"am-claude"}, {"bot_id":"01M1…","name":"C1-fable"}],
+  "skipped": [{"bot_id":"01M1…","name":"am-claude-2","reason":"working",
+               "reason_label":"正在跑，重啟會把這一回合砍掉"}]
+}
+```
+
+- **202 而不是 200**：回的是**計畫**不是結果。實際重啟在 daemon 背景一顆一顆跑，因為一顆
+  `stop_bot` 最久要等 agent 十秒，五顆就一分鐘——同步做完再回會把 HTTP 連線拖死。
+- 每顆走的是既有的單顆路徑加上續接旗標：`stop_bot` → `start_bot_with(resume_native)`，claude 拿到
+  `--resume <上一個 session>`，所以**不會開新對話、上下文不掉**。與 `/bots/{id}/restart` 的差別
+  只有這個旗標。
+- 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
+  任何一張清單裡**。
+- `reason` 的取值與判斷順序見 SPEC §6.9：`spawned_child` / `team_member` / `not_running` / `working` /
+  `blocked` / `unknown_status` / `turn_in_flight`。`reason_label` 是同一件事給人看的那句（前端直接
+  顯示，不另編一套）。
+- `total = 0` 也是 `202`：計畫是空的不是錯誤，daemon 仍會立刻推一次 `bots_restart_done`。
+- 一顆失敗不中斷整批；失敗的進最終的 `failed` 清單。
+
+#### WS：`bots_restart_progress` / `bots_restart_done`
+
+```json
+{"batch_id":"01M2…","index":1,"total":2,"bot_id":"01M1…","name":"am-claude","status":"restarting"}
+{"batch_id":"01M2…","index":1,"total":2,"bot_id":"01M1…","name":"am-claude","status":"ok"}
+{"batch_id":"01M2…","index":2,"total":2,"bot_id":"01M1…","name":"C1-fable","status":"failed",
+ "error":"active run already exists"}
+```
+
+- 每顆送兩次：開始時 `restarting`，結束時 `ok` 或 `failed`（`failed` 帶 `error`）。每顆之後另推一次
+  既有的 `bot_changed`。
+- 收尾一次 `bots_restart_done`：
+
+```json
+{"batch_id":"01M2…",
+ "ok":[{"bot_id":"…","name":"am-claude","run_id":"01M3…"}],
+ "failed":[{"bot_id":"…","name":"C1-fable","error":"…"}],
+ "skipped":[{"bot_id":"…","name":"am-claude-2","reason":"working","reason_label":"正在跑，重啟會把這一回合砍掉"}]}
+```
+
+- `done` 的三張清單是權威：中途漏掉的 progress frame 到這裡會被補齊，前端照它重畫摘要。
+- `batch_id` 用來擋掉不是自己那一批的 frame（同時有兩個分頁按下去時）。
+
 ### 10.4 `DELETE /api/bots/{id}`
 
 ```json
@@ -1687,7 +1737,7 @@ claude 把新版下載好、等重啟才會換過去時，會在 pane 最底下�
 - `update_watch::spawn_update_watcher` 每 30 秒對每個 `state=running` 的 claude run 做一次
   `pane.read visible 80`，跟現值不同才寫 DB 並推 `bot_status`；讀不到畫面就跳過（不清除）。
 - 掛在 run 不是 bot：等著套用的更新是這個 claude process 的事，重啟後的新 run 是 `null`。
-- 套用方式沒有新 API，就是既有的 `POST /api/bots/{id}/restart`。
+- 套用方式：單顆就是既有的 `POST /api/bots/{id}/restart`；全部一起走 `POST /api/bots/restart-idle`（§10.3a）。
 
 ### `run.runtime_model` / `runtime_effort` / `runtime_fast`（2026-09-09 新增，SPEC §4.4a）
 

@@ -434,6 +434,45 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
 5. external：建 Turn（`origin=external`, `status=completed`）+ user Message（Codex 可從 `input-messages` 取得；Claude 無則省略）+ assistant Message。
 6. 推 WS `message_added` / `turn_updated`。
 
+### 6.9 一鍵套用 claude 更新（批次 exit + resume，v4.4）
+
+claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update installed · Restart to update`
+（daemon 收在 `runs.update_notice`，見 §4.5 / API.md），套用的唯一方式就是重啟。十顆 bot 就是點
+十次「重啟」，而且每點一次都要先自己確認那顆有沒有在忙。
+
+- 入口：`POST /api/bots/restart-idle`（無 body）。**立刻回計畫就結束**，實際重啟在背景跑——一顆
+  `stop_bot` 最久要等 agent 十秒才放棄，五顆就一分鐘，同步做完再回會把 HTTP 連線拖死。
+- 挑選（`daemon/src/bulk_restart.rs::plan`，純函式、有單元測試）。候選 = **kind 是 claude**
+  且該 run **帶著非空的 `update_notice`**；不是候選的（其他 kind、沒有更新在等的）連「跳過」都不
+  列，那不是使用者按這顆按鈕時在問的事。候選裡依序判斷，第一個中的就是回報的理由：
+
+  | 條件 | `reason` | 動作 |
+  |---|---|---|
+  | `bots.managed_by = 'child'` | `spawned_child` | 跳過 |
+  | `bots.managed_by = 'team'` | `team_member` | 跳過 |
+  | `runs.state != 'running'` | `not_running` | 跳過 |
+  | `agent_status = 'working'` | `working` | 跳過 |
+  | `agent_status = 'blocked'` | `blocked` | 跳過 |
+  | `agent_status` 不是 `idle`（`unknown`） | `unknown_status` | 跳過 |
+  | 該 run 還有 `in_flight` Turn | `turn_in_flight` | 跳過 |
+  | 以上都不中 | — | 重啟 |
+
+  批次操作最不能做的事就是把使用者正在等的那一回合砍掉，所以規則刻意保守：`unknown` 也跳過。
+  `child` / `team` 不歸這顆按鈕管：子 agent 是父 agent 開的 pane（§6.5a，`start_bot` 本來就會拒絕，
+  放進去只會變成一則看不懂的失敗），team 成員的 run 由 team 排程記著，插手會讓排程對不上。
+- 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::stop_bot` → `lifecycle::start_bot_with(StartOpts
+  { resume_native: true })`。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
+  之後，剛結束那個 `native_session_id` 就成了 `last_native_session_id` 找得到的「上一個 session」，
+  claude 拿到的是 `--resume <session>`。沒有另一套啟動流程，hook 注入 / 身份 / 模型 / pane 版面全部照舊。
+  - 與 `POST /bots/:id/restart` 的差別只有這個旗標：那條是「重新開始」，這條是「接著跑」。
+- **一顆失敗不中斷整批**：批次的價值就在於不用一顆一顆顧，中途停下等於白做。失敗的記在結果裡。
+- 序列而不是並行：herdr 的 pane 版面（§6.2 的挑最大面積切）與每顆的 per-bot 鎖都假設一次一顆，
+  並行重啟五顆會互相搶版面，而且錯誤訊息會混在一起分不出是誰的。
+- 回饋走 WS：`bots_restart_progress`（每顆兩次：`restarting` / `ok` 或 `failed`）與
+  `bots_restart_done`（最終的 `ok` / `failed` / `skipped` 三張清單）。前端用它畫「第幾顆 / 共幾顆」
+  與最後的摘要，見 `docs/UI-DECISIONS.md`。
+
+
 ## 7. API
 
 ### 7.1 存取控制
