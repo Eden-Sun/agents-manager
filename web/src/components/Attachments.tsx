@@ -11,7 +11,7 @@
  * URL rather than pointed at with a plain `src`.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
@@ -41,16 +41,40 @@ export interface Pending {
   error: string | null
 }
 
+type PendingAction =
+  | { type: 'add'; item: Pending }
+  | { type: 'uploaded'; key: string; id: string }
+  | { type: 'failed'; key: string; error: string }
+  | { type: 'remove'; key: string }
+  | { type: 'clear' }
+
+function pendingReducer(items: Pending[], action: PendingAction): Pending[] {
+  switch (action.type) {
+    case 'add':
+      return [...items, action.item]
+    case 'uploaded':
+      return items.map((it) => (it.key === action.key ? { ...it, id: action.id } : it))
+    case 'failed':
+      return items.map((it) => (it.key === action.key ? { ...it, error: action.error } : it))
+    case 'remove':
+      return items.filter((it) => it.key !== action.key)
+    case 'clear':
+      return []
+  }
+}
+
 /**
  * Composer-side attachment state for one draft (a bot chat or a project group chat).
  * `uploadTo` is the bot whose host receives the file — for a group send any member will
- * do, since the daemon scopes attachments to the project they share.
+ * do, since the daemon scopes attachments to the project they share. `resetKey` identifies
+ * the conversation whose tray owns the attachment state.
  */
-export function useAttachments(uploadTo: string | null) {
+export function useAttachments(uploadTo: string | null, resetKey: string | null) {
   const notify = useStore((s) => s.notify)
-  const [items, setItems] = useState<Pending[]>([])
+  const [items, dispatch] = useReducer(pendingReducer, [])
   const seq = useRef(0)
   const urls = useRef(new Set<string>())
+  const itemsRef = useRef<Pending[]>([])
   useEffect(() => {
     const held = urls.current
     return () => {
@@ -63,13 +87,15 @@ export function useAttachments(uploadTo: string | null) {
     urls.current.delete(previewUrl)
   }, [])
 
-  // Attachments belong to the bot that received their upload; never carry them across bots.
-  useEffect(() => {
-    setItems((prev) => {
-      for (const it of prev) revokePreview(it.previewUrl)
-      return []
-    })
-  }, [revokePreview, uploadTo])
+  useLayoutEffect(() => {
+    itemsRef.current = items
+  }, [items])
+
+  // Attachments belong to the conversation, not necessarily the bot that received the upload.
+  useLayoutEffect(() => {
+    for (const it of itemsRef.current) revokePreview(it.previewUrl)
+    dispatch({ type: 'clear' })
+  }, [revokePreview, resetKey])
 
   const add = useCallback(
     (files: File[]) => {
@@ -89,15 +115,15 @@ export function useAttachments(uploadTo: string | null) {
         }
         const previewUrl = URL.createObjectURL(file)
         urls.current.add(previewUrl)
-        setItems((prev) => [...prev, { key, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null }])
+        dispatch({ type: 'add', item: { key, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null } })
         void api
           .uploadAttachment(uploadTo, file)
           .then((a: Attachment) => {
-            setItems((prev) => prev.map((it) => (it.key === key ? { ...it, id: a.id } : it)))
+            dispatch({ type: 'uploaded', key, id: a.id })
           })
           .catch((e: unknown) => {
             const msg = e instanceof Error ? e.message : String(e)
-            setItems((prev) => prev.map((it) => (it.key === key ? { ...it, error: msg } : it)))
+            dispatch({ type: 'failed', key, error: msg })
             notify('error', `圖片「${file.name}」上傳失敗：${msg}`)
           })
       }
@@ -106,19 +132,15 @@ export function useAttachments(uploadTo: string | null) {
   )
 
   const remove = useCallback((key: string) => {
-    setItems((prev) => {
-      const removed = prev.find((it) => it.key === key)
-      if (removed) revokePreview(removed.previewUrl)
-      return prev.filter((it) => it.key !== key)
-    })
-  }, [revokePreview])
+    const removed = items.find((it) => it.key === key)
+    if (removed) revokePreview(removed.previewUrl)
+    dispatch({ type: 'remove', key })
+  }, [items, revokePreview])
 
   const clear = useCallback(() => {
-    setItems((prev) => {
-      for (const it of prev) revokePreview(it.previewUrl)
-      return []
-    })
-  }, [revokePreview])
+    for (const it of items) revokePreview(it.previewUrl)
+    dispatch({ type: 'clear' })
+  }, [items, revokePreview])
 
   /** Ids to send; empty while anything is still uploading. */
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
