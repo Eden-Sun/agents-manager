@@ -328,6 +328,10 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 現在**若那則回覆結尾有合法的 am-team 區塊就照常套用**——回報漏掉時，使用者只要在群組聊天 `@dev-2 請再 report 一次`
 就能把隊伍救回來；沒有區塊或區塊不合法仍當一般對話，不修復、不計次。
 
+**重複的 `report`（2026-09-09）**：task 已經不在執行者手上（`reported` / `reviewing` / `merging`）時又收到同一位的
+`report{done}`——hook 晚到、使用者 nudge、修復提示在第一則已經通過之後才被回答——一律當作重送：記
+`note{duplicate_report}`、不改狀態、不再送審一次（#48 t21 實測 reviewer 收到同一回兩次）。
+
 **`report` 的寬鬆解析（2026-09-08）**：執行者常把欄位包在 `report` 物件裡、用自己的字眼當 `status`。daemon 接受
 `{"action":"report","report":{…}}` 的巢狀寫法；`status` 同義詞 `completed / complete / finished / success / ok → done`、
 `stuck / failed / need_help → blocked`；沒有 `summary` 時把其餘欄位序列化當摘要給 PM。派工 relay 也改成直接印出固定格式的區塊。
@@ -341,7 +345,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | **回合預算** | `budget.max_relays`（預設 40）：所有 relay（含修復提示）計數；到頂 → `paused(budget_relays)`。使用者插話不計。 |
 | **審查回合** | 每個 task `budget.max_review_rounds`（預設 2）：`request_changes` 第 N+1 次 → task `exhausted`，team `paused(review_exhausted)`，由人決定強制合併 / 跳過 / 再給一回合。 |
 | **併行數**（2026-09-08，原「派工上限」） | `workers.count`（1–4，預設 1）是**同時能跑幾個 task**，不是 PM 要自己分配的人頭。每個執行者同時最多 1 個未完成 task（DB 的 `team_tasks_one_open_per_worker` 保證），所以併行數 n = 最多 n 筆同時在跑。PM 可以隨時 `dispatch`，不必等前一批做完：多的進佇列，跑完一筆補一筆。**同一個 issue 內出現第二次完全相同的 `brief`**（不分執行者）→ `paused(pm_repeat)`。 |
-| **時間** | `budget.max_wall_clock_min`（預設 120）：從 `started_at` 起算，到頂 → `paused(budget_time)`。 |
+| **時間** | `budget.max_wall_clock_min`（預設 120）：從當前 issue 的 `started_at` 起算，**扣掉暫停的時間**（從 phase 事件加總；2026-09-09 前不扣，隔夜的 `quota_low` 一 resume 就撞 `budget_time`），到頂 → `paused(budget_time)`。 |
 | **額度** | 每次送 relay 前查 `quota::get(kind)`：任一週期 `used_pct ≥ budget.quota_stop_pct`（預設 90）→ `paused(quota_low)`；額度沒資料時不擋。**暫停要指名道姓**（2026-09-09）：`quota_low` 一律附 `pause_detail`（見下），寫明是哪個成員、哪個身分、哪個視窗、剩多少、幾點 reset。 |
 | **停頓不是中止** | 所有上限都只 `paused`，成員 pane 還活著；使用者 `PATCH budget` 後 `resume`。中止只有人能按。 |
 

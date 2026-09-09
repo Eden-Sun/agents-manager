@@ -585,7 +585,7 @@ async fn refresh_usage(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     let relays = relay_count(app, &ctx.team.id, ctx.issue_id(), "delivered").await;
     let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
     let rounds: i64 = tasks.iter().map(|t| t.round).sum();
-    let elapsed = elapsed_min_of(&ctx.team, ctx.issue.as_ref());
+    let elapsed = elapsed_min_of(app, &ctx.team, ctx.issue.as_ref()).await;
     let mut per_bot = serde_json::Map::new();
     for b in &ctx.members {
         let n = sqlx::query_scalar::<_, i64>(
@@ -614,13 +614,56 @@ async fn refresh_usage(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
 
 /// Minutes on the **current issue** (§2.3): the wall-clock budget is what stops one issue
 /// running away, not what caps the length of a queue.
-fn elapsed_min_of(t: &db::Team, issue: Option<&db::TeamIssue>) -> i64 {
+///
+/// **Paused time does not count** (2026-09-09): a team that sat in `paused(quota_low)`
+/// overnight came back to `budget_time` on the very next pass and had to be raised 240 →
+/// 480 → 960 before it would move. The clock is for a *running* issue. The paused stretches
+/// are read off the `phase` events, so nothing new is stored.
+async fn elapsed_min_of(app: &Arc<App>, t: &db::Team, issue: Option<&db::TeamIssue>) -> i64 {
     let start = issue
         .and_then(|i| i.started_at.as_deref())
         .or(t.started_at.as_deref())
         .unwrap_or(t.created_at.as_str());
     let Ok(s) = chrono::DateTime::parse_from_rfc3339(start) else { return 0 };
-    (chrono::Utc::now() - s.with_timezone(&chrono::Utc)).num_minutes().max(0)
+    let s = s.with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    let paused = paused_secs_since(app, &t.id, start, t.phase == "paused").await;
+    ((now - s).num_seconds() - paused).max(0) / 60
+}
+
+/// Seconds spent in `paused` since `since` (RFC 3339), summed from the phase log. An open
+/// pause (the team is paused right now) runs to the present.
+async fn paused_secs_since(app: &Arc<App>, team_id: &str, since: &str, paused_now: bool) -> i64 {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT payload_json, created_at FROM team_events WHERE team_id = ? AND kind = 'phase' AND created_at >= ? ORDER BY seq",
+    )
+    .bind(team_id)
+    .bind(since)
+    .fetch_all(&app.db)
+    .await
+    .unwrap_or_default();
+    let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&chrono::Utc));
+    let mut total = 0i64;
+    let mut open: Option<chrono::DateTime<chrono::Utc>> = None;
+    for (payload, at) in rows {
+        let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+        let to = v.get("to").and_then(Value::as_str).unwrap_or("");
+        let from = v.get("from").and_then(Value::as_str).unwrap_or("");
+        let Some(at) = ts(&at) else { continue };
+        if to == "paused" && open.is_none() {
+            open = Some(at);
+        } else if from == "paused" && to != "paused" {
+            if let Some(o) = open.take() {
+                total += (at - o).num_seconds().max(0);
+            }
+        }
+    }
+    if let Some(o) = open {
+        if paused_now {
+            total += (chrono::Utc::now() - o).num_seconds().max(0);
+        }
+    }
+    total
 }
 
 // ---------------------------------------------------------------- gates (§4.5, §9.2)
@@ -726,7 +769,7 @@ async fn pause_quota_low(app: &Arc<App>, ctx: &Ctx, hits: &[QuotaHit]) -> LcResu
 
 /// Wall clock and quota, checked on every pass. Returns `true` when the team may proceed.
 async fn gates(app: &Arc<App>, ctx: &Ctx) -> LcResult<bool> {
-    if elapsed_min_of(&ctx.team, ctx.issue.as_ref()) >= ctx.budget.max_wall_clock_min {
+    if elapsed_min_of(app, &ctx.team, ctx.issue.as_ref()).await >= ctx.budget.max_wall_clock_min {
         pause(app, &ctx.team, "budget_time").await?;
         return Ok(false);
     }
@@ -1906,6 +1949,14 @@ async fn report(
     let Some(task) = open_task_of(app, &ctx.team.id, &worker.id).await? else {
         return repair(app, ctx, worker, "你目前沒有進行中的 task").await;
     };
+    // A report for a task that has already left the worker's hands (`reported` / `reviewing`
+    // / `merging`) is a re-send — a late hook, a user nudge, a repair answered after the
+    // first answer got through. Taking it again would drop the task back to `reported` and
+    // send the reviewer the same round twice (2026-09-09 #48 t21). Keep the text, do nothing.
+    if !blocked && !["working", "changes_requested", "rebasing", "blocked_by_worker", "queued"].contains(&task.state.as_str()) {
+        note(app, &ctx.team.id, json!({"action": "duplicate_report", "bot": worker.name, "task": task.seq, "state": task.state})).await?;
+        return Ok(());
+    }
     let body = if summary.trim().is_empty() { notes.to_string() } else { summary.to_string() };
     sqlx::query("UPDATE team_tasks SET last_report = ?, updated_at = ? WHERE id = ?")
         .bind(&body)
@@ -3274,6 +3325,50 @@ mod scenarios {
         // A failed turn is the same story.
         apply_reply(s.app(), &s.tid, &pm.id, "", "failed").await.unwrap();
         assert_eq!(s.pending(&pm).await.len(), 2);
+    }
+
+    /// 2026-09-09 (#48 t21): a second `report{done}` for a task that is already under review is
+    /// a re-send, not a new report — the task stays `reviewing` and the reviewer is not asked
+    /// the same round twice.
+    #[tokio::test]
+    async fn a_second_report_while_reviewing_is_ignored() {
+        let s = S::new(1, true).await;
+        let (pm, d1, rev) = (s.bot("pm", 0).await, s.bot("worker", 0).await, s.bot("reviewer", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"寫好了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "reviewing");
+        assert_eq!(s.pending(&rev).await.len(), 1);
+
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"寫好了（再送一次）"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "reviewing", "still with the reviewer");
+        assert_eq!(s.pending(&rev).await.len(), 1, "no second review relay");
+        assert_ne!(s.team().await.phase, "paused");
+    }
+
+    /// 2026-09-09: the wall clock skips the minutes a team spent paused.
+    #[tokio::test]
+    async fn paused_time_is_not_on_the_wall_clock() {
+        let s = S::new(1, false).await;
+        let since = "2026-01-01T00:00:00Z";
+        let ev = |from: &str, to: &str, at: &str| {
+            let (app, tid) = (s.app().clone(), s.tid.clone());
+            let (from, to, at) = (from.to_string(), to.to_string(), at.to_string());
+            async move {
+                sqlx::query("INSERT INTO team_events (id, team_id, seq, kind, payload_json, created_at) VALUES (?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM team_events WHERE team_id=?), 'phase', ?, ?)")
+                    .bind(db::ulid()).bind(&tid).bind(&tid)
+                    .bind(json!({"from": from, "to": to}).to_string()).bind(at)
+                    .execute(&app.db).await.unwrap();
+            }
+        };
+        ev("working", "paused", "2026-01-01T01:00:00Z").await;
+        ev("paused", "working", "2026-01-01T03:00:00Z").await;
+        ev("working", "paused", "2026-01-01T05:00:00Z").await;
+        ev("paused", "working", "2026-01-01T05:30:00Z").await;
+        let secs = paused_secs_since(s.app(), &s.tid, since, false).await;
+        assert_eq!(secs, 2 * 3600 + 30 * 60);
     }
 
     /// §4.5 (2026-09-08) — the worker pool. Three tasks against a parallelism of one: the
