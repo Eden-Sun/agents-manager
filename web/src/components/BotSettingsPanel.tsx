@@ -5,6 +5,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
+import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 
@@ -445,6 +446,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       ) : null}
 
       <div className="bs-body">
+        {/* 識別（pane / agent / session…）：桌面在標題列的 w17G:p8 ▾ 那顆展得開，手機那顆被藏了，
+            在這裡給一份可以複製的（2026-09-09 使用者要求）。 */}
+        <RunIdents botId={botId} />
         <form
           className="form"
           id={`bot-settings-form-${botId}`}
@@ -639,6 +643,22 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         }}
       />
     </div>
+    </div>
+  )
+}
+
+/** Bot 設定裡的識別列：有 run 才有東西可抄。點一下複製（`CopyChip`）。 */
+function RunIdents({ botId }: { botId: string }) {
+  const run = useStore((s) => s.runs[botId] ?? null)
+  const agentName = useStore((s) => s.bots.find((b) => b.id === botId)?.agent_name ?? null)
+  if (!run) return null
+  return (
+    <div className="bs-idents" role="group" aria-label="Run 識別資訊">
+      <span className="bs-idents-k">識別</span>
+      <CopyChip label="pane" value={run.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
+      <CopyChip label="agent" value={agentName ?? ''} title="herdr agent 名稱：herdr agent list 裡對應的那個" />
+      <CopyChip label="session" value={run.herdr_session ?? ''} title="pane 所屬的 herdr session" />
+      <CopyChip label="workspace" value={run.workspace_id ?? ''} title="herdr workspace id" />
     </div>
   )
 }
