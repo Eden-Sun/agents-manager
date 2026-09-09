@@ -782,9 +782,14 @@ export const useStore = create<StoreState>((set, get) => ({
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
     set((s) => {
       const turns = { ...s.turns }
+      for (const [botId, map] of Object.entries(turns)) {
+        const runId = runs[botId]?.id
+        turns[botId] = Object.fromEntries(Object.entries(map).filter(([, t]) => t.status !== 'in_flight' || t.run_id === runId))
+      }
       for (const t of st.turns) {
         const botId = t.bot_id ?? st.bots.find((b) => runs[b.id]?.id === t.run_id)?.id
         if (!botId) continue
+        if (t.status === 'in_flight' && t.run_id !== runs[botId]?.id) continue
         turns[botId] = pruneTurns({ ...(turns[botId] ?? {}), [t.id]: t })
       }
       const selected =
