@@ -2894,17 +2894,16 @@ pub async fn prompt_grouped(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
-        fail_prompt_delivery(app, &conv, &turn_id, &format!("attachment binding failed: {e}")).await;
-        return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
-    }
-
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
         .bind(&msg_id)
         .fetch_optional(&app.db)
         .await
     {
         app.emit("message_added", json!({"bot_id": bot_id, "message": m})).await;
+    }
+    if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
+        fail_prompt_delivery(app, &conv, &turn_id, &format!("attachment binding failed: {e}")).await;
+        return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
     }
     emit_turn(app, &turn_id).await;
 
@@ -5706,10 +5705,18 @@ mod prompt_tests {
         .execute(&app.db)
         .await
         .unwrap();
+        let mut ws_events = app.subscribe();
         let mut turn_events = app.subscribe_turns();
 
         let out = prompt_with(&app, &f.bot_id, "look", "prompt-attachments", &[attachment_id]).await.unwrap();
         assert_eq!(out.delivery, "failed");
+        let user_event = tokio::time::timeout(std::time::Duration::from_secs(1), ws_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user_event.kind, "message_added");
+        assert_eq!(user_event.data["message"]["id"], out.message_id);
+        assert_eq!(user_event.data["message"]["role"], "user");
         assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none());
         let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?")
             .bind(&out.turn_id)
