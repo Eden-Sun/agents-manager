@@ -95,7 +95,7 @@ fn claude_account_from_tools(
             None,
             Some(format!("身份 {name} 在 {host} 沒有登入：claude 會退回這台機器 Keychain 裡預設（cc0）的帳號執行。請在這個 Bot 按「登入 / 切換帳號」。")),
         ),
-        (_, Some(i)) if i.account.is_some() => (i.account.clone(), None),
+        (_, Some(i)) if i.logged_in != Some(false) && i.account.is_some() => (i.account.clone(), None),
         _ => (None, None),
     }
 }
@@ -139,6 +139,30 @@ mod account_tests {
         let (account, warning) = claude_account_from_tools(&tools, "remote", Some("cc1"));
 
         assert_eq!(account.as_deref(), Some("remote@example.com"));
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn local_identity_probe_miss_does_not_fall_back_to_default_account() {
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("local".to_string(), host_tools(identity("cc0", "stale@example.com")));
+
+        let (account, warning) = claude_account_from_tools(&tools, "local", Some("cc1"));
+
+        assert_eq!(account, None);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn default_bot_does_not_show_stale_account_when_host_says_logged_out() {
+        let mut default_identity = identity("cc0", "stale@example.com");
+        default_identity.logged_in = Some(false);
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("local".to_string(), host_tools(default_identity));
+
+        let (account, warning) = claude_account_from_tools(&tools, "local", None);
+
+        assert_eq!(account, None);
         assert_eq!(warning, None);
     }
 }
