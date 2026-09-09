@@ -1125,16 +1125,28 @@ async fn patch_bot(
             || b.auto_approve.is_some()
             || b.inject_hooks.is_some()
     };
-    let live_field = match kind.as_str() {
-        "grok" if b.model.is_some() && !extras(&["model", "effort"]) => Some("model"),
-        "grok" if b.effort.is_some() && !extras(&["effort"]) => Some("effort"),
-        "claude" if b.model.is_some() && !extras(&["model"]) => Some("model"),
-        "claude" if b.effort.is_some() && !extras(&["effort"]) => Some("effort"),
-        _ => None,
+    // codex 的三個都能在執行中換（SPEC §4.4a）：`/model` 的兩層選單一次決定模型與強度，
+    // `/fast` 開關 service tier。所以它可以一次收下 model / effort / fast 的任意組合，
+    // claude / grok 則維持一次一個欄位（它們的 slash 指令就是一行一個值）。
+    let live_fields: Vec<&str> = match kind.as_str() {
+        "codex" if !extras(&["model", "effort", "fast"]) => ["model", "effort", "fast"]
+            .into_iter()
+            .filter(|f| match *f {
+                "model" => b.model.is_some(),
+                "effort" => b.effort.is_some(),
+                _ => b.fast.is_some(),
+            })
+            .collect(),
+        "grok" if b.model.is_some() && !extras(&["model", "effort"]) => vec!["model"],
+        "grok" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
+        "claude" if b.model.is_some() && !extras(&["model"]) => vec!["model"],
+        "claude" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
+        _ => Vec::new(),
     };
-    let needs_restart = match live_field {
-        Some(f) if needs_restart => !lifecycle::apply_live_setting(&app, &id, f).await,
-        _ => needs_restart,
+    let needs_restart = if needs_restart && !live_fields.is_empty() {
+        !lifecycle::apply_live_setting(&app, &id, &live_fields).await
+    } else {
+        needs_restart
     };
     Ok((StatusCode::OK, Json(json!({"needs_restart": needs_restart}))).into_response())
 }

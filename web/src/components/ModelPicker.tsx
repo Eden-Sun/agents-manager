@@ -107,8 +107,8 @@ export function ApiModelFields({
         <span>
           模型
           {loading ? <span className="field-note">載入中…</span> : fromApi ? null : <span className="field-note warn">API 不可用，使用內建清單</span>}
-          {/* claude / grok 的 TUI 有 /model，daemon 會直接送進去；換模型不用重啟。 */}
-          {kind === 'claude' || kind === 'grok' ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
+          {/* 三個 kind 的 TUI 都能當場換模型，daemon 會直接操作（codex 走 `/model` 選單）。 */}
+          {liveModel(kind) ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
         </span>
         <div className="opt-group models" role="radiogroup" aria-label="model">
           <button
@@ -154,8 +154,9 @@ export function ApiModelFields({
             {current && current.id !== model && kind !== 'claude' ? (
               <span className="field-note">依 {current.display_name}</span>
             ) : null}
-            {/* grok / claude 的 TUI 都有 `/effort <level>`，daemon 會直接送進去；codex 只能重啟。
-                claude 會順手把它存成該帳號的預設（CLI 行為，見 SPEC §17）。 */}
+            {/* grok / claude 的 TUI 有 `/effort <level>`，codex 走 `/model` 的第二層選單；
+                三個都是 daemon 直接操作。claude 與 codex 會順手把它存成該帳號的預設
+                （CLI 行為，見 SPEC §17 與 §4.4a）。 */}
             {liveEffort(kind) ? (
               <span className="field-note" title={kind === 'claude' ? 'claude 會同時把它存成之後新 session 的預設強度' : undefined}>
                 執行中改會即時套用，不用重啟
@@ -203,6 +204,8 @@ export function ApiModelFields({
             <span className="field-note">
               {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
             </span>
+            {/* codex 的 `/fast` 是執行中就能切的開關（SPEC §4.4a）。 */}
+            {liveFast(kind) ? <span className="field-note">執行中改會即時套用，不用重啟</span> : null}
           </span>
         </label>
       ) : null}
@@ -230,14 +233,22 @@ function defaultEffortNote(kind: BotKind): string {
   return kind === 'claude' ? '帳號目前設定' : '模型預設'
 }
 
-/** Kinds whose TUI can take `/model` (or grok `/effort`) without a restart. */
-function liveModel(kind: BotKind): boolean {
-  return kind === 'claude' || kind === 'grok'
+/**
+ * 三個 kind 的 TUI 都能在執行中換模型與強度，daemon 會直接操作（SPEC §4.4a）：
+ * claude / grok 是一行 slash 指令，codex 0.153.4 是 `/model` 的兩層選單（daemon 讀畫面選號碼，
+ * 再回讀狀態列確認）。套不進去時 `PATCH` 還是會回 `needs_restart`，標題列就出現「需重啟」。
+ */
+function liveModel(_kind: BotKind): boolean {
+  return true
 }
 
-/** grok 與 claude 的 TUI 都吃 `/effort <level>`（claude 2.1.263 實測）；codex 沒有。 */
-function liveEffort(kind: BotKind): boolean {
-  return kind === 'grok' || kind === 'claude'
+function liveEffort(_kind: BotKind): boolean {
+  return true
+}
+
+/** codex 的 `/fast` 是個開關，執行中也切得掉；其他 kind 根本沒有這個旗標。 */
+function liveFast(kind: BotKind): boolean {
+  return kind === 'codex'
 }
 
 /**
@@ -364,6 +375,19 @@ export function ModelQuickPicker({
     void apply({ effort: id })
   }
 
+  /** 同 `bots.fast`、同一條 `PATCH`——設定面板那顆勾與這顆 chip 是同一個欄位。 */
+  const toggleFast = () => {
+    if (!bot || patching) {
+      setOpen(false)
+      return
+    }
+    setOpen(false)
+    void apply({ fast: !bot.fast })
+  }
+
+  // 這個模型有沒有 fast tier（`model/list` 的 `serviceTiers`），跟設定面板同一條判斷。
+  const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
+
   const pop = open ? (
       <div
         ref={popRef}
@@ -413,11 +437,30 @@ export function ModelQuickPicker({
             </div>
           </div>
         ) : null}
-        {liveModel(kind) ? (
-          <span className="hint">{liveEffort(kind) ? '執行中改模型或強度會即時套用' : '執行中改模型會即時套用'}</span>
-        ) : (
-          <span className="hint">執行中改了要重啟才生效</span>
-        )}
+        {hasFast ? (
+          <div className="field">
+            <span>tier</span>
+            <div className="opt-group">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={bot?.fast === true}
+                className={`opt${bot?.fast ? ' on' : ''}`}
+                disabled={patching}
+                title={current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
+                onClick={toggleFast}
+              >
+                Fast
+              </button>
+              <span className="field-note">
+                {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '2x speed, increased usage'}
+              </span>
+            </div>
+          </div>
+        ) : null}
+        <span className="hint">
+          {liveFast(kind) ? '執行中改模型、強度或 fast 都會即時套用' : '執行中改模型或強度會即時套用'}
+        </span>
       </div>
     ) : null
 

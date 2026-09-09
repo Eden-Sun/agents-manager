@@ -3628,6 +3628,13 @@ p.project-quota-hidden {
   margin: 0;
 }
 
+/* 快速選單裡的 fast：跟強度那排同一顆 chip 的長相，後面接一行說明。說明要能自己換行，
+   不然 `2x speed, increased usage` 會把 popover 撐到 max-width。 */
+.model-quick-pop .opt-group .field-note {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
 /* -------------------------------------------------------- blocked / term */
 
 .blocked {
@@ -5026,6 +5033,30 @@ button.model-tag {
 .model-tag-extra::before {
   content: '-';
   margin: 0 1px 0 2px;
+}
+
+/* SPEC §4.4a：這一格寫的是「下次啟動才會用的設定」，跟現在真的在跑的值不一樣。⟳ 只是一個
+   記號，實際在跑什麼寫在 tooltip 裡——側欄那一列窄到放不下兩組數字。 */
+.model-tag.stale {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+
+.model-tag-stale {
+  margin-left: 3px;
+  color: var(--warn);
+  font-weight: 700;
+}
+
+/* 標題列那顆：同 `.update-badge` 的形狀，換成警示色——它講的不是「有新版可裝」，
+   而是「你看到的設定現在不是真的」。 */
+.drift-badge {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border-strong));
+}
+
+.drift-badge:hover:not(:disabled) {
+  border-color: var(--warn);
 }
 
 button.model-tag[aria-expanded='true'] {

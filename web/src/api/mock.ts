@@ -60,6 +60,14 @@ interface MockRun {
   update_notice: string | null
   /** 上一回合被 API 斷線截斷時 pane 上那行原文（`runs.turn_error`）。null = 正常收尾。 */
   turn_error: string | null
+  /**
+   * SPEC §4.4a：這個 run **實際上**跑在什麼模型／強度／fast 上。啟動那一刻從 bot 設定複製過來
+   * （真 daemon 是從送出去的 argv 讀回來），之後 `PATCH` 改設定不會動它——codex 的這三個值只有
+   * 啟動時吃得到。有 slash 指令可以當場套用的（grok / claude）才會跟著改。
+   */
+  runtime_model: string | null
+  runtime_effort: string | null
+  runtime_fast: boolean
   started_at: string
   ended_at: string | null
 }
@@ -1723,10 +1731,23 @@ export class MockTransport implements Transport {
     // 清成 CLI 預設沒有對應指令。
     const only = (...fields: string[]) =>
       fields.every((f) => b[f] !== undefined) && LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
+    /** 這次改的欄位全都落在 `fields` 裡（不要求每個都改）。 */
+    const within = (...fields: string[]) => LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
+    // SPEC §4.4a：codex 的 `/model`（兩層選單）與 `/fast`（開關）在執行中都能換，daemon 會
+    // 直接操作 TUI 再回讀狀態列；三個欄位任意組合都不用重啟。
+    if (needs_restart && bot.kind === 'codex' && within('model', 'effort', 'fast')) needs_restart = false
     if (needs_restart && bot.kind === 'grok' && only('effort') && bot.effort) needs_restart = false
     if (needs_restart && bot.kind === 'grok' && (only('model') || only('model', 'effort')) && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('effort') && bot.effort) needs_restart = false
+    // SPEC §4.4a：當場套用成功的那幾種，run 真的換過去了，所以 runtime 也要跟著換——否則
+    // 標題列會掛上一顆永遠不會消失的「需重啟」。送不進去（codex）的就讓它繼續不一致。
+    if (!needs_restart && run) {
+      if (b.model !== undefined) run.runtime_model = bot.model
+      if (b.effort !== undefined) run.runtime_effort = bot.effort
+      if (b.fast !== undefined) run.runtime_fast = bot.fast === 1
+    }
+    if (run) this.emitBotStatus(id)
     return { needs_restart }
   }
 
@@ -1799,6 +1820,9 @@ export class MockTransport implements Transport {
       status_line: null,
       update_notice: null,
       turn_error: null,
+      runtime_model: bot.model,
+      runtime_effort: bot.effort,
+      runtime_fast: bot.fast === 1,
       started_at: now(),
       ended_at: null,
     }
@@ -2388,6 +2412,18 @@ export class MockTransport implements Transport {
       `  pane=${run?.pane_id ?? '-'}  run=${run?.id ?? '-'}  status=${status}`,
       '',
     ]
+    // SPEC §4.4a：codex 自己在 TUI 底下印一行狀態列，內容是**它啟動時吃到的**模型 / 強度 /
+    // service tier，不是 AG Man 資料庫裡那份設定。mock 照這個規則從 run 的 runtime 值畫，
+    // 這樣「改了設定沒重啟」在 mock 的終端分頁上跟真機一樣看得出來。
+    const codexStatusLine =
+      bot.kind === 'codex' && run
+        ? [
+            '',
+            [run.runtime_model ?? 'gpt-5.6-luna', run.runtime_effort ?? '', run.runtime_fast ? 'fast' : '']
+              .filter(Boolean)
+              .join(' ') + ` · ${bot.cwd ?? '~'} · Context 0% used · 5h 100% left`,
+          ]
+        : []
     const body =
       status === 'blocked'
         ? [
@@ -2407,7 +2443,7 @@ export class MockTransport implements Transport {
         : status === 'working'
           ? ['⏺ 正在思考…', '  ⎿  Read(src/api/transport.ts)', '  ⎿  Grep("X-AM-Token")', '', '  ✻ Thinking… (7s)']
           : ['⏺ 已完成上一個回合。', '', '> ', '  ? for shortcuts']
-    const all = [...head, ...body]
+    const all = [...head, ...body, ...codexStatusLine]
     const text = all.slice(Math.max(0, all.length - lines)).join('\n')
     return {
       text,
