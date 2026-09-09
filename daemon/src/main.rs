@@ -173,16 +173,15 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     let default_herdr = herdr::HerdrClient::new(herdr::HerdrClient::session_socket(default_session::SESSION));
 
     let mut addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
-    // `AM_DEV_LAN=1` (set by `cargo dev`, never by a plain `serve`): bind every interface
-    // instead of just loopback, so another device on the LAN can reach this daemon directly
-    // without going through the Vite proxy. Paired with `App::allow_lan` relaxing the peer
-    // and Origin checks below — binding alone would still 403 everything non-local.
-    let dev_lan = std::env::var("AM_DEV_LAN").as_deref() == Ok("1");
+    let exe = std::env::current_exe()?;
+    // Bind every interface instead of just loopback, so a phone or another machine on the
+    // LAN/Tailscale reaches this daemon directly. Paired with `App::allow_lan` relaxing the
+    // peer and Origin checks below — binding alone would still 403 everything non-local.
+    let dev_lan = dev_lan_default(&exe);
     if dev_lan {
         addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     }
     let ui_token = load_or_create_ui_token(&dir)?;
-    let exe = std::env::current_exe()?;
     let app = state::App::new(
         pool,
         herdr_client,
@@ -293,4 +292,55 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
 
 // Keep Arc<App> in scope for the type checker in all builds.
 #[allow(dead_code)]
+/// LAN access is the default for every *dev* run of the daemon, and only the packaged macOS
+/// app stays localhost-only.
+///
+/// It used to be the other way round — off unless `cargo dev` set `AM_DEV_LAN=1` — but the
+/// binary is restarted by hand and by other agents dozens of times a day (`cargo build
+/// --release && ./target/release/agents-managerd serve`), and every restart that forgot the
+/// variable silently dropped the phone and the other machines off `:7788`. A forgotten
+/// environment variable is not a security boundary; being *inside an .app bundle* is one the
+/// launcher cannot forget, and the shipped app is the only build a non-developer runs.
+///
+/// `AM_DEV_LAN` still overrides in both directions: `=0` forces loopback for a dev binary,
+/// `=1` opens up a bundled one.
+fn dev_lan_default(exe: &std::path::Path) -> bool {
+    match std::env::var("AM_DEV_LAN").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => !in_app_bundle(exe),
+    }
+}
+
+/// `scripts/package-dmg.sh` puts the daemon at `<app>.app/Contents/MacOS/agents-managerd`;
+/// nothing else in this repo runs it from such a path.
+fn in_app_bundle(exe: &std::path::Path) -> bool {
+    let mut dirs = exe.ancestors().skip(1);
+    dirs.next().is_some_and(|d| d.file_name().is_some_and(|n| n == "MacOS"))
+        && dirs.next().is_some_and(|d| d.file_name().is_some_and(|n| n == "Contents"))
+}
+
 fn _assert_send(_: &Arc<state::App>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn bundled_daemon_is_localhost_only() {
+        assert!(in_app_bundle(Path::new("/Applications/AG Man.app/Contents/MacOS/agents-managerd")));
+    }
+
+    #[test]
+    fn dev_binaries_are_not_bundled() {
+        for p in [
+            "/Users/x/project/agents-manager/target/release/agents-managerd",
+            "/Users/x/project/agents-manager/target/debug/agents-managerd",
+            "/usr/local/bin/agents-managerd",
+            "/Users/x/MacOS/agents-managerd",
+        ] {
+            assert!(!in_app_bundle(Path::new(p)), "{p} should not look bundled");
+        }
+    }
+}
