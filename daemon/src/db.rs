@@ -988,6 +988,21 @@ pub async fn team_issue(pool: &SqlitePool, id: &str) -> Result<Option<TeamIssue>
     Ok(sqlx::query_as::<_, TeamIssue>("SELECT * FROM team_issues WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
+/// Every issue the team has open right now, in queue order.
+///
+/// SPEC-team §4.5 (unlimited parallelism): with `workers.count = 0` several rows are
+/// `working` at the same time, and `issue_id` on a task — not the `teams` mirror — is what
+/// says which integration branch it belongs to. With a finite parallelism this is always
+/// zero or one row, and `current_team_issue` is exactly its first element.
+pub async fn working_team_issues(pool: &SqlitePool, team_id: &str) -> Result<Vec<TeamIssue>> {
+    Ok(sqlx::query_as::<_, TeamIssue>(
+        "SELECT * FROM team_issues WHERE team_id = ? AND state = 'working' ORDER BY seq",
+    )
+    .bind(team_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// The issue the team is on right now, or `None` between issues / once the queue is empty.
 pub async fn current_team_issue(pool: &SqlitePool, team_id: &str) -> Result<Option<TeamIssue>> {
     Ok(sqlx::query_as::<_, TeamIssue>(

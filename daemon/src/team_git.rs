@@ -198,6 +198,16 @@ pub async fn checkout_task_branch(
     git_ok(app, host, wt, &["checkout", "-b", branch, from], GIT_TIMEOUT).await.map(|_| ())
 }
 
+/// Move a worktree onto an integration branch that **already exists**.
+///
+/// `checkout_task_branch` cannot do this: it is `checkout -b`, which fails on a name that is
+/// already taken. Unlimited parallelism (SPEC-team §4.5) has several integration branches
+/// alive at once and only one integration worktree, so the daemon parks it on whichever
+/// branch the merge in hand belongs to.
+pub async fn checkout_branch(app: &Arc<App>, host: &str, wt: &str, branch: &str) -> Result<()> {
+    git_ok(app, host, wt, &["checkout", branch], GIT_TIMEOUT).await.map(|_| ())
+}
+
 /// Appendix C, review: the reviewer's worktree is parked on the branch under review,
 /// detached so it never owns it.
 pub async fn checkout_detach(app: &Arc<App>, host: &str, wt: &str, rev: &str) -> Result<()> {
@@ -365,6 +375,15 @@ pub async fn write_team_docs(app: &Arc<App>, host: &str, wt: &str, issue_md: &st
     put_file(app, host, &format!("{dir}/ISSUE.md"), issue_md).await?;
     put_file(app, host, &format!("{dir}/TEAM.md"), team_md).await?;
     Ok(())
+}
+
+/// One issue's `ISSUE-<n>.md` inside a member's cwd (SPEC-team §4.5, unlimited parallelism).
+/// Several issues are in flight at once, so a single `ISSUE.md` cannot say which one a task
+/// belongs to; each gets its own file and `TEAM.md` lists them.
+pub async fn write_issue_doc(app: &Arc<App>, host: &str, wt: &str, number: i64, issue_md: &str) -> Result<()> {
+    let dir = format!("{}/.agents-manager/team", wt.trim_end_matches('/'));
+    put_file(app, host, &format!("{dir}/.gitignore"), "*\n").await?;
+    put_file(app, host, &format!("{dir}/ISSUE-{number}.md"), issue_md).await
 }
 
 /// Remove the team root once every worktree registration is gone (§6.5, last step).

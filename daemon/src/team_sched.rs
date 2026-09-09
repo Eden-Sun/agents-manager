@@ -192,8 +192,13 @@ async fn tick(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
 // ---------------------------------------------------------------- context
 
 struct Ctx {
-    /// The queue entry being worked right now (§2.3).
-    issue: Option<db::TeamIssue>,
+    /// The queue entries being worked right now (§2.3), in queue order.
+    ///
+    /// With a finite parallelism (1–4) this is at most one row and every existing decision
+    /// reads it through [`Ctx::issue`]. Unlimited mode (§4.5) has up to
+    /// `MAX_CONCURRENT_ISSUES` of them at once, and then a task's `issue_id` — never the
+    /// `teams` mirror — is what says which integration branch it belongs to.
+    issues: Vec<db::TeamIssue>,
     team: db::Team,
     project: db::Project,
     members: Vec<db::Bot>,
@@ -214,14 +219,46 @@ impl Ctx {
             .filter(|b| b.deleted_at.is_none())
             .collect();
         let budget = Budget::from_json(&team.budget_json);
-        // §2.3: which entry of the issue queue the team is on. `None` only between issues.
-        let issue = db::current_team_issue(&app.db, team_id).await.map_err(up)?;
-        Ok(Ctx { team, project, members, budget, issue })
+        // §2.3: which entries of the issue queue the team is on. Empty only between issues.
+        let issues = db::working_team_issues(&app.db, team_id).await.map_err(up)?;
+        Ok(Ctx { team, project, members, budget, issues })
     }
 
+    /// The first working issue — the `teams` mirror, and with a finite parallelism simply
+    /// *the* issue the team is on.
+    fn issue(&self) -> Option<&db::TeamIssue> {
+        self.issues.first()
+    }
     /// The current issue's id, for scoping tasks / relays / the budget to it.
     fn issue_id(&self) -> Option<&str> {
-        self.issue.as_ref().map(|i| i.id.as_str())
+        self.issues.first().map(|i| i.id.as_str())
+    }
+    /// §4.5: `workers.count = 0`. Every new code path below branches on this and nothing
+    /// else, so a team with a parallelism of 1–4 behaves exactly as it always did.
+    fn unlimited(&self) -> bool {
+        team::is_unlimited(&self.team)
+    }
+    fn issue_of(&self, issue_id: &str) -> Option<&db::TeamIssue> {
+        self.issues.iter().find(|i| i.id == issue_id)
+    }
+    /// The integration branch a task belongs to: its own issue's, falling back to the `teams`
+    /// mirror for a task written before the queue existed.
+    fn integration_of(&self, t: &db::TeamTask) -> String {
+        t.issue_id
+            .as_deref()
+            .and_then(|i| self.issue_of(i))
+            .and_then(|i| i.branch.clone())
+            .unwrap_or_else(|| self.team.branch.clone())
+    }
+    /// The executors that may take work on `issue`. Unlimited mode gives every issue its own
+    /// batch (§6.2's per-issue directories); a finite parallelism has one pool for the team,
+    /// which a `done.workers = "keep"` may carry across issues under its old name.
+    fn workers_for(&self, issue: &db::TeamIssue) -> Vec<&db::Bot> {
+        if self.unlimited() {
+            team::workers_of_issue(&self.members, &self.team.id, issue.seq)
+        } else {
+            self.workers()
+        }
     }
     fn host(&self) -> &str {
         &self.project.host
@@ -334,6 +371,9 @@ pub struct DispatchItem {
     pub title: String,
     pub brief: String,
     pub files: Vec<String>,
+    /// §4.4 (2026-09-09): which issue this task belongs to. Optional while only one issue is
+    /// working; **required** in unlimited mode, where the daemon cannot guess.
+    pub issue: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,11 +382,22 @@ pub enum Action {
     Wait,
     /// `keep_workers`: the PM's call on whether the next issue reuses this batch of
     /// executors (their context is still useful) or gets a fresh one.
-    Done { summary: String, keep_workers: bool },
+    Done { summary: String, keep_workers: bool, issue: Option<i64> },
     AskUser { question: String },
     Abort { reason: String },
     Report { blocked: bool, summary: String, notes: String },
     Verdict { approve: bool, summary: String, must_fix: Vec<String> },
+}
+
+/// `"issue": 48` or `"issue": "#48"` — the PM writes both. Absent or unreadable is `None`,
+/// which the caller turns into "the only working issue" or a refusal (§4.5).
+fn issue_field(v: &Value) -> Option<i64> {
+    let f = v.get("issue").or_else(|| v.get("issue_number"))?;
+    if let Some(n) = f.as_i64() {
+        return Some(n);
+    }
+    let t = f.as_str()?.trim().trim_start_matches('#');
+    t.parse::<i64>().ok()
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -389,6 +440,7 @@ impl Action {
                         title: if title.is_empty() { "task".into() } else { title },
                         brief,
                         files: list(t, "files"),
+                        issue: issue_field(t),
                     });
                 }
                 Ok(Action::Dispatch(out))
@@ -403,7 +455,7 @@ impl Action {
                     Some(w) => return Err(format!("done.workers 必須是 keep 或 replace，不是 `{w}`")),
                     None => v.get("keep_workers").and_then(Value::as_bool).unwrap_or(false),
                 };
-                Ok(Action::Done { summary: s(v, "summary"), keep_workers: keep })
+                Ok(Action::Done { summary: s(v, "summary"), keep_workers: keep, issue: issue_field(v) })
             }
             ("pm", "ask_user") => {
                 let q = s(v, "question");
@@ -583,9 +635,9 @@ async fn relay_count(app: &Arc<App>, team_id: &str, issue_id: Option<&str>, stat
 /// §9.2's `usage_json`, recomputed from the log so it survives a restart.
 async fn refresh_usage(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     let relays = relay_count(app, &ctx.team.id, ctx.issue_id(), "delivered").await;
-    let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+    let tasks = sched_tasks(app, ctx).await?;
     let rounds: i64 = tasks.iter().map(|t| t.round).sum();
-    let elapsed = elapsed_min_of(app, &ctx.team, ctx.issue.as_ref()).await;
+    let elapsed = elapsed_min_of(app, &ctx.team, ctx.issue()).await;
     let mut per_bot = serde_json::Map::new();
     for b in &ctx.members {
         let n = sqlx::query_scalar::<_, i64>(
@@ -769,7 +821,16 @@ async fn pause_quota_low(app: &Arc<App>, ctx: &Ctx, hits: &[QuotaHit]) -> LcResu
 
 /// Wall clock and quota, checked on every pass. Returns `true` when the team may proceed.
 async fn gates(app: &Arc<App>, ctx: &Ctx) -> LcResult<bool> {
-    if elapsed_min_of(app, &ctx.team, ctx.issue.as_ref()).await >= ctx.budget.max_wall_clock_min {
+    if ctx.unlimited() {
+        // §4.5: the wall clock is per issue, so one runaway issue is closed out and the rest
+        // keep going — the same ruling `DECISION_PAUSES` already makes for the queue.
+        for q in ctx.issues.clone() {
+            if elapsed_min_of(app, &ctx.team, Some(&q)).await >= ctx.budget.max_wall_clock_min {
+                close_one_issue(app, &ctx.team.id, &q, "failed", Some("budget_time"), None).await?;
+                return Ok(false);
+            }
+        }
+    } else if elapsed_min_of(app, &ctx.team, ctx.issue()).await >= ctx.budget.max_wall_clock_min {
         pause(app, &ctx.team, "budget_time").await?;
         return Ok(false);
     }
@@ -831,8 +892,17 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             continue;
         }
         // §4.5 relay budget. Repair prompts are rows here too, so they count.
-        let sent = relay_count(app, &ctx.team.id, ctx.issue_id(), "delivered").await;
-        if sent + pending.len() as i64 > ctx.budget.max_relays {
+        let (sent, cap) = if ctx.unlimited() {
+            // Every relay is stamped with the first working issue, so per-issue counting means
+            // nothing here; the cap is instead `max_relays` per issue the team has started.
+            (
+                relay_count(app, &ctx.team.id, None, "delivered").await,
+                ctx.budget.max_relays * started_issue_count(app, &ctx.team.id).await,
+            )
+        } else {
+            (relay_count(app, &ctx.team.id, ctx.issue_id(), "delivered").await, ctx.budget.max_relays)
+        };
+        if sent + pending.len() as i64 > cap {
             pause(app, &ctx.team, "budget_relays").await?;
             return Ok(());
         }
@@ -1123,7 +1193,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     }
     // A normal creation has a working first issue. A done-team reopen has only a queued issue;
     // that distinction is durable and survives a daemon restart.
-    if ctx.issue.is_none() && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_some() {
+    if ctx.issues.is_empty() && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_some() {
         return reopen_startup(app, team_id).await;
     }
     // The §6.2 worktrees are directories claude and codex have never seen, and both stop the
@@ -1178,8 +1248,17 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .map_err(up)?;
     team::set_phase(app, team_id, "planning", None, None).await?;
 
-    // Appendix A.1, the first relay. `from` is NULL, so the timeline reads `daemon → pm`.
+    // §4.5 unlimited: the first issue is already working (it was created with the team);
+    // everything else on the queue starts now, and A.1's first relay covers the lot.
     let ctx = Ctx::load(app, team_id).await?;
+    if ctx.unlimited() {
+        if start_issues_up_to_capacity(app, team_id).await? == 0 {
+            team::refresh_unlimited_docs(app, team_id).await?;
+            hand_issues_to_pm(app, team_id, &[]).await?;
+        }
+        return Ok(());
+    }
+    // Appendix A.1, the first relay. `from` is NULL, so the timeline reads `daemon → pm`.
     let Some(pm) = ctx.pm() else { return Ok(()) };
     let names: Vec<String> = ctx.workers().iter().map(|w| ctx.short(w)).collect();
     let text = format!(
@@ -1204,6 +1283,68 @@ async fn issue_tasks(app: &Arc<App>, team_id: &str, issue_id: Option<&str>) -> L
         Some(i) => db::team_tasks_of_issue(&app.db, team_id, i).await.map_err(up),
         None => db::team_tasks(&app.db, team_id).await.map_err(up),
     }
+}
+
+/// Everything the scheduler is currently responsible for: the tasks of **every** working
+/// issue, in `seq` order. Identical to `issue_tasks(ctx.issue_id())` whenever there is one
+/// working issue, which is every team with a finite parallelism.
+async fn sched_tasks(app: &Arc<App>, ctx: &Ctx) -> LcResult<Vec<db::TeamTask>> {
+    if !ctx.unlimited() {
+        return issue_tasks(app, &ctx.team.id, ctx.issue_id()).await;
+    }
+    let mut out = Vec::new();
+    for q in &ctx.issues {
+        out.extend(db::team_tasks_of_issue(&app.db, &ctx.team.id, &q.id).await.map_err(up)?);
+    }
+    out.sort_by_key(|t| t.seq);
+    Ok(out)
+}
+
+/// How many issues this team has actually started (working or finished). The relay budget is
+/// "per issue" (§9.2), and in unlimited mode a relay cannot be attributed to one issue — the
+/// PM answers several in a single turn — so the cap is scaled by this instead.
+async fn started_issue_count(app: &Arc<App>, team_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM team_issues WHERE team_id = ? AND state IN ('working','done','failed')",
+    )
+    .bind(team_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap_or(1)
+    .max(1)
+}
+
+/// §4.4: which working issue an `issue` field points at. `None` is allowed only while exactly
+/// one issue is working — the case every finite-parallelism team is always in.
+fn resolve_issue<'a>(ctx: &'a Ctx, want: Option<i64>) -> Result<&'a db::TeamIssue, String> {
+    match want {
+        Some(n) => ctx
+            .issues
+            .iter()
+            .find(|i| i.issue_number == n)
+            .ok_or_else(|| format!("#{n} 不是進行中的 issue（進行中：{}）", issue_list(ctx))),
+        None => match ctx.issues.len() {
+            1 => Ok(&ctx.issues[0]),
+            0 => Err("目前沒有進行中的 issue".into()),
+            _ => Err(format!("同時有多個 issue 進行中（{}），每一筆都要寫 `issue`", issue_list(ctx))),
+        },
+    }
+}
+
+/// `[#48] ` in front of a relay to the PM, so a message about one of several issues in
+/// flight says which one at a glance (A.4). Empty with a finite parallelism.
+fn issue_tag(ctx: &Ctx, issue_id: Option<&str>) -> String {
+    if !ctx.unlimited() {
+        return String::new();
+    }
+    match issue_id.and_then(|i| ctx.issue_of(i)) {
+        Some(q) => format!("[#{}] ", q.issue_number),
+        None => String::new(),
+    }
+}
+
+fn issue_list(ctx: &Ctx) -> String {
+    ctx.issues.iter().map(|i| format!("#{}", i.issue_number)).collect::<Vec<_>>().join("、")
 }
 
 // ---------------------------------------------------------------- one pass (§8)
@@ -1260,7 +1401,7 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
     //    refills, so it has to run before the states below move a task into a terminal one —
     //    and again on the next sweep, which is what `changed` below buys.
     fill_workers(app, &ctx).await?;
-    let tasks = issue_tasks(app, team_id, ctx.issue_id()).await?;
+    let tasks = sched_tasks(app, &ctx).await?;
 
     // 1. a reported task goes to review, or — with no reviewer — straight to the merge queue.
     //    Review is serialised: one task at a time, in report order (§8.4).
@@ -1290,7 +1431,9 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
                     title = t.title,
                     br = t.branch,
                     round = t.round + 1,
-                    integ = ctx.team.branch,
+                    // §4.5: the diff base is **this task's** issue, not the `teams` mirror —
+                    // with several issues in flight the mirror is somebody else's branch.
+                    integ = ctx.integration_of(t),
                     report = t.last_report.clone().unwrap_or_default(),
                 );
                 enqueue(app, team_id, t.worker_bot_id.as_deref(), &rev.id, Some(&t.id), "review", text).await?;
@@ -1301,7 +1444,7 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
     }
 
     // 2. merge whatever is approved — SPEC-team §6.1 #3, by the daemon, with git.
-    for t in issue_tasks(app, team_id, ctx.issue_id()).await? {
+    for t in sched_tasks(app, &ctx).await? {
         if t.state != "merging" {
             continue;
         }
@@ -1323,6 +1466,7 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
 /// `false` = the team was paused and the caller must stop.
 async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool> {
     let main_wt = ctx.main_wt()?;
+    let integration = ctx.integration_of(t);
     // §6.3: never fold a hand edit of the integration branch into a merge commit.
     match tg::status_porcelain(app, ctx.host(), &main_wt).await {
         Ok(s) if !s.trim().is_empty() => {
@@ -1334,6 +1478,17 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
         Err(e) => {
             note(app, &ctx.team.id, json!({"action": "integration_missing", "error": e.to_string()})).await?;
             pause(app, &ctx.team, "worktree_missing").await?;
+            return Ok(false);
+        }
+    }
+    // §4.5: one integration worktree, several integration branches. Park it on the one this
+    // task belongs to before merging — with a finite parallelism it is already there.
+    if integration != ctx.team.branch {
+        if let Err(e) = tg::checkout_branch(app, ctx.host(), &main_wt, &integration).await {
+            note(app, &ctx.team.id, json!({"action": "integration_checkout_failed",
+                 "branch": integration, "error": e.to_string()}))
+            .await?;
+            pause(app, &ctx.team, "upstream").await?;
             return Ok(false);
         }
     }
@@ -1360,7 +1515,14 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
             )
             .await?;
             if let Some(pm) = ctx.pm() {
-                let text = format!("t{} 「{}」已合併進 `{}`（{}）。", t.seq, t.title, ctx.team.branch, &sha[..sha.len().min(8)]);
+                let text = format!(
+                    "{}t{} 「{}」已合併進 `{}`（{}）。",
+                    issue_tag(ctx, t.issue_id.as_deref()),
+                    t.seq,
+                    t.title,
+                    integration,
+                    &sha[..sha.len().min(8)]
+                );
                 enqueue(app, &ctx.team.id, None, &pm.id, Some(&t.id), "merge_note", text).await?;
             }
             Ok(true)
@@ -1387,14 +1549,14 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
                 .map_err(up)?;
             emit_task(app, &t.id).await;
             if attempts > MAX_REBASES {
-                pause(app, &ctx.team, "merge_conflict").await?;
+                pause_issue(app, ctx, t.issue_id.as_deref(), "merge_conflict").await?;
                 return Ok(false);
             }
             // §6.1 #4: whoever wrote the code resolves the conflict, in their own worktree.
             let text = format!(
                 "整合分支 `{integ}` 已前進，你的 t{seq} 合併時衝突（{files}）。\
                  請在你的 worktree 執行 `git rebase {integ}`，解掉衝突並確認可建置後再 `report`。",
-                integ = ctx.team.branch,
+                integ = integration,
                 seq = t.seq,
                 files = if files.is_empty() { "見 git 輸出".into() } else { files.join("、") },
             );
@@ -1549,7 +1711,9 @@ pub async fn apply_reply(
     match action {
         Action::Dispatch(items) => dispatch(app, &ctx, &bot, items).await,
         Action::Wait => wait(app, &ctx).await,
-        Action::Done { summary, keep_workers } => pm_done(app, &ctx, &bot, &summary, keep_workers).await,
+        Action::Done { summary, keep_workers, issue } => {
+            pm_done(app, &ctx, &bot, &summary, keep_workers, issue).await
+        }
         Action::AskUser { question } => {
             note(app, team_id, json!({"action": "ask_user", "question": question})).await?;
             pause(app, &ctx.team, "ask_user").await
@@ -1634,7 +1798,7 @@ async fn consecutive_repairs(app: &Arc<App>, team_id: &str, bot_id: &str) -> i64
 async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchItem>) -> LcResult<()> {
     let mut rejected: Vec<String> = Vec::new();
     let mut created: Vec<String> = Vec::new(); // task shorthand (`t3`), for the gate note
-    let existing = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+    let existing = sched_tasks(app, ctx).await?;
     // `team_tasks_seq` is unique per **team**, not per issue: the second issue's first task
     // must continue the numbering (t2, t3…) or the INSERT below collides with t1 of the
     // first issue and the PM's whole dispatch is lost.
@@ -1644,12 +1808,21 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
     // The same brief twice inside one issue is a loop, whoever it was aimed at (§4.5). Since
     // the daemon now picks the executor, "same brief to the same worker" would no longer
     // catch the PM re-sending its whole plan — the brief alone is the identity.
-    let mut briefs: Vec<String> = existing
-        .iter()
-        .map(|t| t.brief.trim().to_string())
-        .collect();
+    // Paired with the issue: the same brief on two different issues is two jobs, not a loop.
+    let mut briefs: Vec<(Option<String>, String)> =
+        existing.iter().map(|t| (t.issue_id.clone(), t.brief.trim().to_string())).collect();
 
     for it in items {
+        // §4.4: which issue this task is for. With one issue working the field may be left
+        // out; with several the daemon refuses rather than guessing (a task on the wrong
+        // integration branch is a merge conflict nobody asked for).
+        let issue = match resolve_issue(ctx, it.issue) {
+            Ok(q) => q.clone(),
+            Err(e) => {
+                rejected.push(format!("「{}」：{e}", it.title));
+                continue;
+            }
+        };
         // A named executor is still honoured — but a busy one is now a queue to join, not a
         // refusal: the task simply waits for *that* worker instead of any worker.
         let worker = match &it.to {
@@ -1670,13 +1843,16 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
                 Some(w)
             }
         };
-        if briefs.iter().any(|b| b == it.brief.trim()) {
+        if briefs.iter().any(|(i, b)| i.as_deref() == Some(issue.id.as_str()) && b == it.brief.trim()) {
             note(app, &ctx.team.id, json!({"action": "pm_repeat", "brief": it.brief})).await?;
             pause(app, &ctx.team, "pm_repeat").await?;
             return Ok(());
         }
-        briefs.push(it.brief.trim().to_string());
-        for other in existing.iter().filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str())) {
+        briefs.push((Some(issue.id.clone()), it.brief.trim().to_string()));
+        for other in existing.iter().filter(|t| {
+            t.issue_id.as_deref() == Some(issue.id.as_str())
+                && !["merged", "skipped", "failed"].contains(&t.state.as_str())
+        }) {
             let of: Vec<String> = serde_json::from_str(&other.files_json).unwrap_or_default();
             for f in &it.files {
                 if of.iter().any(|x| x == f) {
@@ -1689,7 +1865,8 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         // The branch **name** is settled now so the row is complete and the PM can be told
         // about it; the branch itself is cut in `fill_workers`, at the moment the task
         // actually starts, so §6.2 still holds (it contains everything merged before it).
-        let branch = team::task_branch(&ctx.team.branch, next_seq);
+        let branch =
+            team::task_branch(issue.branch.as_deref().unwrap_or(&ctx.team.branch), next_seq);
         let task_id = db::ulid();
         let now = db::now();
         sqlx::query(
@@ -1698,7 +1875,7 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         )
         .bind(&task_id)
         .bind(&ctx.team.id)
-        .bind(ctx.issue_id())
+        .bind(&issue.id)
         .bind(next_seq)
         .bind(&it.title)
         .bind(&it.brief)
@@ -1734,6 +1911,26 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         hold_gate(app, &ctx2, "dispatch", json!({"tasks": created})).await?;
         return Ok(());
     }
+    // §4.5 unlimited: each issue starts with one executor and grows to fit what the PM
+    // actually dispatched — capped per issue and for the whole team.
+    if ctx.unlimited() {
+        let mut grew = false;
+        for q in ctx.issues.clone() {
+            let open = issue_tasks(app, &ctx.team.id, Some(&q.id))
+                .await?
+                .into_iter()
+                .filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str()))
+                .count() as u32;
+            let have = ctx.workers_for(&q).len() as u32;
+            if open > have {
+                let now = team::ensure_workers_for(app, &ctx.team.id, &q, open).await?;
+                grew |= now > have;
+            }
+        }
+        if grew {
+            team::refresh_unlimited_docs(app, &ctx.team.id).await?;
+        }
+    }
     let ctx = Ctx::load(app, &ctx.team.id).await?;
     fill_workers(app, &ctx).await?;
     // Tell the PM what its batch actually became — but only when the answer is not simply
@@ -1741,7 +1938,7 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
     // confirmation of what it just asked for would cost a whole turn to say nothing. The
     // A.4 table under each batch of reports carries the same counts for free.
     if !created.is_empty() {
-        let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+        let tasks = sched_tasks(app, &ctx).await?;
         let n = ctx.workers().len();
         let running: Vec<String> = tasks
             .iter()
@@ -1785,7 +1982,18 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "paused" || ctx.team.phase == "aborting" {
         return Ok(());
     }
-    for worker in ctx.workers() {
+    // §4.5: one pass per working issue. Each issue has its own executors and its own
+    // integration branch, and a task must be cut from **its** branch — using the `teams`
+    // mirror here would branch issue #48's task off issue #49's work.
+    for issue in ctx.issues.clone() {
+        fill_issue(app, ctx, &issue).await?;
+    }
+    Ok(())
+}
+
+async fn fill_issue(app: &Arc<App>, ctx: &Ctx, issue: &db::TeamIssue) -> LcResult<()> {
+    let integration = issue.branch.clone().unwrap_or_else(|| ctx.team.branch.clone());
+    for worker in ctx.workers_for(issue) {
         // A worker with no live run is deliberately *not* skipped here. §9.1 says an
         // undeliverable member is a pause, never a skip, and that is what `flush` does with
         // the relay this loop queues. Skipping instead would leave the queue quietly starved
@@ -1794,7 +2002,7 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             continue;
         }
         // The earliest queued task that is either unassigned or was addressed to this one.
-        let Some(t) = issue_tasks(app, &ctx.team.id, ctx.issue_id())
+        let Some(t) = issue_tasks(app, &ctx.team.id, Some(&issue.id))
             .await?
             .into_iter()
             .find(|t| {
@@ -1808,7 +2016,7 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         // §6.2: cut from the integration branch **now** — at the moment the task starts, not
         // when it was planned — so it already contains everything merged before it.
         let worker_wt = ctx.wt(worker)?;
-        if let Err(e) = tg::checkout_task_branch(app, ctx.host(), &worker_wt, &t.branch, &ctx.team.branch).await {
+        if let Err(e) = tg::checkout_task_branch(app, ctx.host(), &worker_wt, &t.branch, &integration).await {
             note(app, &ctx.team.id, json!({"action": "branch_failed", "branch": t.branch, "error": e.to_string()}))
                 .await?;
             pause(app, &ctx.team, "upstream").await?;
@@ -1823,8 +2031,13 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             .map_err(up)?;
         emit_task(app, &t.id).await;
         let files: Vec<String> = serde_json::from_str(&t.files_json).unwrap_or_default();
+        let head = if ctx.unlimited() {
+            format!("這是 issue #{} 的工作，背景在 `.agents-manager/team/ISSUE-{}.md`。\n\n", issue.issue_number, issue.issue_number)
+        } else {
+            String::new()
+        };
         let text = format!(
-            "Task t{seq}「{title}」（分支 `{branch}` 已建好並 checkout 在你的 cwd）。\n\n{brief}\n\n\
+            "{head}Task t{seq}「{title}」（分支 `{branch}` 已建好並 checkout 在你的 cwd）。\n\n{brief}\n\n\
              相關檔案：{files}\n\
              只在你的 cwd 工作：不要 cd 出去、不要動 ../、不要 git push、不要切換分支。\
              每個邏輯段落 `git commit`，完成後回覆結尾附一個 am-team 區塊回報，格式固定：\n\
@@ -1844,7 +2057,7 @@ async fn fill_workers(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
 
 /// §8.3: a PM that says `wait` when there is nothing left to wait for gets one nudge, once.
 async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
-    let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+    let tasks = sched_tasks(app, ctx).await?;
     if tasks.is_empty() || !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
         return Ok(());
     }
@@ -1881,8 +2094,25 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
 }
 
 /// §8.3: the PM declares completion, the daemon verifies it.
-async fn pm_done(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, summary: &str, keep_workers: bool) -> LcResult<()> {
-    let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+async fn pm_done(
+    app: &Arc<App>,
+    ctx: &Ctx,
+    pm: &db::Bot,
+    summary: &str,
+    keep_workers: bool,
+    want_issue: Option<i64>,
+) -> LcResult<()> {
+    // §4.5: `done` settles **one** issue. With a finite parallelism there is only ever one to
+    // settle and the field may be left out; unlimited mode requires it and delivers only that
+    // issue — the others keep running.
+    let issue = match resolve_issue(ctx, want_issue) {
+        Ok(q) => q.clone(),
+        Err(e) => {
+            enqueue(app, &ctx.team.id, None, &pm.id, None, "reject", format!("還不能 `done`：{e}。")).await?;
+            return Ok(());
+        }
+    };
+    let tasks = issue_tasks(app, &ctx.team.id, Some(&issue.id)).await?;
     let open: Vec<String> = tasks
         .iter()
         .filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str()))
@@ -1900,10 +2130,25 @@ async fn pm_done(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, summary: &str, keep_wo
             &pm.id,
             None,
             "reject",
-            format!("還不能 `done`：{} 尚未進入終態。請等回報或用 `wait`。", open.join("、")),
+            format!(
+                "還不能 `done`（#{n}）：{} 尚未進入終態。請等回報或用 `wait`。",
+                open.join("、"),
+                n = issue.issue_number
+            ),
         )
         .await?;
         return Ok(());
+    }
+    sqlx::query("UPDATE team_issues SET summary = ? WHERE id = ?")
+        .bind(summary)
+        .bind(&issue.id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    if ctx.unlimited() {
+        // No `finishing` phase: that is a whole-team state, and the rest of the queue is still
+        // working. Deliver this one issue here and now, then top the queue back up.
+        return deliver_one_issue(app, ctx, &issue, summary).await;
     }
     sqlx::query("UPDATE teams SET summary = ? WHERE id = ?")
         .bind(summary)
@@ -1970,7 +2215,8 @@ async fn report(
         set_task_state(app, &task.id, "blocked_by_worker").await?;
         if let Some(pm) = ctx.pm() {
             let text = format!(
-                "`{who}` t{seq}「{title}」→ `blocked`：{why}\n{table}\n請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。",
+                "{tag}`{who}` t{seq}「{title}」→ `blocked`：{why}\n{table}\n請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。",
+                tag = issue_tag(ctx, task.issue_id.as_deref()),
                 who = ctx.short(worker),
                 seq = task.seq,
                 title = task.title,
@@ -1993,13 +2239,14 @@ async fn report(
             note(app, &ctx.team.id, json!({"action": "auto_commit_failed", "error": e.to_string()})).await?;
         }
     }
-    match tg::commits_ahead(app, ctx.host(), &wt, &ctx.team.branch).await {
+    let integration = ctx.integration_of(&task);
+    match tg::commits_ahead(app, ctx.host(), &wt, &integration).await {
         Ok(0) => {
             return repair(
                 app,
                 ctx,
                 worker,
-                &format!("你的分支 `{}` 相對 `{}` 沒有任何 commit", task.branch, ctx.team.branch),
+                &format!("你的分支 `{}` 相對 `{}` 沒有任何 commit", task.branch, integration),
             )
             .await
         }
@@ -2016,6 +2263,10 @@ async fn report(
 
 /// The little status table appendix A.4 puts under a batch of reports.
 async fn task_table(app: &Arc<App>, team_id: &str) -> String {
+    let Ok(ctx) = Ctx::load(app, team_id).await else { return String::new() };
+    if ctx.unlimited() {
+        return task_table_by_issue(app, &ctx).await;
+    }
     // The PM only ever sees the issue it is working on (§2.3).
     let issue = db::current_team_issue(&app.db, team_id).await.ok().flatten();
     let tasks = issue_tasks(app, team_id, issue.as_ref().map(|i| i.id.as_str())).await.unwrap_or_default();
@@ -2038,6 +2289,37 @@ async fn task_table(app: &Arc<App>, team_id: &str) -> String {
     format!("目前 task 狀態（併行 {running}/{n}）：{}", rows.join("；"))
 }
 
+/// Appendix A.4 in unlimited mode: the same table, grouped by issue, because the PM is
+/// managing several at once and a flat list of `t1…t9` tells it nothing about which is which.
+async fn task_table_by_issue(app: &Arc<App>, ctx: &Ctx) -> String {
+    let mut groups: Vec<String> = Vec::new();
+    for q in &ctx.issues {
+        let tasks = issue_tasks(app, &ctx.team.id, Some(&q.id)).await.unwrap_or_default();
+        let rows: Vec<String> = tasks
+            .iter()
+            .map(|t| match t.worker_bot_id {
+                None => format!("t{}「{}」= 排隊中", t.seq, t.title),
+                Some(_) => format!("t{}「{}」= {}", t.seq, t.title, t.state),
+            })
+            .collect();
+        let running = tasks
+            .iter()
+            .filter(|t| t.worker_bot_id.is_some() && !["merged", "skipped", "failed"].contains(&t.state.as_str()))
+            .count();
+        groups.push(format!(
+            "#{n} · `{b}`（∞ · 執行者 {k} · 進行中 {running}）：{rows}",
+            n = q.issue_number,
+            b = q.branch.clone().unwrap_or_default(),
+            k = ctx.workers_for(q).len(),
+            rows = if rows.is_empty() { "（尚無 task）".into() } else { rows.join("；") },
+        ));
+    }
+    if groups.is_empty() {
+        return String::new();
+    }
+    format!("目前 task 狀態（按 issue 分組）：\n{}", groups.join("\n"))
+}
+
 // ---------------------------------------------------------------- reviewer
 
 async fn verdict(
@@ -2048,7 +2330,7 @@ async fn verdict(
     summary: &str,
     must_fix: &[String],
 ) -> LcResult<()> {
-    let tasks = issue_tasks(app, &ctx.team.id, ctx.issue_id()).await?;
+    let tasks = sched_tasks(app, ctx).await?;
     let Some(task) = tasks.into_iter().find(|t| t.state == "reviewing") else {
         return repair(app, ctx, rev, "目前沒有待審查的 task").await;
     };
@@ -2066,7 +2348,7 @@ async fn verdict(
     // §4.5 review rounds: `round == max` and another `request_changes` ends the loop.
     if task.round >= ctx.budget.max_review_rounds {
         set_task_state(app, &task.id, "exhausted").await?;
-        pause(app, &ctx.team, "review_exhausted").await?;
+        pause_issue(app, ctx, task.issue_id.as_deref(), "review_exhausted").await?;
         return Ok(());
     }
     let round = task.round + 1;
@@ -2121,6 +2403,37 @@ async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         return Ok(());
     }
     let summary = ctx.team.summary.clone().unwrap_or_default();
+    if !deliver_branch_or_pr(
+        app,
+        ctx,
+        ctx.team.issue_number,
+        &ctx.team.issue_title.clone(),
+        &ctx.team.branch.clone(),
+        ctx.issue_id().map(String::from).as_deref(),
+        &summary,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    close_issue_and_advance(app, &ctx.team.id, "done", None, Some(summary.as_str())).await
+}
+
+/// §6.4: hand one issue over — a local branch, or a PR when the team was asked for one.
+/// `false` = the team was paused (a failed `gh`) and the caller must stop.
+///
+/// Shared by `finish` (the whole team is finishing its only working issue) and by
+/// `deliver_one_issue` (§4.5 unlimited: one issue of several is done and the rest run on),
+/// which is why every per-issue value is a parameter rather than read off the `teams` mirror.
+async fn deliver_branch_or_pr(
+    app: &Arc<App>,
+    ctx: &Ctx,
+    issue_number: i64,
+    issue_title: &str,
+    branch: &str,
+    issue_id: Option<&str>,
+    summary: &str,
+) -> LcResult<bool> {
     if ctx.team.deliver == "pr" {
         // A submodule team delivers to the submodule's repo, not the project's.
         let gh = if ctx.team.repo.is_empty() {
@@ -2140,14 +2453,14 @@ async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             }
             Some(info) => {
                 let base = tg::remote_base_branch(app, ctx.host(), &team::repo_path(&ctx.project, &ctx.team.repo), &ctx.team.base_ref).await;
-                let title = format!("{} (#{})", ctx.team.issue_title, ctx.team.issue_number);
-                let body = format!("{summary}\n\nCloses #{}", ctx.team.issue_number);
+                let title = format!("{issue_title} (#{issue_number})");
+                let body = format!("{summary}\n\nCloses #{issue_number}");
                 match tg::deliver_pr(
                     app,
                     ctx.host(),
                     &ctx.main_wt()?,
                     ctx.team.worktree_root.trim_end_matches('/'),
-                    &ctx.team.branch,
+                    branch,
                     &info.slug(),
                     &base,
                     &title,
@@ -2162,20 +2475,20 @@ async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
                             .execute(&app.db)
                             .await
                             .map_err(up)?;
-                        if let Some(iid) = ctx.issue_id() {
+                        if let Some(iid) = issue_id {
                             let _ = sqlx::query("UPDATE team_issues SET pr_url = ? WHERE id = ?")
                                 .bind(&url)
                                 .bind(iid)
                                 .execute(&app.db)
                                 .await;
                         }
-                        note(app, &ctx.team.id, json!({"action": "pr_created", "url": url, "pushed": ctx.team.branch}))
+                        note(app, &ctx.team.id, json!({"action": "pr_created", "url": url, "pushed": branch}))
                             .await?;
                     }
                     Err(e) => {
                         note(app, &ctx.team.id, json!({"action": "deliver_failed", "error": e.to_string()})).await?;
                         pause(app, &ctx.team, "deliver_failed").await?;
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
             }
@@ -2183,10 +2496,10 @@ async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     } else {
         // §6.4 `branch`: the work stays local. Nothing is pushed, by the user's ruling.
         note(app, &ctx.team.id, json!({"action": "delivered", "deliver": "branch",
-             "branch": ctx.team.branch, "pushed": false, "summary": summary}))
+             "branch": branch, "pushed": false, "summary": summary}))
         .await?;
     }
-    close_issue_and_advance(app, &ctx.team.id, "done", None, Some(summary.as_str())).await
+    Ok(true)
 }
 
 /// SPEC-team §2.3: settle the issue the team just finished with, then either hand it the next
@@ -2203,7 +2516,13 @@ async fn close_issue_and_advance(
     summary: Option<&str>,
 ) -> LcResult<()> {
     let ctx = Ctx::load(app, team_id).await?;
-    let Some(current) = ctx.issue.clone() else {
+    if ctx.unlimited() {
+        // §4.5: an unlimited team settles issues one at a time through `close_one_issue`;
+        // this is the single-issue machine and must not advance a queue it does not own.
+        let Some(current) = ctx.issue().cloned() else { return end_team(app, &ctx).await };
+        return close_one_issue(app, team_id, &current, state, fail_reason, summary).await;
+    }
+    let Some(current) = ctx.issue().cloned() else {
         // No current issue at all: nothing to settle, so this is simply the end.
         return end_team(app, &ctx).await;
     };
@@ -2261,6 +2580,179 @@ async fn close_issue_and_advance(
         start_issue_workers(app, team_id).await?;
     }
     hand_issue_to_pm(app, team_id, keep, None).await
+}
+
+// ---------------------------------------------------------------- unlimited parallelism (§4.5)
+
+/// A `DECISION_PAUSES` reason that belongs to **one** issue.
+///
+/// With a finite parallelism this is [`pause`] and nothing more — the whole team stops (or,
+/// with something left on the queue, moves past this issue), exactly as before. In unlimited
+/// mode the other issues in flight are unaffected: this one is closed `failed`, keeping its
+/// branch, and the queue is topped back up.
+async fn pause_issue(app: &Arc<App>, ctx: &Ctx, issue_id: Option<&str>, reason: &str) -> LcResult<()> {
+    if !ctx.unlimited() {
+        return pause(app, &ctx.team, reason).await;
+    }
+    let Some(q) = issue_id.and_then(|i| ctx.issue_of(i)).cloned() else {
+        return pause(app, &ctx.team, reason).await;
+    };
+    close_one_issue(app, &ctx.team.id, &q, "failed", Some(reason), None).await
+}
+
+/// Settle one row of the queue in unlimited mode: mark it, retire **its** executors, and let
+/// whatever is still queued take the seat. The team ends only when nothing is working and
+/// nothing is queued.
+///
+/// Deliberately not `close_issue_and_advance`: that one is the single-issue machine (settle,
+/// then start exactly one successor, then re-hand the whole team to the PM) and it stays
+/// untouched for teams with a finite parallelism.
+async fn close_one_issue(
+    app: &Arc<App>,
+    team_id: &str,
+    issue: &db::TeamIssue,
+    state: &str,
+    fail_reason: Option<&str>,
+    summary: Option<&str>,
+) -> LcResult<()> {
+    sqlx::query(
+        "UPDATE team_issues SET state = ?, fail_reason = ?, summary = COALESCE(?, summary), ended_at = ?
+         WHERE id = ?",
+    )
+    .bind(state)
+    .bind(fail_reason)
+    .bind(summary)
+    .bind(db::now())
+    .bind(&issue.id)
+    .execute(&app.db)
+    .await
+    .map_err(up)?;
+    note(
+        app,
+        team_id,
+        json!({"action": if state == "done" { "issue_finished" } else { "issue_failed" },
+               "issue_number": issue.issue_number, "seq": issue.seq,
+               "branch": issue.branch, "reason": fail_reason}),
+    )
+    .await?;
+    team::retire_workers_of_issue(app, team_id, issue).await;
+    team::sync_issue_mirror(app, team_id).await?;
+    start_issues_up_to_capacity(app, team_id).await?;
+    let ctx = Ctx::load(app, team_id).await?;
+    if ctx.issues.is_empty() && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_none() {
+        return end_team(app, &ctx).await;
+    }
+    team::refresh_unlimited_docs(app, team_id).await
+}
+
+/// §4.5 unlimited: deliver one finished issue while the rest of the team carries on.
+async fn deliver_one_issue(app: &Arc<App>, ctx: &Ctx, issue: &db::TeamIssue, summary: &str) -> LcResult<()> {
+    if !gate_open(app, &ctx.team, "deliver").await {
+        hold_gate(app, ctx, "deliver", json!({"deliver": ctx.team.deliver, "issue_number": issue.issue_number,
+             "branch": issue.branch}))
+        .await?;
+        return Ok(());
+    }
+    let branch = issue.branch.clone().unwrap_or_else(|| ctx.team.branch.clone());
+    if !deliver_branch_or_pr(
+        app,
+        ctx,
+        issue.issue_number,
+        &issue.issue_title,
+        &branch,
+        Some(issue.id.as_str()),
+        summary,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    close_one_issue(app, &ctx.team.id, issue, "done", None, Some(summary)).await
+}
+
+/// §4.5 unlimited: start every queued issue there is room for, and tell the PM about them.
+///
+/// A no-op for a team with a finite parallelism — that queue is worked one entry at a time by
+/// `close_issue_and_advance`, and this function must never touch it.
+/// Returns how many issues it started.
+pub async fn start_issues_up_to_capacity(app: &Arc<App>, team_id: &str) -> LcResult<usize> {
+    let ctx = Ctx::load(app, team_id).await?;
+    if !ctx.unlimited() || team::is_terminal(&ctx.team.phase) || ctx.team.phase == "aborting" {
+        return Ok(0);
+    }
+    let mut open = ctx.issues.len();
+    let mut started: Vec<db::TeamIssue> = Vec::new();
+    while open < team::MAX_CONCURRENT_ISSUES {
+        let Some(next) = db::next_queued_issue(&app.db, team_id).await.map_err(up)? else { break };
+        if let Err(e) = team::start_issue(app, team_id, &next, false).await {
+            note(app, team_id, json!({"action": "issue_start_failed", "issue_number": next.issue_number,
+                 "error": format!("{e:?}")}))
+            .await?;
+            let ctx = Ctx::load(app, team_id).await?;
+            pause(app, &ctx.team, "upstream").await?;
+            return Ok(0);
+        }
+        open += 1;
+        started.push(next);
+    }
+    if started.is_empty() {
+        return Ok(0);
+    }
+    // `start_issue` only *inserts* each issue's first executor; `startup` runs solely in the
+    // `starting` phase, so somebody has to actually launch them.
+    start_issue_workers(app, team_id).await?;
+    team::sync_issue_mirror(app, team_id).await?;
+    team::refresh_unlimited_docs(app, team_id).await?;
+    hand_issues_to_pm(app, team_id, &started).await?;
+    Ok(started.len())
+}
+
+/// Appendix A.1 for unlimited mode: one relay telling the PM everything it now manages and
+/// that `issue` is not optional any more.
+async fn hand_issues_to_pm(app: &Arc<App>, team_id: &str, started: &[db::TeamIssue]) -> LcResult<()> {
+    if team::load(app, team_id).await?.phase == "starting" {
+        team::set_phase(app, team_id, "planning", None, None).await?;
+    }
+    let ctx = Ctx::load(app, team_id).await?;
+    let Some(pm) = ctx.pm() else { return Ok(()) };
+    let rows: Vec<String> = ctx
+        .issues
+        .iter()
+        .map(|q| {
+            let who: Vec<String> = ctx.workers_for(q).iter().map(|b| ctx.short(b)).collect();
+            format!(
+                "- #{n}「{t}」：整合分支 `{b}`，全文 `.agents-manager/team/ISSUE-{n}.md`，執行者 {who}",
+                n = q.issue_number,
+                t = q.issue_title,
+                b = q.branch.clone().unwrap_or_default(),
+                who = if who.is_empty() { "（尚未建立）".into() } else { who.join("、") },
+            )
+        })
+        .collect();
+    let queued = db::team_issues(&app.db, team_id)
+        .await
+        .map_err(up)?
+        .into_iter()
+        .filter(|i| i.state == "queued")
+        .count();
+    let tail = if queued > 0 {
+        format!("佇列裡還有 {queued} 個 issue，等這裡有 issue 結束就會自動開始。")
+    } else {
+        String::new()
+    };
+    let new_ones: Vec<String> = started.iter().map(|q| format!("#{}", q.issue_number)).collect();
+    let new = if new_ones.is_empty() { "這是第一批".to_string() } else { format!("這一批新開的是 {}", new_ones.join("、")) };
+    let text = format!(
+        "併行數是**無限**：你同時在管 {n} 個 issue（{new}）。\n{rows}\n\n\
+         因此**每一筆 `dispatch` 的 task 都要寫 `issue`（issue 號），`done` 也要寫 `issue`**——\
+         `done` 只交付那一個 issue，其他的照常進行。`to` 一樣可以省略，daemon 會派給那個 issue 有空的執行者；\
+         每個 issue 先給 1 個執行者，你派幾筆就開幾個（每個 issue 最多 4 個、全隊最多 12 個），\
+         多出來的會排隊。請先讀 `.agents-manager/team/TEAM.md` 與各自的 `ISSUE-<n>.md` 再派工。{tail}",
+        n = ctx.issues.len(),
+        rows = rows.join("\n"),
+    );
+    enqueue(app, team_id, None, &pm.id, None, "first", text).await?;
+    Ok(())
 }
 
 /// Start the executors `start_issue` just created (the PM and the reviewer are already up).
@@ -2364,7 +2856,7 @@ mod tests {
         let text = "先講一段\n\n```am-team\n{\"action\":\"wait\"}\n```\n\n改主意了\n\n```am-team\n{\"action\":\"done\",\"summary\":\"ok\"}\n```\n";
         let v = parse_block(text).unwrap();
         assert_eq!(v["action"], "done");
-        assert_eq!(Action::parse("pm", &v).unwrap(), Action::Done { summary: "ok".into(), keep_workers: false });
+        assert_eq!(Action::parse("pm", &v).unwrap(), Action::Done { summary: "ok".into(), keep_workers: false, issue: None });
     }
 
     #[test]
@@ -2599,7 +3091,7 @@ mod scenarios {
         .unwrap();
 
         enter_reopen(&s).await;
-        crate::team::retire_issue_workers(s.app(), &s.tid, &before.issue.as_ref().unwrap().id).await;
+        crate::team::retire_issue_workers(s.app(), &s.tid, &before.issue().unwrap().id).await;
         let next = db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
         crate::team::start_issue(s.app(), &s.tid, &next, false).await.unwrap();
 
@@ -2714,6 +3206,225 @@ mod scenarios {
         assert_eq!(current.issue_number, 44);
         assert_eq!(s.team().await.phase, "planning");
         assert_eq!(db::team_issues(&s.app().db, &s.tid).await.unwrap().iter().filter(|i| i.state == "done").count(), 2);
+    }
+
+    // ------------------------------------------------------------ §4.5 unlimited parallelism
+
+    /// A team in unlimited mode with its whole queue open, the way `startup` leaves it.
+    async fn unlimited(issues: Vec<crate::team::IssueRef>) -> S {
+        let s = S::with_issues(0, true, issues).await;
+        start_issues_up_to_capacity(s.app(), &s.tid).await.unwrap();
+        s
+    }
+
+    /// The working issue with that number, and its executors' short names.
+    async fn issue_of(s: &S, number: i64) -> db::TeamIssue {
+        s.ctx().await.issues.into_iter().find(|i| i.issue_number == number).expect("issue is working")
+    }
+
+    /// Three issues on the queue, `workers.count = 0`: all three are worked at once, each on
+    /// its own integration branch with its own single executor.
+    #[tokio::test]
+    async fn unlimited_works_every_queued_issue_at_once() {
+        let s = unlimited(vec![issue(), issue2(), issue3()]).await;
+        let ctx = s.ctx().await;
+        assert_eq!(ctx.issues.len(), 3, "every queued issue is working");
+        assert!(ctx.unlimited());
+
+        let mut branches: Vec<String> = Vec::new();
+        for q in &ctx.issues {
+            assert_eq!(ctx.workers_for(q).len(), 1, "#{} starts with one executor", q.issue_number);
+            branches.push(q.branch.clone().expect("a working issue has its integration branch"));
+        }
+        branches.sort();
+        branches.dedup();
+        assert_eq!(branches.len(), 3, "one integration branch per issue");
+        // Six executors would be four issues too many: the whole team is three workers + PM + reviewer.
+        assert_eq!(ctx.workers().len(), 3);
+        // The PM is told, once, that it manages all three and that `issue` is mandatory.
+        let p = s.pending(&s.bot("pm", 0).await).await;
+        let text = p.iter().map(|e| serde_json::from_str::<Value>(&e.payload_json).unwrap()["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("\n");
+        for n in ["#42", "#43", "#44"] {
+            assert!(text.contains(n), "the first relay lists {n}: {text}");
+        }
+        assert!(text.contains("`issue`"));
+    }
+
+    /// Three tasks on one issue: that issue grows from one executor to three, and nothing is
+    /// added to the issues nobody dispatched to.
+    #[tokio::test]
+    async fn unlimited_builds_executors_on_demand_per_issue() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(
+            &pm,
+            json!({"action":"dispatch","tasks":[
+                {"issue":42,"title":"A","brief":"做 A"},
+                {"issue":42,"title":"B","brief":"做 B"},
+                {"issue":42,"title":"C","brief":"做 C"}]}),
+        )
+        .await;
+
+        let ctx = s.ctx().await;
+        let a = issue_of(&s, 42).await;
+        let b = issue_of(&s, 43).await;
+        assert_eq!(ctx.workers_for(&a).len(), 3, "one executor per dispatched task, up to the cap");
+        assert_eq!(ctx.workers_for(&b).len(), 1, "the issue nobody dispatched to is untouched");
+        // …and all three tasks are running, none of them queued behind a parallelism.
+        let tasks = s.tasks().await;
+        assert_eq!(tasks.len(), 3);
+        assert!(tasks.iter().all(|t| t.worker_bot_id.is_some()), "{tasks:?}");
+        assert!(tasks.iter().all(|t| t.issue_id.as_deref() == Some(a.id.as_str())));
+    }
+
+    /// The whole-team ceiling: six issues each asking for four executors cannot make 24.
+    #[tokio::test]
+    async fn unlimited_stops_at_twelve_executors_for_the_whole_team() {
+        let s = unlimited(vec![issue(), issue2(), issue3()]).await;
+        let pm = s.bot("pm", 0).await;
+        for n in [42i64, 43, 44] {
+            s.reply(
+                &pm,
+                json!({"action":"dispatch","tasks":[
+                    {"issue":n,"title":"a","brief":format!("{n} 做 a")},
+                    {"issue":n,"title":"b","brief":format!("{n} 做 b")},
+                    {"issue":n,"title":"c","brief":format!("{n} 做 c")},
+                    {"issue":n,"title":"d","brief":format!("{n} 做 d")}]}),
+            )
+            .await;
+        }
+        let ctx = s.ctx().await;
+        assert_eq!(ctx.workers().len(), 12, "MAX_TEAM_WORKERS");
+        for q in &ctx.issues {
+            assert_eq!(ctx.workers_for(q).len(), 4, "MAX_WORKERS per issue");
+        }
+    }
+
+    /// The trap this feature is most likely to fall into: a task must be cut from **its own**
+    /// issue's integration branch, not from the `teams` mirror.
+    #[tokio::test]
+    async fn a_task_branches_off_its_own_issue_not_the_mirror() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let b = issue_of(&s, 43).await;
+        // Put a commit on #43's integration branch only. The mirror still points at #42.
+        let main = s.wt("main");
+        git(&main, &["checkout", "-q", b.branch.as_deref().unwrap()]);
+        std::fs::write(main.join("only-in-43.txt"), "43\n").unwrap();
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-q", "-m", "only in #43"]);
+        git(&main, &["checkout", "-q", &s.team().await.branch]);
+
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"issue":42,"title":"A","brief":"做 A"}]})).await;
+
+        let a = issue_of(&s, 42).await;
+        let task = s.tasks().await.into_iter().next().unwrap();
+        assert_eq!(task.issue_id.as_deref(), Some(a.id.as_str()));
+        assert!(task.branch.starts_with(a.branch.as_deref().unwrap()), "{}", task.branch);
+        let wt = std::path::PathBuf::from(&s.e.dir).join("data/teams").join(&s.tid).join("i1-dev-1");
+        assert_eq!(git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]), task.branch);
+        assert!(!wt.join("only-in-43.txt").exists(), "#42's task must not see #43's work");
+
+        // And #43's own task does branch off #43.
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"issue":43,"title":"B","brief":"做 B"}]})).await;
+        let wt43 = std::path::PathBuf::from(&s.e.dir).join("data/teams").join(&s.tid).join("i2-dev-1");
+        assert!(wt43.join("only-in-43.txt").exists(), "#43's task starts from #43");
+    }
+
+    /// A dispatch that does not say which issue is refused while several are working, and the
+    /// PM is told why rather than having a task land on the wrong branch.
+    #[tokio::test]
+    async fn a_dispatch_without_an_issue_is_refused_while_several_run() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"title":"A","brief":"做 A"}]})).await;
+        assert!(s.tasks().await.is_empty(), "nothing is created");
+        let text = s
+            .pending(&pm)
+            .await
+            .iter()
+            .map(|e| serde_json::from_str::<Value>(&e.payload_json).unwrap()["text"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("`issue`"), "{text}");
+
+        // An issue that is not working is refused the same way.
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"issue":999,"title":"A","brief":"做 A"}]})).await;
+        assert!(s.tasks().await.is_empty());
+    }
+
+    /// `done` settles one issue and one only: #42 is delivered and closed while #43 keeps its
+    /// executor, its branch and its `working` row.
+    #[tokio::test]
+    async fn done_delivers_one_issue_and_leaves_the_others_running() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[
+            {"issue":42,"title":"A","brief":"做 A"},
+            {"issue":43,"title":"B","brief":"做 B"}]}))
+        .await;
+
+        // #42's executor does the work and it is reviewed and merged.
+        let a = issue_of(&s, 42).await;
+        let dev = s.ctx().await.workers_for(&a)[0].clone();
+        let wt = std::path::PathBuf::from(&dev.cwd.clone().unwrap());
+        std::fs::write(wt.join("a.txt"), "a\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "a"]);
+        s.reply(&dev, json!({"action":"report","status":"done","summary":"做完了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        let rev = s.bot("reviewer", 0).await;
+        s.reply(&rev, json!({"action":"verdict","result":"approve","summary":"ok"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.tasks().await.iter().find(|t| t.title == "A").unwrap().state, "merged");
+
+        // `done` for #42 only.
+        s.reply(&pm, json!({"action":"done","issue":42,"summary":"#42 完成"})).await;
+
+        let issues = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        let a = issues.iter().find(|i| i.issue_number == 42).unwrap();
+        let b = issues.iter().find(|i| i.issue_number == 43).unwrap();
+        assert_eq!(a.state, "done");
+        assert_eq!(a.summary.as_deref(), Some("#42 完成"));
+        assert_eq!(b.state, "working", "the other issue is untouched");
+        assert_ne!(s.team().await.phase, "done", "the team is not finished");
+        // #43 still has its executor and its open task.
+        let ctx = s.ctx().await;
+        assert_eq!(ctx.issues.len(), 1);
+        assert_eq!(ctx.workers_for(&issue_of(&s, 43).await).len(), 1);
+        let b_task = s.tasks().await.into_iter().find(|t| t.title == "B").unwrap();
+        assert!(b_task.worker_bot_id.is_some(), "#43's task still has its executor");
+        assert_ne!(b_task.state, "failed", "closing #42 must not fail #43's task");
+    }
+
+    /// `done` for an issue whose tasks are still open is refused, and the refusal names the
+    /// issue — the PM has several and needs to know which one it got wrong.
+    #[tokio::test]
+    async fn done_is_refused_per_issue() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"issue":42,"title":"A","brief":"做 A"}]})).await;
+        s.reply(&pm, json!({"action":"done","issue":42,"summary":"x"})).await;
+        let text = s
+            .pending(&pm)
+            .await
+            .iter()
+            .map(|e| serde_json::from_str::<Value>(&e.payload_json).unwrap()["text"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("#42"), "{text}");
+        assert_eq!(issue_of(&s, 42).await.state, "working");
+    }
+
+    /// A finite parallelism never reaches any of the above: the mode is off, one issue at a
+    /// time, and the `issue` field is simply ignored.
+    #[tokio::test]
+    async fn a_finite_parallelism_is_still_one_issue_at_a_time() {
+        let s = S::with_issues(2, true, vec![issue(), issue2()]).await;
+        assert!(!s.ctx().await.unlimited());
+        assert_eq!(s.ctx().await.issues.len(), 1);
+        assert_eq!(start_issues_up_to_capacity(s.app(), &s.tid).await.unwrap(), 0);
+        assert_eq!(s.ctx().await.issues.len(), 1, "the queue is still worked one at a time");
     }
 
     /// **T2** — the PM dispatches two tasks and each lands on the right worker, with its own
@@ -3497,7 +4208,8 @@ mod scenarios {
                 to: None,
                 title: "A".into(),
                 brief: "做 A".into(),
-                files: vec![]
+                files: vec![],
+                issue: None
             }])
         );
         let named = Action::parse(
@@ -3511,7 +4223,8 @@ mod scenarios {
                 to: Some("dev-1".into()),
                 title: "task".into(),
                 brief: "b".into(),
-                files: vec![]
+                files: vec![],
+                issue: None
             }])
         );
         assert!(Action::parse(
