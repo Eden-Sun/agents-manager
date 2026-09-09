@@ -75,6 +75,27 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 - **不新增 `phase` 值、不新增 `team_events.kind` 值**（兩者都是 CHECK 約束，改了要重建表）。
   issue 邊界事件走 `kind='note'` + `payload.action ∈ {issue_started, issue_finished, issue_failed, issues_queued, issue_unqueued, issue_start_failed}`。
 
+#### 多 issue 同時進行（無限模式，2026-09-09）
+
+`workers.count = 0`（UI 上的「∞ 無限」，§4.5）時**佇列裡的 issue 同時開工**，不再一次一個：
+
+- `team_issues` 可以同時有多列 `state='working'`（上限 `MAX_CONCURRENT_ISSUES = 6`；超過的等有 issue 結束再起）。
+  DB 沒有任何 partial unique 擋這件事，`team_issues_number_open` 擋的是「同一個 issue 號同時排兩次」，不受影響。
+- `teams` 的鏡像欄位（`issue_number` / `branch` / …）改成**第一個** working 的 issue，**只給舊 UI 的標題用，不再是真相**。
+  所有判斷一律走 `team_issues` 與 `team_tasks.issue_id`：task 分支從自己那個 issue 的整合分支切、合併合回自己的整合分支、
+  review 的 diff base 也是自己的。唯一的整合 worktree（`main/`）在合併前會先切到該 task 所屬 issue 的分支。
+- 每個 issue 有自己的執行者批（命名已經是 `t<tid6>-i<seq>-dev-<n>`、worktree `i<seq>-dev-<n>`，天生不會撞），
+  **先建 1 個**，PM 派工超過在跑的數量就按需再建（每 issue 上限 `MAX_WORKERS = 4`、全隊 `MAX_TEAM_WORKERS = 12`）。
+  建執行者走 §7.6 的 `insert_member` + pretrust + `start_bot`。收掉一個 issue 時只退掉**它自己**那批。
+- 文件：每個 issue 一份 `ISSUE-<n>.md`（不再是單一 `ISSUE.md`），`TEAM.md` 列出所有進行中的 issue、各自的整合分支與執行者，
+  在 issue 開工與執行者增減時重寫。
+- PM 與 reviewer 仍是同兩個 bot。PM 同時管多個 issue（§4.4 的 `issue` 欄位、附錄 A.4 的分組表）；
+  reviewer 一次審一個 task、跨 issue 依回報順序排隊（維持現有行為）。
+- 終止：`done` 只結束**那一個** issue；`merge_conflict` / `review_exhausted` / `budget_time` 只把**那個** issue 標 `failed`
+  並繼續其他的；`quota_low` / `member_*` / `protocol_error` / `pm_abort` 仍暫停整隊。所有 issue 終態且佇列空 → team `done`。
+
+**有限模式（1–4）行為完全不變**：一次一個 issue、固定執行者數，所有新邏輯都以 `workers.count == 0` 分岔。
+
 **分支與 base**：每個 issue 都從 team 建立時解析的 `base_sha` 切自己的 `team/i<issue>-<tid6>`，
 彼此獨立、也不受使用者中途合併的影響。PM 的 `main/` worktree 不搬家，只切分支（切之前要求乾淨，跟合併前同一條規則）。
 
@@ -301,9 +322,9 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 
 | 角色 | action | 欄位 | 語意 |
 |---|---|---|---|
-| pm | `dispatch` | `tasks:[{to?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒 |
+| pm | `dispatch` | `tasks:[{to?, issue?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
 | pm | `wait` | — | 目前沒事做，等回報 |
-| pm | `done` | `summary`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的 |
+| pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
 | pm | `abort` | `reason` | PM 認為做不了 → team `paused(pm_abort)`（不直接 abort，讓人決定） |
 | worker | `report` | `status: done \| blocked`, `summary`, `notes?` | 工作回報。`done` 進審查；`blocked` 轉給 PM 決定 |
@@ -311,7 +332,7 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 
 daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說「回覆結尾必須有 am-team 區塊、允許哪些 action」。
 
-`dispatch` 每筆必填的只有 `brief`。
+`dispatch` 每筆必填的只有 `brief`（無限模式再加一個 `issue`）。`issue` 接受 `48` 與 `"#48"` 兩種寫法。
 
 **解析失敗處理**（區塊缺失、JSON 壞、action 不合法、`to` 對不到人）：
 1. 記 `team_events{kind:note, payload:{error}}`；
@@ -342,7 +363,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 |---|---|
 | **拓撲** | 星狀：PM↔worker、PM↔reviewer、reviewer→worker（只有 `request_changes` 這一種）。worker 之間、worker→reviewer 不存在路徑；daemon 只轉送狀態機允許的邊。 |
 | **狀態驅動** | relay 不是「A 說完就叫 B」，而是「事件讓某個 task 換狀態，狀態決定要送什麼」。同一個 task 在同一狀態下不會重複送同一種 relay。 |
-| **回合預算** | `budget.max_relays`（預設 40）：所有 relay（含修復提示）計數；到頂 → `paused(budget_relays)`。使用者插話不計。 |
+| **回合預算** | `budget.max_relays`（預設 40）：所有 relay（含修復提示）計數；到頂 → `paused(budget_relays)`。使用者插話不計。無限模式下每個 relay 都被戳上「第一個 working 的 issue」，按 issue 分不出來，因此上限改成 `max_relays × 已開工的 issue 數`——同樣是「每個 issue 一份預算」的意思。 |
 | **審查回合** | 每個 task `budget.max_review_rounds`（預設 2）：`request_changes` 第 N+1 次 → task `exhausted`，team `paused(review_exhausted)`，由人決定強制合併 / 跳過 / 再給一回合。 |
 | **併行數**（2026-09-08，原「派工上限」） | `workers.count`（1–4，預設 1）是**同時能跑幾個 task**，不是 PM 要自己分配的人頭。每個執行者同時最多 1 個未完成 task（DB 的 `team_tasks_one_open_per_worker` 保證），所以併行數 n = 最多 n 筆同時在跑。PM 可以隨時 `dispatch`，不必等前一批做完：多的進佇列，跑完一筆補一筆。**同一個 issue 內出現第二次完全相同的 `brief`**（不分執行者）→ `paused(pm_repeat)`。 |
 | **時間** | `budget.max_wall_clock_min`（預設 120）：從當前 issue 的 `started_at` 起算，**扣掉暫停的時間**（從 phase 事件加總；2026-09-09 前不扣，隔夜的 `quota_low` 一 resume 就撞 `budget_time`），到頂 → `paused(budget_time)`。 |
@@ -530,11 +551,15 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | 角色 | 數量 | cwd | 可設欄位 | persona 來源 |
 |---|---|---|---|---|
 | `pm` | 恰 1 | `<data_dir>/teams/<id>/main` | kind, model, effort, fast, identity, `persona_extra` | daemon 產生的角色人設（附錄 A.1）+ `persona_extra` |
-| `worker` | **併行數** 1–4（預設 1，2026-09-08） | `<data_dir>/teams/<id>/dev-<n>` | 同上（同一組設定套用到所有 worker；第二階段可逐人不同） | A.2 |
+| `worker` | **併行數** `0` = 無限 / 1–4（預設 1） | `<data_dir>/teams/<id>/dev-<n>` | 同上（同一組設定套用到所有 worker；第二階段可逐人不同） | A.2 |
 | `reviewer` | 0–1（預設 1） | `<data_dir>/teams/<id>/reviewer` | 同上 | A.3 |
 
 「併行數」是使用者面對的名字，`workers.count` 是 API 欄位名（不改，相容）。它決定同時能跑幾個 task，
 而不是 PM 要自己分配的人頭：daemon 一樣建 n 個執行者 bot（`dev-1`…`dev-n`），但誰做哪一筆由 daemon 決定（§4.5）。
+
+**`0` = 無限（2026-09-09）**：佇列裡有幾個 issue 就同時做幾個（§2.3「多 issue 同時進行」），每個 issue 先 1 個執行者、
+PM 派多少就開多少（每 issue 最多 4、全隊最多 12）。硬上限是 pane 與額度的天花板，不是預算——額度會用得很快。
+`0` 是這個欄位的新值，1–4 的意思一個字都沒變。
 
 persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `developer_instructions`（API.md §12.8），三種 kind 都有落點。**這是 `persona` 欄位正式進 SPEC 的時機**（本文 §12 第 9 項）。
 
@@ -704,6 +729,9 @@ PM 同時只能收一則 prompt，但兩個 worker 可能幾乎同時回報。�
 | `supervised` | | 預設 `false` |
 | `budget` | | 每個欄位皆可省，預設如上 |
 
+`workers.count` 接受 `0`（無限，§4.5）與 `1`–`4`；其他值 `400`。`0` 建立時只開第一個 issue 的 1 個執行者，
+其餘 issue 與執行者由 daemon 在 `startup` 之後長出來。
+
 回應 `200 {"team_id":"01M1…"}`（成員尚在啟動中，之後靠 WS）。錯誤：`400 {"error":"not_a_git_repo"}`、`400 {"error":"quota_low","kind":"claude","used_pct":93}`、
 `409 {"error":"conflict","reason":"host is not connected"}`、`404 project`、`502 gh / git`。
 
@@ -759,7 +787,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（`workers` 是 `roles_json.workers.spec`），**下一批據此建立**，同時更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員逐一重啟（進行中的工作會中斷）；預設 `next` 只等重啟或換批時生效 |
 | `kind` | **換 bot**（§7.6）：同名、同 cwd 建一個新 kind 的成員，舊的停掉並 `deleted_at`（訊息保留），未終態的 task 指到新 bot，新成員直接啟動。`apply` 對 `kind` 沒有意義 |
 | `apply` | `next`（預設）/ `now`；其他值 `400 {"message":"<role>.apply must be `next` or `now`…"}` |
-| `count`（只有 `workers`，2026-09-08） | 併行數 1–4，其他值 400。**改大**：當場建並啟動 `dev-(舊n+1)`…`dev-新n`（走 §7.6 的 `insert_member` + pretrust + `start_bot`），啟動後立刻補位，佇列裡的 task 馬上開跑。**改小**：只寫進 `roles_json`，下一批執行者（下一個 issue / `replace`）才生效；多出來的執行者做完手上那筆就不會再被派 |
+| `count`（只有 `workers`） | 併行數 `0`（無限）或 1–4，其他值 400。**改成 `0`**（2026-09-09）：立刻把佇列裡的 issue 全部開工（上限 6），回 `applied: "now"`。**從 `0` 改成 `n`**：不再開新 issue，在跑的做完，執行者數之後照 `n`。以下是 1–4 之間的行為，一個字沒變：**改大**：當場建並啟動 `dev-(舊n+1)`…`dev-新n`（走 §7.6 的 `insert_member` + pretrust + `start_bot`），啟動後立刻補位，佇列裡的 task 馬上開跑。**改小**：只寫進 `roles_json`，下一批執行者（下一個 issue / `replace`）才生效；多出來的執行者做完手上那筆就不會再被派 |
 
 `PATCH` 的回應是 `{"applied": "now" | "next_batch"}`：`now` = 這次真的當場多開了執行者；
 其餘情況（只改小、只改 spec）都是 `next_batch`。
@@ -925,6 +953,11 @@ Project 底下新增 **Team 節點**（`⚙ #42 <title 截斷>` + phase 燈 + �
 - 首則 relay：「Issue #<n>「<title>」。全文在 `.agents-manager/team/ISSUE.md`。**併行數 <n>（執行者：<短名>）**——`dispatch` 不用指定 `to`，派幾筆都可以，超過併行數的會排隊。請先讀取檔案再派工。」（2026-09-08）
 - 收單後的 note（只在**有排隊**時送，否則是白白多一輪 turn）：「收到 <N> 筆。併行數 <n>：現在跑 <M> 筆（t1→dev-1…），排隊 <K> 筆——排隊的會在有執行者空下來時自動派出，你不用再派一次。」
 
+**無限模式（2026-09-09）**：
+- persona 末尾追加：「這個 team 的併行數是**無限**：佇列裡的 issue 會同時開工，你會同時管好幾個。因此 `dispatch` 的**每一筆 task 都必須寫 `issue`**，`done` 也必須寫 `issue`——`done` 只交付那一個 issue，其他的照跑。哪些 issue 在進行中、各自的整合分支與執行者，一律以 `TEAM.md` 為準；每個 issue 的全文在 `ISSUE-<n>.md`。」
+- 首則 relay 改成列表：「併行數是**無限**：你同時在管 <N> 個 issue（這一批新開的是 #48、#49）。<每個 issue 一行：整合分支、`ISSUE-<n>.md`、執行者>。因此每一筆 `dispatch` 都要寫 `issue`，`done` 也要寫 `issue`……每個 issue 先給 1 個執行者，你派幾筆就開幾個（每 issue 最多 4、全隊最多 12）。」佇列裡還有等著的 issue 時補一句「等這裡有 issue 結束就會自動開始」。
+- 每一則關於某個 issue 的 relay（合併通知、`blocked` 回報）開頭標 `[#48]`。
+
 ### A.2 worker persona 與派工 relay
 - persona：「你是 <短名>。你的 cwd `<path>` 是專屬 worktree，你只能在這裡工作：不要 `cd` 出去、不要動 `../`、不要 `git push`、不要切換分支。每個邏輯段落 `git commit`。完成後用 `report` 回報：`summary` 說明改了什麼、如何驗證。做不下去用 `status: blocked` 說明原因。」
 - 派工 relay：「Task t<seq>「<title>」（分支 `<branch>` 已建好並 checkout）。<brief>。相關檔案：<files>。」
@@ -941,7 +974,9 @@ Project 底下新增 **Team 節點**（`⚙ #42 <title 截斷>` + phase 燈 + �
 2. `dev-2` t2「…」→ `blocked`：<notes>
 目前 task 狀態（**併行 <M>/<n>**）：<表，還沒有執行者的那幾筆寫「排隊中」>。請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。」（2026-09-08）
 
-relay 內文上限 8 KB（超過截斷並註明「完整內容見時間軸」）；issue 全文永遠走各 worktree 內的 `.agents-manager/team/ISSUE.md`，不塞進 prompt。
+無限模式下狀態表**按 issue 分組**（2026-09-09），每組標「`#48 · <整合分支>`（∞ · 執行者 k · 進行中 m）」再列該 issue 的 task。
+
+relay 內文上限 8 KB（超過截斷並註明「完整內容見時間軸」）；issue 全文永遠走各 worktree 內的 `.agents-manager/team/ISSUE.md`（無限模式是 `ISSUE-<n>.md`，一個 issue 一份），不塞進 prompt。
 
 ## 附錄 B：SQLite（additive）
 

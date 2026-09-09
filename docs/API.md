@@ -1424,6 +1424,8 @@ daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機
 上面兩個 issue 端點都多一個查詢參數 `repo=<submodule path>`（相對於專案根目錄；省略或空字串 = 專案本身），
 回應多 `repo_path` 回顯。`repo` 不在 submodule 清單裡 → `400`；該 submodule 沒有 GitHub origin → `400`。
 
+`POST /api/projects/{id}/teams` 的 `workers.count` 接受 `0`（無限併行，見 `PATCH /api/teams/{id}` 底下的說明）與 `1`–`4`。
+
 `POST /api/projects/{id}/teams` 的 body 也接受 `repo`：team 的 worktree、分支、合併、PR 與關 issue 全部在**那個 submodule 的 repo** 裡進行；
 team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4。
 
@@ -1480,7 +1482,13 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 |---|---|
 | `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（下一批執行者、reopen 重建的成員都照它），並更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員重啟（進行中的工作會斷），預設 `next` 等重啟或換批 |
 | `kind` | **換一個 bot**：同名、同 cwd 建新 kind 的成員，舊的停掉並軟刪（訊息保留），未做完的 task 跟著搬，新成員直接啟動。`apply` 對它沒有意義。詳見 SPEC-team §7.6 |
-| `count`（只有 `workers`，2026-09-08） | 併行數 1–4（其他值 400）。**改大**當場建並啟動 `dev-(舊n+1)`…`dev-新n`，接著立刻把佇列裡的 task 補上去 → `{"applied":"now"}`。**改小**只寫進 `roles_json`，下一批執行者才生效，多出來的做完手上那筆就不再被派 → `{"applied":"next_batch"}` |
+| `count`（只有 `workers`） | 併行數 `0`（無限）或 1–4（其他值 400）。**改大**當場建並啟動 `dev-(舊n+1)`…`dev-新n`，接著立刻把佇列裡的 task 補上去 → `{"applied":"now"}`。**改小**只寫進 `roles_json`，下一批執行者才生效，多出來的做完手上那筆就不再被派 → `{"applied":"next_batch"}`。**改成 `0`**（2026-09-09，無限）：立刻把佇列裡的 issue 全部開工（同時最多 6 個），每個 issue 先 1 個執行者 → `{"applied":"now"}`。**從 `0` 改回 `n`**：不再開新 issue，在跑的做完，執行者數之後照 `n` |
+
+**無限併行（`workers.count = 0`，2026-09-09）**：佇列裡有幾個 issue 就同時做幾個，執行者數隨 PM 派工放大
+（每個 issue 最多 4 個、全隊最多 12 個、同時最多 6 個 issue）。此時 `am-team` 協定多兩個必填欄位：
+`dispatch` 的每一筆 task 要有 `issue`（issue 號，`48` 或 `"#48"`），`done` 也要有 `issue`——`done` 只交付那一個
+issue，其他 issue 照跑。`teams` 上的 `issue_number` / `branch` 變成「第一個進行中的 issue」的鏡像，真相在
+`GET /teams/{id}` 的 `issues[]` 與每個 task 的 `issue_id`。詳見 SPEC-team §2.3 與 §4.5。
 
 錯誤：kind 未安裝 / `effort` 對不上該 kind → `400`；`identity` 不存在 → `404 {"error":"not_found","what":"identity"}`，
 身分的 kind 對不上 → `400`；這隊沒有 reviewer 而送了 `reviewer` → `400`；
@@ -1660,6 +1668,24 @@ claude 把新版下載好、等重啟才會換過去時，會在 pane 最底下�
   `pane.read visible 80`，跟現值不同才寫 DB 並推 `bot_status`；讀不到畫面就跳過（不清除）。
 - 掛在 run 不是 bot：等著套用的更新是這個 claude process 的事，重啟後的新 run 是 `null`。
 - 套用方式沒有新 API，就是既有的 `POST /api/bots/{id}/restart`。
+
+### `run.runtime_model` / `runtime_effort` / `runtime_fast`（2026-09-09 新增，SPEC §4.4a）
+
+這個 run **實際上**在跑的模型／強度／fast，跟 `bot.model` / `bot.effort` / `bot.fast`（那是「下次啟動
+會用的設定」）分開：
+
+```json
+{"id":"01M1…","runtime_model":"gpt-5.6-luna","runtime_effort":"xhigh","runtime_fast":1}
+```
+
+- daemon 在 `agent.start` 前把最終 argv 讀回來存的（`-m` / `-c model_reasoning_effort=…` /
+  `-c service_tier="priority"`），不是抄 `bots`——該模型不收的強度會在啟動前被丟掉，使用者自己的
+  `args` 也可能再蓋一次。
+- claude / grok 用 slash 指令當場套用成功時（`PATCH` 回 `needs_restart: false`）會一起更新。
+- **三個都是 `null`＝不知道**：收編的 pane（`adopted`）不是我們組的 argv，舊 run 也沒有這幾欄。
+  前端這時不做任何比對，也不標任何東西。
+- 用途：codex 的模型／強度／fast 只有啟動時吃得到，`PATCH` 之後 UI 要顯示的是**還在跑的那個值**，
+  並標「需重啟」，不是把新設定當成已生效。詳見 SPEC §4.4a。
 
 ### `run.turn_error`（2026-09-09 新增，SPEC §4.3a）
 
