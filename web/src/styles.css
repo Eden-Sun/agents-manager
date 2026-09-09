@@ -10672,3 +10672,62 @@ button.run-debug-toggle:hover {
     flex: 0 0 auto;
   }
 }
+
+/* -------- 手機：模型／強度／Fast 這三排（BotSettingsPanel、ModelQuickPicker） -------- */
+@media (width <= 640px) {
+  /* 桌面的 chip 是 24px 高、給滑鼠點的；手指點不到。撐到 36px 並加大左右內距——
+     這幾排是手機上**唯一**能改模型／強度／fast 的地方（標題列那顆 model-tag 在手機是
+     藏起來的），按不準就等於沒有。 */
+  .opt-group .opt {
+    min-height: 36px;
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  /* 「執行中改會即時套用，不用重啟」在模型／強度／Fast 各講一次，桌面上是一行小字，
+     390px 下每一句都會折行，等於同一句話佔掉三段版面。只留模型那一句（三個 kind 的模型
+     都能即時套用，這句對整個面板都成立），其餘走 tooltip。 */
+  .live-note:not(.primary) {
+    display: none;
+  }
+
+  /* Fast 那一列：勾選格撐大到跟 chip 同一個量級，說明字換到勾選格底下自己一整行，
+     不再跟標題擠成「不用重／啟」那種斷法。 */
+  .field.row.fast-row {
+    align-items: flex-start;
+    gap: 10px;
+    padding: 4px 0;
+  }
+
+  .field.row.fast-row input[type='checkbox'] {
+    width: 20px;
+    height: 20px;
+    margin-top: 2px;
+    flex: none;
+  }
+
+  .field.row.fast-row > span {
+    display: grid;
+    gap: 2px;
+    font-size: 13px;
+  }
+
+  /* 說明字改成自己一行之後，`.field-note` 那個為了跟前面的字隔開而留的左邊距會讓它比
+     「Fast」還往右縮排一格，看起來像另一層。同一欄的東西就對齊同一條左邊界。 */
+  .field.row.fast-row > span .field-note {
+    margin-left: 0;
+  }
+
+  /* 快速選單（標題列的 model-tag）在手機貼齊左右邊界：定位算出來的 left 常常只剩十幾 px
+     可用，寬度一窄，每顆 chip 又被壓回兩行。 */
+  .model-quick-pop {
+    max-width: calc(100vw - 16px);
+    min-width: calc(100vw - 16px);
+  }
+}
+
+/* 手機額度 sheet 裡的「看全部」：只看一格時多這一顆，點了才展開其他帳號。 */
+.quota-pop-all {
+  margin: 6px 0 2px;
+  width: 100%;
+}
