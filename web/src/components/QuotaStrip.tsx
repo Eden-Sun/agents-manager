@@ -318,6 +318,22 @@ function fmtLeft(ms: number): string {
   return `${m}m`
 }
 
+/**
+ * 彈出層那一列用的「還剩多久」：`2 天 3 小時` / `4 小時 20 分` / `12 分`。
+ *
+ * 跟 [`fmtLeft`] 是同一個數字，只是那個是給 tooltip 與窄處用的緊縮寫法（`2d3h`）。這裡有位置，
+ * 就寫成讀得出口的樣子——這一列的主角是「還能撐多久」。
+ */
+function fmtLeftLong(ms: number): string {
+  if (ms <= 0) return '即將重置'
+  const m = Math.floor(ms / 60_000)
+  const h = Math.floor(m / 60)
+  const d = Math.floor(h / 24)
+  if (d > 0) return `${d} 天 ${h % 24} 小時`
+  if (h > 0) return `${h} 小時 ${m % 60} 分`
+  return `${m} 分`
+}
+
 /** 每分鐘動一次就夠：刻度是分鐘級的。 */
 function useMinuteNow(): number {
   const [now, setNow] = useState(() => Date.now())
@@ -632,11 +648,14 @@ function PopWindow({
         mark={resetMark(w?.resets_at, WINDOW_MS[win], now)}
         markTitle={left === null ? undefined : `${name} 還有 ${fmtLeft(left)} 重置`}
       />
-      <span className="quota-reset">
+      {/* 「還有多久」而不是「幾號幾點」（2026-09-09 使用者要求）：讀的人問的是「還能撐多久」，
+          日期要自己跟現在相減才知道答案，而黑針畫的本來就是這段剩餘時間。絕對時刻留在
+          tooltip，跨日或要跟別人約時間時才需要。 */}
+      <span className="quota-reset" title={w?.resets_at ? `重置時刻 ${fmtTime(w.resets_at)}` : undefined}>
         <span className="quota-ico" aria-hidden="true">
           ↻
         </span>
-        {fmtTime(w?.resets_at)}
+        {left === null ? '—' : fmtLeftLong(left)}
       </span>
     </div>
   )
@@ -901,7 +920,7 @@ export function QuotaStrip({
             </button>
           ) : null}
           {/* 一行就夠：每個帳號各印一次「更新於」時，那幾個時間差不到一分鐘。 */}
-          {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · 時間為重置時刻</p> : null}
+          {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · ↻ 是距離重置還有多久</p> : null}
         </div>
       ) : null}
     </div>
