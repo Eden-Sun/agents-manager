@@ -42,9 +42,9 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
-
 import { UpgradeIcon } from './UpgradeIcon'
 import { runtimeKnown } from '../lib/runtimeDrift'
+import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
@@ -305,7 +305,7 @@ function BotRow({
           !{unread > 99 ? '99+' : unread}
         </span>
       ) : null}
-      <span className="bot-main">
+      <span className="bot-main" onScroll={compact ? syncKidsScroll : undefined}>
         <span className="bot-ident">
           {/* claude 有新版等著重啟套用時的小記號，掛在 kind icon 的右上角（2026-09-10 使用者：
               放這裡、用綠色）。只是提示——真正點得下去的那顆在 header（`UpdateBadge`）。 */}
@@ -1262,7 +1262,7 @@ export function Sidebar() {
                         onStep={step}
                       />
                       {shut || kids.length === 0 ? null : (
-                        <div className="bot-kids" role="group" aria-label={`${b.name} 的 ${kids.length} 個子 agent`}>
+                        <div className="bot-kids" role="group" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} onWheel={wheelKidsScroll}>
                           {kids.map((c, i) => (
                             <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}`}>
                               <BotRow
