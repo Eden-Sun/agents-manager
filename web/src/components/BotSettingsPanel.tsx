@@ -113,7 +113,12 @@ export function PersonaMark({ persona }: { persona: string | null }) {
  * 偵測過都會落在這裡，所以不出警語，免得把不知道講成壞掉。
  */
 function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
-  if (!st) return null
+  if (!st) {
+    return {
+      mark: '未知',
+      title: `還沒有 ${hostLabel} 上這個身份的 auth status 結果。不要把它當成已登入，先按「重新偵測」或「登入」。`,
+    }
+  }
   if (st.logged_in === false) {
     return {
       mark: '未登入',
@@ -181,6 +186,8 @@ export function IdentityOptions({
   const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === 'claude'), [all, status])
   if (kind !== 'claude' || identities.length === 0) return null
   const hostLabel = !host || host === 'local' ? '本機' : host
+  const selectedStatus = value ? status[value] : undefined
+  const selectedWarning = value ? identityWarning(selectedStatus, hostLabel) : null
   return (
     <div className="field">
       <span>
@@ -226,6 +233,11 @@ export function IdentityOptions({
       {identities.some((i) => status[i.name]?.logged_in !== true) ? (
         <span className="hint">
           標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面；標「未知」的身份則尚未確認，請先看提示原因。
+        </span>
+      ) : null}
+      {selectedWarning ? (
+        <span className={`hint identity-selection-warning${selectedWarning.mark === '未知' ? ' is-unknown' : ''}`}>
+          已選「{value}」：{selectedWarning.mark === '未登入' ? '未登入，bot 會停在登入畫面。' : `登入狀態未知（${selectedStatus?.reason ?? '尚未取得 auth status 結果'}）。`}
         </span>
       ) : null}
     </div>
