@@ -72,12 +72,12 @@ export function IdentityBadge({
 function IdentityHostLogins({ name }: { name: string }) {
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const hosts = useStore((s) => s.hosts)
-  const rows: { host: string; label: string; state: boolean | null; account: string | null }[] = [
-    { host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null },
+  const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null }[] = [
+    { host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null, reason: localStatus?.reason ?? null },
   ]
   for (const h of hosts) {
     const st = h.identity_status[name]
-    rows.push({ host: h.name, label: h.name, state: h.connected ? (st?.logged_in ?? null) : null, account: st?.account ?? null })
+    rows.push({ host: h.name, label: h.name, state: h.connected ? (st?.logged_in ?? null) : null, account: st?.account ?? null, reason: h.connected ? st?.reason ?? null : '主機未連線' })
   }
   return (
     <span className="identity-logins">
@@ -88,7 +88,7 @@ function IdentityHostLogins({ name }: { name: string }) {
             ? `${r.label}：已登入${r.account ? `（${r.account}）` : ''}`
             : r.state === false
               ? `${r.label}：這個身份沒有登入，用它啟動的 bot 會停在登入畫面`
-              : `${r.label}：問不到登入狀態（CLI 沒裝、主機沒連上，或還沒偵測過）`
+              : `${r.label}：問不到登入狀態（${r.reason ?? '尚未偵測過'}）`
         return (
           <span
             key={r.host}
@@ -258,7 +258,7 @@ function ShellIdentities() {
             <span className="identity-logins">
               <span
                 className={`identity-login is-${st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'}`}
-                title={st.account ?? undefined}
+                title={st.logged_in === null ? st.reason ?? '登入狀態未知' : st.account ?? undefined}
               >
                 {label} {st.logged_in === true ? '已登入' : st.logged_in === false ? '未登入' : '未知'}
               </span>

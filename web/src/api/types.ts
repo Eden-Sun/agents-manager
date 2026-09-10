@@ -106,6 +106,8 @@ export interface IdentityStatus {
   name: string
   kind: BotKind
   logged_in: boolean | null
+  /** `logged_in: null` 的可見原因（CLI 缺少、指令失敗、輸出無法解析等）。 */
+  reason: string | null
   /** 登入的是誰（claude 是 e-mail、codex 是 `ChatGPT`、grok 是 `grok.com`）。 */
   account: string | null
   /** claude 的 `subscriptionType`（`max` / `team` …）。 */
