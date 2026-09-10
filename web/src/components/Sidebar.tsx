@@ -43,7 +43,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
-import { UpgradeIcon } from './UpgradeIcon'
+import { UpdateBadge } from './UpdateBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 
@@ -309,14 +309,11 @@ function BotRow({
       <span className="bot-main" onScroll={compact ? syncKidsScroll : undefined}>
         <span className="bot-ident">
           {/* claude 有新版等著重啟套用時的小記號，掛在 kind icon 的右上角（2026-09-10 使用者：
-              放這裡、用綠色）。只是提示——真正點得下去的那顆在 header（`UpdateBadge`）。 */}
+              放這裡、用綠色）。2026-09-11 起它自己就點得下去（`UpdateBadge` 的 dot 版，同一條
+              「先看 changelog 再重啟」的流程）——看到記號的當下人就在側欄，不必先切過去。 */}
           <span className={`bot-kind-wrap${hasUpdate ? ' has-update' : ''}`}>
             <KindTag kind={bot.kind} className="bot-kind" />
-            {hasUpdate ? (
-              <span className="bot-update-dot" aria-label="有更新，重啟套用" title={`${hasUpdate}｜重啟這個 bot 會用新版 claude 接著跑（session 會 --resume）`}>
-                <UpgradeIcon size={8} />
-              </span>
-            ) : null}
+            <UpdateBadge botId={botId} variant="dot" />
           </span>
           {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>

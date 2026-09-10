@@ -12,8 +12,12 @@ import { UpdateChangelog } from './UpdateChangelog'
  *
  * 2026-09-10：不管忙不忙都先開確認框，框裡先列新版 changelog（抓不到就寫「找不到」），
  * 使用者看過按了才重啟；忙的時候多一句「會打斷這一回合」。
+ *
+ * `variant="dot"` 是側欄 bot 列上那顆掛在 kind icon 右上角的小 ⌃⌃（2026-09-11 使用者：
+ * 「click to update latest」）。它本來只是提示，要套用得先切到那顆 bot 再點 header 的
+ * chip——但看到記號的當下人就在側欄。同一顆元件、同一條確認流程，只是換個外觀。
  */
-export function UpdateBadge({ botId }: { botId: string }) {
+export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' }) {
   const run = useStore((s) => s.runs[botId] ?? null)
   const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? '這個 Bot')
   const botKind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind ?? 'claude')
@@ -37,6 +41,39 @@ export function UpdateBadge({ botId }: { botId: string }) {
     })
   }
 
+  const confirmDialog = (
+    <ConfirmRestart
+      open={confirming}
+      name={botName}
+      busy={busy}
+      changelog={confirming ? <UpdateChangelog kind={botKind} host={host} from={runningVersion} /> : null}
+      onCancel={() => setConfirming(false)}
+      onConfirm={restart}
+    />
+  )
+
+  if (variant === 'dot') {
+    return (
+      <>
+        <button
+          type="button"
+          className={`bot-update-dot${restarting ? ' busy' : ''}`}
+          disabled={restarting}
+          aria-label={`${botName}：有更新，點一下套用`}
+          title={`${notice}｜點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+          // 這顆疊在 bot 列上，列本身點下去是「切換到這個 bot」——按更新不該順便換畫面。
+          onClick={(e) => {
+            e.stopPropagation()
+            setConfirming(true)
+          }}
+        >
+          <UpgradeIcon size={8} />
+        </button>
+        {confirmDialog}
+      </>
+    )
+  }
+
   return (
     <>
       <button
@@ -48,14 +85,7 @@ export function UpdateBadge({ botId }: { botId: string }) {
       >
         {restarting ? '重啟中…' : <><UpgradeIcon /> <span className="update-badge-text">有更新 · 重啟套用</span></>}
       </button>
-      <ConfirmRestart
-        open={confirming}
-        name={botName}
-        busy={busy}
-        changelog={confirming ? <UpdateChangelog kind={botKind} host={host} from={runningVersion} /> : null}
-        onCancel={() => setConfirming(false)}
-        onConfirm={restart}
-      />
+      {confirmDialog}
     </>
   )
 }

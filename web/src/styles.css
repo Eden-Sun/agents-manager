@@ -4890,12 +4890,31 @@ p.project-quota-hidden {
   border: 1.5px solid var(--bg-panel);
   background: var(--lamp-green);
   color: #fff;
+  padding: 0;
   line-height: 1;
-  cursor: help;
+  /* 2026-09-11：這顆自己就是「套用更新」的按鈕（`UpdateBadge` 的 dot 版），不再只是提示。
+     12px 的點擊區太小，用 `::after` 往外撐出一圈透明命中區。 */
+  cursor: pointer;
   z-index: 1;
   /* 描一圈面板色的邊，壓在 icon 邊框上還看得清楚。 */
   filter: drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
 }
+/* 命中區：看得到的還是 12px 的點，可按的範圍 22px（滑鼠與手指都不必瞄）。 */
+.bot-update-dot::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+}
+
+.bot-update-dot:hover {
+  filter: brightness(1.15) drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
+}
+
+.bot-update-dot:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .bot-update-dot .upgrade-icon {
   width: 11px;
   height: 11px;
