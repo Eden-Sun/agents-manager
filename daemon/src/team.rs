@@ -3255,6 +3255,64 @@ pub async fn answer(app: &Arc<App>, team_id: &str, text: &str, client_request_id
     Ok(out)
 }
 
+/// `POST /api/teams/:id/issues/retry-failed` — SPEC-team §2.6b (2026-09-11 使用者：
+/// 「例如這類都要能接力完成」).
+///
+/// The issue queue keeps `failed` rows with the reason on them — a merge conflict nobody could
+/// resolve, a wall-clock budget that ran out. Those are not decisions, they are unfinished work:
+/// the user's own answer is to run them again rather than to retype four issue numbers into the
+/// reopen box. §2.3 already allows the same number back on the queue (a finished row stops
+/// reserving it), so this is exactly [`add_issues`] with the numbers filled in for you, plus a
+/// note that says which failure each retry answers.
+/// The queue entries §2.6b puts back: the **latest attempt** of each issue number, kept only
+/// when that attempt failed or was skipped. An issue that failed once and was delivered on the
+/// retry is finished; one queued three times and failed twice comes back once, not twice.
+pub(crate) fn stuck_issues(issues: &[db::TeamIssue]) -> Vec<&db::TeamIssue> {
+    let mut latest: std::collections::BTreeMap<i64, &db::TeamIssue> = std::collections::BTreeMap::new();
+    for i in issues {
+        if latest.get(&i.issue_number).map(|p| i.seq > p.seq).unwrap_or(true) {
+            latest.insert(i.issue_number, i);
+        }
+    }
+    latest.values().copied().filter(|i| i.state == "failed" || i.state == "skipped").collect()
+}
+
+pub async fn retry_failed_issues(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    let issues = db::team_issues(&app.db, team_id).await.map_err(any_err)?;
+    let stuck = stuck_issues(&issues);
+    if stuck.is_empty() {
+        return Err(LcError::conflict("no failed issue to retry", json!({"phase": t.phase})));
+    }
+    let numbers: Vec<i64> = stuck.iter().map(|i| i.issue_number).collect();
+    let out = add_issues(app, team_id, &numbers).await?;
+    record_event(
+        app,
+        team_id,
+        "note",
+        None,
+        None,
+        None,
+        None,
+        json!({
+            "action": "issues_retried",
+            "by": "user",
+            "issues": stuck.iter().map(|i| json!({
+                "issue_number": i.issue_number,
+                "seq": i.seq,
+                "reason": i.fail_reason,
+                "branch": i.branch,
+            })).collect::<Vec<_>>(),
+        }),
+    )
+    .await?;
+    let mut out = out;
+    if let Some(o) = out.as_object_mut() {
+        o.insert("retried".into(), json!(numbers));
+    }
+    Ok(out)
+}
+
 /// `POST /api/teams/:id/rescue` — SPEC-team §2.6 (2026-09-11 使用者).
 ///
 /// A finished team can still be carrying tasks nobody solved (`failed` / `skipped`). Re-queuing
@@ -5428,6 +5486,42 @@ mod api_tests {
             .execute(&app.db).await.unwrap();
         set_phase(&app, &tid, "done", None, None).await.unwrap();
         assert!(matches!(rescue(&app, &tid, None).await, Err(LcError::Conflict(_))));
+    }
+
+    /// §2.6b: which queue entries come back — the latest attempt of each number, and only when
+    /// it failed or was skipped. (The re-queue itself is `add_issues`, which needs GitHub.)
+    #[tokio::test]
+    async fn retry_failed_issues_picks_the_latest_stuck_attempt() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(1), false), vec![issue(), issue2()]).await;
+        let rows = db::team_issues(&app.db, &tid).await.unwrap();
+        // #42 delivered, #43 failed on a merge conflict.
+        for (i, state) in rows.iter().zip(["done", "failed"]) {
+            sqlx::query("UPDATE team_issues SET state = ?, fail_reason = ?, ended_at = ? WHERE id = ?")
+                .bind(state)
+                .bind(if state == "done" { None } else { Some("merge_conflict") })
+                .bind(db::now())
+                .bind(&i.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        let all = db::team_issues(&app.db, &tid).await.unwrap();
+        assert_eq!(stuck_issues(&all).iter().map(|i| i.issue_number).collect::<Vec<_>>(), vec![43]);
+
+        // #43 queued again and delivered: the number is finished, so nothing is stuck any more.
+        sqlx::query(
+            "INSERT INTO team_issues (id, team_id, seq, issue_number, issue_title, issue_url, state, created_at)
+             VALUES (?,?,?,43,'and then this','u','done',?)",
+        )
+        .bind(db::ulid()).bind(&tid).bind(3i64).bind(db::now())
+        .execute(&app.db).await.unwrap();
+        let all = db::team_issues(&app.db, &tid).await.unwrap();
+        assert!(stuck_issues(&all).is_empty(), "the retry delivered it");
+        set_phase(&app, &tid, "done", None, None).await.unwrap();
+        // …and the endpoint refuses before it ever calls GitHub.
+        assert!(matches!(retry_failed_issues(&app, &tid).await, Err(LcError::Conflict(_))));
     }
 
     /// §10.5 decide: only tasks that are actually stuck, and only the three actions.

@@ -731,6 +731,16 @@ export async function rescueTeam(teamId: string, botId?: string): Promise<{ bot:
   return { bot: str(pick(o, 'bot')), rescued: num(pick(o, 'rescued')) }
 }
 
+/**
+ * `POST /api/teams/:id/issues/retry-failed`（SPEC-team §2.6b）——把失敗 / 被跳過的 issue
+ * 全部重新排進佇列接力做完。回傳重排了哪幾號。
+ */
+export async function retryFailedIssues(teamId: string): Promise<number[]> {
+  const raw = await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/issues/retry-failed`, {})
+  const o = isRec(raw) ? raw : {}
+  return arr(pick(o, 'retried')).map((n) => num(n)).filter((n) => n > 0)
+}
+
 /** `DELETE /api/teams/:id/issues/:issue_id` — 只能移除還沒開始的（`queued`）。 */
 export async function removeTeamIssue(teamId: string, issueId: string): Promise<void> {
   await transport.request(

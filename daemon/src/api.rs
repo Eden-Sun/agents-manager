@@ -73,6 +73,7 @@ pub fn router(app: Arc<App>) -> Router {
         // SPEC-team §2.3: the issue queue of a running team.
         .route("/teams/{id}/issues", post(add_team_issues))
         .route("/teams/{id}/rescue", post(rescue_team))
+        .route("/teams/{id}/issues/retry-failed", post(retry_failed_issues))
         .route("/teams/{id}/issues/{issue_id}", delete(remove_team_issue))
         .route("/teams/{id}/close-issue", post(close_team_issue))
         .route("/teams/{id}/say", post(say_team))
@@ -759,6 +760,11 @@ async fn rescue_team(
 ) -> Result<Json<Value>, LcError> {
     let bot = body.and_then(|Json(b)| b.bot_id);
     Ok(Json(crate::team::rescue(&app, &id, bot.as_deref()).await?))
+}
+
+/// SPEC-team §2.6b — put every failed / skipped issue back on the queue.
+async fn retry_failed_issues(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    Ok(Json(crate::team::retry_failed_issues(&app, &id).await?))
 }
 
 async fn decide_team_task(

@@ -600,6 +600,8 @@ export interface StoreState {
   addTeamIssues: (teamId: string, issueNumbers: number[]) => Promise<boolean>
   /** SPEC-team §2.6：把跑完的 team 裡沒解決的 task 全部交給一個成員（省略 = reviewer）。 */
   rescueTeam: (teamId: string, botId?: string) => Promise<boolean>
+  /** SPEC-team §2.6b：把失敗 / 被跳過的 issue 全部重新排進佇列接力做完。 */
+  retryFailedIssues: (teamId: string) => Promise<boolean>
   /** `DELETE /teams/:id/issues/:issue_id` — 只能移除還沒開始的。 */
   removeTeamIssue: (teamId: string, issueId: string) => Promise<boolean>
 }
@@ -1923,6 +1925,26 @@ export const useStore = create<StoreState>((set, get) => ({
       ok = true
       await get().loadTeam(teamId)
       get().notify('info', `已把 ${r.rescued} 個沒解決的 task 交給 ${r.bot} 收尾`)
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return false
+      get().notify('error', errText(e))
+    } finally {
+      set((s) => ({ busy: withoutKey(s.busy, key) }))
+    }
+    return ok
+  },
+
+  async retryFailedIssues(teamId) {
+    const key = `team:${teamId}:retry-issues`
+    if (get().busy[key]) return false
+    let ok = false
+    set((s) => ({ busy: { ...s.busy, [key]: true } }))
+    try {
+      const numbers = await api.retryFailedIssues(teamId)
+      ok = true
+      set((s) => ({ teamReopenUnavailable: withoutKey(s.teamReopenUnavailable, teamId) }))
+      await get().loadTeam(teamId)
+      get().notify('info', `已重排：${numbers.map((n) => `#${n}`).join('、')}`)
     } catch (e) {
       if (markTeamsUnsupported(set, get, e)) return false
       get().notify('error', errText(e))
