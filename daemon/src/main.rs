@@ -8,6 +8,7 @@ mod api;
 mod assets;
 mod attach;
 mod config;
+mod capture;
 mod default_session;
 mod db;
 mod events;
