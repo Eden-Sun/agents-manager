@@ -732,6 +732,29 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
 - env 值中的 `$HOME`、`${HOME}` 與**開頭**的 `~` 會展開成**該 host 的 home**
   （本機用本機 home，遠端用 ssh `echo $HOME` 取得並快取）。
 - identity 的 `kind` 與 bot 的 `kind` 不符 → `400`。
+- `hosts[].identities.<name>.logged_in`：`true` / `false` / `null`。`null` 是「未知」，不是未登入；同時帶
+  `reason`（例如 CLI 不在 PATH、`auth status` 指令失敗、輸出無法解析），讓 UI 不會把探測失敗看成已登入。
+
+### `POST /api/hosts/{name}/identities/{identity}/login`
+
+在指定主機為指定身份開一個**臨時 host-shell pane**，並以該身份在該主機展開後的 env 執行登入：
+
+| kind | 指令 |
+|---|---|
+| `claude` | `claude /login` |
+| `codex` | `codex login` |
+| `grok` | `grok login` |
+
+env（包含 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME`）只送進該 pane，不寫入 daemon log、事件或
+team timeline。回應是「主機 shell」的 pane 物件；UI 從該 pane 的 terminal snapshot 顯示 device code / URL。
+登入指令結束（成功或失敗）後 daemon 重新跑該身份的 `auth status` 探測並關閉臨時 pane；主機斷線時則等
+重連後由使用者重新偵測。
+
+| 狀況 | 回應 |
+|---|---|
+| identity 不存在 | `404 {"error":"not_found","what":"identity"}` |
+| 該 kind 的 CLI 不在偵測到的 PATH | `409 {"error":"conflict","reason":"identity_login_unavailable",...}` |
+| host 不存在 / 未連線 / pane 建立失敗 | `404` / `502` |
 
 ### `GET /api/state` 新增欄位
 
