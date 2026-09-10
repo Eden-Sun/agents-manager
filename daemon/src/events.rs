@@ -305,6 +305,13 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     }
     app.emit_bot_status(&run.bot_id).await;
 
+    // SPEC-team §11：成員離開 blocked → 它的 team 如果正停在 `member_blocked:<這個成員>`
+    // 就自己繼續。`unknown` 不算「回答完了」（那是還沒問到 herdr 的過渡值）。
+    if prev == "blocked" && status != "blocked" && status != "unknown" {
+        let (app2, bot2) = (app.clone(), run.bot_id.clone());
+        tokio::spawn(async move { crate::team::resume_if_member_unblocked(&app2, &bot2).await });
+    }
+
     // The agent reacted to the prompt: the stall watchdog is no longer needed.
     if status == "working" || status == "blocked" {
         crate::lifecycle::cancel_stall(app, &run.id).await;
