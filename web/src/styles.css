@@ -3914,6 +3914,11 @@ p.project-quota-hidden {
   gap: 8px;
 }
 
+/* 對話上方那條 blocked 面板本來就有 16px 內距，這條提示不需要 modal 的左右邊距。 */
+.blocked > .blocked-modal-update {
+  margin: 0 0 8px;
+}
+
 .blocked-modal-update .update-changelog {
   flex: 1 0 100%;
   max-height: 40vh;

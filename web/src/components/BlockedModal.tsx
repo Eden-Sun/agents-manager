@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
-import { parseCodexUpdatePrompt } from '../lib/codexUpdatePrompt'
-import { projectHostName, useStore } from '../store/store'
-import { UpdateChangelog } from './UpdateChangelog'
+import { useStore } from '../store/store'
+import { CodexUpdateHint } from './CodexUpdateHint'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
 const READABLE_COLUMNS = 60
@@ -25,11 +24,6 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
   const press = usePaneKeys(botId, refresh)
   const rootRef = useRef<HTMLDivElement>(null)
-  // codex 的升級是 TUI 當場問的（`Update available! 0.153.4 -> 0.154.0`）。跟 claude 的「有更新 ·
-  // 重啟套用」同一個要求：按 1 之前先看新版改了什麼。認得出來才給，認不出來這裡什麼都不長。
-  const update = bot?.kind === 'codex' ? parseCodexUpdatePrompt(snap?.text) : null
-  const host = useStore((s) => projectHostName(s, bot?.project_id ?? null))
-  const [showLog, setShowLog] = useState(false)
   const termRef = useRef<HTMLPreElement>(null)
 
   // Escape / 關閉鈕的 handler 每次 render 都是新的；透過 ref 讀，下面的 listener 才不必
@@ -109,17 +103,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           </div>
         ) : null}
 
-        {update ? (
-          <div className="blocked-modal-update">
-            <button type="button" className="mini-btn" onClick={() => setShowLog((v) => !v)}>
-              {showLog ? '收起 changelog' : '先看改了什麼'}
-            </button>
-            <span className="hint">
-              codex {update.from ? `${update.from} → ${update.to}` : update.to}：按 1 更新前先看新版的 release notes。
-            </span>
-            {showLog ? <UpdateChangelog kind="codex" host={host} from={update.from} to={update.to} /> : null}
-          </div>
-        ) : null}
+        <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
 
         <pre className="term blocked-modal-term" ref={termRef} tabIndex={0}>
           {err ? `讀取終端失敗：${err}` : (snap?.text ?? '讀取中…')}
