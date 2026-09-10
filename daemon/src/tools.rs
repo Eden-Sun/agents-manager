@@ -314,6 +314,28 @@ pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
 /// stay in step even though claude deliberately no longer goes through the ssh pass.
 pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
 
+/// Build the interactive host-level login command. The command is intentionally sent to a
+/// temporary host shell so the CLI's device code / URL remains terminal output visible only to
+/// the UI. Identity env is quoted as shell data; it is never logged or persisted by this path.
+pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
+    let login = match kind {
+        "claude" => "claude /login",
+        "codex" => "codex login",
+        "grok" => "grok login",
+        _ => return None,
+    };
+    let prefix = env
+        .iter()
+        .filter(|(k, _)| valid_env_name(k))
+        .map(|(k, v)| format!("{k}={}", sh_quote(v)))
+        .collect::<Vec<_>>();
+    if prefix.is_empty() {
+        Some(login.into())
+    } else {
+        Some(format!("env {} {login}", prefix.join(" ")))
+    }
+}
+
 /// Write one identity's login answer into the cached `HostTools`, creating the row if the
 /// tools pass has not seen this identity yet. Returns whether anything actually changed, so
 /// the caller only pushes `host_changed` when the UI would see something new.
@@ -387,6 +409,43 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
         crate::quota_claude::unpark_identity(host, name);
     }
     Some(logged_in)
+}
+
+/// Watch a temporary identity-login pane without copying its terminal output anywhere else.
+/// Once the CLI exits (success or failure), re-probe the identity and close the pane. A pane
+/// that never reaches the CLI is also closed after the short startup grace period.
+pub fn spawn_identity_login_watch(app: Arc<App>, host: String, pane_id: String, name: String, kind: String) {
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        let mut saw_cli = false;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some((client, _)) = crate::api::shell::client_for(&app, &host).await.ok() else { return };
+            let Ok(processes) = client.pane_process_info(&pane_id).await else {
+                if tokio::time::Instant::now() >= deadline {
+                    let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+                    return;
+                }
+                continue;
+            };
+            let cli_active = processes.iter().any(|p| {
+                p.argv.iter().chain(p.argv0.iter()).any(|arg| {
+                    std::path::Path::new(arg).file_name().and_then(|v| v.to_str()) == Some(kind.as_str())
+                })
+            });
+            saw_cli |= cli_active;
+            if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
+                let _ = recheck_identity_login(&app, &host, &name).await;
+                let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+                return;
+            }
+        }
+    });
 }
 
 /// A headless `claude auth login` (what the popover's 「開 shell 登入」 runs) writes the
@@ -979,11 +1038,12 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     #[test]
     fn unreadable_answers_stay_unknown_not_logged_out() {
         // Empty (the CLI died), garbage, and a truncated block are all "could not tell".
-        let out = "AM_IDENT_BEGIN a\nAM_IDENT_END a\nAM_IDENT_BEGIN b\nzsh: command not found\nAM_IDENT_END b\nAM_IDENT_BEGIN c\n{\"loggedIn\":true}\n";
+        let out = "AM_IDENT_BEGIN a\nAM_IDENT_END a\nAM_IDENT_BEGIN b\nzsh: command not found\nAM_IDENT_RC b 0\nAM_IDENT_END b\nAM_IDENT_BEGIN c\n{\"loggedIn\":true}\n";
         let m = parse_identity_probe(out, &kinds(&[("a", "claude"), ("b", "claude"), ("c", "claude")]));
         assert_eq!(m["a"].logged_in, None);
-        assert_eq!(m["a"].reason.as_deref(), Some("auth status 輸出無法解析"));
+        assert_eq!(m["a"].reason.as_deref(), Some("auth status probe 沒有完成"));
         assert_eq!(m["b"].logged_in, None);
+        assert_eq!(m["b"].reason.as_deref(), Some("auth status 輸出無法解析"));
         // `c` never closed, so it is not reported at all (the caller keeps its unknown row).
         assert!(!m.contains_key("c"));
     }
@@ -1012,5 +1072,16 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(install_prompt("codex").unwrap().contains("npm i -g @openai/codex"));
         assert!(install_prompt("codex").unwrap().contains("codex login"));
         assert!(install_prompt("nope").is_none());
+    }
+
+    #[test]
+    fn identity_login_commands_use_the_kind_and_identity_env() {
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".into(), "/tmp/cc one".into());
+        env.insert("bad name".into(), "must not be emitted".into());
+        assert_eq!(identity_login_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude /login"));
+        assert_eq!(identity_login_command("codex", &BTreeMap::new()).as_deref(), Some("codex login"));
+        assert_eq!(identity_login_command("grok", &BTreeMap::new()).as_deref(), Some("grok login"));
+        assert!(identity_login_command("other", &BTreeMap::new()).is_none());
     }
 }

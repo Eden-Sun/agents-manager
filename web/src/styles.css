@@ -8606,6 +8606,26 @@ button.run-debug-toggle:hover {
   margin-top: 2px;
 }
 
+.identity-login-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.identity-login-btn {
+  min-height: 22px;
+  padding-inline: 7px;
+  font-size: 10.5px;
+}
+
+.identity-selection-warning {
+  color: var(--danger);
+}
+
+.identity-selection-warning.is-unknown {
+  color: var(--text-dim);
+}
+
 .identity-login {
   font-size: 11px;
   font-weight: 500;
