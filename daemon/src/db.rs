@@ -1529,6 +1529,65 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A pre-transaction build may have left a scratch table with the old shape. Recovery must
+    /// happen before SCHEMA and its full replacement table are applied, otherwise the additive
+    /// migrations see the temporary empty table and the recovered table misses their columns.
+    #[tokio::test]
+    async fn interrupted_old_shape_still_gets_later_turn_columns() {
+        let dir = tmp_dir();
+        let file = dir.join("half-migrated-old-shape.sqlite3");
+        old_file_with_turns(&file, 1).await;
+        {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display())).unwrap();
+            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+            // The status CHECK is already current, but the additive team/prompt columns are
+            // intentionally absent. This is the shape left after a build copied the table
+            // definition and then crashed before its additive migrations ran.
+            sqlx::query(
+                "CREATE TABLE turns_new (
+                   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                   run_id TEXT REFERENCES runs(id),
+                   origin TEXT NOT NULL CHECK (origin IN ('web','external')),
+                   status TEXT NOT NULL CHECK (status IN ('queued','in_flight','completed','completed_fallback','failed')),
+                   delivery TEXT NOT NULL DEFAULT 'pending' CHECK (delivery IN ('pending','ok','unknown','failed')),
+                   client_request_id TEXT, native_session_id TEXT, native_turn_id TEXT,
+                   created_at TEXT NOT NULL, completed_at TEXT)",
+            )
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO turns_new
+                   (id, conversation_id, run_id, origin, status, delivery, client_request_id,
+                    native_session_id, native_turn_id, created_at, completed_at)
+                 SELECT id, conversation_id, run_id, origin, status, delivery, client_request_id,
+                    native_session_id, native_turn_id, created_at, completed_at FROM turns",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("PRAGMA foreign_keys=OFF").execute(&pool).await.unwrap();
+            sqlx::query("DROP TABLE turns").execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+
+        let pool = open(&file).await.expect("recover and migrate an old-shaped scratch table");
+        for column in ["team_id", "team_event_id", "prompt_text"] {
+            assert!(columns(&pool, "turns").await.contains(&column.to_string()), "turns.{column} missing");
+        }
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "the recovered turn was not replaced by an empty SCHEMA table");
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages m JOIN turns t ON t.id = m.turn_id WHERE m.role = 'user'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, 1, "the message still points at its recovered turn");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The same window for `projects`: the old code's "finish the job" branch renamed
     /// `projects_new` over a `projects` that `SCHEMA` had already recreated, and the daemon
     /// failed to start forever. Now the empty copy is the one that goes.
