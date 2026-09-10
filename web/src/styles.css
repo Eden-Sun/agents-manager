@@ -8555,6 +8555,10 @@ button.run-debug-toggle:hover {
   white-space: nowrap;
 }
 
+.identity-logged-out.is-unknown {
+  color: var(--text-dim);
+}
+
 /* Bot 設定「帳號」欄的動作列：「登入 / 切換帳號」按鈕，加上送出後才冒出來的「重新偵測」。
    窄面板下讓它換行，而不是把按鈕壓扁。 */
 .bs-login-row {
@@ -8600,6 +8604,26 @@ button.run-debug-toggle:hover {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 2px;
+}
+
+.identity-login-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.identity-login-btn {
+  min-height: 22px;
+  padding-inline: 7px;
+  font-size: 10.5px;
+}
+
+.identity-selection-warning {
+  color: var(--danger);
+}
+
+.identity-selection-warning.is-unknown {
+  color: var(--text-dim);
 }
 
 .identity-login {
