@@ -27,14 +27,25 @@ export function UnreadChip() {
         .map((b) => ({ id: b.id, name: b.name, n: botUnread[b.id] ?? 0 })),
     [bots, botUnread],
   )
+  // 右半邊：現在**還在跑**的母 bot。左邊是「回來了、去看」，右邊是「還在做、別等它」——
+  // 兩件事在同一列上，一眼就知道自己丟出去的工作各自到哪了。用 `agent_status` 而不是燈號：
+  // 燈號還混進了主機斷線、啟動中那幾種顏色，那些不是「進行中」。
+  const runs = useStore((s) => s.runs)
+  const working = useMemo(
+    () =>
+      bots
+        .filter((b) => !b.pending && b.parent_bot_id === null && runs[b.id]?.agent_status === 'working')
+        .map((b) => ({ id: b.id, name: b.name })),
+    [bots, runs],
+  )
   const selectedBotId = useStore((s) => s.selectedBotId)
   const selectBot = useStore((s) => s.selectBot)
-  if (rows.length === 0) return null
+  if (rows.length === 0 && working.length === 0) return null
   // 標題列（固定 60px、擠滿了燈號／額度／分頁）放不下，所以自成一列掛在它下面：
   // 一顆 bot 一個晶片，點下去就跳過去看——不用先猜「下一個」是誰。
   return (
     <div className="unread-bar" role="status" aria-live="polite">
-      <span className="unread-bar-label">剛跑完</span>
+      {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
       {rows.map((r) => (
         <button
           key={r.id}
@@ -47,6 +58,24 @@ export function UnreadChip() {
           <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span>
         </button>
       ))}
+      {working.length > 0 ? (
+        <>
+          <span className="unread-bar-gap" />
+          <span className="unread-bar-label">進行中</span>
+          {working.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              className={`unread-chip working${w.id === selectedBotId ? ' current' : ''}`}
+              title={`${w.name} 還在跑。點一下過去看`}
+              onClick={() => selectBot(w.id)}
+            >
+              <span className="unread-chip-dot" aria-hidden="true" />
+              <span className="unread-chip-name">{w.name}</span>
+            </button>
+          ))}
+        </>
+      ) : null}
     </div>
   )
 }
