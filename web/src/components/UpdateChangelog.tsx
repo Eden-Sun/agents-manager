@@ -6,20 +6,31 @@ import { fetchChangelog, type ChangelogReply } from '../api/changelog'
  * 確認後才重啟）。三態：抓取中／找到了（一段一版，新的在前）／找不到（明講原因＋原始連結）。
  * 抓不到 changelog 不擋重啟——那是使用者的決定，這裡只負責把話講清楚。
  */
-export function UpdateChangelog({ kind, host, from }: { kind: string; host: string; from: string | null }) {
+export function UpdateChangelog({
+  kind,
+  host,
+  from,
+  to = null,
+}: {
+  kind: string
+  host: string
+  from: string | null
+  /** 已知的目標版本；codex 的更新是 TUI 當場問的、磁碟上還是舊版，只能從畫面讀。 */
+  to?: string | null
+}) {
   // 以「這次請求的 key」配對結果：key 換了就等於重新載入，不必在 effect 裡同步清狀態。
-  const key = `${kind}|${host}|${from ?? ''}`
+  const key = `${kind}|${host}|${from ?? ''}|${to ?? ''}`
   const [state, setState] = useState<{ key: string; reply: ChangelogReply } | null>(null)
 
   useEffect(() => {
     let alive = true
-    void fetchChangelog(kind, host, from).then((r) => {
+    void fetchChangelog(kind, host, from, to).then((r) => {
       if (alive) setState({ key, reply: r })
     })
     return () => {
       alive = false
     }
-  }, [kind, host, from, key])
+  }, [kind, host, from, to, key])
 
   const reply = state?.key === key ? state.reply : null
   if (!reply) {

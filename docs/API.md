@@ -1,5 +1,65 @@
 # agents-managerd HTTP / WebSocket API
 
+## AGM：歷史證據搜尋（2026-09-09）
+
+`GET /api/supervisor/evidence?q=<文字>&bot_id=<可選>&project_id=<可選>&before=<cursor>&limit=20`
+
+沿用 `X-AM-Token` 認證。`q` 必填，去除頭尾空白後 1–500 字；搜尋是字面子字串（`%`、`_` 不作萬用字元），不是語意搜尋。`limit` 限制 1–100。含已刪除 bot 的歷史，保留 bot/project ID 與名稱供接續判斷。
+
+回應 `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,content,source,incomplete,created_at,truncated}],has_more,next_cursor}`。
+依 `(created_at DESC,id DESC)` 排序；`next_cursor` 是不透明字串，下頁原樣 URL encode 放入 `before`。同毫秒訊息不會因分頁漏掉。每筆 content 最多 16,000 字，超過會有 `truncated:true`；原文仍可由既有 bot messages 介面查閱。
+空查詢、過長查詢或壞 cursor 回 400。此介面只提供證據，不宣稱回合完成等於工作成功，也不把命中次數當 bot 適合度。
+
+## AGM：總管持久層（2026-09-09）
+
+全部掛在既有 `X-AM-Token` 認證下。未部署的 daemon 對這些路徑回 404 —— 前端可以直接用 404 判斷「這台還不支援」，daemon 不會用 200＋空 body 假裝支援。
+
+- `GET /api/supervisor` →
+  `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{status,url},pending_count,assignments:[]}`。
+  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。
+  `pending_count` = 未結案 assignment ＋ 未 ack 的 inbox 事件。
+- `GET /api/supervisor/health` → daemon 端的健康摘要，包含 `status`（`healthy`、`degraded`、`critical`）、AGM
+  狀態、bot running/busy/stopped 計數、host 連線、quota 與 pending assignment。daemon 每 30 秒檢查一次，
+  只在摘要指紋變化時發 `supervisor_health` 事件；異常或恢復會進 AGM inbox，不需要 AGM 使用 `/loop`。
+- `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，
+  寫入 `CLAUDE.md`、`persona.md`、`runtime.json`（`{daemon_url,manager_bot_id,bot_id,data_dir,…}`，**不含 token**）、
+  `bin/agm`（`scripts/agm.py`，`include_str!` 編進二進位，release 安裝一樣可用）、`handoff.md`（已存在就不覆蓋）。
+  args 設為 `["--remote-control","AGM"]`，`autostart=false`。**只建立，不啟動。**
+  身份 `cc0` 不存在 → 409 `identity_missing`；專案裡有另一個同名 `AGM` 但不是本總管 → 409 `name_taken`。
+  總管認的是持久化的 `bot_id`，不是名字：使用者在側欄改名不會讓重跑 setup 多開一個。
+- `POST /api/supervisor/start {}` / `stop {}` → 同 `GET` 的 status。`start` 後 `remote.status` 是 `requested`，
+  **不是** `active`：argv 帶了 `--remote-control` 只代表要求過，遠端有沒有真的起來要另外觀察才能宣稱。
+- `POST /api/supervisor/fallback {}` → 同 status，多一個 `switched:bool`。在 cc0 的兩個候選之間切換，
+  一個冷卻窗（30 分）內最多自動切一次；額度是同一個帳號的，切第二次不會生出額度，所以會停在
+  `waiting_quota` 並記 `quota_reset_at`（讀不到就留 null，不當成 100%）。
+- `GET /api/supervisor/assignments` → `{assignments:[]}`；
+  `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?}` → 一筆 assignment
+  `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at}`。
+  `status`：`queued` | `delivered` | `unknown` | `completed` | `failed` | `cancelled`。
+  先落地再送 prompt；同 `client_request_id` 重試回同一筆（換了 bot 或換了 text 都回 409，不會靜靜當成已生效）。
+  對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，由 controller 依 15/30/60/120/300 秒退避重試，
+  一律沿用同一個 `client_request_id`，所以 worker 不會收到第二份。delivery `unknown` 只對帳、不重送。
+  送出成功的那則 user message 會把 `messages.relay_from` 標成總管 bot id（沿用既有欄位），來源顯示是「AGM → bot」而不是使用者。
+- `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；
+  `PUT /api/supervisor/handoff {summary}` → `{summary,summary_version}`，同時寫一份 `handoff.md` 到總管 cwd（權威仍在資料庫）。
+- `GET /api/supervisor/inbox` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,created_at,updated_at}]}`；
+  `POST /api/supervisor/inbox/{id}/ack` → `{}`。`state`：`pending`（還沒告訴總管）→ `delivered`（已送出通知）→ `handled`（總管確認）。
+  送出不等於處理完：通知失敗會留在 `pending`，總管自己的回合不會產生對自己的通知。
+- `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（含 run 的 `agent_status`、
+  `native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`）、未結案 assignment、待處理 inbox。
+  刻意不含 env、hook token、args 與 persona 全文。
+
+### 總管的工具入口 `bin/agm`
+
+`scripts/agm.py` 由 `include_str!` 編進 daemon 二進位，`setup` 時寫成 `<cwd>/bin/agm`（0755），所以
+release 安裝不依賴 build 機上的 repo 路徑。子命令：`state`、`supervisor`、`search`、`messages`、
+`assign`、`assignments`、`inbox`、`ack`、`handoff`、`quota`、`health`、`bot`；輸出一律 JSON。
+
+執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`。
+**沒有 token**——CLI 自己在執行期 `GET /api/session` 取，不進 argv、不進檔案、不進交接摘要；
+`daemon_url` 只接受 loopback。設定目錄可用 `AGM_RUNTIME_DIR` 覆寫（測試用），其次 `--runtime-dir`。
+`bot_id` 是早期部署的欄位名，與 `manager_bot_id` 一起寫出，兩邊誰先升級都不會壞。
+
 daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。本文件是 SPEC §7 的具體定案，
 前端請以此為準。所有時間欄位皆為 RFC3339 UTC 字串（毫秒精度）。所有 id 為 ULID 字串。
 
@@ -1805,18 +1865,24 @@ run 上：
 push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull：`git pull --rebase --no-autostash`
 （不 stash 別的 agent 的半成品）。回應同 commit（`git_push_failed` / `git_pull_failed`）。逾時 180 秒。
 
-## 更新的 changelog `GET /api/changelog?kind=claude&host=<name>&from=<version>`（2026-09-10 新增）
+## 更新的 changelog `GET /api/changelog?kind=&host=<name>&from=<version>&to=<version>`（2026-09-10 新增）
 
 「有更新 · 重啟套用」徽章／額度列的批次重啟 chip 按下去，**先**呼叫這支把新版 changelog
 擺進確認框，使用者看過按了才真的 `POST /bots/{id}/restart`。
 
-- `kind` 省略 = `claude`；目前只有 claude 有來源（其他 kind 回 `found:false`）。
+- `kind` 省略 = `claude`。支援 `claude` 與 `codex`（其他 kind 回 `found:false`）。
 - `host` 省略 = `local`。daemon 在那台主機上再跑一次 `claude --version`——磁碟上已經是新版
   （pane 裡跑著的 process 還是舊的），那就是 `installed_version`。這一步不快取。
 - `from`：現在跑著的版本（claude statusLine 報的 `runs[].status.version`）。有給就回
   `from`（不含）到 `installed_version`（含）之間每一版的段落，新的在前；沒給只回新版那一段。
-- 來源是 `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`，全文
-  快取 10 分鐘，認 `## x.y.z` 二級標題。
+- `to`：已知的目標版本。**codex 一定要給**——它的更新是 TUI 當場問（`✨ Update available!
+  0.153.4 -> 0.154.0`），新版還沒進磁碟，探 `codex --version` 只會拿到舊版；UI 從終端畫面
+  那句解出 `from` / `to` 一起帶進來。給了 `to` 就完全不探磁碟。
+- 來源：claude 是 `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；
+  codex 沒有 CHANGELOG.md（repo 那份只寫「去看 releases」），改抓
+  `https://api.github.com/repos/openai/codex/releases`，濾掉 draft／prerelease（`-alpha`），
+  把 `rust-vX.Y.Z` + release body 併成同格式的 markdown。兩者各自全文快取 10 分鐘，都認
+  `## x.y.z` 二級標題。
 
 **永遠 200**。抓不到（`--version` 失敗、GitHub 連不上、CHANGELOG 沒那一版）就是
 `found:false` + `error`，UI 必須寫「找不到 changelog」而不是靜默略過。
