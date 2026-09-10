@@ -996,6 +996,18 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   })
   const closeTeamIssue = useStore((s) => s.closeTeamIssue)
   const addTeamIssues = useStore((s) => s.addTeamIssues)
+  const rescueTeam = useStore((s) => s.rescueTeam)
+  // §2.6：跑完之後還留著沒解決的 task（failed / skipped）就給一條收尾的路。
+  const unresolved = useStore((s) => (s.teamDetail[teamId]?.tasks ?? []).filter((t) => t.state === 'failed' || t.state === 'skipped').length)
+  const rescuer = useStore((s) => {
+    const ms = teamMemberBots(s, teamId)
+    return ms.find((b) => b.team?.role === 'reviewer') ?? ms.find((b) => b.team?.role === 'worker') ?? null
+  })
+  const rescuerName = useStore((s) => {
+    const ms = teamMemberBots(s, teamId)
+    const r = ms.find((b) => b.team?.role === 'reviewer') ?? ms.find((b) => b.team?.role === 'worker')
+    return r ? teamDisplayName(r.name, ms.map((b) => b.name)) : ''
+  })
   const notify = useStore((s) => s.notify)
   const canReopen = useStore((s) => canReopenTeam(team, s.teamReopenUnavailable[teamId] === true))
   const [confirm, setConfirm] = useState<'abort' | 'cleanup' | 'delete' | 'close-issue' | null>(null)
@@ -1008,6 +1020,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const closeAllTeamIssues = useStore((s) => s.closeAllTeamIssues)
   // 「追加 issue」正在飛的那一刻：按鈕與輸入都收起來，重送只會換到一個 409。
   const addBusy = Boolean(busy[`team:${teamId}:add-issues`])
+  const rescueBusy = Boolean(busy[`team:${teamId}:rescue`])
   // 390px 的標題列放不下五顆鍵：中止與關閉改從 `⋯` 走（下面 head-actions）。
   const phone = useMediaQuery(PHONE_QUERY)
 
@@ -1142,6 +1155,19 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           ) : null}
           {/* 手機上標題列只放得下 phase chip 與一顆主要動作（放行／繼續／暫停）。中止與關閉
               不是常按的東西，收進 `⋯`——但一定要收得進去，不能只是藏掉。 */}
+          {/* §2.6：done 的 team 還留著沒解決的 task 時，把它們一次交給一個成員收尾——
+              預設 reviewer，它已經看過這個 issue 的每一份 diff，而且工作樹是空的。 */}
+          {team.phase === 'done' && unresolved > 0 && rescuer ? (
+            <button
+              type="button"
+              className="mini-btn"
+              disabled={rescueBusy}
+              title={`把 ${unresolved} 個沒解決的 task 全部交給 ${rescuerName} 收尾（會重新啟動成員）`}
+              onClick={() => void rescueTeam(teamId)}
+            >
+              {rescueBusy ? '交接中…' : `交給 ${rescuerName} 收尾（${unresolved}）`}
+            </button>
+          ) : null}
           {phone ? null : terminal ? (
             <button type="button" className="mini-btn danger" title="移除 worktree 與成員 bot（分支保留）" onClick={() => setConfirm('cleanup')}>
               清理

@@ -254,6 +254,12 @@ impl Ctx {
     /// batch (§6.2's per-issue directories); a finite parallelism has one pool for the team,
     /// which a `done.workers = "keep"` may carry across issues under its old name.
     fn workers_for(&self, issue: &db::TeamIssue) -> Vec<&db::Bot> {
+        // §2.6: a rescue is one member finishing what the team could not. While it runs that
+        // member is the issue's only executor — the retired dev workers are gone, and the
+        // rescuer (usually the reviewer) is the one holding the task.
+        if let Some(id) = self.team.rescue_bot_id.as_deref() {
+            return self.members.iter().filter(|b| b.id == id).collect();
+        }
         if self.unlimited() {
             team::workers_of_issue(&self.members, &self.team.id, issue.seq)
         } else {
@@ -1164,6 +1170,65 @@ async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     hand_issue_to_pm(app, team_id, false, Some(context_lost)).await
 }
 
+/// §2.6: the rescue is over when its issue is. Clearing the column puts `workers_for` back to
+/// the ordinary pool, so a later reopen builds real executors again.
+async fn clear_rescue(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    sqlx::query("UPDATE teams SET rescue_bot_id = NULL WHERE id = ? AND rescue_bot_id IS NOT NULL")
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    Ok(())
+}
+
+/// Phase `starting` for a rescue (§2.6): PM, reviewer and the rescuer come back with their
+/// native sessions, then the team goes straight to `working` — the task the user asked for is
+/// already in the table, so there is nothing for the PM to plan.
+async fn rescue_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let ctx = Ctx::load(app, team_id).await?;
+    let Some(rescuer_id) = ctx.team.rescue_bot_id.clone() else { return Ok(()) };
+    for e in crate::trust::pretrust_members(app, &ctx.members).await {
+        tracing::warn!(team = %team_id, error = %e, "could not pre-trust a team worktree on rescue");
+        note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
+    }
+    for b in &ctx.members {
+        let wanted = b.id == rescuer_id || matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer"));
+        if !wanted {
+            continue;
+        }
+        if db::active_run(&app.db, &b.id).await.map_err(up)?.is_some() {
+            continue;
+        }
+        if let Err(e) = lifecycle::start_bot_with(app, &b.id, lifecycle::StartOpts { resume_native: true }).await {
+            report_member_start_failure(app, team_id, b, &format!("{e:?}")).await?;
+            // Same rule as a reopen: a rescue that cannot bring a member back pauses in place.
+            // Throwing away a delivered issue over a start error would be the worse trade.
+            let reason = format!("member_failed:{}", team::short_name(&b.name, team_id));
+            pause(app, &ctx.team, &reason).await?;
+            return Ok(());
+        }
+    }
+    sqlx::query("UPDATE teams SET started_at = COALESCE(started_at, ?) WHERE id = ?")
+        .bind(db::now())
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    team::set_phase(app, team_id, "working", None, None).await?;
+    // `fill_workers` hands the task over on the next pass; tell the PM what is happening so the
+    // timeline (and the PM's own context) does not skip from "done" to a merge out of nowhere.
+    let ctx = Ctx::load(app, team_id).await?;
+    if let Some(pm) = ctx.pm() {
+        let who = ctx.by_id(&rescuer_id).map(|b| ctx.short(b)).unwrap_or_else(|| "收尾者".into());
+        let text = format!(
+            "使用者把這個 issue 沒解決的 task 全部交給 {who} 收尾了。\
+             它做完會照常回報、審查、合併；在那之前你不用派工，回 `wait` 就好。",
+        );
+        enqueue(app, team_id, None, &pm.id, None, "rescue", text).await?;
+    }
+    Ok(())
+}
+
 /// Whether the PM received a `member_context_lost` note after the latest reopen action. The
 /// scheduler uses this durable event rather than an in-memory flag, so a daemon restart between
 /// starting the member and sending the relay preserves the wording choice.
@@ -1200,6 +1265,11 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     // that distinction is durable and survives a daemon restart.
     if ctx.issues.is_empty() && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_some() {
         return reopen_startup(app, team_id).await;
+    }
+    // §2.6: a rescue re-opened a finished issue with the task already written. Nothing to plan
+    // and no new executors to build — just bring the three bots back and let the engine run.
+    if ctx.team.rescue_bot_id.is_some() {
+        return rescue_startup(app, team_id).await;
     }
     // The §6.2 worktrees are directories claude and codex have never seen, and both stop the
     // first interactive run in one on a "do you trust this folder?" dialog — with the cursor
@@ -1419,8 +1489,16 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
                 changed = true;
             }
         }
-        Some(rev) if !tasks.iter().any(|t| t.state == "reviewing") => {
-            if let Some(t) = tasks.iter().find(|t| t.state == "reported") {
+        Some(rev) => {
+            // §2.6: nobody reviews their own work. A rescue is carried by the reviewer itself,
+            // so its report goes straight to the merge queue — the alternative is asking a bot
+            // to approve the diff it just wrote.
+            for t in tasks.iter().filter(|t| t.state == "reported" && t.worker_bot_id.as_deref() == Some(rev.id.as_str())) {
+                set_task_state(app, &t.id, "merging").await?;
+                changed = true;
+            }
+            if !changed && !tasks.iter().any(|t| t.state == "reviewing") {
+            if let Some(t) = tasks.iter().find(|t| t.state == "reported" && t.worker_bot_id.as_deref() != Some(rev.id.as_str())) {
                 let wt = ctx.wt(rev)?;
                 if let Err(e) = tg::checkout_detach(app, ctx.host(), &wt, &t.branch).await {
                     note(app, team_id, json!({"action": "review_checkout_failed", "error": e.to_string()})).await?;
@@ -1444,8 +1522,8 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
                 enqueue(app, team_id, t.worker_bot_id.as_deref(), &rev.id, Some(&t.id), "review", text).await?;
                 changed = true;
             }
+            }
         }
-        Some(_) => {}
     }
 
     // 2. merge whatever is approved — SPEC-team §6.1 #3, by the daemon, with git.
@@ -2551,6 +2629,7 @@ async fn close_issue_and_advance(
                "branch": current.branch, "reason": fail_reason}),
     )
     .await?;
+    clear_rescue(app, team_id).await?;
     let next = db::next_queued_issue(&app.db, team_id).await.map_err(up)?;
     let Some(next) = next else {
         // Last issue: leave the worktrees exactly as `finish` always did. `done` stops the
@@ -2640,6 +2719,7 @@ async fn close_one_issue(
                "branch": issue.branch, "reason": fail_reason}),
     )
     .await?;
+    clear_rescue(app, team_id).await?;
     team::retire_workers_of_issue(app, team_id, issue).await;
     team::sync_issue_mirror(app, team_id).await?;
     start_issues_up_to_capacity(app, team_id).await?;
