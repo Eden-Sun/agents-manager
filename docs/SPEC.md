@@ -225,6 +225,7 @@ label = "foo"
   autostart = true
 ```
 
+- 載入時未知欄位以 `serde_ignored` 收集並用 `WARN` 回報完整欄位路徑（仍容許載入，保留向前相容）。
 - 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；mtime 與載入時不符回 409。`toml_edit` 保留註解為第二階段。
 - 改 `name` 時若有 active Run 拒絕（herdr agent name 綁定啟動時的名稱）。
 - 改 `listen` port 需重啟 daemon，且既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）；UI 顯示提示。
