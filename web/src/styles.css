@@ -6211,22 +6211,22 @@ button.model-tag:hover:not(:disabled) {
   background: transparent;
 }
 
-/* 「claude 有更新」：額度列上的 chip（見 UpdateQuotaChip.tsx）。跟 `.update-badge` 同一套
-   形狀與 accent 配色——那顆講的是「這一顆 bot 有新版」，這顆講的是「claude 全域有新版，
-   閒置的一次全部重啟」，同一件事的兩個尺度，所以不另開一組顏色。 */
+/* 「claude 有更新」：額度列最左邊那顆（見 UpdateQuotaChip.tsx）。2026-09-11 使用者：外觀跟
+   側欄那顆（`.bot-update-dot`）一致——**綠色的裸 chevron，不要方框**。本來是 accent 色的
+   方框 chip，跟旁邊的量表一比像是另一顆按鈕，而側欄早就用綠色雙 chevron 代表「有新版」；
+   同一件事在兩個地方要長同一個樣子。數字留著（是哪幾顆的量），跟著同一個綠色走。 */
 .quota-update {
   flex: none;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   height: 18px;
-  padding: 0 6px;
+  padding: 0 2px;
   font-size: 11px;
   font-weight: 650;
-  border-radius: 3px;
-  border: 1px solid var(--border-strong);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
+  border: 0;
+  background: none;
+  color: var(--lamp-green);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -6236,7 +6236,7 @@ button.model-tag:hover:not(:disabled) {
 }
 
 .quota-update:hover:not(:disabled) {
-  border-color: var(--accent-ink);
+  filter: brightness(1.25);
 }
 
 .quota-update:focus-visible {
@@ -6247,8 +6247,6 @@ button.model-tag:hover:not(:disabled) {
 /* 有更新但全都在忙：數字改寫「在忙幾顆」，顏色退成灰的——現在按不動，不該搶眼。 */
 .quota-update.waiting,
 .quota-update:disabled {
-  background: var(--bg-sunken);
-  border-color: var(--border-strong);
   color: var(--text-faint);
   cursor: default;
 }
@@ -6259,8 +6257,6 @@ button.model-tag:hover:not(:disabled) {
 }
 
 .quota-update.running.bad {
-  background: var(--danger-soft);
-  border-color: var(--danger);
   color: var(--danger);
 }
 
