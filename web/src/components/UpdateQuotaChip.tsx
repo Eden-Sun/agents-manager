@@ -6,14 +6,18 @@ import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 
 /**
- * 「claude 有更新」擺在額度列上（SPEC §6.9）。
+ * 「claude 有更新」擺在額度列**最左邊**（SPEC §6.9；位置與外觀 2026-09-11 使用者定）。
  *
  * 原本是側欄搜尋框上面一整條橫幅。但那條只在側欄裡看得到——手機把側欄收起來、看 team 面板、
  * 或視窗窄到側欄讓位時，就完全沒有提示；而「claude 有沒有新版」跟「claude 還剩多少額度」是
  * 同一件事的兩面（都是這個 kind 的全域狀態，跟你現在選哪顆 bot 無關），額度列本來就已經
  * 掛在每個畫面的標題列上，且每個 kind 一格。所以更新提示搬進來，跟 kind 的量表排在一起。
  *
- * 條子上放不下「重啟 N 顆閒置的 Bot」那句話，所以 chip 只留箭頭與數字，整句話走 tooltip 與
+ * 外觀跟側欄那顆（`UpdateBadge variant="dot"`／`.bot-update-dot`）一致：綠色的裸 chevron，
+ * 沒有方框。同一件事在兩個地方本來就該長同一個樣子，而且夾在兩個 kind 的量表中間的方框
+ * 看起來像是後面那個 kind 的按鈕——所以也一併移到整條額度的最左邊。
+ *
+ * 條子上放不下「重啟 N 顆閒置的 Bot」那句話，所以只留箭頭與數字，整句話走 tooltip 與
  * `aria-label`（跟同一列的停用開關同一套做法）。按下去做的事完全沒變：閒置的一次全部
  * exit + `--resume` 接回來，忙的跳過。
  *

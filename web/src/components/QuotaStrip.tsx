@@ -929,22 +929,23 @@ export function QuotaStrip({
   // 手機一顆 chip 看不見其他 kind。改把全部身分／kind 攤在一列裡橫向捲。
   const shown = compact ? ordered : tight ? [focusEntry ?? ordered[0]] : ordered
   const hidden = ordered.length - shown.length
-  /** 條上最後一格 claude（claude 有多個身分時就是最右邊那一格）；-1 = 這次沒畫到 claude。 */
-  const lastClaude = shown.reduce((at, e, i) => (e.kind === 'claude' ? i : at), -1)
-
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
       {/* 這排本來整個是一顆 `<button>`。停用開關要長在每一格身分卡裡（數字正下方），
           checkbox 不能塞在 button 裡，所以改成一個容器：每一格自己有「點開 popover」的
           按鈕，開關是它的兄弟節點。點條子照樣打開 popover，行為沒變。 */}
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
+        {/* 「claude 有更新」放在整條額度的**最左邊**（2026-09-11 使用者）。本來貼在 claude
+            那幾格右邊，於是它夾在兩個 kind 中間，看起來像是後面那個 kind 的東西；靠左先出現
+            就沒有這個誤會，位置也不會隨著窄視窗少畫幾格而跳來跳去。沒有更新時它自己不畫。 */}
+        <UpdateQuotaChip />
         {/* 遠端才掛主機名：本機是預設狀態，多一個「本機」標籤只會佔掉標題列的寬度。 */}
         {remote ? (
           <span className="quota-host" aria-hidden="true">
             {host}
           </span>
         ) : null}
-        {shown.map((entry, i) => {
+        {shown.map((entry) => {
           let focused = false
           if (focusKind && entry.kind === focusKind) {
             if (entry.kind !== 'claude') {
@@ -980,10 +981,6 @@ export function QuotaStrip({
                   }
                 }}
               />
-              {/* 「claude 有更新」貼在 claude 那幾格的**右邊**（多身分時只掛在最後一格後面）：
-                  它講的是 claude 這個 kind 的全域狀態，跟量表是同一件事的兩個數字，所以要跟
-                  kind 站在一起，不是被推到整條列的尾巴。 */}
-              {i === lastClaude ? <UpdateQuotaChip /> : null}
             </Fragment>
           )
         })}
@@ -1003,9 +1000,6 @@ export function QuotaStrip({
             +{hidden}
           </button>
         ) : null}
-        {/* 窄視窗下條上只留焦點那一格，claude 的量表可能整個不在——更新是全域的，提示不能
-            跟著消失，所以沒有 claude 格可貼時退回列尾。 */}
-        {lastClaude < 0 ? <UpdateQuotaChip /> : null}
       </div>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`} style={popTop !== null ? { top: popTop } : undefined}>
