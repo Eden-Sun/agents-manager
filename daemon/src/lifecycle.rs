@@ -2912,6 +2912,20 @@ pub async fn prompt_grouped(
         let _ = insert_message(app, &conv, None, "system", &hint, "system", false, None).await;
         return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
     }
+    // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
+    // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
+    // `codex_live::picker_open`）。所以先看一眼並把它關掉，關不掉就講清楚，別把訊息餵進去。
+    if bot.kind == "codex" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, &run).await {
+                if !crate::codex_live::close_picker(&client, pane).await {
+                    let hint = "codex 的 /model 選單擋在輸入列前面，關不掉。請到「終端」分頁按 Esc 回到輸入列再送一次。";
+                    let _ = insert_message(app, &conv, None, "system", hint, "system", false, None).await;
+                    return Err(LcError::conflict("picker_open", json!({"run_id": run.id, "message": hint})));
+                }
+            }
+        }
+    }
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status IN ('in_flight','completed','completed_fallback') LIMIT 1",
     )

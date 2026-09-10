@@ -120,11 +120,54 @@ async fn text(client: &HerdrClient, pane_id: &str, t: &str) -> bool {
     client.pane_send_text(pane_id, t).await.is_ok()
 }
 
-/// One picker step: press `n` and give the TUI a moment to redraw.
+/// Is a `/model` picker (either level) currently on screen?
+///
+/// The footer is the reliable half: both levels print `Press enter to confirm or esc to go
+/// back`, and it survives a narrow pane better than the headings do. The headings are kept as
+/// a second way in, since a very short pane can scroll the footer out of the visible rows.
+///
+/// This is the thing that must be true *before* anyone types into a codex pane: keys sent to
+/// an open picker are not text, they are menu navigation — 2026-09-10 the user's message was
+/// eaten by one of these and its Enter silently moved the session to another model.
+pub fn picker_open(screen: &str) -> bool {
+    let t = screen.to_lowercase();
+    t.contains("press enter to confirm or esc to go back")
+        || t.contains("select model and effort")
+        || t.contains("select reasoning level")
+}
+
+/// Escapes until no picker is left on screen. Returns `true` when the pane is clear.
+///
+/// One Escape is **not** enough: codex says `esc to go back`, and from `Select Reasoning
+/// Level` it means exactly that — you land back on `Select Model and Effort`, still open. Every
+/// failure exit below has to walk all the way out, or the next thing typed into this pane goes
+/// into the menu instead of the composer.
+pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
+    for _ in 0..PICKER_ESCAPES {
+        if !picker_open(&read(client, pane_id).await) {
+            return true;
+        }
+        if !key(client, pane_id, "Escape").await {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    !picker_open(&read(client, pane_id).await)
+}
+
+/// Escapes to spend getting out of the picker: two levels, plus the nested `More reasoning…`
+/// one, plus one spare.
+const PICKER_ESCAPES: u32 = 4;
+
+/// One picker step: press `n` and give the TUI a moment to redraw. A send that does not go
+/// through leaves the menu open, so back out before reporting the failure.
 async fn press_number(client: &HerdrClient, pane_id: &str, n: u32) -> bool {
-    let ok = text(client, pane_id, &n.to_string()).await;
+    if !text(client, pane_id, &n.to_string()).await {
+        close_picker(client, pane_id).await;
+        return false;
+    }
     tokio::time::sleep(Duration::from_millis(700)).await;
-    ok
+    true
 }
 
 /// Send `/model` and walk the two menus to `(model, effort)`.
@@ -139,10 +182,12 @@ async fn apply_model_and_effort(
     effort: Option<&str>,
 ) -> bool {
     if !text(client, pane_id, "/model").await {
+        close_picker(client, pane_id).await;
         return false;
     }
     tokio::time::sleep(Duration::from_millis(600)).await;
     if !key(client, pane_id, "Enter").await {
+        close_picker(client, pane_id).await;
         return false;
     }
     tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -150,12 +195,12 @@ async fn apply_model_and_effort(
     let screen = read(client, pane_id).await;
     if !screen.contains("Select Model") {
         // The menu never opened (busy pane, older codex). Leave the composer clean.
-        let _ = key(client, pane_id, "Escape").await;
+        close_picker(client, pane_id).await;
         return false;
     }
     let needle = model.map(str::to_string).unwrap_or_else(|| "(current)".to_string());
     let Some(n) = picker_number(&screen, &needle) else {
-        let _ = key(client, pane_id, "Escape").await;
+        close_picker(client, pane_id).await;
         return false;
     };
     if !press_number(client, pane_id, n).await {
@@ -164,19 +209,19 @@ async fn apply_model_and_effort(
 
     let screen = read(client, pane_id).await;
     if !screen.contains("Select Reasoning Level") {
-        let _ = key(client, pane_id, "Escape").await;
+        close_picker(client, pane_id).await;
         return false;
     }
     let want = effort.unwrap_or("");
     let needle = if want.is_empty() { "(default)".to_string() } else { effort_menu_label(want).to_string() };
     if needle.is_empty() {
-        let _ = key(client, pane_id, "Escape").await;
+        close_picker(client, pane_id).await;
         return false;
     }
     // `max` / `ultra` sit one menu deeper, behind `More reasoning`.
     let screen = if is_nested_effort(want) && picker_number(&screen, &needle).is_none() {
         let Some(more) = picker_number(&screen, "More reasoning") else {
-            let _ = key(client, pane_id, "Escape").await;
+            close_picker(client, pane_id).await;
             return false;
         };
         if !press_number(client, pane_id, more).await {
@@ -187,10 +232,15 @@ async fn apply_model_and_effort(
         screen
     };
     let Some(n) = picker_number(&screen, &needle) else {
-        let _ = key(client, pane_id, "Escape").await;
+        close_picker(client, pane_id).await;
         return false;
     };
-    press_number(client, pane_id, n).await
+    if !press_number(client, pane_id, n).await {
+        return false;
+    }
+    // The confirming digit closes both menus. If anything is still up, this pane is not safe
+    // to hand back — the next prompt would be typed into it — so walk out before saying so.
+    close_picker(client, pane_id).await
 }
 
 /// Flip the fast tier with `/fast`. It is a toggle, so `want` is only reachable when the
@@ -322,6 +372,32 @@ mod tests {
         assert_eq!(picker_number(EFFORT_MENU, "Max"), None, "max / ultra are one menu deeper");
         assert_eq!(picker_number(EFFORT_MENU, "Ultra"), None);
         assert_eq!(picker_number(MODEL_MENU, "gpt-4"), None);
+    }
+
+    /// Real composer, codex 0.154.0 (2026-09-10) — nothing in the way.
+    const COMPOSER: &str = "\
+─ Worked for 1m 17s ────────────────────────────────────
+
+• Model changed to gpt-6-astra high
+
+› Ask Codex to do anything
+
+  gpt-6-astra high · ~/project/agents-manager · Context 44% used · 5h 10% left
+";
+
+    /// Both levels of the picker are a menu, not an input box: text sent there is navigation,
+    /// and its Enter confirms a row. 2026-09-10 a user's message went into one of these
+    /// (`codex-astra`, pane w168:p19) — the message vanished and the session moved to
+    /// gpt-5.6-luna medium on its own.
+    #[test]
+    fn a_pane_showing_a_picker_is_not_ready_for_text() {
+        assert!(picker_open(MODEL_MENU));
+        assert!(picker_open(EFFORT_MENU));
+        // The footer alone is enough: a short pane can scroll the heading away.
+        assert!(picker_open("  Press enter to confirm or esc to go back\n"));
+        assert!(!picker_open(COMPOSER));
+        assert!(!picker_open(STATUS));
+        assert!(!picker_open(""));
     }
 
     #[test]
