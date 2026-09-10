@@ -717,6 +717,20 @@ export async function addTeamIssues(teamId: string, issueNumbers: number[]): Pro
   await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/issues`, { issue_numbers: issueNumbers })
 }
 
+/**
+ * `POST /api/teams/:id/rescue`（SPEC-team §2.6）——把跑完的 team 裡沒解決的 task 全部交給
+ * 一個成員收尾。`botId` 省略 = reviewer。回傳實際交給誰、收了幾個。
+ */
+export async function rescueTeam(teamId: string, botId?: string): Promise<{ bot: string; rescued: number }> {
+  const raw = await transport.request(
+    'POST',
+    `/teams/${encodeURIComponent(teamId)}/rescue`,
+    botId ? { bot_id: botId } : {},
+  )
+  const o = isRec(raw) ? raw : {}
+  return { bot: str(pick(o, 'bot')), rescued: num(pick(o, 'rescued')) }
+}
+
 /** `DELETE /api/teams/:id/issues/:issue_id` — 只能移除還沒開始的（`queued`）。 */
 export async function removeTeamIssue(teamId: string, issueId: string): Promise<void> {
   await transport.request(

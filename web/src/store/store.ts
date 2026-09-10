@@ -598,6 +598,8 @@ export interface StoreState {
   decideTeamTask: (teamId: string, taskId: string, action: TeamTaskDecision, note?: string) => Promise<boolean>
   /** `POST /teams/:id/issues`（SPEC-team §2.3）——執行中續加 issue 到佇列。 */
   addTeamIssues: (teamId: string, issueNumbers: number[]) => Promise<boolean>
+  /** SPEC-team §2.6：把跑完的 team 裡沒解決的 task 全部交給一個成員（省略 = reviewer）。 */
+  rescueTeam: (teamId: string, botId?: string) => Promise<boolean>
   /** `DELETE /teams/:id/issues/:issue_id` — 只能移除還沒開始的。 */
   removeTeamIssue: (teamId: string, issueId: string) => Promise<boolean>
 }
@@ -1911,6 +1913,25 @@ export const useStore = create<StoreState>((set, get) => ({
     })
     return ok
   },
+  async rescueTeam(teamId, botId) {
+    const key = `team:${teamId}:rescue`
+    if (get().busy[key]) return false
+    let ok = false
+    set((s) => ({ busy: { ...s.busy, [key]: true } }))
+    try {
+      const r = await api.rescueTeam(teamId, botId)
+      ok = true
+      await get().loadTeam(teamId)
+      get().notify('info', `已把 ${r.rescued} 個沒解決的 task 交給 ${r.bot} 收尾`)
+    } catch (e) {
+      if (markTeamsUnsupported(set, get, e)) return false
+      get().notify('error', errText(e))
+    } finally {
+      set((s) => ({ busy: withoutKey(s.busy, key) }))
+    }
+    return ok
+  },
+
   async addTeamIssues(teamId, issueNumbers) {
     const key = `team:${teamId}:add-issues`
     if (get().busy[key]) return false

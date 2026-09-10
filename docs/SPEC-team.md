@@ -273,6 +273,33 @@ PM 的價值在它記得這個 repo、記得上一個 issue 的取捨。停掉�
 
 ---
 
+### 2.6 Rescue：把沒解決的 task 交給一個人收尾（2026-09-11）
+
+跑完的 team（`phase=done`）常常還留著 `failed` / `skipped` 的 task。重排一次 issue（§2.5）會把
+規劃整個重跑，已經合併的成果也失去意義；使用者要的是**擇一個成員把沒解決的一次處理掉，通常是 reviewer**
+——它已經看過這個 issue 的每一份 diff，而且工作樹是空的。
+
+`POST /teams/{id}/rescue`（body `{"bot_id"?}`，省略 = reviewer）：
+
+1. **放行條件**：`phase=done`、未 cleanup（PM 的 bot 還在，同 §2.5.1 的判準）、且至少一個 task 是
+   `failed` / `skipped`。收尾者必須是這個 team 還活著的成員，且**不能是 PM**：PM 的 cwd 是整合
+   工作樹 `main/`，在那裡切任務分支會弄髒 daemon 要合併的現場。
+2. **一個 task，不是一個失敗一個 task**：`team_tasks_one_open_per_worker` 本來就限制一個成員同時只有
+   一個未終態的 task；而且使用者交代的是「把這幾件處理掉」這一件事。brief 逐條列出每個未解決 task 的
+   seq、標題、原 brief 與最後回報，`files` 取聯集，分支照常是 `<整合分支>-t<seq>`。
+3. **回到佇列**：那個 issue 的列改回 `working`（`ended_at` 清掉）、`teams.ended_at=NULL`、
+   `teams.rescue_bot_id=<收尾者>`，phase → `starting`，並記一則 `team_rescue` note。
+4. **scheduler**：
+   - `rescue_bot_id` 有值時，該 issue 的執行者就是它一個人（`workers_for`）——上一批 dev 執行者早就
+     retire 了。
+   - `starting` 走 `rescue_startup`：PM / reviewer / 收尾者用 native session 重啟（起不來就
+     `paused(member_failed:*)`，跟 §2.5.2 同樣的理由：不能為了一個啟動錯誤丟掉已交付的成果），
+     然後直接 `working`——task 已經在表裡，沒有東西要規劃。PM 收到一則 `rescue` relay 說明現在的情況。
+   - **自己不審自己**：`reported` 的 task 若執行者就是 reviewer，直接進 `merging`。要一個 bot 審查
+     自己剛寫的 diff 沒有意義。
+   - issue 收掉時清 `rescue_bot_id`，之後的 reopen 才會照常建新執行者。
+5. 之後就是普通流程：回報 → （不是自己寫的才）審查 → 合併 → PM `done` → team 回到 `done`。
+
 ## 3. 架構：daemon 內的 Team Scheduler
 
 ```

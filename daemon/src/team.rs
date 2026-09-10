@@ -3255,6 +3255,157 @@ pub async fn answer(app: &Arc<App>, team_id: &str, text: &str, client_request_id
     Ok(out)
 }
 
+/// `POST /api/teams/:id/rescue` — SPEC-team §2.6 (2026-09-11 使用者).
+///
+/// A finished team can still be carrying tasks nobody solved (`failed` / `skipped`). Re-queuing
+/// the whole issue (§2.5) restarts planning and throws away what *did* land; what the user
+/// actually wants is 「擇一個 model 來處理所有失敗的」——usually the reviewer, which by then has
+/// read every diff in this issue and has an idle worktree.
+///
+/// So: one new task carrying **all** of them, handed to one member. One task and not one per
+/// failure because `team_tasks_one_open_per_worker` allows a member exactly one open task at a
+/// time — and because "fix these five things" is the single job the user is asking for.
+///
+/// The PM may not be the rescuer: its cwd is the integration worktree (`main/`), and cutting a
+/// task branch there would dirty the tree the daemon merges into.
+pub async fn rescue(app: &Arc<App>, team_id: &str, bot_id: Option<&str>) -> LcResult<Value> {
+    let t = load(app, team_id).await?;
+    if t.phase != "done" {
+        return Err(LcError::conflict("team is not finished", json!({"phase": t.phase})));
+    }
+    let members = db::team_members(&app.db, team_id).await.map_err(any_err)?;
+    let live: Vec<&db::Bot> = members.iter().filter(|b| b.deleted_at.is_none()).collect();
+    if !live.iter().any(|b| b.team_role.as_deref() == Some("pm")) {
+        // §2.5.1's judge, for the same reason: a cleaned-up team has no worktrees left.
+        return Err(LcError::conflict("team is cleaned up", json!({"phase": t.phase})));
+    }
+    let tasks = db::team_tasks(&app.db, team_id).await.map_err(any_err)?;
+    let unresolved: Vec<&db::TeamTask> =
+        tasks.iter().filter(|x| x.state == "failed" || x.state == "skipped").collect();
+    if unresolved.is_empty() {
+        return Err(LcError::conflict("nothing to rescue", json!({"phase": t.phase})));
+    }
+    let bot = match bot_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => *live
+            .iter()
+            .find(|b| b.id == id)
+            .ok_or_else(|| LcError::conflict("not a live member of this team", json!({"bot_id": id})))?,
+        None => *live
+            .iter()
+            .find(|b| b.team_role.as_deref() == Some("reviewer"))
+            .ok_or_else(|| LcError::conflict("this team has no reviewer; pick a member", json!({"team_id": team_id})))?,
+    };
+    if bot.team_role.as_deref() == Some("pm") {
+        return Err(LcError::conflict("the PM cannot be the rescuer", json!({"bot_id": bot.id})));
+    }
+
+    // Which issue does the rescue belong to? The one the newest unresolved task was cut from,
+    // so its branch is the integration branch that already carries everything that merged.
+    let issues = db::team_issues(&app.db, team_id).await.map_err(any_err)?;
+    let newest = unresolved.iter().max_by_key(|x| x.seq).copied().expect("non-empty");
+    let issue = newest
+        .issue_id
+        .as_deref()
+        .and_then(|id| issues.iter().find(|i| i.id == id))
+        .or_else(|| issues.iter().max_by_key(|i| i.seq))
+        .ok_or_else(|| LcError::conflict("this team has no issue to rescue into", json!({"team_id": team_id})))?;
+    let integration = issue.branch.clone().unwrap_or_else(|| t.branch.clone());
+
+    let next_seq = tasks.iter().map(|x| x.seq).max().unwrap_or(0) + 1;
+    let branch = task_branch(&integration, next_seq);
+    let mut brief = String::from(
+        "這些 task 上一輪沒有解決（failed / skipped）。請在你的 cwd 逐一處理掉，\
+         做不到的在回報裡說明原因，不要留給下一個人猜。\n\n",
+    );
+    let mut files: Vec<String> = Vec::new();
+    for x in &unresolved {
+        let fs: Vec<String> = serde_json::from_str(&x.files_json).unwrap_or_default();
+        for f in &fs {
+            if !files.iter().any(|y| y == f) {
+                files.push(f.clone());
+            }
+        }
+        brief.push_str(&format!(
+            "## t{seq}「{title}」（{state}）\n{b}\n{last}相關檔案：{f}\n\n",
+            seq = x.seq,
+            title = x.title,
+            state = x.state,
+            b = x.brief.trim(),
+            last = match x.last_report.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+                Some(r) => format!("最後回報：{r}\n"),
+                None => String::new(),
+            },
+            f = if fs.is_empty() { "（未指定）".to_string() } else { fs.join("、") },
+        ));
+    }
+
+    let task_id = db::ulid();
+    let now = db::now();
+    sqlx::query(
+        "INSERT INTO team_tasks (id, team_id, issue_id, seq, title, brief, files_json, want_worker_bot_id,
+           branch, state, round, rebase_attempts, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'queued',0,0,?,?)",
+    )
+    .bind(&task_id)
+    .bind(team_id)
+    .bind(&issue.id)
+    .bind(next_seq)
+    .bind(format!("收尾未解決的 {} 個 task", unresolved.len()))
+    .bind(&brief)
+    .bind(serde_json::to_string(&files).unwrap_or_else(|_| "[]".into()))
+    .bind(&bot.id)
+    .bind(&branch)
+    .bind(&now)
+    .bind(&now)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+
+    // Back onto the queue: the issue is being worked again, the team is no longer ended, and
+    // `rescue_bot_id` is what makes the chosen member the issue's only executor (§2.6).
+    // `ended_at` goes back to NULL with it: the issue is being worked again, and §2.3 reads
+    // that column to tell a finished entry from a live one.
+    sqlx::query("UPDATE team_issues SET state = 'working', ended_at = NULL WHERE id = ?")
+        .bind(&issue.id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    sqlx::query("UPDATE teams SET ended_at = NULL, rescue_bot_id = ? WHERE id = ?")
+        .bind(&bot.id)
+        .bind(team_id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
+    record_event(
+        app,
+        team_id,
+        "note",
+        None,
+        Some(&bot.id),
+        Some(&task_id),
+        None,
+        json!({
+            "action": "team_rescue",
+            "by": "user",
+            "bot": short_name(&bot.name, team_id),
+            "issue_number": issue.issue_number,
+            "task_seqs": unresolved.iter().map(|x| x.seq).collect::<Vec<_>>(),
+        }),
+    )
+    .await?;
+    // Members were stopped when the team finished, so this goes through `starting` like a
+    // reopen does — `rescue_startup` brings PM / reviewer / rescuer back and hands over.
+    set_phase(app, team_id, "starting", None, None).await?;
+    spawn_scheduler(app, team_id);
+    let created = db::team_task(&app.db, &task_id).await.map_err(any_err)?;
+    Ok(json!({
+        "task": created.as_ref().map(task_json),
+        "bot_id": bot.id,
+        "bot": short_name(&bot.name, team_id),
+        "issue_number": issue.issue_number,
+        "rescued": unresolved.len(),
+    }))
+}
+
 /// `POST /api/teams/:id/tasks/:tid/decide` — the human unblocking one task (SPEC-team §8.2).
 pub async fn decide(
     app: &Arc<App>,
@@ -5222,6 +5373,61 @@ mod api_tests {
         let older = events(&app, &tid, evs[0]["id"].as_str(), 100).await.unwrap();
         assert_eq!(older["has_more"], false);
         assert_eq!(older["events"].as_array().unwrap().len(), 4, "3 notes + the creation event");
+    }
+
+    /// §2.6 rescue: a finished team's unresolved tasks become **one** task for **one** member.
+    #[tokio::test]
+    async fn rescue_hands_every_unresolved_task_to_one_member() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), true)).await;
+        let members = db::team_members(&app.db, &tid).await.unwrap();
+        let reviewer = members.iter().find(|b| b.team_role.as_deref() == Some("reviewer")).unwrap().clone();
+        let pm = members.iter().find(|b| b.team_role.as_deref() == Some("pm")).unwrap().clone();
+        let issue = db::team_issues(&app.db, &tid).await.unwrap().remove(0);
+        let mut ids = Vec::new();
+        for (seq, state) in [(1, "merged"), (2, "failed"), (3, "skipped")] {
+            let id = db::ulid();
+            sqlx::query(
+                "INSERT INTO team_tasks (id, team_id, issue_id, seq, title, brief, files_json, branch, state, round, created_at, updated_at)
+                 VALUES (?,?,?,?,?,?,'[\"a.rs\"]','br',?,0,?,?)",
+            )
+            .bind(&id).bind(&tid).bind(&issue.id).bind(seq)
+            .bind(format!("t{seq}")).bind(format!("做 t{seq}")).bind(state)
+            .bind(db::now()).bind(db::now())
+            .execute(&app.db).await.unwrap();
+            ids.push(id);
+        }
+
+        // A team still running has nothing to rescue — that is what `decide` is for.
+        assert!(matches!(rescue(&app, &tid, None).await, Err(LcError::Conflict(_))));
+        set_phase(&app, &tid, "done", None, None).await.unwrap();
+        // The PM may not carry it: its cwd is the integration worktree.
+        assert!(matches!(rescue(&app, &tid, Some(&pm.id)).await, Err(LcError::Conflict(_))));
+        assert!(matches!(rescue(&app, &tid, Some("nobody")).await, Err(LcError::Conflict(_))));
+
+        let out = rescue(&app, &tid, None).await.unwrap();
+        assert_eq!(out["bot_id"], reviewer.id, "the reviewer is the default rescuer");
+        assert_eq!(out["rescued"], 2, "only failed / skipped");
+        let tasks = db::team_tasks(&app.db, &tid).await.unwrap();
+        let new: Vec<&db::TeamTask> = tasks.iter().filter(|t| !ids.contains(&t.id)).collect();
+        assert_eq!(new.len(), 1, "one task, not one per failure");
+        let r = new[0];
+        assert_eq!((r.state.as_str(), r.seq), ("queued", 4));
+        assert_eq!(r.want_worker_bot_id.as_deref(), Some(reviewer.id.as_str()));
+        assert!(r.worker_bot_id.is_none(), "the executor is picked by the scheduler, one at a time");
+        assert!(r.brief.contains("t2") && r.brief.contains("t3") && !r.brief.contains("t1「"));
+        // The team is back on the queue with the rescuer recorded.
+        let t = load(&app, &tid).await.unwrap();
+        assert_eq!((t.phase.as_str(), t.rescue_bot_id.as_deref()), ("starting", Some(reviewer.id.as_str())));
+        assert!(t.ended_at.is_none());
+        assert_eq!(db::team_issues(&app.db, &tid).await.unwrap()[0].state, "working");
+
+        // Nothing left unresolved → the second call has nothing to do.
+        sqlx::query("UPDATE team_tasks SET state='merged' WHERE state IN ('failed','skipped')")
+            .execute(&app.db).await.unwrap();
+        set_phase(&app, &tid, "done", None, None).await.unwrap();
+        assert!(matches!(rescue(&app, &tid, None).await, Err(LcError::Conflict(_))));
     }
 
     /// §10.5 decide: only tasks that are actually stuck, and only the three actions.

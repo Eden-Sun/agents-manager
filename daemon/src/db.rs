@@ -314,6 +314,10 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         // quota window, how much is left). Nullable — a pause with nothing to say has none.
         ("teams", "pause_detail_json", "ALTER TABLE teams ADD COLUMN pause_detail_json TEXT"),
         ("teams", "label", "ALTER TABLE teams ADD COLUMN label TEXT"),
+        // SPEC-team §2.6 (2026-09-11): while a rescue is running, the one member the user
+        // handed every unresolved task to. NULL = no rescue in flight, which is every team
+        // that never used one.
+        ("teams", "rescue_bot_id", "ALTER TABLE teams ADD COLUMN rescue_bot_id TEXT"),
         // Native session requested by a done-team reopen. NULL for ordinary starts and old runs.
         ("runs", "resume_session_id", "ALTER TABLE runs ADD COLUMN resume_session_id TEXT"),
         // SPEC §4.4a: the model / effort / fast tier the running CLI is on, as opposed to the
@@ -900,6 +904,9 @@ pub struct Team {
     pub issue_closed_at: Option<String>,
     /// Submodule path (relative to the project) this team works in; empty = the project itself.
     pub repo: String,
+    /// SPEC-team §2.6: the member currently carrying a rescue (all the unresolved tasks handed
+    /// to one bot). `None` outside a rescue.
+    pub rescue_bot_id: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,

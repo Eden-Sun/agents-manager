@@ -72,6 +72,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/teams/{id}/cleanup", post(cleanup_team))
         // SPEC-team §2.3: the issue queue of a running team.
         .route("/teams/{id}/issues", post(add_team_issues))
+        .route("/teams/{id}/rescue", post(rescue_team))
         .route("/teams/{id}/issues/{issue_id}", delete(remove_team_issue))
         .route("/teams/{id}/close-issue", post(close_team_issue))
         .route("/teams/{id}/say", post(say_team))
@@ -741,6 +742,23 @@ struct DecideIn {
     action: String,
     #[serde(default)]
     note: Option<String>,
+}
+
+/// SPEC-team §2.6 — hand every unresolved task of a finished team to one member.
+#[derive(Deserialize)]
+struct RescueBody {
+    /// The member to carry it; omitted = the reviewer.
+    #[serde(default)]
+    bot_id: Option<String>,
+}
+
+async fn rescue_team(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    body: Option<Json<RescueBody>>,
+) -> Result<Json<Value>, LcError> {
+    let bot = body.and_then(|Json(b)| b.bot_id);
+    Ok(Json(crate::team::rescue(&app, &id, bot.as_deref()).await?))
 }
 
 async fn decide_team_task(

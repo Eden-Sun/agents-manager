@@ -1863,6 +1863,21 @@ run 上：
 - **沒有新的重試 API**：UI 的「重送上一則」就是把對話裡最後一則 user 訊息再送一次
   `POST /api/bots/{id}/prompt`。
 
+## `POST /api/teams/{id}/rescue`（SPEC-team §2.6，2026-09-11 新增）
+
+跑完的 team 裡沒解決的 task（`failed` / `skipped`）一次交給一個成員收尾。
+
+```json
+{"bot_id": "01M..."}        // 省略 = reviewer
+200 {"task": {...}, "bot_id": "01M...", "bot": "rev", "issue_number": 42, "rescued": 2}
+```
+
+- `409 team is not finished`（phase 不是 `done`）／`team is cleaned up`／`nothing to rescue`
+  （沒有 failed / skipped 的 task）／`not a live member of this team`／`the PM cannot be the rescuer`
+  （PM 的 cwd 是整合工作樹）／`this team has no reviewer; pick a member`。
+- 成功後 team 回到 `starting`：成員重新啟動，收尾者成為這個 issue 唯一的執行者，做完照常
+  合併、由 PM 宣告 `done`。
+
 ## 快速 git（chat 標題列的 chip，2026-09-08 新增）
 
 專案 checkout 的 `+N −M ↑a ↓b` 與 commit / push / pull 三顆按鈕。都在專案的 host 上、專案的目錄裡跑
