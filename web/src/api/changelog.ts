@@ -23,7 +23,13 @@ export interface ChangelogReply {
   error: string | null
 }
 
-const SOURCE = 'https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md'
+const CLAUDE_SOURCE = 'https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md'
+const CODEX_SOURCE = 'https://github.com/openai/codex/releases'
+
+/** daemon 回不了東西時的退路連結，要跟 kind 對得上（codex 沒有 CHANGELOG.md，只有 releases）。 */
+function sourceFor(kind: string): string {
+  return kind === 'codex' ? CODEX_SOURCE : CLAUDE_SOURCE
+}
 
 function isRec(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null
@@ -44,21 +50,28 @@ function toReply(raw: unknown, kind: string, host: string): ChangelogReply {
     fromVersion: typeof r.from_version === 'string' ? r.from_version : null,
     found: r.found === true && sections.length > 0,
     sections,
-    sourceUrl: typeof r.source_url === 'string' ? r.source_url : SOURCE,
+    sourceUrl: typeof r.source_url === 'string' ? r.source_url : sourceFor(kind),
     error: typeof r.error === 'string' ? r.error : null,
   }
 }
 
-export async function fetchChangelog(kind: string, host: string, from: string | null): Promise<ChangelogReply> {
+export async function fetchChangelog(
+  kind: string,
+  host: string,
+  from: string | null,
+  to: string | null = null,
+): Promise<ChangelogReply> {
   const q = new URLSearchParams({ kind, host })
   if (from) q.set('from', from)
+  // codex：新版還沒進磁碟，目標版本由畫面上那句 `0.153.4 -> 0.154.0` 帶進來。
+  if (to) q.set('to', to)
   if (rawTransport.mock) {
-    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: SOURCE, error: 'mock 模式沒有 changelog' }
+    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind), error: 'mock 模式沒有 changelog' }
   }
   try {
     return toReply(await rawTransport.request('GET', `/changelog?${q.toString()}`), kind, host)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: SOURCE, error: msg }
+    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind), error: msg }
   }
 }

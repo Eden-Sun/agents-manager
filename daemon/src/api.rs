@@ -120,6 +120,25 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/mem/processes/kill", post(kill_mem_process))
         .route("/mem/processes/pane", get(get_mem_pane))
         .route("/search/messages", get(search_messages))
+        // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
+        .route("/supervisor", get(crate::supervisor::api::get_supervisor))
+        .route("/supervisor/health", get(crate::supervisor::api::get_health))
+        .route("/supervisor/setup", post(crate::supervisor::api::post_setup))
+        .route("/supervisor/start", post(crate::supervisor::api::post_start))
+        .route("/supervisor/stop", post(crate::supervisor::api::post_stop))
+        .route("/supervisor/fallback", post(crate::supervisor::api::post_fallback))
+        .route(
+            "/supervisor/assignments",
+            get(crate::supervisor::api::get_assignments).post(crate::supervisor::api::post_assignment),
+        )
+        .route(
+            "/supervisor/handoff",
+            get(crate::supervisor::api::get_handoff).put(crate::supervisor::api::put_handoff),
+        )
+        .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox))
+        .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
+        .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))
+        .route("/supervisor/evidence", get(crate::supervisor_evidence::search))
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
@@ -1608,6 +1627,34 @@ fn flag(v: &Option<String>) -> bool {
     matches!(v.as_deref().map(str::trim), Some("1") | Some("true") | Some("yes"))
 }
 
+#[derive(Deserialize)]
+struct ChangelogQuery {
+    kind: Option<String>,
+    host: Option<String>,
+    /// 現在跑著的版本（claude statusLine 報的）；沒有就只給新版那一段。
+    from: Option<String>,
+    /// 目標版本。codex 的更新是 TUI 當場問的、新版還沒進磁碟，版本要由畫面上那句
+    /// `Update available! 0.153.4 -> 0.154.0` 帶進來；不給就回頭探磁碟（claude 的作法）。
+    to: Option<String>,
+}
+
+/// `GET /api/changelog?kind=claude&host=&from=&to=` — 「有更新」徽章／codex 更新提示按下去先看這個。
+/// 永遠 200：抓不到 changelog 時 `found:false` + `error`，UI 要照實寫「找不到 changelog」。
+async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQuery>) -> Result<Json<Value>, LcError> {
+    let kind = q.kind.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "claude".to_string());
+    if !crate::config::valid_kind(&kind) {
+        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
+    }
+    let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    if app.hosts.get(&host).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let from = q.from.as_deref().filter(|s| !s.trim().is_empty());
+    let to = q.to.as_deref().filter(|s| !s.trim().is_empty());
+    let r = crate::changelog::lookup(&app, &host, &kind, from, to).await;
+    Ok(Json(serde_json::to_value(r).map_err(any_err)?))
+}
+
 /// `GET /api/models?kind=&host=&identity=&refresh=1`
 async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -> Result<Json<Value>, LcError> {
     if !crate::config::valid_kind(&q.kind) {
@@ -1626,30 +1673,6 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
 ///
 /// `host` narrows a refresh to one host (default: `local` plus every connected remote one).
 /// The body is always the full map — one entry per host + kind (SPEC §14).
-#[derive(Deserialize)]
-struct ChangelogQuery {
-    kind: Option<String>,
-    host: Option<String>,
-    /// 現在跑著的版本（claude statusLine 報的）；沒有就只給新版那一段。
-    from: Option<String>,
-}
-
-/// `GET /api/changelog?kind=claude&host=&from=` — 「有更新」徽章按下去先看這個。
-/// 永遠 200：抓不到 changelog 時 `found:false` + `error`，UI 要照實寫「找不到 changelog」。
-async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQuery>) -> Result<Json<Value>, LcError> {
-    let kind = q.kind.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "claude".to_string());
-    if !crate::config::valid_kind(&kind) {
-        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
-    }
-    let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
-    if app.hosts.get(&host).await.is_none() {
-        return Err(LcError::NotFound("host".into()));
-    }
-    let from = q.from.as_deref().filter(|s| !s.trim().is_empty());
-    let r = crate::changelog::lookup(&app, &host, &kind, from).await;
-    Ok(Json(serde_json::to_value(r).map_err(any_err)?))
-}
-
 #[cfg(test)]
 mod project_tests {
     use super::*;

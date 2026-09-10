@@ -19,14 +19,19 @@ use tokio::sync::Mutex;
 use crate::config::LOCAL_HOST;
 use crate::state::App;
 
-/// 目前只有 claude 有這種「裝好等重啟」的自動更新；codex／grok 不走這裡。
+/// claude：裝好等重啟，版本從磁碟上的 `claude --version` 探。
 pub const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
+/// codex：沒有 CHANGELOG.md（repo 裡那份只寫「去看 releases」），改抓 releases API。
+/// 而且它是 TUI 裡當場問「Update now / Skip」，新版還沒進磁碟——版本要由呼叫端從畫面帶 `to` 進來。
+const CODEX_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/releases?per_page=100";
+const CODEX_RELEASES_URL: &str = "https://github.com/openai/codex/releases";
 const CACHE_TTL: Duration = Duration::from_secs(600);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 一個 kind 一份全文快取（claude 是 CHANGELOG.md，codex 是 releases 併成的同格式 markdown）。
 #[derive(Default)]
 pub struct ChangelogCache {
-    inner: Mutex<Option<(Instant, String)>>,
+    inner: Mutex<std::collections::HashMap<String, (Instant, String)>>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -129,10 +134,45 @@ async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<Str
     version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
 }
 
-async fn fetch_changelog(app: &Arc<App>) -> Result<String> {
+/// UI 上「完整 CHANGELOG ↗」要連去的地方。
+pub fn source_url(kind: &str) -> &'static str {
+    if kind == "codex" {
+        CODEX_RELEASES_URL
+    } else {
+        CHANGELOG_URL
+    }
+}
+
+/// codex 的 releases JSON → 跟 CHANGELOG.md 同格式的 markdown，後面就能共用 `parse_changelog`。
+/// 預覽版（`0.154.0-alpha.6`）與草稿一律丟掉：使用者被問到的都是正式版。
+fn codex_releases_to_md(json: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| anyhow!("讀 releases 失敗：{e}"))?;
+    let arr = v.as_array().ok_or_else(|| anyhow!("releases 不是陣列"))?;
+    let mut out = String::new();
+    for r in arr {
+        if r.get("draft").and_then(|b| b.as_bool()).unwrap_or(false) || r.get("prerelease").and_then(|b| b.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let tag = r.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
+        let tag = tag.trim_start_matches("rust-");
+        let Some(ver) = version_string(tag) else { continue };
+        // `0.154.0-alpha.6` 的 `version_string` 會失敗（parse 不了 `0-alpha`），這裡再擋一次帶後綴的。
+        if tag.trim_start_matches('v').contains('-') {
+            continue;
+        }
+        let body = r.get("body").and_then(|b| b.as_str()).unwrap_or("").trim();
+        out.push_str(&format!("## {ver}\n\n{body}\n\n"));
+    }
+    if out.is_empty() {
+        return Err(anyhow!("releases 裡沒有正式版"));
+    }
+    Ok(out)
+}
+
+async fn fetch_changelog(app: &Arc<App>, kind: &str) -> Result<String> {
     {
         let g = app.changelog.inner.lock().await;
-        if let Some((at, text)) = g.as_ref() {
+        if let Some((at, text)) = g.get(kind) {
             if at.elapsed() < CACHE_TTL {
                 return Ok(text.clone());
             }
@@ -144,17 +184,21 @@ async fn fetch_changelog(app: &Arc<App>) -> Result<String> {
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
-    let resp = client.get(CHANGELOG_URL).send().await.map_err(|e| anyhow!("抓 CHANGELOG 失敗：{e}"))?;
+    let url = if kind == "codex" { CODEX_RELEASES_API } else { CHANGELOG_URL };
+    let resp = client.get(url).send().await.map_err(|e| anyhow!("抓 CHANGELOG 失敗：{e}"))?;
     if !resp.status().is_success() {
         return Err(anyhow!("抓 CHANGELOG 失敗：HTTP {}", resp.status()));
     }
-    let text = resp.text().await.map_err(|e| anyhow!("讀 CHANGELOG 失敗：{e}"))?;
-    *app.changelog.inner.lock().await = Some((Instant::now(), text.clone()));
+    let raw = resp.text().await.map_err(|e| anyhow!("讀 CHANGELOG 失敗：{e}"))?;
+    let text = if kind == "codex" { codex_releases_to_md(&raw)? } else { raw };
+    app.changelog.inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
     Ok(text)
 }
 
 /// 主流程：版本探測與抓 changelog 各自失敗都不 panic，錯誤寫進回應。
-pub async fn lookup(app: &Arc<App>, host: &str, kind: &str, from: Option<&str>) -> ChangelogReply {
+/// `to`：呼叫端已經知道的目標版本（codex 是從 TUI 那句 `0.153.4 -> 0.154.0` 讀來的）。
+/// 給了就不再探磁碟——codex 被問的當下新版根本還沒裝。
+pub async fn lookup(app: &Arc<App>, host: &str, kind: &str, from: Option<&str>, to: Option<&str>) -> ChangelogReply {
     let mut reply = ChangelogReply {
         kind: kind.to_string(),
         host: host.to_string(),
@@ -162,22 +206,25 @@ pub async fn lookup(app: &Arc<App>, host: &str, kind: &str, from: Option<&str>) 
         from_version: from.and_then(version_string),
         found: false,
         sections: Vec::new(),
-        source_url: CHANGELOG_URL.to_string(),
+        source_url: source_url(kind).to_string(),
         error: None,
     };
-    if kind != "claude" {
+    if kind != "claude" && kind != "codex" {
         reply.error = Some(format!("{kind} 沒有 changelog 來源"));
         return reply;
     }
-    let installed = match installed_version(app, host, kind).await {
-        Ok(v) => v,
-        Err(e) => {
-            reply.error = Some(format!("{e:#}"));
-            return reply;
-        }
+    let installed = match to.and_then(version_string) {
+        Some(v) => v,
+        None => match installed_version(app, host, kind).await {
+            Ok(v) => v,
+            Err(e) => {
+                reply.error = Some(format!("{e:#}"));
+                return reply;
+            }
+        },
     };
     reply.installed_version = Some(installed.clone());
-    let md = match fetch_changelog(app).await {
+    let md = match fetch_changelog(app, kind).await {
         Ok(t) => t,
         Err(e) => {
             reply.error = Some(format!("{e:#}"));
@@ -217,6 +264,22 @@ mod tests {
         assert_eq!(only.iter().map(|x| x.version.as_str()).collect::<Vec<_>>(), ["2.1.4"]);
         assert!(pick_sections(&s, Some("2.1.5"), "2.1.5").is_empty());
         assert!(pick_sections(&s, None, "9.9.9").is_empty());
+    }
+
+    #[test]
+    fn codex_releases_become_changelog_markdown() {
+        let json = r#"[
+          {"tag_name":"rust-v0.154.0","prerelease":false,"draft":false,"body":"New Features\n\n- thing"},
+          {"tag_name":"rust-v0.154.0-alpha.6","prerelease":true,"draft":false,"body":"nope"},
+          {"tag_name":"rust-v0.153.4","prerelease":false,"draft":false,"body":"- older"}
+        ]"#;
+        let md = codex_releases_to_md(json).unwrap();
+        let s = parse_changelog(&md);
+        assert_eq!(s.iter().map(|x| x.version.as_str()).collect::<Vec<_>>(), ["0.154.0", "0.153.4"]);
+        let p = pick_sections(&s, Some("0.153.4"), "0.154.0");
+        assert_eq!(p.len(), 1);
+        assert!(p[0].body.contains("- thing"));
+        assert!(codex_releases_to_md("[]").is_err());
     }
 
     #[test]
