@@ -71,13 +71,14 @@ export function IdentityBadge({
  */
 function IdentityHostLogins({ name }: { name: string }) {
   const localStatus = useStore((s) => s.localIdentityStatus[name])
+  const localConnected = useStore((s) => s.connected)
   const hosts = useStore((s) => s.hosts)
-  const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null }[] = [
-    { host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null, reason: localStatus?.reason ?? null },
+  const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null; connected: boolean }[] = [
+    { host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null, reason: localStatus?.reason ?? null, connected: localConnected },
   ]
   for (const h of hosts) {
     const st = h.identity_status[name]
-    rows.push({ host: h.name, label: h.name, state: h.connected ? (st?.logged_in ?? null) : null, account: st?.account ?? null, reason: h.connected ? st?.reason ?? null : '主機未連線' })
+    rows.push({ host: h.name, label: h.name, state: h.connected ? (st?.logged_in ?? null) : null, account: st?.account ?? null, reason: h.connected ? st?.reason ?? null : '主機未連線', connected: h.connected })
   }
   return (
     <span className="identity-logins">
@@ -89,17 +90,54 @@ function IdentityHostLogins({ name }: { name: string }) {
             : r.state === false
               ? `${r.label}：這個身份沒有登入，用它啟動的 bot 會停在登入畫面`
               : `${r.label}：問不到登入狀態（${r.reason ?? '尚未偵測過'}）`
-        return (
+        const chip = (
           <span
-            key={r.host}
             className={`identity-login is-${r.state === true ? 'ok' : r.state === false ? 'out' : 'unknown'}`}
             title={title}
           >
             {r.label} {text}
           </span>
         )
+        return (
+          <span key={r.host} className="identity-login-wrap">
+            {chip}
+            {r.connected ? <IdentityLoginButton host={r.host} identity={name} loggedIn={r.state === true} /> : null}
+          </span>
+        )
       })}
     </span>
+  )
+}
+
+function closeEnclosingPopup(from: HTMLElement) {
+  if (!from.closest('.modal-backdrop')) return
+  from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+}
+
+function IdentityLoginButton({ host, identity, loggedIn }: { host: string; identity: string; loggedIn: boolean }) {
+  const loginIdentity = useStore((s) => s.loginIdentity)
+  const notify = useStore((s) => s.notify)
+  const [busy, setBusy] = useState(false)
+  return (
+    <button
+      type="button"
+      className="mini-btn identity-login-btn"
+      disabled={busy}
+      title={`在${host === 'local' ? '本機' : host}開臨時 pane，帶著 ${identity} 的設定執行登入`}
+      onClick={(e) => {
+        if (busy) return
+        const btn = e.currentTarget
+        setBusy(true)
+        void loginIdentity(host, identity)
+          .then((ok) => {
+            if (ok) closeEnclosingPopup(btn)
+          })
+          .catch((err) => notify('error', err instanceof Error ? err.message : String(err)))
+          .finally(() => setBusy(false))
+      }}
+    >
+      {busy ? '登入中…' : loggedIn ? '切換' : '登入'}
+    </button>
   )
 }
 
@@ -256,11 +294,14 @@ function ShellIdentities() {
             </span>
             {/* 和 config 那些列同一種 chip 容器，否則單獨一顆會被 flex 拉成整行寬。 */}
             <span className="identity-logins">
-              <span
-                className={`identity-login is-${st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'}`}
-                title={st.logged_in === null ? st.reason ?? '登入狀態未知' : st.account ?? undefined}
-              >
-                {label} {st.logged_in === true ? '已登入' : st.logged_in === false ? '未登入' : '未知'}
+              <span className="identity-login-wrap">
+                <span
+                  className={`identity-login is-${st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'}`}
+                  title={st.logged_in === null ? st.reason ?? '登入狀態未知' : st.account ?? undefined}
+                >
+                  {label} {st.logged_in === true ? '已登入' : st.logged_in === false ? '未登入' : '未知'}
+                </span>
+                <IdentityLoginButton host={host} identity={st.name} loggedIn={st.logged_in === true} />
               </span>
             </span>
           </span>
