@@ -659,6 +659,7 @@ queued ──relay 送達──► working ──report{done}──► reported 
 - 終態：`merged | skipped | failed`。
 - `round` 從 0 起算；`request_changes` 讓 `round += 1`；`round == max_review_rounds` 時再收到 `request_changes` → `exhausted`。
 - 沒有 reviewer（`reviewer: null`）：`reported → merging` 直接整合。
+- rebase relay 送達時 task 仍維持 `rebasing`（不轉成 `working`）；worker 回報才走 `rebasing → merging`，因此不會因衝突重開審查。
 
 ### 8.3 誰判定完成
 - **task 完成**：reviewer `approve`（或無 reviewer）且 daemon merge 成功。不是 worker 說 done 就算。
