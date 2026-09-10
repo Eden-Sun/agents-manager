@@ -33,6 +33,8 @@ mod quota_claude;
 mod quota_grok;
 mod reconcile;
 mod state;
+mod supervisor;
+mod supervisor_evidence;
 mod statusline_cmd;
 mod team;
 mod team_git;
@@ -243,6 +245,9 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     github::spawn_detect_all(app.clone());
     // SPEC-team §7.5: bring back a scheduler for every team that is not in a terminal phase.
     team::respawn_schedulers(&app).await;
+    // AGM: pick the supervisor's open assignments and undelivered results back up.
+    supervisor::controller::respawn(&app).await;
+    supervisor::health::spawn(app.clone());
     // Agent titles (what each agent calls itself) — no herdr event for it, so it polls.
     events::spawn_title_poller(app.clone());
     tui_prompts::spawn_survey_watcher(app.clone());

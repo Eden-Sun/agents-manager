@@ -61,6 +61,12 @@ const transport: Transport = MOCK_MODE ? new MockTransport() : new HttpTransport
 
 export const isMock = transport.mock
 
+/**
+ * 給獨立 API 模組（目前是 `supervisor.ts`）用的原始通道。新的端點各自成一個檔，
+ * 但不能各自再 `new` 一個 transport——mock 模式下那會變成兩份互不相干的假資料。
+ */
+export const rawTransport: Pick<Transport, 'request' | 'mock'> = transport
+
 export function session(): Promise<string> {
   return transport.session()
 }
