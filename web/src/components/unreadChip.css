@@ -90,3 +90,35 @@
   line-height: 14px;
   font-variant-numeric: tabular-nums;
 }
+
+/* 「主要」那一排：跟未讀那排同一個骨架，但它是常駐的，所以底色壓得更淡、不搶眼。 */
+.unread-bar.primary-bar {
+  background: var(--bg-panel);
+}
+
+.unread-chip.pinned {
+  background: transparent;
+  color: var(--text);
+}
+
+.unread-chip.pinned.current {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.unread-chip-star {
+  flex: none;
+  color: var(--lamp-yellow);
+  font-size: 11px;
+}
+
+/* 標題列的星星開關（`PrimaryStar`）：沒釘時是空心、跟其他 icon 一樣淡。 */
+.icon-btn.primary-star {
+  color: var(--text-faint);
+}
+
+.icon-btn.primary-star.on {
+  color: var(--lamp-yellow);
+}

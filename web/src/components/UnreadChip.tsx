@@ -38,44 +38,71 @@ export function UnreadChip() {
         .map((b) => ({ id: b.id, name: b.name })),
     [bots, runs],
   )
+  // 使用者自己釘的「主要執行的 bot」（`PrimaryStar`，存在 daemon）。這一排跟未讀無關：
+  // 不管有沒有回覆、在不在跑都固定排在最上面，因為它回答的是另一個問題——「我平常在推的是
+  // 哪幾顆」。順序照側欄（`bots` 本來就排好了）。
+  const primary = useMemo(() => bots.filter((b) => !b.pending && b.primary).map((b) => ({ id: b.id, name: b.name })), [bots])
   const selectedBotId = useStore((s) => s.selectedBotId)
   const selectBot = useStore((s) => s.selectBot)
-  if (rows.length === 0 && working.length === 0) return null
+  if (rows.length === 0 && working.length === 0 && primary.length === 0) return null
   // 標題列（固定 60px、擠滿了燈號／額度／分頁）放不下，所以自成一列掛在它下面：
   // 一顆 bot 一個晶片，點下去就跳過去看——不用先猜「下一個」是誰。
   return (
-    <div className="unread-bar" role="status" aria-live="polite">
-      {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
-      {rows.map((r) => (
-        <button
-          key={r.id}
-          type="button"
-          className={`unread-chip${r.id === selectedBotId ? ' current' : ''}`}
-          title={`${r.name} 有 ${r.n} 個回合已完成、還沒看過。點一下跳過去`}
-          onClick={() => selectBot(r.id)}
-        >
-          <span className="unread-chip-name">{r.name}</span>
-          <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span>
-        </button>
-      ))}
-      {working.length > 0 ? (
-        <>
-          <span className="unread-bar-gap" />
-          <span className="unread-bar-label">進行中</span>
-          {working.map((w) => (
+    <>
+      {primary.length > 0 ? (
+        <div className="unread-bar primary-bar">
+          <span className="unread-bar-label">主要</span>
+          {primary.map((r) => (
             <button
-              key={w.id}
+              key={r.id}
               type="button"
-              className={`unread-chip working${w.id === selectedBotId ? ' current' : ''}`}
-              title={`${w.name} 還在跑。點一下過去看`}
-              onClick={() => selectBot(w.id)}
+              className={`unread-chip pinned${r.id === selectedBotId ? ' current' : ''}`}
+              title={`${r.name}（主要執行的 bot）。點一下跳過去`}
+              onClick={() => selectBot(r.id)}
             >
-              <span className="unread-chip-dot" aria-hidden="true" />
-              <span className="unread-chip-name">{w.name}</span>
+              <span className="unread-chip-star" aria-hidden="true">★</span>
+              <span className="unread-chip-name">{r.name}</span>
+              {(botUnread[r.id] ?? 0) > 0 ? <span className="unread-chip-n">{botUnread[r.id]}</span> : null}
+              {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
             </button>
           ))}
-        </>
+        </div>
       ) : null}
-    </div>
+      {rows.length > 0 || working.length > 0 ? (
+        <div className="unread-bar" role="status" aria-live="polite">
+          {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
+          {rows.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              className={`unread-chip${r.id === selectedBotId ? ' current' : ''}`}
+              title={`${r.name} 有 ${r.n} 個回合已完成、還沒看過。點一下跳過去`}
+              onClick={() => selectBot(r.id)}
+            >
+              <span className="unread-chip-name">{r.name}</span>
+              <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span>
+            </button>
+          ))}
+          {working.length > 0 ? (
+            <>
+              <span className="unread-bar-gap" />
+              <span className="unread-bar-label">進行中</span>
+              {working.map((w) => (
+                <button
+                  key={w.id}
+                  type="button"
+                  className={`unread-chip working${w.id === selectedBotId ? ' current' : ''}`}
+                  title={`${w.name} 還在跑。點一下過去看`}
+                  onClick={() => selectBot(w.id)}
+                >
+                  <span className="unread-chip-dot" aria-hidden="true" />
+                  <span className="unread-chip-name">{w.name}</span>
+                </button>
+              ))}
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </>
   )
 }

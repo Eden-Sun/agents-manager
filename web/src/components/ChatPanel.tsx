@@ -33,6 +33,7 @@ import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
+import { PrimaryStar } from './PrimaryStar'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
@@ -1246,6 +1247,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             >
               <GearIcon />
             </button>
+            <PrimaryStar botId={botId} />
             <PersonaMark persona={bot.persona} />
             <HostBadge host={hostName} connected={hostUp} />
             <UpdateBadge botId={botId} />

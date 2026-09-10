@@ -281,6 +281,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'team', 'child'], 'user'),
     team: toBotTeamRef(v),
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
+    primary: bool(pick(v, 'primary', 'is_primary')),
     cwd: optStr(pick(v, 'cwd')),
     herdr_session: optStr(pick(v, 'herdr_session', 'session')),
     // debug 用的 herdr agent 名稱；舊 daemon 不送就是 null（UI 那顆晶片自己不渲染）。

@@ -308,6 +308,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 // SPEC-team §10.2: `user` for config.toml bots, `team` for team members.
                 "managed_by": b.managed_by,
                 "parent_bot_id": b.parent_bot_id,
+                // 使用者釘的「主要執行的 bot」（純顯示，不影響啟動）。
+                "primary": b.is_primary == 1,
                 "cwd": b.cwd,
                 "team": crate::team::bot_team_json(b),
                 // herdr agent name: the live run's, else what the next start will use.
@@ -1030,6 +1032,10 @@ struct PatchBot {
     name: Option<String>,
     inject_hooks: Option<bool>,
     auto_approve: Option<bool>,
+    /// 使用者把這顆釘成「主要執行的 bot」。純顯示用，所以不進 config.toml、不需要重啟，
+    /// team 成員與 child bot 也能釘（那兩種本來就沒有 TOML 條目）。
+    #[serde(rename = "primary")]
+    is_primary: Option<bool>,
     /// `Some(Some(name))` binds, `Some(None)` / `Some("")` unbinds, absent = unchanged.
     #[serde(default, deserialize_with = "double_option")]
     identity: Option<Option<String>>,
@@ -1147,7 +1153,27 @@ async fn patch_bot(
     // `managed_by != 'user'`（team 成員、agent 自己 spawn 的 child）從來不進 config.toml，
     // 走 cfg.update 只會拿到 `no-bot` 404——2026-09-09 使用者：child bot 的身分改不了、按儲存沒反應。
     // 這些直接改 DB 列；projection 不管它們，所以也不用 reproject。
+    // 釘選只是 UI 的顯示狀態：直接寫 DB 欄位，不經過 config.toml，也不算「要重啟」。
+    if let Some(pin) = b.is_primary {
+        let n = sqlx::query("UPDATE bots SET is_primary = ? WHERE id = ? AND deleted_at IS NULL")
+            .bind(pin as i64)
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .map_err(any_err)?
+            .rows_affected();
+        if n == 0 {
+            return Err(LcError::NotFound("bot".into()));
+        }
+    }
+    // 只改釘選時就到此為止：再走一次 cfg.update + reproject 只是把整份 TOML 重寫一遍。
+    let touches_config =
+        restart_relevant || b.name.is_some() || b.autostart.is_some();
     let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
+    if !touches_config {
+        app.emit("bot_changed", json!({"bot_id": id})).await;
+        return Ok((StatusCode::OK, Json(json!({"needs_restart": false}))).into_response());
+    }
     if managed_by != "user" {
         patch_unprojected_bot(&app, &id, &b, &effort).await?;
     } else {

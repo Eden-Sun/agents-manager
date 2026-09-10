@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS bots (
   -- the reconcile and shown under its parent. NULL = a top-level bot.
   parent_bot_id TEXT,
   hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL,
+  -- 使用者把這顆標成「主要執行的 bot」：純顯示用的釘選（UI 標題列下面那一列會把它們排在
+  -- 最前面），跟 run 無關，所以不進 config.toml 的投影，改了也不用重啟。存在 daemon 而不是
+  -- 瀏覽器：使用者在手機與電腦上追的是同一組 bot。
+  is_primary INTEGER NOT NULL DEFAULT 0,
   -- 側欄順序 = config.toml 陣列裡的位置（`POST /api/order` 寫回去，投影時填這裡）。
   -- 沒有它的話清單只能照 created_at 排，排序就只能存在瀏覽器，每台裝置各自一份。
   position INTEGER NOT NULL DEFAULT 0
@@ -260,6 +264,7 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
         ("runs", "herdr_session", "ALTER TABLE runs ADD COLUMN herdr_session TEXT"),
         ("teams", "repo", "ALTER TABLE teams ADD COLUMN repo TEXT NOT NULL DEFAULT ''"),
         ("bots", "parent_bot_id", "ALTER TABLE bots ADD COLUMN parent_bot_id TEXT"),
+        ("bots", "is_primary", "ALTER TABLE bots ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0"),
         // What the agent calls itself right now (its terminal title, e.g. Claude Code's
         // one-line summary of the task it is on).
         ("runs", "agent_title", "ALTER TABLE runs ADD COLUMN agent_title TEXT"),
@@ -613,9 +618,10 @@ async fn migrate_bots_kind_check(pool: &SqlitePool) -> Result<()> {
                    herdr_session TEXT,
                    parent_bot_id TEXT,
                    hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL,
+                   is_primary INTEGER NOT NULL DEFAULT 0,
                    position INTEGER NOT NULL DEFAULT 0)",
-                "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at, position)
-                   SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at, position FROM bots",
+                "INSERT INTO bots_new (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at, is_primary, position)
+                   SELECT id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve, identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, deleted_at, created_at, is_primary, position FROM bots",
                 "DROP TABLE bots",
                 "ALTER TABLE bots_new RENAME TO bots",
             ],
@@ -730,6 +736,8 @@ pub struct Bot {
     pub herdr_session: Option<String>,
     /// The bot whose agent spawned this one (`<parent agent name>-<suffix>`); None = top-level.
     pub parent_bot_id: Option<String>,
+    /// 使用者釘選的「主要執行的 bot」（見 SCHEMA 的欄位註解）。0 = 一般。
+    pub is_primary: i64,
     #[serde(skip_serializing)]
     pub hook_token: String,
     pub deleted_at: Option<String>,
