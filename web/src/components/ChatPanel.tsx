@@ -34,7 +34,7 @@ import { runtimeKnown } from '../lib/runtimeDrift'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
-import { UnreadChip } from './UnreadChip'
+import { PrimaryChips, UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
@@ -1199,9 +1199,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </button>
           <span className="main-status">未選擇 Bot</span>
           <span className="spacer" />
-          <UnreadChip />
+          <PrimaryChips />
           <QuotaStrip />
         </div>
+        <UnreadChip />
         <EmptyState title="尚未選擇 Bot" icon="◎">
           從左側選擇一個 Bot，或先新增 Project 與 Bot。
         </EmptyState>
@@ -1304,7 +1305,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
-        <UnreadChip />
+        <PrimaryChips />
         <div className="tabs" role="tablist">
           <button
             type="button"
@@ -1337,6 +1338,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null}
         </div>
       </div>
+      <UnreadChip />
       {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
       {/* The repo chip and the status bar were a row each; neither fills one, so they share.

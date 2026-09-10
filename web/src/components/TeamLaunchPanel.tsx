@@ -18,7 +18,7 @@ import { HostBadge } from './HostsPanel'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { QuotaStrip } from './QuotaStrip'
-import { UnreadChip } from './UnreadChip'
+import { PrimaryChips, UnreadChip } from './UnreadChip'
 
 /**
  * SPEC-team §11.2 — 「組隊」的設定 sheet（右側主區域，不是 modal；同 UI-DECISIONS 的
@@ -343,13 +343,14 @@ export function TeamLaunchPanel({
         {/* 組隊是最花額度的一個動作（多個成員各自跑），所以決定按不按「建立並啟動」之前，
             這裡就要看得到剩多少——跟聊天頁、群組頁、team 頁同一條 `.quota-strip`。 */}
         <QuotaStrip host={host} />
-        <UnreadChip />
+        <PrimaryChips />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={closeTeamLaunch} title="不建立 team，回到原本的畫面">
             取消
           </button>
         </div>
       </div>
+      <UnreadChip />
 
       <div className="team-launch">
         <section className="team-issue">
