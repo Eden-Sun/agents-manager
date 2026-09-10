@@ -2193,6 +2193,37 @@ pub async fn resume(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     resume_inner(app, team_id, false).await
 }
 
+/// SPEC-team §11：成員離開 `blocked` 後自動 resume——這是唯一會自動 resume 的暫停原因
+/// （它不是預算問題，人回答完提示就該繼續）。
+///
+/// 2026-09-10 使用者：codex 的升級選單卡住成員 → team `paused(member_blocked:<name>)`；
+/// 在那個成員自己的畫面回答完（不是走暫停橫幅那顆按鈕）之後，team 仍然停在那裡不動，
+/// 因為補送 `resume` 的邏輯只長在那顆按鈕上。改在 daemon 做，回答的地方就不重要了。
+///
+/// 只在 `pause_reason` 正好指著這個成員時動作；其他原因（預算、額度、gate）不碰。
+///
+/// 回傳的是 **boxed future**，不是 `async fn`：`resume` 會走到 `lifecycle` → `events`，
+/// 而呼叫這裡的也是 `events`，`async fn` 的 opaque type 會被 rustc 判成循環（E0391）。
+/// 裝箱把型別擦掉就切斷了那個環。
+pub fn resume_if_member_unblocked(
+    app: &Arc<App>,
+    bot_id: &str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    let (app, bot_id) = (app.clone(), bot_id.to_string());
+    Box::pin(async move {
+        let Ok(Some(bot)) = db::bot(&app.db, &bot_id).await else { return };
+        let Some(team_id) = bot.team_id.clone() else { return };
+        let Ok(Some(t)) = db::team(&app.db, &team_id).await else { return };
+        if t.phase != "paused" || t.pause_reason.as_deref() != Some(format!("member_blocked:{}", bot.name).as_str()) {
+            return;
+        }
+        match resume(&app, &team_id).await {
+            Ok(_) => tracing::info!(team = %team_id, member = %bot.name, "member left blocked: team resumed"),
+            Err(e) => tracing::warn!(team = %team_id, member = %bot.name, error = ?e, "auto-resume after unblock failed"),
+        }
+    })
+}
+
 /// `POST /api/teams/:id/approve` — release one supervised gate (SPEC-team §4.6).
 pub async fn approve(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     resume_inner(app, team_id, true).await
@@ -3360,6 +3391,26 @@ pub async fn respawn_schedulers(app: &Arc<App>) {
                     let _ = set_phase(app, &t.id, "paused", Some("worktree_missing"), Some(&t.phase)).await;
                 }
                 continue;
+            }
+        }
+        // §11：停在 `member_blocked:<name>` 而那個成員已經不是 blocked 了（人在別的畫面回完
+        // 提示、或 daemon 沒開機的時候被處理掉），開機時就把它接回去；那個 blocked→idle 的
+        // 邊緣已經過了，等不到第二次。
+        if t.phase == "paused" {
+            if let Some(name) = t.pause_reason.as_deref().and_then(|r| r.strip_prefix("member_blocked:")) {
+                let members = db::team_members(&app.db, &t.id).await.unwrap_or_default();
+                let still = match members.iter().find(|b| b.name == name) {
+                    Some(b) => matches!(db::active_run(&app.db, &b.id).await, Ok(Some(r)) if r.agent_status == "blocked"),
+                    // 成員不見了：那是 `member_lost` 的事，這裡不代為決定。
+                    None => true,
+                };
+                if !still {
+                    match resume(app, &t.id).await {
+                        Ok(_) => tracing::info!(team = %t.id, member = %name, "member no longer blocked: team resumed on boot"),
+                        Err(e) => tracing::warn!(team = %t.id, member = %name, error = ?e, "boot auto-resume failed"),
+                    }
+                    continue;
+                }
             }
         }
         spawn_scheduler(app, &t.id);

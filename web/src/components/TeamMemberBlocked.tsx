@@ -11,9 +11,9 @@ import { BlockedModal } from './BlockedModal'
  * 那個成員、點進去、等 blocked 面板彈出來、回完再切回 team 按「繼續」，四步。這裡把成員的整張
  * 終端畫面（同 `BlockedModal`，鍵盤直通）直接從 team 畫面拉出來，回完就地收尾：
  *
- * - 成員一離開 `blocked`（daemon 推 `bot_status`）就自動 `resume`，不用再按「繼續」。規格本來就說
- *   這是唯一會自動 resume 的原因，但 2026-09-10 實測 daemon 沒有做到，UI 這邊補上這一手。
- * - 只在這顆按鈕開的視窗仍開著、或剛關掉時接手；使用者從別處處理掉的，仍照原本流程按「繼續」。
+ * - 成員一離開 `blocked`（daemon 推 `bot_status`）就自動 `resume`，不用再按「繼續」。2026-09-10 起
+ *   daemon 自己也會做（`team::resume_if_member_unblocked`），所以在別的畫面回完提示一樣會繼續；
+ *   這裡留著是為了「按鈕開的視窗回完就立刻動」，重複的 `resume` 只會拿到 409。
  */
 export function TeamMemberBlocked({ teamId, memberName }: { teamId: string; memberName: string }) {
   const bot = useStore((s) => {
