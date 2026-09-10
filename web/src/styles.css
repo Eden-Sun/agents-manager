@@ -1394,29 +1394,6 @@ button:disabled {
   min-width: 0;
 }
 
-/* AGM has one user-facing entry session; child workers and daemon notifications must be
-   visually distinguishable before the user opens a pane. */
-.bot-role-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 6px;
-  padding: 1px 5px;
-  border: 1px solid color-mix(in srgb, var(--text-faint) 45%, transparent);
-  border-radius: 4px;
-  color: var(--text-faint);
-  font-size: 10px;
-  line-height: 1.35;
-  white-space: nowrap;
-}
-.bot-role-badge.direct {
-  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
-  color: var(--accent);
-}
-.bot-role-badge.header {
-  align-self: center;
-  font-size: 11px;
-}
-
 .src-tag.daemon {
   border-color: color-mix(in srgb, #d69e2e 70%, transparent);
   color: #d69e2e;
