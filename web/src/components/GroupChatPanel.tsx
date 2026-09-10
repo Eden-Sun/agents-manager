@@ -605,13 +605,13 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
         <AttachButton command={attachCommand} compact />
+        <UnreadChip />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={() => selectProject(null)} title="回到單一 Bot 的對話">
             關閉群組
           </button>
         </div>
       </div>
-      <UnreadChip />
       <ToolsHint focusHost={hostName} focusKinds={memberKinds} />
       {memberCount === 0 ? (
         <EmptyState
