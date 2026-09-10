@@ -601,7 +601,6 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         <MemberStrip projectId={projectId} />
         <span className="spacer" />
         <ToolsHintIcon />
-        <UnreadChip />
         <QuotaStrip host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
@@ -612,6 +611,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           </button>
         </div>
       </div>
+      <UnreadChip />
       <ToolsHint focusHost={hostName} focusKinds={memberKinds} />
       {memberCount === 0 ? (
         <EmptyState
