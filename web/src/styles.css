@@ -11015,3 +11015,56 @@ button.run-debug-toggle:hover {
   min-width: 28px;
   min-height: 28px;
 }
+
+/* 「有更新」確認框裡的 changelog（UpdateChangelog.tsx）：一段一版，長的自己捲。 */
+.update-changelog {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  font-size: 12px;
+}
+.update-changelog.loading {
+  color: var(--text-dim);
+}
+.update-changelog.missing strong {
+  color: var(--warn, #c9a227);
+}
+.update-changelog-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.update-changelog-ver {
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.update-changelog-why {
+  margin: 4px 0;
+  color: var(--text-dim);
+}
+.update-changelog-body {
+  max-height: min(40vh, 320px);
+  overflow: auto;
+}
+.update-changelog-body h4 {
+  margin: 6px 0 2px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.update-changelog-body pre {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  color: var(--text);
+}
+.update-changelog-src,
+.update-changelog.missing a {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+}

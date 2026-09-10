@@ -99,6 +99,8 @@ pub struct App {
     pub quotas: Mutex<std::collections::BTreeMap<String, crate::quota::Quota>>,
     /// v4.0: per-host CLI detection (`hosts[].tools`), refreshed on every (re)connect.
     pub tools: Mutex<HashMap<String, crate::tools::HostTools>>,
+    /// Claude Code CHANGELOG.md 全文快取（`GET /api/changelog`，10 分鐘）。
+    pub changelog: crate::changelog::ChangelogCache,
     /// v4.0: project id -> GitHub origin (`None` = checked, not GitHub).
     pub github: Mutex<HashMap<String, Option<crate::github::GithubInfo>>>,
     /// v4.0: `GET /projects/:id/issues` cache (2 min).
@@ -156,6 +158,7 @@ impl App {
             models_cache: Mutex::new(HashMap::new()),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             tools: Mutex::new(HashMap::new()),
+            changelog: Default::default(),
             github: Mutex::new(HashMap::new()),
             issues_cache: Mutex::new(HashMap::new()),
             submodules_cache: Mutex::new(HashMap::new()),

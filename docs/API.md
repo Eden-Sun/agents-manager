@@ -1803,3 +1803,30 @@ run 上：
 
 push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull：`git pull --rebase --no-autostash`
 （不 stash 別的 agent 的半成品）。回應同 commit（`git_push_failed` / `git_pull_failed`）。逾時 180 秒。
+
+## 更新的 changelog `GET /api/changelog?kind=claude&host=<name>&from=<version>`（2026-09-10 新增）
+
+「有更新 · 重啟套用」徽章／額度列的批次重啟 chip 按下去，**先**呼叫這支把新版 changelog
+擺進確認框，使用者看過按了才真的 `POST /bots/{id}/restart`。
+
+- `kind` 省略 = `claude`；目前只有 claude 有來源（其他 kind 回 `found:false`）。
+- `host` 省略 = `local`。daemon 在那台主機上再跑一次 `claude --version`——磁碟上已經是新版
+  （pane 裡跑著的 process 還是舊的），那就是 `installed_version`。這一步不快取。
+- `from`：現在跑著的版本（claude statusLine 報的 `runs[].status.version`）。有給就回
+  `from`（不含）到 `installed_version`（含）之間每一版的段落，新的在前；沒給只回新版那一段。
+- 來源是 `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`，全文
+  快取 10 分鐘，認 `## x.y.z` 二級標題。
+
+**永遠 200**。抓不到（`--version` 失敗、GitHub 連不上、CHANGELOG 沒那一版）就是
+`found:false` + `error`，UI 必須寫「找不到 changelog」而不是靜默略過。
+
+```json
+{
+  "kind": "claude", "host": "local",
+  "installed_version": "2.1.5", "from_version": "2.1.3",
+  "found": true,
+  "sections": [{ "version": "2.1.5", "body": "- …" }, { "version": "2.1.4", "body": "- …" }],
+  "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md",
+  "error": null
+}
+```

@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { inFlightTurn, useStore } from '../store/store'
+import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
+import { UpdateChangelog } from './UpdateChangelog'
 
 /**
  * 「claude 有更新」擺在額度列上（SPEC §6.9）。
@@ -44,6 +45,15 @@ export function UpdateQuotaChip() {
   )
   const busyCount = busyLines ? busyLines.split('\n').length : 0
   const [confirming, setConfirming] = useState(false)
+  // changelog 用第一顆等著套用的 bot 所在主機與它跑著的版本；同一台的 claude 都是同一份。
+  const changelogHost = useStore((s) => {
+    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    return projectHostName(s, s.bots.find((b) => b.id === first)?.project_id ?? null)
+  })
+  const changelogFrom = useStore((s) => {
+    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    return first ? (s.runs[first]?.status?.version ?? null) : null
+  })
 
   if (batch) {
     const { total, done, ok, failed, finished } = batch
@@ -95,6 +105,7 @@ export function UpdateQuotaChip() {
         title="重啟這些 Bot 來套用 claude 更新？"
         body={
           <>
+            {confirming ? <UpdateChangelog kind="claude" host={changelogHost} from={changelogFrom} /> : null}
             <p>
               以下 <strong>{readyCount}</strong> 顆會結束目前的 agent，再用同一個 session <code>--resume</code>{' '}
               接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。
@@ -117,7 +128,7 @@ export function UpdateQuotaChip() {
           </>
         }
         confirmLabel={`重啟 ${readyCount} 顆`}
-        width={380}
+        width={440}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
           setConfirming(false)
