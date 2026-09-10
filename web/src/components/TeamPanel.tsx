@@ -1068,7 +1068,6 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         </div>
         <span className="spacer" />
         <BudgetMeter teamId={teamId} />
-        <UnreadChip />
         <QuotaStrip focusKind={memberKind} host={project?.host ?? LOCAL_HOST} />
         {/* 遠端才掛：本機的數字固定在左上角。 */}
         <MemBadge host={project?.host ?? LOCAL_HOST} onlyRemote />
@@ -1202,6 +1201,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           </HeadMoreMenu>
         </div>
       </div>
+      <UnreadChip />
 
       <div className="team-subhead">
         {/* 交付方式是「建立時就決定的設定」，不是會變的狀態，所以從標題列搬到這裡——
