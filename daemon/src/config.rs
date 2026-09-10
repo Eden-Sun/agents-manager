@@ -3,7 +3,7 @@
 //! SQLite holds runtime state (Run / Turn / Message / tokens). On load and after every
 //! write-back we project TOML into SQLite (see `projection.rs`).
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -375,7 +375,6 @@ impl ConfigStore {
 
     /// Mutate the in-memory config and atomically write it back.
     ///
-    /// Refuses (409-ish) when the file changed underneath us since the last read.
     pub async fn update<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut ConfigFile) -> Result<T>,
@@ -383,7 +382,11 @@ impl ConfigStore {
         let mut g = self.inner.lock().await;
         let on_disk = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
         if self.path.exists() && on_disk != g.mtime {
-            bail!("config.toml changed on disk since it was loaded; reload required");
+            let (cfg, mtime) = read_file(&self.path)
+                .context("config.toml changed on disk and could not be re-read")?;
+            tracing::info!("config.toml changed on disk; reloaded before applying update");
+            g.cfg = cfg;
+            g.mtime = mtime;
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
@@ -399,91 +402,18 @@ impl ConfigStore {
     }
 }
 
-/// Shape of the TOML we understand, used to report keys serde would otherwise drop silently.
+/// Deserialize the config while collecting fields that serde does not know.
 ///
-/// Unknown keys are a *warning*, not an error: an older daemon must still start on a file
+/// Unknown keys are a warning, not an error: an older daemon must still start on a file
 /// written by a newer one (forward compatibility), but a typo (`auto_start`) must not vanish
-/// without a trace either.
-enum Schema {
-    Table(&'static [(&'static str, Schema)]),
-    Array(&'static Schema),
-    /// Free-form value (`env` maps, scalars) — never descended into.
-    Any,
-}
-
-const BOT_SCHEMA: Schema = Schema::Table(&[
-    ("id", Schema::Any),
-    ("name", Schema::Any),
-    ("kind", Schema::Any),
-    ("model", Schema::Any),
-    ("effort", Schema::Any),
-    ("fast", Schema::Any),
-    ("persona", Schema::Any),
-    ("args", Schema::Any),
-    ("autostart", Schema::Any),
-    ("inject_hooks", Schema::Any),
-    ("auto_approve", Schema::Any),
-    ("identity", Schema::Any),
-    ("env", Schema::Any),
-    ("herdr_session", Schema::Any),
-]);
-
-const PROJECT_SCHEMA: Schema = Schema::Table(&[
-    ("id", Schema::Any),
-    ("path", Schema::Any),
-    ("label", Schema::Any),
-    ("host", Schema::Any),
-    ("bots", Schema::Array(&BOT_SCHEMA)),
-]);
-
-const IDENTITY_SCHEMA: Schema =
-    Schema::Table(&[("name", Schema::Any), ("kind", Schema::Any), ("env", Schema::Any), ("args", Schema::Any)]);
-
-const HOST_SCHEMA: Schema = Schema::Table(&[
-    ("name", Schema::Any),
-    ("ssh", Schema::Any),
-    ("ssh_port", Schema::Any),
-    ("ssh_opts", Schema::Any),
-    ("herdr_session", Schema::Any),
-    ("remote_path", Schema::Any),
-    ("hook_port", Schema::Any),
-]);
-
-const CONFIG_SCHEMA: Schema = Schema::Table(&[
-    ("server", Schema::Table(&[("listen", Schema::Any), ("herdr_session", Schema::Any)])),
-    ("identities", Schema::Array(&IDENTITY_SCHEMA)),
-    ("hosts", Schema::Array(&HOST_SCHEMA)),
-    ("projects", Schema::Array(&PROJECT_SCHEMA)),
-]);
-
-/// Dotted paths (`projects[0].bots[1].auto_start`) of every key in `text` that `ConfigFile`
-/// does not know about. Empty when the text is not valid TOML — `toml::from_str` reports that.
-pub fn unknown_keys(text: &str) -> Vec<String> {
-    let Ok(value) = text.parse::<toml::Value>() else { return Vec::new() };
-    let mut out = Vec::new();
-    walk_unknown(&value, &CONFIG_SCHEMA, String::new(), &mut out);
-    out
-}
-
-fn walk_unknown(value: &toml::Value, schema: &Schema, path: String, out: &mut Vec<String>) {
-    match (schema, value) {
-        (Schema::Table(fields), toml::Value::Table(t)) => {
-            for (k, v) in t {
-                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
-                match fields.iter().find(|(name, _)| *name == k) {
-                    Some((_, sub)) => walk_unknown(v, sub, child, out),
-                    None => out.push(child),
-                }
-            }
-        }
-        (Schema::Array(item), toml::Value::Array(items)) => {
-            for (i, v) in items.iter().enumerate() {
-                walk_unknown(v, item, format!("{path}[{i}]"), out);
-            }
-        }
-        // Wrong value type (e.g. `projects = 1`): serde reports it as a parse error.
-        _ => {}
-    }
+/// without a trace either. `serde_ignored` follows serde's actual field handling, including
+/// nested arrays and renamed fields, so this list cannot drift from the config structs.
+fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
+    let mut ignored = Vec::new();
+    let cfg = serde_ignored::deserialize(toml::Deserializer::new(text), |path| {
+        ignored.push(path.to_string());
+    })?;
+    Ok((cfg, ignored))
 }
 
 fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
@@ -494,8 +424,8 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
         return Ok((cfg, mtime));
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: ConfigFile = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-    for key in unknown_keys(&text) {
+    let (cfg, unknown) = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+    for key in unknown {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
     let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
@@ -589,8 +519,37 @@ mod agent_name_tests {
 }
 
 #[cfg(test)]
-mod issue38_tests {
-    use super::{unknown_keys, ConfigFile, ConfigStore};
+mod issue29_tests {
+    use super::{parse_config, read_file, ConfigFile, ConfigStore};
+    use std::io::{self, Write};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct CaptureMakeWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for CaptureMakeWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CaptureWriter(self.0.clone())
+        }
+    }
 
     const SAMPLE: &str = r#"# top comment
 [[projects]]
@@ -605,14 +564,18 @@ kind = "claude"
 auto_start = true   # typo for autostart
 "#;
 
+    fn unknown_keys(text: &str) -> Vec<String> {
+        parse_config(text).map(|(_, ignored)| ignored).unwrap_or_default()
+    }
+
     #[test]
     fn unknown_keys_are_reported_with_paths() {
         let keys = unknown_keys(SAMPLE);
-        assert_eq!(keys, vec!["projects[0].bots[0].auto_start"]);
+        assert_eq!(keys, vec!["projects.0.bots.0.auto_start"]);
 
         let keys = unknown_keys("[server]\nport = 1\n[[hosts]]\nname = \"m\"\nssh = \"x\"\nherdr-session = \"s\"\n");
-        // toml::Table is a sorted map, so the order is alphabetical rather than file order.
-        assert_eq!(keys, vec!["hosts[0].herdr-session", "server.port"]);
+        assert!(keys.contains(&"hosts.0.herdr-session".to_string()));
+        assert!(keys.contains(&"server.port".to_string()));
 
         // Free-form maps are never descended into.
         assert!(unknown_keys("[[identities]]\nname = \"i\"\nkind = \"claude\"\n[identities.env]\nFOO = \"1\"\n").is_empty());
@@ -623,6 +586,26 @@ auto_start = true   # typo for autostart
     fn unknown_keys_are_still_parsed_leniently() {
         let cfg: ConfigFile = toml::from_str(SAMPLE).unwrap();
         assert!(!cfg.projects[0].bots[0].autostart, "typo'd key must not silently apply");
+    }
+
+    #[test]
+    fn loading_unknown_keys_emits_warning_with_path() {
+        let dir = std::env::temp_dir().join(format!("am-config-issue29-warn-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CaptureMakeWriter(captured.clone()))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || read_file(&path)).unwrap();
+        let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("WARN"), "{log}");
+        assert!(log.contains("unknown key `projects.0.bots.0.auto_start`"), "{log}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -648,6 +631,39 @@ auto_start = true   # typo for autostart
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("autostart = true"));
         assert!(!text.contains("# top comment"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn rewrite_externally(path: &Path, text: &str) {
+        let before = std::fs::metadata(path).unwrap().modified().unwrap();
+        std::fs::write(path, text).unwrap();
+        if std::fs::metadata(path).unwrap().modified().unwrap() == before {
+            std::thread::sleep(Duration::from_secs(1));
+            std::fs::write(path, text).unwrap();
+        }
+        assert_ne!(std::fs::metadata(path).unwrap().modified().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn update_reloads_external_changes_before_applying_closure() {
+        let dir = std::env::temp_dir().join(format!("am-config-issue29-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[server]\nherdr_session = \"initial\"\n").unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        rewrite_externally(&path, "[server]\nlisten = \"127.0.0.1:8899\"\nherdr_session = \"external\"\n");
+        store
+            .update(|cfg| {
+                cfg.server.herdr_session = "closure".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let cfg = store.get().await;
+        assert_eq!(cfg.server.listen, "127.0.0.1:8899");
+        assert_eq!(cfg.server.herdr_session, "closure");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
