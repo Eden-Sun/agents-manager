@@ -11144,3 +11144,31 @@ button.run-debug-toggle:hover {
     max-height: 90px;
   }
 }
+
+/* 同上，真手機（Safari 有網址列與工具列，可視高度比 844 少一百多 px）再量一次還是差一截：
+   ask_user 時收件者 chip 全部 disabled、只會送給 PM，提示列也只是重複那句「→ PM」，
+   兩者在手機上都不用佔位；橫幅再縮到兩行。`…` 選單在手機上換行到最左邊，
+   `right: 0` 錨在按鈕右緣就整個滑出左邊界，改成靠左展開。 */
+@media (width <= 640px) {
+  .team-composer:has(.team-ask) .recipient-row,
+  .team-composer:has(.team-ask) .composer-hint {
+    display: none;
+  }
+
+  .team-composer .team-ask {
+    max-height: 44px;
+    margin-bottom: 4px;
+  }
+
+  /* 等人回答時 issue 佇列的明細與「已暫停…按繼續」那條橫幅先讓位：前者可再展開，
+     後者的話 composer 橫幅已經講了，而且這時該按的是「回答並繼續」不是「繼續」。 */
+  .team-chat:has(.team-ask) .team-queue-rows,
+  .main:has(.team-ask) .team-head .team-paused {
+    display: none;
+  }
+
+  .team-head .head-menu-pop {
+    left: 0;
+    right: auto;
+  }
+}
