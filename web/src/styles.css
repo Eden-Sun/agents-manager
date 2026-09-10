@@ -11128,3 +11128,19 @@ button.run-debug-toggle:hover {
     max-height: calc(100dvh - 24px);
   }
 }
+
+/* Team 暫停等人回答（`ask_user`）時，手機上輸入框整個掉到畫面外（2026-09-10 於 390×844 量到：
+   textarea top=909）：PM 的問題橫幅有幾百字、issue 佇列又固定 180px，`.team-chat` 裡能縮的只有
+   時間軸，縮到 44px 之後 composer 還是被推到底下，看得到「PM 需要你的答覆」卻沒地方打字。
+   問題全文在時間軸本來就看得到，橫幅只要能提示並可捲動就好；佇列也讓位一點。 */
+@media (width <= 640px) {
+  .team-composer .team-ask {
+    align-items: flex-start;
+    max-height: 66px;
+    overflow-y: auto;
+  }
+
+  .team-chat .team-queue-rows {
+    max-height: 90px;
+  }
+}
