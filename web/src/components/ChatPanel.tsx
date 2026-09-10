@@ -78,6 +78,26 @@ function systemNoticeText(content: string): string {
  * render，沒有 memo 的話畫面上每一則的 react-markdown 都跟著重新解析——200 則時每個 tick
  * 一兩百毫秒的 long task（issue #8）。訊息物件本身不會變，所以 shallow 比較就夠。
  */
+/**
+ * `relay_from` 有值的 user 訊息不是使用者自己打的，是別的 bot（目前只有 AGM 總管）
+ * 代為交辦的。不標的話它跟使用者的話長得一模一樣，讀對話的人會以為是自己派的工。
+ * 對不到 bot（已刪除／daemon 自己發的）就退回 ID，不假裝知道是誰。
+ */
+const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; toId: string | null }) {
+  const names = useStore(
+    useShallow((s) => ({
+      from: s.bots.find((b) => b.id === fromId)?.name ?? '',
+      to: toId ? (s.bots.find((b) => b.id === toId)?.name ?? '') : '',
+    })),
+  )
+  return (
+    <span className={`msg-targets relay${names.from ? '' : ' daemon'}`} title="由其他 agent 代為交辦的訊息（不是你送的）">
+      {names.from || fromId}
+      {names.to ? ` → ${names.to}` : ''}
+    </span>
+  )
+})
+
 export const Bubble = memo(function Bubble({
   msg,
   from,
@@ -101,6 +121,7 @@ export const Bubble = memo(function Bubble({
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
+          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} /> : null}
           {/* 來源只在「不是正常那條路」時才標。`hook` 是每一則回覆的常態，在每顆氣泡上
               印一次「回覆」等於沒說話；會影響你要不要信這段文字的是另外那幾種——終端
               擷取、對話紀錄、系統通知。 */}
@@ -841,6 +862,10 @@ function Composer({
           className="send-btn"
           disabled={state.disabled || sending || files.uploading || nothingToSend}
           title={files.uploading ? '圖片上傳中…' : state.queued ? '這回合結束後自動送出' : undefined}
+          /* 手機第一下常常只把鍵盤收掉、訊息沒送出去：按下去的瞬間輸入框失焦、鍵盤關閉，
+             版面往下長回來，`pointerup` 就不在這顆鍵上了，click 因此不成立（2026-09-10）。
+             擋掉 mousedown 的預設行為＝不讓焦點離開輸入框＝鍵盤不動＝版面不動，一下就送出。 */
+          onMouseDown={(e) => e.preventDefault()}
           onClick={submit}
         >
           {sending ? '送出中…' : files.uploading ? '上傳中…' : state.queued ? '排隊送出' : '送出'}
