@@ -2309,6 +2309,32 @@ button.run-debug-toggle:hover:not(:disabled) {
   margin-left: -5px;
 }
 
+/* 名字下面那一行：模型標籤 + ★ 釘選（`PrimaryChips`）。`.main-title` 是 `overflow: hidden`
+   的直排，子元素超出去會被硬切（2026-09-10 使用者截圖：`opus-Medium · thi` 從中間斷掉）。
+   所以這一行自己是可壓縮的 flex，裡面的東西縮到不能再縮時收成 `…`，不是被切一半。 */
+.bot-head .main-title-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bot-head .main-title-sub > .model-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 桌面：名字至少留這麼寬，額度條再長也不能把它壓成 `0-op…`（同一張截圖）。手機沒有這條，
+   那邊標題列本來就會換行。 */
+@media (min-width: 721px) {
+  .bot-head .main-title {
+    min-width: 168px;
+  }
+}
+
 .bot-head .main-title-row > strong,
 .bot-head .main-title-row > .bot-name-btn,
 .bot-head .main-title-row > .bot-name-input {
