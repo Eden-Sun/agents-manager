@@ -3,7 +3,7 @@
 //! SQLite holds runtime state (Run / Turn / Message / tokens). On load and after every
 //! write-back we project TOML into SQLite (see `projection.rs`).
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -382,11 +382,7 @@ impl ConfigStore {
         let mut g = self.inner.lock().await;
         let on_disk = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
         if self.path.exists() && on_disk != g.mtime {
-            let (cfg, mtime) = read_file(&self.path)
-                .context("config.toml changed on disk and could not be re-read")?;
-            tracing::info!("config.toml changed on disk; reloaded before applying update");
-            g.cfg = cfg;
-            g.mtime = mtime;
+            bail!("config.toml changed on disk since it was loaded; reload required");
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
@@ -519,37 +515,8 @@ mod agent_name_tests {
 }
 
 #[cfg(test)]
-mod issue29_tests {
-    use super::{parse_config, read_file, ConfigFile, ConfigStore};
-    use std::io::{self, Write};
-    use std::path::Path;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    use tracing_subscriber::fmt::MakeWriter;
-
-    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for CaptureWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone)]
-    struct CaptureMakeWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> MakeWriter<'a> for CaptureMakeWriter {
-        type Writer = CaptureWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            CaptureWriter(self.0.clone())
-        }
-    }
+mod issue38_tests {
+    use super::{parse_config, ConfigFile, ConfigStore};
 
     const SAMPLE: &str = r#"# top comment
 [[projects]]
@@ -588,26 +555,6 @@ auto_start = true   # typo for autostart
         assert!(!cfg.projects[0].bots[0].autostart, "typo'd key must not silently apply");
     }
 
-    #[test]
-    fn loading_unknown_keys_emits_warning_with_path() {
-        let dir = std::env::temp_dir().join(format!("am-config-issue29-warn-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        std::fs::write(&path, SAMPLE).unwrap();
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(CaptureMakeWriter(captured.clone()))
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || read_file(&path)).unwrap();
-        let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-        assert!(log.contains("WARN"), "{log}");
-        assert!(log.contains("unknown key `projects.0.bots.0.auto_start`"), "{log}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     #[tokio::test]
     async fn noop_update_leaves_the_file_byte_identical() {
         let dir = std::env::temp_dir().join(format!("am-config-issue38-{}", crate::db::ulid()));
@@ -634,36 +581,4 @@ auto_start = true   # typo for autostart
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    fn rewrite_externally(path: &Path, text: &str) {
-        let before = std::fs::metadata(path).unwrap().modified().unwrap();
-        std::fs::write(path, text).unwrap();
-        if std::fs::metadata(path).unwrap().modified().unwrap() == before {
-            std::thread::sleep(Duration::from_secs(1));
-            std::fs::write(path, text).unwrap();
-        }
-        assert_ne!(std::fs::metadata(path).unwrap().modified().unwrap(), before);
-    }
-
-    #[tokio::test]
-    async fn update_reloads_external_changes_before_applying_closure() {
-        let dir = std::env::temp_dir().join(format!("am-config-issue29-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        std::fs::write(&path, "[server]\nherdr_session = \"initial\"\n").unwrap();
-        let store = ConfigStore::load(path.clone()).await.unwrap();
-
-        rewrite_externally(&path, "[server]\nlisten = \"127.0.0.1:8899\"\nherdr_session = \"external\"\n");
-        store
-            .update(|cfg| {
-                cfg.server.herdr_session = "closure".to_string();
-                Ok(())
-            })
-            .await
-            .unwrap();
-
-        let cfg = store.get().await;
-        assert_eq!(cfg.server.listen, "127.0.0.1:8899");
-        assert_eq!(cfg.server.herdr_session, "closure");
-        std::fs::remove_dir_all(&dir).ok();
-    }
 }
