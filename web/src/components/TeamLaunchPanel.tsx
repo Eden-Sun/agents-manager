@@ -343,13 +343,13 @@ export function TeamLaunchPanel({
         {/* 組隊是最花額度的一個動作（多個成員各自跑），所以決定按不按「建立並啟動」之前，
             這裡就要看得到剩多少——跟聊天頁、群組頁、team 頁同一條 `.quota-strip`。 */}
         <QuotaStrip host={host} />
+        <UnreadChip />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={closeTeamLaunch} title="不建立 team，回到原本的畫面">
             取消
           </button>
         </div>
       </div>
-      <UnreadChip />
 
       <div className="team-launch">
         <section className="team-issue">
