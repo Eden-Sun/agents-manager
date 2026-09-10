@@ -60,6 +60,9 @@ pub struct IdentityInfo {
     pub kind: String,
     /// `None` = could not tell (CLI missing, probe failed, output not understood).
     pub logged_in: Option<bool>,
+    /// Why `logged_in` is unknown. Kept explicit so a failed probe cannot look like a
+    /// successful (or empty) status in the UI.
+    pub reason: Option<String>,
     /// Who is logged in, when the CLI says so (claude: e-mail, codex: `ChatGPT`, grok: `grok.com`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -90,6 +93,7 @@ impl IdentityInfo {
             name: name.to_string(),
             kind: kind.to_string(),
             logged_in: None,
+            reason: None,
             account: None,
             plan: None,
             source,
@@ -441,12 +445,13 @@ pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
         for (k, v) in it.env.iter().filter(|(k, _)| valid_env_name(k)) {
             s.push_str(&format!(" {k}={}; export {k};", sh_quote(v)));
         }
-        s.push_str(&format!(" exec {}", sh_quote(&it.bin)));
+        s.push_str(&format!(" {}", sh_quote(&it.bin)));
         for a in args {
             s.push(' ');
             s.push_str(&sh_quote(a));
         }
-        s.push_str(" ) </dev/null 2>/dev/null\n");
+        s.push_str("; rc=$?; printf '\\nAM_IDENT_RC %s %s\\n' ");
+        s.push_str(&format!("{} \"$rc\" ) </dev/null 2>/dev/null\n", sh_quote(&it.name)));
         // The leading newline keeps the fence on its own line when the CLI ends without one.
         s.push_str(&format!("printf '\\nAM_IDENT_END %s\\n' {}\n", sh_quote(&it.name)));
     }
@@ -515,7 +520,30 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
                 continue;
             }
             let Some(kind) = kinds.get(&open) else { continue };
-            let (logged_in, account, plan) = read_login_answer(kind, &body);
+            let mut answer_body = String::new();
+            let mut rc = None;
+            for answer_line in body.lines() {
+                if let Some(rest) = answer_line.strip_prefix("AM_IDENT_RC ") {
+                    let mut fields = rest.split_whitespace();
+                    let marker_name = fields.next().unwrap_or_default();
+                    if marker_name == open {
+                        rc = fields.next().and_then(|v| v.parse::<i32>().ok());
+                        continue;
+                    }
+                }
+                answer_body.push_str(answer_line);
+                answer_body.push('\n');
+            }
+            let (logged_in, account, plan) = read_login_answer(kind, &answer_body);
+            let reason = if rc.is_some_and(|code| code != 0) {
+                Some(format!("auth status 指令失敗（exit code {}）", rc.unwrap_or_default()))
+            } else if rc.is_none() {
+                Some("auth status probe 沒有完成".into())
+            } else if logged_in.is_none() {
+                Some("auth status 輸出無法解析".into())
+            } else {
+                None
+            };
             // `source` / `config_dir` belong to the identity, not to its answer — the caller
             // fills them in from the entry it asked about.
             m.insert(
@@ -524,6 +552,7 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
                     name: open,
                     kind: kind.clone(),
                     logged_in,
+                    reason,
                     account,
                     plan,
                     source: SOURCE_CONFIG,
@@ -575,7 +604,15 @@ async fn detect_identities(
     };
     let mut out: BTreeMap<String, IdentityInfo> = all
         .iter()
-        .map(|(i, src)| (i.name.clone(), IdentityInfo::unknown(&i.name, &i.kind, src, dir_of(i))))
+        .map(|(i, src)| {
+            let mut info = IdentityInfo::unknown(&i.name, &i.kind, src, dir_of(i));
+            info.reason = Some(match tools.get(&i.kind).and_then(|t| t.path.as_ref()) {
+                Some(_) if login_status_args(&i.kind).is_some() => "auth status 尚未取得結果".into(),
+                Some(_) => "這個 kind 沒有可用的 auth status 探測".into(),
+                None => format!("{} CLI 不在 PATH", i.kind),
+            });
+            (i.name.clone(), info)
+        })
         .collect();
     if out.is_empty() {
         return out;
@@ -619,7 +656,13 @@ async fn detect_identities(
                 out.insert(name, info);
             }
         }
-        Err(e) => tracing::warn!(host, error = %e, "identity login detection failed"),
+        Err(e) => {
+            let reason = format!("auth status 探測失敗：{e}");
+            for info in out.values_mut() {
+                info.reason = Some(reason.clone());
+            }
+            tracing::warn!(host, error = %e, "identity login detection failed")
+        }
     }
     out
 }
@@ -888,7 +931,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         // gk0 has no env of its own, so its subshell must not carry cx1's.
         let gk0 = sh.split("AM_IDENT_BEGIN %s\\n' 'gk0'").nth(1).unwrap().split("AM_IDENT_END").next().unwrap();
         assert!(!gk0.contains("CODEX_HOME"));
-        assert!(gk0.contains("exec '/opt/homebrew/bin/grok' 'models'"));
+        assert!(gk0.contains(" '/opt/homebrew/bin/grok' 'models'"));
         assert!(sh.contains("CODEX_HOME='/Users/m4p/.codex-alt'; export CODEX_HOME;"));
         // stdin closed: none of these CLIs may wait for a TTY.
         assert!(sh.contains("</dev/null"));
@@ -939,9 +982,18 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let out = "AM_IDENT_BEGIN a\nAM_IDENT_END a\nAM_IDENT_BEGIN b\nzsh: command not found\nAM_IDENT_END b\nAM_IDENT_BEGIN c\n{\"loggedIn\":true}\n";
         let m = parse_identity_probe(out, &kinds(&[("a", "claude"), ("b", "claude"), ("c", "claude")]));
         assert_eq!(m["a"].logged_in, None);
+        assert_eq!(m["a"].reason.as_deref(), Some("auth status 輸出無法解析"));
         assert_eq!(m["b"].logged_in, None);
         // `c` never closed, so it is not reported at all (the caller keeps its unknown row).
         assert!(!m.contains_key("c"));
+    }
+
+    #[test]
+    fn failed_auth_status_is_unknown_with_a_reason() {
+        let out = "AM_IDENT_BEGIN cx\npermission denied\nAM_IDENT_RC cx 127\nAM_IDENT_END cx\n";
+        let m = parse_identity_probe(out, &kinds(&[("cx", "codex")]));
+        assert_eq!(m["cx"].logged_in, None);
+        assert_eq!(m["cx"].reason.as_deref(), Some("auth status 指令失敗（exit code 127）"));
     }
 
     /// claude 例外（見 [`claude_is_not_asked_over_ssh`]）；其餘每種 CLI 都要有一條 ssh 問法。

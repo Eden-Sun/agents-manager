@@ -113,11 +113,20 @@ export function PersonaMark({ persona }: { persona: string | null }) {
  * 偵測過都會落在這裡，所以不出警語，免得把不知道講成壞掉。
  */
 function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
-  if (!st || st.logged_in !== false) return null
-  return {
-    mark: '未登入',
-    title: `這個身份在 ${hostLabel} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 ${hostLabel} 用這個身份的設定登入，再回來按「重新偵測」。`,
+  if (!st) return null
+  if (st.logged_in === false) {
+    return {
+      mark: '未登入',
+      title: `這個身份在 ${hostLabel} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 ${hostLabel} 用這個身份的設定登入，再回來按「重新偵測」。`,
+    }
   }
+  if (st.logged_in === null) {
+    return {
+      mark: '未知',
+      title: `無法確認這個身份在 ${hostLabel} 的登入狀態：${st.reason ?? 'auth status 沒有可解析的結果'}。不要把它當成已登入，先修正原因或重新偵測。`,
+    }
+  }
+  return null
 }
 
 /** 已登入時把帳號寫進 title，讓使用者一眼確認選到的是哪個帳號。 */
@@ -131,7 +140,7 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
   } else if (st?.logged_in === false) {
     parts.push(`${hostLabel}：未登入`)
   } else {
-    parts.push(`${hostLabel}：登入狀態未知`)
+    parts.push(`${hostLabel}：登入狀態未知${st?.reason ? ` — ${st.reason}` : ''}`)
   }
   // 從 shell alias 認到的身份不在 config.toml 裡，改不了也刪不掉——講清楚它從哪來。
   if (st?.source === 'shell') {
@@ -206,7 +215,7 @@ export function IdentityOptions({
                 {i.name}
               </button>
               {warn ? (
-                <span className="identity-logged-out" title={warn.title}>
+                <span className={`identity-logged-out${warn.mark === '未知' ? ' is-unknown' : ''}`} title={warn.title}>
                   {warn.mark}
                 </span>
               ) : null}
@@ -214,8 +223,10 @@ export function IdentityOptions({
           )
         })}
       </div>
-      {identities.some((i) => status[i.name]?.logged_in === false) ? (
-        <span className="hint">標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面。</span>
+      {identities.some((i) => status[i.name]?.logged_in !== true) ? (
+        <span className="hint">
+          標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面；標「未知」的身份則尚未確認，請先看提示原因。
+        </span>
       ) : null}
     </div>
   )
