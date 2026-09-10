@@ -35,6 +35,39 @@
   border-color: var(--accent);
 }
 
+/* 「進行中」推到最右邊：左半邊是要處理的（剛跑完），右半邊是不用管的（還在跑）。
+   一列塞不下時 flex-wrap 會讓它掉到下一行，這個 spacer 就自然消失。 */
+.unread-bar-gap {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+/* 還在跑的：中性色，別跟「該去看」的藍色搶注意力。 */
+.unread-chip.working {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.unread-chip-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-working);
+  animation: unread-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes unread-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .unread-chip-dot {
+    animation: none;
+  }
+}
+
 /* 正在看的那一顆（未讀還沒被清掉時，例如視窗在背景）不要看起來像「還要再點一下」。 */
 .unread-chip.current {
   border-style: dashed;
