@@ -504,6 +504,8 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
     }
     migrate_bots_kind_check(&pool).await?;
     migrate_turn_status_check(&pool).await?;
+    // AGM 總管的持久資料（supervisor/store.rs）。
+    crate::supervisor::store::migrate(&pool).await?;
     Ok(())
 }
 

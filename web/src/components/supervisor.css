@@ -1,0 +1,170 @@
+/*
+ * AGM 總管面板。獨立一個檔，不動 styles.css——那支是共用檔，這裡的樣式只有這個面板用。
+ * 顏色一律走既有的 CSS 變數，才會跟著主題一起變。
+ */
+
+.agm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agm-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.agm-key {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.agm-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.agm-chip.ok {
+  border-color: var(--status-ok);
+  color: var(--status-ok);
+}
+
+.agm-chip.warn {
+  border-color: var(--status-warn);
+  color: var(--status-warn);
+}
+
+.agm-chip.bad {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* 候補順序：兩列固定清單，使用中的那列打亮。 */
+.agm-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agm-candidates li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.agm-candidates li.on {
+  border-color: var(--accent-ink);
+  color: var(--text);
+}
+
+.agm-cand-n {
+  width: 18px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.agm-cand-tag {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent-ink);
+}
+
+.agm-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agm-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.agm-note.inline {
+  display: inline;
+}
+
+.agm-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.agm-sec > h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agm-assign-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agm-assign {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.agm-assign-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.agm-assign-to {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agm-assign-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.agm-assign-meta {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.agm-link {
+  font-size: 12px;
+  color: var(--accent-ink);
+}
