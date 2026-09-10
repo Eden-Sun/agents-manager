@@ -347,7 +347,7 @@ function BotRow({
               title={`底下有子 bot 用別的帳號（母 ${bot.identity ?? 'cc0'}、子 ${divergedChildren.identities}：${divergedChildren.names}）——額度分開算，注意別把那個帳號用光`}
             >
               <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
-              <span className="identity-diverged-mark" aria-hidden="true">≠{divergedChildren.identities}</span>
+              <span className="identity-diverged-mark" aria-hidden="true">{divergedChildren.identities}</span>
             </span>
           ) : (
             <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
