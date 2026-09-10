@@ -244,6 +244,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [identity, setIdentity] = useState(bot?.identity ?? '')
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
+  /**
+   * 已經送出去並成功的那些欄位。「有沒有未儲存的變更」要跟**存進去的值**比，不是只跟 store
+   * 裡那份 bot 比：store 慢一拍（或像 2026-09-11 那樣因為 daemon 重啟而卡住不更新）時，
+   * 剛存好的欄位會被算成還沒存，關閉時跳一個沒有道理的「放棄未儲存的變更？」。
+   */
+  const [saved, setSaved] = useState<PatchBotInput>({})
   const [saving, setSaving] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -328,6 +334,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setFast(b.fast)
     setPersona(b.persona ?? '')
     setIdentity(b.identity ?? '')
+    setSaved({})
     setBanner(null)
     setCloseConfirmOpen(false)
   }, [botId])
@@ -357,13 +364,23 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   // `IdentityOptions` 的同一條規則，兩處講法才一致。
   const hostLabel = !host || host === 'local' ? '本機' : host
 
+  // 基準＝store 裡那份 bot，套上這次開啟以來已經存成功的欄位。
+  const base = {
+    name: 'name' in saved ? (saved.name ?? bot.name) : bot.name,
+    model: 'model' in saved ? saved.model ?? null : bot.model,
+    effort: 'effort' in saved ? saved.effort ?? null : bot.effort,
+    fast: 'fast' in saved ? Boolean(saved.fast) : bot.fast,
+    persona: 'persona' in saved ? saved.persona ?? null : bot.persona,
+    identity: 'identity' in saved ? saved.identity ?? null : bot.identity,
+  }
+
   const patch: PatchBotInput = {}
-  if (name !== bot.name) patch.name = name
-  if (model !== bot.model) patch.model = model
-  if (effort !== bot.effort) patch.effort = effort
-  if (bot.kind === 'codex' && fast !== bot.fast) patch.fast = fast
-  if ((persona.trim() || null) !== bot.persona) patch.persona = persona.trim() || null
-  if (bot.kind === 'claude' && (identity || null) !== bot.identity) patch.identity = identity || null
+  if (name !== base.name) patch.name = name
+  if (model !== base.model) patch.model = model
+  if (effort !== base.effort) patch.effort = effort
+  if (bot.kind === 'codex' && fast !== base.fast) patch.fast = fast
+  if ((persona.trim() || null) !== base.persona) patch.persona = persona.trim() || null
+  if (bot.kind === 'claude' && (identity || null) !== base.identity) patch.identity = identity || null
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
   const canSave = dirty && (patch.name === undefined || nameOk) && !saving
@@ -372,9 +389,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     if (!canSave) return
     setSaving(true)
     setBanner(null)
-    void patchBot(botId, patch).then((needsRestart) => {
+    const sent = patch
+    void patchBot(botId, sent).then((needsRestart) => {
       setSaving(false)
       if (needsRestart === null) return
+      setSaved((s) => ({ ...s, ...sent }))
       setBanner(needsRestart ? 'restart' : 'saved')
       if (!needsRestart) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
     })
