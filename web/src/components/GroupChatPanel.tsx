@@ -18,7 +18,7 @@ import { IssuesBar } from './IssuesBar'
 import { KindIcon } from './KindTag'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
-import { PrimaryChips, UnreadChip } from './UnreadChip'
+import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
@@ -605,7 +605,6 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
         <AttachButton command={attachCommand} compact />
-        <PrimaryChips />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={() => selectProject(null)} title="回到單一 Bot 的對話">
             關閉群組
