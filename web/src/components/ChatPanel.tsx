@@ -1265,22 +1265,27 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               showing nothing. The settings (`高 · thinking`) ride along as a dim suffix —
               they used to cost the status bar its own 模型 field. Second row under the name
               so the identity row above doesn't have to yield space to it. */}
-          {bot.model || statusInfo?.model_name ? (
-            <ModelQuickPicker
-              botId={botId}
-              kind={bot.kind}
-              host={hostName}
-              className={`model-tag${bot.model ? '' : ' reported'}`}
-              title={
-                bot.model
-                  ? `點一下改模型（${bot.model}）`
-                  : `CLI 預設，實際載入 ${statusInfo?.model_name}。點一下改模型`
-              }
-            >
-              {bot.model ?? statusInfo?.model_name}
-              {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
-            </ModelQuickPicker>
-          ) : null}
+          {/* 名字下面那一行：模型標籤與 ★ 釘選。標題列那條線已經被額度條佔滿（2026-09-10
+              實測釘選放右上角會被擠掉一半），這一行本來只有一顆模型標籤，空著。 */}
+          <div className="main-title-sub">
+            {bot.model || statusInfo?.model_name ? (
+              <ModelQuickPicker
+                botId={botId}
+                kind={bot.kind}
+                host={hostName}
+                className={`model-tag${bot.model ? '' : ' reported'}`}
+                title={
+                  bot.model
+                    ? `點一下改模型（${bot.model}）`
+                    : `CLI 預設，實際載入 ${statusInfo?.model_name}。點一下改模型`
+                }
+              >
+                {bot.model ?? statusInfo?.model_name}
+                {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
+              </ModelQuickPicker>
+            ) : null}
+            <PrimaryChips />
+          </div>
         </div>
         <span className="spacer" />
         {/* pane id 而不是狀態文字：狀態看左邊的燈號就好（它自己帶 tooltip），這個位置留給
@@ -1305,7 +1310,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
-        <PrimaryChips />
         <div className="tabs" role="tablist">
           <button
             type="button"
