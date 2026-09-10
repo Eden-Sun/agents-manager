@@ -979,14 +979,26 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
                 .bind(&e.id)
                 .execute(&app.db)
                 .await;
-            // §8.2: `queued ──relay 送達──► working`.
+            // §8.2: dispatch/rework relays move their task into `working`. A rebase relay is
+            // different: the task is already `rebasing`, and must stay there so its next
+            // report can take the `rebasing → merging` edge instead of going through review.
             if let Some(tid) = &e.task_id {
                 let action = serde_json::from_str::<Value>(&e.payload_json)
                     .ok()
                     .and_then(|p| p.get("action").and_then(Value::as_str).map(String::from))
                     .unwrap_or_default();
-                if ["dispatch", "rework", "rebase"].contains(&action.as_str()) {
-                    set_task_state(app, tid, "working").await?;
+                let expected = match action.as_str() {
+                    "dispatch" => Some("queued"),
+                    "rework" => Some("changes_requested"),
+                    "rebase" => None,
+                    _ => None,
+                };
+                if let Some(expected) = expected {
+                    // A stale grouped relay must not overwrite a newer state transition (for
+                    // example, an undelivered dispatch grouped with a later rebase relay).
+                    if db::team_task(&app.db, tid).await.map_err(up)?.is_some_and(|t| t.state == expected) {
+                        set_task_state(app, tid, "working").await?;
+                    }
                 }
             }
         }
@@ -3631,8 +3643,18 @@ mod scenarios {
         assert!(payload["text"].as_str().unwrap().contains("git rebase"));
         assert!(payload["text"].as_str().unwrap().contains("README.md"));
 
+        // Deliver the real rebase relay. It may be grouped with the old dispatch relay in this
+        // test because the fake workers have not consumed their first prompt; neither relay may
+        // overwrite the conflict's `rebasing` state.
+        s.arm().await;
+        for _ in 0..2 {
+            let ctx = s.ctx().await;
+            flush(s.app(), &ctx).await.unwrap();
+            s.unpause().await;
+        }
+        assert_eq!(s.tasks().await[1].state, "rebasing", "rebase delivery keeps the rebase state");
+
         // It rebases and reports again; the second merge now succeeds.
-        set_task_state(s.app(), &s.tasks().await[1].id, "rebasing").await.unwrap();
         git(&s.wt("dev-2"), &["rebase", "-X", "theirs", &s.team().await.branch]);
         s.reply(&d2, json!({"action":"report","status":"done","summary":"rebase 完成"})).await;
         assert_eq!(s.tasks().await[1].state, "merging", "a rebase report re-enters the merge queue");
@@ -3641,6 +3663,70 @@ mod scenarios {
 
         // T8: through all of that the user's checkout never moved.
         assert_eq!(git(&s.e.repo, &["status", "--porcelain"]), "");
+    }
+
+    /// A rebase report must not reopen review: the conflict relay is a continuation of the
+    /// already-approved task, not a new implementation round.
+    #[tokio::test]
+    async fn t5_rebase_report_skips_a_second_review() {
+        let s = S::new(2, true).await;
+        let pm = s.bot("pm", 0).await;
+        let (d1, d2) = (s.bot("worker", 0).await, s.bot("worker", 1).await);
+        let rev = s.bot("reviewer", 0).await;
+        s.reply(&pm, dispatch2()).await;
+
+        std::fs::write(s.wt("dev-1").join("README.md"), "dev-1 了\n").unwrap();
+        std::fs::write(s.wt("dev-2").join("README.md"), "dev-2 了\n").unwrap();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"改了 README"})).await;
+        s.reply(&d2, json!({"action":"report","status":"done","summary":"也改了 README"})).await;
+
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "reviewing");
+        assert_eq!(s.tasks().await[1].state, "reported");
+        s.reply(&rev, json!({"action":"verdict","result":"approve","summary":"可以"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "merged");
+        assert_eq!(s.tasks().await[1].state, "reviewing");
+        s.reply(&rev, json!({"action":"verdict","result":"approve","summary":"可以"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.tasks().await[1].state, "rebasing");
+
+        let review_relays_before = s.pending(&rev).await.len();
+        // Deliver dispatch and rebase through the outbox. Fake delivery pauses after each
+        // member, and the reviewer still has earlier review relays queued.
+        s.arm().await;
+        for _ in 0..8 {
+            let ctx = s.ctx().await;
+            flush(s.app(), &ctx).await.unwrap();
+            s.unpause().await;
+            let delivered: Option<String> = sqlx::query_scalar(
+                "SELECT status FROM team_events WHERE team_id=? AND task_id=? AND json_extract(payload_json, '$.action')='rebase'",
+            )
+            .bind(&s.tid)
+            .bind(&s.tasks().await[1].id)
+            .fetch_optional(&s.app().db)
+            .await
+            .unwrap();
+            if delivered.as_deref() == Some("delivered") {
+                break;
+            }
+        }
+        let rebase_status: String = sqlx::query_scalar(
+            "SELECT status FROM team_events WHERE team_id=? AND task_id=? AND json_extract(payload_json, '$.action')='rebase'",
+        )
+        .bind(&s.tid)
+        .bind(&s.tasks().await[1].id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(rebase_status, "delivered");
+        assert_eq!(s.tasks().await[1].state, "rebasing");
+
+        git(&s.wt("dev-2"), &["rebase", "-X", "theirs", &s.team().await.branch]);
+        s.reply(&d2, json!({"action":"report","status":"done","summary":"rebase 完成"})).await;
+        assert_eq!(s.tasks().await[1].state, "merging");
+        assert!(!s.tasks().await.iter().any(|t| t.state == "reported"));
+        assert_eq!(s.pending(&rev).await.len(), review_relays_before, "rebase report does not send a new review");
     }
 
     /// **T6** — the relay budget pauses the team, topping it up and resuming carries on.
