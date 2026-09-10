@@ -24,10 +24,17 @@ const POLL_INTERVAL: Duration = Duration::from_secs(8);
 /// emit `pane.agent_detected` for every launch.
 pub fn spawn_poller(app: Arc<App>) {
     tokio::spawn(async move {
+        let mut last_error = None;
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
             if let Err(e) = sync(&app).await {
-                tracing::debug!(session = SESSION, error = ?e, "default session poll failed");
+                let message = format!("{e:#}");
+                if last_error.as_deref() != Some(message.as_str()) {
+                    tracing::warn!(session = SESSION, error = %message, "default session poll failed");
+                    last_error = Some(message);
+                }
+            } else {
+                last_error = None;
             }
         }
     });
