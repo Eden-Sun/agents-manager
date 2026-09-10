@@ -584,7 +584,7 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
   - PM 起不來 → `failed` + cleanup。worker 部分起不來 → 少一個人繼續（≥1 即可），記 note。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
   - 全部就緒 → `planning`，送 PM 第一則 relay（附錄 A.1）。
 - **停止**：`done / aborted / failed` 時 daemon 對所有成員 `stop_bot`（SPEC §6.4）。成員 pane 不會在 team 還活著時被 daemon 自動停。
-- **使用者手動停某個成員**（既有 `POST /bots/:id/stop`）：scheduler 收到 `RunChanged` → 該成員相關 relay 留在 pending → `paused(member_lost:<name>)`。使用者重新 `start` 該 bot 後按 `resume`。**不自動重啟**（維持 §13「絕不自動啟動」的精神；自動重啟會讓額度在無人看管下持續消耗）。
+- **使用者手動停某個成員**（既有 `POST /bots/:id/stop`）：scheduler 收到 `RunChanged` → 該成員相關 relay 留在 pending → `paused(member_lost:<name>)`。使用者重新 `start` 該 bot 後按 `resume`；暫停橫幅上的「啟動並繼續」（2026-09-10，`TeamMemberLost`）會把沒在跑的成員全部 `start`、都有 run 之後自動 `resume`，仍是人按的。**不自動重啟**（維持 §13「絕不自動啟動」的精神；自動重啟會讓額度在無人看管下持續消耗）。
 
 ### 7.5 異常與恢復
 

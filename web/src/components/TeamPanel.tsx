@@ -40,7 +40,7 @@ import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
-import { TeamMemberBlocked } from './TeamMemberBlocked'
+import { TeamMemberBlocked, TeamMemberLost } from './TeamMemberBlocked'
 import { canReopenTeam, describeEvent, teamPauseDetailTitle, teamPauseText } from './teamPanelLogic'
 
 /**
@@ -1270,13 +1270,16 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                   ? '這是 supervised 閘門，確認後按「放行」。'
                   : (team.pause_reason ?? '').startsWith('member_blocked:')
                     ? '按右邊的按鈕回應該成員的終端提示，回完會自動繼續。'
-                    : (team.pause_reason ?? '').startsWith('member_')
-                      ? '請先處理該成員（啟動 / 回應終端提示），再按「繼續」。'
+                    : (team.pause_reason ?? '').startsWith('member_lost')
+                      ? '按右邊的按鈕把沒在跑的成員啟動起來，都起來後會自動繼續。'
+                      : (team.pause_reason ?? '').startsWith('member_')
+                        ? '請先處理該成員（啟動 / 回應終端提示），再按「繼續」。'
                       : '處理完上面的原因後按「繼續」。'}
           </span>
           {(team.pause_reason ?? '').startsWith('member_blocked:') ? (
             <TeamMemberBlocked teamId={teamId} memberName={team.pause_reason!.slice('member_blocked:'.length)} />
           ) : null}
+          {(team.pause_reason ?? '').startsWith('member_lost') ? <TeamMemberLost teamId={teamId} /> : null}
         </div>
       ) : null}
 
