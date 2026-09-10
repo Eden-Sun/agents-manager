@@ -566,7 +566,16 @@ export class MockTransport implements Transport {
     'claude:cc1': { five_hour: { used_pct: 85, resets_at: inHours(1.1) }, seven_day: { used_pct: 30, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
     // zshrc 認來的身份也有自己的額度列（SPEC §16）。
     'claude:cc2': { five_hour: { used_pct: 24, resets_at: inHours(3.8) }, seven_day: { used_pct: 51, resets_at: inHours(88) }, plan: 'Pro', updated_at: now(), host: 'local' },
-    codex: { five_hour: { used_pct: 63, resets_at: inHours(3.2) }, seven_day: { used_pct: 88, resets_at: inHours(41) }, plan: 'Plus', updated_at: now(), host: 'local' },
+    // 重置券：真 codex 在額度用完時會給（`rateLimitResetCredits`），mock 固定給一張，
+    // 額度明細那格才有東西可看。
+    codex: {
+      five_hour: { used_pct: 63, resets_at: inHours(3.2) },
+      seven_day: { used_pct: 88, resets_at: inHours(41) },
+      reset_credits: { available: 1, title: 'Full reset (Weekly + 5 hr)', expires_at: inHours(720) },
+      plan: 'Plus',
+      updated_at: now(),
+      host: 'local',
+    },
     grok: null,
   }
   private identities: MockIdentity[] = [

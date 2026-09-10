@@ -11235,3 +11235,25 @@ button.run-debug-toggle:hover {
     right: auto;
   }
 }
+/* codex 的額度重置券（`PopResetCredits`）：跟兩條桶子並排在額度明細裡，但它不是進度條，
+   所以只有字。券數用強調色——額度歸零時它是唯一還能做的動作。 */
+.quota-pop-line.reset-credits .quota-reset-credit {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.quota-pop-line.reset-credits .quota-reset-credit strong {
+  color: var(--accent-ink);
+  font-size: 12px;
+}
+
+.quota-reset-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+}

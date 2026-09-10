@@ -56,6 +56,7 @@ import type {
   Message,
   ModelInfo,
   QuotaMap,
+  QuotaResetCredits,
   ToolMap,
   ToolStatus,
   MessageRole,
@@ -768,6 +769,12 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
  * 一個 kind 的額度；null 代表沒有資訊。
  * `key` 只用來補 `host`：舊 daemon 不送 `host`，就從 `m4p/claude` 這種 key 前綴推回來。
  */
+function toResetCredits(v: unknown): QuotaResetCredits | null {
+  if (!isRec(v)) return null
+  const available = num(pick(v, 'available'), 0)
+  return { available, title: optStr(pick(v, 'title')), expires_at: optStr(pick(v, 'expires_at')) }
+}
+
 export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   if (!isRec(v)) return null
   return {
@@ -775,6 +782,8 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
     seven_day: toQuotaWindow(pick(v, 'seven_day', '7d')),
     // 舊 daemon 沒有這個欄位 → null，額度條就完全不畫 Fable 那條。
     fable: toQuotaWindow(pick(v, 'fable')),
+    // 舊 daemon（與 claude / grok）沒有這個欄位 → null，UI 不畫那顆券。
+    reset_credits: toResetCredits(pick(v, 'reset_credits')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
     host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),

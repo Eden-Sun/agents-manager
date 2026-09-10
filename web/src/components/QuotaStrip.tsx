@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import type { BotKind, Identity, KindQuota, QuotaMap, QuotaWindow } from '../api/types'
+import type { BotKind, Identity, KindQuota, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -419,6 +419,10 @@ function Gauge({
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
+  const borderWindows = focused ? [
+    { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
+    { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
+  ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
   const fable = remaining(q?.fable)
   const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
@@ -508,11 +512,13 @@ function Gauge({
   // 停用中的那一格在條上也要看得出來，不然得先點開 popover 才知道側欄少了誰。
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
-  const accessibleTitle = focused ? `目前選取的 ${withOff}` : withOff
+  const accessibleTitle = focused
+    ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!)}%`).join('')}`
+    : withOff
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${off ? ' off' : ''}`}
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}`}
       title={accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
@@ -522,6 +528,19 @@ function Gauge({
         onOpen()
       }}
     >
+      {borderWindows.map((w) => (
+        <span
+          key={w.edge}
+          className={`quota-border-meter ${w.edge}${w.window?.critical ? ' critical' : w.window?.low ? ' warn' : ''}`}
+          role="progressbar"
+          aria-label={`${w.label} 剩餘額度（${w.edge === 'top' ? '上' : '下'}邊框）`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.min(100, Math.max(0, w.pct!))}
+        >
+          <span className="quota-border-fill" style={{ width: `${Math.min(100, Math.max(0, w.pct!))}%` }} />
+        </span>
+      ))}
       <span className="quota-head">
         <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
@@ -670,6 +689,32 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
  * 要看得到跟電腦一樣的圖示化進度）。手機的條子是純文字 chip（38px 的量表在那裡沒有意義），
  * 所以「還剩多少 / 什麼時候回來」的圖形版本只剩這裡能看——那就不能只有數字。
  */
+/**
+ * codex 的「額度重置券」（`rateLimitResetCredits`，2026-09-10 使用者要求接進來）。
+ *
+ * 兩條桶子回答「什麼時候自己回血」，這一行回答另一件事：「你現在就能把它清掉，還有幾張、
+ * 那張什麼時候過期」。額度歸零的當下那是唯一還能做的動作，所以它跟桶子並排、不是藏在別處。
+ * daemon 只讀不用：真的要用還是在 codex 那邊（`/status` → `Reset usage`），這裡不代按。
+ */
+function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
+  if (!credits || credits.available <= 0) return null
+  const left = credits.expires_at ? new Date(credits.expires_at).getTime() - now : null
+  return (
+    <div className="quota-pop-line reset-credits">
+      <span className="quota-win">
+        <span className="quota-ico" aria-hidden="true">
+          ⟳
+        </span>
+        重置券
+      </span>
+      <span className="quota-reset-credit" title={`${credits.title ?? '額度重置券'}${left === null ? '' : `・${fmtLeft(left)}後過期`}・在 codex 裡用 /status → Reset usage`}>
+        <strong>{credits.available}</strong> 張可用
+        {credits.title ? <span className="quota-reset-title">{credits.title}</span> : null}
+      </span>
+    </div>
+  )
+}
+
 function PopWindow({
   icon,
   name,
@@ -777,6 +822,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
           <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
           <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} />
+          <PopResetCredits credits={q?.reset_credits} now={now} />
         </>
       )}
     </div>
