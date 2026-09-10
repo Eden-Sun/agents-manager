@@ -182,8 +182,10 @@ claude 的連線在回應中途掉了，pane 上只會多一行
 - 觸發：與 §4.3 同一個 `working → idle` 邊、同一次 `agent.read {source: recent_unwrapped}`。備援有沒有
   出手都要跑——斷線的回合正是 hook 會照常送 Stop 的那一種，跑到這裡時回合早就 `completed` 了。
 - 判定（`daemon/src/turn_error.rs`）：從畫面**底部往上**掃最多 30 行，剝掉框線與前導記號後，
-  碰到的第一個非 chrome 行若以 `API error`（不分大小寫）開頭就算命中。chrome 沿用 §4.3 的
-  `is_noise` / `is_activity_shape`（spinner、分隔線、狀態列）加上空的輸入框列。
+  碰到的第一個非 chrome 行若以 `API error`（不分大小寫）開頭，或是額度用盡的拒絕
+  （`You've reached your Fable limit. Run /usage-credits …`，2026-09-10 加入：claude 0 秒就 `done`、
+  一個字都沒回，使用者只看到綠燈）就算命中。chrome 沿用 §4.3 的 `is_noise` / `is_activity_shape`
+  （spinner、分隔線、狀態列）加上空的輸入框列與 `Update installed · Restart to update` 那行。
   - 「最後一件事」是關鍵：`API error · Retrying in 0s · attempt 1/10` 之後 agent 又把答案講完了的話，
     橫幅還留在畫面上但下面有回覆——那是重試成功，不算中斷。
 - 記錄：那行原文寫進 `runs.turn_error`（在 run 上而不是 bot 上，理由同 `update_notice`：它屬於這個 CLI

@@ -1761,7 +1761,8 @@ claude 把新版下載好、等重啟才會換過去時，會在 pane 最底下�
 
 ### `run.turn_error`（2026-09-09 新增，SPEC §4.3a）
 
-上一回合被 API 連線中斷截斷時，pane 上那行原文。daemon 在 `working → idle` 的終端掃描裡讀到就掛在
+上一回合被 API 連線中斷截斷、或被額度用盡拒絕（`You've reached your Fable limit…`，2026-09-10）時，
+pane 上那行原文。daemon 在 `working → idle` 的終端掃描裡讀到就掛在
 run 上：
 
 ```json

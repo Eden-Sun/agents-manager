@@ -26,9 +26,13 @@ use std::sync::Arc;
 /// 從螢幕底部往上找幾行。錯誤行後面只會剩下狀態列與輸入框那幾行 chrome。
 const TAIL_LINES: usize = 30;
 
-/// 這行是不是 API 錯誤橫幅（去掉裝飾字元之後以 `API error` 開頭）。
+/// 這行是不是 API 錯誤橫幅（去掉裝飾字元之後以 `API error` 開頭），或是額度用盡的拒絕
+/// （`You've reached your Fable limit. Run /usage-credits to continue or switch models with
+/// /model.`）。後者 claude 根本沒開始回，0 秒就 `done`，pane 只剩這一行；
+/// 對使用者來說一樣是「送了沒回」，一樣要釘在那個回合上（2026-09-10）。
 fn is_api_error(body: &str) -> bool {
-    body.to_ascii_lowercase().starts_with("api error")
+    let lower = body.to_ascii_lowercase();
+    lower.starts_with("api error") || (lower.starts_with("you've reached your") && lower.contains("limit"))
 }
 
 /// 這行在錯誤行**之後**出現的話，代表 agent 後來又說了話——那次錯誤已經被重試蓋過去了。
@@ -36,7 +40,14 @@ fn is_api_error(body: &str) -> bool {
 /// 只有 chrome（空行、輸入框、分隔線、狀態列、spinner）不算數。`is_noise` /
 /// `is_activity_shape` 是終端備援本來就在用的那組判斷，這裡直接沿用，不另外寫一套。
 fn is_chrome(s: &str) -> bool {
-    s.is_empty() || s == "❯" || s == "›" || lifecycle::is_noise(s) || lifecycle::is_activity_shape(s)
+    s.is_empty()
+        || s == "❯"
+        || s == "›"
+        || lifecycle::is_noise(s)
+        || lifecycle::is_activity_shape(s)
+        // claude 自動更新的那一行釘在輸入框上方（`current: 2.1.266 · latest: 2.1.267 ✔ Update
+        // installed · Restart to update`），不是 agent 說的話。
+        || s.contains("Update installed")
 }
 
 /// 把一行的框線剝掉，留下 TUI 真正畫的那串（前導記號還在——`is_noise` 要靠它認 spinner）。
@@ -203,6 +214,24 @@ mod tests {
     }
 
     /// 一般收工的畫面不能誤判。
+    #[test]
+    fn usage_limit_refusal_counts_as_an_error() {
+        let screen = "\
+❯ 用戶回報 cf2go
+  ⎿  2 skills available
+  ⎿  You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.
+
+✻ Crunched for 0s · done 4:11 PM
+                  current: 2.1.266 · latest: 2.1.267 ✔ Update installed · Restart to update
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯
+";
+        assert_eq!(
+            api_error_line(screen).as_deref(),
+            Some("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.")
+        );
+    }
+
     #[test]
     fn a_clean_turn_has_no_error() {
         let screen = "❯ echo 1\n⏺ PONG\n✻ Worked for 0s · done 1:07 AM\n──────\n❯\n";
