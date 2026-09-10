@@ -39,6 +39,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { TeamMemberBlocked } from './TeamMemberBlocked'
 import { canReopenTeam, describeEvent, teamPauseDetailTitle, teamPauseText } from './teamPanelLogic'
 
 /**
@@ -1265,10 +1266,15 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                 ? '等額度回來（或把該成員換成別的身分）再按「繼續」；要硬推就按「無視額度繼續」。'
                 : gated
                   ? '這是 supervised 閘門，確認後按「放行」。'
-                  : (team.pause_reason ?? '').startsWith('member_')
-                    ? '請先處理該成員（啟動 / 回應終端提示），再按「繼續」。'
-                    : '處理完上面的原因後按「繼續」。'}
+                  : (team.pause_reason ?? '').startsWith('member_blocked:')
+                    ? '按右邊的按鈕回應該成員的終端提示，回完會自動繼續。'
+                    : (team.pause_reason ?? '').startsWith('member_')
+                      ? '請先處理該成員（啟動 / 回應終端提示），再按「繼續」。'
+                      : '處理完上面的原因後按「繼續」。'}
           </span>
+          {(team.pause_reason ?? '').startsWith('member_blocked:') ? (
+            <TeamMemberBlocked teamId={teamId} memberName={team.pause_reason!.slice('member_blocked:'.length)} />
+          ) : null}
         </div>
       ) : null}
 
