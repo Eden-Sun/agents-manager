@@ -820,11 +820,27 @@ export interface MessageHit {
   snippet: string
 }
 
+/**
+ * Codex 的「額度重置券」（`rateLimitResetCredits`）。額度歸零時 OpenAI 會送一張可以立刻
+ * 把桶子清掉的券（codex TUI 上的 `Reset usage`）；桶子說的是「什麼時候自己回血」，這個說的是
+ * 「你現在就能清掉，還有幾張」。只有 codex 有，其餘 kind 一律 null。
+ */
+export interface QuotaResetCredits {
+  /** 現在可用的張數。 */
+  available: number
+  /** 第一張可用券的名稱，例如 `Full reset (Weekly + 5 hr)`。 */
+  title: string | null
+  /** 那張券的到期時間（ISO）；券會過期。 */
+  expires_at: string | null
+}
+
 export interface KindQuota {
   five_hour: QuotaWindow | null
   seven_day: QuotaWindow | null
   /** Max 方案才有的 Fable 週額度（`Current week (Fable)`），跟 `seven_day` 同型；沒有就是 null。 */
   fable: QuotaWindow | null
+  /** codex 的額度重置券；沒有（或不是 codex）就是 null。 */
+  reset_credits: QuotaResetCredits | null
   plan: string | null
   updated_at: string
   /** 這份額度是在哪台主機讀到的（`local` 或 `hosts[].name`）。 */

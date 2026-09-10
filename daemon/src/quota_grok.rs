@@ -190,6 +190,7 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
         five_hour: five,
         seven_day: seven,
         fable: None,
+        reset_credits: None,
         plan,
         updated_at: crate::db::now(),
         source: "grok-usage".into(),

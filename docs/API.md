@@ -1346,6 +1346,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
     "codex": {
       "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z", "low": false, "critical": false},
       "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
+      "reset_credits": {"available": 1, "title": "Full reset (Weekly + 5 hr)", "expires_at": "2026-10-11T05:31:28.000Z"},
       "plan": "pro",
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "codex-app-server",
@@ -1355,6 +1356,7 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
       "five_hour": {"used_pct": 97.0, "resets_at": "2026-09-06T14:00:00.000Z", "low": true, "critical": true},
       "seven_day": {"used_pct": 22.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "fable": {"used_pct": 39.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
+      "reset_credits": null,
       "plan": null,
       "updated_at": "2026-09-06T10:00:00.000Z",
       "source": "statusline",
@@ -1388,6 +1390,13 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
   `seven_day` 完全相同（也是週窗，只是只算 Fable 那一份）。沒有這條桶子的方案／來源（codex、grok、
   非 Max 帳號）一律 `null`——**額度條在 `null` 時完全不畫這條，也不佔位**；有值時在 5h / 7d 之後多一條
   標籤 `F` 的同款長條。舊 daemon 沒有這個欄位，前端讀不到就當 `null`（相容）。
+- `reset_credits`（2026-09-10 新增，**只有 codex 有**）：codex 的「額度重置券」，從
+  `account/rateLimits/read` 的 `rateLimitResetCredits` 讀來。額度用完時 OpenAI 會送一張可以立刻把桶子
+  清掉的券（codex TUI 的 `Reset usage`），形狀是
+  `{"available": 1, "title": "Full reset (Weekly + 5 hr)", "expires_at": "2026-10-11T…Z"}`：
+  `available` 是 `availableCount`（可用張數），`title` / `expires_at` 取 `credits[]` 裡第一張
+  `status == "available"` 的。沒有這個欄位（claude / grok、舊 codex）一律 `null`，UI 完全不畫。
+  daemon **只讀不用**：要用還是在 codex 那邊按（`/status` → `Reset usage`）。
 - `low` / `critical` 為 daemon 算好的門檻旗標（`daemon/src/quota.rs` 的 `LOW_REMAINING_PCT` = 30、
   `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
   前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；

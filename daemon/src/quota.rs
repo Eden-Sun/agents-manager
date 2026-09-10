@@ -108,6 +108,22 @@ impl Serialize for Window {
     }
 }
 
+/// Codex 的「額度重置券」（`account/rateLimits/read` 的 `rateLimitResetCredits`）。
+///
+/// 2026-09-10 使用者：codex 用完額度時，OpenAI 會送一張「立刻重置」的券，TUI 上寫成
+/// `Reset usage`。它跟 5h／7d 兩條桶子是不同的事——桶子說「還剩多少、什麼時候回血」，
+/// 這張券說「你可以現在就把它清掉，還有幾張」。額度用完的當下，這是使用者唯一還能做的動作，
+/// 所以要看得到。daemon 只讀不用（按下去仍然在 codex 那邊做）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResetCredits {
+    /// 現在可用的張數（`availableCount`）。0 = 有這個欄位但沒券可用。
+    pub available: i64,
+    /// 第一張可用券的名稱，例如 `Full reset (Weekly + 5 hr)`；沒有就 `None`。
+    pub title: Option<String>,
+    /// 第一張可用券的到期時間（RFC3339）。券會過期，所以這是「什麼時候用掉它」的依據。
+    pub expires_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Quota {
     pub five_hour: Option<Window>,
@@ -115,6 +131,8 @@ pub struct Quota {
     /// Max 方案才有的 Fable 週額度（`Current week (Fable)`）。跟 [`Quota::seven_day`] 同型
     /// 也同樣是週窗，只是只算 Fable 那一份；沒有這條桶子的方案／來源就是 `None`，UI 完全不畫。
     pub fable: Option<Window>,
+    /// Codex 的額度重置券；只有 codex 這個來源會有，其餘一律 `None`。
+    pub reset_credits: Option<ResetCredits>,
     pub plan: Option<String>,
     pub updated_at: String,
     pub source: String,
@@ -139,6 +157,22 @@ fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
     };
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// `rateLimitResetCredits` → [`ResetCredits`]。`availableCount` 才是張數；`credits[]` 裡可能
+/// 還有已經用掉／過期的，所以標題與到期時間只取第一張 `status == "available"` 的。
+fn reset_credits(result: &Value) -> Option<ResetCredits> {
+    let rc = result.get("rateLimitResetCredits")?;
+    let available = rc.get("availableCount").and_then(|x| x.as_i64()).unwrap_or(0);
+    let first = rc
+        .get("credits")
+        .and_then(|x| x.as_array())
+        .and_then(|a| a.iter().find(|c| c.get("status").and_then(|s| s.as_str()) == Some("available")));
+    Some(ResetCredits {
+        available,
+        title: first.and_then(|c| c.get("title")).and_then(|x| x.as_str()).map(String::from),
+        expires_at: first.and_then(|c| unix_to_rfc3339(c.get("expiresAt"))),
+    })
 }
 
 /// `account/rateLimits/read` result → Quota. Windows are matched by `windowDurationMins`
@@ -168,6 +202,7 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
         five_hour: five,
         seven_day: seven,
         fable: None,
+        reset_credits: reset_credits(result),
         plan: rl.get("planType").and_then(|x| x.as_str()).map(String::from),
         updated_at: crate::db::now(),
         source: "codex-app-server".into(),
@@ -198,6 +233,7 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
         five_hour: five,
         seven_day: seven,
         fable,
+        reset_credits: None,
         plan: None,
         updated_at: crate::db::now(),
         source: "statusline".into(),
@@ -219,6 +255,13 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     if q.fable.is_none() {
         if let Some(prev) = quotas.get(&key) {
             q.fable = prev.fable.clone();
+        }
+    }
+    // 同理：重置券只有 codex 的 app-server 讀得到，別的來源（statusLine）寫進同一把 key 時
+    // 不該把它抹掉。
+    if q.reset_credits.is_none() {
+        if let Some(prev) = quotas.get(&key) {
+            q.reset_credits = prev.reset_credits.clone();
         }
     }
     quotas.insert(key.clone(), q.clone());
@@ -292,6 +335,7 @@ mod tests {
             five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
             seven_day: Some(Window { used_pct: 20.0, resets_at: None }),
             fable: Some(Window { used_pct: 66.0, resets_at: None }),
+            reset_credits: None,
             plan: None, updated_at: crate::db::now(), source: "claude-usage".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
         };
         set(&app, LOCAL_HOST, "claude:cc1", probe).await;
@@ -299,6 +343,7 @@ mod tests {
             five_hour: Some(Window { used_pct: 11.0, resets_at: None }),
             seven_day: Some(Window { used_pct: 21.0, resets_at: None }),
             fable: None,
+            reset_credits: None,
             plan: None, updated_at: crate::db::now(), source: "statusline".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
         };
         set(&app, LOCAL_HOST, "claude:cc1", status).await;
@@ -322,6 +367,38 @@ mod tests {
         assert!(q.seven_day.unwrap().resets_at.unwrap().starts_with("2026-"));
         assert_eq!(q.plan.as_deref(), Some("plus"));
         assert_eq!(q.source, "codex-app-server");
+    }
+
+    /// 2026-09-10 使用者：codex 額度用完時 OpenAI 會給「立刻重置」的券。桶子只說什麼時候
+    /// 回血，這張券說「現在就能清掉，還有幾張」——額度歸零的當下那是唯一還能做的事。
+    #[test]
+    fn codex_reset_credits_are_read_with_the_windows() {
+        let r = json!({
+            "rateLimits": {
+                "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1789074446},
+                "secondary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1789450308},
+                "planType": "plus"
+            },
+            "rateLimitResetCredits": {
+                "availableCount": 1,
+                "credits": [
+                    {"status": "used", "title": "已經用掉的那張", "expiresAt": 1791173488},
+                    {"status": "available", "title": "Full reset (Weekly + 5 hr)", "expiresAt": 1791173488}
+                ]
+            }
+        });
+        let c = quota_from_codex(&r).unwrap().reset_credits.unwrap();
+        assert_eq!(c.available, 1);
+        // 標題取的是**還能用**的那一張，不是陣列的第一個。
+        assert_eq!(c.title.as_deref(), Some("Full reset (Weekly + 5 hr)"));
+        assert!(c.expires_at.unwrap().starts_with("2026-"));
+    }
+
+    /// 沒有這個欄位的舊 codex（或別的 kind）＝ `None`，UI 什麼都不畫。
+    #[test]
+    fn no_reset_credits_field_means_none() {
+        let r = json!({"rateLimits": {"primary": {"usedPercent": 3, "windowDurationMins": 300}}});
+        assert!(quota_from_codex(&r).unwrap().reset_credits.is_none());
     }
 
     #[test]
@@ -361,6 +438,7 @@ mod tests {
             five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
             seven_day: None,
             fable: None,
+            reset_credits: None,
             plan: None,
             updated_at: crate::db::now(),
             source: "test".into(),
