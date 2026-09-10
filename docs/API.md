@@ -265,12 +265,18 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 409 的 `reason` 可能是：`bot has no active run`、`run is not running`、
 `agent is blocked; answer the prompt first`、`a turn is already in flight`、
-`a previous turn has unknown delivery; abandon it first`、`needs_login`。
+`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`。
 
 `needs_login`（2026-09-08）：claude 的 pane 正停在開場的「Select login method」選單（那個
 `CLAUDE_CONFIG_DIR` 還沒登入過）。送 prompt 前 daemon 會先讀一次 pane 畫面；中了就不建 turn、
 直接回 `{"error":"conflict","reason":"needs_login","identity":"cc2","message":"…"}`，並在對話裡
 插一則 system 訊息說明怎麼登入。以前這種情況 prompt 會被打進選單、回合掛到 stall 才失敗。
+
+`picker_open`（2026-09-10）：codex 的 `/model` 選單（`Select Model and Effort` /
+`Select Reasoning Level`）開著。那不是輸入框，是吃鍵的選單——送進去的字會變成選單操作，訊息
+整段消失，Enter 還會順手把 session 換到別的模型。所以 codex 送 prompt 前 daemon 會先讀 pane、
+把選單 Esc 到真的關掉（`esc` 只退一層，要走到底）；關得掉就照常送，關不掉才不建 turn、回
+`{"error":"conflict","reason":"picker_open","run_id":"…","message":"…"}` 並插一則 system 訊息。
 
 ## 6. 讀訊息
 
