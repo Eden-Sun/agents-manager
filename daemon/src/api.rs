@@ -113,6 +113,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/shells/{pane_id}/text", post(host_shell_text))
         .route("/hosts/{name}/shells/{pane_id}/keys", post(host_shell_keys))
         .route("/models", get(get_models))
+        .route("/changelog", get(get_changelog))
         .route("/quota", get(get_quota))
         .route("/mem", get(get_mem))
         .route("/mem/processes", get(get_mem_processes))
@@ -1625,6 +1626,30 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
 ///
 /// `host` narrows a refresh to one host (default: `local` plus every connected remote one).
 /// The body is always the full map — one entry per host + kind (SPEC §14).
+#[derive(Deserialize)]
+struct ChangelogQuery {
+    kind: Option<String>,
+    host: Option<String>,
+    /// 現在跑著的版本（claude statusLine 報的）；沒有就只給新版那一段。
+    from: Option<String>,
+}
+
+/// `GET /api/changelog?kind=claude&host=&from=` — 「有更新」徽章按下去先看這個。
+/// 永遠 200：抓不到 changelog 時 `found:false` + `error`，UI 要照實寫「找不到 changelog」。
+async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQuery>) -> Result<Json<Value>, LcError> {
+    let kind = q.kind.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "claude".to_string());
+    if !crate::config::valid_kind(&kind) {
+        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
+    }
+    let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    if app.hosts.get(&host).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let from = q.from.as_deref().filter(|s| !s.trim().is_empty());
+    let r = crate::changelog::lookup(&app, &host, &kind, from).await;
+    Ok(Json(serde_json::to_value(r).map_err(any_err)?))
+}
+
 #[cfg(test)]
 mod project_tests {
     use super::*;
