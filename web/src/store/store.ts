@@ -657,6 +657,20 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
 let appliedStateSeq = 0
 
+/**
+ * daemon 的 `seq` 是行程內的計數器，**重啟就從 0 重來**（`state.rs` 的 `AtomicU64::new(0)`）。
+ * 頁面開著跨過一次 daemon 重啟之後，`appliedStateSeq` 還停在舊行程的大數字，於是新 daemon
+ * 回來的每一份快照都被判成「比套用過的舊」而丟掉——畫面從此凍在舊值：儲存成功、daemon 也
+ * 真的改了，設定面板卻還顯示「已變更：model」，關閉時跳「放棄未儲存的變更？」
+ * （2026-09-11 使用者回報）。
+ *
+ * 所以 socket 重新連上、或收到 `resync`（daemon 判定 seq 倒退時就是送這個）時把基準歸零，
+ * 讓下一份快照重新建立順序。並行請求的保護只在同一個行程內有意義，歸零不影響它。
+ */
+function resetStateSeq() {
+  appliedStateSeq = 0
+}
+
 export const useStore = create<StoreState>((set, get) => ({
   ready: false,
   bootError: null,
@@ -804,7 +818,9 @@ export const useStore = create<StoreState>((set, get) => ({
         turns,
         connected: st.connected,
         defaultConnected: st.default_connected,
-        lastSeq: Math.max(s.lastSeq, st.daemon_seq),
+        // 同上：daemon 重啟後 `daemon_seq` 會比記著的小，這時要跟著降下來——不然
+        // `?since=` 一直送未來的數字，daemon 只能一再回 `resync`，永遠回不到正常同步。
+        lastSeq: st.daemon_seq < s.lastSeq ? st.daemon_seq : Math.max(s.lastSeq, st.daemon_seq),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
         selectedTeamId: selectedTeam,
@@ -2032,7 +2048,11 @@ function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
   disconnect = api.openSocket({
     since: () => get().lastSeq,
-    onStatus: (socket) => set({ socket }),
+    onStatus: (socket) => {
+      // 重新連上＝對面可能是新的 daemon 行程（seq 從 0 重來）：先把順序基準歸零。
+      if (socket === 'open') resetStateSeq()
+      set({ socket })
+    },
     onFrame: (frame) => handleFrame(set, get, frame),
   })
 }
@@ -2079,6 +2099,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     case 'resync': {
       if (resyncPending) return
       resyncPending = true
+      // daemon 可能是重啟過（seq 倒退），基準歸零才吃得下接下來那份快照。
+      resetStateSeq()
       void (async () => {
         try {
           await get().refreshState()
