@@ -11068,3 +11068,21 @@ button.run-debug-toggle:hover {
   margin-top: 4px;
   font-size: 11px;
 }
+
+/* 子 bot 的帳號跟母 bot 不同：身分徽章描一圈琥珀色，後面掛「≠cc0」說母 bot 用的是誰。 */
+.identity-diverged {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: help;
+}
+.identity-diverged .identity-badge {
+  border-color: var(--warn, #c9a227);
+}
+.identity-diverged-mark {
+  font-size: 10px;
+  font-weight: 650;
+  font-family: var(--font-mono);
+  color: var(--warn, #c9a227);
+  white-space: nowrap;
+}

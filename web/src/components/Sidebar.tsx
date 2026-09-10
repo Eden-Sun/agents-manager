@@ -172,6 +172,20 @@ function BotRow({
   })
 
   const hasUpdate = useStore((s) => s.runs[botId]?.update_notice ?? null)
+  // 子 bot 跟母 bot 用不同帳號時要標出來（2026-09-10 使用者）：子 agent 默默吃另一個帳號的
+  // 額度，等到用盡才發現。claude 沒指定身分就是 cc0，比較前先補上。
+  // 回物件，跟上面 quotaWarning 一樣要 useShallow，不然每次都是新物件、React 會無限重繪。
+  const parentIdentity = useStore(
+    useShallow((s) => {
+      const b = s.bots.find((x) => x.id === botId)
+      if (!b?.parent_bot_id || b.kind !== 'claude') return null
+      const parent = s.bots.find((x) => x.id === b.parent_bot_id)
+      if (!parent || parent.kind !== 'claude') return null
+      const mine = b.identity ?? 'cc0'
+      const theirs = parent.identity ?? 'cc0'
+      return mine === theirs ? null : { name: parent.name, identity: theirs }
+    }),
+  )
   // 上一回合被 API 斷線截斷（`runs.turn_error`）。燈號是綠的，這顆才是「其實沒做完」。
   const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
 
@@ -326,7 +340,17 @@ function BotRow({
         ) : null}
         <span className="bot-sub">
           {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
-          <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+          {parentIdentity ? (
+            <span
+              className="identity-diverged"
+              title={`跟母 bot「${parentIdentity.name}」的帳號不同（母 ${parentIdentity.identity}、子 ${bot.identity ?? 'cc0'}）——額度分開算，注意別把這個帳號用光`}
+            >
+              <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+              <span className="identity-diverged-mark" aria-hidden="true">≠{parentIdentity.identity}</span>
+            </span>
+          ) : (
+            <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+          )}
           {quotaWarning ? (
             // 額度 critical：警語取代模型標籤（側欄窄，優先顯示這個）；文字撐不下就截斷，完整內容看 title。
             <span
