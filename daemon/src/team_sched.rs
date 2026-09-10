@@ -1093,6 +1093,17 @@ async fn report_member_start_failure(app: &Arc<App>, team_id: &str, bot: &db::Bo
     Ok(())
 }
 
+/// Stop members left running when startup takes a terminal failure path. Cleanup is deliberately
+/// best effort: the startup error and its timeline note are the useful diagnosis, so a failed
+/// stop must only be logged and never replace them.
+async fn stop_failed_startup_members(app: &Arc<App>, members: &[db::Bot]) {
+    for b in members {
+        if let Err(e) = lifecycle::stop_bot(app, &b.id).await {
+            tracing::warn!(bot = %b.name, error = ?e, "startup failure cleanup: stop_bot failed");
+        }
+    }
+}
+
 /// Start a done Team's long-lived members for a queued continuation. The old issue's workers
 /// are retired first; PM/reviewer keep their bot ids, worktrees and conversations, and ask the
 /// lifecycle layer to resume their last native session when the provider supports it.
@@ -1222,6 +1233,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
                 // cleanup, so nothing is left half-built.
                 Some("pm") => {
                     team::set_phase(app, team_id, "failed", None, None).await?;
+                    stop_failed_startup_members(app, &ctx.members).await;
                     if let Err(e) = team::cleanup(app, team_id).await {
                         tracing::warn!(team = team_id, error = ?e, "cleanup after a failed PM start");
                     }
@@ -1237,6 +1249,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     }
     if !failed.is_empty() && failed.len() == ctx.workers().len() {
         team::set_phase(app, team_id, "failed", None, None).await?;
+        stop_failed_startup_members(app, &ctx.members).await;
         return Ok(());
     }
 
@@ -3135,6 +3148,92 @@ mod scenarios {
         assert!(std::path::Path::new(&root).exists(), "the team root was not cleaned up");
         assert!(db::bot(&s.app().db, &pm.id).await.unwrap().unwrap().deleted_at.is_none());
         assert!(db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().is_some());
+    }
+
+    /// A startup that loses every executor is terminal. The members that did start must be
+    /// stopped, while the member_start_failed notes remain the source of the diagnosis.
+    #[tokio::test]
+    async fn startup_all_workers_failed_stops_started_members_and_keeps_reason() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(2), true)).await;
+        let s = S { e, tid };
+        let members = s.ctx().await.members;
+        let workers: Vec<db::Bot> = members
+            .iter()
+            .filter(|b| b.team_role.as_deref() == Some("worker"))
+            .cloned()
+            .collect();
+        let bad_cwd = s.e.repo.to_string_lossy().to_string();
+        for worker in &workers {
+            sqlx::query("UPDATE bots SET cwd=? WHERE id=?")
+                .bind(&bad_cwd)
+                .bind(&worker.id)
+                .execute(&s.app().db)
+                .await
+                .unwrap();
+        }
+
+        startup(s.app(), &s.tid).await.unwrap();
+
+        assert_eq!(s.team().await.phase, "failed");
+        let pm = members.iter().find(|b| b.team_role.as_deref() == Some("pm")).unwrap();
+        let reviewer = members.iter().find(|b| b.team_role.as_deref() == Some("reviewer")).unwrap();
+        for member in [pm, reviewer] {
+            let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1")
+                .bind(&member.id)
+                .fetch_one(&s.app().db)
+                .await
+                .unwrap();
+            assert_eq!(state, "stopped", "{} was not stopped", member.name);
+        }
+        let notes: Vec<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND kind='note' ORDER BY seq",
+        )
+        .bind(&s.tid)
+        .fetch_all(&s.app().db)
+        .await
+        .unwrap();
+        let failures: Vec<Value> = notes
+            .iter()
+            .filter_map(|n| serde_json::from_str(n).ok())
+            .filter(|p: &Value| p["action"] == "member_start_failed")
+            .collect();
+        assert_eq!(failures.len(), workers.len());
+        assert!(failures.iter().all(|p| p["error"].as_str().unwrap_or_default().contains("inside the project checkout")));
+        assert!(s.e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
+    }
+
+    /// One failed executor is survivable: startup continues with the healthy worker and does
+    /// not stop the PM or reviewer that were successfully started.
+    #[tokio::test]
+    async fn startup_partial_worker_failure_keeps_started_members_running() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(2), true)).await;
+        let s = S { e, tid };
+        let members = s.ctx().await.members;
+        let worker = members
+            .iter()
+            .find(|b| b.team_role.as_deref() == Some("worker"))
+            .unwrap();
+        sqlx::query("UPDATE bots SET cwd=? WHERE id=?")
+            .bind(s.e.repo.to_string_lossy().to_string())
+            .bind(&worker.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+
+        startup(s.app(), &s.tid).await.unwrap();
+
+        assert_eq!(s.team().await.phase, "planning");
+        for member in members.iter().filter(|b| matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer"))) {
+            let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1")
+                .bind(&member.id)
+                .fetch_one(&s.app().db)
+                .await
+                .unwrap();
+            assert_eq!(state, "running", "{} was stopped after a partial worker failure", member.name);
+        }
+        assert!(!s.e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
     }
 
     /// §2.5.5: the hand-over relay explicitly distinguishes a successful native continuation
