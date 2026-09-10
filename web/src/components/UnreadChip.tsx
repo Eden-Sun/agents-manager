@@ -1,14 +1,15 @@
 /**
  * 標題列**下面**自成一列，由左到右三組（2026-09-11 使用者定的排法）：
  *
- * - **主力**：使用者自己用 ★ 釘的「主要執行的 bot」（`PrimaryStar`）。它回答的是「我平常
- *   在推的是哪幾顆」，跟現在有沒有事發生無關，所以**常駐**——只要釘了東西，這一列就在。
- *   本來擠在固定 60px 的標題列上（塞不下的收成 `+N`），名字被切成兩三個字反而認不出是誰；
- *   移到這一列之後可以換行，全部都看得見。
- * - **剛跑完**：跑完了還沒看。
+ * - **剛跑完**：跑完了還沒看。要去看的東西排最前面。
+ * - 接著是使用者自己用 ★ 釘的「主要執行的 bot」（`PrimaryStar`）。它回答的是「我平常在推的
+ *   是哪幾顆」，跟現在有沒有事發生無關，所以**常駐**——只要釘了東西，這一列就在。它**不寫
+ *   標籤**：★ 已經說完了（使用者定的），多一個「主力」兩個字只是佔寬度。本來擠在固定 60px
+ *   的標題列上（塞不下的收成 `+N`），名字被切成兩三個字反而認不出是誰；移到這一列之後可以
+ *   換行，全部都看得見。
  * - **進行中**：還在跑，推到最右邊。
  *
- * 後兩組是會變的狀態；三組都空的時候整列不存在、不佔高度。
+ * 頭尾兩組是會變的狀態；三組都空的時候整列不存在、不佔高度。
  *
  * 釘起來的 bot **不會**同時出現在後兩組：它的晶片本來就帶未讀數與進行中的圓點，再列一次
  * 只是同一件事佔兩格。
@@ -32,7 +33,7 @@ import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 import { useStore } from '../store/store'
 import './unreadChip.css'
 
-/** 標題列下面那一列：主力（常駐）、剛跑完、進行中。 */
+/** 標題列下面那一列：剛跑完、主力（常駐）、進行中。 */
 export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
@@ -88,7 +89,20 @@ export function UnreadChip() {
   if (pinned.length === 0 && rows.length === 0 && live === 0) return null
   return (
     <div className="unread-bar" role="status" aria-live="polite">
-      {pinned.length > 0 ? <span className="unread-bar-label">主力</span> : null}
+      {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
+      {rows.map((r) => (
+        <button
+          key={r.id}
+          type="button"
+          className={`unread-chip${r.id === selectedBotId ? ' current' : ''}`}
+          title={`${r.name} 有 ${r.n} 個回合已完成、還沒看過。點一下跳過去`}
+          onClick={() => selectBot(r.id)}
+        >
+          <span className="unread-chip-name">{r.name}</span>
+          <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span>
+        </button>
+      ))}
+      {/* 釘選的主力：★ 就是標籤，不另外寫字。 */}
       {pinned.map((r) => (
         <button
           key={r.id}
@@ -103,19 +117,6 @@ export function UnreadChip() {
             <span className="unread-chip-n">{botUnreadOf(r.id) > 99 ? '99+' : botUnreadOf(r.id)}</span>
           ) : null}
           {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
-        </button>
-      ))}
-      {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
-      {rows.map((r) => (
-        <button
-          key={r.id}
-          type="button"
-          className={`unread-chip${r.id === selectedBotId ? ' current' : ''}`}
-          title={`${r.name} 有 ${r.n} 個回合已完成、還沒看過。點一下跳過去`}
-          onClick={() => selectBot(r.id)}
-        >
-          <span className="unread-chip-name">{r.name}</span>
-          <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span>
         </button>
       ))}
       {live > 0 ? (
