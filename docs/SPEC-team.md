@@ -592,7 +592,7 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 |---|---|
 | daemon 重啟 | SPEC §6.1 對帳收養成員 Run（agent_name 由 bot id 推得）→ 重建 scheduler → 對每個成員：有 in-flight Turn 就等它（hook 晚到仍可配對，SPEC §6.7）；沒有就看 `team_events` 的 pending relay 重送（冪等鍵相同）。任何成員 Run 被判 `exited` → `paused(member_lost)`。 |
 | 成員 crash（`pane.exited`） | 既有 SPEC §6.6 把 Run `exited`、in-flight Turn `failed` → scheduler `paused(member_lost)`。 |
-| 成員 `blocked`（trust 提示、權限詢問） | `paused(member_blocked:<name>)`；沿用 blocked 面板送鍵；狀態離開 blocked 時 **自動 resume**（唯一會自動 resume 的原因，因為它不是預算問題）。 |
+| 成員 `blocked`（trust 提示、權限詢問、codex 升級選單） | `paused(member_blocked:<name>)`；暫停橫幅上有「回應 <成員>」按鈕（2026-09-10，`TeamMemberBlocked`），就地彈出該成員的整張終端畫面送鍵；狀態離開 blocked 時 **自動 resume**（唯一會自動 resume 的原因，因為它不是預算問題；daemon 側 2026-09-10 實測沒做到，目前由那顆按鈕開的視窗在成員離開 blocked 時補送 `resume`）。 |
 | relay `delivery=unknown` | `paused(delivery_unknown)`；使用者 `abandon` 後 `resume`，scheduler 重送同一 relay（冪等鍵相同 → 既有邏輯會回同一 turn；因此重送用新的 `event_id`）。 |
 | Turn `failed`（stall watchdog、interrupt） | 修復提示規則同 §4.4（算一次），2 次後 `paused(protocol_error)`。 |
 
