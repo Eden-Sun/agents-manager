@@ -1,15 +1,4 @@
-/* 標題列右上角（分頁鍵左邊）那一小排（`PrimaryChips`）。標題列是固定 60px 的單行，所以這裡
-   不換行、也不自己撐高度；沒東西可顯示時元素根本不存在。 */
-.unread-strip {
-  display: flex;
-  align-items: center;
-  flex: 0 1 auto;
-  gap: 5px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-/* 標題列下面那一列（`UnreadChip`）：剛跑完在左、進行中在右，塞不下就換行。 */
+/* 標題列下面那一列（`UnreadChip`）：主力（常駐）、剛跑完在左，進行中在右，塞不下就換行。 */
 .unread-bar {
   display: flex;
   align-items: center;
@@ -136,22 +125,13 @@
   background: transparent;
 }
 
-/* 標題列上那排空間比較緊：名字上限短一點（下面那一列維持 180px），而且晶片本身要能被
-   壓縮——不然標題列一擠，`overflow: hidden` 會把最後一顆從中間切掉，而不是把名字收成 `…`。 */
-.unread-strip .unread-chip {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 120px;
-}
-
 .unread-chip-name {
   min-width: 0;
 }
 
 /* 手機：兩邊都再縮一點，名字留著（少了名字分不出是哪一顆）。 */
 @media (max-width: 720px) {
-  .unread-chip,
-  .unread-strip .unread-chip {
+  .unread-chip {
     max-width: 96px;
   }
 }

@@ -34,7 +34,7 @@ import { runtimeKnown } from '../lib/runtimeDrift'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
-import { PrimaryChips, UnreadChip } from './UnreadChip'
+import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
@@ -1231,7 +1231,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </button>
           <span className="main-status">未選擇 Bot</span>
           <span className="spacer" />
-          <PrimaryChips />
           <QuotaStrip />
         </div>
         <UnreadChip />
@@ -1316,7 +1315,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
-            <PrimaryChips />
           </div>
         </div>
         <span className="spacer" />

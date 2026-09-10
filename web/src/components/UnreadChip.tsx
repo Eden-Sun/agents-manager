@@ -1,11 +1,17 @@
 /**
- * 兩個位置、兩件事（2026-09-10 使用者定的分工）：
+ * 標題列**下面**自成一列，由左到右三組（2026-09-11 使用者定的排法）：
  *
- * - `PrimaryChips`：標題列右上角、分頁鍵（對話／終端）左邊。使用者自己用 ★ 釘的
- *   「主要執行的 bot」（`PrimaryStar`）。它回答的是「我平常在推的是哪幾顆」，跟現在有沒有
- *   事發生無關，所以常駐在標題列上；標題列是固定 60px 的單行，塞不下的收成一顆 `+N`。
- * - `UnreadChip`：標題列**下面**自成一列。左邊「剛跑完」（跑完了還沒看），右邊「進行中」
- *   （還在跑）。這兩件事是會變的狀態，兩邊都空的時候整列不存在、不佔高度。
+ * - **主力**：使用者自己用 ★ 釘的「主要執行的 bot」（`PrimaryStar`）。它回答的是「我平常
+ *   在推的是哪幾顆」，跟現在有沒有事發生無關，所以**常駐**——只要釘了東西，這一列就在。
+ *   本來擠在固定 60px 的標題列上（塞不下的收成 `+N`），名字被切成兩三個字反而認不出是誰；
+ *   移到這一列之後可以換行，全部都看得見。
+ * - **剛跑完**：跑完了還沒看。
+ * - **進行中**：還在跑，推到最右邊。
+ *
+ * 後兩組是會變的狀態；三組都空的時候整列不存在、不佔高度。
+ *
+ * 釘起來的 bot **不會**同時出現在後兩組：它的晶片本來就帶未讀數與進行中的圓點，再列一次
+ * 只是同一件事佔兩格。
  *
  * 側欄本來就會在每一列上亮未讀（`Sidebar` 的 `.unread-turns`），但側欄在手機上收在抽屜裡、
  * 桌面上也可能被捲掉；使用者要追的是跨 bot 的問題，所以它得待在每個畫面都看得到的地方。
@@ -26,52 +32,7 @@ import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 import { useStore } from '../store/store'
 import './unreadChip.css'
 
-/** 標題列右上角那一小排：使用者釘選的主要 bot。塞不下的收成 `+N`。 */
-export function PrimaryChips() {
-  // 欄位分開選、在 `useMemo` 裡才組成陣列：selector 每次回一個新陣列會讓 zustand 每一幀
-  // 都判定「變了」，畫面就停不下來。
-  const bots = useStore((s) => s.bots)
-  const botUnread = useStore((s) => s.botUnread)
-  const runs = useStore((s) => s.runs)
-  const selectedBotId = useStore((s) => s.selectedBotId)
-  const selectBot = useStore((s) => s.selectBot)
-  const primary = useMemo(() => bots.filter((b) => !b.pending && b.primary).map((b) => ({ id: b.id, name: b.name })), [bots])
-  if (primary.length === 0) return null
-  // 標題列只有那麼寬：超過的收成一顆 `+N`，點它跳到第一個被藏起來的。
-  const MAX = 3
-  const shown = primary.slice(0, MAX)
-  const hidden = primary.slice(MAX)
-  return (
-    <div className="unread-strip">
-      {shown.map((r) => (
-        <button
-          key={r.id}
-          type="button"
-          className={`unread-chip pinned${r.id === selectedBotId ? ' current' : ''}`}
-          title={`${r.name}（主要執行的 bot）。點一下跳過去`}
-          onClick={() => selectBot(r.id)}
-        >
-          <span className="unread-chip-star" aria-hidden="true">★</span>
-          <span className="unread-chip-name">{r.name}</span>
-          {(botUnread[r.id] ?? 0) > 0 ? <span className="unread-chip-n">{botUnread[r.id]}</span> : null}
-          {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
-        </button>
-      ))}
-      {hidden.length > 0 ? (
-        <button
-          type="button"
-          className="unread-chip more"
-          title={`還有 ${hidden.map((h) => h.name).join('、')}。點一下跳到 ${hidden[0].name}`}
-          onClick={() => selectBot(hidden[0].id)}
-        >
-          +{hidden.length}
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-/** 標題列下面那一列：左邊「剛跑完」、右邊「進行中」。 */
+/** 標題列下面那一列：主力（常駐）、剛跑完、進行中。 */
 export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
@@ -82,14 +43,21 @@ export function UnreadChip() {
     () => (b: Bot) => !b.pending && b.parent_bot_id === null && !b.team && !agmProjectIds.includes(b.project_id),
     [agmProjectIds],
   )
+  // 釘選是使用者自己指定的，所以不受 `tracked` 的排除規則影響（AGM、team 成員、子 agent
+  // 都釘得起來）——釘了就是要一直看得到。
+  const pinned = useMemo(
+    () => bots.filter((b) => !b.pending && b.primary).map((b) => ({ id: b.id, name: b.name })),
+    [bots],
+  )
+  const isPinned = useMemo(() => new Set(pinned.map((p) => p.id)), [pinned])
   // 只算母 bot（`parent_bot_id === null`）：herdr 開出來的子 agent 是母 bot 自己的工人，
   // 它們回話是給母 bot 看的。team 成員（`b.team`）同樣不算，理由見檔頭。
   const rows = useMemo(
     () =>
       bots
-        .filter((b) => tracked(b) && (botUnread[b.id] ?? 0) > 0)
+        .filter((b) => tracked(b) && !isPinned.has(b.id) && (botUnread[b.id] ?? 0) > 0)
         .map((b) => ({ id: b.id, name: b.name, n: botUnread[b.id] ?? 0 })),
-    [bots, botUnread, tracked],
+    [bots, botUnread, tracked, isPinned],
   )
   // 「進行中」用 `agent_status` 而不是複合燈號——燈號還混進了主機斷線、啟動中那幾種顏色，
   // 那些不是進行中。
@@ -97,9 +65,9 @@ export function UnreadChip() {
   const working = useMemo(
     () =>
       bots
-        .filter((b) => tracked(b) && runs[b.id]?.agent_status === 'working')
+        .filter((b) => tracked(b) && !isPinned.has(b.id) && runs[b.id]?.agent_status === 'working')
         .map((b) => ({ id: b.id, name: b.name })),
-    [bots, runs, tracked],
+    [bots, runs, tracked, isPinned],
   )
   // team 用整隊一顆：還在跑的 team（phase 未進終態、也不是暫停），點下去開 team 畫面。
   const teams = useStore((s) => s.teams)
@@ -115,10 +83,28 @@ export function UnreadChip() {
   const selectedTeamId = useStore((s) => s.selectedTeamId)
   const selectBot = useStore((s) => s.selectBot)
   const selectTeam = useStore((s) => s.selectTeam)
+  const botUnreadOf = (id: string) => botUnread[id] ?? 0
   const live = working.length + liveTeams.length
-  if (rows.length === 0 && live === 0) return null
+  if (pinned.length === 0 && rows.length === 0 && live === 0) return null
   return (
     <div className="unread-bar" role="status" aria-live="polite">
+      {pinned.length > 0 ? <span className="unread-bar-label">主力</span> : null}
+      {pinned.map((r) => (
+        <button
+          key={r.id}
+          type="button"
+          className={`unread-chip pinned${r.id === selectedBotId ? ' current' : ''}`}
+          title={`${r.name}（主要執行的 bot）。點一下跳過去`}
+          onClick={() => selectBot(r.id)}
+        >
+          <span className="unread-chip-star" aria-hidden="true">★</span>
+          <span className="unread-chip-name">{r.name}</span>
+          {botUnreadOf(r.id) > 0 ? (
+            <span className="unread-chip-n">{botUnreadOf(r.id) > 99 ? '99+' : botUnreadOf(r.id)}</span>
+          ) : null}
+          {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+        </button>
+      ))}
       {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
       {rows.map((r) => (
         <button
