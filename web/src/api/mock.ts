@@ -151,6 +151,8 @@ interface MockBot {
   team_id: string | null
   team_role: TeamRole | null
   cwd: string | null
+  /** 使用者釘的「主要執行的 bot」（`PATCH {primary}`）。省略 = 沒釘。 */
+  is_primary?: number
   created_at: string
 }
 
@@ -1590,6 +1592,7 @@ export class MockTransport implements Transport {
               identity: b.identity,
               env: JSON.parse(b.env_json) as Record<string, string>,
               managed_by: b.managed_by,
+              primary: b.is_primary === 1,
               team: b.team_id && b.team_role ? { team_id: b.team_id, role: b.team_role } : null,
               cwd: b.cwd,
               // daemon 是 `slug(project.label)-<bot id 末 6 碼小寫>`，mock 照抄夠用來驗 UI。
@@ -1751,6 +1754,8 @@ export class MockTransport implements Transport {
     if (b.autostart !== undefined) bot.autostart = b.autostart ? 1 : 0
     if (b.auto_approve !== undefined) bot.auto_approve = b.auto_approve ? 1 : 0
     if (b.inject_hooks !== undefined) bot.inject_hooks = b.inject_hooks ? 1 : 0
+    // 釘選只是顯示狀態：不在 LAUNCH_FIELDS 裡，所以永遠不會要求重啟。
+    if (b.primary !== undefined) bot.is_primary = b.primary ? 1 : 0
     this.emit('bot_changed', { bot_id: id })
     // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟；只改 autostart → false。
     const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']

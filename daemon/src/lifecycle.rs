@@ -1196,6 +1196,7 @@ mod model_args_tests {
             cwd: None,
             herdr_session: None,
             parent_bot_id: None,
+            is_primary: 0,
             hook_token: "t".into(),
             deleted_at: None,
             created_at: String::new(),

@@ -230,6 +230,12 @@ export interface Bot {
   team: BotTeamRef | null
   /** 由哪個 bot 的 agent 用 herdr 開出來的子 agent（名稱 `<父 agent 名>-<字尾>`）；null = 頂層。 */
   parent_bot_id: string | null
+  /**
+   * 使用者釘的「主要執行的 bot」（`PATCH /api/bots/:id {primary}`）。純顯示用的釘選：
+   * 不影響啟動參數、不用重啟，存在 daemon 所以手機與電腦看到同一組。舊 daemon 沒有這個
+   * 欄位 → false。
+   */
+  primary: boolean
   /** SPEC-team §2.2：pane 的工作目錄；null = 用 `project.path`。 */
   cwd: string | null
   /**
@@ -652,6 +658,8 @@ export interface PatchBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
+  /** 釘成「主要執行的 bot」。純顯示，`needs_restart` 一定是 false。 */
+  primary?: boolean
 }
 
 /**

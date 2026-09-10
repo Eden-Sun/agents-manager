@@ -115,6 +115,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
           "autostart": false,
           "inject_hooks": true,
     "auto_approve": true,
+          "primary": false,
           "run": null,
           "lamp": "offline",
           "unread": 0
@@ -162,7 +163,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 bot 有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id":"...","needs_restart":false}`；label trim 後為空 → 400。不擋 active run：herdr 的 agent 身分取自 bot id，label 只影響 legacy 名稱與**下次啟動**的 `agent_name` slug |
 | POST | `/api/projects/{id}/bots` | `{"name":"foo-claude","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false}` | `200 {"bot_id":"...","name":"foo-claude"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；名稱重複 409，但 `name_auto:true` 時 daemon 自己往後找 `<base>-<n>`（回應的 `name` 是實際用的） |
-| PATCH | `/api/bots/{id}` | `{"name"?,"model"?,"args"?,"autostart"?,"auto_approve"?,"inject_hooks"?,"identity"?,"env"?}` | `200 {"needs_restart":bool}`；改名時有 active Run → 409（詳見 §10） |
+| PATCH | `/api/bots/{id}` | `{"name"?,"model"?,"args"?,"autostart"?,"auto_approve"?,"inject_hooks"?,"identity"?,"env"?,"primary"?}` | `200 {"needs_restart":bool}`；改名時有 active Run → 409（詳見 §10） |
 | DELETE | `/api/bots/{id}` | — | `200 {}`（會先 stop；conversation 與訊息保留，詳見 §10） |
 | POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個欄位都沒有 → 400 |
 
@@ -397,6 +398,14 @@ UI 標籤建議：
 
 錯誤：路徑不存在或不是目錄 → 400 `{"error":"bad_request","message":"..."}`。
 
+
+## bot.primary（2026-09-10 新增）
+
+每個 bot 的布林欄位，預設 `false`，出現在 `GET /api/state` 的 `bots[].primary`，用 `PATCH /api/bots/{id} {"primary": true|false}` 設定。**純顯示用的釘選**：使用者把常用的那幾顆標成「主要執行的 bot」，網頁把它們固定排在標題列下面那一列的最前面。
+
+- 不影響啟動 argv / env，所以永遠不列入 `needs_restart` 的判斷（只帶這個欄位時回 `{"needs_restart": false}`）。
+- 不進 `config.toml`：直接寫 `bots.is_primary` 欄位，投影（`projection.rs`）不會覆蓋它，`managed_by` 是 `team` / `child` 的 bot 也能釘。
+- 存在 daemon 而不是瀏覽器，所以手機與電腦看到同一組。舊資料庫啟動時自動 `ALTER TABLE` 補欄位；舊 daemon 沒有這個欄位時前端當 `false`。
 
 ## bot.auto_approve（2026-09-06 新增）
 
@@ -934,7 +943,8 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
   "auto_approve": true,
   "inject_hooks": true,
   "identity": "cc1",
-  "env": {"FOO": "bar"}
+  "env": {"FOO": "bar"},
+  "primary": false
 }
 ```
 
