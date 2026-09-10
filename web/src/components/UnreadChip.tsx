@@ -15,8 +15,13 @@
  *   要逐則追的東西；真要看去 team 畫面。
  * - **進行中也不列 team 成員**，改成「這個 team 在跑」一顆——同一個 team 三顆成員各佔一格，
  *   說的其實是同一件事。
+ * - **AGM（總管）兩邊都不列**：它是管理員，靠例行 loop 醒來，每一輪都會「跑完一回合」。
+ *   那不是使用者交代的事，卻會把這兩格洗成永遠有東西。要看它就從側欄的 AGM 總管進去；
+ *   真的想常駐追蹤還是可以用 ★ 把它釘起來（釘選是使用者自己指定的，不受這條影響）。
  */
 import { useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
+import type { Bot } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 import { useStore } from '../store/store'
 import './unreadChip.css'
@@ -70,14 +75,21 @@ export function PrimaryChips() {
 export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
+  // AGM 專案（daemon 自己建的總管環境，`supervisor::setup::BOT_NAME`）整個不算——那底下
+  // 只有總管與它開出來的工人。
+  const agmProjectIds = useStore(useShallow((s) => s.projects.filter((p) => p.label === 'AGM').map((p) => p.id)))
+  const tracked = useMemo(
+    () => (b: Bot) => !b.pending && b.parent_bot_id === null && !b.team && !agmProjectIds.includes(b.project_id),
+    [agmProjectIds],
+  )
   // 只算母 bot（`parent_bot_id === null`）：herdr 開出來的子 agent 是母 bot 自己的工人，
   // 它們回話是給母 bot 看的。team 成員（`b.team`）同樣不算，理由見檔頭。
   const rows = useMemo(
     () =>
       bots
-        .filter((b) => !b.pending && b.parent_bot_id === null && !b.team && (botUnread[b.id] ?? 0) > 0)
+        .filter((b) => tracked(b) && (botUnread[b.id] ?? 0) > 0)
         .map((b) => ({ id: b.id, name: b.name, n: botUnread[b.id] ?? 0 })),
-    [bots, botUnread],
+    [bots, botUnread, tracked],
   )
   // 「進行中」用 `agent_status` 而不是複合燈號——燈號還混進了主機斷線、啟動中那幾種顏色，
   // 那些不是進行中。
@@ -85,9 +97,9 @@ export function UnreadChip() {
   const working = useMemo(
     () =>
       bots
-        .filter((b) => !b.pending && b.parent_bot_id === null && !b.team && runs[b.id]?.agent_status === 'working')
+        .filter((b) => tracked(b) && runs[b.id]?.agent_status === 'working')
         .map((b) => ({ id: b.id, name: b.name })),
-    [bots, runs],
+    [bots, runs, tracked],
   )
   // team 用整隊一顆：還在跑的 team（phase 未進終態、也不是暫停），點下去開 team 畫面。
   const teams = useStore((s) => s.teams)
