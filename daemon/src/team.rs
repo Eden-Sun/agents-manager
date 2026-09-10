@@ -4475,7 +4475,9 @@ mod api_tests {
         crate::team_git::create_branch(&app, LOCAL_HOST, &repo, branch, &base)
             .await
             .unwrap();
-        let wt = e.dir.join("branch-worktree");
+        let root = e.dir.join("rollback-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let wt = root.join("branch-worktree");
         let wt_path = wt.to_string_lossy().to_string();
         crate::team_git::worktree_add(
             &app,
@@ -4490,7 +4492,6 @@ mod api_tests {
         std::fs::write(wt.join("work.txt"), "user work\n").unwrap();
         assert!(crate::team_git::commit_all(&app, LOCAL_HOST, &wt_path, "user work").await.unwrap());
 
-        let root = e.dir.join("rollback-root");
         let root_path = root.to_string_lossy().to_string();
         rollback_create(
             &app,
@@ -4507,6 +4508,7 @@ mod api_tests {
         )
         .await;
 
+        assert!(!wt.exists(), "rollback removed the worktree and released the branch");
         let branches = crate::team_git::testing::run(&e.repo, &["branch", "--list", branch]);
         assert!(branches.contains(branch), "a branch with work must survive rollback: {branches}");
     }
