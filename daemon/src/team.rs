@@ -3120,6 +3120,17 @@ pub async fn say(
     to: &str,
     client_request_id: &str,
 ) -> LcResult<Value> {
+    say_with_delivery(app, team_id, text, to, client_request_id, text).await
+}
+
+async fn say_with_delivery(
+    app: &Arc<App>,
+    team_id: &str,
+    text: &str,
+    to: &str,
+    client_request_id: &str,
+    delivery_text: &str,
+) -> LcResult<Value> {
     let t = load(app, team_id).await?;
     if text.trim().is_empty() {
         return Err(LcError::Bad("text must not be empty".into()));
@@ -3140,7 +3151,7 @@ pub async fn say(
         json!({"text": text, "to": bot.name}),
     )
     .await?;
-    let out = lifecycle::prompt_grouped(app, &bot.id, text, &crid, None, None, &[]).await?;
+    let out = lifecycle::prompt_grouped(app, &bot.id, text, &crid, None, Some(delivery_text), &[]).await?;
     // Stamp the team on the rows the ordinary prompt path just created so the team timeline
     // and `turns.team_id` line up without touching `lifecycle`.
     let _ = sqlx::query("UPDATE messages SET team_id = ? WHERE id = ?")
@@ -3170,7 +3181,12 @@ pub async fn say(
 /// resume when that is what the team is waiting on.
 pub async fn answer(app: &Arc<App>, team_id: &str, text: &str, client_request_id: &str) -> LcResult<Value> {
     let t = load(app, team_id).await?;
-    let mut out = say(app, team_id, text, "pm", client_request_id).await?;
+    // Keep the user's answer as-is in the timeline, but remind the PM in the delivered
+    // prompt that this turn still needs the protocol block. Without this, the PM's
+    // post-`ask_user` reply is an ordinary `kind:"user"` turn and commonly has no block for
+    // `on_turn_done` to apply, leaving the team in `planning`.
+    let delivery = format!("{}{}", text, crate::team_sched::footer("pm"));
+    let mut out = say_with_delivery(app, team_id, text, "pm", client_request_id, &delivery).await?;
     let waiting = t.phase == "paused" && t.pause_reason.as_deref().map(|r| r.starts_with("ask_user")).unwrap_or(false);
     if waiting {
         resume(app, team_id).await?;
