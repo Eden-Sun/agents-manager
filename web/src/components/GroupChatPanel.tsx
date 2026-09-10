@@ -18,6 +18,7 @@ import { IssuesBar } from './IssuesBar'
 import { KindIcon } from './KindTag'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
+import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
@@ -600,6 +601,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         <MemberStrip projectId={projectId} />
         <span className="spacer" />
         <ToolsHintIcon />
+        <UnreadChip />
         <QuotaStrip host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />

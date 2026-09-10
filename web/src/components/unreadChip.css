@@ -1,0 +1,45 @@
+/* 標題列的未讀晶片（`UnreadChip`）。跟 `.unread-turns`（側欄）同一個色系，
+   但它是可以按的，所以有 hover / focus 態。 */
+.unread-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.unread-chip:hover {
+  background: var(--bg-active);
+  border-color: var(--accent);
+}
+
+.unread-chip-bang {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.unread-chip-n {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* 名字是「點下去會去哪」的提示，空間不夠時先犧牲它（數字才是重點）。 */
+.unread-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+@media (max-width: 720px) {
+  .unread-chip-name {
+    display: none;
+  }
+}
