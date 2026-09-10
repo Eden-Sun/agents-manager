@@ -4522,6 +4522,31 @@ fn strip_codex_bullet(line: &str) -> &str {
         .unwrap_or_else(|| line.trim())
 }
 
+/// Glue the limit banner back together from row `i` onwards, and say where it ends.
+///
+/// Narrow panes wrap it across many rows:
+///   ■ You've hit your usage
+///   limit. Upgrade to Pro
+///   …
+///   try again at 1:32 PM.
+fn join_wrapped_limit_hit(lines: &[&str], i: usize) -> (Option<String>, usize) {
+    let mut parts: Vec<&str> = vec![strip_codex_bullet(lines[i])];
+    let mut j = i + 1;
+    while j < lines.len() && parts.len() < 16 {
+        let t = lines[j].trim();
+        if t.is_empty() || t.starts_with('›') || t.starts_with('❯') || t.starts_with('╭') || t.starts_with('╰') {
+            break;
+        }
+        // Model-picker chrome under the input box — stop.
+        if t.to_ascii_lowercase().starts_with("gpt-") || t.contains("max fas") {
+            break;
+        }
+        parts.push(t);
+        j += 1;
+    }
+    (codex_limit_hit_line(&parts.join(" ")), j)
+}
+
 fn codex_usage_notice_lines(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let push = |out: &mut Vec<String>, notice: String| {
@@ -4533,46 +4558,48 @@ fn codex_usage_notice_lines(text: &str) -> Vec<String> {
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        if let Some(notice) = codex_limit_hit_line(line).or_else(|| codex_usage_notice_line(line)) {
+        if let Some(notice) = codex_limit_hit_line(line) {
+            // The first row matches on its own, but `try again at …` — the only place the
+            // reset time appears — is on the row **after** it whenever the banner wraps.
+            // Taking the single row would store the notice truncated at `…, visit` and leave
+            // the quota with no reset (2026-09-10, codex-astra). So look ahead, and prefer
+            // the joined text only when it actually adds the missing half.
+            let (joined, next) = join_wrapped_limit_hit(&lines, i);
+            if !has_try_again(&notice) {
+                if let Some(joined) = joined.filter(|j| has_try_again(j)) {
+                    push(&mut out, joined);
+                    i = next;
+                    continue;
+                }
+            }
             push(&mut out, notice);
             i += 1;
             continue;
         }
-        // Narrow panes wrap the hard-limit banner across many rows:
-        //   ■ You've hit your usage
-        //   limit. Upgrade to Pro
-        //   …
-        //   try again at 1:32 PM.
-        let head = strip_codex_bullet(line);
-        let head_low = head.to_ascii_lowercase();
+        if let Some(notice) = codex_usage_notice_line(line) {
+            push(&mut out, notice);
+            i += 1;
+            continue;
+        }
+        let head_low = strip_codex_bullet(line).to_ascii_lowercase();
         let looks_hit = head_low.contains("hit your usage")
             || (head_low.contains("error") && head_low.contains("usage"))
             || head_low.contains("you've hit");
         if looks_hit {
-            let mut parts: Vec<&str> = vec![head];
-            let mut j = i + 1;
-            while j < lines.len() && parts.len() < 16 {
-                let t = lines[j].trim();
-                if t.is_empty() || t.starts_with('›') || t.starts_with('❯') || t.starts_with('╭') || t.starts_with('╰') {
-                    break;
-                }
-                // Model-picker chrome under the input box — stop.
-                if t.to_ascii_lowercase().starts_with("gpt-") || t.contains("max fas") {
-                    break;
-                }
-                parts.push(t);
-                j += 1;
-            }
-            let joined = parts.join(" ");
-            if let Some(notice) = codex_limit_hit_line(&joined) {
+            let (joined, next) = join_wrapped_limit_hit(&lines, i);
+            if let Some(notice) = joined {
                 push(&mut out, notice);
-                i = j;
+                i = next;
                 continue;
             }
         }
         i += 1;
     }
     out
+}
+
+fn has_try_again(notice: &str) -> bool {
+    notice.to_ascii_lowercase().contains("try again at")
 }
 
 fn month_num_token(tok: &str) -> Option<u32> {
@@ -4586,8 +4613,13 @@ fn month_num_token(tok: &str) -> Option<u32> {
 }
 
 /// `try again at Aug 8th, 2025 1:47 PM` → RFC3339 UTC, if present.
+///
+/// The date half is **optional**: when the reset is later the same day codex writes just
+/// `or try again at 5:07 AM.` (2026-09-10, codex-astra). Requiring a year there meant the
+/// hit was recorded with no reset at all and the strip could never say when it comes back —
+/// so a bare clock time is read as the next time that clock comes round.
 fn parse_codex_try_again(notice: &str) -> Option<String> {
-    use chrono::{Local, NaiveDate, TimeZone};
+    use chrono::{Datelike, Local, NaiveDate, TimeZone};
     let low = notice.to_ascii_lowercase();
     let rest = low.split("try again at").nth(1)?.trim();
     let mut month = None;
@@ -4642,14 +4674,29 @@ fn parse_codex_try_again(notice: &str) -> Option<String> {
             pm = false;
         }
     }
-    let (month, day, year, mut hour) = (month?, day?, year?, hour?);
+    let mut hour = hour?;
     if pm && hour < 12 {
         hour += 12;
     }
     if !pm && hour == 12 {
         hour = 0;
     }
-    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
+    let now = Local::now();
+    // Fill in only what the notice left out, and roll the result forward: a reset is always
+    // ahead of us, so a clock time that already passed today means tomorrow, and a month/day
+    // that already passed this year means next year.
+    let today = now.date_naive();
+    let (date, roll) = match (month, day) {
+        (Some(m), Some(d)) => (NaiveDate::from_ymd_opt(year.unwrap_or_else(|| today.year()), m, d)?, year.is_none()),
+        _ => (today, true),
+    };
+    let mut naive = date.and_hms_opt(hour, minute, 0)?;
+    if roll && naive <= now.naive_local() {
+        naive = match (month, day) {
+            (Some(_), Some(_)) => naive.with_year(naive.year() + 1)?,
+            _ => naive + chrono::Duration::days(1),
+        };
+    }
     let dt = Local.from_local_datetime(&naive).earliest()?;
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
@@ -4927,6 +4974,60 @@ credits or try again at
         assert!(n.contains("hit your usage"));
         assert!(n.contains("limit"));
         assert!(n.contains("try again"));
+    }
+
+    /// Real pane, codex-astra 2026-09-10: a **wide** pane still wraps this banner onto a
+    /// second row, and the first row matches the hit pattern all by itself — so the reset
+    /// half used to be dropped and the notice stored as `…, visit`.
+    const CODEX_LIMIT_HIT_TWO_ROWS: &str = "\
+› AGM 交辦：…
+
+■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit
+https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:07 AM.
+
+  1 background terminal running · /ps to view · /stop to close
+";
+
+    #[test]
+    fn codex_limit_hit_keeps_the_reset_half_off_the_next_row() {
+        let lines = codex_usage_notice_lines(CODEX_LIMIT_HIT_TWO_ROWS);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let n = lines[0].to_ascii_lowercase();
+        assert!(n.contains("hit your usage limit"));
+        assert!(n.contains("try again at 5:07 am"), "the reset half must survive: {n}");
+        assert!(parse_codex_try_again(&lines[0]).is_some());
+        // A banner that already carries its own reset is not extended by whatever follows it.
+        assert_eq!(codex_usage_notice_lines(CODEX_LIMIT_HIT).len(), 1);
+    }
+
+    /// Codex writes a bare clock time when the reset is later today, with no date at all.
+    #[test]
+    fn codex_try_again_without_a_date_is_the_next_time_that_clock_comes_round() {
+        use chrono::{Datelike, Local, TimeZone, Timelike};
+        let now = Local::now();
+        let at = |h: u32| {
+            format!("ERROR: You've hit your usage limit. Upgrade to Pro, or try again at {}:07 {}.",
+                if h % 12 == 0 { 12 } else { h % 12 },
+                if h < 12 { "AM" } else { "PM" })
+        };
+        for h in 0..24u32 {
+            let parsed = parse_codex_try_again(&at(h)).unwrap_or_else(|| panic!("hour {h} did not parse"));
+            let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
+            assert_eq!(dt.hour(), h, "{parsed}");
+            assert_eq!(dt.minute(), 7);
+            assert!(dt > now, "a reset is always ahead of us: {parsed}");
+            assert!(dt.signed_duration_since(now).num_hours() < 25, "and never more than a day out: {parsed}");
+            // Today or tomorrow, never some other date.
+            let day = dt.date_naive();
+            assert!(day == now.date_naive() || day == now.date_naive() + chrono::Duration::days(1));
+        }
+        // A month/day with no year still lands on a real date.
+        let r = parse_codex_try_again("try again at Aug 8th 1:47 PM.").unwrap();
+        let dt = chrono::DateTime::parse_from_rfc3339(&r).unwrap().with_timezone(&Local);
+        assert_eq!((dt.month(), dt.day()), (8, 8));
+        assert!(dt > now);
+        let _ = Local.timestamp_opt(0, 0);
+        let _ = now.year();
     }
 
     #[test]
