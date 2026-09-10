@@ -997,6 +997,17 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const closeTeamIssue = useStore((s) => s.closeTeamIssue)
   const addTeamIssues = useStore((s) => s.addTeamIssues)
   const rescueTeam = useStore((s) => s.rescueTeam)
+  const retryFailedIssues = useStore((s) => s.retryFailedIssues)
+  // §2.6b：佇列上失敗 / 被跳過的 issue（每個號碼只算最後一次），可以一鍵重排接力做完。
+  const stuckIssues = useStore((s) => {
+    const rows = s.teamDetail[teamId]?.issues ?? []
+    const latest = new Map<number, (typeof rows)[number]>()
+    for (const i of rows) {
+      const prev = latest.get(i.issue_number)
+      if (!prev || i.seq > prev.seq) latest.set(i.issue_number, i)
+    }
+    return [...latest.values()].filter((i) => i.state === 'failed' || i.state === 'skipped').length
+  })
   // §2.6：跑完之後還留著沒解決的 task（failed / skipped）就給一條收尾的路。
   const unresolved = useStore((s) => (s.teamDetail[teamId]?.tasks ?? []).filter((t) => t.state === 'failed' || t.state === 'skipped').length)
   const rescuer = useStore((s) => {
@@ -1021,6 +1032,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   // 「追加 issue」正在飛的那一刻：按鈕與輸入都收起來，重送只會換到一個 409。
   const addBusy = Boolean(busy[`team:${teamId}:add-issues`])
   const rescueBusy = Boolean(busy[`team:${teamId}:rescue`])
+  const retryBusy = Boolean(busy[`team:${teamId}:retry-issues`])
   // 390px 的標題列放不下五顆鍵：中止與關閉改從 `⋯` 走（下面 head-actions）。
   const phone = useMediaQuery(PHONE_QUERY)
 
@@ -1166,6 +1178,19 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
               onClick={() => void rescueTeam(teamId)}
             >
               {rescueBusy ? '交接中…' : `交給 ${rescuerName} 收尾（${unresolved}）`}
+            </button>
+          ) : null}
+          {/* §2.6b：合併衝突、預算用完這類失敗的 issue 不是決定，是還沒做完的工作——一鍵
+              重排回佇列接力做，比讓使用者把四個號碼再打一次進「追加 issue」誠實得多。 */}
+          {canReopen && stuckIssues > 0 ? (
+            <button
+              type="button"
+              className="mini-btn"
+              disabled={retryBusy}
+              title={`把失敗 / 被跳過的 ${stuckIssues} 個 issue 重新排進佇列，接力做完`}
+              onClick={() => void retryFailedIssues(teamId)}
+            >
+              {retryBusy ? '重排中…' : `續做失敗的 ${stuckIssues} 個 issue`}
             </button>
           ) : null}
           {phone ? null : terminal ? (

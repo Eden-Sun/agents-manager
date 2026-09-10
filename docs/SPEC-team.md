@@ -300,6 +300,18 @@ PM 的價值在它記得這個 repo、記得上一個 issue 的取捨。停掉�
    - issue 收掉時清 `rescue_bot_id`，之後的 reopen 才會照常建新執行者。
 5. 之後就是普通流程：回報 → （不是自己寫的才）審查 → 合併 → PM `done` → team 回到 `done`。
 
+### 2.6b Retry：把失敗的 issue 重新排回佇列（2026-09-11）
+
+佇列上的 `failed` 列帶著理由（`合併衝突無法自動解決`、`時間預算用完`）。那些不是決定，是**還沒做完的
+工作**；使用者要的是接力做完，而不是把四個號碼再打一次進「追加 issue」。
+
+`POST /teams/{id}/issues/retry-failed`：把每個 issue 號碼的**最後一次嘗試**中，狀態是 `failed` /
+`skipped` 的那些重新排進佇列——就是 §2.3 的「再排同一個 issue」，只是號碼由 daemon 填。
+一個號碼失敗過但重排後交付了，它是完成的、不會再被撿回來；一個號碼排三次失敗兩次也只回來一次。
+另外記一則 `issues_retried` note，帶上每一次失敗的 `reason` 與分支，讓時間軸看得出這次重排是在接誰的力。
+
+放行條件與 §2.5 reopen 完全相同（`done` 且未 cleanup 才會走 reopen 分支；執行中的 team 就只是排隊）。
+
 ## 3. 架構：daemon 內的 Team Scheduler
 
 ```

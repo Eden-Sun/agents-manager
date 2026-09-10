@@ -1878,6 +1878,17 @@ run 上：
 - 成功後 team 回到 `starting`：成員重新啟動，收尾者成為這個 issue 唯一的執行者，做完照常
   合併、由 PM 宣告 `done`。
 
+## `POST /api/teams/{id}/issues/retry-failed`（SPEC-team §2.6b，2026-09-11 新增）
+
+把佇列上失敗 / 被跳過的 issue 重新排回去接力做完（每個號碼只看最後一次嘗試）。
+
+```json
+200 {"queued": [...], "retried": [31, 33, 40, 44]}
+```
+
+- 沒有失敗的 issue → `409 no failed issue to retry`。其餘驗證與 `POST /teams/{id}/issues` 相同
+  （issue 存在、未在佇列上、總數上限、額度），`done` 且未 cleanup 的 team 會照 §2.5 reopen 起來。
+
 ## 快速 git（chat 標題列的 chip，2026-09-08 新增）
 
 專案 checkout 的 `+N −M ↑a ↓b` 與 commit / push / pull 三顆按鈕。都在專案的 host 上、專案的目錄裡跑
