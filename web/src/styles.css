@@ -11133,7 +11133,7 @@ button.run-debug-toggle:hover {
   font-size: 11px;
 }
 
-/* 母 bot 底下有子 bot 用別的帳號：母 bot 的身分徽章描一圈琥珀色，後面掛「≠cc0」說子 bot 用的是誰。 */
+/* 母 bot 底下有子 bot 用別的帳號：母 bot 的身分徽章描一圈琥珀色，後面掛「cc0」說子 bot 用的是誰。 */
 .identity-diverged {
   display: inline-flex;
   align-items: center;
