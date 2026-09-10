@@ -10564,9 +10564,24 @@ button.run-debug-toggle:hover {
     min-width: 3em;
     max-width: 45%;
   }
+  /* chip 那排不截尾，改成可以左右滑（2026-09-10 使用者）：每顆 chip 保持完整寬度，
+     超出的用手指滑過去看；捲軸藏起來，列高不變。 */
   .bot-row.compact .bot-sub {
     min-width: 0;
-    flex: 0 1 auto;
+    flex: 1 1 auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+  .bot-row.compact .bot-sub::-webkit-scrollbar {
+    display: none;
+  }
+  .bot-row.compact .bot-sub > *,
+  .bot-row.compact .bot-sub .model-tag {
+    flex: none;
+    max-width: none;
   }
 
   .bot-row.compact .bot-sub .model-tag {
