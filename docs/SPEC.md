@@ -225,7 +225,7 @@ label = "foo"
   autostart = true
 ```
 
-- 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；mtime 與載入時不符回 409。`toml_edit` 保留註解為第二階段。
+- 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；若 mtime 與上次讀取不符，會在同一把 mutex 內重新讀取後再套用更新，重新解析失敗才回錯誤。`toml_edit` 保留註解為第二階段。
 - 改 `name` 時若有 active Run 拒絕（herdr agent name 綁定啟動時的名稱）。
 - 改 `listen` port 需重啟 daemon，且既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）；UI 顯示提示。
 
