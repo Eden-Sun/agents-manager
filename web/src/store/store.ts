@@ -2151,6 +2151,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       const record = isRec(data) ? data : null
       const run = toRun(record ? (record.run ?? null) : null, botId)
       const bot = get().bots.find((b) => b.id === botId)
+      const wasWorking = get().runs[botId]?.agent_status === 'working'
       const defaultSession = str(record ? pick(record, 'herdr_session') : undefined) === 'default' || bot?.herdr_session === 'default'
       // bot_status.connected is the state of the host/session the bot lives on (#20). A remote
       // bot must never flip the global herdr flag; it only patches its own host entry.
@@ -2168,6 +2169,18 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           ? { hosts: mergeHosts(s.hosts, [{ name: target.host, connected: target.connected }]) }
           : {}),
       }))
+      // working → idle 也是「一個回合做完了」。多數時候 `message_added` / `turn_updated`
+      // 已經先記過（`takeTurnCompletion` 會擋掉重複），但使用者直接在終端裡跟 agent 講話、
+      // 或 hook 沒裝時，那條路一則都不會來——沒有這一段，未讀就永遠不亮。
+      if (wasWorking && run?.agent_status === 'idle') {
+        // 去重要落在跟回合同一個 key 上：這個 bot 最近的那個回合（ULID 字典序＝時間序）。
+        const turnIds = Object.keys(get().turns[botId] ?? {})
+        const latest = turnIds.length > 0 ? turnIds.reduce((a2, b2) => (a2 > b2 ? a2 : b2)) : null
+        const key = latest ?? `run:${run.id}`
+        noteTurnDone(set, get, botId, key)
+        const pid = get().bots.find((b) => b.id === botId)?.project_id
+        if (pid) noteGroupTurnDone(set, get, pid, key)
+      }
       return
     }
     case 'message_added': {

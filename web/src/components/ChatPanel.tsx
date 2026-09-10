@@ -33,6 +33,7 @@ import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
+import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
@@ -1089,6 +1090,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
   const project = useStore((s) => (bot ? (s.projects.find((p) => p.id === bot.project_id) ?? null) : null))
+  // 這顆 bot 自己的未讀。看著它就會被清掉（`selectBot` / 回到前景），所以平常是 0——
+  // 會亮的是「人不在畫面前，回覆已經進來」的那一段，回來的第一眼就知道剛剛跑完了。
+  const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
   const phone = useMediaQuery(PHONE_QUERY)
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
@@ -1194,6 +1198,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </button>
           <span className="main-status">未選擇 Bot</span>
           <span className="spacer" />
+          <UnreadChip />
           <QuotaStrip />
         </div>
         <EmptyState title="尚未選擇 Bot" icon="◎">
@@ -1246,6 +1251,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <UpdateBadge botId={botId} />
             <RuntimeDriftBadge botId={botId} />
             <TurnErrorBadge botId={botId} />
+            {headUnread > 0 ? (
+              <span className="unread-turns" title={`${headUnread} 個回合已完成，還沒看過`}>
+                !{headUnread > 99 ? '99+' : headUnread}
+              </span>
+            ) : null}
           </div>
           {/* `bot.model` is what was *configured* (null = 由 CLI 自己決定); the statusLine
               reports what the CLI actually loaded, so fall back to that rather than
@@ -1289,6 +1299,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </span>
           </button>
         ) : null}
+        <UnreadChip />
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
