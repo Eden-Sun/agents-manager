@@ -1152,6 +1152,9 @@ button:disabled {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
+  /* 上緣與左緣留一點空：kind icon 右上角的更新記號會凸出去，overflow 會把它切掉。 */
+  padding: 5px 0 5px 4px;
+  margin-left: -4px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -4842,24 +4845,31 @@ p.project-quota-hidden {
   cursor: default;
 }
 
-/* 側欄只放一個點——真正的按鈕在 header。 */
-/* 側欄的「待升級」記號：跟標題列的 `.update-badge` 同一個 ⬆（2026-09-09 使用者：符號要一致），
-   不再是一顆藍點。 */
-.bot-update-dot {
+/* 側欄的「待升級」記號：掛在 kind icon 的右上角、綠色小圓（2026-09-10 使用者），裡面是跟標題列
+   `.update-badge` 同一個雙 chevron。真正的按鈕在 header，這裡只是提示。 */
+.bot-kind-wrap {
+  position: relative;
   flex: none;
+  display: inline-flex;
+}
+.bot-update-dot {
+  position: absolute;
+  top: -5px;
+  right: -5px;
   display: inline-grid;
   place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 3px;
-  border-radius: 3px;
-  border: 1px solid var(--border-strong);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  font-size: 10px;
-  font-weight: 700;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg-panel);
+  background: var(--lamp-green);
+  color: #fff;
   line-height: 1;
   cursor: help;
+  z-index: 1;
+}
+.bot-row.selected .bot-update-dot {
+  border-color: var(--bg-active);
 }
 
 /* 「回合被中斷（API 錯誤）」——SPEC §4.3a。
