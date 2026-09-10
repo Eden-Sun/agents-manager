@@ -38,7 +38,7 @@ import { TeamRoleEditor } from './TeamRoleEditor'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
-import { UnreadChip } from './UnreadChip'
+import { PrimaryChips, UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamMemberBlocked, TeamMemberLost } from './TeamMemberBlocked'
 import { canReopenTeam, describeEvent, teamPauseDetailTitle, teamPauseText } from './teamPanelLogic'
@@ -1071,7 +1071,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
         <QuotaStrip focusKind={memberKind} host={project?.host ?? LOCAL_HOST} />
         {/* 遠端才掛：本機的數字固定在左上角。 */}
         <MemBadge host={project?.host ?? LOCAL_HOST} onlyRemote />
-        <UnreadChip />
+        <PrimaryChips />
         <div className="head-actions">
           {gated ? (
             <button
@@ -1202,6 +1202,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           </HeadMoreMenu>
         </div>
       </div>
+      <UnreadChip />
 
       <div className="team-subhead">
         {/* 交付方式是「建立時就決定的設定」，不是會變的狀態，所以從標題列搬到這裡——
