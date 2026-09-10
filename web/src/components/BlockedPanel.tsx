@@ -1,5 +1,6 @@
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
+import { CodexUpdateHint } from './CodexUpdateHint'
 import { linkifyTerm } from './TermLinks'
 import { useTermWrap } from './termWrap'
 
@@ -54,6 +55,8 @@ export function BlockedPanel({
           </button>
         ) : null}
       </div>
+      {/* codex 的升級提示（TUI 當場問的）也要在這裡就能先看 changelog，不必先展開全畫面。 */}
+      <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       <pre className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
       <div className="keypad">
         {KEYPAD.map((k) => (
