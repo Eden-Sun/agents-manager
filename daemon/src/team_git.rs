@@ -33,6 +33,17 @@ pub const PUSH_TIMEOUT: Duration = Duration::from_secs(180);
 /// Marker `sh` appends so a remote shell can report the exit status through stdout.
 const RC: &str = "__am_rc=";
 
+fn wrap_remote_script(full: &str) -> String {
+    format!("( {full}\n) 2>&1; printf '\\n{RC}%s\\n' \"$?\"")
+}
+
+fn parse_remote_output(raw: String) -> (String, i32) {
+    match raw.rsplit_once(RC) {
+        Some((body, code)) => (body.to_string(), code.trim().parse::<i32>().unwrap_or(-1)),
+        None => (raw, -1),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Out {
     pub code: i32,
@@ -87,12 +98,9 @@ pub async fn sh(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> 
     // Remote: ssh_exec_path already fails the whole call on a non-zero status, so the status
     // is carried back in stdout instead.
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    let wrapped = format!("{{ {full}\n}} 2>&1; printf '\\n{RC}%s\\n' \"$?\"");
+    let wrapped = wrap_remote_script(&full);
     let raw = conn.ssh_exec_path(&wrapped).await?;
-    let (body, code) = match raw.rsplit_once(RC) {
-        Some((b, c)) => (b.to_string(), c.trim().parse::<i32>().unwrap_or(-1)),
-        None => (raw, -1),
-    };
+    let (body, code) = parse_remote_output(raw);
     Ok(Out { code, stdout: body, stderr: String::new() })
 }
 
@@ -303,16 +311,7 @@ pub async fn deliver_pr(
     // an issue could smuggle shell commands into the delivery script that way.
     let body_path = format!("{}/pr-body.txt", team_root.trim_end_matches('/'));
     put_file(app, host, &body_path, &body.replace("\r\n", "\n")).await?;
-    let script = format!(
-        "gh pr create --repo {} --head {} --base {} --title {} --body-file {}\n\
-         rc=$?; rm -f {}; exit $rc",
-        sh_quote(repo_slug),
-        sh_quote(branch),
-        sh_quote(base_branch),
-        sh_quote(title),
-        sh_quote(&body_path),
-        sh_quote(&body_path),
-    );
+    let script = deliver_pr_script(repo_slug, branch, base_branch, title, &body_path);
     let o = sh(app, host, &script, PUSH_TIMEOUT).await?;
     if !o.ok() {
         return Err(anyhow!("gh pr create: {}", o.message()));
@@ -325,6 +324,19 @@ pub async fn deliver_pr(
         .unwrap_or("")
         .to_string();
     Ok(url)
+}
+
+fn deliver_pr_script(repo_slug: &str, branch: &str, base_branch: &str, title: &str, body_path: &str) -> String {
+    format!(
+        "gh pr create --repo {} --head {} --base {} --title {} --body-file {}\n\
+         rc=$?; rm -f {}; exit $rc",
+        sh_quote(repo_slug),
+        sh_quote(branch),
+        sh_quote(base_branch),
+        sh_quote(title),
+        sh_quote(body_path),
+        sh_quote(body_path),
+    )
 }
 
 /// Which remote branch a PR should target. `base_ref` is whatever the user asked for
@@ -451,6 +463,71 @@ mod tests {
             "test".into(),
             false,
         )
+    }
+
+    #[tokio::test]
+    async fn sh_local_preserves_exit_status_and_output() {
+        let tmp = std::env::temp_dir().join(format!("am-git-sh-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let app = app_for(&tmp).await;
+
+        for (script, expected) in [("printf 'ok\\n'", 0), ("exit 7", 7)] {
+            let out = sh(&app, LOCAL_HOST, script, GIT_TIMEOUT).await.unwrap();
+            assert_eq!(out.code, expected, "script: {script}");
+            if expected == 0 {
+                assert_eq!(out.stdout, "ok\n");
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn remote_wrapper_keeps_marker_after_script_exit() {
+        for (script, expected, output) in [
+            ("printf 'plain\\n'", 0, "plain"),
+            ("printf 'ok\\n'; exit 0", 0, "ok"),
+            ("printf 'bad\\n'; exit 7", 7, "bad"),
+        ] {
+            let wrapped = wrap_remote_script(script);
+            let raw = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&wrapped)
+                .output()
+                .unwrap();
+            assert!(raw.status.success(), "wrapper must finish after script exit");
+            let (body, code) = parse_remote_output(String::from_utf8_lossy(&raw.stdout).into_owned());
+            assert_eq!(code, expected, "script: {script}");
+            assert!(body.contains(output));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deliver_pr_script_propagates_gh_failure_and_cleans_body() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!("am-git-pr-{}", crate::db::ulid()));
+        let bin = tmp.join("bin");
+        let body = tmp.join("pr-body.txt");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(&body, "body\n").unwrap();
+        let gh = bin.join("gh");
+        std::fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' 'gh failed' >&2\nexit 23\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let script = deliver_pr_script("owner/repo", "feature", "main", "title", &body.to_string_lossy());
+        let path = format!("{}:/bin:/usr/bin", bin.display());
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(23));
+        assert!(!body.exists(), "the delivery script must clean up its body file");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The whole appendix C happy path in a temporary repo: worktrees, a task branch, a
