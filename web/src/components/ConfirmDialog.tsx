@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
@@ -92,7 +93,9 @@ export function ConfirmDialog({
 
   if (!open) return null
 
-  return (
+  // 掛到 body：原本就地渲染時，會被外層的 stacking context（`.main`／聊天面板）壓在
+  // `.shelf`（z-index 30）底下——手機上「圖片暫存」那條蓋住按鈕，點不到（2026-09-10）。
+  return createPortal(
     <div className="confirm-backdrop" role="presentation" onMouseDown={onCancel}>
       <div
         className="confirm-dialog"
@@ -141,6 +144,7 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

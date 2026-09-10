@@ -11097,3 +11097,34 @@ button.run-debug-toggle:hover {
   color: var(--warn, #c9a227);
   white-space: nowrap;
 }
+
+/* 確認框比畫面高時（手機上放 changelog 那種），按鈕會被推到視窗外點不到
+   （2026-09-10 使用者截圖）。框本身封頂在畫面內、內文自己捲，標題與按鈕永遠在畫面上。
+   用 dvh：iOS Safari 的網址列收合前後 100vh 不一樣，100dvh 才是真的可見高度。 */
+.confirm-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  min-height: 0;
+}
+.confirm-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.confirm-title,
+.confirm-require,
+.confirm-actions {
+  flex: none;
+}
+@media (width <= 640px) {
+  .confirm-backdrop {
+    padding: 12px;
+  }
+  .confirm-dialog {
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+}
