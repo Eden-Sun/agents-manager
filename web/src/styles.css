@@ -4845,8 +4845,8 @@ p.project-quota-hidden {
   cursor: default;
 }
 
-/* 側欄的「待升級」記號：掛在 kind icon 的右上角、綠色小圓（2026-09-10 使用者），裡面是跟標題列
-   `.update-badge` 同一個雙 chevron。真正的按鈕在 header，這裡只是提示。 */
+/* 側欄的「待升級」記號：掛在 kind icon 的右上角，只有一個綠色的雙 chevron、沒有底（2026-09-10
+   使用者）。真正的按鈕在 header，這裡只是提示。 */
 .bot-kind-wrap {
   position: relative;
   flex: none;
@@ -4867,9 +4867,13 @@ p.project-quota-hidden {
   line-height: 1;
   cursor: help;
   z-index: 1;
+  /* 描一圈面板色的邊，壓在 icon 邊框上還看得清楚。 */
+  filter: drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
 }
-.bot-row.selected .bot-update-dot {
-  border-color: var(--bg-active);
+.bot-update-dot .upgrade-icon {
+  width: 11px;
+  height: 11px;
+  stroke-width: 4;
 }
 
 /* 「回合被中斷（API 錯誤）」——SPEC §4.3a。
