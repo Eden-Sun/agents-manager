@@ -1011,3 +1011,17 @@ selector 回**純布林**（`.ready.some(...)`）而不是陣列：`updateBatchC
 截圖 `docs/screenshots/header-name-width/`：`batch-hidden-*`（閒置、在 `ready` 裡 → 第一排只剩
 燈號／名字／齒輪／★，名字完整）、`badge-kept-*`（執行中、在 `busy` 裡 → chip 照留，寫
 `⌃⌃ claude 有更新`）。
+
+## 手機 bot 標題列：git 與 ★ 換到第二行，第一行還給名字（2026-09-11）
+
+背景：手機 `.bot-head` 改成 grid 之後，第一行擠了 ☰、名字、⚙、git、★、對話／終端六樣，
+名字只剩 94px——`c0-fable-畫面部分` 與 `c0-fable-調整team` 在標題列上都是 `c0-fable-…`。
+第二行卻只有「✳ 2.1.268」，右邊 300px 空著（ego 390px 實測，截圖在
+`docs/screenshots/mobile-head/`）。
+
+- **git 與 ★ 搬到第二行右側，不是砍掉**：★ 只有標題列這一個入口，git 鍵是手機上開
+  repo／git／context 列的唯一入口，都不在「有第二份」的可讓名單裡。換行之後名字拿回約 200px，
+  而且不再隨名字長短忽上忽下。代價是標題列高 27px（126 → 153）。
+- **齒輪留在名字旁邊**：它是「這顆 bot 的設定」，跟名字是一組；全域動作（git、★）才下去。
+- **git 鍵用跟齒輪同一種灰**：常駐入口染成 git 橘會被讀成「這裡有狀況」。
+- 規則獨立放在 `web/src/components/mobileBotHead.css`（`main.tsx` 匯入），只覆寫 grid 格位。
