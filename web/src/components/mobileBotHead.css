@@ -36,11 +36,25 @@
     min-height: 44px;
   }
 
-  /* ★ 是 `.main-title-row` 的子元素（ChatPanel 在手機把它放在齒輪前面），照 DOM 順序排即可。 */
+  /* 名字那叢吃掉第一行所有剩餘寬度；★ 與齒輪靠右貼著分頁，名字短的時候也不跟過去。 */
+  .main-head.bot-head .main-title-row > .bot-switcher {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .main-head.bot-head .main-title-row > .bot-switcher > .bot-name-btn {
+    max-width: 100%;
+  }
+
   .main-head.bot-head .main-title-row > .primary-star {
     flex: none;
     width: 36px;
     min-width: 36px;
+    margin-left: auto;
+  }
+
+  .main-head.bot-head .main-title-row > .icon-btn.gear {
+    flex: none;
   }
 
   .main-head.bot-head > .tabs {
