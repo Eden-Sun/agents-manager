@@ -999,7 +999,9 @@ function derivedStatus(
 function modelExtraOf(status: StatusInfo | null): string {
   if (!status) return ''
   // 全部用 `·`：`opus-高` 這種連字號黏法讀起來像模型 id 的一部分（見 `ModelTag`）。
-  return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null, status.thinking ? 'thinking' : null]
+  // `thinking` 不放：claude 對這些模型永遠開著，字面上像是一個特別狀態，其實是常態。側欄那顆
+  // `ModelTag` 早就只把它留在 tooltip（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
+  return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null]
     .filter(Boolean)
     .join(' · ')
 }
