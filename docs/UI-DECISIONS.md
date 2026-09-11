@@ -951,3 +951,32 @@ desktop 都要全顯示」），維持 `flex: none`、五格全開約 770–800p
 「剛跑完」「進行中」兩組的排除規則沒有動（`isPinned` 仍然用完整的釘選清單），只有畫出來的
 那一組少掉當前這顆。`.unread-chip.pinned.current` 這個樣式因此沒有對象，一併拿掉。
 截圖 `docs/screenshots/header-name-width/`。
+
+## 標題列的更新 chip：文字縮成 `${kind} 有更新`，批次蓋得到就不畫（2026-09-11）
+
+**文字**：原本寫「有更新 · 重啟套用」。改成只寫 `${bot.kind} 有更新`（`claude 有更新`／`codex 有更新`），
+118px → 104px。「點一下會做什麼」移到 `title` 與新加的 `aria-label`，不印在條上——第一排的寬度
+要留給名字（見上面的收縮優先序）。
+
+**條件隱藏**：額度列最左邊那顆綠色 `⌃⌃ N`（`UpdateQuotaChip`）按下去會一次重啟
+`updateBatchCounts(bots, runs, hasInFlightTurn).ready` 裡的每一顆。當前 bot 落在那份名單裡時，
+右邊那顆本來就會把它一起重啟，標題列再放一顆等於同一件事講兩次，還吃掉 118px。所以
+**`variant === 'chip'` 在 `ready` 名單裡就不畫**。
+
+批次**蓋不到**的三種留著，因為只有這顆能單獨重啟它們（規則全部沿用 `lib/updateBatch.ts`，
+那份跟 daemon 的 `bulk_restart.rs::plan` 一字不差，這裡不另外寫一套）：
+
+- 在 `busy` 名單（`working` / `blocked` / 狀態不明 / 還有回合沒收掉 / 還在啟動關閉中）——批次會跳過它。
+- `managed_by !== 'user'`（子 agent、team 成員）——`updateBatchCounts` 根本不算它們。
+- 不是 claude——批次只處理 claude。
+
+另外「已經按開確認框」或「正在重啟中」時也照畫，不然狀態一轉成 `ready` 會把使用者面前的
+對話框整個抽走。側欄那顆 `variant="dot"` 完全不受影響（它在 bot 列上，跟標題列的寬度無關）。
+
+selector 回**純布林**（`.ready.some(...)`）而不是陣列：`updateBatchCounts` 每次都回新陣列，
+回陣列連 `useShallow` 都擋不住，React 會噴 `getSnapshot should be cached`（`UpdateQuotaChip.tsx`
+的註解裡寫過同一個坑）。
+
+截圖 `docs/screenshots/header-name-width/`：`batch-hidden-*`（閒置、在 `ready` 裡 → 第一排只剩
+燈號／名字／齒輪／★，名字完整）、`badge-kept-*`（執行中、在 `busy` 裡 → chip 照留，寫
+`⌃⌃ claude 有更新`）。
