@@ -21,6 +21,15 @@
   min-width: 8px;
 }
 
+/*
+ * 這一列的兩個狀態是**正交**的，所以分開兩條規則、不要互相蓋（2026-09-11 使用者）：
+ *
+ * - `unread`（有東西等你看）＝ accent 底色。
+ * - `current`（你正在看這一顆）＝ accent 邊框 + 一圈 ring + 粗體，**不動底色**。
+ *
+ * 兩者可能同時成立（例如視窗在背景時那一顆又跑完一輪），疊起來仍然看得出是哪一種。
+ * 底色因此從這條基底規則移到 `.unread-chip.unread`：基底是中性的，誰該亮由狀態決定。
+ */
 .unread-chip {
   display: inline-flex;
   align-items: center;
@@ -29,11 +38,18 @@
   padding: 1px 8px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
+  background: transparent;
+  color: var(--text);
   font-size: 12px;
   line-height: 18px;
   cursor: pointer;
+}
+
+/* 有未讀＝「該去看」。三組（剛跑完／釘選／進行中）共用同一個意思、同一個畫法，
+   一排晶片看過去才挑得出來是哪幾顆。排在 `:hover` 前面，hover 才蓋得過它。 */
+.unread-chip.unread {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
 
 .unread-chip:hover {
@@ -75,10 +91,8 @@
  */
 .unread-chip.current {
   border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  /* 「剛跑完」那組本來就是 accent 底，光換邊框顏色分不出來；再加一圈 ring。`box-shadow`
-     不佔版面，所以這一列不會因為誰被選中而位移。 */
+  /* 只畫邊框、ring 與粗體，不碰底色——底色是「有沒有未讀」在說的話。`box-shadow` 不佔版面，
+     所以這一列不會因為誰被選中而位移。 */
   box-shadow: 0 0 0 1px var(--accent);
   font-weight: 600;
 }
@@ -101,19 +115,9 @@
   font-variant-numeric: tabular-nums;
 }
 
-.unread-chip.pinned {
-  background: transparent;
-  color: var(--text);
-}
-
-/* `.unread-chip.pinned` 與 `.unread-chip.working` 排在 `.current` 後面，會把上面那組
-   focus 的底色蓋掉；同樣的權重再寫一次，讓「正在看的」在三組裡長得一樣。 */
-.unread-chip.pinned.current,
-.unread-chip.working.current {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
+/* 釘選的中性外觀就是基底那一套（★ 當標籤、不搶色）；帶未讀時由 `.unread-chip.unread` 把它
+   亮起來——一排 ★ 看過去，有東西等你看的那幾顆要一眼挑得出來，不能只靠名字後面那個小數字。
+   ★、名字、進行中的圓點都照舊：那是**加一層狀態**，不是把它換成「剛跑完」那一組。 */
 
 .unread-chip-star {
   flex: none;

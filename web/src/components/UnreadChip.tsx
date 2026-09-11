@@ -106,7 +106,7 @@ export function UnreadChip() {
         <button
           key={r.id}
           type="button"
-          className={`unread-chip${r.id === selectedBotId ? ' current' : ''}`}
+          className={`unread-chip${r.n > 0 ? ' unread' : ''}${r.id === selectedBotId ? ' current' : ''}`}
           title={r.n > 0 ? `${r.name} 有 ${r.n} 個回合已完成、還沒看過。點一下跳過去` : `${r.name}：你正在看的就是它`}
           aria-current={r.id === selectedBotId ? 'true' : undefined}
           onClick={() => selectBot(r.id)}
@@ -116,24 +116,34 @@ export function UnreadChip() {
           {r.n > 0 ? <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span> : null}
         </button>
       ))}
-      {/* 釘選的主力：★ 就是標籤，不另外寫字。 */}
-      {pinned.map((r) => (
-        <button
-          key={r.id}
-          type="button"
-          className={`unread-chip pinned${r.id === selectedBotId ? ' current' : ''}`}
-          title={r.id === selectedBotId ? `${r.name}（主要執行的 bot）：你正在看的就是它` : `${r.name}（主要執行的 bot）。點一下跳過去`}
-          aria-current={r.id === selectedBotId ? 'true' : undefined}
-          onClick={() => selectBot(r.id)}
-        >
-          <span className="unread-chip-star" aria-hidden="true">★</span>
-          <span className="unread-chip-name">{r.name}</span>
-          {botUnreadOf(r.id) > 0 ? (
-            <span className="unread-chip-n">{botUnreadOf(r.id) > 99 ? '99+' : botUnreadOf(r.id)}</span>
-          ) : null}
-          {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
-        </button>
-      ))}
+      {/* 釘選的主力：★ 就是標籤，不另外寫字。帶未讀時多套一層 `unread`——見下面的註解。 */}
+      {pinned.map((r) => {
+        const n = botUnreadOf(r.id)
+        return (
+          <button
+            key={r.id}
+            type="button"
+            /* `unread` 是**加在釘選身分上的一層狀態**，不是換一組晶片：一排 ★ 看過去，有東西
+               等你看的那幾顆要能一眼挑出來，而不是只靠名字後面那個小數字。`current`（你在
+               這裡）跟它可以同時成立，兩者的畫法也分得開（見 `unreadChip.css`）。 */
+            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${r.id === selectedBotId ? ' current' : ''}`}
+            title={
+              r.id === selectedBotId
+                ? `${r.name}（主要執行的 bot）：你正在看的就是它`
+                : n > 0
+                  ? `${r.name}（主要執行的 bot）有 ${n} 個回合已完成、還沒看過。點一下跳過去`
+                  : `${r.name}（主要執行的 bot）。點一下跳過去`
+            }
+            aria-current={r.id === selectedBotId ? 'true' : undefined}
+            onClick={() => selectBot(r.id)}
+          >
+            <span className="unread-chip-star" aria-hidden="true">★</span>
+            <span className="unread-chip-name">{r.name}</span>
+            {n > 0 ? <span className="unread-chip-n">{n > 99 ? '99+' : n}</span> : null}
+            {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+          </button>
+        )
+      })}
       {live > 0 ? (
         <>
           <span className="unread-bar-gap" />
