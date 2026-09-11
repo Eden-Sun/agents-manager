@@ -67,9 +67,20 @@
   }
 }
 
-/* 正在看的那一顆（未讀還沒被清掉時，例如視窗在背景）不要看起來像「還要再點一下」。 */
+/*
+ * 正在看的那一顆（2026-09-11 使用者：「即使現在正在 view 也是 focus 而不是消失」）。
+ * 三組都用同一個 focus 外觀，一眼看出「這顆就是我現在在看的」：實線 accent 邊框 + accent 底。
+ * 本來是虛線邊框（意思是「不用再點一次」），但那個做法把它畫得像被停用；現在它是**固定**
+ * 留在原位的定位點，要看起來像被選中，不是被淡掉。
+ */
 .unread-chip.current {
-  border-style: dashed;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  /* 「剛跑完」那組本來就是 accent 底，光換邊框顏色分不出來；再加一圈 ring。`box-shadow`
+     不佔版面，所以這一列不會因為誰被選中而位移。 */
+  box-shadow: 0 0 0 1px var(--accent);
+  font-weight: 600;
 }
 
 .unread-chip-name {
@@ -93,6 +104,15 @@
 .unread-chip.pinned {
   background: transparent;
   color: var(--text);
+}
+
+/* `.unread-chip.pinned` 與 `.unread-chip.working` 排在 `.current` 後面，會把上面那組
+   focus 的底色蓋掉；同樣的權重再寫一次，讓「正在看的」在三組裡長得一樣。 */
+.unread-chip.pinned.current,
+.unread-chip.working.current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
 
 .unread-chip-star {
