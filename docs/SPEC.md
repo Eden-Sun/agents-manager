@@ -458,6 +458,10 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
 >    若 start 仍被一個 pane 已不存在的 run 擋住，就把那個 run 結束並再試一次。
 > 2. reconcile 拿到鎖之後，若要**收編**（沒有 active run）或要**改寫 run 的 pane**（清單上的 pane 與 run 記錄不同），
 >    先向 herdr 重新 `agent.get` + `pane.get` 確認；agent 已不在或 pane 已關就不收編、不改寫。RPC 失敗時維持原判斷。
+>    有 active run 但 herdr 確認不到 agent 時（同名 agent 剛在新 pane 重開的那一瞬間 `agent.get` 會答 not-found
+>    或指到舊 pane），**不能**當成「agent 不見了」把 run 標 exited——那個 run 是在 reconcile 等的那把鎖裡剛寫下的；
+>    這一輪放著不動，下一輪再看 herdr 定下來的答案（2026-09-11 第一版修正就是這樣把整批剛重啟的 run 標掉、
+>    再由孤兒 pane 清掃把新 pane 關掉）。`run_alive` 同理以 pane 本身有沒有 agent 為準，`agent.get` 只是備援。
 > 3. 批次裡某顆最後仍啟動失敗：若它留下一個 pane 已關的 run 就結束掉（bot 顯示為停止，可再啟動），並推一則
 >    supervisor inbox 事件 `kind = bot_restart_failed`（payload：`batch_id`、`bot_id`、`name`、`error`）。
 > 4. 總管 bot（`supervisors.bot_id`，即 AGM）**排在最後**重啟；重啟後 60 秒內每 5 秒檢查一次它是否 running、
@@ -1136,8 +1140,11 @@ herdr 的 `pane.process_info` 回 argv / cwd / **pid**，不回 env，所以帳�
   daemon 從行程猜一個值蓋上去等於改使用者的檔案。SQL 的 `WHERE` 也帶著 `managed_by = 'child'`。
 - model / effort 是**只補不改**（argv 看不到之後在 TUI 打的 `/model`）；identity 是**補，也改**——
   子 agent 的 identity 從來不是使用者設的，那是收編當下抄來的值，蓋掉它是在修我們自己抄錯的東西。
-- **永遠不清成 NULL**。env 讀不到、沒有那個變數（＝預設帳號，但 `cc0` 這種空 env 的身份可能不只一個，
-  沒有唯一答案）、或目錄沒有任何身份認領，一律維持現狀：抄來的值可能是對的，NULL 一定是錯的。
+- **預設帳號也要認得**。沒有那個變數、或變數指向 CLI 自己的預設目錄（`CLAUDE_CONFIG_DIR=~/.claude`、
+  `CODEX_HOME=~/.codex`），就是預設帳號＝空 env 的身份（`cc0`）；不只一個時照第 3 點 config 優先、第一個贏。
+  （2026-09-11：母 pane 明寫 `CLAUDE_CONFIG_DIR=~/.claude` 開出來的 cc0 小孩，選單一直顯示母 bot 的 cc1。）
+- **永遠不清成 NULL**。env 讀不到、目錄沒有任何身份認領、或該 kind 沒有空 env 的身份，一律維持現狀：
+  抄來的值可能是對的，NULL 一定是錯的。
 - **一個 pane 只問一次作業系統**。重連會重播一串 `pane.agent_detected`、每個都排一次 reconcile，每次
   每個小孩一次 `ps`（遠端就是一次 ssh）正是 §11.4.7 already 踩過的風暴。行程活著就不會換帳號，所以問過
   就記著；讀不到、或那台主機還沒偵測出任何同 kind 的身份（開機時 reconcile 可能跑在 §16.1 的 alias
