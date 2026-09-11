@@ -4282,9 +4282,17 @@ p.project-quota-hidden {
     min-height: 26px;
   }
 
+  /* 這裡的 `.quota-open` 還留著 5px 的 gap（上面那條），再加一條分隔線會變成表格。 */
+  .main-head .quota-hp + .quota-hp {
+    border-left-color: transparent;
+  }
+
+  /* 手機的身分名與停用方塊都讓位（見底下 ≤640px 那幾段），固定寬度的標籤欄就只剩空白，
+     欄寬收回自動。 */
   .main-head .quota-head {
     flex-direction: row;
     gap: 4px;
+    width: auto;
   }
 
   /*
@@ -6257,10 +6265,12 @@ button.model-tag:hover:not(:disabled) {
   flex: 0 0 auto;
 }
 
+/* 格與格之間**不留空白**（2026-09-11 使用者）：五格之間各 8px 等於白白吃掉 40px，而省掉的是
+   空白不是資訊。分界改用每一格自己的 7px 內距加一條 1px 細線（見 `.quota-hp + .quota-hp`）。 */
 .quota-open {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0;
   padding: 4px 2px;
   border: 0;
   border-radius: 8px;
@@ -6279,10 +6289,11 @@ button.model-tag:hover:not(:disabled) {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   height: 18px;
   margin-top: 2px;
+  /* 左邊讓出分隔線的位置，右邊跟第一格保持一點距離：它是「有更新」不是一個帳號。 */
   margin-left: 8px;
+  margin-right: 7px;
   padding: 0 2px;
   font-size: 11px;
   font-weight: 650;
@@ -6306,7 +6317,9 @@ button.model-tag:hover:not(:disabled) {
   background: var(--border);
 }
 
+/* 數字跟 chevron 之間用 2px 內距分開，不用 gap（額度區塊一律不留空白撐開的間距）。 */
 .quota-update-n {
+  padding-left: 2px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -6352,7 +6365,7 @@ button.model-tag:hover:not(:disabled) {
 /* 量表那半邊：點它打開 popover（整格也可點，見 QuotaStrip.tsx）。 */
 .quota-bars-open {
   display: inline-flex;
-  padding: 0;
+  padding: 0 0 0 3px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -6368,9 +6381,10 @@ button.model-tag:hover:not(:disabled) {
 /* 停用開關：跟 kind 圖示／身分名同一直欄，貼在名稱正下方。只有方塊、沒有文字——
    條子這一列很擠，說明走 `aria-label` 與 `.icon-tip` 泡泡。負的 `margin-top` 把 10px 的方塊
    塞進圖示欄原本就比量表矮的那段空白裡（實測：圖示欄 27px、量表 36px），整格高度不變。 */
+/* 直排的 gap 拿掉之後，這個負 margin 跟著從 -3px 收成 -1px，方塊與名字的距離不變。 */
 .quota-cell-toggle {
   display: inline-flex;
-  margin-top: -3px;
+  margin-top: -1px;
   cursor: pointer;
 }
 
@@ -6404,6 +6418,8 @@ button.model-tag:hover:not(:disabled) {
    免得把標題列撐高（本機不掛，見 QuotaStrip.tsx）。 */
 .quota-host {
   flex: none;
+  /* 格與格之間已經沒有 gap，名牌自己跟第一格留一點距離。 */
+  margin-right: 7px;
   max-width: 7em;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6419,15 +6435,21 @@ button.model-tag:hover:not(:disabled) {
   font-family: var(--font-mono);
 }
 
+/* 格子裡不用 gap 撐開（2026-09-11 使用者）：身分欄與量表之間改用量表自己的 3px 左內距。 */
 .quota-hp {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   min-height: 28px;
   padding: 3px 7px;
   border: 1px solid transparent;
   border-radius: 7px;
   transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+/* 相鄰兩格的分界。`.quota-hp` 本來就有一圈 1px 的透明外框（選取時整圈變 accent），這裡只是
+   把左邊那條染色，所以拿掉 gap 之後每一格的寬度一格都沒變。選取那格自己整圈上色，會蓋掉這條。 */
+.quota-hp + .quota-hp {
+  border-left-color: var(--border);
 }
 
 /* Highlight only the selected bot's identity gauge (cc0 vs cc1), not every Claude row.
@@ -6485,13 +6507,16 @@ button.model-tag:hover:not(:disabled) {
   color: var(--danger);
 }
 
+/* 身分名那一欄**固定寬度**（2026-09-11 使用者）：`cc0` 只有 22px、`codex` 33px，寬度跟著內容
+   跑的話每一格的 bar 起點 x 都不同，五個帳號的 5h 沒辦法用眼睛橫著比；換一顆 bot 時整條列
+   也會左右跳。3.2em 是最寬的那個標籤（`codex`）的寬度。手機那份身分名本來就讓位，見 ≤640px
+   的 `.main-head .quota-head`。 */
 .quota-head {
   flex: none;
   display: inline-flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  min-width: 1.6em;
+  width: 3.2em;
 }
 
 .quota-identity {
@@ -6558,7 +6583,6 @@ button.model-tag:hover:not(:disabled) {
 
 .quota-bars {
   display: grid;
-  gap: 2px;
   /* Match the height of a 5h+7d stack so a lone grok "週" bar doesn't float like a missing 5h. */
   min-height: 20px;
   align-content: start;
@@ -6572,11 +6596,12 @@ button.model-tag:hover:not(:disabled) {
   display: grid;
   grid-template-columns: 16px auto;
   align-items: center;
-  gap: 3px;
 }
 
-/* `5h` / `7d`：mono 的細節數字，是這條規則裡唯一允許 10.5px 的一類。 */
+/* `5h` / `7d`：mono 的細節數字，是這條規則裡唯一允許 10.5px 的一類。
+   跟條子之間用 2px 內距（原本是 3px 的 gap）。 */
 .quota-window-name {
+  padding-right: 2px;
   font-size: 10.5px;
   font-weight: 650;
   line-height: 1;
@@ -6586,10 +6611,11 @@ button.model-tag:hover:not(:disabled) {
   text-align: right;
 }
 
+/* 條與數字之間留 3px——這是使用者特別點名「不能黏在一起」的一處，所以間距不減，
+   只是從 gap 改成數字自己的左內距。 */
 .quota-bar-row {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   min-width: 38px;
 }
 
@@ -6696,6 +6722,7 @@ button.model-tag:hover:not(:disabled) {
 /* 剩餘 < 30% 才出現的數字：條太短時它就是唯一看得清的訊息，所以字要夠大。 */
 .quota-bar-pct {
   flex: none;
+  padding-left: 3px;
   min-width: 1.6em;
   font-size: 10.5px;
   font-weight: 700;
