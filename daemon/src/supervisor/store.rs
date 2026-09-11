@@ -114,7 +114,35 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(pool).await?;
     }
+    // Additive columns for databases created before they existed (same pattern as `db::migrate`).
+    for (col, ddl) in [
+        // 1 once the user has started the manager, 0 after `supervisor-stop`. The watchdog only
+        // brings back a manager that is *supposed* to be running: a fresh `setup` stays down
+        // until a human starts it once, and an explicit stop stays stopped.
+        ("desired_running", "ALTER TABLE supervisors ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0"),
+        // Consecutive automatic starts that did not bring the manager back, and when the next
+        // one is due. Shared through the row so a second controller loop sees the same count.
+        ("watchdog_attempts", "ALTER TABLE supervisors ADD COLUMN watchdog_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("watchdog_next_at", "ALTER TABLE supervisors ADD COLUMN watchdog_next_at TEXT"),
+    ] {
+        if !has_column(pool, "supervisors", col).await? {
+            sqlx::query(ddl).execute(pool).await?;
+            if col == "desired_running" {
+                // A manager that was started before this column existed (generation > 0 is
+                // only ever bumped by `start`) was never told to stop, so it is still wanted.
+                sqlx::query("UPDATE supervisors SET desired_running=1 WHERE bot_id IS NOT NULL AND generation>0")
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
     Ok(())
+}
+
+async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
+    let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
+    Ok(cols.iter().any(|c| c.1 == col))
 }
 
 /// Mirrors the row: `FromRow` needs every column, and not all of them have a
@@ -139,8 +167,17 @@ pub struct Supervisor {
     pub remote_url: Option<String>,
     pub summary: Option<String>,
     pub summary_version: i64,
+    pub desired_running: i64,
+    pub watchdog_attempts: i64,
+    pub watchdog_next_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl Supervisor {
+    pub fn wants_running(&self) -> bool {
+        self.desired_running != 0
+    }
 }
 
 /// Mirrors the row: `FromRow` needs every column, and not all of them have a
@@ -270,6 +307,42 @@ pub async fn set_status(pool: &SqlitePool, status: &str, detail: Option<&str>) -
     sqlx::query("UPDATE supervisors SET status=?, status_detail=?, updated_at=? WHERE id=?")
         .bind(status)
         .bind(detail)
+        .bind(crate::db::now())
+        .bind(SUPERVISOR_ID)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Change only the human-readable detail; the sticky `status` stays what it is.
+pub async fn set_status_detail(pool: &SqlitePool, detail: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE supervisors SET status_detail=?, updated_at=? WHERE id=?")
+        .bind(detail)
+        .bind(crate::db::now())
+        .bind(SUPERVISOR_ID)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// `start` → true, `stop` → false. Either one is a fresh decision by the user, so the
+/// watchdog's failure count starts over with it.
+pub async fn set_desired_running(pool: &SqlitePool, wanted: bool) -> Result<()> {
+    sqlx::query(
+        "UPDATE supervisors SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL, updated_at=? WHERE id=?",
+    )
+    .bind(i64::from(wanted))
+    .bind(crate::db::now())
+    .bind(SUPERVISOR_ID)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_watchdog(pool: &SqlitePool, attempts: i64, next_at: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE supervisors SET watchdog_attempts=?, watchdog_next_at=?, updated_at=? WHERE id=?")
+        .bind(attempts)
+        .bind(next_at)
         .bind(crate::db::now())
         .bind(SUPERVISOR_ID)
         .execute(pool)
@@ -583,6 +656,18 @@ pub async fn inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
     .await?)
 }
 
+/// Everything the manager has not acked yet — `pending` *and* `delivered` — oldest first, so a
+/// backlog is worked through in the order it happened and an ack loop actually drains it.
+pub async fn open_inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
+    Ok(sqlx::query_as::<_, InboxEvent>(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state!='handled' ORDER BY created_at ASC, id ASC LIMIT ?",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn pending_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' ORDER BY created_at ASC",
@@ -592,19 +677,27 @@ pub async fn pending_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
     .await?)
 }
 
-/// Count of everything still owed to the manager: unhandled notifications plus open work.
-pub async fn pending_count(pool: &SqlitePool) -> Result<i64> {
-    let a: i64 = sqlx::query_scalar(
+/// Assignments not yet closed: queued, delivered or of unknown delivery.
+pub async fn open_assignment_count(pool: &SqlitePool) -> Result<i64> {
+    Ok(sqlx::query_scalar(
         "SELECT COUNT(*) FROM supervisor_assignments WHERE supervisor_id=? AND status IN ('queued','delivered','unknown')",
     )
     .bind(SUPERVISOR_ID)
     .fetch_one(pool)
-    .await?;
-    let b: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE supervisor_id=? AND state!='handled'")
+    .await?)
+}
+
+/// Inbox events the manager has not acked.
+pub async fn open_inbox_count(pool: &SqlitePool) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE supervisor_id=? AND state!='handled'")
         .bind(SUPERVISOR_ID)
         .fetch_one(pool)
-        .await?;
-    Ok(a + b)
+        .await?)
+}
+
+/// Count of everything still owed to the manager: unhandled notifications plus open work.
+pub async fn pending_count(pool: &SqlitePool) -> Result<i64> {
+    Ok(open_assignment_count(pool).await? + open_inbox_count(pool).await?)
 }
 
 /// Prompted, not yet confirmed. Deliberately *not* `handled`: only the manager acking it —
@@ -749,6 +842,79 @@ mod tests {
         assert_eq!(s.fallback_tries, 0);
         assert!(s.cooldown_until.is_none());
         assert_eq!(s.generation, 1, "clearing the budget is not a switch");
+    }
+
+    /// The 464-event night: the manager acks in the order shown, so the list has to be the
+    /// open ones, oldest first — not the newest 200 of everything.
+    #[tokio::test]
+    async fn the_open_inbox_is_oldest_first_and_drains_with_acks() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        for i in 0..5 {
+            let id = push_inbox(&p, &format!("k{i}"), "health_changed", None, None, None, &json!({"i": i}))
+                .await
+                .unwrap()
+                .unwrap();
+            // Distinct timestamps: `now()` has millisecond resolution and the loop is faster.
+            sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE id=?")
+                .bind(format!("2026-09-11T00:00:0{i}Z"))
+                .bind(&id)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        let open = open_inbox(&p, 10).await.unwrap();
+        assert_eq!(open.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(), ["k0", "k1", "k2", "k3", "k4"]);
+        assert_eq!(open_inbox(&p, 2).await.unwrap().len(), 2, "--limit applies");
+        assert!(ack_inbox(&p, &open[0].id).await.unwrap());
+        mark_delivered_inbox(&p, &[open[1].id.clone()], "t1").await.unwrap();
+        let open = open_inbox(&p, 10).await.unwrap();
+        assert_eq!(open.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(), ["k1", "k2", "k3", "k4"], "delivered is still open; handled is gone");
+        assert_eq!(open_inbox_count(&p).await.unwrap(), 4);
+        assert_eq!(open_assignment_count(&p).await.unwrap(), 0);
+        assert_eq!(pending_count(&p).await.unwrap(), 4);
+    }
+
+    /// A manager started before the watchdog existed is still wanted; one that was only set
+    /// up (generation 0) is not — the watchdog must not be the first thing that starts it.
+    #[tokio::test]
+    async fn migration_backfills_desired_running_from_a_previous_start() {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        // The pre-watchdog schema: the same DDL minus the three columns.
+        for stmt in DDL.split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&p).await.unwrap();
+            }
+        }
+        for (id, gen, bot) in [("AGM", 2, Some("b1")), ("OLD", 0, Some("b2")), ("NONE", 3, None)] {
+            sqlx::query("INSERT INTO supervisors (id, bot_id, generation, created_at, updated_at) VALUES (?,?,?,'t','t')")
+                .bind(id)
+                .bind(bot)
+                .bind(gen)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        assert!(!has_column(&p, "supervisors", "desired_running").await.unwrap());
+        migrate(&p).await.unwrap();
+        migrate(&p).await.unwrap(); // idempotent
+        let wanted: Vec<(String, i64)> = sqlx::query_as("SELECT id, desired_running FROM supervisors ORDER BY id")
+            .fetch_all(&p)
+            .await
+            .unwrap();
+        assert_eq!(wanted, [("AGM".to_string(), 1), ("NONE".to_string(), 0), ("OLD".to_string(), 0)]);
+        let s = get_or_init(&p).await.unwrap();
+        assert!(s.wants_running());
+        set_desired_running(&p, false).await.unwrap();
+        assert!(!get_or_init(&p).await.unwrap().wants_running());
+        set_watchdog(&p, 3, Some("2026-09-11T00:00:00Z")).await.unwrap();
+        set_desired_running(&p, true).await.unwrap();
+        let s = get_or_init(&p).await.unwrap();
+        assert_eq!((s.watchdog_attempts, s.watchdog_next_at.as_deref()), (0, None), "a fresh start clears the streak");
+        set_status_detail(&p, Some("x")).await.unwrap();
+        let s = get_or_init(&p).await.unwrap();
+        assert_eq!((s.status.as_str(), s.status_detail.as_deref()), ("", Some("x")), "detail alone leaves status");
     }
 
     #[tokio::test]
