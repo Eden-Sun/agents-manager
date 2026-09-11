@@ -6217,10 +6217,16 @@ button.model-tag:hover:not(:disabled) {
    同一件事在兩個地方要長同一個樣子。數字留著（是哪幾顆的量），跟著同一個綠色走。 */
 .quota-update {
   flex: none;
+  /* 對齊量表的**第一行**（5h），不要對著三行高的區塊垂直置中：置中時它浮在兩邊的空白
+     中間，看起來不屬於任何東西（2026-09-11 使用者）。 */
+  align-self: flex-start;
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   height: 18px;
+  margin-top: 2px;
+  margin-left: 8px;
   padding: 0 2px;
   font-size: 11px;
   font-weight: 650;
@@ -6229,6 +6235,19 @@ button.model-tag:hover:not(:disabled) {
   color: var(--lamp-green);
   white-space: nowrap;
   cursor: pointer;
+}
+
+/* 一條 1px 的細分隔線：左邊是標題那一群（名字、狀態、pane），右邊是額度——這顆是額度列的
+   一員，不是浮在中間的孤島。線比 chip 高一點（上下各多 3px），才讀得出是「這裡開始換一組」
+   而不是 chip 自己的邊框。 */
+.quota-update::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--border);
 }
 
 .quota-update-n {
@@ -6355,11 +6374,59 @@ button.model-tag:hover:not(:disabled) {
   transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
-/* Highlight only the selected bot's identity gauge (cc0 vs cc1), not every Claude row. */
+/* Highlight only the selected bot's identity gauge (cc0 vs cc1), not every Claude row.
+   只留**一種**強調（2026-09-11 使用者）：原本是實心底 + 外圈 + 上下兩條藍線三層疊在一起，
+   比 bot 自己的身分還搶眼，而同一條列上已經有 ★、綠 chevron 在搶注意力。有 5h／7d 數字時
+   強調就是上下那兩條量表邊框（`.quota-framed`；「額度外框＝剩餘量」是定案的），底色與外圈
+   拿掉；畫不出邊框（完全沒有數字）時才退回一圈 1px 的 accent 外框。收斂之後它也是整條列上
+   唯一一格完整量表，本來就跳得出來——其他帳號是 46px 的窄格。 */
 .quota-hp.focused {
   border-color: var(--accent);
+}
+
+/* 選取帳號：上邊 5H、下邊 7D，各自由左至右表示剩餘量，不增加高度。
+   2026-09-11 起**只有手機**會掛上 `.quota-framed`（桌機同一格裡已經有 bar 與數字，邊框是
+   同一份資訊再畫一次；手機的量表被壓成純文字 chip 才需要它）——所以這一組規則＝手機的樣子，
+   底色照舊留著。桌機的選取只剩上面那圈 1px 外框。 */
+.quota-hp.focused.quota-framed {
+  position: relative;
+  border-color: transparent;
   background: var(--accent-soft);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: none;
+}
+
+.quota-border-meter {
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  height: 2px;
+  border-radius: 1px;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--border-strong);
+  color: var(--accent);
+}
+
+.quota-border-meter.top {
+  top: -1px;
+}
+
+.quota-border-meter.bottom {
+  bottom: -1px;
+}
+
+.quota-border-fill {
+  display: block;
+  height: 100%;
+  background: currentColor;
+}
+
+.quota-border-meter.warn {
+  color: var(--warn);
+}
+
+.quota-border-meter.critical {
+  color: var(--danger);
 }
 
 .quota-head {
