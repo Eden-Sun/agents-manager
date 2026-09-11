@@ -239,7 +239,9 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             };
             if stale_possible {
                 let name = found_name.clone().unwrap_or_default();
-                let current = match client.agent_get(&name).await {
+                let got = client.agent_get(&name).await;
+                let got_pane = got.as_ref().ok().and_then(|a| a.as_ref().map(|a| a.pane_id.clone()));
+                let current = match got {
                     Ok(Some(a)) => match client.pane_get(&a.pane_id).await {
                         Ok(None) => None,
                         _ => Some(a),
@@ -250,13 +252,28 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 };
                 if current.as_ref().map(|a| a.pane_id.as_str()) != Some(listed.pane_id.as_str()) {
                     tracing::info!(host, bot = %bot.name, agent = %name, listed_pane = %listed.pane_id,
-                        current_pane = ?current.as_ref().map(|a| a.pane_id.clone()),
+                        current_pane = ?current.as_ref().map(|a| a.pane_id.clone()), agent_get = ?got_pane,
+                        run_pane = ?active.as_ref().and_then(|r| r.pane_id.clone()),
                         "reconcile: agent list went stale while waiting for the bot's lock; using herdr's current answer");
                 }
-                if current.is_none() {
-                    found_name = None;
+                match (&active, current) {
+                    // Nothing to protect: adopt only what herdr confirms, on the pane it is on now.
+                    (None, current) => {
+                        if current.is_none() {
+                            found_name = None;
+                        }
+                        found = current;
+                    }
+                    // herdr confirms the agent on some pane: the run follows it (a pane move).
+                    (Some(_), Some(a)) => found = Some(a),
+                    // A run on another pane than the stale list said, and herdr cannot confirm
+                    // the agent by name — the case right after a same-named restart. Not "gone"
+                    // on that evidence alone: the run's own pane decides below.
+                    (Some(_), None) => {
+                        found = None;
+                        found_name = None;
+                    }
                 }
-                found = current;
             }
         }
         // A bot only owns a tab while herdr still lists its agent; a bot whose run is about to
@@ -320,6 +337,50 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 tracing::info!(host, bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
             }
             (Some(run), None) => {
+                // herdr does not know the run's agent by name — but is the agent still sitting in
+                // the run's pane? After a same-named restart it is: the old agent's late exit
+                // cleared the name the new one had just taken (herdr keeps one registry keyed by
+                // name), while the pane itself still reports `agent: claude`. Marking that run
+                // exited (2026-09-11, the first fix for the 23:02 race) took every freshly
+                // restarted bot down and let the orphan sweep close its new pane. Keep the run
+                // and put the name back, so `agent.prompt`/`send_keys` by name work again.
+                if let Some(p) = run.pane_id.as_deref() {
+                    // `agent.get` takes a pane id too, and answers with whoever is in it —
+                    // name and all, or `name: null` once herdr has cleared it.
+                    let occupant = client.agent_get(p).await;
+                    tracing::info!(host, bot = %bot.name, run = %run.id, pane = %p, candidates = ?candidates,
+                        occupant = ?occupant.as_ref().map(|o| o.as_ref().map(|a| (a.name.clone(), a.agent.clone(), a.pane_id.clone()))).map_err(|e| e.to_string()),
+                        "reconcile: run's agent not listed by name; asking its pane");
+                    match occupant {
+                        Ok(Some(occupant)) if occupant.name.as_deref().map_or(true, |n| candidates.iter().any(|c| c == n)) => {
+                            let name = run.agent_name.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| computed.clone());
+                            if occupant.name.is_none() {
+                                match client.agent_rename(p, &name).await {
+                                    Ok(_) => tracing::info!(host, bot = %bot.name, run = %run.id, pane = %p, agent = %name,
+                                        "reconcile: herdr had lost the agent's name but its pane still hosts it; name re-applied, run kept"),
+                                    Err(e) => tracing::warn!(host, bot = %bot.name, run = %run.id, pane = %p, agent = %name, error = ?e,
+                                        "reconcile: herdr had lost the agent's name and would not take it back; run kept anyway"),
+                                }
+                            }
+                            let status = occupant.agent_status.normalized().as_str().to_string();
+                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
+                                .bind(&status)
+                                .bind(&run.id)
+                                .execute(&app.db)
+                                .await?;
+                            claimed.insert(name);
+                            app.emit_bot_status(&bot.id).await;
+                            continue;
+                        }
+                        // Someone else's agent, or nobody: the run's agent really is gone.
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(host, bot = %bot.name, run = %run.id, pane = %p, error = ?e,
+                                "reconcile: could not ask herdr what is in the run's pane; leaving the run alone this pass");
+                            continue;
+                        }
+                    }
+                }
                 tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
                 crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
                 // A spawned child exists only as long as its pane: retire it with the run,
@@ -917,6 +978,148 @@ mod compat_tests {
         let r = db::active_run(&app.db, &bot).await.unwrap().expect("the new run survives");
         assert_eq!(r.id, new_run);
         assert_eq!(r.pane_id.as_deref(), Some(new.pane_id.as_str()), "the new run was moved onto the closed pane");
+    }
+
+    /// 2026-09-11, the fix for the race above failing the same way: the restart won the lock
+    /// and left a fresh run on a fresh pane, the reconcile's list still names the old pane —
+    /// and when the reconcile asks herdr again, herdr cannot confirm the agent at all (for a
+    /// moment after a same-named agent is restarted, `agent.get` answers not-found, or the
+    /// entry still points at the closed pane). That must not read as "agent gone": every bot
+    /// in the batch was marked exited that way and the orphan sweep closed the new panes.
+    async fn a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(herdr_still_lists_the_old_pane: bool) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let old = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        let old_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&old_run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&old.tab_id)
+        .bind(&old.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let old_entry = json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": old.tab_id, "pane_id": old.pane_id, "cwd": "/tmp/p"});
+        *env.herdr.agents.lock().unwrap() = vec![old_entry.clone()];
+
+        let guard = app.bot_lock(&bot).await.lock_owned().await;
+        let app2 = app.clone();
+        let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
+        wait_for_call(&env, "agent.list").await;
+
+        // The restart, under the lock: old pane closed, its run ended, a new pane and a new
+        // run for the same agent name — which herdr does not confirm yet.
+        client.pane_close(&old.pane_id).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&old_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let new = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let new_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&new_run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&new.tab_id)
+        .bind(&new.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        // What herdr really shows then: the new pane's occupant with its name cleared — and,
+        // in one variant, the old entry still lingering on the closed pane.
+        let nameless = json!({
+            "name": null, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": new.tab_id, "pane_id": new.pane_id, "cwd": "/tmp/p"});
+        *env.herdr.agents.lock().unwrap() = if herdr_still_lists_the_old_pane { vec![old_entry, nameless] } else { vec![nameless] };
+        drop(guard);
+        rec.await.unwrap().unwrap();
+
+        let r = db::active_run(&app.db, &bot).await.unwrap().expect("the fresh run was marked exited");
+        assert_eq!(r.id, new_run);
+        assert_eq!(r.state, "running");
+        assert_eq!(r.pane_id.as_deref(), Some(new.pane_id.as_str()), "the fresh run was moved off its pane");
+        assert!(
+            client.pane_get(&new.pane_id).await.unwrap().is_some(),
+            "the orphan sweep closed the pane the restart had just opened"
+        );
+        let rename = env.herdr.first_call("agent.rename").expect("the cleared name is put back");
+        assert_eq!(rename["target"], new.pane_id);
+        assert_eq!(rename["name"], agent);
+    }
+
+    /// The real shape of 2026-09-11 on herdr 0.8.2: after the same-named restart the new
+    /// agent is in its pane (`pane.get` says `agent: claude`) but herdr has cleared its name —
+    /// `agent.list` carries it with `name: null`, `agent.get <name>` is not-found. The run is
+    /// kept and the name is put back with `agent.rename <pane> <name>`.
+    #[tokio::test]
+    async fn a_run_whose_agent_lost_its_name_is_kept_and_renamed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'starting','unknown',?,?,?,?,'test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": null, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let r = db::active_run(&app.db, &bot).await.unwrap().expect("the run was marked exited over a lost name");
+        assert_eq!(r.id, run_id);
+        assert_eq!(r.state, "running");
+        assert_eq!(r.agent_status, "idle", "status is read off the pane");
+        assert_eq!(r.pane_id.as_deref(), Some(pane.pane_id.as_str()));
+        let rename = env.herdr.first_call("agent.rename").expect("the name is put back");
+        assert_eq!(rename["target"], pane.pane_id);
+        assert_eq!(rename["name"], agent);
+        assert_eq!(env.herdr.agents.lock().unwrap()[0]["name"], agent, "herdr knows the agent by name again");
+        assert!(client.pane_get(&pane.pane_id).await.unwrap().is_some(), "the pane was not swept as an orphan");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_survives_when_agent_get_says_not_found() {
+        a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_survives_when_agent_get_still_points_at_the_closed_pane() {
+        a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(true).await;
     }
 
     /// A spawned child is adopted with the model and effort its CLI is actually running:

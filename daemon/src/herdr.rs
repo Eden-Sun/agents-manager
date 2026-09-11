@@ -497,6 +497,14 @@ impl HerdrClient {
         self.call_as("agent.list", json!({}), "agents").await
     }
 
+    /// Give the agent in `target` (a pane id, or its current name) the name `name`. herdr's
+    /// names are one registry keyed by name, and "a name is cleared when that agent exits, is
+    /// released, or is replaced" — which, the pane after a same-named restart found out, can
+    /// clear the *new* agent's name when the old one's exit is processed late (2026-09-11).
+    pub async fn agent_rename(&self, target: &str, name: &str) -> Result<AgentInfo> {
+        self.call_as("agent.rename", json!({"target": target, "name": name}), "agent").await
+    }
+
     pub async fn agent_get(&self, target: &str) -> Result<Option<AgentInfo>> {
         match self.call("agent.get", json!({"target": target})).await {
             Ok(v) => Ok(Some(serde_json::from_value(v["agent"].clone())?)),

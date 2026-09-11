@@ -1055,7 +1055,9 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 - 每顆走的是既有的單顆路徑加上續接旗標：`restart_bot_with(resume_native)`（stop 與 start 在同一次持有
   bot 鎖裡做完，2026-09-11 修正 23:02 的 reconcile 競態，見 SPEC §6.9），claude 拿到
   `--resume <上一個 session>`，所以**不會開新對話、上下文不掉**。與 `/bots/{id}/restart` 的差別
-  只有這個旗標。
+  只有這個旗標。例外：hook 回報過的 `transcript_path` 在本機不存在（bot 起來後從沒被 prompt 過，claude
+  不會寫 transcript；`--resume` 這種 id 會印 `No conversation found` 直接退出），就不帶 `--resume`、
+  開新對話，log `native session has no transcript on disk`。
 - 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
   任何一張清單裡**。
 - `reason` 的取值與判斷順序見 SPEC §6.9：`spawned_child` / `team_member` / `not_running` / `working` /

@@ -4200,8 +4200,21 @@ pub mod testing {
             self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
         fn pane_json(&self, pane_id: &str, tab: &MockTab, cwd: Option<&Value>) -> Value {
+            // Whatever `agents` says is sitting in this pane — named or, like herdr after it
+            // cleared a name, not — is what `pane.get` reports as the pane's agent.
+            let occupant = self
+                .agents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+                .cloned();
+            let (agent, status) = match occupant {
+                Some(a) => (a.get("agent").cloned().unwrap_or(Value::Null), a.get("agent_status").cloned().unwrap_or(Value::Null)),
+                None => (Value::Null, Value::Null),
+            };
             json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
-                   "cwd": cwd.cloned().unwrap_or(Value::Null), "agent": null, "agent_status": null})
+                   "cwd": cwd.cloned().unwrap_or(Value::Null), "agent": agent, "agent_status": status})
         }
         fn tab_json(t: &MockTab) -> Value {
             json!({"tab_id": t.tab_id, "workspace_id": t.workspace_id, "label": t.label,
@@ -4473,6 +4486,22 @@ pub mod testing {
                                 agents.push(agent.clone());
                                 json!({"id": id, "result": {"agent": agent}})
                             }
+                            "agent.rename" => {
+                                let target = wid_of("target");
+                                let name = params.get("name").and_then(Value::as_str).map(String::from);
+                                let mut agents = st.agents.lock().unwrap();
+                                let hit = agents.iter_mut().find(|a| {
+                                    a.get("pane_id").and_then(Value::as_str) == Some(target.as_str())
+                                        || a.get("name").and_then(Value::as_str) == Some(target.as_str())
+                                });
+                                match hit {
+                                    Some(a) => {
+                                        a["name"] = name.map(Value::from).unwrap_or(Value::Null);
+                                        json!({"id": id, "result": {"agent": a.clone()}})
+                                    }
+                                    None => json!({"id": id, "error": {"code": "agent_not_found", "message": target}}),
+                                }
+                            }
                             "agent.wait" => {
                                 let target = wid_of("target");
                                 match st
@@ -4491,13 +4520,18 @@ pub mod testing {
                                 json!({"id": id, "result": {"agents": st.agents.lock().unwrap().clone()}})
                             }
                             "agent.get" => {
+                                // Like herdr, a target is a live agent name or the id of the pane
+                                // hosting it.
                                 let target = wid_of("target");
                                 let found = st
                                     .agents
                                     .lock()
                                     .unwrap()
                                     .iter()
-                                    .find(|a| a.get("name").and_then(Value::as_str) == Some(target.as_str()))
+                                    .find(|a| {
+                                        a.get("name").and_then(Value::as_str) == Some(target.as_str())
+                                            || a.get("pane_id").and_then(Value::as_str) == Some(target.as_str())
+                                    })
                                     .cloned();
                                 match found {
                                     Some(a) => json!({"id": id, "result": {"agent": a}}),
