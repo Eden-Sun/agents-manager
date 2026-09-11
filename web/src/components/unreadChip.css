@@ -95,13 +95,6 @@
   color: var(--text);
 }
 
-.unread-chip.pinned.current {
-  border-style: solid;
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
-
 .unread-chip-star {
   flex: none;
   color: var(--lamp-yellow);
