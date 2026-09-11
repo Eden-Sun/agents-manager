@@ -19,8 +19,9 @@
 //!   `bots.identity` *is* configuration — the TOML projection writes it back into
 //!   `config.toml` — and reading it off a process would be the daemon rewriting the user's
 //!   file from a guess.
-//! * **never clears.** Unreadable env, a directory no identity claims, or a CLI that names no
-//!   account at all leaves the inherited value standing: 抄來的值可能是對的，NULL 一定是錯的。
+//! * **never clears.** Unreadable env, or a directory no identity claims, leaves the inherited
+//!   value standing: 抄來的值可能是對的，NULL 一定是錯的。No variable (or the CLI's default
+//!   directory) is the default account — see [`child_identity`].
 
 use crate::state::App;
 use futures::future::BoxFuture;
@@ -164,6 +165,43 @@ pub fn identity_named(
         .map(|i| i.name.clone())
 }
 
+/// The CLI's own account directory when its variable is unset — pointing the variable at it
+/// is the same default account, spelled out.
+fn default_dir(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" => Some("~/.claude"),
+        "codex" => Some("~/.codex"),
+        _ => None,
+    }
+}
+
+/// Which identity a child pane runs under, given its account variable (`None` = unset).
+///
+/// An unset variable, or one naming the CLI's default directory (`CLAUDE_CONFIG_DIR=~/.claude`,
+/// which is what a parent pane exporting the default explicitly hands its children), is the
+/// *default* account: the identity with an empty env (`cc0`, §16.1). Without that, such a child
+/// kept its parent's `cc1` forever. Several empty-env identities follow the same config-first,
+/// first-wins rule [`identity_named`] uses.
+pub fn child_identity(
+    identities: &[crate::config::IdentityCfg],
+    kind: &str,
+    var: &str,
+    home: &str,
+    dir: Option<&str>,
+) -> Option<String> {
+    if let Some(d) = dir {
+        if let Some(name) = identity_named(identities, kind, var, home, d) {
+            return Some(name);
+        }
+        let is_default = default_dir(kind)
+            .is_some_and(|def| norm_dir(&crate::config::expand_home(def, home)) == norm_dir(d));
+        if !is_default {
+            return None;
+        }
+    }
+    identities.iter().find(|i| i.kind == kind && !i.env.contains_key(var)).map(|i| i.name.clone())
+}
+
 /// Panes this daemon process already went to the operating system about.
 ///
 /// Bounded on purpose: a reconnect replays a burst of `pane.agent_detected`, each scheduling a
@@ -224,18 +262,13 @@ pub async fn sync_child_identity(
         return;
     }
     probed().lock().unwrap().insert(probe_key(&bot.id, pane_id));
-    // No account variable at all is the *default* account, which several identities may spell
-    // (§16.1: `cc0` is simply an identity with an empty env). Nothing unambiguous to write, so
-    // the inherited value stays — see the module header.
-    let Some(dir) = env.get(var) else {
-        tracing::debug!(host, bot = %bot.name, var, "the child's pane names no account; keeping the inherited identity");
-        return;
-    };
     let home = crate::tools::host_home(app, host).await;
-    let Some(name) = identity_named(&identities, &bot.kind, var, &home, dir) else {
-        tracing::debug!(host, bot = %bot.name, dir, "no identity owns the child's account directory");
+    let dir = env.get(var).map(String::as_str);
+    let Some(name) = child_identity(&identities, &bot.kind, var, &home, dir) else {
+        tracing::debug!(host, bot = %bot.name, ?dir, "no identity owns the child's account; keeping the inherited identity");
         return;
     };
+    let dir = dir.unwrap_or("");
     if bot.identity.as_deref() == Some(name.as_str()) {
         return;
     }
@@ -294,5 +327,21 @@ mod tests {
         // "no answer", which the caller turns into "keep what was inherited".
         assert_eq!(identity_named(&ids, "claude", var, "/Users/m4p", "/Users/m4p/.claude-other"), None);
         assert_eq!(identity_named(&ids, "codex", "CODEX_HOME", "/Users/m4p", "/Users/m4p/.claude-cc2"), None);
+    }
+
+    /// m4p 2026-09-11: children started from a pane exporting `CLAUDE_CONFIG_DIR=~/.claude` showed
+    /// the parent's `cc1` in the menu although they run on the default account, `cc0`.
+    #[test]
+    fn the_default_account_directory_or_no_variable_is_the_empty_env_identity() {
+        let var = "CLAUDE_CONFIG_DIR";
+        let ids = [idn("cc0", "claude", None), idn("cc1", "claude", Some("$HOME/.claude-ccompany"))];
+        let h = "/Users/m4p";
+        assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/m4p/.claude")), Some("cc0".into()));
+        assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/m4p/.claude/")), Some("cc0".into()));
+        assert_eq!(child_identity(&ids, "claude", var, h, None), Some("cc0".into()));
+        assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/m4p/.claude-ccompany")), Some("cc1".into()));
+        assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/m4p/.claude-other")), None);
+        // No empty-env identity of that kind: nothing to name, the inherited value stays.
+        assert_eq!(child_identity(&ids[1..], "claude", var, h, None), None);
     }
 }
