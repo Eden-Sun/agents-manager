@@ -45,6 +45,9 @@
 - `GET /api/supervisor/inbox` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,created_at,updated_at}]}`；
   `POST /api/supervisor/inbox/{id}/ack` → `{}`。`state`：`pending`（還沒告訴總管）→ `delivered`（已送出通知）→ `handled`（總管確認）。
   送出不等於處理完：通知失敗會留在 `pending`，總管自己的回合不會產生對自己的通知。
+  `kind` 除了 assignment 相關與 `health_changed`，另有 `bot_restart_failed`（批次更新重啟後某顆沒回來，payload
+  `batch_id,bot_id,name,error`）與 `supervisor_restart_retry`（總管自己重啟後 60 秒沒回來、已自動再啟動一次，payload
+  `batch_id,bot_id,name,ok,error`），見 §10.3a。
 - `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（含 run 的 `agent_status`、
   `native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`）、未結案 assignment、待處理 inbox。
   刻意不含 env、hook token、args 與 persona 全文。
@@ -1029,7 +1032,8 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 
 - **202 而不是 200**：回的是**計畫**不是結果。實際重啟在 daemon 背景一顆一顆跑，因為一顆
   `stop_bot` 最久要等 agent 十秒，五顆就一分鐘——同步做完再回會把 HTTP 連線拖死。
-- 每顆走的是既有的單顆路徑加上續接旗標：`stop_bot` → `start_bot_with(resume_native)`，claude 拿到
+- 每顆走的是既有的單顆路徑加上續接旗標：`restart_bot_with(resume_native)`（stop 與 start 在同一次持有
+  bot 鎖裡做完，2026-09-11 修正 23:02 的 reconcile 競態，見 SPEC §6.9），claude 拿到
   `--resume <上一個 session>`，所以**不會開新對話、上下文不掉**。與 `/bots/{id}/restart` 的差別
   只有這個旗標。
 - 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
@@ -1039,6 +1043,10 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
   顯示，不另編一套）。
 - `total = 0` 也是 `202`：計畫是空的不是錯誤，daemon 仍會立刻推一次 `bots_restart_done`。
 - 一顆失敗不中斷整批；失敗的進最終的 `failed` 清單。
+- 總管 bot（AGM）在 `planned` 裡**永遠排最後**；它重啟後 daemon 會在 60 秒內確認它回來，沒回來自動再啟動一次
+  （結果推 supervisor inbox `supervisor_restart_retry`）。
+- 某顆最終啟動失敗時不會留下「run 還在、pane 已關」的狀態（該 run 會被結束，bot 顯示停止），並推 supervisor inbox
+  `bot_restart_failed`。
 
 #### WS：`bots_restart_progress` / `bots_restart_done`
 

@@ -223,6 +223,42 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         if let Some(n) = &found_name {
             claimed.insert(n.clone());
         }
+        // …and the other direction (2026-09-10 23:02, AGM down 5.5 h). The agent list is from
+        // before this bot's lock was ours; when a stop or a restart was holding it, what the list
+        // says about this bot can already be history — the agent exited, its pane closed, maybe
+        // a fresh run started on another pane. Acting on that stale entry either adopts a dying
+        // agent as a new run (the restart waiting for the lock then refuses with `active run
+        // already exists` and nobody starts the bot again) or moves the fresh run back onto the
+        // closed pane. So in exactly those two cases, ask herdr again before acting. The name
+        // stays in `claimed` either way: it is this bot's own agent, never a stranger to adopt
+        // as someone's child below.
+        if let Some(listed) = found.clone() {
+            let stale_possible = match &active {
+                None => true,
+                Some(r) => r.pane_id.as_deref() != Some(listed.pane_id.as_str()),
+            };
+            if stale_possible {
+                let name = found_name.clone().unwrap_or_default();
+                let current = match client.agent_get(&name).await {
+                    Ok(Some(a)) => match client.pane_get(&a.pane_id).await {
+                        Ok(None) => None,
+                        _ => Some(a),
+                    },
+                    Ok(None) => None,
+                    // Cannot tell: keep what the list said, exactly as before this check existed.
+                    Err(_) => Some(listed.clone()),
+                };
+                if current.as_ref().map(|a| a.pane_id.as_str()) != Some(listed.pane_id.as_str()) {
+                    tracing::info!(host, bot = %bot.name, agent = %name, listed_pane = %listed.pane_id,
+                        current_pane = ?current.as_ref().map(|a| a.pane_id.clone()),
+                        "reconcile: agent list went stale while waiting for the bot's lock; using herdr's current answer");
+                }
+                if current.is_none() {
+                    found_name = None;
+                }
+                found = current;
+            }
+        }
         // A bot only owns a tab while herdr still lists its agent; a bot whose run is about to
         // be exited below adopts nobody.
         parents.push(Parent {
@@ -732,6 +768,155 @@ mod compat_tests {
         assert_eq!(r.adopted, 1);
         assert_eq!(r.pane_id.as_deref(), Some(pane.pane_id.as_str()));
         assert_eq!(r.tab_id.as_deref(), Some(pane.tab_id.as_str()));
+    }
+
+    /// Waits until the mock herdr has been asked `method` — i.e. a reconcile running on another
+    /// task has taken its snapshot and is now on its way to (or blocked on) a bot's lock.
+    async fn wait_for_call(env: &tt::Env, method: &str) {
+        for _ in 0..200 {
+            if env.herdr.methods().iter().any(|m| m == method) {
+                // One beat more so it is actually parked on the lock, not still between calls.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("reconcile never called {method}");
+    }
+
+    /// **2026-09-10 23:02 (AGM 停 5.5 小時).** `restart-idle` stopped AGM while a reconcile was
+    /// already running: the reconcile had listed agents — AGM's still among them — and was
+    /// parked on AGM's lock behind `stop_bot`. `stop_bot` closed the pane, ended the run and
+    /// let go; the reconcile got the lock *before* `start_bot` did, found no active run, and
+    /// adopted the agent from its stale list as a brand-new run. `start_bot` then refused with
+    /// `active run already exists`, the pane-closed event ended the adopted run, and nobody
+    /// ever started AGM again.
+    ///
+    /// A bot's agent that is gone by the time its lock is ours must not be adopted.
+    #[tokio::test]
+    async fn an_agent_that_left_while_reconcile_waited_for_the_lock_is_not_adopted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+
+        // `stop_bot` is holding the bot's lock…
+        let guard = app.bot_lock(&bot).await.lock_owned().await;
+        let app2 = app.clone();
+        let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
+        wait_for_call(&env, "agent.list").await;
+
+        // …and finishes the stop while the reconcile waits: agent gone, pane closed, run ended.
+        env.herdr.agents.lock().unwrap().clear();
+        client.pane_close(&pane.pane_id).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        drop(guard);
+        rec.await.unwrap().unwrap();
+
+        // What `start_bot` finds next is the only thing that matters: nothing in its way.
+        assert!(
+            db::active_run(&app.db, &bot).await.unwrap().is_none(),
+            "reconcile adopted the agent that had just been stopped, so the restart will refuse with `active run already exists`"
+        );
+    }
+
+    /// The other half of the same race: the restart *won* the lock, so by the time the
+    /// reconcile gets it there is a fresh run on a fresh pane — but the reconcile's agent list
+    /// is from before, and still says the agent lives on the old pane. Taking that at face
+    /// value moves the new run onto a pane that no longer exists.
+    #[tokio::test]
+    async fn a_stale_agent_list_does_not_move_a_fresh_run_back_to_the_old_pane() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let old = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        let old_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&old_run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&old.tab_id)
+        .bind(&old.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": old.tab_id, "pane_id": old.pane_id, "cwd": "/tmp/p"})];
+
+        let guard = app.bot_lock(&bot).await.lock_owned().await;
+        let app2 = app.clone();
+        let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
+        wait_for_call(&env, "agent.list").await;
+
+        // The restart, under the lock: old pane closed and its run ended, a new pane and a new
+        // run for the same agent name.
+        client.pane_close(&old.pane_id).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&old_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let new = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let new_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&new_run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&new.tab_id)
+        .bind(&new.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": new.tab_id, "pane_id": new.pane_id, "cwd": "/tmp/p"})];
+        drop(guard);
+        rec.await.unwrap().unwrap();
+
+        let r = db::active_run(&app.db, &bot).await.unwrap().expect("the new run survives");
+        assert_eq!(r.id, new_run);
+        assert_eq!(r.pane_id.as_deref(), Some(new.pane_id.as_str()), "the new run was moved onto the closed pane");
     }
 
     /// A spawned child is adopted with the model and effort its CLI is actually running:

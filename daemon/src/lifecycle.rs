@@ -1340,10 +1340,6 @@ pub async fn start_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> Lc
     start_bot_locked_with(app, bot_id, opts).await
 }
 
-pub async fn start_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
-    start_bot_locked_with(app, bot_id, StartOpts::default()).await
-}
-
 pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
@@ -2023,6 +2019,12 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
 pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    stop_bot_locked(app, bot_id).await
+}
+
+/// [`stop_bot`] for a caller that already holds the bot's lock, so a restart can stop and start
+/// under one guard ([`restart_bot_with`]).
+pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
@@ -2076,10 +2078,53 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
 
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
 pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
-    stop_bot(app, bot_id).await?;
+    restart_bot_with(app, bot_id, StartOpts::default()).await
+}
+
+/// Stop + start under **one** hold of the bot's lock.
+///
+/// This used to be `stop_bot` (take the lock, stop, let go) followed by taking the lock again to
+/// start. Anything queued on that lock in between got to act on a bot that had no run: on
+/// 2026-09-10 23:02 a reconcile did exactly that during `restart-idle` — it adopted the agent
+/// that had just been stopped as a new run, `start` refused with `active run already exists`,
+/// the pane-closed event ended the adopted run, and AGM plus three other bots stayed down for
+/// 5.5 hours. Holding the lock across both halves leaves no gap to fall into.
+///
+/// If a start is still refused because a run is in the way, and that run's pane is gone (it can
+/// only be a leftover of the same kind of race on some other path), it is ended and the start
+/// is tried once more rather than giving up on a bot that is otherwise dead.
+pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    start_bot_locked(app, bot_id).await
+    stop_bot_locked(app, bot_id).await?;
+    match start_bot_locked_with(app, bot_id, opts).await {
+        Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
+            let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
+                return start_bot_locked_with(app, bot_id, opts).await;
+            };
+            let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+            if run_alive(app, &run, &bot).await {
+                return Err(LcError::Conflict(v));
+            }
+            tracing::warn!(bot = %bot.name, run = %run.id, pane = ?run.pane_id, "restart found a run with no live pane in its way; ending it and starting again");
+            mark_run_exited(app, &run.id, "its pane was gone when the bot restarted").await;
+            start_bot_locked_with(app, bot_id, opts).await
+        }
+        other => other,
+    }
+}
+
+/// Is this run really there — its pane still open and herdr still listing its agent?
+///
+/// A failed RPC counts as alive: callers use this to decide whether to *end* a run, and ending a
+/// live bot over a hiccup is the worse mistake.
+pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
+    let Some(pane) = run.pane_id.as_deref() else { return false };
+    let Ok(client) = client_for_run(app, run).await else { return true };
+    if matches!(client.pane_get(pane).await, Ok(None)) {
+        return false;
+    }
+    !matches!(client.agent_get(&db::run_target(run, bot)).await, Ok(None))
 }
 
 /// Remove a deleted bot's hook material (`~/.config/agents-manager/bots/<id>/`). Best effort:
@@ -2648,6 +2693,60 @@ mod resume_args_tests {
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()));
         stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// 2026-09-10 23:02, end to end: restart a bot over and over while a reconcile runs in a
+    /// tight loop beside it. Before `restart_bot_with` held the lock across stop and start, any
+    /// reconcile queued on that lock could adopt the just-stopped agent in the gap and the start
+    /// would refuse with `active run already exists`. Every restart here must come back with the
+    /// run it started, and that run must really be alive.
+    #[tokio::test]
+    async fn restarts_racing_a_reconcile_loop_always_come_back() {
+        let e = env().await;
+        let mut team_req = req(Some(1), false);
+        team_req.pm.kind = "claude".into();
+        let team_id = make_team(&e.app, &e.project_id, team_req).await;
+        let pm = db::team_members(&e.app.db, &team_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("pm"))
+            .unwrap();
+        start_bot(&e.app, &pm.id).await.unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app2, stop2) = (e.app.clone(), stop.clone());
+        let looper = tokio::spawn(async move {
+            let mut rounds = 0u32;
+            while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = crate::reconcile::reconcile_host(&app2, crate::config::LOCAL_HOST).await;
+                rounds += 1;
+                tokio::task::yield_now().await;
+            }
+            rounds
+        });
+
+        for i in 0..15 {
+            let started = match crate::lifecycle::restart_bot_with(&e.app, &pm.id, StartOpts::default()).await {
+                Ok(id) => id,
+                Err(_) => panic!("restart {i} was refused while a reconcile was running"),
+            };
+            let active = db::active_run(&e.app.db, &pm.id).await.unwrap().expect("a run after the restart");
+            assert_eq!(active.id, started, "restart {i}: the active run is the one the restart started, not an adopted leftover");
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let rounds = looper.await.unwrap();
+        assert!(rounds > 0, "the reconcile loop actually ran alongside the restarts");
+
+        let run = db::active_run(&e.app.db, &pm.id).await.unwrap().unwrap();
+        let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+        assert!(crate::lifecycle::run_alive(&e.app, &run, &bot).await, "the surviving run has a live pane and agent");
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping')")
+            .bind(&pm.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(live, 1, "exactly one live run");
     }
 }
 
