@@ -1,0 +1,12 @@
+/* TeamPanel `⋯` 裡「接力完成」按不下去時的原因（SPEC-team §2.6 / §2.6b）。手機沒有 hover，
+   光靠 title 看不到，所以寫成第二行。選單項目本身是 nowrap，原因很長——自己換行、自己限寬，
+   不然整個選單會被撐成半個畫面寬。 */
+.head-menu-item .team-relay-note {
+  display: block;
+  max-width: 240px;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+}

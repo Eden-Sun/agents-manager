@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { MoreIcon } from './Icons'
 
@@ -14,6 +14,20 @@ import { MoreIcon } from './Icons'
 export function HeadMoreMenu({ children, label }: { children: ReactNode; label: string }) {
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
+  const pop = useRef<HTMLDivElement>(null)
+
+  // 選單是錨在按鈕上的 absolute 方塊，CSS 只能選一邊展開：手機的 team 標題列設成往右展開（`⋯`
+  // 換行到最左時才放得下），但平常 `⋯` 在最右邊，整個選單就滑出右緣、裡面的項目點不到
+  // （390px 實測 right=510）。打開當下量一次，超出視窗就推回來——按鈕這次落在哪，CSS 不知道。
+  useLayoutEffect(() => {
+    const el = pop.current
+    if (!open || !el) return
+    el.style.removeProperty('translate')
+    const { left, right } = el.getBoundingClientRect()
+    const edge = 8
+    const shift = right > window.innerWidth - edge ? window.innerWidth - edge - right : left < edge ? edge - left : 0
+    if (shift !== 0) el.style.setProperty('translate', `${Math.round(shift)}px 0`)
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -46,7 +60,7 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
       </button>
       {open ? (
         // 點到裡面任何一顆按鈕就關起來：每一項都是「開確認框」或「離開」，沒有留著的理由。
-        <div className="head-menu-pop" role="menu" onClick={() => setOpen(false)}>
+        <div ref={pop} className="head-menu-pop" role="menu" onClick={() => setOpen(false)}>
           {children}
         </div>
       ) : null}

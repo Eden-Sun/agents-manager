@@ -1,4 +1,4 @@
-import type { Team, TeamEvent, TeamPauseQuotaMember } from '../api/types.ts'
+import type { Team, TeamEvent, TeamIssue, TeamPauseQuotaMember } from '../api/types.ts'
 import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, teamPauseLabel, teamShortName } from '../api/types.ts'
 
 /**
@@ -16,8 +16,109 @@ import { TEAM_PHASE_LABEL, TEAM_ROLE_LABEL, teamPauseLabel, teamShortName } from
  * 免得使用者再按一次拿到同一個錯誤。
  */
 export function canReopenTeam(team: Team | null, unavailable = false): boolean {
-  if (!team || unavailable || team.phase !== 'done') return false
-  return team.members.some((member) => member.role === 'pm' && member.deleted !== true)
+  return team?.phase === 'done' && !teamCleanedUp(team, unavailable)
+}
+
+/** §2.5.1 的判準：PM 成員的 bot 不在了 = 已經 cleanup（`unavailable` 見上）。 */
+function teamCleanedUp(team: Team, unavailable: boolean): boolean {
+  return unavailable || !team.members.some((member) => member.role === 'pm' && member.deleted !== true)
+}
+
+/**
+ * 「接力完成」兩個入口：§2.6b 把失敗的 issue 重排回佇列、§2.6 把沒解決的 task 交給一個成員收尾。
+ *
+ * 原本兩顆按鈕只在「現在按得下去」時才畫：retry 綁 `canReopenTeam`（只認 done）、rescue 綁
+ * `phase === 'done'`。使用者那一隊已完成、32 個 issue 失敗 4 個，但成員已經清理掉——兩顆都不出現，
+ * 畫面上只剩「失敗 4」，看起來就是功能沒做。所以改成：有東西可以接力（`count > 0`）就一定有入口，
+ * 按不下去時 `reason` 說清楚為什麼。條件照抄 daemon 會回的 409，免得按了才被拒。
+ *
+ * `null` = 沒有東西可以接力，入口整個不畫。
+ */
+export interface TeamRelayGate {
+  /** retry：卡住的 issue 數；rescue：沒解決的 task 數。 */
+  count: number
+  enabled: boolean
+  /** 能按時寫「按下去會怎樣」，不能按時寫「為什麼不行、要先做什麼」。 */
+  reason: string
+}
+
+/** 同 daemon `MAX_QUEUED_ISSUES`：還在佇列上（queued / working）的 issue 上限。 */
+const MAX_QUEUED_ISSUES = 20
+
+/** 已經結束或正在結束、沒有現場可以接力的 phase；其餘回 null。 */
+function teamEndedText(team: Team): string | null {
+  if (team.phase === 'aborting') return '正在中止'
+  if (team.phase === 'aborted') return '已中止'
+  if (team.phase === 'failed') return '已失敗結束'
+  return null
+}
+
+/**
+ * §2.6b：每個 issue 號碼只看**最後一次**嘗試（seq 最大），停在 failed / skipped 的才算——失敗後
+ * 重排並交付了的不算，排三次失敗兩次的也只算一個。同 daemon `stuck_issues`。
+ */
+export function stuckIssueCount(issues: readonly TeamIssue[]): number {
+  const latest = new Map<number, TeamIssue>()
+  for (const issue of issues) {
+    const prev = latest.get(issue.issue_number)
+    if (!prev || issue.seq > prev.seq) latest.set(issue.issue_number, issue)
+  }
+  return [...latest.values()].filter((issue) => issue.state === 'failed' || issue.state === 'skipped').length
+}
+
+/**
+ * §2.6b retry。daemon 走的是「追加 issue」同一條路：`aborted` / `failed` 拒絕、done 要還沒 cleanup
+ * （會照 §2.5 reopen 起來），其餘還在跑的 team 只是排到佇列尾端——所以不必等它停下來。
+ */
+export function teamRetryIssuesGate(team: Team, unavailable = false): TeamRelayGate | null {
+  const count = stuckIssueCount(team.issues)
+  if (count === 0) return null
+  const ended = teamEndedText(team)
+  if (ended) {
+    return { count, enabled: false, reason: `team ${ended}，不能再排 issue；這 ${count} 個 issue 要接力得開一個新 team` }
+  }
+  if (team.phase === 'done' && teamCleanedUp(team, unavailable)) {
+    return {
+      count,
+      enabled: false,
+      reason: `team 已清理（成員與 worktree 都移除了），不能再排 issue；這 ${count} 個 issue 要接力得開一個新 team`,
+    }
+  }
+  const open = team.issues.filter((issue) => issue.state === 'queued' || issue.state === 'working').length
+  if (open + count > MAX_QUEUED_ISSUES) {
+    return { count, enabled: false, reason: `佇列上還有 ${open} 個，再排 ${count} 個會超過上限 ${MAX_QUEUED_ISSUES}；等佇列消化一些再按` }
+  }
+  return {
+    count,
+    enabled: true,
+    reason:
+      team.phase === 'done'
+        ? `把失敗 / 被跳過的 ${count} 個 issue 重新排進佇列，team 會重新啟動接力做完`
+        : `把失敗 / 被跳過的 ${count} 個 issue 排回佇列尾端，前面的做完就接著做`,
+  }
+}
+
+/**
+ * §2.6 rescue。daemon 的放行條件：`done`、還沒 cleanup、有收尾者（不能是 PM）。
+ *
+ * `rescuer` 是收尾者的顯示名（reviewer 優先，沒有就一個執行者）；空字串 = 找不到人。
+ */
+export function teamRescueGate(team: Team, unresolved: number, rescuer: string, unavailable = false): TeamRelayGate | null {
+  const count = unresolved
+  if (count === 0) return null
+  const ended = teamEndedText(team)
+  if (ended) return { count, enabled: false, reason: `team ${ended}，沒有可靠的現場可以收尾` }
+  if (team.phase === 'paused') {
+    return { count, enabled: false, reason: 'team 暫停中，要等它跑完才能把沒解決的 task 交給成員收尾；先處理暫停原因再按「繼續」' }
+  }
+  if (team.phase !== 'done') {
+    return { count, enabled: false, reason: 'team 還在跑，等它跑完再把沒解決的 task 交給成員收尾' }
+  }
+  if (teamCleanedUp(team, unavailable)) {
+    return { count, enabled: false, reason: 'team 已清理（成員與 worktree 都移除了），沒有成員可以收尾' }
+  }
+  if (!rescuer) return { count, enabled: false, reason: '這個 team 沒有 reviewer 或執行者可以收尾' }
+  return { count, enabled: true, reason: `把 ${count} 個沒解決的 task 全部交給 ${rescuer} 收尾（會重新啟動成員）` }
 }
 
 /** `finishing` → `收尾中`；不認得的（或空的）就原樣回去，總比空白好。 */

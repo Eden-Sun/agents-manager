@@ -41,7 +41,8 @@ import { QuotaStrip } from './QuotaStrip'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TeamMemberBlocked, TeamMemberLost } from './TeamMemberBlocked'
-import { canReopenTeam, describeEvent, teamPauseDetailTitle, teamPauseText } from './teamPanelLogic'
+import { canReopenTeam, describeEvent, teamPauseDetailTitle, teamPauseText, teamRescueGate, teamRetryIssuesGate } from './teamPanelLogic'
+import './teamRelay.css'
 
 /**
  * SPEC-team §11.3 — 一個進行中 team 的視圖。骨架沿用 `GroupChatPanel`：標題列 + 成員燈號列 +
@@ -200,6 +201,11 @@ function issueSeqOfMember(name: string): number | null {
 
 function MemberStrip({ teamId }: { teamId: string }) {
   const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
+  // cleanup 把成員全部軟刪除，bot 從清單上消失；這時候寫「啟動中」會讓人以為 team 還在起來。
+  const cleanedUp = useStore((s) => {
+    const all = s.teams[teamId]?.members ?? []
+    return all.length > 0 && all.every((m) => m.deleted === true)
+  })
   const tasks = useStore(useShallow((s) => s.teamDetail[teamId]?.tasks ?? []))
   const working = useStore(useShallow((s) => (s.teams[teamId]?.issues ?? []).filter((i) => i.state === 'working')))
   const openTask = (botId: string) =>
@@ -237,7 +243,7 @@ function MemberStrip({ teamId }: { teamId: string }) {
       {members.map((b) => (
         <MemberChip key={b.id} bot={b} task={openTask(b.id)} />
       ))}
-      {members.length === 0 ? <span className="hint">（成員啟動中…）</span> : null}
+      {members.length === 0 ? <span className="hint">{cleanedUp ? '（成員已清理）' : '（成員啟動中…）'}</span> : null}
     </div>
   )
 }
@@ -998,18 +1004,14 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   const addTeamIssues = useStore((s) => s.addTeamIssues)
   const rescueTeam = useStore((s) => s.rescueTeam)
   const retryFailedIssues = useStore((s) => s.retryFailedIssues)
-  // §2.6b：佇列上失敗 / 被跳過的 issue（每個號碼只算最後一次），可以一鍵重排接力做完。
-  const stuckIssues = useStore((s) => {
-    const rows = s.teamDetail[teamId]?.issues ?? []
-    const latest = new Map<number, (typeof rows)[number]>()
-    for (const i of rows) {
-      const prev = latest.get(i.issue_number)
-      if (!prev || i.seq > prev.seq) latest.set(i.issue_number, i)
-    }
-    return [...latest.values()].filter((i) => i.state === 'failed' || i.state === 'skipped').length
+  // §2.6：還留著沒解決的 task（failed / skipped）就給一條收尾的路。開著的 team 有 detail（task 跟著
+  // `team_task_updated` 即時更新）；detail 還沒載進來時先用 state 的計數，入口才不會晚一拍出現。
+  const unresolved = useStore((s) => {
+    const tasks = s.teamDetail[teamId]?.tasks
+    if (tasks) return tasks.filter((t) => t.state === 'failed' || t.state === 'skipped').length
+    const sum = s.teams[teamId]?.tasks_summary
+    return (sum?.failed ?? 0) + (sum?.skipped ?? 0)
   })
-  // §2.6：跑完之後還留著沒解決的 task（failed / skipped）就給一條收尾的路。
-  const unresolved = useStore((s) => (s.teamDetail[teamId]?.tasks ?? []).filter((t) => t.state === 'failed' || t.state === 'skipped').length)
   const rescuer = useStore((s) => {
     const ms = teamMemberBots(s, teamId)
     return ms.find((b) => b.team?.role === 'reviewer') ?? ms.find((b) => b.team?.role === 'worker') ?? null
@@ -1020,7 +1022,8 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
     return r ? teamDisplayName(r.name, ms.map((b) => b.name)) : ''
   })
   const notify = useStore((s) => s.notify)
-  const canReopen = useStore((s) => canReopenTeam(team, s.teamReopenUnavailable[teamId] === true))
+  const reopenUnavailable = useStore((s) => s.teamReopenUnavailable[teamId] === true)
+  const canReopen = canReopenTeam(team, reopenUnavailable)
   const [confirm, setConfirm] = useState<'abort' | 'cleanup' | 'delete' | 'close-issue' | null>(null)
   const [reopenOpen, setReopenOpen] = useState(false)
   // 手機的標題就是切換器（點了是換畫面），改名因此收進 `⋯`。
@@ -1057,6 +1060,10 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
   // SPEC-team §10.7：只有「真的做完」的 team 能關 issue（中止 / 失敗的不行），關過就不再問，
   // 沒有 GitHub origin 的 project 也沒得關。daemon 不會自己關——這顆按鈕就是那個「同意」。
   const canCloseIssue = team.phase === 'done' && !team.issue_closed_at && Boolean(project?.github)
+  // §2.6b / §2.6「接力完成」：有東西可以接力就一定有入口（至少在 `⋯` 裡），按不下去時寫出原因。
+  // retry 讀 `teams[id].issues`——跟 issue 佇列的「失敗 N」同一份資料，不是晚到的 detail。
+  const retryGate = teamRetryIssuesGate(team, reopenUnavailable)
+  const rescueGate = teamRescueGate(team, unresolved, rescuerName, reopenUnavailable)
 
   return (
     <>
@@ -1168,29 +1175,32 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           {/* 手機上標題列只放得下 phase chip 與一顆主要動作（放行／繼續／暫停）。中止與關閉
               不是常按的東西，收進 `⋯`——但一定要收得進去，不能只是藏掉。 */}
           {/* §2.6：done 的 team 還留著沒解決的 task 時，把它們一次交給一個成員收尾——
-              預設 reviewer，它已經看過這個 issue 的每一份 diff，而且工作樹是空的。 */}
-          {team.phase === 'done' && unresolved > 0 && rescuer ? (
-            <button
-              type="button"
-              className="mini-btn"
-              disabled={rescueBusy}
-              title={`把 ${unresolved} 個沒解決的 task 全部交給 ${rescuerName} 收尾（會重新啟動成員）`}
-              onClick={() => void rescueTeam(teamId)}
-            >
-              {rescueBusy ? '交接中…' : `交給 ${rescuerName} 收尾（${unresolved}）`}
-            </button>
-          ) : null}
-          {/* §2.6b：合併衝突、預算用完這類失敗的 issue 不是決定，是還沒做完的工作——一鍵
-              重排回佇列接力做，比讓使用者把四個號碼再打一次進「追加 issue」誠實得多。 */}
-          {canReopen && stuckIssues > 0 ? (
+              預設 reviewer，它已經看過這個 issue 的每一份 diff，而且工作樹是空的。
+              §2.6b：合併衝突、預算用完這類失敗的 issue 不是決定，是還沒做完的工作——一鍵
+              重排回佇列接力做，比讓使用者把四個號碼再打一次進「追加 issue」誠實得多。
+              標題列只放一顆、只在 done 時放，retry 優先（對得上 issue 佇列的「失敗 N」）：1440px 開著
+              右側面板實測兩顆會把整排推出主欄，進行中的 team 多一顆連標題都被擠沒。另一顆、其他狀態、
+              按不下去的原因都在 `⋯` 裡；手機一律走 `⋯`。
+              rescue 的 bot_id 一定帶：收尾者退回執行者時省略它，daemon 會去找 reviewer 然後回 409。 */}
+          {phone || team.phase !== 'done' ? null : retryGate?.enabled ? (
             <button
               type="button"
               className="mini-btn"
               disabled={retryBusy}
-              title={`把失敗 / 被跳過的 ${stuckIssues} 個 issue 重新排進佇列，接力做完`}
+              title={retryGate.reason}
               onClick={() => void retryFailedIssues(teamId)}
             >
-              {retryBusy ? '重排中…' : `續做失敗的 ${stuckIssues} 個 issue`}
+              {retryBusy ? '重排中…' : `續做失敗的 ${retryGate.count} 個 issue`}
+            </button>
+          ) : rescueGate?.enabled && rescuer ? (
+            <button
+              type="button"
+              className="mini-btn"
+              disabled={rescueBusy}
+              title={rescueGate.reason}
+              onClick={() => void rescueTeam(teamId, rescuer.id)}
+            >
+              {rescueBusy ? '交接中…' : `交給 ${rescuerName} 收尾（${rescueGate.count}）`}
             </button>
           ) : null}
           {phone ? null : terminal ? (
@@ -1208,6 +1218,36 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
             </button>
           )}
           <HeadMoreMenu label="更多 Team 動作">
+            {/* 「接力完成」一定收得進 `⋯`：手機標題列只放得下一顆，桌機被右側面板擠窄時標題列的
+                按鈕也會被擠掉。按不下去時原因寫在第二行——手機沒有 hover，title 看不到。 */}
+            {retryGate ? (
+              <button
+                type="button"
+                className="head-menu-item"
+                role="menuitem"
+                disabled={!retryGate.enabled || retryBusy}
+                title={retryGate.reason}
+                onClick={() => void retryFailedIssues(teamId)}
+              >
+                {retryBusy ? '重排中…' : `續做失敗的 ${retryGate.count} 個 issue`}
+                {retryGate.enabled ? null : <span className="team-relay-note">{retryGate.reason}</span>}
+              </button>
+            ) : null}
+            {rescueGate ? (
+              <button
+                type="button"
+                className="head-menu-item"
+                role="menuitem"
+                disabled={!rescueGate.enabled || !rescuer || rescueBusy}
+                title={rescueGate.reason}
+                onClick={() => void rescueTeam(teamId, rescuer?.id)}
+              >
+                {rescueBusy
+                  ? '交接中…'
+                  : `${rescuerName ? `交給 ${rescuerName} 收尾` : '交給成員收尾'} ${rescueGate.count} 個 task`}
+                {rescueGate.enabled ? null : <span className="team-relay-note">{rescueGate.reason}</span>}
+              </button>
+            ) : null}
             {phone ? (
               <>
                 <button
