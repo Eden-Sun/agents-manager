@@ -70,6 +70,9 @@ pub struct App {
     pub allow_lan: bool,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
+    /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
+    /// real daemon, which means `ps`; a test installs its own reader.
+    pub proc_env: crate::pane_identity::ProcEnvHook,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     bus: broadcast::Sender<WsEvent>,
@@ -143,6 +146,7 @@ impl App {
             allow_lan,
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
+            proc_env: Default::default(),
             locks: Mutex::new(HashMap::new()),
             bus,
             turn_bus,
