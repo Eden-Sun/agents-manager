@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
@@ -9,6 +9,7 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
+import './quotaSlim.css'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
@@ -17,6 +18,12 @@ import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
  * reported quota permanently visible; only the *windows* per kind collapse below 1100px, never
  * a whole kind. Drawn as frameless health bars: the fill length carries the level, colour only
  * reinforces it, so it survives greyscale. Full numbers live in the tooltip and popover.
+ *
+ * 桌機上**每個帳號都在條上**（2026-09-11 使用者），但只有焦點那格畫完整量表：其他帳號收成
+ * 46px 的窄格（`SlimGauge`），一條細 bar ＋ 一個數字。縮寬度靠每一格變密，不是靠把帳號藏進
+ * `+N`——`+N` 只在標題列真的排不下時才出現。判斷用的寬度量的是**標題列**（`ResizeObserver`
+ * 掛在父節點），不是 `window.innerWidth`：後者少算了側欄與圖片暫存欄，1500–1555px 的視窗
+ * 會因此把分頁鍵擠出畫面。
  *
  * The kinds do not report the same windows: claude and codex have both 5h and 7d, grok only a
  * weekly one (scraped from its `/usage` dialog, SPEC §12.6). A kind therefore draws one bar per
@@ -419,7 +426,9 @@ function Gauge({
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  const borderWindows = focused ? [
+  // 上下兩條邊框量表**只有手機畫**（2026-09-11 使用者）：桌機同一格裡已經有 5h／7d 的 bar
+  // 與數字，邊框是同一份資訊再畫一次；手機的量表被壓成純文字 chip，看不到 bar，才需要它。
+  const borderWindows = focused && compact ? [
     { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
     { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
   ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
@@ -604,6 +613,69 @@ function Gauge({
       )}
       </button>
     </span>
+  )
+}
+
+/**
+ * 非焦點帳號的窄量表（2026-09-11 使用者：寬視窗的額度佔掉將近一半的標題列）。
+ *
+ * 五個帳號各三個窗口＝常駐 15 個數字，可是「還剩多少額度」是背景條件，不是每分鐘要做的
+ * 決定；真正在看的「哪顆 bot、什麼狀態」反而只拿到四分之一的寬度。所以只有焦點那格畫完整
+ * 量表，其他帳號收成一格 46px：身分名 + 最吃緊那個窗口的一條細 bar + 一個數字。
+ *
+ * 為什麼不是整格收進 `+N` popover：那樣「哪個帳號快沒了」就得先點開才知道，等於把這條列
+ * 存在的理由拿掉。留一條 bar + 一個數字，掃一眼還是看得出誰紅了；窗口名（5h／7d／F）、
+ * 重置時間與停用開關進 tooltip 與 popover。
+ *
+ * 顯示哪個窗口跟收合狀態同一套規則（`worstWindow`）：最接近用完的那一個。
+ */
+function SlimGauge({
+  entry,
+  host,
+  open,
+  onOpen,
+}: {
+  entry: QuotaEntry
+  host: string
+  /** popover 開著沒（給 `aria-expanded`）。 */
+  open: boolean
+  onOpen: () => void
+}) {
+  const q = useEntryQuota(entry, host)
+  const loggedOut = useLoggedOut(entry, host)
+  const disabledMap = useDisabledQuota()
+  const now = useMinuteNow()
+  const w = worstWindow(q)
+  const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
+  const name = w.name === '7d' ? weekLabel(entry.kind) : w.name
+  const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
+  const base = `${hostLabel(host)} · ${label(entry, q, loggedOut)}`
+  const withOff = off ? `${base}（已暫時停用，底下的 Bot 收在側欄外）` : base
+  // 條上只有一個數字，所以 tooltip 第一行先講它是哪個窗口——不然紅色的 `3` 分不出是
+  // 「兩小時後就回來」還是「這一週沒了」。
+  const left = src?.resets_at ? new Date(src.resets_at).getTime() - now : null
+  const which =
+    w.pct === null
+      ? `${name} 尚無資料`
+      : `條上顯示最吃緊的 ${name}：剩餘 ${fmtPct(w.pct)}%${left === null ? '' : `，還有 ${fmtLeft(left)} 重置`}`
+
+  return (
+    <button
+      type="button"
+      className={`quota-hp slim ${entry.kind} ${worst(q)}${off ? ' off' : ''}`}
+      aria-expanded={open}
+      aria-haspopup="dialog"
+      aria-label={`${withOff}（點開看每個窗口與停用開關）`}
+      title={`${which}\n${withOff}`}
+      onClick={onOpen}
+    >
+      <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
+        {entry.identity ?? entry.kind}
+      </span>
+      {/* 不畫重置黑針：20px 的條上那根 2px 的針比填充本身還搶眼，而且會被誤讀成「還有這麼多」。
+          「還有多久重置」寫在 tooltip 與 popover 裡（完整那格照舊有針）。 */}
+      <Bar pct={w.pct} low={src?.low ?? false} critical={src?.critical ?? false} mark={null} />
+    </button>
   )
 }
 
@@ -829,6 +901,26 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   )
 }
 
+/*
+ * 決定「幾格排得下」用的實測寬度（含 `.quota-open` 的 8px gap，2026-09-11 於 2000px 量）。
+ * 只用來挑版面，不是排版本身——真正的寬度還是由 CSS 決定，所以寫大一點當安全邊。
+ */
+/** 焦點那格（完整量表：3.2em 標籤欄 + 5h／7d／F 三條）＝實測 146px + 8px gap。 */
+const FULL_GAUGE_W = 154
+/** 收斂後的一格（`.quota-hp.slim` 寫死 46px）＋ gap。 */
+const SLIM_GAUGE_W = 54
+/** 「claude 有更新」那顆＋分隔線的邊距；沒更新時不畫，多算的當安全邊。 */
+const UPDATE_CHIP_W = 34
+/**
+ * 標題列上一定要留給別人的寬度：分頁鍵（`對話／終端`，~135px）＋ bot 名字的下限（~84px）
+ * ＋齒輪與間距（~40px）。額度**不**跟它們搶，但只要留得下，五個帳號就一格都不收。
+ *
+ * 「桌面寬度下所有帳號一定要同時看得見」是使用者定的（2026-09-11）：縮寬度靠每一格變密
+ * （`.quota-hp.slim`），不是靠把帳號藏進 `+N`。`+N` 只在真的排不下時才出現——那時被藏起來
+ * 的帳號在點開的 popover 裡仍然一個不少。
+ */
+const HEAD_RESERVE_W = 260
+
 export function QuotaStrip({
   focusKind,
   focusIdentity,
@@ -849,7 +941,19 @@ export function QuotaStrip({
   // 跟本機不同的帳號，額度列本來就一次只看一台，所以身份清單也要跟著那一台。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
   const identities = useMemo(() => identitiesOfHost(configured, idStatus), [configured, idStatus])
-  const [width, setWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1440))
+  /**
+   * 這條列**實際拿得到的寬度**，不是視窗寬。
+   *
+   * 原本用 `window.innerWidth` 比 1500：可是標題列的寬度是「視窗 − 側欄 − 圖片暫存欄」，
+   * 大約少 500px。於是視窗一過 1500，量表就從「只留焦點那格」變成全部攤開（696px），
+   * 而標題列其實只有 ~970px——排在最後的「對話／終端」分頁被推出畫面右緣
+   * （2026-09-11 於 1500–1555px 量到，正好是最常見的筆電寬度）。改成量自己的容器，
+   * 側欄開關、暫存欄多寬、視窗多大都判斷得對。
+   *
+   * 量的是**父節點**（標題列）而不是 `wrap` 自己：`.quota-strip` 是 `flex: none`，寬度由
+   * 內容決定，拿它回頭決定要畫幾格會來回震盪。標題列的寬度由版面給，不受這條列影響。
+   */
+  const [avail, setAvail] = useState<number | null>(null)
   const [open, setOpen] = useState(false)
   // 手機點某一格只看那一格（2026-09-09 使用者）：記下是哪一格開的；`+N` 與桌面仍看全部。
   const [only, setOnly] = useState<string | null>(null)
@@ -862,10 +966,15 @@ export function QuotaStrip({
   }
   const wrap = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    const onResize = () => setWidth(window.innerWidth)
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
+  // `useLayoutEffect`：第一次繪製前就量到，不然開頁會先閃一次「全部攤開」再收回去。
+  useLayoutEffect(() => {
+    const box = wrap.current?.parentElement
+    if (!box) return
+    setAvail(box.clientWidth)
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => setAvail(box.clientWidth))
+    ro.observe(box)
+    return () => ro.disconnect()
   }, [])
 
   useEffect(() => {
@@ -885,9 +994,9 @@ export function QuotaStrip({
   }, [open])
 
   useEffect(() => {
-    if (width > 640) return
+    if (!phone) return
     wrap.current?.querySelector('.quota-hp.focused')?.scrollIntoView({ inline: 'center', block: 'nearest' })
-  }, [width, focusKind, focusIdentity])
+  }, [phone, focusKind, focusIdentity])
 
   /** Fixed: cc0 → cc1 → codex → grok. No remaining-% / focus reshuffle. */
   const ordered = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
@@ -904,18 +1013,20 @@ export function QuotaStrip({
     .sort()
     .pop()
 
+  /** 還沒量到（第一次繪製、或沒有 ResizeObserver）就當作桌機寬度：收得太過比爆版難看。 */
+  const box = avail ?? 1416
   // Both queryable kinds always stay on the bar; only the per-kind windows collapse.
-  const collapsed = width < 1100
+  const collapsed = box < 600
   /**
-   * Under ~1500px the strip cannot hold five gauges *and* leave the title readable: measured
-   * at 1200px it took 563px of a 912px header, which squeezed the team's issue title down to
-   * its 84px floor and pushed the action buttons past the edge. When it is that tight only
-   * the gauge for what you are looking at stays on the bar; the rest are one click away in
-   * the popover, which lists every one of them anyway.
+   * 連「焦點一格 + 其他收成窄格」都排不下時，非焦點的整格才收進 `+N` popover。
+   *
+   * 用「這條列需要多少」對上「標題列扣掉別人要用的還剩多少」，而不是一個視窗寬度的門檻：
+   * 帳號數會變，而標題列的寬度跟視窗寬差了一整個側欄加圖片暫存欄。
    */
-  const tight = width < 1500
-  /** 手機：標題列連一顆量表都放不下，剩餘量改用數字寫在 chip 上。 */
-  const compact = width <= 640
+  const need = FULL_GAUGE_W + SLIM_GAUGE_W * Math.max(0, ordered.length - 1) + UPDATE_CHIP_W
+  /** 手機：標題列連一顆量表都放不下，剩餘量改用數字寫在 chip 上。CSS 也是 640px 那條線。 */
+  const compact = phone
+  const tight = !compact && need > box - HEAD_RESERVE_W
 
   /** The one gauge worth the width when space is tight: the kind/identity this view is about. */
   const focusEntry = focusKind
@@ -960,27 +1071,34 @@ export function QuotaStrip({
               focused = focusId ? entry.identity === focusId : !entry.identity
             }
           }
+          const onOpen = () => {
+            const k = entryReactKey(entry)
+            if (open && (!phone || only === k)) {
+              setOpen(false)
+              setOnly(null)
+            } else {
+              setOnly(phone ? k : null)
+              measure()
+              setOpen(true)
+            }
+          }
           return (
             <Fragment key={entryReactKey(entry)}>
-              <Gauge
-                entry={entry}
-                host={host}
-                collapsed={collapsed || compact}
-                compact={compact}
-                focused={focused}
-                open={open}
-                onOpen={() => {
-                  const k = entryReactKey(entry)
-                  if (open && (!phone || only === k)) {
-                    setOpen(false)
-                    setOnly(null)
-                  } else {
-                    setOnly(phone ? k : null)
-                    measure()
-                    setOpen(true)
-                  }
-                }}
-              />
+              {/* 桌機上只有焦點那格畫完整量表，其他帳號收成窄格（見 `SlimGauge`）。
+                  手機那一列是橫向可捲的文字 chip，每一格都要看得到，不收。 */}
+              {compact || tight || focused ? (
+                <Gauge
+                  entry={entry}
+                  host={host}
+                  collapsed={collapsed || compact}
+                  compact={compact}
+                  focused={focused}
+                  open={open}
+                  onOpen={onOpen}
+                />
+              ) : (
+                <SlimGauge entry={entry} host={host} open={open} onOpen={onOpen} />
+              )}
             </Fragment>
           )
         })}
