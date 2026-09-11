@@ -589,6 +589,8 @@ async fn pause(app: &Arc<App>, team: &db::Team, reason: &str) -> LcResult<()> {
 /// [`pause`] carrying §4.5's structured detail (which member, which quota window, how much is
 /// left). Everything else about a pause is unchanged — the detail is what the banner reads.
 async fn pause_with_detail(app: &Arc<App>, team: &db::Team, reason: &str, detail: Option<Value>) -> LcResult<()> {
+    // `team` is the caller's snapshot; the user may have paused or aborted since (#31).
+    let team = &team::load(app, &team.id).await?;
     if team.phase == "paused" || team::is_terminal(&team.phase) || team.phase == "aborting" {
         return Ok(());
     }
@@ -600,7 +602,7 @@ async fn pause_with_detail(app: &Arc<App>, team: &db::Team, reason: &str, detail
             return Box::pin(close_issue_and_advance(app, &team.id, "failed", Some(reason), None)).await;
         }
     }
-    team::set_phase_detail(app, &team.id, "paused", Some(reason), Some(&team.phase), detail).await?;
+    team::sched_pause(app, &team.id, reason, detail).await?;
     Ok(())
 }
 
@@ -1214,7 +1216,10 @@ async fn rescue_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .execute(&app.db)
         .await
         .map_err(up)?;
-    team::set_phase(app, team_id, "working", None, None).await?;
+    // Starting the members takes a while; a pause or abort in the meantime wins (#31).
+    if !team::sched_phase(app, team_id, "working", false).await? {
+        return Ok(());
+    }
     // `fill_workers` hands the task over on the next pass; tell the PM what is happening so the
     // timeline (and the PM's own context) does not skip from "done" to a merge out of nowhere.
     let ctx = Ctx::load(app, team_id).await?;
@@ -1296,7 +1301,9 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
                 // §7.4: no PM, no team — and §6.5 sends a failed creation through the same
                 // cleanup, so nothing is left half-built.
                 Some("pm") => {
-                    team::set_phase(app, team_id, "failed", None, None).await?;
+                    if !team::sched_phase(app, team_id, "failed", false).await? {
+                        return Ok(());
+                    }
                     if let Err(e) = team::cleanup(app, team_id).await {
                         tracing::warn!(team = team_id, error = ?e, "cleanup after a failed PM start");
                     }
@@ -1311,7 +1318,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         }
     }
     if !failed.is_empty() && failed.len() == ctx.workers().len() {
-        team::set_phase(app, team_id, "failed", None, None).await?;
+        team::sched_phase(app, team_id, "failed", false).await?;
         return Ok(());
     }
 
@@ -1321,7 +1328,10 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .execute(&app.db)
         .await
         .map_err(up)?;
-    team::set_phase(app, team_id, "planning", None, None).await?;
+    // `startup` is re-entrant: paused here, "continue" returns to `starting` and runs it again.
+    if !team::sched_phase(app, team_id, "planning", false).await? {
+        return Ok(());
+    }
 
     // §4.5 unlimited: the first issue is already working (it was created with the team);
     // everything else on the queue starts now, and A.1's first relay covers the lot.
@@ -1974,9 +1984,11 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         created.push(format!("t{next_seq}"));
     }
 
-    if !created.is_empty() && ctx.team.phase != "working" {
-        team::set_phase(app, &ctx.team.id, "working", None, None).await?;
-    }
+    // The tasks are on record either way; when the team was paused under this pass (#31) they
+    // wait for "continue", whose `fill_now` hands them out.
+    let moved = created.is_empty()
+        || ctx.team.phase == "working"
+        || team::sched_phase(app, &ctx.team.id, "working", true).await?;
     if !rejected.is_empty() || !overlaps.is_empty() {
         let mut msg = String::new();
         if !rejected.is_empty() {
@@ -1986,6 +1998,9 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
             msg.push_str(&format!("注意：{}（請以檔案 / 模組切分）。", overlaps.join("；")));
         }
         enqueue(app, &ctx.team.id, None, &pm.id, None, "note", msg).await?;
+    }
+    if !moved {
+        return Ok(());
     }
     // §4.6 gate:dispatch — the plan is on record, but nothing has been cut or sent yet, so
     // this is exactly where a human gets to look before the executors start moving.
@@ -2242,7 +2257,7 @@ async fn pm_done(
     // The decision is read back by `close_issue_and_advance` once delivery is done; it lives
     // in the log (no new column) and only the most recent one for this issue counts.
     note(app, &ctx.team.id, json!({"action": "worker_plan", "keep": keep_workers})).await?;
-    team::set_phase(app, &ctx.team.id, "finishing", None, None).await?;
+    team::sched_phase(app, &ctx.team.id, "finishing", true).await?;
     Ok(())
 }
 
@@ -2796,7 +2811,7 @@ pub async fn start_issues_up_to_capacity(app: &Arc<App>, team_id: &str) -> LcRes
 /// that `issue` is not optional any more.
 async fn hand_issues_to_pm(app: &Arc<App>, team_id: &str, started: &[db::TeamIssue]) -> LcResult<()> {
     if team::load(app, team_id).await?.phase == "starting" {
-        team::set_phase(app, team_id, "planning", None, None).await?;
+        team::sched_phase(app, team_id, "planning", false).await?;
     }
     let ctx = Ctx::load(app, team_id).await?;
     let Some(pm) = ctx.pm() else { return Ok(()) };
@@ -2886,7 +2901,9 @@ async fn end_team(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             tracing::warn!(bot = %b.name, error = ?e, "team finish: stop_bot failed");
         }
     }
-    team::set_phase(app, &ctx.team.id, "done", None, None).await?;
+    // Stopping every member is the slowest await in the scheduler — the likeliest place for an
+    // abort to land in between (#31). A pause keeps `done` as its resume target instead.
+    team::sched_phase(app, &ctx.team.id, "done", true).await?;
     Ok(())
 }
 
@@ -2899,8 +2916,14 @@ async fn hand_issue_to_pm(
     kept_workers: bool,
     context_lost: Option<bool>,
 ) -> LcResult<()> {
-    team::set_phase(app, team_id, "planning", None, None).await?;
+    // Paused mid-advance, the relay still goes out on "continue" (the outbox waits), and
+    // `resume_phase` points at `planning` rather than the `finishing` that delivered the last
+    // issue. Aborted: the team is over and the PM is told nothing.
+    team::sched_phase(app, team_id, "planning", true).await?;
     let ctx = Ctx::load(app, team_id).await?;
+    if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "aborting" {
+        return Ok(());
+    }
     let Some(pm) = ctx.pm() else { return Ok(()) };
     let names: Vec<String> = ctx.workers().iter().map(|w| ctx.short(w)).collect();
     let queued = db::team_issues(&app.db, team_id)
@@ -4783,6 +4806,70 @@ mod scenarios {
         let t = s.team().await;
         assert_eq!(t.phase, "paused");
         assert_eq!(t.pause_reason.as_deref(), Some("worktree_missing"));
+    }
+
+    /// #31：scheduler 一回合裡拿的是開頭載入的 `Ctx`，中間 await（停成員、跑 git、送 relay）
+    /// 的時候使用者按了 abort。舊快照說 `planning`，於是 guard 的 `pause` 和收尾的 `end_team`
+    /// 照寫——把 `aborted` 蓋回 `paused` / `done`，終態的 team 就這樣活回來。
+    #[tokio::test]
+    async fn a_stale_snapshot_cannot_overwrite_an_abort() {
+        let s = S::new(1, true).await;
+        let stale = s.ctx().await;
+        assert_eq!(stale.team.phase, "planning");
+        crate::team::abort(s.app(), &s.tid, None).await.unwrap();
+        assert_eq!(s.team().await.phase, "aborted");
+
+        pause(s.app(), &stale.team, "budget_time").await.unwrap();
+        let t = s.team().await;
+        assert_eq!(t.phase, "aborted", "a guard on a stale snapshot must not pause an aborted team");
+        assert_eq!(t.pause_reason, None);
+
+        end_team(s.app(), &stale).await.unwrap();
+        hand_issue_to_pm(s.app(), &s.tid, false, None).await.unwrap();
+        let pm = stale.pm().unwrap().clone();
+        pm_done(s.app(), &stale, &pm, "做完了", false, None).await.unwrap();
+        assert_eq!(s.team().await.phase, "aborted", "nothing the scheduler writes may leave `aborted`");
+        // No phase event after the abort's own `aborting → aborted`.
+        let last: Value = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>(
+                "SELECT payload_json FROM team_events WHERE team_id = ? AND kind = 'phase' ORDER BY seq DESC LIMIT 1",
+            )
+            .bind(&s.tid)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!((last["from"].as_str(), last["to"].as_str()), (Some("aborting"), Some("aborted")));
+    }
+
+    /// #31 的另一半：使用者按了暫停，舊快照的 `dispatch` / `pm_done` 把 phase 寫成
+    /// `working` / `finishing`，暫停就這樣被吃掉，而且 `pause_reason = user` 也跟著消失。
+    /// 暫停要留著；scheduler 走到的進度記進 `resume_phase`，按「繼續」才回得到對的地方。
+    #[tokio::test]
+    async fn a_stale_snapshot_cannot_lift_a_user_pause() {
+        let s = S::new(1, true).await;
+        let pm = s.bot("pm", 0).await;
+        let stale = s.ctx().await;
+        crate::team::pause(s.app(), &s.tid).await.unwrap();
+
+        let items = match Action::parse("pm", &json!({"action":"dispatch","tasks":[{"title":"A","brief":"做 A"}]})) {
+            Ok(Action::Dispatch(v)) => v,
+            other => panic!("{other:?}"),
+        };
+        dispatch(s.app(), &stale, &pm, items).await.unwrap();
+        let t = s.team().await;
+        assert_eq!(t.phase, "paused", "dispatch on a stale snapshot must not lift a user pause");
+        assert_eq!(t.pause_reason.as_deref(), Some("user"));
+        assert_eq!(t.resume_phase.as_deref(), Some("working"), "resume goes where the scheduler got to");
+        assert_eq!(s.tasks().await.len(), 1, "the task itself is on record");
+
+        // A guard firing on the same stale snapshot keeps the first reason.
+        pause(s.app(), &stale.team, "budget_time").await.unwrap();
+        assert_eq!(s.team().await.pause_reason.as_deref(), Some("user"));
+
+        crate::team::resume(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.team().await.phase, "working");
     }
 
     /// Every file under a directory, with its contents — the `find -newer` of §13's T8, but

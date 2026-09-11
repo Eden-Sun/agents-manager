@@ -674,6 +674,15 @@ starting ──成員全部 running──► planning ──PM dispatch──►
 ```
 
 - `paused` 保存 `resume_phase`；`resume` 回到原 phase 並重送 pending relay。
+- **誰能寫哪個 phase（2026-09-11，#31）**：scheduler 一回合用的是開頭載入的快照，中間會 await（停成員、git、送 relay），
+  使用者可能已經 pause / abort。所以 scheduler 的 phase 寫入一律是 compare-and-set，而且只從它自己推動的
+  `starting | planning | working | finishing` 出發：
+  - 目前是 `aborting` 或終態 → 不寫（abort 之後沒有任何東西能把 team 寫活）；
+  - 目前是 `paused` → 暫停與 `pause_reason` 原封不動；推進類的寫入（dispatch→`working`、PM done→`finishing`、
+    換 issue→`planning`、收尾→`done`）改寫成它的 `resume_phase`，「繼續」才會落在 scheduler 已經走到的地方
+    （而不是回到 `finishing` 再交付一次）；`starting` 階段的寫入不改 `resume_phase`，繼續時整段 startup 重跑（它本來就可重入）；
+  - guard 的 `paused(reason)` 也只從上述四個 phase 進入，`resume_phase` 取當下列上的值，不取快照。
+  使用者端的 `pause` / `abort` 同樣是 CAS：`abort` 撞到 scheduler 剛寫的 `done` 回 409，不會把它改成 `aborted`。
 - `finishing`：deliver=`pr` 時 push + `gh pr create`；`branch` 時只寫摘要。成功 → `done`（停成員）。
 - 終態：`done | aborted | failed`。終態後只剩 `cleanup`——**例外**：`done` 且未 cleanup 的 team 可由使用者追加 issue 而 reopen，
   走 `done ──追加 issue──► starting ──成員重啟、建新執行者──► planning`（§2.5）；`aborted` / `failed` 沒有這條路。

@@ -874,26 +874,104 @@ pub async fn set_phase_detail(
     resume_phase: Option<&str>,
     pause_detail: Option<Value>,
 ) -> LcResult<db::Team> {
+    write_phase(app, team_id, phase, pause_reason, resume_phase, pause_detail, None)
+        .await?
+        .ok_or_else(|| LcError::NotFound("team".into()))
+}
+
+/// The phases the scheduler moves a team through by itself (SPEC-team §8.1). `paused`,
+/// `aborting` and the terminal phases were written by somebody else — a human, or a guard —
+/// and the scheduler never writes over them (#31).
+pub const SCHED_PHASES: [&str; 4] = ["starting", "planning", "working", "finishing"];
+
+/// A phase write from the scheduler (#31). Every scheduler pass acts on a `Ctx` loaded at its
+/// start and then awaits — members stopping, git, relays — so by the time it writes, a user
+/// may have paused or aborted. The write is therefore a compare-and-set against the phase
+/// actually in the row, and only ever out of [`SCHED_PHASES`]:
+///
+/// * aborting / terminal: dropped — nothing revives a team the user ended;
+/// * paused: the pause stays, and with `defer` the target becomes its `resume_phase`, so
+///   "continue" lands where the scheduler got to (not back in `finishing` to deliver the same
+///   issue twice). Re-entrant `starting` work passes `defer = false` and simply runs again.
+///
+/// `true` only when the phase actually moved now; the caller stops its pass otherwise.
+pub async fn sched_phase(app: &Arc<App>, team_id: &str, phase: &str, defer: bool) -> LcResult<bool> {
+    for _ in 0..3 {
+        let t = load(app, team_id).await?;
+        if SCHED_PHASES.contains(&t.phase.as_str()) {
+            if write_phase(app, team_id, phase, None, None, None, Some(&t.phase)).await?.is_some() {
+                return Ok(true);
+            }
+            continue;
+        }
+        if t.phase == "paused" && defer {
+            let r = sqlx::query("UPDATE teams SET resume_phase = ? WHERE id = ? AND phase = 'paused'")
+                .bind(phase)
+                .bind(team_id)
+                .execute(&app.db)
+                .await
+                .map_err(any_err)?;
+            if r.rows_affected() == 0 {
+                continue;
+            }
+            emit_team_changed(app, &load(app, team_id).await?).await;
+        }
+        tracing::info!(team = %team_id, phase = %t.phase, to = phase, "scheduler phase write not applied: the team was paused or ended");
+        return Ok(false);
+    }
+    Ok(false)
+}
+
+/// A guard's pause (§4.5), under the same rule as [`sched_phase`]: only out of a phase the
+/// scheduler owns, with `resume_phase` taken from the row rather than from a stale snapshot.
+/// An existing pause keeps its first reason. `true` when this call paused the team.
+pub async fn sched_pause(app: &Arc<App>, team_id: &str, reason: &str, detail: Option<Value>) -> LcResult<bool> {
+    for _ in 0..3 {
+        let t = load(app, team_id).await?;
+        if !SCHED_PHASES.contains(&t.phase.as_str()) {
+            return Ok(false);
+        }
+        let from = Some(t.phase.as_str());
+        if write_phase(app, team_id, "paused", Some(reason), from, detail.clone(), from).await?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `expect = Some(p)`: write only while the row is still in phase `p`; `None` when it was not.
+async fn write_phase(
+    app: &Arc<App>,
+    team_id: &str,
+    phase: &str,
+    pause_reason: Option<&str>,
+    resume_phase: Option<&str>,
+    pause_detail: Option<Value>,
+    expect: Option<&str>,
+) -> LcResult<Option<db::Team>> {
     let before = load(app, team_id).await?;
+    let from = expect.unwrap_or(&before.phase).to_string();
     let detail_json = pause_detail.as_ref().map(|d| d.to_string());
     let ended_at = if is_terminal(phase) { Some(db::now()) } else { None };
     // Reopen is a transition out of a terminal phase, not a pause. Keep its audit reason in
     // the phase event, while the row itself must remain resumable with no pause marker and no
     // stale terminal timestamp (§2.5.2).
-    if phase == "starting" && pause_reason == Some("reopen") {
+    // `phase = COALESCE(?, phase)` is always true when `expect` is NULL: the unconditional write.
+    let written = if phase == "starting" && pause_reason == Some("reopen") {
         sqlx::query(
             "UPDATE teams SET phase = ?, pause_reason = NULL, resume_phase = NULL,
-               pause_detail_json = NULL, ended_at = NULL WHERE id = ?",
+               pause_detail_json = NULL, ended_at = NULL WHERE id = ? AND phase = COALESCE(?, phase)",
         )
         .bind(phase)
         .bind(team_id)
+        .bind(expect)
         .execute(&app.db)
         .await
-        .map_err(any_err)?;
+        .map_err(any_err)?
     } else {
         sqlx::query(
             "UPDATE teams SET phase = ?, pause_reason = ?, resume_phase = ?,
-               pause_detail_json = ?, ended_at = COALESCE(?, ended_at) WHERE id = ?",
+               pause_detail_json = ?, ended_at = COALESCE(?, ended_at) WHERE id = ? AND phase = COALESCE(?, phase)",
         )
         .bind(phase)
         .bind(pause_reason)
@@ -901,9 +979,13 @@ pub async fn set_phase_detail(
         .bind(detail_json)
         .bind(ended_at)
         .bind(team_id)
+        .bind(expect)
         .execute(&app.db)
         .await
-        .map_err(any_err)?;
+        .map_err(any_err)?
+    };
+    if written.rows_affected() == 0 {
+        return Ok(None);
     }
     record_event(
         app,
@@ -913,12 +995,12 @@ pub async fn set_phase_detail(
         None,
         None,
         None,
-        json!({"from": before.phase, "to": phase, "reason": pause_reason, "detail": pause_detail}),
+        json!({"from": from, "to": phase, "reason": pause_reason, "detail": pause_detail}),
     )
     .await?;
     let after = load(app, team_id).await?;
     emit_team_changed(app, &after).await;
-    Ok(after)
+    Ok(Some(after))
 }
 
 // ---------------------------------------------------------------- validation
@@ -2177,15 +2259,21 @@ pub async fn events(app: &Arc<App>, team_id: &str, before: Option<&str>, limit: 
 
 /// `POST /api/teams/:id/pause`. Idempotent: pausing a paused team is a no-op.
 pub async fn pause(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
-    let t = load(app, team_id).await?;
-    if is_terminal(&t.phase) {
-        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+    // Compare-and-set (#31): the scheduler may move the phase between the read and the write,
+    // and `resume_phase` has to be the phase actually left, not the one read a moment ago.
+    loop {
+        let t = load(app, team_id).await?;
+        if is_terminal(&t.phase) {
+            return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+        }
+        if t.phase == "paused" {
+            return Ok(json!({}));
+        }
+        let from = Some(t.phase.as_str());
+        if write_phase(app, team_id, "paused", Some("user"), from, None, from).await?.is_some() {
+            return Ok(json!({}));
+        }
     }
-    if t.phase == "paused" {
-        return Ok(json!({}));
-    }
-    set_phase(app, team_id, "paused", Some("user"), Some(&t.phase)).await?;
-    Ok(json!({}))
 }
 
 /// `POST /api/teams/:id/resume`.
@@ -2281,11 +2369,17 @@ async fn resume_inner(app: &Arc<App>, team_id: &str, gate_only: bool) -> LcResul
 
 /// `POST /api/teams/:id/abort` — the only irreversible user action (SPEC-team §9.2).
 pub async fn abort(app: &Arc<App>, team_id: &str, reason: Option<&str>) -> LcResult<Value> {
-    let t = load(app, team_id).await?;
-    if is_terminal(&t.phase) {
-        return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
-    }
-    set_phase(app, team_id, "aborting", None, None).await?;
+    // Compare-and-set (#31): a team the scheduler finished between the read and the write is
+    // `done`, and an abort must not rewrite that into `aborted`.
+    let t = loop {
+        let t = load(app, team_id).await?;
+        if is_terminal(&t.phase) {
+            return Err(LcError::conflict("team already finished", json!({"phase": t.phase})));
+        }
+        if write_phase(app, team_id, "aborting", None, None, None, Some(&t.phase)).await?.is_some() {
+            break t;
+        }
+    };
     record_event(app, team_id, "note", None, None, None, None, json!({"action": "abort", "reason": reason})).await?;
     for b in db::team_members(&app.db, &t.id).await.map_err(any_err)? {
         if b.deleted_at.is_some() {
