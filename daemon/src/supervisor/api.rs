@@ -5,20 +5,13 @@
 
 use crate::lifecycle::LcError;
 use crate::state::App;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::{controller, health, setup, store};
-
-const BOOTSTRAP_REQUEST_ID: &str = "agm-bootstrap-v1";
-const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作委派。
-
-請先依你的恢復流程讀取 handoff.md、bin/agm assignments、bin/agm inbox，再用 bin/agm state 查即時狀態。確認你是 agents-manager 的總管，能協助使用者找回適合的既有 bot、提出有證據的分配建議，並在使用者明確交辦後透過 bin/agm 建立與追蹤 assignment。
-
-請用繁體中文回覆一段簡短的「AGM 已就緒」訊息，說明使用者可以直接提出問題、要求尋找相關 bot，或說「交給你推薦的 bot」。不要自行建立工作，也不要把這段握手當成待辦。"#;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
@@ -58,32 +51,9 @@ pub async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
     if let Err(e) = controller::auto_switch_if_fable_low(&app).await {
         tracing::warn!(error = ?e, "automatic Fable quota switch during start failed");
     }
-    let bot = super::manager_bot(&app)
-        .await?
-        .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
-    if crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.is_none() {
-        crate::lifecycle::start_bot(&app, &bot.id).await?;
-    }
-    // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
-    // idempotent handshake so the user can immediately see how to use AGM; the stable request
-    // id prevents a restart from creating another greeting turn.
-    if let Err(e) = crate::lifecycle::prompt(&app, &bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID).await {
-        tracing::warn!(error = ?e, "AGM bootstrap prompt was not delivered");
-    }
-    // The bot's args carry `--remote-control AGM`, which is a *request*. Whether a remote
-    // session actually came up is something only an observation can say, so the status stays
-    // `requested` until something verifies it.
-    let _ = store::set_remote(&app.db, "requested", None).await;
-    let _ = store::set_status(&app.db, "", None).await;
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let gen = if sup.generation == 0 {
-        store::bump_generation(&app.db).await.map_err(up)?
-    } else {
-        sup.generation
-    };
-    controller::spawn(app.clone(), gen);
-    controller::reconcile(&app).await;
-    app.emit("supervisor_changed", json!({"started": true})).await;
+    super::start_manager(&app, None).await?;
+    // From here on the manager is *supposed* to be up: if it dies, the watchdog brings it back.
+    let _ = store::set_desired_running(&app.db, true).await;
     Ok(Json(super::status_json(&app).await?))
 }
 
@@ -92,6 +62,9 @@ pub async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcErr
     let bot = super::manager_bot(&app)
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
+    // Written *before* the stop: a watchdog tick between the two must not read "wanted, but
+    // stopped" and start it straight back up.
+    let _ = store::set_desired_running(&app.db, false).await;
     crate::lifecycle::stop_bot(&app, &bot.id).await?;
     // A stopped CLI takes its Remote Control session with it; claiming otherwise would send
     // the user to a dead URL on their phone.
@@ -167,9 +140,33 @@ pub async fn put_handoff(State(app): State<Arc<App>>, Json(b): Json<HandoffIn>) 
     Ok(Json(json!({"summary": b.summary, "summary_version": version})))
 }
 
-pub async fn get_inbox(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    let events = store::inbox(&app.db, 200).await.map_err(up)?;
-    Ok(Json(json!({"events": events.iter().map(store::InboxEvent::to_json).collect::<Vec<_>>()})))
+#[derive(Deserialize, Default)]
+pub struct InboxQuery {
+    /// `all=1`: include handled events too (newest first, the audit view). Default is the
+    /// work view: only what is still open, oldest first.
+    #[serde(default)]
+    pub all: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+pub async fn get_inbox(
+    State(app): State<Arc<App>>,
+    Query(q): Query<InboxQuery>,
+) -> Result<Json<Value>, LcError> {
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let all = q.all.as_deref().is_some_and(|v| matches!(v, "1" | "true" | "yes"));
+    let events = if all {
+        store::inbox(&app.db, limit).await.map_err(up)?
+    } else {
+        store::open_inbox(&app.db, limit).await.map_err(up)?
+    };
+    Ok(Json(json!({
+        "events": events.iter().map(store::InboxEvent::to_json).collect::<Vec<_>>(),
+        "open": store::open_inbox_count(&app.db).await.map_err(up)?,
+        "all": all,
+        "limit": limit,
+    })))
 }
 
 pub async fn post_inbox_ack(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {

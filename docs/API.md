@@ -19,8 +19,11 @@
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。
   `pending_count` = 未結案 assignment ＋ 未 ack 的 inbox 事件。
 - `GET /api/supervisor/health` → daemon 端的健康摘要，包含 `status`（`healthy`、`degraded`、`critical`）、AGM
-  狀態、bot running/busy/stopped 計數、host 連線、quota 與 pending assignment。daemon 每 30 秒檢查一次，
-  只在摘要指紋變化時發 `supervisor_health` 事件；異常或恢復會進 AGM inbox，不需要 AGM 使用 `/loop`。
+  狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（真正未結案的 assignment 數）與
+  `inbox_open`（尚未 ack 的 inbox 事件數；兩者分開，不再相加）。daemon 每 30 秒檢查一次，
+  只在摘要指紋變化時發 `supervisor_health` 事件；`health_changed` inbox 事件**只在** `status` 或總管狀態
+  （`idle`／`busy` 視為同一個 `running`）真的改變時入列，bot 忙碌／數量等數字變動不算；總管 `stopped`／`starting`
+  期間不入列，恢復後只補一則最新快照。不需要 AGM 使用 `/loop`。
 - `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，
   寫入 `CLAUDE.md`、`persona.md`、`runtime.json`（`{daemon_url,manager_bot_id,bot_id,data_dir,…}`，**不含 token**）、
   `bin/agm`（`scripts/agm.py`，`include_str!` 編進二進位，release 安裝一樣可用）、`handoff.md`（已存在就不覆蓋）。
@@ -29,6 +32,10 @@
   總管認的是持久化的 `bot_id`，不是名字：使用者在側欄改名不會讓重跑 setup 多開一個。
 - `POST /api/supervisor/start {}` / `stop {}` → 同 `GET` 的 status。`start` 後 `remote.status` 是 `requested`，
   **不是** `active`：argv 帶了 `--remote-control` 只代表要求過，遠端有沒有真的起來要另外觀察才能宣稱。
+  `start` 同時把總管標成「應該在跑」、`stop` 標成「使用者要它停」：之後總管不是經由這支 `stop` 而停掉
+  （被殺、崩潰、更新重啟沒回來），daemon 的 watchdog 會自動再 `start`——第一次等 30 秒，之後 60／120／300 秒退避，
+  連續 5 次失敗就把原因寫進 `status_detail` 並停止重試，直到人再 `start` 一次。`waiting_quota` 期間不會自動啟動；
+  `setup` 後還沒 `start` 過的總管也不會被拉起。
 - `POST /api/supervisor/fallback {}` → 同 status，多一個 `switched:bool`。在 cc0 的兩個候選之間切換，
   一個冷卻窗（30 分）內最多自動切一次；額度是同一個帳號的，切第二次不會生出額度，所以會停在
   `waiting_quota` 並記 `quota_reset_at`（讀不到就留 null，不當成 100%）。
@@ -42,7 +49,10 @@
   送出成功的那則 user message 會把 `messages.relay_from` 標成總管 bot id（沿用既有欄位），來源顯示是「AGM → bot」而不是使用者。
 - `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；
   `PUT /api/supervisor/handoff {summary}` → `{summary,summary_version}`，同時寫一份 `handoff.md` 到總管 cwd（權威仍在資料庫）。
-- `GET /api/supervisor/inbox` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,created_at,updated_at}]}`；
+- `GET /api/supervisor/inbox?all=0|1&limit=200` →
+  `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,created_at,updated_at}],open,all,limit}`。
+  預設只列 `state!='handled'`，`created_at` 升序（最舊在前，照順序 ack 才清得掉）；`all=1` 才含已處理的（最新在前）。
+  `limit` 預設 200、上限 1000；`open` 是未 ack 的總數。
   `POST /api/supervisor/inbox/{id}/ack` → `{}`。`state`：`pending`（還沒告訴總管）→ `delivered`（已送出通知）→ `handled`（總管確認）。
   送出不等於處理完：通知失敗會留在 `pending`，總管自己的回合不會產生對自己的通知。
   `kind` 除了 assignment 相關與 `health_changed`，另有 `bot_restart_failed`（批次更新重啟後某顆沒回來，payload
@@ -56,7 +66,7 @@
 
 `scripts/agm.py` 由 `include_str!` 編進 daemon 二進位，`setup` 時寫成 `<cwd>/bin/agm`（0755），所以
 release 安裝不依賴 build 機上的 repo 路徑。子命令：`state`、`supervisor`、`search`、`messages`、
-`assign`、`assignments`、`inbox`、`ack`、`handoff`、`quota`、`health`、`bot`；輸出一律 JSON。
+`assign`、`assignments`、`inbox`（預設只列未 ack、最舊在前；`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`bot`；輸出一律 JSON。
 
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`。
 **沒有 token**——CLI 自己在執行期 `GET /api/session` 取，不進 argv、不進檔案、不進交接摘要；

@@ -424,9 +424,17 @@ async fn quota_reset_at(app: &Arc<App>, identity: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- the loop
 
+/// The generation whose controller loop was spawned last (`-1` = none yet).
+static LIVE_GENERATION: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
 /// Start the controller for `generation`. An older controller notices the mismatch on its
 /// next tick and stops, so a model switch never leaves two of them sending notifications.
 pub fn spawn(app: Arc<App>, generation: i64) {
+    // One loop per generation. `start` after a `stop` keeps the generation, and the watchdog
+    // goes through the same start path: without this every restart added a loop.
+    if LIVE_GENERATION.swap(generation, std::sync::atomic::Ordering::SeqCst) == generation {
+        return;
+    }
     tokio::spawn(async move {
         let mut turns = app.subscribe_turns();
         let mut tick = tokio::time::interval(TICK);
@@ -464,6 +472,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     reconcile(&app).await;
                     drain_queue(&app).await;
                     notify(&app).await;
+                    super::watchdog::tick(&app).await;
                 }
             }
         }
