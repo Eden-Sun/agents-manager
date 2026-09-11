@@ -117,29 +117,39 @@ cargo down    # 兩個都停掉
 
 以前反過來：預設關閉，只有 `cargo dev` 帶的 `AM_DEV_LAN=1` 才打開。但這顆 binary 一天會被人和其他 agent 用 `cargo build --release && ./target/release/agents-managerd serve` 重啟幾十次，每次忘記帶環境變數，手機和其他機器就悄悄連不上 `:7788`。忘得掉的環境變數不是安全邊界，「在不在 .app bundle 裡」是啟動器忘不掉的，而且非開發者只會跑打包版。要覆寫就用 `AM_DEV_LAN`：`=0` 讓開發版只收本機，`=1` 讓打包版對外開。
 
-也可以手動分開跑：
+也可以手動分開跑，這樣 7788 自己就送 UI，不必另開 Vite：
 
 ```bash
-# daemon（監聽 127.0.0.1:7788；首次啟動會寫 ~/.config/agents-manager/）
-cargo build --release
-./target/release/agents-managerd serve
-
-# 另一個終端：前端 dev server（Vite 把 /api、/hook、/ws 代理到 7788）
+# 1. 先建前端：release daemon 預設開 `embed-ui`，編譯當下把 web/dist 內嵌進二進位，所以順序不能反
 cd web
 bun install
+bun run build        # → web/dist
+cd ..
+
+# 2. daemon（首次啟動會寫 ~/.config/agents-manager/）
+cargo build --release -p agents-managerd
+./target/release/agents-managerd serve    # http://127.0.0.1:7788
+```
+
+- 跳過第 1 步也編得過，但那顆 daemon 沒有 UI：開 7788 只會拿到一行「web UI not embedded」的 404。之後補 build 前端，還要讓 daemon **重新編譯**才會嵌進去（cargo 看不到 `web/dist` 變了，見 `daemon/src/assets.rs` 開頭的說明）。
+- workspace 裡的 `desktop/`（Tauri 殼）需要 `desktop/binaries/agents-managerd-<triple>` 這個 sidecar，只有 `scripts/package-dmg.sh` 會放進去，所以它不在預設建置範圍：不帶 `-p` 的 `cargo build` / `cargo test` 只建 `daemon` 與 `xtask`。要打包成 app 請看 [`docs/PACKAGING.md`](docs/PACKAGING.md)。
+
+前端要邊改邊看時，daemon 照上面跑，另一個終端開 Vite dev server（把 /api、/hook、/ws 代理到 7788）：
+
+```bash
+cd web
 bun run dev          # http://localhost:5173
 ```
 
-開發期也可以 `cargo run -- serve`（debug build）。`vite.config.ts` 必須 `changeOrigin: true`：daemon 檢查 `Host` 必須是 `127.0.0.1:<port>` / `localhost:<port>`，不改寫 Host 會拿到 403。
+開發期也可以 `cargo run -p agents-managerd -- serve`（debug build）。`vite.config.ts` 必須 `changeOrigin: true`：daemon 檢查 `Host` 必須是 `127.0.0.1:<port>` / `localhost:<port>`，不改寫 Host 會拿到 403。
 
 沒有 herdr、只想看 UI：
 
 ```bash
 cd web
+bun install
 VITE_MOCK=1 bun run dev
 ```
-
-release 二進位預設開 `embed-ui`：先 `cd web && bun run build` 再 `cargo build --release`，之後開 `http://127.0.0.1:7788` 即可，不必另開 Vite。
 
 設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫）。`config.toml`、SQLite、`ui-token` 都在那裡，**不要**提交進 git。
 

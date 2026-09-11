@@ -1,5 +1,9 @@
 [workspace]
 members = ["daemon", "desktop", "xtask"]
+# A bare `cargo build` / `cargo test` skips `desktop`: its tauri build script needs the
+# `binaries/agents-managerd-<triple>` sidecar that only scripts/package-dmg.sh copies in.
+# `tauri build` runs cargo inside desktop/, so packaging still builds it.
+default-members = ["daemon", "xtask"]
 resolver = "2"
 
 [profile.release]
