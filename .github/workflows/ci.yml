@@ -79,6 +79,9 @@ jobs:
 
   lint:
     runs-on: macos-latest
+    env:
+      # 下面用 grep 數 warning，顏色碼會讓 `path:line:col: warning` 對不上而算成 0。
+      CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
