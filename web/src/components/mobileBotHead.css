@@ -26,30 +26,23 @@
     align-self: center;
   }
 
-  /* 名字＋★＋齒輪，底下那行 kind＋版本：靠上排，第一行跟分頁對齊。 */
+  /* 名字與 kind＋版本上下疊成兩行，總高跟旁邊 ★／⚙ 的 40px 對齊——標題列不必為了名字
+     再多一行。★／⚙ 在 DOM 裡是名字那一行的兄弟，這裡用絕對定位把它們拉出來靠右、
+     垂直置中跨兩行；名字那行留 84px 的右內距給它們。 */
   .main-head.bot-head > .main-title {
     grid-area: 1 / 2;
-    justify-content: flex-start;
+    position: relative;
+    justify-content: center;
+    gap: 0;
+    min-height: 40px;
   }
 
-  /* 名字那顆不撐高：它跟 ★／⚙ 同一行，行高由 40px 的鍵決定，名字本身只要文字加一點內距。
-     （styles.css 手機區塊把 `.bot-name-btn` 拉到 40px 觸控高度，這裡收回——整顆
-     `.bot-switcher-btn` 仍是可點的，高度靠 `align-items: stretch` 跟上鍵的 40px。） */
   .main-head.bot-head .main-title-row {
-    align-items: stretch;
-  }
-
-  .main-head.bot-head .main-title-row > .lamp {
-    align-self: center;
-  }
-
-  .main-head.bot-head .main-title-row > .bot-switcher > .bot-name-btn {
     min-height: 0;
-    height: auto;
-    padding: 1px 4px;
+    padding-right: 84px;
   }
 
-  /* 名字那叢吃掉第一行所有剩餘寬度；★ 與齒輪靠右貼著分頁，名字短的時候也不跟過去。 */
+  /* 名字那叢吃掉剩餘寬度，短名字時 ★／⚙ 也不跟過去。 */
   .main-head.bot-head .main-title-row > .bot-switcher {
     flex: 1 1 auto;
     min-width: 0;
@@ -57,17 +50,32 @@
 
   .main-head.bot-head .main-title-row > .bot-switcher > .bot-name-btn {
     max-width: 100%;
+    min-height: 0;
+    height: auto;
+    padding: 1px 4px;
   }
 
-  .main-head.bot-head .main-title-row > .primary-star {
-    flex: none;
-    width: 36px;
-    min-width: 36px;
-    margin-left: auto;
+  .main-head.bot-head .main-title-row > .primary-star,
+  .main-head.bot-head .main-title-row > .icon-btn.gear {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
   }
 
   .main-head.bot-head .main-title-row > .icon-btn.gear {
-    flex: none;
+    right: 0;
+  }
+
+  .main-head.bot-head .main-title-row > .primary-star {
+    right: 44px;
+    width: 36px;
+    min-width: 36px;
+  }
+
+  .main-head.bot-head .mobile-bot-version {
+    min-height: 0;
+    padding-left: 4px;
   }
 
   .main-head.bot-head > .tabs {
