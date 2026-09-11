@@ -1,0 +1,94 @@
+# push 到 main 與每個 PR 都跑。本地收尾前跑同一組：scripts/check.sh（見該檔用法）。
+#
+# 擋 merge 的：web（bun install --frozen-lockfile → tsc → oxlint → vite build）與
+# daemon（cargo test -p agents-managerd）。
+#
+# 只報告、不擋的：cargo fmt --check 與 cargo clippy（有 warning 就標紅）。2026-09-11
+# 接 CI 時 main（3ccec5f）的現況：rustfmt 47 個檔、1869 處 diff；clippy 45 則 warning。
+# 最新數字看 lint job 的 summary。一次性全 repo `cargo fmt` 會跟每個 agent 手上的 WIP
+# 衝突，所以先不擋；等有人專門清完（一個 commit 做完 fmt、同時通知所有 agent rebase），再把 lint job
+# 裡的 continue-on-error 拿掉。
+#
+# 跑在 macOS：daemon 主要跑在 macOS（desktop 打的是 dmg），測試也以 macOS 為準。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      # 型別檢查一定要 -p tsconfig.app.json：根目錄 tsconfig.json 只有 references，
+      # 單跑 `tsc --noEmit` 什麼都沒檢查。
+      - run: scripts/check.sh web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 3
+
+  daemon:
+    # rust-embed 在編譯時把 web/dist 嵌進 daemon，所以一定要等 web build 完。
+    needs: web
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # check.sh 會清掉 AM_MODEL / AM_EFFORT（測試對這兩個敏感）。
+      - run: scripts/check.sh daemon
+
+  lint:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # clippy 也要編 assets.rs，rust-embed 要求資料夾存在；lint 不需要真的前端。
+      - run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      - name: cargo fmt --check（只報告）
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo fmt -p agents-managerd -- --check > fmt.txt || rc=$?
+          files=$(grep '^Diff in' fmt.txt | awk '{print $3}' | cut -d: -f1 | sort -u | wc -l | tr -d ' ' || true)
+          hunks=$(grep -c '^Diff in' fmt.txt || true)
+          echo "### cargo fmt --check：${files} 個檔、${hunks} 處 diff（不擋 merge）" >> "$GITHUB_STEP_SUMMARY"
+          exit "${rc:-0}"
+      - name: cargo clippy（只報告）
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # 不用 -D warnings：那樣第一個 target 報錯就停，數字會少算。改成數完再決定紅不紅。
+          cargo clippy -p agents-managerd --all-targets --locked --message-format=short 2> clippy.txt
+          grep -E '^[^ ]+:[0-9]+:[0-9]+: (warning|error)' clippy.txt | sort -u > clippy-uniq.txt || true
+          n=$(wc -l < clippy-uniq.txt | tr -d ' ')
+          echo "### cargo clippy：${n} 則 warning（不擋 merge）" >> "$GITHUB_STEP_SUMMARY"
+          [ "$n" -eq 0 ] || rc=1
+          cat clippy-uniq.txt
+          exit "${rc:-0}"
