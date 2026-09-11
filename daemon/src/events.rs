@@ -176,10 +176,29 @@ async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
 
 async fn end_runs_for_pane(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
     let fallback = app.session_for_host(host).await.unwrap_or_default();
+    let mut ended_a_child = false;
     for r in crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await.unwrap_or_default() {
         crate::lifecycle::mark_run_exited(app, &r.id, "pane exited").await;
+        if matches!(crate::db::bot(&app.db, &r.bot_id).await, Ok(Some(b)) if b.managed_by == "child") {
+            ended_a_child = true;
+        }
     }
     unwatch_pane_on_session(app, host, session, pane_id).await;
+    // #60: retiring a child whose pane closed is the reconcile's call (it checks that herdr no
+    // longer lists the agent — a moved pane reports its old id closed too). But closing a pane
+    // is not guaranteed to produce the `pane.agent_detected` that would schedule one, so the
+    // child could sit in the sidebar until some unrelated event. Ask for a reconcile, a beat
+    // late like the agent-detected path, so herdr has settled.
+    if ended_a_child {
+        let app = app.clone();
+        let host = host.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
+                tracing::debug!(host = %host, error = ?e, "reconcile after a child's pane closed failed");
+            }
+        });
+    }
 }
 
 /// Open (or replace) the per-run status subscription in the host's configured session.

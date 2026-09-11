@@ -365,6 +365,11 @@ label = "foo"
 兩條都命中時以血緣為準。認領後走同一條既有路徑：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run、
 同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
 
+**子 agent 退役（#60，2026-09-11）**：子 agent 只活在它的 pane 裡，所以 pane 沒了它就退役（`bots.deleted_at`，對話保留）。兩條路都要接得住：
+reconcile 發現 run 還在、agent 卻不見（原本就有）；以及 `herdr pane close` 時 `pane_closed` 事件**先**把 run 結束、reconcile 後到——
+這時 bot 沒有 active run、herdr 清單也找不到它的 agent 名，且它至少有一個已結束的 run，就一樣退役。herdr 還列著這個 agent 的（例如 pane 被搬走、
+舊 pane id 被報成關閉）不算，會被重新收編。`pane_closed` 結束的若是子 agent 的 run，daemon 會在 2 秒後自己排一次 reconcile，不必等下一個不相干的事件。
+
 ### 6.5b herdr PATH shim（把命名規則變成機制，2026-09-07）
 
 daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/herdr`

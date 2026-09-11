@@ -427,7 +427,33 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 sync_pane_model(app, host, &client, &bot, agent).await;
                 tracing::info!(host, bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
             }
-            (None, None) => {}
+            (None, None) => {
+                // #60: a spawned child whose pane was closed. `herdr pane close` reports
+                // `pane_closed` first and `events::end_runs_for_pane` ends the run; by the time a
+                // reconcile gets here the child has no run and herdr no longer lists its agent —
+                // the "agent gone" branch above never sees it, and the child used to stay in the
+                // sidebar for good. A child cannot be started from here (`start_bot` refuses), so
+                // with its last run over and its agent gone it is done: retire it the same way.
+                // An agent herdr still lists is not this case — it lands in `(None, Some)` and is
+                // adopted again.
+                if bot.managed_by == "child" {
+                    let ended: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM runs WHERE bot_id = ? AND state NOT IN ('starting','running','stopping')",
+                    )
+                    .bind(&bot.id)
+                    .fetch_one(&app.db)
+                    .await?;
+                    if ended > 0 {
+                        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
+                            .bind(db::now())
+                            .bind(&bot.id)
+                            .execute(&app.db)
+                            .await?;
+                        app.emit("project_changed", json!({"project_id": bot.project_id})).await;
+                        tracing::info!(host, bot = %bot.name, "reconcile: spawned child retired — its run had already ended and herdr no longer lists its agent");
+                    }
+                }
+            }
         }
         app.emit_bot_status(&bot.id).await;
     }
@@ -1120,6 +1146,92 @@ mod compat_tests {
     #[tokio::test]
     async fn a_fresh_run_survives_when_agent_get_still_points_at_the_closed_pane() {
         a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(true).await;
+    }
+
+    /// A child row with a run on `pane`, the way reconcile adopts one (#60 tests).
+    async fn a_child(env: &tt::Env, parent: &str, name: &str, agent: &str, ws: &str, tab: &str, pane: &str) -> (String, String) {
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, auto_approve, env_json, managed_by, parent_bot_id, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',0,0,1,'{}','child',?,'tok',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(name)
+        .bind(parent)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, adopted, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,1,?,'test',?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind(ws)
+        .bind(tab)
+        .bind(pane)
+        .bind(agent)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        (bot, run)
+    }
+
+    /// **#60.** `herdr pane close` on a child: herdr's `pane_closed` event arrives first and
+    /// `events::end_runs_for_pane` ends the run; only *then* does a reconcile run. It used to
+    /// find "no active run, no agent" and do nothing (`(None, None) => {}`), so the child stayed
+    /// in the sidebar forever — 19 of them on 2026-09-11 (C1-部署console alone had 10).
+    #[tokio::test]
+    async fn a_child_whose_pane_closed_before_the_reconcile_is_retired() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let kid_agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
+        let (kid, run) = a_child(&env, &parent, "kid", &kid_agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
+
+        // `pane_closed` first: the pane and its agent are gone, and the run is ended the way
+        // `end_runs_for_pane` ends it…
+        client.pane_close(&pane.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        crate::lifecycle::mark_run_exited(&app, &run, "pane exited").await;
+        // …then the reconcile.
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let b = db::bot(&app.db, &kid).await.unwrap().unwrap();
+        assert!(b.deleted_at.is_some(), "a child whose pane was closed must leave the sidebar");
+    }
+
+    /// The limit of the rule above: an ended run is not enough. If herdr still lists the
+    /// child's agent (its pane was moved, say, and the old pane id reported closed), the child
+    /// is alive and gets its run back instead of being retired.
+    #[tokio::test]
+    async fn a_child_whose_run_ended_but_whose_agent_is_still_listed_is_kept() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let kid_agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
+        let (kid, run) = a_child(&env, &parent, "kid", &kid_agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": kid_agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+        crate::lifecycle::mark_run_exited(&app, &run, "pane exited").await;
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let b = db::bot(&app.db, &kid).await.unwrap().unwrap();
+        assert!(b.deleted_at.is_none(), "the agent is still there, so the child is not retired");
+        let r = run_of(&app, &kid).await.unwrap();
+        assert_eq!(r.state, "running", "and it gets a run again");
     }
 
     /// A spawned child is adopted with the model and effort its CLI is actually running:
