@@ -36,40 +36,136 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
         "quota": crate::quota::snapshot(app).await,
-        "pending_assignments": crate::supervisor::store::pending_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        // Two numbers, not one sum: an assignment still running and a notification nobody
+        // acked are different kinds of "owed", and adding them hid a 464-event backlog.
+        "pending_assignments": crate::supervisor::store::open_assignment_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "inbox_open": crate::supervisor::store::open_inbox_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
     }))
 }
 
-/// Poll health outside the assignment controller. The daemon emits only changes, and sends a
-/// durable inbox event when the summary changes so AGM can reason about it without `/loop`.
+/// What the inbox debounce keys on. `idle` and `busy` are one state here: the manager going
+/// busy on its own turn is not news the manager needs an inbox event about.
+pub fn inbox_state(supervisor_status: &str) -> &str {
+    match supervisor_status {
+        "idle" | "busy" => "running",
+        other => other,
+    }
+}
+
+/// No one is there to read an event: it is not queued, and whatever changed meanwhile is
+/// folded into the one snapshot sent when the manager is back.
+fn manager_down(inbox_state: &str) -> bool {
+    matches!(inbox_state, "stopped" | "starting" | "not_configured")
+}
+
+/// Decides which health ticks become `health_changed` inbox events.
+///
+/// 2026-09-10: the fingerprint included the busy / running / pending counters, so a night of
+/// bots starting and finishing put 464 events in front of a manager that was not even up. Only
+/// the severity and the manager's own state count now, and nothing is queued while it is down.
+#[derive(Debug, Default)]
+pub struct Debounce {
+    last_pushed: Option<(String, String)>,
+    /// Something changed while the manager was down; it gets one snapshot when it is back.
+    suppressed: bool,
+}
+
+impl Debounce {
+    /// `true` = queue this tick's snapshot.
+    pub fn observe(&mut self, severity: &str, supervisor_status: &str) -> bool {
+        let state = inbox_state(supervisor_status);
+        let key = (severity.to_string(), state.to_string());
+        let changed = self.last_pushed.as_ref() != Some(&key);
+        if manager_down(state) {
+            if changed {
+                self.suppressed = true;
+            }
+            return false;
+        }
+        if changed || self.suppressed {
+            self.last_pushed = Some(key);
+            self.suppressed = false;
+            return true;
+        }
+        false
+    }
+}
+
+/// Poll health outside the assignment controller. The daemon emits every fingerprint change to
+/// the UI, and queues a durable inbox event only when the *state* changes (see [`Debounce`]),
+/// so AGM can reason about it without `/loop` and without wading through counters.
 pub fn spawn(app: Arc<App>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut previous = String::new();
+        let mut debounce = Debounce::default();
         loop {
             tick.tick().await;
             let Ok(snapshot) = snapshot(&app).await else { continue };
+            let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown").to_string();
+            let sup_status = snapshot.pointer("/supervisor/status").and_then(Value::as_str).unwrap_or("unknown").to_string();
             let fingerprint = serde_json::json!({
-                "status": snapshot.get("status"),
-                "supervisor": snapshot.get("supervisor").and_then(|v| v.get("status")),
+                "status": status,
+                "supervisor": sup_status,
                 "running": snapshot.pointer("/bots/running"),
                 "busy": snapshot.pointer("/bots/busy"),
                 "pending": snapshot.get("pending_assignments"),
+                "inbox_open": snapshot.get("inbox_open"),
                 "disconnected": snapshot.pointer("/hosts/disconnected"),
             }).to_string();
-            if fingerprint == previous { continue; }
-            previous = fingerprint.clone();
-            let _ = app.emit("supervisor_health", snapshot.clone()).await;
-            let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown");
-            let bucket = chrono::Utc::now().timestamp() / 1800;
-            let key = format!("health:{fingerprint}:{bucket}");
+            if fingerprint != previous {
+                previous = fingerprint;
+                let _ = app.emit("supervisor_health", snapshot.clone()).await;
+            }
+            if !debounce.observe(&status, &sup_status) {
+                continue;
+            }
+            let key = format!("health:{status}:{}:{}", inbox_state(&sup_status), chrono::Utc::now().timestamp());
             let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
             let _ = crate::supervisor::store::push_inbox(
                 &app.db, &key, "health_changed", None, bot_id, None, &snapshot,
             ).await;
-            tracing::info!(status, "supervisor health changed");
+            tracing::info!(status, supervisor = %sup_status, "supervisor health changed");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counters_do_not_make_events_only_state_does() {
+        let mut d = Debounce::default();
+        assert!(d.observe("healthy", "idle"), "the first reading after boot is news");
+        // Ticks with different bot counts land here as the same (severity, state): nothing.
+        assert!(!d.observe("healthy", "idle"));
+        assert!(!d.observe("healthy", "busy"), "the manager's own busy/idle is not a state change");
+        assert!(d.observe("degraded", "idle"));
+        assert!(d.observe("healthy", "idle"));
+        assert!(d.observe("critical", "waiting_quota"));
+    }
+
+    #[test]
+    fn nothing_is_queued_while_the_manager_is_down_and_one_snapshot_when_it_is_back() {
+        let mut d = Debounce::default();
+        assert!(d.observe("healthy", "idle"));
+        // 5.5 hours of 30-second ticks against a dead manager: zero events, not 464.
+        for _ in 0..660 {
+            assert!(!d.observe("degraded", "stopped"));
+        }
+        assert!(!d.observe("degraded", "starting"));
+        assert!(d.observe("healthy", "idle"), "one snapshot once it is back, even to the same state");
+        assert!(!d.observe("healthy", "idle"));
+    }
+
+    #[test]
+    fn a_manager_that_was_never_up_gets_its_first_snapshot_when_it_is() {
+        let mut d = Debounce::default();
+        assert!(!d.observe("degraded", "not_configured"));
+        assert!(!d.observe("degraded", "stopped"));
+        assert!(d.observe("healthy", "busy"));
+    }
 }

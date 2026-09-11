@@ -9,6 +9,7 @@ pub mod controller;
 pub mod health;
 pub mod setup;
 pub mod store;
+pub mod watchdog;
 
 use crate::lifecycle::LcError;
 use crate::state::App;
@@ -27,6 +28,46 @@ fn op_lock() -> &'static Mutex<()> {
 
 pub async fn lock() -> tokio::sync::MutexGuard<'static, ()> {
     op_lock().lock().await
+}
+
+const BOOTSTRAP_REQUEST_ID: &str = "agm-bootstrap-v1";
+const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作委派。
+
+請先依你的恢復流程讀取 handoff.md、bin/agm assignments、bin/agm inbox，再用 bin/agm state 查即時狀態。確認你是 agents-manager 的總管，能協助使用者找回適合的既有 bot、提出有證據的分配建議，並在使用者明確交辦後透過 bin/agm 建立與追蹤 assignment。
+
+請用繁體中文回覆一段簡短的「AGM 已就緒」訊息，說明使用者可以直接提出問題、要求尋找相關 bot，或說「交給你推薦的 bot」。不要自行建立工作，也不要把這段握手當成待辦。"#;
+
+/// Bring the manager up. The one start path, shared by `POST /supervisor/start` and the
+/// watchdog; the caller holds [`lock`]. `detail` is what `status_detail` should say afterwards
+/// (the watchdog writes why it did this; the API clears it).
+pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> {
+    let bot = manager_bot(app)
+        .await?
+        .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
+    if crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.is_none() {
+        crate::lifecycle::start_bot(app, &bot.id).await?;
+    }
+    // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
+    // idempotent handshake so the user can immediately see how to use AGM; the stable request
+    // id prevents a restart from creating another greeting turn.
+    if let Err(e) = crate::lifecycle::prompt(app, &bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID).await {
+        tracing::warn!(error = ?e, "AGM bootstrap prompt was not delivered");
+    }
+    // The bot's args carry `--remote-control AGM`, which is a *request*. Whether a remote
+    // session actually came up is something only an observation can say, so the status stays
+    // `requested` until something verifies it.
+    let _ = store::set_remote(&app.db, "requested", None).await;
+    let _ = store::set_status(&app.db, "", detail).await;
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let gen = if sup.generation == 0 {
+        store::bump_generation(&app.db).await.map_err(up)?
+    } else {
+        sup.generation
+    };
+    controller::spawn(app.clone(), gen);
+    controller::reconcile(app).await;
+    app.emit("supervisor_changed", json!({"started": true})).await;
+    Ok(())
 }
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {

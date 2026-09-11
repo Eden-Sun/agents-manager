@@ -521,7 +521,9 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
 
 
 def cmd_inbox(client: Client, cfg: dict, args) -> object:
-    return client.get("/api/supervisor/inbox")
+    # 預設是「工作視圖」：只有還沒 ack 的（pending + delivered），最舊的在前，所以照順序
+    # ack 真的清得掉。--all 才是含 handled 的稽核視圖（最新在前）。
+    return client.get("/api/supervisor/inbox", {"all": "1" if args.all else None, "limit": args.limit})
 
 
 def cmd_ack(client: Client, cfg: dict, args) -> object:
@@ -574,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm messages <bot-id> --limit 50       讀某個 bot 的原始對話\n"
             "  agm assign --bot <id> --text '…' --request-id agm-2026-09-09-001\n"
             "  agm assignments --status pending       對帳未結案交辦\n"
-            "  agm inbox / agm ack <event-id>         處理完成通知\n"
+            "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
             "\n"
             "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。"
@@ -625,7 +627,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--status", help="只列這個狀態")
     s.set_defaults(func=cmd_assignments)
 
-    s = sub.add_parser("inbox", help="待處理的完成／失敗通知")
+    s = sub.add_parser("inbox", help="還沒 ack 的通知（最舊在前）；--all 才含已處理的")
+    s.add_argument("--all", action="store_true", help="含 state=handled 的事件（最新在前）")
+    s.add_argument("--limit", type=int, default=200, help="最多幾筆（預設 200，上限 1000）")
     s.set_defaults(func=cmd_inbox)
 
     s = sub.add_parser("ack", help="確認已處理一則通知")
