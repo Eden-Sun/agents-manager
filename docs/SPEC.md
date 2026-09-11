@@ -449,6 +449,20 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
 
 ### 6.9 一鍵套用 claude 更新（批次 exit + resume，v4.4）
 
+> **2026-09-11 競態修正**（事故：2026-09-10 23:02，AGM 與另外三顆 bot 的 pane 被關、5.5 小時沒人拉回）。
+> 原本 stop 與 start 各拿一次 bot 鎖，中間有空檔；同時在跑的 reconcile 在拿鎖**之前**就讀了 agent 清單，
+> 排在鎖上等，stop 一放鎖就搶先進來，看到「沒有 active run、清單上卻還有這個 agent」，把剛被停掉的 agent
+> 收編成新 run；start 接著以 `active run already exists` 放棄，pane-closed 事件再把收編的 run 結束——
+> bot 從此沒人啟動。修正四件：
+> 1. `restart_bot_with`（批次與 `/bots/{id}/restart` 共用）在**一次持鎖**裡做完 stop + start，不留空檔。
+>    若 start 仍被一個 pane 已不存在的 run 擋住，就把那個 run 結束並再試一次。
+> 2. reconcile 拿到鎖之後，若要**收編**（沒有 active run）或要**改寫 run 的 pane**（清單上的 pane 與 run 記錄不同），
+>    先向 herdr 重新 `agent.get` + `pane.get` 確認；agent 已不在或 pane 已關就不收編、不改寫。RPC 失敗時維持原判斷。
+> 3. 批次裡某顆最後仍啟動失敗：若它留下一個 pane 已關的 run 就結束掉（bot 顯示為停止，可再啟動），並推一則
+>    supervisor inbox 事件 `kind = bot_restart_failed`（payload：`batch_id`、`bot_id`、`name`、`error`）。
+> 4. 總管 bot（`supervisors.bot_id`，即 AGM）**排在最後**重啟；重啟後 60 秒內每 5 秒檢查一次它是否 running、
+>    pane 還在、agent 還在，沒回來就自動再啟動一次，結果推 `kind = supervisor_restart_retry`（payload 含 `ok`、`error`）。
+
 claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update installed · Restart to update`
 （daemon 收在 `runs.update_notice`，見 §4.5 / API.md），套用的唯一方式就是重啟。十顆 bot 就是點
 十次「重啟」，而且每點一次都要先自己確認那顆有沒有在忙。
@@ -473,8 +487,8 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   批次操作最不能做的事就是把使用者正在等的那一回合砍掉，所以規則刻意保守：`unknown` 也跳過。
   `child` / `team` 不歸這顆按鈕管：子 agent 是父 agent 開的 pane（§6.5a，`start_bot` 本來就會拒絕，
   放進去只會變成一則看不懂的失敗），team 成員的 run 由 team 排程記著，插手會讓排程對不上。
-- 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::stop_bot` → `lifecycle::start_bot_with(StartOpts
-  { resume_native: true })`。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
+- 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`
+  ——stop 與 start 在**同一次持有 bot 鎖**裡做完（見下方「2026-09-11 競態修正」）。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
   之後，剛結束那個 `native_session_id` 就成了 `last_native_session_id` 找得到的「上一個 session」，
   claude 拿到的是 `--resume <session>`。沒有另一套啟動流程，hook 注入 / 身份 / 模型 / pane 版面全部照舊。
   - 與 `POST /bots/:id/restart` 的差別只有這個旗標：那條是「重新開始」，這條是「接著跑」。

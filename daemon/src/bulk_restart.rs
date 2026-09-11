@@ -18,6 +18,7 @@ use crate::lifecycle::{self, LcError, StartOpts};
 use crate::state::App;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 一顆候選 bot 的判斷素材（純資料，好寫測試）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,16 +153,17 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
     let cands = candidates(app).await?;
     let (go, skipped) = plan(&cands);
     let batch_id = db::ulid();
-    let planned: Vec<serde_json::Value> = go.iter().map(|c| json!({"bot_id": c.bot_id, "name": c.name})).collect();
+    let supervisor = supervisor_bot_id(app).await;
+    let targets = supervisor_last(go.iter().map(|c| (c.bot_id.clone(), c.name.clone())).collect(), supervisor.as_deref());
+    let planned: Vec<serde_json::Value> = targets.iter().map(|(id, name)| json!({"bot_id": id, "name": name})).collect();
     let skipped_json: Vec<serde_json::Value> = skipped.iter().map(|(c, w)| skip_json(c, *w)).collect();
-    let targets: Vec<(String, String)> = go.iter().map(|c| (c.bot_id.clone(), c.name.clone())).collect();
     let total = targets.len();
 
     if total > 0 {
         let app2 = app.clone();
         let bid = batch_id.clone();
         let skipped_for_task = skipped_json.clone();
-        tokio::spawn(async move { run_batch(&app2, &bid, targets, skipped_for_task).await });
+        tokio::spawn(async move { run_batch(&app2, &bid, targets, skipped_for_task, supervisor).await });
     } else {
         // 沒有可重啟的也要送一次 done：前端才不必自己分「送出去了但什麼都沒發生」這一種。
         app.emit(
@@ -185,6 +187,7 @@ async fn run_batch(
     batch_id: &str,
     targets: Vec<(String, String)>,
     skipped: Vec<serde_json::Value>,
+    supervisor: Option<String>,
 ) {
     let total = targets.len();
     let mut ok: Vec<serde_json::Value> = Vec::new();
@@ -212,6 +215,19 @@ async fn run_batch(
             Err(e) => {
                 let msg = format!("{e:#}");
                 tracing::warn!(bot = %name, error = %msg, "restart for the claude update failed");
+                settle_failed_restart(app, &bot_id).await;
+                // Its own kind, not `health_changed`: the supervisor has to be able to tell "a bot
+                // the batch took down did not come back" from background noise.
+                let _ = crate::supervisor::store::push_inbox(
+                    &app.db,
+                    &format!("bot_restart_failed:{batch_id}:{bot_id}"),
+                    "bot_restart_failed",
+                    None,
+                    Some(&bot_id),
+                    None,
+                    &json!({"batch_id": batch_id, "bot_id": bot_id, "name": name, "error": msg}),
+                )
+                .await;
                 failed.push(json!({"bot_id": bot_id, "name": name, "error": msg}));
                 app.emit(
                     "bots_restart_progress",
@@ -222,6 +238,9 @@ async fn run_batch(
             }
         }
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+        if supervisor.as_deref() == Some(bot_id.as_str()) {
+            tokio::spawn(verify_supervisor_back(app.clone(), bot_id.clone(), name.clone(), batch_id.to_string()));
+        }
     }
     app.emit(
         "bots_restart_done",
@@ -236,9 +255,99 @@ async fn run_batch(
 ///
 /// 跟 `lifecycle::restart_bot` 的差別只有這個旗標——那條路是「重新開始」，這條是「接著跑」。
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String> {
-    lifecycle::stop_bot(app, bot_id).await.map_err(why)?;
-    lifecycle::start_bot_with(app, bot_id, StartOpts { resume_native: true }).await.map_err(why)
+    // One hold of the bot's lock for both halves — see `lifecycle::restart_bot_with` for the
+    // 2026-09-10 23:02 race this closes.
+    lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true }).await.map_err(why)
 }
+
+/// The supervisor's bot (AGM), if one is set up. Read straight off the row: `get_or_init` would
+/// create a supervisor where the user never asked for one.
+async fn supervisor_bot_id(app: &Arc<App>) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT bot_id FROM supervisors LIMIT 1")
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .filter(|s| !s.is_empty())
+}
+
+/// The supervisor goes **last**: it is the one bot that notices and repairs the others, so it
+/// should not be down while they restart — and if the batch goes wrong, it should still have
+/// been up to see it.
+pub fn supervisor_last(mut targets: Vec<(String, String)>, supervisor: Option<&str>) -> Vec<(String, String)> {
+    if let Some(sid) = supervisor {
+        if let Some(i) = targets.iter().position(|(id, _)| id == sid) {
+            let t = targets.remove(i);
+            targets.push(t);
+        }
+    }
+    targets
+}
+
+/// A restart that failed must not leave a run behind that points at a closed pane: the UI would
+/// show the bot as running and nothing would ever start it again. End such a run, so the bot reads
+/// as stopped and can be started.
+async fn settle_failed_restart(app: &Arc<App>, bot_id: &str) {
+    let (Ok(Some(run)), Ok(Some(bot))) = (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) else {
+        return;
+    };
+    if !lifecycle::run_alive(app, &run, &bot).await {
+        tracing::warn!(bot = %bot.name, run = %run.id, "restart failed and left a run with no live pane; ending it");
+        lifecycle::mark_run_exited(app, &run.id, "restart for the claude update failed").await;
+        app.emit_bot_status(bot_id).await;
+    }
+}
+
+/// After the supervisor's own restart, check for [`SUPERVISOR_WINDOW`] that it is really back
+/// (running, pane open, agent listed). If it is not, start it once more and put the outcome in
+/// the inbox (`supervisor_restart_retry`) — the one bot that would otherwise notice is this one.
+async fn verify_supervisor_back(app: Arc<App>, bot_id: String, name: String, batch_id: String) {
+    let mut waited = Duration::ZERO;
+    while waited < SUPERVISOR_WINDOW {
+        tokio::time::sleep(SUPERVISOR_POLL).await;
+        waited += SUPERVISOR_POLL;
+        if supervisor_is_back(&app, &bot_id).await {
+            tracing::info!(bot = %name, secs = waited.as_secs(), "supervisor is back after the update restart");
+            return;
+        }
+    }
+    tracing::warn!(bot = %name, "supervisor did not come back within 60s of the update restart; starting it once more");
+    settle_failed_restart(&app, &bot_id).await;
+    let res = match db::active_run(&app.db, &bot_id).await {
+        Ok(Some(run)) => Ok(run.id),
+        _ => lifecycle::start_bot_with(&app, &bot_id, StartOpts { resume_native: true }).await.map_err(why),
+    };
+    let (ok, error) = match &res {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(format!("{e:#}"))),
+    };
+    tracing::info!(bot = %name, ok, ?error, "supervisor restart retry finished");
+    let _ = crate::supervisor::store::push_inbox(
+        &app.db,
+        &format!("supervisor_restart_retry:{batch_id}"),
+        "supervisor_restart_retry",
+        None,
+        Some(&bot_id),
+        None,
+        &json!({"batch_id": batch_id, "bot_id": bot_id, "name": name, "ok": ok, "error": error}),
+    )
+    .await;
+    app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+}
+
+async fn supervisor_is_back(app: &Arc<App>, bot_id: &str) -> bool {
+    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
+    if run.state != "running" {
+        return false;
+    }
+    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
+    lifecycle::run_alive(app, &run, &bot).await
+}
+
+/// How long the supervisor gets to come back after its own update restart.
+const SUPERVISOR_WINDOW: Duration = Duration::from_secs(60);
+const SUPERVISOR_POLL: Duration = Duration::from_secs(5);
 
 /// `LcError` 沒有 `Display`（它是拿來變成 HTTP body 的）。批次的失敗要進 WS 事件、最後印在
 /// 摘要裡給人看，所以這裡把它攤成一句話——衝突就取 daemon 自己寫的 `reason`。
@@ -345,6 +454,44 @@ mod tests {
             skip.iter().map(|(_, w)| w.code()).collect::<Vec<_>>(),
             ["spawned_child", "team_member"]
         );
+    }
+
+    /// 總管（AGM）排在最後重啟，其他順序不動；沒有總管或總管不在這批裡時原樣不變。
+    #[test]
+    fn the_supervisor_is_restarted_last() {
+        let t = |ids: &[&str]| ids.iter().map(|i| (i.to_string(), format!("n-{i}"))).collect::<Vec<_>>();
+        let order = |v: Vec<(String, String)>| v.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(order(supervisor_last(t(&["a", "agm", "b", "c"]), Some("agm"))), ["a", "b", "c", "agm"]);
+        assert_eq!(order(supervisor_last(t(&["a", "b"]), Some("agm"))), ["a", "b"]);
+        assert_eq!(order(supervisor_last(t(&["agm", "a"]), None)), ["agm", "a"]);
+    }
+
+    /// A restart that fails leaves no run pointing at a dead pane, and says so in the supervisor's
+    /// inbox under its own kind — not `health_changed`.
+    #[tokio::test]
+    async fn a_failed_restart_leaves_no_dead_run_and_tells_the_supervisor() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let bot = db::ulid();
+        // An identity this host does not know: `start` refuses before spawning anything.
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, identity, created_at)
+             VALUES (?,?,'alfa','claude','[]',0,1,'tok','nope',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::team::testing::fake_run(&app, &bot).await;
+
+        run_batch(&app, "batch-1", vec![(bot.clone(), "alfa".into())], vec![], None).await;
+
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none(), "no run is left behind for a bot that did not come back");
+        let inbox = crate::supervisor::store::inbox(&app.db, 50).await.unwrap();
+        let ev = inbox.iter().find(|e| e.kind == "bot_restart_failed").expect("the supervisor is told");
+        assert_eq!(ev.bot_id.as_deref(), Some(bot.as_str()));
     }
 
     /// 什麼都沒有時是空計畫，不是錯誤。
