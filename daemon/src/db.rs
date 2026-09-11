@@ -1121,8 +1121,15 @@ pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
 /// The most recent native session from an ended run. Reopen deliberately does not resume an
 /// active run: the scheduler only calls this after the team has reached `done`.
 pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT native_session_id FROM runs
+    Ok(last_native_session(pool, bot_id).await?.map(|(id, _)| id))
+}
+
+/// The last ended run's native session id and, when the provider's hook reported one, the
+/// transcript file it lives in — so a restart can tell a session it can resume from one that
+/// was never written.
+pub async fn last_native_session(pool: &SqlitePool, bot_id: &str) -> Result<Option<(String, Option<String>)>> {
+    Ok(sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND ended_at IS NOT NULL AND native_session_id IS NOT NULL
           ORDER BY started_at DESC LIMIT 1",
     )
