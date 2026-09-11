@@ -39,6 +39,16 @@
 - `POST /api/supervisor/fallback {}` → 同 status，多一個 `switched:bool`。在 cc0 的兩個候選之間切換，
   一個冷卻窗（30 分）內最多自動切一次；額度是同一個帳號的，切第二次不會生出額度，所以會停在
   `waiting_quota` 並記 `quota_reset_at`（讀不到就留 null，不當成 100%）。
+  切換（手動與自動皆同）只在總管 `idle` 且無 in-flight turn、或根本沒在跑時執行；正在回合中回 409 `busy`
+  （自動路徑則下一個 tick 再問）。`/model` 走 `send_slash_line`：會答 claude 的「Switch model?」確認框，
+  框關不掉就退出；live 套用不成而總管仍 idle 時改用重啟套用（`status_detail` 會註明「重啟套用」）。
+  自動判斷（controller 每 10 秒，`supervisor/policy.rs`）：
+  1. 5 小時或 7 天窗任一 `critical`（兩個候選共用）→ `waiting_quota`，`quota_reset_at` = 其中最近的 `resets_at`，
+     不做無效切換；窗恢復（新讀數、或 `resets_at` 已過）→ 解除。
+  2. 在 `fable`、Fable 週桶剩餘 < 5% → 切 `opus`，`quota_reset_at` = Fable 桶的 `resets_at`。
+  3. 在 `opus`、Fable 桶剩餘 ≥ 20%（或其 `resets_at` 已過——探測讀數可能比重置舊）、且上次切換的 30 分冷卻已過
+     → 切回 `fable`，`quota_reset_at` 清空。
+  讀不到額度就什麼都不做（未知不等於滿）。
 - `GET /api/supervisor/assignments` → `{assignments:[]}`；
   `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?}` → 一筆 assignment
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at}`。
