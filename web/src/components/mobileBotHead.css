@@ -1,0 +1,69 @@
+/*
+ * 手機（≤640px）bot 標題列的排位（2026-09-11，ego 390px 實測）。
+ *
+ * 問題：第一行擠了 ☰、名字、⚙、git、★、對話／終端 六樣，名字只剩 94px，
+ * 兩顆 `c0-fable-…` 開頭的兄弟 bot 在標題列上完全分不出來；第二行卻只有
+ * 「✳ 2.1.268」61px，右邊整段空著。
+ *
+ * 決策：git 與 ★ 搬到第二行右側（跟版本號同一行），第一行只留 ☰、名字＋⚙、分頁。
+ * 名字拿回約 200px。這兩顆都不能砍——★ 只有標題列這一個入口，git 鍵是手機上
+ * 開 repo／git／context 列的唯一入口——所以是「換行」不是「讓位」。
+ * 齒輪留在名字旁邊：它是名字的設定，不是全域動作。
+ *
+ * 這個檔案只覆寫 `styles.css` 尾端 `.bot-head` 那組 grid 的格位；欄與列的定義也在這裡
+ * 重寫一次，才能讓 git／★ 落到第二列。
+ */
+@media (width <= 640px) {
+  .main-head.bot-head {
+    grid-template-columns: 40px minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto auto auto;
+    gap: 2px 4px;
+  }
+
+  /* 第一列 44px 高（分頁 40 + 自身 4px 內距），☰ 置中。 */
+  .main-head.bot-head > .menu-btn {
+    grid-area: 1 / 1;
+    align-self: center;
+  }
+
+  /* 名字＋齒輪，以及底下那行版本：跨第一、二列，靠上排，第一行跟分頁對齊。 */
+  .main-head.bot-head > .main-title {
+    grid-area: 1 / 2 / 3 / 3;
+    justify-content: flex-start;
+  }
+
+  .main-head.bot-head .main-title-row {
+    min-height: 44px;
+  }
+
+  .main-head.bot-head > .tabs {
+    grid-area: 1 / 3 / 2 / 5;
+    align-self: start;
+    justify-self: end;
+  }
+
+  .main-head.bot-head > .mobile-git-info {
+    grid-area: 2 / 3;
+    align-self: center;
+    /* 跟齒輪同一種灰：常駐的入口不該長得像警示。 */
+    color: var(--text-faint);
+  }
+
+  .main-head.bot-head > .primary-star {
+    grid-area: 2 / 4;
+    align-self: center;
+  }
+
+  /* 版本那行跟右邊 git／★ 的 40px 鍵垂直對齊。 */
+  .main-head.bot-head .mobile-bot-version {
+    min-height: 40px;
+  }
+
+  .main-head.bot-head > .quota-strip {
+    grid-area: 3 / 1 / 4 / -1;
+  }
+
+  .main-head.bot-head > .mobile-primary-row {
+    grid-area: 4 / 1 / 5 / -1;
+  }
+}
