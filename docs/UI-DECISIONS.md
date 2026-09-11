@@ -1070,3 +1070,33 @@ selector 回**純布林**（`.ready.some(...)`）而不是陣列：`updateBatchC
   （`hooks/useMenuKeys.ts`，「用現有 agent 安裝」的 Bot 選單也用這一支）。
 - **目錄選擇器的 `›` 不再是按鈕。** option 裡不能有按鈕，整列就是 option；`›` 是滑鼠捷徑，鍵盤走 Enter／→。
   焦點一直留在篩選框（`role="combobox"` + `aria-activedescendant`），點列時也不搶焦點。
+
+## 桌機標題列：搶回來的空白要真的被名字／pane id 用掉，不是晾在旁邊（2026-09-11）
+
+「標題列的收縮優先序」那條把「中間空著的空白」從 spacer 改成用 `.bot-head .main-title` 的
+`flex-grow: 1` 搶回來，目的是讓名字有機會顯示更多。但 `.main-title { align-items: flex-start }`
+讓底下兩行（名字那行、kind/model/pane 那行）各自只取自己內容的寬度，不會跟著 `.main-title`
+一起變寬；名字與 pane id 本身又是 `flex: 0 1 auto`（只會縮不會長）。結果搶回來的寬度晾在
+`.main-title` 自己的框裡沒人用——使用者截圖：5 個額度 kind 的 bot，名字被截成「c0-fa…」、
+pane id 截成「w1…」，★/⚙ 之後到額度列之間卻空著一截。空白跟截斷同時發生，是同一個 bug 的
+兩面，不是「量表擠壓名字」本身的問題（那條已經是定案的地板，見上面「標題列的收縮優先序」）。
+
+量過（ego-browser，bot「c0-fable-畫面部分」、5 個 kind、側欄開著；名字寬 / ★⚙到量表空白）：
+
+| 視窗 | 改前名字 | 改後名字 | 改前空白 | 改後空白 |
+| --- | --- | --- | --- | --- |
+| 1500 | 63px（floor） | 63px（floor，沒變） | 20px（`.main-head` 的 `gap`，不是浪費） | 20px |
+| 1700 | 131px（自然寬度） | 183px | 42px | 20px |
+| 2000 | 131px（同上） | 308px（撞 `max-width`） | 304px | 20px |
+
+改法（`web/src/components/desktopBotHead.css`）：`.main-title` 兩行改 `align-items: stretch`
+跟著撐滿；名字與 pane id 這兩個「有內容可以長」的元素改 `flex: 1 1 auto`——有多餘寬度時先讓
+它們用掉，不夠時仍照原本的 `min-width`（4.5em / 0）縮回去，今天定案的地板沒有動。名字另加
+`max-width: 22em` 頂住，不然短名字配上空盪盪的標題列會被撐成一整條大半是空白的按鈕。
+1500px 那格名字沒變：那個寬度下 `.main-title` 本身就被壓到跟內容一樣窄，沒有多餘寬度可以讓，
+這條規則不介入，也沒去動量表寬度。
+
+額度格內距順手收一點：`.quota-hp` 水平 `7px → 5px`，五格省 20px。「桌機額度全顯示」的決定
+沒有動——收的是格子裡的留白，不是哪個 kind 被藏起來或壓縮寬度。
+
+截圖 `docs/screenshots/desktop-head/`。
