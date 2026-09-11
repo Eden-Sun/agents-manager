@@ -37,6 +37,7 @@ import { PrimaryStar } from './PrimaryStar'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
+import { onTabListKeyDown } from './tabKeys'
 import { ToolsHint } from './Tools'
 
 // `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
@@ -1246,6 +1247,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const settingsOpen = settingsBotId === botId
   /** 主機 shell 當第三個分頁：標題列不變，只有下面的內容換成終端（2026-09-08）。 */
   const shellOpen = shellView !== null && !settingsOpen
+  // 下面那塊畫面現在屬於哪個分頁（設定開著時畫在對話那塊上，就算對話）。
+  const panelId = `bot-tabpanel-${botId}`
+  const panelTab = shellOpen && shellView ? 'shell' : tab === 'terminal' && !settingsOpen ? 'terminal' : 'chat'
   const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
 
   return (
@@ -1344,12 +1348,15 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
-        <div className="tabs" role="tablist">
+        {/* 分頁與下面的 `.tab-panel` 用 id 對起來；←/→ 換分頁見 `tabKeys.ts`。 */}
+        <div className="tabs" role="tablist" aria-label="Bot 畫面" onKeyDown={onTabListKeyDown}>
           <button
             type="button"
             className="tab"
             role="tab"
+            id={`${panelId}-chat`}
             aria-selected={tab === 'chat' && !settingsOpen && !shellOpen}
+            aria-controls={panelTab === 'chat' ? panelId : undefined}
             onClick={() => {
               closeShellView()
               setRightTab('chat')
@@ -1361,7 +1368,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             type="button"
             className="tab"
             role="tab"
+            id={`${panelId}-terminal`}
             aria-selected={tab === 'terminal' && !settingsOpen && !shellOpen}
+            aria-controls={panelTab === 'terminal' ? panelId : undefined}
             onClick={() => {
               closeShellView()
               setRightTab('terminal')
@@ -1370,7 +1379,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             終端
           </button>
           {shellOpen ? (
-            <button type="button" className="tab" role="tab" aria-selected title="主機 shell（按「關閉」回到對話）">
+            <button type="button" className="tab" role="tab" id={`${panelId}-shell`} aria-selected aria-controls={panelId} title="主機 shell（按「關閉」回到對話）">
               shell
             </button>
           ) : null}
@@ -1405,6 +1414,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
 
       {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
+      <div className="tab-panel" role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${panelTab}`}>
       {shellOpen && shellView ? (
         <HostShellPanel key={`${shellView.host}:${shellView.paneId}`} host={shellView.host} paneId={shellView.paneId} cwd={shellView.cwd} embedded />
       ) : tab === 'terminal' && !settingsOpen ? (
@@ -1457,6 +1467,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}
+      </div>
     </>
   )
 }

@@ -33,8 +33,9 @@ function MemberRow({ bot }: { bot: Bot }) {
   return (
     <div
       className={`bot-row team-member-row${selected ? ' selected' : ''}`}
-      role="option"
-      aria-selected={selected}
+      // 跟側欄的 bot 列同一套：清單項目（裡面有齒輪鍵，不能是 option），選取中用 aria-current。
+      role="listitem"
+      aria-current={selected ? 'true' : undefined}
       tabIndex={0}
       title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}\n身分 ${bot.identity ?? '預設'}\ncwd ${bot.cwd ?? '（專案根目錄）'}`}
       onClick={() => selectBot(bot.id)}
@@ -238,7 +239,7 @@ function TeamNode({ team }: { team: Team }) {
       <TeamIssueProgress team={team} />
       {team.phase === 'paused' ? <TeamPausedRow team={team} /> : null}
       {open ? (
-        <div className="team-node-members" role="group" aria-label={`${members.length} 位成員`}>
+        <div className="team-node-members" role="list" aria-label={`${members.length} 位成員`}>
           {members.map((b, i) => (
             <div key={b.id} className={`team-member${i === members.length - 1 ? ' last' : ''}`}>
               <MemberRow bot={b} />

@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
 
@@ -58,14 +59,23 @@ export function KindTag({ kind, title, className }: { kind: BotKind; title?: str
 export function KindDisplayToggle() {
   const mode = useStore((s) => s.kindDisplay)
   const setKindDisplay = useStore((s) => s.setKindDisplay)
+  // radio 只用 aria-checked（aria-selected 是 tab / option 的）。鍵盤照 radio 的規矩：
+  // 整組一個 Tab 停點，←/→ 直接換選項——兩個選項、換了就生效，不用再按 Enter。
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return
+    e.preventDefault()
+    const next = mode === 'icon' ? 'text' : 'icon'
+    setKindDisplay(next)
+    e.currentTarget.querySelector<HTMLElement>(`[data-mode="${next}"]`)?.focus()
+  }
   return (
-    <div className="kind-display" role="radiogroup" aria-label="kind 標示方式">
+    <div className="kind-display" role="radiogroup" aria-label="kind 標示方式" onKeyDown={onKeyDown}>
       <span className="kind-display-label">kind 標示</span>
       <div className="tabs small">
-        <button type="button" className="tab" role="radio" aria-checked={mode === 'icon'} aria-selected={mode === 'icon'} onClick={() => setKindDisplay('icon')} title="以圖示顯示 claude / codex / grok">
+        <button type="button" className="tab" role="radio" data-mode="icon" aria-checked={mode === 'icon'} tabIndex={mode === 'icon' ? 0 : -1} onClick={() => setKindDisplay('icon')} title="以圖示顯示 claude / codex / grok">
           圖示
         </button>
-        <button type="button" className="tab" role="radio" aria-checked={mode === 'text'} aria-selected={mode === 'text'} onClick={() => setKindDisplay('text')} title="以文字顯示 claude / codex / grok">
+        <button type="button" className="tab" role="radio" data-mode="text" aria-checked={mode === 'text'} tabIndex={mode === 'text' ? 0 : -1} onClick={() => setKindDisplay('text')} title="以文字顯示 claude / codex / grok">
           文字
         </button>
       </div>

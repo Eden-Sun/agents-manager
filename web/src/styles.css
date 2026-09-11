@@ -2110,7 +2110,7 @@ button:disabled {
  * 這些鍵原本 hover 完全沒有底色變化（掃出來 ΔL* = 0）：不是缺 :hover 規則，
  * 就是只改了框線或底線。統一補上 ghost 的 wash，各自原本的顏色規則不動。
  */
-.tab:not([aria-selected='true']):hover:not(:disabled),
+.tab:not([aria-selected='true']):not([aria-checked='true']):hover:not(:disabled),
 .mem-open:hover:not(:disabled) .mem-badge,
 .mem-pop-refresh:hover:not(:disabled),
 .mem-pop-act button:hover:not(:disabled),
@@ -2270,10 +2270,17 @@ button.run-debug-toggle:hover:not(:disabled) {
   justify-content: center;
 }
 
-.tab[aria-selected='true'] {
+/* `role="radio"` 的 .tab（kind 標示切換）用 aria-checked，長相跟選中的分頁一樣。 */
+.tab[aria-selected='true'],
+.tab[aria-checked='true'] {
   background: var(--bg-panel);
   color: var(--text);
   box-shadow: var(--shadow);
+}
+
+/* 對話／終端分頁的 tabpanel：只為了掛 role 與 id，不能多一層盒子擠壞主欄的 flex 排版。 */
+.tab-panel {
+  display: contents;
 }
 
 .head-actions {
@@ -4653,13 +4660,16 @@ p.project-quota-hidden {
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  /* 不再是 <button>（option 裡不能有按鈕），自己把 › 置中。 */
+  display: flex;
+  align-items: center;
 }
 .dirpicker-row:hover .dirpicker-enter,
 .dirpicker-row.sel .dirpicker-enter {
   color: var(--accent-ink);
   border-left-color: var(--border);
 }
-.dirpicker-enter:hover:not(:disabled) {
+.dirpicker-enter:hover {
   background: var(--bg-active);
 }
 .dirpicker-empty {

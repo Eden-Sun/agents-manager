@@ -112,6 +112,7 @@ function BotRow({
   childCount = 0,
   collapsed = false,
   kidsLamp = null,
+  kidsListId,
   compact = false,
   onToggleChildren,
   drag,
@@ -128,6 +129,8 @@ function BotRow({
   collapsed?: boolean
   /** 收合時底下子 agent 最要緊的燈號（blocked > working）；null = 沒有在忙的，不畫。 */
   kidsLamp?: Lamp | null
+  /** 展開中的子 agent 清單的 id：DOM 上它是這一列的兄弟，用 `aria-owns` 掛回這一項底下。 */
+  kidsListId?: string
   /** 子 agent 列：單行、不重複 kind，只留身份／模型。 */
   compact?: boolean
   onToggleChildren?: () => void
@@ -195,7 +198,7 @@ function BotRow({
   // 佔位列：分身剛按下去、daemon 還沒建好。灰的、不能點、不能拖，只告訴你「它會出現在這裡」。
   if (bot.pending) {
     return (
-      <div className="bot-row pending" role="option" aria-selected={false} aria-busy="true" data-bot-id={botId}>
+      <div className="bot-row pending" role="listitem" aria-busy="true" data-bot-id={botId}>
         <StatusLamp lamp="starting" title={`${bot.name}：建立中`} />
         <span className="bot-main">
           <span className="bot-ident">
@@ -229,8 +232,11 @@ function BotRow({
       className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
       }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
-      role="option"
-      aria-selected={selected}
+      // 不是 listbox 的 option：option 裡不准有按鈕（收合鈕、改名、⋯ 選單），螢幕閱讀器會把
+      // 它們吃掉。清單項目可以裝互動子元素；「選取中」改用 aria-current 講「你在這裡」。
+      role="listitem"
+      aria-current={selected ? 'true' : undefined}
+      aria-owns={kidsListId}
       // 手機的子列不畫名字（見 styles.css），名字改由這裡帶著走。
       aria-label={compact ? bot.name : undefined}
       data-bot-id={botId}
@@ -251,7 +257,7 @@ function BotRow({
           if (!compact) onNudge(botId, dir)
           return
         }
-        // 沒按 Alt 就是換 bot——listbox 本來就該這樣走，焦點跟著跳到新的那一列。
+        // 沒按 Alt 就是換 bot，焦點跟著跳到新的那一列。
         e.preventDefault()
         onStep(botId, dir)
       }}
@@ -769,7 +775,8 @@ function ProjectTitle({
       type="button"
       className={`project-label-btn${selected ? ' selected' : ''}`}
       title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}${draggable ? '\n拖曳可調整專案順序' : ''}`}
-      aria-pressed={selected}
+      // 不是開關（再按一次不會「放開」），是「現在開著的是這個專案」——跟 bot 列同一個 aria-current。
+      aria-current={selected ? 'true' : undefined}
       onClick={(e) => {
         e.stopPropagation()
         selectProject(projectId)
@@ -1075,7 +1082,9 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      <div className="sidebar-scroll" role="listbox" aria-label="Bot 清單">
+      {/* 不是 listbox：裡面是專案卡片、標題列與一堆按鈕，不是一排 option。每個專案底下的
+          bot 自己是一個 list（見下面 `.bot-list`）。 */}
+      <nav className="sidebar-scroll" aria-label="Bot 清單">
         {query && matchCount === 0 ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
             沒有符合「{query}」的 Bot。
@@ -1136,6 +1145,9 @@ export function Sidebar() {
             >
               <header
                 className={`project-head${projectSelected ? ' selected' : ''}`}
+                // 滑鼠專用的延伸命中區（鍵之間的空隙也點得到）。鍵盤等價就是裡面的
+                // `ProjectTitle` 按鈕（同一個 selectProject），這裡不再給 tabIndex——
+                // 同一件事兩個 Tab 停點只會多按一下。
                 onClick={() => selectProject(p.id)}
                 // 抓標題列拖：整個專案（含底下的 bot）一起搬。bot 列自己也是拖曳來源，
                 // 但它的 dragstart 不會冒泡到這裡（它有自己的 handler 且 pdrag 不設）。
@@ -1171,7 +1183,6 @@ export function Sidebar() {
                     className="icon-btn add icon-tip"
                     aria-label={`在 ${p.label} 新增 Bot`}
                     data-tip={`新增 Bot · ${p.label}`}
-                    aria-expanded={false}
                     onClick={(e) => {
                       e.stopPropagation()
                       openBotSheet(p.id)
@@ -1238,7 +1249,10 @@ export function Sidebar() {
                   <QuickAddBots projectId={p.id} />
                 </div>
               ) : (
-                list.map((b) => {
+                // 每個專案的 bot 是一個 list；子 agent 清單在 DOM 上是父列的兄弟（排版要這樣），
+                // 用父列的 `aria-owns` 掛回它底下，巢狀 list 才合法。
+                <div className="bot-list" role="list" aria-label={`${p.label} 的 Bot`}>
+                {list.map((b) => {
                   const kids = childrenOf(b.id)
                   // 搜尋中一律展開：把命中的子 agent 藏在收合的父列底下等於沒搜到。
                   const shut = kids.length > 0 && collapsed.has(b.id) && !query
@@ -1252,6 +1266,7 @@ export function Sidebar() {
                         childCount={kids.length}
                         collapsed={shut}
                         kidsLamp={kidsLamp}
+                        kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
                         onToggleChildren={() => toggleChildren(b.id)}
                         drag={drag}
                         onDrag={setDrag}
@@ -1260,7 +1275,7 @@ export function Sidebar() {
                         onStep={step}
                       />
                       {shut || kids.length === 0 ? null : (
-                        <div className="bot-kids" role="group" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} onWheel={wheelKidsScroll}>
+                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} onWheel={wheelKidsScroll}>
                           {kids.map((c, i) => (
                             <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}`}>
                               <BotRow
@@ -1279,7 +1294,8 @@ export function Sidebar() {
                       )}
                     </Fragment>
                   )
-                })
+                })}
+                </div>
               )}
               {/* 被停用的身分收走了幾個。清單非空時當一行腳註——執行中／有未讀的現在也會被收，
                   不留一句話交代的話，使用者會以為 bot 不見了。 */}
@@ -1290,7 +1306,7 @@ export function Sidebar() {
             </section>
           )
         })}
-      </div>
+      </nav>
 
       <div className="sidebar-foot">
         <div className="sidebar-foot-actions">
