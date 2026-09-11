@@ -1263,7 +1263,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="main-title">
           <div className="main-title-row">
             <StatusLamp lamp={lamp} />
-            <KindTag kind={bot.kind} />
+            {/* kind logo 與 pane id 都排在下面那一行（2026-09-11 使用者）：kind 講的是「哪個
+                CLI、哪個模型」，跟 model 是同一件事；pane id 是 debug 用的識別碼。兩個掛在
+                第一排只是佔掉名字的寬度。燈號留在這裡——那是狀態不是 kind。 */}
             {/* 手機：點名字是換 bot（BotSwitcher），改名走設定；桌面：點名字直接改。 */}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
             {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
@@ -1299,6 +1301,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {/* 名字下面那一行：模型標籤與 ★ 釘選。標題列那條線已經被額度條佔滿（2026-09-10
               實測釘選放右上角會被擠掉一半），這一行本來只有一顆模型標籤，空著。 */}
           <div className="main-title-sub">
+            <KindTag kind={bot.kind} />
             {bot.model || statusInfo?.model_name ? (
               <ModelQuickPicker
                 botId={botId}
@@ -1315,28 +1318,29 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
+            {/* pane id 而不是狀態文字：狀態看左邊的燈號就好（它自己帶 tooltip），這個位置留給
+                debug 時真正要抄的那串。點一下展開整組識別資訊（agent / session / workspace / run）。
+                沒有 pane 就什麼都不放——燈號已經說了它沒在跑。
+                2026-09-11 使用者：從第一排搬到這一排。它是 debug 用的識別碼，不是每天在看的
+                東西，卻在第一排佔掉 70px；第一排要留給名字、齒輪、★、更新提示與分頁鍵。
+                窄到放不下時 `.pane-id` 先收掉，只剩 `▾`（完整 pane id 在 tooltip 裡）。 */}
+            {run?.pane_id ? (
+              <button
+                type="button"
+                className={`main-status pane-toggle run-debug-toggle${runDebugOpen ? ' on' : ''}`}
+                aria-expanded={runDebugOpen}
+                title={`pane ${run.pane_id}（${LAMP_LABEL[lamp]}）· 點一下展開 run 識別資訊：agent、session、workspace、run id`}
+                onClick={() => setRunDebugOpen((v) => !v)}
+              >
+                <span className="pane-id">{run.pane_id}</span>
+                <span className="pane-chev" aria-hidden="true">
+                  {runDebugOpen ? '▴' : '▾'}
+                </span>
+              </button>
+            ) : null}
           </div>
         </div>
         <span className="spacer" />
-        {/* pane id 而不是狀態文字：狀態看左邊的燈號就好（它自己帶 tooltip），這個位置留給
-            debug 時真正要抄的那串。點一下展開整組識別資訊（agent / session / workspace / run）。
-            沒有 pane 就什麼都不放——燈號已經說了它沒在跑。
-            擺在右邊那一組（額度、記憶體、分頁）而不是名字後面：它跟額度一樣是「這個 run 的
-            數字」，跟在名字後面只會在標題列中間留下一段空白。 */}
-        {run?.pane_id ? (
-          <button
-            type="button"
-            className={`main-status pane-toggle run-debug-toggle${runDebugOpen ? ' on' : ''}`}
-            aria-expanded={runDebugOpen}
-            title={`pane ${run.pane_id}（${LAMP_LABEL[lamp]}）· 點一下展開 run 識別資訊：agent、session、workspace、run id`}
-            onClick={() => setRunDebugOpen((v) => !v)}
-          >
-            <span className="pane-id">{run.pane_id}</span>
-            <span className="pane-chev" aria-hidden="true">
-              {runDebugOpen ? '▴' : '▾'}
-            </span>
-          </button>
-        ) : null}
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />

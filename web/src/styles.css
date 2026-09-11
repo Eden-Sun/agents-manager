@@ -2283,8 +2283,32 @@ button.run-debug-toggle:hover:not(:disabled) {
   gap: 6px;
 }
 
-/* The right edge of every shared header is a hard boundary: the gauges must remain
-   visible while the title-side flex items yield. */
+/*
+ * 標題列的收縮優先序（2026-09-11 使用者實測：視窗 1500 / 1520 時「對話／終端」被擠出右緣
+ * 29px / 9px，分頁根本點不到）。標題列以前只說了「量表不准縮」（`flex: none`），沒說不夠時
+ * 誰先讓——於是溢位時掉出去的永遠是排在最後的分頁。定成三級：
+ *
+ * 1. **分頁不讓**：它是導覽不是資訊，被切掉就沒有別的入口。除了 `flex: none`，還要疊在最上面
+ *    ——萬一有東西溢位疊上來，被蓋掉的是那個東西而不是分頁。
+ * 2. **名字第二**（`.bot-head .main-title`，見下面那條）：可以截尾，不能消失。
+ * 3. **先讓的**：遠端記憶體與附屬 chip（都只是數字，popover 裡有完整的）先收到 0。
+ *    **量表不在可讓的名單裡**（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的
+ *    空間；desktop 都要全顯示」），維持 `flex: none`、五格全開。第一排的寬度因此只能從名字
+ *    那一叢擠出來——pane id 那顆已經搬到第二排（見 `.main-title-sub`）。
+ */
+.main-head > .tabs {
+  flex: none;
+  position: relative;
+  z-index: 1;
+}
+
+.main-head > .main-status,
+.main-head > .mem-open,
+.main-head > .mem-badge {
+  flex: 0 1000 auto;
+  min-width: 0;
+}
+
 .main-head > .quota-strip {
   flex: none;
 }
@@ -2301,12 +2325,23 @@ button.run-debug-toggle:hover:not(:disabled) {
   justify-content: center;
   gap: 1px;
   overflow: hidden;
+  /* 標題列中間空著的那一段先給名字（2026-09-11：視窗 2000px 時 spacer 空著 127px，名字卻
+     已經在截尾）。`flex-basis: auto` 只讓這一叢拿到 max-content，多的都留在 spacer 手上，
+     所以要 `flex-grow: 1`，並且 spacer 不跟它搶（見下一條）。縮的時候相反：權重壓到 0.25，
+     讓上面那幾個先讓完才輪到名字。 */
+  flex: 1 0.25 auto;
   /* Not decoration: the status lamp is this cluster's first child and its `working` state
      draws a pulsing ring 4px outside its own box (`.lamp-working::after`, `inset: -4px`).
      A clip boundary flush with the lamp sliced that ring's left half off. The padding moves
      the boundary out; the negative margin puts the content back where it was. */
   padding-left: 5px;
   margin-left: -5px;
+}
+
+/* 名字那一叢負責吃掉中間的空白之後，spacer 只剩「把右邊那組推到底」這個用途，不再分走
+   空間。只縮在 `.bot-head`：group / team 標題列的 `.main-title` 是不伸縮的，spacer 還得推。 */
+.bot-head > .spacer {
+  flex-grow: 0;
 }
 
 /* 名字下面那一行：模型標籤 + ★ 釘選（`PrimaryChips`）。`.main-title` 是 `overflow: hidden`
@@ -2327,11 +2362,32 @@ button.run-debug-toggle:hover:not(:disabled) {
   text-overflow: ellipsis;
 }
 
-/* 桌面：名字至少留這麼寬，額度條再長也不能把它壓成 `0-op…`（同一張截圖）。手機沒有這條，
-   那邊標題列本來就會換行。 */
+/* kind logo（`KindTag`）跟 model 同一行、排在它前面（2026-09-11 使用者）。固定 20px 的圖示，
+   不參與縮放——這一行要縮的是 model。字級跟 `.model-tag` 一樣是 11px，所以不會把行撐高。 */
+.bot-head .main-title-sub > .kind-tag {
+  flex: none;
+}
+
+/* pane id 那顆（`run-debug-toggle`）也在這一行，排在 model 後面（2026-09-11 使用者）。
+   它跟 model 一樣可壓縮；擠到不能再擠時 `.pane-id` 收掉、只留 `▾`（`.pane-chev` 是
+   `flex: none`），完整的 pane id 在 tooltip 裡。 */
+.bot-head .main-title-sub > .main-status.pane-toggle {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/*
+ * 桌面的名字下限。原本是 168px（「額度條再長也不能把它壓成 `0-op…`」），2026-09-11 改成 3em：
+ * 使用者把優先序定成「分頁永遠不得被裁或推出右緣」>「名字可截尾不可消失」，而量表同一天定成
+ * desktop 五格全開、不准壓縮（約 770–800px）。量過之後這三件事在 1500–1560px（側欄開著、標題
+ * 列只有 1004–1064px）湊不齊：光是選單鍵 + 量表 + 分頁 + 內距就吃掉整條，168px 的下限會把分頁
+ * 推出右緣 56–116px。所以下限降到「名字一定還看得見」的程度，讓分頁先活下來；真正要修的是
+ * 「標題列剩多少就畫多少格量表」，那在 `QuotaStrip`，不在這裡。手機沒有這條，那邊標題列本來
+ * 就會換行。
+ */
 @media (min-width: 721px) {
   .bot-head .main-title {
-    min-width: 168px;
+    min-width: 3em;
   }
 }
 
@@ -4209,9 +4265,9 @@ p.project-quota-hidden {
     display: none;
   }
 
-  /* kind 已經畫在額度 chip 的圖示上；標題列再標一次，就會把設定鍵擠出可視範圍
-     （`.main-title` 是 overflow: hidden，被切掉的是排在後面的那些）。 */
-  .bot-head .main-title-row .kind-tag {
+  /* kind 已經畫在額度 chip 的圖示上；手機的第二行是版本號不是 model，kind logo 在那邊
+     沒有對照的東西可站，只會多佔一行高度。（桌面它跟 model chip 同一行，見 `.main-title-sub`。） */
+  .bot-head .main-title-sub > .kind-tag {
     display: none;
   }
 
