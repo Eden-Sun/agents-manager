@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
 import './styles.css'
 import './components/mobileBotHead.css'
+import './components/desktopBotHead.css'
 import { startRouteSync } from './store/routeSync'
 import { startShelfPersistence } from './store/shelfPersist'
 
