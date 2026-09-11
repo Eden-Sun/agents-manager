@@ -58,8 +58,22 @@ jobs:
           path: web/dist
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # 有些測試會走到 lifecycle::ensure_kind_installed（`command -v claude/codex/grok`），
+      # 開發機上本來就裝了；runner 上沒有，放空殼讓 preflight 過。測試不會真的執行它們。
+      - name: 放 claude / codex / grok 空殼到 PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/stub-bin"
+          for k in claude codex grok; do
+            printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/stub-bin/$k"
+            chmod +x "$RUNNER_TEMP/stub-bin/$k"
+          done
+          echo "$RUNNER_TEMP/stub-bin" >> "$GITHUB_PATH"
       # check.sh 會清掉 AM_MODEL / AM_EFFORT（測試對這兩個敏感）。
+      # TZ：quota_claude::tests::time_only_reset_rolls_to_tomorrow_when_past 用本機時區解析
+      # 「Resets 3:00pm (Asia/Taipei)」，runner 預設 UTC 會算錯日期；先對齊開發機時區。
       - run: scripts/check.sh daemon
+        env:
+          TZ: Asia/Taipei
 
   lint:
     runs-on: macos-latest
