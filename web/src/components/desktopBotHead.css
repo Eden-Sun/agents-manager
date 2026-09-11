@@ -125,3 +125,10 @@
     display: none;
   }
 }
+
+/* 上面那條 `.quota-hp + .quota-hp { border-left-color: transparent }` 跟 `.quota-hp.focused`
+   同權重又排在後面，把選取那格的左邊框也吃掉了（2026-09-11 使用者截圖：藍框左邊缺一段）。
+   選取那格整圈都要是 accent。 */
+.quota-hp + .quota-hp.focused {
+  border-left-color: var(--accent);
+}
