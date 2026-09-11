@@ -1071,7 +1071,7 @@ function ContextBar({ issues, status, hasStatus, summary }: { issues: ReactNode;
   )
 }
 
-function StatusLineBar({ status, text }: { status: StatusInfo | null; text: string | null }) {
+function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
   const line = text?.trim() ?? ''
   if (!status) {
     if (!line) return null
@@ -1113,6 +1113,7 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
           {status.version}
         </SlItem>
       ) : null}
+      <UpdateBadge botId={botId} variant="inline" />
     </div>
   )
 }
@@ -1401,7 +1402,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </>
           ) : null
         }
-        status={<StatusLineBar status={statusInfo} text={run?.status_line ?? null} />}
+        status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
         hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
         summary={[
           project?.github ? project.github.repo : project?.label,

@@ -26,7 +26,7 @@ import { UpdateChangelog } from './UpdateChangelog'
  * 不是 `managed_by === 'user'`（子 agent、team 成員）、不是 claude。判斷全部交給
  * `updateBatch.ts` 那份與 daemon 一字不差的規則，這裡不另外寫一套。
  */
-export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' }) {
+export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' | 'inline' }) {
   const run = useStore((s) => s.runs[botId] ?? null)
   const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? '這個 Bot')
   const botKind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind ?? 'claude')
@@ -83,6 +83,26 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           }}
         >
           <UpgradeIcon size={8} />
+        </button>
+        {confirmDialog}
+      </>
+    )
+  }
+
+  // `inline`：context bar 版本號右邊那顆（2026-09-12 使用者：「可升級就出現在版本號右邊以方便點選」）。
+  // 那一列是看版本的地方，批次蓋不蓋得到都畫——這裡不是標題列第一排，不搶寬度。
+  if (variant === 'inline') {
+    return (
+      <>
+        <button
+          type="button"
+          className={`sl-update${restarting ? ' busy' : ''}`}
+          disabled={restarting}
+          aria-label={`${botName}：${botKind} 有更新，點一下先看新版改了什麼，確認後重啟`}
+          title={`${notice}\n點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）${busy ? '\n它正在忙，重啟會打斷這一回合' : ''}`}
+          onClick={() => setConfirming(true)}
+        >
+          {restarting ? '重啟中…' : <><UpgradeIcon size={9} /> 升級</>}
         </button>
         {confirmDialog}
       </>

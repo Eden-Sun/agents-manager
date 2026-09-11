@@ -1116,3 +1116,5 @@ kind 圖示搬到 model chip 左邊之後（同日稍早）仍沿用側欄 `.kin
   正在打 commit 訊息時常駐。觸控裝置（`hover: none`）與 ≤640px 手機照舊攤開——沒有 hover 可用。
 
 截圖 `docs/screenshots/context-bar/`。
+
+這一列還有：pane 的 CLI 可升級（`runs.update_notice`）時，版本號右邊出現綠色「⌃⌃ 升級」（`UpdateBadge variant="inline"`），點下去走同一條 changelog 確認＋重啟。跟標題列那顆不同，批次 chip 蓋得到也照畫——使用者要的是在看版本的地方直接點。版本被窄視窗收掉時由它自己貼右。截圖 `docs/screenshots/context-bar/update-inline-*.png`。
