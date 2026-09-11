@@ -1107,3 +1107,12 @@ kind 圖示搬到 model chip 左邊之後（同日稍早）仍沿用側欄 `.kin
 使用者：不要 border，而且要靠近 effort。只改標題列那一顆（`.bot-head .main-title-sub > .kind-tag`）：拿掉框與底色、
 寬度收成圖示本身、與 model 的間距收成 3px。側欄那些跟文字並排的 kind 標籤維持有框。
 
+## context bar：不顯示花費、版本貼右、git 動作收進 hover（2026-09-12）
+
+使用者指定：
+- `花費 $…` 不放進 context bar——這一列是「現在狀態」，花費不是每次要看的。
+- `版本` 固定貼最右（`margin-left: auto`）；≤1080px 仍照舊第一個讓位。
+- `commit / push / pull` 平常收起，桌面有游標時滑到 git 那段（或 Tab 進去）才在下方彈出小面板；
+  正在打 commit 訊息時常駐。觸控裝置（`hover: none`）與 ≤640px 手機照舊攤開——沒有 hover 可用。
+
+截圖 `docs/screenshots/context-bar/`。

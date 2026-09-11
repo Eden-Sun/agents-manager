@@ -1107,8 +1107,7 @@ function StatusLineBar({ status, text }: { status: StatusInfo | null; text: stri
           {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
         </SlItem>
       ) : null}
-      {status.cost_usd !== null ? <SlItem k="花費">${status.cost_usd.toFixed(2)}</SlItem> : null}
-      {/* 版本是這一列最不常看的一欄，窄視窗第一個讓位（`sl-version`）。 */}
+      {/* 花費不放（2026-09-12 使用者）。版本固定貼最右（CSS `margin-left: auto`），窄視窗第一個讓位（`sl-version`）。 */}
       {status.version ? (
         <SlItem k="版本" className="sl-version">
           {status.version}

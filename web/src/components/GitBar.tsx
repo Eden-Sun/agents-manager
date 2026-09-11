@@ -99,6 +99,9 @@ export function GitBar({ projectId }: { projectId: string }) {
           {sum.behind ? <span title={`比 upstream 少 ${sum.behind} 個 commit`}>↓{sum.behind}</span> : null}
         </span>
       ) : null}
+      {/* 桌面有游標時 commit / push / pull 收進 hover 才彈出的小面板（2026-09-12 使用者）；
+          正在打 commit 訊息時 `.open` 讓它常駐。觸控裝置與手機照舊攤開。 */}
+      <span className={`git-actions${composing ? ' open' : ''}`}>
       {composing ? (
         <form
           className="git-commit-form"
@@ -157,6 +160,7 @@ export function GitBar({ projectId }: { projectId: string }) {
           </button>
         </>
       )}
+      </span>
     </div>
   )
 }
