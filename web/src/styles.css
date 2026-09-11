@@ -3805,6 +3805,42 @@ p.project-quota-hidden {
   margin-left: auto;
 }
 
+/* 版本號右邊的「⌃⌃ 升級」（`UpdateBadge variant="inline"`）：綠色裸 chevron 同側欄那顆，
+   但帶字、點得到。版本被窄視窗收掉時由它自己貼右。 */
+.sl-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--lamp-green) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--lamp-green) 10%, transparent);
+  color: var(--lamp-green);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sl-update:hover:not(:disabled) {
+  border-color: var(--lamp-green);
+}
+
+.sl-update:disabled {
+  color: var(--text-faint);
+  border-color: var(--border-strong);
+  background: none;
+  cursor: default;
+}
+
+@media (width <= 1080px) {
+  .context-bar .sl-version + .sl-update {
+    margin-left: auto;
+  }
+}
+
 .git-commit-form {
   display: inline-flex;
   align-items: center;
