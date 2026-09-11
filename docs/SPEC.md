@@ -1101,6 +1101,34 @@ mock（`node scripts/demo-identity-shell.mjs`，需 `VITE_MOCK=1 npx vite --port
 | I5 | `GET /api/state` 的 `hosts[0].identities` | `cc0`（無 `config_dir`，已登入）、`cc1`（`/Users/…/.claude-cc1`，**未登入**）、`cc2`（`/Users/…/.claude-cc2`，已登入，帳號與 cc0 不同），三個都是 `source: "shell"` |
 | I6 | 額度 | `claude:cc2` 由 `/usage` 探測填上；未登入的 `cc1` 依 §16.4 被跳過，不再每分鐘燒一次 25 秒逾時 |
 
+### 16.6 收編的子 agent 身分怎麼判定（v4.4，2026-09-11）
+子 agent 的 pane 是**母 bot 開的**，不是 daemon 開的：`herdr pane split --env
+CLAUDE_CONFIG_DIR=$HOME/.claude-cc2` 就能把小孩放到另一個帳號。收編（§6.5）那一刻 daemon 手上只有母
+bot 那一列，所以 `bots.identity` 一直是直接抄母 bot 的——小孩燒的額度因此記到錯的帳號（側欄與
+`/api/quota` 都是），母帳號看起來比實際緊、子帳號比實際鬆。
+
+herdr 的 `pane.process_info` 回 argv / cwd / **pid**，不回 env，所以帳號只能跟作業系統要：
+
+1. 補 model / effort 的同一次 `pane.process_info`（§4.4a 旁邊那條）挑出 pane 的 CLI 行程，拿它的 `pid`。
+2. `ps eww -p <pid>` 讀那個行程的環境變數（本機直接跑，遠端同一句走 `HostConn::ssh_exec`），取
+   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME`（依 `bot.kind`）。
+3. 拿那個目錄回頭比對 `identities_for_host(host)`（§16.2，config 的 `[[identities]]` 排在 shell 認來的
+   `ccN` 前面，所以同一個目錄被兩邊都指到時手寫的贏）。比對前把 `~` / `$HOME` 用**那台主機**的 `$HOME`
+   展開，並且正規化結尾斜線與 macOS 的 `/private` 前綴。對得上就寫回 `bots.identity`。
+
+界線跟 model / effort 只差一點，而且是刻意的：
+
+- **只動 `managed_by='child'`**。其它 bot 的 `identity` 是使用者設定、而且會被投影寫回 `config.toml`，
+  daemon 從行程猜一個值蓋上去等於改使用者的檔案。SQL 的 `WHERE` 也帶著 `managed_by = 'child'`。
+- model / effort 是**只補不改**（argv 看不到之後在 TUI 打的 `/model`）；identity 是**補，也改**——
+  子 agent 的 identity 從來不是使用者設的，那是收編當下抄來的值，蓋掉它是在修我們自己抄錯的東西。
+- **永遠不清成 NULL**。env 讀不到、沒有那個變數（＝預設帳號，但 `cc0` 這種空 env 的身份可能不只一個，
+  沒有唯一答案）、或目錄沒有任何身份認領，一律維持現狀：抄來的值可能是對的，NULL 一定是錯的。
+- **一個 pane 只問一次作業系統**。重連會重播一串 `pane.agent_detected`、每個都排一次 reconcile，每次
+  每個小孩一次 `ps`（遠端就是一次 ssh）正是 §11.4.7 already 踩過的風暴。行程活著就不會換帳號，所以問過
+  就記著；讀不到、或那台主機還沒偵測出任何同 kind 的身份（開機時 reconcile 可能跑在 §16.1 的 alias
+  偵測前面）不算問過，下一輪再問。
+
 ## 17. claude 的 `--effort`（v4.1）
 
 claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），所以 `bot.effort`

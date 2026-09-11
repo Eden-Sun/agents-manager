@@ -27,6 +27,7 @@ mod lifecycle;
 mod memproc;
 mod memstat;
 mod models;
+mod pane_identity;
 mod projection;
 mod quota;
 mod quota_claude;

@@ -535,13 +535,14 @@ async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::H
     }
 }
 
-/// Fill in a child bot's `model` / `effort` from what its CLI is actually running.
+/// Fill in a child bot's `model` / `effort` / `identity` from what its CLI is actually running.
 ///
 /// A spawned child was launched by another agent, so nothing in our database says what it is
 /// on and the sidebar badge reads 「預設」 for a pane that is quite deliberately on `opus`.
 /// `pane.process_info` reports the pane's foreground argv — the same flags `model_args` would
 /// have produced — and grok additionally spells both out in its terminal title
-/// (`Grok 4.6 (xhigh)`) until it renames itself after its task.
+/// (`Grok 4.6 (xhigh)`) until it renames itself after its task. The same call's **pid** is what
+/// [`crate::pane_identity`] then reads the child's account off, the one thing argv cannot show.
 ///
 /// Two deliberate limits:
 /// * **children only.** For any other bot `bots.model` is the user's own setting, and for a
@@ -552,8 +553,17 @@ async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::H
 ///   exactly what `apply_live_setting` sends when the model is changed from the UI), so a
 ///   value that is already recorded is left alone. A field we could not parse stays NULL —
 ///   「預設」 is honest, a guess is not.
+///
+/// `identity` is the one field that also *corrects*, and only because it is not in the same
+/// category: nobody ever set a child's account, the adopt copied it off the parent. See
+/// [`crate::pane_identity`] for where that line is drawn.
 async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::HerdrClient, bot: &db::Bot, agent: &crate::herdr::AgentInfo) {
-    if bot.managed_by != "child" || (bot.model.is_some() && bot.effort.is_some()) {
+    if bot.managed_by != "child" {
+        return;
+    }
+    let want_model = bot.model.is_none() || bot.effort.is_none();
+    let want_identity = crate::pane_identity::probe_due(&bot.id, &agent.pane_id);
+    if !want_model && !want_identity {
         return;
     }
     let procs = match client.pane_process_info(&agent.pane_id).await {
@@ -563,14 +573,21 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
             return;
         }
     };
-    // The agent CLI is the front process; anything it shells out to (`git`, a pager) has an
-    // argv of its own, so pick the one that looks like the CLI and fall back to the first.
-    let argv: &[String] = procs
+    // The agent CLI is the front process; anything it shells out to (`git`, a pager, the
+    // `caffeinate` a pane may be wrapped in) has an argv of its own, so pick the one that looks
+    // like the CLI and fall back to the first. Both halves below want that same process: its
+    // argv names the model, its pid names the account.
+    let cli = procs
         .iter()
         .find(|p| p.argv.first().map(|a| a.contains(bot.kind.as_str())).unwrap_or(false))
-        .or_else(|| procs.iter().find(|p| !p.argv.is_empty()))
-        .map(|p| p.argv.as_slice())
-        .unwrap_or(&[]);
+        .or_else(|| procs.iter().find(|p| !p.argv.is_empty()));
+    if want_identity {
+        crate::pane_identity::sync_child_identity(app, host, bot, &agent.pane_id, cli.and_then(|p| p.pid)).await;
+    }
+    if !want_model {
+        return;
+    }
+    let argv: &[String] = cli.map(|p| p.argv.as_slice()).unwrap_or(&[]);
     let (mut model, mut effort) = crate::models::model_effort_from_argv(&bot.kind, argv);
     if bot.kind == "grok" && (model.is_none() || effort.is_none()) {
         let (tm, te) = crate::models::grok_title_model_effort(agent.terminal_title_stripped.as_deref().unwrap_or(""));
@@ -776,6 +793,144 @@ mod compat_tests {
         sqlx::query("UPDATE bots SET model='sonnet' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         assert_eq!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().model.as_deref(), Some("sonnet"));
+    }
+
+    /// A stand-in for `ps eww -p <pid>`: what each pid is running with, plus every pid it was
+    /// asked about — one `ps` (one *ssh*, on a remote host) per child per reconnect burst is
+    /// exactly the storm this must not make.
+    struct FakeProcEnv {
+        envs: std::collections::BTreeMap<i64, std::collections::BTreeMap<String, String>>,
+        asked: std::sync::Mutex<Vec<i64>>,
+    }
+
+    impl crate::pane_identity::ProcEnv for FakeProcEnv {
+        fn env_of<'a>(
+            &'a self,
+            _app: &'a Arc<App>,
+            _host: &'a str,
+            pid: i64,
+        ) -> futures::future::BoxFuture<'a, Option<std::collections::BTreeMap<String, String>>> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push(pid);
+                self.envs.get(&pid).cloned()
+            })
+        }
+    }
+
+    fn claude_env(dir: &str) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([("CLAUDE_CONFIG_DIR".to_string(), dir.to_string())])
+    }
+
+    fn claude_identity(name: &str, dir: &str) -> crate::config::IdentityCfg {
+        crate::config::IdentityCfg {
+            name: name.into(),
+            kind: "claude".into(),
+            env: claude_env(dir),
+            args: vec![],
+        }
+    }
+
+    /// A child's **account** is not its parent's (SPEC §16.6). `herdr pane split --env
+    /// CLAUDE_CONFIG_DIR=…` is how one bot puts a helper on another login, and the adopt has
+    /// nothing but the parent's row to copy — so the pane's own process is what has to be
+    /// asked, or every token the child burns is billed to the wrong account in the sidebar and
+    /// in `/api/quota`.
+    #[tokio::test]
+    async fn a_spawned_childs_identity_is_the_account_its_own_pane_runs_on() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let home = dirs::home_dir().unwrap().to_string_lossy().to_string();
+        // Two accounts, spelled the two ways an identity may spell one.
+        app.cfg
+            .update(|c| {
+                c.identities =
+                    vec![claude_identity("cc1", "$HOME/.claude-ccompany"), claude_identity("cc2", "~/.claude-cc2")];
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let head = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let lost = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?")
+            .bind(&parent)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": format!("{parent_agent}-head"), "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": head.tab_id, "pane_id": head.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": format!("{parent_agent}-lost"), "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": lost.tab_id, "pane_id": lost.pane_id, "cwd": "/tmp/p"}),
+        ];
+        for pane in [&root.pane_id, &head.pane_id, &lost.pane_id] {
+            env.herdr.set_argv(pane, &["claude", "--dangerously-skip-permissions", "--model", "opus"]);
+        }
+        env.herdr.set_pid(&head.pane_id, 4924);
+        env.herdr.set_pid(&lost.pane_id, 4925);
+        // What each pane is really running under. The parent's pane says `cc2` as well — and
+        // must never be read, because a user bot's identity is the user's setting, projected
+        // back into `config.toml`.
+        let fake = Arc::new(FakeProcEnv {
+            envs: std::collections::BTreeMap::from([
+                (1, claude_env(&format!("{home}/.claude-cc2"))),
+                (4924, claude_env(&format!("{home}/.claude-cc2/"))),
+                (4925, claude_env("/tmp/an-account-nobody-configured")),
+            ]),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        app.proc_env.set(fake.clone());
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kid = |name: &str| {
+            let db = app.db.clone();
+            let name = name.to_string();
+            async move {
+                sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = ?")
+                    .bind(&name)
+                    .fetch_one(&db)
+                    .await
+                    .expect("the child was adopted")
+            }
+        };
+        let head_bot = kid("head").await;
+        assert_eq!(head_bot.managed_by, "child");
+        assert_eq!(head_bot.identity.as_deref(), Some("cc2"), "read off its own pane's CLAUDE_CONFIG_DIR");
+        assert_eq!(head_bot.model.as_deref(), Some("opus"), "the same process_info still fills the model");
+
+        // A directory no identity claims is not an answer: the inherited value stays, because
+        // a value copied from the parent may be right and NULL is certainly wrong.
+        assert_eq!(kid("lost").await.identity.as_deref(), Some("cc1"));
+
+        let p = db::bot(&app.db, &parent).await.unwrap().unwrap();
+        assert_eq!(p.identity.as_deref(), Some("cc1"), "a user bot's account is configuration, never scraped");
+
+        // Asked once per child, and never about the parent — a reconnect replays a burst of
+        // reconciles, and a `ps` per child per pass is an ssh storm on a remote host.
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(*fake.asked.lock().unwrap(), vec![4924, 4925]);
+        assert_eq!(kid("head").await.identity.as_deref(), Some("cc2"));
     }
 
     /// **Descent, not naming.** A child that ignored the naming rule — `helper`, no parent

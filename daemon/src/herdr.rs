@@ -130,6 +130,11 @@ pub struct ProcessInfo {
     pub argv0: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The process id herdr reports for this foreground process. `pane.process_info` carries
+    /// argv and cwd but never env, so the pid is the only handle on the *account* a pane's CLI
+    /// is running under — see [`crate::pane_identity`].
+    #[serde(default)]
+    pub pid: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]

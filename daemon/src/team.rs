@@ -4069,6 +4069,10 @@ pub mod testing {
         pub screens: Arc<StdMutex<BTreeMap<String, String>>>,
         /// `pane.process_info` answers, per pane id: the argv the pane's CLI is running with.
         pub argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
+        /// `pane.process_info` answers, per pane id: the pid of that CLI (default 1). Only a
+        /// test that reads something *off* the process — its account (SPEC §16.6) — needs the
+        /// panes to be told apart by pid.
+        pub pids: Arc<StdMutex<BTreeMap<String, i64>>>,
         /// Every `(method, params)` the daemon sent, so a test can assert *how* it asked —
         /// "started through `tab.create`, never `pane.split`" is only checkable here.
         pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
@@ -4093,6 +4097,7 @@ pub mod testing {
         agents: Arc<StdMutex<Vec<Value>>>,
         screens: Arc<StdMutex<BTreeMap<String, String>>>,
         argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
+        pids: Arc<StdMutex<BTreeMap<String, i64>>>,
         seq: Arc<std::sync::atomic::AtomicU64>,
     }
 
@@ -4137,11 +4142,12 @@ pub mod testing {
                 agents: Default::default(),
                 screens: Default::default(),
                 argvs: Default::default(),
+                pids: Default::default(),
                 seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             };
             let (workspaces, tabs, calls, agents) =
                 (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
-            let (screens, argvs) = (state.screens.clone(), state.argvs.clone());
+            let (screens, argvs, pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone());
             let handle = tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
                     let st = state.clone();
@@ -4317,12 +4323,13 @@ pub mod testing {
                             }
                             "pane.process_info" => {
                                 let pid = wid_of("pane_id");
+                                let os_pid = st.pids.lock().unwrap().get(&pid).copied().unwrap_or(1);
                                 match st.argvs.lock().unwrap().get(&pid).cloned() {
                                     None => json!({"id": id, "result": {"process_info":
                                         {"pane_id": pid, "foreground_processes": []}}}),
                                     Some(argv) => json!({"id": id, "result": {"process_info": {"pane_id": pid,
                                         "foreground_processes": [{"argv": argv, "argv0": argv.first().cloned(),
-                                        "cwd": "/tmp/p", "pid": 1}]}}}),
+                                        "cwd": "/tmp/p", "pid": os_pid}]}}}),
                                 }
                             }
                             "agent.send_keys" => {
@@ -4413,7 +4420,7 @@ pub mod testing {
                     });
                 }
             });
-            MockHerdr { workspaces, tabs, calls, agents, screens, argvs, handle }
+            MockHerdr { workspaces, tabs, calls, agents, screens, argvs, pids, handle }
         }
 
         pub fn count(&self) -> usize {
@@ -4438,6 +4445,11 @@ pub mod testing {
         /// What `pane.process_info` will report as the pane's foreground argv.
         pub fn set_argv(&self, pane_id: &str, argv: &[&str]) {
             self.argvs.lock().unwrap().insert(pane_id.to_string(), argv.iter().map(|s| s.to_string()).collect());
+        }
+
+        /// What `pane.process_info` will report as that CLI's pid.
+        pub fn set_pid(&self, pane_id: &str, pid: i64) {
+            self.pids.lock().unwrap().insert(pane_id.to_string(), pid);
         }
 
         pub fn tab(&self, tab_id: &str) -> Option<MockTab> {
