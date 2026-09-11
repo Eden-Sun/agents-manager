@@ -9,7 +9,6 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
-import './quotaSlim.css'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
@@ -19,11 +18,13 @@ import './quotaSlim.css'
  * a whole kind. Drawn as frameless health bars: the fill length carries the level, colour only
  * reinforces it, so it survives greyscale. Full numbers live in the tooltip and popover.
  *
- * 桌機上**每個帳號都在條上**（2026-09-11 使用者），但只有焦點那格畫完整量表：其他帳號收成
- * 46px 的窄格（`SlimGauge`），一條細 bar ＋ 一個數字。縮寬度靠每一格變密，不是靠把帳號藏進
- * `+N`——`+N` 只在標題列真的排不下時才出現。判斷用的寬度量的是**標題列**（`ResizeObserver`
- * 掛在父節點），不是 `window.innerWidth`：後者少算了側欄與圖片暫存欄，1500–1555px 的視窗
- * 會因此把分頁鍵擠出畫面。
+ * 桌機上**每個帳號都畫完整的量表**（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省
+ * 他的空間」）：五個帳號各自身分名 + 5h／7d／F 三行，焦點那格只是多一圈外框，不是「只有它
+ * 完整」。這條列佔掉 ~700px 是刻意的資訊密度，標題列放不下由標題列自己排收縮優先序解決，
+ * 不從額度身上省，也不收進 `+N`。
+ *
+ * 窄視窗與手機的判斷（`collapsed`／`compact`）量的是**標題列**（`ResizeObserver` 掛在父節點），
+ * 不是 `window.innerWidth`：後者少算了側欄與圖片暫存欄約 500px。
  *
  * The kinds do not report the same windows: claude and codex have both 5h and 7d, grok only a
  * weekly one (scraped from its `/usage` dialog, SPEC §12.6). A kind therefore draws one bar per
@@ -617,69 +618,6 @@ function Gauge({
 }
 
 /**
- * 非焦點帳號的窄量表（2026-09-11 使用者：寬視窗的額度佔掉將近一半的標題列）。
- *
- * 五個帳號各三個窗口＝常駐 15 個數字，可是「還剩多少額度」是背景條件，不是每分鐘要做的
- * 決定；真正在看的「哪顆 bot、什麼狀態」反而只拿到四分之一的寬度。所以只有焦點那格畫完整
- * 量表，其他帳號收成一格 46px：身分名 + 最吃緊那個窗口的一條細 bar + 一個數字。
- *
- * 為什麼不是整格收進 `+N` popover：那樣「哪個帳號快沒了」就得先點開才知道，等於把這條列
- * 存在的理由拿掉。留一條 bar + 一個數字，掃一眼還是看得出誰紅了；窗口名（5h／7d／F）、
- * 重置時間與停用開關進 tooltip 與 popover。
- *
- * 顯示哪個窗口跟收合狀態同一套規則（`worstWindow`）：最接近用完的那一個。
- */
-function SlimGauge({
-  entry,
-  host,
-  open,
-  onOpen,
-}: {
-  entry: QuotaEntry
-  host: string
-  /** popover 開著沒（給 `aria-expanded`）。 */
-  open: boolean
-  onOpen: () => void
-}) {
-  const q = useEntryQuota(entry, host)
-  const loggedOut = useLoggedOut(entry, host)
-  const disabledMap = useDisabledQuota()
-  const now = useMinuteNow()
-  const w = worstWindow(q)
-  const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
-  const name = w.name === '7d' ? weekLabel(entry.kind) : w.name
-  const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
-  const base = `${hostLabel(host)} · ${label(entry, q, loggedOut)}`
-  const withOff = off ? `${base}（已暫時停用，底下的 Bot 收在側欄外）` : base
-  // 條上只有一個數字，所以 tooltip 第一行先講它是哪個窗口——不然紅色的 `3` 分不出是
-  // 「兩小時後就回來」還是「這一週沒了」。
-  const left = src?.resets_at ? new Date(src.resets_at).getTime() - now : null
-  const which =
-    w.pct === null
-      ? `${name} 尚無資料`
-      : `條上顯示最吃緊的 ${name}：剩餘 ${fmtPct(w.pct)}%${left === null ? '' : `，還有 ${fmtLeft(left)} 重置`}`
-
-  return (
-    <button
-      type="button"
-      className={`quota-hp slim ${entry.kind} ${worst(q)}${off ? ' off' : ''}`}
-      aria-expanded={open}
-      aria-haspopup="dialog"
-      aria-label={`${withOff}（點開看每個窗口與停用開關）`}
-      title={`${which}\n${withOff}`}
-      onClick={onOpen}
-    >
-      <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-        {entry.identity ?? entry.kind}
-      </span>
-      {/* 不畫重置黑針：20px 的條上那根 2px 的針比填充本身還搶眼，而且會被誤讀成「還有這麼多」。
-          「還有多久重置」寫在 tooltip 與 popover 裡（完整那格照舊有針）。 */}
-      <Bar pct={w.pct} low={src?.low ?? false} critical={src?.critical ?? false} mark={null} />
-    </button>
-  )
-}
-
-/**
  * 這一格「暫時停用」時，什麼時候自動解除——這組額度最近一次還沒到的 reset 時刻。
  * 三個視窗都沒有時間就回 null（那格只能手動解除）。
  */
@@ -901,26 +839,6 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   )
 }
 
-/*
- * 決定「幾格排得下」用的實測寬度（含 `.quota-open` 的 8px gap，2026-09-11 於 2000px 量）。
- * 只用來挑版面，不是排版本身——真正的寬度還是由 CSS 決定，所以寫大一點當安全邊。
- */
-/** 焦點那格（完整量表：3.2em 標籤欄 + 5h／7d／F 三條）＝實測 146px + 8px gap。 */
-const FULL_GAUGE_W = 154
-/** 收斂後的一格（`.quota-hp.slim` 寫死 46px）＋ gap。 */
-const SLIM_GAUGE_W = 54
-/** 「claude 有更新」那顆＋分隔線的邊距；沒更新時不畫，多算的當安全邊。 */
-const UPDATE_CHIP_W = 34
-/**
- * 標題列上一定要留給別人的寬度：分頁鍵（`對話／終端`，~135px）＋ bot 名字的下限（~84px）
- * ＋齒輪與間距（~40px）。額度**不**跟它們搶，但只要留得下，五個帳號就一格都不收。
- *
- * 「桌面寬度下所有帳號一定要同時看得見」是使用者定的（2026-09-11）：縮寬度靠每一格變密
- * （`.quota-hp.slim`），不是靠把帳號藏進 `+N`。`+N` 只在真的排不下時才出現——那時被藏起來
- * 的帳號在點開的 popover 裡仍然一個不少。
- */
-const HEAD_RESERVE_W = 260
-
 export function QuotaStrip({
   focusKind,
   focusIdentity,
@@ -1013,33 +931,23 @@ export function QuotaStrip({
     .sort()
     .pop()
 
-  /** 還沒量到（第一次繪製、或沒有 ResizeObserver）就當作桌機寬度：收得太過比爆版難看。 */
+  /** 還沒量到（第一次繪製、或沒有 ResizeObserver）就當作桌機寬度。 */
   const box = avail ?? 1416
-  // Both queryable kinds always stay on the bar; only the per-kind windows collapse.
-  const collapsed = box < 600
   /**
-   * 連「焦點一格 + 其他收成窄格」都排不下時，非焦點的整格才收進 `+N` popover。
+   * Both queryable kinds always stay on the bar; only the per-kind windows collapse.
    *
-   * 用「這條列需要多少」對上「標題列扣掉別人要用的還剩多少」，而不是一個視窗寬度的門檻：
-   * 帳號數會變，而標題列的寬度跟視窗寬差了一整個側欄加圖片暫存欄。
+   * 門檻量的是標題列（見 `avail`），不是視窗：`window.innerWidth` 少算了側欄與圖片暫存欄
+   * 約 500px，同一個視窗寬在開／關側欄時給額度的空間差很多。
    */
-  const need = FULL_GAUGE_W + SLIM_GAUGE_W * Math.max(0, ordered.length - 1) + UPDATE_CHIP_W
+  const collapsed = box < 604
   /** 手機：標題列連一顆量表都放不下，剩餘量改用數字寫在 chip 上。CSS 也是 640px 那條線。 */
   const compact = phone
-  const tight = !compact && need > box - HEAD_RESERVE_W
-
-  /** The one gauge worth the width when space is tight: the kind/identity this view is about. */
-  const focusEntry = focusKind
-    ? (ordered.find((e) => {
-        if (e.kind !== focusKind) return false
-        if (e.kind !== 'claude') return true
-        const id = focusIdentity?.trim() || (claudeIdentities(identities).some((i) => i.name === 'cc0') ? 'cc0' : null)
-        return id ? e.identity === id : !e.identity
-      }) ?? null)
-    : null
-  // 手機一顆 chip 看不見其他 kind。改把全部身分／kind 攤在一列裡橫向捲。
-  const shown = compact ? ordered : tight ? [focusEntry ?? ordered[0]] : ordered
-  const hidden = ordered.length - shown.length
+  /**
+   * 每一個帳號都在條上，而且都是完整的量表——**不收進 `+N`、也不縮成窄格**
+   * （2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
+   * 標題列排不下時由標題列自己讓位（名字、pane chip、分頁鍵的收縮優先序），不從額度身上省。
+   */
+  const shown = ordered
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
       {/* 這排本來整個是一顆 `<button>`。停用開關要長在每一格身分卡裡（數字正下方），
@@ -1084,40 +992,18 @@ export function QuotaStrip({
           }
           return (
             <Fragment key={entryReactKey(entry)}>
-              {/* 桌機上只有焦點那格畫完整量表，其他帳號收成窄格（見 `SlimGauge`）。
-                  手機那一列是橫向可捲的文字 chip，每一格都要看得到，不收。 */}
-              {compact || tight || focused ? (
-                <Gauge
-                  entry={entry}
-                  host={host}
-                  collapsed={collapsed || compact}
-                  compact={compact}
-                  focused={focused}
-                  open={open}
-                  onOpen={onOpen}
-                />
-              ) : (
-                <SlimGauge entry={entry} host={host} open={open} onOpen={onOpen} />
-              )}
+              <Gauge
+                entry={entry}
+                host={host}
+                collapsed={collapsed || compact}
+                compact={compact}
+                focused={focused}
+                open={open}
+                onOpen={onOpen}
+              />
             </Fragment>
           )
         })}
-        {hidden > 0 ? (
-          <button
-            type="button"
-            className="quota-more"
-            aria-expanded={open}
-            aria-haspopup="dialog"
-            title={`還有 ${hidden} 組額度，點開看`}
-            onClick={() => {
-              setOnly(null)
-              measure()
-              setOpen((v) => !v)
-            }}
-          >
-            +{hidden}
-          </button>
-        ) : null}
       </div>
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`} style={popTop !== null ? { top: popTop } : undefined}>
