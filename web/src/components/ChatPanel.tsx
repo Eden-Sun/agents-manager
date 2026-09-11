@@ -1271,6 +1271,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
                 header is busy, and the settings button is the one thing in here that is not
                 repeated somewhere else — the badges all are. */}
+            <PrimaryStar botId={botId} />
             <button
               type="button"
               className="icon-btn gear icon-tip"
@@ -1281,7 +1282,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             >
               <GearIcon />
             </button>
-            <PrimaryStar botId={botId} />
             <PersonaMark persona={bot.persona} />
             <HostBadge host={hostName} connected={hostUp} />
             <UpdateBadge botId={botId} />

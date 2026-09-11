@@ -1,22 +1,22 @@
 /*
- * 手機（≤640px）bot 標題列的排位（2026-09-11，ego 390px 實測）。
+ * 手機（≤640px）bot 標題列的排位（2026-09-11，ego 390px 實測；同日使用者再調一次位置）。
  *
  * 問題：第一行擠了 ☰、名字、⚙、git、★、對話／終端 六樣，名字只剩 94px，
- * 兩顆 `c0-fable-…` 開頭的兄弟 bot 在標題列上完全分不出來；第二行卻只有
- * 「✳ 2.1.268」61px，右邊整段空著。
+ * 兩顆 `c0-fable-…` 開頭的兄弟 bot 在標題列上完全分不出來。
  *
- * 決策：git 與 ★ 搬到第二行右側（跟版本號同一行），第一行只留 ☰、名字＋⚙、分頁。
- * 名字拿回約 200px。這兩顆都不能砍——★ 只有標題列這一個入口，git 鍵是手機上
- * 開 repo／git／context 列的唯一入口——所以是「換行」不是「讓位」。
- * 齒輪留在名字旁邊：它是名字的設定，不是全域動作。
+ * 位置（使用者指定）：
+ * - 第一行：☰、名字、★、⚙、分頁。★ 在齒輪左邊。
+ * - 第二行：kind 圖示＋版本號，貼在名字底下。
+ * - 第三行：額度列。git 鍵放在額度列最左邊、「更新」chip 的正下方（兩個都是 32px 級的小鍵，
+ *   疊在 54px 高的額度列裡剛好）。
  *
  * 這個檔案只覆寫 `styles.css` 尾端 `.bot-head` 那組 grid 的格位；欄與列的定義也在這裡
- * 重寫一次，才能讓 git／★ 落到第二列。
+ * 重寫一次。
  */
 @media (width <= 640px) {
   .main-head.bot-head {
-    grid-template-columns: 40px minmax(0, 1fr) auto auto;
-    grid-template-rows: auto auto auto auto;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto;
     gap: 2px 4px;
   }
 
@@ -26,9 +26,9 @@
     align-self: center;
   }
 
-  /* 名字＋齒輪，以及底下那行版本：跨第一、二列，靠上排，第一行跟分頁對齊。 */
+  /* 名字＋★＋齒輪，底下那行 kind＋版本：靠上排，第一行跟分頁對齊。 */
   .main-head.bot-head > .main-title {
-    grid-area: 1 / 2 / 3 / 3;
+    grid-area: 1 / 2;
     justify-content: flex-start;
   }
 
@@ -36,34 +36,53 @@
     min-height: 44px;
   }
 
+  /* ★ 是 `.main-title-row` 的子元素（ChatPanel 在手機把它放在齒輪前面），照 DOM 順序排即可。 */
+  .main-head.bot-head .main-title-row > .primary-star {
+    flex: none;
+    width: 36px;
+    min-width: 36px;
+  }
+
   .main-head.bot-head > .tabs {
-    grid-area: 1 / 3 / 2 / 5;
+    grid-area: 1 / 3;
     align-self: start;
     justify-self: end;
   }
 
+  .main-head.bot-head > .quota-strip {
+    grid-area: 2 / 1 / 3 / -1;
+    position: relative;
+  }
+
+  /* git 鍵疊進額度列左下角：「更新」chip 在左上（18px 高），它在下面。
+     跟齒輪同一種灰：常駐的入口不該長得像警示。 */
   .main-head.bot-head > .mobile-git-info {
-    grid-area: 2 / 3;
-    align-self: center;
-    /* 跟齒輪同一種灰：常駐的入口不該長得像警示。 */
+    grid-area: 2 / 1;
+    align-self: end;
+    justify-self: start;
+    position: relative;
+    z-index: 1;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 2px;
+    margin: 0 0 2px 4px;
     color: var(--text-faint);
   }
 
-  .main-head.bot-head > .primary-star {
-    grid-area: 2 / 4;
-    align-self: center;
+  .main-head.bot-head > .mobile-git-info svg {
+    width: 18px;
+    height: 18px;
   }
 
-  /* 版本那行跟右邊 git／★ 的 40px 鍵垂直對齊。 */
-  .main-head.bot-head .mobile-bot-version {
-    min-height: 40px;
-  }
-
-  .main-head.bot-head > .quota-strip {
-    grid-area: 3 / 1 / 4 / -1;
+  /* 更新 chip 留在左上，底下讓給 git 鍵；chip 的右邊距要夠讓第一格額度不壓到 git。 */
+  .main-head.bot-head .quota-open > .quota-update {
+    align-self: flex-start;
+    margin-right: 14px;
   }
 
   .main-head.bot-head > .mobile-primary-row {
-    grid-area: 4 / 1 / 5 / -1;
+    grid-area: 3 / 1 / 4 / -1;
   }
 }
