@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import * as api from '../api'
 import { ApiError } from '../api/types'
@@ -6,6 +6,7 @@ import type { Issue, ProjectSubmodule } from '../api/types'
 import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
 import { GhLoginButton, isGhAuthError } from './GhAuth'
+import { onTabListKeyDown } from './tabKeys'
 
 /**
  * v4.0 GitHub issues (`GET /api/projects/:id/issues`, via `gh` on the daemon). A thin bar
@@ -81,6 +82,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const wrap = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const seq = useRef(0)
+  const tabsId = useId()
 
   // Submodules once per project; the picker only appears when at least one is on GitHub.
   useEffect(() => {
@@ -245,6 +247,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
               type="search"
               value={q}
               placeholder="搜尋 issue（標題 / #號）…"
+              aria-label="搜尋 issue（標題或 #號）"
               spellCheck={false}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -267,15 +270,17 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
                 ))}
               </select>
             ) : null}
-            <div className="tabs small" role="tablist">
-              <button type="button" className="tab" role="tab" aria-selected={state === 'open'} onClick={() => pickState('open')}>
+            <div className="tabs small" role="tablist" aria-label="issue 狀態" onKeyDown={onTabListKeyDown}>
+              <button type="button" className="tab" role="tab" id={`${tabsId}-open`} aria-selected={state === 'open'} aria-controls={state === 'open' ? `${tabsId}-panel` : undefined} onClick={() => pickState('open')}>
                 open
               </button>
-              <button type="button" className="tab" role="tab" aria-selected={state === 'closed'} onClick={() => pickState('closed')}>
+              <button type="button" className="tab" role="tab" id={`${tabsId}-closed`} aria-selected={state === 'closed'} aria-controls={state === 'closed' ? `${tabsId}-panel` : undefined} onClick={() => pickState('closed')}>
                 closed
               </button>
             </div>
           </div>
+          {/* 結果清單就是那兩個分頁的 tabpanel（同一塊，內容跟著 open / closed 換）。 */}
+          <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${state}`}>
           {error ? (
             <div className="issues-status err" role="alert">
               <div>{error}</div>
@@ -337,6 +342,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
               ))}
             </ul>
           ) : null}
+          </div>
         </div>
       ) : null}
     </div>

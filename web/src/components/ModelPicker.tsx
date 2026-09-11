@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, effortLabel } from '../api/types'
+import { useMenuKeys } from '../hooks/useMenuKeys'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
@@ -392,22 +393,37 @@ export function ModelQuickPicker({
   // 這個模型有沒有 fast tier（`model/list` 的 `serviceTiers`），跟設定面板同一條判斷。
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
+  const menuKeys = useMenuKeys(open, popRef, btnRef, () => setOpen(false), cached)
+  const hintId = useId()
+
+  // 選單（menu + menuitemradio）而不是 listbox：原本 listbox > radiogroup > option 三層角色
+  // 互相矛盾（option 必須直屬 listbox），而且點一下就直接 PATCH 並關掉——那是選單的行為。
+  // 方向鍵只移焦點、Enter/Space 才套用：用 radio 的「方向鍵即選取」會每按一下就送一次 PATCH。
   const pop = open ? (
       <div
         ref={popRef}
         className="model-quick-pop"
-        role="listbox"
+        role="menu"
         aria-label="選擇模型"
+        aria-busy={loading || undefined}
+        aria-describedby={hintId}
+        tabIndex={-1}
+        onKeyDown={menuKeys}
         style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
       >
-        {loading ? <span className="hint">載入模型清單…</span> : null}
-        <div className="opt-group models" role="radiogroup" aria-label="model">
+        {loading ? (
+          <span className="hint" aria-hidden="true">
+            載入模型清單…
+          </span>
+        ) : null}
+        <div className="opt-group models" role="group" aria-label="模型">
           {shownModels.map((m) => (
             <button
               key={m.id}
               type="button"
-              role="option"
-              aria-selected={model === m.id}
+              role="menuitemradio"
+              aria-checked={model === m.id}
+              tabIndex={-1}
               className={`opt${model === m.id ? ' on' : ''}`}
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               disabled={patching}
@@ -419,12 +435,15 @@ export function ModelQuickPicker({
         </div>
         {efforts.length > 0 ? (
           <div className="field">
-            <span>強度</span>
-            <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
+            <span aria-hidden="true">強度</span>
+            <div className="opt-group" role="group" aria-label="強度">
               {efforts.map((e) => (
                 <button
                   key={e}
                   type="button"
+                  role="menuitemradio"
+                  aria-checked={effort === e}
+                  tabIndex={-1}
                   className={`opt${effort === e ? ' on' : ''}`}
                   disabled={patching}
                   title={current?.default_effort === e ? `${defaultEffortNote(kind)}：${effortLabel(e)}` : undefined}
@@ -443,12 +462,13 @@ export function ModelQuickPicker({
         ) : null}
         {hasFast ? (
           <div className="field">
-            <span>tier</span>
-            <div className="opt-group">
+            <span aria-hidden="true">tier</span>
+            <div className="opt-group" role="group" aria-label="tier">
               <button
                 type="button"
-                role="switch"
+                role="menuitemcheckbox"
                 aria-checked={bot?.fast === true}
+                tabIndex={-1}
                 className={`opt${bot?.fast ? ' on' : ''}`}
                 disabled={patching}
                 title={current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
@@ -456,13 +476,13 @@ export function ModelQuickPicker({
               >
                 Fast
               </button>
-              <span className="field-note">
+              <span className="field-note" aria-hidden="true">
                 {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '2x speed, increased usage'}
               </span>
             </div>
           </div>
         ) : null}
-        <span className="hint">
+        <span className="hint" id={hintId} aria-hidden="true">
           {liveFast(kind) ? '執行中改模型、強度或 fast 都會即時套用' : '執行中改模型或強度會即時套用'}
         </span>
       </div>
@@ -475,7 +495,7 @@ export function ModelQuickPicker({
         type="button"
         className={className}
         title={title ?? '點一下改模型'}
-        aria-haspopup="listbox"
+        aria-haspopup="menu"
         aria-expanded={open}
         aria-label="改模型"
         onClick={() => setOpen((v) => !v)}

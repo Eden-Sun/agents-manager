@@ -408,7 +408,7 @@ team 面板 / 三個 popup——對每個可見元素做三種機械檢查：
   兩種意思因此不會搶同一個手勢，而不是二選一。取消選取時若還開著輸入框會自動收掉。
 - 元件在 `components/BotNameField.tsx`，標題列用 `variant="head"`（點一下直接改），
   側邊欄用 `variant="row"` + `armed={selected}`。側邊欄那版**不是 `<button>`**：
-  那一列本身是 listbox option 兼拖曳來源，包一顆按鈕會讓它不能拖也不合語意。
+  那一列本身是可聚焦的清單項目（listitem）兼拖曳來源，包一顆按鈕會讓它不能拖也不合語意。
 
 驗收 `node scripts/demo-rename.mjs`：
 
@@ -505,7 +505,7 @@ click again | slot="w1:pA▾"  detailOpen=false
 
 | 按鍵 | 位置 | 行為 |
 |---|---|---|
-| `↑` / `↓` | 焦點在側邊欄某一列 bot 上 | 換到上／下一個 bot，**焦點跟著跳到新的那一列**（listbox 標準行為），並 `scrollIntoView` |
+| `↑` / `↓` | 焦點在側邊欄某一列 bot 上 | 換到上／下一個 bot，**焦點跟著跳到新的那一列**，並 `scrollIntoView` |
 | `⌥↑` / `⌥↓` | 任何地方（輸入框裡也算） | 換到上／下一個 bot，**焦點留在原地**，打到一半的字不會掉 |
 | `⌥↑` / `⌥↓` | 焦點在某一列 bot 上 | 維持原本的「排序」語意（跟相鄰那列交換），不是換 bot |
 | `Enter` / `Space` | 焦點在某一列 bot 上 | 選取（原有行為） |

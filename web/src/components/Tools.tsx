@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
+import { useMenuKeys } from '../hooks/useMenuKeys'
 import { missingTools, projectHostName, runningBotsOnHost, toolsOfHost, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
@@ -27,6 +28,9 @@ export function InstallToolButton({ host, kind, small }: { host: string; kind: B
   const notify = useStore((s) => s.notify)
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLSpanElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLUListElement>(null)
+  const menuKeys = useMenuKeys(open, menuRef, btnRef, () => setOpen(false))
 
   useEffect(() => {
     if (!open) return
@@ -57,10 +61,11 @@ export function InstallToolButton({ host, kind, small }: { host: string; kind: B
   return (
     <span className="install" ref={wrap} onClick={(e) => e.stopPropagation()}>
       <button
+        ref={btnRef}
         type="button"
         className={`${small ? 'mini-btn' : 'btn'} install-btn`}
         disabled={busy}
-        aria-haspopup={candidates.length > 1 ? 'listbox' : undefined}
+        aria-haspopup={candidates.length > 1 ? 'menu' : undefined}
         aria-expanded={open}
         title={`請 ${hostLabel(host)} 上一個執行中的 Bot 安裝並登入 ${kind}（會在它的 pane 執行，登入 URL 出現在 blocked 面板）`}
         onClick={click}
@@ -68,9 +73,24 @@ export function InstallToolButton({ host, kind, small }: { host: string; kind: B
         {busy ? '送出中…' : small ? '安裝' : '用現有 agent 安裝'}
       </button>
       {open ? (
-        <ul className="install-pop" role="listbox" aria-label={`選擇執行安裝的 Bot（${hostLabel(host)}）`}>
+        // 點一下就送出安裝、沒有「選取中」可言——是選單不是 listbox。項目本來沒有 tabIndex，
+        // 鍵盤根本選不到；現在打開時焦點進第一項，↑/↓ 移動、Enter/Space 送出、Esc 收回。
+        <ul ref={menuRef} className="install-pop" role="menu" tabIndex={-1} aria-label={`選擇執行安裝的 Bot（${hostLabel(host)}）`} onKeyDown={menuKeys}>
           {candidates.map((b) => (
-            <li key={b.id} role="option" aria-selected={false} className="mention-item" onMouseDown={(e) => e.preventDefault()} onClick={() => go(b.id)}>
+            <li
+              key={b.id}
+              role="menuitem"
+              tabIndex={-1}
+              className="mention-item"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => go(b.id)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return
+                e.preventDefault()
+                e.stopPropagation()
+                go(b.id)
+              }}
+            >
               <KindTag kind={b.kind} />
               <span>{b.name}</span>
             </li>

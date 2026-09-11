@@ -1048,3 +1048,25 @@ selector 回**純布林**（`.ready.some(...)`）而不是陣列：`updateBatchC
   唯一入口，不在「有第二份」的可讓名單裡。
 - **git 鍵用跟齒輪同一種灰**：常駐入口染成 git 橘會被讀成「這裡有狀況」。
 - 規則獨立放在 `web/src/components/mobileBotHead.css`（`main.tsx` 匯入），只覆寫 grid 格位。
+
+## 無障礙語意：側欄是 list 不是 listbox，快速選單是 menu（2026-09-11，#11）
+
+外觀一律不動，只換角色與鍵盤行為。截圖在 `docs/screenshots/a11y-issue-11/`。
+
+- **側欄 bot 列是 `listitem`，不是 `option`。** option 裡不准有互動子元素，而 bot 列裡有收合鈕、
+  改名、`⋯` 選單——螢幕閱讀器會把它們吃掉。外層 `.sidebar-scroll` 改成 `<nav aria-label="Bot 清單">`，
+  每個專案的 bot 包一層 `.bot-list`（`role="list"`）；子 agent 清單在 DOM 上仍是父列的兄弟（排版要這樣），
+  用父列的 `aria-owns` 掛回它底下。「選取中」改用 `aria-current`，專案標題鍵的 `aria-pressed` 也換成
+  `aria-current`（它不是開關，再按一次不會放開）。列本身照舊 `tabIndex=0`、↑/↓ 換 bot、Alt+↑/↓ 排序。
+  前面「網址是 store 的投影」那節說的「listbox 的鍵盤行為」就是這一套，行為沒變，只是角色換了。
+- **專案標題列 `<header onClick>` 留著、不給 tabIndex。** 它只是把滑鼠命中區延伸到鍵之間的空隙；
+  鍵盤等價是裡面的 `ProjectTitle` 按鈕（同一個 `selectProject`）。再給 header 一個 Tab 停點等於同一件事按兩次。
+- **分頁加 ←/→/Home/End，但不做 roving tabindex。** 本檔「只用 Tab、Enter、Space、Escape 可完成切換
+  聊天/終端」是驗收條件，roving 會讓沒被選的分頁 Tab 不到。方向鍵是多給的路（`components/tabKeys.ts`）。
+  對話／終端下面那塊包一層 `.tab-panel`（`display: contents`，只為了掛 `role="tabpanel"` 與 id）。
+- **模型快速選單是 `menu` + `menuitemradio`（Fast 是 `menuitemcheckbox`），不是 radiogroup。**
+  點一下就 PATCH 並關掉，那是選單的行為；radio 的「方向鍵即選取」會每按一下送一次 PATCH。
+  打開時焦點落在已勾選的那一項，方向鍵只移焦點，Enter/Space 才套用，Esc／Tab 關掉並把焦點還給觸發鍵
+  （`hooks/useMenuKeys.ts`，「用現有 agent 安裝」的 Bot 選單也用這一支）。
+- **目錄選擇器的 `›` 不再是按鈕。** option 裡不能有按鈕，整列就是 option；`›` 是滑鼠捷徑，鍵盤走 Enter／→。
+  焦點一直留在篩選框（`role="combobox"` + `aria-activedescendant`），點列時也不搶焦點。

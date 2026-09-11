@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { listDirs } from '../api'
 import type { DirListing } from '../api/types'
 
@@ -42,6 +42,8 @@ export function DirPicker({
   const filterRef = useRef<HTMLInputElement>(null)
   const manualRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const listId = useId()
+  const optId = (i: number) => `${listId}-opt-${i}`
 
   const load = (path?: string, opts?: { hidden?: boolean; keep?: string }) => {
     setBusy(true)
@@ -233,6 +235,15 @@ export function DirPicker({
           spellCheck={false}
           autoFocus
           placeholder="篩選這層資料夾…"
+          // 焦點一直留在這格，↑/↓ 移的是清單裡的 highlight（外層 onKeyDown）。沒有
+          // aria-activedescendant 的話，螢幕閱讀器不知道現在選到哪一列。
+          role="combobox"
+          aria-label="篩選這層資料夾"
+          aria-expanded={entries.length > 0}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={selected ? optId(sel) : undefined}
+          aria-describedby={`${listId}-keys`}
           onChange={(e) => {
             setFilter(e.target.value)
             setSel(e.target.value ? 0 : -1)
@@ -252,7 +263,10 @@ export function DirPicker({
         </label>
       </div>
 
-      <div className="dirpicker-list" ref={listRef} role="listbox" aria-label="子資料夾">
+      {/* option 裡不能有按鈕：整列就是 option（點一下 highlight、雙擊進入），› 只是滑鼠的
+          捷徑（鍵盤是 Enter / →），所以不是按鈕、也不佔焦點。按下去時焦點留在篩選框。
+          沒有資料夾時不掛 listbox——那時候裡面只有一句說明，不是選項。 */}
+      <div className="dirpicker-list" ref={listRef} id={listId} role={entries.length > 0 ? 'listbox' : undefined} aria-label="子資料夾">
         {error ? <div className="dirpicker-empty err">{error}</div> : null}
         {!error && busy && !listing ? <div className="dirpicker-empty">載入中…</div> : null}
         {!error && listing && listing.entries.length === 0 ? (
@@ -264,27 +278,39 @@ export function DirPicker({
         {entries.map((e, i) => (
           <div
             key={e.path}
+            id={optId(i)}
             data-idx={i}
             role="option"
             aria-selected={i === sel}
+            aria-disabled={busy || undefined}
             className={`dirpicker-row${i === sel ? ' sel' : ''}`}
-            onDoubleClick={() => enter(e.path)}
+            onMouseDown={(ev) => {
+              ev.preventDefault()
+              filterRef.current?.focus()
+            }}
+            onClick={() => {
+              if (!busy) setSel(i)
+            }}
+            onDoubleClick={() => {
+              if (!busy) enter(e.path)
+            }}
           >
-            <button type="button" className="dirpicker-pick" disabled={busy} onClick={() => setSel(i)}>
-              <span className="ico">📁</span>
+            <span className="dirpicker-pick">
+              <span className="ico" aria-hidden="true">📁</span>
               <span className="name">{e.name}</span>
               {e.git ? <span className="tag">git</span> : null}
-            </button>
-            <button
-              type="button"
+            </span>
+            <span
               className="dirpicker-enter"
               title={`進入 ${e.name}`}
-              aria-label={`進入 ${e.name}`}
-              disabled={busy}
-              onClick={() => enter(e.path)}
+              aria-hidden="true"
+              onClick={(ev) => {
+                ev.stopPropagation()
+                if (!busy) enter(e.path)
+              }}
             >
               ›
-            </button>
+            </span>
           </div>
         ))}
       </div>
@@ -296,7 +322,7 @@ export function DirPicker({
             {target}
           </span>
         </div>
-        <div className="dirpicker-keys">↩ 進入 · ⌘↩ 直接選擇 · ← 上一層 · ↑↓ 移動</div>
+        <div className="dirpicker-keys" id={`${listId}-keys`}>↩ 進入 · ⌘↩ 直接選擇 · ← 上一層 · ↑↓ 移動</div>
         <div className="dirpicker-actions">
           <button type="button" className="btn" onClick={onCancel}>
             取消
