@@ -48,8 +48,8 @@ pub async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
     let _g = super::lock().await;
     // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
     // directly on Opus instead of briefly opening the wrong session.
-    if let Err(e) = controller::auto_switch_if_fable_low(&app).await {
-        tracing::warn!(error = ?e, "automatic Fable quota switch during start failed");
+    if let Err(e) = controller::apply_quota_policy(&app).await {
+        tracing::warn!(error = ?e, "quota policy during start failed");
     }
     super::start_manager(&app, None).await?;
     // From here on the manager is *supposed* to be up: if it dies, the watchdog brings it back.
@@ -76,7 +76,9 @@ pub async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcErr
 /// Switch to the other fixed candidate. Bounded: see `controller::switch_candidate`.
 pub async fn post_fallback(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    let switched = controller::switch_candidate(&app, "requested").await?;
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let next = setup::other_candidate(&sup.active_model);
+    let switched = controller::switch_candidate(&app, next, "requested", None).await?;
     let mut out = super::status_json(&app).await?;
     out["switched"] = json!(switched);
     Ok(Json(out))

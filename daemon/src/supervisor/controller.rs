@@ -10,7 +10,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{setup, store};
+use super::{policy, setup, store};
 
 /// How long a busy target is left alone before the same assignment is offered again.
 const RETRY_BACKOFF: [u64; 5] = [15, 30, 60, 120, 300];
@@ -22,8 +22,6 @@ const SWITCH_COOLDOWN_SECS: i64 = 30 * 60;
 /// The plan's bound: one automatic candidate switch per cooldown window. `cc0` is one account,
 /// so a second switch cannot conjure quota that the first one did not find.
 const MAX_AUTO_SWITCHES: i64 = 1;
-/// Switch away from Fable only when its dedicated weekly bucket has less than 5% left.
-const FABLE_MIN_REMAINING_PCT: f64 = 5.0;
 
 fn backoff_for(attempts: i64) -> Duration {
     let i = (attempts.max(0) as usize).min(RETRY_BACKOFF.len() - 1);
@@ -315,16 +313,39 @@ async fn notify(app: &Arc<App>) {
 
 // ---------------------------------------------------------------- candidate switching
 
-/// Switch to the other candidate. `Ok(false)` = refused, with the reason already recorded.
+/// Switch the manager to `next`. `Ok(false)` = refused, with the reason already recorded.
+/// The caller holds [`super::lock`].
 ///
 /// Bounded on purpose: `cc0` is a single account, so both candidates share one quota pool. If
 /// the first switch does not help, a second one is not going to, and an unbounded loop would
 /// just burn the account's remaining capacity flapping between two models.
-pub async fn switch_candidate(app: &Arc<App>, reason: &str) -> Result<bool, LcError> {
+///
+/// Only an idle manager (no turn in flight) or a stopped one is switched: `/model` lands in
+/// the input line, and mid-turn it eats the user's next message (b95142a). A busy manager gets
+/// 409 `busy`; the controller simply asks again next tick. When the live `/model` does not
+/// take on an idle session (the confirmation would not close, the gate refused), the session
+/// is restarted on the new model rather than left running the old one under a record that
+/// says otherwise.
+pub async fn switch_candidate(
+    app: &Arc<App>,
+    next: &str,
+    reason: &str,
+    reset_at: Option<&str>,
+) -> Result<bool, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(bot_id) = sup.bot_id.clone() else {
         return Err(LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})));
     };
+    if sup.active_model == next {
+        return Ok(false);
+    }
+    let liveness = super::manager_liveness(app, &bot_id).await?;
+    if !matches!(liveness, "idle" | "stopped") {
+        return Err(LcError::conflict(
+            "the supervisor is mid-turn; a model switch now would eat its next message",
+            json!({"reason": "busy", "liveness": liveness}),
+        ));
+    }
     // The window is over: this is a genuinely new failure, so it gets its own budget.
     if sup.cooldown_until.as_deref().is_some_and(past) {
         let _ = store::clear_fallback_budget(&app.db).await;
@@ -346,8 +367,8 @@ pub async fn switch_candidate(app: &Arc<App>, reason: &str) -> Result<bool, LcEr
         return Ok(false);
     }
 
-    let next = setup::other_candidate(&sup.active_model).to_string();
-    let model = setup::model_arg(&next).to_string();
+    let next = if next == "opus" { "opus" } else { "fable" };
+    let model = setup::model_arg(next).to_string();
     // Config first, so a restart comes up on the new candidate even if the live switch fails.
     let bid = bot_id.clone();
     let m2 = model.clone();
@@ -368,45 +389,80 @@ pub async fn switch_candidate(app: &Arc<App>, reason: &str) -> Result<bool, LcEr
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     let _ = crate::projection::project_config(&app.cfg, &app.db).await;
 
-    // Apply it to the session that is already running, if there is one. `active_model` is only
-    // written once something actually took effect.
-    let applied = lifecycle::apply_live_setting(app, &bot_id, &["model", "effort"]).await;
-    let gen = store::set_active_model(&app.db, &next, Some(&iso_in(SWITCH_COOLDOWN_SECS)))
+    // Apply it to the session that is already running, if there is one. `send_slash_line`
+    // answers claude's "Switch model?" confirmation and backs out (Err → false) if it will
+    // not close, so `applied` means the session really is on the new model.
+    let applied = liveness == "idle" && lifecycle::apply_live_setting(app, &bot_id, &["model", "effort"]).await;
+    let gen = store::set_active_model(&app.db, next, Some(&iso_in(SWITCH_COOLDOWN_SECS)))
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
-    let _ = store::set_status(&app.db, "", Some(&format!("switched to {next}: {reason}"))).await;
+    let _ = store::set_quota_reset(&app.db, reset_at).await;
+    let mut restarted = false;
+    if !applied && liveness == "idle" {
+        // Still idle? Then a restart costs only the session, and a manager running the old
+        // model under a record that says the new one is the worse outcome.
+        if super::manager_liveness(app, &bot_id).await.unwrap_or("busy") == "idle" {
+            if let Err(e) = lifecycle::stop_bot(app, &bot_id).await {
+                tracing::warn!(error = ?e, "could not stop the supervisor to apply the model switch");
+            }
+            match super::start_manager(app, Some(&format!("switched to {next}: {reason}（重啟套用）"))).await {
+                Ok(()) => restarted = true,
+                // `desired_running` is still set: the watchdog brings it back on the new model.
+                Err(e) => tracing::warn!(error = ?e, "restart after the model switch failed; leaving it to the watchdog"),
+            }
+        }
+    }
+    if !restarted {
+        let _ = store::set_status(&app.db, "", Some(&format!("switched to {next}: {reason}"))).await;
+    }
     // A live switch keeps the session (and its Remote Control link); a restart does not, so
     // the remote entry point has to be re-observed rather than assumed.
     if !applied {
-        let _ = store::set_remote(&app.db, "unknown", None).await;
+        let _ = store::set_remote(&app.db, if restarted { "requested" } else { "unknown" }, None).await;
     }
-    app.emit("supervisor_changed", json!({"model": next, "generation": gen, "applied_live": applied})).await;
+    tracing::info!(model = next, reason, applied, restarted, "supervisor candidate switched");
+    app.emit("supervisor_changed", json!({"model": next, "generation": gen, "applied_live": applied, "restarted": restarted})).await;
     spawn(app.clone(), gen);
     Ok(true)
 }
 
-/// Apply the quota policy to the currently selected candidate. Missing or stale Fable data is
-/// deliberately treated as unknown: without a reading we keep the configured candidate rather
-/// than making an irreversible model change on an assumption.
-pub async fn auto_switch_if_fable_low(app: &Arc<App>) -> Result<bool, LcError> {
+/// Apply the quota policy ([`policy::decide`]) once. The caller holds [`super::lock`].
+/// `Ok(true)` = a candidate switch happened.
+pub async fn apply_quota_policy(app: &Arc<App>) -> Result<bool, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    if sup.active_model != "fable" || sup.bot_id.is_none() {
-        return Ok(false);
-    }
-    let low = {
+    let Some(bot_id) = sup.bot_id.clone() else { return Ok(false) };
+    let quota = {
         let quotas = app.quotas.lock().await;
-        let quota = quotas
-            .get(&format!("claude:{}", sup.identity))
-            .or_else(|| quotas.get("claude"));
-        quota
-            .and_then(|q| q.fable.as_ref())
-            .map(|w| (100.0 - w.used_pct).max(0.0) < FABLE_MIN_REMAINING_PCT)
-            .unwrap_or(false)
+        quotas.get(&format!("claude:{}", sup.identity)).or_else(|| quotas.get("claude")).cloned()
     };
-    if low {
-        switch_candidate(app, "fable 剩餘額度低於 5%").await
-    } else {
-        Ok(false)
+    let liveness = super::manager_liveness(app, &bot_id).await.unwrap_or("stopped");
+    match policy::decide(&sup, quota.as_ref(), liveness, chrono::Utc::now()) {
+        policy::Decision::Keep => Ok(false),
+        policy::Decision::Defer { model } => {
+            tracing::debug!(model, liveness, "supervisor model switch deferred: manager is mid-turn");
+            Ok(false)
+        }
+        policy::Decision::WaitQuota { reset_at } => {
+            let _ = store::set_quota_reset(&app.db, reset_at.as_deref()).await;
+            let detail = match &reset_at {
+                Some(t) => format!("cc0 的 5 小時／7 天額度見底，兩個候選共用同一份，等 {t} 恢復"),
+                None => "cc0 的 5 小時／7 天額度見底，兩個候選共用同一份，等額度恢復".to_string(),
+            };
+            let _ = store::set_status(&app.db, "waiting_quota", Some(&detail)).await;
+            tracing::warn!(?reset_at, "supervisor waiting for the shared claude quota");
+            app.emit("supervisor_changed", json!({"status": "waiting_quota", "quota_reset_at": reset_at})).await;
+            Ok(false)
+        }
+        policy::Decision::Resume => {
+            let _ = store::set_quota_reset(&app.db, None).await;
+            let _ = store::set_status(&app.db, "", Some("額度已恢復")).await;
+            tracing::info!("supervisor quota wait is over");
+            app.emit("supervisor_changed", json!({"status": "resumed"})).await;
+            Ok(false)
+        }
+        policy::Decision::SwitchTo { model, reason, reset_at } => {
+            switch_candidate(app, model, &reason, reset_at.as_deref()).await
+        }
     }
 }
 
@@ -466,8 +522,13 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     Err(_) => return,
                 },
                 _ = tick.tick() => {
-                    if let Err(e) = auto_switch_if_fable_low(&app).await {
-                        tracing::warn!(error = ?e, "automatic Fable quota switch failed");
+                    {
+                        let _g = super::lock().await;
+                        match apply_quota_policy(&app).await {
+                            // Mid-turn: the next tick asks again.
+                            Err(LcError::Conflict(_)) | Ok(_) => {}
+                            Err(e) => tracing::warn!(error = ?e, "supervisor quota policy failed"),
+                        }
                     }
                     reconcile(&app).await;
                     drain_queue(&app).await;
