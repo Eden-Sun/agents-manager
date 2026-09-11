@@ -3761,6 +3761,50 @@ p.project-quota-hidden {
   font-size: 11.5px;
 }
 
+.git-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 桌面（有游標）：commit / push / pull 平常收起，滑到 git 那段（或 Tab 進去）才在下方彈出；
+   打 commit 訊息時 `.open` 常駐。上緣用 padding 接住游標，移過去的路上不會斷。 */
+@media (hover: hover) and (width > 640px) {
+  .git-bar {
+    position: relative;
+  }
+
+  .git-actions {
+    position: absolute;
+    top: 100%;
+    left: -8px;
+    z-index: 30;
+    display: none;
+    padding: 6px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--bg-panel);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+  }
+
+  .git-actions::before {
+    content: '';
+    position: absolute;
+    inset: -8px 0 100%;
+  }
+
+  .git-bar:hover .git-actions,
+  .git-bar:focus-within .git-actions,
+  .git-actions.open {
+    display: inline-flex;
+  }
+}
+
+/* 版本固定貼這一列最右邊（2026-09-12 使用者）。 */
+.context-bar .sl-item.sl-version {
+  margin-left: auto;
+}
+
 .git-commit-form {
   display: inline-flex;
   align-items: center;
