@@ -14,6 +14,9 @@
  * 釘起來的 bot **不會**同時出現在後兩組：它的晶片本來就帶未讀數與進行中的圓點，再列一次
  * 只是同一件事佔兩格。
  *
+ * **當前正在看的那一顆也不列**（2026-09-11 使用者）：它已經是畫面本身，標題列上就寫著同一個
+ * 名字，點下去什麼也不會發生。空出來的寬度留給真的要跳過去的那幾顆。
+ *
  * 側欄本來就會在每一列上亮未讀（`Sidebar` 的 `.unread-turns`），但側欄在手機上收在抽屜裡、
  * 桌面上也可能被捲掉；使用者要追的是跨 bot 的問題，所以它得待在每個畫面都看得到的地方。
  *
@@ -81,12 +84,15 @@ export function UnreadChip() {
     [teams],
   )
   const selectedBotId = useStore((s) => s.selectedBotId)
+  // 排除當前這顆之後才是要畫出來的那一組；`isPinned` 仍用完整的 `pinned`，前後兩組的排除
+  // 規則（釘起來的不重複列）不因為「現在在看誰」而改變。
+  const pinnedRow = useMemo(() => pinned.filter((p) => p.id !== selectedBotId), [pinned, selectedBotId])
   const selectedTeamId = useStore((s) => s.selectedTeamId)
   const selectBot = useStore((s) => s.selectBot)
   const selectTeam = useStore((s) => s.selectTeam)
   const botUnreadOf = (id: string) => botUnread[id] ?? 0
   const live = working.length + liveTeams.length
-  if (pinned.length === 0 && rows.length === 0 && live === 0) return null
+  if (pinnedRow.length === 0 && rows.length === 0 && live === 0) return null
   return (
     <div className="unread-bar" role="status" aria-live="polite">
       {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
@@ -103,11 +109,11 @@ export function UnreadChip() {
         </button>
       ))}
       {/* 釘選的主力：★ 就是標籤，不另外寫字。 */}
-      {pinned.map((r) => (
+      {pinnedRow.map((r) => (
         <button
           key={r.id}
           type="button"
-          className={`unread-chip pinned${r.id === selectedBotId ? ' current' : ''}`}
+          className="unread-chip pinned"
           title={`${r.name}（主要執行的 bot）。點一下跳過去`}
           onClick={() => selectBot(r.id)}
         >
