@@ -1757,8 +1757,18 @@ async fn start_inner(
     // id is persisted before `agent.start`; the hook receiver consumes it on the first identity
     // or completed-turn callback and can then detect a provider that ignored/misrouted resume.
     let resume = if opts.resume_native {
-        match db::last_native_session_id(&app.db, &bot.id).await.map_err(up)? {
-            Some(session_id) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
+        match db::last_native_session(&app.db, &bot.id).await.map_err(up)? {
+            // A session the provider never wrote cannot be resumed: claude only creates the
+            // transcript once the conversation has a message, and `--resume` of an id without
+            // one prints "No conversation found" and exits — herdr saw the TUI for a moment,
+            // the restart reported success, and the bot was dead a second later (2026-09-11,
+            // every never-prompted bot in the restart-idle repro). Start fresh instead.
+            Some((session_id, Some(transcript))) if host == LOCAL_HOST && !transcript.trim().is_empty() && !std::path::Path::new(&transcript).exists() => {
+                tracing::info!(bot = %bot.name, session = %session_id, transcript, "native session has no transcript on disk; not resuming it");
+                member_context_lost(app, bot, "transcript_missing").await?;
+                None
+            }
+            Some((session_id, _)) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
                 Ok(resume_args) => Some((session_id, resume_args)),
                 Err(why) => {
                     member_context_lost(app, bot, why).await?;
@@ -2121,8 +2131,13 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
 pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
     let Some(pane) = run.pane_id.as_deref() else { return false };
     let Ok(client) = client_for_run(app, run).await else { return true };
-    if matches!(client.pane_get(pane).await, Ok(None)) {
-        return false;
+    match client.pane_get(pane).await {
+        Ok(None) => return false,
+        // The pane itself says an agent is in it: that is the answer. herdr's `agent.get` by
+        // name can say not-found for a moment after a same-named agent was restarted on a new
+        // pane (2026-09-11), and a run must not be ended over that.
+        Ok(Some(p)) if p.agent.is_some() => return true,
+        _ => {}
     }
     !matches!(client.agent_get(&db::run_target(run, bot)).await, Ok(None))
 }
@@ -2692,6 +2707,49 @@ mod resume_args_tests {
         start_bot(&e.app, &pm.id).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()));
+        stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// A session whose transcript was never written (a bot that was started and never
+    /// prompted) is not resumed: `claude --resume <id>` of such an id exits at once with "No
+    /// conversation found", and the restart would report success over a dead pane.
+    #[tokio::test]
+    async fn a_session_without_a_transcript_on_disk_is_not_resumed() {
+        let e = env().await;
+        let mut team_req = req(Some(1), false);
+        team_req.pm.kind = "claude".into();
+        let team_id = make_team(&e.app, &e.project_id, team_req).await;
+        let pm = db::team_members(&e.app.db, &team_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("pm"))
+            .unwrap();
+        let ended = |sid: &str, transcript: &str, at: &str| {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle',?,?,?,?)",
+            )
+            .bind(db::ulid())
+            .bind(pm.id.clone())
+            .bind(sid.to_string())
+            .bind(transcript.to_string())
+            .bind(at.to_string())
+            .bind(at.to_string())
+        };
+        let missing = e.dir.join("never-written.jsonl");
+        ended("sid-unwritten", missing.to_str().unwrap(), "2026-09-11T00:00:00Z").execute(&e.app.db).await.unwrap();
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true }).await.unwrap();
+        let args = started_args(&e).pop().unwrap();
+        assert!(!args.contains(&"--resume".into()), "resumed a session that has no transcript: {args:?}");
+        stop_bot(&e.app, &pm.id).await.unwrap();
+
+        let written = e.dir.join("written.jsonl");
+        std::fs::write(&written, "{}\n").unwrap();
+        ended("sid-written", written.to_str().unwrap(), "2026-09-11T00:10:00Z").execute(&e.app.db).await.unwrap();
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true }).await.unwrap();
+        let args = started_args(&e).pop().unwrap();
+        assert!(args.windows(2).any(|w| w == ["--resume", "sid-written"]), "{args:?}");
         stop_bot(&e.app, &pm.id).await.unwrap();
     }
 

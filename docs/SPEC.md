@@ -458,10 +458,13 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
 >    若 start 仍被一個 pane 已不存在的 run 擋住，就把那個 run 結束並再試一次。
 > 2. reconcile 拿到鎖之後，若要**收編**（沒有 active run）或要**改寫 run 的 pane**（清單上的 pane 與 run 記錄不同），
 >    先向 herdr 重新 `agent.get` + `pane.get` 確認；agent 已不在或 pane 已關就不收編、不改寫。RPC 失敗時維持原判斷。
->    有 active run 但 herdr 確認不到 agent 時（同名 agent 剛在新 pane 重開的那一瞬間 `agent.get` 會答 not-found
->    或指到舊 pane），**不能**當成「agent 不見了」把 run 標 exited——那個 run 是在 reconcile 等的那把鎖裡剛寫下的；
->    這一輪放著不動，下一輪再看 herdr 定下來的答案（2026-09-11 第一版修正就是這樣把整批剛重啟的 run 標掉、
->    再由孤兒 pane 清掃把新 pane 關掉）。`run_alive` 同理以 pane 本身有沒有 agent 為準，`agent.get` 只是備援。
+>    有 active run 但 herdr **按名字**找不到 agent 時，不能只憑這點把 run 標 exited：herdr 0.8.2 的名字是一份
+>    以名字為鍵的登錄，同名 agent 在新 pane 重開後，舊 agent 晚到的退出處理會把新 agent 剛拿到的名字清掉
+>    （`agent.list` 裡它變成 `name: null`、`agent.get <name>` 答 not-found，但 `pane.get` 仍回報 `agent: claude`）。
+>    2026-09-11 第一版修正就是這樣把整批剛重啟的 run 標成 exited、再由孤兒 pane 清掃把新 pane 關掉。
+>    所以改成問 run 自己的 pane：`agent.get <pane_id>`——pane 裡是它自己的 agent（名字相同或已被清掉）就保留 run、
+>    用 `agent.rename <pane_id> <name>` 把名字補回去（之後 `agent.prompt`／`send_keys` 才叫得到）；pane 裡是別人的
+>    agent 或空的才標 exited；RPC 失敗就這一輪不動。`run_alive` 同理以 pane 本身有沒有 agent 為準，`agent.get` 只是備援。
 > 3. 批次裡某顆最後仍啟動失敗：若它留下一個 pane 已關的 run 就結束掉（bot 顯示為停止，可再啟動），並推一則
 >    supervisor inbox 事件 `kind = bot_restart_failed`（payload：`batch_id`、`bot_id`、`name`、`error`）。
 > 4. 總管 bot（`supervisors.bot_id`，即 AGM）**排在最後**重啟；重啟後 60 秒內每 5 秒檢查一次它是否 running、
@@ -495,6 +498,11 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   ——stop 與 start 在**同一次持有 bot 鎖**裡做完（見下方「2026-09-11 競態修正」）。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
   之後，剛結束那個 `native_session_id` 就成了 `last_native_session_id` 找得到的「上一個 session」，
   claude 拿到的是 `--resume <session>`。沒有另一套啟動流程，hook 注入 / 身份 / 模型 / pane 版面全部照舊。
+  - **沒寫過 transcript 的 session 不續接**：claude 只在對話有訊息後才建 transcript，對一個從沒被
+    prompt 過的 bot `--resume <id>` 會印 `No conversation found` 立刻退出——herdr 看到 TUI 一瞬間、
+    批次回報成功，一秒後 pane 變回 shell、reconcile 把 run 標 exited、孤兒清掃關 pane（2026-09-11 隔離
+    重現裡每一輪都是這樣 0/4）。所以本機 host 上 hook 回報過的 `transcript_path` 不存在時，改開新對話
+    （`member_context_lost("transcript_missing")`），不帶 `--resume`。
   - 與 `POST /bots/:id/restart` 的差別只有這個旗標：那條是「重新開始」，這條是「接著跑」。
 - **一顆失敗不中斷整批**：批次的價值就在於不用一顆一顆顧，中途停下等於白做。失敗的記在結果裡。
 - 序列而不是並行：herdr 的 pane 版面（§6.2 的挑最大面積切）與每顆的 per-bot 鎖都假設一次一顆，
