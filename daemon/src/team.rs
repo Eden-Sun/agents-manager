@@ -1814,6 +1814,9 @@ async fn retire_workers(app: &Arc<App>, team_id: &str, issue_id: &str, only_seq:
             .bind(&b.id)
             .execute(&app.db)
             .await;
+        // #61: its hook material goes with it — before the worktree check below, which may
+        // `continue` and must not leave the directory behind when it does.
+        crate::lifecycle::purge_bot_dir(app, &b.id, &project.host).await;
         if let Err(why) = removable_member_dir(&project, &t.worktree_root, &cwd) {
             tracing::warn!(team = team_id, dir = %cwd, why, "refusing to remove a worker worktree");
             continue;
@@ -2045,6 +2048,8 @@ async fn rollback_create(
     let now = db::now();
     for b in created {
         let _ = sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(b).execute(&app.db).await;
+        // #61: a member that never got going still had its hook material written.
+        crate::lifecycle::purge_bot_dir(app, b, &project.host).await;
     }
     close_workspace(app, project, workspace_id).await;
     remove_worktrees(app, project, repo, root, dirs).await;
@@ -3174,6 +3179,8 @@ async fn swap_member(
         .execute(&app.db)
         .await
         .map_err(any_err)?;
+    // #61: the seat keeps its name, not its id — `bots/<id>/` of the retired bot is garbage.
+    crate::lifecycle::purge_bot_dir(app, &old.id, &project.host).await;
     let new_id =
         insert_member(app, project, &t.id, &old.name, &tid6(&t.id), &role, t.issue_number, spec, &cwd).await?;
 
@@ -5423,6 +5430,10 @@ mod api_tests {
             .find(|b| b.team_role.as_deref() == Some("worker"))
             .unwrap();
         assert_eq!(old.kind, "claude");
+        // #61: the retired bot's hook material must not outlive it.
+        let old_dir = app.bot_dir(&old.id);
+        std::fs::create_dir_all(old_dir.join("bin")).unwrap();
+        std::fs::write(old_dir.join("bin").join("herdr"), "shim").unwrap();
         let task_id = db::ulid();
         sqlx::query(
             "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
@@ -5451,6 +5462,7 @@ mod api_tests {
         let members = db::team_members(&app.db, &tid).await.unwrap();
         let gone = members.iter().find(|b| b.id == old.id).unwrap();
         assert!(gone.deleted_at.is_some(), "the old bot is retired, and its messages stay with it");
+        assert!(!old_dir.exists(), "#61: swap_member left the retired bot's bots/<id>/ directory behind");
         let new = members
             .iter()
             .find(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker"))
@@ -5466,6 +5478,75 @@ mod api_tests {
         assert_eq!(owner, new.id, "the unfinished task follows the seat");
         let t = load(&app, &tid).await.unwrap();
         assert_eq!(serde_json::from_str::<Value>(&t.roles_json).unwrap()["workers"]["spec"]["kind"], "grok");
+    }
+
+    /// #61: a team whose creation fails is rolled back — and the members it had already
+    /// written must not leave their `bots/<id>/` directories behind.
+    #[tokio::test]
+    async fn rollback_create_removes_the_bot_dirs_it_soft_deletes() {
+        let e = env().await;
+        let app = e.app.clone();
+        let project = db::project(&app.db, &e.project_id).await.unwrap().unwrap();
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,'t-dev-1','claude','[]',0,1,'tok','team',?)",
+        )
+        .bind(&bot)
+        .bind(&e.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let dir = app.bot_dir(&bot);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin").join("herdr"), "shim").unwrap();
+
+        rollback_create(&app, &project, &project.path, &db::ulid(), &[bot.clone()], "", &[], None).await;
+
+        assert!(db::bot(&app.db, &bot).await.unwrap().unwrap().deleted_at.is_some());
+        assert!(!dir.exists(), "#61: rollback_create left the soft-deleted bot's directory behind");
+    }
+
+    /// #61: the startup sweep removes only the directories of soft-deleted bots. A live bot's
+    /// directory and one no bot row claims are left exactly as they are.
+    #[tokio::test]
+    async fn the_startup_sweep_removes_only_deleted_bots_dirs() {
+        let e = env().await;
+        let app = e.app.clone();
+        let mk = |name: &str, deleted: bool| {
+            let app = app.clone();
+            let pid = e.project_id.clone();
+            let name = name.to_string();
+            async move {
+                let id = db::ulid();
+                sqlx::query(
+                    "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at, deleted_at)
+                     VALUES (?,?,?,'claude','[]',0,1,'tok','team',?,?)",
+                )
+                .bind(&id)
+                .bind(&pid)
+                .bind(&name)
+                .bind(db::now())
+                .bind(deleted.then(db::now))
+                .execute(&app.db)
+                .await
+                .unwrap();
+                std::fs::create_dir_all(app.bot_dir(&id).join("bin")).unwrap();
+                id
+            }
+        };
+        let gone = mk("t-dev-old", true).await;
+        let live = mk("t-dev-new", false).await;
+        let stranger = db::ulid();
+        std::fs::create_dir_all(app.bot_dir(&stranger).join("bin")).unwrap();
+
+        let removed = crate::lifecycle::purge_deleted_bot_dirs(&app).await;
+
+        assert_eq!(removed, 1);
+        assert!(!app.bot_dir(&gone).exists(), "a deleted bot's directory is removed");
+        assert!(app.bot_dir(&live).exists(), "a live bot's directory is kept");
+        assert!(app.bot_dir(&stranger).exists(), "a directory no bot row claims is not ours to judge");
     }
 
     /// A swap in the middle of a turn would throw away the reply the team is waiting for.
