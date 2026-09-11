@@ -96,6 +96,33 @@ const TAIL_LINES: usize = 6;
 /// [`update_notice`] 中了以後存進 `runs.update_notice` 的字，也是 UI tooltip 上的原句。
 pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
 
+/// claude 的 `/model <別名>` 在**已經有對話紀錄**時不會直接換，而是先跳一個確認框：
+///
+/// ```text
+///  Switch model?
+///  Your next response will be slower and use more tokens
+///  This conversation is cached for the current model. Switching to Haiku 4.5 means …
+///  ❯ 1. Yes, switch to Haiku 4.5
+///    2. No, go back
+/// ```
+///
+/// （2.1.268 實測；空的 session 沒有快取可失效，就直接換、不問。）herdr 把這個框判成 `idle`，
+/// 所以 daemon 以為指令已經套用，下一則 prompt 被打進框裡：字被丟掉、Enter 替使用者按了
+/// 「Yes」，回合在 12 秒後以 stall 失敗（2026-09-11 AGM：`/model fable` 04:45:09 送出，
+/// transcript 裡直到 04:45:21.98 使用者的「go」按下 Enter 才真的執行）。
+///
+/// 只看畫面**最下面**幾行：這個框畫在輸入列的位置，正文裡引用到這幾個字（例如 agent 正在讀
+/// 這份原始碼）不算——同 [`update_notice`] 踩過的坑。
+pub fn is_switch_model_dialog(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..].join("\n");
+    let t = flatten(&tail);
+    t.contains("switch model?") && t.contains("yes, switch to") && t.contains("no, go back")
+}
+
+/// 確認框連同上下框線、底下的 statusLine 最多這麼高；再往上就是正文。
+const DIALOG_TAIL_LINES: usize = 12;
+
 /// 這個 Run 的 pane 現在是不是停在登入選單上。讀不到畫面就當不是——那不是這裡要擋的事。
 pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
@@ -194,6 +221,24 @@ mod tests {
         assert!(!is_feedback_survey(""));
         // 只提到 dismiss 的畫面不算——那個字到處都是。
         assert!(!is_feedback_survey("Press 0 to dismiss this notice"));
+    }
+
+    /// 2.1.268 在一個有對話紀錄的 session 裡打 `/model haiku` 之後的真畫面（2026-09-11）。
+    const SWITCH_MODEL: &str = "  ⎿  Interrupted · What should Claude do instead?\n▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   Your next response will be slower and use more tokens\n   This conversation is cached for the current model. Switching to Haiku 4.5 means the full history gets re-read on your next message.\n   ❯ 1. Yes, switch to Haiku 4.5\n     2. No, go back\n";
+
+    #[test]
+    fn switch_model_confirmation_is_recognised() {
+        assert!(is_switch_model_dialog(SWITCH_MODEL));
+        // 同一段字出現在正文裡（例如 agent 正在讀這份原始碼），底下還有輸入列與 statusLine——不算。
+        let quoted = format!(
+            "{}\n{}\n─────\n❯\n─────\n  tony. | agents-manager | Fable 5.1 31% | 5h:96%\n  ⏵⏵ bypass permissions on\n",
+            SWITCH_MODEL,
+            "⏺ Bash(cargo test)\n  ⎿  ok\n".repeat(8)
+        );
+        assert!(!is_switch_model_dialog(&quoted));
+        assert!(!is_switch_model_dialog(SURVEY));
+        assert!(!is_switch_model_dialog(PERMISSION));
+        assert!(!is_switch_model_dialog(""));
     }
 
     const UPDATE: &str = " hunta | amber | OP5 10% | 3.2k                    ✔ Update installed · Restart to update\n";
