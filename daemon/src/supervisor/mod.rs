@@ -7,6 +7,7 @@
 pub mod api;
 pub mod controller;
 pub mod health;
+pub mod policy;
 pub mod setup;
 pub mod store;
 pub mod watchdog;
