@@ -32,8 +32,21 @@
     justify-content: flex-start;
   }
 
+  /* 名字那顆不撐高：它跟 ★／⚙ 同一行，行高由 40px 的鍵決定，名字本身只要文字加一點內距。
+     （styles.css 手機區塊把 `.bot-name-btn` 拉到 40px 觸控高度，這裡收回——整顆
+     `.bot-switcher-btn` 仍是可點的，高度靠 `align-items: stretch` 跟上鍵的 40px。） */
   .main-head.bot-head .main-title-row {
-    min-height: 44px;
+    align-items: stretch;
+  }
+
+  .main-head.bot-head .main-title-row > .lamp {
+    align-self: center;
+  }
+
+  .main-head.bot-head .main-title-row > .bot-switcher > .bot-name-btn {
+    min-height: 0;
+    height: auto;
+    padding: 1px 4px;
   }
 
   /* 名字那叢吃掉第一行所有剩餘寬度；★ 與齒輪靠右貼著分頁，名字短的時候也不跟過去。 */
