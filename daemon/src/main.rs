@@ -212,6 +212,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     }
     // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
     reconcile::rearm_progress(&app).await;
+    // #61: directories of bots deleted before every deletion path purged them.
+    lifecycle::purge_deleted_bot_dirs(&app).await;
     events::spawn_global(app.clone()).await;
 
     // Observe the user's default session when it is separate from the manager's named session.

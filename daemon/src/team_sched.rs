@@ -3180,6 +3180,10 @@ mod scenarios {
         let reviewer = before.reviewer().unwrap().clone();
         let old_worker = before.workers()[0].clone();
         let old_worker_cwd = old_worker.cwd.clone().unwrap();
+        // #61: the retired worker's hook material must go with it.
+        let old_worker_dir = s.app().bot_dir(&old_worker.id);
+        std::fs::create_dir_all(old_worker_dir.join("bin")).unwrap();
+        std::fs::write(old_worker_dir.join("bin").join("herdr"), "shim").unwrap();
         let pm_cwd = pm.cwd.clone().unwrap();
         let reviewer_cwd = reviewer.cwd.clone().unwrap();
         let base_sha = before.team.base_sha.clone();
@@ -3210,6 +3214,7 @@ mod scenarios {
         assert_eq!(after.reviewer().unwrap().cwd.as_deref(), Some(reviewer_cwd.as_str()));
         assert!(db::bot(&s.app().db, &old_worker.id).await.unwrap().unwrap().deleted_at.is_some());
         assert!(!std::path::Path::new(&old_worker_cwd).exists(), "the previous worker worktree is retired");
+        assert!(!old_worker_dir.exists(), "#61: retire_workers left the retired worker's bots/<id>/ directory behind");
 
         let workers = after.workers();
         assert_eq!(workers.len(), 1);

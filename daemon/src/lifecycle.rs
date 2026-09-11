@@ -2144,6 +2144,42 @@ pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
 
 /// Remove a deleted bot's hook material (`~/.config/agents-manager/bots/<id>/`). Best effort:
 /// a remote host that is down only gets a log line — the bot is gone either way.
+/// #61: the one-time clean-up for directories left behind before every deletion path purged:
+/// `bots/<id>/` of bots whose row is soft-deleted and that have no live run. Directories no bot
+/// row claims are left alone — they are not this daemon's to judge (rt-87 also parked eleven
+/// of them in `bots-orphan-backup-2026-09-10/`, outside `bots/`, which this never touches).
+pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
+    let root = app.data_dir.join("bots");
+    let Ok(entries) = std::fs::read_dir(&root) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue };
+        let deleted: Option<Option<String>> = sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&app.db)
+            .await
+            .ok()
+            .flatten();
+        if !matches!(deleted, Some(Some(_))) {
+            continue;
+        }
+        if matches!(db::active_run(&app.db, &id).await, Ok(Some(_))) {
+            continue;
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(dir = %entry.path().display(), error = %e, "could not remove a deleted bot's directory"),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed bots/<id>/ directories left behind by deleted bots");
+    }
+    removed
+}
+
 pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
     if host == LOCAL_HOST {
         let dir = app.bot_dir(bot_id);

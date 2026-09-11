@@ -1104,6 +1104,11 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 刪除該 bot 的 hook 材料目錄 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，
 失敗只寫 log、不影響回應）。
 
+> **hook 材料目錄的清理不只這條路（#61，2026-09-11）**：team 退役 worker（`retire_workers`）、換成員（`swap_member`，
+> 座位保留名字、舊 bot id 的目錄清掉）、建立失敗回滾（`rollback_create`）也都會在軟刪 bot 時一併清 `bots/<bot_id>/`。
+> 另外 daemon 啟動時掃一次 `bots/`：**只刪** DB 裡 `deleted_at` 非空、且沒有 active Run 的 bot 目錄；沒有對應 bot 列的
+> 目錄不動（不是這個 daemon 能判斷的）。
+
 - 找不到 bot → `404`。
 - **它開的子 agent 一起刪**（2026-09-08）：`managed_by = "child"`、`parent_bot_id` 指到它的 bot（含孫代）
   先各自停掉、軟刪、清目錄，最深的先；回應 `{"removed_children":["<bot_id>", …]}`。使用者在
