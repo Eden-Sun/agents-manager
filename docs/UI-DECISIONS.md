@@ -1100,3 +1100,10 @@ pane id 截成「w1…」，★/⚙ 之後到額度列之間卻空著一截。�
 沒有動——收的是格子裡的留白，不是哪個 kind 被藏起來或壓縮寬度。
 
 截圖 `docs/screenshots/desktop-head/`。
+
+## 標題列 model 前面的 kind 圖示：不要框、貼近 model（2026-09-11）
+
+kind 圖示搬到 model chip 左邊之後（同日稍早）仍沿用側欄 `.kind-tag` 的框與底色，20px 寬、跟 model 隔 6px。
+使用者：不要 border，而且要靠近 effort。只改標題列那一顆（`.bot-head .main-title-sub > .kind-tag`）：拿掉框與底色、
+寬度收成圖示本身、與 model 的間距收成 3px。側欄那些跟文字並排的 kind 標籤維持有框。
+

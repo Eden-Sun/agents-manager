@@ -2373,6 +2373,15 @@ button.run-debug-toggle:hover:not(:disabled) {
    不參與縮放——這一行要縮的是 model。字級跟 `.model-tag` 一樣是 11px，所以不會把行撐高。 */
 .bot-head .main-title-sub > .kind-tag {
   flex: none;
+  /* 2026-09-11 使用者：這一顆不要框、底色，而且要貼近後面的 model／effort。框留給側欄那些
+     跟文字並排的 kind 標籤；這裡它只是 model 的前綴圖示，框只會讓它看起來像另一顆按鈕。
+     寬度收成圖示本身（`.kind-tag.icon` 的 20px 是給有框時留白用的），再把這一行 6px 的 gap
+     在它後面收掉一半。 */
+  border: 0;
+  background: transparent;
+  width: auto;
+  padding: 0;
+  margin-right: -3px;
 }
 
 /* pane id 那顆（`run-debug-toggle`）也在這一行，排在 model 後面（2026-09-11 使用者）。
