@@ -1,13 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import type { Team, TeamEvent, TeamPauseDetail, TeamPauseQuotaMember } from '../api/types.ts'
+import type { Team, TeamEvent, TeamIssue, TeamPauseDetail, TeamPauseQuotaMember } from '../api/types.ts'
 import {
   canReopenTeam,
   describeEvent,
+  stuckIssueCount,
   teamPauseAction,
   teamPauseDetailLines,
   teamPauseText,
   teamQuotaMemberText,
+  teamRescueGate,
+  teamRetryIssuesGate,
 } from './teamPanelLogic.ts'
 
 const team = (deleted = false) => ({
@@ -20,6 +23,57 @@ test('done team shows reopen only while the PM is not cleaned up', () => {
   assert.equal(canReopenTeam(team()), true)
   assert.equal(canReopenTeam(team(true)), false)
   assert.equal(canReopenTeam(team(), true), false)
+})
+
+const issue = (issue_number: number, seq: number, state: TeamIssue['state']) =>
+  ({ id: `i${seq}`, seq, issue_number, state }) as TeamIssue
+
+const relayTeam = (phase: Team['phase'], issues: TeamIssue[] = [], pmDeleted = false) =>
+  ({ id: 'team-2', phase, issues, members: [{ bot_id: 'pm-1', role: 'pm', deleted: pmDeleted }] }) as Team
+
+test('stuckIssueCount only counts the latest attempt of each issue number', () => {
+  const rows = [issue(11, 1, 'failed'), issue(11, 5, 'done'), issue(27, 2, 'failed'), issue(27, 6, 'skipped'), issue(31, 3, 'done')]
+  assert.equal(stuckIssueCount(rows), 1)
+})
+
+test('retry is reachable while the team is still running, not only once it is done', () => {
+  const failed = [issue(11, 1, 'failed'), issue(27, 2, 'failed'), issue(40, 3, 'working')]
+  assert.equal(teamRetryIssuesGate(relayTeam('working', [issue(1, 1, 'done')])), null)
+  for (const phase of ['starting', 'working', 'paused', 'done'] as const) {
+    assert.equal(teamRetryIssuesGate(relayTeam(phase, failed))?.enabled, true, phase)
+  }
+  assert.equal(teamRetryIssuesGate(relayTeam('working', failed))?.count, 2)
+})
+
+test('retry on a cleaned-up or ended team stays visible but disabled with the reason', () => {
+  const failed = [issue(11, 1, 'failed'), issue(27, 2, 'done')]
+  const cleaned = teamRetryIssuesGate(relayTeam('done', failed, true))
+  assert.equal(cleaned?.enabled, false)
+  assert.equal(cleaned?.count, 1)
+  assert.match(cleaned?.reason ?? '', /已清理/)
+  assert.equal(teamRetryIssuesGate(relayTeam('done', failed), true)?.enabled, false)
+  assert.match(teamRetryIssuesGate(relayTeam('aborted', failed))?.reason ?? '', /已中止/)
+})
+
+test('retry refuses to push the queue past its cap', () => {
+  const queued = Array.from({ length: 19 }, (_, i) => issue(100 + i, i + 1, 'queued'))
+  const gate = teamRetryIssuesGate(relayTeam('working', [...queued, issue(11, 30, 'failed'), issue(12, 31, 'failed')]))
+  assert.equal(gate?.enabled, false)
+  assert.match(gate?.reason ?? '', /上限 20/)
+})
+
+test('rescue waits for a finished, not-cleaned-up team with someone to hand the tasks to', () => {
+  assert.equal(teamRescueGate(relayTeam('done'), 0, 'rev'), null)
+  assert.deepEqual(teamRescueGate(relayTeam('done'), 7, 'rev'), {
+    count: 7,
+    enabled: true,
+    reason: '把 7 個沒解決的 task 全部交給 rev 收尾（會重新啟動成員）',
+  })
+  assert.match(teamRescueGate(relayTeam('starting'), 7, 'rev')?.reason ?? '', /還在跑/)
+  assert.match(teamRescueGate(relayTeam('paused'), 7, 'rev')?.reason ?? '', /暫停中/)
+  assert.match(teamRescueGate(relayTeam('done', [], true), 7, '')?.reason ?? '', /已清理/)
+  assert.match(teamRescueGate(relayTeam('done'), 7, '')?.reason ?? '', /沒有 reviewer/)
+  assert.equal(teamRescueGate(relayTeam('failed'), 7, 'rev')?.enabled, false)
 })
 
 test('describeEvent explains reopen and lost native context notes', () => {
