@@ -94,3 +94,34 @@
 .bot-head .main-title {
   flex-shrink: 1;
 }
+
+/* 格與格之間的分隔線本來是「把左邊那條 1px 外框染色」，但外框有 7px 圓角，染出來的是一段
+   彎的「(」，看起來像多了一個框（2026-09-11 使用者截圖）。改成 `::before` 畫一條直的 1px
+   細線，上下各縮 6px；選取那格自己有整圈 accent 外框，線就不畫。 */
+.quota-hp + .quota-hp {
+  position: relative;
+  border-left-color: transparent;
+}
+
+.quota-hp + .quota-hp::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
+.quota-hp.focused + .quota-hp::before,
+.quota-hp + .quota-hp.focused::before {
+  display: none;
+}
+
+/* 手機的額度列格與格之間有 5px gap，不畫線（見 styles.css ≤640 那條）。 */
+@media (width <= 640px) {
+  .quota-hp + .quota-hp::before {
+    display: none;
+  }
+}
