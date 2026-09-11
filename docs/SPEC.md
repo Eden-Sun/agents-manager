@@ -212,7 +212,7 @@ claude 的連線在回應中途掉了，pane 上只會多一行
 
 | kind | 執行中改 | 怎麼套用 |
 |---|---|---|
-| claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>` 進 TUI |
+| claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>` 進 TUI；`/model` 在有對話紀錄時會跳「Switch model?」確認框，daemon 送完回頭看畫面、按 `1` 確認，框關掉才算套用，關不掉就 Esc 退出並回 `needs_restart`（2026-09-11） |
 | grok | 可以 | 同上（`/model <id> [effort]`、`/effort <level>`） |
 | codex | 可以（2026-09-09 補） | `/model` 的兩層選單 ＋ `/fast` 開關，見下面「codex 的即時套用」 |
 

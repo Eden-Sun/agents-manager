@@ -265,7 +265,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 409 的 `reason` 可能是：`bot has no active run`、`run is not running`、
 `agent is blocked; answer the prompt first`、`a turn is already in flight`、
-`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`。
+`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`。
 
 `needs_login`（2026-09-08）：claude 的 pane 正停在開場的「Select login method」選單（那個
 `CLAUDE_CONFIG_DIR` 還沒登入過）。送 prompt 前 daemon 會先讀一次 pane 畫面；中了就不建 turn、
@@ -277,6 +277,12 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 整段消失，Enter 還會順手把 session 換到別的模型。所以 codex 送 prompt 前 daemon 會先讀 pane、
 把選單 Esc 到真的關掉（`esc` 只退一層，要走到底）；關得掉就照常送，關不掉才不建 turn、回
 `{"error":"conflict","reason":"picker_open","run_id":"…","message":"…"}` 並插一則 system 訊息。
+
+`dialog_open`（2026-09-11）：claude 的「Switch model?」確認框開著（有對話紀錄的 session 打
+`/model <alias>` 時 claude 會先問，herdr 把這個框判成 `idle`）。送進去的字會被丟掉、Enter 會替
+使用者按下 Yes。claude 送 prompt 前 daemon 先讀 pane，看到這個框就按 Esc（No, go back）退掉再送；
+退不掉才不建 turn、回 `{"error":"conflict","reason":"dialog_open","run_id":"…","message":"…"}`
+並插一則 system 訊息。
 
 ## 6. 讀訊息
 
@@ -966,7 +972,9 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
     pane 並回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
     - grok `effort` → `/effort <level>`
     - grok `model` → `/model <id>`；若這次 PATCH 也帶了 `effort`（或 bot 本來就有），第二參數一併送（`/model grok-4.6 high`）
-    - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）
+    - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）。
+      有對話紀錄時 claude 會先跳「Switch model?」確認框：daemon 送完會回頭看畫面，看到框就按 `1`（Yes），
+      確認框關掉才算套用；關不掉就按 Esc 退出並回 `needs_restart: true`，**不會把框留在畫面上**（2026-09-11）
     - claude `effort` → `/effort <level>`（2.1.263 實測：帶參數就直接套用；不帶參數的 `/effort` 才是拉桿）。
       **副作用**：claude 會把它一併存成該帳號之後新 session 的預設強度（CLI 行為，TUI 上按 `s` 才是只此一次）
     - codex `model` / `effort` / `fast`（2026-09-09 新增，0.153.4 實測）→ 不是一行指令，是操作 TUI：

@@ -2490,11 +2490,36 @@ fn slash_gate(run: &db::Run, turn_in_flight: bool) -> Result<String, SlashBlocke
 ///
 /// 和 grok 額度探測同一套：先打字，等輸入列畫好，再送 Enter。`"/login\n"` 一次送會被
 /// TUI 當成貼上多行，不會送出。
+///
+/// **送出不等於套用**（2026-09-11 AGM）：claude 在有對話紀錄時，`/model` 會先跳
+/// 「Switch model?」確認框（[`crate::tui_prompts::is_switch_model_dialog`]）。以前這裡按完
+/// Enter 就回 `Ok`，呼叫端把 runtime 標成新模型、回 `needs_restart: false`，框卻還開著——
+/// 使用者下一則訊息被打進框裡吃掉，Enter 替他按了 Yes，回合 12 秒後 stall。
+///
+/// 所以按完 Enter 一定回頭看畫面：
+/// * 是那個確認框 → 按 `1`（Yes）。使用者已經在 AG Man 裡選了新模型，「要不要換」已經答過了；
+///   框裡講的代價（整段歷史要重讀一次）是換模型本來就有的，不是新的決定。
+/// * 按完還在 → Esc 退出（= No, go back）並回 `Err`，呼叫端就維持「重啟才生效」。
+///   **絕不把框留在畫面上**：留著的框會吃掉下一則 prompt，這比「沒套用成功」糟得多。
 async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcResult<()> {
     client.pane_send_text(pane_id, line).await.map_err(up)?;
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     client.pane_send_keys(pane_id, &["Enter"]).await.map_err(up)?;
-    Ok(())
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    if !crate::tui_prompts::is_switch_model_dialog(&screen) {
+        return Ok(());
+    }
+    tracing::info!(pane_id, line, "claude asked to confirm the model switch; answering Yes");
+    client.pane_send_keys(pane_id, &["1"]).await.map_err(up)?;
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    if !crate::tui_prompts::is_switch_model_dialog(&screen) {
+        return Ok(());
+    }
+    let _ = client.pane_send_keys(pane_id, &["Escape"]).await;
+    tracing::warn!(pane_id, line, "model-switch confirmation would not close; backed out with Esc");
+    Err(up(anyhow::anyhow!("claude 的換模型確認框沒有關掉，已按 Esc 退出")))
 }
 
 // ---------------------------------------------------------------- login
@@ -2911,6 +2936,31 @@ pub async fn prompt_grouped(
         };
         let _ = insert_message(app, &conv, None, "system", &hint, "system", false, None).await;
         return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
+    }
+    // claude 的「Switch model?」確認框同一個道理（`tui_prompts::is_switch_model_dialog`）：
+    // herdr 把它判成 idle，prompt 打進去字被丟掉、Enter 替使用者按了 Yes，回合 12 秒後 stall
+    // （2026-09-11 AGM 實測）。daemon 自己換模型時已經會把框答掉；還看得到框，就是有人在終端
+    // 裡手動打了 `/model` 沒答——使用者現在是要送訊息，不是要換模型，所以按 Esc（No, go back）
+    // 退掉再送；退不掉才講清楚，不把訊息餵進去。
+    if bot.kind == "claude" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, &run).await {
+                if let Ok(r) = client.pane_read(pane, "visible", 60).await {
+                    if crate::tui_prompts::is_switch_model_dialog(&r.text) {
+                        let _ = client.pane_send_keys(pane, &["Escape"]).await;
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                        let still = matches!(client.pane_read(pane, "visible", 60).await,
+                            Ok(r2) if crate::tui_prompts::is_switch_model_dialog(&r2.text));
+                        if still {
+                            let hint = "claude 的「Switch model?」確認框擋在輸入列前面，關不掉。請到「終端」分頁選 1 或 2 再送一次。";
+                            let _ = insert_message(app, &conv, None, "system", hint, "system", false, None).await;
+                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        }
+                        tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
+                    }
+                }
+            }
+        }
     }
     // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
     // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
