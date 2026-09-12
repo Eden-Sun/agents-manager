@@ -1897,7 +1897,25 @@ async fn retire_workers(app: &Arc<App>, team_id: &str, issue_id: &str, only_seq:
         if !cwd.starts_with(&format!("{}/i", t.worktree_root.trim_end_matches('/'))) {
             continue;
         }
-        let _ = crate::lifecycle::stop_bot(app, &b.id).await;
+        // A member we could not stop (host / herdr gone) keeps its row and its worktree: the
+        // agent may still be running in there, and `worktree remove --force --force` under a
+        // live CLI throws its work away. This function is idempotent — the next retire (or
+        // `cleanup`) finishes the job once the host is back.
+        if let Err(e) = crate::lifecycle::stop_bot(app, &b.id).await {
+            tracing::warn!(team = team_id, bot = %b.name, error = ?e, "could not stop a worker; leaving it and its worktree for the next retire");
+            let _ = record_event(
+                app,
+                team_id,
+                "note",
+                None,
+                None,
+                None,
+                None,
+                json!({"action": "member_retire_failed", "bot": b.name, "error": format!("{e:?}")}),
+            )
+            .await;
+            continue;
+        }
         let _ = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
             .bind(db::now())
             .bind(&b.id)
@@ -5867,6 +5885,53 @@ mod api_tests {
         assert_eq!(std::fs::read_to_string(docs.join(".gitignore")).unwrap(), "*\n");
         assert!(docs.join("ISSUE-42.md").exists() && docs.join("TEAM.md").exists());
         assert_eq!(crate::team_git::testing::run(&wt, &["status", "--porcelain"]), "");
+    }
+
+    /// daemon-ops #19: a worker that cannot be stopped (its herdr is unreachable) is not
+    /// soft-deleted and its worktree is not force-removed under the running agent; the next
+    /// retire finishes the job.
+    #[tokio::test]
+    async fn retire_keeps_a_worker_it_could_not_stop() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(1), false), vec![issue(), issue2()]).await;
+        let d1 = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("worker"))
+            .unwrap();
+        let wt = std::path::PathBuf::from(d1.cwd.clone().unwrap());
+        let q42 = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 42).unwrap();
+        // A live run on a herdr session this daemon does not have: `stop_bot` cannot reach it.
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-x','agent','vanished',?)",
+        )
+        .bind(&run_id)
+        .bind(&d1.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        retire_issue_workers(&app, &tid, &q42.id).await;
+        let still = db::bot(&app.db, &d1.id).await.unwrap().unwrap();
+        assert!(still.deleted_at.is_none(), "not retired while the agent may still be running");
+        assert!(wt.join(".git").exists(), "its worktree is left alone");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT payload_json FROM team_events WHERE team_id = ?")
+            .bind(&tid)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(notes.iter().any(|p| p.contains("member_retire_failed")), "the failure is on the timeline: {notes:?}");
+
+        // The run is gone (or the host is back): the same call now retires it.
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        retire_issue_workers(&app, &tid, &q42.id).await;
+        assert!(db::bot(&app.db, &d1.id).await.unwrap().unwrap().deleted_at.is_some());
+        assert!(!wt.exists());
     }
 
     #[tokio::test]
