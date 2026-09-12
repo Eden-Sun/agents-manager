@@ -85,8 +85,10 @@ am_agent_start() {
         _orig=$_a
         if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
         if [ "$_stop" = 1 ]; then
+            # codex / grok spell it `-m`, codex also `-c model=…`: all of them are "the child
+            # picked its own model" and must not be overridden with the parent's.
             case "$_a" in
-                --model | --model=*) _has_model=1 ;;
+                --model | --model=* | -m | -m=* | model=*) _has_model=1 ;;
                 --effort | --effort=*) _has_effort=1 ;;
                 -c) : ;;
                 model_reasoning_effort=*) _has_effort=1 ;;
@@ -330,6 +332,15 @@ mod tests {
         // 不同 kind：母 bot 的模型名對它沒意義。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex"]);
+
+        // codex／grok 的 `-m` 與 codex 的 `-c model=` 也算「自己有寫」，同 kind 也不補。
+        let cenv = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "codex"), ("AM_MODEL", "gpt-5.6-luna")];
+        let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--kind", "codex", "--", "-m", "o3"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex", "--", "-m", "o3"]);
+        let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--", "-c", "model=o3"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-c", "model=o3"]);
+        let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--", "-m=o3"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-m=o3"]);
 
         // 已經有 `--` 但沒有 --model：接在後面。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--", "--verbose"]);
