@@ -1499,9 +1499,11 @@ AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，
 | 資料庫 | `bots.persona` | `PATCH /api/bots/{AGM}`（回 `needs_restart: true`） |
 | 執行期 | `~/.config/agents-manager/supervisor/AGM/persona.md` | 直接寫檔 |
 
-- **不要手改 config.toml 再走 API**：`ConfigStore` 用 mtime 比對、只在開機時 load，手改過之後所有寫
-  config 的 API 會一路 409 `config.toml changed on disk since it was loaded`，直到 daemon 重啟（2026-09-12 實例）。
-  要改就走 API，讓 daemon 自己寫檔。
+- **手改 config.toml 之後走 API 是可以的，但別指望它保住手改的內容**：`ConfigStore` 每次寫入前用 mtime 比對，
+  發現磁碟版本變了就在同一把 mutex 內**先重讀磁碟版本再套用**這次更新（§5；`config.rs::update`，`issue28_tests` 驗證），
+  只有重新解析失敗才回錯（`config.toml changed on disk and could not be re-read`）。所以手改沒有壞語法時 API 照常成功，
+  而且手改的內容會被保留；但 serde 全量回寫會把註解與未知欄位洗掉。要改 persona 還是走 API，讓 daemon 自己寫檔。
+  （本段原本寫「會一路 409 直到 daemon 重啟」，與實作不符——2026-09-12 review #10 改正。）
 - persona 改完**不必**為它重啟 daemon：`needs_restart` 只表示下次 AGM 重啟才載入新 persona。
 
 ### 18.7 共用工作樹規範
