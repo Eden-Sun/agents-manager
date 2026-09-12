@@ -21,26 +21,35 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 
 ## 1. 任務執行與驗收分開（P1）
 
-- [ ] 定義並實作 execution 與 review 狀態；正常回合結束僅進 awaiting_review，不直接認定任務完成。保留 delivery、turn_status 與 evidence_complete 的原始事實。
-- [ ] 增加 AGM 可用的明確驗收／要求續作或標阻塞／取消介面與 CLI；每次記錄 actor、理由、來源與證據。續作有持久 turn 關係與冪等鍵，不能以改寫已送出的 assignment 造成文字不一致。
-- [ ] 更新 open count、handoff、派工清單、UI 與例行更新判斷。既有 completed 不重新大量派工；以 legacy 分類／文件說明其舊語意，避免誤宣稱已驗收。
-- [ ] 驗收：回覆「仍在等編譯」→ 保留待驗收／阻塞；實際結果經 AGM 明確核准→結案；重複驗收冪等，終端備援缺證據不自動驗收；migration、舊 API 相容有測試。
+- [x] 定義並實作 execution 與 review 狀態；正常回合結束僅進 awaiting_review，不直接認定任務完成。保留 delivery、turn_status 與 evidence_complete 的原始事實。
+- [x] 增加 AGM 可用的明確驗收／要求續作或標阻塞／取消介面與 CLI；每次記錄 actor、理由、來源與證據。續作有持久 turn 關係與冪等鍵，不能以改寫已送出的 assignment 造成文字不一致。
+- [x] 更新 open count、handoff、派工清單、UI 與例行更新判斷。既有 completed 不重新大量派工；以 legacy 分類／文件說明其舊語意，避免誤宣稱已驗收。
+- [x] 驗收：回覆「仍在等編譯」→ 保留待驗收／阻塞；實際結果經 AGM 明確核准→結案；重複驗收冪等，終端備援缺證據不自動驗收；migration、舊 API 相容有測試。
 
 ## 2. 通知 outbox、對帳與 ACK（P1）
 
-- [ ] assignment 狀態遷移與結果事件在同一 DB transaction，含啟動／漏事件補掃的冪等性。
-- [ ] 區分 prompt 成功、明確失敗與 delivery unknown；Ok(delivery=failed) 不標成已送達。追蹤 notify turn，送達後回合失敗／中斷／未 ACK 達期限可恢復。
-- [ ] durable notify attempt 與有限退避。未知送達先查原 turn，不直接新發；明確失敗重試的新 attempt 使用穩定冪等鍵，避免永遠重用已失敗 turn，也避免 daemon crash 造成重複派送。
-- [ ] ACK 在重送／重啟後仍有效且不倒退；處理 ACK 與 mark_delivered 競態。重送達上限形成可見 incident，不吞事件、不無限燒額度；與 600 秒節流相容。
-- [ ] 驗收：transaction 中途失敗全回滾；duplicate completion 只有一事件；failed／unknown／interrupted／delivered-unacked／ACK競態／重啟恢復都有行為測試。
+- [x] assignment 狀態遷移與結果事件在同一 DB transaction，含啟動／漏事件補掃的冪等性。
+- [x] 區分 prompt 成功、明確失敗與 delivery unknown；Ok(delivery=failed) 不標成已送達。追蹤 notify turn，送達後回合失敗／中斷／未 ACK 達期限可恢復。
+- [x] durable notify attempt 與有限退避。未知送達先查原 turn，不直接新發；明確失敗重試的新 attempt 使用穩定冪等鍵，避免永遠重用已失敗 turn，也避免 daemon crash 造成重複派送。
+- [x] ACK 在重送／重啟後仍有效且不倒退；處理 ACK 與 mark_delivered 競態。重送達上限形成可見 incident，不吞事件、不無限燒額度；與 600 秒節流相容。
+- [x] 驗收：transaction 中途失敗全回滾；duplicate completion 只有一事件；failed／unknown／interrupted／delivered-unacked／ACK競態／重啟恢復都有行為測試。
 
 ## 3. 分開總管健康與系統 incident（P1）
 
-- [ ] manager_health／system_health 分開，舊 status 保留明確相容投影。
-- [ ] durable incident：host disconnected、expected-running Bot 異常停止、assignment 長期未推進、通知無 ACK／耗盡重試、現有可取得的瀏覽器／資源異常。每種有來源、resource id、first/last seen、severity、門檻與恢復條件。
-- [ ] 不把正常等使用者輸入的 blocked、使用者刻意停止、或短暫排隊當故障；未知指標明確 unknown，不能算正常。重啟後依持久 incident 去重，恢復發一事件；同事件復發有新 occurrence。
-- [ ] 高負載時不用 LLM 每 tick 輪詢；沿用 cheap probe，資源資訊接既有可觀測來源，不為判斷而 kill 程序。門檻可配置並有合理預設／文件。
-- [ ] 驗收：AGM 正常但 remote host 掛掉→system degraded；門檻前不吵、門檻後一筆、恢復一筆；bot idle/busy 自身變換不造通知風暴。
+- [x] manager_health／system_health 分開，舊 status 保留明確相容投影。
+- [x] durable incident：host disconnected、expected-running Bot 異常停止、assignment 長期未推進、通知無 ACK／耗盡重試、現有可取得的瀏覽器／資源異常。每種有來源、resource id、first/last seen、severity、門檻與恢復條件。
+- [x] 不把正常等使用者輸入的 blocked、使用者刻意停止、或短暫排隊當故障；未知指標明確 unknown，不能算正常。重啟後依持久 incident 去重，恢復發一事件；同事件復發有新 occurrence。
+- [x] 高負載時不用 LLM 每 tick 輪詢；沿用 cheap probe，資源資訊接既有可觀測來源，不為判斷而 kill 程序。門檻可配置並有合理預設／文件。
+- [x] 驗收：AGM 正常但 remote host 掛掉→system degraded；門檻前不吵、門檻後一筆、恢復一筆；bot idle/busy 自身變換不造通知風暴。
+
+### 進度（child ag-man-y3jqg8-agmfix）
+
+- 2026-09-12 commit `40a51a6`（worktree `/var/folders/.../agm-reliability-20260912-l25iz_s2/checkout`，
+  branch `ag-man-y3jqg8/agm-reliability-20260912`）：第 1／2／3 項一起進，因為 `settle_and_notify`
+  同時是驗收狀態與 transactional outbox，拆成兩個 commit 反而不能各自 review。
+  驗證：`cargo test -p agents-managerd` 531 passed / 0 failed（其中 supervisor 57）、
+  `python3 scripts/agm_test.py` 45 tests OK、web `tsc -p tsconfig.app.json` 0 error、
+  `oxlint src` 無新增 warning、`bun run build` 通過。未跑 release build、未重啟任何服務。
 
 ## 4. 結構化核准與執行租約（P2）
 
