@@ -8,10 +8,14 @@
  * 第三輪（多分頁 ＋ 多選）多了三件事：上面那條分頁列（一次問好幾題，☑ 是答過的）、選項是
  * 核取方塊（點一下是**切換勾選**，不是送出）、最後要走到 `Submit` 才真的交卷。
  *
+ * 第四輪：**說明預設收起來**，一列就是「編號＋標題」一行，六個選項一屏看得完；要看說明按那顆
+ * ▸。收合狀態下捲動與 ↑／↓ 照舊能用，而且游標換到哪一項就把那一項捲進視野；展開再收起來時
+ * 捲動位置不會跳（收合前記下那一列的位置，重畫完補回去）。
+ *
  * 認不出選單就什麼都不畫（回 `null`），畫面照舊退回終端快照＋按鍵面板——按鍵是直接送進別人
  * 終端的，寧可少一個捷徑，也不要在認錯的畫面上替使用者答題。
  */
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { usePaneKeys } from '../hooks/usePaneKeys'
 import {
   keysToMove,
@@ -25,6 +29,20 @@ import { useStore } from '../store/store'
 import './blockedChoices.css'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * 這個元素是被誰捲著的。
+ *
+ * 全畫面視窗裡是 `.blocked-modal-body`，對話上方那條面板裡是聊天區自己。找不到就回 `null`
+ * ——那代表整頁在捲，收合造成的位移瀏覽器自己的 scroll anchoring 會處理。
+ */
+function scroller(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const o = getComputedStyle(p).overflowY
+    if ((o === 'auto' || o === 'scroll') && p.scrollHeight > p.clientHeight + 1) return p
+  }
+  return null
+}
 
 /** 送出一顆鍵之後等畫面反應：每 `STEP` 看一次，最多看 `TRIES` 次。 */
 const STEP = 260
@@ -57,6 +75,62 @@ export function BlockedChoices({
   const [tabAt, setTabAt] = useState<number | null>(null)
   const guessTab = menu.tabs.findIndex((t) => !t.done && !t.submit)
   const atTab = tabAt ?? (guessTab >= 0 ? guessTab : null)
+
+  /**
+   * 展開說明的那幾項（2026-09-12 第四輪）。
+   *
+   * 預設全部收起來：實拍那張六個選項、每項三到五行說明，攤開要滑三四屏才看得完一組選項。
+   * 換一題就忘掉——那是另一組選項了。
+   */
+  const [open, setOpen] = useState<number[]>([])
+  const [openFor, setOpenFor] = useState(menu.question)
+  if (openFor !== menu.question) {
+    setOpenFor(menu.question)
+    setOpen([])
+  }
+
+  const listRef = useRef<HTMLOListElement>(null)
+  /** 收合前記下的「那一列離捲動容器上緣多遠」，重畫完補回去，畫面才不會跳。 */
+  const anchor = useRef<{ el: HTMLElement; top: number } | null>(null)
+  const lastCursor = useRef(menu.cursor)
+
+  useLayoutEffect(() => {
+    // a) 收合／展開之後把捲動位置補回去。
+    const a = anchor.current
+    anchor.current = null
+    if (a) {
+      const box = scroller(a.el)
+      const now = a.el.getBoundingClientRect().top
+      if (box) box.scrollTop += now - a.top
+      return
+    }
+    // b) 標題被截尾的那幾列也要有 ▸（沒有說明、但字放不下時，全文得有地方看）。
+    //
+    // 量完直接寫 `data-wide` 而不是進 state：這是純量測結果，走 state 會多一輪 render，而
+    // React 不管 `data-*`，重畫也不會把它洗掉。展開中的那列不量——它的標題本來就折行了。
+    listRef.current?.querySelectorAll<HTMLElement>('.bc-row').forEach((li) => {
+      if (li.querySelector('.bc-open')) return
+      const t = li.querySelector('.bc-title')
+      if (t && t.scrollWidth > t.clientWidth + 1) li.dataset.wide = '1'
+      else delete li.dataset.wide
+    })
+  })
+
+  // 游標換到哪一項就把那一項捲進視野——收合之後一屏多半看得完，但選項多的時候仍會捲出去，
+  // 而 ↑／↓ 是直接送進終端的，畫面不跟上就等於在盲按。只在游標真的變了的時候動。
+  useLayoutEffect(() => {
+    if (lastCursor.current === menu.cursor) return
+    lastCursor.current = menu.cursor
+    listRef.current
+      ?.querySelectorAll<HTMLElement>('.bc-item')
+      [menu.cursor]?.scrollIntoView({ block: 'nearest' })
+  }, [menu.cursor])
+
+  const toggleDetail = (i: number, el: HTMLElement) => {
+    const box = scroller(el)
+    if (box) anchor.current = { el, top: el.getBoundingClientRect().top }
+    setOpen((v) => (v.includes(i) ? v.filter((n) => n !== i) : [...v, i]))
+  }
 
   const read = async (): Promise<TuiChoiceMenu | null> => {
     try {
@@ -233,11 +307,15 @@ export function BlockedChoices({
       </div>
 
       <ol className={`bc-list${menu.multi ? ' bc-list-multi' : ''}`}>
-        {menu.choices.map((c, i) => (
-          <li key={`${c.number}-${c.title}`}>
+        {menu.choices.map((c, i) => {
+          const shown = open.includes(i)
+          return (
+          <li key={`${c.number}-${c.title}`} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
             <button
               type="button"
-              className={`bc-item${c.current ? ' bc-current' : ''}${c.checked ? ' bc-checked' : ''}`}
+              className={`bc-item${c.current ? ' bc-current' : ''}${c.checked ? ' bc-checked' : ''}${
+                shown ? ' bc-open' : ''
+              }`}
               disabled={Boolean(busy)}
               aria-current={c.current ? 'true' : undefined}
               aria-pressed={c.checked === null ? undefined : c.checked}
@@ -264,10 +342,23 @@ export function BlockedChoices({
               <span className="bc-mark">
                 {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : c.current ? '游標在此' : ''}
               </span>
-              {c.detail ? <span className="bc-detail">{c.detail}</span> : null}
+              {shown && c.detail ? <span className="bc-detail">{c.detail}</span> : null}
             </button>
+            {/* ▸ 要是這一列的**兄弟**不是子元素：`<button>` 裡再包一顆 `<button>` 不合法，而整列
+                本身就是「選這一項」那顆按鈕。展開只是看說明，不會送任何鍵。 */}
+            <button
+                type="button"
+                className="bc-chev"
+                aria-expanded={shown}
+                aria-label={shown ? `收起第 ${c.number} 項的說明` : `看第 ${c.number} 項的說明`}
+                title={shown ? '收起說明' : '看這一項的說明'}
+                onClick={(e) => toggleDetail(i, e.currentTarget.parentElement as HTMLElement)}
+              >
+                <span aria-hidden="true">{shown ? '▾' : '▸'}</span>
+              </button>
           </li>
-        ))}
+          )
+        })}
       </ol>
 
       {menu.submit ? (
