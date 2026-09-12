@@ -31,8 +31,21 @@ const TAIL_LINES: usize = 30;
 /// /model.`）。後者 claude 根本沒開始回，0 秒就 `done`，pane 只剩這一行；
 /// 對使用者來說一樣是「送了沒回」，一樣要釘在那個回合上（2026-09-10）。
 fn is_api_error(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    lower.starts_with("api error") || (lower.starts_with("you've reached your") && lower.contains("limit"))
+    lower_is_api_error(&body.to_ascii_lowercase())
+}
+
+fn lower_is_api_error(lower: &str) -> bool {
+    lower.starts_with("api error") || is_quota_limit_lower(lower)
+}
+
+/// 額度用盡的拒絕（`You've reached your Fable limit…`），跟 API 斷線分開認：這種回合不是
+/// 「重送一次」救得回來的，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
+pub fn is_quota_limit(body: &str) -> bool {
+    is_quota_limit_lower(&body.to_ascii_lowercase())
+}
+
+fn is_quota_limit_lower(lower: &str) -> bool {
+    lower.starts_with("you've reached your") && lower.contains("limit")
 }
 
 /// 這行在錯誤行**之後**出現的話，代表 agent 後來又說了話——那次錯誤已經被重試蓋過去了。
@@ -48,6 +61,16 @@ fn is_chrome(s: &str) -> bool {
         // claude 自動更新的那一行釘在輸入框上方（`current: 2.1.266 · latest: 2.1.267 ✔ Update
         // installed · Restart to update`），不是 agent 說的話。
         || s.contains("Update installed")
+        // claude 2.1.269 在額度拒絕那行底下再印一行 `0 tokens`（回合統計），它是 chrome 不是回覆；
+        // 沒認出來的話從底部往上掃第一個就撞到它，橫幅永遠找不到——2026-09-12 使用者實測
+        // 「已用盡卻沒有正確的提示」：那句被當成一則普通的 terminal_fallback 回覆。
+        || is_token_count(s)
+}
+
+/// `0 tokens` / `1,234 tokens` / `12k tokens`：回合結束時的統計行。
+fn is_token_count(s: &str) -> bool {
+    let Some(head) = s.strip_suffix(" tokens").or_else(|| s.strip_suffix(" token")) else { return false };
+    !head.is_empty() && head.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.' || c == 'k' || c == 'K')
 }
 
 /// 把一行的框線剝掉，留下 TUI 真正畫的那串（前導記號還在——`is_noise` 要靠它認 spinner）。
@@ -110,6 +133,12 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
         .execute(&app.db)
         .await?;
     tracing::warn!(bot = %bot_id, run = %run.id, error = %line, "turn cut short by an API error");
+
+    // 額度用盡：把那個帳號的額度格標成「被擋」（跟 codex 的 `limit_hit` 同一格），量表與標題列
+    // 才對得上；`until` 取橫幅講的那個桶子的重置時間，過了就自動解除（`quota::set`）。
+    if is_quota_limit(&line) {
+        mark_claude_limit_hit(app, bot_id, &line).await;
+    }
 
     // 釘在那一回合上：對話裡看得到是「哪一則回覆」斷的，不是一句飄在最後面的通知。
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
@@ -250,5 +279,84 @@ mod tests {
             api_error_line(screen).as_deref(),
             Some("API Error: Connection lost mid-response.")
         );
+    }
+}
+
+/// claude 印了「You've reached your <桶子> limit」：把該 bot 帳號的額度標成 `limit_hit`。
+///
+/// 只認 claude 的 key（`claude` / `claude:<identity>`），桶子看橫幅的字：`Fable` → 週的 Fable 桶，
+/// 其餘 → 5h（沒有 5h 讀數就 7d）。跟 codex 不同的是**不**在下一回合成功時清掉——Fable 用盡後
+/// 換 opus 照樣能跑，那不代表 Fable 恢復了；只靠 `until`（該桶子的 `resets_at`）到期解除。
+async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
+    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return };
+    if bot.kind != "claude" {
+        return;
+    }
+    let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| "local".to_string());
+    let base = match bot.identity.as_deref() {
+        Some(id) if !id.is_empty() => format!("claude:{id}"),
+        _ => "claude".to_string(),
+    };
+    let key = crate::quota::quota_key(&host, &base);
+    let prev = app.quotas.lock().await.get(&key).cloned();
+    let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
+        five_hour: None,
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: db::now(),
+        source: "claude-limit-hit".into(),
+        account: bot.identity.clone(),
+        host: host.clone(),
+    });
+    let lower = line.to_ascii_lowercase();
+    let until = if lower.contains("fable") {
+        match q.fable.as_mut() {
+            Some(w) => {
+                w.used_pct = 100.0;
+                w.resets_at.clone()
+            }
+            None => None,
+        }
+    } else if let Some(w) = q.five_hour.as_mut() {
+        w.used_pct = 100.0;
+        w.resets_at.clone()
+    } else if let Some(w) = q.seven_day.as_mut() {
+        w.used_pct = 100.0;
+        w.resets_at.clone()
+    } else {
+        None
+    };
+    q.limit_hit = Some(crate::quota::LimitHit { message: line.to_string(), until, at: db::now() });
+    q.updated_at = db::now();
+    crate::quota::set(app, &host, &base, q).await;
+}
+
+#[cfg(test)]
+mod quota_limit_tests {
+    use super::*;
+
+    #[test]
+    fn the_token_count_trailer_does_not_hide_the_limit_banner() {
+        // 2026-09-12 實機（claude 2.1.269）：橫幅底下多一行 `0 tokens`。
+        let screen = "❯ ping\n\nYou've reached your Fable limit. Run /usage-credits to continue or switch models with /model.\n\n0 tokens\n─────\n❯\n─────\n  tony. | agents-manager | Fable 5.1 | 5h:67% | F5:0%\n";
+        assert_eq!(
+            api_error_line(screen).as_deref(),
+            Some("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.")
+        );
+        assert!(is_token_count("0 tokens"));
+        assert!(is_token_count("1,234 tokens"));
+        assert!(!is_token_count("tokens"));
+        assert!(!is_token_count("API error handling tokens"));
+    }
+
+    #[test]
+    fn fable_limit_banner_is_a_quota_limit_not_a_connection_error() {
+        let line = "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.";
+        assert!(is_api_error(line));
+        assert!(is_quota_limit(line));
+        assert!(!is_quota_limit("API Error: Connection lost mid-response. The response above may be incomplete."));
     }
 }

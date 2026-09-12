@@ -44,11 +44,13 @@
 /* 手機：名字那列 200px 左右，chip 放名字後面會把名字截掉；擺到第二行（kind · 模型 · 版本）
    的最右邊，那一行本來就有空位，且觸控高度拉到 24px。 */
 @media (width <= 640px) {
-  .bot-head .main-title-row > .blocked-badge {
+  .bot-head .main-title-row > .blocked-badge,
+  .bot-head .main-title-row > .turn-error-badge {
     display: none;
   }
 
-  .bot-head .mobile-bot-version > .blocked-badge {
+  .bot-head .mobile-bot-version > .blocked-badge,
+  .bot-head .mobile-bot-version > .turn-error-badge {
     display: inline-flex;
     height: 24px;
     margin-left: auto;
@@ -56,13 +58,15 @@
 
   /* ★／⚙ 是絕對定位跨兩行貼右邊（mobileBotHead.css），第二行得跟第一行一樣讓出 84px，
      chip 才不會被壓在星號底下點不到。只在有 chip 時讓。 */
-  .bot-head .mobile-bot-version:has(> .blocked-badge) {
+  .bot-head .mobile-bot-version:has(> .blocked-badge),
+  .bot-head .mobile-bot-version:has(> .turn-error-badge) {
     padding-right: 84px;
   }
 
   /* 那一行只剩約 150px：chip 71px 進來之後模型名被截成「o.」。版本號是三樣裡最不急的
      （tooltip 與設定面板都有），有 chip 時讓掉，模型名留得住。 */
-  .bot-head .mobile-bot-version:has(> .blocked-badge) > .mobile-bot-ver {
+  .bot-head .mobile-bot-version:has(> .blocked-badge) > .mobile-bot-ver,
+  .bot-head .mobile-bot-version:has(> .turn-error-badge) > .mobile-bot-ver {
     display: none;
   }
 }
