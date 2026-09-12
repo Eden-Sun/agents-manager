@@ -126,7 +126,7 @@ export function UnreadChip() {
             /* `unread` 是**加在釘選身分上的一層狀態**，不是換一組晶片：一排 ★ 看過去，有東西
                等你看的那幾顆要能一眼挑出來，而不是只靠名字後面那個小數字。`current`（你在
                這裡）跟它可以同時成立，兩者的畫法也分得開（見 `unreadChip.css`）。 */
-            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${runs[r.id]?.agent_status === 'blocked' ? ' blocked' : ''}${r.id === selectedBotId ? ' current' : ''}`}
+            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${runs[r.id]?.agent_status === 'blocked' ? ' needs-reply' : ''}${r.id === selectedBotId ? ' current' : ''}`}
             title={
               runs[r.id]?.agent_status === 'blocked'
                 ? `${r.name}（主要執行的 bot）停在一個要你回答的提示上。點一下過去回答`
@@ -156,7 +156,7 @@ export function UnreadChip() {
             <button
               key={w.id}
               type="button"
-              className={`unread-chip working${runs[w.id]?.agent_status === 'blocked' ? ' blocked' : ''}${w.id === selectedBotId ? ' current' : ''}`}
+              className={`unread-chip working${runs[w.id]?.agent_status === 'blocked' ? ' needs-reply' : ''}${w.id === selectedBotId ? ' current' : ''}`}
               title={
                 runs[w.id]?.agent_status === 'blocked'
                   ? `${w.name} 停在一個要你回答的提示上。${w.id === selectedBotId ? '你正在看的就是它' : '點一下過去回答'}`
