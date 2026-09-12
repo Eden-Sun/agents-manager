@@ -71,4 +71,15 @@
   .bot-head .mobile-bot-version > .blocked-badge {
     display: none;
   }
+
+  /* 桌機：第二行（kind · 模型 · pane id）的最前面。名字那一列在 1440px＋側欄開著時只有約
+     161px，塞不下 71px 的 chip（實測不是 chip 被剪剩「● 需」就是 ⚙ 被剪掉）。這裡把 pane id
+     讓掉——它是 debug 用的識別碼，tooltip 與 run 識別列都還有；模型名照舊可截尾。 */
+  .bot-head .main-title-sub > .blocked-badge {
+    margin-right: 2px;
+  }
+
+  .bot-head .main-title-sub:has(> .blocked-badge) > .main-status.pane-toggle {
+    display: none;
+  }
 }
