@@ -1302,10 +1302,17 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   release binary 裡。使用者口語的「7788」就是它；**5173 是開發用 vite，不是正式環境**。前端改動要
   `bun run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
 - **例行檢查** launchd `com.agm.daemon-update`：`StartCalendarInterval {Minute: 0}`（**每小時整點**），
-  跑 `supervisor/AGM/bin/daemon-update-kick.sh`。腳本順序：`git fetch` → 正在執行的 binary 比 origin/main
-  舊才繼續 → 同一 commit 已派過就 skip（`daemon-update.last`）→ 建置 child 不存在就寫
-  `build child missing` 並 `exit 0`（**不改派給別人**）→ `busy > 1` 就 defer → 派
+  跑 `supervisor/AGM/bin/daemon-update-kick.sh`。腳本順序：`git fetch` → 沒有程式碼差異就跳過（下一條）→
+  同一 commit 已派過就 skip（`daemon-update.last`）→ 建置 child 不存在就寫 `build child missing` 並
+  `exit 0`（**不改派給別人**）→ **上一筆更新派工還沒結案就 skip**（`client_request_id` 以
+  `agm-daemon-update-` 開頭且 status 不是 `completed`／`failed`，寫 `previous update still pending (<id>)`；
+  否則每個整點會疊派同一件事，送達時才發現早就做完了）→ **還有 bot 在 working 就 defer** → 派
   `daemon-update-task.md`，`--request-id agm-daemon-update-<sha>`（同版不重派）。
+- **「可以動手」的判準是沒有 bot 在 `working`，不是 `busy ≤ 1`**：`bin/agm health` 的 `bots.busy` 把
+  `blocked` 也算進去，而 blocked 是**在等使用者回答**——可能好幾小時，重啟卻不會打斷它（pane 不動，
+  原 pane 重啟本來就跳過 blocked）。照 busy 等的話，只要有一顆 bot 在等人，例行更新就永遠派不出去。
+  所以 kick.sh 與固定條件 3 都改看 `bin/agm --compact state` 的 `run.agent_status == 'working'`
+  （排除建置 child 自己與 AGM）。daemon 的 `health.busy` 語意不動，UI 還在用它。
 - **誰做重建**：(a) 有 bot 自己申請重建（帶已 push 的 commit）→ 核准後**由申請的 bot 自己建**；
   (b) 沒有申請者的例行更新 → 固定由 **AGM 建置 child `agm-pxf2pv-build`（cc0/opus/low）**。
   **絕不派給使用者的專案 bot**——會白耗它們的 context。
@@ -1322,7 +1329,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
      不得把它編進 release，也不得 stash / reset）。
   2. 整樹 `cargo test -p agents-managerd` 全過，web `bunx tsc --noEmit -p tsconfig.app.json` 通過
      （`tsc --noEmit` 不帶 `-p` 是假綠燈）。
-  3. 等 `bin/agm health` 的 busy 只剩自己；有別的 bot 在跑就等，最多 30 分鐘，超過回報「延後」不硬重啟。
+  3. 等到沒有別的 bot 在 `working`（`blocked` 不算，見上一條）；有人在跑就等，最多 30 分鐘，
+     超過回報「延後」不硬重啟。
   4. 備份舊 binary 為 `target/release/agents-managerd.bak`。
   5. 重啟後 **30 秒內**驗 `/api/session` 與 `bin/agm health`。
   6. **60 秒內**確認 `bin/agm supervisor` 的 status 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。
