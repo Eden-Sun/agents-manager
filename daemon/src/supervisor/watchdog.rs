@@ -89,9 +89,60 @@ pub async fn tick(app: &Arc<App>) {
             tracing::info!(attempts = sup.watchdog_attempts, wait, "supervisor is down and wanted; scheduling an automatic start");
             let _ = store::set_watchdog(&app.db, sup.watchdog_attempts, Some(&iso_in(wait))).await;
         }
-        Plan::Wait { schedule: false } | Plan::GaveUp => {}
+        Plan::Wait { schedule: false } => {}
+        // The manager is down, wanted, and out of automatic retries. Before 2026-09-13 this
+        // branch did *nothing*: the give-up was re-derived silently on every tick and nobody
+        // was ever told. The worst case is the one that produced it — the fifth start returns
+        // Ok and the CLI dies a second later, so no error path runs at all.
+        Plan::GaveUp => {
+            let why = sup
+                .watchdog_last_error
+                .clone()
+                .unwrap_or_else(|| format!("自動啟動 {MAX_ATTEMPTS} 次後仍未持續存活（最後一次啟動有回 Ok，但 CLI 隨即結束）"));
+            report_gave_up(app, &why).await;
+        }
         Plan::Start => start(app, &bot_id, sup.watchdog_attempts).await,
     }
+}
+
+/// Say once, durably, that the watchdog has stopped trying.
+///
+/// Three channels because they answer different questions: `status_detail` for anyone looking
+/// at the supervisor now, an SSE event for an open UI, and an **inbox event** so AGM finds out
+/// even though the thing that would normally tell it is the thing that is down. The write is
+/// guarded by `mark_watchdog_gave_up`, so ticks two through infinity are silent.
+async fn report_gave_up(app: &Arc<App>, why: &str) {
+    let first = store::mark_watchdog_gave_up(&app.db, why).await.unwrap_or(false);
+    if !first {
+        return;
+    }
+    tracing::error!(attempts = MAX_ATTEMPTS, why, "supervisor watchdog gave up; the manager stays down");
+    let _ = store::set_status_detail(
+        &app.db,
+        Some(&format!(
+            "watchdog 連續 {MAX_ATTEMPTS} 次自動啟動後仍沒有活著，已停止重試；請手動 supervisor-start。原因：{why}"
+        )),
+    )
+    .await;
+    // One durable event per give-up. The key is the moment it happened, so a later outage
+    // (after a recovery clears the marker) is a new event rather than a silenced duplicate.
+    let at = store::get_or_init(&app.db).await.ok().and_then(|s| s.watchdog_gave_up_at).unwrap_or_default();
+    let _ = store::push_inbox(
+        &app.db,
+        &format!("watchdog:gave_up:{at}"),
+        "watchdog_gave_up",
+        None,
+        None,
+        None,
+        &serde_json::json!({
+            "attempts": MAX_ATTEMPTS,
+            "why": why,
+            "gave_up_at": at,
+            "action": "手動 `bin/agm supervisor-start`；自動重試不會再發生，直到有人重新啟動它",
+        }),
+    )
+    .await;
+    app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up", "why": why})).await;
 }
 
 async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
@@ -116,12 +167,8 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
             tracing::warn!(attempt, error = %why, "supervisor watchdog failed to start the manager");
             if attempt >= MAX_ATTEMPTS {
                 let _ = store::set_watchdog(&app.db, attempt, None).await;
-                let _ = store::set_status_detail(
-                    &app.db,
-                    Some(&format!("watchdog 連續 {MAX_ATTEMPTS} 次自動啟動失敗，已停止重試；請手動 supervisor-start。最後錯誤：{why}")),
-                )
-                .await;
-                app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up"})).await;
+                // Same reporting as the "started but died" path: one durable event, once.
+                report_gave_up(app, &why).await;
             } else {
                 let _ = store::set_watchdog(&app.db, attempt, Some(&iso_in(backoff_secs(attempt)))).await;
                 let _ = store::set_status_detail(&app.db, Some(&format!("watchdog 自動啟動失敗（第 {attempt} 次）：{why}"))).await;
@@ -168,6 +215,8 @@ mod tests {
             remote_session_id: None,
             remote_actor: None,
             remote_evidence: None,
+            watchdog_gave_up_at: None,
+            watchdog_last_error: None,
             created_at: "now".into(),
             updated_at: "now".into(),
         }
@@ -211,5 +260,27 @@ mod tests {
         assert_eq!(plan(&sup(true, "", 4, Some("earlier")), "stopped", |_| true), Plan::Start);
         assert_eq!(plan(&sup(true, "", 5, None), "stopped", |_| true), Plan::GaveUp);
         assert_eq!(plan(&sup(true, "", 5, Some("earlier")), "stopped", |_| true), Plan::GaveUp);
+    }
+
+    /// The nastiest shape of giving up, and the one that used to be completely silent: the
+    /// fifth start *succeeds*, so no error path runs, and then the CLI dies a second later.
+    /// Every tick after that lands on `GaveUp` — which has to keep meaning "stop retrying"
+    /// while the reporting happens exactly once (that half is `report_gave_up`, guarded by
+    /// `store::mark_watchdog_gave_up`).
+    #[test]
+    fn a_start_that_succeeded_and_then_died_still_ends_in_give_up_on_every_later_tick() {
+        // Attempt 5 returned Ok, so the row holds attempts=5 with a backoff deadline.
+        let after_ok = sup(true, "", 5, Some("2026-09-13T00:00:00Z"));
+        // The CLI died: the manager is stopped again, and the deadline has since passed.
+        for _ in 0..10 {
+            assert_eq!(plan(&after_ok, "stopped", |_| true), Plan::GaveUp, "no more automatic starts");
+        }
+        // Seen alive again → `tick` resets the streak (Plan::Idle), which is what clears the
+        // give-up marker, so a later outage is reported as a new one.
+        assert_eq!(plan(&after_ok, "idle", |_| true), Plan::Idle);
+        assert_eq!(plan(&after_ok, "busy", |_| true), Plan::Idle);
+        // And a human starting it by hand resets `watchdog_attempts` to 0 (see
+        // `store::set_desired_running`), which puts it back in the ordinary flow.
+        assert_eq!(plan(&sup(true, "", 0, None), "stopped", |_| true), Plan::Wait { schedule: true });
     }
 }

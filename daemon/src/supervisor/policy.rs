@@ -206,6 +206,8 @@ mod tests {
             remote_session_id: None,
             remote_actor: None,
             remote_evidence: None,
+            watchdog_gave_up_at: None,
+            watchdog_last_error: None,
             created_at: "t".into(),
             updated_at: "t".into(),
         }

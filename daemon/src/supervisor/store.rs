@@ -237,6 +237,11 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("remote_session_id", "ALTER TABLE supervisors ADD COLUMN remote_session_id TEXT"),
         ("remote_actor", "ALTER TABLE supervisors ADD COLUMN remote_actor TEXT"),
         ("remote_evidence", "ALTER TABLE supervisors ADD COLUMN remote_evidence TEXT"),
+        // When the watchdog stopped trying, and why. Persisted so the report happens exactly
+        // once: before this, giving up was a state nobody was told about and every later tick
+        // silently re-derived it (review #31).
+        ("watchdog_gave_up_at", "ALTER TABLE supervisors ADD COLUMN watchdog_gave_up_at TEXT"),
+        ("watchdog_last_error", "ALTER TABLE supervisors ADD COLUMN watchdog_last_error TEXT"),
     ] {
         if !has_column(pool, "supervisors", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -350,6 +355,8 @@ pub struct Supervisor {
     pub remote_session_id: Option<String>,
     pub remote_actor: Option<String>,
     pub remote_evidence: Option<String>,
+    pub watchdog_gave_up_at: Option<String>,
+    pub watchdog_last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -575,7 +582,8 @@ pub async fn set_status_detail(pool: &SqlitePool, detail: Option<&str>) -> Resul
 /// watchdog's failure count starts over with it.
 pub async fn set_desired_running(pool: &SqlitePool, wanted: bool) -> Result<()> {
     sqlx::query(
-        "UPDATE supervisors SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL, updated_at=? WHERE id=?",
+        "UPDATE supervisors SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL,
+           watchdog_gave_up_at=NULL, watchdog_last_error=NULL, updated_at=? WHERE id=?",
     )
     .bind(i64::from(wanted))
     .bind(crate::db::now())
@@ -586,14 +594,41 @@ pub async fn set_desired_running(pool: &SqlitePool, wanted: bool) -> Result<()> 
 }
 
 pub async fn set_watchdog(pool: &SqlitePool, attempts: i64, next_at: Option<&str>) -> Result<()> {
-    sqlx::query("UPDATE supervisors SET watchdog_attempts=?, watchdog_next_at=?, updated_at=? WHERE id=?")
-        .bind(attempts)
-        .bind(next_at)
-        .bind(crate::db::now())
-        .bind(SUPERVISOR_ID)
-        .execute(pool)
-        .await?;
+    // Resetting the streak (the manager answered again, or a human decided) also clears the
+    // "gave up" record, so a later outage is reported as a new one instead of being swallowed
+    // by a marker left over from the last one.
+    let clear = attempts == 0;
+    sqlx::query(
+        "UPDATE supervisors SET watchdog_attempts=?, watchdog_next_at=?,
+           watchdog_gave_up_at=CASE WHEN ? THEN NULL ELSE watchdog_gave_up_at END,
+           watchdog_last_error=CASE WHEN ? THEN NULL ELSE watchdog_last_error END,
+           updated_at=? WHERE id=?",
+    )
+    .bind(attempts)
+    .bind(next_at)
+    .bind(clear)
+    .bind(clear)
+    .bind(crate::db::now())
+    .bind(SUPERVISOR_ID)
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+/// Record that the watchdog has stopped retrying. `Ok(true)` = this call was the first to say
+/// so, which is what makes the report happen exactly once however many ticks observe it.
+pub async fn mark_watchdog_gave_up(pool: &SqlitePool, why: &str) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE supervisors SET watchdog_gave_up_at=?, watchdog_last_error=?, updated_at=?
+          WHERE id=? AND watchdog_gave_up_at IS NULL",
+    )
+    .bind(crate::db::now())
+    .bind(why)
+    .bind(crate::db::now())
+    .bind(SUPERVISOR_ID)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
 }
 
 /// Record that the manager was just woken. Only the successful notify path calls this: a
@@ -1933,6 +1968,42 @@ mod tests {
     async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
+    /// Giving up is reported once, not once per tick (review #31), and a recovery re-arms it so
+    /// the *next* outage is not silenced by a marker left over from the last one.
+    #[tokio::test]
+    async fn the_watchdog_reports_giving_up_once_and_a_recovery_re_arms_it() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        set_desired_running(&p, true).await.unwrap();
+        set_watchdog(&p, 5, None).await.unwrap();
+
+        assert!(mark_watchdog_gave_up(&p, "CLI 起來就死").await.unwrap(), "the first tick reports");
+        for _ in 0..50 {
+            assert!(!mark_watchdog_gave_up(&p, "CLI 起來就死").await.unwrap(), "later ticks stay silent");
+        }
+        let s = get_or_init(&p).await.unwrap();
+        assert!(s.watchdog_gave_up_at.is_some());
+        assert_eq!(s.watchdog_last_error.as_deref(), Some("CLI 起來就死"));
+
+        // Seen answering again: the streak resets and so does the give-up record.
+        set_watchdog(&p, 0, None).await.unwrap();
+        let s = get_or_init(&p).await.unwrap();
+        assert!(s.watchdog_gave_up_at.is_none(), "a recovery clears it");
+        assert!(s.watchdog_last_error.is_none());
+        assert!(mark_watchdog_gave_up(&p, "第二次").await.unwrap(), "so a later outage is reported again");
+
+        // A human deciding (start / stop) also clears it.
+        set_desired_running(&p, true).await.unwrap();
+        let s = get_or_init(&p).await.unwrap();
+        assert!(s.watchdog_gave_up_at.is_none());
+        assert_eq!((s.watchdog_attempts, s.watchdog_next_at), (0, None));
+
+        // A non-zero update must *not* clear it: that is the retry bookkeeping, not a recovery.
+        mark_watchdog_gave_up(&p, "第三次").await.unwrap();
+        set_watchdog(&p, 5, Some("2099-01-01T00:00:00Z")).await.unwrap();
+        assert!(get_or_init(&p).await.unwrap().watchdog_gave_up_at.is_some());
+    }
+
         let a = insert_assignment(&p, None, "stopped-bot", "req-r", "做事", &[], None).await.unwrap();
         // Created long ago; retried 20 times, the last one just now. `defer` stamps
         // `updated_at` off the real clock, so the cutoff has to sit between the two: older than
