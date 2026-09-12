@@ -10426,6 +10426,8 @@ button.run-debug-toggle:hover {
 
   .sidebar-head {
     justify-content: flex-end;
+    min-height: 40px;
+    padding: 4px 10px;
   }
 
   /*
@@ -10437,6 +10439,17 @@ button.run-debug-toggle:hover {
   .sidebar-head .mem-k,
   .sidebar-head .tabs-bytes {
     display: none;
+  }
+
+  /*
+   * `.mem-open` 在下面那條觸控規則被加了 `min-height: 40px`，抽屜標題列就變成一塊
+   * 40px 高的 RAM 鍵（還會吃到 focus ring）。這裡只放大可按範圍，列高維持徽章本身。
+   */
+  .sidebar-head .mem-open {
+    min-height: 0;
+    min-width: 0;
+    padding: 8px 6px;
+    margin: -8px -6px;
   }
 }
 
