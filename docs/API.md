@@ -322,6 +322,10 @@ Turn 或 user message，重試不會因為上一回合卡住而得到 409。
 退不掉才不建 turn、回 `{"error":"conflict","reason":"dialog_open","run_id":"…","message":"…"}`
 並插一則 system 訊息。
 
+**排隊中的 prompt 送出時也過同樣三道檢查**（2026-09-12）：queued turn 被 claim 之後、`agent.prompt` 之前，
+daemon 先看畫面；中了就把 turn **放回 `queued`**（`run_id` 清掉）並插同一則 system 訊息，等下一個
+`working → idle` 再試。以前這條路直接打字，使用者排的下一句會被打進 codex 的 `/model` 選單。
+
 ## 6. 讀訊息
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`

@@ -262,6 +262,18 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     }
     emit_turn(app, &turn.id).await;
 
+    // The same three screen checks a live prompt gets (login menu, claude's model-switch box,
+    // codex's `/model` picker). Refused → back on the queue with the hint already in the
+    // conversation; the next `working -> idle` edge tries again.
+    if let Err(e) = pane_ready_for_prompt(app, &bot, &run, &conv).await {
+        let why = match &e {
+            LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
+            other => format!("{other:?}"),
+        };
+        requeue_turn(app, &turn.id, bot_id, &format!("pane not ready for a prompt: {why}")).await;
+        return Ok(());
+    }
+
     // Everything between the claim and the RPC must put the turn *back* on the queue if it
     // gives up. Nothing else in the daemon finishes a turn that is `in_flight` with
     // `delivery='pending'`: `arm_stall`, `arm_progress` and `try_fallback` all require
@@ -3469,6 +3481,69 @@ pub async fn prompt_relayed(
 /// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
 /// `deliver` is what the agent actually receives; `text` is what the timeline shows. The
 /// group chat passes the mention-stripped variant so a bot never sees `@all`.
+/// The three looks at the screen every prompt must pass before any text goes into the pane
+/// — shared by `prompt_grouped` and the durable queue's flush, so a queued prompt gets the same
+/// protection as a live one (review 2026-09-12 #6: the flush skipped all three and typed the
+/// user's next message into codex's `/model` menu, Enter switching the model on the way).
+///
+/// Each refusal inserts its system hint into the conversation and answers a 409 with a stable
+/// `reason`: `needs_login`, `dialog_open`, `picker_open`.
+async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> LcResult<()> {
+    // A claude whose CLAUDE_CONFIG_DIR has never logged in opens on "Select login method"
+    // and looks idle to herdr; a prompt sent there just types into the menu and the turn
+    // hangs until the stall timer gives up. Look at the screen first and say so instead.
+    if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(app, run).await {
+        let identity = bot.identity.clone().unwrap_or_default();
+        let hint = if identity.is_empty() {
+            "這個 claude 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。".to_string()
+        } else {
+            format!("身份 `{identity}` 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。")
+        };
+        let _ = insert_message(app, conv, None, "system", &hint, "system", false, None).await;
+        return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
+    }
+    // claude 的「Switch model?」確認框同一個道理（`tui_prompts::is_switch_model_dialog`）：
+    // herdr 把它判成 idle，prompt 打進去字被丟掉、Enter 替使用者按了 Yes，回合 12 秒後 stall
+    // （2026-09-11 AGM 實測）。daemon 自己換模型時已經會把框答掉；還看得到框，就是有人在終端
+    // 裡手動打了 `/model` 沒答——使用者現在是要送訊息，不是要換模型，所以按 Esc（No, go back）
+    // 退掉再送；退不掉才講清楚，不把訊息餵進去。
+    if bot.kind == "claude" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, run).await {
+                if let Ok(r) = client.pane_read(pane, "visible", 60).await {
+                    if crate::tui_prompts::is_switch_model_dialog(&r.text) {
+                        let _ = client.pane_send_keys(pane, &["Escape"]).await;
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                        let still = matches!(client.pane_read(pane, "visible", 60).await,
+                            Ok(r2) if crate::tui_prompts::is_switch_model_dialog(&r2.text));
+                        if still {
+                            let hint = "claude 的「Switch model?」確認框擋在輸入列前面，關不掉。請到「終端」分頁選 1 或 2 再送一次。";
+                            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        }
+                        tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
+                    }
+                }
+            }
+        }
+    }
+    // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
+    // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
+    // `codex_live::picker_open`）。所以先看一眼並把它關掉，關不掉就講清楚，別把訊息餵進去。
+    if bot.kind == "codex" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, run).await {
+                if !crate::codex_live::close_picker(&client, pane).await {
+                    let hint = "codex 的 /model 選單擋在輸入列前面，關不掉。請到「終端」分頁按 Esc 回到輸入列再送一次。";
+                    let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                    return Err(LcError::conflict("picker_open", json!({"run_id": run.id, "message": hint})));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn prompt_grouped(
     app: &Arc<App>,
     bot_id: &str,
@@ -3526,58 +3601,7 @@ pub async fn prompt_grouped(
     if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
         return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
     }
-    // A claude whose CLAUDE_CONFIG_DIR has never logged in opens on "Select login method"
-    // and looks idle to herdr; a prompt sent there just types into the menu and the turn
-    // hangs until the stall timer gives up. Look at the screen first and say so instead.
-    if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(app, &run).await {
-        let identity = bot.identity.clone().unwrap_or_default();
-        let hint = if identity.is_empty() {
-            "這個 claude 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。".to_string()
-        } else {
-            format!("身份 `{identity}` 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。")
-        };
-        let _ = insert_message(app, &conv, None, "system", &hint, "system", false, None).await;
-        return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
-    }
-    // claude 的「Switch model?」確認框同一個道理（`tui_prompts::is_switch_model_dialog`）：
-    // herdr 把它判成 idle，prompt 打進去字被丟掉、Enter 替使用者按了 Yes，回合 12 秒後 stall
-    // （2026-09-11 AGM 實測）。daemon 自己換模型時已經會把框答掉；還看得到框，就是有人在終端
-    // 裡手動打了 `/model` 沒答——使用者現在是要送訊息，不是要換模型，所以按 Esc（No, go back）
-    // 退掉再送；退不掉才講清楚，不把訊息餵進去。
-    if bot.kind == "claude" {
-        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-            if let Ok(client) = client_for_run(app, &run).await {
-                if let Ok(r) = client.pane_read(pane, "visible", 60).await {
-                    if crate::tui_prompts::is_switch_model_dialog(&r.text) {
-                        let _ = client.pane_send_keys(pane, &["Escape"]).await;
-                        tokio::time::sleep(Duration::from_millis(700)).await;
-                        let still = matches!(client.pane_read(pane, "visible", 60).await,
-                            Ok(r2) if crate::tui_prompts::is_switch_model_dialog(&r2.text));
-                        if still {
-                            let hint = "claude 的「Switch model?」確認框擋在輸入列前面，關不掉。請到「終端」分頁選 1 或 2 再送一次。";
-                            let _ = insert_message(app, &conv, None, "system", hint, "system", false, None).await;
-                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
-                        }
-                        tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
-                    }
-                }
-            }
-        }
-    }
-    // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
-    // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
-    // `codex_live::picker_open`）。所以先看一眼並把它關掉，關不掉就講清楚，別把訊息餵進去。
-    if bot.kind == "codex" {
-        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-            if let Ok(client) = client_for_run(app, &run).await {
-                if !crate::codex_live::close_picker(&client, pane).await {
-                    let hint = "codex 的 /model 選單擋在輸入列前面，關不掉。請到「終端」分頁按 Esc 回到輸入列再送一次。";
-                    let _ = insert_message(app, &conv, None, "system", hint, "system", false, None).await;
-                    return Err(LcError::conflict("picker_open", json!({"run_id": run.id, "message": hint})));
-                }
-            }
-        }
-    }
+    pane_ready_for_prompt(app, &bot, &run, &conv).await?;
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
@@ -6455,15 +6479,20 @@ mod flush_queue_tests {
     /// `client_for_run` fail — which is exactly the shape of a host that dropped out between
     /// the prompt being queued and the flush trying to deliver it.
     async fn queued(session: &str) -> Fixture {
+        queued_kind("claude", session).await
+    }
+
+    async fn queued_kind(kind: &str, session: &str) -> Fixture {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
-             VALUES (?,?,'q','claude','[]',0,1,'tok',?)",
+             VALUES (?,?,'q',?,'[]',0,1,'tok',?)",
         )
         .bind(&bot_id)
         .bind(&env.project_id)
+        .bind(kind)
         .bind(db::now())
         .execute(&app.db)
         .await
@@ -6563,6 +6592,51 @@ mod flush_queue_tests {
         assert_eq!(t.status, "in_flight");
         assert_eq!(t.delivery, "unknown");
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none(), "not put back on the queue");
+    }
+
+    /// **The queue gets the same screen checks as a live prompt** (review 2026-09-12 #6). codex
+    /// sits on its `/model` picker (the user opened it in the terminal and never answered); the
+    /// flush used to type the queued text straight into that menu. The mock cannot press
+    /// Escape, so the picker stays and the prompt has to go back on the queue, with the hint.
+    #[tokio::test]
+    async fn a_queued_prompt_waits_while_codex_shows_its_model_picker() {
+        let f = queued_kind("codex", "test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.set_screen("pane-1", "Select Model and Effort\n› 1. gpt-5 (current)\n  2. gpt-5-mini\n\nPress enter to confirm or esc to go back\n");
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued", "put back, not delivered into the menu");
+        assert_eq!(t.run_id, None);
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "nothing was typed");
+        let hints: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&f.conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert!(hints[0].contains("/model"), "{hints:?}");
+    }
+
+    /// claude parked on its login menu is the same story: `needs_login`, back on the queue.
+    #[tokio::test]
+    async fn a_queued_prompt_waits_while_claude_shows_its_login_menu() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.set_screen("pane-1", "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n");
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"));
+        let hints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(hints, 1);
     }
 
     /// An empty queued prompt is still dropped rather than requeued — an unchanged path,
