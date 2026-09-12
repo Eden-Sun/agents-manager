@@ -330,6 +330,8 @@ daemon 先看畫面；中了就把 turn **放回 `queued`**（`run_id` 清掉）
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`
 
+沒有這個 bot → `404 {"error":"not_found","what":"bot"}`（2026-09-12 前是 502）；已刪除的 bot 仍讀得到歷史（§10.4）。
+
 倒序分頁（`before` 傳目前最舊一則的 `id`，以插入順序分頁），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
 
 ```json

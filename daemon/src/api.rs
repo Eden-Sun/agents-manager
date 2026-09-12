@@ -2348,6 +2348,12 @@ async fn get_messages(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
+    // `conversation_id` creates the conversation on first use; for an id that is not a bot at
+    // all that INSERT trips the foreign key and came back as 502 (review 2026-09-12 #9). A
+    // deleted bot is still readable — API.md §10.4 promises its history stays.
+    if db::bot(&app.db, &id).await.map_err(any_err)?.is_none() {
+        return Err(LcError::NotFound("bot".into()));
+    }
     let conv = db::conversation_id(&app.db, &id).await.map_err(any_err)?;
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
     let before_rowid = match q.get("before") {
@@ -2610,6 +2616,32 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::Bad(_))
         ));
+    }
+
+    /// An id that is not a bot is 404, not 502 (review 2026-09-12 #9) — and a deleted bot still
+    /// answers, because its history is kept (API.md §10.4).
+    #[tokio::test]
+    async fn messages_for_an_unknown_bot_are_not_found() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        assert!(matches!(
+            get_messages(State(app.clone()), Path("no-such-bot".into()), Query(HashMap::new())).await,
+            Err(LcError::NotFound(what)) if what == "bot"
+        ));
+        let gone = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, hook_token, deleted_at, created_at) VALUES (?,?,'gone','claude','tok',?,?)",
+        )
+        .bind(&gone)
+        .bind(&e.project_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let Json(body) = get_messages(State(app), Path(gone.clone()), Query(HashMap::new())).await.unwrap();
+        assert_eq!(body["bot_id"], gone);
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(0));
     }
 }
 
