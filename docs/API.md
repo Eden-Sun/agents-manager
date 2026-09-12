@@ -289,7 +289,11 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 - `delivery = "ok"`：已送達 agent，等 hook 回覆（或 5 秒後的終端備援）。
 - `delivery = "unknown"`：RPC 逾時，**該 bot 在 abandon / interrupt / stop 之前不能再送 prompt**
   （再送會 409），UI 應顯示「送出狀態不明」並提供「放棄這回合」按鈕（呼叫 `/api/turns/{id}/abandon`）。
-- `delivery = "failed"`：agent 當下處於 blocked，Turn 直接標 failed。
+- `delivery = "failed"`：agent 當下處於 blocked，或附件綁定失敗；Turn 直接標 failed，並推送
+  `message_added`（system）與非 `in_flight` 的 `turn_updated`，讓 UI 不會停在 `pending`。
+
+若 active Run 對應的 Herdr session 已不可用，daemon 會在寫入 Turn 前回 `502 upstream`；這種情況不會留下
+Turn 或 user message，重試不會因為上一回合卡住而得到 409。
 
 409 的 `reason` 可能是：`bot has no active run`、`run is not running`、
 `agent is blocked; answer the prompt first`、`a turn is already in flight`、
