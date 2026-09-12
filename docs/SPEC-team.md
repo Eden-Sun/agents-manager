@@ -206,6 +206,9 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 7. **建新一批執行者**：依 `roles_json.workers.spec` / `count`，走既有 `start_issue(next, keep_workers=false)`
    （切 `main/` 到新整合分支 `team/i<issue>-<tid6>`、`worktree add` `i<seq>-dev-<n>`、insert 成員、重寫 `ISSUE.md` / `TEAM.md`、鏡像 `teams` 欄位），
    再 `start_issue_workers`。`start_issue` 對 `main/` 的「必須乾淨」檢查照舊，髒了 → note `issue_start_failed` + `paused(upstream)`。
+   `start_issue` 可重入（2026-09-12）：中途失敗（worktree add、insert_member、寫 docs）會把這次建的成員列軟刪、
+   worktree 移除；整合分支留著（指向 `base_sha`）。resume 再跑時分支已存在就 `checkout` 而非 `checkout -b`、
+   worktree 已註冊就跳過、同暱稱且活著的成員沿用，所以不會永遠撞 `already exists`，也不會退到 `dev-1-<tid6>` 這種 PM 對不到的名字。
 8. **交給 PM**：`hand_issue_to_pm(kept_workers=false)` —— `set_phase("planning")` 並送 `next_issue` relay。relay 文字多一句視 §2.5.3 結果而定：
    續接成功 →「這是同一段對話的延續」；退回新對話 →「你是重新啟動的 PM，先前的對話不在了，請先讀 `TEAM.md` 與 `ISSUE.md`」。
 
