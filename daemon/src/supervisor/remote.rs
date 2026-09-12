@@ -65,6 +65,15 @@ impl Source {
     }
 }
 
+/// Public callers may record an attributed manual check, never manufacture provider evidence.
+pub fn validate_external_source(source: Source) -> Result<(), &'static str> {
+    match source {
+        Source::Manual => Ok(()),
+        Source::Argv => Err("argv is daemon bookkeeping, not an external observation"),
+        Source::Provider => Err("provider observations are unsupported; use an attributed manual check"),
+    }
+}
+
 /// Whether the daemon has any way to observe the remote entry point on this deployment.
 ///
 /// `unsupported` is a statement about our observation ability, not about the phone: the session
@@ -119,7 +128,8 @@ pub fn revocation(
     let Some(current) = current_session else { return Some(Revoked::NotRunning) };
     // A restart or a model switch opens a *new* session; whatever was true of the old one says
     // nothing about this one.
-    if observed_session.is_some_and(|s| s != current) {
+    if observed_session.is_some_and(|s| s != current)
+        || (stored_status != "requested" && observed_session.is_none()) {
         return Some(Revoked::SessionChanged);
     }
     // `requested` is tied to the session, not to a clock: the argument was passed when this
@@ -202,6 +212,15 @@ mod tests {
         assert!(Source::Provider.can_verify());
         assert_eq!(capability()["status"], "unsupported");
         assert!(!STATES.contains(&"active"), "there is no `active`: the honest states are requested/verified/unavailable/unknown");
+    }
+
+    #[test]
+    fn external_callers_cannot_claim_provider_evidence() {
+        assert!(validate_external_source(Source::Manual).is_ok());
+        assert!(validate_external_source(Source::Provider).is_err());
+        assert!(validate_external_source(Source::Argv).is_err());
+        assert_eq!(revocation("verified", Some("2026-09-12T11:55:00Z"), None, Some("new-run"), now()),
+                   Some(Revoked::SessionChanged));
     }
 
     /// A `requested` status lives and dies with its session, and needs no clock: the argument

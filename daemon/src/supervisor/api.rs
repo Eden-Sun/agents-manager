@@ -398,8 +398,8 @@ pub async fn get_remote(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
 pub struct RemoteObservationIn {
     /// `requested` | `verified` | `unavailable` | `unknown`.
     pub status: String,
-    /// `manual` (a person checked) or `provider` (an observation). `argv` is the daemon's own
-    /// bookkeeping and is not accepted here.
+    /// Only `manual` is accepted on this deployment. `provider` is reserved for a future
+    /// authenticated adapter; callers cannot upgrade a manual claim into provider evidence.
     pub source: String,
     /// Who is making the claim. Required for anything that asserts the entry point works: an
     /// unattributed "it is fine" is exactly the fiction this endpoint exists to prevent.
@@ -425,9 +425,7 @@ pub async fn post_remote_observation(
     }
     let source = super::remote::Source::parse(&b.source)
         .ok_or_else(|| LcError::Bad("source must be `manual` or `provider`".into()))?;
-    if source == super::remote::Source::Argv {
-        return Err(LcError::Bad("argv is the daemon's own record and cannot report an observation".into()));
-    }
+    super::remote::validate_external_source(source).map_err(|e| LcError::Bad(e.into()))?;
     if b.status == "verified" && !source.can_verify() {
         return Err(LcError::conflict(
             "this source cannot verify the remote entry point",
@@ -438,11 +436,18 @@ pub async fn post_remote_observation(
     if matches!(b.status.as_str(), "verified" | "unavailable") && actor.is_none() {
         return Err(LcError::Bad("an observation that claims verified or unavailable needs an actor".into()));
     }
+    if matches!(b.status.as_str(), "verified" | "unavailable")
+        && b.evidence.as_deref().is_none_or(|v| v.trim().is_empty()) {
+        return Err(LcError::Bad("verified or unavailable needs observation evidence".into()));
+    }
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let session = match sup.bot_id.as_deref() {
         Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.id),
         None => None,
     };
+    if matches!(b.status.as_str(), "verified" | "unavailable") && session.is_none() {
+        return Err(LcError::Bad("cannot record a remote observation without an active manager session".into()));
+    }
     store::set_remote_observed(
         &app.db,
         &b.status,
@@ -516,15 +521,16 @@ pub async fn put_persona(State(app): State<Arc<App>>, Json(b): Json<PersonaIn>) 
     let _g = super::lock().await;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     if let Some(expected) = b.expected_version {
-        if expected != sup.persona_version {
+        if expected != sup.persona_version && sup.persona_text.as_deref() != Some(text) {
             return Err(LcError::conflict(
                 "the persona changed since you read it",
                 json!({"reason": "version_mismatch", "expected": expected, "current": sup.persona_version}),
             ));
         }
     }
-    let version = store::set_persona(&app.db, text, "api", None).await.map_err(up)?;
-    apply_persona(&app, text).await?;
+    let version = if sup.persona_text.as_deref() == Some(text) { sup.persona_version }
+        else { store::set_persona(&app.db, text, "api", None).await.map_err(up)? };
+    sync_persona(&app, text, version).await?;
     drop(_g);
     app.emit("supervisor_changed", json!({"persona_version": version})).await;
     Ok(Json(get_persona(State(app.clone())).await?.0))
@@ -549,10 +555,11 @@ pub async fn post_persona_adopt(
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let embedded_hash = super::persona::hash(&embedded);
     if sup.persona_hash.as_deref() == Some(embedded_hash.as_str()) {
+        sync_persona(&app, &embedded, sup.persona_version).await?;
         return Ok(Json(json!({"changed": false, "reason": "already_identical", "version": sup.persona_version})));
     }
     let version = store::set_persona(&app.db, &embedded, "embedded", Some(&embedded_hash)).await.map_err(up)?;
-    apply_persona(&app, &embedded).await?;
+    sync_persona(&app, &embedded, version).await?;
     drop(_g);
     tracing::info!(
         version,
@@ -564,6 +571,17 @@ pub async fn post_persona_adopt(
     Ok(Json(json!({"changed": true, "version": version, "hash": embedded_hash})))
 }
 
+/// A DB write is durable even if a derived file cannot be written. Return that fact instead
+/// of silently reporting success; repeating the identical PUT repairs projections without
+/// incrementing the version or being rejected by the old expected_version.
+async fn sync_persona(app: &Arc<App>, text: &str, version: i64) -> Result<(), LcError> {
+    apply_persona(app, text).await.map_err(|e| LcError::conflict(
+        "persona stored but projection sync is incomplete; retry the same text to repair",
+        json!({"reason": "persona_sync_incomplete", "stored": true, "version": version,
+               "sync_error": format!("{e:?}")}),
+    ))
+}
+
 /// Push the stored persona into the derived copies: the bot's config entry and `persona.md`.
 /// Neither is authoritative; both are rewritten from the stored text so they cannot drift.
 async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
@@ -573,17 +591,20 @@ async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
     let bid = bot_id.clone();
     app.cfg
         .update(move |cfg| {
+            let mut found = false;
             for p in cfg.projects.iter_mut() {
                 if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
                     b.persona = Some(t.clone());
+                    found = true;
                 }
             }
+            anyhow::ensure!(found, "manager bot is missing from config");
             Ok(())
         })
         .await
         .map_err(up)?;
-    let _ = crate::projection::project_config(&app.cfg, &app.db).await;
-    let _ = std::fs::write(setup::agm_dir(app).join("persona.md"), text);
+    crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
+    std::fs::write(setup::agm_dir(app).join("persona.md"), text).map_err(up)?;
     Ok(())
 }
 
@@ -794,4 +815,52 @@ pub async fn post_lease_release(
     }
     app.emit("supervisor_changed", json!({"lease": l.to_json()})).await;
     Ok(Json(json!({"released": released, "lease": l.to_json()})))
+}
+
+#[cfg(test)]
+mod persona_sync_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn migration_and_failed_projection_can_be_retried_without_losing_text() {
+        let dir = std::env::temp_dir().join(format!("agm-persona-sync-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bid = crate::db::ulid();
+        let pid = crate::db::ulid();
+        std::fs::write(dir.join("config.toml"), format!(
+            "[[projects]]\nid = '{pid}'\npath = '{}'\nlabel = 'AGM'\n[[projects.bots]]\nid = '{bid}'\nname = 'AGM'\nkind = 'claude'\npersona = 'existing custom persona'\n", dir.display()
+        )).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        crate::projection::project_config(&cfg, &db).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"),
+                           7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&bid).bind(store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+        assert_eq!(setup::effective_persona(&app).await.unwrap().0, "existing custom persona");
+        let initial = store::get_or_init(&app.db).await.unwrap().persona_version;
+        // persona.md cannot be created yet. A partial sync must be visible, while the new
+        // authoritative text remains durable and recoverable using the exact same request.
+        let err = put_persona(State(app.clone()), Json(PersonaIn {
+            text: "new persona".into(), expected_version: Some(initial),
+        })).await.unwrap_err();
+        assert!(format!("{err:?}").contains("persona_sync_incomplete"));
+        let stored = store::get_or_init(&app.db).await.unwrap();
+        assert_eq!(stored.persona_text.as_deref(), Some("new persona"));
+        std::fs::create_dir_all(setup::agm_dir(&app)).unwrap();
+        let repaired = put_persona(State(app.clone()), Json(PersonaIn {
+            text: "new persona".into(), expected_version: Some(initial),
+        })).await.unwrap().0;
+        assert_eq!(repaired["stored"]["version"], stored.persona_version);
+        assert_eq!(std::fs::read_to_string(setup::agm_dir(&app).join("persona.md")).unwrap(), "new persona");
+        assert_eq!(crate::db::bot(&app.db, &bid).await.unwrap().unwrap().persona.as_deref(), Some("new persona"));
+        // An old request with DIFFERENT text still cannot overwrite the new revision.
+        assert!(put_persona(State(app.clone()), Json(PersonaIn {
+            text: "stale edit".into(), expected_version: Some(initial),
+        })).await.is_err());
+        app.db.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

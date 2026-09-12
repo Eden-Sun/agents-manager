@@ -1622,7 +1622,7 @@ incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, reso
 **binary 內嵌版**與 **session 已載入版**。而 `ensure_env` 會無條件把內嵌版寫回 bot——舊 binary 跑一次 setup
 就可能把剛更新的人設降回它自己編進去的那版。
 
-- **持久版（`supervisors.persona_text`）是權威。** `setup` 只在完全沒有人設時 seed 一次；之後 seed 一律被拒。
+- **持久版（`supervisors.persona_text`）是權威。** `setup` 首次遷移先保留既有 `bots.persona`；完全沒有既有人設才以內建版 seed 一次，之後 seed 一律被拒。
   `persona_seed_hash` 記住當初 seed 自哪個內嵌版，所以「內嵌版有新的」與「這份是被刻意改過的」分得開。
 - 內嵌版要取代持久版只有一條路：`POST /api/supervisor/persona/adopt-embedded`，明確的遷移，有 actor 與理由。
 - `config.toml` 的 bot persona 與 `persona.md` 都是**從持久版產生的副本**，改人設走 `PUT /api/supervisor/persona`

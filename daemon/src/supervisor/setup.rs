@@ -58,9 +58,19 @@ pub fn persona_body() -> String {
 /// a seed. Returns `(text, seeded)`.
 pub async fn effective_persona(app: &Arc<App>) -> Result<(String, bool), LcError> {
     let embedded = persona_body();
-    let seeded = store::seed_persona_if_empty(&app.db, &embedded)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let current = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let legacy = if current.persona_text.as_deref().is_none_or(str::is_empty) {
+        match current.bot_id.as_deref() {
+            Some(id) => crate::db::bot(&app.db, id).await
+                .map_err(|e| LcError::Upstream(e.to_string()))?
+                .and_then(|b| b.persona).filter(|t| !t.trim().is_empty()),
+            None => None,
+        }
+    } else { None };
+    let seeded = match legacy {
+        Some(ref text) => store::seed_persona_from(&app.db, text, "legacy_bot", &embedded).await,
+        None => store::seed_persona_if_empty(&app.db, &embedded).await,
+    }.map_err(|e| LcError::Upstream(e.to_string()))?;
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     Ok((sup.persona_text.filter(|t| !t.is_empty()).unwrap_or(embedded), seeded))
 }
@@ -185,7 +195,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
     // afterwards to write the readable copy.
     let persona_for_cfg = persona.clone();
     if seeded {
-        tracing::info!("seeded the AGM persona from the embedded default (first install)");
+        tracing::info!("seeded the AGM persona from the existing bot or embedded first-install default");
     }
     let effort = sup.effort.clone();
     let identity = sup.identity.clone();

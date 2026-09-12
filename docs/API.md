@@ -29,16 +29,17 @@
   Remote Control 觀測來源（herdr pane、hook、session 都不帶這個資訊），所以它不會宣稱手機連上了。
   `status` 是算過的：觀測超過 `ttl_secs`（900 秒）或 AGM 換了 session 就退回 `unknown`（`revoked` 說明原因），
   `url` 也跟著不回——URL 不是連線證據（`url_is_evidence:false`）。
-  `POST /api/supervisor/remote {status,source,actor?,evidence?,url?}` → 同上。`source` 只收 `manual`／`provider`
-  （`argv` 是 daemon 自己的紀錄，會被拒）；`verified`／`unavailable` 一定要 `actor`，人工確認記成一個人的宣稱，而且會過期。
+  `POST /api/supervisor/remote {status,source,actor?,evidence?,url?}` → 同上。`source` 本部署只收 `manual`；`provider` 保留給未來觀測 adapter，外部宣稱會被拒絕。
+  （`argv` 是 daemon 自己的紀錄，會被拒）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run。人工確認記成一個人的宣稱，15 分鐘後失效。
 - `GET /api/supervisor/persona` →
   `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
-  **持久版是權威**：`setup` 只在沒有人設時用內嵌版 seed，之後不再覆寫（舊 binary 跑 setup 不會把新人設降版）。
+  **持久版是權威**：`setup` 只在沒有人設時用內嵌版 seed，之後不再覆寫（支援此機制的 binary 即使內嵌版較舊，也不會因 setup 降版）。
   `loaded.status` 只有三種，沒有 `verified`：`unknown`（沒在跑）、`stale`（session 比人設舊，**確定**沒載到）、
   `unverified`（session 啟動時間晚於人設，所以是帶著這份啟動的，但 daemon 看不到 session 現在握著什麼）。
   `needs_restart` 只有 `stale` 時為 true；它是「要重啟才會載到」，不是「已經載到了」。
-  `PUT /api/supervisor/persona {text,expected_version?}` → 同上。版本 +1、重算 hash，並把 `config.toml` 的 bot
-  persona 與總管 cwd 的 `persona.md` 一起改寫（那兩份是副本，不要手改）。`expected_version` 對不上回 409 `version_mismatch`。
+  `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1、重算 hash，並把 `config.toml` 的 bot
+  persona 與總管 cwd 的 `persona.md` 一起改寫（那兩份是副本，不要手改）。`expected_version` 對不上且正文不同時回 409 `version_mismatch`。若副本同步失敗，回 409 `persona_sync_incomplete`，帶 `stored:true` 與已保存的 `version`；重送相同正文可修復副本，不增加版本，也不會被舊 expected_version 阻擋。
+  首次升級先保留既有 AGM `bots.persona`（source=`legacy_bot`）；完全沒有既有人設才使用內建版。
   `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`。這是內嵌版**唯一**能
   取代持久版的路徑：明確的遷移，不是 setup 的副作用；內容相同時回 `changed:false`。
 - `GET /api/supervisor/build-inputs` → `{paths:[…],embedded:[{path,symbol}],note}`。
