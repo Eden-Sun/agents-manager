@@ -79,7 +79,7 @@ export function UnreadChip() {
   const working = useMemo(
     () =>
       bots
-        .filter((b) => tracked(b) && !isPinned.has(b.id) && runs[b.id]?.agent_status === 'working')
+        .filter((b) => tracked(b) && !isPinned.has(b.id) && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
         .map((b) => ({ id: b.id, name: b.name })),
     [bots, runs, tracked, isPinned],
   )
@@ -126,9 +126,11 @@ export function UnreadChip() {
             /* `unread` 是**加在釘選身分上的一層狀態**，不是換一組晶片：一排 ★ 看過去，有東西
                等你看的那幾顆要能一眼挑出來，而不是只靠名字後面那個小數字。`current`（你在
                這裡）跟它可以同時成立，兩者的畫法也分得開（見 `unreadChip.css`）。 */
-            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${r.id === selectedBotId ? ' current' : ''}`}
+            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${runs[r.id]?.agent_status === 'blocked' ? ' blocked' : ''}${r.id === selectedBotId ? ' current' : ''}`}
             title={
-              r.id === selectedBotId
+              runs[r.id]?.agent_status === 'blocked'
+                ? `${r.name}（主要執行的 bot）停在一個要你回答的提示上。點一下過去回答`
+                : r.id === selectedBotId
                 ? `${r.name}（主要執行的 bot）：你正在看的就是它`
                 : n > 0
                   ? `${r.name}（主要執行的 bot）有 ${n} 個回合已完成、還沒看過。點一下跳過去`
@@ -140,7 +142,9 @@ export function UnreadChip() {
             <span className="unread-chip-star" aria-hidden="true">★</span>
             <span className="unread-chip-name">{r.name}</span>
             {n > 0 ? <span className="unread-chip-n">{n > 99 ? '99+' : n}</span> : null}
-            {runs[r.id]?.agent_status === 'working' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+            {/* 藍點＝還在跑；紅點＝停在要你回答的提示上（`blocked`）。後者跟 `unread` 一樣是疊在
+                釘選身分上的一層狀態，不是換一組晶片（2026-09-12 使用者：「星號標注主力處也要」）。 */}
+            {runs[r.id]?.agent_status === 'working' || runs[r.id]?.agent_status === 'blocked' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
           </button>
         )
       })}
@@ -152,8 +156,12 @@ export function UnreadChip() {
             <button
               key={w.id}
               type="button"
-              className={`unread-chip working${w.id === selectedBotId ? ' current' : ''}`}
-              title={`${w.name} 還在跑。${w.id === selectedBotId ? '你正在看的就是它' : '點一下過去看'}`}
+              className={`unread-chip working${runs[w.id]?.agent_status === 'blocked' ? ' blocked' : ''}${w.id === selectedBotId ? ' current' : ''}`}
+              title={
+                runs[w.id]?.agent_status === 'blocked'
+                  ? `${w.name} 停在一個要你回答的提示上。${w.id === selectedBotId ? '你正在看的就是它' : '點一下過去回答'}`
+                  : `${w.name} 還在跑。${w.id === selectedBotId ? '你正在看的就是它' : '點一下過去看'}`
+              }
               aria-current={w.id === selectedBotId ? 'true' : undefined}
               onClick={() => selectBot(w.id)}
             >

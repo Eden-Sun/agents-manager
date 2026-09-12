@@ -97,6 +97,24 @@
   font-weight: 600;
 }
 
+/* 停在要你回答的提示上（`blocked`）：紅框紅字紅點。跟 `unread`／`current` 一樣是疊加的狀態；
+   放在 `.working` 之後，同一顆既在「進行中」列又 blocked 時紅色要蓋過中性灰。`current` 的
+   accent ring 照舊疊上去。 */
+.unread-chip.blocked {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.unread-chip.blocked .unread-chip-dot {
+  background: var(--danger);
+}
+
+.unread-chip.blocked:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
 .unread-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
