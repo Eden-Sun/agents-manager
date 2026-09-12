@@ -334,16 +334,73 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     Err(anyhow!("grok `/usage` on {host} did not report a limit within {DIALOG_TIMEOUT:?}"))
 }
 
+// ------------------------------------------------ backoff (SPEC §16.4, the grok half)
+
+/// How long a failed probe parks a host. A grok that is installed but cannot draw `/usage`
+/// (not logged in, a trust prompt, a TUI that never settles) used to cost `workspace.create` +
+/// `agent.start` + up to 60 s `agent.wait` + 25 s of screen reads **every 30 s**, forever.
+const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
+
+/// `quota_key(host, "grok")` → when that host may be probed again. In memory only: a restart
+/// costs one extra probe, which is the safe direction to err in.
+fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn cooling_down(key: &str) -> bool {
+    let mut m = backoff_map().lock().unwrap();
+    match m.get(key) {
+        Some(t) if *t > std::time::Instant::now() => true,
+        Some(_) => {
+            m.remove(key);
+            false
+        }
+        None => false,
+    }
+}
+
+fn park(key: &str, how_long: Duration) {
+    backoff_map().lock().unwrap().insert(key.to_string(), std::time::Instant::now() + how_long);
+}
+
+/// The two §16.4 skip rules, as a pure function so they can be tested: tool detection says
+/// grok is logged out on this host, or a probe of our own failed recently.
+pub(crate) fn should_probe_grok(logged_in: Option<bool>, cooling: bool) -> bool {
+    logged_in != Some(false) && !cooling
+}
+
+/// What the poller does with one host: `None` = skipped this cycle (logged out / cooling
+/// down), otherwise `refresh_grok`'s answer. A failure parks the host for
+/// `RETRY_AFTER_FAILURE`; `GET /api/quota?refresh=1` calls `refresh_grok` directly and so
+/// always gets a real attempt.
+pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
+    let key = crate::quota::quota_key(host, "grok");
+    let logged_in = app.tools.lock().await.get(host).and_then(|t| t.tools.get("grok")).and_then(|t| t.logged_in);
+    if !should_probe_grok(logged_in, cooling_down(&key)) {
+        return Ok(None);
+    }
+    match refresh_grok(app, host).await {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            park(&key, RETRY_AFTER_FAILURE);
+            Err(e)
+        }
+    }
+}
+
 /// Start-up + every 30 s, for `local` and every connected remote host.
 pub fn spawn_grok_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
         loop {
             for host in crate::quota::pollable_hosts(&app).await {
-                match refresh_grok(&app, &host).await {
-                    Ok(true) => {}
-                    Ok(false) => tracing::info!(host = %host, "grok not installed; grok quota stays null"),
-                    Err(e) => tracing::warn!(host = %host, error = %e, "grok quota refresh failed"),
+                match refresh_grok_if_due(&app, &host).await {
+                    Ok(Some(true)) => {}
+                    Ok(Some(false)) => tracing::info!(host = %host, "grok not installed; grok quota stays null"),
+                    Ok(None) => tracing::debug!(host = %host, "grok probe skipped (logged out or cooling down)"),
+                    Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "grok quota refresh failed; parking this host"),
                 }
             }
             tokio::time::sleep(GROK_POLL).await;
@@ -354,6 +411,22 @@ pub fn spawn_grok_poller(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_logged_out_or_recently_failed_host_is_not_probed() {
+        assert!(should_probe_grok(None, false));
+        assert!(should_probe_grok(Some(true), false));
+        assert!(!should_probe_grok(Some(false), false));
+        assert!(!should_probe_grok(None, true));
+
+        let key = format!("test-{}/grok", crate::db::ulid());
+        assert!(!cooling_down(&key));
+        park(&key, Duration::from_secs(60));
+        assert!(cooling_down(&key));
+        park(&key, Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!cooling_down(&key), "an expired park clears itself");
+    }
 
     const SCREEN: &str = "\
   /private/tmp                                                        1.5K / 500K

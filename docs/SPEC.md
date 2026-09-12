@@ -1205,6 +1205,11 @@ UI 顯示「未知」而不是已登入。
 - 工具偵測說該身份在這台**沒有登入**（`logged_in == false`）→ 不探（它只會停在登入畫面，把 25 秒的
   對話框逾時燒掉）。等哪次偵測看到它登入了，下一輪自然恢復。
 
+grok 的 `/usage` 探測（§12）套同一套（2026-09-12）：工具偵測說 grok 在這台沒登入就不探；探測失敗
+（畫不出額度列、trust 提示、agent.wait 逾時）後把該主機停 **5 分鐘**再試，不然每 30 秒都要
+`workspace.create` → `agent.start` → 最長 60 秒 `agent.wait` → 25 秒讀畫面 → 關掉。`GET /api/quota?refresh=1`
+不受這個節流影響，永遠真的探一次。
+
 ### 16.5 驗收
 mock（`node scripts/demo-identity-shell.mjs`，需 `VITE_MOCK=1 npx vite --port 5311`）：
 
