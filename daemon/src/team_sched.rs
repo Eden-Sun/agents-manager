@@ -969,15 +969,20 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             Ok(o) => o,
             Err(LcError::Conflict(v)) => {
                 let reason = v.get("reason").and_then(Value::as_str).unwrap_or("");
-                if reason.contains("in flight") {
-                    continue;
-                }
-                if reason.contains("blocked") {
-                    pause(app, &ctx.team, &format!("member_blocked:{}", bot.name)).await?;
-                } else if reason.contains("unknown delivery") {
-                    pause(app, &ctx.team, "delivery_unknown").await?;
-                } else {
-                    pause(app, &ctx.team, &format!("member_lost:{}", bot.name)).await?;
+                match conflict_pause(reason) {
+                    ConflictPause::InFlight => continue,
+                    ConflictPause::Blocked => {
+                        // The member is running; a human has to answer something at its
+                        // terminal. `member_lost` here sent the user to restart a bot that
+                        // was fine and made `resume` stop on the same screen again
+                        // (2026-09-12 review, ops #22).
+                        note(app, &ctx.team.id, json!({"action": "member_blocked", "bot": bot.name,
+                             "reason": reason, "message": v.get("message")}))
+                        .await?;
+                        pause(app, &ctx.team, &format!("member_blocked:{}", bot.name)).await?;
+                    }
+                    ConflictPause::DeliveryUnknown => pause(app, &ctx.team, "delivery_unknown").await?,
+                    ConflictPause::Lost => pause(app, &ctx.team, &format!("member_lost:{}", bot.name)).await?,
                 }
                 return Ok(());
             }
@@ -1040,6 +1045,31 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         }
     }
     refresh_usage(app, ctx).await
+}
+
+/// What a `prompt_grouped` 409 means for the team (§9.1's table).
+#[derive(Debug, PartialEq)]
+enum ConflictPause {
+    /// Queue behind the turn in flight.
+    InFlight,
+    /// The member is running but cannot take input until a human answers its terminal:
+    /// an agent prompt, a login, claude's model-switch dialog, codex's `/model` picker.
+    Blocked,
+    DeliveryUnknown,
+    /// No run, or not a running one.
+    Lost,
+}
+
+fn conflict_pause(reason: &str) -> ConflictPause {
+    if reason.contains("in flight") {
+        ConflictPause::InFlight
+    } else if reason.contains("blocked") || matches!(reason, "needs_login" | "dialog_open" | "picker_open") {
+        ConflictPause::Blocked
+    } else if reason.contains("unknown delivery") {
+        ConflictPause::DeliveryUnknown
+    } else {
+        ConflictPause::Lost
+    }
 }
 
 /// One prompt out of N pending relays (§8.4 / appendix A.4).
@@ -3408,6 +3438,19 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// ops #22: a member stuck on a login / dialog / picker is *blocked*, not lost.
+    #[test]
+    fn prompt_conflicts_map_to_the_right_pause() {
+        assert_eq!(conflict_pause("a turn is already in flight"), ConflictPause::InFlight);
+        assert_eq!(conflict_pause("agent is blocked; answer the prompt first"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("needs_login"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("dialog_open"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("picker_open"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("a previous turn has unknown delivery; abandon it first"), ConflictPause::DeliveryUnknown);
+        assert_eq!(conflict_pause("bot has no active run"), ConflictPause::Lost);
+        assert_eq!(conflict_pause("run is not running"), ConflictPause::Lost);
     }
 
     #[test]

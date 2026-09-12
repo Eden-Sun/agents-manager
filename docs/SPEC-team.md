@@ -748,6 +748,7 @@ PM 同時只能收一則 prompt，但兩個 worker 可能幾乎同時回報。�
 |---|---|
 | `in_flight` | 排隊（§8.4） |
 | `blocked` | `paused(member_blocked)`，離開 blocked 自動 resume |
+| `needs_login` / `dialog_open` / `picker_open`（`prompt` 在送之前看到登入提示、claude 的 Switch model 對話框、codex 的 `/model` 選單） | 同 `blocked`：`paused(member_blocked:<name>)`，note `member_blocked` 帶原 reason 與提示文字（2026-09-12；以前歸成 `member_lost`，橫幅叫人去重啟一個其實在跑的成員） |
 | `not_running` / Run 非 running | `paused(member_lost)`；不自動啟動 |
 | `unknown_delivery` | `paused(delivery_unknown)` |
 | `conflict` / `upstream` | 重試 1 次（5 秒後）→ `paused(upstream)` |
