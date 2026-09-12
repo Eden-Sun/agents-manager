@@ -409,7 +409,8 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 - `herdr agent start <name> …`：`<name>` 不是以 `$AM_AGENT_NAME-` 開頭就自動補上前綴（截到 herdr 的 32 字上限），
   並在 stderr 印一行說明。旗標可以在名字前面，`--kind` / `--pane` / `--timeout` 的值不會被誤認成名字，`--` 之後原封不動。
   **模型沿用**（2026-09-08）：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時，補上 `-- --model $AM_MODEL`，
-  claude 再補 `--effort $AM_EFFORT`（子 agent 自己有寫的一律尊重；codex 的 `-c model_reasoning_effort=` 也算有寫）。
+  claude 再補 `--effort $AM_EFFORT`（子 agent 自己有寫的一律尊重：`--model`、codex／grok 的 `-m`、codex 的 `-c model=`
+  都算；effort 方面 codex 的 `-c model_reasoning_effort=` 也算有寫）。
   不然子 agent 跑 CLI 預設，側欄多一顆「claude-fable-5-1」跟母 bot 的 `opus` 對不上。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發，另外補上 `--env`
   把 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、`AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`PATH` 帶下去
