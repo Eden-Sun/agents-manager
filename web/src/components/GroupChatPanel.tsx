@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { parseMentions } from '../api/mentions'
@@ -8,6 +8,7 @@ import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useComposerFocus } from '../hooks/useComposerFocus'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { ProjectNameField } from './ProjectNameField'
@@ -277,21 +278,8 @@ function GroupComposer({
   const focusEmpty = loaded && empty
   const phone = useMediaQuery(PHONE_QUERY)
 
-  // Restore the group draft's last selection after a reload / project switch. The group
-  // composer uses the same persisted caret data as the per-bot composer.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const currentText = useStore.getState().drafts[draftKey] ?? ''
-    const saved = useStore.getState().draftCursors[draftKey]
-    const max = currentText.length
-    const start = Math.max(0, Math.min(max, saved?.start ?? max))
-    const end = Math.max(start, Math.min(max, saved?.end ?? start))
-    // 手機不自動 focus：鍵盤會擋住視線，要打字自己點（同 ChatPanel）。
-    if (phone && document.activeElement !== el) return
-    el.focus()
-    el.setSelectionRange(start, end)
-  }, [state.disabled, draftKey, ref, focusEmpty, phone])
+  // 手機不自動 focus：鍵盤會擋住視線，要打字自己點（同 ChatPanel）。
+  useComposerFocus({ draftKey, ref, forceFocus: focusEmpty && !phone, autoFocus: !phone })
 
   useEffect(() => {
     const el = ref.current

@@ -7,6 +7,7 @@ import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../ap
 import { effortLabel, quotaKey } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
+import { useComposerFocus } from '../hooks/useComposerFocus'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
@@ -696,21 +697,8 @@ function Composer({
   const [sending, setSending] = useState(false)
   const ref = inputRef
 
-  // A focused controlled textarea defaults to the beginning after a reload or bot switch.
-  // Restore the saved selection after React has put this bot's draft value into the DOM.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const currentText = useStore.getState().drafts[draftKey] ?? ''
-    const saved = useStore.getState().draftCursors[draftKey]
-    const max = currentText.length
-    const start = Math.max(0, Math.min(max, saved?.start ?? max))
-    const end = Math.max(start, Math.min(max, saved?.end ?? start))
-    // 手機不自動 focus（2026-09-09 使用者：切 bot 就彈鍵盤擋住視線，要打字自己點）。
-    if (phone && document.activeElement !== el) return
-    el.focus()
-    el.setSelectionRange(start, end)
-  }, [state.disabled, draftKey, ref, forceFocus, phone])
+  // 手機不自動 focus（2026-09-09 使用者：切 bot 就彈鍵盤擋住視線，要打字自己點）。
+  useComposerFocus({ draftKey, ref, forceFocus: forceFocus && !phone, autoFocus: !phone })
 
   useEffect(() => {
     const el = ref.current
