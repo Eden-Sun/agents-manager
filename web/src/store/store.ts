@@ -308,6 +308,8 @@ export interface StoreState {
   /** The observed user's Herdr default session, used by imported default-session bots. */
   defaultConnected: boolean
   lastSeq: number
+  /** `GET /api/state` failed; the sidebar may be behind until the next successful refresh. */
+  stateStale: boolean
 
   /** SPEC §11.6 remote hosts; the local machine is never in this list. */
   hosts: Host[]
@@ -660,6 +662,7 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
 
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
 let appliedStateSeq = 0
+let lastRefreshError: string | null = null
 
 /**
  * daemon 的 `seq` 是行程內的計數器，**重啟就從 0 重來**（`state.rs` 的 `AtomicU64::new(0)`）。
@@ -682,6 +685,7 @@ export const useStore = create<StoreState>((set, get) => ({
   connected: true,
   defaultConnected: false,
   lastSeq: 0,
+  stateStale: false,
 
   hosts: [],
   attachCommand: 'herdr --session agents-manager',
@@ -768,11 +772,17 @@ export const useStore = create<StoreState>((set, get) => ({
   refreshState: singleFlight(async () => {
     const st = await api.fetchState()
     const seq = acceptStateSeq(appliedStateSeq, st.daemon_seq)
-    if (seq === null) return
+    if (seq === null) {
+      lastRefreshError = null
+      set({ stateStale: false })
+      return
+    }
     // A daemon that has just come back can answer with an empty snapshot for a moment. While
     // the socket is not open that is "not yet", not "everything was deleted": keep what we
     // have rather than blanking the sidebar into the "no projects" onboarding.
     if (st.projects.length === 0 && get().projects.length > 0 && get().socket !== 'open') return
+    lastRefreshError = null
+    set({ stateStale: false })
     appliedStateSeq = seq
     const runs: Record<string, Run | null> = {}
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
@@ -842,7 +852,7 @@ export const useStore = create<StoreState>((set, get) => ({
     if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
     // team 細節不在這裡重抓：`selectTeam`、`team_changed`（phase 有變）與 `resync` 各自負責，
     // 否則每次 state 刷新都多 2-3 個 team 請求，還會跟刪除賽跑（issue #23）。
-  }),
+  }, (e) => reportStateRefreshError(set, get, e)),
 
   selectBot: (botId) => {
     set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, shellView: null, rightTab: 'chat', settingsBotId: null })
@@ -2072,6 +2082,14 @@ useStore.subscribe((s) => {
 type SetFn = (partial: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)) => void
 type GetFn = () => StoreState
 
+function reportStateRefreshError(set: SetFn, get: GetFn, e: unknown) {
+  const text = `同步狀態失敗：${errText(e)}`
+  set({ stateStale: true })
+  if (lastRefreshError === text) return
+  lastRefreshError = text
+  get().notify('error', text)
+}
+
 async function guarded(set: SetFn, get: GetFn, key: string, fn: () => Promise<void>) {
   if (get().busy[key]) return
   set((s) => ({ busy: { ...s.busy, [key]: true } }))
@@ -2097,8 +2115,15 @@ function connectSocket(set: SetFn, get: GetFn) {
   disconnect = api.openSocket({
     since: () => get().lastSeq,
     onStatus: (socket) => {
-      // 重新連上＝對面可能是新的 daemon 行程（seq 從 0 重來）：先把順序基準歸零。
-      if (socket === 'open') resetStateSeq()
+      if (socket === 'open') {
+        // 重新連上＝對面可能是新的 daemon 行程（seq 從 0 重來）：先把順序基準歸零。
+        resetStateSeq()
+        // Re-fetch on every open: a failed frame has already advanced lastSeq, so replaying it
+        // would be racy. The full snapshot repairs that gap without rewinding concurrent frames.
+        set({ socket, stateStale: false })
+        void get().refreshState()
+        return
+      }
       set({ socket })
     },
     onFrame: (frame) => handleFrame(set, get, frame),
@@ -2158,6 +2183,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           if (proj) await get().loadGroupMessages(proj)
           const team = get().selectedTeamId
           if (team) await get().loadTeam(team)
+        } catch (e) {
+          reportStateRefreshError(set, get, e)
         } finally {
           resyncPending = false
         }
