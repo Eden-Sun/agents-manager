@@ -187,7 +187,15 @@ async fn tick(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
         return Ok(true);
     }
     if t.phase == "starting" {
-        startup(app, team_id).await?;
+        // A `startup` that errors out (not one that paused: those return `Ok`) used to be a
+        // `warn!` and another try in `TICK` seconds, for ever — the team read `starting`, could
+        // not be resumed and said nothing (2026-09-12 review, ops #10). Park it where the user
+        // can see it; "continue" goes back to `starting` and runs the whole startup again.
+        if let Err(e) = startup(app, team_id).await {
+            note(app, team_id, json!({"action": "startup_failed", "error": format!("{e:?}")})).await?;
+            team::sched_pause(app, team_id, "upstream", None).await?;
+            return Ok(false);
+        }
     }
     step(app, team_id).await?;
     Ok(team::is_terminal(&team::load(app, team_id).await?.phase))
@@ -1143,11 +1151,15 @@ async fn stop_failed_startup_members(app: &Arc<App>, members: &[db::Bot]) {
 /// provider supports it.
 async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let issues = db::team_issues(&app.db, team_id).await.map_err(up)?;
+    // The entry whose executors are still around: the last one to reach a terminal state.
+    // Only `done` used to count, so a team whose only issue *failed* (`budget_time`,
+    // `review_exhausted` → `end_team`) could be reopened by `retry-failed` and then sat in
+    // `starting` for good (2026-09-12 review, ops #10).
     let previous = issues
         .into_iter()
-        .filter(|i| i.state == "done")
+        .filter(|i| !team::is_open_issue_state(&i.state))
         .max_by_key(|i| i.seq)
-        .ok_or_else(|| LcError::Upstream("cannot reopen a team with no completed issue".into()))?;
+        .ok_or_else(|| LcError::Upstream("cannot reopen a team with no finished issue".into()))?;
     let ctx = Ctx::load(app, team_id).await?;
     // Pretrust only the long-lived members before retirement: stopping old worker panes and
     // removing their per-issue worktrees must not get in the way of the PM/reviewer starts.
@@ -3657,6 +3669,63 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert_eq!(t.branch, crate::team::integration_branch(43, &crate::team::tid6(&s.tid)));
         assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), t.branch);
         assert_eq!(git(&s.wt("main"), &["rev-parse", "HEAD"]), base_sha);
+    }
+
+    /// ops #10 (2026-09-12): the only issue **failed** (no `done` row at all), the team ended,
+    /// and the user retries it — the reopen used to refuse ("no completed issue") and the
+    /// scheduler loop swallowed the error, leaving the team in `starting` with no pause and
+    /// no note. The previous batch to retire is simply the last finished entry, whatever its
+    /// state.
+    #[tokio::test]
+    async fn a_team_whose_only_issue_failed_can_be_reopened() {
+        let s = S::with_issues(1, false, vec![issue(), issue2()]).await;
+        let old_worker = s.bot("worker", 0).await;
+        let current = db::current_team_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
+        sqlx::query("UPDATE team_issues SET state='failed', fail_reason='budget_time', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&current.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "done", None, None).await.unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "starting", Some("reopen"), None).await.unwrap();
+
+        startup(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.issue_number), ("planning", 43));
+        assert!(db::bot(&s.app().db, &old_worker.id).await.unwrap().unwrap().deleted_at.is_some(), "the failed issue's batch is retired");
+        assert_eq!(s.ctx().await.workers().len(), 1);
+        assert!(s.ctx().await.workers()[0].cwd.as_deref().unwrap().ends_with("/i2-dev-1"));
+    }
+
+    /// The other half of ops #10: whatever makes `startup` fail outright is a visible pause
+    /// with a note, never a silent `starting` the loop retries for ever.
+    #[tokio::test]
+    async fn a_startup_error_pauses_the_team_instead_of_looping_silently() {
+        let s = S::with_issues(1, false, vec![issue(), issue2()]).await;
+        // A `starting` team with nothing working, nothing finished and something queued is
+        // not a shape any transition produces — which is exactly why `startup` errors on it.
+        sqlx::query("UPDATE team_issues SET state='queued' WHERE team_id=?")
+            .bind(&s.tid)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "starting", None, None).await.unwrap();
+
+        assert!(!tick(s.app(), &s.tid).await.unwrap());
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(t.resume_phase.as_deref(), Some("starting"), "continue re-runs the startup");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='startup_failed'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// §2.5.3: a PM/reviewer start failure pauses the reopened Team in place. It must not

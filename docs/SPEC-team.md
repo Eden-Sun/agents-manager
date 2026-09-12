@@ -196,13 +196,16 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 背景部分（scheduler 的 `startup`，判斷「這是 reopen」的條件是 **`starting` 且沒有 `working` 的 issue、但有 `queued` 的 issue**）：
 
 5. **收掉上一批執行者**：最後一個 issue 結束時 `end_team` 只停成員、不 retire（§2.3「最後一個 issue」），
-   所以它的 worker 還掛在 `bots`（`deleted_at IS NULL`、cwd 在 `i<seq>-dev-<n>`）。對最後一個 `done` 的 issue 跑 `retire_issue_workers`
+   所以它的 worker 還掛在 `bots`（`deleted_at IS NULL`、cwd 在 `i<seq>-dev-<n>`）。對**最後一個終態**（`done` / `failed` / `skipped`，
+   2026-09-12 前只認 `done`，整隊只有失敗 issue 時 `retry-failed` 會卡在 `starting`）的 issue 跑 `retire_issue_workers`
    （停 pane、標 `deleted_at`、`worktree remove`）。**不讀 `worker_plan.keep`**：那是 PM 在上一個 issue 結束時對「下一個」的判斷，
    當時它以為沒有下一個；reopen 一律換新批。
 6. **PM 與 reviewer 原地重啟**：對兩者各呼叫 `start_bot`，帶 §2.5.3 的續接選項。
    worktree `main/`、`reviewer/` 與 `bots.cwd` 完全不動；persona 不含 issue 號（§2.3），所以重啟後套同一份 persona 是對的。
    - PM 起不來 → `paused(member_failed:<pm>)`，**不是** `failed + cleanup`（§7.4 那條是建 team 失敗才適用；reopen 失敗不能把做完的成果清掉）。使用者修好後 `start` 該 bot 再 `resume`，scheduler 回到 `starting` 重跑本段。
    - reviewer 起不來 → 同 §7.4：`paused(member_failed:<rev>)`。
+   - `startup` 本身回 Err（不是上面那些自己會 pause 的情況）→ note `startup_failed` + `paused(upstream)`，`resume_phase = starting`
+     （2026-09-12；以前只寫 log 然後每 20 秒再試，team 停在 `starting` 又不能 resume）。
 7. **建新一批執行者**：依 `roles_json.workers.spec` / `count`，走既有 `start_issue(next, keep_workers=false)`
    （切 `main/` 到新整合分支 `team/i<issue>-<tid6>`、`worktree add` `i<seq>-dev-<n>`、insert 成員、重寫 `ISSUE.md` / `TEAM.md`、鏡像 `teams` 欄位），
    再 `start_issue_workers`。`start_issue` 對 `main/` 的「必須乾淨」檢查照舊，髒了 → note `issue_start_failed` + `paused(upstream)`。
