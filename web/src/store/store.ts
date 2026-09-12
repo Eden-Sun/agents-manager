@@ -1473,7 +1473,12 @@ export const useStore = create<StoreState>((set, get) => ({
       get().notify('error', errText(e))
       return null
     } finally {
-      set((st) => ({ busy: { ...st.busy, [key]: false } }))
+      // 其他路徑都是 delete；設成 false 會讓 busy 表每 clone 一次多一個永久 key。
+      set((st) => {
+        const busy = { ...st.busy }
+        delete busy[key]
+        return { busy }
+      })
     }
   },
 
@@ -2452,19 +2457,25 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // 多個 agent 同時串流時每秒進來好幾個 frame；每個都 set 就每個都 render。同一個 bot
       // 250 ms 內只留最後一個（頭一個立刻套用，之後的合併到下一拍），畫面看不出差別。
       const pendingKey = botId
-      const apply = () =>
+      const apply = (trailing: boolean) =>
         set((s) => {
           const prev = s.liveReply[botId]
           // Frames can only move forward within a turn; a new turn always replaces.
           if (prev && prev.turnId === turnId && prev.revision > revision) return {}
+          // 合併到下一拍的那一幀：回合若已在這 250ms 內結束（`message_added`／`turn_updated` 清掉了
+          // liveReply），別把舊的 partial 寫回去留到下一回合。認不得的 turn（還沒進 map）照套。
+          if (trailing) {
+            const st = s.turns[botId]?.[turnId]?.status
+            if (st !== undefined && st !== 'in_flight') return {}
+          }
           return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision } } }
         })
       const slot = liveThrottle.get(pendingKey)
       if (slot) {
-        slot.apply = apply
+        slot.apply = () => apply(true)
         return
       }
-      apply()
+      apply(false)
       const entry = { apply: null as null | (() => void) }
       liveThrottle.set(pendingKey, entry)
       setTimeout(() => {
