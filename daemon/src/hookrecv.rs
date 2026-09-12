@@ -126,6 +126,7 @@ mod account_tests {
             name: name.to_string(),
             kind: "claude".to_string(),
             logged_in: Some(true),
+            reason: None,
             account: Some(account.to_string()),
             plan: None,
             source: crate::tools::SOURCE_CONFIG,
