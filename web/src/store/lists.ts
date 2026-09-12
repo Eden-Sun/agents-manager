@@ -85,7 +85,8 @@ export function pruneTurns<T extends Turnish>(map: Record<string, T>, cap = TURN
   const keep = new Set(ids.sort((a, b) => a.localeCompare(b)).slice(-cap))
   for (const id of ids) {
     const t = map[id]
-    if (t.status === 'in_flight' || (t.delivery === 'unknown' && t.status !== 'failed')) keep.add(id)
+    // 只有還在飛的回合有人在讀（`inFlightTurn`／`unknownDeliveryTurn` 都只認 in_flight）。
+    if (t.status === 'in_flight') keep.add(id)
   }
   if (keep.size === ids.length) return map
   const out: Record<string, T> = {}

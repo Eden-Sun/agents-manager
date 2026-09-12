@@ -1263,13 +1263,18 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       // The user message + turn arrive over the socket; only patch the turn map here so
       // the composer locks immediately even if the frame is slow.
-      set((s) => ({
+      set((s) => {
+        // RPC 逾時（`unknown`）期間 agent 可能已答完、`turn_updated(completed)` 先到：那筆已是終態，
+        // 不能再拿 HTTP 回來的 delivery 蓋回去（會變成 completed+unknown 的殘影）。
+        const existing = s.turns[botId]?.[res.turn_id]
+        if (existing && existing.status !== 'in_flight') return {}
+        return {
         turns: {
           ...s.turns,
           [botId]: {
             ...(s.turns[botId] ?? {}),
             [res.turn_id]: {
-              ...(s.turns[botId]?.[res.turn_id] ?? {
+              ...(existing ?? {
                 id: res.turn_id,
                 conversation_id: '',
                 run_id: get().runs[botId]?.id ?? null,
@@ -1284,7 +1289,8 @@ export const useStore = create<StoreState>((set, get) => ({
             },
           },
         },
-      }))
+        }
+      })
       return true
     } catch (e) {
       // daemon 送之前看了 pane 一眼：claude 停在開場的登入選單。它自己也在對話裡插了一則
@@ -2887,10 +2893,15 @@ export function inFlightTurn(state: StoreState, botId: string): Turn | null {
   return null
 }
 
+/**
+ * API.md §5：只有**還在飛**的 `delivery=unknown` 才擋下一則。已經 completed／failed 的 unknown
+ * 是 RPC 逾時但 Stop hook 先把回合推成終態的殘影，不該把 composer 鎖成「送達狀態未知」——
+ * 那時「放棄該回合」打 abandon 只會拿 409，只能重整。
+ */
 export function unknownDeliveryTurn(state: StoreState, botId: string): Turn | null {
   const map = state.turns[botId] ?? {}
   for (const t of Object.values(map)) {
-    if (t.delivery === 'unknown' && t.status !== 'failed') return t
+    if (t.delivery === 'unknown' && t.status === 'in_flight') return t
   }
   return null
 }
