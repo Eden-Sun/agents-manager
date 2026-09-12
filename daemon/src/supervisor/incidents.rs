@@ -176,12 +176,24 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
                     continue;
                 }
                 match crate::db::active_run(&app.db, &bot.id).await {
-                    Ok(None) => out.push(Observation {
-                        kind: "bot_stopped".into(),
-                        resource: bot.id.clone(),
-                        severity: "degraded".into(),
-                        detail: json!({"bot_id": bot.id, "name": bot.name, "expected": "autostart"}).to_string(),
-                    }),
+                    Ok(None) => {
+                        // autostart is a launch preference, not a perpetual desired-state flag.
+                        // stop_bot records `stopped` and leaves autostart unchanged, so an
+                        // intentional stop must not become an outage after the debounce.
+                        let last = sqlx::query_scalar::<_, String>(
+                            "SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                        ).bind(&bot.id).fetch_optional(&app.db).await;
+                        match last {
+                            Ok(Some(state)) if state == "stopped" => {}
+                            Ok(_) => out.push(Observation {
+                                kind: "bot_stopped".into(),
+                                resource: bot.id.clone(),
+                                severity: "degraded".into(),
+                                detail: json!({"bot_id": bot.id, "name": bot.name, "expected": "autostart"}).to_string(),
+                            }),
+                            Err(_) => probed.failed.push("bot_stopped"),
+                        }
+                    },
                     Ok(Some(_)) => {}
                     // Could not tell whether this bot is running. Not knowing is not "it is fine".
                     Err(e) => {

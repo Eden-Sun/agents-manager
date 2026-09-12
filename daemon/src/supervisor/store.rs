@@ -1294,15 +1294,15 @@ pub async fn review_with_followup(
     if let Some(f) = followup {
         // A byte-identical retry of the same continuation is the same continuation. Any other
         // row already holding this id is a different piece of work and must not be adopted.
-        let existing: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT id, follow_up_of FROM supervisor_assignments WHERE supervisor_id=? AND client_request_id=?")
+        let existing: Option<(String, Option<String>, String, String)> =
+            sqlx::query_as("SELECT id, follow_up_of, target_bot_id, text FROM supervisor_assignments WHERE supervisor_id=? AND client_request_id=?")
                 .bind(SUPERVISOR_ID)
                 .bind(f.client_request_id)
                 .fetch_optional(&mut *tx)
                 .await?;
         let new_id = match existing {
-            Some((existing_id, parent)) => {
-                if parent.as_deref() != Some(id) {
+            Some((existing_id, parent, target, text)) => {
+                if parent.as_deref() != Some(id) || target != f.target_bot_id || text != f.text {
                     anyhow::bail!("client_request_id {} already belongs to another assignment", f.client_request_id);
                 }
                 existing_id

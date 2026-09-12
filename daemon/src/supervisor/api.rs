@@ -174,6 +174,21 @@ pub async fn post_review(
     // Already decided this way: hand back what is on file. A retry after a lost response must
     // not look like a second decision.
     if a.status == to_status && a.review_decision.as_deref() == Some(b.decision.as_str()) {
+        if b.decision == "followup" {
+            let f = match a.followup_assignment_id.as_deref() {
+                Some(fid) => store::assignment(&app.db, fid).await.map_err(up)?,
+                None => None,
+            };
+            let identical = f.as_ref().is_some_and(|f| {
+                b.followup_request_id.as_deref().map(str::trim) == Some(f.client_request_id.as_str())
+                    && b.followup_text.as_deref().map(str::trim) == Some(f.text.as_str())
+                    && b.followup_bot_id.as_deref().unwrap_or(&a.target_bot_id) == f.target_bot_id
+            });
+            if !identical {
+                return Err(LcError::conflict("this assignment already has a different continuation",
+                    json!({"reason": "followup_mismatch", "followup_assignment_id": a.followup_assignment_id})));
+            }
+        }
         let mut out = a.to_json();
         out["reviews"] = json!(store::reviews(&app.db, &a.id).await.map_err(up)?);
         out["idempotent"] = json!(true);
@@ -725,6 +740,7 @@ pub async fn post_approval_decision(
     Path(id): Path<String>,
     Json(b): Json<DecisionIn>,
 ) -> Result<Json<Value>, LcError> {
+    let _g = super::lock().await;
     let status = match b.decision.as_str() {
         "approve" => "approved",
         "deny" => "denied",
@@ -826,6 +842,7 @@ pub async fn post_lease_renew(
     Path(resource): Path<String>,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
+    let _g = super::lock().await;
     let ttl = b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS).clamp(30, super::maintenance::MAX_TTL_SECS);
     // Renewal re-checks the permission, it does not just extend the clock. An approval that was
     // revoked (or has lapsed) while the holder was working must not be extendable by the holder
@@ -835,6 +852,12 @@ pub async fn post_lease_renew(
         Some(ap) => store::approval(&app.db, &ap).await.map_err(up)?,
         None => None,
     };
+    if approval.is_none() {
+        return Err(LcError::conflict(
+            "the lease has no valid approval record; release it and request a new window",
+            json!({"reason": "approval_missing"}),
+        ));
+    }
     if let Some(approval) = approval.as_ref() {
         let commit = held.as_ref().and_then(|l| l.target_commit.clone());
         if let Some(reason) = approval.refusal(&crate::db::now(), &resource, commit.as_deref()) {
@@ -923,5 +946,88 @@ mod persona_sync_tests {
         })).await.is_err());
         app.db.close().await;
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod review_boundary_tests {
+    use super::*;
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-review-boundary-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"),
+                           7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        app
+    }
+
+    #[tokio::test]
+    async fn followup_replay_requires_the_same_instruction_and_request_id() {
+        let app = app().await;
+        let parent = store::insert_assignment(&app.db, None, "bot", "parent", "original", &[], None).await.unwrap();
+        store::review_with_followup(&app.db, &parent.id, "queued", "followup", "AGM", "test", None, None,
+            Some(store::FollowupSpec { target_bot_id: "bot", client_request_id: "follow-1", text: "continue",
+                ownership: &[], request_id: None })).await.unwrap().unwrap();
+        for (crid, text, should_pass) in [("follow-1", "continue", true), ("follow-2", "continue", false),
+                                        ("follow-1", "different task", false)] {
+            let input: ReviewIn = serde_json::from_value(json!({"decision":"followup",
+                "followup_request_id":crid,"followup_text":text})).unwrap();
+            let result = post_review(State(app.clone()), Path(parent.id.clone()), Json(input)).await;
+            assert_eq!(result.is_ok(), should_pass);
+            if let Err(e) = result { assert!(format!("{e:?}").contains("followup_mismatch")); }
+        }
+        assert_eq!(store::list_assignments(&app.db, 20).await.unwrap().len(), 2);
+        assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
+        let mismatch = store::review_with_followup(&app.db, &parent.id, "superseded", "followup", "AGM", "test", None, None,
+            Some(store::FollowupSpec { target_bot_id: "bot", client_request_id: "follow-1", text: "different text",
+                ownership: &[], request_id: None })).await;
+        assert!(mismatch.is_err(), "the transaction also rejects adopting a different instruction");
+        assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicitly_stopped_autostart_bot_is_not_an_outage() {
+        let app = app().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,autostart,created_at) VALUES ('b','p','b','claude','t',1,?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,started_at,ended_at) VALUES ('r','b','stopped',?,?)")
+            .bind(&now).bind(&now).execute(&app.db).await.unwrap();
+        let cfg = app.cfg.get().await;
+        let thresholds = super::super::incidents::Thresholds::from_cfg(&cfg.supervisor);
+        let observed = super::super::incidents::observe(&app, &thresholds).await;
+        assert!(!observed.seen.iter().any(|o| o.kind == "bot_stopped"));
+        sqlx::query("UPDATE runs SET state='exited' WHERE id='r'").execute(&app.db).await.unwrap();
+        let observed = super::super::incidents::observe(&app, &thresholds).await;
+        assert!(observed.seen.iter().any(|o| o.kind == "bot_stopped"));
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn renewal_refuses_missing_and_revoked_approval_without_extending_lease() {
+        let app = app().await;
+        let approval = store::create_approval(&app.db, "owner", "rebuild", "test", None, None).await.unwrap();
+        store::decide_approval(&app.db, &approval.id, "approved", "AGM", None, None).await.unwrap();
+        let lease = store::acquire_lease(&app.db, "rebuild", "owner", Some(&approval.id), None,
+            &iso_in(60), &json!({})).await.unwrap().unwrap();
+        store::decide_approval(&app.db, &approval.id, "revoked", "AGM", None, None).await.unwrap();
+        for expected in ["approval_revoked", "approval_missing"] {
+            let input: LeaseHolderIn = serde_json::from_value(json!({"owner":"owner","fence":lease.fence,"ttl_secs":3600})).unwrap();
+            let err = post_lease_renew(State(app.clone()), Path("rebuild".into()), Json(input)).await.unwrap_err();
+            assert!(format!("{err:?}").contains(expected));
+            assert_eq!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().expires_at, lease.expires_at);
+            sqlx::query("DELETE FROM supervisor_approvals WHERE id=?").bind(&approval.id).execute(&app.db).await.unwrap();
+        }
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 }

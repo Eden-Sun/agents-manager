@@ -1,6 +1,6 @@
 # AGM 可靠性修正計畫（2026-09-12）
 
-狀態：AGM 已核准 ownership，交付 child 實作；完成以逐項勾選與父 Bot review 為準。
+狀態：本輪程式經父 review 收尾；部署由 AGM 執行。下列未勾項為後續範圍，不宣稱六項原計畫完全結案。
 使用者原文：「那你出plan去修好這些問題 然後交給child 用cc1 opus-high做」。來源 bot 01M21SG9T6FEDTWRZ2CKY3JQG8、message 01M2AXP0BK1Z66XN0T9N6EDZQQ、turn 01M2AXP0BKAFXSY4KB52QG5C1N；source=web，relay_from=null。
 父 Bot：ag-man-y3jqg8；執行者：優先重用自己的同 context child，沒有則建立 ag-man-y3jqg8-agmfix，Claude、cc1、opus、high，rc off。不得自行改帳號／模型，額度不足持久保存進度並回報。Review 基準 ce9f15e；實作必須重新基於最新 origin/main 查證，可能已有其他 Bot 修正，不能盲目覆寫。
 
@@ -15,7 +15,7 @@
 
 修復 review 的六個缺口：任務驗收、可靠通知、全系統健康、結構化核准／執行鎖、人設版本、防止誤報 Remote 正常。保留 daemon 決定性控制、AGM 語意決策、600 秒通知節流、同 context child 重用及 cc0 fable/opus 模型政策。此次 cc1/opus/high 是修正 child 的設定，不改 AGM 本身。
 
-Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、supervisor API／TS 型別／SupervisorPanel 的必要整合、相應 API／SPEC 與計畫文檔。main.rs、api.rs、db.rs、lifecycle.rs、config.rs、memstat、共用前端檔與 runtime 運維腳本只允許必要小 hunk；若 AGM 指出重疊 owner，先協調接口，不代收 WIP。父 Bot 負責計畫、跨項整合 review 與收尾驗證，不與 child 同時改實作。
+Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、supervisor API／TS 型別／SupervisorPanel 的必要整合、相應 API／SPEC 與計畫文檔。main.rs、api.rs、db.rs、lifecycle.rs、config.rs、memstat、共用前端檔與 runtime 運維腳本只允許必要小 hunk；若 AGM 指出重疊 owner，先協調接口，不代收 WIP。父 Bot 負責計畫、跨項整合 review 與收尾驗證；本輪依明確檔案／hunk 分工補修 ops、persona、remote 與最終 review 邊界。
 
 執行一個 child 依序完成以下六項，不擅自再生子 Bot。所有程式在獨立 worktree／task branch，不在共用樹工作。各階段一個可 review 的 commit；未經父 Bot review 不直接 push main。需要 release build、實機重啟或 runtime 變更，先向 AGM 取得明確窗口；不請使用者轉達、不自行動正式服務。
 
@@ -37,9 +37,9 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 ## 3. 分開總管健康與系統 incident（P1）
 
 - [x] manager_health／system_health 分開，舊 status 保留明確相容投影。
-- [x] durable incident：host disconnected、expected-running Bot 異常停止、assignment 長期未推進、通知無 ACK／耗盡重試、現有可取得的瀏覽器／資源異常。每種有來源、resource id、first/last seen、severity、門檻與恢復條件。
+- [ ] durable incident：host disconnected、expected-running Bot 異常停止、assignment 長期未推進、通知無 ACK／耗盡重試、現有可取得的瀏覽器／資源異常。每種有來源、resource id、first/last seen、severity、門檻與恢復條件。
 - [x] 不把正常等使用者輸入的 blocked、使用者刻意停止、或短暫排隊當故障；未知指標明確 unknown，不能算正常。重啟後依持久 incident 去重，恢復發一事件；同事件復發有新 occurrence。
-- [x] 高負載時不用 LLM 每 tick 輪詢；沿用 cheap probe，資源資訊接既有可觀測來源，不為判斷而 kill 程序。門檻可配置並有合理預設／文件。
+- [ ] 高負載時不用 LLM 每 tick 輪詢；沿用 cheap probe，資源資訊接既有可觀測來源，不為判斷而 kill 程序。門檻可配置並有合理預設／文件。
 - [x] 驗收：AGM 正常但 remote host 掛掉→system degraded；門檻前不吵、門檻後一筆、恢復一筆；bot idle/busy 自身變換不造通知風暴。
 
 ### 進度（child ag-man-y3jqg8-agmfix）
@@ -60,8 +60,8 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 
 - [x] approval 紀錄 requester、目的／範圍、目標 commit、核准來源、有效期、狀態；AGM 直接核駁，不新增使用者審批。
 - [x] rebuild／restart lease 原子 acquire、renew、release、expiry，含 owner 與 fencing generation，避免舊持有人在 lease 過期後仍能依舊授權執行受管理操作。
-- [x] 正式重啟前重核 working／in-flight 及 commit。協調「等待安全窗口」與「取得排他窗口」兩個階段，避免一邊檢查空閒另一邊又派新工作。合法 blocked pane 不關閉；AGM 本人的互動保護維持既有規範。
-- [x] 更新必要 runtime 運維腳本與規範讓所有既有部署路徑使用共同 lease；不能只提供沒人用的 API。腳本來源納入 repo，先在隔離環境測試，正式安裝由 AGM 核准。明列任意外部 shell 無法被 API 鎖強制約束的邊界。
+- [ ] 正式重啟前重核 working／in-flight 及 commit。協調「等待安全窗口」與「取得排他窗口」兩個階段，避免一邊檢查空閒另一邊又派新工作。合法 blocked pane 不關閉；AGM 本人的互動保護維持既有規範。
+- [ ] 更新必要 runtime 運維腳本與規範讓所有既有部署路徑使用共同 lease；不能只提供沒人用的 API。腳本來源納入 repo，先在隔離環境測試，正式安裝由 AGM 核准。明列任意外部 shell 無法被 API 鎖強制約束的邊界。
 - [x] assignment 可記錄檔案／模組 ownership，至少能報衝突並交 AGM 協調；不擅自為別人改檔。
 - [x] 驗收：兩個執行者競爭同資源只有一個成功；過期／撤銷／不同 commit 被拒；舊 lease token 無效；crash 後可恢復，不永久鎖死。
 
@@ -85,7 +85,19 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 - [x] 以 fixture DB／mock clock／mock transport 測行為，所有破壞式與故障注入在隔離環境，不往正式資料庫塞測試事件。
 - [x] 先跑受影響 Rust／Python／TS 測試；整合後 cargo check、整樹 cargo test，web tsc 指定 tsconfig.app.json、oxlint、build。前端行為變更用隔離 mock／ego 驗證並保留畫面證據，不消耗真使用者 session。
 - [x] 既有 pragma／授權／CLI 相容性與 docs/API.md、SPEC §18、SupervisorPanel 同步；標明 release 升級前後的 migration／回滾限制。
-- [ ] child 回父 Bot：各階段 commit、worktree 路徑、驗證數字、未解風險與部署步驟。中途回報不可宣稱六項全完成；完成前不可因單回合結束而退出整個任務。
-- [ ] 父 Bot 覆核狀態機、併發、crash恢復、現行部署接線與 UI，要求必要修正；通過後整合最新 origin/main、重跑受影響檢查、提交推送，再由 AGM 安排正式部署。需要 AGM 的 review／核准一律直接找它，不要請使用者代轉。
+- [x] child 回父 Bot：各階段 commit、worktree 路徑、驗證數字、未解風險與部署步驟。中途回報不可宣稱六項全完成；完成前不可因單回合結束而退出整個任務。
+- [x] 本輪父 Bot 覆核狀態機、併發、crash 恢復、部署接線與 UI，補修並驗證後交付 main；正式部署由 AGM 安排。原計畫尚有下列後續範圍，分開追蹤。
 
 交付界線：六項實作與整合驗證全完成才算本修正計畫完成。正式 release 重建／重啟另受 AGM 時段協調，不用為了展示進度提前動正式 daemon。模型／帳號跨供應商備援不在此次範圍，cc0共用額度歸零時仍須保留任務與可見等待狀態。
+
+## 2026-09-13 父 review 的交付界線
+
+- #30/#31/#32 已納入：保留真正拒絕理由、用建立時間觀察未送達重試；queued/unknown 可取消追蹤但不宣稱停止回合；watchdog 第五次啟動後死亡持久報一次；前端集合防禦與故障查詢錯誤不冒充正常。
+- 追加：續作決定／queued 續作／稽核同交易，提交後才 dispatch；通知通道的故障不透過自己再通知；來源讀失敗不冒充人類；首次 persona migration 保留舊 bot 內容、同步失敗可重試；Remote 外部來源只允許有證據的 manual。
+- 父補測：續作不同 request ID／文字不得冒充冪等成功；核准決定與續租共用鎖、缺失或撤銷核准不得續租；autostart bot 最近 run 為明確 stopped 時不報意外停止。
+- **後續範圍**：restart lease 只暫停 supervisor assignment，未涵蓋普通 prompt／team／scheduler；不可當作全 daemon 排他窗口。全域閘門需跨模組協調另做，正式更新前仍由 AGM 重驗使用者回合。
+- **後續範圍**：瀏覽器／資源異常尚未併入本模組 durable incidents，維持既有獨立監控；不能把目前無 incident 解讀成所有資源已完整檢查。上述相關總項退回未勾，避免過度回報。
+- ops README 的窄化邊界保留。AGM 部署新 daemon 後再安裝 scripts/ops，提供 AGM_BUILD_BOT；approval 狀態檔可跨整點接續，異常鎖由 AGM 確認後處理。
+- 本輪未執行 release build、未重啟、未安裝 runtime。畫面證據見 docs/screenshots/agm-reliability/PARENT-REVIEW.md。
+
+最終父驗證（origin/main c271971 基底）：cargo test 612/0、cargo check 通過；web tsc 通過、bun test 168/0、oxlint exit 0（既有 warnings）；agm_test 63/0、ops 29/0。Rust 測試清除 AM_KIND／AM_MODEL／AM_EFFORT，避免 herdr shim fixture 繼承父 session 模型；未修改 shim 功能。

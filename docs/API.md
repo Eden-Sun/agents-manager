@@ -2157,3 +2157,8 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
   "error": null
 }
 ```
+
+### Supervisor review 補正（2026-09-13）
+
+- followup 的冪等重送須同 request ID、文字與目標；不同續派回 409 `followup_mismatch`，不冒充已送出。
+- 核准決定與租約續租共用 supervisor lock，撤銷與續租的檢查／寫入不交錯。核准紀錄遺失回 409 `approval_missing`，不延長租約。
