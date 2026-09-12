@@ -1264,7 +1264,11 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   代理仍能通，是因為 `web/vite.config.ts` 把 `Origin` 改寫成 daemon 自己的位址（daemon 的 Origin 檢查照舊只信 localhost）。
   代價要知道：同網段任何裝置都能透過 5173 的 `/api` 代理打到 7788，公共網路上要另外收斂。
 - **看門狗** launchd `com.agm.dev-server`（`~/Library/LaunchAgents/com.agm.dev-server.plist`）：
-  `StartInterval 300`、`RunAtLoad true`，跑 `supervisor/AGM/bin/dev-server-kick.sh`。腳本的行為順序：
+  `StartInterval 300`、`RunAtLoad true`，`ProgramArguments` 是
+  `/opt/homebrew/bin/bun run supervisor/AGM/bin/dev-server-kick.ts`，`EnvironmentVariables.PATH` 含
+  `/opt/homebrew/bin`（bun）與 `/Users/m4p/.local/bin`（node）——launchd 不給登入 shell 的 PATH，
+  少了這行就會「手動跑得起來、排程跑不起來」。看門狗自己用 bun 沒問題：它只做 fetch / lsof / spawn，
+  不當 HTTP 代理，碰不到上面那個 socket 差異。腳本的行為順序：
   1. `curl -sf -m 3 http://127.0.0.1:5173/` 有回應 → 直接 `exit 0`，**不寫 log**（每 5 分鐘一行會把 log 灌爆）。
      健康檢查走 loopback 就夠：本機看得到就代表有在聽。
   2. 沒回應但 port 有人占著 → 記下 pid 與完整 command，**不 kill**（可能是別人的程序），`exit 0`。
@@ -1272,6 +1276,11 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   4. 真的沒人聽 → `nohup node vite.js --host 0.0.0.0 --port 5173 --strictPort`，最多等 15 秒複驗；
      仍失敗就寫 log 交給下一輪，**不在腳本裡重試迴圈**（web/ 編不過時才不會每 5 分鐘炸一次）。
   log 在 `supervisor/AGM/dev-server.log`；launchd 自己的 stdout 在 `dev-server.launchd.log`。
+  舊的 bash 版留成 `dev-server-kick.sh.bak-bun`，確認 .ts 版跑滿一輪沒問題後刪掉。
+- **已知缺口**：健康檢查只打 `127.0.0.1`，所以一個只綁 `[::1]`（或只綁別的介面）的 vite 會讓看門狗
+  永遠判定「port 被占用、不動它」，5173 對使用者等於掛著。2026-09-12 就發生過一次：別的 bot 用
+  `npx vite --port 5173 --strictPort`（沒有 `--host`）起了一顆，只聽 IPv6 loopback。要嘛健康檢查也試
+  `localhost`／`[::1]`，要嘛規定所有人起 5173 都要帶 `--host 0.0.0.0`——尚未決定。
 - **其他 port 不歸看門狗管**：5188 那類 `VITE_MOCK=1` 實例是各 bot 自己的測試環境，AGM 不碰、不清、不重啟。
 - **驗證方式**（改動這條規則或腳本後要重跑）：kill 掉現有 vite → 跑一次 kick.sh → `curl http://127.0.0.1:5173/`、
   `curl http://<LAN IP>:5173/`、`curl http://<LAN IP>:5173/api/session` 都要 200（最後一項才證明代理活著）。
