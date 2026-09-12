@@ -394,7 +394,10 @@ one-bot-one-tab 以前建立、沒有 `tab_id` 的 Run 只關 pane，不會因�
 2. **名字前綴**：名稱是 `<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 與 team workspace 的情況只有這條線索。
 
 兩條都命中時以血緣為準。認領後走同一條既有路徑：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run、
-同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
+**同一個父 bot 底下**同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
+字尾在專案裡已經是別人的名字（另一顆母 bot 的同名子 agent、或使用者自己建的 `review` 撞上 `<parent>-review`）時，
+改用完整的 herdr agent 名存（herdr 保證唯一），下次認領兩種拼法都找得到。每顆子 agent 的認領各自成敗：
+一顆失敗只寫 log 跳過，不中止整台主機的對帳（2026-09-12 review #2：以前名字撞到 `?` 直接讓整輪中止、每兩秒重複）。
 
 **子 agent 退役（#60，2026-09-11）**：子 agent 只活在它的 pane 裡，所以 pane 沒了它就退役（`bots.deleted_at`，對話保留）。兩條路都要接得住：
 reconcile 發現 run 還在、agent 卻不見（原本就有）；以及 `herdr pane close` 時 `pane_closed` 事件**先**把 run 結束、reconcile 後到——
