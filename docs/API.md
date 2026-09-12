@@ -65,6 +65,8 @@
   `limit` 預設 200、上限 1000；`open` 是未 ack 的總數。
   `POST /api/supervisor/inbox/{id}/ack` → `{}`。`state`：`pending`（還沒告訴總管）→ `delivered`（已送出通知）→ `handled`（總管確認）。
   送出不等於處理完：通知失敗會留在 `pending`，總管自己的回合不會產生對自己的通知。
+  `pending` → `delivered` 的推送本身節流成每 `[supervisor] notify_interval_secs`（預設 600 秒）最多一次，
+  一次把視窗內累積的事件併成一則通知；入庫不受影響（事件仍即時寫入、即時出現在這個端點）。
   `kind` 除了 assignment 相關與 `health_changed`，另有 `bot_restart_failed`（批次更新重啟後某顆沒回來，payload
   `batch_id,bot_id,name,error`）與 `supervisor_restart_retry`（總管自己重啟後 60 秒沒回來、已自動再啟動一次，payload
   `batch_id,bot_id,name,ok,error`），見 §10.3a。

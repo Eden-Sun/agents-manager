@@ -193,6 +193,7 @@ mod tests {
             desired_running: 1,
             watchdog_attempts: 0,
             watchdog_next_at: None,
+            last_notify_at: None,
             created_at: "t".into(),
             updated_at: "t".into(),
         }

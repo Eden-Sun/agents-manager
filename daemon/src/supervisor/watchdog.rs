@@ -156,6 +156,7 @@ mod tests {
             desired_running: i64::from(wanted),
             watchdog_attempts: attempts,
             watchdog_next_at: next.map(String::from),
+            last_notify_at: None,
             created_at: "now".into(),
             updated_at: "now".into(),
         }

@@ -280,6 +280,9 @@ CLI 的預設包含使用者的 `config.toml`，這是說得通的；fast 是一
 listen = "127.0.0.1:7788"
 herdr_session = "agents-manager"
 
+[supervisor]
+notify_interval_secs = 600    # 喚醒總管的最短間隔；0 = 每次 controller tick 都喚醒
+
 [[projects]]
 id = "01J..."                 # 缺省時 daemon 首次載入自動補寫
 path = "/Users/me/project/foo"
@@ -295,6 +298,11 @@ label = "foo"
 
 - 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；mtime 與載入時不符回 409。`toml_edit` 保留註解為第二階段。
 - 改 `name` 時若有 active Run 拒絕（herdr agent name 綁定啟動時的名稱）。
+- `[supervisor] notify_interval_secs`（預設 **600**）：事件照舊即時寫入 `supervisor_inbox`，**不丟也不延遲入庫**；
+  被節流的只有「把未 ack 事件推給總管、喚醒它」這個動作——每 ≥ 這個秒數才推一次，一次把這段期間累積的
+  未 ack 事件彙整成同一則 `[AG Man 通知]`。health 偵測（30 秒）、watchdog 與模型控制器 TICK 不受影響。
+  總管 busy 時照舊延後，成功送出才開始下一個視窗（送失敗不會吃掉一個視窗）。`0` = 回到節流前的行為。
+  上次喚醒時間存在 `supervisors.last_notify_at`，重啟不會多換來一次喚醒。改這個值要重啟 daemon。
 - 改 `listen` port 需重啟 daemon，且既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）；UI 顯示提示。
 
 ## 6. 生命週期
