@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -17,47 +17,6 @@ import { ApiModelFields } from './ModelPicker'
  * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`：契約與型別保留，但這裡既不顯示
  * 也不會出現在 PATCH body 裡（維持 config.toml 既有的值）。
  */
-
-/** 各 kind 的 auto_approve 旗標（daemon `injected_args`）。 */
-export function AutoApproveFlags() {
-  return (
-    <>
-      claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code> / grok{' '}
-      <code>--always-approve</code>
-    </>
-  )
-}
-
-/** 模型欄位下方的提示文字。 */
-export function modelHint(kind: BotKind): string {
-  switch (kind) {
-    case 'claude':
-      return 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
-    case 'codex':
-      return '選「使用 CLI 預設」則不帶 -m，由 codex 自行決定'
-    case 'grok':
-      return '選「使用 CLI 預設」則不帶 -m，由 grok 自行決定（`grok models`：grok-4.6 為預設）'
-  }
-}
-
-/** grok only: reasoning effort as a row of options (daemon → `--reasoning-effort`). */
-export function EffortField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
-  return (
-    <div className="field">
-      <span>強度</span>
-      <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
-        <button type="button" className={`opt${value === null ? ' on' : ''}`} onClick={() => onChange(null)}>
-          預設
-        </button>
-        {EFFORT_OPTIONS.map((e) => (
-          <button key={e} type="button" className={`opt${value === e ? ' on' : ''}`} title={e} onClick={() => onChange(e)}>
-            {effortLabel(e)}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 /** v4.0 人設：auto-growing textarea; empty = null. */
 export function PersonaField({ value, onChange, collapsible }: { value: string; onChange: (v: string) => void; collapsible?: boolean }) {
@@ -317,12 +276,14 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('pointerdown', onDown, true)
   }, [])
 
-  // 開場落在名稱欄位。不再 trap 鍵盤：這張卡貼著齒輪開、背景也照常能用，把 Tab 關在裡面
-  // 會跟「非模態」自相矛盾（焦點一離開就被搶回來，等於背景還是不能點）。
+  // 桌機設定是貼著齒輪開的非模態浮窗：只把開場焦點放到名稱欄，不攔背景的 Tab，也不還原
+  // 齒輪焦點。手機則是全螢幕 sheet，才啟用共用 modal focus trap。
+  useDialogFocus(phone, cardRef, { initialFocus: () => nameRef.current })
   useEffect(() => {
-    const t = requestAnimationFrame(() => nameRef.current?.focus())
-    return () => cancelAnimationFrame(t)
-  }, [])
+    if (phone) return
+    const raf = requestAnimationFrame(() => nameRef.current?.focus())
+    return () => cancelAnimationFrame(raf)
+  }, [phone])
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
@@ -343,7 +304,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     escRef.current = closeSettings
     return (
       <div className="bs-scrim" role="presentation">
-      <div ref={cardRef} className="bot-settings" role="dialog" aria-label="Bot 設定">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal={phone ? 'true' : undefined} aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -418,6 +379,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
       style={pos ? { left: pos.left, top: pos.top } : undefined}
       role="dialog"
+      aria-modal={phone ? 'true' : undefined}
       aria-label={`${bot.name} 的設定`}
     >
       <div className="bs-head">

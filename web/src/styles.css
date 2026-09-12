@@ -7689,8 +7689,8 @@ button.model-tag:hover:not(:disabled) {
   padding: 2px 8px;
   border-radius: 6px;
   background: var(--bg-sunken);
-  color: var(--text);
-  font-size: 12.5px;
+  color: var(--text-dim);
+  font-size: 11px;
   font-weight: 700;
   line-height: 1.3;
 }
@@ -7918,11 +7918,6 @@ button.model-tag:hover:not(:disabled) {
 }
 .team-pr:hover {
   text-decoration: underline;
-}
-
-.team-project {
-  color: var(--text-dim);
-  font-size: 11px;
 }
 
 /* paused 橫幅：44px 的警示列（同「缺 CLI 情境式警示」）。 */

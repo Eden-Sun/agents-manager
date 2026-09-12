@@ -67,14 +67,6 @@ export function PlayIcon() {
   )
 }
 
-export function StopIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
-      <rect x="4" y="4" width="8" height="8" rx="1.4" fill="currentColor" />
-    </svg>
-  )
-}
-
 /** 提示符加底線：終端的通用符號，跟其他 icon 同一套線寬。 */
 export function TerminalIcon() {
   return (
