@@ -1662,7 +1662,69 @@ async fn refresh_issue(app: &Arc<App>, project_id: &str, repo: &str, q: &db::Tea
 /// Every issue is cut from the team's original `base_sha`, not from wherever `base_ref` points
 /// now, so the queue's entries stay independent of each other and of anything the user merges
 /// while the team is running.
+///
+/// **Re-entrant, and it cleans up after itself.** The scheduler retries this on `resume`
+/// after an `upstream` pause, so a step that already happened (the branch exists, the
+/// worktree is registered, the member row is live) is reused rather than failed on, and a
+/// step that fails midway takes its own worktrees and member rows down again — otherwise a
+/// retry would hit `checkout -b … already exists` for ever and `insert_member` would fall
+/// back to `dev-1-<tid6>`, a name the PM's `to: dev-1` never matches.
 pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_workers: bool) -> LcResult<()> {
+    let mut created: Vec<String> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
+    match start_issue_inner(app, team_id, q, keep_workers, &mut created, &mut dirs).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            rollback_issue_start(app, team_id, &created, &dirs).await;
+            Err(e)
+        }
+    }
+}
+
+/// Undo what one failed `start_issue` attempt built: the member rows it inserted and the
+/// worktrees it added. The integration branch stays — it points at `base_sha` and the retry
+/// checks it out.
+async fn rollback_issue_start(app: &Arc<App>, team_id: &str, created: &[String], dirs: &[String]) {
+    let Ok(Some(t)) = db::team(&app.db, team_id).await else { return };
+    let Ok(Some(project)) = db::project(&app.db, &t.project_id).await else { return };
+    let now = db::now();
+    for b in created {
+        let _ = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(&now).bind(b).execute(&app.db).await;
+        crate::lifecycle::purge_bot_dir(app, b, &project.host).await;
+        app.emit("bot_changed", json!({"bot_id": b})).await;
+    }
+    let git_dir = repo_path(&project, &t.repo);
+    for d in dirs {
+        if let Err(why) = removable_member_dir(&project, &t.worktree_root, d) {
+            tracing::warn!(team = team_id, dir = %d, why, "start_issue rollback: refusing to remove a worktree");
+            continue;
+        }
+        tg::worktree_remove(app, &project.host, &git_dir, d).await;
+    }
+    if !dirs.is_empty() {
+        tg::worktree_prune(app, &project.host, &git_dir).await;
+    }
+}
+
+/// A live member of this team with exactly this nickname, when a previous attempt already
+/// inserted it.
+async fn live_member_named(app: &Arc<App>, team_id: &str, nick: &str) -> LcResult<Option<String>> {
+    sqlx::query_scalar("SELECT id FROM bots WHERE team_id = ? AND name = ? AND deleted_at IS NULL")
+        .bind(team_id)
+        .bind(nick)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(any_err)
+}
+
+async fn start_issue_inner(
+    app: &Arc<App>,
+    team_id: &str,
+    q: &db::TeamIssue,
+    keep_workers: bool,
+    created: &mut Vec<String>,
+    dirs: &mut Vec<String>,
+) -> LcResult<()> {
     let t = load(app, team_id).await?;
     let project = db::project(&app.db, &t.project_id)
         .await
@@ -1672,6 +1734,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
     let branch = issue_branch(app, team_id, q).await?;
     let root = t.worktree_root.clone();
     let main_wt = checked_main_wt(&t, &project).map_err(LcError::Bad)?;
+    let git_dir = repo_path(&project, &t.repo);
 
     // The PM's worktree is about to move to a different branch, so it has to be clean —
     // the same rule `merge_one` applies before every merge.
@@ -1679,26 +1742,33 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
     if !dirty.trim().is_empty() {
         return Err(LcError::Upstream(format!("integration worktree is dirty, cannot start issue #{}", q.issue_number)));
     }
-    tg::checkout_task_branch(app, &project.host, &main_wt, &branch, &t.base_sha)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    if tg::branch_exists(app, &project.host, &main_wt, &branch).await {
+        // A previous attempt got this far: the branch is there, just park `main/` on it.
+        tg::checkout_branch(app, &project.host, &main_wt, &branch).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    } else {
+        tg::checkout_task_branch(app, &project.host, &main_wt, &branch, &t.base_sha)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+    }
 
     // A fresh set of workers, in their own per-issue directories (§6.2) — unless the PM kept
     // the previous batch, which then simply stays where it is.
-    let mut dirs: Vec<String> = Vec::new();
-    let mut created: Vec<String> = Vec::new();
     let count = if keep_workers { 0 } else { queued_worker_role(app, &t, &project.host).await?.0 };
     let spec = if keep_workers { None } else { Some(queued_worker_role(app, &t, &project.host).await?.1) };
     for n in 1..=count {
         let spec = spec.as_ref().expect("spec is loaded when workers are created");
         let dir = format!("{root}/{}", member_dir("worker", n, q.seq));
-        tg::worktree_add(app, &project.host, &repo_path(&project, &t.repo), &dir, &t.base_sha, true)
-            .await
-            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        if !tg::worktree_present(app, &project.host, &git_dir, &dir).await {
+            tg::worktree_add(app, &project.host, &git_dir, &dir, &t.base_sha, true)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+            dirs.push(dir.clone());
+        }
         let nick = member_nick(&t6, "worker", n, q.seq);
-        let bot_id = insert_member(app, &project, team_id, &nick, &t6, "worker", q.issue_number, &spec, &dir).await?;
-        created.push(bot_id);
-        dirs.push(dir);
+        if live_member_named(app, team_id, &nick).await?.is_none() {
+            let bot_id = insert_member(app, &project, team_id, &nick, &t6, "worker", q.issue_number, spec, &dir).await?;
+            created.push(bot_id);
+        }
     }
 
     // Docs last: they name every member, so the roster has to exist first.
@@ -1781,7 +1851,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
         json!({"action": "issue_started", "issue_number": q.issue_number, "seq": q.seq, "branch": branch}),
     )
     .await?;
-    for b in &created {
+    for b in created.iter() {
         app.emit("bot_changed", json!({"bot_id": b})).await;
     }
     let t = load(app, team_id).await?;
@@ -5595,6 +5665,54 @@ mod api_tests {
 
     /// §7.6: a member's CLI is fixed when its pane starts, so a new `kind` is a new bot —
     /// same name, same cwd, same seat, and the unfinished work moves with it.
+    /// daemon-ops #8: a `start_issue` that dies halfway (here: the second executor's directory
+    /// is already taken) must leave nothing behind and must succeed when retried — the
+    /// scheduler retries it on every `resume` after an `upstream` pause.
+    #[tokio::test]
+    async fn start_issue_rolls_back_a_failed_attempt_and_can_be_retried() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(2), false), vec![issue(), issue2()]).await;
+        let t = load(&app, &tid).await.unwrap();
+        let next = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
+        let root = std::path::PathBuf::from(&t.worktree_root);
+        let t6 = tid6(&tid);
+
+        // `worktree add` refuses a non-empty directory: the second executor cannot be built.
+        let blocker = root.join(member_dir("worker", 2, next.seq));
+        std::fs::create_dir_all(&blocker).unwrap();
+        std::fs::write(blocker.join("in-the-way"), "x").unwrap();
+        let err = start_issue(&app, &tid, &next, false).await.unwrap_err();
+        assert!(format!("{err:?}").contains("worktree"), "{err:?}");
+
+        // Rolled back: no live member of issue #2, no leftover worktree for its first executor.
+        let live: Vec<db::Bot> =
+            db::team_members(&app.db, &tid).await.unwrap().into_iter().filter(|b| b.deleted_at.is_none()).collect();
+        assert!(live.iter().all(|b| !b.name.contains("-i2-")), "{:?}", live.iter().map(|b| &b.name).collect::<Vec<_>>());
+        assert!(!root.join(member_dir("worker", 1, next.seq)).exists(), "the first executor's worktree was removed again");
+        // The branch stays (it points at base_sha) and the retry checks it out instead of `-b`.
+        let main_wt = root.join("main");
+        assert_eq!(crate::team_git::testing::run(&main_wt, &["rev-parse", "--abbrev-ref", "HEAD"]), integration_branch(43, &t6));
+        let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
+        assert_eq!(q.state, "queued", "the queue row is untouched until the start succeeds");
+
+        // Out of the way → the retry succeeds, with the protocol names the PM addresses.
+        std::fs::remove_dir_all(&blocker).unwrap();
+        start_issue(&app, &tid, &next, false).await.unwrap();
+        let mut names: Vec<String> = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|b| b.deleted_at.is_none() && b.name.contains("-i2-"))
+            .map(|b| b.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, [format!("t{t6}-i2-dev-1"), format!("t{t6}-i2-dev-2")]);
+        let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
+        assert_eq!(q.state, "working");
+        assert!(root.join(member_dir("worker", 2, next.seq)).join(".git").exists());
+    }
+
     #[tokio::test]
     async fn patch_changes_worker_kind_swaps_bot() {
         let e = env().await;

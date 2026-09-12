@@ -201,6 +201,23 @@ pub async fn checkout_task_branch(
     git_ok(app, host, wt, &["checkout", "-b", branch, from], GIT_TIMEOUT).await.map(|_| ())
 }
 
+/// `refs/heads/<branch>` exists. A retried `start_issue` uses this to `checkout` the branch
+/// its failed attempt already created instead of dying on `checkout -b` for ever.
+pub async fn branch_exists(app: &Arc<App>, host: &str, dir: &str, branch: &str) -> bool {
+    let r = format!("refs/heads/{branch}");
+    matches!(git(app, host, dir, &["rev-parse", "--verify", "--quiet", &r], GIT_TIMEOUT).await, Ok(o) if o.ok())
+}
+
+/// `path` is already one of `repo`'s registered worktrees. Compared canonically where the
+/// path is local (macOS registers `/private/var/…` for a `/var/…` request).
+pub async fn worktree_present(app: &Arc<App>, host: &str, repo: &str, path: &str) -> bool {
+    fn canon(p: &str) -> String {
+        std::fs::canonicalize(p).map(|c| c.to_string_lossy().to_string()).unwrap_or_else(|_| p.trim_end_matches('/').to_string())
+    }
+    let want = canon(path);
+    worktree_paths(app, host, repo).await.iter().any(|p| canon(p) == want)
+}
+
 /// Move a worktree onto an integration branch that **already exists**.
 ///
 /// `checkout_task_branch` cannot do this: it is `checkout -b`, which fails on a name that is
