@@ -10,6 +10,20 @@ import { useStore } from '../store/store'
 
 export const KIND_LABEL: Record<BotKind, string> = { claude: 'claude', codex: 'codex', grok: 'grok' }
 
+/**
+ * 沒有人傳 `title` 時的說明（2026-09-12 使用者：「header 裡 codex 的 kind 文字說明可以優化」）。
+ *
+ * 圖示模式下這一格只剩一個字形，tooltip 卻只寫 `codex`——那是把看得見的東西再講一次。OpenAI
+ * 的標誌尤其不直覺：看到它的人問的是「這顆 bot 在跑哪個 CLI、哪家的模型」，所以說明寫成
+ * 「這是什麼」而不是重複 kind 名。`aria-label` 維持只有 kind 名：驗收腳本與側欄的朗讀都靠它，
+ * 讀出一整句反而吵。
+ */
+export const KIND_DESC: Record<BotKind, string> = {
+  claude: 'claude · Anthropic 的 CLI（Claude 模型）',
+  codex: 'codex · OpenAI 的 CLI（GPT 模型，標誌是 OpenAI 的）',
+  grok: 'grok · xAI 的 CLI（Grok 模型）',
+}
+
 /** Monochrome glyphs (currentColor): claude = star burst, codex = the OpenAI mark, grok = the xAI mark. */
 export function KindIcon({ kind }: { kind: BotKind }) {
   switch (kind) {
@@ -46,7 +60,7 @@ export function KindTag({ kind, title, className }: { kind: BotKind; title?: str
   return (
     <span
       className={`kind-tag ${kind}${mode === 'icon' ? ' icon' : ''}${className ? ` ${className}` : ''}`}
-      title={title ?? KIND_LABEL[kind]}
+      title={title ?? KIND_DESC[kind]}
       aria-label={KIND_LABEL[kind]}
       role="img"
     >
