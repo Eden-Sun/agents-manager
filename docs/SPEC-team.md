@@ -206,6 +206,11 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 7. **建新一批執行者**：依 `roles_json.workers.spec` / `count`，走既有 `start_issue(next, keep_workers=false)`
    （切 `main/` 到新整合分支 `team/i<issue>-<tid6>`、`worktree add` `i<seq>-dev-<n>`、insert 成員、重寫 `ISSUE.md` / `TEAM.md`、鏡像 `teams` 欄位），
    再 `start_issue_workers`。`start_issue` 對 `main/` 的「必須乾淨」檢查照舊，髒了 → note `issue_start_failed` + `paused(upstream)`。
+   - **換 issue 可重入（2026-09-12）**：`finish` / `close_issue_and_advance` 先把交付完的 issue 標 `done`，再 `start_issue(next)`；
+     後者失敗暫停時 `resume_phase` 仍是 `finishing`（或 `working`），所以「繼續」會再走一次。第二次：
+     `finish` 看到沒有 working 的 issue、或該 issue 已有 `delivered` / `pr_created` note，就**不再交付**（記 `deliver_skipped`），
+     直接重試 `start_issue`；`step` 在 `planning` / `working` 發現「沒有 working 的 issue 但佇列還有」也重試（記 `issue_advance_retry`）。
+     沒有 working 的 issue 而佇列非空時**不得**寫 `done`——以前會把剩下的佇列整個丟掉、交付重複一次。
 8. **交給 PM**：`hand_issue_to_pm(kept_workers=false)` —— `set_phase("planning")` 並送 `next_issue` relay。relay 文字多一句視 §2.5.3 結果而定：
    續接成功 →「這是同一段對話的延續」；退回新對話 →「你是重新啟動的 PM，先前的對話不在了，請先讀 `TEAM.md` 與 `ISSUE.md`」。
 
