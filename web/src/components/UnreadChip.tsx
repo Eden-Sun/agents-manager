@@ -21,6 +21,10 @@
  * 三組的順序都是 `bots` 陣列的順序（不是未讀時間、也不是跑完時間），所以只要一顆晶片還在列
  * 上，它的位置就不會變——不會因為未讀歸零、狀態變了就整列往左跳。
  *
+ * **這一列只有一列高，排不下就往右捲**（2026-09-12 使用者）：本來會換行，十顆晶片在手機上
+ * 排成三行、把對話的第一則推出畫面。既然它是索引不是內容，就不該跟對話搶高度。橫捲列的代價
+ * 是「我在看的那顆可能在捲軸外」，所以選到誰就把誰捲進畫面（`scrollCurrentIntoView`）。
+ *
  * 側欄本來就會在每一列上亮未讀（`Sidebar` 的 `.unread-turns`），但側欄在手機上收在抽屜裡、
  * 桌面上也可能被捲掉；使用者要追的是跨 bot 的問題，所以它得待在每個畫面都看得到的地方。
  *
@@ -33,7 +37,8 @@
  *   那不是使用者交代的事，卻會把這兩格洗成永遠有東西。要看它就從側欄的 AGM 總管進去；
  *   真的想常駐追蹤還是可以用 ★ 把它釘起來（釘選是使用者自己指定的，不受這條影響）。
  */
-import { useMemo } from 'react'
+import { useLayoutEffect, useMemo, useRef } from 'react'
+import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Bot } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
@@ -102,9 +107,13 @@ export function UnreadChip() {
   const selectTeam = useStore((s) => s.selectTeam)
   const botUnreadOf = (id: string) => botUnread[id] ?? 0
   const live = working.length + liveTeams.length
+  const barRef = useRef<HTMLDivElement | null>(null)
+  // 換 bot（或這一列的組成變了）就把 `current` 那顆捲進畫面。`aria-current` 當選擇器：三組都
+  // 用它標「你正在看的」，不必再多一個 ref。
+  useScrollCurrentIntoView(barRef, `${selectedBotId}/${selectedTeamId}/${rows.length}/${pinned.length}/${live}`)
   if (pinned.length === 0 && rows.length === 0 && live === 0) return null
   return (
-    <div className="unread-bar" role="status" aria-live="polite">
+    <div className="unread-bar" ref={barRef} role="status" aria-live="polite">
       {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
       {rows.map((r) => (
         <button
@@ -193,6 +202,29 @@ export function UnreadChip() {
       ) : null}
     </div>
   )
+}
+
+/**
+ * 橫捲的那一列裡，把 `aria-current` 的那顆晶片捲進畫面（置中，兩端的則貼邊）。
+ *
+ * 不用 `Element.scrollIntoView`：它會連帶捲祖先，在手機上會把整個 `.app` 往旁邊推一格；
+ * 這裡只動這一列自己的 `scrollLeft`。已經看得見就完全不動——不然每次重繪都把列拉回中間，
+ * 使用者自己捲到的位置會被搶走。
+ *
+ * `key` 把「選了誰／這一列有幾顆」壓成一個字串，只有這些真的變了才重捲；hook 本身必須在
+ * 「三組都空就 `return null`」那一行**之前**無條件呼叫到，所以它收的是算好的字串而不是節點。
+ */
+function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key: string) {
+  useLayoutEffect(() => {
+    const bar = barRef.current
+    if (!bar) return
+    const chip = bar.querySelector<HTMLElement>('.unread-chip[aria-current="true"]')
+    if (!chip) return
+    const pad = 16
+    const left = chip.offsetLeft - bar.scrollLeft
+    if (left >= pad && left + chip.offsetWidth <= bar.clientWidth - pad) return
+    bar.scrollLeft = Math.max(0, chip.offsetLeft - (bar.clientWidth - chip.offsetWidth) / 2)
+  }, [barRef, key])
 }
 
 /**
