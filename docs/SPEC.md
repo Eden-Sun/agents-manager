@@ -484,7 +484,9 @@ daemon 另以唯讀優先的方式觀察本機 Herdr `default` session（socket 
 3. 找到既有採用紀錄就更新其 Run；否則建立一個 `herdr_session = "default"` 的 Bot 設定並
    建立 `adopted = 1` 的 active Run。Bot 設定寫回 `config.toml`，因此 daemon 重啟後仍保留。
 4. default session 的 workspace 不寫入 `projects.workspace_id`；default pane 消失只會結束 Run，
-   不會由 daemon 回收或關閉該使用者 pane。
+   不會由 daemon 回收或關閉該使用者 pane。同一條線的另外三處（2026-09-12 review #4）：`stop` 只送 ctrl+c、
+   **不 `pane.close`**；`start` / `restart` 對 `herdr_session = "default"` 的 bot 回 409 `default_session`
+   （restart 在送 ctrl+c 之前就拒絕）；§6.9 的批次重啟把它列為 `default_session` 跳過。
 
 default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 default socket；沒有 hook
 注入的既有 agent 仍透過 pane status 與 terminal fallback 更新對話。
@@ -544,6 +546,7 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   | 條件 | `reason` | 動作 |
   |---|---|---|
   | `bots.managed_by = 'team'` | `team_member` | 跳過 |
+  | run 或 bot 的 `herdr_session = 'default'`（§6.5.1） | `default_session` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` | `working` | 跳過 |
   | `agent_status = 'blocked'` | `blocked` | 跳過 |

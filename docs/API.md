@@ -211,8 +211,8 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/api/bots/{id}/start` | — | `200 {"run_id":"..."}`；已有 active Run → `409 {"error":"conflict","reason":"active run already exists","run_id":"..."}`；herdr 失敗 502 |
-| POST | `/api/bots/{id}/stop` | — | `200 {}`；本來就沒有 Run → `204`（無 body） |
+| POST | `/api/bots/{id}/start` | — | `200 {"run_id":"..."}`；已有 active Run → `409 {"error":"conflict","reason":"active run already exists","run_id":"..."}`；從使用者 herdr `default` session 匯入的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session","message":…}`（`/restart` 同，且在送 ctrl+c 之前就拒絕；2026-09-12）；herdr 失敗 502 |
+| POST | `/api/bots/{id}/stop` | — | `200 {}`；本來就沒有 Run → `204`（無 body）。default session 的 bot 只送 ctrl+c、**不關使用者的 pane** |
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed）；送不出 `esc` → 502，Turn **維持** in-flight |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}` — **強制**結束目前回合，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
@@ -1116,7 +1116,7 @@ bot 不存在、已刪除或 token 不符 → `401`。
   開新對話，log `native session has no transcript on disk`。
 - 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
   任何一張清單裡**。
-- `reason` 的取值與判斷順序見 SPEC §6.9：`team_member` / `not_running` / `working` /
+- `reason` 的取值與判斷順序見 SPEC §6.9：`team_member` / `default_session` / `not_running` / `working` /
   `blocked` / `unknown_status` / `turn_in_flight`。`reason_label` 是同一件事給人看的那句（前端直接
   顯示，不另編一套）。
 - `total = 0` 也是 `202`：計畫是空的不是錯誤，daemon 仍會立刻推一次 `bots_restart_done`。
