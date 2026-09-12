@@ -382,7 +382,9 @@ one-bot-one-tab 以前建立、沒有 `tab_id` 的 Run 只關 pane，不會因�
 ### 6.5 對帳（daemon 啟動、事件連線重連；逐 bot 在鎖內）
 1. `session.snapshot` + `agent.list`。
 2. DB 中 active Run：
-   - agent 清單中有 `name == bot.name` → 維持，更新 `pane_id`（pane move 會改 id）與 `agent_status`。
+   - agent 清單中有 `name == bot.name` → 維持，更新 `pane_id`（pane move 會改 id）與 `agent_status`——`agent_status` 不用清單上的，
+     在鎖內再 `agent.get` 一次（清單是拿鎖前讀的，前一顆 bot 的 start 可能握鎖一分鐘；用舊的 `idle` 蓋掉已經 `working` 的 run，
+     真正的 `working→idle` 事件會因 `prev == idle` 不啟動備援、不送排隊 prompt；2026-09-12 review a）。
    - 否則 → Run `exited`。
 3. agent 清單中 `name` 匹配某 Bot 但 DB 無 active Run → 建 Run（`running`，`adopted=1`），沿用同一 Conversation。
 4. **orphan pane 回收**（第一階段）：DB 中 `exited/stopped` Run 記錄的 `pane_id` 若仍存在於 snapshot 且無 agent → `pane.close`。
