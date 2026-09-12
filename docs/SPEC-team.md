@@ -826,7 +826,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | POST | `/teams/{id}/resume` | — | `200 {}`；非 paused 409；`member_lost` 且成員仍未 running → 409 `{reason:"member not running", bot_id}` |
 | POST | `/teams/{id}/approve` | — | supervised 閘門放行；非 `paused(gate:*)` 409 |
 | POST | `/teams/{id}/abort` | `{"reason"?}` | `200 {}`；停所有成員 |
-| POST | `/teams/{id}/cleanup` | — | 非終態 409；成功 `200 {}`，推 `bot_changed` ×N + `team_changed` |
+| POST | `/teams/{id}/cleanup` | — | 非終態 409；成員停不掉（主機／herdr 不通）409 `could not stop a team member`，已退的維持已退、之後重跑即可；成功 `200 {"workspace_closed": bool}`——`workspace.close` 失敗時 `workspace_id` 保留（note `workspace_close_failed`）讓下一次 cleanup／delete 再關；推 `bot_changed` ×N + `team_changed` |
 | DELETE | `/teams/{id}` | `?branches=keep\|delete`（預設 `keep`）| **任何 phase 都可刪**（§6.5a）：非終態時先停成員 → 清 worktree → 關 workspace → 刪三張表的列 → 成員 bot 標 `deleted_at`（訊息保留）。`branches=delete` 才 `git branch -D`，遠端分支一律不動。成功 `200 {}` 並推帶 `deleted: true` 的 `team_changed` + `bot_changed` ×N；不存在 `404 {"error":"not_found","what":"team"}` |
 | PATCH | `/teams/{id}` | `{"label"?: string, "budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "pm"?: <角色>, "workers"?: <角色>, "reviewer"?: <角色>}` | `200 {}`；終態 409。三個角色同一個形狀，見下表 |
 
