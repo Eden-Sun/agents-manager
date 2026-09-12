@@ -221,12 +221,7 @@ pub fn parse_accounts(raw: &str) -> Vec<GhAccount> {
 
 async fn run_script(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
-        let o = tokio::time::timeout(
-            timeout,
-            Command::new("/bin/sh").arg("-c").arg(script).stdin(std::process::Stdio::null()).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("command timed out"))??;
+        let o = crate::hosts::sh_local(script, timeout).await?.ok_or_else(|| anyhow!("command timed out"))?;
         if !o.status.success() {
             let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
             let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -235,7 +230,7 @@ async fn run_script(app: &Arc<App>, host: &str, script: &str, timeout: Duration)
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    conn.ssh_exec_path(script).await
+    conn.ssh_exec_path_timeout(script, timeout).await
 }
 
 async fn run_script_stdin(app: &Arc<App>, host: &str, script: &str, data: &[u8], timeout: Duration) -> Result<String> {

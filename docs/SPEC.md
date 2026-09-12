@@ -419,7 +419,8 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 - `herdr agent start <name> …`：`<name>` 不是以 `$AM_AGENT_NAME-` 開頭就自動補上前綴（截到 herdr 的 32 字上限），
   並在 stderr 印一行說明。旗標可以在名字前面，`--kind` / `--pane` / `--timeout` 的值不會被誤認成名字，`--` 之後原封不動。
   **模型沿用**（2026-09-08）：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時，補上 `-- --model $AM_MODEL`，
-  claude 再補 `--effort $AM_EFFORT`（子 agent 自己有寫的一律尊重；codex 的 `-c model_reasoning_effort=` 也算有寫）。
+  claude 再補 `--effort $AM_EFFORT`（子 agent 自己有寫的一律尊重：`--model`、codex／grok 的 `-m`、codex 的 `-c model=`
+  都算；effort 方面 codex 的 `-c model_reasoning_effort=` 也算有寫）。
   不然子 agent 跑 CLI 預設，側欄多一顆「claude-fable-5-1」跟母 bot 的 `opus` 對不上。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發，另外補上 `--env`
   把 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、`AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`PATH` 帶下去
@@ -445,7 +446,9 @@ daemon 沒有參與，那句話只以 **prompt 回音**的形式從 hook 回來�
 
 補法跟 §6.5b 同一種：**做成機制，不是請求**。
 
-1. PATH 上的 shim 攔 `agent prompt`：補完名字前綴之後，先 `POST /relay/announce`
+1. PATH 上的 shim 攔 `agent prompt`：目標名字 herdr 本來就認得（`herdr agent get` 找得到——AGM、別的頂層 bot、
+   pane id）就照原名送，找不到才視為自己的子 agent 補前綴（不然向 AGM 申請會被改成 `<自己>-agm-…` 而 unknown_target）；
+   決定好名字之後，先 `POST /relay/announce`
    （表單欄位 `bot_id`／`to_agent`／`text`，驗證用該 bot 的 `hook_token`，header `X-AM-Bot-Token`，
    跟 hook 同一把鑰匙），再照常轉給真的 herdr。報不成功（沒有 curl、daemon 沒開）就只是少一次標示，
    訊息照送。名字前面帶旗標時整串原樣轉發，不猜。
@@ -1221,6 +1224,11 @@ UI 顯示「未知」而不是已登入。
 - 該身份的列在 **`CLAUDE_POLL` 內剛被 statusLine 更新過** → 不探（有 bot 在對話的帳號本來就有即時數字）。
 - 工具偵測說該身份在這台**沒有登入**（`logged_in == false`）→ 不探（它只會停在登入畫面，把 25 秒的
   對話框逾時燒掉）。等哪次偵測看到它登入了，下一輪自然恢復。
+
+grok 的 `/usage` 探測（§12）套同一套（2026-09-12）：工具偵測說 grok 在這台沒登入就不探；探測失敗
+（畫不出額度列、trust 提示、agent.wait 逾時）後把該主機停 **5 分鐘**再試，不然每 30 秒都要
+`workspace.create` → `agent.start` → 最長 60 秒 `agent.wait` → 25 秒讀畫面 → 關掉。`GET /api/quota?refresh=1`
+不受這個節流影響，永遠真的探一次。
 
 ### 16.5 驗收
 mock（`node scripts/demo-identity-shell.mjs`，需 `VITE_MOCK=1 npx vite --port 5311`）：

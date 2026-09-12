@@ -76,12 +76,23 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
             .strip_prefix("https://")
             .or_else(|| u.strip_prefix("http://"))
             .or_else(|| u.strip_prefix("ssh://"))
-            .or_else(|| u.strip_prefix("git://"))
-            .unwrap_or(u);
+            .or_else(|| u.strip_prefix("git://"));
+        let had_scheme = no_scheme.is_some();
+        let no_scheme = no_scheme.unwrap_or(u);
         // drop userinfo (`git@`, `user:token@`)
         let no_user = no_scheme.rsplit_once('@').map(|(_, h)| h).unwrap_or(no_scheme);
         let host_path = no_user.strip_prefix("github.com")?;
-        host_path.strip_prefix('/').or_else(|| host_path.strip_prefix(':'))?
+        if had_scheme {
+            // With a scheme the colon is a **port** (`ssh://git@github.com:22/owner/repo`), never
+            // the scp-style separator; the path still has to start with `/`.
+            let after_port = match host_path.strip_prefix(':') {
+                Some(p) => p.trim_start_matches(|c: char| c.is_ascii_digit()),
+                None => host_path,
+            };
+            after_port.strip_prefix('/')?
+        } else {
+            host_path.strip_prefix('/').or_else(|| host_path.strip_prefix(':'))?
+        }
     };
     let mut parts = rest.trim_end_matches('/').splitn(3, '/');
     let owner = parts.next()?.trim();
@@ -97,12 +108,7 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
 /// Run a POSIX `sh` script on `host`; stdout on success.
 async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
-        let o = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("/bin/sh").arg("-c").arg(script).stdin(std::process::Stdio::null()).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("command timed out"))??;
+        let o = crate::hosts::sh_local(script, timeout).await?.ok_or_else(|| anyhow!("command timed out"))?;
         if !o.status.success() {
             let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
             let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -111,7 +117,7 @@ async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    conn.ssh_exec_path(script).await
+    conn.ssh_exec_path_timeout(script, timeout).await
 }
 
 /// PATH prefix so `gh` / `git` from Homebrew are found even from a launchd daemon.
@@ -211,7 +217,7 @@ pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> 
     let script = format!(
         "{PATH_FIX}cd {} || exit 0\n\
          test -f .gitmodules || exit 0\n\
-         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | awk '{{print $2}}' | while IFS= read -r p; do\n\
+         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | sed 's/^[^ ]* //' | while IFS= read -r p; do\n\
            printf '%s|%s\\n' \"$p\" \"$(git -C \"$p\" remote get-url origin 2>/dev/null)\"\n\
          done",
         sh_quote(&p.path)
@@ -448,6 +454,9 @@ mod tests {
             "ssh://git@github.com/Eden-Sun/powertech-hub",
             "ssh://git@github.com/Eden-Sun/powertech-hub.git\n",
             "git://github.com/Eden-Sun/powertech-hub.git",
+            // A port after the host is not the scp-style `:owner/repo` separator.
+            "ssh://git@github.com:22/Eden-Sun/powertech-hub.git",
+            "https://github.com:443/Eden-Sun/powertech-hub",
         ] {
             let g = parse_github_remote(u).unwrap_or_else(|| panic!("{u}"));
             assert_eq!(g.owner, "Eden-Sun");
@@ -457,6 +466,7 @@ mod tests {
         assert!(parse_github_remote("git@gitlab.com:a/b.git").is_none());
         assert!(parse_github_remote("").is_none());
         assert!(parse_github_remote("https://github.com/only-owner").is_none());
+        assert!(parse_github_remote("ssh://git@github.com:22").is_none());
     }
 
     #[test]

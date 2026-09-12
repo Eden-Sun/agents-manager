@@ -1117,6 +1117,10 @@ pub async fn create_with_issues(
     req: CreateTeam,
     issues: Vec<IssueRef>,
 ) -> LcResult<Value> {
+    // The same issue twice in one request would trip `team_issues_number_open` halfway through
+    // the inserts; keep the first mention, the way `create`'s `issue_list` already does.
+    let mut seen = std::collections::HashSet::new();
+    let issues: Vec<IssueRef> = issues.into_iter().filter(|i| seen.insert(i.number)).collect();
     let issue = issues.first().cloned().ok_or_else(|| LcError::Bad("issue_numbers must not be empty".into()))?;
     let project = db::project(&app.db, project_id)
         .await
@@ -1201,6 +1205,10 @@ pub async fn create_with_issues(
         "reviewer": reviewer.as_ref().map(role_spec_json),
     });
     let now = db::now();
+    // The team row and its queue are one write: a `teams` row without its `team_issues` (an
+    // insert failing partway) would be picked up by `respawn_schedulers` at the next start as
+    // a member-less `starting` team nobody can explain.
+    let mut tx = app.db.begin().await.map_err(any_err)?;
     sqlx::query(
         "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, pause_reason, resume_phase,
            base_ref, base_sha, branch, worktree_root, deliver, supervised, roles_json, budget_json, usage_json,
@@ -1223,7 +1231,7 @@ pub async fn create_with_issues(
     .bind(serde_json::to_string(&empty_usage()).unwrap_or_else(|_| "{}".into()))
     .bind(&repo)
     .bind(&now)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await
     .map_err(any_err)?;
 
@@ -1249,10 +1257,11 @@ pub async fn create_with_issues(
         .bind(if first { Some(base_sha.as_str()) } else { None })
         .bind(&now)
         .bind(if first { Some(now.as_str()) } else { None })
-        .execute(&app.db)
+        .execute(&mut *tx)
         .await
         .map_err(any_err)?;
     }
+    tx.commit().await.map_err(any_err)?;
 
     // SPEC-team §6.2 / appendix C: the integration branch, then one worktree per member,
     // all under `<data_dir>/teams/<id>/` — outside the repository. The only commands aimed
@@ -1662,7 +1671,69 @@ async fn refresh_issue(app: &Arc<App>, project_id: &str, repo: &str, q: &db::Tea
 /// Every issue is cut from the team's original `base_sha`, not from wherever `base_ref` points
 /// now, so the queue's entries stay independent of each other and of anything the user merges
 /// while the team is running.
+///
+/// **Re-entrant, and it cleans up after itself.** The scheduler retries this on `resume`
+/// after an `upstream` pause, so a step that already happened (the branch exists, the
+/// worktree is registered, the member row is live) is reused rather than failed on, and a
+/// step that fails midway takes its own worktrees and member rows down again — otherwise a
+/// retry would hit `checkout -b … already exists` for ever and `insert_member` would fall
+/// back to `dev-1-<tid6>`, a name the PM's `to: dev-1` never matches.
 pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_workers: bool) -> LcResult<()> {
+    let mut created: Vec<String> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
+    match start_issue_inner(app, team_id, q, keep_workers, &mut created, &mut dirs).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            rollback_issue_start(app, team_id, &created, &dirs).await;
+            Err(e)
+        }
+    }
+}
+
+/// Undo what one failed `start_issue` attempt built: the member rows it inserted and the
+/// worktrees it added. The integration branch stays — it points at `base_sha` and the retry
+/// checks it out.
+async fn rollback_issue_start(app: &Arc<App>, team_id: &str, created: &[String], dirs: &[String]) {
+    let Ok(Some(t)) = db::team(&app.db, team_id).await else { return };
+    let Ok(Some(project)) = db::project(&app.db, &t.project_id).await else { return };
+    let now = db::now();
+    for b in created {
+        let _ = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(&now).bind(b).execute(&app.db).await;
+        crate::lifecycle::purge_bot_dir(app, b, &project.host).await;
+        app.emit("bot_changed", json!({"bot_id": b})).await;
+    }
+    let git_dir = repo_path(&project, &t.repo);
+    for d in dirs {
+        if let Err(why) = removable_member_dir(&project, &t.worktree_root, d) {
+            tracing::warn!(team = team_id, dir = %d, why, "start_issue rollback: refusing to remove a worktree");
+            continue;
+        }
+        tg::worktree_remove(app, &project.host, &git_dir, d).await;
+    }
+    if !dirs.is_empty() {
+        tg::worktree_prune(app, &project.host, &git_dir).await;
+    }
+}
+
+/// A live member of this team with exactly this nickname, when a previous attempt already
+/// inserted it.
+async fn live_member_named(app: &Arc<App>, team_id: &str, nick: &str) -> LcResult<Option<String>> {
+    sqlx::query_scalar("SELECT id FROM bots WHERE team_id = ? AND name = ? AND deleted_at IS NULL")
+        .bind(team_id)
+        .bind(nick)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(any_err)
+}
+
+async fn start_issue_inner(
+    app: &Arc<App>,
+    team_id: &str,
+    q: &db::TeamIssue,
+    keep_workers: bool,
+    created: &mut Vec<String>,
+    dirs: &mut Vec<String>,
+) -> LcResult<()> {
     let t = load(app, team_id).await?;
     let project = db::project(&app.db, &t.project_id)
         .await
@@ -1672,6 +1743,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
     let branch = issue_branch(app, team_id, q).await?;
     let root = t.worktree_root.clone();
     let main_wt = checked_main_wt(&t, &project).map_err(LcError::Bad)?;
+    let git_dir = repo_path(&project, &t.repo);
 
     // The PM's worktree is about to move to a different branch, so it has to be clean —
     // the same rule `merge_one` applies before every merge.
@@ -1679,26 +1751,33 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
     if !dirty.trim().is_empty() {
         return Err(LcError::Upstream(format!("integration worktree is dirty, cannot start issue #{}", q.issue_number)));
     }
-    tg::checkout_task_branch(app, &project.host, &main_wt, &branch, &t.base_sha)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    if tg::branch_exists(app, &project.host, &main_wt, &branch).await {
+        // A previous attempt got this far: the branch is there, just park `main/` on it.
+        tg::checkout_branch(app, &project.host, &main_wt, &branch).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    } else {
+        tg::checkout_task_branch(app, &project.host, &main_wt, &branch, &t.base_sha)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+    }
 
     // A fresh set of workers, in their own per-issue directories (§6.2) — unless the PM kept
     // the previous batch, which then simply stays where it is.
-    let mut dirs: Vec<String> = Vec::new();
-    let mut created: Vec<String> = Vec::new();
     let count = if keep_workers { 0 } else { queued_worker_role(app, &t, &project.host).await?.0 };
     let spec = if keep_workers { None } else { Some(queued_worker_role(app, &t, &project.host).await?.1) };
     for n in 1..=count {
         let spec = spec.as_ref().expect("spec is loaded when workers are created");
         let dir = format!("{root}/{}", member_dir("worker", n, q.seq));
-        tg::worktree_add(app, &project.host, &repo_path(&project, &t.repo), &dir, &t.base_sha, true)
-            .await
-            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        if !tg::worktree_present(app, &project.host, &git_dir, &dir).await {
+            tg::worktree_add(app, &project.host, &git_dir, &dir, &t.base_sha, true)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+            dirs.push(dir.clone());
+        }
         let nick = member_nick(&t6, "worker", n, q.seq);
-        let bot_id = insert_member(app, &project, team_id, &nick, &t6, "worker", q.issue_number, &spec, &dir).await?;
-        created.push(bot_id);
-        dirs.push(dir);
+        if live_member_named(app, team_id, &nick).await?.is_none() {
+            let bot_id = insert_member(app, &project, team_id, &nick, &t6, "worker", q.issue_number, spec, &dir).await?;
+            created.push(bot_id);
+        }
     }
 
     // Docs last: they name every member, so the roster has to exist first.
@@ -1781,7 +1860,7 @@ pub async fn start_issue(app: &Arc<App>, team_id: &str, q: &db::TeamIssue, keep_
         json!({"action": "issue_started", "issue_number": q.issue_number, "seq": q.seq, "branch": branch}),
     )
     .await?;
-    for b in &created {
+    for b in created.iter() {
         app.emit("bot_changed", json!({"bot_id": b})).await;
     }
     let t = load(app, team_id).await?;
@@ -1827,7 +1906,25 @@ async fn retire_workers(app: &Arc<App>, team_id: &str, issue_id: &str, only_seq:
         if !cwd.starts_with(&format!("{}/i", t.worktree_root.trim_end_matches('/'))) {
             continue;
         }
-        let _ = crate::lifecycle::stop_bot(app, &b.id).await;
+        // A member we could not stop (host / herdr gone) keeps its row and its worktree: the
+        // agent may still be running in there, and `worktree remove --force --force` under a
+        // live CLI throws its work away. This function is idempotent — the next retire (or
+        // `cleanup`) finishes the job once the host is back.
+        if let Err(e) = crate::lifecycle::stop_bot(app, &b.id).await {
+            tracing::warn!(team = team_id, bot = %b.name, error = ?e, "could not stop a worker; leaving it and its worktree for the next retire");
+            let _ = record_event(
+                app,
+                team_id,
+                "note",
+                None,
+                None,
+                None,
+                None,
+                json!({"action": "member_retire_failed", "bot": b.name, "error": format!("{e:?}")}),
+            )
+            .await;
+            continue;
+        }
         let _ = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
             .bind(db::now())
             .bind(&b.id)
@@ -1956,9 +2053,7 @@ pub async fn refresh_unlimited_docs(app: &Arc<App>, team_id: &str) -> LcResult<(
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     for b in &members {
         if let Some(cwd) = b.cwd.as_deref().filter(|c| !c.is_empty()) {
-            tg::put_file(app, &project.host, &format!("{}/.agents-manager/team/TEAM.md", cwd.trim_end_matches('/')), &doc)
-                .await
-                .map_err(|e| LcError::Upstream(e.to_string()))?;
+            tg::write_team_md(app, &project.host, cwd, &doc).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         }
     }
     Ok(())
@@ -2073,7 +2168,7 @@ async fn rollback_create(
         // #61: a member that never got going still had its hook material written.
         crate::lifecycle::purge_bot_dir(app, b, &project.host).await;
     }
-    close_workspace(app, project, workspace_id).await;
+    let _ = close_workspace(app, project, workspace_id).await;
     remove_worktrees(app, project, repo, root, dirs).await;
     if branch_created {
         remove_empty_created_branch(app, project, repo, branch, base_sha).await;
@@ -2160,12 +2255,16 @@ async fn make_workspace(
 
 /// `workspace.close` — one call takes every member pane with it, which is the point of
 /// giving a team its own workspace in the first place (§6.4a).
-async fn close_workspace(app: &Arc<App>, project: &db::Project, workspace_id: Option<&str>) {
-    let Some(ws) = workspace_id.filter(|w| !w.trim().is_empty()) else { return };
-    let Ok((client, _)) = team_herdr(app, project).await else { return };
-    if let Err(e) = client.workspace_close(ws).await {
+/// `Ok` only when the workspace is actually gone (or there was none): the caller decides
+/// whether `teams.workspace_id` may be cleared. Clearing it after a failed close (host not
+/// connected, herdr refused) left a workspace nobody could ever close again.
+async fn close_workspace(app: &Arc<App>, project: &db::Project, workspace_id: Option<&str>) -> Result<(), String> {
+    let Some(ws) = workspace_id.filter(|w| !w.trim().is_empty()) else { return Ok(()) };
+    let (client, _) = team_herdr(app, project).await.map_err(|e| format!("{e:?}"))?;
+    client.workspace_close(ws).await.map_err(|e| {
         tracing::warn!(workspace = ws, error = %e, "closing the team workspace failed");
-    }
+        e.to_string()
+    })
 }
 
 /// SPEC-team §6.5, and **the order is the whole point**: `worktree remove` (which deletes
@@ -2627,7 +2726,15 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
         members.iter().filter_map(|b| b.cwd.clone()).filter(|c| !c.trim().is_empty()).collect();
     for b in members {
         if b.deleted_at.is_none() {
-            let _ = lifecycle::stop_bot(app, &b.id).await;
+            // A member that cannot be stopped (its host / herdr is unreachable) is not marked
+            // deleted with its agent still running: the call fails here, everything already
+            // retired stays retired, and cleanup is simply run again once the host is back.
+            if let Err(e) = lifecycle::stop_bot(app, &b.id).await {
+                return Err(LcError::conflict(
+                    "could not stop a team member; retry cleanup when its host is back",
+                    json!({"bot_id": b.id, "bot": b.name, "error": format!("{e:?}")}),
+                ));
+            }
             sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?")
                 .bind(&now)
                 .bind(&b.id)
@@ -2643,12 +2750,32 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     // §6.5: remove → prune → rmdir. Branches (integration and task) are kept for ever by
     // design — they are cheap, they are the audit trail, and deleting the user's history is
     // not the daemon's call.
+    let mut workspace_closed = true;
     if let Ok(Some(project)) = db::project(&app.db, &t.project_id).await {
-        // §6.4a: one `workspace.close` takes every member pane with it.
-        close_workspace(app, &project, t.workspace_id.as_deref()).await;
+        // §6.4a: one `workspace.close` takes every member pane with it. `workspace_id` is
+        // cleared only once that succeeded — otherwise it stays so a later cleanup (or
+        // `delete`) can still find the workspace and close it.
+        match close_workspace(app, &project, t.workspace_id.as_deref()).await {
+            Ok(()) => {
+                let _ = sqlx::query("UPDATE teams SET workspace_id = NULL WHERE id = ?").bind(team_id).execute(&app.db).await;
+            }
+            Err(e) => {
+                workspace_closed = false;
+                record_event(
+                    app,
+                    team_id,
+                    "note",
+                    None,
+                    None,
+                    None,
+                    None,
+                    json!({"action": "workspace_close_failed", "workspace_id": t.workspace_id, "error": e}),
+                )
+                .await?;
+            }
+        }
         remove_worktrees(app, &project, &t.repo, &t.worktree_root, &dirs).await;
     }
-    let _ = sqlx::query("UPDATE teams SET workspace_id = NULL WHERE id = ?").bind(team_id).execute(&app.db).await;
     record_event(
         app,
         team_id,
@@ -2663,7 +2790,7 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     let t = load(app, team_id).await?;
     emit_team_changed(app, &t).await;
     app.emit("project_changed", json!({"project_id": t.project_id})).await;
-    Ok(json!({}))
+    Ok(json!({"workspace_closed": workspace_closed}))
 }
 
 /// `DELETE /api/teams/:id?branches=keep|delete` — SPEC-team §6.5a.
@@ -2745,7 +2872,7 @@ pub async fn delete(app: &Arc<App>, team_id: &str, delete_branches: bool) -> LcR
     let mut removed_branches: Vec<String> = Vec::new();
     if let Some(p) = &project {
         remove_worktrees(app, p, &t.repo, &t.worktree_root, &dirs).await;
-        close_workspace(app, p, t.workspace_id.as_deref()).await;
+        let _ = close_workspace(app, p, t.workspace_id.as_deref()).await;
         if delete_branches {
             // The only destructive path there is. Task branches first, then the integration
             // branch, so a `-D` failure on one leaves the rest recoverable. Remote branches
@@ -3027,66 +3154,74 @@ async fn grow_workers(
 ) -> LcResult<()> {
     let t6 = tid6(&t.id);
     let root = t.worktree_root.clone();
+    let git_dir = repo_path(project, &t.repo);
     for n in (from + 1)..=to {
         let dir = format!("{root}/{}", member_dir("worker", n, issue_seq));
-        tg::worktree_add(
-            app,
-            &project.host,
-            &repo_path(project, &t.repo),
-            &dir,
-            &t.base_sha,
-            true,
-        )
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
         let nick = member_nick(&t6, "worker", n, issue_seq);
-        let bot_id = insert_member(
-            app,
-            project,
-            &t.id,
-            &nick,
-            &t6,
-            "worker",
-            issue_number,
-            spec,
-            &dir,
-        )
-        .await?;
-        // The short persona `insert_member` leaves behind has none of the report protocol.
-        let roster: Vec<String> = db::team_members(&app.db, &t.id)
-            .await
-            .map_err(any_err)?
-            .iter()
-            .filter(|b| b.deleted_at.is_none())
-            .map(|b| {
-                format!(
-                    "`{}`（{}）",
-                    short_name(&b.name, &t.id),
-                    b.team_role.clone().unwrap_or_default()
-                )
-            })
-            .collect();
-        let persona = full_persona(
-            "worker",
-            issue_number,
-            &short_name(&nick, &t.id),
-            &dir,
-            integration,
-            &roster.join("、"),
-            spec.persona_extra.as_deref(),
-            is_unlimited(t),
-        );
-        sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
-            .bind(&persona)
-            .bind(&bot_id)
-            .execute(&app.db)
-            .await
-            .map_err(any_err)?;
+        // Each executor is built as a unit: a worktree without its bot row (or the other way
+        // round) is exactly what made a resent `PATCH workers.count` fail on "already exists".
+        // A worktree a previous attempt left registered is reused, and a failure takes this
+        // executor's own pieces down again — the ones before it are complete and stay.
+        let added = if tg::worktree_present(app, &project.host, &git_dir, &dir).await {
+            false
+        } else {
+            tg::worktree_add(app, &project.host, &git_dir, &dir, &t.base_sha, true)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+            true
+        };
+        let built: LcResult<String> = async {
+            let bot_id = insert_member(app, project, &t.id, &nick, &t6, "worker", issue_number, spec, &dir).await?;
+            // The short persona `insert_member` leaves behind has none of the report protocol.
+            let roster: Vec<String> = db::team_members(&app.db, &t.id)
+                .await
+                .map_err(any_err)?
+                .iter()
+                .filter(|b| b.deleted_at.is_none())
+                .map(|b| format!("`{}`（{}）", short_name(&b.name, &t.id), b.team_role.clone().unwrap_or_default()))
+                .collect();
+            let persona = full_persona(
+                "worker",
+                issue_number,
+                &short_name(&nick, &t.id),
+                &dir,
+                integration,
+                &roster.join("、"),
+                spec.persona_extra.as_deref(),
+                is_unlimited(t),
+            );
+            if let Err(e) = sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
+                .bind(&persona)
+                .bind(&bot_id)
+                .execute(&app.db)
+                .await
+            {
+                let _ = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot_id).execute(&app.db).await;
+                crate::lifecycle::purge_bot_dir(app, &bot_id, &project.host).await;
+                return Err(any_err(e));
+            }
+            Ok(bot_id)
+        }
+        .await;
+        let bot_id = match built {
+            Ok(id) => id,
+            Err(e) => {
+                if added {
+                    tg::worktree_remove(app, &project.host, &git_dir, &dir).await;
+                    tg::worktree_prune(app, &project.host, &git_dir).await;
+                }
+                return Err(e);
+            }
+        };
         if let Ok(Some(bot)) = db::bot(&app.db, &bot_id).await {
             for e in crate::trust::pretrust_members(app, std::slice::from_ref(&bot)).await {
                 tracing::warn!(team = %t.id, error = %e, "could not pre-trust a new executor's worktree");
             }
         }
+        // §6.2 docs before the pane opens: the persona tells the executor to read
+        // `.agents-manager/team/ISSUE*.md`, and the `.gitignore` in that directory is what
+        // keeps `TEAM.md` out of `git add -A` on its task branch.
+        write_docs_for_grown(app, project, t, issue_seq, integration, issue_number, &dir).await?;
         if let Err(e) = crate::lifecycle::start_bot(app, &bot_id).await {
             tracing::warn!(team = %t.id, error = ?e, "a new executor failed to start");
             record_event(
@@ -3103,7 +3238,83 @@ async fn grow_workers(
         }
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
     }
+    if !is_unlimited(t) {
+        // The roster changed, and `TEAM.md` names everyone: rewrite it for every live member
+        // (the PM and the reviewer read their own copy), the way `start_issue` does.
+        refresh_finite_docs(app, project, t, issue_seq, integration, issue_number).await?;
+    } else {
+        refresh_unlimited_docs(app, &t.id).await?;
+    }
     Ok(())
+}
+
+/// The issue a grown executor works on, as `start_issue` would have described it: the queue
+/// row when there is one (the body comes from GitHub), else the `teams` mirror.
+async fn grown_issue(app: &Arc<App>, t: &db::Team, issue_seq: i64, issue_number: i64) -> IssueRef {
+    let row = db::team_issues(&app.db, &t.id).await.unwrap_or_default().into_iter().find(|q| q.seq == issue_seq);
+    match row {
+        Some(q) => refresh_issue(app, &t.project_id, &t.repo, &q).await,
+        None => IssueRef { number: issue_number, title: t.issue_title.clone(), url: t.issue_url.clone(), body: String::new() },
+    }
+}
+
+/// daemon-ops #9: an executor added after the batch started (`PATCH workers.count`, or
+/// unlimited mode growing on demand) gets the same `.agents-manager/team/` directory the
+/// first batch got from `create` / `start_issue` — `.gitignore` included.
+async fn write_docs_for_grown(
+    app: &Arc<App>,
+    project: &db::Project,
+    t: &db::Team,
+    issue_seq: i64,
+    integration: &str,
+    issue_number: i64,
+    dir: &str,
+) -> LcResult<()> {
+    let issue = grown_issue(app, t, issue_seq, issue_number).await;
+    let issue_doc = issue_md(&issue);
+    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
+    if is_unlimited(t) {
+        tg::write_issue_doc(app, &project.host, dir, issue.number, &issue_doc).await.map_err(up)?;
+    } else {
+        let roster = live_roster(app, &t.id).await?;
+        let team_doc = team_md(&issue, integration, &t.worktree_root, &t.repo, &roster);
+        tg::write_team_docs(app, &project.host, dir, &issue_doc, &team_doc).await.map_err(up)?;
+    }
+    Ok(())
+}
+
+/// Finite mode's `TEAM.md` / `ISSUE.md` for the root and every live member, after the roster changed.
+async fn refresh_finite_docs(
+    app: &Arc<App>,
+    project: &db::Project,
+    t: &db::Team,
+    issue_seq: i64,
+    integration: &str,
+    issue_number: i64,
+) -> LcResult<()> {
+    let issue = grown_issue(app, t, issue_seq, issue_number).await;
+    let issue_doc = issue_md(&issue);
+    let roster = live_roster(app, &t.id).await?;
+    let team_doc = team_md(&issue, integration, &t.worktree_root, &t.repo, &roster);
+    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
+    tg::put_file(app, &project.host, &format!("{}/TEAM.md", t.worktree_root), &team_doc).await.map_err(up)?;
+    for (_, _, cwd) in &roster {
+        if !cwd.is_empty() {
+            tg::write_team_docs(app, &project.host, cwd, &issue_doc, &team_doc).await.map_err(up)?;
+        }
+    }
+    Ok(())
+}
+
+/// `(short name, role, cwd)` of every live member — the rows `TEAM.md` lists.
+async fn live_roster(app: &Arc<App>, team_id: &str) -> LcResult<Vec<(String, String, String)>> {
+    Ok(db::team_members(&app.db, team_id)
+        .await
+        .map_err(any_err)?
+        .iter()
+        .filter(|b| b.deleted_at.is_none())
+        .map(|b| (short_name(&b.name, team_id), b.team_role.clone().unwrap_or_default(), b.cwd.clone().unwrap_or_default()))
+        .collect())
 }
 
 /// One role's half of [`patch`] (§10.5). Rewrites `roles_json` — which is what the next batch
@@ -3288,6 +3499,29 @@ async fn swap_member(
     .execute(&app.db)
     .await
     .map_err(any_err)?;
+    // A queued task the PM addressed to this seat by name (`dispatch{to}`) waits on
+    // `want_worker_bot_id`; left on the retired bot it would never match the replacement and
+    // sit in `queued` until `pm_stalled`.
+    sqlx::query(
+        "UPDATE team_tasks SET want_worker_bot_id = ?, updated_at = ?
+          WHERE team_id = ? AND want_worker_bot_id = ? AND state = 'queued'",
+    )
+    .bind(&new_id)
+    .bind(db::now())
+    .bind(&t.id)
+    .bind(&old.id)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+    // Same for a rescue in progress: `workers_for` answers only the rescue bot while
+    // `rescue_bot_id` is set, and a swapped rescuer would leave that set empty.
+    sqlx::query("UPDATE teams SET rescue_bot_id = ? WHERE id = ? AND rescue_bot_id = ?")
+        .bind(&new_id)
+        .bind(&t.id)
+        .bind(&old.id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
 
     // A member with no run is `member_lost` the moment the PM dispatches to it, and `resume`
     // refuses to move until every member is running — so start it here, the same way
@@ -5513,6 +5747,42 @@ mod api_tests {
         assert!(db::team(&app.db, &tid).await.unwrap().is_some());
     }
 
+    /// daemon-ops #14: with the host gone, cleanup keeps `workspace_id` (the close never
+    /// happened) and the next cleanup — host back — closes it and clears the column.
+    #[tokio::test]
+    async fn cleanup_keeps_the_workspace_id_until_the_close_succeeds() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        abort(&app, &tid, None).await.unwrap();
+        assert!(load(&app, &tid).await.unwrap().workspace_id.is_some(), "§6.4a: the team has a workspace");
+
+        app.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        let out = cleanup(&app, &tid).await.unwrap();
+        assert_eq!(out["workspace_closed"], false);
+        let t = load(&app, &tid).await.unwrap();
+        assert!(t.workspace_id.is_some(), "not cleared: nobody closed it");
+        assert!(db::team_members(&app.db, &tid).await.unwrap().iter().all(|m| m.deleted_at.is_some()));
+
+        app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let out = cleanup(&app, &tid).await.unwrap();
+        assert_eq!(out["workspace_closed"], true);
+        assert!(load(&app, &tid).await.unwrap().workspace_id.is_none());
+    }
+
+    /// daemon-ops #20: the same issue twice in `issue_numbers` is one queue entry, not a
+    /// unique-index failure that leaves a member-less `starting` team behind.
+    #[tokio::test]
+    async fn create_with_issues_dedups_the_queue() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(1), false), vec![issue(), issue2(), issue()]).await;
+        let q = db::team_issues(&app.db, &tid).await.unwrap();
+        assert_eq!(q.iter().map(|i| i.issue_number).collect::<Vec<_>>(), [42, 43]);
+        let teams: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM teams").fetch_one(&app.db).await.unwrap();
+        assert_eq!(teams, 1);
+    }
+
     /// §10.5 PATCH: top up the budget, flip supervised, switch the delivery mode.
     #[tokio::test]
     async fn patch_merges_budget_and_validates_deliver() {
@@ -5572,6 +5842,175 @@ mod api_tests {
 
     /// §7.6: a member's CLI is fixed when its pane starts, so a new `kind` is a new bot —
     /// same name, same cwd, same seat, and the unfinished work moves with it.
+    /// daemon-ops #8: a `start_issue` that dies halfway (here: the second executor's directory
+    /// is already taken) must leave nothing behind and must succeed when retried — the
+    /// scheduler retries it on every `resume` after an `upstream` pause.
+    #[tokio::test]
+    async fn start_issue_rolls_back_a_failed_attempt_and_can_be_retried() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(2), false), vec![issue(), issue2()]).await;
+        let t = load(&app, &tid).await.unwrap();
+        let next = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
+        let root = std::path::PathBuf::from(&t.worktree_root);
+        let t6 = tid6(&tid);
+
+        // `worktree add` refuses a non-empty directory: the second executor cannot be built.
+        let blocker = root.join(member_dir("worker", 2, next.seq));
+        std::fs::create_dir_all(&blocker).unwrap();
+        std::fs::write(blocker.join("in-the-way"), "x").unwrap();
+        let err = start_issue(&app, &tid, &next, false).await.unwrap_err();
+        assert!(format!("{err:?}").contains("worktree"), "{err:?}");
+
+        // Rolled back: no live member of issue #2, no leftover worktree for its first executor.
+        let live: Vec<db::Bot> =
+            db::team_members(&app.db, &tid).await.unwrap().into_iter().filter(|b| b.deleted_at.is_none()).collect();
+        assert!(live.iter().all(|b| !b.name.contains("-i2-")), "{:?}", live.iter().map(|b| &b.name).collect::<Vec<_>>());
+        assert!(!root.join(member_dir("worker", 1, next.seq)).exists(), "the first executor's worktree was removed again");
+        // The branch stays (it points at base_sha) and the retry checks it out instead of `-b`.
+        let main_wt = root.join("main");
+        assert_eq!(crate::team_git::testing::run(&main_wt, &["rev-parse", "--abbrev-ref", "HEAD"]), integration_branch(43, &t6));
+        let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
+        assert_eq!(q.state, "queued", "the queue row is untouched until the start succeeds");
+
+        // Out of the way → the retry succeeds, with the protocol names the PM addresses.
+        std::fs::remove_dir_all(&blocker).unwrap();
+        start_issue(&app, &tid, &next, false).await.unwrap();
+        let mut names: Vec<String> = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|b| b.deleted_at.is_none() && b.name.contains("-i2-"))
+            .map(|b| b.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, [format!("t{t6}-i2-dev-1"), format!("t{t6}-i2-dev-2")]);
+        let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
+        assert_eq!(q.state, "working");
+        assert!(root.join(member_dir("worker", 2, next.seq)).join(".git").exists());
+    }
+
+    /// daemon-ops #15: `PATCH workers.count` that dies on the third executor keeps the second
+    /// (it is complete), leaves nothing of the third, and the same PATCH sent again succeeds.
+    #[tokio::test]
+    async fn growing_workers_undoes_only_the_executor_that_failed_and_is_retryable() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let t = load(&app, &tid).await.unwrap();
+        let root = std::path::PathBuf::from(&t.worktree_root);
+        let t6 = tid6(&tid);
+        let grow = PatchTeam { workers: Some(RolePatch { count: Some(3), ..Default::default() }), ..Default::default() };
+
+        let blocker = root.join(member_dir("worker", 3, 1));
+        std::fs::create_dir_all(&blocker).unwrap();
+        std::fs::write(blocker.join("in-the-way"), "x").unwrap();
+        patch(&app, &tid, grow.clone()).await.unwrap_err();
+
+        let live_names = |members: Vec<db::Bot>| -> Vec<String> {
+            let mut v: Vec<String> = members
+                .into_iter()
+                .filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker"))
+                .map(|b| b.name)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            live_names(db::team_members(&app.db, &tid).await.unwrap()),
+            [format!("t{t6}-i1-dev-1"), format!("t{t6}-i1-dev-2")],
+            "dev-2 was built completely and stays; nothing of dev-3 is left"
+        );
+        assert!(root.join(member_dir("worker", 2, 1)).join(".git").exists());
+
+        std::fs::remove_dir_all(&blocker).unwrap();
+        patch(&app, &tid, grow).await.unwrap();
+        assert_eq!(
+            live_names(db::team_members(&app.db, &tid).await.unwrap()),
+            [format!("t{t6}-i1-dev-1"), format!("t{t6}-i1-dev-2"), format!("t{t6}-i1-dev-3")],
+        );
+        assert!(root.join(member_dir("worker", 3, 1)).join(".git").exists());
+    }
+
+    /// daemon-ops #9: an executor grown after the batch started has the same
+    /// `.agents-manager/team/` as the first batch — with the `.gitignore` that keeps
+    /// `TEAM.md` out of `git add -A` on its task branch.
+    #[tokio::test]
+    async fn a_grown_executor_gets_the_team_docs_and_a_clean_status() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        // Finite: PATCH workers.count 1 → 2.
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let root = std::path::PathBuf::from(load(&app, &tid).await.unwrap().worktree_root);
+        let grow = PatchTeam { workers: Some(RolePatch { count: Some(2), ..Default::default() }), ..Default::default() };
+        patch(&app, &tid, grow).await.unwrap();
+        let wt = root.join(member_dir("worker", 2, 1));
+        let docs = wt.join(".agents-manager/team");
+        assert_eq!(std::fs::read_to_string(docs.join(".gitignore")).unwrap(), "*\n");
+        assert!(docs.join("ISSUE.md").exists() && docs.join("TEAM.md").exists());
+        assert!(std::fs::read_to_string(docs.join("TEAM.md")).unwrap().contains("dev-2"), "the roster names the new executor");
+        assert_eq!(crate::team_git::testing::run(&wt, &["status", "--porcelain"]), "", "nothing for `git add -A` to pick up");
+
+        // Unlimited: the issue grows on demand, then `refresh_unlimited_docs` rewrites TEAM.md.
+        let tid = make_team(&app, &pid, req(Some(0), false)).await;
+        let root = std::path::PathBuf::from(load(&app, &tid).await.unwrap().worktree_root);
+        let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 42).unwrap();
+        assert_eq!(ensure_workers_for(&app, &tid, &q, 2).await.unwrap(), 2);
+        refresh_unlimited_docs(&app, &tid).await.unwrap();
+        let wt = root.join(member_dir("worker", 2, q.seq));
+        let docs = wt.join(".agents-manager/team");
+        assert_eq!(std::fs::read_to_string(docs.join(".gitignore")).unwrap(), "*\n");
+        assert!(docs.join("ISSUE-42.md").exists() && docs.join("TEAM.md").exists());
+        assert_eq!(crate::team_git::testing::run(&wt, &["status", "--porcelain"]), "");
+    }
+
+    /// daemon-ops #19: a worker that cannot be stopped (its herdr is unreachable) is not
+    /// soft-deleted and its worktree is not force-removed under the running agent; the next
+    /// retire finishes the job.
+    #[tokio::test]
+    async fn retire_keeps_a_worker_it_could_not_stop() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(1), false), vec![issue(), issue2()]).await;
+        let d1 = db::team_members(&app.db, &tid)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.team_role.as_deref() == Some("worker"))
+            .unwrap();
+        let wt = std::path::PathBuf::from(d1.cwd.clone().unwrap());
+        let q42 = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 42).unwrap();
+        // A live run on a herdr session this daemon does not have: `stop_bot` cannot reach it.
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-x','agent','vanished',?)",
+        )
+        .bind(&run_id)
+        .bind(&d1.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        retire_issue_workers(&app, &tid, &q42.id).await;
+        let still = db::bot(&app.db, &d1.id).await.unwrap().unwrap();
+        assert!(still.deleted_at.is_none(), "not retired while the agent may still be running");
+        assert!(wt.join(".git").exists(), "its worktree is left alone");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT payload_json FROM team_events WHERE team_id = ?")
+            .bind(&tid)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(notes.iter().any(|p| p.contains("member_retire_failed")), "the failure is on the timeline: {notes:?}");
+
+        // The run is gone (or the host is back): the same call now retires it.
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        retire_issue_workers(&app, &tid, &q42.id).await;
+        assert!(db::bot(&app.db, &d1.id).await.unwrap().unwrap().deleted_at.is_some());
+        assert!(!wt.exists());
+    }
+
     #[tokio::test]
     async fn patch_changes_worker_kind_swaps_bot() {
         let e = env().await;
@@ -5601,6 +6040,21 @@ mod api_tests {
         .execute(&app.db)
         .await
         .unwrap();
+        // A second `dispatch{to:"dev-1"}` queued behind it, and a rescue pinned to the seat.
+        let queued_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO team_tasks (id, team_id, seq, title, brief, want_worker_bot_id, branch, state, created_at, updated_at)
+             VALUES (?,?,2,'t2','b',?,'br2','queued',?,?)",
+        )
+        .bind(&queued_id)
+        .bind(&tid)
+        .bind(&old.id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE teams SET rescue_bot_id = ? WHERE id = ?").bind(&old.id).bind(&tid).execute(&app.db).await.unwrap();
 
         patch(
             &app,
@@ -5630,7 +6084,14 @@ mod api_tests {
             .await
             .unwrap();
         assert_eq!(owner, new.id, "the unfinished task follows the seat");
+        let want: String = sqlx::query_scalar("SELECT want_worker_bot_id FROM team_tasks WHERE id = ?")
+            .bind(&queued_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(want, new.id, "a queued task addressed to the seat by name follows it too");
         let t = load(&app, &tid).await.unwrap();
+        assert_eq!(t.rescue_bot_id.as_deref(), Some(new.id.as_str()), "so does a rescue pinned to it");
         assert_eq!(serde_json::from_str::<Value>(&t.roles_json).unwrap()["workers"]["spec"]["kind"], "grok");
     }
 

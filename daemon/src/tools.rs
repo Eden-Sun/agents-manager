@@ -257,8 +257,16 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
             continue;
         }
         let mut env = BTreeMap::new();
-        if let Some(dir) = config_dir_of(&cmd) {
-            env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
+        match config_dir_of(&cmd) {
+            Some(dir) => {
+                env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
+            }
+            // The alias *does* pick a config dir, just not in a shape we read (`env
+            // CLAUDE_CONFIG_DIR=… claude`, `claude --settings CLAUDE_CONFIG_DIR=…`). Treating
+            // it as the default account would run bots on the wrong login and fold its quota
+            // into the bare `claude` key — skip it rather than guess.
+            None if cmd.contains("CLAUDE_CONFIG_DIR=") => continue,
+            None => {}
         }
         // Later definitions win, the way the shell itself resolves a redefined alias.
         found.insert(
@@ -701,7 +709,9 @@ async fn detect_identities(
         run_local(&script, IDENTITY_PROBE_TIMEOUT).await
     } else {
         match app.hosts.get(host).await {
-            Some(conn) => conn.ssh_exec_path(&script).await,
+            // Same budget as the local probe: a multi-identity host easily takes more than
+            // the 30 s one-liner default, and a timeout marks *every* identity unprobed.
+            Some(conn) => conn.ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await,
             None => Err(anyhow::anyhow!("unknown host `{host}`")),
         }
     };
@@ -731,12 +741,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
 const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 
 async fn run_local(script: &str, budget: Duration) -> Result<String> {
-    let o = tokio::time::timeout(
-        budget,
-        tokio::process::Command::new("/bin/sh").arg("-c").arg(script).stdin(std::process::Stdio::null()).output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("local probe timed out"))??;
+    let o = crate::hosts::sh_local(script, budget).await?.ok_or_else(|| anyhow::anyhow!("local probe timed out"))?;
     Ok(String::from_utf8_lossy(&o.stdout).to_string())
 }
 
@@ -937,13 +942,17 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             "AM_ALIAS cc7='CLAUDE_CONFIG_DIR=$HOME/.x claude'",
             "AM_ALIAS ccx='CLAUDE_CONFIG_DIR=$HOME/.x claude'",
             "AM_ALIAS cc1='claude --settings CLAUDE_CONFIG_DIR=$HOME/.x'",
+            "AM_ALIAS cc2='env CLAUDE_CONFIG_DIR=$HOME/.x claude'",
         ] {
             let got = parse_shell_identities(line);
-            assert!(
-                got.is_empty() || got[0].env.is_empty(),
-                "should not have taken a config dir from `{line}`: {got:?}"
-            );
+            // Skipped outright — never an empty-env identity that would run on the default
+            // account under that name.
+            assert!(got.is_empty(), "should not have made an identity from `{line}`: {got:?}");
         }
+        // No config dir at all *is* the default account, and still counts.
+        let ids = parse_shell_identities("AM_ALIAS cc0='claude --dangerously-skip-permissions'");
+        assert_eq!(ids.len(), 1);
+        assert!(ids[0].env.is_empty());
         // A later definition of the same name wins, the way the shell resolves it.
         let ids = parse_shell_identities(
             "AM_ALIAS cc1='CLAUDE_CONFIG_DIR=/a claude'\nAM_ALIAS cc1='CLAUDE_CONFIG_DIR=/b claude'",
