@@ -217,7 +217,7 @@ pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> 
     let script = format!(
         "{PATH_FIX}cd {} || exit 0\n\
          test -f .gitmodules || exit 0\n\
-         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | awk '{{print $2}}' | while IFS= read -r p; do\n\
+         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | sed 's/^[^ ]* //' | while IFS= read -r p; do\n\
            printf '%s|%s\\n' \"$p\" \"$(git -C \"$p\" remote get-url origin 2>/dev/null)\"\n\
          done",
         sh_quote(&p.path)
