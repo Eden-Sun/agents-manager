@@ -721,8 +721,10 @@ label = "foo@m4p"
 路徑不變：`~/.config/agents-manager/bots/<bot_id>/hook.sh`，由 daemon 在每次啟動 Run（與 reconcile 修好 hook 時）覆寫。
 
 argv 維持 `hook.sh <provider> <bot_id> <token> [port]`——**第 4 個參數保留但忽略**，因為 codex 的 `-c notify=[…]`
-與 grok 分派腳本的 argv 是啟動當下寫死的，升級 daemon 時遠端還活著的 agent 仍會用舊 argv 呼叫。`token` 同理保留，
-內容仍寫進 spool 行（daemon 重放時可驗），但不再有 HTTP 可打，因此不再需要 curl。
+與 grok 分派腳本的 argv 是啟動當下寫死的，升級 daemon 時遠端還活著的 agent 仍會用舊 argv 呼叫。第 3 個參數的位置
+同理保留，但 daemon 從 2026-09-12 起**填 `-`**、不再把 `hook_token` 放上去（review #8）：`hook.sh` 從來不讀它、spool 行
+也不含它、daemon 重放 spool 時也不驗它，而 codex 的 notify argv 掛在整個 run 的程序上，`ps` 對該主機所有使用者可見——
+那把 token 同時是本機 `/hook/*` 與 `/relay/announce` 的鑰匙。舊 agent 仍帶真 token 呼叫也照收。不再有 HTTP 可打，因此不再需要 curl。
 
 每個 provider 的行為：
 
