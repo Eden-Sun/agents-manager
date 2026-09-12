@@ -114,10 +114,21 @@
   line-height: 1.4;
   font-weight: 600;
   overflow-wrap: anywhere;
+  /* 收合狀態一列就是一行（2026-09-12 第四輪）：說明攤開時六個選項要滑三四屏，
+     一屏看不完一組選項，等於還是在終端裡找東西。放不下就截尾，按 ▸ 看全文。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bc-open .bc-title {
+  white-space: normal;
+  overflow: visible;
 }
 
 /* 終端把說明折成好幾行、窄 pane 還會直接截掉；這裡是接回來的整段，讓它自己折行。
    **不加行數上限**：使用者的抱怨就是「選項文字被截掉」，在這裡再截一次等於沒解決。 */
+/* 展開才畫（收合時根本不進 DOM）。 */
 .bc-detail {
   grid-area: detail;
   font-size: 12px;
@@ -346,4 +357,56 @@
 .bc-submit:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+
+/* ---- 說明預設收起來（2026-09-12 第四輪） */
+
+/* ▸ 是整列按鈕的**兄弟**，絕對定位貼右——`<button>` 裡不能再包 `<button>`，而整列本身
+   就是「選這一項」。點 ▸ 只展開說明，一顆鍵都不會送出去。 */
+.bc-row {
+  position: relative;
+}
+
+/* ▸ 只在真的有東西可看的列上出現：有說明（React 給的 `.bc-row-more`），或標題被截尾
+   （量出來之後寫在 `data-wide`）。其餘的列不長那顆，免得一排箭頭全是空的。 */
+.bc-chev {
+  display: none;
+}
+
+.bc-row-more .bc-chev,
+.bc-row[data-wide='1'] .bc-chev {
+  display: block;
+}
+
+.bc-row-more .bc-item,
+.bc-row[data-wide='1'] .bc-item {
+  padding-right: 34px;
+}
+
+.bc-chev {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 32px;
+  min-height: 44px;
+  height: 100%;
+  max-height: 44px;
+  border: 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bc-chev:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 收合中的列不需要 44px 以上：一行字＋上下內距剛好是一個觸控目標，六列在 390px 一屏看得完。 */
+.bc-item {
+  align-content: start;
 }
