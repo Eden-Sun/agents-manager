@@ -195,6 +195,12 @@ mod tests {
             watchdog_attempts: 0,
             watchdog_next_at: None,
             last_notify_at: None,
+            persona_text: None,
+            persona_version: 0,
+            persona_hash: None,
+            persona_source: None,
+            persona_updated_at: None,
+            persona_seed_hash: None,
             created_at: "t".into(),
             updated_at: "t".into(),
         }

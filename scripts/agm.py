@@ -638,6 +638,52 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     return client.post(path, body)
 
 
+def cmd_persona(client: Client, cfg: dict, args) -> object:
+    """人設：持久版本是權威，內嵌版只在首次安裝當種子。
+
+    `loaded` 不會出現 `verified`：daemon 只能在啟動 CLI 時把 persona 傳進去，看不到 session
+    現在握著什麼。`needs_restart=false` 不等於新版已經生效。
+    """
+    if args.op == "show":
+        out = optional_get(client, "/api/supervisor/persona")
+        if out is None:
+            raise AgmError("unsupported", "這台 daemon 還沒有 persona 介面（需要更新 agents-managerd）", 6)
+        # 預設不要把整段人設倒進對話；要全文才加 --full。
+        if not args.full and isinstance(out, dict) and isinstance(out.get("stored"), dict):
+            out["stored"] = {k: v for k, v in out["stored"].items() if k != "text"}
+        return out
+    if args.op == "adopt-embedded":
+        body = {"actor": args.actor}
+        if args.reason:
+            body["reason"] = args.reason
+        return client.post("/api/supervisor/persona/adopt-embedded", body)
+    # set
+    if args.file:
+        try:
+            text = Path(args.file).expanduser().read_text(encoding="utf-8")
+        except OSError as e:
+            raise AgmError("bad_args", f"讀不到 --file：{e.strerror}", 2)
+    elif args.text:
+        text = args.text
+    else:
+        raise AgmError("bad_args", "persona set 需要 --text 或 --file", 2)
+    body = {"text": text}
+    if args.expected_version is not None:
+        body["expected_version"] = args.expected_version
+    return client.put("/api/supervisor/persona", body)
+
+
+def cmd_build_inputs(client: Client, cfg: dict, args) -> object:
+    """哪些路徑會被編進 binary（含 include_str! 的 persona 與這支 CLI）。
+
+    例行更新判斷「只動到 docs」時要用這份清單，不然 persona 改了卻被當成不必重建。
+    """
+    out = optional_get(client, "/api/supervisor/build-inputs")
+    if out is None:
+        raise AgmError("unsupported", "這台 daemon 還沒有 build-inputs 介面（需要更新 agents-managerd）", 6)
+    return out
+
+
 def cmd_incidents(client: Client, cfg: dict, args) -> object:
     """系統層級的故障（host 掉線、bot 該開沒開、交辦卡住、通知送不出去）。
 
@@ -823,6 +869,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-busy", action="store_true", dest="allow_busy", help="acquire：跳過「沒人在跑」的檢查")
     s.add_argument("--exclude-bot", action="append", dest="exclude_bot", metavar="BOT_ID", help="idle 檢查要忽略的 bot")
     s.set_defaults(func=cmd_lease)
+
+    s = sub.add_parser("persona", help="人設：show / set / adopt-embedded")
+    s.add_argument("op", choices=["show", "set", "adopt-embedded"])
+    s.add_argument("--full", action="store_true", help="show：連全文一起印（預設只印版本與 hash）")
+    s.add_argument("--text", help="set：新的人設全文")
+    s.add_argument("--file", help="set：從檔案讀")
+    s.add_argument("--expected-version", type=int, dest="expected_version", help="set：樂觀鎖，對不上就拒絕")
+    s.add_argument("--reason", help="adopt-embedded：為什麼要換成內嵌版")
+    s.add_argument("--actor", default="AGM", help="adopt-embedded：誰決定的（預設 AGM）")
+    s.set_defaults(func=cmd_persona)
+
+    s = sub.add_parser("build-inputs", help="會影響 binary 的路徑（含 include_str! 的檔）")
+    s.set_defaults(func=cmd_build_inputs)
 
     s = sub.add_parser("incidents", help="系統層級故障；預設只列未恢復的")
     s.add_argument("--all", action="store_true", help="含已恢復的")

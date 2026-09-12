@@ -22,6 +22,19 @@
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `notify_exhausted`（門檻見 SPEC §18.9）。
   一個 resource 同時只會有一筆 `open`（partial unique index），重啟不會開出第二筆；恢復後再壞是新的一筆。
   開啟與恢復各推一則 inbox 事件（`incident_opened` / `incident_resolved`）。
+- `GET /api/supervisor/persona` →
+  `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
+  **持久版是權威**：`setup` 只在沒有人設時用內嵌版 seed，之後不再覆寫（舊 binary 跑 setup 不會把新人設降版）。
+  `loaded.status` 只有三種，沒有 `verified`：`unknown`（沒在跑）、`stale`（session 比人設舊，**確定**沒載到）、
+  `unverified`（session 啟動時間晚於人設，所以是帶著這份啟動的，但 daemon 看不到 session 現在握著什麼）。
+  `needs_restart` 只有 `stale` 時為 true；它是「要重啟才會載到」，不是「已經載到了」。
+  `PUT /api/supervisor/persona {text,expected_version?}` → 同上。版本 +1、重算 hash，並把 `config.toml` 的 bot
+  persona 與總管 cwd 的 `persona.md` 一起改寫（那兩份是副本，不要手改）。`expected_version` 對不上回 409 `version_mismatch`。
+  `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`。這是內嵌版**唯一**能
+  取代持久版的路徑：明確的遷移，不是 setup 的副作用；內容相同時回 `changed:false`。
+- `GET /api/supervisor/build-inputs` → `{paths:[…],embedded:[{path,symbol}],note}`。
+  會被編進 binary 的路徑，含 `include_str!` 進來的 `docs/goals/agm-supervisor-persona.md` 與 `scripts/agm.py`。
+  例行更新判斷「只動到 docs」要吃這份，不然人設改了會被當成不必重建（SPEC §18.11）。
 - `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,...}]}`；
   `POST /api/supervisor/approvals {requester,purpose,scope,target_commit?,expires_in_secs?}` → 一筆 `pending` 核准，
   同時推一則 `approval_requested` inbox 事件給 AGM（它自己核駁，不用使用者轉達）。`purpose`：`rebuild` | `restart`。

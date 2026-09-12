@@ -62,10 +62,10 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 
 ## 5. 人設版本與建置依賴（P2）
 
-- [ ] 以持久設定的 persona 作運行時來源；setup 對已存在的人設不無條件用 binary 預設覆寫。首次安裝才 seed；顯式更新／migration 有版本、hash 與一致性檢查。
-- [ ] 可讀副本由持久版本產生；設定走 API，不手改 config.toml。暴露 stored／embedded／loaded 資訊，loaded 沒觀測證據就 unknown，不能把 needs_restart=false 當作全文已載入。
-- [ ] 更新偵測涵蓋 include_str! 的 docs persona 與 scripts/agm.py 等實際建置輸入；一般 docs-only 不重啟，內嵌來源變更可判需建置，部署時機仍由 AGM 決定。
-- [ ] 驗收：舊 embedded + 新 stored→setup 不降版；空白新安裝可 seed；PATCH後副本一致；重啟／遷移保留自訂人設；一般 docs與內嵌來源差異測試。
+- [x] 以持久設定的 persona 作運行時來源；setup 對已存在的人設不無條件用 binary 預設覆寫。首次安裝才 seed；顯式更新／migration 有版本、hash 與一致性檢查。
+- [x] 可讀副本由持久版本產生；設定走 API，不手改 config.toml。暴露 stored／embedded／loaded 資訊，loaded 沒觀測證據就 unknown，不能把 needs_restart=false 當作全文已載入。
+- [x] 更新偵測涵蓋 include_str! 的 docs persona 與 scripts/agm.py 等實際建置輸入；一般 docs-only 不重啟，內嵌來源變更可判需建置，部署時機仍由 AGM 決定。
+- [x] 驗收：舊 embedded + 新 stored→setup 不降版；空白新安裝可 seed；PATCH後副本一致；重啟／遷移保留自訂人設；一般 docs與內嵌來源差異測試。
 
 ## 6. Remote 入口可觀測性（P2）
 

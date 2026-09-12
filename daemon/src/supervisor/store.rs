@@ -216,6 +216,19 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // When the manager was last woken with its inbox. The notify throttle reads it, so it
         // has to survive a restart: a reboot must not turn into an extra wake-up.
         ("last_notify_at", "ALTER TABLE supervisors ADD COLUMN last_notify_at TEXT"),
+        // The persona the manager actually runs on. Authoritative: `setup` seeds this when it
+        // is empty and never writes over it afterwards, so an older binary running `setup`
+        // cannot roll a newly updated persona back to whatever it happens to have compiled in.
+        ("persona_text", "ALTER TABLE supervisors ADD COLUMN persona_text TEXT"),
+        ("persona_version", "ALTER TABLE supervisors ADD COLUMN persona_version INTEGER NOT NULL DEFAULT 0"),
+        ("persona_hash", "ALTER TABLE supervisors ADD COLUMN persona_hash TEXT"),
+        // `embedded` (seeded from the binary) | `api` (somebody set it explicitly).
+        ("persona_source", "ALTER TABLE supervisors ADD COLUMN persona_source TEXT"),
+        ("persona_updated_at", "ALTER TABLE supervisors ADD COLUMN persona_updated_at TEXT"),
+        // The embedded hash this was seeded from / last migrated to. Comparing it with the
+        // running binary's is how "there is a newer embedded version" is distinguished from
+        // "somebody deliberately customised this".
+        ("persona_seed_hash", "ALTER TABLE supervisors ADD COLUMN persona_seed_hash TEXT"),
     ] {
         if !has_column(pool, "supervisors", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -318,6 +331,12 @@ pub struct Supervisor {
     pub watchdog_attempts: i64,
     pub watchdog_next_at: Option<String>,
     pub last_notify_at: Option<String>,
+    pub persona_text: Option<String>,
+    pub persona_version: i64,
+    pub persona_hash: Option<String>,
+    pub persona_source: Option<String>,
+    pub persona_updated_at: Option<String>,
+    pub persona_seed_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -572,6 +591,64 @@ pub async fn set_last_notify(pool: &SqlitePool, at: &str) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Write the persona, bumping its version. `source` is `embedded` (a seed or an explicit
+/// migration) or `api` (somebody set the text).
+///
+/// `seed_hash` records which embedded text this came from, so "there is a newer version in the
+/// binary" stays distinguishable from "this was customised on purpose". Returns the new version.
+pub async fn set_persona(
+    pool: &SqlitePool,
+    text: &str,
+    source: &str,
+    seed_hash: Option<&str>,
+) -> Result<i64> {
+    let now = crate::db::now();
+    sqlx::query(
+        "UPDATE supervisors
+            SET persona_text=?, persona_hash=?, persona_source=?, persona_updated_at=?,
+                persona_seed_hash=COALESCE(?, persona_seed_hash), persona_version=persona_version+1, updated_at=?
+          WHERE id=?",
+    )
+    .bind(text)
+    .bind(super::persona::hash(text))
+    .bind(source)
+    .bind(&now)
+    .bind(seed_hash)
+    .bind(&now)
+    .bind(SUPERVISOR_ID)
+    .execute(pool)
+    .await?;
+    Ok(sqlx::query_scalar::<_, i64>("SELECT persona_version FROM supervisors WHERE id=?")
+        .bind(SUPERVISOR_ID)
+        .fetch_one(pool)
+        .await?)
+}
+
+/// Seed the persona only if there is none. `Ok(true)` = this call planted it.
+///
+/// The whole point: a first install gets the binary's text, and every install after that keeps
+/// what it has. `setup` is idempotent, and idempotent must not mean "re-assert the default".
+pub async fn seed_persona_if_empty(pool: &SqlitePool, text: &str) -> Result<bool> {
+    let now = crate::db::now();
+    let planted = sqlx::query(
+        "UPDATE supervisors
+            SET persona_text=?, persona_hash=?, persona_source='embedded', persona_updated_at=?,
+                persona_seed_hash=?, persona_version=persona_version+1, updated_at=?
+          WHERE id=? AND (persona_text IS NULL OR persona_text='')",
+    )
+    .bind(text)
+    .bind(super::persona::hash(text))
+    .bind(&now)
+    .bind(super::persona::hash(text))
+    .bind(&now)
+    .bind(SUPERVISOR_ID)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+    Ok(planted)
 }
 
 pub async fn set_remote(pool: &SqlitePool, status: &str, url: Option<&str>) -> Result<()> {
@@ -2233,6 +2310,43 @@ mod tests {
         let a = decide_approval(&p, &a.id, "revoked", "AGM", Some("使用者開始新回合"), None).await.unwrap().unwrap();
         assert_eq!(a.refusal("2026-09-12T12:00:00Z", "rebuild", Some("abc123")), Some("approval_revoked"));
         assert_eq!(approvals(&p, 10).await.unwrap().len(), 1);
+    }
+
+    /// The downgrade the review found: an old binary running `setup` writing its compiled-in
+    /// persona back over one somebody had just updated. Seeding only fills an empty slot.
+    #[tokio::test]
+    async fn a_stored_persona_is_never_overwritten_by_the_embedded_default() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let s = get_or_init(&p).await.unwrap();
+        assert_eq!((s.persona_version, s.persona_text.clone()), (0, None), "a fresh install has none");
+
+        // First install: the embedded text seeds it.
+        assert!(seed_persona_if_empty(&p, "內嵌版 v1").await.unwrap());
+        let s = get_or_init(&p).await.unwrap();
+        assert_eq!(s.persona_text.as_deref(), Some("內嵌版 v1"));
+        assert_eq!(s.persona_version, 1);
+        assert_eq!(s.persona_source.as_deref(), Some("embedded"));
+        assert_eq!(s.persona_seed_hash, s.persona_hash, "it remembers which embedded text it came from");
+
+        // Somebody updates it through the API.
+        assert_eq!(set_persona(&p, "使用者改過的 v2", "api", None).await.unwrap(), 2);
+
+        // An older binary runs `setup` again: it must not win.
+        assert!(!seed_persona_if_empty(&p, "內嵌版 v1").await.unwrap(), "seeding is refused once there is a persona");
+        let s = get_or_init(&p).await.unwrap();
+        assert_eq!(s.persona_text.as_deref(), Some("使用者改過的 v2"));
+        assert_eq!(s.persona_version, 2, "and the version does not move");
+        assert_eq!(s.persona_source.as_deref(), Some("api"));
+        assert_eq!(s.persona_hash.as_deref(), Some(super::super::persona::hash("使用者改過的 v2").as_str()));
+        // The seed hash still points at the embedded text it started from, which is what makes
+        // "there is a newer embedded version" a different question from "this was customised".
+        assert_eq!(s.persona_seed_hash.as_deref(), Some(super::super::persona::hash("內嵌版 v1").as_str()));
+
+        // An explicit migration is the one way the embedded text takes over.
+        let v = set_persona(&p, "內嵌版 v3", "embedded", Some(&super::super::persona::hash("內嵌版 v3"))).await.unwrap();
+        let s = get_or_init(&p).await.unwrap();
+        assert_eq!((v, s.persona_text.as_deref()), (3, Some("內嵌版 v3")));
     }
 
     #[tokio::test]

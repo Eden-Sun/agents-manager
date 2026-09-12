@@ -44,11 +44,25 @@ pub fn agm_dir(app: &Arc<App>) -> PathBuf {
 
 /// Everything after the `---` separator: the header above it is guidance for humans reading
 /// the plan, not part of what the manager is told about itself.
-fn persona_body() -> String {
+///
+/// This is the *embedded* text — the seed for a first install and nothing more. What the
+/// manager runs on is the stored persona (`supervisors.persona_text`); see `persona.rs`.
+pub fn persona_body() -> String {
     match PERSONA_DOC.split_once("\n---\n") {
         Some((_, body)) => body.trim().to_string(),
         None => PERSONA_DOC.trim().to_string(),
     }
+}
+
+/// The persona the manager actually runs on: stored if there is one, the embedded text only as
+/// a seed. Returns `(text, seeded)`.
+pub async fn effective_persona(app: &Arc<App>) -> Result<(String, bool), LcError> {
+    let embedded = persona_body();
+    let seeded = store::seed_persona_if_empty(&app.db, &embedded)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok((sup.persona_text.filter(|t| !t.is_empty()).unwrap_or(embedded), seeded))
 }
 
 fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
@@ -112,11 +126,15 @@ fn runtime_json(port: u16, bot_id: &str, data_dir: &str) -> Value {
 
 /// Write the directory contents. Idempotent: every file is rewritten from the current
 /// daemon, except `handoff.md`, which belongs to the manager once it exists.
-pub fn deploy_files(app: &Arc<App>, bot_id: &str) -> std::io::Result<Deployed> {
+///
+/// `persona` is the **stored** text, passed in rather than read from the binary: `persona.md`
+/// is a readable copy of what the manager is actually running on, and regenerating it from the
+/// embedded default would make the copy disagree with the original.
+pub fn deploy_files(app: &Arc<App>, bot_id: &str, persona: &str) -> std::io::Result<Deployed> {
     let dir = agm_dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
     std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port))?;
-    std::fs::write(dir.join("persona.md"), persona_body())?;
+    std::fs::write(dir.join("persona.md"), persona)?;
     std::fs::write(
         dir.join("runtime.json"),
         serde_json::to_string_pretty(&runtime_json(app.port, bot_id, &app.data_dir.to_string_lossy()))?,
@@ -159,7 +177,16 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
     let fresh_project = crate::db::ulid();
     let fresh_bot = crate::db::ulid();
     let model = model_arg(&sup.active_model).to_string();
-    let persona = persona_body();
+    // Stored wins. An older binary running `setup` used to write its own compiled-in text back
+    // over the bot, which is how a persona that had just been updated could be silently rolled
+    // back; the embedded copy is now only ever a seed for an install that has none.
+    let (persona, seeded) = effective_persona(app).await?;
+    // The closure below moves its copy into the config update; `persona` itself is still needed
+    // afterwards to write the readable copy.
+    let persona_for_cfg = persona.clone();
+    if seeded {
+        tracing::info!("seeded the AGM persona from the embedded default (first install)");
+    }
     let effort = sup.effort.clone();
     let identity = sup.identity.clone();
     let p2 = path.clone();
@@ -230,7 +257,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
             bot.model = Some(model.clone());
             bot.effort = Some(effort.clone());
             bot.identity = Some(identity.clone());
-            bot.persona = Some(persona.clone());
+            bot.persona = Some(persona_for_cfg.clone());
             // The Remote Control entry point the phone looks for. Setup only *configures* it;
             // whether a remote session actually came up is decided by observation, never argv.
             bot.args = vec!["--remote-control".into(), REMOTE_NAME.into()];
@@ -253,7 +280,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
 
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
 
-    let deployed = deploy_files(app, &bot_id).map_err(|e| LcError::Upstream(e.to_string()))?;
+    let deployed = deploy_files(app, &bot_id, &persona).map_err(|e| LcError::Upstream(e.to_string()))?;
     store::set_env(&app.db, &bot_id, &project_id, &deployed.cwd)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;

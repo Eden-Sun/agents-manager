@@ -350,6 +350,140 @@ pub async fn get_sanitized_state(State(app): State<Arc<App>>) -> Result<Json<Val
     Ok(Json(super::sanitized_state(&app).await?))
 }
 
+// ------------------------------------------------------------------------ persona
+
+/// Which copy is which, and what the running session can honestly be said to have.
+pub async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let (text, _) = setup::effective_persona(&app).await?;
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let embedded = setup::persona_body();
+    let embedded_hash = super::persona::hash(&embedded);
+    let run_started = match sup.bot_id.as_deref() {
+        Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.started_at),
+        None => None,
+    };
+    let loaded = super::persona::loaded_state(run_started.as_deref(), sup.persona_updated_at.as_deref());
+    Ok(Json(json!({
+        "stored": {
+            "version": sup.persona_version,
+            "hash": sup.persona_hash,
+            "source": sup.persona_source,
+            "updated_at": sup.persona_updated_at,
+            "seeded_from": sup.persona_seed_hash,
+            "length": text.chars().count(),
+            "text": text,
+        },
+        "embedded": {"hash": embedded_hash, "length": embedded.chars().count()},
+        // Never `verified`. The daemon passes the persona when it starts the CLI and cannot see
+        // what the session holds now, so the only claims here are "nothing is running",
+        // "the session predates this text" and "it was started with this text".
+        "loaded": {
+            "status": loaded.as_str(),
+            "run_started_at": run_started,
+            "evidence": "the daemon passes the persona at start; it cannot observe the live session",
+        },
+        // The embedded text moved on. Reported, never applied on its own — that is
+        // `POST /api/supervisor/persona/adopt-embedded`.
+        "upgrade_available": sup.persona_seed_hash.as_deref().is_some_and(|h| h != embedded_hash),
+        "needs_restart": loaded.needs_restart(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct PersonaIn {
+    pub text: String,
+    /// Optimistic concurrency: refuse if somebody else has written since you read.
+    #[serde(default)]
+    pub expected_version: Option<i64>,
+}
+
+/// Set the persona. This is the supported path — not editing `config.toml` by hand, and not
+/// waiting for some binary's default to win.
+pub async fn put_persona(State(app): State<Arc<App>>, Json(b): Json<PersonaIn>) -> Result<Json<Value>, LcError> {
+    let text = b.text.trim();
+    if text.is_empty() {
+        return Err(LcError::Bad("persona text must not be empty".into()));
+    }
+    let _g = super::lock().await;
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    if let Some(expected) = b.expected_version {
+        if expected != sup.persona_version {
+            return Err(LcError::conflict(
+                "the persona changed since you read it",
+                json!({"reason": "version_mismatch", "expected": expected, "current": sup.persona_version}),
+            ));
+        }
+    }
+    let version = store::set_persona(&app.db, text, "api", None).await.map_err(up)?;
+    apply_persona(&app, text).await?;
+    drop(_g);
+    app.emit("supervisor_changed", json!({"persona_version": version})).await;
+    Ok(Json(get_persona(State(app.clone())).await?.0))
+}
+
+#[derive(Deserialize)]
+pub struct AdoptIn {
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Take the binary's persona deliberately. The only way the embedded text replaces a stored one
+/// — a migration somebody asked for, recorded as such, never a side effect of running `setup`.
+pub async fn post_persona_adopt(
+    State(app): State<Arc<App>>,
+    Json(b): Json<AdoptIn>,
+) -> Result<Json<Value>, LcError> {
+    let embedded = setup::persona_body();
+    let _g = super::lock().await;
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let embedded_hash = super::persona::hash(&embedded);
+    if sup.persona_hash.as_deref() == Some(embedded_hash.as_str()) {
+        return Ok(Json(json!({"changed": false, "reason": "already_identical", "version": sup.persona_version})));
+    }
+    let version = store::set_persona(&app.db, &embedded, "embedded", Some(&embedded_hash)).await.map_err(up)?;
+    apply_persona(&app, &embedded).await?;
+    drop(_g);
+    tracing::info!(
+        version,
+        actor = b.actor.as_deref().unwrap_or("AGM"),
+        reason = b.reason.as_deref().unwrap_or(""),
+        "AGM persona migrated to the embedded version"
+    );
+    app.emit("supervisor_changed", json!({"persona_version": version})).await;
+    Ok(Json(json!({"changed": true, "version": version, "hash": embedded_hash})))
+}
+
+/// Push the stored persona into the derived copies: the bot's config entry and `persona.md`.
+/// Neither is authoritative; both are rewritten from the stored text so they cannot drift.
+async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let Some(bot_id) = sup.bot_id.clone() else { return Ok(()) };
+    let t = text.to_string();
+    let bid = bot_id.clone();
+    app.cfg
+        .update(move |cfg| {
+            for p in cfg.projects.iter_mut() {
+                if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
+                    b.persona = Some(t.clone());
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(up)?;
+    let _ = crate::projection::project_config(&app.cfg, &app.db).await;
+    let _ = std::fs::write(setup::agm_dir(app).join("persona.md"), text);
+    Ok(())
+}
+
+/// What is compiled into the binary, so the update script can tell "the release is behind" from
+/// "only docs moved" without having to know about `include_str!` itself.
+pub async fn get_build_inputs(State(_app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    Ok(Json(super::persona::build_inputs_json()))
+}
+
 // ------------------------------------------------------------- approvals & leases
 
 #[derive(Deserialize)]
