@@ -2363,6 +2363,9 @@ async fn resume_inner(app: &Arc<App>, team_id: &str, gate_only: bool) -> LcResul
     }
     let back = t.resume_phase.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "planning".into());
     set_phase(app, team_id, &back, None, None).await?;
+    if reason == "pm_stalled" {
+        crate::team_sched::nudge_pm_after_resume(app, team_id).await?;
+    }
     // §4.5: releasing `gate:dispatch` is what actually starts the batch the PM planned, so
     // the branches are cut and the relays queued here rather than on some later pass.
     if let Err(e) = crate::team_sched::fill_now(app, team_id).await {
