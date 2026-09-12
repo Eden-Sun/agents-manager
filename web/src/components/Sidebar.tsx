@@ -46,6 +46,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
+import { useWheelRef } from '../hooks/useWheelRef'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
@@ -832,6 +833,13 @@ function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | nu
   return out
 }
 
+/** 原生 wheel 事件的 `currentTarget` 型別是 `EventTarget | null`，套上 `.bot-kids` 那個節點再交給 `wheelKidsScroll`。 */
+function kidsWheel(e: WheelEvent) {
+  const el = e.currentTarget
+  if (!(el instanceof HTMLElement)) return
+  wheelKidsScroll({ currentTarget: el, deltaX: e.deltaX, deltaY: e.deltaY, shiftKey: e.shiftKey, preventDefault: () => e.preventDefault() })
+}
+
 /** 拖曳中的專案，以及游標落在哪個專案的哪一半。與 bot 的 `DragState` 分開：兩種拖曳不互相干擾。 */
 type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
 
@@ -893,6 +901,8 @@ export function Sidebar() {
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
   const botOrder = useStore((s) => s.botOrder)
   const moveBot = useStore((s) => s.moveBot)
+  // shift+滾輪橫捲子 agent 列要 preventDefault，React 的 onWheel 是 passive 做不到（見 useWheelRef）。
+  const kidsWheelRef = useWheelRef<HTMLDivElement>(kidsWheel)
   const [drag, setDrag] = useState<DragState>(null)
   const shellSupported = useStore((s) => s.hostShellSupported)
   const openHostShell = useStore((s) => s.openHostShell)
@@ -1319,7 +1329,7 @@ export function Sidebar() {
                         onStep={step}
                       />
                       {shut || kids.length === 0 ? null : (
-                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} onWheel={wheelKidsScroll}>
+                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} ref={kidsWheelRef}>
                           {kids.map((c, i) => (
                             <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}`}>
                               <BotRow

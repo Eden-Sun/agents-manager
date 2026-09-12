@@ -154,7 +154,6 @@ export function UnreadChip() {
         ref={barRef}
         role="status"
         aria-live="polite"
-        onWheel={scroll.onWheel}
       >
         {items.map((it) => (
           <button
@@ -275,30 +274,33 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
     const bar = barRef.current
     if (!bar) return
     sync()
+    // 滾輪要原生、非 passive 地掛：React 的 onWheel 是 passive，裡面的 preventDefault 無效，
+    // 「到底才把滾動還給整頁」的分流就失效，列橫捲的同時整頁也直捲。
+    const onWheel = (e: WheelEvent) => {
+      if (!active) return
+      const max = bar.scrollWidth - bar.clientWidth
+      if (max <= 4 || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
+      const next = Math.min(max, Math.max(0, bar.scrollLeft + e.deltaY))
+      if (next === bar.scrollLeft) return // 已經到底：把滾動還給整頁
+      e.preventDefault()
+      bar.scrollLeft = next
+    }
     bar.addEventListener('scroll', sync, { passive: true })
+    bar.addEventListener('wheel', onWheel, { passive: false })
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(sync)
     ro?.observe(bar)
     return () => {
       bar.removeEventListener('scroll', sync)
+      bar.removeEventListener('wheel', onWheel)
       ro?.disconnect()
     }
-  }, [barRef, sync])
+  }, [barRef, sync, active])
   const by = (dir: 1 | -1) => {
     const bar = barRef.current
     if (!bar) return
     bar.scrollBy({ left: dir * Math.max(120, bar.clientWidth * 0.6), behavior: 'smooth' })
   }
-  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    const bar = barRef.current
-    if (!bar || !active) return
-    const max = bar.scrollWidth - bar.clientWidth
-    if (max <= 4 || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
-    const next = Math.min(max, Math.max(0, bar.scrollLeft + e.deltaY))
-    if (next === bar.scrollLeft) return // 已經到底：把滾動還給整頁
-    e.preventDefault()
-    bar.scrollLeft = next
-  }
-  return { ...edges, by, onWheel }
+  return { ...edges, by }
 }
 
 /**
