@@ -14,7 +14,7 @@
 //!   reply that arrives while the team is paused is still recorded.
 //! * [`startup`] — phase `starting`: start the members, then hand the issue to the PM.
 //!
-//! # The seven loop guards of §4.5, and where each one lives
+//! # The loop guards of §4.5, and where each one lives
 //!
 //! | § | guard | here |
 //! |---|---|---|
@@ -23,10 +23,11 @@
 //! | relay budget | `max_relays`, repair prompts included | [`flush`] refuses to deliver past the cap → `paused(budget_relays)` |
 //! | review rounds | `max_review_rounds` | [`Verdict::request_changes`] handling → `exhausted` + `paused(review_exhausted)` |
 //! | dispatch cap | one open task per worker; no identical repeat | [`dispatch`] (plus the DB's partial unique index) |
+//! | PM stall | no task left to wait for, then repeated `wait` | [`wait`] nudges once, then `paused(pm_stalled)` |
 //! | wall clock | `max_wall_clock_min` | [`gates`] |
 //! | quota | `quota_stop_pct` per relay | [`gates`] and again inside [`flush`] |
 //!
-//! And the eighth rule that binds them: **every one of those pauses, never aborts** (§4.5
+//! And the final rule that binds them: **every one of those pauses, never aborts** (§4.5
 //! last row). `aborting` is reachable from `POST /teams/:id/abort` alone.
 
 use crate::db;
@@ -1106,9 +1107,21 @@ async fn report_member_start_failure(app: &Arc<App>, team_id: &str, bot: &db::Bo
     Ok(())
 }
 
+/// Stop members left running when startup takes a terminal failure path. Cleanup is deliberately
+/// best effort: the startup error and its timeline note are the useful diagnosis, so a failed
+/// stop must only be logged and never replace them.
+async fn stop_failed_startup_members(app: &Arc<App>, members: &[db::Bot]) {
+    for b in members {
+        if let Err(e) = lifecycle::stop_bot(app, &b.id).await {
+            tracing::warn!(bot = %b.name, error = ?e, "startup failure cleanup: stop_bot failed");
+        }
+    }
+}
+
 /// Start a done Team's long-lived members for a queued continuation. The old issue's workers
-/// are retired first; PM/reviewer keep their bot ids, worktrees and conversations, and ask the
-/// lifecycle layer to resume their last native session when the provider supports it.
+/// are retired before PM/reviewer start; PM/reviewer keep their bot ids, worktrees and
+/// conversations, and ask the lifecycle layer to resume their last native session when the
+/// provider supports it.
 async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let issues = db::team_issues(&app.db, team_id).await.map_err(up)?;
     let previous = issues
@@ -1116,13 +1129,22 @@ async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .filter(|i| i.state == "done")
         .max_by_key(|i| i.seq)
         .ok_or_else(|| LcError::Upstream("cannot reopen a team with no completed issue".into()))?;
-    team::retire_issue_workers(app, team_id, &previous.id).await;
-
     let ctx = Ctx::load(app, team_id).await?;
-    for e in crate::trust::pretrust_members(app, &ctx.members).await {
+    // Pretrust only the long-lived members before retirement: stopping old worker panes and
+    // removing their per-issue worktrees must not get in the way of the PM/reviewer starts.
+    // The next worker batch is pretrusted separately by `start_issue_workers`.
+    let long_lived: Vec<db::Bot> = ctx
+        .members
+        .iter()
+        .filter(|b| matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer")))
+        .cloned()
+        .collect();
+    for e in crate::trust::pretrust_members(app, &long_lived).await {
         tracing::warn!(team = %team_id, error = %e, "could not pre-trust a team worktree on reopen");
         note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
     }
+    // Retirement remains idempotent: deleted workers are skipped on a retry.
+    team::retire_issue_workers(app, team_id, &previous.id).await;
     for b in &ctx.members {
         if !matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer")) {
             continue;
@@ -1304,6 +1326,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
                     if !team::sched_phase(app, team_id, "failed", false).await? {
                         return Ok(());
                     }
+                    stop_failed_startup_members(app, &ctx.members).await;
                     if let Err(e) = team::cleanup(app, team_id).await {
                         tracing::warn!(team = team_id, error = ?e, "cleanup after a failed PM start");
                     }
@@ -1319,6 +1342,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     }
     if !failed.is_empty() && failed.len() == ctx.workers().len() {
         team::sched_phase(app, team_id, "failed", false).await?;
+        stop_failed_startup_members(app, &ctx.members).await;
         return Ok(());
     }
 
@@ -2153,10 +2177,11 @@ async fn fill_issue(app: &Arc<App>, ctx: &Ctx, issue: &db::TeamIssue) -> LcResul
     Ok(())
 }
 
-/// §8.3: a PM that says `wait` when there is nothing left to wait for gets one nudge, once.
+/// §8.3: a PM that says `wait` when there is nothing left to wait for gets one nudge; the next
+/// such reply pauses the team until a user decides what to do.
 async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     let tasks = sched_tasks(app, ctx).await?;
-    if tasks.is_empty() || !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
+    if !tasks.is_empty() && !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
         return Ok(());
     }
     let Some(pm) = ctx.pm() else { return Ok(()) };
@@ -2175,6 +2200,19 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             .and_then(|p| p.get("action").and_then(Value::as_str).map(String::from))
             .unwrap_or_default();
         if a == "nudge" {
+            if ctx.team.phase != "paused" {
+                pause(app, &ctx.team, "pm_stalled").await?;
+                enqueue(
+                    app,
+                    &ctx.team.id,
+                    None,
+                    &pm.id,
+                    None,
+                    "nudge",
+                    "PM 連續兩次回覆 `wait`，team 已暫停，等使用者決定。".into(),
+                )
+                .await?;
+            }
             return Ok(());
         }
     }
@@ -2186,6 +2224,23 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         None,
         "nudge",
         format!("所有 {} 個 task 都已進入終態。請 `done`（附 summary）或再 `dispatch`。", tasks.len()),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// §8.3: resume a `pm_stalled` team with a fresh prompt instead of leaving the PM idle.
+pub async fn nudge_pm_after_resume(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let ctx = Ctx::load(app, team_id).await?;
+    let Some(pm) = ctx.pm() else { return Ok(()) };
+    enqueue(
+        app,
+        team_id,
+        None,
+        &pm.id,
+        None,
+        "nudge",
+        "team 已恢復執行。請 `done`（附 summary）或再 `dispatch`。".into(),
     )
     .await
     .map(|_| ())
@@ -3362,6 +3417,92 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert!(db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().is_some());
     }
 
+    /// A startup that loses every executor is terminal. The members that did start must be
+    /// stopped, while the member_start_failed notes remain the source of the diagnosis.
+    #[tokio::test]
+    async fn startup_all_workers_failed_stops_started_members_and_keeps_reason() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(2), true)).await;
+        let s = S { e, tid };
+        let members = s.ctx().await.members;
+        let workers: Vec<db::Bot> = members
+            .iter()
+            .filter(|b| b.team_role.as_deref() == Some("worker"))
+            .cloned()
+            .collect();
+        let bad_cwd = s.e.repo.to_string_lossy().to_string();
+        for worker in &workers {
+            sqlx::query("UPDATE bots SET cwd=? WHERE id=?")
+                .bind(&bad_cwd)
+                .bind(&worker.id)
+                .execute(&s.app().db)
+                .await
+                .unwrap();
+        }
+
+        startup(s.app(), &s.tid).await.unwrap();
+
+        assert_eq!(s.team().await.phase, "failed");
+        let pm = members.iter().find(|b| b.team_role.as_deref() == Some("pm")).unwrap();
+        let reviewer = members.iter().find(|b| b.team_role.as_deref() == Some("reviewer")).unwrap();
+        for member in [pm, reviewer] {
+            let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1")
+                .bind(&member.id)
+                .fetch_one(&s.app().db)
+                .await
+                .unwrap();
+            assert_eq!(state, "stopped", "{} was not stopped", member.name);
+        }
+        let notes: Vec<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND kind='note' ORDER BY seq",
+        )
+        .bind(&s.tid)
+        .fetch_all(&s.app().db)
+        .await
+        .unwrap();
+        let failures: Vec<Value> = notes
+            .iter()
+            .filter_map(|n| serde_json::from_str(n).ok())
+            .filter(|p: &Value| p["action"] == "member_start_failed")
+            .collect();
+        assert_eq!(failures.len(), workers.len());
+        assert!(failures.iter().all(|p| p["error"].as_str().unwrap_or_default().contains("inside the project checkout")));
+        assert!(s.e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
+    }
+
+    /// One failed executor is survivable: startup continues with the healthy worker and does
+    /// not stop the PM or reviewer that were successfully started.
+    #[tokio::test]
+    async fn startup_partial_worker_failure_keeps_started_members_running() {
+        let e = env().await;
+        let tid = make_team(&e.app, &e.project_id, req(Some(2), true)).await;
+        let s = S { e, tid };
+        let members = s.ctx().await.members;
+        let worker = members
+            .iter()
+            .find(|b| b.team_role.as_deref() == Some("worker"))
+            .unwrap();
+        sqlx::query("UPDATE bots SET cwd=? WHERE id=?")
+            .bind(s.e.repo.to_string_lossy().to_string())
+            .bind(&worker.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+
+        startup(s.app(), &s.tid).await.unwrap();
+
+        assert_eq!(s.team().await.phase, "planning");
+        for member in members.iter().filter(|b| matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer"))) {
+            let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1")
+                .bind(&member.id)
+                .fetch_one(&s.app().db)
+                .await
+                .unwrap();
+            assert_eq!(state, "running", "{} was stopped after a partial worker failure", member.name);
+        }
+        assert!(!s.e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
+    }
+
     /// §2.5.5: the hand-over relay explicitly distinguishes a successful native continuation
     /// from a fresh PM conversation, while both variants still target the next issue.
     #[tokio::test]
@@ -4490,9 +4631,9 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert_eq!(t.pause_reason.as_deref(), Some("pm_repeat"));
     }
 
-    /// §8.3 — `done` is verified, not taken on trust, and `wait` with nothing left nudges once.
+    /// §8.3 — `done` is verified, and repeated `wait` after all work is done pauses a stalled PM.
     #[tokio::test]
-    async fn done_is_checked_and_wait_nudges_once() {
+    async fn done_is_checked_and_wait_pauses_a_stalled_pm() {
         let s = S::new(1, false).await;
         let pm = s.bot("pm", 0).await;
         s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
@@ -4507,10 +4648,46 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
         assert_eq!(last["action"], "nudge");
         s.reply(&pm, json!({"action":"wait"})).await;
-        assert_eq!(s.pending(&pm).await.len(), n, "only one nudge, not a nudge loop");
+        let team = s.team().await;
+        assert_eq!(team.phase, "paused");
+        assert_eq!(team.pause_reason.as_deref(), Some("pm_stalled"));
+        assert_eq!(s.pending(&pm).await.len(), n + 1, "the pause explanation is queued once");
+        let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
+        assert_eq!(last["action"], "nudge");
+        assert!(last["text"].as_str().unwrap().contains("已暫停，等使用者決定"));
+    }
 
-        s.reply(&pm, json!({"action":"done","summary":"真的完成了"})).await;
-        assert_eq!(s.team().await.phase, "finishing");
+    #[tokio::test]
+    async fn resuming_pm_stalled_nudges_pm_again() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        set_task_state(s.app(), &s.tasks().await[0].id, "merged").await.unwrap();
+        s.reply(&pm, json!({"action":"wait"})).await;
+        s.reply(&pm, json!({"action":"wait"})).await;
+        assert_eq!(s.team().await.pause_reason.as_deref(), Some("pm_stalled"));
+
+        s.arm().await;
+        crate::team::resume(s.app(), &s.tid).await.unwrap();
+        assert_eq!(s.team().await.phase, "working");
+        let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
+        assert_eq!(last["action"], "nudge");
+        assert!(last["text"].as_str().unwrap().contains("`done`"));
+        assert!(last["text"].as_str().unwrap().contains("`dispatch`"));
+    }
+
+    #[tokio::test]
+    async fn waiting_twice_without_tasks_pauses_the_team() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"wait"})).await;
+        let last: Value = serde_json::from_str(&s.pending(&pm).await.last().unwrap().payload_json).unwrap();
+        assert_eq!(last["action"], "nudge");
+        s.reply(&pm, json!({"action":"wait"})).await;
+        let team = s.team().await;
+        assert_eq!(team.phase, "paused");
+        assert_eq!(team.pause_reason.as_deref(), Some("pm_stalled"));
+
     }
 
     /// §4.5 wall clock and quota — both pause, neither aborts.

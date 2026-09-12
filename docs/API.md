@@ -1728,6 +1728,13 @@ issue，其他 issue 照跑。`teams` 上的 `issue_number` / `branch` 變成「
 前端在 TeamPanel 副標題列畫成三列（`TeamRoleEditor.tsx`），側欄成員列的齒輪也開同一份表單——
 **不要**改用 `PATCH /api/bots/{id}`：那只會改到那一列 bot，`roles_json` 不動，下一批又跑回舊設定。
 
+#### `POST /api/teams/{id}/close-issue`（2026-09-08）
+
+關閉一個已完成的 team issue。body 可省略、為 `{}`，或帶 `comment`；reopen 後要關閉較早完成的 issue
+時帶 `issue_id`：`{"issue_id":"…","comment":"…"}`。省略 `issue_id` 會使用 `teams.issue_number` 對應的最後一趟。
+只有指定的 `team_issues` 列為 `done` 才會成功；每一列各自以 `issue_closed_at` 防止重複關閉，且只有目前鏡像
+issue 才會同步寫入 `teams.issue_closed_at`。預設留言也只讀該列的 branch、summary、PR 與該列 tasks。
+
 ## 子 agent（bot 自己開的 pane，2026-09-07 新增）
 
 daemon 起的每個 agent 都帶一段預設人設（`lifecycle::child_agent_rules`，接在使用者的 `bot.persona` 前面）：

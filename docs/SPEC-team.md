@@ -155,6 +155,7 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 | --- | --- |
 | `budget_time` / `budget_relays` | 「加碼並繼續」＝ `PATCH` 把 `max_relays`、`max_wall_clock_min` 各 ×2，成功後 `resume`（同 TeamPanel 標題列的兩顆） |
 | `ask_user`、`gate:*`、`member_*` | 不給按鈕，只顯示原因——回答 PM、放行閘門、救成員都得在 TeamPanel 裡做 |
+| `pm_stalled` | 「繼續」＝ `resume`；恢復後 daemon 再提醒 PM `done` 或 `dispatch` |
 | 其餘（`user`、`quota_low`、`merge_conflict`…） | 「繼續」＝ `resume`（`quota_low` 的成員名單在 tooltip，見 §4.5 `pause_detail`） |
 
 ### 2.4 Submodule 的 issue（2026-09-07）
@@ -250,7 +251,7 @@ PM 的價值在它記得這個 repo、記得上一個 issue 的取捨。停掉�
   沿用 IssuesBar 的 issue 挑選器亦可），送 `store.addTeamIssues`（store 已有，之前沒有任何元件呼叫）。
   已 cleanup 的 team（PM bot `deleted_at` 非空，或 daemon 回 409 `team is cleaned up`）不顯示這顆按鈕。
 - 送出後 `team_changed` 會把 phase 推成 `starting` → `planning`，既有面板自動切回進行中視圖（composer 解鎖、成員 lamp 亮起）。
-- Timeline 多兩種 note 的呈現：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）、`member_context_lost`（「PM 沒能續接先前對話，已改為新對話」）。
+- Timeline 多兩種 note 的呈現：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）、`member_context_lost`（「PM 沒能續接先前對話（<原因>），改為新對話」）；`why` 為 `no_session_id`→「找不到先前的 session」、`unsupported_kind`→「這個 agent 不支援原生續接」、`resume_mismatch`→「續接後的 session 不一致」，未知代碼→「未知原因」。
 - `IssueQueue` 目前 `issues.length < 2` 就不畫；reopen 後至少 2 個，會自然出現。
 
 #### 2.5.6 驗收條件
@@ -362,7 +363,7 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 | 角色 | action | 欄位 | 語意 |
 |---|---|---|---|
 | pm | `dispatch` | `tasks:[{to?, issue?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
-| pm | `wait` | — | 目前沒事做，等回報 |
+| pm | `wait` | — | 目前沒事做，等回報；若沒有 task 或所有 task 都已終態，第一次送 nudge，第二次（含）→ `paused(pm_stalled)`，等使用者 `resume` 後再提醒 `done` 或 `dispatch` |
 | pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
 | pm | `abort` | `reason` | PM 認為做不了 → team `paused(pm_abort)`（不直接 abort，讓人決定） |
@@ -405,6 +406,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | **回合預算** | `budget.max_relays`（預設 40）：所有 relay（含修復提示）計數；到頂 → `paused(budget_relays)`。使用者插話不計。無限模式下每個 relay 都被戳上「第一個 working 的 issue」，按 issue 分不出來，因此上限改成 `max_relays × 已開工的 issue 數`——同樣是「每個 issue 一份預算」的意思。 |
 | **審查回合** | 每個 task `budget.max_review_rounds`（預設 2）：`request_changes` 第 N+1 次 → task `exhausted`，team `paused(review_exhausted)`，由人決定強制合併 / 跳過 / 再給一回合。 |
 | **併行數**（2026-09-08，原「派工上限」） | `workers.count`（1–4，預設 1）是**同時能跑幾個 task**，不是 PM 要自己分配的人頭。每個執行者同時最多 1 個未完成 task（DB 的 `team_tasks_one_open_per_worker` 保證），所以併行數 n = 最多 n 筆同時在跑。PM 可以隨時 `dispatch`，不必等前一批做完：多的進佇列，跑完一筆補一筆。**同一個 issue 內出現第二次完全相同的 `brief`**（不分執行者）→ `paused(pm_repeat)`。 |
+| **PM 停頓** | PM 在沒有 task 或所有 task 都已終態時回 `wait`，第一次送 nudge；第二次（含）→ `paused(pm_stalled)`，並排一則「已暫停，等使用者決定」的 relay。使用者 `resume` 後再 nudge PM `done` 或 `dispatch`。 |
 | **時間** | `budget.max_wall_clock_min`（預設 120）：從當前 issue 的 `started_at` 起算，**扣掉暫停的時間**（從 phase 事件加總；2026-09-09 前不扣，隔夜的 `quota_low` 一 resume 就撞 `budget_time`），到頂 → `paused(budget_time)`。 |
 | **額度** | 每次送 relay 前查 `quota::get(kind)`：任一週期 `used_pct ≥ budget.quota_stop_pct`（預設 90）→ `paused(quota_low)`；額度沒資料時不擋；**`quota_stop_pct = 100` 視為關掉額度檢查**（2026-09-09，UI 的「無視額度繼續」就是 PATCH 成 100 再 resume，建 team / reopen 的預檢同樣不擋）。**暫停要指名道姓**（2026-09-09）：`quota_low` 一律附 `pause_detail`（見下），寫明是哪個成員、哪個身分、哪個視窗、剩多少、幾點 reset。 |
 | **停頓不是中止** | 所有上限都只 `paused`，成員 pane 還活著；使用者 `PATCH budget` 後 `resume`。中止只有人能按。 |
@@ -620,7 +622,7 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 
 - **建 team**（`POST /projects/:id/teams`，同步部分）：驗證（git repo、issue 存在、kind 已安裝、額度未低於 `quota_stop_pct`）→ **先 `git rev-parse` 解出 `base_sha`、算出 `worktree_root`** → 寫 `teams`（`phase=starting`）→ 建 worktree → 建成員 bot → 回 `{team_id}`。
   - ⚠️ `base_sha` / `worktree_root` 是 `NOT NULL`，所以**必須在寫 row 之前就解出來**（附錄 C 的序列即為此）。早期版本把「寫 row」排在解析之前，兩節不一致，以此處為準。worktree 目錄本身可以在寫 row 之後才建 —— 路徑是算出來的，不需要先存在。之後**背景**逐一 `start_bot`（沿用 SPEC §6.2；每個 60 秒上限）。
-  - PM 起不來 → `failed` + cleanup。worker 部分起不來 → 少一個人繼續（≥1 即可），記 note。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
+  - PM 起不來 → `failed` + cleanup；任何直接進 `failed` 的 startup 失敗，都先對已啟動成員逐一 best-effort `stop_bot`，停止失敗只記 log，不覆蓋原本的 `member_start_failed` 原因。worker 部分起不來 → 少一個人繼續（≥1 即可），不做這項清理，記 note。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
   - 全部就緒 → `planning`，送 PM 第一則 relay（附錄 A.1）。
 - **停止**：`done / aborted / failed` 時 daemon 對所有成員 `stop_bot`（SPEC §6.4）。成員 pane 不會在 team 還活著時被 daemon 自動停。
 - **使用者手動停某個成員**（既有 `POST /bots/:id/stop`）：scheduler 收到 `RunChanged` → 該成員相關 relay 留在 pending → `paused(member_lost:<name>)`。使用者重新 `start` 該 bot 後按 `resume`；暫停橫幅上的「啟動並繼續」（2026-09-10，`TeamMemberLost`）會把沒在跑的成員全部 `start`、都有 run 之後自動 `resume`，仍是人按的。**不自動重啟**（維持 §13「絕不自動啟動」的精神；自動重啟會讓額度在無人看管下持續消耗）。
@@ -710,7 +712,7 @@ queued ──relay 送達──► working ──report{done}──► reported 
 
 ### 8.3 誰判定完成
 - **task 完成**：reviewer `approve`（或無 reviewer）且 daemon merge 成功。不是 worker 說 done 就算。
-- **team 完成**：PM 發 `done` **且** daemon 驗證所有 task ∈ 終態。PM 在所有 task 終態後若只回 `wait`，daemon 送一則「所有 task 已合併，請 `done` 或再 `dispatch`」（算 relay）。
+- **team 完成**：PM 發 `done` **且** daemon 驗證所有 task ∈ 終態。PM 在沒有 task 或所有 task 終態後若回 `wait`，daemon 第一次送一則「請 `done` 或再 `dispatch`」的 nudge；第二次（含）把 team 暫停為 `paused(pm_stalled)`，另排一則說明「已暫停，等使用者決定」。使用者 `resume` 後再送一則 nudge，重新要求 PM `done` 或 `dispatch`。
 - PM 的 `done.summary` 成為 PR body / team 摘要。
 
 ### 8.4 PM 收件箱與「每 Run 一筆 in-flight」
@@ -877,7 +879,7 @@ issue 標題常常是一整句規格，手機的標題列與切換器只看得�
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/teams/{id}/close-issue` | 省略、`{}`、`{"comment": "…"}` 或 `{"comment": ""}` | `200 {number, url, title, repo, state:"CLOSED", already_closed}` |
+| POST | `/teams/{id}/close-issue` | 省略、`{}`、`{"comment": "…"}`、`{"comment": ""}` 或 `{"issue_id":"…", "comment":"…"}` | `200 {number, url, title, repo, state:"CLOSED", already_closed}` |
 
 規則（兩條，缺一不可）：
 
