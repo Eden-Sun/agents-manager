@@ -1484,6 +1484,18 @@ pub async fn step(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         pause(app, &ctx.team, "worktree_missing").await?;
         return Ok(());
     }
+    // A finite-parallelism team between issues: the last one is settled, the next is still
+    // queued, and the advance that should have started it failed (`paused(upstream)`, then
+    // "continue"). Nothing below would ever start it — the gates, the task engine and the
+    // outbox all key off the working issue — so the advance is retried here (ops #4).
+    if !ctx.unlimited()
+        && ctx.issues.is_empty()
+        && matches!(ctx.team.phase.as_str(), "planning" | "working")
+        && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_some()
+    {
+        note(app, team_id, json!({"action": "issue_advance_retry"})).await?;
+        return close_issue_and_advance(app, team_id, "done", None, None).await;
+    }
     if !gates(app, &ctx).await? {
         return Ok(());
     }
@@ -2565,26 +2577,57 @@ pub async fn relay_rework_decision(
 
 /// Phase `finishing`. `branch` writes a summary and stops; `pr` is the one path in the whole
 /// feature that pushes, and it says so in the note it leaves behind.
+///
+/// Re-entrant (2026-09-12 review, ops #4): `close_issue_and_advance` marks the issue `done`
+/// and then starts the next one, and that start can fail (a dirty `main/`) → `paused(upstream)`
+/// with `resume_phase = finishing`. "Continue" lands here again, so this must not deliver a
+/// second time: the working issue is gone (already `done`) or already carries a `delivered` /
+/// `pr_created` note, and either way the only thing left to do is the advance.
 async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
-    if !gate_open(app, &ctx.team, "deliver").await {
-        hold_gate(app, ctx, "deliver", json!({"deliver": ctx.team.deliver, "branch": ctx.team.branch})).await?;
-        return Ok(());
-    }
     let summary = ctx.team.summary.clone().unwrap_or_default();
-    if !deliver_branch_or_pr(
-        app,
-        ctx,
-        ctx.team.issue_number,
-        &ctx.team.issue_title.clone(),
-        &ctx.team.branch.clone(),
-        ctx.issue_id().map(String::from).as_deref(),
-        &summary,
-    )
-    .await?
-    {
-        return Ok(());
+    if let Some(current) = ctx.issue().cloned() {
+        if !already_delivered(app, &ctx.team.id, &current.id).await {
+            if !gate_open(app, &ctx.team, "deliver").await {
+                hold_gate(app, ctx, "deliver", json!({"deliver": ctx.team.deliver, "branch": ctx.team.branch})).await?;
+                return Ok(());
+            }
+            let branch = current.branch.clone().unwrap_or_else(|| ctx.team.branch.clone());
+            if !deliver_branch_or_pr(
+                app,
+                ctx,
+                current.issue_number,
+                &current.issue_title,
+                &branch,
+                Some(current.id.as_str()),
+                &summary,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+        } else {
+            note(app, &ctx.team.id, json!({"action": "deliver_skipped", "issue_number": current.issue_number,
+                 "why": "already delivered"}))
+            .await?;
+        }
     }
     close_issue_and_advance(app, &ctx.team.id, "done", None, Some(summary.as_str())).await
+}
+
+/// Has this queue entry already been handed over? `deliver_branch_or_pr` leaves a `delivered`
+/// (branch) or `pr_created` (pr) note stamped with the issue, and a reopened issue is a new
+/// row with a new id, so the note is never mistaken for an earlier round's.
+async fn already_delivered(app: &Arc<App>, team_id: &str, issue_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM team_events WHERE team_id = ? AND issue_id = ? AND kind = 'note'
+           AND json_extract(payload_json, '$.action') IN ('delivered', 'pr_created')",
+    )
+    .bind(team_id)
+    .bind(issue_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap_or(0)
+        > 0
 }
 
 /// §6.4: hand one issue over — a local branch, or a PR when the team was asked for one.
@@ -2617,6 +2660,9 @@ async fn deliver_branch_or_pr(
                 // §6.4: not a GitHub project (or `gh` unusable) → quietly become `branch`.
                 note(app, &ctx.team.id, json!({"action": "deliver_downgraded", "to": "branch",
                      "why": "project has no GitHub origin"}))
+                .await?;
+                note(app, &ctx.team.id, json!({"action": "delivered", "deliver": "branch",
+                     "branch": branch, "pushed": false, "summary": summary}))
                 .await?;
             }
             Some(info) => {
@@ -2690,31 +2736,41 @@ async fn close_issue_and_advance(
         let Some(current) = ctx.issue().cloned() else { return end_team(app, &ctx).await };
         return close_one_issue(app, team_id, &current, state, fail_reason, summary).await;
     }
-    let Some(current) = ctx.issue().cloned() else {
-        // No current issue at all: nothing to settle, so this is simply the end.
-        return end_team(app, &ctx).await;
+    // Settle the working issue — or, with none, pick up where a previous pass left off: it
+    // settled the issue and then `start_issue(next)` failed, so the team paused with the
+    // queue still holding the next entry (2026-09-12 review, ops #4). Ending the team there
+    // used to throw the rest of the queue away.
+    let (settled_id, settled_state) = match ctx.issue().cloned() {
+        Some(current) => {
+            sqlx::query(
+                "UPDATE team_issues SET state = ?, fail_reason = ?, summary = COALESCE(?, summary), ended_at = ?
+                 WHERE id = ?",
+            )
+            .bind(state)
+            .bind(fail_reason)
+            .bind(summary)
+            .bind(db::now())
+            .bind(&current.id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+            note(
+                app,
+                team_id,
+                json!({"action": if state == "done" { "issue_finished" } else { "issue_failed" },
+                       "issue_number": current.issue_number, "seq": current.seq,
+                       "branch": current.branch, "reason": fail_reason}),
+            )
+            .await?;
+            clear_rescue(app, team_id).await?;
+            (current.id, state.to_string())
+        }
+        None => match last_settled_issue(app, team_id).await? {
+            Some(prev) => (prev.id, prev.state),
+            // No issue at all: nothing to settle, so this is simply the end.
+            None => return end_team(app, &ctx).await,
+        },
     };
-    sqlx::query(
-        "UPDATE team_issues SET state = ?, fail_reason = ?, summary = COALESCE(?, summary), ended_at = ?
-         WHERE id = ?",
-    )
-    .bind(state)
-    .bind(fail_reason)
-    .bind(summary)
-    .bind(db::now())
-    .bind(&current.id)
-    .execute(&app.db)
-    .await
-    .map_err(up)?;
-    note(
-        app,
-        team_id,
-        json!({"action": if state == "done" { "issue_finished" } else { "issue_failed" },
-               "issue_number": current.issue_number, "seq": current.seq,
-               "branch": current.branch, "reason": fail_reason}),
-    )
-    .await?;
-    clear_rescue(app, team_id).await?;
     let next = db::next_queued_issue(&app.db, team_id).await.map_err(up)?;
     let Some(next) = next else {
         // Last issue: leave the worktrees exactly as `finish` always did. `done` stops the
@@ -2725,12 +2781,13 @@ async fn close_issue_and_advance(
     };
     // Only now — with somewhere to go — are this issue's executors replaced. Unless the PM
     // asked to keep them (`done.workers = "keep"`): then they stay up, with their context, and
-    // only their leftover tasks are closed out.
-    let keep = state == "done" && keep_workers_for(app, team_id, &current.id).await;
+    // only their leftover tasks are closed out. Both are idempotent, so a retried advance
+    // (see above) does no harm here.
+    let keep = settled_state == "done" && keep_workers_for(app, team_id, &settled_id).await;
     if keep {
-        team::fail_open_tasks(app, team_id, &current.id).await;
+        team::fail_open_tasks(app, team_id, &settled_id).await;
     } else {
-        team::retire_issue_workers(app, team_id, &current.id).await;
+        team::retire_issue_workers(app, team_id, &settled_id).await;
     }
     if let Err(e) = team::start_issue(app, team_id, &next, keep).await {
         // The team is healthy but the queue cannot move; that is a human problem, not a
@@ -2749,6 +2806,19 @@ async fn close_issue_and_advance(
         start_issue_workers(app, team_id).await?;
     }
     hand_issue_to_pm(app, team_id, keep, None).await
+}
+
+/// The most recent queue entry that has reached a terminal state — what a retried advance
+/// (`close_issue_and_advance` with no working issue) is advancing *from*.
+async fn last_settled_issue(app: &Arc<App>, team_id: &str) -> LcResult<Option<db::TeamIssue>> {
+    sqlx::query_as::<_, db::TeamIssue>(
+        "SELECT * FROM team_issues WHERE team_id = ? AND state IN ('done','failed','skipped')
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(team_id)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(up)
 }
 
 // ---------------------------------------------------------------- unlimited parallelism (§4.5)
@@ -4348,6 +4418,81 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         // The relay budget starts again for the new issue (§2.3).
         let c = s.ctx().await;
         assert_eq!(relay_count(s.app(), &s.tid, c.issue_id(), "delivered").await, 0);
+    }
+
+    /// ops #4 (2026-09-12): `finish` delivered #42, marked it `done`, and then could not start
+    /// #43 (dirty `main/`) → `paused(upstream)` with `resume_phase = finishing`. "Continue"
+    /// used to deliver #42 a second time and, finding no working issue, end the team with #43
+    /// still queued. Now the second pass skips the delivery and only retries the advance.
+    #[tokio::test]
+    async fn finishing_is_reentrant_after_the_next_issue_fails_to_start() {
+        let s = S::with_issues(1, true, vec![issue(), issue2()]).await;
+        let (pm, rev, d1) = (s.bot("pm", 0).await, s.bot("reviewer", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        s.reply(&rev, json!({"action":"verdict","result":"approve"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        s.reply(&pm, json!({"action":"done","summary":"完成了 A"})).await;
+        assert_eq!(s.team().await.phase, "finishing");
+
+        // `start_issue(#43)` refuses a dirty integration worktree.
+        let stray = s.wt("main").join("stray.txt");
+        std::fs::write(&stray, "oops\n").unwrap();
+        let ctx = s.ctx().await;
+        finish(s.app(), &ctx).await.unwrap();
+        let delivered = |notes: &[String]| notes.iter().filter(|n| n.contains("\"delivered\"")).count();
+        let notes = async |s: &S| -> Vec<String> {
+            sqlx::query_scalar("SELECT payload_json FROM team_events WHERE team_id=? AND kind='note'")
+                .bind(&s.tid)
+                .fetch_all(&s.app().db)
+                .await
+                .unwrap()
+        };
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(t.resume_phase.as_deref(), Some("finishing"));
+        let q = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!((q[0].state.as_str(), q[1].state.as_str()), ("done", "queued"));
+        assert_eq!(delivered(&notes(&s).await), 1);
+
+        // The user removes the stray file and presses "continue".
+        std::fs::remove_file(&stray).unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "finishing", None, None).await.unwrap();
+        step(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_ne!(t.phase, "done", "the queue was not thrown away");
+        assert_eq!(t.phase, "planning");
+        assert_eq!(t.issue_number, 43);
+        let q = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!((q[0].state.as_str(), q[1].state.as_str()), ("done", "working"));
+        assert_eq!(delivered(&notes(&s).await), 1, "#42 was not delivered a second time");
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), t.branch);
+        assert_eq!(s.ctx().await.workers().len(), 1, "#43 got its executor");
+    }
+
+    /// The same stall on the `failed` road (a `DECISION_PAUSES` reason with a queue behind it):
+    /// `resume_phase` is `working`, not `finishing`, so it is `step` that has to notice the
+    /// team is between issues and retry the advance.
+    #[tokio::test]
+    async fn a_stalled_advance_is_retried_by_the_next_pass() {
+        let s = S::with_issues(1, true, vec![issue(), issue2()]).await;
+        let stray = s.wt("main").join("stray.txt");
+        std::fs::write(&stray, "oops\n").unwrap();
+        close_issue_and_advance(s.app(), &s.tid, "failed", Some("merge_conflict"), None).await.unwrap();
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(s.ctx().await.issues.len(), 0);
+
+        std::fs::remove_file(&stray).unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "working", None, None).await.unwrap();
+        step(s.app(), &s.tid).await.unwrap();
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.issue_number), ("planning", 43));
+        let q = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!((q[0].state.as_str(), q[1].state.as_str()), ("failed", "working"));
     }
 
     #[tokio::test]
