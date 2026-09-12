@@ -2308,6 +2308,11 @@ button.run-debug-toggle:hover:not(:disabled) {
   min-width: 0;
 }
 
+/* 主面板的 tabpanel 殼：只為語意存在（UI-DECISIONS #11），不參與排版。 */
+.tab-panel {
+  display: contents;
+}
+
 .tabs {
   display: flex;
   flex: none;

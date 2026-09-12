@@ -1,6 +1,6 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
@@ -21,6 +21,7 @@ import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
 import { BotNameField } from './BotNameField'
 import { BotSwitcher } from './BotSwitcher'
 import { ConfirmDialog } from './ConfirmDialog'
+import { onTabListKeyDown } from './tabKeys'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { UpdateBadge } from './UpdateBadge'
@@ -1165,6 +1166,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const setRightTab = useStore((s) => s.setRightTab)
   const shellView = useStore((s) => s.shellView)
   const closeShellView = useStore((s) => s.closeShellView)
+  const panelId = useId()
   const settingsBotId = useStore((s) => s.settingsBotId)
   const openSettings = useStore((s) => s.openSettings)
   const closeSettings = useStore((s) => s.closeSettings)
@@ -1410,11 +1412,14 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
-        <div className="tabs" role="tablist">
+        {/* UI-DECISIONS〈無障礙語意（#11）〉：分頁吃 ←/→/Home/End（`tabKeys`），內容區掛 `tabpanel`。 */}
+        <div className="tabs" role="tablist" aria-label="主面板" onKeyDown={onTabListKeyDown}>
           <button
             type="button"
             className="tab"
             role="tab"
+            id={`${panelId}-tab-chat`}
+            aria-controls={`${panelId}-panel`}
             aria-selected={tab === 'chat' && !settingsOpen && !shellOpen}
             onClick={() => {
               closeShellView()
@@ -1427,6 +1432,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             type="button"
             className="tab"
             role="tab"
+            id={`${panelId}-tab-terminal`}
+            aria-controls={`${panelId}-panel`}
             aria-selected={tab === 'terminal' && !settingsOpen && !shellOpen}
             onClick={() => {
               closeShellView()
@@ -1436,7 +1443,15 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             終端
           </button>
           {shellOpen ? (
-            <button type="button" className="tab" role="tab" aria-selected title="主機 shell（按「關閉」回到對話）">
+            <button
+              type="button"
+              className="tab"
+              role="tab"
+              id={`${panelId}-tab-shell`}
+              aria-controls={`${panelId}-panel`}
+              aria-selected
+              title="主機 shell（按「關閉」回到對話）"
+            >
               shell
             </button>
           ) : null}
@@ -1466,6 +1481,14 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
 
       {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
+      {/* 內容區就是那幾個分頁的 tabpanel（同一塊，內容跟著分頁換）。`.tab-panel` 是 display: contents，
+          不改排版。 */}
+      <div
+        className="tab-panel"
+        role="tabpanel"
+        id={`${panelId}-panel`}
+        aria-labelledby={`${panelId}-tab-${shellOpen ? 'shell' : tab === 'terminal' && !settingsOpen ? 'terminal' : 'chat'}`}
+      >
       {shellOpen && shellView ? (
         <HostShellPanel key={`${shellView.host}:${shellView.paneId}`} host={shellView.host} paneId={shellView.paneId} cwd={shellView.cwd} embedded />
       ) : tab === 'terminal' && !settingsOpen ? (
@@ -1518,6 +1541,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}
+      </div>
     </>
   )
 }
