@@ -155,6 +155,7 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 | --- | --- |
 | `budget_time` / `budget_relays` | 「加碼並繼續」＝ `PATCH` 把 `max_relays`、`max_wall_clock_min` 各 ×2，成功後 `resume`（同 TeamPanel 標題列的兩顆） |
 | `ask_user`、`gate:*`、`member_*` | 不給按鈕，只顯示原因——回答 PM、放行閘門、救成員都得在 TeamPanel 裡做 |
+| `pm_stalled` | 「繼續」＝ `resume`；恢復後 daemon 再提醒 PM `done` 或 `dispatch` |
 | 其餘（`user`、`quota_low`、`merge_conflict`…） | 「繼續」＝ `resume`（`quota_low` 的成員名單在 tooltip，見 §4.5 `pause_detail`） |
 
 ### 2.4 Submodule 的 issue（2026-09-07）
@@ -362,7 +363,7 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 | 角色 | action | 欄位 | 語意 |
 |---|---|---|---|
 | pm | `dispatch` | `tasks:[{to?, issue?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
-| pm | `wait` | — | 目前沒事做，等回報 |
+| pm | `wait` | — | 目前沒事做，等回報；若沒有 task 或所有 task 都已終態，第一次送 nudge，第二次（含）→ `paused(pm_stalled)`，等使用者 `resume` 後再提醒 `done` 或 `dispatch` |
 | pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
 | pm | `abort` | `reason` | PM 認為做不了 → team `paused(pm_abort)`（不直接 abort，讓人決定） |
@@ -405,6 +406,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 | **回合預算** | `budget.max_relays`（預設 40）：所有 relay（含修復提示）計數；到頂 → `paused(budget_relays)`。使用者插話不計。無限模式下每個 relay 都被戳上「第一個 working 的 issue」，按 issue 分不出來，因此上限改成 `max_relays × 已開工的 issue 數`——同樣是「每個 issue 一份預算」的意思。 |
 | **審查回合** | 每個 task `budget.max_review_rounds`（預設 2）：`request_changes` 第 N+1 次 → task `exhausted`，team `paused(review_exhausted)`，由人決定強制合併 / 跳過 / 再給一回合。 |
 | **併行數**（2026-09-08，原「派工上限」） | `workers.count`（1–4，預設 1）是**同時能跑幾個 task**，不是 PM 要自己分配的人頭。每個執行者同時最多 1 個未完成 task（DB 的 `team_tasks_one_open_per_worker` 保證），所以併行數 n = 最多 n 筆同時在跑。PM 可以隨時 `dispatch`，不必等前一批做完：多的進佇列，跑完一筆補一筆。**同一個 issue 內出現第二次完全相同的 `brief`**（不分執行者）→ `paused(pm_repeat)`。 |
+| **PM 停頓** | PM 在沒有 task 或所有 task 都已終態時回 `wait`，第一次送 nudge；第二次（含）→ `paused(pm_stalled)`，並排一則「已暫停，等使用者決定」的 relay。使用者 `resume` 後再 nudge PM `done` 或 `dispatch`。 |
 | **時間** | `budget.max_wall_clock_min`（預設 120）：從當前 issue 的 `started_at` 起算，**扣掉暫停的時間**（從 phase 事件加總；2026-09-09 前不扣，隔夜的 `quota_low` 一 resume 就撞 `budget_time`），到頂 → `paused(budget_time)`。 |
 | **額度** | 每次送 relay 前查 `quota::get(kind)`：任一週期 `used_pct ≥ budget.quota_stop_pct`（預設 90）→ `paused(quota_low)`；額度沒資料時不擋；**`quota_stop_pct = 100` 視為關掉額度檢查**（2026-09-09，UI 的「無視額度繼續」就是 PATCH 成 100 再 resume，建 team / reopen 的預檢同樣不擋）。**暫停要指名道姓**（2026-09-09）：`quota_low` 一律附 `pause_detail`（見下），寫明是哪個成員、哪個身分、哪個視窗、剩多少、幾點 reset。 |
 | **停頓不是中止** | 所有上限都只 `paused`，成員 pane 還活著；使用者 `PATCH budget` 後 `resume`。中止只有人能按。 |
@@ -710,7 +712,7 @@ queued ──relay 送達──► working ──report{done}──► reported 
 
 ### 8.3 誰判定完成
 - **task 完成**：reviewer `approve`（或無 reviewer）且 daemon merge 成功。不是 worker 說 done 就算。
-- **team 完成**：PM 發 `done` **且** daemon 驗證所有 task ∈ 終態。PM 在所有 task 終態後若只回 `wait`，daemon 送一則「所有 task 已合併，請 `done` 或再 `dispatch`」（算 relay）。
+- **team 完成**：PM 發 `done` **且** daemon 驗證所有 task ∈ 終態。PM 在沒有 task 或所有 task 終態後若回 `wait`，daemon 第一次送一則「請 `done` 或再 `dispatch`」的 nudge；第二次（含）把 team 暫停為 `paused(pm_stalled)`，另排一則說明「已暫停，等使用者決定」。使用者 `resume` 後再送一則 nudge，重新要求 PM `done` 或 `dispatch`。
 - PM 的 `done.summary` 成為 PR body / team 摘要。
 
 ### 8.4 PM 收件箱與「每 Run 一筆 in-flight」

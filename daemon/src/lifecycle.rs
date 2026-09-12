@@ -178,7 +178,13 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
 /// between `queued -> in_flight` and the `agent.prompt` RPC calls `requeue_turn`, because a
 /// turn left `in_flight` with `delivery='pending'` has no other way out.
 async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
-    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return Ok(()) };
+    let conv = match db::conversation_id(&app.db, bot_id).await {
+        Ok(conv) => conv,
+        Err(error) => {
+            tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for queued prompt flush");
+            return Ok(());
+        }
+    };
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
@@ -1475,18 +1481,23 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
         }
         if not_logged_in {
             tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "identity not logged in on host; the CLI will use the machine's default login");
-            if let Ok(conv) = db::conversation_id(&app.db, bot_id).await {
-                let _ = insert_message(
-                    app,
-                    &conv,
-                    None,
-                    "system",
-                    &format!("身份 `{idn}` 在 {} 沒有登入：claude 會退回這台機器預設（cc0）的帳號執行。啟動後請按「登入 / 切換帳號」登入 `{idn}`。", project.host),
-                    "system",
-                    false,
-                    None,
-                )
-                .await;
+            match db::conversation_id(&app.db, bot_id).await {
+                Ok(conv) => {
+                    let _ = insert_message(
+                        app,
+                        &conv,
+                        None,
+                        "system",
+                        &format!("身份 `{idn}` 在 {} 沒有登入：claude 會退回這台機器預設（cc0）的帳號執行。啟動後請按「登入 / 切換帳號」登入 `{idn}`。", project.host),
+                        "system",
+                        false,
+                        None,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for identity warning");
+                }
             }
         }
     }
@@ -3631,7 +3642,13 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     if !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
         return;
     }
-    let Ok(conv) = db::conversation_id(&app.db, &run.bot_id).await else { return };
+    let conv = match db::conversation_id(&app.db, &run.bot_id).await {
+        Ok(conv) => conv,
+        Err(error) => {
+            tracing::warn!(error = ?error, bot = %run.bot_id, "could not get conversation for external turn");
+            return;
+        }
+    };
     let tid = db::ulid();
     if let Err(e) = sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
