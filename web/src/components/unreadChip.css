@@ -219,20 +219,33 @@
 }
 
 /* 同時有未讀：底維持未讀的實心藍（有東西等你看），左條改成反白色才看得見（你在這裡）。 */
+/*
+ * 目前使用中的那一顆再加一圈**綠色外框**（2026-09-13 使用者：「目前使用窗不夠明顯，要有綠色外框
+ * 標注」）。方角＋石墨左條是形狀訊號，這圈綠是一眼就看到的顏色訊號；綠在這一列沒有別的意思
+ * （藍＝未讀、紅＝要你回答、黃＝等子 agent），所以不會跟任何狀態混在一起。外框用 `box-shadow`
+ * 疊在左條旁邊，不佔版面、不位移。
+ */
+.unread-chip.current {
+  border-color: var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--text), 0 0 0 1px var(--lamp-green);
+}
+
 .unread-chip.current.unread {
   background: var(--accent);
-  border-color: var(--accent);
+  border-color: var(--lamp-green);
   color: var(--accent-text);
-  box-shadow: inset 3px 0 0 var(--accent-text);
+  box-shadow: inset 3px 0 0 var(--accent-text), 0 0 0 1px var(--lamp-green);
 }
 
 /* 方角照舊套在紅、黃、進行中那幾種身上——它是「你在這裡」的記號，跟顏色講的事無關。 */
 .unread-chip.current.needs-reply {
-  box-shadow: inset 3px 0 0 var(--danger);
+  border-color: var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--danger), 0 0 0 1px var(--lamp-green);
 }
 
 .unread-chip.current.waits-kids {
-  box-shadow: inset 3px 0 0 var(--warn);
+  border-color: var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--warn), 0 0 0 1px var(--lamp-green);
 }
 
 /* 紅（要你回答）與黃（等子 agent）講的是「該做什麼」，比「你在哪裡」重要：整顆填色維持它們
