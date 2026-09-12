@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useMenuKeys } from '../hooks/useMenuKeys'
 import { MoreIcon } from './Icons'
 
 /**
@@ -15,6 +16,10 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
   const pop = useRef<HTMLDivElement>(null)
+  const btn = useRef<HTMLButtonElement>(null)
+  // role="menu" 的鍵盤行為（Tools／ModelPicker 用的同一顆）：開啟時焦點進選單、↑↓/Home/End 走項目、
+  // Esc／Tab 關掉並把焦點還給 ⋯。以前只有 role 沒有行為，Tab 直接走出去。
+  const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
 
   // 選單是錨在按鈕上的 absolute 方塊，CSS 只能選一邊展開：手機的 team 標題列設成往右展開（`⋯`
   // 換行到最左時才放得下），但平常 `⋯` 在最右邊，整個選單就滑出右緣、裡面的項目點不到
@@ -48,6 +53,7 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
   return (
     <div className="head-menu" ref={wrap}>
       <button
+        ref={btn}
         type="button"
         className={`icon-btn head-menu-btn icon-tip${open ? ' on' : ''}`}
         aria-haspopup="menu"
@@ -60,7 +66,7 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
       </button>
       {open ? (
         // 點到裡面任何一顆按鈕就關起來：每一項都是「開確認框」或「離開」，沒有留著的理由。
-        <div ref={pop} className="head-menu-pop" role="menu" onClick={() => setOpen(false)}>
+        <div ref={pop} className="head-menu-pop" role="menu" aria-label={label} onClick={() => setOpen(false)} onKeyDown={menuKeys}>
           {children}
         </div>
       ) : null}
