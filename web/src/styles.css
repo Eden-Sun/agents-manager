@@ -1088,6 +1088,22 @@ button:disabled {
   margin-left: 1px;
 }
 
+/* 父列上的「在等子 agent」記號（2026-09-12 使用者）。黃色而不是紅色：紅色在這個 app 裡只代表
+   「要你本人回答」（`needs-reply`、blocked 燈），子 agent 沒好不需要你動手。實心 = 底下還在跑，
+   空心 = 子 agent 回報了還沒人看——後者是父列自己該收的，不搶父列那顆狀態燈的位置。 */
+.bot-kids-wait {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: -2px;
+  border-radius: 50%;
+  border: 1.5px solid var(--lamp-yellow);
+}
+
+.bot-kids-wait.busy {
+  background: var(--lamp-yellow);
+}
+
 .bot-kids-n {
   font-size: 10px;
   font-weight: 650;
