@@ -63,7 +63,8 @@ pub fn parse_version(s: &str) -> Option<Vec<u64>> {
     (!parts.is_empty()).then_some(parts)
 }
 
-fn version_string(s: &str) -> Option<String> {
+/// `2.1.269 (Claude Code)` → `2.1.269`。認不出來就是 `None`。
+pub fn version_string(s: &str) -> Option<String> {
     parse_version(s).map(|v| v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("."))
 }
 
@@ -114,7 +115,9 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
     picked
 }
 
-async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<String> {
+/// 那台主機**磁碟上**的版本（`<kind> --version`）。跑著的 process 可能還是舊的——
+/// 這正是 `update_watch` 用來判斷「重啟就會換新版」的那一半。
+pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<String> {
     let script = format!(
         r#"p=$( "${{SHELL:-/bin/sh}}" -lic "command -v {kind}" 2>/dev/null | tail -1 ); [ -n "$p" ] || p=$(command -v {kind} 2>/dev/null); [ -n "$p" ] && "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r'"#
     );
