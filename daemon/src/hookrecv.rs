@@ -584,7 +584,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let body_text = assistant.clone().unwrap_or_default();
 
             if let Some(t) = target {
-                sqlx::query(
+                let claimed = sqlx::query(
                     "UPDATE turns SET status='completed', delivery=CASE WHEN delivery='unknown' THEN 'ok' ELSE delivery END,
                      completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
                 )
@@ -594,6 +594,32 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .bind(&t.id)
                 .execute(&app.db)
                 .await?;
+                // The CAS lost: between reading the turn and claiming it, someone else closed it.
+                // When that was the §4.3 terminal fallback (the idle-prompt poller used to run it
+                // outside the bot lock — review 2026-09-12 #5) the reply is already stored from
+                // the pane; adding the hook's copy made two assistant messages for one turn, and
+                // with no native ids on the turn a retried hook was not even deduplicated. Stamp
+                // the ids and drop the payload, exactly like the late-hook branch below. A turn
+                // closed any other way (stopped, failed) keeps the reply as before.
+                if claimed.rows_affected() == 0 {
+                    let now_t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+                        .bind(&t.id)
+                        .fetch_optional(&app.db)
+                        .await?;
+                    if now_t.is_some_and(|c| c.status == "completed_fallback") {
+                        sqlx::query(
+                            "UPDATE turns SET native_session_id=COALESCE(?, native_session_id),
+                             native_turn_id=COALESCE(?, native_turn_id) WHERE id=?",
+                        )
+                        .bind(&session_id)
+                        .bind(&turn_id)
+                        .bind(&t.id)
+                        .execute(&app.db)
+                        .await?;
+                        tracing::info!(turn = %t.id, "late hook dropped; the terminal fallback claimed this turn first");
+                        return Ok(());
+                    }
+                }
                 // This turn may be one `begin_external_turn` opened when the user typed into the
                 // pane — claim it instead of opening a second one at step 5. Its user message
                 // was scraped off the prompt echo, so only store the hook's copy (codex sends
@@ -1228,6 +1254,106 @@ mod external_claim_tests {
         .await
         .unwrap();
         assert_eq!(assistant_messages, 1);
+    }
+
+    /// **Hook vs. fallback race** (review 2026-09-12 #5). The fallback claims the turn between
+    /// the hook reading it and the hook's own CAS; the hook's UPDATE then touches no row. It used
+    /// to insert its assistant message anyway — two answers for one turn — and leave the turn
+    /// without native ids, so the same hook retried was not even a duplicate. A BEFORE UPDATE
+    /// trigger stands in for the fallback: it moves the row to `completed_fallback` and makes
+    /// the hook's UPDATE skip it, which is precisely "lost the CAS".
+    #[tokio::test]
+    async fn a_hook_that_loses_the_cas_to_the_fallback_adds_no_second_reply() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'hook-race','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::lifecycle::insert_message(&app, &conv, Some(&turn_id), "assistant", "from the pane", "terminal_fallback", true, None)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fallback_wins BEFORE UPDATE OF status ON turns
+             WHEN OLD.status='in_flight' AND NEW.status='completed'
+             BEGIN
+               UPDATE turns SET status='completed_fallback', completed_at=NEW.completed_at WHERE id=OLD.id;
+               SELECT RAISE(IGNORE);
+             END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        process(
+            &app,
+            &HookBody {
+                bot_id,
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "native-session",
+                    "prompt_id": "native-turn",
+                    "last_assistant_message": "from the hook",
+                }),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turn.status, "completed_fallback", "the fallback's claim stands");
+        assert_eq!(turn.native_turn_id.as_deref(), Some("native-turn"), "the ids land on that turn, so a retry dedups");
+        assert_eq!(turn.native_session_id.as_deref(), Some("native-session"));
+        let replies: Vec<String> = sqlx::query_scalar("SELECT source FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, ["terminal_fallback"], "one answer, not two");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turns, 1, "and no external turn was opened for the dropped payload");
     }
 
     /// The Stop hook must *claim* the in-flight turn `begin_external_turn` opened when the user

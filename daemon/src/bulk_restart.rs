@@ -36,12 +36,16 @@ pub struct Cand {
     pub has_update: bool,
     /// 這個 run 還有一回合沒收掉。
     pub turn_in_flight: bool,
+    /// 這顆是從使用者自己的 herdr `default` session 匯入的（SPEC §6.5.1）：daemon 只觀察，
+    /// 不開、不關它的 pane。
+    pub default_session: bool,
 }
 
 /// 為什麼這顆沒被重啟。`code` 給 API / 前端比對，`label` 給人看。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     TeamMember,
+    DefaultSession,
     NotRunning,
     Working,
     Blocked,
@@ -53,6 +57,7 @@ impl Skip {
     pub fn code(self) -> &'static str {
         match self {
             Skip::TeamMember => "team_member",
+            Skip::DefaultSession => "default_session",
             Skip::NotRunning => "not_running",
             Skip::Working => "working",
             Skip::Blocked => "blocked",
@@ -64,6 +69,7 @@ impl Skip {
     pub fn label(self) -> &'static str {
         match self {
             Skip::TeamMember => "是 team 的成員，由 team 排程管",
+            Skip::DefaultSession => "在你自己的 herdr default session 裡，daemon 不動它的 pane",
             Skip::NotRunning => "還在啟動或關閉中",
             Skip::Working => "正在跑，重啟會把這一回合砍掉",
             Skip::Blocked => "卡在提問，等人回答",
@@ -95,6 +101,10 @@ pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     for c in cands.iter().filter(|c| is_candidate(c)) {
         let why = if c.managed_by == "team" {
             Some(Skip::TeamMember)
+        } else if c.default_session {
+            // SPEC §6.5.1：那個 pane 是使用者自己的，重啟會先把它關掉、再在使用者的 session 裡
+            // 開一個 daemon 的 workspace（2026-09-12 review #4）。
+            Some(Skip::DefaultSession)
         } else if c.state != "running" {
             Some(Skip::NotRunning)
         } else if c.agent_status == "working" {
@@ -133,6 +143,7 @@ pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
             agent_status: run.agent_status.clone(),
             has_update: run.update_notice.as_deref().is_some_and(|s| !s.trim().is_empty()),
             turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
+            default_session: lifecycle::in_default_session(&run) || bot.herdr_session.as_deref() == Some("default"),
         });
     }
     Ok(out)
@@ -381,6 +392,7 @@ mod tests {
             agent_status: status.into(),
             has_update,
             turn_in_flight: in_flight,
+            default_session: false,
         }
     }
 
@@ -453,6 +465,17 @@ mod tests {
         let (go, skip) = plan(&cands);
         assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["kid", "mine"]);
         assert_eq!(skip.iter().map(|(_, w)| w.code()).collect::<Vec<_>>(), ["team_member"]);
+    }
+
+    /// 使用者自己 default session 裡的 claude（SPEC §6.5.1）不進批次：它的 pane 不是 daemon 的，
+    /// 重啟會把使用者的終端關掉（2026-09-12 review #4）。
+    #[test]
+    fn a_bot_in_the_users_default_session_is_skipped() {
+        let mine = Cand { default_session: true, ..cand("mine", "claude", "running", "idle", true, false) };
+        let (go, skip) = plan(std::slice::from_ref(&mine));
+        assert!(go.is_empty());
+        assert_eq!(skip[0].1, Skip::DefaultSession);
+        assert_eq!(skip[0].1.code(), "default_session");
     }
 
     /// 忙碌判斷對子 agent 一樣成立——歸誰管不影響「現在能不能動它」。

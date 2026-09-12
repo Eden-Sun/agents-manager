@@ -35,7 +35,12 @@ fn is_api_error(body: &str) -> bool {
 }
 
 fn lower_is_api_error(lower: &str) -> bool {
-    lower.starts_with("api error") || is_quota_limit_lower(lower)
+    // 橫幅只有兩種長相：`API Error: <原因>`（帶冒號）與重試列 `API error · Retrying in 0s ·
+    // attempt 1/10`。光看「以 api error 開頭」會把 agent 自己的回覆行「API error handling 已補上」
+    // 也釘成斷線（2026-09-12 review h）。
+    let banner = lower.starts_with("api error:")
+        || (lower.starts_with("api error") && (lower.contains("retrying") || lower.contains("attempt ") || lower.contains("connection")));
+    banner || is_quota_limit_lower(lower)
 }
 
 /// 額度用盡的拒絕（`You've reached your Fable limit…`），跟 API 斷線分開認：這種回合不是
@@ -269,6 +274,19 @@ mod tests {
         let prose = "❯ hi\n⏺ 這個 API Error 要自己處理\n✻ done\n❯\n";
         assert_eq!(api_error_line(prose), None);
         assert_eq!(api_error_line(""), None);
+    }
+
+    /// 回覆的最後一行剛好以「API error」開頭（沒有冒號、不是重試列）是 agent 在講話，不是橫幅
+    /// （2026-09-12 review h：以前整回合被釘成斷線、紅 chip、多一則 system 訊息）。
+    #[test]
+    fn a_reply_line_that_merely_starts_with_api_error_is_not_a_banner() {
+        let prose = "❯ 補上錯誤處理\n⏺ API error handling 已補上，測試也過了。\n✻ Worked for 9s · done 1:07 AM\n❯\n";
+        assert_eq!(api_error_line(prose), None);
+        let english = "❯ fix\n⏺ API errors are now retried three times.\n✻ done\n❯\n";
+        assert_eq!(api_error_line(english), None);
+        // 帶冒號的仍然是橫幅。
+        let banner = "❯ fix\n⏺ API Error: Request timed out.\n✻ done\n❯\n";
+        assert_eq!(api_error_line(banner).as_deref(), Some("API Error: Request timed out."));
     }
 
     /// 窄 pane 把橫幅畫進框線裡也要認得。

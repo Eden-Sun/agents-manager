@@ -157,6 +157,9 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 - **回音剝除**（v4.2 補強）：畫面上只有 `❯ <第一行>` 那列算回音，多行 prompt 的第 2..n 行會留在畫面上，所以再逐行比對把它們去掉。逐行比對在**極窄的 pane** 下必定失敗——TUI 自己就把文字排成一欄、每列一個字（herdr 的 `recent_unwrapped` 只還原終端軟換行，還原不了 TUI 的排版），於是整個 prompt 曾被當成回覆存起來、在 UI 上直立成一條字柱。因此加了**去空白比對**的後備：把兩邊的所有空白字元拿掉再比，且要求候選文字**開頭**就是 prompt 的一段結尾（至少 8 個字元），候選本身若只是那段結尾的片段就整個是回音。
 - **無法辨識就說無法辨識**：剝完是空的 → 「（終端沒有可辨識的回覆）」；剝完仍是一欄單字元（`is_shredded`：≥6 行且 ≥70% 的行只有 1–2 個字）→ 「（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）」。窄 pane 會把字與字之間的空白吃掉，重組不回來，所以不猜。
 - 存為 assistant Message `source = terminal_fallback`、`incomplete = 1`。**之後晚到的 hook 不覆蓋**（去重後丟棄並 log），避免跨回合錯配。
+- 第二個觸發點是 `turn_progress` 的輪詢器（§4.3 的狀態沒翻時的安全網：空輸入列且畫面 14 秒沒變）。它**也在 bot 鎖內**呼叫同一支
+  `try_fallback`（2026-09-12 review #5：以前在鎖外，與 hook 交錯成同回合兩則 assistant）；沒收成（spinner 殘影、工具還在跑、hook 先到）
+  就繼續盯著，不自己退場——Turn 由任何一方收掉時，迴圈開頭的「還在 in_flight 嗎」自然結束它（review 可能 b）。
 - **沒有 hook 的 run（v4.2）**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的
   子 agent，見 §6.5a）永遠等不到 hook，終端快照對它不是備援而是**唯一來源**。所以這種 run 的 `working → idle`
   若沒有 in-flight Turn，不再什麼都不做，而是用同一份快照補一筆 `origin = external`、`status =
@@ -371,13 +374,17 @@ one-bot-one-tab 以前建立、沒有 `tab_id` 的 Run 只關 pane，不會因�
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → Run `stopped`（`ended_at`）→ 關閉狀態訂閱。
 - DELETE Bot：先 stop → TOML 移除 → DB `deleted_at`，保留 Conversation 與訊息 → 刪除該 bot 的 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，失敗只 log）（v3.3）。
+  `managed_by = 'team'` 的成員不走這條：回 409 `team_managed`，由 team（退役／換成員／刪 team）處理（2026-09-12 review #3）；
+  `child` 不進 TOML，直接停 pane 並 `deleted_at`。
 - 重啟 Bot（v3.3）：`POST /bots/:id/restart` = 有 Run 就先 stop 再 start，用來套用改過的 `model` / `args` / `identity` / `env`。
 - DELETE Project：需所有 Bot 已停止 → TOML 移除 → 不關 workspace（第二階段）、不刪目錄。
 
 ### 6.5 對帳（daemon 啟動、事件連線重連；逐 bot 在鎖內）
 1. `session.snapshot` + `agent.list`。
 2. DB 中 active Run：
-   - agent 清單中有 `name == bot.name` → 維持，更新 `pane_id`（pane move 會改 id）與 `agent_status`。
+   - agent 清單中有 `name == bot.name` → 維持，更新 `pane_id`（pane move 會改 id）與 `agent_status`——`agent_status` 不用清單上的，
+     在鎖內再 `agent.get` 一次（清單是拿鎖前讀的，前一顆 bot 的 start 可能握鎖一分鐘；用舊的 `idle` 蓋掉已經 `working` 的 run，
+     真正的 `working→idle` 事件會因 `prev == idle` 不啟動備援、不送排隊 prompt；2026-09-12 review a）。
    - 否則 → Run `exited`。
 3. agent 清單中 `name` 匹配某 Bot 但 DB 無 active Run → 建 Run（`running`，`adopted=1`），沿用同一 Conversation。
 4. **orphan pane 回收**（第一階段）：DB 中 `exited/stopped` Run 記錄的 `pane_id` 若仍存在於 snapshot 且無 agent → `pane.close`。
@@ -394,7 +401,10 @@ one-bot-one-tab 以前建立、沒有 `tab_id` 的 Run 只關 pane，不會因�
 2. **名字前綴**：名稱是 `<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 與 team workspace 的情況只有這條線索。
 
 兩條都命中時以血緣為準。認領後走同一條既有路徑：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run、
-同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
+**同一個父 bot 底下**同名的既有 live child 直接重用。子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
+字尾在專案裡已經是別人的名字（另一顆母 bot 的同名子 agent、或使用者自己建的 `review` 撞上 `<parent>-review`）時，
+改用完整的 herdr agent 名存（herdr 保證唯一），下次認領兩種拼法都找得到。每顆子 agent 的認領各自成敗：
+一顆失敗只寫 log 跳過，不中止整台主機的對帳（2026-09-12 review #2：以前名字撞到 `?` 直接讓整輪中止、每兩秒重複）。
 
 **子 agent 退役（#60，2026-09-11）**：子 agent 只活在它的 pane 裡，所以 pane 沒了它就退役（`bots.deleted_at`，對話保留）。兩條路都要接得住：
 reconcile 發現 run 還在、agent 卻不見（原本就有）；以及 `herdr pane close` 時 `pane_closed` 事件**先**把 run 結束、reconcile 後到——
@@ -479,7 +489,9 @@ daemon 另以唯讀優先的方式觀察本機 Herdr `default` session（socket 
 3. 找到既有採用紀錄就更新其 Run；否則建立一個 `herdr_session = "default"` 的 Bot 設定並
    建立 `adopted = 1` 的 active Run。Bot 設定寫回 `config.toml`，因此 daemon 重啟後仍保留。
 4. default session 的 workspace 不寫入 `projects.workspace_id`；default pane 消失只會結束 Run，
-   不會由 daemon 回收或關閉該使用者 pane。
+   不會由 daemon 回收或關閉該使用者 pane。同一條線的另外三處（2026-09-12 review #4）：`stop` 只送 ctrl+c、
+   **不 `pane.close`**；`start` / `restart` 對 `herdr_session = "default"` 的 bot 回 409 `default_session`
+   （restart 在送 ctrl+c 之前就拒絕）；§6.9 的批次重啟把它列為 `default_session` 跳過。
 
 default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 default socket；沒有 hook
 注入的既有 agent 仍透過 pane status 與 terminal fallback 更新對話。
@@ -498,7 +510,9 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
    - 其他 type → ack 後丟棄。
 3. 去重：`(native_session_id, native_turn_id)` 已存在 → 忽略。
 4. 配對目標 = 該 Run **唯一**的 `in_flight` Turn（不用時間排序）：
-   - 有 → 建 assistant Message（`source=hook`），Turn `completed`，寫入 native ids。
+   - 有 → CAS `UPDATE … WHERE status='in_flight'`；**成功**才建 assistant Message（`source=hook`），Turn `completed`，寫入 native ids。
+     CAS 輸了且 Turn 已是 `completed_fallback`（§4.3 的備援先收掉）→ 只把 native ids 蓋到那筆 Turn、丟棄 payload
+     （2026-09-12 review #5：以前不看 CAS 結果照樣插一則，同回合兩則 assistant）。其他原因收掉的（stop／failed）照舊保留回覆。
    - 無 → 第 5 點。
 5. external：建 Turn（`origin=external`, `status=completed`）+ user Message（Codex 可從 `input-messages` 取得；Claude 無則省略）+ assistant Message。
 6. 推 WS `message_added` / `turn_updated`。
@@ -539,6 +553,7 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   | 條件 | `reason` | 動作 |
   |---|---|---|
   | `bots.managed_by = 'team'` | `team_member` | 跳過 |
+  | run 或 bot 的 `herdr_session = 'default'`（§6.5.1） | `default_session` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` | `working` | 跳過 |
   | `agent_status = 'blocked'` | `blocked` | 跳過 |
@@ -554,7 +569,10 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`、`bots` 上那份模型／強度（§4.4a 從它自己的
   argv 讀回來的）與 `auto_approve` 對應的旗標。pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 shim）留在
   pane 的 shell 裡，所以帳號與工具不變；hook 一樣沒注入，回覆照舊走 §4.3 的終端快照。收 agent 的過程中
-  pane 不見了（父 agent 自己關掉）就把 run 標 exited、不重開。單顆的 `POST /api/bots/{id}/restart` 對子
+  pane 不見了（父 agent 自己關掉）就把 run 標 exited、不重開。agent 十秒內**沒退出**（卡在 modal、對 ctrl+c
+  沒反應）就回 502、不動它的 pane，而且 run 要從 `stopping` **放回 `running`**——agent 還在 pane 裡，run 就還活著
+  （2026-09-12 review #1：以前留在 `stopping`，之後 prompt 一律 409、側欄永遠黃燈）。§6.5 的對帳同樣把 herdr
+  仍列著 agent 的 `stopping` run 轉回 `running`。單顆的 `POST /api/bots/{id}/restart` 對子
   agent 走同一條路。
 - 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`
   ——stop 與 start 在**同一次持有 bot 鎖**裡做完（見下方「2026-09-11 競態修正」）。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
@@ -705,8 +723,10 @@ label = "foo@m4p"
 路徑不變：`~/.config/agents-manager/bots/<bot_id>/hook.sh`，由 daemon 在每次啟動 Run（與 reconcile 修好 hook 時）覆寫。
 
 argv 維持 `hook.sh <provider> <bot_id> <token> [port]`——**第 4 個參數保留但忽略**，因為 codex 的 `-c notify=[…]`
-與 grok 分派腳本的 argv 是啟動當下寫死的，升級 daemon 時遠端還活著的 agent 仍會用舊 argv 呼叫。`token` 同理保留，
-內容仍寫進 spool 行（daemon 重放時可驗），但不再有 HTTP 可打，因此不再需要 curl。
+與 grok 分派腳本的 argv 是啟動當下寫死的，升級 daemon 時遠端還活著的 agent 仍會用舊 argv 呼叫。第 3 個參數的位置
+同理保留，但 daemon 從 2026-09-12 起**填 `-`**、不再把 `hook_token` 放上去（review #8）：`hook.sh` 從來不讀它、spool 行
+也不含它、daemon 重放 spool 時也不驗它，而 codex 的 notify argv 掛在整個 run 的程序上，`ps` 對該主機所有使用者可見——
+那把 token 同時是本機 `/hook/*` 與 `/relay/announce` 的鑰匙。舊 agent 仍帶真 token 呼叫也照收。不再有 HTTP 可打，因此不再需要 curl。
 
 每個 provider 的行為：
 
@@ -1481,9 +1501,11 @@ AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，
 | 資料庫 | `bots.persona` | `PATCH /api/bots/{AGM}`（回 `needs_restart: true`） |
 | 執行期 | `~/.config/agents-manager/supervisor/AGM/persona.md` | 直接寫檔 |
 
-- **不要手改 config.toml 再走 API**：`ConfigStore` 用 mtime 比對、只在開機時 load，手改過之後所有寫
-  config 的 API 會一路 409 `config.toml changed on disk since it was loaded`，直到 daemon 重啟（2026-09-12 實例）。
-  要改就走 API，讓 daemon 自己寫檔。
+- **手改 config.toml 之後走 API 是可以的，但別指望它保住手改的內容**：`ConfigStore` 每次寫入前用 mtime 比對，
+  發現磁碟版本變了就在同一把 mutex 內**先重讀磁碟版本再套用**這次更新（§5；`config.rs::update`，`issue28_tests` 驗證），
+  只有重新解析失敗才回錯（`config.toml changed on disk and could not be re-read`）。所以手改沒有壞語法時 API 照常成功，
+  而且手改的內容會被保留；但 serde 全量回寫會把註解與未知欄位洗掉。要改 persona 還是走 API，讓 daemon 自己寫檔。
+  （本段原本寫「會一路 409 直到 daemon 重啟」，與實作不符——2026-09-12 review #10 改正。）
 - persona 改完**不必**為它重啟 daemon：`needs_restart` 只表示下次 AGM 重啟才載入新 persona。
 
 ### 18.7 共用工作樹規範

@@ -295,8 +295,22 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 // by the agent's *name*, never by whether the run has a tab of its own, so a
                 // bot started the old way — `pane.split` into a shared tab, `tab_id` NULL —
                 // is kept exactly as before and simply learns where it is sitting.
-                let status = agent.agent_status.normalized().as_str().to_string();
-                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
+                //
+                // The *status* is asked for again, now, under the lock. The list it came from
+                // predates the lock — by up to a minute when an earlier bot's `start` held its
+                // lock through `agent.wait` — and writing a stale `idle` over a run that has
+                // since gone `working` eats the next `working -> idle` edge: the event handler
+                // sees `prev == idle`, so no fallback is armed, no queued prompt is flushed and
+                // no turn-error scan runs (review 2026-09-12 a). One RPC per live run; if it
+                // fails, the list's answer stands as before.
+                let status = match client.agent_get(&agent.pane_id).await {
+                    Ok(Some(fresh)) => fresh.agent_status.normalized().as_str().to_string(),
+                    _ => agent.agent_status.normalized().as_str().to_string(),
+                };
+                // `stopping` is healed too: a stop or an in-pane restart that gave up on an
+                // agent which would not exit used to leave the run there for good (review
+                // 2026-09-12 #1). herdr still lists the agent, so it is running.
+                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), state=CASE WHEN state IN ('starting','stopping') THEN 'running' ELSE state END WHERE id=?")
                     .bind(&agent.pane_id)
                     .bind(&agent.workspace_id)
                     .bind(&agent.tab_id)
@@ -363,7 +377,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                                 }
                             }
                             let status = occupant.agent_status.normalized().as_str().to_string();
-                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
+                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state IN ('starting','stopping') THEN 'running' ELSE state END WHERE id=?")
                                 .bind(&status)
                                 .bind(&run.id)
                                 .execute(&app.db)
@@ -498,83 +512,24 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             .filter(|k| crate::config::valid_kind(k))
             .unwrap_or(parent.kind.as_str())
             .to_string();
-        let now = db::now();
-        // The same child coming back (its pane was closed and reopened, or its run was ended
-        // by something other than the reconcile) is the same bot: `bots_name_project_live`
-        // would refuse a second live row under that name anyway. Reuse it, new run.
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM bots WHERE project_id = ? AND name = ? AND managed_by = 'child' AND deleted_at IS NULL",
-        )
-        .bind(&parent.project_id)
-        .bind(&child_name)
-        .fetch_optional(&app.db)
-        .await?;
-        let bot_id = match existing {
-            Some(id) => {
-                sqlx::query("UPDATE bots SET parent_bot_id = ?, cwd = COALESCE(?, cwd), kind = ? WHERE id = ?")
-                    .bind(&parent.id)
-                    .bind(agent.cwd.clone())
-                    .bind(&kind)
-                    .bind(&id)
-                    .execute(&app.db)
-                    .await?;
-                id
+        // Everything from here to the run row is one child's business. A `?` used to end the
+        // whole host's reconcile — every later agent unadopted, orphan panes kept, teams and
+        // codex runtime never checked, and `reconcile failed` in the log every two seconds
+        // (review 2026-09-12 #2). One child that cannot be adopted is logged and skipped.
+        match adopt_child(app, host, &client, &session, agent, name, parent, &child_name, &kind).await {
+            Ok(bot_id) => {
+                claimed.insert(name.to_string());
+                app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+                app.emit_bot_status(&bot_id).await;
+                new_children += 1;
+                tracing::info!(host, parent = %parent.name, child = %child_name, agent = %name, pane = %agent.pane_id,
+                               "reconcile: adopted a spawned child agent");
             }
-            None => {
-                let bot_id = db::ulid();
-                // Hooks are never injected here (the pane was started by the parent, not by
-                // us), so the child's replies come from the terminal fallback.
-                sqlx::query(
-                    "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve,
-                       identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, created_at)
-                     VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',NULL,NULL,?,?,?,?,?)",
-                )
-                .bind(&bot_id)
-                .bind(&parent.project_id)
-                .bind(&child_name)
-                .bind(&kind)
-                .bind(&parent.identity)
-                .bind(agent.cwd.clone())
-                .bind(&session)
-                .bind(&parent.id)
-                .bind(db::ulid())
-                .bind(&now)
-                .execute(&app.db)
-                .await?;
-                bot_id
+            Err(e) => {
+                tracing::warn!(host, parent = %parent.name, agent = %name, pane = %agent.pane_id, error = ?e,
+                               "reconcile: could not adopt a spawned child agent this pass");
             }
-        };
-        let run_id = db::ulid();
-        let status = agent.agent_status.normalized().as_str().to_string();
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running',?,?,?,?,1,?,?,?)",
-        )
-        .bind(&run_id)
-        .bind(&bot_id)
-        .bind(&status)
-        .bind(&agent.workspace_id)
-        .bind(&agent.pane_id)
-        .bind(&agent.tab_id)
-        .bind(name)
-        .bind(&session)
-        .bind(&now)
-        .execute(&app.db)
-        .await?;
-        claimed.insert(name.to_string());
-        crate::events::watch_pane_on_session(app, host, &session, &agent.pane_id).await;
-        // The child's pane is the only source for both halves of its identity: what it is
-        // saying (no hooks were injected, so §4.3's snapshot is all there is) and what it is
-        // running on (we did not choose its model, its own argv did).
-        crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot_id);
-        if let Ok(Some(child)) = db::bot(&app.db, &bot_id).await {
-            sync_pane_model(app, host, &client, &child, agent).await;
         }
-        app.emit("bot_changed", json!({"bot_id": bot_id})).await;
-        app.emit_bot_status(&bot_id).await;
-        new_children += 1;
-        tracing::info!(host, parent = %parent.name, child = %child_name, agent = %name, pane = %agent.pane_id,
-                       "reconcile: adopted a spawned child agent");
     }
     if new_children > 0 {
         app.emit("project_changed", json!({})).await;
@@ -615,6 +570,135 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // in its own status line, so read it instead of guessing.
     fill_codex_runtime(app, host, &client).await;
     Ok(())
+}
+
+/// One spawned child: find or create its `managed_by='child'` bot row under `parent` and give
+/// it an adopted run on `agent`'s pane. Returns the bot id.
+///
+/// **Same parent, same name = same child.** The same child coming back (its pane was closed
+/// and reopened, or its run was ended by something other than the reconcile) is the same bot,
+/// so it is reused with a new run. The lookup is keyed on the parent as well as the name:
+/// keyed on the name alone it also hit *another* parent's child of the same name (two mother
+/// bots in one project each spawning `<self>-ui`), re-parented it and then tripped
+/// `runs_one_active` on its live run (review 2026-09-12 #2).
+///
+/// **A name that is taken is not ours.** `bots_name_project_live` allows one live `ui` per
+/// project. When the suffix is already someone else's — the other mother's child, or a bot the
+/// user named `review` while a parent spawned `<parent>-review` — the child is stored under its
+/// full herdr agent name instead, which herdr keeps unique. Both spellings are looked up on the
+/// way back in, so the child found under the long name is recognised next pass.
+#[allow(clippy::too_many_arguments)]
+async fn adopt_child(
+    app: &Arc<App>,
+    host: &str,
+    client: &crate::herdr::HerdrClient,
+    session: &str,
+    agent: &crate::herdr::AgentInfo,
+    name: &str,
+    parent: &db::Bot,
+    child_name: &str,
+    kind: &str,
+) -> anyhow::Result<String> {
+    let now = db::now();
+    let full_name = child_name_from_agent(name);
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM bots WHERE project_id = ? AND parent_bot_id = ? AND managed_by = 'child' AND deleted_at IS NULL
+         AND name IN (?, ?) ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1",
+    )
+    .bind(&parent.project_id)
+    .bind(&parent.id)
+    .bind(child_name)
+    .bind(&full_name)
+    .bind(child_name)
+    .fetch_optional(&app.db)
+    .await?;
+    let bot_id = match existing {
+        Some(id) => {
+            // Its last run ended some other way and its agent is not the one we are looking at
+            // now: the per-bot loop will sort that run out first. Adopting on top of it would
+            // only trip `runs_one_active`.
+            if let Some(r) = db::active_run(&app.db, &id).await? {
+                anyhow::bail!("child `{child_name}` still has active run `{}` under agent `{:?}`", r.id, r.agent_name);
+            }
+            sqlx::query("UPDATE bots SET cwd = COALESCE(?, cwd), kind = ? WHERE id = ?")
+                .bind(agent.cwd.clone())
+                .bind(kind)
+                .bind(&id)
+                .execute(&app.db)
+                .await?;
+            id
+        }
+        None => {
+            let taken = |n: String| {
+                let db = app.db.clone();
+                let project = parent.project_id.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL")
+                        .bind(&project)
+                        .bind(&n)
+                        .fetch_one(&db)
+                        .await
+                        .map(|c| c > 0)
+                }
+            };
+            let use_name = if !taken(child_name.to_string()).await? {
+                child_name.to_string()
+            } else if full_name != child_name && !taken(full_name.clone()).await? {
+                tracing::info!(host, parent = %parent.name, agent = %name, taken = %child_name, using = %full_name,
+                               "reconcile: child's short name is already a bot in this project; using its full agent name");
+                full_name.clone()
+            } else {
+                anyhow::bail!("both `{child_name}` and `{full_name}` are already live bots in this project");
+            };
+            let bot_id = db::ulid();
+            // Hooks are never injected here (the pane was started by the parent, not by
+            // us), so the child's replies come from the terminal fallback.
+            sqlx::query(
+                "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve,
+                   identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, created_at)
+                 VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',NULL,NULL,?,?,?,?,?)",
+            )
+            .bind(&bot_id)
+            .bind(&parent.project_id)
+            .bind(&use_name)
+            .bind(kind)
+            .bind(&parent.identity)
+            .bind(agent.cwd.clone())
+            .bind(session)
+            .bind(&parent.id)
+            .bind(db::ulid())
+            .bind(&now)
+            .execute(&app.db)
+            .await?;
+            bot_id
+        }
+    };
+    let run_id = db::ulid();
+    let status = agent.agent_status.normalized().as_str().to_string();
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, started_at)
+         VALUES (?,?,'running',?,?,?,?,1,?,?,?)",
+    )
+    .bind(&run_id)
+    .bind(&bot_id)
+    .bind(&status)
+    .bind(&agent.workspace_id)
+    .bind(&agent.pane_id)
+    .bind(&agent.tab_id)
+    .bind(name)
+    .bind(session)
+    .bind(&now)
+    .execute(&app.db)
+    .await?;
+    crate::events::watch_pane_on_session(app, host, session, &agent.pane_id).await;
+    // The child's pane is the only source for both halves of its identity: what it is
+    // saying (no hooks were injected, so §4.3's snapshot is all there is) and what it is
+    // running on (we did not choose its model, its own argv did).
+    crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot_id);
+    if let Ok(Some(child)) = db::bot(&app.db, &bot_id).await {
+        sync_pane_model(app, host, client, &child, agent).await;
+    }
+    Ok(bot_id)
 }
 
 /// Learn `runs.runtime_model` / `runtime_effort` / `runtime_fast` for codex runs the daemon did
@@ -831,6 +915,143 @@ mod compat_tests {
         assert!(env.herdr.tab(&old_pane.tab_id).unwrap().panes.contains(&old_pane.pane_id));
     }
 
+    /// A run left in `stopping` — a stop or in-pane restart that gave up on an agent which would
+    /// not exit — is healed back to `running` while herdr still lists the agent (review
+    /// 2026-09-12 #1). `starting` was already healed this way; `stopping` was not, and the bot
+    /// stayed yellow with every prompt refused.
+    #[tokio::test]
+    async fn a_run_stuck_in_stopping_is_healed_while_its_agent_is_listed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'stopping','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let r = run_of(&app, &bot).await.unwrap();
+        assert_eq!(r.id, run);
+        assert_eq!(r.state, "running");
+    }
+
+    /// **Name collisions must not end the reconcile** (review 2026-09-12 #2). Two mother bots in
+    /// one project each spawn `<self>-ui`, and a parent spawns `<parent>-review` while the user
+    /// already has a bot called `review`. Keyed on the bare suffix, the second `ui` used to hit
+    /// the first one's row (re-parented, then `runs_one_active`), and `review` hit
+    /// `bots_name_project_live`; either `?` aborted `reconcile_host` — nothing after it ran,
+    /// and the log said `reconcile failed` every two seconds until the agent went away.
+    #[tokio::test]
+    async fn colliding_child_names_are_stored_under_their_agent_name_and_never_abort_the_pass() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let bravo_pane = client.tab_create(&ws.workspace_id, "/tmp/p", "bravo", json!({})).await.unwrap();
+        let alfa_ui = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let alfa_review = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let bravo_ui = client.pane_split(&bravo_pane.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let alfa = a_bot(&env, "alfa").await;
+        let bravo = a_bot(&env, "bravo").await;
+        let review = a_bot(&env, "review").await;
+        let alfa_agent = crate::config::agent_name("proj", &alfa);
+        let bravo_agent = crate::config::agent_name("proj", &bravo);
+        for (bot, agent, pane) in [(&alfa, &alfa_agent, &root), (&bravo, &bravo_agent, &bravo_pane)] {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+                 VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+            )
+            .bind(db::ulid())
+            .bind(bot)
+            .bind(&ws.workspace_id)
+            .bind(&pane.tab_id)
+            .bind(&pane.pane_id)
+            .bind(agent)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+        let entry = |name: String, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![
+            entry(alfa_agent.clone(), &root),
+            entry(bravo_agent.clone(), &bravo_pane),
+            entry(format!("{alfa_agent}-ui"), &alfa_ui),
+            entry(format!("{alfa_agent}-review"), &alfa_review),
+            entry(format!("{bravo_agent}-ui"), &bravo_ui),
+        ];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.expect("one bad name must not end the pass");
+
+        let kids = |parent: String| {
+            let db = app.db.clone();
+            async move {
+                sqlx::query_as::<_, db::Bot>(
+                    "SELECT * FROM bots WHERE parent_bot_id = ? AND managed_by = 'child' AND deleted_at IS NULL ORDER BY name",
+                )
+                .bind(&parent)
+                .fetch_all(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let alfa_kids = kids(alfa.clone()).await;
+        let bravo_kids = kids(bravo.clone()).await;
+        assert_eq!(
+            alfa_kids.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            [format!("{alfa_agent}-review").as_str(), "ui"],
+            "alfa's `ui` keeps the short name; its `review` yields to the user's bot of that name"
+        );
+        assert_eq!(
+            bravo_kids.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            [format!("{bravo_agent}-ui").as_str()],
+            "bravo's `ui` is a different child, stored under its full agent name"
+        );
+        let user_review = db::bot(&app.db, &review).await.unwrap().unwrap();
+        assert_eq!(user_review.managed_by, "user");
+        assert!(user_review.parent_bot_id.is_none(), "the user's bot was not touched");
+        for k in alfa_kids.iter().chain(bravo_kids.iter()) {
+            let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?")
+                .bind(&k.id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(runs, 1, "{}: one adopted run", k.name);
+        }
+
+        // The next pass finds every child again — under whichever spelling it was stored — and
+        // neither re-parents nor duplicates anything.
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(kids(alfa.clone()).await.len(), 2);
+        assert_eq!(kids(bravo.clone()).await.len(), 1);
+        let all_runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs").fetch_one(&app.db).await.unwrap();
+        assert_eq!(all_runs, 5, "two parents + three children, one run each");
+    }
+
     /// An agent herdr knows about that the database has no run for is adopted, tab and all —
     /// so a bot the daemon lost track of comes back with its tab recorded, not NULL.
     #[tokio::test]
@@ -931,6 +1152,57 @@ mod compat_tests {
             db::active_run(&app.db, &bot).await.unwrap().is_none(),
             "reconcile adopted the agent that had just been stopped, so the restart will refuse with `active run already exists`"
         );
+    }
+
+    /// A stale list must not roll a run's status back (review 2026-09-12 a). The list said
+    /// `idle`; while the reconcile waited for the lock the agent went `working`. Writing `idle`
+    /// from the list would make the real `working -> idle` event a no-op (`prev == idle`):
+    /// no fallback armed, no queued prompt flushed.
+    #[tokio::test]
+    async fn a_stale_agent_list_does_not_roll_a_runs_status_back() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+
+        let guard = app.bot_lock(&bot).await.lock_owned().await;
+        let app2 = app.clone();
+        let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
+        wait_for_call(&env, "agent.list").await;
+
+        // The agent starts working while the reconcile is parked on the lock; the event
+        // handler records that in the DB.
+        env.herdr.agents.lock().unwrap()[0]["agent_status"] = json!("working");
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=?")
+            .bind(&bot)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        drop(guard);
+        rec.await.unwrap().unwrap();
+
+        let r = run_of(&app, &bot).await.unwrap();
+        assert_eq!(r.agent_status, "working", "the reconcile asked herdr again instead of trusting its stale list");
     }
 
     /// The other half of the same race: the restart *won* the lock, so by the time the
