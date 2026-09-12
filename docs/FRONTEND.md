@@ -1421,7 +1421,9 @@ grok 目前 `quota.grok` 是 null（`/usage` 探測讀不到 pane），所以它
   `closeTeamIssue(teamId, issue.id)` → body 的 `issue_id`（§2.5.4）。沒有它的話，reopen 之後
   `teams.issue_number` 已經換成新 issue，上一個 issue 就再也關不掉了。
 - **timeline** 兩則新 note：`team_reopened`（「使用者追加 #57、#58，team 重新啟動」）與
-  `member_context_lost`（「PM 沒能續接先前對話，已改為新對話」）。`done → starting` 那則 phase
+  `member_context_lost`（「PM 沒能續接先前對話（<原因>），改為新對話」；`why` 為
+  `no_session_id`→「找不到先前的 session」、`unsupported_kind`→「這個 agent 不支援原生續接」、
+  `resume_mismatch`→「續接後的 session 不一致」，未知代碼→「未知原因」）。`done → starting` 那則 phase
   事件的 reason `reopen` 也在 `TEAM_PAUSE_LABEL` 裡翻成「使用者追加 issue」——它不是暫停原因，
   但時間軸用同一張表翻譯 reason。
 - 單元測試 `node --test --experimental-strip-types src/components/teamPanelLogic.test.ts`（3 項）。
