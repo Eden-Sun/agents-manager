@@ -80,9 +80,18 @@ const INCIDENT_LABEL: Record<string, string> = {
   host_disconnected: '主機斷線',
   bot_stopped: 'bot 該開著卻停了',
   assignment_stalled: '交辦卡住沒進度',
+  assignment_undelivered: '交辦一直送不出去',
   notify_exhausted: '通知送不出去',
   remote_entry: '遠端入口異常',
 }
+
+/** 故障清單有三種狀態，而「還沒讀到」跟「讀到了，沒有故障」絕對不能畫成同一種。 */
+type IncidentState =
+  | { kind: 'loading' }
+  | { kind: 'ok'; items: SupervisorIncident[] }
+  | { kind: 'error'; message: string }
+  /** 這台 daemon 還沒有這個端點：不是沒故障，是量不到。 */
+  | { kind: 'unsupported' }
 
 function label(map: Record<string, string>, key: string): string {
   return map[key] ?? key
@@ -118,7 +127,32 @@ function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName:
   )
 }
 
-function IncidentList({ items }: { items: SupervisorIncident[] }) {
+/**
+ * 讀不到就說讀不到。
+ *
+ * 原本 incidents 初始是 `[]`、`fetchIncidents` 的 catch 又把錯誤吃掉，於是 API 掛掉時這一格
+ * 顯示「0 筆未恢復」配綠燈——在系統最可能真的出事的時候，畫面最像沒事。這正是這個面板要修的
+ * 那個毛病本身。
+ */
+function IncidentList({ state }: { state: IncidentState }) {
+  if (state.kind !== 'ok') {
+    const [tone, text] =
+      state.kind === 'loading'
+        ? ['', '讀取中…']
+        : state.kind === 'unsupported'
+          ? ['warn', '這台 daemon 還沒有故障清單端點，所以這裡沒有數字——不是沒有故障。']
+          : ['bad', `讀不到故障清單：${state.message}。這不代表系統沒事，代表現在量不到。`]
+    return (
+      <section className="agm-sec">
+        <h4>
+          系統故障
+          <span className={`agm-chip ${tone}`}>狀態不明</span>
+        </h4>
+        <p className="agm-note">{text}</p>
+      </section>
+    )
+  }
+  const items = state.items
   return (
     <section className="agm-sec">
       <h4>
@@ -151,7 +185,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   const [unsupported, setUnsupported] = useState(false)
   const [busy, setBusy] = useState<SupervisorAction | null>(null)
   const [error, setError] = useState('')
-  const [incidents, setIncidents] = useState<SupervisorIncident[]>([])
+  const [incidents, setIncidents] = useState<IncidentState>({ kind: 'loading' })
   const selectBot = useStore((s) => s.selectBot)
   const bots = useStore((s) => s.bots)
 
@@ -180,11 +214,14 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
       if (alive) apply(r)
     })
     // 故障清單獨立拉：它跟總管狀態是兩個問題，一邊掛了另一邊還要看得到。
+    // 失敗不能靜靜吞掉——吞掉就會變成「0 筆未恢復」的綠燈。
     void fetchIncidents()
-      .then((list) => {
-        if (alive) setIncidents(list)
+      .then((r) => {
+        if (alive) setIncidents(r === null ? { kind: 'unsupported' } : { kind: 'ok', items: r })
       })
-      .catch(() => {})
+      .catch((e: unknown) => {
+        if (alive) setIncidents({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
+      })
     return () => {
       alive = false
     }
@@ -338,7 +375,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
 
       {error ? <p className="agm-error">{error}</p> : null}
 
-      <IncidentList items={incidents} />
+      <IncidentList state={incidents} />
 
       <section className="agm-sec">
         <h4>

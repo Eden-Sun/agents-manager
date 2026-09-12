@@ -97,6 +97,17 @@ function n(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
+/**
+ * 任何「應該是一組東西」的欄位都從這裡取。
+ *
+ * `(o.assignments as unknown[]) ?? []` 擋不住真正會出事的那幾種：daemon 回 `{}`、回字串、回
+ * 一個錯誤物件時，`??` 只認 null/undefined，後面的 `.map` 就直接 throw，整個面板變成白屏——
+ * 而這個面板的用處正是在 daemon 不對勁的時候給人看。不是陣列就當空的。
+ */
+function list(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : []
+}
+
 /** 還沒結案的狀態。回合跑完只到 `awaiting_review`，那不是結案。 */
 const OPEN_STATUSES = ['queued', 'delivered', 'unknown', 'awaiting_review', 'blocked']
 
@@ -172,7 +183,7 @@ function toInfo(v: unknown): SupervisorInfo {
     status: s(o.status, 'unknown'),
     remote: toRemote(o.remote),
     pending_count: n(o.pending_count),
-    assignments: ((o.assignments as unknown[]) ?? []).map(toAssignment).filter((a): a is SupervisorAssignment => a !== null),
+    assignments: list(o.assignments).map(toAssignment).filter((a): a is SupervisorAssignment => a !== null),
   }
 }
 
@@ -280,15 +291,21 @@ export async function supervisorAction(action: SupervisorAction): Promise<Superv
   return toInfo(await rawTransport.request('POST', `/supervisor/${action}`, {}))
 }
 
-/** 未恢復的系統故障。舊 daemon（404）回空陣列，不是錯誤。 */
-export async function fetchIncidents(): Promise<SupervisorIncident[]> {
+/**
+ * 未恢復的系統故障。`null` = 這台 daemon 沒有這個端點（404）。
+ *
+ * 特地不回空陣列：空陣列的意思是「問過了，沒有故障」，而 404 的意思是「問不到」。把兩者混成
+ * 同一個值，畫面就會在量不到的時候顯示綠燈。其他錯誤照樣往外丟，由呼叫端顯示。
+ */
+export async function fetchIncidents(): Promise<SupervisorIncident[] | null> {
   if (rawTransport.mock) return []
   try {
     const raw = await rawTransport.request('GET', '/supervisor/incidents')
-    const list = isRec(raw) ? (raw.incidents as unknown[]) : []
-    return (list ?? []).map(toIncident).filter((i): i is SupervisorIncident => i !== null)
+    return list(isRec(raw) ? raw.incidents : null)
+      .map(toIncident)
+      .filter((i): i is SupervisorIncident => i !== null)
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return []
+    if (e instanceof ApiError && e.status === 404) return null
     throw e
   }
 }
@@ -297,6 +314,7 @@ export async function fetchIncidents(): Promise<SupervisorIncident[]> {
 export async function fetchAssignments(): Promise<SupervisorAssignment[]> {
   if (rawTransport.mock) return [...mockState.assignments]
   const raw = await rawTransport.request('GET', '/supervisor/assignments')
-  const list = isRec(raw) ? (raw.assignments as unknown[]) : []
-  return (list ?? []).map(toAssignment).filter((a): a is SupervisorAssignment => a !== null)
+  return list(isRec(raw) ? raw.assignments : null)
+    .map(toAssignment)
+    .filter((a): a is SupervisorAssignment => a !== null)
 }
