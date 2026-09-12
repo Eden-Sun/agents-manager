@@ -35,6 +35,7 @@ import { Modal } from './Modal'
 import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
+import { shortModel } from '../lib/shortModel'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
@@ -1319,7 +1320,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               <span className={`mobile-kind-icon ${bot.kind}`} role="img" aria-label={bot.kind}><KindIcon kind={bot.kind} /></span>
               {bot.model || statusInfo?.model_name ? (
                 <span className="mobile-bot-model">
-                  {bot.model ?? statusInfo?.model_name}
+                  {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
                   {statusInfo?.effort ? ` · ${effortLabel(statusInfo.effort)}` : ''}
                 </span>
               ) : null}
@@ -1345,7 +1346,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                     : `CLI 預設，實際載入 ${statusInfo?.model_name}。點一下改模型`
                 }
               >
-                {bot.model ?? statusInfo?.model_name}
+                {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
