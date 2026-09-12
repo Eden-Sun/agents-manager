@@ -4994,7 +4994,67 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
         raw
     };
     let body = line.trim_start().strip_prefix(echo)?.trim();
-    if body.is_empty() { None } else { Some(body.to_string()) }
+    if body.is_empty() {
+        return None;
+    }
+    // 折行的續行也是同一句話（2026-09-12 使用者回報）。長 prompt 在 TUI 上會被排成
+    //
+    // ```text
+    // ❯ 請直接呼叫 AskUserQuestion 工具問我兩題…請設 multiSelect:
+    //   true，四個選項：…問完就停著等我回答。
+    // ```
+    //
+    // 只讀 `❯` 那一行的話，使用者訊息被截在「multiSelect:」，剩下那半句還留在畫面上，
+    // 接著被 `extract_reply` 當成 agent 的回覆存起來——使用者看到的是自己的話變成 bot 的回答。
+    let mut out = vec![body.to_string()];
+    // 只有**排到行尾**的回音才可能有續行。少了這一條，「回音短、下一行有縮排」的畫面
+    // （grok 的回覆、codex 的 `thinking…`）會被誤收成使用者的話——那比沒收乾淨嚴重得多。
+    if echo_row_is_full(raw) {
+        for l in lines.iter().skip(idx) {
+            match echo_continuation(kind, l) {
+                Some(rest) => out.push(rest.to_string()),
+                None => break,
+            }
+        }
+    }
+    Some(out.join("\n"))
+}
+
+/// 這一行有沒有排到行尾（＝後面那行可能是它折下來的）。
+///
+/// 沒有辦法從快照知道 pane 幾欄寬，但「折行」的前提是這一行長到撞牌邊：CJK 一個字算兩欄，
+/// 所以用顯示寬度估。門檻取 60 欄——比它窄的畫面不會有人在上面打這麼長的 prompt，而真正
+/// 折行的那種（實機是 100 欄以上）遠遠超過。
+fn echo_row_is_full(raw: &str) -> bool {
+    const WRAP_MIN_COLS: usize = 60;
+    raw.trim_end().chars().map(|c| if (c as u32) > 0x1100 { 2 } else { 1 }).sum::<usize>() >= WRAP_MIN_COLS
+}
+
+/// 這一行是上一行 prompt 回音的續行嗎？是的話回它的內容（已去掉縮排）。
+///
+/// 續行的長相就只有「有縮排、而且不是別的東西」：claude 的工具結果（`⎿`）、輸出標記（`⏺`、
+/// `●`）、狀態列（`✻`）與各種框線都縮排在同一個位置，所以它們必須先被排除掉。判斷保守，
+/// 寧可少收一行（回音沒收乾淨、頂多留一句在回覆裡），也不要多吃一行（那是真的把 agent 的
+/// 回覆吃掉）。
+fn echo_continuation<'a>(kind: &str, line: &'a str) -> Option<&'a str> {
+    // 續行一定有縮排；沒縮排的是下一塊內容。
+    let rest = line.strip_prefix("  ")?;
+    let t = rest.trim();
+    if t.is_empty() || is_noise(line) {
+        return None;
+    }
+    // 這些開頭在三種 CLI 上都代表「另一塊東西開始了」，不是使用者那句話的下半截。
+    const MARKERS: [&str; 10] = ["⎿", "⏺", "●", "✻", "✳", "│", "└", "├", "╭", "╰"];
+    if MARKERS.iter().any(|m| t.starts_with(m)) {
+        return None;
+    }
+    // 下一個回音行（使用者連送兩句）也不是續行。
+    if let Some(echo) = prompt_echo_prefix(kind) {
+        if t.starts_with(echo) {
+            return None;
+        }
+    }
+    Some(t)
 }
 
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
@@ -6222,6 +6282,57 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(last_prompt_echo_text("claude", TWO_TURNS).as_deref(), Some("echo 2"));
         assert_eq!(last_prompt_echo_text("claude", NOT_LOGGED_IN).as_deref(), Some("echo 1"));
         assert_eq!(last_prompt_echo_text("codex", "› 幫我看一下這個 bug\n  thinking…\n").as_deref(), Some("幫我看一下這個 bug"));
+    }
+
+    /// 2026-09-12 使用者實機：長 prompt 被 TUI 折成兩行，只讀 `❯` 那一行的話使用者訊息斷在
+    /// 「multiSelect:」，下半句留在畫面上被當成 agent 的回覆。續行要算進回音。
+    #[test]
+    fn last_prompt_echo_text_takes_the_wrapped_continuation() {
+        let screen = "❯ 請直接呼叫 AskUserQuestion 工具問我兩題：第二題 header『功能』請設 multiSelect:\n  true，四個選項：『站內搜尋』『SEO 是主要目的』。問完就停著等我回答。\n  ⎿  You've reached your Fable limit. Run /usage-credits to continue.\n\n✻ Worked for 0s · done 5:08 PM\n";
+        let got = last_prompt_echo_text("claude", screen).expect("有回音");
+        assert!(got.starts_with("請直接呼叫 AskUserQuestion"), "第一行還在：{got}");
+        assert!(got.contains("問完就停著等我回答。"), "折行的下半句要收進來：{got}");
+        // 工具結果那行不是使用者說的話。
+        assert!(!got.contains("Fable limit"), "`⎿` 開頭的是 claude 的輸出：{got}");
+    }
+
+    /// 續行只吃「縮排、而且不是別的東西」。少收一行只是回音沒清乾淨，多收一行等於把 agent
+    /// 的回覆吃掉，所以這裡寧可保守。
+    /// 回音沒排到行尾就不會有續行：grok 的回覆、codex 的 `thinking…` 都縮排在下一行，
+    /// 那些不是使用者的話。
+    #[test]
+    fn a_short_echo_row_has_no_continuation() {
+        assert!(!echo_row_is_full("❯ echo 2"));
+        assert!(!echo_row_is_full("› 幫我看一下這個 bug"));
+        assert!(echo_row_is_full("❯ 請直接呼叫 AskUserQuestion 工具問我兩題：第二題 header『功能』請設 multiSelect:"));
+    }
+
+    #[test]
+    fn echo_continuation_stops_at_anything_that_is_not_the_same_sentence() {
+        // 沒縮排 = 下一塊內容
+        assert_eq!(echo_continuation("claude", "⏺ 我看了一下"), None);
+        assert_eq!(echo_continuation("claude", "done"), None);
+        // 縮排但是輸出標記／狀態列／框線
+        for l in ["  ⎿  結果", "  ⏺ 回覆", "  ✻ Worked for 0s", "  │ box", "  ╭─────"] {
+            assert_eq!(echo_continuation("claude", l), None, "{l} 不是續行");
+        }
+        // 空行
+        assert_eq!(echo_continuation("claude", "   "), None);
+        // 下一個回音（使用者連送兩句）
+        assert_eq!(echo_continuation("claude", "  ❯ 第二句"), None);
+        // 真的續行
+        assert_eq!(echo_continuation("claude", "  第二半句"), Some("第二半句"));
+    }
+
+    /// 收進續行之後，`strip_echoed_prompt` 就吃得到整段回音——這才是使用者看到的那個症狀
+    /// （下半句變成 bot 的回答）真正被修掉的地方。
+    #[test]
+    fn the_wrapped_half_no_longer_looks_like_a_reply() {
+        let screen = "❯ 第一半句很長很長，長到排滿整行才會折到下一行去，這是折行的前提\n  第二半句也不短\n  ⎿  真正的回覆\n";
+        let prompt = last_prompt_echo_text("claude", screen).expect("有回音");
+        let left = strip_echoed_prompt("第二半句也不短\n⎿  真正的回覆", &prompt);
+        assert!(!left.contains("第二半句"), "回音要被剝掉：{left}");
+        assert!(left.contains("真正的回覆"), "回覆要留著：{left}");
     }
 
     /// grok's echo row carries the right-aligned clock and the scrollbar glyph; neither is
