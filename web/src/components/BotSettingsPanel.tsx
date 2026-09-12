@@ -8,6 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
+import { computeBotPatch, effectiveForm, type BotFormKey } from './botSettingsForm'
 
 /**
  * 「Bot 設定」面板（API.md v3.3）：改名 / 模型 / 身份 / autostart / auto_approve，
@@ -224,6 +225,19 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [fast, setFast] = useState<boolean>(bot?.fast ?? false)
   const [persona, setPersona] = useState(bot?.persona ?? '')
   const [identity, setIdentity] = useState(bot?.identity ?? '')
+  /**
+   * 使用者動過哪些欄位。沒動過的欄位畫面上永遠跟著 store 裡的 bot 走（`effectiveForm`）：
+   * 面板開著時在標題列快速選單、另一個分頁或 TeamRoleEditor 改了同一顆的 model／effort，
+   * 這裡不會標「已變更」，儲存也不會拿開啟當下的舊值把剛套用的蓋回去。
+   */
+  const [touched, setTouched] = useState<ReadonlySet<BotFormKey>>(() => new Set())
+  const touch = (k: BotFormKey) =>
+    setTouched((t) => {
+      if (t.has(k)) return t
+      const n = new Set(t)
+      n.add(k)
+      return n
+    })
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
   /**
@@ -318,6 +332,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setFast(b.fast)
     setPersona(b.persona ?? '')
     setIdentity(b.identity ?? '')
+    setTouched(new Set())
     setSaved({})
     setBanner(null)
     setCloseConfirmOpen(false)
@@ -358,13 +373,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     identity: 'identity' in saved ? saved.identity ?? null : bot.identity,
   }
 
-  const patch: PatchBotInput = {}
-  if (name !== base.name) patch.name = name
-  if (model !== base.model) patch.model = model
-  if (effort !== base.effort) patch.effort = effort
-  if (bot.kind === 'codex' && fast !== base.fast) patch.fast = fast
-  if ((persona.trim() || null) !== base.persona) patch.persona = persona.trim() || null
-  if (bot.kind === 'claude' && (identity || null) !== base.identity) patch.identity = identity || null
+  const form = effectiveForm(base, { name, model, effort, fast, persona, identity }, touched)
+  const patch: PatchBotInput = computeBotPatch(base, form, touched, bot.kind)
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
   const canSave = dirty && (patch.name === undefined || nameOk) && !saving
@@ -378,6 +388,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       setSaving(false)
       if (needsRestart === null) return
       setSaved((s) => ({ ...s, ...sent }))
+      // 存進去的欄位之後跟著 base（已含 saved）走，別再算「動過」。
+      setTouched((t) => {
+        const n = new Set(t)
+        for (const k of Object.keys(sent)) n.delete(k as BotFormKey)
+        return n
+      })
       setBanner(needsRestart ? 'restart' : 'saved')
       if (!needsRestart) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
     })
@@ -468,29 +484,49 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <input
               ref={nameRef}
               type="text"
-              value={name}
+              value={form.name}
               spellCheck={false}
               enterKeyHint="done"
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                touch('name')
+                setName(e.target.value)
+              }}
             />
           </label>
 
           <ApiModelFields
             kind={bot.kind}
             host={host}
-            identity={identity || null}
-            model={model}
-            onModel={setModel}
-            effort={effort}
-            onEffort={setEffort}
-            fast={fast}
-            onFast={setFast}
+            identity={form.identity || null}
+            model={form.model}
+            onModel={(v) => {
+              touch('model')
+              setModel(v)
+            }}
+            effort={form.effort}
+            onEffort={(v) => {
+              touch('effort')
+              setEffort(v)
+            }}
+            fast={form.fast}
+            onFast={(v) => {
+              touch('fast')
+              setFast(v)
+            }}
           />
           {/* 這一排本來會在「目前這個 run 用的身份」旁邊再插一顆底線樣式的「登入」。
               它送的 `/login` 跟下面「帳號」那顆一模一樣，卻夾在一排藥丸狀的選項中間，
               讀起來像多了一個身份可以選。留下面那顆——它有標題、有說明，也有登完之後的
               「重新偵測」。 */}
-          <IdentityOptions kind={bot.kind} host={host} value={identity} onChange={setIdentity} />
+          <IdentityOptions
+            kind={bot.kind}
+            host={host}
+            value={form.identity}
+            onChange={(v) => {
+              touch('identity')
+              setIdentity(v)
+            }}
+          />
           {canLoginInSession(bot.kind) ? (
             <div className="field">
               <span>帳號</span>
@@ -553,7 +589,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           )}
-          <PersonaField value={persona} onChange={setPersona} />
+          <PersonaField
+            value={form.persona}
+            onChange={(v) => {
+              touch('persona')
+              setPersona(v)
+            }}
+          />
         </form>
 
         <div className="bs-danger">
