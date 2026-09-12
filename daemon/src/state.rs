@@ -291,15 +291,19 @@ impl App {
     }
 
     pub async fn emit(&self, kind: &str, data: Value) {
-        let ev = WsEvent { seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1, kind: kind.to_string(), data };
+        // The seq is taken *inside* the ring lock, so ring order and seq order are the same
+        // thing and the bus sees events in seq order too. Numbered outside it, two concurrent
+        // emits could take 5 and 6 and push 6 first; a client that disconnected after 6 asked
+        // for `since=6` on reconnect and never got 5 (review 2026-09-12 f).
         {
             let mut ring = self.ring.lock().await;
+            let ev = WsEvent { seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1, kind: kind.to_string(), data };
             ring.push_back(ev.clone());
             while ring.len() > WS_RING {
                 ring.pop_front();
             }
+            let _ = self.bus.send(ev);
         }
-        let _ = self.bus.send(ev);
     }
 
     pub fn current_seq(&self) -> u64 {
@@ -440,4 +444,37 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
         }
     }
     anyhow::bail!("herdr session `{session}` did not come up within 10s")
+}
+
+#[cfg(test)]
+mod ws_seq_tests {
+    //! WS `seq` vs. the replay ring (review 2026-09-12 f).
+    use serde_json::json;
+
+    /// Many emits at once: the ring must hold them in seq order with no gaps, because a
+    /// reconnecting client asks for everything after the highest seq it saw. Numbered outside
+    /// the ring lock, 6 could land in the ring before 5 and a client that saw 6 never got 5.
+    #[tokio::test]
+    async fn concurrent_emits_land_in_the_ring_in_seq_order() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let mut tasks = Vec::new();
+        for i in 0..200 {
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move { app.emit("test_event", json!({"i": i})).await }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let ring = app.backlog(0).await.expect("everything is still in the ring");
+        assert_eq!(ring.len(), 200);
+        let seqs: Vec<u64> = ring.iter().map(|e| e.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(seqs, sorted, "ring order is seq order");
+        assert_eq!(seqs.first().copied(), Some(1));
+        assert_eq!(seqs.last().copied(), Some(200));
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "no gaps: {seqs:?}");
+        assert_eq!(app.current_seq(), 200);
+    }
 }
