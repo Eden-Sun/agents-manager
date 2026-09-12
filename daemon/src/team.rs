@@ -4905,6 +4905,7 @@ mod api_tests {
                 seven_day: None,
                 fable: None,
                 reset_credits: None,
+                limit_hit: None,
                 plan: None,
                 updated_at: db::now(),
                 source: "test".into(),

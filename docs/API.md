@@ -1445,6 +1445,13 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
   `available` 是 `availableCount`（可用張數），`title` / `expires_at` 取 `credits[]` 裡第一張
   `status == "available"` 的。沒有這個欄位（claude / grok、舊 codex）一律 `null`，UI 完全不畫。
   daemon **只讀不用**：要用還是在 codex 那邊按（`/status` → `Reset usage`）。
+- `limit_hit`（2026-09-12 新增，目前只有 codex 會寫）：CLI 自己印的上限橫幅，形狀是
+  `{"message": "ERROR: You've hit your usage limit…", "until": "2026-09-12T21:07:00Z"|null, "at": "…"}`。
+  **為什麼需要它**：`five_hour` / `seven_day` 是速率視窗，codex 的 credits 用完時那兩條可以是 0% 已用
+  （2026-09-12 使用者：量表全滿、送出去卻一直回 hit your usage limit）。這一格是唯一講出「現在收不了
+  工作」的地方，所以它**黏著**：每 5 分鐘一次的 app-server 輪詢不帶這個欄位，`quota::set` 會沿用舊值，
+  直到 `until` 過了、或該 kind 下一回合真的答完（`quota::clear_limit_hit`）。`until` 為 `null` 表示橫幅
+  沒寫時間，只能等下一次成功的回合。UI 把該格標成「被擋」並把量表壓灰。
 - `low` / `critical` 為 daemon 算好的門檻旗標（`daemon/src/quota.rs` 的 `LOW_REMAINING_PCT` = 30、
   `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
   前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；
