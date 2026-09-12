@@ -759,6 +759,10 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       await api.session()
       await get().refreshState()
+      // `refreshState` 是 single-flight，錯誤被 `reportStateRefreshError` 吞掉、永不 throw。第一次
+      // `GET /api/state` 失敗（401／502／daemon 重啟中）不能就這樣 ready：清單是空的，routeSync
+      // 一見 ready 就把深連結判成「這個 Bot 已經不在了」、replaceState 成 `/`。停在開機畫面重試。
+      if (get().stateStale) throw new Error(lastRefreshError ?? '無法讀取 daemon 狀態')
       // 開機時還原的 team 選取要在這裡補抓細節（`refreshState` 不再幫忙載 team，issue #23）。
       const team = get().selectedTeamId
       if (team) await get().loadTeam(team)
