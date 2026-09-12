@@ -1,8 +1,15 @@
 # AGM 可靠性修正計畫（2026-09-12）
 
-狀態：計畫完成，待 AGM 範圍協調後交付 child。
+狀態：AGM 已核准 ownership，交付 child 實作；完成以逐項勾選與父 Bot review 為準。
 使用者原文：「那你出plan去修好這些問題 然後交給child 用cc1 opus-high做」。來源 bot 01M21SG9T6FEDTWRZ2CKY3JQG8、message 01M2AXP0BK1Z66XN0T9N6EDZQQ、turn 01M2AXP0BKAFXSY4KB52QG5C1N；source=web，relay_from=null。
 父 Bot：ag-man-y3jqg8；執行者：優先重用自己的同 context child，沒有則建立 ag-man-y3jqg8-agmfix，Claude、cc1、opus、high，rc off。不得自行改帳號／模型，額度不足持久保存進度並回報。Review 基準 ce9f15e；實作必須重新基於最新 origin/main 查證，可能已有其他 Bot 修正，不能盲目覆寫。
+
+## AGM 協調結果
+
+- 核准來源：AGM turn 01M2AXXAVEF91GNFC5CDYHN6EZ，回覆 assignment 01M2AXYZA70XKYM1F603B0JE8C。
+- child 已建立：ag-man-y3jqg8-agmfix，bot 01M2AXY67QFEEEKRPK9WBHYRPV，pane w168:p2T；daemon state 已核對 identity=cc1、model=opus、effort=high、parent_bot_id 正確。
+- lifecycle 回音段與 hookrecv 的 hook_user_is_new 屬 ag-man-k8bw2f，避開；需要接口變更先找 AGM。其餘 review child 為唯讀，不改碼。
+- 父 Bot review 後才 push main；release build、restart、runtime 變更另向 AGM 申請。AGM 已將此 child 記為有任務，不列入閒置清理。
 
 ## 目標與範圍
 
