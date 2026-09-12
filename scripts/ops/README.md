@@ -26,7 +26,9 @@
 2. 「會影響 binary 的路徑」跟 daemon 對齊（`agm build-inputs`），不再漏掉 `include_str!` 進來的
    persona 與 `scripts/agm.py`。問不到端點時用保底清單。
 3. 空閒判斷改成 `lease safety`（等窗口）＋ `lease acquire`（在同一個鎖裡重驗並拿走窗口）。
-   拿著 `restart` 租約期間 daemon 不會再派新工作出去，所以不會再出現「一邊檢查空閒、一邊又派新工作」。
+   拿著 `restart` 租約期間 supervisor assignment 派送會暫停；這不是所有 prompt 路徑的全域互斥鎖，正式替換前仍須由 AGM 重驗窗口。
+4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下個整點接續查核。pending、denied、revoked 不另建申請；過期後下輪才重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
+5. `daemon-update.lock` 防止腳本重疊執行。若程序被強制終止留下鎖，由 AGM 確認沒有執行者後移除。核准狀態檔損毀或 ID 不在查詢結果中也交 AGM 檢查，不自動繞過。
 
 ### 隔離測試
 

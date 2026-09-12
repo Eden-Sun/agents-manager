@@ -132,6 +132,69 @@ bash "$SCRIPT"
 check "沒有建置 child 就跳過" "沒設 AGM_BUILD_BOT" "$AGM_DIR/daemon-update.log"
 teardown
 
+# 8. Real asynchronous decision: the next run must reuse the first request, not create ap-2.
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
+bash "$SCRIPT"
+check_no "跨次執行不再申請新 ID" "approval request" "$AGM_DIR/calls.log"
+check "接續原核准取得租約" "--approval ap-1" "$AGM_DIR/calls.log"
+check "核准後才派工" "已派工" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 9. Transport failures and malformed replies cannot mean there is no pending work.
+setup
+export STUB_ASSIGNMENTS='{"error":"unavailable"}'
+bash "$SCRIPT"
+check "查派工失敗會停住" "無法確認未結案派工" "$AGM_DIR/daemon-update.log"
+check_no "查派工失敗不申請" "approval request" "$AGM_DIR/calls.log"
+teardown
+
+# 10. A denial is durable, not a reason to spam AGM with another approval next hour.
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"denied"}]}'
+bash "$SCRIPT"
+: > "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check_no "拒絕後不重複申請" "approval request" "$AGM_DIR/calls.log"
+check_no "拒絕後不取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 11. Expiry permits a new request on the next run, never using the expired approval.
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved","expires_at":"2000-01-01T00:00:00Z"}]}'
+bash "$SCRIPT"
+check_no "過期不取租約" "lease acquire" "$AGM_DIR/calls.log"
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check "過期後可重新申請" "approval request" "$AGM_DIR/calls.log"
+teardown
+
+# 12. A lost/corrupt approval list cannot authorize execution or create another request.
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL_LIST='{"approvals":null}'
+bash "$SCRIPT"
+check "核准讀取失敗會停住" "無法確認核准" "$AGM_DIR/daemon-update.log"
+check_no "不拿新申請繞過讀取錯誤" "approval request" "$AGM_DIR/calls.log"
+check_no "讀取錯誤不取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 13. Overlapping invocations stop before making any API mutations.
+setup
+mkdir "$AGM_DIR/daemon-update.lock"
+bash "$SCRIPT"
+check "重疊執行停止" "已有執行者或殘留鎖" "$AGM_DIR/daemon-update.log"
+check_no "重疊執行不申請" "approval request" "$AGM_DIR/calls.log"
+teardown
+
 echo "----"
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
