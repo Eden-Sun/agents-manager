@@ -1472,6 +1472,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
             json!({"parent_bot_id": bot.parent_bot_id}),
         ));
     }
+    refuse_default_session(&bot)?;
     if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }
@@ -2214,6 +2215,26 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     stop_bot_locked(app, bot_id).await
 }
 
+/// Is this run sitting in the user's own herdr `default` session (SPEC §6.5.1)?
+pub fn in_default_session(run: &db::Run) -> bool {
+    run.herdr_session.as_deref() == Some("default")
+}
+
+/// SPEC §6.5.1: a bot imported from the user's `default` session is observed, never driven.
+/// Starting one would `workspace.create` inside the user's session (`inject_hooks=0`,
+/// `auto_approve=0`, `--resume` and all); restarting one would first close their pane. Both
+/// used to happen from the sidebar buttons and from `restart-idle` (review 2026-09-12 #4).
+fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
+    if bot.herdr_session.as_deref() == Some("default") {
+        return Err(LcError::conflict(
+            "default_session",
+            json!({"bot_id": bot.id,
+                   "message": "這顆是從你自己的 herdr default session 匯入的，daemon 只觀察、不替它開或關 pane：要重啟請在那個終端裡自己做。"}),
+        ));
+    }
+    Ok(())
+}
+
 /// [`stop_bot`] for a caller that already holds the bot's lock, so a restart can stop and start
 /// under one guard ([`restart_bot_with`]).
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
@@ -2248,11 +2269,21 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     // we close it, otherwise a bare shell pane would linger until the next reconcile. And
     // when the run owned its tab (started with `tab.create`, or moved into one) the tab goes
     // with it, so stopping bots does not leave a row of empty tabs behind.
-    if let Some(p) = run.pane_id.as_deref() {
-        close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
-    }
-    if !gone {
-        tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
+    //
+    // Except in the user's own `default` session (SPEC §6.5.1): that pane is theirs, the
+    // daemon only ever observed it. The agent gets its ctrl+c and nothing more — closing the
+    // pane took the user's terminal away with it (review 2026-09-12 #4).
+    if in_default_session(&run) {
+        if !gone {
+            tracing::warn!(bot = %bot.name, "agent did not exit within 10s; its pane is the user's own and is left open");
+        }
+    } else {
+        if let Some(p) = run.pane_id.as_deref() {
+            close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
+        }
+        if !gone {
+            tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
+        }
     }
     let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
         .bind(db::now())
@@ -2288,6 +2319,10 @@ pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
 pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    // Checked *before* the stop: `start` would refuse anyway, but by then the user's agent
+    // would already have been sent ctrl+c for nothing.
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    refuse_default_session(&bot)?;
     stop_bot_locked(app, bot_id).await?;
     match start_bot_locked_with(app, bot_id, opts).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
@@ -6913,6 +6948,96 @@ mod child_restart_tests {
         // Nothing touched the pane.
         assert!(env.herdr.tab(&kid_pane.tab_id).unwrap().panes.contains(&kid_pane.pane_id));
         assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"));
+    }
+}
+
+#[cfg(test)]
+mod default_session_tests {
+    //! SPEC §6.5.1: a run in the user's own `default` session is observed, its pane never
+    //! closed and never re-created by the daemon (review 2026-09-12 #4).
+    use super::*;
+    use crate::team::testing as tt;
+
+    async fn imported_bot(env: &tt::Env) -> (String, String, crate::herdr::PaneInfo) {
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "mine", json!({})).await.unwrap();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, herdr_session, created_at)
+             VALUES (?,?,'mine','claude','[]',0,0,'tok','default',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'mine','default',1,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "mine", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+        (bot_id, run_id, pane)
+    }
+
+    /// Stop sends ctrl+c and ends the run, but the user's pane and tab stay exactly as they were.
+    #[tokio::test]
+    async fn stop_never_closes_the_users_pane() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, pane) = imported_bot(&env).await;
+
+        assert!(stop_bot(&app, &bot_id).await.unwrap());
+
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(run.state, "stopped");
+        let methods = env.herdr.methods();
+        assert!(methods.iter().any(|m| m == "agent.send_keys"), "the agent was asked to exit");
+        assert!(!methods.iter().any(|m| m == "pane.close" || m == "tab.close"), "{methods:?}");
+        assert!(env.herdr.tab(&pane.tab_id).unwrap().panes.contains(&pane.pane_id), "the pane is still there");
+    }
+
+    /// Start and restart are refused with a reason the UI can show — and the refusal comes
+    /// before any ctrl+c, so a refused restart leaves the user's agent running.
+    #[tokio::test]
+    async fn start_and_restart_are_refused_before_touching_the_agent() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, _pane) = imported_bot(&env).await;
+
+        let reason = |e: LcError| match e {
+            LcError::Conflict(v) => v["reason"].as_str().unwrap_or_default().to_string(),
+            other => panic!("expected 409, got {other:?}"),
+        };
+        assert_eq!(reason(restart_bot(&app, &bot_id).await.unwrap_err()), "default_session");
+        assert_eq!(reason(restart_bot_with(&app, &bot_id, StartOpts { resume_native: true }).await.unwrap_err()), "default_session");
+        assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| r.id), Some(run_id.clone()), "still running");
+        assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
+
+        // With no run at all, `start` is what the sidebar button would call.
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(reason(start_bot(&app, &bot_id).await.unwrap_err()), "default_session");
+        let creates = env.herdr.methods().iter().filter(|m| *m == "workspace.create").count();
+        assert_eq!(creates, 1, "only the fixture's own workspace.create; the daemon made none in the user's session");
     }
 }
 
