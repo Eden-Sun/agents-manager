@@ -733,12 +733,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
 const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 
 async fn run_local(script: &str, budget: Duration) -> Result<String> {
-    let o = tokio::time::timeout(
-        budget,
-        tokio::process::Command::new("/bin/sh").arg("-c").arg(script).stdin(std::process::Stdio::null()).output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("local probe timed out"))??;
+    let o = crate::hosts::sh_local(script, budget).await?.ok_or_else(|| anyhow::anyhow!("local probe timed out"))?;
     Ok(String::from_utf8_lossy(&o.stdout).to_string())
 }
 
