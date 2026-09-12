@@ -2026,9 +2026,7 @@ pub async fn refresh_unlimited_docs(app: &Arc<App>, team_id: &str) -> LcResult<(
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     for b in &members {
         if let Some(cwd) = b.cwd.as_deref().filter(|c| !c.is_empty()) {
-            tg::put_file(app, &project.host, &format!("{}/.agents-manager/team/TEAM.md", cwd.trim_end_matches('/')), &doc)
-                .await
-                .map_err(|e| LcError::Upstream(e.to_string()))?;
+            tg::write_team_md(app, &project.host, cwd, &doc).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         }
     }
     Ok(())
@@ -3161,6 +3159,10 @@ async fn grow_workers(
                 tracing::warn!(team = %t.id, error = %e, "could not pre-trust a new executor's worktree");
             }
         }
+        // §6.2 docs before the pane opens: the persona tells the executor to read
+        // `.agents-manager/team/ISSUE*.md`, and the `.gitignore` in that directory is what
+        // keeps `TEAM.md` out of `git add -A` on its task branch.
+        write_docs_for_grown(app, project, t, issue_seq, integration, issue_number, &dir).await?;
         if let Err(e) = crate::lifecycle::start_bot(app, &bot_id).await {
             tracing::warn!(team = %t.id, error = ?e, "a new executor failed to start");
             record_event(
@@ -3177,7 +3179,83 @@ async fn grow_workers(
         }
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
     }
+    if !is_unlimited(t) {
+        // The roster changed, and `TEAM.md` names everyone: rewrite it for every live member
+        // (the PM and the reviewer read their own copy), the way `start_issue` does.
+        refresh_finite_docs(app, project, t, issue_seq, integration, issue_number).await?;
+    } else {
+        refresh_unlimited_docs(app, &t.id).await?;
+    }
     Ok(())
+}
+
+/// The issue a grown executor works on, as `start_issue` would have described it: the queue
+/// row when there is one (the body comes from GitHub), else the `teams` mirror.
+async fn grown_issue(app: &Arc<App>, t: &db::Team, issue_seq: i64, issue_number: i64) -> IssueRef {
+    let row = db::team_issues(&app.db, &t.id).await.unwrap_or_default().into_iter().find(|q| q.seq == issue_seq);
+    match row {
+        Some(q) => refresh_issue(app, &t.project_id, &t.repo, &q).await,
+        None => IssueRef { number: issue_number, title: t.issue_title.clone(), url: t.issue_url.clone(), body: String::new() },
+    }
+}
+
+/// daemon-ops #9: an executor added after the batch started (`PATCH workers.count`, or
+/// unlimited mode growing on demand) gets the same `.agents-manager/team/` directory the
+/// first batch got from `create` / `start_issue` — `.gitignore` included.
+async fn write_docs_for_grown(
+    app: &Arc<App>,
+    project: &db::Project,
+    t: &db::Team,
+    issue_seq: i64,
+    integration: &str,
+    issue_number: i64,
+    dir: &str,
+) -> LcResult<()> {
+    let issue = grown_issue(app, t, issue_seq, issue_number).await;
+    let issue_doc = issue_md(&issue);
+    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
+    if is_unlimited(t) {
+        tg::write_issue_doc(app, &project.host, dir, issue.number, &issue_doc).await.map_err(up)?;
+    } else {
+        let roster = live_roster(app, &t.id).await?;
+        let team_doc = team_md(&issue, integration, &t.worktree_root, &t.repo, &roster);
+        tg::write_team_docs(app, &project.host, dir, &issue_doc, &team_doc).await.map_err(up)?;
+    }
+    Ok(())
+}
+
+/// Finite mode's `TEAM.md` / `ISSUE.md` for the root and every live member, after the roster changed.
+async fn refresh_finite_docs(
+    app: &Arc<App>,
+    project: &db::Project,
+    t: &db::Team,
+    issue_seq: i64,
+    integration: &str,
+    issue_number: i64,
+) -> LcResult<()> {
+    let issue = grown_issue(app, t, issue_seq, issue_number).await;
+    let issue_doc = issue_md(&issue);
+    let roster = live_roster(app, &t.id).await?;
+    let team_doc = team_md(&issue, integration, &t.worktree_root, &t.repo, &roster);
+    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
+    tg::put_file(app, &project.host, &format!("{}/TEAM.md", t.worktree_root), &team_doc).await.map_err(up)?;
+    for (_, _, cwd) in &roster {
+        if !cwd.is_empty() {
+            tg::write_team_docs(app, &project.host, cwd, &issue_doc, &team_doc).await.map_err(up)?;
+        }
+    }
+    Ok(())
+}
+
+/// `(short name, role, cwd)` of every live member — the rows `TEAM.md` lists.
+async fn live_roster(app: &Arc<App>, team_id: &str) -> LcResult<Vec<(String, String, String)>> {
+    Ok(db::team_members(&app.db, team_id)
+        .await
+        .map_err(any_err)?
+        .iter()
+        .filter(|b| b.deleted_at.is_none())
+        .map(|b| (short_name(&b.name, team_id), b.team_role.clone().unwrap_or_default(), b.cwd.clone().unwrap_or_default()))
+        .collect())
 }
 
 /// One role's half of [`patch`] (§10.5). Rewrites `roles_json` — which is what the next batch
@@ -5757,6 +5835,38 @@ mod api_tests {
             [format!("t{t6}-i1-dev-1"), format!("t{t6}-i1-dev-2"), format!("t{t6}-i1-dev-3")],
         );
         assert!(root.join(member_dir("worker", 3, 1)).join(".git").exists());
+    }
+
+    /// daemon-ops #9: an executor grown after the batch started has the same
+    /// `.agents-manager/team/` as the first batch — with the `.gitignore` that keeps
+    /// `TEAM.md` out of `git add -A` on its task branch.
+    #[tokio::test]
+    async fn a_grown_executor_gets_the_team_docs_and_a_clean_status() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        // Finite: PATCH workers.count 1 → 2.
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let root = std::path::PathBuf::from(load(&app, &tid).await.unwrap().worktree_root);
+        let grow = PatchTeam { workers: Some(RolePatch { count: Some(2), ..Default::default() }), ..Default::default() };
+        patch(&app, &tid, grow).await.unwrap();
+        let wt = root.join(member_dir("worker", 2, 1));
+        let docs = wt.join(".agents-manager/team");
+        assert_eq!(std::fs::read_to_string(docs.join(".gitignore")).unwrap(), "*\n");
+        assert!(docs.join("ISSUE.md").exists() && docs.join("TEAM.md").exists());
+        assert!(std::fs::read_to_string(docs.join("TEAM.md")).unwrap().contains("dev-2"), "the roster names the new executor");
+        assert_eq!(crate::team_git::testing::run(&wt, &["status", "--porcelain"]), "", "nothing for `git add -A` to pick up");
+
+        // Unlimited: the issue grows on demand, then `refresh_unlimited_docs` rewrites TEAM.md.
+        let tid = make_team(&app, &pid, req(Some(0), false)).await;
+        let root = std::path::PathBuf::from(load(&app, &tid).await.unwrap().worktree_root);
+        let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 42).unwrap();
+        assert_eq!(ensure_workers_for(&app, &tid, &q, 2).await.unwrap(), 2);
+        refresh_unlimited_docs(&app, &tid).await.unwrap();
+        let wt = root.join(member_dir("worker", 2, q.seq));
+        let docs = wt.join(".agents-manager/team");
+        assert_eq!(std::fs::read_to_string(docs.join(".gitignore")).unwrap(), "*\n");
+        assert!(docs.join("ISSUE-42.md").exists() && docs.join("TEAM.md").exists());
+        assert_eq!(crate::team_git::testing::run(&wt, &["status", "--porcelain"]), "");
     }
 
     #[tokio::test]
