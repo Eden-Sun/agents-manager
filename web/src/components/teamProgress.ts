@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useReducer, useState } from 'react'
 import type { RefObject } from 'react'
 import type { Team, TeamTaskState } from '../api/types'
-import { TEAM_TERMINAL_PHASES } from '../api/types'
+import { TEAM_TERMINAL_PHASES } from '../api/types.ts'
 
 /**
  * 「這張卡跑到哪了、跑了多久」——側欄 team 卡片與 `TeamQueueProgress` 共用的口徑。
