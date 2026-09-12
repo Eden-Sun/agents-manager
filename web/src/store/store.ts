@@ -38,14 +38,19 @@ import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from '
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { botStatusConnTarget } from './botStatusConn'
+import { restoreQueued } from './queuedSend'
+import type { QueuedSend } from './queuedSend'
 import {
   botKey,
+  clearHookCompletion,
   completesTurn,
   completionKey,
   countUnreadTurns,
   groupKey,
+  idleEdgeCompletionKey,
   loadCounts,
   loadMarks,
+  markHookCompletion,
   markNow,
   markOfMessages,
   pruneMarks,
@@ -281,10 +286,7 @@ export interface LiveReply {
 }
 
 /** 排隊中的一則送出（`queuedSends`）。 */
-export interface QueuedSend {
-  text: string
-  attachments: string[]
-}
+export type { QueuedSend } from './queuedSend'
 
 export interface ComposerState {
   /** 完全不能輸入（未啟動、blocked、主機斷線、送達狀態未知…）。 */
@@ -477,7 +479,7 @@ export interface StoreState {
   stopBot: (botId: string) => Promise<void>
   interruptBot: (botId: string) => Promise<void>
   /** 強制結束目前回合（送不送得出 `esc` 都解鎖）。 */
-  abortBot: (botId: string) => Promise<void>
+  abortBot: (botId: string) => Promise<boolean>
   /**
    * 對正在跑的 bot 送 `/login`，讓它的 TUI 進入登入 / 切換帳號流程。
    * `true` = 已經送進去（agent 現在停在登入畫面）；`false` = 沒送出，原因已經跳通知。
@@ -555,6 +557,11 @@ export interface StoreState {
   queueSend: (botId: string, text: string, attachments: string[]) => void
   /** 取消排隊中的送出（訊息會退回輸入框，由呼叫端決定）。 */
   cancelQueuedSend: (botId: string) => void
+  /**
+   * 送失敗後把那一則放回去：佇列空著就排回佇列（附件也在），被新的一則佔走就接回輸入框。
+   * 三個送出入口（回合結束自動送、中止並取代、併行送入）共用，免得 409 把字吃掉。
+   */
+  restoreQueuedSend: (botId: string, pending: QueuedSend) => void
 
   // ---- SPEC-team -------------------------------------------------------
   /** 開啟某個 team 的視圖（null = 回到原本的 bot / 群組）。 */
@@ -665,6 +672,22 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
 let appliedStateSeq = 0
 let lastRefreshError: string | null = null
+/**
+ * 還在等 daemon 回話的 `POST /api/order` 有幾個。拖曳後的樂觀順序（`botOrder`／`projectOrder`）
+ * 只在這段期間有意義：daemon 寫完會推 `project_changed`，下一份 `/state` 就是權威順序。
+ * 沒有東西在飛時 `refreshState` 直接把樂觀順序清掉，另一台裝置拖過的順序才會過來；
+ * 存失敗的那次也不會一直錯下去。
+ */
+let orderSavesInFlight = 0
+function saveOrderTracked(input: Parameters<typeof api.saveOrder>[0], onFail: () => void) {
+  orderSavesInFlight += 1
+  void api
+    .saveOrder(input)
+    .catch(onFail)
+    .finally(() => {
+      orderSavesInFlight -= 1
+    })
+}
 
 /**
  * daemon 的 `seq` 是行程內的計數器，**重啟就從 0 重來**（`state.rs` 的 `AtomicU64::new(0)`）。
@@ -755,6 +778,10 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       await api.session()
       await get().refreshState()
+      // `refreshState` 是 single-flight，錯誤被 `reportStateRefreshError` 吞掉、永不 throw。第一次
+      // `GET /api/state` 失敗（401／502／daemon 重啟中）不能就這樣 ready：清單是空的，routeSync
+      // 一見 ready 就把深連結判成「這個 Bot 已經不在了」、replaceState 成 `/`。停在開機畫面重試。
+      if (get().stateStale) throw new Error(lastRefreshError ?? '無法讀取 daemon 狀態')
       // 開機時還原的 team 選取要在這裡補抓細節（`refreshState` 不再幫忙載 team，issue #23）。
       const team = get().selectedTeamId
       if (team) await get().loadTeam(team)
@@ -825,6 +852,16 @@ export const useStore = create<StoreState>((set, get) => ({
         const order = (botOrder[b.project_id] ?? []).map((x) => (x === b.id ? real.id : x))
         botOrder = { ...botOrder, [b.project_id]: order }
       }
+      // 這份快照就是權威順序：沒有 `POST /api/order` 還在飛，樂觀順序就該讓位（另一台裝置拖過的
+      // 順序才過得來；存失敗那次也不會錯到重整）。只留還有佔位列的專案——分身的佔位要靠它排在
+      // 原 bot 旁邊，等真 bot 到了再放。
+      let projectOrder = s.projectOrder
+      if (orderSavesInFlight === 0) {
+        projectOrder = []
+        const keep: Record<string, string[]> = {}
+        for (const b of keptPending) if (botOrder[b.project_id]) keep[b.project_id] = botOrder[b.project_id]
+        botOrder = keep
+      }
       return {
         hosts: st.hosts,
         attachCommand: st.attach_command,
@@ -834,6 +871,7 @@ export const useStore = create<StoreState>((set, get) => ({
         projects: st.projects,
         bots: [...st.bots, ...keptPending],
         botOrder,
+        projectOrder,
         teams,
         runs,
         turns,
@@ -972,9 +1010,14 @@ export const useStore = create<StoreState>((set, get) => ({
 
   /** 設定面板永遠對著「目前選取的 bot」，所以開啟時順便切過去。 */
   openSettings: (botId, anchor = null) => {
+    // 面板只在 ChatPanel 裡渲染：主面板是 Team／組隊／主機 shell 視圖時要一起清掉，
+    // 不然按齒輪只有 selectedBotId 暗中換掉、畫面與網址都不動（同 `selectBot` 的那一組）。
     set({
       selectedBotId: botId,
       selectedProjectId: null,
+      selectedTeamId: null,
+      teamLaunch: null,
+      shellView: null,
       rightTab: 'chat',
       settingsBotId: botId,
       settingsAnchor: anchor,
@@ -998,8 +1041,8 @@ export const useStore = create<StoreState>((set, get) => ({
       const botOrder = { ...s.botOrder, [pid]: next }
       // 順序存在 daemon（config.toml 的陣列順序），手機與桌機才是同一份。這裡先樂觀套用，
       // daemon 寫完會回一個 `project_changed`，下一次 `/state` 帶回權威順序。
-      void api.saveOrder({ bots: { [pid]: next } }).catch(() => {
-        get().notify('error', '排序沒存起來（daemon 沒收到），重新整理會回到原本的順序')
+      saveOrderTracked({ bots: { [pid]: next } }, () => {
+        get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { botOrder }
     })
@@ -1014,8 +1057,8 @@ export const useStore = create<StoreState>((set, get) => ({
       if (beforeId !== null && at < 0) return {}
       const next = [...rest.slice(0, at), projectId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
-      void api.saveOrder({ projects: next }).catch(() => {
-        get().notify('error', '排序沒存起來（daemon 沒收到），重新整理會回到原本的順序')
+      saveOrderTracked({ projects: next }, () => {
+        get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { projectOrder: next }
     })
@@ -1152,9 +1195,12 @@ export const useStore = create<StoreState>((set, get) => ({
    * `esc` 沒送成功時講清楚——bot 那頭可能還在跑，只是這邊不再等它。
    */
   async abortBot(botId) {
+    // 回 true 只代表「esc 真的送進終端了」：呼叫端（中止並取代）要據此決定能不能接著送新的一則。
+    let stopped = false
     await guarded(set, get, `abort:${botId}`, async () => {
       const r = await api.abortBot(botId)
       const n = r.aborted.length
+      stopped = r.keys_sent
       get().notify(
         r.keys_sent ? 'info' : 'error',
         r.keys_sent
@@ -1162,6 +1208,7 @@ export const useStore = create<StoreState>((set, get) => ({
           : `已中止 ${n} 個回合，但 esc 送不進終端——agent 那邊可能還在跑，必要時停掉 Bot`,
       )
     })
+    return stopped
   },
 
   async loginBot(botId) {
@@ -1191,6 +1238,14 @@ export const useStore = create<StoreState>((set, get) => ({
     set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
   },
 
+  restoreQueuedSend(botId, pending) {
+    const r = restoreQueued(get(), botId, pending)
+    set(r.patch)
+    if (r.droppedAttachments > 0) {
+      get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 張圖片要重新加`)
+    }
+  },
+
   async sendPrompt(botId, text, attachments = []) {
     const crid = api.newClientRequestId()
     try {
@@ -1208,13 +1263,18 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       // The user message + turn arrive over the socket; only patch the turn map here so
       // the composer locks immediately even if the frame is slow.
-      set((s) => ({
+      set((s) => {
+        // RPC 逾時（`unknown`）期間 agent 可能已答完、`turn_updated(completed)` 先到：那筆已是終態，
+        // 不能再拿 HTTP 回來的 delivery 蓋回去（會變成 completed+unknown 的殘影）。
+        const existing = s.turns[botId]?.[res.turn_id]
+        if (existing && existing.status !== 'in_flight') return {}
+        return {
         turns: {
           ...s.turns,
           [botId]: {
             ...(s.turns[botId] ?? {}),
             [res.turn_id]: {
-              ...(s.turns[botId]?.[res.turn_id] ?? {
+              ...(existing ?? {
                 id: res.turn_id,
                 conversation_id: '',
                 run_id: get().runs[botId]?.id ?? null,
@@ -1229,7 +1289,8 @@ export const useStore = create<StoreState>((set, get) => ({
             },
           },
         },
-      }))
+        }
+      })
       return true
     } catch (e) {
       // daemon 送之前看了 pane 一眼：claude 停在開場的登入選單。它自己也在對話裡插了一則
@@ -1412,7 +1473,12 @@ export const useStore = create<StoreState>((set, get) => ({
       get().notify('error', errText(e))
       return null
     } finally {
-      set((st) => ({ busy: { ...st.busy, [key]: false } }))
+      // 其他路徑都是 delete；設成 false 會讓 busy 表每 clone 一次多一個永久 key。
+      set((st) => {
+        const busy = { ...st.busy }
+        delete busy[key]
+        return { busy }
+      })
     }
   },
 
@@ -2281,14 +2347,19 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // working → idle 也是「一個回合做完了」。多數時候 `message_added` / `turn_updated`
       // 已經先記過（`takeTurnCompletion` 會擋掉重複），但使用者直接在終端裡跟 agent 講話、
       // 或 hook 沒裝時，那條路一則都不會來——沒有這一段，未讀就永遠不亮。
+      if (!wasWorking && run?.agent_status === 'working') clearHookCompletion(botId)
       if (wasWorking && run?.agent_status === 'idle') {
-        // 去重要落在跟回合同一個 key 上：這個 bot 最近的那個回合（ULID 字典序＝時間序）。
-        const turnIds = Object.keys(get().turns[botId] ?? {})
+        // key 的規則在 `idleEdgeCompletionKey`：最近的回合（ULID 字典序＝時間序）還在飛就共用它的
+        // id；hook 那條路剛記過就跳過；否則是終端裡直接跑的回合，給獨立的 key。
+        const map = get().turns[botId] ?? {}
+        const turnIds = Object.keys(map)
         const latest = turnIds.length > 0 ? turnIds.reduce((a2, b2) => (a2 > b2 ? a2 : b2)) : null
-        const key = latest ?? `run:${run.id}`
-        noteTurnDone(set, get, botId, key)
-        const pid = get().bots.find((b) => b.id === botId)?.project_id
-        if (pid) noteGroupTurnDone(set, get, pid, key)
+        const key = idleEdgeCompletionKey(botId, run.id, latest ? map[latest] : null)
+        if (key) {
+          noteTurnDone(set, get, botId, key)
+          const pid = get().bots.find((b) => b.id === botId)?.project_id
+          if (pid) noteGroupTurnDone(set, get, pid, key)
+        }
       }
       return
     }
@@ -2342,6 +2413,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         // 同一個回合只記一次：沒有 `turn_id` 的訊息也要跟 `turn_updated` 落在同一個 key 上，
         // 否則這裡記 `msg:<id>`、回合終態再記 `turn.id`，一則回覆讓徽章跳兩下。
         const turnId = completionKey(msg, Object.keys(get().turns[botId] ?? {}))
+        markHookCompletion(botId)
         noteTurnDone(set, get, botId, turnId)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
         if (pid) noteGroupTurnDone(set, get, pid, turnId)
@@ -2363,6 +2435,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (turn.status !== 'in_flight') {
         flushQueued(botId)
         // 沒有 assistant 訊息的回合（被中止、只有終端輸出）也要算完成，否則它永遠不會亮。
+        markHookCompletion(botId)
         noteTurnDone(set, get, botId, turn.id)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
         if (pid) noteGroupTurnDone(set, get, pid, turn.id)
@@ -2384,19 +2457,25 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // 多個 agent 同時串流時每秒進來好幾個 frame；每個都 set 就每個都 render。同一個 bot
       // 250 ms 內只留最後一個（頭一個立刻套用，之後的合併到下一拍），畫面看不出差別。
       const pendingKey = botId
-      const apply = () =>
+      const apply = (trailing: boolean) =>
         set((s) => {
           const prev = s.liveReply[botId]
           // Frames can only move forward within a turn; a new turn always replaces.
           if (prev && prev.turnId === turnId && prev.revision > revision) return {}
+          // 合併到下一拍的那一幀：回合若已在這 250ms 內結束（`message_added`／`turn_updated` 清掉了
+          // liveReply），別把舊的 partial 寫回去留到下一回合。認不得的 turn（還沒進 map）照套。
+          if (trailing) {
+            const st = s.turns[botId]?.[turnId]?.status
+            if (st !== undefined && st !== 'in_flight') return {}
+          }
           return { liveReply: { ...s.liveReply, [botId]: { turnId, text, activity, alert, revision } } }
         })
       const slot = liveThrottle.get(pendingKey)
       if (slot) {
-        slot.apply = apply
+        slot.apply = () => apply(true)
         return
       }
-      apply()
+      apply(false)
       const entry = { apply: null as null | (() => void) }
       liveThrottle.set(pendingKey, entry)
       setTimeout(() => {
@@ -2576,7 +2655,11 @@ function flushQueued(botId: string) {
     const cs = composerState(s, botId)
     if (cs.disabled || cs.queued) return
     useStore.setState({ queuedSends: withoutKey(s.queuedSends, botId) })
-    void s.sendPrompt(botId, pending.text, pending.attachments)
+    // 送不出去（409 picker_open／dialog_open／needs_login、502、網路錯）就放回去，
+    // 別讓文字連附件一起消失；toast 由 sendPrompt 自己講。
+    void s.sendPrompt(botId, pending.text, pending.attachments).then((ok) => {
+      if (!ok) useStore.getState().restoreQueuedSend(botId, pending)
+    })
   }, 350)
 }
 
@@ -2821,10 +2904,15 @@ export function inFlightTurn(state: StoreState, botId: string): Turn | null {
   return null
 }
 
+/**
+ * API.md §5：只有**還在飛**的 `delivery=unknown` 才擋下一則。已經 completed／failed 的 unknown
+ * 是 RPC 逾時但 Stop hook 先把回合推成終態的殘影，不該把 composer 鎖成「送達狀態未知」——
+ * 那時「放棄該回合」打 abandon 只會拿 409，只能重整。
+ */
 export function unknownDeliveryTurn(state: StoreState, botId: string): Turn | null {
   const map = state.turns[botId] ?? {}
   for (const t of Object.values(map)) {
-    if (t.delivery === 'unknown' && t.status !== 'failed') return t
+    if (t.delivery === 'unknown' && t.status === 'in_flight') return t
   }
   return null
 }

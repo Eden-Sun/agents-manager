@@ -1,6 +1,6 @@
 # push 到 main 與每個 PR 都跑。本地收尾前跑同一組：scripts/check.sh（見該檔用法）。
 #
-# 擋 merge 的：web（bun install --frozen-lockfile → tsc → oxlint → vite build）與
+# 擋 merge 的：web（bun install --frozen-lockfile → tsc → oxlint → bun test → vite build）與
 # daemon（cargo test -p agents-managerd）。
 #
 # 只報告、不擋的：cargo fmt --check 與 cargo clippy（有 warning 就標紅）。2026-09-11

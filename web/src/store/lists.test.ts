@@ -62,7 +62,7 @@ test('pruneTurns keeps the newest `cap` turns', () => {
   assert.deepEqual(Object.keys(out).sort(), ['t7', 't8', 't9'])
 })
 
-test('pruneTurns never drops an in-flight or unknown-delivery turn', () => {
+test('pruneTurns never drops an in-flight turn; a settled unknown-delivery one is not blocking anything', () => {
   const map: Record<string, { status: string; delivery?: string | null }> = {
     t0: { status: 'in_flight' },
     t1: { status: 'completed', delivery: 'unknown' },
@@ -72,9 +72,9 @@ test('pruneTurns never drops an in-flight or unknown-delivery turn', () => {
     t5: { status: 'completed' },
   }
   const out = pruneTurns(map, 2)
-  // newest two (t4, t5) + the in-flight one + the still-blocking unknown one;
-  // the failed `unknown` is not blocking anything, so it goes.
-  assert.deepEqual(Object.keys(out).sort(), ['t0', 't1', 't4', 't5'])
+  // newest two (t4, t5) + the in-flight one. `unknown` only blocks the composer while
+  // in_flight (API.md §5), so the completed / failed ones go like any other settled turn.
+  assert.deepEqual(Object.keys(out).sort(), ['t0', 't4', 't5'])
 })
 
 test('pruneTurns returns the same object when nothing needs dropping', () => {

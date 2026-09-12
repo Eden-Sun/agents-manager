@@ -356,15 +356,32 @@ export function ImageIcon() {
  * same image can appear in a bot chat and in the group timeline).
  */
 const urlCache = new Map<string, Promise<string>>()
+/**
+ * 上限：object URL 把整個 Blob（最大 12 MB）釘在記憶體，以前既不 revoke、Map 也沒上限，一天內滾過
+ * 幾十張截圖記憶體就線性長上去、換 bot 也不回收。超過就淘汰最久沒用的那筆並 `revokeObjectURL`；
+ * 正在畫面上的 `<img>` 已經解碼完，URL 被收掉不影響它，重新掛載時再抓一次。
+ */
+const URL_CACHE_MAX = 64
 
 function storedUrl(id: string): Promise<string> {
   let p = urlCache.get(id)
-  if (!p) {
-    p = api.attachmentUrl(id).catch((e: unknown) => {
-      urlCache.delete(id)
-      throw e
-    })
+  if (p) {
+    // Map 照插入順序迭代：重新插入就是「最近用過」。
+    urlCache.delete(id)
     urlCache.set(id, p)
+    return p
+  }
+  p = api.attachmentUrl(id).catch((e: unknown) => {
+    urlCache.delete(id)
+    throw e
+  })
+  urlCache.set(id, p)
+  while (urlCache.size > URL_CACHE_MAX) {
+    const oldest = urlCache.keys().next().value
+    if (oldest === undefined) break
+    const evicted = urlCache.get(oldest)
+    urlCache.delete(oldest)
+    void evicted?.then((u) => URL.revokeObjectURL(u)).catch(() => {})
   }
   return p
 }

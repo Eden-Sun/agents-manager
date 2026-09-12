@@ -46,6 +46,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
+import { useWheelRef } from '../hooks/useWheelRef'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
@@ -832,6 +833,13 @@ function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | nu
   return out
 }
 
+/** 原生 wheel 事件的 `currentTarget` 型別是 `EventTarget | null`，套上 `.bot-kids` 那個節點再交給 `wheelKidsScroll`。 */
+function kidsWheel(e: WheelEvent) {
+  const el = e.currentTarget
+  if (!(el instanceof HTMLElement)) return
+  wheelKidsScroll({ currentTarget: el, deltaX: e.deltaX, deltaY: e.deltaY, shiftKey: e.shiftKey, preventDefault: () => e.preventDefault() })
+}
+
 /** 拖曳中的專案，以及游標落在哪個專案的哪一半。與 bot 的 `DragState` 分開：兩種拖曳不互相干擾。 */
 type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
 
@@ -876,8 +884,14 @@ export function Sidebar() {
   // 沒有專案全名以外的說明，也沒有 focus trap。改用跟其他刪除一致的 `ConfirmDialog`。
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
   const runs = useStore((s) => s.runs)
-  // 父列收合時要看子 agent 的燈號；`runs` 已訂閱，子 agent 狀態變了這裡就會重畫。
-  const lampState = useMemo(() => ({ ...useStore.getState(), runs }), [runs])
+  // 父列收合時要看子 agent 的燈號（`kidsLampOf`／`kidsWaitOf` → `botLamp`）。燈號除了 `runs`
+  // 還讀 herdr／遠端主機的連線狀態：herdr 或 host 斷線只改 `connected`／`hosts`（`daemon_status`／
+  // `host_changed`），以前只訂閱 `runs`，父列收合處會一直藍點、「在等子 agent」到下一個 bot_status。
+  const defaultConnected = useStore((s) => s.defaultConnected)
+  const lampState = useMemo(
+    () => ({ ...useStore.getState(), runs, hosts, connected, defaultConnected, bots, projects: rawProjects }),
+    [runs, hosts, connected, defaultConnected, bots, rawProjects],
+  )
   const unreadMap = useStore((s) => s.botUnread)
   const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
@@ -887,6 +901,8 @@ export function Sidebar() {
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
   const botOrder = useStore((s) => s.botOrder)
   const moveBot = useStore((s) => s.moveBot)
+  // shift+滾輪橫捲子 agent 列要 preventDefault，React 的 onWheel 是 passive 做不到（見 useWheelRef）。
+  const kidsWheelRef = useWheelRef<HTMLDivElement>(kidsWheel)
   const [drag, setDrag] = useState<DragState>(null)
   const shellSupported = useStore((s) => s.hostShellSupported)
   const openHostShell = useStore((s) => s.openHostShell)
@@ -1099,8 +1115,10 @@ export function Sidebar() {
           aria-label="搜尋 bot"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            e.stopPropagation()
+            // 只擋 Escape（別讓它一路關掉上層的東西）；其他鍵要放行，App 掛在 window 的 ⌥↑/⌥↓
+            // 換 bot 才收得到（FRONTEND.md：「任何地方（輸入框裡也算）」）。
             if (e.key === 'Escape') {
+              e.stopPropagation()
               e.preventDefault()
               setQuery('')
             }
@@ -1313,7 +1331,7 @@ export function Sidebar() {
                         onStep={step}
                       />
                       {shut || kids.length === 0 ? null : (
-                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} onWheel={wheelKidsScroll}>
+                        <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={`${b.name} 的 ${kids.length} 個子 agent`} ref={kidsWheelRef}>
                           {kids.map((c, i) => (
                             <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}`}>
                               <BotRow

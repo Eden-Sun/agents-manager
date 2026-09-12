@@ -64,13 +64,13 @@ test('沒有更新在等、不是 claude、沒在跑的都不進帳', () => {
   assert.deepEqual(c.busy, [])
 })
 
-test('子 agent 與 team 成員不歸這顆按鈕管（daemon 那邊同樣不碰）', () => {
+test('team 成員不歸這顆按鈕管；子 agent 進來（587b07f：在自己的 pane 裡 exit + resume）', () => {
   const bots = [bot('kid', { managed_by: 'child' }), bot('dev-1', { managed_by: 'team' }), bot('mine')]
   const runs = { kid: run('kid'), 'dev-1': run('dev-1'), mine: run('mine') }
   const c = updateBatchCounts(bots, runs, none)
   assert.deepEqual(
     c.ready.map((x) => x.name),
-    ['mine'],
+    ['kid', 'mine'],
   )
   assert.deepEqual(c.busy, [])
 })

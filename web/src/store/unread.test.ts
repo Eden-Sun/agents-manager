@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { completionKey, countUnreadTurns, isUnread, loadCounts, loadMarks, markOfMessages, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, totalUnread } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, totalUnread } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -143,4 +143,40 @@ test('message_added 與 turn_updated 不管誰先到，同一個回合只記一�
       : [takeTurnCompletion('b1', 't1'), takeTurnCompletion('b1', completionKey(m, known))]
     assert.deepEqual(hits.filter(Boolean).length, 1, `messageFirst=${messageFirst}`)
   }
+})
+
+test('idle 邊緣：最近的回合還在飛就共用它的 turn id，之後 turn_updated 到了會被去重', () => {
+  resetIdleEdges()
+  resetTurnCompletions()
+  const key = idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'in_flight' })
+  assert.equal(key, 't9')
+  assert.equal(takeTurnCompletion('b1', key!), true)
+  assert.equal(takeTurnCompletion('b1', 't9'), false)
+})
+
+test('idle 邊緣：hook 那條路已先記過（turn_updated 先到），這次 idle 是同一回合的尾巴，跳過', () => {
+  resetIdleEdges()
+  markHookCompletion('b1')
+  assert.equal(idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' }), null)
+  // 標記只用一次。
+  assert.equal(idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' }), 'run:r1:1')
+})
+
+test('idle 邊緣：已有 web 回合但這次是終端直接輸入 → 獨立 key，每次都算一則新的', () => {
+  resetIdleEdges()
+  resetTurnCompletions()
+  // 之前從網頁送過的回合已經記過 t9。
+  takeTurnCompletion('b1', 't9')
+  const k1 = idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' })
+  const k2 = idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' })
+  assert.deepEqual([k1, k2], ['run:r1:1', 'run:r1:2'])
+  assert.equal(takeTurnCompletion('b1', k1!), true)
+  assert.equal(takeTurnCompletion('b1', k2!), true)
+})
+
+test('idle 邊緣：新回合開始會清掉上一輪的 hook 標記', () => {
+  resetIdleEdges()
+  markHookCompletion('b1')
+  clearHookCompletion('b1')
+  assert.equal(idleEdgeCompletionKey('b1', 'r1', null), 'run:r1:1')
 })

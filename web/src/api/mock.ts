@@ -1528,7 +1528,19 @@ export class MockTransport implements Transport {
   }
 
   private emitBotStatus(botId: string) {
-    this.emit('bot_status', { bot_id: botId, run: this.activeRun(botId) ?? null, connected: this.connected })
+    // API.md §8：`connected` 是這顆 bot **所屬 host** 的狀態，遠端 bot 要帶 `host`——store 會把它寫進
+    // `hosts[<name>].connected`。以前一律送本機 herdr 的值，`hostDown()` 對該主機每顆 bot 發的
+    // bot_status 反而把主機標回已連線、error 清掉，斷線示範被自己蓋掉。
+    const bot = this.bots.find((x) => x.id === botId)
+    const project = bot ? this.projects.find((p) => p.id === bot.project_id) : undefined
+    const hostName = project?.host && project.host !== 'local' ? project.host : null
+    const host = hostName ? this.hosts.find((h) => h.name === hostName) : undefined
+    this.emit('bot_status', {
+      bot_id: botId,
+      run: this.activeRun(botId) ?? null,
+      connected: host ? host.connected : this.connected,
+      ...(hostName ? { host: hostName } : {}),
+    })
     // The real poller samples on a timer; here the only thing that moves the number is a
     // run starting or stopping, so ride that instead of burning a `setInterval`.
     this.emit('mem_updated', this.mem())
