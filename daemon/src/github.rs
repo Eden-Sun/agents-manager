@@ -76,12 +76,23 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
             .strip_prefix("https://")
             .or_else(|| u.strip_prefix("http://"))
             .or_else(|| u.strip_prefix("ssh://"))
-            .or_else(|| u.strip_prefix("git://"))
-            .unwrap_or(u);
+            .or_else(|| u.strip_prefix("git://"));
+        let had_scheme = no_scheme.is_some();
+        let no_scheme = no_scheme.unwrap_or(u);
         // drop userinfo (`git@`, `user:token@`)
         let no_user = no_scheme.rsplit_once('@').map(|(_, h)| h).unwrap_or(no_scheme);
         let host_path = no_user.strip_prefix("github.com")?;
-        host_path.strip_prefix('/').or_else(|| host_path.strip_prefix(':'))?
+        if had_scheme {
+            // With a scheme the colon is a **port** (`ssh://git@github.com:22/owner/repo`), never
+            // the scp-style separator; the path still has to start with `/`.
+            let after_port = match host_path.strip_prefix(':') {
+                Some(p) => p.trim_start_matches(|c: char| c.is_ascii_digit()),
+                None => host_path,
+            };
+            after_port.strip_prefix('/')?
+        } else {
+            host_path.strip_prefix('/').or_else(|| host_path.strip_prefix(':'))?
+        }
     };
     let mut parts = rest.trim_end_matches('/').splitn(3, '/');
     let owner = parts.next()?.trim();
@@ -443,6 +454,9 @@ mod tests {
             "ssh://git@github.com/Eden-Sun/powertech-hub",
             "ssh://git@github.com/Eden-Sun/powertech-hub.git\n",
             "git://github.com/Eden-Sun/powertech-hub.git",
+            // A port after the host is not the scp-style `:owner/repo` separator.
+            "ssh://git@github.com:22/Eden-Sun/powertech-hub.git",
+            "https://github.com:443/Eden-Sun/powertech-hub",
         ] {
             let g = parse_github_remote(u).unwrap_or_else(|| panic!("{u}"));
             assert_eq!(g.owner, "Eden-Sun");
@@ -452,6 +466,7 @@ mod tests {
         assert!(parse_github_remote("git@gitlab.com:a/b.git").is_none());
         assert!(parse_github_remote("").is_none());
         assert!(parse_github_remote("https://github.com/only-owner").is_none());
+        assert!(parse_github_remote("ssh://git@github.com:22").is_none());
     }
 
     #[test]
