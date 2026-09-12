@@ -11,6 +11,11 @@
  *
  * 同一級之內照 `bots` 陣列原本的順序，所以一顆晶片只要還在同一級就不會左右亂跳。
  *
+ * **手機不排序**（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：手機是單行橫捲，
+ * 使用者靠「第幾顆」的肌肉記憶去點，一顆 bot 跑完就跳到最前面，拇指底下的那顆就換人了。
+ * 所以窄螢幕一律照 `bots` 的順序（＝側欄順序，team 在最後）；緊急度只在桌機的兩行換行裡排——
+ * 那裡看得到全部，不靠位置找。
+ *
  * 為什麼不再分「剛跑完／進行中」兩塊標籤：分組決定位置的時候，第 9 顆的 `needs-reply` 會
  * 排在最右邊，被捲出視野——使用者 2026-09-12 就這樣錯過了一顆 blocked 的 bot。晶片本來就
  * 各自帶著記號（★、未讀數、紅／黃／藍的點），標籤只是在搶寬度。
@@ -77,6 +82,8 @@ export function UnreadChip() {
   // 底下當場消失。記住「它在被選走的前一刻有沒有未讀」，讓它留在列上。
   const keptId = keepSelectedRow(selectedBotId, botUnread)
 
+  const narrow = useMediaQuery(NARROW_QUERY)
+
   const items = useMemo(() => {
     const tracked = (b: Bot) => !b.pending && b.parent_bot_id === null && !b.team && !agmProjectIds.includes(b.project_id)
     const waitsKids = (id: string) =>
@@ -127,12 +134,12 @@ export function UnreadChip() {
         title: teamTitle(t.issue_number, t.issue_title, t.phase, current),
       })
     }
-    // 穩定排序：同一級之內維持上面推進去的順序（＝`bots` 的順序，team 在最後）。
+    // 手機：位置固定（見檔頭）。桌機：穩定排序，同一級之內維持上面推進去的順序（＝`bots` 的順序，team 在最後）。
+    if (narrow) return out
     return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
-  }, [agmProjectIds, botUnread, bots, keptId, runs, selectBot, selectTeam, selectedBotId, selectedTeamId, teams])
+  }, [agmProjectIds, botUnread, bots, keptId, narrow, runs, selectBot, selectTeam, selectedBotId, selectedTeamId, teams])
 
   const barRef = useRef<HTMLDivElement | null>(null)
-  const narrow = useMediaQuery(NARROW_QUERY)
   const [expanded, setExpanded] = useState(false)
   const hidden = useOverflowRows(barRef, !narrow && !expanded, items.length)
   const scroll = useHorizontalScroll(barRef, narrow)
