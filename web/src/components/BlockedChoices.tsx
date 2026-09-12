@@ -73,8 +73,7 @@ export function BlockedChoices({
    * 寫明是推測。猜錯的代價只是跳到別題（切分頁不會答題），再點一下就好。
    */
   const [tabAt, setTabAt] = useState<number | null>(null)
-  const guessTab = menu.tabs.findIndex((t) => !t.done && !t.submit)
-  const atTab = tabAt ?? (guessTab >= 0 ? guessTab : null)
+  const atTab = tabAt ?? menu.tabAt
 
   /**
    * 展開說明的那幾項（2026-09-12 第四輪）。
@@ -230,35 +229,54 @@ export function BlockedChoices({
       return null
     })
 
-  /** 切分頁：Tab 往後、shift+tab 往前。送完看問題有沒有換，換了才把「現在在哪一題」記下來。 */
-  const goTab = (to: number) =>
-    run({ kind: 'tab', key: String(to) }, async () => {
-      if (atTab === null) return '看不出現在在第幾題，請用左右那兩顆一格一格走。'
-      const delta = to - atTab
-      if (!delta) return null
-      const before = await read()
-      if (!before) return '讀不到畫面，什麼都沒送出。'
+  /**
+   * 走 `n` 格分頁並確認畫面真的換了。
+   *
+   * 先送 ←／→——分頁列兩端畫的就是這兩顆箭頭，而且它們在別的地方不會有副作用；
+   * 沒反應才退回 tab／shift+tab（腳註寫的是 `Tab/Arrow keys`，兩種都可能）。
+   * **一顆都不碰 space／數字／Enter**：換頁不該改到任何答案。
+   */
+  const moveTabs = async (delta: number): Promise<boolean> => {
+    const before = await read()
+    if (!before) return false
+    const n = Math.abs(delta)
+    for (const key of delta > 0 ? ['right', 'tab'] : ['left', 'shift+tab']) {
       await sendKeys(
         botId,
-        Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? 'tab' : 'shift+tab')),
+        Array.from({ length: n }, () => key),
       )
       for (let i = 0; i < TRIES; i++) {
         await sleep(STEP)
         const now = await read()
-        if (!now || now.question !== before.question) {
-          setTabAt(to)
-          return null
-        }
+        if (!now || now.question !== before.question || now.tabAt !== before.tabAt) return true
+      }
+    }
+    return false
+  }
+
+  /** 點某一個分頁：走過去，換到了才把「現在在哪一題」記下來。 */
+  const goTab = (to: number) =>
+    run({ kind: 'tab', key: String(to) }, async () => {
+      if (atTab === null) return '看不出現在在第幾題，請用左右那兩顆一格一格走。'
+      if (to === atTab) return null
+      if (await moveTabs(to - atTab)) {
+        setTabAt(to)
+        return null
       }
       return '分頁沒有換——現在可能不在我猜的那一題上，請用左右那兩顆一格一格走。'
     })
 
   const step = (dir: 1 | -1) =>
     run({ kind: 'tab', key: dir > 0 ? 'next' : 'prev' }, async () => {
-      await sendKeys(botId, [dir > 0 ? 'tab' : 'shift+tab'])
-      if (atTab !== null) setTabAt(Math.min(Math.max(atTab + dir, 0), menu.tabs.length - 1))
-      return null
+      if (await moveTabs(dir)) {
+        if (atTab !== null) setTabAt(Math.min(Math.max(atTab + dir, 0), menu.tabs.length - 1))
+        return null
+      }
+      return '分頁沒有換。'
     })
+
+  /** review 那一列對應到第幾個分頁（送出頁不算一題）。 */
+  const reviewTab = (i: number) => menu.tabs.findIndex((t, k) => !t.submit && menu.tabs.slice(0, k).filter((x) => !x.submit).length === i)
 
   return (
     <div className="blocked-choices">
@@ -305,6 +323,27 @@ export function BlockedChoices({
         ) : null}
         {menu.question ? <p className="bc-question">{menu.question}</p> : null}
       </div>
+
+      {/* review／confirm 頁中段那段「每題 → 目前答案」。使用者在這一頁最想確認的就是自己答了
+          什麼，而那段原本只存在收起來的終端原文裡；點一題就跳回那個分頁去改（2026-09-12 第七輪）。 */}
+      {menu.review.length ? (
+        <ul className="bc-review">
+          {menu.review.map((r, i) => (
+            <li key={r.question}>
+              <button
+                type="button"
+                className="bc-rev"
+                disabled={Boolean(busy) || reviewTab(i) < 0}
+                title={`回到「${menu.tabs[reviewTab(i)]?.label ?? '這一題'}」改答案`}
+                onClick={() => void goTab(reviewTab(i))}
+              >
+                <span className="bc-rev-q">{r.question}</span>
+                <span className="bc-rev-a">{r.answer || '（還沒作答）'}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       <ol className={`bc-list${menu.multi ? ' bc-list-multi' : ''}`}>
         {menu.choices.map((c, i) => {

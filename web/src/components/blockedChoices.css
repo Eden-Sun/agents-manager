@@ -410,3 +410,87 @@
 .bc-item {
   align-content: start;
 }
+
+/* ---- 小面板裡的捲動（2026-09-12 第五輪） */
+
+/*
+ * 使用者在 390px 上「無法滑動」，送出鈕永遠在畫面外。量到的祖先鏈是：
+ *
+ *   .blocked-choices 432/432 · .blocked 551/550 · .chat 582/**667** · .main 844/929
+ *   .app overflow-y: hidden  ← 在這裡被裁掉，body 也不捲
+ *
+ * 對話分頁平常是「訊息列自己那一層」在捲，而這塊 blocked 面板在它外面，所以選單一長出來
+ * 就沒有任何一層收得住——不是卡片太大，是整條鏈上沒有捲動容器。
+ *
+ * 修法：**認出選單時，讓這塊面板自己成為捲動容器**。不動 `.chat` / `.app` 的溢出設定（那是
+ * 整個版面的地基，動它會牽到訊息列、輸入框與終端分頁）；沒有選單時也不動（那時面板高度本來
+ * 就被終端快照的 `max-height: 300px` 收著）。送出鈕與 Esc 都在這塊裡面，捲得到。
+ */
+.blocked:has(.blocked-choices) {
+  max-height: 70vh;
+  max-height: 70svh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 面板自己會捲之後，分頁列與問題也釘在它的上緣（跟全畫面視窗同一套）。 */
+.blocked:has(.blocked-choices) .bc-top {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: -2px 0 0;
+  padding: 6px 0 8px;
+  background: var(--danger-soft);
+  box-shadow: 0 1px 0 var(--border);
+}
+
+/* ---- review／confirm 頁的「每題 → 目前答案」（2026-09-12 第七輪） */
+
+.bc-review {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bc-rev {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bc-rev:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.bc-rev:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+/* 問題在這裡是「標籤」，答案才是要確認的東西——所以答案粗、問題淡。 */
+.bc-rev-q {
+  color: var(--text-dim);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.bc-rev-a {
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}

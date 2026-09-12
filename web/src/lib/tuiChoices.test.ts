@@ -9,6 +9,12 @@ import { keysToMove, keysToSelect, parseChoiceMenu, sameChoices } from './tuiCho
  */
 const MULTI = readFileSync(new URL('./__fixtures__/carbis-multiselect.txt', import.meta.url), 'utf8')
 
+/**
+ * 2026-09-12 第七輪真機快照：同一份問卷走到最後的 review／confirm 頁。使用者回報「怎麼不能
+ * 點其他分頁」——分頁列跟選項之間隔著一整段 Review，原本只看問題正上方那一行就找不到它。
+ */
+const REVIEW = readFileSync(new URL('./__fixtures__/carbis-review.txt', import.meta.url), 'utf8')
+
 /** 2026-09-12 真機快照（bot `carbis`，185 欄）。分隔線夾在 5 與 6 之間是原樣。 */
 const CARBIS = [
   '     9 OPEN [astro] .env.example 與實際用到的環境變數不同步',
@@ -199,4 +205,49 @@ test('上一輪的單選那份沒有退步：沒有分頁、沒有方框、沒�
   assert.deepEqual(menu.tabs, [])
   assert.equal(menu.submit, null)
   assert.deepEqual(keysToSelect(menu, 3), ['down', 'down', 'down', 'enter'])
+})
+
+
+test('review 頁：分頁列跟選項之間隔著一整段 Review，照樣找得到（第七輪的根因）', () => {
+  const menu = parseChoiceMenu(REVIEW)
+  assert.ok(menu)
+  assert.deepEqual(menu.tabs, [
+    { label: '編輯方式', done: true, submit: false },
+    { label: '功能', done: true, submit: false },
+    { label: 'Submit', done: false, submit: true },
+  ])
+  // 全部答完了 → 現在這一格應該是送出頁
+  assert.equal(menu.tabAt, 2)
+})
+
+test('review 頁：每題的目前答案讀得出來，選項是 Submit answers / Cancel', () => {
+  const menu = parseChoiceMenu(REVIEW)
+  assert.ok(menu)
+  assert.deepEqual(menu.review, [
+    { question: '文章是誰寫、怎麼上稿？', answer: '非工程師要能自己發' },
+    { question: '除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）', answer: 'SEO 是主要目的' },
+  ])
+  assert.deepEqual(
+    menu.choices.map((c) => c.title),
+    ['Submit answers', 'Cancel'],
+  )
+  assert.equal(menu.question, 'Ready to submit your answers?')
+  assert.equal(menu.cursor, 0)
+  // review 那段不能被當成問題的一部分吃進來
+  assert.equal(menu.multi, false)
+})
+
+test('一般選項頁沒有 review 那段，tabAt 是第一個還沒答的', () => {
+  const menu = parseChoiceMenu(MULTI)
+  assert.ok(menu)
+  assert.deepEqual(menu.review, [])
+  assert.equal(menu.tabAt, 1)
+})
+
+test('沒有分頁的單選：tabAt 是 null、review 空的（沒有退步）', () => {
+  const menu = parseChoiceMenu(CARBIS)
+  assert.ok(menu)
+  assert.equal(menu.tabAt, null)
+  assert.deepEqual(menu.review, [])
+  assert.deepEqual(menu.tabs, [])
 })
