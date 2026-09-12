@@ -3,7 +3,7 @@
 //! SQLite holds runtime state (Run / Turn / Message / tokens). On load and after every
 //! write-back we project TOML into SQLite (see `projection.rs`).
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -399,8 +399,6 @@ impl ConfigStore {
     }
 
     /// Mutate the in-memory config and atomically write it back.
-    ///
-    /// Refuses (409-ish) when the file changed underneath us since the last read.
     pub async fn update<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut ConfigFile) -> Result<T>,
@@ -408,7 +406,11 @@ impl ConfigStore {
         let mut g = self.inner.lock().await;
         let on_disk = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
         if self.path.exists() && on_disk != g.mtime {
-            bail!("config.toml changed on disk since it was loaded; reload required");
+            let (cfg, mtime) = read_file(&self.path)
+                .context("config.toml changed on disk and could not be re-read")?;
+            tracing::info!("config.toml changed on disk; reloaded before applying update");
+            g.cfg = cfg;
+            g.mtime = mtime;
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
@@ -674,5 +676,93 @@ auto_start = true   # typo for autostart
         assert!(text.contains("autostart = true"));
         assert!(!text.contains("# top comment"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod issue28_tests {
+    use super::{ConfigFile, ConfigStore};
+    use std::path::Path;
+    use std::time::Duration;
+
+    fn temp_config() -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("am-config-issue28-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), dir.join("config.toml"))
+    }
+
+    fn rewrite_externally(path: &Path, text: &str) {
+        let before = std::fs::metadata(path).unwrap().modified().unwrap();
+        std::fs::write(path, text).unwrap();
+        if std::fs::metadata(path).unwrap().modified().unwrap() == before {
+            std::thread::sleep(Duration::from_secs(1));
+            std::fs::write(path, text).unwrap();
+        }
+        assert_ne!(std::fs::metadata(path).unwrap().modified().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn update_reloads_external_changes_before_applying_closure() {
+        let (dir, path) = temp_config();
+        std::fs::write(
+            &path,
+            r#"[server]
+listen = "127.0.0.1:7788"
+herdr_session = "initial"
+
+[[projects]]
+path = "/tmp/initial"
+label = "initial"
+"#,
+        )
+        .unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        rewrite_externally(
+            &path,
+            r#"[server]
+listen = "127.0.0.1:8899"
+herdr_session = "external"
+
+[[projects]]
+path = "/tmp/external"
+label = "external"
+"#,
+        );
+        store
+            .update(|cfg| {
+                cfg.server.herdr_session = "closure".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let cfg: ConfigFile = store.get().await;
+        assert_eq!(cfg.server.listen, "127.0.0.1:8899");
+        assert_eq!(cfg.server.herdr_session, "closure");
+        assert_eq!(cfg.projects[0].label, "external");
+        assert_eq!(cfg.projects[0].path, "/tmp/external");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reports_external_toml_parse_errors() {
+        let (dir, path) = temp_config();
+        std::fs::write(&path, "[server]\nlisten = \"127.0.0.1:7788\"\n").unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        rewrite_externally(&path, "[server\nlisten = \"127.0.0.1:8899\"\n");
+        let err = store
+            .update(|cfg| {
+                cfg.server.herdr_session = "closure".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("config.toml changed on disk and could not be re-read"), "{message}");
+        assert!(message.contains("parse "), "{message}");
+        assert!(!message.contains("reload required"), "{message}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
