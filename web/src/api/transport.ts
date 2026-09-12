@@ -137,11 +137,19 @@ export class HttpTransport implements Transport {
       }
       ws.onmessage = (ev: MessageEvent<string>) => {
         if (sock !== ws) return
+        let frame: { seq?: number; type: string; data?: unknown } | null = null
         try {
-          const frame = JSON.parse(ev.data) as { seq?: number; type: string; data?: unknown }
-          if (frame && typeof frame.type === 'string') handlers.onFrame(frame)
+          frame = JSON.parse(ev.data) as { seq?: number; type: string; data?: unknown }
         } catch {
           /* ignore malformed frame */
+        }
+        if (!frame || typeof frame.type !== 'string') return
+        // handleFrame 丟出來的例外不能跟「JSON 壞掉」一起吞：`lastSeq` 在它開頭就推進了，重連時
+        // 不會補這一則，無聲消失等於資料就這樣少一筆。至少在 console 留下痕跡。
+        try {
+          handlers.onFrame(frame)
+        } catch (e) {
+          console.error(`[ws] handler threw on ${frame.type} frame`, e)
         }
       }
       ws.onerror = () => ws.close()
