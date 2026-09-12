@@ -1115,8 +1115,10 @@ export function Sidebar() {
           aria-label="搜尋 bot"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            e.stopPropagation()
+            // 只擋 Escape（別讓它一路關掉上層的東西）；其他鍵要放行，App 掛在 window 的 ⌥↑/⌥↓
+            // 換 bot 才收得到（FRONTEND.md：「任何地方（輸入框裡也算）」）。
             if (e.key === 'Escape') {
+              e.stopPropagation()
               e.preventDefault()
               setQuery('')
             }
