@@ -1607,8 +1607,15 @@ incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, reso
   purpose 不符、過期、被撤銷、commit 不同都會被拒。release 時把核准標成 `consumed`——一次核准一個窗口。
 - 租約有 `fence`，只增不減。持有人過期後被別人接手，舊 fence 的 renew／release 一律失敗，所以「昨天核准過」
   不會變成現在還能動手。租約到期即自動釋放，crash 不會永久鎖死。
-- 拿著 `restart` 租約期間，assignment 派送會 hold（留在 `queued`，不丟工作也不算重試次數）——這正是快照做不到的
-  那一半：不會一邊確認空閒、一邊又派新工作進去。
+- 拿著 `restart` 租約期間，**supervisor 的 assignment 派送**會 hold（留在 `queued`，不丟工作也不算重試次數）——
+  這正是快照做不到的那一半：不會一邊確認空閒、一邊又派新工作進去。
+  **但它只管這一條通道**：`POST /api/bots/{id}/prompt`、team relay 與排程器都沒有被 gate，使用者自己打字、
+  PM 派給 worker 的下一棒，在窗口期間照樣會進去。要把這個洞補起來得在 `lifecycle::prompt` 本身加閘，
+  那是跨模組的改動，這一輪沒有做。所以「拿著 restart 租約」≠「現在沒有任何東西進得了任何 bot」。
+- 安全窗口的判斷是 fail closed：讀不到某顆 bot 的狀態（DB 錯誤）就回 `safe:false` 並把它列在 `unreadable`，
+  不會把「讀不到」算成「閒著」。`restart` 也不接受 `require_idle=false`——那個檢查就是這個資源的窗口本身。
+- 租約不會活得比它依據的核准久：acquire 與 renew 都取「要求的到期」與「核准到期」之中較早的那個，
+  renew 還會重驗核准狀態，所以核准被撤銷之後，持有人不能靠續租把窗口一直延下去。
 - assignment 可帶 `ownership`（檔案／模組）。重疊時 `POST /assignments` 回 `ownership_conflicts`，**只回報不阻擋**：
   daemon 無法判斷兩個模組是不是真的獨立，這是交給 AGM 協調的資料，不是鎖。
 - 運維腳本進 repo（`scripts/ops/`），改用上面的流程，並附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，

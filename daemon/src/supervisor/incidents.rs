@@ -90,10 +90,13 @@ pub struct Plan {
 
 impl Detector {
     /// `now` is a unix timestamp; `open` is what is currently in the database.
+    /// `blind` names probe kinds that could not run this pass. Their incidents are left alone:
+    /// an empty result from a query that errored is not evidence that the fault cleared.
     pub fn plan(
         &mut self,
         observations: &[Observation],
         open: &[(String, String)],
+        blind: &[&str],
         thresholds: &Thresholds,
         now: i64,
     ) -> Plan {
@@ -114,21 +117,43 @@ impl Detector {
                 plan.open.push(obs.clone());
             }
         }
-        // Anything open that nobody observed this pass has cleared.
+        // Anything open that nobody observed this pass has cleared — unless the probe that
+        // would have seen it never ran, in which case we know nothing and say nothing.
         for key in open {
-            if !seen.contains(key) {
+            if !seen.contains(key) && !blind.contains(&key.0.as_str()) {
                 plan.resolve.push(key.clone());
             }
         }
-        self.since.retain(|k, _| seen.contains(k));
+        // A blind probe's timer is left alone too, so a fault that was already accumulating
+        // does not have to start its threshold over because of one failed query.
+        self.since.retain(|k, _| seen.contains(k) || blind.contains(&k.0.as_str()));
         plan
+    }
+}
+
+/// What one sweep could see.
+///
+/// `failed` names the probes whose query errored. It matters because "the query said nothing is
+/// wrong" and "the query did not answer" produce the same empty list, and treating the second
+/// as the first makes the sweep *resolve* open incidents — announcing a recovery that nobody
+/// observed. A probe that could not run keeps its incidents exactly where they are.
+#[derive(Debug, Default)]
+pub struct Probed {
+    pub seen: Vec<Observation>,
+    pub failed: Vec<&'static str>,
+}
+
+impl Probed {
+    pub fn ok(&self) -> bool {
+        self.failed.is_empty()
     }
 }
 
 /// Read every cheap probe. No LLM, no process is killed to find out how it is doing: this runs
 /// on the 30-second health tick and may not cost more than a few queries.
-pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation> {
-    let mut out = Vec::new();
+pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
+    let mut probed = Probed::default();
+    let out = &mut probed.seen;
 
     // A host the daemon cannot reach takes every bot on it with it, and nothing else notices.
     for host in app.hosts.list().await {
@@ -144,19 +169,31 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
 
     // "Expected running" is the user's own `autostart`, not a guess: a bot somebody stopped on
     // purpose is not a fault, and treating it as one is how a health page becomes noise.
-    if let Ok(bots) = crate::db::live_bots(&app.db).await {
-        for bot in bots {
-            if bot.autostart == 0 {
-                continue;
+    match crate::db::live_bots(&app.db).await {
+        Ok(bots) => {
+            for bot in bots {
+                if bot.autostart == 0 {
+                    continue;
+                }
+                match crate::db::active_run(&app.db, &bot.id).await {
+                    Ok(None) => out.push(Observation {
+                        kind: "bot_stopped".into(),
+                        resource: bot.id.clone(),
+                        severity: "degraded".into(),
+                        detail: json!({"bot_id": bot.id, "name": bot.name, "expected": "autostart"}).to_string(),
+                    }),
+                    Ok(Some(_)) => {}
+                    // Could not tell whether this bot is running. Not knowing is not "it is fine".
+                    Err(e) => {
+                        tracing::warn!(bot = %bot.id, error = ?e, "bot_stopped probe failed");
+                        probed.failed.push("bot_stopped");
+                    }
+                }
             }
-            if matches!(crate::db::active_run(&app.db, &bot.id).await, Ok(None)) {
-                out.push(Observation {
-                    kind: "bot_stopped".into(),
-                    resource: bot.id.clone(),
-                    severity: "degraded".into(),
-                    detail: json!({"bot_id": bot.id, "name": bot.name, "expected": "autostart"}).to_string(),
-                });
-            }
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "bot_stopped probe failed");
+            probed.failed.push("bot_stopped");
         }
     }
 
@@ -165,7 +202,12 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
     // nobody has accepted, which is the case the review found in production.
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(thresholds.assignment_stalled_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    if let Ok(stalled) = store::assignments_idle_since(&app.db, &cutoff).await {
+    match store::assignments_idle_since(&app.db, &cutoff).await {
+        Err(e) => {
+            tracing::warn!(error = ?e, "assignment_stalled probe failed");
+            probed.failed.push("assignment_stalled");
+        }
+        Ok(stalled) => {
         for a in stalled {
             out.push(Observation {
                 kind: "assignment_stalled".into(),
@@ -180,13 +222,19 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
                 .to_string(),
             });
         }
+        }
     }
 
     // Work that has never been handed over at all — the stopped-bot case. The idle probe above
     // is blind to it: every retry moves `updated_at`, so an assignment bouncing off a stopped
     // bot every five minutes looks busy forever. The detail carries the retry count and the
     // last refusal, which is what makes it actionable instead of just red.
-    if let Ok(undelivered) = store::assignments_undelivered_since(&app.db, &cutoff).await {
+    match store::assignments_undelivered_since(&app.db, &cutoff).await {
+        Err(e) => {
+            tracing::warn!(error = ?e, "assignment_undelivered probe failed");
+            probed.failed.push("assignment_undelivered");
+        }
+        Ok(undelivered) => {
         for a in undelivered {
             out.push(Observation {
                 kind: "assignment_undelivered".into(),
@@ -203,25 +251,32 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
                 .to_string(),
             });
         }
+        }
     }
 
     // A notification nobody could deliver after every retry. Critical: this is the path the
     // manager learns anything through, and a silent one is worse than a loud failure.
-    if let Ok(stuck) = store::exhausted_inbox(&app.db, thresholds.notify_max_attempts).await {
-        for e in stuck {
-            out.push(Observation {
-                kind: "notify_exhausted".into(),
-                resource: e.id.clone(),
-                severity: "critical".into(),
-                detail: json!({
-                    "event_id": e.id,
-                    "event_key": e.event_key,
-                    "kind": e.kind,
-                    "attempts": e.notify_attempts,
-                    "error": e.notify_error,
-                })
-                .to_string(),
-            });
+    match store::exhausted_inbox(&app.db, thresholds.notify_max_attempts).await {
+        Err(e) => {
+            tracing::warn!(error = ?e, "notify_exhausted probe failed");
+            probed.failed.push("notify_exhausted");
+        }
+        Ok(stuck) => {
+            for e in stuck {
+                out.push(Observation {
+                    kind: "notify_exhausted".into(),
+                    resource: e.id.clone(),
+                    severity: "critical".into(),
+                    detail: json!({
+                        "event_id": e.id,
+                        "event_key": e.event_key,
+                        "kind": e.kind,
+                        "attempts": e.notify_attempts,
+                        "error": e.notify_error,
+                    })
+                    .to_string(),
+                });
+            }
         }
     }
 
@@ -239,17 +294,39 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
         });
     }
 
-    out
+    probed
+}
+
+/// Incidents whose whole point is that the inbox is not working. Queueing an inbox event for
+/// them is how a stuck notification becomes two stuck notifications: the event cannot be
+/// delivered either, so it exhausts its own retries, which opens another incident, and so on.
+/// They are still written down and still show up in `system_health` and on the UI — what they
+/// do not get is a wake-up down the very channel they are reporting as broken.
+fn notifiable(kind: &str) -> bool {
+    kind != "notify_exhausted"
 }
 
 /// Apply one pass: write what changed, and queue one inbox event per transition.
 pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     let cfg = app.cfg.get().await;
     let thresholds = Thresholds::from_cfg(&cfg.supervisor);
-    let observations = observe(app, &thresholds).await;
-    let Ok(open) = store::open_incidents(&app.db).await else { return };
+    let probed = observe(app, &thresholds).await;
+    // Cannot read what is already open: do nothing at all rather than guess in either direction.
+    let Ok(open) = store::open_incidents(&app.db).await else {
+        tracing::warn!("incident sweep skipped: could not read the open incidents");
+        return;
+    };
     let open_keys: Vec<(String, String)> = open.iter().map(|i| (i.kind.clone(), i.resource.clone())).collect();
-    let plan = detector.plan(&observations, &open_keys, &thresholds, chrono::Utc::now().timestamp());
+    if !probed.ok() {
+        tracing::warn!(blind = ?probed.failed, "some incident probes could not run; their incidents are left as they are");
+    }
+    let plan = detector.plan(
+        &probed.seen,
+        &open_keys,
+        &probed.failed,
+        &thresholds,
+        chrono::Utc::now().timestamp(),
+    );
 
     for obs in plan.open {
         let detail: Value = serde_json::from_str(&obs.detail).unwrap_or_else(|_| json!({}));
@@ -262,39 +339,57 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
             continue;
         }
         tracing::warn!(kind = %obs.kind, resource = %obs.resource, severity = %obs.severity, "system incident opened");
-        let _ = store::push_inbox(
-            &app.db,
-            &format!("incident:{}:opened", incident.id),
-            "incident_opened",
-            None,
-            None,
-            None,
-            &json!({"incident": incident.to_json()}),
-        )
-        .await;
+        if notifiable(&obs.kind) {
+            let _ = store::push_inbox(
+                &app.db,
+                &format!("incident:{}:opened", incident.id),
+                "incident_opened",
+                None,
+                None,
+                None,
+                &json!({"incident": incident.to_json()}),
+            )
+            .await;
+        }
         app.emit("supervisor_changed", json!({"incident": incident.to_json()})).await;
     }
 
     for (kind, resource) in plan.resolve {
         let Ok(Some(incident)) = store::resolve_incident(&app.db, &kind, &resource).await else { continue };
         tracing::info!(kind = %kind, resource = %resource, "system incident resolved");
-        let _ = store::push_inbox(
-            &app.db,
-            &format!("incident:{}:resolved", incident.id),
-            "incident_resolved",
-            None,
-            None,
-            None,
-            &json!({"incident": incident.to_json()}),
-        )
-        .await;
+        if notifiable(&kind) {
+            let _ = store::push_inbox(
+                &app.db,
+                &format!("incident:{}:resolved", incident.id),
+                "incident_resolved",
+                None,
+                None,
+                None,
+                &json!({"incident": incident.to_json()}),
+            )
+            .await;
+        }
         app.emit("supervisor_changed", json!({"incident": incident.to_json()})).await;
     }
 }
 
 /// The system half of the health summary: severity, and the incidents behind it.
 pub async fn system_health(app: &Arc<App>) -> Value {
-    let open = store::open_incidents(&app.db).await.unwrap_or_default();
+    // `unwrap_or_default()` here used to turn a failed query into an empty list, and an empty
+    // list into `healthy` — the summary claimed the system was fine on the strength of a read
+    // that never happened.
+    let open = match store::open_incidents(&app.db).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not read open incidents");
+            return json!({
+                "status": "unknown",
+                "error": "could not read the incident table",
+                "open_incidents": null,
+                "incidents": [],
+            });
+        }
+    };
     let severity = open.iter().fold("healthy".to_string(), |acc, i| worst(&acc, &i.severity));
     json!({
         "status": severity,
@@ -332,12 +427,12 @@ mod tests {
         let mut d = Detector::default();
         let t = thresholds();
         let seen = [obs("host_disconnected", "mac2")];
-        assert!(d.plan(&seen, &[], &t, 1000).open.is_empty(), "first sighting is not yet an incident");
-        assert!(d.plan(&seen, &[], &t, 1119).open.is_empty(), "one second short of the threshold");
-        assert_eq!(d.plan(&seen, &[], &t, 1120).open.len(), 1, "past the threshold it opens");
+        assert!(d.plan(&seen, &[], &[], &t, 1000).open.is_empty(), "first sighting is not yet an incident");
+        assert!(d.plan(&seen, &[], &[], &t, 1119).open.is_empty(), "one second short of the threshold");
+        assert_eq!(d.plan(&seen, &[], &[], &t, 1120).open.len(), 1, "past the threshold it opens");
         // Already open: every later pass just refreshes it, and `sweep` only notifies on the
         // transition, so a five-hour outage stays one notification.
-        assert_eq!(d.plan(&seen, &[("host_disconnected".into(), "mac2".into())], &t, 9999).open.len(), 1);
+        assert_eq!(d.plan(&seen, &[("host_disconnected".into(), "mac2".into())], &[], &t, 9999).open.len(), 1);
     }
 
     #[test]
@@ -345,13 +440,13 @@ mod tests {
         let mut d = Detector::default();
         let t = thresholds();
         let open = vec![("host_disconnected".to_string(), "mac2".to_string())];
-        let plan = d.plan(&[], &open, &t, 5000);
+        let plan = d.plan(&[], &open, &[], &t, 5000);
         assert_eq!(plan.resolve, open);
         assert!(plan.open.is_empty());
         // And the clock starts over, so a fault that comes back has to hold the threshold again
         // rather than re-opening on its first tick.
         let seen = [obs("host_disconnected", "mac2")];
-        assert!(d.plan(&seen, &[], &t, 6000).open.is_empty());
+        assert!(d.plan(&seen, &[], &[], &t, 6000).open.is_empty());
     }
 
     /// The counter-churn case from 2026-09-10: bots starting and finishing all night is not a
@@ -361,7 +456,7 @@ mod tests {
         let mut d = Detector::default();
         let t = thresholds();
         for i in 0..660 {
-            assert!(d.plan(&[], &[], &t, 1000 + i * 30).open.is_empty());
+            assert!(d.plan(&[], &[], &[], &t, 1000 + i * 30).open.is_empty());
         }
     }
 
@@ -372,7 +467,55 @@ mod tests {
         let mut d = Detector::default();
         let t = thresholds();
         let seen = [obs("assignment_stalled", "a1"), obs("notify_exhausted", "e1")];
-        assert_eq!(d.plan(&seen, &[], &t, 1000).open.len(), 2);
+        assert_eq!(d.plan(&seen, &[], &[], &t, 1000).open.len(), 2);
+    }
+
+    /// A probe whose query errored returns no observations — exactly like a probe that looked
+    /// and found nothing. Treating them the same makes the sweep announce a recovery nobody
+    /// saw, which is worse than silence: it closes an incident that is still happening.
+    #[test]
+    fn a_probe_that_could_not_run_never_resolves_its_incidents() {
+        let mut d = Detector::default();
+        let t = thresholds();
+        let open = vec![
+            ("host_disconnected".to_string(), "mac2".to_string()),
+            ("assignment_stalled".to_string(), "a1".to_string()),
+        ];
+        // The stalled probe failed this pass; the host probe ran and saw nothing.
+        let plan = d.plan(&[], &open, &["assignment_stalled"], &t, 5000);
+        assert_eq!(
+            plan.resolve,
+            vec![("host_disconnected".to_string(), "mac2".to_string())],
+            "only the probe that actually looked may close its incident"
+        );
+        // And once it can run again and still sees nothing, it resolves normally.
+        let plan = d.plan(&[], &open, &[], &t, 5030);
+        assert_eq!(plan.resolve.len(), 2);
+    }
+
+    /// A blind pass must not restart a threshold that was already accumulating, or a fault
+    /// could dodge every incident by coinciding with an intermittent query failure.
+    #[test]
+    fn a_blind_pass_does_not_reset_a_threshold_in_progress() {
+        let mut d = Detector::default();
+        let t = thresholds();
+        let seen = [obs("host_disconnected", "mac2")];
+        assert!(d.plan(&seen, &[], &[], &t, 1000).open.is_empty(), "clock starts");
+        // The probe fails for a while: no observation, but the fault is not known to be gone.
+        for at in [1030, 1060, 1090] {
+            assert!(d.plan(&[], &[], &["host_disconnected"], &t, at).open.is_empty());
+        }
+        // Back up, still down: the original sighting still counts, so it opens on time.
+        assert_eq!(d.plan(&seen, &[], &[], &t, 1120).open.len(), 1, "threshold measured from the first sighting");
+    }
+
+    /// The incidents that say "the inbox is broken" must not be announced through the inbox.
+    #[test]
+    fn the_broken_notification_channel_is_not_used_to_report_itself() {
+        assert!(!notifiable("notify_exhausted"), "this one would retry, exhaust, and open another incident");
+        for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", "remote_entry"] {
+            assert!(notifiable(kind), "{kind} is safe to wake the manager about");
+        }
     }
 
     #[test]

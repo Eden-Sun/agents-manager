@@ -226,7 +226,13 @@ pub async fn post_review(
     // A follow-up is a *new* assignment carrying the unfinished part forward, never an edit of
     // the one already sent: rewriting delivered text is how a bot ends up working from words
     // nobody sent it.
-    let followup = if b.decision == "followup" {
+    //
+    // Order is the whole point here. The decision, the continuation row and the audit entry are
+    // written in one guarded transaction *before* anything is dispatched, because a prompt that
+    // has gone out cannot be rolled back. Creating the work first and recording it afterwards
+    // (the shape this had until 2026-09-13) let two callers each send a continuation and then
+    // argue about which decision survived.
+    let followup_spec = if b.decision == "followup" {
         let text = b
             .followup_text
             .as_deref()
@@ -240,13 +246,13 @@ pub async fn post_review(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| LcError::Bad("followup needs a stable followup_request_id".into()))?;
         let target = b.followup_bot_id.clone().unwrap_or_else(|| a.target_bot_id.clone());
-        let ownership = if b.ownership.is_empty() { a.ownership() } else { b.ownership.clone() };
-        drop(_g);
-        Some(super::assign(&app, &target, text, crid, None, &ownership, Some(&a.id)).await?)
+        // Validate the target before the transaction: a read, and a 400 for a bot that cannot
+        // take work is more useful than a rolled-back transaction.
+        super::check_assignable(&app, &target).await?;
+        Some((target, crid.to_string(), text.to_string()))
     } else {
         None
     };
-    let followup_id = followup.as_ref().and_then(|f| f.get("id").and_then(Value::as_str).map(str::to_string));
 
     // The caveat goes into the audit row too: whoever reads this decision later should see the
     // same warning the caller got, not just the word `cancelled`.
@@ -255,19 +261,56 @@ pub async fn post_review(
         (None, Some(note)) => Some(note.to_string()),
         (e, None) => e.map(str::to_string),
     };
-    let updated = store::review(
+    let ownership = if b.ownership.is_empty() { a.ownership() } else { b.ownership.clone() };
+    let spec = followup_spec.as_ref().map(|(target, crid, text)| store::FollowupSpec {
+        target_bot_id: target,
+        client_request_id: crid,
+        text,
+        ownership: &ownership,
+        // The continuation answers the same user request as its parent.
+        request_id: a.request_id.as_deref(),
+    });
+    let decided = store::review_with_followup(
         &app.db,
         &a.id,
+        &a.status,
         &b.decision,
         &actor,
         &source,
         b.reason.as_deref(),
         evidence.as_deref(),
-        followup_id.as_deref(),
+        spec,
     )
     .await
-    .map_err(up)?
-    .ok_or_else(|| LcError::NotFound("assignment".into()))?;
+    .map_err(up)?;
+
+    let Some(decided) = decided else {
+        // The guard did not match: somebody decided it between our read and our write, and
+        // **nothing** was written — no continuation, no audit row.
+        let now = store::assignment(&app.db, &id).await.map_err(up)?;
+        return Err(LcError::conflict(
+            "the assignment was decided by someone else first; nothing was written",
+            json!({
+                "reason": "decided_concurrently",
+                "assignment_id": id,
+                "status": now.as_ref().map(|n| n.status.clone()),
+                "decided_by": now.as_ref().and_then(|n| n.reviewed_by.clone()),
+                "decision": now.as_ref().and_then(|n| n.review_decision.clone()),
+            }),
+        ));
+    };
+    let updated = decided.updated;
+
+    // Committed, so now it can go out. Dispatch is best effort exactly as in `assign`: a
+    // failure leaves the row `queued`, which is the recoverable state.
+    if let Some(f) = decided.followup.as_ref() {
+        controller::dispatch(&app, &f.id).await;
+    }
+    drop(_g);
+    let followup = match decided.followup {
+        Some(f) => store::assignment(&app.db, &f.id).await.map_err(up)?.map(|r| r.to_json()),
+        None => None,
+    };
 
     app.emit("supervisor_changed", json!({"assignment_id": updated.id, "status": updated.status})).await;
     let mut out = updated.to_json();
@@ -784,7 +827,25 @@ pub async fn post_lease_renew(
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
     let ttl = b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS).clamp(30, super::maintenance::MAX_TTL_SECS);
-    if !store::renew_lease(&app.db, &resource, &b.owner, b.fence, &iso_in(ttl)).await.map_err(up)? {
+    // Renewal re-checks the permission, it does not just extend the clock. An approval that was
+    // revoked (or has lapsed) while the holder was working must not be extendable by the holder
+    // — otherwise "revoked" only takes effect whenever the current lease happens to run out.
+    let held = store::lease(&app.db, &resource).await.map_err(up)?;
+    let approval = match held.as_ref().and_then(|l| l.approval_id.clone()) {
+        Some(ap) => store::approval(&app.db, &ap).await.map_err(up)?,
+        None => None,
+    };
+    if let Some(approval) = approval.as_ref() {
+        let commit = held.as_ref().and_then(|l| l.target_commit.clone());
+        if let Some(reason) = approval.refusal(&crate::db::now(), &resource, commit.as_deref()) {
+            return Err(LcError::conflict(
+                "the approval behind this lease is no longer valid; release the window and ask again",
+                json!({"reason": reason, "approval_id": approval.id, "status": approval.status}),
+            ));
+        }
+    }
+    let deadline = super::maintenance::lease_deadline(&iso_in(ttl), approval.as_ref().and_then(|a| a.expires_at.as_deref()));
+    if !store::renew_lease(&app.db, &resource, &b.owner, b.fence, &deadline).await.map_err(up)? {
         let held = store::lease(&app.db, &resource).await.map_err(up)?;
         return Err(LcError::conflict(
             "this lease is no longer yours",

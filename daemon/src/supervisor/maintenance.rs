@@ -14,9 +14,17 @@
 //!    lease is held new assignments are not dispatched (they stay queued), which is the half
 //!    the snapshot approach could never do.
 //!
-//! The honest limit, stated because it cannot be fixed here: an arbitrary shell on this machine
-//! can still `kill` the daemon without asking anybody. The lease binds the paths that go through
-//! this API and the operational scripts in `scripts/ops/`; it is not an OS-level mutex.
+//! **What the pause actually covers, stated narrowly because the gap matters:** holding a
+//! `restart` lease stops *supervisor assignment dispatch* — `controller::dispatch`, the path
+//! AGM's own work goes out through. It does **not** gate `POST /api/bots/{id}/prompt`, the team
+//! relay, or the scheduler; a user typing into a bot, or a PM handing a worker its next job,
+//! still goes through during the window. So the lease makes the window quiet on the one channel
+//! the supervisor controls, not on the whole daemon. Closing that gap means a check inside
+//! `lifecycle::prompt` itself, which reaches well outside this module and is not attempted here.
+//!
+//! The other honest limit, for the same reason: an arbitrary shell on this machine can still
+//! `kill` the daemon without asking anybody. The lease binds the paths that go through this API
+//! and the operational scripts in `scripts/ops/`; it is not an OS-level mutex.
 
 use crate::lifecycle::LcError;
 use crate::state::App;
@@ -29,8 +37,10 @@ use super::store;
 /// a private lock that protects nothing.
 pub const RESOURCES: [&str; 2] = ["rebuild", "restart"];
 
-/// Holding this one pauses assignment dispatch. A rebuild does not interrupt anybody; a restart
-/// does, and handing a bot new work while waiting to kill its session is the race this closes.
+/// Holding this one pauses **supervisor assignment dispatch**. A rebuild does not interrupt
+/// anybody; a restart does, and handing a bot new work while waiting to kill its session is the
+/// race this closes — for assignments. Ordinary prompts and the team relay are not gated (see
+/// the module docs); do not read a held restart lease as "nothing can reach any bot".
 pub const EXCLUSIVE: [&str; 1] = ["restart"];
 
 /// Default and maximum lease lifetime. Long enough for a release build and a restart, short
@@ -65,11 +75,23 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
     let mut working = Vec::new();
     let mut blocked = Vec::new();
     let mut in_flight = Vec::new();
+    // A read that fails is not a bot that is idle. Before this, `let Ok(Some(run)) = … else
+    // continue` swallowed the error and the bot silently counted as free — a failing database
+    // would have read as "the coast is clear", which is the one answer this must never invent.
+    let mut unreadable = Vec::new();
     for b in &bots {
         if exclude.contains(&b.id) {
             continue;
         }
-        let Ok(Some(run)) = crate::db::active_run(&app.db, &b.id).await else { continue };
+        let run = match crate::db::active_run(&app.db, &b.id).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(bot = %b.id, error = ?e, "safety probe could not read this bot's run");
+                unreadable.push(json!({"bot_id": b.id, "name": b.name}));
+                continue;
+            }
+        };
+        let Some(run) = run else { continue };
         // AGM's own turn is protected by the same rule as everyone's: you do not restart the
         // daemon out from under the session the user is talking to.
         if run.agent_status == "working" {
@@ -77,16 +99,25 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
         } else if run.agent_status == "blocked" {
             blocked.push(json!({"bot_id": b.id, "name": b.name}));
         }
-        if let Ok(Some(t)) = crate::db::in_flight_turn(&app.db, &run.id).await {
-            in_flight.push(json!({"bot_id": b.id, "turn_id": t.id}));
+        match crate::db::in_flight_turn(&app.db, &run.id).await {
+            Ok(Some(t)) => in_flight.push(json!({"bot_id": b.id, "turn_id": t.id})),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(bot = %b.id, error = ?e, "safety probe could not read this bot's in-flight turn");
+                unreadable.push(json!({"bot_id": b.id, "name": b.name}));
+            }
         }
     }
     let open = store::open_assignments(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let safe = working.is_empty() && in_flight.is_empty();
+    // Not knowing about even one bot is enough to refuse: the window's whole promise is that
+    // nothing is running, and we cannot promise that about a bot we could not look at.
+    let safe = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
     Ok(json!({
         "safe": safe,
         "working": working,
         "in_flight": in_flight,
+        // Bots whose state could not be read this pass. Never empty *and* `safe` at once.
+        "unreadable": unreadable,
         // Reported, not blocking: a pane waiting on a person is a normal state, and a restart
         // leaves it alone.
         "blocked_waiting_for_user": blocked,
@@ -112,6 +143,13 @@ pub async fn acquire(
     if !RESOURCES.contains(&resource) {
         return Err(LcError::Bad(format!("unknown lease resource: {resource}")));
     }
+    // A restart interrupts every session on the box. "Take the window anyway" is not a thing
+    // you get to ask for: the idle check *is* the window for this resource.
+    if EXCLUSIVE.contains(&resource) && !require_idle {
+        return Err(LcError::Bad(format!(
+            "the `{resource}` window cannot skip the idle check; wait for a safe window instead"
+        )));
+    }
     let ttl = ttl_secs.clamp(30, MAX_TTL_SECS);
     let _g = super::lock().await;
 
@@ -135,13 +173,17 @@ pub async fn acquire(
         ));
     }
 
+    // The lease may not outlive the permission it rests on. Otherwise "approved until 14:00"
+    // quietly becomes "holding the box until 14:45", which is a different promise than the one
+    // anybody agreed to.
+    let expires_at = lease_deadline(&iso_in(ttl), approval.expires_at.as_deref());
     let taken = store::acquire_lease(
         &app.db,
         resource,
         owner,
         Some(&approval.id),
         commit,
-        &iso_in(ttl),
+        &expires_at,
         &json!({"require_idle": require_idle, "safety": safety}),
     )
     .await
@@ -157,6 +199,19 @@ pub async fn acquire(
     tracing::info!(resource, owner, fence = lease.fence, "maintenance lease acquired");
     app.emit("supervisor_changed", json!({"lease": lease.to_json()})).await;
     Ok(json!({"lease": lease.to_json(), "approval": approval.to_json(), "safety": safety}))
+}
+
+/// The earlier of the requested deadline and the approval's own expiry.
+///
+/// A lease is only ever a permission with a clock on it; it cannot be renewed past the moment
+/// that permission lapses, and it cannot be granted past it either.
+pub fn lease_deadline(requested: &str, approval_expires_at: Option<&str>) -> String {
+    match approval_expires_at {
+        // RFC3339 in UTC with the same precision sorts lexicographically, and both sides come
+        // from `iso_in` / the approvals table, so a string compare is the right comparison.
+        Some(exp) if exp < requested => exp.to_string(),
+        _ => requested.to_string(),
+    }
 }
 
 /// Dispatch is paused; keep the assignment queued until the window closes rather than sending
@@ -223,5 +278,21 @@ mod tests {
         assert!(EXCLUSIVE.contains(&"restart"));
         assert!(!EXCLUSIVE.contains(&"rebuild"));
         assert!(pause_note("2026-09-12T12:15:00Z").contains("12:15"));
+    }
+
+    /// A lease is a permission with a clock on it, so it cannot outlive the permission — on
+    /// acquire *or* on renew. Otherwise "approved until 14:00" quietly becomes "holding the box
+    /// until 14:45".
+    #[test]
+    fn a_lease_never_outlives_its_approval() {
+        let asked = "2026-09-12T12:45:00Z";
+        assert_eq!(lease_deadline(asked, Some("2026-09-12T14:00:00Z")), asked, "approval outlasts it: keep the ask");
+        assert_eq!(
+            lease_deadline(asked, Some("2026-09-12T12:10:00Z")),
+            "2026-09-12T12:10:00Z",
+            "approval lapses first: the lease ends with it"
+        );
+        // An approval with no deadline is the author's choice; it does not shorten anything.
+        assert_eq!(lease_deadline(asked, None), asked);
     }
 }
