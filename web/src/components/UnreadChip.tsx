@@ -1,218 +1,312 @@
 /**
- * 標題列**下面**自成一列，由左到右三組（2026-09-11 使用者定的排法）：
+ * 標題列**下面**自成一列：現在有哪幾顆 bot 在等你、在跑、或你釘著要一直看得到。
  *
- * - **剛跑完**：跑完了還沒看。要去看的東西排最前面。
- * - 接著是使用者自己用 ★ 釘的「主要執行的 bot」（`PrimaryStar`）。它回答的是「我平常在推的
- *   是哪幾顆」，跟現在有沒有事發生無關，所以**常駐**——只要釘了東西，這一列就在。它**不寫
- *   標籤**：★ 已經說完了（使用者定的），多一個「主力」兩個字只是佔寬度。本來擠在固定 60px
- *   的標題列上（塞不下的收成 `+N`），名字被切成兩三個字反而認不出是誰；移到這一列之後可以
- *   換行，全部都看得見。
- * - **進行中**：還在跑，推到最右邊。
+ * 排法是**緊急度**，不是分組也不是建立時間（2026-09-12 使用者／AGM，推翻 9/11 的三組排法）：
  *
- * 頭尾兩組是會變的狀態；三組都空的時候整列不存在、不佔高度。
+ * 1. `needs-reply`——停在一個要**你本人**回答的提示上。
+ * 2. 有未讀——跑完了還沒看。
+ * 3. `waits-kids`——自己沒卡住，但在等它開出去的子 agent。
+ * 4. `current`——你正在看的那一顆（固定留在列上當定位點）。
+ * 5. 其餘（釘選的主力、還在跑的、在跑的 team）。
  *
- * 釘起來的 bot **不會**同時出現在後兩組：它的晶片本來就帶未讀數與進行中的圓點，再列一次
- * 只是同一件事佔兩格。
+ * 同一級之內照 `bots` 陣列原本的順序，所以一顆晶片只要還在同一級就不會左右亂跳。
  *
- * **當前正在看的那一顆要「固定」住**（2026-09-11 使用者，推翻同日稍早「把它排除掉」的做法）：
- * 它不但不消失，還要留在原本的順位上、套 `current` 的 focus 樣式，一眼看出「這顆就是我現在
- * 在看的」。切到別顆之後它才依各組原本的規則離開。
+ * 為什麼不再分「剛跑完／進行中」兩塊標籤：分組決定位置的時候，第 9 顆的 `needs-reply` 會
+ * 排在最右邊，被捲出視野——使用者 2026-09-12 就這樣錯過了一顆 blocked 的 bot。晶片本來就
+ * 各自帶著記號（★、未讀數、紅／黃／藍的點），標籤只是在搶寬度。
  *
- * 三組的順序都是 `bots` 陣列的順序（不是未讀時間、也不是跑完時間），所以只要一顆晶片還在列
- * 上，它的位置就不會變——不會因為未讀歸零、狀態變了就整列往左跳。
+ * 版面（同日同一份交辦）：
+ * - 桌機不靠橫捲：換行，最多兩行；再多就收起來，右邊那顆 `+N` 按一下展開（不是捲走）。
+ * - 手機維持單行橫捲，但要**看得出來能捲**：兩端有陰影與可點的 ◂ ▸，滾輪的垂直滾動在這一列
+ *   映射成橫捲，`scroll-snap` 讓邊緣的晶片不會被切一半。
+ * - 名字放不下時先縮成 `…`（`.unread-chip-name` 的 ellipsis），不要切掉半顆晶片。
  *
- * **這一列只有一列高，排不下就往右捲**（2026-09-12 使用者）：本來會換行，十顆晶片在手機上
- * 排成三行、把對話的第一則推出畫面。既然它是索引不是內容，就不該跟對話搶高度。橫捲列的代價
- * 是「我在看的那顆可能在捲軸外」，所以選到誰就把誰捲進畫面（`scrollCurrentIntoView`）。
+ * 釘起來的 bot 不會重複出現：一顆 bot 就是一顆晶片，該亮的狀態疊在同一顆上。
  *
  * 側欄本來就會在每一列上亮未讀（`Sidebar` 的 `.unread-turns`），但側欄在手機上收在抽屜裡、
  * 桌面上也可能被捲掉；使用者要追的是跨 bot 的問題，所以它得待在每個畫面都看得到的地方。
  *
  * 排除規則（2026-09-10 使用者）：
- * - **team 成員不算「剛跑完」**：team 的進度由它的主 issue 管，成員一顆一顆回話不是使用者
- *   要逐則追的東西；真要看去 team 畫面。
- * - **進行中也不列 team 成員**，改成「這個 team 在跑」一顆——同一個 team 三顆成員各佔一格，
- *   說的其實是同一件事。
- * - **AGM（總管）兩邊都不列**：它是管理員，靠例行 loop 醒來，每一輪都會「跑完一回合」。
- *   那不是使用者交代的事，卻會把這兩格洗成永遠有東西。要看它就從側欄的 AGM 總管進去；
- *   真的想常駐追蹤還是可以用 ★ 把它釘起來（釘選是使用者自己指定的，不受這條影響）。
+ * - **team 成員不算**：team 的進度由它的主 issue 管，成員一顆一顆回話不是使用者要逐則追的
+ *   東西；整隊只出一顆 `team #N`。
+ * - **AGM（總管）不算**：它靠例行 loop 醒來，每一輪都會跑完一回合，會把這一列洗成永遠有東西。
+ *   真的想追還是可以用 ★ 釘它（釘選是使用者自己指定的，不受這條影響）。
  */
-import { useLayoutEffect, useMemo, useRef } from 'react'
-import type { RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Bot } from '../api/types'
+import type { Bot, TeamPhase } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import { useStore } from '../store/store'
 import './unreadChip.css'
 
-/** 標題列下面那一列：剛跑完、主力（常駐）、進行中。 */
+/** 跟 `unreadChip.css` 裡那個斷點同一個值：以下是手機的單行橫捲，以上是桌機的兩行換行。 */
+const NARROW_QUERY = '(max-width: 720px)'
+
+/** 緊急度。數字小的排前面（見檔頭）。 */
+const RANK = { needsReply: 0, unread: 1, waitsKids: 2, current: 3, rest: 4 } as const
+
+interface ChipItem {
+  id: string
+  name: string
+  /** 點下去要開的東西：bot 的對話，或 team 畫面。 */
+  go: () => void
+  rank: number
+  current: boolean
+  pinned: boolean
+  unread: number
+  needsReply: boolean
+  waitsKids: boolean
+  working: boolean
+  title: string
+}
+
+/** 標題列下面那一列。 */
 export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
-  // AGM 專案（daemon 自己建的總管環境，`supervisor::setup::BOT_NAME`）整個不算——那底下
-  // 只有總管與它開出來的工人。
-  const agmProjectIds = useStore(useShallow((s) => s.projects.filter((p) => p.label === 'AGM').map((p) => p.id)))
-  const tracked = useMemo(
-    () => (b: Bot) => !b.pending && b.parent_bot_id === null && !b.team && !agmProjectIds.includes(b.project_id),
-    [agmProjectIds],
-  )
-  // 釘選是使用者自己指定的，所以不受 `tracked` 的排除規則影響（AGM、team 成員、子 agent
-  // 都釘得起來）——釘了就是要一直看得到。
-  const pinned = useMemo(
-    () => bots.filter((b) => !b.pending && b.primary).map((b) => ({ id: b.id, name: b.name })),
-    [bots],
-  )
-  const isPinned = useMemo(() => new Set(pinned.map((p) => p.id)), [pinned])
-  const selectedBotId = useStore((s) => s.selectedBotId)
-  // 點進一顆 bot 的那一刻 `selectBot` 會同步把它的未讀清掉（`markBotRead`），所以光看
-  // `botUnread` 的話，晶片會在手指底下當場消失、後面幾顆往左跳。使用者要它留在原位。
-  // 需要記的只有「它在被選走的前一刻到底有沒有未讀」——位置不用記，這一組的順序本來就是
-  // `bots` 的順序。
-  const keptId = keepSelectedRow(selectedBotId, botUnread)
-  // 只算母 bot（`parent_bot_id === null`）：herdr 開出來的子 agent 是母 bot 自己的工人，
-  // 它們回話是給母 bot 看的。team 成員（`b.team`）同樣不算，理由見檔頭。
-  const rows = useMemo(
-    () =>
-      bots
-        .filter((b) => tracked(b) && !isPinned.has(b.id) && ((botUnread[b.id] ?? 0) > 0 || b.id === keptId))
-        .map((b) => ({ id: b.id, name: b.name, n: botUnread[b.id] ?? 0 })),
-    [bots, botUnread, tracked, isPinned, keptId],
-  )
-  // 「進行中」用 `agent_status` 而不是複合燈號——燈號還混進了主機斷線、啟動中那幾種顏色，
-  // 那些不是進行中。
   const runs = useStore((s) => s.runs)
-  /* 「在等子 agent」：底下有 child 還在跑或 blocked（同 Sidebar 的 `kidsLampOf`，但這裡只要
-     知道有沒有）。自己 blocked（等使用者）一定蓋過它——紅色只留給「需要我本人動手」。 */
-  const waitsKids = (id: string) =>
-    bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
-  const working = useMemo(
-    () =>
-      bots
-        .filter((b) => tracked(b) && !isPinned.has(b.id) && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
-        .map((b) => ({ id: b.id, name: b.name })),
-    [bots, runs, tracked, isPinned],
-  )
-  // team 用整隊一顆：還在跑的 team（phase 未進終態、也不是暫停），點下去開 team 畫面。
   const teams = useStore((s) => s.teams)
-  const liveTeams = useMemo(
-    () =>
-      Object.values(teams)
-        .filter((t) => !TEAM_TERMINAL_PHASES.includes(t.phase) && t.phase !== 'paused')
-        .sort((a, b) => a.created_at.localeCompare(b.created_at))
-        .map((t) => ({ id: t.id, label: `#${t.issue_number}`, title: t.issue_title, phase: t.phase })),
-    [teams],
-  )
+  const selectedBotId = useStore((s) => s.selectedBotId)
   const selectedTeamId = useStore((s) => s.selectedTeamId)
   const selectBot = useStore((s) => s.selectBot)
   const selectTeam = useStore((s) => s.selectTeam)
-  const botUnreadOf = (id: string) => botUnread[id] ?? 0
-  const live = working.length + liveTeams.length
+  // AGM 專案（daemon 自己建的總管環境）整個不算——那底下只有總管與它開出去的工人。
+  const agmProjectIds = useStore(useShallow((s) => s.projects.filter((p) => p.label === 'AGM').map((p) => p.id)))
+  // 點進一顆 bot 的那一刻 `selectBot` 會同步清掉它的未讀，所以光看 `botUnread`，晶片會在手指
+  // 底下當場消失。記住「它在被選走的前一刻有沒有未讀」，讓它留在列上。
+  const keptId = keepSelectedRow(selectedBotId, botUnread)
+
+  const items = useMemo(() => {
+    const tracked = (b: Bot) => !b.pending && b.parent_bot_id === null && !b.team && !agmProjectIds.includes(b.project_id)
+    const waitsKids = (id: string) =>
+      bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
+    const out: ChipItem[] = []
+    for (const b of bots) {
+      if (b.pending) continue
+      // 釘選是使用者自己指定的，所以不受排除規則影響（AGM、team 成員、子 agent 都釘得起來）。
+      const pinned = b.primary
+      const n = botUnread[b.id] ?? 0
+      const status = runs[b.id]?.agent_status
+      const needsReply = status === 'blocked'
+      const kids = !needsReply && waitsKids(b.id)
+      const current = b.id === selectedBotId && !selectedTeamId
+      const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || status === 'working' || needsReply))
+      if (!show) continue
+      out.push({
+        id: b.id,
+        name: b.name,
+        go: () => selectBot(b.id),
+        rank: needsReply ? RANK.needsReply : n > 0 ? RANK.unread : kids ? RANK.waitsKids : current ? RANK.current : RANK.rest,
+        current,
+        pinned,
+        unread: n,
+        needsReply,
+        waitsKids: kids,
+        working: status === 'working',
+        title: botTitle(b.name, pinned, n, needsReply, kids, current),
+      })
+    }
+    // team 用整隊一顆：還在跑的 team（phase 未進終態、也不是暫停）。
+    const live = Object.values(teams)
+      .filter((t) => !TEAM_TERMINAL_PHASES.includes(t.phase) && t.phase !== 'paused')
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    for (const t of live) {
+      const current = t.id === selectedTeamId
+      out.push({
+        id: `team:${t.id}`,
+        name: `team #${t.issue_number}`,
+        go: () => selectTeam(t.id),
+        rank: current ? RANK.current : RANK.rest,
+        current,
+        pinned: false,
+        unread: 0,
+        needsReply: false,
+        waitsKids: false,
+        working: true,
+        title: teamTitle(t.issue_number, t.issue_title, t.phase, current),
+      })
+    }
+    // 穩定排序：同一級之內維持上面推進去的順序（＝`bots` 的順序，team 在最後）。
+    return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
+  }, [agmProjectIds, botUnread, bots, keptId, runs, selectBot, selectTeam, selectedBotId, selectedTeamId, teams])
+
   const barRef = useRef<HTMLDivElement | null>(null)
-  // 換 bot（或這一列的組成變了）就把 `current` 那顆捲進畫面。`aria-current` 當選擇器：三組都
-  // 用它標「你正在看的」，不必再多一個 ref。
-  useScrollCurrentIntoView(barRef, `${selectedBotId}/${selectedTeamId}/${rows.length}/${pinned.length}/${live}`)
-  if (pinned.length === 0 && rows.length === 0 && live === 0) return null
+  const narrow = useMediaQuery(NARROW_QUERY)
+  const [expanded, setExpanded] = useState(false)
+  const hidden = useOverflowRows(barRef, !narrow && !expanded, items.length)
+  const scroll = useHorizontalScroll(barRef, narrow)
+  // 換 bot（或這一列的組成變了）就把 `current` 那顆捲進畫面。`aria-current` 當選擇器。
+  useScrollCurrentIntoView(barRef, `${selectedBotId}/${selectedTeamId}/${items.length}`)
+
+  if (items.length === 0) return null
+  const clipped = !narrow && !expanded && hidden > 0
   return (
-    <div className="unread-bar" ref={barRef} role="status" aria-live="polite">
-      {rows.length > 0 ? <span className="unread-bar-label">剛跑完</span> : null}
-      {rows.map((r) => (
-        <button
-          key={r.id}
-          type="button"
-          className={`unread-chip${r.n > 0 ? ' unread' : ''}${r.id === selectedBotId ? ' current' : ''}`}
-          title={r.n > 0 ? `${r.name} 有 ${r.n} 個回合已完成、還沒看過。點一下跳過去` : `${r.name}：你正在看的就是它`}
-          aria-current={r.id === selectedBotId ? 'true' : undefined}
-          onClick={() => selectBot(r.id)}
-        >
-          <span className="unread-chip-name">{r.name}</span>
-          {/* 黏住的那一顆未讀已經歸零（你就在看它），這時不要畫一顆 `0`。 */}
-          {r.n > 0 ? <span className="unread-chip-n">{r.n > 99 ? '99+' : r.n}</span> : null}
+    <div className={`unread-bar-wrap${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
+      {/* 能捲才畫箭頭：只有陰影的話使用者看不出這裡還有東西（2026-09-12 使用者回報）。 */}
+      {scroll.left ? (
+        <button type="button" className="unread-bar-arrow left" aria-label="往左看更多" onClick={() => scroll.by(-1)}>
+          ◂
         </button>
-      ))}
-      {/* 釘選的主力：★ 就是標籤，不另外寫字。帶未讀時多套一層 `unread`——見下面的註解。 */}
-      {pinned.map((r) => {
-        const n = botUnreadOf(r.id)
-        const selfBlocked = runs[r.id]?.agent_status === 'blocked'
-        const kids = !selfBlocked && waitsKids(r.id)
-        return (
+      ) : null}
+      <div
+        className={`unread-bar${clipped ? ' clipped' : ''}${expanded ? ' expanded' : ''}`}
+        ref={barRef}
+        role="status"
+        aria-live="polite"
+        onWheel={scroll.onWheel}
+      >
+        {items.map((it) => (
           <button
-            key={r.id}
+            key={it.id}
             type="button"
-            /* `unread` 是**加在釘選身分上的一層狀態**，不是換一組晶片：一排 ★ 看過去，有東西
-               等你看的那幾顆要能一眼挑出來，而不是只靠名字後面那個小數字。`current`（你在
-               這裡）跟它可以同時成立，兩者的畫法也分得開（見 `unreadChip.css`）。 */
-            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${selfBlocked ? ' needs-reply' : kids ? ' waits-kids' : ''}${r.id === selectedBotId ? ' current' : ''}`}
-            title={
-              selfBlocked
-                ? `${r.name}（主要執行的 bot）停在一個要你回答的提示上。點一下過去回答`
-                : kids
-                  ? `${r.name}（主要執行的 bot）在等子 agent 完成。${r.id === selectedBotId ? '你正在看的就是它' : '點一下跳過去'}`
-                : r.id === selectedBotId
-                ? `${r.name}（主要執行的 bot）：你正在看的就是它`
-                : n > 0
-                  ? `${r.name}（主要執行的 bot）有 ${n} 個回合已完成、還沒看過。點一下跳過去`
-                  : `${r.name}（主要執行的 bot）。點一下跳過去`
-            }
-            aria-current={r.id === selectedBotId ? 'true' : undefined}
-            onClick={() => selectBot(r.id)}
+            className={chipClass(it)}
+            title={it.title}
+            aria-current={it.current ? 'true' : undefined}
+            onClick={it.go}
           >
-            <span className="unread-chip-star" aria-hidden="true">★</span>
-            <span className="unread-chip-name">{r.name}</span>
-            {n > 0 ? <span className="unread-chip-n">{n > 99 ? '99+' : n}</span> : null}
-            {/* 藍點＝還在跑；紅點＝停在要你回答的提示上（`blocked`）。後者跟 `unread` 一樣是疊在
-                釘選身分上的一層狀態，不是換一組晶片（2026-09-12 使用者：「星號標注主力處也要」）。 */}
-            {runs[r.id]?.agent_status === 'working' || selfBlocked || kids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+            {it.pinned ? (
+              <span className="unread-chip-star" aria-hidden="true">
+                ★
+              </span>
+            ) : null}
+            <span className="unread-chip-name">{it.name}</span>
+            {it.unread > 0 ? <span className="unread-chip-n">{it.unread > 99 ? '99+' : it.unread}</span> : null}
+            {/* 藍＝還在跑、紅＝等你回答、黃＝等子 agent。 */}
+            {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
           </button>
-        )
-      })}
-      {live > 0 ? (
-        <>
-          <span className="unread-bar-gap" />
-          <span className="unread-bar-label">進行中</span>
-          {working.map((w) => (
-            <button
-              key={w.id}
-              type="button"
-              className={`unread-chip working${runs[w.id]?.agent_status === 'blocked' ? ' needs-reply' : ''}${w.id === selectedBotId ? ' current' : ''}`}
-              title={
-                runs[w.id]?.agent_status === 'blocked'
-                  ? `${w.name} 停在一個要你回答的提示上。${w.id === selectedBotId ? '你正在看的就是它' : '點一下過去回答'}`
-                  : `${w.name} 還在跑。${w.id === selectedBotId ? '你正在看的就是它' : '點一下過去看'}`
-              }
-              aria-current={w.id === selectedBotId ? 'true' : undefined}
-              onClick={() => selectBot(w.id)}
-            >
-              <span className="unread-chip-dot" aria-hidden="true" />
-              <span className="unread-chip-name">{w.name}</span>
-            </button>
-          ))}
-          {liveTeams.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`unread-chip working team${t.id === selectedTeamId ? ' current' : ''}`}
-              title={`Team ${t.label}・${t.title}・${TEAM_PHASE_LABEL[t.phase]}。點一下開 team 畫面`}
-              onClick={() => selectTeam(t.id)}
-            >
-              <span className="unread-chip-dot" aria-hidden="true" />
-              <span className="unread-chip-name">team {t.label}</span>
-            </button>
-          ))}
-        </>
+        ))}
+      </div>
+      {scroll.right ? (
+        <button type="button" className="unread-bar-arrow right" aria-label="往右看更多" onClick={() => scroll.by(1)}>
+          ▸
+        </button>
+      ) : null}
+      {/* 桌機超過兩行：收起來的那幾顆一定是最不急的（排序見檔頭），按一下展開。 */}
+      {!narrow && (hidden > 0 || expanded) ? (
+        <button
+          type="button"
+          className="unread-bar-more"
+          aria-expanded={expanded}
+          title={expanded ? '收合成兩行' : `還有 ${hidden} 顆沒顯示（都是比較不急的）。點一下展開`}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? '收合' : `+${hidden}`}
+        </button>
       ) : null}
     </div>
   )
 }
 
+function chipClass(it: ChipItem): string {
+  const state = it.needsReply ? ' needs-reply' : it.waitsKids ? ' waits-kids' : it.unread > 0 ? ' unread' : it.working ? ' working' : ''
+  return `unread-chip${it.pinned ? ' pinned' : ''}${state}${it.current ? ' current' : ''}`
+}
+
+function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean, kids: boolean, current: boolean): string {
+  const who = pinned ? `${name}（主要執行的 bot）` : name
+  const tail = current ? '你正在看的就是它' : '點一下跳過去'
+  if (needsReply) return `${who} 停在一個要你回答的提示上。${current ? tail : '點一下過去回答'}`
+  if (n > 0) return `${who} 有 ${n} 個回合已完成、還沒看過。${tail}`
+  if (kids) return `${who} 在等子 agent 完成。${tail}`
+  return `${who}。${tail}`
+}
+
+function teamTitle(issue: number, title: string, phase: TeamPhase, current: boolean): string {
+  return `Team #${issue}・${title}・${TEAM_PHASE_LABEL[phase]}。${current ? '你正在看的就是它' : '點一下開 team 畫面'}`
+}
+
 /**
- * 橫捲的那一列裡，把 `aria-current` 的那顆晶片捲進畫面（置中，兩端的則貼邊）。
+ * 兩行裝不下的有幾顆。
+ *
+ * 用量到的是每顆晶片的 `offsetTop`：同一行的值一樣，所以不同的 `offsetTop` 就是行。第三行
+ * 起的全部算「沒顯示」——CSS 那邊 `.clipped` 只留兩行的高度，所以它們本來就看不到了。
+ *
+ * 刻意不去算「還能塞幾顆」再切陣列：那會讓 render 依賴自己的測量結果，一改就震盪。這裡
+ * 永遠把全部畫出來、只是把超出的裁掉，測量只影響右邊那顆 `+N` 的數字。
+ */
+function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boolean, count: number): number {
+  const [hidden, setHidden] = useState(0)
+  const measure = useCallback(() => {
+    const bar = barRef.current
+    if (!bar || !active) {
+      setHidden((prev) => (prev === 0 ? prev : 0))
+      return
+    }
+    const chips = [...bar.querySelectorAll<HTMLElement>('.unread-chip')]
+    const rows: number[] = []
+    for (const c of chips) if (!rows.includes(c.offsetTop)) rows.push(c.offsetTop)
+    const cut = rows[1]
+    // 只在數字真的變了才寫 state：測量是在 layout effect 裡跑的（render 期間量不到
+    // `offsetTop`），同一個值重複寫會讓它每一幀都重繪一次。
+    const n = rows.length <= 2 ? 0 : chips.filter((c) => c.offsetTop > cut).length
+    setHidden((prev) => (prev === n ? prev : n))
+  }, [active, barRef])
+  useLayoutEffect(measure, [measure, count])
+  useEffect(() => {
+    const bar = barRef.current
+    if (!bar || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(bar)
+    return () => ro.disconnect()
+  }, [barRef, measure])
+  return hidden
+}
+
+/**
+ * 手機那條單行橫捲：滾輪（垂直）映射成橫捲，兩端能不能再捲用 state 記著，讓 ◂ ▸ 與陰影
+ * 只有在真的捲得動時才出現。
+ *
+ * `preventDefault` 只在**真的捲得動**時做，否則在這一列上滾滑鼠會把整頁鎖住。
+ */
+function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: boolean) {
+  const [edges, setEdges] = useState({ left: false, right: false })
+  const sync = useCallback(() => {
+    const bar = barRef.current
+    if (!bar || !active) {
+      setEdges((e) => (e.left || e.right ? { left: false, right: false } : e))
+      return
+    }
+    const max = bar.scrollWidth - bar.clientWidth
+    const next = { left: bar.scrollLeft > 4, right: max > 4 && bar.scrollLeft < max - 4 }
+    setEdges((e) => (e.left === next.left && e.right === next.right ? e : next))
+  }, [active, barRef])
+  useEffect(() => {
+    const bar = barRef.current
+    if (!bar) return
+    sync()
+    bar.addEventListener('scroll', sync, { passive: true })
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(sync)
+    ro?.observe(bar)
+    return () => {
+      bar.removeEventListener('scroll', sync)
+      ro?.disconnect()
+    }
+  }, [barRef, sync])
+  const by = (dir: 1 | -1) => {
+    const bar = barRef.current
+    if (!bar) return
+    bar.scrollBy({ left: dir * Math.max(120, bar.clientWidth * 0.6), behavior: 'smooth' })
+  }
+  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    const bar = barRef.current
+    if (!bar || !active) return
+    const max = bar.scrollWidth - bar.clientWidth
+    if (max <= 4 || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
+    const next = Math.min(max, Math.max(0, bar.scrollLeft + e.deltaY))
+    if (next === bar.scrollLeft) return // 已經到底：把滾動還給整頁
+    e.preventDefault()
+    bar.scrollLeft = next
+  }
+  return { ...edges, by, onWheel }
+}
+
+/**
+ * 把 `current` 那顆捲進畫面（只在這一列橫捲時有事做）。
  *
  * 不用 `Element.scrollIntoView`：它會連帶捲祖先，在手機上會把整個 `.app` 往旁邊推一格；
  * 這裡只動這一列自己的 `scrollLeft`。已經看得見就完全不動——不然每次重繪都把列拉回中間，
  * 使用者自己捲到的位置會被搶走。
- *
- * `key` 把「選了誰／這一列有幾顆」壓成一個字串，只有這些真的變了才重捲；hook 本身必須在
- * 「三組都空就 `return null`」那一行**之前**無條件呼叫到，所以它收的是算好的字串而不是節點。
  */
 function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key: string) {
   useLayoutEffect(() => {
@@ -228,19 +322,14 @@ function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key:
 }
 
 /**
- * 「被選走的前一刻，這顆 bot 有沒有未讀？」——有的話回它的 id，讓「剛跑完」那一組把它留著。
+ * 「被選走的前一刻，這顆 bot 有沒有未讀？」——有的話回它的 id，讓它留在列上。
  *
  * 為什麼要記：`selectBot` 會同步呼叫 `markBotRead` 把未讀清掉，所以重繪時
- * `botUnread[selectedBotId]` 已經是 0 了，看不出「它剛才在不在這一組」。
+ * `botUnread[selectedBotId]` 已經是 0 了，看不出「它剛才在不在這一列」。
  *
  * 為什麼記在模組層而不是 `useState` / `useRef`：`App.tsx` 是 `<ChatPanel key={botId}>`，換 bot
  * 會把整棵（含這一列）重新掛載——元件自己的記憶正好在需要它的那一刻被清空。畫面上同時只有
- * 一列 `.unread-bar`，所以一份模組層的記憶就夠，而且它只從 `selectedBotId` / `botUnread` 推導，
- * 重複呼叫同一組輸入結果一樣（StrictMode 重繪兩次也不會變）。
- *
- * 刻意只記「在不在」，不記位置：這一組是從 `bots` 陣列濾出來的，順序本來就固定。
- * 也刻意不讓「從來沒有未讀過的 bot」黏上來——不然隨便點一顆都會多一顆晶片，三組全空時整列
- * 就不會消失了。
+ * 一列 `.unread-bar`，所以一份模組層的記憶就夠，而且它只從 `selectedBotId` / `botUnread` 推導。
  */
 let lastUnread: Record<string, number> = {}
 let lastSelected: string | null = null
@@ -249,11 +338,9 @@ let kept: string | null = null
 function keepSelectedRow(selectedBotId: string | null, botUnread: Record<string, number>): string | null {
   const hasUnread = (id: string | null, table: Record<string, number>) => (id ? (table[id] ?? 0) > 0 : false)
   if (lastSelected !== selectedBotId) {
-    // 換人了：用**換之前**那份未讀表看新的這顆原本在不在「剛跑完」裡
     kept = hasUnread(selectedBotId, lastUnread) ? selectedBotId : null
     lastSelected = selectedBotId
   } else if (hasUnread(selectedBotId, botUnread)) {
-    // 未讀還沒被清掉（例如視窗在背景時收到的回合）：它本來就在這一組
     kept = selectedBotId
   }
   lastUnread = botUnread
