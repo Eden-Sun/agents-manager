@@ -417,6 +417,15 @@ pub async fn write_team_docs(app: &Arc<App>, host: &str, wt: &str, issue_md: &st
     Ok(())
 }
 
+/// Just `TEAM.md` (unlimited mode rewrites it on its own whenever the batch changes) — with
+/// the same `.gitignore` first, so a member that never had the directory does not end up
+/// committing `TEAM.md` into its task branch through `git add -A`.
+pub async fn write_team_md(app: &Arc<App>, host: &str, wt: &str, team_md: &str) -> Result<()> {
+    let dir = format!("{}/.agents-manager/team", wt.trim_end_matches('/'));
+    put_file(app, host, &format!("{dir}/.gitignore"), "*\n").await?;
+    put_file(app, host, &format!("{dir}/TEAM.md"), team_md).await
+}
+
 /// One issue's `ISSUE-<n>.md` inside a member's cwd (SPEC-team §4.5, unlimited parallelism).
 /// Several issues are in flight at once, so a single `ISSUE.md` cannot say which one a task
 /// belongs to; each gets its own file and `TEAM.md` lists them.
