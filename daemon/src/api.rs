@@ -2207,6 +2207,13 @@ struct PromptIn {
     /// Attachment ids from `POST /bots/:id/attachments`, in display order.
     #[serde(default)]
     attachments: Vec<String>,
+    /// 送出這句話的**不是**畫面前的使用者時要帶：另一顆 bot 的 id，或哨符 `daemon`
+    /// （launchd 的例行腳本、daemon 自己的通知）。省略 = 使用者自己打的。
+    ///
+    /// 2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」——
+    /// 總管的對話裡混著使用者的指示、別的 bot 的申請與排程腳本的派工，全部長成同一顆藍泡泡。
+    #[serde(default)]
+    relay_from: Option<String>,
 }
 
 async fn prompt_bot(
@@ -2215,7 +2222,17 @@ async fn prompt_bot(
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    let out = lifecycle::prompt_with(&app, &id, &b.text, &crid, &b.attachments).await?;
+    // 來源只收「真的存在的 bot」或哨符 daemon：這顆欄位會直接畫成「X → 這顆 bot」，
+    // 讓呼叫端隨便填等於讓它冒名。
+    let relay_from = match b.relay_from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(crate::agent_relay::DAEMON_SENDER) => Some(crate::agent_relay::DAEMON_SENDER.to_string()),
+        Some(from) => match db::bot(&app.db, from).await.map_err(any_err)? {
+            Some(b) if b.deleted_at.is_none() => Some(b.id),
+            _ => return Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
+        },
+    };
+    let out = lifecycle::prompt_relayed(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 

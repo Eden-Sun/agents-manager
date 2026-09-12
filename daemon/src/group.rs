@@ -204,7 +204,7 @@ pub async fn chat(
     let mut skipped = Vec::new();
     for t in targets {
         let crid = format!("{client_request_id}:{}", t.id);
-        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids).await {
+        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids, None).await {
             Ok(out) => sent.push(json!({
                 "bot_id": t.id, "bot_name": t.name, "turn_id": out.turn_id,
                 "message_id": out.message_id, "delivery": out.delivery,

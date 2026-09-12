@@ -3394,7 +3394,7 @@ pub struct PromptOut {
 }
 
 pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None, None, &[]).await
+    prompt_grouped(app, bot_id, text, client_request_id, None, None, &[], None).await
 }
 
 /// `prompt` carrying images dropped into the composer (`attach.rs`). The agent gets the
@@ -3407,7 +3407,20 @@ pub async fn prompt_with(
     client_request_id: &str,
     attachment_ids: &[String],
 ) -> LcResult<PromptOut> {
-    prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids).await
+    prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, None).await
+}
+
+/// 同 `prompt_with`，但記下「這句話不是使用者自己打的」：`relay_from` 是送出它的 bot id，
+/// 或哨符 `daemon`（launchd 的例行腳本、daemon 自己的通知）。UI 靠它把泡泡畫在左邊。
+pub async fn prompt_relayed(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay_from: Option<&str>,
+) -> LcResult<PromptOut> {
+    prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from).await
 }
 
 /// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
@@ -3421,6 +3434,8 @@ pub async fn prompt_grouped(
     group_id: Option<&str>,
     deliver: Option<&str>,
     attachment_ids: &[String],
+    // `relay_from`：送出這句話的 bot id，或哨符 `daemon`；`None` = 使用者自己在畫面上打的。
+    relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     let lock = app.bot_lock(bot_id).await;
@@ -3551,13 +3566,14 @@ pub async fn prompt_grouped(
     .map_err(up)?;
     let msg_id = db::ulid();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, created_at) VALUES (?,?,?,'user',?,'web',?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
     .bind(&turn_id)
     .bind(text)
     .bind(group_id)
+    .bind(relay_from)
     .bind(db::now())
     .execute(&mut *tx)
     .await
@@ -6585,6 +6601,39 @@ mod prompt_tests {
         assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none());
     }
 
+    /// 別的 bot 或排程腳本送進來的 prompt 要留下來源：總管的對話裡混著使用者的指示、其他 bot 的
+    /// 申請與 launchd 的派工，`relay_from` 是 UI 唯一分得出來的依據（2026-09-12 使用者）。
+    #[tokio::test]
+    async fn a_relayed_prompt_records_who_sent_it() {
+        // 一顆 bot 同時只能有一個回合在飛，所以兩則各用一個 fixture。
+        let user = fixture("codex", "test").await;
+        let user_app = user.env.app.clone();
+        let mine = prompt_with(&user_app, &user.bot_id, "使用者自己打的", "prompt-user", &[]).await.unwrap();
+
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let relayed = prompt_relayed(&app, &f.bot_id, "排程派的", "prompt-daemon", &[], Some(crate::agent_relay::DAEMON_SENDER))
+            .await
+            .unwrap();
+
+        let from = |db: sqlx::SqlitePool, id: &str| {
+            let db = db.clone();
+            let id = id.to_string();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>("SELECT relay_from FROM messages WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(from(user_app.db.clone(), &mine.message_id).await, None, "使用者自己打的不該有來源標");
+        assert_eq!(
+            from(app.db.clone(), &relayed.message_id).await,
+            Some(crate::agent_relay::DAEMON_SENDER.to_string())
+        );
+    }
+
     /// Binding can fail after the turn transaction commits (for example, a transient database
     /// error between the message and attachment updates). The UI must receive a terminal turn
     /// event instead of being left on the committed `in_flight` / `pending` state.
@@ -6775,7 +6824,7 @@ mod abandon_tests {
         .await
         .unwrap();
 
-        let out = prompt_grouped(&app, &bot_id, "next", "request-1", None, None, &[])
+        let out = prompt_grouped(&app, &bot_id, "next", "request-1", None, None, &[], None)
             .await
             .expect("a completed unknown-delivery row must not block the next prompt");
         assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");

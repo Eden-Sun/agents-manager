@@ -98,10 +98,17 @@ const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; to
       to: toId ? (s.bots.find((b) => b.id === toId)?.name ?? '') : '',
     })),
   )
+  // `daemon` 是哨符不是 bot id（`agent_relay::DAEMON_SENDER`）：launchd 的例行腳本與 daemon 自己
+  // 發的通知都掛這個。寫成「daemon 自動觸發」比印一個 `daemon` 清楚——讀的人要知道的是「沒有人
+  // 按過這一下」。
+  const daemon = fromId === 'daemon'
   return (
-    <span className={`msg-targets relay${names.from ? '' : ' daemon'}`} title="由其他 agent 代為交辦的訊息（不是你送的）">
-      {names.from || fromId}
-      {names.to ? ` → ${names.to}` : ''}
+    <span
+      className={`msg-targets relay${names.from ? '' : ' daemon'}`}
+      title={daemon ? 'daemon 自動觸發的訊息（排程／自動化，不是人送的）' : '由其他 agent 代為交辦的訊息（不是你送的）'}
+    >
+      {daemon ? 'daemon 自動觸發' : names.from || fromId}
+      {!daemon && names.to ? ` → ${names.to}` : ''}
     </span>
   )
 })
