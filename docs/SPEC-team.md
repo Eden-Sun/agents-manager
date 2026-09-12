@@ -214,6 +214,9 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
      `finish` 看到沒有 working 的 issue、或該 issue 已有 `delivered` / `pr_created` note，就**不再交付**（記 `deliver_skipped`），
      直接重試 `start_issue`；`step` 在 `planning` / `working` 發現「沒有 working 的 issue 但佇列還有」也重試（記 `issue_advance_retry`）。
      沒有 working 的 issue 而佇列非空時**不得**寫 `done`——以前會把剩下的佇列整個丟掉、交付重複一次。
+    - `start_issue` 可重入（2026-09-12）：中途失敗（worktree add、insert_member、寫 docs）會把這次建的成員列軟刪、
+   worktree 移除；整合分支留著（指向 `base_sha`）。resume 再跑時分支已存在就 `checkout` 而非 `checkout -b`、
+   worktree 已註冊就跳過、同暱稱且活著的成員沿用，所以不會永遠撞 `already exists`，也不會退到 `dev-1-<tid6>` 這種 PM 對不到的名字。
 8. **交給 PM**：`hand_issue_to_pm(kept_workers=false)` —— `set_phase("planning")` 並送 `next_issue` relay。relay 文字多一句視 §2.5.3 結果而定：
    續接成功 →「這是同一段對話的延續」；退回新對話 →「你是重新啟動的 PM，先前的對話不在了，請先讀 `TEAM.md` 與 `ISSUE.md`」。
 
@@ -841,7 +844,7 @@ team 日誌，倒序分頁、正序回傳（同 messages）。每則：
 | POST | `/teams/{id}/resume` | — | `200 {}`；非 paused 409；`member_lost` 且成員仍未 running → 409 `{reason:"member not running", bot_id}` |
 | POST | `/teams/{id}/approve` | — | supervised 閘門放行；非 `paused(gate:*)` 409 |
 | POST | `/teams/{id}/abort` | `{"reason"?}` | `200 {}`；停所有成員 |
-| POST | `/teams/{id}/cleanup` | — | 非終態 409；成功 `200 {}`，推 `bot_changed` ×N + `team_changed` |
+| POST | `/teams/{id}/cleanup` | — | 非終態 409；成員停不掉（主機／herdr 不通）409 `could not stop a team member`，已退的維持已退、之後重跑即可；成功 `200 {"workspace_closed": bool}`——`workspace.close` 失敗時 `workspace_id` 保留（note `workspace_close_failed`）讓下一次 cleanup／delete 再關；推 `bot_changed` ×N + `team_changed` |
 | DELETE | `/teams/{id}` | `?branches=keep\|delete`（預設 `keep`）| **任何 phase 都可刪**（§6.5a）：非終態時先停成員 → 清 worktree → 關 workspace → 刪三張表的列 → 成員 bot 標 `deleted_at`（訊息保留）。`branches=delete` 才 `git branch -D`，遠端分支一律不動。成功 `200 {}` 並推帶 `deleted: true` 的 `team_changed` + `bot_changed` ×N；不存在 `404 {"error":"not_found","what":"team"}` |
 | PATCH | `/teams/{id}` | `{"label"?: string, "budget"?: {...部分}, "supervised"?: bool, "deliver"?: "branch"\|"pr", "pm"?: <角色>, "workers"?: <角色>, "reviewer"?: <角色>}` | `200 {}`；終態 409。三個角色同一個形狀，見下表 |
 
