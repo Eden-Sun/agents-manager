@@ -561,7 +561,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 
 ### 6.5 清理
 - `POST /teams/:id/cleanup`（team 在終態時）：停成員（若還活著）→ 對每個 worktree `git -C <project.path> worktree remove --force <path>`（被鎖住時再加一次 `--force`）→ `git -C <project.path> worktree prune` → 刪 `<data_dir>/teams/<id>/`（此時只剩 `ISSUE.md` / `TEAM.md`）→ 成員 bot 標 `deleted_at`（訊息保留，同 SPEC §6.4）。**分支一律保留**（便宜、可追溯；使用者自己刪）。順序很重要：先 `remove`/`prune` 再刪目錄，否則 `.git/worktrees/` 留下孤兒登記項（§6.2「git 元資料」）。
-- 建 team 失敗（任何一步）走同一個 cleanup，避免留下半套 worktree。
+- 建 team 失敗（任何一步）走同一個 cleanup，避免留下半套 worktree。rollback 只處理本次建立成功的整合分支：先移除 worktree，再以 `base_sha..branch` 檢查相對 base 是否為 0 個 commit；只有確定沒有工作時才 best-effort `git branch -D`。已有 commit 的分支必須保留並記錄 warning，刪除失敗也只記錄 warning，不覆蓋原本的建立失敗原因。
 - 對帳時（SPEC §6.5）對每個有 team 的 project 跑 `git worktree prune`，收掉目錄已被人手動刪除的登記項；若某個 active team 的 worktree 目錄不見了 → `paused(worktree_missing)`。
 
 ### 6.5a 刪除（2026-09-06 使用者要求）
@@ -707,6 +707,7 @@ queued ──relay 送達──► working ──report{done}──► reported 
 - 終態：`merged | skipped | failed`。
 - `round` 從 0 起算；`request_changes` 讓 `round += 1`；`round == max_review_rounds` 時再收到 `request_changes` → `exhausted`。
 - 沒有 reviewer（`reviewer: null`）：`reported → merging` 直接整合。
+- rebase relay 送達時 task 仍維持 `rebasing`（不轉成 `working`）；worker 回報才走 `rebasing → merging`，因此不會因衝突重開審查。
 
 ### 8.3 誰判定完成
 - **task 完成**：reviewer `approve`（或無 reviewer）且 daemon merge 成功。不是 worker 說 done 就算。
