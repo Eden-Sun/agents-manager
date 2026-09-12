@@ -399,6 +399,17 @@ function Bar({
 
 type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
 
+/**
+ * 手機一格只放得下一個數字，所以要挑「誰比較急」：先看 daemon 的旗標（critical > low > 一般），
+ * 同一級才比剩得少的。**平手時留著現任**——常駐的 7d 不會因為另一個窗口剛好同分就換掉，
+ * 那樣格子上的數字會在兩個窗口之間跳來跳去。門檻一律吃 daemon 的旗標，前端不另外寫死 pct。
+ */
+function moreUrgent(w: WindowBar, best: WindowBar): boolean {
+  const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
+  if (rank(w) !== rank(best)) return rank(w) > rank(best)
+  return (w.pct ?? 100) < (best.pct ?? 100)
+}
+
 /** grok only reports a weekly window (stored in seven_day) — never call it 7d. */
 function weekLabel(kind: BotKind): '7d' | '週' {
   return kind === 'grok' ? '週' : '7d'
@@ -439,24 +450,27 @@ function Gauge({
   const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  // 手機：**7d 常駐**（grok 是「週」）＋任何一個在警戒中的其他窗口。
+  // 手機：一格**只寫一個**窗口（2026-09-12 使用者，推翻同日稍早的「7d 常駐＋追加警戒窗口」）。
   //
-  // 7d 是決定「今天還能不能開工」的數字，5h 兩三個小時就回來了，所以它固定在同一個位置、
-  // 不會被別的窗口擠掉；但「5h 只剩 3%」是現在就會擋住你的事，不能等到點開才知道。所以是
-  // 常駐一個＋例外才追加，而不是收成最差的一個（7d 會被蓋掉）或三個全列（一排捲不完）。
+  // 追加的那一個本來往下排，於是 `7d 19% / F 0%`、`7d 42% / 3m 0%` 這種格子變成兩行，整條
+  // 額度列跟著長高；而 390px 一次要放五格（cc0/cc1/cc2/codex/grok），沒有那個高度可以給。
+  //
+  // 保留的仍然是 7d（grok 是「週」）——它決定「今天還能不能開工」，5h 兩三個小時就回來了。
+  // 只有另一個窗口被 daemon 標成 low／critical **而且比 7d 更急**時才**取代**它，不並列：
+  // 「5h 只剩 3%」是現在就會擋住你的事，那時候 7d 還剩多少已經不是重點。
+  // 三個窗口的完整數字照舊在 tooltip 與點開的底部 sheet 裡，一個都沒有少。
   if (compact && seven !== null) {
-    windows = [
-      {
-        name: weekLabel(entry.kind),
-        pct: seven,
-        resetsAt: q?.seven_day?.resets_at ?? null,
-        low: q?.seven_day?.low ?? false,
-        critical: q?.seven_day?.critical ?? false,
-      },
-    ]
-    // 5h / Fable 只有在 daemon 標成 low／critical 時才佔位（門檻見 docs/API.md §12.4）。
+    const shown: WindowBar = {
+      name: weekLabel(entry.kind),
+      pct: seven,
+      resetsAt: q?.seven_day?.resets_at ?? null,
+      low: q?.seven_day?.low ?? false,
+      critical: q?.seven_day?.critical ?? false,
+    }
+    // 5h / Fable 只有在 daemon 標成 low／critical 時才有資格搶這一格（門檻見 docs/API.md §12.4）。
+    const rivals: WindowBar[] = []
     if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
-      windows.push({
+      rivals.push({
         name: '5h',
         pct: five,
         resetsAt: q?.five_hour?.resets_at ?? null,
@@ -465,7 +479,7 @@ function Gauge({
       })
     }
     if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
-      windows.push({
+      rivals.push({
         name: 'F',
         pct: fable,
         resetsAt: q?.fable?.resets_at ?? null,
@@ -473,6 +487,7 @@ function Gauge({
         critical: q?.fable?.critical ?? false,
       })
     }
+    windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
   } else if (collapsed) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
