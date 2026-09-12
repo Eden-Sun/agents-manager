@@ -1104,8 +1104,10 @@ pane id 截成「w1…」，★/⚙ 之後到額度列之間卻空著一截。�
 ## 標題列 model 前面的 kind 圖示：不要框、貼近 model（2026-09-11）
 
 kind 圖示搬到 model chip 左邊之後（同日稍早）仍沿用側欄 `.kind-tag` 的框與底色，20px 寬、跟 model 隔 6px。
-使用者：不要 border，而且要靠近 effort。只改標題列那一顆（`.bot-head .main-title-sub > .kind-tag`）：拿掉框與底色、
-寬度收成圖示本身、與 model 的間距收成 3px。側欄那些跟文字並排的 kind 標籤維持有框。
+使用者：不要 border，而且要靠近 effort。只改標題列那一顆（`.bot-head .main-title-sub > .kind-tag`）：拿掉框、
+與 model 的間距收成 3px。側欄那些跟文字並排的 kind 標籤維持有框。
+
+**2026-09-12 更正**：當初連底色也一起拿掉，只剩 12px 的細字形，使用者回報「怎麼沒有顏色」——在額度列那排實心 kind 記號旁邊確實看起來像沒有顏色（字形本身其實是 kind 色，量到 dark `rgb(224,138,107)`／light `rgb(194,96,60)`，與側欄同色）。底色改回保留（那塊顏色就是 kind 的意義），只有框不要，左右各留 4px，整顆維持 20px、不比原本寬。
 
 ## context bar：不顯示花費、版本貼右、git 動作收進 hover（2026-09-12）
 

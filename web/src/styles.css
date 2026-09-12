@@ -2378,9 +2378,11 @@ button.run-debug-toggle:hover:not(:disabled) {
      寬度收成圖示本身（`.kind-tag.icon` 的 20px 是給有框時留白用的），再把這一行 6px 的 gap
      在它後面收掉一半。 */
   border: 0;
-  background: transparent;
+  /* 2026-09-12 使用者「怎麼沒有顏色」：框拿掉的同時把底色也拿掉，只剩一個 12px 的細字形，
+     在額度列那排實心 kind 記號旁邊看起來就像沒有顏色。底色留著（它就是 kind 的顏色），
+     只有框不要；左右留 4px 讓那塊顏色看得出來，整顆仍是 20px、不比原本寬。 */
   width: auto;
-  padding: 0;
+  padding: 0 4px;
   margin-right: -3px;
 }
 
