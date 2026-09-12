@@ -2313,6 +2313,11 @@ button.run-debug-toggle:hover:not(:disabled) {
   display: contents;
 }
 
+/* 清單項目殼：`role="listitem"` 不能蓋在 button 上（AT 會唸成清單項目），所以包一層不參與排版的殼。 */
+.li-wrap {
+  display: contents;
+}
+
 .tabs {
   display: flex;
   flex: none;
