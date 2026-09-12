@@ -1289,7 +1289,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <UpdateBadge botId={botId} />
             <RuntimeDriftBadge botId={botId} />
             <TurnErrorBadge botId={botId} />
-            <BlockedBadge botId={botId} onOpen={openBlockedFull} />
             {headUnread > 0 ? (
               <span className="unread-turns" title={`${headUnread} 個回合已完成，還沒看過`}>
                 !{headUnread > 99 ? '99+' : headUnread}
@@ -1316,6 +1315,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               <BlockedBadge botId={botId} onOpen={openBlockedFull} />
             </div>
           ) : <div className="main-title-sub">
+            {/* 桌機也放第二行（跟手機同一個位置）：名字那一列在 1440px＋側欄開著時只有約 161px，
+                lamp＋名字＋★＋⚙ 就滿了，71px 的 chip 擠進去一定有人被剪——實測不是 chip 自己剩
+                半顆就是 ⚙ 被剪掉，而 ⚙ 是那一列唯一不重複的入口。第二行的 pane id 是 debug 用的
+                識別碼，blocked 時讓給它（見 blockedBadge.css）。 */}
+            <BlockedBadge botId={botId} onOpen={openBlockedFull} />
             <KindTag kind={bot.kind} />
             {bot.model || statusInfo?.model_name ? (
               <ModelQuickPicker
