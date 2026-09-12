@@ -1648,6 +1648,22 @@ session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去
 - 恢復（例如重開 remote session）仍須 AGM 在沒有回合衝突的窗口安排，daemon 不會自己多開 session，也不動其他
   使用者入口。
 
+### 18.13 這批改動的 migration 與回滾限制（2026-09-12）
+
+全部是 additive column 與新資料表（`supervisor_reviews`、`supervisor_incidents`、`supervisor_approvals`、
+`supervisor_leases`），`db::migrate` 重跑冪等，升級不必停機做資料搬移。要注意的是**往回滾**：
+
+- 舊 binary 看不懂 `awaiting_review` / `blocked` / `superseded`。它的 open 查詢只收
+  `queued`/`delivered`/`unknown`，所以這些交辦會從它的未結案清單**消失**（資料還在，不會被刪）。
+  真的要回滾，先把當下的 `awaiting_review` 逐筆決定掉，別留在半途。
+- 舊 binary 的 `on_turn_done` 會把回合跑完的交辦直接寫成 `completed`——也就是回到這次要修的行為。
+  回滾後新做完的那些交辦不會有 `legacy_closed` 標記，之後再升級上來也分不出來。
+- `legacy_closed=1` 的回填只跑一次（欄位建立時）。升級後再回滾再升級，中間那段用舊語意關掉的 row
+  不會被重新標記。
+- 租約與核准對舊 binary 無效：它不看 `supervisor_leases`，所以回滾期間 restart 窗口不會 hold 住派工。
+- persona：新版把持久版當權威，舊版的 `ensure_env` 仍會用內嵌版覆寫。回滾前先確認內嵌版就是你要的那份，
+  否則舊 binary 跑一次 setup 就把自訂人設蓋掉（§18.11 修的就是這個）。
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。

@@ -51,6 +51,11 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
   `python3 scripts/agm_test.py` 45 tests OK、web `tsc -p tsconfig.app.json` 0 error、
   `oxlint src` 無新增 warning、`bun run build` 通過。未跑 release build、未重啟任何服務。
 
+- 2026-09-12 commit `f17f550`／`03b0d43`（同一 worktree／branch）：第 4／5／6 項。運維腳本進 repo
+  （`scripts/ops/`）並附隔離測試 15 案；persona 以持久版為權威、build-inputs 與 `include_str!` 由測試綁住；
+  Remote 查完能力後標 `unsupported`，狀態沒有 `active`。UI 證據走隔離 mock（VITE_MOCK=1、自己的 5199），
+  四張圖在 `docs/screenshots/agm-reliability/`。
+
 ## 4. 結構化核准與執行租約（P2）
 
 - [x] approval 紀錄 requester、目的／範圍、目標 commit、核准來源、有效期、狀態；AGM 直接核駁，不新增使用者審批。
@@ -77,9 +82,9 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 
 ## 整合、驗證與交付
 
-- [ ] 以 fixture DB／mock clock／mock transport 測行為，所有破壞式與故障注入在隔離環境，不往正式資料庫塞測試事件。
-- [ ] 先跑受影響 Rust／Python／TS 測試；整合後 cargo check、整樹 cargo test，web tsc 指定 tsconfig.app.json、oxlint、build。前端行為變更用隔離 mock／ego 驗證並保留畫面證據，不消耗真使用者 session。
-- [ ] 既有 pragma／授權／CLI 相容性與 docs/API.md、SPEC §18、SupervisorPanel 同步；標明 release 升級前後的 migration／回滾限制。
+- [x] 以 fixture DB／mock clock／mock transport 測行為，所有破壞式與故障注入在隔離環境，不往正式資料庫塞測試事件。
+- [x] 先跑受影響 Rust／Python／TS 測試；整合後 cargo check、整樹 cargo test，web tsc 指定 tsconfig.app.json、oxlint、build。前端行為變更用隔離 mock／ego 驗證並保留畫面證據，不消耗真使用者 session。
+- [x] 既有 pragma／授權／CLI 相容性與 docs/API.md、SPEC §18、SupervisorPanel 同步；標明 release 升級前後的 migration／回滾限制。
 - [ ] child 回父 Bot：各階段 commit、worktree 路徑、驗證數字、未解風險與部署步驟。中途回報不可宣稱六項全完成；完成前不可因單回合結束而退出整個任務。
 - [ ] 父 Bot 覆核狀態機、併發、crash恢復、現行部署接線與 UI，要求必要修正；通過後整合最新 origin/main、重跑受影響檢查、提交推送，再由 AGM 安排正式部署。需要 AGM 的 review／核准一律直接找它，不要請使用者代轉。
 
