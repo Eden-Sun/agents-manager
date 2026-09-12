@@ -47,3 +47,17 @@
 
 ## 回報
 三到五行：commit hash、怎麼驗的、要不要重啟 daemon、沒做到的與原因。
+
+## 完成（2026-09-12，cc2 · opus High）
+
+- [x] 1 手機額度 chip 一格一個窗口 — `815f082`。390px 五格全在、每格 40px 一行；5h／7d／Fable
+      仍在 tooltip、底部 sheet 與選取那格的上下邊框量表裡，百分比沒省。
+- [x] 2 未讀列一列可橫捲 — `8b497c2`。390 / 1380 / 1500 都量到 33px（晶片 22px），390px 的訊息
+      從 136px 起（原本 192px）；正在看的那顆會自己捲進畫面。
+- [x] 3 桌機 context／git 不壓訊息 — `cde2d54`。實測本來就沒有 `position` 疊住（context 93–128、
+      `.msg-list` 從 128 起，1380 與 1500 同），看起來像疊住是三行的未讀列造成的，已由 2 解掉。
+      這條約束改由 `scripts/verify-header-chrome.mjs` 用數字守，避免下次又只能看截圖猜。
+
+驗證：`bunx tsc --noEmit -p tsconfig.app.json`、`bunx oxlint src`（無新增 warning）、`bun run build`
+都過；`node scripts/verify-header-chrome.mjs` 七項全 PASS。截圖 `docs/screenshots/header-chrome/`，
+取捨補在 `docs/UI-DECISIONS.md` 最後一節。未重啟 daemon（7788 仍是舊 binary，前端改動只在 5173 生效）。
