@@ -2392,6 +2392,52 @@ button.run-debug-toggle:hover:not(:disabled) {
   margin-right: -3px;
 }
 
+/* 2026-09-12 使用者：「▾ ★ opus · High 也要有顏色」。kind logo 上色之後，它旁邊那一排控制
+   仍然整排是灰的，在標題列上看起來像被停用。四顆各給一種有意義的顏色，不是隨便上色：
+   - model／effort chip 吃 kind 的品牌色——它講的就是左邊那顆 CLI 現在在跑什麼，是同一件事；
+   - ▾（展開 run 識別資訊）吃 accent，跟它「開著」時的 --accent-ink 同一族，只是淡一階；
+   - ⚙（設定）同樣吃 accent，它是這一列唯一沒有在別處重複的入口；
+   - ★ 吃燈號的黃：釘起來是實心黃，沒釘是同一個黃的淡色空心，而不是灰。
+   hover／開啟狀態不動：那幾條規則在後面且特異度較高，仍然是既有的 accent wash。 */
+.bot-head .main-title-sub > .kind-tag.claude ~ .model-tag {
+  --head-kind: var(--kind-claude);
+}
+
+.bot-head .main-title-sub > .kind-tag.codex ~ .model-tag {
+  --head-kind: var(--kind-codex);
+}
+
+.bot-head .main-title-sub > .kind-tag.grok ~ .model-tag {
+  --head-kind: var(--kind-grok);
+}
+
+.bot-head .main-title-sub > .model-tag {
+  color: var(--head-kind, var(--text-dim));
+  border-color: color-mix(in srgb, var(--head-kind, var(--border-strong)) 45%, transparent);
+  background: color-mix(in srgb, var(--head-kind, var(--bg-sunken)) 8%, var(--bg-sunken));
+}
+
+/* effort（`-高`）仍然比模型名淡一階，但要同一個顏色家族——不然一顆 chip 一半彩色一半灰。 */
+.bot-head .main-title-sub > .model-tag .model-tag-extra {
+  color: color-mix(in srgb, var(--head-kind, var(--text-faint)) 55%, var(--text-dim));
+}
+
+.bot-head .main-title-sub > .main-status.pane-toggle .pane-chev {
+  color: color-mix(in srgb, var(--accent) 70%, var(--text-faint));
+}
+
+.bot-head .main-title-row > .icon-btn.gear {
+  color: color-mix(in srgb, var(--accent) 70%, var(--text-dim));
+}
+
+.bot-head .main-title-row > .icon-btn.primary-star {
+  color: color-mix(in srgb, var(--lamp-yellow) 55%, var(--text-faint));
+}
+
+.bot-head .main-title-row > .icon-btn.primary-star.on {
+  color: var(--lamp-yellow);
+}
+
 /* pane id 那顆（`run-debug-toggle`）也在這一行，排在 model 後面（2026-09-11 使用者）。
    它跟 model 一樣可壓縮；擠到不能再擠時 `.pane-id` 收掉、只留 `▾`（`.pane-chev` 是
    `flex: none`），完整的 pane id 在 tooltip 裡。 */

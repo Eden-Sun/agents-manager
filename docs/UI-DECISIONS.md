@@ -1132,3 +1132,19 @@ kind 圖示搬到 model chip 左邊之後（同日稍早）仍沿用側欄 `.kin
 每個 kind 的 chip 底色與邊框跟著各自的色系重調。額度列的 `warn` / `crit` 仍然蓋過 kind 色——額度狀態比「這是哪個 kind」重要。
 截圖：`docs/screenshots/head-kind-icon/`（三個 kind × 深淺）。
 
+
+## 標題列其餘控制也上色：⚙ / ★ / ▾ / model chip（2026-09-12）
+
+kind logo 上色之後，使用者：「make 功能 ▾ ★ opus · High colorful」——同一行裡只有 kind logo 有顏色，
+右邊的 model chip、pane id 的 ▾、上一行的 ★ 與 ⚙ 全是灰的，看起來像被停用。
+
+各給一種有意義的顏色，不是隨便上色：
+- **model／effort chip** 吃該 bot 的 kind 品牌色（`--kind-*`，透過 `.kind-tag.<kind> ~ .model-tag` 傳
+  `--head-kind`）：它講的就是左邊那顆 CLI 現在在跑什麼，是同一件事。底色與邊框是同色的極淡一層
+  （`color-mix`），effort（`-Low`）仍比模型名淡一階但同色系。
+- **▾**（展開 run 識別資訊）與 **⚙**（設定）吃 accent，跟 ▾ 開著時既有的 `--accent-ink` 同一族、淡一階。
+- **★** 吃燈號的黃：釘起來實心黃（原本就是），沒釘時是同一個黃的淡色空心，而不是灰。
+
+hover／開啟狀態一律不動（那幾條規則特異度較高）：chip 點下去仍是 accent wash，狀態的顏色仍然只由燈號負責。
+量到的 chip 文字對比（深／淺）：claude 8.01／5.00、codex 9.32／6.53、grok 7.08／4.80，都過 4.5:1。
+截圖：`docs/screenshots/head-controls-color/`（三個 kind × 深淺）。
