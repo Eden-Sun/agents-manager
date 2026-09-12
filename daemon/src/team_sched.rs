@@ -1562,6 +1562,18 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
     fill_workers(app, &ctx).await?;
     let tasks = sched_tasks(app, &ctx).await?;
 
+    // A task whose rebases are used up sits in `rebasing` waiting for a human `decide`
+    // (§8.2). Nothing below has an edge for it, so a plain "continue" on the
+    // `merge_conflict` pause used to leave the team quietly `working` with nobody to prompt
+    // (2026-09-12 review, ops #18). Say so and pause again; `decide` lifts this one itself.
+    if let Some(t) = tasks.iter().find(|t| t.state == "rebasing" && t.rebase_attempts > MAX_REBASES) {
+        note(app, team_id, json!({"action": "decision_required", "task": t.seq, "state": t.state,
+             "why": "rebase attempts exhausted: decide rework / force_merge / skip"}))
+        .await?;
+        pause_issue(app, &ctx, t.issue_id.as_deref(), "merge_conflict").await?;
+        return Ok(false);
+    }
+
     // 1. a reported task goes to review, or — with no reviewer — straight to the merge queue.
     //    Review is serialised: one task at a time, in report order (§8.4).
     let mut changed = false;
@@ -4578,6 +4590,47 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
 
     /// A rebase report must not reopen review: the conflict relay is a continuation of the
     /// already-approved task, not a new implementation round.
+    /// ops #18 (2026-09-12): the third conflict leaves the task in `rebasing` and pauses on
+    /// `merge_conflict`. "Continue" without a `decide` used to resume into a team with no
+    /// edge for that task — `working`, silent, for ever. Now the pass names the task and
+    /// pauses again, and a `decide` is what moves on.
+    #[tokio::test]
+    async fn resuming_past_an_exhausted_rebase_pauses_again_until_decided() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let task = s.tasks().await.remove(0);
+        // What `merge_one` leaves behind after its last conflict.
+        sqlx::query("UPDATE team_tasks SET state='rebasing', rebase_attempts=? WHERE id=?")
+            .bind(MAX_REBASES + 1)
+            .bind(&task.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        // The user pressed "continue" without deciding.
+        crate::team::set_phase(s.app(), &s.tid, "working", None, None).await.unwrap();
+
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("merge_conflict")));
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='decision_required'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+
+        // A decision is the way out: skip it, and the team runs on.
+        crate::team::decide(s.app(), &s.tid, &task.id, "skip", None).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "skipped");
+        assert_ne!(s.team().await.phase, "paused");
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_ne!(s.team().await.phase, "paused", "nothing left to decide");
+    }
+
     #[tokio::test]
     async fn t5_rebase_report_skips_a_second_review() {
         let s = S::new(2, true).await;
