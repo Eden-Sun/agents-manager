@@ -1415,7 +1415,8 @@ async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<d
 /// 唯一救不回的是 bot 的工作目錄（刪除時 `purge_bot_dir` 真的砍了）：那裡面是 hook 設定與
 /// 包裝腳本，下次啟動會重新產生，所以不影響復原。
 ///
-/// `managed_by = "child"` 的 bot 從來沒進過 config.toml，projection 不管它，直接清欄位。
+/// `managed_by = "child"` 與 `"team"` 的 bot 從來沒進過 config.toml，projection 不管它們，直接清欄位。
+/// team 成員以前走 user 那條路，會被寫進 config.toml 變成使用者的 bot（review 2026-09-12 可能 e）。
 async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // `db::bot` 不過濾 deleted_at，所以軟刪除的也拿得到——這裡要的就是它。
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -1438,7 +1439,7 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             json!({"bot_id": id, "name": bot.name, "taken_by": other}),
         ));
     }
-    if bot.managed_by == "child" {
+    if bot.managed_by != "user" {
         sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
     } else {
         let entry = crate::config::BotCfg {
@@ -2688,6 +2689,29 @@ mod delete_bot_tests {
         assert_eq!(db::active_run(&app.db, &id).await.unwrap().map(|r| r.id), Some(run), "not stopped");
         assert!(dir.exists(), "hook material kept");
         assert!(!e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
+    }
+
+    /// Restoring a soft-deleted team member clears `deleted_at` and nothing else: it must not be
+    /// written into config.toml as a user bot (review 2026-09-12 e).
+    #[tokio::test]
+    async fn restoring_a_team_member_does_not_write_it_into_config() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "dev-2", "team").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(db::now())
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+
+        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_none());
+        assert_eq!(bot.managed_by, "team");
+        let in_config = app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|b| b.id.as_deref() == Some(id.as_str()));
+        assert!(!in_config, "a team member never enters config.toml");
     }
 }
 
