@@ -1269,6 +1269,7 @@ pub async fn create_with_issues(
         plan.iter().map(|(role, i, _)| format!("{root}/{}", member_dir(role, *i, 1))).collect();
 
     let mut created: Vec<String> = Vec::new();
+    let mut integration_branch_created = false;
     // Filled in by the §6.4a step below; `None` until then so an early failure knows there
     // is no workspace to close.
     let workspace_id: Option<String>;
@@ -1276,6 +1277,7 @@ pub async fn create_with_issues(
         tg::create_branch(app, &project.host, &git_dir, &branch, &base_sha)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
+        integration_branch_created = true;
         for (i, (role, _, _)) in plan.iter().enumerate() {
             // Only `main/` may hold the integration branch — git refuses the same branch in
             // two worktrees, so everyone else starts detached at the base commit (§6.2).
@@ -1289,7 +1291,10 @@ pub async fn create_with_issues(
     }
     .await;
     if let Err(e) = build {
-        rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, None).await;
+        rollback_create(
+            app, &project, &repo, &team_id, &created, &root, &dirs, None,
+            &branch, &base_sha, integration_branch_created,
+        ).await;
         return Err(e);
     }
 
@@ -1302,7 +1307,10 @@ pub async fn create_with_issues(
     match make_workspace(app, &project, &team_id, &root, &issue).await {
         Ok(ws) => workspace_id = Some(ws),
         Err(e) => {
-            rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, None).await;
+            rollback_create(
+                app, &project, &repo, &team_id, &created, &root, &dirs, None,
+                &branch, &base_sha, integration_branch_created,
+            ).await;
             return Err(e);
         }
     }
@@ -1313,7 +1321,10 @@ pub async fn create_with_issues(
         .await
         .map_err(any_err)
     {
-        rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+        rollback_create(
+            app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref(),
+            &branch, &base_sha, integration_branch_created,
+        ).await;
         return Err(e);
     }
 
@@ -1323,7 +1334,10 @@ pub async fn create_with_issues(
             Ok(bot_id) => created.push(bot_id),
             Err(e) => {
                 // SPEC-team §6.5: a half-built team is torn down rather than left behind.
-                rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+                rollback_create(
+                    app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref(),
+                    &branch, &base_sha, integration_branch_created,
+                ).await;
                 return Err(e);
             }
         }
@@ -1361,7 +1375,10 @@ pub async fn create_with_issues(
     }
     .await;
     if let Err(e) = docs {
-        rollback_create(app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref()).await;
+        rollback_create(
+            app, &project, &repo, &team_id, &created, &root, &dirs, workspace_id.as_deref(),
+            &branch, &base_sha, integration_branch_created,
+        ).await;
         return Err(e);
     }
 
@@ -2046,6 +2063,9 @@ async fn rollback_create(
     root: &str,
     dirs: &[String],
     workspace_id: Option<&str>,
+    branch: &str,
+    base_sha: &str,
+    branch_created: bool,
 ) {
     let now = db::now();
     for b in created {
@@ -2055,11 +2075,48 @@ async fn rollback_create(
     }
     close_workspace(app, project, workspace_id).await;
     remove_worktrees(app, project, repo, root, dirs).await;
+    if branch_created {
+        remove_empty_created_branch(app, project, repo, branch, base_sha).await;
+    }
     let _ = sqlx::query("UPDATE teams SET phase='failed', pause_reason=NULL, ended_at=? WHERE id=?")
         .bind(&now)
         .bind(team_id)
         .execute(&app.db)
         .await;
+}
+
+/// Roll back only the integration branch created by this attempt, and only while it still
+/// points at the resolved base. A branch with any commit is user work, even if the team later
+/// failed to finish creating, so it stays available for recovery.
+async fn remove_empty_created_branch(app: &Arc<App>, project: &db::Project, repo: &str, branch: &str, base_sha: &str) {
+    let git_dir = repo_path(project, repo);
+    let range = format!("{base_sha}..{branch}");
+    let count = match tg::git(app, &project.host, &git_dir, &["rev-list", "--count", &range], tg::GIT_TIMEOUT).await {
+        Ok(out) if out.ok() => match out.trimmed().parse::<i64>() {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(branch = %branch, error = %e, "team create rollback: could not inspect integration branch; keeping it");
+                return;
+            }
+        },
+        Ok(out) => {
+            tracing::warn!(branch = %branch, error = %out.message(), "team create rollback: could not inspect integration branch; keeping it");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(branch = %branch, error = %e, "team create rollback: could not inspect integration branch; keeping it");
+            return;
+        }
+    };
+    if count != 0 {
+        tracing::warn!(branch = %branch, commits = count, "team create rollback: keeping integration branch with work");
+        return;
+    }
+    match tg::git(app, &project.host, &git_dir, &["branch", "-D", branch], tg::GIT_TIMEOUT).await {
+        Ok(out) if out.ok() => {}
+        Ok(out) => tracing::warn!(branch = %branch, error = %out.message(), "team create rollback: branch -D failed"),
+        Err(e) => tracing::warn!(branch = %branch, error = %e, "team create rollback: branch -D failed"),
+    }
 }
 
 // ---------------------------------------------------------------- the team's workspace (§6.4a)
@@ -4860,7 +4917,11 @@ mod api_tests {
         let (app, pid) = (e.app.clone(), e.project_id.clone());
         // Pull the socket out from under it: `workspace.create` now fails.
         app.connected.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(create_with_issues(&app, &pid, req(Some(1), false), vec![issue()]).await.is_err());
+        let err = create_with_issues(&app, &pid, req(Some(1), false), vec![issue()]).await.unwrap_err();
+        match err {
+            LcError::Conflict(detail) => assert_eq!(detail["reason"], "host is not connected"),
+            other => panic!("expected the workspace failure to survive rollback, got {other:?}"),
+        }
         // The row is parked in `failed` and every worktree it had built is gone again.
         let teams = db::teams_of_project(&app.db, &pid).await.unwrap();
         assert_eq!(teams.len(), 1);
@@ -4868,6 +4929,62 @@ mod api_tests {
         assert!(!std::path::Path::new(&teams[0].worktree_root).exists(), "the half-built root was removed");
         let listed = crate::team_git::testing::run(&e.repo, &["worktree", "list", "--porcelain"]);
         assert_eq!(listed.matches("worktree ").count(), 1, "no orphan registrations: {listed}");
+        let branches = crate::team_git::testing::run(&e.repo, &["branch", "--list", &teams[0].branch]);
+        assert!(branches.trim().is_empty(), "the empty integration branch was removed: {branches}");
+    }
+
+    /// A failed creation must not destroy work that landed on the integration branch while
+    /// rollback was running. This uses the same temporary-repo branch path as create and calls
+    /// the real rollback after putting one commit on that branch.
+    #[tokio::test]
+    async fn rollback_keeps_an_integration_branch_with_commits() {
+        let e = env().await;
+        let app = e.app.clone();
+        let project = db::project(&app.db, &e.project_id).await.unwrap().unwrap();
+        let repo = e.repo.to_string_lossy().to_string();
+        let base = crate::team_git::resolve_commit(&app, LOCAL_HOST, &repo, "HEAD")
+            .await
+            .unwrap();
+        let branch = "team/i42-preserve";
+        crate::team_git::create_branch(&app, LOCAL_HOST, &repo, branch, &base)
+            .await
+            .unwrap();
+        let root = e.dir.join("rollback-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let wt = root.join("branch-worktree");
+        let wt_path = wt.to_string_lossy().to_string();
+        crate::team_git::worktree_add(
+            &app,
+            LOCAL_HOST,
+            &repo,
+            &wt_path,
+            branch,
+            false,
+        )
+        .await
+        .unwrap();
+        std::fs::write(wt.join("work.txt"), "user work\n").unwrap();
+        assert!(crate::team_git::commit_all(&app, LOCAL_HOST, &wt_path, "user work").await.unwrap());
+
+        let root_path = root.to_string_lossy().to_string();
+        rollback_create(
+            &app,
+            &project,
+            "",
+            "test-team",
+            &[],
+            &root_path,
+            &[wt_path],
+            None,
+            branch,
+            &base,
+            true,
+        )
+        .await;
+
+        assert!(!wt.exists(), "rollback removed the worktree and released the branch");
+        let branches = crate::team_git::testing::run(&e.repo, &["branch", "--list", branch]);
+        assert!(branches.contains(branch), "a branch with work must survive rollback: {branches}");
     }
 
     /// The TOML projection must not soft-delete team members just because they are not in
@@ -5539,7 +5656,8 @@ mod api_tests {
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(dir.join("bin").join("herdr"), "shim").unwrap();
 
-        rollback_create(&app, &project, &project.path, &db::ulid(), &[bot.clone()], "", &[], None).await;
+        // i49 之後多了整合分支的參數；這個測試不測分支清理，branch_created=false 直接跳過那段。
+        rollback_create(&app, &project, &project.path, &db::ulid(), &[bot.clone()], "", &[], None, "", "", false).await;
 
         assert!(db::bot(&app.db, &bot).await.unwrap().unwrap().deleted_at.is_some());
         assert!(!dir.exists(), "#61: rollback_create left the soft-deleted bot's directory behind");

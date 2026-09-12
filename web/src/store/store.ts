@@ -540,6 +540,8 @@ export interface StoreState {
   loadModels: (kind: BotKind, host: string, identity?: string | null) => Promise<ModelInfo[] | null>
   /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
+  /** 在該 host 為某個 identity 開臨時登入 pane；成功後切到 host shell 面板。 */
+  loginIdentity: (host: string, identity: string) => Promise<boolean>
   /** v4.0: re-run CLI + per-identity login detection on one host (`''` / `local` = this machine). */
   refreshTools: (host: string) => Promise<boolean>
   setKindDisplay: (mode: KindDisplay) => void
@@ -1703,6 +1705,16 @@ export const useStore = create<StoreState>((set, get) => ({
         if (!api.isHostShellUnsupported(e)) throw e
         set({ hostShellSupported: false })
       }
+    })
+    return ok
+  },
+
+  async loginIdentity(host, identity) {
+    let ok = false
+    await guarded(set, get, `identity-login:${host}:${identity}`, async () => {
+      const shell = await api.loginIdentity(host, identity)
+      set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
+      ok = true
     })
     return ok
   },

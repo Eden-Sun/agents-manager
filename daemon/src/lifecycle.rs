@@ -2,6 +2,7 @@
 //!
 //! Every public entry point takes the per-bot lock.
 
+use crate::capture::Capture;
 use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
 use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
@@ -3818,15 +3819,7 @@ fn live_reply(kind: &str, text: &str) -> Option<String> {
 }
 
 /// Longest activity string we forward; the pane can carry a whole wrapped status bar.
-const ACTIVITY_MAX: usize = 120;
-
-/// Is `s` an elapsed-time token — `18s`, `3m`, `1h`, `0.1s`?
-fn is_elapsed_token(s: &str) -> bool {
-    let Some(num) = s.strip_suffix('s').or_else(|| s.strip_suffix('m')).or_else(|| s.strip_suffix('h')) else {
-        return false;
-    };
-    !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.')
-}
+const ACTIVITY_MAX: usize = crate::capture::ACTIVITY_MAX;
 
 /// Is the agent sitting at an **empty** composer, i.e. waiting for input?
 ///
@@ -3837,6 +3830,9 @@ fn is_elapsed_token(s: &str) -> bool {
 /// Note this is true while the agent is *working* too (claude keeps the empty composer on
 /// screen under the spinner), so it is only meaningful together with "nothing changed".
 fn pane_awaits_input(kind: &str, text: &str) -> bool {
+    if kind == "claude" {
+        return crate::capture::claude::PARSER.awaits_input(text);
+    }
     let Some(marker) = prompt_echo_prefix(kind).and_then(|p| p.trim_end().chars().next()) else { return false };
     text.lines().rev().take(12).any(|l| {
         let mut chars = l.chars().filter(|c| !"│┃╭╮╰╯─━ \t".contains(*c));
@@ -4032,20 +4028,7 @@ async fn pane_columns(app: &Arc<App>, run: &db::Run) -> Option<u32> {
 /// spaces between words fall off the ends of those rows entirely. Nothing can reconstruct that,
 /// so the honest move is to say so rather than store a vertical column as the reply.
 fn is_shredded(text: &str) -> bool {
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.len() < 6 {
-        return false;
-    }
-    // The widest row is the decisive one: whatever the mix of glyphs and word fragments, no
-    // pane whose longest line is a few characters is holding a readable answer. Counting short
-    // lines alone missed the real case (`w8:pK`, 31 columns, grok's borders eating most of
-    // them) — its rows were `381K` / `Hel` / `Off` / `by`, so only half were ≤ 2 chars while
-    // the *widest* was 4.
-    if lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) <= 6 {
-        return true;
-    }
-    let narrow = lines.iter().filter(|l| l.chars().count() <= 2).count();
-    narrow * 10 >= lines.len() * 7
+    crate::capture::is_shredded(text)
 }
 
 /// Does this row have the *shape* of a spinner frame — `<Verb>… (3m 18s · ↓ 11.0k tokens)` —
@@ -4057,17 +4040,7 @@ fn is_shredded(text: &str) -> bool {
 /// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
 /// a parenthesised status carrying `tokens` or a duration.
 pub(crate) fn is_activity_shape(s: &str) -> bool {
-    // A leading decoration glyph is ignored here; the caller strips it from what it reports.
-    let body = match s.chars().next() {
-        Some(c) if !c.is_alphanumeric() => s[c.len_utf8()..].trim_start(),
-        _ => s,
-    };
-    let Some((verb, tail)) = body.split_once("… (") else { return false };
-    if verb.is_empty() || verb.chars().any(char::is_whitespace) {
-        return false;
-    }
-    let Some((inner, _)) = tail.rsplit_once(')') else { return false };
-    inner.contains("tokens") || inner.split(|c: char| c.is_whitespace() || c == '·').any(|t| is_elapsed_token(t.trim()))
+    crate::capture::is_activity_shape(s)
 }
 
 /// The agent's *current activity* — the spinner row of this turn (`✻ Thinking… (12s · ↑ 1.2k
@@ -4078,6 +4051,9 @@ pub(crate) fn is_activity_shape(s: &str) -> bool {
 /// This is a read-only side channel for `turn_progress.activity`: it never reaches a stored
 /// message, so `clean_screen` / `extract_reply` stay untouched.
 fn live_activity(kind: &str, text: &str) -> Option<String> {
+    if kind == "claude" {
+        return crate::capture::claude::PARSER.activity(text);
+    }
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let grok = kind == "grok";
@@ -4706,27 +4682,14 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
 /// Glyphs the CLIs animate in front of an in-progress verb (`✢ Baking…`, `· Thinking…`,
 /// `⠦ Thinking… 52s`). Claude Code rotates through a whole set; the braille block is codex/grok.
 fn is_spinner_glyph(c: char) -> bool {
-    "✻✽✶✳✢✣✤✥✦✧✩✪✫✬✭✮✯✰✱✲✴✵✷✸✹✺✻✼✾❋·∗*".contains(c) || ('\u{2800}'..='\u{28FF}').contains(&c)
-}
-
-/// `<glyph> <Verb>…` with nothing that says it finished (`· done 11:35 PM`, `for 9s`).
-fn is_spinner_line(s: &str) -> bool {
-    let s = s.trim();
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else { return false };
-    if !is_spinner_glyph(first) {
-        return false;
-    }
-    let rest = chars.as_str().trim_start();
-    let Some(verb) = rest.split_whitespace().next() else { return false };
-    verb.ends_with('…') && !rest.contains("· done") && !rest.contains(" for ")
+    crate::capture::claude::is_spinner_glyph(c)
 }
 
 /// The pane is mid-turn: a spinner is still turning somewhere on it. codex's spinner is
 /// `• Working (4s • esc to interrupt)` — no ellipsis verb, so it is matched on its own
 /// (2026-09-08: the fallback scraped a working codex and the team counted it as a bad reply).
 fn pane_still_busy(screen: &str) -> bool {
-    screen.lines().any(|l| is_spinner_line(l) || is_codex_working_line(l))
+    crate::capture::claude::PARSER.still_busy(screen) || screen.lines().any(is_codex_working_line)
 }
 
 fn is_codex_working_line(s: &str) -> bool {
@@ -4735,13 +4698,7 @@ fn is_codex_working_line(s: &str) -> bool {
 }
 
 fn is_tool_progress(reply: &str) -> bool {
-    let lines: Vec<&str> = reply.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.is_empty() {
-        return false;
-    }
-    let running = |l: &str| l.starts_with("Running ") && l.ends_with('…');
-    let noise = |l: &str| running(l) || l.starts_with("Tip: ") || l.contains("esc to interrupt");
-    lines.iter().any(|l| running(l)) && lines.iter().all(|l| noise(l))
+    crate::capture::claude::is_tool_progress(reply)
 }
 
 // ------------------------------------------------- hookless runs: the terminal is the source
@@ -5042,35 +4999,7 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
 
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
 pub(crate) fn is_noise(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let first = s.chars().next().unwrap_or(' ');
-    if "▐▝▛▜█╭╮╰╯│▔⏵⚠✗✘".contains(first) || is_spinner_glyph(first) {
-        return true;
-    }
-    // Claude Code's update nag; the "Tip:" below is its sibling.
-    if s.contains("Auto-update failed") {
-        return true;
-    }
-    if s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_' || c == ' ') {
-        return true;
-    }
-    // Claude Code status bar: "user | project | model | 5h:- | 7d:-"; codex: "gpt-… · ~/dir · 5h 60% left"
-    if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:"))) || (s.contains(" · ") && s.contains("left")) {
-        return true;
-    }
-    s.starts_with("Claude Code v") || s.starts_with("Tip:") || s.starts_with("Ask Codex") || s.contains("shift+tab to cycle")
-        || s.contains("OpenAI Codex (v")
-        || s.starts_with(">_ OpenAI Codex")
-        || s.contains("Ask Codex to do")
-        || s.contains("autocompletes slash commands")
-        || s.contains("/model to change")
-        || s.starts_with("directory:")
-        || s.starts_with("permissions: YOLO")
-        || (s.contains("Context ") && s.contains("% used"))
-        || is_codex_idle_prompt(s)
-        || codex_usage_notice_line(s).is_some()
+    crate::capture::claude::PARSER.noise_line(s)
 }
 
 /// Codex idle input: `› Ask Codex to do anything`. Looks like a prompt echo (`› …`) but is
@@ -5480,8 +5409,10 @@ fn clean_screen(kind: &str, text: &str) -> Option<String> {
 /// grok prints the reply as plain indented text with no marker (appendix F), so it has no
 /// entry here and always goes through `clean_screen`.
 fn extract_reply(kind: &str, text: &str) -> Option<String> {
+    if kind == "claude" {
+        return crate::capture::claude::PARSER.extract_reply(text);
+    }
     let marker = match kind {
-        "claude" => "⏺ ",
         "codex" => "• ",
         _ => return None,
     };

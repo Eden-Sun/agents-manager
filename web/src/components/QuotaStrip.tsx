@@ -968,7 +968,7 @@ export function QuotaStrip({
   const ordered = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
 
   /** Same fixed order as the strip (Claude identities expanded). */
-  const popEntries = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
+  const popEntries = ordered
 
   if (ordered.length === 0) return null
 

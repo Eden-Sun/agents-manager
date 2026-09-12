@@ -516,6 +516,16 @@ export async function refreshTools(host: string): Promise<{ tools: ToolMap; iden
   return { tools: toToolMap(rec.tools), identity_status: toIdentityStatusMap(rec.identities) }
 }
 
+/** `POST /api/hosts/:name/identities/:identity/login` — 開臨時 pane 做該身份的登入。 */
+export async function loginIdentity(host: string, identity: string): Promise<HostShell> {
+  const name = host || 'local'
+  const raw = await transport.request(
+    'POST',
+    `/hosts/${encodeURIComponent(name)}/identities/${encodeURIComponent(identity)}/login`,
+  )
+  return toHostShell(raw, name)
+}
+
 /**
  * `POST /api/hosts/:name/tools/install {kind, via_bot_id}` — asks a running bot on that
  * host to install + log in the given agent CLI (as a prompt in its own pane).

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { EFFORT_OPTIONS, effortLabel } from '../api/types'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -17,47 +17,6 @@ import { ApiModelFields } from './ModelPicker'
  * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`：契約與型別保留，但這裡既不顯示
  * 也不會出現在 PATCH body 裡（維持 config.toml 既有的值）。
  */
-
-/** 各 kind 的 auto_approve 旗標（daemon `injected_args`）。 */
-export function AutoApproveFlags() {
-  return (
-    <>
-      claude <code>--dangerously-skip-permissions</code> / codex <code>--yolo</code> / grok{' '}
-      <code>--always-approve</code>
-    </>
-  )
-}
-
-/** 模型欄位下方的提示文字。 */
-export function modelHint(kind: BotKind): string {
-  switch (kind) {
-    case 'claude':
-      return 'claude 預設可能是 haiku，建議選 opus 或 sonnet'
-    case 'codex':
-      return '選「使用 CLI 預設」則不帶 -m，由 codex 自行決定'
-    case 'grok':
-      return '選「使用 CLI 預設」則不帶 -m，由 grok 自行決定（`grok models`：grok-4.6 為預設）'
-  }
-}
-
-/** grok only: reasoning effort as a row of options (daemon → `--reasoning-effort`). */
-export function EffortField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
-  return (
-    <div className="field">
-      <span>強度</span>
-      <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
-        <button type="button" className={`opt${value === null ? ' on' : ''}`} onClick={() => onChange(null)}>
-          預設
-        </button>
-        {EFFORT_OPTIONS.map((e) => (
-          <button key={e} type="button" className={`opt${value === e ? ' on' : ''}`} title={e} onClick={() => onChange(e)}>
-            {effortLabel(e)}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 /** v4.0 人設：auto-growing textarea; empty = null. */
 export function PersonaField({ value, onChange, collapsible }: { value: string; onChange: (v: string) => void; collapsible?: boolean }) {
@@ -114,11 +73,25 @@ export function PersonaMark({ persona }: { persona: string | null }) {
  * 偵測過都會落在這裡，所以不出警語，免得把不知道講成壞掉。
  */
 function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
-  if (!st || st.logged_in !== false) return null
-  return {
-    mark: '未登入',
-    title: `這個身份在 ${hostLabel} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 ${hostLabel} 用這個身份的設定登入，再回來按「重新偵測」。`,
+  if (!st) {
+    return {
+      mark: '未知',
+      title: `還沒有 ${hostLabel} 上這個身份的 auth status 結果。不要把它當成已登入，先按「重新偵測」或「登入」。`,
+    }
   }
+  if (st.logged_in === false) {
+    return {
+      mark: '未登入',
+      title: `這個身份在 ${hostLabel} 上沒有登入：bot 起來會停在登入畫面，不會開始工作。先在 ${hostLabel} 用這個身份的設定登入，再回來按「重新偵測」。`,
+    }
+  }
+  if (st.logged_in === null) {
+    return {
+      mark: '未知',
+      title: `無法確認這個身份在 ${hostLabel} 的登入狀態：${st.reason ?? 'auth status 沒有可解析的結果'}。不要把它當成已登入，先修正原因或重新偵測。`,
+    }
+  }
+  return null
 }
 
 /** 已登入時把帳號寫進 title，讓使用者一眼確認選到的是哪個帳號。 */
@@ -132,7 +105,7 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
   } else if (st?.logged_in === false) {
     parts.push(`${hostLabel}：未登入`)
   } else {
-    parts.push(`${hostLabel}：登入狀態未知`)
+    parts.push(`${hostLabel}：登入狀態未知${st?.reason ? ` — ${st.reason}` : ''}`)
   }
   // 從 shell alias 認到的身份不在 config.toml 裡，改不了也刪不掉——講清楚它從哪來。
   if (st?.source === 'shell') {
@@ -173,6 +146,8 @@ export function IdentityOptions({
   const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === 'claude'), [all, status])
   if (kind !== 'claude' || identities.length === 0) return null
   const hostLabel = !host || host === 'local' ? '本機' : host
+  const selectedStatus = value ? status[value] : undefined
+  const selectedWarning = value ? identityWarning(selectedStatus, hostLabel) : null
   return (
     <div className="field">
       <span>
@@ -207,7 +182,7 @@ export function IdentityOptions({
                 {i.name}
               </button>
               {warn ? (
-                <span className="identity-logged-out" title={warn.title}>
+                <span className={`identity-logged-out${warn.mark === '未知' ? ' is-unknown' : ''}`} title={warn.title}>
                   {warn.mark}
                 </span>
               ) : null}
@@ -215,8 +190,15 @@ export function IdentityOptions({
           )
         })}
       </div>
-      {identities.some((i) => status[i.name]?.logged_in === false) ? (
-        <span className="hint">標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面。</span>
+      {identities.some((i) => status[i.name]?.logged_in !== true) ? (
+        <span className="hint">
+          標「未登入」的身份在 {hostLabel} 上沒有帳號，選了它 bot 會停在登入畫面；標「未知」的身份則尚未確認，請先看提示原因。
+        </span>
+      ) : null}
+      {selectedWarning ? (
+        <span className={`hint identity-selection-warning${selectedWarning.mark === '未知' ? ' is-unknown' : ''}`}>
+          已選「{value}」：{selectedWarning.mark === '未登入' ? '未登入，bot 會停在登入畫面。' : `登入狀態未知（${selectedStatus?.reason ?? '尚未取得 auth status 結果'}）。`}
+        </span>
       ) : null}
     </div>
   )
@@ -317,12 +299,14 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('pointerdown', onDown, true)
   }, [])
 
-  // 開場落在名稱欄位。不再 trap 鍵盤：這張卡貼著齒輪開、背景也照常能用，把 Tab 關在裡面
-  // 會跟「非模態」自相矛盾（焦點一離開就被搶回來，等於背景還是不能點）。
+  // 桌機設定是貼著齒輪開的非模態浮窗：只把開場焦點放到名稱欄，不攔背景的 Tab，也不還原
+  // 齒輪焦點。手機則是全螢幕 sheet，才啟用共用 modal focus trap。
+  useDialogFocus(phone, cardRef, { initialFocus: () => nameRef.current })
   useEffect(() => {
-    const t = requestAnimationFrame(() => nameRef.current?.focus())
-    return () => cancelAnimationFrame(t)
-  }, [])
+    if (phone) return
+    const raf = requestAnimationFrame(() => nameRef.current?.focus())
+    return () => cancelAnimationFrame(raf)
+  }, [phone])
 
   // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
@@ -343,7 +327,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     escRef.current = closeSettings
     return (
       <div className="bs-scrim" role="presentation">
-      <div ref={cardRef} className="bot-settings" role="dialog" aria-label="Bot 設定">
+      <div ref={cardRef} className="bot-settings" role="dialog" aria-modal={phone ? 'true' : undefined} aria-label="Bot 設定">
         <div className="bs-head">
           <strong>Bot 設定</strong>
           <span className="spacer" />
@@ -418,6 +402,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
       style={pos ? { left: pos.left, top: pos.top } : undefined}
       role="dialog"
+      aria-modal={phone ? 'true' : undefined}
       aria-label={`${bot.name} 的設定`}
     >
       <div className="bs-head">
