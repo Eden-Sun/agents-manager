@@ -119,7 +119,9 @@
   `cancel` 不會中止那個回合：bot 接下來說什麼不會再記到這筆交辦上。`block` 要等回合結束（會停在
   `awaiting_review`）再標，否則 row 會在回合還開著時離開執行中集合，結果就沒有地方可去。
   先落地再送 prompt；同 `client_request_id` 重試回同一筆（換了 bot 或換了 text 都回 409，不會靜靜當成已生效）。
-  對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，由 controller 依 15/30/60/120/300 秒退避重試，
+  對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，`error` 記**真正的理由**
+  （`bot has no active run`、`a turn is already in flight`、`needs_login: …`；不是分類字串 `conflict`），
+  `next_attempt_at` 說下次什麼時候再試。由 controller 依 15/30/60/120/300 秒退避重試，
   一律沿用同一個 `client_request_id`，所以 worker 不會收到第二份。delivery `unknown` 只對帳、不重送。
   送出的那則 user message 在寫入時就帶 `messages.relay_from` = 總管 bot id（走 `prompt_relayed`，不是事後補寫），來源顯示是「AGM → bot」而不是使用者。
   daemon 自己送給 AGM 的通知（inbox digest、啟動握手）帶哨符 `daemon`，所以 AGM 的對話裡分得出哪幾句是使用者真的打的。

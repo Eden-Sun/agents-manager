@@ -93,9 +93,8 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         // A busy bot, an in-flight turn, a bot that is not running: all temporary, all keep
         // the assignment queued with the same id.
         Err(LcError::Conflict(v)) => {
-            let why = v.get("error").and_then(|s| s.as_str()).unwrap_or("conflict").to_string();
             let wait = backoff_for(a.attempts).as_secs() as i64;
-            let _ = store::defer(&app.db, &a.id, &iso_in(wait), &why).await;
+            let _ = store::defer(&app.db, &a.id, &iso_in(wait), &conflict_reason(&v)).await;
         }
         Err(LcError::NotFound(what)) => {
             dispatch_failed(app, &a, &format!("not found: {what}")).await;
@@ -115,6 +114,28 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
                 let _ = store::defer(&app.db, &a.id, &iso_in(wait), &why).await;
             }
         }
+    }
+}
+
+/// Why a 409 happened, in words worth writing down.
+///
+/// `LcError::conflict` builds `{"error": "conflict", "reason": "<the actual reason>", …}` — the
+/// `error` key is the *category* and is always the literal string `conflict`. Reading it (as
+/// this did until 2026-09-13) filled every deferred assignment's `error` column with
+/// "conflict", so the one field AGM checks to find out why work is not moving said nothing.
+/// The real reasons are things like "bot has no active run", "agent is blocked; answer the
+/// prompt first", "a turn is already in flight".
+fn conflict_reason(v: &serde_json::Value) -> String {
+    let reason = v
+        .get("reason")
+        .and_then(|s| s.as_str())
+        .or_else(|| v.get("error").and_then(|s| s.as_str()))
+        .unwrap_or("conflict");
+    // Several conflicts carry an operator-facing hint (`needs_login` explains which identity);
+    // it is the difference between "blocked" and "blocked, and here is what to do".
+    match v.get("message").and_then(|s| s.as_str()).filter(|m| !m.trim().is_empty()) {
+        Some(m) => format!("{reason}: {m}"),
+        None => reason.to_string(),
     }
 }
 
@@ -729,6 +750,30 @@ mod tests {
         // A long-blocked assignment retries every five minutes forever rather than never.
         assert_eq!(backoff_for(99).as_secs(), 300);
         assert_eq!(backoff_for(-1).as_secs(), 15);
+    }
+
+    /// `LcError::conflict` puts the category in `error` (always the literal `conflict`) and the
+    /// actual cause in `reason`. Reading the wrong one filled every deferred assignment's
+    /// `error` column with "conflict" — the one field AGM checks to find out why work is not
+    /// moving told it nothing.
+    #[test]
+    fn a_deferred_assignment_records_why_not_just_that_it_conflicted() {
+        let real = |msg: &str, extra: serde_json::Value| match LcError::conflict(msg, extra) {
+            LcError::Conflict(v) => conflict_reason(&v),
+            _ => unreachable!("conflict() builds a Conflict"),
+        };
+        assert_eq!(real("bot has no active run", json!({})), "bot has no active run");
+        assert_eq!(real("a turn is already in flight", json!({"turn_id": "t1"})), "a turn is already in flight");
+        // The operator-facing hint rides along: "blocked" versus "blocked, and here is what to do".
+        assert_eq!(
+            real("needs_login", json!({"message": "cc1 需要重新登入"})),
+            "needs_login: cc1 需要重新登入"
+        );
+        // Older / hand-built payloads without a reason still degrade to something readable.
+        assert_eq!(conflict_reason(&json!({"error": "conflict"})), "conflict");
+        assert_eq!(conflict_reason(&json!({})), "conflict");
+        // And the bug itself: the category alone must never be the whole story.
+        assert_ne!(real("agent is blocked; answer the prompt first", json!({})), "conflict");
     }
 
     #[test]

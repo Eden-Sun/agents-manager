@@ -106,8 +106,8 @@ impl Detector {
             let needed = match obs.kind.as_str() {
                 "host_disconnected" => thresholds.host_disconnected_secs,
                 "bot_stopped" => thresholds.bot_stopped_secs,
-                // The stalled and exhausted probes carry their own age test; a second wait here
-                // would just double the threshold.
+                // The stalled, undelivered and exhausted probes carry their own age test; a
+                // second wait here would just double the threshold.
                 _ => 0,
             };
             if held >= needed || open.contains(&key) {
@@ -176,6 +176,29 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
                     "bot_id": a.target_bot_id,
                     "status": a.status,
                     "updated_at": a.updated_at,
+                })
+                .to_string(),
+            });
+        }
+    }
+
+    // Work that has never been handed over at all — the stopped-bot case. The idle probe above
+    // is blind to it: every retry moves `updated_at`, so an assignment bouncing off a stopped
+    // bot every five minutes looks busy forever. The detail carries the retry count and the
+    // last refusal, which is what makes it actionable instead of just red.
+    if let Ok(undelivered) = store::assignments_undelivered_since(&app.db, &cutoff).await {
+        for a in undelivered {
+            out.push(Observation {
+                kind: "assignment_undelivered".into(),
+                resource: a.id.clone(),
+                severity: "degraded".into(),
+                detail: json!({
+                    "assignment_id": a.id,
+                    "bot_id": a.target_bot_id,
+                    "attempts": a.attempts,
+                    "last_error": a.error,
+                    "next_attempt_at": a.next_attempt_at,
+                    "created_at": a.created_at,
                 })
                 .to_string(),
             });
