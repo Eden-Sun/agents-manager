@@ -1961,13 +1961,6 @@ mod tests {
         assert_eq!(open_assignment_count(&p).await.unwrap(), 0, "accepted work leaves the open list");
     }
 
-    /// The stopped-bot case (review #30). Every retry calls `defer`, which moves `updated_at`,
-    /// so work bouncing off a dead bot every five minutes looks *busy* forever and the idle
-    /// probe never sees it. The undelivered probe clocks it from `created_at` instead.
-    #[tokio::test]
-    async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
-        let p = pool().await;
-        get_or_init(&p).await.unwrap();
     /// Giving up is reported once, not once per tick (review #31), and a recovery re-arms it so
     /// the *next* outage is not silenced by a marker left over from the last one.
     #[tokio::test]
@@ -2004,6 +1997,13 @@ mod tests {
         assert!(get_or_init(&p).await.unwrap().watchdog_gave_up_at.is_some());
     }
 
+    /// The stopped-bot case (review #30). Every retry calls `defer`, which moves `updated_at`,
+    /// so work bouncing off a dead bot every five minutes looks *busy* forever and the idle
+    /// probe never sees it. The undelivered probe clocks it from `created_at` instead.
+    #[tokio::test]
+    async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
         let a = insert_assignment(&p, None, "stopped-bot", "req-r", "做事", &[], None).await.unwrap();
         // Created long ago; retried 20 times, the last one just now. `defer` stamps
         // `updated_at` off the real clock, so the cutoff has to sit between the two: older than
