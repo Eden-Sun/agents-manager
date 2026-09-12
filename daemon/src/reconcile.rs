@@ -295,7 +295,18 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 // by the agent's *name*, never by whether the run has a tab of its own, so a
                 // bot started the old way — `pane.split` into a shared tab, `tab_id` NULL —
                 // is kept exactly as before and simply learns where it is sitting.
-                let status = agent.agent_status.normalized().as_str().to_string();
+                //
+                // The *status* is asked for again, now, under the lock. The list it came from
+                // predates the lock — by up to a minute when an earlier bot's `start` held its
+                // lock through `agent.wait` — and writing a stale `idle` over a run that has
+                // since gone `working` eats the next `working -> idle` edge: the event handler
+                // sees `prev == idle`, so no fallback is armed, no queued prompt is flushed and
+                // no turn-error scan runs (review 2026-09-12 a). One RPC per live run; if it
+                // fails, the list's answer stands as before.
+                let status = match client.agent_get(&agent.pane_id).await {
+                    Ok(Some(fresh)) => fresh.agent_status.normalized().as_str().to_string(),
+                    _ => agent.agent_status.normalized().as_str().to_string(),
+                };
                 // `stopping` is healed too: a stop or an in-pane restart that gave up on an
                 // agent which would not exit used to leave the run there for good (review
                 // 2026-09-12 #1). herdr still lists the agent, so it is running.
@@ -1141,6 +1152,57 @@ mod compat_tests {
             db::active_run(&app.db, &bot).await.unwrap().is_none(),
             "reconcile adopted the agent that had just been stopped, so the restart will refuse with `active run already exists`"
         );
+    }
+
+    /// A stale list must not roll a run's status back (review 2026-09-12 a). The list said
+    /// `idle`; while the reconcile waited for the lock the agent went `working`. Writing `idle`
+    /// from the list would make the real `working -> idle` event a no-op (`prev == idle`):
+    /// no fallback armed, no queued prompt flushed.
+    #[tokio::test]
+    async fn a_stale_agent_list_does_not_roll_a_runs_status_back() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+
+        let guard = app.bot_lock(&bot).await.lock_owned().await;
+        let app2 = app.clone();
+        let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
+        wait_for_call(&env, "agent.list").await;
+
+        // The agent starts working while the reconcile is parked on the lock; the event
+        // handler records that in the DB.
+        env.herdr.agents.lock().unwrap()[0]["agent_status"] = json!("working");
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=?")
+            .bind(&bot)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        drop(guard);
+        rec.await.unwrap().unwrap();
+
+        let r = run_of(&app, &bot).await.unwrap();
+        assert_eq!(r.agent_status, "working", "the reconcile asked herdr again instead of trusting its stale list");
     }
 
     /// The other half of the same race: the restart *won* the lock, so by the time the
