@@ -528,7 +528,7 @@ CLAUDE_CONFIG_DIR=/Users/m4p/.claude-ccompany           <- ✅ 展開成「該 h
     - 影響輕微：同一次發言的 N 份副本前端本來就用 `group_id` 折成一顆氣泡，順序不影響觀感。
     - **`team_events` 踩到同一個問題且會實際重現**（scheduler 一步派多個 worker，同毫秒連寫
       多筆），表現為 `state_detail_and_event_pagination` 間歇性失敗；已用 per-team 的 `seq`
-      欄位修掉。
+      欄位修掉（已進 main：`d089298`）。
     - **建議修法（零成本）**：`messages` 沒有宣告 `WITHOUT ROWID`，它的 `rowid` 天生就是
       單調插入序。`group::messages` / `get_messages` 改用 `rowid` 排序，`before=` 對外仍傳
       message id、由後端解析成 `rowid` 比較（前端契約不變，與 team events 一致）。
