@@ -51,10 +51,14 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
       const tag = target?.tagName.toLowerCase()
       // 只有這個視窗裡的輸入控制項（直通開關）能留住鍵盤；視窗外的輸入框在模態期間不該收到
       // 任何東西——沒有這個判斷，背後聊天輸入框有焦點時打的字會跑進去。
-      const editing =
-        rootRef.current?.contains(target) && (tag === 'input' || tag === 'textarea' || tag === 'select')
+      const inside = Boolean(rootRef.current?.contains(target))
+      const editing = inside && (tag === 'input' || tag === 'textarea' || tag === 'select')
       if (editing) return
       if (e.key === 'Tab') return
+      // 焦點在這個視窗裡的按鈕（✕、選單模式的 `.bc-item`、按鍵列）上按 Enter／Space 要啟動那顆
+      // 按鈕，不是把 enter／space 送進 pane——不然選單模式自動彈出、焦點落在 ✕ 時一按 Enter，
+      // 被選走的是 TUI 游標所在那一項，鍵盤使用者也永遠用不到可點清單。
+      if (inside && (tag === 'button' || tag === 'a') && (e.key === 'Enter' || e.key === ' ')) return
 
       if (!passthrough) {
         if (e.key === 'Escape' && !e.defaultPrevented) {
