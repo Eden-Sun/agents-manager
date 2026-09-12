@@ -121,7 +121,8 @@
   先落地再送 prompt；同 `client_request_id` 重試回同一筆（換了 bot 或換了 text 都回 409，不會靜靜當成已生效）。
   對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，由 controller 依 15/30/60/120/300 秒退避重試，
   一律沿用同一個 `client_request_id`，所以 worker 不會收到第二份。delivery `unknown` 只對帳、不重送。
-  送出成功的那則 user message 會把 `messages.relay_from` 標成總管 bot id（沿用既有欄位），來源顯示是「AGM → bot」而不是使用者。
+  送出的那則 user message 在寫入時就帶 `messages.relay_from` = 總管 bot id（走 `prompt_relayed`，不是事後補寫），來源顯示是「AGM → bot」而不是使用者。
+  daemon 自己送給 AGM 的通知（inbox digest、啟動握手）帶哨符 `daemon`，所以 AGM 的對話裡分得出哪幾句是使用者真的打的。
 - `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；
   `PUT /api/supervisor/handoff {summary}` → `{summary,summary_version}`，同時寫一份 `handoff.md` 到總管 cwd（權威仍在資料庫）。
 - `GET /api/supervisor/inbox?all=0|1&limit=200` →
