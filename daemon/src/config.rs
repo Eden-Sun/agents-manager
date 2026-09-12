@@ -41,6 +41,29 @@ impl Default for ServerConfig {
     }
 }
 
+/// `[supervisor]` — knobs for the manager (AGM) that are policy, not per-bot state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SupervisorCfg {
+    /// How often, at most, the daemon is allowed to wake the manager with its pending inbox.
+    ///
+    /// Events still land in `supervisor_inbox` the moment they happen — nothing is dropped or
+    /// delayed on the way in. This only paces the *push*: one digest per window, carrying
+    /// everything that accumulated in it. `0` = wake on every controller tick (the pre-4.x
+    /// behaviour).
+    #[serde(default = "default_notify_interval_secs")]
+    pub notify_interval_secs: u64,
+}
+
+fn default_notify_interval_secs() -> u64 {
+    600
+}
+
+impl Default for SupervisorCfg {
+    fn default() -> Self {
+        Self { notify_interval_secs: default_notify_interval_secs() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotCfg {
     /// ULID. Missing on hand-written files; filled in and written back on first load.
@@ -148,6 +171,8 @@ pub struct ProjectCfg {
 pub struct ConfigFile {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub supervisor: SupervisorCfg,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identities: Vec<IdentityCfg>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

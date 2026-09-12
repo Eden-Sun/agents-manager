@@ -124,6 +124,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // one is due. Shared through the row so a second controller loop sees the same count.
         ("watchdog_attempts", "ALTER TABLE supervisors ADD COLUMN watchdog_attempts INTEGER NOT NULL DEFAULT 0"),
         ("watchdog_next_at", "ALTER TABLE supervisors ADD COLUMN watchdog_next_at TEXT"),
+        // When the manager was last woken with its inbox. The notify throttle reads it, so it
+        // has to survive a restart: a reboot must not turn into an extra wake-up.
+        ("last_notify_at", "ALTER TABLE supervisors ADD COLUMN last_notify_at TEXT"),
     ] {
         if !has_column(pool, "supervisors", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -170,6 +173,7 @@ pub struct Supervisor {
     pub desired_running: i64,
     pub watchdog_attempts: i64,
     pub watchdog_next_at: Option<String>,
+    pub last_notify_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -343,6 +347,19 @@ pub async fn set_watchdog(pool: &SqlitePool, attempts: i64, next_at: Option<&str
     sqlx::query("UPDATE supervisors SET watchdog_attempts=?, watchdog_next_at=?, updated_at=? WHERE id=?")
         .bind(attempts)
         .bind(next_at)
+        .bind(crate::db::now())
+        .bind(SUPERVISOR_ID)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record that the manager was just woken. Only the successful notify path calls this: a
+/// failed prompt must not start the next window, or a flaky send silently drops a window's
+/// worth of events.
+pub async fn set_last_notify(pool: &SqlitePool, at: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisors SET last_notify_at=?, updated_at=? WHERE id=?")
+        .bind(at)
         .bind(crate::db::now())
         .bind(SUPERVISOR_ID)
         .execute(pool)
@@ -743,6 +760,16 @@ mod tests {
         assert_eq!(a.id, SUPERVISOR_ID);
         assert_eq!(a.created_at, b.created_at, "a second call must not replace the row");
         assert_eq!((a.identity.as_str(), a.effort.as_str(), a.active_model.as_str()), ("cc0", "low", "fable"));
+    }
+
+    /// The throttle's clock lives in the row, so a daemon restart does not buy the manager an
+    /// extra wake-up.
+    #[tokio::test]
+    async fn the_last_wake_up_is_remembered_across_reads() {
+        let p = pool().await;
+        assert!(get_or_init(&p).await.unwrap().last_notify_at.is_none(), "never woken yet");
+        set_last_notify(&p, "2026-09-12T10:00:00Z").await.unwrap();
+        assert_eq!(get_or_init(&p).await.unwrap().last_notify_at.as_deref(), Some("2026-09-12T10:00:00Z"));
     }
 
     /// The whole point of the client_request_id: a retry after a crash is the same assignment.
