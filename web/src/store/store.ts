@@ -778,9 +778,14 @@ export const useStore = create<StoreState>((set, get) => ({
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
     set((s) => {
       const turns = { ...s.turns }
+      for (const [botId, map] of Object.entries(turns)) {
+        const runId = runs[botId]?.id
+        turns[botId] = Object.fromEntries(Object.entries(map).filter(([, t]) => t.status !== 'in_flight' || t.run_id === runId))
+      }
       for (const t of st.turns) {
         const botId = t.bot_id ?? st.bots.find((b) => runs[b.id]?.id === t.run_id)?.id
         if (!botId) continue
+        if (t.status === 'in_flight' && t.run_id !== runs[botId]?.id) continue
         turns[botId] = pruneTurns({ ...(turns[botId] ?? {}), [t.id]: t })
       }
       const selected =
@@ -2146,9 +2151,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       resetStateSeq()
       void (async () => {
         try {
+          const loadedBotIds = Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
           await get().refreshState()
-          const sel = get().selectedBotId
-          if (sel) await get().loadMessages(sel)
+          for (const botId of loadedBotIds) await get().loadMessages(botId)
           const proj = get().selectedProjectId
           if (proj) await get().loadGroupMessages(proj)
           const team = get().selectedTeamId
@@ -2814,6 +2819,8 @@ export function composerState(state: StoreState, botId: string | null): Composer
     // Not `disabled`: the user keeps typing, and a send is queued rather than refused.
     return { ...base, disabled: false, queued: true, reason: '這回合還在跑，送出會排到結束後', inFlightTurnId: inflight.id }
   }
+  const queued = Object.values(state.turns[botId] ?? {}).find((t) => t.status === 'queued')
+  if (queued) return { ...base, disabled: false, queued: true, reason: '已有訊息排隊中，等它送出後再試' }
   return { disabled: false, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
 }
 
