@@ -1,0 +1,165 @@
+/* agent 停在編號選單上時那份可以點的清單（BlockedChoices.tsx）。
+   排版的前提是手機：一列一個 44px 的觸控目標，選項文字自己折行，沒有橫向捲軸——
+   終端快照那套（等寬字、11px、`white-space: pre`）是給「看畫面」用的，不是給手指用的。 */
+.blocked-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+/* 問題本身：這是整塊裡唯一要先讀懂的一句，字級比選項再大半級。 */
+.bc-question {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.bc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 編號、標題、「游標在此」同一列，說明自己占滿下面一整列。
+   說明擠在標題右邊那一欄的話，在 390px 只剩兩百出頭的寬度，一段話被折成八行窄柱。 */
+.bc-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'num title mark'
+    'num detail detail';
+  align-items: start;
+  column-gap: 8px;
+  row-gap: 2px;
+  width: 100%;
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bc-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.bc-item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 游標停在哪一項要一眼看出來：終端上那個 `❯` 在這裡換成左邊一條 3px 的邊＋右邊一句字。
+   只靠顏色不夠（UI-DECISIONS 的老規矩），所以「游標在此」四個字一定在。 */
+.bc-current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.bc-num {
+  grid-area: num;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 18px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.bc-current .bc-num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.bc-title {
+  grid-area: title;
+  line-height: 1.4;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* 終端把說明折成好幾行、窄 pane 還會直接截掉；這裡是接回來的整段，讓它自己折行。
+   **不加行數上限**：使用者的抱怨就是「選項文字被截掉」，在這裡再截一次等於沒解決。 */
+.bc-detail {
+  grid-area: detail;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.bc-mark {
+  grid-area: mark;
+  align-self: start;
+  line-height: 20px;
+  font-size: 11px;
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+
+.bc-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* 全畫面終端裡：清單放在終端畫面上方，但不能把終端整個擠出視野——選項多的時候自己捲。 */
+.blocked-modal .blocked-choices {
+  margin: 0 16px 0;
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+/* 對話上方那條 blocked 面板：認出選單之後終端快照預設收起來（`BlockedPanel`），
+   這塊就是主角，字級不再縮。 */
+@media (width <= 640px) {
+  .bc-item {
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+
+  .bc-detail {
+    font-size: 12px;
+  }
+
+  /* 「游標在此」在 390px 只吃掉約 50px，標題還有 270px 可用——留著。只靠左邊那條藍邊
+     與編號底色辨認等於只靠顏色，那是這份文件早就否決過的做法。 */
+  .bc-mark {
+    font-size: 10.5px;
+  }
+}
+
+/* 手機的全畫面終端是一張 390px 寬的 sheet，裡面那份 185 欄的終端畫面本來就只讀得到左上角
+   （視窗自己也在警告這件事）。有可以點的選單時就讓選單當主角：清單拿走剩下的高度、自己捲，
+   終端縮成固定一小條——留著是為了「還看得到它在動」，不是要在這個寬度上讀它。 */
+@media (width <= 640px) {
+  .blocked-modal .blocked-choices {
+    flex: 1 1 auto;
+    max-height: none;
+  }
+
+  .blocked-modal:has(.blocked-choices) .term.blocked-modal-term {
+    flex: 0 0 110px;
+  }
+}
