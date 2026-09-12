@@ -378,6 +378,8 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說「回覆結尾必須有 am-team 區塊、允許哪些 action」。
 
 `dispatch` 每筆必填的只有 `brief`（無限模式再加一個 `issue`）。`issue` 接受 `48` 與 `"#48"` 兩種寫法。
+`to` 只在**那筆 task 所屬 issue 的執行者**裡找（2026-09-12）：無限模式下每個 issue 都有自己的 `dev-1`，
+以前對全隊解析會指到別的 issue 的執行者、task 永遠排隊。短名 `dev-1` 與長名 `i<seq>-dev-1` 都接受；對不到就拒那一筆並寫明是哪個 issue。
 
 **解析失敗處理**（區塊缺失、JSON 壞、action 不合法、`to` 對不到人）：
 1. 記 `team_events{kind:note, payload:{error}}`；

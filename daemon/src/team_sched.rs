@@ -2094,15 +2094,29 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
             None => None,
             Some(to) => {
                 let want = to.trim().trim_start_matches('@').to_ascii_lowercase();
+                // §4.5: only **this issue's** executors are candidates. In unlimited mode the
+                // short name `dev-1` exists once per working issue, and resolving it against
+                // the whole team handed #43's task to #42's executor — whom `fill_issue(#43)`
+                // never considers, so the task queued for ever (2026-09-12 review, ops #5).
+                // `i<seq>-dev-1` (the nickname minus the team prefix) is accepted as well.
+                let tid6 = team::tid6(&ctx.team.id);
                 let Some(w) = ctx
-                    .workers()
+                    .workers_for(&issue)
                     .into_iter()
                     .find(|w| {
-                        w.id == *to || w.name.to_ascii_lowercase() == want || ctx.short(w).to_ascii_lowercase() == want
+                        let rest = w.name.strip_prefix(&format!("t{tid6}-")).unwrap_or(&w.name).to_ascii_lowercase();
+                        w.id == *to
+                            || w.name.to_ascii_lowercase() == want
+                            || rest == want
+                            || ctx.short(w).to_ascii_lowercase() == want
                     })
                     .cloned()
                 else {
-                    rejected.push(format!("`{to}` 不是這個 team 的執行者"));
+                    rejected.push(if ctx.unlimited() {
+                        format!("`{to}` 不是 #{} 的執行者", issue.issue_number)
+                    } else {
+                        format!("`{to}` 不是這個 team 的執行者")
+                    });
                     continue;
                 };
                 Some(w)
@@ -3981,6 +3995,40 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert!(holders.contains(&a_branch), "#42's merge must be on #42's branch: {holders}");
         assert!(!holders.contains(&b_branch), "#43's branch must not carry #42's merge: {holders}");
         assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), a_branch);
+    }
+
+    /// ops #5 (2026-09-12): `to: "dev-1"` for #43 must name #43's `dev-1`, not #42's — both
+    /// issues have one, and a task pinned to the other issue's executor never starts.
+    #[tokio::test]
+    async fn a_named_executor_is_resolved_within_the_tasks_own_issue() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        let (a, b) = (issue_of(&s, 42).await, issue_of(&s, 43).await);
+        let ctx = s.ctx().await;
+        let (a_dev, b_dev) = (ctx.workers_for(&a)[0].clone(), ctx.workers_for(&b)[0].clone());
+        assert_eq!(ctx.short(&a_dev), ctx.short(&b_dev), "the trap: both are `dev-1`");
+
+        s.reply(&pm, json!({"action":"dispatch","tasks":[
+            {"issue":43,"to":"dev-1","title":"B","brief":"做 B"},
+            {"issue":42,"to":"i1-dev-1","title":"A","brief":"做 A"},
+            {"issue":42,"to":"i2-dev-1","title":"C","brief":"做 C"}]}))
+        .await;
+        let tasks = s.tasks().await;
+        let b_task = tasks.iter().find(|t| t.title == "B").unwrap();
+        assert_eq!(b_task.worker_bot_id.as_deref(), Some(b_dev.id.as_str()), "#43's dev-1, and it started");
+        let a_task = tasks.iter().find(|t| t.title == "A").unwrap();
+        assert_eq!(a_task.worker_bot_id.as_deref(), Some(a_dev.id.as_str()), "the long form works too");
+        assert!(tasks.iter().all(|t| t.title != "C"), "#42 has no `i2-dev-1`: refused, not guessed");
+        let reject: String = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'
+               AND json_extract(payload_json,'$.action')='note' ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(&s.tid)
+        .bind(&pm.id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert!(reject.contains("i2-dev-1") && reject.contains("#42"), "{reject}");
     }
 
     #[tokio::test]
