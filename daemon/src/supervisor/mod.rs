@@ -7,6 +7,7 @@
 pub mod api;
 pub mod controller;
 pub mod health;
+pub mod incidents;
 pub mod policy;
 pub mod setup;
 pub mod store;
@@ -146,6 +147,8 @@ pub async fn assign(
     text: &str,
     client_request_id: &str,
     source_turn_id: Option<&str>,
+    ownership: &[String],
+    follow_up_of: Option<&str>,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -202,14 +205,74 @@ pub async fn assign(
         .await
         .map_err(up)?;
 
-    let a = store::insert_assignment(&app.db, Some(&request_id), target_bot_id, client_request_id, text)
-        .await
-        .map_err(up)?;
+    // Who else is already holding these files. Reported, never enforced: the daemon cannot
+    // know that two modules are really independent, so this goes to AGM to arbitrate rather
+    // than refusing work on a string match (SPEC §18.4).
+    let conflicts = ownership_conflicts(app, ownership, None).await?;
+
+    let a = store::insert_assignment(
+        &app.db,
+        Some(&request_id),
+        target_bot_id,
+        client_request_id,
+        text,
+        ownership,
+        follow_up_of,
+    )
+    .await
+    .map_err(up)?;
+    if let Some(parent) = follow_up_of {
+        let _ = store::link_followup(&app.db, parent, &a.id).await;
+    }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
     let a = store::assignment(&app.db, &a.id).await.map_err(up)?.unwrap_or(a);
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
-    Ok(a.to_json())
+    let mut out = a.to_json();
+    out["ownership_conflicts"] = json!(conflicts);
+    Ok(out)
+}
+
+/// Open assignments whose declared ownership overlaps `paths`.
+///
+/// A plain prefix match on the declared strings: `daemon/src/supervisor` overlaps
+/// `daemon/src/supervisor/store.rs` and itself, and nothing else. Cheap, explainable, and wrong
+/// only in the safe direction — it can report an overlap that is not one, which costs AGM a
+/// glance; it cannot quietly hand two bots the same file.
+pub async fn ownership_conflicts(
+    app: &Arc<App>,
+    paths: &[String],
+    ignore_assignment: Option<&str>,
+) -> Result<Vec<Value>, LcError> {
+    if paths.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for other in store::unsettled_assignments(&app.db).await.map_err(up)? {
+        if Some(other.id.as_str()) == ignore_assignment {
+            continue;
+        }
+        let held = other.ownership();
+        let overlap: Vec<String> = paths
+            .iter()
+            .filter(|p| held.iter().any(|h| overlaps(p, h)))
+            .cloned()
+            .collect();
+        if !overlap.is_empty() {
+            out.push(json!({
+                "assignment_id": other.id,
+                "target_bot_id": other.target_bot_id,
+                "status": other.status,
+                "paths": overlap,
+            }));
+        }
+    }
+    Ok(out)
+}
+
+fn overlaps(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
 /// Where an assignment came from: `(source, source_key, text)`.
@@ -335,9 +398,13 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
             "id": p.id, "label": p.label, "path": p.path, "host": p.host,
         })).collect::<Vec<_>>(),
         "bots": out,
-        "open_assignments": store::open_assignments(&app.db).await.map_err(up)?
+        // Everything still owed, `awaiting_review` included: the point of the acceptance state
+        // is that a finished turn stays in front of the manager until it decides.
+        "open_assignments": store::unsettled_assignments(&app.db).await.map_err(up)?
             .iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
         "pending_inbox": store::pending_inbox(&app.db).await.map_err(up)?
             .iter().map(store::InboxEvent::to_json).collect::<Vec<_>>(),
+        "open_incidents": store::open_incidents(&app.db).await.map_err(up)?
+            .iter().map(store::Incident::to_json).collect::<Vec<_>>(),
     }))
 }

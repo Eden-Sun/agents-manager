@@ -1531,6 +1531,55 @@ AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，
 - 需要重疊範圍時交回 AGM 分配 ownership，不要自行合併或替別人收尾。
 
 
+### 18.8 交辦的執行與驗收是兩件事（2026-09-12）
+
+回合結束只結束**那一輪**。2026-09-12 的 review 找到實例：assignment `01M246903Z54XW872GWD7XXJAE` 的回覆是
+「還在等編譯（已等 78 分鐘），稍後回報」，狀態卻已經是 `completed`，而未結案查詢立刻把它排除掉——沒做完的工作
+就這樣從待辦裡消失。
+
+所以 `supervisor_assignments.status` 改成生命週期：
+
+| 階段 | 狀態 | 誰能推動 |
+| --- | --- | --- |
+| 執行中 | `queued` / `delivered` / `unknown` | daemon（派送、退避、對帳） |
+| 等驗收 | `awaiting_review` | 只有 AGM 的決定 |
+| 已決定 | `completed` / `failed` / `cancelled` / `superseded` | AGM |
+| 還在等 | `blocked` | AGM，且**仍算未結案** |
+
+- 回合的原始事實不丟：`delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` /
+  `turn_missing`）與 `evidence_complete` 各自留欄位。終端備援（`completed_fallback`）不會因為「跑完了」就被驗收。
+- 連派不出去的交辦也是進 `awaiting_review`（`turn_status=dispatch_failed`）。daemon 知道送失敗，不知道這份工作該
+  怎麼辦；讓它自己結案就是在替使用者以為還在跑的工作蓋章。
+- 驗收走 `POST /api/supervisor/assignments/{id}/review`，每次記 actor、來源、理由與證據（`supervisor_reviews`）。
+  同樣的 decision 重送是冪等的。
+- 「要求續作」是**新開一筆** `follow_up_of` 指回原本那筆的交辦（原本那筆變 `superseded`），用呼叫端給的穩定
+  `followup_request_id` 去重——不改寫已經送出去的文字，bot 不會憑空看到自己沒收過的指示。
+- 未結案 = `queued`/`delivered`/`unknown`/`awaiting_review`/`blocked`。open count、handoff、`/supervisor/state`、
+  UI 與例行更新判斷都吃這一組。
+- **既有資料**：migration 只把已經關掉的舊 row 標成 `legacy_closed=1`，不重新打開、不重新派工；UI 與 API 標示
+  「舊資料·未經驗收」，不宣稱它們被驗收過。
+
+### 18.9 總管健康與系統 incident（2026-09-12）
+
+`manager_health`（AGM 自己能不能工作）與 `system_health`（系統有沒有壞）分開；頂層 `status` 是兩者取較嚴重者的
+相容投影，所以只讀 `status` 的舊呼叫端不會在 host 掛掉時看到 `healthy`。
+
+incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, resource)` 在 `status='open'` 上唯一）：
+
+| kind | 判斷 | 門檻（`[supervisor]`） |
+| --- | --- | --- |
+| `host_disconnected` | host 連不上 | `host_disconnected_secs`（120） |
+| `bot_stopped` | `autostart=1` 的 bot 沒有 active run | `bot_stopped_secs`（300） |
+| `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
+| `notify_exhausted` | 通知重送用盡預算 | `notify_max_attempts`（5） |
+
+- 條件要**持續**超過門檻才寫入（門檻計時在記憶體裡，重啟後重算——寧可晚一點開，不要重複開）；開啟與恢復各推
+  一則 inbox 事件，中間的每一 tick 只更新 `occurrences`。恢復後再壞是新的一筆，不是舊的復用。
+- 不算故障：使用者自己停掉的 bot、正常等使用者回答的 blocked pane、短暫排隊、AGM 自己的 idle/busy 變換。
+  量不到的東西回 `unknown`，不併進 `healthy`。
+- 全部走既有的 30 秒 cheap probe，不因為要判斷而額外問模型或殺程序。
+
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。

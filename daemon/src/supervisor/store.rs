@@ -61,7 +61,11 @@ CREATE TABLE IF NOT EXISTS supervisor_assignments (
   client_request_id TEXT NOT NULL,
   turn_id TEXT,
   text TEXT NOT NULL,
-  -- queued | delivered | unknown | completed | failed | cancelled
+  -- Lifecycle, *not* transport. In flight: queued | delivered | unknown. The turn ending puts
+  -- it in `awaiting_review`; only an explicit AGM decision reaches completed | failed |
+  -- cancelled | superseded, and `blocked` is a decision that keeps it open. The raw transport
+  -- facts stay in `delivery`, `turn_status` and `evidence_complete` — a turn that ended is not
+  -- the same claim as a job that was accepted.
   status TEXT NOT NULL DEFAULT 'queued',
   delivery TEXT,
   result TEXT,
@@ -77,6 +81,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS supervisor_assignments_crid
 CREATE INDEX IF NOT EXISTS supervisor_assignments_open
   ON supervisor_assignments(status) WHERE status IN ('queued','delivered','unknown');
 CREATE INDEX IF NOT EXISTS supervisor_assignments_turn ON supervisor_assignments(turn_id);
+-- Every acceptance decision, kept whole: who decided, on what grounds, from where. The
+-- assignment row carries only the latest one, and a state machine without an audit trail is
+-- how "AGM said it was done" becomes unfalsifiable.
+CREATE TABLE IF NOT EXISTS supervisor_reviews (
+  id TEXT PRIMARY KEY,
+  supervisor_id TEXT NOT NULL,
+  assignment_id TEXT NOT NULL,
+  -- accept | block | followup | fail | cancel
+  decision TEXT NOT NULL,
+  -- Status the assignment was in when the decision was taken, so a replayed decision is
+  -- recognisable as one.
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'api',
+  reason TEXT,
+  evidence TEXT,
+  -- The follow-up assignment this decision created, when the decision was `followup`.
+  followup_assignment_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS supervisor_reviews_assignment
+  ON supervisor_reviews(assignment_id, created_at);
 CREATE TABLE IF NOT EXISTS supervisor_inbox (
   id TEXT PRIMARY KEY,
   supervisor_id TEXT NOT NULL,
@@ -95,6 +122,31 @@ CREATE TABLE IF NOT EXISTS supervisor_inbox (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS supervisor_inbox_key ON supervisor_inbox(supervisor_id, event_key);
 CREATE INDEX IF NOT EXISTS supervisor_inbox_open ON supervisor_inbox(state) WHERE state != 'handled';
+-- One row per *resource* that is currently wrong, not per tick that noticed it. The partial
+-- unique index is the dedupe key: a restart cannot open a second incident for the same thing,
+-- and a fault that comes back after a resolve gets a new row (a new occurrence), not a silent
+-- re-use of the old one.
+CREATE TABLE IF NOT EXISTS supervisor_incidents (
+  id TEXT PRIMARY KEY,
+  supervisor_id TEXT NOT NULL,
+  -- host_disconnected | bot_stopped | assignment_stalled | notify_exhausted | remote_entry
+  kind TEXT NOT NULL,
+  -- What is wrong: a host name, a bot id, an assignment id. Never a message.
+  resource TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'degraded',
+  -- open | resolved
+  status TEXT NOT NULL DEFAULT 'open',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  -- How many ticks have confirmed it since it opened; the threshold is applied before the row
+  -- exists, so 1 already means "past the threshold".
+  occurrences INTEGER NOT NULL DEFAULT 1,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS supervisor_incidents_open
+  ON supervisor_incidents(supervisor_id, kind, resource) WHERE status='open';
+CREATE INDEX IF NOT EXISTS supervisor_incidents_recent ON supervisor_incidents(first_seen_at);
 CREATE TABLE IF NOT EXISTS supervisor_notes (
   id TEXT PRIMARY KEY,
   supervisor_id TEXT NOT NULL,
@@ -137,6 +189,61 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
                     .execute(pool)
                     .await?;
             }
+        }
+    }
+    for (col, ddl) in [
+        // The turn's own last word, kept apart from the lifecycle status: `completed`,
+        // `completed_fallback`, `failed`, `dispatch_failed`. Losing it was how "the turn
+        // ended" turned into "the job is done".
+        ("turn_status", "ALTER TABLE supervisor_assignments ADD COLUMN turn_status TEXT"),
+        // 0 when the result was scraped off the terminal instead of reported by a hook. An
+        // assignment is never accepted automatically, and least of all on this evidence.
+        ("evidence_complete", "ALTER TABLE supervisor_assignments ADD COLUMN evidence_complete INTEGER"),
+        ("reviewed_at", "ALTER TABLE supervisor_assignments ADD COLUMN reviewed_at TEXT"),
+        ("reviewed_by", "ALTER TABLE supervisor_assignments ADD COLUMN reviewed_by TEXT"),
+        ("review_decision", "ALTER TABLE supervisor_assignments ADD COLUMN review_decision TEXT"),
+        ("review_reason", "ALTER TABLE supervisor_assignments ADD COLUMN review_reason TEXT"),
+        // The assignment that carries this one's unfinished part forward, and the pointer back.
+        ("followup_assignment_id", "ALTER TABLE supervisor_assignments ADD COLUMN followup_assignment_id TEXT"),
+        ("follow_up_of", "ALTER TABLE supervisor_assignments ADD COLUMN follow_up_of TEXT"),
+        // Closed under the pre-review semantics: the turn ended and the row was called
+        // `completed` without anyone accepting it. Kept closed (a backfill must not re-open a
+        // month of work) but never presented as an acceptance. See docs/SPEC.md §18.
+        ("legacy_closed", "ALTER TABLE supervisor_assignments ADD COLUMN legacy_closed INTEGER NOT NULL DEFAULT 0"),
+        // Files / modules this assignment was handed, so an overlap with another open
+        // assignment can at least be reported to AGM (§18.4).
+        ("ownership_json", "ALTER TABLE supervisor_assignments ADD COLUMN ownership_json TEXT"),
+    ] {
+        if !has_column(pool, "supervisor_assignments", col).await? {
+            sqlx::query(ddl).execute(pool).await?;
+            if col == "legacy_closed" {
+                sqlx::query(
+                    "UPDATE supervisor_assignments SET legacy_closed=1
+                       WHERE status IN ('completed','failed','cancelled')",
+                )
+                .execute(pool)
+                .await?;
+            }
+            if col == "turn_status" {
+                // Rows closed by the old `on_turn_done` really did see a completed turn; that
+                // fact is recoverable, the acceptance is not.
+                sqlx::query("UPDATE supervisor_assignments SET turn_status='completed' WHERE status='completed'")
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
+    for (col, ddl) in [
+        // Durable notify bookkeeping: what the transport said, how many times we tried, when
+        // the next attempt is due and why the last one did not stick.
+        ("notify_delivery", "ALTER TABLE supervisor_inbox ADD COLUMN notify_delivery TEXT"),
+        ("notify_attempts", "ALTER TABLE supervisor_inbox ADD COLUMN notify_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("notify_next_at", "ALTER TABLE supervisor_inbox ADD COLUMN notify_next_at TEXT"),
+        ("notify_error", "ALTER TABLE supervisor_inbox ADD COLUMN notify_error TEXT"),
+        ("delivered_at", "ALTER TABLE supervisor_inbox ADD COLUMN delivered_at TEXT"),
+    ] {
+        if !has_column(pool, "supervisor_inbox", col).await? {
+            sqlx::query(ddl).execute(pool).await?;
         }
     }
     Ok(())
@@ -205,7 +312,22 @@ pub struct Assignment {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+    pub turn_status: Option<String>,
+    pub evidence_complete: Option<i64>,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub review_decision: Option<String>,
+    pub review_reason: Option<String>,
+    pub followup_assignment_id: Option<String>,
+    pub follow_up_of: Option<String>,
+    pub legacy_closed: i64,
+    pub ownership_json: Option<String>,
 }
+
+/// Lifecycle states an assignment can still move out of on its own.
+pub const EXECUTING_STATES: [&str; 3] = ["queued", "delivered", "unknown"];
+/// Everything AGM still owes attention to: in flight, waiting to be accepted, or blocked.
+pub const OPEN_STATES: [&str; 5] = ["queued", "delivered", "unknown", "awaiting_review", "blocked"];
 
 impl Assignment {
     /// The wire shape the front end and the `agm` CLI agreed on.
@@ -225,11 +347,43 @@ impl Assignment {
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "completed_at": self.completed_at,
+            // The raw transport facts, kept next to the lifecycle state rather than folded
+            // into it: what the turn itself ended as, and whether we saw all of the reply.
+            "turn_status": self.turn_status,
+            "evidence_complete": self.evidence_complete.map(|v| v != 0),
+            "open": self.is_open(),
+            "awaiting_review": self.status == "awaiting_review",
+            "review": {
+                "decision": self.review_decision,
+                "by": self.reviewed_by,
+                "at": self.reviewed_at,
+                "reason": self.review_reason,
+                "followup_assignment_id": self.followup_assignment_id,
+            },
+            "follow_up_of": self.follow_up_of,
+            // True for rows closed before acceptance existed: closed, but never accepted by
+            // anyone. Not a claim that the work was verified.
+            "legacy_closed": self.legacy_closed != 0,
+            "ownership": self.ownership(),
         })
     }
 
+    /// Files / modules this assignment was handed.
+    pub fn ownership(&self) -> Vec<String> {
+        self.ownership_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Still owed to AGM: in flight, waiting for acceptance, or explicitly blocked.
     pub fn is_open(&self) -> bool {
-        matches!(self.status.as_str(), "queued" | "delivered" | "unknown")
+        OPEN_STATES.contains(&self.status.as_str())
+    }
+
+    /// The daemon can still move this one on its own (retry, reconcile, close the turn).
+    pub fn is_executing(&self) -> bool {
+        EXECUTING_STATES.contains(&self.status.as_str())
     }
 }
 
@@ -247,6 +401,11 @@ pub struct InboxEvent {
     pub payload_json: String,
     pub state: String,
     pub notify_turn_id: Option<String>,
+    pub notify_delivery: Option<String>,
+    pub notify_attempts: i64,
+    pub notify_next_at: Option<String>,
+    pub notify_error: Option<String>,
+    pub delivered_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -262,6 +421,17 @@ impl InboxEvent {
             "kind": self.kind,
             "payload": serde_json::from_str::<Value>(&self.payload_json).unwrap_or_else(|_| json!({})),
             "state": self.state,
+            // How the wake-up that carried this event went. `unknown` is its own answer: the
+            // prompt may or may not have reached the manager, so the next attempt reconciles
+            // against `notify_turn_id` instead of sending a second copy.
+            "notify": {
+                "turn_id": self.notify_turn_id,
+                "delivery": self.notify_delivery,
+                "attempts": self.notify_attempts,
+                "next_at": self.notify_next_at,
+                "error": self.notify_error,
+                "delivered_at": self.delivered_at,
+            },
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
@@ -539,12 +709,15 @@ pub async fn insert_assignment(
     target_bot_id: &str,
     client_request_id: &str,
     text: &str,
+    ownership: &[String],
+    follow_up_of: Option<&str>,
 ) -> Result<Assignment> {
     let now = crate::db::now();
     sqlx::query(
         "INSERT INTO supervisor_assignments
-           (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?)",
+           (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
+            ownership_json, follow_up_of, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
     )
     .bind(crate::db::ulid())
     .bind(SUPERVISOR_ID)
@@ -552,6 +725,8 @@ pub async fn insert_assignment(
     .bind(target_bot_id)
     .bind(client_request_id)
     .bind(text)
+    .bind((!ownership.is_empty()).then(|| serde_json::to_string(ownership).unwrap_or_default()))
+    .bind(follow_up_of)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -569,12 +744,43 @@ pub async fn list_assignments(pool: &SqlitePool, limit: i64) -> Result<Vec<Assig
     .await?)
 }
 
+/// The controller's work list: assignments the daemon itself can still move (dispatch, retry,
+/// close against their turn). An `awaiting_review` row is *not* here — nothing the daemon does
+/// advances it, only a decision does.
 pub async fn open_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
     Ok(sqlx::query_as::<_, Assignment>(
         "SELECT * FROM supervisor_assignments WHERE supervisor_id=? AND status IN ('queued','delivered','unknown')
           ORDER BY created_at ASC",
     )
     .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Everything still owed to AGM: in flight, waiting for acceptance, or blocked. This is the
+/// list the handoff, the open count and the dispatch UI read — a job whose turn happens to have
+/// ended is still on it until somebody accepts it.
+pub async fn unsettled_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
+    Ok(sqlx::query_as::<_, Assignment>(
+        "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
+           AND status IN ('queued','delivered','unknown','awaiting_review','blocked')
+          ORDER BY created_at ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Assignments that have been sitting in one open state without moving since `cutoff` — the
+/// stalled-work probe behind the `assignment_stalled` incident.
+pub async fn assignments_idle_since(pool: &SqlitePool, cutoff: &str) -> Result<Vec<Assignment>> {
+    Ok(sqlx::query_as::<_, Assignment>(
+        "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
+           AND status IN ('queued','delivered','unknown','awaiting_review')
+           AND updated_at <= ? ORDER BY updated_at ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(cutoff)
     .fetch_all(pool)
     .await?)
 }
@@ -611,20 +817,202 @@ pub async fn defer(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str
     Ok(())
 }
 
-pub async fn finish(pool: &SqlitePool, id: &str, status: &str, result: Option<&str>, error: Option<&str>) -> Result<()> {
+/// What one execution outcome did to the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settled {
+    /// The assignment moved from an executing state into `awaiting_review`.
+    pub moved: bool,
+    /// The notification was new (not a replay of one already queued).
+    pub event_new: bool,
+}
+
+/// The execution half ended: park the assignment on `awaiting_review` and queue its
+/// notification **in one transaction**.
+///
+/// The two used to be separate statements, and a daemon that died between them left an
+/// assignment closed with nobody ever told about it — the restart rescan only looks at open
+/// rows, so that result was gone for good. Either both land or neither does.
+///
+/// `turn_status` is the turn's own word (`completed`, `completed_fallback`, `failed`,
+/// `dispatch_failed`); it is recorded, not interpreted. Nothing here accepts anything: only
+/// [`review`] closes an assignment.
+#[allow(clippy::too_many_arguments)]
+pub async fn settle_and_notify(
+    pool: &SqlitePool,
+    id: &str,
+    turn_status: &str,
+    evidence_complete: bool,
+    result: Option<&str>,
+    error: Option<&str>,
+    event_key: &str,
+    kind: &str,
+    payload: &Value,
+) -> Result<Settled> {
     let now = crate::db::now();
-    sqlx::query(
-        "UPDATE supervisor_assignments SET status=?, result=COALESCE(?, result), error=COALESCE(?, error),
-           completed_at=?, updated_at=? WHERE id=?",
+    let mut tx = pool.begin().await?;
+    let moved = sqlx::query(
+        "UPDATE supervisor_assignments
+            SET status='awaiting_review', turn_status=?, evidence_complete=?,
+                result=COALESCE(?, result), error=COALESCE(?, error), completed_at=?, updated_at=?
+          WHERE id=? AND status IN ('queued','delivered','unknown')",
     )
-    .bind(status)
+    .bind(turn_status)
+    .bind(i64::from(evidence_complete))
     .bind(result)
     .bind(error)
     .bind(&now)
     .bind(&now)
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    let (bot_id, turn_id): (String, Option<String>) =
+        sqlx::query_as("SELECT target_bot_id, turn_id FROM supervisor_assignments WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let event_new = sqlx::query(
+        "INSERT OR IGNORE INTO supervisor_inbox
+           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(SUPERVISOR_ID)
+    .bind(event_key)
+    .bind(id)
+    .bind(&bot_id)
+    .bind(&turn_id)
+    .bind(kind)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(Settled { moved, event_new })
+}
+
+/// A terminal assignment whose completion event never made it into the inbox.
+///
+/// Belt and braces for [`settle_and_notify`]: rows closed by an older daemon (or by a path that
+/// predates the transaction) are swept up at startup instead of being silently dropped.
+pub async fn settled_without_event(pool: &SqlitePool, limit: i64) -> Result<Vec<Assignment>> {
+    Ok(sqlx::query_as::<_, Assignment>(
+        "SELECT a.* FROM supervisor_assignments a
+          WHERE a.supervisor_id=? AND a.status='awaiting_review' AND a.legacy_closed=0
+            AND NOT EXISTS (SELECT 1 FROM supervisor_inbox i WHERE i.assignment_id=a.id
+                              AND i.kind IN ('assignment_completed','assignment_failed'))
+          ORDER BY a.updated_at ASC LIMIT ?",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The decision a `decision` string maps to. `None` = not a decision we know.
+pub fn decision_status(decision: &str) -> Option<&'static str> {
+    match decision {
+        "accept" => Some("completed"),
+        "fail" => Some("failed"),
+        "cancel" => Some("cancelled"),
+        "block" => Some("blocked"),
+        "followup" => Some("superseded"),
+        _ => None,
+    }
+}
+
+/// Record an acceptance decision. The caller has already checked that the transition is legal.
+///
+/// Idempotent by construction at the API layer: re-deciding the same way is answered from the
+/// row without writing a second audit entry.
+#[allow(clippy::too_many_arguments)]
+pub async fn review(
+    pool: &SqlitePool,
+    id: &str,
+    decision: &str,
+    actor: &str,
+    source: &str,
+    reason: Option<&str>,
+    evidence: Option<&str>,
+    followup_assignment_id: Option<&str>,
+) -> Result<Option<Assignment>> {
+    let Some(to_status) = decision_status(decision) else { return Ok(None) };
+    let Some(before) = assignment(pool, id).await? else { return Ok(None) };
+    let now = crate::db::now();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE supervisor_assignments
+            SET status=?, review_decision=?, reviewed_by=?, reviewed_at=?, review_reason=?,
+                followup_assignment_id=COALESCE(?, followup_assignment_id), updated_at=?
+          WHERE id=?",
+    )
+    .bind(to_status)
+    .bind(decision)
+    .bind(actor)
+    .bind(&now)
+    .bind(reason)
+    .bind(followup_assignment_id)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "INSERT INTO supervisor_reviews
+           (id, supervisor_id, assignment_id, decision, from_status, to_status, actor, source,
+            reason, evidence, followup_assignment_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(SUPERVISOR_ID)
+    .bind(id)
+    .bind(decision)
+    .bind(&before.status)
+    .bind(to_status)
+    .bind(actor)
+    .bind(source)
+    .bind(reason)
+    .bind(evidence)
+    .bind(followup_assignment_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    assignment(pool, id).await
+}
+
+/// Every decision taken on one assignment, oldest first.
+pub async fn reviews(pool: &SqlitePool, assignment_id: &str) -> Result<Vec<Value>> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, String)>(
+        "SELECT id, decision, from_status, to_status, actor, source, reason, evidence, followup_assignment_id, created_at
+           FROM supervisor_reviews WHERE assignment_id=? ORDER BY created_at ASC",
+    )
+    .bind(assignment_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, decision, from, to, actor, source, reason, evidence, followup, at)| {
+            json!({
+                "id": id, "decision": decision, "from_status": from, "to_status": to,
+                "actor": actor, "source": source, "reason": reason, "evidence": evidence,
+                "followup_assignment_id": followup, "created_at": at,
+            })
+        })
+        .collect())
+}
+
+/// Point a superseded assignment at the one that carries its work forward.
+pub async fn link_followup(pool: &SqlitePool, id: &str, followup_id: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisor_assignments SET followup_assignment_id=?, updated_at=? WHERE id=?")
+        .bind(followup_id)
+        .bind(crate::db::now())
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -694,10 +1082,22 @@ pub async fn pending_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
     .await?)
 }
 
-/// Assignments not yet closed: queued, delivered or of unknown delivery.
+/// Assignments not yet settled: in flight, waiting for acceptance, or blocked. A turn that
+/// ended does not take its assignment off this count — only a decision does.
 pub async fn open_assignment_count(pool: &SqlitePool) -> Result<i64> {
     Ok(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM supervisor_assignments WHERE supervisor_id=? AND status IN ('queued','delivered','unknown')",
+        "SELECT COUNT(*) FROM supervisor_assignments WHERE supervisor_id=?
+           AND status IN ('queued','delivered','unknown','awaiting_review','blocked')",
+    )
+    .bind(SUPERVISOR_ID)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Of those, the ones nobody has accepted or rejected yet.
+pub async fn awaiting_review_count(pool: &SqlitePool) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM supervisor_assignments WHERE supervisor_id=? AND status='awaiting_review'",
     )
     .bind(SUPERVISOR_ID)
     .fetch_one(pool)
@@ -719,16 +1119,244 @@ pub async fn pending_count(pool: &SqlitePool) -> Result<i64> {
 
 /// Prompted, not yet confirmed. Deliberately *not* `handled`: only the manager acking it —
 /// or the UI acking on its behalf — closes the event, so a failed notify keeps it queued.
-pub async fn mark_delivered_inbox(pool: &SqlitePool, ids: &[String], notify_turn_id: &str) -> Result<()> {
+pub async fn mark_delivered_inbox(
+    pool: &SqlitePool,
+    ids: &[String],
+    notify_turn_id: &str,
+    delivery: &str,
+) -> Result<()> {
+    let now = crate::db::now();
     for id in ids {
-        sqlx::query("UPDATE supervisor_inbox SET state='delivered', notify_turn_id=?, updated_at=? WHERE id=?")
-            .bind(notify_turn_id)
-            .bind(crate::db::now())
-            .bind(id)
-            .execute(pool)
-            .await?;
+        // `AND state!='handled'`: the manager can ack the digest before this write lands (it
+        // reads the events out of the prompt, not out of this row). Without the guard that ack
+        // is undone and the same event is pushed at it again — an acknowledgement must never
+        // go backwards.
+        sqlx::query(
+            "UPDATE supervisor_inbox
+                SET state='delivered', notify_turn_id=?, notify_delivery=?, delivered_at=?,
+                    notify_attempts=notify_attempts+1, notify_next_at=NULL, notify_error=NULL, updated_at=?
+              WHERE id=? AND state!='handled'",
+        )
+        .bind(notify_turn_id)
+        .bind(delivery)
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(pool)
+        .await?;
     }
     Ok(())
+}
+
+/// A notify attempt that did not land. The events stay `pending`; only the attempt counter and
+/// the backoff move, so a flaky transport cannot silently drop a window's worth of results.
+pub async fn defer_notify(pool: &SqlitePool, ids: &[String], next_at: &str, why: &str) -> Result<()> {
+    let now = crate::db::now();
+    for id in ids {
+        sqlx::query(
+            "UPDATE supervisor_inbox
+                SET notify_attempts=notify_attempts+1, notify_next_at=?, notify_error=?, updated_at=?
+              WHERE id=? AND state!='handled'",
+        )
+        .bind(next_at)
+        .bind(why)
+        .bind(&now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Put a delivered-but-unanswered event back in the queue.
+///
+/// Used when the notify turn itself failed or was interrupted, and when a delivered event has
+/// gone unacked past its deadline. `notify_turn_id` is kept: the next attempt has to be able to
+/// check the original turn before sending anything a second time.
+pub async fn requeue_inbox(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE supervisor_inbox SET state='pending', notify_error=?, notify_next_at=NULL, updated_at=?
+          WHERE id=? AND state='delivered'",
+    )
+    .bind(why)
+    .bind(crate::db::now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Delivered events still unacked, oldest delivery first — the ACK-recovery work list.
+pub async fn delivered_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
+    Ok(sqlx::query_as::<_, InboxEvent>(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='delivered'
+          ORDER BY COALESCE(delivered_at, updated_at) ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Pending events whose backoff has not run out yet are skipped; everything else is due.
+pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Result<Vec<InboxEvent>> {
+    Ok(sqlx::query_as::<_, InboxEvent>(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending'
+           AND (notify_next_at IS NULL OR notify_next_at <= ?)
+           AND notify_attempts < ?
+          ORDER BY created_at ASC, id ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(now)
+    .bind(max_attempts)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Events that have spent their whole retry budget. They stay pending (nothing is swallowed),
+/// but the daemon stops pushing them and raises an incident instead of burning quota forever.
+pub async fn exhausted_inbox(pool: &SqlitePool, max_attempts: i64) -> Result<Vec<InboxEvent>> {
+    Ok(sqlx::query_as::<_, InboxEvent>(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ?
+          ORDER BY created_at ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(max_attempts)
+    .fetch_all(pool)
+    .await?)
+}
+
+// ---------------------------------------------------------------- incidents
+
+/// Mirrors the row: `FromRow` needs every column, and the JSON readers take several of them
+/// straight out of `to_json`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, FromRow)]
+pub struct Incident {
+    pub id: String,
+    pub supervisor_id: String,
+    pub kind: String,
+    pub resource: String,
+    pub severity: String,
+    pub status: String,
+    pub detail_json: String,
+    pub occurrences: i64,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub resolved_at: Option<String>,
+}
+
+impl Incident {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "kind": self.kind,
+            "resource": self.resource,
+            "severity": self.severity,
+            "status": self.status,
+            "detail": serde_json::from_str::<Value>(&self.detail_json).unwrap_or_else(|_| json!({})),
+            "occurrences": self.occurrences,
+            "first_seen_at": self.first_seen_at,
+            "last_seen_at": self.last_seen_at,
+            "resolved_at": self.resolved_at,
+        })
+    }
+}
+
+/// Open an incident for `(kind, resource)`, or refresh the one already open.
+///
+/// Returns `(incident, opened)`. `opened == false` on every tick after the first, which is what
+/// keeps a five-hour outage at one notification instead of six hundred.
+pub async fn open_incident(
+    pool: &SqlitePool,
+    kind: &str,
+    resource: &str,
+    severity: &str,
+    detail: &Value,
+) -> Result<(Incident, bool)> {
+    let now = crate::db::now();
+    let opened = sqlx::query(
+        "INSERT OR IGNORE INTO supervisor_incidents
+           (id, supervisor_id, kind, resource, severity, status, detail_json, occurrences, first_seen_at, last_seen_at)
+         VALUES (?,?,?,?,?, 'open', ?, 1, ?, ?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(SUPERVISOR_ID)
+    .bind(kind)
+    .bind(resource)
+    .bind(severity)
+    .bind(detail.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+    if !opened {
+        sqlx::query(
+            "UPDATE supervisor_incidents SET last_seen_at=?, occurrences=occurrences+1, severity=?, detail_json=?
+              WHERE supervisor_id=? AND kind=? AND resource=? AND status='open'",
+        )
+        .bind(&now)
+        .bind(severity)
+        .bind(detail.to_string())
+        .bind(SUPERVISOR_ID)
+        .bind(kind)
+        .bind(resource)
+        .execute(pool)
+        .await?;
+    }
+    let row = sqlx::query_as::<_, Incident>(
+        "SELECT * FROM supervisor_incidents WHERE supervisor_id=? AND kind=? AND resource=? AND status='open'",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(kind)
+    .bind(resource)
+    .fetch_one(pool)
+    .await?;
+    Ok((row, opened))
+}
+
+/// The condition cleared. `Ok(None)` = there was nothing open, which is the ordinary case.
+pub async fn resolve_incident(pool: &SqlitePool, kind: &str, resource: &str) -> Result<Option<Incident>> {
+    let row = sqlx::query_as::<_, Incident>(
+        "SELECT * FROM supervisor_incidents WHERE supervisor_id=? AND kind=? AND resource=? AND status='open'",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(kind)
+    .bind(resource)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let now = crate::db::now();
+    sqlx::query("UPDATE supervisor_incidents SET status='resolved', resolved_at=?, last_seen_at=? WHERE id=?")
+        .bind(&now)
+        .bind(&now)
+        .bind(&row.id)
+        .execute(pool)
+        .await?;
+    Ok(sqlx::query_as::<_, Incident>("SELECT * FROM supervisor_incidents WHERE id=?")
+        .bind(&row.id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn open_incidents(pool: &SqlitePool) -> Result<Vec<Incident>> {
+    Ok(sqlx::query_as::<_, Incident>(
+        "SELECT * FROM supervisor_incidents WHERE supervisor_id=? AND status='open' ORDER BY first_seen_at ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn incidents(pool: &SqlitePool, limit: i64) -> Result<Vec<Incident>> {
+    Ok(sqlx::query_as::<_, Incident>(
+        "SELECT * FROM supervisor_incidents WHERE supervisor_id=? ORDER BY first_seen_at DESC LIMIT ?",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn ack_inbox(pool: &SqlitePool, id: &str) -> Result<bool> {
@@ -777,9 +1405,9 @@ mod tests {
     async fn one_client_request_id_is_one_assignment() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-1", "do the thing").await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-1", "do the thing", &[], None).await.unwrap();
         assert_eq!(a.status, "queued");
-        assert!(insert_assignment(&p, None, "bot1", "req-1", "do the thing").await.is_err());
+        assert!(insert_assignment(&p, None, "bot1", "req-1", "do the thing", &[], None).await.is_err());
         assert_eq!(assignment_by_crid(&p, "req-1").await.unwrap().unwrap().id, a.id);
     }
 
@@ -803,7 +1431,7 @@ mod tests {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
         let id = push_inbox(&p, "k1", "assignment_completed", None, None, None, &json!({})).await.unwrap().unwrap();
-        mark_delivered_inbox(&p, &[id.clone()], "turn-9").await.unwrap();
+        mark_delivered_inbox(&p, &[id.clone()], "turn-9", "ok").await.unwrap();
         assert!(pending_inbox(&p).await.unwrap().is_empty(), "delivered events are not offered again");
         assert_eq!(pending_count(&p).await.unwrap(), 1, "but they are still outstanding");
         assert!(ack_inbox(&p, &id).await.unwrap());
@@ -815,14 +1443,147 @@ mod tests {
     async fn pending_counts_open_work_as_well_as_unhandled_news() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-1", "x").await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-1", "x", &[], None).await.unwrap();
         assert_eq!(pending_count(&p).await.unwrap(), 1);
         mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
         assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "delivered");
         assert_eq!(pending_count(&p).await.unwrap(), 1, "delivered work is still open work");
-        finish(&p, &a.id, "completed", Some("done"), None).await.unwrap();
-        assert_eq!(pending_count(&p).await.unwrap(), 0);
-        assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().result.as_deref(), Some("done"));
+        settle_and_notify(&p, &a.id, "completed", true, Some("done"), None, "k-done", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_count(&p).await.unwrap(),
+            2,
+            "a finished turn is still open work, plus the notification nobody has read"
+        );
+        review(&p, &a.id, "accept", "AGM", "cli", Some("編譯通過"), Some("turn t1"), None).await.unwrap();
+        let done = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(done.status, "completed");
+        assert_eq!(done.result.as_deref(), Some("done"));
+        assert_eq!(open_assignment_count(&p).await.unwrap(), 0, "accepted work leaves the open list");
+    }
+
+    /// The heart of the 2026-09-12 P1: a turn ending is not a job being done.
+    ///
+    /// `01M246903Z54XW872GWD7XXJAE` answered "still waiting on the build, will report back" and
+    /// the row said `completed`. Now that reply parks the assignment on `awaiting_review`, where
+    /// it stays on the open list until somebody decides.
+    #[tokio::test]
+    async fn a_finished_turn_waits_for_acceptance_instead_of_closing_itself() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-a", "改好那個 bug", &[], None).await.unwrap();
+        mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
+        let s = settle_and_notify(
+            &p,
+            &a.id,
+            "completed",
+            true,
+            Some("還在等編譯，等一下回報"),
+            None,
+            "assignment_completed:a:t1",
+            "assignment_completed",
+            &json!({"result": "還在等編譯"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(s, Settled { moved: true, event_new: true });
+        let a = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "awaiting_review");
+        assert!(a.is_open(), "still owed to the manager");
+        assert!(!a.is_executing(), "but the daemon has nothing left to do for it");
+        assert_eq!(a.turn_status.as_deref(), Some("completed"), "the raw fact is kept");
+        assert_eq!(awaiting_review_count(&p).await.unwrap(), 1);
+        assert!(open_assignments(&p).await.unwrap().is_empty(), "not on the controller's work list");
+        assert_eq!(unsettled_assignments(&p).await.unwrap().len(), 1, "but on the manager's");
+
+        // "Still waiting on the build" is not an acceptance: blocking keeps it open.
+        review(&p, &a.id, "block", "AGM", "cli", Some("等編譯"), None, None).await.unwrap();
+        let a = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "blocked");
+        assert!(a.is_open());
+        assert_eq!(open_assignment_count(&p).await.unwrap(), 1);
+    }
+
+    /// Every decision names who made it, on what grounds. Without that the state machine is
+    /// just a different way of asserting the same unfalsifiable "it is done".
+    #[tokio::test]
+    async fn every_decision_is_recorded_with_its_actor_and_evidence() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-b", "x", &[], None).await.unwrap();
+        settle_and_notify(&p, &a.id, "completed", true, Some("ok"), None, "k", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        review(&p, &a.id, "accept", "AGM", "cli", Some("測試通過"), Some("commit abc123"), None).await.unwrap();
+        let log = reviews(&p, &a.id).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0]["decision"], "accept");
+        assert_eq!(log[0]["from_status"], "awaiting_review");
+        assert_eq!(log[0]["to_status"], "completed");
+        assert_eq!(log[0]["actor"], "AGM");
+        assert_eq!(log[0]["evidence"], "commit abc123");
+    }
+
+    /// A continuation is a new assignment pointing back at the old one — never a rewrite of
+    /// text that has already been sent to a bot.
+    #[tokio::test]
+    async fn a_follow_up_is_a_new_assignment_linked_to_the_old_one() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let first = insert_assignment(&p, None, "bot1", "req-1", "做 A", &[], None).await.unwrap();
+        settle_and_notify(&p, &first.id, "completed", true, Some("A 做了一半"), None, "k1", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        let next = insert_assignment(&p, None, "bot1", "req-1-follow", "把 A 做完", &[], Some(&first.id)).await.unwrap();
+        link_followup(&p, &first.id, &next.id).await.unwrap();
+        review(&p, &first.id, "followup", "AGM", "cli", Some("還差一半"), None, Some(&next.id)).await.unwrap();
+        let first = assignment(&p, &first.id).await.unwrap().unwrap();
+        assert_eq!(first.status, "superseded");
+        assert_eq!(first.followup_assignment_id.as_deref(), Some(next.id.as_str()));
+        assert!(!first.is_open(), "the original is closed…");
+        let next = assignment(&p, &next.id).await.unwrap().unwrap();
+        assert_eq!(next.follow_up_of.as_deref(), Some(first.id.as_str()));
+        assert!(next.is_open(), "…because the follow-up carries the work");
+        assert_eq!(first.text, "做 A", "the delivered words are never rewritten");
+    }
+
+    /// The transactional outbox: either the assignment moves and the event is queued, or
+    /// neither happens. A replay of the same outcome changes nothing.
+    #[tokio::test]
+    async fn settling_twice_moves_nothing_and_queues_one_event() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-c", "x", &[], None).await.unwrap();
+        mark_delivered(&p, &a.id, "t9", "ok").await.unwrap();
+        let key = "assignment_completed:a:t9";
+        let first = settle_and_notify(&p, &a.id, "completed", true, Some("r"), None, key, "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        let again = settle_and_notify(&p, &a.id, "completed", true, Some("r"), None, key, "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(first, Settled { moved: true, event_new: true });
+        assert_eq!(again, Settled { moved: false, event_new: false }, "a duplicate completion is not a second event");
+        assert_eq!(pending_inbox(&p).await.unwrap().len(), 1);
+    }
+
+    /// A result closed by an older daemon, with nobody ever told: the sweep finds it. Once the
+    /// write is transactional this can only be a pre-upgrade row — which is exactly the backlog
+    /// the review was worried about.
+    #[tokio::test]
+    async fn a_settled_assignment_with_no_event_is_found_by_the_sweep() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-d", "x", &[], None).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review', turn_status='completed' WHERE id=?")
+            .bind(&a.id)
+            .execute(&p)
+            .await
+            .unwrap();
+        assert_eq!(settled_without_event(&p, 10).await.unwrap().len(), 1);
+        push_inbox(&p, "k", "assignment_completed", Some(&a.id), None, None, &json!({})).await.unwrap();
+        assert!(settled_without_event(&p, 10).await.unwrap().is_empty(), "once queued it is not swept again");
     }
 
     /// `unknown` delivery is its own state precisely so the controller reconciles it instead
@@ -831,7 +1592,7 @@ mod tests {
     async fn unknown_delivery_is_not_folded_into_delivered() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-2", "x").await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-2", "x", &[], None).await.unwrap();
         mark_delivered(&p, &a.id, "t2", "unknown").await.unwrap();
         let a = assignment(&p, &a.id).await.unwrap().unwrap();
         assert_eq!(a.status, "unknown");
@@ -894,7 +1655,7 @@ mod tests {
         assert_eq!(open.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(), ["k0", "k1", "k2", "k3", "k4"]);
         assert_eq!(open_inbox(&p, 2).await.unwrap().len(), 2, "--limit applies");
         assert!(ack_inbox(&p, &open[0].id).await.unwrap());
-        mark_delivered_inbox(&p, &[open[1].id.clone()], "t1").await.unwrap();
+        mark_delivered_inbox(&p, &[open[1].id.clone()], "t1", "ok").await.unwrap();
         let open = open_inbox(&p, 10).await.unwrap();
         assert_eq!(open.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(), ["k1", "k2", "k3", "k4"], "delivered is still open; handled is gone");
         assert_eq!(open_inbox_count(&p).await.unwrap(), 4);
@@ -942,6 +1703,141 @@ mod tests {
         set_status_detail(&p, Some("x")).await.unwrap();
         let s = get_or_init(&p).await.unwrap();
         assert_eq!((s.status.as_str(), s.status_detail.as_deref()), ("", Some("x")), "detail alone leaves status");
+    }
+
+    /// The ACK / mark_delivered race. The manager reads the digest out of the prompt and acks
+    /// before the delivery write lands; without the guard that write reopens the event and the
+    /// same news is pushed at it again.
+    #[tokio::test]
+    async fn an_acknowledgement_never_goes_backwards() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let id = push_inbox(&p, "k1", "assignment_completed", None, None, None, &json!({})).await.unwrap().unwrap();
+        assert!(ack_inbox(&p, &id).await.unwrap());
+        mark_delivered_inbox(&p, &[id.clone()], "turn-1", "ok").await.unwrap();
+        let e = inbox(&p, 10).await.unwrap().into_iter().find(|e| e.id == id).unwrap();
+        assert_eq!(e.state, "handled", "the late delivery write must not un-ack it");
+        assert_eq!(open_inbox_count(&p).await.unwrap(), 0);
+    }
+
+    /// Delivery is not an answer. A failed send leaves everything pending with a backoff; a
+    /// delivered-but-unacked event can be handed back; the retry budget is bounded, and an
+    /// exhausted event is still kept rather than dropped.
+    #[tokio::test]
+    async fn notifications_are_retried_a_bounded_number_of_times_and_never_dropped() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let id = push_inbox(&p, "k1", "assignment_completed", None, None, None, &json!({})).await.unwrap().unwrap();
+        let ids = [id.clone()];
+
+        // A send that failed: still pending, but not due until the backoff passes.
+        defer_notify(&p, &ids, "2099-01-01T00:00:00Z", "delivery failed").await.unwrap();
+        assert!(due_inbox(&p, "2026-09-12T00:00:00Z", 5).await.unwrap().is_empty(), "backoff holds it");
+        assert_eq!(due_inbox(&p, "2099-06-01T00:00:00Z", 5).await.unwrap().len(), 1, "and then releases it");
+
+        // Delivered, unanswered, handed back: the notify turn is kept so the next attempt can
+        // check it instead of blindly sending a second copy.
+        mark_delivered_inbox(&p, &ids, "turn-7", "unknown").await.unwrap();
+        assert!(pending_inbox(&p).await.unwrap().is_empty());
+        assert_eq!(delivered_inbox(&p).await.unwrap().len(), 1);
+        assert!(requeue_inbox(&p, &id, "delivered but never acknowledged").await.unwrap());
+        let e = pending_inbox(&p).await.unwrap().remove(0);
+        assert_eq!(e.notify_turn_id.as_deref(), Some("turn-7"));
+        assert_eq!(e.notify_delivery.as_deref(), Some("unknown"), "unknown delivery stays unknown");
+        assert!(!requeue_inbox(&p, &id, "again").await.unwrap(), "only a delivered event can be requeued");
+
+        // Spend the budget. The event never leaves the inbox; what stops is the pushing.
+        for _ in 0..5 {
+            defer_notify(&p, &ids, "2000-01-01T00:00:00Z", "nope").await.unwrap();
+        }
+        assert!(due_inbox(&p, "2099-01-01T00:00:00Z", 5).await.unwrap().is_empty(), "budget spent, no more sends");
+        assert_eq!(exhausted_inbox(&p, 5).await.unwrap().len(), 1, "and it is visible as an incident source");
+        assert_eq!(open_inbox_count(&p).await.unwrap(), 1, "still owed, never swallowed");
+    }
+
+    /// Incidents are one row per resource, deduplicated across restarts, with a fresh row for a
+    /// recurrence so "it happened again" is not lost in an old timestamp.
+    #[tokio::test]
+    async fn an_incident_is_one_row_per_resource_and_a_recurrence_is_a_new_one() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let (first, opened) = open_incident(&p, "host_disconnected", "mac2", "degraded", &json!({"host": "mac2"}))
+            .await
+            .unwrap();
+        assert!(opened);
+        let (again, opened) = open_incident(&p, "host_disconnected", "mac2", "degraded", &json!({})).await.unwrap();
+        assert!(!opened, "a second tick refreshes the incident, it does not open another");
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.occurrences, 2);
+        assert_eq!(open_incidents(&p).await.unwrap().len(), 1);
+
+        let resolved = resolve_incident(&p, "host_disconnected", "mac2").await.unwrap().unwrap();
+        assert_eq!(resolved.status, "resolved");
+        assert!(resolved.resolved_at.is_some());
+        assert!(open_incidents(&p).await.unwrap().is_empty());
+        assert!(resolve_incident(&p, "host_disconnected", "mac2").await.unwrap().is_none(), "resolving twice is a no-op");
+
+        let (third, opened) = open_incident(&p, "host_disconnected", "mac2", "degraded", &json!({})).await.unwrap();
+        assert!(opened, "the same fault coming back is a new occurrence");
+        assert_ne!(third.id, first.id);
+        assert_eq!(incidents(&p, 10).await.unwrap().len(), 2, "the resolved one is still on the record");
+    }
+
+    /// The upgrade path. Rows closed under the old "turn ended = done" rule stay closed — a
+    /// backfill must not re-dispatch a month of work — but they are marked `legacy_closed`, so
+    /// nothing presents them as having been accepted by anyone.
+    #[tokio::test]
+    async fn the_migration_marks_old_rows_legacy_instead_of_reopening_them() {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        for stmt in DDL.split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&p).await.unwrap();
+            }
+        }
+        for (id, status) in [("a1", "completed"), ("a2", "failed"), ("a3", "delivered"), ("a4", "cancelled")] {
+            sqlx::query(
+                "INSERT INTO supervisor_assignments
+                   (id, supervisor_id, target_bot_id, client_request_id, text, status, attempts, created_at, updated_at)
+                 VALUES (?,?, 'bot1', ?, 'x', ?, 0, 't', 't')",
+            )
+            .bind(id)
+            .bind(SUPERVISOR_ID)
+            .bind(format!("crid-{id}"))
+            .bind(status)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        assert!(!has_column(&p, "supervisor_assignments", "legacy_closed").await.unwrap());
+        migrate(&p).await.unwrap();
+        migrate(&p).await.unwrap(); // idempotent
+        let rows: Vec<(String, String, i64, Option<String>)> =
+            sqlx::query_as("SELECT id, status, legacy_closed, turn_status FROM supervisor_assignments ORDER BY id")
+                .fetch_all(&p)
+                .await
+                .unwrap();
+        assert_eq!(rows[0], ("a1".into(), "completed".into(), 1, Some("completed".into())));
+        assert_eq!(rows[1], ("a2".into(), "failed".into(), 1, None));
+        assert_eq!(rows[2], ("a3".into(), "delivered".into(), 0, None), "work in flight is untouched");
+        assert_eq!(rows[3], ("a4".into(), "cancelled".into(), 1, None));
+        assert_eq!(open_assignment_count(&p).await.unwrap(), 1, "the backfill does not re-open closed work");
+        // And the sweep leaves them alone: nobody wants a month of old results pushed at AGM.
+        assert!(settled_without_event(&p, 10).await.unwrap().is_empty());
+    }
+
+    /// Ownership is recorded on the assignment so an overlap can be reported. It is data for
+    /// AGM to arbitrate with, not a lock.
+    #[tokio::test]
+    async fn an_assignment_remembers_the_files_it_was_handed() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let owns = vec!["daemon/src/supervisor".to_string(), "scripts/agm.py".to_string()];
+        let a = insert_assignment(&p, None, "bot1", "req-o", "x", &owns, None).await.unwrap();
+        assert_eq!(a.ownership(), owns);
+        assert_eq!(a.to_json()["ownership"][1], "scripts/agm.py");
+        let b = insert_assignment(&p, None, "bot2", "req-p", "x", &[], None).await.unwrap();
+        assert!(b.ownership().is_empty());
     }
 
     #[tokio::test]

@@ -487,6 +487,10 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     }
     if args.source_turn_id:
         body["source_turn_id"] = args.source_turn_id
+    # 交辦時就把檔案／模組範圍記下來，daemon 才有東西可以比對重疊；它只會「回報」衝突，
+    # 不會替你決定，真正的協調還是你的事。
+    if args.owns:
+        body["ownership"] = list(args.owns)
     try:
         return client.post("/api/supervisor/assignments", body)
     except AgmError as e:
@@ -503,21 +507,89 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
         raise
 
 
+OPEN_STATUSES = ("queued", "delivered", "unknown", "awaiting_review", "blocked")
+
+
 def cmd_assignments(client: Client, cfg: dict, args) -> object:
     out = client.get("/api/supervisor/assignments")
     if not isinstance(out, dict):
         return out
     items = [a for a in out.get("assignments") or [] if isinstance(a, dict)]
-    # 單筆走清單過濾，不猜 `/assignments/{id}`：那支端點的契約還沒定案，猜錯會變成
-    # 一個看起來像「查無此筆」的 404，而那跟「交辦不存在」是兩件事。
     if args.id:
+        # 單筆優先走 `/assignments/{id}`（有 review 歷程）；舊 daemon 沒這支就退回清單過濾。
+        one = optional_get(client, f"/api/supervisor/assignments/{urllib.parse.quote(args.id)}")
+        if one is not None:
+            return one
         for a in items:
             if a.get("id") == args.id or a.get("client_request_id") == args.id:
                 return a
         raise AgmError("not_found", f"找不到交辦 {args.id}", 4, id=args.id)
     if args.status:
         items = [a for a in items if a.get("status") == args.status]
-    return {"assignments": items}
+    # 未結案 = 還在跑 + 等驗收 + 被標阻塞。回合跑完不等於結案，所以 awaiting_review 也算。
+    if args.open:
+        items = [a for a in items if a.get("status") in OPEN_STATUSES]
+    if args.awaiting_review:
+        items = [a for a in items if a.get("status") == "awaiting_review"]
+    return {
+        "assignments": items,
+        "open": len([a for a in items if a.get("status") in OPEN_STATUSES]),
+        "awaiting_review": len([a for a in items if a.get("status") == "awaiting_review"]),
+    }
+
+
+def cmd_review(client: Client, cfg: dict, args) -> object:
+    """驗收／阻塞／續作／取消一筆交辦。
+
+    這是唯一能把交辦結案的路徑：daemon 只會把回合跑完的交辦放到 awaiting_review，
+    要不要算完成是判斷，而判斷要有人、有理由、有證據。
+    """
+    body: dict = {"decision": args.decision, "actor": args.actor, "source": args.source}
+    for key, val in (("reason", args.reason), ("evidence", args.evidence)):
+        if val:
+            body[key] = val
+    if args.decision == "followup":
+        if not args.followup_text and not args.followup_file:
+            raise AgmError("bad_args", "followup 要用 --followup-text 或 --followup-file 說明接下來做什麼", 2)
+        if not args.followup_request_id:
+            raise AgmError("bad_args", "followup 要一個穩定的 --followup-request-id（重試沿用同一個）", 2)
+        if args.followup_file:
+            try:
+                body["followup_text"] = Path(args.followup_file).expanduser().read_text(encoding="utf-8")
+            except OSError as e:
+                raise AgmError("bad_args", f"讀不到 --followup-file：{e.strerror}", 2)
+        else:
+            body["followup_text"] = args.followup_text
+        body["followup_request_id"] = args.followup_request_id
+        if args.followup_bot:
+            body["followup_bot_id"] = args.followup_bot
+    path = f"/api/supervisor/assignments/{urllib.parse.quote(args.assignment_id)}/review"
+    try:
+        return client.post(path, body)
+    except AgmError as e:
+        if e.kind == "timeout":
+            # 跟 assign 同一條規則：逾時是「送達未知」。決定本身是冪等的（同一個
+            # decision 重送會回同一筆），followup 也綁同一個 request id，所以先對帳再重試。
+            raise AgmError(
+                "delivery_unknown",
+                "驗收請求逾時，狀態未知。先用 `agm assignments --id <id>` 對帳；"
+                "同樣的 decision（followup 連同同一個 --followup-request-id）可以安全重送。",
+                7,
+                assignment_id=args.assignment_id,
+                decision=args.decision,
+            )
+        raise
+
+
+def cmd_incidents(client: Client, cfg: dict, args) -> object:
+    """系統層級的故障（host 掉線、bot 該開沒開、交辦卡住、通知送不出去）。
+
+    跟 `agm health` 的 manager_health 分開看：AGM 自己好好的，不代表系統沒事。
+    """
+    out = optional_get(client, "/api/supervisor/incidents", {"all": "1" if args.all else None})
+    if out is None:
+        raise AgmError("unsupported", "這台 daemon 還沒有 incident 介面（需要更新 agents-managerd）", 6)
+    return out
 
 
 def cmd_inbox(client: Client, cfg: dict, args) -> object:
@@ -575,11 +647,14 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm search '登入 遠端身份' --limit 20   找相關歷史（帶 message/turn ID）\n"
             "  agm messages <bot-id> --limit 50       讀某個 bot 的原始對話\n"
             "  agm assign --bot <id> --text '…' --request-id agm-2026-09-09-001\n"
-            "  agm assignments --status pending       對帳未結案交辦\n"
+            "  agm assignments --open                 對帳未結案交辦（含等驗收的）\n"
+            "  agm review <id> --decision accept --reason '…' --evidence '…'\n"
+            "  agm incidents                          看系統層級故障（host／bot／卡住的交辦）\n"
             "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
             "\n"
-            "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。"
+            "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。\n"
+            "注意：回合結束不等於工作完成。交辦會停在 awaiting_review，要 `agm review` 才會結案。"
         ),
     )
     p.add_argument("--runtime-dir", help="覆寫設定目錄（預設讀 AGM_RUNTIME_DIR，再退回腳本上層目錄）")
@@ -620,12 +695,50 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--text-file", help="從檔案讀交辦內容")
     s.add_argument("--request-id", required=True, help="穩定的 client_request_id；重試沿用同一個")
     s.add_argument("--source-turn-id", help="使用者原始訊息的 turn id")
+    s.add_argument(
+        "--owns",
+        action="append",
+        metavar="PATH",
+        help="這筆交辦負責的檔案／模組（可重複）。重疊時 daemon 會回報 ownership_conflicts",
+    )
     s.set_defaults(func=cmd_assign)
 
     s = sub.add_parser("assignments", help="列出交辦，或用 --id 查一筆")
     s.add_argument("--id", help="只查這一筆（吃 assignment id 或 client_request_id）")
     s.add_argument("--status", help="只列這個狀態")
+    s.add_argument("--open", action="store_true", help="只列未結案（含 awaiting_review、blocked）")
+    s.add_argument("--awaiting-review", action="store_true", dest="awaiting_review", help="只列等你驗收的")
     s.set_defaults(func=cmd_assignments)
+
+    s = sub.add_parser(
+        "review",
+        help="驗收／阻塞／續作／取消一筆交辦（唯一能結案的路徑）",
+        description="回合跑完只會進 awaiting_review。要結案就在這裡說清楚是誰、依據什麼決定的。",
+    )
+    s.add_argument("assignment_id")
+    s.add_argument(
+        "--decision",
+        required=True,
+        choices=["accept", "block", "followup", "fail", "cancel"],
+        help="accept=驗收結案／block=還在等，保持未結案／followup=派續作／fail=判定失敗／cancel=取消",
+    )
+    s.add_argument("--reason", help="為什麼這樣決定")
+    s.add_argument("--evidence", help="依據（turn id、commit、測試數字）")
+    s.add_argument("--actor", default="AGM", help="決定的人／bot（預設 AGM）")
+    s.add_argument("--source", default="cli", help="來源（預設 cli）")
+    s.add_argument("--followup-text", dest="followup_text", help="followup：續作要做什麼")
+    s.add_argument("--followup-file", dest="followup_file", help="followup：從檔案讀續作內容")
+    s.add_argument(
+        "--followup-request-id",
+        dest="followup_request_id",
+        help="followup：續作的穩定 client_request_id；重試沿用同一個",
+    )
+    s.add_argument("--followup-bot", dest="followup_bot", help="followup：改派給別的 bot（預設同一顆）")
+    s.set_defaults(func=cmd_review)
+
+    s = sub.add_parser("incidents", help="系統層級故障；預設只列未恢復的")
+    s.add_argument("--all", action="store_true", help="含已恢復的")
+    s.set_defaults(func=cmd_incidents)
 
     s = sub.add_parser("inbox", help="還沒 ack 的通知（最舊在前）；--all 才含已處理的")
     s.add_argument("--all", action="store_true", help="含 state=handled 的事件（最新在前）")

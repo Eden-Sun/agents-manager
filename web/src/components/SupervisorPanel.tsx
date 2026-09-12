@@ -9,8 +9,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { SUPERVISOR_CANDIDATES, fetchSupervisor, supervisorAction } from '../api/supervisor'
-import type { SupervisorAction, SupervisorAssignment, SupervisorInfo } from '../api/supervisor'
+import { SUPERVISOR_CANDIDATES, fetchIncidents, fetchSupervisor, supervisorAction } from '../api/supervisor'
+import type { SupervisorAction, SupervisorAssignment, SupervisorIncident, SupervisorInfo } from '../api/supervisor'
 import { useStore } from '../store/store'
 import './supervisor.css'
 
@@ -43,13 +43,36 @@ const REMOTE_LABEL: Record<string, string> = {
   unknown: '狀態不明',
 }
 
+/**
+ * 交辦的生命週期。`awaiting_review` 是這裡最重要的一格：回合跑完只到這裡，AGM 驗收過
+ * 才會變 `completed`。把它畫成「已完成」就是在替沒人看過的工作背書。
+ */
 const ASSIGN_LABEL: Record<string, string> = {
-  pending: '待送出',
+  queued: '待送出',
   delivered: '已送達',
-  running: '執行中',
-  done: '已完成',
+  unknown: '送達未知',
+  awaiting_review: '等驗收',
+  blocked: '阻塞中',
+  completed: '已驗收',
   failed: '失敗',
-  unknown: '狀態不明',
+  cancelled: '已取消',
+  superseded: '已接續',
+}
+
+const ASSIGN_TONE: Record<string, string> = {
+  completed: 'ok',
+  failed: 'bad',
+  awaiting_review: 'warn',
+  blocked: 'warn',
+  unknown: 'warn',
+}
+
+const INCIDENT_LABEL: Record<string, string> = {
+  host_disconnected: '主機斷線',
+  bot_stopped: 'bot 該開著卻停了',
+  assignment_stalled: '交辦卡住沒進度',
+  notify_exhausted: '通知送不出去',
+  remote_entry: '遠端入口異常',
 }
 
 function label(map: Record<string, string>, key: string): string {
@@ -61,15 +84,55 @@ function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName:
     <li className="agm-assign">
       <div className="agm-assign-head">
         <span className="agm-assign-to">{botName || item.target_bot_id || '（未知 bot）'}</span>
-        <span className={`agm-chip ${item.status === 'failed' ? 'bad' : item.status === 'done' ? 'ok' : ''}`}>
-          {label(ASSIGN_LABEL, item.status)}
-        </span>
+        <span className={`agm-chip ${ASSIGN_TONE[item.status] ?? ''}`}>{label(ASSIGN_LABEL, item.status)}</span>
+        {/* 舊資料是在有驗收狀態之前就關掉的：關掉了，但沒有人驗收過，不要讓它看起來像有。 */}
+        {item.legacy_closed ? <span className="agm-chip">舊資料·未經驗收</span> : null}
       </div>
       <p className="agm-assign-text">{item.text}</p>
       {/* turn_id 是這筆交辦唯一能拿去對帳的把手，短短一行也要留著。 */}
       {item.turn_id ? <p className="agm-assign-meta mono">turn {item.turn_id}</p> : null}
       {item.result ? <p className="agm-assign-meta">{item.result}</p> : null}
+      {item.awaiting_review ? (
+        <p className="agm-assign-meta">
+          回合已結束（{item.turn_status || '狀態不明'}）
+          {item.evidence_complete === false ? '，回覆是終端擷取的，可能不完整' : ''}
+          ，等 AGM 驗收才算完成。
+        </p>
+      ) : null}
+      {item.review.decision ? (
+        <p className="agm-assign-meta">
+          {item.review.by || 'AGM'} 判定 {item.review.decision}
+          {item.review.reason ? `：${item.review.reason}` : ''}
+        </p>
+      ) : null}
     </li>
+  )
+}
+
+function IncidentList({ items }: { items: SupervisorIncident[] }) {
+  return (
+    <section className="agm-sec">
+      <h4>
+        系統故障
+        <span className={`agm-chip ${items.length > 0 ? 'bad' : 'ok'}`}>{items.length} 筆未恢復</span>
+      </h4>
+      {items.length === 0 ? (
+        <p className="agm-note">目前沒有未恢復的故障。這一格看的是主機、bot 與交辦，不是 AGM 自己。</p>
+      ) : (
+        <ul className="agm-assign-list">
+          {items.map((i) => (
+            <li key={i.id} className="agm-assign">
+              <div className="agm-assign-head">
+                <span className="agm-assign-to">{label(INCIDENT_LABEL, i.kind)}</span>
+                <span className={`agm-chip ${i.severity === 'critical' ? 'bad' : 'warn'}`}>{i.severity}</span>
+              </div>
+              <p className="agm-assign-meta mono">{i.resource}</p>
+              <p className="agm-assign-meta">自 {i.first_seen_at} 起，已確認 {i.occurrences} 次</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 
@@ -79,6 +142,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   const [unsupported, setUnsupported] = useState(false)
   const [busy, setBusy] = useState<SupervisorAction | null>(null)
   const [error, setError] = useState('')
+  const [incidents, setIncidents] = useState<SupervisorIncident[]>([])
   const selectBot = useStore((s) => s.selectBot)
   const bots = useStore((s) => s.bots)
 
@@ -106,6 +170,12 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
     void read().then((r) => {
       if (alive) apply(r)
     })
+    // 故障清單獨立拉：它跟總管狀態是兩個問題，一邊掛了另一邊還要看得到。
+    void fetchIncidents()
+      .then((list) => {
+        if (alive) setIncidents(list)
+      })
+      .catch(() => {})
     return () => {
       alive = false
     }
@@ -151,6 +221,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   }
 
   const managerBot = bots.find((b) => b.id === live.bot_id)
+  const awaitingReview = live.assignments.filter((a) => a.awaiting_review).length
   const activeIndex = SUPERVISOR_CANDIDATES.findIndex((c) => c.model === live.model)
   const running = live.status === 'running' || live.status === 'busy' || live.status === 'starting'
 
@@ -240,10 +311,13 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
 
       {error ? <p className="agm-error">{error}</p> : null}
 
+      <IncidentList items={incidents} />
+
       <section className="agm-sec">
         <h4>
           交辦
           {live.pending_count > 0 ? <span className="agm-chip warn">{live.pending_count} 筆未結案</span> : null}
+          {awaitingReview > 0 ? <span className="agm-chip warn">{awaitingReview} 筆等驗收</span> : null}
         </h4>
         {live.assignments.length === 0 ? (
           <p className="agm-note">目前沒有交辦。AGM 只有在你明確說「交給它」時才會派工。</p>

@@ -18,9 +18,17 @@
   `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{status,url},pending_count,assignments:[]}`。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。
   `pending_count` = 未結案 assignment ＋ 未 ack 的 inbox 事件。
+- `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
+  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `notify_exhausted`（門檻見 SPEC §18.9）。
+  一個 resource 同時只會有一筆 `open`（partial unique index），重啟不會開出第二筆；恢復後再壞是新的一筆。
+  開啟與恢復各推一則 inbox 事件（`incident_opened` / `incident_resolved`）。
 - `GET /api/supervisor/health` → daemon 端的健康摘要，包含 `status`（`healthy`、`degraded`、`critical`）、AGM
-  狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（真正未結案的 assignment 數）與
-  `inbox_open`（尚未 ack 的 inbox 事件數；兩者分開，不再相加）。daemon 每 30 秒檢查一次，
+  狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（真正未結案的 assignment 數，
+  含 `awaiting_review` 與 `blocked`）、`awaiting_review`（其中等驗收的）與
+  `inbox_open`（尚未 ack 的 inbox 事件數；三者分開，不相加）。
+  `manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents}` 分開：
+  前者只回答「AGM 自己能不能工作」，後者是 incident 推出來的系統狀態。頂層 `status` 是**相容投影**＝兩者取較嚴重者，
+  所以只讀 `status` 的舊呼叫端不會在 host 掛掉時仍看到 `healthy`（SPEC §18.9）。daemon 每 30 秒檢查一次，
   只在摘要指紋變化時發 `supervisor_health` 事件；`health_changed` inbox 事件**只在** `status` 或總管狀態
   （`idle`／`busy` 視為同一個 `running`）真的改變時入列，bot 忙碌／數量等數字變動不算；總管 `stopped`／`starting`
   期間不入列，恢復後只補一則最新快照。不需要 AGM 使用 `/loop`。
@@ -50,9 +58,25 @@
      → 切回 `fable`，`quota_reset_at` 清空。
   讀不到額度就什麼都不做（未知不等於滿）。
 - `GET /api/supervisor/assignments` → `{assignments:[]}`；
-  `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?}` → 一筆 assignment
-  `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at}`。
-  `status`：`queued` | `delivered` | `unknown` | `completed` | `failed` | `cancelled`。
+  `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path]}` → 一筆 assignment
+  `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,
+  turn_status,evidence_complete,open,awaiting_review,review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts}`。
+  `status` 是**生命週期**，不是傳輸狀態：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review`（回合結束，等驗收）
+  → `completed` | `failed` | `cancelled` | `superseded`（AGM 決定過），另有 `blocked`（AGM 說還在等，仍算未結案）。
+  傳輸的原始事實留在 `delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing`）
+  與 `evidence_complete`。**回合結束不會自己變成 `completed`**——連送不出去的交辦也是進 `awaiting_review`，
+  daemon 不會替沒人看過的工作結案（SPEC §18.8）。
+  `legacy_closed=true` 是驗收狀態出現之前就被關掉的舊資料：關掉了，但沒有人驗收過，不要當成已驗收。
+  `ownership` 是這筆交辦負責的檔案／模組；建立時 daemon 會回 `ownership_conflicts`（前綴重疊的其他未結案交辦），
+  只回報、不阻擋，協調仍由 AGM 決定。
+- `GET /api/supervisor/assignments/{id}` → 單筆，多一個 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
+- `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}`
+  → 更新後的 assignment（含 `reviews`，`followup` 時另含 `followup`）。這是**唯一**能把交辦結案的路徑。
+  `decision`：`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`（仍未結案）、
+  `followup`→原本那筆變 `superseded`，並用 `followup_request_id` 另開一筆 `follow_up_of` 指回來的新交辦
+  （**不會**改寫已經送出去的 text）。
+  冪等：同樣的 decision 重送回同一筆（`idempotent:true`），不會寫第二筆稽核；`followup` 靠 `followup_request_id` 去重。
+  409：已結案的不能再決定（`already_closed`，要接續請開 follow-up）；還在跑的只接受 `cancel` / `block`（`still_executing`）。
   先落地再送 prompt；同 `client_request_id` 重試回同一筆（換了 bot 或換了 text 都回 409，不會靜靜當成已生效）。
   對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，由 controller 依 15/30/60/120/300 秒退避重試，
   一律沿用同一個 `client_request_id`，所以 worker 不會收到第二份。delivery `unknown` 只對帳、不重送。
@@ -60,11 +84,18 @@
 - `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；
   `PUT /api/supervisor/handoff {summary}` → `{summary,summary_version}`，同時寫一份 `handoff.md` 到總管 cwd（權威仍在資料庫）。
 - `GET /api/supervisor/inbox?all=0|1&limit=200` →
-  `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,created_at,updated_at}],open,all,limit}`。
+  `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},created_at,updated_at}],open,all,limit}`。
   預設只列 `state!='handled'`，`created_at` 升序（最舊在前，照順序 ack 才清得掉）；`all=1` 才含已處理的（最新在前）。
   `limit` 預設 200、上限 1000；`open` 是未 ack 的總數。
   `POST /api/supervisor/inbox/{id}/ack` → `{}`。`state`：`pending`（還沒告訴總管）→ `delivered`（已送出通知）→ `handled`（總管確認）。
   送出不等於處理完：通知失敗會留在 `pending`，總管自己的回合不會產生對自己的通知。
+  送達判斷看 `lifecycle` 回的 `delivery`：`failed` **不算**已送達（留 `pending` 並退避），`unknown` 記成 `unknown`
+  並綁 `notify.turn_id`，之後對帳原回合而不是重送第二份。delivered 但通知回合失敗／消失，或超過
+  `[supervisor] notify_ack_deadline_secs`（預設 1800 秒）還沒 ack，會被放回 `pending`；
+  重送次數上限 `[supervisor] notify_max_attempts`（預設 5）——用完就停止推送並開一筆 `notify_exhausted` incident，
+  事件本身仍留在 inbox（不吞事件，也不無限燒額度）。ack 是單向的：ack 之後遲到的 delivered 寫入不會把它打回未處理。
+  assignment 的狀態遷移與它的完成事件在**同一個 transaction**，daemon 在中間死掉不會留下「已結案但沒人被通知」；
+  啟動時另有一次補掃（舊 daemon 留下的那種）。
   `pending` → `delivered` 的推送本身節流成每 `[supervisor] notify_interval_secs`（預設 600 秒，見 SPEC §18.3）最多一次，
   一次把視窗內累積的事件併成一則通知；入庫不受影響（事件仍即時寫入、即時出現在這個端點）。
   `kind` 除了 assignment 相關與 `health_changed`，另有 `bot_restart_failed`（批次更新重啟後某顆沒回來，payload

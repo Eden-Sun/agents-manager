@@ -395,21 +395,111 @@ class AssignmentsCommandTest(CliCase):
         super().setUp()
         FakeDaemon.routes["GET /api/supervisor/assignments"] = (
             200,
-            {"assignments": [{"id": "a1", "status": "pending", "client_request_id": "req-1"}, {"id": "a2", "status": "done"}]},
+            {
+                "assignments": [
+                    {"id": "a1", "status": "queued", "client_request_id": "req-1"},
+                    {"id": "a2", "status": "completed"},
+                    {"id": "a3", "status": "awaiting_review", "turn_status": "completed"},
+                    {"id": "a4", "status": "blocked"},
+                ]
+            },
         )
 
     def test_filter_by_status(self):
-        out = self.ok("assignments", "--status", "pending")
+        out = self.ok("assignments", "--status", "queued")
         self.assertEqual([a["id"] for a in out["assignments"]], ["a1"])
 
-    def test_single_lookup_by_id_or_request_id(self):
-        self.assertEqual(self.ok("assignments", "--id", "a2")["id"], "a2")
+    def test_open_includes_awaiting_review_and_blocked(self):
+        """回合跑完不等於結案：等驗收與被標阻塞的都還算未結案。"""
+        out = self.ok("assignments", "--open")
+        self.assertEqual([a["id"] for a in out["assignments"]], ["a1", "a3", "a4"])
+        self.assertEqual(out["awaiting_review"], 1)
+        self.assertEqual([a["id"] for a in self.ok("assignments", "--awaiting-review")["assignments"]], ["a3"])
+
+    def test_single_lookup_prefers_the_detail_endpoint(self):
+        FakeDaemon.routes["GET /api/supervisor/assignments/a2"] = (
+            200,
+            {"id": "a2", "status": "completed", "reviews": [{"decision": "accept", "actor": "AGM"}]},
+        )
+        out = self.ok("assignments", "--id", "a2")
+        self.assertEqual(out["reviews"][0]["decision"], "accept")
+
+    def test_single_lookup_falls_back_to_the_list_on_404(self):
+        """舊 daemon 沒有 /assignments/{id}：退回清單過濾，不要把 404 當成「查無此筆」。"""
         self.assertEqual(self.ok("assignments", "--id", "req-1")["id"], "a1")
-        # 走清單過濾，不打 /assignments/{id}。
-        self.assertEqual([r["path"] for r in FakeDaemon.seen if r["path"].startswith("/api/supervisor/assignments/")], [])
 
     def test_missing_id_is_not_found(self):
         self.assertEqual(self.bad("assignments", "--id", "nope")["error"], "not_found")
+
+
+class ReviewCommandTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        FakeDaemon.routes["POST /api/supervisor/assignments/a1/review"] = (
+            200,
+            {"id": "a1", "status": "completed", "review": {"decision": "accept"}},
+        )
+
+    def _body(self):
+        return [r for r in FakeDaemon.seen if r["method"] == "POST"][0]["body"]
+
+    def test_accept_carries_actor_reason_and_evidence(self):
+        out = self.ok("review", "a1", "--decision", "accept", "--reason", "測試通過", "--evidence", "commit abc")
+        self.assertEqual(out["status"], "completed")
+        body = self._body()
+        self.assertEqual(body["decision"], "accept")
+        self.assertEqual(body["reason"], "測試通過")
+        self.assertEqual(body["evidence"], "commit abc")
+        self.assertEqual(body["actor"], "AGM")
+        self.assertEqual(body["source"], "cli")
+
+    def test_followup_needs_text_and_a_stable_request_id(self):
+        """續作是新的一筆交辦，不是改寫已經送出去的字，所以它要自己的冪等鍵。"""
+        self.assertEqual(self.bad("review", "a1", "--decision", "followup")["error"], "bad_args")
+        self.assertEqual(
+            self.bad("review", "a1", "--decision", "followup", "--followup-text", "把 A 做完")["error"],
+            "bad_args",
+        )
+        # 兩次都在送出任何請求之前就擋下來。
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
+        self.ok(
+            "review",
+            "a1",
+            "--decision",
+            "followup",
+            "--followup-text",
+            "把 A 做完",
+            "--followup-request-id",
+            "agm-follow-1",
+        )
+        body = self._body()
+        self.assertEqual(body["followup_text"], "把 A 做完")
+        self.assertEqual(body["followup_request_id"], "agm-follow-1")
+
+    def test_timeout_reports_delivery_unknown_without_retrying(self):
+        FakeDaemon.slow.add("/api/supervisor/assignments/a1/review")
+        code, _out, err = self.run_cli("--timeout", "0.2", "review", "a1", "--decision", "accept")
+        self.assertEqual(code, 7)
+        self.assertEqual(json.loads(err)["error"], "delivery_unknown")
+        self.assertEqual(len([r for r in FakeDaemon.seen if r["method"] == "POST"]), 1, "逾時不自動重試")
+
+    def test_unknown_decision_is_rejected_by_the_parser(self):
+        code, _out, _err = self.run_cli("review", "a1", "--decision", "looks-fine")
+        self.assertEqual(code, 2)
+
+
+class IncidentsCommandTest(CliCase):
+    def test_lists_open_incidents(self):
+        FakeDaemon.routes["GET /api/supervisor/incidents"] = (
+            200,
+            {"incidents": [{"kind": "host_disconnected", "resource": "mac2"}], "open": 1},
+        )
+        self.assertEqual(self.ok("incidents")["open"], 1)
+        self.ok("incidents", "--all")
+        self.assertIn("all=1", FakeDaemon.seen[-1]["path"])
+
+    def test_old_daemon_says_unsupported_rather_than_pretending(self):
+        self.assertEqual(self.bad("incidents")["error"], "unsupported")
 
 
 class MiscCommandTest(CliCase):

@@ -32,6 +32,17 @@ export interface SupervisorInfo {
   assignments: SupervisorAssignment[]
 }
 
+/** 系統層級的故障。跟「AGM 起沒起來」是兩件事，所以分開拿、分開畫。 */
+export interface SupervisorIncident {
+  id: string
+  kind: string
+  resource: string
+  severity: string
+  status: string
+  first_seen_at: string
+  occurrences: number
+}
+
 export interface SupervisorAssignment {
   id: string
   target_bot_id: string
@@ -40,6 +51,16 @@ export interface SupervisorAssignment {
   text: string
   created_at: string
   result?: string | null
+  /** 回合自己的結局（completed / completed_fallback / failed / dispatch_failed）。 */
+  turn_status?: string | null
+  /** false = 回覆是從終端擷取的，可能被截斷；驗收時要自己再查證據。 */
+  evidence_complete?: boolean | null
+  /** 還沒結案：還在跑、等驗收，或被標成阻塞。 */
+  open: boolean
+  awaiting_review: boolean
+  /** 驗收前就被舊語意關掉的舊資料——關掉了，但沒有人驗收過。 */
+  legacy_closed: boolean
+  review: { decision: string | null; by: string | null; reason: string | null }
 }
 
 export type SupervisorAction = 'setup' | 'start' | 'stop' | 'fallback'
@@ -58,18 +79,49 @@ function n(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
+/** 還沒結案的狀態。回合跑完只到 `awaiting_review`，那不是結案。 */
+const OPEN_STATUSES = ['queued', 'delivered', 'unknown', 'awaiting_review', 'blocked']
+
 export function toAssignment(v: unknown): SupervisorAssignment | null {
+  if (!isRec(v)) return null
+  const id = s(v.id)
+  if (!id) return null
+  const status = s(v.status, 'unknown')
+  const review = isRec(v.review) ? v.review : {}
+  return {
+    id,
+    target_bot_id: s(v.target_bot_id),
+    turn_id: s(v.turn_id),
+    status,
+    text: s(v.text),
+    created_at: s(v.created_at),
+    result: typeof v.result === 'string' ? v.result : null,
+    turn_status: typeof v.turn_status === 'string' ? v.turn_status : null,
+    evidence_complete: typeof v.evidence_complete === 'boolean' ? v.evidence_complete : null,
+    // daemon 有給就用它的；舊 daemon 沒給就照狀態自己判，不要預設成「已結案」。
+    open: typeof v.open === 'boolean' ? v.open : OPEN_STATUSES.includes(status),
+    awaiting_review: v.awaiting_review === true || status === 'awaiting_review',
+    legacy_closed: v.legacy_closed === true,
+    review: {
+      decision: typeof review.decision === 'string' ? review.decision : null,
+      by: typeof review.by === 'string' ? review.by : null,
+      reason: typeof review.reason === 'string' ? review.reason : null,
+    },
+  }
+}
+
+export function toIncident(v: unknown): SupervisorIncident | null {
   if (!isRec(v)) return null
   const id = s(v.id)
   if (!id) return null
   return {
     id,
-    target_bot_id: s(v.target_bot_id),
-    turn_id: s(v.turn_id),
-    status: s(v.status, 'unknown'),
-    text: s(v.text),
-    created_at: s(v.created_at),
-    result: typeof v.result === 'string' ? v.result : null,
+    kind: s(v.kind, 'unknown'),
+    resource: s(v.resource),
+    severity: s(v.severity, 'degraded'),
+    status: s(v.status, 'open'),
+    first_seen_at: s(v.first_seen_at),
+    occurrences: n(v.occurrences),
   }
 }
 
@@ -131,9 +183,31 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
         text: '重現並修正手機登入流程卡在驗證遠端身份的問題',
         created_at: new Date().toISOString(),
         result: null,
+        turn_status: null,
+        evidence_complete: null,
+        open: true,
+        awaiting_review: false,
+        legacy_closed: false,
+        review: { decision: null, by: null, reason: null },
+      },
+      // 回合跑完、等驗收的那一筆：mock 也要看得到這個狀態，不然它永遠沒被畫過。
+      {
+        id: 'asg-2',
+        target_bot_id: 'bot-2',
+        turn_id: 'turn-2',
+        status: 'awaiting_review',
+        text: '把 daemon 重建成 release 並回報結果',
+        created_at: new Date().toISOString(),
+        result: '還在等編譯，好了再回報',
+        turn_status: 'completed',
+        evidence_complete: true,
+        open: true,
+        awaiting_review: true,
+        legacy_closed: false,
+        review: { decision: null, by: null, reason: null },
       },
     ]
-    mockState.pending_count = 1
+    mockState.pending_count = 2
   } else if (action === 'stop') {
     mockState.status = 'stopped'
     mockState.remote = { status: 'unverified', url: '' }
@@ -161,6 +235,19 @@ export async function fetchSupervisor(): Promise<SupervisorInfo | null> {
 export async function supervisorAction(action: SupervisorAction): Promise<SupervisorInfo> {
   if (rawTransport.mock) return mockAct(action)
   return toInfo(await rawTransport.request('POST', `/supervisor/${action}`, {}))
+}
+
+/** 未恢復的系統故障。舊 daemon（404）回空陣列，不是錯誤。 */
+export async function fetchIncidents(): Promise<SupervisorIncident[]> {
+  if (rawTransport.mock) return []
+  try {
+    const raw = await rawTransport.request('GET', '/supervisor/incidents')
+    const list = isRec(raw) ? (raw.incidents as unknown[]) : []
+    return (list ?? []).map(toIncident).filter((i): i is SupervisorIncident => i !== null)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return []
+    throw e
+  }
 }
 
 /** 交辦清單。單獨拉一次是為了在不重整整個狀態的情況下刷新結果。 */
