@@ -1373,6 +1373,21 @@ request id 綁時間（`agm-browser-gc-<YYYYmmdd-HHMM>`）。清理規則：
 - ego lite：`listTaskSpaces()`，`ownership=agent` 且沒有進行中的 assignment／最近 2 小時無活動才
   `completeTaskSpace(id, {keep:false})`；**`ownership=user` 或 `agentDelegatedToUser` 一律不動**。
 - Chrome：只動 Claude in Chrome 的 MCP tab group，其餘使用者分頁不碰。
+- **bot 的 headless Chrome（CDP 截圖用）**：`--headless=new --remote-debugging-port=93xx
+  --user-data-dir=/tmp/am-cdp-*｜/tmp/am-codex-*-profile｜/tmp/am-ui-rc` 這一類。使用者自己的 Chrome 沒有
+  `--headless`，永遠不在清單裡。判定（前兩項 `kick.sh` 用 shell 直接做，不花 LLM）：
+  - **孤兒（`ppid=1`）+ debug port 上沒有 ESTABLISHED 連線 + 活超過 2 分鐘** → TERM，等 3 秒再 KILL，
+    `/tmp/am-*` 的 profile 目錄一併 `rm -rf`。三個條件缺一不可：bot 用 `nohup` 起的實例在 bot 還活著時
+    `ppid` 也是 1，只看孤兒會殺掉正在截圖的實例；正在用的實例一定有一條 CDP 連線。
+  - **沒有 Chrome 在用、一小時內沒被動過的 profile 目錄** → 刪。一個目錄 100～230 MB，放著就是好幾 GB
+    （2026-09-12 清出 ~1.5 GB，另有 ~1.2 GB 因為剛被動過留到下一輪）。
+  - **父程序活著、但那顆 bot 已經 `idle`／run 結束，且 Chrome 活超過 30 分鐘** → 做完截圖沒關，收掉並記是誰。
+  - **父程序活著且 bot 是 `working`／`blocked`** → 保留，列出 bot 與 profile 路徑。
+  回報固定一行：`headless Chrome：收掉 N（profile）／保留 M（bot）`。
+- **所有 bot 的義務**：用 CDP／headless Chrome 截圖，**用完自己關**（`Browser.close`，或 kill 自己 spawn 的
+  pid），profile 目錄用完即刪。browser-gc 是安全網，不是代收垃圾的——2026-09-12 就累積到 10 顆實例、
+  最久的從 9/9 活到 9/12，加上沒刪的 profile 共約 5 GB。
+  `ps` 的 etime 在 macOS 沒有 `etimes` 可用，要自己把 `[[D-]HH:]MM:SS` 換算成秒。
 - CLI 超過 30 秒無回應：改用 `ps` 列出 renderer 的 pid／記憶體／存活時間回報，**不要直接 kill ego lite 主程序**；
   只有確認 CLI 無回應時，才走「quit → `pkill -f '/Applications/ego lite'` → 對殘留的
   `--startup-ego-browser-service` `kill -9` → `open -a`」這條會關掉所有視窗的路。
