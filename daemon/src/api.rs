@@ -1332,6 +1332,17 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
+    // SPEC-team §5.3: a team member never entered config.toml, so the path below could not
+    // retire it — it answered 200 having only stopped the agent and deleted its hook material,
+    // and the row stayed live for the scheduler to report `member_lost` (review 2026-09-12 #3).
+    // Members leave through the team (retire / swap / delete the team), not through here.
+    if bot.managed_by == "team" {
+        return Err(LcError::conflict(
+            "team_managed",
+            json!({"bot_id": id, "team_id": bot.team_id, "team_role": bot.team_role,
+                   "message": "這顆是 team 的成員，由 team 管：要拿掉請退役 worker、換成員或刪掉整個 team。"}),
+        ));
+    }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
     // 2026-09-08: the children it spawned go with it. They only exist as panes their parent
     // opened and rows the daemon adopted; left behind they would sit in the sidebar as
@@ -2599,6 +2610,52 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::Bad(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod delete_bot_tests {
+    use super::*;
+
+    async fn a_bot(e: &crate::team::testing::Env, name: &str, managed_by: &str) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?,?)",
+        )
+        .bind(&id)
+        .bind(&e.project_id)
+        .bind(name)
+        .bind(managed_by)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// `DELETE` on a team member is refused outright (review 2026-09-12 #3). It used to answer
+    /// 200 after stopping the agent and purging `bots/<id>/`, with the row still live: the
+    /// sidebar kept the bot and the scheduler saw `member_lost`.
+    #[tokio::test]
+    async fn a_team_member_is_refused_and_left_untouched() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "dev-1", "team").await;
+        let run = crate::team::testing::fake_run(&app, &id).await;
+        let dir = app.bot_dir(&id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = delete_bot(State(app.clone()), Path(id.clone())).await.err().expect("refused");
+        match err {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "team_managed"),
+            other => panic!("expected 409, got {other:?}"),
+        }
+        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_none(), "still live");
+        assert_eq!(db::active_run(&app.db, &id).await.unwrap().map(|r| r.id), Some(run), "not stopped");
+        assert!(dir.exists(), "hook material kept");
+        assert!(!e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
     }
 }
 

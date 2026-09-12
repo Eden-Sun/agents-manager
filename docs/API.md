@@ -1166,6 +1166,9 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 > 目錄不動（不是這個 daemon 能判斷的）。
 
 - 找不到 bot → `404`。
+- **team 成員（`managed_by = "team"`）→ `409 {"error":"conflict","reason":"team_managed","bot_id":…,"team_id":…,"team_role":…,"message":…}`**
+  （2026-09-12）。成員從不進 config.toml，這條路刪不掉它——以前回 200 但只停了 agent、砍了 hook 目錄，
+  bot 列還活著、team 排程接著報 `member_lost`。要拿掉成員走 team 的路：退役 worker、`swap_member`、或刪整個 team。
 - **它開的子 agent 一起刪**（2026-09-08）：`managed_by = "child"`、`parent_bot_id` 指到它的 bot（含孫代）
   先各自停掉、軟刪、清目錄，最深的先；回應 `{"removed_children":["<bot_id>", …]}`。使用者在
   config.toml 建的 bot 不會是誰的 child，不受影響。

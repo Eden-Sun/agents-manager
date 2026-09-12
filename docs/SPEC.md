@@ -371,6 +371,8 @@ one-bot-one-tab 以前建立、沒有 `tab_id` 的 Run 只關 pane，不會因�
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → Run `stopped`（`ended_at`）→ 關閉狀態訂閱。
 - DELETE Bot：先 stop → TOML 移除 → DB `deleted_at`，保留 Conversation 與訊息 → 刪除該 bot 的 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，失敗只 log）（v3.3）。
+  `managed_by = 'team'` 的成員不走這條：回 409 `team_managed`，由 team（退役／換成員／刪 team）處理（2026-09-12 review #3）；
+  `child` 不進 TOML，直接停 pane 並 `deleted_at`。
 - 重啟 Bot（v3.3）：`POST /bots/:id/restart` = 有 Run 就先 stop 再 start，用來套用改過的 `model` / `args` / `identity` / `env`。
 - DELETE Project：需所有 Bot 已停止 → TOML 移除 → 不關 workspace（第二階段）、不刪目錄。
 
