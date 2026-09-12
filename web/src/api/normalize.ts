@@ -423,7 +423,9 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
     run_id: optStr(v.run_id),
     bot_id: optStr(v.bot_id) ?? botId ?? null,
     origin: oneOf<TurnOrigin>(v.origin, ORIGINS, 'web'),
-    status: oneOf<TurnStatus>(v.status, TURN_STATUSES, 'in_flight'),
+    // 認不得的 status 當終態（`failed`），不是進行中：daemon 之後新增終態（例如 `cancelled`）時，
+    // 退回 in_flight 會把輸入框鎖進排隊模式、liveReplyOf 也把它當還在回。
+    status: oneOf<TurnStatus>(v.status, TURN_STATUSES, 'failed'),
     delivery: oneOf<TurnDelivery>(v.delivery, DELIVERIES, 'pending'),
     client_request_id: optStr(v.client_request_id),
     created_at: str(v.created_at),
