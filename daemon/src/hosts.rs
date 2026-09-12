@@ -49,6 +49,18 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// `export PATH=<remote_path>:"$PATH"` for a configured `remote_path`, quoted so a value with a
+/// space (or worse) is one PATH entry and not a shell command: unquoted, `/Users/me/my tools/bin`
+/// made every remote script start with `export: not a valid identifier` and lose PATH entirely.
+pub fn remote_path_prefix(remote_path: &str) -> String {
+    let p = remote_path.trim();
+    if p.is_empty() {
+        String::new()
+    } else {
+        format!("export PATH={}:\"$PATH\"\n", sh_quote(p))
+    }
+}
+
 // ---------------------------------------------------------------- HostConn
 
 pub struct HostConn {
@@ -227,22 +239,20 @@ impl HostConn {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
+    /// The `export PATH=…` line SPEC §11.2 `remote_path` prepends to every remote script,
+    /// or empty when the host has none.
+    fn path_prefix(&self) -> String {
+        remote_path_prefix(self.cfg.as_ref().map(|c| c.remote_path.as_str()).unwrap_or_default())
+    }
+
     /// `ssh_exec_stdin` with SPEC §11.2 `remote_path` prepended.
     pub async fn ssh_exec_path_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
-        let prefix = match self.cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default() {
-            p if p.trim().is_empty() => String::new(),
-            p => format!("export PATH={}:$PATH\n", p),
-        };
-        self.ssh_exec_stdin(&format!("{prefix}{script}"), data, timeout).await
+        self.ssh_exec_stdin(&format!("{}{script}", self.path_prefix()), data, timeout).await
     }
 
     /// Same, but with the remote PATH fixed up first (SPEC §11.2 `remote_path`).
     pub async fn ssh_exec_path(&self, script: &str) -> Result<String> {
-        let prefix = match self.cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default() {
-            p if p.trim().is_empty() => String::new(),
-            p => format!("export PATH={}:$PATH\n", p),
-        };
-        self.ssh_exec(&format!("{prefix}{script}")).await
+        self.ssh_exec(&format!("{}{script}", self.path_prefix())).await
     }
 
     pub async fn home(&self) -> Result<String> {
@@ -273,7 +283,12 @@ impl HostConn {
         let cfg = self.cfg.as_ref().unwrap();
         let sess = &cfg.herdr_session;
         let q = sh_quote(sess);
-        let path_prefix = if cfg.remote_path.trim().is_empty() { String::new() } else { format!("{}:", cfg.remote_path.trim()) };
+        // The plist is XML: `&`, `<`, `>` in a path would break the whole file, not just PATH.
+        let path_prefix = if cfg.remote_path.trim().is_empty() {
+            String::new()
+        } else {
+            format!("{}:", cfg.remote_path.trim().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"))
+        };
         let script = format!(
             r#"printf 'AM_HOME=%s\n' "$HOME"
 S={q}
@@ -786,6 +801,16 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_path_is_one_quoted_path_entry() {
+        assert_eq!(remote_path_prefix(""), "");
+        assert_eq!(remote_path_prefix("  "), "");
+        assert_eq!(remote_path_prefix("/opt/x/bin"), "export PATH='/opt/x/bin':\"$PATH\"\n");
+        // A space no longer splits the export; a `;` or `$(…)` is data, not a command.
+        let p = remote_path_prefix("/Users/me/my tools/bin;$(touch /tmp/pwned)");
+        assert_eq!(p, "export PATH='/Users/me/my tools/bin;$(touch /tmp/pwned)':\"$PATH\"\n");
+    }
 
     fn cfg() -> HostCfg {
         HostCfg {
