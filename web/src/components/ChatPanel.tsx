@@ -8,9 +8,10 @@ import { effortLabel, quotaKey } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { useScrollTail } from '../hooks/useScrollTail'
+import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
-import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { BlockedModal } from './BlockedModal'
 import { BlockedPanel } from './BlockedPanel'
@@ -23,11 +24,12 @@ import { HostBadge } from './HostsPanel'
 import { UpdateBadge } from './UpdateBadge'
 import { TurnErrorBadge } from './TurnErrorBadge'
 import { HostShellPanel } from './HostShellPanel'
-import { GearIcon } from './Icons'
+import { GearIcon, GitIcon } from './Icons'
 import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
 import { GitBar } from './GitBar'
-import { KindTag } from './KindTag'
+import { KindIcon, KindTag } from './KindTag'
+import { Modal } from './Modal'
 import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
@@ -37,7 +39,6 @@ import { PrimaryStar } from './PrimaryStar'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
-import { onTabListKeyDown } from './tabKeys'
 import { ToolsHint } from './Tools'
 
 // `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
@@ -116,15 +117,21 @@ export const Bubble = memo(function Bubble({
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
   const rail = system || msg.source === 'hook' || msg.source === 'system'
+  const daemonNotice = msg.role === 'user' && msg.content.trimStart().startsWith('[AG Man 通知]')
+  const notify = useStore((s) => s.notify)
+  const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
+    notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
+  })
 
   return (
     /* `data-msg-id`：唯一能從清單外面（浮窗、之後的搜尋）指回某一則訊息的把手。 */
-    <article className={`msg ${msg.role}${rail ? ' rail' : ''}${flash ? ' flash' : ''}`} data-msg-id={msg.id}>
+    <article className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}`} data-msg-id={msg.id}>
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
           {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} /> : null}
+          {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
           {/* 來源只在「不是正常那條路」時才標。`hook` 是每一則回覆的常態，在每顆氣泡上
               印一次「回覆」等於沒說話；會影響你要不要信這段文字的是另外那幾種——終端
               擷取、對話紀錄、系統通知。 */}
@@ -145,7 +152,11 @@ export const Bubble = memo(function Bubble({
           </time>
         )}
       </div>
-      <div className={`bubble${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}`}>
+      <div
+        className={`bubble bubble-copyable${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}`}
+        title="點一下複製全文；長按可選取文字"
+        {...tapCopy}
+      >
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
@@ -331,7 +342,8 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
 }
 
 /**
- * 「這回合的提問」浮窗：回合跑起來之後，把使用者最後送出的那則問題釘在對話區最下方。
+ * 「這回合的提問」浮窗：桌面在回合跑起來之後把問題釘在對話區最下方；手機只在回合
+ * 已經完成後保留，避免執行中的提示蓋住輸出與輸入區。
  *
  * 為什麼要有它：回合一長，agent 的輸出會把提問推到捲軸上面幾千 px 之外，而「它到底在做
  * 我交代的哪件事」正是這段等待裡唯一想確認的事。這時候要嘛往回捲（就失去了輸出的尾巴），
@@ -562,7 +574,14 @@ function MessageList({ botId }: { botId: string }) {
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const inFlight = useStore((s) => composerState(s, botId).inFlightTurnId !== null)
-  const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
+  const inFlightTurnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
+  const latestCompletedTurnId = useStore((s) => {
+    const turns = Object.values(s.turns[botId] ?? {})
+      .filter((turn) => turn.status === 'completed' || turn.status === 'completed_fallback')
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    return turns.at(-1)?.id ?? null
+  })
+  const phone = useMediaQuery(PHONE_QUERY)
   const [flashId, setFlashId] = useState<string | null>(null)
   // 擷取來的即時文字先過濾掉 CLI 自己的狀態列 / 提示行（`cleanLiveText`），濾光了就回 null，
   // 讓氣泡退回顯示活動摘要。
@@ -579,6 +598,14 @@ function MessageList({ botId }: { botId: string }) {
   }, [flashId])
 
   const list = messages ?? []
+  // 手機的提示只在已完成且確實有回覆的回合顯示；doing / in-flight 時讓輸出區保持乾淨。
+  // 桌面維持原本的「執行中固定住問題」行為。
+  const completedAnswered = latestCompletedTurnId !== null && list.some(
+    (m) => m.role === 'assistant' && m.turn_id === latestCompletedTurnId,
+  )
+  const turnId = phone
+    ? (!working && !inFlight && completedAnswered ? latestCompletedTurnId : null)
+    : inFlightTurnId
   const lastAsk = turnId ? lastAskOf(list, turnId) : null
   const askVisible = useMsgVisible(tail.ref, lastAsk?.id ?? null, list.length)
 
@@ -688,7 +715,7 @@ function Composer({
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(200, el.scrollHeight)}px`
-  }, [text, ref])
+  }, [text, ref, phone])
 
   const submit = () => {
     const body = text.trim()
@@ -774,7 +801,7 @@ function Composer({
   }
 
   return (
-    <div className="composer">
+    <div className="composer bot-composer">
       {queued ? (
         <div className="composer-queued" role="status">
           <span className="composer-queued-label">已排隊，這回合結束後送出：</span>
@@ -799,7 +826,7 @@ function Composer({
         <div className={`composer-lock${state.disabled ? '' : ' running'}`} role="status">
           {/* 拿掉 ⛔：emoji 吃不到 `color`（OS 自己上色），跟琥珀色的框對不上，
               每個平台長得也不一樣。框與文字本身已經是訊號。 */}
-          <span>{state.reason}</span>
+          <span title={state.reason}>{phone && !state.disabled && state.inFlightTurnId ? '執行中 · 送出排隊' : state.reason}</span>
           {state.unknownTurnId ? (
             <button type="button" className="mini-btn" onClick={() => void abandonTurn(botId, state.unknownTurnId!)}>
               放棄該回合
@@ -856,6 +883,7 @@ function Composer({
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
         <textarea
           ref={ref}
+          rows={phone ? 1 : 2}
           value={text}
           /* 連線斷了也讓人繼續打（草稿本來就會存），只是送不出去。 */
           disabled={sending}
@@ -865,7 +893,7 @@ function Composer({
             state.disabled
               ? `${state.reason || '目前無法送出訊息'}${phone ? '' : '——可以先打，恢復後再送'}`
               : state.queued
-                ? `這回合還在跑，先打下一則…${phone ? '' : '（送出會排隊）'}`
+                ? (phone ? '下一則訊息…' : '這回合還在跑，先打下一則…（送出會排隊）')
                 : `輸入訊息…${phone ? '' : '（圖片可直接拖放或貼上）'}`
           }
           title="Enter 送出，Shift+Enter 換行；圖片可拖放或貼上"
@@ -903,7 +931,7 @@ function Composer({
           onMouseDown={(e) => e.preventDefault()}
           onClick={submit}
         >
-          {sending ? '送出中…' : files.uploading ? '上傳中…' : state.queued ? '排隊送出' : '送出'}
+          {sending ? '送出中…' : files.uploading ? '上傳中…' : state.queued ? (phone ? '排隊' : '排隊送出') : '送出'}
         </button>
       </div>
     </div>
@@ -943,16 +971,17 @@ function SlItem({ k, children, title, className }: { k: string; children: ReactN
  * so this renders the *original* statusLine fields instead (`run.status`): the whole email,
  * the real model name, and the context window, which the compressed line has no space for.
  * `status_line` (the pane's exact text) stays as the tooltip, and as the fallback for a bot
- * whose payload has not arrived yet. Bots without a statusLine (codex / grok) show nothing.
+ * whose payload has not arrived yet. Codex and Grok use the same row with their detected CLI
+ * version plus the model, working directory, and quota data available to the daemon.
  */
 /**
  * A status bar for the kinds that have no statusLine *hook*.
  *
  * codex renders its own status line inside the TUI (`[tui] status_line` in
  * `~/.codex/config.toml` — model, cwd, 5h, weekly), and grok likewise; neither can hand it
- * to us the way claude's statusLine command does, and reading it back off the pane would
- * only get the terminal-width-truncated version (`~/…`). Every field it shows is already
- * in the store, so build it from there instead — same shape as claude's, no truncation.
+ * to us the way claude's statusLine command does. Build the stable fields from the store
+ * instead, including the host's detected CLI version, so the browser gets the same version
+ * indicator without depending on terminal width.
  */
 function derivedStatus(
   kind: BotKind,
@@ -961,8 +990,9 @@ function derivedStatus(
   fast: boolean,
   cwd: string | null,
   quota: KindQuota | null,
+  version: string | null,
 ): StatusInfo | null {
-  if (!model && !quota && !cwd) return null
+  if (!model && !quota && !cwd && !version) return null
   const win = (w: QuotaWindow | null | undefined) => ({
     pct: typeof w?.used_pct === 'number' ? w.used_pct : null,
     // The quota API gives an ISO string; the bar wants epoch seconds.
@@ -987,7 +1017,7 @@ function derivedStatus(
     seven_day_resets_at: seven.at,
     cost_usd: null,
     cwd,
-    version: null,
+    version,
     session_name: null,
   }
 }
@@ -1011,64 +1041,27 @@ function modelExtraOf(status: StatusInfo | null): string {
  * `<StatusLineBar>` is a truthy element even on the render where it returns null, so the row
  * would keep a hairline border for a bot that has no status line at all.
  */
-function ContextBar({ issues, status, hasStatus, summary }: { issues: ReactNode; status: ReactNode; hasStatus: boolean; summary: string }) {
+function ContextBar({ issues, status, hasStatus, mobileOpen, onClose }: {
+  issues: ReactNode
+  status: ReactNode
+  hasStatus: boolean
+  mobileOpen: boolean
+  onClose: () => void
+}) {
   const phone = useMediaQuery(PHONE_QUERY)
-  // 手機預設收起（2026-09-09 使用者：手機不用那麼多 git 資訊）：只留一列摘要 + 展開鍵。
-  // 記在 localStorage，展開過的人下次還是展開的。
-  const [open, setOpen] = useState(() => {
-    try {
-      return localStorage.getItem('am:ctxbar-open') === '1'
-    } catch {
-      return false
-    }
-  })
   if (!issues && !hasStatus) return null
-  if (phone && !open) {
-    return (
-      <div className="context-bar collapsed">
-        <button
-          type="button"
-          className="ctx-toggle"
-          title="展開 repo / git / context"
-          onClick={() => {
-            setOpen(true)
-            try {
-              localStorage.setItem('am:ctxbar-open', '1')
-            } catch {
-              /* 私密模式沒有 localStorage，記不住就算了 */
-            }
-          }}
-        >
-          <span className="ctx-chev" aria-hidden="true">▸</span>
-          <span className="ctx-summary">{summary}</span>
-        </button>
-      </div>
-    )
-  }
-  return (
+  if (phone && !mobileOpen) return null
+  const content = (
     <div className="context-bar">
-      {phone ? (
-        <button
-          type="button"
-          className="ctx-toggle ctx-toggle-open"
-          title="收起"
-          aria-label="收起 repo / git / context"
-          onClick={() => {
-            setOpen(false)
-            try {
-              localStorage.setItem('am:ctxbar-open', '0')
-            } catch {
-              /* 同上 */
-            }
-          }}
-        >
-          <span className="ctx-chev" aria-hidden="true">▾</span>
-        </button>
-      ) : null}
       {issues}
       {hasStatus ? status : null}
     </div>
   )
+  return phone ? (
+    <Modal open title="Git / 專案資訊" onClose={onClose}>
+      {content}
+    </Modal>
+  ) : content
 }
 
 function StatusLineBar({ botId, status, text }: { botId: string; status: StatusInfo | null; text: string | null }) {
@@ -1125,7 +1118,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
-  const project = useStore((s) => (bot ? (s.projects.find((p) => p.id === bot.project_id) ?? null) : null))
   // 這顆 bot 自己的未讀。看著它就會被清掉（`selectBot` / 回到前景），所以平常是 0——
   // 會亮的是「人不在畫面前，回覆已經進來」的那一段，回來的第一眼就知道剛剛跑完了。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
@@ -1148,6 +1140,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   // debug 用的 run 識別列（pane / agent / run id）預設收合，不佔常態版面。
   const [runDebugOpen, setRunDebugOpen] = useState(false)
+  const [gitInfoBotId, setGitInfoBotId] = useState<string | null>(null)
   // claude hands us its statusLine payload; the other kinds render their status line inside
   // their own TUI, so it is rebuilt from what the store already knows.
   const statusInfo = useStore(
@@ -1161,6 +1154,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const host = projectHostName(s, b.project_id)
       const key = quotaKey(host, b.identity ? `${b.kind}:${b.identity}` : b.kind)
       const q = s.quota[key] ?? s.quota[quotaKey(host, b.kind)] ?? null
+      const tool = toolsOfHost(s, host)[b.kind]
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
       // SPEC §4.4a：這條狀態列講的是「現在在跑什麼」，所以模型／強度／fast 一律用 run 真正
       // 啟動時的值（`run.runtime_*`），不是 `bots` 那份「下次啟動才會用的設定」——codex 的
@@ -1173,6 +1167,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         live ? (r!.runtime_fast ?? b.fast) : b.fast,
         path,
         q,
+        tool?.version ?? null,
       )
     }),
   )
@@ -1249,9 +1244,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const settingsOpen = settingsBotId === botId
   /** 主機 shell 當第三個分頁：標題列不變，只有下面的內容換成終端（2026-09-08）。 */
   const shellOpen = shellView !== null && !settingsOpen
-  // 下面那塊畫面現在屬於哪個分頁（設定開著時畫在對話那塊上，就算對話）。
-  const panelId = `bot-tabpanel-${botId}`
-  const panelTab = shellOpen && shellView ? 'shell' : tab === 'terminal' && !settingsOpen ? 'terminal' : 'chat'
   const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
 
   return (
@@ -1269,9 +1261,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="main-title">
           <div className="main-title-row">
             <StatusLamp lamp={lamp} />
-            {/* kind logo 與 pane id 都排在下面那一行（2026-09-11 使用者）：kind 講的是「哪個
-                CLI、哪個模型」，跟 model 是同一件事；pane id 是 debug 用的識別碼。兩個掛在
-                第一排只是佔掉名字的寬度。燈號留在這裡——那是狀態不是 kind。 */}
+            {/* kind logo 排在下面那行的 model 左邊（2026-09-11 使用者）：kind 講的是「哪個 CLI、
+                哪個模型」，跟 model 是同一件事，掛在名字前面只是佔掉名字的寬度。燈號留在這裡
+                ——那是狀態不是 kind。 */}
             {/* 手機：點名字是換 bot（BotSwitcher），改名走設定；桌面：點名字直接改。 */}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
             {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
@@ -1306,7 +1298,18 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               so the identity row above doesn't have to yield space to it. */}
           {/* 名字下面那一行：模型標籤與 ★ 釘選。標題列那條線已經被額度條佔滿（2026-09-10
               實測釘選放右上角會被擠掉一半），這一行本來只有一顆模型標籤，空著。 */}
-          <div className="main-title-sub">
+          {phone ? (
+            <div className="mobile-bot-version" title={`${bot.kind} · ${statusInfo?.version ?? '版本未回報'}`}>
+              <span className={`mobile-kind-icon ${bot.kind}`} role="img" aria-label={bot.kind}><KindIcon kind={bot.kind} /></span>
+              {bot.model || statusInfo?.model_name ? (
+                <span className="mobile-bot-model">
+                  {bot.model ?? statusInfo?.model_name}
+                  {statusInfo?.effort ? ` · ${effortLabel(statusInfo.effort)}` : ''}
+                </span>
+              ) : null}
+              <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
+            </div>
+          ) : <div className="main-title-sub">
             <KindTag kind={bot.kind} />
             {bot.model || statusInfo?.model_name ? (
               <ModelQuickPicker
@@ -1344,21 +1347,34 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 </span>
               </button>
             ) : null}
-          </div>
+          </div>}
         </div>
+        {phone ? (
+          <>
+            <button
+              type="button"
+              className="icon-btn mobile-git-info"
+              aria-label="Git / 專案資訊"
+              aria-haspopup="dialog"
+              aria-expanded={gitInfoBotId === botId}
+              onClick={() => setGitInfoBotId(botId)}
+            >
+              <GitIcon />
+            </button>
+            {/* 2026-09-11: 主力晶片搬到 `.unread-bar` 了，這一格暫時空著（`:empty` 會把它藏起來）。 */}
+            <div className="mobile-primary-row" />
+          </>
+        ) : null}
         <span className="spacer" />
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
-        {/* 分頁與下面的 `.tab-panel` 用 id 對起來；←/→ 換分頁見 `tabKeys.ts`。 */}
-        <div className="tabs" role="tablist" aria-label="Bot 畫面" onKeyDown={onTabListKeyDown}>
+        <div className="tabs" role="tablist">
           <button
             type="button"
             className="tab"
             role="tab"
-            id={`${panelId}-chat`}
             aria-selected={tab === 'chat' && !settingsOpen && !shellOpen}
-            aria-controls={panelTab === 'chat' ? panelId : undefined}
             onClick={() => {
               closeShellView()
               setRightTab('chat')
@@ -1370,9 +1386,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             type="button"
             className="tab"
             role="tab"
-            id={`${panelId}-terminal`}
             aria-selected={tab === 'terminal' && !settingsOpen && !shellOpen}
-            aria-controls={panelTab === 'terminal' ? panelId : undefined}
             onClick={() => {
               closeShellView()
               setRightTab('terminal')
@@ -1381,7 +1395,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             終端
           </button>
           {shellOpen ? (
-            <button type="button" className="tab" role="tab" id={`${panelId}-shell`} aria-selected aria-controls={panelId} title="主機 shell（按「關閉」回到對話）">
+            <button type="button" className="tab" role="tab" aria-selected title="主機 shell（按「關閉」回到對話）">
               shell
             </button>
           ) : null}
@@ -1394,8 +1408,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           The issues popup must stay outside an `overflow` box, hence the scrolling is on the
           status half only. The chip is chat-only — the terminal tab has no composer to insert into. */}
       <ContextBar
+        mobileOpen={gitInfoBotId === botId}
+        onClose={() => setGitInfoBotId(null)}
         issues={
-          tab === 'chat' && !settingsOpen ? (
+          phone || (tab === 'chat' && !settingsOpen) ? (
             <>
               <IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} />
               <GitBar projectId={bot.project_id} />
@@ -1404,19 +1420,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         }
         status={<StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
         hasStatus={Boolean(statusInfo) || Boolean(run?.status_line?.trim())}
-        summary={[
-          project?.github ? project.github.repo : project?.label,
-          statusInfo?.context_used_pct !== null && statusInfo?.context_used_pct !== undefined ? `context ${pct(statusInfo.context_used_pct)}` : null,
-          statusInfo?.cost_usd !== null && statusInfo?.cost_usd !== undefined ? `$${statusInfo.cost_usd.toFixed(2)}` : null,
-        ]
-          .filter(Boolean)
-          .join(' · ')}
       />
 
 
       {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
-      <div className="tab-panel" role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${panelTab}`}>
       {shellOpen && shellView ? (
         <HostShellPanel key={`${shellView.host}:${shellView.paneId}`} host={shellView.host} paneId={shellView.paneId} cwd={shellView.cwd} embedded />
       ) : tab === 'terminal' && !settingsOpen ? (
@@ -1469,7 +1477,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}
-      </div>
     </>
   )
 }

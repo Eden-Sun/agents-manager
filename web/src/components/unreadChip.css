@@ -150,5 +150,33 @@
 @media (max-width: 720px) {
   .unread-chip {
     max-width: 96px;
+    gap: 3px;
+    padding: 0 5px;
+    line-height: 20px;
+  }
+
+  /* 手機上星號是辨識「主要 bot」最快的符號，放大它；左右留白縮到只保留觸控需要的量。 */
+  .unread-chip-star {
+    font-size: 18px;
+    line-height: 20px;
+  }
+
+  .unread-chip-n {
+    padding: 0 3px;
+  }
+
+  .unread-chip-dot {
+    width: 8px;
+    height: 8px;
+  }
+
+  .icon-btn.primary-star {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 0;
+    font-size: 22px;
+    line-height: 1;
   }
 }

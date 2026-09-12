@@ -2116,7 +2116,7 @@ button:disabled {
  * 這些鍵原本 hover 完全沒有底色變化（掃出來 ΔL* = 0）：不是缺 :hover 規則，
  * 就是只改了框線或底線。統一補上 ghost 的 wash，各自原本的顏色規則不動。
  */
-.tab:not([aria-selected='true']):not([aria-checked='true']):hover:not(:disabled),
+.tab:not([aria-selected='true']):hover:not(:disabled),
 .mem-open:hover:not(:disabled) .mem-badge,
 .mem-pop-refresh:hover:not(:disabled),
 .mem-pop-act button:hover:not(:disabled),
@@ -2276,17 +2276,10 @@ button.run-debug-toggle:hover:not(:disabled) {
   justify-content: center;
 }
 
-/* `role="radio"` 的 .tab（kind 標示切換）用 aria-checked，長相跟選中的分頁一樣。 */
-.tab[aria-selected='true'],
-.tab[aria-checked='true'] {
+.tab[aria-selected='true'] {
   background: var(--bg-panel);
   color: var(--text);
   box-shadow: var(--shadow);
-}
-
-/* 對話／終端分頁的 tabpanel：只為了掛 role 與 id，不能多一層盒子擠壞主欄的 flex 排版。 */
-.tab-panel {
-  display: contents;
 }
 
 .head-actions {
@@ -2302,12 +2295,12 @@ button.run-debug-toggle:hover:not(:disabled) {
  * 誰先讓——於是溢位時掉出去的永遠是排在最後的分頁。定成三級：
  *
  * 1. **分頁不讓**：它是導覽不是資訊，被切掉就沒有別的入口。除了 `flex: none`，還要疊在最上面
- *    ——萬一有東西溢位疊上來，被蓋掉的是那個東西而不是分頁。
+ *    ——量表真的被壓到內容溢位時，被蓋掉的必須是量表。
  * 2. **名字第二**（`.bot-head .main-title`，見下面那條）：可以截尾，不能消失。
- * 3. **先讓的**：遠端記憶體與附屬 chip（都只是數字，popover 裡有完整的）先收到 0。
+ * 3. **先讓的**：遠端記憶體與其他附屬 chip（都只是數字，popover 裡有完整的）先收到 0。
  *    **量表不在可讓的名單裡**（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的
- *    空間；desktop 都要全顯示」），維持 `flex: none`、五格全開。第一排的寬度因此只能從名字
- *    那一叢擠出來——pane id 那顆已經搬到第二排（見 `.main-title-sub`）。
+ *    空間；desktop 都要全顯示」），所以它維持 `flex: none`、五格全開。第一排的寬度因此只能
+ *    從名字這一叢擠出來——pane id 那顆已經搬到第二排（見 `.main-title-sub`）。
  */
 .main-head > .tabs {
   flex: none;
@@ -2392,52 +2385,6 @@ button.run-debug-toggle:hover:not(:disabled) {
   margin-right: -3px;
 }
 
-/* 2026-09-12 使用者：「▾ ★ opus · High 也要有顏色」。kind logo 上色之後，它旁邊那一排控制
-   仍然整排是灰的，在標題列上看起來像被停用。四顆各給一種有意義的顏色，不是隨便上色：
-   - model／effort chip 吃 kind 的品牌色——它講的就是左邊那顆 CLI 現在在跑什麼，是同一件事；
-   - ▾（展開 run 識別資訊）吃 accent，跟它「開著」時的 --accent-ink 同一族，只是淡一階；
-   - ⚙（設定）同樣吃 accent，它是這一列唯一沒有在別處重複的入口；
-   - ★ 吃燈號的黃：釘起來是實心黃，沒釘是同一個黃的淡色空心，而不是灰。
-   hover／開啟狀態不動：那幾條規則在後面且特異度較高，仍然是既有的 accent wash。 */
-.bot-head .main-title-sub > .kind-tag.claude ~ .model-tag {
-  --head-kind: var(--kind-claude);
-}
-
-.bot-head .main-title-sub > .kind-tag.codex ~ .model-tag {
-  --head-kind: var(--kind-codex);
-}
-
-.bot-head .main-title-sub > .kind-tag.grok ~ .model-tag {
-  --head-kind: var(--kind-grok);
-}
-
-.bot-head .main-title-sub > .model-tag {
-  color: var(--head-kind, var(--text-dim));
-  border-color: color-mix(in srgb, var(--head-kind, var(--border-strong)) 45%, transparent);
-  background: color-mix(in srgb, var(--head-kind, var(--bg-sunken)) 8%, var(--bg-sunken));
-}
-
-/* effort（`-高`）仍然比模型名淡一階，但要同一個顏色家族——不然一顆 chip 一半彩色一半灰。 */
-.bot-head .main-title-sub > .model-tag .model-tag-extra {
-  color: color-mix(in srgb, var(--head-kind, var(--text-faint)) 55%, var(--text-dim));
-}
-
-.bot-head .main-title-sub > .main-status.pane-toggle .pane-chev {
-  color: color-mix(in srgb, var(--accent) 70%, var(--text-faint));
-}
-
-.bot-head .main-title-row > .icon-btn.gear {
-  color: color-mix(in srgb, var(--accent) 70%, var(--text-dim));
-}
-
-.bot-head .main-title-row > .icon-btn.primary-star {
-  color: color-mix(in srgb, var(--lamp-yellow) 55%, var(--text-faint));
-}
-
-.bot-head .main-title-row > .icon-btn.primary-star.on {
-  color: var(--lamp-yellow);
-}
-
 /* pane id 那顆（`run-debug-toggle`）也在這一行，排在 model 後面（2026-09-11 使用者）。
    它跟 model 一樣可壓縮；擠到不能再擠時 `.pane-id` 收掉、只留 `▾`（`.pane-chev` 是
    `flex: none`），完整的 pane id 在 tooltip 裡。 */
@@ -2449,11 +2396,10 @@ button.run-debug-toggle:hover:not(:disabled) {
 /*
  * 桌面的名字下限。原本是 168px（「額度條再長也不能把它壓成 `0-op…`」），2026-09-11 改成 3em：
  * 使用者把優先序定成「分頁永遠不得被裁或推出右緣」>「名字可截尾不可消失」，而量表同一天定成
- * desktop 五格全開、不准壓縮（約 770–800px）。量過之後這三件事在 1500–1560px（側欄開著、標題
- * 列只有 1004–1064px）湊不齊：光是選單鍵 + 量表 + 分頁 + 內距就吃掉整條，168px 的下限會把分頁
+ * desktop 五格全開、不准壓縮（約 800px）。量過之後這三件事在 1500–1560px（側欄開著、標題列
+ * 只有 1004–1064px）湊不齊：光是選單鍵 + 量表 + 分頁 + 內距就吃掉整條，168px 的下限會把分頁
  * 推出右緣 56–116px。所以下限降到「名字一定還看得見」的程度，讓分頁先活下來；真正要修的是
- * 「標題列剩多少就畫多少格量表」，那在 `QuotaStrip`，不在這裡。手機沒有這條，那邊標題列本來
- * 就會換行。
+ * 「標題列剩多少就畫多少格量表」，那在 `QuotaStrip`，不在這裡。
  */
 @media (min-width: 721px) {
   .bot-head .main-title {
@@ -3216,6 +3162,19 @@ p.project-quota-hidden {
   color: var(--text-faint);
 }
 
+/* 複製手勢不攔截長按、選取或捲動，iOS 仍可使用原生文字選取選單。 */
+.bubble-copyable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+@media (width <= 640px) {
+  .app > .shelf {
+    display: none;
+  }
+}
+
 .composer textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
@@ -3561,19 +3520,26 @@ p.project-quota-hidden {
  */
 .lastq-slot {
   position: absolute;
+  /* top 一定要給：只釘 bottom 的話卡片高度不受容器約束，展開長訊息時會往上長出
+     .msg-list-wrap 之外（它沒有 overflow:hidden），把標題列連同關閉鍵頂到畫面外，
+     於是「看不見也點不到 ×」。釘上下兩端 + max-height:100%，卡片最多就跟訊息區一樣高。 */
+  top: 0;
   bottom: 0;
   left: 0;
   right: 0;
   z-index: 14;
   margin: 0 auto;
   max-width: var(--chat-max);
-  padding: 0 28px 10px;
+  /* 上緣留一點空隙：slot 現在滿版，卡片展到最高時才不會貼死訊息區頂端。 */
+  padding: 8px 28px 10px;
   box-sizing: border-box;
   pointer-events: none;
   /* 靠右、跟使用者氣泡同寬（2026-09-08）：它就是「剛送出去的那則」，長得像使用者氣泡
      才讀得出「這題還在跑」；置中的卡片看起來像系統通知。 */
   display: flex;
   justify-content: flex-end;
+  /* slot 現在滿版，卡片靠下緣對齊，維持原本「貼著訊息區下緣」的觀感。 */
+  align-items: flex-end;
 }
 
 .lastq {
@@ -3583,6 +3549,9 @@ p.project-quota-hidden {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  /* 卡片最高就是訊息區的高度；超過的部分由 .lastq-body 自己捲，
+     標題列（含 ×）因此永遠留在畫面內。 */
+  max-height: 100%;
   max-width: min(560px, 82%);
   min-width: 260px;
   padding: 7px 8px 9px 14px;
@@ -3627,6 +3596,8 @@ p.project-quota-hidden {
 }
 
 .lastq-head {
+  /* 高度固定不被壓縮：body 再長也擠不掉關閉鍵。 */
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3715,15 +3686,22 @@ p.project-quota-hidden {
   overflow-wrap: anywhere;
 }
 
-.lastq-body:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
+@media (hover: hover) {
+  .lastq-body:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
 }
 
 .lastq.open .lastq-body {
   display: block;
-  max-height: 40vh;
+  /* 交給 flex 分配剩餘空間，不再用固定 vh —— vh 在行動瀏覽器會因為網址列收合而變動，
+     算出來的高度常常比實際可視區大。min-height:0 是讓 flex 子元素真的縮得下去的關鍵。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* 從浮窗捲過去之後閃一下，否則捲完只會看到一堆長得一樣的氣泡，不知道停在哪。 */
@@ -4536,7 +4514,7 @@ p.project-quota-hidden {
   /* 訊息區在 390px 只剩 14px 的左右 padding，浮窗跟著收才對得齊；兩行就夠，390px 的
      三行加上標題列會蓋掉將近四分之一的畫面。 */
   .lastq-slot {
-    padding: 0 14px 8px;
+    padding: 8px 14px 8px;
   }
 
   .lastq-body {
@@ -4544,9 +4522,8 @@ p.project-quota-hidden {
     line-clamp: 2;
   }
 
-  .lastq.open .lastq-body {
-    max-height: 34vh;
-  }
+  /* 手機不再壓 vh 上限：卡片本身已被 max-height:100% 約束，
+     body 用 flex 吃剩餘空間即可。 */
 
   .context-bar {
     gap: 8px;
@@ -4803,16 +4780,13 @@ p.project-quota-hidden {
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  /* 不再是 <button>（option 裡不能有按鈕），自己把 › 置中。 */
-  display: flex;
-  align-items: center;
 }
 .dirpicker-row:hover .dirpicker-enter,
 .dirpicker-row.sel .dirpicker-enter {
   color: var(--accent-ink);
   border-left-color: var(--border);
 }
-.dirpicker-enter:hover {
+.dirpicker-enter:hover:not(:disabled) {
   background: var(--bg-active);
 }
 .dirpicker-empty {
@@ -5101,22 +5075,21 @@ p.project-quota-hidden {
   right: -5px;
   display: inline-grid;
   place-items: center;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 1.5px solid var(--bg-panel);
-  background: var(--lamp-green);
-  color: #fff;
+  width: 11px;
+  height: 11px;
   padding: 0;
+  border: 0;
+  background: none;
+  color: var(--lamp-green);
   line-height: 1;
   /* 2026-09-11：這顆自己就是「套用更新」的按鈕（`UpdateBadge` 的 dot 版），不再只是提示。
-     12px 的點擊區太小，用 `::after` 往外撐出一圈透明命中區。 */
+     11px 的點擊區偏小，所以另外用 `::after` 撐一個 20px 的透明命中區（見下面）。 */
   cursor: pointer;
   z-index: 1;
   /* 描一圈面板色的邊，壓在 icon 邊框上還看得清楚。 */
   filter: drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
 }
-/* 命中區：看得到的還是 12px 的點，可按的範圍 22px（滑鼠與手指都不必瞄）。 */
+/* 命中區：圖形維持 11px，可按的範圍放大到 20px（手指與滑鼠都不必瞄）。 */
 .bot-update-dot::after {
   content: '';
   position: absolute;
@@ -5124,7 +5097,8 @@ p.project-quota-hidden {
 }
 
 .bot-update-dot:hover {
-  filter: brightness(1.15) drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
+  color: var(--lamp-green);
+  filter: brightness(1.25) drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
 }
 
 .bot-update-dot:disabled {
@@ -6711,16 +6685,6 @@ button.model-tag:hover:not(:disabled) {
   color: var(--kind-claude);
 }
 
-/* 同一組品牌色（2026-09-12）：額度列的 kind 記號跟標題列、側欄用同一個顏色，三個地方一致。
-   底下的 warn / crit 仍然蓋過它——那是額度狀態，比「這是哪個 kind」重要。 */
-.quota-hp.codex .quota-kind {
-  color: var(--kind-codex);
-}
-
-.quota-hp.grok .quota-kind {
-  color: var(--kind-grok);
-}
-
 .quota-hp.warn .quota-kind {
   color: var(--warn);
 }
@@ -6735,12 +6699,9 @@ button.model-tag:hover:not(:disabled) {
   color: var(--kind-claude);
 }
 
-.quota-hp.focused.codex .quota-kind {
-  color: var(--kind-codex);
-}
-
+.quota-hp.focused.codex .quota-kind,
 .quota-hp.focused.grok .quota-kind {
-  color: var(--kind-grok);
+  color: var(--text-dim);
 }
 
 .quota-hp.focused .quota-identity {
@@ -11213,6 +11174,44 @@ button.run-debug-toggle:hover {
     padding: 0 10px;
     font-size: 12px;
   }
+
+  /* Bot 執行中只需一條緊湊工具列；完整錯誤原因仍沿用上面的換行規則。 */
+  .bot-composer {
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    min-height: 0;
+  }
+
+  .bot-composer .composer-lock.running {
+    gap: 4px;
+    padding: 0;
+    margin-bottom: 4px;
+    border: 0;
+    background: transparent;
+  }
+
+  .bot-composer .composer-lock.running > span:first-child {
+    flex: 1 0 auto;
+    white-space: nowrap;
+  }
+
+  .bot-composer .composer-lock.running .mini-btn {
+    min-height: 32px;
+    padding: 0 6px;
+  }
+
+  .bot-composer .composer-box {
+    gap: 6px;
+  }
+
+  .bot-composer textarea {
+    min-width: 0;
+    padding: 8px;
+  }
+
+  .bot-composer .send-btn {
+    flex: none;
+    padding: 8px 12px;
+  }
 }
 
 /* ---- 手機的「追加 issue 繼續」那列（2026-09-09 使用者截圖：label、輸入框、「勾選 open issue」、
@@ -11421,6 +11420,226 @@ button.run-debug-toggle:hover {
   min-height: 28px;
 }
 
+/* 手機所有純圖示控制都要能用拇指可靠點到。前面的局部規則照顧了標題列與側欄的
+   排版；這裡補上設定、彈窗、托盤、錯誤提示等較晚載入的圖示鍵，避免新頁面又落回
+   18–30px 的小點擊區。標題列空間有限，仍維持它既有的 40px 尺寸。 */
+@media (width <= 640px) {
+  button.icon-btn,
+  button.jump-bottom,
+  button.lastq-x,
+  button.attach-thumb-x,
+  button.shelf-card-x,
+  button.update-all-x {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px;
+    font-size: 18px;
+  }
+
+  button.icon-btn svg,
+  button.jump-bottom svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* 標題列與 bot 動作列已經以 40px 排好，放大可按範圍時不讓它們把列高撐破。 */
+  .main-head button.icon-btn,
+  .bot-actions button.icon-btn,
+  .bot-actions button.head-menu-btn,
+  .bot-actions button.menu-btn {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    padding: 4px;
+  }
+
+  /* 額度按鈕含多行數字，使用內容寬高；不可套用純圖示鍵的固定方形或負邊距。 */
+  .main-head .quota-bars-open {
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+  }
+
+  .bot-head {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) 40px 40px auto;
+    grid-template-rows: auto auto auto;
+    gap: 2px 4px;
+    padding: 4px 8px;
+  }
+
+  .bot-head > .menu-btn {
+    grid-area: 1 / 1;
+  }
+
+  .bot-head > .main-title {
+    grid-area: 1 / 2;
+    max-height: none;
+  }
+
+  .bot-head > .tabs {
+    grid-area: 1 / 5;
+    align-self: start;
+  }
+
+  .bot-head > .primary-star {
+    grid-area: 1 / 4;
+    align-self: start;
+  }
+
+  .bot-head > .mobile-git-info {
+    grid-area: 1 / 3;
+    align-self: start;
+    color: #f05033;
+  }
+
+  .bot-head .main-title-row {
+    width: 100%;
+    gap: 4px;
+  }
+
+  .bot-head .bot-switcher {
+    flex: 1;
+  }
+
+  /* 未讀數已在主力／剛跑完列顯示，名稱這排保留空間給 Git 與設定入口。 */
+  .bot-head .main-title-row > .unread-turns {
+    display: none;
+  }
+
+  .mobile-bot-version {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--text-dim);
+  }
+
+  /* kind 圖示 → 模型 · effort → 版本號（2026-09-11 使用者指定順序）；太長時模型先省略。 */
+  .mobile-bot-model {
+    flex: 0 1 auto;
+    min-width: 0;
+    color: var(--text);
+  }
+
+  /* 2026-09-12 使用者（手機實拍）：「name 下方的還是灰」。桌面那一排（⚙ / ★ / ▾ / model chip）
+     已經照 kind 上色，手機這一行的模型名卻還是 --text。跟桌面同一套：模型名吃該 bot 的 kind
+     品牌色（`--kind-*`，由前面的 `.mobile-kind-icon.<kind>` 傳 `--head-kind`），版本號維持淡灰
+     ——它跟 kind 無關，等同桌面留灰的 pane id。 */
+  .mobile-kind-icon.claude ~ .mobile-bot-model {
+    --head-kind: var(--kind-claude);
+  }
+
+  .mobile-kind-icon.codex ~ .mobile-bot-model {
+    --head-kind: var(--kind-codex);
+  }
+
+  .mobile-kind-icon.grok ~ .mobile-bot-model {
+    --head-kind: var(--kind-grok);
+  }
+
+  .mobile-bot-version > .mobile-bot-model {
+    /* 這一行沒有 chip 底色，字直接坐在白底上：純品牌色在淺色主題只有 3.2–4.35:1（12px 要 4.5）。
+       跟文字色混一成多，色相仍看得出是 kind，對比拉過 4.5；深色主題同一條式子反而更亮。 */
+    color: color-mix(in srgb, var(--head-kind, var(--text)) 72%, var(--text));
+    font-weight: 600;
+  }
+
+  .mobile-bot-ver {
+    flex: none;
+  }
+
+  .mobile-bot-model,
+  .mobile-bot-version > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-kind-icon {
+    display: inline-flex;
+    flex: none;
+    font-size: 16px;
+  }
+
+  /* 這一行的 kind 圖示本來吃 `.mobile-bot-version` 的 --text-dim，跟桌面標題列的 kind logo
+     （彩色）與額度列的 kind 記號對不起來。同一組品牌色。 */
+  .mobile-kind-icon.claude {
+    color: var(--kind-claude);
+  }
+
+  .mobile-kind-icon.codex {
+    color: var(--kind-codex);
+  }
+
+  .mobile-kind-icon.grok {
+    color: var(--kind-grok);
+  }
+
+  .bot-head > .spacer {
+    display: none;
+  }
+
+  .bot-head > .mobile-primary-row {
+    grid-area: 3 / 1 / 4 / -1;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .bot-head > .mobile-primary-row:empty {
+    display: none;
+  }
+
+  .mobile-primary-row > .unread-strip {
+    flex: 1;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .mobile-primary-row .unread-chip {
+    flex: none;
+  }
+
+  .bot-head > .quota-strip {
+    grid-area: 2 / 1 / 3 / -1;
+    margin: 0;
+    padding: 0;
+  }
+
+  .bot-head .main-title-row > .icon-btn.gear {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+@media (width <= 360px) {
+  .bot-head {
+    grid-template-columns: 32px minmax(0, 1fr) 32px 32px auto;
+    column-gap: 2px;
+    padding-inline: 4px;
+  }
+
+  .bot-head > button.menu-btn,
+  .bot-head > button.mobile-git-info,
+  .bot-head > button.primary-star,
+  .bot-head .main-title-row > .icon-btn.gear {
+    width: 32px;
+    min-width: 32px;
+    padding-inline: 2px;
+  }
+}
+
 /* 「有更新」確認框裡的 changelog（UpdateChangelog.tsx）：一段一版，長的自己捲。 */
 .update-changelog {
   margin: 8px 0 4px;
@@ -11566,6 +11785,7 @@ button.run-debug-toggle:hover {
     right: auto;
   }
 }
+
 /* codex 的額度重置券（`PopResetCredits`）：跟兩條桶子並排在額度明細裡，但它不是進度條，
    所以只有字。券數用強調色——額度歸零時它是唯一還能做的動作。 */
 .quota-pop-line.reset-credits .quota-reset-credit {
