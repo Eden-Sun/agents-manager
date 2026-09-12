@@ -2,7 +2,7 @@
 # 收尾前一鍵跑跟 CI（.github/workflows/ci.yml）同一組檢查。
 #
 #   scripts/check.sh            # web + daemon（會擋 merge 的那兩項）
-#   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、vite build
+#   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
@@ -11,6 +11,9 @@
 # 注意：
 # - web 的型別檢查一定要 `tsc -p tsconfig.app.json`；根目錄的 tsconfig.json 只有
 #   references 沒有 files，`tsc --noEmit` 什麼都不檢查（假綠燈）。
+# - web 的單元測試用 `bun test`（不是 `node --test`）：測試檔是 `node:test` 寫的，bun 直接吃，
+#   而且會解析 `.tsx` 與沒副檔名的 import；node 的 --experimental-strip-types 對那兩種都會
+#   ERR_MODULE_NOT_FOUND。
 # - daemon 用 rust-embed 把 web/dist 編進二進位，所以 web 要先 build。
 # - daemon 的測試會讀 AM_MODEL / AM_EFFORT（herdr shim 的沿用邏輯），在 bot 的 pane
 #   裡跑時這兩個有值會讓測試結果不同，這裡一律清掉。
@@ -29,6 +32,8 @@ check_web() {
     (cd web && bunx tsc -p tsconfig.app.json --noEmit)
     step "web: oxlint src"
     (cd web && bunx oxlint src)
+    step "web: bun test"
+    (cd web && bun test)
     step "web: bun run build"
     (cd web && bun run build)
 }
