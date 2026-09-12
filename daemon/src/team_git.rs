@@ -260,17 +260,33 @@ pub enum MergeOutcome {
 /// The integration worktree must be clean first — a dirty `main/` means somebody edited the
 /// integration branch by hand and the caller pauses with `integration_dirty` rather than
 /// sweeping it into a merge commit.
+///
+/// Only a real conflict (unmerged paths, or git saying `CONFLICT`) is a `Conflict`; every other
+/// non-zero exit — a stale `index.lock`, a branch that does not exist, unrelated histories — is
+/// an `Err` carrying git's own message, so the worker is not sent off to "resolve" a conflict
+/// that is not there. Either way `merge --abort` runs so `main/` is usable afterwards.
 pub async fn merge_task(app: &Arc<App>, host: &str, main_wt: &str, branch: &str) -> Result<MergeOutcome> {
-    let o = git(app, host, main_wt, &["merge", "--no-ff", "--no-edit", branch], GIT_TIMEOUT).await?;
+    let o = match git(app, host, main_wt, &["merge", "--no-ff", "--no-edit", branch], GIT_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e) => {
+            // A merge that timed out (and was killed) may have left MERGE_HEAD behind.
+            let _ = git(app, host, main_wt, &["merge", "--abort"], GIT_TIMEOUT).await;
+            return Err(e);
+        }
+    };
     if o.ok() {
         return Ok(MergeOutcome::Merged { sha: head_sha(app, host, main_wt).await.unwrap_or_default() });
     }
-    let files = git(app, host, main_wt, &["diff", "--name-only", "--diff-filter=U"], GIT_TIMEOUT)
+    let files: Vec<String> = git(app, host, main_wt, &["diff", "--name-only", "--diff-filter=U"], GIT_TIMEOUT)
         .await
         .map(|x| x.stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
         .unwrap_or_default();
     // Always leave the integration worktree usable, whatever went wrong.
     let _ = git(app, host, main_wt, &["merge", "--abort"], GIT_TIMEOUT).await;
+    let says_conflict = o.stdout.contains("CONFLICT") || o.stderr.contains("CONFLICT");
+    if files.is_empty() && !says_conflict {
+        return Err(anyhow!("git merge {branch}: {}", o.message()));
+    }
     Ok(MergeOutcome::Conflict { files, message: o.message() })
 }
 
@@ -600,6 +616,41 @@ mod tests {
 
     /// T5's first half: a real conflict is detected, aborted, and reported with the file
     /// list — the integration worktree is left clean enough to merge again afterwards.
+    #[tokio::test]
+    async fn a_merge_that_fails_for_another_reason_is_not_a_conflict() {
+        let tmp = std::env::temp_dir().join(format!("am-git-nonconflict-{}", crate::db::ulid()));
+        let repo = tmp.join("repo");
+        let root = tmp.join("data/teams/t1");
+        init_repo(&repo);
+        let app = app_for(&tmp).await;
+        let (h, r) = (LOCAL_HOST, repo.to_string_lossy().to_string());
+        let base = resolve_commit(&app, h, &r, "HEAD").await.unwrap();
+        create_branch(&app, h, &r, "team/i1-aaa", &base).await.unwrap();
+        let main_wt = root.join("main").to_string_lossy().to_string();
+        worktree_add(&app, h, &r, &main_wt, "team/i1-aaa", false).await.unwrap();
+
+        // A branch that does not exist: git fails, but nothing is unmerged.
+        let e = merge_task(&app, h, &main_wt, "team/i1-aaa-t9-nobody").await.unwrap_err();
+        assert!(e.to_string().contains("t9-nobody"), "{e}");
+        assert_eq!(status_porcelain(&app, h, &main_wt).await.unwrap().trim(), "");
+
+        // A stale index.lock: same thing — an error naming the lock, not a "conflict" for the worker.
+        let a_wt = root.join("dev-1").to_string_lossy().to_string();
+        worktree_add(&app, h, &r, &a_wt, &base, true).await.unwrap();
+        checkout_task_branch(&app, h, &a_wt, "team/i1-aaa-t1-dev-1", "team/i1-aaa").await.unwrap();
+        std::fs::write(root.join("dev-1/NEW.md"), "new\n").unwrap();
+        commit_all(&app, h, &a_wt, "t1").await.unwrap();
+        let lock = run(&root.join("main"), &["rev-parse", "--git-path", "index.lock"]);
+        let lock = root.join("main").join(lock);
+        std::fs::write(&lock, "").unwrap();
+        let e = merge_task(&app, h, &main_wt, "team/i1-aaa-t1-dev-1").await.unwrap_err();
+        assert!(e.to_string().starts_with("git merge team/i1-aaa-t1-dev-1:"), "{e}");
+        std::fs::remove_file(&lock).unwrap();
+        assert!(matches!(merge_task(&app, h, &main_wt, "team/i1-aaa-t1-dev-1").await.unwrap(), MergeOutcome::Merged { .. }));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[tokio::test]
     async fn a_conflicting_merge_is_aborted_and_named() {
         let tmp = std::env::temp_dir().join(format!("am-git-conflict-{}", crate::db::ulid()));
