@@ -598,7 +598,11 @@ async fn pause_with_detail(app: &Arc<App>, team: &db::Team, reason: &str, detail
     if team.phase == "paused" || team::is_terminal(&team.phase) || team.phase == "aborting" {
         return Ok(());
     }
-    if team::DECISION_PAUSES.contains(&reason) {
+    // Not in unlimited mode (§2.3 "多 issue 同時進行"): there the issue-level reasons go
+    // through `pause_issue` → `close_one_issue` for **their** issue, and `pm_abort` — which
+    // names no issue — pauses the whole team. Taking this branch used to close "the first
+    // working issue" as failed for an abort aimed at some other one (2026-09-12 review, ops #7).
+    if team::DECISION_PAUSES.contains(&reason) && !team::is_unlimited(team) {
         let has_next = db::next_queued_issue(&app.db, &team.id).await.map_err(up)?.is_some();
         if has_next {
             // Boxed: the advance can itself end up back in `pause` (a failed hand-over), and
@@ -4029,6 +4033,37 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         .await
         .unwrap();
         assert!(reject.contains("i2-dev-1") && reject.contains("#42"), "{reject}");
+    }
+
+    fn issue_n(number: i64) -> crate::team::IssueRef {
+        crate::team::IssueRef {
+            number,
+            title: format!("issue {number}"),
+            url: format!("https://example.invalid/{number}"),
+            body: "做。".into(),
+        }
+    }
+
+    /// ops #7 (2026-09-12): a PM `abort` names no issue, so in unlimited mode it must pause
+    /// the whole team (§2.3). With something still queued it used to take the finite-mode
+    /// `DECISION_PAUSES` road instead: close "the first working issue" as failed and carry
+    /// on — the wrong issue, and no pause at all.
+    #[tokio::test]
+    async fn an_unlimited_pm_abort_pauses_the_team_instead_of_failing_the_first_issue() {
+        let n = crate::team::MAX_CONCURRENT_ISSUES as i64;
+        let s = unlimited((42..=42 + n).map(issue_n).collect()).await;
+        assert_eq!(s.ctx().await.issues.len(), n as usize);
+        assert!(db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().is_some(), "one is still queued");
+        let pm = s.bot("pm", 0).await;
+
+        s.reply(&pm, json!({"action":"abort","reason":"#43 做不了"})).await;
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("pm_abort")));
+        let issues = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!(issues.iter().filter(|i| i.state == "working").count(), n as usize, "nobody was closed");
+        assert!(issues.iter().all(|i| i.state != "failed"), "{issues:?}");
+        assert_eq!(issues.iter().filter(|i| i.state == "queued").count(), 1, "the queue did not move");
     }
 
     #[tokio::test]
