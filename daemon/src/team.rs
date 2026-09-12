@@ -447,7 +447,8 @@ fn role_persona(role: &str, issue_number: i64, extra: Option<&str>) -> Option<St
         .to_string(),
         _ => format!(
             "你是 issue #{issue_number} 的執行者。只在指派給你的工作目錄裡工作：不要 cd 出去、不要動別人的目錄、\
-             不要 git push、不要切換分支。每個邏輯段落 git commit，完成後回報改了什麼、如何驗證。"
+             不要 git push、不要切換分支。只在自己的 worktree 工作；禁止 git stash / --autostash；只 git add 自己的檔案；\
+             收尾前跑 scripts/check.sh。每個邏輯段落 git commit，完成後回報改了什麼、如何驗證。"
         ),
     };
     let extra = extra.map(str::trim).filter(|s| !s.is_empty());
@@ -502,7 +503,8 @@ fn full_persona(
         _ => format!(
             "你是 issue #{issue_number} 的執行者 `{short}`。你的 cwd `{cwd}` 是你專屬的 git worktree，\
              你只能在這裡工作：不要 `cd` 出去、不要動 `../`、不要進入使用者的主 checkout、\
-             不要 `git push`、不要自己切換分支（分支由 daemon 建好並 checkout）。\n\
+             不要 `git push`、不要自己切換分支（分支由 daemon 建好並 checkout）。只在自己的 worktree 工作，\
+             禁止 `git stash` / `--autostash`；只 `git add` 自己的檔案；收尾前跑 `scripts/check.sh`。\n\
              成員：{roster}\n\
              整合分支是 `{integration}`。每個邏輯段落 `git commit`。完成後用 `report` 回報：\
              `summary` 說明改了什麼、如何驗證。做不下去用 `status: blocked` 說明原因。\
