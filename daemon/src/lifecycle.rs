@@ -2124,6 +2124,152 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     }
 }
 
+/// 子 agent 的「原地重啟」：在**它自己那個 pane 裡**把 agent 收掉再起回來（SPEC §6.5a / §6.9）。
+///
+/// pane 是父 agent 用 `pane.split` 開的，[`start_bot_locked_with`] 因此拒絕子 agent——照那條路走
+/// 會多開一個跟父 agent 無關的 pane。但「套用 claude 更新」要的其實只是把 CLI 換成新版接回同一個
+/// session，pane 本身不必動：所以這裡送 `ctrl+c` 讓 agent 退出、**不關 pane**，再用同一個 agent
+/// 名字在同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`。
+///
+/// pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 herdr shim、父 agent 傳下來的那些）留在 pane 的
+/// shell 裡，所以重啟回來的還是同一個帳號、同一套工具——這是 daemon 重建不了的東西，也是不能關掉
+/// 這個 pane 的第二個理由。hook 一樣沒有注入（`inject_hooks = 0`），回覆照舊走終端快照。
+///
+/// pane 在收 agent 的過程中不見了（父 agent 自己關掉）就不重開：那顆子 agent 本來就結束了。
+pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.managed_by != "child" {
+        return Err(LcError::Bad("這不是 agent spawn 出來的子 agent".into()));
+    }
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let Some(pane_id) = run.pane_id.clone() else {
+        return Err(LcError::Bad("這個子 agent 的 run 沒有記到 pane".into()));
+    };
+    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let client = client_for_run(app, &run).await?;
+    let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
+
+    let _ = sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run.id).execute(&app.db).await;
+    app.emit_bot_status(bot_id).await;
+    fail_in_flight(app, &run.id, "restarted to apply the CLI update").await;
+
+    let target = db::run_target(&run, &bot);
+    for _ in 0..2 {
+        let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mut empty = false;
+    for _ in 0..20 {
+        match client.pane_get(&pane_id).await {
+            // pane 沒了：這顆子 agent 結束了，run 跟著收掉，不要在別的地方重開一個。
+            Ok(None) => {
+                mark_run_exited(app, &run.id, "子 agent 的 pane 在重啟過程中被關掉").await;
+                app.emit_bot_status(bot_id).await;
+                return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
+            }
+            Ok(Some(p)) if p.agent.is_none() => {
+                empty = true;
+                break;
+            }
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if !empty {
+        return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
+    }
+    // `ended_at` 一寫上去，剛剛那個 native session 就成了 `last_native_session` 的「上一個」。
+    let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+        .bind(db::now())
+        .bind(&run.id)
+        .execute(&app.db)
+        .await;
+
+    let mut args: Vec<String> = Vec::new();
+    if bot.auto_approve != 0 {
+        match bot.kind.as_str() {
+            "claude" => args.push("--dangerously-skip-permissions".into()),
+            "codex" => args.push("--yolo".into()),
+            "grok" => args.push("--always-approve".into()),
+            _ => {}
+        }
+    }
+    // 模型／強度用 `bots` 上那份——它是 §4.4a 從這顆子 agent 自己的 argv 讀回來補的，
+    // 不是我們挑的。讀不到就不帶，讓 CLI 用它自己的預設。
+    args.extend(model_args(&effort_checked(app, &bot, &host).await));
+    args.extend(bot.args());
+    let resume = match db::last_native_session(&app.db, bot_id).await.map_err(up)? {
+        Some((sid, _)) => resume_args_by_kind(&bot.kind, &sid).ok().map(|a| (sid, a)),
+        None => None,
+    };
+    if let Some((_, resume_args)) = resume.clone() {
+        if bot.kind == "codex" {
+            let mut resumed = resume_args;
+            resumed.extend(args);
+            args = resumed;
+        } else {
+            args.extend(resume_args);
+        }
+    } else {
+        tracing::info!(bot = %bot.name, "子 agent 沒有可接續的 session，重啟後從新的對話開始");
+    }
+
+    let run_id = db::ulid();
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, resume_session_id, started_at)
+         VALUES (?,?,'starting','unknown',?,?,?,1,?,?,?,?)",
+    )
+    .bind(&run_id)
+    .bind(bot_id)
+    .bind(&run.workspace_id)
+    .bind(&pane_id)
+    .bind(&run.tab_id)
+    .bind(&agent)
+    .bind(&run.herdr_session)
+    .bind(resume.as_ref().map(|(sid, _)| sid.clone()))
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .map_err(up)?;
+
+    let mut started = false;
+    for attempt in 0..10u32 {
+        match client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
+            Ok(_) => {
+                started = true;
+                break;
+            }
+            Err(e) if pane_not_ready(&e) => {
+                tracing::debug!(bot = %bot.name, attempt, error = %e, "子 agent 的 pane 還沒回到可用的 shell");
+                tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
+            }
+            Err(e) => {
+                mark_run_exited(app, &run_id, "子 agent 重啟時 agent.start 失敗").await;
+                app.emit_bot_status(bot_id).await;
+                return Err(up(e));
+            }
+        }
+    }
+    if !started {
+        mark_run_exited(app, &run_id, "子 agent 的 pane 一直不是可用的 shell").await;
+        app.emit_bot_status(bot_id).await;
+        return Err(LcError::Upstream(format!("pane {pane_id} never became an available shell")));
+    }
+    let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=?").bind(&run_id).execute(&app.db).await;
+    let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
+    if let Err(e) = client.agent_wait(&agent, &until, 60_000).await {
+        tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手");
+    }
+    // 跟收編同一條路：沒有 hook 的 run，畫面就是唯一來源。
+    spawn_adopted_capture(app, &run_id, bot_id);
+    app.emit_bot_status(bot_id).await;
+    app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+    tracing::info!(bot = %bot.name, pane = %pane_id, run = %run_id, "子 agent 在原本的 pane 裡重啟完成");
+    Ok(run_id)
+}
+
 /// Is this run really there — its pane still open and herdr still listing its agent?
 ///
 /// A failed RPC counts as alive: callers use this to decide whether to *end* a run, and ending a

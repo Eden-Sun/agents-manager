@@ -1060,7 +1060,7 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
   開新對話，log `native session has no transcript on disk`。
 - 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
   任何一張清單裡**。
-- `reason` 的取值與判斷順序見 SPEC §6.9：`spawned_child` / `team_member` / `not_running` / `working` /
+- `reason` 的取值與判斷順序見 SPEC §6.9：`team_member` / `not_running` / `working` /
   `blocked` / `unknown_status` / `turn_in_flight`。`reason_label` 是同一件事給人看的那句（前端直接
   顯示，不另編一套）。
 - `total = 0` 也是 `202`：計畫是空的不是錯誤，daemon 仍會立刻推一次 `bots_restart_done`。

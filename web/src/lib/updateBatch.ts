@@ -39,8 +39,9 @@ export function updateBatchCounts(
   const busy: UpdateBatchCounts['busy'] = []
   for (const bot of bots) {
     if (bot.kind !== 'claude') continue
-    // 子 agent 由它的父 agent 管、team 成員由 team 排程管——daemon 那邊同樣不碰。
-    if (bot.managed_by !== 'user') continue
+    // team 成員由 team 排程管——daemon 那邊同樣不碰。子 agent 進來：它在自己的 pane 裡
+    // exit + resume（2026-09-12 使用者：子 agent 全被跳過，更新永遠套不上去）。
+    if (bot.managed_by === 'team') continue
     const run = runs[bot.id]
     if (!run || !run.update_notice?.trim()) continue
     const why = busyReason(run, hasInFlightTurn(bot.id))

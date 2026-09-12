@@ -487,7 +487,6 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
 
   | 條件 | `reason` | 動作 |
   |---|---|---|
-  | `bots.managed_by = 'child'` | `spawned_child` | 跳過 |
   | `bots.managed_by = 'team'` | `team_member` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` | `working` | 跳過 |
@@ -497,8 +496,15 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   | 以上都不中 | — | 重啟 |
 
   批次操作最不能做的事就是把使用者正在等的那一回合砍掉，所以規則刻意保守：`unknown` 也跳過。
-  `child` / `team` 不歸這顆按鈕管：子 agent 是父 agent 開的 pane（§6.5a，`start_bot` 本來就會拒絕，
-  放進去只會變成一則看不懂的失敗），team 成員的 run 由 team 排程記著，插手會讓排程對不上。
+  `team` 不歸這顆按鈕管：成員的 run 由 team 排程記著，插手會讓排程對不上。
+  **子 agent 進來**（2026-09-12 使用者：ns2 / race / sup 三顆全被跳過，子 agent 的更新永遠套不上去）。
+  它們不能照一般路徑重開 pane（§6.5a，`start_bot` 會拒絕），所以執行時改走
+  `lifecycle::restart_child_in_pane`：送 `ctrl+c` 讓 agent 退出、**不關 pane**，再用同一個 agent 名字在
+  同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`、`bots` 上那份模型／強度（§4.4a 從它自己的
+  argv 讀回來的）與 `auto_approve` 對應的旗標。pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 shim）留在
+  pane 的 shell 裡，所以帳號與工具不變；hook 一樣沒注入，回覆照舊走 §4.3 的終端快照。收 agent 的過程中
+  pane 不見了（父 agent 自己關掉）就把 run 標 exited、不重開。單顆的 `POST /api/bots/{id}/restart` 對子
+  agent 走同一條路。
 - 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`
   ——stop 與 start 在**同一次持有 bot 鎖**裡做完（見下方「2026-09-11 競態修正」）。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
   之後，剛結束那個 `native_session_id` 就成了 `last_native_session_id` 找得到的「上一個 session」，

@@ -1829,7 +1829,7 @@ export class MockTransport implements Transport {
     const planned: { bot_id: string; name: string }[] = []
     const skipped: { bot_id: string; name: string; reason: string; reason_label: string }[] = []
     for (const bot of this.bots) {
-      if (bot.kind !== 'claude' || bot.managed_by !== 'user') continue
+      if (bot.kind !== 'claude' || bot.managed_by === 'team') continue
       const run = this.activeRun(bot.id)
       if (!run?.update_notice) continue
       const inFlight = this.turns.some((t) => t.run_id === run.id && t.status === 'in_flight')
