@@ -1120,3 +1120,15 @@ kind 圖示搬到 model chip 左邊之後（同日稍早）仍沿用側欄 `.kin
 截圖 `docs/screenshots/context-bar/`。
 
 這一列還有：pane 的 CLI 可升級（`runs.update_notice`）時，版本號右邊出現綠色「⌃⌃ 升級」（`UpdateBadge variant="inline"`），點下去走同一條 changelog 確認＋重啟。跟標題列那顆不同，批次 chip 蓋得到也照畫——使用者要的是在看版本的地方直接點。版本被窄視窗收掉時由它自己貼右。截圖 `docs/screenshots/context-bar/update-inline-*.png`。
+
+## 三個 kind 各有品牌色（2026-09-12）
+
+標題列的 kind logo 只有 claude 是彩色的：codex 是淡藍 `#33587f`／`#8fb8e8`、grok 是灰 `#3a3a3a`／`#d6d6d6`
+（原本註解寫「另外兩個品牌本來就是黑白」）。使用者：「header bot kind logo 要有顏色」。額度列上看起來很鮮明的紅／橘
+其實是額度 warn／crit 的顏色，不是 kind 的顏色。
+
+改成一組 kind 品牌色變數，標題列、側欄、額度列三處共用：`--kind-claude` 橘（不變）、`--kind-codex` OpenAI 綠
+（`#10a37f`／深色 `#19c39c`）、`--kind-grok` 紫（`#7c5cff`／深色 `#9b83ff`，xAI 標誌官方是黑白，紫色是使用者選的）。
+每個 kind 的 chip 底色與邊框跟著各自的色系重調。額度列的 `warn` / `crit` 仍然蓋過 kind 色——額度狀態比「這是哪個 kind」重要。
+截圖：`docs/screenshots/head-kind-icon/`（三個 kind × 深淺）。
+

@@ -1569,8 +1569,12 @@ button:disabled {
 }
 
 :root {
-  /* Claude's brand orange; the other two marks are monochrome by brand. */
+  /* 每個 kind 一個品牌色（2026-09-12 使用者：header 的 kind logo 要有顏色）。claude 是它自己的
+     橘；codex 用 OpenAI 的綠；xAI 的標誌官方是黑白，在深色底上等於沒有顏色，使用者選了紫色，
+     所以這裡給它一個固定的紫。三個地方（標題列、側欄、額度列）都吃這組變數。 */
   --kind-claude: #c2603c;
+  --kind-codex: #10a37f;
+  --kind-grok: #7c5cff;
 }
 
 .kind-tag.claude {
@@ -1580,20 +1584,22 @@ button:disabled {
 }
 
 .kind-tag.codex {
-  background: #e7edf6;
-  border-color: #b9cae4;
-  color: #33587f;
+  background: #e7f6f1;
+  border-color: #b3e0d3;
+  color: var(--kind-codex);
 }
 
 .kind-tag.grok {
-  background: #ebebeb;
-  border-color: #c4c4c4;
-  color: #3a3a3a;
+  background: #efeaff;
+  border-color: #cfc2ff;
+  color: var(--kind-grok);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --kind-claude: #e08a6b;
+    --kind-codex: #19c39c;
+    --kind-grok: #9b83ff;
   }
 
   .kind-tag.claude {
@@ -1603,15 +1609,15 @@ button:disabled {
   }
 
   .kind-tag.codex {
-    background: #1d2836;
-    border-color: #33506f;
-    color: #8fb8e8;
+    background: #12261f;
+    border-color: #1f5546;
+    color: var(--kind-codex);
   }
 
   .kind-tag.grok {
-    background: #2a2a2a;
-    border-color: #555;
-    color: #d6d6d6;
+    background: #221d38;
+    border-color: #41387a;
+    color: var(--kind-grok);
   }
 }
 
@@ -6659,6 +6665,16 @@ button.model-tag:hover:not(:disabled) {
   color: var(--kind-claude);
 }
 
+/* 同一組品牌色（2026-09-12）：額度列的 kind 記號跟標題列、側欄用同一個顏色，三個地方一致。
+   底下的 warn / crit 仍然蓋過它——那是額度狀態，比「這是哪個 kind」重要。 */
+.quota-hp.codex .quota-kind {
+  color: var(--kind-codex);
+}
+
+.quota-hp.grok .quota-kind {
+  color: var(--kind-grok);
+}
+
 .quota-hp.warn .quota-kind {
   color: var(--warn);
 }
@@ -6673,9 +6689,12 @@ button.model-tag:hover:not(:disabled) {
   color: var(--kind-claude);
 }
 
-.quota-hp.focused.codex .quota-kind,
+.quota-hp.focused.codex .quota-kind {
+  color: var(--kind-codex);
+}
+
 .quota-hp.focused.grok .quota-kind {
-  color: var(--text-dim);
+  color: var(--kind-grok);
 }
 
 .quota-hp.focused .quota-identity {
