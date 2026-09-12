@@ -2195,6 +2195,28 @@ async fn upload_attachment(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, LcError> {
+    if body.is_empty() {
+        return Err(LcError::Bad("attachment is empty".into()));
+    }
+    if body.len() > crate::attach::MAX_BYTES {
+        return Err(LcError::Bad(format!(
+            "attachment is {} bytes; the limit is {}",
+            body.len(),
+            crate::attach::MAX_BYTES
+        )));
+    }
+    let bot = db::bot(&app.db, &id)
+        .await
+        .map_err(any_err)?
+        .filter(|bot| bot.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let project_is_live = db::project(&app.db, &bot.project_id)
+        .await
+        .map_err(any_err)?
+        .is_some_and(|project| project.deleted_at.is_none());
+    if !project_is_live {
+        return Err(LcError::NotFound("bot".into()));
+    }
     let name = q.get("name").map(String::as_str).unwrap_or("image").trim();
     let name = if name.is_empty() { "image" } else { name };
     let mime = headers
@@ -2214,7 +2236,10 @@ async fn upload_attachment(
 
 /// The stored bytes, for the UI's thumbnail (fetched with the token, then blob-URL'd).
 async fn get_attachment(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let (mime, data) = crate::attach::read(&app, &id).await.map_err(|e| LcError::NotFound(e.to_string()))?;
+    let (mime, data) = crate::attach::read(&app, &id).await.map_err(|e| {
+        tracing::warn!(attachment = %id, error = %e, "attachment read failed");
+        LcError::NotFound("attachment".into())
+    })?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, max-age=31536000".into())],
@@ -2522,5 +2547,92 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::Bad(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn image_headers() -> HeaderMap {
+        HeaderMap::from_iter([(header::CONTENT_TYPE, HeaderValue::from_static("image/png"))])
+    }
+
+    async fn status(result: Result<Response, LcError>) -> StatusCode {
+        match result {
+            Ok(response) => response.status(),
+            Err(error) => error.into_response().status(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_empty_oversized_unknown_and_deleted_bots() {
+        let e = crate::team::testing::env().await;
+        let query = Query(HashMap::new());
+
+        assert_eq!(
+            status(upload_attachment(
+                State(e.app.clone()),
+                Path("missing".into()),
+                query.clone(),
+                image_headers(),
+                Bytes::new(),
+            )
+            .await)
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(upload_attachment(
+                State(e.app.clone()),
+                Path("missing".into()),
+                query.clone(),
+                image_headers(),
+                Bytes::from(vec![0; crate::attach::MAX_BYTES + 1]),
+            )
+            .await)
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(upload_attachment(
+                State(e.app.clone()),
+                Path("missing".into()),
+                query.clone(),
+                image_headers(),
+                Bytes::from_static(b"png"),
+            )
+            .await)
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        let deleted_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, hook_token, deleted_at, created_at)
+             VALUES (?, ?, ?, 'claude', ?, ?, ?)",
+        )
+        .bind(&deleted_id)
+        .bind(&e.project_id)
+        .bind("deleted-bot")
+        .bind("test-token")
+        .bind(crate::db::now())
+        .bind(crate::db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            status(upload_attachment(
+                State(e.app.clone()),
+                Path(deleted_id),
+                query,
+                image_headers(),
+                Bytes::from_static(b"png"),
+            )
+            .await)
+            .await,
+            StatusCode::NOT_FOUND
+        );
     }
 }

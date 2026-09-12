@@ -66,7 +66,8 @@ impl Default for SupervisorCfg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotCfg {
-    /// ULID. Missing on hand-written files; filled in and written back on first load.
+    /// An ASCII id matching `ID_RE`. Missing on hand-written files; filled in and written back
+    /// on first load (normally as a ULID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
@@ -156,6 +157,8 @@ pub struct HostCfg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
+    /// An ASCII id matching `ID_RE`. Missing on hand-written files; filled in and written back
+    /// on first load (normally as a ULID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub path: String,
@@ -183,6 +186,8 @@ pub struct ConfigFile {
 
 /// Strict slug shape used by host and identity names (they end up in file paths / launchd labels).
 pub const SLUG_NAME_RE: &str = "[a-z][a-z0-9_-]{0,31}";
+/// Config IDs are safe to append to local and remote directories.
+pub const ID_RE: &str = "[A-Za-z0-9_-]{1,64}";
 /// Bot names are nicknames (v3.8): shown in the UI and used for `@mention`, never given to herdr.
 pub const BOT_NAME_RE: &str = "1–32 個字，不可含空白或 @ , : ;";
 
@@ -249,6 +254,11 @@ pub fn valid_slug_name(name: &str) -> bool {
         return false;
     }
     it.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+pub fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
 pub fn valid_bot_name(name: &str) -> bool {
@@ -426,91 +436,18 @@ impl ConfigStore {
     }
 }
 
-/// Shape of the TOML we understand, used to report keys serde would otherwise drop silently.
+/// Deserialize the config while collecting fields that serde does not know.
 ///
-/// Unknown keys are a *warning*, not an error: an older daemon must still start on a file
+/// Unknown keys are a warning, not an error: an older daemon must still start on a file
 /// written by a newer one (forward compatibility), but a typo (`auto_start`) must not vanish
-/// without a trace either.
-enum Schema {
-    Table(&'static [(&'static str, Schema)]),
-    Array(&'static Schema),
-    /// Free-form value (`env` maps, scalars) — never descended into.
-    Any,
-}
-
-const BOT_SCHEMA: Schema = Schema::Table(&[
-    ("id", Schema::Any),
-    ("name", Schema::Any),
-    ("kind", Schema::Any),
-    ("model", Schema::Any),
-    ("effort", Schema::Any),
-    ("fast", Schema::Any),
-    ("persona", Schema::Any),
-    ("args", Schema::Any),
-    ("autostart", Schema::Any),
-    ("inject_hooks", Schema::Any),
-    ("auto_approve", Schema::Any),
-    ("identity", Schema::Any),
-    ("env", Schema::Any),
-    ("herdr_session", Schema::Any),
-]);
-
-const PROJECT_SCHEMA: Schema = Schema::Table(&[
-    ("id", Schema::Any),
-    ("path", Schema::Any),
-    ("label", Schema::Any),
-    ("host", Schema::Any),
-    ("bots", Schema::Array(&BOT_SCHEMA)),
-]);
-
-const IDENTITY_SCHEMA: Schema =
-    Schema::Table(&[("name", Schema::Any), ("kind", Schema::Any), ("env", Schema::Any), ("args", Schema::Any)]);
-
-const HOST_SCHEMA: Schema = Schema::Table(&[
-    ("name", Schema::Any),
-    ("ssh", Schema::Any),
-    ("ssh_port", Schema::Any),
-    ("ssh_opts", Schema::Any),
-    ("herdr_session", Schema::Any),
-    ("remote_path", Schema::Any),
-    ("hook_port", Schema::Any),
-]);
-
-const CONFIG_SCHEMA: Schema = Schema::Table(&[
-    ("server", Schema::Table(&[("listen", Schema::Any), ("herdr_session", Schema::Any)])),
-    ("identities", Schema::Array(&IDENTITY_SCHEMA)),
-    ("hosts", Schema::Array(&HOST_SCHEMA)),
-    ("projects", Schema::Array(&PROJECT_SCHEMA)),
-]);
-
-/// Dotted paths (`projects[0].bots[1].auto_start`) of every key in `text` that `ConfigFile`
-/// does not know about. Empty when the text is not valid TOML — `toml::from_str` reports that.
-pub fn unknown_keys(text: &str) -> Vec<String> {
-    let Ok(value) = text.parse::<toml::Value>() else { return Vec::new() };
-    let mut out = Vec::new();
-    walk_unknown(&value, &CONFIG_SCHEMA, String::new(), &mut out);
-    out
-}
-
-fn walk_unknown(value: &toml::Value, schema: &Schema, path: String, out: &mut Vec<String>) {
-    match (schema, value) {
-        (Schema::Table(fields), toml::Value::Table(t)) => {
-            for (k, v) in t {
-                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
-                match fields.iter().find(|(name, _)| *name == k) {
-                    Some((_, sub)) => walk_unknown(v, sub, child, out),
-                    None => out.push(child),
-                }
-            }
-        }
-        (Schema::Array(item), toml::Value::Array(items)) => {
-            for (i, v) in items.iter().enumerate() {
-                walk_unknown(v, item, format!("{path}[{i}]"), out);
-            }
-        }
-        // Wrong value type (e.g. `projects = 1`): serde reports it as a parse error.
-        _ => {}
-    }
+/// without a trace either. `serde_ignored` follows serde's actual field handling, including
+/// nested arrays and renamed fields, so this list cannot drift from the config structs.
+fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
+    let mut ignored = Vec::new();
+    let cfg = serde_ignored::deserialize(toml::Deserializer::new(text), |path| {
+        ignored.push(path.to_string());
+    })?;
+    Ok((cfg, ignored))
 }
 
 fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
@@ -521,8 +458,8 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
         return Ok((cfg, mtime));
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: ConfigFile = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-    for key in unknown_keys(&text) {
+    let (cfg, unknown) = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+    for key in unknown {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
     let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
@@ -617,7 +554,7 @@ mod agent_name_tests {
 
 #[cfg(test)]
 mod issue38_tests {
-    use super::{unknown_keys, ConfigFile, ConfigStore};
+    use super::{parse_config, ConfigFile, ConfigStore};
 
     const SAMPLE: &str = r#"# top comment
 [[projects]]
@@ -632,14 +569,18 @@ kind = "claude"
 auto_start = true   # typo for autostart
 "#;
 
+    fn unknown_keys(text: &str) -> Vec<String> {
+        parse_config(text).map(|(_, ignored)| ignored).unwrap_or_default()
+    }
+
     #[test]
     fn unknown_keys_are_reported_with_paths() {
         let keys = unknown_keys(SAMPLE);
-        assert_eq!(keys, vec!["projects[0].bots[0].auto_start"]);
+        assert_eq!(keys, vec!["projects.0.bots.0.auto_start"]);
 
         let keys = unknown_keys("[server]\nport = 1\n[[hosts]]\nname = \"m\"\nssh = \"x\"\nherdr-session = \"s\"\n");
-        // toml::Table is a sorted map, so the order is alphabetical rather than file order.
-        assert_eq!(keys, vec!["hosts[0].herdr-session", "server.port"]);
+        assert!(keys.contains(&"hosts.0.herdr-session".to_string()));
+        assert!(keys.contains(&"server.port".to_string()));
 
         // Free-form maps are never descended into.
         assert!(unknown_keys("[[identities]]\nname = \"i\"\nkind = \"claude\"\n[identities.env]\nFOO = \"1\"\n").is_empty());
@@ -677,6 +618,7 @@ auto_start = true   # typo for autostart
         assert!(!text.contains("# top comment"));
         std::fs::remove_dir_all(&dir).ok();
     }
+
 }
 
 #[cfg(test)]

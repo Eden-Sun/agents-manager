@@ -3293,7 +3293,7 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         let old_worker = before.workers()[0].clone();
         let old_worker_cwd = old_worker.cwd.clone().unwrap();
         // #61: the retired worker's hook material must go with it.
-        let old_worker_dir = s.app().bot_dir(&old_worker.id);
+        let old_worker_dir = s.app().bot_dir(&old_worker.id).unwrap();
         std::fs::create_dir_all(old_worker_dir.join("bin")).unwrap();
         std::fs::write(old_worker_dir.join("bin").join("herdr"), "shim").unwrap();
         let pm_cwd = pm.cwd.clone().unwrap();

@@ -1,6 +1,6 @@
 //! Shared daemon state: db pool, herdr client, per-bot locks, WS event bus.
 
-use crate::config::{ConfigStore, LOCAL_HOST};
+use crate::config::{valid_id, ConfigStore, ID_RE, LOCAL_HOST};
 use crate::herdr::HerdrClient;
 use crate::hosts::{HostConn, HostManager};
 use anyhow::Result;
@@ -86,16 +86,20 @@ pub struct App {
     pub global_watchers: Mutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>,
     /// Serializes discovery/config projection against a default-session event and poll tick.
     pub default_sync_lock: Mutex<()>,
-    /// run_id -> pending terminal-fallback timer
-    pub fallback_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    /// run_id -> prompt-stall watchdog (delivered but the agent never went `working`)
-    pub stall_timers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// run_id -> generation of the pending terminal-fallback timer
+    pub fallback_timers: Mutex<HashMap<String, u64>>,
+    /// run_id -> generation of the prompt-stall watchdog (delivered but the agent never went
+    /// `working`)
+    pub stall_timers: Mutex<HashMap<String, u64>>,
     /// run_id -> live-progress poller (streams the partial reply while a turn is in flight)
     pub progress_pollers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// run_id -> when that run last emitted a `turn_progress` frame (API.md: at most 4/s per run).
     /// Kept on `App` rather than inside the poller task so re-arming a poller — a new turn on the
     /// same run — cannot restart the budget and burst.
     pub progress_emitted: Mutex<HashMap<String, std::time::Instant>>,
+    /// run_id -> pane revision for the last feedback survey dismissal attempt. The status event
+    /// path and the periodic sweep share this guard so one survey cannot be dismissed twice.
+    pub survey_revisions: Mutex<HashMap<String, u64>>,
     /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
     /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
@@ -159,6 +163,7 @@ impl App {
             stall_timers: Mutex::new(HashMap::new()),
             progress_pollers: Mutex::new(HashMap::new()),
             progress_emitted: Mutex::new(HashMap::new()),
+            survey_revisions: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             tools: Mutex::new(HashMap::new()),
@@ -314,8 +319,11 @@ impl App {
         }
     }
 
-    pub fn bot_dir(&self, bot_id: &str) -> PathBuf {
-        self.data_dir.join("bots").join(bot_id)
+    pub fn bot_dir(&self, bot_id: &str) -> Result<PathBuf> {
+        if !valid_id(bot_id) {
+            anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+        }
+        Ok(self.data_dir.join("bots").join(bot_id))
     }
 
     pub async fn emit_bot_status(&self, bot_id: &str) {

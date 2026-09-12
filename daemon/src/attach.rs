@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
+use crate::config::{valid_id, ID_RE};
 use crate::hosts::sh_quote;
 use crate::state::App;
 
@@ -83,8 +84,11 @@ pub fn is_image(mime: &str) -> bool {
     mime.starts_with("image/")
 }
 
-fn local_copy_dir(app: &Arc<App>, bot_id: &str) -> PathBuf {
-    app.data_dir.join("attachments").join(bot_id)
+fn local_copy_dir(app: &Arc<App>, bot_id: &str) -> Result<PathBuf> {
+    if !valid_id(bot_id) {
+        bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
+    Ok(app.data_dir.join("attachments").join(bot_id))
 }
 
 /// Store one uploaded image for `bot_id` and return what the UI and the prompt need.
@@ -98,8 +102,14 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
     if !is_image(mime) {
         bail!("only images can be attached (got {mime})");
     }
-    let bot = db::bot(&app.db, bot_id).await?.ok_or_else(|| anyhow::anyhow!("no such bot"))?;
-    let project = db::project(&app.db, &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("no such project"))?;
+    let bot = db::bot(&app.db, bot_id)
+        .await?
+        .filter(|bot| bot.deleted_at.is_none())
+        .ok_or_else(|| anyhow::anyhow!("no such bot"))?;
+    let project = db::project(&app.db, &bot.project_id)
+        .await?
+        .filter(|project| project.deleted_at.is_none())
+        .ok_or_else(|| anyhow::anyhow!("no such project"))?;
 
     let id = db::ulid();
     let file = format!("{}-{}.{}", id, safe_stem(name), ext_for(name, mime));
@@ -119,7 +129,7 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
         std::fs::write(&agent_path, data).with_context(|| format!("write {agent_path}"))?;
         agent_path.clone()
     } else {
-        let copy_dir = local_copy_dir(app, bot_id);
+        let copy_dir = local_copy_dir(app, bot_id)?;
         std::fs::create_dir_all(&copy_dir).with_context(|| format!("create {}", copy_dir.display()))?;
         let copy = copy_dir.join(&file);
         std::fs::write(&copy, data).with_context(|| format!("write {}", copy.display()))?;
@@ -242,4 +252,22 @@ pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
 /// Metadata for one attachment, as JSON (used by the upload response).
 pub fn to_json(a: &Attachment) -> serde_json::Value {
     json!({"id": a.id, "name": a.name, "mime": a.mime, "size": a.size, "path": a.path})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    #[tokio::test]
+    async fn local_attachment_copy_rejects_unsafe_bot_ids() {
+        let env = tt::env().await;
+        let protected = env.app.data_dir.join("attachments").join("keep");
+        std::fs::create_dir_all(&protected).unwrap();
+
+        for id in ["../..", "x/y", r"..\..", ""] {
+            assert!(local_copy_dir(&env.app, id).is_err(), "unsafe id was accepted: {id:?}");
+            assert!(protected.exists(), "path construction touched the protected directory for {id:?}");
+        }
+    }
 }
