@@ -44,9 +44,11 @@ web/src/
   store/store.ts   # 單一 Zustand store：server state 鏡像 + UI state + WS 事件處理
   store/routeSync.ts # 網址 ↔ store 的雙向同步（pushState / popstate / document.title）
   lib/routes.ts    # `parse(pathname) → Route` / `build(Route) → pathname`（純函式，有單元測試）
+  lib/tuiChoices.ts # 終端快照 → 編號選單（`❯ 1.` / 權限框 / codex），純函式，有單元測試
   hooks/
     useTerminalSnapshot.ts # `GET /terminal` 輪詢（blocked 面板與全畫面共用，可 pause）
     usePaneKeys.ts         # 鍵名對照（KeyboardEvent → herdr）＋ 依序送鍵的佇列、KEYPAD 按鍵列
+    useChoiceMenu.ts       # 這張快照上有沒有可以點的選單（面板與全畫面共用同一個判斷）
   components/
     Sidebar.tsx    # Project 分組、狀態燈、start/stop、新增 Project / Bot 表單
     ChatPanel.tsx  # 標題列、對話/終端分頁、氣泡列表、輸入框（export Bubble）
@@ -54,6 +56,7 @@ web/src/
     BotSettingsPanel.tsx # Bot 設定（改名 / 模型 / args / 身份 / env / 刪除），另 export ModelField
     BlockedPanel.tsx # blocked 時對話上方的終端快照 + 按鍵面板
     BlockedModal.tsx # blocked 時自動彈出的全畫面 herdr 終端（鍵盤直通 + 按鍵列）
+    BlockedChoices.tsx # 編號選單畫成可以點的清單（44px 一列，送 ↓／↑ + Enter）
     TerminalTab.tsx  # recent_unwrapped 唯讀快照 + 刷新
     StatusLamp.tsx   # §2.2 合成燈號
     AttachButton.tsx # v4.0：一鍵複製 hosts[].attach_command
@@ -167,6 +170,15 @@ web/src/
 
 送鍵走一條佇列：正在送的時候按下的鍵先累積，下一輪一次送出（`agent.send_keys` 吃陣列，
 順序由它保證）。一顆鍵一個請求的話，打字快一點就會亂序。
+
+#### 編號選單直接點（`BlockedChoices`）
+
+快照上認得出編號選單（claude 的 AskUserQuestion／權限框、codex 的 `> 1.`）時，兩層畫面都先
+長出一份可以點的清單：問題、每一項的標題與**接回折行後的完整說明**、游標停在哪一項。點一下
+= `GET /terminal` 重讀一次 → 重新解析 → 比對選項沒變 → 送 `↓／↑ × n + Enter`。解析規則與取捨
+（為什麼不送數字鍵、為什麼認不出來就整塊不長）寫在 `docs/UI-DECISIONS.md`，純函式在
+`lib/tuiChoices.ts`，單元測試 `node --test --experimental-strip-types src/lib/tuiChoices.test.ts`
+（10 項，含一份 185 欄的真機快照）。認不出來時畫面照舊是終端快照＋按鍵面板。
 
 ### 終端分頁
 
