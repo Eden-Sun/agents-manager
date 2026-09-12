@@ -1611,15 +1611,18 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
         }
     }
     // §4.5: one integration worktree, several integration branches. Park it on the one this
-    // task belongs to before merging — with a finite parallelism it is already there.
-    if integration != ctx.team.branch {
-        if let Err(e) = tg::checkout_branch(app, ctx.host(), &main_wt, &integration).await {
-            note(app, &ctx.team.id, json!({"action": "integration_checkout_failed",
-                 "branch": integration, "error": e.to_string()}))
-            .await?;
-            pause(app, &ctx.team, "upstream").await?;
-            return Ok(false);
-        }
+    // task belongs to before merging — **unconditionally**. The `teams.branch` mirror is not
+    // where `main/` is: `start_issue(#43)` checks the worktree out on #43's branch and then
+    // `sync_issue_mirror` points the mirror back at #42, so "integration == mirror" used to
+    // mean "skip the checkout" precisely when the worktree was on somebody else's branch, and
+    // #42's task was merged into #43's integration branch (2026-09-12 review, ops #1). With a
+    // finite parallelism the worktree is already there and the checkout is a no-op.
+    if let Err(e) = tg::checkout_branch(app, ctx.host(), &main_wt, &integration).await {
+        note(app, &ctx.team.id, json!({"action": "integration_checkout_failed",
+             "branch": integration, "error": e.to_string()}))
+        .await?;
+        pause(app, &ctx.team, "upstream").await?;
+        return Ok(false);
     }
     let outcome = tg::merge_task(app, ctx.host(), &main_wt, &t.branch).await.map_err(up)?;
     match outcome {
@@ -3711,6 +3714,44 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
 
     /// A dispatch that does not say which issue is refused while several are working, and the
     /// PM is told why rather than having a task land on the wrong branch.
+    /// ops #1 (2026-09-12): the integration worktree is parked on the branch of whichever
+    /// issue started **last**, while the `teams` mirror names the **first** working issue. A
+    /// merge for the mirrored issue used to skip the checkout and land on the other issue's
+    /// branch; now every merge checks out the task's own integration branch first.
+    #[tokio::test]
+    async fn a_merge_lands_on_the_tasks_own_integration_branch_not_the_mirrors() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[
+            {"issue":42,"title":"A","brief":"做 A"},
+            {"issue":43,"title":"B","brief":"做 B"}]}))
+        .await;
+        let (a, b) = (issue_of(&s, 42).await, issue_of(&s, 43).await);
+        let (a_branch, b_branch) = (a.branch.clone().unwrap(), b.branch.clone().unwrap());
+        // The trap: `main/` is on #43 (started last), the mirror says #42.
+        assert_eq!(s.team().await.branch, a_branch, "the mirror is the first working issue");
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), b_branch);
+
+        let dev = s.ctx().await.workers_for(&a)[0].clone();
+        let wt = std::path::PathBuf::from(dev.cwd.clone().unwrap());
+        std::fs::write(wt.join("a.txt"), "a\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "a"]);
+        s.reply(&dev, json!({"action":"report","status":"done","summary":"做完了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        let rev = s.bot("reviewer", 0).await;
+        s.reply(&rev, json!({"action":"verdict","result":"approve","summary":"ok"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+
+        let task = s.tasks().await.into_iter().find(|t| t.title == "A").unwrap();
+        assert_eq!(task.state, "merged");
+        let sha = task.merge_sha.clone().expect("merge sha");
+        let holders = git(&s.e.repo, &["branch", "--contains", &sha]);
+        assert!(holders.contains(&a_branch), "#42's merge must be on #42's branch: {holders}");
+        assert!(!holders.contains(&b_branch), "#43's branch must not carry #42's merge: {holders}");
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), a_branch);
+    }
+
     #[tokio::test]
     async fn a_dispatch_without_an_issue_is_refused_while_several_run() {
         let s = unlimited(vec![issue(), issue2()]).await;
