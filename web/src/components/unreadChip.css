@@ -116,25 +116,45 @@
   gap: 5px;
   max-width: 180px;
   padding: 1px 8px;
-  /* 沒事的那幾顆退到背景去：邊框與字都淡一級，讓「有事」與「正在看」有對比可以站出來
-     （2026-09-12 使用者：這一列在寬視窗上分不出狀態）。 */
-  border: 1px solid var(--border);
+  /* 沒事的那幾顆退到背景去：字淡一級、字重降一級，讓「有事」與「正在看」有對比可以站出來
+     （2026-09-12 使用者：這一列在寬視窗上分不出狀態）。邊框留 `--border-strong`：形狀本身
+     要讀得出來，淡到看不見反而變成「一排文字」。 */
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
   font-size: 12px;
+  font-weight: 500;
   line-height: 18px;
   cursor: pointer;
 }
 
 /* 有未讀＝「該去看」。三組（剛跑完／釘選／進行中）共用同一個意思、同一個畫法，
    一排晶片看過去才挑得出來是哪幾顆。排在 `:hover` 前面，hover 才蓋得過它。 */
+/*
+ * 洗底自己調，不用 `--accent-soft`：那組 token 是給 52px 側欄選取列用的，蓋在這一列的
+ * `--bg-sunken` 上只有 1.1（淺）／1.3（深）:1——20px 藥丸上等於沒有面積差，所以描邊、加 ring
+ * 都救不回來（2026-09-12 w168:pN 量測）。目標是跟旁邊閒置膠囊有 ~1.8:1 的圖形對比。
+ */
 .unread-chip.unread {
-  background: var(--accent-soft);
-  /* 底色之外再給一圈 accent 邊框：只有底色時，深色主題的 `--accent-soft` 跟中性底差不到
-     一階，一整列看過去挑不出來（2026-09-12 實拍）。 */
+  /* 實心 accent：量過了，洗底再怎麼調都不夠——淺色主題把 accent 混到 22%／32% 對這一列的
+     `--bg-sunken` 只有 1.26:1（深色 1.86:1），而 12px 的字要留在 4.5:1 以上就不能再壓深。
+     實心之後淺色 5.4:1、深色 3.7:1，形狀也一眼看得出來。最強的顏色給「待辦」是對的：
+     `current` 只是定位點，改用形狀（左側石墨條）表示。 */
+  background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent-ink);
+  color: var(--accent-text);
+}
+
+/* 實心底上的數字籤要翻過來，不然藍底藍籤看不見。 */
+.unread-chip.unread .unread-chip-n {
+  background: var(--accent-text);
+  color: var(--accent);
+}
+
+.unread-chip.unread:hover {
+  background: color-mix(in srgb, var(--accent) 85%, var(--text));
+  color: var(--accent-text);
 }
 
 .unread-chip:hover {
@@ -175,50 +195,58 @@
  * 留在原位的定位點，要看起來像被選中，不是被淡掉。
  */
 /*
- * 2026-09-12 使用者：1px 的 accent ring 在 2000px 的視窗上「色差不夠明顯」——一列九顆晶片
- * 掃過去看不出正在看的是哪一顆。改成**實心 accent**：這一列裡只會有一顆是實心的，所以它不必
- * 跟任何狀態比較，自己就是最強的那一個。底色原則因此改寫：實心＝你在這裡，淡底＝有未讀，
- * 透明＝沒事（`docs/UI-DECISIONS.md`）。`box-shadow` 仍然不佔版面，被選中不會讓這一列位移。
+ * 2026-09-12（第二輪，w168:pN 的診斷）：使用者連說兩次「不夠明顯」。第一版把 current 推成
+ * 實心 accent，反而讓它跟「有未讀」的藍**更像**——同一個色相上「填色 vs 描邊」在 18–20px 的
+ * 藥丸上是最弱的對比。所以兩件正交的事分兩個通道：
+ *
+ * - 有未讀＝**顏色與面積**（上面那檔藍洗底 + 放大的數字籤）。
+ * - 正在看＝**形狀與位置**：中性底 + 左側 3px 石墨條，比照側欄選取列的語言，不再搶藍。
+ *
+ * `inset` shadow 不佔盒模型，所以被選中仍然不會讓這一列位移。
  */
 .unread-chip.current {
-  border-color: var(--accent);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+  /* **形狀**才是這顆的主訊號：一列都是藥丸，只有它是方角，掃過去立刻挑得出來，而且完全不靠
+     顏色。999px 的圓角會把 `inset` 左條削成一條細月牙（2026-09-12 實拍），收成 6px 之後那條
+     3px 石墨條才是完整的一根。 */
+  border-radius: 6px;
+  box-shadow: inset 3px 0 0 var(--text);
+  font-weight: 650;
+  /* 左邊讓出那條的寬度，字不會壓在上面。 */
+  padding-left: 11px;
+}
+
+/* 同時有未讀：底維持未讀的實心藍（有東西等你看），左條改成反白色才看得見（你在這裡）。 */
+.unread-chip.current.unread {
   background: var(--accent);
+  border-color: var(--accent);
   color: var(--accent-text);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 32%, transparent);
-  font-weight: 650;
+  box-shadow: inset 3px 0 0 var(--accent-text);
 }
 
-.unread-chip.current:hover {
-  background: color-mix(in srgb, var(--accent) 85%, var(--text));
-  color: var(--accent-text);
+/* 方角照舊套在紅、黃、進行中那幾種身上——它是「你在這裡」的記號，跟顏色講的事無關。 */
+.unread-chip.current.needs-reply {
+  box-shadow: inset 3px 0 0 var(--danger);
 }
 
-/* 實心底上的未讀數字要翻過來，不然藍底藍籤看不見。 */
-.unread-chip.current .unread-chip-n {
-  background: var(--accent-text);
-  color: var(--accent);
-}
-
-/* 紅（要你回答）與黃（在等子 agent）講的是「該做什麼」，比「你在哪裡」重要，所以實心底不套
-   在它們身上——只加同一圈 ring 與粗體，顏色維持它們自己的語意。 */
-.unread-chip.current.needs-reply,
 .unread-chip.current.waits-kids {
-  color: inherit;
-  font-weight: 650;
+  box-shadow: inset 3px 0 0 var(--warn);
 }
 
+/* 紅（要你回答）與黃（等子 agent）講的是「該做什麼」，比「你在哪裡」重要：整顆填色維持它們
+   自己的語意，左條照舊疊上去。 */
 .unread-chip.current.needs-reply {
   background: var(--danger-soft);
-  color: var(--danger);
   border-color: var(--danger);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 32%, transparent);
+  color: var(--danger);
 }
 
 .unread-chip.current.waits-kids {
   background: var(--warn-soft);
-  color: var(--warn);
   border-color: var(--warn);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 32%, transparent);
+  color: var(--warn);
 }
 
 /* 停在要你回答的提示上（`needs-reply`；不叫 `blocked`——styles.css 有一條裸的 `.blocked` 是
@@ -231,8 +259,27 @@
   color: var(--danger);
 }
 
+/* 要你回答的那顆：圓點換成 `!`——紅色之外多一個非顏色的記號，跟「等子 agent」的黃點一眼分得開。 */
 .unread-chip.needs-reply .unread-chip-dot {
-  background: var(--danger);
+  width: 10px;
+  height: 10px;
+  border-radius: 0;
+  background: none;
+  animation: none;
+  display: grid;
+  place-items: center;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.unread-chip.needs-reply .unread-chip-dot::before {
+  content: '!';
+}
+
+.unread-chip.needs-reply:hover .unread-chip-dot {
+  color: #fff;
 }
 
 .unread-chip.needs-reply:hover {
@@ -259,15 +306,19 @@
   white-space: nowrap;
 }
 
+/* 未讀數字是這一列最強的**非顏色**訊號，原本 10px／14px 行高在 2000px 上讀不到。 */
 .unread-chip-n {
   flex: none;
-  padding: 0 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
   border-radius: 4px;
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  line-height: 14px;
+  line-height: 16px;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
