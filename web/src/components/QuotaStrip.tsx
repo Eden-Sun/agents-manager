@@ -3,6 +3,7 @@ import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetC
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
@@ -399,17 +400,6 @@ function Bar({
 
 type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
 
-/**
- * 手機一格只放得下一個數字，所以要挑「誰比較急」：先看 daemon 的旗標（critical > low > 一般），
- * 同一級才比剩得少的。**平手時留著現任**——常駐的 7d 不會因為另一個窗口剛好同分就換掉，
- * 那樣格子上的數字會在兩個窗口之間跳來跳去。門檻一律吃 daemon 的旗標，前端不另外寫死 pct。
- */
-function moreUrgent(w: WindowBar, best: WindowBar): boolean {
-  const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
-  if (rank(w) !== rank(best)) return rank(w) > rank(best)
-  return (w.pct ?? 100) < (best.pct ?? 100)
-}
-
 /** grok only reports a weekly window (stored in seven_day) — never call it 7d. */
 function weekLabel(kind: BotKind): '7d' | '週' {
   return kind === 'grok' ? '週' : '7d'
@@ -439,56 +429,17 @@ function Gauge({
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  // 上下兩條邊框量表**只有手機畫**（2026-09-11 使用者）：桌機同一格裡已經有 5h／7d 的 bar
-  // 與數字，邊框是同一份資訊再畫一次；手機的量表被壓成純文字 chip，看不到 bar，才需要它。
-  const borderWindows = focused && compact ? [
-    { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
-    { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
-  ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
+  // 手機的 chip 現在直接畫三條 bar（2026-09-13 使用者：「額度條所有都顯示，不僅目前」），
+  // 上下邊框量表是純文字 chip 時代的替代品，不再需要。
+  const borderWindows: { edge: string; label: string; window: QuotaWindow | null | undefined; pct: number | null }[] = []
   const fable = remaining(q?.fable)
   const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  // 手機：一格**只寫一個**窗口（2026-09-12 使用者，推翻同日稍早的「7d 常駐＋追加警戒窗口」）。
-  //
-  // 追加的那一個本來往下排，於是 `7d 19% / F 0%`、`7d 42% / 3m 0%` 這種格子變成兩行，整條
-  // 額度列跟著長高；而 390px 一次要放五格（cc0/cc1/cc2/codex/grok），沒有那個高度可以給。
-  //
-  // 保留的仍然是 7d（grok 是「週」）——它決定「今天還能不能開工」，5h 兩三個小時就回來了。
-  // 只有另一個窗口被 daemon 標成 low／critical **而且比 7d 更急**時才**取代**它，不並列：
-  // 「5h 只剩 3%」是現在就會擋住你的事，那時候 7d 還剩多少已經不是重點。
-  // 三個窗口的完整數字照舊在 tooltip 與點開的底部 sheet 裡，一個都沒有少。
-  if (compact && seven !== null) {
-    const shown: WindowBar = {
-      name: weekLabel(entry.kind),
-      pct: seven,
-      resetsAt: q?.seven_day?.resets_at ?? null,
-      low: q?.seven_day?.low ?? false,
-      critical: q?.seven_day?.critical ?? false,
-    }
-    // 5h / Fable 只有在 daemon 標成 low／critical 時才有資格搶這一格（門檻見 docs/API.md §12.4）。
-    const rivals: WindowBar[] = []
-    if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
-      rivals.push({
-        name: '5h',
-        pct: five,
-        resetsAt: q?.five_hour?.resets_at ?? null,
-        low: q?.five_hour?.low ?? false,
-        critical: q?.five_hour?.critical ?? false,
-      })
-    }
-    if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
-      rivals.push({
-        name: 'F',
-        pct: fable,
-        resetsAt: q?.fable?.resets_at ?? null,
-        low: q?.fable?.low ?? false,
-        critical: q?.fable?.critical ?? false,
-      })
-    }
-    windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
-  } else if (collapsed) {
+  // 手機（compact）跟桌機一樣列出全部窗口（2026-09-13 使用者，推翻 2026-09-12「一格只寫一個」）：
+  // 差別只在 CSS 把 bar 縮小、行距壓緊，見 mobileQuota.css。
+  if (collapsed) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
     windows = [
@@ -547,7 +498,7 @@ function Gauge({
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' blocked' : ''}`}
+      className={`quota-hp ${entry.kind} ${worst(q)}${compact ? ' compact' : ''}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' blocked' : ''}`}
       title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
@@ -594,21 +545,6 @@ function Gauge({
         aria-label={accessibleTitle}
         onClick={onOpen}
       >
-      {compact ? (
-        /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
-           （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
-        <span className="quota-compact">
-          {windows.map((w) => {
-            const soon = soonLabel(w.name, w.resetsAt, now)
-            return (
-            <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
-              <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
-              <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
-            </span>
-            )
-          })}
-        </span>
-      ) : (
       <span className={`quota-bars${windows.length === 1 ? ' single' : ''}`}>
         {windows.map((w) => {
           const span = WINDOW_MS[w.name]
@@ -631,7 +567,6 @@ function Gauge({
           )
         })}
       </span>
-      )}
       </button>
     </span>
   )
@@ -987,7 +922,8 @@ export function QuotaStrip({
    * 門檻量的是標題列（見 `avail`），不是視窗：`window.innerWidth` 少算了側欄與圖片暫存欄
    * 約 500px，同一個視窗寬在開／關側欄時給額度的空間差很多。
    */
-  const collapsed = box < 604
+  // 手機（compact）自己一列橫捲、每格畫全部窗口，不走「窄就只留最差的」那條（2026-09-13）。
+  const collapsed = !phone && box < 604
   /** 手機：標題列連一顆量表都放不下，剩餘量改用數字寫在 chip 上。CSS 也是 640px 那條線。 */
   const compact = phone
   /**
@@ -1043,7 +979,7 @@ export function QuotaStrip({
               <Gauge
                 entry={entry}
                 host={host}
-                collapsed={collapsed || compact}
+                collapsed={collapsed}
                 compact={compact}
                 focused={focused}
                 open={open}
