@@ -170,21 +170,23 @@ function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
   const role = bot.team?.role ?? 'worker'
   const siblings = useStore(useShallow((s) => teamMemberBots(s, bot.team?.team_id ?? null).map((b) => b.name)))
   const short = teamDisplayName(bot.name, siblings)
+  // listitem 放外層殼（display: contents），按鈕保留原生 button 語意（同 GroupChatPanel 的 MemberChip）。
   return (
-    <button
-      type="button"
-      className="member team-member"
-      role="listitem"
-      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}${task ? `\n目前：t${task.seq} ${task.title}` : ''}\n身分 ${bot.identity ?? '預設'}\n模型 ${bot.model ?? '（CLI 預設）'}${bot.effort ? ` · ${effortLabel(bot.effort)}` : ''}\ncwd ${bot.cwd ?? '（專案根目錄）'}\n點擊開啟它的單獨對話`}
-      onClick={() => selectBot(bot.id)}
-    >
-      <StatusLamp lamp={lamp} />
-      {/* SPEC-team §7.3：短名本身就是角色徽章（`pm` / `dev-1` / `rev`），不再重複一次角色字。 */}
-      <span className={`bot-badge ${bot.kind} team-role-badge ${role}`}>{short}</span>
-      {/* 一個 team 常常一個角色一個帳號（分散額度），所以身分要看得見，不能只留在 tooltip。 */}
-      <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
-      {task ? <span className="team-member-task">t{task.seq}</span> : null}
-    </button>
+    <span role="listitem" className="li-wrap">
+      <button
+        type="button"
+        className="member team-member"
+        title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}${task ? `\n目前：t${task.seq} ${task.title}` : ''}\n身分 ${bot.identity ?? '預設'}\n模型 ${bot.model ?? '（CLI 預設）'}${bot.effort ? ` · ${effortLabel(bot.effort)}` : ''}\ncwd ${bot.cwd ?? '（專案根目錄）'}\n點擊開啟它的單獨對話`}
+        onClick={() => selectBot(bot.id)}
+      >
+        <StatusLamp lamp={lamp} />
+        {/* SPEC-team §7.3：短名本身就是角色徽章（`pm` / `dev-1` / `rev`），不再重複一次角色字。 */}
+        <span className={`bot-badge ${bot.kind} team-role-badge ${role}`}>{short}</span>
+        {/* 一個 team 常常一個角色一個帳號（分散額度），所以身分要看得見，不能只留在 tooltip。 */}
+        <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+        {task ? <span className="team-member-task">t{task.seq}</span> : null}
+      </button>
+    </span>
   )
 }
 
@@ -226,7 +228,8 @@ function MemberStrip({ teamId }: { teamId: string }) {
           )
           if (own.length === 0) return null
           return (
-            <span key={i.id} className="team-member-issue" role="listitem">
+            // 分段層不是清單項目（裡面才是），用 group 免得 listitem 巢 listitem。
+            <span key={i.id} className="team-member-issue" role="group" aria-label={`#${i.issue_number} 的執行者`}>
               <span className="team-member-issue-tag" title={i.branch ?? undefined}>
                 #{i.issue_number}
               </span>
