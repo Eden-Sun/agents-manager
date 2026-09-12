@@ -2,6 +2,12 @@
 
 這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。人類讀的說明在 `README.md`，規格在 `docs/SPEC.md`、`docs/SPEC-team.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
 
+## 修正 Bot 直接向 AGM 申請（使用者授權，2026-09-12）
+
+- 修正 Bot 在既有任務範圍內，可直接向 AGM 申請 ownership 協調、跨 Bot 調度、Rust release rebuild 或 daemon 重啟；不必先問使用者是否可以聯絡 AGM，也不必請使用者轉達。
+- AGM 核對其他 Bot 的 WIP、進行中回合與預計影響後，直接核准、排程或拒絕。AGM 明確核准後，修正 Bot 可直接執行並回報證據，不再要求使用者二次同意。
+- AGM 忙碌或尚未核准時，等待 AGM 調度，不把例行申請退回使用者。此授權限於原任務；刪除設定／歷史等原本明訂需使用者確認的操作仍依既有規則。
+
 ## 回覆語言
 繁體中文（zh-TW）。程式註解與 commit 訊息可中可英，禁止日文。
 
