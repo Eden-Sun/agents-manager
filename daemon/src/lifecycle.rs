@@ -83,11 +83,32 @@ pub async fn insert_message_grouped(
     snapshot: Option<&str>,
     group_id: Option<&str>,
 ) -> anyhow::Result<db::Message> {
+    insert_message_full(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id, None).await
+}
+
+/// 同上，外加 `relay_from`——「這句話是別的 bot 送進來的，不是使用者自己打的」（SPEC §6.5d）。
+///
+/// 為什麼要在 INSERT 就寫進去，而不是插完再 UPDATE：`message_added` 是插入的當下就推出去的，
+/// 事後補欄位的話畫面上那顆泡泡要等重新載入才會變成「AGM →」。
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_message_full(
+    app: &Arc<App>,
+    conversation_id: &str,
+    turn_id: Option<&str>,
+    role: &str,
+    content: &str,
+    source: &str,
+    incomplete: bool,
+    snapshot: Option<&str>,
+    group_id: Option<&str>,
+    relay_from: Option<&str>,
+) -> anyhow::Result<db::Message> {
     let id = db::ulid();
+
     let now = db::now();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, relay_from, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(conversation_id)
@@ -98,6 +119,7 @@ pub async fn insert_message_grouped(
     .bind(incomplete as i64)
     .bind(snapshot)
     .bind(group_id)
+    .bind(relay_from)
     .bind(&now)
     .execute(&app.db)
     .await?;

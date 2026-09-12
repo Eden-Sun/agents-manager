@@ -127,6 +127,27 @@ am_agent_start() {
     exec "$AM_HERDR" agent start "$@"
 }
 
+am_agent_prompt() {
+    shift 2
+    case "${1:-}" in
+        -* | "")
+            # 旗標在名字前面（或根本沒給名字）：交給真的 herdr 去講清楚，我們不猜。
+            exec "$AM_HERDR" agent prompt "$@"
+            ;;
+    esac
+    _name=$(am_child_name "$1")
+    shift
+    if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
+        # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。
+        curl -s -m 2 -o /dev/null -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
+            -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
+            --data-urlencode "bot_id=${AM_BOT_ID}" \
+            --data-urlencode "to_agent=${_name}" \
+            --data-urlencode "text=$*" 2>/dev/null || true
+    fi
+    exec "$AM_HERDR" agent prompt "$_name" "$@"
+}
+
 # herdr spawns a pane from the *server*, not from this shell, so nothing is inherited: a child
 # pane would come up on the user's default account, with no hook token and no way to name its
 # own children. Pass the parent's environment down explicitly, without overriding a value the
@@ -151,6 +172,7 @@ fi
 
 case "${1:-} ${2:-}" in
     "agent start") am_agent_start "$@" ;;
+    "agent prompt") am_agent_prompt "$@" ;;
     "pane split" | "pane new" | "tab create") am_forward_with_env "$@" ;;
     *) exec "$AM_HERDR" "$@" ;;
 esac
@@ -251,6 +273,27 @@ mod tests {
             s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", "review", "--kind", "claude"]);
         assert_eq!(out, ["agent", "start", "proj-abc123-review", "--kind", "claude"]);
         assert!(err.contains("proj-abc123-review"), "the rename is announced: {err}");
+    }
+
+    /// `agent prompt` 也要補前綴（不然送不到那顆子 agent），而且只補名字、內容原樣轉。
+    /// 報給 daemon 的那一步在測試環境裡沒有 daemon 可報，失敗也不能擋住轉發。
+    #[test]
+    fn agent_prompt_prefixes_the_target_and_forwards_the_text() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(
+            &[("AM_AGENT_NAME", "proj-abc123")],
+            &["agent", "prompt", "review", "把 daemon 重建一次，然後回報"],
+        );
+        // 假 herdr 一行印一個參數，所以這裡順便證明：整段文字仍是**一個**參數，沒有被拆開。
+        assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "把 daemon 重建一次，然後回報"]);
+    }
+
+    /// 名字前面就帶旗標時不猜：整串原樣交給真的 herdr。
+    #[test]
+    fn an_agent_prompt_with_flags_first_is_forwarded_verbatim() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "prompt", "--json", "review", "hi"]);
+        assert_eq!(out, ["agent", "prompt", "--json", "review", "hi"]);
     }
 
     /// A name that already carries the prefix is left alone — and so is the argv order, flags

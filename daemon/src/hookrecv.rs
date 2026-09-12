@@ -57,6 +57,16 @@ pub async fn receive(
     (StatusCode::OK, Json(json!({})))
 }
 
+/// 這句 prompt 回音是別的 agent 打進來的嗎？（SPEC §6.5d）
+///
+/// hook 只帶回音本身，說不出是誰打的。PATH 上的 herdr shim 在 `agent prompt` 轉發前會先向
+/// `/relay/announce` 報一聲，所以這裡拿 run 的 agent 名字去認領；認不出來就回 `None`，那則訊息
+/// 維持「使用者自己打的」——寧可少標一次，也不要冤枉一句話。
+fn relay_source(run: Option<&db::Run>, echo: &str) -> Option<String> {
+    let agent = run?.agent_name.as_deref()?;
+    crate::agent_relay::claim(agent, echo)
+}
+
 #[derive(Debug)]
 enum HookKind {
     /// Session / thread identity only — never creates a Turn.
@@ -521,7 +531,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         let have = db::turn_user_messages(&app.db, &t.id).await?;
                         if hook_user_is_new(&have, u) {
-                            lifecycle::insert_message(app, &conv, Some(&t.id), "user", u, "hook", false, None).await?;
+                            let from = relay_source(run.as_ref(), u);
+                            lifecycle::insert_message_full(app, &conv, Some(&t.id), "user", u, "hook", false, None, None, from.as_deref()).await?;
                         }
                     }
                 }
@@ -577,7 +588,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             .execute(&app.db)
             .await?;
             if let Some(u) = user.filter(|s| !s.is_empty()) {
-                lifecycle::insert_message(app, &conv, Some(&tid), "user", &u, "hook", false, None).await?;
+                let from = relay_source(run.as_ref(), &u);
+                lifecycle::insert_message_full(app, &conv, Some(&tid), "user", &u, "hook", false, None, None, from.as_deref()).await?;
             }
             if !body_text.is_empty() {
                 lifecycle::insert_message(app, &conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?;

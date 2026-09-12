@@ -1041,6 +1041,18 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 - start 失敗的錯誤與 `POST /bots/{id}/start` 相同（502 / 409 / 404）。
 - 過程中會推 `bot_status`（stopping → offline → starting → idle）。
 
+### `POST /relay/announce`（2026-09-12 新增，SPEC §6.5d）
+
+**不在 `/api` 下**，也不吃 UI token：送出的是 pane 裡的 herdr shim。驗證用該 bot 的 `hook_token`
+（header `X-AM-Bot-Token`），跟 `/hook/{provider}` 同一把鑰匙。
+
+表單編碼（`application/x-www-form-urlencoded`）：`bot_id`、`to_agent`、`text`。回 `200 {}`；
+bot 不存在、已刪除或 token 不符 → `401`。
+
+用途：`herdr agent prompt` 是 agent 直接打進另一個 agent 的 pane，daemon 只看得到 prompt 回音。
+這一報讓 daemon 認得出來源，回音進對話時就帶著 `relay_from`（UI 畫成「AGM → …」而不是使用者自己打的）。
+記錄只留在行程內、5 分鐘過期，認領一次就用掉。
+
 ### 10.3a `POST /api/bots/restart-idle`（2026-09-09 新增，SPEC §6.9）
 
 一鍵把「帶著 claude 更新且現在閒置」的 bot 全部 exit + resume。無 body。

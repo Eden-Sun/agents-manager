@@ -403,6 +403,26 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 
 子 agent 要指定自己的 pane 時用 herdr 自己注入的 `$HERDR_PANE_ID`（或 `--current`），不需要另外一個變數。
 
+### 6.5d agent 對 agent 的 prompt 要標出來源（2026-09-12）
+
+bot 之間互相派工有兩條路。走 daemon 的（`POST /api/bots/{id}/prompt`、總管的 assignment）會寫
+`messages.relay_from`，UI 畫成「AGM → 這顆 bot」。另一條是 agent 自己 `herdr agent prompt <名字> …`：
+daemon 沒有參與，那句話只以 **prompt 回音**的形式從 hook 回來（`source='hook'` 的 user 訊息），於是
+總管的裁示在對話裡跟使用者自己打的字長得一模一樣（2026-09-12 使用者：「這種 agm 的訊息標示為 agm 訊息」）。
+
+補法跟 §6.5b 同一種：**做成機制，不是請求**。
+
+1. PATH 上的 shim 攔 `agent prompt`：補完名字前綴之後，先 `POST /relay/announce`
+   （表單欄位 `bot_id`／`to_agent`／`text`，驗證用該 bot 的 `hook_token`，header `X-AM-Bot-Token`，
+   跟 hook 同一把鑰匙），再照常轉給真的 herdr。報不成功（沒有 curl、daemon 沒開）就只是少一次標示，
+   訊息照送。名字前面帶旗標時整串原樣轉發，不猜。
+2. daemon 把「誰要送什麼給哪個 agent」記在一張行程內的短命表（5 分鐘）。
+3. 那句話的回音從 hook 回來時，用 run 的 `agent_name` 去認領：比對時空白全部忽略（TUI 會在任意位置
+   折行、補縮排），長度取兩邊的較短者，至少要對上 12 個字元；短於此就要求完全一樣（「繼續」這種字
+   使用者自己也會打）。認到就在**插入當下**寫進 `relay_from`——事後補欄位的話，`message_added` 已經
+   推出去了，畫面上那顆泡泡要等重新載入才會變。
+4. 認不出來就維持 NULL＝使用者自己打的。寧可少標一次，也不要把使用者的話說成是別人送的。
+
 ### 6.5c 給 claude 注入 herdr skill（2026-09-07）
 
 啟動 claude bot 前，daemon 把 `herdr --skill` 的輸出寫到那個身份的
