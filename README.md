@@ -42,9 +42,29 @@ flowchart LR
 
 數字越大的檔名通常越新。下面幾張是目前 UI，不是早期 demo。
 
-**主畫面對話** — 側欄依專案列出 bot 與燈號；右側是選定 bot 的氣泡、即時輸出、排隊中的下一則與額度條。回覆來源標在氣泡上（`hook` 或 `terminal_fallback`）。側欄左上角是 `AG Man ｜ pane N ｜ RAM …`：現在開著幾個 herdr pane、所有 herdr 進程樹吃掉多少記憶體。
+**主畫面對話** — 側欄依專案列出 bot 與燈號；右側是選定 bot 的氣泡、即時輸出、排隊中的下一則與額度條。回覆來源標在氣泡上（`hook` 或 `terminal_fallback`）。側欄左上角是 `AG Man ｜ pane N ｜ RAM 已用 · 剩 可用/總量`：現在開著幾個 herdr pane、herdr 進程樹吃掉多少記憶體、整機還剩多少。
 
-![主畫面對話](docs/screenshots/360-readme-chat-dark.png)
+標題列第一行是名字、★、⚙；第二行是 **kind 圖示 · 模型 · pane id**。kind 有品牌色（claude 橘、codex OpenAI 綠、grok 紫），模型 chip 跟著染同一色；codex 的模型名省掉每顆都一樣的 `gpt-`（`6-astra`，完整 id 在 tooltip）。標題列下面那排是 **★ 主力列**：釘選的 bot 常駐在前，剛跑完的與進行中的接在後面。
+
+![主畫面對話](docs/screenshots/readme/450-readme-chat-dark.png)
+
+**對話裡「誰說的」分得出來** — 靠右的藍泡泡**只屬於使用者**。其他來源一律靠左、換面板底色加左槓，並在上方標來源：
+
+- `AGM → x`：總管經 daemon 派來的裁示／交辦（`messages.relay_from` 記的是 AGM 的 bot id）。
+- `x（轉述）`：沒有 `relay_from` 但第一行是 `AGM …：`、`[AGM …]` 或 `[來自 <bot> / <agent>]` 抬頭——使用者親手貼進來的總管訊息、或 bot 之間走 `herdr agent prompt` 而 daemon 沒認領到的那種。
+- `daemon 自動觸發`：排程腳本與 daemon 自己發的通知（`relay_from = "daemon"`）；`[AG Man 通知]` 另有黃槓。
+
+bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要帶 `relay_from=<自己的 bot_id>`（省略＝使用者自己打的，不存在的值回 400）；走 `herdr agent prompt` 的由 PATH shim 經 `/relay/announce` 認領，第一行再順手寫 `[來自 …]` 抬頭當備援。規格見 [`docs/API.md`](docs/API.md) 的 prompt 一節。
+
+![手機版對話與來源標示](docs/screenshots/readme/451-readme-mobile-light.png)
+
+**需要你回應時不會被藏起來** — agent 停在 y/n、選單這類提示（`blocked`）時：
+
+- 標題列第二行最前面常駐紅色 **`● 需要回應`**，不管在對話、終端還是 shell 分頁都在，點一下開全畫面終端；解除就消失。
+- ★ 主力列那顆變成紅框紅點；**在等子 agent** 的則是黃色（紅色只留給「要你本人動手」）。側欄的父列也會在燈號旁掛一顆黃點：實心＝子 agent 還在跑，空心＝子 agent 回報了還沒人看。
+- claude 的編號選單直接畫成可以點的清單，不必按 ↓ 找選項；**多分頁、複選的問卷先把每一頁讀完，離線勾好再一次送出**，送出前重讀畫面比對，對不上就整批不送。認不出來的畫面退回原本的終端快照＋按鍵面板。
+
+![blocked 的多分頁問卷](docs/screenshots/blocked-choices/draft-mobile-390-loaded.png)
 
 側欄可以搜尋 bot、在列上直接改暱稱，每列的操作鈕（啟動 / 停止 / 設定 / 刪除）排成 2×2；燈號是環狀，看得出「連線中」與「在跑」的差別。
 
@@ -115,6 +135,9 @@ cargo dev
 # ...
 cargo down    # 兩個都停掉
 ```
+
+> **有 AGM 總管的機器上，5173 看的是已經合併進 `origin/main` 的東西**：dev server 由 AGM 的看門狗維護（不是 `cargo dev` 起的那顆），吃的是一棵只跟 `origin/main` 的乾淨 worktree（每 5 分鐘 `git fetch && git reset --hard origin/main`），推上去重新整理就看得到。bot 要驗自己**還沒提交**的改動請另開自己的 port，不要佔 5173——那是使用者的視窗（[SPEC §18.1](docs/SPEC.md)）。7788 是正式 daemon，前端改動要等下一次 release 重建才會進去。
+
 
 `cargo dev` / `cargo down` 是 `xtask/` 的別名（見 `.cargo/config.toml`），行為是 `cargo build --bin agents-managerd` + `bun install` 之後，把 daemon 與 `vite --host` 當成一般子行程啟動，PID 記在 `target/dev.pids`，log 在 `target/dev-logs/`。
 
