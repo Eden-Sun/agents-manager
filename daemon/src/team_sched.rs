@@ -2416,7 +2416,34 @@ async fn report(
         Ok(true) => note(app, &ctx.team.id, json!({"action": "auto_commit", "bot": worker.name})).await?,
         Ok(false) => {}
         Err(e) => {
-            note(app, &ctx.team.id, json!({"action": "auto_commit_failed", "error": e.to_string()})).await?;
+            // §6.3: nothing the worker wrote may be lost. Sending the task on regardless used
+            // to merge a branch missing its last changes, and `retire_workers`' `worktree
+            // remove --force` then threw them away (2026-09-12 review, ops #23). The commit is
+            // handed back to the executor instead; the task keeps its state, so the next
+            // report takes the same edge. Bounded like a repair: the third failure in a row on
+            // one task pauses the team, with the relay left pending for "continue".
+            let attempt = commit_failures_of(app, &ctx.team.id, &task.id).await + 1;
+            team::record_event(
+                app,
+                &ctx.team.id,
+                "note",
+                None,
+                Some(&worker.id),
+                Some(&task.id),
+                None,
+                json!({"action": "auto_commit_failed", "bot": worker.name, "task": task.seq,
+                       "error": e.to_string(), "attempt": attempt}),
+            )
+            .await?;
+            let text = format!(
+                "系統替你把未提交的改動 commit 時失敗：{e}。請在你的 worktree 自己執行 \
+                 `git add -A && git commit -m \"…\"`（不要 push、不要切分支），確認 `git status` 乾淨後再 `report` 一次。"
+            );
+            enqueue(app, &ctx.team.id, None, &worker.id, Some(&task.id), "commit_failed", text).await?;
+            if attempt > MAX_REPAIRS {
+                pause(app, &ctx.team, "upstream").await?;
+            }
+            return Ok(());
         }
     }
     let integration = ctx.integration_of(&task);
@@ -2439,6 +2466,19 @@ async fn report(
     let next = if task.state == "rebasing" { "merging" } else { "reported" };
     set_task_state(app, &task.id, next).await?;
     Ok(())
+}
+
+/// How many times the daemon has failed to commit this task's worktree for its executor.
+async fn commit_failures_of(app: &Arc<App>, team_id: &str, task_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM team_events WHERE team_id = ? AND task_id = ? AND kind = 'note'
+           AND json_extract(payload_json, '$.action') = 'auto_commit_failed'",
+    )
+    .bind(team_id)
+    .bind(task_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap_or(0)
 }
 
 /// The little status table appendix A.4 puts under a batch of reports.
@@ -5117,6 +5157,62 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
     /// This is the failure mode that took the daemon down earlier in this branch's life — a
     /// schema change that only worked on a fresh file — so it is checked directly rather
     /// than inferred from "the tests pass on a new database".
+    /// ops #23 (2026-09-12): a `report` whose worktree the daemon cannot commit (a leftover
+    /// `index.lock` here) used to be sent to review anyway — the merge then missed the last
+    /// changes and the worktree removal after the issue lost them for good. Now the commit is
+    /// handed back to the executor, the task stays put, and the third failure pauses the team.
+    #[tokio::test]
+    async fn a_failed_auto_commit_goes_back_to_the_worker_not_to_review() {
+        let s = S::new(1, false).await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let wt = s.wt("dev-1");
+        std::fs::write(wt.join("a.txt"), "v1\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "a"]);
+        // The change that must not be lost: written after the last commit.
+        std::fs::write(wt.join("b.txt"), "v2\n").unwrap();
+        let index = git(&wt, &["rev-parse", "--git-path", "index"]);
+        let index = if index.starts_with('/') { std::path::PathBuf::from(index) } else { wt.join(index) };
+        let lock = std::path::PathBuf::from(format!("{}.lock", index.display()));
+        std::fs::write(&lock, "").unwrap();
+
+        let before = s.tasks().await[0].state.clone();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        let task = &s.tasks().await[0];
+        assert_eq!(task.state, before, "not sent on with an uncommitted worktree");
+        // The dispatch relay is still pending too (nothing is armed here); count only ours.
+        let commit_relays = async |s: &S| -> Vec<Value> {
+            s.pending(&d1)
+                .await
+                .iter()
+                .map(|e| serde_json::from_str::<Value>(&e.payload_json).unwrap())
+                .filter(|p| p["action"] == "commit_failed")
+                .collect()
+        };
+        let relay = commit_relays(&s).await;
+        assert_eq!(relay.len(), 1);
+        assert!(relay[0]["text"].as_str().unwrap().contains("git add -A"), "{}", relay[0]);
+        assert!(!git(&wt, &["status", "--porcelain"]).is_empty(), "the worktree is untouched");
+        assert_eq!(s.team().await.phase, "working", "one failure is not a pause");
+
+        // Two more failures in a row: the third pauses the team, the relay stays pending.
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        assert_eq!(s.team().await.phase, "working");
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(commit_relays(&s).await.len(), 3, "the relays wait for continue");
+
+        // The lock is gone: the next report commits and goes to review as usual.
+        std::fs::remove_file(&lock).unwrap();
+        s.unpause().await;
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        assert_eq!(s.tasks().await[0].state, "reported");
+        assert!(git(&wt, &["status", "--porcelain"]).is_empty());
+        assert!(git(&wt, &["log", "--oneline"]).contains("wip(dev-1)"));
+    }
+
     #[tokio::test]
     async fn an_older_database_gains_workspace_id_without_losing_its_rows() {
         let dir = std::env::temp_dir().join(format!("am-migrate-{}", db::ulid()));
