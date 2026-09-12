@@ -2075,7 +2075,11 @@ async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcEr
 }
 
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let run_id = lifecycle::restart_bot(&app, &id).await?;
+    // 子 agent 的 pane 是父 agent 開的，一般的 stop + start 會拒絕（SPEC §6.5a）：改成在它
+    // 自己那個 pane 裡 exit + resume，套用 claude 更新的入口對子 agent 才是通的。
+    let child = db::bot(&app.db, &id).await.map_err(any_err)?.is_some_and(|b| b.managed_by == "child");
+    let run_id =
+        if child { lifecycle::restart_child_in_pane(&app, &id).await? } else { lifecycle::restart_bot(&app, &id).await? };
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
 }
