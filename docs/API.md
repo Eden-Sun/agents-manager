@@ -146,13 +146,17 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
           "primary": false,
           "run": null,
           "lamp": "offline",
-          "unread": 0
+          "unread": 0,
+          "queued_turn": null
         }
       ]
     }
   ]
 }
 ```
+
+`queued_turn`：這顆 bot 排在下一個要送的 Turn（`status = "queued"`，§6 的 turn 物件），沒有就 `null`。
+前端據此把輸入框畫成「已排隊」而不是可送出。
 
 ### `run` 物件（`null` = 目前沒有 active Run）
 
@@ -344,7 +348,7 @@ Turn 或 user message，重試不會因為上一回合卡住而得到 409。
     {
       "id": "01M1...", "conversation_id": "01M1...", "run_id": "01M1...",
       "origin": "web" | "external",
-      "status": "in_flight" | "completed" | "completed_fallback" | "failed",
+      "status": "queued" | "in_flight" | "completed" | "completed_fallback" | "failed",
       "delivery": "pending" | "ok" | "unknown" | "failed",
       "client_request_id": "...", "native_session_id": null, "native_turn_id": null,
       "created_at": "...", "completed_at": null
