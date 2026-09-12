@@ -112,6 +112,7 @@ function BotRow({
   childCount = 0,
   collapsed = false,
   kidsLamp = null,
+  kidsWait = null,
   kidsListId,
   compact = false,
   onToggleChildren,
@@ -129,6 +130,8 @@ function BotRow({
   collapsed?: boolean
   /** 收合時底下子 agent 最要緊的燈號（blocked > working）；null = 沒有在忙的，不畫。 */
   kidsLamp?: Lamp | null
+  /** 這一列在等它的子 agent：`busy` = 還有 child 在跑／卡住，`reply` = child 回報了還沒看。 */
+  kidsWait?: KidsWait | null
   /** 展開中的子 agent 清單的 id：DOM 上它是這一列的兄弟，用 `aria-owns` 掛回這一項底下。 */
   kidsListId?: string
   /** 子 agent 列：單行、不重複 kind，只留身份／模型。 */
@@ -305,6 +308,18 @@ function BotRow({
         </button>
       ) : null}
       <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
+      {/* 等子 agent 的黃點：紅色留給「要你本人回答」，這裡只是「底下還沒好」。 */}
+      {kidsWait ? (
+        <span
+          className={`bot-kids-wait ${kidsWait}`}
+          title={
+            kidsWait === 'busy'
+              ? `${bot.name} 在等底下的子 agent 做完`
+              : `${bot.name} 的子 agent 回報了，還沒有人看`
+          }
+          aria-label={kidsWait === 'busy' ? '等子 agent 完成' : '子 agent 已回報'}
+        />
+      ) : null}
       {/* 「已完成（未讀）」：燈號說的是**現在**在做什麼，這顆說的是**你還沒看過**幾回合——
           兩件不同的事，所以是兩個記號，並排在名字前面。`!` 讓它就算被截斷也不會被讀成模型參數。 */}
       {unread > 0 ? (
@@ -787,6 +802,25 @@ function ProjectTitle({
   )
 }
 
+/**
+ * 這一列在等它的子 agent 嗎（2026-09-12 使用者：「這個 parent 要該標注 waiting children response」）。
+ *
+ * 分兩種，因為要做的事不一樣：`busy` 是子 agent 還在跑／卡住，父列只是在等；`reply` 是子 agent
+ * 已經回報、還沒有人看過（子列上的 `!N`）——那是父列該去收的東西。收合與展開都要畫：展開時
+ * 子列雖然看得到，但父列自己那顆燈是綠的，整條看過去會以為它沒事。
+ */
+export type KidsWait = 'busy' | 'reply'
+
+function kidsWaitOf(st: Parameters<typeof botLamp>[0], unread: Record<string, number>, ids: string[]): KidsWait | null {
+  let out: KidsWait | null = null
+  for (const id of ids) {
+    const l = botLamp(st, id)
+    if (l === 'working' || l === 'blocked') return 'busy'
+    if ((unread[id] ?? 0) > 0) out = 'reply'
+  }
+  return out
+}
+
 /** 一群子 agent 裡最要緊的燈號：blocked > working；都不是就 null（idle / done 不值得在父列上亮）。 */
 function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | null {
   let out: Lamp | null = null
@@ -844,6 +878,7 @@ export function Sidebar() {
   const runs = useStore((s) => s.runs)
   // 父列收合時要看子 agent 的燈號；`runs` 已訂閱，子 agent 狀態變了這裡就會重畫。
   const lampState = useMemo(() => ({ ...useStore.getState(), runs }), [runs])
+  const unreadMap = useStore((s) => s.botUnread)
   const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
   const [botFormFor, setBotFormFor] = useState<string | null>(null)
@@ -1258,6 +1293,8 @@ export function Sidebar() {
                   const shut = kids.length > 0 && collapsed.has(b.id) && !query
                   // 收合時把子 agent 裡最要緊的燈號帶到父列：卡住的優先於在忙的，其餘不畫。
                   const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
+                  // 收合與否都算：父列自己的燈說不出「底下還沒好」。
+                  const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
                   return (
                     <Fragment key={b.id}>
                       <BotRow
@@ -1266,6 +1303,7 @@ export function Sidebar() {
                         childCount={kids.length}
                         collapsed={shut}
                         kidsLamp={kidsLamp}
+                        kidsWait={kidsWait}
                         kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
                         onToggleChildren={() => toggleChildren(b.id)}
                         drag={drag}

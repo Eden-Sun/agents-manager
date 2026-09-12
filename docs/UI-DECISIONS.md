@@ -1446,3 +1446,16 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
 
 截圖：`draft-mobile-390-loaded.png`（預載完）、`draft-mobile-390.png`、`draft-desktop-1440.png`
 （勾了兩項、還沒送出）。真的 carbis 那題是使用者本人要回答的，不能拿來按。
+## 側欄父列標「在等子 agent」（2026-09-12）
+
+使用者看側欄：`grok-1` 底下的子 agent 有 `!1` 沒人看，父列自己卻是綠燈閒置——「這個 parent
+要該標注 waiting children response」。原本只有**收合**時會把子 agent 的燈號帶到收合鈕上
+（`.bot-kids-lamp`），展開時父列完全看不出底下還沒好。
+
+父列的燈號旁多一顆 7px 的黃點（`.bot-kids-wait`），收合與展開都畫，分兩種：
+- **實心**＝還有子 agent 在跑或卡住（`busy`）：父列只是在等。
+- **空心**＝子 agent 回報了還沒人看（`reply`，就是子列上的 `!N`）：那是父列該去收的。
+
+黃色而不是紅色：紅色在這個 app 裡只代表「要你本人回答」（blocked 燈、★ 列的 `needs-reply`），
+子 agent 沒好不需要使用者動手。兩種狀態同時成立時 `busy` 優先。實測：PT全（子 agent `review`
+有 `!2`）畫空心、AGM（子 agent 在跑）畫實心。截圖 `docs/screenshots/kids-wait/`。
