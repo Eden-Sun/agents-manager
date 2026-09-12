@@ -99,7 +99,7 @@ pub async fn sh(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> 
     // is carried back in stdout instead.
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     let wrapped = wrap_remote_script(&full);
-    let raw = conn.ssh_exec_path(&wrapped).await?;
+    let raw = conn.ssh_exec_path_timeout(&wrapped, timeout).await?;
     let (body, code) = parse_remote_output(raw);
     Ok(Out { code, stdout: body, stderr: String::new() })
 }

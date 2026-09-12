@@ -111,7 +111,7 @@ async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    conn.ssh_exec_path(script).await
+    conn.ssh_exec_path_timeout(script, timeout).await
 }
 
 /// PATH prefix so `gh` / `git` from Homebrew are found even from a launchd daemon.
