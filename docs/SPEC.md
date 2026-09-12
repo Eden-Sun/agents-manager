@@ -1272,18 +1272,25 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   `/opt/homebrew/bin`（bun）與 `/Users/m4p/.local/bin`（node）——launchd 不給登入 shell 的 PATH，
   少了這行就會「手動跑得起來、排程跑不起來」。看門狗自己用 bun 沒問題：它只做 fetch / lsof / spawn，
   不當 HTTP 代理，碰不到上面那個 socket 差異。腳本的行為順序：
-  1. `curl -sf -m 3 http://127.0.0.1:5173/` 有回應 → 直接 `exit 0`，**不寫 log**（每 5 分鐘一行會把 log 灌爆）。
-     健康檢查走 loopback 就夠：本機看得到就代表有在聽。
-  2. 沒回應但 port 有人占著 → 記下 pid 與完整 command，**不 kill**（可能是別人的程序），`exit 0`。
+  1. **健康 = 對外可達**，不是「127.0.0.1 有回應」：先用 `lsof -nP -iTCP:5173 -sTCP:LISTEN -Fpn` 看
+     LISTEN 的位址，綁 `*:5173`／`0.0.0.0:5173` 且 curl `127.0.0.1` 有回應才算健康 → 直接 `exit 0`，
+     **不寫 log**（每 5 分鐘一行會把 log 灌爆）。只綁 `127.0.0.1`／`[::1]` 的實例本機看得到、使用者的手機
+     看不到，一律當成**錯誤實例**。（`lsof` 要用 `-F` 機器格式：人類格式的最後一欄是 `(LISTEN)` 不是位址，
+     照欄位切會把每顆都誤判成 loopback-only。）
+  2. 錯誤實例怎麼處理，看它是誰的：
+     - **vite 且 `ppid=1`**（孤兒，起它的人已經結束）→ kill 掉，寫 `收掉孤兒 loopback-only vite pid N`，
+       等 port 放開（最多 5 秒，沒放開就交下一輪），再照下面拉起一顆綁 `0.0.0.0` 的。
+     - **vite 但還有活著的父程序** → 某個 bot 正在用，只寫 `…以 loopback-only 占用，需人工處理`，不 kill。
+     - **非 vite 程序** → 一律只記錄 pid 與完整 command，不 kill。
   3. 找不到 node 或找不到 `vite.js` → 寫 log 跳過這輪，**不拿 bun 代跑**（等於把 crash 裝回去）。
   4. 真的沒人聽 → `nohup node vite.js --host 0.0.0.0 --port 5173 --strictPort`，最多等 15 秒複驗；
      仍失敗就寫 log 交給下一輪，**不在腳本裡重試迴圈**（web/ 編不過時才不會每 5 分鐘炸一次）。
   log 在 `supervisor/AGM/dev-server.log`；launchd 自己的 stdout 在 `dev-server.launchd.log`。
   舊的 bash 版留成 `dev-server-kick.sh.bak-bun`，確認 .ts 版跑滿一輪沒問題後刪掉。
-- **已知缺口**：健康檢查只打 `127.0.0.1`，所以一個只綁 `[::1]`（或只綁別的介面）的 vite 會讓看門狗
-  永遠判定「port 被占用、不動它」，5173 對使用者等於掛著。2026-09-12 就發生過一次：別的 bot 用
-  `npx vite --port 5173 --strictPort`（沒有 `--host`）起了一顆，只聽 IPv6 loopback。要嘛健康檢查也試
-  `localhost`／`[::1]`，要嘛規定所有人起 5173 都要帶 `--host 0.0.0.0`——尚未決定。
+- 這條規則的由來：2026-09-12 有 bot 用 `npx vite --port 5173 --strictPort`（沒帶 `--host`）起了一顆只聽
+  `[::1]` 的實例，看門狗當時只認「127.0.0.1 有回應」，於是判定「被占用、不動它」，5173 對使用者等於掛著。
+  現在兩道都補上了：`vite.config.ts` 的 `server.host: true` 讓手動起的也對外，看門狗則會收掉沒人認領的
+  loopback-only 孤兒。
 - **其他 port 不歸看門狗管**：5188 那類 `VITE_MOCK=1` 實例是各 bot 自己的測試環境，AGM 不碰、不清、不重啟。
 - **驗證方式**（改動這條規則或腳本後要重跑）：kill 掉現有 vite → 跑一次 kick.sh → `curl http://127.0.0.1:5173/`、
   `curl http://<LAN IP>:5173/`、`curl http://<LAN IP>:5173/api/session` 都要 200（最後一項才證明代理活著）。
