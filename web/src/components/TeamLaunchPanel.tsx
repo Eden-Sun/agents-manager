@@ -254,8 +254,9 @@ export function TeamLaunchPanel({
     [pm, worker, reviewer, hasReviewer],
   )
 
-  /** §9.2：任一角色所選 kind 的已用量 ≥ quota_stop_pct → 不給建立。 */
+  /** §9.2：任一角色所選 kind 的已用量 ≥ quota_stop_pct → 不給建立。SPEC-team §4.5：100 = 關掉額度檢查。 */
   const blockedKind = roles.find((r) => {
+    if (budget.quota_stop_pct >= 100) return false
     // 額度按主機分（SPEC §14）：team 開在哪台，就看哪台的列。
     const key = quotaKey(host, r.spec.identity ? `${r.spec.kind}:${r.spec.identity}` : r.spec.kind)
     const used = worstUsedPct(quota[key] ?? quota[quotaKey(host, r.spec.kind)])
