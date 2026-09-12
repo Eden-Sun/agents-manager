@@ -142,6 +142,17 @@ pub fn router(app: Arc<App>) -> Router {
         // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
         .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review))
         .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents))
+        // 重建／重啟的核准與執行租約（SPEC §18.10）。
+        .route(
+            "/supervisor/approvals",
+            get(crate::supervisor::api::get_approvals).post(crate::supervisor::api::post_approval),
+        )
+        .route("/supervisor/approvals/{id}/decide", post(crate::supervisor::api::post_approval_decision))
+        .route("/supervisor/maintenance/safety", get(crate::supervisor::api::get_maintenance_safety))
+        .route("/supervisor/leases", get(crate::supervisor::api::get_leases))
+        .route("/supervisor/leases/{resource}/acquire", post(crate::supervisor::api::post_lease_acquire))
+        .route("/supervisor/leases/{resource}/renew", post(crate::supervisor::api::post_lease_renew))
+        .route("/supervisor/leases/{resource}/release", post(crate::supervisor::api::post_lease_release))
         .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox))
         .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
         .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))

@@ -581,6 +581,63 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
         raise
 
 
+def cmd_approval(client: Client, cfg: dict, args) -> object:
+    """重建／重啟核准。申請寫成紀錄（誰、範圍、哪個 commit、到期），AGM 直接核駁。"""
+    if args.op == "list":
+        return client.get("/api/supervisor/approvals")
+    if args.op == "request":
+        if not (args.requester and args.purpose and args.scope):
+            raise AgmError("bad_args", "approval request 需要 --requester、--purpose、--scope", 2)
+        body: dict = {"requester": args.requester, "purpose": args.purpose, "scope": args.scope}
+        if args.commit:
+            body["target_commit"] = args.commit
+        if args.expires_in:
+            body["expires_in_secs"] = args.expires_in
+        return client.post("/api/supervisor/approvals", body)
+    if not args.approval_id:
+        raise AgmError("bad_args", "approval decide 需要 approval id", 2)
+    if not args.decision:
+        raise AgmError("bad_args", "approval decide 需要 --decision approve|deny|revoke", 2)
+    body = {"decision": args.decision, "actor": args.actor}
+    if args.reason:
+        body["reason"] = args.reason
+    if args.expires_in:
+        body["expires_in_secs"] = args.expires_in
+    return client.post(f"/api/supervisor/approvals/{urllib.parse.quote(args.approval_id)}/decide", body)
+
+
+def cmd_lease(client: Client, cfg: dict, args) -> object:
+    """執行租約：等安全窗口用 `safety`（唯讀），真的要動手用 `acquire`。
+
+    兩件事分開是刻意的：safety 只說「現在」，acquire 會在同一個鎖裡重驗一次再把窗口拿走，
+    拿著 restart 租約期間 daemon 不會再派新工作出去。
+    """
+    if args.op == "status":
+        return client.get("/api/supervisor/leases")
+    if args.op == "safety":
+        return client.get("/api/supervisor/maintenance/safety")
+    if not args.resource:
+        raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
+    path = f"/api/supervisor/leases/{urllib.parse.quote(args.resource)}/{args.op}"
+    if args.op == "acquire":
+        if not args.approval:
+            raise AgmError("bad_args", "lease acquire 需要 --approval（核准 id）", 2)
+        body: dict = {"owner": args.owner, "approval_id": args.approval, "require_idle": not args.allow_busy}
+        if args.commit:
+            body["commit"] = args.commit
+        if args.ttl:
+            body["ttl_secs"] = args.ttl
+        if args.exclude_bot:
+            body["exclude_bot_ids"] = list(args.exclude_bot)
+        return client.post(path, body)
+    if args.fence is None:
+        raise AgmError("bad_args", f"lease {args.op} 需要 --fence（acquire 回傳的那個）", 2)
+    body = {"owner": args.owner, "fence": args.fence}
+    if args.ttl:
+        body["ttl_secs"] = args.ttl
+    return client.post(path, body)
+
+
 def cmd_incidents(client: Client, cfg: dict, args) -> object:
     """系統層級的故障（host 掉線、bot 該開沒開、交辦卡住、通知送不出去）。
 
@@ -650,6 +707,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm assignments --open                 對帳未結案交辦（含等驗收的）\n"
             "  agm review <id> --decision accept --reason '…' --evidence '…'\n"
             "  agm incidents                          看系統層級故障（host／bot／卡住的交辦）\n"
+            "  agm approval request --requester … --purpose rebuild --scope … --commit <sha>\n"
+            "  agm lease safety / agm lease acquire rebuild --approval <id> --commit <sha>\n"
             "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
             "\n"
@@ -735,6 +794,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--followup-bot", dest="followup_bot", help="followup：改派給別的 bot（預設同一顆）")
     s.set_defaults(func=cmd_review)
+
+    s = sub.add_parser("approval", help="重建／重啟核准：request / decide / list")
+    s.add_argument("op", choices=["request", "decide", "list"])
+    s.add_argument("approval_id", nargs="?", help="decide 的目標")
+    s.add_argument("--requester", help="request：申請者（bot id 或名字）")
+    s.add_argument("--purpose", choices=["rebuild", "restart"], help="request：要做什麼")
+    s.add_argument("--scope", help="request：會動到什麼")
+    s.add_argument("--commit", help="request：針對哪個 commit（之後 acquire 要對得上）")
+    s.add_argument("--expires-in", type=int, dest="expires_in", metavar="SECS", help="多久之後失效")
+    s.add_argument("--decision", choices=["approve", "deny", "revoke"], help="decide：核准／駁回／撤銷")
+    s.add_argument("--reason", help="decide：理由")
+    s.add_argument("--actor", default="AGM", help="decide：決定者（預設 AGM）")
+    s.set_defaults(func=cmd_approval)
+
+    s = sub.add_parser(
+        "lease",
+        help="執行租約：safety / acquire / renew / release / status",
+        description="等窗口用 safety（唯讀，只說現在）；真的要動手用 acquire（同一個鎖裡重驗並拿走窗口）。",
+    )
+    s.add_argument("op", choices=["safety", "acquire", "renew", "release", "status"])
+    s.add_argument("resource", nargs="?", choices=["rebuild", "restart"], help="acquire/renew/release 的目標")
+    s.add_argument("--owner", default=os.environ.get("AM_AGENT_NAME", "agm-ops"), help="誰持有（預設 $AM_AGENT_NAME）")
+    s.add_argument("--approval", help="acquire：核准 id")
+    s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
+    s.add_argument("--ttl", type=int, metavar="SECS", help="租約長度（預設 900，上限 3600）")
+    s.add_argument("--fence", type=int, help="renew/release：acquire 回傳的 fence")
+    s.add_argument("--allow-busy", action="store_true", dest="allow_busy", help="acquire：跳過「沒人在跑」的檢查")
+    s.add_argument("--exclude-bot", action="append", dest="exclude_bot", metavar="BOT_ID", help="idle 檢查要忽略的 bot")
+    s.set_defaults(func=cmd_lease)
 
     s = sub.add_parser("incidents", help="系統層級故障；預設只列未恢復的")
     s.add_argument("--all", action="store_true", help="含已恢復的")

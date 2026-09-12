@@ -22,6 +22,22 @@
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `notify_exhausted`（門檻見 SPEC §18.9）。
   一個 resource 同時只會有一筆 `open`（partial unique index），重啟不會開出第二筆；恢復後再壞是新的一筆。
   開啟與恢復各推一則 inbox 事件（`incident_opened` / `incident_resolved`）。
+- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,...}]}`；
+  `POST /api/supervisor/approvals {requester,purpose,scope,target_commit?,expires_in_secs?}` → 一筆 `pending` 核准，
+  同時推一則 `approval_requested` inbox 事件給 AGM（它自己核駁，不用使用者轉達）。`purpose`：`rebuild` | `restart`。
+  `POST /api/supervisor/approvals/{id}/decide {decision,actor?,reason?,expires_in_secs?}`，`decision`：`approve` | `deny` | `revoke`。
+  同樣的 decision 重送回 `idempotent:true`；只有 `pending` 能被 approve（已決定過的要重新申請）。
+- `GET /api/supervisor/maintenance/safety` → `{safe,working[],in_flight[],blocked_waiting_for_user[],queued_assignments,checked_at}`。
+  **唯讀**，只說「現在」。`blocked`（在等使用者回答）只回報不阻擋，重啟本來就會跳過它。
+- `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`；
+  `POST /api/supervisor/leases/{resource}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}`
+  → `{lease,approval,safety}`。resource 只能是 `rebuild` / `restart`。acquire 會在同一個 supervisor lock 裡
+  重驗核准（狀態、到期、purpose、commit 必須對得上）與 idle，再以單一條件式 UPDATE 拿走窗口——兩個執行者搶同一個
+  窗口只有一個會成功（409 `lease_held`）。ttl 預設 900 秒、上限 3600。
+  `POST …/renew {owner,fence,ttl_secs?}`、`POST …/release {owner,fence}`：fence 是 acquire 回的號碼，
+  只會往上加；租約過期被別人接手後舊 fence 立刻失效（409 `lease_lost`），所以舊持有人不能靠昨天的核准繼續動作。
+  release 會把對應核准標成 `consumed`：一次核准一個窗口。
+  拿著 `restart` 租約期間，daemon 的 assignment 派送會 hold 住（留在 `queued`，不丟工作、不算重試次數）。
 - `GET /api/supervisor/health` → daemon 端的健康摘要，包含 `status`（`healthy`、`degraded`、`critical`）、AGM
   狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（真正未結案的 assignment 數，
   含 `awaiting_review` 與 `blocked`）、`awaiting_review`（其中等驗收的）與
