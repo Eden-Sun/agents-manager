@@ -1,0 +1,6 @@
+still_busy = false
+awaits_input = false
+reply = "看完了：try_fallback 只認 in-flight turn。"
+noise_lines = [5, 6, 8, 9]
+source = "synthetic"
+note = "Based on the hookless_capture_tests EXCHANGE screen in lifecycle.rs."
