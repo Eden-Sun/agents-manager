@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useStore } from '../store/store'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
 import { isSurvey } from '../lib/choiceDraft'
@@ -41,12 +42,8 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
     onCloseRef.current = onClose
   })
 
-  // 焦點落在終端本身而不是第一顆按鈕：這樣 PageUp / 滾輪可以捲畫面，而且不會有「空白鍵
-  // 誤觸某個按鈕」這種事——空白鍵本來就該送進 agent。
-  useEffect(() => {
-    const raf = requestAnimationFrame(() => termRef.current?.focus())
-    return () => cancelAnimationFrame(raf)
-  }, [])
+  // 焦點落在終端本身而不是第一顆按鈕；Tab 仍由共用 hook 留在這個視窗內。
+  useDialogFocus(true, rootRef, { initialFocus: () => termRef.current })
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -57,6 +54,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
       const editing =
         rootRef.current?.contains(target) && (tag === 'input' || tag === 'textarea' || tag === 'select')
       if (editing) return
+      if (e.key === 'Tab') return
 
       if (!passthrough) {
         if (e.key === 'Escape' && !e.defaultPrevented) {

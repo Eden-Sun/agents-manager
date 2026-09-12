@@ -1505,3 +1505,11 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
 - **理由**：Bot 啟動、回合與連線狀態會自行變動，不能因此把設定欄、搜尋框或其他表單的焦點拉回 composer。保留安全情境的 focus，則不犧牲首次進入空對話與主動切換對象時的鍵盤動線。
 - **取捨**：側欄 `.bot-row` 是可 focus 的 `div[role="option"][tabIndex="0"]`；點它切換 Bot 後，`document.activeElement` 會留在這列，因此守衛會跳過 composer focus，`forceFocus={chatEmpty && active}` 也不會繞過這個保護。這和從其他控制項切換對象一樣，焦點不會強行跳進 composer；使用者仍可直接點擊輸入框。游標位置恢復與 focus 分開，避免 disabled 等背景狀態重新觸發 focus。
 - **與手機規則的關係（整合時補，2026-09-12）**：`useComposerFocus` 的 `autoFocus`／`forceFocus` 在 ≤640px 一律關掉，沿用 2026-09-09「切 bot 不彈鍵盤」的決定；守衛只負責桌機不搶別人的焦點，游標還原兩邊都照做。
+
+## 自製對話框的鍵盤焦點（2026-09-09）
+
+- **決策**：真正的 modal 共用 `useDialogFocus`；開啟時記住觸發元件，焦點進入指定的初始元件或第一個可聚焦元件，Tab / Shift+Tab 只在對話框內循環，關閉後還原觸發元件。Bot 設定桌機 anchored 分支仍遵守 2026-09-08 的非模態決定，只保留開場 focus 名稱欄；手機全螢幕 sheet 才啟用同一個 hook。
+- `ConfirmDialog` 有要求輸入文字時先 focus 輸入欄，否則先 focus「取消」；避免剛開啟的危險操作被 Enter 或 Space 誤觸。
+- `BotSettingsPanel` 桌機仍是貼著觸發齒輪的非模態浮窗；名稱欄是指定初始焦點，背景可繼續使用。手機全螢幕 sheet 才把焦點留在面板內並還原觸發元件。
+- `BlockedModal` 仍保留終端鍵盤直通；Tab / Shift+Tab 是瀏覽器焦點移動，不送進 agent。代價是直通模式下仍不能用 Esc 關閉，關閉入口維持右上角按鈕與視窗外。
+- **不採用**原生 `<dialog>` + `showModal()`：現有 backdrop、portal 與巢狀確認框的行為不需改寫，改動面較小且保留既有視覺契約。

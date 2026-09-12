@@ -4,15 +4,14 @@ import { useShallow } from 'zustand/react/shallow'
 import { parseMentions } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
-import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
-import { attachCommandOf, botLamp, composerState, groupComposerState, liveReplyOf, projectHostName, useStore } from '../store/store'
+import { attachCommandOf, botLamp, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
 import { ProjectNameField } from './ProjectNameField'
-import { AbandonTurnAction, Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveBubble, LoadEarlier } from './ChatPanel'
+import { Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveReplyBubble, LoadEarlier } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
 import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
@@ -28,11 +27,6 @@ import { LAMP_LABEL, StatusLamp } from './StatusLamp'
  * SPEC §13 project group chat: one Project = one group. The timeline is every member bot's
  * conversation merged (by message id); `@<bot>` / `@all` in the composer picks recipients.
  */
-
-/** Left-hand badge on a reply: which bot said it. */
-export function BotBadge({ name, kind }: { name: string; kind?: Bot['kind'] }) {
-  return <span className={`bot-badge${kind ? ` ${kind}` : ''}`}>{name}</span>
-}
 
 const MENTION_RE = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
 
@@ -128,12 +122,7 @@ function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
   )
 }
 
-function GroupMessageList({ projectId }: { projectId: string }) {
-  const messages = useStore((s) => s.groupMessages[projectId])
-  const loaded = useStore((s) => Boolean(s.loadedProjects[projectId]))
-  const kinds = useStore(useShallow((s) => Object.fromEntries(s.bots.map((b) => [b.id, b.kind]))))
-  // Members that are still answering: one typing bubble each (labelled). The selector
-  // returns the store's own Bot objects (stable references) so `useShallow` settles.
+function GroupLiveBubbles({ projectId }: { projectId: string }) {
   const typing = useStore(
     useShallow((s) =>
       s.bots
@@ -141,24 +130,24 @@ function GroupMessageList({ projectId }: { projectId: string }) {
         .filter((b) => s.runs[b.id]?.agent_status === 'working' || composerState(s, b.id).inFlightTurnId !== null),
     ),
   )
-  // v3.9 live output per member: bot_id → partial text (only for the in-flight turn). A
-  // fresh object each call, but its values are strings, so `useShallow` settles.
-  const liveText = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveText(liveReplyOf(s, b.id)?.text)]))),
-  )
-  // …and the spinner row (API.md v4.1 `turn_progress.activity`) for members that are still
-  // only thinking, so their bubble says what is happening instead of "等待回覆…".
-  const liveActivity = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveActivity(liveReplyOf(s, b.id)?.activity)]))),
-  )
-  // …and any retry / API-error banner (API.md v4.2 `turn_progress.alert`), which must be visible
-  // per member: in a group one bot can be stuck retrying while the others answer normally.
-  const liveAlert = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.alert ?? null]))),
-  )
+  return typing.map((t) => (
+    <LiveReplyBubble
+      key={`typing-${t.id}`}
+      botId={t.id}
+      kind={t.kind}
+      from={`${t.name} · ${KIND_TITLE[t.kind]}`}
+      abandon
+    />
+  ))
+}
+
+function GroupMessageList({ projectId }: { projectId: string }) {
+  const messages = useStore((s) => s.groupMessages[projectId])
+  const loaded = useStore((s) => Boolean(s.loadedProjects[projectId]))
+  const kinds = useStore(useShallow((s) => Object.fromEntries(s.bots.map((b) => [b.id, b.kind]))))
   const rows = useMemo(() => foldRows(messages ?? []), [messages])
   const loadEarlier = useStore((s) => s.loadEarlierGroupMessages)
-  const tail = useScrollTail([rows, typing.length, liveText, liveActivity])
+  const tail = useScrollTail([rows])
 
   return (
     <div className="msg-list-wrap">
@@ -178,43 +167,22 @@ function GroupMessageList({ projectId }: { projectId: string }) {
             <Bubble
               key={r.key}
               msg={r.msg}
-              from={
-                <span className="msg-targets" title="這則訊息送給了這些 Bot">
-                  你 → {r.targets.join(', ')}
-                </span>
-              }
+              from={`你 → ${r.targets.join(', ')}`}
+              fromClassName="msg-targets"
+              fromTitle="這則訊息送給了這些 Bot"
             />
           ) : (
             <Bubble
               key={r.key}
               msg={r.msg}
               kind={kinds[r.msg.bot_id]}
-              from={
-                <span className="msg-speaker">
-                  {r.msg.bot_name}
-                  {kinds[r.msg.bot_id] ? ` · ${KIND_TITLE[kinds[r.msg.bot_id]]}` : ''}
-                </span>
-              }
+              from={`${r.msg.bot_name}${kinds[r.msg.bot_id] ? ` · ${KIND_TITLE[kinds[r.msg.bot_id]]}` : ''}`}
+              fromClassName="msg-speaker"
             />
           ),
         )
       )}
-      {typing.map((t) => (
-        <LiveBubble
-          key={`typing-${t.id}`}
-          text={liveText[t.id] ?? null}
-          activity={liveActivity[t.id] ?? null}
-          alert={liveAlert[t.id] ?? null}
-          kind={t.kind}
-          from={
-            <span className="msg-speaker">
-              {t.name} · {KIND_TITLE[t.kind]}
-            </span>
-          }
-          /* 群組裡一個成員卡住不該拖住其他人：逃生門掛在各自的泡泡上。 */
-          action={<AbandonTurnAction botId={t.id} />}
-        />
-      ))}
+      <GroupLiveBubbles projectId={projectId} />
     </div>
     <JumpToBottom show={!tail.atBottom && rows.length > 0} onClick={tail.toBottom} />
     </div>
@@ -541,7 +509,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const composerRef = useRef<HTMLTextAreaElement>(null)
   // Attachments are project-scoped, so any member can receive the upload; held here so a
   // drop anywhere in the group chat area is accepted.
-  const files = useAttachments(members[0]?.id ?? null)
+  const files = useAttachments(members[0]?.id ?? null, projectId)
   const drop = useDropTarget(files.add, memberCount === 0)
   const [renaming, setRenaming] = useState(false)
   // 同 ChatPanel：讓右側圖片暫存區把「點一下」的圖片交給這個群組草稿。

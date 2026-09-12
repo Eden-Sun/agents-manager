@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { fetchMemPane } from '../api'
 import type { MemProcess, TerminalSnapshot } from '../api/types'
-import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 
 /**
  * RAM 清單裡點「自己開的 pane wM:pB」之後開的視窗：那個 pane 現在畫面上的字。
@@ -22,7 +22,7 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
   const rootRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const termRef = useRef<HTMLPreElement>(null)
-  useFocusTrap(true, rootRef, { initialFocus: () => closeRef.current })
+  useDialogFocus(true, rootRef, { initialFocus: () => closeRef.current })
 
   useEffect(() => {
     let alive = true

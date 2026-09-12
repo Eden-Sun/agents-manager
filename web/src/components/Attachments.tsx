@@ -11,11 +11,11 @@
  * URL rather than pointed at with a plain `src`.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
-import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
 
@@ -43,25 +43,65 @@ export interface Pending {
   error: string | null
 }
 
+type PendingAction =
+  | { type: 'add'; item: Pending }
+  | { type: 'uploaded'; key: string; id: string }
+  | { type: 'failed'; key: string; error: string }
+  | { type: 'remove'; key: string }
+  | { type: 'clear' }
+
+function pendingReducer(items: Pending[], action: PendingAction): Pending[] {
+  switch (action.type) {
+    case 'add':
+      return [...items, action.item]
+    case 'uploaded':
+      return items.map((it) => (it.key === action.key ? { ...it, id: action.id } : it))
+    case 'failed':
+      return items.map((it) => (it.key === action.key ? { ...it, error: action.error } : it))
+    case 'remove':
+      return items.filter((it) => it.key !== action.key)
+    case 'clear':
+      return []
+  }
+}
+
 /**
  * Composer-side attachment state for one draft (a bot chat or a project group chat).
  * `uploadTo` is the bot whose host receives the file — for a group send any member will
- * do, since the daemon scopes attachments to the project they share.
+ * do, since the daemon scopes attachments to the project they share. `resetKey` identifies
+ * the conversation whose tray owns the attachment state.
  */
-export function useAttachments(uploadTo: string | null) {
+export function useAttachments(uploadTo: string | null, resetKey: string | null) {
   const notify = useStore((s) => s.notify)
-  const [items, setItems] = useState<Pending[]>([])
+  const [items, dispatch] = useReducer(pendingReducer, [])
   const seq = useRef(0)
   /** 托盤裡每張圖的指紋（見 `add`），用來擋同一張重複進來。 */
   const seen = useRef(new Set<string>())
-  // Object URLs are revoked on unmount only: a thumbnail must stay valid while it is shown.
-  const urls = useRef<string[]>([])
+  const urls = useRef(new Set<string>())
+  const itemsRef = useRef<Pending[]>([])
   useEffect(() => {
     const held = urls.current
     return () => {
       for (const u of held) URL.revokeObjectURL(u)
     }
   }, [])
+
+  const revokePreview = useCallback((previewUrl: string) => {
+    URL.revokeObjectURL(previewUrl)
+    urls.current.delete(previewUrl)
+  }, [])
+
+  useLayoutEffect(() => {
+    itemsRef.current = items
+  }, [items])
+
+  // Attachments belong to the conversation, not necessarily the bot that received the upload.
+  useLayoutEffect(() => {
+    for (const it of itemsRef.current) revokePreview(it.previewUrl)
+    // 指紋跟著托盤一起清，不然換回原本的對話時同一張圖會被誤判成重複。
+    seen.current.clear()
+    dispatch({ type: 'clear' })
+  }, [revokePreview, resetKey])
 
   const add = useCallback(
     (files: File[]) => {
@@ -85,16 +125,16 @@ export function useAttachments(uploadTo: string | null) {
           continue
         }
         const previewUrl = URL.createObjectURL(file)
-        urls.current.push(previewUrl)
-        setItems((prev) => [...prev, { key, fp, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null }])
+        urls.current.add(previewUrl)
+        dispatch({ type: 'add', item: { key, fp, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null } })
         void api
           .uploadAttachment(uploadTo, file)
           .then((a: Attachment) => {
-            setItems((prev) => prev.map((it) => (it.key === key ? { ...it, id: a.id } : it)))
+            dispatch({ type: 'uploaded', key, id: a.id })
           })
           .catch((e: unknown) => {
             const msg = e instanceof Error ? e.message : String(e)
-            setItems((prev) => prev.map((it) => (it.key === key ? { ...it, error: msg } : it)))
+            dispatch({ type: 'failed', key, error: msg })
             notify('error', `圖片「${file.name}」上傳失敗：${msg}`)
           })
       }
@@ -103,17 +143,19 @@ export function useAttachments(uploadTo: string | null) {
   )
 
   const remove = useCallback((key: string) => {
-    setItems((prev) => {
-      const gone = prev.find((it) => it.key === key)
-      if (gone) seen.current.delete(gone.fp)
-      return prev.filter((it) => it.key !== key)
-    })
-  }, [])
+    const removed = items.find((it) => it.key === key)
+    if (removed) {
+      revokePreview(removed.previewUrl)
+      seen.current.delete(removed.fp)
+    }
+    dispatch({ type: 'remove', key })
+  }, [items, revokePreview])
 
   const clear = useCallback(() => {
+    for (const it of items) revokePreview(it.previewUrl)
     seen.current.clear()
-    setItems([])
-  }, [])
+    dispatch({ type: 'clear' })
+  }, [items, revokePreview])
 
   /** Ids to send; empty while anything is still uploading. */
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
@@ -390,7 +432,7 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
   }, [onClose])
 
   // 打開時焦點進到「關閉」鍵（圖片本身不可聚焦），關掉時退回原本按到的縮圖。
-  useFocusTrap(true, boxRef, { initialFocus: () => closeRef.current })
+  useDialogFocus(true, boxRef, { initialFocus: () => closeRef.current })
 
   return (
     <div

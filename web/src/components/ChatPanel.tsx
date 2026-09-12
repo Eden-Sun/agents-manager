@@ -107,11 +107,15 @@ const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; to
 export const Bubble = memo(function Bubble({
   msg,
   from,
+  fromClassName,
+  fromTitle,
   kind,
   flash,
 }: {
   msg: Message
-  from?: ReactNode
+  from?: string
+  fromClassName?: string
+  fromTitle?: string
   kind?: BotKind
   /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
   flash?: boolean
@@ -131,7 +135,11 @@ export const Bubble = memo(function Bubble({
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
-          {from ? <span className="msg-from">{from}</span> : null}
+          {from ? (
+            <span className={`msg-from${fromClassName ? ` ${fromClassName}` : ''}`} title={fromTitle}>
+              {from}
+            </span>
+          ) : null}
           {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} /> : null}
           {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
           {/* 來源只在「不是正常那條路」時才標。`hook` 是每一則回覆的常態，在每顆氣泡上
@@ -229,7 +237,7 @@ export function LiveBubble({
   text: string | null
   activity?: string | null
   alert?: string | null
-  from?: ReactNode
+  from?: string
   kind?: BotKind
   /** 這一泡泡專屬的逃生門（`AbandonTurnAction`）；放在狀態列右端，沒有就不佔位。 */
   action?: ReactNode
@@ -276,6 +284,40 @@ export function LiveBubble({
         </p>
       ) : null}
     </article>
+  )
+}
+
+/**
+ * The live tail owns all turn-progress subscriptions. Historical message lists only need
+ * their stable message array; ResizeObserver in `useScrollTail` still follows this bubble as
+ * its height changes without making the list parse every historical Markdown message again.
+ */
+export function LiveReplyBubble({
+  botId,
+  kind,
+  from,
+  abandon = false,
+}: {
+  botId: string
+  kind?: BotKind
+  from?: string
+  abandon?: boolean
+}) {
+  const active = useStore((s) => s.runs[botId]?.agent_status === 'working' || composerState(s, botId).inFlightTurnId !== null)
+  const text = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
+  const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
+  const alert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
+
+  if (!active) return null
+  return (
+    <LiveBubble
+      text={text}
+      activity={activity}
+      alert={alert}
+      kind={kind}
+      from={from}
+      action={abandon ? <AbandonTurnAction botId={botId} /> : undefined}
+    />
   )
 }
 
@@ -586,13 +628,8 @@ function MessageList({ botId }: { botId: string }) {
   })
   const phone = useMediaQuery(PHONE_QUERY)
   const [flashId, setFlashId] = useState<string | null>(null)
-  // 擷取來的即時文字先過濾掉 CLI 自己的狀態列 / 提示行（`cleanLiveText`），濾光了就回 null，
-  // 讓氣泡退回顯示活動摘要。
-  const liveText = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
-  const liveActivity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
-  const liveAlert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
   const loadEarlier = useStore((s) => s.loadEarlierMessages)
-  const tail = useScrollTail([messages, working, liveText, liveActivity, liveAlert])
+  const tail = useScrollTail([messages, inFlightTurnId])
 
   useEffect(() => {
     if (!flashId) return
@@ -645,9 +682,7 @@ function MessageList({ botId }: { botId: string }) {
       ) : (
         list.map((m) => <Bubble key={m.id} msg={m} flash={m.id === flashId} />)
       )}
-      {inFlight || working ? (
-        <LiveBubble text={liveText} activity={liveActivity} alert={liveAlert} action={<AbandonTurnAction botId={botId} />} />
-      ) : null}
+      <LiveReplyBubble botId={botId} abandon />
     </div>
     {turnId && lastAsk && !askVisible ? (
       <LastAskPeek key={botId} msg={lastAsk} turnId={turnId} onJump={() => jumpTo(lastAsk.id)} />
@@ -954,17 +989,6 @@ function SlItem({ k, children, title, className }: { k: string; children: ReactN
 }
 
 /**
- * The bot's status bar.
- *
- * The pane's own line is written for a terminal's width — the user's script trims the
- * account to five characters and the model to `OP5` to make it fit. The browser has room,
- * so this renders the *original* statusLine fields instead (`run.status`): the whole email,
- * the real model name, and the context window, which the compressed line has no space for.
- * `status_line` (the pane's exact text) stays as the tooltip, and as the fallback for a bot
- * whose payload has not arrived yet. Codex and Grok use the same row with their detected CLI
- * version plus the model, working directory, and quota data available to the daemon.
- */
-/**
  * A status bar for the kinds that have no statusLine *hook*.
  *
  * codex renders its own status line inside the TUI (`[tui] status_line` in
@@ -1164,7 +1188,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const modelExtra = modelExtraOf(statusInfo)
   // Images live outside the store: they only matter until the send that carries them.
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
-  const files = useAttachments(botId)
+  const files = useAttachments(botId, botId)
   const drop = useDropTarget(files.add, !botId)
   // 右側圖片暫存區要知道「現在這個對話」是誰：點暫存縮圖時，圖片就落進這個托盤（也就是
   // 上傳給這隻 bot）。終端分頁時這個托盤不在畫面上，就別接收——圖會像憑空消失。
