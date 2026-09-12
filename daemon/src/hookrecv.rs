@@ -359,6 +359,35 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     })
 }
 
+/// 把 turn 上「從畫面刮下來、但被截斷」的那則使用者訊息補成 hook 給的完整原文。
+///
+/// 判斷用去空白後的前綴：畫面折行會在中間多出換行與縮排，字面上不會相等。只有「既有那則是
+/// 完整原文的前綴，而且原文更長」才覆蓋——長度一樣就是同一句話，沒必要動；不是前綴的話代表
+/// 兩者根本不是同一句，那更不該覆蓋。
+async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str) -> Result<()> {
+    let full_sq = squash_ws(full);
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY id")
+            .bind(turn_id)
+            .fetch_all(&app.db)
+            .await?;
+    for (id, content) in rows {
+        let have = squash_ws(&content);
+        if have.is_empty() || have.len() >= full_sq.len() || !full_sq.starts_with(&have) {
+            continue;
+        }
+        sqlx::query("UPDATE messages SET content = ?, source = 'hook', updated_at = ? WHERE id = ?")
+            .bind(full)
+            .bind(db::now())
+            .bind(&id)
+            .execute(&app.db)
+            .await?;
+        tracing::info!(turn = %turn_id, msg = %id, "prompt 回音被截斷，用 hook 的原文補完");
+        return Ok(());
+    }
+    Ok(())
+}
+
 /// Consume the one-shot native session request written for a reopened Team member. Claude
 /// reports its identity in `SessionStart`; Codex and Grok have no equivalent hook, so callers
 /// pass their first completed turn instead. Clearing the column before recording a mismatch
@@ -576,6 +605,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         if hook_user_is_new(&have, u) {
                             let from = relay_source(run.as_ref(), u);
                             lifecycle::insert_message_full(app, &conv, Some(&t.id), "user", u, "hook", false, None, None, from.as_deref()).await?;
+                        } else {
+                            // 畫面刮下來的那則可能是**截斷**的（TUI 把長 prompt 折行，回音只讀得到
+                            // 前面那幾行）。hook 送來的是 claude 自己記的原文，比畫面可信：既有那則
+                            // 是它的前綴時就補完，不要只因為「看起來是同一則」就丟掉整段下半截。
+                            upgrade_clipped_user_message(app, &t.id, u).await?;
                         }
                     }
                 }
@@ -1062,6 +1096,63 @@ mod external_claim_tests {
             sqlx::query(q).bind(&now).execute(&pool).await.unwrap();
         }
         (TmpDb(dir), pool, "r".to_string(), "c".to_string())
+    }
+
+    /// 2026-09-12 使用者實機：畫面折行讓刮下來的那則使用者訊息斷在一半（「…請設 multiSelect:」），
+    /// hook 之後送來的才是完整原文。既有那則是原文的前綴時要補完，不是當重複丟掉。
+    #[tokio::test]
+    async fn a_clipped_scraped_prompt_is_upgraded_to_the_hooks_full_text() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'clipped-echo','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at)
+             VALUES (?,?,'external','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let clipped = "請問我兩題，第二題 header『功能』請設 multiSelect:";
+        let full = "請問我兩題，第二題 header『功能』請設 multiSelect: true，四個選項。問完就停著等我回答。";
+        crate::lifecycle::insert_message(&app, &conv, Some(&turn_id), "user", clipped, "terminal_fallback", false, None)
+            .await
+            .unwrap();
+
+        upgrade_clipped_user_message(&app, &turn_id, full).await.unwrap();
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT content, source FROM messages WHERE turn_id=? AND role='user'")
+                .bind(&turn_id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "補完，不是多開一則");
+        assert_eq!(rows[0].0, full);
+        assert_eq!(rows[0].1, "hook");
+
+        // 不是前綴的就別動：那是另一句話。
+        upgrade_clipped_user_message(&app, &turn_id, "完全不同的一句").await.unwrap();
+        let after: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='user'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(after, full);
     }
 
     #[tokio::test]
