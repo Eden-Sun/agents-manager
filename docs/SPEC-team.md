@@ -636,10 +636,10 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 
 | 情況 | 行為 |
 |---|---|
-| daemon 重啟 | SPEC §6.1 對帳收養成員 Run（agent_name 由 bot id 推得）→ 重建 scheduler → 對每個成員：有 in-flight Turn 就等它（hook 晚到仍可配對，SPEC §6.7）；沒有就看 `team_events` 的 pending relay 重送（冪等鍵相同）。任何成員 Run 被判 `exited` → `paused(member_lost)`。 |
+| daemon 重啟 | SPEC §6.1 對帳收養成員 Run（agent_name 由 bot id 推得）→ 重建 scheduler → 對每個成員：有 in-flight Turn 就等它（hook 晚到仍可配對，SPEC §6.7）；沒有就看 `team_events` 的 pending relay 重送（冪等鍵相同）。任何成員 Run 被判 `exited` → `paused(member_lost)`。**開機順序（2026-09-12）**：`respawn_schedulers` 先於 hook spool 重放（scheduler 在 spawn 當下就訂閱 turn bus），重放出的 `TurnDone` 才有人接；保險是 `step` 開頭的**補漏**：relay 已 `delivered`、對應 turn 已終態、卻沒有 `turn_handled` note 的，補跑一次回覆處理（記 `turn_caught_up`），bus 漏掉、lag 或停機期間完成的回合都靠這條救。 |
 | 成員 crash（`pane.exited`） | 既有 SPEC §6.6 把 Run `exited`、in-flight Turn `failed` → scheduler `paused(member_lost)`。 |
 | 成員 `blocked`（trust 提示、權限詢問、codex 升級選單） | `paused(member_blocked:<name>)`；暫停橫幅上有「回應 <成員>」按鈕（2026-09-10，`TeamMemberBlocked`），就地彈出該成員的整張終端畫面送鍵；狀態離開 blocked 時 **自動 resume**（唯一會自動 resume 的原因，因為它不是預算問題）。2026-09-10 起由 daemon 做（`team::resume_if_member_unblocked`，掛在 `pane.agent_status_changed` 的 blocked→非 blocked 邊緣），所以在哪裡回完提示都一樣；開機對帳時也補一次（那個邊緣可能發生在 daemon 沒開的時候）。UI 那顆按鈕仍會在自己開的視窗裡補送 `resume`，重複的 `resume` 只會拿到 409。 |
-| relay `delivery=unknown` | `paused(delivery_unknown)`；使用者 `abandon` 後 `resume`，scheduler 重送同一 relay（冪等鍵相同 → 既有邏輯會回同一 turn；因此重送用新的 `event_id`）。 |
+| relay `delivery=unknown` | `paused(delivery_unknown)`；使用者 `abandon` 後 `resume`，scheduler 重送同一 relay（冪等鍵相同 → 既有邏輯會回同一 turn；因此重送用新的 `event_id`）。**實作（2026-09-12）**：`abandon` 把 turn 收成 `failed` + `delivery='failed'`；scheduler 看到 `delivery='failed'` 的 relay turn 不送修復提示（沒人收到過 prompt），而是把那批 relay 列標 `dropped`（保留 `turn_id` 當紀錄）、複製成新的 `pending` 列（新 id → 新 `client_request_id`），記 `relay_resent`；「繼續」後 `flush` 照送。 |
 | Turn `failed`（stall watchdog、interrupt） | 修復提示規則同 §4.4（算一次），2 次後 `paused(protocol_error)`。 |
 
 team 狀態全部在 DB（§2.1），記憶體只有 scheduler 的 mpsc 與計時器。

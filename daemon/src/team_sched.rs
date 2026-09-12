@@ -131,9 +131,12 @@ pub fn spawn(app: &Arc<App>, team_id: &str) {
     // Moved into the task, so the id is withdrawn on every exit path — panic included.
     let reg = Registration { team_id: team_id.clone(), generation };
     let key = team_id.clone();
+    // Subscribed **here**, not inside the task: a broadcast receiver only sees what is sent
+    // after it exists, and `main` replays the hook spool right after `respawn_schedulers` —
+    // a turn published before the task had run would otherwise be lost to it (ops #3).
+    let mut turns = app.subscribe_turns();
     let handle = tokio::spawn(async move {
         let _reg = reg;
-        let mut turns = app.subscribe_turns();
         loop {
             let done = match tick(&app, &team_id).await {
                 Ok(d) => d,
@@ -1473,7 +1476,14 @@ fn issue_list(ctx: &Ctx) -> String {
 /// One idempotent pass: gates, then the task engine, then the outbox.
 pub async fn step(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let ctx = Ctx::load(app, team_id).await?;
-    if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "aborting" || ctx.team.phase == "paused" {
+    if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "aborting" {
+        return Ok(());
+    }
+    // Replies the turn bus never delivered to this scheduler (ops #3) — applied even while
+    // paused, exactly as `on_turn_done` would have.
+    catch_up_turns(app, team_id).await?;
+    let ctx = Ctx::load(app, team_id).await?;
+    if ctx.team.phase == "paused" {
         return Ok(());
     }
     // §6.1 #1, checked before any git runs: a team whose members are not inside its own
@@ -1732,6 +1742,61 @@ pub async fn on_turn_done(
     turn_id: &str,
     status: &str,
 ) -> LcResult<()> {
+    let handled = handle_turn(app, team_id, bot_id, turn_id, status).await;
+    // A reply that could not be applied — an unsafe layout, a git command that failed — is
+    // still followed by a `step`, because `step` is what turns that condition into a visible
+    // `paused` rather than a warning in the log.
+    let stepped = step(app, team_id).await;
+    handled.and(stepped)
+}
+
+/// Delivered relay turns that ended without this scheduler hearing about it, and what to do
+/// with each. The bus is the fast path; this is the one that survives a daemon restart (the
+/// hook spool is replayed at boot, `TurnDone` and all), a lagging subscriber, or an
+/// `abandon` while nothing was listening (2026-09-12 review, ops #2 / #3). Without it a task
+/// sat in `working` for ever with its reply already in `messages`.
+///
+/// "Not heard about" is the absence of the `turn_handled` marker `handle_turn` writes first
+/// thing. Turns handled before that marker existed (an upgrade) are told apart by the events
+/// their handling left behind: anything addressed to the same member after the turn ended.
+/// The candidates are read in **one** query before any of them is handled, because handling
+/// one (a worker's report) addresses the next (the PM) and would hide it.
+async fn catch_up_turns(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT DISTINCT t.id, t.status, c.bot_id FROM team_events e
+           JOIN turns t ON t.id = e.turn_id
+           JOIN conversations c ON c.id = t.conversation_id
+          WHERE e.team_id = ? AND e.kind = 'relay' AND e.status = 'delivered'
+            AND t.status IN ('completed', 'completed_fallback', 'failed')
+            AND NOT EXISTS (SELECT 1 FROM team_events n WHERE n.team_id = e.team_id AND n.kind = 'note'
+                              AND json_extract(n.payload_json, '$.action') = 'turn_handled'
+                              AND json_extract(n.payload_json, '$.turn_id') = t.id)
+            AND NOT EXISTS (SELECT 1 FROM team_events l WHERE l.team_id = e.team_id AND l.to_bot_id = c.bot_id
+                              AND l.seq > e.seq AND l.created_at >= COALESCE(t.completed_at, t.created_at))
+          ORDER BY COALESCE(t.completed_at, t.created_at), t.created_at",
+    )
+    .bind(team_id)
+    .fetch_all(&app.db)
+    .await
+    .map_err(up)?;
+    for (turn_id, status, bot_id) in rows {
+        note(app, team_id, json!({"action": "turn_caught_up", "turn_id": turn_id, "bot": bot_id, "status": status})).await?;
+        if let Err(e) = handle_turn(app, team_id, &bot_id, &turn_id, &status).await {
+            tracing::warn!(team = %team_id, turn = %turn_id, error = ?e, "team scheduler: catching up a turn failed");
+        }
+    }
+    Ok(())
+}
+
+/// One finished turn of a member: find its reply and run it through the protocol. Writes
+/// rows only — `on_turn_done` is the caller that follows it with a `step`.
+async fn handle_turn(
+    app: &Arc<App>,
+    team_id: &str,
+    bot_id: &str,
+    turn_id: &str,
+    status: &str,
+) -> LcResult<()> {
     let ctx = Ctx::load(app, team_id).await?;
     if team::is_terminal(&ctx.team.phase) {
         return Ok(());
@@ -1766,11 +1831,26 @@ pub async fn on_turn_done(
             note(app, team_id, json!({"action": "user_turn_block", "bot": bot_id, "role": role})).await?;
             let _ = apply_reply(app, team_id, bot_id, &text, status).await;
         }
-        return step(app, team_id).await;
+        return Ok(());
     }
-    // A reply that could not be applied — an unsafe layout, a git command that failed — is
-    // still followed by a `step`, because `step` is what turns that condition into a visible
-    // `paused` rather than a warning in the log.
+    // The marker `catch_up_turns` looks for — written **before** the reply is applied, so a
+    // crash halfway is a lost reply (the existing `retry` road) and never a reply applied
+    // twice. `to_bot_id` stays NULL on purpose: `consecutive_repairs` walks the member's own
+    // slice of the log and a note addressed to it there would end a repair chain early.
+    note(app, team_id, json!({"action": "turn_handled", "turn_id": turn_id, "bot": bot_id, "status": status})).await?;
+    // §7.5 `delivery=unknown`: the prompt may never have reached the agent. `abandon` closes
+    // such a turn as `failed` with `delivery='failed'`, and that is not a member failing to
+    // answer — it is a relay that was never delivered, so it goes out again under a new event
+    // id (the old one would hit the idempotent prompt and get the same dead turn back).
+    let delivery = sqlx::query_scalar::<_, String>("SELECT delivery FROM turns WHERE id = ?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+        .unwrap_or_default();
+    if delivery == "failed" {
+        return resend_relays_of_turn(app, team_id, turn_id).await;
+    }
     let applied = apply_reply(app, team_id, bot_id, &text, status).await;
     if let Err(e) = &applied {
         // A reply the scheduler failed to apply (a DB or git error, not a protocol error)
@@ -1796,8 +1876,49 @@ pub async fn on_turn_done(
             enqueue(app, team_id, None, bot_id, None, "retry", text).await?;
         }
     }
-    let stepped = step(app, team_id).await;
-    applied.and(stepped)
+    applied
+}
+
+/// §7.5: re-queue the relays a never-delivered turn carried. The old rows become `dropped`
+/// (they keep their `turn_id` as the record of the attempt) and copies go back on the outbox
+/// as fresh `pending` rows — a new id, hence a new `client_request_id` for `flush`.
+async fn resend_relays_of_turn(app: &Arc<App>, team_id: &str, turn_id: &str) -> LcResult<()> {
+    let rows = sqlx::query_as::<_, db::TeamEvent>(
+        "SELECT * FROM team_events WHERE team_id = ? AND turn_id = ? AND kind = 'relay' AND status = 'delivered' ORDER BY seq",
+    )
+    .bind(team_id)
+    .bind(turn_id)
+    .fetch_all(&app.db)
+    .await
+    .map_err(up)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut resent: Vec<String> = Vec::new();
+    for e in &rows {
+        sqlx::query("UPDATE team_events SET status = 'dropped' WHERE id = ? AND status = 'delivered'")
+            .bind(&e.id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+        let payload: Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
+        let copy = team::record_event(
+            app,
+            team_id,
+            "relay",
+            e.from_bot_id.as_deref(),
+            e.to_bot_id.as_deref(),
+            e.task_id.as_deref(),
+            Some("pending"),
+            payload,
+        )
+        .await?;
+        resent.push(copy.id);
+    }
+    note(app, team_id, json!({"action": "relay_resent", "turn_id": turn_id,
+         "of": rows.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), "as": resent,
+         "to": rows[0].to_bot_id}))
+    .await
 }
 
 /// Parse one reply and move the state machine. Writes rows; sends nothing.
@@ -4032,6 +4153,127 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert_eq!(m.relay_from.as_deref(), Some(pm.id.as_str()));
         assert_eq!(s.tasks().await[0].state, "working", "delivery is what moves `queued → working`");
         assert_eq!(s.team().await.pause_reason.as_deref(), Some("delivery_unknown"));
+    }
+
+    /// ops #3 (2026-09-12): the worker's reply arrived while no scheduler was listening (a
+    /// daemon restart replays the hook spool before the schedulers subscribe). The turn is
+    /// `completed`, the relay `delivered`, the reply is in `messages` — and the task used to
+    /// stay `working` for ever. `step` now catches such turns up, exactly once.
+    #[tokio::test]
+    async fn a_reply_the_bus_never_delivered_is_caught_up_by_the_next_pass() {
+        let s = S::new(1, false).await;
+        s.arm().await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let ctx = s.ctx().await;
+        flush(s.app(), &ctx).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "working");
+        let ev = sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'",
+        )
+        .bind(&s.tid)
+        .bind(&d1.id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        let turn_id = ev.turn_id.clone().unwrap();
+        // The agent answered and the hook closed the turn — with nobody subscribed.
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn_id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        let conv = db::conversation_id(&s.app().db, &d1.id).await.unwrap();
+        let reply = "好了。\n\n```am-team\n{\"action\":\"report\",\"status\":\"done\",\"summary\":\"做完了\"}\n```\n";
+        crate::lifecycle::insert_message(s.app(), &conv, Some(&turn_id), "assistant", reply, "hook", false, None)
+            .await
+            .unwrap();
+        s.unpause().await;
+
+        step(s.app(), &s.tid).await.unwrap();
+        assert_ne!(s.tasks().await[0].state, "working", "the reply was applied");
+        let notes = async |s: &S, action: &str| -> i64 {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')=?",
+            )
+            .bind(&s.tid)
+            .bind(action)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(notes(&s, "turn_caught_up").await, 1);
+        assert_eq!(notes(&s, "turn_handled").await, 1);
+        // Neither another pass nor the bus event arriving late applies it a second time.
+        step(s.app(), &s.tid).await.unwrap();
+        on_turn_done(s.app(), &s.tid, &d1.id, &turn_id, "completed").await.unwrap();
+        assert_eq!(notes(&s, "turn_caught_up").await, 1);
+        assert_eq!(notes(&s, "duplicate_report").await, 0, "the report was not taken twice");
+    }
+
+    /// ops #2 (2026-09-12) / §7.5: a relay whose prompt RPC timed out (`delivery=unknown`) is
+    /// abandoned by the user. That turn ends `failed` with `delivery='failed'` — the prompt
+    /// never reached the agent — so the relay is sent again under a new event id rather than
+    /// answered with a repair prompt, and nothing is left for "continue" to forget.
+    #[tokio::test]
+    async fn an_abandoned_unknown_delivery_is_resent_under_a_new_event_id() {
+        let s = S::new(1, false).await;
+        s.arm().await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let ctx = s.ctx().await;
+        flush(s.app(), &ctx).await.unwrap();
+        assert_eq!(s.team().await.pause_reason.as_deref(), Some("delivery_unknown"));
+        let old = sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'",
+        )
+        .bind(&s.tid)
+        .bind(&d1.id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        let turn_id = old.turn_id.clone().unwrap();
+        crate::lifecycle::abandon_turn(s.app(), &turn_id).await.unwrap();
+
+        // The bus path (the scheduler saw the abandon) …
+        on_turn_done(s.app(), &s.tid, &d1.id, &turn_id, "failed").await.unwrap();
+        let relays = sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay' ORDER BY seq",
+        )
+        .bind(&s.tid)
+        .bind(&d1.id)
+        .fetch_all(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(relays.len(), 2, "{relays:?}");
+        assert_eq!((relays[0].id.as_str(), relays[0].status.as_deref()), (old.id.as_str(), Some("dropped")));
+        assert_eq!(relays[0].turn_id.as_deref(), Some(turn_id.as_str()), "the attempt stays on record");
+        assert_ne!(relays[1].id, old.id, "a new event id — a new client_request_id");
+        assert_eq!(relays[1].status.as_deref(), Some("pending"), "waits for continue: the team is still paused");
+        assert_eq!(relays[1].task_id, old.task_id);
+        assert_eq!(relays[1].payload_json, old.payload_json, "the same relay, verbatim");
+        let actions: Vec<Value> = relays.iter().map(|e| serde_json::from_str(&e.payload_json).unwrap()).collect();
+        assert!(actions.iter().all(|a| a["action"] == "dispatch"), "no repair prompt for a prompt nobody received: {actions:?}");
+
+        // … and the sweep on the next pass does not do it again.
+        s.unpause().await;
+        step(s.app(), &s.tid).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'")
+            .bind(&s.tid)
+            .bind(&d1.id)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        let resent = sqlx::query_as::<_, db::TeamEvent>("SELECT * FROM team_events WHERE id=?")
+            .bind(&relays[1].id)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap();
+        assert_eq!(resent.status.as_deref(), Some("delivered"), "continue sent the copy");
+        assert_ne!(resent.turn_id.as_deref(), Some(turn_id.as_str()), "on a fresh turn");
     }
 
     /// **T3** — two workers report almost at once; the PM can only hold one turn, so §8.4
