@@ -1220,6 +1220,155 @@ pub async fn review(
     assignment(pool, id).await
 }
 
+/// The continuation to create alongside a `followup` decision.
+pub struct FollowupSpec<'a> {
+    pub target_bot_id: &'a str,
+    pub client_request_id: &'a str,
+    pub text: &'a str,
+    pub ownership: &'a [String],
+    /// The user request the parent traces back to, carried so the continuation answers the same
+    /// ask rather than inventing a new one.
+    pub request_id: Option<&'a str>,
+}
+
+/// What the decision did. `None` from [`review_with_followup`] means somebody else decided
+/// first and nothing was written.
+pub struct Decided {
+    pub updated: Assignment,
+    pub followup: Option<Assignment>,
+}
+
+/// Decide an assignment and, for `followup`, create its continuation — **in one transaction**,
+/// guarded on the status we validated against.
+///
+/// Both halves of that matter and they fix different failures:
+///
+/// - *One* transaction, so a crash cannot leave a queued continuation whose parent was never
+///   superseded (work nobody is tracking), or a superseded parent whose continuation does not
+///   exist (work silently dropped).
+/// - Guarded on `expect_status`, so two callers deciding the same assignment at once do not
+///   both create a continuation. The loser's UPDATE matches no rows, the whole transaction
+///   rolls back, and it is told it lost rather than quietly duplicating the work. This is why
+///   the row must be committed before anything is *sent*: an assignment that has gone out
+///   cannot be rolled back.
+#[allow(clippy::too_many_arguments)]
+pub async fn review_with_followup(
+    pool: &SqlitePool,
+    id: &str,
+    expect_status: &str,
+    decision: &str,
+    actor: &str,
+    source: &str,
+    reason: Option<&str>,
+    evidence: Option<&str>,
+    followup: Option<FollowupSpec<'_>>,
+) -> Result<Option<Decided>> {
+    let Some(to_status) = decision_status(decision) else { return Ok(None) };
+    let now = crate::db::now();
+    let mut tx = pool.begin().await?;
+
+    // The guard. Everything below only happens if the assignment is still where we left it.
+    let moved = sqlx::query(
+        "UPDATE supervisor_assignments
+            SET status=?, review_decision=?, reviewed_by=?, reviewed_at=?, review_reason=?, updated_at=?
+          WHERE id=? AND status=?",
+    )
+    .bind(to_status)
+    .bind(decision)
+    .bind(actor)
+    .bind(&now)
+    .bind(reason)
+    .bind(&now)
+    .bind(id)
+    .bind(expect_status)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if !moved {
+        // Nothing written; the caller re-reads to find out who decided and how.
+        return Ok(None);
+    }
+
+    let mut created: Option<String> = None;
+    if let Some(f) = followup {
+        // A byte-identical retry of the same continuation is the same continuation. Any other
+        // row already holding this id is a different piece of work and must not be adopted.
+        let existing: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, follow_up_of FROM supervisor_assignments WHERE supervisor_id=? AND client_request_id=?")
+                .bind(SUPERVISOR_ID)
+                .bind(f.client_request_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let new_id = match existing {
+            Some((existing_id, parent)) => {
+                if parent.as_deref() != Some(id) {
+                    anyhow::bail!("client_request_id {} already belongs to another assignment", f.client_request_id);
+                }
+                existing_id
+            }
+            None => {
+                let new_id = crate::db::ulid();
+                sqlx::query(
+                    "INSERT INTO supervisor_assignments
+                       (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
+                        ownership_json, follow_up_of, created_at, updated_at)
+                     VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
+                )
+                .bind(&new_id)
+                .bind(SUPERVISOR_ID)
+                .bind(f.request_id)
+                .bind(f.target_bot_id)
+                .bind(f.client_request_id)
+                .bind(f.text)
+                .bind((!f.ownership.is_empty()).then(|| serde_json::to_string(f.ownership).unwrap_or_default()))
+                .bind(id)
+                .bind(&now)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+                new_id
+            }
+        };
+        sqlx::query("UPDATE supervisor_assignments SET followup_assignment_id=?, updated_at=? WHERE id=?")
+            .bind(&new_id)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        created = Some(new_id);
+    }
+
+    sqlx::query(
+        "INSERT INTO supervisor_reviews
+           (id, supervisor_id, assignment_id, decision, from_status, to_status, actor, source,
+            reason, evidence, followup_assignment_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(SUPERVISOR_ID)
+    .bind(id)
+    .bind(decision)
+    .bind(expect_status)
+    .bind(to_status)
+    .bind(actor)
+    .bind(source)
+    .bind(reason)
+    .bind(evidence)
+    .bind(created.as_deref())
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let updated = assignment(pool, id).await?.expect("just updated");
+    let followup = match created {
+        Some(fid) => assignment(pool, &fid).await?,
+        None => None,
+    };
+    Ok(Some(Decided { updated, followup }))
+}
+
 /// Every decision taken on one assignment, oldest first.
 pub async fn reviews(pool: &SqlitePool, assignment_id: &str) -> Result<Vec<Value>> {
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, String)>(
@@ -2147,6 +2296,95 @@ mod tests {
         assert_eq!(next.follow_up_of.as_deref(), Some(first.id.as_str()));
         assert!(next.is_open(), "…because the follow-up carries the work");
         assert_eq!(first.text, "做 A", "the delivered words are never rewritten");
+    }
+
+    fn spec<'a>(target: &'a str, crid: &'a str, text: &'a str, owns: &'a [String]) -> FollowupSpec<'a> {
+        FollowupSpec { target_bot_id: target, client_request_id: crid, text, ownership: owns, request_id: None }
+    }
+
+    /// Two callers deciding the same assignment at once must not each派 a continuation. The
+    /// guard is the status the caller validated against: the loser matches no rows, rolls back
+    /// whole, and is told it lost — *before* anything has been sent to a bot.
+    #[tokio::test]
+    async fn two_concurrent_followups_on_one_parent_create_exactly_one_continuation() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let parent = insert_assignment(&p, None, "bot1", "req-p", "做 A", &[], None).await.unwrap();
+        settle_and_notify(&p, &parent.id, "completed", true, Some("做一半"), None, "k", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+
+        let first = review_with_followup(
+            &p, &parent.id, "awaiting_review", "followup", "AGM", "cli", Some("還差一半"), None,
+            Some(spec("bot1", "follow-A", "把 A 做完", &[])),
+        )
+        .await
+        .unwrap()
+        .expect("the first decision wins");
+        assert_eq!(first.updated.status, "superseded");
+        let first_child = first.followup.expect("a continuation was created");
+
+        // The second caller read the same `awaiting_review` and is deciding with a *different*
+        // request id — the case that used to produce two continuations.
+        let second = review_with_followup(
+            &p, &parent.id, "awaiting_review", "followup", "AGM", "web", Some("我也覺得要續作"), None,
+            Some(spec("bot1", "follow-B", "另一份續作", &[])),
+        )
+        .await
+        .unwrap();
+        assert!(second.is_none(), "the loser writes nothing at all");
+
+        let all = list_assignments(&p, 50).await.unwrap();
+        assert_eq!(all.len(), 2, "one parent, one continuation — not two");
+        assert!(all.iter().all(|a| a.client_request_id != "follow-B"), "the loser's row was never inserted");
+        assert_eq!(reviews(&p, &parent.id).await.unwrap().len(), 1, "and no second audit entry");
+        assert_eq!(
+            assignment(&p, &parent.id).await.unwrap().unwrap().followup_assignment_id.as_deref(),
+            Some(first_child.id.as_str())
+        );
+
+        // A byte-identical retry of the winner is idempotent at the assignment level: the same
+        // request id finds the row that already exists rather than making a second one.
+        let retry = review_with_followup(
+            &p, &parent.id, "superseded", "followup", "AGM", "cli", Some("重送"), None,
+            Some(spec("bot1", "follow-A", "把 A 做完", &[])),
+        )
+        .await
+        .unwrap()
+        .expect("the parent is still where this caller thinks it is");
+        assert_eq!(retry.followup.unwrap().id, first_child.id);
+        assert_eq!(list_assignments(&p, 50).await.unwrap().len(), 2, "still two rows");
+    }
+
+    /// If any part of the decision fails, none of it lands: no superseded parent, no audit row,
+    /// and above all no queued continuation that nobody is tracking.
+    #[tokio::test]
+    async fn a_failed_followup_rolls_back_and_leaves_no_orphan_queued_row() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let parent = insert_assignment(&p, None, "bot1", "req-p", "做 A", &[], None).await.unwrap();
+        settle_and_notify(&p, &parent.id, "completed", true, Some("做一半"), None, "k", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        // Somebody else's assignment already owns this client_request_id.
+        let other = insert_assignment(&p, None, "bot2", "taken-crid", "別人的工作", &[], None).await.unwrap();
+
+        let err = review_with_followup(
+            &p, &parent.id, "awaiting_review", "followup", "AGM", "cli", Some("續作"), None,
+            Some(spec("bot1", "taken-crid", "把 A 做完", &[])),
+        )
+        .await;
+        assert!(err.is_err(), "adopting someone else's request id is refused");
+
+        let parent_now = assignment(&p, &parent.id).await.unwrap().unwrap();
+        assert_eq!(parent_now.status, "awaiting_review", "the parent was not superseded");
+        assert!(parent_now.review_decision.is_none(), "and no decision was recorded");
+        assert!(parent_now.followup_assignment_id.is_none());
+        assert!(reviews(&p, &parent.id).await.unwrap().is_empty(), "no audit row either");
+        let all = list_assignments(&p, 50).await.unwrap();
+        assert_eq!(all.len(), 2, "no orphan continuation was left behind");
+        assert!(all.iter().all(|a| a.follow_up_of.is_none()));
+        assert_eq!(assignment(&p, &other.id).await.unwrap().unwrap().text, "別人的工作", "and the other row is untouched");
     }
 
     /// The transactional outbox: either the assignment moves and the event is queued, or

@@ -59,6 +59,9 @@ launchd 設定沿用既有的 `com.agm.daemon-update`（`StartCalendarInterval M
 - 這些腳本、`bin/agm`、`/api/supervisor/*` 的重建與重啟申請。
 - 拿著 `restart` 租約期間，daemon 的 assignment 派送會 hold 住（不丟工作，等窗口結束再送）。
 
+- **只管 supervisor 的 assignment 派送**：`POST /api/bots/{id}/prompt`、team relay 與排程器都沒有被 gate。
+  使用者自己打字、PM 派下一棒，在窗口期間照樣進得去。
+
 管不到的：
 
 - 這台機器上任何一個 shell 直接 `kill` daemon、自己 `cargo build --release`、或用別的方式換掉

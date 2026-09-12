@@ -293,6 +293,30 @@ fn overlaps(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
+/// Can this bot be handed work at all? A read-only check, so a caller can validate a target
+/// before opening a transaction (and get a plain 400/409 instead of a rolled-back write).
+///
+/// Shares its rules with [`assign`]: the manager may not assign to itself, the bot has to exist
+/// and not be deleted, and a team member takes work through its PM, never through here.
+pub async fn check_assignable(app: &Arc<App>, target_bot_id: &str) -> Result<(), LcError> {
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    if sup.bot_id.as_deref() == Some(target_bot_id) {
+        return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
+    }
+    let target = crate::db::bot(&app.db, target_bot_id)
+        .await
+        .map_err(up)?
+        .filter(|b| b.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if target.managed_by == "team" {
+        return Err(LcError::conflict(
+            "target bot is team-managed; coordinate through the team instead",
+            json!({"reason": "team_managed", "team_id": target.team_id}),
+        ));
+    }
+    Ok(())
+}
+
 /// Where an assignment came from: `(source, source_key, text)`.
 ///
 /// The phone talks to the manager over Remote Control, which is a native session — its user

@@ -78,8 +78,25 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     // The assignment is stamped as coming from the manager, not from the user: `relay_from` is
     // set as the message is written, so there is no window in which the UI could render it as
     // the user's own words (it used to be patched in afterwards).
-    let from = store::get_or_init(&app.db).await.ok().and_then(|s| s.bot_id);
-    match lifecycle::prompt_relayed(app, &a.target_bot_id, &a.text, &a.client_request_id, &[], from.as_deref()).await {
+    //
+    // Fail closed. A DB hiccup here used to collapse to `None`, and `None` does not mean
+    // "source unknown" — it means "the user typed this", which is a claim we would be making
+    // about a person from a failed read. Retrying a few seconds later costs nothing; a prompt
+    // wearing the user's face cannot be taken back.
+    let from = match store::get_or_init(&app.db).await {
+        Ok(sup) => sup.bot_id,
+        Err(e) => {
+            let _ = store::defer(&app.db, &a.id, &iso_in(30), &format!("could not read the supervisor row: {e}")).await;
+            tracing::warn!(assignment = %a.id, error = ?e, "holding the assignment: cannot attribute it to the manager");
+            return;
+        }
+    };
+    let Some(from) = from else {
+        let _ = store::defer(&app.db, &a.id, &iso_in(30), "supervisor has no bot id; cannot attribute the assignment").await;
+        tracing::warn!(assignment = %a.id, "holding the assignment: the supervisor has no bot to attribute it to");
+        return;
+    };
+    match lifecycle::prompt_relayed(app, &a.target_bot_id, &a.text, &a.client_request_id, &[], Some(&from)).await {
         Ok(out) => {
             // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
             // it landed, and is reconciled against the turn rather than re-sent.
