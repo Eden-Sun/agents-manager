@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useStore } from '../store/store'
+import { projectHostName, useStore } from '../store/store'
+import { quotaKey } from '../api/types'
 
 /**
  * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）。
@@ -20,6 +21,22 @@ import { useStore } from '../store/store'
  */
 export function TurnErrorBadge({ botId }: { botId: string }) {
   const notice = useStore((s) => s.runs[botId]?.turn_error ?? null)
+  // 額度用盡（`You've reached your Fable limit…`）跟 API 斷線分開講：重送沒有用，要等重置或換模型
+  // （2026-09-12 使用者：「已用盡卻沒有正確的提示」）。重置時間從該帳號的額度格拿（daemon 在同一時刻
+  // 把它標成 limit_hit）。
+  const quotaLimit = notice !== null && /^you've reached your .*limit/i.test(notice)
+  const quotaName = notice && /fable/i.test(notice) ? 'Fable' : '5 小時'
+  const resetsAt = useStore((s) => {
+    if (!quotaLimit) return null
+    const bot = s.bots.find((b) => b.id === botId)
+    if (!bot) return null
+    const base = bot.identity ? `${bot.kind}:${bot.identity}` : bot.kind
+    const q = s.quota[quotaKey(projectHostName(s, bot.project_id), base)]
+    if (!q) return null
+    return q.limit_hit?.until ?? (/fable/i.test(notice ?? '') ? q.fable?.resets_at : q.five_hour?.resets_at) ?? null
+  })
+  const currentModel = useStore((s) => s.bots.find((b) => b.id === botId)?.model ?? null)
+  const patchBot = useStore((s) => s.patchBot)
   // 上一則使用者訊息就是「被斷掉的那一則」——重送指的是它。
   const lastUserText = useStore((s) => {
     const list = s.messages[botId] ?? []
@@ -108,20 +125,50 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
       aria-label="回合被中斷"
       style={pos ? { left: pos.left, top: pos.top } : { left: 0, top: 0, visibility: 'hidden' }}
     >
-      <p className="turn-error-why">
-        這一回合被 API 連線中斷截斷，回應是不完整的——終端與 hook 都會把它報成 <code>done</code>
-        ，所以側欄的燈號看起來一切正常。
-      </p>
+      {quotaLimit ? (
+        <p className="turn-error-why">
+          這一回合根本沒跑：{quotaName} 額度已用盡，claude 直接拒絕。重送沒有用——
+          {resetsAt ? `等 ${new Date(resetsAt).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 重置，` : '等額度重置，'}
+          或先換一個模型繼續。
+        </p>
+      ) : (
+        <p className="turn-error-why">
+          這一回合被 API 連線中斷截斷，回應是不完整的——終端與 hook 都會把它報成 <code>done</code>
+          ，所以側欄的燈號看起來一切正常。
+        </p>
+      )}
       {/* 原文照貼：使用者要能拿它去對終端上那一行。 */}
       <pre className="turn-error-raw">{notice}</pre>
       <div className="turn-error-act">
+        {quotaLimit ? (
+          <button
+            type="button"
+            className="btn primary"
+            disabled={sending || currentModel === 'opus'}
+            title={currentModel === 'opus' ? '已經是 opus' : '把這顆 bot 的模型改成 opus（live 套用，不重啟）'}
+            onClick={() => {
+              setSending(true)
+              void patchBot(botId, { model: 'opus' }).then((ok) => {
+                setSending(false)
+                if (ok) {
+                  setOpen(false)
+                  notify('info', '已改用 opus，重送上一則就能繼續')
+                }
+              })
+            }}
+          >
+            {sending ? '切換中…' : '改用 opus'}
+          </button>
+        ) : null}
         <button
           type="button"
           className="btn primary"
-          disabled={!lastUserText || sending || busy}
+          disabled={!lastUserText || sending || busy || (quotaLimit && currentModel !== 'opus' && !resetPassed(resetsAt))}
           title={
             !lastUserText
               ? '這個對話裡沒有可以重送的訊息'
+              : quotaLimit && currentModel !== 'opus' && !resetPassed(resetsAt)
+                ? '額度還沒重置，重送只會再被拒絕一次；先換模型'
               : busy
                 ? '它正在忙，等這一輪停下來再重送'
                 : `重送：${lastUserText.slice(0, 60)}`
@@ -145,9 +192,15 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
         title={notice}
         onClick={() => setOpen((v) => !v)}
       >
-        ⚠ 回合被中斷（API 錯誤）
+        {quotaLimit ? `⛔ ${quotaName} 額度用盡` : '⚠ 回合被中斷（API 錯誤）'}
       </button>
       {pop && createPortal(pop, document.body)}
     </>
   )
+}
+
+function resetPassed(resetsAt: string | null): boolean {
+  if (!resetsAt) return false
+  const t = Date.parse(resetsAt)
+  return Number.isFinite(t) && t <= Date.now()
 }

@@ -1976,6 +1976,11 @@ run 上：
 - 回合當下若還是 `in_flight`，會一併收成 `status = failed` 並推 `turn_updated`。
 - **沒有新的重試 API**：UI 的「重送上一則」就是把對話裡最後一則 user 訊息再送一次
   `POST /api/bots/{id}/prompt`。
+- 額度用盡那一種（2026-09-12）：daemon 同時把該 bot 帳號的額度格（`claude` / `claude:<identity>`）
+  標成 `limit_hit`（同 codex 那一格），`until` 取橫幅講的桶子（`Fable` → `fable`，否則 5h）的
+  `resets_at`；**不**在下一回合成功時清掉（換 opus 照樣能跑不代表 Fable 恢復了），只靠 `until`
+  到期解除。UI 的 chip 寫「⛔ Fable 額度用盡」、給重置時間與「改用 opus」，重送鍵在重置前灰掉。
+  claude 2.1.269 起橫幅底下多一行 `0 tokens`，掃描時視為 chrome。
 
 ## `POST /api/teams/{id}/rescue`（SPEC-team §2.6，2026-09-11 新增）
 

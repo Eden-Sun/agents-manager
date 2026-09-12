@@ -1319,7 +1319,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <HostBadge host={hostName} connected={hostUp} />
             <UpdateBadge botId={botId} />
             <RuntimeDriftBadge botId={botId} />
-            <TurnErrorBadge botId={botId} />
             {headUnread > 0 ? (
               <span className="unread-turns" title={`${headUnread} 個回合已完成，還沒看過`}>
                 !{headUnread > 99 ? '99+' : headUnread}
@@ -1344,6 +1343,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               ) : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
               <BlockedBadge botId={botId} onOpen={openBlockedFull} />
+              <TurnErrorBadge botId={botId} />
             </div>
           ) : <div className="main-title-sub">
             {/* 桌機也放第二行（跟手機同一個位置）：名字那一列在 1440px＋側欄開著時只有約 161px，
@@ -1351,6 +1351,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 半顆就是 ⚙ 被剪掉，而 ⚙ 是那一列唯一不重複的入口。第二行的 pane id 是 debug 用的
                 識別碼，blocked 時讓給它（見 blockedBadge.css）。 */}
             <BlockedBadge botId={botId} onOpen={openBlockedFull} />
+            {/* 同理：1400px 側欄開著時名字列連 71px 的紅 chip 都放不下，整顆被 overflow 剪掉——
+                使用者就是「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
+            <TurnErrorBadge botId={botId} />
             <KindTag kind={bot.kind} />
             {bot.model || statusInfo?.model_name ? (
               <ModelQuickPicker
