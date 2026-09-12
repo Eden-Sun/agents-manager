@@ -76,6 +76,10 @@ export function UnreadChip() {
   // 「進行中」用 `agent_status` 而不是複合燈號——燈號還混進了主機斷線、啟動中那幾種顏色，
   // 那些不是進行中。
   const runs = useStore((s) => s.runs)
+  /* 「在等子 agent」：底下有 child 還在跑或 blocked（同 Sidebar 的 `kidsLampOf`，但這裡只要
+     知道有沒有）。自己 blocked（等使用者）一定蓋過它——紅色只留給「需要我本人動手」。 */
+  const waitsKids = (id: string) =>
+    bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
   const working = useMemo(
     () =>
       bots
@@ -119,6 +123,8 @@ export function UnreadChip() {
       {/* 釘選的主力：★ 就是標籤，不另外寫字。帶未讀時多套一層 `unread`——見下面的註解。 */}
       {pinned.map((r) => {
         const n = botUnreadOf(r.id)
+        const selfBlocked = runs[r.id]?.agent_status === 'blocked'
+        const kids = !selfBlocked && waitsKids(r.id)
         return (
           <button
             key={r.id}
@@ -126,10 +132,12 @@ export function UnreadChip() {
             /* `unread` 是**加在釘選身分上的一層狀態**，不是換一組晶片：一排 ★ 看過去，有東西
                等你看的那幾顆要能一眼挑出來，而不是只靠名字後面那個小數字。`current`（你在
                這裡）跟它可以同時成立，兩者的畫法也分得開（見 `unreadChip.css`）。 */
-            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${runs[r.id]?.agent_status === 'blocked' ? ' needs-reply' : ''}${r.id === selectedBotId ? ' current' : ''}`}
+            className={`unread-chip pinned${n > 0 ? ' unread' : ''}${selfBlocked ? ' needs-reply' : kids ? ' waits-kids' : ''}${r.id === selectedBotId ? ' current' : ''}`}
             title={
-              runs[r.id]?.agent_status === 'blocked'
+              selfBlocked
                 ? `${r.name}（主要執行的 bot）停在一個要你回答的提示上。點一下過去回答`
+                : kids
+                  ? `${r.name}（主要執行的 bot）在等子 agent 完成。${r.id === selectedBotId ? '你正在看的就是它' : '點一下跳過去'}`
                 : r.id === selectedBotId
                 ? `${r.name}（主要執行的 bot）：你正在看的就是它`
                 : n > 0
@@ -144,7 +152,7 @@ export function UnreadChip() {
             {n > 0 ? <span className="unread-chip-n">{n > 99 ? '99+' : n}</span> : null}
             {/* 藍點＝還在跑；紅點＝停在要你回答的提示上（`blocked`）。後者跟 `unread` 一樣是疊在
                 釘選身分上的一層狀態，不是換一組晶片（2026-09-12 使用者：「星號標注主力處也要」）。 */}
-            {runs[r.id]?.agent_status === 'working' || runs[r.id]?.agent_status === 'blocked' ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+            {runs[r.id]?.agent_status === 'working' || selfBlocked || kids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
           </button>
         )
       })}
