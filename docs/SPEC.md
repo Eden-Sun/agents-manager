@@ -1261,6 +1261,9 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   實測差異：node v22 的 upgrade socket 是 `Socket` 且 `destroySoon` 可呼叫，bun 同一支測試是
   `undefined` 並丟出同一則 TypeError。**bun 只用來 build（`bun run build`）與裝套件，不用來跑 dev server。**
 - **必綁 `--host 0.0.0.0`**：使用者從手機／LAN／Tailscale 上的裝置存取，綁 `127.0.0.1` 只有這台機器連得到。
+  `web/vite.config.ts` 也設了 `server.host: true`，所以**手動 `npx vite` / `bun run dev` 起的也會對外**，
+  不會再出現「某人用預設值起了一顆只聽 loopback 的 vite，占著 5173 但手機連不到」。看門狗仍顯式帶
+  `--host 0.0.0.0`，不倚賴設定檔（設定檔被改了也還是對的）。
   代理仍能通，是因為 `web/vite.config.ts` 把 `Origin` 改寫成 daemon 自己的位址（daemon 的 Origin 檢查照舊只信 localhost）。
   代價要知道：同網段任何裝置都能透過 5173 的 `/api` 代理打到 7788，公共網路上要另外收斂。
 - **看門狗** launchd `com.agm.dev-server`（`~/Library/LaunchAgents/com.agm.dev-server.plist`）：
@@ -1299,9 +1302,14 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
 - **誰做重建**：(a) 有 bot 自己申請重建（帶已 push 的 commit）→ 核准後**由申請的 bot 自己建**；
   (b) 沒有申請者的例行更新 → 固定由 **AGM 建置 child `agm-pxf2pv-build`（cc0/opus/low）**。
   **絕不派給使用者的專案 bot**——會白耗它們的 context。
-- **docs-only 的差異不重啟**：接到任務先看
-  `git diff --quiet <binary 的 commit> origin/main -- daemon web Cargo.toml Cargo.lock`，
-  沒有差異就只做驗證（cargo test / tsc / build）並回報「無需上線」，**不要為了零程式碼差異中斷使用者與所有 bot**。
+- **docs-only 的差異不重啟**，防線在 kick.sh：每次建置成功並驗證通過後，建置者把這次建進 binary 的
+  origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾就不寫）。kick.sh 有這個檔就改用
+  `git diff --quiet <built> origin/main -- daemon web Cargo.toml Cargo.lock` 判斷：沒有差異就寫
+  `docs-only since <built>, skip`、把 `daemon-update.last` 推到 HEAD（下個整點不必重算）並結束；
+  檔案不存在或裡面的 sha 不在 repo 裡，才退回舊的「binary mtime vs origin/main commit 時間」比較
+  （那個比法會把 docs-only 也算成落後，是這條規則的由來）。
+  執行端保留同一道檢查：接到任務先自己 diff 一次，沒有程式碼差異就只做驗證並回報「無需上線」，
+  **不要為了零程式碼差異中斷使用者與所有 bot**。
 - **重建重啟的固定條件**（六項全中才動手，否則回報阻塞）：
   1. 在**乾淨的 HEAD worktree** 建 web 與 daemon（用 `git worktree`，共用樹裡永遠有別人未提交的 WIP，
      不得把它編進 release，也不得 stash / reset）。

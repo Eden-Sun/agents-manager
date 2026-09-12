@@ -20,6 +20,10 @@ const rewriteOrigin: ProxyOptions['configure'] = proxy => {
 export default defineConfig({
   plugins: [react()],
   server: {
+    // 使用者是從手機／LAN 上的裝置開這個 dev server，只綁 loopback 他們連不到，
+    // 所以 5173 一律對外（SPEC §18.1）。daemon 自己仍只綁 127.0.0.1，跨裝置來的請求
+    // 靠下面 proxy 的 changeOrigin + Origin 改寫過它的檢查。
+    host: true,
     // The daemon rejects requests whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`
     // (docs/API.md §0), so the proxy must rewrite Host to the target: changeOrigin: true.
     proxy: {
