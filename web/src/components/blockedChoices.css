@@ -494,3 +494,35 @@
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+
+/* ---- 預載後的離線作答（2026-09-12 第六輪） */
+
+.bc-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bc-page {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* 一次把所有題目攤在同一條捲軸上，題目自己要站得住腳（上面有一條細線隔開前一題）。 */
+.bc-page + .bc-page {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.bc-page-q {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.bc-again {
+  margin-left: 8px;
+}
