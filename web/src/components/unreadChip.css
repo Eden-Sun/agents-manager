@@ -116,6 +116,19 @@
   color: #fff;
 }
 
+/* 在等子 agent（自己沒 blocked）：黃。`--lamp-yellow` 淺色主題只有 2.4:1，只能當實心點；
+   字與框用 `--warn`（文字安全的那組），底用 `--warn-soft`（2026-09-12 使用者：「等待 child
+   更好，用黃色」，紅色只留給「需要我本人動手」）。 */
+.unread-chip.waits-kids {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.unread-chip.waits-kids .unread-chip-dot {
+  background: var(--lamp-yellow);
+}
+
 .unread-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
