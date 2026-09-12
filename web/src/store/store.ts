@@ -976,9 +976,14 @@ export const useStore = create<StoreState>((set, get) => ({
 
   /** 設定面板永遠對著「目前選取的 bot」，所以開啟時順便切過去。 */
   openSettings: (botId, anchor = null) => {
+    // 面板只在 ChatPanel 裡渲染：主面板是 Team／組隊／主機 shell 視圖時要一起清掉，
+    // 不然按齒輪只有 selectedBotId 暗中換掉、畫面與網址都不動（同 `selectBot` 的那一組）。
     set({
       selectedBotId: botId,
       selectedProjectId: null,
+      selectedTeamId: null,
+      teamLaunch: null,
+      shellView: null,
       rightTab: 'chat',
       settingsBotId: botId,
       settingsAnchor: anchor,
