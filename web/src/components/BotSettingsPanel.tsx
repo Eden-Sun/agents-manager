@@ -143,9 +143,10 @@ export function IdentityOptions({
   const status = useStore((s) => identityStatusOfHost(s, host))
   const refreshTools = useStore((s) => s.refreshTools)
   const busy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
-  // config 的身份加上這台主機 shell 裡的 `ccN`（SPEC §16）。
-  const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === 'claude'), [all, status])
-  if (kind !== 'claude' || identities.length === 0) return null
+  // config 的身份加上這台主機 shell 裡的 `ccN`（SPEC §16），只留這個 kind 的：新增身份表單
+  // 允許 codex／grok，以前這裡對 kind !== 'claude' 直接回 null，那些身份建了也永遠指派不了。
+  const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === kind), [all, status, kind])
+  if (identities.length === 0) return null
   const hostLabel = !host || host === 'local' ? '本機' : host
   const selectedStatus = value ? status[value] : undefined
   const selectedWarning = value ? identityWarning(selectedStatus, hostLabel) : null
