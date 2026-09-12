@@ -730,6 +730,7 @@ function Composer({
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const queueSend = useStore((s) => s.queueSend)
   const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
+  const restoreQueuedSend = useStore((s) => s.restoreQueuedSend)
   const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
@@ -796,14 +797,18 @@ function Composer({
     const body = pending.trim()
     const ids = queued ? queued.attachments : files.ids
     if (!body && ids.length === 0) return
-    if (queued) cancelQueuedSend(botId)
+    const wasQueued = queued
+    if (wasQueued) cancelQueuedSend(botId)
     setSending(true)
-    await abortBot(botId)
-    const ok = await sendPrompt(botId, body, ids)
+    // esc 沒送進終端就別送新的：agent 還在跑，新 prompt 只會撞上它。排隊的那一則放回去。
+    const stopped = await abortBot(botId)
+    const ok = stopped && (await sendPrompt(botId, body, ids))
     setSending(false)
     if (ok) {
       setText('')
       files.clear()
+    } else if (wasQueued) {
+      restoreQueuedSend(botId, wasQueued)
     }
   }
 
@@ -814,13 +819,15 @@ function Composer({
   const sendAlongside = async () => {
     const body = pending.trim()
     if (!body) return
-    if (queued) cancelQueuedSend(botId)
+    const wasQueued = queued
+    if (wasQueued) cancelQueuedSend(botId)
     setSending(true)
     // 整段文字走 `POST /bots/:id/text`，Enter 由 daemon 另外送（見 store/alongside.ts）：
     // 拆成鍵名的舊寫法會把多行內容的 `\n` 當成一顆不存在的鍵，內容送不完整。
     const ok = await typeAlongside({ sendText }, botId, body)
     setSending(false)
     if (ok) setText('')
+    else if (wasQueued) restoreQueuedSend(botId, wasQueued)
   }
 
   /**
