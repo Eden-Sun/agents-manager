@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { commit, preload, togglesFor, wantOf, type Draft, type Io } from '../lib/choiceDraft'
+import { acquirePreload, restartPreload } from '../lib/draftPreload'
 import { parseChoiceMenu, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import { BlockedChoices } from './BlockedChoices'
@@ -37,8 +38,8 @@ export function BlockedDraft({
   const [open, setOpen] = useState<string[]>([])
   const [round, setRound] = useState(0)
   const listRef = useRef<HTMLDivElement>(null)
-  /** 正在跑（或跑完）的那一份預載，用來擋掉 StrictMode 的第二次 effect。 */
-  const jobRef = useRef<{ round: number; job: Promise<Draft | null> } | null>(null)
+  /** 使用者按了「重新讀取」：下一輪要換一份新的預載，而不是接既有的。 */
+  const retryRef = useRef(false)
 
   // 手上這份選單的身分：問卷換了（分頁的標籤組合不一樣）就重新預載。
   const ident = menu.tabs.map((t) => t.label).join('')
@@ -71,21 +72,24 @@ export function BlockedDraft({
   /**
    * 預載。`round` 變了（換問卷、或使用者按「重新讀取」）就再跑一次。
    *
-   * **同一輪只准跑一份**：StrictMode 在 dev 會把 effect 跑兩次（mount → cleanup → mount），
-   * 兩份預載同時在同一個 pane 上送導覽鍵會互相插隊，走到一半就對不上、還把終端留在別的分頁。
-   * 所以把那顆 promise 記在 ref 裡，第二次進來的人接同一份結果。
+   * **同一份問卷只准跑一份**：對話上方的面板與全畫面視窗會同時掛著各自的 BlockedDraft，
+   * StrictMode 在 dev 也會把 effect 跑兩次——兩份預載同時在同一個 pane 上送導覽鍵會互相插隊，
+   * 走到一半就對不上、還把終端留在別的分頁。所以預載掛在 module 層（`lib/draftPreload`），
+   * 以 bot + 問卷身分為 key，後掛上來的人接同一份結果。
    */
   useEffect(() => {
     let alive = true
     setErr(null)
     setStep({ done: 0, total: menu.tabs.length })
-    if (jobRef.current?.round !== round) {
-      jobRef.current = {
-        round,
-        job: preload(ioRef.current, menu, (done, total) => setStep({ done, total })),
-      }
+    const key = `${botId}:${ident}`
+    const onProgress = (done: number, total: number) => {
+      if (alive) setStep({ done, total })
     }
-    void jobRef.current.job.then((d) => {
+    const start = (progress: (done: number, total: number) => void) => preload(ioRef.current, menu, progress)
+    const retry = retryRef.current
+    retryRef.current = false
+    const handle = retry ? restartPreload(key, start, onProgress) : acquirePreload(key, start, onProgress)
+    void handle.job.then((d) => {
       if (!alive) return
       if (!d) {
         // 讀不完整就整個退回即時模式，不要送出半套。
@@ -98,8 +102,9 @@ export function BlockedDraft({
     })
     return () => {
       alive = false
+      handle.release()
     }
-    // menu 每秒都是新物件，不能進 deps；預載只認 round。
+    // menu 每秒都是新物件，不能進 deps；預載只認 round（ident 變了會推 round）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [round])
 
@@ -244,7 +249,14 @@ export function BlockedDraft({
       {err ? (
         <p className="bc-hint bc-stale" role="status">
           {err}
-          <button type="button" className="mini-btn bc-again" onClick={() => setRound((n) => n + 1)}>
+          <button
+            type="button"
+            className="mini-btn bc-again"
+            onClick={() => {
+              retryRef.current = true
+              setRound((n) => n + 1)
+            }}
+          >
             重新讀取
           </button>
         </p>
