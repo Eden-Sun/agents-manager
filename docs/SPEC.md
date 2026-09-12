@@ -298,7 +298,7 @@ label = "foo"
 
 - 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；mtime 與載入時不符回 409。`toml_edit` 保留註解為第二階段。
 - 改 `name` 時若有 active Run 拒絕（herdr agent name 綁定啟動時的名稱）。
-- `[supervisor] notify_interval_secs`（預設 **600**）：事件照舊即時寫入 `supervisor_inbox`，**不丟也不延遲入庫**；
+- `[supervisor] notify_interval_secs`（預設 **600**，AGM 運維面的說明見 §18.3）：事件照舊即時寫入 `supervisor_inbox`，**不丟也不延遲入庫**；
   被節流的只有「把未 ack 事件推給總管、喚醒它」這個動作——每 ≥ 這個秒數才推一次，一次把這段期間累積的
   未 ack 事件彙整成同一則 `[AG Man 通知]`。health 偵測（30 秒）、watchdog 與模型控制器 TICK 不受影響。
   總管 busy 時照舊延後，成功送出才開始下一個視窗（送失敗不會吃掉一個視窗）。`0` = 回到節流前的行為。
@@ -1245,6 +1245,121 @@ claude 2.1 起有 `--effort <low|medium|high|xhigh|max>`（`claude --help`），
 | E11 | claude 官方文件 `code.claude.com/docs/en/model-config`「Choose an effort level」 | 逐字：「`high` \| Balances token usage and intelligence. **The default on every model except Opus 4.7**」（Opus 4.7 預設 `xhigh`）——`opus`/`sonnet`/`haiku`/`fable` 四個 alias 都不是 Opus 4.7 |
 | E12 | 真機驗證 E11：一個 `settings.json` 從沒碰過 effort 的乾淨帳號（cc2），開 claude 直接切到 Sonnet | 開場橫幅印 `Sonnet 5 with high effort`，狀態列 `● high · /effort`，`/effort` 拉桿 ▲ 停在 `high`——證實 §17.1 那個 `null` 是查漏了，已改回 `high` |
 | E13 | 同帳號（cc2）換成 `--model haiku` | `/effort`（不帶參數）一樣開得出拉桿，五級都在，▲ 停在 `high`——haiku 支援 effort，且預設同樣是 `high`（E11 的官方表格沒列 haiku，但實機行為以這條為準） |
+
+## 18. 總管（AGM）運維規範（2026-09-12）
+
+AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是同一份規則的執行期投影
+（§18.6），launchd 腳本是它的實作；三者不一致時**以實際腳本行為為準**，然後把本節改對。
+
+### 18.1 開發用 dev server（5173）
+
+- **正式位址** `http://<本機>:5173`，`--strictPort`（搶不到就失敗，不要默默換 port——使用者手機上的書籤是寫死的）。
+- **runtime 是 node，不是 bun**：`node web/node_modules/vite/bin/vite.js`。bun 1.3.14 交給 HTTP
+  upgrade handler 的 socket 沒有 Node 的 `destroySoon`，vite 代理在 upgrade 回應結束時會呼叫它
+  （`proxyRes.on('end') → socket.destroySoon()`），於是**正式 daemon 一重啟、代理目標斷線，vite 整個
+  crash**（2026-09-12 實例：`TypeError: socket.destroySoon is not a function`，Bun v1.3.14）。
+  實測差異：node v22 的 upgrade socket 是 `Socket` 且 `destroySoon` 可呼叫，bun 同一支測試是
+  `undefined` 並丟出同一則 TypeError。**bun 只用來 build（`bun run build`）與裝套件，不用來跑 dev server。**
+- **必綁 `--host 0.0.0.0`**：使用者從手機／LAN／Tailscale 上的裝置存取，綁 `127.0.0.1` 只有這台機器連得到。
+  代理仍能通，是因為 `web/vite.config.ts` 把 `Origin` 改寫成 daemon 自己的位址（daemon 的 Origin 檢查照舊只信 localhost）。
+  代價要知道：同網段任何裝置都能透過 5173 的 `/api` 代理打到 7788，公共網路上要另外收斂。
+- **看門狗** launchd `com.agm.dev-server`（`~/Library/LaunchAgents/com.agm.dev-server.plist`）：
+  `StartInterval 300`、`RunAtLoad true`，跑 `supervisor/AGM/bin/dev-server-kick.sh`。腳本的行為順序：
+  1. `curl -sf -m 3 http://127.0.0.1:5173/` 有回應 → 直接 `exit 0`，**不寫 log**（每 5 分鐘一行會把 log 灌爆）。
+     健康檢查走 loopback 就夠：本機看得到就代表有在聽。
+  2. 沒回應但 port 有人占著 → 記下 pid 與完整 command，**不 kill**（可能是別人的程序），`exit 0`。
+  3. 找不到 node 或找不到 `vite.js` → 寫 log 跳過這輪，**不拿 bun 代跑**（等於把 crash 裝回去）。
+  4. 真的沒人聽 → `nohup node vite.js --host 0.0.0.0 --port 5173 --strictPort`，最多等 15 秒複驗；
+     仍失敗就寫 log 交給下一輪，**不在腳本裡重試迴圈**（web/ 編不過時才不會每 5 分鐘炸一次）。
+  log 在 `supervisor/AGM/dev-server.log`；launchd 自己的 stdout 在 `dev-server.launchd.log`。
+- **其他 port 不歸看門狗管**：5188 那類 `VITE_MOCK=1` 實例是各 bot 自己的測試環境，AGM 不碰、不清、不重啟。
+- **驗證方式**（改動這條規則或腳本後要重跑）：kill 掉現有 vite → 跑一次 kick.sh → `curl http://127.0.0.1:5173/`、
+  `curl http://<LAN IP>:5173/`、`curl http://<LAN IP>:5173/api/session` 都要 200（最後一項才證明代理活著）。
+  LAN IP 用 `route -n get default` 找到的那張介面問，**不要寫死 `en0`**（這台的 LAN 是 `en7`）。
+
+### 18.2 正式 daemon 的定義與例行更新
+
+- **正式 daemon** = `target/release/agents-managerd serve`，監聽 `127.0.0.1:7788`，前端（`web/dist`）內嵌在這個
+  release binary 裡。使用者口語的「7788」就是它；**5173 是開發用 vite，不是正式環境**。前端改動要
+  `bun run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
+- **例行檢查** launchd `com.agm.daemon-update`：`StartCalendarInterval {Minute: 0}`（**每小時整點**），
+  跑 `supervisor/AGM/bin/daemon-update-kick.sh`。腳本順序：`git fetch` → 正在執行的 binary 比 origin/main
+  舊才繼續 → 同一 commit 已派過就 skip（`daemon-update.last`）→ 建置 child 不存在就寫
+  `build child missing` 並 `exit 0`（**不改派給別人**）→ `busy > 1` 就 defer → 派
+  `daemon-update-task.md`，`--request-id agm-daemon-update-<sha>`（同版不重派）。
+- **誰做重建**：(a) 有 bot 自己申請重建（帶已 push 的 commit）→ 核准後**由申請的 bot 自己建**；
+  (b) 沒有申請者的例行更新 → 固定由 **AGM 建置 child `agm-pxf2pv-build`（cc0/opus/low）**。
+  **絕不派給使用者的專案 bot**——會白耗它們的 context。
+- **docs-only 的差異不重啟**：接到任務先看
+  `git diff --quiet <binary 的 commit> origin/main -- daemon web Cargo.toml Cargo.lock`，
+  沒有差異就只做驗證（cargo test / tsc / build）並回報「無需上線」，**不要為了零程式碼差異中斷使用者與所有 bot**。
+- **重建重啟的固定條件**（六項全中才動手，否則回報阻塞）：
+  1. 在**乾淨的 HEAD worktree** 建 web 與 daemon（用 `git worktree`，共用樹裡永遠有別人未提交的 WIP，
+     不得把它編進 release，也不得 stash / reset）。
+  2. 整樹 `cargo test -p agents-managerd` 全過，web `bunx tsc --noEmit -p tsconfig.app.json` 通過
+     （`tsc --noEmit` 不帶 `-p` 是假綠燈）。
+  3. 等 `bin/agm health` 的 busy 只剩自己；有別的 bot 在跑就等，最多 30 分鐘，超過回報「延後」不硬重啟。
+  4. 備份舊 binary 為 `target/release/agents-managerd.bak`。
+  5. 重啟後 **30 秒內**驗 `/api/session` 與 `bin/agm health`。
+  6. **60 秒內**確認 `bin/agm supervisor` 的 status 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。
+     任一項不對就用 `.bak` 回滾並回報。
+  期間不要同時觸發「claude 更新重啟」去動其他 bot（已知競態：2026-09-10 23:02Z 把 AGM 等 4 顆 bot 殺掉沒拉回，
+  已由 §6 的批次重啟修正處理）。
+
+### 18.3 喚醒 AGM 的節流
+
+`[supervisor] notify_interval_secs`（預設 600 秒）——規則與理由見 §5「設定檔」。重點：事件照舊即時寫入
+`supervisor_inbox`，被節流的只有「推給 AGM、喚醒它」這個動作；health 偵測（30 秒）、watchdog 與模型控制器
+TICK 都不受影響。API 端的狀態機見 `docs/API.md` 的 `GET /api/supervisor/inbox`。
+
+### 18.4 瀏覽器殭屍清理
+
+launchd `com.agm.browser-gc`（`StartInterval 21600`，每 6 小時）跑 `bin/browser-gc-kick.sh`：確認
+`agm-pxf2pv-browser-gc` 在跑（沒跑就 `bin/agm bot start`），再把 `browser-gc-task.md` 派給它，
+request id 綁時間（`agm-browser-gc-<YYYYmmdd-HHMM>`）。清理規則：
+
+- ego lite：`listTaskSpaces()`，`ownership=agent` 且沒有進行中的 assignment／最近 2 小時無活動才
+  `completeTaskSpace(id, {keep:false})`；**`ownership=user` 或 `agentDelegatedToUser` 一律不動**。
+- Chrome：只動 Claude in Chrome 的 MCP tab group，其餘使用者分頁不碰。
+- CLI 超過 30 秒無回應：改用 `ps` 列出 renderer 的 pid／記憶體／存活時間回報，**不要直接 kill ego lite 主程序**；
+  只有確認 CLI 無回應時，才走「quit → `pkill -f '/Applications/ego lite'` → 對殘留的
+  `--startup-ego-browser-service` `kill -9` → `open -a`」這條會關掉所有視窗的路。
+- 記憶體不足導致指令被殺就回報並停止，不要重試迴圈。
+
+### 18.5 AGM 派 child 的模型預設
+
+`cc0/opus/low`。不預設 `fable`，也不預設 `high` 以上的強度（`high`／`xhigh`／`max`）——對一般修正與覆核工作
+過度，只有任務明確需要才調高並記錄理由。AGM **自己**的模型不在此列，由 supervisor 控制器依 §5 的候選規則切換
+（`fable` 剩餘 <5% 切 `opus`，30 分鐘冷卻內只自動切一次，不會自動切回）。
+
+### 18.6 persona 的權威與四份同步
+
+AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，否則重跑 supervisor setup 會把現行 persona 蓋回舊版（#62）：
+
+| 副本 | 位置 | 怎麼改 |
+| --- | --- | --- |
+| 來源 | `docs/goals/agm-supervisor-persona.md`（`---` 以下） | commit + push；`supervisor/setup.rs` 的 `include_str!` 內嵌的就是它 |
+| 設定檔 | `~/.config/agents-manager/config.toml` 的 AGM bot | 由 `PATCH /api/bots/{AGM}` 連帶寫入 |
+| 資料庫 | `bots.persona` | `PATCH /api/bots/{AGM}`（回 `needs_restart: true`） |
+| 執行期 | `~/.config/agents-manager/supervisor/AGM/persona.md` | 直接寫檔 |
+
+- **不要手改 config.toml 再走 API**：`ConfigStore` 用 mtime 比對、只在開機時 load，手改過之後所有寫
+  config 的 API 會一路 409 `config.toml changed on disk since it was loaded`，直到 daemon 重啟（2026-09-12 實例）。
+  要改就走 API，讓 daemon 自己寫檔。
+- persona 改完**不必**為它重啟 daemon：`needs_restart` 只表示下次 AGM 重啟才載入新 persona。
+
+### 18.7 共用工作樹規範
+
+`/Users/m4p/project/agents-manager` 是多個 bot 共用的同一個工作樹，任何時候都可能有別人未提交的改動：
+
+- **不改別人的 WIP，連「只是新增幾行」也不行**；不 `git stash`、不 `reset`、不 `checkout -- <file>`、
+  不 `--autostash`，也不要用 regex 對共用樹批次取代（會掃到別人正在改的檔）。
+- 認定某份 WIP 的擁有者要有**證據**（那個 bot 自己的訊息／assignment），不能憑 pane 標題或 session 名稱猜。
+- 工作樹髒到不能 `pull --rebase` 時，用暫存 index（`GIT_INDEX_FILE` + `read-tree origin/main` +
+  `commit-tree`）把自己的檔案接在 `origin/main` 上直接 push，或另開 `git worktree`；本地 HEAD 落後沒關係。
+  腳本要用 `/usr/bin/git` 並寫成 bash 檔（zsh 不拆 `$VAR`，rtk 會吞掉失敗，曾因此推出空 commit）。
+- 需要重疊範圍時交回 AGM 分配 ownership，不要自行合併或替別人收尾。
+
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
