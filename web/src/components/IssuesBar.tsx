@@ -47,6 +47,10 @@ function errorText(e: unknown): string {
 
 export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string; draftKey: DraftKey; inputRef: RefObject<HTMLTextAreaElement | null> }) {
   const github = useStore((s) => s.projects.find((p) => p.id === projectId)?.github ?? null)
+  // effect 的依賴用字串：`github` 是 `projects[]` 上的物件欄位，normalize 每次 `GET /api/state` 都重建，
+  // 拿它當 deps 等於任何 bot_changed／project_changed／resync 都重抓 submodules 與 issues（daemon 的
+  // 2 分鐘快取一冷就是一次 gh）。
+  const githubUrl = github?.url ?? null
   const host = useStore((s) => s.projects.find((p) => p.id === projectId)?.host ?? 'local')
   const setDraft = useStore((s) => s.setDraft)
   const setDraftCursor = useStore((s) => s.setDraftCursor)
@@ -77,7 +81,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
 
   // Submodules once per project; the picker only appears when at least one is on GitHub.
   useEffect(() => {
-    if (!github) return
+    if (!githubUrl) return
     let alive = true
     api
       .fetchSubmodules(projectId)
@@ -86,11 +90,11 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     return () => {
       alive = false
     }
-  }, [projectId, github])
+  }, [projectId, githubUrl])
 
   // Open-issue count for the button (once per project and repo).
   useEffect(() => {
-    if (!github) return
+    if (!githubUrl) return
     let alive = true
     api
       .fetchIssues(projectId, { state: 'open', limit: 100, repo })
@@ -99,7 +103,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     return () => {
       alive = false
     }
-  }, [projectId, github, repo])
+  }, [projectId, githubUrl, repo])
 
   const load = useCallback(
     async (st: IssueState, query: string) => {

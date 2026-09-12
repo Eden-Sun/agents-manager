@@ -107,18 +107,21 @@ function MemberStrip({ projectId }: { projectId: string }) {
  */
 function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
   const lamp = useStore((s) => botLamp(s, bot.id))
+  // listitem 放外層殼（display: contents，不改排版），按鈕保留原生 button 語意——
+  // role 蓋在 button 上 AT 會唸成「清單項目」而不是按鈕。
   return (
-    <button
-      type="button"
-      className={`member member-icon ${bot.kind}`}
-      role="listitem"
-      title={`${bot.name}：${LAMP_LABEL[lamp]}（點擊開啟單獨對話）`}
-      aria-label={`${bot.name}：${LAMP_LABEL[lamp]}`}
-      onClick={onOpen}
-    >
-      <KindIcon kind={bot.kind} />
-      <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
-    </button>
+    <span role="listitem" className="li-wrap">
+      <button
+        type="button"
+        className={`member member-icon ${bot.kind}`}
+        title={`${bot.name}：${LAMP_LABEL[lamp]}（點擊開啟單獨對話）`}
+        aria-label={`${bot.name}：${LAMP_LABEL[lamp]}`}
+        onClick={onOpen}
+      >
+        <KindIcon kind={bot.kind} />
+        <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
+      </button>
+    </span>
   )
 }
 
@@ -198,7 +201,8 @@ interface Candidate {
 /** The `@` token under the caret, if the caret sits at the end of one. */
 function mentionAtCaret(text: string, caret: number): { start: number; query: string } | null {
   const head = text.slice(0, caret)
-  const m = /(^|[^\p{L}\p{N}_])@([A-Za-z0-9_-]*)$/u.exec(head)
+  // 字元集要跟 `MENTION_RE` 同一份：v3.8 起暱稱允許 CJK，`@小` 也要彈自動完成。
+  const m = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']*)$/u.exec(head)
   if (!m) return null
   return { start: caret - m[2].length - 1, query: m[2] }
 }

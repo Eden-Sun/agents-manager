@@ -113,23 +113,14 @@ export function ApiModelFields({
   const selectedEffort = effort ?? current?.default_effort ?? null
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
-  // Drop Fast when the chosen model has no priority tier. Only ever act on a real API list:
-  // while the list is loading (or when the fetch failed) `models` is the static fallback, and
-  // letting it "correct" the stored value wipes Fast whenever the key changes — e.g. picking
-  // another identity, which must not touch anything but `identity`.
-  useEffect(() => {
-    if (!fromApi) return
-    if (!hasFast && fast) onFast(false)
-  }, [fromApi, hasFast, fast, onFast])
-
-  // Same for the effort: the levels are per-model, so one carried over from the previously
-  // selected model can be rejected outright — codex answers `-c model_reasoning_effort="max"`
-  // on gpt-5.5 with `400 unsupported_value`. Falling back to null just omits the flag.
-  // This also heals a bot whose stored effort predates a model change, once its panel opens.
-  useEffect(() => {
-    if (!fromApi) return
-    if (effort !== null && efforts.length > 0 && !efforts.includes(effort)) onEffort(null)
-  }, [fromApi, efforts, effort, onEffort])
+  // 存著的值這個模型不支援（清單是 per-model 的：codex 對 gpt-5.5 送 `-c model_reasoning_effort="max"`
+  // 會回 `400 unsupported_value`；Fast 只有部分模型有 priority tier）。以前是 effect 一載入清單就
+  // 主動 `onEffort(null)`／`onFast(false)` 改父層表單，使用者什麼都沒動設定面板就 dirty、關閉被問
+  // 「放棄未儲存的變更？」、儲存還悄悄送 `effort: null`（docs/reviews/2026-09-12/web.md §1 ModelPicker）。
+  // 現在只**標出來**，要不要清由使用者按；使用者自己換模型時 `pickModel` 照舊順手清掉。
+  // 只認真的 API 清單：載入中／失敗時 `models` 是靜態退路，拿它判斷會把好的值也標成不支援。
+  const effortUnsupported = fromApi && effort !== null && efforts.length > 0 && !efforts.includes(effort)
+  const fastUnsupported = fromApi && fast && !hasFast
 
   const pickModel = (id: string | null) => {
     onModel(id)
@@ -204,6 +195,22 @@ export function ApiModelFields({
         </div>
       ) : null}
 
+      {effortUnsupported ? (
+        <span className="hint field-note warn">
+          存著的強度「{effortLabel(effort)}」{current ? `${current.display_name} ` : ''}沒有這一級，啟動時會被拒。
+          <button type="button" className="mini-btn" onClick={() => onEffort(null)}>
+            改用預設
+          </button>
+        </span>
+      ) : null}
+      {fastUnsupported ? (
+        <span className="hint field-note warn">
+          存著的 Fast 在{current ? ` ${current.display_name}` : '這個模型'}上沒有優先佇列，會被忽略。
+          <button type="button" className="mini-btn" onClick={() => onFast(false)}>
+            關掉 Fast
+          </button>
+        </span>
+      ) : null}
       {hasFast ? (
         <label className="field row fast-row">
           <input type="checkbox" checked={fast} onChange={(e) => onFast(e.target.checked)} />

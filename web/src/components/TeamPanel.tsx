@@ -31,8 +31,10 @@ import { IdentityBadge } from './IdentitiesPanel'
 import { CopyChip } from './CopyChip'
 import { BotSwitcher } from './BotSwitcher'
 import { TeamNameField, teamTitle } from './TeamNameField'
+import { TeamCleanupDialog } from './TeamCleanupDialog'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamQueueProgress } from './TeamQueueProgress'
+import { workingIssuesOf } from './teamProgress'
 import { TeamRoleEditor } from './TeamRoleEditor'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
@@ -168,21 +170,23 @@ function MemberChip({ bot, task }: { bot: Bot; task: TeamTask | null }) {
   const role = bot.team?.role ?? 'worker'
   const siblings = useStore(useShallow((s) => teamMemberBots(s, bot.team?.team_id ?? null).map((b) => b.name)))
   const short = teamDisplayName(bot.name, siblings)
+  // listitem 放外層殼（display: contents），按鈕保留原生 button 語意（同 GroupChatPanel 的 MemberChip）。
   return (
-    <button
-      type="button"
-      className="member team-member"
-      role="listitem"
-      title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}${task ? `\n目前：t${task.seq} ${task.title}` : ''}\n身分 ${bot.identity ?? '預設'}\n模型 ${bot.model ?? '（CLI 預設）'}${bot.effort ? ` · ${effortLabel(bot.effort)}` : ''}\ncwd ${bot.cwd ?? '（專案根目錄）'}\n點擊開啟它的單獨對話`}
-      onClick={() => selectBot(bot.id)}
-    >
-      <StatusLamp lamp={lamp} />
-      {/* SPEC-team §7.3：短名本身就是角色徽章（`pm` / `dev-1` / `rev`），不再重複一次角色字。 */}
-      <span className={`bot-badge ${bot.kind} team-role-badge ${role}`}>{short}</span>
-      {/* 一個 team 常常一個角色一個帳號（分散額度），所以身分要看得見，不能只留在 tooltip。 */}
-      <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
-      {task ? <span className="team-member-task">t{task.seq}</span> : null}
-    </button>
+    <span role="listitem" className="li-wrap">
+      <button
+        type="button"
+        className="member team-member"
+        title={`${bot.name}（${TEAM_ROLE_LABEL[role]}）：${LAMP_LABEL[lamp]}${task ? `\n目前：t${task.seq} ${task.title}` : ''}\n身分 ${bot.identity ?? '預設'}\n模型 ${bot.model ?? '（CLI 預設）'}${bot.effort ? ` · ${effortLabel(bot.effort)}` : ''}\ncwd ${bot.cwd ?? '（專案根目錄）'}\n點擊開啟它的單獨對話`}
+        onClick={() => selectBot(bot.id)}
+      >
+        <StatusLamp lamp={lamp} />
+        {/* SPEC-team §7.3：短名本身就是角色徽章（`pm` / `dev-1` / `rev`），不再重複一次角色字。 */}
+        <span className={`bot-badge ${bot.kind} team-role-badge ${role}`}>{short}</span>
+        {/* 一個 team 常常一個角色一個帳號（分散額度），所以身分要看得見，不能只留在 tooltip。 */}
+        <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+        {task ? <span className="team-member-task">t{task.seq}</span> : null}
+      </button>
+    </span>
   )
 }
 
@@ -224,7 +228,8 @@ function MemberStrip({ teamId }: { teamId: string }) {
           )
           if (own.length === 0) return null
           return (
-            <span key={i.id} className="team-member-issue" role="listitem">
+            // 分段層不是清單項目（裡面才是），用 group 免得 listitem 巢 listitem。
+            <span key={i.id} className="team-member-issue" role="group" aria-label={`#${i.issue_number} 的執行者`}>
               <span className="team-member-issue-tag" title={i.branch ?? undefined}>
                 #{i.issue_number}
               </span>
@@ -949,18 +954,22 @@ function BudgetMeter({ teamId }: { teamId: string }) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   if (!team) return null
   const { relays, elapsed_min } = team.usage
-  const pct = Math.min(100, Math.round((relays / Math.max(1, team.budget.max_relays)) * 100))
+  // SPEC-team §4.5：無限併行時 daemon 的上限是 max_relays × 已開工的 issue 數，量表的分母要跟著乘，
+  // 不然三個 issue 同時跑、relays 60/40 就畫成 100% crit，其實還有 60 次。
+  const working = workingIssuesOf(team)
+  const maxRelays = team.budget.max_relays * Math.max(1, working)
+  const pct = Math.min(100, Math.round((relays / Math.max(1, maxRelays)) * 100))
   const level = pct >= 100 ? 'crit' : pct >= 75 ? 'warn' : 'ok'
   return (
     <span
       className={`team-budget-meter ${level}`}
-      title={`轉送 ${relays}/${team.budget.max_relays}・已跑 ${elapsed_min}/${team.budget.max_wall_clock_min} 分鐘・審查回合合計 ${team.usage.review_rounds_total}`}
+      title={`轉送 ${relays}/${maxRelays}${working > 1 ? `（${team.budget.max_relays} × ${working} 個進行中的 issue）` : ''}・已跑 ${elapsed_min}/${team.budget.max_wall_clock_min} 分鐘・審查回合合計 ${team.usage.review_rounds_total}`}
     >
       <span className="team-budget-bar">
         <span className="team-budget-fill" style={{ width: `${pct}%` }} />
       </span>
       <span className="team-budget-text mono">
-        {relays}/{team.budget.max_relays} · {elapsed_min} 分
+        {relays}/{maxRelays} · {elapsed_min} 分
       </span>
     </span>
   )
@@ -1123,18 +1132,20 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                 <button
                   type="button"
                   className="mini-btn"
-                  disabled={Boolean(busy[`team:${teamId}:patch`])}
+                  disabled={Boolean(busy[`team:${teamId}:patch`] || busy[`team:${teamId}:resume`])}
                   title="把轉送上限與時間上限各加一倍，然後繼續"
                   onClick={() =>
+                    // 側欄同一顆（TeamNodes 的 TeamPausedRow）patch 完會 resume；這裡以前只 patch，
+                    // 預算翻倍了 team 還停在 paused，跟按鈕寫的「然後繼續」不符。
                     void patchTeam(teamId, {
                       budget: {
                         max_relays: team.budget.max_relays * 2,
                         max_wall_clock_min: team.budget.max_wall_clock_min * 2,
                       },
-                    })
+                    }).then((ok) => ok && controlTeam(teamId, 'resume'))
                   }
                 >
-                  加碼預算
+                  加碼並繼續
                 </button>
               ) : null}
               {team.pause_reason === 'quota_low' && team.budget.quota_stop_pct < 100 ? (
@@ -1508,29 +1519,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           void controlTeam(teamId, 'abort')
         }}
       />
-      <ConfirmDialog
-        open={confirm === 'cleanup'}
-        title="清理這個 Team？"
-        body={
-          <>
-            <p>
-              會移除 {team.members.length} 個成員 bot 與它們的 worktree（<code>{detail?.worktree_root ?? '資料目錄下的 team 目錄'}</code>）。
-              <strong>分支一律保留</strong>，訊息歷史也保留。
-            </p>
-            <p className="hint">
-              Team #{team.issue_number} {team.issue_title}
-              {project ? ` · ${project.label}` : ''}
-            </p>
-          </>
-        }
-        confirmLabel="清理"
-        danger
-        onCancel={() => setConfirm(null)}
-        onConfirm={() => {
-          setConfirm(null)
-          void controlTeam(teamId, 'cleanup')
-        }}
-      />
+      {confirm === 'cleanup' ? <TeamCleanupDialog teamId={teamId} onClose={() => setConfirm(null)} /> : null}
       <ConfirmDialog
         open={confirm === 'close-issue'}
         title={`關閉 issue #${team.issue_number}？`}

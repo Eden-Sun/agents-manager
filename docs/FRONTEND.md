@@ -104,7 +104,9 @@ web/src/
 
 **`lamp` 欄位**：`GET /api/state` 會回後端算好的 `lamp`，但前端**自己重算**
 （`normalize.lampOf(run, connected)`），因為 `bot_status` WS 事件只帶 `run` 不帶 `lamp`，
-若採用後端值會在事件更新後失準。兩邊的規則相同（SPEC §2.2）。
+若採用後端值會在事件更新後失準。規則同 SPEC §2.2，**一處刻意不同**：`running` + `agent_status=unknown`
+在 run 起跑後 90 秒內前端畫成 `starting` 而不是 `unknown`（實測 claude 要 ~20 秒才回第一個狀態，
+剛新增的 bot 標「狀態未知」看起來像壞掉）。
 
 ---
 
@@ -314,6 +316,8 @@ abandon）已在 mock 模式完整走過，且請求形狀與 `daemon/src/api.rs
 - `npm run build` 產物在 `web/dist`，入口 `dist/index.html`，資產路徑是絕對的 `/assets/…`，
   rust-embed 掛在 root fallback 即可（`daemon/src/assets.rs` 已經是這個形狀）。
 - 前端只在啟動時打一次 `GET /api/session`；token 存在記憶體，不寫 localStorage。
+  `transport.ts` **不讀網址上的 `?token=`**（沒有這條路）；`routeSync` 只是在第一次 `replaceState`
+  時把網址上的 `token` 參數拿掉，免得分享出去的連結帶著它。
 - 前端**不會**呼叫 `/hook/*`，proxy 設定只是為了本機除錯方便。
 - 如果 `GET /api/state` 之後要加欄位，前端會安全忽略未知欄位；但如果**改欄位名**，
   請同步更新 `web/src/api/normalize.ts`（那是唯一需要改的地方）。

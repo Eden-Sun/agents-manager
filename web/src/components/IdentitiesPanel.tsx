@@ -199,11 +199,18 @@ function IdentityRow({ name }: { name: string }) {
   )
 }
 
+/** 各 kind 的設定目錄變數（SPEC §16／§12）：claude 用 CLAUDE_CONFIG_DIR、codex 用 CODEX_HOME、grok 用 GROK_HOME。 */
+const ENV_PREFILL: Record<BotKind, string> = {
+  claude: 'CLAUDE_CONFIG_DIR=$HOME/.claude-',
+  codex: 'CODEX_HOME=$HOME/.codex-',
+  grok: 'GROK_HOME=$HOME/.grok-',
+}
+
 function NewIdentityForm() {
   const addIdentity = useStore((s) => s.addIdentity)
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
-  const [envText, setEnvText] = useState('CLAUDE_CONFIG_DIR=$HOME/.claude-')
+  const [envText, setEnvText] = useState(ENV_PREFILL.claude)
   const [busy, setBusy] = useState(false)
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
 
@@ -236,7 +243,15 @@ function NewIdentityForm() {
       </label>
       <label className="field">
         <span>kind</span>
-        <select value={kind} onChange={(e) => setKind(e.target.value as BotKind)}>
+        <select
+          value={kind}
+          onChange={(e) => {
+            const next = e.target.value as BotKind
+            // 預填的是各 kind 自己的設定目錄變數；使用者沒改過那一行才跟著換，免得把打好的蓋掉。
+            setEnvText((t) => (t === ENV_PREFILL[kind] ? ENV_PREFILL[next] : t))
+            setKind(next)
+          }}
+        >
           <option value="claude">claude</option>
           <option value="codex">codex</option>
           <option value="grok">grok</option>
