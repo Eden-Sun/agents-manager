@@ -1,0 +1,81 @@
+/*
+ * 手機（≤640px）的額度列：每一格畫完整的三條 bar（5h／7d／F），不只目前那一格、不只一個窗口
+ * （2026-09-13 使用者：「額度條所有都顯示，不僅目前」「上下空間貼齊以節省」）。
+ * 推翻 2026-09-12 的「一格只寫一個窗口」與「只有 focused 畫上下邊框量表」。
+ * 高度靠三件事壓住：bar 縮成 26×3、行距 11px、格子上下內距 1px——五格一列仍是 40px 上下。
+ */
+@media (width <= 640px) {
+  .main-head .quota-hp.compact {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 5px;
+    min-height: 0;
+  }
+
+  .main-head .quota-hp.compact .quota-head {
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    width: auto;
+  }
+
+  .main-head .quota-hp.compact .quota-bars {
+    min-height: 0;
+    row-gap: 0;
+  }
+
+  .main-head .quota-hp.compact .quota-window {
+    grid-template-columns: 14px auto;
+    height: 11px;
+  }
+
+  .main-head .quota-hp.compact .quota-window-name,
+  .main-head .quota-hp.compact .quota-bar-pct {
+    font-size: 9.5px;
+  }
+
+  .main-head .quota-hp.compact .quota-bar-row {
+    min-width: 0;
+  }
+
+  .main-head .quota-hp.compact .quota-bar-pct {
+    min-width: 0;
+    padding-left: 4px;
+  }
+
+  .main-head .quota-hp.compact .quota-bar {
+    width: 26px;
+    height: 3px;
+  }
+
+  .main-head .quota-hp.compact .quota-bar-mark {
+    top: -2px;
+    height: 7px;
+  }
+
+  /* 整條列上下貼齊：strip 與 open 的內距歸零，格與格 4px。 */
+  .main-head > .quota-strip {
+    padding-bottom: 0;
+  }
+
+  .main-head .quota-open {
+    padding: 0;
+    gap: 4px;
+  }
+
+  /* 左欄：更新 chevron 在上、git 鍵在下，兩個加起來要塞進 ~40px 的列高。 */
+  .main-head.bot-head > button.mobile-git-info {
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 1px;
+    margin: 0 0 1px 6px;
+  }
+
+  .main-head.bot-head > button.mobile-git-info svg {
+    width: 16px;
+    height: 16px;
+  }
+}
