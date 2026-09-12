@@ -1,6 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { keysToSelect, parseChoiceMenu, sameChoices } from './tuiChoices.ts'
+import { readFileSync } from 'node:fs'
+import { keysToMove, keysToSelect, parseChoiceMenu, sameChoices } from './tuiChoices.ts'
+
+/**
+ * 2026-09-12 第三輪真機快照（bot `carbis`，185×54）：claude 的**多分頁 ＋ 多選**
+ * AskUserQuestion，使用者回報「第二個分頁的問題沒有辦法正確解析」——整塊選單長不出來。
+ */
+const MULTI = readFileSync(new URL('./__fixtures__/carbis-multiselect.txt', import.meta.url), 'utf8')
 
 /** 2026-09-12 真機快照（bot `carbis`，185 欄）。分隔線夾在 5 與 6 之間是原樣。 */
 const CARBIS = [
@@ -127,4 +134,69 @@ test('codex 的 `> 1.` 也認得（游標記號只有一個）', () => {
   )
   assert.equal(menu?.choices.length, 3)
   assert.equal(menu?.cursor, 0)
+})
+
+
+test('多選：分頁列讀得出每一題答過沒有（☒／☐／✔ Submit）', () => {
+  const menu = parseChoiceMenu(MULTI)
+  assert.ok(menu)
+  assert.deepEqual(menu.tabs, [
+    { label: '編輯方式', done: true, submit: false },
+    { label: '功能', done: false, submit: false },
+    { label: 'Submit', done: false, submit: true },
+  ])
+})
+
+test('多選：`[ ]` 讀成 checked、本文不留方括號，整份是 multi', () => {
+  const menu = parseChoiceMenu(MULTI)
+  assert.ok(menu)
+  assert.equal(menu.multi, true)
+  assert.equal(menu.choices.length, 6)
+  assert.equal(menu.choices[0].title, '站內搜尋、分類、標籤')
+  assert.equal(menu.choices[0].checked, false)
+  assert.equal(menu.choices[0].current, true)
+  // `Chat about this` 沒有方框，不是可勾選的選項
+  assert.equal(menu.choices[5].checked, null)
+  assert.equal(menu.question, '除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）')
+})
+
+test('多選：說明只縮排到編號那一欄（2）也算說明，不會把選單切斷', () => {
+  const menu = parseChoiceMenu(MULTI)
+  assert.equal(menu?.choices[1].detail, '需要伺服器端收件與儲存（現有 serverless function + console 可承接）。')
+  assert.deepEqual(
+    menu?.choices.map((c) => c.number),
+    [1, 2, 3, 4, 5, 6],
+  )
+})
+
+test('多選：沒有編號的 `Submit` 列算進游標要走的格數，不然點第 6 項會停在它上面', () => {
+  const menu = parseChoiceMenu(MULTI)
+  assert.ok(menu)
+  assert.deepEqual(menu.submit, { after: 4, current: false })
+  // 游標在第 1 項：第 5 項 4 格、Submit 5 格、第 6 項 6 格（中間多一列 Submit）
+  assert.equal(keysToMove(menu, 4)?.length, 4)
+  assert.equal(keysToMove(menu, 'submit')?.length, 5)
+  assert.equal(keysToMove(menu, 5)?.length, 6)
+})
+
+test('多選：游標停在 Submit 那一列時仍算得出來（cursor 為 -1 但不是解析失敗）', () => {
+  const menu = parseChoiceMenu(MULTI.replace('     Submit', '❯    Submit').replace('❯ 1. [ ]', '  1. [ ]'))
+  assert.ok(menu)
+  assert.equal(menu.cursor, -1)
+  assert.equal(menu.submit?.current, true)
+  assert.deepEqual(keysToMove(menu, 5), ['down'])
+  assert.deepEqual(keysToMove(menu, 4), ['up'])
+})
+
+test('多選那份的腳註是 Tab/Arrow keys，照樣算腳註', () => {
+  assert.equal(parseChoiceMenu(MULTI)?.footer, true)
+})
+
+test('上一輪的單選那份沒有退步：沒有分頁、沒有方框、沒有 Submit 列', () => {
+  const menu = parseChoiceMenu(CARBIS)
+  assert.ok(menu)
+  assert.equal(menu.multi, false)
+  assert.deepEqual(menu.tabs, [])
+  assert.equal(menu.submit, null)
+  assert.deepEqual(keysToSelect(menu, 3), ['down', 'down', 'down', 'enter'])
 })

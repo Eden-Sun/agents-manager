@@ -1,0 +1,54 @@
+     // 網址形式維持不變(/announcements?category=…),但本頁是靜態產出,build 時讀不到
+     // searchParams,所以改成一次 render 全部公告、每則標上 data-category,
+     // 再由下方 inline script 讀 location.search 決定 <html data-announcement-category>。
+     // 沒有 JS 時就是「全部」,不會出現空白畫面。
+     //
+     // 分頁:示範資料只有數則,一次全部取出並移除分頁控制項,
+     // 避免留下按了沒反應的按鈕。
+     const announcements = getSampleAnnouncements({ page: 0, size: 500 }).content
+
+     /** 產生列表網址:分類留在 query param,預設值不寫進網址保持乾淨。 */
+     function listHref(category: AnnouncementCategory | '') {
+       return category ? `/announcements?category=${category}` : '/announcements'
+     }
+
+     /** 固定時區 + Intl,產出時與瀏覽器顯示一致,不寫死格式。 */
+     === sample/api
+     api.ts
+     contact.ts
+     dates.ts
+     feedback.ts
+     handoff.ts
+     icons.ts
+     leadsSheet.ts
+     legal.ts
+     network.ts
+     quoteCompare.ts
+     quoteEstimate.ts
+     quoteFailures.ts
+     quoteResult.ts
+     rpa.ts
+     sample.ts
+     track.ts
+     useQuoteFlow.ts
+     3:import react from '@astrojs/react'
+     5:import vercel from '@astrojs/vercel'
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ 編輯方式  ☐ 功能  ✔ Submit  →
+
+除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）
+
+❯ 1. [ ] 站內搜尋、分類、標籤
+  静態可行：建置時產索引，瀏覽器端搜尋（Pagefind/Fuse）。
+  2. [ ] 訂閱電子報、留言、按讚
+  需要伺服器端收件與儲存（現有 serverless function + console 可承接）。
+  3. [ ] 文章導向報價、追蹤轉換
+  文章頁嵌報價 CTA，要知道哪篇帶來詢價。追蹤層已有 track.ts 雛形。
+  4. [ ] SEO 是主要目的
+  要拿自然流量：sitemap、結構化資料、canonical、OG 圖。静態反而最強。
+  5. [ ] Type something
+     Submit
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
