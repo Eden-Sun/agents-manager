@@ -34,6 +34,7 @@ import { TeamNameField, teamTitle } from './TeamNameField'
 import { TeamCleanupDialog } from './TeamCleanupDialog'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamQueueProgress } from './TeamQueueProgress'
+import { workingIssuesOf } from './teamProgress'
 import { TeamRoleEditor } from './TeamRoleEditor'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { MemBadge } from './MemBadge'
@@ -950,18 +951,22 @@ function BudgetMeter({ teamId }: { teamId: string }) {
   const team = useStore((s) => s.teams[teamId] ?? null)
   if (!team) return null
   const { relays, elapsed_min } = team.usage
-  const pct = Math.min(100, Math.round((relays / Math.max(1, team.budget.max_relays)) * 100))
+  // SPEC-team §4.5：無限併行時 daemon 的上限是 max_relays × 已開工的 issue 數，量表的分母要跟著乘，
+  // 不然三個 issue 同時跑、relays 60/40 就畫成 100% crit，其實還有 60 次。
+  const working = workingIssuesOf(team)
+  const maxRelays = team.budget.max_relays * Math.max(1, working)
+  const pct = Math.min(100, Math.round((relays / Math.max(1, maxRelays)) * 100))
   const level = pct >= 100 ? 'crit' : pct >= 75 ? 'warn' : 'ok'
   return (
     <span
       className={`team-budget-meter ${level}`}
-      title={`轉送 ${relays}/${team.budget.max_relays}・已跑 ${elapsed_min}/${team.budget.max_wall_clock_min} 分鐘・審查回合合計 ${team.usage.review_rounds_total}`}
+      title={`轉送 ${relays}/${maxRelays}${working > 1 ? `（${team.budget.max_relays} × ${working} 個進行中的 issue）` : ''}・已跑 ${elapsed_min}/${team.budget.max_wall_clock_min} 分鐘・審查回合合計 ${team.usage.review_rounds_total}`}
     >
       <span className="team-budget-bar">
         <span className="team-budget-fill" style={{ width: `${pct}%` }} />
       </span>
       <span className="team-budget-text mono">
-        {relays}/{team.budget.max_relays} · {elapsed_min} 分
+        {relays}/{maxRelays} · {elapsed_min} 分
       </span>
     </span>
   )
