@@ -1482,3 +1482,19 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
 
 `useScrollCurrentIntoView` 與 `overscroll-behavior-x: contain`、隱藏捲軸都保留，
 `role="status"` / `aria-live` 不變。截圖：`docs/screenshots/unread-bar-2026-09-12/`。
+
+## 右邊那一欄只屬於使用者（2026-09-12）
+
+使用者：「訊息右方就只能有我的，agm 代發的特別標。」
+
+對話裡靠右的泡泡一直被讀成「我說的話」。但 `user` 這個 role 底下混了兩種來源：使用者自己打的，
+以及代發的——總管的裁示（`messages.relay_from`，SPEC §6.5d）和 daemon 的自動通知
+（`[AG Man 通知]` 開頭，`.daemon-notice`）。代發的靠右擺等於冒名。
+
+改法（`web/src/components/relayedMessage.css`，從 `App.tsx` 匯入）：這兩種移到左邊，換一套外觀
+——面板底色加左邊一條 accent 槓，圓角的尖角翻到左下；來源標（`AGM → <bot>`）留在泡泡左上。
+判斷不另外寫一套邏輯：代發的那一則本來就會畫出 `.msg-targets.relay`，daemon 通知本來就有
+`.daemon-notice`，CSS 用 `:has()` 認這兩個既有的記號。bot 的回覆維持原本的左側樣式（沒有槓），
+所以三種來源在畫面上各自分得開。
+
+截圖 `docs/screenshots/relayed-msg/`。
