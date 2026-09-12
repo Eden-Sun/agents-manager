@@ -2159,7 +2159,7 @@ async fn rollback_create(
         // #61: a member that never got going still had its hook material written.
         crate::lifecycle::purge_bot_dir(app, b, &project.host).await;
     }
-    close_workspace(app, project, workspace_id).await;
+    let _ = close_workspace(app, project, workspace_id).await;
     remove_worktrees(app, project, repo, root, dirs).await;
     if branch_created {
         remove_empty_created_branch(app, project, repo, branch, base_sha).await;
@@ -2246,12 +2246,16 @@ async fn make_workspace(
 
 /// `workspace.close` — one call takes every member pane with it, which is the point of
 /// giving a team its own workspace in the first place (§6.4a).
-async fn close_workspace(app: &Arc<App>, project: &db::Project, workspace_id: Option<&str>) {
-    let Some(ws) = workspace_id.filter(|w| !w.trim().is_empty()) else { return };
-    let Ok((client, _)) = team_herdr(app, project).await else { return };
-    if let Err(e) = client.workspace_close(ws).await {
+/// `Ok` only when the workspace is actually gone (or there was none): the caller decides
+/// whether `teams.workspace_id` may be cleared. Clearing it after a failed close (host not
+/// connected, herdr refused) left a workspace nobody could ever close again.
+async fn close_workspace(app: &Arc<App>, project: &db::Project, workspace_id: Option<&str>) -> Result<(), String> {
+    let Some(ws) = workspace_id.filter(|w| !w.trim().is_empty()) else { return Ok(()) };
+    let (client, _) = team_herdr(app, project).await.map_err(|e| format!("{e:?}"))?;
+    client.workspace_close(ws).await.map_err(|e| {
         tracing::warn!(workspace = ws, error = %e, "closing the team workspace failed");
-    }
+        e.to_string()
+    })
 }
 
 /// SPEC-team §6.5, and **the order is the whole point**: `worktree remove` (which deletes
@@ -2713,7 +2717,15 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
         members.iter().filter_map(|b| b.cwd.clone()).filter(|c| !c.trim().is_empty()).collect();
     for b in members {
         if b.deleted_at.is_none() {
-            let _ = lifecycle::stop_bot(app, &b.id).await;
+            // A member that cannot be stopped (its host / herdr is unreachable) is not marked
+            // deleted with its agent still running: the call fails here, everything already
+            // retired stays retired, and cleanup is simply run again once the host is back.
+            if let Err(e) = lifecycle::stop_bot(app, &b.id).await {
+                return Err(LcError::conflict(
+                    "could not stop a team member; retry cleanup when its host is back",
+                    json!({"bot_id": b.id, "bot": b.name, "error": format!("{e:?}")}),
+                ));
+            }
             sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?")
                 .bind(&now)
                 .bind(&b.id)
@@ -2729,12 +2741,32 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     // §6.5: remove → prune → rmdir. Branches (integration and task) are kept for ever by
     // design — they are cheap, they are the audit trail, and deleting the user's history is
     // not the daemon's call.
+    let mut workspace_closed = true;
     if let Ok(Some(project)) = db::project(&app.db, &t.project_id).await {
-        // §6.4a: one `workspace.close` takes every member pane with it.
-        close_workspace(app, &project, t.workspace_id.as_deref()).await;
+        // §6.4a: one `workspace.close` takes every member pane with it. `workspace_id` is
+        // cleared only once that succeeded — otherwise it stays so a later cleanup (or
+        // `delete`) can still find the workspace and close it.
+        match close_workspace(app, &project, t.workspace_id.as_deref()).await {
+            Ok(()) => {
+                let _ = sqlx::query("UPDATE teams SET workspace_id = NULL WHERE id = ?").bind(team_id).execute(&app.db).await;
+            }
+            Err(e) => {
+                workspace_closed = false;
+                record_event(
+                    app,
+                    team_id,
+                    "note",
+                    None,
+                    None,
+                    None,
+                    None,
+                    json!({"action": "workspace_close_failed", "workspace_id": t.workspace_id, "error": e}),
+                )
+                .await?;
+            }
+        }
         remove_worktrees(app, &project, &t.repo, &t.worktree_root, &dirs).await;
     }
-    let _ = sqlx::query("UPDATE teams SET workspace_id = NULL WHERE id = ?").bind(team_id).execute(&app.db).await;
     record_event(
         app,
         team_id,
@@ -2749,7 +2781,7 @@ pub async fn cleanup(app: &Arc<App>, team_id: &str) -> LcResult<Value> {
     let t = load(app, team_id).await?;
     emit_team_changed(app, &t).await;
     app.emit("project_changed", json!({"project_id": t.project_id})).await;
-    Ok(json!({}))
+    Ok(json!({"workspace_closed": workspace_closed}))
 }
 
 /// `DELETE /api/teams/:id?branches=keep|delete` — SPEC-team §6.5a.
@@ -2831,7 +2863,7 @@ pub async fn delete(app: &Arc<App>, team_id: &str, delete_branches: bool) -> LcR
     let mut removed_branches: Vec<String> = Vec::new();
     if let Some(p) = &project {
         remove_worktrees(app, p, &t.repo, &t.worktree_root, &dirs).await;
-        close_workspace(app, p, t.workspace_id.as_deref()).await;
+        let _ = close_workspace(app, p, t.workspace_id.as_deref()).await;
         if delete_branches {
             // The only destructive path there is. Task branches first, then the integration
             // branch, so a `-D` failure on one leaves the rest recoverable. Remote branches
@@ -5704,6 +5736,29 @@ mod api_tests {
         assert!(members.iter().all(|m| m.deleted_at.is_some()), "cleanup soft-deletes every member");
         // The team row and its log survive (§6.5: the history stays).
         assert!(db::team(&app.db, &tid).await.unwrap().is_some());
+    }
+
+    /// daemon-ops #14: with the host gone, cleanup keeps `workspace_id` (the close never
+    /// happened) and the next cleanup — host back — closes it and clears the column.
+    #[tokio::test]
+    async fn cleanup_keeps_the_workspace_id_until_the_close_succeeds() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        abort(&app, &tid, None).await.unwrap();
+        assert!(load(&app, &tid).await.unwrap().workspace_id.is_some(), "§6.4a: the team has a workspace");
+
+        app.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        let out = cleanup(&app, &tid).await.unwrap();
+        assert_eq!(out["workspace_closed"], false);
+        let t = load(&app, &tid).await.unwrap();
+        assert!(t.workspace_id.is_some(), "not cleared: nobody closed it");
+        assert!(db::team_members(&app.db, &tid).await.unwrap().iter().all(|m| m.deleted_at.is_some()));
+
+        app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let out = cleanup(&app, &tid).await.unwrap();
+        assert_eq!(out["workspace_closed"], true);
+        assert!(load(&app, &tid).await.unwrap().workspace_id.is_none());
     }
 
     /// §10.5 PATCH: top up the budget, flip supervised, switch the delivery mode.
