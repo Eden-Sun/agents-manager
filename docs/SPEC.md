@@ -1502,6 +1502,10 @@ request id 綁時間（`agm-browser-gc-<YYYYmmdd-HHMM>`）。清理規則：
 
 ### 18.6 persona 的權威與四份同步
 
+> **2026-09-12 起由 §18.11 取代。** 「重跑 setup 會蓋回舊版」已經修掉：持久版才是權威，setup 只在完全沒有
+> 人設時 seed。改人設走 `PUT /api/supervisor/persona`（它自己會同步下面那幾份副本）。這一節保留為當時的
+> 狀況紀錄與「不要手改 config.toml」那條仍然有效的規則。
+
 AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，否則重跑 supervisor setup 會把現行 persona 蓋回舊版（#62）：
 
 | 副本 | 位置 | 怎麼改 |
@@ -1517,6 +1521,7 @@ AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，
   而且手改的內容會被保留；但 serde 全量回寫會把註解與未知欄位洗掉。要改 persona 還是走 API，讓 daemon 自己寫檔。
   （本段原本寫「會一路 409 直到 daemon 重啟」，與實作不符——2026-09-12 review #10 改正。）
 - persona 改完**不必**為它重啟 daemon：`needs_restart` 只表示下次 AGM 重啟才載入新 persona。
+  反過來也成立，而且比較容易搞錯：`needs_restart=false` **不等於**新人設已經在 session 裡生效（§18.11）。
 
 ### 18.7 共用工作樹規範
 
@@ -1603,6 +1608,25 @@ incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, reso
   假 CLI ＋ 暫存 repo，不碰正式環境）。正式安裝由 AGM 決定時機。
 - **邊界（明講）**：租約只約束走 API 與這些腳本的路徑。任何一個 shell 仍可直接 kill daemon 或自己跑
   `cargo build --release`，daemon 這裡沒有 OS 層的鎖可以強制。租約讓「問過 AGM」在執行期間持續成立，不是取代它。
+
+### 18.11 人設的權威、版本與建置依賴（2026-09-12）
+
+人設原本有四份（repo、config.toml、DB、總管 cwd 的可讀副本），review 又點出兩份沒被算進去的：
+**binary 內嵌版**與 **session 已載入版**。而 `ensure_env` 會無條件把內嵌版寫回 bot——舊 binary 跑一次 setup
+就可能把剛更新的人設降回它自己編進去的那版。
+
+- **持久版（`supervisors.persona_text`）是權威。** `setup` 只在完全沒有人設時 seed 一次；之後 seed 一律被拒。
+  `persona_seed_hash` 記住當初 seed 自哪個內嵌版，所以「內嵌版有新的」與「這份是被刻意改過的」分得開。
+- 內嵌版要取代持久版只有一條路：`POST /api/supervisor/persona/adopt-embedded`，明確的遷移，有 actor 與理由。
+- `config.toml` 的 bot persona 與 `persona.md` 都是**從持久版產生的副本**，改人設走 `PUT /api/supervisor/persona`
+  （帶 `expected_version` 可做樂觀鎖），不要手改檔案。
+- **已載入版不可觀測，就不要假裝。** daemon 只能在啟動 CLI 時把 persona 傳進去，看不到 session 現在握著什麼
+  （compaction、`/clear` 在外面都看不見）。所以 `loaded.status` 只有 `unknown`／`stale`／`unverified`，沒有
+  `verified`；`needs_restart=false` 只代表「不是舊 session」，不代表全文已載入。
+- **建置依賴**：`GET /api/supervisor/build-inputs` 列出會進 binary 的路徑，含 `include_str!` 的
+  `docs/goals/agm-supervisor-persona.md` 與 `scripts/agm.py`。一般 docs 改動不必重建；這些改了就是 binary 落後，
+  但**什麼時候重建、什麼時候重啟仍由 AGM 決定**——這兩件事分開判斷。清單與實際 `include_str!` 由測試綁住
+  （`supervisor::persona::tests::every_embedded_file_is_declared_as_a_build_input`），不靠人記得改。
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 

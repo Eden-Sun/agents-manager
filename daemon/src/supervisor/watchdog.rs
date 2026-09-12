@@ -157,6 +157,12 @@ mod tests {
             watchdog_attempts: attempts,
             watchdog_next_at: next.map(String::from),
             last_notify_at: None,
+            persona_text: None,
+            persona_version: 0,
+            persona_hash: None,
+            persona_source: None,
+            persona_updated_at: None,
+            persona_seed_hash: None,
             created_at: "now".into(),
             updated_at: "now".into(),
         }

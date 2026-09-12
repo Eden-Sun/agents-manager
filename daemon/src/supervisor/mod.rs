@@ -9,6 +9,7 @@ pub mod controller;
 pub mod health;
 pub mod incidents;
 pub mod maintenance;
+pub mod persona;
 pub mod policy;
 pub mod setup;
 pub mod store;

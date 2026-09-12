@@ -538,6 +538,64 @@ class ApprovalLeaseCommandTest(CliCase):
         self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "等窗口不會改到任何狀態")
 
 
+class PersonaCommandTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        FakeDaemon.routes["GET /api/supervisor/persona"] = (
+            200,
+            {
+                "stored": {"version": 3, "hash": "fnv1a64:abc", "source": "api", "text": "你是 AGM。（全文）"},
+                "embedded": {"hash": "fnv1a64:def"},
+                "loaded": {"status": "unverified"},
+                "upgrade_available": True,
+                "needs_restart": False,
+            },
+        )
+        FakeDaemon.routes["PUT /api/supervisor/persona"] = (200, {"stored": {"version": 4}})
+        FakeDaemon.routes["POST /api/supervisor/persona/adopt-embedded"] = (200, {"changed": True, "version": 5})
+
+    def test_show_hides_the_full_text_unless_asked(self):
+        """人設很長，預設不要整段倒進總管的對話紀錄裡。"""
+        out = self.ok("persona", "show")
+        self.assertNotIn("text", out["stored"])
+        self.assertEqual(out["stored"]["version"], 3)
+        self.assertIn("text", self.ok("persona", "show", "--full")["stored"])
+
+    def test_show_never_claims_the_session_loaded_it(self):
+        out = self.ok("persona", "show")
+        self.assertEqual(out["loaded"]["status"], "unverified")
+        self.assertNotEqual(out["loaded"]["status"], "verified")
+
+    def test_set_needs_text_and_passes_the_expected_version(self):
+        self.assertEqual(self.bad("persona", "set")["error"], "bad_args")
+        self.ok("persona", "set", "--text", "新版人設", "--expected-version", "3")
+        body = [r for r in FakeDaemon.seen if r["method"] == "PUT"][-1]["body"]
+        self.assertEqual((body["text"], body["expected_version"]), ("新版人設", 3))
+
+    def test_adopt_embedded_is_explicit(self):
+        """內嵌版只會透過這支明確的遷移覆蓋持久版，不會是 setup 的副作用。"""
+        self.assertEqual(self.ok("persona", "adopt-embedded", "--reason", "跟上新版")["version"], 5)
+        body = [r for r in FakeDaemon.seen if r["method"] == "POST"][-1]["body"]
+        self.assertEqual((body["actor"], body["reason"]), ("AGM", "跟上新版"))
+
+    def test_old_daemon_says_unsupported(self):
+        FakeDaemon.routes.pop("GET /api/supervisor/persona")
+        self.assertEqual(self.bad("persona", "show")["error"], "unsupported")
+
+
+class BuildInputsCommandTest(CliCase):
+    def test_lists_the_embedded_paths(self):
+        """例行更新判斷「只動到 docs」要吃這份清單，不然 persona 改了會被當成不必重建。"""
+        FakeDaemon.routes["GET /api/supervisor/build-inputs"] = (
+            200,
+            {"paths": ["daemon", "web", "docs/goals/agm-supervisor-persona.md", "scripts/agm.py"]},
+        )
+        self.assertIn("docs/goals/agm-supervisor-persona.md", self.ok("build-inputs")["paths"])
+
+    def test_old_daemon_says_unsupported(self):
+        self.assertEqual(self.bad("build-inputs")["error"], "unsupported")
+
+
 class IncidentsCommandTest(CliCase):
     def test_lists_open_incidents(self):
         FakeDaemon.routes["GET /api/supervisor/incidents"] = (
