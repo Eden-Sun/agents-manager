@@ -2360,6 +2360,14 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     if !empty {
+        // agent 還在 pane 裡、我們也沒動它：run 就還是活的。留在 `stopping` 的話之後 prompt
+        // 一律 409 `run is not running`、`start_bot` 對子 agent 又一律拒絕、reconcile 只把
+        // `starting` 轉回 `running`——這顆 bot 會在側欄變成永遠的黃燈（2026-09-12 review #1）。
+        let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=? AND state='stopping'")
+            .bind(&run.id)
+            .execute(&app.db)
+            .await;
+        app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
     }
     // `ended_at` 一寫上去，剛剛那個 native session 就成了 `last_native_session` 的「上一個」。
@@ -6828,6 +6836,83 @@ mod abandon_tests {
             .await
             .expect("a completed unknown-delivery row must not block the next prompt");
         assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");
+    }
+}
+
+#[cfg(test)]
+mod child_restart_tests {
+    //! `restart_child_in_pane` when the agent will not leave (review 2026-09-12 #1).
+    use super::*;
+    use crate::team::testing as tt;
+
+    /// The agent shrugs off ctrl+c (a modal, a hung CLI): the restart gives up after its 20
+    /// polls, and the run it had put into `stopping` must come back to `running` — the agent is
+    /// still right there in its pane. Left in `stopping`, every prompt answered 409, `start_bot`
+    /// refused (a child), reconcile only healed `starting`, and the bot sat yellow for good.
+    #[tokio::test]
+    async fn a_child_that_will_not_exit_gets_its_run_back() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'alfa','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&parent)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','claude','[]',0,0,'tok','child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(&parent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'proj-alfa-ui','test',1,?)",
+        )
+        .bind(&run_id)
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&kid_pane.tab_id)
+        .bind(&kid_pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        // The mock drops an agent on ctrl+c only when the *name* matches the target. An agent
+        // whose name herdr has cleared (`name: null`, exactly what 0.8.2 does after a same-named
+        // restart) stays in the pane whatever keys are sent — a perfect stand-in for one that
+        // ignores ctrl+c.
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": null, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        let err = restart_child_in_pane(&app, &kid).await.expect_err("the agent never left");
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(run.state, "running", "the agent is still in its pane, so the run is still live");
+        assert!(run.ended_at.is_none());
+        assert_eq!(db::active_run(&app.db, &kid).await.unwrap().map(|r| r.id), Some(run_id));
+        // Nothing touched the pane.
+        assert!(env.herdr.tab(&kid_pane.tab_id).unwrap().panes.contains(&kid_pane.pane_id));
+        assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"));
     }
 }
 

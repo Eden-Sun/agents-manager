@@ -554,7 +554,10 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`、`bots` 上那份模型／強度（§4.4a 從它自己的
   argv 讀回來的）與 `auto_approve` 對應的旗標。pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 shim）留在
   pane 的 shell 裡，所以帳號與工具不變；hook 一樣沒注入，回覆照舊走 §4.3 的終端快照。收 agent 的過程中
-  pane 不見了（父 agent 自己關掉）就把 run 標 exited、不重開。單顆的 `POST /api/bots/{id}/restart` 對子
+  pane 不見了（父 agent 自己關掉）就把 run 標 exited、不重開。agent 十秒內**沒退出**（卡在 modal、對 ctrl+c
+  沒反應）就回 502、不動它的 pane，而且 run 要從 `stopping` **放回 `running`**——agent 還在 pane 裡，run 就還活著
+  （2026-09-12 review #1：以前留在 `stopping`，之後 prompt 一律 409、側欄永遠黃燈）。§6.5 的對帳同樣把 herdr
+  仍列著 agent 的 `stopping` run 轉回 `running`。單顆的 `POST /api/bots/{id}/restart` 對子
   agent 走同一條路。
 - 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`
   ——stop 與 start 在**同一次持有 bot 鎖**裡做完（見下方「2026-09-11 競態修正」）。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`

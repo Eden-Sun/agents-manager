@@ -296,7 +296,10 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 // bot started the old way — `pane.split` into a shared tab, `tab_id` NULL —
                 // is kept exactly as before and simply learns where it is sitting.
                 let status = agent.agent_status.normalized().as_str().to_string();
-                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
+                // `stopping` is healed too: a stop or an in-pane restart that gave up on an
+                // agent which would not exit used to leave the run there for good (review
+                // 2026-09-12 #1). herdr still lists the agent, so it is running.
+                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), state=CASE WHEN state IN ('starting','stopping') THEN 'running' ELSE state END WHERE id=?")
                     .bind(&agent.pane_id)
                     .bind(&agent.workspace_id)
                     .bind(&agent.tab_id)
@@ -363,7 +366,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                                 }
                             }
                             let status = occupant.agent_status.normalized().as_str().to_string();
-                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state='starting' THEN 'running' ELSE state END WHERE id=?")
+                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state IN ('starting','stopping') THEN 'running' ELSE state END WHERE id=?")
                                 .bind(&status)
                                 .bind(&run.id)
                                 .execute(&app.db)
@@ -829,6 +832,46 @@ mod compat_tests {
         // And the shared tab is untouched — the reconcile closes orphan *panes*, and this
         // pane is not orphaned.
         assert!(env.herdr.tab(&old_pane.tab_id).unwrap().panes.contains(&old_pane.pane_id));
+    }
+
+    /// A run left in `stopping` — a stop or in-pane restart that gave up on an agent which would
+    /// not exit — is healed back to `running` while herdr still lists the agent (review
+    /// 2026-09-12 #1). `starting` was already healed this way; `stopping` was not, and the bot
+    /// stayed yellow with every prompt refused.
+    #[tokio::test]
+    async fn a_run_stuck_in_stopping_is_healed_while_its_agent_is_listed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'stopping','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let r = run_of(&app, &bot).await.unwrap();
+        assert_eq!(r.id, run);
+        assert_eq!(r.state, "running");
     }
 
     /// An agent herdr knows about that the database has no run for is adopted, tab and all —
