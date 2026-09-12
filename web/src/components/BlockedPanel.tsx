@@ -1,5 +1,8 @@
+import { useState } from 'react'
+import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
+import { BlockedChoices } from './BlockedChoices'
 import { CodexUpdateHint } from './CodexUpdateHint'
 import { linkifyTerm } from './TermLinks'
 import { useTermWrap } from './termWrap'
@@ -24,6 +27,15 @@ export function BlockedPanel({
   const press = usePaneKeys(botId, refresh)
   // 折不折行跟終端分頁共用一個開關（切換鍵在那條 term-bar 上）。
   const wrap = useTermWrap()
+  /**
+   * 認得出編號選單時（`BlockedChoices`），終端快照預設收起來。
+   *
+   * 這條面板在手機上只有 300px 高，選單一攤開就沒地方擺了；而且那份快照裡要看的東西
+   * （問題、選項、說明、游標在哪）已經全部被攤成可以點的清單，留著等寬 11px 的原畫面只是
+   * 讓人再戳一次小字。真的想看原畫面的人按這顆，或按「展開全畫面」。
+   */
+  const menu = useChoiceMenu(botId, snap?.text)
+  const [showTerm, setShowTerm] = useState(false)
   // `pre` 是 white-space: pre，內容一律當成一個字串算好再放進去，免得 JSX 的排版縮排跑進畫面。
   const body = err
     ? `讀取終端失敗：${err}`
@@ -49,6 +61,16 @@ export function BlockedPanel({
             </span>
           )}
         </span>
+        {menu ? (
+          <button
+            type="button"
+            className="mini-btn"
+            title={showTerm ? '收起終端原畫面，只留可以點的選單' : '看終端原畫面（選單以外的內容都在那裡）'}
+            onClick={() => setShowTerm((v) => !v)}
+          >
+            {showTerm ? '收起終端' : '看終端'}
+          </button>
+        ) : null}
         {onExpand ? (
           <button type="button" className="mini-btn" title="展開整個 herdr 畫面" onClick={onExpand}>
             展開全畫面
@@ -57,7 +79,10 @@ export function BlockedPanel({
       </div>
       {/* codex 的升級提示（TUI 當場問的）也要在這裡就能先看 changelog，不必先展開全畫面。 */}
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
-      <pre className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
+      {menu ? <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} /> : null}
+      {menu && !showTerm ? null : (
+        <pre className={`term blocked-term${wrap ? ' term-wrap' : ''}`}>{linkifyTerm(body, snap?.columns)}</pre>
+      )}
       <div className="keypad">
         {KEYPAD.map((k) => (
           <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => press(k.keys)}>
