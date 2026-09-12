@@ -18,14 +18,21 @@
   color: var(--text);
 }
 
-.blocked-modal-body .bc-question {
+/* 分頁列與問題一起釘在主捲軸上緣：捲到第 5 項還看得到自己在回答哪一題。 */
+.bc-top {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.blocked-modal-body .bc-top {
   position: sticky;
   top: 0;
   z-index: 1;
   margin: -2px 0 0;
   padding: 6px 0 8px;
   background: var(--bg-panel);
-  /* 內容從底下捲過去時要看得出來這一行是釘住的，不是跟著捲的第一段。 */
+  /* 內容從底下捲過去時要看得出來這一段是釘住的，不是跟著捲的第一段。 */
   box-shadow: 0 1px 0 var(--border);
 }
 
@@ -46,6 +53,7 @@
   grid-template-areas:
     'num title mark'
     'num detail detail';
+  /* 多選多一欄放 ☐／☑（`.bc-list-multi`），其餘格位不動。 */
   align-items: start;
   column-gap: 8px;
   row-gap: 2px;
@@ -218,4 +226,124 @@
     min-height: 40px;
     padding: 4px 16px;
   }
+}
+
+
+/* ---- 多分頁 ＋ 多選（2026-09-12 第三輪） */
+
+/* 上面那條分頁列：一次問好幾題時，每一格是一題，☑ 是答過的、✔ 是整份問卷的送出頁。
+   「現在在第幾題」終端只用顏色標，快照讀不出來——UI 只敢用「第一個還沒答的」去猜，
+   所以那一格畫的是虛線框（跟選項的實心藍框分得開），tooltip 也寫明是推測。 */
+.bc-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.bc-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.bc-tab:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.bc-tab-done {
+  color: var(--text);
+}
+
+.bc-tab-at {
+  border: 1px dashed var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+.bc-step {
+  min-width: 28px;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bc-step:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.bc-tab:disabled,
+.bc-step:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 多選：編號右邊多一個 ☐／☑。點一下是切換勾選，不是送出——所以勾起來的那幾項要一眼看得到
+   （底色＋粗體），跟「游標在此」那條藍邊是兩回事（游標只是終端的焦點）。 */
+.bc-list-multi .bc-item {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'num box title mark'
+    'num box detail detail';
+}
+
+.bc-box {
+  grid-area: box;
+  align-self: start;
+  font-size: 15px;
+  line-height: 20px;
+  color: var(--text-dim);
+}
+
+.bc-checked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.bc-checked .bc-box {
+  color: var(--accent-ink);
+}
+
+.bc-checked .bc-title {
+  color: var(--accent-ink);
+}
+
+/* 多選要自己按這一顆才交卷（終端裡那一列沒有編號的 `Submit`）。它是整塊裡唯一會「送出」的
+   按鈕，所以是唯一的實心主色；勾選那幾列只是淡底。 */
+.bc-submit {
+  min-height: 44px;
+  margin-top: 2px;
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.bc-submit:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.bc-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
