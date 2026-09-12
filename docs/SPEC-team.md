@@ -196,16 +196,24 @@ daemon 負責在 PM / 執行者 / reviewer 之間**轉送**訊息、以 `git mer
 背景部分（scheduler 的 `startup`，判斷「這是 reopen」的條件是 **`starting` 且沒有 `working` 的 issue、但有 `queued` 的 issue**）：
 
 5. **收掉上一批執行者**：最後一個 issue 結束時 `end_team` 只停成員、不 retire（§2.3「最後一個 issue」），
-   所以它的 worker 還掛在 `bots`（`deleted_at IS NULL`、cwd 在 `i<seq>-dev-<n>`）。對最後一個 `done` 的 issue 跑 `retire_issue_workers`
+   所以它的 worker 還掛在 `bots`（`deleted_at IS NULL`、cwd 在 `i<seq>-dev-<n>`）。對**最後一個終態**（`done` / `failed` / `skipped`，
+   2026-09-12 前只認 `done`，整隊只有失敗 issue 時 `retry-failed` 會卡在 `starting`）的 issue 跑 `retire_issue_workers`
    （停 pane、標 `deleted_at`、`worktree remove`）。**不讀 `worker_plan.keep`**：那是 PM 在上一個 issue 結束時對「下一個」的判斷，
    當時它以為沒有下一個；reopen 一律換新批。
 6. **PM 與 reviewer 原地重啟**：對兩者各呼叫 `start_bot`，帶 §2.5.3 的續接選項。
    worktree `main/`、`reviewer/` 與 `bots.cwd` 完全不動；persona 不含 issue 號（§2.3），所以重啟後套同一份 persona 是對的。
    - PM 起不來 → `paused(member_failed:<pm>)`，**不是** `failed + cleanup`（§7.4 那條是建 team 失敗才適用；reopen 失敗不能把做完的成果清掉）。使用者修好後 `start` 該 bot 再 `resume`，scheduler 回到 `starting` 重跑本段。
    - reviewer 起不來 → 同 §7.4：`paused(member_failed:<rev>)`。
+   - `startup` 本身回 Err（不是上面那些自己會 pause 的情況）→ note `startup_failed` + `paused(upstream)`，`resume_phase = starting`
+     （2026-09-12；以前只寫 log 然後每 20 秒再試，team 停在 `starting` 又不能 resume）。
 7. **建新一批執行者**：依 `roles_json.workers.spec` / `count`，走既有 `start_issue(next, keep_workers=false)`
    （切 `main/` 到新整合分支 `team/i<issue>-<tid6>`、`worktree add` `i<seq>-dev-<n>`、insert 成員、重寫 `ISSUE.md` / `TEAM.md`、鏡像 `teams` 欄位），
    再 `start_issue_workers`。`start_issue` 對 `main/` 的「必須乾淨」檢查照舊，髒了 → note `issue_start_failed` + `paused(upstream)`。
+   - **換 issue 可重入（2026-09-12）**：`finish` / `close_issue_and_advance` 先把交付完的 issue 標 `done`，再 `start_issue(next)`；
+     後者失敗暫停時 `resume_phase` 仍是 `finishing`（或 `working`），所以「繼續」會再走一次。第二次：
+     `finish` 看到沒有 working 的 issue、或該 issue 已有 `delivered` / `pr_created` note，就**不再交付**（記 `deliver_skipped`），
+     直接重試 `start_issue`；`step` 在 `planning` / `working` 發現「沒有 working 的 issue 但佇列還有」也重試（記 `issue_advance_retry`）。
+     沒有 working 的 issue 而佇列非空時**不得**寫 `done`——以前會把剩下的佇列整個丟掉、交付重複一次。
 8. **交給 PM**：`hand_issue_to_pm(kept_workers=false)` —— `set_phase("planning")` 並送 `next_issue` relay。relay 文字多一句視 §2.5.3 結果而定：
    續接成功 →「這是同一段對話的延續」；退回新對話 →「你是重新啟動的 PM，先前的對話不在了，請先讀 `TEAM.md` 與 `ISSUE.md`」。
 
@@ -362,9 +370,9 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 
 | 角色 | action | 欄位 | 語意 |
 |---|---|---|---|
-| pm | `dispatch` | `tasks:[{to?, issue?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
-| pm | `wait` | — | 目前沒事做，等回報；若沒有 task 或所有 task 都已終態，第一次送 nudge，第二次（含）→ `paused(pm_stalled)`，等使用者 `resume` 後再提醒 `done` 或 `dispatch` |
-| pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
+| pm | `dispatch` | `tasks:[{to?, issue?, task?, title, brief, files?[]}]` | 派工。**`task`（2026-09-12）**：`"t3"` / `3`，表示這一筆**取代** `blocked_by_worker` 的 t3——舊的標 `skipped`（分支留著，note `pm_replaced_task`），新的照常排隊／派出（同 issue；`to` 可換人；跟舊的相同 brief 不算 `pm_repeat`）。t3 不是 blocked 就拒那一筆。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
+| pm | `wait` | — | 目前沒事做，等回報；若沒有 task 或所有 task 都已終態**或 `blocked_by_worker`**（它等的是 PM，不是執行者；2026-09-12），第一次送 nudge（有 blocked 的會點名並說明 `task` / `done` 兩條路），第二次（含）→ `paused(pm_stalled)`，等使用者 `resume` 後再提醒 `done` 或 `dispatch` |
+| pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`；**`blocked_by_worker` 的 task 視為 PM 決定 skip**（2026-09-12：改標 `skipped`、note `pm_skipped_blocked`，不擋 `done`）。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
 | pm | `abort` | `reason` | PM 認為做不了 → team `paused(pm_abort)`（不直接 abort，讓人決定） |
 | worker | `report` | `status: done \| blocked`, `summary`, `notes?` | 工作回報。`done` 進審查；`blocked` 轉給 PM 決定 |
@@ -373,6 +381,8 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說「回覆結尾必須有 am-team 區塊、允許哪些 action」。
 
 `dispatch` 每筆必填的只有 `brief`（無限模式再加一個 `issue`）。`issue` 接受 `48` 與 `"#48"` 兩種寫法。
+`to` 只在**那筆 task 所屬 issue 的執行者**裡找（2026-09-12）：無限模式下每個 issue 都有自己的 `dev-1`，
+以前對全隊解析會指到別的 issue 的執行者、task 永遠排隊。短名 `dev-1` 與長名 `i<seq>-dev-1` 都接受；對不到就拒那一筆並寫明是哪個 issue。
 
 **解析失敗處理**（區塊缺失、JSON 壞、action 不合法、`to` 對不到人）：
 1. 記 `team_events{kind:note, payload:{error}}`；
@@ -622,7 +632,7 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 
 - **建 team**（`POST /projects/:id/teams`，同步部分）：驗證（git repo、issue 存在、kind 已安裝、額度未低於 `quota_stop_pct`）→ **先 `git rev-parse` 解出 `base_sha`、算出 `worktree_root`** → 寫 `teams`（`phase=starting`）→ 建 worktree → 建成員 bot → 回 `{team_id}`。
   - ⚠️ `base_sha` / `worktree_root` 是 `NOT NULL`，所以**必須在寫 row 之前就解出來**（附錄 C 的序列即為此）。早期版本把「寫 row」排在解析之前，兩節不一致，以此處為準。worktree 目錄本身可以在寫 row 之後才建 —— 路徑是算出來的，不需要先存在。之後**背景**逐一 `start_bot`（沿用 SPEC §6.2；每個 60 秒上限）。
-  - PM 起不來 → `failed` + cleanup；任何直接進 `failed` 的 startup 失敗，都先對已啟動成員逐一 best-effort `stop_bot`，停止失敗只記 log，不覆蓋原本的 `member_start_failed` 原因。worker 部分起不來 → 少一個人繼續（≥1 即可），不做這項清理，記 note。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
+  - PM 起不來 → `failed` + cleanup；任何直接進 `failed` 的 startup 失敗，都先對已啟動成員逐一 best-effort `stop_bot`，停止失敗只記 log，不覆蓋原本的 `member_start_failed` 原因。worker 部分起不來 → 少一個人繼續（≥1 即可），不做這項清理，記 note。**起不來的那個執行者要真的退掉**（2026-09-12：`deleted_at` + 退 worktree，note `member_dropped`）——以前留在 pool 裡，PM 第一筆派工就派給它，`flush` 找不到 run 變 `paused(member_lost)`，`resume` 又要求它 running，「少一個人繼續」實際做不到。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
   - 全部就緒 → `planning`，送 PM 第一則 relay（附錄 A.1）。
 - **停止**：`done / aborted / failed` 時 daemon 對所有成員 `stop_bot`（SPEC §6.4）。成員 pane 不會在 team 還活著時被 daemon 自動停。
 - **使用者手動停某個成員**（既有 `POST /bots/:id/stop`）：scheduler 收到 `RunChanged` → 該成員相關 relay 留在 pending → `paused(member_lost:<name>)`。使用者重新 `start` 該 bot 後按 `resume`；暫停橫幅上的「啟動並繼續」（2026-09-10，`TeamMemberLost`）會把沒在跑的成員全部 `start`、都有 run 之後自動 `resume`，仍是人按的。**不自動重啟**（維持 §13「絕不自動啟動」的精神；自動重啟會讓額度在無人看管下持續消耗）。
@@ -631,10 +641,10 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 
 | 情況 | 行為 |
 |---|---|
-| daemon 重啟 | SPEC §6.1 對帳收養成員 Run（agent_name 由 bot id 推得）→ 重建 scheduler → 對每個成員：有 in-flight Turn 就等它（hook 晚到仍可配對，SPEC §6.7）；沒有就看 `team_events` 的 pending relay 重送（冪等鍵相同）。任何成員 Run 被判 `exited` → `paused(member_lost)`。 |
+| daemon 重啟 | SPEC §6.1 對帳收養成員 Run（agent_name 由 bot id 推得）→ 重建 scheduler → 對每個成員：有 in-flight Turn 就等它（hook 晚到仍可配對，SPEC §6.7）；沒有就看 `team_events` 的 pending relay 重送（冪等鍵相同）。任何成員 Run 被判 `exited` → `paused(member_lost)`。**開機順序（2026-09-12）**：`respawn_schedulers` 先於 hook spool 重放（scheduler 在 spawn 當下就訂閱 turn bus），重放出的 `TurnDone` 才有人接；保險是 `step` 開頭的**補漏**：relay 已 `delivered`、對應 turn 已終態、卻沒有 `turn_handled` note 的，補跑一次回覆處理（記 `turn_caught_up`），bus 漏掉、lag 或停機期間完成的回合都靠這條救。 |
 | 成員 crash（`pane.exited`） | 既有 SPEC §6.6 把 Run `exited`、in-flight Turn `failed` → scheduler `paused(member_lost)`。 |
 | 成員 `blocked`（trust 提示、權限詢問、codex 升級選單） | `paused(member_blocked:<name>)`；暫停橫幅上有「回應 <成員>」按鈕（2026-09-10，`TeamMemberBlocked`），就地彈出該成員的整張終端畫面送鍵；狀態離開 blocked 時 **自動 resume**（唯一會自動 resume 的原因，因為它不是預算問題）。2026-09-10 起由 daemon 做（`team::resume_if_member_unblocked`，掛在 `pane.agent_status_changed` 的 blocked→非 blocked 邊緣），所以在哪裡回完提示都一樣；開機對帳時也補一次（那個邊緣可能發生在 daemon 沒開的時候）。UI 那顆按鈕仍會在自己開的視窗裡補送 `resume`，重複的 `resume` 只會拿到 409。 |
-| relay `delivery=unknown` | `paused(delivery_unknown)`；使用者 `abandon` 後 `resume`，scheduler 重送同一 relay（冪等鍵相同 → 既有邏輯會回同一 turn；因此重送用新的 `event_id`）。 |
+| relay `delivery=unknown` | `paused(delivery_unknown)`；使用者 `abandon` 後 `resume`，scheduler 重送同一 relay（冪等鍵相同 → 既有邏輯會回同一 turn；因此重送用新的 `event_id`）。**實作（2026-09-12）**：`abandon` 把 turn 收成 `failed` + `delivery='failed'`；scheduler 看到 `delivery='failed'` 的 relay turn 不送修復提示（沒人收到過 prompt），而是把那批 relay 列標 `dropped`（保留 `turn_id` 當紀錄）、複製成新的 `pending` 列（新 id → 新 `client_request_id`），記 `relay_resent`；「繼續」後 `flush` 照送。 |
 | Turn `failed`（stall watchdog、interrupt） | 修復提示規則同 §4.4（算一次），2 次後 `paused(protocol_error)`。 |
 
 team 狀態全部在 DB（§2.1），記憶體只有 scheduler 的 mpsc 與計時器。
@@ -701,18 +711,25 @@ queued ──relay 送達──► working ──report{done}──► reported 
                           │                                                   ▼                          ▼
                           │                                             exhausted ──使用者 decide──► working | merging | skipped
                           │                                                                           rebasing ──report──► merging（≤2 次）
- report{blocked} ──► blocked_by_worker ──PM 下一則 relay 決定：改派 / 補充 brief（→ working）/ skip
+ report{blocked} ──► blocked_by_worker ──PM 下一則 relay 決定：dispatch{task:"tN"}（取代：舊的 skipped、新的 queued）/ done（→ skipped）；或使用者 decide
 ```
 
 - `queued` 有兩種（2026-09-08）：`worker_bot_id IS NULL` = 還在佇列裡等併行位，分支**還沒切**；
   有 `worker_bot_id` = 已經派給某個執行者、relay 還沒送達。前端的 task 列把前者顯示成「排隊中」。
 - 終態：`merged | skipped | failed`。
+- `blocked_by_worker`（2026-09-12 前只有使用者 `decide` 能動它，PM 收到「請決定下一步」卻沒有任何 action 會碰到它）：
+  PM 用 `dispatch` 帶 `task` 取代（§4.4），或 `done` 把它當 skipped；`wait` 對它視同「沒事可等」走 nudge → `pm_stalled`。
 - `round` 從 0 起算；`request_changes` 讓 `round += 1`；`round == max_review_rounds` 時再收到 `request_changes` → `exhausted`。
 - 沒有 reviewer（`reviewer: null`）：`reported → merging` 直接整合。
 - rebase relay 送達時 task 仍維持 `rebasing`（不轉成 `working`）；worker 回報才走 `rebasing → merging`，因此不會因衝突重開審查。
 
 ### 8.3 誰判定完成
 - **task 完成**：reviewer `approve`（或無 reviewer）且 daemon merge 成功。不是 worker 說 done 就算。
+- **`report` 時 daemon 替執行者 commit 失敗（2026-09-12）**：`index.lock` 殘留、沒有 `user.email`、磁碟滿……
+  以前只記 `auto_commit_failed` 就照樣送審，合併的是少了最後那批改動的分支，issue 結束時 `worktree remove --force`
+  再把它們真的丟掉（違反 §6.3）。現在 task **不換狀態**，改送一則 `commit_failed` relay 請執行者自己
+  `git add -A && git commit` 後再 `report`；同一個 task 連續第 3 次失敗 → `paused(upstream)`，relay 留在 pending，
+  「繼續」後照送。
 - **team 完成**：PM 發 `done` **且** daemon 驗證所有 task ∈ 終態。PM 在沒有 task 或所有 task 終態後若回 `wait`，daemon 第一次送一則「請 `done` 或再 `dispatch`」的 nudge；第二次（含）把 team 暫停為 `paused(pm_stalled)`，另排一則說明「已暫停，等使用者決定」。使用者 `resume` 後再送一則 nudge，重新要求 PM `done` 或 `dispatch`。
 - PM 的 `done.summary` 成為 PR body / team 摘要。
 
@@ -733,6 +750,7 @@ PM 同時只能收一則 prompt，但兩個 worker 可能幾乎同時回報。�
 |---|---|
 | `in_flight` | 排隊（§8.4） |
 | `blocked` | `paused(member_blocked)`，離開 blocked 自動 resume |
+| `needs_login` / `dialog_open` / `picker_open`（`prompt` 在送之前看到登入提示、claude 的 Switch model 對話框、codex 的 `/model` 選單） | 同 `blocked`：`paused(member_blocked:<name>)`，note `member_blocked` 帶原 reason 與提示文字（2026-09-12；以前歸成 `member_lost`，橫幅叫人去重啟一個其實在跑的成員） |
 | `not_running` / Run 非 running | `paused(member_lost)`；不自動啟動 |
 | `unknown_delivery` | `paused(delivery_unknown)` |
 | `conflict` / `upstream` | 重試 1 次（5 秒後）→ `paused(upstream)` |

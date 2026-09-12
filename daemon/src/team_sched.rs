@@ -131,9 +131,12 @@ pub fn spawn(app: &Arc<App>, team_id: &str) {
     // Moved into the task, so the id is withdrawn on every exit path — panic included.
     let reg = Registration { team_id: team_id.clone(), generation };
     let key = team_id.clone();
+    // Subscribed **here**, not inside the task: a broadcast receiver only sees what is sent
+    // after it exists, and `main` replays the hook spool right after `respawn_schedulers` —
+    // a turn published before the task had run would otherwise be lost to it (ops #3).
+    let mut turns = app.subscribe_turns();
     let handle = tokio::spawn(async move {
         let _reg = reg;
-        let mut turns = app.subscribe_turns();
         loop {
             let done = match tick(&app, &team_id).await {
                 Ok(d) => d,
@@ -184,7 +187,15 @@ async fn tick(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
         return Ok(true);
     }
     if t.phase == "starting" {
-        startup(app, team_id).await?;
+        // A `startup` that errors out (not one that paused: those return `Ok`) used to be a
+        // `warn!` and another try in `TICK` seconds, for ever — the team read `starting`, could
+        // not be resumed and said nothing (2026-09-12 review, ops #10). Park it where the user
+        // can see it; "continue" goes back to `starting` and runs the whole startup again.
+        if let Err(e) = startup(app, team_id).await {
+            note(app, team_id, json!({"action": "startup_failed", "error": format!("{e:?}")})).await?;
+            team::sched_pause(app, team_id, "upstream", None).await?;
+            return Ok(false);
+        }
     }
     step(app, team_id).await?;
     Ok(team::is_terminal(&team::load(app, team_id).await?.phase))
@@ -381,6 +392,10 @@ pub struct DispatchItem {
     /// §4.4 (2026-09-09): which issue this task belongs to. Optional while only one issue is
     /// working; **required** in unlimited mode, where the daemon cannot guess.
     pub issue: Option<i64>,
+    /// §8.2 (2026-09-12): the `blocked_by_worker` task this item **replaces** — `"task": "t3"`.
+    /// That task is closed `skipped` and this one takes its place (same issue), which is how
+    /// the PM re-briefs or re-assigns a task its executor gave up on.
+    pub task: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,6 +419,16 @@ fn issue_field(v: &Value) -> Option<i64> {
         return Some(n);
     }
     let t = f.as_str()?.trim().trim_start_matches('#');
+    t.parse::<i64>().ok()
+}
+
+/// `"task": "t3"`, `"t3"`, `"3"` or `3` — the task's `seq`. Absent or unreadable is `None`.
+fn task_field(v: &Value) -> Option<i64> {
+    let f = v.get("task").or_else(|| v.get("replaces"))?;
+    if let Some(n) = f.as_i64() {
+        return Some(n);
+    }
+    let t = f.as_str()?.trim().trim_start_matches('#').trim_start_matches('t');
     t.parse::<i64>().ok()
 }
 
@@ -448,6 +473,7 @@ impl Action {
                         brief,
                         files: list(t, "files"),
                         issue: issue_field(t),
+                        task: task_field(t),
                     });
                 }
                 Ok(Action::Dispatch(out))
@@ -595,7 +621,11 @@ async fn pause_with_detail(app: &Arc<App>, team: &db::Team, reason: &str, detail
     if team.phase == "paused" || team::is_terminal(&team.phase) || team.phase == "aborting" {
         return Ok(());
     }
-    if team::DECISION_PAUSES.contains(&reason) {
+    // Not in unlimited mode (§2.3 "多 issue 同時進行"): there the issue-level reasons go
+    // through `pause_issue` → `close_one_issue` for **their** issue, and `pm_abort` — which
+    // names no issue — pauses the whole team. Taking this branch used to close "the first
+    // working issue" as failed for an abort aimed at some other one (2026-09-12 review, ops #7).
+    if team::DECISION_PAUSES.contains(&reason) && !team::is_unlimited(team) {
         let has_next = db::next_queued_issue(&app.db, &team.id).await.map_err(up)?.is_some();
         if has_next {
             // Boxed: the advance can itself end up back in `pause` (a failed hand-over), and
@@ -954,15 +984,20 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             Ok(o) => o,
             Err(LcError::Conflict(v)) => {
                 let reason = v.get("reason").and_then(Value::as_str).unwrap_or("");
-                if reason.contains("in flight") {
-                    continue;
-                }
-                if reason.contains("blocked") {
-                    pause(app, &ctx.team, &format!("member_blocked:{}", bot.name)).await?;
-                } else if reason.contains("unknown delivery") {
-                    pause(app, &ctx.team, "delivery_unknown").await?;
-                } else {
-                    pause(app, &ctx.team, &format!("member_lost:{}", bot.name)).await?;
+                match conflict_pause(reason) {
+                    ConflictPause::InFlight => continue,
+                    ConflictPause::Blocked => {
+                        // The member is running; a human has to answer something at its
+                        // terminal. `member_lost` here sent the user to restart a bot that
+                        // was fine and made `resume` stop on the same screen again
+                        // (2026-09-12 review, ops #22).
+                        note(app, &ctx.team.id, json!({"action": "member_blocked", "bot": bot.name,
+                             "reason": reason, "message": v.get("message")}))
+                        .await?;
+                        pause(app, &ctx.team, &format!("member_blocked:{}", bot.name)).await?;
+                    }
+                    ConflictPause::DeliveryUnknown => pause(app, &ctx.team, "delivery_unknown").await?,
+                    ConflictPause::Lost => pause(app, &ctx.team, &format!("member_lost:{}", bot.name)).await?,
                 }
                 return Ok(());
             }
@@ -1025,6 +1060,31 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         }
     }
     refresh_usage(app, ctx).await
+}
+
+/// What a `prompt_grouped` 409 means for the team (§9.1's table).
+#[derive(Debug, PartialEq)]
+enum ConflictPause {
+    /// Queue behind the turn in flight.
+    InFlight,
+    /// The member is running but cannot take input until a human answers its terminal:
+    /// an agent prompt, a login, claude's model-switch dialog, codex's `/model` picker.
+    Blocked,
+    DeliveryUnknown,
+    /// No run, or not a running one.
+    Lost,
+}
+
+fn conflict_pause(reason: &str) -> ConflictPause {
+    if reason.contains("in flight") {
+        ConflictPause::InFlight
+    } else if reason.contains("blocked") || matches!(reason, "needs_login" | "dialog_open" | "picker_open") {
+        ConflictPause::Blocked
+    } else if reason.contains("unknown delivery") {
+        ConflictPause::DeliveryUnknown
+    } else {
+        ConflictPause::Lost
+    }
 }
 
 /// One prompt out of N pending relays (§8.4 / appendix A.4).
@@ -1119,6 +1179,26 @@ async fn report_member_start_failure(app: &Arc<App>, team_id: &str, bot: &db::Bo
     Ok(())
 }
 
+/// Retire one member the team is going on without: soft-delete the bot row, purge its hook
+/// material and remove its worktree. The note says why, in the timeline the user reads.
+async fn drop_member(app: &Arc<App>, ctx: &Ctx, b: &db::Bot, why: &str) -> LcResult<()> {
+    let _ = lifecycle::stop_bot(app, &b.id).await;
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
+        .bind(db::now())
+        .bind(&b.id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    lifecycle::purge_bot_dir(app, &b.id, ctx.host()).await;
+    // Only a directory the §6.1 check vouches for is ever removed.
+    if let Ok(wt) = ctx.wt(b) {
+        tg::worktree_remove(app, ctx.host(), &team::repo_path(&ctx.project, &ctx.team.repo), &wt).await;
+    }
+    note(app, &ctx.team.id, json!({"action": "member_dropped", "bot": b.name, "role": b.team_role, "why": why})).await?;
+    app.emit("bot_changed", json!({"bot_id": b.id})).await;
+    Ok(())
+}
+
 /// Stop members left running when startup takes a terminal failure path. Cleanup is deliberately
 /// best effort: the startup error and its timeline note are the useful diagnosis, so a failed
 /// stop must only be logged and never replace them.
@@ -1136,11 +1216,15 @@ async fn stop_failed_startup_members(app: &Arc<App>, members: &[db::Bot]) {
 /// provider supports it.
 async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let issues = db::team_issues(&app.db, team_id).await.map_err(up)?;
+    // The entry whose executors are still around: the last one to reach a terminal state.
+    // Only `done` used to count, so a team whose only issue *failed* (`budget_time`,
+    // `review_exhausted` → `end_team`) could be reopened by `retry-failed` and then sat in
+    // `starting` for good (2026-09-12 review, ops #10).
     let previous = issues
         .into_iter()
-        .filter(|i| i.state == "done")
+        .filter(|i| !team::is_open_issue_state(&i.state))
         .max_by_key(|i| i.seq)
-        .ok_or_else(|| LcError::Upstream("cannot reopen a team with no completed issue".into()))?;
+        .ok_or_else(|| LcError::Upstream("cannot reopen a team with no finished issue".into()))?;
     let ctx = Ctx::load(app, team_id).await?;
     // Pretrust only the long-lived members before retirement: stopping old worker panes and
     // removing their per-issue worktrees must not get in the way of the PM/reviewer starts.
@@ -1322,7 +1406,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
     }
 
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed: Vec<db::Bot> = Vec::new();
     for b in &ctx.members {
         if db::active_run(&app.db, &b.id).await.map_err(up)?.is_some() {
             continue;
@@ -1348,7 +1432,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
                     pause(app, &ctx.team, &format!("member_failed:{}", b.name)).await?;
                     return Ok(());
                 }
-                _ => failed.push(b.name.clone()),
+                _ => failed.push(b.clone()),
             }
         }
     }
@@ -1356,6 +1440,14 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         team::sched_phase(app, team_id, "failed", false).await?;
         stop_failed_startup_members(app, &ctx.members).await;
         return Ok(());
+    }
+    // §7.4 "少一個人繼續" — but *actually* one short. A worker that would not start used to
+    // stay in the pool: the PM's first task went to it, `flush` found no run and parked the
+    // team on `member_lost`, and `resume` then demanded that very member be running
+    // (2026-09-12 review, ops #21). It is retired here instead, worktree and all, so the
+    // roster the PM is told about is the one that can take work.
+    for b in &failed {
+        drop_member(app, &ctx, b, "start failed; continuing one executor short").await?;
     }
 
     sqlx::query("UPDATE teams SET started_at = COALESCE(started_at, ?) WHERE id = ?")
@@ -1464,6 +1556,11 @@ fn issue_tag(ctx: &Ctx, issue_id: Option<&str>) -> String {
     }
 }
 
+/// The issue number a task belongs to, if that issue is working.
+fn issue_number_of(ctx: &Ctx, t: &db::TeamTask) -> Option<i64> {
+    t.issue_id.as_deref().and_then(|i| ctx.issue_of(i)).map(|q| q.issue_number)
+}
+
 fn issue_list(ctx: &Ctx) -> String {
     ctx.issues.iter().map(|i| format!("#{}", i.issue_number)).collect::<Vec<_>>().join("、")
 }
@@ -1473,7 +1570,14 @@ fn issue_list(ctx: &Ctx) -> String {
 /// One idempotent pass: gates, then the task engine, then the outbox.
 pub async fn step(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let ctx = Ctx::load(app, team_id).await?;
-    if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "aborting" || ctx.team.phase == "paused" {
+    if team::is_terminal(&ctx.team.phase) || ctx.team.phase == "aborting" {
+        return Ok(());
+    }
+    // Replies the turn bus never delivered to this scheduler (ops #3) — applied even while
+    // paused, exactly as `on_turn_done` would have.
+    catch_up_turns(app, team_id).await?;
+    let ctx = Ctx::load(app, team_id).await?;
+    if ctx.team.phase == "paused" {
         return Ok(());
     }
     // §6.1 #1, checked before any git runs: a team whose members are not inside its own
@@ -1483,6 +1587,18 @@ pub async fn step(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         note(app, team_id, json!({"action": "unsafe_layout", "detail": format!("{e:?}")})).await?;
         pause(app, &ctx.team, "worktree_missing").await?;
         return Ok(());
+    }
+    // A finite-parallelism team between issues: the last one is settled, the next is still
+    // queued, and the advance that should have started it failed (`paused(upstream)`, then
+    // "continue"). Nothing below would ever start it — the gates, the task engine and the
+    // outbox all key off the working issue — so the advance is retried here (ops #4).
+    if !ctx.unlimited()
+        && ctx.issues.is_empty()
+        && matches!(ctx.team.phase.as_str(), "planning" | "working")
+        && db::next_queued_issue(&app.db, team_id).await.map_err(up)?.is_some()
+    {
+        note(app, team_id, json!({"action": "issue_advance_retry"})).await?;
+        return close_issue_and_advance(app, team_id, "done", None, None).await;
     }
     if !gates(app, &ctx).await? {
         return Ok(());
@@ -1523,6 +1639,18 @@ async fn advance_once(app: &Arc<App>, team_id: &str) -> LcResult<bool> {
     //    and again on the next sweep, which is what `changed` below buys.
     fill_workers(app, &ctx).await?;
     let tasks = sched_tasks(app, &ctx).await?;
+
+    // A task whose rebases are used up sits in `rebasing` waiting for a human `decide`
+    // (§8.2). Nothing below has an edge for it, so a plain "continue" on the
+    // `merge_conflict` pause used to leave the team quietly `working` with nobody to prompt
+    // (2026-09-12 review, ops #18). Say so and pause again; `decide` lifts this one itself.
+    if let Some(t) = tasks.iter().find(|t| t.state == "rebasing" && t.rebase_attempts > MAX_REBASES) {
+        note(app, team_id, json!({"action": "decision_required", "task": t.seq, "state": t.state,
+             "why": "rebase attempts exhausted: decide rework / force_merge / skip"}))
+        .await?;
+        pause_issue(app, &ctx, t.issue_id.as_deref(), "merge_conflict").await?;
+        return Ok(false);
+    }
 
     // 1. a reported task goes to review, or — with no reviewer — straight to the merge queue.
     //    Review is serialised: one task at a time, in report order (§8.4).
@@ -1611,15 +1739,18 @@ async fn merge_one(app: &Arc<App>, ctx: &Ctx, t: &db::TeamTask) -> LcResult<bool
         }
     }
     // §4.5: one integration worktree, several integration branches. Park it on the one this
-    // task belongs to before merging — with a finite parallelism it is already there.
-    if integration != ctx.team.branch {
-        if let Err(e) = tg::checkout_branch(app, ctx.host(), &main_wt, &integration).await {
-            note(app, &ctx.team.id, json!({"action": "integration_checkout_failed",
-                 "branch": integration, "error": e.to_string()}))
-            .await?;
-            pause(app, &ctx.team, "upstream").await?;
-            return Ok(false);
-        }
+    // task belongs to before merging — **unconditionally**. The `teams.branch` mirror is not
+    // where `main/` is: `start_issue(#43)` checks the worktree out on #43's branch and then
+    // `sync_issue_mirror` points the mirror back at #42, so "integration == mirror" used to
+    // mean "skip the checkout" precisely when the worktree was on somebody else's branch, and
+    // #42's task was merged into #43's integration branch (2026-09-12 review, ops #1). With a
+    // finite parallelism the worktree is already there and the checkout is a no-op.
+    if let Err(e) = tg::checkout_branch(app, ctx.host(), &main_wt, &integration).await {
+        note(app, &ctx.team.id, json!({"action": "integration_checkout_failed",
+             "branch": integration, "error": e.to_string()}))
+        .await?;
+        pause(app, &ctx.team, "upstream").await?;
+        return Ok(false);
     }
     let outcome = tg::merge_task(app, ctx.host(), &main_wt, &t.branch).await.map_err(up)?;
     match outcome {
@@ -1717,6 +1848,61 @@ pub async fn on_turn_done(
     turn_id: &str,
     status: &str,
 ) -> LcResult<()> {
+    let handled = handle_turn(app, team_id, bot_id, turn_id, status).await;
+    // A reply that could not be applied — an unsafe layout, a git command that failed — is
+    // still followed by a `step`, because `step` is what turns that condition into a visible
+    // `paused` rather than a warning in the log.
+    let stepped = step(app, team_id).await;
+    handled.and(stepped)
+}
+
+/// Delivered relay turns that ended without this scheduler hearing about it, and what to do
+/// with each. The bus is the fast path; this is the one that survives a daemon restart (the
+/// hook spool is replayed at boot, `TurnDone` and all), a lagging subscriber, or an
+/// `abandon` while nothing was listening (2026-09-12 review, ops #2 / #3). Without it a task
+/// sat in `working` for ever with its reply already in `messages`.
+///
+/// "Not heard about" is the absence of the `turn_handled` marker `handle_turn` writes first
+/// thing. Turns handled before that marker existed (an upgrade) are told apart by the events
+/// their handling left behind: anything addressed to the same member after the turn ended.
+/// The candidates are read in **one** query before any of them is handled, because handling
+/// one (a worker's report) addresses the next (the PM) and would hide it.
+async fn catch_up_turns(app: &Arc<App>, team_id: &str) -> LcResult<()> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT DISTINCT t.id, t.status, c.bot_id FROM team_events e
+           JOIN turns t ON t.id = e.turn_id
+           JOIN conversations c ON c.id = t.conversation_id
+          WHERE e.team_id = ? AND e.kind = 'relay' AND e.status = 'delivered'
+            AND t.status IN ('completed', 'completed_fallback', 'failed')
+            AND NOT EXISTS (SELECT 1 FROM team_events n WHERE n.team_id = e.team_id AND n.kind = 'note'
+                              AND json_extract(n.payload_json, '$.action') = 'turn_handled'
+                              AND json_extract(n.payload_json, '$.turn_id') = t.id)
+            AND NOT EXISTS (SELECT 1 FROM team_events l WHERE l.team_id = e.team_id AND l.to_bot_id = c.bot_id
+                              AND l.seq > e.seq AND l.created_at >= COALESCE(t.completed_at, t.created_at))
+          ORDER BY COALESCE(t.completed_at, t.created_at), t.created_at",
+    )
+    .bind(team_id)
+    .fetch_all(&app.db)
+    .await
+    .map_err(up)?;
+    for (turn_id, status, bot_id) in rows {
+        note(app, team_id, json!({"action": "turn_caught_up", "turn_id": turn_id, "bot": bot_id, "status": status})).await?;
+        if let Err(e) = handle_turn(app, team_id, &bot_id, &turn_id, &status).await {
+            tracing::warn!(team = %team_id, turn = %turn_id, error = ?e, "team scheduler: catching up a turn failed");
+        }
+    }
+    Ok(())
+}
+
+/// One finished turn of a member: find its reply and run it through the protocol. Writes
+/// rows only — `on_turn_done` is the caller that follows it with a `step`.
+async fn handle_turn(
+    app: &Arc<App>,
+    team_id: &str,
+    bot_id: &str,
+    turn_id: &str,
+    status: &str,
+) -> LcResult<()> {
     let ctx = Ctx::load(app, team_id).await?;
     if team::is_terminal(&ctx.team.phase) {
         return Ok(());
@@ -1751,11 +1937,26 @@ pub async fn on_turn_done(
             note(app, team_id, json!({"action": "user_turn_block", "bot": bot_id, "role": role})).await?;
             let _ = apply_reply(app, team_id, bot_id, &text, status).await;
         }
-        return step(app, team_id).await;
+        return Ok(());
     }
-    // A reply that could not be applied — an unsafe layout, a git command that failed — is
-    // still followed by a `step`, because `step` is what turns that condition into a visible
-    // `paused` rather than a warning in the log.
+    // The marker `catch_up_turns` looks for — written **before** the reply is applied, so a
+    // crash halfway is a lost reply (the existing `retry` road) and never a reply applied
+    // twice. `to_bot_id` stays NULL on purpose: `consecutive_repairs` walks the member's own
+    // slice of the log and a note addressed to it there would end a repair chain early.
+    note(app, team_id, json!({"action": "turn_handled", "turn_id": turn_id, "bot": bot_id, "status": status})).await?;
+    // §7.5 `delivery=unknown`: the prompt may never have reached the agent. `abandon` closes
+    // such a turn as `failed` with `delivery='failed'`, and that is not a member failing to
+    // answer — it is a relay that was never delivered, so it goes out again under a new event
+    // id (the old one would hit the idempotent prompt and get the same dead turn back).
+    let delivery = sqlx::query_scalar::<_, String>("SELECT delivery FROM turns WHERE id = ?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+        .unwrap_or_default();
+    if delivery == "failed" {
+        return resend_relays_of_turn(app, team_id, turn_id).await;
+    }
     let applied = apply_reply(app, team_id, bot_id, &text, status).await;
     if let Err(e) = &applied {
         // A reply the scheduler failed to apply (a DB or git error, not a protocol error)
@@ -1781,8 +1982,49 @@ pub async fn on_turn_done(
             enqueue(app, team_id, None, bot_id, None, "retry", text).await?;
         }
     }
-    let stepped = step(app, team_id).await;
-    applied.and(stepped)
+    applied
+}
+
+/// §7.5: re-queue the relays a never-delivered turn carried. The old rows become `dropped`
+/// (they keep their `turn_id` as the record of the attempt) and copies go back on the outbox
+/// as fresh `pending` rows — a new id, hence a new `client_request_id` for `flush`.
+async fn resend_relays_of_turn(app: &Arc<App>, team_id: &str, turn_id: &str) -> LcResult<()> {
+    let rows = sqlx::query_as::<_, db::TeamEvent>(
+        "SELECT * FROM team_events WHERE team_id = ? AND turn_id = ? AND kind = 'relay' AND status = 'delivered' ORDER BY seq",
+    )
+    .bind(team_id)
+    .bind(turn_id)
+    .fetch_all(&app.db)
+    .await
+    .map_err(up)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut resent: Vec<String> = Vec::new();
+    for e in &rows {
+        sqlx::query("UPDATE team_events SET status = 'dropped' WHERE id = ? AND status = 'delivered'")
+            .bind(&e.id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+        let payload: Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
+        let copy = team::record_event(
+            app,
+            team_id,
+            "relay",
+            e.from_bot_id.as_deref(),
+            e.to_bot_id.as_deref(),
+            e.task_id.as_deref(),
+            Some("pending"),
+            payload,
+        )
+        .await?;
+        resent.push(copy.id);
+    }
+    note(app, team_id, json!({"action": "relay_resent", "turn_id": turn_id,
+         "of": rows.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), "as": resent,
+         "to": rows[0].to_bot_id}))
+    .await
 }
 
 /// Parse one reply and move the state machine. Writes rows; sends nothing.
@@ -1942,10 +2184,30 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         existing.iter().map(|t| (t.issue_id.clone(), t.brief.trim().to_string())).collect();
 
     for it in items {
+        // §8.2: `task: t3` — this item settles a `blocked_by_worker` task by replacing it.
+        // The old row is closed `skipped` (its branch stays), the new one is a fresh task on
+        // the same issue: re-briefed, re-assigned, or both. Before 2026-09-12 a blocked task
+        // had no PM-side transition at all — only a user `decide` could move it, while the PM
+        // was told to "decide what to do next" with nothing it said having any effect (ops #24).
+        let mut replaced: Option<db::TeamTask> = None;
+        if let Some(seq) = it.task {
+            match existing.iter().find(|t| t.seq == seq) {
+                Some(t) if t.state == "blocked_by_worker" => replaced = Some(t.clone()),
+                Some(t) => {
+                    rejected.push(format!("「{}」：t{seq} 不是 blocked（現在是 {}），不能取代", it.title, t.state));
+                    continue;
+                }
+                None => {
+                    rejected.push(format!("「{}」：沒有 t{seq} 這個 task", it.title));
+                    continue;
+                }
+            }
+        }
         // §4.4: which issue this task is for. With one issue working the field may be left
         // out; with several the daemon refuses rather than guessing (a task on the wrong
-        // integration branch is a merge conflict nobody asked for).
-        let issue = match resolve_issue(ctx, it.issue) {
+        // integration branch is a merge conflict nobody asked for). A replacement inherits
+        // the issue of the task it replaces.
+        let issue = match resolve_issue(ctx, it.issue.or_else(|| replaced.as_ref().and_then(|t| issue_number_of(ctx, t)))) {
             Ok(q) => q.clone(),
             Err(e) => {
                 rejected.push(format!("「{}」：{e}", it.title));
@@ -1958,29 +2220,63 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
             None => None,
             Some(to) => {
                 let want = to.trim().trim_start_matches('@').to_ascii_lowercase();
+                // §4.5: only **this issue's** executors are candidates. In unlimited mode the
+                // short name `dev-1` exists once per working issue, and resolving it against
+                // the whole team handed #43's task to #42's executor — whom `fill_issue(#43)`
+                // never considers, so the task queued for ever (2026-09-12 review, ops #5).
+                // `i<seq>-dev-1` (the nickname minus the team prefix) is accepted as well.
+                let tid6 = team::tid6(&ctx.team.id);
                 let Some(w) = ctx
-                    .workers()
+                    .workers_for(&issue)
                     .into_iter()
                     .find(|w| {
-                        w.id == *to || w.name.to_ascii_lowercase() == want || ctx.short(w).to_ascii_lowercase() == want
+                        let rest = w.name.strip_prefix(&format!("t{tid6}-")).unwrap_or(&w.name).to_ascii_lowercase();
+                        w.id == *to
+                            || w.name.to_ascii_lowercase() == want
+                            || rest == want
+                            || ctx.short(w).to_ascii_lowercase() == want
                     })
                     .cloned()
                 else {
-                    rejected.push(format!("`{to}` 不是這個 team 的執行者"));
+                    rejected.push(if ctx.unlimited() {
+                        format!("`{to}` 不是 #{} 的執行者", issue.issue_number)
+                    } else {
+                        format!("`{to}` 不是這個 team 的執行者")
+                    });
                     continue;
                 };
                 Some(w)
             }
         };
-        if briefs.iter().any(|(i, b)| i.as_deref() == Some(issue.id.as_str()) && b == it.brief.trim()) {
+        // The same brief as the task being replaced is a re-assignment, not a loop.
+        let same_as_replaced = replaced.as_ref().is_some_and(|t| t.brief.trim() == it.brief.trim());
+        if !same_as_replaced
+            && briefs.iter().any(|(i, b)| i.as_deref() == Some(issue.id.as_str()) && b == it.brief.trim())
+        {
             note(app, &ctx.team.id, json!({"action": "pm_repeat", "brief": it.brief})).await?;
             pause(app, &ctx.team, "pm_repeat").await?;
             return Ok(());
         }
         briefs.push((Some(issue.id.clone()), it.brief.trim().to_string()));
+        if let Some(old) = &replaced {
+            set_task_state(app, &old.id, "skipped").await?;
+            team::record_event(
+                app,
+                &ctx.team.id,
+                "note",
+                None,
+                old.worker_bot_id.as_deref(),
+                Some(&old.id),
+                None,
+                json!({"action": "pm_replaced_task", "task": old.seq, "from": "blocked_by_worker", "to": "skipped",
+                       "replacement_title": it.title}),
+            )
+            .await?;
+        }
         for other in existing.iter().filter(|t| {
             t.issue_id.as_deref() == Some(issue.id.as_str())
                 && !["merged", "skipped", "failed"].contains(&t.state.as_str())
+                && replaced.as_ref().is_none_or(|r| r.id != t.id)
         }) {
             let of: Vec<String> = serde_json::from_str(&other.files_json).unwrap_or_default();
             for f in &it.files {
@@ -2193,9 +2489,13 @@ async fn fill_issue(app: &Arc<App>, ctx: &Ctx, issue: &db::TeamIssue) -> LcResul
 /// such reply pauses the team until a user decides what to do.
 async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     let tasks = sched_tasks(app, ctx).await?;
-    if !tasks.is_empty() && !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
+    // §8.2: a `blocked_by_worker` task is waiting for the **PM**, so it is nothing to wait
+    // for — `wait` on it is the same stall as `wait` with everything finished (ops #24).
+    let settled = |t: &db::TeamTask| ["merged", "skipped", "failed", "blocked_by_worker"].contains(&t.state.as_str());
+    if !tasks.is_empty() && !tasks.iter().all(settled) {
         return Ok(());
     }
+    let blocked: Vec<String> = tasks.iter().filter(|t| t.state == "blocked_by_worker").map(|t| format!("t{}", t.seq)).collect();
     let Some(pm) = ctx.pm() else { return Ok(()) };
     // Only one nudge: if the previous relay to the PM already was one, stop asking.
     let last = sqlx::query_as::<_, db::TeamEvent>(
@@ -2228,17 +2528,17 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             return Ok(());
         }
     }
-    enqueue(
-        app,
-        &ctx.team.id,
-        None,
-        &pm.id,
-        None,
-        "nudge",
-        format!("所有 {} 個 task 都已進入終態。請 `done`（附 summary）或再 `dispatch`。", tasks.len()),
-    )
-    .await
-    .map(|_| ())
+    let text = if blocked.is_empty() {
+        format!("所有 {} 個 task 都已進入終態。請 `done`（附 summary）或再 `dispatch`。", tasks.len())
+    } else {
+        format!(
+            "{} 的執行者回報 blocked，等的是你的決定，`wait` 不會讓它動：用 `dispatch` 帶 `\"task\":\"{}\"` 補充 brief 或改派（可指定 `to`），\
+             或 `done`（blocked 的 task 會視為 skipped）。",
+            blocked.join("、"),
+            blocked[0]
+        )
+    };
+    enqueue(app, &ctx.team.id, None, &pm.id, None, "nudge", text).await.map(|_| ())
 }
 
 /// §8.3: resume a `pm_stalled` team with a fresh prompt instead of leaving the PM idle.
@@ -2280,7 +2580,7 @@ async fn pm_done(
     let tasks = issue_tasks(app, &ctx.team.id, Some(&issue.id)).await?;
     let open: Vec<String> = tasks
         .iter()
-        .filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str()))
+        .filter(|t| !["merged", "skipped", "failed", "blocked_by_worker"].contains(&t.state.as_str()))
         .map(|t| match t.worker_bot_id {
             // §4.5: a task nobody has picked up yet is still work the PM cannot call done.
             None => format!("t{}（排隊中）", t.seq),
@@ -2303,6 +2603,22 @@ async fn pm_done(
         )
         .await?;
         return Ok(());
+    }
+    // §8.2: `done` over a `blocked_by_worker` task is the PM's "skip" — it was told the task
+    // is waiting on it and chose to close the issue without it (ops #24).
+    for t in tasks.iter().filter(|t| t.state == "blocked_by_worker") {
+        set_task_state(app, &t.id, "skipped").await?;
+        team::record_event(
+            app,
+            &ctx.team.id,
+            "note",
+            None,
+            t.worker_bot_id.as_deref(),
+            Some(&t.id),
+            None,
+            json!({"action": "pm_skipped_blocked", "task": t.seq, "from": "blocked_by_worker", "to": "skipped"}),
+        )
+        .await?;
     }
     sqlx::query("UPDATE team_issues SET summary = ? WHERE id = ?")
         .bind(summary)
@@ -2380,7 +2696,9 @@ async fn report(
         set_task_state(app, &task.id, "blocked_by_worker").await?;
         if let Some(pm) = ctx.pm() {
             let text = format!(
-                "{tag}`{who}` t{seq}「{title}」→ `blocked`：{why}\n{table}\n請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。",
+                "{tag}`{who}` t{seq}「{title}」→ `blocked`：{why}\n{table}\n\
+                 這個 task 現在等你決定：`dispatch` 一筆帶 `\"task\":\"t{seq}\"`（補充 brief 或用 `to` 改派，舊的會標 skipped）、\
+                 `done`（把它視為 skipped）、或 `ask_user`。`wait` 對它沒有用。",
                 tag = issue_tag(ctx, task.issue_id.as_deref()),
                 who = ctx.short(worker),
                 seq = task.seq,
@@ -2401,7 +2719,34 @@ async fn report(
         Ok(true) => note(app, &ctx.team.id, json!({"action": "auto_commit", "bot": worker.name})).await?,
         Ok(false) => {}
         Err(e) => {
-            note(app, &ctx.team.id, json!({"action": "auto_commit_failed", "error": e.to_string()})).await?;
+            // §6.3: nothing the worker wrote may be lost. Sending the task on regardless used
+            // to merge a branch missing its last changes, and `retire_workers`' `worktree
+            // remove --force` then threw them away (2026-09-12 review, ops #23). The commit is
+            // handed back to the executor instead; the task keeps its state, so the next
+            // report takes the same edge. Bounded like a repair: the third failure in a row on
+            // one task pauses the team, with the relay left pending for "continue".
+            let attempt = commit_failures_of(app, &ctx.team.id, &task.id).await + 1;
+            team::record_event(
+                app,
+                &ctx.team.id,
+                "note",
+                None,
+                Some(&worker.id),
+                Some(&task.id),
+                None,
+                json!({"action": "auto_commit_failed", "bot": worker.name, "task": task.seq,
+                       "error": e.to_string(), "attempt": attempt}),
+            )
+            .await?;
+            let text = format!(
+                "系統替你把未提交的改動 commit 時失敗：{e}。請在你的 worktree 自己執行 \
+                 `git add -A && git commit -m \"…\"`（不要 push、不要切分支），確認 `git status` 乾淨後再 `report` 一次。"
+            );
+            enqueue(app, &ctx.team.id, None, &worker.id, Some(&task.id), "commit_failed", text).await?;
+            if attempt > MAX_REPAIRS {
+                pause(app, &ctx.team, "upstream").await?;
+            }
+            return Ok(());
         }
     }
     let integration = ctx.integration_of(&task);
@@ -2424,6 +2769,19 @@ async fn report(
     let next = if task.state == "rebasing" { "merging" } else { "reported" };
     set_task_state(app, &task.id, next).await?;
     Ok(())
+}
+
+/// How many times the daemon has failed to commit this task's worktree for its executor.
+async fn commit_failures_of(app: &Arc<App>, team_id: &str, task_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM team_events WHERE team_id = ? AND task_id = ? AND kind = 'note'
+           AND json_extract(payload_json, '$.action') = 'auto_commit_failed'",
+    )
+    .bind(team_id)
+    .bind(task_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap_or(0)
 }
 
 /// The little status table appendix A.4 puts under a batch of reports.
@@ -2562,26 +2920,57 @@ pub async fn relay_rework_decision(
 
 /// Phase `finishing`. `branch` writes a summary and stops; `pr` is the one path in the whole
 /// feature that pushes, and it says so in the note it leaves behind.
+///
+/// Re-entrant (2026-09-12 review, ops #4): `close_issue_and_advance` marks the issue `done`
+/// and then starts the next one, and that start can fail (a dirty `main/`) → `paused(upstream)`
+/// with `resume_phase = finishing`. "Continue" lands here again, so this must not deliver a
+/// second time: the working issue is gone (already `done`) or already carries a `delivered` /
+/// `pr_created` note, and either way the only thing left to do is the advance.
 async fn finish(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
-    if !gate_open(app, &ctx.team, "deliver").await {
-        hold_gate(app, ctx, "deliver", json!({"deliver": ctx.team.deliver, "branch": ctx.team.branch})).await?;
-        return Ok(());
-    }
     let summary = ctx.team.summary.clone().unwrap_or_default();
-    if !deliver_branch_or_pr(
-        app,
-        ctx,
-        ctx.team.issue_number,
-        &ctx.team.issue_title.clone(),
-        &ctx.team.branch.clone(),
-        ctx.issue_id().map(String::from).as_deref(),
-        &summary,
-    )
-    .await?
-    {
-        return Ok(());
+    if let Some(current) = ctx.issue().cloned() {
+        if !already_delivered(app, &ctx.team.id, &current.id).await {
+            if !gate_open(app, &ctx.team, "deliver").await {
+                hold_gate(app, ctx, "deliver", json!({"deliver": ctx.team.deliver, "branch": ctx.team.branch})).await?;
+                return Ok(());
+            }
+            let branch = current.branch.clone().unwrap_or_else(|| ctx.team.branch.clone());
+            if !deliver_branch_or_pr(
+                app,
+                ctx,
+                current.issue_number,
+                &current.issue_title,
+                &branch,
+                Some(current.id.as_str()),
+                &summary,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+        } else {
+            note(app, &ctx.team.id, json!({"action": "deliver_skipped", "issue_number": current.issue_number,
+                 "why": "already delivered"}))
+            .await?;
+        }
     }
     close_issue_and_advance(app, &ctx.team.id, "done", None, Some(summary.as_str())).await
+}
+
+/// Has this queue entry already been handed over? `deliver_branch_or_pr` leaves a `delivered`
+/// (branch) or `pr_created` (pr) note stamped with the issue, and a reopened issue is a new
+/// row with a new id, so the note is never mistaken for an earlier round's.
+async fn already_delivered(app: &Arc<App>, team_id: &str, issue_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM team_events WHERE team_id = ? AND issue_id = ? AND kind = 'note'
+           AND json_extract(payload_json, '$.action') IN ('delivered', 'pr_created')",
+    )
+    .bind(team_id)
+    .bind(issue_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap_or(0)
+        > 0
 }
 
 /// §6.4: hand one issue over — a local branch, or a PR when the team was asked for one.
@@ -2614,6 +3003,9 @@ async fn deliver_branch_or_pr(
                 // §6.4: not a GitHub project (or `gh` unusable) → quietly become `branch`.
                 note(app, &ctx.team.id, json!({"action": "deliver_downgraded", "to": "branch",
                      "why": "project has no GitHub origin"}))
+                .await?;
+                note(app, &ctx.team.id, json!({"action": "delivered", "deliver": "branch",
+                     "branch": branch, "pushed": false, "summary": summary}))
                 .await?;
             }
             Some(info) => {
@@ -2687,31 +3079,41 @@ async fn close_issue_and_advance(
         let Some(current) = ctx.issue().cloned() else { return end_team(app, &ctx).await };
         return close_one_issue(app, team_id, &current, state, fail_reason, summary).await;
     }
-    let Some(current) = ctx.issue().cloned() else {
-        // No current issue at all: nothing to settle, so this is simply the end.
-        return end_team(app, &ctx).await;
+    // Settle the working issue — or, with none, pick up where a previous pass left off: it
+    // settled the issue and then `start_issue(next)` failed, so the team paused with the
+    // queue still holding the next entry (2026-09-12 review, ops #4). Ending the team there
+    // used to throw the rest of the queue away.
+    let (settled_id, settled_state) = match ctx.issue().cloned() {
+        Some(current) => {
+            sqlx::query(
+                "UPDATE team_issues SET state = ?, fail_reason = ?, summary = COALESCE(?, summary), ended_at = ?
+                 WHERE id = ?",
+            )
+            .bind(state)
+            .bind(fail_reason)
+            .bind(summary)
+            .bind(db::now())
+            .bind(&current.id)
+            .execute(&app.db)
+            .await
+            .map_err(up)?;
+            note(
+                app,
+                team_id,
+                json!({"action": if state == "done" { "issue_finished" } else { "issue_failed" },
+                       "issue_number": current.issue_number, "seq": current.seq,
+                       "branch": current.branch, "reason": fail_reason}),
+            )
+            .await?;
+            clear_rescue(app, team_id).await?;
+            (current.id, state.to_string())
+        }
+        None => match last_settled_issue(app, team_id).await? {
+            Some(prev) => (prev.id, prev.state),
+            // No issue at all: nothing to settle, so this is simply the end.
+            None => return end_team(app, &ctx).await,
+        },
     };
-    sqlx::query(
-        "UPDATE team_issues SET state = ?, fail_reason = ?, summary = COALESCE(?, summary), ended_at = ?
-         WHERE id = ?",
-    )
-    .bind(state)
-    .bind(fail_reason)
-    .bind(summary)
-    .bind(db::now())
-    .bind(&current.id)
-    .execute(&app.db)
-    .await
-    .map_err(up)?;
-    note(
-        app,
-        team_id,
-        json!({"action": if state == "done" { "issue_finished" } else { "issue_failed" },
-               "issue_number": current.issue_number, "seq": current.seq,
-               "branch": current.branch, "reason": fail_reason}),
-    )
-    .await?;
-    clear_rescue(app, team_id).await?;
     let next = db::next_queued_issue(&app.db, team_id).await.map_err(up)?;
     let Some(next) = next else {
         // Last issue: leave the worktrees exactly as `finish` always did. `done` stops the
@@ -2722,12 +3124,13 @@ async fn close_issue_and_advance(
     };
     // Only now — with somewhere to go — are this issue's executors replaced. Unless the PM
     // asked to keep them (`done.workers = "keep"`): then they stay up, with their context, and
-    // only their leftover tasks are closed out.
-    let keep = state == "done" && keep_workers_for(app, team_id, &current.id).await;
+    // only their leftover tasks are closed out. Both are idempotent, so a retried advance
+    // (see above) does no harm here.
+    let keep = settled_state == "done" && keep_workers_for(app, team_id, &settled_id).await;
     if keep {
-        team::fail_open_tasks(app, team_id, &current.id).await;
+        team::fail_open_tasks(app, team_id, &settled_id).await;
     } else {
-        team::retire_issue_workers(app, team_id, &current.id).await;
+        team::retire_issue_workers(app, team_id, &settled_id).await;
     }
     if let Err(e) = team::start_issue(app, team_id, &next, keep).await {
         // The team is healthy but the queue cannot move; that is a human problem, not a
@@ -2746,6 +3149,19 @@ async fn close_issue_and_advance(
         start_issue_workers(app, team_id).await?;
     }
     hand_issue_to_pm(app, team_id, keep, None).await
+}
+
+/// The most recent queue entry that has reached a terminal state — what a retried advance
+/// (`close_issue_and_advance` with no working issue) is advancing *from*.
+async fn last_settled_issue(app: &Arc<App>, team_id: &str) -> LcResult<Option<db::TeamIssue>> {
+    sqlx::query_as::<_, db::TeamIssue>(
+        "SELECT * FROM team_issues WHERE team_id = ? AND state IN ('done','failed','skipped')
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(team_id)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(up)
 }
 
 // ---------------------------------------------------------------- unlimited parallelism (§4.5)
@@ -3106,6 +3522,19 @@ mod tests {
         }
     }
 
+    /// ops #22: a member stuck on a login / dialog / picker is *blocked*, not lost.
+    #[test]
+    fn prompt_conflicts_map_to_the_right_pause() {
+        assert_eq!(conflict_pause("a turn is already in flight"), ConflictPause::InFlight);
+        assert_eq!(conflict_pause("agent is blocked; answer the prompt first"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("needs_login"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("dialog_open"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("picker_open"), ConflictPause::Blocked);
+        assert_eq!(conflict_pause("a previous turn has unknown delivery; abandon it first"), ConflictPause::DeliveryUnknown);
+        assert_eq!(conflict_pause("bot has no active run"), ConflictPause::Lost);
+        assert_eq!(conflict_pause("run is not running"), ConflictPause::Lost);
+    }
+
     #[test]
     fn relay_bodies_are_capped() {
         let long = "字".repeat(RELAY_MAX + 500);
@@ -3407,6 +3836,63 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert_eq!(git(&s.wt("main"), &["rev-parse", "HEAD"]), base_sha);
     }
 
+    /// ops #10 (2026-09-12): the only issue **failed** (no `done` row at all), the team ended,
+    /// and the user retries it — the reopen used to refuse ("no completed issue") and the
+    /// scheduler loop swallowed the error, leaving the team in `starting` with no pause and
+    /// no note. The previous batch to retire is simply the last finished entry, whatever its
+    /// state.
+    #[tokio::test]
+    async fn a_team_whose_only_issue_failed_can_be_reopened() {
+        let s = S::with_issues(1, false, vec![issue(), issue2()]).await;
+        let old_worker = s.bot("worker", 0).await;
+        let current = db::current_team_issue(&s.app().db, &s.tid).await.unwrap().unwrap();
+        sqlx::query("UPDATE team_issues SET state='failed', fail_reason='budget_time', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&current.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "done", None, None).await.unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "starting", Some("reopen"), None).await.unwrap();
+
+        startup(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.issue_number), ("planning", 43));
+        assert!(db::bot(&s.app().db, &old_worker.id).await.unwrap().unwrap().deleted_at.is_some(), "the failed issue's batch is retired");
+        assert_eq!(s.ctx().await.workers().len(), 1);
+        assert!(s.ctx().await.workers()[0].cwd.as_deref().unwrap().ends_with("/i2-dev-1"));
+    }
+
+    /// The other half of ops #10: whatever makes `startup` fail outright is a visible pause
+    /// with a note, never a silent `starting` the loop retries for ever.
+    #[tokio::test]
+    async fn a_startup_error_pauses_the_team_instead_of_looping_silently() {
+        let s = S::with_issues(1, false, vec![issue(), issue2()]).await;
+        // A `starting` team with nothing working, nothing finished and something queued is
+        // not a shape any transition produces — which is exactly why `startup` errors on it.
+        sqlx::query("UPDATE team_issues SET state='queued' WHERE team_id=?")
+            .bind(&s.tid)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "starting", None, None).await.unwrap();
+
+        assert!(!tick(s.app(), &s.tid).await.unwrap());
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(t.resume_phase.as_deref(), Some("starting"), "continue re-runs the startup");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='startup_failed'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
     /// §2.5.3: a PM/reviewer start failure pauses the reopened Team in place. It must not
     /// turn the Team into `failed` or invoke cleanup, because the user can repair and resume
     /// the same member.
@@ -3513,6 +3999,27 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
             assert_eq!(state, "running", "{} was stopped after a partial worker failure", member.name);
         }
         assert!(!s.e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
+        // ops #21: "one short" means the failed executor is out of the pool, not waiting in it
+        // for the PM's first task to park the team on `member_lost`.
+        assert!(db::bot(&s.app().db, &worker.id).await.unwrap().unwrap().deleted_at.is_some(), "the failed worker is retired");
+        let ctx = s.ctx().await;
+        assert_eq!(ctx.workers().len(), 1);
+        let first: String = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND kind='relay' AND json_extract(payload_json,'$.action')='first'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert!(first.contains("併行數 1"), "the PM is told the real parallelism: {first}");
+        let dropped: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='member_dropped'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(dropped, 1);
     }
 
     /// §2.5.5: the hand-over relay explicitly distinguishes a successful native continuation
@@ -3711,6 +4218,109 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
 
     /// A dispatch that does not say which issue is refused while several are working, and the
     /// PM is told why rather than having a task land on the wrong branch.
+    /// ops #1 (2026-09-12): the integration worktree is parked on the branch of whichever
+    /// issue started **last**, while the `teams` mirror names the **first** working issue. A
+    /// merge for the mirrored issue used to skip the checkout and land on the other issue's
+    /// branch; now every merge checks out the task's own integration branch first.
+    #[tokio::test]
+    async fn a_merge_lands_on_the_tasks_own_integration_branch_not_the_mirrors() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[
+            {"issue":42,"title":"A","brief":"做 A"},
+            {"issue":43,"title":"B","brief":"做 B"}]}))
+        .await;
+        let (a, b) = (issue_of(&s, 42).await, issue_of(&s, 43).await);
+        let (a_branch, b_branch) = (a.branch.clone().unwrap(), b.branch.clone().unwrap());
+        // The trap: `main/` is on #43 (started last), the mirror says #42.
+        assert_eq!(s.team().await.branch, a_branch, "the mirror is the first working issue");
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), b_branch);
+
+        let dev = s.ctx().await.workers_for(&a)[0].clone();
+        let wt = std::path::PathBuf::from(dev.cwd.clone().unwrap());
+        std::fs::write(wt.join("a.txt"), "a\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "a"]);
+        s.reply(&dev, json!({"action":"report","status":"done","summary":"做完了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        let rev = s.bot("reviewer", 0).await;
+        s.reply(&rev, json!({"action":"verdict","result":"approve","summary":"ok"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+
+        let task = s.tasks().await.into_iter().find(|t| t.title == "A").unwrap();
+        assert_eq!(task.state, "merged");
+        let sha = task.merge_sha.clone().expect("merge sha");
+        let holders = git(&s.e.repo, &["branch", "--contains", &sha]);
+        assert!(holders.contains(&a_branch), "#42's merge must be on #42's branch: {holders}");
+        assert!(!holders.contains(&b_branch), "#43's branch must not carry #42's merge: {holders}");
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), a_branch);
+    }
+
+    /// ops #5 (2026-09-12): `to: "dev-1"` for #43 must name #43's `dev-1`, not #42's — both
+    /// issues have one, and a task pinned to the other issue's executor never starts.
+    #[tokio::test]
+    async fn a_named_executor_is_resolved_within_the_tasks_own_issue() {
+        let s = unlimited(vec![issue(), issue2()]).await;
+        let pm = s.bot("pm", 0).await;
+        let (a, b) = (issue_of(&s, 42).await, issue_of(&s, 43).await);
+        let ctx = s.ctx().await;
+        let (a_dev, b_dev) = (ctx.workers_for(&a)[0].clone(), ctx.workers_for(&b)[0].clone());
+        assert_eq!(ctx.short(&a_dev), ctx.short(&b_dev), "the trap: both are `dev-1`");
+
+        s.reply(&pm, json!({"action":"dispatch","tasks":[
+            {"issue":43,"to":"dev-1","title":"B","brief":"做 B"},
+            {"issue":42,"to":"i1-dev-1","title":"A","brief":"做 A"},
+            {"issue":42,"to":"i2-dev-1","title":"C","brief":"做 C"}]}))
+        .await;
+        let tasks = s.tasks().await;
+        let b_task = tasks.iter().find(|t| t.title == "B").unwrap();
+        assert_eq!(b_task.worker_bot_id.as_deref(), Some(b_dev.id.as_str()), "#43's dev-1, and it started");
+        let a_task = tasks.iter().find(|t| t.title == "A").unwrap();
+        assert_eq!(a_task.worker_bot_id.as_deref(), Some(a_dev.id.as_str()), "the long form works too");
+        assert!(tasks.iter().all(|t| t.title != "C"), "#42 has no `i2-dev-1`: refused, not guessed");
+        let reject: String = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'
+               AND json_extract(payload_json,'$.action')='note' ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(&s.tid)
+        .bind(&pm.id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert!(reject.contains("i2-dev-1") && reject.contains("#42"), "{reject}");
+    }
+
+    fn issue_n(number: i64) -> crate::team::IssueRef {
+        crate::team::IssueRef {
+            number,
+            title: format!("issue {number}"),
+            url: format!("https://example.invalid/{number}"),
+            body: "做。".into(),
+        }
+    }
+
+    /// ops #7 (2026-09-12): a PM `abort` names no issue, so in unlimited mode it must pause
+    /// the whole team (§2.3). With something still queued it used to take the finite-mode
+    /// `DECISION_PAUSES` road instead: close "the first working issue" as failed and carry
+    /// on — the wrong issue, and no pause at all.
+    #[tokio::test]
+    async fn an_unlimited_pm_abort_pauses_the_team_instead_of_failing_the_first_issue() {
+        let n = crate::team::MAX_CONCURRENT_ISSUES as i64;
+        let s = unlimited((42..=42 + n).map(issue_n).collect()).await;
+        assert_eq!(s.ctx().await.issues.len(), n as usize);
+        assert!(db::next_queued_issue(&s.app().db, &s.tid).await.unwrap().is_some(), "one is still queued");
+        let pm = s.bot("pm", 0).await;
+
+        s.reply(&pm, json!({"action":"abort","reason":"#43 做不了"})).await;
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("pm_abort")));
+        let issues = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!(issues.iter().filter(|i| i.state == "working").count(), n as usize, "nobody was closed");
+        assert!(issues.iter().all(|i| i.state != "failed"), "{issues:?}");
+        assert_eq!(issues.iter().filter(|i| i.state == "queued").count(), 1, "the queue did not move");
+    }
+
     #[tokio::test]
     async fn a_dispatch_without_an_issue_is_refused_while_several_run() {
         let s = unlimited(vec![issue(), issue2()]).await;
@@ -3883,6 +4493,127 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         assert_eq!(s.team().await.pause_reason.as_deref(), Some("delivery_unknown"));
     }
 
+    /// ops #3 (2026-09-12): the worker's reply arrived while no scheduler was listening (a
+    /// daemon restart replays the hook spool before the schedulers subscribe). The turn is
+    /// `completed`, the relay `delivered`, the reply is in `messages` — and the task used to
+    /// stay `working` for ever. `step` now catches such turns up, exactly once.
+    #[tokio::test]
+    async fn a_reply_the_bus_never_delivered_is_caught_up_by_the_next_pass() {
+        let s = S::new(1, false).await;
+        s.arm().await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let ctx = s.ctx().await;
+        flush(s.app(), &ctx).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "working");
+        let ev = sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'",
+        )
+        .bind(&s.tid)
+        .bind(&d1.id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        let turn_id = ev.turn_id.clone().unwrap();
+        // The agent answered and the hook closed the turn — with nobody subscribed.
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn_id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        let conv = db::conversation_id(&s.app().db, &d1.id).await.unwrap();
+        let reply = "好了。\n\n```am-team\n{\"action\":\"report\",\"status\":\"done\",\"summary\":\"做完了\"}\n```\n";
+        crate::lifecycle::insert_message(s.app(), &conv, Some(&turn_id), "assistant", reply, "hook", false, None)
+            .await
+            .unwrap();
+        s.unpause().await;
+
+        step(s.app(), &s.tid).await.unwrap();
+        assert_ne!(s.tasks().await[0].state, "working", "the reply was applied");
+        let notes = async |s: &S, action: &str| -> i64 {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')=?",
+            )
+            .bind(&s.tid)
+            .bind(action)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(notes(&s, "turn_caught_up").await, 1);
+        assert_eq!(notes(&s, "turn_handled").await, 1);
+        // Neither another pass nor the bus event arriving late applies it a second time.
+        step(s.app(), &s.tid).await.unwrap();
+        on_turn_done(s.app(), &s.tid, &d1.id, &turn_id, "completed").await.unwrap();
+        assert_eq!(notes(&s, "turn_caught_up").await, 1);
+        assert_eq!(notes(&s, "duplicate_report").await, 0, "the report was not taken twice");
+    }
+
+    /// ops #2 (2026-09-12) / §7.5: a relay whose prompt RPC timed out (`delivery=unknown`) is
+    /// abandoned by the user. That turn ends `failed` with `delivery='failed'` — the prompt
+    /// never reached the agent — so the relay is sent again under a new event id rather than
+    /// answered with a repair prompt, and nothing is left for "continue" to forget.
+    #[tokio::test]
+    async fn an_abandoned_unknown_delivery_is_resent_under_a_new_event_id() {
+        let s = S::new(1, false).await;
+        s.arm().await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let ctx = s.ctx().await;
+        flush(s.app(), &ctx).await.unwrap();
+        assert_eq!(s.team().await.pause_reason.as_deref(), Some("delivery_unknown"));
+        let old = sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'",
+        )
+        .bind(&s.tid)
+        .bind(&d1.id)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        let turn_id = old.turn_id.clone().unwrap();
+        crate::lifecycle::abandon_turn(s.app(), &turn_id).await.unwrap();
+
+        // The bus path (the scheduler saw the abandon) …
+        on_turn_done(s.app(), &s.tid, &d1.id, &turn_id, "failed").await.unwrap();
+        let relays = sqlx::query_as::<_, db::TeamEvent>(
+            "SELECT * FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay' ORDER BY seq",
+        )
+        .bind(&s.tid)
+        .bind(&d1.id)
+        .fetch_all(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(relays.len(), 2, "{relays:?}");
+        assert_eq!((relays[0].id.as_str(), relays[0].status.as_deref()), (old.id.as_str(), Some("dropped")));
+        assert_eq!(relays[0].turn_id.as_deref(), Some(turn_id.as_str()), "the attempt stays on record");
+        assert_ne!(relays[1].id, old.id, "a new event id — a new client_request_id");
+        assert_eq!(relays[1].status.as_deref(), Some("pending"), "waits for continue: the team is still paused");
+        assert_eq!(relays[1].task_id, old.task_id);
+        assert_eq!(relays[1].payload_json, old.payload_json, "the same relay, verbatim");
+        let actions: Vec<Value> = relays.iter().map(|e| serde_json::from_str(&e.payload_json).unwrap()).collect();
+        assert!(actions.iter().all(|a| a["action"] == "dispatch"), "no repair prompt for a prompt nobody received: {actions:?}");
+
+        // … and the sweep on the next pass does not do it again.
+        s.unpause().await;
+        step(s.app(), &s.tid).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM team_events WHERE team_id=? AND to_bot_id=? AND kind='relay'")
+            .bind(&s.tid)
+            .bind(&d1.id)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        let resent = sqlx::query_as::<_, db::TeamEvent>("SELECT * FROM team_events WHERE id=?")
+            .bind(&relays[1].id)
+            .fetch_one(&s.app().db)
+            .await
+            .unwrap();
+        assert_eq!(resent.status.as_deref(), Some("delivered"), "continue sent the copy");
+        assert_ne!(resent.turn_id.as_deref(), Some(turn_id.as_str()), "on a fresh turn");
+    }
+
     /// **T3** — two workers report almost at once; the PM can only hold one turn, so §8.4
     /// says merge them into a single prompt rather than dropping or serialising them.
     #[tokio::test]
@@ -4033,6 +4764,47 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
 
     /// A rebase report must not reopen review: the conflict relay is a continuation of the
     /// already-approved task, not a new implementation round.
+    /// ops #18 (2026-09-12): the third conflict leaves the task in `rebasing` and pauses on
+    /// `merge_conflict`. "Continue" without a `decide` used to resume into a team with no
+    /// edge for that task — `working`, silent, for ever. Now the pass names the task and
+    /// pauses again, and a `decide` is what moves on.
+    #[tokio::test]
+    async fn resuming_past_an_exhausted_rebase_pauses_again_until_decided() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let task = s.tasks().await.remove(0);
+        // What `merge_one` leaves behind after its last conflict.
+        sqlx::query("UPDATE team_tasks SET state='rebasing', rebase_attempts=? WHERE id=?")
+            .bind(MAX_REBASES + 1)
+            .bind(&task.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        // The user pressed "continue" without deciding.
+        crate::team::set_phase(s.app(), &s.tid, "working", None, None).await.unwrap();
+
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("merge_conflict")));
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='decision_required'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+
+        // A decision is the way out: skip it, and the team runs on.
+        crate::team::decide(s.app(), &s.tid, &task.id, "skip", None).await.unwrap();
+        assert_eq!(s.tasks().await[0].state, "skipped");
+        assert_ne!(s.team().await.phase, "paused");
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        assert_ne!(s.team().await.phase, "paused", "nothing left to decide");
+    }
+
     #[tokio::test]
     async fn t5_rebase_report_skips_a_second_review() {
         let s = S::new(2, true).await;
@@ -4307,6 +5079,81 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
         // The relay budget starts again for the new issue (§2.3).
         let c = s.ctx().await;
         assert_eq!(relay_count(s.app(), &s.tid, c.issue_id(), "delivered").await, 0);
+    }
+
+    /// ops #4 (2026-09-12): `finish` delivered #42, marked it `done`, and then could not start
+    /// #43 (dirty `main/`) → `paused(upstream)` with `resume_phase = finishing`. "Continue"
+    /// used to deliver #42 a second time and, finding no working issue, end the team with #43
+    /// still queued. Now the second pass skips the delivery and only retries the advance.
+    #[tokio::test]
+    async fn finishing_is_reentrant_after_the_next_issue_fails_to_start() {
+        let s = S::with_issues(1, true, vec![issue(), issue2()]).await;
+        let (pm, rev, d1) = (s.bot("pm", 0).await, s.bot("reviewer", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        std::fs::write(s.wt("dev-1").join("a.txt"), "v1\n").unwrap();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        s.reply(&rev, json!({"action":"verdict","result":"approve"})).await;
+        advance_tasks(s.app(), &s.tid).await.unwrap();
+        s.reply(&pm, json!({"action":"done","summary":"完成了 A"})).await;
+        assert_eq!(s.team().await.phase, "finishing");
+
+        // `start_issue(#43)` refuses a dirty integration worktree.
+        let stray = s.wt("main").join("stray.txt");
+        std::fs::write(&stray, "oops\n").unwrap();
+        let ctx = s.ctx().await;
+        finish(s.app(), &ctx).await.unwrap();
+        let delivered = |notes: &[String]| notes.iter().filter(|n| n.contains("\"delivered\"")).count();
+        let notes = async |s: &S| -> Vec<String> {
+            sqlx::query_scalar("SELECT payload_json FROM team_events WHERE team_id=? AND kind='note'")
+                .bind(&s.tid)
+                .fetch_all(&s.app().db)
+                .await
+                .unwrap()
+        };
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(t.resume_phase.as_deref(), Some("finishing"));
+        let q = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!((q[0].state.as_str(), q[1].state.as_str()), ("done", "queued"));
+        assert_eq!(delivered(&notes(&s).await), 1);
+
+        // The user removes the stray file and presses "continue".
+        std::fs::remove_file(&stray).unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "finishing", None, None).await.unwrap();
+        step(s.app(), &s.tid).await.unwrap();
+
+        let t = s.team().await;
+        assert_ne!(t.phase, "done", "the queue was not thrown away");
+        assert_eq!(t.phase, "planning");
+        assert_eq!(t.issue_number, 43);
+        let q = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!((q[0].state.as_str(), q[1].state.as_str()), ("done", "working"));
+        assert_eq!(delivered(&notes(&s).await), 1, "#42 was not delivered a second time");
+        assert_eq!(git(&s.wt("main"), &["rev-parse", "--abbrev-ref", "HEAD"]), t.branch);
+        assert_eq!(s.ctx().await.workers().len(), 1, "#43 got its executor");
+    }
+
+    /// The same stall on the `failed` road (a `DECISION_PAUSES` reason with a queue behind it):
+    /// `resume_phase` is `working`, not `finishing`, so it is `step` that has to notice the
+    /// team is between issues and retry the advance.
+    #[tokio::test]
+    async fn a_stalled_advance_is_retried_by_the_next_pass() {
+        let s = S::with_issues(1, true, vec![issue(), issue2()]).await;
+        let stray = s.wt("main").join("stray.txt");
+        std::fs::write(&stray, "oops\n").unwrap();
+        close_issue_and_advance(s.app(), &s.tid, "failed", Some("merge_conflict"), None).await.unwrap();
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(s.ctx().await.issues.len(), 0);
+
+        std::fs::remove_file(&stray).unwrap();
+        crate::team::set_phase(s.app(), &s.tid, "working", None, None).await.unwrap();
+        step(s.app(), &s.tid).await.unwrap();
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.issue_number), ("planning", 43));
+        let q = db::team_issues(&s.app().db, &s.tid).await.unwrap();
+        assert_eq!((q[0].state.as_str(), q[1].state.as_str()), ("failed", "working"));
     }
 
     #[tokio::test]
@@ -4623,6 +5470,53 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
     }
 
     /// §8.3 — `done` counts the queue too: a task nobody has started yet is still open work.
+    /// ops #24 (2026-09-12) / §8.2: a `blocked_by_worker` task is the PM's to settle, and the
+    /// PM now can — `wait` is a stall, `dispatch` with `task: t1` replaces it (re-brief or
+    /// re-assign), `done` skips whatever is still blocked.
+    #[tokio::test]
+    async fn a_blocked_task_is_settled_by_the_pms_next_relay() {
+        let s = S::new(2, false).await;
+        let pm = s.bot("pm", 0).await;
+        let (d1, d2) = (s.bot("worker", 0).await, s.bot("worker", 1).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        s.reply(&d1, json!({"action":"report","status":"blocked","summary":"看不懂 A"})).await;
+        assert_eq!(s.tasks().await[0].state, "blocked_by_worker");
+
+        // `wait` does not wait on a blocked task: it is a nudge that names it.
+        s.reply(&pm, json!({"action":"wait"})).await;
+        let last = s.pending(&pm).await.pop().unwrap();
+        let p: Value = serde_json::from_str(&last.payload_json).unwrap();
+        assert_eq!(p["action"], "nudge");
+        assert!(p["text"].as_str().unwrap().contains("t1"), "{p}");
+        assert_ne!(s.team().await.phase, "paused");
+
+        // Re-assign it: the same brief to dev-2 is not a `pm_repeat`.
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"task":"t1","to":"dev-2","title":"A again","brief":"做 A"}]})).await;
+        assert_ne!(s.team().await.phase, "paused", "not a repeat");
+        let tasks = s.tasks().await;
+        assert_eq!(tasks.len(), 2);
+        assert_eq!((tasks[0].seq, tasks[0].state.as_str()), (1, "skipped"));
+        assert_eq!(tasks[1].worker_bot_id.as_deref(), Some(d2.id.as_str()), "dev-2 took the replacement");
+        assert_ne!(tasks[1].branch, tasks[0].branch, "a fresh task on a fresh branch");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='pm_replaced_task'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+        // Only a blocked task can be replaced.
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"task":"t2","title":"B","brief":"做 B"}]})).await;
+        assert_eq!(s.tasks().await.len(), 2, "t2 is not blocked: refused");
+
+        // dev-2 gives up too; `done` is the PM's skip.
+        s.reply(&d2, json!({"action":"report","status":"blocked","summary":"也不懂"})).await;
+        s.reply(&pm, json!({"action":"done","summary":"做不了，先收"})).await;
+        assert_eq!(s.team().await.phase, "finishing", "done was accepted");
+        assert_eq!(s.tasks().await[1].state, "skipped");
+    }
+
     #[tokio::test]
     async fn done_is_refused_while_tasks_are_still_queued() {
         let s = S::new(1, false).await;
@@ -4661,7 +5555,8 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
                 title: "A".into(),
                 brief: "做 A".into(),
                 files: vec![],
-                issue: None
+                issue: None,
+                task: None
             }])
         );
         let named = Action::parse(
@@ -4676,7 +5571,8 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
                 title: "task".into(),
                 brief: "b".into(),
                 files: vec![],
-                issue: None
+                issue: None,
+                task: None
             }])
         );
         assert!(Action::parse(
@@ -4931,6 +5827,62 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
     /// This is the failure mode that took the daemon down earlier in this branch's life — a
     /// schema change that only worked on a fresh file — so it is checked directly rather
     /// than inferred from "the tests pass on a new database".
+    /// ops #23 (2026-09-12): a `report` whose worktree the daemon cannot commit (a leftover
+    /// `index.lock` here) used to be sent to review anyway — the merge then missed the last
+    /// changes and the worktree removal after the issue lost them for good. Now the commit is
+    /// handed back to the executor, the task stays put, and the third failure pauses the team.
+    #[tokio::test]
+    async fn a_failed_auto_commit_goes_back_to_the_worker_not_to_review() {
+        let s = S::new(1, false).await;
+        let (pm, d1) = (s.bot("pm", 0).await, s.bot("worker", 0).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        let wt = s.wt("dev-1");
+        std::fs::write(wt.join("a.txt"), "v1\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "a"]);
+        // The change that must not be lost: written after the last commit.
+        std::fs::write(wt.join("b.txt"), "v2\n").unwrap();
+        let index = git(&wt, &["rev-parse", "--git-path", "index"]);
+        let index = if index.starts_with('/') { std::path::PathBuf::from(index) } else { wt.join(index) };
+        let lock = std::path::PathBuf::from(format!("{}.lock", index.display()));
+        std::fs::write(&lock, "").unwrap();
+
+        let before = s.tasks().await[0].state.clone();
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        let task = &s.tasks().await[0];
+        assert_eq!(task.state, before, "not sent on with an uncommitted worktree");
+        // The dispatch relay is still pending too (nothing is armed here); count only ours.
+        let commit_relays = async |s: &S| -> Vec<Value> {
+            s.pending(&d1)
+                .await
+                .iter()
+                .map(|e| serde_json::from_str::<Value>(&e.payload_json).unwrap())
+                .filter(|p| p["action"] == "commit_failed")
+                .collect()
+        };
+        let relay = commit_relays(&s).await;
+        assert_eq!(relay.len(), 1);
+        assert!(relay[0]["text"].as_str().unwrap().contains("git add -A"), "{}", relay[0]);
+        assert!(!git(&wt, &["status", "--porcelain"]).is_empty(), "the worktree is untouched");
+        assert_eq!(s.team().await.phase, "working", "one failure is not a pause");
+
+        // Two more failures in a row: the third pauses the team, the relay stays pending.
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        assert_eq!(s.team().await.phase, "working");
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        let t = s.team().await;
+        assert_eq!((t.phase.as_str(), t.pause_reason.as_deref()), ("paused", Some("upstream")));
+        assert_eq!(commit_relays(&s).await.len(), 3, "the relays wait for continue");
+
+        // The lock is gone: the next report commits and goes to review as usual.
+        std::fs::remove_file(&lock).unwrap();
+        s.unpause().await;
+        s.reply(&d1, json!({"action":"report","status":"done","summary":"好了"})).await;
+        assert_eq!(s.tasks().await[0].state, "reported");
+        assert!(git(&wt, &["status", "--porcelain"]).is_empty());
+        assert!(git(&wt, &["log", "--oneline"]).contains("wip(dev-1)"));
+    }
+
     #[tokio::test]
     async fn an_older_database_gains_workspace_id_without_losing_its_rows() {
         let dir = std::env::temp_dir().join(format!("am-migrate-{}", db::ulid()));
