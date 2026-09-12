@@ -876,8 +876,14 @@ export function Sidebar() {
   // 沒有專案全名以外的說明，也沒有 focus trap。改用跟其他刪除一致的 `ConfirmDialog`。
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
   const runs = useStore((s) => s.runs)
-  // 父列收合時要看子 agent 的燈號；`runs` 已訂閱，子 agent 狀態變了這裡就會重畫。
-  const lampState = useMemo(() => ({ ...useStore.getState(), runs }), [runs])
+  // 父列收合時要看子 agent 的燈號（`kidsLampOf`／`kidsWaitOf` → `botLamp`）。燈號除了 `runs`
+  // 還讀 herdr／遠端主機的連線狀態：herdr 或 host 斷線只改 `connected`／`hosts`（`daemon_status`／
+  // `host_changed`），以前只訂閱 `runs`，父列收合處會一直藍點、「在等子 agent」到下一個 bot_status。
+  const defaultConnected = useStore((s) => s.defaultConnected)
+  const lampState = useMemo(
+    () => ({ ...useStore.getState(), runs, hosts, connected, defaultConnected, bots, projects: rawProjects }),
+    [runs, hosts, connected, defaultConnected, bots, rawProjects],
+  )
   const unreadMap = useStore((s) => s.botUnread)
   const deleteTarget = deleteProject ? projects.find((p) => p.id === deleteProject.id) : undefined
   const deleteBlockers = deleteProject ? projectDeleteBlockers(bots, runs, deleteProject.id) : { total: 0, active: 0 }
