@@ -16,6 +16,7 @@ import {
 } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
+import { useComposerFocus } from '../hooks/useComposerFocus'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import {
   botLamp,
@@ -830,16 +831,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
 
   // Keep the same draft-selection behavior as bot and group composers. Do not focus here:
   // opening a Team view should not steal focus from another control.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const currentText = useStore.getState().drafts[draftKey] ?? ''
-    const saved = useStore.getState().draftCursors[draftKey]
-    const max = currentText.length
-    const start = Math.max(0, Math.min(max, saved?.start ?? max))
-    const end = Math.max(start, Math.min(max, saved?.end ?? start))
-    el.setSelectionRange(start, end)
-  }, [draftKey, ref])
+  useComposerFocus({ draftKey, ref, autoFocus: false })
 
   const target = to && members.some((b) => b.id === to) ? to : (pm?.id ?? null)
 
