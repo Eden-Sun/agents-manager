@@ -38,6 +38,8 @@ import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from '
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { botStatusConnTarget } from './botStatusConn'
+import { restoreQueued } from './queuedSend'
+import type { QueuedSend } from './queuedSend'
 import {
   botKey,
   completesTurn,
@@ -281,10 +283,7 @@ export interface LiveReply {
 }
 
 /** 排隊中的一則送出（`queuedSends`）。 */
-export interface QueuedSend {
-  text: string
-  attachments: string[]
-}
+export type { QueuedSend } from './queuedSend'
 
 export interface ComposerState {
   /** 完全不能輸入（未啟動、blocked、主機斷線、送達狀態未知…）。 */
@@ -477,7 +476,7 @@ export interface StoreState {
   stopBot: (botId: string) => Promise<void>
   interruptBot: (botId: string) => Promise<void>
   /** 強制結束目前回合（送不送得出 `esc` 都解鎖）。 */
-  abortBot: (botId: string) => Promise<void>
+  abortBot: (botId: string) => Promise<boolean>
   /**
    * 對正在跑的 bot 送 `/login`，讓它的 TUI 進入登入 / 切換帳號流程。
    * `true` = 已經送進去（agent 現在停在登入畫面）；`false` = 沒送出，原因已經跳通知。
@@ -555,6 +554,11 @@ export interface StoreState {
   queueSend: (botId: string, text: string, attachments: string[]) => void
   /** 取消排隊中的送出（訊息會退回輸入框，由呼叫端決定）。 */
   cancelQueuedSend: (botId: string) => void
+  /**
+   * 送失敗後把那一則放回去：佇列空著就排回佇列（附件也在），被新的一則佔走就接回輸入框。
+   * 三個送出入口（回合結束自動送、中止並取代、併行送入）共用，免得 409 把字吃掉。
+   */
+  restoreQueuedSend: (botId: string, pending: QueuedSend) => void
 
   // ---- SPEC-team -------------------------------------------------------
   /** 開啟某個 team 的視圖（null = 回到原本的 bot / 群組）。 */
@@ -1152,9 +1156,12 @@ export const useStore = create<StoreState>((set, get) => ({
    * `esc` 沒送成功時講清楚——bot 那頭可能還在跑，只是這邊不再等它。
    */
   async abortBot(botId) {
+    // 回 true 只代表「esc 真的送進終端了」：呼叫端（中止並取代）要據此決定能不能接著送新的一則。
+    let stopped = false
     await guarded(set, get, `abort:${botId}`, async () => {
       const r = await api.abortBot(botId)
       const n = r.aborted.length
+      stopped = r.keys_sent
       get().notify(
         r.keys_sent ? 'info' : 'error',
         r.keys_sent
@@ -1162,6 +1169,7 @@ export const useStore = create<StoreState>((set, get) => ({
           : `已中止 ${n} 個回合，但 esc 送不進終端——agent 那邊可能還在跑，必要時停掉 Bot`,
       )
     })
+    return stopped
   },
 
   async loginBot(botId) {
@@ -1189,6 +1197,14 @@ export const useStore = create<StoreState>((set, get) => ({
 
   cancelQueuedSend(botId) {
     set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
+  },
+
+  restoreQueuedSend(botId, pending) {
+    const r = restoreQueued(get(), botId, pending)
+    set(r.patch)
+    if (r.droppedAttachments > 0) {
+      get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 張圖片要重新加`)
+    }
   },
 
   async sendPrompt(botId, text, attachments = []) {
@@ -2576,7 +2592,11 @@ function flushQueued(botId: string) {
     const cs = composerState(s, botId)
     if (cs.disabled || cs.queued) return
     useStore.setState({ queuedSends: withoutKey(s.queuedSends, botId) })
-    void s.sendPrompt(botId, pending.text, pending.attachments)
+    // 送不出去（409 picker_open／dialog_open／needs_login、502、網路錯）就放回去，
+    // 別讓文字連附件一起消失；toast 由 sendPrompt 自己講。
+    void s.sendPrompt(botId, pending.text, pending.attachments).then((ok) => {
+      if (!ok) useStore.getState().restoreQueuedSend(botId, pending)
+    })
   }, 350)
 }
 
