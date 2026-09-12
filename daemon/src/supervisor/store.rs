@@ -682,17 +682,24 @@ pub async fn set_persona(
 /// The whole point: a first install gets the binary's text, and every install after that keeps
 /// what it has. `setup` is idempotent, and idempotent must not mean "re-assert the default".
 pub async fn seed_persona_if_empty(pool: &SqlitePool, text: &str) -> Result<bool> {
+    seed_persona_from(pool, text, "embedded", text).await
+}
+
+/// First upgrade from the old bot/config authority must preserve the existing custom text.
+/// The embedded hash is still recorded separately, so future binary upgrades stay observable.
+pub async fn seed_persona_from(pool: &SqlitePool, text: &str, source: &str, embedded: &str) -> Result<bool> {
     let now = crate::db::now();
     let planted = sqlx::query(
         "UPDATE supervisors
-            SET persona_text=?, persona_hash=?, persona_source='embedded', persona_updated_at=?,
+            SET persona_text=?, persona_hash=?, persona_source=?, persona_updated_at=?,
                 persona_seed_hash=?, persona_version=persona_version+1, updated_at=?
           WHERE id=? AND (persona_text IS NULL OR persona_text='')",
     )
     .bind(text)
     .bind(super::persona::hash(text))
+    .bind(source)
     .bind(&now)
-    .bind(super::persona::hash(text))
+    .bind(super::persona::hash(embedded))
     .bind(&now)
     .bind(SUPERVISOR_ID)
     .execute(pool)
@@ -2574,5 +2581,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(notes, 2, "the earlier summary is still recoverable");
+    }
+}
+
+#[cfg(test)]
+mod persona_migration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_upgrade_preserves_custom_bot_persona_and_embedded_baseline() {
+        let p = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        migrate(&p).await.unwrap();
+        get_or_init(&p).await.unwrap();
+        assert!(seed_persona_from(&p, "custom newer text", "legacy_bot", "old binary text").await.unwrap());
+        let row = get_or_init(&p).await.unwrap();
+        assert_eq!(row.persona_text.as_deref(), Some("custom newer text"));
+        assert_eq!(row.persona_source.as_deref(), Some("legacy_bot"));
+        assert_eq!(row.persona_seed_hash, Some(super::super::persona::hash("old binary text")));
+        assert!(!seed_persona_if_empty(&p, "another binary").await.unwrap());
+        assert!(!seed_persona_from(&p, "outdated bot projection", "legacy_bot", "old binary").await.unwrap());
+        assert_eq!(get_or_init(&p).await.unwrap().persona_text.as_deref(), Some("custom newer text"));
     }
 }
