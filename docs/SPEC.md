@@ -296,7 +296,7 @@ label = "foo"
   autostart = true
 ```
 
-- 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；mtime 與載入時不符回 409。`toml_edit` 保留註解為第二階段。
+- 寫回：第一階段以 serde 全量序列化（註解不保留），先寫暫存檔再原子 rename；daemon 內單一 mutex 序列化；若 mtime 與上次讀取不符，會在同一把 mutex 內重新讀取後再套用更新，重新解析失敗才回錯誤。`toml_edit` 保留註解為第二階段。
 - 改 `name` 時若有 active Run 拒絕（herdr agent name 綁定啟動時的名稱）。
 - `[supervisor] notify_interval_secs`（預設 **600**，AGM 運維面的說明見 §18.3）：事件照舊即時寫入 `supervisor_inbox`，**不丟也不延遲入庫**；
   被節流的只有「把未 ack 事件推給總管、喚醒它」這個動作——每 ≥ 這個秒數才推一次，一次把這段期間累積的
