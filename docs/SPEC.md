@@ -1308,6 +1308,15 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
 ### 18.1 開發用 dev server（5173）
 
 - **正式位址** `http://<本機>:5173`，`--strictPort`（搶不到就失敗，不要默默換 port——使用者手機上的書籤是寫死的）。
+- **來源是一棵只跟 origin/main 的乾淨 worktree**：`/Users/m4p/project/agents-manager-main`
+  （`git worktree`、detached HEAD）。看門狗每輪先 `git fetch && git reset --hard origin/main`——那棵樹
+  沒有任何人未提交的改動，reset 是安全的；`web/bun.lock` 變了才 `bun install` 並重啟 vite，只有原始碼
+  變就靠 vite 自己的 HMR。**5173 看到的＝已經合併進 origin/main 的事實**，推上去重新整理就看得到。
+  由來（2026-09-12 使用者「dev 也該要馬上 change」）：原本它吃共用工作樹 `~/project/agents-manager`，
+  那棵樹同時有二十幾個檔是其他 agent 未提交的 WIP，既不能 pull（會動到別人的東西）也就永遠追不上
+  origin/main——使用者在手機上看到的一直是好幾十顆 commit 以前的畫面。**共用工作樹從此不再被 5173 用。**
+- **bot 要驗自己還沒提交的改動，用自己的 port**（`5188` 那類 `VITE_MOCK=1`、或任何沒被占用的 port，
+  自己起自己收），不要再把改動丟進 5173 等別人看——5173 是使用者的視窗，不是誰的工作區。
 - **runtime 是 node，不是 bun**：`node web/node_modules/vite/bin/vite.js`。bun 1.3.14 交給 HTTP
   upgrade handler 的 socket 沒有 Node 的 `destroySoon`，vite 代理在 upgrade 回應結束時會呼叫它
   （`proxyRes.on('end') → socket.destroySoon()`），於是**正式 daemon 一重啟、代理目標斷線，vite 整個
