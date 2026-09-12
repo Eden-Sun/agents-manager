@@ -1,59 +1,105 @@
 /*
- * 標題列下面那一列（`UnreadChip`）：主力（常駐）、剛跑完在左，進行中在右。
+ * 標題列下面那一列（`UnreadChip`）。排序是緊急度（見 `UnreadChip.tsx` 檔頭），版面分兩套：
  *
- * **一列到底、放不下就橫捲**（2026-09-12 使用者）。本來是 `flex-wrap: wrap`：十顆晶片在
- * 390px 上排成三行、佔掉 89px，對話的第一則被推到畫面外；桌機也一樣，這一列一長高就把
- * git／context 那一列連同訊息一起往下擠。這一列講的是「還有哪幾顆要看」，是**索引**不是
- * 內容，它不該跟對話搶高度——所以高度鎖死一列，多出來的往右捲。
+ * - **桌機**：換行，最多兩行（`.clipped` 把高度切在第二行）；再多就由右邊那顆 `+N` 展開。
+ *   不用橫捲——2026-09-12 使用者截圖：2000px 寬、9 顆晶片，左邊那顆被切一半，看起來像壞掉，
+ *   而且看不出可以捲，等人回答的那顆就這樣躺在視野外。
+ * - **手機**：單行橫捲（寬度就是不夠），但要看得出來能捲：兩端陰影 + 可點的 ◂ ▸，滾輪的垂直
+ *   滾動映射成橫捲，`scroll-snap` 讓停下來的位置不會把晶片切一半。
  *
- * 捲的方式跟 `.context-bar > .git-bar` 同一套 scroll shadow：`local` 兩層跟著內容走、捲到底
- * 時蓋掉 `scroll` 兩層的陰影，所以「右邊還有東西」只在真的還有東西時才畫出來。
- *
- * 正在看的那一顆由 `UnreadChip` 自己捲進畫面（見該檔的 `useScrollCurrentIntoView`）——
- * 橫捲列最怕的是「我在看的那顆在捲軸外」。
+ * 正在看的那一顆由 `UnreadChip` 自己捲進畫面（`useScrollCurrentIntoView`）——只動這一列的
+ * `scrollLeft`，不用 `scrollIntoView`（那會連祖先一起捲）。
  */
+.unread-bar-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
 .unread-bar {
   display: flex;
   align-items: center;
-  flex: none;
-  flex-wrap: nowrap;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 5px 16px;
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-  /* 底色是最後一層（多層 `background` 的顏色只能放在最後）。 */
-  background:
-    linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
-    linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
-    radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 32%), transparent) left / 10px 100% no-repeat scroll,
-    radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 32%), transparent) right / 10px 100% no-repeat scroll,
-    var(--bg-sunken);
+  min-width: 0;
 }
 
-.unread-bar::-webkit-scrollbar {
-  display: none;
+/* 兩行的高度：晶片 20px + 行距 6px。第三行起看不到，數量由 `+N` 說。 */
+.unread-bar.clipped {
+  max-height: 46px;
+  overflow: hidden;
 }
 
-/* 橫捲列裡的東西自己不能再縮，不然又被擠回原樣、名字全變成 `c…`。 */
-.unread-bar > * {
-  flex: none;
+/* 展開時給個上限再自己捲，免得 30 顆 bot 把對話區壓掉半個畫面。 */
+.unread-bar.expanded {
+  max-height: 30vh;
+  overflow-y: auto;
 }
 
-.unread-bar-label {
-  font-size: 11px;
+/* 右邊那顆展開／收合：絕對定位，不進 flex 流——它若佔一格，測量「兩行放得下幾顆」就會
+   跟著自己的存在震盪。 */
+.unread-bar-more {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 2;
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-panel);
   color: var(--text-dim);
-  white-space: nowrap;
+  font-size: 11px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
 }
 
-/* 「進行中」推到最右邊。排得下時這個 spacer 撐開剩餘空間；一列塞不下（開始橫捲）時它縮到
-   最小的 8px，只當兩組之間的間隔——`flex-grow` 在 overflow 的容器裡本來就不會再長。 */
-.unread-bar-gap {
-  flex: 1 1 auto;
-  min-width: 8px;
+.unread-bar-more:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
 }
+
+/* 有 `+N` 時右邊留出它的位置，晶片不會被壓在它底下。 */
+.unread-bar:has(~ .unread-bar-more) {
+  padding-right: 58px;
+}
+
+/* 可捲的那一端：陰影 + 箭頭。陰影單獨存在時使用者看不出「還有東西」（2026-09-12 使用者），
+   所以箭頭是可以點的按鈕，不是裝飾。 */
+.unread-bar-arrow {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.unread-bar-arrow.left {
+  left: 0;
+  background: linear-gradient(to right, var(--bg-sunken) 55%, transparent);
+}
+
+.unread-bar-arrow.right {
+  right: 0;
+  background: linear-gradient(to left, var(--bg-sunken) 55%, transparent);
+}
+
+.unread-bar-arrow:hover {
+  color: var(--accent-ink);
+}
+
 
 /*
  * 這一列的兩個狀態是**正交**的，所以分開兩條規則、不要互相蓋（2026-09-11 使用者）：
@@ -200,22 +246,49 @@
   color: var(--lamp-yellow);
 }
 
-/* 塞不下的收成一顆 `+N`。 */
-.unread-chip.more {
-  padding: 1px 6px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
-  background: transparent;
-}
-
 .unread-chip-name {
   min-width: 0;
 }
 
-/* 手機：兩邊都再縮一點，名字留著（少了名字分不出是哪一顆）。 */
+/* 手機：換行會把半個畫面吃掉，所以這裡維持單行橫捲。捲軸藏起來（兩端的 ◂ ▸ 與陰影才是
+   提示），`overscroll-behavior-x: contain` 擋住捲到底之後把整頁往旁邊帶，`scroll-snap` 讓
+   停下來的位置對齊晶片左緣——被切一半的晶片正是使用者回報的那個問題。 */
 @media (max-width: 720px) {
+  .unread-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-height: none;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scroll-padding-inline: 16px;
+    /* 兩端讓出箭頭的位置，晶片不會被壓在箭頭底下。 */
+    padding-inline: 24px;
+    /* scroll shadow 跟 `.context-bar > .git-bar` 同一套（2026-09-12 早上那版留下來的）：
+       `local` 兩層跟著內容走、捲到底時蓋掉 `scroll` 兩層的陰影，所以「還有東西」只在真的
+       還有東西時才畫。箭頭是另一半提示——只有陰影使用者看不出來。 */
+    background:
+      linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 32%), transparent) left / 10px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 32%), transparent) right / 10px 100% no-repeat scroll,
+      var(--bg-sunken);
+  }
+
+  /* 橫捲列裡的東西自己不能再縮，不然又被擠回原樣、名字全變成 `c…`。 */
+  .unread-bar > * {
+    flex: none;
+  }
+
+  .unread-bar::-webkit-scrollbar {
+    display: none;
+  }
+
   .unread-chip {
-    max-width: 96px;
+    scroll-snap-align: start;
+    flex: none;
+    max-width: 108px;
     gap: 3px;
     padding: 0 5px;
     line-height: 20px;
