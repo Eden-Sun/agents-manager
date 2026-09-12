@@ -34,7 +34,7 @@ import { KindIcon, KindTag } from './KindTag'
 import { Modal } from './Modal'
 import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
-import { isAgmQuote } from '../lib/agmQuote'
+import { quotedFrom } from '../lib/agmQuote'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
 import { MemBadge } from './MemBadge'
@@ -137,7 +137,7 @@ export const Bubble = memo(function Bubble({
   // relay 送的那種有 `relay_from`，畫法早就分開了（`relayedMessage.css`）；但使用者常常是自己把
   // AGM 的裁示貼進來的——那種 `relay_from` 是空的，於是整段變成他自己的藍泡泡，回頭讀對話就
   // 分不出哪句是他的決定、哪句是總管的。只認開頭：`AGM …：` 或 `[AGM …]`，句中提到 AGM 不算。
-  const agmQuote = msg.role === 'user' && !msg.relay_from && isAgmQuote(msg.content)
+  const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
   const notify = useStore((s) => s.notify)
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
     notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
@@ -155,9 +155,9 @@ export const Bubble = memo(function Bubble({
             </span>
           ) : null}
           {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} /> : null}
-          {agmQuote ? (
-            <span className="msg-targets relay quoted" title="使用者轉述的總管訊息（內容來自 AGM，不是他自己的話）">
-              AGM（轉述）
+          {quoted ? (
+            <span className="msg-targets relay quoted" title={`這一則的內容來自 ${quoted}，不是使用者自己打的`}>
+              {quoted}（轉述）
             </span>
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
