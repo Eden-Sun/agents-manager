@@ -3,6 +3,8 @@ import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
+import { isSurvey } from '../lib/choiceDraft'
+import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 import { linkifyTerm } from './TermLinks'
 import { useTermWrap } from './termWrap'
@@ -72,7 +74,11 @@ export function BlockedPanel({
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       {menu ? (
         <>
-          <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
+          {isSurvey(menu) ? (
+            <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />
+          ) : (
+            <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
+          )}
           <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
         </>
       ) : null}

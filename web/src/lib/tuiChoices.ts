@@ -256,6 +256,24 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
 
   if (rows.length < 2 || rows[0].number !== 1) return null
 
+  // `Submit` 那一列也可能排在**最後一個編號之後**（那一頁沒有 `Chat about this` 時就是這樣）。
+  // 往上走的時候看不到它，所以再往下看幾行；碰到腳註或第二個空白行就停。
+  if (submitLine < 0) {
+    let blanks = 0
+    for (let i = end + 1; i < lines.length && i <= end + 4; i++) {
+      if (FOOTER.test(lines[i])) break
+      if (lines[i].trim() === '') {
+        if (++blanks > 1) break
+        continue
+      }
+      if (SUBMIT.test(lines[i])) {
+        submitLine = i
+        break
+      }
+      if (!isDivider(lines[i])) break
+    }
+  }
+
   // 游標記號在整塊裡**剛好一個**：零個代表游標捲出畫面（算不出走幾格），兩個以上代表這根本
   // 不是選單（例如正文裡的 `> 1. …` 引用）。記號可能落在 `Submit` 那一列上，那也算一個。
   const blockTop = rows[0].line

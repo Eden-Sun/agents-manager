@@ -5,6 +5,8 @@ import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useStore } from '../store/store'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
+import { isSurvey } from '../lib/choiceDraft'
+import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
@@ -121,7 +123,11 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
             快照各自捲，手指在手機上分不清正在捲哪一塊（2026-09-12 第二輪回饋第 4 點）。 */}
         {menu ? (
           <div className="blocked-modal-body">
+            {isSurvey(menu) ? (
+            <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />
+          ) : (
             <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
+          )}
           </div>
         ) : null}
 
