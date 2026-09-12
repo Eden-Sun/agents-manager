@@ -1119,8 +1119,9 @@ async fn stop_failed_startup_members(app: &Arc<App>, members: &[db::Bot]) {
 }
 
 /// Start a done Team's long-lived members for a queued continuation. The old issue's workers
-/// are retired first; PM/reviewer keep their bot ids, worktrees and conversations, and ask the
-/// lifecycle layer to resume their last native session when the provider supports it.
+/// are retired before PM/reviewer start; PM/reviewer keep their bot ids, worktrees and
+/// conversations, and ask the lifecycle layer to resume their last native session when the
+/// provider supports it.
 async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
     let issues = db::team_issues(&app.db, team_id).await.map_err(up)?;
     let previous = issues
@@ -1128,13 +1129,22 @@ async fn reopen_startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         .filter(|i| i.state == "done")
         .max_by_key(|i| i.seq)
         .ok_or_else(|| LcError::Upstream("cannot reopen a team with no completed issue".into()))?;
-    team::retire_issue_workers(app, team_id, &previous.id).await;
-
     let ctx = Ctx::load(app, team_id).await?;
-    for e in crate::trust::pretrust_members(app, &ctx.members).await {
+    // Pretrust only the long-lived members before retirement: stopping old worker panes and
+    // removing their per-issue worktrees must not get in the way of the PM/reviewer starts.
+    // The next worker batch is pretrusted separately by `start_issue_workers`.
+    let long_lived: Vec<db::Bot> = ctx
+        .members
+        .iter()
+        .filter(|b| matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer")))
+        .cloned()
+        .collect();
+    for e in crate::trust::pretrust_members(app, &long_lived).await {
         tracing::warn!(team = %team_id, error = %e, "could not pre-trust a team worktree on reopen");
         note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
     }
+    // Retirement remains idempotent: deleted workers are skipped on a retry.
+    team::retire_issue_workers(app, team_id, &previous.id).await;
     for b in &ctx.members {
         if !matches!(b.team_role.as_deref(), Some("pm") | Some("reviewer")) {
             continue;

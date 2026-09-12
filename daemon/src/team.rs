@@ -2445,10 +2445,13 @@ pub fn close_comment_for_issue(t: &db::Team, issue: &db::TeamIssue, tasks: &[db:
     let mut mirror = t.clone();
     mirror.issue_number = issue.issue_number;
     mirror.issue_title = issue.issue_title.clone();
-    mirror.branch = issue.branch.clone().unwrap_or_else(|| t.branch.clone());
-    mirror.base_sha = issue.base_sha.clone().unwrap_or_else(|| t.base_sha.clone());
-    mirror.summary = issue.summary.clone().or_else(|| t.summary.clone());
-    mirror.pr_url = issue.pr_url.clone().or_else(|| t.pr_url.clone());
+    // A reopened Team's scalar columns now describe the next issue. The queue row is the
+    // source of truth for a historical close comment; falling back to the mirror would leak
+    // the next issue's summary or PR when the finished row intentionally has neither.
+    mirror.branch = issue.branch.clone().unwrap_or_default();
+    mirror.base_sha = issue.base_sha.clone().unwrap_or_default();
+    mirror.summary = issue.summary.clone();
+    mirror.pr_url = issue.pr_url.clone();
     close_comment(&mirror, tasks)
 }
 
@@ -5287,6 +5290,18 @@ mod api_tests {
         assert!(comment.contains("第一個 issue 的完成摘要"), "the finished row supplies the summary: {comment}");
         assert!(comment.contains("team/i42-finished"), "the finished row supplies the branch: {comment}");
         assert!(comment.contains("https://github.com/o/r/pull/42"), "the finished row supplies the PR: {comment}");
+
+        // A historical row with no summary or PR must not inherit either field from the
+        // reopened team's current mirror.
+        let mut current_mirror = reopened.clone();
+        current_mirror.summary = Some("第二個 issue 的摘要".into());
+        current_mirror.pr_url = Some("https://github.com/o/r/pull/57".into());
+        let mut sparse_finished = finished.clone();
+        sparse_finished.summary = None;
+        sparse_finished.pr_url = None;
+        let comment = close_comment_for_issue(&current_mirror, &sparse_finished, &[]);
+        assert!(!comment.contains("第二個 issue 的摘要"), "the current summary leaked: {comment}");
+        assert!(!comment.contains("https://github.com/o/r/pull/57"), "the current PR leaked: {comment}");
     }
 
     /// §10.7: what the comment says. The `deliver=branch` caveat is the load-bearing part —

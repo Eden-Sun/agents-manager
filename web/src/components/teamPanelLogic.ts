@@ -170,11 +170,16 @@ function noteText(p: Record<string, unknown>): string | null {
       return list ? `使用者追加 ${list}，team 重新啟動` : '使用者追加 issue，team 重新啟動'
     }
     // §2.5.3：CLI 沒能續接原本那段對話。哪個角色比 bot 名字重要——使用者關心的是
-    // 「PM 還記不記得上一個 issue」，`why` 是給查問題的人看的，留在 payload 裡就好。
+    // 「PM 還記不記得上一個 issue」，`why` 用短中文寫在時間軸，payload 仍保留原始代碼。
     case 'member_context_lost': {
       const role = str('role')
       const who = role === 'pm' ? 'PM' : ((TEAM_ROLE_LABEL as Record<string, string>)[role] ?? (bot || '成員'))
-      return `${who} 沒能續接先前對話，已改為新對話`
+      const why = {
+        no_session_id: '找不到先前的 session',
+        unsupported_kind: '這個 agent 不支援原生續接',
+        resume_mismatch: '續接後的 session 不一致',
+      }[str('why')] ?? '未知原因'
+      return `${who} 沒能續接先前對話（${why}），改為新對話`
     }
     case 'issue_unqueued':
       return `已從佇列移除 issue #${issue}`
