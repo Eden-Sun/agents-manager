@@ -531,11 +531,28 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
         items = [a for a in items if a.get("status") in OPEN_STATUSES]
     if args.awaiting_review:
         items = [a for a in items if a.get("status") == "awaiting_review"]
-    return {
+    # 一直在重試的那種（bot 停了、在忙、要重登）最容易被看漏：它 updated_at 每次都動，
+    # 看起來很忙，其實從來沒送出去過。把它單獨數出來，並附上最後一個理由。
+    stuck = [
+        {
+            "id": a.get("id"),
+            "target_bot_id": a.get("target_bot_id"),
+            "attempts": a.get("attempts"),
+            "next_attempt_at": a.get("next_attempt_at"),
+            "last_error": a.get("error"),
+            "created_at": a.get("created_at"),
+        }
+        for a in items
+        if a.get("status") == "queued" and not a.get("turn_id") and (a.get("attempts") or 0) >= 3
+    ]
+    out = {
         "assignments": items,
         "open": len([a for a in items if a.get("status") in OPEN_STATUSES]),
         "awaiting_review": len([a for a in items if a.get("status") == "awaiting_review"]),
     }
+    if stuck:
+        out["retrying_undelivered"] = stuck
+    return out
 
 
 def cmd_review(client: Client, cfg: dict, args) -> object:
@@ -848,6 +865,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["accept", "block", "followup", "fail", "cancel"],
         help="accept=驗收結案／block=還在等，保持未結案／followup=派續作／fail=判定失敗／cancel=取消",
     )
+    # cancel 是唯一能在回合還在跑時用的決定，但它停的是「追蹤」，不是那顆 bot：
+    # daemon 不會中止回合，delivered／unknown 的 delivery 與 turn_id 都會原樣留著。
     s.add_argument("--reason", help="為什麼這樣決定")
     s.add_argument("--evidence", help="依據（turn id、commit、測試數字）")
     s.add_argument("--actor", default="AGM", help="決定的人／bot（預設 AGM）")

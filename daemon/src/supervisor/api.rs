@@ -205,6 +205,24 @@ pub async fn post_review(
     let actor = b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string());
     let source = b.source.clone().unwrap_or_else(|| "api".to_string());
 
+    // Cancelling work that is (or may be) already running stops the *tracking*, not the bot.
+    // Spelled out here and returned to the caller, because the tempting reading of a cancelled
+    // row — "it never went out" — is wrong in two different ways: a `delivered` assignment is
+    // running right now, and an `unknown` one may or may not be. The daemon does not abort
+    // turns, and it must not let a status imply that it did.
+    let still_running = if b.decision != "cancel" {
+        None
+    } else {
+        match a.status.as_str() {
+            "delivered" => Some("the turn is still running; cancelling stops tracking it, it does not stop the bot"),
+            "unknown" => Some(
+                "delivery was never confirmed: this work may or may not be running. Cancelling records your \
+                 decision; it does not un-send the prompt and does not abort a turn.",
+            ),
+            _ => None,
+        }
+    };
+
     // A follow-up is a *new* assignment carrying the unfinished part forward, never an edit of
     // the one already sent: rewriting delivered text is how a bot ends up working from words
     // nobody sent it.
@@ -230,6 +248,13 @@ pub async fn post_review(
     };
     let followup_id = followup.as_ref().and_then(|f| f.get("id").and_then(Value::as_str).map(str::to_string));
 
+    // The caveat goes into the audit row too: whoever reads this decision later should see the
+    // same warning the caller got, not just the word `cancelled`.
+    let evidence = match (b.evidence.as_deref(), still_running) {
+        (Some(e), Some(note)) => Some(format!("{e}｜{note}")),
+        (None, Some(note)) => Some(note.to_string()),
+        (e, None) => e.map(str::to_string),
+    };
     let updated = store::review(
         &app.db,
         &a.id,
@@ -237,7 +262,7 @@ pub async fn post_review(
         &actor,
         &source,
         b.reason.as_deref(),
-        b.evidence.as_deref(),
+        evidence.as_deref(),
         followup_id.as_deref(),
     )
     .await
@@ -249,6 +274,12 @@ pub async fn post_review(
     out["reviews"] = json!(store::reviews(&app.db, &updated.id).await.map_err(up)?);
     if let Some(f) = followup {
         out["followup"] = f;
+    }
+    if let Some(note) = still_running {
+        out["warning"] = json!(note);
+        // The transport facts stay readable next to the warning: a cancelled `unknown` keeps
+        // its `delivery` and `turn_id` precisely so nobody has to guess afterwards.
+        out["may_still_be_running"] = json!(true);
     }
     Ok(Json(out))
 }

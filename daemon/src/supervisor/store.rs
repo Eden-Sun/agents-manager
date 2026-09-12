@@ -412,6 +412,9 @@ impl Assignment {
             "result": self.result,
             "error": self.error,
             "attempts": self.attempts,
+            // When the next retry is due. Without it "attempts: 37" is a number with no story:
+            // you cannot tell a job that is retrying on schedule from one that is wedged.
+            "next_attempt_at": self.next_attempt_at,
             "request_id": self.request_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -922,6 +925,24 @@ pub async fn unsettled_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>>
           ORDER BY created_at ASC",
     )
     .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Work that has never reached anybody: still `queued`, first created before `cutoff`.
+///
+/// This needs its own query because [`assignments_idle_since`] cannot see it. Every retry calls
+/// `defer`, which moves `updated_at`, so an assignment bouncing off a stopped bot every five
+/// minutes looks *busy* forever and never trips the idle probe — it would retry until the heat
+/// death of the universe with nobody told. `created_at` is the honest clock here: it is how
+/// long the work has been owed, regardless of how many times we have failed to hand it over.
+pub async fn assignments_undelivered_since(pool: &SqlitePool, cutoff: &str) -> Result<Vec<Assignment>> {
+    Ok(sqlx::query_as::<_, Assignment>(
+        "SELECT * FROM supervisor_assignments WHERE supervisor_id=? AND status='queued'
+           AND turn_id IS NULL AND created_at <= ? ORDER BY created_at ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(cutoff)
     .fetch_all(pool)
     .await?)
 }
@@ -1903,6 +1924,66 @@ mod tests {
         assert_eq!(done.status, "completed");
         assert_eq!(done.result.as_deref(), Some("done"));
         assert_eq!(open_assignment_count(&p).await.unwrap(), 0, "accepted work leaves the open list");
+    }
+
+    /// The stopped-bot case (review #30). Every retry calls `defer`, which moves `updated_at`,
+    /// so work bouncing off a dead bot every five minutes looks *busy* forever and the idle
+    /// probe never sees it. The undelivered probe clocks it from `created_at` instead.
+    #[tokio::test]
+    async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "stopped-bot", "req-r", "做事", &[], None).await.unwrap();
+        // Created long ago; retried 20 times, the last one just now. `defer` stamps
+        // `updated_at` off the real clock, so the cutoff has to sit between the two: older than
+        // "now" (or the idle probe would match anything) and newer than `created_at`.
+        sqlx::query("UPDATE supervisor_assignments SET created_at='2020-01-01T00:00:00.000Z' WHERE id=?")
+            .bind(&a.id)
+            .execute(&p)
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            defer(&p, &a.id, "2099-01-01T00:00:00Z", "bot has no active run").await.unwrap();
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(60))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let cutoff = cutoff.as_str();
+        assert!(
+            assignments_idle_since(&p, cutoff).await.unwrap().is_empty(),
+            "the idle probe is blind to it: every retry refreshes updated_at"
+        );
+        let seen = assignments_undelivered_since(&p, cutoff).await.unwrap();
+        assert_eq!(seen.len(), 1, "but never-delivered work is clocked from created_at");
+        assert_eq!(seen[0].attempts, 20);
+        assert_eq!(seen[0].error.as_deref(), Some("bot has no active run"), "with the real reason, not `conflict`");
+        assert_eq!(seen[0].to_json()["next_attempt_at"], "2099-01-01T00:00:00Z", "and when it will try again");
+
+        // Once it actually goes out it is no longer undelivered, whatever happens next.
+        mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
+        assert!(assignments_undelivered_since(&p, cutoff).await.unwrap().is_empty());
+    }
+
+    /// Cancelling work that is or may be running is allowed — and must not pretend it un-sent
+    /// anything. The transport facts survive the decision precisely so nobody has to guess.
+    #[tokio::test]
+    async fn cancelling_unknown_delivery_keeps_the_evidence_that_it_may_be_running() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-u", "x", &[], None).await.unwrap();
+        mark_delivered(&p, &a.id, "t7", "unknown").await.unwrap();
+        assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "unknown");
+
+        review(&p, &a.id, "cancel", "AGM", "cli", Some("使用者改主意"), Some("送達未知，沒有中止回合"), None)
+            .await
+            .unwrap();
+        let a = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "cancelled");
+        assert!(!a.is_open());
+        // The two facts that stop `cancelled` from being read as "it never went out".
+        assert_eq!(a.delivery.as_deref(), Some("unknown"), "delivery is not rewritten by the decision");
+        assert_eq!(a.turn_id.as_deref(), Some("t7"), "and the turn is still named, so it can be checked");
+        let log = reviews(&p, &a.id).await.unwrap();
+        assert!(log[0]["evidence"].as_str().unwrap().contains("沒有中止回合"));
     }
 
     /// The heart of the 2026-09-12 P1: a turn ending is not a job being done.

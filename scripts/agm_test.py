@@ -431,6 +431,34 @@ class AssignmentsCommandTest(CliCase):
     def test_missing_id_is_not_found(self):
         self.assertEqual(self.bad("assignments", "--id", "nope")["error"], "not_found")
 
+    def test_work_that_keeps_retrying_is_called_out(self):
+        """一直重試但從沒送出去的（bot 停了／在忙）最容易看漏：它看起來一直在動。"""
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = (
+            200,
+            {
+                "assignments": [
+                    {
+                        "id": "a9",
+                        "status": "queued",
+                        "turn_id": None,
+                        "attempts": 12,
+                        "next_attempt_at": "2026-09-13T01:00:00Z",
+                        "error": "bot has no active run",
+                        "target_bot_id": "bot-dead",
+                    },
+                    {"id": "a1", "status": "queued", "turn_id": None, "attempts": 1},
+                ]
+            },
+        )
+        out = self.ok("assignments", "--open")
+        stuck = out["retrying_undelivered"]
+        self.assertEqual([s["id"] for s in stuck], ["a9"], "剛排隊的那筆不算卡住")
+        self.assertEqual(stuck[0]["last_error"], "bot has no active run", "要看得到真正的理由，不是 conflict")
+        self.assertEqual(stuck[0]["next_attempt_at"], "2026-09-13T01:00:00Z")
+
+    def test_no_retrying_section_when_nothing_is_stuck(self):
+        self.assertNotIn("retrying_undelivered", self.ok("assignments", "--open"))
+
 
 class ReviewCommandTest(CliCase):
     def setUp(self):

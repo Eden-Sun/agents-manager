@@ -1579,10 +1579,14 @@ incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, reso
 | `host_disconnected` | host 連不上 | `host_disconnected_secs`（120） |
 | `bot_stopped` | `autostart=1` 的 bot 沒有 active run | `bot_stopped_secs`（300） |
 | `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
+| `assignment_undelivered` | 還在 `queued`、從沒送出去，用 `created_at` 算 | `assignment_stalled_secs`（7200） |
 | `notify_exhausted` | 通知重送用盡預算 | `notify_max_attempts`（5） |
 
 - 條件要**持續**超過門檻才寫入（門檻計時在記憶體裡，重啟後重算——寧可晚一點開，不要重複開）；開啟與恢復各推
   一則 inbox 事件，中間的每一 tick 只更新 `occurrences`。恢復後再壞是新的一筆，不是舊的復用。
+- `assignment_undelivered` 要獨立一條，是因為 `assignment_stalled` 天生看不到它：每次重試都呼叫 `defer`，
+  `updated_at` 就被推到現在，於是「對著停掉的 bot 每 5 分鐘重試一次」看起來永遠很忙。派工被拒的真正理由
+  （`bot has no active run`、`needs_login` 等）記在 `error` 欄，不是分類字串 `conflict`（2026-09-13 review #30）。
 - 不算故障：使用者自己停掉的 bot、正常等使用者回答的 blocked pane、短暫排隊、AGM 自己的 idle/busy 變換。
   量不到的東西回 `unknown`，不併進 `healthy`。
 - 全部走既有的 30 秒 cheap probe，不因為要判斷而額外問模型或殺程序。
