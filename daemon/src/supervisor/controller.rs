@@ -75,7 +75,11 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         return;
     }
 
-    match lifecycle::prompt(app, &a.target_bot_id, &a.text, &a.client_request_id).await {
+    // The assignment is stamped as coming from the manager, not from the user: `relay_from` is
+    // set as the message is written, so there is no window in which the UI could render it as
+    // the user's own words (it used to be patched in afterwards).
+    let from = store::get_or_init(&app.db).await.ok().and_then(|s| s.bot_id);
+    match lifecycle::prompt_relayed(app, &a.target_bot_id, &a.text, &a.client_request_id, &[], from.as_deref()).await {
         Ok(out) => {
             // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
             // it landed, and is reconciled against the turn rather than re-sent.
@@ -84,7 +88,6 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
                 return;
             }
             let _ = store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await;
-            attribute(app, &out.message_id).await;
             app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "delivered"})).await;
         }
         // A busy bot, an in-flight turn, a bot that is not running: all temporary, all keep
@@ -124,24 +127,6 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
 async fn dispatch_failed(app: &Arc<App>, a: &store::Assignment, why: &str) {
     tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, why, "assignment could not be dispatched");
     settle(app, a, "dispatch_failed", true, None, Some(why)).await;
-}
-
-/// Stamp the delivered prompt as coming from the manager rather than from the user.
-///
-/// `messages.relay_from` already exists (the team relay uses it) and the UI already renders
-/// it, so this is additive: without it an assignment is indistinguishable from the user
-/// typing into that bot's chat, which is exactly the impersonation the plan rules out.
-async fn attribute(app: &Arc<App>, message_id: &str) {
-    let Ok(sup) = store::get_or_init(&app.db).await else { return };
-    let Some(manager) = sup.bot_id else { return };
-    if message_id.is_empty() {
-        return;
-    }
-    let _ = sqlx::query("UPDATE messages SET relay_from=? WHERE id=? AND relay_from IS NULL")
-        .bind(&manager)
-        .bind(message_id)
-        .execute(&app.db)
-        .await;
 }
 
 /// The dedupe key one assignment's outcome always lands under, whichever path reports it: the
@@ -397,7 +382,18 @@ async fn notify(app: &Arc<App>) {
         0 => format!("agm-inbox-{}", ids.last().cloned().unwrap_or_default()),
         n => format!("agm-inbox-{}-r{n}", ids.last().cloned().unwrap_or_default()),
     };
-    match lifecycle::prompt(app, &manager, &digest(&pending), &crid).await {
+    // The digest is the daemon talking, not the user. Without the sentinel it lands in AGM's
+    // conversation as a blue bubble indistinguishable from an instruction somebody typed.
+    match lifecycle::prompt_relayed(
+        app,
+        &manager,
+        &digest(&pending),
+        &crid,
+        &[],
+        Some(crate::agent_relay::DAEMON_SENDER),
+    )
+    .await
+    {
         // A prompt call that returns Ok is not a prompt that arrived. `failed` is the CLI
         // telling us it did not land; treating that as delivered is exactly how a result went
         // missing with the row saying it had been handed over.

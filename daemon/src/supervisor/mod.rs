@@ -55,7 +55,18 @@ pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), L
     // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
     // idempotent handshake so the user can immediately see how to use AGM; the stable request
     // id prevents a restart from creating another greeting turn.
-    if let Err(e) = crate::lifecycle::prompt(app, &bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID).await {
+    // The handshake is the daemon's, not the user's: marked as such so AGM's own conversation
+    // keeps showing which lines a person actually typed.
+    if let Err(e) = crate::lifecycle::prompt_relayed(
+        app,
+        &bot.id,
+        BOOTSTRAP_PROMPT,
+        BOOTSTRAP_REQUEST_ID,
+        &[],
+        Some(crate::agent_relay::DAEMON_SENDER),
+    )
+    .await
+    {
         tracing::warn!(error = ?e, "AGM bootstrap prompt was not delivered");
     }
     // The bot's args carry `--remote-control AGM`, which is a *request*. Whether a remote

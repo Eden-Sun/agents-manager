@@ -1443,6 +1443,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
      超過回報「延後」不硬重啟。**判定通過之後、換 binary 的前一刻要再查一次**，仍成立才動手——
      建置與等待之間隔了好幾分鐘，狀態會翻回來（2026-09-12：輪詢判定「只剩一顆授權中的 bot」，
      幾秒後另一顆又變成 working，腳本沒有再閘一次就換了 binary）。
+     「再查一次」本身也還是快照：查完到動手之間仍有空隙。§18.10 的執行租約就是為了把這段補起來——
+     `acquire` 在同一個鎖裡重驗並**持有**窗口，期間 daemon 不再派新工作，所以條件在整段執行期間持續成立。
   4. 備份舊 binary 為 `target/release/agents-managerd.bak`。
   5. 重啟後 **30 秒內**驗 `/api/session` 與 `bin/agm health`。
   6. **60 秒內**確認 `bin/agm supervisor` 的 status 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。
