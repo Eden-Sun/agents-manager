@@ -180,6 +180,11 @@ web/src/
 `lib/tuiChoices.ts`，單元測試 `node --test --experimental-strip-types src/lib/tuiChoices.test.ts`
 （10 項，含一份 185 欄的真機快照）。認不出來時畫面照舊是終端快照＋按鍵面板。
 
+認出選單時進**選單模式**：畫面上只剩問題、選項、一顆 `Esc 取消` 與一顆「終端原文與更多按鍵」。
+終端快照、整排按鍵、鍵盤直通勾選框與 pane id／欄列／revision 這些都收起來（tooltip 仍留著），
+按開才長、樣子照舊。全畫面視窗在選單模式只有一條主捲軸（`.blocked-modal-body`），問題那一行
+`position: sticky` 釘在上緣。
+
 ### 終端分頁
 
 右上「對話 / 終端」切換。終端分頁是 `recent_unwrapped` 的唯讀快照，可選 50/100/200/500 行，

@@ -9,6 +9,7 @@
  * 終端的，寧可少一個捷徑，也不要在認錯的畫面上替使用者答題。
  */
 import { useState } from 'react'
+import { usePaneKeys } from '../hooks/usePaneKeys'
 import { keysToSelect, parseChoiceMenu, sameChoices, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import './blockedChoices.css'
@@ -79,11 +80,44 @@ export function BlockedChoices({
           </li>
         ))}
       </ol>
-      <p className="bc-hint">
-        {stale
-          ? '畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。'
-          : '點一下＝在終端上把游標移過去再按 Enter。下面那排鍵照舊可用（Esc、ctrl+c 在那裡）。'}
-      </p>
+      {/* 平常不留任何說明文字（2026-09-12 第二輪回饋：畫面上只要「問題 ＋ 選項 ＋ 送出」）。
+          「點一下會送什麼」寫在每顆按鈕的 tooltip；只有真的沒送出去時才需要一句話。 */}
+      {stale ? (
+        <p className="bc-hint bc-stale" role="status">
+          畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 選單模式底下那一條：一顆 `Esc 取消`，加上把終端原文與整排按鍵收起來的開關。
+ *
+ * 2026-09-12 第二輪回饋：認出選單之後，`Enter / Esc / y / n / ↑ / ↓ / ctrl+c` 那排鍵、鍵盤
+ * 直通勾選框與它那段說明都不該是預設狀態——選單本身就是操作方式。只有 Esc（取消這個問題）
+ * 是真的常用，留在選單旁邊；其他的跟終端原文一起收進這顆開關後面。
+ */
+export function BlockedExtrasBar({
+  botId,
+  open,
+  onToggle,
+  onAnswered,
+}: {
+  botId: string
+  open: boolean
+  onToggle: () => void
+  onAnswered?: () => void
+}) {
+  const press = usePaneKeys(botId, onAnswered)
+  return (
+    <div className="bc-bar">
+      <button type="button" className="bc-esc" title="送出 Esc：取消這個問題" onClick={() => press(['esc'])}>
+        Esc 取消
+      </button>
+      <button type="button" className="mini-btn bc-more" aria-expanded={open} onClick={onToggle}>
+        {open ? '收起終端原文' : '終端原文與更多按鍵'}
+      </button>
     </div>
   )
 }
