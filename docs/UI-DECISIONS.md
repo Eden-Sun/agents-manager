@@ -1311,3 +1311,46 @@ keypad 7 顆、沒有 Esc 條）。第三輪的多分頁＋複選照舊，測試
 截圖 `docs/screenshots/blocked-choices/`：`multi-mobile-390-panel`（收合，一屏六個選項）、
 `multi-mobile-390-panel-open`（展開第 1、3 項）、`multi-mobile-390-modal`、
 `multi-desktop-1440-modal`、`multi-mobile-390-scroll`（矮螢幕下收合仍有捲軸）。
+
+## blocked 選單：小面板自己要能捲，review 頁的分頁列要畫得出來（2026-09-12 第五＋七輪）
+
+**無法滑動（第五輪 A）**：使用者在 390px 上滑不動、送出鈕永遠在畫面外。量到的祖先鏈是
+`.blocked-choices 432/432 → .blocked 551/550 → .chat 582/**667** → .main 844/929 →
+.app overflow-y: hidden`——對話分頁平常是「訊息列自己那一層」在捲，而 blocked 面板在它外面，
+所以選單一長出來就沒有任何一層收得住，`.app` 直接裁掉。
+
+決策：**認出選單時讓這塊面板自己成為捲動容器**（`max-height: 70svh; overflow-y: auto`），
+不動 `.chat` / `.app` 的溢出設定——那是整個版面的地基，動它會牽到訊息列、輸入框與終端分頁。
+沒有選單時也不動（那時面板高度本來就被終端快照的 `max-height: 300px` 收著），全畫面視窗那條
+主捲軸也沒有第二條。面板自己會捲之後，分頁列與問題同樣釘在它的上緣。
+量到（390×560 逼出溢出）：`.blocked` 324 高／562 內容、`overflow-y: auto`，捲 238px 之後
+最後一顆按鈕進到視窗內；改之前整條鏈沒有任何一層可捲。
+
+**review 頁點不到分頁（第七輪）**：使用者走到最後那頁，看到答案不對卻回不去改。根因是分頁列
+原本只在「問題正上方那一行」找，而 review 頁的分頁列與選項之間隔著一整段 Review：
+
+```text
+←  ☒ 編輯方式  ☒ 功能  ✔ Submit  →
+Review your answers
+ ● 文章是誰寫、怎麼上稿？
+   → 非工程師要能自己發
+Ready to submit your answers?
+❯ 1. Submit answers
+  2. Cancel
+```
+
+改成從選單起點**往上找一段**（20 行內，遇到分隔線或正文符號就停）取最靠近的那一條；一般
+選項頁那條本來就在問題正上方，兩種版型都吃得到。順便把中間那段 Review 解析成「每題 →
+目前答案」，畫成可以點的列——使用者在這一頁最想確認的就是自己答了什麼，而那段原本只存在
+收起來的終端原文裡。點一題就走回那個分頁改。
+
+- **切分頁改送 ←／→**，沒反應才退回 `tab`／`shift+tab`：分頁列兩端畫的就是那兩顆箭頭，而且
+  它們在別處沒有副作用；`shift+tab` 在 claude 主輸入列是「切換權限模式」，萬一沒被對話框收走
+  就會改到使用者的 session。換頁一律不送 space／數字／Enter——換頁不該改到任何答案。
+- **「現在在第幾個分頁」改由解析器猜**（第一個還沒答的；全答完就是 `✔ Submit` 那格），UI 照舊
+  用虛線框標示並在 tooltip 寫明是推測。review 頁量到 `tabAt = 2`（Submit），跟實機一致。
+
+fixture 兩份都進了測試（`carbis-review.txt`、`carbis-multiselect.txt`），連同單選那組共 21 項。
+截圖：`review-mobile-390.png`、`review-desktop-1440.png`、`panel-scroll-390-short.png`
+（390×560 逼出溢出，面板自己捲得動）。這三張是拿真機快照餵給同一個元件畫出來的——carbis 當時
+已經答完那題，不能為了拍照替使用者按鍵。

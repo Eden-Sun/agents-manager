@@ -73,6 +73,17 @@ export interface TuiChoiceMenu {
   multi: boolean
   /** 上方那條分頁列；不是多題問卷就是空陣列。 */
   tabs: TuiTab[]
+  /**
+   * 猜的「現在停在第幾個分頁」：第一個還沒答的；全部答完就是 `✔ Submit` 那格。
+   *
+   * 終端上那一格是用顏色標的，快照只剩純文字，所以這是**推測**不是讀出來的。UI 要照實說。
+   */
+  tabAt: number | null
+  /**
+   * review／confirm 畫面中段那段「每題 → 目前答案」（`● 問題` / `→ 答案`）。
+   * 一般選項頁沒有這段，就是空陣列。
+   */
+  review: { question: string; answer: string }[]
   /** 清單裡那一列沒有編號的 `Submit`（多選才有）。`after` 是它排在第幾個選項後面。 */
   submit: { after: number; current: boolean } | null
 }
@@ -103,6 +114,19 @@ const TRANSCRIPT = /^[⏺⎿✽·✢✻✶*]/
 
 /** 分頁列上的記號：`☒` 答過、`☐` 還沒、`✔` 送出頁。 */
 const TAB_MARK = /([☒☑☐✔✓])\s*([^☒☑☐✔✓←→]+)/g
+
+/**
+ * 分頁列往上找幾行。
+ *
+ * 一般選項頁它就貼在問題正上方，但 review／confirm 那頁中間還隔著一整段「每題 → 答案」
+ * （2026-09-12 第七輪：使用者在最後那頁點不到分頁，回不去改答案，就是因為原本只看問題正
+ * 上方那一行）。所以改成往上找一段，取**最靠近**的那條，遇到分隔線或正文符號就停。
+ */
+const TAB_SCAN = 20
+
+/** review 那段：`● 問題` 一列、`→ 答案` 一列。 */
+const REVIEW_Q = /^\s*[●•]\s+(\S.*)$/
+const REVIEW_A = /^\s*(?:→|->)\s*(\S.*)$/
 
 /**
  * 去掉外框線：claude 的權限框是 `│ ❯ 1. Yes                    │`，框內的縮排要原樣留著
@@ -259,19 +283,47 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     return { number: row.number, title: row.title, detail, current: row.marker, checked: row.checked }
   })
 
-  // 4. 第一項上面那句問題（先跳過空白行，再往上收連續的幾行），再上去可能是分頁列。
+  // 4. 第一項上面那句問題（先跳過空白行，再往上收連續的幾行）。
   let q = rows[0].line - 1
   while (q >= 0 && lines[q].trim() === '') q--
   const qs: string[] = []
   while (q >= 0 && qs.length < 4) {
     const s = lines[q]
     if (s.trim() === '' || isDivider(s) || TRANSCRIPT.test(s.trim()) || matchRow(q, s)) break
-    if (parseTabs(s)) break
+    if (parseTabs(s) || REVIEW_Q.test(s) || REVIEW_A.test(s)) break
     qs.unshift(s.trim())
     q--
   }
-  while (q >= 0 && lines[q].trim() === '') q--
-  const tabs = (q >= 0 ? parseTabs(lines[q]) : null) ?? []
+
+  // 5. 分頁列：從選單起點往上找**最靠近**的那一條，不是只看問題正上方那一行。
+  let tabLine = -1
+  for (let i = rows[0].line - 1; i >= 0 && rows[0].line - i <= TAB_SCAN; i--) {
+    if (isDivider(lines[i]) || TRANSCRIPT.test(lines[i].trim())) break
+    if (parseTabs(lines[i])) {
+      tabLine = i
+      break
+    }
+  }
+  const tabs = (tabLine >= 0 ? parseTabs(lines[tabLine]) : null) ?? []
+
+  // 6. 分頁列與選單之間那段 review（`● 問題` / `→ 答案`），review 頁才有。
+  const review: { question: string; answer: string }[] = []
+  for (let i = tabLine + 1; tabLine >= 0 && i < rows[0].line; i++) {
+    const mq = REVIEW_Q.exec(lines[i])
+    if (mq) {
+      review.push({ question: mq[1].trim(), answer: '' })
+      continue
+    }
+    const ma = REVIEW_A.exec(lines[i])
+    if (ma && review.length) {
+      const last = review[review.length - 1]
+      last.answer = joinWrapped(last.answer, ma[1].trim())
+    }
+  }
+
+  // 哪一格是現在這一題讀不出來（終端只用顏色標），猜第一個還沒答的；全答完就是送出頁。
+  const undone = tabs.findIndex((t) => !t.done && !t.submit)
+  const at = undone >= 0 ? undone : tabs.findIndex((t) => t.submit)
 
   const submitAfter = submitLine < 0 ? -1 : rows.filter((r) => r.line < submitLine).length - 1
 
@@ -282,6 +334,8 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     footer,
     multi: choices.some((c) => c.checked !== null),
     tabs,
+    tabAt: at >= 0 ? at : null,
+    review,
     submit: submitLine < 0 ? null : { after: submitAfter, current: hasMarker(lines[submitLine]) },
   }
 }
