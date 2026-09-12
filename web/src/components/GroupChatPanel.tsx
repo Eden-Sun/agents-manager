@@ -198,7 +198,8 @@ interface Candidate {
 /** The `@` token under the caret, if the caret sits at the end of one. */
 function mentionAtCaret(text: string, caret: number): { start: number; query: string } | null {
   const head = text.slice(0, caret)
-  const m = /(^|[^\p{L}\p{N}_])@([A-Za-z0-9_-]*)$/u.exec(head)
+  // 字元集要跟 `MENTION_RE` 同一份：v3.8 起暱稱允許 CJK，`@小` 也要彈自動完成。
+  const m = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']*)$/u.exec(head)
   if (!m) return null
   return { start: caret - m[2].length - 1, query: m[2] }
 }
