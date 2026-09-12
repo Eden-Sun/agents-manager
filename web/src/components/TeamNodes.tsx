@@ -179,7 +179,8 @@ function TeamNode({ team }: { team: Team }) {
         <button
           type="button"
           className="team-node-btn"
-          aria-pressed={selected}
+          // UI-DECISIONS #11：「開著的是這個」統一用 aria-current（bot 列、專案標題鍵都是）。
+          aria-current={selected ? 'true' : undefined}
           title={`開啟 Team：#${team.issue_number} ${title}\nphase ${TEAM_PHASE_LABEL[team.phase]}${team.pause_reason ? `（${teamPauseLabel(team.pause_reason)}）` : ''}\n分支 ${team.branch}`}
           onClick={() => selectTeam(team.id)}
         >
