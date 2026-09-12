@@ -1519,3 +1519,14 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
 - `BotSettingsPanel` 桌機仍是貼著觸發齒輪的非模態浮窗；名稱欄是指定初始焦點，背景可繼續使用。手機全螢幕 sheet 才把焦點留在面板內並還原觸發元件。
 - `BlockedModal` 仍保留終端鍵盤直通；Tab / Shift+Tab 是瀏覽器焦點移動，不送進 agent。代價是直通模式下仍不能用 Esc 關閉，關閉入口維持右上角按鈕與視窗外。
 - **不採用**原生 `<dialog>` + `showModal()`：現有 backdrop、portal 與巢狀確認框的行為不需改寫，改動面較小且保留既有視覺契約。
+
+## kind 圖示的 tooltip 改寫成「這是什麼」（2026-09-12）
+
+使用者：「header 裡 codex 的 kind 文字說明可以優化」。圖示模式下這一格只剩一個字形，tooltip
+卻只寫 `codex`——等於把看得見的東西再講一次；OpenAI 的標誌尤其不直覺，看到它的人想知道的是
+「這顆 bot 跑的是哪個 CLI、哪家的模型」。
+
+沒有人傳 `title` 時改用 `KIND_DESC`：`claude · Anthropic 的 CLI（Claude 模型）`、
+`codex · OpenAI 的 CLI（GPT 模型，標誌是 OpenAI 的）`、`grok · xAI 的 CLI（Grok 模型）`。
+`aria-label` 仍然只有 kind 名——驗收腳本與朗讀靠它，讀一整句只會吵；`Tools.tsx` 那種自己傳
+`title` 的呼叫點不受影響。標題列、側欄、設定面板、team 圖都吃同一份。
