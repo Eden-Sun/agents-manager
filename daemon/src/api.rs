@@ -138,6 +138,10 @@ pub fn router(app: Arc<App>) -> Router {
             "/supervisor/handoff",
             get(crate::supervisor::api::get_handoff).put(crate::supervisor::api::put_handoff),
         )
+        .route("/supervisor/assignments/{id}", get(crate::supervisor::api::get_assignment))
+        // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
+        .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review))
+        .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents))
         .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox))
         .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
         .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))

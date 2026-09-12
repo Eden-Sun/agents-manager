@@ -54,8 +54,7 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     let target = match crate::db::bot(&app.db, &a.target_bot_id).await {
         Ok(Some(b)) if b.deleted_at.is_none() => b,
         Ok(_) => {
-            let _ = store::finish(&app.db, &a.id, "failed", None, Some("target bot no longer exists")).await;
-            let _ = push_event(app, &a, "assignment_failed", json!({"error": "bot_deleted"})).await;
+            dispatch_failed(app, &a, "target bot no longer exists").await;
             return;
         }
         Err(e) => {
@@ -64,8 +63,7 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         }
     };
     if target.managed_by == "team" {
-        let _ = store::finish(&app.db, &a.id, "failed", None, Some("target bot became team-managed")).await;
-        let _ = push_event(app, &a, "assignment_failed", json!({"error": "team_managed"})).await;
+        dispatch_failed(app, &a, "target bot became team-managed").await;
         return;
     }
 
@@ -74,8 +72,7 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
             // it landed, and is reconciled against the turn rather than re-sent.
             if out.delivery == "failed" {
-                let _ = store::finish(&app.db, &a.id, "failed", None, Some("delivery failed")).await;
-                let _ = push_event(app, &a, "assignment_failed", json!({"error": "delivery_failed"})).await;
+                dispatch_failed(app, &a, "delivery failed").await;
                 return;
             }
             let _ = store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await;
@@ -90,32 +87,35 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             let _ = store::defer(&app.db, &a.id, &iso_in(wait), &why).await;
         }
         Err(LcError::NotFound(what)) => {
-            let _ = store::finish(&app.db, &a.id, "failed", None, Some(&format!("not found: {what}"))).await;
+            dispatch_failed(app, &a, &format!("not found: {what}")).await;
         }
-        // A malformed assignment will be just as malformed next time: fail it now, loudly,
-        // rather than holding work the user believes is running.
-        Err(LcError::Bad(m)) => {
-            let _ = store::finish(&app.db, &a.id, "failed", None, Some(&m)).await;
-            let _ = push_event(app, &a, "assignment_failed", json!({"error": m})).await;
-        }
-        Err(LcError::BadValue(v)) => {
-            let why = v.to_string();
-            let _ = store::finish(&app.db, &a.id, "failed", None, Some(&why)).await;
-            let _ = push_event(app, &a, "assignment_failed", json!({"error": why})).await;
-        }
+        // A malformed assignment will be just as malformed next time: stop retrying it now,
+        // loudly, rather than holding work the user believes is running.
+        Err(LcError::Bad(m)) => dispatch_failed(app, &a, &m).await,
+        Err(LcError::BadValue(v)) => dispatch_failed(app, &a, &v.to_string()).await,
         Err(e) => {
             // Upstream / bad-request: retry a bounded number of times, then give up loudly
             // rather than silently holding work the user thinks is running.
             let why = format!("{e:?}");
             if a.attempts >= RETRY_BACKOFF.len() as i64 {
-                let _ = store::finish(&app.db, &a.id, "failed", None, Some(&why)).await;
-                let _ = push_event(app, &a, "assignment_failed", json!({"error": why})).await;
+                dispatch_failed(app, &a, &why).await;
             } else {
                 let wait = backoff_for(a.attempts).as_secs() as i64;
                 let _ = store::defer(&app.db, &a.id, &iso_in(wait), &why).await;
             }
         }
     }
+}
+
+/// The assignment never ran and never will under this id.
+///
+/// It is *not* closed: the daemon knows the send failed, it does not know what should happen to
+/// the work. So it lands on `awaiting_review` like any other outcome, with `turn_status =
+/// dispatch_failed`, and AGM decides whether to re-target it, follow it up or drop it. Work the
+/// user believes is running must not disappear from the list on the daemon's own say-so.
+async fn dispatch_failed(app: &Arc<App>, a: &store::Assignment, why: &str) {
+    tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, why, "assignment could not be dispatched");
+    settle(app, a, "dispatch_failed", true, None, Some(why)).await;
 }
 
 /// Stamp the delivered prompt as coming from the manager rather than from the user.
@@ -136,28 +136,62 @@ async fn attribute(app: &Arc<App>, message_id: &str) {
         .await;
 }
 
-/// Record a durable notification for the manager. Returns false when the event was already
-/// known — a replayed turn event, or a restart rescan seeing the same completion again.
-async fn push_event(
+/// The dedupe key one assignment's outcome always lands under, whichever path reports it: the
+/// live turn event, the restart rescan, or the missing-event sweep.
+fn event_key(kind: &str, a: &store::Assignment) -> String {
+    format!("{}:{}:{}", kind, a.id, a.turn_id.clone().unwrap_or_default())
+}
+
+/// Park an assignment on `awaiting_review` and queue its notification, atomically.
+///
+/// Nothing here decides the work is done: `turn_status` and `evidence_complete` are recorded as
+/// observed, and AGM has to accept, block, ask for a follow-up or fail it explicitly
+/// (`POST /api/supervisor/assignments/{id}/review`).
+async fn settle(
     app: &Arc<App>,
     a: &store::Assignment,
-    kind: &str,
-    payload: serde_json::Value,
+    turn_status: &str,
+    evidence_complete: bool,
+    result: Option<&str>,
+    error: Option<&str>,
 ) -> bool {
-    let key = format!("{}:{}:{}", kind, a.id, a.turn_id.clone().unwrap_or_default());
-    matches!(
-        store::push_inbox(
-            &app.db,
-            &key,
-            kind,
-            Some(&a.id),
-            Some(&a.target_bot_id),
-            a.turn_id.as_deref(),
-            &payload,
-        )
-        .await,
-        Ok(Some(_))
+    let ok = turn_status == "completed" || turn_status == "completed_fallback";
+    let kind = if ok { "assignment_completed" } else { "assignment_failed" };
+    let payload = json!({
+        "bot_id": a.target_bot_id,
+        "turn_status": turn_status,
+        // `completed_fallback` means the reply was scraped off the terminal, not reported by a
+        // hook. The manager is told, because "it finished" and "we saw all of it" differ.
+        "evidence_complete": evidence_complete,
+        "result": result,
+        "error": error,
+        // Said out loud in the payload so a digest cannot read as an acceptance.
+        "needs_review": true,
+    });
+    match store::settle_and_notify(
+        &app.db,
+        &a.id,
+        turn_status,
+        evidence_complete,
+        result,
+        error,
+        &event_key(kind, a),
+        kind,
+        &payload,
     )
+    .await
+    {
+        Ok(s) => {
+            if s.moved {
+                app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "awaiting_review"})).await;
+            }
+            s.event_new
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, assignment = %a.id, "could not settle the assignment; it stays open");
+            false
+        }
+    }
 }
 
 /// The worker's last word on the turn, which is what the manager actually has to read before
@@ -173,35 +207,16 @@ async fn last_reply(app: &Arc<App>, turn_id: &str) -> Option<String> {
     .flatten()
 }
 
-/// A tracked turn finished. Close the assignment and queue the notification.
+/// A tracked turn finished. That ends the *execution*, not the job: the assignment moves to
+/// `awaiting_review` and waits for an explicit decision (docs/SPEC.md §18.3).
 async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
     let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
-    if !a.is_open() {
+    if !a.is_executing() {
         return;
     }
     let ok = status == "completed" || status == "completed_fallback";
     let reply = last_reply(app, turn_id).await;
-    let new_status = if ok { "completed" } else { "failed" };
-    let _ = store::finish(&app.db, &a.id, new_status, reply.as_deref(), (!ok).then_some(status)).await;
-    let a = store::assignment(&app.db, &a.id).await.ok().flatten().unwrap_or(a);
-    let kind = if ok { "assignment_completed" } else { "assignment_failed" };
-    // `completed_fallback` means the reply was scraped off the terminal, not reported by a
-    // hook. The manager is told, because "it finished" and "we saw all of it" differ.
-    let fresh = push_event(
-        app,
-        &a,
-        kind,
-        json!({
-            "bot_id": a.target_bot_id,
-            "turn_status": status,
-            "evidence_complete": status != "completed_fallback",
-            "result": reply,
-        }),
-    )
-    .await;
-    if fresh {
-        app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": new_status})).await;
-    }
+    settle(app, &a, status, status != "completed_fallback", reply.as_deref(), (!ok).then_some(status)).await;
 }
 
 /// Reconcile every open assignment against what the database actually says about its turn.
@@ -219,13 +234,50 @@ pub async fn reconcile(app: &Arc<App>) {
             continue;
         };
         let Some(turn) = turn else {
-            // The turn is gone (a purge, a rebuilt bot): queue it again under the same id
-            // rather than inventing a new one.
-            let _ = store::finish(&app.db, &a.id, "failed", None, Some("turn no longer exists")).await;
+            // The turn is gone (a purge, a rebuilt bot). We cannot say what became of the
+            // work, so it goes to review rather than being called failed and forgotten.
+            settle(app, &a, "turn_missing", false, None, Some("turn no longer exists")).await;
             continue;
         };
         if turn.status != "in_flight" && turn.status != "queued" {
             on_turn_done(app, &turn_id, &turn.status).await;
+        }
+    }
+    sweep_missing_events(app).await;
+}
+
+/// A settled assignment whose completion event is not in the inbox.
+///
+/// [`store::settle_and_notify`] makes the two atomic, so this only ever finds rows closed by an
+/// older daemon — but that is exactly the backlog the review flagged, and it is cheap to look.
+async fn sweep_missing_events(app: &Arc<App>) {
+    let Ok(orphans) = store::settled_without_event(&app.db, 50).await else { return };
+    for a in orphans {
+        let ok = a.turn_status.as_deref() == Some("completed") || a.turn_status.as_deref() == Some("completed_fallback");
+        let kind = if ok { "assignment_completed" } else { "assignment_failed" };
+        let key = event_key(kind, &a);
+        let payload = json!({
+            "bot_id": a.target_bot_id,
+            "turn_status": a.turn_status,
+            "evidence_complete": a.evidence_complete.map(|v| v != 0),
+            "result": a.result,
+            "error": a.error,
+            "needs_review": true,
+            // Said out loud: this one was recovered by the sweep, not reported live.
+            "recovered": true,
+        });
+        if let Ok(Some(_)) = store::push_inbox(
+            &app.db,
+            &key,
+            kind,
+            Some(&a.id),
+            Some(&a.target_bot_id),
+            a.turn_id.as_deref(),
+            &payload,
+        )
+        .await
+        {
+            tracing::warn!(assignment = %a.id, "recovered an assignment result that was never queued for the manager");
         }
     }
 }
@@ -248,7 +300,9 @@ async fn drain_queue(app: &Arc<App>) {
 /// Compose one digest for everything the manager has not been told about yet.
 fn digest(events: &[store::InboxEvent]) -> String {
     let mut s = String::from(
-        "[AG Man 通知] 以下是你追蹤中的工作的最新結果。依 assignment id 去重，處理完用 `bin/agm ack <event_id>` 確認。\n",
+        "[AG Man 通知] 以下是你追蹤中的工作的最新結果。依 assignment id 去重，處理完用 `bin/agm ack <event_id>` 確認。\n\
+         回合結束只代表那一輪跑完，不代表工作已完成：交辦會停在 awaiting_review，要你看過證據後用 \
+         `bin/agm review <assignment_id> --decision accept|block|followup|fail|cancel` 才會結案。\n",
     );
     for e in events {
         let p: serde_json::Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
@@ -306,7 +360,10 @@ fn notify_due(last: Option<&str>, interval: u64, now: chrono::DateTime<chrono::U
 async fn notify(app: &Arc<App>) {
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
     let Some(manager) = sup.bot_id.clone() else { return };
-    let Ok(pending) = store::pending_inbox(&app.db).await else { return };
+    let cfg = app.cfg.get().await;
+    let max_attempts = cfg.supervisor.notify_max_attempts.max(1);
+    let now = crate::db::now();
+    let Ok(pending) = store::due_inbox(&app.db, &now, max_attempts).await else { return };
     if pending.is_empty() {
         return;
     }
@@ -314,7 +371,7 @@ async fn notify(app: &Arc<App>) {
     // controller keep their own cadence, and every event is already in the inbox. All that is
     // paced is how often the manager is interrupted — one digest per window, carrying
     // everything the window collected.
-    let interval = app.cfg.get().await.supervisor.notify_interval_secs;
+    let interval = cfg.supervisor.notify_interval_secs;
     if !notify_due(sup.last_notify_at.as_deref(), interval, chrono::Utc::now()) {
         tracing::debug!(interval, pending = pending.len(), "supervisor notify throttled; events stay pending");
         return;
@@ -322,18 +379,88 @@ async fn notify(app: &Arc<App>) {
     if super::manager_liveness(app, &manager).await.unwrap_or("stopped") != "idle" {
         return;
     }
+    let ids: Vec<String> = pending.iter().map(|e| e.id.clone()).collect();
     // One prompt for the whole batch, with an id derived from the batch: a retry after a
-    // crash mid-send reuses it instead of prompting twice.
-    let crid = format!("agm-inbox-{}", pending.last().map(|e| e.id.clone()).unwrap_or_default());
+    // crash mid-send reuses it instead of prompting twice. Attempts past the first get their
+    // own suffix so a *known-failed* send is not forever answered out of the dedupe cache —
+    // `lifecycle::prompt` would hand back the dead turn instead of sending anything.
+    let attempt = pending.iter().map(|e| e.notify_attempts).max().unwrap_or(0);
+    let crid = match attempt {
+        0 => format!("agm-inbox-{}", ids.last().cloned().unwrap_or_default()),
+        n => format!("agm-inbox-{}-r{n}", ids.last().cloned().unwrap_or_default()),
+    };
     match lifecycle::prompt(app, &manager, &digest(&pending), &crid).await {
+        // A prompt call that returns Ok is not a prompt that arrived. `failed` is the CLI
+        // telling us it did not land; treating that as delivered is exactly how a result went
+        // missing with the row saying it had been handed over.
+        Ok(out) if out.delivery == "failed" => {
+            let wait = notify_backoff(attempt).as_secs() as i64;
+            let _ = store::defer_notify(&app.db, &ids, &iso_in(wait), "delivery failed").await;
+            tracing::warn!(attempt, "supervisor notify reported a failed delivery; events stay pending");
+        }
         Ok(out) => {
-            let ids: Vec<String> = pending.iter().map(|e| e.id.clone()).collect();
-            let _ = store::mark_delivered_inbox(&app.db, &ids, &out.turn_id).await;
-            // Only a wake that actually landed opens the next window.
+            // `unknown` is recorded as unknown. The events are marked delivered against this
+            // turn so the recovery pass reconciles *that turn* rather than sending a second
+            // copy of the same digest.
+            let _ = store::mark_delivered_inbox(&app.db, &ids, &out.turn_id, &out.delivery).await;
+            // Only a wake that actually went out opens the next window.
             let _ = store::set_last_notify(&app.db, &crate::db::now()).await;
         }
         Err(e) => {
+            let wait = notify_backoff(attempt).as_secs() as i64;
+            let _ = store::defer_notify(&app.db, &ids, &iso_in(wait), &format!("{e:?}")).await;
             tracing::debug!(error = ?e, "supervisor notify deferred; events stay pending");
+        }
+    }
+}
+
+/// Bounded backoff between notify attempts, on the same shape as the dispatch one.
+fn notify_backoff(attempts: i64) -> Duration {
+    let i = (attempts.max(0) as usize).min(RETRY_BACKOFF.len() - 1);
+    Duration::from_secs(RETRY_BACKOFF[i])
+}
+
+/// Delivered, but never answered.
+///
+/// Three different things end up here and they are not the same: the notify turn failed or was
+/// interrupted (nothing was read, re-offer it at once), the turn ended normally but no ack came
+/// (the manager saw it and moved on, or it did not — re-offer after the deadline), and the
+/// delivery was `unknown` (look at the turn before doing anything). In all three the *original*
+/// turn is consulted first; nothing is ever re-sent on the strength of a missing ack alone.
+async fn recover_unacked(app: &Arc<App>) {
+    let cfg = app.cfg.get().await;
+    let deadline = cfg.supervisor.notify_ack_deadline_secs as i64;
+    let Ok(delivered) = store::delivered_inbox(&app.db).await else { return };
+    for e in delivered {
+        let Some(turn_id) = e.notify_turn_id.clone() else { continue };
+        let turn = sqlx::query_as::<_, crate::db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_optional(&app.db)
+            .await
+            .ok()
+            .flatten();
+        let why = match turn.as_ref().map(|t| t.status.as_str()) {
+            // The wake-up itself never completed (`lifecycle` fails a turn on an aborted or
+            // interrupted send): the manager cannot have read it.
+            Some("failed") => Some("notify turn did not complete"),
+            // The turn we were told carried it does not exist any more.
+            None => Some("notify turn is gone"),
+            // Still running: leave it alone, the manager is reading it right now.
+            Some("in_flight") | Some("queued") => None,
+            Some(_) => {
+                let age = e
+                    .delivered_at
+                    .as_deref()
+                    .or(Some(e.updated_at.as_str()))
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).num_seconds())
+                    .unwrap_or(i64::MAX);
+                (age >= deadline).then_some("delivered but never acknowledged")
+            }
+        };
+        let Some(why) = why else { continue };
+        if store::requeue_inbox(&app.db, &e.id, why).await.unwrap_or(false) {
+            tracing::warn!(event = %e.id, attempts = e.notify_attempts, why, "re-queueing an unanswered notification");
         }
     }
 }
@@ -559,6 +686,9 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     }
                     reconcile(&app).await;
                     drain_queue(&app).await;
+                    // Before pushing anything new: give back the notifications that went out
+                    // and were never answered. A delivered event nobody acked is still owed.
+                    recover_unacked(&app).await;
                     notify(&app).await;
                     super::watchdog::tick(&app).await;
                 }
@@ -616,6 +746,11 @@ mod tests {
             payload_json: json!({"result": "done", "evidence_complete": complete}).to_string(),
             state: "pending".into(),
             notify_turn_id: None,
+            notify_delivery: None,
+            notify_attempts: 0,
+            notify_next_at: None,
+            notify_error: None,
+            delivered_at: None,
             created_at: "now".into(),
             updated_at: "now".into(),
         };
@@ -637,6 +772,11 @@ mod tests {
             payload_json: json!({"result": "x"}).to_string(),
             state: "pending".into(),
             notify_turn_id: None,
+            notify_delivery: None,
+            notify_attempts: 0,
+            notify_next_at: None,
+            notify_error: None,
+            delivered_at: None,
             created_at: "now".into(),
             updated_at: "now".into(),
         }

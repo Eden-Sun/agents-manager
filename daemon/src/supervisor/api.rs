@@ -96,14 +96,181 @@ pub struct AssignIn {
     pub client_request_id: String,
     #[serde(default)]
     pub source_turn_id: Option<String>,
+    /// Files / modules this assignment is being handed, for conflict reporting (§18.4).
+    #[serde(default)]
+    pub ownership: Vec<String>,
 }
 
 pub async fn post_assignment(
     State(app): State<Arc<App>>,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
-    let a = super::assign(&app, &b.target_bot_id, &b.text, &b.client_request_id, b.source_turn_id.as_deref()).await?;
+    let a = super::assign(
+        &app,
+        &b.target_bot_id,
+        &b.text,
+        &b.client_request_id,
+        b.source_turn_id.as_deref(),
+        &b.ownership,
+        None,
+    )
+    .await?;
     Ok(Json(a))
+}
+
+/// One assignment, with its decision history.
+pub async fn get_assignment(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+    let a = store::assignment(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("assignment".into()))?;
+    let mut out = a.to_json();
+    out["reviews"] = json!(store::reviews(&app.db, &a.id).await.map_err(up)?);
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+pub struct ReviewIn {
+    /// accept | block | followup | fail | cancel
+    pub decision: String,
+    /// Who decided. AGM names itself; a human acting through the UI says so.
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// What the decision rests on — a turn id, a commit, a build log line.
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// `followup` only: the continuation's text and its own stable request id.
+    #[serde(default)]
+    pub followup_text: Option<String>,
+    #[serde(default)]
+    pub followup_request_id: Option<String>,
+    #[serde(default)]
+    pub followup_bot_id: Option<String>,
+    #[serde(default)]
+    pub ownership: Vec<String>,
+}
+
+/// Accept, block, continue, fail or cancel an assignment.
+///
+/// This is the only way an assignment is ever called done. A turn ending puts it on
+/// `awaiting_review`; what happened to the *work* is a judgement, and a judgement has an author,
+/// a reason and evidence attached to it (SPEC §18.3).
+///
+/// Idempotent: repeating a decision that is already recorded returns the same row without
+/// writing a second audit entry, and a `followup` reuses its `followup_request_id`, so a retry
+/// after a timeout cannot fan out into two continuations.
+pub async fn post_review(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<ReviewIn>,
+) -> Result<Json<Value>, LcError> {
+    let _g = super::lock().await;
+    let to_status = store::decision_status(&b.decision).ok_or_else(|| {
+        LcError::Bad("decision must be one of accept | block | followup | fail | cancel".into())
+    })?;
+    let a = store::assignment(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("assignment".into()))?;
+
+    // Already decided this way: hand back what is on file. A retry after a lost response must
+    // not look like a second decision.
+    if a.status == to_status && a.review_decision.as_deref() == Some(b.decision.as_str()) {
+        let mut out = a.to_json();
+        out["reviews"] = json!(store::reviews(&app.db, &a.id).await.map_err(up)?);
+        out["idempotent"] = json!(true);
+        return Ok(Json(out));
+    }
+    // A decision is only meaningful on something that is still open. Re-deciding a closed
+    // assignment would rewrite history; the follow-up mechanism exists for that.
+    if !a.is_open() {
+        return Err(LcError::conflict(
+            "assignment is already closed; create a follow-up assignment instead of re-deciding this one",
+            json!({"assignment_id": a.id, "status": a.status, "reason": "already_closed"}),
+        ));
+    }
+    // The turn is still running: there is nothing to accept yet, and accepting it would be a
+    // claim about work we can still watch happening.
+    if a.is_executing() && b.decision != "cancel" && b.decision != "block" {
+        return Err(LcError::conflict(
+            "assignment has not finished executing; only cancel or block apply while it is in flight",
+            json!({"assignment_id": a.id, "status": a.status, "reason": "still_executing"}),
+        ));
+    }
+
+    let actor = b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string());
+    let source = b.source.clone().unwrap_or_else(|| "api".to_string());
+
+    // A follow-up is a *new* assignment carrying the unfinished part forward, never an edit of
+    // the one already sent: rewriting delivered text is how a bot ends up working from words
+    // nobody sent it.
+    let followup = if b.decision == "followup" {
+        let text = b
+            .followup_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| LcError::Bad("followup needs followup_text".into()))?;
+        let crid = b
+            .followup_request_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| LcError::Bad("followup needs a stable followup_request_id".into()))?;
+        let target = b.followup_bot_id.clone().unwrap_or_else(|| a.target_bot_id.clone());
+        let ownership = if b.ownership.is_empty() { a.ownership() } else { b.ownership.clone() };
+        drop(_g);
+        Some(super::assign(&app, &target, text, crid, None, &ownership, Some(&a.id)).await?)
+    } else {
+        None
+    };
+    let followup_id = followup.as_ref().and_then(|f| f.get("id").and_then(Value::as_str).map(str::to_string));
+
+    let updated = store::review(
+        &app.db,
+        &a.id,
+        &b.decision,
+        &actor,
+        &source,
+        b.reason.as_deref(),
+        b.evidence.as_deref(),
+        followup_id.as_deref(),
+    )
+    .await
+    .map_err(up)?
+    .ok_or_else(|| LcError::NotFound("assignment".into()))?;
+
+    app.emit("supervisor_changed", json!({"assignment_id": updated.id, "status": updated.status})).await;
+    let mut out = updated.to_json();
+    out["reviews"] = json!(store::reviews(&app.db, &updated.id).await.map_err(up)?);
+    if let Some(f) = followup {
+        out["followup"] = f;
+    }
+    Ok(Json(out))
+}
+
+#[derive(Deserialize, Default)]
+pub struct IncidentQuery {
+    /// `all=1`: resolved incidents too (newest first). Default: only what is open.
+    #[serde(default)]
+    pub all: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+pub async fn get_incidents(
+    State(app): State<Arc<App>>,
+    Query(q): Query<IncidentQuery>,
+) -> Result<Json<Value>, LcError> {
+    let all = q.all.as_deref().is_some_and(|v| matches!(v, "1" | "true" | "yes"));
+    let rows = if all {
+        store::incidents(&app.db, q.limit.unwrap_or(100).clamp(1, 1000)).await.map_err(up)?
+    } else {
+        store::open_incidents(&app.db).await.map_err(up)?
+    };
+    Ok(Json(json!({
+        "incidents": rows.iter().map(store::Incident::to_json).collect::<Vec<_>>(),
+        "open": store::open_incidents(&app.db).await.map_err(up)?.len(),
+        "all": all,
+    })))
 }
 
 pub async fn get_handoff(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {

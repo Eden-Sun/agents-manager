@@ -52,15 +52,63 @@ pub struct SupervisorCfg {
     /// behaviour).
     #[serde(default = "default_notify_interval_secs")]
     pub notify_interval_secs: u64,
+    /// How long a delivered notification may go unacknowledged before it is offered again.
+    /// Delivery is not an answer: a wake-up the manager never got to read is still owed to it.
+    #[serde(default = "default_notify_ack_deadline_secs")]
+    pub notify_ack_deadline_secs: u64,
+    /// Attempts one event gets before the daemon stops pushing it and raises a
+    /// `notify_exhausted` incident. The event is kept, not dropped — what stops is the burning
+    /// of quota on a manager that is not answering.
+    #[serde(default = "default_notify_max_attempts")]
+    pub notify_max_attempts: i64,
+    /// A host must be unreachable for this long before it counts as an incident. Short blips
+    /// during a reconnect are not a fault.
+    #[serde(default = "default_host_disconnected_secs")]
+    pub host_disconnected_secs: u64,
+    /// A bot configured to autostart must have been down this long before it counts. A bot the
+    /// user stopped is not down, and is never counted here.
+    #[serde(default = "default_bot_stopped_secs")]
+    pub bot_stopped_secs: u64,
+    /// An open assignment that has not moved for this long is stalled. Waiting on a person is
+    /// normal; waiting on nothing for hours is not.
+    #[serde(default = "default_assignment_stalled_secs")]
+    pub assignment_stalled_secs: u64,
 }
 
 fn default_notify_interval_secs() -> u64 {
     600
 }
 
+fn default_notify_ack_deadline_secs() -> u64 {
+    1800
+}
+
+fn default_notify_max_attempts() -> i64 {
+    5
+}
+
+fn default_host_disconnected_secs() -> u64 {
+    120
+}
+
+fn default_bot_stopped_secs() -> u64 {
+    300
+}
+
+fn default_assignment_stalled_secs() -> u64 {
+    7200
+}
+
 impl Default for SupervisorCfg {
     fn default() -> Self {
-        Self { notify_interval_secs: default_notify_interval_secs() }
+        Self {
+            notify_interval_secs: default_notify_interval_secs(),
+            notify_ack_deadline_secs: default_notify_ack_deadline_secs(),
+            notify_max_attempts: default_notify_max_attempts(),
+            host_disconnected_secs: default_host_disconnected_secs(),
+            bot_stopped_secs: default_bot_stopped_secs(),
+            assignment_stalled_secs: default_assignment_stalled_secs(),
+        }
     }
 }
 

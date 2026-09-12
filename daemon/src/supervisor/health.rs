@@ -22,16 +22,30 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     }
     let supervisor = crate::supervisor::status_json(app).await?;
     let supervisor_status = supervisor.get("status").and_then(Value::as_str).unwrap_or("unknown");
-    let severity = if supervisor_status == "failed" || supervisor_status == "waiting_quota" {
+    let manager_severity = if supervisor_status == "failed" || supervisor_status == "waiting_quota" {
         "critical"
     } else if supervisor_status == "not_configured" || supervisor_status == "stopped" || !app.connected.load(std::sync::atomic::Ordering::SeqCst) {
         "degraded"
     } else { "healthy" };
     let hosts = app.hosts.list().await;
     let disconnected_hosts = hosts.iter().filter(|h| !h.is_connected()).count();
+    let system = crate::supervisor::incidents::system_health(app).await;
+    let system_severity = system.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    // The compat projection. `status` used to mean "is AGM all right", and a caller that only
+    // reads this field must not be told everything is fine while a host is down — so it is now
+    // the worse of the two halves, and the halves are published next to it. See docs/SPEC.md §18.
+    let severity = crate::supervisor::incidents::worst(manager_severity, system_severity);
     Ok(json!({
         "status": severity,
         "checked_at": crate::db::now(),
+        // Two questions, two answers: whether the manager can work, and whether the system
+        // around it is intact. Folding them into one number is what let `healthy` mean neither.
+        "manager_health": {
+            "status": manager_severity,
+            "supervisor_status": supervisor_status,
+            "daemon_connected": app.connected.load(std::sync::atomic::Ordering::SeqCst),
+        },
+        "system_health": system,
         "daemon": {"connected": app.connected.load(std::sync::atomic::Ordering::SeqCst)},
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
@@ -39,6 +53,7 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         // Two numbers, not one sum: an assignment still running and a notification nobody
         // acked are different kinds of "owed", and adding them hid a 464-event backlog.
         "pending_assignments": crate::supervisor::store::open_assignment_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "awaiting_review": crate::supervisor::store::awaiting_review_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "inbox_open": crate::supervisor::store::open_inbox_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
     }))
@@ -101,8 +116,12 @@ pub fn spawn(app: Arc<App>) {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut previous = String::new();
         let mut debounce = Debounce::default();
+        let mut detector = crate::supervisor::incidents::Detector::default();
         loop {
             tick.tick().await;
+            // Incidents first: the snapshot below reports what this pass decided, so a fault
+            // and the health reading that mentions it never disagree by one tick.
+            crate::supervisor::incidents::sweep(&app, &mut detector).await;
             let Ok(snapshot) = snapshot(&app).await else { continue };
             let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown").to_string();
             let sup_status = snapshot.pointer("/supervisor/status").and_then(Value::as_str).unwrap_or("unknown").to_string();
@@ -112,17 +131,24 @@ pub fn spawn(app: Arc<App>) {
                 "running": snapshot.pointer("/bots/running"),
                 "busy": snapshot.pointer("/bots/busy"),
                 "pending": snapshot.get("pending_assignments"),
+                "awaiting_review": snapshot.get("awaiting_review"),
                 "inbox_open": snapshot.get("inbox_open"),
                 "disconnected": snapshot.pointer("/hosts/disconnected"),
+                "incidents": snapshot.pointer("/system_health/open_incidents"),
             }).to_string();
             if fingerprint != previous {
                 previous = fingerprint;
                 let _ = app.emit("supervisor_health", snapshot.clone()).await;
             }
-            if !debounce.observe(&status, &sup_status) {
+            // Keyed on the *manager's* half only. System faults have their own durable
+            // incidents with their own one-event-per-transition rule; letting them move this
+            // key too would tell the manager the same thing twice.
+            let manager_status =
+                snapshot.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown").to_string();
+            if !debounce.observe(&manager_status, &sup_status) {
                 continue;
             }
-            let key = format!("health:{status}:{}:{}", inbox_state(&sup_status), chrono::Utc::now().timestamp());
+            let key = format!("health:{manager_status}:{}:{}", inbox_state(&sup_status), chrono::Utc::now().timestamp());
             let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
             let _ = crate::supervisor::store::push_inbox(
                 &app.db, &key, "health_changed", None, bot_id, None, &snapshot,
