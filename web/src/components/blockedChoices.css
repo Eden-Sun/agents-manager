@@ -8,13 +8,25 @@
   margin-bottom: 8px;
 }
 
-/* 問題本身：這是整塊裡唯一要先讀懂的一句，字級比選項再大半級。 */
+/* 問題本身：這是整塊裡唯一要先讀懂的一句，字級比選項再大半級。
+   在全畫面的主捲軸裡釘在上緣——選項多、說明長時捲到第 5 項還看得到自己在回答什麼。 */
 .bc-question {
   margin: 0;
   font-size: 13.5px;
   font-weight: 650;
   line-height: 1.5;
   color: var(--text);
+}
+
+.blocked-modal-body .bc-question {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: -2px 0 0;
+  padding: 6px 0 8px;
+  background: var(--bg-panel);
+  /* 內容從底下捲過去時要看得出來這一行是釘住的，不是跟著捲的第一段。 */
+  box-shadow: 0 1px 0 var(--border);
 }
 
 .bc-list {
@@ -122,13 +134,18 @@
   color: var(--text-dim);
 }
 
-/* 全畫面終端裡：清單放在終端畫面上方，但不能把終端整個擠出視野——選項多的時候自己捲。 */
-.blocked-modal .blocked-choices {
-  margin: 0 16px 0;
-  flex: 0 0 auto;
+/* 全畫面終端的選單模式：這個 body 是**視窗裡唯一的捲動容器**，清單本身不再自己捲。
+   兩層各捲一塊時，手指在手機上分不清正在捲哪一個（2026-09-12 第二輪回饋第 4 點）。 */
+.blocked-modal-body {
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: 50vh;
-  overflow: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 16px 4px;
+}
+
+.blocked-modal-body .blocked-choices {
+  margin-bottom: 0;
 }
 
 /* 對話上方那條 blocked 面板：認出選單之後終端快照預設收起來（`BlockedPanel`），
@@ -150,16 +167,55 @@
   }
 }
 
-/* 手機的全畫面終端是一張 390px 寬的 sheet，裡面那份 185 欄的終端畫面本來就只讀得到左上角
-   （視窗自己也在警告這件事）。有可以點的選單時就讓選單當主角：清單拿走剩下的高度、自己捲，
-   終端縮成固定一小條——留著是為了「還看得到它在動」，不是要在這個寬度上讀它。 */
-@media (width <= 640px) {
-  .blocked-modal .blocked-choices {
-    flex: 1 1 auto;
-    max-height: none;
-  }
+/* 選單模式下展開終端原文時：終端仍照原本的樣子（自己的捲軸）擺在主捲軸下面，不跟著長高
+   把視窗撐爆。這是使用者主動按開的狀態，不是預設。 */
+.blocked-modal:has(.blocked-modal-body) .term.blocked-modal-term {
+  flex: 0 1 auto;
+  max-height: 34vh;
+}
 
-  .blocked-modal:has(.blocked-choices) .term.blocked-modal-term {
-    flex: 0 0 110px;
+
+/* 選單模式底下那一條：Esc 一顆＋把終端原文與整排按鍵收起來的開關。 */
+.bc-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.blocked > .bc-bar {
+  margin-top: 2px;
+}
+
+.blocked-modal-foot > .bc-bar {
+  padding-bottom: 2px;
+}
+
+/* Esc 是這裡唯一常用到的鍵（取消這個問題），做成跟選項同一級的觸控目標，但用中性色——
+   它不是答案之一。 */
+.bc-esc {
+  min-height: 32px;
+  padding: 4px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bc-esc:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.bc-more {
+  margin-left: auto;
+}
+
+@media (width <= 640px) {
+  .bc-esc {
+    min-height: 40px;
+    padding: 4px 16px;
   }
 }
