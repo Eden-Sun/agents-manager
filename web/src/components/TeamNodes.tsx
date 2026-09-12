@@ -9,6 +9,7 @@ import { TrashIcon } from './Icons'
 import { KindTag } from './KindTag'
 import { ModelTag } from './ModelTag'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { TeamCleanupDialog } from './TeamCleanupDialog'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamIssueProgress } from './TeamIssueProgress'
 import { teamTitle } from './TeamNameField'
@@ -150,11 +151,11 @@ function TeamNode({ team }: { team: Team }) {
   const unread = useStore((s) => s.teamUnread[team.id] ?? 0)
   const members = useStore(useShallow((s) => teamMemberBots(s, team.id)))
   const selectTeam = useStore((s) => s.selectTeam)
-  const controlTeam = useStore((s) => s.controlTeam)
   const busy = useStore((s) => Boolean(s.busy[`team:${team.id}:cleanup`]))
   const deleting = useStore((s) => Boolean(s.busy[`team:${team.id}:delete`]))
   const [open, setOpen] = useState(true)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmCleanup, setConfirmCleanup] = useState(false)
   const terminal = TEAM_TERMINAL_PHASES.includes(team.phase)
   const tone = teamPhaseTone(team.phase)
   const title = teamTitle(team)
@@ -214,7 +215,8 @@ function TeamNode({ team }: { team: Team }) {
             data-tip={`清理 · #${team.issue_number}`}
             onClick={(e) => {
               e.stopPropagation()
-              void controlTeam(team.id, 'cleanup')
+              // 清理跟刪除一樣不可逆（成員軟刪、worktree 移除），主面板那顆走確認框，這裡也要。
+              setConfirmCleanup(true)
             }}
           >
             ✕
@@ -248,6 +250,7 @@ function TeamNode({ team }: { team: Team }) {
         </div>
       ) : null}
       {confirmDelete ? <TeamDeleteDialog teamId={team.id} onClose={() => setConfirmDelete(false)} /> : null}
+      {confirmCleanup ? <TeamCleanupDialog teamId={team.id} onClose={() => setConfirmCleanup(false)} /> : null}
     </div>
   )
 }
