@@ -540,7 +540,7 @@ daemon 對每個 relay 都回一句**系統提示格式**（附錄 A），明說
 - **合併順序 = 審查通過順序**（單一整合佇列，reviewer 本來就一次只審一個）。
 - daemon 每次 merge 前檢查 `git -C main status --porcelain` 必須乾淨；不乾淨（PM 手癢改了東西）→ `paused(integration_dirty)`，UI 顯示 `git status`。
 - 派工時 daemon 檢查 `tasks[].files` 是否與其他進行中 task 重疊 → 只**警告**（寫進 PM 下一則 relay：「注意：t2 與 t1 都列了 src/api.rs」），不擋。PM persona 明說「請以檔案 / 模組切分，避免兩人改同一檔」。
-- worker 的 persona 明說：cwd 就是你的 worktree、不得 `cd ..`、不得動 `../main` / `../dev-2`、不得進入 `<project.path>`（使用者的 checkout）、不得 `git push`、不得改分支、每個邏輯段落 commit。這些是「指示」不是「強制」；強制層是 worktree（改錯地方也只汙染自己的 worktree）與 daemon 只合併它建的那條分支。
+- worker 的 persona 明說：cwd 就是你的 worktree、不得 `cd ..`、不得動 `../main` / `../dev-2`、不得進入 `<project.path>`（使用者的 checkout）、不得 `git push`、不得改分支、禁止 `git stash` / `--autostash`、只 `git add` 自己的檔案、收尾前跑 `scripts/check.sh`、每個邏輯段落 commit。這些是「指示」不是「強制」；強制層是 worktree（改錯地方也只汙染自己的 worktree）與 daemon 只合併它建的那條分支。
 
 ### 6.4 交付（`teams.deliver`）
 
@@ -1018,7 +1018,7 @@ Project 底下新增 **Team 節點**（`⚙ #42 <title 截斷>` + phase 燈 + �
 - 每一則關於某個 issue 的 relay（合併通知、`blocked` 回報）開頭標 `[#48]`。
 
 ### A.2 worker persona 與派工 relay
-- persona：「你是 <短名>。你的 cwd `<path>` 是專屬 worktree，你只能在這裡工作：不要 `cd` 出去、不要動 `../`、不要 `git push`、不要切換分支。每個邏輯段落 `git commit`。完成後用 `report` 回報：`summary` 說明改了什麼、如何驗證。做不下去用 `status: blocked` 說明原因。」
+- persona：「你是 <短名>。你的 cwd `<path>` 是專屬 worktree，你只能在這裡工作：不要 `cd` 出去、不要動 `../`、不要 `git push`、不要切換分支。禁止 `git stash` / `--autostash`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`。每個邏輯段落 `git commit`。完成後用 `report` 回報：`summary` 說明改了什麼、如何驗證。做不下去用 `status: blocked` 說明原因。」
 - 派工 relay：「Task t<seq>「<title>」（分支 `<branch>` 已建好並 checkout）。<brief>。相關檔案：<files>。」
 - rework relay：「Reviewer 打回（第 <round> 回）：<summary>。必修：<must_fix>。在同一分支繼續，完成後再 `report`。」
 - rebase relay：「整合分支已前進。請執行 `git rebase <integration>`，解掉衝突並確認可建置後 `report`。」
