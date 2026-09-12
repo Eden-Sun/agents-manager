@@ -3779,8 +3779,27 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             quiet += 1;
             if quiet >= IDLE_POLLS {
                 tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
-                let _ = try_fallback(&app2, &run_id).await;
-                break;
+                // Under the bot's lock like every other caller: `try_fallback` reads the pane
+                // and then claims the turn, and the Stop hook does the same under the lock. Run
+                // outside it, the two interleaved into two assistant messages for one turn
+                // (review 2026-09-12 #5).
+                let done = {
+                    let lock = app2.bot_lock(&bot_id).await;
+                    let _g = lock.lock().await;
+                    try_fallback(&app2, &run_id).await
+                };
+                match done {
+                    Ok(true) => break,
+                    // Nothing was claimed — a leftover spinner shape, a tool still running, or the
+                    // hook got there first. This poller is the safety net for a status that never
+                    // flips (grok, 2026-09-06), so it keeps watching rather than retiring on the
+                    // first miss; the `still` check at the top ends it once the turn is closed.
+                    Ok(false) => quiet = 0,
+                    Err(e) => {
+                        tracing::debug!(turn = %turn_id, error = ?e, "idle-prompt fallback failed; keeping the poller");
+                        quiet = 0;
+                    }
+                }
             }
         }
         // Whatever was held back by the budget is the last thing the UI could still use.

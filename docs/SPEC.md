@@ -157,6 +157,9 @@ hook 身分為 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 
 - **回音剝除**（v4.2 補強）：畫面上只有 `❯ <第一行>` 那列算回音，多行 prompt 的第 2..n 行會留在畫面上，所以再逐行比對把它們去掉。逐行比對在**極窄的 pane** 下必定失敗——TUI 自己就把文字排成一欄、每列一個字（herdr 的 `recent_unwrapped` 只還原終端軟換行，還原不了 TUI 的排版），於是整個 prompt 曾被當成回覆存起來、在 UI 上直立成一條字柱。因此加了**去空白比對**的後備：把兩邊的所有空白字元拿掉再比，且要求候選文字**開頭**就是 prompt 的一段結尾（至少 8 個字元），候選本身若只是那段結尾的片段就整個是回音。
 - **無法辨識就說無法辨識**：剝完是空的 → 「（終端沒有可辨識的回覆）」；剝完仍是一欄單字元（`is_shredded`：≥6 行且 ≥70% 的行只有 1–2 個字）→ 「（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）」。窄 pane 會把字與字之間的空白吃掉，重組不回來，所以不猜。
 - 存為 assistant Message `source = terminal_fallback`、`incomplete = 1`。**之後晚到的 hook 不覆蓋**（去重後丟棄並 log），避免跨回合錯配。
+- 第二個觸發點是 `turn_progress` 的輪詢器（§4.3 的狀態沒翻時的安全網：空輸入列且畫面 14 秒沒變）。它**也在 bot 鎖內**呼叫同一支
+  `try_fallback`（2026-09-12 review #5：以前在鎖外，與 hook 交錯成同回合兩則 assistant）；沒收成（spinner 殘影、工具還在跑、hook 先到）
+  就繼續盯著，不自己退場——Turn 由任何一方收掉時，迴圈開頭的「還在 in_flight 嗎」自然結束它（review 可能 b）。
 - **沒有 hook 的 run（v4.2）**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的
   子 agent，見 §6.5a）永遠等不到 hook，終端快照對它不是備援而是**唯一來源**。所以這種 run 的 `working → idle`
   若沒有 in-flight Turn，不再什麼都不做，而是用同一份快照補一筆 `origin = external`、`status =
@@ -505,7 +508,9 @@ default Bot 的 prompt / keys / terminal 讀取會依 Run 的 session 回到 def
    - 其他 type → ack 後丟棄。
 3. 去重：`(native_session_id, native_turn_id)` 已存在 → 忽略。
 4. 配對目標 = 該 Run **唯一**的 `in_flight` Turn（不用時間排序）：
-   - 有 → 建 assistant Message（`source=hook`），Turn `completed`，寫入 native ids。
+   - 有 → CAS `UPDATE … WHERE status='in_flight'`；**成功**才建 assistant Message（`source=hook`），Turn `completed`，寫入 native ids。
+     CAS 輸了且 Turn 已是 `completed_fallback`（§4.3 的備援先收掉）→ 只把 native ids 蓋到那筆 Turn、丟棄 payload
+     （2026-09-12 review #5：以前不看 CAS 結果照樣插一則，同回合兩則 assistant）。其他原因收掉的（stop／failed）照舊保留回覆。
    - 無 → 第 5 點。
 5. external：建 Turn（`origin=external`, `status=completed`）+ user Message（Codex 可從 `input-messages` 取得；Claude 無則省略）+ assistant Message。
 6. 推 WS `message_added` / `turn_updated`。
