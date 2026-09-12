@@ -40,10 +40,21 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
 
   const tabs = tabsTotal(row.browsers)
   const tabsHot = tabs >= TABS_WARN
+  // 整機剩餘（2026-09-12 使用者）：「herdr 樹吃了 7G」回答不了「還能不能再開一顆 bot」，
+  // 那要看這台還剩什麼。舊 daemon 沒有這一節就只顯示已用量，不要畫成「剩 0」。
+  const machine = row.machine
+  const freePct = machine && machine.total_bytes > 0 ? (machine.available_bytes / machine.total_bytes) * 100 : null
+  const low = freePct !== null && freePct < 15
   const tip = [
     `${remote ? host : '本機'}：herdr 進程樹現在佔用的記憶體`,
     `herdr 本身 ${humanBytes(row.herdr_bytes)} · 底下的 pane 與 CLI ${humanBytes(row.agents_bytes)}`,
     `${row.processes} 個 process`,
+    ...(machine
+      ? [
+          `這台機器：剩 ${humanBytes(machine.available_bytes)} / 共 ${humanBytes(machine.total_bytes)}（已用 ${humanBytes(machine.total_bytes - machine.available_bytes)}，剩 ${Math.round(freePct ?? 0)}%）`,
+          ...(low ? ['剩餘不到 15%，再開 bot 之前先關一些東西。'] : []),
+        ]
+      : []),
     ...(row.browsers.length ? [`瀏覽器：${browsersLine(row.browsers)}${tabsHot ? `（超過 ${TABS_WARN} 個分頁，關一些）` : ''}`] : []),
     '',
     '算的是「跑在 herdr pane 裡的一切」，不只是這裡管的 bot。',
@@ -52,9 +63,15 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
   // 點得開：一個總數看不出「哪些是我自己開的、可以砍」，明細見 `MemPopover`（SPEC §15.2）。
   return (
     <MemPopover host={host}>
-      <span className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}`} title={`${tip.join('\n')}\n\n點一下看有哪些程序。`}>
+      <span className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}${low ? ' mem-low' : ''}`} title={`${tip.join('\n')}\n\n點一下看有哪些程序。`}>
         <span className="mem-k">{remote ? `@${host}` : 'RAM'}</span>
         <span className="mem-v">{humanBytes(row.total_bytes)}</span>
+        {/* 已用量旁邊直接寫「這台還剩多少」——要判斷還能不能再開一顆 bot，看的是這個數字。 */}
+        {machine ? (
+          <span className="mem-free" title={`這台機器還可用 ${humanBytes(machine.available_bytes)}，共 ${humanBytes(machine.total_bytes)}`}>
+            剩 {humanBytes(machine.available_bytes)} / {humanBytes(machine.total_bytes)}
+          </span>
+        ) : null}
         {/* 分頁數只在超線時冒出來：平常那格只講 herdr，超線才是「RAM 被瀏覽器吃掉」的訊號。 */}
         {tabsHot ? <span className="mem-tabs" aria-label={`${tabs} 個瀏覽器分頁`}>⧉{tabs}</span> : null}
       </span>

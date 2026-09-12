@@ -1107,6 +1107,12 @@ export class MockTransport implements Transport {
                 { name: 'ego', tabs: 6, bytes: 700 * 1024 ** 2, processes: 9 },
               ]
             : [],
+        // 整機記憶體（2026-09-12）：本機給一台 16G、剩 5.5G 的機器，遠端給剩餘吃緊的那種，
+        // mock 才看得到 `.mem-low` 的警示長相。
+        machine:
+          h.name === 'local'
+            ? { total_bytes: 16 * 1024 ** 3, available_bytes: 5.5 * 1024 ** 3 }
+            : { total_bytes: 32 * 1024 ** 3, available_bytes: 3 * 1024 ** 3 },
       }
     })
     return {

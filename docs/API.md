@@ -478,6 +478,12 @@ herdr 這一側現在佔多少常駐記憶體。左上角那一格用的就是�
   （`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`）：
   `[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}]`。`tabs` = `--type=renderer`
   的 process 數（≈ 分頁數）。**不算進** `total_bytes`；前端在總分頁 ≥ 30 時把左上角那格標紅並顯示分頁數。
+- `hosts[].machine`（2026-09-12 新增，SPEC §15.1a）：**整台機器**的記憶體，
+  `{"total_bytes":17179869184,"available_bytes":5536579584}`。`total_bytes` 那一欄只講 herdr 樹，
+  回答不了「還能不能再開一顆 bot」。取法：Linux 讀 `/proc/meminfo` 的 `MemTotal`/`MemAvailable`；
+  macOS 用 `sysctl -n hw.memsize` ＋ `vm_stat` 的 free/inactive/speculative/purgeable 頁數換算
+  （核心可回收的部分算「可用」）。**不是** `total − 我們用掉的`：機器上還有瀏覽器與系統。
+  認不出來（舊 daemon、指令不存在）→ `null`，UI 只顯示已用量。跟 `ps` 同一次往返取回。
 - 每台主機一次 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走既有的 ssh master），RSS 由 KiB 換成 bytes。
 - **量不到的主機用 `error` 回報，不會從清單消失**：總和悄悄變小比沒有數字更糟。UI 會在數字旁
   標星號。

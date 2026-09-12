@@ -411,6 +411,9 @@ button:disabled {
   flex: none;
   display: inline-flex;
   align-items: baseline;
+  /* 剩餘量（`.mem-free`）用整行寬度，所以這一格要允許折行——左上角那一欄只有約 175px，
+     「已用 · 剩 N / 共 M」擠在同一行會被右邊界切掉（2026-09-12 實拍）。 */
+  flex-wrap: wrap;
   gap: 4px;
   padding: 1px 5px;
   border: 1px solid var(--border);
@@ -431,6 +434,42 @@ button:disabled {
   font-family: var(--font-mono);
   font-weight: 650;
   font-variant-numeric: tabular-nums;
+}
+
+/* 「剩 5.5G」——已用量旁邊的剩餘可用量（2026-09-12 使用者）。比已用量淡一級：它是背景條件，
+   不是主角；剩餘吃緊時才靠 `.mem-low` 變成警示色。 */
+/* 自己一整行：左上角那一欄只有約 120px，跟已用量、分頁數擠在同一行會被拆成「剩」＋「5.5G」
+   兩段（2026-09-12 實拍）。獨立一行就永遠讀得完，也不必把數字縮寫到看不懂。 */
+.mem-badge .mem-free {
+  flex: 0 0 100%;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.mem-badge.mem-low {
+  border-color: var(--danger);
+}
+
+.mem-badge.mem-low .mem-free {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+/* 明細最上面那一行：這台還剩多少。 */
+.mem-pop-machine {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mem-pop-machine.low {
+  color: var(--danger);
+}
+
+.mem-pop-machine-used {
+  color: var(--text-faint);
 }
 
 /* 量不到的那台：直接顯示「—」，不要拿 0 假裝。 */

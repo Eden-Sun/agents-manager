@@ -767,6 +767,18 @@ export interface HostMem {
   error: string | null
   /** 這台上的 Chromium 系瀏覽器（Chrome / ego）：分頁數與 RSS（2026-09-08）。舊 daemon 沒有 → 空陣列。 */
   browsers: BrowserMem[]
+  /**
+   * 整台機器的總量與剩餘可用量（2026-09-12）。`total_bytes` 只講「herdr 樹吃掉多少」，回答不了
+   * 「還能不能再開一顆 bot」；舊 daemon 沒有這個欄位 → null，UI 就只顯示已用量。
+   */
+  machine: MachineMem | null
+}
+
+/** 整台機器的記憶體（`HostMem.machine`，SPEC §15）。 */
+export interface MachineMem {
+  total_bytes: number
+  /** 現在還可用的量。Linux 取 MemAvailable；macOS 取 free+inactive+speculative+purgeable。 */
+  available_bytes: number
 }
 
 export interface BrowserMem {
