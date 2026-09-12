@@ -13,6 +13,7 @@ import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
+import { BlockedBadge } from './BlockedBadge'
 import { BlockedModal } from './BlockedModal'
 import { BlockedPanel } from './BlockedPanel'
 import { BotSettingsPanel, PersonaMark } from './BotSettingsPanel'
@@ -1245,6 +1246,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   /** 主機 shell 當第三個分頁：標題列不變，只有下面的內容換成終端（2026-09-08）。 */
   const shellOpen = shellView !== null && !settingsOpen
   const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
+  // 標題列「● 需要回應」chip 按下去：立刻開，不等 AUTO_OPEN_DELAY，也不管關過沒。
+  const openBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: true }))
 
   return (
     <>
@@ -1285,6 +1288,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <UpdateBadge botId={botId} />
             <RuntimeDriftBadge botId={botId} />
             <TurnErrorBadge botId={botId} />
+            <BlockedBadge botId={botId} onOpen={openBlockedFull} />
             {headUnread > 0 ? (
               <span className="unread-turns" title={`${headUnread} 個回合已完成，還沒看過`}>
                 !{headUnread > 99 ? '99+' : headUnread}
@@ -1308,6 +1312,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 </span>
               ) : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
+              <BlockedBadge botId={botId} onOpen={openBlockedFull} />
             </div>
           ) : <div className="main-title-sub">
             <KindTag kind={bot.kind} />
