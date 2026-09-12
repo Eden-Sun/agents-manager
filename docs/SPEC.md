@@ -436,7 +436,9 @@ daemon 沒有參與，那句話只以 **prompt 回音**的形式從 hook 回來�
 
 補法跟 §6.5b 同一種：**做成機制，不是請求**。
 
-1. PATH 上的 shim 攔 `agent prompt`：補完名字前綴之後，先 `POST /relay/announce`
+1. PATH 上的 shim 攔 `agent prompt`：目標名字 herdr 本來就認得（`herdr agent get` 找得到——AGM、別的頂層 bot、
+   pane id）就照原名送，找不到才視為自己的子 agent 補前綴（不然向 AGM 申請會被改成 `<自己>-agm-…` 而 unknown_target）；
+   決定好名字之後，先 `POST /relay/announce`
    （表單欄位 `bot_id`／`to_agent`／`text`，驗證用該 bot 的 `hook_token`，header `X-AM-Bot-Token`，
    跟 hook 同一把鑰匙），再照常轉給真的 herdr。報不成功（沒有 curl、daemon 沒開）就只是少一次標示，
    訊息照送。名字前面帶旗標時整串原樣轉發，不猜。
