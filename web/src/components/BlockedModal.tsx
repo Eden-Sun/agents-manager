@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useStore } from '../store/store'
+import { BlockedChoices } from './BlockedChoices'
 import { CodexUpdateHint } from './CodexUpdateHint'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
@@ -23,6 +25,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const [passthrough, setPassthrough] = useState(true)
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
   const press = usePaneKeys(botId, refresh)
+  const menu = useChoiceMenu(botId, snap?.text)
   const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLPreElement>(null)
 
@@ -104,6 +107,10 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         ) : null}
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
+
+        {/* 認得出編號選單就先給可以點的那一份（`BlockedChoices`）。這裡的終端畫面**不收起來**：
+            全畫面本來就是「要看完整畫面才決定得了」才開的，選單上方那幾十行脈絡是判斷的一半。 */}
+        {menu ? <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} /> : null}
 
         <pre className="term blocked-modal-term" ref={termRef} tabIndex={0}>
           {err ? `讀取終端失敗：${err}` : (snap?.text ?? '讀取中…')}
