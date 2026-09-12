@@ -1349,7 +1349,7 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     // orphans with nothing to hang from. Deepest first, each stopped the same way.
     let mut removed_children = Vec::new();
     for child in descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev() {
-        let _ = lifecycle::stop_bot(&app, &child.id).await;
+        stop_for_delete(&app, &child.id).await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&child.id)
@@ -1362,7 +1362,7 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
         removed_children.push(child.id);
     }
     // SPEC §6.4: stop first (ctrl+c x2, pane closed on timeout), then drop the config entry.
-    let _ = lifecycle::stop_bot(&app, &id).await;
+    stop_for_delete(&app, &id).await;
     // A spawned child never entered config.toml, so the projection cannot retire it.
     if bot.managed_by == "child" {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
@@ -1385,6 +1385,22 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
+}
+
+/// Stop a bot that is about to be deleted. A stop that could not even reach herdr (the host is
+/// down: `client_for_run` fails before the run is touched) used to be ignored with `let _ =`,
+/// leaving a run `running` on a bot nobody can see any more — `live_bots_on_host` skips deleted
+/// bots, so no reconcile ever ends it, and `purge_deleted_bot_dirs` waits for it for ever
+/// (review 2026-09-12 d). End the run here instead: the row is going away. An agent that is in
+/// fact still alive on that host keeps its pane until someone closes it; once it exits, the
+/// orphan-pane sweep of the next reconcile reclaims the pane like any other ended run's.
+async fn stop_for_delete(app: &Arc<App>, bot_id: &str) {
+    if let Err(e) = lifecycle::stop_bot(app, bot_id).await {
+        tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot before deleting it; ending its run");
+        if let Ok(Some(run)) = db::active_run(&app.db, bot_id).await {
+            lifecycle::mark_run_exited(app, &run.id, "the bot was deleted while its host was unreachable").await;
+        }
+    }
 }
 
 /// Every live `managed_by = 'child'` bot under `root`, parents before their children
@@ -2689,6 +2705,37 @@ mod delete_bot_tests {
         assert_eq!(db::active_run(&app.db, &id).await.unwrap().map(|r| r.id), Some(run), "not stopped");
         assert!(dir.exists(), "hook material kept");
         assert!(!e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
+    }
+
+    /// Deleting a bot whose host is unreachable must not leave its run `running` for ever
+    /// (review 2026-09-12 d): the bot is gone from every list a reconcile walks, so nothing
+    /// else would ever end that run.
+    #[tokio::test]
+    async fn a_bot_deleted_while_its_host_is_down_does_not_keep_a_running_run() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "remote-ish", "user").await;
+        let run = db::ulid();
+        // A session no client answers for: `stop_bot` fails before touching anything.
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','pane-x','agent','no-such-session',?)",
+        )
+        .bind(&run)
+        .bind(&id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        delete_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+
+        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_some(), "the bot is gone");
+        assert!(db::active_run(&app.db, &id).await.unwrap().is_none(), "no orphan run stays active");
+        let r = db::run(&app.db, &run).await.unwrap().unwrap();
+        assert_eq!(r.state, "exited");
+        assert!(r.ended_at.is_some());
     }
 
     /// Restoring a soft-deleted team member clears `deleted_at` and nothing else: it must not be
