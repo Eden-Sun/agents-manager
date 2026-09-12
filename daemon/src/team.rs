@@ -3097,61 +3097,65 @@ async fn grow_workers(
 ) -> LcResult<()> {
     let t6 = tid6(&t.id);
     let root = t.worktree_root.clone();
+    let git_dir = repo_path(project, &t.repo);
     for n in (from + 1)..=to {
         let dir = format!("{root}/{}", member_dir("worker", n, issue_seq));
-        tg::worktree_add(
-            app,
-            &project.host,
-            &repo_path(project, &t.repo),
-            &dir,
-            &t.base_sha,
-            true,
-        )
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
         let nick = member_nick(&t6, "worker", n, issue_seq);
-        let bot_id = insert_member(
-            app,
-            project,
-            &t.id,
-            &nick,
-            &t6,
-            "worker",
-            issue_number,
-            spec,
-            &dir,
-        )
-        .await?;
-        // The short persona `insert_member` leaves behind has none of the report protocol.
-        let roster: Vec<String> = db::team_members(&app.db, &t.id)
-            .await
-            .map_err(any_err)?
-            .iter()
-            .filter(|b| b.deleted_at.is_none())
-            .map(|b| {
-                format!(
-                    "`{}`（{}）",
-                    short_name(&b.name, &t.id),
-                    b.team_role.clone().unwrap_or_default()
-                )
-            })
-            .collect();
-        let persona = full_persona(
-            "worker",
-            issue_number,
-            &short_name(&nick, &t.id),
-            &dir,
-            integration,
-            &roster.join("、"),
-            spec.persona_extra.as_deref(),
-            is_unlimited(t),
-        );
-        sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
-            .bind(&persona)
-            .bind(&bot_id)
-            .execute(&app.db)
-            .await
-            .map_err(any_err)?;
+        // Each executor is built as a unit: a worktree without its bot row (or the other way
+        // round) is exactly what made a resent `PATCH workers.count` fail on "already exists".
+        // A worktree a previous attempt left registered is reused, and a failure takes this
+        // executor's own pieces down again — the ones before it are complete and stay.
+        let added = if tg::worktree_present(app, &project.host, &git_dir, &dir).await {
+            false
+        } else {
+            tg::worktree_add(app, &project.host, &git_dir, &dir, &t.base_sha, true)
+                .await
+                .map_err(|e| LcError::Upstream(e.to_string()))?;
+            true
+        };
+        let built: LcResult<String> = async {
+            let bot_id = insert_member(app, project, &t.id, &nick, &t6, "worker", issue_number, spec, &dir).await?;
+            // The short persona `insert_member` leaves behind has none of the report protocol.
+            let roster: Vec<String> = db::team_members(&app.db, &t.id)
+                .await
+                .map_err(any_err)?
+                .iter()
+                .filter(|b| b.deleted_at.is_none())
+                .map(|b| format!("`{}`（{}）", short_name(&b.name, &t.id), b.team_role.clone().unwrap_or_default()))
+                .collect();
+            let persona = full_persona(
+                "worker",
+                issue_number,
+                &short_name(&nick, &t.id),
+                &dir,
+                integration,
+                &roster.join("、"),
+                spec.persona_extra.as_deref(),
+                is_unlimited(t),
+            );
+            if let Err(e) = sqlx::query("UPDATE bots SET persona = ? WHERE id = ?")
+                .bind(&persona)
+                .bind(&bot_id)
+                .execute(&app.db)
+                .await
+            {
+                let _ = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot_id).execute(&app.db).await;
+                crate::lifecycle::purge_bot_dir(app, &bot_id, &project.host).await;
+                return Err(any_err(e));
+            }
+            Ok(bot_id)
+        }
+        .await;
+        let bot_id = match built {
+            Ok(id) => id,
+            Err(e) => {
+                if added {
+                    tg::worktree_remove(app, &project.host, &git_dir, &dir).await;
+                    tg::worktree_prune(app, &project.host, &git_dir).await;
+                }
+                return Err(e);
+            }
+        };
         if let Ok(Some(bot)) = db::bot(&app.db, &bot_id).await {
             for e in crate::trust::pretrust_members(app, std::slice::from_ref(&bot)).await {
                 tracing::warn!(team = %t.id, error = %e, "could not pre-trust a new executor's worktree");
@@ -5711,6 +5715,48 @@ mod api_tests {
         let q = db::team_issues(&app.db, &tid).await.unwrap().into_iter().find(|q| q.issue_number == 43).unwrap();
         assert_eq!(q.state, "working");
         assert!(root.join(member_dir("worker", 2, next.seq)).join(".git").exists());
+    }
+
+    /// daemon-ops #15: `PATCH workers.count` that dies on the third executor keeps the second
+    /// (it is complete), leaves nothing of the third, and the same PATCH sent again succeeds.
+    #[tokio::test]
+    async fn growing_workers_undoes_only_the_executor_that_failed_and_is_retryable() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team(&app, &pid, req(Some(1), false)).await;
+        let t = load(&app, &tid).await.unwrap();
+        let root = std::path::PathBuf::from(&t.worktree_root);
+        let t6 = tid6(&tid);
+        let grow = PatchTeam { workers: Some(RolePatch { count: Some(3), ..Default::default() }), ..Default::default() };
+
+        let blocker = root.join(member_dir("worker", 3, 1));
+        std::fs::create_dir_all(&blocker).unwrap();
+        std::fs::write(blocker.join("in-the-way"), "x").unwrap();
+        patch(&app, &tid, grow.clone()).await.unwrap_err();
+
+        let live_names = |members: Vec<db::Bot>| -> Vec<String> {
+            let mut v: Vec<String> = members
+                .into_iter()
+                .filter(|b| b.deleted_at.is_none() && b.team_role.as_deref() == Some("worker"))
+                .map(|b| b.name)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            live_names(db::team_members(&app.db, &tid).await.unwrap()),
+            [format!("t{t6}-i1-dev-1"), format!("t{t6}-i1-dev-2")],
+            "dev-2 was built completely and stays; nothing of dev-3 is left"
+        );
+        assert!(root.join(member_dir("worker", 2, 1)).join(".git").exists());
+
+        std::fs::remove_dir_all(&blocker).unwrap();
+        patch(&app, &tid, grow).await.unwrap();
+        assert_eq!(
+            live_names(db::team_members(&app.db, &tid).await.unwrap()),
+            [format!("t{t6}-i1-dev-1"), format!("t{t6}-i1-dev-2"), format!("t{t6}-i1-dev-3")],
+        );
+        assert!(root.join(member_dir("worker", 3, 1)).join(".git").exists());
     }
 
     #[tokio::test]
