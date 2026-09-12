@@ -632,7 +632,7 @@ persona 走既有 `bots.persona` → `--append-system-prompt` / `--rules` / `dev
 
 - **建 team**（`POST /projects/:id/teams`，同步部分）：驗證（git repo、issue 存在、kind 已安裝、額度未低於 `quota_stop_pct`）→ **先 `git rev-parse` 解出 `base_sha`、算出 `worktree_root`** → 寫 `teams`（`phase=starting`）→ 建 worktree → 建成員 bot → 回 `{team_id}`。
   - ⚠️ `base_sha` / `worktree_root` 是 `NOT NULL`，所以**必須在寫 row 之前就解出來**（附錄 C 的序列即為此）。早期版本把「寫 row」排在解析之前，兩節不一致，以此處為準。worktree 目錄本身可以在寫 row 之後才建 —— 路徑是算出來的，不需要先存在。之後**背景**逐一 `start_bot`（沿用 SPEC §6.2；每個 60 秒上限）。
-  - PM 起不來 → `failed` + cleanup；任何直接進 `failed` 的 startup 失敗，都先對已啟動成員逐一 best-effort `stop_bot`，停止失敗只記 log，不覆蓋原本的 `member_start_failed` 原因。worker 部分起不來 → 少一個人繼續（≥1 即可），不做這項清理，記 note。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
+  - PM 起不來 → `failed` + cleanup；任何直接進 `failed` 的 startup 失敗，都先對已啟動成員逐一 best-effort `stop_bot`，停止失敗只記 log，不覆蓋原本的 `member_start_failed` 原因。worker 部分起不來 → 少一個人繼續（≥1 即可），不做這項清理，記 note。**起不來的那個執行者要真的退掉**（2026-09-12：`deleted_at` + 退 worktree，note `member_dropped`）——以前留在 pool 裡，PM 第一筆派工就派給它，`flush` 找不到 run 變 `paused(member_lost)`，`resume` 又要求它 running，「少一個人繼續」實際做不到。reviewer 起不來 → `paused(member_failed)`，人決定「不審直接合」或重試。
   - 全部就緒 → `planning`，送 PM 第一則 relay（附錄 A.1）。
 - **停止**：`done / aborted / failed` 時 daemon 對所有成員 `stop_bot`（SPEC §6.4）。成員 pane 不會在 team 還活著時被 daemon 自動停。
 - **使用者手動停某個成員**（既有 `POST /bots/:id/stop`）：scheduler 收到 `RunChanged` → 該成員相關 relay 留在 pending → `paused(member_lost:<name>)`。使用者重新 `start` 該 bot 後按 `resume`；暫停橫幅上的「啟動並繼續」（2026-09-10，`TeamMemberLost`）會把沒在跑的成員全部 `start`、都有 run 之後自動 `resume`，仍是人按的。**不自動重啟**（維持 §13「絕不自動啟動」的精神；自動重啟會讓額度在無人看管下持續消耗）。

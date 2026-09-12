@@ -1134,6 +1134,26 @@ async fn report_member_start_failure(app: &Arc<App>, team_id: &str, bot: &db::Bo
     Ok(())
 }
 
+/// Retire one member the team is going on without: soft-delete the bot row, purge its hook
+/// material and remove its worktree. The note says why, in the timeline the user reads.
+async fn drop_member(app: &Arc<App>, ctx: &Ctx, b: &db::Bot, why: &str) -> LcResult<()> {
+    let _ = lifecycle::stop_bot(app, &b.id).await;
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
+        .bind(db::now())
+        .bind(&b.id)
+        .execute(&app.db)
+        .await
+        .map_err(up)?;
+    lifecycle::purge_bot_dir(app, &b.id, ctx.host()).await;
+    // Only a directory the §6.1 check vouches for is ever removed.
+    if let Ok(wt) = ctx.wt(b) {
+        tg::worktree_remove(app, ctx.host(), &team::repo_path(&ctx.project, &ctx.team.repo), &wt).await;
+    }
+    note(app, &ctx.team.id, json!({"action": "member_dropped", "bot": b.name, "role": b.team_role, "why": why})).await?;
+    app.emit("bot_changed", json!({"bot_id": b.id})).await;
+    Ok(())
+}
+
 /// Stop members left running when startup takes a terminal failure path. Cleanup is deliberately
 /// best effort: the startup error and its timeline note are the useful diagnosis, so a failed
 /// stop must only be logged and never replace them.
@@ -1341,7 +1361,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         note(app, team_id, json!({"action": "pretrust_failed", "error": e})).await?;
     }
 
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed: Vec<db::Bot> = Vec::new();
     for b in &ctx.members {
         if db::active_run(&app.db, &b.id).await.map_err(up)?.is_some() {
             continue;
@@ -1367,7 +1387,7 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
                     pause(app, &ctx.team, &format!("member_failed:{}", b.name)).await?;
                     return Ok(());
                 }
-                _ => failed.push(b.name.clone()),
+                _ => failed.push(b.clone()),
             }
         }
     }
@@ -1375,6 +1395,14 @@ pub async fn startup(app: &Arc<App>, team_id: &str) -> LcResult<()> {
         team::sched_phase(app, team_id, "failed", false).await?;
         stop_failed_startup_members(app, &ctx.members).await;
         return Ok(());
+    }
+    // §7.4 "少一個人繼續" — but *actually* one short. A worker that would not start used to
+    // stay in the pool: the PM's first task went to it, `flush` found no run and parked the
+    // team on `member_lost`, and `resume` then demanded that very member be running
+    // (2026-09-12 review, ops #21). It is retired here instead, worktree and all, so the
+    // roster the PM is told about is the one that can take work.
+    for b in &failed {
+        drop_member(app, &ctx, b, "start failed; continuing one executor short").await?;
     }
 
     sqlx::query("UPDATE teams SET started_at = COALESCE(started_at, ?) WHERE id = ?")
@@ -3846,6 +3874,27 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
             assert_eq!(state, "running", "{} was stopped after a partial worker failure", member.name);
         }
         assert!(!s.e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
+        // ops #21: "one short" means the failed executor is out of the pool, not waiting in it
+        // for the PM's first task to park the team on `member_lost`.
+        assert!(db::bot(&s.app().db, &worker.id).await.unwrap().unwrap().deleted_at.is_some(), "the failed worker is retired");
+        let ctx = s.ctx().await;
+        assert_eq!(ctx.workers().len(), 1);
+        let first: String = sqlx::query_scalar(
+            "SELECT payload_json FROM team_events WHERE team_id=? AND kind='relay' AND json_extract(payload_json,'$.action')='first'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert!(first.contains("併行數 1"), "the PM is told the real parallelism: {first}");
+        let dropped: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='member_dropped'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(dropped, 1);
     }
 
     /// §2.5.5: the hand-over relay explicitly distinguishes a successful native continuation
