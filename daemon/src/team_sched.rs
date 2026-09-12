@@ -392,6 +392,10 @@ pub struct DispatchItem {
     /// §4.4 (2026-09-09): which issue this task belongs to. Optional while only one issue is
     /// working; **required** in unlimited mode, where the daemon cannot guess.
     pub issue: Option<i64>,
+    /// §8.2 (2026-09-12): the `blocked_by_worker` task this item **replaces** — `"task": "t3"`.
+    /// That task is closed `skipped` and this one takes its place (same issue), which is how
+    /// the PM re-briefs or re-assigns a task its executor gave up on.
+    pub task: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -415,6 +419,16 @@ fn issue_field(v: &Value) -> Option<i64> {
         return Some(n);
     }
     let t = f.as_str()?.trim().trim_start_matches('#');
+    t.parse::<i64>().ok()
+}
+
+/// `"task": "t3"`, `"t3"`, `"3"` or `3` — the task's `seq`. Absent or unreadable is `None`.
+fn task_field(v: &Value) -> Option<i64> {
+    let f = v.get("task").or_else(|| v.get("replaces"))?;
+    if let Some(n) = f.as_i64() {
+        return Some(n);
+    }
+    let t = f.as_str()?.trim().trim_start_matches('#').trim_start_matches('t');
     t.parse::<i64>().ok()
 }
 
@@ -459,6 +473,7 @@ impl Action {
                         brief,
                         files: list(t, "files"),
                         issue: issue_field(t),
+                        task: task_field(t),
                     });
                 }
                 Ok(Action::Dispatch(out))
@@ -1541,6 +1556,11 @@ fn issue_tag(ctx: &Ctx, issue_id: Option<&str>) -> String {
     }
 }
 
+/// The issue number a task belongs to, if that issue is working.
+fn issue_number_of(ctx: &Ctx, t: &db::TeamTask) -> Option<i64> {
+    t.issue_id.as_deref().and_then(|i| ctx.issue_of(i)).map(|q| q.issue_number)
+}
+
 fn issue_list(ctx: &Ctx) -> String {
     ctx.issues.iter().map(|i| format!("#{}", i.issue_number)).collect::<Vec<_>>().join("、")
 }
@@ -2164,10 +2184,30 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
         existing.iter().map(|t| (t.issue_id.clone(), t.brief.trim().to_string())).collect();
 
     for it in items {
+        // §8.2: `task: t3` — this item settles a `blocked_by_worker` task by replacing it.
+        // The old row is closed `skipped` (its branch stays), the new one is a fresh task on
+        // the same issue: re-briefed, re-assigned, or both. Before 2026-09-12 a blocked task
+        // had no PM-side transition at all — only a user `decide` could move it, while the PM
+        // was told to "decide what to do next" with nothing it said having any effect (ops #24).
+        let mut replaced: Option<db::TeamTask> = None;
+        if let Some(seq) = it.task {
+            match existing.iter().find(|t| t.seq == seq) {
+                Some(t) if t.state == "blocked_by_worker" => replaced = Some(t.clone()),
+                Some(t) => {
+                    rejected.push(format!("「{}」：t{seq} 不是 blocked（現在是 {}），不能取代", it.title, t.state));
+                    continue;
+                }
+                None => {
+                    rejected.push(format!("「{}」：沒有 t{seq} 這個 task", it.title));
+                    continue;
+                }
+            }
+        }
         // §4.4: which issue this task is for. With one issue working the field may be left
         // out; with several the daemon refuses rather than guessing (a task on the wrong
-        // integration branch is a merge conflict nobody asked for).
-        let issue = match resolve_issue(ctx, it.issue) {
+        // integration branch is a merge conflict nobody asked for). A replacement inherits
+        // the issue of the task it replaces.
+        let issue = match resolve_issue(ctx, it.issue.or_else(|| replaced.as_ref().and_then(|t| issue_number_of(ctx, t)))) {
             Ok(q) => q.clone(),
             Err(e) => {
                 rejected.push(format!("「{}」：{e}", it.title));
@@ -2208,15 +2248,35 @@ async fn dispatch(app: &Arc<App>, ctx: &Ctx, pm: &db::Bot, items: Vec<DispatchIt
                 Some(w)
             }
         };
-        if briefs.iter().any(|(i, b)| i.as_deref() == Some(issue.id.as_str()) && b == it.brief.trim()) {
+        // The same brief as the task being replaced is a re-assignment, not a loop.
+        let same_as_replaced = replaced.as_ref().is_some_and(|t| t.brief.trim() == it.brief.trim());
+        if !same_as_replaced
+            && briefs.iter().any(|(i, b)| i.as_deref() == Some(issue.id.as_str()) && b == it.brief.trim())
+        {
             note(app, &ctx.team.id, json!({"action": "pm_repeat", "brief": it.brief})).await?;
             pause(app, &ctx.team, "pm_repeat").await?;
             return Ok(());
         }
         briefs.push((Some(issue.id.clone()), it.brief.trim().to_string()));
+        if let Some(old) = &replaced {
+            set_task_state(app, &old.id, "skipped").await?;
+            team::record_event(
+                app,
+                &ctx.team.id,
+                "note",
+                None,
+                old.worker_bot_id.as_deref(),
+                Some(&old.id),
+                None,
+                json!({"action": "pm_replaced_task", "task": old.seq, "from": "blocked_by_worker", "to": "skipped",
+                       "replacement_title": it.title}),
+            )
+            .await?;
+        }
         for other in existing.iter().filter(|t| {
             t.issue_id.as_deref() == Some(issue.id.as_str())
                 && !["merged", "skipped", "failed"].contains(&t.state.as_str())
+                && replaced.as_ref().is_none_or(|r| r.id != t.id)
         }) {
             let of: Vec<String> = serde_json::from_str(&other.files_json).unwrap_or_default();
             for f in &it.files {
@@ -2429,9 +2489,13 @@ async fn fill_issue(app: &Arc<App>, ctx: &Ctx, issue: &db::TeamIssue) -> LcResul
 /// such reply pauses the team until a user decides what to do.
 async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
     let tasks = sched_tasks(app, ctx).await?;
-    if !tasks.is_empty() && !tasks.iter().all(|t| ["merged", "skipped", "failed"].contains(&t.state.as_str())) {
+    // §8.2: a `blocked_by_worker` task is waiting for the **PM**, so it is nothing to wait
+    // for — `wait` on it is the same stall as `wait` with everything finished (ops #24).
+    let settled = |t: &db::TeamTask| ["merged", "skipped", "failed", "blocked_by_worker"].contains(&t.state.as_str());
+    if !tasks.is_empty() && !tasks.iter().all(settled) {
         return Ok(());
     }
+    let blocked: Vec<String> = tasks.iter().filter(|t| t.state == "blocked_by_worker").map(|t| format!("t{}", t.seq)).collect();
     let Some(pm) = ctx.pm() else { return Ok(()) };
     // Only one nudge: if the previous relay to the PM already was one, stop asking.
     let last = sqlx::query_as::<_, db::TeamEvent>(
@@ -2464,17 +2528,17 @@ async fn wait(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
             return Ok(());
         }
     }
-    enqueue(
-        app,
-        &ctx.team.id,
-        None,
-        &pm.id,
-        None,
-        "nudge",
-        format!("所有 {} 個 task 都已進入終態。請 `done`（附 summary）或再 `dispatch`。", tasks.len()),
-    )
-    .await
-    .map(|_| ())
+    let text = if blocked.is_empty() {
+        format!("所有 {} 個 task 都已進入終態。請 `done`（附 summary）或再 `dispatch`。", tasks.len())
+    } else {
+        format!(
+            "{} 的執行者回報 blocked，等的是你的決定，`wait` 不會讓它動：用 `dispatch` 帶 `\"task\":\"{}\"` 補充 brief 或改派（可指定 `to`），\
+             或 `done`（blocked 的 task 會視為 skipped）。",
+            blocked.join("、"),
+            blocked[0]
+        )
+    };
+    enqueue(app, &ctx.team.id, None, &pm.id, None, "nudge", text).await.map(|_| ())
 }
 
 /// §8.3: resume a `pm_stalled` team with a fresh prompt instead of leaving the PM idle.
@@ -2516,7 +2580,7 @@ async fn pm_done(
     let tasks = issue_tasks(app, &ctx.team.id, Some(&issue.id)).await?;
     let open: Vec<String> = tasks
         .iter()
-        .filter(|t| !["merged", "skipped", "failed"].contains(&t.state.as_str()))
+        .filter(|t| !["merged", "skipped", "failed", "blocked_by_worker"].contains(&t.state.as_str()))
         .map(|t| match t.worker_bot_id {
             // §4.5: a task nobody has picked up yet is still work the PM cannot call done.
             None => format!("t{}（排隊中）", t.seq),
@@ -2539,6 +2603,22 @@ async fn pm_done(
         )
         .await?;
         return Ok(());
+    }
+    // §8.2: `done` over a `blocked_by_worker` task is the PM's "skip" — it was told the task
+    // is waiting on it and chose to close the issue without it (ops #24).
+    for t in tasks.iter().filter(|t| t.state == "blocked_by_worker") {
+        set_task_state(app, &t.id, "skipped").await?;
+        team::record_event(
+            app,
+            &ctx.team.id,
+            "note",
+            None,
+            t.worker_bot_id.as_deref(),
+            Some(&t.id),
+            None,
+            json!({"action": "pm_skipped_blocked", "task": t.seq, "from": "blocked_by_worker", "to": "skipped"}),
+        )
+        .await?;
     }
     sqlx::query("UPDATE team_issues SET summary = ? WHERE id = ?")
         .bind(summary)
@@ -2616,7 +2696,9 @@ async fn report(
         set_task_state(app, &task.id, "blocked_by_worker").await?;
         if let Some(pm) = ctx.pm() {
             let text = format!(
-                "{tag}`{who}` t{seq}「{title}」→ `blocked`：{why}\n{table}\n請決定下一步（`dispatch` / `wait` / `done` / `ask_user`）。",
+                "{tag}`{who}` t{seq}「{title}」→ `blocked`：{why}\n{table}\n\
+                 這個 task 現在等你決定：`dispatch` 一筆帶 `\"task\":\"t{seq}\"`（補充 brief 或用 `to` 改派，舊的會標 skipped）、\
+                 `done`（把它視為 skipped）、或 `ask_user`。`wait` 對它沒有用。",
                 tag = issue_tag(ctx, task.issue_id.as_deref()),
                 who = ctx.short(worker),
                 seq = task.seq,
@@ -5388,6 +5470,53 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
     }
 
     /// §8.3 — `done` counts the queue too: a task nobody has started yet is still open work.
+    /// ops #24 (2026-09-12) / §8.2: a `blocked_by_worker` task is the PM's to settle, and the
+    /// PM now can — `wait` is a stall, `dispatch` with `task: t1` replaces it (re-brief or
+    /// re-assign), `done` skips whatever is still blocked.
+    #[tokio::test]
+    async fn a_blocked_task_is_settled_by_the_pms_next_relay() {
+        let s = S::new(2, false).await;
+        let pm = s.bot("pm", 0).await;
+        let (d1, d2) = (s.bot("worker", 0).await, s.bot("worker", 1).await);
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"to":"dev-1","title":"A","brief":"做 A"}]})).await;
+        s.reply(&d1, json!({"action":"report","status":"blocked","summary":"看不懂 A"})).await;
+        assert_eq!(s.tasks().await[0].state, "blocked_by_worker");
+
+        // `wait` does not wait on a blocked task: it is a nudge that names it.
+        s.reply(&pm, json!({"action":"wait"})).await;
+        let last = s.pending(&pm).await.pop().unwrap();
+        let p: Value = serde_json::from_str(&last.payload_json).unwrap();
+        assert_eq!(p["action"], "nudge");
+        assert!(p["text"].as_str().unwrap().contains("t1"), "{p}");
+        assert_ne!(s.team().await.phase, "paused");
+
+        // Re-assign it: the same brief to dev-2 is not a `pm_repeat`.
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"task":"t1","to":"dev-2","title":"A again","brief":"做 A"}]})).await;
+        assert_ne!(s.team().await.phase, "paused", "not a repeat");
+        let tasks = s.tasks().await;
+        assert_eq!(tasks.len(), 2);
+        assert_eq!((tasks[0].seq, tasks[0].state.as_str()), (1, "skipped"));
+        assert_eq!(tasks[1].worker_bot_id.as_deref(), Some(d2.id.as_str()), "dev-2 took the replacement");
+        assert_ne!(tasks[1].branch, tasks[0].branch, "a fresh task on a fresh branch");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='pm_replaced_task'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+        // Only a blocked task can be replaced.
+        s.reply(&pm, json!({"action":"dispatch","tasks":[{"task":"t2","title":"B","brief":"做 B"}]})).await;
+        assert_eq!(s.tasks().await.len(), 2, "t2 is not blocked: refused");
+
+        // dev-2 gives up too; `done` is the PM's skip.
+        s.reply(&d2, json!({"action":"report","status":"blocked","summary":"也不懂"})).await;
+        s.reply(&pm, json!({"action":"done","summary":"做不了，先收"})).await;
+        assert_eq!(s.team().await.phase, "finishing", "done was accepted");
+        assert_eq!(s.tasks().await[1].state, "skipped");
+    }
+
     #[tokio::test]
     async fn done_is_refused_while_tasks_are_still_queued() {
         let s = S::new(1, false).await;
@@ -5426,7 +5555,8 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
                 title: "A".into(),
                 brief: "做 A".into(),
                 files: vec![],
-                issue: None
+                issue: None,
+                task: None
             }])
         );
         let named = Action::parse(
@@ -5441,7 +5571,8 @@ async fn complete_answer_turn(s: &S, response: &str) -> String {
                 title: "task".into(),
                 brief: "b".into(),
                 files: vec![],
-                issue: None
+                issue: None,
+                task: None
             }])
         );
         assert!(Action::parse(

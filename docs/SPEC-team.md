@@ -370,9 +370,9 @@ fenced 語言標記固定 `am-team`，內容為**一個 JSON 物件**；daemon �
 
 | 角色 | action | 欄位 | 語意 |
 |---|---|---|---|
-| pm | `dispatch` | `tasks:[{to?, issue?, title, brief, files?[]}]` | 派工。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
-| pm | `wait` | — | 目前沒事做，等回報；若沒有 task 或所有 task 都已終態，第一次送 nudge，第二次（含）→ `paused(pm_stalled)`，等使用者 `resume` 後再提醒 `done` 或 `dispatch` |
-| pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
+| pm | `dispatch` | `tasks:[{to?, issue?, task?, title, brief, files?[]}]` | 派工。**`task`（2026-09-12）**：`"t3"` / `3`，表示這一筆**取代** `blocked_by_worker` 的 t3——舊的標 `skipped`（分支留著，note `pm_replaced_task`），新的照常排隊／派出（同 issue；`to` 可換人；跟舊的相同 brief 不算 `pm_repeat`）。t3 不是 blocked 就拒那一筆。**`to` 可省略**（2026-09-08）：省略時 daemon 派給空著的執行者，一次可派任意筆，超過併行數的排隊（§4.5）。寫了 `to`（成員暱稱如 `dev-1`）就指定那一位；他正忙時**排在他後面**，不再被拒。`to` 對不到人才拒。**`issue`（issue 號，2026-09-09）**：只有一個 issue 進行中時可省；無限模式（§4.5）下**必填**，對不到進行中的 issue 就拒那一筆並回報 PM |
+| pm | `wait` | — | 目前沒事做，等回報；若沒有 task 或所有 task 都已終態**或 `blocked_by_worker`**（它等的是 PM，不是執行者；2026-09-12），第一次送 nudge（有 blocked 的會點名並說明 `task` / `done` 兩條路），第二次（含）→ `paused(pm_stalled)`，等使用者 `resume` 後再提醒 `done` 或 `dispatch` |
+| pm | `done` | `summary`, `issue?`, `workers?: keep \| replace` | 宣告完成。daemon 檢查所有 task 已 `merged | skipped` 才接受，否則回 `reject`；**`blocked_by_worker` 的 task 視為 PM 決定 skip**（2026-09-12：改標 `skipped`、note `pm_skipped_blocked`，不擋 `done`）。`workers` 是 PM 對**下一個 issue**的決定：`keep` 沿用這批執行者（同 bot、同 worktree、上下文保留），`replace`（預設）換一批新的。**`issue`（2026-09-09）**：同 `dispatch`，只驗**那個** issue 的 task 全終態，也只交付那一個 issue，其他 issue 照跑 |
 | pm | `ask_user` | `question` | 需要人 → team `paused(ask_user)`，UI 顯示問題，使用者用 §10.6 回覆後續跑 |
 | pm | `abort` | `reason` | PM 認為做不了 → team `paused(pm_abort)`（不直接 abort，讓人決定） |
 | worker | `report` | `status: done \| blocked`, `summary`, `notes?` | 工作回報。`done` 進審查；`blocked` 轉給 PM 決定 |
@@ -711,12 +711,14 @@ queued ──relay 送達──► working ──report{done}──► reported 
                           │                                                   ▼                          ▼
                           │                                             exhausted ──使用者 decide──► working | merging | skipped
                           │                                                                           rebasing ──report──► merging（≤2 次）
- report{blocked} ──► blocked_by_worker ──PM 下一則 relay 決定：改派 / 補充 brief（→ working）/ skip
+ report{blocked} ──► blocked_by_worker ──PM 下一則 relay 決定：dispatch{task:"tN"}（取代：舊的 skipped、新的 queued）/ done（→ skipped）；或使用者 decide
 ```
 
 - `queued` 有兩種（2026-09-08）：`worker_bot_id IS NULL` = 還在佇列裡等併行位，分支**還沒切**；
   有 `worker_bot_id` = 已經派給某個執行者、relay 還沒送達。前端的 task 列把前者顯示成「排隊中」。
 - 終態：`merged | skipped | failed`。
+- `blocked_by_worker`（2026-09-12 前只有使用者 `decide` 能動它，PM 收到「請決定下一步」卻沒有任何 action 會碰到它）：
+  PM 用 `dispatch` 帶 `task` 取代（§4.4），或 `done` 把它當 skipped；`wait` 對它視同「沒事可等」走 nudge → `pm_stalled`。
 - `round` 從 0 起算；`request_changes` 讓 `round += 1`；`round == max_review_rounds` 時再收到 `request_changes` → `exhausted`。
 - 沒有 reviewer（`reviewer: null`）：`reported → merging` 直接整合。
 - rebase relay 送達時 task 仍維持 `rebasing`（不轉成 `working`）；worker 回報才走 `rebasing → merging`，因此不會因衝突重開審查。
