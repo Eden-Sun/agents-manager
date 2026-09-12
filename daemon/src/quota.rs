@@ -124,6 +124,22 @@ pub struct ResetCredits {
     pub expires_at: Option<String>,
 }
 
+/// 「這個帳號現在被擋住了」——CLI 自己印出來的上限橫幅（codex：`You've hit your usage limit …`）。
+///
+/// 為什麼不能只靠 5h／7d 兩條桶子：那兩條是**速率**視窗，codex 的 credits 用完時它們可以是滿的，
+/// app-server 也照樣回報 0% 已用。2026-09-12 使用者看到的就是這個矛盾——量表全滿，送出去卻一直
+/// 回「hit your usage limit」。所以把 CLI 講的話單獨記一格，並且**黏住**：每 5 分鐘一次的
+/// app-server 輪詢不帶這個欄位，[`set`] 會沿用舊值，直到 `until` 過了或下一回合真的跑成功。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LimitHit {
+    /// CLI 印的那一句（已經接好換行的完整橫幅）。
+    pub message: String,
+    /// 橫幅裡的 `try again at …`（RFC3339）；沒寫時間就 `None`，那就只能等下一次成功的回合清掉。
+    pub until: Option<String>,
+    /// 什麼時候撞到的（RFC3339）。
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Quota {
     pub five_hour: Option<Window>,
@@ -133,6 +149,8 @@ pub struct Quota {
     pub fable: Option<Window>,
     /// Codex 的額度重置券；只有 codex 這個來源會有，其餘一律 `None`。
     pub reset_credits: Option<ResetCredits>,
+    /// CLI 說這個帳號現在被擋住了。見 [`LimitHit`]；沒撞到就是 `None`。
+    pub limit_hit: Option<LimitHit>,
     pub plan: Option<String>,
     pub updated_at: String,
     pub source: String,
@@ -203,6 +221,7 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
         seven_day: seven,
         fable: None,
         reset_credits: reset_credits(result),
+        limit_hit: None,
         plan: rl.get("planType").and_then(|x| x.as_str()).map(String::from),
         updated_at: crate::db::now(),
         source: "codex-app-server".into(),
@@ -234,6 +253,7 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
         seven_day: seven,
         fable,
         reset_credits: None,
+        limit_hit: None,
         plan: None,
         updated_at: crate::db::now(),
         source: "statusline".into(),
@@ -264,9 +284,44 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
             q.reset_credits = prev.reset_credits.clone();
         }
     }
+    // 「撞上限」只有 CLI 的橫幅看得到（§12.4）。app-server 的輪詢每 5 分鐘把同一把 key 蓋掉一次，
+    // 沿用之前額度會在 CLI 還在拒絕的時候變回滿格——2026-09-12 使用者看到的就是這個。
+    if q.limit_hit.is_none() {
+        if let Some(prev) = quotas.get(&key) {
+            q.limit_hit = prev.limit_hit.clone();
+        }
+    }
+    if limit_hit_expired(q.limit_hit.as_ref()) {
+        q.limit_hit = None;
+    }
+
     quotas.insert(key.clone(), q.clone());
     drop(quotas);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": q})).await;
+}
+
+/// 這張「撞上限」已經過了它自己寫的恢復時間了嗎？沒寫時間的一律**不**過期——只能靠下一次
+/// 成功的回合（[`clear_limit_hit`]）把它清掉。
+fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
+    let Some(until) = hit.and_then(|h| h.until.as_deref()) else { return false };
+    match chrono::DateTime::parse_from_rfc3339(until) {
+        Ok(t) => chrono::Utc::now() >= t.with_timezone(&chrono::Utc),
+        Err(_) => false,
+    }
+}
+
+/// 這個帳號又能跑了：一回合真的跑完就把「撞上限」拿掉，不必等它自己寫的時間。
+pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
+    let key = quota_key(host, base);
+    let mut quotas = app.quotas.lock().await;
+    let Some(q) = quotas.get_mut(&key) else { return };
+    if q.limit_hit.is_none() {
+        return;
+    }
+    q.limit_hit = None;
+    let out = q.clone();
+    drop(quotas);
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
 }
 
 /// `GET /api/quota` body: every known key, with the three base kinds always present **per
@@ -336,6 +391,7 @@ mod tests {
             seven_day: Some(Window { used_pct: 20.0, resets_at: None }),
             fable: Some(Window { used_pct: 66.0, resets_at: None }),
             reset_credits: None,
+            limit_hit: None,
             plan: None, updated_at: crate::db::now(), source: "claude-usage".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
         };
         set(&app, LOCAL_HOST, "claude:cc1", probe).await;
@@ -344,6 +400,7 @@ mod tests {
             seven_day: Some(Window { used_pct: 21.0, resets_at: None }),
             fable: None,
             reset_credits: None,
+            limit_hit: None,
             plan: None, updated_at: crate::db::now(), source: "statusline".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
         };
         set(&app, LOCAL_HOST, "claude:cc1", status).await;
@@ -353,6 +410,62 @@ mod tests {
     }
 
     use super::*;
+
+    fn codex_q(source: &str, limit_hit: Option<LimitHit>) -> Quota {
+        Quota {
+            five_hour: Some(Window { used_pct: 0.0, resets_at: None }),
+            seven_day: Some(Window { used_pct: 0.0, resets_at: None }),
+            fable: None,
+            reset_credits: None,
+            limit_hit,
+            plan: None,
+            updated_at: crate::db::now(),
+            source: source.into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        }
+    }
+
+    /// 2026-09-12 使用者：codex 的量表全滿、送出去卻一直回「hit your usage limit」。
+    /// CLI 的橫幅是唯一看得到這件事的地方（credits 用完時 5h／7d 兩條桶子可以是 0%），
+    /// 所以它要黏過五分鐘一次的 app-server 輪詢，直到恢復時間到、或下一回合真的跑成功。
+    #[tokio::test]
+    async fn a_codex_limit_hit_outlives_the_app_server_poll() {
+        let app = crate::team::testing::env().await.app.clone();
+        let soon = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(soon), at: crate::db::now() };
+        set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
+        // 輪詢回來：桶子空的、而且它根本不知道有這回事。
+        set(&app, LOCAL_HOST, "codex", codex_q("codex-app-server", None)).await;
+        let got = |app: &std::sync::Arc<crate::state::App>| {
+            let app = app.clone();
+            async move { app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap() }
+        };
+        assert!(got(&app).await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
+        // 一回合真的跑完就清掉。
+        clear_limit_hit(&app, LOCAL_HOST, "codex").await;
+        assert!(got(&app).await.limit_hit.is_none());
+    }
+
+    /// 恢復時間過了就自己消失——不必等下一回合，也不必使用者手動清。
+    #[tokio::test]
+    async fn a_limit_hit_past_its_reset_time_is_dropped() {
+        let app = crate::team::testing::env().await.app.clone();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(past), at: crate::db::now() };
+        set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
+        let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap();
+        assert!(got.limit_hit.is_none(), "過了恢復時間的橫幅不該再擋著畫面");
+    }
+
+    /// 沒寫恢復時間的橫幅不會自己過期：codex 當天撞上限時只寫 `try again at 5:07 AM`，
+    /// 解析不出來時寧可留著，等下一回合成功再清。
+    #[test]
+    fn a_limit_hit_without_a_time_never_expires_on_its_own() {
+        let hit = LimitHit { message: "ERROR: usage limit".into(), until: None, at: crate::db::now() };
+        assert!(!limit_hit_expired(Some(&hit)));
+        assert!(!limit_hit_expired(None));
+    }
 
     #[test]
     fn codex_rate_limits_map_by_window() {
@@ -439,6 +552,7 @@ mod tests {
             seven_day: None,
             fable: None,
             reset_credits: None,
+            limit_hit: None,
             plan: None,
             updated_at: crate::db::now(),
             source: "test".into(),

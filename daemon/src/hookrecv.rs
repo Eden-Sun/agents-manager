@@ -363,6 +363,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         if let Some(r) = run.as_ref() {
             lifecycle::schedule_codex_notice_capture(app, &bot.id, &r.id);
         }
+        // 真的答完一回合＝這個帳號又能跑了，把「撞上限」拿掉，不必等橫幅寫的那個時間
+        // （券兌換、方案升級、或它自己提早恢復都算）。
+        if matches!(&kind, HookKind::TurnComplete { assistant: Some(a), .. } if !a.trim().is_empty()) {
+            let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| "local".to_string());
+            crate::quota::clear_limit_hit(app, &host, "codex").await;
+        }
     }
 
     match kind {

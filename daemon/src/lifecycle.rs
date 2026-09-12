@@ -1988,26 +1988,37 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
     for notice in codex_usage_notice_lines(&read.text) {
+        // 去重只看**這個 run 開始之後**。原本比對整段對話：codex-astra 的 pane 兩天前印過
+        // 一模一樣的上限橫幅，今天再撞一次時這裡直接 `continue`，於是額度沒有被標記、
+        // 卡住的回合也沒有被解開——畫面上額度是滿的，輸入列卻一直轉（2026-09-12 使用者）。
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM messages
-             WHERE conversation_id=? AND role='system' AND source='system' AND content=?)",
+             WHERE conversation_id=? AND role='system' AND source='system' AND content=? AND created_at >= ?)",
         )
         .bind(&conversation_id)
         .bind(&notice)
+        .bind(&run.started_at)
         .fetch_one(&app.db)
         .await?;
-        if exists != 0 {
-            continue;
+        let fresh = exists == 0;
+        if fresh {
+            // Don't attach the pane snapshot: the idle splash is a boxed TUI (model /
+            // directory / Tip / "Ask Codex to do anything"), not a failed cut of a reply.
+            insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
+            tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         }
-        // Don't attach the pane snapshot: the idle splash is a boxed TUI (model /
-        // directory / Tip / "Ask Codex to do anything"), not a failed cut of a reply.
-        insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
-        tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         if codex_limit_hit_line(&notice).is_some() {
+            // 還有回合在飛＝這張橫幅就是我們剛送出去那一句的答案，即使字面上看過也要處理；
+            // 沒有回合在飛時只認這個 run 內第一次看到的，畫面上留著的舊橫幅才不會反覆把
+            // 額度打回 100%。
+            let in_flight = db::in_flight_turn(&app.db, &run.id).await?;
+            if !fresh && in_flight.is_none() {
+                continue;
+            }
             let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
             apply_codex_limit_hit_quota(app, &host, &notice).await;
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
-            if let Some(turn) = db::in_flight_turn(&app.db, &run.id).await? {
+            if let Some(turn) = in_flight {
                 let res = sqlx::query(
                     "UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'",
                 )
@@ -5106,6 +5117,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
             seven_day: None,
             fable: None,
             reset_credits: None,
+            limit_hit: None,
             plan: None,
             updated_at: crate::db::now(),
             source: "codex-limit-hit".into(),
@@ -5119,11 +5131,18 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
     } else if let Some(existing) = q.seven_day.as_mut() {
         existing.used_pct = 100.0;
         if resets.is_some() {
-            existing.resets_at = resets;
+            existing.resets_at = resets.clone();
         }
     } else {
         q.seven_day = Some(win);
     }
+    // CLI 自己說被擋住了，這一格黏著走（`quota::set` 會沿用，直到 `until` 過了或下一回合跑成功）。
+    // 沒有它的話，五分鐘後 app-server 的輪詢就把量表刷回滿格，畫面與實際對不上。
+    q.limit_hit = Some(crate::quota::LimitHit {
+        message: notice.to_string(),
+        until: resets.clone(),
+        at: crate::db::now(),
+    });
     q.updated_at = crate::db::now();
     q.source = "codex-limit-hit".into();
     crate::quota::set(app, host, "codex", q).await;

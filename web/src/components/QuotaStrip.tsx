@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { BotKind, Identity, KindQuota, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
+import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -9,6 +9,7 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
+import './quotaLimitHit.css'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
@@ -522,14 +523,17 @@ function Gauge({
   // 停用中的那一格在條上也要看得出來，不然得先點開 popover 才知道側欄少了誰。
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
+  // CLI 說這個帳號現在收不下工作。量表是速率視窗，codex 的 credits 用完時它們照樣是滿的
+  // （2026-09-12 使用者：滿格卻一直 hit limit），所以這件事要畫在格子上，不是只寫在 popover。
+  const blocked = q?.limit_hit ?? null
   const accessibleTitle = focused
     ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!)}%`).join('')}`
     : withOff
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}`}
-      title={accessibleTitle}
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' blocked' : ''}`}
+      title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
       // 不放行就會一次開一次關。
@@ -559,6 +563,7 @@ function Gauge({
             因此都是「圖示 / 名稱 / 開關」三層，開關一律貼在名稱正下方，不會有一格歪掉。 */}
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
+            {blocked ? <span className="quota-blocked-ico">⛔</span> : null}
             {entry.identity ?? entry.kind}
           </span>
         )}
@@ -706,6 +711,33 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
  * 那張什麼時候過期」。額度歸零的當下那是唯一還能做的動作，所以它跟桶子並排、不是藏在別處。
  * daemon 只讀不用：真的要用還是在 codex 那邊（`/status` → `Reset usage`），這裡不代按。
  */
+/** 「⛔ 額度被擋 · 19:07 恢復」——橫幅沒寫時間就只說要等它下一次跑得動。 */
+function blockedLine(hit: QuotaLimitHit): string {
+  const when = hit.until ? new Date(hit.until) : null
+  const back = when && !Number.isNaN(when.getTime())
+    ? `${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 才會恢復`
+    : '恢復時間 CLI 沒寫，要等它下一回合跑得動'
+  return `⛔ CLI 說這個帳號現在被擋住：${back}\n${hit.message}`
+}
+
+function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
+  if (!hit) return null
+  return (
+    <div className="quota-pop-line limit-hit">
+      <span className="quota-win">
+        <span className="quota-ico" aria-hidden="true">
+          ⛔
+        </span>
+        被擋
+      </span>
+      <span className="quota-limit-hit" title={hit.message}>
+        {hit.until ? `${new Date(hit.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 恢復` : '等下一回合跑得動'}
+        <span className="quota-limit-hit-why">CLI 回報額度上限，量表是速率視窗，看不到這件事</span>
+      </span>
+    </div>
+  )
+}
+
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   if (!credits || credits.available <= 0) return null
   const left = credits.expires_at ? new Date(credits.expires_at).getTime() - now : null
@@ -832,6 +864,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
           <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
           <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} />
+          <PopLimitHit hit={q?.limit_hit} />
           <PopResetCredits credits={q?.reset_credits} now={now} />
         </>
       )}
