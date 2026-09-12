@@ -211,8 +211,8 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/api/bots/{id}/start` | — | `200 {"run_id":"..."}`；已有 active Run → `409 {"error":"conflict","reason":"active run already exists","run_id":"..."}`；herdr 失敗 502 |
-| POST | `/api/bots/{id}/stop` | — | `200 {}`；本來就沒有 Run → `204`（無 body） |
+| POST | `/api/bots/{id}/start` | — | `200 {"run_id":"..."}`；已有 active Run → `409 {"error":"conflict","reason":"active run already exists","run_id":"..."}`；從使用者 herdr `default` session 匯入的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session","message":…}`（`/restart` 同，且在送 ctrl+c 之前就拒絕；2026-09-12）；herdr 失敗 502 |
+| POST | `/api/bots/{id}/stop` | — | `200 {}`；本來就沒有 Run → `204`（無 body）。default session 的 bot 只送 ctrl+c、**不關使用者的 pane** |
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed）；送不出 `esc` → 502，Turn **維持** in-flight |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}` — **強制**結束目前回合，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
@@ -322,9 +322,15 @@ Turn 或 user message，重試不會因為上一回合卡住而得到 409。
 退不掉才不建 turn、回 `{"error":"conflict","reason":"dialog_open","run_id":"…","message":"…"}`
 並插一則 system 訊息。
 
+**排隊中的 prompt 送出時也過同樣三道檢查**（2026-09-12）：queued turn 被 claim 之後、`agent.prompt` 之前，
+daemon 先看畫面；中了就把 turn **放回 `queued`**（`run_id` 清掉）並插同一則 system 訊息，等下一個
+`working → idle` 再試。以前這條路直接打字，使用者排的下一句會被打進 codex 的 `/model` 選單。
+
 ## 6. 讀訊息
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`
+
+沒有這個 bot → `404 {"error":"not_found","what":"bot"}`（2026-09-12 前是 502）；已刪除的 bot 仍讀得到歷史（§10.4）。
 
 倒序分頁（`before` 傳目前最舊一則的 `id`，以插入順序分頁），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
 
@@ -1116,7 +1122,7 @@ bot 不存在、已刪除或 token 不符 → `401`。
   開新對話，log `native session has no transcript on disk`。
 - 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
   任何一張清單裡**。
-- `reason` 的取值與判斷順序見 SPEC §6.9：`team_member` / `not_running` / `working` /
+- `reason` 的取值與判斷順序見 SPEC §6.9：`team_member` / `default_session` / `not_running` / `working` /
   `blocked` / `unknown_status` / `turn_in_flight`。`reason_label` 是同一件事給人看的那句（前端直接
   顯示，不另編一套）。
 - `total = 0` 也是 `202`：計畫是空的不是錯誤，daemon 仍會立刻推一次 `bots_restart_done`。
@@ -1155,7 +1161,8 @@ bot 不存在、已刪除或 token 不符 → `401`。
 200 {}
 ```
 
-流程：有 active Run 先 stop（ctrl+c ×2、逾時關 pane；遠端 host 亦同）→ 從 config.toml 移除 →
+流程：有 active Run 先 stop（ctrl+c ×2、逾時關 pane；遠端 host 亦同；**host 連不上而 stop 根本送不出去時，
+run 直接標 `exited`、照常刪**——不然那個 run 會永遠 `running`，沒有任何對帳會再看它，2026-09-12）→ 從 config.toml 移除 →
 DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id 之後仍查得到歷史）→
 刪除該 bot 的 hook 材料目錄 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，
 失敗只寫 log、不影響回應）。
@@ -1166,6 +1173,9 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 > 目錄不動（不是這個 daemon 能判斷的）。
 
 - 找不到 bot → `404`。
+- **team 成員（`managed_by = "team"`）→ `409 {"error":"conflict","reason":"team_managed","bot_id":…,"team_id":…,"team_role":…,"message":…}`**
+  （2026-09-12）。成員從不進 config.toml，這條路刪不掉它——以前回 200 但只停了 agent、砍了 hook 目錄，
+  bot 列還活著、team 排程接著報 `member_lost`。要拿掉成員走 team 的路：退役 worker、`swap_member`、或刪整個 team。
 - **它開的子 agent 一起刪**（2026-09-08）：`managed_by = "child"`、`parent_bot_id` 指到它的 bot（含孫代）
   先各自停掉、軟刪、清目錄，最深的先；回應 `{"removed_children":["<bot_id>", …]}`。使用者在
   config.toml 建的 bot 不會是誰的 child，不受影響。

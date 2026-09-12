@@ -1332,13 +1332,24 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
+    // SPEC-team §5.3: a team member never entered config.toml, so the path below could not
+    // retire it — it answered 200 having only stopped the agent and deleted its hook material,
+    // and the row stayed live for the scheduler to report `member_lost` (review 2026-09-12 #3).
+    // Members leave through the team (retire / swap / delete the team), not through here.
+    if bot.managed_by == "team" {
+        return Err(LcError::conflict(
+            "team_managed",
+            json!({"bot_id": id, "team_id": bot.team_id, "team_role": bot.team_role,
+                   "message": "這顆是 team 的成員，由 team 管：要拿掉請退役 worker、換成員或刪掉整個 team。"}),
+        ));
+    }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
     // 2026-09-08: the children it spawned go with it. They only exist as panes their parent
     // opened and rows the daemon adopted; left behind they would sit in the sidebar as
     // orphans with nothing to hang from. Deepest first, each stopped the same way.
     let mut removed_children = Vec::new();
     for child in descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev() {
-        let _ = lifecycle::stop_bot(&app, &child.id).await;
+        stop_for_delete(&app, &child.id).await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&child.id)
@@ -1351,7 +1362,7 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
         removed_children.push(child.id);
     }
     // SPEC §6.4: stop first (ctrl+c x2, pane closed on timeout), then drop the config entry.
-    let _ = lifecycle::stop_bot(&app, &id).await;
+    stop_for_delete(&app, &id).await;
     // A spawned child never entered config.toml, so the projection cannot retire it.
     if bot.managed_by == "child" {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
@@ -1374,6 +1385,22 @@ async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resu
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
+}
+
+/// Stop a bot that is about to be deleted. A stop that could not even reach herdr (the host is
+/// down: `client_for_run` fails before the run is touched) used to be ignored with `let _ =`,
+/// leaving a run `running` on a bot nobody can see any more — `live_bots_on_host` skips deleted
+/// bots, so no reconcile ever ends it, and `purge_deleted_bot_dirs` waits for it for ever
+/// (review 2026-09-12 d). End the run here instead: the row is going away. An agent that is in
+/// fact still alive on that host keeps its pane until someone closes it; once it exits, the
+/// orphan-pane sweep of the next reconcile reclaims the pane like any other ended run's.
+async fn stop_for_delete(app: &Arc<App>, bot_id: &str) {
+    if let Err(e) = lifecycle::stop_bot(app, bot_id).await {
+        tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot before deleting it; ending its run");
+        if let Ok(Some(run)) = db::active_run(&app.db, bot_id).await {
+            lifecycle::mark_run_exited(app, &run.id, "the bot was deleted while its host was unreachable").await;
+        }
+    }
 }
 
 /// Every live `managed_by = 'child'` bot under `root`, parents before their children
@@ -1404,7 +1431,8 @@ async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<d
 /// 唯一救不回的是 bot 的工作目錄（刪除時 `purge_bot_dir` 真的砍了）：那裡面是 hook 設定與
 /// 包裝腳本，下次啟動會重新產生，所以不影響復原。
 ///
-/// `managed_by = "child"` 的 bot 從來沒進過 config.toml，projection 不管它，直接清欄位。
+/// `managed_by = "child"` 與 `"team"` 的 bot 從來沒進過 config.toml，projection 不管它們，直接清欄位。
+/// team 成員以前走 user 那條路，會被寫進 config.toml 變成使用者的 bot（review 2026-09-12 可能 e）。
 async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // `db::bot` 不過濾 deleted_at，所以軟刪除的也拿得到——這裡要的就是它。
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -1427,7 +1455,7 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             json!({"bot_id": id, "name": bot.name, "taken_by": other}),
         ));
     }
-    if bot.managed_by == "child" {
+    if bot.managed_by != "user" {
         sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
     } else {
         let entry = crate::config::BotCfg {
@@ -2337,6 +2365,12 @@ async fn get_messages(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
+    // `conversation_id` creates the conversation on first use; for an id that is not a bot at
+    // all that INSERT trips the foreign key and came back as 502 (review 2026-09-12 #9). A
+    // deleted bot is still readable — API.md §10.4 promises its history stays.
+    if db::bot(&app.db, &id).await.map_err(any_err)?.is_none() {
+        return Err(LcError::NotFound("bot".into()));
+    }
     let conv = db::conversation_id(&app.db, &id).await.map_err(any_err)?;
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
     let before_rowid = match q.get("before") {
@@ -2599,6 +2633,132 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::Bad(_))
         ));
+    }
+
+    /// An id that is not a bot is 404, not 502 (review 2026-09-12 #9) — and a deleted bot still
+    /// answers, because its history is kept (API.md §10.4).
+    #[tokio::test]
+    async fn messages_for_an_unknown_bot_are_not_found() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        assert!(matches!(
+            get_messages(State(app.clone()), Path("no-such-bot".into()), Query(HashMap::new())).await,
+            Err(LcError::NotFound(what)) if what == "bot"
+        ));
+        let gone = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, hook_token, deleted_at, created_at) VALUES (?,?,'gone','claude','tok',?,?)",
+        )
+        .bind(&gone)
+        .bind(&e.project_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let Json(body) = get_messages(State(app), Path(gone.clone()), Query(HashMap::new())).await.unwrap();
+        assert_eq!(body["bot_id"], gone);
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod delete_bot_tests {
+    use super::*;
+
+    async fn a_bot(e: &crate::team::testing::Env, name: &str, managed_by: &str) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?,?)",
+        )
+        .bind(&id)
+        .bind(&e.project_id)
+        .bind(name)
+        .bind(managed_by)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// `DELETE` on a team member is refused outright (review 2026-09-12 #3). It used to answer
+    /// 200 after stopping the agent and purging `bots/<id>/`, with the row still live: the
+    /// sidebar kept the bot and the scheduler saw `member_lost`.
+    #[tokio::test]
+    async fn a_team_member_is_refused_and_left_untouched() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "dev-1", "team").await;
+        let run = crate::team::testing::fake_run(&app, &id).await;
+        let dir = app.bot_dir(&id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = delete_bot(State(app.clone()), Path(id.clone())).await.err().expect("refused");
+        match err {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "team_managed"),
+            other => panic!("expected 409, got {other:?}"),
+        }
+        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_none(), "still live");
+        assert_eq!(db::active_run(&app.db, &id).await.unwrap().map(|r| r.id), Some(run), "not stopped");
+        assert!(dir.exists(), "hook material kept");
+        assert!(!e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
+    }
+
+    /// Deleting a bot whose host is unreachable must not leave its run `running` for ever
+    /// (review 2026-09-12 d): the bot is gone from every list a reconcile walks, so nothing
+    /// else would ever end that run.
+    #[tokio::test]
+    async fn a_bot_deleted_while_its_host_is_down_does_not_keep_a_running_run() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "remote-ish", "user").await;
+        let run = db::ulid();
+        // A session no client answers for: `stop_bot` fails before touching anything.
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','pane-x','agent','no-such-session',?)",
+        )
+        .bind(&run)
+        .bind(&id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        delete_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+
+        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_some(), "the bot is gone");
+        assert!(db::active_run(&app.db, &id).await.unwrap().is_none(), "no orphan run stays active");
+        let r = db::run(&app.db, &run).await.unwrap().unwrap();
+        assert_eq!(r.state, "exited");
+        assert!(r.ended_at.is_some());
+    }
+
+    /// Restoring a soft-deleted team member clears `deleted_at` and nothing else: it must not be
+    /// written into config.toml as a user bot (review 2026-09-12 e).
+    #[tokio::test]
+    async fn restoring_a_team_member_does_not_write_it_into_config() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "dev-2", "team").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(db::now())
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+
+        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_none());
+        assert_eq!(bot.managed_by, "team");
+        let in_config = app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|b| b.id.as_deref() == Some(id.as_str()));
+        assert!(!in_config, "a team member never enters config.toml");
     }
 }
 

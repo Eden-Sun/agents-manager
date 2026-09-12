@@ -262,6 +262,18 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     }
     emit_turn(app, &turn.id).await;
 
+    // The same three screen checks a live prompt gets (login menu, claude's model-switch box,
+    // codex's `/model` picker). Refused → back on the queue with the hint already in the
+    // conversation; the next `working -> idle` edge tries again.
+    if let Err(e) = pane_ready_for_prompt(app, &bot, &run, &conv).await {
+        let why = match &e {
+            LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
+            other => format!("{other:?}"),
+        };
+        requeue_turn(app, &turn.id, bot_id, &format!("pane not ready for a prompt: {why}")).await;
+        return Ok(());
+    }
+
     // Everything between the claim and the RPC must put the turn *back* on the queue if it
     // gives up. Nothing else in the daemon finishes a turn that is `in_flight` with
     // `delivery='pending'`: `arm_stall`, `arm_progress` and `try_fallback` all require
@@ -403,6 +415,10 @@ fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str) -> Vec
     vec![exe.into(), "hook".into(), provider.into(), "--bot".into(), bot_id.into(), "--port".into(), port.to_string()]
 }
 
+/// What goes in `hook.sh`'s third argv slot. The script ignores it; the real `hook_token` is
+/// never put on a remote command line (review 2026-09-12 #8).
+pub const REMOTE_TOKEN_SLOT: &str = "-";
+
 /// SPEC §11.4 — the POSIX sh hook installed on remote hosts (no daemon binary there).
 ///
 /// v4.3: nothing calls home over HTTP any more. The payload is appended to the bot's spool
@@ -417,7 +433,11 @@ if [ $# -gt 0 ]; then case "$1" in ''|*[!0-9]*) ;; *) shift ;; esac; fi
 LIMIT=1048576
 DIR="$HOME/.config/agents-manager/bots/$BOT"
 mkdir -p "$DIR" 2>/dev/null
-: "$TOKEN"   # kept for argv compatibility; the spool file is already only ours to read
+# Argument 3 is the token slot. It is never used here (the spool file is already only ours to
+# read) and since 2026-09-12 the daemon passes `-` in it: the real token sat on codex's argv
+# for the whole run, where `ps` shows it to every user of the host. Older agents still pass
+# the real thing; either is accepted.
+: "$TOKEN"
 
 # v4.0 statusLine mode: the rate limits arrive on every repaint, so they go to a single-slot
 # file the daemon picks up with the next drain (§11.4.5) — never the spool, which is a queue.
@@ -650,15 +670,13 @@ pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<Rem
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
 async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<RemoteHookPaths> {
     let p = remote_bot_dir(conn, &bot.id).await?;
-    let cmd = shell_join(&[
-        p.hook_sh.clone(),
-        "claude".into(),
-        bot.id.clone(),
-        bot.hook_token.clone(),
-    ]);
-    // v4.0: `hook.sh statusline <bot> <token>` overwrites the single-slot `hook-status.json`
+    // The token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it, and the same key
+    // opens `/relay/announce` and the local `/hook/*`. Kept positional for the older agents
+    // whose argv still carries a real token.
+    let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
+    // v4.0: `hook.sh statusline <bot> -` overwrites the single-slot `hook-status.json`
     // (§11.4.5), then execs the user's own statusLine command (remote ~/.claude/settings.json).
-    let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), bot.hook_token.clone()]);
+    let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     let settings = json!({
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
@@ -772,13 +790,11 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
+            // The notify argv lives on the codex process for its whole run, in plain view of
+            // `ps` for every user of that host — so the token slot is a placeholder (#8; the
+            // local path already keeps the token off the argv, issue #43).
             "codex" => {
-                let parts = vec![
-                    paths.hook_sh,
-                    "codex".to_string(),
-                    bot.id.clone(),
-                    bot.hook_token.clone(),
-                ];
+                let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
                 vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
             }
             // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
@@ -1472,6 +1488,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
             json!({"parent_bot_id": bot.parent_bot_id}),
         ));
     }
+    refuse_default_session(&bot)?;
     if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }
@@ -2214,6 +2231,26 @@ pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     stop_bot_locked(app, bot_id).await
 }
 
+/// Is this run sitting in the user's own herdr `default` session (SPEC §6.5.1)?
+pub fn in_default_session(run: &db::Run) -> bool {
+    run.herdr_session.as_deref() == Some("default")
+}
+
+/// SPEC §6.5.1: a bot imported from the user's `default` session is observed, never driven.
+/// Starting one would `workspace.create` inside the user's session (`inject_hooks=0`,
+/// `auto_approve=0`, `--resume` and all); restarting one would first close their pane. Both
+/// used to happen from the sidebar buttons and from `restart-idle` (review 2026-09-12 #4).
+fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
+    if bot.herdr_session.as_deref() == Some("default") {
+        return Err(LcError::conflict(
+            "default_session",
+            json!({"bot_id": bot.id,
+                   "message": "這顆是從你自己的 herdr default session 匯入的，daemon 只觀察、不替它開或關 pane：要重啟請在那個終端裡自己做。"}),
+        ));
+    }
+    Ok(())
+}
+
 /// [`stop_bot`] for a caller that already holds the bot's lock, so a restart can stop and start
 /// under one guard ([`restart_bot_with`]).
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
@@ -2248,11 +2285,21 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     // we close it, otherwise a bare shell pane would linger until the next reconcile. And
     // when the run owned its tab (started with `tab.create`, or moved into one) the tab goes
     // with it, so stopping bots does not leave a row of empty tabs behind.
-    if let Some(p) = run.pane_id.as_deref() {
-        close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
-    }
-    if !gone {
-        tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
+    //
+    // Except in the user's own `default` session (SPEC §6.5.1): that pane is theirs, the
+    // daemon only ever observed it. The agent gets its ctrl+c and nothing more — closing the
+    // pane took the user's terminal away with it (review 2026-09-12 #4).
+    if in_default_session(&run) {
+        if !gone {
+            tracing::warn!(bot = %bot.name, "agent did not exit within 10s; its pane is the user's own and is left open");
+        }
+    } else {
+        if let Some(p) = run.pane_id.as_deref() {
+            close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
+        }
+        if !gone {
+            tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
+        }
     }
     let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
         .bind(db::now())
@@ -2288,6 +2335,10 @@ pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
 pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    // Checked *before* the stop: `start` would refuse anyway, but by then the user's agent
+    // would already have been sent ctrl+c for nothing.
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    refuse_default_session(&bot)?;
     stop_bot_locked(app, bot_id).await?;
     match start_bot_locked_with(app, bot_id, opts).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
@@ -2360,6 +2411,14 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     if !empty {
+        // agent 還在 pane 裡、我們也沒動它：run 就還是活的。留在 `stopping` 的話之後 prompt
+        // 一律 409 `run is not running`、`start_bot` 對子 agent 又一律拒絕、reconcile 只把
+        // `starting` 轉回 `running`——這顆 bot 會在側欄變成永遠的黃燈（2026-09-12 review #1）。
+        let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=? AND state='stopping'")
+            .bind(&run.id)
+            .execute(&app.db)
+            .await;
+        app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
     }
     // `ended_at` 一寫上去，剛剛那個 native session 就成了 `last_native_session` 的「上一個」。
@@ -3426,6 +3485,69 @@ pub async fn prompt_relayed(
 /// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
 /// `deliver` is what the agent actually receives; `text` is what the timeline shows. The
 /// group chat passes the mention-stripped variant so a bot never sees `@all`.
+/// The three looks at the screen every prompt must pass before any text goes into the pane
+/// — shared by `prompt_grouped` and the durable queue's flush, so a queued prompt gets the same
+/// protection as a live one (review 2026-09-12 #6: the flush skipped all three and typed the
+/// user's next message into codex's `/model` menu, Enter switching the model on the way).
+///
+/// Each refusal inserts its system hint into the conversation and answers a 409 with a stable
+/// `reason`: `needs_login`, `dialog_open`, `picker_open`.
+async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> LcResult<()> {
+    // A claude whose CLAUDE_CONFIG_DIR has never logged in opens on "Select login method"
+    // and looks idle to herdr; a prompt sent there just types into the menu and the turn
+    // hangs until the stall timer gives up. Look at the screen first and say so instead.
+    if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(app, run).await {
+        let identity = bot.identity.clone().unwrap_or_default();
+        let hint = if identity.is_empty() {
+            "這個 claude 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。".to_string()
+        } else {
+            format!("身份 `{identity}` 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。")
+        };
+        let _ = insert_message(app, conv, None, "system", &hint, "system", false, None).await;
+        return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
+    }
+    // claude 的「Switch model?」確認框同一個道理（`tui_prompts::is_switch_model_dialog`）：
+    // herdr 把它判成 idle，prompt 打進去字被丟掉、Enter 替使用者按了 Yes，回合 12 秒後 stall
+    // （2026-09-11 AGM 實測）。daemon 自己換模型時已經會把框答掉；還看得到框，就是有人在終端
+    // 裡手動打了 `/model` 沒答——使用者現在是要送訊息，不是要換模型，所以按 Esc（No, go back）
+    // 退掉再送；退不掉才講清楚，不把訊息餵進去。
+    if bot.kind == "claude" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, run).await {
+                if let Ok(r) = client.pane_read(pane, "visible", 60).await {
+                    if crate::tui_prompts::is_switch_model_dialog(&r.text) {
+                        let _ = client.pane_send_keys(pane, &["Escape"]).await;
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                        let still = matches!(client.pane_read(pane, "visible", 60).await,
+                            Ok(r2) if crate::tui_prompts::is_switch_model_dialog(&r2.text));
+                        if still {
+                            let hint = "claude 的「Switch model?」確認框擋在輸入列前面，關不掉。請到「終端」分頁選 1 或 2 再送一次。";
+                            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        }
+                        tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
+                    }
+                }
+            }
+        }
+    }
+    // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
+    // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
+    // `codex_live::picker_open`）。所以先看一眼並把它關掉，關不掉就講清楚，別把訊息餵進去。
+    if bot.kind == "codex" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, run).await {
+                if !crate::codex_live::close_picker(&client, pane).await {
+                    let hint = "codex 的 /model 選單擋在輸入列前面，關不掉。請到「終端」分頁按 Esc 回到輸入列再送一次。";
+                    let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                    return Err(LcError::conflict("picker_open", json!({"run_id": run.id, "message": hint})));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn prompt_grouped(
     app: &Arc<App>,
     bot_id: &str,
@@ -3483,58 +3605,7 @@ pub async fn prompt_grouped(
     if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
         return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
     }
-    // A claude whose CLAUDE_CONFIG_DIR has never logged in opens on "Select login method"
-    // and looks idle to herdr; a prompt sent there just types into the menu and the turn
-    // hangs until the stall timer gives up. Look at the screen first and say so instead.
-    if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(app, &run).await {
-        let identity = bot.identity.clone().unwrap_or_default();
-        let hint = if identity.is_empty() {
-            "這個 claude 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。".to_string()
-        } else {
-            format!("身份 `{identity}` 還沒登入：到「終端」分頁選 1 完成登入，或在額度那格按「登入」。")
-        };
-        let _ = insert_message(app, &conv, None, "system", &hint, "system", false, None).await;
-        return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
-    }
-    // claude 的「Switch model?」確認框同一個道理（`tui_prompts::is_switch_model_dialog`）：
-    // herdr 把它判成 idle，prompt 打進去字被丟掉、Enter 替使用者按了 Yes，回合 12 秒後 stall
-    // （2026-09-11 AGM 實測）。daemon 自己換模型時已經會把框答掉；還看得到框，就是有人在終端
-    // 裡手動打了 `/model` 沒答——使用者現在是要送訊息，不是要換模型，所以按 Esc（No, go back）
-    // 退掉再送；退不掉才講清楚，不把訊息餵進去。
-    if bot.kind == "claude" {
-        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-            if let Ok(client) = client_for_run(app, &run).await {
-                if let Ok(r) = client.pane_read(pane, "visible", 60).await {
-                    if crate::tui_prompts::is_switch_model_dialog(&r.text) {
-                        let _ = client.pane_send_keys(pane, &["Escape"]).await;
-                        tokio::time::sleep(Duration::from_millis(700)).await;
-                        let still = matches!(client.pane_read(pane, "visible", 60).await,
-                            Ok(r2) if crate::tui_prompts::is_switch_model_dialog(&r2.text));
-                        if still {
-                            let hint = "claude 的「Switch model?」確認框擋在輸入列前面，關不掉。請到「終端」分頁選 1 或 2 再送一次。";
-                            let _ = insert_message(app, &conv, None, "system", hint, "system", false, None).await;
-                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
-                        }
-                        tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
-                    }
-                }
-            }
-        }
-    }
-    // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
-    // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
-    // `codex_live::picker_open`）。所以先看一眼並把它關掉，關不掉就講清楚，別把訊息餵進去。
-    if bot.kind == "codex" {
-        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-            if let Ok(client) = client_for_run(app, &run).await {
-                if !crate::codex_live::close_picker(&client, pane).await {
-                    let hint = "codex 的 /model 選單擋在輸入列前面，關不掉。請到「終端」分頁按 Esc 回到輸入列再送一次。";
-                    let _ = insert_message(app, &conv, None, "system", hint, "system", false, None).await;
-                    return Err(LcError::conflict("picker_open", json!({"run_id": run.id, "message": hint})));
-                }
-            }
-        }
-    }
+    pane_ready_for_prompt(app, &bot, &run, &conv).await?;
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
@@ -3736,8 +3807,27 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             quiet += 1;
             if quiet >= IDLE_POLLS {
                 tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
-                let _ = try_fallback(&app2, &run_id).await;
-                break;
+                // Under the bot's lock like every other caller: `try_fallback` reads the pane
+                // and then claims the turn, and the Stop hook does the same under the lock. Run
+                // outside it, the two interleaved into two assistant messages for one turn
+                // (review 2026-09-12 #5).
+                let done = {
+                    let lock = app2.bot_lock(&bot_id).await;
+                    let _g = lock.lock().await;
+                    try_fallback(&app2, &run_id).await
+                };
+                match done {
+                    Ok(true) => break,
+                    // Nothing was claimed — a leftover spinner shape, a tool still running, or the
+                    // hook got there first. This poller is the safety net for a status that never
+                    // flips (grok, 2026-09-06), so it keeps watching rather than retiring on the
+                    // first miss; the `still` check at the top ends it once the turn is closed.
+                    Ok(false) => quiet = 0,
+                    Err(e) => {
+                        tracing::debug!(turn = %turn_id, error = ?e, "idle-prompt fallback failed; keeping the poller");
+                        quiet = 0;
+                    }
+                }
             }
         }
         // Whatever was held back by the budget is the last thing the UI could still use.
@@ -6393,15 +6483,20 @@ mod flush_queue_tests {
     /// `client_for_run` fail — which is exactly the shape of a host that dropped out between
     /// the prompt being queued and the flush trying to deliver it.
     async fn queued(session: &str) -> Fixture {
+        queued_kind("claude", session).await
+    }
+
+    async fn queued_kind(kind: &str, session: &str) -> Fixture {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
-             VALUES (?,?,'q','claude','[]',0,1,'tok',?)",
+             VALUES (?,?,'q',?,'[]',0,1,'tok',?)",
         )
         .bind(&bot_id)
         .bind(&env.project_id)
+        .bind(kind)
         .bind(db::now())
         .execute(&app.db)
         .await
@@ -6501,6 +6596,51 @@ mod flush_queue_tests {
         assert_eq!(t.status, "in_flight");
         assert_eq!(t.delivery, "unknown");
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none(), "not put back on the queue");
+    }
+
+    /// **The queue gets the same screen checks as a live prompt** (review 2026-09-12 #6). codex
+    /// sits on its `/model` picker (the user opened it in the terminal and never answered); the
+    /// flush used to type the queued text straight into that menu. The mock cannot press
+    /// Escape, so the picker stays and the prompt has to go back on the queue, with the hint.
+    #[tokio::test]
+    async fn a_queued_prompt_waits_while_codex_shows_its_model_picker() {
+        let f = queued_kind("codex", "test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.set_screen("pane-1", "Select Model and Effort\n› 1. gpt-5 (current)\n  2. gpt-5-mini\n\nPress enter to confirm or esc to go back\n");
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued", "put back, not delivered into the menu");
+        assert_eq!(t.run_id, None);
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "nothing was typed");
+        let hints: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&f.conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert!(hints[0].contains("/model"), "{hints:?}");
+    }
+
+    /// claude parked on its login menu is the same story: `needs_login`, back on the queue.
+    #[tokio::test]
+    async fn a_queued_prompt_waits_while_claude_shows_its_login_menu() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.set_screen("pane-1", "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n");
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"));
+        let hints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(hints, 1);
     }
 
     /// An empty queued prompt is still dropped rather than requeued — an unchanged path,
@@ -6828,6 +6968,173 @@ mod abandon_tests {
             .await
             .expect("a completed unknown-delivery row must not block the next prompt");
         assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");
+    }
+}
+
+#[cfg(test)]
+mod child_restart_tests {
+    //! `restart_child_in_pane` when the agent will not leave (review 2026-09-12 #1).
+    use super::*;
+    use crate::team::testing as tt;
+
+    /// The agent shrugs off ctrl+c (a modal, a hung CLI): the restart gives up after its 20
+    /// polls, and the run it had put into `stopping` must come back to `running` — the agent is
+    /// still right there in its pane. Left in `stopping`, every prompt answered 409, `start_bot`
+    /// refused (a child), reconcile only healed `starting`, and the bot sat yellow for good.
+    #[tokio::test]
+    async fn a_child_that_will_not_exit_gets_its_run_back() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'alfa','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&parent)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','claude','[]',0,0,'tok','child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(&parent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'proj-alfa-ui','test',1,?)",
+        )
+        .bind(&run_id)
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&kid_pane.tab_id)
+        .bind(&kid_pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        // The mock drops an agent on ctrl+c only when the *name* matches the target. An agent
+        // whose name herdr has cleared (`name: null`, exactly what 0.8.2 does after a same-named
+        // restart) stays in the pane whatever keys are sent — a perfect stand-in for one that
+        // ignores ctrl+c.
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": null, "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        let err = restart_child_in_pane(&app, &kid).await.expect_err("the agent never left");
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(run.state, "running", "the agent is still in its pane, so the run is still live");
+        assert!(run.ended_at.is_none());
+        assert_eq!(db::active_run(&app.db, &kid).await.unwrap().map(|r| r.id), Some(run_id));
+        // Nothing touched the pane.
+        assert!(env.herdr.tab(&kid_pane.tab_id).unwrap().panes.contains(&kid_pane.pane_id));
+        assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"));
+    }
+}
+
+#[cfg(test)]
+mod default_session_tests {
+    //! SPEC §6.5.1: a run in the user's own `default` session is observed, its pane never
+    //! closed and never re-created by the daemon (review 2026-09-12 #4).
+    use super::*;
+    use crate::team::testing as tt;
+
+    async fn imported_bot(env: &tt::Env) -> (String, String, crate::herdr::PaneInfo) {
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "mine", json!({})).await.unwrap();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, herdr_session, created_at)
+             VALUES (?,?,'mine','claude','[]',0,0,'tok','default',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'mine','default',1,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "mine", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+        (bot_id, run_id, pane)
+    }
+
+    /// Stop sends ctrl+c and ends the run, but the user's pane and tab stay exactly as they were.
+    #[tokio::test]
+    async fn stop_never_closes_the_users_pane() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, pane) = imported_bot(&env).await;
+
+        assert!(stop_bot(&app, &bot_id).await.unwrap());
+
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(run.state, "stopped");
+        let methods = env.herdr.methods();
+        assert!(methods.iter().any(|m| m == "agent.send_keys"), "the agent was asked to exit");
+        assert!(!methods.iter().any(|m| m == "pane.close" || m == "tab.close"), "{methods:?}");
+        assert!(env.herdr.tab(&pane.tab_id).unwrap().panes.contains(&pane.pane_id), "the pane is still there");
+    }
+
+    /// Start and restart are refused with a reason the UI can show — and the refusal comes
+    /// before any ctrl+c, so a refused restart leaves the user's agent running.
+    #[tokio::test]
+    async fn start_and_restart_are_refused_before_touching_the_agent() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, _pane) = imported_bot(&env).await;
+
+        let reason = |e: LcError| match e {
+            LcError::Conflict(v) => v["reason"].as_str().unwrap_or_default().to_string(),
+            other => panic!("expected 409, got {other:?}"),
+        };
+        assert_eq!(reason(restart_bot(&app, &bot_id).await.unwrap_err()), "default_session");
+        assert_eq!(reason(restart_bot_with(&app, &bot_id, StartOpts { resume_native: true }).await.unwrap_err()), "default_session");
+        assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| r.id), Some(run_id.clone()), "still running");
+        assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
+
+        // With no run at all, `start` is what the sidebar button would call.
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(reason(start_bot(&app, &bot_id).await.unwrap_err()), "default_session");
+        let creates = env.herdr.methods().iter().filter(|m| *m == "workspace.create").count();
+        assert_eq!(creates, 1, "only the fixture's own workspace.create; the daemon made none in the user's session");
     }
 }
 
@@ -7645,6 +7952,24 @@ mod remote_hook_tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("--agent grok ") && calls[0].contains("--state idle "), "{:?}", calls);
         assert!(calls[0].contains("--agent-session-id g-9"), "{:?}", calls);
+    }
+
+    /// The token slot the daemon now fills is `-` (review 2026-09-12 #8); the script must treat
+    /// it exactly like a real token — spool, then report — so nothing changes on the wire.
+    #[test]
+    fn a_placeholder_token_slot_changes_nothing() {
+        let sb = Sandbox::new(true);
+        let (out, ok) = sb.run(&["claude", &sb.bot, super::REMOTE_TOKEN_SLOT], STOP);
+        assert!(ok && out.is_empty());
+        let spool = sb.read("hook-spool.jsonl");
+        assert_eq!(spool.lines().count(), 1);
+        assert!(spool.contains(r#""bot_id":"b-test""#), "{spool}");
+        assert!(!spool.contains("tok"), "no token, real or placeholder, is written anywhere: {spool}");
+        assert_eq!(sb.calls().len(), 1);
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"c-4"}"#;
+        sb.run(&["codex", &sb.bot, super::REMOTE_TOKEN_SLOT, payload], "");
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 2);
+        assert!(sb.calls()[1].contains("--agent-session-id c-4"), "{:?}", sb.calls());
     }
 
     #[test]
