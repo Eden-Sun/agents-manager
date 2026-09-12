@@ -1428,7 +1428,16 @@ TICK 都不受影響。API 端的狀態機見 `docs/API.md` 的 `GET /api/superv
 
 ### 18.4 瀏覽器殭屍清理
 
-launchd `com.agm.browser-gc`（`StartInterval 21600`，每 6 小時）跑 `bin/browser-gc-kick.sh`：確認
+launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依使用者的 Claude 訂閱方案定
+（2026-09-12 使用者裁示；方案變了就改 plist 與這張表）：
+
+| 方案 | StartInterval | 頻率 |
+| --- | --- | --- |
+| Pro | 21600 | 每 6 小時 |
+| Max 5x | 3600 | 每 1 小時 |
+| Max 20x | 1800 | 每 30 分鐘（**目前**） |
+
+每輪：確認
 `agm-pxf2pv-browser-gc` 在跑（沒跑就 `bin/agm bot start`），再把 `browser-gc-task.md` 派給它，
 request id 綁時間（`agm-browser-gc-<YYYYmmdd-HHMM>`）。清理規則：
 

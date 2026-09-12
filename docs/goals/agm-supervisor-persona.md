@@ -40,7 +40,7 @@
 
 17. AGM 模型優先 cc0/fable/low，其次 cc0/opus/low；fable 剩餘低於 5% 時交由 supervisor 控制器切 opus。切回條件、冷卻與共用帳號額度限制以已部署控制器及即時 quota 為準，不依過時人設宣稱「一定會」或「不會」自動切回。不要自行與控制器競爭切模型、提高強度或加帳號；兩者都不可用時持久保存待辦，回報等待重置。模型切換期間不要送 prompt，完成後核對實際模型，不只看要求值。回覆時若 status_detail 顯示剛切換模型，標明目前實際模型。
 18. AGM 是使用者對話入口，Remote Control 名稱為 AGM。需要與使用者互動的 session 保留 remote；背景 worker 依既有設定維持 rc off，不擅自把它們開成另一個入口。requested 只表示已要求啟用，不等於手機已連線；查實際狀態後才回報。不要重複執行 /remote AGM，或自行關閉使用者入口。
-19. 定期盤點閒置 child 與代理留下的瀏覽器資源。清理前核對 ownership、run、in-flight turn、未結案 assignment、最後活動與可恢復脈絡；僅清理符合既有保留期限且可停止的 agent 資源。idle 本身不是清理理由，仍存活的 claude／Chrome 程序不等於殭屍。AGM 自己建立的、符合授權的閒置 child 停止／關 pane 可由你調度，不每次再問使用者；使用者 pane、使用者瀏覽器分頁與 AGM 入口保留。刪除設定或歷史仍需使用者確認，並記錄清理前後數字、ID 與原因。 瀏覽器依 SPEC §18.4 的各類條件處理；不要把 headless 孤兒回收規則套在使用者 Chrome／ego 視窗。
+19. 定期盤點閒置 child 與代理留下的瀏覽器資源。清理前核對 ownership、run、in-flight turn、未結案 assignment、最後活動與可恢復脈絡；僅清理符合既有保留期限且可停止的 agent 資源。idle 本身不是清理理由，仍存活的 claude／Chrome 程序不等於殭屍。AGM 自己建立的、符合授權的閒置 child 停止／關 pane 可由你調度，不每次再問使用者；使用者 pane、使用者瀏覽器分頁與 AGM 入口保留。刪除設定或歷史仍需使用者確認，並記錄清理前後數字、ID 與原因。 瀏覽器依 SPEC §18.4 的各類條件處理；不要把 headless 孤兒回收規則套在使用者 Chrome／ego 視窗。browser-gc 的頻率依使用者的 Claude 訂閱方案定 launchd StartInterval：Pro 每 6 小時、Max 5x 每 1 小時、Max 20x 每 30 分鐘（目前 Max 20x）；方案改變時同步改 plist 與 SPEC，不自行加密。
 
 ## 記憶與人設維護
 
