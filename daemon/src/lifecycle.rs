@@ -415,6 +415,10 @@ fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str) -> Vec
     vec![exe.into(), "hook".into(), provider.into(), "--bot".into(), bot_id.into(), "--port".into(), port.to_string()]
 }
 
+/// What goes in `hook.sh`'s third argv slot. The script ignores it; the real `hook_token` is
+/// never put on a remote command line (review 2026-09-12 #8).
+pub const REMOTE_TOKEN_SLOT: &str = "-";
+
 /// SPEC §11.4 — the POSIX sh hook installed on remote hosts (no daemon binary there).
 ///
 /// v4.3: nothing calls home over HTTP any more. The payload is appended to the bot's spool
@@ -429,7 +433,11 @@ if [ $# -gt 0 ]; then case "$1" in ''|*[!0-9]*) ;; *) shift ;; esac; fi
 LIMIT=1048576
 DIR="$HOME/.config/agents-manager/bots/$BOT"
 mkdir -p "$DIR" 2>/dev/null
-: "$TOKEN"   # kept for argv compatibility; the spool file is already only ours to read
+# Argument 3 is the token slot. It is never used here (the spool file is already only ours to
+# read) and since 2026-09-12 the daemon passes `-` in it: the real token sat on codex's argv
+# for the whole run, where `ps` shows it to every user of the host. Older agents still pass
+# the real thing; either is accepted.
+: "$TOKEN"
 
 # v4.0 statusLine mode: the rate limits arrive on every repaint, so they go to a single-slot
 # file the daemon picks up with the next drain (§11.4.5) — never the spool, which is a queue.
@@ -662,15 +670,13 @@ pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<Rem
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
 async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<RemoteHookPaths> {
     let p = remote_bot_dir(conn, &bot.id).await?;
-    let cmd = shell_join(&[
-        p.hook_sh.clone(),
-        "claude".into(),
-        bot.id.clone(),
-        bot.hook_token.clone(),
-    ]);
-    // v4.0: `hook.sh statusline <bot> <token>` overwrites the single-slot `hook-status.json`
+    // The token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it, and the same key
+    // opens `/relay/announce` and the local `/hook/*`. Kept positional for the older agents
+    // whose argv still carries a real token.
+    let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
+    // v4.0: `hook.sh statusline <bot> -` overwrites the single-slot `hook-status.json`
     // (§11.4.5), then execs the user's own statusLine command (remote ~/.claude/settings.json).
-    let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), bot.hook_token.clone()]);
+    let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     let settings = json!({
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
@@ -784,13 +790,11 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
+            // The notify argv lives on the codex process for its whole run, in plain view of
+            // `ps` for every user of that host — so the token slot is a placeholder (#8; the
+            // local path already keeps the token off the argv, issue #43).
             "codex" => {
-                let parts = vec![
-                    paths.hook_sh,
-                    "codex".to_string(),
-                    bot.id.clone(),
-                    bot.hook_token.clone(),
-                ];
+                let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
                 vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
             }
             // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
@@ -7948,6 +7952,24 @@ mod remote_hook_tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("--agent grok ") && calls[0].contains("--state idle "), "{:?}", calls);
         assert!(calls[0].contains("--agent-session-id g-9"), "{:?}", calls);
+    }
+
+    /// The token slot the daemon now fills is `-` (review 2026-09-12 #8); the script must treat
+    /// it exactly like a real token — spool, then report — so nothing changes on the wire.
+    #[test]
+    fn a_placeholder_token_slot_changes_nothing() {
+        let sb = Sandbox::new(true);
+        let (out, ok) = sb.run(&["claude", &sb.bot, super::REMOTE_TOKEN_SLOT], STOP);
+        assert!(ok && out.is_empty());
+        let spool = sb.read("hook-spool.jsonl");
+        assert_eq!(spool.lines().count(), 1);
+        assert!(spool.contains(r#""bot_id":"b-test""#), "{spool}");
+        assert!(!spool.contains("tok"), "no token, real or placeholder, is written anywhere: {spool}");
+        assert_eq!(sb.calls().len(), 1);
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"c-4"}"#;
+        sb.run(&["codex", &sb.bot, super::REMOTE_TOKEN_SLOT, payload], "");
+        assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 2);
+        assert!(sb.calls()[1].contains("--agent-session-id c-4"), "{:?}", sb.calls());
     }
 
     #[test]
