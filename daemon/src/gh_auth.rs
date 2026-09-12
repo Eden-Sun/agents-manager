@@ -235,7 +235,7 @@ async fn run_script(app: &Arc<App>, host: &str, script: &str, timeout: Duration)
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    conn.ssh_exec_path(script).await
+    conn.ssh_exec_path_timeout(script, timeout).await
 }
 
 async fn run_script_stdin(app: &Arc<App>, host: &str, script: &str, data: &[u8], timeout: Duration) -> Result<String> {

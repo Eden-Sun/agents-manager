@@ -150,6 +150,12 @@ impl HostConn {
     /// shell on the far side may be zsh/fish/…, and this keeps everything POSIX sh and
     /// sidesteps a second round of shell quoting.
     pub async fn ssh_exec(&self, script: &str) -> Result<String> {
+        self.ssh_exec_timeout(script, SSH_EXEC_TIMEOUT).await
+    }
+
+    /// `ssh_exec` with the caller's own budget: a push, a `worktree add` or an identity probe
+    /// is allowed more than the 30 s one-liner default (`SSH_EXEC_TIMEOUT`).
+    pub async fn ssh_exec_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
         let Some(cfg) = &self.cfg else { bail!("ssh_exec called on the local host") };
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg("/bin/sh").arg("-s");
@@ -162,9 +168,9 @@ impl HostConn {
             sin.write_all(script.as_bytes()).await.ok();
             sin.shutdown().await.ok();
         }
-        let out = tokio::time::timeout(SSH_EXEC_TIMEOUT, child.wait_with_output())
+        let out = tokio::time::timeout(timeout, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!("ssh to {} timed out", cfg.ssh))?
+            .map_err(|_| anyhow::anyhow!("ssh to {} timed out after {}s", cfg.ssh, timeout.as_secs()))?
             .with_context(|| format!("run ssh {}", cfg.ssh))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -252,7 +258,12 @@ impl HostConn {
 
     /// Same, but with the remote PATH fixed up first (SPEC §11.2 `remote_path`).
     pub async fn ssh_exec_path(&self, script: &str) -> Result<String> {
-        self.ssh_exec(&format!("{}{script}", self.path_prefix())).await
+        self.ssh_exec_path_timeout(script, SSH_EXEC_TIMEOUT).await
+    }
+
+    /// `ssh_exec_path` with the caller's own budget (see `ssh_exec_timeout`).
+    pub async fn ssh_exec_path_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
+        self.ssh_exec_timeout(&format!("{}{script}", self.path_prefix()), timeout).await
     }
 
     pub async fn home(&self) -> Result<String> {

@@ -701,7 +701,9 @@ async fn detect_identities(
         run_local(&script, IDENTITY_PROBE_TIMEOUT).await
     } else {
         match app.hosts.get(host).await {
-            Some(conn) => conn.ssh_exec_path(&script).await,
+            // Same budget as the local probe: a multi-identity host easily takes more than
+            // the 30 s one-liner default, and a timeout marks *every* identity unprobed.
+            Some(conn) => conn.ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await,
             None => Err(anyhow::anyhow!("unknown host `{host}`")),
         }
     };
