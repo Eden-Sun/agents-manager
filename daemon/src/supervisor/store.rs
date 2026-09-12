@@ -229,6 +229,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // running binary's is how "there is a newer embedded version" is distinguished from
         // "somebody deliberately customised this".
         ("persona_seed_hash", "ALTER TABLE supervisors ADD COLUMN persona_seed_hash TEXT"),
+        // What the remote-entry status is based on. Without these, `remote_status` was a word
+        // with no provenance and no expiry — and `requested` was being read as "connected".
+        ("remote_source", "ALTER TABLE supervisors ADD COLUMN remote_source TEXT"),
+        ("remote_observed_at", "ALTER TABLE supervisors ADD COLUMN remote_observed_at TEXT"),
+        // The run the observation was made against: a restart invalidates it.
+        ("remote_session_id", "ALTER TABLE supervisors ADD COLUMN remote_session_id TEXT"),
+        ("remote_actor", "ALTER TABLE supervisors ADD COLUMN remote_actor TEXT"),
+        ("remote_evidence", "ALTER TABLE supervisors ADD COLUMN remote_evidence TEXT"),
     ] {
         if !has_column(pool, "supervisors", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -337,6 +345,11 @@ pub struct Supervisor {
     pub persona_source: Option<String>,
     pub persona_updated_at: Option<String>,
     pub persona_seed_hash: Option<String>,
+    pub remote_source: Option<String>,
+    pub remote_observed_at: Option<String>,
+    pub remote_session_id: Option<String>,
+    pub remote_actor: Option<String>,
+    pub remote_evidence: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -651,15 +664,43 @@ pub async fn seed_persona_if_empty(pool: &SqlitePool, text: &str) -> Result<bool
     Ok(planted)
 }
 
-pub async fn set_remote(pool: &SqlitePool, status: &str, url: Option<&str>) -> Result<()> {
-    sqlx::query("UPDATE supervisors SET remote_status=?, remote_url=?, updated_at=? WHERE id=?")
-        .bind(status)
-        .bind(url)
-        .bind(crate::db::now())
-        .bind(SUPERVISOR_ID)
-        .execute(pool)
-        .await?;
+/// Record what is known about the remote entry point, and **where it came from**.
+///
+/// `source` is `argv` (we asked for a session), `manual` (a person says they reached it) or
+/// `provider` (an observation, when one becomes available). `session_id` binds the claim to the
+/// run it was made against, so a restart cannot inherit it.
+pub async fn set_remote_observed(
+    pool: &SqlitePool,
+    status: &str,
+    url: Option<&str>,
+    source: &str,
+    session_id: Option<&str>,
+    actor: Option<&str>,
+    evidence: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE supervisors
+            SET remote_status=?, remote_url=?, remote_source=?, remote_session_id=?, remote_actor=?,
+                remote_evidence=?, remote_observed_at=?, updated_at=? WHERE id=?",
+    )
+    .bind(status)
+    .bind(url)
+    .bind(source)
+    .bind(session_id)
+    .bind(actor)
+    .bind(evidence)
+    .bind(crate::db::now())
+    .bind(crate::db::now())
+    .bind(SUPERVISOR_ID)
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+/// The daemon's own bookkeeping: we started (or stopped) the session, so this is what we asked
+/// for. `argv` can never mean more than `requested`.
+pub async fn set_remote(pool: &SqlitePool, status: &str, url: Option<&str>) -> Result<()> {
+    set_remote_observed(pool, status, url, "argv", None, None, None).await
 }
 
 /// Applying a candidate switch: the new model is recorded only once it is actually in effect,

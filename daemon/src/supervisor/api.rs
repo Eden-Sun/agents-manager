@@ -350,6 +350,78 @@ pub async fn get_sanitized_state(State(app): State<Arc<App>>) -> Result<Json<Val
     Ok(Json(super::sanitized_state(&app).await?))
 }
 
+// ------------------------------------------------------------------------- remote
+
+/// The phone entry point: what is claimed, on what evidence, and when it stops counting.
+pub async fn get_remote(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    Ok(Json(super::remote::status(&app).await))
+}
+
+#[derive(Deserialize)]
+pub struct RemoteObservationIn {
+    /// `requested` | `verified` | `unavailable` | `unknown`.
+    pub status: String,
+    /// `manual` (a person checked) or `provider` (an observation). `argv` is the daemon's own
+    /// bookkeeping and is not accepted here.
+    pub source: String,
+    /// Who is making the claim. Required for anything that asserts the entry point works: an
+    /// unattributed "it is fine" is exactly the fiction this endpoint exists to prevent.
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// Record an observation of the remote entry point.
+///
+/// Refuses to let argv, or an anonymous caller, claim the entry point works. The observation is
+/// bound to the current session and expires (`remote::OBSERVATION_TTL_SECS`), so it can never
+/// harden into a permanent "connected" that nobody rechecked.
+pub async fn post_remote_observation(
+    State(app): State<Arc<App>>,
+    Json(b): Json<RemoteObservationIn>,
+) -> Result<Json<Value>, LcError> {
+    if !super::remote::STATES.contains(&b.status.as_str()) {
+        return Err(LcError::Bad(format!("status must be one of {:?}", super::remote::STATES)));
+    }
+    let source = super::remote::Source::parse(&b.source)
+        .ok_or_else(|| LcError::Bad("source must be `manual` or `provider`".into()))?;
+    if source == super::remote::Source::Argv {
+        return Err(LcError::Bad("argv is the daemon's own record and cannot report an observation".into()));
+    }
+    if b.status == "verified" && !source.can_verify() {
+        return Err(LcError::conflict(
+            "this source cannot verify the remote entry point",
+            json!({"reason": "source_cannot_verify", "source": b.source}),
+        ));
+    }
+    let actor = b.actor.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if matches!(b.status.as_str(), "verified" | "unavailable") && actor.is_none() {
+        return Err(LcError::Bad("an observation that claims verified or unavailable needs an actor".into()));
+    }
+    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let session = match sup.bot_id.as_deref() {
+        Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.id),
+        None => None,
+    };
+    store::set_remote_observed(
+        &app.db,
+        &b.status,
+        b.url.as_deref(),
+        source.as_str(),
+        session.as_deref(),
+        actor,
+        b.evidence.as_deref(),
+    )
+    .await
+    .map_err(up)?;
+    tracing::info!(status = %b.status, source = source.as_str(), actor = actor.unwrap_or(""), "remote entry observation recorded");
+    app.emit("supervisor_changed", json!({"remote": true})).await;
+    Ok(Json(super::remote::status(&app).await))
+}
+
 // ------------------------------------------------------------------------ persona
 
 /// Which copy is which, and what the running session can honestly be said to have.

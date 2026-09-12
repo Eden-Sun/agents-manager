@@ -69,11 +69,11 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 
 ## 6. Remote 入口可觀測性（P2）
 
-- [ ] 先確認已安裝 Claude CLI／hook／session 對 Remote 的可靠觀測來源，記錄能力限制；不要單靠 argv、requested 或任意 bot 文字就宣稱 active。
-- [ ] 定義 requested／verified／unavailable／unknown（命名可沿用兼容方案）、observed_at、來源、session關聯與過期；session 停止／切換／觀測過期時撤銷舊狀態。
-- [ ] 只從可驗證 provider 資料識別 URL／session，URL不冒充「手機已連上」。若目前 provider 無可靠證據，實作 capability=unsupported／unknown 與 UI 說明，必要時提供帶 actor/source 的人工確認；不得造假 active。
-- [ ] Remote 異常加入 incident，恢復只在 AGM 核准且無回合衝突的窗口；不自動開更多 remote session，不改其他使用者入口。
-- [ ] 驗收：只有啟動 args→requested；可靠證據→verified；session換掉／證據過期→unknown；偽造文字不接受。實機測試需要 AGM 協調並保留觀察證據。
+- [x] 先確認已安裝 Claude CLI／hook／session 對 Remote 的可靠觀測來源，記錄能力限制；不要單靠 argv、requested 或任意 bot 文字就宣稱 active。
+- [x] 定義 requested／verified／unavailable／unknown（命名可沿用兼容方案）、observed_at、來源、session關聯與過期；session 停止／切換／觀測過期時撤銷舊狀態。
+- [x] 只從可驗證 provider 資料識別 URL／session，URL不冒充「手機已連上」。若目前 provider 無可靠證據，實作 capability=unsupported／unknown 與 UI 說明，必要時提供帶 actor/source 的人工確認；不得造假 active。
+- [x] Remote 異常加入 incident，恢復只在 AGM 核准且無回合衝突的窗口；不自動開更多 remote session，不改其他使用者入口。
+- [x] 驗收：只有啟動 args→requested；可靠證據→verified；session換掉／證據過期→unknown；偽造文字不接受。實機測試需要 AGM 協調並保留觀察證據。
 
 ## 整合、驗證與交付
 

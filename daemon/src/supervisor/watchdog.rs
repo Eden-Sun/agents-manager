@@ -163,6 +163,11 @@ mod tests {
             persona_source: None,
             persona_updated_at: None,
             persona_seed_hash: None,
+            remote_source: None,
+            remote_observed_at: None,
+            remote_session_id: None,
+            remote_actor: None,
+            remote_evidence: None,
             created_at: "now".into(),
             updated_at: "now".into(),
         }
