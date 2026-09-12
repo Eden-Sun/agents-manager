@@ -560,18 +560,6 @@ export interface WsFrame {
   data?: unknown
 }
 
-export type WsEventType =
-  | 'bot_status'
-  | 'message_added'
-  | 'turn_updated'
-  | 'project_changed'
-  | 'bot_changed'
-  | 'daemon_status'
-  | 'host_changed'
-  | 'turn_progress'
-  | 'quota_updated'
-  | 'resync'
-
 export interface ApiErrorBody {
   /** machine code: `conflict` | `bad_request` | `not_found` | `upstream` */
   error?: string
