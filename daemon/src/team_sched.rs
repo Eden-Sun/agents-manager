@@ -530,7 +530,7 @@ fn clip(s: &str) -> String {
     format!("{head}\n\n（已截斷，完整內容見時間軸）")
 }
 
-fn footer(role: &str) -> String {
+pub(crate) fn footer(role: &str) -> String {
     format!(
         "\n\n---\n回覆結尾必須包含一個 ```am-team fenced 區塊（JSON），允許的 action：{}。\
          區塊之外的文字給人看，區塊給系統看。",
@@ -3131,6 +3131,118 @@ mod scenarios {
                 if name.starts_with("dev-") { format!("i1-{name}") } else { name.to_string() };
             std::path::PathBuf::from(&self.e.dir).join("data/teams").join(&self.tid).join(dir)
         }
+    }
+
+/// Complete the PM turn created by `POST /teams/:id/answer` as the hook path would.
+async fn complete_answer_turn(s: &S, response: &str) -> String {
+    let pm = s.bot("pm", 0).await;
+    let out = crate::team::answer(s.app(), &s.tid, "使用者的回答", "answer-test")
+        .await
+        .unwrap();
+    let turn_id = out["turn_id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE turns SET status='completed', delivery='ok', completed_at=? WHERE id=?")
+        .bind(db::now())
+        .bind(&turn_id)
+        .execute(&s.app().db)
+        .await
+        .unwrap();
+    let conv = db::conversation_id(&s.app().db, &pm.id).await.unwrap();
+    crate::lifecycle::insert_message(s.app(), &conv, Some(&turn_id), "assistant", response, "hook", false, None)
+        .await
+        .unwrap();
+    on_turn_done(s.app(), &s.tid, &pm.id, &turn_id, "completed").await.unwrap();
+    turn_id
+}
+
+    /// An answer keeps the user's timeline text unchanged, but the delivered PM prompt must
+    /// restate the protocol so the PM's next reply can be applied instead of leaving planning.
+    #[tokio::test]
+    async fn answer_applies_pm_action_and_advances_phase() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"ask_user","question":"要不要繼續？"})).await;
+        assert_eq!(s.team().await.pause_reason.as_deref(), Some("ask_user"));
+        s.arm().await;
+
+        let out = crate::team::answer(s.app(), &s.tid, "繼續", "answer-footer-test").await.unwrap();
+        let delivered = s
+            .e
+            .herdr
+            .first_call("agent.prompt")
+            .and_then(|p| p["text"].as_str().map(String::from))
+            .unwrap();
+        assert!(delivered.contains("```am-team"));
+        assert!(delivered.contains("dispatch, wait, done, ask_user, abort"));
+
+        let turn_id = out["turn_id"].as_str().unwrap();
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(turn_id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        let conv = db::conversation_id(&s.app().db, &pm.id).await.unwrap();
+        crate::lifecycle::insert_message(
+            s.app(),
+            &conv,
+            Some(turn_id),
+            "assistant",
+            "收到，我來派工。\n\n```am-team\n{\"action\":\"dispatch\",\"tasks\":[{\"to\":\"dev-1\",\"brief\":\"完成工作\"}]}\n```",
+            "hook",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let worker = s.bot("worker", 0).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=? AND state='running'")
+            .bind(&worker.id)
+            .execute(&s.app().db)
+            .await
+            .unwrap();
+        // Keep the worker's delivery slot occupied so this test observes the PM transition
+        // without making the mock herdr invent a completed worker turn.
+        let worker_run = db::active_run(&s.app().db, &worker.id).await.unwrap().unwrap();
+        let worker_conv = db::conversation_id(&s.app().db, &worker.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind("answer-worker-busy")
+        .bind(&worker_conv)
+        .bind(&worker_run.id)
+        .bind(db::now())
+        .execute(&s.app().db)
+        .await
+        .unwrap();
+
+        on_turn_done(s.app(), &s.tid, &pm.id, turn_id, "completed").await.unwrap();
+
+        assert_eq!(s.tasks().await.len(), 1, "the PM action was applied");
+        let team = s.team().await;
+        assert_eq!(team.phase, "working", "planning advanced after answer: {team:?}");
+    }
+
+    /// A PM response without a block remains ordinary user conversation: no repair is queued
+    /// and the resumed team stays in planning until the PM sends a protocol response.
+    #[tokio::test]
+    async fn answer_without_pm_block_keeps_existing_behavior() {
+        let s = S::new(1, false).await;
+        let pm = s.bot("pm", 0).await;
+        s.reply(&pm, json!({"action":"ask_user","question":"需要更多資訊"})).await;
+        s.arm().await;
+        complete_answer_turn(&s, "我先想一下，稍後回覆。").await;
+
+        assert_eq!(s.team().await.phase, "planning");
+        assert!(s.tasks().await.is_empty());
+        let repairs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM team_events WHERE team_id=? AND kind='note' AND json_extract(payload_json,'$.action')='protocol_error'",
+        )
+        .bind(&s.tid)
+        .fetch_one(&s.app().db)
+        .await
+        .unwrap();
+        assert_eq!(repairs, 0);
     }
 
     fn dispatch2() -> Value {

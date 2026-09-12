@@ -830,7 +830,7 @@ issue 標題常常是一整句規格，手機的標題列與切換器只看得�
 `GET /teams/{id}` 與 `GET /api/state` 的 team 物件多一個 `label`（`null` = 沒取）。
 | POST | `/teams/{id}/say` | `{"text", "to", "client_request_id"}`；`to` 接受**角色**（`pm` / `reviewer`）、**短名**（`dev-1`，同 §4.4 協定用的）、**暱稱**（`i42-pm`）、**bot_id**，可帶 `@` 前綴 | 使用者插話（記 `kind:user`，不計預算），走 §13 群組路徑；回同 `POST chat` 的單筆 `sent` |
 | POST | `/teams/{id}/tasks/{tid}/decide` | `{"action": "rework" \| "force_merge" \| "skip", "note"?}` | 只在 task `exhausted` / `blocked_by_worker` / rebase 用盡時有效；其餘 409 |
-| POST | `/teams/{id}/answer` | `{"text"}` | 回 PM 的 `ask_user`；等同 `say` 到 pm + `resume` |
+| POST | `/teams/{id}/answer` | `{"text"}` | 回 PM 的 `ask_user`；等同 `say` 到 pm + `resume`，送給 PM 的 prompt 會附上 PM 協定 footer |
 
 **角色（`pm` / `workers` / `reviewer`，2026-09-08）**：`{"kind"?, "model"?, "effort"?, "fast"?, "identity"?, "apply"?}`。
 省略一個 key = 不動它；`model` / `effort` / `identity` 送 `null` = 清成該 kind 的預設。
