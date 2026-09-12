@@ -96,6 +96,9 @@ pub struct App {
     /// Kept on `App` rather than inside the poller task so re-arming a poller — a new turn on the
     /// same run — cannot restart the budget and burst.
     pub progress_emitted: Mutex<HashMap<String, std::time::Instant>>,
+    /// run_id -> pane revision for the last feedback survey dismissal attempt. The status event
+    /// path and the periodic sweep share this guard so one survey cannot be dismissed twice.
+    pub survey_revisions: Mutex<HashMap<String, u64>>,
     /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
     /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
@@ -159,6 +162,7 @@ impl App {
             stall_timers: Mutex::new(HashMap::new()),
             progress_pollers: Mutex::new(HashMap::new()),
             progress_emitted: Mutex::new(HashMap::new()),
+            survey_revisions: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             tools: Mutex::new(HashMap::new()),

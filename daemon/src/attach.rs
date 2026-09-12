@@ -98,8 +98,14 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
     if !is_image(mime) {
         bail!("only images can be attached (got {mime})");
     }
-    let bot = db::bot(&app.db, bot_id).await?.ok_or_else(|| anyhow::anyhow!("no such bot"))?;
-    let project = db::project(&app.db, &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("no such project"))?;
+    let bot = db::bot(&app.db, bot_id)
+        .await?
+        .filter(|bot| bot.deleted_at.is_none())
+        .ok_or_else(|| anyhow::anyhow!("no such bot"))?;
+    let project = db::project(&app.db, &bot.project_id)
+        .await?
+        .filter(|project| project.deleted_at.is_none())
+        .ok_or_else(|| anyhow::anyhow!("no such project"))?;
 
     let id = db::ulid();
     let file = format!("{}-{}.{}", id, safe_stem(name), ext_for(name, mime));
