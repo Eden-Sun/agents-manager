@@ -1117,6 +1117,10 @@ pub async fn create_with_issues(
     req: CreateTeam,
     issues: Vec<IssueRef>,
 ) -> LcResult<Value> {
+    // The same issue twice in one request would trip `team_issues_number_open` halfway through
+    // the inserts; keep the first mention, the way `create`'s `issue_list` already does.
+    let mut seen = std::collections::HashSet::new();
+    let issues: Vec<IssueRef> = issues.into_iter().filter(|i| seen.insert(i.number)).collect();
     let issue = issues.first().cloned().ok_or_else(|| LcError::Bad("issue_numbers must not be empty".into()))?;
     let project = db::project(&app.db, project_id)
         .await
@@ -1201,6 +1205,10 @@ pub async fn create_with_issues(
         "reviewer": reviewer.as_ref().map(role_spec_json),
     });
     let now = db::now();
+    // The team row and its queue are one write: a `teams` row without its `team_issues` (an
+    // insert failing partway) would be picked up by `respawn_schedulers` at the next start as
+    // a member-less `starting` team nobody can explain.
+    let mut tx = app.db.begin().await.map_err(any_err)?;
     sqlx::query(
         "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, pause_reason, resume_phase,
            base_ref, base_sha, branch, worktree_root, deliver, supervised, roles_json, budget_json, usage_json,
@@ -1223,7 +1231,7 @@ pub async fn create_with_issues(
     .bind(serde_json::to_string(&empty_usage()).unwrap_or_else(|_| "{}".into()))
     .bind(&repo)
     .bind(&now)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await
     .map_err(any_err)?;
 
@@ -1249,10 +1257,11 @@ pub async fn create_with_issues(
         .bind(if first { Some(base_sha.as_str()) } else { None })
         .bind(&now)
         .bind(if first { Some(now.as_str()) } else { None })
-        .execute(&app.db)
+        .execute(&mut *tx)
         .await
         .map_err(any_err)?;
     }
+    tx.commit().await.map_err(any_err)?;
 
     // SPEC-team §6.2 / appendix C: the integration branch, then one worktree per member,
     // all under `<data_dir>/teams/<id>/` — outside the repository. The only commands aimed
@@ -5759,6 +5768,19 @@ mod api_tests {
         let out = cleanup(&app, &tid).await.unwrap();
         assert_eq!(out["workspace_closed"], true);
         assert!(load(&app, &tid).await.unwrap().workspace_id.is_none());
+    }
+
+    /// daemon-ops #20: the same issue twice in `issue_numbers` is one queue entry, not a
+    /// unique-index failure that leaves a member-less `starting` team behind.
+    #[tokio::test]
+    async fn create_with_issues_dedups_the_queue() {
+        let e = env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let tid = make_team_with(&app, &pid, req(Some(1), false), vec![issue(), issue2(), issue()]).await;
+        let q = db::team_issues(&app.db, &tid).await.unwrap();
+        assert_eq!(q.iter().map(|i| i.issue_number).collect::<Vec<_>>(), [42, 43]);
+        let teams: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM teams").fetch_one(&app.db).await.unwrap();
+        assert_eq!(teams, 1);
     }
 
     /// §10.5 PATCH: top up the budget, flip supervised, switch the delivery mode.
