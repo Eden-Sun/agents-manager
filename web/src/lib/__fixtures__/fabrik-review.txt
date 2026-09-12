@@ -1,0 +1,50 @@
+     // 網址形式維持不變(/announcements?category=…),但本頁是靜態產出,build 時讀不到
+     // searchParams,所以改成一次 render 全部公告、每則標上 data-category,
+     // 再由下方 inline script 讀 location.search 決定 <html data-announcement-category>。
+     // 沒有 JS 時就是「全部」,不會出現空白畫面。
+     //
+     // 分頁:示範資料只有數則,一次全部取出並移除分頁控制項,
+     // 避免留下按了沒反應的按鈕。
+     const announcements = getSampleAnnouncements({ page: 0, size: 500 }).content
+
+     /** 產生列表網址:分類留在 query param,預設值不寫進網址保持乾淨。 */
+     function listHref(category: AnnouncementCategory | '') {
+       return category ? `/announcements?category=${category}` : '/announcements'
+     }
+
+     /** 固定時區 + Intl,產出時與瀏覽器顯示一致,不寫死格式。 */
+     === sample/api
+     api.ts
+     contact.ts
+     dates.ts
+     feedback.ts
+     handoff.ts
+     icons.ts
+     leadsSheet.ts
+     legal.ts
+     network.ts
+     quoteCompare.ts
+     quoteEstimate.ts
+     quoteFailures.ts
+     quoteResult.ts
+     rpa.ts
+     sample.ts
+     track.ts
+     useQuoteFlow.ts
+     3:import react from '@astrojs/react'
+     5:import vercel from '@astrojs/vercel'
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ 編輯方式  ☒ 功能  ✔ Submit  →
+
+Review your answers
+
+ ● 文章是誰寫、怎麼上稿？
+   → 非工程師要能自己發
+ ● 除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）
+   → SEO 是主要目的
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
