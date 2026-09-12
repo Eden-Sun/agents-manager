@@ -2262,15 +2262,25 @@ async fn get_messages(
 ) -> Result<Json<Value>, LcError> {
     let conv = db::conversation_id(&app.db, &id).await.map_err(any_err)?;
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
-    let before = q.get("before").cloned();
-    let rows = match &before {
+    let before_rowid = match q.get("before") {
+        Some(b) => Some(
+            sqlx::query_scalar::<_, i64>("SELECT rowid FROM messages WHERE id = ?")
+                .bind(b)
+                .fetch_optional(&app.db)
+                .await
+                .map_err(any_err)?
+                .ok_or_else(|| LcError::Bad(format!("before message `{b}` not found")))?,
+        ),
+        None => None,
+    };
+    let rows = match before_rowid {
         Some(b) => sqlx::query_as::<_, db::Message>(
-            "SELECT * FROM messages WHERE conversation_id=? AND id < ? ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM messages WHERE conversation_id=? AND rowid < ? ORDER BY rowid DESC LIMIT ?",
         )
         .bind(&conv)
         .bind(b)
         .bind(limit + 1),
-        None => sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?")
+        None => sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid DESC LIMIT ?")
             .bind(&conv)
             .bind(limit + 1),
     }
@@ -2458,5 +2468,59 @@ mod name_tests {
         assert_eq!(next_free_name("review", &taken), "review-1");
         let long = "a".repeat(32);
         assert!(next_free_name(&long, &taken).len() <= 32);
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn messages_page_by_insert_order_when_ids_are_not_monotonic() {
+        let e = crate::team::testing::env().await;
+        let app = e.app.clone();
+        let bot_id = "messages-test-bot";
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,'claude','tok',?)")
+            .bind(bot_id)
+            .bind(&e.project_id)
+            .bind(bot_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+        for id in ["m3", "m1", "m2"] {
+            sqlx::query(
+                "INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?, 'user', ?, 'web', ?)",
+            )
+            .bind(id)
+            .bind(&conv)
+            .bind(id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+
+        let mut before: Option<String> = None;
+        let expected = ["m2", "m1", "m3"];
+        for (page, want) in expected.iter().enumerate() {
+            let mut q = HashMap::from([(String::from("limit"), String::from("1"))]);
+            if let Some(cursor) = &before {
+                q.insert("before".into(), cursor.clone());
+            }
+            let Json(body) = get_messages(State(app.clone()), Path(bot_id.into()), Query(q)).await.unwrap();
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["id"], *want);
+            assert_eq!(body["has_more"], page + 1 < expected.len());
+            before = Some(messages[0]["id"].as_str().unwrap().to_string());
+        }
+
+        let q = HashMap::from([(String::from("before"), String::from("missing"))]);
+        assert!(matches!(
+            get_messages(State(app), Path(bot_id.into()), Query(q)).await,
+            Err(LcError::Bad(_))
+        ));
     }
 }

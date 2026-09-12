@@ -320,7 +320,7 @@ Turn 或 user message，重試不會因為上一回合卡住而得到 409。
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`
 
-倒序分頁（`before` 傳目前最舊一則的 `id`），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
+倒序分頁（`before` 傳目前最舊一則的 `id`，以插入順序分頁），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
 
 ```json
 {
@@ -1163,8 +1163,9 @@ DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id
 
 ### 11.2 `GET /api/projects/{id}/messages?before=<message_id>&limit=100`
 
-Project 底下**所有存活 bot** 的訊息合併，以 `message.id`（ULID，時間有序）倒序分頁，
-回傳時已**正序**排好。`limit` 1–500（預設 100）。Project 不存在 → 404。
+Project 底下**所有存活 bot** 的訊息合併，以插入順序（SQLite `rowid`，非 `id` 字典序）倒序分頁，
+回傳時已**正序**排好。`before` 對外仍傳 message id，由後端解析成插入順序游標；`limit` 1–500（預設 100）。
+Project 不存在 → 404。
 
 ```json
 {
