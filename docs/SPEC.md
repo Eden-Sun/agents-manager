@@ -1440,7 +1440,9 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   2. 整樹 `cargo test -p agents-managerd` 全過，web `bunx tsc --noEmit -p tsconfig.app.json` 通過
      （`tsc --noEmit` 不帶 `-p` 是假綠燈）。
   3. 等到沒有別的 bot 在 `working`（`blocked` 不算，見上一條）；有人在跑就等，最多 30 分鐘，
-     超過回報「延後」不硬重啟。
+     超過回報「延後」不硬重啟。**判定通過之後、換 binary 的前一刻要再查一次**，仍成立才動手——
+     建置與等待之間隔了好幾分鐘，狀態會翻回來（2026-09-12：輪詢判定「只剩一顆授權中的 bot」，
+     幾秒後另一顆又變成 working，腳本沒有再閘一次就換了 binary）。
   4. 備份舊 binary 為 `target/release/agents-managerd.bak`。
   5. 重啟後 **30 秒內**驗 `/api/session` 與 `bin/agm health`。
   6. **60 秒內**確認 `bin/agm supervisor` 的 status 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。
