@@ -219,3 +219,50 @@ export function takeTurnCompletion(botId: string, turnId: string): boolean {
 export function resetTurnCompletions() {
   counted.clear()
 }
+
+// ---------------------------------------------------------------- 終端直接輸入的回合
+
+/**
+ * `bot_status` working→idle 的補記要用哪個 key（docs/reviews/2026-09-12/web.md §2 未讀補記）。
+ *
+ * 那條路的目的是「使用者直接在終端裡跟 agent 講話、或 hook 沒裝」——這時 `message_added`／
+ * `turn_updated` 一則都不會來。以前一律拿這個 bot 字典序最大的 turn id 當 key，但那筆幾乎一定
+ * 已被 hook 那條路記過（`takeTurnCompletion` 回 false），結果只要這顆 bot 曾從網頁送過一次訊息，
+ * 之後終端裡的回合就永遠不亮。
+ *
+ * 三種情況：
+ * - 最近的回合還在 `in_flight`：hook 的 `turn_updated` 還沒到，跟它共用 turn id，之後到了會被去重。
+ * - hook 那條路在上一次 idle 邊緣之後已經記過一次（`markHookCompletion`）：這次 idle 就是那個
+ *   回合的尾巴，跳過（回 `null`）。
+ * - 都不是：這是終端裡直接跑的回合，給它一個獨立的 key（`run:<id>:<第幾次 idle>`）。
+ */
+const hookCompleted = new Set<string>()
+const idleEdges = new Map<string, number>()
+
+/** `message_added`／`turn_updated` 記了一次回合完成：接下來的那個 idle 邊緣屬於它。 */
+export function markHookCompletion(botId: string) {
+  hookCompleted.add(botId)
+}
+
+/** 新回合開始（idle→working）：上一輪留下的標記已經沒有意義。 */
+export function clearHookCompletion(botId: string) {
+  hookCompleted.delete(botId)
+}
+
+export function idleEdgeCompletionKey(
+  botId: string,
+  runId: string,
+  latestTurn: { id: string; status: string } | null,
+): string | null {
+  if (latestTurn && latestTurn.status === 'in_flight') return latestTurn.id
+  if (hookCompleted.delete(botId)) return null
+  const n = (idleEdges.get(botId) ?? 0) + 1
+  idleEdges.set(botId, n)
+  return `run:${runId}:${n}`
+}
+
+/** 測試用。 */
+export function resetIdleEdges() {
+  hookCompleted.clear()
+  idleEdges.clear()
+}

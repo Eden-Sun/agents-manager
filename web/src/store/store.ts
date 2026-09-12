@@ -42,12 +42,15 @@ import { restoreQueued } from './queuedSend'
 import type { QueuedSend } from './queuedSend'
 import {
   botKey,
+  clearHookCompletion,
   completesTurn,
   completionKey,
   countUnreadTurns,
   groupKey,
+  idleEdgeCompletionKey,
   loadCounts,
   loadMarks,
+  markHookCompletion,
   markNow,
   markOfMessages,
   pruneMarks,
@@ -2333,14 +2336,19 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // working → idle 也是「一個回合做完了」。多數時候 `message_added` / `turn_updated`
       // 已經先記過（`takeTurnCompletion` 會擋掉重複），但使用者直接在終端裡跟 agent 講話、
       // 或 hook 沒裝時，那條路一則都不會來——沒有這一段，未讀就永遠不亮。
+      if (!wasWorking && run?.agent_status === 'working') clearHookCompletion(botId)
       if (wasWorking && run?.agent_status === 'idle') {
-        // 去重要落在跟回合同一個 key 上：這個 bot 最近的那個回合（ULID 字典序＝時間序）。
-        const turnIds = Object.keys(get().turns[botId] ?? {})
+        // key 的規則在 `idleEdgeCompletionKey`：最近的回合（ULID 字典序＝時間序）還在飛就共用它的
+        // id；hook 那條路剛記過就跳過；否則是終端裡直接跑的回合，給獨立的 key。
+        const map = get().turns[botId] ?? {}
+        const turnIds = Object.keys(map)
         const latest = turnIds.length > 0 ? turnIds.reduce((a2, b2) => (a2 > b2 ? a2 : b2)) : null
-        const key = latest ?? `run:${run.id}`
-        noteTurnDone(set, get, botId, key)
-        const pid = get().bots.find((b) => b.id === botId)?.project_id
-        if (pid) noteGroupTurnDone(set, get, pid, key)
+        const key = idleEdgeCompletionKey(botId, run.id, latest ? map[latest] : null)
+        if (key) {
+          noteTurnDone(set, get, botId, key)
+          const pid = get().bots.find((b) => b.id === botId)?.project_id
+          if (pid) noteGroupTurnDone(set, get, pid, key)
+        }
       }
       return
     }
@@ -2394,6 +2402,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         // 同一個回合只記一次：沒有 `turn_id` 的訊息也要跟 `turn_updated` 落在同一個 key 上，
         // 否則這裡記 `msg:<id>`、回合終態再記 `turn.id`，一則回覆讓徽章跳兩下。
         const turnId = completionKey(msg, Object.keys(get().turns[botId] ?? {}))
+        markHookCompletion(botId)
         noteTurnDone(set, get, botId, turnId)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
         if (pid) noteGroupTurnDone(set, get, pid, turnId)
@@ -2415,6 +2424,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (turn.status !== 'in_flight') {
         flushQueued(botId)
         // 沒有 assistant 訊息的回合（被中止、只有終端輸出）也要算完成，否則它永遠不會亮。
+        markHookCompletion(botId)
         noteTurnDone(set, get, botId, turn.id)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
         if (pid) noteGroupTurnDone(set, get, pid, turn.id)
