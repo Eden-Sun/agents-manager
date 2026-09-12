@@ -718,6 +718,11 @@ queued ──relay 送達──► working ──report{done}──► reported 
 
 ### 8.3 誰判定完成
 - **task 完成**：reviewer `approve`（或無 reviewer）且 daemon merge 成功。不是 worker 說 done 就算。
+- **`report` 時 daemon 替執行者 commit 失敗（2026-09-12）**：`index.lock` 殘留、沒有 `user.email`、磁碟滿……
+  以前只記 `auto_commit_failed` 就照樣送審，合併的是少了最後那批改動的分支，issue 結束時 `worktree remove --force`
+  再把它們真的丟掉（違反 §6.3）。現在 task **不換狀態**，改送一則 `commit_failed` relay 請執行者自己
+  `git add -A && git commit` 後再 `report`；同一個 task 連續第 3 次失敗 → `paused(upstream)`，relay 留在 pending，
+  「繼續」後照送。
 - **team 完成**：PM 發 `done` **且** daemon 驗證所有 task ∈ 終態。PM 在沒有 task 或所有 task 終態後若回 `wait`，daemon 第一次送一則「請 `done` 或再 `dispatch`」的 nudge；第二次（含）把 team 暫停為 `paused(pm_stalled)`，另排一則說明「已暫停，等使用者決定」。使用者 `resume` 後再送一則 nudge，重新要求 PM `done` 或 `dispatch`。
 - PM 的 `done.summary` 成為 PR body / team 摘要。
 
