@@ -13,7 +13,7 @@
 #   3. **空閒判斷改成租約**。原本是一次快照：讀完「沒人在跑」之後到真的替換 binary 之間還有
 #      好幾分鐘，期間隨時可能有人開始工作，而兩個申請都可能同時被允許「等空檔執行」。現在是
 #      先 `lease safety` 等窗口、再 `lease acquire` 在同一個鎖裡重驗並拿走窗口；拿著 restart
-#      租約期間 daemon 不會再派新工作出去。
+#      租約期間 supervisor assignment 派送暫停；其他 prompt 路徑仍需 AGM 協調。
 #
 # 邊界（老實說清楚）：租約只約束走 API 與這些腳本的路徑。這台機器上任何一個 shell 還是可以
 # 直接 kill daemon 或自己跑 cargo build，那不是這裡能強制的；租約是協調，不是 OS 層的鎖。
@@ -27,7 +27,8 @@ REPO="${AGM_REPO:-$HOME/project/agents-manager}"
 BOT="${AGM_BUILD_BOT:-}"            # 建置 child 的 bot id；沒設就跳過（絕不改派給使用者的 bot）
 AGM="$DIR/bin/agm"
 LOG="$DIR/daemon-update.log"
-STATE="$DIR/daemon-update.last"     # 已派工的 origin/main short sha
+STATE="$DIR/daemon-update.last"     # 已派工的 origin/main sha
+APPROVAL_STATE="$DIR/daemon-update.approval.json"
 BUILT="$DIR/daemon-update.built"    # 上次真的建進正式 binary 的 short sha
 OWNER="${AM_AGENT_NAME:-daemon-update-kick}"
 GIT=/usr/bin/git
@@ -37,9 +38,14 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 [ -n "$BOT" ] || { log "沒設 AGM_BUILD_BOT，跳過（不改派給別的 bot）"; exit 0; }
 
+# A second runner must not create another approval or hand off the same lease. A killed runner
+# leaves this directory behind: fail closed until AGM verifies no runner remains and removes it.
+LOCK="$DIR/daemon-update.lock"
+mkdir "$LOCK" 2>/dev/null || { log "更新檢查已有執行者或殘留鎖，交 AGM 檢查"; exit 0; }
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 log "== check"
 "$GIT" -C "$REPO" fetch -q origin main 2>>"$LOG" || log "fetch 失敗，用本地 origin/main"
-HEAD_SHA=$("$GIT" -C "$REPO" rev-parse --short origin/main)
+HEAD_SHA=$("$GIT" -C "$REPO" rev-parse origin/main) || { log "無法讀取 origin/main，跳過"; exit 0; }
 
 # 會影響 binary 的路徑。問 daemon 拿（它知道自己 include_str! 了什麼）；問不到再用保底清單。
 PATHS=$("$AGM" --compact build-inputs 2>/dev/null | python3 -c '
@@ -80,10 +86,11 @@ fi
 # 上一筆更新派工還沒**結案**就不要再疊：回合跑完但沒人驗收的也算未結案。
 PENDING=$("$AGM" --compact assignments --open 2>/dev/null | python3 -c '
 import json,sys
-rows = json.load(sys.stdin).get("assignments", [])
+rows = json.load(sys.stdin)["assignments"]
+if not isinstance(rows, list): sys.exit(1)
 mine = [r for r in rows if str(r.get("client_request_id","")).startswith("agm-daemon-update-")]
 print(mine[0]["client_request_id"] if mine else "")
-' 2>/dev/null) || PENDING=""
+' 2>/dev/null) || { log "無法確認未結案派工，這輪不派"; exit 0; }
 if [ -n "$PENDING" ]; then
   log "上一筆更新還沒結案（${PENDING}），跳過"; exit 0
 fi
@@ -98,27 +105,58 @@ if [ "$SAFE" != "yes" ]; then
   log "還有人在跑（${SAFE}），這輪不派"; exit 0
 fi
 
-# 核准：寫成紀錄（申請者、範圍、commit、到期），由 AGM 核駁。沒核准就不往下走，也不找使用者轉達。
-APPROVAL=$("$AGM" --compact approval request \
-  --requester "$OWNER" --purpose rebuild \
-  --scope "release rebuild + daemon restart（daemon/web/persona/agm.py）" \
-  --commit "$HEAD_SHA" --expires-in 5400 2>>"$LOG" | python3 -c '
+# Reuse the same durable approval on later invocations. Creating a fresh pending request on
+# every tick makes an asynchronous AGM decision impossible to consume. Store the full commit
+# and requester so approval for one tree/owner can never authorize another.
+APPROVAL=""
+if [ -f "$APPROVAL_STATE" ]; then
+  APPROVAL=$(python3 -c '
 import json,sys
-print(json.load(sys.stdin).get("id",""))
-' 2>/dev/null) || APPROVAL=""
-if [ -z "$APPROVAL" ]; then
-  log "申請核准失敗，這輪不派"; exit 0
+with open(sys.argv[1]) as f: d=json.load(f)
+if d["commit"] == sys.argv[2] and d["owner"] == sys.argv[3]:
+    if not isinstance(d["id"], str) or not d["id"]: sys.exit(1)
+    print(d["id"])
+' "$APPROVAL_STATE" "$HEAD_SHA" "$OWNER" 2>/dev/null) || {
+    log "核准狀態檔損毀，交 AGM 檢查，這輪不派"; exit 0;
+  }
 fi
-log "已申請核准 ${APPROVAL}（commit ${HEAD_SHA}），等 AGM 裁示"
-
-# AGM 還沒核准就到此為止：下一個整點會用同一個 commit 再看一次。核准是它的判斷，不是等待迴圈。
-STATUS=$("$AGM" --compact approval list 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
+if [ -z "$APPROVAL" ]; then
+  APPROVAL=$("$AGM" --compact approval request \
+    --requester "$OWNER" --purpose rebuild \
+    --scope "release rebuild（daemon/web/persona/agm.py）；restart 另行核准" \
+    --commit "$HEAD_SHA" --expires-in 5400 2>>"$LOG" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+if not isinstance(d.get("id"),str) or not d["id"]: sys.exit(1)
+print(d["id"])
+' 2>/dev/null) || { log "申請核准失敗，這輪不派"; exit 0; }
+  python3 -c '
 import json,os,sys
-want = os.environ["APPROVAL"]
-for a in json.load(sys.stdin).get("approvals", []):
-    if a.get("id") == want:
-        print(a.get("status","")); break
-' 2>/dev/null) || STATUS=""
+path,commit,owner,aid=sys.argv[1:]
+with open(path+".tmp","w") as f: json.dump(dict(commit=commit,owner=owner,id=aid),f)
+os.replace(path+".tmp",path)
+' "$APPROVAL_STATE" "$HEAD_SHA" "$OWNER" "$APPROVAL" || {
+    log "保存核准 ID 失敗，這輪不派"; exit 0;
+  }
+  log "已申請核准 ${APPROVAL}（commit ${HEAD_SHA}），等 AGM 裁示"
+fi
+
+STATUS=$("$AGM" --compact approval list 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
+import datetime,json,os,sys
+rows=json.load(sys.stdin)["approvals"]
+if not isinstance(rows,list): sys.exit(1)
+a=next((a for a in rows if a["id"]==os.environ["APPROVAL"]),None)
+if a is None: sys.exit(1)
+status=a["status"]
+if a.get("expires_at") and status in ("pending","approved"):
+    expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
+    if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
+print(status)
+' 2>/dev/null) || { log "無法確認核准 ${APPROVAL}，這輪不派"; exit 0; }
+if [ "$STATUS" = "expired" ]; then
+  rm -f "$APPROVAL_STATE"
+  log "核准 ${APPROVAL} 已過期，下輪重新申請"; exit 0
+fi
 if [ "$STATUS" != "approved" ]; then
   log "核准狀態是 ${STATUS:-unknown}，這輪不派（下個整點再看）"; exit 0
 fi
@@ -141,7 +179,7 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   printf 'origin/main %s。核准 %s，rebuild 租約 fence %s（owner %s）。\n' "$HEAD_SHA" "$APPROVAL" "$LEASE" "$OWNER"
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
   printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s` 交還窗口；\n' "$OWNER" "$LEASE"
-  printf '需要重啟正式 daemon 另外申請 restart 核准與租約（拿著 restart 租約期間不會再派新工作）。\n'
+  printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
      --request-id "agm-daemon-update-$HEAD_SHA" \
