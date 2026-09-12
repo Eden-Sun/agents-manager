@@ -1124,18 +1124,20 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
                 <button
                   type="button"
                   className="mini-btn"
-                  disabled={Boolean(busy[`team:${teamId}:patch`])}
+                  disabled={Boolean(busy[`team:${teamId}:patch`] || busy[`team:${teamId}:resume`])}
                   title="把轉送上限與時間上限各加一倍，然後繼續"
                   onClick={() =>
+                    // 側欄同一顆（TeamNodes 的 TeamPausedRow）patch 完會 resume；這裡以前只 patch，
+                    // 預算翻倍了 team 還停在 paused，跟按鈕寫的「然後繼續」不符。
                     void patchTeam(teamId, {
                       budget: {
                         max_relays: team.budget.max_relays * 2,
                         max_wall_clock_min: team.budget.max_wall_clock_min * 2,
                       },
-                    })
+                    }).then((ok) => ok && controlTeam(teamId, 'resume'))
                   }
                 >
-                  加碼預算
+                  加碼並繼續
                 </button>
               ) : null}
               {team.pause_reason === 'quota_low' && team.budget.quota_stop_pct < 100 ? (
