@@ -79,16 +79,11 @@ export NO_COLOR=1\nunset CLICOLOR_FORCE FORCE_COLOR CLICOLOR 2>/dev/null\n";
 pub async fn sh(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<Out> {
     let full = format!("{PATH_FIX}{script}");
     if host == LOCAL_HOST {
-        let o = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&full)
-                .stdin(std::process::Stdio::null())
-                .output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git command timed out after {}s", timeout.as_secs()))??;
+        // `sh_local` kills the whole process group on timeout, so a hung git does not keep
+        // holding `index.lock` / `MERGE_HEAD` after we have reported it as failed.
+        let o = crate::hosts::sh_local(&full, timeout)
+            .await?
+            .ok_or_else(|| anyhow!("git command timed out after {}s", timeout.as_secs()))?;
         return Ok(Out {
             code: o.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&o.stdout).to_string(),

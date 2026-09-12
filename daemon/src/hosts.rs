@@ -49,6 +49,45 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Run `/bin/sh -c <script>` locally with stdin closed. `None` means the budget ran out —
+/// and by then the script **and everything it forked** are gone: the child gets its own
+/// process group and the whole group is killed on timeout, so a hung `git merge` (pinentry,
+/// a stuck remote) cannot keep `index.lock` while the caller has already given up on it.
+pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::process::Output>> {
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
+    let mut child = cmd.spawn().context("spawn /bin/sh")?;
+    let pid = child.id();
+    let out = child.stdout.take();
+    let err = child.stderr.take();
+    let gather = async move {
+        use tokio::io::AsyncReadExt;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut o) = out {
+            o.read_to_end(&mut stdout).await.ok();
+        }
+        if let Some(mut e) = err {
+            e.read_to_end(&mut stderr).await.ok();
+        }
+        (stdout, stderr)
+    };
+    let (status, (stdout, stderr)) = tokio::select! {
+        r = async { tokio::join!(child.wait(), gather) } => (r.0.context("wait /bin/sh")?, r.1),
+        _ = tokio::time::sleep(timeout) => {
+            if let Some(pid) = pid {
+                // Group kill first (grandchildren too), then the direct child for good measure.
+                let _ = std::process::Command::new("/bin/kill").args(["-9", "--", &format!("-{pid}")]).status();
+            }
+            let _ = child.kill().await;
+            return Ok(None);
+        }
+    };
+    Ok(Some(std::process::Output { status, stdout, stderr }))
+}
+
 /// `export PATH=<remote_path>:"$PATH"` for a configured `remote_path`, quoted so a value with a
 /// space (or worse) is one PATH entry and not a shell command: unquoted, `/Users/me/my tools/bin`
 /// made every remote script start with `export: not a valid identifier` and lose PATH entirely.
@@ -821,6 +860,25 @@ mod tests {
         // A space no longer splits the export; a `;` or `$(…)` is data, not a command.
         let p = remote_path_prefix("/Users/me/my tools/bin;$(touch /tmp/pwned)");
         assert_eq!(p, "export PATH='/Users/me/my tools/bin;$(touch /tmp/pwned)':\"$PATH\"\n");
+    }
+
+    #[tokio::test]
+    async fn sh_local_timeout_kills_the_child() {
+        let marker = format!("am-sh-local-{}", crate::db::ulid());
+        // `sh -c` may fork rather than exec the last command; the group kill has to reach it.
+        let script = format!("sleep 30 # {marker}\nsleep 30 # {marker}");
+        let t0 = std::time::Instant::now();
+        let r = sh_local(&script, Duration::from_millis(300)).await.unwrap();
+        assert!(r.is_none(), "expected a timeout");
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        // Give the kernel a moment to reap, then make sure nothing with our marker survived.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
+        let alive: Vec<&str> = std::str::from_utf8(&ps.stdout).unwrap().lines().filter(|l| l.contains(&marker) && !l.contains("ps ")).collect();
+        assert!(alive.is_empty(), "children survived the timeout: {alive:?}");
+        let ok = sh_local("printf hi; exit 3", Duration::from_secs(5)).await.unwrap().unwrap();
+        assert_eq!(ok.status.code(), Some(3));
+        assert_eq!(ok.stdout, b"hi");
     }
 
     fn cfg() -> HostCfg {
