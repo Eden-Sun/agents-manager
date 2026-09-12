@@ -1,7 +1,9 @@
 //! Hook receiver: `POST /hook/{provider}` plus Turn matching (SPEC §6.7) and spool replay (§4.4.6).
 
 use crate::db;
+use crate::config::{valid_id, ID_RE};
 use crate::lifecycle;
+use crate::hosts::sh_quote;
 use crate::state::App;
 use anyhow::Result;
 use axum::extract::{Path, State};
@@ -553,7 +555,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
             if let Some(t) = target {
                 sqlx::query(
-                    "UPDATE turns SET status='completed', completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
+                    "UPDATE turns SET status='completed', delivery=CASE WHEN delivery='unknown' THEN 'ok' ELSE delivery END,
+                     completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
                 )
                 .bind(db::now())
                 .bind(&session_id)
@@ -674,13 +677,16 @@ fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
 /// SPEC §11.4.3 — rename the remote spool aside, replay every line, and pick up the
 /// statusLine slot file in the same ssh. Returns how many spool lines were replayed.
 pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let Some(conn) = app.hosts.get(host).await else { return Ok(0) };
     if !conn.is_connected() {
         return Ok(0);
     }
-    let text = conn.ssh_exec(&drain_script(bot_id)).await?;
+    let text = conn.ssh_exec(&drain_script(bot_id)?).await?;
     let (lines, status) = parse_drain_output(&text);
     let mut n = 0usize;
     for line in lines {
@@ -718,18 +724,21 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
 }
 
 /// The remote sh: spool → `.replaying` → stdout → gone, then the statusLine slot (§11.4.5).
-fn drain_script(bot_id: &str) -> String {
-    format!(
-        "d=\"$HOME/.config/agents-manager/bots/{id}\"\n\
+fn drain_script(bot_id: &str) -> Result<String> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
+    let dir = format!("\"$HOME/.config/agents-manager/bots/\"{}", sh_quote(bot_id));
+    Ok(format!(
+        "d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\"; \
          elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; rm -f \"$f.replaying\"; fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
-        id = bot_id,
         marker = STATUS_MARKER
-    )
+    ))
 }
 
 /// The statusLine slot file as a `HookBody` for the existing `HookKind::StatusLine` branch.
@@ -867,7 +876,7 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let dir = app.bot_dir(bot_id);
+    let dir = app.bot_dir(bot_id)?;
     let spool = dir.join("hook-spool.jsonl");
     if !spool.exists() {
         return Ok(0);
@@ -987,17 +996,25 @@ mod drain_tests {
 
     #[test]
     fn the_drain_script_takes_the_spool_and_the_status_slot() {
-        let s = drain_script("botX");
-        assert!(s.contains("bots/botX"));
+        let s = drain_script("botX").unwrap();
+        assert!(s.contains("bots/\"'botX'"));
         assert!(s.contains("mv \"$f\" \"$f.replaying\""));
         assert!(s.contains("hook-status.json"));
         assert!(s.contains(STATUS_MARKER));
+    }
+
+    #[test]
+    fn the_drain_script_rejects_unsafe_ids() {
+        for id in ["../..", "x/y", r"..\..", "", "x\";id"] {
+            assert!(drain_script(id).is_err(), "unsafe id was accepted: {id:?}");
+        }
     }
 }
 
 #[cfg(test)]
 mod external_claim_tests {
     use super::*;
+    use crate::team::testing as tt;
 
     /// The prompt echo scraped off the pane and the hook's own copy are the same message,
     /// however the pane wrapped or clipped it.
@@ -1044,6 +1061,81 @@ mod external_claim_tests {
             sqlx::query(q).bind(&now).execute(&pool).await.unwrap();
         }
         (TmpDb(dir), pool, "r".to_string(), "c".to_string())
+    }
+
+    #[tokio::test]
+    async fn stop_hook_resolves_unknown_delivery_when_it_completes_a_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'hook-unknown','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','unknown',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        process(
+            &app,
+            &HookBody {
+                bot_id,
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "native-session",
+                    "prompt_id": "native-turn",
+                    "last_assistant_message": "hook reply",
+                }),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turn.status, "completed");
+        assert_eq!(turn.delivery, "ok");
+        let assistant_messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'",
+        )
+        .bind(&turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(assistant_messages, 1);
     }
 
     /// The Stop hook must *claim* the in-flight turn `begin_external_turn` opened when the user

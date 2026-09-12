@@ -5448,7 +5448,7 @@ mod api_tests {
             .unwrap();
         assert_eq!(old.kind, "claude");
         // #61: the retired bot's hook material must not outlive it.
-        let old_dir = app.bot_dir(&old.id);
+        let old_dir = app.bot_dir(&old.id).unwrap();
         std::fs::create_dir_all(old_dir.join("bin")).unwrap();
         std::fs::write(old_dir.join("bin").join("herdr"), "shim").unwrap();
         let task_id = db::ulid();
@@ -5515,7 +5515,7 @@ mod api_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        let dir = app.bot_dir(&bot);
+        let dir = app.bot_dir(&bot).unwrap();
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(dir.join("bin").join("herdr"), "shim").unwrap();
 
@@ -5549,21 +5549,21 @@ mod api_tests {
                 .execute(&app.db)
                 .await
                 .unwrap();
-                std::fs::create_dir_all(app.bot_dir(&id).join("bin")).unwrap();
+                std::fs::create_dir_all(app.bot_dir(&id).unwrap().join("bin")).unwrap();
                 id
             }
         };
         let gone = mk("t-dev-old", true).await;
         let live = mk("t-dev-new", false).await;
         let stranger = db::ulid();
-        std::fs::create_dir_all(app.bot_dir(&stranger).join("bin")).unwrap();
+        std::fs::create_dir_all(app.bot_dir(&stranger).unwrap().join("bin")).unwrap();
 
         let removed = crate::lifecycle::purge_deleted_bot_dirs(&app).await;
 
         assert_eq!(removed, 1);
-        assert!(!app.bot_dir(&gone).exists(), "a deleted bot's directory is removed");
-        assert!(app.bot_dir(&live).exists(), "a live bot's directory is kept");
-        assert!(app.bot_dir(&stranger).exists(), "a directory no bot row claims is not ours to judge");
+        assert!(!app.bot_dir(&gone).unwrap().exists(), "a deleted bot's directory is removed");
+        assert!(app.bot_dir(&live).unwrap().exists(), "a live bot's directory is kept");
+        assert!(app.bot_dir(&stranger).unwrap().exists(), "a directory no bot row claims is not ours to judge");
     }
 
     /// A swap in the middle of a turn would throw away the reply the team is waiting for.
