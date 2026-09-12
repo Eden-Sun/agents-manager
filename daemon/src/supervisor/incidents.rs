@@ -202,6 +202,20 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Vec<Observation
         }
     }
 
+    // The phone entry point, but only when there is evidence it is *broken*. `unknown` with an
+    // unsupported capability is a documented limit, not a fault: opening an incident for it
+    // would mean a permanent red light nobody can clear.
+    let remote = super::remote::status(app).await;
+    let remote_status = remote.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    if super::remote::severity(remote_status) == "degraded" {
+        out.push(Observation {
+            kind: "remote_entry".into(),
+            resource: super::setup::REMOTE_NAME.to_string(),
+            severity: "degraded".into(),
+            detail: remote.to_string(),
+        });
+    }
+
     out
 }
 

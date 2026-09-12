@@ -22,6 +22,15 @@
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `notify_exhausted`（門檻見 SPEC §18.9）。
   一個 resource 同時只會有一筆 `open`（partial unique index），重啟不會開出第二筆；恢復後再壞是新的一筆。
   開啟與恢復各推一則 inbox 事件（`incident_opened` / `incident_resolved`）。
+- `GET /api/supervisor/remote` →
+  `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
+  狀態只有 `requested` | `verified` | `unavailable` | `unknown`——**沒有 `active`**。argv 帶了
+  `--remote-control` 只買到 `requested`。`capability.status` 目前是 `unsupported`：這台 daemon 沒有可靠的
+  Remote Control 觀測來源（herdr pane、hook、session 都不帶這個資訊），所以它不會宣稱手機連上了。
+  `status` 是算過的：觀測超過 `ttl_secs`（900 秒）或 AGM 換了 session 就退回 `unknown`（`revoked` 說明原因），
+  `url` 也跟著不回——URL 不是連線證據（`url_is_evidence:false`）。
+  `POST /api/supervisor/remote {status,source,actor?,evidence?,url?}` → 同上。`source` 只收 `manual`／`provider`
+  （`argv` 是 daemon 自己的紀錄，會被拒）；`verified`／`unavailable` 一定要 `actor`，人工確認記成一個人的宣稱，而且會過期。
 - `GET /api/supervisor/persona` →
   `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
   **持久版是權威**：`setup` 只在沒有人設時用內嵌版 seed，之後不再覆寫（舊 binary 跑 setup 不會把新人設降版）。
@@ -69,6 +78,7 @@
   總管認的是持久化的 `bot_id`，不是名字：使用者在側欄改名不會讓重跑 setup 多開一個。
 - `POST /api/supervisor/start {}` / `stop {}` → 同 `GET` 的 status。`start` 後 `remote.status` 是 `requested`，
   **不是** `active`：argv 帶了 `--remote-control` 只代表要求過，遠端有沒有真的起來要另外觀察才能宣稱。
+  2026-09-12 起 `remote` 是完整物件（見 `GET /api/supervisor/remote`），`active` 這個值已經不存在。
   `start` 同時把總管標成「應該在跑」、`stop` 標成「使用者要它停」：之後總管不是經由這支 `stop` 而停掉
   （被殺、崩潰、更新重啟沒回來），daemon 的 watchdog 會自動再 `start`——第一次等 30 秒，之後 60／120／300 秒退避，
   連續 5 次失敗就把原因寫進 `status_detail` 並停止重試，直到人再 `start` 一次。`waiting_quota` 期間不會自動啟動；

@@ -673,6 +673,27 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
     return client.put("/api/supervisor/persona", body)
 
 
+def cmd_remote(client: Client, cfg: dict, args) -> object:
+    """遠端（手機）入口。
+
+    沒有 `active`：argv 帶了 `--remote-control` 只代表要求過。`capability.status=unsupported`
+    表示這台 daemon 沒有可靠的觀測來源——那是「不知道」，不是「壞了」，不要在回報裡寫成已連上。
+    人工確認會記下 actor 與時間，而且會過期，AGM 重啟後也會失效。
+    """
+    if args.op == "show":
+        out = optional_get(client, "/api/supervisor/remote")
+        if out is None:
+            raise AgmError("unsupported", "這台 daemon 還沒有 remote 介面（需要更新 agents-managerd）", 6)
+        return out
+    if args.status in ("verified", "unavailable") and not args.actor:
+        raise AgmError("bad_args", f"回報 {args.status} 要有 --actor（是誰確認的）", 2)
+    body: dict = {"status": args.status, "source": args.source}
+    for key, val in (("actor", args.actor), ("evidence", args.evidence), ("url", args.url)):
+        if val:
+            body[key] = val
+    return client.post("/api/supervisor/remote", body)
+
+
 def cmd_build_inputs(client: Client, cfg: dict, args) -> object:
     """哪些路徑會被編進 binary（含 include_str! 的 persona 與這支 CLI）。
 
@@ -879,6 +900,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", help="adopt-embedded：為什麼要換成內嵌版")
     s.add_argument("--actor", default="AGM", help="adopt-embedded：誰決定的（預設 AGM）")
     s.set_defaults(func=cmd_persona)
+
+    s = sub.add_parser("remote", help="遠端入口：show / observe（人工確認會過期）")
+    s.add_argument("op", choices=["show", "observe"])
+    s.add_argument("--status", choices=["requested", "verified", "unavailable", "unknown"], default="verified")
+    s.add_argument("--source", choices=["manual", "provider"], default="manual", help="argv 不接受：那是 daemon 自己的紀錄")
+    s.add_argument("--actor", help="誰確認的（verified / unavailable 必填）")
+    s.add_argument("--evidence", help="依據（例如實際用手機連過）")
+    s.add_argument("--url", help="觀測到的入口 URL（URL 本身不算證據）")
+    s.set_defaults(func=cmd_remote)
 
     s = sub.add_parser("build-inputs", help="會影響 binary 的路徑（含 include_str! 的檔）")
     s.set_defaults(func=cmd_build_inputs)

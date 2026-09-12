@@ -149,6 +149,11 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/supervisor/persona/adopt-embedded", post(crate::supervisor::api::post_persona_adopt))
         .route("/supervisor/build-inputs", get(crate::supervisor::api::get_build_inputs))
+        // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
+        .route(
+            "/supervisor/remote",
+            get(crate::supervisor::api::get_remote).post(crate::supervisor::api::post_remote_observation),
+        )
         // 重建／重啟的核准與執行租約（SPEC §18.10）。
         .route(
             "/supervisor/approvals",

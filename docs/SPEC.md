@@ -1628,6 +1628,26 @@ incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, reso
   但**什麼時候重建、什麼時候重啟仍由 AGM 決定**——這兩件事分開判斷。清單與實際 `include_str!` 由測試綁住
   （`supervisor::persona::tests::every_embedded_file_is_declared_as_a_build_input`），不靠人記得改。
 
+### 18.12 遠端（手機）入口的可觀測性（2026-09-12）
+
+AGM 是使用者唯一的手機入口，但 daemon 一直無法回答「這個入口現在通不通」：`setup` 把
+`--remote-control AGM` 寫進 args，那是**要求**，而沒有任何一條路徑去驗證 session 有沒有起來。
+
+先查能力，再決定怎麼講：herdr pane 狀態、hook payload、session 資料列、bot args 都不帶 Remote Control 的
+session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去的那個參數。**結論是目前沒有可靠的觀測來源**，
+所以 `capability.status = unsupported`，daemon 不會宣稱手機已連上。
+
+- 狀態只有 `requested`（argv 要求過）、`verified`（有可驗證來源說通了）、`unavailable`（有證據說不通）、
+  `unknown`。**沒有 `active`。** 從 argv、從 bot 自己的文字、或從一個 URL 都不能推出 `verified`。
+- 觀測綁 session（run id）並且會過期（900 秒）。AGM 重啟或換模型後是新的 session，舊的確認一律失效
+  （`revoked: session_changed`）；過期是 `observation_expired`。撤銷時 `url` 也不再回傳。
+- 需要人工確認時走 `POST /api/supervisor/remote`，`source=manual` 且**必須帶 actor**——它被記成「某個人在某個
+  時間宣稱過」，不是 daemon 的量測，UI 也照這樣寫。
+- incident 只在 `unavailable`（有證據的失敗）時開。`unknown` 配 unsupported 是已知限制，不是故障；為它開
+  incident 只會得到一盞永遠關不掉的紅燈。
+- 恢復（例如重開 remote session）仍須 AGM 在沒有回合衝突的窗口安排，daemon 不會自己多開 session，也不動其他
+  使用者入口。
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。

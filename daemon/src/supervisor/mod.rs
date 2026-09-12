@@ -11,6 +11,7 @@ pub mod incidents;
 pub mod maintenance;
 pub mod persona;
 pub mod policy;
+pub mod remote;
 pub mod setup;
 pub mod store;
 pub mod watchdog;
@@ -59,8 +60,10 @@ pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), L
     }
     // The bot's args carry `--remote-control AGM`, which is a *request*. Whether a remote
     // session actually came up is something only an observation can say, so the status stays
-    // `requested` until something verifies it.
-    let _ = store::set_remote(&app.db, "requested", None).await;
+    // `requested` until something verifies it — and it is bound to *this* run, so a later
+    // restart cannot inherit the claim (see `remote.rs`).
+    let session = crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.map(|r| r.id);
+    let _ = store::set_remote_observed(&app.db, "requested", None, "argv", session.as_deref(), None, None).await;
     let _ = store::set_status(&app.db, "", detail).await;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let gen = if sup.generation == 0 {
@@ -132,7 +135,9 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "generation": sup.generation,
         "cwd": sup.cwd,
         "quota_reset_at": sup.quota_reset_at,
-        "remote": {"status": sup.remote_status, "url": sup.remote_url},
+        // Computed, not just read back: an observation that has expired or belongs to a session
+        // that is gone reads as `unknown` here rather than as the word it was stored under.
+        "remote": remote::status(app).await,
         "pending_count": store::pending_count(&app.db).await.map_err(up)?,
         "assignments": assignments.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
     }))
