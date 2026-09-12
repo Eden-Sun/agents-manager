@@ -1569,3 +1569,14 @@ claude 的別名規則與 grok 不變。
 
 因此 2026-09-11 那條「底色只屬於未讀」改寫為：實心＝你在這裡，淡底＝有未讀，透明＝沒事。
 `box-shadow` 不佔版面，所以被選中仍然不會讓這一列位移。
+## 送進總管的話要分得出是誰送的（2026-09-12）
+
+AGM 的對話裡混著三種來源：使用者的指示、別的 bot 的申請／回報、launchd 例行腳本的派工——
+全部走 `POST /api/bots/{id}/prompt`，`relay_from` 都是空的，所以在畫面上長成同一顆使用者藍泡泡
+（使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」）。
+
+`prompt` 多收一個 `relay_from`：另一顆 bot 帶自己的 `bot_id`，排程腳本與 daemon 自己的通知帶哨符
+`daemon`（`agent_relay::DAEMON_SENDER`）；值不是存在中的 bot 也不是 `daemon` 就回 400，不讓呼叫端
+冒名。省略仍然代表「使用者自己打的」，所以舊的呼叫端行為不變。UI 那顆來源標對 `daemon` 寫
+「daemon 自動觸發」而不是印哨符本身——讀的人要知道的是「沒有人按過這一下」；版型沿用既有的
+`relayedMessage.css`（靠左、面板底色、左槓）。team 的首則指派與排程重試也改帶 `daemon`。

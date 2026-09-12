@@ -950,7 +950,7 @@ async fn flush(app: &Arc<App>, ctx: &Ctx) -> LcResult<()> {
         // §3: `team:<team_id>:<event_id>` — the event id makes the send idempotent across a
         // restart, because the retry re-uses the very same pending row.
         let crid = format!("team:{}:{}", ctx.team.id, pending[0].id);
-        let out = match lifecycle::prompt_grouped(app, &bot.id, &text, &crid, None, None, &[]).await {
+        let out = match lifecycle::prompt_grouped(app, &bot.id, &text, &crid, None, None, &[], Some(crate::agent_relay::DAEMON_SENDER)).await {
             Ok(o) => o,
             Err(LcError::Conflict(v)) => {
                 let reason = v.get("reason").and_then(Value::as_str).unwrap_or("");

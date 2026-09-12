@@ -275,8 +275,13 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 `POST /api/bots/{id}/prompt`
 
 ```json
-{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>" }
+{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"" }
 ```
+
+`relay_from` 省略 = **使用者自己在畫面上打的**。不是的話一定要帶，UI 才畫得出來源（靠左、不用使用者
+的藍底、標上「誰 → 誰」）：另一顆 bot 送的帶它的 `bot_id`，launchd 的例行腳本與 daemon 自己的自動
+通知帶哨符 `"daemon"`（顯示成「daemon 自動觸發」）。值不是存在中的 bot 也不是 `daemon` → `400`，
+避免呼叫端冒名。2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」。
 
 `client_request_id` 可省（daemon 會補），但**建議前端自己帶**以取得冪等：同一個 id 重送會回同一個
 `turn_id`，不會重複送給 agent。

@@ -3391,7 +3391,7 @@ async fn say_with_delivery(
         json!({"text": text, "to": bot.name}),
     )
     .await?;
-    let out = lifecycle::prompt_grouped(app, &bot.id, text, &crid, None, Some(delivery_text), &[]).await?;
+    let out = lifecycle::prompt_grouped(app, &bot.id, text, &crid, None, Some(delivery_text), &[], Some(crate::agent_relay::DAEMON_SENDER)).await?;
     // Stamp the team on the rows the ordinary prompt path just created so the team timeline
     // and `turns.team_id` line up without touching `lifecycle`.
     let _ = sqlx::query("UPDATE messages SET team_id = ? WHERE id = ?")

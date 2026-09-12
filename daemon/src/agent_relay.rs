@@ -13,6 +13,11 @@
 //!
 //! 認不出來就維持原樣——寧可少標一次，也不要把使用者自己打的字說成是別人送的。
 
+/// 「這句話是 daemon 自己發的」的哨符（`messages.relay_from`）。不是任何 bot 的 id，所以 UI 找不到
+/// 對應的 bot，就照 `daemon` 畫（SPEC-team §2.1 原本把 `NULL` 同時當成使用者與 daemon，分不出來）。
+/// 例行腳本（launchd 的 daemon-update / dev-server / browser-gc）送進總管的話也用它。
+pub const DAEMON_SENDER: &str = "daemon";
+
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
