@@ -1556,7 +1556,8 @@ AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，
 - 連派不出去的交辦也是進 `awaiting_review`（`turn_status=dispatch_failed`）。daemon 知道送失敗，不知道這份工作該
   怎麼辦；讓它自己結案就是在替使用者以為還在跑的工作蓋章。
 - 驗收走 `POST /api/supervisor/assignments/{id}/review`，每次記 actor、來源、理由與證據（`supervisor_reviews`）。
-  同樣的 decision 重送是冪等的。
+  同樣的 decision 重送是冪等的。回合還在跑時只接受 `cancel`（而且不會中止那個回合，之後的回覆不會再記到這筆
+  交辦上）；`block` 要等回合結束停在 `awaiting_review` 之後再標，不然 row 會在回合還開著時離開執行中集合。
 - 「要求續作」是**新開一筆** `follow_up_of` 指回原本那筆的交辦（原本那筆變 `superseded`），用呼叫端給的穩定
   `followup_request_id` 去重——不改寫已經送出去的文字，bot 不會憑空看到自己沒收過的指示。
 - 未結案 = `queued`/`delivered`/`unknown`/`awaiting_review`/`blocked`。open count、handoff、`/supervisor/state`、

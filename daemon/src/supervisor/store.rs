@@ -2010,6 +2010,26 @@ mod tests {
         assert_eq!(pending_inbox(&p).await.unwrap().len(), 1);
     }
 
+    /// If the notification cannot be written, the assignment does not move either.
+    ///
+    /// The failure is forced by dropping the inbox table — crude, but it exercises the real
+    /// rollback path, and the property is the one that matters: there is no state in which the
+    /// work is closed and nobody was told.
+    #[tokio::test]
+    async fn a_failed_notification_rolls_the_whole_settle_back() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-tx", "x", &[], None).await.unwrap();
+        mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
+        sqlx::query("DROP TABLE supervisor_inbox").execute(&p).await.unwrap();
+        let err = settle_and_notify(&p, &a.id, "completed", true, Some("done"), None, "k", "assignment_completed", &json!({}))
+            .await;
+        assert!(err.is_err(), "the write failed");
+        let a = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "delivered", "so the assignment is still open and will be reconciled again");
+        assert!(a.turn_status.is_none(), "and nothing of the half-written outcome survived");
+    }
+
     /// A result closed by an older daemon, with nobody ever told: the sweep finds it. Once the
     /// write is transactional this can only be a pre-upgrade row — which is exactly the backlog
     /// the review was worried about.

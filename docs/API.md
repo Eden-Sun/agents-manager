@@ -115,7 +115,9 @@
   `followup`→原本那筆變 `superseded`，並用 `followup_request_id` 另開一筆 `follow_up_of` 指回來的新交辦
   （**不會**改寫已經送出去的 text）。
   冪等：同樣的 decision 重送回同一筆（`idempotent:true`），不會寫第二筆稽核；`followup` 靠 `followup_request_id` 去重。
-  409：已結案的不能再決定（`already_closed`，要接續請開 follow-up）；還在跑的只接受 `cancel` / `block`（`still_executing`）。
+  409：已結案的不能再決定（`already_closed`，要接續請開 follow-up）；還在跑的只接受 `cancel`（`still_executing`）。
+  `cancel` 不會中止那個回合：bot 接下來說什麼不會再記到這筆交辦上。`block` 要等回合結束（會停在
+  `awaiting_review`）再標，否則 row 會在回合還開著時離開執行中集合，結果就沒有地方可去。
   先落地再送 prompt；同 `client_request_id` 重試回同一筆（換了 bot 或換了 text 都回 409，不會靜靜當成已生效）。
   對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，由 controller 依 15/30/60/120/300 秒退避重試，
   一律沿用同一個 `client_request_id`，所以 worker 不會收到第二份。delivery `unknown` 只對帳、不重送。

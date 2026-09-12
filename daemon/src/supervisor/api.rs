@@ -189,9 +189,15 @@ pub async fn post_review(
     }
     // The turn is still running: there is nothing to accept yet, and accepting it would be a
     // claim about work we can still watch happening.
-    if a.is_executing() && b.decision != "cancel" && b.decision != "block" {
+    //
+    // `cancel` is the one decision that applies mid-flight, and it has a cost worth stating:
+    // the turn is *not* aborted, so whatever the bot says next will not be recorded against
+    // this assignment. `block` is refused here on purpose — it would take the row out of the
+    // executing set while its turn is still open, and the result would land nowhere. Wait for
+    // the turn to end (it will park on `awaiting_review`) and block it then.
+    if a.is_executing() && b.decision != "cancel" {
         return Err(LcError::conflict(
-            "assignment has not finished executing; only cancel or block apply while it is in flight",
+            "assignment has not finished executing; only cancel applies while it is in flight",
             json!({"assignment_id": a.id, "status": a.status, "reason": "still_executing"}),
         ));
     }
