@@ -1530,3 +1530,13 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
 `codex · OpenAI 的 CLI（GPT 模型，標誌是 OpenAI 的）`、`grok · xAI 的 CLI（Grok 模型）`。
 `aria-label` 仍然只有 kind 名——驗收腳本與朗讀靠它，讀一整句只會吵；`Tools.tsx` 那種自己傳
 `title` 的呼叫點不受影響。標題列、側欄、設定面板、team 圖都吃同一份。
+
+## codex 的模型名去掉 `gpt-` 前綴（2026-09-12）
+
+使用者：「codex 肯定是 gpt-xxx 所以去掉 gpt-」。codex 只跑 GPT，`gpt-` 這三個字每一顆都一樣，
+在標題列那個只有 ~70px 的 chip 上純粹是浪費（`gpt-6-astra-High` 得截成 `gpt-6-astra-Hi…`）。
+
+`shortModel()` 多一條 codex 規則：開頭的 `gpt-` 去掉（`gpt-6-astra` → `6-astra`），名字中間的
+`gpt` 不動；完整 id 仍留在 tooltip（`點一下改模型（gpt-6-astra）`）與設定面板裡。標題列與手機第二行
+本來直接印 `bot.model`，這次一起改成走 `shortModel()`，才跟側欄（早就走它）講同一套。
+claude 的別名規則與 grok 不變。
