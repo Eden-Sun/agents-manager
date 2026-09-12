@@ -1,12 +1,45 @@
-/* 標題列下面那一列（`UnreadChip`）：主力（常駐）、剛跑完在左，進行中在右，塞不下就換行。 */
+/*
+ * 標題列下面那一列（`UnreadChip`）：主力（常駐）、剛跑完在左，進行中在右。
+ *
+ * **一列到底、放不下就橫捲**（2026-09-12 使用者）。本來是 `flex-wrap: wrap`：十顆晶片在
+ * 390px 上排成三行、佔掉 89px，對話的第一則被推到畫面外；桌機也一樣，這一列一長高就把
+ * git／context 那一列連同訊息一起往下擠。這一列講的是「還有哪幾顆要看」，是**索引**不是
+ * 內容，它不該跟對話搶高度——所以高度鎖死一列，多出來的往右捲。
+ *
+ * 捲的方式跟 `.context-bar > .git-bar` 同一套 scroll shadow：`local` 兩層跟著內容走、捲到底
+ * 時蓋掉 `scroll` 兩層的陰影，所以「右邊還有東西」只在真的還有東西時才畫出來。
+ *
+ * 正在看的那一顆由 `UnreadChip` 自己捲進畫面（見該檔的 `useScrollCurrentIntoView`）——
+ * 橫捲列最怕的是「我在看的那顆在捲軸外」。
+ */
 .unread-bar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex: none;
+  flex-wrap: nowrap;
   gap: 6px;
   padding: 5px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-sunken);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  /* 底色是最後一層（多層 `background` 的顏色只能放在最後）。 */
+  background:
+    linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
+    linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 32%), transparent) left / 10px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 32%), transparent) right / 10px 100% no-repeat scroll,
+    var(--bg-sunken);
+}
+
+.unread-bar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 橫捲列裡的東西自己不能再縮，不然又被擠回原樣、名字全變成 `c…`。 */
+.unread-bar > * {
+  flex: none;
 }
 
 .unread-bar-label {
@@ -15,7 +48,8 @@
   white-space: nowrap;
 }
 
-/* 「進行中」推到最右邊。一列塞不下時 flex-wrap 讓它掉到下一行，這個 spacer 就自然消失。 */
+/* 「進行中」推到最右邊。排得下時這個 spacer 撐開剩餘空間；一列塞不下（開始橫捲）時它縮到
+   最小的 8px，只當兩組之間的間隔——`flex-grow` 在 overflow 的容器裡本來就不會再長。 */
 .unread-bar-gap {
   flex: 1 1 auto;
   min-width: 8px;
