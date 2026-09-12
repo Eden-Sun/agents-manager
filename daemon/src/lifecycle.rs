@@ -2,13 +2,14 @@
 //!
 //! Every public entry point takes the per-bot lock.
 
-use crate::config::LOCAL_HOST;
+use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
 use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
 use crate::hosts::{sh_quote, HostConn};
 use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -68,6 +69,44 @@ pub async fn insert_message(
     snapshot: Option<&str>,
 ) -> anyhow::Result<db::Message> {
     insert_message_grouped(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_message_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    conversation_id: &str,
+    turn_id: Option<&str>,
+    role: &str,
+    content: &str,
+    source: &str,
+    incomplete: bool,
+    snapshot: Option<&str>,
+) -> anyhow::Result<db::Message> {
+    let id = db::ulid();
+    let now = db::now();
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(conversation_id)
+    .bind(turn_id)
+    .bind(role)
+    .bind(content)
+    .bind(source)
+    .bind(incomplete as i64)
+    .bind(snapshot)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&mut **tx)
+        .await?)
+}
+
+async fn emit_message_added(app: &Arc<App>, bot_id: &str, message: db::Message) {
+    app.emit("message_added", json!({ "bot_id": bot_id, "message": message })).await;
 }
 
 /// `insert_message` with a SPEC §13 `group_id` (project group chat).
@@ -593,6 +632,9 @@ pub struct RemoteHookPaths {
 }
 
 pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<RemoteHookPaths> {
+    if !valid_id(bot_id) {
+        anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
+    }
     let home = conn.home().await?;
     let dir = format!("{home}/.config/agents-manager/bots/{bot_id}");
     Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
@@ -672,9 +714,11 @@ pub async fn refresh_remote_hook(app: &Arc<App>, bot: &db::Bot) -> anyhow::Resul
 /// start a bot: the reconcile's descent match still tracks whatever the agent spawns.
 async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
     let installed = if project.host == LOCAL_HOST {
-        crate::herdr_shim::install_local(&app.bot_dir(&bot.id))
-            .map(|d| d.to_string_lossy().into_owned())
-            .map_err(anyhow::Error::from)
+        app.bot_dir(&bot.id).and_then(|dir| {
+            crate::herdr_shim::install_local(&dir)
+                .map(|d| d.to_string_lossy().into_owned())
+                .map_err(anyhow::Error::from)
+        })
     } else {
         match app.hosts.get(&project.host).await {
             Some(conn) => match remote_bot_dir(&conn, &bot.id).await {
@@ -742,7 +786,7 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
     }
 
     // ---- local project: the daemon binary is right here
-    let dir = app.bot_dir(&bot.id);
+    let dir = app.bot_dir(&bot.id)?;
     std::fs::create_dir_all(&dir)?;
     let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
@@ -1684,6 +1728,41 @@ async fn acquire_run_pane(
     }
 }
 
+/// Keep pane cleanup for the part of startup that runs after a pane exists. This is deliberately
+/// async rather than a `Drop` guard: `pane.close` and the empty-tab tidy-up must finish before
+/// the start error is returned to the caller.
+struct StartPaneGuard<'a> {
+    client: &'a crate::herdr::HerdrClient,
+    workspace_id: &'a str,
+    tab_id: &'a str,
+    pane_id: &'a str,
+    armed: bool,
+}
+
+impl<'a> StartPaneGuard<'a> {
+    fn new(client: &'a crate::herdr::HerdrClient, workspace_id: &'a str, tab_id: &'a str, pane_id: &'a str) -> Self {
+        Self { client, workspace_id, tab_id, pane_id, armed: true }
+    }
+
+    async fn protect<T>(&mut self, result: LcResult<T>) -> LcResult<T> {
+        if result.is_err() {
+            self.cleanup().await;
+        }
+        result
+    }
+
+    async fn cleanup(&mut self) {
+        if self.armed {
+            close_pane_and_tab(self.client, Some(self.workspace_id), Some(self.tab_id), self.pane_id).await;
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
 async fn start_inner(
     app: &Arc<App>,
     bot: &db::Bot,
@@ -1719,100 +1798,8 @@ async fn start_inner(
     // room for a CLI reference, and `herdr --skill` is the CLI's own.
     install_herdr_skill(app, bot, project, &env, &agent).await;
 
-    // 2. workspace
-    let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
-    // SPEC-team §6.4a: a team member's panes belong to the **team's** workspace, not the
-    // project's. This is an extension of SPEC §2's "one workspace per project", not a breach
-    // of it: the project's workspace is untouched, the team simply owns another one. The
-    // team's workspace is created up front by `team::create`, so a member that cannot find
-    // it fails to start rather than quietly filling the user's own workspace with four
-    // throw-away panes — the reconcile then reports `workspace_missing`.
-    let team_ws: Option<String> = match bot.team_id.as_deref() {
-        Some(tid) if session.as_str() != "default" => {
-            let t = db::team(&app.db, tid).await.map_err(up)?;
-            let ws = t
-                .and_then(|t| t.workspace_id)
-                .filter(|w| !w.trim().is_empty())
-                .ok_or_else(|| LcError::Upstream("this team has no workspace".into()))?;
-            if client.workspace_get(&ws).await.map_err(up)?.is_none() {
-                return Err(LcError::Upstream(format!("the team's workspace {ws} is gone")));
-            }
-            Some(ws)
-        }
-        _ => None,
-    };
-    // `projects.workspace_id` belongs to the manager's configured session. An imported bot
-    // lives in the user's default session, so it must not overwrite that mapping or cause the
-    // next named-session reconcile to clear it.
-    let workspace_id = match team_ws {
-        Some(ws) => ws,
-        None => match (session.as_str() != "default", project.workspace_id.as_deref()) {
-            (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
-            _ => {
-                let (ws, root) =
-                    client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
-                if session != "default" {
-                    sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
-                        .bind(&ws.workspace_id)
-                        .bind(&project.id)
-                        .execute(&app.db)
-                        .await
-                        .map_err(up)?;
-                }
-                fresh_root = Some(root);
-                ws.workspace_id
-            }
-        },
-    };
-
-    // 3. pane
-    //
-    // SPEC-team §2.2: the pane's cwd is `bots.cwd` when the bot has one (a team member lives
-    // in its own worktree), otherwise the project's path.
-    //
-    // For a **team member** that fallback is forbidden (§6.1 #1): the project path is the
-    // user's own checkout, and an agent started there can commit whatever the user had in
-    // progress. So a team member's cwd goes through `team::checked_member_cwd`, which
-    // demands it be inside the team's worktree root, and a member that fails it never gets
-    // a pane at all rather than getting the wrong one.
-    let checked;
-    let cwd = match bot.team_id.as_deref() {
-        Some(tid) => {
-            let t = db::team(&app.db, tid)
-                .await
-                .map_err(up)?
-                .ok_or_else(|| LcError::Upstream("this bot's team is gone".into()))?;
-            checked = crate::team::checked_member_cwd(&t, project, bot).map_err(LcError::Upstream)?;
-            checked.as_str()
-        }
-        None => bot_cwd(bot, project),
-    };
-    // A directory the CLI has not seen before opens with "Is this a project you trust?", and
-    // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
-    // sits at the prompt looking `idle` and silently eats the first message. Record the trust
-    // first. Only local hosts, and only when the path is not already trusted, so in practice
-    // this touches the user's config once per new directory (SPEC-team §7.4 does the same for
-    // team worktrees, which are new by construction).
-    if project.host == LOCAL_HOST {
-        let mut b = bot.clone();
-        b.cwd = Some(cwd.to_string());
-        for w in crate::trust::pretrust_members(app, std::slice::from_ref(&b)).await {
-            tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
-        }
-    }
-    let root = acquire_run_pane(&client, &workspace_id, cwd, &tab_label(bot), &env, fresh_root).await.map_err(up)?;
-    let pane_id = root.pane_id;
-    let tab_id = root.tab_id;
-
-    // 4. persist mapping + generate hook injection
-    sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
-        .bind(&workspace_id)
-        .bind(&pane_id)
-        .bind(&tab_id)
-        .bind(run_id)
-        .execute(&app.db)
-        .await
-        .map_err(up)?;
+    // Prepare everything that can fail without a pane. In particular, remote hook injection
+    // may perform an ssh upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
     args.extend(persona_args(bot, &agent));
@@ -1867,27 +1854,130 @@ async fn start_inner(
             .map_err(up)?;
     }
 
+    // Resolve the cwd before workspace creation too: a team member with a bad worktree must
+    // not leave the workspace's root pane behind.
+    let checked;
+    let cwd = match bot.team_id.as_deref() {
+        Some(tid) => {
+            let t = db::team(&app.db, tid)
+                .await
+                .map_err(up)?
+                .ok_or_else(|| LcError::Upstream("this bot's team is gone".into()))?;
+            checked = crate::team::checked_member_cwd(&t, project, bot).map_err(LcError::Upstream)?;
+            checked.as_str()
+        }
+        None => bot_cwd(bot, project),
+    };
+    // A directory the CLI has not seen before opens with "Is this a project you trust?", and
+    // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
+    // sits at the prompt looking `idle` and silently eats the first message. Record the trust
+    // first. Only local hosts, and only when the path is not already trusted, so in practice
+    // this touches the user's config once per new directory (SPEC-team §7.4 does the same for
+    // team worktrees, which are new by construction).
+    if project.host == LOCAL_HOST {
+        let mut b = bot.clone();
+        b.cwd = Some(cwd.to_string());
+        for w in crate::trust::pretrust_members(app, std::slice::from_ref(&b)).await {
+            tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
+        }
+    }
+
+    // 2. workspace
+    let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
+    // SPEC-team §6.4a: a team member's panes belong to the **team's** workspace, not the
+    // project's. This is an extension of SPEC §2's "one workspace per project", not a breach
+    // of it: the project's workspace is untouched, the team simply owns another one. The
+    // team's workspace is created up front by `team::create`, so a member that cannot find
+    // it fails to start rather than quietly filling the user's own workspace with four
+    // throw-away panes — the reconcile then reports `workspace_missing`.
+    let team_ws: Option<String> = match bot.team_id.as_deref() {
+        Some(tid) if session.as_str() != "default" => {
+            let t = db::team(&app.db, tid).await.map_err(up)?;
+            let ws = t
+                .and_then(|t| t.workspace_id)
+                .filter(|w| !w.trim().is_empty())
+                .ok_or_else(|| LcError::Upstream("this team has no workspace".into()))?;
+            if client.workspace_get(&ws).await.map_err(up)?.is_none() {
+                return Err(LcError::Upstream(format!("the team's workspace {ws} is gone")));
+            }
+            Some(ws)
+        }
+        _ => None,
+    };
+    // `projects.workspace_id` belongs to the manager's configured session. An imported bot
+    // lives in the user's default session, so it must not overwrite that mapping or cause the
+    // next named-session reconcile to clear it.
+    let workspace_id = match team_ws {
+        Some(ws) => ws,
+        None => match (session.as_str() != "default", project.workspace_id.as_deref()) {
+            (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
+            _ => {
+                let (ws, root) =
+                    client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
+                if session != "default" {
+                    sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
+                        .bind(&ws.workspace_id)
+                        .bind(&project.id)
+                        .execute(&app.db)
+                        .await
+                        .map_err(up)?;
+                }
+                fresh_root = Some(root);
+                ws.workspace_id
+            }
+        },
+    };
+
+    // 3. pane
+    let root = acquire_run_pane(&client, &workspace_id, cwd, &tab_label(bot), &env, fresh_root).await.map_err(up)?;
+    let pane_id = root.pane_id;
+    let tab_id = root.tab_id;
+    let mut pane_guard = StartPaneGuard::new(&client, &workspace_id, &tab_id, &pane_id);
+
+    // 4. persist mapping. From here until `agent.start` succeeds, every returned error must
+    // close the pane and its now-empty tab.
+    pane_guard
+        .protect(
+            sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
+                .bind(&workspace_id)
+                .bind(&pane_id)
+                .bind(&tab_id)
+                .bind(run_id)
+                .execute(&app.db)
+                .await
+                .map_err(up),
+        )
+        .await?;
+
     // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
-    sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
-        .bind(&agent)
-        .bind(run_id)
-        .execute(&app.db)
-        .await
-        .map_err(up)?;
+    pane_guard
+        .protect(
+            sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
+                .bind(&agent)
+                .bind(run_id)
+                .execute(&app.db)
+                .await
+                .map_err(up),
+        )
+        .await?;
     // SPEC §4.4a: stamp what this run is actually going to be on, read back off the argv we
     // are about to hand herdr rather than off `bots`. The two can differ — `effort_checked`
     // drops a level the model rejects, and the user's own `bot.args` can carry another `-m` —
     // and `bots` keeps changing under a live run (codex applies model / effort only at start).
     let (rt_model, rt_effort) = crate::models::model_effort_from_argv(&bot.kind, &args);
     let rt_fast = i64::from(args.iter().any(|a| a.contains("service_tier=\"priority\"")));
-    sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
-        .bind(&rt_model)
-        .bind(&rt_effort)
-        .bind(rt_fast)
-        .bind(run_id)
-        .execute(&app.db)
-        .await
-        .map_err(up)?;
+    pane_guard
+        .protect(
+            sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
+                .bind(&rt_model)
+                .bind(&rt_effort)
+                .bind(rt_fast)
+                .bind(run_id)
+                .execute(&app.db)
+                .await
+                .map_err(up),
+        )
+        .await?;
     // A freshly created pane is not an available shell the instant `tab.create` /
     // `pane.split` returns — herdr answers `agent_pane_busy: … is not an available shell`
     // until the interactive shell has settled. Observed 2026-09-06: starting a six-member
@@ -1919,15 +2009,16 @@ async fn start_inner(
                 tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
             }
             Err(e) => {
-                close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
+                pane_guard.cleanup().await;
                 return Err(up(e));
             }
         }
     }
     if !started {
-        close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
+        pane_guard.cleanup().await;
         return Err(up(format!("pane {pane_id} never became an available shell")));
     }
+    pane_guard.disarm();
 
     // 6. per-run status subscription
     crate::events::watch_pane_on_session(app, &host, &session, &pane_id).await;
@@ -2406,8 +2497,12 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
 }
 
 pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
+    if !valid_id(bot_id) {
+        tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
+        return;
+    }
     if host == LOCAL_HOST {
-        let dir = app.bot_dir(bot_id);
+        let Ok(dir) = app.bot_dir(bot_id) else { return };
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(dir = %dir.display(), "removed bot config dir"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2428,6 +2523,25 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
     match res {
         Ok(dir) => tracing::info!(host, %dir, "removed remote bot config dir"),
         Err(e) => tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not remove remote bot config dir"),
+    }
+}
+
+#[cfg(test)]
+mod bot_dir_safety_tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    #[tokio::test]
+    async fn invalid_ids_do_not_access_or_remove_local_bot_dirs() {
+        let env = tt::env().await;
+        let protected = env.app.data_dir.join("bots").join("keep");
+        std::fs::create_dir_all(&protected).unwrap();
+
+        for id in ["../..", "foo/bar", r"..\..", ""] {
+            assert!(env.app.bot_dir(id).is_err(), "invalid id was accepted: {id:?}");
+            purge_bot_dir(&env.app, id, LOCAL_HOST).await;
+            assert!(protected.exists(), "purge touched the protected directory for {id:?}");
+        }
     }
 }
 
@@ -3395,7 +3509,7 @@ pub async fn prompt_grouped(
         }
     }
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
-        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status IN ('in_flight','completed','completed_fallback') LIMIT 1",
+        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
     )
     .bind(&conv)
     .fetch_optional(&app.db)
@@ -4181,15 +4295,14 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
 /// and the composer would stay locked. Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
     let mut timers = app.stall_timers.lock().await;
-    if let Some(h) = timers.remove(run_id) {
-        h.abort();
-    }
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    timers.insert(run_id.to_string(), generation);
     let app2 = app.clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
-    let key = run_id.clone();
-    let h = tokio::spawn(async move {
+    tokio::spawn(async move {
         // What we handed the agent, for the "still in the input box" check below.
         let sent = turn_echo_texts(&app2, &turn_id).await;
         let mut nudged = false;
@@ -4200,6 +4313,9 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
+            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+                return;
+            }
             nudged = nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
         tokio::time::sleep(Duration::from_secs(STALL_SECS - NUDGE_EARLY_SECS)).await;
@@ -4208,6 +4324,9 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
+            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+                return;
+            }
             nudged |= nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
         if nudged {
@@ -4215,18 +4334,21 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         }
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
+        if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+            return;
+        }
         if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged).await {
             tracing::warn!(error = ?e, "stall watchdog failed");
         }
-        app2.stall_timers.lock().await.remove(&run_id);
+        let mut timers = app2.stall_timers.lock().await;
+        if timers.get(&run_id) == Some(&generation) {
+            timers.remove(&run_id);
+        }
     });
-    timers.insert(key, h);
 }
 
 pub async fn cancel_stall(app: &Arc<App>, run_id: &str) {
-    if let Some(h) = app.stall_timers.lock().await.remove(run_id) {
-        h.abort();
-    }
+    app.stall_timers.lock().await.remove(run_id);
 }
 
 async fn fail_stalled_turn(
@@ -4257,16 +4379,29 @@ async fn fail_stalled_turn(
         }
     }
     let reason = stall_reason(&hints, nudged);
+    let mut tx = app.db.begin().await?;
     let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
         .bind(turn_id)
-        .execute(&app.db)
+        .execute(&mut *tx)
         .await?;
     if res.rows_affected() == 0 {
         return Ok(());
     }
+    let message = insert_message_tx(
+        &mut tx,
+        &turn.conversation_id,
+        Some(turn_id),
+        "system",
+        &reason,
+        "system",
+        false,
+        snapshot.as_deref(),
+    )
+    .await?;
+    tx.commit().await?;
     tracing::warn!(turn = %turn_id, bot = %bot_id, %reason, "prompt stalled; turn failed");
-    insert_message(app, &turn.conversation_id, Some(turn_id), "system", &reason, "system", false, snapshot.as_deref()).await?;
+    emit_message_added(app, bot_id, message).await;
     emit_turn(app, turn_id).await;
     Ok(())
 }
@@ -4309,28 +4444,40 @@ fn stall_reason(hints: &[String], nudged: bool) -> String {
 }
 
 pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
-    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+    let conversation_id = sqlx::query_scalar::<_, String>("SELECT conversation_id FROM turns WHERE id=?")
         .bind(turn_id)
         .fetch_optional(&app.db)
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id=?")
-        .bind(&t.conversation_id)
+        .bind(&conversation_id)
         .fetch_one(&app.db)
         .await
         .map_err(up)?;
     let lock = app.bot_lock(&bot_id).await;
     let _g = lock.lock().await;
-    if t.status != "in_flight" && t.delivery != "unknown" {
+    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+        .ok_or_else(|| LcError::NotFound("turn".into()))?;
+    if t.status != "in_flight" {
         return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
     }
-    sqlx::query("UPDATE turns SET status='failed', delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END, completed_at=? WHERE id=?")
+    let res = sqlx::query(
+        "UPDATE turns SET status='failed', delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END, completed_at=?
+         WHERE id=? AND status='in_flight'",
+    )
         .bind(db::now())
         .bind(turn_id)
         .execute(&app.db)
         .await
         .map_err(up)?;
+    if res.rows_affected() == 0 {
+        return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
+    }
     let _ = insert_message(app, &t.conversation_id, Some(turn_id), "system", "turn abandoned by user", "system", false, None).await;
     emit_turn(app, turn_id).await;
     Ok(())
@@ -4341,17 +4488,19 @@ pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
 /// Arm the 5s terminal-fallback timer after a working -> idle transition.
 pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
     let mut timers = app.fallback_timers.lock().await;
-    if let Some(h) = timers.remove(run_id) {
-        h.abort();
-    }
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    timers.insert(run_id.to_string(), generation);
     let app2 = app.clone();
     let run_id = run_id.to_string();
     let bot_id = bot_id.to_string();
-    let key = run_id.clone();
-    let h = tokio::spawn(async move {
+    tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
+        if app2.fallback_timers.lock().await.get(&run_id) != Some(&generation) {
+            return;
+        }
         match try_fallback(&app2, &run_id).await {
             // No turn to fall back on. For a run with no hooks that is not "nothing happened":
             // the agent just finished answering and the only record of it is on the pane.
@@ -4374,9 +4523,11 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
         if let Err(e) = crate::turn_error::capture(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "turn error capture failed");
         }
-        app2.fallback_timers.lock().await.remove(&run_id);
+        let mut timers = app2.fallback_timers.lock().await;
+        if timers.get(&run_id) == Some(&generation) {
+            timers.remove(&run_id);
+        }
     });
-    timers.insert(key, h);
 }
 
 /// `Ok(true)` when a turn was actually completed from the pane, `Ok(false)` when there was
@@ -4417,85 +4568,101 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         return Ok(false);
     }
 
-    // CAS: only one writer wins the turn.
+    let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
+
+    // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
+    // Scan both the fresh slice and the full snapshot — the banner may sit above the cursor.
+    let codex_hit = if bot.kind == "codex" {
+        codex_usage_notice_lines(&fresh)
+            .into_iter()
+            .chain(codex_usage_notice_lines(&read.text))
+            .find(|n| codex_limit_hit_line(n).is_some())
+    } else {
+        None
+    };
+
+    // Derive the reply before taking SQLite's write lock. In particular, `pane_columns` may
+    // make a herdr RPC, and `turn_echo_texts` reads through another pool connection.
+    let reply = if codex_hit.is_some() {
+        None
+    } else {
+        // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
+        // 2..n on screen and they would be stored as the agent's answer.
+        let sent = turn_echo_texts(app, &turn.id).await;
+        match screen_reply(&bot.kind, &fresh, &sent) {
+            None => None,
+            Some(reply) => Some(if is_shredded(&reply) {
+                // What is left has to be worth storing. A shredded capture means the pane is too
+                // narrow to read at all.
+                // Name the pane and its width: "too narrow" is not actionable when the user has
+                // a dozen panes open and no idea which one, or how much wider it needs to be.
+                let how_wide = match pane_columns(app, &run).await {
+                    Some(w) => format!("目前 {w} 欄，"),
+                    None => String::new(),
+                };
+                format!(
+                    "（pane {pane_id} 太窄，{how_wide}輸出在終端就被切成單字元，無法還原。\
+                     把它拉寬一點就會恢復；這只影響終端備援，hook 取得的回覆不受影響。）"
+                )
+            } else {
+                reply
+            }),
+        }
+    };
+
+    // CAS: only one writer wins the turn. Keep the claim and the resulting message in one
+    // transaction so a cancellation or database error cannot leave a completed turn without
+    // its terminal reply. All pane / reply derivation above is outside this write transaction.
+    let mut tx = app.db.begin().await?;
     let res = sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
         .bind(&turn.id)
-        .execute(&app.db)
+        .execute(&mut *tx)
         .await?;
     if res.rows_affected() == 0 {
         return Ok(false);
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
-    let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
-
-    // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
-    // Scan both the fresh slice and the full snapshot — the banner may sit above the cursor.
-    if bot.kind == "codex" {
-        if let Some(hit) = codex_usage_notice_lines(&fresh)
-            .into_iter()
-            .chain(codex_usage_notice_lines(&read.text))
-            .find(|n| codex_limit_hit_line(n).is_some())
-        {
-            sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?")
-                .bind(db::now())
-                .bind(&turn.id)
-                .execute(&app.db)
-                .await?;
-            insert_message(
-                app,
-                &turn.conversation_id,
-                Some(&turn.id),
-                "system",
-                &hit,
-                "system",
-                false,
-                Some(&read.text),
-            )
+    if let Some(hit) = codex_hit {
+        sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn.id)
+            .execute(&mut *tx)
             .await?;
-            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-            apply_codex_limit_hit_quota(app, &host, &hit).await;
-            remember_pane_cursor(app, run_id, &read).await?;
-            emit_turn(app, &turn.id).await;
-            return Ok(true);
-        }
+        let message = insert_message_tx(
+            &mut tx,
+            &turn.conversation_id,
+            Some(&turn.id),
+            "system",
+            &hit,
+            "system",
+            false,
+            Some(&read.text),
+        )
+        .await?;
+        remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
+        tx.commit().await?;
+        emit_message_added(app, &bot.id, message).await;
+        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+        apply_codex_limit_hit_quota(app, &host, &hit).await;
+        emit_turn(app, &turn.id).await;
+        return Ok(true);
     }
 
-    // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
-    // 2..n on screen and they would be stored as the agent's answer.
-    let sent = turn_echo_texts(app, &turn.id).await;
-    let Some(reply) = screen_reply(&bot.kind, &fresh, &sent) else {
+    let Some(reply) = reply else {
         // Nothing but our own prompt (or an empty screen). The turn is already closed, so the
         // composer unlocks either way — storing the echo back as an `incomplete` assistant
         // message would only put words in the agent's mouth.
         tracing::info!(turn = %turn.id, "terminal fallback saw only our own prompt; storing no reply");
+        tx.commit().await?;
         remember_pane_cursor(app, run_id, &read).await?;
         emit_turn(app, &turn.id).await;
         return Ok(true);
     };
 
-    // What is left has to be worth storing. A shredded capture means the pane is too narrow
-    // to read at all.
-    let reply = if is_shredded(&reply) {
-        // Name the pane and its width: "too narrow" is not actionable when the user has a
-        // dozen panes open and no idea which one, or how much wider it needs to be.
-        let how_wide = match pane_columns(app, &run).await {
-            Some(w) => format!("目前 {w} 欄，"),
-            None => String::new(),
-        };
-        format!(
-            "（pane {pane_id} 太窄，{how_wide}輸出在終端就被切成單字元，無法還原。\
-             把它拉寬一點就會恢復；這只影響終端備援，hook 取得的回覆不受影響。）"
-        )
-    } else {
-        reply
-    };
-
-    remember_pane_cursor(app, run_id, &read).await?;
-
-    insert_message(
-        app,
+    let message = insert_message_tx(
+        &mut tx,
         &turn.conversation_id,
         Some(&turn.id),
         "assistant",
@@ -4505,6 +4672,9 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         Some(&read.text),
     )
     .await?;
+    remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
+    tx.commit().await?;
+    emit_message_added(app, &bot.id, message).await;
     emit_turn(app, &turn.id).await;
     Ok(true)
 }
@@ -4756,6 +4926,20 @@ async fn remember_pane_cursor(app: &Arc<App>, run_id: &str, read: &crate::herdr:
         .bind(tail_hash(&read.text))
         .bind(run_id)
         .execute(&app.db)
+        .await?;
+    Ok(())
+}
+
+async fn remember_pane_cursor_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &str,
+    read: &crate::herdr::PaneRead,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
+        .bind(read.revision as i64)
+        .bind(tail_hash(&read.text))
+        .bind(run_id)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
@@ -6408,6 +6592,138 @@ mod prompt_tests {
 }
 
 #[cfg(test)]
+mod abandon_tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    async fn completed_turn(status: &str) -> (tt::Env, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'abandon-test','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web',?,'unknown',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(status)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        insert_message(&app, &conversation_id, Some(&turn_id), "assistant", "already complete", "hook", false, None)
+            .await
+            .unwrap();
+        (env, turn_id, conversation_id)
+    }
+
+    #[tokio::test]
+    async fn abandon_of_a_completed_unknown_delivery_turn_is_a_noop_conflict() {
+        for status in ["completed", "completed_fallback"] {
+            let (env, turn_id, conversation_id) = completed_turn(status).await;
+            let app = env.app.clone();
+            let before = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            let before_messages = sqlx::query_as::<_, (String, String, String, String)>(
+                "SELECT id, role, content, source FROM messages WHERE conversation_id=? ORDER BY id",
+            )
+            .bind(&conversation_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+
+            let err = abandon_turn(&app, &turn_id).await.expect_err("completed turns cannot be abandoned");
+            match err {
+                LcError::Conflict(body) => {
+                    assert_eq!(body["reason"], "turn is neither in-flight nor of unknown delivery");
+                    assert_eq!(body["turn_id"], turn_id);
+                }
+                other => panic!("expected conflict, got {other:?}"),
+            }
+
+            let after = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.delivery, before.delivery);
+            assert_eq!(after.completed_at, before.completed_at);
+            let after_messages = sqlx::query_as::<_, (String, String, String, String)>(
+                "SELECT id, role, content, source FROM messages WHERE conversation_id=? ORDER BY id",
+            )
+            .bind(&conversation_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+            assert_eq!(after_messages, before_messages);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_unknown_delivery_turn_does_not_block_a_new_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'prompt-unknown','codex','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,?,'web','completed','unknown',?,?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt_grouped(&app, &bot_id, "next", "request-1", None, None, &[])
+            .await
+            .expect("a completed unknown-delivery row must not block the next prompt");
+        assert_eq!(out.delivery, "unknown", "the mock RPC was reached and failed delivery, rather than the stale row blocking it");
+    }
+}
+
+#[cfg(test)]
 mod tab_tests {
     //! One bot, one tab (and the retrofit for the bots that predate it).
     //!
@@ -6433,6 +6749,42 @@ mod tab_tests {
         .await
         .unwrap();
         id
+    }
+
+    /// A database failure after `workspace.create` still has to remove the root pane and its
+    /// tab. The trigger exercises the same error boundary as either run mapping UPDATE without
+    /// needing a real herdr failure injection.
+    #[tokio::test]
+    async fn a_run_mapping_failure_closes_the_new_pane_and_tab() {
+        let env = tt::env().await;
+        let bot_id = a_bot(&env, "alfa").await;
+        sqlx::query(
+            "CREATE TRIGGER fail_run_mapping BEFORE UPDATE OF workspace_id, pane_id, tab_id ON runs
+             BEGIN SELECT RAISE(ABORT, 'forced run mapping failure'); END",
+        )
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        assert!(start_bot(&env.app, &bot_id).await.is_err());
+
+        let workspace_id = db::project(&env.app.db, &env.project_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_id
+            .expect("workspace.create ran before the mapping failure");
+        assert!(env.herdr.tabs_in(&workspace_id).is_empty(), "the failed start left a tab behind");
+        let methods = env.herdr.methods();
+        assert!(methods.contains(&"pane.close".into()), "cleanup did not close the pane: {methods:?}");
+        assert!(methods.contains(&"tab.close".into()), "cleanup did not close the empty tab: {methods:?}");
+
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id = ? ORDER BY started_at DESC LIMIT 1")
+            .bind(&bot_id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "exited");
     }
 
     async fn run_row(app: &Arc<App>, id: &str) -> db::Run {
@@ -6873,6 +7225,154 @@ mod hookless_capture_tests {
         assert!(!capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
         assert_eq!(messages(&app, &c.conv).await.len(), 1);
         let _ = &c.bot_id;
+    }
+}
+
+#[cfg(test)]
+mod issue_17_tests {
+    use super::*;
+    use crate::team::testing as tt;
+
+    const FALLBACK_SCREEN: &str = "❯ Reply with PONG\n⏺ PONG\n✻ Worked for 5s · done 1:07 AM\n──────\n❯\n";
+
+    struct Fixture {
+        env: tt::Env,
+        bot_id: String,
+        conversation_id: String,
+        run_id: String,
+        turn_id: String,
+    }
+
+    async fn fixture(kind: &str, screen: &str) -> Fixture {
+        let env = tt::env().await;
+        let bot_id = db::ulid();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?, ?, 'tok', ?)")
+            .bind(&bot_id)
+            .bind(&env.project_id)
+            .bind("issue-17")
+            .bind(kind)
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let conversation_id = db::conversation_id(&env.app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at)
+             VALUES (?,?,'running','idle','pane-17','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at)
+             VALUES (?,?,?,'user','Reply with PONG','web',?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation_id)
+        .bind(&turn_id)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        env.herdr.set_screen("pane-17", screen);
+        Fixture { env, bot_id, conversation_id, run_id, turn_id }
+    }
+
+    async fn event_kinds(mut rx: tokio::sync::broadcast::Receiver<crate::state::WsEvent>) -> Vec<String> {
+        let mut kinds = Vec::new();
+        while kinds.len() < 2 {
+            kinds.push(tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().unwrap().kind);
+        }
+        kinds
+    }
+
+    async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
+        sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// Re-arming only invalidates the old task. Once it reaches the bot lock, the old generation
+    /// returns and cannot remove or overwrite the newer registration.
+    #[tokio::test]
+    async fn an_old_fallback_timer_gives_up_inside_the_bot_lock() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let lock = app.bot_lock("bot-17").await;
+        let guard = lock.lock().await;
+
+        arm_fallback(&app, "run-17", "bot-17").await;
+        let old = *app.fallback_timers.lock().await.get("run-17").unwrap();
+        arm_fallback(&app, "run-17", "bot-17").await;
+        let current = *app.fallback_timers.lock().await.get("run-17").unwrap();
+        assert_ne!(old, current, "re-arming advances the generation");
+
+        tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(50)).await;
+        assert_eq!(*app.fallback_timers.lock().await.get("run-17").unwrap(), current);
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(app.fallback_timers.lock().await.get("run-17").is_none());
+    }
+
+    #[tokio::test]
+    async fn fallback_commits_assistant_message_before_turn_updated() {
+        let f = fixture("claude", FALLBACK_SCREEN).await;
+        let app = f.env.app.clone();
+        let rx = app.subscribe();
+
+        assert!(try_fallback(&app, &f.run_id).await.unwrap());
+        let messages: Vec<(String, String)> = sqlx::query_as(
+            "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at, id",
+        )
+        .bind(&f.conversation_id)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(messages, vec![("user".into(), "Reply with PONG".into()), ("assistant".into(), "PONG".into())]);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "completed_fallback");
+        let kinds = event_kinds(rx).await;
+        assert_eq!(kinds, vec!["message_added", "turn_updated"]);
+    }
+
+    #[tokio::test]
+    async fn stall_commits_system_message_before_turn_updated() {
+        let f = fixture("claude", "not logged in\n").await;
+        let app = f.env.app.clone();
+        let rx = app.subscribe();
+
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false).await.unwrap();
+        let message: (String, String, String) = sqlx::query_as(
+            "SELECT role, content, source FROM messages WHERE conversation_id=? AND turn_id=? AND role='system'",
+        )
+        .bind(&f.conversation_id)
+        .bind(&f.turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(message.0, "system");
+        assert!(message.1.contains("not logged in"));
+        assert_eq!(message.2, "system");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        let kinds = event_kinds(rx).await;
+        assert_eq!(kinds, vec!["message_added", "turn_updated"]);
     }
 }
 
