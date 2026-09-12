@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import * as api from '../api'
+import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -164,6 +165,10 @@ export function HostShellPanel({
           setErr(null)
         }
       } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          if (alive) closeShellView()
+          return
+        }
         if (alive) setErr(e instanceof Error ? e.message : String(e))
       }
       if (alive) timer = setTimeout(() => void tick(), 1_000)
@@ -173,7 +178,7 @@ export function HostShellPanel({
       alive = false
       if (timer) clearTimeout(timer)
     }
-  }, [host, paneId, source, lines, nonce])
+  }, [closeShellView, host, paneId, source, lines, nonce])
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 

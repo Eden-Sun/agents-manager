@@ -12,6 +12,7 @@ mod bulk_restart;
 mod changelog;
 mod codex_live;
 mod config;
+mod capture;
 mod default_session;
 mod db;
 mod events;

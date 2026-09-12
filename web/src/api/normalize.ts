@@ -177,6 +177,7 @@ export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
       name: str(pick(v, 'name')) || key,
       kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
       logged_in: typeof li === 'boolean' ? li : null,
+      reason: optStr(pick(v, 'reason')),
       account: optStr(pick(v, 'account', 'email')),
       plan: optStr(pick(v, 'plan', 'subscriptionType')),
       // 舊 daemon 沒有這兩個欄位：一律當成 config 來源（唯一會被編輯的那種）。

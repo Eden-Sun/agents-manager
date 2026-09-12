@@ -409,6 +409,7 @@ interface MockIdentityStatus {
   name: string
   kind: BotKind
   logged_in: boolean | null
+  reason?: string
   account?: string
   plan?: string
   /** `config` = config.toml 的 `[[identities]]`；`shell` = 那台主機 zshrc 的 `ccN`（SPEC §16）。 */
@@ -802,6 +803,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/mem/processes/pane') return this.memPane(q.get('host') ?? 'local', q.get('pane_id') ?? '')
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'login' && method === 'POST') return this.ghLogin(seg[1], b)
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'cancel' && method === 'POST') return this.ghCancel(seg[1])
@@ -1210,6 +1212,22 @@ export class MockTransport implements Transport {
     const tools = remote ? remote.tools : this.localTools
     const identities = remote ? remote.identities : this.localIdentityStatus
     return { name: remote?.name ?? 'local', tools, identities, tools_checked_at: now() }
+  }
+
+  private loginIdentity(host: string, name: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const identities = remote ? remote.identities : this.localIdentityStatus
+    const st = identities[name]
+    if (!st) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
+    const shell = this.openShell(host, '')
+    const pane = this.shell(host, shell.pane_id)
+    const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
+    const command = st.kind === 'claude' ? `${dir}claude /login` : `${dir}${st.kind} login`
+    pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '請在瀏覽器完成登入：', 'https://example.test/device?code=AM-MOCK', '登入完成，正在重新偵測…', '')
+    st.logged_in = true
+    st.account = st.account ?? 'mock@example.com'
+    this.emit('host_changed', { name: host || 'local', connected: true, identities })
+    return shell
   }
 
   private ghKey(name: string): string {
