@@ -4,7 +4,7 @@ import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useStore } from '../store/store'
-import { BlockedChoices } from './BlockedChoices'
+import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
 import { CodexUpdateHint } from './CodexUpdateHint'
 
 /** 低於這個欄數，TUI 會把自己的輸出折成碎片，畫面本身就讀不了（同 TerminalTab）。 */
@@ -26,6 +26,9 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
   const press = usePaneKeys(botId, refresh)
   const menu = useChoiceMenu(botId, snap?.text)
+  /** 選單模式預設只留問題與選項；終端原文、整排按鍵與鍵盤直通收在這顆開關後面。 */
+  const [extras, setExtras] = useState(false)
+  const showRaw = !menu || extras
   const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLPreElement>(null)
 
@@ -83,23 +86,29 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="modal-head">
-          <strong className="blocked-title">● {bot?.name ?? 'agent'} 需要回應</strong>
-          {/* 同 `BlockedPanel` / 終端分頁：抓法（`visible`）與對帳序號（`revision`）收進
-              tooltip，條上留下你會用到的——這是哪個 pane、幾欄幾列。 */}
-          <span
-            className="modal-sub"
-            title={`終端 visible 全畫面${snap?.revision != null ? `・revision ${snap.revision}` : ''}`}
+          <strong
+            className="blocked-title"
+            title={`終端 visible 全畫面${snap?.pane_id ? `・pane ${snap.pane_id}` : ''}${
+              snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''
+            }${snap?.revision != null ? `・revision ${snap.revision}` : ''}`}
           >
-            終端畫面，每秒更新
-            {snap?.pane_id ? `・pane ${snap.pane_id}` : ''}
-            {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
-          </span>
+            ● {bot?.name ?? 'agent'} 需要回應
+          </strong>
+          {/* 抓法、pane id、幾欄幾列、對帳序號都是除錯資訊：選單模式下畫面上只留「要回答的
+              那件事」，這些收進標題的 tooltip（2026-09-12 第二輪回饋第 3 點）。 */}
+          {menu ? null : (
+            <span className="modal-sub">
+              終端畫面，每秒更新
+              {snap?.pane_id ? `・pane ${snap.pane_id}` : ''}
+              {snap?.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
+            </span>
+          )}
           <button type="button" className="icon-btn" aria-label="關閉" title="關閉" onClick={onClose}>
             ✕
           </button>
         </div>
 
-        {narrow ? (
+        {narrow && !menu ? (
           <div className="blocked-modal-warn" role="status">
             這個 pane 只有 {snap?.columns} 欄，agent 的輸出在終端就被折成碎片了。到「終端」分頁可以把它
             移到自己的分頁，之後的輸出才會是完整寬度。
@@ -108,43 +117,58 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
 
-        {/* 認得出編號選單就先給可以點的那一份（`BlockedChoices`）。這裡的終端畫面**不收起來**：
-            全畫面本來就是「要看完整畫面才決定得了」才開的，選單上方那幾十行脈絡是判斷的一半。 */}
-        {menu ? <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} /> : null}
+        {/* 選單模式：視窗裡**只有一條主捲軸**（這個 body），問題那一行釘在上緣。原本清單與終端
+            快照各自捲，手指在手機上分不清正在捲哪一塊（2026-09-12 第二輪回饋第 4 點）。 */}
+        {menu ? (
+          <div className="blocked-modal-body">
+            <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
+          </div>
+        ) : null}
 
-        <pre className="term blocked-modal-term" ref={termRef} tabIndex={0}>
-          {err ? `讀取終端失敗：${err}` : (snap?.text ?? '讀取中…')}
-        </pre>
+        {showRaw ? (
+          <pre className="term blocked-modal-term" ref={termRef} tabIndex={0}>
+            {err ? `讀取終端失敗：${err}` : (snap?.text ?? '讀取中…')}
+          </pre>
+        ) : null}
 
         <div className="blocked-modal-foot">
-          <div className="keypad">
-            {KEYPAD.map((k) => (
-              <button
-                key={k.label}
-                type="button"
-                className="key-btn"
-                title={k.title}
-                onClick={() => press(k.keys)}
-              >
-                {k.label}
-              </button>
-            ))}
-          </div>
-          <div className="blocked-modal-hints">
-            <label className="conn">
-              <input
-                type="checkbox"
-                checked={passthrough}
-                onChange={(e) => setPassthrough(e.target.checked)}
-              />
-              鍵盤直通
-            </label>
-            <span className="hint">
-              {passthrough
-                ? '打字、方向鍵、Enter、Esc、ctrl+c 都直接送進終端；Esc 也算，關閉請按右上 ✕ 或點視窗外。⌘ 快捷鍵（⌘C 複製）留給瀏覽器，Home / End / PgUp / PgDn 用來捲這個畫面。'
-                : '鍵盤還給瀏覽器：Esc 關閉這個視窗，回應改用上面的按鍵。'}
-            </span>
-          </div>
+          {menu ? (
+            <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
+          ) : null}
+          {/* 選單模式預設不長這一段（第二輪回饋第 2 點）：那排鍵、鍵盤直通與它那段說明
+              都不是回答問題需要的東西。展開之後樣子照舊。 */}
+          {showRaw ? (
+            <>
+              <div className="keypad">
+                {KEYPAD.map((k) => (
+                  <button
+                    key={k.label}
+                    type="button"
+                    className="key-btn"
+                    title={k.title}
+                    onClick={() => press(k.keys)}
+                  >
+                    {k.label}
+                  </button>
+                ))}
+              </div>
+              <div className="blocked-modal-hints">
+                <label className="conn">
+                  <input
+                    type="checkbox"
+                    checked={passthrough}
+                    onChange={(e) => setPassthrough(e.target.checked)}
+                  />
+                  鍵盤直通
+                </label>
+                <span className="hint">
+                  {passthrough
+                    ? '打字、方向鍵、Enter、Esc、ctrl+c 都直接送進終端；Esc 也算，關閉請按右上 ✕ 或點視窗外。⌘ 快捷鍵（⌘C 複製）留給瀏覽器，Home / End / PgUp / PgDn 用來捲這個畫面。'
+                    : '鍵盤還給瀏覽器：Esc 關閉這個視窗，回應改用上面的按鍵。'}
+                </span>
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
     </div>,
