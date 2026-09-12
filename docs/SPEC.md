@@ -1070,6 +1070,25 @@ claude / grok 的 `/usage` 探測開在本機、遠端 bot 的 statusLine 也直
 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走既有 ssh master），變化超過 1 MiB 才推 `mem_updated`。
 量不到的主機用 `error` 回報而不是從清單消失。端點見 `docs/API.md` 的 `GET /api/mem`。
 
+### 15.1a 這台機器還剩多少（2026-09-12）
+使用者：「除了已用量，也要能夠 show 出剩餘 ram 量。」herdr 樹佔 7G 這個數字回答不了「還能不能
+再開一顆 bot」——那要看整台機器還剩什麼，而剩下的多半是被瀏覽器與系統吃掉的，不在 §15.1 的樹裡。
+
+同一次取樣、同一個 snapshot、同一個 `mem_updated` 事件多帶一節 `hosts[].machine`：
+`{"total_bytes":…,"available_bytes":…}`。取法依平台，一次 shell 往返（遠端就是同一次 ssh）：
+
+- Linux：`/proc/meminfo` 的 `MemTotal` / `MemAvailable`。
+- macOS：`sysctl -n hw.memsize` 拿總量，`vm_stat` 的 `Pages free + inactive + speculative +
+  purgeable` × page size 當可用量——inactive／purgeable 是核心隨時能回收的快取，算成「已用」
+  會讓人以為記憶體早就見底。
+
+**`available` 不是 `total −（我們用掉的）`**：那台機器上還有瀏覽器、編輯器、系統自己。兩種輸出都
+認不出來（指令不存在、被截斷）就回 `null`，UI 只顯示已用量——少一個數字沒關係，猜一個會誤導。
+舊格式（沒有分隔線、只有 `ps`）照舊算得出 herdr 的數字。
+
+UI：左上那格變成「已用 · 剩 N」，剩餘低於 15% 時整格轉警示色；展開的明細最上面一行寫
+「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
+
 ### 15.2 展開看程序 / 砍程序（2026-09-08）
 一台機器底下常常有十幾個 `claude`，其中一半是使用者自己開的 pane 或舊的 `--resume`，
 不是 AG Man 管的 bot——但從那一個總數看不出來哪些可以砍。所以那一格可以展開成清單。

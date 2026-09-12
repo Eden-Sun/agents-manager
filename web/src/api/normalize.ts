@@ -1179,6 +1179,10 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
       bytes: n(b.bytes),
       processes: n(b.processes),
     })),
+    // 舊 daemon 沒有整機那一節 → null，UI 只顯示已用量（不要畫成「剩 0」）。
+    machine: isRec(h.machine) && n(h.machine.total_bytes) > 0
+      ? { total_bytes: n(h.machine.total_bytes), available_bytes: n(h.machine.available_bytes) }
+      : null,
   }))
   return {
     total_bytes: n(r.total_bytes),

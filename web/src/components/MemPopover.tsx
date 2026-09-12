@@ -162,6 +162,15 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
               重新整理
             </button>
           </div>
+          {/* 整機那一行放在最上面：明細是「我們自己吃了什麼」，這一行才是「這台還剩什麼」。 */}
+          {row?.machine ? (
+            <p className={`mem-pop-machine${row.machine.available_bytes / row.machine.total_bytes < 0.15 ? ' low' : ''}`}>
+              這台機器 剩 <strong>{humanBytes(row.machine.available_bytes)}</strong> / 共 {humanBytes(row.machine.total_bytes)}
+              <span className="mem-pop-machine-used">
+                （已用 {humanBytes(row.machine.total_bytes - row.machine.available_bytes)}，其中 herdr 樹 {humanBytes(row.total_bytes)}）
+              </span>
+            </p>
+          ) : null}
           {row?.browsers.length ? (
             <p className={`mem-pop-browsers${tabsTotal(row.browsers) >= TABS_WARN ? ' hot' : ''}`}>
               瀏覽器 {browsersLine(row.browsers)}

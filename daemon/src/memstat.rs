@@ -27,6 +27,34 @@ const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// token, but a clipped line still costs us the tail of long agent command lines.
 const PS_CMD: &str = "ps -Awwo pid=,ppid=,rss=,args= 2>/dev/null";
 
+/// 同一次往返順便問「這台機器還剩多少記憶體」（使用者 2026-09-12：「除了已用量，也要能夠 show
+/// 出剩餘 ram 量」）。herdr 進程樹佔 7G 這個數字本身回答不了「還能不能再開一顆 bot」——那要看整台
+/// 機器還剩什麼。遠端主機一次 ssh 就順便帶回來，不另外開一趟。
+///
+/// Linux 有 `/proc/meminfo`（`MemTotal` / `MemAvailable` 直接就是答案）；macOS 沒有，得用
+/// `sysctl hw.memsize` 拿總量、`vm_stat` 拿頁數自己算。兩種輸出都丟進 [`parse_machine`]。
+const MACHINE_CMD: &str = "cat /proc/meminfo 2>/dev/null || { sysctl -n hw.memsize 2>/dev/null; vm_stat 2>/dev/null; }";
+
+/// 一次 shell 往返拿兩段：機器記憶體、然後 `ps`。分隔線是固定字串，`ps` 的 argv 不會長這樣。
+const MACHINE_MARK: &str = "__AM_MACHINE__";
+const PS_MARK: &str = "__AM_PS__";
+
+fn sample_cmd() -> String {
+    format!("echo {MACHINE_MARK}; {MACHINE_CMD}; echo {PS_MARK}; {PS_CMD}")
+}
+
+/// 把一次取樣的輸出切成「機器那段」與「`ps` 那段」。舊格式（只有 ps）也要吃得下：找不到分隔線
+/// 就當整段都是 ps，機器資訊為 `None`——一台還沒更新的遠端主機不該讓整格變成空白。
+fn split_sample(out: &str) -> (Option<MachineMem>, &str) {
+    let Some(pi) = out.find(PS_MARK) else { return (None, out) };
+    let head = &out[..pi];
+    let machine = match head.find(MACHINE_MARK) {
+        Some(mi) => parse_machine(&head[mi + MACHINE_MARK.len()..]),
+        None => parse_machine(head),
+    };
+    (machine, &out[pi + PS_MARK.len()..])
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct HostMem {
     pub host: String,
@@ -44,6 +72,67 @@ pub struct HostMem {
     /// other big RAM lever on a workstation, and the UI warns when it runs away.
     #[serde(default)]
     pub browsers: Vec<BrowserMem>,
+    /// 整台機器的總量與剩餘可用量（2026-09-12）。量不到就是 `None`，UI 只是少顯示「還剩多少」。
+    #[serde(default)]
+    pub machine: Option<MachineMem>,
+}
+
+/// 整台機器的記憶體（SPEC §15）。`available` 是「現在還能給出去的量」，不是 `total - 我們用掉的`：
+/// 那台機器上還有瀏覽器、編輯器、系統自己，而 macOS 的快取（inactive / purgeable）隨時可以回收，
+/// 算成「已用」會讓人以為記憶體早就見底。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MachineMem {
+    /// 實體記憶體總量，bytes。
+    pub total_bytes: u64,
+    /// 現在還可用的量，bytes。Linux 取 `MemAvailable`；macOS 取 free + inactive + speculative
+    /// + purgeable 的頁數換算（＝核心認為可以馬上回收的部分）。
+    pub available_bytes: u64,
+}
+
+impl MachineMem {
+    /// 已用 = 總量 − 可用。UI 兩邊都要（「還剩多少」與「用掉多少」），算在這裡就不會兩處各算一套。
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes.saturating_sub(self.available_bytes)
+    }
+}
+
+/// `/proc/meminfo`（Linux）或 `sysctl -n hw.memsize` + `vm_stat`（macOS）→ [`MachineMem`]。
+///
+/// 兩邊都認不出來（指令不存在、輸出被截斷）就回 `None`：少一個數字沒關係，猜一個會誤導。
+pub fn parse_machine(out: &str) -> Option<MachineMem> {
+    // Linux: `MemTotal:  16316412 kB` / `MemAvailable:  9381234 kB`
+    let kib = |key: &str| -> Option<u64> {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|n| n.parse::<u64>().ok())
+    };
+    if let (Some(total), Some(avail)) = (kib("MemTotal:"), kib("MemAvailable:")) {
+        if total > 0 {
+            return Some(MachineMem { total_bytes: total * 1024, available_bytes: avail * 1024 });
+        }
+    }
+    // macOS: 第一行是 `sysctl -n hw.memsize` 的裸位元組數，後面是 `vm_stat`。
+    let total = out.lines().map(str::trim).find_map(|l| l.parse::<u64>().ok())?;
+    if total == 0 {
+        return None;
+    }
+    let page = out
+        .lines()
+        .find(|l| l.contains("page size of"))
+        .and_then(|l| l.split_whitespace().rev().nth(1).and_then(|n| n.parse::<u64>().ok()))
+        .unwrap_or(4096);
+    let pages = |key: &str| -> u64 {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .and_then(|l| l.rsplit(':').next())
+            .map(|v| v.trim().trim_end_matches('.').replace(['.', ','], ""))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    // 可回收的四種：真正空的、非活躍的（檔案快取）、投機預讀、可丟棄的。
+    let avail = (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page;
+    Some(MachineMem { total_bytes: total, available_bytes: avail.min(total) })
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -167,6 +256,8 @@ pub(crate) fn herdr_roots(procs: &[Proc], by_pid: &HashMap<i32, &Proc>) -> Vec<i
 /// counted twice. Everything reachable from a root is an "agent": that is where the CLIs
 /// live, and they are the reason this number is worth showing at all.
 pub fn sum_herdr(out: &str, host: &str) -> HostMem {
+    // 同一段輸出前面可能帶著機器記憶體那一節（見 [`sample_cmd`]）；切掉之後才是 `ps`。
+    let (machine, out) = split_sample(out);
     let procs = parse_ps(out);
     let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
     let children = child_index(&procs);
@@ -204,11 +295,12 @@ pub fn sum_herdr(out: &str, host: &str) -> HostMem {
         processes,
         error: None,
         browsers: sum_browsers(out),
+        machine,
     }
 }
 
 async fn sample_local(host: &str) -> HostMem {
-    let out = tokio::process::Command::new("/bin/sh").arg("-c").arg(PS_CMD).output().await;
+    let out = tokio::process::Command::new("/bin/sh").arg("-c").arg(sample_cmd()).output().await;
     match out {
         Ok(o) if o.status.success() => sum_herdr(&String::from_utf8_lossy(&o.stdout), host),
         Ok(o) => HostMem {
@@ -218,6 +310,7 @@ async fn sample_local(host: &str) -> HostMem {
             total_bytes: 0,
             processes: 0,
             browsers: vec![],
+            machine: None,
             error: Some(format!("ps exited {}", o.status)),
         },
         Err(e) => HostMem {
@@ -227,6 +320,7 @@ async fn sample_local(host: &str) -> HostMem {
             total_bytes: 0,
             processes: 0,
             browsers: vec![],
+            machine: None,
             error: Some(e.to_string()),
         },
     }
@@ -251,11 +345,12 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
                 total_bytes: 0,
                 processes: 0,
                 browsers: vec![],
+                machine: None,
                 error: Some("未連線".into()),
             });
             continue;
         }
-        match conn.ssh_exec(PS_CMD).await {
+        match conn.ssh_exec(&sample_cmd()).await {
             Ok(out) => hosts.push(sum_herdr(&out, &name)),
             Err(e) => hosts.push(HostMem {
                 host: name,
@@ -264,6 +359,7 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
                 total_bytes: 0,
                 processes: 0,
                 browsers: vec![],
+                machine: None,
                 error: Some(format!("{e:#}")),
             }),
         }
@@ -302,6 +398,57 @@ pub fn spawn_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// m4p 實機的 `sysctl -n hw.memsize` + `vm_stat`（2026-09-12）：16 GiB，可回收約 5.5 GiB。
+    #[test]
+    fn macos_machine_memory_comes_from_memsize_and_vm_stat() {
+        let out = "17179869184\n\
+Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free:                                     8261.\n\
+Pages active:                                 329793.\n\
+Pages inactive:                               299465.\n\
+Pages speculative:                             29406.\n\
+Pages throttled:                                   0.\n\
+Pages wired down:                             169646.\n\
+Pages purgeable:                                 809.\n";
+        let m = parse_machine(out).unwrap();
+        assert_eq!(m.total_bytes, 17_179_869_184);
+        // (8261 + 299465 + 29406 + 809) 頁 × 16 KiB
+        assert_eq!(m.available_bytes, (8261 + 299465 + 29406 + 809) * 16384);
+        assert_eq!(m.used_bytes(), m.total_bytes - m.available_bytes);
+    }
+
+    /// Linux 的 `/proc/meminfo` 直接就有答案，不必自己加頁數。
+    #[test]
+    fn linux_machine_memory_comes_from_meminfo() {
+        let out = "MemTotal:       16316412 kB\nMemFree:          812344 kB\nMemAvailable:    9381234 kB\nBuffers:          123456 kB\n";
+        let m = parse_machine(out).unwrap();
+        assert_eq!(m.total_bytes, 16_316_412 * 1024);
+        assert_eq!(m.available_bytes, 9_381_234 * 1024);
+    }
+
+    /// 認不出來就 `None`——少一個數字沒關係，猜一個會誤導。
+    #[test]
+    fn an_unreadable_machine_section_is_none() {
+        assert!(parse_machine("").is_none());
+        assert!(parse_machine("sh: sysctl: command not found\n").is_none());
+    }
+
+    /// 一次取樣的輸出要切得開；沒有分隔線的舊格式（只有 ps）仍然算得出 herdr 的數字。
+    #[test]
+    fn one_sample_carries_both_sections_and_the_old_format_still_parses() {
+        let ps = "  100   1  2048 /opt/homebrew/bin/herdr --session x\n";
+        let out = format!("{MACHINE_MARK}\nMemTotal:       1048576 kB\nMemAvailable:    524288 kB\n{PS_MARK}\n{ps}");
+        let h = sum_herdr(&out, "local");
+        assert_eq!(h.herdr_bytes, 2048 * 1024, "ps 那段照樣算");
+        let m = h.machine.expect("機器那段也讀到了");
+        assert_eq!(m.total_bytes, 1_048_576 * 1024);
+        assert_eq!(m.available_bytes, 524_288 * 1024);
+        // 舊格式：整段都是 ps，機器資訊為 None，但 herdr 的數字不受影響。
+        let old = sum_herdr(ps, "local");
+        assert_eq!(old.herdr_bytes, 2048 * 1024);
+        assert!(old.machine.is_none());
+    }
     #[test]
     fn browsers_count_renderers_per_app() {
         let out = "1 0 100 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
