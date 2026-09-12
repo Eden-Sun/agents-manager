@@ -669,6 +669,22 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
 let appliedStateSeq = 0
 let lastRefreshError: string | null = null
+/**
+ * 還在等 daemon 回話的 `POST /api/order` 有幾個。拖曳後的樂觀順序（`botOrder`／`projectOrder`）
+ * 只在這段期間有意義：daemon 寫完會推 `project_changed`，下一份 `/state` 就是權威順序。
+ * 沒有東西在飛時 `refreshState` 直接把樂觀順序清掉，另一台裝置拖過的順序才會過來；
+ * 存失敗的那次也不會一直錯下去。
+ */
+let orderSavesInFlight = 0
+function saveOrderTracked(input: Parameters<typeof api.saveOrder>[0], onFail: () => void) {
+  orderSavesInFlight += 1
+  void api
+    .saveOrder(input)
+    .catch(onFail)
+    .finally(() => {
+      orderSavesInFlight -= 1
+    })
+}
 
 /**
  * daemon 的 `seq` 是行程內的計數器，**重啟就從 0 重來**（`state.rs` 的 `AtomicU64::new(0)`）。
@@ -833,6 +849,16 @@ export const useStore = create<StoreState>((set, get) => ({
         const order = (botOrder[b.project_id] ?? []).map((x) => (x === b.id ? real.id : x))
         botOrder = { ...botOrder, [b.project_id]: order }
       }
+      // 這份快照就是權威順序：沒有 `POST /api/order` 還在飛，樂觀順序就該讓位（另一台裝置拖過的
+      // 順序才過得來；存失敗那次也不會錯到重整）。只留還有佔位列的專案——分身的佔位要靠它排在
+      // 原 bot 旁邊，等真 bot 到了再放。
+      let projectOrder = s.projectOrder
+      if (orderSavesInFlight === 0) {
+        projectOrder = []
+        const keep: Record<string, string[]> = {}
+        for (const b of keptPending) if (botOrder[b.project_id]) keep[b.project_id] = botOrder[b.project_id]
+        botOrder = keep
+      }
       return {
         hosts: st.hosts,
         attachCommand: st.attach_command,
@@ -842,6 +868,7 @@ export const useStore = create<StoreState>((set, get) => ({
         projects: st.projects,
         bots: [...st.bots, ...keptPending],
         botOrder,
+        projectOrder,
         teams,
         runs,
         turns,
@@ -1011,8 +1038,8 @@ export const useStore = create<StoreState>((set, get) => ({
       const botOrder = { ...s.botOrder, [pid]: next }
       // 順序存在 daemon（config.toml 的陣列順序），手機與桌機才是同一份。這裡先樂觀套用，
       // daemon 寫完會回一個 `project_changed`，下一次 `/state` 帶回權威順序。
-      void api.saveOrder({ bots: { [pid]: next } }).catch(() => {
-        get().notify('error', '排序沒存起來（daemon 沒收到），重新整理會回到原本的順序')
+      saveOrderTracked({ bots: { [pid]: next } }, () => {
+        get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { botOrder }
     })
@@ -1027,8 +1054,8 @@ export const useStore = create<StoreState>((set, get) => ({
       if (beforeId !== null && at < 0) return {}
       const next = [...rest.slice(0, at), projectId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
-      void api.saveOrder({ projects: next }).catch(() => {
-        get().notify('error', '排序沒存起來（daemon 沒收到），重新整理會回到原本的順序')
+      saveOrderTracked({ projects: next }, () => {
+        get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { projectOrder: next }
     })
