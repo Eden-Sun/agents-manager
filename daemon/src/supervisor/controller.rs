@@ -66,6 +66,14 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         dispatch_failed(app, &a, "target bot became team-managed").await;
         return;
     }
+    // A restart window is being held: the point of the window is that nothing new starts inside
+    // it. The assignment stays queued (nothing is lost or refused) until the window closes —
+    // this is the half a one-off "is anything working?" snapshot could never cover.
+    if let Some(until) = super::maintenance::dispatch_paused(app).await {
+        let _ = store::hold(&app.db, &a.id, &until, &super::maintenance::pause_note(&until)).await;
+        tracing::info!(assignment = %a.id, until, "assignment held: a restart window is open");
+        return;
+    }
 
     match lifecycle::prompt(app, &a.target_bot_id, &a.text, &a.client_request_id).await {
         Ok(out) => {

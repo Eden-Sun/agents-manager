@@ -147,6 +147,43 @@ CREATE TABLE IF NOT EXISTS supervisor_incidents (
 CREATE UNIQUE INDEX IF NOT EXISTS supervisor_incidents_open
   ON supervisor_incidents(supervisor_id, kind, resource) WHERE status='open';
 CREATE INDEX IF NOT EXISTS supervisor_incidents_recent ON supervisor_incidents(first_seen_at);
+-- A rebuild / restart permission, written down instead of living in a chat message: who asked,
+-- for what, against which commit, until when, and who decided.
+CREATE TABLE IF NOT EXISTS supervisor_approvals (
+  id TEXT PRIMARY KEY,
+  supervisor_id TEXT NOT NULL,
+  requester TEXT NOT NULL,
+  -- rebuild | restart | other: what the approval is *for*. A lease can only be taken on the
+  -- resource its approval names.
+  purpose TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  -- The commit the approval was granted against. A different tree is a different decision.
+  target_commit TEXT,
+  -- pending | approved | denied | revoked | consumed
+  status TEXT NOT NULL DEFAULT 'pending',
+  decided_by TEXT,
+  decided_at TEXT,
+  reason TEXT,
+  expires_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS supervisor_approvals_open ON supervisor_approvals(status, created_at);
+-- One row per resource, ever. Holding it is `released_at IS NULL AND expires_at > now`, so a
+-- holder that died releases by expiry and nothing stays locked forever. `fence` only ever goes
+-- up: an old holder that wakes after its lease expired presents a stale fence and is refused,
+-- even though its approval may still read "approved".
+CREATE TABLE IF NOT EXISTS supervisor_leases (
+  resource TEXT PRIMARY KEY,
+  owner TEXT,
+  approval_id TEXT,
+  fence INTEGER NOT NULL DEFAULT 0,
+  target_commit TEXT,
+  acquired_at TEXT,
+  expires_at TEXT,
+  released_at TEXT,
+  detail_json TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS supervisor_notes (
   id TEXT PRIMARY KEY,
   supervisor_id TEXT NOT NULL,
@@ -803,6 +840,24 @@ pub async fn mark_delivered(pool: &SqlitePool, id: &str, turn_id: &str, delivery
     Ok(())
 }
 
+/// Hold a queued assignment until `until` **without** spending an attempt.
+///
+/// Waiting out a maintenance window is not a failed delivery: counting it would push the
+/// assignment up the backoff ladder, and enough windows would eventually retire work that was
+/// never actually tried.
+pub async fn hold(pool: &SqlitePool, id: &str, until: &str, why: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE supervisor_assignments SET next_attempt_at=?, error=?, updated_at=? WHERE id=? AND status='queued'",
+    )
+    .bind(until)
+    .bind(why)
+    .bind(crate::db::now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn defer(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str) -> Result<()> {
     sqlx::query(
         "UPDATE supervisor_assignments SET attempts=attempts+1, next_attempt_at=?, error=?, updated_at=?
@@ -1223,6 +1278,275 @@ pub async fn exhausted_inbox(pool: &SqlitePool, max_attempts: i64) -> Result<Vec
     .bind(max_attempts)
     .fetch_all(pool)
     .await?)
+}
+
+// ---------------------------------------------------------------- approvals & leases
+
+/// Mirrors the row; several fields are read straight out of `to_json`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, FromRow)]
+pub struct Approval {
+    pub id: String,
+    pub supervisor_id: String,
+    pub requester: String,
+    pub purpose: String,
+    pub scope: String,
+    pub target_commit: Option<String>,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub reason: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl Approval {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "requester": self.requester,
+            "purpose": self.purpose,
+            "scope": self.scope,
+            "target_commit": self.target_commit,
+            "status": self.status,
+            "decided_by": self.decided_by,
+            "decided_at": self.decided_at,
+            "reason": self.reason,
+            "expires_at": self.expires_at,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        })
+    }
+
+    /// Why this approval cannot be used right now, if it cannot. `None` = usable.
+    ///
+    /// `now` and `commit` are passed in so this is a pure decision the tests can drive.
+    pub fn refusal(&self, now: &str, resource: &str, commit: Option<&str>) -> Option<&'static str> {
+        if self.status != "approved" {
+            return Some(match self.status.as_str() {
+                "pending" => "approval_not_decided",
+                "denied" => "approval_denied",
+                "revoked" => "approval_revoked",
+                "consumed" => "approval_already_used",
+                _ => "approval_not_usable",
+            });
+        }
+        if self.expires_at.as_deref().is_some_and(|t| t <= now) {
+            return Some("approval_expired");
+        }
+        if self.purpose != resource {
+            return Some("approval_purpose_mismatch");
+        }
+        // An approval is for a tree, not for a permission in general. Rebuilding a different
+        // commit under yesterday's yes is exactly the drift this table exists to stop.
+        match (self.target_commit.as_deref(), commit) {
+            (Some(a), Some(b)) if a != b => Some("approval_commit_mismatch"),
+            (Some(_), None) => Some("approval_commit_required"),
+            _ => None,
+        }
+    }
+}
+
+pub async fn create_approval(
+    pool: &SqlitePool,
+    requester: &str,
+    purpose: &str,
+    scope: &str,
+    target_commit: Option<&str>,
+    expires_at: Option<&str>,
+) -> Result<Approval> {
+    let id = crate::db::ulid();
+    let now = crate::db::now();
+    sqlx::query(
+        "INSERT INTO supervisor_approvals
+           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(SUPERVISOR_ID)
+    .bind(requester)
+    .bind(purpose)
+    .bind(scope)
+    .bind(target_commit)
+    .bind(expires_at)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(approval(pool, &id).await?.expect("just inserted"))
+}
+
+pub async fn approval(pool: &SqlitePool, id: &str) -> Result<Option<Approval>> {
+    Ok(sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn approvals(pool: &SqlitePool, limit: i64) -> Result<Vec<Approval>> {
+    Ok(sqlx::query_as::<_, Approval>(
+        "SELECT * FROM supervisor_approvals WHERE supervisor_id=? ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Approve, deny, revoke or consume. Only a `pending` approval can be approved or denied; a
+/// revoke applies to one that was already approved, and takes effect for every later acquire.
+pub async fn decide_approval(
+    pool: &SqlitePool,
+    id: &str,
+    status: &str,
+    actor: &str,
+    reason: Option<&str>,
+    expires_at: Option<&str>,
+) -> Result<Option<Approval>> {
+    let now = crate::db::now();
+    sqlx::query(
+        "UPDATE supervisor_approvals
+            SET status=?, decided_by=?, decided_at=?, reason=COALESCE(?, reason),
+                expires_at=COALESCE(?, expires_at), updated_at=?
+          WHERE id=?",
+    )
+    .bind(status)
+    .bind(actor)
+    .bind(&now)
+    .bind(reason)
+    .bind(expires_at)
+    .bind(&now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    approval(pool, id).await
+}
+
+/// Mirrors the row.
+#[allow(dead_code)]
+#[derive(Debug, Clone, FromRow)]
+pub struct Lease {
+    pub resource: String,
+    pub owner: Option<String>,
+    pub approval_id: Option<String>,
+    pub fence: i64,
+    pub target_commit: Option<String>,
+    pub acquired_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub released_at: Option<String>,
+    pub detail_json: String,
+}
+
+impl Lease {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "resource": self.resource,
+            "owner": self.owner,
+            "approval_id": self.approval_id,
+            "fence": self.fence,
+            "target_commit": self.target_commit,
+            "acquired_at": self.acquired_at,
+            "expires_at": self.expires_at,
+            "released_at": self.released_at,
+            "held": self.held_at(&crate::db::now()),
+        })
+    }
+
+    pub fn held_at(&self, now: &str) -> bool {
+        self.released_at.is_none() && self.expires_at.as_deref().is_some_and(|t| t > now)
+    }
+}
+
+pub async fn lease(pool: &SqlitePool, resource: &str) -> Result<Option<Lease>> {
+    Ok(sqlx::query_as::<_, Lease>("SELECT * FROM supervisor_leases WHERE resource=?")
+        .bind(resource)
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
+    Ok(sqlx::query_as::<_, Lease>("SELECT * FROM supervisor_leases ORDER BY resource").fetch_all(pool).await?)
+}
+
+/// Take the lease on `resource`, if nobody holds it.
+///
+/// One conditional UPDATE does the whole thing, so two callers racing for the same window
+/// cannot both win: the loser's `rows_affected` is 0. `fence` is bumped on every successful
+/// acquire and every operation afterwards has to present the current one — that is what stops a
+/// holder that stalled past its expiry from carrying on as if it still had the window.
+pub async fn acquire_lease(
+    pool: &SqlitePool,
+    resource: &str,
+    owner: &str,
+    approval_id: Option<&str>,
+    target_commit: Option<&str>,
+    expires_at: &str,
+    detail: &Value,
+) -> Result<Option<Lease>> {
+    let now = crate::db::now();
+    sqlx::query("INSERT OR IGNORE INTO supervisor_leases (resource, fence, released_at) VALUES (?, 0, ?)")
+        .bind(resource)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    let taken = sqlx::query(
+        "UPDATE supervisor_leases
+            SET owner=?, approval_id=?, target_commit=?, fence=fence+1, acquired_at=?, expires_at=?,
+                released_at=NULL, detail_json=?
+          WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR expires_at <= ?)",
+    )
+    .bind(owner)
+    .bind(approval_id)
+    .bind(target_commit)
+    .bind(&now)
+    .bind(expires_at)
+    .bind(detail.to_string())
+    .bind(resource)
+    .bind(&now)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+    if !taken {
+        return Ok(None);
+    }
+    lease(pool, resource).await
+}
+
+/// Extend a lease you still hold. A stale fence, a different owner or an expired lease all fail
+/// — the holder has to find out it lost the window rather than assume it still has it.
+pub async fn renew_lease(pool: &SqlitePool, resource: &str, owner: &str, fence: i64, expires_at: &str) -> Result<bool> {
+    let now = crate::db::now();
+    Ok(sqlx::query(
+        "UPDATE supervisor_leases SET expires_at=?
+          WHERE resource=? AND owner=? AND fence=? AND released_at IS NULL AND expires_at > ?",
+    )
+    .bind(expires_at)
+    .bind(resource)
+    .bind(owner)
+    .bind(fence)
+    .bind(&now)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0)
+}
+
+/// Give the window back. Deliberately *not* gated on `expires_at`: a holder whose lease has
+/// just expired should still be able to say it is finished.
+pub async fn release_lease(pool: &SqlitePool, resource: &str, owner: &str, fence: i64) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE supervisor_leases SET released_at=? WHERE resource=? AND owner=? AND fence=? AND released_at IS NULL",
+    )
+    .bind(crate::db::now())
+    .bind(resource)
+    .bind(owner)
+    .bind(fence)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0)
 }
 
 // ---------------------------------------------------------------- incidents
@@ -1838,6 +2162,77 @@ mod tests {
         assert_eq!(a.to_json()["ownership"][1], "scripts/agm.py");
         let b = insert_assignment(&p, None, "bot2", "req-p", "x", &[], None).await.unwrap();
         assert!(b.ownership().is_empty());
+    }
+
+    /// Two executors racing for the same rebuild window: exactly one wins. This is the whole
+    /// reason the lease exists — the old flow let both read "nothing is working" and proceed.
+    #[tokio::test]
+    async fn two_executors_race_for_one_window_and_only_one_gets_it() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let soon = "2099-01-01T00:00:00Z";
+        let first = acquire_lease(&p, "rebuild", "bot-a", Some("ap1"), Some("abc"), soon, &json!({})).await.unwrap();
+        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, &json!({})).await.unwrap();
+        let first = first.expect("first acquire wins");
+        assert!(second.is_none(), "the second executor is refused while the window is held");
+        assert_eq!(first.owner.as_deref(), Some("bot-a"));
+        assert!(first.held_at(&crate::db::now()));
+
+        // The holder can renew; nobody else can, and neither can a stale fence.
+        assert!(renew_lease(&p, "rebuild", "bot-a", first.fence, soon).await.unwrap());
+        assert!(!renew_lease(&p, "rebuild", "bot-b", first.fence, soon).await.unwrap(), "not your lease");
+        assert!(!renew_lease(&p, "rebuild", "bot-a", first.fence - 1, soon).await.unwrap(), "stale fence");
+
+        // Released: the next executor gets it, with a higher fence.
+        assert!(release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap());
+        assert!(!release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap(), "releasing twice is a no-op");
+        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, &json!({}))
+            .await
+            .unwrap()
+            .expect("free again");
+        assert!(second.fence > first.fence, "the fence only goes up");
+    }
+
+    /// A holder that died does not lock the window forever, and cannot carry on afterwards: its
+    /// fence is stale the moment somebody else takes over.
+    #[tokio::test]
+    async fn an_expired_lease_is_taken_over_and_the_old_token_stops_working() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let dead = acquire_lease(&p, "restart", "bot-a", None, None, "2000-01-01T00:00:00Z", &json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!dead.held_at(&crate::db::now()), "already expired");
+        let next = acquire_lease(&p, "restart", "bot-b", None, None, "2099-01-01T00:00:00Z", &json!({}))
+            .await
+            .unwrap()
+            .expect("an expired lease does not block the next window");
+        assert_eq!(next.owner.as_deref(), Some("bot-b"));
+        assert!(
+            !renew_lease(&p, "restart", "bot-a", dead.fence, "2099-01-01T00:00:00Z").await.unwrap(),
+            "the old holder's token is worthless even though its approval may still say approved"
+        );
+        assert!(!release_lease(&p, "restart", "bot-a", dead.fence).await.unwrap());
+    }
+
+    /// The approval is a record, and revoking it takes effect for the next acquire even though
+    /// the words "AGM said yes" were true yesterday.
+    #[tokio::test]
+    async fn an_approval_is_decided_once_and_revocable() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = create_approval(&p, "bot-a", "rebuild", "daemon/", Some("abc123"), Some("2099-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(a.status, "pending");
+        assert_eq!(a.refusal("2026-09-12T12:00:00Z", "rebuild", Some("abc123")), Some("approval_not_decided"));
+        let a = decide_approval(&p, &a.id, "approved", "AGM", Some("沒有人在跑"), None).await.unwrap().unwrap();
+        assert_eq!(a.refusal("2026-09-12T12:00:00Z", "rebuild", Some("abc123")), None);
+        assert_eq!(a.decided_by.as_deref(), Some("AGM"));
+        let a = decide_approval(&p, &a.id, "revoked", "AGM", Some("使用者開始新回合"), None).await.unwrap().unwrap();
+        assert_eq!(a.refusal("2026-09-12T12:00:00Z", "rebuild", Some("abc123")), Some("approval_revoked"));
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

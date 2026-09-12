@@ -488,6 +488,56 @@ class ReviewCommandTest(CliCase):
         self.assertEqual(code, 2)
 
 
+class ApprovalLeaseCommandTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        FakeDaemon.routes["POST /api/supervisor/approvals"] = (200, {"id": "ap-1", "status": "pending"})
+        FakeDaemon.routes["GET /api/supervisor/approvals"] = (200, {"approvals": [{"id": "ap-1", "status": "approved"}]})
+        FakeDaemon.routes["POST /api/supervisor/approvals/ap-1/decide"] = (200, {"id": "ap-1", "status": "approved"})
+        FakeDaemon.routes["GET /api/supervisor/maintenance/safety"] = (200, {"safe": True, "working": []})
+        FakeDaemon.routes["POST /api/supervisor/leases/rebuild/acquire"] = (200, {"lease": {"fence": 3}})
+        FakeDaemon.routes["POST /api/supervisor/leases/rebuild/release"] = (200, {"released": True})
+
+    def _last_body(self):
+        return [r for r in FakeDaemon.seen if r["method"] == "POST"][-1]["body"]
+
+    def test_request_records_who_what_and_which_commit(self):
+        self.assertEqual(self.ok("approval", "request", "--requester", "bot-a", "--purpose", "rebuild",
+                                 "--scope", "daemon/", "--commit", "abc123", "--expires-in", "600")["id"], "ap-1")
+        body = self._last_body()
+        self.assertEqual(
+            (body["requester"], body["purpose"], body["target_commit"], body["expires_in_secs"]),
+            ("bot-a", "rebuild", "abc123", 600),
+        )
+
+    def test_request_needs_its_fields(self):
+        self.assertEqual(self.bad("approval", "request", "--requester", "bot-a")["error"], "bad_args")
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "缺欄位時不送出請求")
+
+    def test_decide_carries_the_actor(self):
+        self.ok("approval", "decide", "ap-1", "--decision", "approve", "--reason", "沒有人在跑")
+        body = self._last_body()
+        self.assertEqual((body["decision"], body["actor"], body["reason"]), ("approve", "AGM", "沒有人在跑"))
+
+    def test_acquire_needs_an_approval_and_defaults_to_requiring_idle(self):
+        """租約不是「我覺得可以」：沒有核准 id 就不該送出。"""
+        self.assertEqual(self.bad("lease", "acquire", "rebuild")["error"], "bad_args")
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1", "--commit", "abc123", "--owner", "bot-a")
+        body = self._last_body()
+        self.assertEqual((body["approval_id"], body["commit"], body["owner"]), ("ap-1", "abc123", "bot-a"))
+        self.assertIs(body["require_idle"], True)
+
+    def test_renew_and_release_need_the_fence(self):
+        """fence 是防舊持有人的那道鎖，缺了就不要送。"""
+        self.assertEqual(self.bad("lease", "release", "rebuild", "--owner", "bot-a")["error"], "bad_args")
+        self.ok("lease", "release", "rebuild", "--owner", "bot-a", "--fence", "3")
+        self.assertEqual(self._last_body()["fence"], 3)
+
+    def test_safety_is_a_plain_read(self):
+        self.assertIs(self.ok("lease", "safety")["safe"], True)
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "等窗口不會改到任何狀態")
+
+
 class IncidentsCommandTest(CliCase):
     def test_lists_open_incidents(self):
         FakeDaemon.routes["GET /api/supervisor/incidents"] = (

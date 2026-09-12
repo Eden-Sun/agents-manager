@@ -1580,6 +1580,30 @@ incident 以**資源**為單位持久化（`supervisor_incidents`，`(kind, reso
 - 全部走既有的 30 秒 cheap probe，不因為要判斷而額外問模型或殺程序。
 
 
+### 18.10 重建／重啟的核准與執行租約（2026-09-12）
+
+原本「AGM 說可以」只存在於對話裡，安全檢查是一次快照：`daemon-update-kick.sh` 讀一次「有沒有人在 working」，
+然後花好幾分鐘建置與替換 binary，期間隨時可能有人開始工作；兩個申請也可能同時被允許「等空檔執行」。
+
+現在窗口分成兩個明確的階段：
+
+1. **等安全窗口**：`GET /api/supervisor/maintenance/safety`，唯讀，只描述「現在」。
+2. **取得排他窗口**：`POST /api/supervisor/leases/{resource}/acquire`，在同一個 supervisor lock 裡重驗核准與
+   idle，再以單一條件式 UPDATE 拿走租約。搶同一個窗口只有一個會成功。
+
+- 核准是紀錄不是句子：申請者、purpose、範圍、`target_commit`、有效期、誰決定的、理由。acquire 時逐項核對，
+  purpose 不符、過期、被撤銷、commit 不同都會被拒。release 時把核准標成 `consumed`——一次核准一個窗口。
+- 租約有 `fence`，只增不減。持有人過期後被別人接手，舊 fence 的 renew／release 一律失敗，所以「昨天核准過」
+  不會變成現在還能動手。租約到期即自動釋放，crash 不會永久鎖死。
+- 拿著 `restart` 租約期間，assignment 派送會 hold（留在 `queued`，不丟工作也不算重試次數）——這正是快照做不到的
+  那一半：不會一邊確認空閒、一邊又派新工作進去。
+- assignment 可帶 `ownership`（檔案／模組）。重疊時 `POST /assignments` 回 `ownership_conflicts`，**只回報不阻擋**：
+  daemon 無法判斷兩個模組是不是真的獨立，這是交給 AGM 協調的資料，不是鎖。
+- 運維腳本進 repo（`scripts/ops/`），改用上面的流程，並附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，
+  假 CLI ＋ 暫存 repo，不碰正式環境）。正式安裝由 AGM 決定時機。
+- **邊界（明講）**：租約只約束走 API 與這些腳本的路徑。任何一個 shell 仍可直接 kill daemon 或自己跑
+  `cargo build --release`，daemon 這裡沒有 OS 層的鎖可以強制。租約讓「問過 AGM」在執行期間持續成立，不是取代它。
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。

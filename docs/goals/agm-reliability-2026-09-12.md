@@ -53,12 +53,12 @@ Ownership：child 負責 daemon/src/supervisor/、scripts/agm.py 與其測試、
 
 ## 4. 結構化核准與執行租約（P2）
 
-- [ ] approval 紀錄 requester、目的／範圍、目標 commit、核准來源、有效期、狀態；AGM 直接核駁，不新增使用者審批。
-- [ ] rebuild／restart lease 原子 acquire、renew、release、expiry，含 owner 與 fencing generation，避免舊持有人在 lease 過期後仍能依舊授權執行受管理操作。
-- [ ] 正式重啟前重核 working／in-flight 及 commit。協調「等待安全窗口」與「取得排他窗口」兩個階段，避免一邊檢查空閒另一邊又派新工作。合法 blocked pane 不關閉；AGM 本人的互動保護維持既有規範。
-- [ ] 更新必要 runtime 運維腳本與規範讓所有既有部署路徑使用共同 lease；不能只提供沒人用的 API。腳本來源納入 repo，先在隔離環境測試，正式安裝由 AGM 核准。明列任意外部 shell 無法被 API 鎖強制約束的邊界。
-- [ ] assignment 可記錄檔案／模組 ownership，至少能報衝突並交 AGM 協調；不擅自為別人改檔。
-- [ ] 驗收：兩個執行者競爭同資源只有一個成功；過期／撤銷／不同 commit 被拒；舊 lease token 無效；crash 後可恢復，不永久鎖死。
+- [x] approval 紀錄 requester、目的／範圍、目標 commit、核准來源、有效期、狀態；AGM 直接核駁，不新增使用者審批。
+- [x] rebuild／restart lease 原子 acquire、renew、release、expiry，含 owner 與 fencing generation，避免舊持有人在 lease 過期後仍能依舊授權執行受管理操作。
+- [x] 正式重啟前重核 working／in-flight 及 commit。協調「等待安全窗口」與「取得排他窗口」兩個階段，避免一邊檢查空閒另一邊又派新工作。合法 blocked pane 不關閉；AGM 本人的互動保護維持既有規範。
+- [x] 更新必要 runtime 運維腳本與規範讓所有既有部署路徑使用共同 lease；不能只提供沒人用的 API。腳本來源納入 repo，先在隔離環境測試，正式安裝由 AGM 核准。明列任意外部 shell 無法被 API 鎖強制約束的邊界。
+- [x] assignment 可記錄檔案／模組 ownership，至少能報衝突並交 AGM 協調；不擅自為別人改檔。
+- [x] 驗收：兩個執行者競爭同資源只有一個成功；過期／撤銷／不同 commit 被拒；舊 lease token 無效；crash 後可恢復，不永久鎖死。
 
 ## 5. 人設版本與建置依賴（P2）
 
