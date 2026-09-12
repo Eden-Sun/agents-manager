@@ -1,0 +1,9 @@
+╭────────────────────────────────────────────╮
+│ Select login method                        │
+│                                            │
+│ 1. Claude account with subscription       │
+│ 2. Anthropic API key                       │
+│ 3. Other provider                          │
+╰────────────────────────────────────────────╯
+❯
+

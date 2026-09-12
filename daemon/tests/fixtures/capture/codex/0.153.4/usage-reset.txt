@@ -1,0 +1,9 @@
+╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                  │
+╰────────────────────────────────────────────╯
+
+Tip: Use /init to create an AGENTS.md.
+
+• You have 1 usage limit reset available. Run /usage to use one.
+›
+

@@ -1,0 +1,7 @@
+still_busy = true
+awaits_input = false
+activity = "Baking…"
+noise_lines = [2, 3, 4]
+source = "synthetic"
+note = "Reproduces the ✢ Baking… spinner from af9f5ca, with the update and Tip chrome seen on the same pane."
+
