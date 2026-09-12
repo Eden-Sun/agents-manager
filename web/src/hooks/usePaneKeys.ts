@@ -63,8 +63,12 @@ export function usePaneKeys(botId: string, onSent?: () => void) {
   const pending = useRef<string[]>([])
   const sending = useRef(false)
   const onSentRef = useRef(onSent)
+  // 迴圈每一輪都讀最新的 botId：`pending`／`sending` 兩個 ref 跨 botId 共用，換 bot 時上一顆的
+  // `while` 可能還在等一次 POST /keys 回來，接著按的鍵不能用舊閉包的 botId 送到上一顆 bot 的 pane。
+  const botIdRef = useRef(botId)
   useEffect(() => {
     onSentRef.current = onSent
+    botIdRef.current = botId
   })
 
   // 換 bot 時把還沒送出去的鍵丟掉：那些是給上一個 bot 的答案。
@@ -82,7 +86,7 @@ export function usePaneKeys(botId: string, onSent?: () => void) {
         sending.current = true
         try {
           while (pending.current.length) {
-            await sendKeys(botId, pending.current.splice(0, pending.current.length))
+            await sendKeys(botIdRef.current, pending.current.splice(0, pending.current.length))
           }
         } finally {
           sending.current = false
@@ -90,6 +94,6 @@ export function usePaneKeys(botId: string, onSent?: () => void) {
         }
       })()
     },
-    [botId, sendKeys],
+    [sendKeys],
   )
 }
