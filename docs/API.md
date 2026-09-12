@@ -1161,7 +1161,8 @@ bot 不存在、已刪除或 token 不符 → `401`。
 200 {}
 ```
 
-流程：有 active Run 先 stop（ctrl+c ×2、逾時關 pane；遠端 host 亦同）→ 從 config.toml 移除 →
+流程：有 active Run 先 stop（ctrl+c ×2、逾時關 pane；遠端 host 亦同；**host 連不上而 stop 根本送不出去時，
+run 直接標 `exited`、照常刪**——不然那個 run 會永遠 `running`，沒有任何對帳會再看它，2026-09-12）→ 從 config.toml 移除 →
 DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id 之後仍查得到歷史）→
 刪除該 bot 的 hook 材料目錄 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，
 失敗只寫 log、不影響回應）。
