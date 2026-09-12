@@ -1,6 +1,7 @@
 # Agents Manager 規格書（v4.3）
 
 > 修訂紀錄
+> - v4.4（2026-09-10）：身份登入探測 fail loud：`hosts[].identities.<name>` 的 `logged_in: null` 帶 `reason`；新增主機層身份登入端點，使用臨時 host-shell pane 帶 identity env 執行 kind 對應登入指令，完成後重新探測並清理 pane。
 > - v4.2（2026-09-07）：新增 §17.1「預設提示從哪來」：`GET /api/models` 新增 `identity=` 參數，claude 的 `default_effort` 改讀那個身份的 `settings.json`（`effortLevel` 全域 + `modelSettings.<真實 id>.effortLevel` per-model 覆寫，以 alias 子字串比對），兩者都沒有時落回 claude 官方文件記載、並經真機驗證的內建預設 `high`（初版誤回 `null`，已修正）；UI 的「預設」按鈕與 tooltip 因此顯示真正會生效的強度而不是空話；模型快取 key 多一段身份。
 > - v4.1（2026-09-06）：新增 §17「claude 的 `--effort`」：claude 2.1+ 的五級強度（low…max）納入 `bot.effort`，啟動注入 `--effort`，`GET /api/models` 的 claude 清單帶同一組 `efforts`；執行中改強度走 TUI 的 `/effort <level>` 當場套用（帶參數才行，不帶參數是拉桿；claude 會順手存成該帳號的預設）。
 > - v4.1（2026-09-06）：新增 §16「從 shell 認出來的身份 cc0～cc6」：daemon 在工具偵測時順便讀該主機登入 shell 的 `ccN` alias（`~/.zshrc` 為退路），只取 `CLAUDE_CONFIG_DIR`、不取旗標，結果放在 `hosts[].shell_identities` 與 `hosts[].identities.<name>.source/config_dir`，**不寫回 config.toml**；bot 啟動、identity 驗證、額度探測與 UI 選單一律改用 `identities_for_host(host)`（config 優先）；額度探測跳過「statusLine 剛更新過」與「這台沒登入」的身份。
@@ -1144,6 +1145,17 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
   （已用**那台**的 `$HOME` 展開，顯示用）。
 - 合併規則只有一條，`tools::identities_for_host()`：**config.toml 的 `[[identities]]` 先，同名的
   shell 身份讓位**。手寫的永遠贏得過猜出來的。
+
+### 16.3a 主機層一鍵登入
+
+身份列可呼叫 `POST /api/hosts/{name}/identities/{identity}/login`。daemon 在該主機 manager session 開一個
+臨時 host-shell pane，將 identity env 以該主機 `$HOME` 展開後，執行：`claude /login`、`codex login` 或
+`grok login`。pane 的 terminal snapshot 是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log、
+WebSocket 事件或 team timeline。
+
+登入 CLI 結束時（成功或失敗）daemon 重新做該身份的登入探測，再關閉臨時 pane；若建立或登入失敗也走同一條
+清理路徑。若無法判定，`logged_in` 必須是 `null`，並以 `reason` 說明 CLI 缺失、指令失敗或輸出解析失敗，
+UI 顯示「未知」而不是已登入。
 
 ### 16.3 誰在用
 | 用途 | 之前 | 現在 |

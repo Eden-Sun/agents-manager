@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { MOCK_MODE } from './api'
-import { useFocusTrap } from './hooks/useFocusTrap'
+import { useDialogFocus } from './hooks/useDialogFocus'
 import { useViewportPin } from './hooks/useViewportPin'
 import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { ChatPanel } from './components/ChatPanel'
@@ -216,7 +216,7 @@ export default function App() {
 
   // Over the main panel with a scrim, the drawer is modal: keep Tab inside it and hand focus
   // back to the header button that opened it.
-  useFocusTrap(drawerOpen, sidebarRef)
+  useDialogFocus(drawerOpen, sidebarRef)
 
   if (!ready) {
     return (

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import type { Bot, GroupMessage, Issue, TeamEvent, TeamIssue, TeamTask, TeamTaskState } from '../api/types'
@@ -16,17 +16,16 @@ import {
 } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
-import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
+import { useComposerFocus } from '../hooks/useComposerFocus'
+import { useScrollTail } from '../hooks/useScrollTail'
 import {
   botLamp,
   composerState,
-  liveReplyOf,
   teamMemberBots,
-  teamShortName,
   teamDisplayName,
   useStore,
 } from '../store/store'
-import { Bubble, EmptyState, KIND_TITLE, LiveBubble } from './ChatPanel'
+import { Bubble, EmptyState, KIND_TITLE, LiveReplyBubble } from './ChatPanel'
 import { ConfirmDialog } from './ConfirmDialog'
 import { IdentityBadge } from './IdentitiesPanel'
 import { CopyChip } from './CopyChip'
@@ -659,11 +658,40 @@ function TaskList({ teamId }: { teamId: string }) {
 // ---------------------------------------------------------------- timeline
 
 type Row =
-  | { key: string; sort: string; kind: 'msg'; msg: GroupMessage }
+  | {
+      key: string
+      sort: string
+      kind: 'msg'
+      msg: GroupMessage
+      parsed: {
+        stripped: ReturnType<typeof splitProtocolFooter>
+        split: ReturnType<typeof splitAmTeam>
+        shown: GroupMessage
+      }
+    }
   | { key: string; sort: string; kind: 'event'; event: TeamEvent }
 
 /** 時間軸左邊那顆小標：事件種類的中文（`note` 這種 daemon 用詞不進畫面）。 */
 const EVENT_KIND_LABEL: Record<string, string> = { note: '系統', phase: '階段', merge: '合併' }
+
+function TeamLiveBubbles({ teamId }: { teamId: string }) {
+  const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
+  const typing = useStore(
+    useShallow((s) =>
+      members.filter((b) => s.runs[b.id]?.agent_status === 'working' || composerState(s, b.id).inFlightTurnId !== null),
+    ),
+  )
+  // 名字用整隊一起算的 display name（2026-09-11 main：同前綴的成員要分得開）。
+  const names = members.map((b) => b.name)
+  return typing.map((t) => (
+    <LiveReplyBubble
+      key={`typing-${t.id}`}
+      botId={t.id}
+      kind={t.kind}
+      from={`${teamDisplayName(t.name, names)} · ${KIND_TITLE[t.kind]}`}
+    />
+  ))
+}
 
 function Timeline({ teamId }: { teamId: string }) {
   // The rows come from the project's merged timeline (SPEC-team §11.3). Select the *stable*
@@ -676,23 +704,26 @@ function Timeline({ teamId }: { teamId: string }) {
   const members = useStore(useShallow((s) => teamMemberBots(s, teamId)))
   const kinds = useMemo(() => Object.fromEntries(members.map((b) => [b.id, b.kind])), [members])
   const shortNames = useMemo(() => { const all = members.map((b) => b.name); return Object.fromEntries(members.map((b) => [b.id, teamDisplayName(b.name, all)])) }, [members])
-  // 還在回答的成員：一人一顆打字氣泡（沿用單一 bot / 群組的同一套 live 狀態）。
-  const typing = useStore(
-    useShallow((s) =>
-      members.filter((b) => s.runs[b.id]?.agent_status === 'working' || composerState(s, b.id).inFlightTurnId !== null),
-    ),
-  )
-  const liveText = useStore(useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveText(liveReplyOf(s, b.id)?.text)]))))
-  const liveActivity = useStore(
-    useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, cleanLiveActivity(liveReplyOf(s, b.id)?.activity)]))),
-  )
-  const liveAlert = useStore(useShallow((s) => Object.fromEntries(typing.map((b) => [b.id, liveReplyOf(s, b.id)?.alert ?? null]))))
-  const ref = useRef<HTMLDivElement>(null)
-  const stick = useRef(true)
+  // Parsing depends on message identity and content, not on live turn-progress state.
+  const parsedMessages = useMemo(() => {
+    const parsed = new Map<
+      string,
+      { stripped: ReturnType<typeof splitProtocolFooter>; split: ReturnType<typeof splitAmTeam>; shown: GroupMessage }
+    >()
+    for (const m of messages ?? []) {
+      const stripped = splitProtocolFooter(m.content)
+      const split = splitAmTeam(stripped.text)
+      parsed.set(m.id, { stripped, split, shown: split.blocks.length || stripped.footer ? { ...m, content: split.text } : m })
+    }
+    return parsed
+  }, [messages])
 
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = []
-    for (const m of messages ?? []) out.push({ key: `m:${m.id}`, sort: m.created_at || m.id, kind: 'msg', msg: m })
+    for (const m of messages ?? []) {
+      const parsed = parsedMessages.get(m.id)
+      if (parsed) out.push({ key: `m:${m.id}`, sort: m.created_at || m.id, kind: 'msg', msg: m, parsed })
+    }
     for (const e of events ?? []) {
       // relay / user 事件本身就是時間軸上的訊息，不重複畫一次。
       if (e.kind === 'relay' || e.kind === 'user') continue
@@ -700,21 +731,15 @@ function Timeline({ teamId }: { teamId: string }) {
       out.push({ key: `e:${e.id}`, sort: e.created_at || e.id, kind: 'event', event: e })
     }
     return out.sort((a, b) => a.sort.localeCompare(b.sort) || a.key.localeCompare(b.key))
-  }, [messages, events])
+  }, [messages, events, parsedMessages])
 
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [rows, typing.length, liveText, liveActivity])
+  const { ref: timelineRef, onScroll: handleTimelineScroll } = useScrollTail([rows])
 
   return (
     <div
       className="msg-list group team-timeline"
-      ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-      }}
+      ref={timelineRef}
+      onScroll={handleTimelineScroll}
     >
       {rows.length === 0 ? (
         <EmptyState loading={messages === null} title={messages === null ? undefined : '等待第一則轉送'} icon={messages === null ? undefined : '⚙'}>
@@ -734,41 +759,40 @@ function Timeline({ teamId }: { teamId: string }) {
             )
           }
           const m = r.msg
-          const stripped = splitProtocolFooter(m.content)
-          const { text, blocks } = splitAmTeam(stripped.text)
-          const shown = blocks.length || stripped.footer ? { ...m, content: text } : m
+          const { stripped, split } = r.parsed
+          const { blocks } = split
+          const shown = r.parsed.shown
           const to = shortNames[m.bot_id] ?? m.bot_name
           const from =
-            m.role === 'user' ? (
-              m.relay_from ? (
-                // `relay_from` 對得到成員 = bot→bot 的轉送；對不到（daemon 自己發的首則指派 /
-                // 合併通知 / 修復提示）就標成 daemon。
-                <span
-                  className={`msg-targets relay${shortNames[m.relay_from] ? '' : ' daemon'}`}
-                  title="daemon 代為轉送的訊息（不是你送的）"
-                >
-                  {shortNames[m.relay_from] ?? 'daemon'} → {to}
-                </span>
-              ) : (
-                <span className="msg-targets" title="你直接對這個成員說的話">
-                  你 → {to}
-                </span>
-              )
-            ) : m.role === 'assistant' ? (
-              <span className="msg-speaker">
-                {to}
-                {kinds[m.bot_id] ? ` · ${KIND_TITLE[kinds[m.bot_id]]}` : ''}
-              </span>
-            ) : undefined
+            m.role === 'user'
+              ? m.relay_from
+                ? `${shortNames[m.relay_from] ?? 'daemon'} → ${to}`
+                : `你 → ${to}`
+              : m.role === 'assistant'
+                ? `${to}${kinds[m.bot_id] ? ` · ${KIND_TITLE[kinds[m.bot_id]]}` : ''}`
+                : undefined
+          const fromClassName =
+            m.role === 'assistant' ? 'msg-speaker' : m.relay_from ? `msg-targets relay${shortNames[m.relay_from] ? '' : ' daemon'}` : 'msg-targets'
+          const fromTitle = m.relay_from ? 'daemon 代為轉送的訊息（不是你送的）' : m.role === 'user' ? '你直接對這個成員說的話' : undefined
           return (
             // 使用者／轉送的訊息靠右，所以它底下的 chip 也要靠右，不然會浮在對面。
             <div key={r.key} className={`team-msg-row${m.role === 'user' ? ' from-user' : ''}`}>
               {/* 拿掉協定提醒後整則就空了（daemon 只是來提醒規矩的）：不畫空氣泡，
                   只留發話標記與那顆折起來的 chip。 */}
               {shown.content.trim() || blocks.length ? (
-                <Bubble msg={shown} kind={m.role === 'assistant' ? kinds[m.bot_id] : undefined} from={from} />
+                <Bubble
+                  msg={shown}
+                  kind={m.role === 'assistant' ? kinds[m.bot_id] : undefined}
+                  from={from}
+                  fromClassName={fromClassName}
+                  fromTitle={fromTitle}
+                />
               ) : (
-                <div className="team-msg-bare">{from}</div>
+                <div className="team-msg-bare">
+                  <span className={fromClassName} title={fromTitle}>
+                    {from}
+                  </span>
+                </div>
               )}
               {blocks.length || stripped.footer ? (
                 <div className="am-chips">
@@ -782,20 +806,7 @@ function Timeline({ teamId }: { teamId: string }) {
           )
         })
       )}
-      {typing.map((t) => (
-        <LiveBubble
-          key={`typing-${t.id}`}
-          text={liveText[t.id] ?? null}
-          activity={liveActivity[t.id] ?? null}
-          alert={liveAlert[t.id] ?? null}
-          kind={t.kind}
-          from={
-            <span className="msg-speaker">
-              {shortNames[t.id] ?? teamShortName(t.name)} · {KIND_TITLE[t.kind]}
-            </span>
-          }
-        />
-      ))}
+      <TeamLiveBubbles teamId={teamId} />
     </div>
   )
 }
@@ -830,16 +841,7 @@ function TeamComposer({ teamId }: { teamId: string }) {
 
   // Keep the same draft-selection behavior as bot and group composers. Do not focus here:
   // opening a Team view should not steal focus from another control.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const currentText = useStore.getState().drafts[draftKey] ?? ''
-    const saved = useStore.getState().draftCursors[draftKey]
-    const max = currentText.length
-    const start = Math.max(0, Math.min(max, saved?.start ?? max))
-    const end = Math.max(start, Math.min(max, saved?.end ?? start))
-    el.setSelectionRange(start, end)
-  }, [draftKey, ref])
+  useComposerFocus({ draftKey, ref, autoFocus: false })
 
   const target = to && members.some((b) => b.id === to) ? to : (pm?.id ?? null)
 
