@@ -31,6 +31,7 @@ import { IdentityBadge } from './IdentitiesPanel'
 import { CopyChip } from './CopyChip'
 import { BotSwitcher } from './BotSwitcher'
 import { TeamNameField, teamTitle } from './TeamNameField'
+import { TeamCleanupDialog } from './TeamCleanupDialog'
 import { TeamDeleteDialog } from './TeamDeleteDialog'
 import { TeamQueueProgress } from './TeamQueueProgress'
 import { TeamRoleEditor } from './TeamRoleEditor'
@@ -1508,29 +1509,7 @@ export function TeamPanel({ teamId, onOpenSidebar }: { teamId: string; onOpenSid
           void controlTeam(teamId, 'abort')
         }}
       />
-      <ConfirmDialog
-        open={confirm === 'cleanup'}
-        title="清理這個 Team？"
-        body={
-          <>
-            <p>
-              會移除 {team.members.length} 個成員 bot 與它們的 worktree（<code>{detail?.worktree_root ?? '資料目錄下的 team 目錄'}</code>）。
-              <strong>分支一律保留</strong>，訊息歷史也保留。
-            </p>
-            <p className="hint">
-              Team #{team.issue_number} {team.issue_title}
-              {project ? ` · ${project.label}` : ''}
-            </p>
-          </>
-        }
-        confirmLabel="清理"
-        danger
-        onCancel={() => setConfirm(null)}
-        onConfirm={() => {
-          setConfirm(null)
-          void controlTeam(teamId, 'cleanup')
-        }}
-      />
+      {confirm === 'cleanup' ? <TeamCleanupDialog teamId={teamId} onClose={() => setConfirm(null)} /> : null}
       <ConfirmDialog
         open={confirm === 'close-issue'}
         title={`關閉 issue #${team.issue_number}？`}
