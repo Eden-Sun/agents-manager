@@ -137,8 +137,13 @@ am_agent_prompt() {
             exec "$AM_HERDR" agent prompt "$@"
             ;;
     esac
-    _name=$(am_child_name "$1")
+    _name=$1
     shift
+    # 原名本來就存在（AGM、其他頂層 bot、pane id）就照原名送；硬補前綴只會變成 unknown_target，
+    # 訊息沒送到、stderr 還說「已改名」。找不到才當成自己的子 agent 補前綴。
+    if ! "$AM_HERDR" agent get "$_name" >/dev/null 2>&1; then
+        _name=$(am_child_name "$_name")
+    fi
     if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
         # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。
         curl -s -m 2 -o /dev/null -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
@@ -237,7 +242,16 @@ mod tests {
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
             let mut f = std::fs::File::create(fake.join("herdr")).unwrap();
-            f.write_all(b"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n").unwrap();
+            // `agent get <name>` answers from `AM_TEST_AGENTS` (space-separated), the way the
+            // real herdr would know AGM or another top-level bot; everything else echoes argv.
+            f.write_all(
+                b"#!/bin/sh\n\
+                  if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
+                    case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) exit 0 ;; *) exit 1 ;; esac\n\
+                  fi\n\
+                  for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+            )
+            .unwrap();
             drop(f);
             #[cfg(unix)]
             {
@@ -288,6 +302,20 @@ mod tests {
         );
         // 假 herdr 一行印一個參數，所以這裡順便證明：整段文字仍是**一個**參數，沒有被拆開。
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "把 daemon 重建一次，然後回報"]);
+    }
+
+    /// 目標本來就存在（AGM、別的頂層 bot）就不改名：bot 照 CLAUDE.md 直接向 AGM 申請時，
+    /// 之前會被改成 `proj-abc123-agm-pxf2pv` 而 unknown_target。
+    #[test]
+    fn an_existing_target_is_prompted_under_its_own_name() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv proj-abc123-review")];
+        let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+        assert!(!err.contains("已改名"), "{err}");
+        // 自己的子 agent 用短名仍然補前綴。
+        let (out, _) = s.run(&env, &["agent", "prompt", "review", "hi"]);
+        assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "hi"]);
     }
 
     /// 名字前面就帶旗標時不猜：整串原樣交給真的 herdr。
