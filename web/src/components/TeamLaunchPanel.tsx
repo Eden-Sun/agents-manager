@@ -207,6 +207,7 @@ export function TeamLaunchPanel({
   const [queue, setQueue] = useState<number[]>([issueNumber])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [candidates, setCandidates] = useState<Issue[] | null>(null)
+  const [candidatesError, setCandidatesError] = useState<string | null>(null)
   const project = useStore((s) => s.projects.find((p) => p.id === projectId) ?? null)
   const host = useStore((s) => projectHostName(s, projectId))
   const hostUp = useStore((s) => {
@@ -265,10 +266,16 @@ export function TeamLaunchPanel({
   useEffect(() => {
     if (!pickerOpen || candidates) return
     let live = true
+    setCandidatesError(null)
     api
       .fetchIssues(projectId, { state: 'open', limit: 100, repo })
       .then((l) => live && setCandidates(l))
-      .catch(() => live && setCandidates([]))
+      .catch((e: unknown) => {
+        if (!live) return
+        // gh 未登入回 502 時不能寫成「沒有其他開啟中的 issue」——那會讓人以為 repo 真的沒有。
+        setCandidates([])
+        setCandidatesError(e instanceof Error ? e.message : String(e))
+      })
     return () => {
       live = false
     }
@@ -407,6 +414,13 @@ export function TeamLaunchPanel({
             <div className="team-queue-picker">
               {candidates === null ? (
                 <p className="hint">讀取中…</p>
+              ) : candidatesError ? (
+                <p className="hint warn" role="alert">
+                  讀取失敗：{candidatesError}
+                  <button type="button" className="mini-btn" onClick={() => setCandidates(null)}>
+                    重試
+                  </button>
+                </p>
               ) : candidates.filter((c) => !queue.includes(c.number)).length === 0 ? (
                 <p className="hint">沒有其他開啟中的 issue。</p>
               ) : (
