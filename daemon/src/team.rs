@@ -3288,6 +3288,29 @@ async fn swap_member(
     .execute(&app.db)
     .await
     .map_err(any_err)?;
+    // A queued task the PM addressed to this seat by name (`dispatch{to}`) waits on
+    // `want_worker_bot_id`; left on the retired bot it would never match the replacement and
+    // sit in `queued` until `pm_stalled`.
+    sqlx::query(
+        "UPDATE team_tasks SET want_worker_bot_id = ?, updated_at = ?
+          WHERE team_id = ? AND want_worker_bot_id = ? AND state = 'queued'",
+    )
+    .bind(&new_id)
+    .bind(db::now())
+    .bind(&t.id)
+    .bind(&old.id)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
+    // Same for a rescue in progress: `workers_for` answers only the rescue bot while
+    // `rescue_bot_id` is set, and a swapped rescuer would leave that set empty.
+    sqlx::query("UPDATE teams SET rescue_bot_id = ? WHERE id = ? AND rescue_bot_id = ?")
+        .bind(&new_id)
+        .bind(&t.id)
+        .bind(&old.id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?;
 
     // A member with no run is `member_lost` the moment the PM dispatches to it, and `resume`
     // refuses to move until every member is running — so start it here, the same way
@@ -5601,6 +5624,21 @@ mod api_tests {
         .execute(&app.db)
         .await
         .unwrap();
+        // A second `dispatch{to:"dev-1"}` queued behind it, and a rescue pinned to the seat.
+        let queued_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO team_tasks (id, team_id, seq, title, brief, want_worker_bot_id, branch, state, created_at, updated_at)
+             VALUES (?,?,2,'t2','b',?,'br2','queued',?,?)",
+        )
+        .bind(&queued_id)
+        .bind(&tid)
+        .bind(&old.id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE teams SET rescue_bot_id = ? WHERE id = ?").bind(&old.id).bind(&tid).execute(&app.db).await.unwrap();
 
         patch(
             &app,
@@ -5630,7 +5668,14 @@ mod api_tests {
             .await
             .unwrap();
         assert_eq!(owner, new.id, "the unfinished task follows the seat");
+        let want: String = sqlx::query_scalar("SELECT want_worker_bot_id FROM team_tasks WHERE id = ?")
+            .bind(&queued_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(want, new.id, "a queued task addressed to the seat by name follows it too");
         let t = load(&app, &tid).await.unwrap();
+        assert_eq!(t.rescue_bot_id.as_deref(), Some(new.id.as_str()), "so does a rescue pinned to it");
         assert_eq!(serde_json::from_str::<Value>(&t.roles_json).unwrap()["workers"]["spec"]["kind"], "grok");
     }
 
