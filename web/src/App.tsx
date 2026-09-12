@@ -211,7 +211,11 @@ export default function App() {
 
   // Over the main panel with a scrim, the drawer is modal: keep Tab inside it and hand focus
   // back to the header button that opened it.
-  useFocusTrap(drawerOpen, sidebarRef)
+  // 手機抽屜一開若走預設「第一個可聚焦」會落到 RAM 那顆 button，整顆徽章被 focus ring
+  // 撐成一塊（390px 實測）。抽屜是來找 bot 的，焦點給搜尋框。
+  useFocusTrap(drawerOpen, sidebarRef, {
+    initialFocus: () => sidebarRef.current?.querySelector<HTMLElement>('.bot-search-input'),
+  })
 
   if (!ready) {
     return (

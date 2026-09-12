@@ -103,13 +103,21 @@ export function useFocusTrap(
       const wanted = initialFocusRef.current?.()
       // A caller can hand back a control that is disabled by the form's current state;
       // focusing it is a silent no-op, so fall through to the first real one.
-      const usable = wanted && root.contains(wanted) && focusableIn(root).includes(wanted) ? wanted : null
+      // Don't require `focusableIn` membership: the drawer starts `inert` / off-screen, so
+      // `isVisible` can still be false on the first frame while the input is already the
+      // intended landing spot (mobile sidebar search vs the RAM badge).
+      const blocked = wanted instanceof HTMLElement && (wanted.hasAttribute('disabled') || inDisabledFieldset(wanted))
+      const usable = wanted && root.contains(wanted) && !blocked ? wanted : null
       const target = usable ?? focusableIn(root)[0] ?? root
       if (target === root && !root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1')
       target.focus()
     }
-    // A frame late: the dialog's children (and any autofocus inside them) exist by then.
-    const raf = requestAnimationFrame(focusFirst)
+    // Two frames: one for children to exist, one for `inert` / transform to settle so
+    // the chosen control actually receives focus.
+    let raf2 = 0
+    const raf = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(focusFirst)
+    })
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || !isTop()) return
@@ -157,6 +165,7 @@ export function useFocusTrap(
 
     return () => {
       cancelAnimationFrame(raf)
+      cancelAnimationFrame(raf2)
       document.removeEventListener('keydown', onKeyDown, true)
       document.removeEventListener('focusin', onFocusIn, true)
       const at = stack.indexOf(id)
