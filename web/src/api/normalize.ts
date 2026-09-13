@@ -78,6 +78,8 @@ import {
   BOT_KINDS,
   type Mission,
   type MissionAssignment,
+  type MissionParentRef,
+  type MissionRevisionRef,
   type MissionDelivery,
   type MissionDetail,
   type MissionEvent,
@@ -1255,6 +1257,7 @@ export function toMission(v: unknown): Mission | null {
     paused_reason: paused,
     paused_detail: optStr(pick(v, 'paused_detail')),
     result_summary: optStr(pick(v, 'result_summary')),
+    parent_mission_id: optStr(pick(v, 'parent_mission_id')),
     // daemon 算過一次就照它的；沒給才自己照同一條規則推（cancelled → done → paused → open）。
     status: oneOf<MissionStatus>(
       pick(v, 'status'),
@@ -1321,6 +1324,7 @@ export function toMissionEvent(v: unknown, missionId = ''): MissionEvent | null 
   }
   return {
     id,
+    reply_to: optStr(pick(v, 'reply_to')),
     mission_id: str(pick(v, 'mission_id'), missionId),
     kind: oneOf<MissionEventKind>(pick(v, 'kind'), MISSION_EVENT_KINDS, 'note'),
     text: str(pick(v, 'text')),
@@ -1344,5 +1348,32 @@ export function toMissionDetail(raw: unknown): MissionDetail | null {
     const one = toMissionAssignment(a)
     if (one) assignments.push(one)
   }
-  return { ...base, events: sortByTime(events), assignments }
+  const revisions: MissionRevisionRef[] = []
+  for (const r of arr(pick(raw, 'revisions'))) {
+    if (!isRec(r)) continue
+    const rid = str(pick(r, 'id'))
+    if (!rid) continue
+    revisions.push({
+      id: rid,
+      text: str(pick(r, 'text')),
+      status: oneOf<MissionStatus>(pick(r, 'status'), MISSION_STATUSES, 'open'),
+      created_at: str(pick(r, 'created_at')),
+      result_summary: optStr(pick(r, 'result_summary')),
+    })
+  }
+  const parentRaw = pick(raw, 'parent')
+  let parent: MissionParentRef | null = null
+  if (isRec(parentRaw)) {
+    const pid = str(pick(parentRaw, 'id'))
+    if (pid) {
+      parent = {
+        id: pid,
+        text: optStr(pick(parentRaw, 'text')) ?? undefined,
+        status: oneOf<MissionStatus>(pick(parentRaw, 'status'), MISSION_STATUSES, 'done'),
+        result_summary: optStr(pick(parentRaw, 'result_summary')),
+        missing: pick(parentRaw, 'missing') === true,
+      }
+    }
+  }
+  return { ...base, events: sortByTime(events), assignments, revisions, parent }
 }

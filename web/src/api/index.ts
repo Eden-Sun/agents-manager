@@ -973,6 +973,49 @@ export async function addMissionEvent(
   return toMissionEvent(pick(root, 'event') ?? raw, missionId)
 }
 
+/**
+ * `POST /api/missions/:id/question` —— 對成果追問（已完成的任務也能問）。
+ *
+ * 追問只會留一句話並叫醒 AGM；它不會改狀態、不會產生交付，也不會開新任務。真的要改東西是
+ * `reviseMission`。`client_request_id` 是冪等鍵：重送回同一則，不會變成第二個問題。
+ */
+export async function askMission(
+  missionId: string,
+  input: { text: string; client_request_id: string },
+): Promise<MissionEvent | null> {
+  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/question`, input)
+  const root = isRec(raw) ? raw : {}
+  return toMissionEvent(pick(root, 'event') ?? raw, missionId)
+}
+
+/**
+ * `POST /api/missions/:id/answer` —— 回答「停下來問人」的任務。
+ *
+ * 記錄、放行、叫醒 AGM 是 daemon 端的**一個交易**；前端只送一次，不要再自己串
+ * events + resume（那樣中間斷掉就會留下半套）。
+ */
+export async function answerMission(
+  missionId: string,
+  input: { text: string; client_request_id: string },
+): Promise<{ mission: Mission | null; resumed: boolean }> {
+  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/answer`, input)
+  const root = isRec(raw) ? raw : {}
+  return { mission: toMission(pick(root, 'mission')), resumed: pick(root, 'resumed') === true }
+}
+
+/**
+ * `POST /api/missions/:id/revise` —— 從已完成的成果開一筆續作。
+ *
+ * 回的是**新的一筆任務**（`parent_mission_id` 指回來），原成果不會被改到。
+ */
+export async function reviseMission(
+  missionId: string,
+  input: { text: string; client_request_id: string },
+): Promise<Mission | null> {
+  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/revise`, input)
+  return toMission(isRec(raw) ? (pick(raw, 'mission') ?? raw) : raw)
+}
+
 /** `POST /api/missions/:id/{pause,resume,cancel}` — 都回同一份任務。 */
 export async function controlMission(
   missionId: string,

@@ -8,7 +8,7 @@
  * 事件 payload 的欄位名在 P1b（assignment 加 `mission_id/role/turn_error`）落地前還沒定死，
  * 所以每一個讀取都是**寬鬆**的：讀得到就顯示，讀不到就留白，絕不讓卡片因此壞掉或說謊。
  */
-import type { Mission, MissionAssignment, MissionEvent, MissionRole } from '../api/types'
+import type { Mission, MissionAssignment, MissionEvent, MissionQna, MissionRole } from '../api/types'
 
 /** 進度條上的五段＋終點。`paused` / `cancelled` 不是其中一格，是疊在上面的狀態。 */
 export type MissionPhase = 'planning' | 'executing' | 'reviewing' | 'verifying' | 'delivering' | 'done'
@@ -329,4 +329,19 @@ export function assignmentLabel(a: MissionAssignment): string {
 /** 這件交辦還開著嗎（沒有 `completed_at` 就是還在跑或還在等）。 */
 export function assignmentOpen(a: MissionAssignment): boolean {
   return !a.completed_at && a.status !== 'completed' && a.status !== 'cancelled' && a.status !== 'superseded'
+}
+
+/**
+ * 把追問與回覆配成一問一答。
+ *
+ * `answer` 靠 `reply_to` 指回它回的那一則——不是靠時間排序猜。任務一旦被追問兩次，光看順序
+ * 就分不出哪句話在回哪一句，而使用者看到的會是一串對不上的獨白。
+ * 沒有人回的追問留 `answer: null`，畫面才說得出「還在等」。
+ */
+export function missionQna(events: MissionEvent[]): MissionQna[] {
+  const answers = new Map<string, MissionEvent>()
+  for (const e of events) {
+    if (e.kind === 'answer' && e.reply_to) answers.set(e.reply_to, e)
+  }
+  return events.filter((e) => e.kind === 'question').map((q) => ({ question: q, answer: answers.get(q.id) ?? null }))
 }

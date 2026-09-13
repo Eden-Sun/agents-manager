@@ -418,6 +418,10 @@ export interface StoreState {
   controlMission: (missionId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
   /** 任務停下來問人時，使用者在卡片上回答：記一則 `note`（使用者本人）再 resume。 */
   answerMission: (missionId: string, text: string) => Promise<boolean>
+  /** 對已完成的成果追問。只會留話並叫醒 AGM，不改任何交付。 */
+  askMission: (missionId: string, text: string) => Promise<boolean>
+  /** 從已完成的成果開一筆續作，回新任務的 id。原成果不會被改到。 */
+  reviseMission: (missionId: string, text: string) => Promise<string | null>
 
   /**
    * 非 null = 主面板顯示 `HostShellPanel`（與上面每一個選取互斥，而且優先）。
@@ -1959,15 +1963,43 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async answerMission(missionId, text) {
     try {
-      // 先把回答記進事件串（不帶 relay_from ＝ 使用者本人），再放行——AGM 接回去時
-      // 讀得到這句話。順序反過來的話 AGM 可能先醒來卻看不到答案。
-      await api.addMissionEvent(missionId, { kind: 'note', text })
-      await api.controlMission(missionId, 'resume')
+      // 一支就好：記錄、放行、叫醒 AGM 由 daemon 綁在同一個交易裡。以前這裡連打兩支
+      // （events 再 resume），中間斷掉就留下「答案寫了但沒人被叫醒」的半套。
+      // crid 讓重送安全：同一句話重送回同一則，不會變成第二次續作。
+      await api.answerMission(missionId, { text, client_request_id: `answer-${missionId}-${Date.now()}` })
       await get().loadMission(missionId)
       return true
     } catch (e) {
       get().notify('error', `回覆任務失敗：${errText(e)}`)
       return false
+    }
+  },
+
+  async askMission(missionId, text) {
+    try {
+      await api.askMission(missionId, { text, client_request_id: `ask-${missionId}-${Date.now()}` })
+      await get().loadMission(missionId)
+      return true
+    } catch (e) {
+      get().notify('error', `追問失敗：${errText(e)}`)
+      return false
+    }
+  },
+
+  async reviseMission(missionId, text) {
+    try {
+      const next = await api.reviseMission(missionId, { text, client_request_id: `revise-${missionId}-${Date.now()}` })
+      // 兩邊都要重讀：原成果多了「已開續作」的連結，新任務要進清單。
+      await get().loadMission(missionId)
+      if (next) {
+        await get().loadMission(next.id)
+        await get().loadMissions(next.project_id)
+        get().notify('info', '已開一筆續作任務，原本的成果保持不變')
+      }
+      return next?.id ?? null
+    } catch (e) {
+      get().notify('error', `追加修改失敗：${errText(e)}`)
+      return null
     }
   },
 
