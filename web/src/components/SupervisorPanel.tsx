@@ -23,6 +23,7 @@ const STATUS_LABEL: Record<string, string> = {
   busy: '處理中',
   idle: '待命中',
   waiting_quota: '等額度恢復',
+  missing: 'bot 不見了',
   failed: '啟動失敗',
   unknown: '狀態不明',
 }
@@ -35,6 +36,7 @@ const STATUS_TONE: Record<string, string> = {
   starting: 'warn',
   waiting_quota: 'warn',
   failed: 'bad',
+  missing: 'bad',
 }
 
 /**
@@ -123,7 +125,7 @@ function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: s
             <span className={`agm-chip ${STATUS_TONE[r.status] ?? ''}`}>{label(STATUS_LABEL, r.status)}</span>
             <span className="agm-chip mono">{r.identity} · {r.model} · {r.effort}</span>
             {r.inbox_open > 0 ? <span className="agm-chip warn">{r.inbox_open} 則待處理</span> : null}
-            {r.bot_id ? (
+            {r.bot_id && r.bot_present ? (
               <button type="button" className="btn" onClick={() => onOpen(r.bot_id)}>
                 打開協調者對話
               </button>

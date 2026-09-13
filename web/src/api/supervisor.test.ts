@@ -108,6 +108,12 @@ test('協調者：舊 daemon 沒這一塊、或是垃圾，都當成沒建立，
     assert.equal(r.status, 'not_configured')
     assert.equal(r.stats.wakes, 0)
   }
+  // 登記過但 bot 被刪掉：狀態是 missing，不是「沒建立」——事件還在它的佇列裡。
+  const gone = toResponder({ configured: true, bot_present: false, bot_id: 'b-resp', status: 'missing' })
+  assert.equal(gone.configured, true)
+  assert.equal(gone.bot_present, false)
+  // 舊 daemon 沒有 bot_present：有 bot_id 就當它還在。
+  assert.equal(toResponder({ configured: true, bot_id: 'b-resp', status: 'idle' }).bot_present, true)
   const r = toResponder({ configured: true, status: 'waiting_quota', quota_reset_at: '2026-09-13T18:00:00Z', stats: { wakes: 'nope', duplicates: 99 } })
   assert.equal(r.status, 'waiting_quota')
   assert.equal(r.quota_reset_at, '2026-09-13T18:00:00Z')
