@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { deliveryLabel, missionView, pausedLabel, phaseLabel, MISSION_PHASES } from './missionView.ts'
+import { assignmentLabel, assignmentOpen, deliveryLabel, missionView, pausedLabel, phaseLabel, MISSION_PHASES } from './missionView.ts'
 import type { Mission, MissionEvent, MissionEventKind } from '../api/types.ts'
 
 function mission(over: Partial<Mission> = {}): Mission {
@@ -215,4 +215,24 @@ test('等額度／等 AGM 是 daemon 說的，卡片照實顯示且進度不倒�
 test('已結案的欄位仍然壓過 daemon 的 phase（cancelled / done / paused 先判）', () => {
   assert.equal(missionView(mission({ phase: 'executing', cancelled_at: 'x', status: 'cancelled' }), []).phase, 'cancelled')
   assert.equal(missionView(mission({ phase: 'executing', paused_reason: 'max_rounds', status: 'paused' }), []).phase, 'paused')
+})
+
+test('交辦的狀態講成人話：turn_status 比 status 精確，認不得的原樣顯示', () => {
+  assert.equal(assignmentLabel(asg({ status: 'awaiting_review', turn_status: 'identity_switch' })), '撞限，等 AGM 換身分接手')
+  assert.equal(assignmentLabel(asg({ status: 'awaiting_review', turn_status: 'quota_exhausted' })), '沒有可用額度')
+  assert.equal(assignmentLabel(asg({ status: 'awaiting_review' })), '等 AGM 驗收')
+  assert.equal(assignmentLabel(asg({ status: 'quota_blocked' })), '等額度重置')
+  assert.equal(assignmentLabel(asg({ status: 'delivered' })), '進行中')
+  assert.equal(assignmentLabel(asg({ status: 'something_new' })), 'something_new')
+})
+
+test('哪幾件交辦還開著：沒結案的才算，view 也把整串帶出去', () => {
+  const open = asg({ status: 'delivered', completed_at: null })
+  const closed = asg({ status: 'completed', completed_at: '2026-09-13T03:00:00Z' })
+  const dropped = asg({ status: 'superseded', completed_at: null })
+  assert.equal(assignmentOpen(open), true)
+  assert.equal(assignmentOpen(closed), false)
+  assert.equal(assignmentOpen(dropped), false)
+  const v = missionView(mission(), [], [closed, open])
+  assert.deepEqual(v.assignments.map((a) => a.id), [closed.id, open.id])
 })

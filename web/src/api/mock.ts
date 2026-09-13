@@ -1757,6 +1757,24 @@ export class MockTransport implements Transport {
     )
     this.missionAssignment(asking.id, { role: 'executor', target_bot_id: 'mission-exec-3' })
 
+    // 等 AGM：交辦都結案了、任務還開著（P1b 的 `awaiting_agm`）。
+    const idle = mk({ text: '把群組未讀數改成只算 bot 的回覆', delivery_mode: 'push_main' })
+    this.missions.push(idle)
+    this.missionEvent(idle.id, 'instruction', idle.text)
+    this.missionEvent(idle.id, 'report', '第一版做完，等 AGM 派 reviewer', { role: 'executor', bot: 'mission-exec-5', identity: 'cc2', model: 'opus' }, 'bot_exec5')
+    this.missionAssignment(idle.id, { role: 'executor', target_bot_id: 'mission-exec-5' })
+
+    // 等額度：那件交辦停在 quota_blocked（開任務時選了「等重置」）。
+    const quota = mk({ text: '把 hosts 面板的錯誤訊息翻成中文', on_5h_limit: 'wait' })
+    this.missions.push(quota)
+    this.missionEvent(quota.id, 'instruction', quota.text)
+    this.missionAssignment(quota.id, {
+      role: 'executor',
+      target_bot_id: 'mission-exec-6',
+      status: 'quota_blocked',
+      completed_at: null,
+    })
+
     const done = mk({
       text: '群組訊息的時間戳改成本地時區',
       completed_at: now(),

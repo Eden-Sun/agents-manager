@@ -8,7 +8,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Mission } from '../api/types'
-import { deliveryLabel, missionView, pausedLabel, phaseLabel, MISSION_PHASES, PHASE_LABEL, ROLE_LABEL } from '../lib/missionView'
+import {
+  assignmentLabel,
+  assignmentOpen,
+  deliveryLabel,
+  missionView,
+  pausedLabel,
+  phaseLabel,
+  MISSION_PHASES,
+  PHASE_LABEL,
+  ROLE_LABEL,
+} from '../lib/missionView'
 import { useStore } from '../store/store'
 import { KindIcon } from './KindTag'
 import './missions.css'
@@ -173,7 +183,7 @@ function MissionCard({ mission }: { mission: Mission }) {
   const waiting = paused || view.phase === 'waiting_quota' || view.phase === 'awaiting_agm'
 
   return (
-    <article className={`mission-card${waiting ? ' paused' : ''}`}>
+    <article className={`mission-card${paused ? ' paused' : waiting ? ' waiting' : ''}`}>
       <header className="mission-head">
         <span className={`mission-phase ${view.phase}`}>{phaseLabel(view.phase)}</span>
         <span className="mission-text">{mission.text}</span>
@@ -224,6 +234,28 @@ function MissionCard({ mission }: { mission: Mission }) {
               </span>
             </li>
           ) : null}
+        </ul>
+      ) : null}
+
+      {/* 每一件交辦的 role 與狀態（P1b）。角色那一列講的是「現在誰在跑」，這裡講的是
+          「一路上派了哪幾件、各自到哪了」——撞限換手在這裡看得到是兩件而不是一件。 */}
+      {view.assignments.length > 0 ? (
+        <ul className="mission-asgs">
+          {view.assignments.map((a) => (
+            <li key={a.id} className={assignmentOpen(a) ? 'open' : ''}>
+              <span className="mission-role">{a.role ? ROLE_LABEL[a.role] : '—'}</span>
+              <span className={`mission-asg-state${a.turn_error || a.turn_status === 'quota_exhausted' ? ' warn' : ''}`}>
+                {assignmentLabel(a)}
+              </span>
+              {a.target_bot_id ? <span className="mission-who">{a.target_bot_id}</span> : null}
+              {a.follow_up_of ? <span className="mission-tag">接手</span> : null}
+              {a.turn_error ? (
+                <span className="mission-asg-err" title={a.turn_error}>
+                  {a.turn_error}
+                </span>
+              ) : null}
+            </li>
+          ))}
         </ul>
       ) : null}
 
@@ -281,6 +313,18 @@ function MissionCard({ mission }: { mission: Mission }) {
               {sending ? '送出中…' : '回答並繼續'}
             </button>
           </div>
+        </div>
+      ) : view.phase === 'awaiting_agm' || view.phase === 'waiting_quota' ? (
+        /* 「等 AGM」「等額度」不用使用者動手，但它自己不會動——要看得出來這是在等，
+           不是在跑（AGM 2026-09-13：awaiting_agm／paused 要有明顯提示）。 */
+        <div className="mission-wait" role="status">
+          <strong>{view.phase === 'waiting_quota' ? '等額度重置' : '等 AGM 決定下一步'}</strong>
+          <span>
+            {view.phase === 'waiting_quota'
+              ? '這個身分的額度用完了，正在等它重置——這是開任務時選「等重置」的結果。要換身分接手，下一個任務把 5h 撞限改成「不等」。'
+              : '這一輪的交辦都結案了，AGM 還沒派下一件。它醒來就會接著跑，不需要你動手。'}
+          </span>
+          {view.latest?.text ? <span className="mission-wait-last">最後一則：{view.latest.text}</span> : null}
         </div>
       ) : (
         <p className="mission-latest">{view.latest?.text ?? '等 AGM 接手…'}</p>
