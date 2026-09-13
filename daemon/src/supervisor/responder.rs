@@ -333,8 +333,16 @@ pub async fn stop(app: &Arc<App>) -> Result<(), LcError> {
 // ---------------------------------------------------------------- watchdog
 
 pub async fn watchdog_tick(app: &Arc<App>) {
-    let Ok(Some(bot)) = roles::responder_bot(&app.db).await else { return };
     let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
+    let Ok(bot) = roles::responder_bot(&app.db).await else { return };
+    let Some(bot) = bot else {
+        // 登記過卻找不到那顆 bot（被刪掉）：看門狗沒有東西可以拉起來，交給巡檢。事件照樣留在
+        // 協調者的佇列，不倒回巡檢處理（SPEC §18.15）。
+        if row.bot_id.is_some() {
+            report_missing(app, row.bot_id.as_deref().unwrap_or("")).await;
+        }
+        return;
+    };
     let liveness = super::manager_liveness(app, &bot.id).await.unwrap_or("stopped");
     let w = watchdog::Watched {
         configured: true,
@@ -378,6 +386,30 @@ pub async fn watchdog_tick(app: &Arc<App>) {
                 }
             }
         }
+    }
+}
+
+/// 登記過的協調者 bot 不見了（被刪除）。說一次給巡檢聽，並把狀態寫清楚：它的事件仍留在它的
+/// 佇列裡等人把它建回來，不會改由巡檢處理。event_key 帶 bot id，所以刪掉再建一顆會是新的一則。
+async fn report_missing(app: &Arc<App>, bot_id: &str) {
+    let _ = roles::set_status_detail(
+        &app.db,
+        Role::Responder,
+        Some("登記的協調者 bot 不存在（已刪除）；事件留在它的 inbox，請重新 `agm responder setup` 與 start"),
+    )
+    .await;
+    let pushed = store::push_inbox(
+        &app.db,
+        &format!("responder_bot_missing:{bot_id}"),
+        "responder_bot_missing",
+        None,
+        None,
+        None,
+        &json!({"bot_id": bot_id, "action": "`bin/agm responder setup` 再 `responder start`；協調的事件不會倒回巡檢"}),
+    )
+    .await;
+    if matches!(pushed, Ok(Some(_))) {
+        tracing::error!(bot_id, "the configured AGM responder bot is gone; its events stay queued");
     }
 }
 
@@ -504,8 +536,14 @@ fn snippet(s: &str, max: usize) -> String {
 
 /// 喚醒協調者。每個 controller tick 一次；沒事的 tick 只讀 DB。
 pub async fn notify(app: &Arc<App>) {
-    let Ok(Some(bot)) = roles::responder_bot(&app.db).await else { return };
     let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
+    let Ok(bot) = roles::responder_bot(&app.db).await else { return };
+    let Some(bot) = bot else {
+        if row.bot_id.is_some() {
+            report_missing(app, row.bot_id.as_deref().unwrap_or("")).await;
+        }
+        return;
+    };
     let cfg = app.cfg.get().await;
     let (batch, cap) = (cfg.supervisor.responder_batch_secs, cfg.supervisor.responder_max_backoff_secs);
     let now = chrono::Utc::now();
@@ -564,18 +602,23 @@ pub async fn notify(app: &Arc<App>) {
 pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
     let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
     let bot = roles::responder_bot(&app.db).await.map_err(up)?;
-    let status = match &bot {
-        None => "not_configured".to_string(),
-        Some(_) if !row.status.is_empty() => row.status.clone(),
-        Some(b) => super::manager_liveness(app, &b.id).await?.to_string(),
+    // 「登記過」與「那顆 bot 還在」分開講：登記過但 bot 被刪掉是 `missing`，不是 `not_configured`——
+    // 後者會讓人以為事件回到巡檢了，而它們還在協調者的佇列裡。
+    let status = match (&bot, row.bot_id.is_some()) {
+        (None, false) => "not_configured".to_string(),
+        (None, true) => "missing".to_string(),
+        (Some(_), _) if !row.status.is_empty() => row.status.clone(),
+        (Some(b), _) => super::manager_liveness(app, &b.id).await?.to_string(),
     };
-    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE role='responder' AND state!='handled'")
-        .fetch_one(&app.db)
-        .await
-        .map_err(up)?;
+    let open: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE COALESCE(claimed_by, role)='responder' AND state!='handled'")
+            .fetch_one(&app.db)
+            .await
+            .map_err(up)?;
     Ok(json!({
-        "configured": bot.is_some(),
-        "bot_id": bot.as_ref().map(|b| b.id.clone()),
+        "configured": row.bot_id.is_some(),
+        "bot_present": bot.is_some(),
+        "bot_id": row.bot_id.clone(),
         "project_id": bot.as_ref().map(|b| b.project_id.clone()),
         "identity": row.identity,
         "model": row.model,
