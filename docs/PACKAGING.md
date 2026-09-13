@@ -162,7 +162,7 @@ App 版和終端機版共用同一份，不會另開一套。
 **Port 從設定檔讀**：`[server] listen`，讀不到就用預設 `127.0.0.1:7788`。
 
 **關掉 App = 關掉 daemon**（自己啟動的那個）：先送 **SIGTERM**，daemon 的 graceful shutdown
-會關掉所有 ssh ControlMaster（SPEC §11.3.5）；1.5 秒內沒收乾淨才補 SIGKILL。
+會關掉所有 ssh ControlMaster（SPEC §11.3 第 5 點）；1.5 秒內沒收乾淨才補 SIGKILL。
 App 自己被 `kill -9` 之類強制中止時來不及做這件事，daemon 會留下來變成孤兒，
 下次開 App 會直接接上去。herdr 裡的 agent 不受影響，會繼續活著，
 下次開 App 由 reconcile 接回來。要 daemon 常駐就用終端機跑 `agents-managerd serve`，
