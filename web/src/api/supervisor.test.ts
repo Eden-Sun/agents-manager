@@ -7,7 +7,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toAssignment, toIncident } from './supervisor.ts'
+import { toAssignment, toIncident, toResponder } from './supervisor.ts'
 
 test('集合欄位不是陣列時不會 throw（.map 白屏的那個 bug）', () => {
   // 這些都是 `(x as unknown[]) ?? []` 擋不住的：?? 只認 null/undefined。
@@ -99,4 +99,18 @@ test('occurrences 不是有限數字時回 0，不會變成 NaN 印在畫面上'
   for (const bad of ['3', null, undefined, NaN, Infinity, {}]) {
     assert.equal(toIncident({ id: 'i1', occurrences: bad })?.occurrences, 0)
   }
+})
+
+test('協調者：舊 daemon 沒這一塊、或是垃圾，都當成沒建立，不畫成在跑', () => {
+  for (const junk of [undefined, null, 'x', 42, [], {}]) {
+    const r = toResponder(junk)
+    assert.equal(r.configured, false)
+    assert.equal(r.status, 'not_configured')
+    assert.equal(r.stats.wakes, 0)
+  }
+  const r = toResponder({ configured: true, status: 'waiting_quota', quota_reset_at: '2026-09-13T18:00:00Z', stats: { wakes: 'nope', duplicates: 99 } })
+  assert.equal(r.status, 'waiting_quota')
+  assert.equal(r.quota_reset_at, '2026-09-13T18:00:00Z')
+  assert.equal(r.stats.wakes, 0, '型別不對的數字不採用')
+  assert.equal(r.stats.duplicates, 99)
 })

@@ -30,6 +30,34 @@ export interface SupervisorInfo {
   remote: SupervisorRemote
   pending_count: number
   assignments: SupervisorAssignment[]
+  /** 巡檢（就是上面這顆 AGM）的喚醒統計。 */
+  stats: SupervisorRoleStats
+  /** 協調者：只回應 bot 的第二顆 AGM（SPEC §18.15）。舊 daemon 沒有這一塊 → `configured: false`。 */
+  responder: SupervisorResponder
+}
+
+/** 一個角色被叫醒過幾次、為什麼。驗「fable 不會因為 bot 申請被叫醒」看的就是這幾個數。 */
+export interface SupervisorRoleStats {
+  wakes: number
+  events_delivered: number
+  duplicates: number
+  merged: number
+  last_wake_at: string | null
+  last_wake_reason: string | null
+  notify_next_at: string | null
+}
+
+export interface SupervisorResponder {
+  configured: boolean
+  bot_id: string
+  identity: string
+  model: string
+  effort: string
+  status: string
+  status_detail: string
+  quota_reset_at: string | null
+  inbox_open: number
+  stats: SupervisorRoleStats
 }
 
 /**
@@ -170,6 +198,37 @@ function toRemote(v: unknown): SupervisorRemote {
   }
 }
 
+function toStats(v: unknown): SupervisorRoleStats {
+  const o = isRec(v) ? v : {}
+  const t = (x: unknown) => (typeof x === 'string' ? x : null)
+  return {
+    wakes: n(o.wakes),
+    events_delivered: n(o.events_delivered),
+    duplicates: n(o.duplicates),
+    merged: n(o.merged),
+    last_wake_at: t(o.last_wake_at),
+    last_wake_reason: t(o.last_wake_reason),
+    notify_next_at: t(o.notify_next_at),
+  }
+}
+
+export function toResponder(v: unknown): SupervisorResponder {
+  const o = isRec(v) ? v : {}
+  return {
+    // 沒有這一塊（舊 daemon）或讀壞了：當成「沒建立」，不要畫成一顆在跑的協調者。
+    configured: o.configured === true,
+    bot_id: s(o.bot_id),
+    identity: s(o.identity, 'cc0'),
+    model: s(o.model, 'opus'),
+    effort: s(o.effort, 'high'),
+    status: s(o.status, 'not_configured'),
+    status_detail: s(o.status_detail),
+    quota_reset_at: typeof o.quota_reset_at === 'string' ? o.quota_reset_at : null,
+    inbox_open: n(o.inbox_open),
+    stats: toStats(o.stats),
+  }
+}
+
 function toInfo(v: unknown): SupervisorInfo {
   const o = isRec(v) ? v : {}
   return {
@@ -184,6 +243,8 @@ function toInfo(v: unknown): SupervisorInfo {
     remote: toRemote(o.remote),
     pending_count: n(o.pending_count),
     assignments: list(o.assignments).map(toAssignment).filter((a): a is SupervisorAssignment => a !== null),
+    stats: toStats(o.stats),
+    responder: toResponder(o.responder),
   }
 }
 
@@ -213,6 +274,14 @@ const mockState: SupervisorInfo = {
   },
   pending_count: 0,
   assignments: [],
+  stats: toStats({}),
+  responder: toResponder({
+    configured: true,
+    bot_id: 'bot-agm-responder',
+    status: 'idle',
+    inbox_open: 1,
+    stats: { wakes: 3, events_delivered: 7, duplicates: 12, last_wake_reason: 'bot_request×2, approval_requested' },
+  }),
 }
 
 function mockAct(action: SupervisorAction): SupervisorInfo {
