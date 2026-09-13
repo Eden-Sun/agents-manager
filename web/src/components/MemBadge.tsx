@@ -69,7 +69,7 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
         {/* 已用量旁邊直接寫「這台還剩多少」——要判斷還能不能再開一顆 bot，看的是這個數字。 */}
         {machine ? (
           <span className="mem-free" title={`這台機器還可用 ${humanBytes(machine.available_bytes)}，共 ${humanBytes(machine.total_bytes)}`}>
-            剩 {humanBytes(machine.available_bytes)} / {humanBytes(machine.total_bytes)}
+            剩 {humanBytes(machine.available_bytes)}
           </span>
         ) : null}
         {/* 分頁數只在超線時冒出來：平常那格只講 herdr，超線才是「RAM 被瀏覽器吃掉」的訊號。 */}

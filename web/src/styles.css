@@ -296,11 +296,14 @@ button:disabled {
   min-height: 46px;
   padding: 4px 14px;
   border-bottom: 1px solid var(--border);
+  overflow: hidden;
 }
 
-/* 徽章群：第一列 pane / RAM / 連線，第二列瀏覽器分頁數（有瀏覽器才有），靠左對齊 pane 那欄。 */
+/* 徽章群：第一列 pane / RAM / 連線，第二列瀏覽器分頁。寬度跟第一列走，分頁在列內折，
+   不要 nowrap 把整排撐過側欄把「已連線」切掉。 */
 .head-badges {
   margin-left: auto;
+  min-width: 0;
   display: grid;
   grid-template-columns: auto auto auto;
   column-gap: 8px;
@@ -311,7 +314,15 @@ button:disabled {
 
 .head-badges .tabs-badge {
   grid-column: 1 / -1;
-  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+/* 側欄 ~288px，「已連線」四個字常被右邊界切成「已連」——殘字比沒有更糟。燈還在，全文在 title。 */
+.sidebar-head .conn-label {
+  display: none;
 }
 
 /* 本機瀏覽器分頁數 / 吃的 RAM。跟 pane / RAM 同一種徽章，超線才變琥珀色。 */
@@ -411,9 +422,7 @@ button:disabled {
   flex: none;
   display: inline-flex;
   align-items: baseline;
-  /* 剩餘量（`.mem-free`）用整行寬度，所以這一格要允許折行——左上角那一欄只有約 175px，
-     「已用 · 剩 N / 共 M」擠在同一行會被右邊界切掉（2026-09-12 實拍）。 */
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
   padding: 1px 5px;
   border: 1px solid var(--border);
@@ -422,6 +431,7 @@ button:disabled {
   font-size: 11px;
   line-height: 1.6;
   cursor: default;
+  white-space: nowrap;
 }
 
 .mem-badge .mem-k {
@@ -436,13 +446,9 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* 「剩 5.5G」——已用量旁邊的剩餘可用量（2026-09-12 使用者）。比已用量淡一級：它是背景條件，
-   不是主角；剩餘吃緊時才靠 `.mem-low` 變成警示色。 */
-/* 自己一整行：左上角那一欄只有約 120px，跟已用量、分頁數擠在同一行會被拆成「剩」＋「5.5G」
-   兩段（2026-09-12 實拍）。獨立一行就永遠讀得完，也不必把數字縮寫到看不懂。 */
+/* 「剩 5.5G」跟已用量同一行。總容量只在 tooltip／點開的清單裡——側欄把「剩 N / 共 M」
+   折成第二行會把整顆徽章撐高，分頁列掉下去、連線被切掉（2026-09-13 實拍）。 */
 .mem-badge .mem-free {
-  flex: 0 0 100%;
-  white-space: nowrap;
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -10646,6 +10652,7 @@ button.run-debug-toggle:hover {
    */
   .sidebar-head .pane-k,
   .sidebar-head .mem-k,
+  .sidebar-head .mem-free,
   .sidebar-head .tabs-bytes {
     display: none;
   }
