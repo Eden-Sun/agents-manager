@@ -5896,7 +5896,10 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
             if behind >= chrono::Duration::zero() && behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
                 continue;
             }
-            let parsed = parse_codex_try_again(&at(h)).unwrap_or_else(|| panic!("hour {h} did not parse"));
+            // 用**同一個** `now` 解析：`parse_codex_try_again` 自己讀時鐘，跨過 `h:07` 或
+            // 那 15 分鐘寬限的邊界時，上面的判斷與底下的解析就會用到不同的時間（實測 2026-09-13
+            // 偶發一次紅燈）。時間敏感的測試要自己帶時鐘。
+            let parsed = parse_codex_try_again_at(&at(h), now).unwrap_or_else(|| panic!("hour {h} did not parse"));
             let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
             assert_eq!(dt.hour(), h, "{parsed}");
             assert_eq!(dt.minute(), 7);
@@ -5907,7 +5910,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
             assert!(day == now.date_naive() || day == now.date_naive() + chrono::Duration::days(1));
         }
         // A month/day with no year still lands on a real date.
-        let r = parse_codex_try_again("try again at Aug 8th 1:47 PM.").unwrap();
+        let r = parse_codex_try_again_at("try again at Aug 8th 1:47 PM.", now).unwrap();
         let dt = chrono::DateTime::parse_from_rfc3339(&r).unwrap().with_timezone(&Local);
         assert_eq!((dt.month(), dt.day()), (8, 8));
         assert!(dt > now);
