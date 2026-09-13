@@ -43,12 +43,13 @@
   background: var(--danger);
 }
 
-/* kind 圖示在 `crit` 時本來就是紅的；加上那顆點就有兩處紅在說同一件事。狀態由點負責，
-   圖示退回原本的辨識功能（那是「哪一家的 CLI」，不是「壞了沒」）。 */
+/* 被擋住時整格退色，logo 也一起退：這是這個 app 裡唯一讓 kind logo 失去顏色的狀態，所以
+   「灰掉的 logo」就等於「這個帳號現在收不了工作」（2026-09-13 使用者：有顏色的才是正常的）。
+   多帶一個 class 贏過 `.quota-hp.<kind> .quota-kind`，不靠檔案載入順序。 */
 .quota-hp.quota-blocked .quota-kind,
-/* `.quota-hp.crit .quota-kind` 同樣是三個 class，平手時看載入順序——這裡多一個 class 贏過它，
-   不要靠檔案順序。 */
-.quota-hp.quota-blocked.crit .quota-kind {
+.quota-hp.quota-blocked.claude .quota-kind,
+.quota-hp.quota-blocked.codex .quota-kind,
+.quota-hp.quota-blocked.grok .quota-kind {
   color: var(--text-dim);
 }
 

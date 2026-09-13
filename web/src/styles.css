@@ -6796,16 +6796,21 @@ button.model-tag:hover:not(:disabled) {
   color: var(--text-dim);
 }
 
+/* 三個 kind 都用自己的品牌色（2026-09-13 使用者：grok 的 logo 要有顏色，否則很像用盡）。
+   本來只有 claude 有色、codex／grok 退成 `--text-dim`；而灰色現在是「這個帳號被擋住了」的
+   畫法（見 `quotaLimitHit.css`），於是好好的 grok 看起來像沒額度。
+   **嚴重程度不畫在 logo 上**：logo 回答「這是哪一家的 CLI」，還剩多少由量表與數字說——
+   本來 `warn` / `crit` 會把它染黃染紅，那既跟量表重複，也讓「灰 = 擋住」這件事失焦。 */
 .quota-hp.claude .quota-kind {
   color: var(--kind-claude);
 }
 
-.quota-hp.warn .quota-kind {
-  color: var(--warn);
+.quota-hp.codex .quota-kind {
+  color: var(--kind-codex);
 }
 
-.quota-hp.crit .quota-kind {
-  color: var(--danger);
+.quota-hp.grok .quota-kind {
+  color: var(--kind-grok);
 }
 
 /* Selection is shown by the gauge frame only. Never let the focused state replace the
@@ -6814,9 +6819,12 @@ button.model-tag:hover:not(:disabled) {
   color: var(--kind-claude);
 }
 
-.quota-hp.focused.codex .quota-kind,
+.quota-hp.focused.codex .quota-kind {
+  color: var(--kind-codex);
+}
+
 .quota-hp.focused.grok .quota-kind {
-  color: var(--text-dim);
+  color: var(--kind-grok);
 }
 
 .quota-hp.focused .quota-identity {
