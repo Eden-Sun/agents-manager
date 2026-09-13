@@ -1,0 +1,122 @@
+/* --------------------------------------------------------- 手機預覽（桌機右欄第二格）
+
+   右欄（`.app` 第三欄）平常只有圖片暫存區一格。預覽開著時把那一欄切成上下兩列：暫存在
+   上、預覽在下。整段都鎖在 `body:has(.mobile-preview)` 底下，關著的時候版面跟原本
+   一個位元組都不差。
+
+   側欄與主面板要跨兩列，所以在這裡明寫 grid 位置——多了一列之後自動配置會把它們塞進
+   第一列，主面板高度就被預覽切一半。 */
+
+body:has(.mobile-preview) .app {
+  grid-template-rows: minmax(0, 1fr) auto;
+  /* 第三欄從 `auto` 改成固定寬：`auto` 量的是欄裡最寬那格的 max-content，暫存區撐滿之後
+     那個值沒有上界，1600px 實測整欄長到 706px、把對話擠掉一半。390 預覽 + `.mp-frame-wrap`
+     左右各 8px 的留白 = 406。 */
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 406px;
+}
+
+body:has(.mobile-preview) .app > .sidebar,
+body:has(.mobile-preview) .app > .main {
+  grid-row: 1 / -1;
+}
+
+body:has(.mobile-preview) .app > .sidebar {
+  grid-column: 1;
+}
+
+body:has(.mobile-preview) .app > .main {
+  grid-column: 2;
+}
+
+body:has(.mobile-preview) .app > .shelf {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+/* 那一欄被 390px 的預覽撐寬了，暫存區還卡在 208px 會留一條空的底色：讓它跟著撐滿。 */
+body:has(.mobile-preview) .app > .shelf.open {
+  width: auto;
+}
+
+.mobile-preview {
+  grid-column: 3;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  background: var(--bg-side);
+}
+
+.mp-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mp-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.mp-size {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.mp-frame-wrap {
+  /* 預覽本身是固定寬度的視窗；欄比它寬時置中，比它窄時可以橫向捲，不去擠壓 iframe 寬度
+     （擠壓了就量不到真正的 390px 版面，這個工具就白做了）。 */
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  padding: 8px;
+  background: var(--bg-sunken);
+}
+
+.mp-frame {
+  flex: 0 0 auto;
+  width: 390px;
+  /* 高度夠看到標題列＋一段時間軸＋輸入框；再高就把圖片暫存區擠沒了。 */
+  height: 620px;
+  max-height: 52vh;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+/* ------------------------------------------------------- 環境設定 → 顯示 的那顆開關 */
+
+.mp-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mp-toggle-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mp-toggle-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.mp-toggle-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
