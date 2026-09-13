@@ -1751,6 +1751,11 @@ session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去
    都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續；使用者取消 → `mission cancel`。
 9. **不做的事**：不代使用者回答問卷；不在一個任務裡同時開兩件交辦；不用 `/loop` 輪詢任務（`mission_updated` 與 inbox
    事件會來）；臨時 bot 不開 remote。
+10. **實跑教訓（2026-09-13 兩個任務）**：
+   - 驗證者的截圖**不要放在執行者的 worktree**（deliver 會 409 `dirty_worktree`）；放 AGM 的 scratchpad 或另一個目錄，路徑寫進 `verified` 事件。
+   - `not_fast_forward` 不算「停下問人」：對執行者**新開**一件 `assign --mission --role executor`（已結案的交辦不能 `followup`）
+     要它 `git rebase origin/main` 並重跑 tsc／build／test；rebase 乾淨就直接再 `deliver`，**有衝突才**停下問人。
+   - `mission complete` 只會自動刪「沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
