@@ -236,3 +236,14 @@ test('哪幾件交辦還開著：沒結案的才算，view 也把整串帶出去
   const v = missionView(mission(), [], [closed, open])
   assert.deepEqual(v.assignments.map((a) => a.id), [closed.id, open.id])
 })
+
+test('最新進度不含 instruction：卡片標題那一句不會再印第二次（P4 缺陷 4）', () => {
+  const m = mission({ text: '把設定頁的錯字修掉' })
+  const only = missionView(m, [ev('instruction', '把設定頁的錯字修掉')])
+  assert.equal(only.latest, null)
+  // 事件文字剛好等於任務本文的（AGM 原樣轉述）也算重複，一樣不當成進度
+  const echoed = missionView(m, [ev('instruction', m.text), ev('report', m.text)])
+  assert.equal(echoed.latest, null)
+  const real = missionView(m, [ev('instruction', m.text), ev('report', '改好 4 處')])
+  assert.equal(real.latest?.text, '改好 4 處')
+})

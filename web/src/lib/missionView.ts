@@ -98,7 +98,12 @@ export interface MissionView {
   ask: MissionAsk | null
   verified: MissionEvent | null
   delivered: MissionDelivered | null
-  /** 最後一則有內容的回報，摺疊時當一行摘要用。 */
+  /**
+   * 最後一則有內容的**進度**回報，摺疊時當一行摘要用。
+   *
+   * 不含 `instruction`——那是任務標題本身，卡片上方已經印過一次（P4 驗收缺陷 4：
+   * 手機 390 那張卡 249px，一半是重複的字）。
+   */
   latest: MissionEvent | null
   /** 這個任務的交辦（P1b），舊的在前；舊 daemon 沒給就是空的。 */
   assignments: MissionAssignment[]
@@ -200,7 +205,8 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
       }
     }
     if (e.kind === 'paused') lastPaused = e
-    if (e.text) latest = e
+    // `instruction` 就是卡片標題那一句，不要再當成「最新進度」印第二次。
+    if (e.text && e.kind !== 'instruction' && e.text !== m.text) latest = e
   }
 
   // 交辦是 daemon 寫的：角色一定對，bot 也一定是現在那一顆。身分／模型補事件裡的。

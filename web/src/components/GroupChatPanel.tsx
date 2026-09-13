@@ -173,7 +173,19 @@ function GroupMessageList({ projectId }: { projectId: string }) {
             <Bubble
               key={r.key}
               msg={r.msg}
-              from={`你 → ${r.targets.join(', ')}`}
+              /*
+               * 代發的那一則**不是使用者送的**（P4 驗收缺陷 3：同一則同時印「你 → X」與
+               * 「AGM → X」）。有 `relay_from` 時來源交給 `Bubble` 裡的 `RelayFrom` 畫，
+               * 這裡不要再掛一個「你 →」。收件者多於一個時才補一條純箭頭的清單——
+               * `RelayFrom` 只寫得下一個收件者。
+               */
+              from={
+                r.msg.relay_from
+                  ? r.targets.length > 1
+                    ? `→ ${r.targets.join(', ')}`
+                    : undefined
+                  : `你 → ${r.targets.join(', ')}`
+              }
               fromClassName="msg-targets"
               fromTitle="這則訊息送給了這些 Bot"
             />

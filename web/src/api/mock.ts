@@ -773,7 +773,35 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
+    this.seedGroupRelay(p.id)
     installDevHelpers(this)
+  }
+
+  /**
+   * 種一則「使用者自己發的」與一則「AGM 代發的」群組訊息。
+   *
+   * P4 驗收缺陷 3 就是這兩則長得一樣——代發那則同時印「你 → X」與「AGM → X」，而且照樣
+   * 靠右畫成藍泡泡。並排才看得出改對了沒有。
+   */
+  private seedGroupRelay(projectId: string) {
+    const target = this.bots.find((b) => b.project_id === projectId)
+    const agm = this.bots.find((b) => b.project_id === projectId && b.id !== target?.id)
+    if (!target) return
+    const base = {
+      conversation_id: this.conv(target.id),
+      turn_id: null,
+      bot_id: target.id,
+      role: 'user' as const,
+      source: 'web' as const,
+      incomplete: 0,
+    }
+    this.addMessage({ ...base, content: '先看一下 README 的安裝步驟還對不對', group_id: ulid('grp') })
+    this.addMessage({
+      ...base,
+      content: '任務 01M2C：先把設定頁的錯字修掉，做完回報，我會派 reviewer。',
+      group_id: ulid('grp'),
+      relay_from: agm?.id ?? 'daemon',
+    })
   }
 
   // ---------------------------------------------------------------- transport
@@ -1790,6 +1818,11 @@ export class MockTransport implements Transport {
     this.missionAssignment(done.id, { role: 'executor', target_bot_id: 'mission-exec-4' })
     this.missionAssignment(done.id, { role: 'reviewer', target_bot_id: 'mission-rev-2' })
     this.missionAssignment(done.id, { role: 'verifier', target_bot_id: 'mission-ver' })
+
+    const killed = mk({ text: '把側欄改成可以拖曳排序', cancelled_at: now() })
+    this.missions.push(killed)
+    this.missionEvent(killed.id, 'instruction', killed.text)
+    this.missionEvent(killed.id, 'cancelled', '使用者取消', null, 'daemon')
   }
 
   private emit(type: string, data: unknown) {

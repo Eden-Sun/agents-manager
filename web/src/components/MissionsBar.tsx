@@ -37,18 +37,26 @@ export function MissionsBar({ projectId }: { projectId: string }) {
 
   const [showAll, setShowAll] = useState(false)
   const [showDone, setShowDone] = useState(false)
+  const [showCancelled, setShowCancelled] = useState(false)
 
-  const { open, done } = useMemo(() => {
+  /**
+   * 「已完成任務」只算 `done`（P4 驗收缺陷 5）：API.md 寫得很清楚「已完成任務清單＝
+   * `status=done`」，取消掉的擺進去會讓那份清單不能當成「做完了什麼」來讀。
+   * 取消的另外列一段——做過什麼也是紀錄，只是不算成果。
+   */
+  const { open, done, cancelled } = useMemo(() => {
     const open: Mission[] = []
     const done: Mission[] = []
+    const cancelled: Mission[] = []
     for (const m of missions) {
-      if (m.status === 'done' || m.status === 'cancelled') done.push(m)
+      if (m.status === 'done') done.push(m)
+      else if (m.status === 'cancelled') cancelled.push(m)
       else open.push(m)
     }
-    return { open, done }
+    return { open, done, cancelled }
   }, [missions])
 
-  if (!supported || (open.length === 0 && done.length === 0)) return null
+  if (!supported || (open.length === 0 && done.length === 0 && cancelled.length === 0)) return null
   // 停下來問人的先排前面——那是唯一在等使用者的東西。
   const sorted = [...open].sort((a, b) => Number(b.status === 'paused') - Number(a.status === 'paused'))
   const shown = showAll ? sorted : sorted.slice(0, OPEN_SHOWN)
@@ -84,6 +92,28 @@ export function MissionsBar({ projectId }: { projectId: string }) {
           {showDone ? (
             <ul className="mission-done-list">
               {done.map((m) => (
+                <MissionDoneRow key={m.id} mission={m} />
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      {cancelled.length > 0 ? (
+        <div className="mission-done">
+          <button
+            type="button"
+            className="mission-done-head"
+            aria-expanded={showCancelled}
+            title="取消掉的任務不算「已完成」，但做過什麼也是紀錄"
+            onClick={() => setShowCancelled((v) => !v)}
+          >
+            <span aria-hidden="true">{showCancelled ? '▾' : '▸'}</span>
+            已取消（{cancelled.length}）
+          </button>
+          {showCancelled ? (
+            <ul className="mission-done-list">
+              {cancelled.map((m) => (
                 <MissionDoneRow key={m.id} mission={m} />
               ))}
             </ul>
