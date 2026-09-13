@@ -94,6 +94,35 @@ pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<L
     None
 }
 
+/// 這顆 bot 的額度**下一次重置**是什麼時候（5h 優先，沒有就看週窗）。
+///
+/// 給 `supervisor::controller` 判斷「被額度擋下之後什麼時候再試」用：CLI 橫幅上的時間會舊
+/// （2026-09-13：橫幅還寫著剛過去的 22:15，app-server 已經說 22:20 重置），所以兩邊都要看。
+/// 只回**還在未來**的時間。
+pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
+    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let keys = bot_quota_keys(&host, &bot.kind, bot.identity.as_deref());
+    let now = chrono::Utc::now();
+    let future = |t: &Option<String>| {
+        t.as_deref()
+            .and_then(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
+            .map(|x| x.with_timezone(&chrono::Utc))
+            .filter(|x| *x > now)
+    };
+    let q = app.quotas.lock().await;
+    for k in keys {
+        let Some(entry) = q.get(&k) else { continue };
+        let candidates = [
+            entry.five_hour.as_ref().and_then(|w| future(&w.resets_at)),
+            entry.seven_day.as_ref().and_then(|w| future(&w.resets_at)),
+        ];
+        if let Some(t) = candidates.into_iter().flatten().min() {
+            return Some(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        }
+    }
+    None
+}
+
 /// The host a quota map key belongs to, given the hosts that exist (`local` for anything else).
 pub fn host_of_key<'a>(key: &'a str, hosts: &[String]) -> (&'a str, &'a str) {
     match key.split_once('/') {

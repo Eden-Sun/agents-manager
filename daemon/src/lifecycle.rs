@@ -5415,6 +5415,20 @@ fn month_num_token(tok: &str) -> Option<u32> {
 /// hit was recorded with no reset at all and the strip could never say when it comes back —
 /// so a bare clock time is read as the next time that clock comes round.
 fn parse_codex_try_again(notice: &str) -> Option<String> {
+    parse_codex_try_again_at(notice, chrono::Local::now())
+}
+
+/// 橫幅上的時間已經過去、但只過去一點點時，**不要**跳到明天。
+///
+/// 2026-09-13 實況：22:15:22 派工，CLI 橫幅還印著 `try again at 10:15 PM`（它那一秒還沒更新），
+/// 解析出 22:15:00 已經過去 22 秒，於是滾成隔天 22:15——兩筆交辦被排去等 24 小時，而 app-server
+/// 當時已經說 5h 用量 21%、22:20 重置。差幾分鐘的「過去」是**舊橫幅**，不是明天的預約。
+const STALE_BANNER_GRACE_MINS: i64 = 15;
+/// 橫幅是舊的時候，隔多久再問一次 CLI／app-server。
+const STALE_BANNER_RETRY_MINS: i64 = 5;
+
+/// [`parse_codex_try_again`] 的可測版本：`now` 由呼叫端給。
+fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) -> Option<String> {
     use chrono::{Datelike, Local, NaiveDate, TimeZone};
     let low = notice.to_ascii_lowercase();
     let rest = low.split("try again at").nth(1)?.trim();
@@ -5477,7 +5491,6 @@ fn parse_codex_try_again(notice: &str) -> Option<String> {
     if !pm && hour == 12 {
         hour = 0;
     }
-    let now = Local::now();
     // Fill in only what the notice left out, and roll the result forward: a reset is always
     // ahead of us, so a clock time that already passed today means tomorrow, and a month/day
     // that already passed this year means next year.
@@ -5488,10 +5501,16 @@ fn parse_codex_try_again(notice: &str) -> Option<String> {
     };
     let mut naive = date.and_hms_opt(hour, minute, 0)?;
     if roll && naive <= now.naive_local() {
-        naive = match (month, day) {
-            (Some(_), Some(_)) => naive.with_year(naive.year() + 1)?,
-            _ => naive + chrono::Duration::days(1),
-        };
+        // 剛過去幾分鐘＝橫幅還沒更新（見上面的常數）：晚幾分鐘再問，不要整整等一輪。
+        let behind = now.naive_local().signed_duration_since(naive);
+        if behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
+            naive = now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS);
+        } else {
+            naive = match (month, day) {
+                (Some(_), Some(_)) => naive.with_year(naive.year() + 1)?,
+                _ => naive + chrono::Duration::days(1),
+            };
+        }
     }
     let dt = Local.from_local_datetime(&naive).earliest()?;
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
@@ -5805,6 +5824,30 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         // A banner that already carries its own reset is not extended by whatever follows it.
         assert_eq!(codex_usage_notice_lines(CODEX_LIMIT_HIT).len(), 1);
     }
+    /// 2026-09-13 實況：22:15:22 派工時 CLI 橫幅還印著 `try again at 10:15 PM`——那是**上一輪**的
+    /// 字，解析出來剛過去 22 秒。滾到隔天等於把工作壓 24 小時；差幾分鐘的「過去」是舊橫幅。
+    #[test]
+    fn a_banner_that_just_went_stale_does_not_roll_to_tomorrow() {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 9, 13, 22, 15, 22).unwrap();
+        let got = parse_codex_try_again_at("ERROR: You've hit your usage limit, or try again at 10:15 PM.", now)
+            .expect("讀得到時間");
+        let t = chrono::DateTime::parse_from_rfc3339(&got).unwrap();
+        let mins = (t.timestamp() - now.timestamp()) / 60;
+        assert!((4..=6).contains(&mins), "應該是幾分鐘後再問，不是隔天：{got}（{mins} 分）");
+    }
+
+    /// 真的過去很久的（超過 15 分鐘）才當成「明天的那個時刻」。
+    #[test]
+    fn a_clock_time_long_past_still_means_tomorrow() {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 9, 13, 22, 15, 22).unwrap();
+        let got = parse_codex_try_again_at("or try again at 9:00 PM.", now).expect("讀得到時間");
+        let t = chrono::DateTime::parse_from_rfc3339(&got).unwrap();
+        let hours = (t.timestamp() - now.timestamp()) / 3600;
+        assert!((22..=23).contains(&hours), "隔天的 21:00：{got}（{hours} 小時後）");
+    }
+
 
     /// Codex writes a bare clock time when the reset is later today, with no date at all.
     #[test]
@@ -5817,6 +5860,13 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
                 if h < 12 { "AM" } else { "PM" })
         };
         for h in 0..24u32 {
+            // 剛過去 15 分鐘內的那個鐘點另有規則（橫幅是舊的 → 幾分鐘後再問，見
+            // `a_banner_that_just_went_stale_does_not_roll_to_tomorrow`），這裡跳過它。
+            let candidate = now.date_naive().and_hms_opt(h, 7, 0).unwrap();
+            let behind = now.naive_local().signed_duration_since(candidate);
+            if behind >= chrono::Duration::zero() && behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
+                continue;
+            }
             let parsed = parse_codex_try_again(&at(h)).unwrap_or_else(|| panic!("hour {h} did not parse"));
             let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
             assert_eq!(dt.hour(), h, "{parsed}");
