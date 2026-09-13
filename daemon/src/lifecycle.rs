@@ -2204,7 +2204,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
                 continue;
             }
             let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-            apply_codex_limit_hit_quota(app, &host, &notice).await;
+            apply_codex_limit_hit_quota(app, &host, bot.identity.as_deref(), &notice).await;
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
             if let Some(turn) = in_flight {
                 let res = sqlx::query(
@@ -4777,7 +4777,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         tx.commit().await?;
         emit_message_added(app, &bot.id, message).await;
         let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-        apply_codex_limit_hit_quota(app, &host, &hit).await;
+        apply_codex_limit_hit_quota(app, &host, bot.identity.as_deref(), &hit).await;
         emit_turn(app, &turn.id).await;
         return Ok(true);
     }
@@ -5518,9 +5518,12 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
 
 /// When Codex prints a hard limit-hit, mirror it onto that host's `codex` quota row so the
 /// strip shows empty immediately (the rate-limits RPC can lag a turn behind the TUI).
-async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
+async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Option<&str>, notice: &str) {
     let resets = parse_codex_try_again(notice);
-    let key = crate::quota::quota_key(host, "codex");
+    // 寫進**這顆 bot 身分**的那把 key：查詢端（`limit_hit_for_bot`）先查 `codex:<identity>` 再查裸
+    // `codex`，寫入端以前一律寫裸的，有身分的 bot 就對不起來（2026-09-13 AGM 指出）。
+    let base = crate::quota::quota_base("codex", identity);
+    let key = crate::quota::quota_key(host, &base);
     let mut q = app
         .quotas
         .lock()
@@ -5539,20 +5542,25 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
             account: None,
             host: host.to_string(),
         });
-    // Prefer marking the 5h window (the burst limit); fall back to 7d if that is all we have.
-    let win = crate::quota::Window { used_pct: 100.0, resets_at: resets.clone() };
-    if q.five_hour.is_some() || q.seven_day.is_none() {
-        q.five_hour = Some(win);
+    // 同一張橫幅再看到一次不是新證據：它就留在畫面上（2026-09-13：22:21 那次根本沒送出任何東西，
+    // 掃到的是 22:15 留下的那張，卻又把 `at` 蓋成現在、把量表打回 100%）。保留原本那筆，直接收工。
+    if q.limit_hit.as_ref().is_some_and(|h| h.message == notice) {
+        return;
+    }
+    // 量表標成用完：CLI 說它現在收不下工作，畫面就不該顯示還有額度。
+    // **但重置時間不從橫幅寫進來**——橫幅的時間會舊、也會被解析歪（同日實況：解析成隔天，
+    // 於是 5h 的 `resets_at` 變成明天，連帶把交辦排去等 24 小時）。那個時間只記在 `limit_hit.until`，
+    // 窗口自己的 `resets_at` 留給 app-server／statusLine 這些結構化來源。
+    let win = crate::quota::Window { used_pct: 100.0, resets_at: None };
+    if let Some(existing) = q.five_hour.as_mut() {
+        existing.used_pct = 100.0;
     } else if let Some(existing) = q.seven_day.as_mut() {
         existing.used_pct = 100.0;
-        if resets.is_some() {
-            existing.resets_at = resets.clone();
-        }
     } else {
-        q.seven_day = Some(win);
+        q.five_hour = Some(win);
     }
-    // CLI 自己說被擋住了，這一格黏著走（`quota::set` 會沿用，直到 `until` 過了或下一回合跑成功）。
-    // 沒有它的話，五分鐘後 app-server 的輪詢就把量表刷回滿格，畫面與實際對不上。
+    // CLI 自己說被擋住了，這一格黏著走（`quota::set` 會沿用，直到 `until` 過了、下一回合跑成功、
+    // 或有更新的結構化讀數說帳號其實還有額度）。
     q.limit_hit = Some(crate::quota::LimitHit {
         message: notice.to_string(),
         until: resets.clone(),
@@ -5560,7 +5568,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
     });
     q.updated_at = crate::db::now();
     q.source = "codex-limit-hit".into();
-    crate::quota::set(app, host, "codex", q).await;
+    crate::quota::set(app, host, &base, q).await;
 }
 
 /// No reply marker found: keep whatever the agent printed after the last prompt echo,
@@ -6579,6 +6587,46 @@ mod flush_queue_tests {
     //! background task would have done.
     use super::*;
     use crate::team::testing as tt;
+
+    /// 上限橫幅要寫進**這顆 bot 身分**的那把 key，而且不可以把 5h 的 `resets_at` 蓋成橫幅的時間。
+    ///
+    /// 2026-09-13：橫幅一律寫裸的 `codex`，有身分的 bot 就對不起來；而橫幅時間被解析成隔天，
+    /// 連帶讓 5h 的 `resets_at` 也變成明天（量表與 `quota_blocked` 一起被拖下水）。
+    #[tokio::test]
+    async fn a_limit_hit_banner_lands_on_the_bots_own_quota_key() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let notice = "ERROR: You've hit your usage limit, or try again at 10:15 PM.";
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, Some("astra"), notice).await;
+
+        let q = app.quotas.lock().await;
+        let mine = q.get("codex:astra").expect("寫進帶身分的那把");
+        assert!(mine.limit_hit.is_some());
+        assert_eq!(mine.five_hour.as_ref().unwrap().used_pct, 100.0, "量表標成用完");
+        assert!(mine.five_hour.as_ref().unwrap().resets_at.is_none(), "橫幅的時間只進 limit_hit.until");
+        assert!(mine.limit_hit.as_ref().unwrap().until.is_some());
+        assert!(q.get("codex").is_none(), "沒有身分的那把不該被動到");
+    }
+
+    /// 同一張橫幅再掃到一次不是新證據：它就留在畫面上。
+    ///
+    /// 2026-09-13：22:21 那筆交辦根本沒送出任何東西，掃到的是 22:15 留下的同一張，卻把 `at`
+    /// 蓋成現在——於是「撞限」看起來永遠是剛剛發生的，量表也被再打回 100%。
+    #[tokio::test]
+    async fn the_same_banner_seen_again_is_not_new_evidence() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let notice = "ERROR: You've hit your usage limit, or try again at 10:15 PM.";
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, notice).await;
+        let first = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
+
+        // 中間 app-server 說還有餘裕（這一步會把橫幅清掉——那是另一條規則）；這裡只看重掃的行為，
+        // 所以直接再掃一次同一張。
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, notice).await;
+        let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
+        assert_eq!(first.at, again.at, "同一張橫幅不會把時間戳往前推");
+        assert_eq!(first.until, again.until);
+    }
 
     struct Fixture {
         env: tt::Env,
