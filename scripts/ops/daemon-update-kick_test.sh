@@ -44,6 +44,7 @@ case "$sub:$op" in
   approval:request)  printf '%s' "$STUB_APPROVAL" ;;
   approval:list)     printf '%s' "$STUB_APPROVAL_LIST" ;;
   assign:*)          [ -n "$STUB_ASSIGN_FAIL" ] && exit 1; printf '%s' '{"id":"a-1"}' ;;
+  responder:show)    [ -n "${STUB_RESPONDER:-}" ] && printf '%s' "$STUB_RESPONDER" || printf '%s' '{}' ;;
   *)                 printf '%s' '{}' ;;
 esac
 STUB
@@ -276,6 +277,25 @@ setup
 export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[]}'
 bash "$SCRIPT"
 check_no "舊端點沒有回排除名單時不取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 24. AGM 雙角色：協調者也排除；以 runtime.json 的角色派工，巡檢目錄就是 patrol 驗收。
+setup
+printf '%s' '{"manager_bot_id":"bot-manager","role":"patrol","self_bot_id":"bot-manager"}' > "$AGM_DIR/runtime.json"
+export STUB_RESPONDER='{"configured":true,"bot_id":"bot-resp"}'
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager","bot-resp"]}'
+bash "$SCRIPT"
+check "safety 也排除協調者" "lease safety --exclude-bot bot-build --exclude-bot bot-manager --exclude-bot bot-resp" "$AGM_DIR/calls.log"
+check "派工帶上巡檢角色" "--review-by patrol" "$AGM_DIR/calls.log"
+check "雙角色下照常派工" "已派工" "$AGM_DIR/daemon-update.log"
+teardown
+unset STUB_RESPONDER
+
+# 25. 舊部署（runtime 沒有 role、沒有協調者）：不帶 --review-by，舊 CLI 才不會拒絕整筆派工。
+setup
+bash "$SCRIPT"
+check_no "舊部署不帶 --review-by" "--review-by" "$AGM_DIR/calls.log"
+check "舊部署照常派工" "已派工" "$AGM_DIR/daemon-update.log"
 teardown
 
 echo "----"

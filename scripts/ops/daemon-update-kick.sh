@@ -104,7 +104,7 @@ except Exception:
     sys.exit(1)
 print(" ".join(d.get("paths") or []))
 ' 2>/dev/null) || PATHS=""
-[ -n "$PATHS" ] || PATHS="daemon web Cargo.toml Cargo.lock docs/goals/agm-supervisor-persona.md scripts/agm.py"
+[ -n "$PATHS" ] || PATHS="daemon web Cargo.toml Cargo.lock docs/goals/agm-supervisor-persona.md docs/goals/agm-responder-persona.md scripts/agm.py"
 
 BUILT_SHA=""
 if [ -f "$BUILT" ]; then
@@ -154,18 +154,39 @@ print(manager.strip())
 ' "$DIR/runtime.json" 2>/dev/null) || {
   log "無法從 runtime.json 取得 manager_bot_id，這輪不派"; exit 0;
 }
+# AGM 雙角色（SPEC §18.15）：協調者也是 AGM，一樣排除。沒建立（或舊 CLI 沒有這個子命令）就只有巡檢。
+RESPONDER=$("$AGM" --compact responder show 2>/dev/null | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+b=d.get("bot_id") if isinstance(d,dict) and d.get("configured") else None
+if isinstance(b,str) and b.strip(): print(b.strip())
+' 2>/dev/null) || RESPONDER=""
+# 這支腳本以哪個角色派工：runtime.json 的 role（巡檢目錄＝patrol）。舊部署沒寫 role，CLI 也還不認
+# `--review-by`，就不帶，行為照舊。
+ROLE=$(python3 -c '
+import json,sys
+with open(sys.argv[1]) as f: d=json.load(f)
+r=d.get("role")
+if r in ("patrol","responder"): print(r)
+' "$DIR/runtime.json" 2>/dev/null) || ROLE=""
 EXCL=(--exclude-bot "$BOT" --exclude-bot "$MANAGER")
+[ -n "$RESPONDER" ] && [ "$RESPONDER" != "$MANAGER" ] && EXCL+=(--exclude-bot "$RESPONDER")
+REVIEW=()
+[ -n "$ROLE" ] && REVIEW=(--review-by "$ROLE")
 
 # safety 與 acquire 都傳同一份排除清單，由 daemon 判定；不再自行過濾快照。
 # 回應須確認實際排除的 ID。舊 daemon / CLI 尚未支援或格式有誤就跳過，
 # 保留正式熱修腳本直到 daemon 升級後再安裝本版。重啟仍另行核准。
-SAFE=$("$AGM" --compact lease safety "${EXCL[@]}" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" python3 -c '
+SAFE=$("$AGM" --compact lease safety "${EXCL[@]}" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" RESPONDER_BOT="$RESPONDER" python3 -c '
 import json,sys,os
 d=json.load(sys.stdin)
 if not isinstance(d,dict) or not isinstance(d.get("safe"),bool): sys.exit(1)
 for key in ("working","in_flight","unreadable"):
     if not isinstance(d.get(key),list) or any(not isinstance(x,dict) for x in d[key]): sys.exit(1)
-ex={os.environ["BUILD_BOT"],os.environ["MANAGER_BOT"]}
+ex={os.environ["BUILD_BOT"],os.environ["MANAGER_BOT"]} | ({os.environ["RESPONDER_BOT"]} if os.environ.get("RESPONDER_BOT") else set())
 applied=d.get("excluded_bot_ids")
 if not isinstance(applied,list) or any(not isinstance(x,str) for x in applied) or set(applied) != ex: sys.exit(1)
 working,in_flight,unreadable=d["working"],d["in_flight"],d["unreadable"]
@@ -253,7 +274,7 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
-     --request-id "agm-daemon-update-$HEAD_SHA" \
+     --request-id "agm-daemon-update-$HEAD_SHA" ${REVIEW[@]+"${REVIEW[@]}"} \
      --owns daemon --owns web --owns Cargo.lock >> "$LOG" 2>&1; then
   echo "$HEAD_SHA" > "$STATE"
   log "已派工 agm-daemon-update-$HEAD_SHA"

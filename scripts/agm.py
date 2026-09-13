@@ -112,6 +112,33 @@ def check_loopback(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def self_bot_id(cfg: dict) -> str:
+    """這支 CLI 代表誰說話。雙角色部署寫 `self_bot_id`；舊的只有 manager_bot_id（那時只有一顆 AGM）。"""
+    v = cfg.get("self_bot_id")
+    if isinstance(v, str) and v:
+        return v
+    return manager_bot_id(cfg)
+
+
+def runtime_role(cfg: dict) -> str:
+    """`patrol`（巡檢，使用者入口）或 `responder`（協調者）。舊的 runtime.json 沒寫就是巡檢。"""
+    v = cfg.get("role")
+    return v if v in ("patrol", "responder") else "patrol"
+
+
+def bot_auth_headers(cfg: dict) -> dict:
+    """角色身分的證明：pane 環境裡的 `AM_BOT_ID` + `AM_HOOK_TOKEN`（daemon 注入的那顆 bot 自己的
+    hook token）。daemon 只認這兩個對得上的，模型打出來的角色名字不算數。
+
+    只在 `AM_BOT_ID` 就是這個 runtime 的 `self_bot_id` 時才帶：在別的 pane 裡借用這支 CLI，
+    不會把那顆 bot 的 token 送出去冒充角色。"""
+    bot, tok = os.environ.get("AM_BOT_ID", ""), os.environ.get("AM_HOOK_TOKEN", "")
+    mine = cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id")
+    if bot and tok and bot == mine:
+        return {"X-AM-Bot-Id": bot, "X-AM-Bot-Token": tok}
+    return {}
+
+
 def manager_bot_id(cfg: dict) -> str:
     # `manager_bot_id` 是正式欄位；`bot_id` 是早期部署寫的名字，一起吃掉。
     for key in ("manager_bot_id", "bot_id"):
@@ -132,11 +159,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, base: str, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, base: str, timeout: float = DEFAULT_TIMEOUT, extra_headers: dict | None = None) -> None:
         # 再擋一次 loopback：Client 可能被別的路徑（測試、之後的呼叫端）直接建出來。
         self.base = check_loopback(base).rstrip("/")
         self.timeout = timeout
         self._token: str | None = None
+        # 角色身分（見 bot_auth_headers）。只跟著需要驗證的 API 請求走，不送去 /api/session。
+        self._extra = dict(extra_headers or {})
         # ProxyHandler({}) 是關鍵：urllib 預設吃 HTTP_PROXY/ALL_PROXY，那會把帶著
         # token 的請求整包送去代理伺服器。本機 daemon 不需要任何 proxy。
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -164,6 +193,7 @@ class Client:
             headers["Content-Type"] = "application/json"
         if auth:
             headers["X-AM-Token"] = self.token()
+            headers.update(self._extra)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as res:
@@ -465,6 +495,10 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     # 不會替你決定，真正的協調還是你的事。
     if args.owns:
         body["ownership"] = list(args.owns)
+    # 回報給哪個角色驗收。不寫就是「誰派的誰驗」（daemon 依 bot token 認角色）；巡檢的例行
+    # 維運（gc、健康追查）寫 patrol，其餘交給協調者。
+    if getattr(args, "review_by", None):
+        body["review_role"] = args.review_by
     # 通知：只是把話說給 bot 聽（「收到」「進 idle」「看完即可」），送到就結案。
     # 不加這個旗標的一律照舊：回合結束停在 awaiting_review 等你驗收。
     if getattr(args, "notice", False):
@@ -650,8 +684,11 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
     `loaded` 不會出現 `verified`：daemon 只能在啟動 CLI 時把 persona 傳進去，看不到 session
     現在握著什麼。`needs_restart=false` 不等於新版已經生效。
     """
+    base = "/api/supervisor/responder/persona" if getattr(args, "role", None) == "responder" else "/api/supervisor/persona"
+    if getattr(args, "role", None) == "responder" and args.op == "adopt-embedded":
+        raise AgmError("bad_args", "協調者的人設用 set 更新（沒有 adopt-embedded）", 2)
     if args.op == "show":
-        out = optional_get(client, "/api/supervisor/persona")
+        out = optional_get(client, base)
         if out is None:
             raise AgmError("unsupported", "這台 daemon 還沒有 persona 介面（需要更新 agents-managerd）", 6)
         # 預設不要把整段人設倒進對話；要全文才加 --full。
@@ -676,7 +713,7 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
     body = {"text": text}
     if args.expected_version is not None:
         body["expected_version"] = args.expected_version
-    return client.put("/api/supervisor/persona", body)
+    return client.put(base, body)
 
 
 def cmd_remote(client: Client, cfg: dict, args) -> object:
@@ -725,7 +762,31 @@ def cmd_incidents(client: Client, cfg: dict, args) -> object:
 def cmd_inbox(client: Client, cfg: dict, args) -> object:
     # 預設是「工作視圖」：只有還沒 ack 的（pending + delivered），最舊的在前，所以照順序
     # ack 真的清得掉。--all 才是含 handled 的稽核視圖（最新在前）。
-    return client.get("/api/supervisor/inbox", {"all": "1" if args.all else None, "limit": args.limit})
+    role = getattr(args, "role", None)
+    if role == "mine":
+        role = runtime_role(cfg)
+    return client.get("/api/supervisor/inbox", {"all": "1" if args.all else None, "limit": args.limit, "role": role})
+
+
+def cmd_whoami(client: Client, cfg: dict, args) -> object:
+    """這支 CLI 以哪個角色、哪顆 bot 說話，以及 daemon 能不能驗證（不印 token）。"""
+    headers = bot_auth_headers(cfg)
+    return {
+        "role": runtime_role(cfg),
+        "self_bot_id": cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id"),
+        "manager_bot_id": cfg.get("manager_bot_id"),
+        "bot_token_present": bool(headers),
+    }
+
+
+def cmd_responder(client: Client, cfg: dict, args) -> object:
+    """協調者（responder）：狀態、建立、啟停。建立不會啟動，要再 start 一次。"""
+    if args.op == "show":
+        return client.get("/api/supervisor/responder")
+    if args.op == "setup":
+        body = {k: v for k, v in (("identity", args.identity), ("model", args.model), ("effort", args.effort)) if v}
+        return client.post("/api/supervisor/responder/setup", body)
+    return client.post(f"/api/supervisor/responder/{args.op}", {})
 
 
 def cmd_ack(client: Client, cfg: dict, args) -> object:
@@ -835,7 +896,8 @@ def _with_relay(body: dict, cfg: dict, args) -> None:
     if getattr(args, "as_daemon", False):
         body["relay_from"] = "daemon"
         return
-    manager = cfg.get("manager_bot_id") or cfg.get("bot_id")
+    # 以這個 runtime 自己的 bot 發言：協調者的回報不能掛在巡檢名下。
+    manager = cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id")
     if not manager:
         raise AgmError("bad_args", "runtime.json 沒有 manager_bot_id，無法標示這則回報是誰說的", 2)
     body["relay_from"] = manager
@@ -940,6 +1002,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--mission", help="群組任務 id：這件交辦屬於哪個任務（要和 --role 一起給）")
     s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="在任務裡擔任的角色")
+    s.add_argument(
+        "--review-by",
+        dest="review_by",
+        choices=["patrol", "responder"],
+        help="回報給哪個 AGM 角色驗收（預設：派工的角色自己；巡檢的例行維運寫 patrol）",
+    )
     s.set_defaults(func=cmd_assign)
 
     s = sub.add_parser("assignments", help="列出交辦，或用 --id 查一筆")
@@ -1014,6 +1082,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--expected-version", type=int, dest="expected_version", help="set：樂觀鎖，對不上就拒絕")
     s.add_argument("--reason", help="adopt-embedded：為什麼要換成內嵌版")
     s.add_argument("--actor", default="AGM", help="adopt-embedded：誰決定的（預設 AGM）")
+    s.add_argument("--role", choices=["patrol", "responder"], default="patrol", help="哪個角色的人設（預設巡檢）")
     s.set_defaults(func=cmd_persona)
 
     s = sub.add_parser("remote", help="遠端入口：show / observe（人工確認會過期）")
@@ -1034,10 +1103,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("inbox", help="還沒 ack 的通知（最舊在前）；--all 才含已處理的")
     s.add_argument("--all", action="store_true", help="含 state=handled 的事件（最新在前）")
+    s.add_argument("--role", choices=["patrol", "responder", "mine"], help="只看某個 AGM 角色收的（mine＝runtime.json 的角色）")
     s.add_argument("--limit", type=int, default=200, help="最多幾筆（預設 200，上限 1000）")
     s.set_defaults(func=cmd_inbox)
 
-    s = sub.add_parser("ack", help="確認已處理一則通知")
+    s = sub.add_parser("whoami", help="這支 CLI 代表哪個 AGM 角色（patrol／responder）與 bot")
+    s.set_defaults(func=cmd_whoami)
+
+    s = sub.add_parser("responder", help="AGM 協調者：show / setup / start / stop（setup 不會啟動）")
+    s.add_argument("op", choices=["show", "setup", "start", "stop"])
+    s.add_argument("--identity", help="setup：帳號（預設沿用，第一次 cc0）")
+    s.add_argument("--model", help="setup：模型（預設沿用，第一次 opus）")
+    s.add_argument("--effort", help="setup：強度（預設沿用，第一次 high）")
+    s.set_defaults(func=cmd_responder)
+
+    s = sub.add_parser("ack", help="確認已處理一則通知（帶角色 token 時只能 ack 自己角色收的）")
     s.add_argument("event_id")
     s.set_defaults(func=cmd_ack)
 
@@ -1101,7 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
     indent = None if args.compact else 2
     try:
         cfg = load_runtime(args.runtime_dir)
-        client = Client(daemon_url(cfg), args.timeout)
+        client = Client(daemon_url(cfg), args.timeout, bot_auth_headers(cfg))
         out = args.func(client, cfg, args)
     except AgmError as e:
         json.dump(e.to_json(), sys.stderr, ensure_ascii=False, indent=indent)
