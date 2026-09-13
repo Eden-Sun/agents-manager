@@ -1731,8 +1731,9 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
 
 截圖 `docs/screenshots/sidebar-head/288-stack.png`。
 
-點 RAM 的下拉（`.mem-pop`）不能再被 `.sidebar-head { overflow: hidden }` 裁掉；標題列改
-`overflow: visible` 並抬 z-index，清單從中欄置中往主畫面長出來。
+RAM 清單要 **portal 到 `document.body`、`position: fixed`**。掛在側欄格子裡再 `translateX(-50%)`
+會：左半被 `.app`／側欄裁掉、右半被主標題列蓋住（2026-09-13 實拍）。對齊 RAM 按鈕、z-index 80
+蓋過 `.main-head`。
 
 ## 桌機右欄可以嵌一個手機預覽（2026-09-13）
 

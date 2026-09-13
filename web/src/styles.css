@@ -10056,21 +10056,8 @@ button.run-debug-toggle:hover {
    同一個東西。差別只在這張是表格——使用者要在幾十列裡比大小、找出哪些能砍。 */
 .mem-wrap {
   position: relative;
-  z-index: 6;
   flex: none;
   display: inline-flex;
-}
-
-/* 側欄中欄的 RAM：下拉比側欄寬，要畫進主畫面，不能被側欄或標題列裁。 */
-.head-ram .mem-wrap {
-  z-index: 8;
-}
-
-.head-ram .mem-pop {
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(560px, calc(100vw - 24px));
-  max-width: none;
 }
 
 .mem-open {
@@ -10087,12 +10074,10 @@ button.run-debug-toggle:hover {
 }
 
 .mem-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 40;
-  width: 560px;
-  max-width: 92vw;
+  position: fixed;
+  z-index: 80;
+  width: min(560px, calc(100vw - 24px));
+  max-width: none;
   max-height: 460px;
   overflow-y: auto;
   display: grid;
