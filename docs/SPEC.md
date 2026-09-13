@@ -1711,6 +1711,39 @@ session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去
 - persona：新版把持久版當權威，舊版的 `ensure_env` 仍會用內嵌版覆寫。回滾前先確認內嵌版就是你要的那份，
   否則舊 binary 跑一次 setup 就把自訂人設蓋掉（§18.11 修的就是這個）。
 
+### 18.14 群組任務（mission）的 AGM runbook（2026-09-13）
+
+設計 `docs/goals/agm-missions.md`，API 契約 `docs/API.md`「群組任務」。daemon 只做確定性的部分（任務／事件持久化、
+身分挑選、輪數上限、fast-forward 交付）；下面是 AGM 這一側的步驟，每一步都用 `bin/agm mission …`／`bin/agm assign --mission`，
+不拼 curl。一個任務同時只有一件開著的交辦；`phase` 由交辦推導，AGM 不另存狀態。
+
+1. **收到 `mission_created`**（inbox）：讀 `mission get`。指示不清或範圍太大 → 在群組問使用者（`mission event --kind note`
+   ＋ `mission pause --reason clarify`），不猜。與其他未結案交辦的 ownership 重疊 → 先排隊，在任務記 `note`。
+2. **執行者**：`mission pick --role executor` → `use` 就用該身分（`model` 有值要換模型）開臨時 bot（乾淨 worktree，命名
+   `agm-mission-<id 尾 6 碼>-exec`），`assign --mission <id> --role executor`，文字含：指示原文、cwd、ownership、完成條件、
+   「推 origin/main 由 AGM 交付，執行者只推 task branch」。`wait` → 什麼都不做，controller 會依 `quota_blocked` 續派；
+   `ask_user` 只會出現在驗證者。
+3. **reviewer**：執行者回合結束並 `review accept` 後，`mission pick --role reviewer --exclude <執行者身分>`；
+   `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`
+   （`approve|changes`＋findings）。`changes` → `mission round`（409 `max_rounds` 就停，任務已 `paused`，在群組問人）
+   → 對執行者那件 `review followup`，文字帶 findings。
+4. **驗證者**：`mission pick --role verifier`；`ask_user` 時任務已停在 `no_fable_for_verifier`，在群組問使用者要等哪個身分
+   或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
+   `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified`（帶數字與截圖路徑）；
+   失敗 → `mission round` → followup 退回執行者。
+5. **交付**：`mission deliver --worktree <執行者 worktree>`。409 `not_verified` 代表流程漏了第 4 步；其餘 409 任務已
+   `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人，**不 force、不自己 rebase 後硬推**。
+   交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
+6. **回報與收尾**：`mission complete --result-summary`（commit／PR、驗證證據、輪數），群組時間軸由 daemon 記 `completed`；
+   臨時 bot 停止並刪除（保留 `mission_events` 作證據）。
+7. **撞額度換手（`mission_identity_switch`）**：那件交辦停在 `awaiting_review`／`identity_switch`。用 `to_identity`（與
+   `model`）開新臨時 bot，對原交辦 `review followup`，文字帶進度摘要（已做／未做／未提交檔案、worktree 路徑）；
+   followup 會沿用 `mission_id`／`role`。同身分同模型的 `wait` 由 daemon 自己重送，AGM 不介入。
+8. **停下問人的統一原則**：`paused_reason ∈ max_rounds | no_fable_for_verifier | push_main_failed | pr_failed | clarify`
+   都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續；使用者取消 → `mission cancel`。
+9. **不做的事**：不代使用者回答問卷；不在一個任務裡同時開兩件交辦；不用 `/loop` 輪詢任務（`mission_updated` 與 inbox
+   事件會來）；臨時 bot 不開 remote。
+
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 
 - 線路格式：每個請求一條 JSON line `{"id":"<string>","method":"...","params":{...}}`，`id` **必須是字串**；回應 `{"id","result":{"type":...}}` 或 `{"id","error":{"code","message"}}`。錯誤碼例：`agent_not_found`、`workspace_not_found`、`pane_not_found`、`agent_not_ready`、`agent_blocked`、`invalid_request`。
