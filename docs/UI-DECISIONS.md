@@ -1719,6 +1719,18 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
 
 截圖 `docs/screenshots/sidebar-head/288-after.png`。
 
+## 側欄標題列三欄：左 pane／連線、中 RAM、右 Chrome／ego（2026-09-13）
+
+收合寬度下上一版把分頁跟 pane 疊在同一欄，ego 不見、RAM 漂在中間對不齊。定成三欄：
+
+- **左**：`AG Man`，下面 `pane N` 與連線燈。
+- **中**：RAM（已用＋剩，同一行）。
+- **右**：上 Chrome、下 ego，各一顆徽章。
+
+手機抽屜仍藏標題，三欄位置不變。
+
+截圖 `docs/screenshots/sidebar-head/288-stack.png`。
+
 ## 桌機右欄可以嵌一個手機預覽（2026-09-13）
 
 手機版的版面問題只有在窄視窗才看得到，開發時的常態卻是寬視窗；以前要驗得另開視窗拉窄或

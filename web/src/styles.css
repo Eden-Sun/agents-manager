@@ -290,37 +290,56 @@ button:disabled {
 }
 
 .sidebar-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
   min-height: 46px;
-  padding: 4px 14px;
+  padding: 6px 10px 6px 14px;
   border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
 
-/* 徽章群：第一列 pane / RAM / 連線，第二列瀏覽器分頁。寬度跟第一列走，分頁在列內折，
-   不要 nowrap 把整排撐過側欄把「已連線」切掉。 */
-.head-badges {
-  margin-left: auto;
+/* 左欄：標題在上，pane 數與連線在下。 */
+.head-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   min-width: 0;
-  display: grid;
-  grid-template-columns: auto auto auto;
-  column-gap: 8px;
-  row-gap: 3px;
-  align-items: center;
-  justify-items: start;
 }
 
-.head-badges .tabs-badge {
-  grid-column: 1 / -1;
+.head-brand-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.head-brand-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 中欄 RAM。側欄不夠寬時「剩 N」可以在這一格裡折第二行，不要去擠左右兩欄。 */
+.head-ram {
+  justify-self: center;
   min-width: 0;
-  max-width: 100%;
+}
+
+.head-ram .mem-badge {
   flex-wrap: wrap;
   white-space: normal;
+  max-width: 100%;
+  justify-content: center;
 }
 
-/* 側欄 ~288px，「已連線」四個字常被右邊界切成「已連」——殘字比沒有更糟。燈還在，全文在 title。 */
+.head-ram .mem-free {
+  flex: 1 0 100%;
+  text-align: center;
+}
+
+/* 側欄放不下「已連線」四字（會切成「已連」），燈＋title 就夠。 */
 .sidebar-head .conn-label {
   display: none;
 }
@@ -328,16 +347,17 @@ button:disabled {
 /* 本機瀏覽器分頁數 / 吃的 RAM。跟 pane / RAM 同一種徽章，超線才變琥珀色。 */
 .tabs-badge {
   flex: none;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: none;
   font-size: 11px;
   line-height: 1.6;
   cursor: default;
+  justify-self: end;
 }
 
 .tabs-badge .tabs-v {
@@ -351,10 +371,19 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  white-space: nowrap;
 }
 
 .tabs-badge .tabs-one + .tabs-one {
-  margin-left: 4px;
+  margin-left: 0;
+}
+
+.tabs-badge.hot .tabs-one {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
 }
 
 .browser-icon {
@@ -525,14 +554,7 @@ button:disabled {
   white-space: nowrap;
 }
 
-/* 標題貼左、徽章群（`.head-badges`）貼右；MOCK 徽章夾在中間時也照樣。 */
-.sidebar-head h1 + .mock-badge {
-  margin-left: auto;
-}
 
-.sidebar-head h1 + .mock-badge + .head-badges {
-  margin-left: 0;
-}
 
 .conn {
   display: inline-flex;
@@ -10631,18 +10653,9 @@ button.run-debug-toggle:hover {
     white-space: nowrap;
   }
 
-  /* 兩列的 grid 攤成一列。`h1` 已經是絕對定位，`margin-left: auto` 沒有東西可以推，
-     所以這裡自己補一個推到最右。 */
-  .sidebar-head .head-badges {
-    display: flex;
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 8px;
-    margin-left: 0;
-  }
-
+  /* 標題藏了之後仍是三欄：左 pane／連線、中 RAM、右 Chrome／ego。 */
   .sidebar-head {
-    justify-content: flex-end;
+    justify-content: unset;
   }
 
   /*

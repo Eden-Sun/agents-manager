@@ -1089,16 +1089,21 @@ export function Sidebar() {
   return (
     <>
       <div className="sidebar-head">
-        {/* 縮寫是為了把寬度讓給右邊那排徽章；全名留在 title 裡。 */}
-        <h1 title="Agents Manager">AG Man</h1>
-        {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-        {/* 上列 pane / RAM / 連線（RAM 含「剩 N」同一行）；下列瀏覽器分頁，寬度跟上面走。 */}
-        <div className="head-badges">
-          <PaneBadge />
-          <MemBadge />
-          <ConnBadge socket={socket} connected={connected} />
-          <TabsBadge />
+        {/* 左：標題；下面 pane 數與連線。中：RAM。右：上 Chrome、下 ego。 */}
+        <div className="head-brand">
+          <div className="head-brand-title">
+            <h1 title="Agents Manager">AG Man</h1>
+            {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
+          </div>
+          <div className="head-brand-meta">
+            <PaneBadge />
+            <ConnBadge socket={socket} connected={connected} />
+          </div>
         </div>
+        <div className="head-ram">
+          <MemBadge />
+        </div>
+        <TabsBadge />
       </div>
 
       {/* claude 有新版等著套用時的那一條（SPEC §6.9）。平常不佔位，只在真的有更新時出現。 */}
