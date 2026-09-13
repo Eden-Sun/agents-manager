@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { fetchMemProcesses, killMemProcess } from '../api'
 import type { MemProcess, MemProcesses } from '../api/types'
 import { LOCAL_HOST } from '../api/types'
@@ -97,6 +98,9 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
 
   const load = useCallback(async () => {
@@ -119,13 +123,43 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
     return () => clearInterval(t)
   }, [open, load])
 
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null)
+      return
+    }
+    const place = () => {
+      const el = btnRef.current
+      const pop = popRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const margin = 8
+      const w = pop?.offsetWidth || Math.min(560, window.innerWidth - 24)
+      const h = pop?.offsetHeight || 280
+      let left = r.left
+      if (left + w + margin > window.innerWidth) left = window.innerWidth - w - margin
+      left = Math.max(margin, left)
+      let top = r.bottom + 6
+      if (top + h + margin > window.innerHeight) top = Math.max(margin, r.top - 6 - h)
+      setPos({ left, top })
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, data, loading])
+
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node
       // pane 視窗是 portal 到 body 的，不在 `wrap` 裡；點它不算「點到外面」。
       if ((t as Element).closest?.('.mem-pane-backdrop')) return
-      if (wrap.current && !wrap.current.contains(t)) setOpen(false)
+      if (btnRef.current?.contains(t) || popRef.current?.contains(t)) return
+      setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -143,17 +177,14 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   // 點「自己開的 pane」開的那個視窗（`MemPaneModal`）；清單留在後面不關。
   const [peek, setPeek] = useState<MemProcess | null>(null)
 
-  return (
-    <div className="mem-wrap" ref={wrap}>
-      <button type="button" className="mem-open" aria-expanded={open} aria-haspopup="dialog" aria-label={`${title} 的記憶體明細`} onClick={() => {
-          setOpen((v) => !v)
-          if (!open) void load()
-        }}
-      >
-        {children}
-      </button>
-      {open ? (
-        <div className="mem-pop" role="dialog" aria-label={`${title} 的記憶體明細`}>
+  const pop = open ? (
+        <div
+          ref={popRef}
+          className="mem-pop"
+          role="dialog"
+          aria-label={`${title} 的記憶體明細`}
+          style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden', left: 0, top: 0 }}
+        >
           <div className="mem-pop-head">
             <span className="mem-pop-title">
               {title} RAM {humanBytes(row?.total_bytes ?? 0)} · herdr {humanBytes(row?.herdr_bytes ?? 0)} · {row?.processes ?? 0} 個 process
@@ -223,7 +254,25 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
           ) : null}
           <p className="mem-pop-foot">結束的是那個 pane 裡的程序，pane 本身還在。</p>
         </div>
-      ) : null}
+  ) : null
+
+  return (
+    <div className="mem-wrap" ref={wrap}>
+      <button
+        ref={btnRef}
+        type="button"
+        className="mem-open"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={`${title} 的記憶體明細`}
+        onClick={() => {
+          setOpen((v) => !v)
+          if (!open) void load()
+        }}
+      >
+        {children}
+      </button>
+      {pop ? createPortal(pop, document.body) : null}
       {open && peek ? <MemPaneModal host={host} p={peek} onClose={() => setPeek(null)} /> : null}
     </div>
   )
