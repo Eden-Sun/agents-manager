@@ -25,6 +25,7 @@ import { ImageIcon, formatSize, useDropTarget } from './Attachments'
 import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
 import type { ShelfItem } from '../store/shelf'
 import { useStore } from '../store/store'
+import { MobilePreviewButton } from './MobilePreview'
 
 /** Collapsed / expanded is a layout preference, so it — and only it — is remembered. */
 const OPEN_KEY = 'am.shelf.open'
@@ -345,6 +346,7 @@ export function ImageShelf() {
                 ✕
               </button>
             ) : null}
+            <MobilePreviewButton />
             <button
               type="button"
               className="icon-btn shelf-fold icon-tip"

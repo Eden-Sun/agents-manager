@@ -11,8 +11,8 @@
  * `docs/UI-DECISIONS.md`），浮動面板會蓋住時間軸與輸入框。
  *
  * 預設關閉、設定持久（localStorage，見 `store/mobilePreview.ts`）：這是 debug 工具，不該從一般
- * 使用者的對話寬度先扣
- * 一塊。開關在「環境設定 → 顯示」。
+ * 使用者的對話寬度先扣一塊。開關是右欄標題列上那顆手機圖示（2026-09-13 使用者：「手機預覽做在
+ * 右邊 toggle 就好，不用在設定裡」）——要看的時候眼睛本來就在右欄，不必再繞進環境設定。
  *
  * 只在桌機出現：≤1024px 右欄已經變成底部那一條，塞不下 390px，而且那時候本來就是手機版。
  */
@@ -29,23 +29,26 @@ import {
 } from '../store/mobilePreview'
 import './mobilePreview.css'
 
-/** 「環境設定 → 顯示」裡的那顆開關。 */
-export function MobilePreviewToggle() {
+/** 右欄標題列上的手機預覽開關（圖片暫存那一列，⤢ 收合鍵左邊）。 */
+export function MobilePreviewButton() {
   const open = useMobilePreviewOpen()
   const drawer = useMediaQuery(DRAWER_QUERY)
-  if (IN_MOBILE_PREVIEW) return null
+  // 預覽裡那份 app 不再長出巢狀預覽；視窗已經窄到手機／平板版面時，預覽本來就不會顯示。
+  if (IN_MOBILE_PREVIEW || drawer) return null
   return (
-    <div className="mp-toggle">
-      <span className="mp-toggle-label">手機預覽</span>
-      <label className="mp-toggle-switch">
-        <input type="checkbox" checked={open} onChange={(e) => setMobilePreviewOpen(e.target.checked)} />
-        <span>
-          在右欄圖片暫存區下方嵌一個 iPhone 16（{MOBILE_PREVIEW_W}×{MOBILE_PREVIEW_H}）的預覽，
-          畫面上縮到 {Math.round(MOBILE_PREVIEW_SCALE * 100)}%
-        </span>
-      </label>
-      {drawer ? <p className="mp-toggle-note">目前視窗寬度已經是手機／平板版面，預覽不會顯示。</p> : null}
-    </div>
+    <button
+      type="button"
+      className={`icon-btn mp-button icon-tip${open ? ' on' : ''}`}
+      aria-pressed={open}
+      aria-label={open ? '關閉手機預覽' : '開啟手機預覽'}
+      data-tip={open ? '關閉 · 手機預覽' : `手機預覽 · ${MOBILE_PREVIEW_W}×${MOBILE_PREVIEW_H}`}
+      onClick={() => setMobilePreviewOpen(!open)}
+    >
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <rect x="4.25" y="1.75" width="7.5" height="12.5" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        <path d="M7 11.75h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    </button>
   )
 }
 
@@ -76,7 +79,7 @@ export function MobilePreview() {
         <button
           type="button"
           className="icon-btn"
-          title="關閉手機預覽（可在環境設定 → 顯示 重新開啟）"
+          title="關閉手機預覽（右欄標題列的手機圖示可以重新開啟）"
           aria-label="關閉手機預覽"
           onClick={() => setMobilePreviewOpen(false)}
         >

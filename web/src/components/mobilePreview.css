@@ -116,30 +116,10 @@ body:has(.mobile-preview) .app > .shelf.open {
   background: var(--bg);
 }
 
-/* ------------------------------------------------------- 環境設定 → 顯示 的那顆開關 */
+/* ------------------------------------------------ 右欄標題列上的手機預覽開關（2026-09-13） */
 
-.mp-toggle {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.mp-toggle-label {
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.mp-toggle-switch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.mp-toggle-note {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-faint);
+/* 開著的時候要看得出來是開著的：跟旁邊的 ＋／» 同一種 icon 鍵，只是換成 accent 色。 */
+.mp-button.on {
+  color: var(--accent-ink);
+  background: var(--bg-active);
 }
