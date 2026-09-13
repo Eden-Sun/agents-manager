@@ -1235,6 +1235,8 @@ const MISSION_EVENT_KINDS = [
   'cancelled',
   'delivered',
   'completed',
+  'question',
+  'answer',
 ] as const
 
 export function toMission(v: unknown): Mission | null {

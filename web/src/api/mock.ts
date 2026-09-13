@@ -539,6 +539,8 @@ interface MockMission {
   paused_reason: string | null
   paused_detail: string | null
   result_summary: string | null
+  /** 非 null ＝ 這筆是某個成果的續作。 */
+  parent_mission_id: string | null
   created_at: string
   updated_at: string
   completed_at: string | null
@@ -565,6 +567,8 @@ interface MockMissionEvent {
   text: string
   relay_from: string | null
   payload: Rec | null
+  reply_to: string | null
+  client_request_id: string | null
   created_at: string
 }
 
@@ -928,6 +932,9 @@ export class MockTransport implements Transport {
       if (method === 'POST' && (seg[2] === 'pause' || seg[2] === 'resume' || seg[2] === 'cancel')) {
         return this.controlMission(id, seg[2], b)
       }
+      if (method === 'POST' && seg[2] === 'question') return this.askMission(id, b)
+      if (method === 'POST' && seg[2] === 'answer') return this.answerMission(id, b)
+      if (method === 'POST' && seg[2] === 'revise') return this.reviseMission(id, b)
     }
 
     // ---- SPEC-team §10 -------------------------------------------------
@@ -1574,8 +1581,12 @@ export class MockTransport implements Transport {
 
   // ---- 群組任務 -------------------------------------------------------
 
+  private missionStatus(m: MockMission): string {
+    return m.cancelled_at ? 'cancelled' : m.completed_at ? 'done' : m.paused_reason ? 'paused' : 'open'
+  }
+
   private missionJson(m: MockMission): Rec {
-    const status = m.cancelled_at ? 'cancelled' : m.completed_at ? 'done' : m.paused_reason ? 'paused' : 'open'
+    const status = this.missionStatus(m)
     // P1b：`phase` 從交辦推導（最新一件還開著的那件的 role）。
     const mine = this.missionAssignments.filter((a) => a.mission_id === m.id)
     const openOne = [...mine].reverse().find((a) => !a.completed_at)
@@ -1614,7 +1625,14 @@ export class MockTransport implements Transport {
     return a
   }
 
-  private missionEvent(missionId: string, kind: string, text: string, payload: Rec | null = null, relayFrom: string | null = null) {
+  private missionEvent(
+    missionId: string,
+    kind: string,
+    text: string,
+    payload: Rec | null = null,
+    relayFrom: string | null = null,
+    replyTo: string | null = null,
+  ) {
     const e: MockMissionEvent = {
       id: ulid('mev'),
       mission_id: missionId,
@@ -1622,6 +1640,8 @@ export class MockTransport implements Transport {
       text,
       relay_from: relayFrom,
       payload,
+      reply_to: replyTo,
+      client_request_id: null,
       created_at: now(),
     }
     this.missionEvents.push(e)
@@ -1646,6 +1666,7 @@ export class MockTransport implements Transport {
       project_id: projectId,
       client_request_id: reqId,
       text: String(b.text ?? ''),
+      parent_mission_id: null,
       delivery_mode: b.delivery_mode === 'push_main' ? 'push_main' : 'pr',
       executor_kind: (b.executor_kind === 'codex' || b.executor_kind === 'grok' ? b.executor_kind : 'claude') as BotKind,
       on_5h_limit: b.on_5h_limit === 'switch' ? 'switch' : 'wait',
@@ -1677,10 +1698,19 @@ export class MockTransport implements Transport {
   private missionDetail(id: string): Rec {
     const m = this.missions.find((x) => x.id === id)
     if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    const parent = m.parent_mission_id ? this.missions.find((x) => x.id === m.parent_mission_id) : undefined
     return {
       ...this.missionJson(m),
       events: this.missionEvents.filter((e) => e.mission_id === id),
       assignments: this.missionAssignments.filter((a) => a.mission_id === id),
+      revisions: this.missions
+        .filter((x) => x.parent_mission_id === id)
+        .map((x) => ({ id: x.id, text: x.text, status: this.missionStatus(x), created_at: x.created_at, result_summary: x.result_summary })),
+      parent: m.parent_mission_id
+        ? parent
+          ? { id: parent.id, text: parent.text, status: this.missionStatus(parent), result_summary: parent.result_summary }
+          : { id: m.parent_mission_id, missing: true }
+        : null,
     }
   }
 
@@ -1696,6 +1726,69 @@ export class MockTransport implements Transport {
     )
     this.touchMission(m)
     return { event: e }
+  }
+
+  /** 追問：留一句話就好，任務狀態完全不動（跟 daemon 一樣，已完成也能問）。 */
+  private askMission(id: string, b: Rec): Rec {
+    const m = this.missions.find((x) => x.id === id)
+    if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    const dup = this.missionEvents.find((e) => e.mission_id === id && e.client_request_id === String(b.client_request_id ?? ''))
+    if (dup) return { event: dup, replayed: true }
+    const e = this.missionEvent(id, 'question', String(b.text ?? ''))
+    e.client_request_id = String(b.client_request_id ?? '')
+    this.touchMission(m)
+    // demo 用：AGM 隔一會兒回一句，讓畫面看得到一問一答串起來的樣子。
+    setTimeout(() => {
+      const a = this.missionEvent(id, 'answer', '看過了：這個改動只動到文案，不影響登入流程。', null, 'bot-agm', e.id)
+      a.client_request_id = `${e.client_request_id}-reply`
+      this.touchMission(m)
+    }, 900)
+    return { event: e, replayed: false }
+  }
+
+  private answerMission(id: string, b: Rec): Rec {
+    const m = this.missions.find((x) => x.id === id)
+    if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    const e = this.missionEvent(id, 'answer', String(b.text ?? ''))
+    e.client_request_id = String(b.client_request_id ?? '')
+    const resumed = Boolean(m.paused_reason)
+    if (resumed) {
+      m.paused_reason = null
+      m.paused_detail = null
+      this.missionEvent(id, 'resumed', '繼續', null, 'daemon')
+    }
+    this.touchMission(m)
+    return { event: e, replayed: false, resumed, mission: this.missionJson(m) }
+  }
+
+  /** 續作：**新的一筆**任務，原成果原封不動。 */
+  private reviseMission(id: string, b: Rec): Rec {
+    const parent = this.missions.find((x) => x.id === id)
+    if (!parent) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    if (!parent.completed_at) throw new ApiError(409, { error: 'conflict', reason: 'not_completed' }, 'not completed')
+    const open = this.missions.find((x) => x.parent_mission_id === id && !x.completed_at && !x.cancelled_at)
+    if (open) throw new ApiError(409, { error: 'conflict', reason: 'revision_in_progress', mission_id: open.id }, 'revision in progress')
+    const child: MockMission = {
+      ...parent,
+      id: ulid('msn'),
+      client_request_id: String(b.client_request_id ?? ''),
+      text: String(b.text ?? ''),
+      parent_mission_id: parent.id,
+      paused_reason: null,
+      paused_detail: null,
+      result_summary: null,
+      rounds_used: 0,
+      created_at: now(),
+      updated_at: now(),
+      completed_at: null,
+      cancelled_at: null,
+    }
+    this.missions.unshift(child)
+    this.missionEvent(child.id, 'instruction', child.text)
+    this.missionEvent(id, 'note', `追加修改：已開續作任務 ${child.id}`, { revision_mission_id: child.id }, 'daemon')
+    this.touchMission(parent)
+    this.emit('mission_updated', { mission_id: child.id, project_id: child.project_id, status: 'open' })
+    return { ...this.missionJson(child), created: true }
   }
 
   private controlMission(id: string, action: 'pause' | 'resume' | 'cancel', b: Rec): Rec {
@@ -1730,6 +1823,7 @@ export class MockTransport implements Transport {
       project_id: projectId,
       client_request_id: ulid('req'),
       text: '',
+      parent_mission_id: null,
       delivery_mode: 'pr',
       executor_kind: 'claude',
       on_5h_limit: 'wait',
