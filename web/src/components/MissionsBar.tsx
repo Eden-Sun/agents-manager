@@ -7,8 +7,9 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { Mission } from '../api/types'
+import type { Mission, MissionDetail } from '../api/types'
 import {
+  missionQna,
   assignmentLabel,
   assignmentOpen,
   deliveryLabel,
@@ -157,9 +158,108 @@ function MissionDoneRow({ mission }: { mission: Mission }) {
           {mission.result_summary ? <p className="mission-summary">{mission.result_summary}</p> : null}
           <Evidence view={view} mission={mission} />
           {!detail ? <p className="mission-hint">讀取中…</p> : null}
+          {detail ? <FollowUp mission={mission} detail={detail} /> : null}
         </div>
       ) : null}
     </li>
+  )
+}
+
+/**
+ * 成果卡下面的追問與追加修改。
+ *
+ * 兩件事刻意分開，因為後果不同：追問只是問一句話（不會改碼、不會產生新交付），追加修改會**開一筆
+ * 新任務**。把它們做成同一個輸入框，使用者就沒辦法在按下去之前知道自己要的是哪一種。
+ */
+function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail }) {
+  const askMission = useStore((s) => s.askMission)
+  const reviseMission = useStore((s) => s.reviseMission)
+  const [mode, setMode] = useState<'ask' | 'revise' | null>(null)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const qna = missionQna(detail.events)
+  // 已經有一輪續作還沒結束時，不要再給第二個入口——daemon 也會擋（revision_in_progress）。
+  const openRevision = detail.revisions.find((r) => r.status !== 'done' && r.status !== 'cancelled') ?? null
+
+  const send = async () => {
+    const body = text.trim()
+    if (!body || busy) return
+    setBusy(true)
+    const ok = mode === 'revise' ? Boolean(await reviseMission(mission.id, body)) : await askMission(mission.id, body)
+    setBusy(false)
+    // 失敗就把字留著——重打一次很煩，而且失敗多半是暫時的。
+    if (ok) {
+      setText('')
+      setMode(null)
+    }
+  }
+
+  return (
+    <div className="mission-followup">
+      {qna.length > 0 ? (
+        <ul className="mission-qna">
+          {qna.map((pair) => (
+            <li key={pair.question.id}>
+              <p className="mission-qna-q">{pair.question.text}</p>
+              {pair.answer ? (
+                <p className="mission-qna-a">{pair.answer.text}</p>
+              ) : (
+                <p className="mission-hint">等 AGM 回覆…</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {/* 續作是獨立的一筆任務：進行中的會自己出現在上面的清單，完成的落到「已完成」那一段。
+          這裡只負責讓兩邊看得出彼此的關係，不另外做一套跳轉。 */}
+      {detail.revisions.length > 0 ? (
+        <ul className="mission-revisions">
+          {detail.revisions.map((r) => (
+            <li key={r.id}>
+              <span className="mission-tag">
+                {r.status === 'done' ? '續作已完成' : r.status === 'cancelled' ? '續作已取消' : '續作進行中'}
+              </span>
+              {r.text}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {mode ? (
+        <div className="mission-followup-form">
+          <textarea
+            className="mission-followup-input"
+            value={text}
+            autoFocus
+            rows={2}
+            placeholder={mode === 'ask' ? '想問什麼？（不會改動任何東西）' : '要再改什麼？會開一筆新任務'}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <div className="mission-followup-actions">
+            <button type="button" className="btn" disabled={busy} onClick={() => setMode(null)}>
+              取消
+            </button>
+            <button type="button" className="btn primary" disabled={busy || !text.trim()} onClick={() => void send()}>
+              {busy ? '送出中…' : mode === 'ask' ? '送出追問' : '建立續作'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mission-followup-actions">
+          <button type="button" className="btn" onClick={() => setMode('ask')}>
+            追問
+          </button>
+          {openRevision ? (
+            <span className="mission-hint">續作進行中（在上方的進行中清單裡），先看那一筆</span>
+          ) : (
+            <button type="button" className="btn" onClick={() => setMode('revise')}>
+              追加修改
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -1434,6 +1434,10 @@ export type MissionEventKind =
   | 'cancelled'
   | 'delivered'
   | 'completed'
+  /** 使用者對成果追問（已完成的任務也能問）。 */
+  | 'question'
+  /** 回覆：使用者回答暫停，或 AGM 回答某一則 `question`（`reply_to` 指回去）。 */
+  | 'answer'
 
 export interface Mission {
   id: string
@@ -1449,6 +1453,8 @@ export interface Mission {
   paused_reason: string | null
   paused_detail: string | null
   result_summary: string | null
+  /** 非 null ＝ 這筆是某個成果的續作（追加修改）。 */
+  parent_mission_id: string | null
   status: MissionStatus
   /**
    * P1b：daemon 從 assignments 推導的細分階段。`null` = 舊 daemon 沒給，前端自己從事件推。
@@ -1484,7 +1490,15 @@ export interface MissionEvent {
   text: string
   relay_from: string | null
   payload: Record<string, unknown> | null
+  /** `answer` 指回它回答的那則 `question` 的事件 id；其他事件是 null。 */
+  reply_to: string | null
   created_at: string
+}
+
+/** 成果卡上串起來的一問一答。`answer` 為 null ＝ 還在等 AGM 回。 */
+export interface MissionQna {
+  question: MissionEvent
+  answer: MissionEvent | null
 }
 
 /**
@@ -1509,6 +1523,26 @@ export interface MissionDetail extends Mission {
   events: MissionEvent[]
   /** 舊的在前。舊 daemon 沒有這個欄位就是空陣列。 */
   assignments: MissionAssignment[]
+  /** 這筆成果的續作（新的在前）。舊 daemon 沒給就是空陣列。 */
+  revisions: MissionRevisionRef[]
+  /** 這筆是從哪個成果續作來的。`missing` ＝ 來源任務已經不在了。 */
+  parent: MissionParentRef | null
+}
+
+export interface MissionRevisionRef {
+  id: string
+  text: string
+  status: MissionStatus
+  created_at: string
+  result_summary: string | null
+}
+
+export interface MissionParentRef {
+  id: string
+  text?: string
+  status?: MissionStatus
+  result_summary?: string | null
+  missing?: boolean
 }
 
 /** `POST /api/projects/:id/missions` 的 body（§11 的三個選項）。 */

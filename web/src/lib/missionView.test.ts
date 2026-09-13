@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentLabel, assignmentOpen, deliveryLabel, missionView, pausedLabel, phaseLabel, MISSION_PHASES } from './missionView.ts'
+import { assignmentLabel, assignmentOpen, deliveryLabel, missionQna, missionView, pausedLabel, phaseLabel, MISSION_PHASES } from './missionView.ts'
 import type { Mission, MissionEvent, MissionEventKind } from '../api/types.ts'
 
 function mission(over: Partial<Mission> = {}): Mission {
@@ -17,6 +17,7 @@ function mission(over: Partial<Mission> = {}): Mission {
     paused_reason: null,
     paused_detail: null,
     result_summary: null,
+    parent_mission_id: null,
     status: 'open',
     phase: null,
     created_at: '2026-09-13T01:00:00Z',
@@ -37,6 +38,7 @@ function ev(kind: MissionEventKind, text: string, payload: Record<string, unknow
     text,
     relay_from: null,
     payload,
+    reply_to: null,
     created_at: `2026-09-13T01:${String(seq).padStart(2, '0')}:00Z`,
   }
 }
@@ -246,4 +248,36 @@ test('最新進度不含 instruction：卡片標題那一句不會再印第二�
   assert.equal(echoed.latest, null)
   const real = missionView(m, [ev('instruction', m.text), ev('report', '改好 4 處')])
   assert.equal(real.latest?.text, '改好 4 處')
+})
+
+test('追問與回覆靠 reply_to 配對，不是靠時間順序猜', () => {
+  const q1 = ev('question', '這會影響登入嗎？')
+  const q2 = ev('question', '那設定頁呢？')
+  // 第二個問題先被回答：光看順序會配錯，reply_to 才是對的依據。
+  const a2: MissionEvent = { ...ev('answer', '設定頁沒動到'), reply_to: q2.id }
+  const a1: MissionEvent = { ...ev('answer', '不會，只動文案'), reply_to: q1.id }
+  const pairs = missionQna([q1, q2, a2, a1])
+  assert.equal(pairs.length, 2)
+  assert.equal(pairs[0]?.question.id, q1.id)
+  assert.equal(pairs[0]?.answer?.text, '不會，只動文案')
+  assert.equal(pairs[1]?.answer?.text, '設定頁沒動到')
+})
+
+test('還沒被回答的追問留 null，畫面才說得出「還在等」', () => {
+  const q = ev('question', '有副作用嗎？')
+  const pairs = missionQna([q])
+  assert.equal(pairs.length, 1)
+  assert.equal(pairs[0]?.answer, null)
+})
+
+test('沒有 reply_to 的 answer 不會被硬配給某個追問', () => {
+  // 使用者回答「停下來問人」也是 answer，但它不是在回哪一則追問。
+  const q = ev('question', '要不要順便改標題？')
+  const loose = ev('answer', '照你說的做')
+  const pairs = missionQna([q, loose])
+  assert.equal(pairs[0]?.answer, null, '不相干的回答不能被當成這題的答案')
+})
+
+test('沒有追問時就沒有問答串', () => {
+  assert.deepEqual(missionQna([ev('report', '做完了'), ev('completed', 'ok')]), [])
 })
