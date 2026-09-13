@@ -1761,3 +1761,23 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
 截圖 `docs/screenshots/mobile-preview/`：`settings-toggle-1600.png`（開關）、
 `desktop-with-mobile-preview-1600.png`（右欄上暫存、下 390px 預覽）、
 `scaled-1600.png` 與 `scaled-panel.png`（2026-09-13 晚改成 393×852 縮 50% 之後）。
+
+## 額度格「這個帳號現在收不了工作」只留一個紅（2026-09-13）
+
+`quota.limit_hit`（CLI 自己印的上限橫幅）本來畫成：整格紅底 + 紅色 kind 圖示 + 紅色名字 + ⛔
+emoji，而格子裡的量表照樣是綠的。使用者的話是「目前看來很衝突」——同一格同時喊兩件相反的事，
+而且 ⛔ 跟 kind 圖示一樣圓、一樣大，並排讀起來像壞掉的圖示。
+
+改成 **一顆紅點 + 其餘全部退色**：
+
+- 量表、數字、邊框量表一律 `filter: grayscale(1)` + 半透明。帳號收不了工作時「5h 還剩多少」不是
+  現在要讀的東西，但也不必消失——灰階比降透明度重要，留著綠色就還是在說「還很夠用」。
+- 紅只留名字前面那顆 6px 的點（跟側欄燈號同一個語彙），外框一圈淡紅定位它；整格底色拿掉。
+- kind 圖示改回中性色：`crit` 本來就把它染紅，跟那顆點兩處紅在說同一件事。選擇器多帶一個 class
+  （`.quota-hp.quota-blocked.crit .quota-kind`）贏過 `.quota-hp.crit .quota-kind`，不靠檔案載入順序。
+
+**順手修掉一個 CSS 撞名**：狀態 class 本來就叫 `blocked`，而 `styles.css` 有一條**裸的** `.blocked`
+（BlockedPanel 的外框：`background: var(--danger-soft)` + 10px 內距）。額度格撞上它，於是被整片
+染紅、還多了一圈內距——那正是「很衝突」的一半來源。class 改名 `quota-blocked`。
+
+截圖 `docs/screenshots/quota-limit-hit/`：`before.png`（紅底 + ⛔）、`after.png`、`after-light.png`。
