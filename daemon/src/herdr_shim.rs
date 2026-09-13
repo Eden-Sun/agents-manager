@@ -271,6 +271,11 @@ mod tests {
                 self.dir.join("real").display()
             );
             cmd.env("PATH", path).args(args);
+            // Parent pane model settings are not test inputs. Remove them only from the
+            // subprocess, then apply each fixture's explicit inheritance settings below.
+            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND"] {
+                cmd.env_remove(key);
+            }
             for (k, v) in env {
                 cmd.env(k, v);
             }

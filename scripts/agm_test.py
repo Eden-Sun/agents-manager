@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -564,6 +565,17 @@ class ApprovalLeaseCommandTest(CliCase):
     def test_safety_is_a_plain_read(self):
         self.assertIs(self.ok("lease", "safety")["safe"], True)
         self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "等窗口不會改到任何狀態")
+
+    def test_safety_forwards_repeated_exclusions_as_a_query(self):
+        self.ok("lease", "safety", "--exclude-bot", "builder", "--exclude-bot", "manager")
+        reads = [r for r in FakeDaemon.seen if r["method"] == "GET" and "/maintenance/safety" in r["path"]]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(reads[0]["path"]).query),
+                         {"exclude": ["builder,manager"]})
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1",
+                "--exclude-bot", "builder", "--exclude-bot", "manager")
+        self.assertEqual(self._last_body()["exclude_bot_ids"], ["builder", "manager"])
 
 
 class PersonaCommandTest(CliCase):

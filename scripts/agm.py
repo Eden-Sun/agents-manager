@@ -627,12 +627,13 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     """執行租約：等安全窗口用 `safety`（唯讀），真的要動手用 `acquire`。
 
     兩件事分開是刻意的：safety 只說「現在」，acquire 會在同一個鎖裡重驗一次再把窗口拿走，
-    拿著 restart 租約期間 daemon 不會再派新工作出去。
+    拿著 restart 租約期間 supervisor assignment 派送暫停；其他送信路徑仍需協調。
     """
     if args.op == "status":
         return client.get("/api/supervisor/leases")
     if args.op == "safety":
-        return client.get("/api/supervisor/maintenance/safety")
+        query = {"exclude": ",".join(args.exclude_bot)} if args.exclude_bot else None
+        return client.get("/api/supervisor/maintenance/safety", query)
     if not args.resource:
         raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
     path = f"/api/supervisor/leases/{urllib.parse.quote(args.resource)}/{args.op}"

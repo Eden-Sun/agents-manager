@@ -26,7 +26,7 @@
 2. 「會影響 binary 的路徑」跟 daemon 對齊（`agm build-inputs`），不再漏掉 `include_str!` 進來的
    persona 與 `scripts/agm.py`。問不到端點時用保底清單。
 3. 空閒判斷改成 `lease safety`（等窗口）＋ `lease acquire`（在同一個鎖裡重驗並拿走窗口）。
-   依 SPEC §18.2，建置前排除建置 child 與 runtime.json 的 `manager_bot_id`；safety API 尚不接受排除參數，腳本先過濾 working／in-flight，acquire 帶同一份兩顆 ID 由 daemon 重驗。其他 bot 與 unreadable 仍阻擋；runtime 缺少有效管理員 ID 就跳過並記錄原因。這個排除僅用於 rebuild，restart 另行核准。
+   依 SPEC §18.2，建置前排除建置 child 與 runtime.json 的 `manager_bot_id`；safety 與 acquire 都帶同一份兩顆 `--exclude-bot`；CLI 以 `?exclude=<id,id>` 傳給 safety API。新版回應會列出 `excluded_bot_ids`，腳本直接採用 daemon 判定；缺少該欄或名單不符就跳過，不自行過濾快照。其他 bot 仍受保護；runtime 缺少有效管理員 ID 就跳過並記錄原因。這個排除僅用於 rebuild，restart 另行核准。
    拿著 `restart` 租約期間 supervisor assignment 派送會暫停；這不是所有 prompt 路徑的全域互斥鎖，正式替換前仍須由 AGM 重驗窗口。
 4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下個整點接續查核。pending、denied、revoked 不另建申請；過期後下輪才重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
 5. `daemon-update.lock` 防止腳本重疊執行。若程序被強制終止留下鎖，由 AGM 確認沒有執行者後移除。核准狀態檔損毀或 ID 不在查詢結果中也交 AGM 檢查，不自動繞過。
@@ -69,3 +69,5 @@ launchd 設定沿用既有的 `com.agm.daemon-update`（`StartCalendarInterval M
   binary。沒有 OS 層的鎖能從 daemon 這裡強制，**這是已知邊界，不要在文件或回報裡假裝有**。
 - 因此規範仍然有效：要重啟、要 release rebuild，先問 AGM（見 repo 的 `CLAUDE.md`）。租約是讓
   「問過了」這件事在執行期間持續成立，不是替代它。
+
+此 safety API／內嵌 CLI 更新需要重建並部署 daemon，再由 AGM 部署 kick。升級前暫保留正式環境的 client-side 過濾熱修；repo 本版不再自行排除，舊端點會使本版跳過派工。

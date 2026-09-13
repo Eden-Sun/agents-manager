@@ -108,22 +108,20 @@ print(manager.strip())
 }
 EXCL=(--exclude-bot "$BOT" --exclude-bot "$MANAGER")
 
-# GET /maintenance/safety 目前不接受排除清單：先在快照中過濾這兩顆的
-# working / in_flight；acquire 才把同一份清單交 daemon 在鎖內重驗。
-# unreadable 不過濾；讀不到或回應格式有誤，不能當作安全。重啟仍另行核准。
-SAFE=$("$AGM" --compact lease safety 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" python3 -c '
+# safety 與 acquire 都傳同一份排除清單，由 daemon 判定；不再自行過濾快照。
+# 回應須確認實際排除的 ID。舊 daemon / CLI 尚未支援或格式有誤就跳過，
+# 保留正式熱修腳本直到 daemon 升級後再安裝本版。重啟仍另行核准。
+SAFE=$("$AGM" --compact lease safety "${EXCL[@]}" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" python3 -c '
 import json,sys,os
 d=json.load(sys.stdin)
 if not isinstance(d,dict) or not isinstance(d.get("safe"),bool): sys.exit(1)
 for key in ("working","in_flight","unreadable"):
     if not isinstance(d.get(key),list) or any(not isinstance(x,dict) for x in d[key]): sys.exit(1)
 ex={os.environ["BUILD_BOT"],os.environ["MANAGER_BOT"]}
-working=[b for b in d["working"] if b.get("bot_id") not in ex]
-in_flight=[t for t in d["in_flight"] if t.get("bot_id") not in ex]
-unreadable=d["unreadable"]
-# A false safe flag with no explained blockers is not permission to proceed.
-explained=d["safe"] or bool(d["working"] or d["in_flight"] or d["unreadable"])
-ok=explained and not working and not in_flight and not unreadable
+applied=d.get("excluded_bot_ids")
+if not isinstance(applied,list) or any(not isinstance(x,str) for x in applied) or set(applied) != ex: sys.exit(1)
+working,in_flight,unreadable=d["working"],d["in_flight"],d["unreadable"]
+ok=d["safe"] and not working and not in_flight and not unreadable
 print("yes" if ok else ",".join(b.get("name","?") for b in working) or ("unreadable" if unreadable else "in_flight" if in_flight else "unknown"))
 ' 2>/dev/null) || SAFE="unknown"
 if [ "$SAFE" != "yes" ]; then
