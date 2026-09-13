@@ -2189,9 +2189,30 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
   "created_at": "…", "updated_at": "…", "completed_at": null, "cancelled_at": null }
 ```
 
-`status` 是從欄位算的（`cancelled_at` → `cancelled`、`completed_at` → `done`、`paused_reason` → `paused`、其餘 `open`）；
-規劃／執行／審查／驗證的細分之後由該任務的 assignments 推導，不另存一份狀態。
+`status` 是從欄位算的（`cancelled_at` → `cancelled`、`completed_at` → `done`、`paused_reason` → `paused`、其餘 `open`）。
+`GET /api/missions/{id}` 與清單多兩個欄位，都從該任務的 assignments 推導（不另存一份狀態）：
+
+- `phase`：`done | cancelled | paused` 同 `status`；其餘看**最新一件還開著的交辦**——`executing`／`reviewing`／`verifying`（依 `role`），
+  那件停在 `quota_blocked` 時是 `waiting_quota`；還沒有任何交辦＝`planning`；交辦都結案了但任務還開著＝`awaiting_agm`（輪到 AGM 決定下一步）。
+- `assignments[]`：`{id, role, status, target_bot_id, turn_status, turn_error, follow_up_of, created_at, completed_at}`，舊的在前。
 `paused_reason` 目前會出現：`max_rounds`、`no_fable_for_verifier`、`push_main_failed`、`pr_failed`，或呼叫端自己寫的原因。
+
+### 交辦掛到任務上（P1b）
+
+`POST /api/supervisor/assignments` 多收 `mission_id` 與 `role`（`executor | reviewer | verifier`），**兩個一起給或都不給**；
+任務不存在 404、已結案 409 `mission_closed`。連結在派送**之前**寫入。follow-up（`review` 的 `followup`）自動沿用父交辦的
+`mission_id`／`role`——撞限換手的接手工作就是靠這個接回同一個任務。assignment 物件多 `mission_id`、`role`、`turn_error`
+（回合結束時 run 上記的錯誤原因，例如撞限橫幅；`turn_status` 只說成敗）。
+
+**任務裡的交辦撞到額度**時，controller 先照 `pick` 的規則判斷，再決定要不要走 §18.8b 的 `quota_blocked`：
+
+- 同一身分、同一模型仍被挑中（例如 5h 撞限且任務選了 `wait`）→ 照原本的 `quota_blocked`，額度回來自己重送。
+- 挑到**別的身分**，或同一身分但要**換模型**（Fable 用盡改 opus）→ 這件交辦進 `awaiting_review`，`turn_status = "identity_switch"`，
+  AGM inbox 收到 `mission_identity_switch`（`{mission_id, assignment_id, role, bot_id, from_identity, to_identity, model, reason, message, needs_review:true}`），
+  任務記一則 `note`。換身分不能續接 session（各身分的 `CLAUDE_CONFIG_DIR` 不同），所以由 AGM 用 `to_identity` 開新 bot、對這件交辦下 `followup` 接手，
+  followup 文字要帶進度摘要（已做／未做／未提交檔案）。
+- 驗證者找不到 Fable 有效額度 → 交辦進 `awaiting_review`（`turn_status = "quota_exhausted"`），任務停在 `no_fable_for_verifier` 等使用者決定。
+- 不屬於任何任務的交辦，行為與先前完全相同。
 
 事件（`GET /api/missions/{id}` 的 `events[]`，也是群組時間軸上這個任務的那一串）：
 `{id, mission_id, kind, text, relay_from, payload_json, created_at}`，

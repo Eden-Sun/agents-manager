@@ -288,6 +288,13 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("expects_review", "ALTER TABLE supervisor_assignments ADD COLUMN expects_review INTEGER NOT NULL DEFAULT 1"),
         ("resume_at", "ALTER TABLE supervisor_assignments ADD COLUMN resume_at TEXT"),
         ("quota_retries", "ALTER TABLE supervisor_assignments ADD COLUMN quota_retries INTEGER NOT NULL DEFAULT 0"),
+        // 群組任務（mission/，docs/goals/agm-missions.md）：這件交辦屬於哪個任務、擔任哪個角色
+        // （executor | reviewer | verifier）。follow-up 會沿用父交辦的這兩欄。
+        ("mission_id", "ALTER TABLE supervisor_assignments ADD COLUMN mission_id TEXT"),
+        ("mission_role", "ALTER TABLE supervisor_assignments ADD COLUMN mission_role TEXT"),
+        // 回合結束時 run 上記的 `turn_error`（撞限、API 錯誤、斷線…）。`turn_status` 只有
+        // completed/failed 這種粗分類，換手要看的是「為什麼」。
+        ("turn_error", "ALTER TABLE supervisor_assignments ADD COLUMN turn_error TEXT"),
     ] {
         if !has_column(pool, "supervisor_assignments", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -416,6 +423,11 @@ pub struct Assignment {
     pub resume_at: Option<String>,
     /// 因額度自動重送過幾次。
     pub quota_retries: i64,
+    /// 群組任務：所屬任務與角色（見 migrate 的欄位註解）。
+    pub mission_id: Option<String>,
+    pub mission_role: Option<String>,
+    /// 回合結束時 run 上的 `turn_error`。
+    pub turn_error: Option<String>,
 }
 
 /// Lifecycle states an assignment can still move out of on its own.
@@ -470,6 +482,10 @@ impl Assignment {
             // 只有 `quota_blocked` 用得到：額度什麼時候回來、已經自動重送幾次。
             "resume_at": self.resume_at,
             "quota_retries": self.quota_retries,
+            // 群組任務（沒有就是 null）。
+            "mission_id": self.mission_id,
+            "role": self.mission_role,
+            "turn_error": self.turn_error,
         })
     }
 
@@ -980,6 +996,38 @@ pub async fn insert_assignment(
     .execute(pool)
     .await?;
     Ok(assignment_by_crid(pool, client_request_id).await?.expect("just inserted"))
+}
+
+/// 把一件交辦掛到群組任務上。必須在 dispatch 之前寫：派送當下就可能撞額度，那時要看得到任務設定。
+pub async fn set_mission_link(pool: &SqlitePool, id: &str, mission_id: &str, role: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisor_assignments SET mission_id = ?, mission_role = ?, updated_at = ? WHERE id = ?")
+        .bind(mission_id)
+        .bind(role)
+        .bind(crate::db::now())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 回合結束時 run 上記的錯誤原因（撞限、API 錯誤…）。
+pub async fn set_turn_error(pool: &SqlitePool, id: &str, turn_error: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisor_assignments SET turn_error = ? WHERE id = ?")
+        .bind(turn_error)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 一個群組任務底下的所有交辦，舊的在前。
+pub async fn mission_assignments(pool: &SqlitePool, mission_id: &str) -> Result<Vec<Assignment>> {
+    Ok(sqlx::query_as::<_, Assignment>(
+        "SELECT * FROM supervisor_assignments WHERE mission_id = ? ORDER BY created_at, id",
+    )
+    .bind(mission_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn list_assignments(pool: &SqlitePool, limit: i64) -> Result<Vec<Assignment>> {
@@ -1514,6 +1562,18 @@ pub async fn review_with_followup(
                 .bind(id)
                 .bind(&now)
                 .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+                // 接續的工作仍然是同一個任務、同一個角色（撞限換手的 followup 就是靠這個接回任務）。
+                sqlx::query(
+                    "UPDATE supervisor_assignments
+                        SET mission_id = (SELECT mission_id FROM supervisor_assignments WHERE id = ?),
+                            mission_role = (SELECT mission_role FROM supervisor_assignments WHERE id = ?)
+                      WHERE id = ?",
+                )
+                .bind(id)
+                .bind(id)
+                .bind(&new_id)
                 .execute(&mut *tx)
                 .await?;
                 new_id

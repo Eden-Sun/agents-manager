@@ -104,7 +104,12 @@ pub struct AssignIn {
     pub kind: Option<String>,
     /// `kind` 的等價寫法，給既有的呼叫端用；兩個都給時以 `expects_review` 為準。
     #[serde(default)]
-    pub expects_review: Option<bool>,
+    pub expects_review: Option<bool>,    /// 群組任務：這件交辦屬於哪個任務（`/api/missions/{id}`），以及擔任的角色
+    /// `executor | reviewer | verifier`。兩個一起給或都不給。
+    #[serde(default)]
+    pub mission_id: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 impl AssignIn {
@@ -118,6 +123,18 @@ pub async fn post_assignment(
     State(app): State<Arc<App>>,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
+    // 任務連結先驗證再建交辦：錯的 mission_id 不該留下一件已派出去、卻掛不回任務的工作。
+    let mission = match (b.mission_id.as_deref().map(str::trim).filter(|s| !s.is_empty()), b.role.as_deref().map(str::trim)) {
+        (None, None | Some("")) => None,
+        (Some(mid), Some(role)) if crate::mission::pick::Role::parse(role).is_some() => {
+            let m = crate::mission::store::get(&app.db, mid).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
+            if m.completed_at.is_some() || m.cancelled_at.is_some() {
+                return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": mid})));
+            }
+            Some((mid.to_string(), role.to_string()))
+        }
+        _ => return Err(LcError::Bad("mission_id and role (executor | reviewer | verifier) go together".into())),
+    };
     let a = super::assign(
         &app,
         &b.target_bot_id,
@@ -127,6 +144,7 @@ pub async fn post_assignment(
         &b.ownership,
         None,
         b.expects_review(),
+        mission.as_ref().map(|(m, r)| (m.as_str(), r.as_str())),
     )
     .await?;
     Ok(Json(a))

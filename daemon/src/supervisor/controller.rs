@@ -260,12 +260,79 @@ fn quota_action(retries: i64, until: Option<&str>) -> QuotaAction {
     }
 }
 
+/// 群組任務的交辦撞到額度（`docs/goals/agm-missions.md` D4–D6）。回傳 `true` = 已經處理掉，
+/// 不要再進 `quota_blocked`。
+///
+/// 規則在 `mission::pick`（純函式，有測試）：同一身分同一模型仍被挑中 → 照原本的等待；
+/// 挑到別的身分或要換模型 → 這件交辦進 `awaiting_review`（`turn_status=identity_switch`），
+/// 通知 AGM 用挑到的身分開 followup 接手——換身分不能續接 session（各身分的 CLAUDE_CONFIG_DIR
+/// 不同），所以是新 bot＋新 session，不是在原 bot 上重送；驗證者找不到 Fable → 停下任務問人。
+async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> bool {
+    use crate::mission::{pick, store as mstore};
+    let Ok(Some(m)) = mstore::get(&app.db, mission_id).await else { return false };
+    if m.completed_at.is_some() || m.cancelled_at.is_some() {
+        return false;
+    }
+    let Some(role) = a.mission_role.as_deref().and_then(pick::Role::parse) else { return false };
+    let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { return false };
+    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    let kind = if role == pick::Role::Verifier { "claude" } else { m.executor_kind.as_str() };
+    let raw = crate::mission::candidates(app, &host, kind).await;
+    let cands: Vec<pick::Candidate> = raw.iter().map(|(n, d, q)| pick::Candidate { name: n, disabled: *d, quota: q.as_ref() }).collect();
+    let on_5h = if m.on_5h_limit == "switch" { pick::On5hLimit::Switch } else { pick::On5hLimit::Wait };
+    let decision = pick::pick(role, &cands, on_5h, None, chrono::Utc::now());
+    let current = bot.identity.clone().unwrap_or_default();
+    match pick::quota_policy(&current, bot.model.as_deref(), &decision) {
+        pick::QuotaPolicy::Wait => false,
+        pick::QuotaPolicy::Switch { identity, model, reason } => {
+            let to = match model.as_deref() {
+                Some(mdl) => format!("{identity}（{mdl}）"),
+                None => identity.clone(),
+            };
+            let why = format!("帳號撞到用量上限（{where_seen}）：{}｜依任務規則換手：{} → {}（{}）", hit.message.trim(), current, to, reason);
+            settle(app, a, "identity_switch", true, None, Some(&why)).await;
+            let payload = json!({
+                "mission_id": mission_id,
+                "assignment_id": a.id,
+                "role": a.mission_role,
+                "bot_id": a.target_bot_id,
+                "from_identity": current,
+                "to_identity": identity,
+                "model": model,
+                "reason": reason,
+                "message": hit.message,
+                // 要 AGM 動手：用 to_identity 開新 bot，對這件交辦下 followup（帶進度摘要與 git status）。
+                "needs_review": true,
+            });
+            let key = format!("mission_switch:{}:{}", a.id, a.turn_id.clone().unwrap_or_default());
+            let _ = store::push_inbox(&app.db, &key, "mission_identity_switch", Some(&a.id), Some(&a.target_bot_id), a.turn_id.as_deref(), &payload).await;
+            let _ = mstore::add_event(&app.db, mission_id, "note", &format!("{current} 撞到用量上限，換 {to} 接手"), Some(crate::agent_relay::DAEMON_SENDER), &payload).await;
+            app.emit("mission_updated", json!({"mission_id": mission_id, "project_id": m.project_id, "status": m.status()})).await;
+            true
+        }
+        pick::QuotaPolicy::AskUser { reason } => {
+            settle(app, a, "quota_exhausted", true, None, Some(&reason)).await;
+            if mstore::pause(&app.db, mission_id, "no_fable_for_verifier", Some(&reason)).await.unwrap_or(false) {
+                let _ = mstore::add_event(&app.db, mission_id, "paused", &format!("暫停：{reason}，等使用者決定"), Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": "no_fable_for_verifier", "assignment_id": a.id})).await;
+            }
+            app.emit("mission_updated", json!({"mission_id": mission_id, "project_id": m.project_id, "status": "paused"})).await;
+            true
+        }
+    }
+}
+
 /// 把一件被額度擋下的 assignment 停在 `quota_blocked`，並通知 AGM 一次。
 ///
 /// `where_seen` 只是為了讓 inbox 事件說得出「是派送前就擋住，還是跑到一半撞到」。
 /// 超過 [`MAX_QUOTA_RETRIES`] 就不再等了：那通常代表額度不是「等一下就回來」的那種
 /// （credits 用完），交給 AGM 決定要換帳號、換 bot 還是放掉。
 async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::LimitHit, where_seen: &str) {
+    // 群組任務的交辦先照任務的規則判斷：要換手（換身分／換模型）或停下問人就不進 quota_blocked。
+    if let Some(mission_id) = a.mission_id.as_deref() {
+        if mission_quota(app, a, mission_id, hit, where_seen).await {
+            return;
+        }
+    }
     let resume_at = match quota_action(a.quota_retries, hit.until.as_deref()) {
         QuotaAction::GiveUp => {
             let why = format!("額度重送 {} 次仍被擋：{}", a.quota_retries, hit.message.trim());
@@ -354,6 +421,20 @@ async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
     let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
     if !a.is_executing() {
         return;
+    }
+    // 回合結束時 run 上記的錯誤原因（撞限、API 錯誤…）抄進交辦：`turn_status` 只說成敗，
+    // 換手與驗收要看的是為什麼。
+    if let Ok(Some(err)) = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT r.turn_error FROM turns t JOIN runs r ON r.id = t.run_id WHERE t.id = ?",
+    )
+    .bind(turn_id)
+    .fetch_optional(&app.db)
+    .await
+    .map(Option::flatten)
+    {
+        if !err.trim().is_empty() {
+            let _ = store::set_turn_error(&app.db, &a.id, &err).await;
+        }
     }
     // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
     // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
@@ -1043,5 +1124,177 @@ mod tests {
         assert_eq!(snippet("   "), "（沒有留下回覆）");
         assert!(snippet(&"x".repeat(900)).ends_with('…'));
         assert_eq!(snippet("ok"), "ok");
+    }
+}
+
+/// 群組任務的交辦撞到額度時（`mission_quota`）：換手、照原本等待、或停下問人。
+#[cfg(test)]
+mod mission_quota_tests {
+    use super::*;
+    use crate::mission::store as mstore;
+    use crate::quota::{LimitHit, Quota, Window};
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-mission-quota-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        app
+    }
+
+    async fn bot(app: &Arc<App>, id: &str, identity: &str, model: Option<&str>) {
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,model,hook_token,created_at) VALUES (?,'p',?,'claude',?,?,'t',?)")
+            .bind(id)
+            .bind(id)
+            .bind(identity)
+            .bind(model)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    async fn mission(app: &Arc<App>, on_5h: &str) -> String {
+        let (m, _) = mstore::create(
+            &app.db,
+            &mstore::NewMission { project_id: "p", client_request_id: &crate::db::ulid(), text: "做 X", delivery_mode: "pr", executor_kind: "claude", on_5h_limit: on_5h, max_rounds: 2 },
+        )
+        .await
+        .unwrap();
+        m.id
+    }
+
+    async fn assignment(app: &Arc<App>, bot_id: &str, mission_id: &str, role: &str) -> store::Assignment {
+        let a = store::insert_assignment(&app.db, None, bot_id, &crate::db::ulid(), "做 X", &[], None, true).await.unwrap();
+        store::set_mission_link(&app.db, &a.id, mission_id, role).await.unwrap();
+        store::assignment(&app.db, &a.id).await.unwrap().unwrap()
+    }
+
+    fn quota(five: f64, seven: f64, fable: f64) -> Quota {
+        let w = |u: f64, r: &str| Some(Window { used_pct: u, resets_at: Some(r.into()) });
+        Quota {
+            five_hour: w(five, "2999-01-01T05:00:00Z"),
+            seven_day: w(seven, "2999-01-07T00:00:00Z"),
+            fable: w(fable, "2999-01-07T00:00:00Z"),
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: "local".into(),
+        }
+    }
+
+    fn hit() -> LimitHit {
+        LimitHit { message: "You've reached your limit".into(), until: Some("2999-01-07T00:00:00Z".into()), at: crate::db::now() }
+    }
+
+    async fn inbox_kinds(app: &Arc<App>) -> Vec<String> {
+        sqlx::query_scalar("SELECT kind FROM supervisor_inbox ORDER BY created_at").fetch_all(&app.db).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_week_exhausted_executor_hands_over_to_the_next_identity() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc1".into(), quota(0.0, 0.0, 0.0));
+        }
+        park_quota(&app, &a, &hit(), "turn").await;
+
+        let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "awaiting_review", "換手要 AGM 動手，不能停在 quota_blocked 自己重送");
+        assert_eq!(a.turn_status.as_deref(), Some("identity_switch"));
+        assert!(inbox_kinds(&app).await.contains(&"mission_identity_switch".to_string()));
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='mission_identity_switch'").fetch_one(&app.db).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["from_identity"], "cc2");
+        assert_eq!(payload["to_identity"], "cc1");
+        let notes = mstore::events(&app.db, &mid).await.unwrap();
+        assert!(notes.iter().any(|e| e.kind == "note" && e.text.contains("cc1")));
+    }
+
+    #[tokio::test]
+    async fn a_five_hour_hit_waits_when_the_mission_chose_to_wait() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        app.quotas.lock().await.insert("claude:cc2".into(), quota(100.0, 20.0, 20.0));
+        park_quota(&app, &a, &hit(), "turn").await;
+        let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "quota_blocked", "照任務設定原地等，走 supervisor 原本的自動重送");
+    }
+
+    #[tokio::test]
+    async fn a_verifier_without_fable_quota_stops_the_mission_and_asks() {
+        let app = app().await;
+        bot(&app, "b-v", "cc1", Some("fable")).await;
+        let mid = mission(&app, "switch").await;
+        let a = assignment(&app, "b-v", &mid, "verifier").await;
+        {
+            let mut q = app.quotas.lock().await;
+            for id in ["cc2", "cc1"] {
+                q.insert(format!("claude:{id}"), quota(0.0, 0.0, 100.0));
+            }
+        }
+        park_quota(&app, &a, &hit(), "turn").await;
+        let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "awaiting_review");
+        assert_eq!(a.turn_status.as_deref(), Some("quota_exhausted"));
+        let m = mstore::get(&app.db, &mid).await.unwrap().unwrap();
+        assert_eq!(m.paused_reason.as_deref(), Some("no_fable_for_verifier"));
+    }
+
+    #[tokio::test]
+    async fn an_assignment_outside_any_mission_keeps_the_old_behaviour() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let a = store::insert_assignment(&app.db, None, "b-cc2", "plain", "做 X", &[], None, true).await.unwrap();
+        app.quotas.lock().await.insert("claude:cc2".into(), quota(10.0, 100.0, 10.0));
+        park_quota(&app, &a, &hit(), "turn").await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "quota_blocked");
+    }
+
+    #[tokio::test]
+    async fn a_followup_stays_in_the_same_mission_and_role() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", None).await;
+        bot(&app, "b-cc1", "cc1", None).await;
+        let mid = mission(&app, "switch").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        park_quota(&app, &a, &hit(), "turn").await; // 沒有額度讀數 → 照原本等待
+        let _ = sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        store::review_with_followup(
+            &app.db,
+            &a.id,
+            "awaiting_review",
+            "followup",
+            "AGM",
+            "test",
+            None,
+            None,
+            Some(store::FollowupSpec { target_bot_id: "b-cc1", client_request_id: "handover-1", text: "接手", ownership: &[], request_id: None }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let f = store::assignment_by_crid(&app.db, "handover-1").await.unwrap().unwrap();
+        assert_eq!(f.mission_id.as_deref(), Some(mid.as_str()));
+        assert_eq!(f.mission_role.as_deref(), Some("executor"));
+        let all = store::mission_assignments(&app.db, &mid).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let m = mstore::get(&app.db, &mid).await.unwrap().unwrap();
+        assert_eq!(crate::mission::api::phase(&m, &all), "executing");
     }
 }

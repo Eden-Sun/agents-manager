@@ -23,6 +23,52 @@ async fn load(app: &Arc<App>, id: &str) -> Result<store::Mission, LcError> {
     store::get(&app.db, id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))
 }
 
+/// 任務現在在哪一段：終態與暫停看任務本身，其餘從它的交辦推——最新一件還開著的交辦的角色。
+/// 不另存狀態，就不必跟 assignments 對帳。
+pub fn phase(m: &store::Mission, assignments: &[crate::supervisor::store::Assignment]) -> &'static str {
+    match m.status() {
+        "done" => return "done",
+        "cancelled" => return "cancelled",
+        "paused" => return "paused",
+        _ => {}
+    }
+    if assignments.is_empty() {
+        return "planning";
+    }
+    let open = assignments.iter().rev().find(|a| crate::supervisor::store::OPEN_STATES.contains(&a.status.as_str()));
+    match open {
+        Some(a) if a.status == "quota_blocked" => "waiting_quota",
+        Some(a) => match a.mission_role.as_deref() {
+            Some("reviewer") => "reviewing",
+            Some("verifier") => "verifying",
+            _ => "executing",
+        },
+        // 交辦都結案了、任務還開著：輪到 AGM 決定下一步（派下一個角色、交付或完成）。
+        None => "awaiting_agm",
+    }
+}
+
+async fn with_phase(app: &Arc<App>, m: &store::Mission) -> Result<Value, LcError> {
+    let assignments = crate::supervisor::store::mission_assignments(&app.db, &m.id).await.map_err(up)?;
+    let mut out = m.json();
+    out["phase"] = phase(m, &assignments).into();
+    out["assignments"] = json!(assignments
+        .iter()
+        .map(|a| json!({
+            "id": a.id,
+            "role": a.mission_role,
+            "status": a.status,
+            "target_bot_id": a.target_bot_id,
+            "turn_status": a.turn_status,
+            "turn_error": a.turn_error,
+            "follow_up_of": a.follow_up_of,
+            "created_at": a.created_at,
+            "completed_at": a.completed_at,
+        }))
+        .collect::<Vec<_>>());
+    Ok(out)
+}
+
 /// 已結案的任務不能再動：一律 409 `already_closed`，讓呼叫端知道要開新任務而不是重試。
 fn ensure_open(m: &store::Mission) -> Result<(), LcError> {
     if m.completed_at.is_some() || m.cancelled_at.is_some() {
@@ -144,13 +190,17 @@ pub async fn get_missions(
     let status = q.status.as_deref().unwrap_or("all");
     one_of("status", status, &["all", "open", "done", "cancelled"])?;
     let rows = store::list(&app.db, &project_id, status, q.limit.unwrap_or(100)).await.map_err(up)?;
-    Ok(Json(json!({"project_id": project_id, "missions": rows.iter().map(|m| m.json()).collect::<Vec<_>>()})))
+    let mut missions = Vec::with_capacity(rows.len());
+    for m in &rows {
+        missions.push(with_phase(&app, m).await?);
+    }
+    Ok(Json(json!({"project_id": project_id, "missions": missions})))
 }
 
 pub async fn get_mission(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     let events = store::events(&app.db, &id).await.map_err(up)?;
-    let mut out = m.json();
+    let mut out = with_phase(&app, &m).await?;
     out["events"] = json!(events);
     Ok(Json(out))
 }
@@ -466,7 +516,7 @@ mod tests {
         assert_eq!(cur["paused_reason"], "no_fable_for_verifier");
 
         // 有 Fable 額度之後挑得到；cc2 被停用就往下挑 cc1。
-        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
         {
             let mut qs = app.quotas.lock().await;
             qs.insert("claude:cc2".into(), quota(10.0));
@@ -475,20 +525,20 @@ mod tests {
         let Json(p) = get_pick(State(app.clone()), Path(id.clone()), Query(q("verifier"))).await.unwrap();
         assert_eq!(p["pick"]["identity"], "cc2");
         assert_eq!(p["pick"]["model"], "fable");
-        put_identity_disabled(State(app.clone()), Path("cc2".into()), Json(DisableIn { kind: "claude".into(), disabled: true, host: None }))
+        let _ = put_identity_disabled(State(app.clone()), Path("cc2".into()), Json(DisableIn { kind: "claude".into(), disabled: true, host: None }))
             .await
             .unwrap();
         let Json(p) = get_pick(State(app.clone()), Path(id.clone()), Query(q("executor"))).await.unwrap();
         assert_eq!(p["pick"]["identity"], "cc1");
 
         // 輪數上限：兩輪之後第三輪停下來。
-        post_round(State(app.clone()), Path(id.clone())).await.unwrap();
-        post_round(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
         let err = post_round(State(app.clone()), Path(id.clone())).await.unwrap_err();
         assert_eq!(conflict_reason(err), "max_rounds");
         let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(cur["paused_reason"], "max_rounds");
-        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
 
         // 沒有驗證通過不能交付。
         let deliver = || DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: None };
@@ -499,7 +549,7 @@ mod tests {
         let bogus = EventIn { kind: "verified".into(), text: "ok".into(), relay_from: Some("no-such-bot".into()), payload: None };
         assert!(matches!(post_event(State(app.clone()), Path(id.clone()), Json(bogus)).await, Err(LcError::Bad(_))));
         let ok = EventIn { kind: "verified".into(), text: "cargo test 全過".into(), relay_from: Some("daemon".into()), payload: None };
-        post_event(State(app.clone()), Path(id.clone()), Json(ok)).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(ok)).await.unwrap();
 
         // 測試 repo 沒有 origin：交付失敗 → 停下來問人（D8），不是靜靜吞掉。
         let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver())).await.unwrap_err();
@@ -508,7 +558,7 @@ mod tests {
         assert_eq!(cur["paused_reason"], "push_main_failed");
 
         // 完成之後就關起來；已完成任務清單查得到。
-        post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "修好了".into(), relay_from: None })).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "修好了".into(), relay_from: None })).await.unwrap();
         let err = post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "late".into(), detail: None })).await.unwrap_err();
         assert_eq!(conflict_reason(err), "already_closed");
         let Json(done) = get_missions(State(app.clone()), Path(pid.clone()), Query(ListQuery { status: Some("done".into()), limit: None })).await.unwrap();
