@@ -167,7 +167,7 @@
 
 `scripts/agm.py` 由 `include_str!` 編進 daemon 二進位，`setup` 時寫成 `<cwd>/bin/agm`（0755），所以
 release 安裝不依賴 build 機上的 repo 路徑。子命令：`state`、`supervisor`、`search`、`messages`、
-`assign`、`assignments`、`inbox`（預設只列未 ack、最舊在前；`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`bot`；輸出一律 JSON。
+`assign`（含 `--mission`／`--role`）、`assignments`、`inbox`（預設只列未 ack、最舊在前；`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`bot`、`mission`（見「群組任務」一節的 CLI 對照）；輸出一律 JSON。
 
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`。
 **沒有 token**——CLI 自己在執行期 `GET /api/session` 取，不進 argv、不進檔案、不進交接摘要；
@@ -2238,6 +2238,27 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
 | GET | `/api/identity-prefs` | `{disabled:[{host, kind, identity}]}`。 |
 
 已結案（`done`／`cancelled`）的任務對任何變更回 409 `already_closed`。每次變更推 WS `mission_updated {mission_id, project_id, status}`。
+
+### CLI 對照（`bin/agm mission …`）
+
+總管只能用 `bin/agm` 操作（沒有的子命令不自己拼 curl），所以每個端點都有對應：
+
+| CLI | 端點 |
+|---|---|
+| `agm mission list --project <id> [--status all\|open\|done\|cancelled] [--limit N]` | `GET /api/projects/{id}/missions` |
+| `agm mission get <mission>` | `GET /api/missions/{id}` |
+| `agm mission events <mission>` | 同上，只取 `events[]` |
+| `agm mission event <mission> --kind report\|note\|verified --text …（或 --text-file）[--as-daemon]` | `POST /api/missions/{id}/events` |
+| `agm mission pause <mission> --reason <碼> [--detail …]` | `POST /api/missions/{id}/pause` |
+| `agm mission resume\|cancel\|round <mission>` | `POST /api/missions/{id}/resume`／`cancel`／`round` |
+| `agm mission complete <mission> --text …（或 --text-file）[--as-daemon]` | `POST /api/missions/{id}/complete` |
+| `agm mission pick <mission> --role executor\|reviewer\|verifier [--exclude <identity>]` | `GET /api/missions/{id}/pick` |
+| `agm mission deliver <mission> --worktree <絕對路徑> [--title …] [--body …] [--as-daemon]` | `POST /api/missions/{id}/deliver` |
+| `agm assign … --mission <mission> --role executor\|reviewer\|verifier` | `POST /api/supervisor/assignments` 的 `mission_id`／`role` |
+
+`event`／`complete`／`deliver` 預設帶 `relay_from = runtime.json 的 manager_bot_id`（群組時間軸上顯示成總管說的）；
+`--as-daemon` 改標 `daemon`。`runtime.json` 沒有 bot id 時直接報 `bad_args`，不送出——沒帶來源的回報會被當成使用者本人說的。
+`--mission` 與 `--role` 只給一個也在送出前擋下。HTTP 錯誤照舊是非 0 結束碼＋`{"error":"http_error","status":…,"detail":…}`。
 
 ### 身分挑選（`pick`）
 
