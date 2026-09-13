@@ -328,10 +328,12 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             sqlx::query(ddl).execute(pool).await?;
         }
     }
+    // 雙角色（巡檢／協調）的欄位與表，見 roles.rs。
+    super::roles::migrate(pool).await?;
     Ok(())
 }
 
-async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
+pub(super) async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
     let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
         sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
     Ok(cols.iter().any(|c| c.1 == col))
@@ -428,6 +430,9 @@ pub struct Assignment {
     pub mission_role: Option<String>,
     /// 回合結束時 run 上的 `turn_error`。
     pub turn_error: Option<String>,
+    /// 回報給哪個 AGM 角色驗收（`patrol` | `responder`；NULL = 協調者）。見 roles.rs。
+    #[sqlx(default)]
+    pub review_role: Option<String>,
 }
 
 /// Lifecycle states an assignment can still move out of on its own.
@@ -476,6 +481,7 @@ impl Assignment {
             // anyone. Not a claim that the work was verified.
             "legacy_closed": self.legacy_closed != 0,
             "ownership": self.ownership(),
+            "review_role": self.review_role.as_deref().unwrap_or("responder"),
             // `notice` = AGM 只是把話說給 bot 聽：送到、回合結束就結案，沒有驗收這一段。
             "kind": if self.is_notice() { "notice" } else { "task" },
             "expects_review": !self.is_notice(),
@@ -548,6 +554,19 @@ pub struct InboxEvent {
     pub delivered_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// `patrol` | `responder`；NULL = 還沒分類（見 `roles::classify`）。
+    #[sqlx(default)]
+    pub role: Option<String>,
+    /// 0 = 只記錄、不喚醒。
+    #[sqlx(default)]
+    pub wake: Option<i64>,
+    /// 實際送給哪個角色。
+    #[sqlx(default)]
+    pub claimed_by: Option<String>,
+    #[sqlx(default)]
+    pub acked_by: Option<String>,
+    #[sqlx(default)]
+    pub merged_into: Option<String>,
 }
 
 impl InboxEvent {
@@ -572,6 +591,11 @@ impl InboxEvent {
                 "error": self.notify_error,
                 "delivered_at": self.delivered_at,
             },
+            "role": self.role,
+            "wake": self.wake.map(|w| w != 0),
+            "claimed_by": self.claimed_by,
+            "acked_by": self.acked_by,
+            "merged_into": self.merged_into,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
@@ -1568,9 +1592,11 @@ pub async fn review_with_followup(
                 sqlx::query(
                     "UPDATE supervisor_assignments
                         SET mission_id = (SELECT mission_id FROM supervisor_assignments WHERE id = ?),
-                            mission_role = (SELECT mission_role FROM supervisor_assignments WHERE id = ?)
+                            mission_role = (SELECT mission_role FROM supervisor_assignments WHERE id = ?),
+                            review_role = (SELECT review_role FROM supervisor_assignments WHERE id = ?)
                       WHERE id = ?",
                 )
+                .bind(id)
                 .bind(id)
                 .bind(id)
                 .bind(&new_id)
@@ -1751,6 +1777,8 @@ pub async fn pending_count(pool: &SqlitePool) -> Result<i64> {
     Ok(open_assignment_count(pool).await? + open_inbox_count(pool).await?)
 }
 
+// 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
+#[cfg(test)]
 /// Prompted, not yet confirmed. Deliberately *not* `handled`: only the manager acking it —
 /// or the UI acking on its behalf — closes the event, so a failed notify keeps it queued.
 pub async fn mark_delivered_inbox(
@@ -1831,6 +1859,8 @@ pub async fn delivered_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
     .await?)
 }
 
+// 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
+#[cfg(test)]
 /// Pending events whose backoff has not run out yet are skipped; everything else is due.
 pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
@@ -1851,6 +1881,7 @@ pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Resul
 pub async fn exhausted_inbox(pool: &SqlitePool, max_attempts: i64) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ?
+           AND COALESCE(role, 'patrol')='patrol'
           ORDER BY created_at ASC",
     )
     .bind(SUPERVISOR_ID)
@@ -2000,6 +2031,49 @@ pub async fn decide_approval(
     .execute(pool)
     .await?;
     approval(pool, id).await
+}
+
+/// 只在狀態仍是 `from_status` 時才寫。`Ok(None)` = 已經被別人（另一個 AGM 角色、UI）先決定了，
+/// 這一次什麼都沒寫。兩個角色同時核准同一筆，只有一個會成功。
+pub async fn decide_approval_from(
+    pool: &SqlitePool,
+    id: &str,
+    from_status: &str,
+    status: &str,
+    actor: &str,
+    reason: Option<&str>,
+    expires_at: Option<&str>,
+) -> Result<Option<Approval>> {
+    let now = crate::db::now();
+    let res = sqlx::query(
+        "UPDATE supervisor_approvals
+            SET status=?, decided_by=?, decided_at=?, reason=COALESCE(?, reason),
+                expires_at=COALESCE(?, expires_at), updated_at=?
+          WHERE id=? AND status=?",
+    )
+    .bind(status)
+    .bind(actor)
+    .bind(&now)
+    .bind(reason)
+    .bind(expires_at)
+    .bind(&now)
+    .bind(id)
+    .bind(from_status)
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Ok(None);
+    }
+    approval(pool, id).await
+}
+
+pub async fn set_review_role(pool: &SqlitePool, id: &str, role: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisor_assignments SET review_role=? WHERE id=?")
+        .bind(role)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Mirrors the row.
@@ -2262,6 +2336,8 @@ pub async fn incidents(pool: &SqlitePool, limit: i64) -> Result<Vec<Incident>> {
     .await?)
 }
 
+// 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
+#[cfg(test)]
 pub async fn ack_inbox(pool: &SqlitePool, id: &str) -> Result<bool> {
     let res = sqlx::query("UPDATE supervisor_inbox SET state='handled', updated_at=? WHERE supervisor_id=? AND id=?")
         .bind(crate::db::now())

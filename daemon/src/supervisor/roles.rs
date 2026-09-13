@@ -1,0 +1,706 @@
+//! AGM 的兩個角色：巡檢（patrol）與協調（responder）。docs/SPEC.md §18.15。
+//!
+//! 使用者 2026-09-13：「主動找問題用 fable-low（額度不足 opus-low），回應 bots 用 opus-high」。
+//! 巡檢就是原本那顆 AGM——`supervisors.bot_id`、使用者入口、Remote Control 全部不動；協調是
+//! 第二顆 bot，只接 bot 的申請、交辦回報、核准請求與任務事件。
+//!
+//! 誰收哪一件事**由 daemon 依事件種類決定**（[`route`]），不問模型、不看名字：
+//! 先喚醒巡檢再請它轉交，等於每個 bot 申請都先燒一輪 fable——這張表存在就是為了不讓那件事發生。
+//!
+//! 協調者還沒建立（舊部署）時一切照舊：協調的事件由巡檢收，節流也照巡檢的。一旦建立了，
+//! 協調的事件就**只**給協調者；它沒額度、停了或登出，事件留在 inbox 等，不倒回巡檢。
+
+use anyhow::Result;
+use serde_json::{json, Value};
+use sqlx::{FromRow, SqlitePool};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    Patrol,
+    Responder,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Patrol => "patrol",
+            Role::Responder => "responder",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Role> {
+        match s.trim() {
+            "patrol" => Some(Role::Patrol),
+            "responder" => Some(Role::Responder),
+            _ => None,
+        }
+    }
+}
+
+pub const DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS supervisor_roles (
+  -- 'patrol' | 'responder'。巡檢的 bot／模型／遠端入口仍在 `supervisors`；這一列只放它的喚醒統計。
+  role TEXT PRIMARY KEY,
+  bot_id TEXT,
+  project_id TEXT,
+  cwd TEXT,
+  identity TEXT NOT NULL DEFAULT 'cc0',
+  model TEXT NOT NULL DEFAULT 'opus',
+  effort TEXT NOT NULL DEFAULT 'high',
+  desired_running INTEGER NOT NULL DEFAULT 0,
+  -- '' | 'waiting_quota'：黏著的覆寫，跟巡檢的 `supervisors.status` 同義。
+  status TEXT NOT NULL DEFAULT '',
+  status_detail TEXT,
+  quota_reset_at TEXT,
+  watchdog_attempts INTEGER NOT NULL DEFAULT 0,
+  watchdog_next_at TEXT,
+  watchdog_gave_up_at TEXT,
+  watchdog_last_error TEXT,
+  last_notify_at TEXT,
+  -- 額度或送不出去時，下一次可以再試的時間（有界退避）。
+  notify_next_at TEXT,
+  last_wake_at TEXT,
+  last_wake_reason TEXT,
+  wakes INTEGER NOT NULL DEFAULT 0,
+  events_delivered INTEGER NOT NULL DEFAULT 0,
+  duplicates INTEGER NOT NULL DEFAULT 0,
+  merged INTEGER NOT NULL DEFAULT 0,
+  persona_text TEXT,
+  persona_version INTEGER NOT NULL DEFAULT 0,
+  persona_hash TEXT,
+  persona_source TEXT,
+  persona_updated_at TEXT,
+  persona_seed_hash TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS supervisor_inbox_role_open
+  ON supervisor_inbox(role, state) WHERE state != 'handled';
+"#;
+
+/// 從 `store::migrate` 最後呼叫。可重入：每一步都有 `IF NOT EXISTS` 或欄位檢查。
+pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    for (col, ddl) in [
+        // NULL = 還沒分類（剛寫進來、或這個欄位出現以前的舊列）；controller 每個 tick 先補上。
+        ("role", "ALTER TABLE supervisor_inbox ADD COLUMN role TEXT"),
+        // 0 = 只記錄、不喚醒：回覆、ack、純通知、恢復。會跟下一次喚醒一起送，但自己不叫醒誰。
+        ("wake", "ALTER TABLE supervisor_inbox ADD COLUMN wake INTEGER"),
+        // 實際送給哪個角色（送出那一刻寫下）。ack 以它為準，兩個角色不會各收一次。
+        ("claimed_by", "ALTER TABLE supervisor_inbox ADD COLUMN claimed_by TEXT"),
+        ("acked_by", "ALTER TABLE supervisor_inbox ADD COLUMN acked_by TEXT"),
+        // 被合併掉的事件指向留下來的那一筆（例如同一段時間的多次 health_changed）。
+        ("merged_into", "ALTER TABLE supervisor_inbox ADD COLUMN merged_into TEXT"),
+    ] {
+        if !super::store::has_column(pool, "supervisor_inbox", col).await? {
+            sqlx::query(ddl).execute(pool).await?;
+        }
+    }
+    if !super::store::has_column(pool, "supervisor_assignments", "review_role").await? {
+        // 回報給誰驗收。NULL = 協調者（巡檢自己的例行派工會明寫 patrol）。
+        sqlx::query("ALTER TABLE supervisor_assignments ADD COLUMN review_role TEXT").execute(pool).await?;
+    }
+    for stmt in DDL.split(";\n") {
+        let s = stmt.trim();
+        if !s.is_empty() {
+            sqlx::query(s).execute(pool).await?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- routing table
+
+/// 一個事件歸誰、要不要叫醒人。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    pub role: Role,
+    pub wake: bool,
+}
+
+/// 路由表（SPEC §18.15）。純函式：只看事件種類、payload 裡明寫的欄位，以及交辦記錄的驗收角色。
+///
+/// 不認得的種類給巡檢並喚醒：新事件寧可被看到一次，也不要無聲地躺在沒人收的角色底下。
+pub fn route(kind: &str, payload: &Value, review_role: Option<&str>) -> Route {
+    let needs_review = payload.get("needs_review").and_then(Value::as_bool);
+    let reviewer = review_role.and_then(Role::parse).unwrap_or(Role::Responder);
+    let r = |role, wake| Route { role, wake };
+    match kind {
+        // bot 的申請：寫入時已決定收件角色（`bot_requests::intercept`）。
+        "bot_request" => r(
+            payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Responder),
+            payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
+        ),
+        "assignment_completed" | "assignment_failed" => r(reviewer, needs_review != Some(false)),
+        // 通知型交辦送到了、額度擋住／恢復：controller 自己會處理，這些只是記錄。
+        "assignment_noticed" | "quota_blocked" | "quota_resumed" => r(reviewer, false),
+        "approval_requested" | "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
+        | "mission_identity_switch" => r(Role::Responder, true),
+        // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
+        "incident_resolved" => r(Role::Patrol, false),
+        "health_changed" => {
+            let status = payload.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown");
+            r(Role::Patrol, status != "healthy")
+        }
+        _ => r(Role::Patrol, true),
+    }
+}
+
+/// 把還沒分類的 inbox 列補上角色與喚醒旗標。寫入端（store、mission、bulk_restart）都不用改，
+/// 路由只存在這一個地方。
+pub async fn classify(pool: &SqlitePool) -> Result<usize> {
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, i.kind, i.payload_json, a.review_role
+           FROM supervisor_inbox i LEFT JOIN supervisor_assignments a ON a.id = i.assignment_id
+          WHERE i.role IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, kind, payload, review_role) in &rows {
+        let p: Value = serde_json::from_str(payload).unwrap_or_else(|_| json!({}));
+        let rt = route(kind, &p, review_role.as_deref());
+        sqlx::query("UPDATE supervisor_inbox SET role=?, wake=? WHERE id=? AND role IS NULL")
+            .bind(rt.role.as_str())
+            .bind(i64::from(rt.wake))
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(rows.len())
+}
+
+// ---------------------------------------------------------------- role rows
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, FromRow)]
+pub struct RoleRow {
+    pub role: String,
+    pub bot_id: Option<String>,
+    pub project_id: Option<String>,
+    pub cwd: Option<String>,
+    pub identity: String,
+    pub model: String,
+    pub effort: String,
+    pub desired_running: i64,
+    pub status: String,
+    pub status_detail: Option<String>,
+    pub quota_reset_at: Option<String>,
+    pub watchdog_attempts: i64,
+    pub watchdog_next_at: Option<String>,
+    pub watchdog_gave_up_at: Option<String>,
+    pub watchdog_last_error: Option<String>,
+    pub last_notify_at: Option<String>,
+    pub notify_next_at: Option<String>,
+    pub last_wake_at: Option<String>,
+    pub last_wake_reason: Option<String>,
+    pub wakes: i64,
+    pub events_delivered: i64,
+    pub duplicates: i64,
+    pub merged: i64,
+    pub persona_text: Option<String>,
+    pub persona_version: i64,
+    pub persona_hash: Option<String>,
+    pub persona_source: Option<String>,
+    pub persona_updated_at: Option<String>,
+    pub persona_seed_hash: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl RoleRow {
+    pub fn stats_json(&self) -> Value {
+        json!({
+            "wakes": self.wakes,
+            "events_delivered": self.events_delivered,
+            "duplicates": self.duplicates,
+            "merged": self.merged,
+            "last_wake_at": self.last_wake_at,
+            "last_wake_reason": self.last_wake_reason,
+            "last_notify_at": self.last_notify_at,
+            "notify_next_at": self.notify_next_at,
+        })
+    }
+}
+
+pub async fn get(pool: &SqlitePool, role: Role) -> Result<RoleRow> {
+    let now = crate::db::now();
+    sqlx::query("INSERT OR IGNORE INTO supervisor_roles (role, created_at, updated_at) VALUES (?, ?, ?)")
+        .bind(role.as_str())
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    Ok(sqlx::query_as::<_, RoleRow>("SELECT * FROM supervisor_roles WHERE role=?")
+        .bind(role.as_str())
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn set_env(pool: &SqlitePool, role: Role, bot_id: &str, project_id: &str, cwd: &str) -> Result<()> {
+    get(pool, role).await?;
+    sqlx::query("UPDATE supervisor_roles SET bot_id=?, project_id=?, cwd=?, updated_at=? WHERE role=?")
+        .bind(bot_id)
+        .bind(project_id)
+        .bind(cwd)
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_runtime(pool: &SqlitePool, role: Role, identity: &str, model: &str, effort: &str) -> Result<()> {
+    get(pool, role).await?;
+    sqlx::query("UPDATE supervisor_roles SET identity=?, model=?, effort=?, updated_at=? WHERE role=?")
+        .bind(identity)
+        .bind(model)
+        .bind(effort)
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_desired_running(pool: &SqlitePool, role: Role, wanted: bool) -> Result<()> {
+    get(pool, role).await?;
+    // 人手啟動就是新的一輪：前一次 watchdog 放棄的紀錄與計數一起清掉。
+    sqlx::query(
+        "UPDATE supervisor_roles SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL,
+                watchdog_gave_up_at=NULL, watchdog_last_error=NULL, updated_at=? WHERE role=?",
+    )
+    .bind(i64::from(wanted))
+    .bind(crate::db::now())
+    .bind(role.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_status(pool: &SqlitePool, role: Role, status: &str, detail: Option<&str>, reset_at: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE supervisor_roles SET status=?, status_detail=?, quota_reset_at=?, updated_at=? WHERE role=?")
+        .bind(status)
+        .bind(detail)
+        .bind(reset_at)
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_status_detail(pool: &SqlitePool, role: Role, detail: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE supervisor_roles SET status_detail=?, updated_at=? WHERE role=?")
+        .bind(detail)
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_watchdog(pool: &SqlitePool, role: Role, attempts: i64, next_at: Option<&str>, error: Option<&str>) -> Result<()> {
+    let clear_gave_up = attempts == 0 && next_at.is_none();
+    sqlx::query(
+        "UPDATE supervisor_roles SET watchdog_attempts=?, watchdog_next_at=?,
+                watchdog_last_error=COALESCE(?, CASE WHEN ? THEN NULL ELSE watchdog_last_error END),
+                watchdog_gave_up_at=CASE WHEN ? THEN NULL ELSE watchdog_gave_up_at END, updated_at=?
+          WHERE role=?",
+    )
+    .bind(attempts)
+    .bind(next_at)
+    .bind(error)
+    .bind(clear_gave_up)
+    .bind(clear_gave_up)
+    .bind(crate::db::now())
+    .bind(role.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// `true` 只在第一次：放棄只報一次。
+pub async fn mark_watchdog_gave_up(pool: &SqlitePool, role: Role, why: &str) -> Result<Option<String>> {
+    let now = crate::db::now();
+    let res = sqlx::query(
+        "UPDATE supervisor_roles SET watchdog_gave_up_at=?, watchdog_last_error=?, updated_at=?
+          WHERE role=? AND watchdog_gave_up_at IS NULL",
+    )
+    .bind(&now)
+    .bind(why)
+    .bind(&now)
+    .bind(role.as_str())
+    .execute(pool)
+    .await?;
+    Ok((res.rows_affected() > 0).then_some(now))
+}
+
+pub async fn set_notify_next(pool: &SqlitePool, role: Role, next_at: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE supervisor_roles SET notify_next_at=?, updated_at=? WHERE role=?")
+        .bind(next_at)
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 一次真的送出去的喚醒。計數是驗收「fable 不會因為 bot 申請被叫醒」的證據。
+pub async fn record_wake(pool: &SqlitePool, role: Role, events: usize, reason: &str) -> Result<()> {
+    get(pool, role).await?;
+    let now = crate::db::now();
+    sqlx::query(
+        "UPDATE supervisor_roles SET wakes=wakes+1, events_delivered=events_delivered+?, last_wake_at=?,
+                last_wake_reason=?, last_notify_at=?, notify_next_at=NULL, updated_at=? WHERE role=?",
+    )
+    .bind(events as i64)
+    .bind(&now)
+    .bind(reason)
+    .bind(&now)
+    .bind(&now)
+    .bind(role.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn count_duplicate(pool: &SqlitePool, role: Role) -> Result<()> {
+    get(pool, role).await?;
+    sqlx::query("UPDATE supervisor_roles SET duplicates=duplicates+1, updated_at=? WHERE role=?")
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn count_merged(pool: &SqlitePool, role: Role, n: usize) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    get(pool, role).await?;
+    sqlx::query("UPDATE supervisor_roles SET merged=merged+?, updated_at=? WHERE role=?")
+        .bind(n as i64)
+        .bind(crate::db::now())
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 協調者的 bot，且那顆 bot 還在（使用者可能刪掉它）。`None` = 單角色的舊部署。
+pub async fn responder_bot(pool: &SqlitePool) -> Result<Option<crate::db::Bot>> {
+    let row = get(pool, Role::Responder).await?;
+    let Some(id) = row.bot_id else { return Ok(None) };
+    Ok(crate::db::bot(pool, &id).await?.filter(|b| b.deleted_at.is_none()))
+}
+
+/// 這顆 bot 是哪個角色；兩個都不是就 `None`。
+pub async fn role_of_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Role>> {
+    let sup = super::store::get_or_init(pool).await?;
+    if sup.bot_id.as_deref() == Some(bot_id) {
+        return Ok(Some(Role::Patrol));
+    }
+    let r = get(pool, Role::Responder).await?;
+    Ok((r.bot_id.as_deref() == Some(bot_id)).then_some(Role::Responder))
+}
+
+pub async fn bot_for(pool: &SqlitePool, role: Role) -> Result<Option<String>> {
+    Ok(match role {
+        Role::Patrol => super::store::get_or_init(pool).await?.bot_id,
+        Role::Responder => responder_bot(pool).await?.map(|b| b.id),
+    })
+}
+
+// ---------------------------------------------------------------- per-role inbox
+
+/// 這個角色這一輪可以送的事件（最舊在前）。
+///
+/// * 巡檢：自己的事件，外加協調者**還沒建立**時的協調事件（舊部署的行為）。巡檢的事件照舊有
+///   重試上限（`max_attempts`），用完就交給 `notify_exhausted` incident。
+/// * 協調：只有自己的。沒有重試上限——送不出去是有界退避（見 `responder::notify`），事件一直留著。
+pub async fn due_for(
+    pool: &SqlitePool,
+    role: Role,
+    responder_configured: bool,
+    now: &str,
+    max_attempts: i64,
+) -> Result<Vec<super::store::InboxEvent>> {
+    // 巡檢的重試上限只套在巡檢自己的事件上；協調的事件（不論誰在收）一律不設上限。
+    let (roles, cap) = match (role, responder_configured) {
+        (Role::Patrol, true) => ("role='patrol'", "notify_attempts < ?1"),
+        (Role::Patrol, false) => ("role IS NOT NULL", "(role='responder' OR notify_attempts < ?1)"),
+        (Role::Responder, _) => ("role='responder'", "?1 = ?1"),
+    };
+    // 編號參數：三種組合用同一組 bind，不必各自對齊順序。
+    let sql = format!(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=?2 AND state='pending' AND {roles}
+           AND (notify_next_at IS NULL OR notify_next_at <= ?3) AND {cap}
+         ORDER BY created_at ASC, id ASC"
+    );
+    Ok(sqlx::query_as::<_, super::store::InboxEvent>(&sql)
+        .bind(max_attempts)
+        .bind(super::store::SUPERVISOR_ID)
+        .bind(now)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// 標記送達，並寫下是哪個角色收的。`claimed_by` 已經是別的角色的列不動——同一件事只能有一個
+/// 角色收，重試或兩條迴圈交錯都不會變成兩個角色各處理一次。
+pub async fn mark_delivered(pool: &SqlitePool, ids: &[String], role: Role, turn_id: &str, delivery: &str) -> Result<usize> {
+    let now = crate::db::now();
+    let mut n = 0;
+    for id in ids {
+        let res = sqlx::query(
+            "UPDATE supervisor_inbox
+                SET state='delivered', claimed_by=?, notify_turn_id=?, notify_delivery=?, delivered_at=?,
+                    notify_attempts=notify_attempts+1, notify_next_at=NULL, notify_error=NULL, updated_at=?
+              WHERE id=? AND state!='handled' AND (claimed_by IS NULL OR claimed_by=?)",
+        )
+        .bind(role.as_str())
+        .bind(turn_id)
+        .bind(delivery)
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .bind(role.as_str())
+        .execute(pool)
+        .await?;
+        n += res.rows_affected() as usize;
+    }
+    Ok(n)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AckOutcome {
+    Acked,
+    AlreadyHandled,
+    NotFound,
+    /// 這件事是另一個角色收的；ack 它等於替別人結案。
+    ClaimedByOther(String),
+}
+
+/// 結案一則事件。`actor` = 驗證過的角色（bot token）；`None` = UI／使用者，什麼都能結。
+///
+/// 協調者還沒建立時，巡檢可以結協調的事件（因為那時就是它在收）。
+pub async fn ack(pool: &SqlitePool, id: &str, actor: Option<Role>, responder_configured: bool) -> Result<AckOutcome> {
+    let row: Option<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT state, role, claimed_by FROM supervisor_inbox WHERE supervisor_id=? AND id=?")
+            .bind(super::store::SUPERVISOR_ID)
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((state, role, claimed)) = row else { return Ok(AckOutcome::NotFound) };
+    if state == "handled" {
+        return Ok(AckOutcome::AlreadyHandled);
+    }
+    let owner = claimed.or(role).unwrap_or_else(|| "patrol".into());
+    if let Some(a) = actor {
+        let legacy_patrol = a == Role::Patrol && !responder_configured;
+        if owner != a.as_str() && !legacy_patrol {
+            return Ok(AckOutcome::ClaimedByOther(owner));
+        }
+    }
+    let acked_by = actor.map(Role::as_str).unwrap_or("user");
+    let res = sqlx::query(
+        "UPDATE supervisor_inbox SET state='handled', acked_by=?, updated_at=? WHERE id=? AND state!='handled'",
+    )
+    .bind(acked_by)
+    .bind(crate::db::now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(if res.rows_affected() > 0 { AckOutcome::Acked } else { AckOutcome::AlreadyHandled })
+}
+
+/// 巡檢的合併去重（今天 fable 用量最大的來源）。在送之前、每個 tick 跑一次：
+///
+/// 1. 還沒送出的 `health_changed` 只留最新一筆——十分鐘內 degraded→healthy→degraded 是一件事，
+///    讀的人只需要現在的狀態。
+/// 2. 同一個 incident 開了又在送出前就恢復：兩筆一起結案，不叫醒任何人（抖動）。
+///
+/// 被合併的列 `state='handled'`、`acked_by='daemon'`、`merged_into` 指向留下來的那筆，稽核看得到。
+pub async fn coalesce_patrol(pool: &SqlitePool) -> Result<usize> {
+    let now = crate::db::now();
+    let mut merged = 0usize;
+    let health: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM supervisor_inbox WHERE state='pending' AND kind='health_changed'
+          ORDER BY created_at DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    if let Some(((keep,), older)) = health.split_first() {
+        for (id,) in older {
+            merged += sqlx::query(
+                "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', merged_into=?, updated_at=?
+                  WHERE id=? AND state='pending'",
+            )
+            .bind(keep)
+            .bind(&now)
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected() as usize;
+        }
+    }
+    // `incident:<id>:opened` / `incident:<id>:resolved`（incidents.rs 的 event_key）。
+    let flaps: Vec<(String, String)> = sqlx::query_as(
+        "SELECT o.id, r.id FROM supervisor_inbox o
+           JOIN supervisor_inbox r
+             ON r.event_key = substr(o.event_key, 1, length(o.event_key) - length('opened')) || 'resolved'
+          WHERE o.kind='incident_opened' AND o.state='pending' AND r.state='pending'",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (opened, resolved) in &flaps {
+        for id in [opened, resolved] {
+            merged += sqlx::query(
+                "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', merged_into=?, updated_at=?
+                  WHERE id=? AND state='pending'",
+            )
+            .bind(resolved)
+            .bind(&now)
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected() as usize;
+        }
+    }
+    count_merged(pool, Role::Patrol, merged).await?;
+    Ok(merged)
+}
+
+/// 喚醒原因：這一批裡有哪些種類，給 UI 與稽核看「為什麼叫醒了它」。
+pub fn wake_reason(events: &[super::store::InboxEvent]) -> String {
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for e in events.iter().filter(|e| e.wake != Some(0)) {
+        match kinds.iter_mut().find(|(k, _)| *k == e.kind) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((e.kind.clone(), 1)),
+        }
+    }
+    kinds.iter().map(|(k, n)| if *n > 1 { format!("{k}×{n}") } else { k.clone() }).collect::<Vec<_>>().join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn pool() -> SqlitePool {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        super::super::store::migrate(&p).await.unwrap();
+        super::super::store::get_or_init(&p).await.unwrap();
+        p
+    }
+
+    #[test]
+    fn the_routing_table_sends_bot_business_to_the_responder_and_system_faults_to_patrol() {
+        let p = json!({});
+        for kind in ["approval_requested", "mission_question", "mission_created", "mission_answered", "mission_resumed", "mission_identity_switch"] {
+            assert_eq!(route(kind, &p, None), Route { role: Role::Responder, wake: true }, "{kind}");
+        }
+        assert_eq!(route("assignment_completed", &json!({"needs_review": true}), None), Route { role: Role::Responder, wake: true });
+        assert_eq!(route("assignment_failed", &json!({"needs_review": true}), Some("patrol")), Route { role: Role::Patrol, wake: true }, "巡檢自己的例行派工回到巡檢");
+        for kind in ["assignment_noticed", "quota_blocked", "quota_resumed"] {
+            assert!(!route(kind, &p, None).wake, "{kind} 只記錄");
+        }
+        for kind in ["incident_opened", "watchdog_gave_up", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "brand_new_kind"] {
+            assert_eq!(route(kind, &p, None), Route { role: Role::Patrol, wake: true }, "{kind}");
+        }
+        assert_eq!(route("incident_resolved", &p, None), Route { role: Role::Patrol, wake: false }, "恢復不叫醒人");
+        assert!(!route("health_changed", &json!({"manager_health": {"status": "healthy"}}), None).wake);
+        assert!(route("health_changed", &json!({"manager_health": {"status": "degraded"}}), None).wake);
+        assert_eq!(
+            route("bot_request", &json!({"to_role": "patrol", "wake": false}), None),
+            Route { role: Role::Patrol, wake: false }
+        );
+        assert_eq!(route("bot_request", &json!({}), None), Route { role: Role::Responder, wake: true });
+    }
+
+    /// 舊資料庫：欄位補上、舊列在下一個 tick 被分類，重跑 migrate 不會壞。
+    #[tokio::test]
+    async fn migration_is_reentrant_and_old_rows_get_classified() {
+        let p = pool().await;
+        super::super::store::push_inbox(&p, "k1", "approval_requested", None, None, None, &json!({})).await.unwrap();
+        super::super::store::push_inbox(&p, "k2", "incident_resolved", None, None, None, &json!({})).await.unwrap();
+        super::super::store::migrate(&p).await.unwrap();
+        migrate(&p).await.unwrap();
+        assert_eq!(classify(&p).await.unwrap(), 2);
+        assert_eq!(classify(&p).await.unwrap(), 0, "分類過的不會再分");
+        let rows: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT kind, role, wake FROM supervisor_inbox ORDER BY event_key").fetch_all(&p).await.unwrap();
+        assert_eq!(rows, vec![("approval_requested".into(), "responder".into(), 1), ("incident_resolved".into(), "patrol".into(), 0)]);
+    }
+
+    #[tokio::test]
+    async fn a_responder_event_is_only_due_for_patrol_until_a_responder_exists() {
+        let p = pool().await;
+        super::super::store::push_inbox(&p, "k1", "approval_requested", None, None, None, &json!({})).await.unwrap();
+        super::super::store::push_inbox(&p, "k2", "incident_opened", None, None, None, &json!({})).await.unwrap();
+        classify(&p).await.unwrap();
+        let now = "2999-01-01T00:00:00Z";
+        assert_eq!(due_for(&p, Role::Patrol, false, now, 5).await.unwrap().len(), 2, "舊部署：巡檢收全部");
+        let patrol = due_for(&p, Role::Patrol, true, now, 5).await.unwrap();
+        assert_eq!(patrol.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), vec!["incident_opened"]);
+        let resp = due_for(&p, Role::Responder, true, now, 5).await.unwrap();
+        assert_eq!(resp.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), vec!["approval_requested"]);
+        // 協調者送不出去很多次，也不會掉回巡檢、也不會被當成用完重試。
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=99").execute(&p).await.unwrap();
+        assert_eq!(due_for(&p, Role::Responder, true, now, 5).await.unwrap().len(), 1);
+        assert!(due_for(&p, Role::Patrol, true, now, 5).await.unwrap().is_empty());
+    }
+
+    /// 兩個角色搶同一件事：先送到的那個角色 claim，另一個既標不了送達、也 ack 不了。
+    #[tokio::test]
+    async fn one_event_is_claimed_and_acked_by_exactly_one_role() {
+        let p = pool().await;
+        let id = super::super::store::push_inbox(&p, "k1", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
+        classify(&p).await.unwrap();
+        let ids = vec![id.clone()];
+        assert_eq!(mark_delivered(&p, &ids, Role::Responder, "t1", "ok").await.unwrap(), 1);
+        assert_eq!(mark_delivered(&p, &ids, Role::Patrol, "t2", "ok").await.unwrap(), 0, "已被協調者 claim");
+        assert_eq!(ack(&p, &id, Some(Role::Patrol), true).await.unwrap(), AckOutcome::ClaimedByOther("responder".into()));
+        assert_eq!(ack(&p, &id, Some(Role::Responder), true).await.unwrap(), AckOutcome::Acked);
+        assert_eq!(ack(&p, &id, Some(Role::Responder), true).await.unwrap(), AckOutcome::AlreadyHandled);
+        assert_eq!(ack(&p, "nope", None, true).await.unwrap(), AckOutcome::NotFound);
+        let acked_by: String = sqlx::query_scalar("SELECT acked_by FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&p).await.unwrap();
+        assert_eq!(acked_by, "responder");
+    }
+
+    #[tokio::test]
+    async fn concurrent_acks_from_both_roles_close_it_once() {
+        let p = pool().await;
+        let id = super::super::store::push_inbox(&p, "k1", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
+        classify(&p).await.unwrap();
+        // 使用者（UI）與協調者同時結：只有一個 Acked。
+        let (a, b) = tokio::join!(ack(&p, &id, None, true), ack(&p, &id, Some(Role::Responder), true));
+        let outcomes = [a.unwrap(), b.unwrap()];
+        assert_eq!(outcomes.iter().filter(|o| **o == AckOutcome::Acked).count(), 1, "{outcomes:?}");
+    }
+
+    #[tokio::test]
+    async fn patrol_folds_repeated_health_and_flapping_incidents_before_waking() {
+        let p = pool().await;
+        for (i, s) in ["degraded", "healthy", "degraded"].iter().enumerate() {
+            super::super::store::push_inbox(&p, &format!("health:{i}"), "health_changed", None, None, None, &json!({"manager_health": {"status": s}})).await.unwrap();
+            // created_at 精度是秒；排序要穩定就把時間往後推。
+            sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE event_key=?")
+                .bind(format!("2026-09-13T00:00:0{i}Z"))
+                .bind(format!("health:{i}"))
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        super::super::store::push_inbox(&p, "incident:I1:opened", "incident_opened", None, None, None, &json!({})).await.unwrap();
+        super::super::store::push_inbox(&p, "incident:I1:resolved", "incident_resolved", None, None, None, &json!({})).await.unwrap();
+        super::super::store::push_inbox(&p, "incident:I2:opened", "incident_opened", None, None, None, &json!({})).await.unwrap();
+        classify(&p).await.unwrap();
+        assert_eq!(coalesce_patrol(&p).await.unwrap(), 4, "兩筆舊 health + 一對抖動");
+        let due = due_for(&p, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
+        let keys: Vec<&str> = due.iter().map(|e| e.event_key.as_str()).collect();
+        assert_eq!(keys, vec!["health:2", "incident:I2:opened"]);
+        assert_eq!(get(&p, Role::Patrol).await.unwrap().merged, 4);
+        assert_eq!(coalesce_patrol(&p).await.unwrap(), 0, "再跑一次不會重複合併");
+    }
+}

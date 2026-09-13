@@ -43,28 +43,52 @@ pub enum Plan {
 
 /// `liveness` is [`super::manager_liveness`]: `stopped` | `starting` | `busy` | `idle`.
 pub fn plan(sup: &Supervisor, liveness: &str, now_past: impl Fn(&str) -> bool) -> Plan {
-    if sup.bot_id.is_none() || !sup.wants_running() || sup.status == "waiting_quota" {
+    plan_for(
+        Watched {
+            configured: sup.bot_id.is_some(),
+            wanted: sup.wants_running(),
+            waiting_quota: sup.status == "waiting_quota",
+            attempts: sup.watchdog_attempts,
+            next_at: sup.watchdog_next_at.as_deref(),
+        },
+        liveness,
+        now_past,
+    )
+}
+
+/// 看門狗要看的那幾個欄位。巡檢的在 `supervisors`、協調者的在 `supervisor_roles`，規則同一套。
+#[derive(Debug, Clone, Copy)]
+pub struct Watched<'a> {
+    pub configured: bool,
+    pub wanted: bool,
+    pub waiting_quota: bool,
+    pub attempts: i64,
+    pub next_at: Option<&'a str>,
+}
+
+pub fn plan_for(w: Watched<'_>, liveness: &str, now_past: impl Fn(&str) -> bool) -> Plan {
+    if !w.configured || !w.wanted || w.waiting_quota {
         return Plan::Idle;
     }
     if liveness != "stopped" {
         return Plan::Idle;
     }
-    if sup.watchdog_attempts >= MAX_ATTEMPTS {
+    if w.attempts >= MAX_ATTEMPTS {
         return Plan::GaveUp;
     }
-    match sup.watchdog_next_at.as_deref() {
+    match w.next_at {
         None => Plan::Wait { schedule: true },
         Some(t) if !now_past(t) => Plan::Wait { schedule: false },
         Some(_) => Plan::Start,
     }
 }
 
-fn iso_in(secs: u64) -> String {
+pub(super) fn iso_in(secs: u64) -> String {
     (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn past(iso: &str) -> bool {
+pub(super) fn past(iso: &str) -> bool {
     match chrono::DateTime::parse_from_rfc3339(iso) {
         Ok(t) => t <= chrono::Utc::now(),
         Err(_) => true,
