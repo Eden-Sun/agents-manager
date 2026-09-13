@@ -38,7 +38,6 @@ import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
-import { MobilePreviewToggle } from './MobilePreview'
 import { QuickAddBots } from './QuickAddBots'
 import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
@@ -1485,7 +1484,6 @@ export function Sidebar() {
           <section className="env-sec">
             <h3>顯示</h3>
             <KindDisplayToggle />
-            <MobilePreviewToggle />
           </section>
         </div>
       </Modal>
