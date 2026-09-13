@@ -31,25 +31,46 @@ CREATE TABLE IF NOT EXISTS missions (
   paused_reason TEXT,
   paused_detail TEXT,
   result_summary TEXT,
+  -- 這一筆是哪一筆任務的續作（追加修改）。NULL = 使用者自己開的第一筆。
+  -- 續作是**新的一筆 mission**，不是把舊的打開重跑：舊那筆的 completed_at、result_summary 與
+  -- 事件串完全不動，使用者回頭看到的還是當初交付的那一版。
+  parent_mission_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   completed_at TEXT,
   cancelled_at TEXT
 );
+CREATE INDEX IF NOT EXISTS missions_parent ON missions(parent_mission_id);
+-- 一個 parent 同時只能有**一筆**還沒結案的續作。未結案＝沒 completed_at 也沒 cancelled_at，
+-- 所以 paused、等額度、還在跑全都算——那些都是「這一輪還沒結束」。
+-- 放在 DB 而不是先查再寫：兩個並發的 revise（就算 crid 不同）只有一個能通過這個索引，
+-- 剩下那個必然失敗，不必賭應用層的檢查與寫入之間沒有空隙。
+CREATE UNIQUE INDEX IF NOT EXISTS missions_one_open_child
+  ON missions(parent_mission_id)
+  WHERE parent_mission_id IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS missions_crid ON missions(project_id, client_request_id);
 CREATE INDEX IF NOT EXISTS missions_project ON missions(project_id, created_at);
 CREATE TABLE IF NOT EXISTS mission_events (
   id TEXT PRIMARY KEY,
   mission_id TEXT NOT NULL,
-  -- instruction | report | verified | round | paused | resumed | cancelled | delivered | completed | note
+  -- instruction | report | verified | round | paused | resumed | cancelled | delivered | completed
+  -- | note | question（使用者對成果追問）| answer（回覆：使用者回答暫停，或 AGM 回覆追問）
   kind TEXT NOT NULL,
   text TEXT NOT NULL,
   -- NULL = 使用者本人；bot id = 那顆 bot（多半是 AGM）；'daemon' = daemon 自己記的。
   relay_from TEXT,
   payload_json TEXT NOT NULL DEFAULT '{}',
+  -- answer 指回它回答的那則 question 事件 id，成對顯示才不會變成一串對不上的獨白。
+  reply_to TEXT,
+  -- 同一個請求重送回同一則事件（回答／追問都要冪等，見 api.rs 的 replay 規則）。
+  client_request_id TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mission_events_mission ON mission_events(mission_id, created_at);
+CREATE INDEX IF NOT EXISTS mission_events_reply ON mission_events(reply_to);
+-- 冪等鍵：同一筆任務裡一個 client_request_id 只會有一則事件。
+CREATE UNIQUE INDEX IF NOT EXISTS mission_events_crid
+  ON mission_events(mission_id, client_request_id) WHERE client_request_id IS NOT NULL;
 -- 身分停用原本只存在瀏覽器 localStorage（web/src/store/quotaHide.ts），daemon 挑身分時看不到。
 CREATE TABLE IF NOT EXISTS identity_prefs (
   host TEXT NOT NULL,
@@ -68,7 +89,36 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             sqlx::query(s).execute(pool).await?;
         }
     }
+    // 既有資料庫的加欄位（跟 db::migrate 同一套做法）。全部是 additive，舊列拿到 NULL：
+    // 沒有 parent 的就是使用者自己開的第一筆，沒有 reply_to/crid 的是這個功能之前的事件。
+    for (table, col, ddl) in [
+        ("missions", "parent_mission_id", "ALTER TABLE missions ADD COLUMN parent_mission_id TEXT"),
+        ("mission_events", "reply_to", "ALTER TABLE mission_events ADD COLUMN reply_to TEXT"),
+        ("mission_events", "client_request_id", "ALTER TABLE mission_events ADD COLUMN client_request_id TEXT"),
+    ] {
+        if !has_column(pool, table, col).await? {
+            sqlx::query(ddl).execute(pool).await?;
+        }
+    }
+    // 索引要在欄位存在之後才建得起來。
+    for stmt in [
+        "CREATE INDEX IF NOT EXISTS missions_parent ON missions(parent_mission_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS missions_one_open_child
+           ON missions(parent_mission_id)
+           WHERE parent_mission_id IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL",
+        "CREATE INDEX IF NOT EXISTS mission_events_reply ON mission_events(reply_to)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS mission_events_crid
+           ON mission_events(mission_id, client_request_id) WHERE client_request_id IS NOT NULL",
+    ] {
+        sqlx::query(stmt).execute(pool).await?;
+    }
     Ok(())
+}
+
+async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
+    let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
+    Ok(cols.iter().any(|c| c.1 == col))
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -85,6 +135,7 @@ pub struct Mission {
     pub paused_reason: Option<String>,
     pub paused_detail: Option<String>,
     pub result_summary: Option<String>,
+    pub parent_mission_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
@@ -122,6 +173,8 @@ pub struct MissionEvent {
     pub text: String,
     pub relay_from: Option<String>,
     pub payload_json: String,
+    pub reply_to: Option<String>,
+    pub client_request_id: Option<String>,
     pub created_at: String,
 }
 
@@ -133,6 +186,8 @@ pub struct NewMission<'a> {
     pub executor_kind: &'a str,
     pub on_5h_limit: &'a str,
     pub max_rounds: i64,
+    /// 續作才有：它是哪一筆任務的下一輪。
+    pub parent_mission_id: Option<&'a str>,
 }
 
 /// 建立任務；同一個 `(project_id, client_request_id)` 已經有了就回那一筆（`created=false`）。
@@ -144,8 +199,9 @@ pub async fn create(pool: &SqlitePool, m: &NewMission<'_>) -> Result<(Mission, b
     let now = crate::db::now();
     let res = sqlx::query(
         "INSERT OR IGNORE INTO missions
-           (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, max_rounds, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)",
+           (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, max_rounds,
+            parent_mission_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(m.project_id)
@@ -155,12 +211,80 @@ pub async fn create(pool: &SqlitePool, m: &NewMission<'_>) -> Result<(Mission, b
     .bind(m.executor_kind)
     .bind(m.on_5h_limit)
     .bind(m.max_rounds)
+    .bind(m.parent_mission_id)
     .bind(&now)
     .bind(&now)
     .execute(pool)
     .await?;
     let row = by_crid(pool, m.project_id, m.client_request_id).await?.ok_or_else(|| anyhow::anyhow!("mission vanished after insert"))?;
     Ok((row, res.rows_affected() == 1))
+}
+
+/// 建續作的三種結果。
+#[derive(Debug)]
+pub enum ChildCreate {
+    Created(Mission),
+    /// 同一個 client_request_id 已經建過了——回原本那一筆。
+    Replayed(Mission),
+    /// 這個 parent 已經有一筆還沒結案的續作。附上它，呼叫端才講得出「去看那一筆」。
+    OpenChildExists(Mission),
+}
+
+/// 目前還沒結案的那筆續作（如果有）。
+pub async fn open_child(pool: &SqlitePool, parent_id: &str) -> Result<Option<Mission>> {
+    Ok(sqlx::query_as::<_, Mission>(
+        "SELECT * FROM missions WHERE parent_mission_id = ? AND completed_at IS NULL AND cancelled_at IS NULL LIMIT 1",
+    )
+    .bind(parent_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// 建立續作。`missions_one_open_child` 是真正的守門員：先查一次是為了給出好的錯誤訊息，
+/// 但就算兩個請求同時通過那個查詢，也只有一個 INSERT 進得去，另一個會撞索引。
+pub async fn create_child(pool: &SqlitePool, m: &NewMission<'_>) -> Result<ChildCreate> {
+    let parent_id = m.parent_mission_id.ok_or_else(|| anyhow::anyhow!("create_child needs a parent"))?;
+    if let Some(existing) = by_crid(pool, m.project_id, m.client_request_id).await? {
+        return Ok(ChildCreate::Replayed(existing));
+    }
+    if let Some(open) = open_child(pool, parent_id).await? {
+        return Ok(ChildCreate::OpenChildExists(open));
+    }
+    let id = crate::db::ulid();
+    let now = crate::db::now();
+    let res = sqlx::query(
+        "INSERT INTO missions
+           (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, max_rounds,
+            parent_mission_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(m.project_id)
+    .bind(m.client_request_id)
+    .bind(m.text)
+    .bind(m.delivery_mode)
+    .bind(m.executor_kind)
+    .bind(m.on_5h_limit)
+    .bind(m.max_rounds)
+    .bind(parent_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await;
+    match res {
+        Ok(_) => Ok(ChildCreate::Created(get(pool, &id).await?.ok_or_else(|| anyhow::anyhow!("child vanished after insert"))?)),
+        Err(e) => {
+            // 撞到唯一索引：不是失敗，是「別人先建了」。分不出是哪一個索引就兩邊都查，
+            // 查不到才是真的出錯。
+            if let Some(existing) = by_crid(pool, m.project_id, m.client_request_id).await? {
+                return Ok(ChildCreate::Replayed(existing));
+            }
+            if let Some(open) = open_child(pool, parent_id).await? {
+                return Ok(ChildCreate::OpenChildExists(open));
+            }
+            Err(e.into())
+        }
+    }
 }
 
 async fn by_crid(pool: &SqlitePool, project_id: &str, crid: &str) -> Result<Option<Mission>> {
@@ -207,6 +331,25 @@ pub async fn add_event(
     relay_from: Option<&str>,
     payload: &serde_json::Value,
 ) -> Result<MissionEvent> {
+    let mut tx = pool.begin().await?;
+    let ev = insert_event(&mut tx, mission_id, kind, text, relay_from, payload, None, None).await?;
+    tx.commit().await?;
+    Ok(ev)
+}
+
+/// 寫一則事件（在呼叫端的 transaction 裡）。`reply_to` 讓 answer 指回它回答的 question，
+/// `crid` 是冪等鍵。
+#[allow(clippy::too_many_arguments)]
+async fn insert_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    mission_id: &str,
+    kind: &str,
+    text: &str,
+    relay_from: Option<&str>,
+    payload: &serde_json::Value,
+    reply_to: Option<&str>,
+    crid: Option<&str>,
+) -> Result<MissionEvent> {
     let ev = MissionEvent {
         id: crate::db::ulid(),
         mission_id: mission_id.into(),
@@ -214,20 +357,123 @@ pub async fn add_event(
         text: text.into(),
         relay_from: relay_from.map(String::from),
         payload_json: payload.to_string(),
+        reply_to: reply_to.map(String::from),
+        client_request_id: crid.map(String::from),
         created_at: crate::db::now(),
     };
-    sqlx::query("INSERT INTO mission_events (id, mission_id, kind, text, relay_from, payload_json, created_at) VALUES (?,?,?,?,?,?,?)")
-        .bind(&ev.id)
-        .bind(&ev.mission_id)
-        .bind(&ev.kind)
-        .bind(&ev.text)
-        .bind(&ev.relay_from)
-        .bind(&ev.payload_json)
+    sqlx::query(
+        "INSERT INTO mission_events
+           (id, mission_id, kind, text, relay_from, payload_json, reply_to, client_request_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(&ev.id)
+    .bind(&ev.mission_id)
+    .bind(&ev.kind)
+    .bind(&ev.text)
+    .bind(&ev.relay_from)
+    .bind(&ev.payload_json)
+    .bind(&ev.reply_to)
+    .bind(&ev.client_request_id)
+    .bind(&ev.created_at)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE missions SET updated_at = ? WHERE id = ?")
         .bind(&ev.created_at)
-        .execute(pool)
+        .bind(mission_id)
+        .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE missions SET updated_at = ? WHERE id = ?").bind(&ev.created_at).bind(mission_id).execute(pool).await?;
     Ok(ev)
+}
+
+/// 這個任務的續作（新的在前）。
+pub async fn children(pool: &SqlitePool, mission_id: &str) -> Result<Vec<Mission>> {
+    Ok(sqlx::query_as::<_, Mission>("SELECT * FROM missions WHERE parent_mission_id = ? ORDER BY created_at DESC")
+        .bind(mission_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// 既有的那一則同 crid 事件（重放判斷用）。
+pub async fn event_by_crid(pool: &SqlitePool, mission_id: &str, crid: &str) -> Result<Option<MissionEvent>> {
+    Ok(sqlx::query_as::<_, MissionEvent>(
+        "SELECT * FROM mission_events WHERE mission_id = ? AND client_request_id = ?",
+    )
+    .bind(mission_id)
+    .bind(crid)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// 一次寫入的結果。`replayed` = 這是同一個 crid 的重送，什麼都沒有再寫一次。
+#[derive(Debug)]
+pub struct Written {
+    pub event: MissionEvent,
+    pub resumed: bool,
+    pub replayed: bool,
+}
+
+/// 使用者的回答／追問，連同喚醒 AGM 的 inbox 事件，一次交易寫完。
+///
+/// 三件事非得綁在一起不可：事件（AGM 接回去要讀得到這句話）、`paused → open`（不放行它就永遠停著）、
+/// inbox（沒有它 AGM 根本不知道有人回答了——`post_resume` 以前就只寫事件＋SSE，等於靠 AGM 自己去查）。
+/// 拆成三支 API 由前端串（store.ts 舊的做法）的話，中間任何一步失敗都會留下半套。
+///
+/// **重放優先**：先看 crid 有沒有寫過，有就原樣回，**不**再檢查任務現在是什麼狀態。重送發生在 resume
+/// 之後是常態（網路慢、使用者連點），那時候任務已經不是 paused 了，先檢查狀態只會把正確的重送擋掉。
+#[allow(clippy::too_many_arguments)]
+pub async fn write_reply(
+    pool: &SqlitePool,
+    mission_id: &str,
+    kind: &str,
+    text: &str,
+    relay_from: Option<&str>,
+    reply_to: Option<&str>,
+    crid: &str,
+    resume_mission: bool,
+    inbox: Option<(&str, &str, &serde_json::Value)>,
+) -> Result<Written> {
+    if let Some(existing) = event_by_crid(pool, mission_id, crid).await? {
+        return Ok(Written { event: existing, resumed: false, replayed: true });
+    }
+    let mut tx = pool.begin().await?;
+    let ev = insert_event(&mut tx, mission_id, kind, text, relay_from, &serde_json::json!({}), reply_to, Some(crid)).await?;
+    let mut resumed = false;
+    if resume_mission {
+        let now = crate::db::now();
+        resumed = sqlx::query(
+            "UPDATE missions SET paused_reason = NULL, paused_detail = NULL, updated_at = ?
+             WHERE id = ? AND paused_reason IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL",
+        )
+        .bind(&now)
+        .bind(mission_id)
+        .execute(&mut **&mut tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if resumed {
+            insert_event(&mut tx, mission_id, "resumed", "繼續", Some(crate::agent_relay::DAEMON_SENDER), &serde_json::json!({}), None, None)
+                .await?;
+        }
+    }
+    if let Some((key, kind, payload)) = inbox {
+        // 同一個資料庫，所以放得進同一個交易。`INSERT OR IGNORE` 讓 event_key 自己去重。
+        sqlx::query(
+            "INSERT OR IGNORE INTO supervisor_inbox
+               (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+             VALUES (?,?,?,NULL,NULL,NULL,?,?, 'pending', ?, ?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(crate::supervisor::store::SUPERVISOR_ID)
+        .bind(key)
+        .bind(kind)
+        .bind(payload.to_string())
+        .bind(&ev.created_at)
+        .bind(&ev.created_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Written { event: ev, resumed, replayed: false })
 }
 
 /// 已結案（完成或取消）的任務不接受任何狀態變更。回傳 `false` = 沒有改到（已結案或不存在）。
@@ -357,6 +603,7 @@ mod tests {
             executor_kind: "claude",
             on_5h_limit: "wait",
             max_rounds: 2,
+            parent_mission_id: None,
         }
     }
 

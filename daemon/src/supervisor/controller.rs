@@ -1233,7 +1233,7 @@ mod mission_quota_tests {
     async fn mission(app: &Arc<App>, on_5h: &str) -> String {
         let (m, _) = mstore::create(
             &app.db,
-            &mstore::NewMission { project_id: "p", client_request_id: &crate::db::ulid(), text: "做 X", delivery_mode: "pr", executor_kind: "claude", on_5h_limit: on_5h, max_rounds: 2 },
+            &mstore::NewMission { project_id: "p", client_request_id: &crate::db::ulid(), text: "做 X", delivery_mode: "pr", executor_kind: "claude", on_5h_limit: on_5h, max_rounds: 2, parent_mission_id: None },
         )
         .await
         .unwrap();
