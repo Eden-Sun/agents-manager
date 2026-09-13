@@ -53,6 +53,22 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
         .route("/projects/{id}/chat", post(project_chat))
+        // 群組任務（docs/goals/agm-missions.md）：群組的「交給 AGM」與 AGM 調度用的端點。
+        .route(
+            "/projects/{id}/missions",
+            get(crate::mission::api::get_missions).post(crate::mission::api::post_mission),
+        )
+        .route("/missions/{id}", get(crate::mission::api::get_mission))
+        .route("/missions/{id}/events", post(crate::mission::api::post_event))
+        .route("/missions/{id}/pause", post(crate::mission::api::post_pause))
+        .route("/missions/{id}/resume", post(crate::mission::api::post_resume))
+        .route("/missions/{id}/cancel", post(crate::mission::api::post_cancel))
+        .route("/missions/{id}/complete", post(crate::mission::api::post_complete))
+        .route("/missions/{id}/round", post(crate::mission::api::post_round))
+        .route("/missions/{id}/pick", get(crate::mission::api::get_pick))
+        .route("/missions/{id}/deliver", post(crate::mission::api::post_deliver))
+        .route("/identity-prefs", get(crate::mission::api::get_identity_prefs))
+        .route("/identities/{name}/disabled", axum::routing::put(crate::mission::api::put_identity_disabled))
         .route("/projects/{id}/github/refresh", post(refresh_github))
         .route("/projects/{id}/submodules", get(get_submodules))
         .route("/projects/{id}/git", get(get_git))

@@ -536,6 +536,8 @@ async fn migrate(mpool: &SqlitePool) -> Result<()> {
     }
     // AGM 總管的持久資料（supervisor/store.rs）。
     crate::supervisor::store::migrate(&pool).await?;
+    // 群組任務（mission/store.rs，docs/goals/agm-missions.md）。
+    crate::mission::store::migrate(&pool).await?;
     Ok(())
 }
 
