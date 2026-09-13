@@ -184,6 +184,8 @@ pub async fn assign(
     mission: Option<(&str, &str)>,
     // 回報給哪個 AGM 角色驗收；`None` = 協調者（roles.rs 的預設）。
     review_role: Option<roles::Role>,
+    // 呼叫端自己是哪個角色（bot token 驗過的）。`None` = UI／腳本。
+    actor: Option<roles::Role>,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -216,8 +218,34 @@ pub async fn assign(
     let manager_id = sup.bot_id.clone().ok_or_else(|| {
         LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"}))
     })?;
-    if target_bot_id == manager_id || roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)?.is_some() {
-        return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
+    // 目標是另一個 AGM 角色：這不是交辦，是**交接**。走跟 bot 申請同一條佇列（批次、節流、
+    // 「回覆不再叫醒對方」的規則只有一份），不直接打進對方的 pane（SPEC §18.15）。
+    if let Some(target_role) = roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)? {
+        if actor == Some(target_role) || target_bot_id == manager_id && actor.is_none() && target_role == roles::Role::Patrol {
+            return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
+        }
+        let from = match actor {
+            Some(r) => roles::bot_for(&app.db, r).await.map_err(up)?,
+            None => Some(manager_id.clone()),
+        };
+        let Some(from) = from else {
+            return Err(LcError::conflict("that AGM role has no bot", json!({"reason": "role_not_configured"})));
+        };
+        let mut out = bot_requests::queue(
+            app,
+            target_role,
+            &from,
+            target_bot_id,
+            text,
+            Some(client_request_id),
+            &[],
+            actor.is_some(),
+            "assignment",
+        )
+        .await?;
+        out["kind"] = json!("handover");
+        out["expects_review"] = json!(expects_review);
+        return Ok(out);
     }
     crate::db::bot(&app.db, target_bot_id)
         .await
@@ -317,8 +345,9 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// Shares its rules with [`assign`]: the manager may not assign to itself, the bot has to exist
 /// and not be deleted.
 pub async fn check_assignable(app: &Arc<App>, target_bot_id: &str) -> Result<(), LcError> {
+    // 角色 bot 不是工人：要跟另一個角色說話走 `assign` 的交接路徑（佇列），不是 followup。
     if roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)?.is_some() {
-        return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
+        return Err(LcError::Bad("an AGM role cannot be the target of an assignment; hand over through the role queue".into()));
     }
     crate::db::bot(&app.db, target_bot_id)
         .await
