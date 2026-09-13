@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { keysToMove, keysToSelect, parseChoiceMenu, sameChoices } from './tuiChoices.ts'
+import { isActionChoice, keysToMove, keysToSelect, parseChoiceMenu, sameChoices } from './tuiChoices.ts'
 
 /**
  * 2026-09-12 第三輪真機快照（bot `carbis`，185×54）：claude 的**多分頁 ＋ 多選**
@@ -14,6 +14,9 @@ const MULTI = readFileSync(new URL('./__fixtures__/carbis-multiselect.txt', impo
  * 點其他分頁」——分頁列跟選項之間隔著一整段 Review，原本只看問題正上方那一行就找不到它。
  */
 const REVIEW = readFileSync(new URL('./__fixtures__/carbis-review.txt', import.meta.url), 'utf8')
+
+/** 2026-09-13 真機：多分頁**單選**（沒有 `[ ]`）。草稿若把 `checked===null` 當 disabled 就勾不起來。 */
+const OPU_RADIO = readFileSync(new URL('./__fixtures__/opu-radio.txt', import.meta.url), 'utf8')
 
 /** 2026-09-12 真機快照（bot `carbis`，185 欄）。分隔線夾在 5 與 6 之間是原樣。 */
 const CARBIS = [
@@ -250,4 +253,22 @@ test('沒有分頁的單選：tabAt 是 null、review 空的（沒有退步）',
   assert.equal(menu.tabAt, null)
   assert.deepEqual(menu.review, [])
   assert.deepEqual(menu.tabs, [])
+})
+
+test('多分頁單選（opu 真畫面）：五個分頁、沒有核取方塊、Type something 與 Chat 都是編號列', () => {
+  const menu = parseChoiceMenu(OPU_RADIO)
+  assert.ok(menu)
+  assert.equal(menu.multi, false)
+  assert.equal(menu.tabs.length, 5)
+  assert.deepEqual(
+    menu.tabs.map((t) => t.label),
+    ['換身分門檻', 'Fable 用完', '執行者 kind', '推 main 失敗', 'Submit'],
+  )
+  assert.equal(menu.choices.length, 5)
+  assert.equal(menu.choices.every((c) => c.checked === null), true)
+  assert.equal(menu.cursor, 0)
+  assert.equal(isActionChoice(menu.choices[3]), true)
+  assert.equal(isActionChoice(menu.choices[4]), true)
+  assert.ok(menu.question?.includes('cc2 撞到哪一種才換下一個身分'))
+  assert.ok(menu.choices[0].detail.includes('reviewer 建議'))
 })

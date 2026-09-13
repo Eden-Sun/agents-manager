@@ -1454,6 +1454,21 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
 
 截圖：`draft-mobile-390-loaded.png`（預載完）、`draft-mobile-390.png`、`draft-desktop-1440.png`
 （勾了兩項、還沒送出）。真的 carbis 那題是使用者本人要回答的，不能拿來按。
+
+## 多分頁單選問卷要能點（2026-09-13）
+
+使用者在手機上完全勾不起來：草稿把 `checked === null` 的列整顆 `disabled`，而 claude 單選
+本來就沒有 `[ ]`，每一項都是 `null`。點了沒有選取狀態，右邊只剩 ▸。
+
+- **單選用 radio**：一題裡點一個會取消另一個；複選維持 checkbox toggle。點選項本體就是選取，
+  ▸ 只展開說明，觸控 44px，不疊在標題上。
+- **送出**：單選頁走到那一項再 Enter（不是 space）。複選仍走差集 + 該頁 Submit。
+- **認不出來就不畫捷徑**，退回終端快照＋按鍵面板。
+- `Type something.` / `Chat about this` 在單選裡是編號選項，可以選（送出就是對那一列 Enter）。
+  選完若終端改成自由輸入，這次不代打文字——畫面變了就停手，請用終端原文。
+
+截圖 `docs/screenshots/survey-radio/390-picked.png`。假 TUI 在 `choiceDraft.test.ts`。
+
 ## 側欄父列標「在等子 agent」（2026-09-12）
 
 使用者看側欄：`grok-1` 底下的子 agent 有 `!1` 沒人看，父列自己卻是綠燈閒置——「這個 parent

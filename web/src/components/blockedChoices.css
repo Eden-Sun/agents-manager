@@ -306,7 +306,8 @@
 
 /* 多選：編號右邊多一個 ☐／☑。點一下是切換勾選，不是送出——所以勾起來的那幾項要一眼看得到
    （底色＋粗體），跟「游標在此」那條藍邊是兩回事（游標只是終端的焦點）。 */
-.bc-list-multi .bc-item {
+.bc-list-multi .bc-item,
+.bc-list-radio .bc-item {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
   grid-template-areas:
     'num box title mark'
@@ -381,14 +382,15 @@
 
 .bc-row-more .bc-item,
 .bc-row[data-wide='1'] .bc-item {
-  padding-right: 34px;
+  padding-right: 48px;
 }
 
 .bc-chev {
   position: absolute;
   top: 0;
   right: 0;
-  width: 32px;
+  width: 44px;
+  min-width: 44px;
   min-height: 44px;
   height: 100%;
   max-height: 44px;
