@@ -549,7 +549,7 @@ function Gauge({
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' blocked' : ''}`}
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}`}
       title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
@@ -580,7 +580,9 @@ function Gauge({
             因此都是「圖示 / 名稱 / 開關」三層，開關一律貼在名稱正下方，不會有一格歪掉。 */}
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {blocked ? <span className="quota-blocked-ico">⛔</span> : null}
+            {/* 紅點（不是 ⛔）：emoji 跟 kind 圖示一樣是圓的、一樣大，兩顆並排讀起來像壞掉的圖示
+                （2026-09-13 使用者）。點由 CSS 畫，見 `quotaLimitHit.css`。 */}
+            {blocked ? <span className="quota-blocked-ico" aria-hidden="true" /> : null}
             {entry.identity ?? entry.kind}
           </span>
         )}

@@ -6,25 +6,56 @@
  * app-server 也照實回報滿格。唯一講出這件事的是 CLI 自己印的橫幅，daemon 收在
  * `quota.limit_hit`，所以這裡把它畫成格子上的一個狀態，而不是只寫在 popover 裡。
  */
-.quota-hp.blocked {
-  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
+/*
+ * 畫法（2026-09-13 使用者：「目前看來很衝突」）：紅底 + 紅字 + ⛔ 三種紅一起上，而格子裡的
+ * 綠色量表還在說「還很夠」——同一格同時喊兩件相反的事。改成**一個紅點 + 其餘全部退色**：
+ *
+ * - 量表與數字轉成灰階：帳號收不了工作時，「5h 還剩多少」不是現在要讀的東西，但也不必消失。
+ * - 紅只留一處：名字前面那顆點（跟 app 其他地方的燈號同一個語彙），外框跟著淡紅一圈定位它。
+ * - 底色拿掉：整格染紅會跟隔壁格搶，而它想說的只是「這一格現在不能用」。
+ *
+ * class 叫 `quota-blocked` 不是 `blocked`：`styles.css` 有一條**裸的** `.blocked`（BlockedPanel
+ * 的外框，`background: var(--danger-soft)` + 10px 內距），額度格撞上它就被整片染紅、還多了一圈
+ * 內距——那正是使用者看到的「很衝突」的一半。
+ */
+.quota-hp.quota-blocked {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
-/* 量表是滿的但帳號收不了工作——把條子壓灰，才不會讀成「還很夠用」。 */
-.quota-hp.blocked .quota-bar,
-.quota-hp.blocked .quota-border-meter {
-  opacity: 0.45;
+/* 灰階而不只是降透明度：留著綠色就還是在說「還很夠用」，那正是衝突的來源。 */
+.quota-hp.quota-blocked .quota-bar,
+.quota-hp.quota-blocked .quota-bar-wrap,
+.quota-hp.quota-blocked .quota-bar-pct,
+.quota-hp.quota-blocked .quota-border-meter,
+.quota-hp.quota-blocked .quota-pct,
+.quota-hp.quota-blocked .quota-compact {
+  filter: grayscale(1);
+  opacity: 0.5;
 }
 
+/* 唯一的紅：名字前面一顆 6px 的點。比 ⛔ 小、不跟 kind 圖示搶形狀，跟側欄燈號同一個語彙。 */
 .quota-blocked-ico {
-  margin-right: 2px;
-  font-size: 10px;
-  line-height: 1;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: 3px;
+  border-radius: 50%;
+  background: var(--danger);
 }
 
-.quota-hp.blocked .quota-identity {
-  color: var(--danger);
+/* kind 圖示在 `crit` 時本來就是紅的；加上那顆點就有兩處紅在說同一件事。狀態由點負責，
+   圖示退回原本的辨識功能（那是「哪一家的 CLI」，不是「壞了沒」）。 */
+.quota-hp.quota-blocked .quota-kind,
+/* `.quota-hp.crit .quota-kind` 同樣是三個 class，平手時看載入順序——這裡多一個 class 贏過它，
+   不要靠檔案順序。 */
+.quota-hp.quota-blocked.crit .quota-kind {
+  color: var(--text-dim);
+}
+
+.quota-hp.quota-blocked .quota-identity {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
 }
 
 /* popover 裡那一行：跟「重置券」同一種排版，左邊是標籤欄，右邊是內容。 */
