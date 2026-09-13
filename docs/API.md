@@ -2172,3 +2172,63 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
 
 - followup 的冪等重送須同 request ID、文字與目標；不同續派回 409 `followup_mismatch`，不冒充已送出。
 - 核准決定與租約續租共用 supervisor lock，撤銷與續租的檢查／寫入不交錯。核准紀錄遺失回 409 `approval_missing`，不延長租約。
+
+## 群組任務（mission，2026-09-13 新增，設計 `docs/goals/agm-missions.md`）
+
+群組裡的「交給 AGM」：使用者下一句指示，AGM 派執行者／reviewer／驗證者完成。daemon 只提供確定性的部分——
+任務與事件的持久化、身分挑選規則、輪數上限、交付前的 fast-forward 檢查；拆工與判斷結果是 AGM 的事。
+**第一版只支援本機專案**。
+
+### 物件
+
+```json
+{ "id": "01M…", "project_id": "01M…", "client_request_id": "…", "text": "把設定頁的錯字修掉",
+  "delivery_mode": "push_main" | "pr", "executor_kind": "claude" | "codex" | "grok", "on_5h_limit": "wait" | "switch",
+  "max_rounds": 2, "rounds_used": 0, "paused_reason": null, "paused_detail": null, "result_summary": null,
+  "status": "open" | "paused" | "done" | "cancelled",
+  "created_at": "…", "updated_at": "…", "completed_at": null, "cancelled_at": null }
+```
+
+`status` 是從欄位算的（`cancelled_at` → `cancelled`、`completed_at` → `done`、`paused_reason` → `paused`、其餘 `open`）；
+規劃／執行／審查／驗證的細分之後由該任務的 assignments 推導，不另存一份狀態。
+`paused_reason` 目前會出現：`max_rounds`、`no_fable_for_verifier`、`push_main_failed`、`pr_failed`，或呼叫端自己寫的原因。
+
+事件（`GET /api/missions/{id}` 的 `events[]`，也是群組時間軸上這個任務的那一串）：
+`{id, mission_id, kind, text, relay_from, payload_json, created_at}`，
+`kind ∈ instruction | report | note | verified | round | paused | resumed | cancelled | delivered | completed`。
+`relay_from`：`null` = 使用者本人（只有 `instruction`），bot id = 那顆 bot，`"daemon"` = daemon 自己記的。
+
+### 端點
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| POST | `/api/projects/{id}/missions` | `{text, client_request_id?, delivery_mode, executor_kind, on_5h_limit, max_rounds?(0..=10，預設 2)}` → 任務＋`created`。同一個 `client_request_id` 回同一筆（`created:false`）。建立時記一則 `instruction` 事件，並往 AGM inbox 放一則 `mission_created`（event_key `mission:<id>:created`，payload 含 `mission_id/project_id/project/cwd/text` 與三個選項）。遠端專案回 400 `{"error":"remote_not_supported","host":…}`。 |
+| GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`**。 |
+| GET | `/api/missions/{id}` | 任務＋`events[]`。 |
+| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?}` → 事件。`relay_from` 規則同 `POST /api/bots/{id}/prompt`（不存在的值 400）。**交付前必須有一則 `verified`**。 |
+| POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。 |
+| POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
+| POST | `/api/missions/{id}/cancel` | → 任務。 |
+| POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`）。 |
+| POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`。 |
+| GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`。 |
+| POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/main` 必須是 HEAD 的祖先 → `git push origin HEAD:main`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。成功記 `delivered` 事件並回 `{mode, sha}` 或 `{mode, branch, url}`。沒有 `verified` 事件 → 409 `not_verified`；其餘失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
+| PUT | `/api/identities/{name}/disabled` | `{kind, disabled, host?}` → 同一份。身分停用搬進 daemon（原本只在瀏覽器 localStorage），挑身分時才看得到；WS `identity_prefs_changed`。 |
+| GET | `/api/identity-prefs` | `{disabled:[{host, kind, identity}]}`。 |
+
+已結案（`done`／`cancelled`）的任務對任何變更回 409 `already_closed`。每次變更推 WS `mission_updated {mission_id, project_id, status}`。
+
+### 身分挑選（`pick`）
+
+回傳 `{mission_id, role, kind, pick}`，`pick.decision` 是其中之一：
+
+- `use` `{identity, model, reason}`：用這個身分；`model` 有值時要換模型（執行者／reviewer 撞到 Fable 週桶＝`"opus"`，驗證者一律 `"fable"`）。claude 以外的 kind 沒有身分可輪換，`identity` 是空字串。
+- `wait` `{identity, until, reason}`：原地等這個身分重置（5h 撞限且 `on_5h_limit=wait`），或所有身分都用盡時等最早回來的那一個。
+- `ask_user` `{reason, resets:[{identity, resets_at}]}`：停下來問使用者（驗證者找不到 Fable 有效額度）。
+- `no_independent_reviewer` `{reason}`：沒有跟執行者不同的身分可以當 reviewer，改走「執行者自審＋驗證者把關」。
+
+規則（`daemon/src/mission/pick.rs`，每一條都有測試）：claude 身分固定照 **cc2 → cc1 → cc0**，**用盡才換**——
+`low` 不算用盡；**7d** 用盡（`critical`，或 `limit_hit` 推定為週窗）→ 換下一個；**5h** 用盡 → 照 `on_5h_limit` 等或換；
+**Fable 週桶**用盡 → 執行者／reviewer 同一身分改用 opus，驗證者不能用這個身分。`limit_hit` 本身不帶桶別，
+從當下的桶子讀數推（claude 撞限時 `turn_error.rs` 會把撞到的那個桶標成 100%）；過了 `until` 就不算。
+讀不到額度視為可以用（未知不等於用盡），但驗證者例外：必須讀得到 Fable 桶且未見底。停用的身分一律跳過。

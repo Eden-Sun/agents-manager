@@ -28,6 +28,7 @@ mod hosts;
 mod lifecycle;
 mod memproc;
 mod memstat;
+mod mission;
 mod models;
 mod pane_identity;
 mod projection;
