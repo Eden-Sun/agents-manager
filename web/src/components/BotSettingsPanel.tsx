@@ -279,9 +279,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       const gap = 8
       const margin = 12
       const { offsetWidth: w, offsetHeight: h } = el
-      let left = anchor.right + gap
-      if (left + w + margin > window.innerWidth) left = anchor.left - gap - w
-      left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - w - margin))
+      // 桌機一律水平置中（2026-09-13 使用者：「按下該要置中」）。760px 寬的卡片貼著齒輪開會偏到
+      // 右邊、壓住側欄與圖片暫存；垂直方向仍然從標題列底下開始（見下面的 minTop）。
+      const left = Math.min(Math.max(margin, (window.innerWidth - w) / 2), Math.max(margin, window.innerWidth - w - margin))
       // 不蓋到標題列（2026-09-13 使用者）：齒輪就在標題列上，貼著它往下開會把名字、額度、分頁
       // 都壓住。上緣至少在標題列（與它下面那排晶片）底下。
       const headBottom = Math.max(
