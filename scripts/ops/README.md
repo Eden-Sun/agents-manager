@@ -42,6 +42,8 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
    拿著 `restart` 租約期間 supervisor assignment 派送會暫停；這不是所有 prompt 路徑的全域互斥鎖，正式替換前仍須由 AGM 重驗窗口。
 4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下個整點接續查核。pending、denied、revoked 不另建申請；過期後下輪才重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
 5. `daemon-update.lock` 防止腳本重疊執行。若程序被強制終止留下鎖，由 AGM 確認沒有執行者後移除。核准狀態檔損毀或 ID 不在查詢結果中也交 AGM 檢查，不自動繞過。
+6. AGM 雙角色（SPEC §18.15）：idle 檢查另外排除協調者（`agm responder show` 有 `bot_id` 時）；runtime.json 有 `role` 才帶 `assign --review-by <role>`
+   （巡檢目錄＝`patrol`，更新結果回巡檢驗收）。舊部署兩者都沒有，行為照舊。
 
 ### 隔離測試
 

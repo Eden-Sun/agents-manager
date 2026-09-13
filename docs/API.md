@@ -855,6 +855,16 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 ### 狀態、啟停、模型切換
 - `GET /api/supervisor` → `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{…},pending_count,assignments:[]}`。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。`pending_count` = 未結案 assignment + 未 ack inbox。`remote` 同 `GET /api/supervisor/remote`。
+  頂層欄位都是**巡檢**（SPEC §18.15）；另有 `role:"patrol"`、`remote_provider:"patrol"`、`stats:{wakes,events_delivered,duplicates,merged,last_wake_at,last_wake_reason,last_notify_at,notify_next_at}`、
+  `responder`（同 `GET /api/supervisor/responder`）。
+
+### 協調者（responder，SPEC §18.15）
+- `GET /api/supervisor/responder` → `{configured,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,stats:{…}}`。
+  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota`。
+- `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。自己的專案與 cwd `supervisor/AGM-responder`
+  （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空（rc off）。身分不存在 409 `identity_missing`。
+- `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
+- `GET /api/supervisor/responder/persona`、`PUT {text,expected_version?}` → 同巡檢的 persona 形狀加 `role:"responder"`；內嵌種子 `docs/goals/agm-responder-persona.md`。
 - `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，寫 `CLAUDE.md`、`persona.md`、`runtime.json`（**不含 token**）、`bin/agm`、
   `handoff.md`（已存在不覆蓋）。args `["--remote-control","AGM"]`、`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`。
   總管認持久化的 `bot_id`，改名不會多開一個。
@@ -871,6 +881,7 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 - `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents}`，頂層 `status` 取兩者較嚴重者。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在 `status` 或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
+  `responder_health{status,responder_status,inbox_open,retry_at}` 單獨一格，不併進頂層 `status`。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted`（SPEC §18.9）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
 
@@ -885,12 +896,13 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 - `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1，並改寫 config.toml 的 bot persona 與 `persona.md`（副本，不要手改）。
   `expected_version` 對不上且正文不同 409 `version_mismatch`；副本同步失敗 409 `persona_sync_incomplete`（帶 `stored:true` 與 `version`，重送相同正文可修復且不加版本）。
 - `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`：內嵌版取代持久版的唯一路徑。
-- `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`scripts/agm.py`）。
+- `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
 ### 核准與租約（SPEC §18.10）
 - `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,…}]}`。
 - `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?}` → 一筆 `pending`，並推 inbox `approval_requested` 給 AGM。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`；只有 `pending` 能 approve。
+  條件寫入：讀到之後被別人（另一個 AGM 角色、UI）先決定了 → 409 `decided_concurrently`，什麼都沒寫。帶角色 bot token 時 `decided_by` 記 `AGM:patrol`／`AGM:responder`。
   核准決定與租約續租共用 supervisor lock；核准紀錄遺失 409 `approval_missing`（不延長租約）。
 - `GET /api/supervisor/maintenance/safety?exclude=<id,id>` → `{safe,working,in_flight,unreadable,blocked_waiting_for_user,queued_assignments,checked_at,excluded_bot_ids}`。唯讀快照；`blocked` 只回報不阻擋。
   CLI `agm lease safety --exclude-bot <id>` 傳此查詢。
@@ -901,7 +913,7 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 
 ### 交辦 assignments（SPEC §18.8）
 - `GET /api/supervisor/assignments` → `{assignments:[]}`。
-- `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?:"task"|"notice",expects_review?,mission_id?,role?}` → 一筆 assignment：
+- `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?:"task"|"notice",expects_review?,mission_id?,role?,review_role?:"patrol"|"responder"}` → 一筆 assignment（多 `review_role`）：
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,turn_status,evidence_complete,open,awaiting_review,
   review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts,resume_at,quota_retries,next_attempt_at}`。
   - `status`：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review` → `completed` | `failed` | `cancelled` | `superseded`；另有 `blocked`、`quota_blocked`（都算未結案）。
@@ -913,18 +925,25 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   - `mission_id` 與 `role` 見「群組任務」。
   - 先落地再送 prompt；同 `client_request_id` 重試回同一筆（換 bot 或 text 409）。對方忙 → 留 `queued`，`error` 記真正理由
     （`bot has no active run`、`a turn is already in flight`、`needs_login: …`），`next_attempt_at` 下次重試時間，controller 依 15/30/60/120/300 秒退避、沿用同一 crid。delivery `unknown` 只對帳不重送。
-  - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id；daemon 自己送給 AGM 的通知帶 `daemon`。
+  - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id（驗收角色是已建立的協調者時為協調者 id）；daemon 自己送給 AGM 的通知帶 `daemon`。
+  - `review_role`：回報進哪個角色的 inbox。省略 = 呼叫的角色（`X-AM-Bot-Id`+`X-AM-Bot-Token` 驗證）；沒有角色 token = 協調者。followup 沿用。目標是任一角色 bot → 400。
+  - `source_turn_id` 可以是巡檢或協調者的回合。
 - `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
+  帶角色 bot token 時 `actor` 以 token 為準（`AGM:<role>`）。
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
   同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
 
 ### 交接、inbox、狀態、證據
 - `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；`PUT {summary}` → `{summary,summary_version}`，同時寫 `handoff.md`（權威在 DB）。
-- `GET /api/supervisor/inbox?all=0|1&limit=200` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},created_at,updated_at}],open,all,limit}`。
-  預設只列未 handled、最舊在前；`all=1` 含已處理（最新在前）；`limit` 上限 1000。`POST /api/supervisor/inbox/{id}/ack` → `{}`。
+- `GET /api/supervisor/inbox?all=0|1&limit=200&role=patrol|responder` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},role,wake,claimed_by,acked_by,merged_into,created_at,updated_at}],open,all,limit,role}`。
+  預設只列未 handled、最舊在前；`all=1` 含已處理（最新在前）；`limit` 上限 1000；`role` 以 `claimed_by`（沒送過則 `role`）過濾。
+  `POST /api/supervisor/inbox/{id}/ack` → `{}`；已結過 `{already_handled:true}`；帶角色 bot token 而事件歸另一個角色 → 409 `claimed_by_other_role`。
+  - `role`／`wake`：SPEC §18.15 的路由表。`wake=false` 的事件不會自己開一次喚醒；`merged_into` 非空 = 被 daemon 合併掉（`acked_by:"daemon"`）。
+  - `kind:"bot_request"`（`payload{to_role,wake,quiet_reason,from_bot_id,from_name,from_role,target_bot_id,text,client_request_id,attachments,sender_verified,via}`）：見下方「bot 寫給 AGM」。
   - `state`：`pending` → `delivered`（已送通知）→ `handled`（總管 ack）。送達看 `delivery`：`failed` 留 pending 退避；`unknown` 綁 `notify.turn_id` 對帳不重送。
-    delivered 但通知回合失敗／消失，或超過 `notify_ack_deadline_secs`（1800）沒 ack → 放回 pending；重送上限 `notify_max_attempts`（5），用完開 `notify_exhausted` incident（事件仍留著）。ack 單向。
+    delivered 但通知回合失敗／消失，或超過 `notify_ack_deadline_secs`（1800）沒 ack → 放回 pending；重送上限 `notify_max_attempts`（5，只算巡檢的事件），用完開 `notify_exhausted` incident（事件仍留著）。ack 單向。
+    協調者的事件沒有次數上限：15 秒倍增退避到 `responder_max_backoff_secs`（300）；等額度時不計次。
   - assignment 狀態遷移與完成事件同一個 transaction；啟動時補掃一次。
   - pending → delivered 的推送節流成每 `notify_interval_secs`（600）最多一次，一次併成一則通知；入庫不受影響。
   - `kind` 另有 `bot_restart_failed`（`batch_id,bot_id,name,error`）、`supervisor_restart_retry`（`batch_id,bot_id,name,ok,error`）、`approval_requested`、mission 相關事件（見群組任務）。
@@ -933,10 +952,21 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。
   每筆 content 最多 16,000 字（超過 `truncated:true`）。空查詢、過長、壞 cursor 400。只提供證據，不把命中當完成或適合度。
 
+### bot 寫給 AGM（SPEC §18.15）
+協調者建立後，下面兩條路目標是巡檢或協調者 bot 時**不開回合**，改寫 inbox `bot_request`：
+- `POST /api/bots/{id}/prompt {text,client_request_id?,attachments?,relay_from:<bot id>}`（可帶 `X-AM-Bot-Token` 證明寄件者）→ **202**
+  `{routed:"responder"|"patrol",queued:true,duplicate,wake,inbox_event_id,state,delivery:"queued",turn_id:null,message_id:null,note}`。
+  沒有 `relay_from`（使用者）、`relay_from:"daemon"`、目標不是角色 bot、協調者未建立 → 照舊 200 `PromptOut`。
+- `POST /relay/announce`（shim，`X-AM-Bot-Token`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
+- 去重：同寄件者同 `client_request_id` 一筆；沒 id 時同寄件者、正規化後同內容、同一個十分鐘格子一筆。重複 → `duplicate:true`，同一個 `inbox_event_id`。
+- `wake:false`：寄件者當下的回合是一件通知型交辦（`quiet_reason:"reply_to_notice"`），或是一次喚醒而那批事件來自收件角色（`"reply_between_roles"`）。
+
 ### `bin/agm`
 `scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`）、
-`assign`（含 `--notice`、`--mission`／`--role`）、`assignments`、`inbox`（`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`；輸出一律 JSON。
-執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
+`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`、
+`whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`；輸出一律 JSON。
+執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
+`role` 缺省＝`patrol`。環境 `AM_BOT_ID` 等於 `self_bot_id` 時，API 請求另帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_HOOK_TOKEN`）證明角色；mission 回報的 `relay_from` 用 `self_bot_id`。
 設定目錄可用 `AGM_RUNTIME_DIR` 或 `--runtime-dir` 覆寫。
 
 ## 群組任務（mission，2026-09-13 新增，使用者決策見 SPEC §18.14 D1–D8）
