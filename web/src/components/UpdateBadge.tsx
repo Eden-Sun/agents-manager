@@ -23,7 +23,7 @@ import { UpdateChangelog } from './UpdateChangelog'
  * 當前這顆落在那份名單裡時，標題列再放一顆等於同一件事講兩次，還吃掉第一排 118px 的寬度
  * （標題列第一排的寬度是稀缺資源，見 `styles.css` 的「標題列的收縮優先序」）。
  * 批次**蓋不到**的三種留著——只有這顆能單獨重啟它們：在忙（`busy` 名單，批次會跳過）、
- * 不是 `managed_by === 'user'`（子 agent、team 成員）、不是 claude。判斷全部交給
+ * 不是 claude。判斷全部交給
  * `updateBatch.ts` 那份與 daemon 一字不差的規則，這裡不另外寫一套。
  */
 export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' | 'inline' }) {

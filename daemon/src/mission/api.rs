@@ -135,7 +135,7 @@ pub async fn post_mission(
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     if project.host != crate::config::LOCAL_HOST {
-        // team 的 worktree helper 同樣本機限定；遠端要另外設計交付路徑，先明確拒絕。
+        // 遠端要另外設計交付路徑，先明確拒絕。
         return Err(LcError::BadValue(json!({"error": "remote_not_supported", "host": project.host})));
     }
     let crid = b.client_request_id.clone().unwrap_or_else(crate::db::ulid);
@@ -991,7 +991,7 @@ mod tests {
     /// 完成的任務可以被追問，而追問**不能**改變任何交付事實。這是「已完成清單不可覆寫」的底線。
     #[tokio::test]
     async fn a_finished_mission_can_be_asked_about_without_changing_anything() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
@@ -1053,7 +1053,7 @@ mod tests {
     /// 使用者回答暫停的任務：回答、放行、喚醒是一筆交易，而且重送不會派出第二次續作。
     #[tokio::test]
     async fn answering_a_paused_mission_resumes_and_wakes_the_manager_once() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
@@ -1089,7 +1089,7 @@ mod tests {
     /// 「不回答直接繼續」那顆按鈕也要真的叫醒 AGM；而 AGM 自己對沒暫停的任務按 resume 不會產生通知。
     #[tokio::test]
     async fn plain_resume_wakes_the_manager_but_cannot_loop() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
@@ -1110,7 +1110,7 @@ mod tests {
     /// 追加修改開的是**新的一筆**任務：舊成果原封不動，而新任務拿不到舊的 verified。
     #[tokio::test]
     async fn a_revision_is_a_new_mission_that_cannot_inherit_the_old_verification() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
@@ -1190,7 +1190,7 @@ mod tests {
 
     #[tokio::test]
     async fn revision_source_is_preserved_and_part_of_replay_identity() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("source-parent", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
@@ -1212,7 +1212,7 @@ mod tests {
     /// 續作只能從**已完成**的成果開。進行中與已取消各自回明確理由。
     #[tokio::test]
     async fn only_a_finished_mission_can_be_revised() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
@@ -1227,7 +1227,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_mission_runs_through_its_gates_end_to_end() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let pid = env.project_id.clone();
 
@@ -1327,7 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn completing_a_mission_deletes_only_its_stopped_temp_bots() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         crate::supervisor::store::get_or_init(&app.db).await.unwrap();
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("cleanup", "pr"))).await.unwrap();
@@ -1390,7 +1390,7 @@ mod tests {
 
     #[tokio::test]
     async fn bad_options_and_remote_projects_are_rejected() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let mut bad = new_mission("r2", "push_main");
         bad.delivery_mode = "force".into();

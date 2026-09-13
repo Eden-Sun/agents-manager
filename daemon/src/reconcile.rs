@@ -481,8 +481,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // only a request — an agent that forgets it, or a codex/grok that never read it, used to
     // vanish into an untracked sub-task.
     //
-    // The prefix match is kept for the cases descent cannot see: a child in another tab, or a
-    // team workspace. Within the matching tab the longest prefix still wins, so a grandchild
+    // The prefix match is kept for the case descent cannot see: a child in another tab. Within the matching tab the longest prefix still wins, so a grandchild
     // lands under the child rather than the grandparent; with no prefix at all the tab's own
     // bot (not a child adopted into it) takes it.
     let mut new_children = 0usize;
@@ -513,8 +512,8 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             .unwrap_or(parent.kind.as_str())
             .to_string();
         // Everything from here to the run row is one child's business. A `?` used to end the
-        // whole host's reconcile — every later agent unadopted, orphan panes kept, teams and
-        // codex runtime never checked, and `reconcile failed` in the log every two seconds
+        // whole host's reconcile — every later agent unadopted, orphan panes kept, codex runtime
+        // never checked, and `reconcile failed` in the log every two seconds
         // (review 2026-09-12 #2). One child that cannot be adopted is logged and skipped.
         match adopt_child(app, host, &client, &session, agent, name, parent, &child_name, &kind).await {
             Ok(bot_id) => {
@@ -560,11 +559,6 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             crate::lifecycle::close_pane_and_tab(&client, ws.as_deref(), tab.as_deref(), &pane).await;
         }
     }
-    // SPEC-team §6.5 / §6.4a: a team's worktrees and its workspace are checked on *every*
-    // reconcile pass, not only at boot — a worktree the user deleted by hand, or a closed
-    // workspace, pauses the team where they can see it. Scoped to this host's teams, since
-    // reconcile is always per-host (pane / workspace ids are only unique within a session).
-    crate::team::reconcile_teams_on_host(app, host).await;
     // SPEC §4.4a: a run the daemon did not start has NULL `runtime_*`, so the UI falls back to
     // `bots` and quietly claims the CLI is on whatever was configured. codex prints all three
     // in its own status line, so read it instead of guessing.
@@ -655,8 +649,8 @@ async fn adopt_child(
             // us), so the child's replies come from the terminal fallback.
             sqlx::query(
                 "INSERT INTO bots (id, project_id, name, kind, model, effort, fast, persona, args_json, autostart, inject_hooks, auto_approve,
-                   identity, env_json, managed_by, team_id, team_role, cwd, herdr_session, parent_bot_id, hook_token, created_at)
-                 VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',NULL,NULL,?,?,?,?,?)",
+                   identity, env_json, managed_by, cwd, herdr_session, parent_bot_id, hook_token, created_at)
+                 VALUES (?,?,?,?,NULL,NULL,0,NULL,'[]',0,0,1,?,'{}','child',?,?,?,?,?)",
             )
             .bind(&bot_id)
             .bind(&parent.project_id)
@@ -839,7 +833,7 @@ mod compat_tests {
     //! because the run has a tab of its own.
     use crate::db;
     use crate::state::App;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
     use serde_json::json;
     use std::sync::Arc;
 

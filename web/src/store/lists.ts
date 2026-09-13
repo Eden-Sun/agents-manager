@@ -1,6 +1,6 @@
 /**
  * issue #25：store 裡由 WS 一路 append 的清單（`messages` / `groupMessages` /
- * `turns` / `teamEvents`）原本沒有上限，也沒有淘汰；每則 `message_added` 還要對整包做
+ * `turns`）原本沒有上限，也沒有淘汰；每則 `message_added` 還要對整包做
  * 一次 `sort`。daemon 是常駐的、UI 一開就是一整天，這兩件事都會隨時間線性變貴。
  *
  * 這裡放兩件事：
@@ -14,9 +14,6 @@
 
 /** 每個 bot / project 的訊息清單上限。超過就截掉最舊的，改由分頁補回來。 */
 export const MESSAGE_CAP = 500
-
-/** 每個 team 的事件清單上限。時間軸只有最近的有人在看，舊的沒有分頁可補，就純粹丟掉。 */
-export const TEAM_EVENT_CAP = 500
 
 /** 一個 bot 底下保留的 Turn 數上限，見 `pruneTurns`。 */
 export const TURN_CAP = 50

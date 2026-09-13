@@ -26,15 +26,7 @@ await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textCont
 await shot('m4-terminal')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='對話')?.click()`); await sleep(500)
 const openDrawer = () => ev(`document.querySelector('button[aria-label*="選單"], .menu-btn, button.hamburger')?.click()`)
-// team 節點在側欄裡，抽屜要先開。`.team-node-btn` 是它現在的 class；`開啟 Team` 是它 title
-// 的開頭（`TeamNodes.tsx`），class 改名時還接得住。沒有進行中的 team 就整張跳過——
-// 拍一張「其實是對話」的 m5-team 比沒有這張更誤導。
-await openDrawer(); await sleep(600)
-const teamHit = await ev(`(() => { const b = document.querySelector('.team-node-btn, [aria-label^="開啟 Team"], [title^="開啟 Team"]'); if (!b) return false; b.click(); return true })()`)
-if (teamHit) { await sleep(1500); await shot('m5-team') }
-else { console.log('m5-team: 側欄裡沒有 team 節點（目前沒有進行中的 team），跳過這張'); await ev(`document.querySelector('.scrim')?.click()`); await sleep(400) }
-// 設定是 **bot** 標題列上的齒輪：剛剛選的是 team 的話那顆根本不存在，會拍成 team 畫面的
-// 複本。所以先回到一顆 bot，再點齒輪。
+// 設定是 **bot** 標題列上的齒輪，所以先回到一顆 bot，再點齒輪。
 await openDrawer(); await sleep(600)
 await ev(`[...document.querySelectorAll('.bot-row')].find(r=>/C1-fable|c1\\b/i.test(r.textContent))?.click()`); await sleep(1500)
 const gearHit = await ev(`(() => { const b = document.querySelector('.main-head .icon-btn.gear'); if (!b) return false; b.click(); return true })()`)

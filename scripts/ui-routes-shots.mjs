@@ -1,10 +1,9 @@
 // 每個畫面都有自己的 URL：對著 5173（真 daemon）走一遍路由，順便留下截圖。
-// `BOT=<id> TEAM=<id> OUT=dir node scripts/ui-routes-shots.mjs`
+// `BOT=<id> PROJECT=<id> OUT=dir node scripts/ui-routes-shots.mjs`
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 const TOKEN = process.env.AM_TOKEN ?? readFileSync(process.env.HOME + '/.config/agents-manager/ui-token', 'utf8').trim()
 const BOT = process.env.BOT
-const TEAM = process.env.TEAM
 const PROJECT = process.env.PROJECT
 const BASE = process.env.BASE ?? 'http://127.0.0.1:5173'
 const OUT = process.env.OUT ?? '/tmp/am-ui-routes'
@@ -64,28 +63,12 @@ await ev('history.back()'); await sleep(1200)
 await check('上一頁關掉設定', await url(), `/bots/${BOT}`)
 await check('設定浮窗收起來了', await ev(`!document.querySelector('.bot-settings')`), true)
 
-// 5. Team：直接開、重新整理停在同一個畫面。
-if (TEAM) {
-  await goto(`/teams/${TEAM}`)
-  await check('open /teams/<id>', await url(), `/teams/${TEAM}`)
-  await check('畫面是 TeamPanel', await ev(`!!document.querySelector('.team-panel, .team-head')`), true)
-  console.log('      title:', await title())
-  await shot('r5-team')
-  await send('Page.reload'); await sleep(3500)
-  await check('reload 停在同一個 team', await url(), `/teams/${TEAM}`)
-  await shot('r6-team-reload')
-}
-
-// 5b. Project 群組聊天與組隊 sheet（`?issue=` 要留著）。
+// 5. Project 群組聊天。
 if (PROJECT) {
   await goto(`/projects/${PROJECT}`)
   await check('open /projects/<id>', await url(), `/projects/${PROJECT}`)
   await check('畫面是群組聊天', await ev(`!!document.querySelector('.group-tag')`), true)
   await shot('r5b-project')
-  await goto(`/projects/${PROJECT}/teams/new?issue=48`)
-  await check('open 組隊 sheet 且保留 issue', await url(), `/projects/${PROJECT}/teams/new?issue=48`)
-  await check('畫面是 TeamLaunchPanel', await ev(`!!document.querySelector('.team-launch')`), true)
-  await shot('r5c-team-new')
 }
 
 // 6. 壞連結：回首頁並說一聲。

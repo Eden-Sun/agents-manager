@@ -16,8 +16,8 @@
  */
 
 import { parseMentions } from './mentions'
-import { ApiError, BOT_KINDS, TEAM_BUDGET_DEFAULTS, TEAM_WORKERS_MAX, TEAM_WORKERS_UNLIMITED } from './types'
-import type { BotKind, TeamBudget, TeamDeliver, TeamPhase, TeamRole, TeamTaskState } from './types'
+import { ApiError, BOT_KINDS } from './types'
+import type { BotKind } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
@@ -121,9 +121,7 @@ interface MockMessage {
   group_id: string | null
   /** 拖放進來的圖片（mock 只保留 metadata，位元組留在 `blobs`）。 */
   attachments_json: string | null
-  /** SPEC-team §2.1：屬於哪個 team（null = 一般訊息）。 */
-  team_id: string | null
-  /** SPEC-team §2.1：這則 relay 的來源 bot（null = 使用者 / daemon 自己）。 */
+  /** 這則 relay 的來源 bot（null = 使用者 / daemon 自己）。 */
   relay_from: string | null
   created_at: string
 }
@@ -146,10 +144,7 @@ interface MockBot {
   auto_approve: number
   identity: string | null
   env_json: string
-  /** SPEC-team §2.1 */
-  managed_by: 'user' | 'team'
-  team_id: string | null
-  team_role: TeamRole | null
+  managed_by: 'user'
   cwd: string | null
   /** 使用者釘的「主要執行的 bot」（`PATCH {primary}`）。省略 = 沒釘。 */
   is_primary?: number
@@ -177,8 +172,6 @@ interface MockProject {
 /** v4.0 fake `gh issue list` for the seeded project. */
 const ISSUES: Rec[] = [
   { number: 42, title: '群組聊天：刪掉的 bot 歷史不再出現在合併時間軸', state: 'open', labels: [{ name: 'bug', color: 'd73a4a' }, { name: 'group-chat', color: '0e8a16' }], author: 'edansun', updated_at: inHours(-3), body: '重現步驟：\n1. 在群組視圖送 `@all` \n2. 刪掉其中一個 bot\n3. 重新整理\n\n預期：歷史仍在；實際：只剩存活 bot 的訊息。\n\n相關：`GET /projects/:id/messages` 只合併現存 bot。' },
-  { number: 57, title: '追加 issue 後繼續 Team', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'team', color: '5319e7' }], author: 'edansun', updated_at: inHours(-1), body: 'done 的 Team 可以追加下一個 issue，沿用 PM 與 reviewer 的對話。' },
-  { number: 58, title: '為 Team reopen 補上事件紀錄', state: 'open', labels: [{ name: 'test', color: '7057ff' }], author: 'edansun', updated_at: inHours(-2), body: '追加 issue 時要在 timeline 留下 team_reopened。' },
   { number: 41, title: '即時輸出前幾幀是 TUI 雜訊（✢ Improvising…）', state: 'open', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'polish', color: 'fbca04' }], author: 'edansun', updated_at: inHours(-9), body: '`turn_progress` 的前 1–2 幀會帶 Claude Code 的 spinner 文字，應在 daemon 端過濾。' },
   { number: 40, title: 'Bot 設定：codex 模型 / effort / fast 從 `GET /api/models` 取', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }, { name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-20), body: '目前是靜態清單。改為 API 驅動，失敗退回靜態清單。' },
   { number: 39, title: '主機面板顯示三個 kind 的工具偵測徽章', state: 'open', labels: [{ name: 'enhancement', color: 'a2eeef' }], author: 'm4p-bot', updated_at: inHours(-30), body: '已安裝 ✓ / 未安裝 ✗ / 未登入 !，附「安裝」按鈕。' },
@@ -186,142 +179,6 @@ const ISSUES: Rec[] = [
   { number: 37, title: '長訊息不要預先收合', state: 'closed', labels: [{ name: 'web', color: '5319e7' }], author: 'edansun', updated_at: inHours(-60), body: '已在 v3.9 UI polish 移除 isLong / clamped。' },
   { number: 35, title: 'hash 式 herdr agent name', state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }], author: 'edansun', updated_at: inHours(-100), body: '`<project slug>-<bot id 尾 6 碼>`。' },
   { number: 33, title: 'grok kind：hook 不走 argv', state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'grok', color: '000000' }], author: 'edansun', updated_at: inHours(-140), body: '改寫入 `<GROK_HOME>/hooks/agents-manager.json`。' },
-]
-
-// ------------------------------------------------------------ SPEC-team（mock）
-
-interface MockRoleSpec {
-  kind: BotKind
-  model: string | null
-  effort: string | null
-  fast: boolean
-  identity: string | null
-  persona_extra: string
-}
-
-interface MockTeam {
-  id: string
-  project_id: string
-  issue_number: number
-  issue_title: string
-  issue_url: string
-  /** 使用者取的短名；null = 用 `#編號 issue 標題`。 */
-  label: string | null
-  phase: TeamPhase
-  pause_reason: string | null
-  /** SPEC-team §4.5：`quota_low` 是誰的額度不夠（daemon 的 `pause_detail`）。 */
-  pause_detail: Rec | null
-  resume_phase: TeamPhase | null
-  base_ref: string
-  base_sha: string
-  branch: string
-  worktree_root: string
-  deliver: TeamDeliver
-  supervised: boolean
-  budget: TeamBudget
-  usage: { relays: number; review_rounds_total: number; elapsed_min: number; per_bot: Record<string, { turns: number }> }
-  members: { bot_id: string; role: TeamRole }[]
-  /** `roles_json`：三個角色各自是用什麼設定建出來的（SPEC-team §10.5 的 PATCH 目標）。 */
-  roles: { pm: MockRoleSpec; workers: { count: number; spec: MockRoleSpec }; reviewer: MockRoleSpec | null }
-  issues: MockTeamIssue[]
-  pr_url: string | null
-  summary: string | null
-  /** SPEC-team §10.7：使用者從這個 team 關掉 issue 的時間（mock 不碰真的 GitHub）。 */
-  issue_closed_at: string | null
-  created_at: string
-  started_at: string | null
-  ended_at: string | null
-}
-
-interface MockTeamIssue {
-  id: string
-  seq: number
-  issue_number: number
-  issue_title: string
-  issue_url: string
-  state: 'queued' | 'working' | 'done' | 'failed' | 'skipped'
-  branch: string | null
-  summary: string | null
-  pr_url: string | null
-  issue_closed_at: string | null
-  fail_reason: string | null
-  started_at: string | null
-  ended_at: string | null
-}
-
-interface MockTeamTask {
-  id: string
-  team_id: string
-  seq: number
-  title: string
-  brief: string
-  files: string[]
-  /** §4.5：`null` = 還在排隊，還沒有執行者接手。 */
-  worker_bot_id: string | null
-  /** §2.3 / §4.5：這筆 task 屬於哪一個佇列項。無限模式下分組就是靠它。 */
-  issue_id: string | null
-  branch: string
-  state: TeamTaskState
-  round: number
-  last_report: string | null
-  last_verdict: string | null
-  merge_sha: string | null
-  created_at: string
-  updated_at: string
-}
-
-interface MockTeamEvent {
-  id: string
-  team_id: string
-  kind: 'relay' | 'phase' | 'merge' | 'note' | 'user'
-  from_bot_id: string | null
-  to_bot_id: string | null
-  task_id: string | null
-  turn_id: string | null
-  status: 'pending' | 'delivered' | 'dropped' | null
-  payload: Rec
-  created_at: string
-}
-
-/**
- * daemon 自己發的 relay（首則指派、合併通知、修復提示）在 `messages.relay_from` 上放的哨符。
- *
- * SPEC-team §2.1 把 `relay_from = NULL` 同時當成「使用者」與「daemon 自己」，前端因此分不出
- * 「你 → pm」跟「daemon → pm」。這裡用一個非 bot_id 的字串，UI 認不出來就顯示成 daemon。
- */
-const DAEMON_SENDER = 'daemon'
-
-/** 一行 am-team fenced 區塊（UI 會把它折成 chip）。 */
-function amTeam(obj: Rec): string {
-  return '```am-team\n' + JSON.stringify(obj, null, 2) + '\n```'
-}
-
-/** 假的 task 題材，依序取用。 */
-const TEAM_TASK_SEEDS = [
-  {
-    title: '`GET /projects/:id/messages` 保留已刪除 bot 的歷史',
-    brief: '改成用 `messages.bot_id` 直接查，不要 inner join `bots`；刪掉的 bot 以 bot_id 當顯示名。',
-    files: ['daemon/src/group.rs'],
-    report: '已完成並 commit（3 個 commit）。\n\n改動：`daemon/src/group.rs` 改用 `messages.bot_id` 直接查，join 改為 LEFT JOIN；\n刪除的 bot 以 `bot_id` 尾 6 碼當顯示名。\n\n驗證：`cargo test group::` 全過。',
-  },
-  {
-    title: '前端合併時間軸容忍未知 bot_id',
-    brief: '`GroupChatPanel` 的 `kinds[msg.bot_id]` 查不到時不要當掉，退回無 kind 的中性氣泡。',
-    files: ['web/src/components/GroupChatPanel.tsx'],
-    report: '已完成。`kinds[...]` 改為 optional chaining，並補一個「已刪除」徽章。\n\n驗證：`npx tsc --noEmit` 與 `npm run build` 都過。',
-  },
-  {
-    title: '補上刪除 bot 後的歷史保留測試',
-    brief: '新增整合測試：建立 bot → 送訊息 → 刪除 bot → `GET /projects/:id/messages` 仍看得到那則訊息。',
-    files: ['daemon/tests/group_history.rs'],
-    report: '已完成，新增 `daemon/tests/group_history.rs`（2 個案例）。\n\n驗證：`cargo test --test group_history` 全過。',
-  },
-  {
-    title: '文件：把「刪除 bot 不刪訊息」寫進 SPEC §6.4',
-    brief: '補一句話說明 DELETE bot 的訊息保留語意，並在 API.md 對應段落加註。',
-    files: ['docs/SPEC.md', 'docs/API.md'],
-    report: '已完成，SPEC §6.4 與 API.md §10.3 各補一段。',
-  },
 ]
 
 /** SPEC §11.2 `[[hosts]]` + the runtime connection state the daemon reports. */
@@ -638,18 +495,9 @@ export class MockTransport implements Transport {
   private missions: MockMission[] = []
   private missionEvents: MockMissionEvent[] = []
   private missionAssignments: MockMissionAssignment[] = []
-  private teams: MockTeam[] = []
-  private teamTasks: MockTeamTask[] = []
-  private teamEvents: MockTeamEvent[] = []
-  /** team_id → 還沒跑完的假 scheduler 步驟（一步 ≈ 一次 relay / 一次狀態轉移）。 */
-  private teamSteps = new Map<string, (() => void)[]>()
-  private teamTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private conversations = new Map<string, string>()
   /** Uploaded attachment bytes, so the mock UI can render its own thumbnails. */
   private blobs = new Map<string, Blob>()
-
-  /** Dev helper：模擬「舊 daemon 完全沒有 team 端點」（`__amMock.teamsOff()`）。 */
-  private teamsDisabled = false
 
   /** Dev helper：模擬「舊 daemon 沒有 `/api/missions`」（`__amMock.missionsOff()`）。 */
   private missionsDisabled = false
@@ -708,8 +556,6 @@ export class MockTransport implements Transport {
       identity: null,
       env_json: '{}',
       managed_by: 'user',
-      team_id: null,
-      team_role: null,
       cwd: null,
       created_at: now(),
     })
@@ -730,8 +576,6 @@ export class MockTransport implements Transport {
       identity: null,
       env_json: '{}',
       managed_by: 'user',
-      team_id: null,
-      team_role: null,
       cwd: null,
       created_at: now(),
     })
@@ -751,8 +595,6 @@ export class MockTransport implements Transport {
       identity: null,
       env_json: '{}',
       managed_by: 'user',
-      team_id: null,
-      team_role: null,
       cwd: null,
       created_at: now(),
     })
@@ -772,8 +614,6 @@ export class MockTransport implements Transport {
       identity: null,
       env_json: '{}',
       managed_by: 'user',
-      team_id: null,
-      team_role: null,
       cwd: null,
       created_at: now(),
     })
@@ -916,9 +756,6 @@ export class MockTransport implements Transport {
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'submodules') return { project_id: seg[1], submodules: [] }
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'chat') return this.projectChat(seg[1], b)
-    if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'teams' && !this.teamsDisabled) {
-      return this.createTeam(seg[1], b)
-    }
 
     // ---- 群組任務（docs/API.md「群組任務」）------------------------------
     if (seg[0] === 'projects' && seg[2] === 'missions' && !this.missionsDisabled) {
@@ -935,27 +772,6 @@ export class MockTransport implements Transport {
       if (method === 'POST' && seg[2] === 'question') return this.askMission(id, b)
       if (method === 'POST' && seg[2] === 'answer') return this.answerMission(id, b)
       if (method === 'POST' && seg[2] === 'revise') return this.reviseMission(id, b)
-    }
-
-    // ---- SPEC-team §10 -------------------------------------------------
-    if (seg[0] === 'teams' && seg.length >= 2 && !this.teamsDisabled) {
-      const teamId = seg[1]
-      if (method === 'GET' && seg.length === 2) return this.teamDetail(teamId)
-      if (method === 'GET' && seg[2] === 'events') return { team_id: teamId, events: this.teamEventsOf(teamId) }
-      if (method === 'PATCH' && seg.length === 2) return this.patchTeam(teamId, b)
-      if (method === 'POST' && seg[2] === 'issues' && seg.length === 3) return this.addTeamIssues(teamId, b)
-      if (method === 'POST' && seg[2] === 'tasks' && seg[4] === 'decide') return this.decideTask(teamId, seg[3], b)
-      if (method === 'POST' && seg[2] === 'say') return this.teamSay(teamId, b)
-      if (method === 'POST' && seg[2] === 'answer') return this.teamAnswer(teamId, b)
-      if (method === 'POST' && seg[2] === 'pause') return this.pauseTeam(teamId)
-      if (method === 'POST' && seg[2] === 'resume') return this.resumeTeam(teamId)
-      if (method === 'POST' && seg[2] === 'approve') return this.approveTeam(teamId)
-      if (method === 'POST' && seg[2] === 'abort') return this.abortTeam(teamId)
-      if (method === 'POST' && seg[2] === 'cleanup') return this.cleanupTeam(teamId)
-      if (method === 'POST' && seg[2] === 'close-issue') return this.closeTeamIssue(teamId, b)
-      if (method === 'DELETE' && seg.length === 2) {
-        return this.deleteTeam(teamId, q.get('branches') === 'delete' ? 'delete' : 'keep')
-      }
     }
 
     // SPEC §6.9：批次重啟。要排在下面 `bots/{id}` 那組前面，不然 `restart-idle` 會被當成 bot id。
@@ -1986,17 +1802,15 @@ export class MockTransport implements Transport {
   }
 
   private addMessage(
-    m: Omit<MockMessage, 'id' | 'created_at' | 'group_id' | 'attachments_json' | 'team_id' | 'relay_from'> & {
+    m: Omit<MockMessage, 'id' | 'created_at' | 'group_id' | 'attachments_json' | 'relay_from'> & {
       group_id?: string | null
       attachments_json?: string | null
-      team_id?: string | null
       relay_from?: string | null
     },
   ): MockMessage {
     const msg: MockMessage = {
       group_id: null,
       attachments_json: null,
-      team_id: null,
       relay_from: null,
       ...m,
       id: ulid('msg'),
@@ -2077,7 +1891,6 @@ export class MockTransport implements Transport {
               env: JSON.parse(b.env_json) as Record<string, string>,
               managed_by: b.managed_by,
               primary: b.is_primary === 1,
-              team: b.team_id && b.team_role ? { team_id: b.team_id, role: b.team_role } : null,
               cwd: b.cwd,
               // daemon 是 `slug(project.label)-<bot id 末 6 碼小寫>`，mock 照抄夠用來驗 UI。
               agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
@@ -2086,8 +1899,6 @@ export class MockTransport implements Transport {
               unread: 0,
             }
           }),
-        // SPEC-team §10.2；`teamsDisabled` 時整個欄位不存在（模擬舊 daemon）。
-        ...(this.teamsDisabled ? {} : { teams: this.teams.filter((t) => t.project_id === p.id).map((t) => this.teamJson(t)) }),
       })),
     }
   }
@@ -2168,8 +1979,6 @@ export class MockTransport implements Transport {
       identity: typeof b.identity === 'string' && b.identity.trim() ? b.identity : null,
       env_json: JSON.stringify(b.env && typeof b.env === 'object' ? b.env : {}),
       managed_by: 'user',
-      team_id: null,
-      team_role: null,
       cwd: typeof b.cwd === 'string' && b.cwd.trim() ? b.cwd.trim() : null,
       created_at: now(),
     }
@@ -2304,7 +2113,7 @@ export class MockTransport implements Transport {
     const planned: { bot_id: string; name: string }[] = []
     const skipped: { bot_id: string; name: string; reason: string; reason_label: string }[] = []
     for (const bot of this.bots) {
-      if (bot.kind !== 'claude' || bot.managed_by === 'team') continue
+      if (bot.kind !== 'claude') continue
       const run = this.activeRun(bot.id)
       if (!run?.update_notice) continue
       const inFlight = this.turns.some((t) => t.run_id === run.id && t.status === 'in_flight')
@@ -3034,1003 +2843,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  // ------------------------------------------------------- Issue Team (SPEC-team)
-
-  private team(id: string): MockTeam {
-    const t = this.teams.find((x) => x.id === id)
-    if (!t) throw new ApiError(404, { error: 'not_found', what: 'team' }, 'team not found')
-    return t
-  }
-
-  private teamJson(t: MockTeam): Rec {
-    const tasks = this.teamTasks.filter((x) => x.team_id === t.id)
-    const summary: Rec = { total: tasks.length }
-    for (const task of tasks) summary[task.state] = Number(summary[task.state] ?? 0) + 1
-    const issuesSummary = {
-      total: t.issues.length,
-      done: t.issues.filter((issue) => issue.state === 'done').length,
-      failed: t.issues.filter((issue) => issue.state === 'failed' || issue.state === 'skipped').length,
-      queued: t.issues.filter((issue) => issue.state === 'queued').length,
-    }
-    return {
-      id: t.id,
-      issues: t.issues.map((issue) => ({ ...issue })),
-      current_issue_id: t.issues.find((issue) => issue.state === 'working')?.id ?? null,
-      issues_summary: issuesSummary,
-      project_id: t.project_id,
-      issue_number: t.issue_number,
-      issue_title: t.issue_title,
-      label: t.label,
-      issue_url: t.issue_url,
-      phase: t.phase,
-      pause_reason: t.pause_reason,
-      pause_detail: t.pause_detail,
-      branch: t.branch,
-      deliver: t.deliver,
-      supervised: t.supervised,
-      members: t.members.map((m) => ({ ...m, deleted: !this.bots.some((bot) => bot.id === m.bot_id) })),
-      tasks_summary: summary,
-      budget: { ...t.budget },
-      usage: { ...t.usage, per_bot: { ...t.usage.per_bot } },
-      pr_url: t.pr_url,
-      issue_closed_at: t.issue_closed_at,
-      created_at: t.created_at,
-      started_at: t.started_at,
-      ended_at: t.ended_at,
-    }
-  }
-
-  private taskJson(task: MockTeamTask): Rec {
-    return {
-      id: task.id,
-      issue_id: task.issue_id,
-      seq: task.seq,
-      title: task.title,
-      brief: task.brief,
-      files: [...task.files],
-      worker_bot_id: task.worker_bot_id,
-      branch: task.branch,
-      state: task.state,
-      round: task.round,
-      last_report: task.last_report,
-      last_verdict: task.last_verdict,
-      merge_sha: task.merge_sha,
-      updated_at: task.updated_at,
-    }
-  }
-
-  private teamDetail(id: string) {
-    const t = this.team(id)
-    return {
-      ...this.teamJson(t),
-      tasks: this.teamTasks.filter((x) => x.team_id === id).map((x) => this.taskJson(x)),
-      summary: t.summary,
-      base_ref: t.base_ref,
-      base_sha: t.base_sha,
-      worktree_root: t.worktree_root,
-      roles: t.roles,
-    }
-  }
-
-  private teamEventsOf(id: string) {
-    this.team(id)
-    return this.teamEvents
-      .filter((e) => e.team_id === id)
-      .map((e) => ({ ...e, payload: { ...e.payload } }))
-  }
-
-  private emitTeam(t: MockTeam) {
-    this.emit('team_changed', {
-      team_id: t.id,
-      project_id: t.project_id,
-      phase: t.phase,
-      pause_reason: t.pause_reason,
-      pause_detail: t.pause_detail,
-      usage: { ...t.usage },
-    })
-  }
-
-  private emitTask(task: MockTeamTask) {
-    task.updated_at = now()
-    this.emit('team_task_updated', { team_id: task.team_id, task: this.taskJson(task) })
-  }
-
-  private teamEvent(
-    teamId: string,
-    kind: MockTeamEvent['kind'],
-    payload: Rec,
-    extra: Partial<MockTeamEvent> = {},
-  ): MockTeamEvent {
-    const ev: MockTeamEvent = {
-      id: ulid('tev'),
-      team_id: teamId,
-      kind,
-      from_bot_id: null,
-      to_bot_id: null,
-      task_id: null,
-      turn_id: null,
-      status: kind === 'relay' ? 'delivered' : null,
-      payload,
-      created_at: now(),
-      ...extra,
-    }
-    this.teamEvents.push(ev)
-    this.emit('team_event', { team_id: teamId, event: { ...ev } })
-    return ev
-  }
-
-  private setPhase(t: MockTeam, phase: TeamPhase, reason: string | null = null, detail: Rec | null = null) {
-    const from = t.phase
-    t.phase = phase
-    t.pause_reason = phase === 'paused' ? reason : null
-    t.pause_detail = phase === 'paused' ? detail : null
-    if (phase === 'done' || phase === 'aborted' || phase === 'failed') t.ended_at = now()
-    this.teamEvent(t.id, 'phase', { from, to: phase, reason })
-    this.emitTeam(t)
-  }
-
-  /** daemon 代發的一則 relay：收件 bot 的一則普通 user 訊息 + 一筆 `team_events`。 */
-  private teamRelay(t: MockTeam, fromBotId: string | null, toBotId: string, text: string, taskId: string | null = null) {
-    t.usage.relays += 1
-    this.addMessage({
-      conversation_id: this.conv(toBotId),
-      turn_id: null,
-      bot_id: toBotId,
-      role: 'user',
-      content: text,
-      source: 'web',
-      incomplete: 0,
-      team_id: t.id,
-      relay_from: fromBotId,
-    })
-    this.teamEvent(t.id, 'relay', { action: 'relay', text_excerpt: text.slice(0, 120) }, {
-      from_bot_id: fromBotId,
-      to_bot_id: toBotId,
-      task_id: taskId,
-    })
-    const run = this.activeRun(toBotId)
-    if (run && run.state === 'running') {
-      run.agent_status = 'working'
-      this.emitBotStatus(toBotId)
-    }
-    this.emitTeam(t)
-  }
-
-  /** 成員的回覆（assistant 訊息，含 am-team 區塊）。 */
-  private teamReply(t: MockTeam, botId: string, text: string) {
-    t.usage.per_bot[botId] = { turns: (t.usage.per_bot[botId]?.turns ?? 0) + 1 }
-    this.addMessage({
-      conversation_id: this.conv(botId),
-      turn_id: null,
-      bot_id: botId,
-      role: 'assistant',
-      content: text,
-      source: 'hook',
-      incomplete: 0,
-      team_id: t.id,
-    })
-    const run = this.activeRun(botId)
-    if (run && run.state === 'running') {
-      run.agent_status = 'idle'
-      this.emitBotStatus(botId)
-    }
-  }
-
-  private memberBot(t: MockTeam, role: TeamRole, index = 0): MockBot | undefined {
-    const ids = t.members.filter((m) => m.role === role).map((m) => m.bot_id)
-    const id = ids[index]
-    return id ? this.bots.find((b) => b.id === id) : undefined
-  }
-
-  private roleSpec(v: unknown): MockRoleSpec {
-    const o = (v ?? {}) as Rec
-    return {
-      kind: toKind(o.kind),
-      model: typeof o.model === 'string' && o.model.trim() ? o.model.trim() : null,
-      effort: typeof o.effort === 'string' && o.effort.trim() ? o.effort.trim() : null,
-      fast: o.fast === true,
-      identity: typeof o.identity === 'string' && o.identity.trim() ? o.identity.trim() : null,
-      persona_extra: typeof o.persona_extra === 'string' ? o.persona_extra : '',
-    }
-  }
-
-  /** `POST /api/projects/:id/teams` — 建 team、建成員、背景啟動，之後由假 scheduler 推進。 */
-  private createTeam(projectId: string, b: Rec) {
-    const p = this.projects.find((x) => x.id === projectId)
-    if (!p) throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
-    // SPEC-team §10.1：非 git 目錄 400 `not_a_git_repo`；mock 用 github 有無代替。
-    if (!p.github) throw new ApiError(400, { error: 'not_a_git_repo' }, 'not a git repo')
-    // SPEC-team §2.3 之後前端送的是 issue **佇列**（`issue_numbers`）；舊的單數欄位仍接受。
-    const queue = Array.isArray(b.issue_numbers) ? b.issue_numbers.map((n) => Number(n) || 0).filter(Boolean) : []
-    const issueNumber = queue[0] ?? (Number(b.issue_number ?? 0) || 0)
-    const issue = ISSUES.find((i) => i.number === issueNumber)
-    if (!issue) throw new ApiError(502, { error: 'upstream', message: `gh: issue #${issueNumber} not found` }, 'upstream')
-
-    const pm = this.roleSpec(b.pm)
-    const workersRaw = (b.workers ?? {}) as Rec
-    // §4.5：`0` 是「無限」而不是壞值，所以下限是 0 不是 1。`?? 2` 只在完全沒送時生效。
-    const rawCount = workersRaw.count === undefined ? 2 : Number(workersRaw.count) || 0
-    const workers = { ...this.roleSpec(workersRaw), count: Math.max(0, Math.min(TEAM_WORKERS_MAX, rawCount)) }
-    const unlimited = workers.count === TEAM_WORKERS_UNLIMITED
-    const reviewer = b.reviewer === null || b.reviewer === undefined ? null : this.roleSpec(b.reviewer)
-    const budget: TeamBudget = { ...TEAM_BUDGET_DEFAULTS, ...((b.budget ?? {}) as Partial<TeamBudget>) }
-
-    // §9.2 預檢：任一角色的 kind 已用量 ≥ quota_stop_pct → 400 quota_low。
-    for (const kind of new Set([pm.kind, workers.kind, ...(reviewer ? [reviewer.kind] : [])])) {
-      const q = this.quota[kind]
-      if (!q) continue
-      for (const w of [q.five_hour, q.seven_day]) {
-        const used = Number((w as Rec | null)?.used_pct ?? 0)
-        if (used >= budget.quota_stop_pct) {
-          throw new ApiError(400, { error: 'quota_low', kind, used_pct: used }, 'quota low')
-        }
-      }
-    }
-
-    const id = ulid('team')
-    const tid6 = id.slice(-6).toLowerCase()
-    const branch = `team/i${issueNumber}-${tid6}`
-    const root = `/Users/me/.config/agents-manager/teams/${id}`
-    const team: MockTeam = {
-      id,
-      project_id: projectId,
-      issue_number: issueNumber,
-      issue_title: String(issue.title),
-      issue_url: `${p.github.url}/issues/${issueNumber}`,
-      label: null,
-      phase: 'starting',
-      pause_reason: null,
-      pause_detail: null,
-      resume_phase: null,
-      base_ref: String(b.base ?? 'HEAD') || 'HEAD',
-      base_sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
-      branch,
-      worktree_root: root,
-      deliver: b.deliver === 'pr' ? 'pr' : 'branch',
-      supervised: b.supervised === true,
-      budget,
-      usage: { relays: 0, review_rounds_total: 0, elapsed_min: 0, per_bot: {} },
-      members: [],
-      roles: { pm, workers: { count: workers.count, spec: workers }, reviewer },
-      issues: [{
-        id: ulid('issue'),
-        seq: 1,
-        issue_number: issueNumber,
-        issue_title: String(issue.title),
-        issue_url: `${p.github.url}/issues/${issueNumber}`,
-        state: 'working',
-        branch,
-        summary: null,
-        pr_url: null,
-        issue_closed_at: null,
-        fail_reason: null,
-        started_at: now(),
-        ended_at: null,
-      }],
-      pr_url: null,
-      summary: null,
-      issue_closed_at: null,
-      created_at: now(),
-      started_at: now(),
-      ended_at: null,
-    }
-
-    const mk = (role: TeamRole, name: string, spec: ReturnType<typeof this.roleSpec>, cwd: string) => {
-      const bot: MockBot = {
-        id: ulid('bot'),
-        project_id: projectId,
-        name,
-        kind: spec.kind,
-        model: spec.model,
-        effort: spec.effort,
-        fast: spec.fast ? 1 : 0,
-        persona: `你是 issue #${issueNumber} 的 ${role}。${spec.persona_extra}`.trim(),
-        args_json: '[]',
-        autostart: 0,
-        inject_hooks: 1,
-        auto_approve: 1,
-        identity: spec.identity,
-        env_json: '{}',
-        managed_by: 'team',
-        team_id: id,
-        team_role: role,
-        cwd,
-        created_at: now(),
-      }
-      this.bots.push(bot)
-      team.members.push({ bot_id: bot.id, role })
-      return bot
-    }
-
-    // §4.5 無限模式：佇列裡的每個 issue 都同時開工，各自一條整合分支、各自 1 個執行者。
-    if (unlimited) {
-      for (const [idx, n] of queue.slice(1).entries()) {
-        const extra = ISSUES.find((i) => i.number === n)
-        if (!extra) continue
-        team.issues.push({
-          id: ulid('issue'),
-          seq: idx + 2,
-          issue_number: n,
-          issue_title: String(extra.title),
-          issue_url: `${p.github.url}/issues/${n}`,
-          state: 'working',
-          branch: `team/i${n}-${tid6}`,
-          summary: null,
-          pr_url: null,
-          issue_closed_at: null,
-          fail_reason: null,
-          started_at: now(),
-          ended_at: null,
-        })
-      }
-    }
-
-    mk('pm', `i${issueNumber}-pm`, pm, `${root}/main`)
-    if (unlimited) {
-      for (const q of team.issues) mk('worker', `i${q.seq}-dev-1`, workers, `${root}/i${q.seq}-dev-1`)
-    } else {
-      for (let i = 1; i <= workers.count; i++) mk('worker', `i${issueNumber}-dev-${i}`, workers, `${root}/dev-${i}`)
-    }
-    if (reviewer) mk('reviewer', `i${issueNumber}-rev`, reviewer, `${root}/reviewer`)
-
-    this.teams.push(team)
-    this.teamEvent(id, 'note', { text: `已建立 worktree ${root}，整合分支 ${branch}` })
-    this.emit('bot_changed', { team_id: id })
-    this.emitTeam(team)
-    // 成員背景啟動（沿用既有 start()，1.4 秒後 running）。
-    for (const m of team.members) this.start(m.bot_id)
-    this.buildTeamSteps(team)
-    this.scheduleTeam(team, 2600)
-    return { team_id: id }
-  }
-
-  /** 假 scheduler：把一整輪流程拆成一連串步驟，每 1.6 秒推進一步。 */
-  private buildTeamSteps(t: MockTeam) {
-    const steps: (() => void)[] = []
-    const pmBot = this.memberBot(t, 'pm')
-    const workers = t.members.filter((m) => m.role === 'worker').map((m) => this.bots.find((b) => b.id === m.bot_id)!)
-    const rev = this.memberBot(t, 'reviewer')
-    const short = (b: MockBot) => b.name.replace(/^i\d+-/, '')
-    // 有 reviewer 時，挑一件 task 走一次 request_changes，讓 round 機制看得到。
-    const reworkAt = workers.length > 1 ? 1 : 0
-    // Task 物件先建好（步驟閉包要用），但要到 dispatch 那一步才進 `this.teamTasks`。
-    // §4.5 無限模式：第 i 個執行者屬於第 i 個進行中的 issue，task 也跟著掛過去。
-    const working = t.issues.filter((i) => i.state === 'working')
-    const assigned: MockTeamTask[] = workers.map((w, i) => {
-      const seed = TEAM_TASK_SEEDS[i % TEAM_TASK_SEEDS.length]
-      const own = working.length > 1 ? (working[i] ?? working[0]) : working[0]
-      return {
-        id: ulid('task'),
-        team_id: t.id,
-        issue_id: own?.id ?? null,
-        seq: i + 1,
-        title: seed.title,
-        brief: seed.brief,
-        files: [...seed.files],
-        worker_bot_id: w.id,
-        branch: `${own?.branch ?? t.branch}/t${i + 1}`,
-        state: 'queued',
-        round: 0,
-        last_report: null,
-        last_verdict: null,
-        merge_sha: null,
-        created_at: now(),
-        updated_at: now(),
-      }
-    })
-    // §4.5：PM 派的比併行數多，多出來的一筆就排隊——面板要看得到「排隊中」這一列。
-    const queuedSeed = TEAM_TASK_SEEDS[workers.length % TEAM_TASK_SEEDS.length]
-    const extra: MockTeamTask = {
-      id: ulid('task'),
-      team_id: t.id,
-      issue_id: working[0]?.id ?? null,
-      seq: workers.length + 1,
-      title: queuedSeed.title,
-      brief: queuedSeed.brief,
-      files: [...queuedSeed.files],
-      worker_bot_id: null,
-      branch: `${t.branch}/t${workers.length + 1}`,
-      state: 'queued',
-      round: 0,
-      last_report: null,
-      last_verdict: null,
-      merge_sha: null,
-      created_at: now(),
-      updated_at: now(),
-    }
-    const tasks: MockTeamTask[] = [...assigned, extra]
-
-    steps.push(() => {
-      this.setPhase(t, 'planning')
-      if (pmBot) {
-        this.teamRelay(
-          t,
-          DAEMON_SENDER,
-          pmBot.id,
-          `Issue #${t.issue_number}「${t.issue_title}」。全文在 \`.agents-manager/team/ISSUE.md\`。\n併行數 ${workers.length}（執行者：${workers.map(short).join('、')}）——dispatch 不用指定 to，超過併行數的會排隊。請先讀取檔案再派工。`,
-        )
-      }
-    })
-
-    steps.push(() => {
-      for (const task of tasks) {
-        this.teamTasks.push(task)
-        this.emitTask(task)
-      }
-      if (pmBot) {
-        this.teamReply(
-          t,
-          pmBot.id,
-          `我把 issue #${t.issue_number} 拆成 ${tasks.length} 件互不重疊的 task（以檔案切分）：\n\n` +
-            tasks.map((x) => `- **t${x.seq}** ${x.title}`).join('\n') +
-            '\n\n' +
-            amTeam({
-              action: 'dispatch',
-              tasks: tasks.map((x) => ({
-                title: x.title,
-                brief: x.brief,
-                files: x.files,
-              })),
-            }),
-        )
-      }
-    })
-
-    steps.push(() => {
-      this.setPhase(t, 'working')
-      // 只有拿到併行位的才會動起來；`extra` 留在 queued，等第一筆合併後才補位。
-      for (const task of assigned) {
-        task.state = 'working'
-        this.emitTask(task)
-        this.teamRelay(
-          t,
-          pmBot?.id ?? null,
-          task.worker_bot_id!,
-          `Task t${task.seq}「${task.title}」（分支 \`${task.branch}\` 已建好並 checkout）。\n\n${task.brief}\n\n相關檔案：${task.files.join('、')}`,
-          task.id,
-        )
-      }
-    })
-
-    const report = (task: MockTeamTask, again: boolean) => () => {
-      const seed = TEAM_TASK_SEEDS[(task.seq - 1) % TEAM_TASK_SEEDS.length]
-      const body = again ? `已依 reviewer 的意見修正並補測試。\n\n${seed.report}` : seed.report
-      task.last_report = body.split('\n')[0]
-      this.teamReply(t, task.worker_bot_id!, `${body}\n\n${amTeam({ action: 'report', status: 'done', summary: task.last_report })}`)
-      task.state = rev ? 'reviewing' : 'merging'
-      this.emitTask(task)
-      if (rev) {
-        this.teamRelay(
-          t,
-          task.worker_bot_id!,
-          rev.id,
-          `請審查 task t${task.seq}「${task.title}」（分支 \`${task.branch}\`，第 ${task.round + 1} 回）。\n執行者的回報：${task.last_report}`,
-          task.id,
-        )
-      }
-    }
-
-    const merge = (task: MockTeamTask) => () => {
-      task.state = 'merged'
-      task.merge_sha = `${Math.random().toString(16).slice(2, 9)}f0`
-      this.emitTask(task)
-      this.teamEvent(t.id, 'merge', { branch: task.branch, result: 'ok', sha: task.merge_sha }, { task_id: task.id })
-      if (pmBot) {
-        this.teamRelay(t, DAEMON_SENDER, pmBot.id, `t${task.seq}「${task.title}」已合併進 ${t.branch}（${task.merge_sha}）。`, task.id)
-      }
-    }
-
-    assigned.forEach((task, i) => {
-      steps.push(report(task, false))
-      if (rev && i === reworkAt) {
-        steps.push(() => {
-          task.round += 1
-          t.usage.review_rounds_total += 1
-          task.last_verdict = 'request_changes：錯誤路徑沒有測試，且 LEFT JOIN 後的 NULL 名稱會顯示成 undefined'
-          this.teamReply(
-            t,
-            rev.id,
-            `看過 \`git diff ${t.branch}...HEAD\`，主要邏輯正確，但有兩點必須修：\n\n1. 刪除的 bot 名稱會變成 \`undefined\`\n2. 少了錯誤路徑的測試\n\n` +
-              amTeam({
-                action: 'verdict',
-                result: 'request_changes',
-                summary: '主要邏輯正確，但顯示名與測試要補',
-                must_fix: ['daemon/src/group.rs: 名稱 fallback', 'daemon/tests: 錯誤路徑'],
-              }),
-          )
-          task.state = 'changes_requested'
-          this.emitTask(task)
-          this.teamRelay(
-            t,
-            rev.id,
-            task.worker_bot_id!,
-            `Reviewer 打回（第 ${task.round} 回）：${task.last_verdict}。在同一分支繼續，完成後再 report。`,
-            task.id,
-          )
-          task.state = 'working'
-          this.emitTask(task)
-        })
-        steps.push(report(task, true))
-      }
-      if (rev) {
-        steps.push(() => {
-          task.last_verdict = 'approve：符合 issue 描述，測試涵蓋錯誤路徑'
-          this.teamReply(
-            t,
-            rev.id,
-            `這次沒問題了。\n\n${amTeam({ action: 'verdict', result: 'approve', summary: task.last_verdict })}`,
-          )
-          task.state = 'merging'
-          this.emitTask(task)
-        })
-      }
-      steps.push(merge(task))
-      // 第一個併行位空出來的那一刻，daemon 才把排隊的那筆派出去（分支也才在這時切）。
-      if (i === 0) {
-        steps.push(() => {
-          extra.worker_bot_id = task.worker_bot_id
-          extra.state = 'working'
-          this.emitTask(extra)
-          this.teamRelay(
-            t,
-            pmBot?.id ?? null,
-            extra.worker_bot_id!,
-            `Task t${extra.seq}「${extra.title}」（分支 \`${extra.branch}\` 已建好並 checkout）。\n\n${extra.brief}`,
-            extra.id,
-          )
-        })
-        steps.push(report(extra, false))
-        if (rev) {
-          steps.push(() => {
-            extra.last_verdict = 'approve：符合 issue 描述'
-            this.teamReply(t, rev.id, `沒問題。\n\n${amTeam({ action: 'verdict', result: 'approve', summary: extra.last_verdict })}`)
-            extra.state = 'merging'
-            this.emitTask(extra)
-          })
-        }
-        steps.push(merge(extra))
-      }
-    })
-
-    steps.push(() => {
-      t.summary = `修正群組合併時間軸在成員被刪除後遺失歷史的問題，並補上回歸測試。共 ${tasks.length} 件 task 全數合併。`
-      if (pmBot) {
-        this.teamReply(t, pmBot.id, `所有 task 都已合併。\n\n${t.summary}\n\n${amTeam({ action: 'done', summary: t.summary })}`)
-      }
-      this.setPhase(t, 'finishing')
-    })
-
-    steps.push(() => {
-      if (t.deliver === 'pr') {
-        const p = this.projects.find((x) => x.id === t.project_id)
-        t.pr_url = `${p?.github?.url ?? 'https://github.com/me/repo'}/pull/${t.issue_number + 100}`
-        this.teamEvent(t.id, 'note', { text: `已 push ${t.branch} 並開 PR ${t.pr_url}` })
-      } else {
-        this.teamEvent(t.id, 'note', { text: `整合分支 ${t.branch} 已留在 repo（未 push）。` })
-      }
-      const current = t.issues.find((issue) => issue.state === 'working')
-      if (current) {
-        current.state = 'done'
-        current.summary = t.summary
-        current.pr_url = t.pr_url
-        current.ended_at = now()
-      }
-      this.setPhase(t, 'done')
-      for (const m of t.members) this.stop(m.bot_id)
-    })
-
-    this.teamSteps.set(t.id, steps)
-  }
-
-  private scheduleTeam(t: MockTeam, delay = 1600) {
-    const prev = this.teamTimers.get(t.id)
-    if (prev) clearTimeout(prev)
-    this.teamTimers.set(
-      t.id,
-      setTimeout(() => this.teamTick(t.id), delay),
-    )
-  }
-
-  private teamTick(teamId: string) {
-    this.teamTimers.delete(teamId)
-    const t = this.teams.find((x) => x.id === teamId)
-    if (!t) return
-    if (t.phase === 'paused' || t.phase === 'aborting' || t.phase === 'aborted' || t.phase === 'done' || t.phase === 'failed') {
-      return
-    }
-    const steps = this.teamSteps.get(teamId) ?? []
-    const step = steps.shift()
-    if (!step) return
-    t.usage.elapsed_min += 1
-    step()
-    // §4.5 預算：轉送次數到頂就停下來（可加碼後 resume）。
-    // `step()` can advance the phase to a terminal state, but TypeScript cannot see that
-    // mutation through the callback, so widen the narrowed phase before checking it.
-    if (t.usage.relays >= t.budget.max_relays && (t.phase as TeamPhase) !== 'done') {
-      this.pauseWith(t, 'budget_relays')
-      return
-    }
-    if (steps.length > 0) this.scheduleTeam(t)
-  }
-
-  private pauseWith(t: MockTeam, reason: string) {
-    if (t.phase === 'paused') return
-    t.resume_phase = t.phase
-    this.setPhase(t, 'paused', reason, reason === 'quota_low' ? this.quotaLowDetail(t) : null)
-  }
-
-  /**
-   * SPEC-team §4.5：`quota_low` 的「是誰」。daemon 是拿每個成員的 kind / identity 去查它那台
-   * 主機的額度；mock 照同一條路走一遍自己的 `quota` 表，這樣橫幅的文案在 `VITE_MOCK=1`
-   * 底下也驗得到（`__amMock.teamPause('quota_low')`）。
-   */
-  private quotaLowDetail(t: MockTeam): Rec {
-    const stopPct = t.budget.quota_stop_pct
-    const members: Rec[] = []
-    for (const m of t.members) {
-      const bot = this.bots.find((b) => b.id === m.bot_id)
-      if (!bot) continue
-      const q = this.quota[bot.identity ? `${bot.kind}:${bot.identity}` : bot.kind] ?? this.quota[bot.kind]
-      if (!q) continue
-      const windows: [string, Rec | null][] = [
-        ['five_hour', (q.five_hour ?? null) as Rec | null],
-        ['seven_day', (q.seven_day ?? null) as Rec | null],
-      ]
-      const worst = windows
-        .filter((w): w is [string, Rec] => w[1] !== null)
-        .sort((a, b) => Number(b[1].used_pct ?? 0) - Number(a[1].used_pct ?? 0))[0]
-      if (!worst) continue
-      const usedPct = Number(worst[1].used_pct ?? 0)
-      if (usedPct < stopPct) continue
-      members.push({
-        bot_id: bot.id,
-        name: bot.name,
-        short: bot.name.replace(/^i\d+-/, ''),
-        role: m.role,
-        kind: bot.kind,
-        identity: bot.identity,
-        host: 'local',
-        window: worst[0],
-        used_pct: usedPct,
-        remaining_pct: Math.max(0, 100 - usedPct),
-        resets_at: worst[1].resets_at ?? null,
-      })
-    }
-    members.sort((a, b) => Number(b.used_pct) - Number(a.used_pct))
-    return { stop_pct: stopPct, members }
-  }
-
-  private pauseTeam(id: string) {
-    const t = this.team(id)
-    if (t.phase === 'done' || t.phase === 'aborted' || t.phase === 'failed') {
-      throw new ApiError(409, { error: 'conflict', reason: 'team 已在終態' }, 'conflict')
-    }
-    const timer = this.teamTimers.get(id)
-    if (timer) clearTimeout(timer)
-    this.teamTimers.delete(id)
-    this.pauseWith(t, 'user')
-    return {}
-  }
-
-  private resumeTeam(id: string) {
-    const t = this.team(id)
-    if (t.phase !== 'paused') throw new ApiError(409, { error: 'conflict', reason: 'team 不在 paused' }, 'conflict')
-    if (t.usage.relays >= t.budget.max_relays) {
-      throw new ApiError(409, { error: 'conflict', reason: '轉送次數仍已用盡，請先加碼 max_relays' }, 'conflict')
-    }
-    t.phase = t.resume_phase ?? 'working'
-    t.pause_reason = null
-    t.pause_detail = null
-    t.resume_phase = null
-    this.teamEvent(t.id, 'phase', { from: 'paused', to: t.phase, reason: 'resume' })
-    this.emitTeam(t)
-    this.scheduleTeam(t, 800)
-    return {}
-  }
-
-  private approveTeam(id: string) {
-    const t = this.team(id)
-    if (!(t.pause_reason ?? '').startsWith('gate:')) {
-      throw new ApiError(409, { error: 'conflict', reason: 'team 不在 supervised 閘門上' }, 'conflict')
-    }
-    return this.resumeTeam(id)
-  }
-
-  private abortTeam(id: string) {
-    const t = this.team(id)
-    const timer = this.teamTimers.get(id)
-    if (timer) clearTimeout(timer)
-    this.teamTimers.delete(id)
-    this.teamSteps.set(id, [])
-    this.setPhase(t, 'aborting')
-    setTimeout(() => {
-      for (const m of t.members) this.stop(m.bot_id)
-      this.setPhase(t, 'aborted')
-    }, 700)
-    return {}
-  }
-
-  /** `POST /api/teams/:id/issues` — exercise the done-team continuation in the manual mock. */
-  private addTeamIssues(id: string, b: Rec) {
-    const t = this.team(id)
-    if (t.phase === 'aborted' || t.phase === 'failed') {
-      throw new ApiError(409, { error: 'conflict', reason: 'team is finished', phase: t.phase }, 'conflict')
-    }
-    const raw = Array.isArray(b.issue_numbers) ? b.issue_numbers : b.issue_number === undefined ? [] : [b.issue_number]
-    const numbers = raw.map((number) => Number(number)).filter((number) => Number.isInteger(number) && number > 0)
-    if (!numbers.length) throw new ApiError(400, { error: 'bad_request', message: 'issue_numbers must not be empty' }, 'bad request')
-    if (t.issues.length + numbers.length > 20) {
-      throw new ApiError(400, { error: 'bad_request', message: 'at most 20 issues per team' }, 'bad request')
-    }
-    // SPEC-team §2.3：只有還在佇列上（`queued` / `working`）的同號 issue 才擋；做完 / 失敗 /
-    // 略過的可以再排一次（新的一列，舊的留著當紀錄）。
-    const duplicate = numbers.find(
-      (number, index) =>
-        numbers.slice(0, index).includes(number) ||
-        t.issues.some(
-          (issue) => issue.issue_number === number && (issue.state === 'queued' || issue.state === 'working'),
-        ),
-    )
-    if (duplicate !== undefined) {
-      throw new ApiError(409, { error: 'conflict', reason: 'issue already queued', issue_number: duplicate }, 'conflict')
-    }
-    if (t.phase === 'done' && !t.members.some((member) => member.role === 'pm' && this.bots.some((bot) => bot.id === member.bot_id))) {
-      throw new ApiError(409, { error: 'conflict', reason: 'team is cleaned up', phase: t.phase }, 'conflict')
-    }
-
-    const p = this.projects.find((project) => project.id === t.project_id)
-    const added: MockTeamIssue[] = []
-    for (const number of numbers) {
-      const source = ISSUES.find((issue) => issue.number === number)
-      if (!source) throw new ApiError(502, { error: 'upstream', message: `gh: issue #${number} not found` }, 'upstream')
-      const entry: MockTeamIssue = {
-        id: ulid('issue'),
-        seq: (t.issues.at(-1)?.seq ?? 0) + 1,
-        issue_number: number,
-        issue_title: String(source.title),
-        issue_url: `${p?.github?.url ?? 'https://github.com/me/repo'}/issues/${number}`,
-        state: 'queued',
-        branch: null,
-        summary: null,
-        pr_url: null,
-        issue_closed_at: null,
-        fail_reason: null,
-        started_at: null,
-        ended_at: null,
-      }
-      t.issues.push(entry)
-      added.push(entry)
-    }
-    this.teamEvent(id, 'note', { action: 'issues_queued', issue_numbers: numbers })
-
-    if (t.phase === 'done') {
-      this.teamEvent(id, 'note', { action: 'team_reopened', by: 'user', issue_numbers: numbers, from_phase: 'done' })
-      const pm = this.memberBot(t, 'pm')
-      if (pm) {
-        this.teamEvent(id, 'note', { action: 'member_context_lost', bot: pm.name, role: 'pm', why: 'no_session_id' }, { to_bot_id: pm.id })
-        if (!this.activeRun(pm.id)) this.start(pm.id)
-      }
-      const rev = this.memberBot(t, 'reviewer')
-      if (rev && !this.activeRun(rev.id)) this.start(rev.id)
-      t.ended_at = null
-      this.setPhase(t, 'starting', 'reopen')
-      setTimeout(() => {
-        if (t.phase !== 'starting') return
-        const next = t.issues.find((issue) => issue.state === 'queued')
-        if (!next) return
-        next.state = 'working'
-        next.started_at = now()
-        next.branch = `team/i${next.issue_number}-${t.id.slice(-6).toLowerCase()}`
-        t.issue_number = next.issue_number
-        t.issue_title = next.issue_title
-        t.issue_url = next.issue_url
-        t.branch = next.branch
-        t.summary = null
-        t.pr_url = null
-        t.issue_closed_at = null
-        this.teamEvent(id, 'note', { action: 'issue_started', issue_number: next.issue_number, seq: next.seq, branch: next.branch })
-        this.setPhase(t, 'planning')
-        const currentPm = this.memberBot(t, 'pm')
-        if (currentPm) {
-          this.teamRelay(t, DAEMON_SENDER, currentPm.id, `換下一個 issue：#${next.issue_number}「${next.issue_title}」。你是重新啟動的 PM，先前的對話不在了；先讀 \`.agents-manager/team/TEAM.md\` 與 \`ISSUE.md\` 再派工。`)
-        }
-        this.emitTeam(t)
-      }, 1000)
-    }
-    this.emitTeam(t)
-    return { issues: t.issues.map((issue) => ({ ...issue })) }
-  }
-
-  /**
-   * `POST /api/teams/:id/close-issue`（SPEC-team §10.7）。
-   *
-   * 守則跟 daemon 一樣、也只有這兩條：**只有 `done` 的 team**、**只關一次**。mock 沒有真的
-   * GitHub，所以只把 `issue_closed_at` 記下來並發一則 `issue_closed` 事件——驗收要看的是
-   * 「按鈕只在完成後出現、按過就變成已關閉」這件事。
-   */
-  private closeTeamIssue(id: string, b: Rec) {
-    const t = this.team(id)
-    const target = typeof b.issue_id === 'string'
-      ? t.issues.find((issue) => issue.id === b.issue_id)
-      : t.issues.find((issue) => issue.issue_number === t.issue_number)
-    if (!target) throw new ApiError(404, { error: 'not_found', what: 'issue' }, 'not found')
-    if (target.state !== 'done') {
-      throw new ApiError(409, { error: 'conflict', state: target.state, phase: t.phase }, 'conflict')
-    }
-    if (target.issue_closed_at) {
-      throw new ApiError(409, { error: 'conflict', reason: 'issue 已經從這個 team 關過了' }, 'conflict')
-    }
-    target.issue_closed_at = new Date().toISOString()
-    if (target.issue_number === t.issue_number) t.issue_closed_at = target.issue_closed_at
-    this.teamEvent(id, 'note', {
-      action: 'issue_closed',
-      by: 'user',
-      number: target.issue_number,
-      url: target.issue_url,
-      already_closed: false,
-      comment: typeof b.comment === 'string' ? b.comment : null,
-    })
-    this.emitTeam(t)
-    return { number: target.issue_number, url: target.issue_url, state: 'CLOSED', already_closed: false }
-  }
-
-  private cleanupTeam(id: string) {
-    const t = this.team(id)
-    if (t.phase !== 'done' && t.phase !== 'aborted' && t.phase !== 'failed') {
-      throw new ApiError(409, { error: 'conflict', reason: 'team 尚未進入終態' }, 'conflict')
-    }
-    for (const m of t.members) {
-      this.bots = this.bots.filter((b) => b.id !== m.bot_id)
-      this.emit('bot_changed', { bot_id: m.bot_id, deleted: true })
-    }
-    this.teams = this.teams.filter((x) => x.id !== id)
-    this.teamTasks = this.teamTasks.filter((x) => x.team_id !== id)
-    this.teamEvents = this.teamEvents.filter((x) => x.team_id !== id)
-    this.teamSteps.delete(id)
-    this.emit('project_changed', { project_id: t.project_id })
-    return {}
-  }
-
-  /**
-   * `DELETE /api/teams/:id?branches=keep|delete`（SPEC-team §6.5a）。
-   *
-   * 與 `cleanup` 的差別：**任何 phase 都可以刪**（非終態時等於先 abort 再刪），而且連
-   * `teams` / `team_tasks` / `team_events` 的紀錄一起移除。成員 bot 走 `deleteBot`，
-   * 所以**對話訊息保留**。`branches=delete` 在 mock 裡沒有真的 repo 可以動，只把「分支已刪」
-   * 記進 console，讓兩條路徑在驗收時分得出來。不存在 → `this.team()` 丟 404（冪等）。
-   */
-  private deleteTeam(id: string, branches: 'keep' | 'delete') {
-    const t = this.team(id)
-    const timer = this.teamTimers.get(id)
-    if (timer) clearTimeout(timer)
-    this.teamTimers.delete(id)
-    this.teamSteps.delete(id)
-    // 刪除中：真 daemon 會先推這一則（phase `deleting`）。
-    this.emit('team_changed', { team_id: id, project_id: t.project_id, phase: 'deleting' })
-    for (const m of t.members) {
-      if (this.bots.some((b) => b.id === m.bot_id)) this.deleteBot(m.bot_id)
-    }
-    this.teams = this.teams.filter((x) => x.id !== id)
-    this.teamTasks = this.teamTasks.filter((x) => x.team_id !== id)
-    this.teamEvents = this.teamEvents.filter((x) => x.team_id !== id)
-    if (branches === 'delete') {
-      console.info(`[mock] git branch -D ${t.branch}（含所有 task 分支）；遠端分支不動`)
-    }
-    this.emit('team_changed', { team_id: id, project_id: t.project_id, deleted: true })
-    return {}
-  }
-
-  private patchTeam(id: string, b: Rec) {
-    const t = this.team(id)
-    // 改名不受終態限制（同 daemon）：名字是事後找東西用的。
-    if (typeof b.label === 'string') {
-      t.label = b.label.trim().slice(0, 60) || null
-      this.emitTeam(t)
-      if (Object.keys(b).length === 1) return {}
-    }
-    if (t.phase === 'done' || t.phase === 'aborted' || t.phase === 'failed') {
-      throw new ApiError(409, { error: 'conflict', reason: 'team 已在終態' }, 'conflict')
-    }
-    if (b.budget && typeof b.budget === 'object') {
-      for (const [k, v] of Object.entries(b.budget as Rec)) {
-        if (k in t.budget && typeof v === 'number') (t.budget as unknown as Rec)[k] = v
-      }
-    }
-    if (b.supervised !== undefined) t.supervised = b.supervised === true
-    if (b.deliver === 'pr' || b.deliver === 'branch') t.deliver = b.deliver
-    for (const role of ['pm', 'workers', 'reviewer'] as const) {
-      if (!b[role] || typeof b[role] !== 'object') continue
-      this.patchTeamRole(t, role, b[role] as Rec)
-    }
-    this.emitTeam(t)
-    return {}
-  }
-
-  /**
-   * SPEC-team §10.5 的一個角色。改 `kind` = 換 bot（§7.6）：舊的移出 `members`、
-   * 新的接同一個名字與 cwd；其餘欄位只是把 spec 與現有成員的欄位對齊。
-   */
-  private patchTeamRole(t: MockTeam, role: 'pm' | 'workers' | 'reviewer', p: Rec) {
-    const spec = role === 'workers' ? t.roles.workers.spec : t.roles[role]
-    if (!spec) throw new ApiError(400, { error: 'bad_request', message: '這個 team 沒有 reviewer' }, 'bad request')
-    const teamRole: TeamRole = role === 'workers' ? 'worker' : role
-    const fromKind = spec.kind
-    if (typeof p.kind === 'string') spec.kind = toKind(p.kind)
-    if (p.model !== undefined) spec.model = typeof p.model === 'string' && p.model.trim() ? p.model.trim() : null
-    if (p.effort !== undefined) spec.effort = typeof p.effort === 'string' && p.effort.trim() ? p.effort.trim() : null
-    if (p.fast !== undefined) spec.fast = p.fast === true
-    if (p.identity !== undefined) {
-      spec.identity = typeof p.identity === 'string' && p.identity.trim() ? p.identity.trim() : null
-    }
-    for (const m of t.members.filter((x) => x.role === teamRole)) {
-      const bot = this.bots.find((x) => x.id === m.bot_id)
-      if (!bot) continue
-      if (spec.kind !== fromKind) bot.kind = spec.kind
-      bot.model = spec.model
-      bot.effort = spec.effort
-      bot.fast = spec.fast ? 1 : 0
-      bot.identity = spec.identity
-      this.emit('bot_changed', { bot_id: bot.id })
-    }
-    this.teamEvent(t.id, 'note', { action: 'patch', role, from: fromKind, to: spec.kind })
-  }
-
-  private teamSay(id: string, b: Rec) {
-    const t = this.team(id)
-    const text = String(b.text ?? '').trim()
-    if (!text) throw new ApiError(400, { error: 'bad_request', message: 'text 不可為空' }, 'bad request')
-    const to = String(b.to ?? 'pm')
-    const target =
-      t.members.find((m) => m.bot_id === to)?.bot_id ?? this.memberBot(t, to === 'pm' ? 'pm' : 'worker')?.id ?? null
-    if (!target) throw new ApiError(404, { error: 'not_found', what: 'member' }, 'not found')
-    // §5.4：使用者插話記 `kind:user`，不計 relay 預算。
-    this.addMessage({
-      conversation_id: this.conv(target),
-      turn_id: null,
-      bot_id: target,
-      role: 'user',
-      content: text,
-      source: 'web',
-      incomplete: 0,
-      team_id: t.id,
-    })
-    this.teamEvent(t.id, 'user', { text_excerpt: text.slice(0, 120) }, { to_bot_id: target })
-    const run = this.activeRun(target)
-    if (run && run.state === 'running') {
-      run.agent_status = 'working'
-      this.emitBotStatus(target)
-    }
-    setTimeout(() => {
-      this.teamReply(t, target, '收到，我會把這點納入下一輪的判斷。（mock）')
-    }, 1800)
-    return { team_id: t.id, sent: [{ bot_id: target, delivery: 'ok' }] }
-  }
-
-  private teamAnswer(id: string, b: Rec) {
-    const t = this.team(id)
-    const pm = this.memberBot(t, 'pm')
-    this.teamSay(id, { text: b.text, to: pm?.id ?? 'pm' })
-    if (t.phase === 'paused') this.resumeTeam(id)
-    return {}
-  }
-
-  private decideTask(teamId: string, taskId: string, b: Rec) {
-    const t = this.team(teamId)
-    const task = this.teamTasks.find((x) => x.id === taskId && x.team_id === teamId)
-    if (!task) throw new ApiError(404, { error: 'not_found', what: 'task' }, 'not found')
-    if (task.state !== 'exhausted' && task.state !== 'blocked_by_worker' && task.state !== 'rebasing') {
-      throw new ApiError(409, { error: 'conflict', reason: `task 狀態 ${task.state} 不接受 decide` }, 'conflict')
-    }
-    const action = String(b.action ?? '')
-    if (action === 'skip') task.state = 'skipped'
-    else if (action === 'force_merge') task.state = 'merging'
-    else task.state = 'working'
-    this.emitTask(task)
-    this.teamEvent(teamId, 'note', { text: `使用者決定：${action}`, task_id: taskId }, { task_id: taskId })
-    if (t.phase === 'paused') this.resumeTeam(teamId)
-    return {}
-  }
-
   // -------------------------------------------------------------- dev helpers
 
   forceResync() {
@@ -4062,15 +2874,6 @@ export class MockTransport implements Transport {
     return this.bots.find((b) => b.name === name)?.id
   }
 
-  /** Dev helper: 目前的 team id（最新的排最後）。 */
-  teamIds(): string[] {
-    return this.teams.map((t) => t.id)
-  }
-
-  /**
-   * Dev helper: 模擬舊 daemon —— `/api/teams*` 全部落到「查無此路由」的裸 404，
-   * `GET /state` 也不再有 `projects[].teams`。用來驗前端的優雅退回。
-   */
   /**
    * Dev helper: 預設分頁裡塞幾個外來 pane。數字越大，bot 的 pane 越窄
    * （`WORKSPACE_COLUMNS / (n + 共用分頁的 run 數)`），用來驗窄 pane 警示。
@@ -4088,73 +2891,6 @@ export class MockTransport implements Transport {
   setHostShellsSupported(on: boolean) {
     this.hostShellsDisabled = !on
   }
-
-  setTeamsSupported(on: boolean) {
-    this.teamsDisabled = !on
-    if (!on) {
-      for (const id of [...this.teamTimers.keys()]) {
-        clearTimeout(this.teamTimers.get(id)!)
-        this.teamTimers.delete(id)
-      }
-      this.teamSteps.clear()
-    }
-    this.emit('project_changed', {})
-  }
-
-  /**
-   * Dev helper: 用任意原因把某個 team 停下來，驗 paused 橫幅
-   * （例：`__amMock.teamPause('review_exhausted')`；省略 id = 最後一個 team）。
-   */
-  forceTeamPause(reason: string, teamId?: string) {
-    const t = teamId ? this.teams.find((x) => x.id === teamId) : this.teams[this.teams.length - 1]
-    if (!t) return
-    const timer = this.teamTimers.get(t.id)
-    if (timer) clearTimeout(timer)
-    this.teamTimers.delete(t.id)
-    // 已經是 paused 時也要能換原因（驗各種橫幅文案用）。
-    if (t.phase === 'paused') t.phase = t.resume_phase ?? 'working'
-    // `quota_low` 是額度掉下去才發生的事，光把原因塞進去、額度還是 18% 的話，橫幅要寫的
-    // 「rev（cc2）5h 額度剩 4%」就無中生有。先讓成員的額度真的見底，再讓它停。
-    if (reason === 'quota_low') this.starveMemberQuota(t)
-    this.pauseWith(t, reason)
-  }
-
-  /**
-   * Dev helper 的一半：把 team 成員用到的額度打到 `quota_stop_pct` 以上（最多兩個帳號，
-   * 這樣「最嚴重的那個 + 另有 N 位」兩種文案都驗得到），並照常推 `quota_updated`。
-   */
-  private starveMemberQuota(t: MockTeam) {
-    const stop = t.budget.quota_stop_pct
-    const keys: string[] = []
-    for (const m of t.members) {
-      const bot = this.bots.find((b) => b.id === m.bot_id)
-      if (!bot) continue
-      const key = bot.identity && this.quota[`${bot.kind}:${bot.identity}`] ? `${bot.kind}:${bot.identity}` : bot.kind
-      if (this.quota[key] && !keys.includes(key)) keys.push(key)
-    }
-    keys.slice(0, 2).forEach((key, i) => {
-      const q = this.quota[key]
-      if (!q) return
-      const w = (q.five_hour ?? q.seven_day) as Rec | null
-      if (!w) return
-      w.used_pct = Math.min(99, stop + 6 - i * 2)
-      q.updated_at = now()
-      this.emit('quota_updated', { kind: key, host: 'local', quota: q })
-    })
-  }
-
-  /** Dev helper: 把某個 team 的第一件未完成 task 推進「需要你」欄。 */
-  forceTeamNeedsUser(state: 'exhausted' | 'blocked_by_worker' = 'exhausted', teamId?: string) {
-    const t = teamId ? this.teams.find((x) => x.id === teamId) : this.teams[this.teams.length - 1]
-    if (!t) return
-    const task = this.teamTasks.find(
-      (x) => x.team_id === t.id && x.state !== 'merged' && x.state !== 'skipped' && x.state !== 'failed',
-    )
-    if (!task) return
-    task.state = state
-    this.emitTask(task)
-    this.forceTeamPause(state === 'exhausted' ? 'review_exhausted' : 'pm_abort', t.id)
-  }
 }
 
 function sleep(ms: number) {
@@ -4171,13 +2907,6 @@ function installDevHelpers(mock: MockTransport) {
     hostDown: (name: string) => mock.setHostConnected(name, false),
     hostUp: (name: string) => mock.setHostConnected(name, true),
     hosts: () => mock.hostNames(),
-    // SPEC-team
-    teams: () => mock.teamIds(),
-    teamsOff: () => mock.setTeamsSupported(false),
-    teamsOn: () => mock.setTeamsSupported(true),
-    teamPause: (reason = 'budget_relays', teamId?: string) => mock.forceTeamPause(reason, teamId),
-    teamNeedsUser: (state: 'exhausted' | 'blocked_by_worker' = 'exhausted', teamId?: string) =>
-      mock.forceTeamNeedsUser(state, teamId),
     // 窄 pane / 移到自己的分頁
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     paneMoveOff: () => mock.setPaneMoveSupported(false),

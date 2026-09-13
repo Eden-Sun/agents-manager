@@ -18,6 +18,7 @@ mod db;
 mod events;
 mod gh_auth;
 mod git_quick;
+mod git_sh;
 mod github;
 mod group;
 mod herdr;
@@ -40,9 +41,8 @@ mod state;
 mod supervisor;
 mod supervisor_evidence;
 mod statusline_cmd;
-mod team;
-mod team_git;
-mod team_sched;
+#[cfg(test)]
+mod testing;
 mod tools;
 mod trust;
 mod tui_prompts;
@@ -239,11 +239,6 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         }
     }
 
-    // SPEC-team §7.5: bring back a scheduler for every team that is not in a terminal phase —
-    // **before** the spool replay below, so the `TurnDone`s it publishes have a subscriber
-    // (`team_sched::spawn` subscribes synchronously). `step`'s catch-up is the safety net for
-    // a turn that slips past anyway (2026-09-12 review, ops #3).
-    team::respawn_schedulers(&app).await;
     hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
     // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.

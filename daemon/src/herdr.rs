@@ -49,6 +49,7 @@ pub struct WorkspaceInfo {
     pub workspace_id: String,
     pub label: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub pane_count: u32,
 }
 
@@ -91,6 +92,7 @@ pub struct AgentInfo {
     #[serde(default)]
     pub foreground_cwd: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub interactive_ready: bool,
     #[serde(default)]
     pub launch_pending: bool,
@@ -182,7 +184,7 @@ pub const EXPECTED_PROTOCOL: u32 = 20;
 /// it refuses; backticks, quotes, `#` and CJK all pass).
 ///
 /// A multi-line value is easy to arrive at by accident: a persona typed into the settings
-/// textarea, or a team's generated role brief. Folding to spaces loses the paragraph breaks
+/// textarea. Folding to spaces loses the paragraph breaks
 /// but keeps every word, which beats a bot that silently refuses to start.
 fn fold_newlines(arg: &str) -> String {
     if !arg.contains('\n') && !arg.contains('\r') {
@@ -205,7 +207,7 @@ const TRIM_MARK: &str = "…（後略）";
 ///
 /// Silent truncation is the worst outcome here: the shell is left holding half a line, the CLI
 /// never runs, and nothing says why. A shortened `--append-system-prompt` still launches, and
-/// the detail it loses is by convention also on disk (a team member's `TEAM.md`). The marker
+/// the detail it loses stays in the bot's settings. The marker
 /// makes the loss visible to whoever reads the persona.
 fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
     let total = |a: &[String]| a.iter().map(|s| s.len() + 3).sum::<usize>();
@@ -216,7 +218,7 @@ fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
         // the budget too**. Charging a guessed 12 instead of its real 15 made a small
         // overshoot cut exactly as many bytes as the marker added back: 719 → 704 → 719 → …
         // for as long as the process lived, one WARN line per pass. (Observed 2026-09-06:
-        // a team start filled the daemon log with 11 GB in six minutes.)
+        // one start filled the daemon log with 11 GB in six minutes.)
         let keep = args[i].len().saturating_sub(over + TRIM_MARK.len());
         if keep < 40 {
             break; // Nothing left worth trimming; let herdr answer for it rather than send junk.
@@ -606,12 +608,12 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 mod arg_tests {
     use super::{fit_command_line, fold_newlines, MAX_COMMAND_BYTES};
 
-    /// Reported 2026-09-06: a team failed to start with `invalid_agent_argument` because the
-    /// generated PM persona spans four lines. Verified against herdr 0.8.2 that a newline is
+    /// Reported 2026-09-06: a bot failed to start with `invalid_agent_argument` because its
+    /// persona spans four lines. Verified against herdr 0.8.2 that a newline is
     /// the only character it refuses, so folding is enough — and nothing else may change.
-    /// 2026-09-06: a PM persona carrying four absolute worktree paths made the launch command
-    /// 1256 bytes; the shell took 1019 of them, stopped mid-word, and Enter never arrived. The
-    /// team then failed on `agent_not_running` with nothing on screen to explain it.
+    /// 2026-09-06: a long persona made the launch command
+    /// 1256 bytes; the shell took 1019 of them, stopped mid-word, and Enter never arrived; the
+    /// start then failed on `agent_not_running` with nothing on screen to explain it.
     #[test]
     fn an_over_long_command_is_trimmed_rather_than_truncated_by_the_shell() {
         let long = "你是 issue #1 的 PM，暱稱 `pm`。".repeat(40); // ~1200 bytes of CJK
@@ -631,7 +633,7 @@ mod arg_tests {
         assert_eq!(fit_command_line(short.clone()), short);
     }
 
-    /// Regression, 2026-09-06: a team start hung the daemon in this loop and wrote 11 GB of
+    /// Regression, 2026-09-06: a start hung the daemon in this loop and wrote 11 GB of
     /// identical WARN lines. A line that overshoots by only a few bytes cut fewer bytes than
     /// the trim marker adds back, so the argument never got shorter. Any overshoot from 1 byte
     /// upwards must converge — this test hangs rather than fails if it ever regresses.

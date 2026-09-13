@@ -6,8 +6,8 @@ import { chipTracked } from './supervisorProject.ts'
 const SUP = '01M23DD13WT45KX1JKKTEMMBB6'
 
 /** 2026-09-13 實機那顆：AGM 開出去的瀏覽器殭屍清理工，跑完卻進了「剛跑完」。 */
-const browserGc = { pending: null, parent_bot_id: null, team: null, project_id: SUP }
-const userBot = { pending: null, parent_bot_id: null, team: null, project_id: '01M1PROJECT' }
+const browserGc = { pending: null, parent_bot_id: null, project_id: SUP }
+const userBot = { pending: null, parent_bot_id: null, project_id: '01M1PROJECT' }
 
 test('總管專案底下的 bot 不進晶片列（AGM 本人與它開出去的工人都在這個專案）', () => {
   assert.equal(chipTracked(browserGc, SUP), false)
@@ -27,8 +27,7 @@ test('讀不到總管的 project_id 時退回「不排除」，不會把使用�
   assert.equal(chipTracked(browserGc, null), true)
 })
 
-test('子 agent、team 成員、還沒建好的一樣不進晶片列（原本的規則沒有動）', () => {
+test('子 agent、還沒建好的一樣不進晶片列（原本的規則沒有動）', () => {
   assert.equal(chipTracked({ ...userBot, parent_bot_id: 'mother' }, SUP), false)
-  assert.equal(chipTracked({ ...userBot, team: { id: 't1' } }, SUP), false)
   assert.equal(chipTracked({ ...userBot, pending: true }, SUP), false)
 })

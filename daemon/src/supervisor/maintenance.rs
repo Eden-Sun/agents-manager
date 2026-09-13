@@ -16,9 +16,8 @@
 //!
 //! **What the pause actually covers, stated narrowly because the gap matters:** holding a
 //! `restart` lease stops *supervisor assignment dispatch* — `controller::dispatch`, the path
-//! AGM's own work goes out through. It does **not** gate `POST /api/bots/{id}/prompt`, the team
-//! relay, or the scheduler; a user typing into a bot, or a PM handing a worker its next job,
-//! still goes through during the window. So the lease makes the window quiet on the one channel
+//! AGM's own work goes out through. It does **not** gate `POST /api/bots/{id}/prompt`; a user
+//! typing into a bot still goes through during the window. So the lease makes the window quiet on the one channel
 //! the supervisor controls, not on the whole daemon. Closing that gap means a check inside
 //! `lifecycle::prompt` itself, which reaches well outside this module and is not attempted here.
 //!
@@ -39,7 +38,7 @@ pub const RESOURCES: [&str; 2] = ["rebuild", "restart"];
 
 /// Holding this one pauses **supervisor assignment dispatch**. A rebuild does not interrupt
 /// anybody; a restart does, and handing a bot new work while waiting to kill its session is the
-/// race this closes — for assignments. Ordinary prompts and the team relay are not gated (see
+/// race this closes — for assignments. Ordinary prompts are not gated (see
 /// the module docs); do not read a held restart lease as "nothing can reach any bot".
 pub const EXCLUSIVE: [&str; 1] = ["restart"];
 

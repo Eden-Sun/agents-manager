@@ -4,8 +4,7 @@
 //! （D8：非 fast-forward、rebase 衝突、驗證沒過都算失敗，**不**自動改開 PR、不 force）。
 //! 「整樹驗證通過」這一關由呼叫端把關（任務要先有 `verified` 事件），這裡只管 git 的事實。
 //!
-//! MVP 只支援本機專案（team 的 worktree helper 同樣本機限定，`team.rs` 對遠端直接拒絕），
-//! 所以直接跑本機 `git`，不經 `team_git` 的主機路由——也因此可以用暫存 repo 單元測試。
+//! MVP 只支援本機專案，所以直接跑本機 `git`，不經主機路由——也因此可以用暫存 repo 單元測試。
 
 use std::path::Path;
 use tokio::process::Command;
@@ -126,7 +125,7 @@ mod tests {
         sh(dir, &["commit", "-q", "-m", file]);
     }
 
-    /// 測試結束就刪掉的暫存目錄（同 team_git 測試的做法，不另加依賴）。
+    /// 測試結束就刪掉的暫存目錄（不另加依賴）。
     struct Tmp(std::path::PathBuf);
     impl Tmp {
         fn path(&self) -> &Path {

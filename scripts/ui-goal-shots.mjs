@@ -1,5 +1,5 @@
 // Seven screenshots of the live dev UI (5173, real daemon) for the UI polish goal:
-// chat dark/light, team, terminal, bot settings, 1024px, mobile. `OUT=dir node scripts/ui-goal-shots.mjs`.
+// chat dark/light, terminal, bot settings, 1024px, mobile. `OUT=dir node scripts/ui-goal-shots.mjs`.
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 const TOKEN = process.env.AM_TOKEN ?? readFileSync(process.env.HOME + '/.config/agents-manager/ui-token', 'utf8').trim()
@@ -23,9 +23,6 @@ await dark(true); await send('Page.navigate', { url: URL_BASE }); await sleep(35
 await ev(`[...document.querySelectorAll('.bot-row')].find(r=>r.textContent.includes('C1-Fable'))?.click()`); await sleep(1500)
 await shot('s1-chat-dark')
 await dark(false); await sleep(300); await shot('s2-chat-light'); await dark(true)
-await ev(`[...document.querySelectorAll('.team-node-btn')][0]?.click()`); await sleep(1500)
-await shot('s3-team-dark')
-await ev(`[...document.querySelectorAll('.bot-row')].find(r=>r.textContent.includes('C1-Fable'))?.click()`); await sleep(800)
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='終端')?.click()`); await sleep(1500)
 await shot('s4-terminal-dark')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='對話')?.click()`); await sleep(500)

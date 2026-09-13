@@ -55,8 +55,7 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     if a.status != "queued" {
         return;
     }
-    // Re-check the target: between queueing and now it could have been deleted or pulled
-    // into a team.
+    // Re-check the target: between queueing and now it could have been deleted.
     let target = match crate::db::bot(&app.db, &a.target_bot_id).await {
         Ok(Some(b)) if b.deleted_at.is_none() => b,
         Ok(_) => {
@@ -68,10 +67,6 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             return;
         }
     };
-    if target.managed_by == "team" {
-        dispatch_failed(app, &a, "target bot became team-managed").await;
-        return;
-    }
     // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
     // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
     // 停在 `quota_blocked` 等額度回來，時間到了 controller 自己重送。

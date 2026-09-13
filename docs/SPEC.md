@@ -1,6 +1,6 @@
 # Agents Manager 規格書
 
-> 本檔只寫**目前的行為**與讀程式看不出來的理由；演進過程看 git log。API 契約在 `API.md`，Team 在 `SPEC-team.md`，
+> 本檔只寫**目前的行為**與讀程式看不出來的理由；演進過程看 git log。API 契約在 `API.md`，
 > UI 取捨在 `UI-DECISIONS.md`，前端約定在 `FRONTEND.md`。
 
 ## 1. 目標
@@ -256,7 +256,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的舊 
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
 - `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。
 - DELETE Bot：stop → TOML 移除 → DB `deleted_at`（保留對話）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
-  `managed_by = 'team'` 回 409 `team_managed`（由 team 處理）；`child` 不在 TOML，直接停 pane 並 `deleted_at`。
+  `child` 不在 TOML，直接停 pane 並 `deleted_at`。
 - DELETE Project：所有 bot 須已停止 → TOML 移除；不關 workspace、不刪目錄。
 
 ### 6.5 對帳（啟動、事件連線重連；逐 bot 在鎖內）
@@ -273,7 +273,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的舊 
 
 1. **血緣（優先）**：它的 `tab_id` 等於某 bot 活動 run 的 `tab_id` → 那顆 bot 的子 agent（子 pane 從父 pane split 出來，必然在父的 tab 裡，不需要 agent 配合）。
    同一 tab 有多顆 bot（父 + 已認領的子）時取名字前綴最長者，平手取非 `child`——孫代因此掛在子代下面。
-2. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 與 team workspace 只有這條。
+2. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 只有這條。
 
 兩條都中以血緣為準。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
 子 bot `name`：有前綴取字尾，否則用 herdr agent 名（去空白與 `@,:;`、截 32 字）。字尾在專案裡已被別人用掉時改存完整 herdr agent 名（herdr 保證唯一）。
@@ -366,7 +366,6 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
   | 條件 | `reason` | 動作 |
   |---|---|---|
-  | `bots.managed_by = 'team'` | `team_member` | 跳過（成員的 run 由 team 排程記著） |
   | run 或 bot 的 `herdr_session = 'default'` | `default_session` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` / `'blocked'` | `working` / `blocked` | 跳過 |
@@ -649,9 +648,9 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 - WS `quota_updated` 的 `kind` 是完整 key，另帶 `host`。
 
 ### 14.5 UI
-- 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、群組用 Project 的、Team 面板用 Team 專案的，都沒選是本機。
+- 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、群組用 Project 的，都沒選是本機。
 - 遠端時條最左掛主機名牌（`.quota-host`），本機不掛；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
-- 側欄 bot 的 critical 警告讀該 bot 所在主機的列；Team 的 `quota_stop_pct` 讀 Team 專案主機的列。
+- 側欄 bot 的 critical 警告讀該 bot 所在主機的列。
 - 兩個 daemon 管同一台遠端會搶同一條 ssh master（`hosts::short_dir()` 只用 uid 命名），測試 daemon 要先停掉另一個。
 
 ## 15. herdr 這一側的記憶體
@@ -711,7 +710,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 
 ### 16.3a 主機層一鍵登入
 `POST /api/hosts/{name}/identities/{identity}/login`：在該主機 manager session 開臨時 host-shell pane，identity env 以該主機 `$HOME` 展開後執行 `claude /login`、`codex login` 或 `grok login`。
-pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log、WS 事件或 team timeline。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
+pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
 
 ### 16.5 alias 定期重讀
 每 60 秒對每台可達主機只跑 alias 那半段 probe（一個登入 shell，不碰 CLI），與快取的 `shell_identities` 比對；**名單或 `CLAUDE_CONFIG_DIR` 變了**才做完整偵測（含登入探測）並推 `host_changed`。
@@ -904,7 +903,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 
 - 核准是紀錄：申請者、purpose、範圍、`target_commit`、有效期、決定者、理由。acquire 逐項核對（purpose 不符、過期、撤銷、commit 不同都拒）；release 時標 `consumed`——一次核准一個窗口。
 - 租約有只增不減的 `fence`；過期被接手後舊 fence 的 renew／release 一律失敗。到期自動釋放。acquire 與 renew 取「要求到期」與「核准到期」較早者，renew 重驗核准狀態。
-- 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt`、team relay 與排程器沒被 gate。
+- 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt` 沒被 gate。
 - 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
 - assignment 可帶 `ownership`（檔案／模組），重疊時 `POST /assignments` 回 `ownership_conflicts`，**只回報不阻擋**。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。

@@ -20,7 +20,7 @@
 5. 新任務先讀狀態與未結案 assignments，搜尋專案、cwd、模組、檔名、issue 和關鍵字，確認是否已有 Bot 在處理。優先順序為同一工作脈絡、相關決策經驗、可恢復 session、當下可用狀態、額度；不要只挑空閒者或搜尋命中最多者。讀候選的原始對話，推薦時說明它先前做了什麼與現在卡在哪裡。
 6. 優先重用同 context 的既有 child；有可用的 idle／done child 就接續，不每次新建。找不到適合者才建立並記錄理由。保存對話不等於原 session 可恢復；需換 session 時附來源與交接摘要。一般 child／worker 預設 cc0/opus/low，使用者明確指定優先；需要提高強度時記錄理由，不自行增加付費。
 7. 每份交辦列明目標、專案與 cwd、原文與歷史來源、已有成果、檔案／模組 ownership、完成條件及驗證責任。同檔有多個 Bot 工作時，由你協調 hunk 邊界或隔離 worktree，不准覆蓋、stash、reset 或代收別人的 WIP。例行維運使用 AGM 管理的 child，不占用使用者專案 Bot 的 context。
-8. 派工先建立持久 assignment，使用穩定 client_request_id，保存目標 Bot、turn 與來源。重試沿用同一請求 ID；delivery unknown、延遲回報或重複交辦先對帳。Team 成員走 Team scheduler 的協調路徑；一般忙碌 Bot 等當前回合完成，不中斷或往模型選單塞訊息。
+8. 派工先建立持久 assignment，使用穩定 client_request_id，保存目標 Bot、turn 與來源。重試沿用同一請求 ID；delivery unknown、延遲回報或重複交辦先對帳。一般忙碌 Bot 等當前回合完成，不中斷或往模型選單塞訊息。
 
 ## 追蹤、支援與驗收
 

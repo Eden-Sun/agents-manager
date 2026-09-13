@@ -375,7 +375,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 
 ### GitHub CLI 登入
 
-`GET /api/hosts/{name}/gh` → 該主機 `gh` 的登入狀態（issue 列表與 team 靠它）：
+`GET /api/hosts/{name}/gh` → 該主機 `gh` 的登入狀態（issue 列表靠它）：
 
 ```json
 { "name": "m4p", "installed": true, "path": "/opt/homebrew/bin/gh", "logged_in": false, "account": "eddysun-alt",
@@ -475,7 +475,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
-在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude /login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log、事件或 team timeline。
+在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude /login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。
 回應是主機 shell 的 pane 物件；UI 從它的 terminal 顯示 device code / URL。登入指令結束後 daemon 重新探測該身份並關 pane。
 
 | 狀況 | 回應 |
@@ -498,10 +498,10 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 | `fast` | bool | §12.2 |
 | `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve` |
 | `inject_hooks` | bool，預設 `true` | `false` 時回覆走終端備援 |
-| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），team/child bot 也能釘，手機與電腦同步 |
+| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步 |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
-| `managed_by` / `parent_bot_id` | 唯讀 | `child` = bot 自己開的子 agent（§子 agent）；`team` = team 成員 |
+| `managed_by` / `parent_bot_id` | 唯讀 | `user` = config.toml 的 bot；`child` = bot 自己開的子 agent（§子 agent） |
 
 啟動 argv 順序（前端可據此預覽）：daemon 旗標（auto_approve、hooks、persona）→ model（claude `--model`、codex/grok `-m`）→ effort（claude `--effort`、grok `--reasoning-effort`、
 codex `-c model_reasoning_effort="<level>"`）→ identity.args → bot.args。
@@ -547,7 +547,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 
 - **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
 - 每顆 `restart_bot_with(resume_native)`，claude 拿到 `--resume <上一個 session>`（上下文不掉）；本機找不到 `transcript_path` 時開新對話。
-- 候選 = claude 且 run 的 `update_notice` 非空；非候選不出現在任何清單。`reason`：`team_member` / `default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
+- 候選 = claude 且 run 的 `update_notice` 非空；非候選不出現在任何清單。`reason`：`default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
   `reason_label` 是給人看的那句（前端直接顯示）。
 - 一顆失敗不中斷整批。AGM 在 `planned` 永遠排最後，60 秒內沒回來自動再啟動一次（inbox `supervisor_restart_retry`）；最終啟動失敗推 inbox `bot_restart_failed`。
 
@@ -569,9 +569,8 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
   刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
 - **子 agent 一起刪**：`managed_by = "child"` 且 `parent_bot_id` 指到它的（含孫代），最深的先。每顆各推 `bot_changed`。
-- team 成員（`managed_by = "team"`）→ `409 {"reason":"team_managed","bot_id","team_id","team_role","message"}`，要走 team 的退役／換成員／刪 team。
 - 找不到 404。
-- hook 材料目錄的其他清理路徑：team 退役 worker、換成員、建立失敗回滾；daemon 啟動時也掃一次 `bots/`，只刪 DB 裡已 `deleted_at` 且沒有 active Run 的目錄。
+- daemon 啟動時掃一次 `bots/`，只刪 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄。
 
 ### 10.5 `POST /relay/announce`
 **不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
@@ -850,117 +849,6 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
 
-## Team（SPEC-team.md）
-
-`POST /api/projects/{id}/teams` 的 `workers.count` 接受 `0`（無限併行，見 `PATCH /api/teams/{id}` 底下的說明）與 `1`–`4`。
-
-`POST /api/projects/{id}/teams` 的 body 也接受 `repo`：team 的 worktree、分支、合併、PR 與關 issue 全部在**那個 submodule 的 repo** 裡進行；
-team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4。
-
-### `POST /api/teams/{id}/issues` 的 409
-
-追加 issue 到 team 佇列（`{"issue_numbers":[57,58]}`，或單數 `{"issue_number":57}`），成功回 `200 {"issues":[…]}`。
-409 的 `reason` 有三種：
-
-| `reason` | 何時 | extra |
-|---|---|---|
-| `team is finished` | `aborted` / `failed` 的 team（`done` 且未 cleanup 則放行並 reopen，SPEC-team §2.5） | `phase` |
-| `team is cleaned up` | `done` 但已 cleanup（沒有活著的 PM 可以接手） | `phase` |
-| `issue already queued` | 同號 issue **還在佇列上**，也就是該 `team_issues` 列的 `state` 是 `queued` 或 `working`；同一個請求裡自己重複（`[57, 57]`）也算 | `issue_number` |
-
-**`issue already queued` 只看還在佇列上的列**：`done` / `failed` / `skipped` 是做完那一趟的紀錄，
-同一個 issue **可以再排一次**（失敗後重試、或想再做一趟），舊列留著、新列取下一個 `seq`，
-第 n 趟的整合分支是 `team/i<issue>-<tid6>-r<n>`。詳見 SPEC-team §2.3「再排同一個 issue」。
-> 修正前是拿**全部**列（含 `done` / `failed` / `skipped`）比對 issue 號，所以一個 issue 在同一隊做過一次
-> 就永遠不能再排，UI 只會看到「追加 issue 失敗：issue already queued」。
-
-### team 物件的 `pause_detail`
-
-`GET /api/state`、`GET /api/teams/{id}` 的 team 物件與 WS 的 `team_changed` 多一個 `pause_detail`，
-補 `pause_reason` 這個機器碼講不出來的那一半：**是誰**的額度不夠。目前只有 `quota_low` 會帶（其餘 `null`）：
-
-```json
-{"phase":"paused","pause_reason":"quota_low",
- "pause_detail":{"stop_pct":90,
-   "members":[{"bot_id":"01M1…","name":"ttxka1d-i2-rev","short":"rev","role":"reviewer",
-               "kind":"claude","identity":"cc2","host":"local",
-               "window":"five_hour","used_pct":96.0,"remaining_pct":4.0,
-               "resets_at":"2026-09-09T03:20:00Z"}]}}
-```
-
-`members` 是暫停當下**所有**過線的成員（`used_pct` 由大到小），`window` 是該成員最接近上限的那個視窗，
-名字與 `GET /api/quota` 相同（`five_hour` / `seven_day`）。每次 phase 變動都重寫，`resume` 之後就是 `null`。
-舊 daemon 沒有這個欄位，前端會退回只寫原因的舊文案。詳見 SPEC-team §4.5。
-
-### `PATCH /api/teams/{id}` 的角色
-
-改預算 / supervised / deliver 之外，三個角色也能就地改：
-
-```json
-{"pm":       {"model": "opus", "effort": "high", "apply": "now"},
- "workers":  {"kind": "grok"},
- "reviewer": {"identity": "cc2", "model": null}}
-```
-
-三個 key 同一個形狀 `{"kind"?, "model"?, "effort"?, "fast"?, "identity"?, "apply"?}`；
-`workers` 多一個 `count`（併行數）。省略一個欄位 = 不動；`model` / `effort` / `identity` 送 `null` = 清成該 kind 的預設。
-回應是 `{"applied": "now" | "next_batch"}`。
-
-| 欄位 | 行為 |
-|---|---|
-| `model` / `effort` / `fast` / `identity` | 寫回 `roles_json.<role>`（下一批執行者、reopen 重建的成員都照它），並更新該角色現有 bot 的欄位。`apply: "now"` 再把有 run 的成員重啟（進行中的工作會斷），預設 `next` 等重啟或換批 |
-| `kind` | **換一個 bot**：同名、同 cwd 建新 kind 的成員，舊的停掉並軟刪（訊息保留），未做完的 task 跟著搬，新成員直接啟動。`apply` 對它沒有意義。詳見 SPEC-team §7.6 |
-| `count`（只有 `workers`） | 併行數 `0`（無限）或 1–4（其他值 400）。**改大**當場建並啟動 `dev-(舊n+1)`…`dev-新n`，接著立刻把佇列裡的 task 補上去 → `{"applied":"now"}`。**改小**只寫進 `roles_json`，下一批執行者才生效，多出來的做完手上那筆就不再被派 → `{"applied":"next_batch"}`。**改成 `0`**（2026-09-09，無限）：立刻把佇列裡的 issue 全部開工（同時最多 6 個），每個 issue 先 1 個執行者 → `{"applied":"now"}`。**從 `0` 改回 `n`**：不再開新 issue，在跑的做完，執行者數之後照 `n` |
-
-**無限併行（`workers.count = 0`，2026-09-09）**：佇列裡有幾個 issue 就同時做幾個，執行者數隨 PM 派工放大
-（每個 issue 最多 4 個、全隊最多 12 個、同時最多 6 個 issue）。此時 `am-team` 協定多兩個必填欄位：
-`dispatch` 的每一筆 task 要有 `issue`（issue 號，`48` 或 `"#48"`），`done` 也要有 `issue`——`done` 只交付那一個
-issue，其他 issue 照跑。`teams` 上的 `issue_number` / `branch` 變成「第一個進行中的 issue」的鏡像，真相在
-`GET /teams/{id}` 的 `issues[]` 與每個 task 的 `issue_id`。詳見 SPEC-team §2.3 與 §4.5。
-
-錯誤：kind 未安裝 / `effort` 對不上該 kind → `400`；`identity` 不存在 → `404 {"error":"not_found","what":"identity"}`，
-身分的 kind 對不上 → `400`；這隊沒有 reviewer 而送了 `reviewer` → `400`；
-換 `kind` 時該角色有成員正在跑一個 turn → `409 {"error":"conflict","reason":"member busy","role","bot_id","name"}`（先 `pause` 再改）。
-終態的 team 一律 `409`。
-
-前端在 TeamPanel 副標題列畫成三列（`TeamRoleEditor.tsx`），側欄成員列的齒輪也開同一份表單——
-**不要**改用 `PATCH /api/bots/{id}`：那只會改到那一列 bot，`roles_json` 不動，下一批又跑回舊設定。
-
-### `POST /api/teams/{id}/close-issue`
-
-關閉一個已完成的 team issue。body 可省略、為 `{}`，或帶 `comment`；reopen 後要關閉較早完成的 issue
-時帶 `issue_id`：`{"issue_id":"…","comment":"…"}`。省略 `issue_id` 會使用 `teams.issue_number` 對應的最後一趟。
-只有指定的 `team_issues` 列為 `done` 才會成功；每一列各自以 `issue_closed_at` 防止重複關閉，且只有目前鏡像
-issue 才會同步寫入 `teams.issue_closed_at`。預設留言也只讀該列的 branch、summary、PR 與該列 tasks。
-
-
-### `POST /api/teams/{id}/rescue`（SPEC-team §2.6）
-
-跑完的 team 裡沒解決的 task（`failed` / `skipped`）一次交給一個成員收尾。
-
-```json
-{"bot_id": "01M..."}        // 省略 = reviewer
-200 {"task": {...}, "bot_id": "01M...", "bot": "rev", "issue_number": 42, "rescued": 2}
-```
-
-- `409 team is not finished`（phase 不是 `done`）／`team is cleaned up`／`nothing to rescue`
-  （沒有 failed / skipped 的 task）／`not a live member of this team`／`the PM cannot be the rescuer`
-  （PM 的 cwd 是整合工作樹）／`this team has no reviewer; pick a member`。
-- 成功後 team 回到 `starting`：成員重新啟動，收尾者成為這個 issue 唯一的執行者，做完照常
-  合併、由 PM 宣告 `done`。
-
-### `POST /api/teams/{id}/issues/retry-failed`（SPEC-team §2.6b）
-
-把佇列上失敗 / 被跳過的 issue 重新排回去接力做完（每個號碼只看最後一次嘗試）。
-
-```json
-200 {"queued": [...], "retried": [31, 33, 40, 44]}
-```
-
-- 沒有失敗的 issue → `409 no failed issue to retry`。其餘驗證與 `POST /teams/{id}/issues` 相同
-  （issue 存在、未在佇列上、總數上限、額度），`done` 且未 cleanup 的 team 會照 §2.5 reopen 起來。
-
-
 ## 總管 AGM（SPEC §18）
 
 全部走 `X-AM-Token`。未部署的 daemon 對這些路徑回 404（前端用 404 判斷「這台不支援」）。
@@ -1024,7 +912,7 @@ issue 才會同步寫入 `teams.issue_closed_at`。預設留言也只讀該列�
   - `legacy_closed=true`：驗收狀態出現前就關掉的舊資料，未經驗收。
   - `ownership_conflicts`：前綴重疊的其他未結案交辦，只回報不阻擋。
   - `mission_id` 與 `role` 見「群組任務」。
-  - 先落地再送 prompt；同 `client_request_id` 重試回同一筆（換 bot 或 text 409）。對方是 team 成員 409 `team_managed`。對方忙 → 留 `queued`，`error` 記真正理由
+  - 先落地再送 prompt；同 `client_request_id` 重試回同一筆（換 bot 或 text 409）。對方忙 → 留 `queued`，`error` 記真正理由
     （`bot has no active run`、`a turn is already in flight`、`needs_login: …`），`next_attempt_at` 下次重試時間，controller 依 15/30/60/120/300 秒退避、沿用同一 crid。delivery `unknown` 只對帳不重送。
   - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id；daemon 自己送給 AGM 的通知帶 `daemon`。
 - `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。

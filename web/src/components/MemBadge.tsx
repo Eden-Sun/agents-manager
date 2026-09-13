@@ -17,7 +17,7 @@ export function humanBytes(n: number): string {
  * 一台主機上 herdr 進程樹現在佔的常駐記憶體（SPEC §15）。
  *
  * **一格只講一台**。左上角固定是本機——那是「我這台現在多重」，隨時都想知道；遠端主機的
- * 數字只在你正在看那台上面的東西時才出現（bot / 群組 / team 的標題列），不然一個平常用不到
+ * 數字只在你正在看那台上面的東西時才出現（bot / 群組的標題列），不然一個平常用不到
  * 的數字會一直佔著版面，而且把兩台加總出來的那個大數字也不好懂（8G 裡有 5G 是別台的）。
  */
 export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: string; onlyRemote?: boolean }) {

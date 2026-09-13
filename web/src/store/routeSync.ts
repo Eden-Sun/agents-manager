@@ -20,8 +20,6 @@ import { useStore, type StoreState } from './store'
 export function routeOf(s: StoreState): Route {
   // shell 非 null 時，不管它是整個主面板還是 ChatPanel 的第三個分頁，畫面上就是那個終端。
   if (s.shellView) return { kind: 'shell', host: s.shellView.host, paneId: s.shellView.paneId }
-  if (s.teamLaunch) return { kind: 'team-new', projectId: s.teamLaunch.projectId, issueNumber: s.teamLaunch.issueNumber }
-  if (s.selectedTeamId) return { kind: 'team', teamId: s.selectedTeamId }
   if (s.selectedProjectId) return { kind: 'project', projectId: s.selectedProjectId }
   if (s.selectedBotId) {
     const settings = s.settingsBotId === s.selectedBotId
@@ -43,12 +41,6 @@ export function screenTitle(s: StoreState): string {
     }
     case 'project':
       return s.projects.find((p) => p.id === r.projectId)?.label ?? ''
-    case 'team': {
-      const t = s.teams[r.teamId]
-      return t ? `#${t.issue_number} ${t.issue_title} · Team` : 'Team'
-    }
-    case 'team-new':
-      return `#${r.issueNumber} · 組隊`
     case 'shell':
       return `${r.host} · shell`
   }
@@ -133,18 +125,6 @@ async function applyRoute(r: Route) {
       if (!s.projects.some((p) => p.id === r.projectId)) return backHome('這個專案已經不在了')
       s.selectProject(r.projectId)
       return
-    case 'team':
-      if (!s.teams[r.teamId]) return backHome('這個 Team 已經不在了')
-      s.selectTeam(r.teamId)
-      return
-    case 'team-new': {
-      const p = s.projects.find((x) => x.id === r.projectId)
-      if (!p) return backHome('這個專案已經不在了')
-      // repo 不進網址：一個 issue 編號在專案裡就是唯一的，而網址不必背 submodule 的名字。
-      // 從連結進來一律當專案本身的 repo；submodule 的組隊還是從 Issues 列表點進去。
-      s.openTeamLaunch(r.projectId, r.issueNumber, p.github?.repo ?? '')
-      return
-    }
     case 'shell': {
       if (!s.hostShellSupported) return backHome('這個 daemon 沒有主機 shell')
       try {
@@ -175,7 +155,7 @@ function onPop() {
     closeDrawer?.()
     return
   }
-  const r = parseRoute(location.pathname, location.search)
+  const r = parseRoute(location.pathname)
   lastRoute = r
   run(r)
 }
@@ -188,7 +168,7 @@ function onPop() {
 export function startRouteSync() {
   if (started || typeof window === 'undefined') return
   started = true
-  const initial = parseRoute(location.pathname, location.search)
+  const initial = parseRoute(location.pathname)
   lastRoute = initial
   window.addEventListener('popstate', onPop)
 
@@ -196,7 +176,7 @@ export function startRouteSync() {
   useStore.subscribe((s) => {
     if (applying) return
     if (pending) {
-      // bot / project / team 清單要先到齊，才判斷得出網址指的東西還在不在。
+      // bot / project 清單要先到齊，才判斷得出網址指的東西還在不在。
       if (!s.ready) return
       const r = pending
       pending = null

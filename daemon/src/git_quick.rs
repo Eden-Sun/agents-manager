@@ -1,7 +1,7 @@
 //! Quick git for the chat header (2026-09-08): `GET /api/projects/:id/git` for the
 //! `+N −M · ↑a ↓b` chip, and `POST …/git/{commit,push,pull}` behind its three buttons.
 //!
-//! Everything runs through `team_git::sh` on the project's host (local or ssh), on the
+//! Everything runs through `git_sh::sh` on the project's host (local or ssh), on the
 //! project's own checkout — no worktrees, no branches: this is the user's "commit what the
 //! agents just did and push it" gesture, nothing more. Not a git repo → `{"git": false}` and
 //! the UI hides the chip.
@@ -9,7 +9,7 @@
 use crate::db;
 use crate::lifecycle::LcError;
 use crate::state::App;
-use crate::team_git::{git, GIT_TIMEOUT, PUSH_TIMEOUT};
+use crate::git_sh::{git, GIT_TIMEOUT, PUSH_TIMEOUT};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -94,7 +94,7 @@ pub struct CommitBody {
     pub message: String,
 }
 
-fn done(op: &str, out: crate::team_git::Out) -> Result<Value, LcError> {
+fn done(op: &str, out: crate::git_sh::Out) -> Result<Value, LcError> {
     if out.ok() {
         Ok(json!({"ok": true, "output": out.trimmed()}))
     } else {

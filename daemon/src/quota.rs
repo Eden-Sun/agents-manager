@@ -579,7 +579,7 @@ mod tests {
     /// app-server 帶來的 `resets_at` 洗掉（2026-09-13 使用者：量表停在舊數字）。
     #[tokio::test]
     async fn the_status_line_updates_the_numbers_without_losing_the_reset_time() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let from_server = Quota {
             five_hour: Some(Window { used_pct: 0.0, resets_at: Some("2026-09-13T12:00:00Z".into()) }),
             seven_day: Some(Window { used_pct: 50.0, resets_at: Some("2026-09-18T00:00:00Z".into()) }),
@@ -613,7 +613,7 @@ mod tests {
     /// （2026-09-13 使用者：header 的 codex 只剩一條）。
     #[tokio::test]
     async fn a_partial_reading_keeps_the_window_it_could_not_see() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let mut full = codex_q("codex-app-server", None);
         full.five_hour = Some(Window { used_pct: 30.0, resets_at: Some("2026-09-13T19:22:00.000Z".into()) });
         full.seven_day = Some(Window { used_pct: 76.0, resets_at: Some("2026-09-18T00:00:00.000Z".into()) });
@@ -636,7 +636,7 @@ mod tests {
     /// 21%、22:20 重置。更新的結構化讀數說帳號還有餘裕時，那張橫幅就該被清掉。
     #[tokio::test]
     async fn a_newer_reading_that_says_there_is_room_clears_the_banner() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let hit_at = "2026-09-13T14:15:30.000Z";
         let mut blocked = codex_q("codex-limit-hit", None);
         blocked.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
@@ -664,7 +664,7 @@ mod tests {
     /// 也不算數——不然 CLI 才剛拒絕你，五分鐘前的一份快取就能把它蓋掉。
     #[tokio::test]
     async fn an_older_or_self_reported_reading_keeps_the_banner() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let hit = LimitHit {
             message: "ERROR: You've hit your usage limit.".into(),
             until: Some("2999-01-01T00:00:00.000Z".into()),
@@ -694,7 +694,7 @@ mod tests {
     /// 對得起來，而且狀態列的讀數不能把 CLI 說的「撞上限」洗掉。
     #[tokio::test]
     async fn the_status_line_writes_where_the_lookup_reads_and_keeps_the_limit_hit() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         // 帶身分的 codex bot：寫進 `codex:astra`，查也先查它。
         let base = quota_base("codex", Some("astra"));
         assert_eq!(base, "codex:astra");
@@ -742,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_statusline_reading_keeps_the_probes_fable_window() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let probe = Quota {
             five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
             seven_day: Some(Window { used_pct: 20.0, resets_at: None }),
@@ -788,7 +788,7 @@ mod tests {
     /// 所以它要黏過五分鐘一次的 app-server 輪詢，直到恢復時間到、或下一回合真的跑成功。
     #[tokio::test]
     async fn a_codex_limit_hit_outlives_the_app_server_poll() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let soon = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
         let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(soon), at: crate::db::now() };
         set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
@@ -807,7 +807,7 @@ mod tests {
     /// 恢復時間過了就自己消失——不必等下一回合，也不必使用者手動清。
     #[tokio::test]
     async fn a_limit_hit_past_its_reset_time_is_dropped() {
-        let app = crate::team::testing::env().await.app.clone();
+        let app = crate::testing::env().await.app.clone();
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
         let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(past), at: crate::db::now() };
         set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
