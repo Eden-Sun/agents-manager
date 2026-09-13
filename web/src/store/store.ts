@@ -39,6 +39,8 @@ import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, prune
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { botStatusConnTarget } from './botStatusConn'
 import { restoreQueued } from './queuedSend'
+import { missionRequests } from './missionRequests'
+
 import type { QueuedSend } from './queuedSend'
 import {
   botKey,
@@ -62,6 +64,9 @@ import {
   type ReadMark,
 } from './unread'
 import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
+
+const sendMissionRequest = missionRequests(api.newClientRequestId)
+const missionLoads = new Map<string, () => Promise<void>>()
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -409,6 +414,8 @@ export interface StoreState {
   missions: Record<string, Mission[]>
   /** 展開過的任務：任務本身＋事件串。 */
   missionDetail: Record<string, MissionDetail>
+  missionLoading: Record<string, boolean>
+  missionLoadErrors: Record<string, string>
   /** false = 這個 daemon 沒有 `/api/missions`（舊版）。同 `teamsSupported`：入口靜默消失。 */
   missionsSupported: boolean
   loadMissions: (projectId: string) => Promise<void>
@@ -416,7 +423,7 @@ export interface StoreState {
   /** 群組「交給 AGM」：成功回任務 id。 */
   startMission: (projectId: string, input: NewMissionInput) => Promise<string | null>
   controlMission: (missionId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
-  /** 任務停下來問人時，使用者在卡片上回答：記一則 `note`（使用者本人）再 resume。 */
+  /** 使用者回答暫停任務：daemon 原子記錄、放行與喚醒。 */
   answerMission: (missionId: string, text: string) => Promise<boolean>
   /** 對已完成的成果追問。只會留話並叫醒 AGM，不改任何交付。 */
   askMission: (missionId: string, text: string) => Promise<boolean>
@@ -771,6 +778,8 @@ export const useStore = create<StoreState>((set, get) => ({
   teamLaunch: null,
   missions: {},
   missionDetail: {},
+  missionLoading: {},
+  missionLoadErrors: {},
   missionsSupported: true,
   shellView: initialShellView,
   hostShellSupported: true,
@@ -1911,21 +1920,35 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async loadMission(missionId) {
-    if (!get().missionsSupported) return
-    try {
-      const detail = await api.fetchMission(missionId)
-      if (!detail) return
-      set((s) => ({
-        missionDetail: { ...s.missionDetail, [missionId]: detail },
-        missions: mergeMission(s.missions, detail),
-      }))
-    } catch (e) {
-      if (api.isMissionsUnsupported(e)) {
-        set({ missionsSupported: false })
-        return
-      }
-      get().notify('error', `載入任務失敗：${errText(e)}`)
+    let run = missionLoads.get(missionId)
+    if (!run) {
+      // Coalesce concurrent reads but run again after an update received mid-request.
+      run = singleFlight(async () => {
+        if (!get().missionsSupported) return
+        set((s) => ({
+          missionLoading: { ...s.missionLoading, [missionId]: true },
+          missionLoadErrors: { ...s.missionLoadErrors, [missionId]: '' },
+        }))
+        try {
+          const detail = await api.fetchMission(missionId)
+          if (!detail) throw new Error('任務資料不完整')
+          set((s) => ({
+            missionDetail: { ...s.missionDetail, [missionId]: detail },
+            missions: mergeMission(s.missions, detail),
+          }))
+        } catch (e) {
+          if (api.isMissionsUnsupported(e)) {
+            set({ missionsSupported: false })
+            return
+          }
+          set((s) => ({ missionLoadErrors: { ...s.missionLoadErrors, [missionId]: errText(e) } }))
+        } finally {
+          set((s) => ({ missionLoading: { ...s.missionLoading, [missionId]: false } }))
+        }
+      })
+      missionLoads.set(missionId, run)
     }
+    await run()
   },
 
   async startMission(projectId, input) {
@@ -1966,7 +1989,7 @@ export const useStore = create<StoreState>((set, get) => ({
       // 一支就好：記錄、放行、叫醒 AGM 由 daemon 綁在同一個交易裡。以前這裡連打兩支
       // （events 再 resume），中間斷掉就留下「答案寫了但沒人被叫醒」的半套。
       // crid 讓重送安全：同一句話重送回同一則，不會變成第二次續作。
-      await api.answerMission(missionId, { text, client_request_id: `answer-${missionId}-${Date.now()}` })
+      await sendMissionRequest('answer', missionId, text, (id) => api.answerMission(missionId, { text, client_request_id: id }))
       await get().loadMission(missionId)
       return true
     } catch (e) {
@@ -1977,7 +2000,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async askMission(missionId, text) {
     try {
-      await api.askMission(missionId, { text, client_request_id: `ask-${missionId}-${Date.now()}` })
+      await sendMissionRequest('ask', missionId, text, (id) => api.askMission(missionId, { text, client_request_id: id }))
       await get().loadMission(missionId)
       return true
     } catch (e) {
@@ -1988,7 +2011,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async reviseMission(missionId, text) {
     try {
-      const next = await api.reviseMission(missionId, { text, client_request_id: `revise-${missionId}-${Date.now()}` })
+      const next = await sendMissionRequest('revise', missionId, text, (id) => api.reviseMission(missionId, { text, client_request_id: id }))
       // 兩邊都要重讀：原成果多了「已開續作」的連結，新任務要進清單。
       await get().loadMission(missionId)
       if (next) {
@@ -2707,6 +2730,10 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       queueMicrotask(() => {
         const s = useStore.getState()
         if (s.missionDetail[missionId]) void s.loadMission(missionId)
+        // A child finishing changes its parent's continuation button and relation list too.
+        for (const detail of Object.values(s.missionDetail)) {
+          if (detail.revisions.some((r) => r.id === missionId)) void s.loadMission(detail.id)
+        }
         if (projectId && s.missions[projectId]) void s.loadMissions(projectId)
       })
       return null
