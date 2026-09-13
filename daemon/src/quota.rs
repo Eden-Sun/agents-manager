@@ -54,6 +54,34 @@ pub fn quota_key(host: &str, base: &str) -> String {
     }
 }
 
+/// 這顆 bot 用的是哪一把額度 key（`claude:cc1`、`codex`…），含主機前綴。
+///
+/// 規則跟 UI 的額度條同一套：有 identity 就是 `<kind>:<identity>`，沒有就是裸的 kind；
+/// `cc0` 這種預設身份可能沒有自己的那一把，所以呼叫端要連裸 kind 一起看。
+pub fn bot_quota_keys(host: &str, kind: &str, identity: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(id) = identity.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push(quota_key(host, &format!("{kind}:{id}")));
+    }
+    out.push(quota_key(host, kind));
+    out
+}
+
+/// 這顆 bot 的帳號現在是不是被 CLI 擋著（[`LimitHit`]），還沒過期的才算。
+pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
+    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let keys = bot_quota_keys(&host, &bot.kind, bot.identity.as_deref());
+    let q = app.quotas.lock().await;
+    for k in keys {
+        if let Some(hit) = q.get(&k).and_then(|x| x.limit_hit.clone()) {
+            if !limit_hit_expired(Some(&hit)) {
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
 /// The host a quota map key belongs to, given the hosts that exist (`local` for anything else).
 pub fn host_of_key<'a>(key: &'a str, hosts: &[String]) -> (&'a str, &'a str) {
     match key.split_once('/') {

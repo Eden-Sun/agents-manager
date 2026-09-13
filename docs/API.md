@@ -99,7 +99,7 @@
      → 切回 `fable`，`quota_reset_at` 清空。
   讀不到額度就什麼都不做（未知不等於滿）。
 - `GET /api/supervisor/assignments` → `{assignments:[]}`；
-  `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path]}` → 一筆 assignment
+  `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?,expects_review?}` → 一筆 assignment
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,
   turn_status,evidence_complete,open,awaiting_review,review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts}`。
   `status` 是**生命週期**，不是傳輸狀態：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review`（回合結束，等驗收）
@@ -107,6 +107,15 @@
   傳輸的原始事實留在 `delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing`）
   與 `evidence_complete`。**回合結束不會自己變成 `completed`**——連送不出去的交辦也是進 `awaiting_review`，
   daemon 不會替沒人看過的工作結案（SPEC §18.8）。
+  `kind`（2026-09-13）：`task`（預設）或 `notice`。**notice = 只是把話說給 bot 聽**（「收到」「進 idle」「看完即可」），
+  送達且回合正常結束就直接 `completed`，不進 `awaiting_review`、不會被 `assignment_stalled` 探針看到；
+  inbox 事件是 `assignment_noticed`（`needs_review=false`）。送**失敗**的 notice 仍然停在 `awaiting_review`——
+  送不出去本身就是要有人看的壞消息。`expects_review:false` 是同一件事的等價寫法，兩個都給時以它為準；
+  兩個都不給 = 舊行為（CLI：`agm assign --notice`）。
+  `quota_blocked`（2026-09-13）：目標 bot 的帳號被 CLI 擋著（`quota.limit_hit`）。**仍算未結案**，回應多帶
+  `resume_at`（額度預計回來的時間）與 `quota_retries`（已自動重送次數）。daemon 會在額度回來後用
+  `<client_request_id>#r<n>` 自己重送（同一次重送仍然冪等），並各推一則 `assignment_quota_blocked` /
+  `assignment_quota_resumed` inbox 事件；重送超過 6 次才交給 AGM（`awaiting_review`，`turn_status=quota_exhausted`）。
   `legacy_closed=true` 是驗收狀態出現之前就被關掉的舊資料：關掉了，但沒有人驗收過，不要當成已驗收。
   `ownership` 是這筆交辦負責的檔案／模組；建立時 daemon 會回 `ownership_conflicts`（前綴重疊的其他未結案交辦），
   只回報、不阻擋，協調仍由 AGM 決定。

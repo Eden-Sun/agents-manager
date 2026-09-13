@@ -99,6 +99,19 @@ pub struct AssignIn {
     /// Files / modules this assignment is being handed, for conflict reporting (§18.4).
     #[serde(default)]
     pub ownership: Vec<String>,
+    /// `"notice"` = 只是把話說給 bot 聽，不等回覆也不驗收（§18.8）。省略 = `"task"`。
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// `kind` 的等價寫法，給既有的呼叫端用；兩個都給時以 `expects_review` 為準。
+    #[serde(default)]
+    pub expects_review: Option<bool>,
+}
+
+impl AssignIn {
+    /// 要不要驗收。舊的呼叫端兩個欄位都不帶 → `true`，行為跟以前一模一樣。
+    fn expects_review(&self) -> bool {
+        self.expects_review.unwrap_or_else(|| self.kind.as_deref() != Some("notice"))
+    }
 }
 
 pub async fn post_assignment(
@@ -113,6 +126,7 @@ pub async fn post_assignment(
         b.source_turn_id.as_deref(),
         &b.ownership,
         None,
+        b.expects_review(),
     )
     .await?;
     Ok(Json(a))
@@ -987,7 +1001,7 @@ mod review_boundary_tests {
     #[tokio::test]
     async fn followup_replay_requires_the_same_instruction_and_request_id() {
         let app = app().await;
-        let parent = store::insert_assignment(&app.db, None, "bot", "parent", "original", &[], None).await.unwrap();
+        let parent = store::insert_assignment(&app.db, None, "bot", "parent", "original", &[], None, true).await.unwrap();
         store::review_with_followup(&app.db, &parent.id, "queued", "followup", "AGM", "test", None, None,
             Some(store::FollowupSpec { target_bot_id: "bot", client_request_id: "follow-1", text: "continue",
                 ownership: &[], request_id: None })).await.unwrap().unwrap();

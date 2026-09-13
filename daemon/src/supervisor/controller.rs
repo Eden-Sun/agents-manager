@@ -22,6 +22,12 @@ const SWITCH_COOLDOWN_SECS: i64 = 30 * 60;
 /// The plan's bound: one automatic candidate switch per cooldown window. `cc0` is one account,
 /// so a second switch cannot conjure quota that the first one did not find.
 const MAX_AUTO_SWITCHES: i64 = 1;
+/// 帳號撞到用量上限、CLI 又沒說什麼時候回來時，先等這麼久再問一次。
+const QUOTA_BLIND_WAIT_SECS: i64 = 30 * 60;
+/// 同一個 assignment 最多自動重送幾次；再撞就交給 AGM（`awaiting_review` + 原因）。
+/// 上限存在的理由：帳號可能是**真的**用完了（credits 歸零、不是 5 小時窗），那不是等得到的，
+/// 無限重送只會把一件做不完的事永遠掛在清單上。
+const MAX_QUOTA_RETRIES: i64 = 6;
 
 fn backoff_for(attempts: i64) -> Duration {
     let i = (attempts.max(0) as usize).min(RETRY_BACKOFF.len() - 1);
@@ -66,6 +72,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         dispatch_failed(app, &a, "target bot became team-managed").await;
         return;
     }
+    // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
+    // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
+    // 停在 `quota_blocked` 等額度回來，時間到了 controller 自己重送。
+    if let Some(hit) = crate::quota::limit_hit_for_bot(app, &target).await {
+        park_quota(app, &a, &hit, "dispatch").await;
+        return;
+    }
     // A restart window is being held: the point of the window is that nothing new starts inside
     // it. The assignment stays queued (nothing is lost or refused) until the window closes —
     // this is the half a one-off "is anything working?" snapshot could never cover.
@@ -96,7 +109,7 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         tracing::warn!(assignment = %a.id, "holding the assignment: the supervisor has no bot to attribute it to");
         return;
     };
-    match lifecycle::prompt_relayed(app, &a.target_bot_id, &a.text, &a.client_request_id, &[], Some(&from)).await {
+    match lifecycle::prompt_relayed(app, &a.target_bot_id, &a.text, &a.dispatch_crid(), &[], Some(&from)).await {
         Ok(out) => {
             // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
             // it landed, and is reconciled against the turn rather than re-sent.
@@ -225,6 +238,103 @@ async fn settle(
     }
 }
 
+/// 撞到上限時要做什麼——抽成純函式，好讓「重送幾次之後放棄」這條規則能被測到。
+#[derive(Debug, PartialEq)]
+enum QuotaAction {
+    /// CLI 說了時間：等到那時候。
+    WaitUntil(String),
+    /// CLI 沒說時間：等一段固定的時間再問。
+    WaitBlind,
+    /// 等太多次了，這不是「等一下就回來」的那種額度：交給 AGM。
+    GiveUp,
+}
+
+fn quota_action(retries: i64, until: Option<&str>) -> QuotaAction {
+    if retries >= MAX_QUOTA_RETRIES {
+        return QuotaAction::GiveUp;
+    }
+    match until.map(str::trim).filter(|s| !s.is_empty()) {
+        // 已經過去的時間不是時間：那代表這份讀數比重置還舊，照沒說時間處理。
+        Some(t) if !past(t) => QuotaAction::WaitUntil(t.to_string()),
+        _ => QuotaAction::WaitBlind,
+    }
+}
+
+/// 把一件被額度擋下的 assignment 停在 `quota_blocked`，並通知 AGM 一次。
+///
+/// `where_seen` 只是為了讓 inbox 事件說得出「是派送前就擋住，還是跑到一半撞到」。
+/// 超過 [`MAX_QUOTA_RETRIES`] 就不再等了：那通常代表額度不是「等一下就回來」的那種
+/// （credits 用完），交給 AGM 決定要換帳號、換 bot 還是放掉。
+async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::LimitHit, where_seen: &str) {
+    let resume_at = match quota_action(a.quota_retries, hit.until.as_deref()) {
+        QuotaAction::GiveUp => {
+            let why = format!("額度重送 {} 次仍被擋：{}", a.quota_retries, hit.message.trim());
+            settle(app, a, "quota_exhausted", true, None, Some(&why)).await;
+            return;
+        }
+        QuotaAction::WaitUntil(t) => t,
+        QuotaAction::WaitBlind => iso_in(QUOTA_BLIND_WAIT_SECS),
+    };
+    let why = format!("帳號撞到用量上限（{where_seen}）：{}", hit.message.trim());
+    let payload = json!({
+        "bot_id": a.target_bot_id,
+        "resume_at": resume_at,
+        "retries": a.quota_retries,
+        "message": hit.message,
+        "where": where_seen,
+        // 這不是要人來決定的事：時間到了 controller 自己重送。
+        "needs_review": false,
+    });
+    let key = format!("quota_blocked:{}:{}", a.id, a.quota_retries);
+    match store::park_quota_blocked(&app.db, &a.id, &resume_at, &why, &key, &payload).await {
+        Ok(s) if s.moved => {
+            tracing::info!(assignment = %a.id, bot = %a.target_bot_id, resume_at, where_seen, "assignment 等額度回來");
+            app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "quota_blocked"})).await;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = ?e, assignment = %a.id, "could not park the assignment on quota_blocked"),
+    }
+}
+
+/// 額度回來了就重送：每個 tick 看一次被擋住的那幾件。
+///
+/// 兩個條件都算數：`resume_at` 到了，或者 CLI 那格 `limit_hit` 已經被清掉（下一回合跑成功、
+/// 或 `until` 過期）。重送走的是同一個 assignment、同一段文字、下一個 `#r<n>` crid，所以
+/// 重跑幾次 tick 都只會有一個新 turn。
+async fn resume_quota_blocked(app: &Arc<App>) {
+    let Ok(rows) = store::quota_blocked_all(&app.db).await else { return };
+    for a in rows {
+        let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
+        let still_hit = crate::quota::limit_hit_for_bot(app, &bot).await;
+        let due = a.resume_at.as_deref().map(past).unwrap_or(true);
+        match (&still_hit, due) {
+            // 還在擋、時間也還沒到：什麼都不做。
+            (Some(_), false) => continue,
+            // 還在擋，但我們記的時間已經過了——以 CLI 現在說的為準，把時間往後挪。
+            (Some(hit), true) => {
+                let next = hit.until.clone().unwrap_or_else(|| iso_in(QUOTA_BLIND_WAIT_SECS));
+                if Some(next.as_str()) != a.resume_at.as_deref() {
+                    let _ = store::touch_resume_at(&app.db, &a.id, &next).await;
+                }
+                continue;
+            }
+            // 不擋了：回到 queued 並馬上試一次。
+            (None, _) => {}
+        }
+        let key = format!("quota_resumed:{}:{}", a.id, a.quota_retries);
+        let payload = json!({"bot_id": a.target_bot_id, "retries": a.quota_retries + 1, "needs_review": false});
+        match store::resume_quota_blocked(&app.db, &a.id, &key, &payload).await {
+            Ok(s) if s.moved => {
+                tracing::info!(assignment = %a.id, bot = %a.target_bot_id, "額度回來了，重送 assignment");
+                app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "queued"})).await;
+                dispatch(app, &a.id).await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, assignment = %a.id, "could not resume the assignment"),
+        }
+    }
+}
+
 /// The worker's last word on the turn, which is what the manager actually has to read before
 /// it may call an assignment done.
 async fn last_reply(app: &Arc<App>, turn_id: &str) -> Option<String> {
@@ -244,6 +354,15 @@ async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
     let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
     if !a.is_executing() {
         return;
+    }
+    // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
+    // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
+    // 那句系統訊息記在 `error`（不是 `result`），免得 AGM 把它讀成 bot 的回覆。
+    if let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await {
+        if let Some(hit) = crate::quota::limit_hit_for_bot(app, &bot).await {
+            park_quota(app, &a, &hit, "turn").await;
+            return;
+        }
     }
     let ok = status == "completed" || status == "completed_fallback";
     let reply = last_reply(app, turn_id).await;
@@ -727,6 +846,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                         }
                     }
                     reconcile(&app).await;
+                    resume_quota_blocked(&app).await;
                     drain_queue(&app).await;
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.
@@ -759,6 +879,19 @@ pub async fn respawn(app: &Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 撞上限之後等多久、等幾次。重送上限存在的理由：credits 真的用完時不是等得到的。
+    #[test]
+    fn quota_waits_on_the_clis_own_clock_and_gives_up_eventually() {
+        let far = "2999-01-01T00:00:00Z";
+        assert_eq!(quota_action(0, Some(far)), QuotaAction::WaitUntil(far.into()));
+        // 沒說時間、或說了一個已經過去的時間：都退回固定等待，不要當場又送一次。
+        assert_eq!(quota_action(0, None), QuotaAction::WaitBlind);
+        assert_eq!(quota_action(0, Some("2020-01-01T00:00:00Z")), QuotaAction::WaitBlind);
+        assert_eq!(quota_action(0, Some("   ")), QuotaAction::WaitBlind);
+        assert_eq!(quota_action(MAX_QUOTA_RETRIES - 1, Some(far)), QuotaAction::WaitUntil(far.into()));
+        assert_eq!(quota_action(MAX_QUOTA_RETRIES, Some(far)), QuotaAction::GiveUp);
+    }
 
     #[test]
     fn the_backoff_grows_and_then_stops_growing() {

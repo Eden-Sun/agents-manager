@@ -491,6 +491,11 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     # 不會替你決定，真正的協調還是你的事。
     if args.owns:
         body["ownership"] = list(args.owns)
+    # 通知：只是把話說給 bot 聽（「收到」「進 idle」「看完即可」），送到就結案。
+    # 不加這個旗標的一律照舊：回合結束停在 awaiting_review 等你驗收。
+    if getattr(args, "notice", False):
+        body["kind"] = "notice"
+        body["expects_review"] = False
     try:
         return client.post("/api/supervisor/assignments", body)
     except AgmError as e:
@@ -507,7 +512,8 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
         raise
 
 
-OPEN_STATUSES = ("queued", "delivered", "unknown", "awaiting_review", "blocked")
+# `quota_blocked`：帳號撞到用量上限，daemon 會在額度回來後自己重送——工作還沒完，所以算 open。
+OPEN_STATUSES = ("queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked")
 
 
 def cmd_assignments(client: Client, cfg: dict, args) -> object:
@@ -844,6 +850,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="PATH",
         help="這筆交辦負責的檔案／模組（可重複）。重疊時 daemon 會回報 ownership_conflicts",
+    )
+    s.add_argument(
+        "--notice",
+        action="store_true",
+        help="通知，不是交辦：送到、回合結束就自動結案，不進 awaiting_review、不會被當成卡住的工作",
     )
     s.set_defaults(func=cmd_assign)
 

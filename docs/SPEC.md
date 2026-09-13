@@ -1567,6 +1567,39 @@ AGM 的 persona 有四份副本，改動時**四份一起改、逐字一致**，
 - **既有資料**：migration 只把已經關掉的舊 row 標成 `legacy_closed=1`，不重新打開、不重新派工；UI 與 API 標示
   「舊資料·未經驗收」，不宣稱它們被驗收過。
 
+#### 18.8a 通知不是交辦（2026-09-13）
+
+AGM 對 bot 說的話有兩種：一種要它做事、做完要驗收；一種只是把話說給它聽（「收到」「進 idle」「這封看完即可」）。
+之前只有一種語意，所以第二種也停在 `awaiting_review`，而 AGM 不會回頭驗收自己的招呼——2026-09-13 10:1x 兩件
+`assignment_stalled` incident（`01M2C84N…`、`01M2C85J…`）就是這樣來的：系統替沒有人在等的事開了工單。
+
+`supervisor_assignments.expects_review`（0/1，預設 1）：
+
+- `expects_review=0`（API 的 `kind:"notice"`、CLI 的 `agm assign --notice`）：送達且回合以 `completed` /
+  `completed_fallback` 結束 → 直接 `completed`，inbox 事件 `assignment_noticed`（`needs_review=false`）。
+- 送不出去、或回合 `failed` / `dispatch_failed` 的通知**仍然**進 `awaiting_review`：那是壞消息，要有人看。
+- `assignment_stalled` 探針跳過停在 `awaiting_review` 的通知；`quota_blocked` 也不算卡住（它在等一個已知的時間點）。
+- 既有資料一律 `expects_review=1`，行為不變。
+
+#### 18.8b 撞到用量上限是「等」，不是「失敗」（2026-09-13）
+
+`quota.limit_hit` 記的是 CLI 自己印的上限橫幅（`You've hit your usage limit …`，可能帶 `try again at …`）。
+在這之前 assignment 的生命週期不認得它：派送照送、送出去只換回一句系統錯誤，`queued` 的退避重試跑完之後
+變成 `dispatch_failed`，工作就無聲斷掉——2026-09-12 codex-astra 三次撞 Codex 5h 上限，三次都要 AGM 事後手動重送。
+
+新的狀態 `quota_blocked`（仍算未結案）：
+
+- **派送前**（`controller::dispatch`）與**回合結束後**（`on_turn_done`）各檢查一次目標 bot 的
+  `quota::limit_hit_for_bot`；撞到就停在 `quota_blocked`，`resume_at` = 橫幅寫的時間，沒寫就 +30 分鐘。
+- 回合結束那一次特別重要：那種回合的「回覆」是一句系統錯誤，不是工作的結果。它記進 `error`，**不會**寫進
+  `result`，也不會被算成 `completed`。
+- controller 每個 tick 掃一次：額度還擋著就順著 CLI 的時間往後挪；不擋了就回 `queued` 並立刻重送。
+  重送用 `<client_request_id>#r<n>`——`lifecycle::prompt` 的冪等是「同一個 crid 回同一個 turn」，不換序號的話
+  重送會拿回上一個撞牆的 turn，等於沒送；換了序號之後同一次重送重跑幾遍仍然只有一個 turn。
+- `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox 事件（`needs_review=false`），
+  不開 incident、不重複派工。重送 6 次仍被擋 → `awaiting_review` + `turn_status=quota_exhausted`，交給 AGM：
+  那通常是 credits 真的用完，不是等得到的。
+
 ### 18.9 總管健康與系統 incident（2026-09-12）
 
 `manager_health`（AGM 自己能不能工作）與 `system_health`（系統有沒有壞）分開；頂層 `status` 是兩者取較嚴重者的

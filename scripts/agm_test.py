@@ -368,6 +368,21 @@ class AssignCommandTest(CliCase):
         body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
         self.assertEqual(body, {"target_bot_id": "b1", "text": "修登入", "client_request_id": "req-1"})
 
+    def test_notice_is_marked_as_one(self):
+        """通知不是交辦：daemon 要知道它送到就結案，不用你回頭驗收。"""
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a9", "kind": "notice"})
+        self.ok("assign", "--bot", "b1", "--text", "收到，進 idle", "--request-id", "n-1", "--notice")
+        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
+        self.assertEqual(body["kind"], "notice")
+        self.assertIs(body["expects_review"], False)
+
+    def test_without_the_flag_nothing_changes(self):
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a8"})
+        self.ok("assign", "--bot", "b1", "--text", "做這個", "--request-id", "t-1")
+        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
+        self.assertNotIn("kind", body)
+        self.assertNotIn("expects_review", body)
+
     def test_timeout_reports_delivery_unknown_and_sends_once(self):
         FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1"})
         FakeDaemon.slow = {"/api/supervisor/assignments"}
@@ -402,6 +417,7 @@ class AssignmentsCommandTest(CliCase):
                     {"id": "a2", "status": "completed"},
                     {"id": "a3", "status": "awaiting_review", "turn_status": "completed"},
                     {"id": "a4", "status": "blocked"},
+                    {"id": "a5", "status": "quota_blocked", "resume_at": "2026-09-13T01:00:00Z"},
                 ]
             },
         )
@@ -413,7 +429,8 @@ class AssignmentsCommandTest(CliCase):
     def test_open_includes_awaiting_review_and_blocked(self):
         """回合跑完不等於結案：等驗收與被標阻塞的都還算未結案。"""
         out = self.ok("assignments", "--open")
-        self.assertEqual([a["id"] for a in out["assignments"]], ["a1", "a3", "a4"])
+        # `quota_blocked` 也算未結案：工作沒做完，只是在等額度回來（daemon 會自己重送）。
+        self.assertEqual([a["id"] for a in out["assignments"]], ["a1", "a3", "a4", "a5"])
         self.assertEqual(out["awaiting_review"], 1)
         self.assertEqual([a["id"] for a in self.ok("assignments", "--awaiting-review")["assignments"]], ["a3"])
 
