@@ -1091,7 +1091,7 @@ export function Sidebar() {
         {/* 縮寫是為了把寬度讓給右邊那排徽章；全名留在 title 裡。 */}
         <h1 title="Agents Manager">AG Man</h1>
         {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-        {/* 兩列：上面 pane / RAM / 連線，下面瀏覽器分頁數對齊 pane 那欄（TabsBadge）。 */}
+        {/* 上列 pane / RAM / 連線（RAM 含「剩 N」同一行）；下列瀏覽器分頁，寬度跟上面走。 */}
         <div className="head-badges">
           <PaneBadge />
           <MemBadge />
