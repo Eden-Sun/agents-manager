@@ -9,6 +9,7 @@ import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
 import { computeBotPatch, effectiveForm, type BotFormKey } from './botSettingsForm'
+import './botSettings.css'
 
 /**
  * 「Bot 設定」面板（API.md v3.3）：改名 / 模型 / 身份 / autostart / auto_approve，
@@ -151,7 +152,7 @@ export function IdentityOptions({
   const selectedStatus = value ? status[value] : undefined
   const selectedWarning = value ? identityWarning(selectedStatus, hostLabel) : null
   return (
-    <div className="field">
+    <div className="field identity-field">
       <span>
         身份
         {recheck ? (
@@ -225,6 +226,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
   const [fast, setFast] = useState<boolean>(bot?.fast ?? false)
   const [persona, setPersona] = useState(bot?.persona ?? '')
+  /** 人設那格要不要攤開：已經有人設就是勾著的，否則收起來（2026-09-13 使用者）。 */
+  const [personaOn, setPersonaOn] = useState(Boolean(bot?.persona))
   const [identity, setIdentity] = useState(bot?.identity ?? '')
   /**
    * 使用者動過哪些欄位。沒動過的欄位畫面上永遠跟著 store 裡的 bot 走（`effectiveForm`）：
@@ -279,7 +282,15 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       let left = anchor.right + gap
       if (left + w + margin > window.innerWidth) left = anchor.left - gap - w
       left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - w - margin))
-      const top = Math.min(Math.max(margin, anchor.top - gap), Math.max(margin, window.innerHeight - h - margin))
+      // 不蓋到標題列（2026-09-13 使用者）：齒輪就在標題列上，貼著它往下開會把名字、額度、分頁
+      // 都壓住。上緣至少在標題列（與它下面那排晶片）底下。
+      const headBottom = Math.max(
+        document.querySelector('.main-head')?.getBoundingClientRect().bottom ?? 0,
+        document.querySelector('.unread-bar-wrap')?.getBoundingClientRect().bottom ?? 0,
+        document.querySelector('.context-bar')?.getBoundingClientRect().bottom ?? 0,
+      )
+      const minTop = Math.max(margin, headBottom + gap)
+      const top = Math.min(Math.max(minTop, anchor.top - gap), Math.max(minTop, window.innerHeight - h - margin))
       setPos({ left, top })
     }
     place()
@@ -332,6 +343,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setEffort(b.effort)
     setFast(b.fast)
     setPersona(b.persona ?? '')
+    setPersonaOn(Boolean(b.persona))
     setIdentity(b.identity ?? '')
     setTouched(new Set())
     setSaved({})
@@ -427,8 +439,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <KindTag kind={bot.kind} />
         <span className="bs-sub" title={project?.path}>
           {bot.name}
-          {project ? ` · ${project.label}` : ''}
         </span>
+        {/* 識別放標題列就好（2026-09-13 使用者），不再在內文另開一整列。 */}
+        <RunIdents botId={botId} />
         <span className="spacer" />
         <button type="button" className="icon-btn bs-close" onClick={requestClose} aria-label="關閉設定" title="關閉，回到對話">
           ✕
@@ -469,9 +482,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       ) : null}
 
       <div className="bs-body">
-        {/* 識別（pane / agent / session…）：桌面在標題列的 w17G:p8 ▾ 那顆展得開，手機那顆被藏了，
-            在這裡給一份可以複製的（2026-09-09 使用者要求）。 */}
-        <RunIdents botId={botId} />
         <form
           className="form"
           id={`bot-settings-form-${botId}`}
@@ -529,7 +539,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             }}
           />
           {canLoginInSession(bot.kind) ? (
-            <div className="field">
+            <div className="field account-field">
               <span>帳號</span>
               <div className="bs-login-row">
                 <button
@@ -571,7 +581,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           ) : (
             // codex 的 TUI 只有 `/logout`——與其給一個按了必定失敗的按鈕，不如直接說要去哪裡
             // 登入。「重新偵測」還是留著：使用者在別的地方登完，回來就是按它。
-            <div className="field">
+            <div className="field account-field">
               <span>帳號</span>
               <div className="bs-login-row">
                 <button
@@ -590,20 +600,35 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           )}
-          <PersonaField
-            value={form.persona}
-            onChange={(v) => {
-              touch('persona')
-              setPersona(v)
-            }}
-          />
+          {/* 人設預設不勾、不顯示（2026-09-13 使用者）：大多數 bot 用不到，常駐一個空的大輸入框只是
+              把卡片撐高。已經有人設的 bot 一打開就是勾著的；取消勾選等於清掉人設。 */}
+          <label className="bs-persona-toggle">
+            <input
+              type="checkbox"
+              checked={personaOn}
+              onChange={(e) => {
+                setPersonaOn(e.target.checked)
+                if (!e.target.checked && form.persona) {
+                  touch('persona')
+                  setPersona('')
+                }
+              }}
+            />
+            人設
+          </label>
+          {personaOn ? (
+            <PersonaField
+              value={form.persona}
+              onChange={(v) => {
+                touch('persona')
+                setPersona(v)
+              }}
+            />
+          ) : null}
         </form>
 
-        <div className="bs-danger">
-          <div>
-            <strong>刪除 Bot</strong>
-            <p className="hint">會停止並關閉它的終端 pane，對話紀錄保留。</p>
-          </div>
+        {/* 刪除只要一顆鍵（2026-09-13 使用者）：後果寫在按下去之後的確認框裡，不必在這裡再講一次。 */}
+        <div className="bs-danger bare">
           <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>
             刪除 Bot
           </button>

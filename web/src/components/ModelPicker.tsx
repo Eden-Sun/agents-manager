@@ -135,8 +135,7 @@ export function ApiModelFields({
         <span>
           模型
           {loading ? <span className="field-note">載入中…</span> : fromApi ? null : <span className="field-note warn">API 不可用，使用內建清單</span>}
-          {/* 三個 kind 的 TUI 都能當場換模型，daemon 會直接操作（codex 走 `/model` 選單）。 */}
-          {liveModel(kind) ? <span className="field-note live-note primary">執行中改會即時套用，不用重啟</span> : null}
+          {/* 「執行中改會即時套用」不再標（2026-09-13 使用者：模型與強度不用特別說明）；daemon 照舊當場套用。 */}
         </span>
         {/* 「使用 CLI 預設」與「自訂…」都拿掉（2026-09-09 使用者決定）：清單上就那幾顆，
             多一顆「預設」等於要人先猜它是誰，多一顆「自訂」則是幾乎沒人走、卻天天佔一格的路。
@@ -167,11 +166,7 @@ export function ApiModelFields({
             {/* grok / claude 的 TUI 有 `/effort <level>`，codex 走 `/model` 的第二層選單；
                 三個都是 daemon 直接操作。claude 與 codex 會順手把它存成該帳號的預設
                 （CLI 行為，見 SPEC §17 與 §4.4a）。 */}
-            {liveEffort(kind) ? (
-              <span className="field-note live-note" title={kind === 'claude' ? 'claude 會同時把它存成之後新 session 的預設強度' : undefined}>
-                執行中改會即時套用，不用重啟
-              </span>
-            ) : null}
+
           </span>
           {/* 同模型：不放「預設」那一顆，沒設就把廠推薦的那一級標成選取中。 */}
           <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
@@ -242,19 +237,6 @@ export function ApiModelFields({
  */
 function defaultEffortNote(kind: BotKind): string {
   return kind === 'claude' ? '帳號目前設定' : '模型預設'
-}
-
-/**
- * 三個 kind 的 TUI 都能在執行中換模型與強度，daemon 會直接操作（SPEC §4.4a）：
- * claude / grok 是一行 slash 指令，codex 0.153.4 是 `/model` 的兩層選單（daemon 讀畫面選號碼，
- * 再回讀狀態列確認）。套不進去時 `PATCH` 還是會回 `needs_restart`，標題列就出現「需重啟」。
- */
-function liveModel(_kind: BotKind): boolean {
-  return true
-}
-
-function liveEffort(_kind: BotKind): boolean {
-  return true
 }
 
 /** codex 的 `/fast` 是個開關，執行中也切得掉；其他 kind 根本沒有這個旗標。 */
