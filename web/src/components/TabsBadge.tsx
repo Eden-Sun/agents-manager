@@ -19,9 +19,13 @@ export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {
     hot ? `超過 ${TABS_WARN} 個分頁，RAM 多半是被瀏覽器吃掉的，關一些。` : '',
     '（瀏覽器不算在上面的 RAM 裡；一個 renderer 當一個分頁。）',
   ].filter(Boolean)
+  const ranked = [...browsers].sort((a, b) => {
+    const rank = (n: string) => (n === 'Chrome' ? 0 : n === 'ego' ? 1 : 2)
+    return rank(a.name) - rank(b.name) || a.name.localeCompare(b.name)
+  })
   return (
     <span className={`tabs-badge${hot ? ' hot' : ''}`} title={tip.join('\n')}>
-      {browsers.map((b) => (
+      {ranked.map((b) => (
         <span key={b.name} className="tabs-one" aria-label={`${b.name} ${b.tabs} 個分頁 ${humanBytes(b.bytes)}`}>
           <BrowserIcon name={b.name} />
           <span className="tabs-v">
