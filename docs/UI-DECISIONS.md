@@ -1598,16 +1598,3 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
   外框用 `box-shadow`，不佔版面、不位移。
 
 截圖 `docs/screenshots/chip-states/mobile-current-green-390.png`。
-
-## 手機額度列：每格畫全部三條 bar，上下貼齊（2026-09-13）
-
-推翻 2026-09-12 的兩條：「一格只寫一個窗口（7d 常駐，更急的才取代）」與「只有 focused 那格畫上下
-邊框量表」。使用者原話：「額度條所有都顯示，不僅目前」「上下空間貼齊以節省」。
-
-- **每一格都跟桌機一樣列出它回報的所有窗口（5h／7d／F），畫成 bar＋數字**，不再是純文字 chip；
-  focused 只多一圈外框。`collapsed`（窄就只留最差的）在手機不再生效——手機那一列本來就橫捲。
-- **高度**：bar 縮到 26×3、每行 11px、格子上下內距 1px、strip 與 open 內距歸零；五格一列的
-  額度列從 54px 降到 43px，格子 37px。左欄的 git 鍵縮到 24px，跟上面的更新 chevron 加起來
-  仍塞得進列高。
-- 規則獨立在 `web/src/components/mobileQuota.css`（QuotaStrip 匯入）。截圖
-  `docs/screenshots/mobile-quota/after-390.png`。
