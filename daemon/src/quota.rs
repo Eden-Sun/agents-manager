@@ -346,6 +346,19 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
             q.fable = prev.fable.clone();
         }
     }
+    // 同一條規則給兩條桶子：新讀數看不到的窗口，沿用上一份。狀態列被行寬截斷時只讀得到 5h
+    // （2026-09-13 實機：`weekly 24%…` 解析失敗），整份寫進去會把 app-server 的 7d 洗成「不知道」，
+    // header 上那一格就少一條（使用者回報）。少一個數字是「這次沒看到」，不是「沒有了」。
+    if q.five_hour.is_none() || q.seven_day.is_none() {
+        if let Some(prev) = quotas.get(&key) {
+            if q.five_hour.is_none() {
+                q.five_hour = prev.five_hour.clone();
+            }
+            if q.seven_day.is_none() {
+                q.seven_day = prev.seven_day.clone();
+            }
+        }
+    }
     // 同理：重置券只有 codex 的 app-server 讀得到，別的來源（statusLine）寫進同一把 key 時
     // 不該把它抹掉。
     if q.reset_credits.is_none() {
@@ -594,6 +607,28 @@ mod tests {
         assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-13T12:00:00Z"), "重置時間沿用");
         assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00Z"));
         assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
+    }
+
+    /// 狀態列被行寬截斷時只讀得到 5h；那一份寫進去不可以把 app-server 的 7d 洗掉
+    /// （2026-09-13 使用者：header 的 codex 只剩一條）。
+    #[tokio::test]
+    async fn a_partial_reading_keeps_the_window_it_could_not_see() {
+        let app = crate::team::testing::env().await.app.clone();
+        let mut full = codex_q("codex-app-server", None);
+        full.five_hour = Some(Window { used_pct: 30.0, resets_at: Some("2026-09-13T19:22:00.000Z".into()) });
+        full.seven_day = Some(Window { used_pct: 76.0, resets_at: Some("2026-09-18T00:00:00.000Z".into()) });
+        set(&app, LOCAL_HOST, "codex", full).await;
+
+        // 只讀到 5h 的那種（`weekly …` 被截斷）。
+        let mut partial = codex_q("codex-statusline", None);
+        partial.five_hour = Some(Window { used_pct: 64.0, resets_at: None });
+        partial.seven_day = None;
+        set(&app, LOCAL_HOST, "codex", partial).await;
+
+        let q = app.quotas.lock().await.get("codex").cloned().unwrap();
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 64.0, "看得到的那條要更新");
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 76.0, "看不到的那條沿用，不是清空");
+        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00.000Z"));
     }
 
     /// 2026-09-13 實況（AGM 補的證據）：22:21 那筆交辦根本沒送到 pane，daemon 卻在派送前置檢查

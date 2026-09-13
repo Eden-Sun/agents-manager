@@ -134,7 +134,10 @@ fn pct_after(line: &str, label: &str) -> Option<f64> {
         if !w.eq_ignore_ascii_case(label) {
             continue;
         }
-        let n = words.peek()?.trim_end_matches(&['%', ','][..]);
+        // 只留開頭那串數字：狀態列被行寬切斷時，`%` 後面會直接黏著省略號（實機 2026-09-13：
+        // `weekly 24%…`，中間**沒有**空白），照原樣 parse 會失敗，於是 header 少了 7d 那一條。
+        let raw = *words.peek()?;
+        let n: String = raw.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
         if let Ok(v) = n.parse::<f64>() {
             if (0.0..=100.0).contains(&v) {
                 return Some(v);
@@ -523,6 +526,17 @@ mod tests {
         .unwrap();
         assert_eq!(q.five_hour_left, Some(90.0));
         assert_eq!(q.weekly_left, Some(48.0), "`left` 被截掉也要讀得到");
+
+        // 省略號直接黏在 `%` 後面（2026-09-13 實機：`weekly 24%…`，中間沒有空白）——
+        // 這正是 header 上 codex 少了 7d 那一條的原因。
+        let tight = parse_status_quota(
+            "  gpt-6-astra medium · ~/project/agents-manager · Context 9% used · 5h 36% left · weekly 24%…",
+        )
+        .unwrap();
+        assert_eq!((tight.five_hour_left, tight.weekly_left), (Some(36.0), Some(24.0)));
+        // 小數與逗號也不要被吃掉。
+        let odd = parse_status_quota("m x · /tmp · Context 1% used · 5h 7.5% left, weekly 12%.").unwrap();
+        assert_eq!((odd.five_hour_left, odd.weekly_left), (Some(7.5), Some(12.0)));
 
         let full = parse_status_quota("gpt-5.6-sol high fast · /tmp · Context 0% used · 5h 82% left · weekly 73% left")
             .unwrap();
