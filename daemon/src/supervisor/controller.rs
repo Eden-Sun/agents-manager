@@ -67,6 +67,12 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             return;
         }
     };
+    // 這顆 bot 在排隊期間變成了 AGM 的角色（setup 挑中了它）：直接 prompt 會繞過角色佇列，
+    // 把交接打進對方的 pane。停下來交給 AGM 用 `assign` 的角色路徑重下一次（SPEC §18.15）。
+    if super::roles::role_of_bot(&app.db, &a.target_bot_id).await.ok().flatten().is_some() {
+        dispatch_failed(app, &a, "target bot is now an AGM role; hand it over through the role queue instead").await;
+        return;
+    }
     // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
     // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
     // 停在 `quota_blocked` 等額度回來，時間到了 controller 自己重送。
@@ -628,7 +634,8 @@ async fn notify(app: &Arc<App>) {
     let cfg = app.cfg.get().await;
     let max_attempts = cfg.supervisor.notify_max_attempts.max(1);
     let now = crate::db::now();
-    let responder_configured = super::roles::responder_bot(&app.db).await.ok().flatten().is_some();
+    // 「建立過」而不是「現在活著」：協調者停了或被刪，它的事件仍歸它（SPEC §18.15）。
+    let responder_configured = super::roles::responder_configured(&app.db).await.unwrap_or(false);
     let Ok(pending) = super::roles::due_for(&app.db, super::roles::Role::Patrol, responder_configured, &now, max_attempts).await
     else {
         return;
