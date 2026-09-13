@@ -2277,7 +2277,7 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 | `agm mission resume\|cancel\|round <mission>` | `POST /api/missions/{id}/resume`／`cancel`／`round` |
 | `agm mission complete <mission> --text …（或 --text-file）[--as-daemon]` | `POST /api/missions/{id}/complete` |
 | `agm mission question <mission> --text … --request-id <穩定鍵>` | `POST /api/missions/{id}/question` |
-| `agm mission answer <mission> --text … --request-id <穩定鍵> [--reply-to <event id>]` | `POST /api/missions/{id}/answer`（帶 `--reply-to` ＝ AGM 回覆追問，會自動帶自己的 `relay_from`） |
+| `agm mission answer <mission> --text … --request-id <穩定鍵> [--reply-to <event id>]` | `POST /api/missions/{id}/answer`（預設帶 AGM 的 `relay_from`，回覆追問須 `--reply-to`；依使用者明確指示代送暫停回答須 `--as-user`） |
 | `agm mission revise <mission> --text … --request-id <穩定鍵>` | `POST /api/missions/{id}/revise` |
 | `agm mission pick <mission> --role executor\|reviewer\|verifier [--exclude <identity>]` | `GET /api/missions/{id}/pick` |
 | `agm mission deliver <mission> --worktree <絕對路徑> [--title …] [--body …] [--as-daemon]` | `POST /api/missions/{id}/deliver` |

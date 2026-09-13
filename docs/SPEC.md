@@ -1792,7 +1792,7 @@ session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去
      `parent_delivery_mode` 說得出當初用哪種方式交付。push 過的可能被 revert，PR 也可能早就合併了——
      動手前自己查目前基底，兩個方向都不要假設。
    - 一個成果同時只能有一輪未結案的續作（第二筆會被 409 `revision_in_progress` 擋下並指向既存那筆）。
-   - 使用者回答暫停的任務（`mission answer` 不帶 `--reply-to`）或按「不回答直接繼續」（`mission resume`），
+   - 使用者回答暫停的任務（web 直接回答；CLI 依使用者明確指示代送時用 `mission answer --as-user`，不帶 `--reply-to`）或按「不回答直接繼續」（`mission resume`），
      daemon 都會推 inbox 叫醒你；你自己呼叫 resume 不會產生通知。
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）

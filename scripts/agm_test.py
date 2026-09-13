@@ -800,10 +800,15 @@ class MissionCommandTest(CliCase):
         self.assertEqual(self.posts("/api/missions/m1/revise")[0]["body"]["relay_from"], "bot-agm")
 
     def test_answering_for_the_user_does_not_wear_the_manager_identity(self):
-        """沒有 --reply-to ＝ 替使用者回答暫停的任務；標成總管的話 daemon 會當成 bot 回覆而不放行。"""
+        """明確 --as-user 才代表依使用者指示回答暫停任務。"""
         FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {"resumed": True})
-        self.ok("mission", "answer", "m1", "--text", "照你說的做", "--request-id", "a1")
+        self.ok("mission", "answer", "m1", "--text", "照你說的做", "--request-id", "a1", "--as-user")
         self.assertNotIn("relay_from", self.posts("/api/missions/m1/answer")[0]["body"])
+
+    def test_answer_without_reply_to_does_not_silently_claim_to_be_the_user(self):
+        FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {})
+        self.ok("mission", "answer", "m1", "--text", "hello", "--request-id", "a1")
+        self.assertEqual(self.posts("/api/missions/m1/answer")[0]["body"]["relay_from"], "bot-agm")
 
     def test_answer_carries_the_manager_identity_when_replying(self):
         """AGM 回覆追問要指回那一則，並用自己的身分；不帶 --reply-to 就是使用者回答暫停那條路。"""

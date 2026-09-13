@@ -528,6 +528,7 @@ pub async fn post_revise(
     if crid.is_empty() {
         return Err(LcError::Bad("client_request_id is empty".into()));
     }
+    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
     let parent = load(&app, &id).await?;
     // 契約鎖死：只有已完成的成果能續作。進行中的請直接回答／等它做完（要改方向就先 cancel），
     // 取消掉的沒有成果可以接續——兩種都回明確的理由，不要讓呼叫端猜。
@@ -553,6 +554,7 @@ pub async fn post_revise(
     let delivery_mode_used = delivered_payload.get("mode").and_then(Value::as_str).map(str::to_string);
     let snapshot = json!({
         "parent_mission_id": parent.id,
+        "requested_by": from,
         "parent_text": parent.text,
         "parent_result_summary": parent.result_summary,
         "parent_completed_at": parent.completed_at,
@@ -598,7 +600,10 @@ pub async fn post_revise(
     let parent_note = format!("追加修改：已開續作任務（{}）", text);
     // 指紋只包含請求本身（parent＋文字＋四個選項），不含會變的快照：用會變的東西當冪等鍵，
     // 同一個請求重送兩次就會被判成兩個不同的請求。
-    let fingerprint = store::revise_fingerprint(&parent.id, text, &delivery_mode, &executor_kind, &on_5h_limit, max_rounds);
+    let fingerprint = json!([
+        store::revise_fingerprint(&parent.id, text, &delivery_mode, &executor_kind, &on_5h_limit, max_rounds),
+        from,
+    ]).to_string();
     let base_payload = snapshot.clone();
     let opts = (delivery_mode.clone(), executor_kind.clone(), on_5h_limit.clone());
     let outcome = store::create_child(
@@ -992,7 +997,7 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         let done = CompleteIn { result_summary: "改好了".into(), relay_from: None };
-        post_complete(State(app.clone()), Path(id.clone()), Json(done)).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done)).await.unwrap();
         let before = get_mission(State(app.clone()), Path(id.clone())).await.unwrap().0;
 
         let Json(out) = post_question(State(app.clone()), Path(id.clone()), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
@@ -1053,7 +1058,7 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "max_rounds".into(), detail: None }))
+        let _ = post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "max_rounds".into(), detail: None }))
             .await
             .unwrap();
 
@@ -1089,16 +1094,16 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "waiting_quota".into(), detail: None }))
+        let _ = post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "waiting_quota".into(), detail: None }))
             .await
             .unwrap();
 
-        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:resumed:%")).await.len(), 1, "按鈕有接線");
 
         // 已經在跑的任務再按一次：沒有 paused→open 的轉移，就不該再有通知。
-        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
-        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:resumed:%")).await.len(), 1, "不會自己叫醒自己");
     }
 
@@ -1116,8 +1121,8 @@ mod tests {
             relay_from: Some("daemon".into()),
             payload: Some(json!({"shots": ["/tmp/a.png"]})),
         };
-        post_event(State(app.clone()), Path(id.clone()), Json(ev)).await.unwrap();
-        post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "第一版".into(), relay_from: None }))
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(ev)).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "第一版".into(), relay_from: None }))
             .await
             .unwrap();
 
@@ -1183,6 +1188,27 @@ mod tests {
         assert_eq!(conflict_reason(err), "request_id_reused");
     }
 
+    #[tokio::test]
+    async fn revision_source_is_preserved_and_part_of_replay_identity() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("source-parent", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "v1".into(), relay_from: None })).await.unwrap();
+        let mut input = rev("v2", "source-revise");
+        input.relay_from = Some("daemon".into());
+        let Json(child) = post_revise(State(app.clone()), Path(id.clone()), Json(input)).await.unwrap();
+        let cid = child["id"].as_str().unwrap();
+        let events = store::events(&app.db, cid).await.unwrap();
+        assert_eq!(events[0].relay_from.as_deref(), Some("daemon"));
+        assert_eq!(serde_json::from_str::<Value>(&events[0].payload_json).unwrap()["requested_by"], "daemon");
+        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("v2", "source-revise"))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "request_id_reused");
+        let mut invalid = rev("v2", "invalid-source");
+        invalid.relay_from = Some("missing-bot".into());
+        assert!(matches!(post_revise(State(app.clone()), Path(id), Json(invalid)).await, Err(LcError::Bad(_))));
+    }
+
     /// 續作只能從**已完成**的成果開。進行中與已取消各自回明確理由。
     #[tokio::test]
     async fn only_a_finished_mission_can_be_revised() {
@@ -1194,7 +1220,7 @@ mod tests {
         let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev1"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_completed");
 
-        post_cancel(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_cancel(State(app.clone()), Path(id.clone())).await.unwrap();
         let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev2"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_completed");
     }

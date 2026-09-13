@@ -777,6 +777,8 @@ def cmd_handoff(client: Client, cfg: dict, args) -> object:
 def cmd_mission(client: Client, cfg: dict, args) -> object:
     """群組任務（docs/API.md「群組任務」）。每個 op 對一個端點，不在 CLI 裡另外拼流程。"""
     op = args.op
+    if args.as_user and (op != "answer" or args.reply_to or args.as_daemon):
+        raise AgmError("bad_args", "--as-user 僅用於依使用者明確指示回答暫停任務，不可搭配 --reply-to/--as-daemon", 2)
     if op == "list":
         if not args.project:
             raise AgmError("bad_args", "mission list 需要 --project", 2)
@@ -814,17 +816,11 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         if not args.request_id:
             raise AgmError("bad_args", f"mission {op} 需要 --request-id（穩定的冪等鍵，重送沿用同一個）", 2)
         body = {"text": _mission_text(args), "client_request_id": args.request_id}
-        if op == "answer":
-            # AGM 回覆使用者的追問：要指回那一則 question，並帶自己的身分。
-            # 不帶 --reply-to 就是「使用者回答暫停的任務」那條路，daemon 會 resume 並喚醒。
-            if args.reply_to:
-                body["reply_to"] = args.reply_to
-                _with_relay(body, cfg, args)
-            # 沒有 --reply-to：這是在替**使用者**回答，不能標成總管說的，否則 daemon 會當成
-            # bot 回覆而不放行任務。要代答請明說（--as-user 之外沒有別的路）。
-        else:
-            # question / revise 由總管代打時同樣要留下來源：不帶 relay_from 會被記成使用者本人，
-            # 群組時間軸上就看不出那句話其實是 AGM 問的、那筆續作其實是 AGM 開的。
+        if op == "answer" and args.reply_to:
+            body["reply_to"] = args.reply_to
+        # Never silently turn the manager into the user. A user-authorized paused
+        # answer must explicitly select --as-user; normal bot replies need --reply-to.
+        if not args.as_user:
             _with_relay(body, cfg, args)
         return client.post(f"{base}/{op}", body)
     if op == "complete":
@@ -1109,6 +1105,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--worktree", help="deliver：要交付的 worktree（本機絕對路徑）")
     s.add_argument("--request-id", dest="request_id", help="question/answer/revise：穩定的冪等鍵，重送沿用同一個")
     s.add_argument("--reply-to", dest="reply_to", help="answer：回的是哪一則 question 的事件 id")
+    s.add_argument("--as-user", action="store_true", help="answer：依使用者明確指示代送暫停回答（不帶 relay_from）")
     s.add_argument("--title", help="deliver（pr）：PR 標題")
     s.add_argument("--body", help="deliver（pr）：PR 內文")
     s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
