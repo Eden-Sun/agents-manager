@@ -1,15 +1,12 @@
 /**
- * 每個畫面自己的 URL（goal `docs/goals/routes-2026-09-09.md`）。
- *
- * 刻意**不引 router 套件**：路徑只有四種形狀，`parse` / `build` 一對純函式就夠，
- * 而且純函式才測得起來（`routes.test.ts`）。真正跟 store 對接的雙向同步在
- * `store/routeSync.ts`，這個檔不碰 `window`、不碰 store。
+ * 每個畫面的 URL（goal `docs/goals/routes-2026-09-09.md`）。刻意不引 router：四種形狀，純函式
+ * 好測；跟 store 同步在 `store/routeSync.ts`，這裡不碰 `window`／store。
  */
 
 export type RouteTab = 'chat' | 'terminal'
 
 export type Route =
-  /** 什麼都沒選（`/`）。開機時它代表「網址沒指定」，不是「請清空選取」——見 routeSync。 */
+  /** 開機時代表「網址沒指定」，不是「清空選取」——見 routeSync。 */
   | { kind: 'home' }
   | { kind: 'bot'; botId: string; tab: RouteTab; settings: boolean }
   | { kind: 'project'; projectId: string }
@@ -17,7 +14,7 @@ export type Route =
 
 export const HOME: Route = { kind: 'home' }
 
-/** 壞掉的 `%` 逸出不該讓整個 UI 崩掉，解不開就照原樣當 id（反正之後會查不到而回首頁）。 */
+/** 壞掉的 `%` 逸出照原樣當 id，別讓 UI 崩掉。 */
 function decodeSeg(s: string): string {
   try {
     return decodeURIComponent(s)
@@ -26,10 +23,7 @@ function decodeSeg(s: string): string {
   }
 }
 
-/**
- * `pathname` → Route。任何認不得的路徑一律回首頁：網址是使用者能手打的東西，
- * 錯字不該變成一個半死的畫面。
- */
+/** 認不得的路徑一律回首頁：手打錯字不該變成半死的畫面。 */
 export function parseRoute(pathname: string): Route {
   const p = pathname.split('/').filter(Boolean).map(decodeSeg)
   if (p.length === 0) return HOME
@@ -53,14 +47,14 @@ export function parseRoute(pathname: string): Route {
   return HOME
 }
 
-/** Route → `pathname`（不含 token：分享出去的連結不該帶憑證）。 */
+/** 不含 token：分享出去的連結不該帶憑證。 */
 export function buildRoute(r: Route): string {
   const e = encodeURIComponent
   switch (r.kind) {
     case 'home':
       return '/'
     case 'bot':
-      // 設定是蓋在對話上的浮窗，所以它跟 `terminal` 不會同時成立（`openSettings` 會切回對話）。
+      // 設定浮窗蓋在對話上，不與 `terminal` 同時成立。
       return `/bots/${e(r.botId)}${r.settings ? '/settings' : r.tab === 'terminal' ? '/terminal' : ''}`
     case 'project':
       return `/projects/${e(r.projectId)}`
@@ -69,10 +63,7 @@ export function buildRoute(r: Route): string {
   }
 }
 
-/**
- * 「同一個畫面」的識別碼：一樣就用 `replaceState`，上一頁不該為了對話↔終端多一格。
- * 設定浮窗刻意算成另一個畫面——它開著時 push、關掉時就是上一頁（goal 的要求）。
- */
+/** 一樣就 `replaceState`（對話↔終端不多一格上一頁）；設定浮窗刻意算另一畫面，關掉＝上一頁（goal 要求）。 */
 export function screenKey(r: Route): string {
   switch (r.kind) {
     case 'home':

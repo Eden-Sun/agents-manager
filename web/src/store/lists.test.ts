@@ -72,8 +72,7 @@ test('pruneTurns never drops an in-flight turn; a settled unknown-delivery one i
     t5: { status: 'completed' },
   }
   const out = pruneTurns(map, 2)
-  // newest two (t4, t5) + the in-flight one. `unknown` only blocks the composer while
-  // in_flight (API.md §5), so the completed / failed ones go like any other settled turn.
+  // newest two + in-flight; settled `unknown` turns don't block (API.md §5).
   assert.deepEqual(Object.keys(out).sort(), ['t0', 't4', 't5'])
 })
 

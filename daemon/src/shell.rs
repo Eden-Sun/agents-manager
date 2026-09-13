@@ -1,15 +1,8 @@
-//! Plain shells the daemon opens on a host, for the UI's host-shell panel.
+//! Plain login-shell panes on a host, for the UI's host-shell panel (no agent, no run, no turn).
 //!
-//! A "host shell" is one herdr pane running nothing but the user's login shell: no agent, no
-//! run row, no turn. It exists so the odd jobs a remote host needs — installing a CLI, reading
-//! a log, `gh auth status`, tidying a worktree — can be done from the UI instead of a second
-//! terminal window and an `ssh`.
-//!
-//! **The registry is the whitelist.** Every endpoint except `open` looks the `(host, pane_id)`
-//! pair up in [`Registry`] first and 404s when it is not there, so "you cannot send keys to an
-//! arbitrary pane" holds by construction rather than by inspecting what a pane looks like.
-//! It is memory only: after a daemon restart the table is empty and every pane from the
-//! previous life is a stranger, which is exactly the behaviour we want from a whitelist.
+//! **The registry is the whitelist.** Every endpoint except `open` 404s unless `(host, pane_id)`
+//! is in [`Registry`], so keys can never reach an arbitrary pane. Memory only on purpose: after a
+//! restart every old pane is a stranger.
 
 use crate::db;
 use crate::herdr::HerdrClient;
@@ -20,12 +13,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// A plain shell has no natural per-host limit the way "one bot, one pane" does, and a
-/// mis-click is cheap to repeat, so a stuck finger could leave a row of invisible panes
-/// behind. Eight is more than the jobs this panel is for ever need at once.
+/// Caps a stuck finger leaving a row of invisible panes behind.
 pub const MAX_PER_HOST: usize = 8;
 
-/// The workspace label used when a host has no project workspace to borrow.
 const SHELL_LABEL: &str = "shell";
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,19 +29,15 @@ pub struct HostShell {
     pub created_at: String,
 }
 
-/// `App.host_shells`. See the module comment for why it is deliberately not persisted.
+/// `App.host_shells`; deliberately not persisted (see module comment).
 pub type Registry = Mutex<Vec<HostShell>>;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-/// The herdr client for a host's **manager** session, plus that session's name.
-///
-/// The local `default` session is intentionally unreachable from here: that one is the user's
-/// own, and the daemon does not put things into it (`state::ensure_session` draws the same
-/// line). A host that is configured but down fails here rather than after opening a pane, so
-/// nothing unusable ever reaches the registry.
+/// The host's **manager** session only: the local `default` session is the user's own and the
+/// daemon never puts things into it. A down host fails here, before a pane reaches the registry.
 pub(crate) async fn client_for(app: &Arc<App>, host: &str) -> LcResult<(HerdrClient, String)> {
     if app.hosts.get(host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
@@ -70,10 +56,7 @@ pub(crate) async fn client_for(app: &Arc<App>, host: &str) -> LcResult<(HerdrCli
     Ok((client, session))
 }
 
-/// Where a shell with no explicit `cwd` should start: a project on that host, else its `$HOME`.
-///
-/// A project path is the better default because it is where the jobs this panel is for
-/// actually happen (`git worktree list`, reading a log next to the checkout).
+/// A project on that host (where the jobs actually happen), else its `$HOME`.
 async fn default_cwd(app: &Arc<App>, host: &str) -> LcResult<String> {
     let projects = db::live_projects(&app.db).await.map_err(up)?;
     if let Some(p) = projects.iter().find(|p| p.host == host) {
@@ -83,16 +66,8 @@ async fn default_cwd(app: &Arc<App>, host: &str) -> LcResult<String> {
     conn.home().await.map_err(up)
 }
 
-/// The workspace a new shell goes into: borrow one of that host's projects, or make one.
-///
-/// Returns the pane straight away when a workspace had to be created, because its root pane
-/// is *already* a tab of its own holding exactly one pane — the same reason
-/// `lifecycle::acquire_run_pane` uses a fresh root as-is instead of doubling it.
-///
-/// A freshly created workspace is deliberately **not** written back to
-/// `projects.workspace_id`: that column is where the project's bots live, and a shell is only
-/// passing through. Writing it would make the next bot start put its pane in a workspace
-/// labelled `shell`.
+/// A fresh workspace's root pane is already its own tab, so it is used as-is. It is deliberately
+/// **not** written back to `projects.workspace_id`, or the next bot would land in a `shell` workspace.
 async fn acquire_pane(
     app: &Arc<App>,
     client: &HerdrClient,
@@ -110,7 +85,7 @@ async fn acquire_pane(
     Ok(root)
 }
 
-/// `POST /api/hosts/:name/shells` — open one.
+/// `POST /api/hosts/:name/shells`
 pub async fn open(app: &Arc<App>, host: &str, cwd: Option<&str>) -> LcResult<HostShell> {
     let (client, session) = client_for(app, host).await?;
     // Counted before the pane is created, so a burst of clicks cannot race past the cap.
@@ -129,8 +104,7 @@ pub async fn open(app: &Arc<App>, host: &str, cwd: Option<&str>) -> LcResult<Hos
         workspace_id: pane.workspace_id.clone(),
         tab_id: pane.tab_id.clone(),
         pane_id: pane.pane_id.clone(),
-        // What herdr actually opened, which is not always what was asked for (a path that does
-        // not exist on that host lands somewhere else), so the UI shows the truth.
+        // What herdr actually opened: a missing path lands somewhere else.
         cwd: pane.cwd.clone().unwrap_or(cwd),
         created_at: db::now(),
     };
@@ -139,18 +113,14 @@ pub async fn open(app: &Arc<App>, host: &str, cwd: Option<&str>) -> LcResult<Hos
     Ok(shell)
 }
 
-/// `GET /api/hosts/:name/shells` — the ones still alive, sweeping the dead out on the way.
-///
-/// Closing a pane by hand in herdr is an ordinary thing to do, so a shell that is gone must
-/// stop being listed rather than sit there forever as a row that answers nothing.
+/// `GET /api/hosts/:name/shells` — sweeps out panes closed by hand in herdr.
 pub async fn list(app: &Arc<App>, host: &str) -> LcResult<Vec<HostShell>> {
     let (client, _) = client_for(app, host).await?;
     let mine: Vec<HostShell> = app.host_shells.lock().await.iter().filter(|s| s.host == host).cloned().collect();
     let mut alive = Vec::with_capacity(mine.len());
     let mut dead = Vec::new();
     for s in mine {
-        // A herdr that cannot be asked is not evidence the pane died — keep it listed and let
-        // the next poll decide, the same way `close_tab_if_empty` refuses to guess.
+        // An unreachable herdr is not evidence the pane died; let the next poll decide.
         match client.pane_get(&s.pane_id).await {
             Ok(None) => dead.push(s.pane_id.clone()),
             _ => alive.push(s),
@@ -162,7 +132,7 @@ pub async fn list(app: &Arc<App>, host: &str) -> LcResult<Vec<HostShell>> {
     Ok(alive)
 }
 
-/// The registry row for a pane, or 404. This is the whitelist check every endpoint below runs.
+/// The whitelist check every endpoint below runs.
 async fn registered(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<HostShell> {
     app.host_shells
         .lock()
@@ -181,8 +151,7 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
     }
     let (client, _) = client_for(app, host).await?;
     let read = client.pane_read(pane_id, source, lines).await.map_err(up)?;
-    // Best effort, exactly as in `get_terminal`: a snapshot is still worth returning without
-    // the geometry, and the UI needs the width to explain a wrapped line rather than hide it.
+    // Best effort, as in `get_terminal`: a snapshot is still worth returning without geometry.
     let (columns, rows) = match client.pane_size(pane_id).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
@@ -194,12 +163,8 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
     }))
 }
 
-/// `POST /api/hosts/:name/shells/:pane_id/text` — type a line, optionally pressing Enter.
-///
-/// Enter is a **separate** `pane.send_keys`, not a `\n` inside the text: to herdr a newline in
-/// `pane.send_text` is a pasted line break, not a key press (the same distinction
-/// `herdr::fold_newlines` exists for). An empty `text` with `enter: true` is allowed on
-/// purpose — "just press Enter" is a real thing to want at a prompt.
+/// `POST /api/hosts/:name/shells/:pane_id/text`. Enter is a **separate** `pane.send_keys`: a `\n`
+/// in `pane.send_text` is a pasted line break to herdr. Empty `text` + `enter` = "just press Enter".
 pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, enter: bool) -> LcResult<()> {
     registered(app, host, pane_id).await?;
     let (client, _) = client_for(app, host).await?;
@@ -212,8 +177,7 @@ pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, en
     Ok(())
 }
 
-/// `POST /api/hosts/:name/shells/:pane_id/keys` — ctrl+c, esc, arrows. Names go to herdr
-/// verbatim; the daemon does not translate them (same contract as `POST /bots/:id/keys`).
+/// `POST /api/hosts/:name/shells/:pane_id/keys` — names go to herdr verbatim, like `POST /bots/:id/keys`.
 pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String]) -> LcResult<()> {
     registered(app, host, pane_id).await?;
     if keys.is_empty() {
@@ -224,11 +188,8 @@ pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String
     client.pane_send_keys(pane_id, &refs).await.map_err(up)
 }
 
-/// `DELETE /api/hosts/:name/shells/:pane_id` — close the pane, and its tab when that empties it.
-///
-/// Idempotent: a pane_id that is not (or no longer) in the registry is success, because the
-/// caller's goal — that shell is gone — already holds. Only a host we cannot even resolve is
-/// an error, since then we do not know whether anything was left behind.
+/// `DELETE /api/hosts/:name/shells/:pane_id`. Idempotent: an unregistered pane is success; only an
+/// unresolvable host errors, since then we cannot tell whether anything was left behind.
 pub async fn close(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<()> {
     let (client, _) = client_for(app, host).await?;
     let Some(shell) = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned()
@@ -245,9 +206,7 @@ pub async fn close(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<()> {
 mod tests {
     use super::*;
 
-    /// The whitelist is what stops `POST …/shells/<any pane>/keys` reaching a bot's pane, so
-    /// the lookup has to be keyed on **both** halves: a pane_id is only unique within a host,
-    /// and herdr hands out the same `w1:p1` shape on every machine.
+    /// The whitelist must key on **both** halves: a pane_id is only unique within a host.
     #[test]
     fn a_shell_is_only_recognised_on_the_host_it_was_opened_on() {
         let rows = vec![

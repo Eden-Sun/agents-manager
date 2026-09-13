@@ -1,9 +1,6 @@
 /**
- * `GET /api/changelog?kind=&host=&from=`：「有更新 · 重啟套用」按下去先看新版改了什麼
- * （2026-09-10 使用者需求）。獨立成一檔，`index.ts` 只借 transport。
- *
- * daemon 抓不到時仍回 200（`found:false` + `error`）；這裡再把傳輸層的錯（404、
- * mock 模式、斷線）也收成同一個形狀，UI 一律有東西可寫，不會靜默略過。
+ * `GET /api/changelog`：重啟套用前先看新版改了什麼（2026-09-10 使用者需求）。
+ * 傳輸層錯誤也收成 `found:false` + `error`，UI 不會靜默略過。
  */
 import { rawTransport } from './index'
 
@@ -26,7 +23,7 @@ export interface ChangelogReply {
 const CLAUDE_SOURCE = 'https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md'
 const CODEX_SOURCE = 'https://github.com/openai/codex/releases'
 
-/** daemon 回不了東西時的退路連結，要跟 kind 對得上（codex 沒有 CHANGELOG.md，只有 releases）。 */
+/** codex 沒有 CHANGELOG.md，只有 releases。 */
 function sourceFor(kind: string): string {
   return kind === 'codex' ? CODEX_SOURCE : CLAUDE_SOURCE
 }
@@ -63,7 +60,7 @@ export async function fetchChangelog(
 ): Promise<ChangelogReply> {
   const q = new URLSearchParams({ kind, host })
   if (from) q.set('from', from)
-  // codex：新版還沒進磁碟，目標版本由畫面上那句 `0.153.4 -> 0.154.0` 帶進來。
+  // codex 新版還沒進磁碟，目標版本取自 pane 上的 `a -> b`。
   if (to) q.set('to', to)
   if (rawTransport.mock) {
     return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind), error: 'mock 模式沒有 changelog' }

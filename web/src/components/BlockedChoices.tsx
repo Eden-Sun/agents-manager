@@ -1,19 +1,6 @@
 /**
- * agent 停在編號選單上時，把選單畫成**可以直接點**的清單（2026-09-12 使用者回報）。
- *
- * 原本要在手機上選第 4 項，得在下面那排鍵按三次 ↓ 再按 Enter——而且選項到底寫什麼，得去戳
- * 終端快照裡 11px 的字，長一點的說明還被終端寬度截掉。這裡把 `parseChoiceMenu` 讀出來的
- * 問題、選項、被折掉的說明攤成一列一列 44px 的按鈕，點一下就答完。
- *
- * 第三輪（多分頁 ＋ 多選）多了三件事：上面那條分頁列（一次問好幾題，☑ 是答過的）、選項是
- * 核取方塊（點一下是**切換勾選**，不是送出）、最後要走到 `Submit` 才真的交卷。
- *
- * 第四輪：**說明預設收起來**，一列就是「編號＋標題」一行，六個選項一屏看得完；要看說明按那顆
- * ▸。收合狀態下捲動與 ↑／↓ 照舊能用，而且游標換到哪一項就把那一項捲進視野；展開再收起來時
- * 捲動位置不會跳（收合前記下那一列的位置，重畫完補回去）。
- *
- * 認不出選單就什麼都不畫（回 `null`），畫面照舊退回終端快照＋按鍵面板——按鍵是直接送進別人
- * 終端的，寧可少一個捷徑，也不要在認錯的畫面上替使用者答題。
+ * agent 停在編號選單上時，畫成可直接點的清單（2026-09-12 使用者回報）；多分頁＋多選要走到 Submit 才交卷，說明預設收起。
+ * 認不出選單就回 `null` 退回終端快照：按鍵直送別人終端，寧可少捷徑也不在認錯的畫面上替使用者答題。
  */
 import { useLayoutEffect, useRef, useState } from 'react'
 import { usePaneKeys } from '../hooks/usePaneKeys'
@@ -33,12 +20,7 @@ import './blockedChoices.css'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/**
- * 這個元素是被誰捲著的。
- *
- * 全畫面視窗裡是 `.blocked-modal-body`，對話上方那條面板裡是聊天區自己。找不到就回 `null`
- * ——那代表整頁在捲，收合造成的位移瀏覽器自己的 scroll anchoring 會處理。
- */
+/** 最近的捲動容器；`null` ＝整頁在捲，交給瀏覽器 scroll anchoring。 */
 function scroller(el: HTMLElement): HTMLElement | null {
   for (let p = el.parentElement; p; p = p.parentElement) {
     const o = getComputedStyle(p).overflowY
@@ -51,7 +33,7 @@ function scroller(el: HTMLElement): HTMLElement | null {
 const STEP = 260
 const TRIES = 3
 
-/** 走到目標列最多修正幾次（清單裡可能還有我們認不得、但游標走得到的列）。 */
+/** 走到目標列最多修正幾次（清單可能有認不得但游標走得到的列）。 */
 const WALK_TRIES = 3
 
 type Busy = { kind: 'choice' | 'submit' | 'tab'; key: string } | null
@@ -63,7 +45,6 @@ export function BlockedChoices({
 }: {
   botId: string
   menu: TuiChoiceMenu
-  /** 送出後叫一次，讓外面那張終端快照立刻重抓，不必等下一秒的輪詢。 */
   onAnswered?: () => void
 }) {
   const readTerminal = useStore((s) => s.readTerminal)
@@ -73,20 +54,11 @@ export function BlockedChoices({
   const [note, setNote] = useState<string | null>(null)
   const [typeText, setTypeText] = useState('')
   const [typeFor, setTypeFor] = useState<number | null>(null)
-  /**
-   * 「現在在第幾個分頁」**讀不出來**：終端上那是用顏色標的，快照只剩純文字。先猜第一個還沒
-   * 答（☐）的那一格——claude 是照順序帶著人走的——之後每次自己切分頁就記下切到哪，UI 上也
-   * 寫明是推測。猜錯的代價只是跳到別題（切分頁不會答題），再點一下就好。
-   */
+  // 目前分頁讀不出來（終端用顏色標），先猜第一個 ☐、之後自己記；猜錯只是跳到別題。
   const [tabAt, setTabAt] = useState<number | null>(null)
   const atTab = tabAt ?? menu.tabAt
 
-  /**
-   * 展開說明的那幾項（2026-09-12 第四輪）。
-   *
-   * 預設全部收起來：實拍那張六個選項、每項三到五行說明，攤開要滑三四屏才看得完一組選項。
-   * 換一題就忘掉——那是另一組選項了。
-   */
+  // 展開說明的項目，預設全收、換題清空（2026-09-12 第四輪：攤開要滑三四屏）。
   const [open, setOpen] = useState<number[]>([])
   const [openFor, setOpenFor] = useState(menu.question)
   if (openFor !== menu.question) {
@@ -95,12 +67,11 @@ export function BlockedChoices({
   }
 
   const listRef = useRef<HTMLOListElement>(null)
-  /** 收合前記下的「那一列離捲動容器上緣多遠」，重畫完補回去，畫面才不會跳。 */
+  /** 收合前記下列的位置，重畫完補回去以免跳動。 */
   const anchor = useRef<{ el: HTMLElement; top: number } | null>(null)
   const lastCursor = useRef(menu.cursor)
 
   useLayoutEffect(() => {
-    // a) 收合／展開之後把捲動位置補回去。
     const a = anchor.current
     anchor.current = null
     if (a) {
@@ -109,10 +80,7 @@ export function BlockedChoices({
       if (box) box.scrollTop += now - a.top
       return
     }
-    // b) 標題被截尾的那幾列也要有 ▸（沒有說明、但字放不下時，全文得有地方看）。
-    //
-    // 量完直接寫 `data-wide` 而不是進 state：這是純量測結果，走 state 會多一輪 render，而
-    // React 不管 `data-*`，重畫也不會把它洗掉。展開中的那列不量——它的標題本來就折行了。
+    // 標題截尾的列也要有 ▸；直接寫 `data-wide` 不進 state（省一輪 render，React 不會洗掉）。
     listRef.current?.querySelectorAll<HTMLElement>('.bc-row').forEach((li) => {
       if (li.querySelector('.bc-open')) return
       const t = li.querySelector('.bc-title')
@@ -121,8 +89,7 @@ export function BlockedChoices({
     })
   })
 
-  // 游標換到哪一項就把那一項捲進視野——收合之後一屏多半看得完，但選項多的時候仍會捲出去，
-  // 而 ↑／↓ 是直接送進終端的，畫面不跟上就等於在盲按。只在游標真的變了的時候動。
+  // 游標移動時捲進視野，否則 ↑／↓ 等於盲按。
   useLayoutEffect(() => {
     if (lastCursor.current === menu.cursor) return
     lastCursor.current = menu.cursor
@@ -145,22 +112,16 @@ export function BlockedChoices({
     }
   }
 
-  /** 畫面還是同一份選單嗎。不是就什麼都不送——走幾格是相對的，換了題就會按到別的東西。 */
+  /** 不是同一份選單就什麼都不送——走幾格是相對的，換題會按到別的東西。 */
   const stillHere = (now: TuiChoiceMenu | null): now is TuiChoiceMenu => Boolean(now && sameChoices(now, menu))
 
-  /**
-   * 把游標走到某一列：**每一步都用當下重讀的畫面重算**，走完再確認真的停在那裡。
-   *
-   * 清單裡除了編號選項還可能有我們認不得、但游標走得到的列（真機那個 `Submit` 就是），只算
-   * 一次會差一格。走一步、看一眼、再修正，就不必猜那種列到底有幾個。
-   */
+  /** 游標走到某列：每步重讀畫面重算（有認不得的列如 `Submit`，一次算會差一格）。 */
   const walkTo = async (target: WalkTarget): Promise<TuiChoiceMenu | null> => {
     for (let i = 0; i < WALK_TRIES; i++) {
       const now = await read()
       if (!stillHere(now)) return null
       const at: WalkTarget | null = now.submit?.current ? 'submit' : now.cursor >= 0 ? now.cursor : null
       if (at === target) return now
-      // 游標落在我們認不得的列上：先往上挪一格回到認得的位置，下一圈重算。
       const keys = at === null ? ['up'] : (keysToMove(now, target) ?? [])
       if (!keys.length) return null
       await sendKeys(botId, keys)
@@ -169,13 +130,12 @@ export function BlockedChoices({
     return null
   }
 
-  /** 送一顆鍵，然後等畫面出現預期的變化。`done` 回 true 就算成功。 */
   const pressUntil = async (key: string, done: (now: TuiChoiceMenu) => boolean): Promise<boolean> => {
     await sendKeys(botId, [key])
     for (let i = 0; i < TRIES; i++) {
       await sleep(STEP)
       const now = await read()
-      // 選單整個不見／換了一題＝這顆鍵被收下了（單選就是這樣結束的）。
+      // 選單不見／換題＝鍵被收下了。
       if (!now || !sameChoices(now, menu)) return true
       if (done(now)) return true
     }
@@ -194,10 +154,7 @@ export function BlockedChoices({
     }
   }
 
-  /**
-   * 單選：走過去再 Enter，一批送完（2026-09-12 第一輪實測過的路徑）。送出**前**先重讀一次，
-   * 用當下的游標算——手上這份快照最多是一秒前的。
-   */
+  /** 單選：送出前重讀、走過去再 Enter 一批送完（2026-09-12 第一輪實測）。 */
   const pickOne = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const now = await read()
@@ -206,7 +163,7 @@ export function BlockedChoices({
       return null
     })
 
-  /** 真機：游標停在 Type something. 上直接貼字，不必先 Enter；貼完 Enter 才答完並跳頁。 */
+  /** 真機：停在 Type something. 上直接貼字，不必先 Enter；貼完 Enter 才答完。 */
   const sendTyped = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const text = typeText.trim()
@@ -229,11 +186,7 @@ export function BlockedChoices({
       return null
     })
 
-  /**
-   * 多選：切換勾選。**一次都不按 Enter**——Enter 在這種選單上可能是「交卷」，猜錯就替使用者
-   * 答了一整題。先走到那一列，再試 space；沒反應才試數字鍵；兩個都沒反應就照實說，按鍵面板
-   * 還在下面。成功與否一律看畫面上的 `[ ]` 有沒有變成 `[x]`，不靠猜。
-   */
+  /** 多選切換：絕不按 Enter（可能是交卷）；試 space 再試數字鍵，成功與否看畫面 `[x]`。 */
   const toggle = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const landed = await walkTo(i)
@@ -246,7 +199,6 @@ export function BlockedChoices({
       return '這個選單不吃點選（space 與數字鍵都沒反應），請用下面的按鍵。'
     })
 
-  /** 沒有核取方塊的列（`Type something` / `Chat about this`）是動作，不是勾選。 */
   const activate = (i: number) => {
     if (isTypeSomething(menu.choices[i])) {
       setTypeFor(i)
@@ -256,7 +208,7 @@ export function BlockedChoices({
     return menu.multi && menu.choices[i].checked !== null ? toggle(i) : pickOne(i)
   }
 
-  /** 送出這一題：走到清單裡那列 `Submit`，**確認游標真的停在它上面**，才按 Enter。 */
+  /** 確認游標真的停在 `Submit` 上才按 Enter。 */
   const submit = () =>
     run({ kind: 'submit', key: 'submit' }, async () => {
       const landed = await walkTo('submit')
@@ -265,13 +217,7 @@ export function BlockedChoices({
       return null
     })
 
-  /**
-   * 走 `n` 格分頁並確認畫面真的換了。
-   *
-   * 先送 ←／→——分頁列兩端畫的就是這兩顆箭頭，而且它們在別的地方不會有副作用；
-   * 沒反應才退回 tab／shift+tab（腳註寫的是 `Tab/Arrow keys`，兩種都可能）。
-   * **一顆都不碰 space／數字／Enter**：換頁不該改到任何答案。
-   */
+  /** 換分頁：先 ←／→（無副作用）再退回 tab；絕不碰 space／數字／Enter，換頁不該改答案。 */
   const moveTabs = async (delta: number): Promise<boolean> => {
     const before = await read()
     if (!before) return false
@@ -290,7 +236,6 @@ export function BlockedChoices({
     return false
   }
 
-  /** 點某一個分頁：走過去，換到了才把「現在在哪一題」記下來。 */
   const goTab = (to: number) =>
     run({ kind: 'tab', key: String(to) }, async () => {
       if (atTab === null) return '看不出現在在第幾題，請用左右那兩顆一格一格走。'
@@ -311,7 +256,7 @@ export function BlockedChoices({
       return '分頁沒有換。'
     })
 
-  /** review 那一列對應到第幾個分頁（送出頁不算一題）。 */
+  /** review 列對應的分頁（送出頁不算一題）。 */
   const reviewTab = (i: number) => menu.tabs.findIndex((t, k) => !t.submit && menu.tabs.slice(0, k).filter((x) => !x.submit).length === i)
 
   return (
@@ -360,8 +305,7 @@ export function BlockedChoices({
         {menu.question ? <p className="bc-question">{menu.question}</p> : null}
       </div>
 
-      {/* review／confirm 頁中段那段「每題 → 目前答案」。使用者在這一頁最想確認的就是自己答了
-          什麼，而那段原本只存在收起來的終端原文裡；點一題就跳回那個分頁去改（2026-09-12 第七輪）。 */}
+      {/* review 頁「每題 → 目前答案」，點一題跳回去改（2026-09-12 第七輪）。 */}
       {menu.review.length ? (
         <ul className="bc-review">
           {menu.review.map((r, i) => (
@@ -412,8 +356,7 @@ export function BlockedChoices({
               <span className="bc-num" aria-hidden="true">
                 {c.number}
               </span>
-              {/* 多選清單裡沒有方框的列（`Chat about this`）也要占住那一欄，不然本文會比
-                  上面幾列往左凸一截。 */}
+              {/* 沒方框的列也占住這欄，否則本文往左凸。 */}
               <span className="bc-box" aria-hidden="true">
                 {menu.multi
                   ? c.checked === null
@@ -431,8 +374,7 @@ export function BlockedChoices({
               </span>
               {shown && c.detail ? <span className="bc-detail">{c.detail}</span> : null}
             </button>
-            {/* ▸ 要是這一列的**兄弟**不是子元素：`<button>` 裡再包一顆 `<button>` 不合法，而整列
-                本身就是「選這一項」那顆按鈕。展開只是看說明，不會送任何鍵。 */}
+            {/* ▸ 是兄弟不是子元素：button 內不能再包 button。 */}
             <button
                 type="button"
                 className="bc-chev"
@@ -467,8 +409,7 @@ export function BlockedChoices({
         </button>
       ) : null}
 
-      {/* 平常不留任何說明文字（2026-09-12 第二輪回饋：畫面上只要「問題 ＋ 選項 ＋ 送出」）。
-          「點一下會送什麼」寫在每顆按鈕的 tooltip；只有真的沒送出去時才需要一句話。 */}
+      {/* 平常不留說明文字，只在沒送出去時提示（2026-09-12 第二輪回饋）。 */}
       {note ? (
         <p className="bc-hint bc-stale" role="status">
           {note}
@@ -478,13 +419,7 @@ export function BlockedChoices({
   )
 }
 
-/**
- * 選單模式底下那一條：一顆 `Esc 取消`，加上把終端原文與整排按鍵收起來的開關。
- *
- * 2026-09-12 第二輪回饋：認出選單之後，`Enter / Esc / y / n / ↑ / ↓ / ctrl+c` 那排鍵、鍵盤
- * 直通勾選框與它那段說明都不該是預設狀態——選單本身就是操作方式。只有 Esc（取消這個問題）
- * 是真的常用，留在選單旁邊；其他的跟終端原文一起收進這顆開關後面。
- */
+/** 選單模式底下：`Esc 取消`＋收起終端原文與按鍵的開關（2026-09-12 第二輪回饋：選單本身就是操作方式）。 */
 export function BlockedExtrasBar({
   botId,
   open,

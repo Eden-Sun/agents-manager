@@ -5,11 +5,7 @@ import { identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, u
 import { isQuotaDisabled, quotaDisableKey, useDisabledQuota } from '../store/quotaHide'
 import { KindTag } from './KindTag'
 
-/**
- * 空專案的一鍵新增：直接列出「這台主機上真的能開」的選項（claude 的每個已登入身份
- * cc0/cc1/…，加上其他已安裝的 kind），點一下就建好並啟動，省掉開表單挑 kind 挑身份。
- * 不能用的（CLI 未安裝、身份沒登入）不列，列出來的都保證可行。
- */
+/** 空專案的一鍵新增：只列這台主機上真的能開的 kind／已登入身份，點一下就建好並啟動。 */
 type Choice = {
   key: string
   kind: BotKind

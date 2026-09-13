@@ -10,18 +10,11 @@ import { linkifyTerm } from './TermLinks'
 import { setTermWrap, useTermWrap } from './termWrap'
 
 /**
- * 對某台主機（本機或遠端）開著的那個 shell：終端快照 + 一行指令輸入。
- *
- * 存在的理由是「裝個 CLI、看一段 log、`gh auth status`、清掉一個 worktree」這些雜事不該
- * 需要另外開一個 terminal 再 ssh 一次。它**不是**一個 bot：沒有 run、沒有回合、沒有訊息
- * 紀錄，畫面上就只有那張快照與你打進去的字。
- *
- * 輪詢刻意寫在這裡而不是重用 `useTerminalSnapshot`：那支 hook 的參數是 `botId`，要它同時
- * 吃 bot 與 host 得改簽名，而 `ChatPanel` / `BlockedModal` 都在用。節奏（1 秒）、來源與
- * 「換目標就在 render 當下清畫面」都照它。
+ * 對某台主機開著的 shell：終端快照 + 一行指令輸入；不是 bot（沒有 run／回合／訊息）。
+ * 輪詢不重用 `useTerminalSnapshot`：它吃 `botId`，改簽名會動到 ChatPanel／BlockedModal；節奏與清畫面照它。
  */
 
-/** 每台主機各記一份指令歷史。存在 localStorage：關掉面板再開回來還在。 */
+/** 每台主機各記一份指令歷史（localStorage）。 */
 const HISTORY_KEY = 'am.shellHistory'
 const HISTORY_MAX = 20
 
@@ -50,10 +43,7 @@ function writeHistory(map: HistoryMap) {
   }
 }
 
-/**
- * 還沒送出的那一行指令，依 `host/paneId` 各存一份。換 bot、關掉面板、重新整理都留著——
- * 打到一半的長指令不該因為切去看一眼對話就沒了。
- */
+/** 未送出的指令依 `host/paneId` 各存一份，切去看一眼對話不會丟。 */
 const DRAFT_KEY = 'am.shellDrafts'
 
 function readDrafts(): Record<string, string> {
@@ -89,10 +79,7 @@ const KEYS: { label: string; keys: string[]; title: string }[] = [
   { label: 'Enter', keys: ['enter'], title: '只按 Enter' },
 ]
 
-/**
- * 標題列只放 cwd 的最後兩段（`project/agents-manager`），完整路徑在 tooltip。
- * 倒數第二段另外包起來，手機寬度用 CSS 藏掉，只剩最後一段。
- */
+/** 標題列只放 cwd 最後兩段（完整路徑在 tooltip）；倒數第二段手機用 CSS 藏掉。 */
 function cwdTail(cwd: string): { parent: string; leaf: string } {
   const seg = cwd.split('/').filter(Boolean)
   if (seg.length === 0) return { parent: '', leaf: cwd || '/' }
@@ -125,7 +112,6 @@ export function HostShellPanel({
   /** `visible` = 終端現在長什麼樣（shell 的常態）；`recent_unwrapped` = 連捲上去的一起看。 */
   const [source, setSource] = useState<TerminalSource>('visible')
   const [lines, setLines] = useState(200)
-  // 折不折行跟終端分頁共用一個開關（手機預設折、桌機預設不折）。
   const wrap = useTermWrap()
   const target = `${host}/${paneId}`
   const [text, setTextState] = useState(() => readDrafts()[target] ?? '')
@@ -143,8 +129,7 @@ export function HostShellPanel({
   const [histAt, setHistAt] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // 換 shell 時清畫面是 render 當下就該有的結果，不是一個 effect：留著上一個主機的終端內容
-  // 不只是舊資料，是「另一台機器的畫面」，一眼看過去會以為是這一台的。
+  // 換 shell 在 render 當下清畫面，不走 effect：留著另一台機器的畫面會被誤認成這一台。
   const [lastTarget, setLastTarget] = useState(target)
   if (lastTarget !== target) {
     setLastTarget(target)
@@ -182,7 +167,6 @@ export function HostShellPanel({
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 
-  // 這個面板存在的目的就是打字，所以一開就把焦點交給輸入框（換 shell 也一樣）。
   useEffect(() => {
     inputRef.current?.focus()
   }, [host, paneId])
@@ -192,7 +176,6 @@ export function HostShellPanel({
       if (!cmd.trim()) return
       setHistory((h) => {
         const prev = h[host] ?? []
-        // 同一個指令連按兩次不該在歷史裡佔兩格。
         const next = [cmd, ...prev.filter((x) => x !== cmd)].slice(0, HISTORY_MAX)
         const map = { ...h, [host]: next }
         writeHistory(map)
@@ -253,16 +236,13 @@ export function HostShellPanel({
       e.preventDefault()
       const at = histAt - 1
       setHistAt(at)
-      // 走回 `-1` 就是回到「正在編輯的那一行」，而那一行本來是空的。
       setText(at < 0 ? '' : list[at])
     }
   }
 
   const body = useMemo(() => {
     if (!snap) return err ? `讀取終端失敗：${err}` : '讀取中…'
-    // herdr 的 `recent_unwrapped` 只給「已經捲出畫面」的部分，還沒捲過的 pane 回的是空字串
-    // （實測 2026-09-07：一個剛開的 shell 兩種 `recent` 都是空的，而 `visible` 有內容）。
-    // 空白畫面看起來像壞掉，所以這裡把它說出來，而不是讓使用者以為讀不到。
+    // herdr 的 `recent_unwrapped` 只給已捲出畫面的部分，剛開的 shell 回空字串（實測 2026-09-07）；明講以免看起來像壞掉。
     if (!snap.text.trim() && source === 'recent_unwrapped') {
       return '（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）'
     }
@@ -346,7 +326,6 @@ export function HostShellPanel({
           <button type="button" className="mini-btn" onClick={refresh} title="立刻重讀一次（平常每秒自己更新）">
             刷新
           </button>
-          {/* 手機預設折行、桌機預設不折，跟終端分頁共用同一個開關。 */}
           <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
             換行
@@ -363,7 +342,7 @@ export function HostShellPanel({
 
         {err && snap ? (
           <div className="shell-err" role="status">
-            {/* 有快照卻讀失敗：畫面上那張是舊的，別讓它看起來像現況。 */}
+            {/* 有快照卻讀失敗：畫面是舊的。 */}
             最後一次讀取失敗（{err}）——上面顯示的是先前的畫面。
           </div>
         ) : null}
@@ -406,8 +385,7 @@ export function HostShellPanel({
               {k.label}
             </button>
           ))}
-          {/* 清畫面 = 真的送 `clear`，不是前端把 state 清掉：使用者要的是終端乾淨，
-              不是畫面假裝乾淨（下一次輪詢就會把原本的內容抓回來）。 */}
+          {/* 清畫面 = 真的送 `clear`：前端清 state 下次輪詢就會抓回原內容。 */}
           <button type="button" className="key-btn" title="送出 clear，清掉終端畫面" onClick={() => void run('clear')}>
             清畫面
           </button>

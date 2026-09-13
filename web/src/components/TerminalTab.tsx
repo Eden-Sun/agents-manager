@@ -6,11 +6,7 @@ import { useStore } from '../store/store'
 import { linkifyTerm } from './TermLinks'
 import { setTermWrap, useTermWrap } from './termWrap'
 
-/**
- * Below this many columns a TUI agent lays its own text out a fragment per row and the spaces
- * fall off the ends, so the snapshot cannot be read however it is rendered. Observed on a
- * 31-column grok pane (2026-09-06), whose widest row held four characters.
- */
+/** Below this many columns a TUI agent's output is fragmented beyond repair (31-column grok pane, 2026-09-06). */
 const READABLE_COLUMNS = 60
 
 /** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
@@ -27,10 +23,7 @@ export function TerminalTab({ botId }: { botId: string }) {
   const [lines, setLines] = useState(200)
   const [tight, setTight] = useState(true)
   const [moving, setMoving] = useState(false)
-  /**
-   * 搬移結果記的是「哪一個 bot」而不是布林：換 bot 時這個元件不一定重新掛載，記 bot id 才能
-   * 在 render 當下就算出來，不用一個把上一個 bot 的結果清掉的 effect。
-   */
+  /** 記 bot id 而非布林：換 bot 不一定重掛載，這樣不用 effect 清掉上一個 bot 的結果。 */
   const [movedBot, setMovedBot] = useState<string | null>(null)
   const [moveErr, setMoveErr] = useState<{ botId: string; text: string } | null>(null)
   const wrap = useTermWrap()
@@ -67,7 +60,6 @@ export function TerminalTab({ botId }: { botId: string }) {
   }, [botId, refresh])
 
   const narrow = snap?.columns != null && snap.columns < READABLE_COLUMNS
-  /** 這個 bot 在這次掛載裡搬過了。留著是為了讓「只影響之後的輸出」在警示消失後還講得完。 */
   const moved = movedBot === botId
   const moveErrText = moveErr?.botId === botId ? moveErr.text : null
   const body = useMemo(() => {
@@ -76,8 +68,7 @@ export function TerminalTab({ botId }: { botId: string }) {
     return tight ? squeeze(snap.text) : snap.text
   }, [err, snap, tight])
 
-  // 終端的「現在」在最下面：一進分頁、換 bot、每次刷新都要看到最新輸出，除非使用者
-  // 自己往上捲去翻 scrollback（`useScrollTail` 的 stick 判斷）。
+  // 貼底顯示最新輸出，除非使用者自己往上捲（`useScrollTail`）。
   const tail = useScrollTail<HTMLPreElement>([body])
 
   return (
@@ -96,8 +87,6 @@ export function TerminalTab({ botId }: { botId: string }) {
             ))}
           </select>
         </label>
-        {/* `source=recent_unwrapped・revision 12` 是抓法本身，只有在對帳時才有意義：
-            收進 tooltip。留在條上的是你會用到的兩件事——這是哪個 pane、有沒有被截斷。 */}
         {snap?.pane_id ? (
           <span
             className="hint term-pane-chip"
@@ -120,8 +109,6 @@ export function TerminalTab({ botId }: { botId: string }) {
           換行
         </label>
         <span className="spacer" />
-        {/* 這裡本來寫的是開發備忘（「第一階段不做 xterm.js 串流」）。畫面上要說的是這東西
-            現在怎麼用，不是它的實作進度。 */}
         <span className="hint term-bar-note">唯讀快照，按「刷新」更新</span>
       </div>
       {narrow ? (

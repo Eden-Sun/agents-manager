@@ -1,15 +1,7 @@
-//! Which processes the herdr RAM number is actually made of, and killing the ones that are
-//! nobody's bot (SPEC §15.4).
+//! Which processes make up the herdr RAM number, and killing the ones that are nobody's bot (SPEC §15.4).
 //!
-//! `memstat` answers "how much"; this answers "who". The split matters because half the
-//! `claude` processes under herdr on a typical machine are panes the user opened by hand or
-//! stale `--resume` sessions — reclaimable memory the UI could not point at before.
-//!
-//! Ownership is read out of each process's **environment**, not out of any bookkeeping of
-//! ours: the daemon injects `AM_BOT_ID` when it starts a bot (`lifecycle.rs`), and herdr
-//! injects `HERDR_PANE_ID` into every pane. Environment is inherited, so the CLI several
-//! levels below a pane shell still carries both. That makes the answer true even for
-//! processes started before this daemon booted, which a registry could never be.
+//! Ownership comes from each process's inherited environment (`AM_BOT_ID`, `HERDR_PANE_ID`),
+//! not our bookkeeping, so it stays true for processes started before this daemon booted.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,10 +12,8 @@ use serde_json::{json, Value};
 use crate::memstat::{child_index, exe_name, herdr_roots, is_herdr, parse_ps, Proc};
 use crate::state::App;
 
-/// Two sections in one round trip: the tree (`pid ppid rss argv`) and the environments.
-/// macOS exposes another process's environment through `ps -E`; Linux does not, so there it
-/// reads `/proc/<pid>/environ` (same-user only, which is exactly the scope we want).
-/// The marker keeps a single parser for both halves.
+/// Tree and environments in one round trip. macOS has `ps -E`; Linux needs `/proc/<pid>/environ`
+/// (same-user only, which is exactly the scope we want).
 const MARKER: &str = "---AM-ENV---";
 const PS_TREE_ENV: &str = r#"ps -Awwo pid=,ppid=,rss=,args= 2>/dev/null
 echo '---AM-ENV---'
@@ -37,9 +27,8 @@ else
   ps -Ewwo pid=,args= 2>/dev/null
 fi"#;
 
-/// Rows worth putting in front of a human: a pane's shell or an agent CLI. Everything else
-/// (node workers, ripgrep, the dozens of short-lived helpers) stays folded into its parent's
-/// `subtree_bytes` instead of turning the list into a process explorer.
+/// Everything else stays folded into its parent's `subtree_bytes` instead of turning the list
+/// into a process explorer.
 const LISTED: &[&str] = &["claude", "codex", "grok", "node", "bash", "zsh", "sh", "fish"];
 
 /// Below this a row is noise; its bytes still count towards the parent's subtree.
@@ -53,8 +42,7 @@ pub struct MemProcess {
     pub exe: String,
     pub argv: String,
     pub pane_id: Option<String>,
-    /// `HERDR_SOCKET_PATH` from the environment: pane ids are per herdr session, and a
-    /// user's own panes usually live in `default`, not in ours. Needed to read the pane back.
+    /// Pane ids are per herdr session; the user's own panes usually live in `default`, not ours.
     pub socket_path: Option<String>,
     pub bot_id: Option<String>,
     pub bot_name: Option<String>,
@@ -63,11 +51,9 @@ pub struct MemProcess {
     pub owner: String,
     /// This process plus every descendant: "killing this frees roughly that much".
     pub subtree_bytes: u64,
-    /// Descendants folded into `subtree_bytes`.
     pub children: u32,
 }
 
-/// One process in the herdr trees, before bot names are looked up.
 struct Raw {
     p_index: usize,
     pane_id: Option<String>,
@@ -78,10 +64,7 @@ struct Raw {
     children: u32,
 }
 
-/// Who a process belongs to, from its environment.
-///
-/// `AM_BOT_ID` wins over `HERDR_PANE_ID` because a bot always runs inside a pane; the pane is
-/// how it got there, not who owns it. herdr itself is never anybody's to kill.
+/// `AM_BOT_ID` wins over `HERDR_PANE_ID`: a bot always runs inside a pane, the pane is not its owner.
 fn owner_of(is_herdr_proc: bool, bot_id: Option<&str>, pane_id: Option<&str>) -> &'static str {
     if is_herdr_proc {
         "herdr"
@@ -94,7 +77,6 @@ fn owner_of(is_herdr_proc: bool, bot_id: Option<&str>, pane_id: Option<&str>) ->
     }
 }
 
-/// `KEY=value` out of a whitespace-joined environment dump.
 fn env_value(blob: &str, key: &str) -> Option<String> {
     let want = format!("{key}=");
     blob.split_whitespace()
@@ -103,7 +85,6 @@ fn env_value(blob: &str, key: &str) -> Option<String> {
         .map(|v| v.to_string())
 }
 
-/// pid -> its environment dump (argv included on macOS; harmless, we only look for our keys).
 fn parse_env(section: &str) -> HashMap<i32, String> {
     let mut m = HashMap::new();
     for line in section.lines() {
@@ -115,8 +96,7 @@ fn parse_env(section: &str) -> HashMap<i32, String> {
     m
 }
 
-/// Split the dump at the marker **line**. Matching a whole line matters: an argv can contain
-/// anything, including the marker text, and a `ps` line can never contain a newline.
+/// Match the marker as a whole line: an argv can contain the marker text, but never a newline.
 fn split_sections(out: &str) -> (&str, &str) {
     let mut at = 0usize;
     for line in out.split_inclusive('\n') {
@@ -128,7 +108,6 @@ fn split_sections(out: &str) -> (&str, &str) {
     (out, "")
 }
 
-/// Everything in the herdr trees of one dump, with subtree sums and ownership resolved.
 fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
     let (tree, env_section) = split_sections(out);
     let procs = parse_ps(tree);
@@ -137,7 +116,6 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
     let index: HashMap<i32, usize> = procs.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
     let children = child_index(&procs);
 
-    // Every pid reachable from a herdr root, roots included.
     let mut in_tree: Vec<i32> = Vec::new();
     let mut seen: HashSet<i32> = HashSet::new();
     for root in herdr_roots(&procs, &by_pid) {
@@ -157,8 +135,6 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
     for pid in in_tree {
         let Some(&i) = index.get(&pid) else { continue };
         let p = &procs[i];
-        // Subtree walk stays inside the herdr tree by construction: a descendant of a member
-        // is a member.
         let (mut bytes, mut kids) = (p.rss_kib * 1024, 0u32);
         let mut stack: Vec<i32> = children.get(&pid).cloned().unwrap_or_default();
         let mut walked: HashSet<i32> = HashSet::new();
@@ -184,7 +160,6 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
     (procs, raws)
 }
 
-/// The rows the UI shows, biggest subtree first.
 fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
     let mut rows: Vec<MemProcess> = raws
         .iter()
@@ -215,14 +190,12 @@ fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
     rows
 }
 
-/// Parse one host dump into the rows the API returns. Split out from the ssh/`sh` plumbing so
-/// the ownership and subtree rules are testable without a machine to sample.
+/// Split out from the ssh/`sh` plumbing so ownership and subtree rules are testable.
 pub fn processes_from_dump(out: &str) -> Vec<MemProcess> {
     let (procs, raws) = scan(out);
     listed(&procs, &raws)
 }
 
-/// Run the sampler on `host` (locally or over ssh) and return its raw output.
 async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
@@ -238,15 +211,13 @@ async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
     conn.ssh_exec_path(PS_TREE_ENV).await
 }
 
-/// `GET /api/mem/processes?host=…`: every listed process in that host's herdr trees, with the
-/// bot rows filled in from the database.
+/// `GET /api/mem/processes?host=…`
 pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
     let out = dump(app, host).await?;
     let mut rows = processes_from_dump(&out);
     for r in &mut rows {
         let Some(id) = r.bot_id.clone() else { continue };
-        // A deleted bot still reads as a bot: its process is alive and stopping it is still
-        // the bot's own business, not a kill.
+        // A deleted bot still reads as a bot: stopping it is the bot's business, not a kill.
         if let Ok(Some(b)) = crate::db::bot(&app.db, &id).await {
             r.bot_name = Some(b.name);
             r.project_id = Some(b.project_id);
@@ -259,17 +230,11 @@ pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
     }))
 }
 
-/// `GET /api/mem/processes/pane` — what is on screen in one pane of the list (SPEC §15.2).
-///
-/// The list says "自己開的 pane wM:pB", which tells the user nothing about *which* of their
-/// ten claude sessions that is. The pane's visible text answers it. Any pane herdr knows is
-/// readable — unlike `shell::read` there is no registration to check, these panes were
-/// never ours — but only the last `lines` visible rows, plain text, never keys or input.
+/// `GET /api/mem/processes/pane` (SPEC §15.2). Any pane herdr knows is readable (no registration
+/// check, unlike `shell::read`), but only the last `lines` visible rows as plain text — never keys or input.
 pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Option<&str>, lines: u32) -> crate::lifecycle::LcResult<Value> {
     use crate::lifecycle::LcError;
-    // Local panes from another herdr session (the user's own `default`, typically): talk to
-    // that session's socket directly. It is the same user's socket — the process list just
-    // told us the path — so this is no wider than what `herdr` in their shell can do.
+    // Another local herdr session's socket: same user's socket, no wider than `herdr` in their shell.
     let client = match socket.filter(|s| !s.is_empty()) {
         Some(path) if host == crate::config::LOCAL_HOST => {
             if !std::path::Path::new(path).exists() {
@@ -292,18 +257,15 @@ pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Opt
     }))
 }
 
-/// Why a kill was refused. `Bot` is a 409 and not a 400: the request is well formed, there is
-/// simply a better door (`POST /bots/{id}/stop`, which also records the stop).
+/// `Bot` is a 409, not a 400: the request is fine, the better door is `POST /bots/{id}/stop`.
 pub enum KillDenied {
     NotInTree,
     Herdr,
     Bot(String),
 }
 
-/// Re-sample, check the pid is still a killable member of a herdr tree, then signal it.
-///
-/// Re-sampling rather than trusting the caller's list is the whole safety story: pids are
-/// recycled, and a stale row must never let a `kill` escape the herdr trees.
+/// Re-samples instead of trusting the caller's list: pids are recycled, and a stale row must
+/// never let a `kill` escape the herdr trees.
 pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow::Result<Result<Value, KillDenied>> {
     let out = dump(app, host).await?;
     let (procs, raws) = scan(&out);
@@ -331,7 +293,7 @@ pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow:
     let p = &procs[raw.p_index];
     let freed = raw.subtree_bytes;
     let exe = exe_name(&p.argv).to_string();
-    // The badge is the reason the user came here; let it move now rather than up to 15s later.
+    // Update the badge now rather than up to 15s later.
     let snap = crate::memstat::sample(app).await;
     app.emit("mem_updated", json!(snap)).await;
     Ok(Ok(json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed})))
@@ -394,8 +356,7 @@ mod tests {
         assert!(rows.iter().all(|r| r.pid != 500));
         // herdr itself is not offered as a row.
         assert!(rows.iter().all(|r| r.exe != "herdr"));
-        // The 40 MiB node worker is over the floor but still listed only because it clears it;
-        // anything under 8 MiB would be folded away.
+        // Anything under 8 MiB is folded away.
         let small = processes_from_dump("  400     1  48000 herdr\n  401   400   100 /bin/zsh -l\n");
         assert!(small.is_empty());
     }

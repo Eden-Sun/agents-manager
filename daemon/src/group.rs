@@ -1,10 +1,5 @@
-//! Project group chat (SPEC §13): one Project is one group; `@<bot>` / `@all` in the text
-//! picks the recipients, the daemon fans the prompt out to each of them, and the group
-//! timeline is every member bot's conversation merged by message insertion order.
-//!
-//! No new conversation type: each recipient gets its own Turn + user Message through the
-//! ordinary `lifecycle::prompt` path, stamped with a shared `messages.group_id` so the UI can
-//! fold the copies back into one bubble.
+//! Project group chat (SPEC §13). No new conversation type: each recipient gets an ordinary
+//! `lifecycle::prompt` Turn stamped with a shared `messages.group_id` the UI folds into one bubble.
 
 use crate::db;
 use crate::lifecycle::{self, LcError, LcResult};
@@ -12,23 +7,18 @@ use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// A bot as the mention parser sees it.
 #[derive(Debug, Clone)]
 pub struct Member {
     pub id: String,
     pub name: String,
 }
 
-/// SPEC §13.2: resolve `@all` / `@<name>` (case-insensitive, trailing punctuation tolerated)
-/// against the project's bots. Returns the recipients in project order, deduplicated.
-/// A `@` only counts when it starts the text or follows a non-word character, so
-/// `me@example.com` is not a mention.
-/// Characters that may appear inside an `@mention` token: anything but whitespace and the
-/// usual sentence punctuation, so CJK nicknames work (`@小幫手，看一下`).
+/// Excludes only whitespace and sentence punctuation, so CJK nicknames work (`@小幫手，看一下`).
 fn mention_char(c: char) -> bool {
     !c.is_whitespace() && !"@,:;?!。，、！？()（）[]{}<>\"'".contains(c)
 }
 
+/// SPEC §13.2. A `@` only counts after a non-word character, so `me@example.com` is not a mention.
 pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
     let mut all = false;
     let mut hit: Vec<usize> = Vec::new();
@@ -73,9 +63,7 @@ pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
     hit.into_iter().map(|i| members[i].clone()).collect()
 }
 
-/// Remove every recognised mention token (`@all`, `@<member>`, optionally followed by
-/// `,` / `:` / `;`) and tidy the whitespace. Falls back to the original text when nothing
-/// would be left, so a bare `@all` still delivers *something* rather than an empty prompt.
+/// Falls back to the original text when nothing is left, so a bare `@all` is not an empty prompt.
 pub fn strip_mentions(text: &str, members: &[Member]) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -109,7 +97,6 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
         out.push(chars[i]);
         i += 1;
     }
-    // collapse whitespace runs left behind by removed tokens (keep newlines)
     let mut tidy = String::with_capacity(out.len());
     let mut prev_space = false;
     for c in out.chars() {
@@ -131,8 +118,7 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
     }
 }
 
-/// Why a recipient was skipped (SPEC §13.3). Short machine codes; the system message
-/// carries the human-readable text.
+/// SPEC §13.3 machine codes; the system message carries the human-readable text.
 fn skip_reason(app_err: &LcError) -> (&'static str, String) {
     match app_err {
         LcError::Conflict(v) => {
@@ -159,17 +145,13 @@ fn skip_reason(app_err: &LcError) -> (&'static str, String) {
     }
 }
 
-/// Live bots of a project, in creation order.
 pub async fn members(app: &Arc<App>, project_id: &str) -> LcResult<Vec<db::Bot>> {
     let bots = db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     Ok(bots.into_iter().filter(|b| b.project_id == project_id).collect())
 }
 
-/// `POST /api/projects/:id/chat` (SPEC §13.4).
-///
-/// The group id **is** the client request id: a retry with the same id reaches the same
-/// per-bot Turns (`<crid>:<bot_id>` idempotency in `lifecycle::prompt`) and does not add a
-/// second "skipped" note.
+/// `POST /api/projects/:id/chat` (SPEC §13.4). The group id **is** the client request id, so a
+/// retry reaches the same per-bot Turns and adds no second "skipped" note.
 pub async fn chat(
     app: &Arc<App>,
     project_id: &str,
@@ -212,8 +194,7 @@ pub async fn chat(
             Err(e) => {
                 let (code, human) = skip_reason(&e);
                 tracing::info!(bot = %t.name, code, reason = %human, "group chat: recipient skipped");
-                // SPEC §13.3: never auto-start; leave a note in that bot's conversation so
-                // the group timeline shows who did not get the message.
+                // SPEC §13.3: never auto-start; the note shows who did not get the message.
                 if let Err(e2) = note_skipped(app, &t, &group_id, code, &human).await {
                     tracing::warn!(bot = %t.name, error = %e2, "could not record the skipped note");
                 }
@@ -253,8 +234,7 @@ pub enum Response400 {
     NoMention(Vec<Value>),
 }
 
-/// `GET /api/projects/:id/messages?before=&limit=` (SPEC §13.4): every live member bot's
-/// messages merged, paginated backwards by SQLite insertion order, returned in ascending order.
+/// `GET /api/projects/:id/messages?before=&limit=` (SPEC §13.4), paginated by SQLite rowid.
 pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, limit: i64) -> LcResult<Value> {
     let project = db::project(&app.db, project_id)
         .await
@@ -403,8 +383,7 @@ mod message_tests {
             .await
             .unwrap();
 
-        // Insert in the same millisecond with IDs in reverse lexical order. The rowid order is
-        // the only stable order for the group timeline in this case.
+        // Same millisecond, IDs in reverse lexical order: only rowid order is stable.
         let created_at = db::now();
         let ids = [
             "01ARZ3NDEKTSV4RRFFQ69G5F3C",

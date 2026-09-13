@@ -1,42 +1,22 @@
-//! 畫面上認得出來、而且不該讓使用者操心的 TUI 對話框。
+//! 認得出來、不該讓使用者操心的 TUI 對話框（主要是 Claude Code 的滿意度問卷）。
 //!
-//! 目前只有一種：Claude Code 每隔一陣子插進來的滿意度問卷
-//!
-//! ```text
-//! ● How is Claude doing this session? (optional)
-//!   1: Bad    2: Fine   3: Good   0: Dismiss
-//! ```
-//!
-//! 它跟手上的工作無關，卻會讓 agent 停在 `blocked` 等人回答——回合卡住、輸入框鎖住，UI 還會
-//! 把整個終端彈到眼前（`BlockedModal`）。使用者的決定是**一律選 `0: Dismiss`**，所以 daemon
-//! 自己按掉，不驚動任何人。
-//!
-//! 兩條路徑都接上，因為兩條都可能是唯一的機會：
-//! - 事件：`pane.agent_status_changed` 一報 `blocked` 就看一眼（[`crate::events`]），最快；
-//! - 巡邏：[`spawn_survey_watcher`] 每 10 秒掃一次停著（`blocked` / `idle`）的 Run，補上問卷在
-//!   pane 訂閱建立之前就跳出來、事件漏掉、或 herdr 根本沒把它當成 `blocked` 的情形。
-//!
-//! [`crate::quota_claude`] 的探測 pane 也走同一個判斷：那裡本來就會對擋路的對話框按 Enter，
-//! 而 Enter 落在這份問卷上等於**替使用者打了一個分數**。
-//!
-//! 認畫面而不是認狀態：只有畫面上真的是那份問卷才會按鍵，其他等人回答的東西（權限確認、
-//! trust 對話框）原封不動留給使用者。
+//! 問卷會讓 agent 卡在 `blocked`；使用者的決定是**一律選 `0: Dismiss`**，daemon 自己按掉。
+//! 事件（[`crate::events`]）與巡邏（[`spawn_survey_watcher`]）兩條都接：訂閱前跳出、事件漏掉、
+//! herdr 沒判成 blocked 時只剩巡邏。[`crate::quota_claude`] 探測 pane 也用：它會按 Enter，
+//! 落在問卷上等於替使用者打分數。
+//! 認畫面不認狀態：權限確認、trust 對話框等原封不動留給使用者。
 
 use crate::db;
 use crate::state::App;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 巡邏間隔：blocked 的 Run 通常是 0 個或 1 個，一次 `pane.read` 很便宜。
 const SWEEP: Duration = Duration::from_secs(10);
 
 /// 按下 `0` 之後等多久再看一眼。
 const SETTLE: Duration = Duration::from_millis(700);
 
-/// 終端畫面壓成一行小寫、單一空白的字。
-///
-/// 窄 pane 會把同一句話折成好幾行（`is_shredded` 那個老問題），逐行比對認不出來；框線字元也
-/// 一併當成空白丟掉。
+/// 窄 pane 會把同一句話折成好幾行，逐行比對認不出來；框線字元一併當空白。
 fn flatten(screen: &str) -> String {
     let spaced: String = screen
         .chars()
@@ -80,11 +60,7 @@ fn survey_options(line: &str) -> [bool; 4] {
     ]
 }
 
-/// 這個畫面是不是那份滿意度問卷。
-///
-/// 問句必須由 TUI 的 `●` / `>` 標記開頭，且在相鄰幾行內跟至少三個真正的選項列
-/// （`0: Dismiss`、`1: Bad`、`2: Fine`、`3: Good`）一起出現。這避免 agent 引用這些
-/// 字串時把整個可見畫面誤認成問卷。
+/// 問句要由 `●` / `>` 開頭且相鄰幾行內有至少三個選項，避免 agent 引用這些字串時誤認。
 pub fn is_feedback_survey(screen: &str) -> bool {
     let lines: Vec<String> = screen
         .lines()
@@ -118,34 +94,15 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     false
 }
 
-/// 這個畫面是不是 Claude Code 開場的登入選單（`CLAUDE_CONFIG_DIR` 指到一個還沒登入的目錄）：
-///
-/// ```text
-/// Select login method:
-/// ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise
-///   2. Anthropic Console account · API usage billing
-/// ```
-///
-/// 停在這裡的 agent 對 herdr 看起來是活的、也收得下字，但送進去的 prompt 只是在選單上打字，
-/// 回合會一直掛著。所以 [`crate::lifecycle`] 送 prompt 前先看一眼，中了就直接 409 `needs_login`。
+/// Claude Code 開場登入選單（`CLAUDE_CONFIG_DIR` 未登入）。herdr 看起來是活的，prompt 卻只打在
+/// 選單上、回合永遠掛著，所以 [`crate::lifecycle`] 送前先看，中了回 409 `needs_login`。
 pub fn is_login_menu(screen: &str) -> bool {
     let t = flatten(screen);
     t.contains("select login method") && (t.contains("claude account with subscription") || t.contains("anthropic console account"))
 }
 
-/// claude 已經把新版下載好、等重啟才會換過去時，畫面最底下那行（跟使用者的 statusLine 同一
-/// 行、靠右）印的：
-///
-/// ```text
-/// ✔ Update installed · Restart to update
-/// ```
-///
-/// 中了就回一句固定的字，而不是整行——那行左半邊還有使用者 statusLine 的內容（模型、用量…），
-/// 每回合都在變，存進 DB 只會一直 emit。
-///
-/// 兩段字都要中，理由同 [`is_feedback_survey`]。但這裡光是「兩段都中」還不夠：2026-09-08 實測，
-/// 正在寫這個功能的那個 agent 的畫面上同時有這兩句**引文**，照樣中。所以只看畫面**最下面**
-/// [`TAIL_LINES`] 行非空白的——真正的通知就印在那條狀態列上，正文捲不到那裡。
+/// claude 狀態列靠右的 `✔ Update installed · Restart to update`。回固定字而非整行：左半是每回合
+/// 都變的 statusLine，存 DB 會一直 emit。只看最底 [`TAIL_LINES`] 行：正文引文也會中（2026-09-08 實測）。
 pub fn update_notice(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
@@ -153,30 +110,15 @@ pub fn update_notice(screen: &str) -> Option<String> {
     (t.contains("update installed") && t.contains("restart to update")).then(|| UPDATE_NOTICE.to_string())
 }
 
-/// 只認畫面最底下這幾行。那句印在使用者 statusLine 那一行（靠右），底下最多再一行
-/// `⏵⏵ bypass permissions on …`；窄 pane 折行也還在這個範圍內。
+/// statusLine 那行加底下 `⏵⏵ bypass permissions` 一行，窄 pane 折行也在範圍內。
 const TAIL_LINES: usize = 6;
 
-/// [`update_notice`] 中了以後存進 `runs.update_notice` 的字，也是 UI tooltip 上的原句。
+/// 存進 `runs.update_notice` 的字，也是 UI tooltip 原句。
 pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
 
-/// claude 的 `/model <別名>` 在**已經有對話紀錄**時不會直接換，而是先跳一個確認框：
-///
-/// ```text
-///  Switch model?
-///  Your next response will be slower and use more tokens
-///  This conversation is cached for the current model. Switching to Haiku 4.5 means …
-///  ❯ 1. Yes, switch to Haiku 4.5
-///    2. No, go back
-/// ```
-///
-/// （2.1.268 實測；空的 session 沒有快取可失效，就直接換、不問。）herdr 把這個框判成 `idle`，
-/// 所以 daemon 以為指令已經套用，下一則 prompt 被打進框裡：字被丟掉、Enter 替使用者按了
-/// 「Yes」，回合在 12 秒後以 stall 失敗（2026-09-11 AGM：`/model fable` 04:45:09 送出，
-/// transcript 裡直到 04:45:21.98 使用者的「go」按下 Enter 才真的執行）。
-///
-/// 只看畫面**最下面**幾行：這個框畫在輸入列的位置，正文裡引用到這幾個字（例如 agent 正在讀
-/// 這份原始碼）不算——同 [`update_notice`] 踩過的坑。
+/// 有對話紀錄時 `/model <別名>` 會跳「Switch model?」確認框（2.1.268 實測），herdr 判成 `idle`，
+/// 下一則 prompt 被打進框裡、Enter 替使用者按 Yes、回合 stall（2026-09-11 AGM）。
+/// 只看最底幾行，理由同 [`update_notice`]。
 pub fn is_switch_model_dialog(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..].join("\n");
@@ -184,10 +126,10 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
     t.contains("switch model?") && t.contains("yes, switch to") && t.contains("no, go back")
 }
 
-/// 確認框連同上下框線、底下的 statusLine 最多這麼高；再往上就是正文。
+/// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
 const DIALOG_TAIL_LINES: usize = 12;
 
-/// 這個 Run 的 pane 現在是不是停在登入選單上。讀不到畫面就當不是——那不是這裡要擋的事。
+/// 讀不到畫面就當不是——那不是這裡要擋的事。
 pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
     let Some(client) = app.herdr_for_run(run).await else { return false };
@@ -197,7 +139,7 @@ pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     }
 }
 
-/// 這個 Run 的 pane 若正停在那份問卷上就替它按 `0`。回傳是否真的按了。
+/// 停在問卷上就按 `0`；回傳是否真的按了。
 pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
     let Some(client) = app.herdr_for_run(run).await else { return false };
@@ -222,20 +164,15 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
         return false;
     }
     tokio::time::sleep(SETTLE).await;
-    // 有的版本要再一個 Enter 才收下選擇。只在畫面**還停在同一份問卷**時才補，免得 Enter 落進
-    // 問卷後面那個真正在等人回答的東西。不要用 run.agent_status 守衛：事件路徑傳進來的
-    // Run 是 DB 更新前的複本，idle -> blocked 時會是過期的 idle。
+    // 有的版本要再按 Enter；只在仍是問卷時補，免得落進後面真正等人回答的框。
+    // 別用 run.agent_status 守衛：事件路徑的 Run 是 DB 更新前的複本（過期的 idle）。
     if matches!(client.pane_read(&pane, "visible", 80).await, Ok(r) if is_feedback_survey(&r.text)) {
         let _ = client.pane_send_keys(&pane, &["enter"]).await;
     }
     true
 }
 
-/// 每 [`SWEEP`] 掃一次停著的 Run，替停在問卷上的按掉。
-///
-/// `blocked` 與 `idle` 都掃：問卷多半讓 herdr 判成 `blocked`（它就是個等輸入的 UI），但它是在
-/// **回合結束後**插進來的，herdr 也可能只當成一般的 idle 畫面——那時使用者送出的下一句話會被
-/// 打進問卷裡。`working` 不掃：畫面正在動，問卷不會插在中間。
+/// `idle` 也掃：問卷在回合結束後插入，herdr 可能只判成 idle，下一句話就會打進問卷裡。
 pub fn spawn_survey_watcher(app: Arc<App>) {
     tokio::spawn(async move {
         loop {

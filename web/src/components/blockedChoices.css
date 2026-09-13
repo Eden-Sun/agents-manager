@@ -1,6 +1,4 @@
-/* agent 停在編號選單上時那份可以點的清單（BlockedChoices.tsx）。
-   排版的前提是手機：一列一個 44px 的觸控目標，選項文字自己折行，沒有橫向捲軸——
-   終端快照那套（等寬字、11px、`white-space: pre`）是給「看畫面」用的，不是給手指用的。 */
+/* 編號選單的可點清單（BlockedChoices.tsx）：以手機為前提，一列一個 44px 觸控目標、文字自己折行、無橫捲。 */
 .blocked-choices {
   display: flex;
   flex-direction: column;
@@ -8,8 +6,7 @@
   margin-bottom: 8px;
 }
 
-/* 問題本身：這是整塊裡唯一要先讀懂的一句，字級比選項再大半級。
-   在全畫面的主捲軸裡釘在上緣——選項多、說明長時捲到第 5 項還看得到自己在回答什麼。 */
+/* 問題字級大半級，釘在主捲軸上緣：捲到第 5 項還看得到在回答什麼。 */
 .bc-question {
   margin: 0;
   font-size: 13.5px;
@@ -18,7 +15,6 @@
   color: var(--text);
 }
 
-/* 分頁列與問題一起釘在主捲軸上緣：捲到第 5 項還看得到自己在回答哪一題。 */
 .bc-top {
   display: flex;
   flex-direction: column;
@@ -32,7 +28,7 @@
   margin: -2px 0 0;
   padding: 6px 0 8px;
   background: var(--bg-panel);
-  /* 內容從底下捲過去時要看得出來這一段是釘住的，不是跟著捲的第一段。 */
+  /* 捲過去時要看得出這段是釘住的。 */
   box-shadow: 0 1px 0 var(--border);
 }
 
@@ -45,15 +41,13 @@
   gap: 4px;
 }
 
-/* 編號、標題、「游標在此」同一列，說明自己占滿下面一整列。
-   說明擠在標題右邊那一欄的話，在 390px 只剩兩百出頭的寬度，一段話被折成八行窄柱。 */
+/* 說明自己佔滿下一列：擠在標題右欄時 390px 只剩兩百出頭，一段話折成八行窄柱。 */
 .bc-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas:
     'num title mark'
     'num detail detail';
-  /* 多選多一欄放 ☐／☑（`.bc-list-multi`），其餘格位不動。 */
   align-items: start;
   column-gap: 8px;
   row-gap: 2px;
@@ -80,8 +74,7 @@
   cursor: default;
 }
 
-/* 游標停在哪一項要一眼看出來：終端上那個 `❯` 在這裡換成左邊一條 3px 的邊＋右邊一句字。
-   只靠顏色不夠（UI-DECISIONS 的老規矩），所以「游標在此」四個字一定在。 */
+/* 游標（終端的 `❯`）換成左邊 3px 邊＋「游標在此」字：只靠顏色不夠（UI-DECISIONS）。 */
 .bc-current {
   border-color: var(--accent);
   background: var(--accent-soft);
@@ -114,8 +107,7 @@
   line-height: 1.4;
   font-weight: 600;
   overflow-wrap: anywhere;
-  /* 收合狀態一列就是一行（2026-09-12 第四輪）：說明攤開時六個選項要滑三四屏，
-     一屏看不完一組選項，等於還是在終端裡找東西。放不下就截尾，按 ▸ 看全文。 */
+  /* 收合狀態一列一行（2026-09-12 第四輪）：說明攤開時六個選項要滑三四屏。放不下截尾，按 ▸ 看全文。 */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -126,9 +118,7 @@
   overflow: visible;
 }
 
-/* 終端把說明折成好幾行、窄 pane 還會直接截掉；這裡是接回來的整段，讓它自己折行。
-   **不加行數上限**：使用者的抱怨就是「選項文字被截掉」，在這裡再截一次等於沒解決。 */
-/* 展開才畫（收合時根本不進 DOM）。 */
+/* **不加行數上限**：使用者的抱怨就是「選項文字被截掉」，再截一次等於沒解決。 */
 .bc-detail {
   grid-area: detail;
   font-size: 12px;
@@ -153,8 +143,7 @@
   color: var(--text-dim);
 }
 
-/* 全畫面終端的選單模式：這個 body 是**視窗裡唯一的捲動容器**，清單本身不再自己捲。
-   兩層各捲一塊時，手指在手機上分不清正在捲哪一個（2026-09-12 第二輪回饋第 4 點）。 */
+/* 選單模式下 body 是**視窗裡唯一的捲動容器**：兩層各捲時手指分不清在捲哪個（2026-09-12 第二輪回饋第 4 點）。 */
 .blocked-modal-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -167,8 +156,7 @@
   margin-bottom: 0;
 }
 
-/* 對話上方那條 blocked 面板：認出選單之後終端快照預設收起來（`BlockedPanel`），
-   這塊就是主角，字級不再縮。 */
+/* 認出選單後終端快照預設收起（`BlockedPanel`），這塊是主角，字級不縮。 */
 @media (width <= 640px) {
   .bc-item {
     font-size: 13px;
@@ -179,22 +167,19 @@
     font-size: 12px;
   }
 
-  /* 「游標在此」在 390px 只吃掉約 50px，標題還有 270px 可用——留著。只靠左邊那條藍邊
-     與編號底色辨認等於只靠顏色，那是這份文件早就否決過的做法。 */
+  /* 「游標在此」在 390px 只吃約 50px，留著——只靠藍邊與底色等於只靠顏色，已否決。 */
   .bc-mark {
     font-size: 10.5px;
   }
 }
 
-/* 選單模式下展開終端原文時：終端仍照原本的樣子（自己的捲軸）擺在主捲軸下面，不跟著長高
-   把視窗撐爆。這是使用者主動按開的狀態，不是預設。 */
+/* 使用者主動展開的終端原文擺在主捲軸下、保留自己的捲軸，不跟著長高撐爆視窗。 */
 .blocked-modal:has(.blocked-modal-body) .term.blocked-modal-term {
   flex: 0 1 auto;
   max-height: 34vh;
 }
 
 
-/* 選單模式底下那一條：Esc 一顆＋把終端原文與整排按鍵收起來的開關。 */
 .bc-bar {
   display: flex;
   align-items: center;
@@ -209,8 +194,7 @@
   padding-bottom: 2px;
 }
 
-/* Esc 是這裡唯一常用到的鍵（取消這個問題），做成跟選項同一級的觸控目標，但用中性色——
-   它不是答案之一。 */
+/* Esc 常用（取消問題），同選項級的觸控目標但用中性色——它不是答案之一。 */
 .bc-esc {
   min-height: 32px;
   padding: 4px 14px;
@@ -240,11 +224,9 @@
 }
 
 
-/* ---- 多分頁 ＋ 多選（2026-09-12 第三輪） */
+/* 多分頁 ＋ 多選（2026-09-12 第三輪） */
 
-/* 上面那條分頁列：一次問好幾題時，每一格是一題，☑ 是答過的、✔ 是整份問卷的送出頁。
-   「現在在第幾題」終端只用顏色標，快照讀不出來——UI 只敢用「第一個還沒答的」去猜，
-   所以那一格畫的是虛線框（跟選項的實心藍框分得開），tooltip 也寫明是推測。 */
+/* ☑ 答過、✔ 是送出頁。「現在第幾題」終端只用顏色標、快照讀不出，UI 猜「第一個沒答的」，所以畫虛線框、tooltip 寫明是推測。 */
 .bc-tabs {
   display: flex;
   align-items: center;
@@ -304,8 +286,7 @@
   cursor: default;
 }
 
-/* 多選：編號右邊多一個 ☐／☑。點一下是切換勾選，不是送出——所以勾起來的那幾項要一眼看得到
-   （底色＋粗體），跟「游標在此」那條藍邊是兩回事（游標只是終端的焦點）。 */
+/* 多選點一下是切換不是送出：勾起的要一眼看得到（底色＋粗體），跟游標藍邊是兩回事。 */
 .bc-list-multi .bc-item,
 .bc-list-radio .bc-item {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
@@ -335,8 +316,7 @@
   color: var(--accent-ink);
 }
 
-/* 多選要自己按這一顆才交卷（終端裡那一列沒有編號的 `Submit`）。它是整塊裡唯一會「送出」的
-   按鈕，所以是唯一的實心主色；勾選那幾列只是淡底。 */
+/* 多選要按這顆才交卷（終端的 `Submit`）：唯一會送出的按鈕，所以唯一實心主色。 */
 .bc-submit {
   min-height: 44px;
   margin-top: 2px;
@@ -360,7 +340,7 @@
   cursor: default;
 }
 
-/* Type something. 展開的輸入：手機要能打中文、能貼多行，觸控 ≥44px。 */
+/* Type something：手機要能打中文、貼多行，觸控 ≥44px。 */
 .bc-type {
   display: block;
   box-sizing: border-box;
@@ -389,16 +369,14 @@
 }
 
 
-/* ---- 說明預設收起來（2026-09-12 第四輪） */
+/* 說明預設收起來（2026-09-12 第四輪） */
 
-/* ▸ 是整列按鈕的**兄弟**，絕對定位貼右——`<button>` 裡不能再包 `<button>`，而整列本身
-   就是「選這一項」。點 ▸ 只展開說明，一顆鍵都不會送出去。 */
+/* ▸ 是整列按鈕的**兄弟**、絕對定位貼右：`<button>` 不能包 `<button>`。點 ▸ 只展開，不送出。 */
 .bc-row {
   position: relative;
 }
 
-/* ▸ 只在真的有東西可看的列上出現：有說明（React 給的 `.bc-row-more`），或標題被截尾
-   （量出來之後寫在 `data-wide`）。其餘的列不長那顆，免得一排箭頭全是空的。 */
+/* ▸ 只在有東西可看時出現：有說明（`.bc-row-more`）或標題被截尾（`data-wide`）。 */
 .bc-chev {
   display: none;
 }
@@ -436,26 +414,15 @@
   color: var(--text);
 }
 
-/* 收合中的列不需要 44px 以上：一行字＋上下內距剛好是一個觸控目標，六列在 390px 一屏看得完。 */
+/* 收合列一行字＋內距剛好是觸控目標，六列在 390px 一屏看得完。 */
 .bc-item {
   align-content: start;
 }
 
-/* ---- 小面板裡的捲動（2026-09-12 第五輪） */
+/* 小面板裡的捲動（2026-09-12 第五輪） */
 
-/*
- * 使用者在 390px 上「無法滑動」，送出鈕永遠在畫面外。量到的祖先鏈是：
- *
- *   .blocked-choices 432/432 · .blocked 551/550 · .chat 582/**667** · .main 844/929
- *   .app overflow-y: hidden  ← 在這裡被裁掉，body 也不捲
- *
- * 對話分頁平常是「訊息列自己那一層」在捲，而這塊 blocked 面板在它外面，所以選單一長出來
- * 就沒有任何一層收得住——不是卡片太大，是整條鏈上沒有捲動容器。
- *
- * 修法：**認出選單時，讓這塊面板自己成為捲動容器**。不動 `.chat` / `.app` 的溢出設定（那是
- * 整個版面的地基，動它會牽到訊息列、輸入框與終端分頁）；沒有選單時也不動（那時面板高度本來
- * 就被終端快照的 `max-height: 300px` 收著）。送出鈕與 Esc 都在這塊裡面，捲得到。
- */
+/* 使用者在 390px「無法滑動」、送出鈕在畫面外：blocked 面板在訊息列捲動層外，`.app` overflow-y: hidden，整條鏈沒有捲動容器。
+   修法：**認出選單時讓面板自己成為捲動容器**；不動 `.chat` / `.app`（版面地基），沒選單時也不動（快照已有 max-height）。 */
 .blocked:has(.blocked-choices) {
   max-height: 70vh;
   max-height: 70svh;
@@ -463,7 +430,6 @@
   overscroll-behavior: contain;
 }
 
-/* 面板自己會捲之後，分頁列與問題也釘在它的上緣（跟全畫面視窗同一套）。 */
 .blocked:has(.blocked-choices) .bc-top {
   position: sticky;
   top: 0;
@@ -474,7 +440,7 @@
   box-shadow: 0 1px 0 var(--border);
 }
 
-/* ---- review／confirm 頁的「每題 → 目前答案」（2026-09-12 第七輪） */
+/* review／confirm 頁的「每題 → 目前答案」（2026-09-12 第七輪） */
 
 .bc-review {
   list-style: none;
@@ -512,7 +478,7 @@
   cursor: default;
 }
 
-/* 問題在這裡是「標籤」，答案才是要確認的東西——所以答案粗、問題淡。 */
+/* 答案是要確認的東西：答案粗、問題淡。 */
 .bc-rev-q {
   color: var(--text-dim);
   line-height: 1.35;
@@ -525,7 +491,7 @@
   overflow-wrap: anywhere;
 }
 
-/* ---- 預載後的離線作答（2026-09-12 第六輪） */
+/* 預載後的離線作答（2026-09-12 第六輪） */
 
 .bc-pages {
   display: flex;
@@ -539,7 +505,7 @@
   gap: 5px;
 }
 
-/* 一次把所有題目攤在同一條捲軸上，題目自己要站得住腳（上面有一條細線隔開前一題）。 */
+/* 所有題目攤在同一條捲軸上，上方細線隔開前一題。 */
 .bc-page + .bc-page {
   padding-top: 8px;
   border-top: 1px solid var(--border);

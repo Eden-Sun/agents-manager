@@ -1,42 +1,12 @@
 /**
- * 標題列**下面**自成一列：現在有哪幾顆 bot 在等你、在跑、或你釘著要一直看得到。
+ * 標題列下面一列：等你、在跑、或釘選的 bot；一顆 bot 一顆晶片，狀態疊在同一顆上。
  *
- * 排法是**緊急度**，不是分組也不是建立時間（2026-09-12 使用者／AGM，推翻 9/11 的三組排法）：
- *
- * 1. `needs-reply`——停在一個要**你本人**回答的提示上。
- * 2. 有未讀——跑完了還沒看。
- * 3. `waits-kids`——自己沒卡住，但在等它開出去的子 agent。
- * 4. `current`——你正在看的那一顆（固定留在列上當定位點）。
- * 5. 其餘（釘選的主力、還在跑的）。
- *
- * 同一級之內照 `bots` 陣列原本的順序，所以一顆晶片只要還在同一級就不會左右亂跳。
- *
- * **手機不排序**（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：手機是單行橫捲，
- * 使用者靠「第幾顆」的肌肉記憶去點，一顆 bot 跑完就跳到最前面，拇指底下的那顆就換人了。
- * 所以窄螢幕一律照 `bots` 的順序（＝側欄順序）；緊急度只在桌機的兩行換行裡排——
- * 那裡看得到全部，不靠位置找。
- *
- * 為什麼不再分「剛跑完／進行中」兩塊標籤：分組決定位置的時候，第 9 顆的 `needs-reply` 會
- * 排在最右邊，被捲出視野——使用者 2026-09-12 就這樣錯過了一顆 blocked 的 bot。晶片本來就
- * 各自帶著記號（★、未讀數、紅／黃／藍的點），標籤只是在搶寬度。
- *
- * 版面（同日同一份交辦）：
- * - 桌機不靠橫捲：換行，最多兩行；再多就收起來，右邊那顆 `+N` 按一下展開（不是捲走）。
- * - 手機維持單行橫捲，但要**看得出來能捲**：兩端有陰影與可點的 ◂ ▸，滾輪的垂直滾動在這一列
- *   映射成橫捲，`scroll-snap` 讓邊緣的晶片不會被切一半。
- * - 名字放不下時先縮成 `…`（`.unread-chip-name` 的 ellipsis），不要切掉半顆晶片。
- *
- * 釘起來的 bot 不會重複出現：一顆 bot 就是一顆晶片，該亮的狀態疊在同一顆上。
- *
- * 側欄本來就會在每一列上亮未讀（`Sidebar` 的 `.unread-turns`），但側欄在手機上收在抽屜裡、
- * 桌面上也可能被捲掉；使用者要追的是跨 bot 的問題，所以它得待在每個畫面都看得到的地方。
- *
- * 排除規則（2026-09-10 使用者）：
- * - **AGM（總管）不算**：它靠例行 loop 醒來，每一輪都會跑完一回合，會把這一列洗成永遠有東西。
- *   真的想追還是可以用 ★ 釘它（釘選是使用者自己指定的，不受這條影響）。
- *   「總管的環境」＝ `GET /api/supervisor` 的 `project_id` 那個專案，總管本人與它開出去的工人
- *   （build／race／sup／browser-gc）都在裡面。認 id 不認名字——那個專案使用者改得動名字
- *   （2026-09-13 已經從 `AGM` 改成 `AGM-DM-GRUP`）。
+ * 排序＝緊急度（2026-09-12 使用者／AGM，推翻 9/11 分組）：needs-reply → 未讀 → waits-kids → current → 其餘；
+ * 同級照 `bots` 順序。不分組標籤：分組會把第 9 顆 needs-reply 擠出視野（使用者 2026-09-12 錯過 blocked bot）。
+ * 手機不排序（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：單行橫捲靠位置肌肉記憶。
+ * 版面（同日）：桌機換行最多兩行、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
+ * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
+ * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { Bot } from '../api/types'
@@ -45,16 +15,14 @@ import { chipTracked } from '../lib/supervisorProject'
 import { useStore } from '../store/store'
 import './unreadChip.css'
 
-/** 跟 `unreadChip.css` 裡那個斷點同一個值：以下是手機的單行橫捲，以上是桌機的兩行換行。 */
+/** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
 
-/** 緊急度。數字小的排前面（見檔頭）。 */
 const RANK = { needsReply: 0, unread: 1, waitsKids: 2, current: 3, rest: 4 } as const
 
 interface ChipItem {
   id: string
   name: string
-  /** 點下去要開的東西：bot 的對話。 */
   go: () => void
   rank: number
   current: boolean
@@ -66,18 +34,14 @@ interface ChipItem {
   title: string
 }
 
-/** 標題列下面那一列。 */
 export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
   const selectedBotId = useStore((s) => s.selectedBotId)
   const selectBot = useStore((s) => s.selectBot)
-  // 總管專案（daemon 自己建的環境）整個不算——那底下只有總管與它開出去的工人。
-  // 用 `GET /api/supervisor` 的 `project_id`，不是名字：那個專案使用者改得動名字。
   const supervisorProjectId = useStore((s) => s.supervisorProjectId)
-  // 點進一顆 bot 的那一刻 `selectBot` 會同步清掉它的未讀，所以光看 `botUnread`，晶片會在手指
-  // 底下當場消失。記住「它在被選走的前一刻有沒有未讀」，讓它留在列上。
+  // `selectBot` 會同步清未讀，不記住的話晶片會在手指底下消失。
   const keptId = keepSelectedRow(selectedBotId, botUnread)
 
   const narrow = useMediaQuery(NARROW_QUERY)
@@ -89,7 +53,7 @@ export function UnreadChip() {
     const out: ChipItem[] = []
     for (const b of bots) {
       if (b.pending) continue
-      // 釘選是使用者自己指定的，所以不受排除規則影響（AGM、子 agent 都釘得起來）。
+      // 釘選是使用者自己指定的，不受排除規則影響。
       const pinned = b.primary
       const n = botUnread[b.id] ?? 0
       const status = runs[b.id]?.agent_status
@@ -112,7 +76,6 @@ export function UnreadChip() {
         title: botTitle(b.name, pinned, n, needsReply, kids, current),
       })
     }
-    // 手機：位置固定（見檔頭）。桌機：穩定排序，同一級之內維持上面推進去的順序（＝`bots` 的順序）。
     if (narrow) return out
     return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
   }, [supervisorProjectId, botUnread, bots, keptId, narrow, runs, selectBot, selectedBotId])
@@ -121,14 +84,13 @@ export function UnreadChip() {
   const [expanded, setExpanded] = useState(false)
   const hidden = useOverflowRows(barRef, !narrow && !expanded, items.length)
   const scroll = useHorizontalScroll(barRef, narrow)
-  // 換 bot（或這一列的組成變了）就把 `current` 那顆捲進畫面。`aria-current` 當選擇器。
   useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
 
   if (items.length === 0) return null
   const clipped = !narrow && !expanded && hidden > 0
   return (
     <div className={`unread-bar-wrap${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
-      {/* 能捲才畫箭頭：只有陰影的話使用者看不出這裡還有東西（2026-09-12 使用者回報）。 */}
+      {/* 箭頭：只有陰影看不出能捲（2026-09-12 使用者回報）。 */}
       {scroll.left ? (
         <button type="button" className="unread-bar-arrow left" aria-label="往左看更多" onClick={() => scroll.by(-1)}>
           ◂
@@ -156,7 +118,6 @@ export function UnreadChip() {
             ) : null}
             <span className="unread-chip-name">{it.name}</span>
             {it.unread > 0 ? <span className="unread-chip-n">{it.unread > 99 ? '99+' : it.unread}</span> : null}
-            {/* 藍＝還在跑、紅＝等你回答、黃＝等子 agent。 */}
             {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
           </button>
         ))}
@@ -166,7 +127,6 @@ export function UnreadChip() {
           ▸
         </button>
       ) : null}
-      {/* 桌機超過兩行：收起來的那幾顆一定是最不急的（排序見檔頭），按一下展開。 */}
       {!narrow && (hidden > 0 || expanded) ? (
         <button
           type="button"
@@ -196,15 +156,7 @@ function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean,
   return `${who}。${tail}`
 }
 
-/**
- * 兩行裝不下的有幾顆。
- *
- * 用量到的是每顆晶片的 `offsetTop`：同一行的值一樣，所以不同的 `offsetTop` 就是行。第三行
- * 起的全部算「沒顯示」——CSS 那邊 `.clipped` 只留兩行的高度，所以它們本來就看不到了。
- *
- * 刻意不去算「還能塞幾顆」再切陣列：那會讓 render 依賴自己的測量結果，一改就震盪。這裡
- * 永遠把全部畫出來、只是把超出的裁掉，測量只影響右邊那顆 `+N` 的數字。
- */
+/** 兩行裝不下的顆數（依 `offsetTop` 分行）。永遠全畫、CSS 裁切，不切陣列——render 依賴測量會震盪。 */
 function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boolean, count: number): number {
   const [hidden, setHidden] = useState(0)
   const measure = useCallback(() => {
@@ -217,8 +169,7 @@ function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boole
     const rows: number[] = []
     for (const c of chips) if (!rows.includes(c.offsetTop)) rows.push(c.offsetTop)
     const cut = rows[1]
-    // 只在數字真的變了才寫 state：測量是在 layout effect 裡跑的（render 期間量不到
-    // `offsetTop`），同一個值重複寫會讓它每一幀都重繪一次。
+    // 值沒變就不寫 state，否則 layout effect 每幀重繪。
     const n = rows.length <= 2 ? 0 : chips.filter((c) => c.offsetTop > cut).length
     setHidden((prev) => (prev === n ? prev : n))
   }, [active, barRef])
@@ -233,12 +184,7 @@ function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boole
   return hidden
 }
 
-/**
- * 手機那條單行橫捲：滾輪（垂直）映射成橫捲，兩端能不能再捲用 state 記著，讓 ◂ ▸ 與陰影
- * 只有在真的捲得動時才出現。
- *
- * `preventDefault` 只在**真的捲得動**時做，否則在這一列上滾滑鼠會把整頁鎖住。
- */
+/** 手機橫捲：滾輪映射成橫捲；只在真的捲得動時 `preventDefault`，否則整頁被鎖住。 */
 function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: boolean) {
   const [edges, setEdges] = useState({ left: false, right: false })
   const sync = useCallback(() => {
@@ -255,8 +201,7 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
     const bar = barRef.current
     if (!bar) return
     sync()
-    // 滾輪要原生、非 passive 地掛：React 的 onWheel 是 passive，裡面的 preventDefault 無效，
-    // 「到底才把滾動還給整頁」的分流就失效，列橫捲的同時整頁也直捲。
+    // 原生非 passive 掛：React onWheel 是 passive，preventDefault 無效。
     const onWheel = (e: WheelEvent) => {
       if (!active) return
       const max = bar.scrollWidth - bar.clientWidth
@@ -284,13 +229,7 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
   return { ...edges, by }
 }
 
-/**
- * 把 `current` 那顆捲進畫面（只在這一列橫捲時有事做）。
- *
- * 不用 `Element.scrollIntoView`：它會連帶捲祖先，在手機上會把整個 `.app` 往旁邊推一格；
- * 這裡只動這一列自己的 `scrollLeft`。已經看得見就完全不動——不然每次重繪都把列拉回中間，
- * 使用者自己捲到的位置會被搶走。
- */
+/** 把 `current` 捲進畫面。不用 `scrollIntoView`（會連帶捲祖先、手機推走 `.app`）；看得見就不動。 */
 function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key: string) {
   useLayoutEffect(() => {
     const bar = barRef.current
@@ -305,14 +244,8 @@ function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key:
 }
 
 /**
- * 「被選走的前一刻，這顆 bot 有沒有未讀？」——有的話回它的 id，讓它留在列上。
- *
- * 為什麼要記：`selectBot` 會同步呼叫 `markBotRead` 把未讀清掉，所以重繪時
- * `botUnread[selectedBotId]` 已經是 0 了，看不出「它剛才在不在這一列」。
- *
- * 為什麼記在模組層而不是 `useState` / `useRef`：`App.tsx` 是 `<ChatPanel key={botId}>`，換 bot
- * 會把整棵（含這一列）重新掛載——元件自己的記憶正好在需要它的那一刻被清空。畫面上同時只有
- * 一列 `.unread-bar`，所以一份模組層的記憶就夠，而且它只從 `selectedBotId` / `botUnread` 推導。
+ * 被選走前一刻有未讀就回它的 id，讓它留在列上。
+ * 記在模組層：`<ChatPanel key={botId}>` 換 bot 會重新掛載，元件內記憶會被清空。
  */
 let lastUnread: Record<string, number> = {}
 let lastSelected: string | null = null

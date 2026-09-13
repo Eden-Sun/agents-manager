@@ -4,11 +4,7 @@ import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 
-/**
- * 身份預設（identities）：例如 `cc1` = 用另一個 `CLAUDE_CONFIG_DIR` 跑不同帳號。
- * daemon 啟動 bot 時把 `env` 注入 pane。身份的本體就是 env，所以表單只收 env；
- * `args` 契約仍在（舊設定讀得到），但 UI 不再提供輸入。
- */
+/** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）：daemon 啟動 bot 時注入 `env`；`args` 契約仍在但 UI 不提供輸入。 */
 
 /** `KEY=VALUE` 每行 → map；忽略空行與 `#` 註解。 */
 export function parseEnvText(text: string): Record<string, string> {
@@ -38,7 +34,7 @@ export function IdentityBadge({
   showDefault?: boolean
   kind?: BotKind
 }) {
-  // 沒指定身份時仍要標出來，不然本機預設和 cc1 在列表上長得一樣。
+  // 沒指定身份也要標出來，不然本機預設和 cc1 在列表上長得一樣。
   if (!name) {
     if (!showDefault) return null
     // claude 的本機預設帳號就是 cc0；其他 kind 沒有這套身分。
@@ -62,13 +58,7 @@ export function IdentityBadge({
   )
 }
 
-/**
- * 一個身份在每台主機上的登入狀態。
- *
- * 身份是全域設定，但它指到的帳號是**每台主機各自登入**的：`CLAUDE_CONFIG_DIR` 在每台機器
- * 都展得開，那個資料夾裡卻不一定有能用的帳號。所以這裡一台一台列，而不是給一個總結。
- * `null` = 問不到（CLI 沒裝、還沒偵測），標「未知」而不是「未登入」。
- */
+/** 身份在每台主機各自的登入狀態（帳號是每台各自登入的）；`null` = 問不到，標「未知」而非「未登入」。 */
 function IdentityHostLogins({ name }: { name: string }) {
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const localConnected = useStore((s) => s.connected)
@@ -169,7 +159,6 @@ function IdentityRow({ name }: { name: string }) {
       >
         ✕
       </button>
-      {/* 本來是 `window.confirm()`；跟主機、Project 一起換成同一顆確認框。 */}
       <ConfirmDialog
         open={confirmDelete}
         title="刪除身份"
@@ -236,7 +225,6 @@ function NewIdentityForm() {
           spellCheck={false}
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
-        {/* 同 `HostsPanel`：不要把 regex 印給使用者看。 */}
         {name && !nameOk ? (
           <span className="hint">小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字。</span>
         ) : null}
@@ -247,7 +235,7 @@ function NewIdentityForm() {
           value={kind}
           onChange={(e) => {
             const next = e.target.value as BotKind
-            // 預填的是各 kind 自己的設定目錄變數；使用者沒改過那一行才跟著換，免得把打好的蓋掉。
+            // 使用者沒改過那一行才跟著換 kind 的設定目錄變數，免得蓋掉打好的。
             setEnvText((t) => (t === ENV_PREFILL[kind] ? ENV_PREFILL[next] : t))
             setKind(next)
           }}
@@ -270,11 +258,7 @@ function NewIdentityForm() {
   )
 }
 
-/**
- * 從各主機 shell 認出來的 `ccN`（SPEC §16）。唯讀：它們是使用者 zshrc 裡的 alias，
- * 這裡只負責讓人看見「daemon 認到了什麼、指到哪個設定目錄、登入了沒」。
- * 同名的 config 身份會蓋過它，所以已經在上面列出來的就不重複列。
- */
+/** 從各主機 shell 認出來的 `ccN`（SPEC §16），唯讀；同名 config 身份會蓋過它，已列出的不重複。 */
 function ShellIdentities() {
   const configured = useStore((s) => s.identities)
   const local = useStore((s) => s.localIdentityStatus)
@@ -307,7 +291,7 @@ function ShellIdentities() {
             <span className="identity-detail" title={st.config_dir ?? '預設帳號（無 CLAUDE_CONFIG_DIR）'}>
               {st.config_dir ? `CLAUDE_CONFIG_DIR=${st.config_dir}` : '（預設帳號）'}
             </span>
-            {/* 和 config 那些列同一種 chip 容器，否則單獨一顆會被 flex 拉成整行寬。 */}
+            {/* 同一種 chip 容器，否則單獨一顆會被 flex 拉成整行寬。 */}
             <span className="identity-logins">
               <span className="identity-login-wrap">
                 <span

@@ -1,17 +1,7 @@
-//! grok quota (SPEC §12.6).
+//! grok quota (SPEC §12.6). The numbers only exist in the TUI's `/usage` dialog, so we drive a
+//! throwaway grok pane. It runs in its own unattached `am-quota` session: a narrow user pane cuts
+//! the percentage off, and probes every 30 s must not flash through the user's workspace.
 //!
-//! grok's CLI has no `usage` subcommand and no rate-limit RPC — the numbers only exist inside
-//! the TUI's `/usage` dialog. So the daemon opens a throwaway pane, starts a grok agent in it,
-//! types `/usage`, reads the rendered dialog back through `pane.read`, parses it and closes the
-//! pane again.
-//!
-//! The probe runs in its **own herdr session** (`am-quota`), never the user's. Two reasons:
-//! a pane in the user's session is as wide as their terminal, and grok truncates the dialog —
-//! at 32 columns the percentage is cut off the right edge entirely and no probe can ever
-//! succeed; an unattached session renders at a wide default grid instead. And a probe every
-//! 30 s must not flash panes through the workspace the user is looking at.
-//!
-//! The dialog looks like this (box drawing trimmed):
 //!
 //! ```text
 //! Context usage  Usage limit  Session info
@@ -19,9 +9,6 @@
 //! ████░░░░░░░░░░░░░░░░░░░░░░░░░░  14%
 //! Resets: September 12, 16:28
 //! ```
-//!
-//! Only a weekly window is reported today, so it lands on `seven_day`; an hourly row would map
-//! to `five_hour` if grok ever grows one.
 
 use crate::config::LOCAL_HOST;
 use crate::herdr::{AgentStatus, HerdrClient};
@@ -33,16 +20,11 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// One probe opens a grok process for ~10 s, so the cycle is mostly probe. The user asked for
-/// this cadence explicitly ("30s is ok"); the weekly number then tracks the TUI closely.
+/// User-specified cadence ("30s is ok"), even though a probe holds grok for ~10 s.
 pub const GROK_POLL: Duration = Duration::from_secs(30);
 
-/// How long to wait for the `/usage` dialog to render before giving up.
 const DIALOG_TIMEOUT: Duration = Duration::from_secs(25);
 
-// ------------------------------------------------------------------ parsing
-
-/// Box drawing, bar glyphs and the dialog frame carry no information — drop them.
 fn clean(line: &str) -> String {
     let s: String = line
         .chars()
@@ -64,8 +46,7 @@ fn month_num(tok: &str) -> Option<u32> {
     M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
 }
 
-/// `Resets: September 12, 16:28` → RFC3339. The year is omitted by grok, so it is inferred:
-/// the current one, rolled forward when that would put the reset in the past.
+/// grok omits the year: assume this one, rolled forward if that puts the reset in the past.
 pub fn parse_reset(rest: &str, now: DateTime<Local>) -> Option<String> {
     let mut month = None;
     let mut day = None;
@@ -116,8 +97,7 @@ pub fn parse_reset(rest: &str, now: DateTime<Local>) -> Option<String> {
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-/// `████░░░░  14%` → `14.0`. Only bar rows are accepted, so the context-usage percentage in
-/// another tab can never be mistaken for a rate limit.
+/// Bar rows only, so the context-usage percentage is never mistaken for a rate limit.
 fn parse_pct(line: &str) -> Option<f64> {
     if !line.contains('█') && !line.contains('░') {
         return None;
@@ -130,7 +110,6 @@ fn parse_pct(line: &str) -> Option<f64> {
     num.chars().rev().collect::<String>().parse().ok()
 }
 
-/// `Weekly limit (SuperGrok)` → (`weekly`, `SuperGrok`).
 fn parse_header(line: &str) -> Option<(String, Option<String>)> {
     let low = line.to_ascii_lowercase();
     let at = low.find(" limit")?;
@@ -142,7 +121,6 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
     Some((window, plan.filter(|p| !p.is_empty())))
 }
 
-/// The whole `/usage` screen → a Quota, or `None` when no limit row is on it yet.
 pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
     let lines: Vec<String> = screen.lines().map(clean).collect();
     let mut five: Option<Window> = None;
@@ -154,7 +132,6 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
             i += 1;
             continue;
         };
-        // The bar and the reset line follow the header, with blank rows in between.
         let mut pct = None;
         let mut resets = None;
         let mut j = i + 1;
@@ -200,14 +177,10 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
     })
 }
 
-// ------------------------------------------------------------------ the probe
-
-/// The dedicated herdr session the probe lives in. Never attached, so it renders wide.
 const PROBE_SESSION: &str = "am-quota";
-/// Label on every probe workspace, so stale ones are recognisable after a daemon restart.
+/// Lets stale probe workspaces be recognised after a daemon restart.
 const PROBE_LABEL: &str = "am-quota-grok";
 
-/// A client for [`PROBE_SESSION`], starting its herdr server the first time.
 async fn probe_client() -> Result<HerdrClient> {
     let client = HerdrClient::new(HerdrClient::session_socket(PROBE_SESSION));
     if client.ping().await.is_ok() {
@@ -231,15 +204,13 @@ async fn probe_client() -> Result<HerdrClient> {
     Err(anyhow!("the `{PROBE_SESSION}` herdr session did not come up"))
 }
 
-/// Close probe workspaces left behind by a daemon that died mid-probe — each one still holds a
-/// live grok process. Also sweeps the local session, where probes ran before they moved out.
+/// Probe workspaces orphaned by a daemon that died mid-probe still hold a live grok process.
 pub async fn sweep_stale(app: &Arc<App>) {
     let mut clients = Vec::new();
     if let Ok(c) = probe_client().await {
         clients.push(c);
     }
-    // The local session (where probes used to run) plus every connected remote session, which
-    // is where a remote probe lives by design — see [`client_for`].
+    // Remote probes live in the remote session by design — see [`client_for`].
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
             clients.push(c);
@@ -273,8 +244,7 @@ impl Drop for Probe {
     }
 }
 
-/// Where the probe runs for `host` — see [`crate::quota_claude::client_for`] for why a remote
-/// host borrows the daemon's own forwarded session instead of its own `am-quota` one.
+/// Remote hosts borrow the forwarded session — see [`crate::quota_claude::client_for`].
 async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
     if host == LOCAL_HOST {
         return probe_client().await;
@@ -286,11 +256,10 @@ async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
     app.herdr_for(host).await.ok_or_else(|| anyhow!("no herdr client for `{host}`"))
 }
 
-/// One grok quota read on `host`. `Ok(false)` = grok is not installed there (quota stays null).
+/// `Ok(false)` = grok is not installed there (quota stays null).
 pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
-    // The start-up poller can beat CLI detection to the cache; an empty cache is "unknown",
-    // not "missing", so detect once rather than reporting grok as uninstalled for 30 minutes.
+    // The start-up poller can beat detection; empty cache = unknown, not missing.
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
     }
@@ -334,15 +303,10 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     Err(anyhow!("grok `/usage` on {host} did not report a limit within {DIALOG_TIMEOUT:?}"))
 }
 
-// ------------------------------------------------ backoff (SPEC §16.4, the grok half)
-
-/// How long a failed probe parks a host. A grok that is installed but cannot draw `/usage`
-/// (not logged in, a trust prompt, a TUI that never settles) used to cost `workspace.create` +
-/// `agent.start` + up to 60 s `agent.wait` + 25 s of screen reads **every 30 s**, forever.
+/// Backoff (SPEC §16.4): a grok that can't draw `/usage` otherwise costs a full probe every 30 s forever.
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
 
-/// `quota_key(host, "grok")` → when that host may be probed again. In memory only: a restart
-/// costs one extra probe, which is the safe direction to err in.
+/// In memory only: a restart costs one extra probe, the safe direction to err in.
 fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
         std::sync::OnceLock::new();
@@ -365,16 +329,12 @@ fn park(key: &str, how_long: Duration) {
     backoff_map().lock().unwrap().insert(key.to_string(), std::time::Instant::now() + how_long);
 }
 
-/// The two §16.4 skip rules, as a pure function so they can be tested: tool detection says
-/// grok is logged out on this host, or a probe of our own failed recently.
+/// §16.4 skip rules: logged out, or our own probe failed recently.
 pub(crate) fn should_probe_grok(logged_in: Option<bool>, cooling: bool) -> bool {
     logged_in != Some(false) && !cooling
 }
 
-/// What the poller does with one host: `None` = skipped this cycle (logged out / cooling
-/// down), otherwise `refresh_grok`'s answer. A failure parks the host for
-/// `RETRY_AFTER_FAILURE`; `GET /api/quota?refresh=1` calls `refresh_grok` directly and so
-/// always gets a real attempt.
+/// `None` = skipped this cycle. `GET /api/quota?refresh=1` bypasses this and always really probes.
 pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
     let key = crate::quota::quota_key(host, "grok");
     let logged_in = app.tools.lock().await.get(host).and_then(|t| t.tools.get("grok")).and_then(|t| t.logged_in);
@@ -390,7 +350,6 @@ pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bo
     }
 }
 
-/// Start-up + every 30 s, for `local` and every connected remote host.
 pub fn spawn_grok_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;

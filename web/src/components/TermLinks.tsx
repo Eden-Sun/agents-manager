@@ -2,12 +2,8 @@ import type { ReactNode } from 'react'
 import { TermLink } from './TermLink'
 
 /**
- * URL 在終端畫面裡是可點的：點一下複製到剪貼簿（不是開新分頁——這種 URL 多半是登入用的
- * 一次性連結，使用者要的是貼到別處，開了反而跳錯瀏覽器／錯帳號）。
- *
- * 終端會把長 URL 硬折行：一行剛好塞滿 `columns` 欄就接到下一行開頭，中間沒有任何分隔。
- * 畫面上維持原本的折行（不然 `<pre>` 會橫向捲動），但每一段都指向**接回來的完整 URL**，
- * 點哪一段複製到的都是整條。`columns` 不知道時拿最長的一行當寬度。
+ * 終端裡的 URL 點一下複製（多半是一次性登入連結，開新分頁反而跳錯瀏覽器／帳號）。
+ * 長 URL 被硬折行時保留畫面折行，但每一段都指向接回來的完整 URL。
  */
 const URL_CHARS = /[^\s<>"'`）」』]/
 const URL_RE = /https?:\/\/[^\s<>"'`）」』]+/g
@@ -28,18 +24,8 @@ function isFullWrap(line: string | undefined, width: number): boolean {
 }
 
 /**
- * 第 `i` 行的 URL 剛好跑到行尾——這是終端把它折下去了，還是它本來就在這裡結束？
- *
- * 不能只看「這行是不是畫面上最長的一行」：claude 的登入畫面有一條 185 欄的框線，URL 卻是
- * 在 78 欄折的，拿最長行當寬度時每一段 URL 都「沒塞滿」，於是只有第一行被 linkify、複製到的
- * 是腰斬的網址（實測 2026-09-08）。所以改成三條各自獨立的證據，中一條就接：
- *
- *   (a) 下一行是「剛好同寬、整行沒有空白」的續行——只有軟折行會長這樣，跟畫面上其他東西
- *       多寬無關。折成三行以上的長 URL 都吃這條。
- *   (b) 這行的長度剛好等於終端的 `columns`：典型的硬折行，就算只折一次也算數。
- *   (c) 這行剛好是畫面上最長的一行（舊行為，`observed`）：折一次、又不知道 columns 時的後路。
- *
- * 都不中就不接——寧可漏接也不要把真正換行的相鄰兩行黏成一條假網址。
+ * 第 `i` 行的 URL 跑到行尾，是被折下去還是本來就結束？不能只看最長行：claude 登入畫面有 185 欄框線、URL 卻在 78 欄折（實測 2026-09-08）。
+ * 三條證據中一條就接：(a) 下一行同寬且無空白 (b) 行長等於 `columns` (c) 是畫面最長行（不知 columns 的後路）。都不中寧可漏接。
  */
 function wrapsToNextLine(lines: string[], i: number, columns: number | null | undefined, longest: number): boolean {
   const width = lines[i].length
@@ -56,7 +42,6 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
   const lines = text.split('\n')
   const longest = Math.max(0, ...lines.map((l) => l.length))
   const rows: Piece[][] = []
-  // 上一行的 URL 跑到行尾且判定為折行 → 這一行開頭的連續非空白是它的延續。
   let carry: { url: string; frags: Piece[]; width: number } | null = null
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -70,7 +55,6 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
         carry.url += m[0]
         row.push(piece)
         from = m[0].length
-        // 整行都是這條 URL 而且跟上一行等寬 → 還會再折下去；否則 URL 就在這一行結束。
         if (from !== line.length || line.length !== carry.width) {
           for (const f of carry.frags) f.url = trimPunct(carry.url)
           carry = null

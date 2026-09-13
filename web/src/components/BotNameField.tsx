@@ -4,19 +4,8 @@ import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
 
 /**
- * The bot's name, renamed in place. Nicknames get changed often (they are how you tell two
- * `claude`s apart mid-task), and routing that through the settings panel every time is a
- * three-click detour — so the name itself is the field: click, type, Enter.
- *
- * `PATCH /bots/:id {name}` is safe while the bot is running (docs/API.md §「bot.name 是暱稱」):
- * herdr's own agent name is derived from the bot id, not from this.
- *
- * Two placements, one behaviour:
- * - `variant="head"` (chat header): a click always starts editing.
- * - `variant="row"` (sidebar): a click starts editing **only when the row is already
- *   selected** (`armed`). On an unselected row the first click has to mean "open this bot",
- *   so the name renders as plain text and the click falls through to the row — the same
- *   click-then-click-again rename every file browser uses.
+ * The bot's name, renamed in place (click, type, Enter). `PATCH /bots/:id {name}` is safe while running
+ * (docs/API.md §「bot.name 是暱稱」). `variant="row"` edits only when already selected (`armed`); otherwise the click selects the row.
  */
 export function BotNameField({
   botId,
@@ -105,8 +94,7 @@ export function BotNameField({
   }
 
   if (variant === 'row') {
-    // Not a <button>: the row itself is the click target for selection, and a button inside
-    // an option is both invalid and un-draggable. Armed rows get the edit affordance.
+    // Not a <button>: a button inside a listbox option is invalid and un-draggable.
     return (
       <span
         className={`bot-name${armed ? ' renamable' : ''}`}

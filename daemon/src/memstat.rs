@@ -1,14 +1,5 @@
-//! How much RAM the herdr side of the world is holding.
-//!
-//! The number the UI shows in its top-left corner is the **resident set of every herdr
-//! process tree**: the `herdr` server itself plus everything it spawned — the panes and the
-//! agent CLIs living in them. That is the honest answer to "how much is this costing me",
-//! because a pane full of `claude` is where the memory actually goes; herdr's own daemon is
-//! a rounding error next to it.
-//!
-//! One `ps` per host per tick, parsed here. `ps` is used rather than a sysinfo crate because
-//! remote hosts have to be measured over ssh anyway, and running the same command in both
-//! places keeps the two numbers comparable.
+//! RSS of every herdr process tree (herdr + panes + agent CLIs): the agents are where the memory goes.
+//! `ps` instead of a sysinfo crate: remote hosts go over ssh anyway, same command keeps numbers comparable.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,24 +9,15 @@ use serde_json::json;
 
 use crate::state::App;
 
-/// Long enough that a per-host `ps` (an ssh round trip for remote ones) is cheap, short
-/// enough that starting a bot shows up while you are still looking at the screen.
 const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// `ps` output is the same shape everywhere we run: pid, ppid, RSS in KiB, then argv.
-/// `-ww` so macOS does not clip argv to the terminal width; the exe name is the first
-/// token, but a clipped line still costs us the tail of long agent command lines.
+/// `-ww` so macOS does not clip long agent argv to the terminal width.
 const PS_CMD: &str = "ps -Awwo pid=,ppid=,rss=,args= 2>/dev/null";
 
-/// 同一次往返順便問「這台機器還剩多少記憶體」（使用者 2026-09-12：「除了已用量，也要能夠 show
-/// 出剩餘 ram 量」）。herdr 進程樹佔 7G 這個數字本身回答不了「還能不能再開一顆 bot」——那要看整台
-/// 機器還剩什麼。遠端主機一次 ssh 就順便帶回來，不另外開一趟。
-///
-/// Linux 有 `/proc/meminfo`（`MemTotal` / `MemAvailable` 直接就是答案）；macOS 沒有，得用
-/// `sysctl hw.memsize` 拿總量、`vm_stat` 拿頁數自己算。兩種輸出都丟進 [`parse_machine`]。
+/// 使用者 2026-09-12：「除了已用量，也要能夠 show 出剩餘 ram 量」；同一次 ssh 往返帶回。
+/// macOS 沒有 `/proc/meminfo`，改用 `sysctl hw.memsize` + `vm_stat` 自己算。
 const MACHINE_CMD: &str = "cat /proc/meminfo 2>/dev/null || { sysctl -n hw.memsize 2>/dev/null; vm_stat 2>/dev/null; }";
 
-/// 一次 shell 往返拿兩段：機器記憶體、然後 `ps`。分隔線是固定字串，`ps` 的 argv 不會長這樣。
 const MACHINE_MARK: &str = "__AM_MACHINE__";
 const PS_MARK: &str = "__AM_PS__";
 
@@ -43,8 +25,7 @@ fn sample_cmd() -> String {
     format!("echo {MACHINE_MARK}; {MACHINE_CMD}; echo {PS_MARK}; {PS_CMD}")
 }
 
-/// 把一次取樣的輸出切成「機器那段」與「`ps` 那段」。舊格式（只有 ps）也要吃得下：找不到分隔線
-/// 就當整段都是 ps，機器資訊為 `None`——一台還沒更新的遠端主機不該讓整格變成空白。
+/// 找不到分隔線就當整段都是 ps：還沒更新的遠端主機不該讓整格變空白。
 fn split_sample(out: &str) -> (Option<MachineMem>, &str) {
     let Some(pi) = out.find(PS_MARK) else { return (None, out) };
     let head = &out[..pi];
@@ -58,49 +39,37 @@ fn split_sample(out: &str) -> (Option<MachineMem>, &str) {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct HostMem {
     pub host: String,
-    /// RSS of the `herdr` processes themselves, bytes.
     pub herdr_bytes: u64,
-    /// RSS of everything running underneath them (panes, agent CLIs), bytes.
+    /// Everything underneath herdr (panes, agent CLIs).
     pub agents_bytes: u64,
-    /// `herdr_bytes + agents_bytes`, so the UI never has to add them up itself.
     pub total_bytes: u64,
-    /// How many processes that total covers, herdr roots included.
     pub processes: u32,
     /// Set when this host could not be sampled; the other fields are then 0.
     pub error: Option<String>,
-    /// Chromium-family browsers on this host (Chrome, ego), 2026-09-08: their tab count is the
-    /// other big RAM lever on a workstation, and the UI warns when it runs away.
+    /// 2026-09-08: browser tab count is the other big RAM lever; the UI warns when it runs away.
     #[serde(default)]
     pub browsers: Vec<BrowserMem>,
-    /// 整台機器的總量與剩餘可用量（2026-09-12）。量不到就是 `None`，UI 只是少顯示「還剩多少」。
+    /// 2026-09-12；量不到就是 `None`。
     #[serde(default)]
     pub machine: Option<MachineMem>,
 }
 
-/// 整台機器的記憶體（SPEC §15）。`available` 是「現在還能給出去的量」，不是 `total - 我們用掉的`：
-/// 那台機器上還有瀏覽器、編輯器、系統自己，而 macOS 的快取（inactive / purgeable）隨時可以回收，
-/// 算成「已用」會讓人以為記憶體早就見底。
+/// SPEC §15。`available` 不是 `total - 我們用掉的`：macOS 快取隨時可回收，算成已用會像見底。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MachineMem {
-    /// 實體記憶體總量，bytes。
     pub total_bytes: u64,
-    /// 現在還可用的量，bytes。Linux 取 `MemAvailable`；macOS 取 free + inactive + speculative
-    /// + purgeable 的頁數換算（＝核心認為可以馬上回收的部分）。
+    /// Linux `MemAvailable`；macOS free + inactive + speculative + purgeable 頁。
     pub available_bytes: u64,
 }
 
 impl MachineMem {
-    /// 已用 = 總量 − 可用。UI 兩邊都要（「還剩多少」與「用掉多少」），算在這裡就不會兩處各算一套。
     pub fn used_bytes(&self) -> u64 {
         self.total_bytes.saturating_sub(self.available_bytes)
     }
 }
 
-/// `/proc/meminfo`（Linux）或 `sysctl -n hw.memsize` + `vm_stat`（macOS）→ [`MachineMem`]。
-///
-/// 兩邊都認不出來（指令不存在、輸出被截斷）就回 `None`：少一個數字沒關係，猜一個會誤導。
+/// 認不出來就回 `None`：少一個數字沒關係，猜一個會誤導。
 pub fn parse_machine(out: &str) -> Option<MachineMem> {
-    // Linux: `MemTotal:  16316412 kB` / `MemAvailable:  9381234 kB`
     let kib = |key: &str| -> Option<u64> {
         out.lines()
             .find(|l| l.trim_start().starts_with(key))
@@ -130,25 +99,19 @@ pub fn parse_machine(out: &str) -> Option<MachineMem> {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0)
     };
-    // 可回收的四種：真正空的、非活躍的（檔案快取）、投機預讀、可丟棄的。
     let avail = (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page;
     Some(MachineMem { total_bytes: total, available_bytes: avail.min(total) })
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BrowserMem {
-    /// `Chrome` / `ego`.
     pub name: String,
-    /// Renderer processes (`--type=renderer`): one per tab as a rule, though Chrome shares a
-    /// renderer between same-site tabs and gives extensions their own — close enough to
-    /// "how many tabs are open" for a warning light.
+    /// Renderer processes: not exactly tabs (same-site sharing, extensions) but close enough for a warning.
     pub tabs: u32,
-    /// RSS of every process belonging to that app bundle, bytes.
     pub bytes: u64,
     pub processes: u32,
 }
 
-/// Which browser an argv belongs to, by its app bundle path. Only the two we care about.
 fn browser_of(argv: &str) -> Option<&'static str> {
     if argv.contains("Google Chrome.app/") || argv.starts_with("/opt/google/chrome/") {
         Some("Chrome")
@@ -159,7 +122,6 @@ fn browser_of(argv: &str) -> Option<&'static str> {
     }
 }
 
-/// Per-browser tab count and RSS from one `ps` dump.
 pub fn sum_browsers(out: &str) -> Vec<BrowserMem> {
     let mut map: std::collections::BTreeMap<&'static str, BrowserMem> = std::collections::BTreeMap::new();
     for p in parse_ps(out) {
@@ -190,7 +152,6 @@ pub(crate) struct Proc {
     pub argv: String,
 }
 
-/// The command's own name, with the path and any interpreter prefix stripped:
 /// `/opt/homebrew/bin/herdr --session x` → `herdr`.
 pub(crate) fn exe_name(argv: &str) -> &str {
     let first = argv.split_whitespace().next().unwrap_or("");
@@ -205,19 +166,17 @@ pub(crate) fn parse_ps(out: &str) -> Vec<Proc> {
         let (Ok(pid), Ok(ppid), Ok(rss_kib)) = (pid.parse::<i32>(), ppid.parse::<i32>(), rss.parse::<u64>()) else {
             continue;
         };
-        // argv keeps its internal spacing; only the three fixed columns were split off.
         let argv = line.split_whitespace().skip(3).collect::<Vec<_>>().join(" ");
         v.push(Proc { pid, ppid, rss_kib, argv });
     }
     v
 }
 
-/// Whether this process *is* the herdr binary (not merely something mentioning it).
+/// Exe name, not argv substring: `grep herdr` is not herdr.
 pub(crate) fn is_herdr(p: &Proc) -> bool {
     exe_name(&p.argv) == "herdr"
 }
 
-/// ppid -> child pids, for walking a tree downwards.
 pub(crate) fn child_index(procs: &[Proc]) -> HashMap<i32, Vec<i32>> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
     for p in procs {
@@ -226,8 +185,7 @@ pub(crate) fn child_index(procs: &[Proc]) -> HashMap<i32, Vec<i32>> {
     children
 }
 
-/// The pids of the herdr **roots**: a process whose executable is `herdr` and which has no
-/// herdr ancestor — otherwise a `herdr` that shells out to `herdr` would be counted twice.
+/// Only herdr with no herdr ancestor — otherwise a `herdr` shelling out to `herdr` counts twice.
 pub(crate) fn herdr_roots(procs: &[Proc], by_pid: &HashMap<i32, &Proc>) -> Vec<i32> {
     procs
         .iter()
@@ -249,14 +207,7 @@ pub(crate) fn herdr_roots(procs: &[Proc], by_pid: &HashMap<i32, &Proc>) -> Vec<i
         .collect()
 }
 
-/// Sum the herdr trees in one `ps` dump.
-///
-/// A herdr **root** is a process whose own executable is `herdr` and whose parent is not
-/// already inside a herdr tree — otherwise a `herdr` that shells out to `herdr` would be
-/// counted twice. Everything reachable from a root is an "agent": that is where the CLIs
-/// live, and they are the reason this number is worth showing at all.
 pub fn sum_herdr(out: &str, host: &str) -> HostMem {
-    // 同一段輸出前面可能帶著機器記憶體那一節（見 [`sample_cmd`]）；切掉之後才是 `ps`。
     let (machine, out) = split_sample(out);
     let procs = parse_ps(out);
     let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
@@ -326,9 +277,7 @@ async fn sample_local(host: &str) -> HostMem {
     }
 }
 
-/// One sample of every host we can currently reach. A disconnected host is reported with an
-/// `error` rather than dropped, so the UI can say "this host is not counted" instead of
-/// silently showing a smaller number.
+/// A disconnected host gets an `error`, not dropped, so the UI doesn't silently show a smaller number.
 pub async fn sample(app: &Arc<App>) -> MemSnapshot {
     let mut hosts = Vec::new();
     for conn in app.hosts.list().await {
@@ -374,16 +323,13 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
     }
 }
 
-/// Sample every `SAMPLE_EVERY` and push the result out over the socket. Only a change is
-/// pushed: the number moves constantly by a few KiB and a frame every 15s per client for
-/// that is noise. `GET /api/mem` still answers with the latest value at any time.
+/// Only pushes changes (≥1 MiB drift): a frame per client every 15s for KiB jitter is noise.
 pub fn spawn_poller(app: Arc<App>) {
     tokio::spawn(async move {
         let mut last: Option<MemSnapshot> = None;
         loop {
             let snap = sample(&app).await;
             let changed = match &last {
-                // Ignore drift below 1 MiB; it is never what the user is looking at.
                 Some(prev) => prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024 || prev.hosts.len() != snap.hosts.len(),
                 None => true,
             };
@@ -398,7 +344,6 @@ pub fn spawn_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
-
     /// m4p 實機的 `sysctl -n hw.memsize` + `vm_stat`（2026-09-12）：16 GiB，可回收約 5.5 GiB。
     #[test]
     fn macos_machine_memory_comes_from_memsize_and_vm_stat() {
@@ -413,12 +358,10 @@ Pages wired down:                             169646.\n\
 Pages purgeable:                                 809.\n";
         let m = parse_machine(out).unwrap();
         assert_eq!(m.total_bytes, 17_179_869_184);
-        // (8261 + 299465 + 29406 + 809) 頁 × 16 KiB
         assert_eq!(m.available_bytes, (8261 + 299465 + 29406 + 809) * 16384);
         assert_eq!(m.used_bytes(), m.total_bytes - m.available_bytes);
     }
 
-    /// Linux 的 `/proc/meminfo` 直接就有答案，不必自己加頁數。
     #[test]
     fn linux_machine_memory_comes_from_meminfo() {
         let out = "MemTotal:       16316412 kB\nMemFree:          812344 kB\nMemAvailable:    9381234 kB\nBuffers:          123456 kB\n";
@@ -427,14 +370,12 @@ Pages purgeable:                                 809.\n";
         assert_eq!(m.available_bytes, 9_381_234 * 1024);
     }
 
-    /// 認不出來就 `None`——少一個數字沒關係，猜一個會誤導。
     #[test]
     fn an_unreadable_machine_section_is_none() {
         assert!(parse_machine("").is_none());
         assert!(parse_machine("sh: sysctl: command not found\n").is_none());
     }
 
-    /// 一次取樣的輸出要切得開；沒有分隔線的舊格式（只有 ps）仍然算得出 herdr 的數字。
     #[test]
     fn one_sample_carries_both_sections_and_the_old_format_still_parses() {
         let ps = "  100   1  2048 /opt/homebrew/bin/herdr --session x\n";
@@ -444,7 +385,6 @@ Pages purgeable:                                 809.\n";
         let m = h.machine.expect("機器那段也讀到了");
         assert_eq!(m.total_bytes, 1_048_576 * 1024);
         assert_eq!(m.available_bytes, 524_288 * 1024);
-        // 舊格式：整段都是 ps，機器資訊為 None，但 herdr 的數字不受影響。
         let old = sum_herdr(ps, "local");
         assert_eq!(old.herdr_bytes, 2048 * 1024);
         assert!(old.machine.is_none());
@@ -480,7 +420,6 @@ Pages purgeable:                                 809.\n";
     fn sums_the_tree_not_just_herdr() {
         let m = sum_herdr(PS, "local");
         assert_eq!(m.herdr_bytes, 48_000 * 1024);
-        // zsh + claude + codex, not the unrelated ssh/grep.
         assert_eq!(m.agents_bytes, (30_000 + 820_000 + 640_000) * 1024);
         assert_eq!(m.total_bytes, m.herdr_bytes + m.agents_bytes);
         assert_eq!(m.processes, 4);
@@ -488,7 +427,6 @@ Pages purgeable:                                 809.\n";
 
     #[test]
     fn a_process_merely_mentioning_herdr_is_not_one() {
-        // `grep herdr` has "herdr" in its argv but is not the herdr binary.
         let m = sum_herdr("  600     1   9000 grep herdr\n", "local");
         assert_eq!(m.total_bytes, 0);
         assert_eq!(m.processes, 0);

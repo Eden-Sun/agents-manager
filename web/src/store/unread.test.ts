@@ -111,8 +111,6 @@ test('localStorage 整支不能用時不會炸（無痕視窗）', () => {
   saveMarks({ 'bot:b1': { at: 'x', id: 'y' } })
 })
 
-// ---------------------------------------------------------- 一個回合只跳一下
-
 test('有 turn_id 就用 turn_id 記帳', () => {
   assert.equal(completionKey(msg('m1', 'assistant', '2026-09-07T00:00:01Z', 't1'), ['t1']), 't1')
 })
@@ -126,11 +124,7 @@ test('連一個回合都不知道時才退回 msg:<id>', () => {
   assert.equal(completionKey(msg('m1', 'assistant', '2026-09-07T00:00:01Z'), []), 'msg:m1')
 })
 
-/**
- * 這就是重複計數的那個 bug：沒有 turn_id 的回覆先被 `message_added` 記一次、`turn_updated`
- * 再記一次，`takeTurnCompletion` 兩個 key 對不上，一則回覆讓徽章跳兩下。兩種 frame 順序都要
- * 只跳一次。
- */
+/** 防重複計數：沒 turn_id 的回覆兩種 frame 的 key 曾對不上，一則回覆跳兩下。 */
 test('message_added 與 turn_updated 不管誰先到，同一個回合只記一次', () => {
   for (const messageFirst of [true, false]) {
     resetTurnCompletions()

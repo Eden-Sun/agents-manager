@@ -5,12 +5,8 @@ import { projectHostName, useStore } from '../store/store'
 import { UpdateChangelog } from './UpdateChangelog'
 
 /**
- * codex 在 TUI 裡當場問的升級提示（`Update available! 0.153.4 -> 0.154.0`）上面那條
- * 「先看改了什麼」。跟 claude 的「有更新 · 重啟套用」同一個要求：按 1 之前先看新版改了什麼。
- *
- * 兩個地方都要長：`BlockedModal`（全畫面）與對話上方那條 `BlockedPanel`——2026-09-10 使用者
- * 回報只有全畫面才有，而看到提示的第一個畫面通常是那條面板，在那裡就得能先看 changelog。
- * 認不出來（不是 codex、畫面上沒有那句話）就什麼都不長。
+ * codex TUI 升級提示（`Update available! 0.153.4 -> 0.154.0`）上的「先看改了什麼」。
+ * `BlockedModal` 與 `BlockedPanel` 都要有（2026-09-10 使用者：只有全畫面才有）。
  */
 export function CodexUpdateHint({
   botId,
@@ -33,8 +29,6 @@ export function CodexUpdateHint({
       <button type="button" className="mini-btn" onClick={() => setShowLog((v) => !v)}>
         {showLog ? '收起 changelog' : '先看改了什麼'}
       </button>
-      {/* 選項本身也在這裡按掉：這個提示每顆 codex 都會撞到，而答案永遠是那三個數字之一，
-          不該讓人自己去終端上找游標在哪。數字原樣送進 pane，等於在終端上按同一顆鍵。 */}
       <button type="button" className="mini-btn" title="送出 1：現在更新（codex 會自己跑安裝指令）" onClick={() => press(['1'])}>
         1 更新
       </button>

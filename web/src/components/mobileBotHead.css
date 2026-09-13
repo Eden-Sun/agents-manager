@@ -1,18 +1,5 @@
-/*
- * 手機（≤640px）bot 標題列的排位（2026-09-11，ego 390px 實測；同日使用者再調一次位置）。
- *
- * 問題：第一行擠了 ☰、名字、⚙、git、★、對話／終端 六樣，名字只剩 94px，
- * 兩顆 `c0-fable-…` 開頭的兄弟 bot 在標題列上完全分不出來。
- *
- * 位置（使用者指定）：
- * - 第一行：☰、名字、★、⚙、分頁。★ 在齒輪左邊。
- * - 第二行：kind 圖示＋版本號，貼在名字底下。
- * - 第三行：額度列。git 鍵放在額度列最左邊、「更新」chip 的正下方（兩個都是 32px 級的小鍵，
- *   疊在 54px 高的額度列裡剛好）。
- *
- * 這個檔案只覆寫 `styles.css` 尾端 `.bot-head` 那組 grid 的格位；欄與列的定義也在這裡
- * 重寫一次。
- */
+/* 手機（≤640px）bot 標題列排位（2026-09-11，ego 390px 實測）：第一行擠六樣時名字只剩 94px，兄弟 bot 分不出來。
+   位置（使用者指定）：第一行 ☰、名字、★、⚙、分頁；第二行 kind＋版本號；第三行額度列，git 鍵在最左、「更新」chip 正下方。 */
 @media (width <= 640px) {
   .main-head.bot-head {
     grid-template-columns: 40px minmax(0, 1fr) auto;
@@ -20,15 +7,12 @@
     gap: 2px 4px;
   }
 
-  /* 第一列 44px 高（分頁 40 + 自身 4px 內距），☰ 置中。 */
   .main-head.bot-head > .menu-btn {
     grid-area: 1 / 1;
     align-self: center;
   }
 
-  /* 名字與 kind＋版本上下疊成兩行，總高跟旁邊 ★／⚙ 的 40px 對齊——標題列不必為了名字
-     再多一行。★／⚙ 在 DOM 裡是名字那一行的兄弟，這裡用絕對定位把它們拉出來靠右、
-     垂直置中跨兩行；名字那行留 84px 的右內距給它們。 */
+  /* 名字與 kind＋版本疊兩行對齊 ★／⚙ 的 40px；★／⚙ 絕對定位拉出來靠右跨兩行，名字行留 84px 右內距。 */
   .main-head.bot-head > .main-title {
     grid-area: 1 / 2;
     position: relative;
@@ -42,7 +26,6 @@
     padding-right: 84px;
   }
 
-  /* 名字那叢吃掉剩餘寬度，短名字時 ★／⚙ 也不跟過去。 */
   .main-head.bot-head .main-title-row > .bot-switcher {
     flex: 1 1 auto;
     min-width: 0;
@@ -89,8 +72,7 @@
     position: relative;
   }
 
-  /* git 鍵疊進額度列左下角：「更新」chip 在左上（18px 高），它在下面。
-     跟齒輪同一種灰：常駐的入口不該長得像警示。 */
+  /* git 鍵跟齒輪同一種灰：常駐入口不該像警示。 */
   .main-head.bot-head > .mobile-git-info {
     grid-area: 2 / 1;
     align-self: end;
@@ -111,9 +93,7 @@
     height: 18px;
   }
 
-  /* 額度列左邊常駐讓出 git 鍵那一欄（4 + 32px）。原本靠「更新」chip 的右邊距撐開，
-     沒有更新時 chip 不畫，第一格 cc0 就滑到 git 鍵底下被蓋住（2026-09-11 手機實拍）。
-     更新 chip 仍在這一欄的左上，git 鍵在它下面。 */
+  /* 常駐讓出 git 鍵欄（4 + 32px）：靠更新 chip 撐開時，沒更新 cc0 就滑到 git 鍵底下（2026-09-11 手機實拍）。 */
   .main-head.bot-head:has(> .mobile-git-info) .quota-open {
     position: relative;
     padding-left: 40px;

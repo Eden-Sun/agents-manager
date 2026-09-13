@@ -1,14 +1,4 @@
-/**
- * Tolerant decoders for daemon payloads.
- *
- * The backend is written in parallel with this UI, so every reader here accepts the
- * plausible shapes rather than one exact schema:
- *   - `bots[].args` may arrive as `args: string[]` or `args_json: "[...]"`
- *   - booleans may arrive as SQLite integers (`autostart: 0 | 1`)
- *   - `/api/state` may nest bots under projects, or list them flat
- *   - runs may be `runs` / `active_runs`, or embedded on each bot as `run`
- * Everything downstream of this module sees the types in `types.ts`.
- */
+/** Tolerant decoders for daemon payloads: accept plausible shapes (SQLite 0/1 booleans, JSON-string fields, nested or flat bots/runs). */
 
 import type {
   MemOwner,
@@ -99,7 +89,6 @@ function num(v: unknown, fallback = 0): number {
   return fallback
 }
 
-/** First present key among `keys`. */
 function pick(o: Rec, ...keys: string[]): unknown {
   for (const k of keys) if (o[k] !== undefined && o[k] !== null) return o[k]
   return undefined
@@ -122,9 +111,7 @@ const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
 
-/**
- * SPEC §11.6 `hosts[]`（`GET /api/state`、`host_changed`、`daemon_status` 的 hosts map）。
- */
+/** SPEC §11.6 */
 export function toHost(v: unknown): Host | null {
   if (!isRec(v)) return null
   const name = str(pick(v, 'name'))
@@ -145,10 +132,7 @@ export function toHost(v: unknown): Host | null {
   }
 }
 
-/**
- * v4.0 `hosts[].identities`：身份在這台主機上的登入狀態。缺欄位 / 讀不懂的一律當「未知」
- * （`logged_in: null`），絕不把問不到說成未登入。
- */
+/** 讀不懂的一律 `logged_in: null`，絕不把問不到說成未登入。 */
 export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
   const root = isRec(raw) ? raw : {}
   const out: IdentityStatusMap = {}
@@ -162,7 +146,6 @@ export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
       reason: optStr(pick(v, 'reason')),
       account: optStr(pick(v, 'account')),
       plan: optStr(pick(v, 'plan')),
-      // 只有 `shell` 會另外標；其餘都是 config 來源（唯一會被編輯的那種）。
       source: str(pick(v, 'source')) === 'shell' ? 'shell' : 'config',
       config_dir: optStr(pick(v, 'config_dir')),
     }
@@ -170,7 +153,7 @@ export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
   return out
 }
 
-/** v4.0 `tools`：缺的 kind 視為未知（`TOOL_UNKNOWN`），不會誤報「缺少」。 */
+/** 缺的 kind 視為未知，不誤報「缺少」。 */
 export function toToolMap(raw: unknown): ToolMap {
   const root = isRec(raw) ? raw : {}
   const one = (v: unknown): ToolStatus => {
@@ -192,10 +175,7 @@ export function toInstallResult(raw: unknown): InstallToolResult {
   return { turn_id: isRec(raw) ? str(pick(raw, 'turn_id')) : '' }
 }
 
-/**
- * `hosts` arrives as an array in `GET /api/state` but as a `{name: {connected, error}}`
- * map in the `daemon_status` frame (SPEC §11.6); accept both.
- */
+/** Array in `GET /api/state`, `{name: {...}}` map in `daemon_status` (SPEC §11.6). */
 export function hostArray(v: unknown): unknown[] {
   if (Array.isArray(v)) return v
   if (isRec(v)) return Object.entries(v).map(([name, val]) => (isRec(val) ? { name, ...val } : { name }))
@@ -235,7 +215,6 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     project_id: str(pick(v, 'project_id'), projectId ?? ''),
     name: str(pick(v, 'name'), id),
     kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
-    // API.md v3.3; null → "no explicit model".
     model: optStr(pick(v, 'model')),
     effort: optStr(pick(v, 'effort')),
     fast: bool(pick(v, 'fast'), false),
@@ -252,19 +231,16 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
       return typeof i === 'string' && i.trim() ? i : null
     })(),
     env: envMap(pick(v, 'env')),
-    // 沒有 parent 時 `managed_by` 是 `user`、`parent_bot_id` 是 null。
     managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'child'], 'user'),
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
     primary: bool(pick(v, 'primary')),
     cwd: optStr(pick(v, 'cwd')),
     herdr_session: optStr(pick(v, 'herdr_session')),
-    // debug 用的 herdr agent 名稱；null 時 UI 那顆晶片自己不渲染。
     agent_name: optStr(pick(v, 'agent_name')),
     created_at: str(v.created_at),
   }
 }
 
-/** `{K: V}` or a JSON string of one; anything else → `{}`. */
 export function envMap(v: unknown): Record<string, string> {
   let raw: unknown = v
   if (typeof raw === 'string') {
@@ -293,7 +269,7 @@ export function toIdentity(v: unknown): Identity | null {
   }
 }
 
-/** `runs.status_json` — a JSON string (or an already-parsed object) from the daemon. */
+/** `runs.status_json` */
 export function toStatusInfo(v: unknown): StatusInfo | null {
   let raw: unknown = v
   if (typeof raw === 'string') {
@@ -354,7 +330,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     status: toStatusInfo(pick(v, 'status_json')),
     update_notice: optStr(pick(v, 'update_notice')),
     turn_error: optStr(pick(v, 'turn_error')),
-    // SPEC §4.4a：`runtime_fast` 是 daemon 的 0/1；三個都是 null = daemon 不知道。
+    // SPEC §4.4a：null = daemon 不知道，不能當 false
     runtime_model: optStr(pick(v, 'runtime_model')),
     runtime_effort: optStr(pick(v, 'runtime_effort')),
     runtime_fast: pick(v, 'runtime_fast') == null ? null : bool(pick(v, 'runtime_fast')),
@@ -375,8 +351,7 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
     run_id: optStr(v.run_id),
     bot_id: optStr(v.bot_id) ?? botId ?? null,
     origin: oneOf<TurnOrigin>(v.origin, ORIGINS, 'web'),
-    // 認不得的 status 當終態（`failed`），不是進行中：daemon 之後新增終態（例如 `cancelled`）時，
-    // 退回 in_flight 會把輸入框鎖進排隊模式、liveReplyOf 也把它當還在回。
+    // 未知 status 當終態：daemon 新增終態時退回 in_flight 會把輸入框鎖進排隊模式。
     status: oneOf<TurnStatus>(v.status, TURN_STATUSES, 'failed'),
     delivery: oneOf<TurnDelivery>(v.delivery, DELIVERIES, 'pending'),
     client_request_id: optStr(v.client_request_id),
@@ -385,10 +360,7 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
   }
 }
 
-/**
- * `messages.attachments_json` — a JSON array the daemon stamps onto the user message.
- * Tolerates the parsed-array form too, in case the daemon ever inlines it.
- */
+/** `messages.attachments_json` (string or parsed array). */
 export function toAttachments(v: unknown): Attachment[] {
   let raw: unknown = v
   if (typeof raw === 'string') {
@@ -436,7 +408,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
   }
 }
 
-/** SPEC §13.4 group timeline row: a message that must know its bot. */
+/** SPEC §13.4 */
 export function toGroupMessage(v: unknown): GroupMessage | null {
   const m = toMessage(v)
   if (!m || !isRec(v)) return null
@@ -455,12 +427,11 @@ export function toGroupMessagesPage(raw: unknown, projectId: string): GroupMessa
   return { project_id: str(pick(o, 'project_id'), projectId), messages: sortById(out), has_more: bool(pick(o, 'has_more')) }
 }
 
-/** Group timeline order = message id (ULID, time-ordered) — the daemon paginates by it. */
+/** ULID order — the daemon paginates by it. */
 export function sortById<T extends { id: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => a.id.localeCompare(b.id))
 }
 
-/** Sort ascending by created_at, falling back to id (ULIDs sort lexicographically by time). */
 export function sortByTime<T extends { created_at: string; id: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => {
     const t = a.created_at.localeCompare(b.created_at)
@@ -482,9 +453,7 @@ export function toState(raw: unknown): AppState {
   let localTools = toToolMap(undefined)
   let localIdentityStatus: IdentityStatusMap = {}
   for (const h of hostArray(pick(root, 'hosts'))) {
-    // API.md: `hosts[0]` is always the reserved `local` entry (ssh fields null). The UI
-    // models the local machine separately (`state.connected`), so drop it here — keeping
-    // only its v4.0 `attach_command`.
+    // `local` is modelled via `state.connected`; keep only its attach/tools/identities.
     const host = toHost(h)
     if (!host) continue
     if (host.name === 'local') {
@@ -558,7 +527,7 @@ export function toMessages(raw: unknown, botId: string): Message[] {
     const msg = toMessage(m, botId)
     if (msg) out.push(msg)
   }
-  // The endpoint paginates in descending order (SPEC §7.2); the UI renders ascending.
+  // SPEC §7.2: endpoint is descending; UI renders ascending.
   return sortByTime(out)
 }
 
@@ -578,7 +547,7 @@ export function toMessagesPage(raw: unknown, botId: string): MessagesPage {
   }
 }
 
-/** SPEC §2.2 composite lamp, recomputed from the active run so WS updates stay authoritative. */
+/** SPEC §2.2 */
 export function lampOf(run: Run | undefined | null, connected: boolean): Lamp {
   if (!connected) return 'disconnected'
   if (!run) return 'offline'
@@ -597,16 +566,14 @@ export function lampOf(run: Run | undefined | null, connected: boolean): Lamp {
           ? 'working'
           : run.agent_status === 'blocked'
             ? 'blocked'
-            : // 剛起來的 run 還沒有任何 hook／快照分類（實測 claude 要 ~20 秒才回第一個狀態）。
-              // 這段期間標「狀態未知」會讓剛新增的 bot 看起來是壞的、像沒生出來；它其實正在開。
-              // 只在起跑後 90 秒內這樣說，之後真的問不到狀態才是 `unknown`。
+            : // 實測 claude ~20 秒才回第一個狀態；90 秒內標 unknown 會像 bot 沒生出來。
               justStarted(run)
               ? 'starting'
               : 'unknown'
   }
 }
 
-/** run 是不是剛起來（< 90 秒）。時間戳讀不出來時當作不是，寧可標 unknown 也不要一直說「啟動中」。 */
+/** 時間戳讀不出來時當作不是，寧可 unknown 也不要一直說「啟動中」。 */
 function justStarted(run: Run): boolean {
   const t = Date.parse(run.started_at)
   return Number.isNaN(t) ? false : Date.now() - t < 90_000
@@ -624,13 +591,12 @@ export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapsh
     truncated: bool(o.truncated),
     source: oneOf<TerminalSource>(pick(o, 'source'), ['visible', 'recent_unwrapped'], source),
     pane_id: optStr(pick(o, 'pane_id')),
-    // Absent when herdr doesn't report it: the UI must fall back to saying nothing, not to a wrong size.
+    // null rather than a wrong size
     columns: o.columns === undefined || o.columns === null ? null : num(o.columns, 0) || null,
     rows: o.rows === undefined || o.rows === null ? null : num(o.rows, 0) || null,
   }
 }
 
-/** `POST /api/hosts/:name/shells` 的一列。`pane_id` 是空的就當這筆不存在（見 `toHostShells`）。 */
 export function toHostShell(raw: unknown, fallbackHost: string): HostShell {
   const o = isRec(raw) ? raw : {}
   return {
@@ -643,7 +609,7 @@ export function toHostShell(raw: unknown, fallbackHost: string): HostShell {
   }
 }
 
-/** `GET /api/hosts/:name/shells` → `{shells:[…]}`。沒有 `pane_id` 的列丟掉：整個面板都靠它定位。 */
+/** 沒有 `pane_id` 的列丟掉：面板靠它定位。 */
 export function toHostShells(raw: unknown, fallbackHost: string): HostShell[] {
   const o = isRec(raw) ? raw : {}
   return arr(o.shells)
@@ -651,7 +617,6 @@ export function toHostShells(raw: unknown, fallbackHost: string): HostShell[] {
     .filter((s) => s.pane_id)
 }
 
-/** Best-effort bot_id for a WS payload that may carry it directly or on a nested entity. */
 export function frameBotId(data: unknown): string | null {
   if (!isRec(data)) return null
   const direct = optStr(pick(data, 'bot_id'))
@@ -666,7 +631,6 @@ export function frameBotId(data: unknown): string | null {
   return null
 }
 
-/** Unwrap `{message: {...}}` / `{turn: {...}}` / `{run: {...}}` or the bare entity. */
 export function unwrap(data: unknown, key: string): unknown {
   if (isRec(data) && isRec(data[key])) return data[key]
   return data
@@ -674,9 +638,6 @@ export function unwrap(data: unknown, key: string): unknown {
 
 export { isRec, num, str, bool, optStr, pick, arr }
 
-// ------------------------------------------------------------------ v4.0
-
-/** `GET /api/models` → `ModelInfo[]`（缺欄位時給安全預設）。 */
 export function toModels(raw: unknown): ModelInfo[] {
   const root = isRec(raw) ? raw : {}
   return arr(pick(root, 'models'))
@@ -703,16 +664,12 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   return {
     used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct'), 0))),
     resets_at: optStr(pick(v, 'resets_at')),
-    // 門檻在 daemon 算好（見 docs/API.md §12.4），不在前端自己補算。
+    // 門檻由 daemon 算（API.md §12.4），前端不補算
     low: bool(pick(v, 'low'), false),
     critical: bool(pick(v, 'critical'), false),
   }
 }
 
-/**
- * 一個 kind 的額度；null 代表沒有資訊。
- * `key` 只用來補 `host`：缺 `host` 時從 `m4p/claude` 這種 key 前綴推回來。
- */
 function toResetCredits(v: unknown): QuotaResetCredits | null {
   if (!isRec(v)) return null
   const available = num(pick(v, 'available'), 0)
@@ -726,16 +683,14 @@ function toLimitHit(v: unknown): QuotaLimitHit | null {
   return { message, until: optStr(pick(v, 'until')), at: str(pick(v, 'at')) }
 }
 
+/** `key` 只用來在缺 `host` 時從前綴推回。 */
 export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   if (!isRec(v)) return null
   return {
     five_hour: toQuotaWindow(pick(v, 'five_hour')),
     seven_day: toQuotaWindow(pick(v, 'seven_day')),
-    // 沒有 Fable 窗口 → null，額度條就完全不畫 Fable 那條。
     fable: toQuotaWindow(pick(v, 'fable')),
-    // 沒有重置券（claude / grok 一律沒有）→ null，UI 不畫那顆券。
     reset_credits: toResetCredits(pick(v, 'reset_credits')),
-    // 沒被擋 → null，格子就不會標成「被擋」。
     limit_hit: toLimitHit(pick(v, 'limit_hit')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
@@ -743,7 +698,6 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   }
 }
 
-/** `GET /api/quota` → `{kinds: {...}}`（也接受直接給 map）。 */
 export function toQuota(raw: unknown): QuotaMap {
   const root = isRec(raw) ? raw : {}
   const kinds = isRec(root.kinds) ? root.kinds : root
@@ -751,8 +705,6 @@ export function toQuota(raw: unknown): QuotaMap {
   for (const [k, v] of Object.entries(kinds)) out[k] = toKindQuota(v, k)
   return out
 }
-
-// ------------------------------------------------------------------ v4.0 issues
 
 function toLabel(v: unknown): IssueLabel | null {
   if (typeof v === 'string') return v ? { name: v, color: null } : null
@@ -814,13 +766,13 @@ function root_issue(raw: Record<string, unknown>): unknown {
   return raw.issue ?? raw
 }
 
-/** daemon 之外的字串一律當 `unknown`：多一個不認得的分類會讓「可以砍嗎」變成猜的。 */
+/** 不認得的一律 `unknown`，免得「可以砍嗎」變成猜的。 */
 function toOwner(v: unknown): MemOwner {
   const s = str(v)
   return s === 'bot' || s === 'pane' || s === 'herdr' ? s : 'unknown'
 }
 
-/** `GET /api/mem/processes`（SPEC §15.2）。 */
+/** SPEC §15.2 */
 export function toMemProcesses(v: unknown): MemProcesses {
   const r = isRec(v) ? v : {}
   const rows: MemProcess[] = arr(r.processes)
@@ -843,7 +795,7 @@ export function toMemProcesses(v: unknown): MemProcesses {
   return { host: str(r.host), sampled_at: str(r.sampled_at), processes: rows }
 }
 
-/** `GET /api/mem` / WS `mem_updated`（SPEC §15）。缺的數字一律當 0。 */
+/** SPEC §15 */
 export function toMemSnapshot(v: unknown): MemSnapshot {
   const r = isRec(v) ? v : {}
   const n = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0)
@@ -860,7 +812,7 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
       bytes: n(b.bytes),
       processes: n(b.processes),
     })),
-    // daemon 讀不出整機記憶體時沒有這一節 → null，UI 只顯示已用量（不要畫成「剩 0」）。
+    // 讀不出 → null，不要畫成「剩 0」
     machine: isRec(h.machine) && n(h.machine.total_bytes) > 0
       ? { total_bytes: n(h.machine.total_bytes), available_bytes: n(h.machine.available_bytes) }
       : null,
@@ -874,7 +826,7 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
   }
 }
 
-// ---------------------------------------------- 群組任務（mission，docs/API.md「群組任務」）
+// 群組任務（mission，docs/API.md「群組任務」）
 
 const MISSION_DELIVERIES = ['push_main', 'pr'] as const
 const MISSION_ON_5H = ['wait', 'switch'] as const
@@ -927,13 +879,12 @@ export function toMission(v: unknown): Mission | null {
     paused_detail: optStr(pick(v, 'paused_detail')),
     result_summary: optStr(pick(v, 'result_summary')),
     parent_mission_id: optStr(pick(v, 'parent_mission_id')),
-    // daemon 算過一次就照它的；沒給才自己照同一條規則推（cancelled → done → paused → open）。
+    // daemon 沒給才照同規則推
     status: oneOf<MissionStatus>(
       pick(v, 'status'),
       MISSION_STATUSES,
       cancelled ? 'cancelled' : completed ? 'done' : paused ? 'paused' : 'open',
     ),
-    // P1b 的 `phase`；舊 daemon 沒給就是 null，UI 自己從事件推。
     phase: (() => {
       const p = pick(v, 'phase')
       return typeof p === 'string' && (MISSION_PHASES_SERVER as readonly string[]).includes(p)
@@ -981,7 +932,6 @@ export function toMissionEvent(v: unknown, missionId = ''): MissionEvent | null 
   if (!isRec(v)) return null
   const id = str(pick(v, 'id', 'event_id'))
   if (!id) return null
-  // `payload_json` 可能是字串也可能已經是物件。
   const raw = pick(v, 'payload', 'payload_json')
   let parsed: unknown = raw
   if (typeof raw === 'string') {

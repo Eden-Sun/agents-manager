@@ -1,6 +1,4 @@
-//! Bot / Run lifecycle: start, stop, interrupt, prompt, keys, terminal fallback (SPEC §6.2–§6.4, §4.3).
-//!
-//! Every public entry point takes the per-bot lock.
+//! Bot / Run lifecycle (SPEC §6.2–§6.4, §4.3). Every public entry point takes the per-bot lock.
 
 use crate::capture::Capture;
 use crate::config::{valid_id, ID_RE, LOCAL_HOST};
@@ -42,11 +40,8 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-/// herdr's "the pane exists but its shell is not ready for an agent yet" answer.
-///
-/// It is a timing answer, not a failure: the shell settles a few hundred milliseconds later.
-/// Matched on the error code first, with the message as a fallback because the same condition
-/// reaches some call sites already flattened into a string.
+/// herdr's "pane exists but its shell is not ready yet" — a timing answer, not a failure.
+/// Message fallback: some call sites only see the error flattened into a string.
 fn pane_not_ready(e: &anyhow::Error) -> bool {
     if let Some(h) = e.downcast_ref::<HerdrError>() {
         if h.code == "agent_pane_busy" || h.message.contains("not an available shell") {
@@ -57,7 +52,6 @@ fn pane_not_ready(e: &anyhow::Error) -> bool {
     s.contains("agent_pane_busy") || s.contains("not an available shell")
 }
 
-// ---------------------------------------------------------------- messages
 
 pub async fn insert_message(
     app: &Arc<App>,
@@ -126,10 +120,8 @@ pub async fn insert_message_grouped(
     insert_message_full(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id, None).await
 }
 
-/// 同上，外加 `relay_from`——「這句話是別的 bot 送進來的，不是使用者自己打的」（SPEC §6.5d）。
-///
-/// 為什麼要在 INSERT 就寫進去，而不是插完再 UPDATE：`message_added` 是插入的當下就推出去的，
-/// 事後補欄位的話畫面上那顆泡泡要等重新載入才會變成「AGM →」。
+/// 同上，外加 `relay_from`（別的 bot 送進來的，SPEC §6.5d）。INSERT 時就寫：`message_added`
+/// 當下就推出去，事後 UPDATE 的話泡泡要重新載入才會變「AGM →」。
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_message_full(
     app: &Arc<App>,
@@ -189,32 +181,24 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
             .unwrap_or_default();
         let should_flush_queue = t.status != "in_flight" && t.status != "queued";
         app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
-        // The same transition on the internal bus. Every path that takes a turn out of
-        // `in_flight` (hook match, terminal fallback, watchdog, stop, interrupt) funnels
-        // through here, so a subscriber only needs this one subscription.
+        // Every path that takes a turn out of `in_flight` funnels through here: one subscription suffices.
         app.publish_turn(crate::state::TurnEvent {
             bot_id: bot_id.clone(),
             turn_id: t.id.clone(),
             status: t.status.clone(),
             delivery: t.delivery.clone(),
         });
-        // The queue is daemon-owned. Schedule after publishing so the next prompt cannot race
-        // the completion event, and let the per-bot lock serialize it with hooks / status events.
+        // Schedule after publishing so the next prompt cannot race the completion event.
         if should_flush_queue {
             schedule_flush_queued(app, &bot_id);
         }
     }
 }
 
-/// Hand the oldest queued prompt to the agent, if it can take one right now.
-///
-/// The caller already holds the bot lock, which is what makes the `queued -> in_flight`
-/// promotion safe: `turns_one_in_flight` and `turns_one_queued` are both unique indexes, so
-/// losing a race here would be an error rather than a no-op. Every early return leaves the
-/// turn queued for the next transition to retry — the queue is durable, so "not now" is
-/// always a safe answer. That holds *after* the claim as well: anything that gives up
-/// between `queued -> in_flight` and the `agent.prompt` RPC calls `requeue_turn`, because a
-/// turn left `in_flight` with `delivery='pending'` has no other way out.
+/// Hand the oldest queued prompt to the agent, if it can take one now. Caller holds the bot lock
+/// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
+/// the turn queued; after the claim, any give-up must `requeue_turn` — `in_flight` +
+/// `delivery='pending'` has no other way out.
 async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
@@ -226,10 +210,8 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
-    // `working` holds the queue too: a turn can be closed (fallback, hook) while the TUI is
-    // still drawing its last answer, and a prompt pasted into claude at that moment loses its
-    // Enter — the text sits in the composer and the turn stalls (2026-09-07 11:21). The
-    // `working -> idle` edge re-schedules this flush.
+    // `working` holds the queue too: a prompt pasted while claude is still drawing loses its
+    // Enter and stalls (2026-09-07 11:21). The `working -> idle` edge re-schedules this flush.
     if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {
         return Ok(());
     }
@@ -260,9 +242,7 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     }
     emit_turn(app, &turn.id).await;
 
-    // The same three screen checks a live prompt gets (login menu, claude's model-switch box,
-    // codex's `/model` picker). Refused → back on the queue with the hint already in the
-    // conversation; the next `working -> idle` edge tries again.
+    // Refused by a screen check → back on the queue; the next `working -> idle` edge retries.
     if let Err(e) = pane_ready_for_prompt(app, &bot, &run, &conv).await {
         let why = match &e {
             LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
@@ -272,12 +252,9 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
         return Ok(());
     }
 
-    // Everything between the claim and the RPC must put the turn *back* on the queue if it
-    // gives up. Nothing else in the daemon finishes a turn that is `in_flight` with
-    // `delivery='pending'`: `arm_stall`, `arm_progress` and `try_fallback` all require
-    // `delivery == "ok"`, so a turn abandoned here would sit in flight until the run ended
-    // — blocking every later `prompt()` with 409 "a turn is already in flight" — and this is
-    // a background task, so the user would never see why.
+    // From the claim to the RPC, giving up must requeue: `arm_stall` / `arm_progress` /
+    // `try_fallback` all require `delivery == "ok"`, so an abandoned turn would 409 every
+    // later prompt until the run ended, invisibly (background task).
     let client = match client_for_run(app, &run).await {
         Ok(c) => c,
         Err(e) => {
@@ -302,10 +279,8 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
                 emit_turn(app, &turn.id).await;
                 return Ok(());
             }
-            // Deliberately *not* requeued: the RPC was sent and we do not know whether the
-            // agent took it, so putting the same text back on the queue could deliver it
-            // twice. `delivery='unknown'` is the designed, user-visible parking state —
-            // `prompt()` refuses the next prompt with "abandon it first" and names this turn.
+            // Not requeued: the agent may have taken it, so a retry could deliver twice.
+            // `delivery='unknown'` is the designed user-visible parking state (§6.3).
             tracing::warn!(bot = %bot_id, error = %e, "queued prompt delivery unknown");
             "unknown"
         }
@@ -319,13 +294,8 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Undo a `queued -> in_flight` claim that never became a delivery.
-///
-/// Only ever called while the bot lock is held and only for a turn this flush claimed
-/// itself, so the `turns_one_queued` unique index cannot be violated: the row going back is
-/// the very one that was taken out of the queue a moment ago, and nothing else can have
-/// queued behind it in between. `run_id` goes back to NULL too — a turn that was never
-/// delivered does not belong to that run.
+/// Undo a `queued -> in_flight` claim that never became a delivery. Bot lock held and only for
+/// a turn this flush claimed, so `turns_one_queued` cannot be violated.
 async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str) {
     match sqlx::query("UPDATE turns SET status='queued', run_id=NULL WHERE id=? AND status='in_flight'")
         .bind(turn_id)
@@ -345,9 +315,8 @@ async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str)
     emit_turn(app, turn_id).await;
 }
 
-/// Wake the durable prompt queue after a turn or Run transition. The task deliberately does
-/// nothing in tests; tests drive the DB state machine directly and must not race a background
-/// RPC attempt.
+/// Wake the durable prompt queue after a turn / Run transition. No-op in tests so a background
+/// RPC cannot race the DB state machine they drive.
 pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
     if cfg!(test) {
         return;
@@ -365,7 +334,6 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
     });
 }
 
-// ---------------------------------------------------------------- run state
 
 /// Terminate a run: state `exited`, fail its in-flight turn, drop the pane watcher.
 pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
@@ -400,7 +368,6 @@ pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) {
     }
 }
 
-// ---------------------------------------------------------------- hook injection
 
 /// The hook / statusLine command line for a *local* bot. The token is deliberately **not**
 /// on the argv (issue #43: `ps` shows every user the full command line, and the statusLine
@@ -417,12 +384,8 @@ fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str) -> Vec
 /// never put on a remote command line (review 2026-09-12 #8).
 pub const REMOTE_TOKEN_SLOT: &str = "-";
 
-/// SPEC §11.4 — the POSIX sh hook installed on remote hosts (no daemon binary there).
-///
-/// v4.3: nothing calls home over HTTP any more. The payload is appended to the bot's spool
-/// file and the *state* is reported to this machine's own herdr (`pane report-agent`), whose
-/// event stream the daemon is already subscribed to over the forwarded socket. The daemon
-/// drains the spool when it sees that state change (§11.4.3).
+/// SPEC §11.4 — the POSIX sh hook for remote hosts. Payload goes to the bot's spool; state goes
+/// to this machine's herdr (`pane report-agent`), whose event makes the daemon drain the spool (§11.4.3).
 pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
 LIMIT=1048576
@@ -546,18 +509,11 @@ am_herdr "$@" >/dev/null 2>>"$DIR/hook.log"
 exit 0
 "#;
 
-// ---------------------------------------------------------------- grok (SPEC §12)
-//
-// grok 1.0.13 has no per-launch hook flag (`--settings` / `--hooks` / `--plugin-dir` are all
-// rejected by the TUI), so the daemon installs ONE global, always-trusted hook file
-// `<GROK_HOME>/hooks/agents-manager.json` whose Stop / SessionStart entries run a static
-// dispatcher `~/.config/agents-manager/grok-hook.sh`. The dispatcher reads the pane env
-// (`AM_BOT_ID`, `AM_HOOK_TOKEN`, `AM_PORT`) to decide which bot to report to, and exits 0
-// immediately when those are unset, so the user's own grok sessions are unaffected.
+// grok (SPEC §12): 1.0.13 has no per-launch hook flag, so one global hooks file runs a static
+// dispatcher that reads `AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` from the pane env and exits 0
+// when unset — the user's own grok sessions are unaffected.
 
-/// File name inside `<GROK_HOME>/hooks/`.
 pub const GROK_HOOKS_FILE: &str = "agents-manager.json";
-/// Dispatcher file name inside `~/.config/agents-manager/`.
 pub const GROK_DISPATCH_SH: &str = "grok-hook.sh";
 
 /// Dispatcher installed on remote hosts: forwards to the per-bot `hook.sh` (SPEC §11.4).
@@ -569,7 +525,6 @@ H="$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh"
 exec "$H" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN"
 "#;
 
-/// Local dispatcher: runs the daemon binary's `hook grok` subcommand.
 fn local_grok_dispatch_sh(exe: &str) -> String {
     format!(
         "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\nexec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\"\n",
@@ -577,13 +532,11 @@ fn local_grok_dispatch_sh(exe: &str) -> String {
     )
 }
 
-/// The hooks file (grok's JSON hook-file schema, same shape as Claude's `hooks` object).
 fn grok_hooks_json(dispatcher: &str) -> String {
     let entry = json!([{"hooks": [{"type": "command", "command": dispatcher, "timeout": 5}]}]);
     serde_json::to_string_pretty(&json!({"hooks": {"SessionStart": entry, "Stop": entry}})).unwrap_or_default()
 }
 
-/// `GROK_HOME` from the resolved pane env, else `<home>/.grok`.
 fn grok_home(env: &Value, home: &str) -> String {
     env.get("GROK_HOME")
         .and_then(|v| v.as_str())
@@ -610,7 +563,6 @@ fn write_if_changed(path: &std::path::Path, content: &str, executable: bool) -> 
     Ok(true)
 }
 
-/// Local grok bot: install the dispatcher + the global hooks file. Idempotent.
 fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?.to_string_lossy().to_string();
     let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
@@ -645,7 +597,6 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value) -> anyhow::Resul
     Ok(())
 }
 
-/// Absolute remote paths for a bot's hook material.
 pub struct RemoteHookPaths {
     pub dir: String,
     pub hook_sh: String,
@@ -664,12 +615,10 @@ pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<Rem
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
 async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<RemoteHookPaths> {
     let p = remote_bot_dir(conn, &bot.id).await?;
-    // The token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it, and the same key
-    // opens `/relay/announce` and the local `/hook/*`. Kept positional for the older agents
-    // whose argv still carries a real token.
+    // Token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it and the real key opens
+    // `/relay/announce` + `/hook/*`. Kept positional for older agents.
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
-    // v4.0: `hook.sh statusline <bot> -` overwrites the single-slot `hook-status.json`
-    // (§11.4.5), then execs the user's own statusLine command (remote ~/.claude/settings.json).
+    // `hook.sh statusline` writes `hook-status.json` (§11.4.5), then execs the user's own statusLine.
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     let settings = json!({
         "hooks": {
@@ -698,9 +647,8 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<R
     Ok(p)
 }
 
-/// Put the `herdr` shim (SPEC §6.5b) where this bot's pane can reach it, and answer with the
-/// directory to prepend to its PATH. A host we cannot write to is not a reason to refuse to
-/// start a bot: the reconcile's descent match still tracks whatever the agent spawns.
+/// Put the `herdr` shim (SPEC §6.5b) where this bot's pane can reach it; returns the PATH dir.
+/// An unwritable host does not block the start: reconcile's descent match still tracks children.
 async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
     let installed = if project.host == LOCAL_HOST {
         app.bot_dir(&bot.id).and_then(|dir| {
@@ -726,8 +674,7 @@ async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> O
     }
 }
 
-/// Returns the daemon-injected CLI args that go *before* the bot's own args.
-/// For a remote project this also uploads the hook script over ssh (SPEC §11.4).
+/// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
 async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     if bot.auto_approve != 0 {
@@ -743,7 +690,7 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         return Ok(out);
     }
 
-    // ---- remote project: POSIX sh hook, reporting through that host's own herdr (§11.4)
+    // remote project: POSIX sh hook via that host's own herdr (§11.4)
     if project.host != LOCAL_HOST {
         let conn = app
             .hosts
@@ -754,9 +701,7 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
-            // The notify argv lives on the codex process for its whole run, in plain view of
-            // `ps` for every user of that host — so the token slot is a placeholder (#8; the
-            // local path already keeps the token off the argv, issue #43).
+            // The notify argv is visible in `ps` for the whole run: placeholder token slot (#8, issue #43).
             "codex" => {
                 let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
                 vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)]
@@ -772,19 +717,16 @@ async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Va
         return Ok(out);
     }
 
-    // ---- local project: the daemon binary is right here
     let dir = app.bot_dir(&bot.id)?;
     std::fs::create_dir_all(&dir)?;
     let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
             let cmd = shell_join(&hook_cmd_parts(app, bot, "claude"));
-            // v4.0: the status line reports rate limits (`StatusLine` hook event) and then
-            // runs the user's own statusLine command so the pane looks unchanged.
+            // Status line reports rate limits, then runs the user's own statusLine command.
             let mut sl = hook_cmd_parts(app, bot, "claude");
             sl[1] = "statusline".into();
             sl.remove(2);
             let statusline = shell_join(&sl);
-            // v3: no Notification hook; Stop with stop_hook_active=true is ignored daemon-side.
             let settings = json!({
                 "hooks": {
                     "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
@@ -840,8 +782,7 @@ fn shell_join(parts: &[String]) -> String {
         .join(" ")
 }
 
-/// Pane env = daemon-injected ∪ identity.env ∪ bot.env (later wins). `$HOME` / `~` in the
-/// identity's and bot's values expand against *that host's* home.
+/// Pane env = daemon-injected ∪ identity.env ∪ bot.env (later wins); `$HOME` / `~` expand against that host's home.
 async fn pane_env(
     app: &Arc<App>,
     bot: &db::Bot,
@@ -852,11 +793,9 @@ async fn pane_env(
 ) -> Value {
     let mut env = serde_json::Map::new();
     env.insert("AM_BOT_ID".into(), json!(bot.id));
-    // The name the herdr shim prefixes a child agent with (SPEC §6.5b), and the same name the
-    // persona quotes (`child_agent_rules`).
+    // Name the herdr shim prefixes children with (SPEC §6.5b); the persona quotes it too.
     env.insert("AM_AGENT_NAME".into(), json!(agent_name));
-    // 母 bot 的 kind / 模型 / 強度：herdr shim 在子 agent 沒指定 `--model` 時拿來補（SPEC §6.5b），
-    // 不然子 agent 跑 CLI 預設、側欄冒出一顆對不上的模型。沒設就不給，shim 也就不補。
+    // 母 bot 的 kind／模型／強度：子 agent 沒指定 `--model` 時 shim 拿來補（SPEC §6.5b）。
     env.insert("AM_KIND".into(), json!(bot.kind));
     if let Some(m) = bot.model.as_deref().filter(|m| !m.trim().is_empty()) {
         env.insert("AM_MODEL".into(), json!(m));
@@ -865,26 +804,22 @@ async fn pane_env(
         env.insert("AM_EFFORT".into(), json!(e));
     }
     if let Some(dir) = shim_dir {
-        // Best effort only: a login shell re-runs the user's profile after this, and on macOS
-        // `path_helper` plus `brew shellenv` push us back behind the real herdr. The pane's
-        // own shell is told to prepend it again in `start_inner`, which is what actually wins.
+    // Best effort only: the login shell's profile (`path_helper`, `brew shellenv`) pushes us back;
+    // `start_inner` re-prepends in the pane's shell, which is what actually wins.
         let path = match std::env::var("PATH") {
             Ok(p) if host == LOCAL_HOST => format!("{dir}:{p}"),
             _ => format!("{dir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
         };
         env.insert("PATH".into(), json!(path));
     }
-    // diagnostics only; hook identity is per-bot
     env.insert("AM_RUN_ID".into(), json!(run_id));
-    // Only the local hook commands talk HTTP to the daemon; a remote pane has no port to
-    // call home on since v4.3 (§11.4.6), so it is not told about one.
+    // Only local hook commands call home over HTTP; remote panes have no port since v4.3 (§11.4.6).
     if host == LOCAL_HOST {
         env.insert("AM_PORT".into(), json!(app.port.to_string()));
     }
-    // The hook token rides in the pane env for every kind: grok's global dispatcher can only
-    // learn the bot from there (SPEC §12), and the local claude / codex hook commands read
-    // `AM_HOOK_TOKEN` too so the token never shows up in `ps` (issue #43).
-    // Omitting it is how `inject_hooks = false` is honoured for grok: the dispatcher exits 0.
+    // Hook token rides in the pane env for every kind: grok's dispatcher learns the bot only here
+    // (SPEC §12), and local hooks read it so it never shows in `ps` (issue #43).
+    // Omitting it is how `inject_hooks = false` is honoured for grok.
     if bot.inject_hooks != 0 {
         env.insert("AM_HOOK_TOKEN".into(), json!(bot.hook_token));
     }
@@ -899,8 +834,7 @@ async fn pane_env(
         None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
     };
 
-    // Identities are per host (SPEC §16): `[[identities]]` plus the `ccN` aliases discovered
-    // on *this* machine, so `cc1` picks up the config dir that machine's shell means by it.
+    // Identities are per host (SPEC §16): `cc1` means that machine's config dir.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if let Some(id) = crate::tools::identity_for_host(app, host, idn).await {
             for (k, v) in &id.env {
@@ -914,8 +848,7 @@ async fn pane_env(
     Value::Object(env)
 }
 
-/// Quote `s` as a TOML basic string (for codex `-c key="…"` overrides): `\`, `"`, newlines,
-/// tabs and other control characters are escaped.
+/// Quote `s` as a TOML basic string (for codex `-c key="…"`).
 pub fn toml_basic_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -936,14 +869,9 @@ pub fn toml_basic_string(s: &str) -> String {
     out
 }
 
-/// **The one text.** Everything the daemon has to say to an agent about opening sub-agents,
-/// delivered wherever that agent can hear it: the persona for all three kinds
-/// (`persona_args`) and, for claude, the top of the injected herdr skill
-/// (`herdr_skill_doc`). One source, so the three never drift apart.
-///
-/// The naming rule is no longer load-bearing — the reconcile claims a child by descent
-/// (SPEC §6.5a) and the PATH shim prefixes the name anyway (§6.5b) — but saying it keeps the
-/// agent's own mental model matching what it sees in the sidebar.
+/// The one text about opening sub-agents, used by the persona (all kinds) and the claude herdr
+/// skill so they never drift. Naming isn't load-bearing (§6.5a descent, §6.5b shim) but keeps
+/// the agent's mental model matching the sidebar.
 pub fn child_agent_rules(agent_name: &str) -> String {
     format!(
         "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。\
@@ -971,9 +899,8 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
     )
 }
 
-/// What `herdr --skill`'s own front matter says, replaced. The upstream description is
-/// 「只有使用者明確提到 Herdr 才用……不要只因為工作可能受益於背景終端或平行處理就用」, which is
-/// exactly backwards for a bot living inside AG Man: opening sub-agents is the point.
+/// Replaces `herdr --skill`'s description, which says 「只有使用者明確提到 Herdr 才用」 —
+/// backwards for a bot inside AG Man.
 const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr 的 pane、tab、workspace 與子 agent。\
 需要開子任務、平行工作、或把工作分給另一個 agent 時，一律用這個 skill，並**必須**照裡面的 AG Man 規則命名與開 pane。";
 
@@ -1020,22 +947,13 @@ fn herdr_skill_doc(raw: &str, agent_name: &str) -> String {
     out
 }
 
-/// claude reads skills from `$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md` (default
-/// `~/.claude/skills`). Write herdr's own skill there, with `child_agent_rules` on top, so a
-/// claude bot knows how to open a sub-agent *and* how AG Man wants it done — without the user
-/// having to install anything.
-///
-/// Per identity, not per bot: the file lives in the identity's config dir, so five bots on
-/// `cc2` write the same bytes. Idempotent on purpose — same content, no write — because the
-/// file is in the user's own claude config and a rewrite on every start is noise in their
-/// backups.
+/// Install herdr's skill (with `child_agent_rules` on top) into `$CLAUDE_CONFIG_DIR/skills/`.
+/// Per identity; idempotent because the file is in the user's own claude config (backup noise).
 async fn install_herdr_skill(app: &Arc<App>, bot: &db::Bot, project: &db::Project, env: &Value, agent_name: &str) {
     if bot.kind != "claude" {
         return;
     }
-    // A unit test must never write into the developer's own `~/.claude` — that is where the
-    // no-identity fallback lands. The interesting half, the rewrite, is covered directly by
-    // `herdr_skill_doc`'s tests.
+    // Never write into the developer's own `~/.claude`; the rewrite is covered by `herdr_skill_doc` tests.
     if cfg!(test) {
         return;
     }
@@ -1090,8 +1008,7 @@ async fn install_herdr_skill_remote(
         _ => format!("{}/.claude", conn.home().await?),
     };
     let dir = format!("{base}/skills/herdr");
-    // Written through a temp file and `cmp`, so an unchanged skill leaves the user's mtime
-    // alone exactly as the local path does.
+    // Temp file + `cmp` so an unchanged skill keeps its mtime, like the local path.
     let script = format!(
         "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/.SKILL.md.new\" <<'AM_SKILL_EOF'\n{doc}\nAM_SKILL_EOF\nif cmp -s \"$D/.SKILL.md.new\" \"$D/SKILL.md\" 2>/dev/null; then rm -f \"$D/.SKILL.md.new\"; else mv \"$D/.SKILL.md.new\" \"$D/SKILL.md\"; fi\nprintf 'AM_SKILL_OK\\n'\n",
         dir = sh_quote(&dir),
@@ -1105,9 +1022,7 @@ async fn install_herdr_skill_remote(
     Ok(())
 }
 
-/// v4.0: `bot.persona` appended to the agent's system prompt, per kind. Sits right after the
-/// daemon's own flags (before model / effort). The daemon's own rules (`child_agent_rules`) come
-/// first; the user's text follows it.
+/// `bot.persona` appended to the system prompt per kind; `child_agent_rules` comes first.
 fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
     let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let p = match user {
@@ -1125,24 +1040,14 @@ fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
     }
 }
 
-/// `bot.model` as CLI args, inserted between the daemon's own flags and `identity.args`.
-/// Drop `bot.effort` when the chosen model does not accept it.
-///
-/// The levels are **per model** (`model/list` reports `supportedReasoningEfforts`), so an effort
-/// left over from a previous model is rejected outright: codex answers `-c
-/// model_reasoning_effort="max"` on `gpt-5.5` with `400 unsupported_value … Supported values are
-/// 'none', 'low', 'medium', 'high', and 'xhigh'`, and every turn of that Run fails. The UI
-/// already prevents the pairing, but the stored value can predate that, be edited by hand, or
-/// come from `config.toml`.
-///
-/// Silence is deliberate on every uncertain path — an unreachable CLI, an unknown model, an
-/// empty list — because dropping a *valid* effort would quietly downgrade the agent. Only a
-/// model we can see, whose list we can read, and which does not contain this value, is filtered.
+/// `bot.model` / `bot.effort` as CLI args. Efforts are per model: a stale one gets
+/// `400 unsupported_value` on every turn (codex `max` on `gpt-5.5`), so it is dropped — but only
+/// when the model's list is readable and lacks it; uncertain paths keep it (dropping a valid one
+/// silently downgrades the agent).
 async fn effort_checked(app: &Arc<App>, bot: &db::Bot, host: &str) -> db::Bot {
     let Some(effort) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     let Some(model) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
-    // The `efforts` array does not depend on identity (same five levels for every claude
-    // account); only the default-effort *hint* would, and this path never reads that field.
+    // `efforts` does not depend on identity, so no identity is passed.
     let Ok(list) = crate::models::list(app, host, &bot.kind, None, false).await else { return bot.clone() };
     let Some(entry) = list
         .get("models")
@@ -1181,17 +1086,9 @@ fn model_args(bot: &db::Bot) -> Vec<String> {
             _ => {}
         }
     }
-    // v4.0: codex Fast tier, same key the user's config.toml uses.
-    //
-    // 2026-09-09: it has to be sent **both ways**. Leaving the flag out does not mean "not
-    // fast", it means "whatever `~/.codex/config.toml` says" — and that file commonly carries
-    // `service_tier = "fast"` (it is what the TUI's own Fast toggle writes). A bot with the box
-    // unchecked therefore came up on the fast tier and said so in its own status line
-    // (`gpt-6-astra low fast · …`) while AG Man showed no fast at all. The empty value is how
-    // codex is told to use no tier: verified on 0.153.4, `-c service_tier=""` drops `fast` from
-    // the status line and warns once that the tier "is not advertised … and will be omitted
-    // from requests", which is exactly the standard tier. `priority` is the only tier these
-    // models advertise (`model/list` → `serviceTiers`), and it is what the TUI shows as `fast`.
+    // codex Fast tier must be sent both ways (2026-09-09): omitted means `~/.codex/config.toml`
+    // decides, often `service_tier = "fast"`, so an unchecked bot ran fast. `service_tier=""` is
+    // codex's "no tier" (verified 0.153.4); `priority` is what the TUI shows as `fast`.
     if bot.kind == "codex" {
         let tier = if bot.fast != 0 { "priority" } else { "" };
         out.extend(["-c".to_string(), format!("service_tier=\"{tier}\"")]);
@@ -1264,16 +1161,12 @@ mod model_args_tests {
             a,
             vec!["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\""]
         );
-        // Fast **off** is not the same as "no opinion": without the flag the user's own
-        // `~/.codex/config.toml` (`service_tier = "fast"`) decides, and the bot comes up fast
-        // with nothing in the UI saying so. The empty tier is codex's "use no tier".
+        // Fast off ≠ no opinion: without the flag `~/.codex/config.toml` decides.
         let a = model_args(&bot("codex", None, None, false));
         assert_eq!(a, vec!["-c", "service_tier=\"\""]);
     }
 
-    /// SPEC §4.4a: what `start_inner` stamps on the run is `model_args` read back through its
-    /// own inverse, so the two must agree — that stamp is the only thing that can tell the UI
-    /// a codex bot is still running the effort it was started with.
+    /// SPEC §4.4a: `model_args` and its inverse must agree — the run stamp is read back through it.
     #[test]
     fn the_runtime_stamp_reads_back_what_we_passed() {
         let b = bot("codex", Some("gpt-5.6-luna"), Some("xhigh"), true);
@@ -1282,9 +1175,7 @@ mod model_args_tests {
         assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(effort.as_deref(), Some("xhigh"));
         assert!(args.iter().any(|a| a.contains("service_tier=\"priority\"")), "fast is a flag we can read back");
-        // A bot on the CLI's own model / effort passes neither, and reads back as neither —
-        // the UI must not turn that into "設定與實際不符". The service tier is always spelled
-        // out, and an empty one reads back as not-fast.
+        // CLI defaults read back as neither (not 「設定與實際不符」); an empty tier reads as not-fast.
         let bare = model_args(&bot("codex", None, None, false));
         assert_eq!(crate::models::model_effort_from_argv("codex", &bare), (None, None));
         assert!(!bare.iter().any(|a| a.contains("service_tier=\"priority\"")));
@@ -1306,9 +1197,7 @@ mod model_args_tests {
         assert!(model_args(&bot("claude", None, None, true)).is_empty());
     }
 
-    /// The injected herdr skill: our description replaces herdr's own (which tells the agent
-    /// *not* to use it unless the user says "Herdr" — backwards inside AG Man), our rules go
-    /// first in the body, and everything herdr wrote about its own CLI survives untouched.
+    /// Injected herdr skill: our description replaces herdr's, our rules go first, herdr's CLI text survives.
     #[test]
     fn the_herdr_skill_is_rewritten_for_ag_man() {
         let raw = "---\nname: herdr\ndescription: \"Control Herdr… Use only when the user explicitly mentions Herdr.\"\n---\n\n# Herdr\n\nherdr organizes terminals.\n";
@@ -1371,8 +1260,7 @@ mod model_args_tests {
     }
 }
 
-/// Extra CLI args contributed by the bot's identity on `host`. Discovered `ccN` identities
-/// carry no args by design — the flags in the alias are the user's shell habit, not ours.
+/// Identity CLI args on `host`. Discovered `ccN` identities carry none: alias flags are the user's shell habit.
 async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String> {
     let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
     crate::tools::identity_for_host(app, host, idn).await.map(|i| i.args).unwrap_or_default()
@@ -1384,10 +1272,8 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> 
         .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))
 }
 
-/// Close a prompt whose local setup failed after its turn was committed.
-///
-/// The failed delivery and the follow-up events are one operation from the UI's point of view:
-/// a `pending` turn must never be the last state the frontend sees.
+/// Close a prompt whose local setup failed after its turn was committed; `pending` must never
+/// be the last state the frontend sees.
 async fn fail_prompt_delivery(app: &Arc<App>, conversation_id: &str, turn_id: &str, reason: &str) {
     let updated = match sqlx::query(
         "UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'",
@@ -1430,11 +1316,8 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
     }
 }
 
-// ---------------------------------------------------------------- start
 
-/// Options that affect how a new native agent session is started.
-///
-/// `resume_native` continues the bot's last native session (the batch update restart).
+/// `resume_native` continues the bot's last native session (batch update restart).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StartOpts {
     pub resume_native: bool,
@@ -1455,8 +1338,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
-    // A spawned child (`managed_by='child'`) only ever exists as the pane its parent opened;
-    // starting one here would open a second, unrelated pane under the same bot.
+    // A child only exists as the pane its parent opened; starting here would open an unrelated pane.
     if bot.managed_by == "child" {
         return Err(LcError::conflict(
             "a spawned child is started by its parent agent, not from here",
@@ -1475,10 +1357,8 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
         .session_for_bot(&bot, &project.host)
         .await
         .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?;
-    // An identity the host does not know would be dropped from the pane env without a word,
-    // and the CLI would run as whatever that machine's default login is (observed on m4p:
-    // a `cc1` bot answering as cc0). Refuse instead; not-logged-in gets a system message
-    // below so the user can still `/login` from inside.
+    // An unknown identity would silently run as the host's default login (m4p: `cc1` bot answered
+    // as cc0). Refuse; not-logged-in only gets a system message so the user can `/login` inside.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if crate::tools::identity_for_host(app, &project.host, idn).await.is_none() {
             return Err(LcError::conflict(
@@ -1495,8 +1375,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
             .and_then(|t| t.identities.get(idn))
             .map(|i| i.logged_in == Some(false))
             .unwrap_or(false);
-        // The cache can be half an hour stale after a login (the quota poller parks a
-        // logged-out identity); ask the CLI once before telling the user they are not logged in.
+    // The cache can be ~30 min stale after a login; ask the CLI before saying not logged in.
         if not_logged_in {
             if let Some(fresh) = crate::tools::recheck_identity_login(app, &project.host, idn).await {
                 not_logged_in = !fresh;
@@ -1573,10 +1452,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     }
 }
 
-/// CLI-specific native-session continuation arguments.
-///
-/// Claude accepts `--resume <session>`. Codex's `resume` is a subcommand and therefore must
-/// be the first pair of arguments passed to the CLI. Grok has no supported native resume form.
+/// Native-session continuation args. codex `resume` is a subcommand (must come first); grok has none.
 fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'static str> {
     if session_id.trim().is_empty() {
         return Err("no_session_id");
@@ -1595,8 +1471,7 @@ pub(crate) async fn context_lost(_app: &Arc<App>, bot: &db::Bot, why: &str) -> L
     Ok(())
 }
 
-/// The directory a bot's pane starts in: `bots.cwd` when set (an adopted child's own cwd),
-/// otherwise the project's path.
+/// A bot pane's start dir: `bots.cwd` (adopted child) or the project path.
 pub fn bot_cwd<'a>(bot: &'a db::Bot, project: &'a db::Project) -> &'a str {
     match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(c) => c,
@@ -1604,8 +1479,7 @@ pub fn bot_cwd<'a>(bot: &'a db::Bot, project: &'a db::Project) -> &'a str {
     }
 }
 
-/// What the bot's tab is called on herdr's tab bar. The bot's own nickname, so the user can
-/// tell which tab is which — a label herdr would otherwise number `1`, `2`, `3`.
+/// The bot's herdr tab label: its nickname, instead of herdr's `1`, `2`, `3`.
 pub fn tab_label(bot: &db::Bot) -> String {
     let n = bot.name.trim();
     if n.is_empty() {
@@ -1615,21 +1489,13 @@ pub fn tab_label(bot: &db::Bot) -> String {
     }
 }
 
-/// Close `tab_id` when nothing is left in it.
-///
-/// The one place that decides "is this tab now empty?", shared by every caller that takes a
-/// pane out of a tab: stopping a run, cleaning up after a failed start, and moving a pane to
-/// a tab of its own. Deliberately quiet and idempotent — herdr reaps a tab whose last pane
-/// closes, and `pane.move` reports the emptied tab it closed itself, so finding the tab
-/// already gone is the *expected* outcome, not a failure worth surfacing.
-///
-/// A tab that still holds panes is left alone: that is a run from before the one-bot-one-tab
-/// change (split into a shared tab), or panes the user arranged by hand.
+/// Close `tab_id` when empty — the single decider for every caller removing a pane from a tab.
+/// Quiet and idempotent: herdr often reaps the tab itself. A tab still holding panes (pre
+/// one-bot-one-tab runs, user layouts) is left alone.
 async fn close_tab_if_empty(client: &crate::herdr::HerdrClient, workspace_id: &str, tab_id: &str) {
     let tabs = match client.tab_list(workspace_id).await {
         Ok(t) => t,
-        // Never guess when herdr cannot be asked: closing a tab we cannot see the contents
-        // of could take a pane the user is working in with it.
+        // Never guess: closing a tab we cannot see could take the user's pane with it.
         Err(e) => {
             tracing::debug!(workspace_id, tab_id, error = %e, "tab.list failed; leaving the tab alone");
             return;
@@ -1646,10 +1512,7 @@ async fn close_tab_if_empty(client: &crate::herdr::HerdrClient, workspace_id: &s
     }
 }
 
-/// Close a run's pane and, when that leaves its tab empty, the tab as well.
-///
-/// `tab_id` is `None` for runs started before one-bot-one-tab: their pane was split into a
-/// tab it shares, so only the pane goes.
+/// Close a run's pane and its tab if now empty; `tab_id` is `None` for pre one-bot-one-tab runs.
 pub(crate) async fn close_pane_and_tab(
     client: &crate::herdr::HerdrClient,
     workspace_id: Option<&str>,
@@ -1663,23 +1526,9 @@ pub(crate) async fn close_pane_and_tab(
     }
 }
 
-/// The pane a starting run gets: **one bot, one tab**.
-///
-/// This used to `pane.split` inside the project's single tab, so N bots meant N panes
-/// carving up one screen width. Seven of them in a 185-column workspace left the narrowest
-/// at 18 columns, and below roughly 31 an agent's TUI reflows to a few glyphs a row *without
-/// writing the spaces* — the user cannot read it and the terminal fallback recovers only
-/// fragments (`is_shredded`). Splitting the roomiest pane rather than the first slowed that
-/// down without fixing it, because the width being divided never grew.
-///
-/// Tabs of one workspace do **not** share width, so `tab.create` is what actually scales:
-/// five bots become five tabs of the full 185 columns each. It takes the same arguments as
-/// `pane.split` and hands back the new tab's root pane, so everything downstream —
-/// `agent.start`, the pane subscription, the run mapping — is unchanged.
-///
-/// `focus` is always false: starting a bot must not yank the user out of the tab they are
-/// reading. `fresh_root` is the root pane of a workspace we *just* created, which is already
-/// a tab of its own holding exactly one pane, so it is used as-is rather than doubled.
+/// One bot, one tab. Splitting one tab shrank panes below ~31 columns, where TUIs reflow without
+/// spaces (`is_shredded`); tabs don't share width. `focus` is false so starting a bot doesn't
+/// yank the user's tab; `fresh_root` (a just-created workspace's pane) is used as-is.
 async fn acquire_run_pane(
     client: &crate::herdr::HerdrClient,
     workspace_id: &str,
@@ -1694,9 +1543,8 @@ async fn acquire_run_pane(
     }
 }
 
-/// Keep pane cleanup for the part of startup that runs after a pane exists. This is deliberately
-/// async rather than a `Drop` guard: `pane.close` and the empty-tab tidy-up must finish before
-/// the start error is returned to the caller.
+/// Pane cleanup for startup after a pane exists. Async, not `Drop`: `pane.close` and the tab
+/// tidy-up must finish before the start error returns.
 struct StartPaneGuard<'a> {
     client: &'a crate::herdr::HerdrClient,
     workspace_id: &'a str,
@@ -1748,24 +1596,19 @@ async fn start_inner(
     if !app.session_connected(&host, &session).await {
         return Err(LcError::Upstream(format!("host `{host}` is not connected")));
     }
-    // 1b. preflight: the agent CLI must exist on that host, otherwise herdr would sit in
-    //     `launch_pending` for the whole 60 s timeout with nothing to tell the user.
+    // 1b. preflight: a missing CLI would sit in `launch_pending` for the full 60 s silently.
     if let Err(reason) = ensure_kind_installed(app, &host, &bot.kind).await {
         let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
         let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         return Err(LcError::Bad(reason));
     }
-    // The agent name is decided here because both the persona (`child_agent_rules`) and the shim
-    // (`AM_AGENT_NAME`) quote it.
     let agent = crate::config::agent_name(&project.label, &bot.id);
     let shim_dir = install_shim(app, bot, project).await;
     let env = pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await;
-    // SPEC §6.5c: claude learns herdr from a skill, not from the persona — the persona has no
-    // room for a CLI reference, and `herdr --skill` is the CLI's own.
+    // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
     install_herdr_skill(app, bot, project, &env, &agent).await;
 
-    // Prepare everything that can fail without a pane. In particular, remote hook injection
-    // may perform an ssh upload, so it must happen before workspace/tab creation.
+    // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
     args.extend(persona_args(bot, &agent));
@@ -1773,17 +1616,12 @@ async fn start_inner(
     args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());
 
-    // Reopen only: resolve the previous ended native session after the normal start preflight,
-    // so a missing/unsupported continuation still gets an ordinary agent pane. The requested
-    // id is persisted before `agent.start`; the hook receiver consumes it on the first identity
-    // or completed-turn callback and can then detect a provider that ignored/misrouted resume.
+    // Reopen only: resolve the previous native session after preflight. The requested id is
+    // persisted before `agent.start`; hookrecv uses it to detect a provider that ignored resume.
     let resume = if opts.resume_native {
         match db::last_native_session(&app.db, &bot.id).await.map_err(up)? {
-            // A session the provider never wrote cannot be resumed: claude only creates the
-            // transcript once the conversation has a message, and `--resume` of an id without
-            // one prints "No conversation found" and exits — herdr saw the TUI for a moment,
-            // the restart reported success, and the bot was dead a second later (2026-09-11,
-            // every never-prompted bot in the restart-idle repro). Start fresh instead.
+            // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
+            // right after a "successful" restart (2026-09-11 restart-idle repro). Start fresh.
             Some((session_id, Some(transcript))) if host == LOCAL_HOST && !transcript.trim().is_empty() && !std::path::Path::new(&transcript).exists() => {
                 tracing::info!(bot = %bot.name, session = %session_id, transcript, "native session has no transcript on disk; not resuming it");
                 context_lost(app, bot, "transcript_missing").await?;
@@ -1821,11 +1659,8 @@ async fn start_inner(
     }
 
     let cwd = bot_cwd(bot, project);
-    // A directory the CLI has not seen before opens with "Is this a project you trust?", and
-    // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
-    // sits at the prompt looking `idle` and silently eats the first message. Record the trust
-    // first. Only local hosts, and only when the path is not already trusted, so in practice
-    // this touches the user's config once per new directory.
+    // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
+    // the first message. Record trust first (local, only when not yet trusted).
     if project.host == LOCAL_HOST {
         let mut b = bot.clone();
         b.cwd = Some(cwd.to_string());
@@ -1836,9 +1671,8 @@ async fn start_inner(
 
     // 2. workspace
     let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
-    // `projects.workspace_id` belongs to the manager's configured session. An imported bot
-    // lives in the user's default session, so it must not overwrite that mapping or cause the
-    // next named-session reconcile to clear it.
+    // `projects.workspace_id` is the configured session's; an imported bot in `default` must not
+    // overwrite it (the next reconcile would clear it).
     let workspace_id = match (session.as_str() != "default", project.workspace_id.as_deref()) {
         (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
         _ => {
@@ -1862,8 +1696,7 @@ async fn start_inner(
     let tab_id = root.tab_id;
     let mut pane_guard = StartPaneGuard::new(&client, &workspace_id, &tab_id, &pane_id);
 
-    // 4. persist mapping. From here until `agent.start` succeeds, every returned error must
-    // close the pane and its now-empty tab.
+    // 4. persist mapping. Until `agent.start` succeeds, every error must close the pane and tab.
     pane_guard
         .protect(
             sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
@@ -1877,7 +1710,7 @@ async fn start_inner(
         )
         .await?;
 
-    // 5. agent.start (async on the socket) — under `<project>-<bot>`, recorded on the run
+    // 5. agent.start under `<project>-<bot>`
     pane_guard
         .protect(
             sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
@@ -1888,10 +1721,8 @@ async fn start_inner(
                 .map_err(up),
         )
         .await?;
-    // SPEC §4.4a: stamp what this run is actually going to be on, read back off the argv we
-    // are about to hand herdr rather than off `bots`. The two can differ — `effort_checked`
-    // drops a level the model rejects, and the user's own `bot.args` can carry another `-m` —
-    // and `bots` keeps changing under a live run (codex applies model / effort only at start).
+    // SPEC §4.4a: stamp model/effort read back off the argv, not `bots` — `effort_checked` and
+    // `bot.args` can differ, and `bots` changes under a live run.
     let (rt_model, rt_effort) = crate::models::model_effort_from_argv(&bot.kind, &args);
     let rt_fast = i64::from(args.iter().any(|a| a.contains("service_tier=\"priority\"")));
     pane_guard
@@ -1906,18 +1737,11 @@ async fn start_inner(
                 .map_err(up),
         )
         .await?;
-    // A freshly created pane is not an available shell the instant `tab.create` /
-    // `pane.split` returns — herdr answers `agent_pane_busy: … is not an available shell`
-    // until the interactive shell has settled. Observed 2026-09-06: of six agents started
-    // back to back, one was lost to exactly that, 300 ms in, with nothing on screen to explain it. `quota_claude` already
-    // retries this same herdr answer — the bot start path is the one that did not.
-    // SPEC §6.5b: the pane env's `PATH` is not enough to put the shim in front of the real
-    // herdr. herdr starts the pane's shell as a *login* shell, so the user's profile runs
-    // afterwards and rebuilds `PATH` — measured on macOS 2026-09-07, `/etc/zprofile`'s
-    // `path_helper` plus `brew shellenv` left the shim behind `/opt/homebrew/bin`, where it
-    // never gets looked at. Typing the prepend into the pane's own shell happens after the
-    // profile, so it is the one that holds. Sent before `agent.start`, which is what the
-    // agent then inherits; if the shell is not up yet the pty buffers it.
+    // A fresh pane answers `agent_pane_busy: … is not an available shell` until its shell settles
+    // (2026-09-06: one of six back-to-back starts lost, 300 ms in); hence the retry.
+    // SPEC §6.5b: the login shell's profile rebuilds PATH after the pane env (macOS 2026-09-07:
+    // `path_helper` + `brew shellenv`), so the shim prepend is typed into the shell before
+    // `agent.start`; the pty buffers it if the shell isn't up yet.
     if let Some(dir) = shim_dir.as_deref() {
         let line = format!(" export PATH={}:\"$PATH\"\n", sh_quote(dir));
         if let Err(e) = client.pane_send_text(&pane_id, &line).await {
@@ -1969,9 +1793,7 @@ async fn start_inner(
             }
         }
     }
-    // Codex renders account notices as standalone TUI history rows rather than part of an
-    // agent turn. They are not included in `notify`'s `last-assistant-message`, so take a
-    // delayed pane snapshot once the startup screen has had time to render.
+    // Codex account notices are TUI history rows, not in `notify`'s last message: snapshot the pane later.
     if bot.kind == "codex" {
         schedule_codex_notice_capture(app, &bot.id, run_id);
     }
@@ -1979,9 +1801,8 @@ async fn start_inner(
     Ok(())
 }
 
-/// Look the kind's executable up the way the pane will see it: through the user's *login*
-/// shell (`$SHELL -lic`), falling back to the plain PATH. Returns a user-facing reason when
-/// it is missing. Best effort — a lookup that itself fails (timeout, odd shell) passes.
+/// Find the kind's executable via the user's login shell (`$SHELL -lic`), else PATH. Returns a
+/// user-facing reason when missing; a lookup that itself fails passes.
 async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result<(), String> {
     if !crate::config::valid_kind(kind) {
         return Err(format!("未知的 bot kind `{kind}`"));
@@ -2035,14 +1856,11 @@ async fn set_run(app: &Arc<App>, run_id: &str, state: &str, agent_status: &str) 
         .await;
 }
 
-// ---------------------------------------------------------------- Codex account notices
 
-/// Codex draws this hint in the startup / idle transcript, outside any agent turn. It is not
-/// part of `agent-turn-complete`, so terminal inspection is the only source available to us.
+/// Codex's account hint is outside any turn (not in `agent-turn-complete`); the terminal is the only source.
 const CODEX_NOTICE_DELAY: Duration = Duration::from_millis(500);
 
-/// Schedule a best-effort read after Codex has time to paint its startup or post-turn hint.
-/// The task re-checks the run id so a delayed read from an old run cannot land on a new one.
+/// Best-effort delayed read of Codex's hint; re-checks the run id so an old read can't land on a new run.
 pub fn schedule_codex_notice_capture(app: &Arc<App>, bot_id: &str, run_id: &str) {
     let app = app.clone();
     let bot_id = bot_id.to_string();
@@ -2057,8 +1875,7 @@ pub fn schedule_codex_notice_capture(app: &Arc<App>, bot_id: &str, run_id: &str)
     });
 }
 
-/// Read and persist newly seen Codex account notices (reset available **or** hard limit hit).
-/// The caller must hold the bot lock.
+/// Persist newly seen Codex account notices (reset available or hard limit). Caller holds the bot lock.
 pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> anyhow::Result<()> {
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
     if run.id != expected_run_id {
@@ -2074,9 +1891,8 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
     for notice in codex_usage_notice_lines(&read.text) {
-        // 去重只看**這個 run 開始之後**。原本比對整段對話：codex-astra 的 pane 兩天前印過
-        // 一模一樣的上限橫幅，今天再撞一次時這裡直接 `continue`，於是額度沒有被標記、
-        // 卡住的回合也沒有被解開——畫面上額度是滿的，輸入列卻一直轉（2026-09-12 使用者）。
+        // 去重只看這個 run 開始之後：比對整段對話時，兩天前一樣的上限橫幅讓這次被跳過，
+        // 額度沒標、回合沒解開（2026-09-12 使用者）。
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM messages
              WHERE conversation_id=? AND role='system' AND source='system' AND content=? AND created_at >= ?)",
@@ -2088,15 +1904,13 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         .await?;
         let fresh = exists == 0;
         if fresh {
-            // Don't attach the pane snapshot: the idle splash is a boxed TUI (model /
-            // directory / Tip / "Ask Codex to do anything"), not a failed cut of a reply.
+            // No pane snapshot: the idle splash is a boxed TUI, not a failed cut of a reply.
             insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
             tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         }
         if codex_limit_hit_line(&notice).is_some() {
-            // 還有回合在飛＝這張橫幅就是我們剛送出去那一句的答案，即使字面上看過也要處理；
-            // 沒有回合在飛時只認這個 run 內第一次看到的，畫面上留著的舊橫幅才不會反覆把
-            // 額度打回 100%。
+            // 有回合在飛＝橫幅就是那句的答案，照樣處理；否則只認這個 run 內第一次看到的，
+            // 舊橫幅才不會反覆把額度打回 100%。
             let in_flight = db::in_flight_turn(&app.db, &run.id).await?;
             if !fresh && in_flight.is_none() {
                 continue;
@@ -2121,7 +1935,6 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     Ok(())
 }
 
-// ---------------------------------------------------------------- stop / interrupt
 
 pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     let lock = app.bot_lock(bot_id).await;
@@ -2134,10 +1947,8 @@ pub fn in_default_session(run: &db::Run) -> bool {
     run.herdr_session.as_deref() == Some("default")
 }
 
-/// SPEC §6.5.1: a bot imported from the user's `default` session is observed, never driven.
-/// Starting one would `workspace.create` inside the user's session (`inject_hooks=0`,
-/// `auto_approve=0`, `--resume` and all); restarting one would first close their pane. Both
-/// used to happen from the sidebar buttons and from `restart-idle` (review 2026-09-12 #4).
+/// SPEC §6.5.1: a bot from the user's `default` session is observed, never driven — start
+/// would create a workspace in their session, restart would close their pane (review 2026-09-12 #4).
 fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
     if bot.herdr_session.as_deref() == Some("default") {
         return Err(LcError::conflict(
@@ -2149,8 +1960,7 @@ fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
     Ok(())
 }
 
-/// [`stop_bot`] for a caller that already holds the bot's lock, so a restart can stop and start
-/// under one guard ([`restart_bot_with`]).
+/// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
@@ -2179,14 +1989,8 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    // The pane belongs to this Run either way: once the agent is gone (or refused to go)
-    // we close it, otherwise a bare shell pane would linger until the next reconcile. And
-    // when the run owned its tab (started with `tab.create`, or moved into one) the tab goes
-    // with it, so stopping bots does not leave a row of empty tabs behind.
-    //
-    // Except in the user's own `default` session (SPEC §6.5.1): that pane is theirs, the
-    // daemon only ever observed it. The agent gets its ctrl+c and nothing more — closing the
-    // pane took the user's terminal away with it (review 2026-09-12 #4).
+    // Close the Run's pane (and its tab if owned) so no bare shell lingers — except in the user's
+    // `default` session (SPEC §6.5.1): only ctrl+c; closing took their terminal (review 2026-09-12 #4).
     if in_default_session(&run) {
         if !gone {
             tracing::warn!(bot = %bot.name, "agent did not exit within 10s; its pane is the user's own and is left open");
@@ -2218,23 +2022,13 @@ pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
     restart_bot_with(app, bot_id, StartOpts::default()).await
 }
 
-/// Stop + start under **one** hold of the bot's lock.
-///
-/// This used to be `stop_bot` (take the lock, stop, let go) followed by taking the lock again to
-/// start. Anything queued on that lock in between got to act on a bot that had no run: on
-/// 2026-09-10 23:02 a reconcile did exactly that during `restart-idle` — it adopted the agent
-/// that had just been stopped as a new run, `start` refused with `active run already exists`,
-/// the pane-closed event ended the adopted run, and AGM plus three other bots stayed down for
-/// 5.5 hours. Holding the lock across both halves leaves no gap to fall into.
-///
-/// If a start is still refused because a run is in the way, and that run's pane is gone (it can
-/// only be a leftover of the same kind of race on some other path), it is ended and the start
-/// is tried once more rather than giving up on a bot that is otherwise dead.
+/// Stop + start under one hold of the bot's lock. Two holds let a reconcile adopt the just-stopped
+/// agent in between (2026-09-10 23:02, `restart-idle`: AGM + three bots down 5.5 h).
+/// If a run whose pane is gone still blocks the start, it is ended and the start retried once.
 pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    // Checked *before* the stop: `start` would refuse anyway, but by then the user's agent
-    // would already have been sent ctrl+c for nothing.
+    // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     refuse_default_session(&bot)?;
     stop_bot_locked(app, bot_id).await?;
@@ -2255,18 +2049,10 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     }
 }
 
-/// 子 agent 的「原地重啟」：在**它自己那個 pane 裡**把 agent 收掉再起回來（SPEC §6.5a / §6.9）。
-///
-/// pane 是父 agent 用 `pane.split` 開的，[`start_bot_locked_with`] 因此拒絕子 agent——照那條路走
-/// 會多開一個跟父 agent 無關的 pane。但「套用 claude 更新」要的其實只是把 CLI 換成新版接回同一個
-/// session，pane 本身不必動：所以這裡送 `ctrl+c` 讓 agent 退出、**不關 pane**，再用同一個 agent
-/// 名字在同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`。
-///
-/// pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 herdr shim、父 agent 傳下來的那些）留在 pane 的
-/// shell 裡，所以重啟回來的還是同一個帳號、同一套工具——這是 daemon 重建不了的東西，也是不能關掉
-/// 這個 pane 的第二個理由。hook 一樣沒有注入（`inject_hooks = 0`），回覆照舊走終端快照。
-///
-/// pane 在收 agent 的過程中不見了（父 agent 自己關掉）就不重開：那顆子 agent 本來就結束了。
+/// 子 agent 原地重啟（SPEC §6.5a / §6.9）：在它自己的 pane 裡 `ctrl+c` 收掉、**不關 pane**，
+/// 同名 `agent.start --resume <上一個 session>`。pane 是父 agent 開的，且 shell 裡的環境
+/// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
+/// 過程中 pane 不見了就不重開。
 pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -2294,7 +2080,7 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
     let mut empty = false;
     for _ in 0..20 {
         match client.pane_get(&pane_id).await {
-            // pane 沒了：這顆子 agent 結束了，run 跟著收掉，不要在別的地方重開一個。
+            // pane 沒了：子 agent 結束，run 收掉，不在別處重開。
             Ok(None) => {
                 mark_run_exited(app, &run.id, "子 agent 的 pane 在重啟過程中被關掉").await;
                 app.emit_bot_status(bot_id).await;
@@ -2309,9 +2095,8 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     if !empty {
-        // agent 還在 pane 裡、我們也沒動它：run 就還是活的。留在 `stopping` 的話之後 prompt
-        // 一律 409 `run is not running`、`start_bot` 對子 agent 又一律拒絕、reconcile 只把
-        // `starting` 轉回 `running`——這顆 bot 會在側欄變成永遠的黃燈（2026-09-12 review #1）。
+        // agent 還在：run 轉回 running。留在 `stopping` 會讓 prompt 409、start 拒絕、reconcile
+        // 也不救——永遠黃燈（2026-09-12 review #1）。
         let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=? AND state='stopping'")
             .bind(&run.id)
             .execute(&app.db)
@@ -2319,7 +2104,6 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
         app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
     }
-    // `ended_at` 一寫上去，剛剛那個 native session 就成了 `last_native_session` 的「上一個」。
     let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
         .bind(db::now())
         .bind(&run.id)
@@ -2335,8 +2119,7 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
             _ => {}
         }
     }
-    // 模型／強度用 `bots` 上那份——它是 §4.4a 從這顆子 agent 自己的 argv 讀回來補的，
-    // 不是我們挑的。讀不到就不帶，讓 CLI 用它自己的預設。
+    // 模型／強度用 `bots` 上 §4.4a 從子 agent argv 讀回的；讀不到就讓 CLI 用預設。
     args.extend(model_args(&effort_checked(app, &bot, &host).await));
     args.extend(bot.args());
     let resume = match db::last_native_session(&app.db, bot_id).await.map_err(up)? {
@@ -2401,7 +2184,7 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
     if let Err(e) = client.agent_wait(&agent, &until, 60_000).await {
         tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手");
     }
-    // 跟收編同一條路：沒有 hook 的 run，畫面就是唯一來源。
+    // 沒有 hook 的 run，畫面是唯一來源（同收編）。
     spawn_adopted_capture(app, &run_id, bot_id);
     app.emit_bot_status(bot_id).await;
     app.emit("bot_changed", json!({"bot_id": bot_id})).await;
@@ -2409,30 +2192,23 @@ pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<Str
     Ok(run_id)
 }
 
-/// Is this run really there — its pane still open and herdr still listing its agent?
-///
-/// A failed RPC counts as alive: callers use this to decide whether to *end* a run, and ending a
-/// live bot over a hiccup is the worse mistake.
+/// Is this run's pane open and its agent listed? A failed RPC counts as alive: ending a live bot
+/// over a hiccup is the worse mistake.
 pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
     let Some(pane) = run.pane_id.as_deref() else { return false };
     let Ok(client) = client_for_run(app, run).await else { return true };
     match client.pane_get(pane).await {
         Ok(None) => return false,
-        // The pane itself says an agent is in it: that is the answer. herdr's `agent.get` by
-        // name can say not-found for a moment after a same-named agent was restarted on a new
-        // pane (2026-09-11), and a run must not be ended over that.
+        // The pane says an agent is in it: `agent.get` by name can briefly miss after a same-named
+        // restart on a new pane (2026-09-11).
         Ok(Some(p)) if p.agent.is_some() => return true,
         _ => {}
     }
     !matches!(client.agent_get(&db::run_target(run, bot)).await, Ok(None))
 }
 
-/// Remove a deleted bot's hook material (`~/.config/agents-manager/bots/<id>/`). Best effort:
-/// a remote host that is down only gets a log line — the bot is gone either way.
-/// #61: the one-time clean-up for directories left behind before every deletion path purged:
-/// `bots/<id>/` of bots whose row is soft-deleted and that have no live run. Directories no bot
-/// row claims are left alone — they are not this daemon's to judge (rt-87 also parked eleven
-/// of them in `bots-orphan-backup-2026-09-10/`, outside `bots/`, which this never touches).
+/// #61: one-time purge of `bots/<id>/` for soft-deleted bots with no live run. Dirs no bot row
+/// claims are left alone (rt-87's `bots-orphan-backup-2026-09-10/` is outside `bots/`).
 pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
     let root = app.data_dir.join("bots");
     let Ok(entries) = std::fs::read_dir(&root) else { return 0 };
@@ -2527,11 +2303,8 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     Ok(())
 }
 
-/// claude 在**還沒吐出第一個字**（thinking 階段）就被 `esc` 打斷時，會把那則 prompt 原封不動放回
-/// 輸入框（2026-09-08 實測；串流中或工具執行中被打斷則不會）。放著不管，下一則 `agent.prompt`
-/// 的貼上會直接接在後面，agent 收到的是「舊 prompt + 新 prompt」黏成一句——使用者看到的就是
-/// 「中斷後再下指令沒反應／照舊做」。所以中斷後看一眼 composer：有字就 `ctrl+c` 清掉（claude 的
-/// 單次 ctrl+c 在有字時只清輸入框，不會退出）。只做給 claude；純粹是保險，失敗不報錯。
+/// claude 在吐出第一個字前被 `esc` 打斷，會把 prompt 放回輸入框（2026-09-08 實測），下一則
+/// 貼上會黏在後面。中斷後 composer 有字就 `ctrl+c` 清掉（有字時只清不退出）。只做 claude，失敗不報錯。
 async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bot) {
     if bot.kind != "claude" {
         return;
@@ -2548,18 +2321,9 @@ async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bo
     }
 }
 
-/// **強制**結束這個 bot 目前的回合（`POST /api/bots/:id/abort`）。
-///
-/// [`interrupt_bot`] 是「請 agent 停下來」：`esc` 送不出去（pane 沒了、herdr 斷線、run 不在了）
-/// 就整個失敗，那一回合仍然掛在 `in_flight`，輸入框跟著鎖死，使用者只剩「停掉整個 bot」這條路。
-/// 這支的語義相反——**先保證 DB 這邊解開**，送鍵只是順帶：
-///
-/// * `esc` 盡力送一次，失敗只記在回應裡（`keys_sent: false`），不影響其餘步驟；
-/// * in-flight 的回合標成 `failed` 並留一則系統訊息；
-/// * `delivery = unknown` 的回合也一併收掉——它同樣會鎖住輸入框（§6.3），而使用者要的是「現在
-///   就能再打字」，不是分兩個按鈕點兩次。
-///
-/// 沒有 active run 時**不是**錯誤：run 已經沒了、回合卻還掛著，正是最需要這支的情況。
+/// 強制結束目前回合（`POST /api/bots/:id/abort`）。和 [`interrupt_bot`] 相反，先保證 DB 解開、
+/// 送 `esc` 只是盡力（`keys_sent`）：in-flight 標 failed、`delivery = unknown` 也一併收（§6.3，
+/// 同樣鎖輸入框）。沒有 active run 不算錯——那正是最需要這支的情況。
 pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -2593,8 +2357,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
             clear_restored_prompt(c, r, &bot).await;
         }
     }
-    // Unknown-delivery turns live on the bot, not on one run: a stopped run can leave one
-    // behind, and `prompt()` refuses the next message until it is cleared.
+    // Unknown-delivery turns live on the bot, not a run: a stopped run can leave one behind.
     let unknown = sqlx::query_as::<_, db::Turn>(
         "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
          WHERE c.bot_id = ? AND (t.status = 'in_flight' OR t.delivery = 'unknown')",
@@ -2628,17 +2391,9 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     Ok(json!({"aborted": aborted, "keys_sent": keys_sent, "key_error": key_error}))
 }
 
-/// Give a *running* bot a tab of its own — the retrofit for every bot started before
-/// one-bot-one-tab, which is sitting in a pane split off a shared tab.
-///
-/// This is a move, not a restart. herdr keeps the `pane_id` across `pane.move` (verified
-/// against 0.8.2), so the run's mapping, its pane subscription, the progress poller and any
-/// turn in flight all carry on untouched; only `tab_id` changes. Nothing is sent to the
-/// agent, so a bot mid-answer does not notice.
-///
-/// Idempotent: a pane that already owns its tab is left exactly where it is. Moving it again
-/// would not be a no-op on herdr's side — it builds a *new* tab and closes the old one, which
-/// renumbers the user's tab bar for nothing.
+/// Give a running pre one-bot-one-tab bot its own tab. A move, not a restart: herdr keeps
+/// `pane_id` across `pane.move` (0.8.2), so mapping, poller and in-flight turn carry on.
+/// Idempotent: re-moving a solo pane would rebuild a tab and renumber the user's tab bar.
 pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -2651,8 +2406,7 @@ pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> 
         .ok_or_else(|| LcError::NotFound("pane".into()))?;
     let client = client_for_run(app, &run).await?;
 
-    // Where the pane actually is right now — `runs.tab_id` is NULL for every run started the
-    // old way, and stale if the user dragged the pane about themselves.
+    // `runs.tab_id` is NULL for old runs and stale if the user dragged the pane.
     let pane = client.pane_get(&pane_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("pane".into()))?;
     let workspace_id = pane.workspace_id.clone();
     let current_tab = pane.tab_id.clone();
@@ -2669,10 +2423,7 @@ pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> 
         current_tab
     } else {
         let (new_tab, previous) = client.pane_move_to_new_tab(&pane_id, &tab_label(&bot)).await.map_err(up)?;
-        // Belt to two braces: the `solo` check above means we only ever move out of a tab
-        // that still holds something, and herdr closes a tab its move emptied anyway. The
-        // shared tidy-up runs regardless because it is idempotent, and because it is the one
-        // place that decides a tab may go — a second opinion here would be a second bug.
+        // The shared tidy-up is idempotent and the one place that decides a tab may go.
         if !previous.is_empty() && previous != new_tab {
             close_tab_if_empty(&client, &workspace_id, &previous).await;
         }
@@ -2705,14 +2456,9 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
     Ok(())
 }
 
-/// `POST /api/bots/:id/text` — 把一段（可能多行的）文字打進 bot 的 pane，選擇性按 Enter。
-///
-/// 和 `send_keys` 的差別就是「文字」和「鍵」的差別：`agent.send_keys` 吃鍵名，`\n` 不是
-/// 鍵名，多行文字拆成鍵名會整段掉。Enter 也一樣要**另外**用 `pane.send_keys` 送——`\n`
-/// 在 `pane.send_text` 裡是貼上的換行，不是送出（同 `shell::send_text`）。
-///
-/// 不擋 `agent_status`：這條路的用途正是「回合跑到一半時再補一句」（前端的「併送」），
-/// 那時 agent 本來就是 working。
+/// `POST /api/bots/:id/text` — 把（多行）文字打進 pane，選擇性按 Enter。`\n` 不是鍵名，所以不走
+/// `send_keys`；Enter 另用 `pane.send_keys`（`send_text` 裡的 `\n` 是貼上換行）。不擋
+/// `agent_status`：用途就是回合中「併送」。
 pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, expect_run_id: Option<String>) -> LcResult<()> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -2739,8 +2485,7 @@ pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, ex
     Ok(())
 }
 
-/// Build the TUI slash command for a live setting, or `None` if this kind/field
-/// has no in-session command (caller then reports `needs_restart`).
+/// TUI slash command for a live setting, or `None` (caller reports `needs_restart`).
 fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {
     match (kind, field) {
         ("grok", "effort") | ("claude", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
@@ -2757,26 +2502,12 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
     }
 }
 
-/// 有些設定不用重啟就能改：agent 的 TUI 自己有辦法當場換。
-///
-/// * grok `effort` → `/effort <level>`（grok 1.0.13 `04-slash-commands.md`）
-/// * grok `model` → `/model <id>`；bot 同時有 effort 時帶第二參數（`/model grok-4.6 high`）
-/// * claude `model` → `/model <alias>`（alias 同 `claude --model`：opus / sonnet / haiku / fable…）
-/// * claude `effort` → `/effort <level>`（2.1.263 實測：`/effort low` 直接套用並回
-///   `Set effort level to low (saved as your default for new sessions)`。不帶參數的 `/effort`
-///   才是那條拉桿。**注意副作用**：claude 會把它存成該帳號之後新 session 的預設值，這是 CLI
-///   的行為，只有 TUI 上按 `s` 才是「只有這次」——daemon 沒有那個選項。）
-/// * codex `model` / `effort` / `fast` → 走 [`crate::codex_live`]：`/model` 是一個**不吃參數**
-///   的兩層選單、`/fast` 是一個開關，所以那邊是「送鍵、讀畫面、再送鍵」，最後回讀狀態列確認
-///   （2026-09-09 在拋棄式 pane 實測，SPEC §4.4a）。codex 一樣會把選擇存成帳號預設。
-///
-/// 回傳 `true` = 已經套用（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
-/// （kind 不符、沒在跑、正在忙、選單長得不對、回讀對不上），讓呼叫端退回「重啟才生效」。
-/// 為什麼沒有當場套用。`None` = 套用成功，呼叫端就不必重啟。
-///
-/// 2026-09-13 使用者：「codex 改 effort 其實不用重啟」——對，但那天它落回重啟，而**每一個失敗
-/// 出口都是靜默的 `return false`**，log 裡只看得到 pane 被關掉重開，查不出是哪一步。理由現在
-/// 一路帶回呼叫端（`PATCH /api/bots/{id}` 的 `live_apply`）並寫進 log。
+/// 不重啟就套用設定（SPEC §4.4a）。grok `effort`/`model`、claude `model`/`effort` 走一行 slash
+/// 指令；codex 的 `/model` 是不吃參數的選單、`/fast` 是開關，走 [`crate::codex_live`]
+/// 送鍵讀畫面再回讀狀態列（2026-09-09 實測）。副作用：claude（2.1.263 實測）與 codex 都會把
+/// 選擇存成帳號之後新 session 的預設。
+/// 回傳 `None` = 已套用；`Some(理由)` = 退回重啟。理由一路帶回 `live_apply` 並寫 log——
+/// 2026-09-13 使用者問 codex 改 effort 為何重啟，當時每個失敗出口都是靜默的。
 pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
     let reason = apply_live_setting_inner(app, bot_id, fields).await;
     match &reason {
@@ -2794,19 +2525,18 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
     let pane_id = match slash_gate(&run, in_flight) {
         Ok(p) => p,
-        // slash_gate 自己說得出是「沒有 pane」「正在忙」還是「停在提示上」。
         Err(why) => return Some(format!("slash_gate: {}", why.reason())),
     };
     let Ok(client) = client_for_run(app, &run).await else { return Some("no_herdr_client".into()) };
 
     if bot.kind == "codex" {
-        // 這個 run 現在是不是 fast——`/fast` 是開關，不知道現在的狀態就不能按。
+        // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
         let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
             Ok(seen) => seen,
             Err(why) => return Some(format!("codex: {why}")),
         };
-        // 回讀到的狀態列就是 runtime 的定義（SPEC §4.4a），不是我們以為送出去的東西。
+        // 回讀的狀態列才是 runtime 的定義（SPEC §4.4a）。
         let _ = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
             .bind(&seen.model)
             .bind(&seen.effort)
@@ -2819,14 +2549,13 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
         return None;
     }
 
-    // claude / grok：一個欄位一行 slash 指令。
     let [field] = fields else { return Some("not_a_single_field".into()) };
     let value = match *field {
         "effort" => bot.effort.as_deref(),
         "model" => bot.model.as_deref(),
         _ => None,
     };
-    // 清成「不指定」沒有 slash 指令可用（`/effort` 與 `/model` 都一定要帶值）。
+    // `/effort`、`/model` 都一定要帶值，清成「不指定」沒有 slash 指令。
     let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Some(format!("{field}_cleared_to_default"));
     };
@@ -2836,9 +2565,7 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     if send_slash_line(&client, &pane_id, &line).await.is_err() {
         return Some("slash_send_failed".into());
     }
-    // SPEC §4.4a: the run really is on the new value now, so the drift marker must clear with
-    // it. Only the field that was sent — `/model` does not touch the effort, and grok's
-    // two-argument form carries the effort the bot already had.
+    // SPEC §4.4a: clear the drift marker only for the field sent (`/model` doesn't touch effort).
     let col = match *field {
         "effort" => "runtime_effort",
         _ => "runtime_model",
@@ -2862,24 +2589,19 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     None
 }
 
-/// 現在不能把一行 slash 指令送進 agent 輸入列的理由。
-///
-/// `apply_live_setting` 只需要知道「不行」（它會退回「重啟才生效」），但使用者自己按下
-/// 「登入」時，靜默失敗就是個 bug ——所以理由要拿得出來。
+/// 不能送 slash 指令的理由。`apply_live_setting` 只需要「不行」，但使用者按「登入」時靜默失敗是 bug。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashBlocked {
-    /// 沒有正在跑的 run，或 run 已經不是 `running`。
     NotRunning,
-    /// agent 自己在忙（`working` / `blocked`）：這時打的字會被吃掉，或掉進權限提示裡。
+    /// `working` / `blocked`：打的字會被吃掉，或掉進權限提示。
     AgentBusy,
-    /// 有回合正在飛，這一行會變成那個 prompt 的一部分。
+    /// 這一行會變成在飛 prompt 的一部分。
     TurnInFlight,
-    /// run 沒有 pane 可以打字（舊資料，或 herdr 那邊已經收掉了）。
     NoPane,
 }
 
 impl SlashBlocked {
-    /// 給 API body 用的機器可讀理由；文案由前端依這個 key 翻。
+    /// 機器可讀理由；文案由前端翻。
     pub fn reason(self) -> &'static str {
         match self {
             SlashBlocked::NotRunning => "not_running",
@@ -2890,10 +2612,7 @@ impl SlashBlocked {
     }
 }
 
-/// 這個 run 現在能不能被打字？能的話回它的 pane id。
-///
-/// 純函式，好讓每一條擋下來的理由都測得到——`apply_live_setting` 與 `login` 共用同一組
-/// 判斷，兩邊就不會各自漂走。
+/// 能打字就回 pane id。純函式：`apply_live_setting` 與 `login` 共用，每條擋下的理由都測得到。
 fn slash_gate(run: &db::Run, turn_in_flight: bool) -> Result<String, SlashBlocked> {
     if run.state != "running" {
         return Err(SlashBlocked::NotRunning);
@@ -2911,21 +2630,10 @@ fn slash_gate(run: &db::Run, turn_in_flight: bool) -> Result<String, SlashBlocke
         .ok_or(SlashBlocked::NoPane)
 }
 
-/// 把一行 slash 指令打進 agent 的輸入列並送出。
-///
-/// 和 grok 額度探測同一套：先打字，等輸入列畫好，再送 Enter。`"/login\n"` 一次送會被
-/// TUI 當成貼上多行，不會送出。
-///
-/// **送出不等於套用**（2026-09-11 AGM）：claude 在有對話紀錄時，`/model` 會先跳
-/// 「Switch model?」確認框（[`crate::tui_prompts::is_switch_model_dialog`]）。以前這裡按完
-/// Enter 就回 `Ok`，呼叫端把 runtime 標成新模型、回 `needs_restart: false`，框卻還開著——
-/// 使用者下一則訊息被打進框裡吃掉，Enter 替他按了 Yes，回合 12 秒後 stall。
-///
-/// 所以按完 Enter 一定回頭看畫面：
-/// * 是那個確認框 → 按 `1`（Yes）。使用者已經在 AG Man 裡選了新模型，「要不要換」已經答過了；
-///   框裡講的代價（整段歷史要重讀一次）是換模型本來就有的，不是新的決定。
-/// * 按完還在 → Esc 退出（= No, go back）並回 `Err`，呼叫端就維持「重啟才生效」。
-///   **絕不把框留在畫面上**：留著的框會吃掉下一則 prompt，這比「沒套用成功」糟得多。
+/// 打一行 slash 指令並送出：先打字、等輸入列畫好、再 Enter（`"/login\n"` 會被當多行貼上）。
+/// 送出不等於套用（2026-09-11 AGM）：claude 有對話時 `/model` 會跳「Switch model?」框，留著會吃掉
+/// 下一則 prompt、Enter 替人按 Yes、回合 stall。所以回頭看畫面：是那個框 → 按 `1`（使用者已在
+/// AG Man 選過）；還在 → Esc 並回 `Err`。絕不把框留在畫面上。
 async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcResult<()> {
     client.pane_send_text(pane_id, line).await.map_err(up)?;
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -2947,19 +2655,9 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
     Err(up(anyhow::anyhow!("claude 的換模型確認框沒有關掉，已按 Esc 退出")))
 }
 
-// ---------------------------------------------------------------- login
 
-/// 這個 kind 在 TUI 裡登入 / 換帳號的 slash 指令，沒有就是 `None`。
-///
-/// 這是實際問過 CLI 的結果，不是猜的（每個都在拋棄式 herdr session 裡開起 TUI，打前綴看
-/// 補完選單）：
-///
-/// * `claude` 2.1.263 → `/login`，選單說明「Sign in with your Anthropic account」。
-/// * `grok` 1.0.13 → `/login`，選單說明「Log in or re-authenticate with your account」；
-///   另見 `~/.grok/docs/user-guide/04-slash-commands.md` 的 “Account and Billing”。
-/// * `codex` 0.153.4 → **沒有**。它的 slash 選單只有 `/logout`（`/logi` 完全沒有補完項），
-///   登入得在 TUI 外面跑 `codex login`。所以這裡回 `None`：送一個不存在的 slash 指令進去，
-///   codex 只會把 `/login` 當成一般 prompt 丟給模型，比報錯還糟。
+/// 登入／換帳號的 slash 指令（拋棄式 herdr session 實測）：claude 2.1.263 與 grok 1.0.13 是
+/// `/login`；codex 0.153.4 沒有（只有 `/logout`），送進去會被當一般 prompt 丟給模型，所以 `None`。
 pub fn login_slash_command(kind: &str) -> Option<&'static str> {
     match kind {
         "claude" | "grok" => Some("/login"),
@@ -2971,17 +2669,11 @@ pub fn login_slash_command(kind: &str) -> Option<&'static str> {
 pub struct LoginOut {
     pub run_id: String,
     pub kind: String,
-    /// 實際送進 TUI 的那一行，讓前端／log 講得出送了什麼。
     pub command: String,
 }
 
-/// 對一個**正在跑的** bot 送登入指令，讓它的 TUI 進入登入 / 切換帳號流程。
-///
-/// 走的路和 `apply_live_setting` 一模一樣（同一個 gate、同一套打字節奏），差別只在錯誤語意：
-/// 這裡是使用者明確按了按鈕，送不出去就要說明白為什麼，而不是靜悄悄地不做。
-///
-/// 送出後 agent 會停在登入畫面（通常還會開瀏覽器），在使用者完成之前它不能工作——daemon
-/// 不去等、也不去替使用者完成，登入完成與否由 `POST /hosts/:name/tools/refresh` 重新偵測。
+/// 對正在跑的 bot 送登入指令。同 `apply_live_setting` 的 gate 與打字節奏，但使用者明確按了按鈕，
+/// 送不出去要說明理由。daemon 不等登入完成；由 `POST /hosts/:name/tools/refresh` 重新偵測。
 pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
@@ -3036,8 +2728,7 @@ mod resume_args_tests {
         assert_eq!(resume_args_by_kind("claude", ""), Err("no_session_id"));
     }
 
-    /// Continuation is opt-in: `resume_native` gets `--resume <id>`; the same bot started the
-    /// way the user's button starts it gets a fresh conversation, with the same id in `runs`.
+    /// Continuation is opt-in: only `resume_native` gets `--resume <id>`.
     #[tokio::test]
     async fn native_resume_is_opt_in() {
         let e = env().await;
@@ -3066,9 +2757,7 @@ mod resume_args_tests {
         stop_bot(&e.app, &pm.id).await.unwrap();
     }
 
-    /// A session whose transcript was never written (a bot that was started and never
-    /// prompted) is not resumed: `claude --resume <id>` of such an id exits at once with "No
-    /// conversation found", and the restart would report success over a dead pane.
+    /// No transcript → not resumed: `claude --resume` would exit with "No conversation found".
     #[tokio::test]
     async fn a_session_without_a_transcript_on_disk_is_not_resumed() {
         let e = env().await;
@@ -3101,11 +2790,8 @@ mod resume_args_tests {
         stop_bot(&e.app, &pm.id).await.unwrap();
     }
 
-    /// 2026-09-10 23:02, end to end: restart a bot over and over while a reconcile runs in a
-    /// tight loop beside it. Before `restart_bot_with` held the lock across stop and start, any
-    /// reconcile queued on that lock could adopt the just-stopped agent in the gap and the start
-    /// would refuse with `active run already exists`. Every restart here must come back with the
-    /// run it started, and that run must really be alive.
+    /// 2026-09-10 23:02: restart repeatedly beside a tight reconcile loop; every restart must
+    /// return the run it started, alive (no adoption in a stop/start gap).
     #[tokio::test]
     async fn restarts_racing_a_reconcile_loop_always_come_back() {
         let e = env().await;
@@ -3152,9 +2838,7 @@ mod resume_args_tests {
 mod abort_tests {
     use super::*;
 
-    /// The whole point of `abort_turns`: it works when talking to the agent does **not**.
-    /// This App has no herdr behind its socket, so `esc` cannot be delivered — and the turn
-    /// must still come out of `in_flight`, which is what unlocks the composer.
+    /// `abort_turns` must work when `esc` cannot be delivered (no herdr here): the turn still leaves `in_flight`.
     #[tokio::test]
     async fn unlocks_even_when_the_keys_cannot_be_sent() {
         let dir = std::env::temp_dir().join(format!("am-abort-{}", db::ulid()));
@@ -3185,8 +2869,7 @@ mod abort_tests {
             .bind(&rid).bind(&bid).bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)")
             .bind(&cid).bind(&bid).bind(&now).execute(&app.db).await.unwrap();
-        // One turn stuck in flight, and one older turn whose delivery never came back — both
-        // block the next prompt, so both have to go.
+        // Both an in-flight turn and an unknown-delivery one block the next prompt.
         let (t_flight, t_unknown) = (db::ulid(), db::ulid());
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(&t_flight).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
@@ -3259,7 +2942,6 @@ mod login_slash_tests {
     use super::{login_slash_command, slash_gate, SlashBlocked};
     use crate::db;
 
-    /// 一個「可以打字」的 run；每個測試只動它想證明的那一格。
     fn run(state: &str, agent_status: &str, pane_id: Option<&str>) -> db::Run {
         db::Run {
             id: "r1".into(),
@@ -3290,8 +2972,7 @@ mod login_slash_tests {
         }
     }
 
-    /// claude 與 grok 的 TUI 都有 `/login`；codex 沒有（只有 `/logout`），所以它得是 `None`
-    /// ——回一個「不支援」比送一個不存在的指令進去好。
+    /// codex 沒有 `/login`（只有 `/logout`），回「不支援」好過送不存在的指令。
     #[test]
     fn only_claude_and_grok_can_log_in_from_the_tui() {
         assert_eq!(login_slash_command("claude"), Some("/login"));
@@ -3337,7 +3018,6 @@ mod login_slash_tests {
     }
 }
 
-// ---------------------------------------------------------------- prompt
 
 #[derive(serde::Serialize)]
 pub struct PromptOut {
@@ -3350,8 +3030,7 @@ pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id:
     prompt_grouped(app, bot_id, text, client_request_id, None, None, &[], None).await
 }
 
-/// `prompt` carrying images dropped into the composer (`attach.rs`). The agent gets the
-/// text plus their paths on its own host; the timeline keeps the text and renders the
+/// `prompt` with images (`attach.rs`): the agent gets paths on its host; the timeline renders
 /// thumbnails from `messages.attachments_json`.
 pub async fn prompt_with(
     app: &Arc<App>,
@@ -3363,8 +3042,7 @@ pub async fn prompt_with(
     prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, None).await
 }
 
-/// 同 `prompt_with`，但記下「這句話不是使用者自己打的」：`relay_from` 是送出它的 bot id，
-/// 或哨符 `daemon`（launchd 的例行腳本、daemon 自己的通知）。UI 靠它把泡泡畫在左邊。
+/// 同 `prompt_with`，記下 `relay_from`（bot id 或哨符 `daemon`）；UI 靠它把泡泡畫在左邊。
 pub async fn prompt_relayed(
     app: &Arc<App>,
     bot_id: &str,
@@ -3376,20 +3054,11 @@ pub async fn prompt_relayed(
     prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from).await
 }
 
-/// `prompt` whose user message carries a SPEC §13 `group_id` (project group chat).
-/// `deliver` is what the agent actually receives; `text` is what the timeline shows. The
-/// group chat passes the mention-stripped variant so a bot never sees `@all`.
-/// The three looks at the screen every prompt must pass before any text goes into the pane
-/// — shared by `prompt_grouped` and the durable queue's flush, so a queued prompt gets the same
-/// protection as a live one (review 2026-09-12 #6: the flush skipped all three and typed the
-/// user's next message into codex's `/model` menu, Enter switching the model on the way).
-///
-/// Each refusal inserts its system hint into the conversation and answers a 409 with a stable
-/// `reason`: `needs_login`, `dialog_open`, `picker_open`.
+/// The screen checks every prompt passes before text enters the pane — shared with the queue
+/// flush (review 2026-09-12 #6: the flush skipped them and typed into codex's `/model` menu).
+/// Refusals insert a system hint and 409 with `needs_login` / `dialog_open` / `picker_open`.
 async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> LcResult<()> {
-    // A claude whose CLAUDE_CONFIG_DIR has never logged in opens on "Select login method"
-    // and looks idle to herdr; a prompt sent there just types into the menu and the turn
-    // hangs until the stall timer gives up. Look at the screen first and say so instead.
+    // An unlogged claude opens on "Select login method" and looks idle; a prompt would type into the menu.
     if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(app, run).await {
         let identity = bot.identity.clone().unwrap_or_default();
         let hint = if identity.is_empty() {
@@ -3400,11 +3069,8 @@ async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &db::Run, con
         let _ = insert_message(app, conv, None, "system", &hint, "system", false, None).await;
         return Err(LcError::conflict("needs_login", json!({"run_id": run.id, "identity": identity, "message": hint})));
     }
-    // claude 的「Switch model?」確認框同一個道理（`tui_prompts::is_switch_model_dialog`）：
-    // herdr 把它判成 idle，prompt 打進去字被丟掉、Enter 替使用者按了 Yes，回合 12 秒後 stall
-    // （2026-09-11 AGM 實測）。daemon 自己換模型時已經會把框答掉；還看得到框，就是有人在終端
-    // 裡手動打了 `/model` 沒答——使用者現在是要送訊息，不是要換模型，所以按 Esc（No, go back）
-    // 退掉再送；退不掉才講清楚，不把訊息餵進去。
+    // claude「Switch model?」框被 herdr 判成 idle，prompt 打進去會被吃、Enter 按了 Yes（2026-09-11
+    // AGM 實測）。還看得到框＝有人在終端手動 `/model`；使用者要送訊息，按 Esc 退掉再送，退不掉就講清楚。
     if bot.kind == "claude" {
         if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             if let Ok(client) = client_for_run(app, run).await {
@@ -3425,9 +3091,7 @@ async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &db::Run, con
             }
         }
     }
-    // codex 的 `/model` 是個吃鍵的選單，不是輸入框：開著的時候送 prompt 進去，整段字會變成
-    // 選單操作——訊息消失、Enter 還順手把 session 換到別的模型（2026-09-10 實測，
-    // `codex_live::picker_open`）。所以先看一眼並把它關掉，關不掉就講清楚，別把訊息餵進去。
+    // codex `/model` 選單開著時，prompt 會變成選單操作、Enter 換掉模型（2026-09-10 實測）。先關掉，關不掉就講清楚。
     if bot.kind == "codex" {
         if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             if let Ok(client) = client_for_run(app, run).await {
@@ -3450,7 +3114,7 @@ pub async fn prompt_grouped(
     group_id: Option<&str>,
     deliver: Option<&str>,
     attachment_ids: &[String],
-    // `relay_from`：送出這句話的 bot id，或哨符 `daemon`；`None` = 使用者自己在畫面上打的。
+    // `None` = 使用者自己在畫面上打的。
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
@@ -3462,8 +3126,7 @@ pub async fn prompt_grouped(
     }
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
-    // Resolved before anything is written, so an unknown id is a plain 400 rather than a
-    // turn that exists but was never delivered.
+    // Resolve first so an unknown id is a plain 400, not an undelivered turn.
     let files = crate::attach::resolve(app, bot_id, attachment_ids)
         .await
         .map_err(|e| LcError::Bad(e.to_string()))?;
@@ -3510,8 +3173,7 @@ pub async fn prompt_grouped(
     {
         return Err(LcError::conflict("a previous turn has unknown delivery; abandon it first", json!({"turn_id": t.id})));
     }
-    // Resolve the client before committing anything. A run can outlive its host/session, and
-    // this must remain a retryable 502 rather than a turn stuck at `in_flight` / `pending`.
+    // Resolve the client before committing: must stay a retryable 502, not a stuck `pending` turn.
     let client = client_for_run(app, &run).await?;
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
@@ -3583,50 +3245,31 @@ pub async fn prompt_grouped(
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into() })
 }
 
-// ---------------------------------------------------------------- live progress (v3.9)
 
-/// Consecutive unchanged polls at an empty composer before we stop trusting `agent_status`
-/// and complete the Turn ourselves. ~14s: long enough that a merely slow hook still wins.
+/// Unchanged polls at an empty composer before we complete the Turn ourselves (~14s; a slow hook still wins).
 const IDLE_POLLS: u32 = 20;
 
-/// 畫面從頭到尾**什麼都沒出現過**時，要靜止到這麼多輪才敢當成「它在等你輸入」。
-///
-/// 2026-09-13（bot GROK、pane w168:pN）：使用者送出 15 秒後，grok 還在想，畫面就是一個空的
-/// `❯`——它連第一個字都還沒印。[`pane_awaits_input`] 只看得到那個空框，於是備援把回合關掉，
-/// 而 36 秒後真正的回覆（Stop hook）撞上一個已經關掉的回合。
-///
-/// 「有印過東西然後停住」跟「從來沒印過東西」是兩種情況：前者是它講完了在等你，14 秒足夠；
-/// 後者多半是 CLI 還沒開始渲染，那就多等一會兒。等待的代價只是備援晚一點接手（hook 正常的
-/// bot 根本走不到這條路）；等不夠的代價是把使用者的問題吃掉。
+/// 這回合畫面從沒出現過任何東西時的門檻（~63s）。2026-09-13（GROK、w168:pN）：grok 還沒印第一個字，
+/// 空 `❯` 被當成等輸入，備援關掉回合，36 秒後 Stop hook 撞上已關的回合。等久只是備援晚接手；
+/// 等不夠會吃掉使用者的問題。
 const IDLE_POLLS_SILENT: u32 = 90;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(700);
 const PROGRESS_MAX: Duration = Duration::from_secs(40 * 60);
 
-/// Smallest gap between two `turn_progress` frames for the same run: 4 frames a second.
-///
-/// The poll interval alone is not a rate limit. It bounds one poller, but the budget it
-/// implies restarts every time a poller is (re-)armed, and `arm_progress` runs once per turn
-/// — so a run that churns turns can hand the UI a burst, and lowering `PROGRESS_INTERVAL`
-/// would silently multiply the frames every browser tab has to render. This is the ceiling
-/// the wire contract promises (docs/API.md), enforced where the frames are emitted.
+/// Min gap between `turn_progress` frames per run (4/s, docs/API.md). The poll interval isn't a
+/// rate limit: `arm_progress` re-arms per turn, so turn churn could burst.
 const PROGRESS_MIN_GAP: Duration = Duration::from_millis(250);
 
-/// How long a run's last-emit timestamp is worth keeping once nothing is emitting.
 const PROGRESS_STALE: Duration = Duration::from_secs(60);
 
-/// Does this run's budget allow a frame right now? Split out of `flush_progress` so the rule
-/// itself can be tested without standing up an `App`.
+/// Split out of `flush_progress` so the budget rule is testable without an `App`.
 fn progress_due(last: Option<&std::time::Instant>, force: bool) -> bool {
     force || last.is_none_or(|t| t.elapsed() >= PROGRESS_MIN_GAP)
 }
 
-/// Ship the frame held for `run_id`, if the run's 4/s budget allows it right now.
-///
-/// Frames are *merged*, not queued: `pending` only ever holds the newest one, so a frame that
-/// arrives inside the window replaces the one waiting there and the intermediate states are
-/// never sent. `force` skips the budget check — used once the poller is done, so the last
-/// state of the reply is not left sitting in `pending`.
+/// Ship the held frame if the 4/s budget allows. Frames merge (newest wins); `force` flushes the
+/// final state once the poller is done.
 async fn flush_progress(app: &Arc<App>, run_id: &str, pending: &mut Option<Value>, force: bool) {
     let Some(frame) = pending.take() else { return };
     let mut emitted = app.progress_emitted.lock().await;
@@ -3635,16 +3278,14 @@ async fn flush_progress(app: &Arc<App>, run_id: &str, pending: &mut Option<Value
         return;
     }
     emitted.insert(run_id.to_string(), std::time::Instant::now());
-    // The map outlives its poller on purpose (a new turn on the same run must not get a fresh
-    // budget), so drop entries no live run can still be rate-limited by.
+    // The map outlives its poller (a new turn must not get a fresh budget); drop stale entries.
     emitted.retain(|_, t| t.elapsed() < PROGRESS_STALE);
     drop(emitted);
     app.emit("turn_progress", frame).await;
 }
 
-/// While a turn is in flight, poll the pane and push the partial reply as `turn_progress`
-/// so the UI can render it as it is being written. Stops by itself once the turn is no
-/// longer `in_flight` (hook / fallback / watchdog / stop all end it).
+/// While a turn is in flight, poll the pane and push partial replies as `turn_progress`. Also the
+/// idle-prompt safety net that calls `try_fallback` (see below). Stops once the turn leaves `in_flight`.
 pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
     // A new turn is starting: whatever cut the *previous* one short is history (§4.3a).
     crate::turn_error::clear(app, run_id, bot_id).await;
@@ -3660,11 +3301,10 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
     let h = tokio::spawn(async move {
         let started = std::time::Instant::now();
         let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
-        // What we sent, so the pane's echo of it can be stripped back off every frame.
+        // What we sent, to strip the pane's echo off every frame.
         let sent = turn_echo_texts(&app2, &turn_id).await;
         let mut last = (String::new(), String::new(), String::new());
         let mut quiet = 0u32;
-        // The newest frame not yet on the wire, held back by this run's 4/s budget.
         let mut pending: Option<Value> = None;
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
@@ -3680,10 +3320,8 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             let Ok(client) = client_for_run(&app2, &run).await else { continue };
             let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
             let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
-            // Same multi-line echo problem as the fallback path: strip our own prompt back off.
             let live = sent.iter().fold(live, |acc, p| strip_echoed_prompt(&acc, p));
-            // The spinner row is dropped by `clean_screen`, so a pure thinking / tool phase
-            // produces no frame at all and the UI sits on "waiting". Ship it separately.
+            // `clean_screen` drops the spinner row, so a thinking / tool phase needs its own `activity` field.
             let activity = live_activity(&bot.kind, &read.text).unwrap_or_default();
             let alert = live_alert(&bot.kind, &read.text).unwrap_or_default();
             if live != last.0 || activity != last.1 || alert != last.2 {
@@ -3695,15 +3333,10 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
                 flush_progress(&app2, &run_id, &mut pending, false).await;
                 continue;
             }
-            // Nothing new to say, but a frame may still be waiting on the budget.
             flush_progress(&app2, &run_id, &mut pending, false).await;
-            // §4.3's fallback is armed by `working -> idle`, which is herdr's reading of the
-            // pane. When that reading sticks (observed 2026-09-06: grok finished and sat at an
-            // empty composer while herdr still reported `working`, its title spinner never
-            // cleared) no hook and no fallback ever completes the Turn, and the UI waits for
-            // ever. So also believe the pane directly: an empty composer plus nothing changing
-            // is the agent telling us it wants input. `blocked` is excluded — SPEC §4.3 keeps
-            // it out of the fallback because a modal is not an ended turn.
+            // §4.3's fallback is armed by herdr's `working -> idle`; when that sticks (2026-09-06: grok
+            // idle at an empty composer, herdr still `working`) nothing closes the turn. So trust the
+            // pane too: empty composer + no change = wants input. `blocked` excluded (a modal isn't an end).
             let agent_status = match db::run(&app2.db, &run_id).await {
                 Ok(Some(r)) => r.agent_status,
                 _ => String::new(),
@@ -3713,14 +3346,12 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
                 continue;
             }
             quiet += 1;
-            // 這個回合到現在為止，畫面上出現過任何東西嗎（回覆、spinner、警示都算）。
+            // 這回合畫面上出現過任何東西嗎（回覆、spinner、警示都算）。
             let said_something = !(last.0.is_empty() && last.1.is_empty() && last.2.is_empty());
             if quiet >= idle_threshold(said_something, &agent_status) {
                 tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
-                // Under the bot's lock like every other caller: `try_fallback` reads the pane
-                // and then claims the turn, and the Stop hook does the same under the lock. Run
-                // outside it, the two interleaved into two assistant messages for one turn
-                // (review 2026-09-12 #5).
+                // Under the bot lock, like the Stop hook: outside it the two interleaved into two
+                // assistant messages for one turn (review 2026-09-12 #5).
                 let done = {
                     let lock = app2.bot_lock(&bot_id).await;
                     let _g = lock.lock().await;
@@ -3728,10 +3359,8 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
                 };
                 match done {
                     Ok(true) => break,
-                    // Nothing was claimed — a leftover spinner shape, a tool still running, or the
-                    // hook got there first. This poller is the safety net for a status that never
-                    // flips (grok, 2026-09-06), so it keeps watching rather than retiring on the
-                    // first miss; the `still` check at the top ends it once the turn is closed.
+                    // Nothing claimed (spinner, tool, or hook won). Keep watching: this is the net for a
+                    // status that never flips (grok 2026-09-06); the `still` check ends it once closed.
                     Ok(false) => quiet = 0,
                     Err(e) => {
                         tracing::debug!(turn = %turn_id, error = ?e, "idle-prompt fallback failed; keeping the poller");
@@ -3740,32 +3369,21 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
                 }
             }
         }
-        // Whatever was held back by the budget is the last thing the UI could still use.
         flush_progress(&app2, &run_id, &mut pending, true).await;
         app2.progress_pollers.lock().await.remove(&run_id);
     });
     pollers.insert(key, h);
 }
 
-// ------------------------------------------------- CLI-side (external) turn, live
 
-/// The user typed straight into the tmux pane: open the `external` turn **now**.
-///
-/// Until this existed an external turn was only ever born at Stop-hook time, already
-/// `completed` — so for the whole time the agent was working the web UI had no in-flight turn,
-/// no `turn_progress` poller and therefore nothing to show; the exchange appeared in one lump
-/// at the end. Opening the turn on the `-> working` edge puts a CLI prompt on exactly the same
-/// footing as one the web sent: live bubble, activity row, streaming reply.
-///
-/// `delivery` is `ok` deliberately — the §4.3 terminal fallback ignores any other value, and
-/// this turn needs that safety net just as much as a web one (it is what closes the turn if the
-/// Stop hook never arrives).
+/// The user typed straight into the pane: open the `external` turn on the `-> working` edge so it
+/// gets the same live bubble / progress as a web prompt. `delivery='ok'` so the §4.3 fallback
+/// (which ignores other values) can still close it if the Stop hook never comes.
 pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
-    // Re-read under the lock: `prompt()` may have opened its own turn since the status event,
-    // and the pane watcher is armed *before* `start_bot` flips the run to `running` (step 6 vs
-    // step 7), so a boot-time `-> working` blip must not be mistaken for the user typing.
+    // Re-read under the lock: `prompt()` may have opened a turn, and the watcher is armed before
+    // the run is `running`, so a boot-time `-> working` blip is not the user typing.
     let Ok(Some(run)) = db::run(&app.db, &run.id).await else { return };
     if run.state != "running" {
         return;
@@ -3792,14 +3410,12 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     .execute(&app.db)
     .await
     {
-        // `turns_one_in_flight` is a unique index; losing that race just means someone else
-        // opened the turn first, which is the outcome we wanted anyway.
+        // Losing the `turns_one_in_flight` race means someone else opened it — fine.
         tracing::debug!(run = %run.id, error = %e, "external turn not opened");
         return;
     }
     tracing::info!(run = %run.id, turn = %tid, "external turn opened from pane activity");
-    // The prompt echo on the pane is the text the user typed. If it is not on screen we open
-    // the turn anyway (the live reply is still worth showing) rather than invent a message.
+    // No echo on screen: open the turn anyway rather than invent a user message.
     if let Some(text) = pane_prompt_echo(app, &run).await {
         if let Err(e) = insert_message(app, &conv, Some(&tid), "user", &text, "hook", false, None).await {
             tracing::warn!(turn = %tid, error = ?e, "external prompt echo not stored");
@@ -3809,7 +3425,6 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     arm_progress(app, &run.id, &run.bot_id, &tid).await;
 }
 
-/// Read the pane and pull the last prompt echo off it. Same read as `arm_progress`.
 async fn pane_prompt_echo(app: &Arc<App>, run: &db::Run) -> Option<String> {
     let bot = db::bot(&app.db, &run.bot_id).await.ok().flatten()?;
     let pane = run.pane_id.clone()?;
@@ -3818,8 +3433,7 @@ async fn pane_prompt_echo(app: &Arc<App>, run: &db::Run) -> Option<String> {
     last_prompt_echo_text(&bot.kind, &read.text)
 }
 
-/// Everything the agent has printed since the prompt echo, cleaned of TUI chrome, with the
-/// reply markers (`⏺ ` / `• `) dropped so it reads like the final message will.
+/// Everything printed since the prompt echo, chrome and reply markers (`⏺ ` / `• `) removed.
 fn live_reply(kind: &str, text: &str) -> Option<String> {
     let cleaned = clean_screen(kind, text)?;
     let out: Vec<String> = cleaned
@@ -3834,17 +3448,11 @@ fn live_reply(kind: &str, text: &str) -> Option<String> {
     if joined.is_empty() { None } else { Some(joined) }
 }
 
-/// Longest activity string we forward; the pane can carry a whole wrapped status bar.
 const ACTIVITY_MAX: usize = crate::capture::ACTIVITY_MAX;
 
-/// Is the agent sitting at an **empty** composer, i.e. waiting for input?
-///
-/// The marker alone on a row, once the box frame is stripped — grok draws its composer as
-/// `│ ❯      │` inside `╭──╮ / ╰─ Grok ─╯`, so the bare `s == "❯"` test `clean_screen` uses
-/// never matches there. Only the tail is searched because the composer is always at the bottom.
-///
-/// Note this is true while the agent is *working* too (claude keeps the empty composer on
-/// screen under the spinner), so it is only meaningful together with "nothing changed".
+/// Empty composer = waiting for input? The bare marker row after stripping box frames (grok's
+/// `│ ❯ │` never matches `clean_screen`'s test). Also true while claude works under a spinner, so
+/// only meaningful with "nothing changed" (the progress poller's idle net → `try_fallback`).
 fn pane_awaits_input(kind: &str, text: &str) -> bool {
     if kind == "claude" {
         return crate::capture::claude::PARSER.awaits_input(text);
@@ -3856,15 +3464,8 @@ fn pane_awaits_input(kind: &str, text: &str) -> bool {
     })
 }
 
-/// 空 composer 要靜止幾輪才算「它在等你輸入」。
-///
-/// 短的那條（14 秒）是給「herdr 的狀態卡住了」準備的安全網（2026-09-06：grok 答完坐在空
-/// composer，herdr 卻一直說 working）。可是 herdr 說 `working` 時它**也可能真的在做事**——
-/// 2026-09-13 的 GROK 就是這樣被關掉回合的。所以兩個訊號都要看：
-///
-/// * herdr 說閒著、畫面也印過東西然後停住 → 它講完了在等你，14 秒。
-/// * herdr 說還在跑，或這回合畫面上從頭到尾什麼都沒出現過 → 多半是它真的在想／CLI 還沒開始
-///   渲染，等到 63 秒。安全網仍然在（卡住的 `working` 最後還是收得掉），只是晚一點接手。
+/// 空 composer 靜止幾輪才算等輸入。herdr 說閒著且畫面印過東西 → 14 秒（2026-09-06 grok 卡 working
+/// 的安全網）；herdr 說 working 或這回合什麼都沒印過 → 63 秒（2026-09-13 GROK 還在想就被關）。
 fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
     if said_something && agent_status != "working" {
         IDLE_POLLS
@@ -3873,13 +3474,9 @@ fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
     }
 }
 
-/// Every form of "what we sent this turn" worth matching a pane echo against.
-///
-/// The timeline stores what the user *typed*; a prompt carrying images was delivered with
-/// `attach::deliver_text` appended (「附加圖片（請讀取這個檔案來查看）：」 plus the paths), and
-/// that appendix is exactly what came back on screen and got stored as an answer
-/// (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07). The delivered form comes first so the fold in
-/// the callers strips the longer text before the shorter one.
+/// Every form of what we sent, for echo matching: image prompts were delivered with
+/// `attach::deliver_text`'s appendix, which came back stored as an answer
+/// (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07). Delivered form first so the longer text strips first.
 async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
     let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await.unwrap_or_default();
     let mut out = Vec::new();
@@ -3897,14 +3494,8 @@ async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
     out
 }
 
-/// The reply this snapshot actually contains, with every echo of our own prompt taken back
-/// off — `None` when nothing survives.
-///
-/// The three pieces (`after_last_prompt_echo` drops the `❯ …` row, `extract_reply` /
-/// `clean_screen` drop the chrome, `strip_echoed_prompt` drops lines 2..n of what we sent)
-/// only mean "the agent said something" when they are applied together, so callers get them
-/// as one function. A screen holding nothing but our own prompt is not an answer and must
-/// not be stored as one.
+/// The reply in this snapshot with our prompt echo removed, or `None`. The three strippers only
+/// mean "the agent said something" together; our own prompt alone is not an answer.
 fn screen_reply(kind: &str, text: &str, sent: &[String]) -> Option<String> {
     let raw = extract_reply(kind, text).or_else(|| clean_screen(kind, text))?;
     let stripped = sent.iter().fold(raw, |acc, p| strip_echoed_prompt(&acc, p));
@@ -3919,7 +3510,6 @@ fn screen_reply(kind: &str, text: &str, sent: &[String]) -> Option<String> {
 /// Trailing-ellipsis marker a TUI leaves where it clipped the echo of a long prompt.
 const ELLIPSES: [&str; 2] = ["…", "..."];
 
-/// `s` without a trailing `…` / `...`, or `None` if it had none.
 fn without_ellipsis(s: &str) -> Option<&str> {
     ELLIPSES.iter().find_map(|e| s.strip_suffix(e)).map(str::trim_end)
 }
@@ -3928,13 +3518,8 @@ fn squash(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// Does this screen line read as "the rest of the prompt, clipped"?
-///
-/// grok renders a multi-line prompt as its first line on the `❯` row and everything after it
-/// squeezed onto one row ending in `…`. That row can never equal a line of what we sent, so
-/// the line-wise match below gives up on it and the whole appendix is stored as the agent's
-/// answer. Requiring the visible part to be a prefix of the *remaining* prompt (and at least
-/// [`SQUASH_MIN`] characters of it) keeps a real reply that merely ends in `…` safe.
+/// Is this line "the rest of the prompt, clipped"? grok squeezes lines 2..n onto one row ending in
+/// `…`. Requiring a prefix of the remaining prompt (≥ [`SQUASH_MIN`] chars) keeps real replies ending in `…` safe.
 fn is_clipped_echo(line: &str, rest: &[&str]) -> bool {
     let Some(body) = without_ellipsis(line.trim()) else { return false };
     let body = squash(body);
@@ -3944,17 +3529,12 @@ fn is_clipped_echo(line: &str, rest: &[&str]) -> bool {
     squash(&rest.join("")).starts_with(&body)
 }
 
-/// Drop the tail of the user's own prompt from the head of what we scraped.
-///
-/// A multi-line prompt echoes as **one** `❯ <first line>` marker row followed by its remaining
-/// lines verbatim, and `after_last_prompt_echo` only skips that marker row — so lines 2..n of
-/// the user's own message come back as if the agent had written them. Matching them against
-/// what we actually sent is exact, unlike guessing from indentation.
+/// Drop lines 2..n of a multi-line prompt echo: `after_last_prompt_echo` only skips the `❯` row.
+/// Matching against what we sent is exact, unlike guessing from indentation.
 fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
     let want: Vec<&str> = prompt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if want.len() < 2 {
-        // A one-line prompt leaves no tail for the line-wise match — but a narrow pane can
-        // still have shredded that one line across many rows, which the squashed match sees.
+        // A one-line prompt can still be shredded across rows in a narrow pane.
         return strip_echoed_prompt_squashed(text, prompt).unwrap_or_else(|| text.to_string());
     }
     let lines: Vec<&str> = text.lines().collect();
@@ -3968,8 +3548,7 @@ fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
             continue;
         }
         if l != want[w] {
-            // The TUI may have clipped the rest of the echo onto this one row; if so, the
-            // whole tail is accounted for and nothing of it is left on screen.
+            // The TUI may have clipped the whole remaining echo onto this row.
             if is_clipped_echo(l, &want[w..]) {
                 i += 1;
                 w = want.len();
@@ -3979,24 +3558,16 @@ fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
         i += 1;
         w += 1;
     }
-    // Only strip once the whole tail matched. A partial match means the pane wrapped the text
-    // (or the agent opened by quoting us), and eating half a real reply is worse than a echo.
+    // Only strip on a full match; eating half a real reply is worse than an echo.
     if w < want.len() {
         return strip_echoed_prompt_squashed(text, prompt).unwrap_or_else(|| text.to_string());
     }
     lines[i..].join("\n").trim().to_string()
 }
 
-/// Whitespace-insensitive fallback for [`strip_echoed_prompt`].
-///
-/// A very narrow pane lays the echo out **one character per line**, so no line of it can ever
-/// equal a line of what we sent and the line-wise match above always gives up — which is how a
-/// whole prompt came back stored as the agent's reply, rendered as a vertical column of glyphs.
-///
-/// Compare with every whitespace character removed instead. To keep a real reply safe this
-/// still demands that the candidate *opens* with a tail of the prompt, at least
-/// [`SQUASH_MIN`] characters of it; a candidate that is itself only a fragment of that tail is
-/// pure echo and leaves nothing behind.
+/// Whitespace-insensitive fallback for [`strip_echoed_prompt`]: a very narrow pane lays the echo
+/// out one char per line, so it was stored as a vertical-column reply. The candidate must open
+/// with ≥ [`SQUASH_MIN`] chars of the prompt tail to keep real replies safe.
 const SQUASH_MIN: usize = 8;
 
 fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
@@ -4005,8 +3576,7 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
     if ps.len() < SQUASH_MIN || ts.is_empty() {
         return None;
     }
-    // Longest tail of the prompt that the candidate opens with. The head is what the `❯ ` row
-    // took away, so the tail is what survives on screen.
+    // Longest prompt tail the candidate opens with (the head went with the `❯ ` row).
     let mut matched = 0;
     for k in 0..ps.len() {
         let suf = &ps[k..];
@@ -4026,7 +3596,6 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
     if matched == 0 {
         return None;
     }
-    // Drop that many non-whitespace characters off the front of the original text.
     let mut n = 0;
     let mut cut = text.len();
     for (i, c) in text.char_indices() {
@@ -4044,8 +3613,7 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
     Some(text[cut..].trim().to_string())
 }
 
-/// How many columns wide this run's pane currently is, for the "too narrow to read" message.
-/// Best effort: it only ever decorates a diagnostic, so any failure just means less detail.
+/// Pane width for the "too narrow" message; best effort, failure only means less detail.
 async fn pane_columns(app: &Arc<App>, run: &db::Run) -> Option<u32> {
     let pane = run.pane_id.clone()?;
     let ws = run.workspace_id.clone()?;
@@ -4054,35 +3622,20 @@ async fn pane_columns(app: &Arc<App>, run: &db::Run) -> Option<u32> {
     rects.into_iter().find(|(id, _, _)| *id == pane).map(|(_, w, _)| w)
 }
 
-/// Has the pane shredded its output into a column of single characters?
-///
-/// herdr's `recent_unwrapped` undoes the *terminal's* soft wrapping, not the TUI's own layout:
-/// in a pane a few columns wide the agent itself lays text out one glyph per row, and the
-/// spaces between words fall off the ends of those rows entirely. Nothing can reconstruct that,
-/// so the honest move is to say so rather than store a vertical column as the reply.
+/// Output shredded into single characters? herdr unwraps terminal wrapping, not the TUI's own
+/// one-glyph-per-row layout, whose spaces are lost — say so rather than store a column.
 fn is_shredded(text: &str) -> bool {
     crate::capture::is_shredded(text)
 }
 
-/// Does this row have the *shape* of a spinner frame — `<Verb>… (3m 18s · ↓ 11.0k tokens)` —
-/// whatever glyph, if any, precedes it?
-///
-/// Neither half of the row can be matched literally: the verb is picked at random per frame
-/// (`Thinking`, `Boogieing`, `Improvising`, `Puttering`, `Simmering`, …) and the leading glyph
-/// set is a moving target across CLI releases. The bracketed elapsed time / token counter is
-/// the part that has stayed stable, so that is what this matches — a single word, `… (`, then
-/// a parenthesised status carrying `tokens` or a duration.
+/// Spinner-row shape `<Verb>… (3m 18s · ↓ 11.0k tokens)`. Verb is random and glyphs change
+/// across releases; only the bracketed time / token counter is stable.
 pub(crate) fn is_activity_shape(s: &str) -> bool {
     crate::capture::is_activity_shape(s)
 }
 
-/// The agent's *current activity* — the spinner row of this turn (`✻ Thinking… (12s · ↑ 1.2k
-/// tokens)`, grok's `◆ Thought for 0.1s`), with the glyph stripped.
-///
-/// `clean_screen` (and therefore `live_reply`) throws these lines away as TUI chrome, which is
-/// right for the message body but leaves a purely-thinking turn with nothing at all to show.
-/// This is a read-only side channel for `turn_progress.activity`: it never reaches a stored
-/// message, so `clean_screen` / `extract_reply` stay untouched.
+/// The spinner row of this turn, glyph stripped, for `turn_progress.activity` only — never stored,
+/// so `clean_screen` / `extract_reply` can keep dropping it as chrome.
 fn live_activity(kind: &str, text: &str) -> Option<String> {
     if kind == "claude" {
         return crate::capture::claude::PARSER.activity(text);
@@ -4090,9 +3643,7 @@ fn live_activity(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let grok = kind == "grok";
-    // grok marks event / thinking rows with `◆` (see `is_grok_noise`); claude / codex cycle
-    // through this spinner set. It grows between CLI releases, so it is a fast path, not the
-    // whole test — `is_activity_shape` below catches frames printed with a glyph we don't know.
+    // Fast path only; the glyph set grows between releases, `is_activity_shape` catches the rest.
     let glyphs: &[char] = if grok { &['◆'] } else { &['✻', '✽', '✶', '✳', '✢', '·'] };
     let mut found: Option<String> = None;
     for line in &lines[start..] {
@@ -4104,8 +3655,6 @@ fn live_activity(kind: &str, text: &str) -> Option<String> {
             line.trim()
         };
         let Some(first) = s.chars().next() else { continue };
-        // The verb is randomised per frame (`Thinking…`, `Boogieing…`, `Improvising…`), so this
-        // can only ever match on shape — never on the word itself.
         let rest = if glyphs.contains(&first) {
             s[first.len_utf8()..].trim()
         } else if is_activity_shape(s) {
@@ -4117,7 +3666,7 @@ fn live_activity(kind: &str, text: &str) -> Option<String> {
         if rest.is_empty() {
             continue;
         }
-        // Keep scanning: the last activity row on screen is the current one.
+        // The last activity row on screen is the current one.
         found = Some(rest.to_string());
     }
     let s = found?;
@@ -4129,19 +3678,12 @@ fn live_activity(kind: &str, text: &str) -> Option<String> {
     Some(cut)
 }
 
-/// A retry / API-error banner on the pane, e.g. claude's `API error · Retrying in 3s ·
-/// attempt 1/10` or codex's `stream error: …; retrying 2/5`.
-///
-/// The turn is still technically in flight when one of these is on screen, so `activity` shows
-/// the spinner and the UI looks healthy while the agent is actually stuck retrying an upstream
-/// failure. Surfaced separately as `turn_progress.alert` so the UI can say so.
-///
-/// Shape, never wording: a short line that says *error* **and** carries a retry / attempt token
-/// — or that opens with `API error`. Requiring both halves keeps the agent's own prose about
-/// errors (which is neither short nor retry-shaped, and rarely both) out of the banner.
+/// Retry / API-error banner (`API error · Retrying in 3s · attempt 1/10`, codex `stream error: …;
+/// retrying 2/5`) as `turn_progress.alert`, since the spinner makes a stuck turn look healthy.
+/// Shape, not wording: short + *error* + retry/attempt token, or opens with `API error`.
 fn live_alert(kind: &str, text: &str) -> Option<String> {
     const RETRY_TOKENS: [&str; 6] = ["retry", "retrying", "attempt", "reconnect", "重試", "retries"];
-    // Codex hard limit may be wrapped across many narrow-pane rows — use the multi-line scanner.
+    // Codex hard limit may wrap across narrow-pane rows: multi-line scanner.
     if kind == "codex" {
         if let Some(hit) = codex_usage_notice_lines(text)
             .into_iter()
@@ -4179,9 +3721,7 @@ fn live_alert(kind: &str, text: &str) -> Option<String> {
         if !says_error {
             continue;
         }
-        // Data, not a banner (2026-09-08): a JSON blob or a `|`-separated row the agent printed
-        // (`62|note||{"action":"protocol_error","attempt":3,…}` from a sqlite dump) says
-        // "error" and "attempt" without anyone retrying anything.
+        // Data, not a banner (2026-09-08): JSON or `|` rows from e.g. a sqlite dump.
         if s.contains('{') || s.contains('}') || s.matches('|').count() >= 2 {
             continue;
         }
@@ -4189,7 +3729,7 @@ fn live_alert(kind: &str, text: &str) -> Option<String> {
         if !retrying && !low.starts_with("api error") {
             continue;
         }
-        // Keep scanning: the newest banner is the one that is still true.
+        // The newest banner is the one still true.
         found = Some(s.to_string());
     }
     let s = found?;
@@ -4201,41 +3741,30 @@ fn live_alert(kind: &str, text: &str) -> Option<String> {
     Some(cut)
 }
 
-// ---------------------------------------------------------------- prompt-stall watchdog
 
 const STALL_SECS: u64 = 12;
 
-/// How many rows above the bottom the composer can start. The input box is always the last
-/// thing drawn, but it grows with the text in it (and claude draws a hint row under it).
+/// Rows above the bottom the composer can start (it grows with its text; claude adds a hint row).
 const COMPOSER_TAIL: usize = 24;
 
-/// How much of the head of our prompt has to be visible in the composer before we believe it
-/// is our text sitting there. Long enough that a coincidence is implausible, short enough to
-/// survive a TUI that decorates what it pasted (claude turns an attached path into
-/// `[Image #6]` and puts it *in front* of the text, so this is a `contains`, not a prefix).
+/// Chars of our prompt head that must be visible in the composer. `contains`, not prefix: claude
+/// puts `[Image #6]` in front of pasted text.
 const COMPOSER_HEAD: usize = 12;
 
 /// Never match on a fragment this short — a two-character prompt is in every screen.
 const COMPOSER_HEAD_MIN: usize = 4;
 
-/// Strip a row's box drawing / scrollbar decoration so its text can be read.
 fn undecorate_row(line: &str) -> String {
     let s = strip_grok_decor(line);
     s.trim().trim_start_matches('│').trim_end_matches('│').trim().to_string()
 }
 
-/// Is this row the horizontal rule that closes the composer?
 fn is_rule_row(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| "─━-=_╭╮╰╯".contains(c))
 }
 
-/// The text currently sitting in the agent's input box, or `None` when the box is empty (or
-/// this CLI has no echo marker we know).
-///
-/// The composer is the **last** `❯ …` / `› …` row on screen plus its continuation rows, so it
-/// is looked for from the bottom. An empty box is `pane_awaits_input`'s job: without that
-/// guard the search would walk back into the transcript and hand back the echo of a prompt
-/// that *was* accepted.
+/// Text in the input box, or `None` when empty / no known marker. Searched from the bottom; an
+/// empty box is `pane_awaits_input`'s job, else we'd walk back to an accepted prompt's echo.
 fn composer_text(kind: &str, screen: &str) -> Option<String> {
     let marker = prompt_echo_prefix(kind)?.trim_end();
     if pane_awaits_input(kind, screen) {
@@ -4265,12 +3794,8 @@ fn composer_text(kind: &str, screen: &str) -> Option<String> {
     }
 }
 
-/// Is the prompt we just sent still lying **unsent** in the input box?
-///
-/// Observed 2026-09-07 11:21: a multi-line prompt (text + attachment path) went into claude's
-/// composer while the session was busy compacting, the trailing Enter was swallowed with the
-/// paste, and twelve seconds later the turn was failed as a stall — with the message still
-/// visible in the box, one keystroke from being sent.
+/// Is our prompt still unsent in the box? 2026-09-07 11:21: claude swallowed the Enter while
+/// compacting; the turn failed as a stall with the message one keystroke from sent.
 fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
     let Some(box_text) = composer_text(kind, screen) else { return false };
     let needle: String = squash(sent).chars().take(COMPOSER_HEAD).collect();
@@ -4280,19 +3805,14 @@ fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
     squash(&box_text).contains(&needle)
 }
 
-/// Wait this long after delivering a **multi-line** prompt before checking whether the TUI
-/// took it. Long enough for the box to be drawn, short enough that the user does not sit
-/// through the full stall deadline for a keystroke we can supply ourselves.
+/// Early check after delivery: enough for the box to draw, short of the full stall deadline.
 const NUDGE_EARLY_SECS: u64 = 3;
 
 /// After re-sending Enter, how long the agent gets to react before the turn is failed.
 const NUDGE_GRACE_SECS: u64 = 8;
 
-/// If our prompt is still in the input box and the agent is idle, press Enter for it.
-///
-/// Returns whether an Enter was actually sent. Every reason to do nothing (turn gone, agent
-/// already working, no pane, nothing recognisable in the box) is a plain `false`: this is a
-/// best-effort rescue in front of the stall report, never a source of errors of its own.
+/// Press Enter if our prompt is still in the box and the agent idle. Best effort: every reason to
+/// do nothing is `false`, never an error.
 async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> bool {
     let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
     if run.agent_status == "working" || run.agent_status == "blocked" {
@@ -4316,9 +3836,8 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
     true
 }
 
-/// After a delivered prompt the agent must leave `idle` within `STALL_SECS`; otherwise the
-/// Turn would sit `in_flight` forever (e.g. Claude "Not logged in", or a modal we cannot see)
-/// and the composer would stay locked. Cancelled by the first `working` / `blocked` event.
+/// The agent must leave `idle` within `STALL_SECS` after delivery, or the Turn sits `in_flight`
+/// forever (not logged in, invisible modal). Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
     let mut timers = app.stall_timers.lock().await;
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -4329,12 +3848,9 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
-        // What we handed the agent, for the "still in the input box" check below.
         let sent = turn_echo_texts(&app2, &turn_id).await;
         let mut nudged = false;
-        // Every prompt gets an early look, not only multi-line ones: a single line pasted
-        // while the TUI is still busy loses its Enter just the same, and the user should not
-        // sit through the full deadline for a keystroke we can supply ourselves.
+    // Every prompt gets the early look: a single line pasted into a busy TUI loses its Enter too.
         tokio::time::sleep(Duration::from_secs(NUDGE_EARLY_SECS)).await;
         {
             let lock = app2.bot_lock(&bot_id).await;
@@ -4345,8 +3861,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
             nudged = nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
         tokio::time::sleep(Duration::from_secs(STALL_SECS - NUDGE_EARLY_SECS)).await;
-        // Deadline. One more look before giving up: if the text is *still* sitting there,
-        // press Enter and give the agent a grace period rather than reporting a stall.
+    // Deadline: if the text is still there, press Enter and grant a grace period first.
         {
             let lock = app2.bot_lock(&bot_id).await;
             let _g = lock.lock().await;
@@ -4392,8 +3907,7 @@ async fn fail_stalled_turn(
     if turn.id != turn_id || turn.delivery != "ok" {
         return Ok(());
     }
-    // Peek at the screen and quote the lines that usually explain it. We do NOT assert a cause
-    // (the host may well be logged in) — the user reads the quoted lines and decides.
+    // Quote the screen, never assert a cause (the host may well be logged in).
     let mut snapshot: Option<String> = None;
     let mut hints: Vec<String> = Vec::new();
     if let Ok(client) = client_for_run(app, &run).await {
@@ -4449,12 +3963,10 @@ fn stall_hint_lines(screen: &str) -> Vec<String> {
     out
 }
 
-/// Neutral wording: state the symptom, quote the screen, and mention the keychain caveat.
-/// Never claim the agent "is not logged in" — the host may be logged in and stuck for other reasons.
+/// Neutral wording: symptom + quoted screen + keychain caveat; never claim "not logged in".
 fn stall_reason(hints: &[String], nudged: bool) -> String {
     let head = format!("agent 在 {STALL_SECS} 秒內沒有對訊息作出反應。");
-    // `nudged` means the text was still visible in the input box and we pressed Enter for it
-    // — the user should hear that, both as the likely cause and as something already tried.
+    // `nudged`: tell the user we already pressed Enter for text left in the box.
     let head = if nudged {
         format!("{head}訊息還留在輸入框沒送出（TUI 忙碌時會把多行文字當成貼上，吞掉最後的 Enter），已嘗試補送一次 Enter，等 {NUDGE_GRACE_SECS} 秒仍沒有反應。")
     } else {
@@ -4509,7 +4021,6 @@ pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- terminal fallback (§4.3)
 
 /// Arm the 5s terminal-fallback timer after a working -> idle transition.
 pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
@@ -4528,8 +4039,7 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
             return;
         }
         match try_fallback(&app2, &run_id).await {
-            // No turn to fall back on. For a run with no hooks that is not "nothing happened":
-            // the agent just finished answering and the only record of it is on the pane.
+            // No turn, but for a hookless run the pane is the only record of the answer.
             Ok(false) => {
                 if let Err(e) = capture_hookless_turn_locked(&app2, &run_id, false).await {
                     tracing::warn!(error = ?e, "hookless terminal capture failed");
@@ -4538,14 +4048,11 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
             Ok(true) => {}
             Err(e) => tracing::warn!(error = ?e, "terminal fallback failed"),
         }
-        // A Codex usage-reset hint can be rendered after the turn's notify hook has already
-        // completed it. Capture it even when there is no longer an in-flight turn to fall back.
+        // A Codex usage hint may render after notify already completed the turn: capture regardless.
         if let Err(e) = capture_codex_usage_notices(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "codex notice capture failed");
         }
-        // §4.3a: the same read also says whether this turn ended or was cut off by the API.
-        // It runs whether or not the fallback fired — a connection lost mid-response still
-        // sends its Stop hook, so the turn is already `completed` by the time we get here.
+        // §4.3a: also classify ended vs cut off by the API, even when the Stop hook already completed it.
         if let Err(e) = crate::turn_error::capture(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "turn error capture failed");
         }
@@ -4556,8 +4063,8 @@ pub async fn arm_fallback(app: &Arc<App>, run_id: &str, bot_id: &str) {
     });
 }
 
-/// `Ok(true)` when a turn was actually completed from the pane, `Ok(false)` when there was
-/// nothing to fall back on (no in-flight turn, or one whose delivery we do not trust).
+/// Close the in-flight turn from the pane (§4.3). `Ok(false)`: nothing to fall back on (no turn,
+/// or untrusted delivery). A turn closed with zero reply can still be filled by hookrecv's late hook.
 async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
     let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(false) };
@@ -4566,11 +4073,8 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     }
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
 
-    // Read the pane *before* the turn is claimed. Marking it complete first and then failing
-    // on the session or the read left the turn `completed_fallback` with no assistant message,
-    // no `turn_updated` on the wire (only `emit_turn` sends one) and no `schedule_flush_queued`
-    // — a locked composer and a queued prompt that never went out. Failing here instead leaves
-    // the turn in flight, which the next `working -> idle` edge re-arms.
+    // Read the pane before claiming: a failure after claiming left `completed_fallback` with no
+    // message, no `turn_updated`, no queue flush. Failing here keeps it in flight for the next edge.
     let pane_id = run.pane_id.clone().unwrap_or_default();
     let client = app
         .herdr_for_run(&run)
@@ -4578,11 +4082,8 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
 
-    // Decide from the screen *before* claiming the turn. A spinner still turning (`✢ Baking…`,
-    // `· Philosophising… (33m)`) is the agent mid-thought whatever herdr's status says; claiming
-    // the turn here stored that chrome as the answer and closed the turn under the real reply
-    // (observed 2026-09-07 11:17). Leaving it in flight is safe: the next `working -> idle`
-    // edge and the idle-prompt poller both re-arm this.
+    // A spinner still turning means mid-thought whatever herdr says: claiming stored chrome as the
+    // answer (2026-09-07 11:17). Left in flight, the next edge or the idle poller re-arms this.
     if pane_still_busy(&read.text) {
         tracing::debug!(run_id, "pane still shows a spinner; not completing the turn from it");
         return Ok(false);
@@ -4596,8 +4097,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
 
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
 
-    // Codex hard limit: prefer a system notice + failed turn over a fake assistant reply.
-    // Scan both the fresh slice and the full snapshot — the banner may sit above the cursor.
+    // Codex hard limit: system notice + failed turn, not a fake reply. Banner may sit above the cursor.
     let codex_hit = if bot.kind == "codex" {
         codex_usage_notice_lines(&fresh)
             .into_iter()
@@ -4607,21 +4107,16 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         None
     };
 
-    // Derive the reply before taking SQLite's write lock. In particular, `pane_columns` may
-    // make a herdr RPC, and `turn_echo_texts` reads through another pool connection.
+    // Derive the reply before SQLite's write lock (`pane_columns` RPC, `turn_echo_texts` other conn).
     let reply = if codex_hit.is_some() {
         None
     } else {
-        // Only the `❯ <first line>` row counts as the echo, so a multi-line prompt leaves lines
-        // 2..n on screen and they would be stored as the agent's answer.
+    // Only the `❯` row counts as echo; lines 2..n would be stored as the answer.
         let sent = turn_echo_texts(app, &turn.id).await;
         match screen_reply(&bot.kind, &fresh, &sent) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
-                // What is left has to be worth storing. A shredded capture means the pane is too
-                // narrow to read at all.
-                // Name the pane and its width: "too narrow" is not actionable when the user has
-                // a dozen panes open and no idea which one, or how much wider it needs to be.
+                // Shredded = too narrow to read; name the pane and width so it's actionable.
                 let how_wide = match pane_columns(app, &run).await {
                     Some(w) => format!("目前 {w} 欄，"),
                     None => String::new(),
@@ -4636,9 +4131,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         }
     };
 
-    // CAS: only one writer wins the turn. Keep the claim and the resulting message in one
-    // transaction so a cancellation or database error cannot leave a completed turn without
-    // its terminal reply. All pane / reply derivation above is outside this write transaction.
+    // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let mut tx = app.db.begin().await?;
     let res = sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
@@ -4677,9 +4170,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     }
 
     let Some(reply) = reply else {
-        // Nothing but our own prompt (or an empty screen). The turn is already closed, so the
-        // composer unlocks either way — storing the echo back as an `incomplete` assistant
-        // message would only put words in the agent's mouth.
+        // Only our own prompt: the turn is closed (composer unlocks); storing the echo would put words in the agent's mouth.
         tracing::info!(turn = %turn.id, "terminal fallback saw only our own prompt; storing no reply");
         tx.commit().await?;
         remember_pane_cursor(app, run_id, &read).await?;
@@ -4705,22 +4196,13 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Is this capture nothing but "a tool is running"?
-///
-/// `Running 1 shell command…` (note the ellipsis — the finished form is `Ran 4 shell commands`)
-/// and the `Tip:` line Claude Code parks at the bottom are not an answer. Requiring *every*
-/// non-empty line to be one of those keeps a real reply that merely mentions the word from
-/// being thrown away, and requiring at least one `Running …` line keeps a lone `Tip:` line
-/// (a different symptom) out of this branch.
-/// Glyphs the CLIs animate in front of an in-progress verb (`✢ Baking…`, `· Thinking…`,
-/// `⠦ Thinking… 52s`). Claude Code rotates through a whole set; the braille block is codex/grok.
+/// Spinner glyphs before an in-progress verb (`✢ Baking…`, `⠦ Thinking… 52s`); braille is codex/grok.
 fn is_spinner_glyph(c: char) -> bool {
     crate::capture::claude::is_spinner_glyph(c)
 }
 
-/// The pane is mid-turn: a spinner is still turning somewhere on it. codex's spinner is
-/// `• Working (4s • esc to interrupt)` — no ellipsis verb, so it is matched on its own
-/// (2026-09-08: the fallback scraped a working codex and counted it as a bad reply).
+/// Mid-turn: a spinner still on screen. codex's `• Working (4s • esc to interrupt)` has no ellipsis,
+/// so it's matched separately (2026-09-08).
 fn pane_still_busy(screen: &str) -> bool {
     crate::capture::claude::PARSER.still_busy(screen) || screen.lines().any(is_codex_working_line)
 }
@@ -4734,56 +4216,34 @@ fn is_tool_progress(reply: &str) -> bool {
     crate::capture::claude::is_tool_progress(reply)
 }
 
-// ------------------------------------------------- hookless runs: the terminal is the source
 
-/// An adopted run whose bot has no hooks injected.
-///
-/// Nothing will ever POST a `user_prompt` / `stop` payload for such a run, so §4.3's terminal
-/// snapshot is not a *fallback* here — it is the only place its conversation can come from.
-/// The `managed_by='child'` bots `reconcile` adopts (one agent spawning another) are all like
-/// this: their pane was started by their parent, so the 終端 tab showed what they were saying
-/// while 對話 stayed empty.
+/// Adopted run without hooks: no `user_prompt` / `stop` payload will ever come, so the terminal
+/// snapshot is the only source (e.g. `managed_by='child'` bots whose parent started the pane).
 fn is_hookless(bot: &db::Bot, run: &db::Run) -> bool {
     run.adopted != 0 && bot.inject_hooks == 0
 }
 
-/// Longest terminal-scraped reply stored for a hookless turn. The snapshot is 200 lines of
-/// scrollback, so a capture anywhere near this is a screen rather than a message; cutting it
-/// keeps one adoption from writing a novel into the conversation.
+/// Cap on a hookless scraped reply: near 200 lines of scrollback it's a screen, not a message.
 const HOOKLESS_REPLY_MAX: usize = 6000;
 
-/// How long after adoption the pane is read. An agent herdr has only just detected is often
-/// still painting its banner, and its `agent_status` settles a moment after the pane appears.
+/// Delay before reading an adopted pane: its banner and `agent_status` are still settling.
 const ADOPTED_CAPTURE_DELAY: Duration = Duration::from_secs(2);
 
-/// Store the exchange a hookless run has just finished as a turn of its own.
-///
-/// The ordinary path needs the daemon to have watched the whole turn: `begin_external_turn`
-/// opens it on the `-> working` edge and `try_fallback` closes it on the way back to `idle`.
-/// An adopted pane is routinely picked up *mid-answer* — reconcile runs when herdr detects the
-/// child agent, by which time its parent has already prompted it — so `working -> idle` arrives
-/// with no turn in flight and the reply used to be dropped on the floor. This writes it as a
-/// finished `external` turn instead, from the same snapshot, through the same noise filters.
-///
-/// `seed` is the one-shot capture done at adoption, when the exchange on screen is already
-/// over. It is refused unless the conversation is still empty, so re-adopting a bot (which
-/// happens on every daemon restart and every event-stream reconnect) cannot copy one screen in
-/// twice.
-///
-/// The caller must hold the bot lock. Returns whether anything was stored.
+/// Store a finished hookless exchange as its own `external` turn. Adopted panes are often picked
+/// up mid-answer, so `working -> idle` arrives with no turn in flight and the reply was dropped.
+/// `seed` (adoption-time capture) only writes into an empty conversation, since re-adoption
+/// happens on every restart / reconnect. Caller holds the bot lock; returns whether stored.
 async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) -> anyhow::Result<bool> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
     if !is_hookless(&bot, &run) || run.state != "running" {
         return Ok(false);
     }
-    // §4.3 keeps `blocked` out of the fallback, and for the same reason: a modal waiting for an
-    // answer is not an ended turn, and the question on screen is not a reply.
+    // Like §4.3: a modal waiting for an answer is not an ended turn.
     if run.agent_status == "blocked" {
         return Ok(false);
     }
-    // An in-flight turn belongs to `try_fallback`; capturing here as well would store the
-    // reply twice.
+    // An in-flight turn belongs to `try_fallback`; capturing too would store it twice.
     if db::in_flight_turn(&app.db, run_id).await?.is_some() {
         return Ok(false);
     }
@@ -4798,13 +4258,10 @@ async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) 
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
-    // What the user (or the parent agent) typed. The pane echo is the only record of it —
-    // there is no hook payload to read it from, ever.
+    // The pane echo is the only record of what was typed.
     let echo = last_prompt_echo_text(&bot.kind, &fresh);
-    // Where does this exchange begin? With a cursor, at the cursor. Without one the snapshot
-    // is the whole scrollback and only the prompt echo says where the last turn started, so
-    // with neither we just remember the cursor and wait for the next edge — storing screens of
-    // older turns as one message is worse than storing nothing.
+    // Without a cursor, only the echo marks where the last turn began; with neither, just
+    // remember the cursor — storing older turns as one message is worse than nothing.
     if run.last_read_tail_hash.is_none() && echo.is_none() {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
@@ -4815,16 +4272,12 @@ async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) 
         (None, Some(r)) => r,
         (_, None) => String::new(),
     };
-    // Nothing readable on screen: move the cursor on and say nothing. Unlike `try_fallback`
-    // there is no turn waiting to be closed, so a 「（終端沒有可辨識的回覆）」 bubble here would
-    // be noise nobody asked for.
+    // Unlike `try_fallback`, no turn waits to be closed, so no 「（終端沒有可辨識的回覆）」 bubble.
     if reply.trim().is_empty() || is_shredded(&reply) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
-    // The screen need not have moved since the last edge (herdr reports `working -> idle` more
-    // than once for a single answer, and the cursor only matches when the tail is still on
-    // screen), so an identical reply is the same reply.
+    // herdr reports `working -> idle` more than once per answer: an identical reply is the same reply.
     if last_assistant_content(app, &conv).await.as_deref().map(str::trim) == Some(reply.trim()) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
@@ -4846,10 +4299,7 @@ async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) 
     .await?;
     if let Some(text) = echo.as_deref() {
         insert_message(app, &conv, Some(&tid), "user", text, "terminal_fallback", false, None).await?;
-        // 對話 is ordered by message id, and a ULID is only ordered by its millisecond — two
-        // messages written in the same one sort at random, which here would put the reply
-        // above the prompt that caused it. This is the only place the daemon writes both
-        // halves of an exchange back to back, so it is the only place that has to wait.
+        // ULIDs only order by millisecond; wait so the reply doesn't sort above its prompt.
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     insert_message(app, &conv, Some(&tid), "assistant", &reply, "terminal_fallback", true, Some(&read.text)).await?;
@@ -4866,15 +4316,8 @@ async fn capture_hookless_turn(app: &Arc<App>, run_id: &str, bot_id: &str, seed:
     capture_hookless_turn_locked(app, run_id, seed).await
 }
 
-/// Give a freshly adopted hookless run whatever its pane can tell us.
-///
-/// Called by `reconcile` for every adopted agent, off the reconcile's own task because that
-/// holds the bot lock and both paths here take it.
-///
-/// * still `working`: open the `external` turn now, exactly as if we had watched the user type
-///   — the answer then streams into 對話 live and `try_fallback` closes the turn as usual.
-/// * already `idle`: the exchange is over, so store it once (`seed`), otherwise the
-///   conversation stays empty until somebody prompts the agent again.
+/// Adopted hookless run (called by `reconcile`, off its task since both take the bot lock):
+/// still `working` → open the `external` turn now; already `idle` → store the exchange once (`seed`).
 pub fn spawn_adopted_capture(app: &Arc<App>, run_id: &str, bot_id: &str) {
     let (app, run_id, bot_id) = (app.clone(), run_id.to_string(), bot_id.to_string());
     tokio::spawn(async move {
@@ -4912,8 +4355,7 @@ async fn conversation_message_count(app: &Arc<App>, conversation_id: &str) -> an
         .await?)
 }
 
-/// The newest `assistant` message of a conversation — the duplicate guard for terminal
-/// capture, which re-reads a screen that may not have changed since the previous edge.
+/// Newest assistant message: duplicate guard for re-reading an unchanged screen.
 async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> Option<String> {
     sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
@@ -4956,7 +4398,6 @@ fn tail_hash(text: &str) -> String {
     format!("{:x}", md5ish(&tail))
 }
 
-/// Tiny non-cryptographic digest — enough to detect "have I already seen this tail".
 fn md5ish(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
@@ -4968,7 +4409,6 @@ fn md5ish(s: &str) -> u64 {
 
 fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
     let Some(prev) = prev_tail_hash else { return text.to_string() };
-    // Walk suffix boundaries looking for the previously recorded tail.
     let chars: Vec<char> = text.chars().collect();
     for end in (0..=chars.len()).rev() {
         let start = end.saturating_sub(400);
@@ -4980,8 +4420,7 @@ fn slice_after_cursor(text: &str, prev_tail_hash: Option<&str>) -> String {
     text.to_string()
 }
 
-/// The prompt-echo prefix each CLI prints in front of what the user typed. Single source of
-/// truth for `after_last_prompt_echo` and `last_prompt_echo_text`.
+/// Prompt-echo prefix per CLI; single source for `after_last_prompt_echo` / `last_prompt_echo_text`.
 fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
     match kind {
         "claude" | "grok" => Some("❯ "),
@@ -4990,8 +4429,7 @@ fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
     }
 }
 
-/// Index of the first line *after* the last prompt echo (`❯ …` / `› …`), or 0 when the echo
-/// is not on screen. Everything before it belongs to earlier turns.
+/// Index after the last prompt echo (`❯ …` / `› …`), or 0 when not on screen.
 fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
     let Some(echo) = prompt_echo_prefix(kind) else { return 0 };
     lines
@@ -5004,12 +4442,8 @@ fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
-/// What the user typed on the *last* prompt echo — the echo line itself, prefix stripped.
-///
-/// `after_last_prompt_echo` reports the index of the line **after** the echo, so the echo is
-/// at `idx - 1` and `idx == 0` means no echo is on screen. This is how a turn the user started
-/// by typing straight into the tmux pane gets its user message: there is no hook payload to
-/// read it from until the turn ends.
+/// What the user typed on the last prompt echo, prefix stripped — the only source of the user
+/// message for a turn typed straight into the pane (no hook payload until it ends).
 pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
     let echo = prompt_echo_prefix(kind)?;
     let lines: Vec<&str> = text.lines().collect();
@@ -5030,18 +4464,10 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
     if body.is_empty() {
         return None;
     }
-    // 折行的續行也是同一句話（2026-09-12 使用者回報）。長 prompt 在 TUI 上會被排成
-    //
-    // ```text
-    // ❯ 請直接呼叫 AskUserQuestion 工具問我兩題…請設 multiSelect:
-    //   true，四個選項：…問完就停著等我回答。
-    // ```
-    //
-    // 只讀 `❯` 那一行的話，使用者訊息被截在「multiSelect:」，剩下那半句還留在畫面上，
-    // 接著被 `extract_reply` 當成 agent 的回覆存起來——使用者看到的是自己的話變成 bot 的回答。
+    // 折行的續行也是同一句話（2026-09-12 使用者回報）：只讀 `❯` 那行的話訊息被截斷，
+    // 剩下半句被 `extract_reply` 當成 agent 的回覆。
     let mut out = vec![body.to_string()];
-    // 只有**排到行尾**的回音才可能有續行。少了這一條，「回音短、下一行有縮排」的畫面
-    // （grok 的回覆、codex 的 `thinking…`）會被誤收成使用者的話——那比沒收乾淨嚴重得多。
+    // 只有排到行尾的回音才可能有續行；否則 grok 回覆、codex `thinking…` 這類縮排行會被誤收成使用者的話。
     if echo_row_is_full(raw) {
         for l in lines.iter().skip(idx) {
             match echo_continuation(kind, l) {
@@ -5053,22 +4479,15 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
     Some(out.join("\n"))
 }
 
-/// 這一行有沒有排到行尾（＝後面那行可能是它折下來的）。
-///
-/// 沒有辦法從快照知道 pane 幾欄寬，但「折行」的前提是這一行長到撞牌邊：CJK 一個字算兩欄，
-/// 所以用顯示寬度估。門檻取 60 欄——比它窄的畫面不會有人在上面打這麼長的 prompt，而真正
-/// 折行的那種（實機是 100 欄以上）遠遠超過。
+/// 這行有沒有排到行尾（下一行可能是折下來的）。快照不知 pane 寬度，用顯示寬度（CJK 算兩欄）估，
+/// 門檻 60 欄：實機折行都在 100 欄以上。
 fn echo_row_is_full(raw: &str) -> bool {
     const WRAP_MIN_COLS: usize = 60;
     raw.trim_end().chars().map(|c| if (c as u32) > 0x1100 { 2 } else { 1 }).sum::<usize>() >= WRAP_MIN_COLS
 }
 
-/// 這一行是上一行 prompt 回音的續行嗎？是的話回它的內容（已去掉縮排）。
-///
-/// 續行的長相就只有「有縮排、而且不是別的東西」：claude 的工具結果（`⎿`）、輸出標記（`⏺`、
-/// `●`）、狀態列（`✻`）與各種框線都縮排在同一個位置，所以它們必須先被排除掉。判斷保守，
-/// 寧可少收一行（回音沒收乾淨、頂多留一句在回覆裡），也不要多吃一行（那是真的把 agent 的
-/// 回覆吃掉）。
+/// 上一行回音的續行？續行＝有縮排且不是別的東西（`⎿`、`⏺`、`●`、`✻`、框線要先排除）。
+/// 寧可少收（留一句回音）也不多收（吃掉 agent 的回覆）。
 fn echo_continuation<'a>(kind: &str, line: &'a str) -> Option<&'a str> {
     // 續行一定有縮排；沒縮排的是下一塊內容。
     let rest = line.strip_prefix("  ")?;
@@ -5076,7 +4495,7 @@ fn echo_continuation<'a>(kind: &str, line: &'a str) -> Option<&'a str> {
     if t.is_empty() || is_noise(line) {
         return None;
     }
-    // 這些開頭在三種 CLI 上都代表「另一塊東西開始了」，不是使用者那句話的下半截。
+    // 這些開頭代表另一塊東西開始了。
     const MARKERS: [&str; 10] = ["⎿", "⏺", "●", "✻", "✳", "│", "└", "├", "╭", "╰"];
     if MARKERS.iter().any(|m| t.starts_with(m)) {
         return None;
@@ -5095,17 +4514,15 @@ pub(crate) fn is_noise(s: &str) -> bool {
     crate::capture::claude::PARSER.noise_line(s)
 }
 
-/// Codex idle input: `› Ask Codex to do anything`. Looks like a prompt echo (`› …`) but is
-/// the empty-composer placeholder, not something the user typed.
+/// Codex empty-composer placeholder `› Ask Codex to do anything` — looks like an echo, isn't one.
 fn is_codex_idle_prompt(s: &str) -> bool {
     let t = s.trim_start();
     let body = t.strip_prefix("› ").unwrap_or(t).trim();
     body.to_ascii_lowercase().starts_with("ask codex to do")
 }
 
-/// grok 1.0.13 TUI chrome (appendix F): `◆ …` event / thinking lines, the "Worked for" footer
-/// with its `[hooks: N]` chip, the telemetry opt-in banner, the shortcut footer, the
-/// `<cwd>   15K / 500K` header, and the `[stable]` tag.
+/// grok 1.0.13 TUI chrome (appendix F): `◆` rows, "Worked for" footer, telemetry banner, shortcut
+/// footer, `<cwd>   15K / 500K` header, `[stable]`.
 fn is_grok_noise(s: &str) -> bool {
     if s.starts_with('◆') || s.starts_with("Worked for ") || s.contains("[hooks:") {
         return true;
@@ -5132,8 +4549,7 @@ fn is_grok_noise(s: &str) -> bool {
     false
 }
 
-/// Strip grok's per-line decoration: the scrollbar glyph `█` at the right edge and the
-/// right-aligned `h:mm AM|PM` timestamp on prompt / reply lines.
+/// Strip grok's right-edge scrollbar `█` and right-aligned `h:mm AM|PM` clock.
 fn strip_grok_decor(line: &str) -> String {
     let mut s = line.trim_end().trim_end_matches('█').trim_end().to_string();
     if let Some(rest) = s.strip_suffix(" AM").or_else(|| s.strip_suffix(" PM")) {
@@ -5151,9 +4567,7 @@ fn strip_grok_decor(line: &str) -> String {
     s
 }
 
-/// Extract the standalone Codex usage-reset hint from a pane snapshot. Codex has used both
-/// `•` and `■` for this kind of account notice across CLI releases; neither glyph belongs in
-/// the stored system message.
+/// Codex usage-reset hint line; its glyph (`•` / `■`, varies by release) is not stored.
 fn codex_usage_notice_line(line: &str) -> Option<String> {
     let body = line
         .trim()
@@ -5179,7 +4593,6 @@ fn codex_limit_hit_line(line: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    // Drop a leading spinner / bullet so `• ERROR: …` still matches.
     let s = match raw.chars().next() {
         Some(c) if !c.is_alphanumeric() => raw[c.len_utf8()..].trim(),
         _ => raw,
@@ -5196,7 +4609,7 @@ fn codex_limit_hit_line(line: &str) -> Option<String> {
     if !hit {
         return None;
     }
-    // Keep a stable ERROR: prefix so the chat styles it as a hard failure.
+    // Stable ERROR: prefix so the chat styles it as a hard failure.
     if s.to_ascii_lowercase().starts_with("error:") {
         Some(s.to_string())
     } else {
@@ -5212,13 +4625,7 @@ fn strip_codex_bullet(line: &str) -> &str {
         .unwrap_or_else(|| line.trim())
 }
 
-/// Glue the limit banner back together from row `i` onwards, and say where it ends.
-///
-/// Narrow panes wrap it across many rows:
-///   ■ You've hit your usage
-///   limit. Upgrade to Pro
-///   …
-///   try again at 1:32 PM.
+/// Rejoin the limit banner that narrow panes wrap across rows, from row `i`; returns where it ends.
 fn join_wrapped_limit_hit(lines: &[&str], i: usize) -> (Option<String>, usize) {
     let mut parts: Vec<&str> = vec![strip_codex_bullet(lines[i])];
     let mut j = i + 1;
@@ -5249,11 +4656,8 @@ fn codex_usage_notice_lines(text: &str) -> Vec<String> {
     while i < lines.len() {
         let line = lines[i];
         if let Some(notice) = codex_limit_hit_line(line) {
-            // The first row matches on its own, but `try again at …` — the only place the
-            // reset time appears — is on the row **after** it whenever the banner wraps.
-            // Taking the single row would store the notice truncated at `…, visit` and leave
-            // the quota with no reset (2026-09-10, codex-astra). So look ahead, and prefer
-            // the joined text only when it actually adds the missing half.
+            // When wrapped, `try again at …` (the only reset time) is on the next row; the single row
+            // stored `…, visit` with no reset (2026-09-10, codex-astra). Prefer the join only if it adds that.
             let (joined, next) = join_wrapped_limit_hit(&lines, i);
             if !has_try_again(&notice) {
                 if let Some(joined) = joined.filter(|j| has_try_again(j)) {
@@ -5302,26 +4706,18 @@ fn month_num_token(tok: &str) -> Option<u32> {
     M.iter().position(|m| t.starts_with(m)).map(|i| i as u32 + 1)
 }
 
-/// `try again at Aug 8th, 2025 1:47 PM` → RFC3339 UTC, if present.
-///
-/// The date half is **optional**: when the reset is later the same day codex writes just
-/// `or try again at 5:07 AM.` (2026-09-10, codex-astra). Requiring a year there meant the
-/// hit was recorded with no reset at all and the strip could never say when it comes back —
-/// so a bare clock time is read as the next time that clock comes round.
+/// `try again at Aug 8th, 2025 1:47 PM` → RFC3339 UTC. The date is optional: same-day resets are
+/// a bare `5:07 AM.` (2026-09-10, codex-astra), read as the next time that clock comes round.
 fn parse_codex_try_again(notice: &str) -> Option<String> {
     parse_codex_try_again_at(notice, chrono::Local::now())
 }
 
-/// 橫幅上的時間已經過去、但只過去一點點時，**不要**跳到明天。
-///
-/// 2026-09-13 實況：22:15:22 派工，CLI 橫幅還印著 `try again at 10:15 PM`（它那一秒還沒更新），
-/// 解析出 22:15:00 已經過去 22 秒，於是滾成隔天 22:15——兩筆交辦被排去等 24 小時，而 app-server
-/// 當時已經說 5h 用量 21%、22:20 重置。差幾分鐘的「過去」是**舊橫幅**，不是明天的預約。
+/// 橫幅時間剛過去幾分鐘＝舊橫幅，不要滾到明天。2026-09-13：22:15:22 派工時橫幅還是 `10:15 PM`，
+/// 滾成隔天讓兩筆交辦等 24 小時，而 app-server 說 22:20 就重置。
 const STALE_BANNER_GRACE_MINS: i64 = 15;
-/// 橫幅是舊的時候，隔多久再問一次 CLI／app-server。
 const STALE_BANNER_RETRY_MINS: i64 = 5;
 
-/// [`parse_codex_try_again`] 的可測版本：`now` 由呼叫端給。
+/// 可測版本：`now` 由呼叫端給。
 fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) -> Option<String> {
     use chrono::{Datelike, Local, NaiveDate, TimeZone};
     let low = notice.to_ascii_lowercase();
@@ -5341,8 +4737,7 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
         }
         let digits: String = tok.chars().take_while(|c| c.is_ascii_digit()).collect();
         if digits.is_empty() {
-            // The notice ends in a full stop, so the last token is `pm.` — an exact match here
-            // silently loses the meridiem and reports a reset twelve hours early.
+            // The last token is `pm.`: an exact match loses the meridiem (reset 12 h early).
             match tok.trim_matches(|c: char| !c.is_ascii_alphanumeric()) {
                 "pm" => pm = true,
                 "am" => pm = false,
@@ -5385,9 +4780,7 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
     if !pm && hour == 12 {
         hour = 0;
     }
-    // Fill in only what the notice left out, and roll the result forward: a reset is always
-    // ahead of us, so a clock time that already passed today means tomorrow, and a month/day
-    // that already passed this year means next year.
+    // A reset is always ahead: a passed clock time means tomorrow, a passed month/day next year.
     let today = now.date_naive();
     let (date, roll) = match (month, day) {
         (Some(m), Some(d)) => (NaiveDate::from_ymd_opt(year.unwrap_or_else(|| today.year()), m, d)?, year.is_none()),
@@ -5395,7 +4788,7 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
     };
     let mut naive = date.and_hms_opt(hour, minute, 0)?;
     if roll && naive <= now.naive_local() {
-        // 剛過去幾分鐘＝橫幅還沒更新（見上面的常數）：晚幾分鐘再問，不要整整等一輪。
+        // 剛過去幾分鐘＝舊橫幅：晚點再問，不等一整輪。
         let behind = now.naive_local().signed_duration_since(naive);
         if behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
             naive = now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS);
@@ -5410,12 +4803,10 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-/// When Codex prints a hard limit-hit, mirror it onto that host's `codex` quota row so the
-/// strip shows empty immediately (the rate-limits RPC can lag a turn behind the TUI).
+/// Mirror a Codex hard limit-hit onto that host's quota row immediately (the rate-limits RPC lags).
 async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Option<&str>, notice: &str) {
     let resets = parse_codex_try_again(notice);
-    // 寫進**這顆 bot 身分**的那把 key：查詢端（`limit_hit_for_bot`）先查 `codex:<identity>` 再查裸
-    // `codex`，寫入端以前一律寫裸的，有身分的 bot 就對不起來（2026-09-13 AGM 指出）。
+    // 寫進這顆 bot 身分的 key：查詢端先查 `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）。
     let base = crate::quota::quota_base("codex", identity);
     let key = crate::quota::quota_key(host, &base);
     let mut q = app
@@ -5436,15 +4827,12 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Optio
             account: None,
             host: host.to_string(),
         });
-    // 同一張橫幅再看到一次不是新證據：它就留在畫面上（2026-09-13：22:21 那次根本沒送出任何東西，
-    // 掃到的是 22:15 留下的那張，卻又把 `at` 蓋成現在、把量表打回 100%）。保留原本那筆，直接收工。
+    // 同一張橫幅再看到不是新證據（2026-09-13：掃到 22:15 的舊橫幅卻把 `at` 蓋成現在、量表打回 100%）。
     if q.limit_hit.as_ref().is_some_and(|h| h.message == notice) {
         return;
     }
-    // 量表標成用完：CLI 說它現在收不下工作，畫面就不該顯示還有額度。
-    // **但重置時間不從橫幅寫進來**——橫幅的時間會舊、也會被解析歪（同日實況：解析成隔天，
-    // 於是 5h 的 `resets_at` 變成明天，連帶把交辦排去等 24 小時）。那個時間只記在 `limit_hit.until`，
-    // 窗口自己的 `resets_at` 留給 app-server／statusLine 這些結構化來源。
+    // 量表標成用完，但重置時間不從橫幅寫：橫幅時間會舊會歪（同日解析成隔天，交辦等 24 小時）。
+    // 只記在 `limit_hit.until`；`resets_at` 留給 app-server／statusLine。
     let win = crate::quota::Window { used_pct: 100.0, resets_at: None };
     if let Some(existing) = q.five_hour.as_mut() {
         existing.used_pct = 100.0;
@@ -5453,8 +4841,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Optio
     } else {
         q.five_hour = Some(win);
     }
-    // CLI 自己說被擋住了，這一格黏著走（`quota::set` 會沿用，直到 `until` 過了、下一回合跑成功、
-    // 或有更新的結構化讀數說帳號其實還有額度）。
+    // 黏著走，直到 `until` 過了、下一回合成功、或更新的結構化讀數說還有額度（`quota::set`）。
     q.limit_hit = Some(crate::quota::LimitHit {
         message: notice.to_string(),
         until: resets.clone(),
@@ -5465,16 +4852,14 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Optio
     crate::quota::set(app, host, &base, q).await;
 }
 
-/// No reply marker found: keep whatever the agent printed after the last prompt echo,
-/// minus TUI chrome. Tool-result lines (`⎿ …`) are kept because they usually carry the
-/// actual error ("Not logged in · Please run /login").
+/// No reply marker: keep what follows the last prompt echo minus chrome. `⎿` lines stay — they
+/// usually carry the actual error ("Not logged in · Please run /login").
 fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let mut out: Vec<String> = Vec::new();
     let grok = kind == "grok";
-    // grok's telemetry opt-in banner wraps at the pane width, so it is skipped as a block:
-    // from "Help improve Grok" through "Read Terms and Privacy Policy." inclusive.
+    // grok's telemetry banner wraps at pane width: skip "Help improve Grok" … "Privacy Policy." as a block.
     let mut in_banner = false;
     for line in &lines[start..] {
         let stripped;
@@ -5495,8 +4880,7 @@ fn clean_screen(kind: &str, text: &str) -> Option<String> {
                 continue;
             }
         }
-        // `is_noise` only knows the spinner glyphs we have seen; `is_activity_shape` catches the
-        // rest by shape, so a frame like `✛ Generating… (4s · thinking)` cannot reach a message.
+        // `is_activity_shape` catches spinner glyphs `is_noise` doesn't know.
         if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
             continue;
         }
@@ -5524,10 +4908,7 @@ fn clean_screen(kind: &str, text: &str) -> Option<String> {
     }
 }
 
-/// Provider-specific reply extraction from a terminal snapshot.
-///
-/// grok prints the reply as plain indented text with no marker (appendix F), so it has no
-/// entry here and always goes through `clean_screen`.
+/// Provider-specific reply extraction. grok has no reply marker (appendix F): always `clean_screen`.
 fn extract_reply(kind: &str, text: &str) -> Option<String> {
     if kind == "claude" {
         return crate::capture::claude::PARSER.extract_reply(text);
@@ -5537,8 +4918,7 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
         _ => return None,
     };
     let lines: Vec<&str> = text.lines().collect();
-    // A2: only this turn's output counts. Without this the last `⏺` line of the *previous*
-    // turn would be handed back as the answer whenever the current turn printed no marker.
+    // A2: only this turn's output — else the previous turn's `⏺` line is returned as the answer.
     let after_echo = after_last_prompt_echo(kind, &lines);
     let start = after_echo
         + lines[after_echo..].iter().rposition(|l| {
@@ -5556,8 +4936,7 @@ fn extract_reply(kind: &str, text: &str) -> Option<String> {
         if !s.is_empty() && s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_') {
             break;
         }
-        // Skip the spinner / status line ("✻ Crunched for 9s · done 11:35 PM") and the chrome
-        // that sits next to it (`Tip:`, `✗ Auto-update failed`).
+        // Skip the spinner / status line and its neighbours (`Tip:`, `✗ Auto-update failed`).
         if s.chars().next().map(is_spinner_glyph).unwrap_or(false) || is_noise(s) {
             continue;
         }
@@ -5624,8 +5003,7 @@ mod extract_tests {
         assert!(codex_usage_notice_line("• ordinary assistant text").is_none());
     }
 
-    /// Idle splash as drawn by Codex 0.153 (2026-09-08 screenshot): boxed banner, usage
-    /// hint, empty-composer placeholder. Must not become a user prompt or an assistant reply.
+    /// Codex 0.153 idle splash (2026-09-08): must not become a user prompt or a reply.
     const CODEX_IDLE_SPLASH: &str = "\
 ╭────────────────────────────────────────────╮
 │ >_ OpenAI Codex (v0.153.4)                  │
@@ -5703,9 +5081,7 @@ credits or try again at
         assert!(n.contains("try again"));
     }
 
-    /// Real pane, codex-astra 2026-09-10: a **wide** pane still wraps this banner onto a
-    /// second row, and the first row matches the hit pattern all by itself — so the reset
-    /// half used to be dropped and the notice stored as `…, visit`.
+    /// codex-astra 2026-09-10: even a wide pane wraps this banner; the reset half was dropped (`…, visit`).
     const CODEX_LIMIT_HIT_TWO_ROWS: &str = "\
 › AGM 交辦：…
 
@@ -5726,8 +5102,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         // A banner that already carries its own reset is not extended by whatever follows it.
         assert_eq!(codex_usage_notice_lines(CODEX_LIMIT_HIT).len(), 1);
     }
-    /// 2026-09-13 實況：22:15:22 派工時 CLI 橫幅還印著 `try again at 10:15 PM`——那是**上一輪**的
-    /// 字，解析出來剛過去 22 秒。滾到隔天等於把工作壓 24 小時；差幾分鐘的「過去」是舊橫幅。
+    /// 2026-09-13：派工時橫幅剛過去 22 秒是舊字，不能滾到隔天壓 24 小時。
     #[test]
     fn a_banner_that_just_went_stale_does_not_roll_to_tomorrow() {
         use chrono::TimeZone;
@@ -5762,16 +5137,13 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
                 if h < 12 { "AM" } else { "PM" })
         };
         for h in 0..24u32 {
-            // 剛過去 15 分鐘內的那個鐘點另有規則（橫幅是舊的 → 幾分鐘後再問，見
-            // `a_banner_that_just_went_stale_does_not_roll_to_tomorrow`），這裡跳過它。
+            // 15 分鐘寬限內的鐘點另有規則（見 `a_banner_that_just_went_stale_does_not_roll_to_tomorrow`）。
             let candidate = now.date_naive().and_hms_opt(h, 7, 0).unwrap();
             let behind = now.naive_local().signed_duration_since(candidate);
             if behind >= chrono::Duration::zero() && behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
                 continue;
             }
-            // 用**同一個** `now` 解析：`parse_codex_try_again` 自己讀時鐘，跨過 `h:07` 或
-            // 那 15 分鐘寬限的邊界時，上面的判斷與底下的解析就會用到不同的時間（實測 2026-09-13
-            // 偶發一次紅燈）。時間敏感的測試要自己帶時鐘。
+            // 同一個 `now` 解析：各讀各的時鐘時跨過邊界會偶發紅燈（2026-09-13）。
             let parsed = parse_codex_try_again_at(&at(h), now).unwrap_or_else(|| panic!("hour {h} did not parse"));
             let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
             assert_eq!(dt.hour(), h, "{parsed}");
@@ -5813,8 +5185,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(got, "Not logged in · Please run /login");
     }
 
-    /// Two turns; the second produced only tool output. The previous turn's `⏺ FIRST-ANSWER`
-    /// must not be reported as the answer to "echo 2" (review A2).
+    /// Second turn printed only tool output; the previous `⏺ FIRST-ANSWER` must not be its answer (review A2).
     const TWO_TURNS: &str = "\
 ❯ echo 1
 ⏺ FIRST-ANSWER
@@ -5857,7 +5228,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         // Long prose that happens to contain both stays out.
         let prose = format!("The {} error means we should retry the request later on.", "x".repeat(300));
         assert!(live_alert("claude", &prose).is_none());
-        // Printed data that happens to say error + attempt: a sqlite row / JSON blob (seen 2026-09-08).
+        // Printed data saying error + attempt (sqlite row / JSON, 2026-09-08).
         let row = r#"62|note||{"action":"protocol_error","attempt":3,"bot":"t1-dev-2","error":"report.status 必須是 done 或 blocked"}|06:12"#;
         assert!(live_alert("claude", row).is_none());
         assert!(live_alert("claude", r#"{"error":"timeout","retry":true}"#).is_none());
@@ -5877,8 +5248,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(extract_reply("claude", screen).unwrap(), "PONG");
     }
 
-    /// grok 1.0.13 `agent.read {source: visible}` after "Reply with exactly GROK-OK"
-    /// (appendix F), columns narrowed.
+    /// grok 1.0.13 `agent.read {source: visible}` (appendix F), columns narrowed.
     const GROK_SCREEN: &str = "\
 
   /private/tmp/scratch/grok-ws                                       15K / 500K
@@ -5932,10 +5302,8 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
   Shift+Tab:mode  │  Ctrl+.:shortcuts
 ";
 
-    /// grok's echo of a prompt that carried an attachment (message
-    /// `01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07): the first line goes on the `❯` row and
-    /// everything after it is squeezed onto one row and clipped with `…`. That row used to be
-    /// stored as grok's answer.
+    /// grok echo of an attachment prompt (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07): lines 2..n
+    /// squeezed onto one `…` row, which was stored as the answer.
     const GROK_ATTACHMENT_ECHO: &str = "\
 
    main ~/project/agents-manager                                          250K / 500K
@@ -5965,12 +5333,10 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
   Shift+Tab:mode  │  Esc:cancel  │  Ctrl+.:shortcuts
 ";
 
-    /// What the agent was actually handed for that turn: what the user typed, plus the
-    /// attachment block `attach::deliver_text` appends.
+    /// What the agent was handed: typed text plus `attach::deliver_text`'s block.
     const SENT_WITH_ATTACHMENT: &str = "是否能有更好的ui表示法\n\n附加圖片（請讀取這個檔案來查看）：\n/Users/m1pro/project/agents-manager/.agents-manager/attachments/01M1XSTPGPMTZ3HYENTBP36125-2026-09-07---7-25-01.png";
 
-    /// The screen really does read as an answer until the echo is taken off — that is why it
-    /// was stored — and the clipped row really is all that is left of it.
+    /// Reads as an answer until the echo is removed; the clipped row is all that remains.
     #[test]
     fn a_clipped_attachment_echo_is_not_an_answer() {
         assert_eq!(clean_screen("grok", GROK_ATTACHMENT_ECHO).unwrap(), "附加圖片（請讀取這個檔案來查看）： …");
@@ -5978,8 +5344,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(screen_reply("grok", GROK_ATTACHMENT_ECHO, &sent), None);
     }
 
-    /// Only the *delivered* text carries the attachment block; matching against what the
-    /// timeline stores (the typed line alone) is what let the echo through.
+    /// Only the delivered text carries the attachment block; matching the typed text let the echo through.
     #[test]
     fn the_typed_line_alone_does_not_cover_the_echo() {
         let typed = vec!["是否能有更好的ui表示法".to_string()];
@@ -5997,8 +5362,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(screen_reply("grok", &screen, &sent).unwrap(), "好的，我看過圖了。");
     }
 
-    /// The clipped-echo rule keys on the *content*, not on the `…`: an answer that merely
-    /// trails off must not be eaten.
+    /// The clipped-echo rule keys on content, not `…`: a reply that trails off survives.
     #[test]
     fn a_reply_that_merely_ends_in_an_ellipsis_is_kept() {
         let text = "不太確定，讓我先看看那個檔案…";
@@ -6012,11 +5376,9 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(is_clipped_echo("附加圖片（請讀取這個檔案來查看）： …", &["附加圖片（請讀取這個檔案來查看）：", "/tmp/a.png"]));
     }
 
-    // ---- the composer check behind the stall watchdog's Enter nudge ----
+    // composer check behind the stall watchdog's Enter nudge
 
-    /// claude 2.1.263 while a 673k-token session was compacting (2026-09-07 11:21): the
-    /// prompt went in as a paste, the trailing Enter was swallowed, and the text sat in the
-    /// box until the turn was failed as a stall.
+    /// claude 2.1.263 compacting a 673k session (2026-09-07 11:21): Enter swallowed, text left in the box.
     const CLAUDE_UNSENT_PROMPT: &str = "\
 ❯ 直接做，且要確保claude裝有herdr 的skill
 
@@ -6038,8 +5400,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn an_unsent_prompt_is_seen_in_the_composer() {
-        // The box, not the transcript echo above it — and claude's `[Image #6]` decoration
-        // in front of our text does not hide it.
+        // The box, not the transcript echo; `[Image #6]` in front doesn't hide it.
         assert_eq!(
             composer_text("claude", CLAUDE_UNSENT_PROMPT).unwrap(),
             "[Image #6]試著對claude max方案增加 fable用量的讀取\n附加圖片（請讀取這個檔案來查看）："
@@ -6047,8 +5408,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(composer_holds_prompt("claude", CLAUDE_UNSENT_PROMPT, SENT_UNSENT_PROMPT));
     }
 
-    /// What claude really draws after `❯` is U+00A0, not a space (pane read 2026-09-07
-    /// 20:0x, `❯\u{a0}[Image #6]…`). The marker must not care which blank follows it.
+    /// claude draws U+00A0 after `❯` (pane read 2026-09-07); the marker must accept any blank.
     #[test]
     fn a_no_break_space_after_the_marker_still_reads_as_the_composer() {
         let screen = CLAUDE_UNSENT_PROMPT.replace("❯ [Image #6]", "❯\u{a0}[Image #6]");
@@ -6057,8 +5417,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(!pane_awaits_input("claude", &screen));
     }
 
-    /// The prompt *was* taken: the box is empty and the echo is only in the transcript. No
-    /// Enter must be sent here — pressing it would submit an empty prompt.
+    /// Prompt taken: box empty, echo only in the transcript. Enter here would submit an empty prompt.
     #[test]
     fn an_accepted_prompt_leaves_the_composer_empty() {
         let screen = CLAUDE_UNSENT_PROMPT.replace(
@@ -6104,7 +5463,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn a_turning_spinner_means_the_turn_is_not_over() {
-        // The exact screen that closed a turn with chrome as its answer (2026-09-07 11:17).
+        // The screen that closed a turn with chrome as its answer (2026-09-07 11:17).
         let screen = "⏺ 上一句回覆\n\n✢ Baking…\n  ⎿  Tip: Use /memory to view and manage Claude memory\n✗ Auto-update failed · Run claude doctor\n❯ ";
         assert!(pane_still_busy(screen));
         assert!(pane_still_busy("· Philosophising… (33m 33s · ↓ 94.9k tokens)"));
@@ -6132,9 +5491,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(!is_tool_progress(""));
     }
 
-    /// Claude mid-turn with nothing printed yet: spinner + input box + status bar only.
-    /// Everything here is chrome, so `live_reply` has nothing — but the user still needs to
-    /// see that the agent is thinking.
+    /// claude mid-turn, nothing printed yet: all chrome, but the user still needs to see it thinking.
     const THINKING_ONLY: &str = "\
 ❯ 幫我看一下這個 bug
 ✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)
@@ -6145,16 +5502,9 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
   ⏵⏵ bypass permissions on (shift+tab to cycle)
 ";
 
-    /// Reported from a real stuck session (2026-09-06): the UI sat on 「等待回覆（hook）…」
-    /// for 3m18s. The verb is randomised per frame and `✢` was missing from the glyph set,
-    /// so this row has to be caught on shape alone.
 
-    /// Same frame with a glyph that is in no whitelist at all — `is_activity_shape` is what
-    /// keeps this working when the CLI adds a spinner character we have never seen.
 
-    /// Reported 2026-09-06: the reply bubble came back holding the user's own message.
-    /// A multi-line prompt echoes as one `❯ <first line>` row plus its remaining lines verbatim,
-    /// and only the marker row is skipped — so lines 2..n were stored as the agent's answer.
+    /// 2026-09-06: lines 2..n of a multi-line prompt echo were stored as the agent's answer.
     const ECHOED_BACK: &str = "\
 ❯ 併行
 1 沒事 bot 不會需要停止的動作
@@ -6166,7 +5516,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn the_users_own_prompt_does_not_come_back_as_the_reply() {
-        // Before the fix this was the whole tail of the prompt plus the spinner row.
         let scraped = clean_screen("claude", ECHOED_BACK).unwrap_or_default();
         assert_eq!(strip_echoed_prompt(&scraped, SENT), "");
     }
@@ -6183,9 +5532,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(strip_echoed_prompt(text, SENT), "好的，我來處理。");
     }
 
-    /// Real capture (2026-09-06): the pane was a couple of columns wide, so the echo of
-    /// 「不要依剩餘量重排 固定 cc0 cc1 codex grok」came back one glyph per line and the
-    /// line-wise match never fired — the whole prompt got stored as the agent's reply.
+    /// 2026-09-06: a pane a couple of columns wide echoed the prompt one glyph per line; it was stored as the reply.
     #[test]
     fn a_prompt_shredded_one_glyph_per_line_is_still_recognised_as_the_echo() {
         let sent = "不要依剩餘量重排 固定 cc0 cc1 codex grok";
@@ -6222,10 +5569,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(strip_echoed_prompt("PONG", "ping"), "PONG");
     }
 
-    /// Real capture (2026-09-06) from the stuck grok pane `w8:pK`: grok had finished and was
-    /// sitting at an empty composer, but herdr still reported `agent_status: working`, so
-    /// nothing ever completed the Turn. The box frame is why `clean_screen`'s bare `s == "❯"`
-    /// test does not see this.
+    /// grok pane `w8:pK` (2026-09-06): finished at an empty boxed composer while herdr said `working`.
     const GROK_AWAITING: &str = "\
      一
      次
@@ -6243,10 +5587,8 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
   Shift+Tab:
 ";
 
-    /// Real capture (2026-09-06): pane `w8:pK` was so narrow that every CJK character wrapped
-    /// onto its own row, and the fallback stored the user's own prompt back as the reply.
-    /// `strip_echoed_prompt` cannot help here — the wrap points do not line up with what we
-    /// sent, so it correctly refuses to strip a partial match.
+    /// `w8:pK` (2026-09-06): every CJK char on its own row; `strip_echoed_prompt` rightly refuses
+    /// partial matches, so shredding must be detected.
     #[test]
     fn a_pane_too_narrow_to_read_is_recognised() {
         let shredded = "要\n依\n剩\n餘\n量\n重\n排\n固\n定\nc\nc\n0\nHelp impro\n";
@@ -6256,9 +5598,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         // Too little to judge: a two-line answer is not evidence of a broken pane.
         assert!(!is_shredded("好\n的\n"));
 
-        // Verbatim from `w8:pK` (2026-09-06): 31 columns, most of them eaten by grok's borders.
-        // Only half of these rows are ≤ 2 chars, so counting short lines alone let it through —
-        // the widest row being 4 characters is what actually gives it away.
+        // Verbatim `w8:pK` (2026-09-06): short-line count alone let it through; widest row = 4 chars gives it away.
         let real = "381K\n❯\n█\n█\n▼\nHel\nOff\nby\ndef\nau…\n";
         assert!(is_shredded(real));
 
@@ -6271,8 +5611,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(pane_awaits_input("grok", GROK_AWAITING));
         assert!(pane_awaits_input("claude", "⏺ done\n╭────╮\n│ ❯  │\n╰────╯\n"));
         assert!(pane_awaits_input("codex", "• done\n╭────╮\n│ ›  │\n╰────╯\n"));
-        // Claude keeps the empty composer on screen while working, which is exactly why the
-        // caller pairs this with "nothing changed for N polls" rather than trusting it alone.
+        // True while claude works too — why the caller pairs it with "nothing changed for N polls".
         assert!(pane_awaits_input("claude", THINKING_ONLY));
     }
 
@@ -6294,8 +5633,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(live_activity("claude", THINKING_ONLY).unwrap(), "Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)");
     }
 
-    /// Once the agent prints something, `live_reply` keeps working exactly as before and the
-    /// activity row is still reported alongside it (the UI prefers the text).
+    /// Once text prints, `live_reply` works as before and the activity row is still reported.
     #[test]
     fn live_reply_still_wins_once_there_is_output() {
         let screen = "❯ Reply with PONG\n⏺ PONG\n✻ Cooked for 5s\n──────\n❯\n";
@@ -6311,15 +5649,13 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(got.ends_with('…'));
     }
 
-    /// grok's thinking rows are `◆ …` and carry the scrollbar glyph, so they go through
-    /// `strip_grok_decor` first (same as `clean_screen`).
+    /// grok `◆` rows carry the scrollbar glyph: `strip_grok_decor` first.
     #[test]
     fn live_activity_reads_grok_event_rows() {
         assert_eq!(live_activity("grok", GROK_SCREEN).unwrap(), "Thought for 0.1s");
     }
 
-    /// Real capture from the stuck session that started this fix: three minutes in, the pane
-    /// carried nothing but this row and the UI still said 「等待回覆（hook）…」.
+    /// Real capture: three minutes in, only this row, UI still 「等待回覆（hook）…」.
     const BOOGIEING: &str = "\
 ❯ 幫我重構一下
 ✻ Boogieing… (3m 18s · ↓ 11.0k tokens)
@@ -6335,8 +5671,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(live_activity("claude", BOOGIEING).unwrap(), "Boogieing… (3m 18s · ↓ 11.0k tokens)");
     }
 
-    /// The spinner verb is randomised and the glyph set grows between CLI releases, so an
-    /// unknown glyph — or none at all — must still be recognised by shape alone.
+    /// Unknown glyph, or none, still recognised by shape.
     #[test]
     fn live_activity_falls_back_to_shape_for_unknown_glyphs() {
         let unknown = "❯ go\n⣾ Puttering… (12s · ↑ 1.2k tokens)\n";
@@ -6354,8 +5689,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(is_activity_shape("✢ Improvising… (5s)"));
     }
 
-    /// Before the prompt echo there is nothing to report (the previous turn's spinner must
-    /// not leak into this turn).
+    /// Before the prompt echo nothing is reported (no previous turn's spinner).
     #[test]
     fn live_activity_ignores_the_previous_turn() {
         let screen = "❯ echo 1\n✻ Worked for 9s\n❯ echo 2\n";
@@ -6369,8 +5703,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(strip_grok_decor("plain line █"), "plain line");
     }
 
-    /// The CLI-typed prompt is read back off the pane's own echo — the line `after_last_prompt_echo`
-    /// stops just past. The *last* echo wins, so an earlier turn's prompt is never reported.
+    /// CLI-typed prompt read off the pane echo; the last echo wins.
     #[test]
     fn last_prompt_echo_text_reads_what_the_user_typed() {
         assert_eq!(last_prompt_echo_text("claude", TWO_TURNS).as_deref(), Some("echo 2"));
@@ -6378,26 +5711,21 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(last_prompt_echo_text("codex", "› 幫我看一下這個 bug\n  thinking…\n").as_deref(), Some("幫我看一下這個 bug"));
     }
 
-    /// grok 那張常駐的 telemetry 橫幅不是內容，也不是活動跡象：它一直在畫面上，所以把它算成
-    /// 「畫面有東西」會讓 [`idle_threshold`] 誤判成「它講完了」。2026-09-13 GROK 那顆 pane 尾端
-    /// 就一直壓著這張。
+    /// grok 常駐的 telemetry 橫幅不算「畫面有東西」，否則 [`idle_threshold`] 誤判講完了（2026-09-13 GROK）。
     #[test]
     fn the_grok_opt_in_banner_is_not_content() {
         let screen = "❯ fix ui\n\n  Help improve Grok                                    [Opt out] [Opt in]\n  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g.,\n  prompts, traces, & metrics, for training and debugging purposes.\n  Change anytime via settings.\n  Read Terms and Privacy Policy.\n\n  ╭──────────────────────────────╮\n  │ ❯                            │\n  ╰──────── Grok 4.6 (low) ──────╯\n\n  Shift+Tab:mode  │  Ctrl+.:shortcuts\n";
         assert!(live_reply("grok", screen).unwrap_or_default().trim().is_empty(), "橫幅不是回覆");
-        // 而且這個畫面確實是「在等輸入」——空的 composer 還在。
         assert!(pane_awaits_input("grok", screen));
     }
 
-    /// 2026-09-13（GROK／w168:pN）：送出 15 秒後畫面還是一個空的 `❯`——它連第一個字都還沒印，
-    /// 卻被當成「在等你輸入」，回合被備援關掉，真正的回覆 36 秒後才到。「印過東西然後停住」
-    /// 才是 14 秒就算數的那種；「從頭到尾沒印過東西」要多等。
+    /// 2026-09-13（GROK／w168:pN）：15 秒還是空 `❯` 被當成等輸入，回覆 36 秒後才到。沒印過東西要多等。
     #[test]
     fn a_pane_that_never_rendered_anything_gets_a_longer_grace() {
         // 只有「herdr 說閒著」+「印過東西然後停住」才走短的那條。
         assert_eq!(idle_threshold(true, "idle"), IDLE_POLLS);
         assert_eq!(idle_threshold(false, "idle"), IDLE_POLLS_SILENT);
-        // herdr 說還在跑：它可能真的在做事（2026-09-13 GROK），不要 14 秒就收掉。
+        // herdr 說還在跑：可能真的在做事（2026-09-13 GROK）。
         assert_eq!(idle_threshold(true, "working"), IDLE_POLLS_SILENT);
         assert_eq!(idle_threshold(false, "working"), IDLE_POLLS_SILENT);
         // 讀不到狀態時不要比原本更急。
@@ -6405,8 +5733,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(IDLE_POLLS_SILENT > IDLE_POLLS * 3, "要明顯長過那 14 秒，不然等於沒改");
     }
 
-    /// 2026-09-12 使用者實機：長 prompt 被 TUI 折成兩行，只讀 `❯` 那一行的話使用者訊息斷在
-    /// 「multiSelect:」，下半句留在畫面上被當成 agent 的回覆。續行要算進回音。
+    /// 2026-09-12 使用者實機：長 prompt 折成兩行，下半句被當成回覆。續行要算進回音。
     #[test]
     fn last_prompt_echo_text_takes_the_wrapped_continuation() {
         let screen = "❯ 請直接呼叫 AskUserQuestion 工具問我兩題：第二題 header『功能』請設 multiSelect:\n  true，四個選項：『站內搜尋』『SEO 是主要目的』。問完就停著等我回答。\n  ⎿  You've reached your Fable limit. Run /usage-credits to continue.\n\n✻ Worked for 0s · done 5:08 PM\n";
@@ -6417,10 +5744,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(!got.contains("Fable limit"), "`⎿` 開頭的是 claude 的輸出：{got}");
     }
 
-    /// 續行只吃「縮排、而且不是別的東西」。少收一行只是回音沒清乾淨，多收一行等於把 agent
-    /// 的回覆吃掉，所以這裡寧可保守。
-    /// 回音沒排到行尾就不會有續行：grok 的回覆、codex 的 `thinking…` 都縮排在下一行，
-    /// 那些不是使用者的話。
+    /// 續行只吃「縮排且不是別的東西」，寧可保守；回音沒排到行尾就沒有續行。
     #[test]
     fn a_short_echo_row_has_no_continuation() {
         assert!(!echo_row_is_full("❯ echo 2"));
@@ -6445,8 +5769,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(echo_continuation("claude", "  第二半句"), Some("第二半句"));
     }
 
-    /// 收進續行之後，`strip_echoed_prompt` 就吃得到整段回音——這才是使用者看到的那個症狀
-    /// （下半句變成 bot 的回答）真正被修掉的地方。
+    /// 收進續行後 `strip_echoed_prompt` 才吃得到整段回音——症狀真正修掉的地方。
     #[test]
     fn the_wrapped_half_no_longer_looks_like_a_reply() {
         let screen = "❯ 第一半句很長很長，長到排滿整行才會折到下一行去，這是折行的前提\n  第二半句也不短\n  ⎿  真正的回覆\n";
@@ -6456,17 +5779,14 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(left.contains("真正的回覆"), "回覆要留著：{left}");
     }
 
-    /// grok's echo row carries the right-aligned clock and the scrollbar glyph; neither is
-    /// part of the prompt.
+    /// grok's clock and scrollbar glyph on the echo row are not part of the prompt.
     #[test]
     fn last_prompt_echo_text_strips_grok_decor() {
         let screen = "❯ Reply with GROK-OK                    2:09 AM   █\n     GROK-OK\n";
         assert_eq!(last_prompt_echo_text("grok", screen).as_deref(), Some("Reply with GROK-OK"));
     }
 
-    /// No echo on screen, an empty prompt box, or a CLI we have no prefix for: report nothing
-    /// rather than a made-up prompt (`begin_external_turn` then opens the turn with no user
-    /// message at all).
+    /// No echo / empty box / unknown CLI: report nothing (`begin_external_turn` opens with no user message).
     #[test]
     fn last_prompt_echo_text_is_none_without_an_echo() {
         assert_eq!(last_prompt_echo_text("claude", "⏺ orphaned reply\n"), None);
@@ -6478,17 +5798,12 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
 #[cfg(test)]
 mod flush_queue_tests {
-    //! The durable prompt queue's claim step, driven straight at the sqlite state machine.
-    //! `schedule_flush_queued` is a no-op under `cfg!(test)`, so these call
-    //! `flush_queued_locked` themselves — which is also the only way to observe what the
-    //! background task would have done.
+    //! Durable prompt queue claim step. `schedule_flush_queued` is a no-op in tests, so these call
+    //! `flush_queued_locked` directly.
     use super::*;
     use crate::testing as tt;
 
-    /// 上限橫幅要寫進**這顆 bot 身分**的那把 key，而且不可以把 5h 的 `resets_at` 蓋成橫幅的時間。
-    ///
-    /// 2026-09-13：橫幅一律寫裸的 `codex`，有身分的 bot 就對不起來；而橫幅時間被解析成隔天，
-    /// 連帶讓 5h 的 `resets_at` 也變成明天（量表與 `quota_blocked` 一起被拖下水）。
+    /// 上限橫幅寫進這顆 bot 身分的 key，且不把 5h `resets_at` 蓋成橫幅時間（2026-09-13）。
     #[tokio::test]
     async fn a_limit_hit_banner_lands_on_the_bots_own_quota_key() {
         let env = tt::env().await;
@@ -6505,10 +5820,7 @@ mod flush_queue_tests {
         assert!(q.get("codex").is_none(), "沒有身分的那把不該被動到");
     }
 
-    /// 同一張橫幅再掃到一次不是新證據：它就留在畫面上。
-    ///
-    /// 2026-09-13：22:21 那筆交辦根本沒送出任何東西，掃到的是 22:15 留下的同一張，卻把 `at`
-    /// 蓋成現在——於是「撞限」看起來永遠是剛剛發生的，量表也被再打回 100%。
+    /// 同一張橫幅重掃不是新證據，不可把 `at` 蓋成現在（2026-09-13：22:21 掃到 22:15 的舊橫幅）。
     #[tokio::test]
     async fn the_same_banner_seen_again_is_not_new_evidence() {
         let env = tt::env().await;
@@ -6517,8 +5829,7 @@ mod flush_queue_tests {
         apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, notice).await;
         let first = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
 
-        // 中間 app-server 說還有餘裕（這一步會把橫幅清掉——那是另一條規則）；這裡只看重掃的行為，
-        // 所以直接再掃一次同一張。
+        // 中間 app-server 清橫幅是另一條規則；這裡只測重掃。
         apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, notice).await;
         let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
         assert_eq!(first.at, again.at, "同一張橫幅不會把時間戳往前推");
@@ -6533,10 +5844,8 @@ mod flush_queue_tests {
         turn_id: String,
     }
 
-    /// A bot with a running run and one queued prompt behind it. `session` is what the run
-    /// claims to live on: `"test"` is the one the mock herdr answers, anything else makes
-    /// `client_for_run` fail — which is exactly the shape of a host that dropped out between
-    /// the prompt being queued and the flush trying to deliver it.
+    /// Running bot with one queued prompt. `session` other than `"test"` makes `client_for_run` fail
+    /// (a host that dropped out between queueing and flush).
     async fn queued(session: &str) -> Fixture {
         queued_kind("claude", session).await
     }
@@ -6591,12 +5900,8 @@ mod flush_queue_tests {
             .unwrap()
     }
 
-    /// **The regression.** The flush claims the turn (`queued -> in_flight`) *before* it has
-    /// a herdr client. When that lookup then fails the turn used to be abandoned mid-claim:
-    /// `in_flight` with `delivery='pending'`, which nothing finishes — `arm_stall`,
-    /// `arm_progress` and `try_fallback` all require `delivery == "ok"` — so the composer
-    /// said "回合進行中" for ever and every later `prompt()` was refused with 409 "a turn is
-    /// already in flight". It must go back on the queue instead.
+    /// Regression: a client lookup failing after the claim abandoned the turn `in_flight` +
+    /// `delivery='pending'` (nothing finishes that), 409-ing every later prompt. It must be requeued.
     #[tokio::test]
     async fn a_claim_that_cannot_be_delivered_goes_back_on_the_queue() {
         let f = queued("no-such-session").await;
@@ -6609,7 +5914,6 @@ mod flush_queue_tests {
         assert_eq!(t.delivery, "pending");
         assert_eq!(t.run_id, None, "an undelivered turn does not belong to that run");
         assert!(t.completed_at.is_none(), "it was requeued, not failed");
-        // The two consequences of the bug, checked directly.
         assert!(
             db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none(),
             "nothing is in flight, so the next prompt is not refused with 409",
@@ -6620,8 +5924,7 @@ mod flush_queue_tests {
             "the durable queue still holds it, so a later transition retries the delivery",
         );
 
-        // And it really is retryable: the same call against a reachable session claims it
-        // again, so requeueing did not poison `turns_one_queued` or the CAS.
+        // Still retryable: requeueing didn't poison `turns_one_queued` or the CAS.
         sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?")
             .bind(&f.run_id)
             .execute(&app.db)
@@ -6633,13 +5936,8 @@ mod flush_queue_tests {
         assert_eq!(t.run_id.as_deref(), Some(f.run_id.as_str()));
     }
 
-    /// The other side of the same coin: once the RPC has actually gone out, a failure is
-    /// **not** requeued. We do not know whether the agent took the text, so replaying it
-    /// could deliver the same prompt twice; `delivery='unknown'` is the designed parking
-    /// state and `prompt()` names that turn in its "abandon it first" conflict.
-    ///
-    /// (The mock herdr answers `agent.prompt` with `unsupported`, which is a delivery
-    /// failure that is not `agent_blocked` — precisely this case.)
+    /// Once the RPC went out, a failure is not requeued (could deliver twice); `delivery='unknown'`
+    /// parks it. The mock's `unsupported` answer to `agent.prompt` is exactly that case.
     #[tokio::test]
     async fn a_failure_after_the_rpc_is_parked_as_unknown_not_requeued() {
         let f = queued("test").await;
@@ -6653,10 +5951,8 @@ mod flush_queue_tests {
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none(), "not put back on the queue");
     }
 
-    /// **The queue gets the same screen checks as a live prompt** (review 2026-09-12 #6). codex
-    /// sits on its `/model` picker (the user opened it in the terminal and never answered); the
-    /// flush used to type the queued text straight into that menu. The mock cannot press
-    /// Escape, so the picker stays and the prompt has to go back on the queue, with the hint.
+    /// The queue gets the live prompt's screen checks (review 2026-09-12 #6): codex on its `/model`
+    /// picker (mock can't Esc) → back on the queue with the hint.
     #[tokio::test]
     async fn a_queued_prompt_waits_while_codex_shows_its_model_picker() {
         let f = queued_kind("codex", "test").await;
@@ -6698,8 +5994,7 @@ mod flush_queue_tests {
         assert_eq!(hints, 1);
     }
 
-    /// An empty queued prompt is still dropped rather than requeued — an unchanged path,
-    /// pinned here because "always put it back" would turn it into an infinite queue.
+    /// An empty queued prompt is dropped, not requeued ("always put it back" would loop forever).
     #[tokio::test]
     async fn an_empty_queued_prompt_is_still_failed_not_requeued() {
         let f = queued("no-such-session").await;
@@ -6776,8 +6071,7 @@ mod prompt_tests {
         id
     }
 
-    /// A missing run session is rejected before the turn and user message are written, so a
-    /// retry reports the same upstream problem instead of finding a stale in-flight turn.
+    /// A missing run session is rejected before writing, so a retry reports the same upstream problem.
     #[tokio::test]
     async fn an_unavailable_run_session_does_not_create_a_turn() {
         let f = fixture("codex", "no-such-session").await;
@@ -6796,11 +6090,10 @@ mod prompt_tests {
         assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none());
     }
 
-    /// 別的 bot 或排程腳本送進來的 prompt 要留下來源：總管的對話裡混著使用者的指示、其他 bot 的
-    /// 申請與 launchd 的派工，`relay_from` 是 UI 唯一分得出來的依據（2026-09-12 使用者）。
+    /// 別的 bot／排程送進來的 prompt 要留 `relay_from`，UI 才分得出來源（2026-09-12 使用者）。
     #[tokio::test]
     async fn a_relayed_prompt_records_who_sent_it() {
-        // 一顆 bot 同時只能有一個回合在飛，所以兩則各用一個 fixture。
+        // 一顆 bot 同時只有一個回合在飛：各用一個 fixture。
         let user = fixture("codex", "test").await;
         let user_app = user.env.app.clone();
         let mine = prompt_with(&user_app, &user.bot_id, "使用者自己打的", "prompt-user", &[]).await.unwrap();
@@ -6829,9 +6122,7 @@ mod prompt_tests {
         );
     }
 
-    /// Binding can fail after the turn transaction commits (for example, a transient database
-    /// error between the message and attachment updates). The UI must receive a terminal turn
-    /// event instead of being left on the committed `in_flight` / `pending` state.
+    /// Binding can fail after the turn commits; the UI must still get a terminal turn event.
     #[tokio::test]
     async fn an_attachment_bind_failure_closes_the_pending_turn() {
         let success = fixture("codex", "test").await;
@@ -7032,10 +6323,8 @@ mod child_restart_tests {
     use super::*;
     use crate::testing as tt;
 
-    /// The agent shrugs off ctrl+c (a modal, a hung CLI): the restart gives up after its 20
-    /// polls, and the run it had put into `stopping` must come back to `running` — the agent is
-    /// still right there in its pane. Left in `stopping`, every prompt answered 409, `start_bot`
-    /// refused (a child), reconcile only healed `starting`, and the bot sat yellow for good.
+    /// Agent ignores ctrl+c: after 20 polls the `stopping` run must return to `running` (else 409s
+    /// and a permanently yellow bot).
     #[tokio::test]
     async fn a_child_that_will_not_exit_gets_its_run_back() {
         let env = tt::env().await;
@@ -7081,10 +6370,8 @@ mod child_restart_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        // The mock drops an agent on ctrl+c only when the *name* matches the target. An agent
-        // whose name herdr has cleared (`name: null`, exactly what 0.8.2 does after a same-named
-        // restart) stays in the pane whatever keys are sent — a perfect stand-in for one that
-        // ignores ctrl+c.
+        // The mock drops an agent on ctrl+c only by name; `name: null` (herdr 0.8.2 after a same-named
+        // restart) stays put — a stand-in for one ignoring ctrl+c.
         *env.herdr.agents.lock().unwrap() = vec![json!({
             "name": null, "agent": "claude", "agent_status": "idle",
             "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
@@ -7105,8 +6392,8 @@ mod child_restart_tests {
 
 #[cfg(test)]
 mod default_session_tests {
-    //! SPEC §6.5.1: a run in the user's own `default` session is observed, its pane never
-    //! closed and never re-created by the daemon (review 2026-09-12 #4).
+    //! SPEC §6.5.1: a run in the user's `default` session is observed; its pane is never closed
+    //! or re-created (review 2026-09-12 #4).
     use super::*;
     use crate::testing as tt;
 
@@ -7163,8 +6450,7 @@ mod default_session_tests {
         assert!(env.herdr.tab(&pane.tab_id).unwrap().panes.contains(&pane.pane_id), "the pane is still there");
     }
 
-    /// Start and restart are refused with a reason the UI can show — and the refusal comes
-    /// before any ctrl+c, so a refused restart leaves the user's agent running.
+    /// Start / restart refused with a UI reason, before any ctrl+c.
     #[tokio::test]
     async fn start_and_restart_are_refused_before_touching_the_agent() {
         let env = tt::env().await;
@@ -7195,13 +6481,8 @@ mod default_session_tests {
 
 #[cfg(test)]
 mod tab_tests {
-    //! One bot, one tab (and the retrofit for the bots that predate it).
-    //!
-    //! These drive the real functions against the mock herdr in `crate::testing`, which keeps
-    //! genuine tab/pane bookkeeping — so "the tab was closed" is a fact about the server's
-    //! state, not about which RPC we happened to send. The mock deliberately does **not**
-    //! reap a tab when its last pane closes, though herdr 0.8.2 does: that is the only way to
-    //! see whether the daemon tidies up on its own rather than leaning on the server.
+    //! One bot, one tab (and the retrofit). The mock herdr keeps real tab/pane bookkeeping but,
+    //! unlike herdr 0.8.2, does not reap empty tabs — so these see whether the daemon tidies up itself.
     use super::*;
     use crate::testing as tt;
 
@@ -7221,9 +6502,7 @@ mod tab_tests {
         id
     }
 
-    /// A database failure after `workspace.create` still has to remove the root pane and its
-    /// tab. The trigger exercises the same error boundary as either run mapping UPDATE without
-    /// needing a real herdr failure injection.
+    /// A DB failure after `workspace.create` must still remove the root pane and its tab (trigger-injected).
     #[tokio::test]
     async fn a_run_mapping_failure_closes_the_new_pane_and_tab() {
         let env = tt::env().await;
@@ -7280,9 +6559,7 @@ mod tab_tests {
         id
     }
 
-    /// Every start pre-trusts its own working directory. A project pointed at a directory claude
-    /// has never opened hits the "Is this a project you trust?" prompt, whose cursor starts on
-    /// *No, exit*, and the start fails.
+    /// Every start pre-trusts its cwd, or claude's "trust this project?" prompt (cursor on *No*) fails it.
     #[tokio::test]
     async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
         let dir = std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid()));
@@ -7299,17 +6576,14 @@ mod tab_tests {
         assert_eq!(v["numStartups"], 7, "the CLI's own state survives the merge");
         let key = crate::trust::canonical(&cwd);
         assert_eq!(v["projects"][&key]["hasTrustDialogAccepted"], true);
-        // The key has to be the resolved path: on macOS `/tmp` is a symlink and the CLI
-        // compares against its own `getcwd()`, so an unresolved key silently does nothing.
+        // Resolved path: macOS `/tmp` is a symlink and the CLI compares its `getcwd()`.
         assert!(!key.starts_with("/tmp/"), "the recorded path is canonical, got {key}");
 
         assert!(!crate::trust::mark_trusted("claude", &store, &[key]).unwrap(), "already trusted: left alone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **The change.** Starting a bot asks for a *tab*, not a split of somebody else's pane,
-    /// and hands back that tab's root pane. `pane.split` is never sent — which is the whole
-    /// point: panes of one tab divide a fixed width between them, tabs do not.
+    /// Starting a bot creates a tab (never `pane.split`): tabs don't divide a fixed width.
     #[tokio::test]
     async fn a_starting_bot_gets_a_tab_of_its_own() {
         let env = tt::env().await;
@@ -7327,8 +6601,7 @@ mod tab_tests {
             assert_eq!(env.herdr.tab(t).unwrap().panes.len(), 1, "each tab holds exactly the one bot's pane");
         }
 
-        // The call itself: same cwd/env contract as the old `pane.split`, the bot's nickname
-        // on the tab bar, and never stealing focus from whatever the user is reading.
+        // Same cwd/env contract as `pane.split`, nickname on the tab bar, never steals focus.
         let p = env.herdr.first_call("tab.create").expect("tab.create was called");
         assert_eq!(p["workspace_id"], json!(ws.workspace_id));
         assert_eq!(p["cwd"], json!("/tmp/p"));
@@ -7338,8 +6611,7 @@ mod tab_tests {
         assert_eq!(p["env"]["AM_HOOK_TOKEN"], json!("tok"));
     }
 
-    /// A workspace we just created is already one tab with one pane in it, so the first bot
-    /// in a fresh project sits in the root pane rather than opening a second, empty tab.
+    /// A fresh workspace is already one tab / one pane: the first bot uses the root pane.
     #[tokio::test]
     async fn the_first_bot_in_a_fresh_workspace_reuses_its_root_pane() {
         let env = tt::env().await;
@@ -7355,8 +6627,7 @@ mod tab_tests {
         assert_eq!(env.herdr.tabs_in(&ws.workspace_id).len(), 1);
     }
 
-    /// Stopping a bot takes its tab with it, so a day of starting and stopping does not leave
-    /// a row of empty tabs across the top of the workspace.
+    /// Stopping a bot takes its tab too, so no row of empty tabs builds up.
     #[tokio::test]
     async fn stopping_a_bot_closes_the_tab_it_owned() {
         let env = tt::env().await;
@@ -7374,9 +6645,7 @@ mod tab_tests {
         assert_eq!(env.herdr.tabs_in(&ws.workspace_id).len(), 1, "only the workspace's own tab is left");
     }
 
-    /// The other half of the same rule: a pane that *shares* its tab — every bot started
-    /// before this change, and anything the user split by hand — only loses the pane. Closing
-    /// the tab there would take a neighbour's agent down with it.
+    /// A pane sharing its tab only loses the pane; closing the tab would kill a neighbour's agent.
     #[tokio::test]
     async fn stopping_a_bot_in_a_shared_tab_leaves_the_tab_alone() {
         let env = tt::env().await;
@@ -7389,8 +6658,7 @@ mod tab_tests {
         assert_eq!(mine.tab_id, neighbour.tab_id);
 
         let bot = a_bot(&env, "alfa").await;
-        // `tab_id` recorded even though the tab is shared — reconcile fills it in from herdr
-        // for old runs too, so "has a tab id" must not be what decides to close the tab.
+        // Reconcile fills `tab_id` for old runs too, so "has a tab id" can't decide closing.
         running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, Some(&mine.tab_id)).await;
 
         assert!(stop_bot(&app, &bot).await.unwrap());
@@ -7400,9 +6668,7 @@ mod tab_tests {
         assert!(tab.panes.contains(&neighbour.pane_id), "the neighbour's agent is untouched");
     }
 
-    /// The retrofit endpoint: a bot already running in a shared tab is given one of its own.
-    /// It is a move, so the `pane_id` — everything the run, its subscription and any turn in
-    /// flight are keyed by — must survive unchanged.
+    /// Retrofit: a bot in a shared tab gets its own via a move; `pane_id` must survive.
     #[tokio::test]
     async fn moving_a_running_bot_gives_it_a_tab_without_changing_its_pane() {
         let env = tt::env().await;
@@ -7413,7 +6679,7 @@ mod tab_tests {
         let mine = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
 
         let bot = a_bot(&env, "alfa").await;
-        // NULL tab_id: exactly what a run started before the column existed looks like.
+        // NULL tab_id: a run from before the column existed.
         let run = running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, None).await;
 
         move_pane_to_own_tab(&app, &bot).await.unwrap();
@@ -7430,14 +6696,8 @@ mod tab_tests {
         assert!(env.herdr.tab(&neighbour.tab_id).unwrap().panes.contains(&neighbour.pane_id));
     }
 
-    /// The tidy-up both paths share, on its own. It is the *only* thing that decides a tab
-    /// may go, and it decides it from herdr's pane count rather than from anything we
-    /// recorded — a tab still holding a pane is somebody's live agent.
-    ///
-    /// It also has to be quiet about a tab that is already gone: herdr 0.8.2 reaps a tab when
-    /// its last pane closes and `pane.move` closes the tab it emptied, so "not found" is the
-    /// ordinary outcome in production, and only the mock (which does not reap) ever reaches
-    /// the `tab.close` below.
+    /// The shared tidy-up decides from herdr's pane count, not our records. "Not found" is normal in
+    /// production (herdr 0.8.2 reaps tabs); only the non-reaping mock reaches `tab.close`.
     #[tokio::test]
     async fn the_tidy_up_closes_an_empty_tab_and_only_an_empty_one() {
         let env = tt::env().await;
@@ -7460,9 +6720,7 @@ mod tab_tests {
         assert!(env.herdr.tab(&busy.tab_id).is_some());
     }
 
-    /// Idempotence. A pane that already owns its tab is left exactly where it is: on herdr a
-    /// second move is *not* a no-op — it builds a new tab and closes the old one, renumbering
-    /// the user's tab bar for nothing.
+    /// Idempotence: on herdr a second move rebuilds the tab and renumbers the tab bar.
     #[tokio::test]
     async fn moving_a_bot_that_already_owns_its_tab_changes_nothing() {
         let env = tt::env().await;
@@ -7508,14 +6766,12 @@ mod tab_tests {
 
 #[cfg(test)]
 mod hookless_capture_tests {
-    //! 對話 for a run the daemon did not start and never injected hooks into: a spawned child
-    //! agent (`managed_by='child'`). Everything it says has to be scraped off its pane, so
-    //! these drive `capture_hookless_turn_locked` at a mock herdr holding a real screen.
+    //! 對話 for a hookless child run (`managed_by='child'`): scraped off a mock herdr pane via
+    //! `capture_hookless_turn_locked`.
     use super::*;
     use crate::testing as tt;
 
-    /// A finished claude exchange, as `recent_unwrapped` renders it: the prompt echo, the
-    /// reply, the status line, and the empty composer below the rule.
+    /// A finished claude exchange as `recent_unwrapped` renders it.
     const EXCHANGE: &str = "\
 ❯ 幫我看一下 lifecycle.rs
   ⎿  Read lifecycle.rs (4308 lines)
@@ -7535,8 +6791,7 @@ mod hookless_capture_tests {
         run_id: String,
     }
 
-    /// An adopted, hook-less bot sitting in `pane-1`, with `screen` on that pane.
-    /// `hooks` / `adopted` are the two flags that decide whether the terminal is the source.
+    /// An adopted hookless bot on `pane-1`; `hooks` / `adopted` decide whether the terminal is the source.
     async fn child(status: &str, screen: &str, hooks: i64, adopted: i64) -> Child {
         let env = tt::env().await;
         let app = env.app.clone();
@@ -7572,7 +6827,7 @@ mod hookless_capture_tests {
 
     async fn messages(app: &Arc<App>, conv: &str) -> Vec<(String, String, String)> {
         sqlx::query_as::<_, (String, String, String)>(
-            // Ordered the way `GET /api/bots/{id}/messages` orders it, so a test sees what 對話 shows.
+            // Same order as `GET /api/bots/{id}/messages`.
             "SELECT role, content, source FROM messages WHERE conversation_id = ? ORDER BY id",
         )
         .bind(conv)
@@ -7581,10 +6836,8 @@ mod hookless_capture_tests {
         .unwrap()
     }
 
-    /// **The bug.** A child agent's `working -> idle` edge arrives with no turn in flight —
-    /// the daemon adopted the pane mid-answer, so it never saw the `-> working` edge that
-    /// opens one — and `try_fallback` bails on that, which left 對話 empty for a bot whose
-    /// 終端 tab was full of text. The edge now becomes a turn of its own.
+    /// The bug: a child adopted mid-answer hits `working -> idle` with no turn in flight, and
+    /// `try_fallback` bails — 對話 stayed empty. The edge now becomes a turn of its own.
     #[tokio::test]
     async fn a_finished_exchange_on_the_pane_becomes_a_turn() {
         let c = child("idle", EXCHANGE, 0, 1).await;
@@ -7613,8 +6866,7 @@ mod hookless_capture_tests {
         assert!(t.completed_at.is_some(), "nothing is left in flight, so the composer is not locked");
     }
 
-    /// herdr reports `working -> idle` more than once for one answer, and a re-adoption reads
-    /// the same screen again. Neither may grow the conversation.
+    /// Repeated `working -> idle` edges and re-adoption must not grow the conversation.
     #[tokio::test]
     async fn the_same_screen_is_never_stored_twice() {
         let c = child("idle", EXCHANGE, 0, 1).await;
@@ -7649,9 +6901,7 @@ mod hookless_capture_tests {
         assert_eq!(turns, 2);
     }
 
-    /// A bot whose pane *we* started keeps hooks as its source of truth (SPEC §4.3: the
-    /// snapshot is the備援, not the record), so this path must not touch it — a hook reply is
-    /// complete, a scrape is not.
+    /// A pane we started keeps hooks as source of truth (SPEC §4.3: snapshot is the 備援); this path must not touch it.
     #[tokio::test]
     async fn a_run_with_hooks_is_left_to_its_hooks() {
         let c = child("idle", EXCHANGE, 1, 1).await;
@@ -7666,9 +6916,7 @@ mod hookless_capture_tests {
         assert!(messages(&app, &own.conv).await.is_empty());
     }
 
-    /// Without a cursor the snapshot is the whole scrollback, and the prompt echo is the only
-    /// thing marking where the last turn began. With neither, storing "the screen" would drop
-    /// several turns into one bubble — so it stores nothing and just remembers the cursor.
+    /// No cursor and no echo: storing the whole scrollback would merge turns, so store nothing and remember the cursor.
     #[tokio::test]
     async fn a_screen_with_no_prompt_echo_is_not_guessed_at() {
         let c = child("idle", "⏺ 一段沒有頭的舊輸出\n", 0, 1).await;
@@ -7682,9 +6930,7 @@ mod hookless_capture_tests {
         );
     }
 
-    /// The adoption seed only ever fires into an empty conversation: a bot is re-adopted on
-    /// every daemon restart and every event-stream reconnect, and its last exchange is still
-    /// on screen each time.
+    /// The adoption seed only fires into an empty conversation (re-adoption on every restart / reconnect).
     #[tokio::test]
     async fn the_adoption_seed_refuses_a_conversation_that_already_has_messages() {
         let c = child("idle", EXCHANGE, 0, 1).await;
@@ -7779,8 +7025,7 @@ mod issue_17_tests {
             .unwrap()
     }
 
-    /// Re-arming only invalidates the old task. Once it reaches the bot lock, the old generation
-    /// returns and cannot remove or overwrite the newer registration.
+    /// Re-arming invalidates the old task; at the lock it returns without touching the newer registration.
     #[tokio::test]
     async fn an_old_fallback_timer_gives_up_inside_the_bot_lock() {
         let env = tt::env().await;
@@ -7871,8 +7116,7 @@ mod progress_rate_tests {
         assert!(progress_due(Some(&last), false));
     }
 
-    /// The poller's last frame must never be left sitting in `pending` just because the turn
-    /// happened to end inside the window — that is what `force` is for.
+    /// The poller's last frame must not stay in `pending` when the turn ends inside the window (`force`).
     #[test]
     fn force_ignores_the_budget() {
         assert!(progress_due(Some(&Instant::now()), true));
@@ -7881,10 +7125,8 @@ mod progress_rate_tests {
 
 #[cfg(test)]
 mod remote_hook_tests {
-    //! SPEC §11.4.2 — `REMOTE_HOOK_SH` is a shell script, so the only test worth writing runs it
-    //! with `/bin/sh` against a fake `$HOME` and a fake `herdr` that records its argv. It has no
-    //! coverage on the remote host itself, which is why the classification stays coarse here and
-    //! the real one lives in `hookrecv::classify`.
+    //! SPEC §11.4.2 — runs `REMOTE_HOOK_SH` with `/bin/sh` against a fake `$HOME` and `herdr`.
+    //! Classification stays coarse; the real one is `hookrecv::classify`.
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
@@ -8008,8 +7250,7 @@ mod remote_hook_tests {
         assert!(calls[0].contains("--agent-session-id g-9"), "{:?}", calls);
     }
 
-    /// The token slot the daemon now fills is `-` (review 2026-09-12 #8); the script must treat
-    /// it exactly like a real token — spool, then report — so nothing changes on the wire.
+    /// Token slot `-` (review 2026-09-12 #8) is treated like a real token: spool, then report.
     #[test]
     fn a_placeholder_token_slot_changes_nothing() {
         let sb = Sandbox::new(true);

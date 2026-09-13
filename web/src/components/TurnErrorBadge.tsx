@@ -4,26 +4,12 @@ import { projectHostName, useStore } from '../store/store'
 import { quotaKey } from '../api/types'
 
 /**
- * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）。
- *
- * claude 的連線在回應中途掉了只會在 pane 印一行
- * `⏺ API Error: Connection lost mid-response. The response above may be incomplete.`，
- * 然後照常收工——hook 送 Stop、herdr 報 idle，側欄一顆綠燈，使用者以為做完了。daemon 把那行
- * 讀出來掛在 run 上（`runs.turn_error`），這顆 badge 就是它在畫面上的樣子。
- *
- * 不做成 tooltip：斷掉的回合是要**動手**的，不是滑過去才知道的。所以是一顆點得下去的紅 chip，
- * 點開看得到原文，底下就是「重送上一則」——走的是輸入框那條 `sendPrompt`，沒有另一套送法。
- *
- * 沒有「知道了」：下一回合一開就會被 daemon 清掉（`arm_progress`），重送本身就是清掉它的動作。
- *
- * 彈出層跟 `ModelQuickPicker` 一樣 portal 到 body 再用 `position: fixed` 定位：標題列那一列
- * 自己會疊在對話區底下，`position: absolute` 的浮層會被壓在後面（實測看得到一角）。
+ * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）：claude 斷線只在 pane 印一行、照常 idle，`runs.turn_error` 在此顯示。
+ * 沒有「知道了」：下一回合 daemon 會清掉。彈出層 portal 到 body：標題列疊在對話區底下，absolute 會被壓住。
  */
 export function TurnErrorBadge({ botId }: { botId: string }) {
   const notice = useStore((s) => s.runs[botId]?.turn_error ?? null)
-  // 額度用盡（`You've reached your Fable limit…`）跟 API 斷線分開講：重送沒有用，要等重置或換模型
-  // （2026-09-12 使用者：「已用盡卻沒有正確的提示」）。重置時間從該帳號的額度格拿（daemon 在同一時刻
-  // 把它標成 limit_hit）。
+  // 額度用盡跟斷線分開講：重送沒用，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
   const quotaLimit = notice !== null && /^you've reached your .*limit/i.test(notice)
   const quotaName = notice && /fable/i.test(notice) ? 'Fable' : '5 小時'
   const resetsAt = useStore((s) => {
@@ -37,7 +23,6 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
   })
   const currentModel = useStore((s) => s.bots.find((b) => b.id === botId)?.model ?? null)
   const patchBot = useStore((s) => s.patchBot)
-  // 上一則使用者訊息就是「被斷掉的那一則」——重送指的是它。
   const lastUserText = useStore((s) => {
     const list = s.messages[botId] ?? []
     for (let i = list.length - 1; i >= 0; i -= 1) {

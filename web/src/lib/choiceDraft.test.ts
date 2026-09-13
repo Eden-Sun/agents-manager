@@ -4,12 +4,8 @@ import { commit, pageNeedsCommit, preload, radioPick, samePage, togglesFor, want
 import { parseChoiceMenu } from './tuiChoices.ts'
 
 /**
- * 一台假的 claude 問卷 TUI：三個分頁（兩題複選 ＋ 一個送出頁），會對 ←／→、↑／↓、space、
- * 數字鍵與 Enter 有反應，而且**畫出來的字跟真機快照同一個版型**（`carbis-multiselect.txt`
- * 的縮排、沒有編號的 `Submit` 列、夾在中間的分隔線都照抄）。
- *
- * 有它才驗得了「預載走一輪回到原點」「差集只送要翻的那幾顆」「對不上就停手」這幾條——真的
- * bot 上那題是使用者本人要回答的，不能拿來按。
+ * 假的 claude 問卷 TUI（兩題複選＋送出頁），版型照抄 `carbis-multiselect.txt`。
+ * 真 bot 上的題是使用者本人要答的，不能拿來按。
  */
 class FakeTui {
   tab = 0

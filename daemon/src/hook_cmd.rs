@@ -1,29 +1,19 @@
 //! `agents-managerd hook claude|codex|grok` — the hook child process (SPEC §4.4, §12).
 //!
-//! Contract (agreed interface — do not change the signatures):
-//!   - synchronous, never panics, never writes to stdout, caller exits 0 afterwards.
-//!   - POST http://127.0.0.1:<port>/hook/<provider> with header `X-AM-Bot-Token`
-//!     and body {bot_id, provider, payload, received_at, truncated}.
-//!   - on failure append that same body as one JSON line to
-//!     ~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl
+//! Contract (do not change the signatures): synchronous, never panics, caller exits 0; POST
+//! with `X-AM-Bot-Token`, spool the same body to `bots/<bot_id>/hook-spool.jsonl` on failure.
+//! Claude blocks on the Stop hook, so everything fits well under 3 s.
 //!
-//! Timing: this process sits in the agent's critical path (Claude blocks on the Stop
-//! hook), so the whole thing is budgeted at well under the 3 s wall-clock ceiling:
-//! stdin read ≤ 800 ms, HTTP connect ≤ 300 ms, HTTP total ≤ min(2 s, remaining budget).
-//!
-//! stdout is sacred: Claude parses a Stop hook's stdout as a *decision* object, so a
-//! stray `println!` here can make the agent loop or abort. Errors go to stderr (one
-//! short line) and to `hook.log`; never to stdout.
+//! stdout is sacred: Claude parses a Stop hook's stdout as a *decision* object, so a stray
+//! `println!` can make the agent loop or abort. Errors go to stderr and `hook.log` only.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Total wall-clock budget. The hard contract is 3 s; we aim well under it so that
-/// process startup + teardown still fit.
+/// Hard contract is 3 s; leave room for process startup + teardown.
 const TOTAL_BUDGET: Duration = Duration::from_millis(2_500);
-/// stdin is closed by Claude right after it writes the payload; the cap only protects
-/// us from a caller that keeps the pipe open.
+/// Only guards against a caller that keeps the pipe open.
 const STDIN_BUDGET: Duration = Duration::from_millis(800);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const HTTP_TIMEOUT: Duration = Duration::from_millis(2_000);
@@ -31,7 +21,6 @@ const HTTP_TIMEOUT: Duration = Duration::from_millis(2_000);
 const MAX_PAYLOAD: usize = 1024 * 1024;
 
 pub struct HookArgs {
-    /// "claude" | "codex" | "grok"
     pub provider: String,
     pub bot: String,
     pub token: String,
@@ -40,8 +29,7 @@ pub struct HookArgs {
     pub payload_arg: Option<String>,
 }
 
-/// The bot token: `--token` when given, else `$AM_HOOK_TOKEN` from the pane env (issue #43:
-/// the daemon no longer puts it on the command line, where `ps` shows it to every user).
+/// `--token`, else `$AM_HOOK_TOKEN` — kept off the command line where `ps` exposes it (issue #43).
 pub fn hook_token(arg: &str) -> String {
     if !arg.is_empty() {
         arg.to_string()
@@ -50,7 +38,7 @@ pub fn hook_token(arg: &str) -> String {
     }
 }
 
-/// Entry point. Never panics, never touches stdout. The caller exits 0 unconditionally.
+/// Never panics, never touches stdout.
 pub fn run(args: HookArgs) {
     // A panic would print a multi-line backtrace-ish message to stderr; keep it to one line.
     let prev = std::panic::take_hook();
@@ -68,7 +56,6 @@ fn inner(args: HookArgs) {
     let deadline = Instant::now() + TOTAL_BUDGET;
 
     let (text, truncated) = match args.payload_arg {
-        // Codex: argv's last element is the JSON payload.
         Some(s) => {
             if s.len() > MAX_PAYLOAD {
                 (truncate_utf8(&s, MAX_PAYLOAD).to_string(), true)
@@ -76,7 +63,6 @@ fn inner(args: HookArgs) {
                 (s, false)
             }
         }
-        // Claude / grok: the payload arrives on stdin.
         None => read_stdin_capped(STDIN_BUDGET),
     };
 
@@ -107,8 +93,7 @@ fn inner(args: HookArgs) {
     }
 }
 
-/// Valid JSON *object* → used as-is. Anything else (invalid JSON, a bare scalar, an
-/// array, a truncated blob) → `{"raw": "<text>"}` so the daemon still sees something.
+/// Non-object → `{"raw": "<text>"}` so the daemon still sees something.
 fn parse_payload(text: &str) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(text) {
         Ok(v) if v.is_object() => v,
@@ -116,11 +101,7 @@ fn parse_payload(text: &str) -> serde_json::Value {
     }
 }
 
-/// Read stdin up to `MAX_PAYLOAD`, giving up after `budget`.
-///
-/// The read runs on a helper thread so a caller that never closes the pipe cannot
-/// blow the wall-clock contract; on timeout we return what the contract allows
-/// (empty payload) and let the daemon classify it as a no-op.
+/// Helper thread so a never-closed pipe cannot blow the budget; timeout → empty payload.
 fn read_stdin_capped(budget: Duration) -> (String, bool) {
     let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
     std::thread::spawn(move || {
@@ -139,7 +120,6 @@ fn read_stdin_capped(budget: Duration) -> (String, bool) {
     rx.recv_timeout(budget).unwrap_or_else(|_| (String::new(), false))
 }
 
-/// Truncate at a char boundary at or below `max` bytes.
 fn truncate_utf8(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -155,8 +135,7 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// POST to the daemon. Hard-wired to IPv4 loopback and proxy-free (SPEC §4.4.3):
-/// a user's `HTTP_PROXY` / `ALL_PROXY` must never intercept a local hook.
+/// IPv4 loopback, proxy-free (SPEC §4.4.3): `HTTP_PROXY` must never intercept a local hook.
 fn post(
     body: &serde_json::Value,
     provider: &str,
@@ -170,8 +149,7 @@ fn post(
     }
     let total = HTTP_TIMEOUT.min(remaining);
 
-    // reqwest is async-only in this build (no `blocking` feature), so we drive one
-    // request on a single-threaded runtime and block here.
+    // reqwest has no `blocking` feature in this build.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -207,7 +185,7 @@ fn post(
 }
 
 fn data_dir() -> PathBuf {
-    // `AM_DATA_DIR` exists so the timing tests can run against a throwaway directory.
+    // For tests.
     if let Some(d) = std::env::var_os("AM_DATA_DIR") {
         return PathBuf::from(d);
     }
@@ -246,7 +224,7 @@ fn spool(bot_id: &str, body: &serde_json::Value) {
     }
 }
 
-/// Last resort: `hook.log`. If this fails too we stay silent — exit 0 is the contract.
+/// Last resort; if this fails too we stay silent.
 fn log_line(bot_id: &str, msg: &str) {
     let dir = bot_dir(bot_id);
     if std::fs::create_dir_all(&dir).is_err() {

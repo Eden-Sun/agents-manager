@@ -2,9 +2,8 @@ import { useEffect, useState } from 'react'
 import { fetchChangelog, type ChangelogReply } from '../api/changelog'
 
 /**
- * 「有更新 · 重啟套用」確認框裡的 changelog 區塊（2026-09-10 使用者需求：先看新版改了什麼，
- * 確認後才重啟）。三態：抓取中／找到了（一段一版，新的在前）／找不到（明講原因＋原始連結）。
- * 抓不到 changelog 不擋重啟——那是使用者的決定，這裡只負責把話講清楚。
+ * 「有更新 · 重啟套用」確認框裡的 changelog（2026-09-10 使用者需求：先看改了什麼才重啟）。
+ * 抓不到不擋重啟——那是使用者的決定，這裡只講清楚原因。
  */
 export function UpdateChangelog({
   kind,

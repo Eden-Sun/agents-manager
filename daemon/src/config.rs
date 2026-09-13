@@ -1,7 +1,5 @@
-//! `~/.config/agents-manager/config.toml` — the authority for the *desired* Project / Bot set.
-//!
-//! SQLite holds runtime state (Run / Turn / Message / tokens). On load and after every
-//! write-back we project TOML into SQLite (see `projection.rs`).
+//! config.toml is the authority for the *desired* Project / Bot set; SQLite holds runtime state
+//! and is projected from TOML (see `projection.rs`).
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,7 +22,6 @@ pub fn default_host() -> String {
     LOCAL_HOST.to_string()
 }
 
-/// Reserved host name for "this machine".
 pub const LOCAL_HOST: &str = "local";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,36 +38,24 @@ impl Default for ServerConfig {
     }
 }
 
-/// `[supervisor]` — knobs for the manager (AGM) that are policy, not per-bot state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SupervisorCfg {
-    /// How often, at most, the daemon is allowed to wake the manager with its pending inbox.
-    ///
-    /// Events still land in `supervisor_inbox` the moment they happen — nothing is dropped or
-    /// delayed on the way in. This only paces the *push*: one digest per window, carrying
-    /// everything that accumulated in it. `0` = wake on every controller tick (the pre-4.x
-    /// behaviour).
+    /// Paces only the *push* (one digest per window); events still land in the inbox immediately.
+    /// `0` = wake on every controller tick.
     #[serde(default = "default_notify_interval_secs")]
     pub notify_interval_secs: u64,
-    /// How long a delivered notification may go unacknowledged before it is offered again.
-    /// Delivery is not an answer: a wake-up the manager never got to read is still owed to it.
+    /// Re-offer unacked notifications: delivery is not an answer.
     #[serde(default = "default_notify_ack_deadline_secs")]
     pub notify_ack_deadline_secs: u64,
-    /// Attempts one event gets before the daemon stops pushing it and raises a
-    /// `notify_exhausted` incident. The event is kept, not dropped — what stops is the burning
-    /// of quota on a manager that is not answering.
+    /// Then raise `notify_exhausted`; the event is kept, only the quota burn on a silent manager stops.
     #[serde(default = "default_notify_max_attempts")]
     pub notify_max_attempts: i64,
-    /// A host must be unreachable for this long before it counts as an incident. Short blips
-    /// during a reconnect are not a fault.
+    /// Reconnect blips are not a fault.
     #[serde(default = "default_host_disconnected_secs")]
     pub host_disconnected_secs: u64,
-    /// A bot configured to autostart must have been down this long before it counts. A bot the
-    /// user stopped is not down, and is never counted here.
+    /// Autostart bots only; a bot the user stopped is never counted.
     #[serde(default = "default_bot_stopped_secs")]
     pub bot_stopped_secs: u64,
-    /// An open assignment that has not moved for this long is stalled. Waiting on a person is
-    /// normal; waiting on nothing for hours is not.
     #[serde(default = "default_assignment_stalled_secs")]
     pub assignment_stalled_secs: u64,
 }
@@ -114,64 +99,53 @@ impl Default for SupervisorCfg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotCfg {
-    /// An ASCII id matching `ID_RE`. Missing on hand-written files; filled in and written back
-    /// on first load (normally as a ULID).
+    /// Missing on hand-written files; filled in (ULID) and written back on first load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
     pub kind: String,
-    /// Model to run under, injected as claude `--model <m>` / codex `-m <m>` / grok `-m <m>`.
     /// None = the CLI's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Reasoning effort: grok `--reasoning-effort low|medium|high`, codex
-    /// `-c model_reasoning_effort="<x>"` (values from `model/list`). Always None for claude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// v4.0: codex "Fast" service tier (`-c service_tier="priority"`). Ignored by other kinds.
+    /// codex only (`-c service_tier="priority"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fast: bool,
-    /// v4.0: text appended to the agent's system prompt (claude `--append-system-prompt`,
-    /// grok `--rules`, codex `-c developer_instructions=…`). Never touches CLAUDE.md / AGENTS.md.
+    /// Appended to the system prompt; never touches CLAUDE.md / AGENTS.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub autostart: bool,
-    /// Extension beyond SPEC v3: lets a bot run without daemon hook injection so the
-    /// terminal-fallback path (§4.3) can be exercised. Defaults to true.
+    /// false exercises the terminal-fallback path (SPEC §4.3).
     #[serde(default = "default_true")]
     pub inject_hooks: bool,
-    /// Grant the agent all permissions on start: claude `--dangerously-skip-permissions`,
-    /// codex `--yolo` (alias of `--dangerously-bypass-approvals-and-sandbox`),
-    /// grok `--always-approve` (= `--permission-mode bypassPermissions`). Defaults to true.
+    /// Grants all permissions on start (claude `--dangerously-skip-permissions`, codex `--yolo`,
+    /// grok `--always-approve`). Defaults to true.
     #[serde(default = "default_true")]
     pub auto_approve: bool,
-    /// Name of an `[[identities]]` entry, or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     /// Per-bot pane env; overrides the identity's.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
-    /// Herdr session override. Set for bots imported from the local user's `default` session;
-    /// ordinary configured bots inherit their project's session.
+    /// Set for bots imported from the local `default` session; others inherit the project's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_session: Option<String>,
 }
 
-/// A named set of env vars + args, applied to a bot at start time. Lets several bots of the
-/// same kind run under different accounts (e.g. claude's `CLAUDE_CONFIG_DIR`, grok's `GROK_HOME`).
+/// Lets several bots of one kind run under different accounts (`CLAUDE_CONFIG_DIR`, `GROK_HOME`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdentityCfg {
-    /// Unique id, `[a-z][a-z0-9_-]{0,31}`.
     pub name: String,
-    /// `claude` | `codex` | `grok`; must match the bot it is applied to.
+    /// Must match the bot it is applied to.
     pub kind: String,
-    /// Extra pane env. `$HOME` / `${HOME}` / a leading `~` expand to the *host's* home.
+    /// `$HOME` / `${HOME}` / leading `~` expand to the *host's* home.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
-    /// Extra CLI args, inserted between the daemon's injected args and the bot's own.
+    /// Inserted between the daemon's injected args and the bot's own.
     #[serde(default)]
     pub args: Vec<String>,
 }
@@ -179,34 +153,30 @@ pub struct IdentityCfg {
 /// SPEC §11.2 — a remote machine reached over SSH, running its own herdr.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostCfg {
-    /// Unique id, `[a-z][a-z0-9_-]{0,31}`. `"local"` is reserved.
+    /// `"local"` is reserved.
     pub name: String,
-    /// ssh target: `user@host` or an ssh_config alias.
     pub ssh: String,
-    /// Only emitted on the ssh command line when != 22, so ssh_config aliases keep their Port.
+    /// Only emitted when != 22, so ssh_config aliases keep their Port.
     #[serde(default = "default_ssh_port")]
     pub ssh_port: u16,
-    /// Extra ssh arguments appended verbatim (e.g. `["-i", "/path/to/key"]`).
     /// Beyond SPEC §11.2 — needed for the loopback dev sshd (§11.8 R5).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_opts: Vec<String>,
-    /// Remote named session. Never the remote default session.
+    /// Never the remote default session.
     #[serde(default = "default_session")]
     pub herdr_session: String,
-    /// PATH a non-interactive ssh shell is missing; prefixed to the remote PATH.
+    /// A non-interactive ssh shell's PATH is missing things; prefixed to the remote PATH.
     #[serde(default)]
     pub remote_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectCfg {
-    /// An ASCII id matching `ID_RE`. Missing on hand-written files; filled in and written back
-    /// on first load (normally as a ULID).
+    /// Missing on hand-written files; filled in (ULID) and written back on first load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub path: String,
     pub label: String,
-    /// `"local"` (default) or a `[[hosts]]` name.
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default, rename = "bots")]
@@ -227,25 +197,17 @@ pub struct ConfigFile {
     pub projects: Vec<ProjectCfg>,
 }
 
-/// Strict slug shape used by host and identity names (they end up in file paths / launchd labels).
+/// Host / identity names end up in file paths and launchd labels.
 pub const SLUG_NAME_RE: &str = "[a-z][a-z0-9_-]{0,31}";
-/// Config IDs are safe to append to local and remote directories.
 pub const ID_RE: &str = "[A-Za-z0-9_-]{1,64}";
-/// Bot names are nicknames (v3.8): shown in the UI and used for `@mention`, never given to herdr.
+/// Nicknames, never given to herdr.
 pub const BOT_NAME_RE: &str = "1–32 個字，不可含空白或 @ , : ;";
 
-/// Supported agent kinds (SPEC §2, §12). Also the herdr `agent.start` `kind` value.
+/// SPEC §2, §12. Also the herdr `agent.start` `kind` value.
 pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
 
-/// Effort values a kind accepts (v4.0, kind-dependent).
-///
-/// grok includes `xhigh` (grok-4.6+; verified `--reasoning-effort xhigh -m grok-4.6`). The
-/// per-model list from `GET /api/models` may be narrower (e.g. grok-4.5 is low/medium/high);
-/// `effort_checked` drops a stored value the chosen model rejects.
-///
-/// claude gained `--effort <low|medium|high|xhigh|max>` in 2.1 (verified on 2.1.263:
-/// `claude -p --effort high` works, and an unknown value is only a warning — it falls back to
-/// the default rather than failing the run).
+/// grok `xhigh` needs grok-4.6+ (verified); per-model lists may be narrower, `effort_checked` drops rejects.
+/// claude `--effort` since 2.1 (verified 2.1.263); an unknown value only warns and falls back to default.
 pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
     match kind {
         "claude" => &["low", "medium", "high", "xhigh", "max"],
@@ -255,8 +217,6 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
     }
 }
 
-/// Normalise a requested effort for `kind`: trims / lowercases, `""` → `None`.
-/// `Err(msg)` when the value is not one this kind accepts.
 pub fn normalize_effort(kind: &str, e: Option<&str>) -> Result<Option<String>, String> {
     let Some(e) = e.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
     let v = e.to_ascii_lowercase();
@@ -268,7 +228,6 @@ pub fn normalize_effort(kind: &str, e: Option<&str>) -> Result<Option<String>, S
     }
 }
 
-/// v4.0: the `herdr` command a user pastes into a terminal to attach to a host's session.
 pub fn attach_command(host: Option<&HostCfg>, local_session: &str) -> String {
     match host {
         None => format!("herdr --session {local_session}"),
@@ -281,7 +240,6 @@ pub fn valid_kind(kind: &str) -> bool {
     KINDS.contains(&kind)
 }
 
-/// Human-readable list for error messages: `claude, codex or grok`.
 pub fn kinds_list() -> String {
     let (last, rest) = KINDS.split_last().unwrap();
     format!("{} or {last}", rest.join(", "))
@@ -309,8 +267,7 @@ pub fn valid_bot_name(name: &str) -> bool {
     n >= 1 && n <= 32 && !name.chars().any(|c| c.is_whitespace() || matches!(c, '@' | ',' | ':' | ';'))
 }
 
-/// Slug a project label into herdr's `[a-z][a-z0-9_-]*` alphabet (lowercase, other chars → `-`,
-/// runs collapsed, must start with a letter). Empty when nothing usable is left.
+/// Into herdr's `[a-z][a-z0-9_-]*` alphabet; empty when nothing usable is left.
 fn label_slug(project_label: &str) -> String {
     let raw: String = project_label
         .to_lowercase()
@@ -333,9 +290,7 @@ fn label_slug(project_label: &str) -> String {
     slug
 }
 
-/// herdr agent name for a bot (v3.8): `<project slug>-<hash>`, where the hash is the tail of
-/// the bot's ULID. The bot's own `name` is a free nickname that never reaches herdr, so it can
-/// be changed at any time without a restart. Fits herdr's `[a-z][a-z0-9_-]{0,31}`.
+/// `<project slug>-<ULID tail>`: the nickname never reaches herdr, so renaming needs no restart.
 pub fn agent_name(project_label: &str, bot_id: &str) -> String {
     const MAX: usize = 32;
     let tail: String = bot_id.to_ascii_lowercase().chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
@@ -354,13 +309,10 @@ pub fn agent_name(project_label: &str, bot_id: &str) -> String {
     }
 }
 
-
-/// Identity names use the same shape as bot names.
 pub fn valid_identity_name(name: &str) -> bool {
     valid_slug_name(name)
 }
 
-/// Expand `$HOME`, `${HOME}` and a leading `~` against a specific host's home directory.
 pub fn expand_home(value: &str, home: &str) -> String {
     let mut out = if value == "~" {
         home.to_string()
@@ -370,7 +322,7 @@ pub fn expand_home(value: &str, home: &str) -> String {
         value.to_string()
     };
     out = out.replace("${HOME}", home);
-    // Replace `$HOME` only when it is not part of a longer identifier ($HOMEBREW…).
+    // Not inside a longer identifier ($HOMEBREW…).
     let mut res = String::with_capacity(out.len());
     let bytes: Vec<char> = out.chars().collect();
     let mut i = 0;
@@ -393,12 +345,10 @@ pub fn expand_home(value: &str, home: &str) -> String {
     res
 }
 
-/// Host names use the same shape as bot names; `local` is reserved for this machine.
 pub fn valid_host_name(name: &str) -> bool {
     valid_slug_name(name)
 }
 
-/// Canonicalize a project path; the directory must exist.
 pub fn canonical_path(p: &str) -> Result<String> {
     let expanded = if let Some(rest) = p.strip_prefix("~/") {
         dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?.join(rest)
@@ -433,7 +383,6 @@ impl ConfigStore {
         self.inner.lock().await.cfg.clone()
     }
 
-    /// Mutate the in-memory config and atomically write it back.
     pub async fn update<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut ConfigFile) -> Result<T>,
@@ -449,9 +398,7 @@ impl ConfigStore {
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
-        // Only touch the file when the closure actually changed something: a full serde
-        // rewrite drops comments / unknown keys, so a no-op update must not clobber them
-        // (issue #38 — startup projection used to rewrite the file on every boot).
+        // A serde rewrite drops comments / unknown keys: no-op updates must not write (issue #38).
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
@@ -461,12 +408,7 @@ impl ConfigStore {
     }
 }
 
-/// Deserialize the config while collecting fields that serde does not know.
-///
-/// Unknown keys are a warning, not an error: an older daemon must still start on a file
-/// written by a newer one (forward compatibility), but a typo (`auto_start`) must not vanish
-/// without a trace either. `serde_ignored` follows serde's actual field handling, including
-/// nested arrays and renamed fields, so this list cannot drift from the config structs.
+/// Unknown keys warn, not error: an older daemon must start on a newer file, but typos must not vanish silently.
 fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
     let mut ignored = Vec::new();
     let cfg = serde_ignored::deserialize(toml::Deserializer::new(text), |path| {
@@ -491,7 +433,7 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
     Ok((cfg, mtime))
 }
 
-/// Full serde re-serialization (comments are lost — `toml_edit` preservation is stage two).
+/// Full serde re-serialization: comments are lost.
 pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     let text = toml::to_string_pretty(cfg)?;
     let tmp = path.with_extension("toml.tmp");
@@ -533,8 +475,7 @@ mod v40_tests {
         assert_eq!(normalize_effort("codex", Some("xhigh")).unwrap(), Some("xhigh".into()));
         assert_eq!(normalize_effort("codex", Some("none")).unwrap(), Some("none".into()));
         assert!(normalize_effort("codex", Some("turbo")).is_err());
-        // claude gained `--effort` in 2.1: low…max, and `ultracode` is a TUI-only slider
-        // position, not a CLI value.
+        // `ultracode` is a TUI-only slider position, not a CLI value.
         assert_eq!(normalize_effort("claude", Some("High")).unwrap(), Some("high".into()));
         assert_eq!(normalize_effort("claude", Some("max")).unwrap(), Some("max".into()));
         assert!(normalize_effort("claude", Some("none")).is_err());
@@ -601,7 +542,6 @@ auto_start = true   # typo for autostart
         assert!(keys.contains(&"hosts.0.herdr-session".to_string()));
         assert!(keys.contains(&"server.port".to_string()));
 
-        // Free-form maps are never descended into.
         assert!(unknown_keys("[[identities]]\nname = \"i\"\nkind = \"claude\"\n[identities.env]\nFOO = \"1\"\n").is_empty());
         assert!(unknown_keys("").is_empty());
     }
@@ -624,7 +564,7 @@ auto_start = true   # typo for autostart
         assert!(!dirty);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SAMPLE, "comments and typos survive a no-op update");
 
-        // A real change still writes back (and the typo'd key is then gone — known trade-off).
+        // Known trade-off: a real change drops the typo'd key.
         store
             .update(|cfg| {
                 cfg.projects[0].bots[0].autostart = true;
@@ -637,7 +577,6 @@ auto_start = true   # typo for autostart
         assert!(!text.contains("# top comment"));
         std::fs::remove_dir_all(&dir).ok();
     }
-
 }
 
 #[cfg(test)]

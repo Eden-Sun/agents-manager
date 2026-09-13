@@ -1,42 +1,13 @@
-//! Pre-trusting a workspace directory, so an agent CLI does not stop on its "do you trust
-//! this folder?" dialog.
+//! Pre-trusting a workspace directory so an unattended claude/codex pane does not stall on the
+//! first-run "do you trust this folder?" dialog (claude's cursor starts on `No, exit`, so it quits
+//! → `agent_not_running`). `--dangerously-skip-permissions` does not suppress it (verified).
 //!
-//! Both claude and codex gate the *first* interactive run in a directory they have never
-//! seen behind a confirmation dialog. Nobody is sitting at a bot's pane to answer it, and for claude the cursor even starts on `No, exit`, so the CLI eventually quits by
-//! itself and `agent.wait` comes back `agent_not_running`:
-//!
-//! ```text
-//!  Accessing workspace: /private/tmp/.../trusttest2
-//!  Quick safety check: Is this a project you created or one you trust? …
-//!  ❯ No, exit
-//!    Yes, I trust this folder
-//! ```
-//!
-//! `--dangerously-skip-permissions` does not suppress it (verified); headless `claude -p`
-//! never shows it, only the interactive mode a pane runs.
-//!
-//! The fix is to write, before the bot starts, exactly the record the dialog would have
-//! written:
-//!
-//! * claude — `projects["<dir>"].hasTrustDialogAccepted = true` in `.claude.json`;
-//! * codex  — `[projects."<dir>"] trust_level = "trusted"` in `config.toml`;
-//! * grok   — nothing: it has no start-up directory gate (its `trusted_folders.toml` only
-//!   governs *project-local* `.grok/hooks/`, and the daemon installs its hook in the user
-//!   layer at `$GROK_HOME/hooks/`). Verified on grok 4.6, 2026-09-06.
-//!
-//! Two details that are easy to get wrong, both measured rather than assumed:
-//!
-//! * **which file** — the record has to land in the config the *bot's identity* will read.
-//!   `CLAUDE_CONFIG_DIR` (how `cc1` is kept apart from `cc0`) moves `.claude.json` with it,
-//!   and `CODEX_HOME` does the same for codex.
-//! * **which spelling of the path** — the CLI compares against its own `getcwd()`, which is
-//!   the *physical* path (`/tmp` is a symlink to `/private/tmp` on macOS). A record written
-//!   under `/tmp/x` does not match a process whose cwd is `/private/tmp/x`; it is skipped
-//!   and the dialog appears anyway. Everything here goes through [`canonical`].
-//!
-//! These files belong to the agent CLIs, not to us: they are read, amended in place and
-//! written back through a temporary file plus `rename`, and left alone entirely when the
-//! record is already there.
+//! We write the record the dialog would: claude `hasTrustDialogAccepted` in `.claude.json`, codex
+//! `trust_level = "trusted"` in `config.toml`; grok has no start-up gate (verified grok 4.6,
+//! 2026-09-06). Gotchas: the file must be the one the *bot's identity* reads
+//! (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), and the path must be physical (`/tmp` → `/private/tmp`),
+//! see [`canonical`]. These files belong to the CLIs: amend in place via temp file + `rename`,
+//! and leave untouched when already trusted.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -48,18 +19,13 @@ use crate::config::expand_home;
 use crate::db;
 use crate::state::App;
 
-/// claude's per-project flag inside `.claude.json`.
 const CLAUDE_KEY: &str = "hasTrustDialogAccepted";
-/// The *second* first-run dialog (2026-09-08): a CLAUDE.md that `@imports` a file outside the
-/// cwd (the user's `~/.claude/RTK.md`) stops the TUI on 「Allow external CLAUDE.md file
-/// imports?」, cursor on *No*. Same shape as the trust record, same file, same fix.
+/// Second first-run dialog (2026-09-08): external CLAUDE.md `@imports`, cursor on *No*. Same fix.
 const CLAUDE_EXTERNAL_KEYS: [&str; 2] = ["hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown"];
-/// codex's per-project key inside `config.toml`.
 const CODEX_KEY: &str = "trust_level";
 const CODEX_TRUSTED: &str = "trusted";
 
-/// The physical path, the way an agent CLI sees its own cwd. Falls back to the input when
-/// the directory does not exist (nothing else useful to write, and a bad key is inert).
+/// Falls back to the input when the directory does not exist (a bad key is inert).
 pub fn canonical(path: &str) -> String {
     match std::fs::canonicalize(path) {
         Ok(p) => p.to_string_lossy().into_owned(),
@@ -67,16 +33,13 @@ pub fn canonical(path: &str) -> String {
     }
 }
 
-/// The file holding `kind`'s directory-trust records for a pane started with `env`
-/// (identity ∪ bot env, already `$HOME`-expanded). `None` for kinds without a gate.
+/// `env` = identity ∪ bot env, `$HOME`-expanded. `None` for kinds without a gate.
 pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Option<PathBuf> {
     let var = |k: &str| {
         env.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| expand_home(s, home))
     };
     match kind {
-        // `CLAUDE_CONFIG_DIR` relocates the whole state directory, `.claude.json` included.
-        // Unset, the file is `~/.claude.json` — *not* `~/.claude/.claude.json`, which is why
-        // this cannot reuse the `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` shape settings.json uses.
+        // Unset → `~/.claude.json`, *not* `~/.claude/.claude.json` (unlike settings.json).
         "claude" => Some(match var("CLAUDE_CONFIG_DIR") {
             Some(dir) => PathBuf::from(dir).join(".claude.json"),
             None => PathBuf::from(home).join(".claude.json"),
@@ -85,16 +48,11 @@ pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Opt
             let dir = var("CODEX_HOME").unwrap_or_else(|| format!("{home}/.codex"));
             Some(PathBuf::from(dir).join("config.toml"))
         }
-        // grok: no start-up trust gate.
         _ => None,
     }
 }
 
-/// `.claude.json` with `projects[p].hasTrustDialogAccepted = true` for every `p`, and every
-/// other key of the document left exactly as it was. `None` when nothing needed changing.
-///
-/// An empty/absent file yields a fresh document; a file that is not JSON, or whose
-/// `projects` is not an object, is an error rather than something to overwrite.
+/// `None` when nothing changed. Unparseable or wrong-shaped files are an error, never overwritten.
 pub fn claude_merge(existing: &str, paths: &[String]) -> Result<Option<String>> {
     let mut root: Value = if existing.trim().is_empty() {
         json!({})
@@ -122,14 +80,11 @@ pub fn claude_merge(existing: &str, paths: &[String]) -> Result<Option<String>> 
     if !changed {
         return Ok(None);
     }
-    // Claude Code writes this file two-space-pretty with a trailing newline; match it so the
-    // shape does not flip back and forth between its writer and ours.
+    // Match Claude Code's own formatting so the file does not flip between writers.
     Ok(Some(format!("{}\n", serde_json::to_string_pretty(&root)?)))
 }
 
-/// codex's `config.toml` with `[projects."<p>"] trust_level = "trusted"` for every `p`.
-/// `toml_edit` keeps the rest of the file — comments, ordering, formatting — byte-identical.
-/// `None` when every path was already trusted.
+/// `toml_edit` keeps the rest of the file byte-identical. `None` when already trusted.
 pub fn codex_merge(existing: &str, paths: &[String]) -> Result<Option<String>> {
     let mut doc: toml_edit::DocumentMut = if existing.trim().is_empty() {
         toml_edit::DocumentMut::new()
@@ -159,9 +114,7 @@ pub fn codex_merge(existing: &str, paths: &[String]) -> Result<Option<String>> {
     Ok(Some(doc.to_string()))
 }
 
-/// Replace `path`'s contents with `text` in one step: a sibling temp file, flushed to disk,
-/// then `rename`d over the target. A crash mid-write leaves the original untouched, which
-/// matters because these are the user's own agent-CLI state files.
+/// Temp file + fsync + `rename`: a crash must not corrupt the user's own agent-CLI state files.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
 
@@ -188,8 +141,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     res.with_context(|| format!("writing {}", path.display()))
 }
 
-/// Record `paths` as trusted in `store` for `kind`. A no-op when they already are — the
-/// file is not rewritten, so a run that changes nothing leaves no trace at all.
+/// No-op (file not rewritten) when already trusted.
 pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> {
     let existing = match std::fs::read_to_string(store) {
         Ok(s) => s,
@@ -207,14 +159,11 @@ pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> 
     Ok(true)
 }
 
-/// The pane env that decides *which* config file a bot reads: the identity's env then the
-/// bot's own, `$HOME` expanded against the local home (`lifecycle::pane_env`, minus the
-/// daemon's own variables, none of which name a config directory).
+/// Identity env then bot env (`lifecycle::pane_env` minus daemon vars, which name no config dir).
 async fn config_env(app: &Arc<App>, bot: &db::Bot, home: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
-    // `identity_for_host`, not `cfg.identities`: a shell-discovered `ccN` (SPEC §16) is not in
-    // config.toml, and looking only there sent cc2's trust record to `~/.claude.json` while
-    // its CLI read `~/.claude-cc2/.claude.json` — so the dialog came up anyway (2026-09-08).
+    // `identity_for_host`, not `cfg.identities`: shell-discovered `ccN` (SPEC §16) aren't in
+    // config.toml, which once sent cc2's record to the wrong file (2026-09-08).
     if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if let Some(id) = crate::tools::identity_for_host(app, crate::config::LOCAL_HOST, name).await {
             for (k, v) in &id.env {
@@ -228,21 +177,15 @@ async fn config_env(app: &Arc<App>, bot: &db::Bot, home: &str) -> BTreeMap<Strin
     env
 }
 
-/// Mark every bot's cwd as already trusted, in whichever config file that bot's identity
-/// actually reads. Best effort: returns one message per store that could not be updated,
-/// because a bot that might still start is better than one refused outright.
-///
-/// **Local host only**: a remote bot would need the same record written over ssh in the
-/// *remote* home, which is not done here.
+/// Best effort: returns one error per store rather than refusing the start.
+/// **Local host only** — remote bots would need this written over ssh.
 pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
     let Some(home) = dirs::home_dir() else {
         return vec!["no home directory; cannot pre-trust the working directory".into()];
     };
     let home = home.to_string_lossy().into_owned();
 
-    // One read-modify-write per file, not per bot: four bots on one identity share a
-    // `.claude.json`, and rewriting it four times only widens the window against the agent
-    // CLIs, which write this file themselves.
+    // One write per file, not per bot: the CLIs write these files too, so minimise the race.
     let mut jobs: BTreeMap<PathBuf, (String, BTreeSet<String>)> = BTreeMap::new();
     for b in bots {
         let Some(cwd) = b.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
@@ -271,17 +214,14 @@ mod tests {
 
     #[test]
     fn claude_store_follows_the_identity_config_dir() {
-        // Default account: the file sits beside the home, not inside `~/.claude`.
         assert_eq!(
             store_path("claude", &env(&[]), "/home/u").unwrap(),
             PathBuf::from("/home/u/.claude.json")
         );
-        // `cc1`-style identity: `$HOME` expands against the host's home.
         assert_eq!(
             store_path("claude", &env(&[("CLAUDE_CONFIG_DIR", "$HOME/.claude-ccompany")]), "/home/u").unwrap(),
             PathBuf::from("/home/u/.claude-ccompany/.claude.json")
         );
-        // Blank is not a config dir.
         assert_eq!(
             store_path("claude", &env(&[("CLAUDE_CONFIG_DIR", "   ")]), "/home/u").unwrap(),
             PathBuf::from("/home/u/.claude.json")
@@ -298,13 +238,9 @@ mod tests {
             store_path("codex", &env(&[("CODEX_HOME", "~/alt")]), "/home/u").unwrap(),
             PathBuf::from("/home/u/alt/config.toml")
         );
-        // grok has no start-up trust dialog, so there is nothing to write.
         assert!(store_path("grok", &env(&[]), "/home/u").is_none());
     }
 
-    /// The whole point of amending rather than rewriting: a real `.claude.json` carries
-    /// dozens of unrelated top-level keys and dozens of other projects, and none of them
-    /// may be disturbed.
     #[test]
     fn claude_merge_keeps_every_other_field() {
         let before = r#"{
@@ -321,21 +257,18 @@ mod tests {
         let a: Value = serde_json::from_str(&after).unwrap();
         let b: Value = serde_json::from_str(before).unwrap();
 
-        // Every pre-existing top-level key survives, untouched.
         for (k, v) in b.as_object().unwrap() {
             if k == "projects" {
                 continue;
             }
             assert_eq!(a.get(k), Some(v), "top-level `{k}` was lost or changed");
         }
-        // Every pre-existing project survives, untouched — including its other fields.
         let bp = b["projects"].as_object().unwrap();
         for (k, v) in bp {
             assert_eq!(&a["projects"][k], v, "project `{k}` was lost or changed");
         }
         assert_eq!(a["projects"]["/home/u"]["lastCost"], json!(1.25));
         assert_eq!(a["projects"]["/home/u/other"]["allowedTools"], json!(["Bash"]));
-        // …and the new one is trusted.
         assert_eq!(a["projects"]["/data/proj/main"][CLAUDE_KEY], json!(true));
         assert_eq!(a["projects"].as_object().unwrap().len(), 3);
         assert!(after.ends_with("}\n"));
@@ -343,24 +276,19 @@ mod tests {
 
     #[test]
     fn claude_merge_adds_projects_and_leaves_a_trusted_path_alone() {
-        // No `projects` at all yet.
         let out = claude_merge(r#"{"numStartups": 1}"#, &["/w".into()]).unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["numStartups"], json!(1));
         assert_eq!(v["projects"]["/w"][CLAUDE_KEY], json!(true));
 
-        // An entirely absent file is a fresh document, not a failure.
         let out = claude_merge("", &["/w".into()]).unwrap().unwrap();
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["projects"]["/w"][CLAUDE_KEY], json!(true));
 
-        // Already trusted → no rewrite at all, so the user's file is never even touched.
         assert!(claude_merge(&out, &["/w".into()]).unwrap().is_none());
-        // The external-imports dialog is pre-answered in the same record.
         for k in CLAUDE_EXTERNAL_KEYS {
             assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["projects"]["/w"][k], json!(true));
         }
 
-        // A bot's other project keys are preserved when only the flag is missing.
         let out = claude_merge(r#"{"projects":{"/w":{"lastCost":3}}}"#, &["/w".into()]).unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["projects"]["/w"]["lastCost"], json!(3));
@@ -391,23 +319,18 @@ trust_level = "trusted"
         assert!(out.contains("[tui]\ntheme = \"dark\""), "table lost:\n{out}");
         assert!(out.contains("[projects.\"/home/u/project\"]"), "existing project lost:\n{out}");
         assert!(out.contains("[projects.\"/data/proj/dev-1\"]"), "new project missing:\n{out}");
-        // Parses back, with both projects trusted and `model` intact.
         let v: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(v["model"].as_str(), Some("gpt-5"));
         assert_eq!(v["projects"]["/home/u/project"]["trust_level"].as_str(), Some("trusted"));
         assert_eq!(v["projects"]["/data/proj/dev-1"]["trust_level"].as_str(), Some("trusted"));
 
-        // Already trusted → nothing to write.
         assert!(codex_merge(&out, &["/data/proj/dev-1".into()]).unwrap().is_none());
-        // Empty file → a fresh document.
         let fresh = codex_merge("", &["/w".into()]).unwrap().unwrap();
         assert!(fresh.contains("[projects.\"/w\"]"), "{fresh}");
         assert!(!fresh.contains("\n[projects]\n"), "bare [projects] header:\n{fresh}");
         assert!(codex_merge("nope = ", &["/w".into()]).is_err());
     }
 
-    /// The measured rule: the CLI compares against its own `getcwd()`, so `/tmp/x` on macOS
-    /// has to be written as `/private/tmp/x` or the record is simply not found.
     #[test]
     fn canonical_resolves_symlinks_and_survives_a_missing_directory() {
         let dir = std::env::temp_dir().join(format!("am-trust-canon-{}", std::process::id()));
@@ -422,7 +345,6 @@ trust_level = "trusted"
         assert_eq!(got, want.to_string_lossy());
         assert!(!got.contains("/link"), "symlink not resolved: {got}");
 
-        // A path that does not exist is passed through rather than dropped.
         assert_eq!(canonical("/no/such/dir/anywhere"), "/no/such/dir/anywhere");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -442,11 +364,9 @@ trust_level = "trusted"
         assert_eq!(v["projects"]["/w1"][CLAUDE_KEY], json!(true));
         assert_eq!(v["projects"]["/w2"][CLAUDE_KEY], json!(true));
 
-        // Second run: nothing changes, and the file is left byte-identical.
         let bytes = std::fs::read(&store).unwrap();
         assert!(!mark_trusted("claude", &store, &["/w1".into(), "/w2".into()]).unwrap());
         assert_eq!(std::fs::read(&store).unwrap(), bytes);
-        // No temp file left behind.
         let strays: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -455,12 +375,10 @@ trust_level = "trusted"
             .collect();
         assert!(strays.is_empty(), "temp files left: {strays:?}");
 
-        // A kind without a gate writes nothing, not even a file.
         let none = dir.join("grok-nothing");
         assert!(!mark_trusted("grok", &none, &["/w1".into()]).unwrap());
         assert!(!none.exists());
 
-        // A missing file is created (codex's `config.toml` may not exist yet).
         let cx = dir.join("sub").join("config.toml");
         assert!(mark_trusted("codex", &cx, &["/w1".into()]).unwrap());
         let v: toml::Value = toml::from_str(&std::fs::read_to_string(&cx).unwrap()).unwrap();

@@ -1,16 +1,6 @@
-//! `agents-managerd statusline --bot <id> --port <p>` (token via `$AM_HOOK_TOKEN`) — Claude Code's statusLine
-//! command for daemon-started claude bots (v4.0).
-//!
-//! Claude Code pipes a JSON object (`rate_limits`, `model`, `context_window`, `session_id`,
-//! `cost`, `workspace`, …) to the statusLine command on every refresh. This process
-//!   1. POSTs a slim copy (`hook_event_name = "StatusLine"`, no transcript-ish fields) to
-//!      `/hook/claude` so the daemon can track the 5 h / 7 d quota, fire-and-forget (never
-//!      spooled — the next refresh brings fresher numbers anyway), and
-//!   2. runs the user's *own* statusLine command (from `$CLAUDE_CONFIG_DIR/settings.json`,
-//!      default `~/.claude/settings.json`) on the same input and relays its stdout verbatim,
-//!      so the pane's status bar looks exactly as it would without the daemon. No command
-//!      configured → empty output. That same text rides along in the POST as `status_line`,
-//!      so the web UI can show the bot's real status bar, not an approximation of it.
+//! Claude Code statusLine command for daemon-started claude bots (token via `$AM_HOOK_TOKEN`).
+//! POSTs the payload to `/hook/claude` fire-and-forget (never spooled: the next refresh is fresher),
+//! and relays the user's *own* statusLine command verbatim so the pane looks unchanged.
 //!
 //! Budget ≤ 2 s; never exits non-zero; never panics past `run`.
 
@@ -42,11 +32,9 @@ fn inner(args: StatuslineArgs) {
     let deadline = Instant::now() + TOTAL_BUDGET;
     let input = read_stdin_capped(STDIN_BUDGET);
 
-    // 1. the user's own status line, on the same input. Runs *before* the POST so the text
-    // can ride along with it; it is the pane's own output, so it must not be delayed either.
+    // Before the POST so the text can ride along; it is the pane's own output, so no delay.
     let status_line = user_statusline_command().and_then(|cmd| relay_user_command(&cmd, &input, deadline));
 
-    // 2. report the quota + that text (background thread; not waited for past the deadline).
     let poster = slim_payload(&input, status_line.as_deref()).map(|payload| {
         let body = serde_json::json!({
             "bot_id": args.bot,
@@ -64,7 +52,6 @@ fn inner(args: StatuslineArgs) {
         std::thread::spawn(move || post(&body, &token, port, deadline))
     });
 
-    // Give the POST the rest of the budget, then leave regardless.
     if let Some(h) = poster {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -76,31 +63,24 @@ fn inner(args: StatuslineArgs) {
     }
 }
 
-/// The fields the daemon cares about, plus the event name. `None` when stdin was not a JSON
-/// object (nothing to report).
 pub fn slim_payload(input: &str, status_line: Option<&str>) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(input).ok()?;
     let o = v.as_object()?;
     let mut out = serde_json::Map::new();
     out.insert("hook_event_name".into(), serde_json::json!("StatusLine"));
-    // Everything claude sends *except* the transcript path: the web UI has room for the
-    // full picture (context window, model, cost…), where the pane's one line does not.
-    // The transcript is a file path the daemon tracks elsewhere and never needs here.
+    // The daemon tracks the transcript path elsewhere.
     for (k, v) in o {
         if k == "transcript_path" {
             continue;
         }
         out.insert(k.clone(), v.clone());
     }
-    // The rendered status bar itself, so the UI can show exactly what the pane shows.
     if let Some(t) = status_line.map(str::trim).filter(|t| !t.is_empty()) {
         out.insert("status_line".into(), serde_json::json!(t));
     }
     Some(serde_json::Value::Object(out))
 }
 
-/// `statusLine.command` from the user's settings.json (`type` must be `command` or absent).
-/// Refuses to recurse into ourselves.
 pub fn user_statusline_command() -> Option<String> {
     let cfg_dir = std::env::var("CLAUDE_CONFIG_DIR")
         .ok()
@@ -120,14 +100,14 @@ pub fn statusline_command_from_settings(text: &str) -> Option<String> {
         }
     }
     let cmd = sl.get("command")?.as_str()?.trim().to_string();
+    // Refuses to recurse into ourselves.
     if cmd.is_empty() || cmd.contains("agents-managerd statusline") || cmd.contains("hook.sh statusline") {
         return None;
     }
     Some(cmd)
 }
 
-/// Run `sh -c <cmd>` with `input` on stdin and copy its stdout to ours, returning that text
-/// (ANSI stripped) for the daemon. Killed at the deadline.
+/// Killed at the deadline.
 fn relay_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<String> {
     let mut child = match Command::new("/bin/sh")
         .arg("-c")

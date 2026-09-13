@@ -4,12 +4,8 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { HeadMoreMenu } from './HeadMoreMenu'
 
 /**
- * bot 列尾端的動作，收成一顆 `⋯`。
- *
- * 原本是四顆 icon 疊在名字上、hover 才浮出來：側欄一窄就蓋掉名字，觸控裝置沒有 hover
- * 只能靠 `@media (hover: none)` 另開一套排法——同一件事兩份規則，寬度一變就有一邊壞掉。
- * 一顆固定 28px 的按鈕不佔名字的寬、不需要 hover 才看得到，任何寬度與任何輸入方式都一樣。
- * 常用的「設定」仍是選單第一項，破壞性的刪除照 UI-DECISIONS 排在最後並且走確認框。
+ * bot 列尾端的動作收成一顆固定寬的 `⋯`：hover 浮出的 icon 會蓋名字、觸控裝置又得另寫一套。
+ * 破壞性的刪除照 UI-DECISIONS 排最後並走確認框。
  */
 export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolean }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))

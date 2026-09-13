@@ -1,18 +1,9 @@
-/* --------------------------------------------------------- 手機預覽（桌機右欄第二格）
-
-   右欄（`.app` 第三欄）平常只有圖片暫存區一格。預覽開著時把那一欄切成上下兩列：暫存在
-   上、預覽在下。整段都鎖在 `body:has(.mobile-preview)` 底下，關著的時候版面跟原本
-   一個位元組都不差。
-
-   側欄與主面板要跨兩列，所以在這裡明寫 grid 位置——多了一列之後自動配置會把它們塞進
-   第一列，主面板高度就被預覽切一半。 */
+/* 手機預覽（桌機右欄第二格）：預覽開著時右欄切成暫存上、預覽下；全鎖在 `body:has(.mobile-preview)` 底下，關著時版面不變。
+   側欄與主面板明寫跨兩列，否則自動配置會把主面板高度切一半。 */
 
 body:has(.mobile-preview) .app {
   grid-template-rows: minmax(0, 1fr) auto;
-  /* 第三欄從 `auto` 改成固定寬：`auto` 量的是欄裡最寬那格的 max-content，暫存區撐滿之後
-     那個值沒有上界，1600px 實測整欄長到 706px、把對話擠掉一半。
-     iPhone 16 的 393×852 視窗畫在畫面上時縮一半 = 197 寬，加 `.mp-frame-wrap` 左右各 8px = 213
-     （2026-09-13 使用者：406px 那一格吃掉桌機太多寬度）。 */
+  /* 第三欄改固定寬：`auto` 量 max-content 無上界，1600px 實測長到 706px。393×852 縮一半 = 197 + 左右 8px = 213（2026-09-13 使用者：406px 吃掉桌機太多寬度）。 */
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 213px;
 }
 
@@ -34,7 +25,7 @@ body:has(.mobile-preview) .app > .shelf {
   grid-row: 1;
 }
 
-/* 那一欄被 390px 的預覽撐寬了，暫存區還卡在 208px 會留一條空的底色：讓它跟著撐滿。 */
+/* 欄被撐寬時暫存區跟著撐滿，免得留一條空底色。 */
 body:has(.mobile-preview) .app > .shelf.open {
   width: auto;
 }
@@ -50,8 +41,7 @@ body:has(.mobile-preview) .app > .shelf.open {
   background: var(--bg-side);
 }
 
-/* 這一列現在只有 213px 寬（縮放之後那一欄就這麼寬），標題與尺寸都不准折行——折了就變兩層樓高，
-   而這是一個工具列不是內容。 */
+/* 只有 213px 寬，工具列標題與尺寸不准折行。 */
 .mp-head {
   display: flex;
   align-items: center;
@@ -81,10 +71,8 @@ body:has(.mobile-preview) .app > .shelf.open {
   font-variant-numeric: tabular-nums;
 }
 
-/* iframe 是固定尺寸的視窗（iPhone 16 的 393×852），畫面上用 `transform` 縮一半。
-   縮放不改 iframe 自己量到的寬高，所以裡面仍然是手機版面——但 `transform` 也不會縮小它在版面裡
-   佔的格子，所以那一格的大小寫在 `.mp-frame-box` 上（＝ 視窗尺寸 × 縮放）。
-   欄比它寬時置中，比它窄時橫向捲；**不**去擠壓 iframe 的寬度，擠了就量不到真正的手機版面。 */
+/* iframe 固定 393×852 再 `transform` 縮一半，裡面仍是手機版面；transform 不縮版面格子，所以格子大小寫在 `.mp-frame-box`。
+   **不**擠壓 iframe 寬度，否則量不到真正的手機版面。 */
 .mp-frame-wrap {
   display: flex;
   justify-content: center;
@@ -98,7 +86,7 @@ body:has(.mobile-preview) .app > .shelf.open {
   position: relative;
   width: calc(393px * 0.5);
   height: calc(852px * 0.5);
-  /* 矮螢幕上整支手機放不下：盒子收高、捲軸交給 `.mp-frame-wrap`。 */
+  /* 矮螢幕放不下整支手機：盒子收高，捲軸交給 `.mp-frame-wrap`。 */
   max-height: 52vh;
 }
 
@@ -111,14 +99,14 @@ body:has(.mobile-preview) .app > .shelf.open {
   transform: scale(0.5);
   transform-origin: top left;
   border: 1px solid var(--border-strong);
-  /* 縮一半之後圓角也會變一半，所以先寫兩倍，看起來才跟別處一致。 */
+  /* 縮一半後圓角也減半，所以寫兩倍。 */
   border-radius: calc(var(--radius) * 2);
   background: var(--bg);
 }
 
-/* ------------------------------------------------ 右欄標題列上的手機預覽開關（2026-09-13） */
+/* 右欄標題列上的手機預覽開關（2026-09-13） */
 
-/* 開著的時候要看得出來是開著的：跟旁邊的 ＋／» 同一種 icon 鍵，只是換成 accent 色。 */
+/* 開著時換 accent 色，看得出是開著。 */
 .mp-button.on {
   color: var(--accent-ink);
   background: var(--bg-active);

@@ -1,11 +1,7 @@
 import { copyText } from '../lib/copyText'
 import { useState } from 'react'
 
-/**
- * 「標籤 + 值 + 點一下複製」的小晶片。
- *
- * 值是空字串就整個不渲染——沒有 pane id 的 run 不該留一顆空晶片。
- */
+/** 「標籤 + 值 + 點一下複製」的小晶片；值是空字串就不渲染（沒有 pane id 的 run 不留空晶片）。 */
 export function CopyChip({
   label,
   value,

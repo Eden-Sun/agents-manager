@@ -11,16 +11,10 @@ import {
   sameChoices,
 } from './tuiChoices.ts'
 
-/**
- * 2026-09-12 第三輪真機快照（bot `carbis`，185×54）：claude 的**多分頁 ＋ 多選**
- * AskUserQuestion，使用者回報「第二個分頁的問題沒有辦法正確解析」——整塊選單長不出來。
- */
+/** 2026-09-12 第三輪真機（carbis，185×54）多分頁＋多選：使用者回報第二個分頁解析不出來。 */
 const MULTI = readFileSync(new URL('./__fixtures__/carbis-multiselect.txt', import.meta.url), 'utf8')
 
-/**
- * 2026-09-12 第七輪真機快照：同一份問卷走到最後的 review／confirm 頁。使用者回報「怎麼不能
- * 點其他分頁」——分頁列跟選項之間隔著一整段 Review，原本只看問題正上方那一行就找不到它。
- */
+/** 2026-09-12 第七輪真機 review 頁：使用者回報點不了其他分頁（分頁列與選項間隔著 Review 段）。 */
 const REVIEW = readFileSync(new URL('./__fixtures__/carbis-review.txt', import.meta.url), 'utf8')
 
 /** 2026-09-13 真機：多分頁**單選**（沒有 `[ ]`）。草稿若把 `checked===null` 當 disabled 就勾不起來。 */

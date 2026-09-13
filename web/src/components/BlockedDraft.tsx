@@ -1,13 +1,6 @@
 /**
- * 多分頁問卷的「先讀完、離線作答、最後一次送出」介面（2026-09-12 第六輪，使用者指定：
- * 「一開始就先預載入所有的分頁，而不是每一次連動，最後送出前再確認就好」）。
- *
- * 認出兩個以上的分頁就先跑一次 [`preload`]：用 ←／→ 把每一頁走過去讀回來，走完回到原本那頁。
- * 之後所有勾選、切題、展開說明都只改本地 state，**完全不碰終端**（點擊是即時的，不再是一次
- * 點擊四到六個 HTTP）。按「送出全部答案」才動終端，而且是照差集只送要翻的那幾顆，一頁一頁
- * 驗過去，任何一步對不上就停手。
- *
- * 預載失敗（走不動、某頁讀不完整）就整個退回即時模式（`BlockedChoices`），不留半套草稿。
+ * 多分頁問卷「先讀完、離線作答、最後一次送出」（2026-09-12 第六輪，使用者指定）。先 [`preload`] 走過每頁，之後作答只改本地 state；
+ * 送出時照差集逐頁驗證，對不上就停手。預載失敗整個退回即時模式（`BlockedChoices`），不留半套草稿。
  */
 import { useEffect, useRef, useState } from 'react'
 import { commit, pageNeedsCommit, preload, wantOf, type Draft, type Io } from '../lib/choiceDraft'
@@ -44,12 +37,11 @@ export function BlockedDraft({
   /** 使用者按了「重新讀取」：下一輪要換一份新的預載，而不是接既有的。 */
   const retryRef = useRef(false)
 
-  // 手上這份選單的身分：問卷換了（分頁的標籤組合不一樣）就重新預載。
   const ident = menu.tabs.map((t) => t.label).join('')
   const identRef = useRef(ident)
 
   const io: Io = {
-    // 讀取量收到 60 行：選單只佔畫面下半部，200 行每次都在搬一大包 JSON（第五輪 B）。
+    // 讀取量收到 60 行：選單只佔畫面下半部，200 行太重（第五輪 B）。
     read: async () => {
       try {
         return parseChoiceMenu((await readTerminal(botId, 'visible', 60)).text)
@@ -76,12 +68,8 @@ export function BlockedDraft({
   }, [ident])
 
   /**
-   * 預載。`round` 變了（換問卷、或使用者按「重新讀取」）就再跑一次。
-   *
-   * **同一份問卷只准跑一份**：對話上方的面板與全畫面視窗會同時掛著各自的 BlockedDraft，
-   * StrictMode 在 dev 也會把 effect 跑兩次——兩份預載同時在同一個 pane 上送導覽鍵會互相插隊，
-   * 走到一半就對不上、還把終端留在別的分頁。所以預載掛在 module 層（`lib/draftPreload`），
-   * 以 bot + 問卷身分為 key，後掛上來的人接同一份結果。
+   * 預載，`round` 變了就重跑。同一份問卷只准跑一份：面板與全畫面視窗（及 StrictMode）會重複掛載，兩份同時送導覽鍵會互相插隊，
+   * 所以掛在 module 層（`lib/draftPreload`），以 bot + 問卷身分為 key 共用結果。
    */
   useEffect(() => {
     let alive = true
@@ -98,7 +86,6 @@ export function BlockedDraft({
     void handle.job.then((d) => {
       if (!alive) return
       if (!d) {
-        // 讀不完整就整個退回即時模式，不要送出半套。
         setPhase('live')
         return
       }
@@ -161,7 +148,7 @@ export function BlockedDraft({
     const res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }), byTab)
     onAnswered?.()
     if (res.ok) return
-    // 失敗就停在那裡，並且把「終端現在到底長什麼樣」重讀回來，不要假裝成功。
+    // 失敗就停手並重讀終端現況，不要假裝成功。
     setErr(res.error ?? '送出失敗。')
     setPhase('ready')
   }

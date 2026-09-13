@@ -1,14 +1,6 @@
 /**
- * Image attachments in the composer and in the timeline.
- *
- * A CLI agent only ever receives text, so a dropped image is uploaded first
- * (`POST /bots/:id/attachments`, which lands the file on the bot's host) and the send then
- * carries the returned ids; the daemon appends their paths to what the agent reads. Here
- * that means: a tray of pending thumbnails under the textarea, drop / paste / file-picker
- * as three ways in, and the thumbnails again on the sent message.
- *
- * Bytes sit behind the UI token, so every thumbnail is fetched and turned into an object
- * URL rather than pointed at with a plain `src`.
+ * Image attachments: uploaded first (`POST /bots/:id/attachments`), the send carries ids since agents only read text.
+ * Bytes sit behind the UI token, so thumbnails are fetched into object URLs rather than a plain `src`.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
@@ -32,13 +24,11 @@ export function formatSize(bytes: number): string {
 /** One image waiting to be sent: uploading, ready (has an id), or failed. */
 export interface Pending {
   key: string
-  /** 名稱｜大小｜修改時間，`useAttachments` 用來擋重複。 */
+  /** 名稱｜大小｜修改時間，擋重複用。 */
   fp: string
   name: string
   size: number
-  /** Local preview, available before the upload finishes. */
   previewUrl: string
-  /** Set once the daemon has stored it; this is what the send carries. */
   id: string | null
   error: string | null
 }
@@ -65,17 +55,11 @@ function pendingReducer(items: Pending[], action: PendingAction): Pending[] {
   }
 }
 
-/**
- * Composer-side attachment state for one draft (a bot chat or a project group chat).
- * `uploadTo` is the bot whose host receives the file — for a group send any member will
- * do, since the daemon scopes attachments to the project they share. `resetKey` identifies
- * the conversation whose tray owns the attachment state.
- */
+/** Composer attachment state for one draft. `uploadTo`: any group member works (attachments are project-scoped). */
 export function useAttachments(uploadTo: string | null, resetKey: string | null) {
   const notify = useStore((s) => s.notify)
   const [items, dispatch] = useReducer(pendingReducer, [])
   const seq = useRef(0)
-  /** 托盤裡每張圖的指紋（見 `add`），用來擋同一張重複進來。 */
   const seen = useRef(new Set<string>())
   const urls = useRef(new Set<string>())
   const itemsRef = useRef<Pending[]>([])
@@ -98,7 +82,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
   // Attachments belong to the conversation, not necessarily the bot that received the upload.
   useLayoutEffect(() => {
     for (const it of itemsRef.current) revokePreview(it.previewUrl)
-    // 指紋跟著托盤一起清，不然換回原本的對話時同一張圖會被誤判成重複。
+    // 指紋一起清，否則換回原對話時同一張會被誤判重複。
     seen.current.clear()
     dispatch({ type: 'clear' })
   }, [revokePreview, resetKey])
@@ -113,8 +97,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         return
       }
       for (const file of images) {
-        // 同一張圖（暫存區的同一張卡按兩下、或拖過來又點一下）不要在托盤裡疊第二份——
-        // 2026-09-09 使用者：同一張暫存會重複放入對話。以名稱＋大小＋修改時間認同一張。
+        // 同一張不重複放入（2026-09-09 使用者：同一張暫存會重複放入對話）。
         const fp = `${file.name}|${file.size}|${file.lastModified}`
         if (seen.current.has(fp)) continue
         seen.current.add(fp)
@@ -157,26 +140,16 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     dispatch({ type: 'clear' })
   }, [items, revokePreview])
 
-  /** Ids to send; empty while anything is still uploading. */
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
   const uploading = items.some((it) => !it.id && !it.error)
 
   return { items, add, remove, clear, ids, uploading }
 }
 
-/**
- * Drag-and-drop wiring for a composer area: `props` on the drop target, plus the overlay.
- *
- * Two kinds of drag land here and both end up in the same `onFiles`: files from the OS, and
- * an image dragged out of the shelf (the cross-conversation staging area), which carries
- * only its shelf key — the `File` itself is still parked in the shelf store and is fetched
- * back on drop. That is deliberate: the shelf never uploads, so the bytes reach the daemon
- * exactly here, addressed to the bot the user dropped them on.
- */
+/** Drop target for OS files and shelf drags (key only; the shelf never uploads, so bytes go to the bot dropped on). */
 export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boolean) {
   const [over, setOver] = useState(false)
-  // dragenter/dragleave fire for every child element; count them so the overlay does not
-  // flicker as the pointer crosses the textarea.
+  // dragenter/dragleave fire per child; count so the overlay does not flicker.
   const depth = useRef(0)
 
   const shelfKeys = (e: DragEvent): string[] =>
@@ -190,17 +163,13 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
     return types.includes('Files') || types.includes(SHELF_MIME)
   }
 
-  // A drag that starts outside the window (a macOS screenshot thumbnail) can end without ever
-  // giving us the matching `dragleave` — the depth stays > 0 and the veil sticks around,
-  // swallowing the rest of the interaction. Reset on the window-level end-of-drag events, same
-  // as `useFileDragActive` in the shelf.
+  // Drags from outside the window (macOS screenshot thumbnail) may never send `dragleave`; reset at window level.
   useEffect(() => {
     const reset = () => {
       depth.current = 0
       setOver(false)
     }
     const onWindowLeave = (e: globalThis.DragEvent) => {
-      // relatedTarget === null means the pointer left the window itself, not just an element.
       if (e.relatedTarget === null) reset()
     }
     window.addEventListener('drop', reset)
@@ -236,7 +205,6 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
       e.preventDefault()
       depth.current = 0
       setOver(false)
-      // A shelf drag exposes no `files`; resolve its keys back to the parked `File`s.
       const keys = shelfKeys(e)
       onFiles(keys.length ? shelfFilesFor(keys) : Array.from(e.dataTransfer?.files ?? []))
     },
@@ -245,7 +213,6 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
   return { over, props }
 }
 
-/** The "drop here" veil, rendered inside a `position: relative` composer. */
 export function DropVeil({ label = '放開以附加圖片' }: { label?: string }) {
   return (
     <div className="drop-veil" aria-hidden="true">
@@ -257,16 +224,10 @@ export function DropVeil({ label = '放開以附加圖片' }: { label?: string }
   )
 }
 
-/**
- * Pending thumbnails above the textarea.
- *
- * 40px 只夠數「附了幾張」，認不出是哪一張截圖，所以 hover（鍵盤則是 focus）會在托盤正上方
- * 浮一張滿對話框寬度的預覽：絕對定位，版面一格都不動，等比例縮到對話區高度以內。
- */
+/** Pending thumbnails; 40px 認不出是哪張，hover/focus 浮一張絕對定位的大預覽。 */
 export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; onRemove: (key: string) => void; disabled?: boolean }) {
   const [peek, setPeek] = useState<string | null>(null)
   if (items.length === 0) return null
-  // 預覽開著時那張被移掉，就當作沒開。
   const peeked = items.find((it) => it.key === peek) ?? null
   const off = (key: string) => setPeek((k) => (k === key ? null : k))
   return (
@@ -310,7 +271,6 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
   )
 }
 
-/** 📎 button that opens the file picker; images only. */
 export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) => void; disabled?: boolean }) {
   const ref = useRef<HTMLInputElement>(null)
   return (
@@ -323,7 +283,6 @@ export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) =
         hidden
         onChange={(e) => {
           onFiles(Array.from(e.target.files ?? []))
-          // Reset so picking the same file twice still fires `change`.
           e.target.value = ''
         }}
       />
@@ -351,16 +310,9 @@ export function ImageIcon() {
   )
 }
 
-/**
- * A stored attachment's object URL, fetched once per id and shared across bubbles (the
- * same image can appear in a bot chat and in the group timeline).
- */
+/** Object URL per attachment id, shared across bubbles. */
 const urlCache = new Map<string, Promise<string>>()
-/**
- * 上限：object URL 把整個 Blob（最大 12 MB）釘在記憶體，以前既不 revoke、Map 也沒上限，一天內滾過
- * 幾十張截圖記憶體就線性長上去、換 bot 也不回收。超過就淘汰最久沒用的那筆並 `revokeObjectURL`；
- * 正在畫面上的 `<img>` 已經解碼完，URL 被收掉不影響它，重新掛載時再抓一次。
- */
+/** LRU 上限：每個 object URL 釘住最大 12 MB Blob；已解碼的 `<img>` 不受 revoke 影響。 */
 const URL_CACHE_MAX = 64
 
 function storedUrl(id: string): Promise<string> {
@@ -386,7 +338,6 @@ function storedUrl(id: string): Promise<string> {
   return p
 }
 
-/** Thumbnails on a sent message; click opens the full image. */
 export function MessageAttachments({ items }: { items: Attachment[] }) {
   const [zoom, setZoom] = useState<Attachment | null>(null)
   if (items.length === 0) return null
@@ -440,7 +391,7 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // 讓縮圖上的選單／popover 先吃掉自己的 Escape，沒人處理才關 lightbox。
+      // 讓 popover 先吃掉自己的 Escape。
       if (e.key !== 'Escape' || e.defaultPrevented) return
       onClose()
     }
@@ -448,7 +399,6 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // 打開時焦點進到「關閉」鍵（圖片本身不可聚焦），關掉時退回原本按到的縮圖。
   useDialogFocus(true, boxRef, { initialFocus: () => closeRef.current })
 
   return (

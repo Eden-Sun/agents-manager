@@ -2,15 +2,8 @@ import { useSyncExternalStore } from 'react'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 
 /**
- * 終端快照要不要折行。
- *
- * 桌機上終端是固定字元格線的東西，折行會把 TUI 畫的框線與對齊全部弄爛，所以預設不折、
- * 橫捲。手機不一樣：390px 大概只看得到 45 欄，一個 185 欄的 pane 每一行都被右邊裁掉，
- * 等於什麼都讀不到（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 1）。所以預設值
- * 跟著 `PHONE_QUERY` 走，而使用者自己按過的選擇（localStorage）永遠優先。
- *
- * 三個面板（`TerminalTab` / `BlockedPanel` / `HostShellPanel`）共用同一個值，切一次就都跟著
- * 換——所以狀態放在 module scope 而不是各自的 useState。
+ * 終端快照要不要折行：桌機不折（會弄爛 TUI 框線），手機折（mobile-rwd-round2-2026-09-08 問題 1）；使用者選擇優先。
+ * 三個終端面板共用，所以狀態放 module scope。
  */
 const KEY = 'am.term.wrap'
 
@@ -36,7 +29,6 @@ function subscribe(fn: () => void): () => void {
   }
 }
 
-/** 記下使用者的選擇並通知所有終端面板。 */
 export function setTermWrap(on: boolean): void {
   pref = on ? 'wrap' : 'nowrap'
   try {

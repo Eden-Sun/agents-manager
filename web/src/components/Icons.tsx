@@ -1,10 +1,4 @@
-/**
- * Shared line icons for the chrome (settings, row menu).
- *
- * These used to be the ⚙ / ⋯ characters, which render as hairline glyphs at the sizes the
- * sidebar uses and all but disappear against a selected row. A stroked SVG at
- * `currentColor` keeps the same weight as the rest of the UI's icons and stays legible.
- */
+/** Shared line icons for the chrome: stroked SVGs, since ⚙ / ⋯ glyphs vanish against a selected row at sidebar sizes. */
 
 export function GearIcon() {
   return (

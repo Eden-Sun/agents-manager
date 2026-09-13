@@ -1,15 +1,8 @@
 import { useEffect, useRef, type RefObject } from 'react'
 
 /**
- * 單行輸入框（改名欄）的「按 Enter 就收下」。
- *
- * 桌面靠各自的 `onKeyDown`；手機不行——Android 的軟鍵盤送的是 keyCode 229，`key` 不是
- * `Enter`，所以 keydown 那條永遠不成立（2026-09-09 使用者回報：手機改名按 Enter 沒反應）。
- * 原生的 `beforeinput` 收得到 `insertLineBreak` / `insertParagraph`，有些 IME 則是把換行
- * 當文字送（`insertText` 且 `data` 整個就是換行），兩條都接。
- *
- * 這跟 composer 的 `useEnterToSend` 是相反的決定，而且是刻意的：訊息是多行的，名字不是。
- * 單行輸入框裡的「換行」除了送出沒有別的意思。
+ * 單行輸入框按 Enter 收下。Android 軟鍵盤送 keyCode 229、keydown 不成立（2026-09-09 使用者回報），
+ * 改接 `beforeinput`。與 `useEnterToSend` 相反是刻意的：名字是單行的。
  */
 export function useEnterCommit(ref: RefObject<HTMLInputElement | null>, commit: () => void) {
   const latest = useRef(commit)

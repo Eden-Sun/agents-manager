@@ -3,13 +3,8 @@ import { listDirs } from '../api'
 import type { DirListing } from '../api/types'
 
 /**
- * Server-backed directory browser. Browsers cannot hand a page a real filesystem path,
- * so the daemon lists directories (`GET /api/fs/dirs`) and the user drills down here.
- * With `host` set (SPEC §11.5) the daemon runs the listing over ssh on that host instead.
- *
- * Interaction follows the macOS open panel: one click highlights a folder, double-click
- * (or Enter / →, or the row's ›) walks into it, and the primary button takes whatever is
- * highlighted — so a folder three levels down is one click away instead of three.
+ * Server-backed directory browser (browsers cannot expose real paths); with `host`, listed over ssh (SPEC §11.5).
+ * Interaction follows the macOS open panel: click highlights, double-click / Enter / → walks in.
  */
 /** Long folder names would otherwise stretch the primary button past the sidebar. */
 function short(name: string) {
@@ -79,7 +74,6 @@ export function DirPicker({
     return all.filter((e) => e.name.toLowerCase().includes(q))
   }, [listing, filter])
 
-  // Keep the highlight inside the filtered list and scrolled into view.
   useEffect(() => {
     if (sel >= entries.length) setSel(entries.length ? 0 : -1)
   }, [entries.length, sel])
@@ -92,7 +86,6 @@ export function DirPicker({
     const p = listing?.path ?? ''
     if (!p) return [] as { label: string; path: string }[]
     const home = listing?.home ?? ''
-    // Collapse the home prefix into ⌂ so deep paths stay readable.
     const underHome = home && (p === home || p.startsWith(`${home}/`))
     const rest = underHome ? p.slice(home.length) : p
     const out: { label: string; path: string }[] = underHome
@@ -235,8 +228,7 @@ export function DirPicker({
           spellCheck={false}
           autoFocus
           placeholder="篩選這層資料夾…"
-          // 焦點一直留在這格，↑/↓ 移的是清單裡的 highlight（外層 onKeyDown）。沒有
-          // aria-activedescendant 的話，螢幕閱讀器不知道現在選到哪一列。
+          // 焦點留在這格、↑/↓ 移 highlight，靠 aria-activedescendant 告訴螢幕閱讀器。
           role="combobox"
           aria-label="篩選這層資料夾"
           aria-expanded={entries.length > 0}
@@ -263,9 +255,7 @@ export function DirPicker({
         </label>
       </div>
 
-      {/* option 裡不能有按鈕：整列就是 option（點一下 highlight、雙擊進入），› 只是滑鼠的
-          捷徑（鍵盤是 Enter / →），所以不是按鈕、也不佔焦點。按下去時焦點留在篩選框。
-          沒有資料夾時不掛 listbox——那時候裡面只有一句說明，不是選項。 */}
+      {/* option 裡不能有按鈕，› 只是滑鼠捷徑；沒有資料夾時不掛 listbox。 */}
       <div className="dirpicker-list" ref={listRef} id={listId} role={entries.length > 0 ? 'listbox' : undefined} aria-label="子資料夾">
         {error ? <div className="dirpicker-empty err">{error}</div> : null}
         {!error && busy && !listing ? <div className="dirpicker-empty">載入中…</div> : null}

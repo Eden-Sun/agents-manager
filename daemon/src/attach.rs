@@ -1,16 +1,7 @@
-//! Image attachments: what the composer's drag-and-drop / paste produces.
-//!
-//! A CLI agent lives in a terminal pane and is driven by `agent.prompt`, which carries
-//! **text only**. The only way to hand it a picture is therefore to put the file somewhere
-//! it can read and name that path in the prompt. So an upload:
-//!
-//! 1. lands under `<project>/.agents-manager/attachments/` **on the bot's host** — inside
-//!    the agent's cwd, so a sandboxed CLI may read it without a path-approval prompt; the
-//!    directory carries a `.gitignore` of `*` so the repo never sees it;
-//! 2. keeps a daemon-side copy when the host is remote, so the UI can still show the
-//!    thumbnail without going back over ssh;
-//! 3. is recorded in `attachments`, and stamped onto the user message's `attachments_json`
-//!    once the prompt is actually sent.
+//! Image attachments. `agent.prompt` carries **text only**, so an image is written into the
+//! agent's cwd on the bot's host (a sandboxed CLI reads it without a path-approval prompt,
+//! `.gitignore`d) and its path is named in the prompt. Remote hosts also keep a daemon-side copy
+//! so thumbnails need no ssh.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,11 +15,9 @@ use crate::config::{valid_id, ID_RE};
 use crate::hosts::sh_quote;
 use crate::state::App;
 
-/// Per-file ceiling. Big enough for a retina screenshot, small enough that pushing it to a
-/// remote host over ssh stays a sub-second operation.
+/// Retina screenshot fits; an ssh push stays sub-second.
 pub const MAX_BYTES: usize = 12 * 1024 * 1024;
 
-/// Directory (relative to the project root) that holds a bot's dropped images.
 const SUBDIR: &str = ".agents-manager/attachments";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,8 +30,6 @@ pub struct Attachment {
     pub path: String,
 }
 
-/// `image/png` → `png`. Used to give the stored file a sensible extension when the
-/// original name has none (pasted screenshots are often just "image.png" or nothing).
 fn ext_for(name: &str, mime: &str) -> String {
     if let Some((_, e)) = name.rsplit_once('.') {
         let e: String = e.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
@@ -63,8 +50,7 @@ fn ext_for(name: &str, mime: &str) -> String {
     .to_string()
 }
 
-/// Keep the user's filename recognisable in the path without letting it escape the
-/// directory or upset a shell.
+/// Recognisable, but cannot escape the directory or upset a shell.
 fn safe_stem(name: &str) -> String {
     let base = name.rsplit('/').next().unwrap_or(name);
     let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
@@ -91,7 +77,6 @@ fn local_copy_dir(app: &Arc<App>, bot_id: &str) -> Result<PathBuf> {
     Ok(app.data_dir.join("attachments").join(bot_id))
 }
 
-/// Store one uploaded image for `bot_id` and return what the UI and the prompt need.
 pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[u8]) -> Result<Attachment> {
     if data.is_empty() {
         bail!("attachment is empty");
@@ -162,7 +147,6 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
     Ok(Attachment { id, name: name.to_string(), mime: mime.to_string(), size: data.len() as i64, path: agent_path })
 }
 
-/// `.agents-manager/` is daemon scratch inside someone's repo — keep git blind to it.
 fn write_gitignore_local(dir: &str) {
     let p = PathBuf::from(dir).join(".gitignore");
     if !p.exists() {
@@ -170,10 +154,8 @@ fn write_gitignore_local(dir: &str) {
     }
 }
 
-/// The rows for `ids`, in the order given, restricted to the recipient's **project** — an
-/// id from an unrelated chat must not turn into a path in this prompt. Project scope (not
-/// bot scope) is what lets one group send hand the same upload to every recipient: the
-/// file already sits in the project directory they share.
+/// Restricted to the recipient's **project**: an unrelated chat's id must not become a path here.
+/// Project (not bot) scope lets one group send share an upload with every recipient.
 pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec<Attachment>> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -198,8 +180,6 @@ pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec
     Ok(out)
 }
 
-/// Bind the attachments to the user message they were sent with, so a reload can render
-/// the same thumbnails.
 pub async fn bind(app: &Arc<App>, message_id: &str, items: &[Attachment]) -> Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -220,8 +200,7 @@ pub async fn bind(app: &Arc<App>, message_id: &str, items: &[Attachment]) -> Res
     Ok(())
 }
 
-/// What the agent actually receives: the user's text, then the paths, spelled out plainly
-/// enough that every CLI (claude / codex / grok) reads them with its file tool.
+/// Paths spelled out plainly enough that every CLI reads them with its file tool.
 pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
     if items.is_empty() {
         return text.to_string();
@@ -238,7 +217,7 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
     s.trim_end().to_string()
 }
 
-/// The bytes behind an attachment id, for `GET /api/attachments/:id`.
+/// `GET /api/attachments/:id`
 pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
     let row = sqlx::query_as::<_, (String, String)>("SELECT mime, local_path FROM attachments WHERE id = ?")
         .bind(id)
@@ -249,7 +228,6 @@ pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
     Ok((mime, data))
 }
 
-/// Metadata for one attachment, as JSON (used by the upload response).
 pub fn to_json(a: &Attachment) -> serde_json::Value {
     json!({"id": a.id, "name": a.name, "mime": a.mime, "size": a.size, "path": a.path})
 }

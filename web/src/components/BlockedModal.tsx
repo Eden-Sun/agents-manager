@@ -14,14 +14,8 @@ import { CodexUpdateHint } from './CodexUpdateHint'
 const READABLE_COLUMNS = 60
 
 /**
- * agent 進 `blocked` 時彈出來的**整個 herdr 畫面**。
- *
- * 對話上方那條 `BlockedPanel` 只放得下 300px 高的截角，而要決定「該按 y 還是 n」通常得看到
- * 完整的對話框：問題全文、選項、游標停在哪一個。所以 blocked 一發生就把整張畫面推到眼前，
- * 判斷跟回應在同一個地方完成。
- *
- * 鍵盤直通（預設開）把按鍵原樣送進 pane，等於直接在終端上操作。代價是 **Esc 也會送給
- * agent**，所以關閉只走 ✕ / 點視窗外；這件事直接寫在頁尾，不讓人按 Esc 按到疑惑。
+ * agent 進 `blocked` 時彈出整個 herdr 畫面：`BlockedPanel` 的 300px 截角看不到完整問題與選項。
+ * 鍵盤直通會把 Esc 也送給 agent，所以關閉只走 ✕／點視窗外（頁尾有寫）。
  */
 export function BlockedModal({ botId, onClose }: { botId: string; onClose: () => void }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
@@ -35,29 +29,24 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLPreElement>(null)
 
-  // Escape / 關閉鈕的 handler 每次 render 都是新的；透過 ref 讀，下面的 listener 才不必
-  // 跟著重新註冊（同 Modal.tsx 的作法）。
+  // handler 每次 render 都是新的；透過 ref 讀，listener 才不必重新註冊（同 Modal.tsx）。
   const onCloseRef = useRef(onClose)
   useEffect(() => {
     onCloseRef.current = onClose
   })
 
-  // 焦點落在終端本身而不是第一顆按鈕；Tab 仍由共用 hook 留在這個視窗內。
   useDialogFocus(true, rootRef, { initialFocus: () => termRef.current })
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null
       const tag = target?.tagName.toLowerCase()
-      // 只有這個視窗裡的輸入控制項（直通開關）能留住鍵盤；視窗外的輸入框在模態期間不該收到
-      // 任何東西——沒有這個判斷，背後聊天輸入框有焦點時打的字會跑進去。
+      // 模態期間只有這個視窗裡的輸入控制項能留住鍵盤，否則字會跑進背後的聊天輸入框。
       const inside = Boolean(rootRef.current?.contains(target))
       const editing = inside && (tag === 'input' || tag === 'textarea' || tag === 'select')
       if (editing) return
       if (e.key === 'Tab') return
-      // 焦點在這個視窗裡的按鈕（✕、選單模式的 `.bc-item`、按鍵列）上按 Enter／Space 要啟動那顆
-      // 按鈕，不是把 enter／space 送進 pane——不然選單模式自動彈出、焦點落在 ✕ 時一按 Enter，
-      // 被選走的是 TUI 游標所在那一項，鍵盤使用者也永遠用不到可點清單。
+      // 焦點在視窗內按鈕上時 Enter／Space 要啟動那顆按鈕，而不是送進 pane（否則會選到 TUI 游標那項）。
       if (inside && (tag === 'button' || tag === 'a') && (e.key === 'Enter' || e.key === ' ')) return
 
       if (!passthrough) {
@@ -98,8 +87,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           >
             ● {bot?.name ?? 'agent'} 需要回應
           </strong>
-          {/* 抓法、pane id、幾欄幾列、對帳序號都是除錯資訊：選單模式下畫面上只留「要回答的
-              那件事」，這些收進標題的 tooltip（2026-09-12 第二輪回饋第 3 點）。 */}
+          {/* 除錯資訊選單模式下收進標題 tooltip（2026-09-12 第二輪回饋第 3 點）。 */}
           {menu ? null : (
             <span className="modal-sub">
               終端畫面，每秒更新
@@ -121,8 +109,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
 
-        {/* 選單模式：視窗裡**只有一條主捲軸**（這個 body），問題那一行釘在上緣。原本清單與終端
-            快照各自捲，手指在手機上分不清正在捲哪一塊（2026-09-12 第二輪回饋第 4 點）。 */}
+        {/* 選單模式只有一條主捲軸，問題行釘在上緣：兩塊各自捲在手機上分不清（2026-09-12 第二輪回饋第 4 點）。 */}
         {menu ? (
           <div className="blocked-modal-body">
             {isSurvey(menu) ? (
@@ -143,8 +130,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           {menu ? (
             <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
           ) : null}
-          {/* 選單模式預設不長這一段（第二輪回饋第 2 點）：那排鍵、鍵盤直通與它那段說明
-              都不是回答問題需要的東西。展開之後樣子照舊。 */}
+          {/* 選單模式預設不長這一段（第二輪回饋第 2 點）。 */}
           {showRaw ? (
             <>
               <div className="keypad">

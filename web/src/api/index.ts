@@ -1,8 +1,3 @@
-/**
- * Domain API. Picks the real daemon transport or the in-memory mock
- * (`VITE_MOCK=1`) and exposes typed calls over it.
- */
-
 import { MockTransport } from './mock'
 import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
@@ -57,10 +52,7 @@ const transport: Transport = MOCK_MODE ? new MockTransport() : new HttpTransport
 
 export const isMock = transport.mock
 
-/**
- * 給獨立 API 模組（目前是 `supervisor.ts`）用的原始通道。新的端點各自成一個檔，
- * 但不能各自再 `new` 一個 transport——mock 模式下那會變成兩份互不相干的假資料。
- */
+/** 獨立 API 模組共用這條；各自 `new` transport 會在 mock 模式變成兩份不相干的假資料。 */
 export const rawTransport: Pick<Transport, 'request' | 'mock'> = transport
 
 export function session(): Promise<string> {
@@ -75,7 +67,7 @@ export async function fetchState(): Promise<AppState> {
   return toState(await transport.request('GET', '/state'))
 }
 
-/** API.md §6: `before` = 目前最舊一則的 id，用來往前翻（issue #25 的「載入更早的訊息」）。 */
+/** API.md §6: `before` = 目前最舊一則的 id（往前翻，issue #25）。 */
 export async function fetchMessages(botId: string, limit = 200, before?: string): Promise<MessagesPage> {
   const q = new URLSearchParams({ limit: String(limit) })
   if (before) q.set('before', before)
@@ -83,7 +75,7 @@ export async function fetchMessages(botId: string, limit = 200, before?: string)
   return toMessagesPage(raw, botId)
 }
 
-/** SPEC §13.4 `GET /api/projects/:id/messages` — every member bot's messages, merged. */
+/** SPEC §13.4 — every member bot's messages, merged. */
 export async function fetchProjectMessages(projectId: string, limit = 200, before?: string): Promise<GroupMessagesPage> {
   const q = new URLSearchParams({ limit: String(limit) })
   if (before) q.set('before', before)
@@ -91,10 +83,7 @@ export async function fetchProjectMessages(projectId: string, limit = 200, befor
   return toGroupMessagesPage(raw, projectId)
 }
 
-/**
- * SPEC §13.4 `POST /api/projects/:id/chat`. The daemon resolves `@all` / `@<bot>` itself;
- * no valid mention → 400 `{error:"no_mention", bots}` (surfaces as an `ApiError`).
- */
+/** SPEC §13.4. Daemon resolves mentions; none valid → 400 `no_mention` (`ApiError`). */
 export async function sendGroupChat(
   projectId: string,
   text: string,
@@ -142,22 +131,14 @@ export async function fetchTerminal(
 }
 
 /**
- * `POST /api/bots/:id/pane/move-to-tab` → `200 {}`.
- *
- * 把 bot 現有的 pane 從共用分頁搬到同 workspace 的新分頁（daemon 端對應 herdr 的
- * `pane.move` + `destination.type = "new_tab"`）。同一分頁裡的 pane 互搶寬度，不同分頁不會，
- * 所以這是把窄到讀不了的 pane 救回來的唯一可預期做法（`pane.resize` 是零和的、`zoom` 只放大字）。
- *
- * **搬的是既有 pane，不是重開**：`pane_id` 不變，run / 事件訂閱 / 正在跑的回合都不受影響。
+ * 搬到新分頁是救回窄 pane 唯一可預期的做法（`pane.resize` 零和、`zoom` 只放大字）。
+ * 搬既有 pane 不重開：`pane_id`、run、進行中回合都不受影響。
  */
 export async function movePaneToTab(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/pane/move-to-tab`)
 }
 
-/**
- * `GET /api/fs/dirs?host=<name>&path=` — SPEC §11.5. `host` omitted / `"local"` lists the
- * daemon's own filesystem; anything else is listed over ssh on that host.
- */
+/** SPEC §11.5. Non-local `host` is listed over ssh. */
 export async function listDirs(path?: string, host?: string, hidden?: boolean): Promise<DirListing> {
   const params = new URLSearchParams()
   if (path) params.set('path', path)
@@ -175,7 +156,7 @@ export async function listDirs(path?: string, host?: string, hidden?: boolean): 
   }
 }
 
-// ------------------------------------------------------------------ hosts (§11.6)
+// hosts (SPEC §11.6)
 
 function toHostResult(raw: unknown, name: string): HostResult {
   const o = isRec(raw) ? raw : {}
@@ -203,10 +184,7 @@ export async function createProject(input: NewProjectInput): Promise<string> {
   return isRec(raw) ? str(pick(raw, 'project_id')) : ''
 }
 
-/**
- * `PATCH /api/projects/:id` (API.md §3). Renaming is never blocked by a live run: the label
- * only feeds the `agent_name` slug of the *next* start.
- */
+/** API.md §3. Rename never blocked by a live run: label only affects the next start's slug. */
 export async function patchProject(projectId: string, input: PatchProjectInput): Promise<void> {
   await transport.request('PATCH', `/projects/${encodeURIComponent(projectId)}`, input)
 }
@@ -229,36 +207,24 @@ export async function createBot(projectId: string, input: NewBotInput): Promise<
   return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')) }
 }
 
-/**
- * `PATCH /api/bots/:id` (API.md v3.3). Only the changed fields are sent; `model` /
- * `identity` as `null` clears them. Renaming a bot that has an active Run is a 409.
- */
+/** API.md v3.3. `null` `model`/`identity` clears; renaming with an active Run → 409. */
 export async function patchBot(botId: string, input: PatchBotInput): Promise<PatchBotResult> {
   const raw = await transport.request('PATCH', `/bots/${encodeURIComponent(botId)}`, input)
   const o = isRec(raw) ? raw : {}
   return { needs_restart: o.needs_restart === true || o.restart_required === true }
 }
 
-/**
- * `POST /api/order` — 側欄排序（docs/API.md §5.4）。順序寫回 config.toml 的陣列，
- * 所以手機與桌機看到的是同一份（以前存 localStorage，每台裝置各自一份）。
- */
+/** 側欄排序（API.md §5.4），存 config.toml 讓各裝置共用同一份。 */
 export async function saveOrder(input: { projects?: string[]; bots?: Record<string, string[]> }): Promise<void> {
   await transport.request('POST', '/order', input)
 }
 
-/** `POST /api/bots/:id/restart` — stop then start; returns the new run id. */
 export async function restartBot(botId: string): Promise<string> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart`)
   return isRec(raw) ? str(pick(raw, 'run_id')) : ''
 }
 
-/**
- * SPEC §6.9 — 一鍵把帶著 claude 更新且閒置的 bot 全部 exit + resume。
- *
- * 立刻回計畫（誰要重啟、誰被跳過與原因）就結束；實際的重啟在 daemon 背景一顆一顆跑，
- * 進度與摘要走 WS 的 `bots_restart_progress` / `bots_restart_done`。
- */
+/** SPEC §6.9. 只回計畫；實際重啟在背景跑，進度走 WS `bots_restart_progress` / `bots_restart_done`。 */
 export async function restartIdleBots(): Promise<RestartPlan> {
   const raw = await transport.request('POST', '/bots/restart-idle')
   const o = isRec(raw) ? raw : {}
@@ -272,7 +238,7 @@ export async function restartIdleBots(): Promise<RestartPlan> {
   }
 }
 
-/** WS 事件與 REST 回應共用的「被跳過的那幾顆」解析。 */
+/** WS 事件與 REST 回應共用。 */
 export function toRestartSkips(v: unknown): RestartSkip[] {
   return arr(v).flatMap((x) =>
     isRec(x)
@@ -305,11 +271,7 @@ export async function interruptBot(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/interrupt`)
 }
 
-/**
- * `POST /api/bots/:id/abort` — **強制**結束目前回合。`interrupt` 是「請 agent 停下來」，
- * `esc` 送不出去就整個失敗、回合仍卡在 in-flight；這支反過來，先保證解鎖，送鍵只是順帶
- * （`keys_sent` 告訴你送成功沒有）。
- */
+/** 強制結束回合：不同於 `interrupt`（esc 送不出就失敗），這支先保證解鎖，送鍵只是順帶。 */
 export async function abortBot(botId: string): Promise<{ aborted: string[]; keys_sent: boolean }> {
   const r = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/abort`)
   const o = isRec(r) ? r : {}
@@ -319,14 +281,7 @@ export async function abortBot(botId: string): Promise<{ aborted: string[]; keys
   }
 }
 
-/**
- * `POST /api/bots/:id/login` — 對這個**正在跑的** bot 的 TUI 送 `/login`，讓它進入
- * 登入 / 切換帳號流程。回傳實際送進去的那一行。
- *
- * 只是把指令送進去而已：agent 接著會停在登入畫面（通常還會開瀏覽器），完成與否得靠
- * `refreshTools` 重新偵測。失敗一律是 `ApiError`，理由在 `body.error` / `body.reason`
- * （`login_unsupported` / `not_running` / `agent_busy` / `turn_in_flight` / `no_pane`）。
- */
+/** 對執行中 bot 送 `/login`；只送指令，完成與否要靠 `refreshTools` 重新偵測。 */
 export async function loginBot(botId: string): Promise<{ command: string; kind: string }> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/login`)
   const o = isRec(raw) ? raw : {}
@@ -360,10 +315,7 @@ export async function sendKeys(botId: string, keys: string[], expectRunId: strin
   })
 }
 
-/**
- * `POST /bots/:id/text` — 把一整段文字打進 bot 的 pane（daemon 端是 `pane.send_text`），
- * `enter` 決定要不要接一個 Enter。多行文字走這裡，不要拆成 `sendKeys` 的鍵名。
- */
+/** 多行文字走這裡，不要拆成 `sendKeys` 的鍵名。 */
 export async function sendText(botId: string, text: string, enter: boolean, expectRunId: string | null): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/text`, {
     text,
@@ -376,12 +328,6 @@ export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
 }
 
-// ---------------------------------------------------------- attachments
-
-/**
- * `POST /api/bots/:id/attachments?name=…` with the raw image as the body. The daemon puts
- * the file on the bot's host and returns the metadata the prompt needs.
- */
 export async function uploadAttachment(botId: string, file: File): Promise<Attachment> {
   const qs = new URLSearchParams({ name: file.name || 'image' })
   const raw = await transport.upload(`/bots/${encodeURIComponent(botId)}/attachments?${qs.toString()}`, file)
@@ -395,19 +341,11 @@ export async function uploadAttachment(botId: string, file: File): Promise<Attac
   }
 }
 
-/** An object URL for a stored attachment (the bytes sit behind the UI token). */
 export function attachmentUrl(id: string): Promise<string> {
   return transport.blobUrl(`/attachments/${encodeURIComponent(id)}`)
 }
 
-// ------------------------------------------------------------------ v4.0
-
-/** `GET /api/models?kind=&host=` — the agent CLI's model catalogue on that host. */
-/**
- * `identity` (claude only) picks whose `settings.json` the "預設" effort hint is read from
- * (SPEC §17.1) — omit it for the default account. An unknown name just falls back to that
- * account, so it is safe to pass through whatever the form currently has selected.
- */
+/** `identity` (claude) picks whose settings.json the default effort comes from (SPEC §17.1); unknown falls back safely. */
 export async function fetchModels(kind: BotKind, host?: string, identity?: string | null): Promise<ModelInfo[]> {
   const q = new URLSearchParams({ kind })
   if (host && host !== 'local') q.set('host', host)
@@ -415,15 +353,11 @@ export async function fetchModels(kind: BotKind, host?: string, identity?: strin
   return toModels(await transport.request('GET', `/models?${q.toString()}`))
 }
 
-/** `GET /api/quota` — per-kind 5h / 7d usage. */
 export async function fetchQuota(): Promise<QuotaMap> {
   return toQuota(await transport.request('GET', '/quota'))
 }
 
-/**
- * `GET /api/search/messages?q=` — 哪些 bot 的對話裡出現過這段文字。
- * 失敗就丟出來，由呼叫端當成「沒有訊息命中」。
- */
+/** 失敗就丟出來，由呼叫端當成「沒有訊息命中」。 */
 export async function searchMessages(q: string): Promise<Record<string, MessageHit>> {
   const raw = await transport.request('GET', `/search/messages?q=${encodeURIComponent(q)}`)
   const r = isRec(raw) ? raw : {}
@@ -436,10 +370,7 @@ export async function searchMessages(q: string): Promise<Record<string, MessageH
   return out
 }
 
-/**
- * `POST /api/bots/:id/restore` — 把誤刪的 bot 放回來（連同它全部的對話）。
- * 任何失敗 → false，呼叫端顯示失敗而不是假裝成功。
- */
+/** 任何失敗 → false，呼叫端顯示失敗而不是假裝成功。 */
 export async function restoreBot(botId: string): Promise<boolean> {
   try {
     await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restore`)
@@ -449,12 +380,12 @@ export async function restoreBot(botId: string): Promise<boolean> {
   }
 }
 
-/** `GET /api/mem` — herdr 進程樹的常駐記憶體（SPEC §15）。 */
+/** SPEC §15. */
 export async function fetchMem(): Promise<MemSnapshot> {
   return toMemSnapshot(await transport.request('GET', '/mem'))
 }
 
-/** `GET /api/mem/processes/pane` — 清單裡「自己開的 pane」現在畫面上的字（SPEC §15.2）。 */
+/** SPEC §15.2. */
 export async function fetchMemPane(host: string, paneId: string, socket: string | null, lines = 40): Promise<TerminalSnapshot> {
   const sock = socket ? `&socket=${encodeURIComponent(socket)}` : ''
   const raw = await transport.request(
@@ -464,32 +395,24 @@ export async function fetchMemPane(host: string, paneId: string, socket: string 
   return toTerminal(raw, 'visible')
 }
 
-/** `GET /api/mem/processes?host=…` — 那個數字是由哪些程序組成的（SPEC §15.2）。 */
+/** SPEC §15.2. */
 export async function fetchMemProcesses(host: string): Promise<MemProcesses> {
   return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`))
 }
 
-/**
- * `POST /api/mem/processes/kill` — 結束一個 herdr 樹裡的程序（SPEC §15.2）。
- * daemon 會重新取樣再判定，並擋掉 herdr 本身（400）與 bot（409）；錯誤原樣往上丟，
- * 呼叫端把 daemon 的訊息照著顯示，不在前端另外猜一套說法。
- */
+/** SPEC §15.2. daemon 擋 herdr 本身（400）與 bot（409）；錯誤原樣上丟，照 daemon 訊息顯示。 */
 export async function killMemProcess(host: string, pid: number, signal: 'TERM' | 'KILL' = 'TERM'): Promise<void> {
   await transport.request('POST', '/mem/processes/kill', { host, pid, signal })
 }
 
-/**
- * `POST /api/hosts/:name/tools/refresh` — re-runs CLI + per-identity login detection on that
- * host. Detection otherwise only happens when the host (re)connects, so this is what the user
- * reaches for right after logging an account in.
- */
+/** Detection otherwise only runs on host (re)connect — needed right after logging in. */
 export async function refreshTools(host: string): Promise<{ tools: ToolMap; identity_status: IdentityStatusMap }> {
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/refresh`)
   const rec = isRec(raw) ? raw : {}
   return { tools: toToolMap(rec.tools), identity_status: toIdentityStatusMap(rec.identities) }
 }
 
-/** `POST /api/hosts/:name/identities/:identity/login` — 開臨時 pane 做該身份的登入。 */
+/** 開臨時 pane 做該身份的登入。 */
 export async function loginIdentity(host: string, identity: string): Promise<HostShell> {
   const name = host || 'local'
   const raw = await transport.request(
@@ -499,10 +422,7 @@ export async function loginIdentity(host: string, identity: string): Promise<Hos
   return toHostShell(raw, name)
 }
 
-/**
- * `POST /api/hosts/:name/tools/install {kind, via_bot_id}` — asks a running bot on that
- * host to install + log in the given agent CLI (as a prompt in its own pane).
- */
+/** Asks a running bot on that host to install + log in the CLI via a prompt. */
 export async function installTool(host: string, kind: BotKind, viaBotId: string): Promise<InstallToolResult> {
   return toInstallResult(
     await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/install`, { kind, via_bot_id: viaBotId }),
@@ -539,13 +459,11 @@ function toGhStatus(raw: unknown, fallbackName: string): GhStatus {
   }
 }
 
-/** `GET /api/hosts/:name/gh` — 該主機的 GitHub CLI 登入狀態。 */
 export async function fetchGhStatus(host: string): Promise<GhStatus> {
   const name = host || 'local'
   return toGhStatus(await transport.request('GET', `/hosts/${encodeURIComponent(name)}/gh`), name)
 }
 
-/** `POST /api/hosts/:name/gh/login` — auto / copy / device / switch。 */
 export async function loginGh(host: string, mode: GhLoginMode = 'auto', user?: string): Promise<GhStatus> {
   const name = host || 'local'
   return toGhStatus(
@@ -557,34 +475,23 @@ export async function loginGh(host: string, mode: GhLoginMode = 'auto', user?: s
   )
 }
 
-/** `POST /api/hosts/:name/gh/cancel` — 放棄進行中的裝置碼。 */
 export async function cancelGhLogin(host: string): Promise<GhStatus> {
   const name = host || 'local'
   return toGhStatus(await transport.request('POST', `/hosts/${encodeURIComponent(name)}/gh/cancel`), name)
 }
 
-// ------------------------------------------------------------------ 主機 shell
-
-/**
- * `POST /api/hosts/:name/shells` — 在某台主機開一個純 shell pane（沒有 agent、沒有 run）。
- *
- * `cwd` 省略時由 daemon 挑（該主機的某個 project，都沒有就 `$HOME`），回傳的一律是**實際**
- * 開起來的目錄。`pane_id` 只在 daemon 這一輪有效：它同時是白名單的 key，daemon 重啟後
- * 舊的 pane 一律不認。
- */
+/** 純 shell pane。`pane_id` 是白名單 key，只在這輪 daemon 有效，重啟後舊 pane 不認。 */
 export async function openHostShell(host: string, cwd?: string): Promise<HostShell> {
   const name = host || 'local'
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/shells`, cwd ? { cwd } : {})
   return toHostShell(raw, name)
 }
 
-/** `GET /api/hosts/:name/shells` — 這台主機上還活著的 shell（daemon 會順手掃掉死掉的）。 */
 export async function fetchHostShells(host: string): Promise<HostShell[]> {
   const name = host || 'local'
   return toHostShells(await transport.request('GET', `/hosts/${encodeURIComponent(name)}/shells`), name)
 }
 
-/** `GET /api/hosts/:name/shells/:pane_id/terminal` — 形狀同 `GET /bots/:id/terminal`。 */
 export async function readHostShell(
   host: string,
   paneId: string,
@@ -598,12 +505,7 @@ export async function readHostShell(
   return toTerminal(raw, source)
 }
 
-/**
- * `POST /api/hosts/:name/shells/:pane_id/text` — 把一行字打進 shell。
- *
- * `enter` 是 daemon 端獨立的一次按鍵，不是文字裡的 `\n`（對 herdr 來說換行是「貼上」而不是
- * 「按 Enter」）。空字串 + `enter` = 只按 Enter，這在提示符前是真的會用到的動作。
- */
+/** `enter` 是獨立按鍵而非 `\n`（herdr 把換行當貼上）；空字串 + `enter` = 只按 Enter。 */
 export async function sendHostShellText(host: string, paneId: string, text: string, enter = true): Promise<void> {
   await transport.request(
     'POST',
@@ -612,7 +514,6 @@ export async function sendHostShellText(host: string, paneId: string, text: stri
   )
 }
 
-/** `POST /api/hosts/:name/shells/:pane_id/keys` — 鍵名原樣送 herdr（同 `usePaneKeys`）。 */
 export async function sendHostShellKeys(host: string, paneId: string, keys: string[]): Promise<void> {
   await transport.request(
     'POST',
@@ -621,7 +522,7 @@ export async function sendHostShellKeys(host: string, paneId: string, keys: stri
   )
 }
 
-/** `DELETE /api/hosts/:name/shells/:pane_id` — 結束這個 shell。已經沒了也算成功。 */
+/** 已經沒了也算成功。 */
 export async function closeHostShell(host: string, paneId: string): Promise<void> {
   await transport.request(
     'DELETE',
@@ -629,7 +530,7 @@ export async function closeHostShell(host: string, paneId: string): Promise<void
   )
 }
 
-/** `GET /api/projects/:id/issues?state=&limit=&q=` (v4.0; the daemon shells out to `gh`). */
+/** Daemon shells out to `gh`. */
 export async function fetchIssues(
   projectId: string,
   opts: { state?: 'open' | 'closed'; limit?: number; q?: string; repo?: string } = {},
@@ -643,20 +544,16 @@ export async function fetchIssues(
   return toIssues(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues${qs ? `?${qs}` : ''}`))
 }
 
-/** `GET /api/projects/:id/issues/:number` — with the full body. */
 export async function fetchIssue(projectId: string, number: number, repo = ''): Promise<IssueDetail | null> {
   const qs = repo ? `?repo=${encodeURIComponent(repo)}` : ''
   return toIssueDetail(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/issues/${number}${qs}`))
 }
 
-/**
- * `GET /api/projects/:id/submodules` — the project's git submodules with their GitHub origins.
- */
 export async function fetchSubmodules(projectId: string): Promise<ProjectSubmodule[]> {
   return toSubmodules(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/submodules`))
 }
 
-/** `crypto.randomUUID()` with a fallback for non-secure origins. */
+/** Fallback: `randomUUID` is missing on non-secure origins. */
 export function newClientRequestId(): string {
   const c = globalThis.crypto
   if (c && typeof c.randomUUID === 'function') return c.randomUUID()
@@ -672,8 +569,7 @@ export function newClientRequestId(): string {
 export { num }
 export type { SocketHandlers }
 
-// -------------------------------------------------------- 快速 git（chat 標題列的 chip，2026-09-08）
-
+// 快速 git（chat 標題列 chip，2026-09-08）
 export interface GitSummary {
   git: boolean
   branch: string | null
@@ -686,7 +582,7 @@ export interface GitSummary {
   deletions: number
 }
 
-/** `GET /api/projects/:id/git`。專案不在了（404）→ `{git:false}`，chip 靜默消失。 */
+/** 404（專案不在）→ `{git:false}`，chip 靜默消失。 */
 export async function fetchGit(projectId: string): Promise<GitSummary> {
   const none: GitSummary = { git: false, branch: null, upstream: null, ahead: 0, behind: 0, changed: 0, untracked: 0, insertions: 0, deletions: 0 }
   let raw: unknown
@@ -711,21 +607,16 @@ export async function fetchGit(projectId: string): Promise<GitSummary> {
   }
 }
 
-/** `POST …/git/commit`（`git add -A && git commit`）、`…/git/push`、`…/git/pull --rebase --no-autostash`。回 git 的輸出。 */
+/** commit = `git add -A && git commit`；pull = `--rebase --no-autostash`。 */
 export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull', message?: string): Promise<string> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/git/${op}`, op === 'commit' ? { message } : undefined)
   const o = isRec(raw) ? raw : {}
   return str(pick(o, 'output'), '')
 }
 
-// -------------------------------------------------------- 群組任務（docs/API.md「群組任務」）
+// 群組任務：見 docs/API.md「群組任務」
 
-/**
- * `POST /api/projects/:id/missions`——群組裡的「交給 AGM」。
- *
- * 同一個 `client_request_id` 回同一筆（`created:false`），所以重送不會多開一個任務。
- * 遠端專案 daemon 回 400 `remote_not_supported`（第一版只支援本機專案）。
- */
+/** 同 `client_request_id` 回同一筆（冪等）；遠端專案 → 400 `remote_not_supported`。 */
 export async function createMission(
   projectId: string,
   input: NewMissionInput,
@@ -735,17 +626,15 @@ export async function createMission(
   return { mission: toMission(pick(root, 'mission') ?? raw), created: pick(root, 'created') !== false }
 }
 
-/** 這個專案有沒有支援群組任務（舊 daemon 沒有這些路由，SPA fallback 會回 index.html）。 */
+/** 舊 daemon 沒這些路由（SPA fallback 會回 index.html）。 */
 export function isMissionsUnsupported(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501)
 }
 
-/** 建任務時被擋下來的原因（遠端專案）。 */
 export function missionRejectReason(e: unknown): string | null {
   return e instanceof ApiError ? (e.body?.error ?? null) : null
 }
 
-/** `GET /api/projects/:id/missions?status=` — 已完成任務清單就是 `status=done`。 */
 export async function fetchMissions(
   projectId: string,
   status: 'all' | 'open' | 'done' | 'cancelled' = 'all',
@@ -755,17 +644,11 @@ export async function fetchMissions(
   return toMissions(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/missions?${qs}`))
 }
 
-/** `GET /api/missions/:id` — 任務本身＋它的事件串。 */
 export async function fetchMission(missionId: string): Promise<MissionDetail | null> {
   return toMissionDetail(await transport.request('GET', `/missions/${encodeURIComponent(missionId)}`))
 }
 
-/**
- * `POST /api/missions/:id/events`。
- *
- * 使用者在任務卡上回答「停下來問人」時走這裡：**不帶 `relay_from`**＝這句話是使用者本人說的
- * （契約：`relay_from` 為 null 就是使用者），bot 轉述才要帶自己的 bot id。
- */
+/** 契約：不帶 `relay_from` ＝ 使用者本人說的；bot 轉述才帶自己的 bot id。 */
 export async function addMissionEvent(
   missionId: string,
   input: { kind: 'report' | 'note' | 'verified'; text: string; relay_from?: string; payload?: unknown },
@@ -775,12 +658,7 @@ export async function addMissionEvent(
   return toMissionEvent(pick(root, 'event') ?? raw, missionId)
 }
 
-/**
- * `POST /api/missions/:id/question` —— 對成果追問（已完成的任務也能問）。
- *
- * 追問只會留一句話並叫醒 AGM；它不會改狀態、不會產生交付，也不會開新任務。真的要改東西是
- * `reviseMission`。`client_request_id` 是冪等鍵：重送回同一則，不會變成第二個問題。
- */
+/** 追問只留言並叫醒 AGM，不改狀態（要改用 `reviseMission`）；`client_request_id` 冪等。 */
 export async function askMission(
   missionId: string,
   input: { text: string; client_request_id: string },
@@ -790,12 +668,7 @@ export async function askMission(
   return toMissionEvent(pick(root, 'event') ?? raw, missionId)
 }
 
-/**
- * `POST /api/missions/:id/answer` —— 回答「停下來問人」的任務。
- *
- * 記錄、放行、叫醒 AGM 是 daemon 端的**一個交易**；前端只送一次，不要再自己串
- * events + resume（那樣中間斷掉就會留下半套）。
- */
+/** daemon 端單一交易；別自己串 events + resume（中途斷掉會留半套）。 */
 export async function answerMission(
   missionId: string,
   input: { text: string; client_request_id: string },
@@ -805,11 +678,7 @@ export async function answerMission(
   return { mission: toMission(pick(root, 'mission')), resumed: pick(root, 'resumed') === true }
 }
 
-/**
- * `POST /api/missions/:id/revise` —— 從已完成的成果開一筆續作。
- *
- * 回的是**新的一筆任務**（`parent_mission_id` 指回來），原成果不會被改到。
- */
+/** 回新任務（`parent_mission_id` 指回來），原成果不動。 */
 export async function reviseMission(
   missionId: string,
   input: { text: string; client_request_id: string },
@@ -818,7 +687,6 @@ export async function reviseMission(
   return toMission(isRec(raw) ? (pick(raw, 'mission') ?? raw) : raw)
 }
 
-/** `POST /api/missions/:id/{pause,resume,cancel}` — 都回同一份任務。 */
 export async function controlMission(
   missionId: string,
   action: 'pause' | 'resume' | 'cancel',

@@ -5,13 +5,7 @@ import { canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv } fr
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/**
- * 額度 popover 裡「這個帳號未登入」那一列的登入按鈕（claude 與 grok：TUI 有 `/login` 的 kind）。
- *
- * 以前這裡只寫一句「請在 Bot 設定按登入 / 切換帳號」，使用者得自己去翻是哪一個 bot。
- * 這些 kind 的 TUI 有 `/login`，那就直接在這裡送——目標是同 host、同 kind、同身份、還在跑的那個 bot
- * （`findLoginTarget`）。沒有在跑的就 disabled，因為 `/login` 要送進活著的 pane。
- */
+/** 額度 popover「未登入」列的登入鈕（claude / grok）：`/login` 送進同 host、kind、身份且在跑的 bot（`findLoginTarget`）。 */
 export function QuotaLoginSlash({
   kind,
   host,
@@ -37,8 +31,7 @@ export function QuotaLoginSlash({
 
   // codex 沒有 `/login`，走 `QuotaLogin-codex`；這裡擋一下免得被誤用時給出壞按鈕。
   if (!canLoginInSession(kind)) return null
-  // 沒有正在跑的 Bot 就沒有畫面可以送 `/login`。與其給一顆灰掉的按鈕叫使用者先去開 bot，
-  // 不如走 codex 那條路：開該主機的 shell 跑 `<cli> login`，登的是同一個身份。
+  // 沒有在跑的 Bot 就走 codex 那條路：開主機 shell 跑 `<cli> login`，登的是同一個身份。
   if (!botId) return <QuotaLoginShell host={host} hostLabel={hostLabel} kind={kind} command={shellCommand} />
 
   return (
@@ -68,8 +61,6 @@ export function QuotaLoginSlash({
         </button>
       ) : null}
 
-      {/* 送 `/login` 不是「按了就登入好了」：畫面會跑到 agent 那邊，而且在使用者完成之前
-          那個 Bot 不能工作。這三件事在按下去**之前**講清楚，按鈕才誠實。 */}
       <ConfirmDialog
         open={confirmOpen}
         title="送出登入指令？"

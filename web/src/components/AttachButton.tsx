@@ -2,12 +2,7 @@ import { copyText } from '../lib/copyText'
 import { useEffect, useRef, useState } from 'react'
 import { TerminalIcon } from './Icons'
 
-/**
- * v4.0 "open in terminal": one-click copy of the host's `herdr …` attach command
- * (`navigator.clipboard`). A short popover still shows the command so the user can
- * confirm what was copied. Running it in a local terminal attaches to the same
- * herdr session the daemon drives.
- */
+/** v4.0 "open in terminal": one-click copy of the host's `herdr …` attach command; a popover shows what was copied. */
 export function AttachButton({ command, compact }: { command: string; compact?: boolean }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState<'ok' | 'fail' | null>(null)
@@ -37,8 +32,6 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
   }
 
   const onMainClick = () => {
-    // Once open, the same button is the close control. Otherwise one click copies and
-    // leaves the command visible for confirmation.
     if (open) {
       setOpen(false)
       return

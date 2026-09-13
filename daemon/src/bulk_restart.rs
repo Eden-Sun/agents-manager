@@ -1,17 +1,7 @@
 //! 一鍵把「等著套用 claude 更新」的閒置 bot 全部 exit + resume（SPEC §6.9）。
 //!
-//! claude 把新版下載好之後只會在 pane 底下印 `Update installed · Restart to update`
-//! （daemon 收在 `runs.update_notice`，見 API.md），真正套用的方式就是重啟。十顆 bot 就要點
-//! 十次「重啟」，而且每點一次都要自己確認那顆現在有沒有在忙。
-//!
-//! 這支只做兩件事：**挑**（[`plan`]）與**跑**（[`spawn`]）。跑的部分完全疊在既有的單顆路徑上
-//! ——`lifecycle::stop_bot` 之後 `lifecycle::start_bot_with(StartOpts { resume_native: true })`，
-//! 也就是「結束目前的 agent，再用它自己剛結束那個 native session `--resume` 回來」。沒有另一套
-//! 啟動流程，所以 hook 注入、身份、模型、pane 版面那些全部照舊。
-//!
-//! 挑的規則刻意保守：**只動 claude、只動真的帶著 update_notice 的、而且只動閒置的那些**。
-//! 正在跑（`working`）、卡在提問（`blocked`）、狀態不明（`unknown`）、還有回合在飛的一律跳過並
-//! 說出原因——批次操作最不能做的事就是把使用者正在等的那一回合砍掉。
+//! 跑的部分疊在既有單顆路徑（stop + `resume_native` start）上，沒有另一套啟動流程。
+//! 挑的規則刻意保守：只動帶著 update_notice 的閒置 claude——批次最不能做的就是砍掉使用者正在等的回合。
 
 use crate::db;
 use crate::lifecycle::{self, LcError, StartOpts};
@@ -20,28 +10,22 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 一顆候選 bot 的判斷素材（純資料，好寫測試）。
+/// 純資料，好寫測試。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cand {
     pub bot_id: String,
     pub name: String,
     pub kind: String,
-    /// `bots.managed_by`：`user` / `child`。只有 `user` 的歸使用者管。
     pub managed_by: String,
-    /// `runs.state`：只有 `running` 能重啟，`starting` / `stopping` 都還在變。
     pub state: String,
-    /// `runs.agent_status`：`idle` / `working` / `blocked` / `unknown`。
     pub agent_status: String,
-    /// 這個 run 帶著 `update_notice`（也就是真的有更新等著套用）。
     pub has_update: bool,
-    /// 這個 run 還有一回合沒收掉。
     pub turn_in_flight: bool,
-    /// 這顆是從使用者自己的 herdr `default` session 匯入的（SPEC §6.5.1）：daemon 只觀察，
-    /// 不開、不關它的 pane。
+    /// 使用者自己的 herdr `default` session（SPEC §6.5.1）：daemon 只觀察，不開、不關它的 pane。
     pub default_session: bool,
 }
 
-/// 為什麼這顆沒被重啟。`code` 給 API / 前端比對，`label` 給人看。
+/// `code` 給 API / 前端比對，`label` 給人看。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     DefaultSession,
@@ -76,27 +60,19 @@ impl Skip {
     }
 }
 
-/// 這顆算不算候選——不是 claude、或根本沒有更新在等，就連「跳過」都不必列出來（那不是使用者
-/// 按這顆按鈕時心裡想的東西，列出來只會把真正要看的那幾行淹掉）。
+/// 非候選連「跳過」都不列，免得淹掉真正要看的那幾行。
 pub fn is_candidate(c: &Cand) -> bool {
     c.kind == "claude" && c.has_update
 }
 
-/// 候選裡誰重啟、誰跳過。
-///
-/// 順序即優先序：先看這顆歸不歸使用者管，再看 run 本身穩不穩（`state`），再看 agent 在不在忙，
-/// 最後才看回合。回報的理由取第一個中的那個，因為那是使用者最該先處理的那件事。
-///
-/// 子 agent（`child`）**進來**（2026-09-12 使用者：三顆子 agent 全被跳過，更新套不上去）。
-/// 它們跟別人一樣是帶著更新的 claude，只是不能照一般路徑重開 pane，所以執行時改走
-/// [`crate::lifecycle::restart_child_in_pane`]——在它自己那個 pane 裡 exit + resume。
+/// 順序即優先序，回報理由取第一個命中的（使用者最該先處理的那件）。
+/// 子 agent 也進來，走 [`crate::lifecycle::restart_child_in_pane`]（2026-09-12 使用者：三顆子 agent 全被跳過）。
 pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     let mut go = Vec::new();
     let mut skip = Vec::new();
     for c in cands.iter().filter(|c| is_candidate(c)) {
         let why = if c.default_session {
-            // SPEC §6.5.1：那個 pane 是使用者自己的，重啟會先把它關掉、再在使用者的 session 裡
-            // 開一個 daemon 的 workspace（2026-09-12 review #4）。
+            // SPEC §6.5.1：重啟會關掉使用者自己的 pane（2026-09-12 review #4）。
             Some(Skip::DefaultSession)
         } else if c.state != "running" {
             Some(Skip::NotRunning)
@@ -119,7 +95,6 @@ pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     (go, skip)
 }
 
-/// 從資料庫湊出候選清單。只走有 active run 的 bot——沒在跑的本來就沒有更新要套用。
 pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
     let mut out = Vec::new();
     for run in db::all_active_runs(&app.db).await? {
@@ -146,11 +121,7 @@ fn skip_json(c: &Cand, w: Skip) -> serde_json::Value {
     json!({"bot_id": c.bot_id, "name": c.name, "reason": w.code(), "reason_label": w.label()})
 }
 
-/// 開一批重啟：回傳給 HTTP 呼叫端的計畫，實際的 exit + resume 在背景一顆一顆跑。
-///
-/// 為什麼不同步做完再回：一顆 `stop_bot` 最久要等 agent 十秒才放棄，五顆就一分鐘——那是會把
-/// HTTP 連線拖爆的長度。所以這裡只回計畫，進度與結果走 WS（`bots_restart_progress` /
-/// `bots_restart_done`），前端照著畫「第幾顆 / 共幾顆」與最後的摘要。
+/// 只回計畫、背景執行：一顆 `stop_bot` 最久等十秒，同步做會拖爆 HTTP；進度走 WS。
 pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
     let cands = candidates(app).await?;
     let (go, skipped) = plan(&cands);
@@ -167,7 +138,7 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
         let skipped_for_task = skipped_json.clone();
         tokio::spawn(async move { run_batch(&app2, &bid, targets, skipped_for_task, supervisor).await });
     } else {
-        // 沒有可重啟的也要送一次 done：前端才不必自己分「送出去了但什麼都沒發生」這一種。
+        // 空批次也送 done，前端不必另外處理「什麼都沒發生」。
         app.emit(
             "bots_restart_done",
             json!({"batch_id": batch_id, "ok": [], "failed": [], "skipped": skipped_json}),
@@ -183,7 +154,7 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
     }))
 }
 
-/// 一顆一顆跑。**一顆失敗不中斷整批**——批次的價值就在於不用一顆一顆顧，中途停下等於白做。
+/// 一顆失敗不中斷整批。
 async fn run_batch(
     app: &Arc<App>,
     batch_id: &str,
@@ -218,8 +189,7 @@ async fn run_batch(
                 let msg = format!("{e:#}");
                 tracing::warn!(bot = %name, error = %msg, "restart for the claude update failed");
                 settle_failed_restart(app, &bot_id).await;
-                // Its own kind, not `health_changed`: the supervisor has to be able to tell "a bot
-                // the batch took down did not come back" from background noise.
+                // Own kind, not `health_changed`, so the supervisor can tell it from background noise.
                 let _ = crate::supervisor::store::push_inbox(
                     &app.db,
                     &format!("bot_restart_failed:{batch_id}:{bot_id}"),
@@ -251,23 +221,16 @@ async fn run_batch(
     .await;
 }
 
-/// 單顆的 exit + resume：`stop_bot` 把 run 收掉（`ended_at` 一寫上去，剛剛那個
-/// `native_session_id` 就成了 [`db::last_native_session_id`] 找得到的「上一個 session」），
-/// 接著用 `resume_native` 起回來，claude 拿到的就是 `--resume <session>`。
-///
-/// 跟 `lifecycle::restart_bot` 的差別只有這個旗標——那條路是「重新開始」，這條是「接著跑」。
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String> {
-    // 子 agent 的 pane 是父 agent 開的：關掉再開一個新的等於把它搬家，所以走原地重啟那條路。
+    // 子 agent 的 pane 是父 agent 開的：關掉再開等於搬家，所以原地重啟。
     if db::bot(&app.db, bot_id).await.ok().flatten().is_some_and(|b| b.managed_by == "child") {
         return lifecycle::restart_child_in_pane(app, bot_id).await.map_err(why);
     }
-    // One hold of the bot's lock for both halves — see `lifecycle::restart_bot_with` for the
-    // 2026-09-10 23:02 race this closes.
+    // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
     lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true }).await.map_err(why)
 }
 
-/// The supervisor's bot (AGM), if one is set up. Read straight off the row: `get_or_init` would
-/// create a supervisor where the user never asked for one.
+/// Read straight off the row: `get_or_init` would create a supervisor the user never asked for.
 async fn supervisor_bot_id(app: &Arc<App>) -> Option<String> {
     sqlx::query_scalar::<_, Option<String>>("SELECT bot_id FROM supervisors LIMIT 1")
         .fetch_optional(&app.db)
@@ -278,9 +241,7 @@ async fn supervisor_bot_id(app: &Arc<App>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// The supervisor goes **last**: it is the one bot that notices and repairs the others, so it
-/// should not be down while they restart — and if the batch goes wrong, it should still have
-/// been up to see it.
+/// Supervisor goes last: it repairs the others, so it must be up while they restart.
 pub fn supervisor_last(mut targets: Vec<(String, String)>, supervisor: Option<&str>) -> Vec<(String, String)> {
     if let Some(sid) = supervisor {
         if let Some(i) = targets.iter().position(|(id, _)| id == sid) {
@@ -291,9 +252,7 @@ pub fn supervisor_last(mut targets: Vec<(String, String)>, supervisor: Option<&s
     targets
 }
 
-/// A restart that failed must not leave a run behind that points at a closed pane: the UI would
-/// show the bot as running and nothing would ever start it again. End such a run, so the bot reads
-/// as stopped and can be started.
+/// A run left pointing at a closed pane would read as running and never be started again.
 async fn settle_failed_restart(app: &Arc<App>, bot_id: &str) {
     let (Ok(Some(run)), Ok(Some(bot))) = (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) else {
         return;
@@ -305,9 +264,7 @@ async fn settle_failed_restart(app: &Arc<App>, bot_id: &str) {
     }
 }
 
-/// After the supervisor's own restart, check for [`SUPERVISOR_WINDOW`] that it is really back
-/// (running, pane open, agent listed). If it is not, start it once more and put the outcome in
-/// the inbox (`supervisor_restart_retry`) — the one bot that would otherwise notice is this one.
+/// Retry once and record it in the inbox: the bot that would otherwise notice is this one.
 async fn verify_supervisor_back(app: Arc<App>, bot_id: String, name: String, batch_id: String) {
     let mut waited = Duration::ZERO;
     while waited < SUPERVISOR_WINDOW {
@@ -351,12 +308,10 @@ async fn supervisor_is_back(app: &Arc<App>, bot_id: &str) -> bool {
     lifecycle::run_alive(app, &run, &bot).await
 }
 
-/// How long the supervisor gets to come back after its own update restart.
 const SUPERVISOR_WINDOW: Duration = Duration::from_secs(60);
 const SUPERVISOR_POLL: Duration = Duration::from_secs(5);
 
-/// `LcError` 沒有 `Display`（它是拿來變成 HTTP body 的）。批次的失敗要進 WS 事件、最後印在
-/// 摘要裡給人看，所以這裡把它攤成一句話——衝突就取 daemon 自己寫的 `reason`。
+/// `LcError` 沒有 `Display`，批次失敗要給人看，攤成一句話。
 fn why(e: LcError) -> anyhow::Error {
     let s = match e {
         LcError::NotFound(what) => format!("找不到 {what}"),
@@ -389,7 +344,6 @@ mod tests {
         }
     }
 
-    /// 閒置的 claude 帶著更新 → 重啟；working / blocked → 跳過並說出原因。
     #[test]
     fn working_and_blocked_are_skipped() {
         let cands = vec![
@@ -406,7 +360,7 @@ mod tests {
         );
     }
 
-    /// 回合還在飛的不能動——即使 herdr 已經把 agent 報成 idle（§4.3 的備援還沒收掉那一回合）。
+    /// herdr 報 idle 但 §4.3 備援還沒收掉回合。
     #[test]
     fn an_in_flight_turn_is_skipped_even_when_idle() {
         let cands = vec![cand("mid-turn", "claude", "running", "idle", true, true)];
@@ -415,7 +369,6 @@ mod tests {
         assert_eq!(skip[0].1, Skip::TurnInFlight);
     }
 
-    /// 狀態不明與還在啟動 / 關閉中的一律不碰。
     #[test]
     fn unstable_runs_are_skipped() {
         let cands = vec![
@@ -431,7 +384,6 @@ mod tests {
         );
     }
 
-    /// 不是 claude、或根本沒有更新在等的，連「跳過」都不列——那不是這顆按鈕在講的事。
     #[test]
     fn non_candidates_are_not_reported_at_all() {
         let cands = vec![
@@ -447,8 +399,7 @@ mod tests {
         assert!(!is_candidate(&cands[2]));
     }
 
-    /// 子 agent 也進批次——它在自己的 pane 裡重啟
-    /// （2026-09-12 使用者：三顆子 agent 全被跳過，更新永遠套不上去）。
+    /// 2026-09-12 使用者：三顆子 agent 全被跳過，更新永遠套不上去。
     #[test]
     fn children_join_the_batch() {
         let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "idle", true, false) };
@@ -459,8 +410,7 @@ mod tests {
         assert!(skip.is_empty(), "{skip:?}");
     }
 
-    /// 使用者自己 default session 裡的 claude（SPEC §6.5.1）不進批次：它的 pane 不是 daemon 的，
-    /// 重啟會把使用者的終端關掉（2026-09-12 review #4）。
+    /// SPEC §6.5.1：重啟會關掉使用者的終端（2026-09-12 review #4）。
     #[test]
     fn a_bot_in_the_users_default_session_is_skipped() {
         let mine = Cand { default_session: true, ..cand("mine", "claude", "running", "idle", true, false) };
@@ -470,7 +420,6 @@ mod tests {
         assert_eq!(skip[0].1.code(), "default_session");
     }
 
-    /// 忙碌判斷對子 agent 一樣成立——歸誰管不影響「現在能不能動它」。
     #[test]
     fn a_busy_child_is_still_skipped_for_being_busy() {
         let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "working", true, false) };
@@ -479,7 +428,6 @@ mod tests {
         assert_eq!(skip[0].1, Skip::Working);
     }
 
-    /// 總管（AGM）排在最後重啟，其他順序不動；沒有總管或總管不在這批裡時原樣不變。
     #[test]
     fn the_supervisor_is_restarted_last() {
         let t = |ids: &[&str]| ids.iter().map(|i| (i.to_string(), format!("n-{i}"))).collect::<Vec<_>>();
@@ -489,8 +437,6 @@ mod tests {
         assert_eq!(order(supervisor_last(t(&["agm", "a"]), None)), ["agm", "a"]);
     }
 
-    /// A restart that fails leaves no run pointing at a dead pane, and says so in the supervisor's
-    /// inbox under its own kind — not `health_changed`.
     #[tokio::test]
     async fn a_failed_restart_leaves_no_dead_run_and_tells_the_supervisor() {
         let env = crate::testing::env().await;
@@ -517,7 +463,6 @@ mod tests {
         assert_eq!(ev.bot_id.as_deref(), Some(bot.as_str()));
     }
 
-    /// 什麼都沒有時是空計畫，不是錯誤。
     #[test]
     fn nothing_to_do_is_an_empty_plan() {
         let (go, skip) = plan(&[]);
