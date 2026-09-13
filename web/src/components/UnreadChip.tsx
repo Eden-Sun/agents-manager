@@ -36,15 +36,15 @@
  *   東西；整隊只出一顆 `team #N`。
  * - **AGM（總管）不算**：它靠例行 loop 醒來，每一輪都會跑完一回合，會把這一列洗成永遠有東西。
  *   真的想追還是可以用 ★ 釘它（釘選是使用者自己指定的，不受這條影響）。
- *   「總管的環境」不只 `AGM` 那個專案——daemon 也會把總管開出去的工人放在 `AGM-…` 底下
- *   （2026-09-13 使用者：`agm-pxf2pv-browser-gc` 這種 daemon 的雜務 bot 跑完不該出現在這一列）。
+ *   「總管的環境」＝ `GET /api/supervisor` 的 `project_id` 那個專案，總管本人與它開出去的工人
+ *   （build／race／sup／browser-gc）都在裡面。認 id 不認名字——那個專案使用者改得動名字
+ *   （2026-09-13 已經從 `AGM` 改成 `AGM-DM-GRUP`）。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { useShallow } from 'zustand/react/shallow'
 import type { Bot, TeamPhase } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
-import { chipTracked, isSupervisorProject } from '../lib/supervisorProject'
+import { chipTracked } from '../lib/supervisorProject'
 import { useStore } from '../store/store'
 import './unreadChip.css'
 
@@ -79,8 +79,9 @@ export function UnreadChip() {
   const selectedTeamId = useStore((s) => s.selectedTeamId)
   const selectBot = useStore((s) => s.selectBot)
   const selectTeam = useStore((s) => s.selectTeam)
-  // AGM 專案（daemon 自己建的總管環境）整個不算——那底下只有總管與它開出去的工人。
-  const agmProjectIds = useStore(useShallow((s) => s.projects.filter((p) => isSupervisorProject(p.label)).map((p) => p.id)))
+  // 總管專案（daemon 自己建的環境）整個不算——那底下只有總管與它開出去的工人。
+  // 用 `GET /api/supervisor` 的 `project_id`，不是名字：那個專案使用者改得動名字。
+  const supervisorProjectId = useStore((s) => s.supervisorProjectId)
   // 點進一顆 bot 的那一刻 `selectBot` 會同步清掉它的未讀，所以光看 `botUnread`，晶片會在手指
   // 底下當場消失。記住「它在被選走的前一刻有沒有未讀」，讓它留在列上。
   const keptId = keepSelectedRow(selectedBotId, botUnread)
@@ -88,7 +89,7 @@ export function UnreadChip() {
   const narrow = useMediaQuery(NARROW_QUERY)
 
   const items = useMemo(() => {
-    const tracked = (b: Bot) => chipTracked(b, agmProjectIds)
+    const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
     const waitsKids = (id: string) =>
       bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
     const out: ChipItem[] = []
@@ -140,7 +141,7 @@ export function UnreadChip() {
     // 手機：位置固定（見檔頭）。桌機：穩定排序，同一級之內維持上面推進去的順序（＝`bots` 的順序，team 在最後）。
     if (narrow) return out
     return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
-  }, [agmProjectIds, botUnread, bots, keptId, narrow, runs, selectBot, selectTeam, selectedBotId, selectedTeamId, teams])
+  }, [supervisorProjectId, botUnread, bots, keptId, narrow, runs, selectBot, selectTeam, selectedBotId, selectedTeamId, teams])
 
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)

@@ -63,6 +63,7 @@ import {
   windowActive,
   type ReadMark,
 } from './unread'
+import { fetchSupervisor } from '../api/supervisor'
 import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
@@ -406,6 +407,16 @@ export interface StoreState {
    * 之後 UI 的 team 入口靜默消失，不再重試，也不再跳錯誤（docs/FRONTEND.md §8）。
    */
   teamsSupported: boolean
+  /**
+   * 總管（AGM）自己那個專案的 id（`GET /api/supervisor` 的 `project_id`）。
+   *
+   * daemon 建的總管環境——總管本人與它開出去的工人（build／race／sup／browser-gc）都在這個
+   * 專案底下。要排除它們**只能靠這個 id**：專案名字是使用者可以改的（2026-09-13 已經被改成
+   * `AGM-DM-GRUP`），比對名字就是在賭他不再改名。`null` = 還沒讀到／這台 daemon 沒有總管。
+   */
+  supervisorProjectId: string | null
+  loadSupervisorProject: () => Promise<void>
+
   /** TeamLaunchPanel（右側暫時性 sheet）；null = 未開啟。 */
   teamLaunch: { projectId: string; issueNumber: number; repo: string } | null
 
@@ -697,6 +708,8 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
 
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
 let appliedStateSeq = 0
+/** 總管專案 id 只要讀到一次就夠（它不會變）；這個旗標擋掉開機那幾輪重複的請求。 */
+let supervisorProjectAsked = false
 let lastRefreshError: string | null = null
 /**
  * 還在等 daemon 回話的 `POST /api/order` 有幾個。拖曳後的樂觀順序（`botOrder`／`projectOrder`）
@@ -782,6 +795,7 @@ export const useStore = create<StoreState>((set, get) => ({
   missionLoadErrors: {},
   missionsSupported: true,
   shellView: initialShellView,
+  supervisorProjectId: null,
   hostShellSupported: true,
 
   selectedBotId: initialSelection.botId,
@@ -923,7 +937,25 @@ export const useStore = create<StoreState>((set, get) => ({
     if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
     // team 細節不在這裡重抓：`selectTeam`、`team_changed`（phase 有變）與 `resync` 各自負責，
     // 否則每次 state 刷新都多 2-3 個 team 請求，還會跟刪除賽跑（issue #23）。
+    // 總管的專案 id 只讀一次就夠（它不會變），讀不到就算了——排除規則會退回「不排除」，
+    // 那是多顯示幾顆晶片，不是壞掉。
+    if (get().supervisorProjectId === null) void get().loadSupervisorProject()
   }, (e) => reportStateRefreshError(set, get, e)),
+
+  async loadSupervisorProject() {
+    // 進行中就不要再打一次：`refreshState` 開機時會連跑好幾輪，光看 state 裡的 null 會讓
+    // 第一次還沒回來就又送一個（實測 2 次）。旗標是同步設的，所以擋得住。
+    if (supervisorProjectAsked) return
+    supervisorProjectAsked = true
+    try {
+      const info = await fetchSupervisor()
+      if (info?.project_id) set({ supervisorProjectId: info.project_id })
+    } catch {
+      // 舊 daemon 沒有這個端點（`fetchSupervisor` 已經吃掉 404 回 null）；其他錯誤也不值得
+      // 為了一條晶片列跳給使用者看。下一次重新整理還會再試一次。
+      supervisorProjectAsked = false
+    }
+  },
 
   selectBot: (botId) => {
     set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, shellView: null, rightTab: 'chat', settingsBotId: null })
