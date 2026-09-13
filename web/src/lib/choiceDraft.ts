@@ -14,7 +14,14 @@
  * 這裡只有純邏輯：所有 I/O 走 [`Io`] 注入，測試拿一個假終端跑完整條流程
  * （`choiceDraft.test.ts`），不必對真的 bot 按鍵。
  */
-import { keysToMove, parseChoiceMenu, type TuiChoiceMenu, type WalkTarget } from './tuiChoices.ts'
+import {
+  customAnswerShown,
+  isTypeSomething,
+  keysToMove,
+  parseChoiceMenu,
+  type TuiChoiceMenu,
+  type WalkTarget,
+} from './tuiChoices.ts'
 
 /** 跟終端打交道的三件事。元件傳真的進來，測試傳假的。 */
 export interface Io {
@@ -22,6 +29,11 @@ export interface Io {
   read: () => Promise<TuiChoiceMenu | null>
   send: (keys: string[]) => Promise<void>
   wait: (ms: number) => Promise<void>
+  /**
+   * 貼一段字（`POST /bots/{id}/text`，`enter: false`）。
+   * `Type something.` 那列游標停上去之後直接貼，不必先 Enter（2026-09-13 真機）。
+   */
+  paste: (text: string) => Promise<void>
 }
 
 /** 預載到的一頁。 */
@@ -245,8 +257,22 @@ export async function commit(
   draft: Draft,
   want: boolean[][],
   onProgress?: (done: number, total: number) => void,
+  custom: string[] = [],
 ): Promise<CommitResult> {
   const todo = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
+
+  for (const { p, i } of todo) {
+    const idx = radioPick(want[i])
+    if (!p.multi && idx >= 0 && isTypeSomething(p.choices[idx] ?? { title: '' })) {
+      if (!(custom[p.tab] ?? '').trim()) {
+        return {
+          ok: false,
+          error: `第 ${p.tab + 1} 題選了「Type something.」但沒有打字。請打一段或改選別項。`,
+          at: i,
+        }
+      }
+    }
+  }
 
   let cur = await io.read()
   if (!cur) return { ok: false, error: '讀不到畫面，什麼都沒送出。' }
@@ -272,11 +298,28 @@ export async function commit(
     }
 
     // 單選：沒有核取方塊、沒有這一頁的 Submit 列。走到那一項再 Enter，畫面可能自己跳下一題。
+    // `Type something.`：游標停上去之後直接貼字（不必先 Enter），標題被取代後再 Enter。
     if (!p.multi) {
       const idx = radioPick(want[i])
       if (idx < 0) continue
       const landed = await walkTo(io, idx, p)
       if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${idx + 1} 項，停在這裡。`, at: i }
+      if (isTypeSomething(p.choices[idx] ?? { title: '' })) {
+        const text = (custom[p.tab] ?? '').trim()
+        await io.paste(text)
+        let shown = false
+        for (let t = 0; t < SETTLE_TRIES; t++) {
+          await io.wait(SETTLE_STEP)
+          const now = await io.read()
+          if (now && now.choices[idx] && customAnswerShown(now.choices[idx], text)) {
+            shown = true
+            break
+          }
+        }
+        if (!shown) {
+          return { ok: false, error: `第 ${p.tab + 1} 題的自訂文字沒有出現在畫面上，沒有按 Enter。`, at: i }
+        }
+      }
       await io.send(['enter'])
       await io.wait(SETTLE_STEP * 3)
       const now = await io.read()

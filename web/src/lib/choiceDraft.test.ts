@@ -112,6 +112,7 @@ class FakeTui {
       read: async () => parseChoiceMenu(this.screen()),
       send: async (keys) => keys.forEach((k) => this.key(k)),
       wait: async () => {},
+      paste: async () => {},
     }
   }
 }
@@ -258,7 +259,9 @@ class FakeRadioTui {
   tab = 0
   cursor = 0
   chosen: (number | null)[] = [null, null, null, null]
+  typed: string[] = ['', '', '', '']
   sent: string[] = []
+  pasted: string[] = []
   submitted = false
 
   private readonly pages = [
@@ -284,8 +287,12 @@ class FakeRadioTui {
     if (this.tab === 4) {
       out.push('Review your answers', '')
       this.pages.forEach((p, i) => {
-        const a = this.chosen[i] !== null ? p.opts[this.chosen[i]!] : '（沒選）'
-        out.push(` ● ${p.q}`, `   → ${a}`)
+        let a = '（沒選）'
+        if (this.chosen[i] === p.opts.length) a = this.typed[i] || 'Type something.'
+        else if (this.chosen[i] !== null) a = p.opts[this.chosen[i]!] ?? '（沒選）'
+        const lines = a.split('\n')
+        out.push(` ● ${p.q}`, `   → ${lines[0]}`)
+        for (const extra of lines.slice(1)) out.push(`   ${extra}`)
       })
       out.push('', 'Ready to submit your answers?', '', `${mark(0)}1. Submit answers`, `${mark(1)}2. Cancel`)
       return out.join('\n')
@@ -293,7 +300,16 @@ class FakeRadioTui {
     const p = this.pages[this.tab]
     out.push(p.q, '')
     p.opts.forEach((o, i) => out.push(`${mark(i)}${i + 1}. ${o}`))
-    out.push(`${mark(p.opts.length)}${p.opts.length + 1}. Type something.`)
+    const typeIdx = p.opts.length
+    const typed = this.typed[this.tab]
+    if (typed) {
+      const lines = typed.split('\n')
+      const tick = this.chosen[this.tab] === typeIdx ? ' ✔' : ''
+      out.push(`${mark(typeIdx)}${typeIdx + 1}. ${lines[0]}${tick}`)
+      for (const extra of lines.slice(1)) out.push(`     ${extra}`)
+    } else {
+      out.push(`${mark(typeIdx)}${typeIdx + 1}. Type something.`)
+    }
     out.push('─'.repeat(60))
     out.push(`${mark(p.opts.length + 1)}${p.opts.length + 2}. Chat about this`)
     out.push('Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
@@ -331,11 +347,17 @@ class FakeRadioTui {
     if (k === 'enter') this.chosen[this.tab] = this.cursor
   }
 
+  paste(text: string) {
+    this.pasted.push(text)
+    if (this.tab < 4 && this.cursor === this.pages[this.tab].opts.length) this.typed[this.tab] = text
+  }
+
   io(): Io {
     return {
       read: async () => parseChoiceMenu(this.screen()),
       send: async (keys) => keys.forEach((k) => this.key(k)),
       wait: async () => {},
+      paste: async (text) => this.paste(text),
     }
   }
 }
@@ -389,6 +411,48 @@ test('單選一次送出：每頁 Enter 那一項，最後 Submit answers；不�
   assert.equal(tui.submitted, true)
   assert.equal(tui.sent.includes('space'), false)
   assert.ok(tui.sent.filter((k) => k === 'enter').length >= 5)
+})
+
+test('Type something 空字串不能送，終端一顆鍵都沒動', async () => {
+  const tui = new FakeRadioTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  const want = [[false, false, false, true, false], [], [], [], []]
+  tui.sent = []
+  const res = await commit(tui.io(), draft, want, undefined, ['', '', '', '', ''])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /沒有打字/)
+  assert.equal(tui.sent.length, 0)
+  assert.equal(tui.submitted, false)
+})
+
+test('Type something：預載 → 貼中文多行 → Enter → 對帳出現在 review', async () => {
+  const tui = new FakeRadioTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  const want = [
+    [false, false, false, true, false],
+    [true, false, false, false, false],
+    [true, false, false, false, false],
+    [true, false, false, false, false],
+    [],
+  ]
+  const custom = ['第一行\n第二行中文', '', '', '', '']
+  tui.sent = []
+  const res = await commit(tui.io(), draft, want, undefined, custom)
+  assert.deepEqual(res, { ok: true })
+  assert.equal(tui.typed[0], '第一行\n第二行中文')
+  assert.deepEqual(tui.chosen, [3, 0, 0, 0])
+  assert.equal(tui.submitted, true)
+  assert.deepEqual(tui.pasted, ['第一行\n第二行中文'])
+  const review = parseChoiceMenu(tui.screen())
+  assert.ok(review)
+  assert.ok(review.review[0]?.answer.includes('第一行'))
+  assert.ok(review.review[0]?.answer.includes('第二行中文'))
 })
 
 test('wantOf 拿讀到當下的勾選當預設；samePage 只比題目與選項字串', async () => {

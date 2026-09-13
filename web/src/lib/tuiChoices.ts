@@ -336,6 +336,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     if (ma && review.length) {
       const last = review[review.length - 1]
       last.answer = joinWrapped(last.answer, ma[1].trim())
+      continue
+    }
+    // Type something 換行貼上之後，review 第二行沒有 `→`（2026-09-13 真機）。
+    if (review.length && indentOf(lines[i]) >= 3 && lines[i].trim() && !matchRow(i, lines[i]) && !REVIEW_Q.test(lines[i])) {
+      const last = review[review.length - 1]
+      last.answer = joinWrapped(last.answer, lines[i].trim())
     }
   }
 
@@ -404,7 +410,25 @@ export function keysToSelect(menu: TuiChoiceMenu, target: number): string[] {
 
 /** `Type something.` / `Chat about this`：編號列，但不是勾選項。 */
 export function isActionChoice(c: Pick<TuiChoice, 'title'>): boolean {
-  return /^type something\.?$/i.test(c.title.trim()) || /^chat about this$/i.test(c.title.trim())
+  return isTypeSomething(c) || /^chat about this$/i.test(c.title.trim())
+}
+
+/** 游標停在這列時可以直接貼字，標題會被取代（2026-09-13 真機）。 */
+export function isTypeSomething(c: Pick<TuiChoice, 'title'>): boolean {
+  return /^type something\.?$/i.test(c.title.trim())
+}
+
+/**
+ * 貼上之後那一列是不是已經長出這段字。第一行在標題、其餘在說明（換行貼上就是這樣）；
+ * 答完回來看會多一個 `✔`。
+ */
+export function customAnswerShown(choice: TuiChoice, text: string): boolean {
+  const want = text.replace(/\s+/g, ' ').trim()
+  if (!want) return false
+  const first = text.split('\n')[0]?.trim() ?? ''
+  const title = choice.title.replace(/\s*✔\s*$/, '').trim()
+  const blob = `${title} ${choice.detail}`.replace(/\s+/g, ' ').trim()
+  return title === first || blob.includes(want) || blob.includes(first)
 }
 
 /**

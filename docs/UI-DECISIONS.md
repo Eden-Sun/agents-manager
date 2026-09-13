@@ -1464,10 +1464,23 @@ context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三
   ▸ 只展開說明，觸控 44px，不疊在標題上。
 - **送出**：單選頁走到那一項再 Enter（不是 space）。複選仍走差集 + 該頁 Submit。
 - **認不出來就不畫捷徑**，退回終端快照＋按鍵面板。
-- `Type something.` / `Chat about this` 在單選裡是編號選項，可以選（送出就是對那一列 Enter）。
-  選完若終端改成自由輸入，這次不代打文字——畫面變了就停手，請用終端原文。
+- `Chat about this` 在單選裡仍是編號選項，點了就對那一列 Enter。
 
 截圖 `docs/screenshots/survey-radio/390-picked.png`。假 TUI 在 `choiceDraft.test.ts`。
+
+## Type something. 就地打字（2026-09-13）
+
+2026-09-13 在拋棄式 claude pane 實測 AskUserQuestion（**不是** 0-opu 那份）：
+
+- 游標停在 `Type something.` 上就可以貼字，**不必先 Enter**。腳註會多 `ctrl+g to edit in Vim`。
+- `POST /text`（herdr `send-text`）把列標題換成貼上的第一行；換行變成下一列縮排說明。
+- **Enter 才答完這一頁並跳下一題**（分頁變 ☒）。回來看是 `4. <自訂文字> ✔`。
+- review 頁：`→ 第一行` 下一行沒有箭頭的是同一段答案的換行。
+- 空字串不能送。
+
+UI：選到那一列就展開 ≥44px 多行輸入（16px，可中文可貼）。草稿跟單頁即時模式同一套。送出：走到那列 → paste → 對帳標題出現那段字 → Enter；對不上就停。
+
+截圖 `docs/screenshots/survey-radio/390-type.png`。fixture：`type-something-idle.txt` / `typed` / `review`。
 
 ## 側欄父列標「在等子 agent」（2026-09-12）
 

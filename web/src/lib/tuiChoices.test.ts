@@ -1,7 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { isActionChoice, keysToMove, keysToSelect, parseChoiceMenu, sameChoices } from './tuiChoices.ts'
+import {
+  customAnswerShown,
+  isActionChoice,
+  isTypeSomething,
+  keysToMove,
+  keysToSelect,
+  parseChoiceMenu,
+  sameChoices,
+} from './tuiChoices.ts'
 
 /**
  * 2026-09-12 第三輪真機快照（bot `carbis`，185×54）：claude 的**多分頁 ＋ 多選**
@@ -17,6 +25,9 @@ const REVIEW = readFileSync(new URL('./__fixtures__/carbis-review.txt', import.m
 
 /** 2026-09-13 真機：多分頁**單選**（沒有 `[ ]`）。草稿若把 `checked===null` 當 disabled 就勾不起來。 */
 const OPU_RADIO = readFileSync(new URL('./__fixtures__/opu-radio.txt', import.meta.url), 'utf8')
+const TYPE_IDLE = readFileSync(new URL('./__fixtures__/type-something-idle.txt', import.meta.url), 'utf8')
+const TYPE_TYPED = readFileSync(new URL('./__fixtures__/type-something-typed.txt', import.meta.url), 'utf8')
+const TYPE_REVIEW = readFileSync(new URL('./__fixtures__/type-something-review.txt', import.meta.url), 'utf8')
 
 /** 2026-09-12 真機快照（bot `carbis`，185 欄）。分隔線夾在 5 與 6 之間是原樣。 */
 const CARBIS = [
@@ -271,4 +282,30 @@ test('多分頁單選（opu 真畫面）：五個分頁、沒有核取方塊、T
   assert.equal(isActionChoice(menu.choices[4]), true)
   assert.ok(menu.question?.includes('cc2 撞到哪一種才換下一個身分'))
   assert.ok(menu.choices[0].detail.includes('reviewer 建議'))
+})
+
+test('Type something 游標停上去：標題還是那句、腳註多了 ctrl+g', () => {
+  const menu = parseChoiceMenu(TYPE_IDLE)
+  assert.ok(menu)
+  assert.equal(menu.cursor, 3)
+  assert.equal(isTypeSomething(menu.choices[3]), true)
+  assert.equal(menu.choices[3].title, 'Type something.')
+})
+
+test('貼上之後標題被取代、換行進說明；customAnswerShown 認得出來', () => {
+  const menu = parseChoiceMenu(TYPE_TYPED)
+  assert.ok(menu)
+  assert.equal(isTypeSomething(menu.choices[2] ?? { title: '' }), false)
+  assert.equal(menu.choices[2].title, '第一行')
+  assert.ok(menu.choices[2].detail.includes('第二行中文'))
+  assert.equal(customAnswerShown(menu.choices[2], '第一行\n第二行中文'), true)
+})
+
+test('答完進 review：自訂答案（含換行）讀得出來', () => {
+  const menu = parseChoiceMenu(TYPE_REVIEW)
+  assert.ok(menu)
+  assert.ok(menu.review.length >= 2)
+  assert.ok(menu.review[0].answer.includes('測試中文'))
+  assert.ok(menu.review[1].answer.includes('第一行'))
+  assert.ok(menu.review[1].answer.includes('第二行中文'))
 })
