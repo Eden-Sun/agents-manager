@@ -290,6 +290,8 @@ button:disabled {
 }
 
 .sidebar-head {
+  position: relative;
+  z-index: 6;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -297,7 +299,8 @@ button:disabled {
   min-height: 46px;
   padding: 6px 10px 6px 14px;
   border-bottom: 1px solid var(--border);
-  overflow: hidden;
+  /* RAM 點開的清單是 absolute，不能 hidden——上一版為了切齊「已連線」把下拉裁掉了。 */
+  overflow: visible;
 }
 
 /* 左欄：標題在上，pane 數與連線在下。 */
@@ -10045,8 +10048,21 @@ button.run-debug-toggle:hover {
    同一個東西。差別只在這張是表格——使用者要在幾十列裡比大小、找出哪些能砍。 */
 .mem-wrap {
   position: relative;
+  z-index: 6;
   flex: none;
   display: inline-flex;
+}
+
+/* 側欄中欄的 RAM：下拉比側欄寬，要畫進主畫面，不能被側欄或標題列裁。 */
+.head-ram .mem-wrap {
+  z-index: 8;
+}
+
+.head-ram .mem-pop {
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 24px));
+  max-width: none;
 }
 
 .mem-open {

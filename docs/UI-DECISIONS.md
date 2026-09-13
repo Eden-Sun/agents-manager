@@ -1731,6 +1731,9 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
 
 截圖 `docs/screenshots/sidebar-head/288-stack.png`。
 
+點 RAM 的下拉（`.mem-pop`）不能再被 `.sidebar-head { overflow: hidden }` 裁掉；標題列改
+`overflow: visible` 並抬 z-index，清單從中欄置中往主畫面長出來。
+
 ## 桌機右欄可以嵌一個手機預覽（2026-09-13）
 
 手機版的版面問題只有在窄視窗才看得到，開發時的常態卻是寬視窗；以前要驗得另開視窗拉窄或
