@@ -1036,15 +1036,24 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   bot 對通知型交辦（`--notice`）的回覆、角色之間在同一次喚醒回合裡的回信。它們跟下一次有事的喚醒一起送，自己不開回合。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
-  協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋正規化內容雜湊＋十分鐘一格。
+  協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。
+  去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋內容指紋＋十分鐘一格。指紋 = 收件角色＋目標＋正文（逐字，不做空白正規化，縮排差一格就是不同內容）＋附件；
+  同一個 id 換了內容不是重播，回 409 `request_mismatch` 且什麼都不寫——否則第二次申請會被讀成「送到了」而靜靜消失。
   一般 bot → 協調者；巡檢 ↔ 協調者互相交接給對方。不攔：使用者（沒有 `relay_from`）、`relay_from=daemon`、目標不是角色 bot、協調者未建立。
-- **一件事只有一個角色**：送出時以 `claimed_by` 條件更新；`ack` 帶角色 bot token 時只能結自己收的（另一個角色的回 409 `claimed_by_other_role`），UI／使用者照舊全能結。
+- **角色之間的交接**：`assign` 的目標是另一個角色 bot 時，**不是交辦**——不建交辦列、不開回合，而是走同一條佇列
+  （回 `{kind:"handover", routed, queued, duplicate, wake, inbox_event_id}`），批次、節流與「回覆不再叫醒對方」只有一份規則。
+  對自己的角色下交辦仍是 400。排隊中的交辦若目標在期間變成角色 bot，`dispatch` 停手並記 `dispatch_failed`，不直接打進對方 pane。
+- **一件事只有一個角色**：擁有者的定義是 `COALESCE(claimed_by, role)`——送出去之後看實際收的人，還沒送就看路由表。
+  兩個角色的待送查詢、`ack` 的守衛與 UI 過濾都用這一條，所以雙角色剛啟用時、先前由巡檢收走（`claimed_by='patrol'`）
+  而被 recover 放回 pending 的協調事件仍歸巡檢，不會被協調者撈去送、卻又寫不進 delivered（每個 tick 重送一次）。
+  送出時以 `claimed_by` 條件更新；`ack` 的守衛跟寫入在同一句 SQL（先讀後寫之間 claim 會變），帶角色 bot token 時只能結自己收的（另一個角色的回 409 `claimed_by_other_role`），UI／使用者照舊全能結。
   核准決定改為條件寫入（`WHERE status=<讀到的狀態>`），兩個角色同時決定只有一個成功（409 `decided_concurrently`）；交辦驗收本來就是條件寫入。
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`）。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
-- **協調者故障不倒回巡檢**：沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
+- **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
   停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。送不出去是有界退避（15 秒倍增到 `responder_max_backoff_secs`），**沒有次數上限**，
   也不開 `notify_exhausted`。巡檢自己的事件照舊有 `notify_max_attempts`。
+  登記的 bot 被刪掉 → `status=missing`（`configured:true`、`bot_present:false`），推一次 `responder_bot_missing` 給巡檢，事件照樣留在協調者的佇列等它被建回來。
 - **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
 - **交辦的驗收角色**：`POST /api/supervisor/assignments` 的 `review_role`；省略 = 呼叫的角色（token）自己，UI／腳本呼叫 = 協調者。巡檢的例行維運（daemon-update、browser-gc、健康追查）寫 `patrol`。
   followup 沿用父交辦的 `review_role`。協調者存在且驗收角色是它時，派工訊息的 `relay_from` 標協調者，bot 回話才找對人。
