@@ -159,6 +159,9 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
 /// Order matters and is the whole point: the assignment row is committed *first*, then the
 /// prompt goes out under that row's `client_request_id`. A crash in between leaves a `queued`
 /// row the controller retries with the same id, so the worker never gets the job twice.
+/// `expects_review = false` 是**通知**：AGM 只是要把話說給 bot 聽（「收到」「進 idle」
+/// 「看完即可」），送到、回合結束就結案，不進 awaiting_review、不會被當成卡住的工作。
+#[allow(clippy::too_many_arguments)]
 pub async fn assign(
     app: &Arc<App>,
     target_bot_id: &str,
@@ -167,6 +170,7 @@ pub async fn assign(
     source_turn_id: Option<&str>,
     ownership: &[String],
     follow_up_of: Option<&str>,
+    expects_review: bool,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -236,6 +240,7 @@ pub async fn assign(
         text,
         ownership,
         follow_up_of,
+        expects_review,
     )
     .await
     .map_err(up)?;

@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS supervisor_assignments (
   -- facts stay in `delivery`, `turn_status` and `evidence_complete` — a turn that ended is not
   -- the same claim as a job that was accepted.
   status TEXT NOT NULL DEFAULT 'queued',
+  -- 0 = 通知（notice）：AGM 只是要把話說給 bot 聽，不等回覆也不驗收。回合一結束就自己結案，
+  -- 不進 awaiting_review、不會變成 assignment_stalled。1 = 一般交辦，照 §18.3 等 AGM 裁示。
+  expects_review INTEGER NOT NULL DEFAULT 1,
+  -- `quota_blocked` 用：額度什麼時候回來（CLI 橫幅寫的 `try again at …`，沒寫就給預設）。
+  resume_at TEXT,
+  -- 因為額度被擋、之後自動重送的次數。重送用 `<crid>#r<n>` 當 client_request_id：
+  -- 同一次重送重跑幾遍都只會有一個 turn，但跟前一次撞上限的那個 turn 分得開。
+  quota_retries INTEGER NOT NULL DEFAULT 0,
   delivery TEXT,
   result TEXT,
   error TEXT,
@@ -276,6 +284,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // Files / modules this assignment was handed, so an overlap with another open
         // assignment can at least be reported to AGM (§18.4).
         ("ownership_json", "ALTER TABLE supervisor_assignments ADD COLUMN ownership_json TEXT"),
+        // 通知型交辦（見 SCHEMA 的欄位註解）。舊資料一律 1＝照原本的規則等 AGM 驗收。
+        ("expects_review", "ALTER TABLE supervisor_assignments ADD COLUMN expects_review INTEGER NOT NULL DEFAULT 1"),
+        ("resume_at", "ALTER TABLE supervisor_assignments ADD COLUMN resume_at TEXT"),
+        ("quota_retries", "ALTER TABLE supervisor_assignments ADD COLUMN quota_retries INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !has_column(pool, "supervisor_assignments", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -398,12 +410,20 @@ pub struct Assignment {
     pub follow_up_of: Option<String>,
     pub legacy_closed: i64,
     pub ownership_json: Option<String>,
+    /// 0 = 通知，不等回覆也不驗收（見 SCHEMA）。
+    pub expects_review: i64,
+    /// `quota_blocked` 時：額度預計什麼時候回來。
+    pub resume_at: Option<String>,
+    /// 因額度自動重送過幾次。
+    pub quota_retries: i64,
 }
 
 /// Lifecycle states an assignment can still move out of on its own.
 pub const EXECUTING_STATES: [&str; 3] = ["queued", "delivered", "unknown"];
 /// Everything AGM still owes attention to: in flight, waiting to be accepted, or blocked.
-pub const OPEN_STATES: [&str; 5] = ["queued", "delivered", "unknown", "awaiting_review", "blocked"];
+/// `quota_blocked` 也在裡面——工作還沒做完，只是在等額度回來；controller 會自己重送。
+pub const OPEN_STATES: [&str; 6] =
+    ["queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked"];
 
 impl Assignment {
     /// The wire shape the front end and the `agm` CLI agreed on.
@@ -444,7 +464,32 @@ impl Assignment {
             // anyone. Not a claim that the work was verified.
             "legacy_closed": self.legacy_closed != 0,
             "ownership": self.ownership(),
+            // `notice` = AGM 只是把話說給 bot 聽：送到、回合結束就結案，沒有驗收這一段。
+            "kind": if self.is_notice() { "notice" } else { "task" },
+            "expects_review": !self.is_notice(),
+            // 只有 `quota_blocked` 用得到：額度什麼時候回來、已經自動重送幾次。
+            "resume_at": self.resume_at,
+            "quota_retries": self.quota_retries,
         })
+    }
+
+    /// 通知型（不等回覆、不驗收）。
+    pub fn is_notice(&self) -> bool {
+        self.expects_review == 0
+    }
+
+    /// 這一次要送出去用的 `client_request_id`。
+    ///
+    /// 第一次就是 assignment 自己的那個；被額度擋下重送時加上 `#r<n>`——`lifecycle::prompt`
+    /// 的冪等是「同一個 crid 回同一個 turn」，不換 id 的話重送會直接拿回上一個**撞到上限的**
+    /// turn，等於什麼都沒送。加了序號之後：同一次重送重跑幾遍仍然只有一個 turn（冪等還在），
+    /// 但跟上一次分得開。
+    pub fn dispatch_crid(&self) -> String {
+        if self.quota_retries <= 0 {
+            self.client_request_id.clone()
+        } else {
+            format!("{}#r{}", self.client_request_id, self.quota_retries)
+        }
     }
 
     /// Files / modules this assignment was handed.
@@ -903,6 +948,7 @@ pub async fn assignment_by_turn(pool: &SqlitePool, turn_id: &str) -> Result<Opti
 
 /// Write the assignment down *before* anything is sent. A crash between here and the prompt
 /// leaves a `queued` row the controller picks up again with the same client_request_id.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_assignment(
     pool: &SqlitePool,
     request_id: Option<&str>,
@@ -911,13 +957,14 @@ pub async fn insert_assignment(
     text: &str,
     ownership: &[String],
     follow_up_of: Option<&str>,
+    expects_review: bool,
 ) -> Result<Assignment> {
     let now = crate::db::now();
     sqlx::query(
         "INSERT INTO supervisor_assignments
            (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
-            ownership_json, follow_up_of, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
+            ownership_json, follow_up_of, expects_review, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?, ?)",
     )
     .bind(crate::db::ulid())
     .bind(SUPERVISOR_ID)
@@ -927,6 +974,7 @@ pub async fn insert_assignment(
     .bind(text)
     .bind((!ownership.is_empty()).then(|| serde_json::to_string(ownership).unwrap_or_default()))
     .bind(follow_up_of)
+    .bind(i64::from(expects_review))
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -993,8 +1041,12 @@ pub async fn assignments_undelivered_since(pool: &SqlitePool, cutoff: &str) -> R
 /// stalled-work probe behind the `assignment_stalled` incident.
 pub async fn assignments_idle_since(pool: &SqlitePool, cutoff: &str) -> Result<Vec<Assignment>> {
     Ok(sqlx::query_as::<_, Assignment>(
+        // 兩種「不動」不是卡住：通知本來就沒人要驗收（它也不會停在 awaiting_review），
+        // 被額度擋下的那種是**在等一個已知的時間點**，controller 自己會重送。把它們報成
+        // incident 只會讓 AGM 每兩小時被叫醒一次去看一件沒有人需要做的事。
         "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
            AND status IN ('queued','delivered','unknown','awaiting_review')
+           AND NOT (expects_review=0 AND status='awaiting_review')
            AND updated_at <= ? ORDER BY updated_at ASC",
     )
     .bind(SUPERVISOR_ID)
@@ -1086,12 +1138,17 @@ pub async fn settle_and_notify(
 ) -> Result<Settled> {
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
-    let moved = sqlx::query(
+    // 通知（`expects_review=0`）而且回合是正常結束的：沒有東西要驗收，當場結案。
+    // 這是 2026-09-12 兩件 `assignment_stalled` incident 的根因——AGM 說一句「收到」也要
+    // 它自己回頭 review，沒 review 就被當成卡住的工作。
+    let ok_turn = turn_status == "completed" || turn_status == "completed_fallback";
+    let land_on = if ok_turn { "CASE WHEN expects_review=0 THEN 'completed' ELSE 'awaiting_review' END" } else { "'awaiting_review'" };
+    let moved = sqlx::query(&format!(
         "UPDATE supervisor_assignments
-            SET status='awaiting_review', turn_status=?, evidence_complete=?,
+            SET status={land_on}, turn_status=?, evidence_complete=?,
                 result=COALESCE(?, result), error=COALESCE(?, error), completed_at=?, updated_at=?
           WHERE id=? AND status IN ('queued','delivered','unknown')",
-    )
+    ))
     .bind(turn_status)
     .bind(i64::from(evidence_complete))
     .bind(result)
@@ -1103,11 +1160,22 @@ pub async fn settle_and_notify(
     .await?
     .rows_affected()
         > 0;
-    let (bot_id, turn_id): (String, Option<String>) =
-        sqlx::query_as("SELECT target_bot_id, turn_id FROM supervisor_assignments WHERE id=?")
+    let (bot_id, turn_id, expects_review, status): (String, Option<String>, i64, String) =
+        sqlx::query_as("SELECT target_bot_id, turn_id, expects_review, status FROM supervisor_assignments WHERE id=?")
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
+    // 通知結案了就不要再叫 AGM 來看：inbox 事件改成 `assignment_noticed`，digest 與
+    // `needs_review` 都不會把它算成待辦。失敗的通知照舊走原本那條（它真的需要有人看）。
+    let kind = if expects_review == 0 && status == "completed" { "assignment_noticed" } else { kind };
+    let payload = if expects_review == 0 && status == "completed" {
+        let mut p = payload.clone();
+        p["needs_review"] = Value::Bool(false);
+        p["kind"] = Value::String("notice".into());
+        p
+    } else {
+        payload.clone()
+    };
     let event_new = sqlx::query(
         "INSERT OR IGNORE INTO supervisor_inbox
            (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
@@ -1129,6 +1197,127 @@ pub async fn settle_and_notify(
         > 0;
     tx.commit().await?;
     Ok(Settled { moved, event_new })
+}
+
+/// 額度撞牆：把 assignment 停在 `quota_blocked`，並在**同一個交易**裡通知 AGM。
+///
+/// 這不是失敗，也不是要人來看的東西：帳號的用量上限會在 `resume_at` 之後自己回來，
+/// controller 屆時用下一個 `#r<n>` 重送。之所以要單獨一個狀態而不是塞回 `queued`，是因為
+/// queued 每 10 秒就會被試一次——撞上限的帳號會被一路重試到 backoff 用完，然後變成
+/// `dispatch_failed`，工作就這樣無聲斷掉（2026-09-12 codex-astra 三次都是這樣）。
+pub async fn park_quota_blocked(
+    pool: &SqlitePool,
+    id: &str,
+    resume_at: &str,
+    why: &str,
+    event_key: &str,
+    payload: &Value,
+) -> Result<Settled> {
+    let now = crate::db::now();
+    let mut tx = pool.begin().await?;
+    let moved = sqlx::query(
+        "UPDATE supervisor_assignments
+            SET status='quota_blocked', resume_at=?, error=?, updated_at=?
+          WHERE id=? AND status IN ('queued','delivered','unknown')",
+    )
+    .bind(resume_at)
+    .bind(why)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    let (bot_id, turn_id): (String, Option<String>) =
+        sqlx::query_as("SELECT target_bot_id, turn_id FROM supervisor_assignments WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let event_new = sqlx::query(
+        "INSERT OR IGNORE INTO supervisor_inbox
+           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'assignment_quota_blocked', ?, 'pending', ?, ?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(SUPERVISOR_ID)
+    .bind(event_key)
+    .bind(id)
+    .bind(&bot_id)
+    .bind(&turn_id)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(Settled { moved, event_new })
+}
+
+/// 額度回來了（或 `resume_at` 已經過去）：回到 `queued`，重送次數 +1，並通知 AGM 一聲。
+///
+/// `turn_id` 一併清掉：下一次是新的 turn（見 [`Assignment::dispatch_crid`]），留著舊的會讓
+/// `assignment_by_turn` 把新舊兩回合混在一起。
+pub async fn resume_quota_blocked(pool: &SqlitePool, id: &str, event_key: &str, payload: &Value) -> Result<Settled> {
+    let now = crate::db::now();
+    let mut tx = pool.begin().await?;
+    let moved = sqlx::query(
+        "UPDATE supervisor_assignments
+            SET status='queued', quota_retries=quota_retries+1, resume_at=NULL, turn_id=NULL,
+                delivery=NULL, next_attempt_at=NULL, attempts=0, updated_at=?
+          WHERE id=? AND status='quota_blocked'",
+    )
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    let (bot_id,): (String,) = sqlx::query_as("SELECT target_bot_id FROM supervisor_assignments WHERE id=?")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let event_new = sqlx::query(
+        "INSERT OR IGNORE INTO supervisor_inbox
+           (id, supervisor_id, event_key, assignment_id, bot_id, kind, payload_json, state, created_at, updated_at)
+         VALUES (?,?,?,?,?, 'assignment_quota_resumed', ?, 'pending', ?, ?)",
+    )
+    .bind(crate::db::ulid())
+    .bind(SUPERVISOR_ID)
+    .bind(event_key)
+    .bind(id)
+    .bind(&bot_id)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(Settled { moved, event_new })
+}
+
+/// CLI 說的重試時間變了：只改 `resume_at`，不動狀態也不再發一次通知。
+pub async fn touch_resume_at(pool: &SqlitePool, id: &str, resume_at: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisor_assignments SET resume_at=?, updated_at=? WHERE id=? AND status='quota_blocked'")
+        .bind(resume_at)
+        .bind(crate::db::now())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 被額度擋著的全部（不管時間到了沒）——重送前要再問一次額度現況時用。
+pub async fn quota_blocked_all(pool: &SqlitePool) -> Result<Vec<Assignment>> {
+    Ok(sqlx::query_as::<_, Assignment>(
+        "SELECT * FROM supervisor_assignments WHERE supervisor_id=? AND status='quota_blocked' ORDER BY updated_at ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// A terminal assignment whose completion event never made it into the inbox.
@@ -2059,10 +2248,109 @@ mod tests {
     async fn one_client_request_id_is_one_assignment() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-1", "do the thing", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-1", "do the thing", &[], None, true).await.unwrap();
         assert_eq!(a.status, "queued");
-        assert!(insert_assignment(&p, None, "bot1", "req-1", "do the thing", &[], None).await.is_err());
+        assert!(insert_assignment(&p, None, "bot1", "req-1", "do the thing", &[], None, true).await.is_err());
         assert_eq!(assignment_by_crid(&p, "req-1").await.unwrap().unwrap().id, a.id);
+    }
+
+    /// 通知（`expects_review=false`）：送到、回合結束就自己結案。
+    ///
+    /// 2026-09-12 兩件 `assignment_stalled` incident 的根因——AGM 對 bot 說一句「收到」也被
+    /// 當成一份要驗收的工作，沒人 review 就被 controller 報成卡住。
+    #[tokio::test]
+    async fn a_notice_closes_itself_when_the_turn_ends() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "notice-1", "收到，進 idle", &[], None, false).await.unwrap();
+        assert!(a.is_notice());
+        mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
+        let s = settle_and_notify(&p, &a.id, "completed", true, Some("好"), None, "k1", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        assert!(s.moved);
+        let after = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "completed", "通知不需要驗收");
+        assert!(after.completed_at.is_some());
+        assert_eq!(awaiting_review_count(&p).await.unwrap(), 0);
+        // inbox 事件還是有（AGM 想看得到），但它不是待辦。
+        let ev = pending_inbox(&p).await.unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, "assignment_noticed");
+        let payload: Value = serde_json::from_str(&ev[0].payload_json).unwrap();
+        assert_eq!(payload["needs_review"], json!(false));
+    }
+
+    /// …但**失敗**的通知還是要有人看：送不出去這件事本身是壞消息。
+    #[tokio::test]
+    async fn a_notice_that_failed_still_waits_for_agm() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "notice-2", "看完即可", &[], None, false).await.unwrap();
+        settle_and_notify(&p, &a.id, "dispatch_failed", true, None, Some("bot has no active run"), "k2", "assignment_failed", &json!({}))
+            .await
+            .unwrap();
+        let after = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "awaiting_review");
+        assert_eq!(awaiting_review_count(&p).await.unwrap(), 1);
+    }
+
+    /// 一般交辦不受影響：回合結束照樣停在 awaiting_review。
+    #[tokio::test]
+    async fn a_task_still_waits_for_acceptance() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "task-1", "做這個", &[], None, true).await.unwrap();
+        settle_and_notify(&p, &a.id, "completed", true, Some("做完了"), None, "k3", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "awaiting_review");
+    }
+
+    /// 撞到用量上限不是失敗也不是完成：停在 `quota_blocked`，等額度回來自己重送。
+    #[tokio::test]
+    async fn a_quota_block_parks_and_then_resumes_with_a_fresh_crid() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "job-1", "跑那個批次", &[], None, true).await.unwrap();
+        mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
+        let parked = park_quota_blocked(&p, &a.id, "2026-09-13T01:00:00Z", "撞到上限", "qb:1", &json!({}))
+            .await
+            .unwrap();
+        assert!(parked.moved && parked.event_new);
+        let blocked = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(blocked.status, "quota_blocked");
+        assert_eq!(blocked.resume_at.as_deref(), Some("2026-09-13T01:00:00Z"));
+        assert!(blocked.is_open(), "工作還沒做完，只是在等額度");
+        // 這一段時間內它不算「卡住」——incident 探針看不到它。
+        assert!(assignments_idle_since(&p, "2999-01-01T00:00:00Z").await.unwrap().iter().all(|x| x.id != a.id));
+
+        let resumed = resume_quota_blocked(&p, &a.id, "qr:1", &json!({})).await.unwrap();
+        assert!(resumed.moved);
+        let back = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(back.status, "queued");
+        assert_eq!(back.quota_retries, 1);
+        assert!(back.turn_id.is_none(), "下一次是新的 turn");
+        // crid 換過了，否則 `lifecycle::prompt` 會直接把上一個撞牆的 turn 還回來。
+        assert_eq!(back.dispatch_crid(), "job-1#r1");
+        assert_eq!(a.dispatch_crid(), "job-1");
+        // 兩則通知都在（擋下 / 重送），而且都不是待辦。
+        let kinds: Vec<String> = pending_inbox(&p).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"assignment_quota_blocked".to_string()));
+        assert!(kinds.contains(&"assignment_quota_resumed".to_string()));
+    }
+
+    /// 同一次擋下重放幾遍只會有一則通知（event_key 帶重送次數）。
+    #[tokio::test]
+    async fn parking_twice_does_not_wake_agm_twice() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "job-2", "x", &[], None, true).await.unwrap();
+        let first = park_quota_blocked(&p, &a.id, "2026-09-13T01:00:00Z", "撞到上限", "qb:2", &json!({})).await.unwrap();
+        let again = park_quota_blocked(&p, &a.id, "2026-09-13T01:00:00Z", "撞到上限", "qb:2", &json!({})).await.unwrap();
+        assert!(first.event_new);
+        assert!(!again.event_new, "重放不再通知一次");
+        assert!(!again.moved, "已經在 quota_blocked 了");
     }
 
     /// A replayed turn event — or the restart rescan seeing the same completion — must not
@@ -2097,7 +2385,7 @@ mod tests {
     async fn pending_counts_open_work_as_well_as_unhandled_news() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-1", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-1", "x", &[], None, true).await.unwrap();
         assert_eq!(pending_count(&p).await.unwrap(), 1);
         mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
         assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "delivered");
@@ -2160,7 +2448,7 @@ mod tests {
     async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "stopped-bot", "req-r", "做事", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "stopped-bot", "req-r", "做事", &[], None, true).await.unwrap();
         // Created long ago; retried 20 times, the last one just now. `defer` stamps
         // `updated_at` off the real clock, so the cutoff has to sit between the two: older than
         // "now" (or the idle probe would match anything) and newer than `created_at`.
@@ -2196,7 +2484,7 @@ mod tests {
     async fn cancelling_unknown_delivery_keeps_the_evidence_that_it_may_be_running() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-u", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-u", "x", &[], None, true).await.unwrap();
         mark_delivered(&p, &a.id, "t7", "unknown").await.unwrap();
         assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "unknown");
 
@@ -2222,7 +2510,7 @@ mod tests {
     async fn a_finished_turn_waits_for_acceptance_instead_of_closing_itself() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-a", "改好那個 bug", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-a", "改好那個 bug", &[], None, true).await.unwrap();
         mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
         let s = settle_and_notify(
             &p,
@@ -2261,7 +2549,7 @@ mod tests {
     async fn every_decision_is_recorded_with_its_actor_and_evidence() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-b", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-b", "x", &[], None, true).await.unwrap();
         settle_and_notify(&p, &a.id, "completed", true, Some("ok"), None, "k", "assignment_completed", &json!({}))
             .await
             .unwrap();
@@ -2281,11 +2569,11 @@ mod tests {
     async fn a_follow_up_is_a_new_assignment_linked_to_the_old_one() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let first = insert_assignment(&p, None, "bot1", "req-1", "做 A", &[], None).await.unwrap();
+        let first = insert_assignment(&p, None, "bot1", "req-1", "做 A", &[], None, true).await.unwrap();
         settle_and_notify(&p, &first.id, "completed", true, Some("A 做了一半"), None, "k1", "assignment_completed", &json!({}))
             .await
             .unwrap();
-        let next = insert_assignment(&p, None, "bot1", "req-1-follow", "把 A 做完", &[], Some(&first.id)).await.unwrap();
+        let next = insert_assignment(&p, None, "bot1", "req-1-follow", "把 A 做完", &[], Some(&first.id), true).await.unwrap();
         link_followup(&p, &first.id, &next.id).await.unwrap();
         review(&p, &first.id, "followup", "AGM", "cli", Some("還差一半"), None, Some(&next.id)).await.unwrap();
         let first = assignment(&p, &first.id).await.unwrap().unwrap();
@@ -2309,7 +2597,7 @@ mod tests {
     async fn two_concurrent_followups_on_one_parent_create_exactly_one_continuation() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let parent = insert_assignment(&p, None, "bot1", "req-p", "做 A", &[], None).await.unwrap();
+        let parent = insert_assignment(&p, None, "bot1", "req-p", "做 A", &[], None, true).await.unwrap();
         settle_and_notify(&p, &parent.id, "completed", true, Some("做一半"), None, "k", "assignment_completed", &json!({}))
             .await
             .unwrap();
@@ -2362,12 +2650,12 @@ mod tests {
     async fn a_failed_followup_rolls_back_and_leaves_no_orphan_queued_row() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let parent = insert_assignment(&p, None, "bot1", "req-p", "做 A", &[], None).await.unwrap();
+        let parent = insert_assignment(&p, None, "bot1", "req-p", "做 A", &[], None, true).await.unwrap();
         settle_and_notify(&p, &parent.id, "completed", true, Some("做一半"), None, "k", "assignment_completed", &json!({}))
             .await
             .unwrap();
         // Somebody else's assignment already owns this client_request_id.
-        let other = insert_assignment(&p, None, "bot2", "taken-crid", "別人的工作", &[], None).await.unwrap();
+        let other = insert_assignment(&p, None, "bot2", "taken-crid", "別人的工作", &[], None, true).await.unwrap();
 
         let err = review_with_followup(
             &p, &parent.id, "awaiting_review", "followup", "AGM", "cli", Some("續作"), None,
@@ -2393,7 +2681,7 @@ mod tests {
     async fn settling_twice_moves_nothing_and_queues_one_event() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-c", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-c", "x", &[], None, true).await.unwrap();
         mark_delivered(&p, &a.id, "t9", "ok").await.unwrap();
         let key = "assignment_completed:a:t9";
         let first = settle_and_notify(&p, &a.id, "completed", true, Some("r"), None, key, "assignment_completed", &json!({}))
@@ -2416,7 +2704,7 @@ mod tests {
     async fn a_failed_notification_rolls_the_whole_settle_back() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-tx", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-tx", "x", &[], None, true).await.unwrap();
         mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
         sqlx::query("DROP TABLE supervisor_inbox").execute(&p).await.unwrap();
         let err = settle_and_notify(&p, &a.id, "completed", true, Some("done"), None, "k", "assignment_completed", &json!({}))
@@ -2434,7 +2722,7 @@ mod tests {
     async fn a_settled_assignment_with_no_event_is_found_by_the_sweep() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-d", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-d", "x", &[], None, true).await.unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review', turn_status='completed' WHERE id=?")
             .bind(&a.id)
             .execute(&p)
@@ -2451,7 +2739,7 @@ mod tests {
     async fn unknown_delivery_is_not_folded_into_delivered() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = insert_assignment(&p, None, "bot1", "req-2", "x", &[], None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-2", "x", &[], None, true).await.unwrap();
         mark_delivered(&p, &a.id, "t2", "unknown").await.unwrap();
         let a = assignment(&p, &a.id).await.unwrap().unwrap();
         assert_eq!(a.status, "unknown");
@@ -2692,10 +2980,10 @@ mod tests {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
         let owns = vec!["daemon/src/supervisor".to_string(), "scripts/agm.py".to_string()];
-        let a = insert_assignment(&p, None, "bot1", "req-o", "x", &owns, None).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-o", "x", &owns, None, true).await.unwrap();
         assert_eq!(a.ownership(), owns);
         assert_eq!(a.to_json()["ownership"][1], "scripts/agm.py");
-        let b = insert_assignment(&p, None, "bot2", "req-p", "x", &[], None).await.unwrap();
+        let b = insert_assignment(&p, None, "bot2", "req-p", "x", &[], None, true).await.unwrap();
         assert!(b.ownership().is_empty());
     }
 
