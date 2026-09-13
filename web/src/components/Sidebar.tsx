@@ -287,8 +287,33 @@ function BotRow({
       }}
     >
       {/* 沒展開標題的列，agent 的標題掛在燈號的 tooltip 上，資訊沒有掉。 */}
-      {/* 收合鈕排在燈號前面。收起來時把數量帶上——不然收合後就看不出底下還有東西。 */}
-      {childCount > 0 && onToggleChildren ? (
+      {/* 左邊那一欄是**直的**：燈號在上、收合鈕在它正下方（2026-09-13 使用者）。收合鈕本來跟燈號
+          並排，於是有子 agent 的列整條往右推一格，子 agent 的縮排看起來對不齊自己的父列。 */}
+      <span className="bot-gutter">
+        <span className="bot-gutter-top">
+          <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
+          {/* 等子 agent 的黃點：紅色留給「要你本人回答」，這裡只是「底下還沒好」。 */}
+          {kidsWait ? (
+            <span
+              className={`bot-kids-wait ${kidsWait}`}
+              title={
+                kidsWait === 'busy'
+                  ? `${bot.name} 在等底下的子 agent 做完`
+                  : `${bot.name} 的子 agent 回報了，還沒有人看`
+              }
+              aria-label={kidsWait === 'busy' ? '等子 agent 完成' : '子 agent 已回報'}
+            />
+          ) : null}
+          {/* 「已完成（未讀）」：燈號說的是**現在**在做什麼，這顆說的是**你還沒看過**幾回合——
+              兩件不同的事，所以是兩個記號。`!` 讓它就算被截斷也不會被讀成模型參數。 */}
+          {unread > 0 ? (
+            <span className="unread-turns" title={`${unread} 個回合已完成，還沒看過`}>
+              !{unread > 99 ? '99+' : unread}
+            </span>
+          ) : null}
+        </span>
+        {/* 收起來時把數量帶上——不然收合後就看不出底下還有東西。 */}
+        {childCount > 0 && onToggleChildren ? (
         <button
           type="button"
           className={`bot-kids-toggle${collapsed ? ' shut' : ''}`}
@@ -308,27 +333,8 @@ function BotRow({
           {/* 收起來時子 agent 的燈號跟著藏了；還在忙／卡住的那顆要透出來，不然收合等於把它藏掉。 */}
           {collapsed && kidsLamp ? <span className={`bot-kids-lamp lamp lamp-${kidsLamp}`} aria-hidden="true" /> : null}
         </button>
-      ) : null}
-      <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
-      {/* 等子 agent 的黃點：紅色留給「要你本人回答」，這裡只是「底下還沒好」。 */}
-      {kidsWait ? (
-        <span
-          className={`bot-kids-wait ${kidsWait}`}
-          title={
-            kidsWait === 'busy'
-              ? `${bot.name} 在等底下的子 agent 做完`
-              : `${bot.name} 的子 agent 回報了，還沒有人看`
-          }
-          aria-label={kidsWait === 'busy' ? '等子 agent 完成' : '子 agent 已回報'}
-        />
-      ) : null}
-      {/* 「已完成（未讀）」：燈號說的是**現在**在做什麼，這顆說的是**你還沒看過**幾回合——
-          兩件不同的事，所以是兩個記號，並排在名字前面。`!` 讓它就算被截斷也不會被讀成模型參數。 */}
-      {unread > 0 ? (
-        <span className="unread-turns" title={`${unread} 個回合已完成，還沒看過`}>
-          !{unread > 99 ? '99+' : unread}
-        </span>
-      ) : null}
+        ) : null}
+      </span>
       <span className="bot-main" onScroll={compact ? syncKidsScroll : undefined}>
         <span className="bot-ident">
           {/* claude 有新版等著重啟套用時的小記號，掛在 kind icon 的右上角（2026-09-10 使用者：

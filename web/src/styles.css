@@ -1124,15 +1124,34 @@ button:disabled {
   color: var(--text-dim);
 }
 
+/* 列左邊那一欄：燈號在上、收合鈕在它正下方（2026-09-13 使用者）。
+   本來收合鈕跟燈號並排，於是有子 agent 的列整條往右推一格——父列的名字跟沒有子 agent 的列
+   對不齊，子 agent 的縮排也就沒有基準。改成直的之後，這一欄的寬度不再隨「有沒有子 agent」變動。 */
+.bot-gutter {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  /* 收起來時這一欄要裝得下 `▶ 1 ●`（箭頭＋數量＋子 agent 燈）。固定寬度而不是讓它自己長：
+     這一欄是所有列的共同基準線，寬度一變，有子 agent 的列又會跟別人對不齊。 */
+  width: 26px;
+}
+
+.bot-gutter-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .bot-kids-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 2px;
   flex: none;
-  width: 18px;
-  min-width: 18px;
-  margin-left: -6px;
+  width: 100%;
   padding: 0;
   border: 0;
   background: none;
@@ -10456,18 +10475,24 @@ button.run-debug-toggle:hover {
    * 往左吃到列的內緣、往上下吃滿列高；右邊留給緊接著的按鍵（`.project-label-btn`
    * 從 x=37 開始、`.bot-row` 的 `.bot-main` 從 x=64 開始），不搶它們的點擊。
    */
-  .project-fold,
-  .bot-kids-toggle {
+  .project-fold {
     justify-content: center;
     padding: 13px 10px;
     margin: -11px -10px;
   }
 
-  /* `.bot-kids-toggle` 自己寫死 `width: 18px`，padding 進不去（border-box），用 min-width 撐。
-     `.project-fold` 停在 27×40：再寬就要吃進 `.project-label-btn`（x=37 起）的點擊範圍，
-     而那顆是進群組聊天的入口。 */
+  /* 收合鈕現在排在燈號**下面**（`.bot-gutter`，2026-09-13）：負的上下 margin 會把它拉上去
+     疊在燈號上，40px 的寬又撐破那一欄。改成把觸控區給在欄內——欄本身放寬到 34px，鈕吃滿它。 */
+  .bot-gutter {
+    width: 34px;
+  }
+
   .bot-kids-toggle {
-    min-width: 40px;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    padding: 5px 0;
+    margin: 0;
   }
 
   /* 額度 chip 裡那顆按鍵只有 12px 高。這顆不能撐高——`.quota-hp` 是一列 flex，
