@@ -91,8 +91,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     // "source unknown" — it means "the user typed this", which is a claim we would be making
     // about a person from a failed read. Retrying a few seconds later costs nothing; a prompt
     // wearing the user's face cannot be taken back.
+    // 驗收角色是協調者、而協調者存在時，派工訊息標成協調者送的：bot 回話才會找對人。
+    let responder = match a.review_role.as_deref() {
+        Some("patrol") => None,
+        _ => super::roles::responder_bot(&app.db).await.ok().flatten().map(|b| b.id),
+    };
     let from = match store::get_or_init(&app.db).await {
-        Ok(sup) => sup.bot_id,
+        Ok(sup) => responder.or(sup.bot_id),
         Err(e) => {
             let _ = store::defer(&app.db, &a.id, &iso_in(30), &format!("could not read the supervisor row: {e}")).await;
             tracing::warn!(assignment = %a.id, error = ?e, "holding the assignment: cannot attribute it to the manager");
@@ -623,8 +628,13 @@ async fn notify(app: &Arc<App>) {
     let cfg = app.cfg.get().await;
     let max_attempts = cfg.supervisor.notify_max_attempts.max(1);
     let now = crate::db::now();
-    let Ok(pending) = store::due_inbox(&app.db, &now, max_attempts).await else { return };
-    if pending.is_empty() {
+    let responder_configured = super::roles::responder_bot(&app.db).await.ok().flatten().is_some();
+    let Ok(pending) = super::roles::due_for(&app.db, super::roles::Role::Patrol, responder_configured, &now, max_attempts).await
+    else {
+        return;
+    };
+    // 只有要叫醒人的事件才開一次喚醒；恢復、純記錄的那些等下一次有事時一起帶上。
+    if !pending.iter().any(|e| e.wake != Some(0)) {
         return;
     }
     // The throttle sits here on purpose: health detection, the watchdog and the model
@@ -673,9 +683,12 @@ async fn notify(app: &Arc<App>) {
             // `unknown` is recorded as unknown. The events are marked delivered against this
             // turn so the recovery pass reconciles *that turn* rather than sending a second
             // copy of the same digest.
-            let _ = store::mark_delivered_inbox(&app.db, &ids, &out.turn_id, &out.delivery).await;
+            let n = super::roles::mark_delivered(&app.db, &ids, super::roles::Role::Patrol, &out.turn_id, &out.delivery)
+                .await
+                .unwrap_or(0);
             // Only a wake that actually went out opens the next window.
             let _ = store::set_last_notify(&app.db, &crate::db::now()).await;
+            let _ = super::roles::record_wake(&app.db, super::roles::Role::Patrol, n, &super::roles::wake_reason(&pending)).await;
         }
         Err(e) => {
             let wait = notify_backoff(attempt).as_secs() as i64;
@@ -962,8 +975,14 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.
                     recover_unacked(&app).await;
+                    // 先分角色、合併重複，再各自決定要不要叫醒（roles.rs）。沒有要叫醒的事件時，
+                    // 這一段只讀寫資料庫，不開任何模型回合。
+                    let _ = super::roles::classify(&app.db).await;
+                    let _ = super::roles::coalesce_patrol(&app.db).await;
                     notify(&app).await;
+                    super::responder::notify(&app).await;
                     super::watchdog::tick(&app).await;
+                    super::responder::watchdog_tick(&app).await;
                 }
             }
         }
@@ -974,8 +993,9 @@ async fn current(app: &Arc<App>, generation: i64) -> bool {
     store::get_or_init(&app.db).await.map(|s| s.generation == generation).unwrap_or(false)
 }
 
+/// 兩個 AGM 角色都算：協調者自己的回合結束同樣不能變成一則叫醒自己的事件。
 async fn is_manager(app: &Arc<App>, bot_id: &str) -> bool {
-    store::get_or_init(&app.db).await.map(|s| s.bot_id.as_deref() == Some(bot_id)).unwrap_or(false)
+    super::roles::role_of_bot(&app.db, bot_id).await.map(|r| r.is_some()).unwrap_or(false)
 }
 
 /// Called once from `serve`: bring the controller back for whatever generation is on disk.
@@ -1100,6 +1120,11 @@ mod tests {
             delivered_at: None,
             created_at: "now".into(),
             updated_at: "now".into(),
+            role: None,
+            wake: None,
+            claimed_by: None,
+            acked_by: None,
+            merged_into: None,
         };
         assert!(digest(&[ev(false)]).contains("終端備援"));
         assert!(!digest(&[ev(true)]).contains("終端備援"));
@@ -1126,6 +1151,11 @@ mod tests {
             delivered_at: None,
             created_at: "now".into(),
             updated_at: "now".into(),
+            role: None,
+            wake: None,
+            claimed_by: None,
+            acked_by: None,
+            merged_into: None,
         }
     }
 
@@ -1191,6 +1221,58 @@ mod tests {
         assert_eq!(snippet("   "), "（沒有留下回覆）");
         assert!(snippet(&"x".repeat(900)).ends_with('…'));
         assert_eq!(snippet("ok"), "ok");
+    }
+}
+
+/// 巡檢的喚醒條件：只有「要叫醒人」的事件才開一次回合（SPEC §18.15）。
+#[cfg(test)]
+mod patrol_wake_tests {
+    use super::*;
+    use crate::supervisor::bot_requests::flow_tests as fx;
+    use crate::supervisor::roles::{self, Role};
+
+    async fn seed(app: &Arc<App>, key: &str, kind: &str, payload: serde_json::Value) {
+        store::push_inbox(&app.db, key, kind, None, None, None, &payload).await.unwrap();
+    }
+
+    /// 恢復、ack、額度自動重送這些「只記錄」的事件，不該把跑在 fable 上的巡檢叫起來；
+    /// 它們會跟著下一次真的有事的喚醒一起送。
+    #[tokio::test]
+    async fn record_only_events_never_open_a_turn() {
+        let app = fx::app().await;
+        seed(&app, "incident:I1:resolved", "incident_resolved", json!({})).await;
+        seed(&app, "health:ok", "health_changed", json!({"manager_health": {"status": "healthy"}})).await;
+        seed(&app, "qb:a1:0", "quota_blocked", json!({"needs_review": false})).await;
+        roles::classify(&app.db).await.unwrap();
+
+        notify(&app).await;
+
+        let states: Vec<String> = sqlx::query_scalar("SELECT state FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
+        assert!(states.iter().all(|s| s == "pending"), "{states:?}");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 0, "沒有任何回合被開起來");
+        assert!(store::get_or_init(&app.db).await.unwrap().last_notify_at.is_none(), "喚醒視窗沒有被用掉");
+        assert_eq!(roles::get(&app.db, Role::Patrol).await.unwrap().wakes, 0);
+    }
+
+    /// 有一件要人看的事時，那一批（含只記錄的）一起被挑出來送；而巡檢沒在跑的時候，整批原封不動
+    /// 留在 inbox——沒送出去就不算送過，重試次數也不該被燒掉。
+    #[tokio::test]
+    async fn one_real_event_carries_the_quiet_ones_and_a_stopped_patrol_keeps_them_all() {
+        let app = fx::app().await;
+        seed(&app, "incident:I1:resolved", "incident_resolved", json!({})).await;
+        seed(&app, "incident:I2:opened", "incident_opened", json!({})).await;
+        roles::classify(&app.db).await.unwrap();
+        let due = roles::due_for(&app.db, Role::Patrol, false, &crate::db::now(), 5).await.unwrap();
+        assert_eq!(due.len(), 2, "只記錄的那筆跟著一起送");
+        assert!(due.iter().any(|e| e.wake == Some(1)));
+
+        notify(&app).await;
+
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT state, notify_attempts FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
+        assert!(rows.iter().all(|(s, n)| s == "pending" && *n == 0), "{rows:?}");
+        assert!(store::get_or_init(&app.db).await.unwrap().last_notify_at.is_none());
     }
 }
 
