@@ -274,8 +274,72 @@ pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>) ->
     store::cancel(&app.db, &id).await.map_err(up)?;
     store::add_event(&app.db, &id, "cancelled", "已取消", Some(crate::agent_relay::DAEMON_SENDER), &json!({})).await.map_err(up)?;
     let m = load(&app, &id).await?;
+    let temp = cleanup_temp_bots(&app, &m).await;
     emit(&app, &m).await;
-    Ok(Json(m.json()))
+    let mut out = m.json();
+    out["temp_bots"] = temp;
+    Ok(Json(out))
+}
+
+/// 任務結案（完成或取消）時收掉 AGM 為它開的臨時 bot（§18.14 第 6 步「停止並刪除」）。
+///
+/// 只刪同時滿足三件事的 bot，缺一就留著、在回應與事件裡說明為什麼：
+/// 1. 是這個任務某件交辦的 `target_bot_id`——不是任務派過工的 bot 一律不碰；
+/// 2. 名字以 `agm-mission-<任務 id 尾碼>-` 開頭（尾 6 碼；相容 5 碼的舊命名）——
+///    使用者自己的常駐 bot 也可能被派到任務裡的工作，名字是「這是臨時開的」唯一的證據；
+/// 3. 沒有進行中的 run——還在跑的不能從它腳下把 bot 刪掉，AGM 停掉之後用 `agm bot delete` 收。
+/// 刪除走跟 `DELETE /api/bots/{id}` 同一條路（軟刪、子 agent 一起收、對話紀錄保留）。
+pub fn is_temp_bot_name(mission_id: &str, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("agm-mission-") else { return false };
+    let Some((tail, role)) = rest.split_once('-') else { return false };
+    let id = mission_id.to_ascii_lowercase();
+    let tail = tail.to_ascii_lowercase();
+    (5..=6).contains(&tail.len()) && id.ends_with(&tail) && !role.is_empty()
+}
+
+async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
+    let Ok(assignments) = crate::supervisor::store::mission_assignments(&app.db, &m.id).await else {
+        return json!({"deleted": [], "skipped": [], "error": "could not read the mission's assignments"});
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut deleted, mut skipped) = (Vec::new(), Vec::new());
+    for a in assignments {
+        if !seen.insert(a.target_bot_id.clone()) {
+            continue;
+        }
+        let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
+        if bot.deleted_at.is_some() {
+            continue;
+        }
+        if !is_temp_bot_name(&m.id, &bot.name) {
+            skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "not_a_temp_bot"}));
+            continue;
+        }
+        if crate::db::active_run(&app.db, &bot.id).await.ok().flatten().is_some() {
+            skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "still_running"}));
+            continue;
+        }
+        match crate::api::delete_bot(State(app.clone()), Path(bot.id.clone())).await {
+            Ok(_) => deleted.push(json!({"bot_id": bot.id, "name": bot.name})),
+            Err(e) => skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "delete_failed", "detail": format!("{e:?}")})),
+        }
+    }
+    let out = json!({"deleted": deleted, "skipped": skipped});
+    if !deleted.is_empty() || !skipped.is_empty() {
+        let names = |v: &[Value]| v.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join("、");
+        let mut text = String::new();
+        if !deleted.is_empty() {
+            text.push_str(&format!("已刪除臨時 bot：{}", names(&deleted)));
+        }
+        if !skipped.is_empty() {
+            if !text.is_empty() {
+                text.push('；');
+            }
+            text.push_str(&format!("未刪除：{}", names(&skipped)));
+        }
+        let _ = store::add_event(&app.db, &m.id, "note", &text, Some(crate::agent_relay::DAEMON_SENDER), &out).await;
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -295,8 +359,11 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
     store::complete(&app.db, &id, b.result_summary.trim()).await.map_err(up)?;
     store::add_event(&app.db, &id, "completed", b.result_summary.trim(), from.as_deref(), &json!({})).await.map_err(up)?;
     let m = load(&app, &id).await?;
+    let temp = cleanup_temp_bots(&app, &m).await;
     emit(&app, &m).await;
-    Ok(Json(m.json()))
+    let mut out = m.json();
+    out["temp_bots"] = temp;
+    Ok(Json(out))
 }
 
 /// 用掉一輪（review 退回或驗證失敗）。到上限就把任務停下來（`max_rounds`）並回 409。
@@ -570,6 +637,81 @@ mod tests {
         assert!(kinds.contains(&"verified") && kinds.contains(&"completed"));
         let instruction = &full["events"][0];
         assert!(instruction["relay_from"].is_null(), "使用者下的指示不帶來源標");
+    }
+
+    #[test]
+    fn temp_bot_names_are_tied_to_the_mission_tail() {
+        let id = "01M2CDAG4QY36YGVJMJK8Q11SA";
+        assert!(is_temp_bot_name(id, "agm-mission-8q11sa-exec"));
+        assert!(is_temp_bot_name(id, "agm-mission-8Q11SA-verify"));
+        assert!(is_temp_bot_name(id, "agm-mission-Q11SA-review"), "相容 5 碼的舊命名");
+        assert!(!is_temp_bot_name(id, "agm-mission-XXXXXX-exec"), "別的任務的臨時 bot");
+        assert!(!is_temp_bot_name(id, "agm-mission-8q11sa"), "沒有角色段");
+        assert!(!is_temp_bot_name(id, "c1-主要功能"));
+        assert!(!is_temp_bot_name(id, "agm-mission-1sa-exec"), "尾碼太短，容易撞到別的任務");
+    }
+
+    #[tokio::test]
+    async fn completing_a_mission_deletes_only_its_stopped_temp_bots() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("cleanup", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let tail = id[id.len() - 6..].to_ascii_lowercase();
+        let now = crate::db::now();
+        let bots = [
+            ("t-exec", format!("agm-mission-{tail}-exec"), false),
+            ("t-verify", format!("agm-mission-{tail}-verify"), true),
+            ("regular", "c1-主要功能".to_string(), false),
+        ];
+        for (bid, name, running) in &bots {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,managed_by,hook_token,created_at) VALUES (?,?,?,'claude','child','t',?)")
+                .bind(bid)
+                .bind(&env.project_id)
+                .bind(name)
+                .bind(&now)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            if *running {
+                sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','idle',?)")
+                    .bind(format!("run-{bid}"))
+                    .bind(bid)
+                    .bind(&now)
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+            }
+            let a = crate::supervisor::store::insert_assignment(&app.db, None, bid, &format!("crid-{bid}"), "做 X", &[], None, true).await.unwrap();
+            crate::supervisor::store::set_mission_link(&app.db, &a.id, &id, "executor").await.unwrap();
+        }
+
+        let Json(done) = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "完成".into(), relay_from: None }))
+            .await
+            .unwrap();
+        let deleted: Vec<&str> = done["temp_bots"]["deleted"].as_array().unwrap().iter().map(|b| b["bot_id"].as_str().unwrap()).collect();
+        assert_eq!(deleted, ["t-exec"]);
+        let skipped: Vec<(&str, &str)> = done["temp_bots"]["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| (b["bot_id"].as_str().unwrap(), b["reason"].as_str().unwrap()))
+            .collect();
+        assert!(skipped.contains(&("t-verify", "still_running")));
+        assert!(skipped.contains(&("regular", "not_a_temp_bot")));
+
+        let gone = |bid: &'static str| {
+            let db = app.db.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>("SELECT deleted_at FROM bots WHERE id = ?").bind(bid).fetch_one(&db).await.unwrap().is_some()
+            }
+        };
+        assert!(gone("t-exec").await);
+        assert!(!gone("t-verify").await, "還在跑的不能刪");
+        assert!(!gone("regular").await, "使用者自己的 bot 不碰");
+        let Json(full) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert!(full["events"].as_array().unwrap().iter().any(|e| e["kind"] == "note" && e["text"].as_str().unwrap().contains("已刪除臨時 bot")));
     }
 
     #[tokio::test]

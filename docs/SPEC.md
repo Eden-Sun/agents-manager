@@ -1734,8 +1734,11 @@ session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去
 5. **交付**：`mission deliver --worktree <執行者 worktree>`。409 `not_verified` 代表流程漏了第 4 步；其餘 409 任務已
    `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人，**不 force、不自己 rebase 後硬推**。
    交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
-6. **回報與收尾**：`mission complete --result-summary`（commit／PR、驗證證據、輪數），群組時間軸由 daemon 記 `completed`；
-   臨時 bot 停止並刪除（保留 `mission_events` 作證據）。
+6. **回報與收尾**：`mission complete <id> --text …`（或 `--text-file`；內容是結果摘要：commit／PR、驗證證據、輪數），
+   群組時間軸由 daemon 記 `completed`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
+   目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
+   `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；刪除保留對話紀錄與 `mission_events` 作證據。
+   所以第 2、4 步開臨時 bot 時**一定照這個命名**，否則收尾時不會被認出來。
 7. **撞額度換手（`mission_identity_switch`）**：那件交辦停在 `awaiting_review`／`identity_switch`。用 `to_identity`（與
    `model`）開新臨時 bot，對原交辦 `review followup`，文字帶進度摘要（已做／未做／未提交檔案、worktree 路徑）；
    followup 會沿用 `mission_id`／`role`。同身分同模型的 `wait` 由 daemon 自己重送，AGM 不介入。
