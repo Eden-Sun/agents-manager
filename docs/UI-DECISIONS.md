@@ -1781,3 +1781,10 @@ emoji，而格子裡的量表照樣是綠的。使用者的話是「目前看來
 染紅、還多了一圈內距——那正是「很衝突」的一半來源。class 改名 `quota-blocked`。
 
 截圖 `docs/screenshots/quota-limit-hit/`：`before.png`（紅底 + ⛔）、`after.png`、`after-light.png`。
+
+**配套（同日稍後，使用者：「grok 的 logo 要有顏色，否則很像用盡」）**：額度列的三個 kind logo
+一律用自己的品牌色（claude 橘／codex 綠／grok 紫），本來只有 claude 有色、codex 與 grok 退成
+`--text-dim`。灰色現在是「這個帳號被擋住」的唯一畫法，所以正常的 grok 灰在那裡就會被讀成沒額度。
+順帶把 `warn` / `crit` 對 logo 的染色拿掉：**嚴重程度不畫在 logo 上**——logo 回答「這是哪一家的
+CLI」，還剩多少由量表與數字說；本來染黃染紅既跟量表重複，也讓「灰＝擋住」失焦。
+截圖 `docs/screenshots/quota-limit-hit/kinds.png`、`kinds-light.png`。
