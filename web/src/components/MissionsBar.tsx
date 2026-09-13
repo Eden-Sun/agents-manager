@@ -5,7 +5,7 @@
  * 位置刻意放在**輸入框正上方**而不是訊息列上方：任務卡是要動手的東西——停下來問人的時候
  * 要在這裡回答——跟 IssuesBar 那種「這個專案有什麼可以挑」不一樣，捲到哪裡都不該找不到它。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Mission, MissionDetail } from '../api/types'
 import {
@@ -39,6 +39,41 @@ export function MissionsBar({ projectId }: { projectId: string }) {
   const [showAll, setShowAll] = useState(false)
   const [showDone, setShowDone] = useState(false)
   const [showCancelled, setShowCancelled] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [target, setTarget] = useState<string | null>(null)
+  const [navigationError, setNavigationError] = useState('')
+  const section = useRef<HTMLElement>(null)
+  const setExpandedRow = (id: string, open: boolean) => setExpanded((old) => {
+    const next = new Set(old)
+    if (open) next.add(id)
+    else next.delete(id)
+    return next
+  })
+  const navigate = async (id: string) => {
+    setNavigationError('')
+    // A referenced result can fall outside the latest 100 missions. Fetch by ID first.
+    await useStore.getState().loadMission(id)
+    const state = useStore.getState()
+    const detail = state.missionDetail[id]
+    if (!detail) {
+      setNavigationError(state.missionLoadErrors[id] || '無法讀取這筆任務，請再點一次重試')
+      return
+    }
+    if (detail.status === 'done') setShowDone(true)
+    else if (detail.status === 'cancelled') setShowCancelled(true)
+    else setShowAll(true)
+    setExpandedRow(id, true)
+    setTarget(id)
+  }
+  useEffect(() => {
+    if (!target) return
+    const el = section.current?.querySelector<HTMLElement>(`[data-mission-id="${CSS.escape(target)}"]`)
+    if (el) {
+      el.scrollIntoView({ block: 'nearest' })
+      el.focus({ preventScroll: true })
+      setTarget(null)
+    }
+  }, [target, missions])
 
   /**
    * 「已完成任務」只算 `done`（P4 驗收缺陷 5）：API.md 寫得很清楚「已完成任務清單＝
@@ -64,9 +99,10 @@ export function MissionsBar({ projectId }: { projectId: string }) {
   const hidden = sorted.length - shown.length
 
   return (
-    <section className="missions-bar" aria-label="群組任務">
+    <section ref={section} className="missions-bar" aria-label="群組任務">
+      {navigationError ? <p className="mission-hint" role="alert">{navigationError}</p> : null}
       {shown.map((m) => (
-        <MissionCard key={m.id} mission={m} />
+        <MissionCard key={m.id} mission={m} onNavigate={navigate} />
       ))}
       {hidden > 0 ? (
         <button type="button" className="mini-btn mission-more" onClick={() => setShowAll(true)}>
@@ -93,7 +129,7 @@ export function MissionsBar({ projectId }: { projectId: string }) {
           {showDone ? (
             <ul className="mission-done-list">
               {done.map((m) => (
-                <MissionDoneRow key={m.id} mission={m} />
+                <MissionDoneRow key={m.id} mission={m} open={expanded.has(m.id)} onToggle={(open) => setExpandedRow(m.id, open)} onNavigate={navigate} />
               ))}
             </ul>
           ) : null}
@@ -115,7 +151,7 @@ export function MissionsBar({ projectId }: { projectId: string }) {
           {showCancelled ? (
             <ul className="mission-done-list">
               {cancelled.map((m) => (
-                <MissionDoneRow key={m.id} mission={m} />
+                <MissionDoneRow key={m.id} mission={m} open={expanded.has(m.id)} onToggle={(open) => setExpandedRow(m.id, open)} onNavigate={navigate} />
               ))}
             </ul>
           ) : null}
@@ -130,21 +166,27 @@ export function MissionsBar({ projectId }: { projectId: string }) {
  *
  * 點開才去抓事件串——清單可能有幾十筆，一次全抓只是把 daemon 打爆。
  */
-function MissionDoneRow({ mission }: { mission: Mission }) {
+type NavigateMission = (id: string) => void
+
+function MissionDoneRow({ mission, open, onToggle, onNavigate }: {
+  mission: Mission
+  open: boolean
+  onToggle: (open: boolean) => void
+  onNavigate: NavigateMission
+}) {
   const detail = useStore((s) => s.missionDetail[mission.id] ?? null)
   const loadMission = useStore((s) => s.loadMission)
-  const [open, setOpen] = useState(false)
   const view = missionView(mission, detail?.events ?? [], detail?.assignments ?? [])
 
   return (
-    <li className={`mission-done-row${mission.status === 'cancelled' ? ' cancelled' : ''}`}>
+    <li tabIndex={-1} data-mission-id={mission.id} className={`mission-done-row${mission.status === 'cancelled' ? ' cancelled' : ''}`}>
       <button
         type="button"
         className="mission-done-row-head"
         aria-expanded={open}
         onClick={() => {
-          setOpen((v) => !v)
-          if (!detail) void loadMission(mission.id)
+          onToggle(!open)
+          if (!open) void loadMission(mission.id)
         }}
       >
         <span className="mission-done-mark" aria-hidden="true">
@@ -157,8 +199,9 @@ function MissionDoneRow({ mission }: { mission: Mission }) {
         <div className="mission-done-body">
           {mission.result_summary ? <p className="mission-summary">{mission.result_summary}</p> : null}
           <Evidence view={view} mission={mission} />
-          {!detail ? <p className="mission-hint">讀取中…</p> : null}
-          {detail ? <FollowUp mission={mission} detail={detail} /> : null}
+          <MissionLoadState missionId={mission.id} />
+          <ParentLink mission={mission} detail={detail} onNavigate={onNavigate} />
+          {detail ? <FollowUp mission={mission} detail={detail} onNavigate={onNavigate} /> : null}
         </div>
       ) : null}
     </li>
@@ -171,7 +214,7 @@ function MissionDoneRow({ mission }: { mission: Mission }) {
  * 兩件事刻意分開，因為後果不同：追問只是問一句話（不會改碼、不會產生新交付），追加修改會**開一筆
  * 新任務**。把它們做成同一個輸入框，使用者就沒辦法在按下去之前知道自己要的是哪一種。
  */
-function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail }) {
+function FollowUp({ mission, detail, onNavigate }: { mission: Mission; detail: MissionDetail; onNavigate: NavigateMission }) {
   const askMission = useStore((s) => s.askMission)
   const reviseMission = useStore((s) => s.reviseMission)
   const [mode, setMode] = useState<'ask' | 'revise' | null>(null)
@@ -183,7 +226,7 @@ function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail
 
   const send = async () => {
     const body = text.trim()
-    if (!body || busy) return
+    if (!body || busy || !mode) return
     setBusy(true)
     const ok = mode === 'revise' ? Boolean(await reviseMission(mission.id, body)) : await askMission(mission.id, body)
     setBusy(false)
@@ -211,8 +254,7 @@ function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail
         </ul>
       ) : null}
 
-      {/* 續作是獨立的一筆任務：進行中的會自己出現在上面的清單，完成的落到「已完成」那一段。
-          這裡只負責讓兩邊看得出彼此的關係，不另外做一套跳轉。 */}
+      {/* 點連結會展開並捲到同一份清單裡的任務，不另建一套頁面。 */}
       {detail.revisions.length > 0 ? (
         <ul className="mission-revisions">
           {detail.revisions.map((r) => (
@@ -220,7 +262,9 @@ function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail
               <span className="mission-tag">
                 {r.status === 'done' ? '續作已完成' : r.status === 'cancelled' ? '續作已取消' : '續作進行中'}
               </span>
-              {r.text}
+              <button type="button" className="mission-link" onClick={() => onNavigate(r.id)}>
+                查看續作：{r.text}
+              </button>
             </li>
           ))}
         </ul>
@@ -231,7 +275,8 @@ function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail
           <textarea
             className="mission-followup-input"
             value={text}
-            autoFocus
+            aria-label={mode === 'ask' ? '追問內容' : '追加修改內容'}
+            disabled={busy}
             rows={2}
             placeholder={mode === 'ask' ? '想問什麼？（不會改動任何東西）' : '要再改什麼？會開一筆新任務'}
             onChange={(e) => setText(e.target.value)}
@@ -250,17 +295,42 @@ function FollowUp({ mission, detail }: { mission: Mission; detail: MissionDetail
           <button type="button" className="btn" onClick={() => setMode('ask')}>
             追問
           </button>
-          {openRevision ? (
-            <span className="mission-hint">續作進行中（在上方的進行中清單裡），先看那一筆</span>
+          {mission.status === 'done' ? openRevision ? (
+            <button type="button" className="mission-link" onClick={() => onNavigate(openRevision.id)}>
+              查看進行中的續作
+            </button>
           ) : (
             <button type="button" className="btn" onClick={() => setMode('revise')}>
               追加修改
             </button>
-          )}
+          ) : null}
         </div>
       )}
     </div>
   )
+}
+
+function MissionLoadState({ missionId }: { missionId: string }) {
+  const error = useStore((s) => s.missionLoadErrors[missionId])
+  const loading = useStore((s) => s.missionLoading[missionId])
+  const loadMission = useStore((s) => s.loadMission)
+  if (error) return <div className="mission-hint" role="alert">
+    載入任務失敗：{error}
+    <button type="button" className="mission-link" onClick={() => void loadMission(missionId)}>重試</button>
+  </div>
+  return loading ? <p className="mission-hint" role="status">讀取中…</p> : null
+}
+
+function ParentLink({ mission, detail, onNavigate }: {
+  mission: Mission
+  detail: MissionDetail | null
+  onNavigate: NavigateMission
+}) {
+  if (!mission.parent_mission_id) return null
+  if (detail?.parent?.missing) return <p className="mission-hint">原成果已不存在</p>
+  return <button type="button" className="mission-link" onClick={() => onNavigate(mission.parent_mission_id!)}>
+    查看原成果{detail?.parent?.text ? `：${detail.parent.text}` : ''}
+  </button>
 }
 
 /** 驗證證據與交付去向（commit / PR），兩邊的卡片共用。 */
@@ -294,9 +364,10 @@ function Evidence({ view, mission }: { view: ReturnType<typeof missionView>; mis
 }
 
 /** 進行中的一張卡。 */
-function MissionCard({ mission }: { mission: Mission }) {
+function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: NavigateMission }) {
   const detail = useStore((s) => s.missionDetail[mission.id] ?? null)
   const loadMission = useStore((s) => s.loadMission)
+  const loadError = useStore((s) => s.missionLoadErrors[mission.id])
   const controlMission = useStore((s) => s.controlMission)
   const answerMission = useStore((s) => s.answerMission)
   const [answer, setAnswer] = useState('')
@@ -304,8 +375,8 @@ function MissionCard({ mission }: { mission: Mission }) {
 
   // 進行中的卡一定要有事件串才畫得出進度與角色，進來就抓一次；之後靠 WS `mission_updated`。
   useEffect(() => {
-    if (!detail) void loadMission(mission.id)
-  }, [mission.id, detail, loadMission])
+    if (!detail && !loadError) void loadMission(mission.id)
+  }, [mission.id, detail, loadError, loadMission])
 
   const view = missionView(mission, detail?.events ?? [], detail?.assignments ?? [])
   // 「在等人」的三種都用同一種醒目底色：等你回答、等額度、等 AGM——共同點是它自己不會動。
@@ -313,7 +384,7 @@ function MissionCard({ mission }: { mission: Mission }) {
   const waiting = paused || view.phase === 'waiting_quota' || view.phase === 'awaiting_agm'
 
   return (
-    <article className={`mission-card${paused ? ' paused' : waiting ? ' waiting' : ''}`}>
+    <article tabIndex={-1} data-mission-id={mission.id} className={`mission-card${paused ? ' paused' : waiting ? ' waiting' : ''}`}>
       <header className="mission-head">
         <span className={`mission-phase ${view.phase}`}>{phaseLabel(view.phase)}</span>
         <span className="mission-text">{mission.text}</span>
@@ -333,6 +404,8 @@ function MissionCard({ mission }: { mission: Mission }) {
         </span>
       </header>
 
+      <ParentLink mission={mission} detail={detail} onNavigate={onNavigate} />
+      <MissionLoadState missionId={mission.id} />
       <ol className="mission-steps" aria-label="進度">
         {MISSION_PHASES.map((p, i) => (
           <li
