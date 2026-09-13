@@ -10,9 +10,10 @@
 body:has(.mobile-preview) .app {
   grid-template-rows: minmax(0, 1fr) auto;
   /* 第三欄從 `auto` 改成固定寬：`auto` 量的是欄裡最寬那格的 max-content，暫存區撐滿之後
-     那個值沒有上界，1600px 實測整欄長到 706px、把對話擠掉一半。390 預覽 + `.mp-frame-wrap`
-     左右各 8px 的留白 = 406。 */
-  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 406px;
+     那個值沒有上界，1600px 實測整欄長到 706px、把對話擠掉一半。
+     iPhone 16 的 393×852 視窗畫在畫面上時縮一半 = 197 寬，加 `.mp-frame-wrap` 左右各 8px = 213
+     （2026-09-13 使用者：406px 那一格吃掉桌機太多寬度）。 */
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 213px;
 }
 
 body:has(.mobile-preview) .app > .sidebar,
@@ -49,32 +50,42 @@ body:has(.mobile-preview) .app > .shelf.open {
   background: var(--bg-side);
 }
 
+/* 這一列現在只有 213px 寬（縮放之後那一欄就這麼寬），標題與尺寸都不准折行——折了就變兩層樓高，
+   而這是一個工具列不是內容。 */
 .mp-head {
   display: flex;
   align-items: center;
   gap: 4px;
   height: 34px;
   min-height: 34px;
-  padding: 0 6px 0 10px;
+  padding: 0 2px 0 8px;
   border-bottom: 1px solid var(--border);
 }
 
 .mp-title {
+  flex: none;
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
+  white-space: nowrap;
 }
 
 .mp-size {
   margin-right: auto;
-  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
 
+/* iframe 是固定尺寸的視窗（iPhone 16 的 393×852），畫面上用 `transform` 縮一半。
+   縮放不改 iframe 自己量到的寬高，所以裡面仍然是手機版面——但 `transform` 也不會縮小它在版面裡
+   佔的格子，所以那一格的大小寫在 `.mp-frame-box` 上（＝ 視窗尺寸 × 縮放）。
+   欄比它寬時置中，比它窄時橫向捲；**不**去擠壓 iframe 的寬度，擠了就量不到真正的手機版面。 */
 .mp-frame-wrap {
-  /* 預覽本身是固定寬度的視窗；欄比它寬時置中，比它窄時可以橫向捲，不去擠壓 iframe 寬度
-     （擠壓了就量不到真正的 390px 版面，這個工具就白做了）。 */
   display: flex;
   justify-content: center;
   overflow: auto;
@@ -82,14 +93,26 @@ body:has(.mobile-preview) .app > .shelf.open {
   background: var(--bg-sunken);
 }
 
-.mp-frame {
+.mp-frame-box {
   flex: 0 0 auto;
-  width: 390px;
-  /* 高度夠看到標題列＋一段時間軸＋輸入框；再高就把圖片暫存區擠沒了。 */
-  height: 620px;
+  position: relative;
+  width: calc(393px * 0.5);
+  height: calc(852px * 0.5);
+  /* 矮螢幕上整支手機放不下：盒子收高、捲軸交給 `.mp-frame-wrap`。 */
   max-height: 52vh;
+}
+
+.mp-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 393px;
+  height: 852px;
+  transform: scale(0.5);
+  transform-origin: top left;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  /* 縮一半之後圓角也會變一半，所以先寫兩倍，看起來才跟別處一致。 */
+  border-radius: calc(var(--radius) * 2);
   background: var(--bg);
 }
 

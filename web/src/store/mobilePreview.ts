@@ -18,8 +18,22 @@ const EVENT = 'am:mobile-preview'
 export const IN_MOBILE_PREVIEW =
   typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('mobilePreview')
 
-/** 預覽的視窗寬度。390 = iPhone 直向寬度，也是 `scripts/ui-goal-shots.mjs` 用的那個數字。 */
-export const MOBILE_PREVIEW_W = 390
+/**
+ * 預覽 iframe 的**視窗**尺寸：iPhone 16 直向的 CSS 像素（393×852）。
+ *
+ * 這是 iframe 裡那份 app 真正量到的視窗——媒體查詢、`100dvh`、安全區都照這個走，所以它不能
+ * 因為畫面上顯示得比較小就跟著縮（縮了就不是在預覽手機版面，而是在預覽一個沒人用的尺寸）。
+ */
+export const MOBILE_PREVIEW_W = 393
+export const MOBILE_PREVIEW_H = 852
+
+/**
+ * 畫面上縮到一半再擺（2026-09-13 使用者：那一格占掉桌機太多寬度）。
+ *
+ * `transform: scale()` 只改「畫多大」，不改 iframe 自己的視窗尺寸，所以量到的還是 393×852 的
+ * 版面；右欄需要的寬度則從 406px 降到約 213px。
+ */
+export const MOBILE_PREVIEW_SCALE = 0.5
 
 function read(): boolean {
   try {
