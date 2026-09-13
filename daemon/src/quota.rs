@@ -322,6 +322,18 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     if limit_hit_expired(q.limit_hit.as_ref()) {
         q.limit_hit = None;
     }
+    // 重置時間只有 app-server／statusLine 那種結構化來源帶得出來。CLI 自己的狀態列只寫
+    // 「還剩幾 %」，沒有時間——那不代表重置時間變成未知，所以沿用上一份讀數的。少了這一條，
+    // pane 讀數一寫進來，量表上的「N 小時後重置」就會消失。
+    if let Some(prev) = quotas.get(&key) {
+        for (now, old) in [(&mut q.five_hour, &prev.five_hour), (&mut q.seven_day, &prev.seven_day), (&mut q.fable, &prev.fable)] {
+            if let (Some(w), Some(p)) = (now.as_mut(), old.as_ref()) {
+                if w.resets_at.is_none() {
+                    w.resets_at = p.resets_at.clone();
+                }
+            }
+        }
+    }
 
     quotas.insert(key.clone(), q.clone());
     drop(quotas);
@@ -376,6 +388,73 @@ pub async fn snapshot(app: &Arc<App>) -> Value {
     json!({"kinds": Value::Object(m)})
 }
 
+/// codex 自己狀態列上的剩餘量 → Quota。
+///
+/// 只帶 5h / 7d 兩條（CLI 就只寫這兩個）；`resets_at` 交給 [`set`] 沿用上一份讀數的。
+pub fn quota_from_codex_status(q: &crate::codex_live::CodexStatusQuota, account: Option<&str>) -> Option<Quota> {
+    let win = |left: Option<f64>| left.map(|l| Window { used_pct: (100.0 - l).clamp(0.0, 100.0), resets_at: None });
+    let (five, seven) = (win(q.five_hour_left), win(q.weekly_left));
+    if five.is_none() && seven.is_none() {
+        return None;
+    }
+    Some(Quota {
+        five_hour: five,
+        seven_day: seven,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: crate::db::now(),
+        source: "codex-statusline".into(),
+        account: account.map(String::from),
+        host: LOCAL_HOST.into(),
+    })
+}
+
+/// 掃一遍這台主機上跑著的 codex pane，把它們狀態列上的額度寫進去。
+///
+/// 為什麼需要：`account/rateLimits/read` 每 5 分鐘一次，而且它跟 CLI 自己知道的數字會差一整輪
+/// （2026-09-13 使用者截圖：量表停在 5h 100、pane 上寫 5h 90% left）。CLI 的那一行是它**當下**
+/// 拿來擋你的依據，所以它更接近真的。寫進該 bot 身分的那把 key（`codex` / `codex:<identity>`），
+/// 跟 app-server 的讀數共用同一格——後到的覆蓋先到的，`resets_at`、重置券與 limit_hit 由
+/// [`set`] 沿用。
+pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
+    let rows: Vec<(String, Option<String>)> = match sqlx::query_as(
+        "SELECT r.pane_id, b.identity FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+          WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
+            AND b.deleted_at IS NULL",
+    )
+    .bind(host)
+    .fetch_all(&app.db)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(host, error = ?e, "codex statusline quota: query failed");
+            return 0;
+        }
+    };
+    let mut wrote = 0;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (pane_id, identity) in rows {
+        let base = match identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => format!("codex:{id}"),
+            None => "codex".to_string(),
+        };
+        // 同一個身分讀一次就夠：兩顆 bot 共用帳號時第二顆只是再寫一次同樣的數字。
+        if !seen.insert(base.clone()) {
+            continue;
+        }
+        let Some(client) = app.herdr_for(host).await else { continue };
+        let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
+        let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
+        let Some(q) = quota_from_codex_status(&parsed, identity.as_deref()) else { continue };
+        set(app, host, &base, q).await;
+        wrote += 1;
+    }
+    wrote
+}
+
 /// One codex refresh on `host`. `Ok(false)` = codex not installed there (quota stays null).
 pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
     let r = crate::models::codex_rpc(app, host, "account/rateLimits/read", json!({})).await;
@@ -403,6 +482,12 @@ pub fn spawn_codex_poller(app: Arc<App>) {
                     Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
                     Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
                 }
+                // app-server 那份是帳號層級、每 5 分鐘一次；CLI 狀態列是**這個 pane 現在**看到的
+                // 數字，而且分得出身分。兩個都收，後到的蓋前面的。
+                let n = refresh_codex_from_panes(&app, &host).await;
+                if n > 0 {
+                    tracing::debug!(host = %host, panes = n, "codex quota read off the status line");
+                }
             }
             tokio::time::sleep(CODEX_POLL).await;
         }
@@ -411,6 +496,47 @@ pub fn spawn_codex_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+    /// CLI 狀態列寫的是**剩餘**，我們存的是**已用**；而且它沒有重置時間，不能因此把
+    /// app-server 帶來的 `resets_at` 洗掉（2026-09-13 使用者：量表停在舊數字）。
+    #[tokio::test]
+    async fn the_status_line_updates_the_numbers_without_losing_the_reset_time() {
+        let app = crate::team::testing::env().await.app.clone();
+        let from_server = Quota {
+            five_hour: Some(Window { used_pct: 0.0, resets_at: Some("2026-09-13T12:00:00Z".into()) }),
+            seven_day: Some(Window { used_pct: 50.0, resets_at: Some("2026-09-18T00:00:00Z".into()) }),
+            fable: None,
+            reset_credits: Some(ResetCredits { available: 1, title: None, expires_at: None }),
+            limit_hit: None,
+            plan: Some("plus".into()),
+            updated_at: crate::db::now(),
+            source: "codex-app-server".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "codex", from_server).await;
+
+        let seen = crate::codex_live::parse_status_quota(
+            "gpt-6-astra high · /tmp · Context 28% used · 5h 90% left · weekly 48% …",
+        )
+        .unwrap();
+        set(&app, LOCAL_HOST, "codex", quota_from_codex_status(&seen, None).unwrap()).await;
+
+        let q = app.quotas.lock().await.get("codex").cloned().unwrap();
+        assert_eq!(q.source, "codex-statusline");
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 10.0, "90% left = 10% used");
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 52.0);
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-13T12:00:00Z"), "重置時間沿用");
+        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00Z"));
+        assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
+    }
+
+    /// 狀態列讀不到額度時不要寫一筆空的——那會把 app-server 的數字蓋成「不知道」。
+    #[test]
+    fn a_status_line_without_numbers_is_not_a_reading() {
+        let empty = crate::codex_live::CodexStatusQuota { five_hour_left: None, weekly_left: None };
+        assert!(quota_from_codex_status(&empty, None).is_none());
+    }
+
     #[tokio::test]
     async fn a_statusline_reading_keeps_the_probes_fable_window() {
         let app = crate::team::testing::env().await.app.clone();
