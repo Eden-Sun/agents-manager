@@ -1598,3 +1598,14 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
   外框用 `box-shadow`，不佔版面、不位移。
 
 截圖 `docs/screenshots/chip-states/mobile-current-green-390.png`。
+
+## 手機額度列：上下邊框量表每一格都畫，上下貼齊（2026-09-13）
+
+- **樣式維持手機的純文字 chip**，不改成桌機的 bar（同日一度改成 bar，使用者退回：「不要改的跟
+  桌機一樣，維持手機的樣式」）。
+- **上下兩條邊框量表（5h 在上、7d／週在下）每一格都畫**，不只目前這顆 bot 的那格——使用者原話
+  「上下條不侷限於現在的種類」。focused 照舊多一層 accent 底色，其他格只有那兩條線。
+  推翻 2026-09-11「只有 focused 掛 `.quota-framed`」。
+- **上下貼齊**：格子內距 3 → 2px、min-height 拿掉、strip／open 內距歸零，額度列 54 → 46px。
+- 規則在 `web/src/components/mobileQuota.css`（QuotaStrip 匯入）。截圖
+  `docs/screenshots/mobile-quota/after-390.png`。
