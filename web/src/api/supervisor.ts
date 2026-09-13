@@ -48,7 +48,10 @@ export interface SupervisorRoleStats {
 }
 
 export interface SupervisorResponder {
+  /** 登記過沒有（路由只看這個）。 */
   configured: boolean
+  /** 登記的那顆 bot 還在不在。`configured && !bot_present` = 被刪掉了，事件仍在它的佇列裡。 */
+  bot_present: boolean
   bot_id: string
   identity: string
   model: string
@@ -217,6 +220,8 @@ export function toResponder(v: unknown): SupervisorResponder {
   return {
     // 沒有這一塊（舊 daemon）或讀壞了：當成「沒建立」，不要畫成一顆在跑的協調者。
     configured: o.configured === true,
+    // 舊 daemon 沒有這個欄位：有 bot_id 就當它還在，不要憑空說它不見了。
+    bot_present: typeof o.bot_present === 'boolean' ? o.bot_present : s(o.bot_id) !== '',
     bot_id: s(o.bot_id),
     identity: s(o.identity, 'cc0'),
     model: s(o.model, 'opus'),
