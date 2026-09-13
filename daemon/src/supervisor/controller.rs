@@ -249,6 +249,38 @@ enum QuotaAction {
     GiveUp,
 }
 
+/// 等太久就不是「等」了：單一個壞掉的時間不該把一件工作壓一整天。
+const MAX_QUOTA_WAIT_SECS: i64 = 6 * 3600;
+/// 上面那條踩到時，隔這麼久再問一次（那時 app-server 通常已經有新讀數）。
+const QUOTA_RECHECK_SECS: i64 = 15 * 60;
+
+/// 什麼時候再試一次：CLI 橫幅與 app-server 的讀數**取最早且還在未來**的那個。
+///
+/// 2026-09-13 實況：22:15:22 派工，橫幅還印著上一輪的 `try again at 10:15 PM`（解析成 22:15:00、
+/// 剛過去 22 秒），而 app-server 那時已經說 5h 用量 21%、22:20 重置。只信橫幅的話兩筆交辦被排去
+/// 等 24 小時。橫幅是 CLI 的說法、會舊；結構化讀數是帳號的說法、會延遲——兩邊都收，取最早的，
+/// 誰都不當唯一真相。
+///
+/// 再加一道上限：算出來超過 [`MAX_QUOTA_WAIT_SECS`] 就改成 15 分鐘後再問。晚一點重送的代價，
+/// 遠小於一個錯的時間把工作壓一整天。
+fn resume_at_from(now: chrono::DateTime<chrono::Utc>, banner: Option<&str>, quota_reset: Option<&str>) -> String {
+    let iso = |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let parse = |s: Option<&str>| {
+        s.map(str::trim)
+            .filter(|x| !x.is_empty())
+            .and_then(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .filter(|t| *t > now)
+    };
+    match [parse(banner), parse(quota_reset)].into_iter().flatten().min() {
+        Some(t) if t - now > chrono::Duration::seconds(MAX_QUOTA_WAIT_SECS) => {
+            iso(now + chrono::Duration::seconds(QUOTA_RECHECK_SECS))
+        }
+        Some(t) => iso(t),
+        None => iso(now + chrono::Duration::seconds(QUOTA_BLIND_WAIT_SECS)),
+    }
+}
+
 fn quota_action(retries: i64, until: Option<&str>) -> QuotaAction {
     if retries >= MAX_QUOTA_RETRIES {
         return QuotaAction::GiveUp;
@@ -333,15 +365,17 @@ async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::L
             return;
         }
     }
-    let resume_at = match quota_action(a.quota_retries, hit.until.as_deref()) {
-        QuotaAction::GiveUp => {
-            let why = format!("額度重送 {} 次仍被擋：{}", a.quota_retries, hit.message.trim());
-            settle(app, a, "quota_exhausted", true, None, Some(&why)).await;
-            return;
-        }
-        QuotaAction::WaitUntil(t) => t,
-        QuotaAction::WaitBlind => iso_in(QUOTA_BLIND_WAIT_SECS),
+    if quota_action(a.quota_retries, hit.until.as_deref()) == QuotaAction::GiveUp {
+        let why = format!("額度重送 {} 次仍被擋：{}", a.quota_retries, hit.message.trim());
+        settle(app, a, "quota_exhausted", true, None, Some(&why)).await;
+        return;
+    }
+    // 橫幅只是其中一個說法：app-server 的 5h 重置時間常常比它新（見 `resume_at_from`）。
+    let quota_reset = match crate::db::bot(&app.db, &a.target_bot_id).await {
+        Ok(Some(bot)) => crate::quota::next_reset_for_bot(app, &bot).await,
+        _ => None,
     };
+    let resume_at = resume_at_from(chrono::Utc::now(), hit.until.as_deref(), quota_reset.as_deref());
     let why = format!("帳號撞到用量上限（{where_seen}）：{}", hit.message.trim());
     let payload = json!({
         "bot_id": a.target_bot_id,
@@ -960,6 +994,43 @@ pub async fn respawn(app: &Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-09-13 實況：22:15:22 派工，CLI 橫幅還印著剛過去 22 秒的 `10:15 PM`，app-server 卻
+    /// 已經說 22:20 重置。兩邊都看、取最早且未來的那個——只信橫幅會把交辦排去等 24 小時。
+    #[test]
+    fn the_soonest_of_the_banner_and_the_account_wins() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-13T14:15:22Z").unwrap().with_timezone(&chrono::Utc);
+        // 橫幅被解析成隔天（舊的判讀），app-server 說五分鐘後：取五分鐘後那個。
+        assert_eq!(
+            resume_at_from(now, Some("2026-09-14T14:15:00Z"), Some("2026-09-13T14:20:00Z")),
+            "2026-09-13T14:20:00Z"
+        );
+        // 反過來也一樣：橫幅比較早就聽橫幅。
+        assert_eq!(
+            resume_at_from(now, Some("2026-09-13T14:18:00Z"), Some("2026-09-13T14:20:00Z")),
+            "2026-09-13T14:18:00Z"
+        );
+        // 已經過去的一律不算（那是舊讀數，不是預約）。
+        assert_eq!(
+            resume_at_from(now, Some("2026-09-13T14:15:00Z"), Some("2026-09-13T14:20:00Z")),
+            "2026-09-13T14:20:00Z"
+        );
+        // 兩邊都沒有 → 固定等一段時間再問。
+        assert_eq!(resume_at_from(now, None, None), "2026-09-13T14:45:22Z");
+        assert_eq!(resume_at_from(now, Some(" "), Some("2020-01-01T00:00:00Z")), "2026-09-13T14:45:22Z");
+    }
+
+    /// 單一個錯的時間不該把工作壓一整天：超過 6 小時就改成 15 分鐘後再問一次。
+    #[test]
+    fn an_absurdly_far_reset_is_rechecked_instead_of_waited_out() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-13T14:15:22Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(resume_at_from(now, Some("2026-09-14T14:15:00Z"), None), "2026-09-13T14:30:22Z");
+        // 剛好在上限內的照用。
+        assert_eq!(
+            resume_at_from(now, Some("2026-09-13T20:00:00Z"), None),
+            "2026-09-13T20:00:00Z"
+        );
+    }
 
     /// 撞上限之後等多久、等幾次。重送上限存在的理由：credits 真的用完時不是等得到的。
     #[test]
