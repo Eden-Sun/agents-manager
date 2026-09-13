@@ -514,7 +514,13 @@ body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env
 { "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…" }
 ```
 
-回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。
+回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。真的試過「當場套用」時多一個
+`live_apply: {fields, applied, reason}`（2026-09-13）：`reason` 是機器可讀 key——
+`bot_missing` / `no_active_run` / `slash_gate: <not_running|agent_busy|turn_in_flight|no_pane>` /
+`no_herdr_client` / `<field>_cleared_to_default` / `no_slash_command_for_<field>` / `slash_send_failed` /
+`not_a_single_field`，codex 另有 `codex: <picker_failed|unknown_fast_tier|fast_toggle_failed|no_status_line|
+readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以前失敗是**靜默**的：
+只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。
 
 - **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`）。
   沒有 active Run，或只改 `name` / `autostart` / `primary` → `false`。前端顯示「需要重新啟動」並提供 §10.3。

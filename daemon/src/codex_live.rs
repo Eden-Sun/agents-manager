@@ -323,40 +323,40 @@ pub async fn apply(
     bot: &db::Bot,
     was_fast: Option<bool>,
     fields: &[&str],
-) -> Option<CodexRuntime> {
+) -> Result<CodexRuntime, &'static str> {
     if fields.iter().any(|f| *f == "model" || *f == "effort") {
         let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let effort = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if !apply_model_and_effort(client, pane_id, model, effort).await {
-            return None;
+            return Err("picker_failed");
         }
     }
     if fields.contains(&"fast") {
         let want = bot.fast != 0;
         // Unknown current tier: a toggle could turn it the wrong way round, so refuse.
-        let now = was_fast?;
+        let Some(now) = was_fast else { return Err("unknown_fast_tier") };
         if now != want && !toggle_fast(client, pane_id).await {
-            return None;
+            return Err("fast_toggle_failed");
         }
     }
     // Read-back: the status line is codex's own account of all three (SPEC §4.4a).
     tokio::time::sleep(Duration::from_millis(900)).await;
-    let seen = parse_status_line(&read(client, pane_id).await)?;
+    let Some(seen) = parse_status_line(&read(client, pane_id).await) else { return Err("no_status_line") };
     let want_model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if let Some(m) = want_model {
         if seen.model != m {
-            return None;
+            return Err("readback_model_mismatch");
         }
     }
     if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         if seen.effort.as_deref() != Some(e) {
-            return None;
+            return Err("readback_effort_mismatch");
         }
     }
     if fields.contains(&"fast") && seen.fast != (bot.fast != 0) {
-        return None;
+        return Err("readback_fast_mismatch");
     }
-    Some(seen)
+    Ok(seen)
 }
 
 #[cfg(test)]
@@ -462,6 +462,56 @@ mod tests {
         assert_eq!(effort_menu_label("high"), "High");
         assert!(is_nested_effort("max") && is_nested_effort("ultra"));
         assert!(!is_nested_effort("xhigh"));
+    }
+
+    /// codex 0.154.0 的兩層選單原文（2026-09-13 用一個 throwaway pane 實地抓的）。
+    ///
+    /// 為什麼要釘住：`apply_model_and_effort` 是靠這些字在導航的（`Select Model`、
+    /// `Select Reasoning Level`、`Low/Medium/High/Extra high/More reasoning…`）。codex 一改字，
+    /// 「改 effort 不用重啟」就會靜靜退回重啟——那正是 2026-09-13 使用者遇到的形狀，所以把
+    /// 當時**確認沒變**的原文留成 fixture，下次真的變了測試會先講。
+    const MODEL_MENU_0154: &str = "\
+  Select Model and Effort
+  Access legacy models by running codex -m <model_name> or in your config.toml
+
+› 1. gpt-6-astra (current)  Our most capable model for complex, demanding work.
+  2. gpt-5.6-sol            Reliable agentic workhorse for everyday tasks.
+  3. gpt-5.6-terra          Balanced agentic coding model for everyday work.
+  4. gpt-5.6-luna           Fast and affordable agentic coding model.
+  5. gpt-5.5                Proven previous-generation model for coding and general work.
+
+  Press enter to confirm or esc to go back
+";
+
+    const EFFORT_MENU_0154: &str = "\
+  Select Reasoning Level for gpt-6-astra
+
+  1. Low (default)    Fast responses with lighter reasoning
+  2. Medium           Balances speed and reasoning depth for everyday tasks
+› 3. High (current)   Greater reasoning depth for complex problems
+  4. Extra high       Extra high reasoning depth for complex problems
+  5. More reasoning…  Max and Ultra consume usage limits faster
+
+  Press enter to confirm or esc to go back
+";
+
+    #[test]
+    fn the_0_154_menus_still_read_the_way_the_driver_expects() {
+        assert!(MODEL_MENU_0154.contains("Select Model"), "第一層的判斷字");
+        assert!(EFFORT_MENU_0154.contains("Select Reasoning Level"), "第二層的判斷字");
+        // 指定模型時用模型名找；沒指定時找 `(current)`。
+        assert_eq!(picker_number(MODEL_MENU_0154, "gpt-6-astra"), Some(1));
+        assert_eq!(picker_number(MODEL_MENU_0154, "(current)"), Some(1));
+        assert_eq!(picker_number(MODEL_MENU_0154, "gpt-5.6-luna"), Some(4));
+        // 五種強度各自對到哪一列（`max` / `ultra` 在 `More reasoning…` 底下，見 `is_nested_effort`）。
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("low")), Some(1));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("medium")), Some(2));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("high")), Some(3));
+        assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("xhigh")), Some(4));
+        assert_eq!(picker_number(EFFORT_MENU_0154, "More reasoning"), Some(5));
+        assert!(picker_number(EFFORT_MENU_0154, effort_menu_label("max")).is_none(), "max 藏在下一層");
+        // `(default)` 那一列不能被 `Extra high` 的描述文字搶走（描述在兩格空白之後）。
+        assert_eq!(picker_number(EFFORT_MENU_0154, "(default)"), Some(1));
     }
 
     /// 2026-09-13 使用者截圖那一行（行尾被截斷）。CLI 自己知道的數字要進得了 UI。

@@ -171,6 +171,15 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **選單一律用讀的**：號碼、順序、`(default)`/`(current)` 會跑；每步回讀 pane，比對「號碼後到兩個空白為止」的 label（說明文字會含別的模型名）。
 - **最後回讀狀態列**（`<model> [<effort>] [fast] · <cwd> · Context …`）確認；`runtime_*` 存讀到的值，對不上回 `needs_restart`。
 - codex 會把選擇存成帳號預設（寫 `~/.codex/config.toml`），是 CLI 行為。
+- **套不進去要說得出是哪一步**（2026-09-13）：`apply_live_setting` 回「原因」而非布林，每個出口寫一行 log，
+  並經 `PATCH` 的 `live_apply` 回給呼叫端（docs/API.md §10.2）。在這之前失敗是靜默的，只剩
+  `needs_restart: true`，使用者問「改 effort 為什麼又重啟」時 log 裡沒有任何線索。0.154.0 的兩層選單原文
+  釘成測試 fixture（`codex_live` 的 `MODEL_MENU_0154` / `EFFORT_MENU_0154`）：選單改字會讓這條路**靜靜**
+  退回重啟，讓測試先講。
+- **旁註：被重啟掉的 codex 怎麼接回原對話**——沒有「重啟並續接」的 API（`/restart` 無 resume 旗標、
+  `restart-idle` 只吃帶更新的 claude）。繞路是把 `bots.args` 暫時設成 `["resume","<上一個 native session>"]`、
+  `/restart`、確認接上後再還原 `args`：codex 的 resume 是**子命令**，start 時 args 排最前面，形狀剛好是
+  `codex resume <id>`（2026-09-13 對 GPT-astra 實作過）。
 
 ## 5. 設定檔
 
