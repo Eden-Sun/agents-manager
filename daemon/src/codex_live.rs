@@ -88,6 +88,62 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
     out
 }
 
+/// codex 自己在 status line 上寫的額度剩餘量。
+///
+/// 那一行是 `<model> <effort> · <cwd> · Context 28% used · 5h 90% left · weekly 48% left`。
+/// 這是 **CLI 當下真的知道的數字**，而 `account/rateLimits/read` 是每 5 分鐘輪詢一次的另一份
+/// 讀數——2026-09-13 使用者截圖裡兩者差了一整輪（量表停在 5h 100，pane 寫 5h 90% left）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodexStatusQuota {
+    /// 5 小時窗剩餘 %。
+    pub five_hour_left: Option<f64>,
+    /// 週窗剩餘 %。
+    pub weekly_left: Option<f64>,
+}
+
+impl CodexStatusQuota {
+    pub fn is_empty(&self) -> bool {
+        self.five_hour_left.is_none() && self.weekly_left.is_none()
+    }
+}
+
+/// `… · 5h 90% left · weekly 48% left` → 兩個剩餘百分比。
+///
+/// 窄 pane 會把行尾截成 `weekly 48% …`，所以 `left` 不是必要的字——`<label> <n>% ` 就算數。
+/// 兩個都讀不到就回 `None`（那多半根本不是 status line）。
+pub fn parse_status_quota(screen: &str) -> Option<CodexStatusQuota> {
+    let mut out = None;
+    for raw in screen.lines() {
+        let line = raw.trim();
+        if !line.contains("Context") || !line.contains('·') {
+            continue;
+        }
+        let q = CodexStatusQuota { five_hour_left: pct_after(line, "5h"), weekly_left: pct_after(line, "weekly") };
+        if !q.is_empty() {
+            // 最後一個相符的才是現在那行（開頭的 banner 有同樣形狀）。
+            out = Some(q);
+        }
+    }
+    out
+}
+
+/// `… 5h 90% left …` 裡 `<label>` 後面那個百分比。
+fn pct_after(line: &str, label: &str) -> Option<f64> {
+    let mut words = line.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        if !w.eq_ignore_ascii_case(label) {
+            continue;
+        }
+        let n = words.peek()?.trim_end_matches(&['%', ','][..]);
+        if let Ok(v) = n.parse::<f64>() {
+            if (0.0..=100.0).contains(&v) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 /// The number to press for the entry whose **label** contains `needle`, in a codex picker.
 ///
 /// Lines look like `› 4. gpt-5.6-luna (current)  Fast and affordable…` — the `›` marks the
@@ -406,5 +462,29 @@ mod tests {
         assert_eq!(effort_menu_label("high"), "High");
         assert!(is_nested_effort("max") && is_nested_effort("ultra"));
         assert!(!is_nested_effort("xhigh"));
+    }
+
+    /// 2026-09-13 使用者截圖那一行（行尾被截斷）。CLI 自己知道的數字要進得了 UI。
+    #[test]
+    fn the_status_line_carries_the_accounts_remaining_quota() {
+        let q = parse_status_quota(
+            "  gpt-6-astra high · ~/project/agents-manager · Context 28% used · 5h 90% left · weekly 48% …\n",
+        )
+        .unwrap();
+        assert_eq!(q.five_hour_left, Some(90.0));
+        assert_eq!(q.weekly_left, Some(48.0), "`left` 被截掉也要讀得到");
+
+        let full = parse_status_quota("gpt-5.6-sol high fast · /tmp · Context 0% used · 5h 82% left · weekly 73% left")
+            .unwrap();
+        assert_eq!((full.five_hour_left, full.weekly_left), (Some(82.0), Some(73.0)));
+
+        // 只有 5h 的那種（週窗還沒開始算）。
+        let one = parse_status_quota("gpt-6-astra high · /tmp · Context 44% used · 5h 10% left").unwrap();
+        assert_eq!((one.five_hour_left, one.weekly_left), (Some(10.0), None));
+
+        // 不是 status line 的畫面不要亂猜。
+        assert!(parse_status_quota("› Ask Codex to do anything\n1 background terminal running\n").is_none());
+        // 有 Context 但沒有任何額度數字：也是 None，不要寫一筆空的讀數蓋掉 app-server。
+        assert!(parse_status_quota("gpt-6-astra high · /tmp · Context 44% used").is_none());
     }
 }

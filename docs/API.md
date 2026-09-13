@@ -1614,9 +1614,16 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
   要開 pane（claude 最久 40 秒、grok 25 秒），多台是依序跑的。
 - 背景輪詢的節奏不變（codex 5 分、claude 60 秒、grok 30 秒），每一輪把 `local` 與每一台已連線遠端
   **併發**跑一次——一次探測要數十秒，序列跑會把本機的週期拉長（SPEC §14.3）。
+- `source`：`codex-app-server`（每 5 分鐘一次的 `account/rateLimits/read`）、**`codex-statusline`**（2026-09-13 新增：
+  codex 自己底下那行 `… · 5h 90% left · weekly 48% left`，同一輪順便讀每個 running 的 codex pane）、
+  `claude-usage`、`statusline`、`grok-usage`。codex 兩個來源寫**同一把 key**，後到的覆蓋先到的——狀態列是 CLI
+  **當下**拿來擋你的依據，app-server 那份可能差一整輪（2026-09-13 使用者：量表停在 5h 100，pane 上寫 5h 90% left）。
+  狀態列只寫剩餘 %，沒有重置時間，所以 `resets_at`（以及 `reset_credits`、`limit_hit`）沿用前一份讀數，不會被洗掉。
+  有 identity 的 codex bot 寫進 `codex:<identity>`，沒有的寫裸 `codex`。
 - 來源（每一台主機各自跑一份）：
   - **codex**：daemon 啟動後與每 5 分鐘用該主機的 `codex app-server` 的 `account/rateLimits/read`
-    （遠端走 ssh）。
+    （遠端走 ssh），**同一輪**再讀一次每個 running 的 codex pane 底下那行狀態列（`source=codex-statusline`，
+    見上一條）。
   - **claude**：兩路並存。
     1. **statusLine 推送**（bot 對話中）：daemon 注入的 `statusLine` 指令把 `rate_limits.five_hour / seven_day`
        （若哪天多了 `rate_limits.fable` 也會一起收；實測 2.1.263 的 payload 只有前兩個桶，所以 statusLine
