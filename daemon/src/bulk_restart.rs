@@ -26,7 +26,7 @@ pub struct Cand {
     pub bot_id: String,
     pub name: String,
     pub kind: String,
-    /// `bots.managed_by`：`user` / `team` / `child`。只有 `user` 的歸使用者管。
+    /// `bots.managed_by`：`user` / `child`。只有 `user` 的歸使用者管。
     pub managed_by: String,
     /// `runs.state`：只有 `running` 能重啟，`starting` / `stopping` 都還在變。
     pub state: String,
@@ -44,7 +44,6 @@ pub struct Cand {
 /// 為什麼這顆沒被重啟。`code` 給 API / 前端比對，`label` 給人看。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    TeamMember,
     DefaultSession,
     NotRunning,
     Working,
@@ -56,7 +55,6 @@ pub enum Skip {
 impl Skip {
     pub fn code(self) -> &'static str {
         match self {
-            Skip::TeamMember => "team_member",
             Skip::DefaultSession => "default_session",
             Skip::NotRunning => "not_running",
             Skip::Working => "working",
@@ -68,7 +66,6 @@ impl Skip {
 
     pub fn label(self) -> &'static str {
         match self {
-            Skip::TeamMember => "是 team 的成員，由 team 排程管",
             Skip::DefaultSession => "在你自己的 herdr default session 裡，daemon 不動它的 pane",
             Skip::NotRunning => "還在啟動或關閉中",
             Skip::Working => "正在跑，重啟會把這一回合砍掉",
@@ -90,8 +87,6 @@ pub fn is_candidate(c: &Cand) -> bool {
 /// 順序即優先序：先看這顆歸不歸使用者管，再看 run 本身穩不穩（`state`），再看 agent 在不在忙，
 /// 最後才看回合。回報的理由取第一個中的那個，因為那是使用者最該先處理的那件事。
 ///
-/// `team` 不碰：成員的生死歸 team 排程管——批次重啟插手只會讓排程對不上自己記得的 run。
-///
 /// 子 agent（`child`）**進來**（2026-09-12 使用者：三顆子 agent 全被跳過，更新套不上去）。
 /// 它們跟別人一樣是帶著更新的 claude，只是不能照一般路徑重開 pane，所以執行時改走
 /// [`crate::lifecycle::restart_child_in_pane`]——在它自己那個 pane 裡 exit + resume。
@@ -99,9 +94,7 @@ pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     let mut go = Vec::new();
     let mut skip = Vec::new();
     for c in cands.iter().filter(|c| is_candidate(c)) {
-        let why = if c.managed_by == "team" {
-            Some(Skip::TeamMember)
-        } else if c.default_session {
+        let why = if c.default_session {
             // SPEC §6.5.1：那個 pane 是使用者自己的，重啟會先把它關掉、再在使用者的 session 裡
             // 開一個 daemon 的 workspace（2026-09-12 review #4）。
             Some(Skip::DefaultSession)
@@ -454,17 +447,16 @@ mod tests {
         assert!(!is_candidate(&cands[2]));
     }
 
-    /// team 成員不歸這顆按鈕管（run 由 team 排程記著）；子 agent 歸——它在自己的 pane 裡重啟
-    /// （2026-09-12 使用者：ns2 / race / sup 三顆全被跳過，更新永遠套不上去）。
+    /// 子 agent 也進批次——它在自己的 pane 裡重啟
+    /// （2026-09-12 使用者：三顆子 agent 全被跳過，更新永遠套不上去）。
     #[test]
-    fn children_join_the_batch_and_team_members_do_not() {
+    fn children_join_the_batch() {
         let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "idle", true, false) };
-        let member = Cand { managed_by: "team".into(), ..cand("dev-1", "claude", "running", "idle", true, false) };
         let mine = cand("mine", "claude", "running", "idle", true, false);
-        let cands = [kid, member, mine];
+        let cands = [kid, mine];
         let (go, skip) = plan(&cands);
         assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["kid", "mine"]);
-        assert_eq!(skip.iter().map(|(_, w)| w.code()).collect::<Vec<_>>(), ["team_member"]);
+        assert!(skip.is_empty(), "{skip:?}");
     }
 
     /// 使用者自己 default session 裡的 claude（SPEC §6.5.1）不進批次：它的 pane 不是 daemon 的，
@@ -501,7 +493,7 @@ mod tests {
     /// inbox under its own kind — not `health_changed`.
     #[tokio::test]
     async fn a_failed_restart_leaves_no_dead_run_and_tells_the_supervisor() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = db::ulid();
         // An identity this host does not know: `start` refuses before spawning anything.
@@ -515,7 +507,7 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        crate::team::testing::fake_run(&app, &bot).await;
+        crate::testing::fake_run(&app, &bot).await;
 
         run_batch(&app, "batch-1", vec![(bot.clone(), "alfa".into())], vec![], None).await;
 

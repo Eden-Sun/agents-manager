@@ -4,7 +4,7 @@
  */
 
 import { MockTransport } from './mock'
-import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
@@ -38,20 +38,12 @@ import type {
   NewBotInput,
   NewProjectInput,
   PatchProjectInput,
-  NewTeamInput,
   PatchBotInput,
   PatchBotResult,
-  PatchTeamInput,
   PromptResult,
   RestartPlan,
   RestartSkip,
   BotKind,
-  TeamBranchDisposal,
-  TeamControlAction,
-  TeamIssueClosed,
-  TeamDetail,
-  TeamEvent,
-  TeamTaskDecision,
   TerminalSnapshot,
   TerminalSource,
   ToolMap,
@@ -700,158 +692,9 @@ export async function fetchSubmodules(projectId: string): Promise<ProjectSubmodu
   try {
     return toSubmodules(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/submodules`))
   } catch (e) {
-    if (isTeamsUnsupported(e)) return []
+    if (isPaneMoveUnsupported(e)) return []
     throw e
   }
-}
-
-// -------------------------------------------------------- Issue Team（SPEC-team §10）
-
-/**
- * 這批端點在舊 daemon 上並不存在。呼叫端一律用 `isTeamsUnsupported()` 判斷，
- * 把「daemon 還沒有 team」跟真正的錯誤分開（docs/FRONTEND.md §8：缺端點要靜默退回）。
- */
-export function isTeamsUnsupported(e: unknown): boolean {
-  if (!(e instanceof ApiError)) return false
-  if (e.status === 405 || e.status === 501) return true
-  if (e.status !== 404) return false
-  // daemon 自己的 404 一定帶機器碼（`{error:"not_found", what:"team"}`）——那是「這個 team
-  // 不見了」，不是「這版 daemon 沒有 team」。路由根本不存在時回的是裸 404。
-  return !e.body.error && !e.body.what
-}
-
-/** `POST /api/projects/:id/teams` → `{team_id}`。 */
-export async function createTeam(projectId: string, input: NewTeamInput): Promise<string> {
-  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/teams`, input)
-  return isRec(raw) ? str(pick(raw, 'team_id', 'id')) : ''
-}
-
-/** `POST /api/teams/:id/issues`（SPEC-team §2.3）——把 issue 追加到執行中 team 的佇列。 */
-export async function addTeamIssues(teamId: string, issueNumbers: number[]): Promise<void> {
-  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/issues`, { issue_numbers: issueNumbers })
-}
-
-/**
- * `POST /api/teams/:id/rescue`（SPEC-team §2.6）——把跑完的 team 裡沒解決的 task 全部交給
- * 一個成員收尾。`botId` 省略 = reviewer。回傳實際交給誰、收了幾個。
- */
-export async function rescueTeam(teamId: string, botId?: string): Promise<{ bot: string; rescued: number }> {
-  const raw = await transport.request(
-    'POST',
-    `/teams/${encodeURIComponent(teamId)}/rescue`,
-    botId ? { bot_id: botId } : {},
-  )
-  const o = isRec(raw) ? raw : {}
-  return { bot: str(pick(o, 'bot')), rescued: num(pick(o, 'rescued')) }
-}
-
-/**
- * `POST /api/teams/:id/issues/retry-failed`（SPEC-team §2.6b）——把失敗 / 被跳過的 issue
- * 全部重新排進佇列接力做完。回傳重排了哪幾號。
- */
-export async function retryFailedIssues(teamId: string): Promise<number[]> {
-  const raw = await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/issues/retry-failed`, {})
-  const o = isRec(raw) ? raw : {}
-  return arr(pick(o, 'retried')).map((n) => num(n)).filter((n) => n > 0)
-}
-
-/** `DELETE /api/teams/:id/issues/:issue_id` — 只能移除還沒開始的（`queued`）。 */
-export async function removeTeamIssue(teamId: string, issueId: string): Promise<void> {
-  await transport.request(
-    'DELETE',
-    `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
-  )
-}
-
-/** `GET /api/teams/:id` — team 物件 + tasks + base/worktree。 */
-export async function fetchTeam(teamId: string): Promise<TeamDetail | null> {
-  return toTeamDetail(await transport.request('GET', `/teams/${encodeURIComponent(teamId)}`), teamId)
-}
-
-/** `GET /api/teams/:id/events?before=&limit=` — 倒序分頁、正序回傳。 */
-export async function fetchTeamEvents(teamId: string, limit = 100, before?: string): Promise<TeamEvent[]> {
-  const q = new URLSearchParams({ limit: String(limit) })
-  if (before) q.set('before', before)
-  return toTeamEvents(await transport.request('GET', `/teams/${encodeURIComponent(teamId)}/events?${q.toString()}`))
-}
-
-/** `POST /api/teams/:id/{pause|resume|approve|abort|cleanup}`。 */
-export async function controlTeam(teamId: string, action: TeamControlAction, body?: unknown): Promise<void> {
-  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/${action}`, body)
-}
-
-/**
- * `DELETE /api/teams/:id?branches=keep|delete`（SPEC-team §6.5a）。
- *
- * 與 `cleanup` 不同：**任何 phase 都可以刪**（非終態時等於先 abort 再刪），而且連
- * `teams` / `team_tasks` / `team_events` 的紀錄一起移除。成員的對話訊息保留。
- * 冪等：team 不存在回 `404 {error:"not_found", what:"team"}`，呼叫端當成功處理。
- */
-export async function deleteTeam(teamId: string, branches: TeamBranchDisposal = 'keep'): Promise<void> {
-  await transport.request('DELETE', `/teams/${encodeURIComponent(teamId)}?branches=${branches}`)
-}
-
-export interface CloseTeamIssueInput {
-  /** 省略 = daemon 寫預設的完成留言；空字串 = 不留言。 */
-  comment?: string
-  /**
-   * SPEC-team §2.5.4：要關的是佇列裡哪一筆。省略 = `teams.issue_number` 對到的那一筆
-   * （reopen 之前唯一存在的行為）。reopen 之後鏡像已經換成新 issue，要回頭關上一個就得帶它。
-   */
-  issue_id?: string
-}
-
-/**
- * `POST /api/teams/:id/close-issue`（SPEC-team §10.7）→ `{number, url, state, already_closed}`。
- *
- * 只有 `state === 'done'` 的那一筆 issue 能關，而且**只由使用者按下按鈕觸發**——daemon 不會
- * 自己關 issue。預設留言是 PM 總結 + 整合分支 + 已合併的 commit（沒有 PR 時會註明「分支還沒
- * 合併進 base」）。別人已經先關掉的 issue 回 `already_closed: true`，不是錯誤。
- */
-export async function closeTeamIssue(teamId: string, input?: CloseTeamIssueInput): Promise<TeamIssueClosed> {
-  const raw = await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/close-issue`, {
-    ...(input?.comment === undefined ? {} : { comment: input.comment }),
-    ...(input?.issue_id === undefined ? {} : { issue_id: input.issue_id }),
-  })
-  const o = isRec(raw) ? raw : {}
-  return {
-    number: num(pick(o, 'number'), 0),
-    url: str(pick(o, 'url')),
-    already_closed: o.already_closed === true,
-  }
-}
-
-/** daemon 回的「這個 team 不存在」（與「這版 daemon 沒有 team 端點」不同，見 `isTeamsUnsupported`）。 */
-export function isTeamNotFound(e: unknown): boolean {
-  return e instanceof ApiError && e.status === 404 && e.body.what === 'team'
-}
-
-/** `PATCH /api/teams/:id {budget?, supervised?, deliver?}`。 */
-export async function patchTeam(teamId: string, input: PatchTeamInput): Promise<void> {
-  await transport.request('PATCH', `/teams/${encodeURIComponent(teamId)}`, input)
-}
-
-/** `POST /api/teams/:id/say {text, to, client_request_id}` — 使用者插話（不計預算）。 */
-export async function sayToTeam(teamId: string, text: string, to: string, clientRequestId: string): Promise<void> {
-  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/say`, { text, to, client_request_id: clientRequestId })
-}
-
-/** `POST /api/teams/:id/answer {text}` — 回覆 PM 的 `ask_user`（等同 say + resume）。 */
-export async function answerTeam(teamId: string, text: string): Promise<void> {
-  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/answer`, { text })
-}
-
-/** `POST /api/teams/:id/tasks/:tid/decide {action, note?}`。 */
-export async function decideTeamTask(
-  teamId: string,
-  taskId: string,
-  action: TeamTaskDecision,
-  note?: string,
-): Promise<void> {
-  await transport.request('POST', `/teams/${encodeURIComponent(teamId)}/tasks/${encodeURIComponent(taskId)}/decide`, {
-    action,
-    ...(note ? { note } : {}),
-  })
 }
 
 /** `crypto.randomUUID()` with a fallback for non-secure origins. */

@@ -55,9 +55,6 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const setDraft = useStore((s) => s.setDraft)
   const setDraftCursor = useStore((s) => s.setDraftCursor)
   const notify = useStore((s) => s.notify)
-  // SPEC-team §11.1：舊 daemon 沒有 team 端點時 `teamsSupported` 會翻成 false，這顆按鈕靜默消失。
-  const teamsSupported = useStore((s) => s.teamsSupported)
-  const openTeamLaunch = useStore((s) => s.openTeamLaunch)
   const [open, setOpen] = useState(false)
   const [state, setState] = useState<IssueState>(readState)
   const [q, setQ] = useState('')
@@ -250,7 +247,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
               <select
                 className="issues-repo-pick"
                 aria-label="哪個 repo 的 issue"
-                title="這個專案有 submodule：選要看哪個 repo 的 issue（組隊也會在那個 repo 裡進行）"
+                title="這個專案有 submodule：選要看哪個 repo 的 issue"
                 value={repo}
                 onChange={(e) => {
                   setRepo(e.target.value)
@@ -307,19 +304,6 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
                     </div>
                   </div>
                   <div className="issue-actions">
-                    {teamsSupported ? (
-                      <button
-                        type="button"
-                        className="mini-btn team-btn"
-                        title="為這個 issue 建立一個 team（PM + 執行者 + reviewer，各自獨立的 worktree）"
-                        onClick={() => {
-                          openTeamLaunch(projectId, i.number, repo)
-                          setOpen(false)
-                        }}
-                      >
-                        組隊
-                      </button>
-                    ) : null}
                     <button type="button" className="mini-btn" title="插入「#號 標題」與連結到輸入框游標處" onClick={() => insertRef(i)}>
                       插入
                     </button>

@@ -22,9 +22,6 @@ import {
   str,
   toMessage,
   toRun,
-  toTeam,
-  toTeamTask,
-  toTeamEvent,
   toTurn,
   unwrap,
   isRec,
@@ -33,9 +30,9 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamRoleKey, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
+import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { botStatusConnTarget } from './botStatusConn'
 import { restoreQueued } from './queuedSend'
@@ -64,7 +61,7 @@ import {
   type ReadMark,
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
-import { BOT_KINDS, LOCAL_HOST, quotaKey, TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
+import { BOT_KINDS, LOCAL_HOST, quotaKey } from '../api/types'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
@@ -96,11 +93,9 @@ const SELECTION_KEY = 'am.selection'
 interface Selection {
   botId: string | null
   projectId: string | null
-  /** SPEC-team §11.5：與另外兩個互斥；非 null = 右側顯示 TeamPanel。 */
-  teamId: string | null
 }
 
-const NO_SELECTION: Selection = { botId: null, projectId: null, teamId: null }
+const NO_SELECTION: Selection = { botId: null, projectId: null }
 
 function readSelection(): Selection {
   try {
@@ -110,7 +105,6 @@ function readSelection(): Selection {
     return {
       botId: optStr(pick(parsed, 'botId')),
       projectId: optStr(pick(parsed, 'projectId')),
-      teamId: optStr(pick(parsed, 'teamId')),
     }
   } catch {
     return NO_SELECTION
@@ -163,10 +157,10 @@ function writeShellView(v: ShellView | null) {
 const initialShellView = readShellView()
 
 /**
- * Composer drafts survive bot / group / team / tab switches and reloads.
- * Key: `bot:<id>` | `group:<projectId>` | `team:<teamId>`.
+ * Composer drafts survive bot / group / tab switches and reloads.
+ * Key: `bot:<id>` | `group:<projectId>`.
  */
-export type DraftKey = `bot:${string}` | `group:${string}` | `team:${string}`
+export type DraftKey = `bot:${string}` | `group:${string}`
 
 /** The saved selection in a composer draft (usually a collapsed caret). */
 export interface DraftCursor {
@@ -389,24 +383,6 @@ export interface StoreState {
   /** §13.6: replies that arrived while that project's group view was not open (memory only). */
   groupUnread: Record<string, number>
 
-  // ---- SPEC-team §11.5 -------------------------------------------------
-  /** `GET /api/state` 的 `projects[].teams[]` 攤平；key = team id。 */
-  teams: Record<string, Team>
-  /** `GET /teams/:id`（含 tasks / worktree_root）；只在開過的 team 上有值。 */
-  teamDetail: Record<string, TeamDetail>
-  /** `GET /teams/:id/events` + WS `team_event`。 */
-  teamEvents: Record<string, TeamEvent[]>
-  /** 該 team 的視圖沒開著時進來的成員回覆數（僅記憶體）。 */
-  teamUnread: Record<string, number>
-  /** done team 清理後追加 issue 會固定得到 409；記住它以隱藏不可再用的按鈕。 */
-  teamReopenUnavailable: Record<string, boolean>
-  /** 非 null = 右側顯示 TeamPanel（與 `selectedProjectId` 互斥）。 */
-  selectedTeamId: string | null
-  /**
-   * false = 這個 daemon 沒有 `/api/teams` 端點（舊版）。第一次收到 404/405 就翻成 false，
-   * 之後 UI 的 team 入口靜默消失，不再重試，也不再跳錯誤（docs/FRONTEND.md §8）。
-   */
-  teamsSupported: boolean
   /**
    * 總管（AGM）自己那個專案的 id（`GET /api/supervisor` 的 `project_id`）。
    *
@@ -417,9 +393,6 @@ export interface StoreState {
   supervisorProjectId: string | null
   loadSupervisorProject: () => Promise<void>
 
-  /** TeamLaunchPanel（右側暫時性 sheet）；null = 未開啟。 */
-  teamLaunch: { projectId: string; issueNumber: number; repo: string } | null
-
   // ---- 群組任務（mission，docs/goals/agm-missions.md §5）
   /** 每個 project 的任務清單（新的在前）。 */
   missions: Record<string, Mission[]>
@@ -427,7 +400,7 @@ export interface StoreState {
   missionDetail: Record<string, MissionDetail>
   missionLoading: Record<string, boolean>
   missionLoadErrors: Record<string, string>
-  /** false = 這個 daemon 沒有 `/api/missions`（舊版）。同 `teamsSupported`：入口靜默消失。 */
+  /** false = 這個 daemon 沒有 `/api/missions`（舊版）：入口靜默消失。 */
   missionsSupported: boolean
   loadMissions: (projectId: string) => Promise<void>
   loadMission: (missionId: string) => Promise<void>
@@ -599,59 +572,6 @@ export interface StoreState {
    * 三個送出入口（回合結束自動送、中止並取代、併行送入）共用，免得 409 把字吃掉。
    */
   restoreQueuedSend: (botId: string, pending: QueuedSend) => void
-
-  // ---- SPEC-team -------------------------------------------------------
-  /** 開啟某個 team 的視圖（null = 回到原本的 bot / 群組）。 */
-  selectTeam: (teamId: string | null) => void
-  /**
-   * 開著 team 角色編輯的 `{teamId, role}`；null = 沒開。
-   *
-   * 側欄成員列的齒輪與 TeamPanel 的角色列都寫這一格，彈窗只有一份（在 TeamPanel 裡）。
-   */
-  teamRoleEdit: { teamId: string; role: TeamRoleKey } | null
-  /** 選到那個 team 並把角色編輯開在 `role` 上（側欄齒輪用）。 */
-  openTeamRole: (teamId: string, role: TeamRoleKey) => void
-  closeTeamRole: () => void
-  /** 載入 `GET /teams/:id` + `/events` + 該專案的合併時間軸。 */
-  loadTeam: (teamId: string) => Promise<void>
-  /** IssuesBar 的「組隊」：開啟 TeamLaunchPanel。 */
-  openTeamLaunch: (projectId: string, issueNumber: number, repo?: string) => void
-  closeTeamLaunch: () => void
-  /** `POST /projects/:id/teams`；成功後自動 `selectTeam`。null = 失敗。 */
-  createTeam: (projectId: string, input: NewTeamInput) => Promise<string | null>
-  controlTeam: (teamId: string, action: TeamControlAction) => Promise<boolean>
-  /**
-   * `DELETE /teams/:id?branches=`（SPEC-team §6.5a）——任何 phase 都可以刪。
-   * `branches: 'delete'` 會連分支一起 `git branch -D`，UI 必須先二次確認。
-   * team 已經不在（404 not_found）也算成功：本地照樣清乾淨。
-   */
-  removeTeam: (teamId: string, branches?: TeamBranchDisposal) => Promise<boolean>
-  patchTeam: (teamId: string, input: PatchTeamInput) => Promise<boolean>
-  /**
-   * `POST /teams/:id/close-issue`（SPEC-team §10.7）——把 team 對應的 GitHub issue 關掉。
-   *
-   * 只有 `phase === 'done'` 的 team 有這個動作，而且**永遠是使用者按出來的**：daemon 不會
-   * 自己關 issue，UI 也要先二次確認（這是會寫到 GitHub 的動作）。
-   */
-  closeTeamIssue: (teamId: string, issueId?: string) => Promise<boolean>
-  /**
-   * 一鍵把這隊所有「已交付但還沒關」的 issue 關掉：同一個端點逐一呼叫（daemon 不做批次，
-   * §10.7 的「每一次關閉都是使用者按出來的」不變），一個失敗不擋其他，最後一則通知說結果。
-   */
-  closeAllTeamIssues: (teamId: string) => Promise<{ closed: number; failed: number }>
-  /** `POST /teams/:id/say`（`to` = `pm` 或 bot_id）。 */
-  sayToTeam: (teamId: string, text: string, to: string) => Promise<boolean>
-  /** `POST /teams/:id/answer` — 回覆 PM 的 `ask_user`。 */
-  answerTeam: (teamId: string, text: string) => Promise<boolean>
-  decideTeamTask: (teamId: string, taskId: string, action: TeamTaskDecision, note?: string) => Promise<boolean>
-  /** `POST /teams/:id/issues`（SPEC-team §2.3）——執行中續加 issue 到佇列。 */
-  addTeamIssues: (teamId: string, issueNumbers: number[]) => Promise<boolean>
-  /** SPEC-team §2.6：把跑完的 team 裡沒解決的 task 全部交給一個成員（省略 = reviewer）。 */
-  rescueTeam: (teamId: string, botId?: string) => Promise<boolean>
-  /** SPEC-team §2.6b：把失敗 / 被跳過的 issue 全部重新排進佇列接力做完。 */
-  retryFailedIssues: (teamId: string) => Promise<boolean>
-  /** `DELETE /teams/:id/issues/:issue_id` — 只能移除還沒開始的。 */
-  removeTeamIssue: (teamId: string, issueId: string) => Promise<boolean>
 }
 
 let noticeSeq = 0
@@ -781,14 +701,6 @@ export const useStore = create<StoreState>((set, get) => ({
   loadedProjects: {},
   groupUnread: initialUnread.groups,
 
-  teams: {},
-  teamDetail: {},
-  teamEvents: {},
-  teamUnread: {},
-  teamReopenUnavailable: {},
-  selectedTeamId: initialSelection.teamId,
-  teamsSupported: true,
-  teamLaunch: null,
   missions: {},
   missionDetail: {},
   missionLoading: {},
@@ -827,9 +739,6 @@ export const useStore = create<StoreState>((set, get) => ({
       // `GET /api/state` 失敗（401／502／daemon 重啟中）不能就這樣 ready：清單是空的，routeSync
       // 一見 ready 就把深連結判成「這個 Bot 已經不在了」、replaceState 成 `/`。停在開機畫面重試。
       if (get().stateStale) throw new Error(lastRefreshError ?? '無法讀取 daemon 狀態')
-      // 開機時還原的 team 選取要在這裡補抓細節（`refreshState` 不再幫忙載 team，issue #23）。
-      const team = get().selectedTeamId
-      if (team) await get().loadTeam(team)
       await get().restoreShellView()
       set({ ready: true, bootError: null })
     } catch (e) {
@@ -878,10 +787,6 @@ export const useStore = create<StoreState>((set, get) => ({
           : (st.bots[0]?.id ?? null)
       const selectedProject =
         s.selectedProjectId && st.projects.some((p) => p.id === s.selectedProjectId) ? s.selectedProjectId : null
-      // SPEC-team：`teams` 以 state 為權威，但保留 WS 已經推進的 phase/usage（state 可能較舊）。
-      const teams: Record<string, Team> = {}
-      for (const t of st.teams) teams[t.id] = { ...(s.teams[t.id] ?? {}), ...t }
-      const selectedTeam = s.selectedTeamId && teams[s.selectedTeamId] ? s.selectedTeamId : null
       // 瀏覽器端的佔位列（分身按下去那一刻放的）：同名的真 bot 到了就原地換掉——連它在
       // `botOrder`（拖曳後、還沒等到 daemon 回話的樂觀順序）裡的位子一起讓給真的那一列，
       // 同一次 set 裡完成，清單不會少一列或跳一下。
@@ -917,7 +822,6 @@ export const useStore = create<StoreState>((set, get) => ({
         bots: [...st.bots, ...keptPending],
         botOrder,
         projectOrder,
-        teams,
         runs,
         turns,
         connected: st.connected,
@@ -927,7 +831,6 @@ export const useStore = create<StoreState>((set, get) => ({
         lastSeq: st.daemon_seq < s.lastSeq ? st.daemon_seq : Math.max(s.lastSeq, st.daemon_seq),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
-        selectedTeamId: selectedTeam,
       }
     })
     get().pruneUnread()
@@ -935,8 +838,6 @@ export const useStore = create<StoreState>((set, get) => ({
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
     const proj = get().selectedProjectId
     if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
-    // team 細節不在這裡重抓：`selectTeam`、`team_changed`（phase 有變）與 `resync` 各自負責，
-    // 否則每次 state 刷新都多 2-3 個 team 請求，還會跟刪除賽跑（issue #23）。
     // 總管的專案 id 只讀一次就夠（它不會變），讀不到就算了——排除規則會退回「不排除」，
     // 那是多顯示幾顆晶片，不是壞掉。
     if (get().supervisorProjectId === null) void get().loadSupervisorProject()
@@ -958,7 +859,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   selectBot: (botId) => {
-    set({ selectedBotId: botId, selectedProjectId: null, selectedTeamId: null, teamLaunch: null, shellView: null, rightTab: 'chat', settingsBotId: null })
+    set({ selectedBotId: botId, selectedProjectId: null, shellView: null, rightTab: 'chat', settingsBotId: null })
     // 點進來就是看到了——但只有視窗真的在前景才算（程式化的選取可能發生在背景分頁）。
     if (botId && windowActive()) get().markBotRead(botId)
     if (botId && !get().loadedBots[botId]) void get().loadMessages(botId)
@@ -972,8 +873,6 @@ export const useStore = create<StoreState>((set, get) => ({
   selectProject: (projectId) => {
     set({
       selectedProjectId: projectId,
-      selectedTeamId: null,
-      teamLaunch: null,
       shellView: null,
       rightTab: 'chat',
       settingsBotId: null,
@@ -1073,13 +972,11 @@ export const useStore = create<StoreState>((set, get) => ({
 
   /** 設定面板永遠對著「目前選取的 bot」，所以開啟時順便切過去。 */
   openSettings: (botId, anchor = null) => {
-    // 面板只在 ChatPanel 裡渲染：主面板是 Team／組隊／主機 shell 視圖時要一起清掉，
+    // 面板只在 ChatPanel 裡渲染：主面板是主機 shell 視圖時要一起清掉，
     // 不然按齒輪只有 selectedBotId 暗中換掉、畫面與網址都不動（同 `selectBot` 的那一組）。
     set({
       selectedBotId: botId,
       selectedProjectId: null,
-      selectedTeamId: null,
-      teamLaunch: null,
       shellView: null,
       rightTab: 'chat',
       settingsBotId: botId,
@@ -1203,7 +1100,7 @@ export const useStore = create<StoreState>((set, get) => ({
       get().markGroupRead(s.selectedProjectId)
       return
     }
-    if (s.selectedTeamId || s.shellView) return
+    if (s.shellView) return
     if (s.selectedBotId) get().markBotRead(s.selectedBotId)
   },
 
@@ -1490,7 +1387,7 @@ export const useStore = create<StoreState>((set, get) => ({
     // 先把一列灰的放進清單、排在本尊後面，使用者按下去就看得到；daemon 回來再換成真的。
     // 佔位列用假 id，`refreshState` 會保留它直到同名的真 bot 出現。
     const tempId = `pending:${Date.now().toString(36)}`
-    const placeholder: Bot = { ...bot, id: tempId, name, parent_bot_id: null, team: null, pending: true }
+    const placeholder: Bot = { ...bot, id: tempId, name, parent_bot_id: null, pending: true }
     const dropPlaceholder = () =>
       set((st) => ({
         bots: st.bots.filter((b) => b.id !== tempId),
@@ -1874,68 +1771,6 @@ export const useStore = create<StoreState>((set, get) => ({
     })
   },
 
-  // ------------------------------------------------------------ SPEC-team
-
-  teamRoleEdit: null,
-
-  openTeamRole: (teamId, role) => {
-    if (get().selectedTeamId !== teamId) get().selectTeam(teamId)
-    set({ teamRoleEdit: { teamId, role } })
-  },
-
-  closeTeamRole: () => set({ teamRoleEdit: null }),
-
-  selectTeam: (teamId) => {
-    set((s) => ({
-      selectedTeamId: teamId,
-      teamRoleEdit: null,
-      selectedProjectId: null,
-      teamLaunch: null,
-      shellView: null,
-      rightTab: 'chat',
-      settingsBotId: null,
-      teamUnread: teamId ? { ...s.teamUnread, [teamId]: 0 } : s.teamUnread,
-    }))
-    if (teamId) void get().loadTeam(teamId)
-  },
-
-  async loadTeam(teamId) {
-    if (!get().teamsSupported) return
-    // The timeline is `GET /projects/:id/messages` filtered by `team_id` (SPEC-team §11.3),
-    // so the project's merged history has to be there before the panel can render anything.
-    const projectId = get().teams[teamId]?.project_id ?? get().teamDetail[teamId]?.project_id ?? null
-    if (projectId && !get().loadedProjects[projectId]) await get().loadGroupMessages(projectId)
-    try {
-      const [detail, events] = await Promise.all([api.fetchTeam(teamId), api.fetchTeamEvents(teamId)])
-      // 舊 daemon 的 SPA fallback 會對 `/api/teams/:id` 回 200 + index.html，解不出 team。
-      if (!detail && !get().teams[teamId]) {
-        set({ teamsSupported: false, teamLaunch: null, selectedTeamId: null })
-        return
-      }
-      set((s) => ({
-        teamDetail: detail ? { ...s.teamDetail, [teamId]: detail } : s.teamDetail,
-        teams: detail ? { ...s.teams, [teamId]: { ...(s.teams[teamId] ?? {}), ...stripDetail(detail) } } : s.teams,
-        teamEvents: { ...s.teamEvents, [teamId]: capList(events, TEAM_EVENT_CAP).list },
-      }))
-      const pid = detail?.project_id
-      if (pid && !get().loadedProjects[pid]) await get().loadGroupMessages(pid)
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return
-      if (api.isTeamNotFound(e)) {
-        // 這個 team 已經不在了（多半是剛被刪掉——`refreshState` 尾巴的重載會跟刪除賽跑，
-        // 別的視窗刪的也一樣）。靜靜清掉本地痕跡就好，不要跳錯誤。
-        set((s) => forgetTeamPatch(s, teamId, true))
-        return
-      }
-      get().notify('error', `載入 Team 失敗：${errText(e)}`)
-    }
-  },
-
-  openTeamLaunch: (projectId, issueNumber, repo = '') =>
-    set({ teamLaunch: { projectId, issueNumber, repo }, selectedTeamId: null, shellView: null, settingsBotId: null }),
-
-  closeTeamLaunch: () => set({ teamLaunch: null }),
-
   // ---- 群組任務（mission）
   async loadMissions(projectId) {
     if (!get().missionsSupported) return
@@ -2057,250 +1892,7 @@ export const useStore = create<StoreState>((set, get) => ({
       return null
     }
   },
-
-  async createTeam(projectId, input) {
-    try {
-      const id = await api.createTeam(projectId, input)
-      set({ teamLaunch: null })
-      await get().refreshState()
-      if (id) {
-        get().selectTeam(id)
-        get().notify('info', `已建立 Team（${input.issue_numbers.map((n) => `#${n}`).join('、')}），成員啟動中…`)
-      }
-      return id || null
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return null
-      get().notify('error', `建立 Team 失敗：${errText(e)}`)
-      return null
-    }
-  },
-
-  async controlTeam(teamId, action) {
-    let ok = false
-    await guarded(set, get, `team:${teamId}:${action}`, async () => {
-      await api.controlTeam(teamId, action)
-      ok = true
-      // `cleanup` 收現場但**留下 `teams` 這一列**（SPEC-team §6.5），所以 row 不動，
-      // 只丟掉細節與草稿；`delete` 才是連紀錄一起移除的那條路（§6.5a，見 `removeTeam`）。
-      if (action === 'cleanup') set((s) => forgetTeamPatch(s, teamId, false))
-      await get().refreshState()
-    })
-    return ok
-  },
-
-  async removeTeam(teamId, branches = 'keep') {
-    const team = get().teams[teamId]
-    let ok = false
-    await guarded(set, get, `team:${teamId}:delete`, async () => {
-      try {
-        await api.deleteTeam(teamId, branches)
-      } catch (e) {
-        // 舊 daemon 根本沒有這個端點（裸 404 / 405）→ 靜默關掉整組 team UI。
-        if (markTeamsUnsupported(set, get, e)) return
-        // 冪等（§6.5a）：已經不在了就當成功——本地照樣清乾淨，不要跳錯誤。
-        if (!api.isTeamNotFound(e)) throw e
-      }
-      ok = true
-      set((s) => forgetTeamPatch(s, teamId, true))
-      await get().refreshState()
-      const label = team ? `Team #${team.issue_number}` : 'Team'
-      get().notify('info', branches === 'delete' ? `已刪除 ${label}（含分支）` : `已刪除 ${label}（分支保留）`)
-    })
-    return ok
-  },
-
-  async patchTeam(teamId, input) {
-    let ok = false
-    await guarded(set, get, `team:${teamId}:patch`, async () => {
-      await api.patchTeam(teamId, input)
-      ok = true
-      await get().loadTeam(teamId)
-      await get().refreshState()
-    })
-    return ok
-  },
-
-  async closeTeamIssue(teamId, issueId) {
-    const team = get().teams[teamId]
-    let ok = false
-    await guarded(set, get, `team:${teamId}:close-issue`, async () => {
-      const out = await api.closeTeamIssue(teamId, issueId ? { issue_id: issueId } : undefined)
-      ok = true
-      await get().loadTeam(teamId)
-      await get().refreshState()
-      const n = out.number || team?.issue_number || 0
-      get().notify(
-        'info',
-        out.already_closed ? `issue #${n} 本來就已經關閉了` : `已關閉 issue #${n}`,
-      )
-    })
-    return ok
-  },
-
-  async closeAllTeamIssues(teamId) {
-    const team = get().teams[teamId]
-    const targets = (team?.issues ?? []).filter((i) => i.state === 'done' && !i.issue_closed_at)
-    let closed = 0
-    let failed = 0
-    const errors: string[] = []
-    await guarded(set, get, `team:${teamId}:close-issue`, async () => {
-      for (const i of targets) {
-        try {
-          await api.closeTeamIssue(teamId, { issue_id: i.id })
-          closed += 1
-        } catch (e) {
-          failed += 1
-          errors.push(`#${i.issue_number}：${errText(e)}`)
-        }
-      }
-      await get().loadTeam(teamId)
-      await get().refreshState()
-    })
-    if (failed === 0) get().notify('info', `已關閉 ${closed} 個 issue`)
-    else get().notify('error', `已關閉 ${closed} 個，${failed} 個失敗：${errors.join('；')}`)
-    return { closed, failed }
-  },
-
-  async sayToTeam(teamId, text, to) {
-    try {
-      await api.sayToTeam(teamId, text, to, api.newClientRequestId())
-      return true
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return false
-      get().notify('error', errText(e))
-      return false
-    }
-  },
-
-  async answerTeam(teamId, text) {
-    try {
-      await api.answerTeam(teamId, text)
-      await get().loadTeam(teamId)
-      return true
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return false
-      get().notify('error', errText(e))
-      return false
-    }
-  },
-
-  async decideTeamTask(teamId, taskId, action, note) {
-    let ok = false
-    await guarded(set, get, `team:${teamId}:decide:${taskId}`, async () => {
-      await api.decideTeamTask(teamId, taskId, action, note)
-      ok = true
-      await get().loadTeam(teamId)
-    })
-    return ok
-  },
-  async rescueTeam(teamId, botId) {
-    const key = `team:${teamId}:rescue`
-    if (get().busy[key]) return false
-    let ok = false
-    set((s) => ({ busy: { ...s.busy, [key]: true } }))
-    try {
-      const r = await api.rescueTeam(teamId, botId)
-      ok = true
-      await get().loadTeam(teamId)
-      get().notify('info', `已把 ${r.rescued} 個沒解決的 task 交給 ${r.bot} 收尾`)
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return false
-      get().notify('error', errText(e))
-    } finally {
-      set((s) => ({ busy: withoutKey(s.busy, key) }))
-    }
-    return ok
-  },
-
-  async retryFailedIssues(teamId) {
-    const key = `team:${teamId}:retry-issues`
-    if (get().busy[key]) return false
-    let ok = false
-    set((s) => ({ busy: { ...s.busy, [key]: true } }))
-    try {
-      const numbers = await api.retryFailedIssues(teamId)
-      ok = true
-      set((s) => ({ teamReopenUnavailable: withoutKey(s.teamReopenUnavailable, teamId) }))
-      await get().loadTeam(teamId)
-      get().notify('info', `已重排：${numbers.map((n) => `#${n}`).join('、')}`)
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return false
-      get().notify('error', errText(e))
-    } finally {
-      set((s) => ({ busy: withoutKey(s.busy, key) }))
-    }
-    return ok
-  },
-
-  async addTeamIssues(teamId, issueNumbers) {
-    const key = `team:${teamId}:add-issues`
-    if (get().busy[key]) return false
-    let ok = false
-    set((s) => ({ busy: { ...s.busy, [key]: true } }))
-    try {
-      await api.addTeamIssues(teamId, issueNumbers)
-      ok = true
-      set((s) => ({ teamReopenUnavailable: withoutKey(s.teamReopenUnavailable, teamId) }))
-      await get().loadTeam(teamId)
-      get().notify('info', `已加入佇列：${issueNumbers.map((n) => `#${n}`).join('、')}`)
-    } catch (e) {
-      if (markTeamsUnsupported(set, get, e)) return false
-      // §2.5.1：cleanup 過的 done team 永遠回這個 409，重試也沒用——記住它，把按鈕收掉。
-      if (e instanceof ApiError && e.status === 409 && e.body.reason === 'team is cleaned up') {
-        set((s) => ({ teamReopenUnavailable: { ...s.teamReopenUnavailable, [teamId]: true } }))
-        get().notify('info', '這個 Team 已經清理，無法追加 issue。')
-      } else if (e instanceof ApiError && e.status === 409 && e.body.reason === 'issue already queued') {
-        // §2.3：只有還在佇列上（待處理 / 進行中）的同號 issue 會擋。原文是 `issue already
-        // queued`，對使用者只是一句英文——直接說是哪一號、以及它已經在佇列裡了。
-        const n = typeof e.body.issue_number === 'number' ? e.body.issue_number : null
-        get().notify('info', n === null ? '這個 issue 已在佇列裡。' : `#${n} 已在佇列裡。`)
-      } else {
-        get().notify('error', `追加 issue 失敗：${errText(e)}`)
-      }
-    } finally {
-      set((s) => {
-        const busy = { ...s.busy }
-        delete busy[key]
-        return { busy }
-      })
-    }
-    return ok
-  },
-  async removeTeamIssue(teamId, issueId) {
-    let ok = false
-    await guarded(set, get, `team:${teamId}:remove-issue:${issueId}`, async () => {
-      await api.removeTeamIssue(teamId, issueId)
-      ok = true
-      await get().loadTeam(teamId)
-    })
-    return ok
-  },
 }))
-
-/**
- * 抹掉某個 team 的本地痕跡（`cleanup` / `delete` / WS `deleted:true` 共用）。
- *
- * `dropRow` 才把 `teams` 這一列拿掉：`cleanup` 在 daemon 端會保留 row（SPEC-team §6.5），
- * 本地先刪掉只會讓節點閃一下又被 `refreshState` 補回來；`delete`（§6.5a）才是真的沒了。
- * 正選著這個 team 時把選取放掉 —— `refreshState` 會把選取退回既有的 bot，
- * 不會留在一個已經不存在的 team 上變成白畫面。
- */
-function forgetTeamPatch(s: StoreState, teamId: string, dropRow: boolean): Partial<StoreState> {
-  const drafts = withoutKey(s.drafts, `team:${teamId}`)
-  const draftCursors = withoutKey(s.draftCursors, `team:${teamId}`)
-  writeDrafts(drafts)
-  writeDraftCursors(draftCursors)
-  return {
-    selectedTeamId: s.selectedTeamId === teamId ? null : s.selectedTeamId,
-    ...(dropRow ? { teams: withoutKey(s.teams, teamId) } : {}),
-    teamDetail: withoutKey(s.teamDetail, teamId),
-    teamEvents: withoutKey(s.teamEvents, teamId),
-    teamUnread: withoutKey(s.teamUnread, teamId),
-    teamReopenUnavailable: withoutKey(s.teamReopenUnavailable, teamId),
-    drafts,
-    draftCursors,
-  }
-}
 
 /**
  * 把一筆任務併回它那個 project 的清單（新的在前）。
@@ -2312,25 +1904,6 @@ function mergeMission(map: Record<string, Mission[]>, mission: Mission): Record<
   if (!list) return map
   const next = [mission, ...list.filter((m) => m.id !== mission.id)]
   return { ...map, [mission.project_id]: next }
-}
-
-/** `TeamDetail` 的 `Team` 部分（`teams` map 只存共同欄位，細節留在 `teamDetail`）。 */
-function stripDetail(detail: TeamDetail): Team {
-  const { tasks: _tasks, summary: _summary, base_ref: _ref, base_sha: _sha, worktree_root: _root, ...team } = detail
-  return team
-}
-
-/**
- * daemon 還沒有 team 端點（404 / 405）→ 靜默關掉整組 team UI，只留一則說明用的 info。
- * 回 true 代表「已處理，呼叫端不要再跳錯誤」。
- */
-function markTeamsUnsupported(set: SetFn, get: GetFn, e: unknown): boolean {
-  if (!api.isTeamsUnsupported(e)) return false
-  if (get().teamsSupported) {
-    set({ teamsSupported: false, teamLaunch: null, selectedTeamId: null })
-    get().notify('info', '這個 daemon 版本還沒有 Team 端點，已隱藏「組隊」功能。')
-  }
-  return true
 }
 
 // One subscription instead of a write at every mutation site: `selectBot`, `selectProject`,
@@ -2345,12 +1918,11 @@ useStore.subscribe((s) => {
   }
   if (
     s.selectedBotId === lastSelection.botId &&
-    s.selectedProjectId === lastSelection.projectId &&
-    s.selectedTeamId === lastSelection.teamId
+    s.selectedProjectId === lastSelection.projectId
   ) {
     return
   }
-  lastSelection = { botId: s.selectedBotId, projectId: s.selectedProjectId, teamId: s.selectedTeamId }
+  lastSelection = { botId: s.selectedBotId, projectId: s.selectedProjectId }
   writeSelection(lastSelection)
 })
 
@@ -2407,9 +1979,9 @@ function connectSocket(set: SetFn, get: GetFn) {
 
 let resyncPending = false
 
-/** 使用者現在看的是不是這個 bot 的對話（群組 / team / shell 都會蓋掉它）。 */
+/** 使用者現在看的是不是這個 bot 的對話（群組 / shell 都會蓋掉它）。 */
 function viewingBot(s: StoreState, botId: string): boolean {
-  return s.selectedBotId === botId && !s.selectedProjectId && !s.selectedTeamId && !s.shellView
+  return s.selectedBotId === botId && !s.selectedProjectId && !s.shellView
 }
 
 /**
@@ -2456,8 +2028,6 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           for (const botId of loadedBotIds) await get().loadMessages(botId)
           const proj = get().selectedProjectId
           if (proj) await get().loadGroupMessages(proj)
-          const team = get().selectedTeamId
-          if (team) await get().loadTeam(team)
         } catch (e) {
           reportStateRefreshError(set, get, e)
         } finally {
@@ -2596,16 +2166,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
             if (cut.trimmed) more[pid] = true
           }
         }
-        // SPEC-team §11.5: the team timeline reads the same `groupMessages` rows (filtered by
-        // `team_id`), so only the unread counter is team-specific here.
-        if (msg.team_id && msg.role !== 'user' && s.selectedTeamId !== msg.team_id) {
-          patch.teamUnread = { ...s.teamUnread, [msg.team_id]: (s.teamUnread[msg.team_id] ?? 0) + 1 }
-        }
         if (Object.keys(more).length > 0) patch.moreMessages = { ...s.moreMessages, ...more }
         return patch
       })
       // 一則 assistant 訊息 = 一個回合完成。記未讀要在 set 之後：`markBotRead` 的標記是從
-      // 已經含這則訊息的清單推出來的。team 成員也是 bot，走的是同一條路。
+      // 已經含這則訊息的清單推出來的。
       if (completesTurn(msg)) {
         // 同一個回合只記一次：沒有 `turn_id` 的訊息也要跟 `turn_updated` 落在同一個 key 上，
         // 否則這裡記 `msg:<id>`、回合終態再記 `turn.id`，一則回覆讓徽章跳兩下。
@@ -2701,58 +2266,6 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota'), kind) } }))
       return
     }
-    case 'team_changed': {
-      // SPEC-team §10.6: `{team_id, project_id, phase, pause_reason, usage}` — a partial patch.
-      if (!isRec(data)) return
-      const teamId = str(pick(data, 'team_id', 'id'))
-      if (!teamId) return
-      if (bool(pick(data, 'deleted'), false)) {
-        // SPEC-team §6.5a：刪除完成的那一則。節點要立刻消失（成員的 `bot_changed` 會另外來），
-        // 而且不能 `refreshState` 把它撈回來——這一列在 daemon 端已經不存在了。
-        set((s) => forgetTeamPatch(s, teamId, true))
-        void get().refreshState()
-        return
-      }
-      // §6.5a 的「刪除中」phase 不在 `TeamPhase` 裡，`toTeam` 的 `oneOf` 會 fallback 成
-      // `starting`，節點反而顯示「啟動中」。刪除完成馬上會推 `deleted:true`，這一則略過。
-      if (str(pick(data, 'phase')) === 'deleting') return
-      const existing = get().teams[teamId]
-      if (!existing) {
-        // A team this client has not seen yet (just created elsewhere): pull the full record.
-        void get().refreshState()
-        return
-      }
-      const merged = toTeam({ ...existing, ...data, id: teamId }, existing.project_id)
-      if (!merged) return
-      set((s) => ({
-        teams: { ...s.teams, [teamId]: merged },
-        teamDetail: s.teamDetail[teamId] ? { ...s.teamDetail, [teamId]: { ...s.teamDetail[teamId], ...merged } } : s.teamDetail,
-      }))
-      if (existing.phase !== merged.phase) {
-        if (TEAM_TERMINAL_PHASES.includes(merged.phase)) {
-          get().notify('info', `Team #${merged.issue_number} ${TEAM_PHASE_LABEL[merged.phase]}`)
-        }
-        // `summary` / `base_*` / `worktree_root` 只在 `GET /teams/:id` 上，phase 一動就重抓
-        // （只對開著的 team，不會變成每則事件一次請求）。
-        if (get().selectedTeamId === teamId) void get().loadTeam(teamId)
-      }
-      return
-    }
-    case 'team_task_updated': {
-      if (!isRec(data)) return
-      const teamId = str(pick(data, 'team_id'))
-      const task = toTeamTask(unwrap(data, 'task'))
-      if (!teamId || !task) return
-      set((s) => {
-        const detail = s.teamDetail[teamId]
-        if (!detail) return {}
-        const tasks = detail.tasks.some((t) => t.id === task.id)
-          ? detail.tasks.map((t) => (t.id === task.id ? task : t))
-          : [...detail.tasks, task]
-        return { teamDetail: { ...s.teamDetail, [teamId]: { ...detail, tasks: tasks.sort((a, b) => a.seq - b.seq) } } }
-      })
-      return
-    }
     case 'mission_updated': {
       // 只帶 id 與狀態（API.md），細節重抓一次；清單還沒載過就不主動去載（使用者沒在看）。
       const d = isRec(frame.data) ? frame.data : {}
@@ -2771,20 +2284,6 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       return null
     }
 
-    case 'team_event': {
-      if (!isRec(data)) return
-      const teamId = str(pick(data, 'team_id'))
-      const ev = toTeamEvent(unwrap(data, 'event'))
-      if (!teamId || !ev) return
-      set((s) => {
-        const list = s.teamEvents[teamId]
-        if (!list) return {}
-        if (list.some((x) => x.id === ev.id)) return {}
-        // issue #25：時間軸只往後長。這裡沒有分頁可以補，舊事件就直接丟。
-        return { teamEvents: { ...s.teamEvents, [teamId]: capList([...list, ev], TEAM_EVENT_CAP).list } }
-      })
-      return
-    }
     // SPEC §6.9：批次重啟的進度。一顆一顆來，`index` 是第幾顆（1-based）。
     case 'bots_restart_progress': {
       if (!isRec(data)) return
@@ -3088,7 +2587,6 @@ export function botSearchText(state: StoreState, bot: Bot): string {
     bot.model ?? '',
     bot.persona ?? '',
     run?.agent_title ?? '',
-    bot.team?.role ?? '',
     project?.label ?? '',
     project?.path ?? '',
     project?.host === LOCAL_HOST ? '本機 local' : (project?.host ?? ''),
@@ -3255,45 +2753,6 @@ export interface GroupComposerState {
   /** member bots that would accept a prompt right now */
   sendable: string[]
 }
-
-// ---------------------------------------------------- SPEC-team selectors
-
-/** 某個 project 底下的 team（建立時間新的排前面）。 */
-export function teamsOfProject(state: { teams: Record<string, Team> }, projectId: string): Team[] {
-  return Object.values(state.teams)
-    .filter((t) => t.project_id === projectId)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
-}
-
-/**
- * SPEC-team §11.3 時間軸：`GET /projects/:id/messages` 的同一份資料，過濾 `team_id`。
- * 專案的群組歷史還沒載入時回 null，讓面板顯示載入狀態而不是「空的」。
- */
-export function teamMessages(state: StoreState, teamId: string | null): GroupMessage[] | null {
-  if (!teamId) return null
-  const projectId = state.teams[teamId]?.project_id ?? state.teamDetail[teamId]?.project_id ?? null
-  if (!projectId) return null
-  const all = state.groupMessages[projectId]
-  if (!all) return null
-  return all.filter((m) => m.team_id === teamId)
-}
-
-/** team 成員的 Bot 物件，依 pm → worker → reviewer 排序（缺席的成員略過）。 */
-export function teamMemberBots(state: StoreState, teamId: string | null): Bot[] {
-  const team = teamId ? state.teams[teamId] : null
-  if (!team) return []
-  const rank = { pm: 0, worker: 1, reviewer: 2 }
-  return team.members
-    .map((m) => state.bots.find((b) => b.id === m.bot_id))
-    .filter((b): b is Bot => Boolean(b))
-    .sort((a, b) => rank[a.team?.role ?? 'worker'] - rank[b.team?.role ?? 'worker'] || a.name.localeCompare(b.name))
-}
-
-/**
- * SPEC-team §7.3 的短名。定義在 `api/types.ts`（純模組，`teamPanelLogic` 這種可單獨跑
- * `node --test` 的檔案才能用），這裡照舊 re-export，元件的 import 路徑不變。
- */
-export { teamShortName, teamDisplayName } from '../api/types'
 
 export function groupComposerState(state: StoreState, projectId: string | null): GroupComposerState {
   if (!projectId) return { disabled: true, reason: '', sendable: [] }

@@ -128,15 +128,12 @@ export function IdentityOptions({
   host,
   value,
   onChange,
-  recheck = true,
 }: {
   kind: BotKind
   /** bot 會跑在哪台主機（`''` / `local` = 本機）。 */
   host: string
   value: string
   onChange: (v: string) => void
-  /** 組隊三張卡並排時不重複「重新偵測」。 */
-  recheck?: boolean
 }) {
   // Select the stable array and filter outside: a selector that returns a fresh array
   // re-renders forever (React #185).
@@ -155,17 +152,15 @@ export function IdentityOptions({
     <div className="field identity-field">
       <span>
         身份
-        {recheck ? (
-          <button
-            type="button"
-            className="identity-recheck"
-            disabled={busy}
-            title={`重新問 ${hostLabel} 上的 CLI 每個身份是否已登入`}
-            onClick={() => void refreshTools(host)}
-          >
-            {busy ? '偵測中…' : '重新偵測'}
-          </button>
-        ) : null}
+        <button
+          type="button"
+          className="identity-recheck"
+          disabled={busy}
+          title={`重新問 ${hostLabel} 上的 CLI 每個身份是否已登入`}
+          onClick={() => void refreshTools(host)}
+        >
+          {busy ? '偵測中…' : '重新偵測'}
+        </button>
       </span>
       <div className="opt-group" role="radiogroup" aria-label="identity">
         <button type="button" className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
@@ -231,7 +226,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [identity, setIdentity] = useState(bot?.identity ?? '')
   /**
    * 使用者動過哪些欄位。沒動過的欄位畫面上永遠跟著 store 裡的 bot 走（`effectiveForm`）：
-   * 面板開著時在標題列快速選單、另一個分頁或 TeamRoleEditor 改了同一顆的 model／effort，
+   * 面板開著時在標題列快速選單或另一個分頁改了同一顆的 model／effort，
    * 這裡不會標「已變更」，儲存也不會拿開啟當下的舊值把剛套用的蓋回去。
    */
   const [touched, setTouched] = useState<ReadonlySet<BotFormKey>>(() => new Set())

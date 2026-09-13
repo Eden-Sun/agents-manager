@@ -24,7 +24,6 @@ function msg(id: string, role: Message['role'], created_at: string, turn_id: str
     incomplete: false,
     group_id: null,
     attachments: [],
-    team_id: null,
     relay_from: null,
     terminal_snapshot: null,
     created_at,

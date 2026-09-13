@@ -907,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_does_not_return_a_stale_error() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut host_cfg = cfg();

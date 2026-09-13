@@ -1,6 +1,6 @@
 # agents-manager — agent 工作規則
 
-這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。人類讀的說明在 `README.md`，規格在 `docs/SPEC.md`、`docs/SPEC-team.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
+這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。人類讀的說明在 `README.md`，規格在 `docs/SPEC.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
 
 ## 修正 Bot 直接向 AGM 申請（使用者授權，2026-09-12）
 
@@ -17,7 +17,7 @@
 - 正式 UI 嵌在 daemon 二進位裡：前端改完要 `bun run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
 
 ## 開工前
-本規範針對直接派在 repo 主樹上的 agent 與它們的子 agent；team 成員使用各自 worktree，照 `.agents-manager/team/TEAM.md`。
+本規範針對直接派在 repo 主樹上的 agent 與它們的子 agent。
 1. 開工先找自己的 worktree：`git worktree list` 若已有 `.claude/worktrees/<你的 agent 名>` 就使用它；沒有就從主樹執行
    `git worktree add .claude/worktrees/<你的 agent 名> -b <分支>`，之後只在那棵 worktree 改與 commit。
 2. 進入自己的 worktree 後跑 `git status`，先辨認**其他 agent 未提交的改動**；那些不是你的，不要動，
@@ -28,7 +28,7 @@
 ## 改動邊界
 - 只改任務需要的檔案與行；共用檔（`store.ts`、`ChatPanel.tsx`、`Sidebar.tsx`、`styles.css`、`api.rs`、`lifecycle.rs`）hunk 要小，新邏輯優先獨立成新檔。
 - 不要翻案 `docs/UI-DECISIONS.md` 已定案的決定；新的取捨補寫進去。
-- 改了 API 要同步 `docs/API.md`；改了 team 行為要同步 `docs/SPEC-team.md`。
+- 改了 API 要同步 `docs/API.md`；改了行為要同步 `docs/SPEC.md`。
 - 不要加新功能、不要順手重構任務以外的東西。
 
 ## 驗證（收尾前必跑）
@@ -41,7 +41,7 @@
 
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
-- 訊息：`feat(scope): …` / `fix(scope): …` / `perf` / `docs` / `chore`，scope 用 `daemon` / `web` / `team` / `hosts` / `quota` 等，第一行說**為什麼**。
+- 訊息：`feat(scope): …` / `fix(scope): …` / `perf` / `docs` / `chore`，scope 用 `daemon` / `web` / `hosts` / `quota` / `mission` 等，第一行說**為什麼**。
 - 回報 commit hash，讓派工者在主樹只做 `git -C <主樹> merge --ff-only <你的分支>`；需要 rebase 時在自己的 worktree 做完再推自己的分支，禁止在主樹 stash、`checkout --` 或 autostash。
 - 不要 push 編不過的 HEAD（別人的半成品被你的 commit 依賴到時，把那部分一起帶上並在訊息裡註明）。整合完成後移除自己的 worktree：`git worktree remove .claude/worktrees/<你的 agent 名>`。
 

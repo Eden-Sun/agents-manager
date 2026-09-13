@@ -190,7 +190,7 @@ class SlimTest(unittest.TestCase):
                         "label": "AG Man",
                         "path": "/x",
                         # 這裡照 `GET /api/state` 真的會給的欄位：queued_turn 是一筆 turn，
-                        # team 的階段叫 phase，燈號是 daemon 算好的 lamp。
+                        # 燈號是 daemon 算好的 lamp。舊 daemon 可能還帶 team／teams，要被忽略。
                         "bots": [
                             {
                                 "id": "b1",
@@ -212,15 +212,14 @@ class SlimTest(unittest.TestCase):
         self.assertEqual(out["bots"][0]["queued_turn"]["id"], "q1")
         self.assertEqual(out["bots"][0]["queued_turn"]["status"], "queued")
         self.assertEqual(out["bots"][0]["lamp"], "busy")
-        self.assertEqual(out["bots"][0]["team"]["phase"], "working")
+        self.assertNotIn("team", out["bots"][0])
         self.assertTrue(out["bots"][0]["is_manager"])
-        self.assertEqual(out["teams"][0]["project_id"], "p1")
-        self.assertEqual(out["teams"][0]["phase"], "working")
+        self.assertEqual(set(out), {"projects", "bots", "manager_bot_id"})
 
-    def test_state_bot_without_queue_or_team(self):
+    def test_state_bot_without_queue_or_teams(self):
         out = agm.slim_state({"projects": [{"id": "p1", "bots": [{"id": "b1", "lamp": "idle", "queued_turn": None}]}]})
         self.assertIsNone(out["bots"][0]["queued_turn"])
-        self.assertNotIn("team", out["bots"][0])
+        self.assertEqual(set(out), {"projects", "bots"})
 
     def test_state_reads_top_level_bots(self):
         out = agm.slim_state({"bots": [{"id": "b9", "name": "n", "project_id": "p2"}]})
@@ -727,11 +726,11 @@ class MiscCommandTest(CliCase):
         self.assertEqual([r["method"] for r in FakeDaemon.seen if r["path"] == "/api/bots/b9"], ["DELETE"])
         self.assertEqual(self.bad("bot", "delete")["error"], "bad_args")
 
-    def test_bot_delete_of_a_team_member_is_a_structured_error(self):
-        FakeDaemon.routes["DELETE /api/bots/tm"] = (409, {"error": "conflict", "reason": "team_managed"})
+    def test_bot_delete_conflict_is_a_structured_error(self):
+        FakeDaemon.routes["DELETE /api/bots/tm"] = (409, {"error": "conflict", "reason": "all bots must be stopped first"})
         err = self.bad("bot", "delete", "tm")
         self.assertEqual(err["status"], 409)
-        self.assertEqual(err["detail"]["reason"], "team_managed")
+        self.assertEqual(err["detail"]["reason"], "all bots must be stopped first")
 
     def test_bot_restart(self):
         FakeDaemon.routes["POST /api/bots/b1/restart"] = (200, {"run_id": "r1"})

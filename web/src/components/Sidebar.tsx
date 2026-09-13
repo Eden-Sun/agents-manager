@@ -42,7 +42,6 @@ import { MobilePreviewToggle } from './MobilePreview'
 import { QuickAddBots } from './QuickAddBots'
 import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
-import { TeamNodes } from './TeamNodes'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
@@ -1018,10 +1017,9 @@ export function Sidebar() {
   // 比對讀的是整個 store（專案、run 的 agent 標題…），所以在這裡取一次 state 就好。
   const matches = (bot: Bot) => botMatches(useStore.getState(), bot, query) || bot.id in hits
   // 只數「真的命中」的，不含為了讓子 agent 有地方掛而一起顯示的父 bot。
-  const matchCount = query ? bots.filter((b) => b.team === null && matches(b)).length : bots.length
-  // 只數跟 `matchCount` 同一群的（team 成員列由 TeamNodes 自己畫，不在這個計數裡），
-  // 不然會出現「1 個符合（3 個含對話）」這種自相矛盾的數字。
-  const hitCount = bots.filter((b) => b.team === null && b.id in hits).length
+  const matchCount = query ? bots.filter((b) => matches(b)).length : bots.length
+  // 只數跟 `matchCount` 同一群的，不然會出現「1 個符合（3 個含對話）」這種自相矛盾的數字。
+  const hitCount = bots.filter((b) => b.id in hits).length
 
   /** 拖放：落在 overId 的上/下半 → 插到它前面 / 後面（後面 = 下一列的前面）。 */
   const dropAt = (dragId: string, overId: string, edge: 'before' | 'after') => {
@@ -1167,8 +1165,7 @@ export function Sidebar() {
           </p>
         ) : null}
         {projects.map((p) => {
-          // SPEC-team §11.4：team 成員縮排列在 Team 節點底下，不與一般 bot 混排。
-          const every = botsOfProject({ bots, botOrder }, p.id).filter((b) => b.team === null)
+          const every = botsOfProject({ bots, botOrder }, p.id)
           // 命中的子 agent 要連父 bot 一起留著（不然它沒有地方掛，會整個消失）；
           // 父 bot 命中時，它底下的子 agent 也一起顯示，當作它的脈絡。
           const hit = new Set(every.filter((b) => matches(b)).map((b) => b.id))
@@ -1256,8 +1253,7 @@ export function Sidebar() {
                     ＋
                   </button>
                   {/* 刪除專案本來是一顆 `✕`，就排在「新增 Bot」的 `＋` 旁邊——建設性與
-                      破壞性的動作肩並肩，而且在選取中的專案上是常駐的。跟 Team 標題列
-                      同一顆 `⋯`。 */}
+                      破壞性的動作肩並肩，而且在選取中的專案上是常駐的。收進 `⋯`。 */}
                   <HeadMoreMenu label={`更多動作 · ${p.label}`}>
                     {/* 開 shell 原本只長在「環境設定 → 主機」裡，要開一個 shell 得先想到它在
                         設定頁。從專案開才是常態：主機跟目錄都已經知道了（`openHostShell`
@@ -1370,7 +1366,6 @@ export function Sidebar() {
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
                 <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>
               ) : null}
-              {projectShut ? null : <TeamNodes projectId={p.id} />}
             </section>
           )
         })}

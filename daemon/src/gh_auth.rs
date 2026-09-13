@@ -1,4 +1,4 @@
-//! Remote (and local) `gh` login for hosts that issue-list / team need.
+//! Remote (and local) `gh` login for hosts whose issue list needs it.
 //!
 //! See `docs/goals/remote-gh-auth-2026-09-07.md`. Token bytes never go on argv, into
 //! tracing, or into API JSON. Device-flow `device_code` stays in memory only.

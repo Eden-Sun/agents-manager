@@ -3,7 +3,7 @@
  *
  * The composer's own tray is per-draft and dies with the panel, so a screenshot you happen
  * to have in front of bot A cannot be walked over to bot B. Park it here instead — the
- * shelf lives outside `<main>` in `App.tsx`, so switching bot / project / team never
+ * shelf lives outside `<main>` in `App.tsx`, so switching bot / project never
  * unmounts it — then hand it to whichever conversation is open, by dragging it into the
  * chat (desktop) or tapping it (everywhere, and the only way on touch).
  *

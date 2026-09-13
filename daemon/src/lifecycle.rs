@@ -19,8 +19,8 @@ pub enum LcError {
     Conflict(Value),
     Upstream(String),
     Bad(String),
-    /// A 400 whose body is machine-readable rather than a message, e.g. SPEC-team §10.1's
-    /// `{"error":"quota_low","kind":"claude","used_pct":93}`.
+    /// A 400 whose body is machine-readable rather than a message, e.g.
+    /// `{"error":"remote_not_supported","host":"m4p"}`.
     BadValue(Value),
 }
 
@@ -189,16 +189,14 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
             .unwrap_or_default();
         let should_flush_queue = t.status != "in_flight" && t.status != "queued";
         app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
-        // SPEC-team §3: the same transition on the internal bus. Every path that takes a
-        // turn out of `in_flight` (hook match, terminal fallback, watchdog, stop, interrupt)
-        // funnels through here, so team schedulers only need this one subscription.
+        // The same transition on the internal bus. Every path that takes a turn out of
+        // `in_flight` (hook match, terminal fallback, watchdog, stop, interrupt) funnels
+        // through here, so a subscriber only needs this one subscription.
         app.publish_turn(crate::state::TurnEvent {
             bot_id: bot_id.clone(),
             turn_id: t.id.clone(),
             status: t.status.clone(),
             delivery: t.delivery.clone(),
-            team_id: t.team_id.clone(),
-            team_event_id: t.team_event_id.clone(),
         });
         // The queue is daemon-owned. Schedule after publishing so the next prompt cannot race
         // the completion event, and let the per-bot lock serialize it with hooks / status events.
@@ -1280,8 +1278,6 @@ mod model_args_tests {
             identity: None,
             env_json: "{}".into(),
             managed_by: "user".into(),
-            team_id: None,
-            team_role: None,
             cwd: None,
             herdr_session: None,
             parent_bot_id: None,
@@ -1458,8 +1454,7 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
 
 /// Options that affect how a new native agent session is started.
 ///
-/// Ordinary starts keep the existing behaviour. A done Team's PM and reviewer opt into native
-/// session continuation when the scheduler reopens the Team.
+/// `resume_native` continues the bot's last native session (the batch update restart).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StartOpts {
     pub resume_native: bool,
@@ -1614,49 +1609,14 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
     }
 }
 
-/// Tell a Team bot and its conversation that its old native context could not be continued.
-/// Ordinary bots only get a trace entry: the Team timeline is the durable, user-facing record
-/// of this distinction.
-pub(crate) async fn member_context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> LcResult<()> {
-    let Some(team_id) = bot.team_id.as_deref() else {
-        tracing::info!(bot = %bot.name, why, "native session continuation unavailable; starting a new conversation");
-        return Ok(());
-    };
-    crate::team::record_event(
-        app,
-        team_id,
-        "note",
-        None,
-        Some(&bot.id),
-        None,
-        None,
-        json!({
-            "action": "member_context_lost",
-            "bot": bot.name,
-            "role": bot.team_role,
-            "why": why,
-        }),
-    )
-    .await?;
-    let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
-    insert_message(
-        app,
-        &conv,
-        None,
-        "system",
-        "沒能續接先前對話，這是新的一段",
-        "system",
-        false,
-        None,
-    )
-    .await
-    .map_err(up)?;
+/// The last native session could not be continued, so this start opens a new conversation.
+pub(crate) async fn context_lost(_app: &Arc<App>, bot: &db::Bot, why: &str) -> LcResult<()> {
+    tracing::info!(bot = %bot.name, why, "native session continuation unavailable; starting a new conversation");
     Ok(())
 }
 
-/// SPEC-team §2.2: the directory a bot's pane starts in. `bots.cwd` when set (a team member
-/// lives in its own worktree), otherwise the project's path — which is what every ordinary
-/// bot has, so this is a no-op for them.
+/// The directory a bot's pane starts in: `bots.cwd` when set (an adopted child's own cwd),
+/// otherwise the project's path.
 pub fn bot_cwd<'a>(bot: &'a db::Bot, project: &'a db::Project) -> &'a str {
     match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(c) => c,
@@ -1750,9 +1710,6 @@ async fn acquire_run_pane(
 ) -> anyhow::Result<crate::herdr::PaneInfo> {
     match fresh_root {
         Some(p) => Ok(p),
-        // A team workspace (SPEC-team §6.4a) keeps its root pane: it is a plain shell sitting
-        // at the team root, a useful place for the user to stand while watching, and
-        // reclaiming it would mean re-homing a pane that is already running a shell.
         None => client.tab_create(workspace_id, cwd, label, env.clone()).await,
     }
 }
@@ -1849,18 +1806,18 @@ async fn start_inner(
             // every never-prompted bot in the restart-idle repro). Start fresh instead.
             Some((session_id, Some(transcript))) if host == LOCAL_HOST && !transcript.trim().is_empty() && !std::path::Path::new(&transcript).exists() => {
                 tracing::info!(bot = %bot.name, session = %session_id, transcript, "native session has no transcript on disk; not resuming it");
-                member_context_lost(app, bot, "transcript_missing").await?;
+                context_lost(app, bot, "transcript_missing").await?;
                 None
             }
             Some((session_id, _)) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
                 Ok(resume_args) => Some((session_id, resume_args)),
                 Err(why) => {
-                    member_context_lost(app, bot, why).await?;
+                    context_lost(app, bot, why).await?;
                     None
                 }
             },
             _ => {
-                member_context_lost(app, bot, "no_session_id").await?;
+                context_lost(app, bot, "no_session_id").await?;
                 None
             }
         }
@@ -1883,78 +1840,40 @@ async fn start_inner(
             .map_err(up)?;
     }
 
-    // Resolve the cwd before workspace creation too: a team member with a bad worktree must
-    // not leave the workspace's root pane behind.
-    let checked;
-    let cwd = match bot.team_id.as_deref() {
-        Some(tid) => {
-            let t = db::team(&app.db, tid)
-                .await
-                .map_err(up)?
-                .ok_or_else(|| LcError::Upstream("this bot's team is gone".into()))?;
-            checked = crate::team::checked_member_cwd(&t, project, bot).map_err(LcError::Upstream)?;
-            checked.as_str()
-        }
-        None => bot_cwd(bot, project),
-    };
+    let cwd = bot_cwd(bot, project);
     // A directory the CLI has not seen before opens with "Is this a project you trust?", and
     // the cursor starts on *No, exit* — claude then quits and the start fails, while codex
     // sits at the prompt looking `idle` and silently eats the first message. Record the trust
     // first. Only local hosts, and only when the path is not already trusted, so in practice
-    // this touches the user's config once per new directory (SPEC-team §7.4 does the same for
-    // team worktrees, which are new by construction).
+    // this touches the user's config once per new directory.
     if project.host == LOCAL_HOST {
         let mut b = bot.clone();
         b.cwd = Some(cwd.to_string());
-        for w in crate::trust::pretrust_members(app, std::slice::from_ref(&b)).await {
+        for w in crate::trust::pretrust_bots(app, std::slice::from_ref(&b)).await {
             tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
         }
     }
 
     // 2. workspace
     let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
-    // SPEC-team §6.4a: a team member's panes belong to the **team's** workspace, not the
-    // project's. This is an extension of SPEC §2's "one workspace per project", not a breach
-    // of it: the project's workspace is untouched, the team simply owns another one. The
-    // team's workspace is created up front by `team::create`, so a member that cannot find
-    // it fails to start rather than quietly filling the user's own workspace with four
-    // throw-away panes — the reconcile then reports `workspace_missing`.
-    let team_ws: Option<String> = match bot.team_id.as_deref() {
-        Some(tid) if session.as_str() != "default" => {
-            let t = db::team(&app.db, tid).await.map_err(up)?;
-            let ws = t
-                .and_then(|t| t.workspace_id)
-                .filter(|w| !w.trim().is_empty())
-                .ok_or_else(|| LcError::Upstream("this team has no workspace".into()))?;
-            if client.workspace_get(&ws).await.map_err(up)?.is_none() {
-                return Err(LcError::Upstream(format!("the team's workspace {ws} is gone")));
-            }
-            Some(ws)
-        }
-        _ => None,
-    };
     // `projects.workspace_id` belongs to the manager's configured session. An imported bot
     // lives in the user's default session, so it must not overwrite that mapping or cause the
     // next named-session reconcile to clear it.
-    let workspace_id = match team_ws {
-        Some(ws) => ws,
-        None => match (session.as_str() != "default", project.workspace_id.as_deref()) {
-            (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
-            _ => {
-                let (ws, root) =
-                    client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
-                if session != "default" {
-                    sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
-                        .bind(&ws.workspace_id)
-                        .bind(&project.id)
-                        .execute(&app.db)
-                        .await
-                        .map_err(up)?;
-                }
-                fresh_root = Some(root);
-                ws.workspace_id
+    let workspace_id = match (session.as_str() != "default", project.workspace_id.as_deref()) {
+        (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
+        _ => {
+            let (ws, root) = client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
+            if session != "default" {
+                sqlx::query("UPDATE projects SET workspace_id = ? WHERE id = ?")
+                    .bind(&ws.workspace_id)
+                    .bind(&project.id)
+                    .execute(&app.db)
+                    .await
+                    .map_err(up)?;
             }
-        },
+            fresh_root = Some(root);
+            ws.workspace_id
+        }
     };
 
     // 3. pane
@@ -2009,9 +1928,8 @@ async fn start_inner(
         .await?;
     // A freshly created pane is not an available shell the instant `tab.create` /
     // `pane.split` returns — herdr answers `agent_pane_busy: … is not an available shell`
-    // until the interactive shell has settled. Observed 2026-09-06: starting a six-member
-    // team started five agents and lost `dev-1` to exactly that, 300 ms in; the team then
-    // paused on `member_lost` with nothing on screen to explain it. `quota_claude` already
+    // until the interactive shell has settled. Observed 2026-09-06: of six agents started
+    // back to back, one was lost to exactly that, 300 ms in, with nothing on screen to explain it. `quota_claude` already
     // retries this same herdr answer — the bot start path is the one that did not.
     // SPEC §6.5b: the pane env's `PATH` is not enough to put the shim in front of the real
     // herdr. herdr starts the pane's shell as a *login* shell, so the user's profile runs
@@ -2600,7 +2518,7 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
 #[cfg(test)]
 mod bot_dir_safety_tests {
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     #[tokio::test]
     async fn invalid_ids_do_not_access_or_remove_local_bot_dirs() {
@@ -3111,7 +3029,7 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
 mod resume_args_tests {
     use super::{resume_args_by_kind, start_bot, start_bot_with, stop_bot, StartOpts};
     use crate::db;
-    use crate::team::testing::{env, make_team, req, Env};
+    use crate::testing::{claude_bot, env, Env};
     use serde_json::Value;
 
     fn started_args(e: &Env) -> Vec<Vec<String>> {
@@ -3138,21 +3056,12 @@ mod resume_args_tests {
         assert_eq!(resume_args_by_kind("claude", ""), Err("no_session_id"));
     }
 
-    /// SPEC-team §2.5.6 #10: continuation is opt-in. The scheduler's reopen path asks for it
-    /// explicitly and gets `--resume <id>`; the same bot started the way the user's button
-    /// starts it gets a fresh conversation, with the very same id sitting in `runs`.
+    /// Continuation is opt-in: `resume_native` gets `--resume <id>`; the same bot started the
+    /// way the user's button starts it gets a fresh conversation, with the same id in `runs`.
     #[tokio::test]
     async fn native_resume_is_opt_in() {
         let e = env().await;
-        let mut team_req = req(Some(1), false);
-        team_req.pm.kind = "claude".into();
-        let team_id = make_team(&e.app, &e.project_id, team_req).await;
-        let pm = db::team_members(&e.app.db, &team_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|b| b.team_role.as_deref() == Some("pm"))
-            .unwrap();
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
              VALUES (?,?,'stopped','idle',?,?,?)",
@@ -3183,15 +3092,7 @@ mod resume_args_tests {
     #[tokio::test]
     async fn a_session_without_a_transcript_on_disk_is_not_resumed() {
         let e = env().await;
-        let mut team_req = req(Some(1), false);
-        team_req.pm.kind = "claude".into();
-        let team_id = make_team(&e.app, &e.project_id, team_req).await;
-        let pm = db::team_members(&e.app.db, &team_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|b| b.team_role.as_deref() == Some("pm"))
-            .unwrap();
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
         let ended = |sid: &str, transcript: &str, at: &str| {
             sqlx::query(
                 "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
@@ -3228,15 +3129,7 @@ mod resume_args_tests {
     #[tokio::test]
     async fn restarts_racing_a_reconcile_loop_always_come_back() {
         let e = env().await;
-        let mut team_req = req(Some(1), false);
-        team_req.pm.kind = "claude".into();
-        let team_id = make_team(&e.app, &e.project_id, team_req).await;
-        let pm = db::team_members(&e.app.db, &team_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|b| b.team_role.as_deref() == Some("pm"))
-            .unwrap();
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
         start_bot(&e.app, &pm.id).await.unwrap();
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4847,7 +4740,7 @@ fn is_spinner_glyph(c: char) -> bool {
 
 /// The pane is mid-turn: a spinner is still turning somewhere on it. codex's spinner is
 /// `• Working (4s • esc to interrupt)` — no ellipsis verb, so it is matched on its own
-/// (2026-09-08: the fallback scraped a working codex and the team counted it as a bad reply).
+/// (2026-09-08: the fallback scraped a working codex and counted it as a bad reply).
 fn pane_still_busy(screen: &str) -> bool {
     crate::capture::claude::PARSER.still_busy(screen) || screen.lines().any(is_codex_working_line)
 }
@@ -6610,7 +6503,7 @@ mod flush_queue_tests {
     //! `flush_queued_locked` themselves — which is also the only way to observe what the
     //! background task would have done.
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     /// 上限橫幅要寫進**這顆 bot 身分**的那把 key，而且不可以把 5h 的 `resets_at` 蓋成橫幅的時間。
     ///
@@ -6848,7 +6741,7 @@ mod flush_queue_tests {
 #[cfg(test)]
 mod prompt_tests {
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     struct Fixture {
         env: tt::Env,
@@ -7024,7 +6917,7 @@ mod prompt_tests {
 #[cfg(test)]
 mod abandon_tests {
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     async fn completed_turn(status: &str) -> (tt::Env, String, String) {
         let env = tt::env().await;
@@ -7157,7 +7050,7 @@ mod abandon_tests {
 mod child_restart_tests {
     //! `restart_child_in_pane` when the agent will not leave (review 2026-09-12 #1).
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     /// The agent shrugs off ctrl+c (a modal, a hung CLI): the restart gives up after its 20
     /// polls, and the run it had put into `stopping` must come back to `running` — the agent is
@@ -7235,7 +7128,7 @@ mod default_session_tests {
     //! SPEC §6.5.1: a run in the user's own `default` session is observed, its pane never
     //! closed and never re-created by the daemon (review 2026-09-12 #4).
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     async fn imported_bot(env: &tt::Env) -> (String, String, crate::herdr::PaneInfo) {
         let app = env.app.clone();
@@ -7324,13 +7217,13 @@ mod default_session_tests {
 mod tab_tests {
     //! One bot, one tab (and the retrofit for the bots that predate it).
     //!
-    //! These drive the real functions against the mock herdr in `team::testing`, which keeps
+    //! These drive the real functions against the mock herdr in `crate::testing`, which keeps
     //! genuine tab/pane bookkeeping — so "the tab was closed" is a fact about the server's
     //! state, not about which RPC we happened to send. The mock deliberately does **not**
     //! reap a tab when its last pane closes, though herdr 0.8.2 does: that is the only way to
     //! see whether the daemon tidies up on its own rather than leaning on the server.
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     async fn a_bot(env: &tt::Env, name: &str) -> String {
         let id = db::ulid();
@@ -7407,10 +7300,9 @@ mod tab_tests {
         id
     }
 
-    /// Every start pre-trusts its own working directory, not just a team's worktree. A project
-    /// pointed at a directory claude has never opened hits the same "Is this a project you
-    /// trust?" prompt, whose cursor starts on *No, exit* — 2026-09-06 that killed every team,
-    /// and an ordinary bot in a fresh checkout fails the same way.
+    /// Every start pre-trusts its own working directory. A project pointed at a directory claude
+    /// has never opened hits the "Is this a project you trust?" prompt, whose cursor starts on
+    /// *No, exit*, and the start fails.
     #[tokio::test]
     async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
         let dir = std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid()));
@@ -7640,7 +7532,7 @@ mod hookless_capture_tests {
     //! agent (`managed_by='child'`). Everything it says has to be scraped off its pane, so
     //! these drive `capture_hookless_turn_locked` at a mock herdr holding a real screen.
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     /// A finished claude exchange, as `recent_unwrapped` renders it: the prompt echo, the
     /// reply, the status line, and the empty composer below the rule.
@@ -7828,7 +7720,7 @@ mod hookless_capture_tests {
 #[cfg(test)]
 mod issue_17_tests {
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     const FALLBACK_SCREEN: &str = "❯ Reply with PONG\n⏺ PONG\n✻ Worked for 5s · done 1:07 AM\n──────\n❯\n";
 

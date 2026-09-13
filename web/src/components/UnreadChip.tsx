@@ -7,13 +7,13 @@
  * 2. 有未讀——跑完了還沒看。
  * 3. `waits-kids`——自己沒卡住，但在等它開出去的子 agent。
  * 4. `current`——你正在看的那一顆（固定留在列上當定位點）。
- * 5. 其餘（釘選的主力、還在跑的、在跑的 team）。
+ * 5. 其餘（釘選的主力、還在跑的）。
  *
  * 同一級之內照 `bots` 陣列原本的順序，所以一顆晶片只要還在同一級就不會左右亂跳。
  *
  * **手機不排序**（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：手機是單行橫捲，
  * 使用者靠「第幾顆」的肌肉記憶去點，一顆 bot 跑完就跳到最前面，拇指底下的那顆就換人了。
- * 所以窄螢幕一律照 `bots` 的順序（＝側欄順序，team 在最後）；緊急度只在桌機的兩行換行裡排——
+ * 所以窄螢幕一律照 `bots` 的順序（＝側欄順序）；緊急度只在桌機的兩行換行裡排——
  * 那裡看得到全部，不靠位置找。
  *
  * 為什麼不再分「剛跑完／進行中」兩塊標籤：分組決定位置的時候，第 9 顆的 `needs-reply` 會
@@ -32,8 +32,6 @@
  * 桌面上也可能被捲掉；使用者要追的是跨 bot 的問題，所以它得待在每個畫面都看得到的地方。
  *
  * 排除規則（2026-09-10 使用者）：
- * - **team 成員不算**：team 的進度由它的主 issue 管，成員一顆一顆回話不是使用者要逐則追的
- *   東西；整隊只出一顆 `team #N`。
  * - **AGM（總管）不算**：它靠例行 loop 醒來，每一輪都會跑完一回合，會把這一列洗成永遠有東西。
  *   真的想追還是可以用 ★ 釘它（釘選是使用者自己指定的，不受這條影響）。
  *   「總管的環境」＝ `GET /api/supervisor` 的 `project_id` 那個專案，總管本人與它開出去的工人
@@ -41,8 +39,7 @@
  *   （2026-09-13 已經從 `AGM` 改成 `AGM-DM-GRUP`）。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import type { Bot, TeamPhase } from '../api/types'
-import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
+import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { chipTracked } from '../lib/supervisorProject'
 import { useStore } from '../store/store'
@@ -57,7 +54,7 @@ const RANK = { needsReply: 0, unread: 1, waitsKids: 2, current: 3, rest: 4 } as 
 interface ChipItem {
   id: string
   name: string
-  /** 點下去要開的東西：bot 的對話，或 team 畫面。 */
+  /** 點下去要開的東西：bot 的對話。 */
   go: () => void
   rank: number
   current: boolean
@@ -74,11 +71,8 @@ export function UnreadChip() {
   const bots = useStore((s) => s.bots)
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
-  const teams = useStore((s) => s.teams)
   const selectedBotId = useStore((s) => s.selectedBotId)
-  const selectedTeamId = useStore((s) => s.selectedTeamId)
   const selectBot = useStore((s) => s.selectBot)
-  const selectTeam = useStore((s) => s.selectTeam)
   // 總管專案（daemon 自己建的環境）整個不算——那底下只有總管與它開出去的工人。
   // 用 `GET /api/supervisor` 的 `project_id`，不是名字：那個專案使用者改得動名字。
   const supervisorProjectId = useStore((s) => s.supervisorProjectId)
@@ -95,13 +89,13 @@ export function UnreadChip() {
     const out: ChipItem[] = []
     for (const b of bots) {
       if (b.pending) continue
-      // 釘選是使用者自己指定的，所以不受排除規則影響（AGM、team 成員、子 agent 都釘得起來）。
+      // 釘選是使用者自己指定的，所以不受排除規則影響（AGM、子 agent 都釘得起來）。
       const pinned = b.primary
       const n = botUnread[b.id] ?? 0
       const status = runs[b.id]?.agent_status
       const needsReply = status === 'blocked'
       const kids = !needsReply && waitsKids(b.id)
-      const current = b.id === selectedBotId && !selectedTeamId
+      const current = b.id === selectedBotId
       const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || status === 'working' || needsReply))
       if (!show) continue
       out.push({
@@ -118,37 +112,17 @@ export function UnreadChip() {
         title: botTitle(b.name, pinned, n, needsReply, kids, current),
       })
     }
-    // team 用整隊一顆：還在跑的 team（phase 未進終態、也不是暫停）。
-    const live = Object.values(teams)
-      .filter((t) => !TEAM_TERMINAL_PHASES.includes(t.phase) && t.phase !== 'paused')
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
-    for (const t of live) {
-      const current = t.id === selectedTeamId
-      out.push({
-        id: `team:${t.id}`,
-        name: `team #${t.issue_number}`,
-        go: () => selectTeam(t.id),
-        rank: current ? RANK.current : RANK.rest,
-        current,
-        pinned: false,
-        unread: 0,
-        needsReply: false,
-        waitsKids: false,
-        working: true,
-        title: teamTitle(t.issue_number, t.issue_title, t.phase, current),
-      })
-    }
-    // 手機：位置固定（見檔頭）。桌機：穩定排序，同一級之內維持上面推進去的順序（＝`bots` 的順序，team 在最後）。
+    // 手機：位置固定（見檔頭）。桌機：穩定排序，同一級之內維持上面推進去的順序（＝`bots` 的順序）。
     if (narrow) return out
     return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
-  }, [supervisorProjectId, botUnread, bots, keptId, narrow, runs, selectBot, selectTeam, selectedBotId, selectedTeamId, teams])
+  }, [supervisorProjectId, botUnread, bots, keptId, narrow, runs, selectBot, selectedBotId])
 
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
   const hidden = useOverflowRows(barRef, !narrow && !expanded, items.length)
   const scroll = useHorizontalScroll(barRef, narrow)
   // 換 bot（或這一列的組成變了）就把 `current` 那顆捲進畫面。`aria-current` 當選擇器。
-  useScrollCurrentIntoView(barRef, `${selectedBotId}/${selectedTeamId}/${items.length}`)
+  useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
 
   if (items.length === 0) return null
   const clipped = !narrow && !expanded && hidden > 0
@@ -220,10 +194,6 @@ function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean,
   if (n > 0) return `${who} 有 ${n} 個回合已完成、還沒看過。${tail}`
   if (kids) return `${who} 在等子 agent 完成。${tail}`
   return `${who}。${tail}`
-}
-
-function teamTitle(issue: number, title: string, phase: TeamPhase, current: boolean): string {
-  return `Team #${issue}・${title}・${TEAM_PHASE_LABEL[phase]}。${current ? '你正在看的就是它' : '點一下開 team 畫面'}`
 }
 
 /**

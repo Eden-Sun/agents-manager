@@ -2,8 +2,7 @@
 //! this folder?" dialog.
 //!
 //! Both claude and codex gate the *first* interactive run in a directory they have never
-//! seen behind a confirmation dialog. Nobody is sitting at a team member's pane to answer
-//! it, and for claude the cursor even starts on `No, exit`, so the CLI eventually quits by
+//! seen behind a confirmation dialog. Nobody is sitting at a bot's pane to answer it, and for claude the cursor even starts on `No, exit`, so the CLI eventually quits by
 //! itself and `agent.wait` comes back `agent_not_running`:
 //!
 //! ```text
@@ -13,12 +12,10 @@
 //!    Yes, I trust this folder
 //! ```
 //!
-//! A team's worktrees (SPEC-team §6.2) are brand-new directories under
-//! `<data_dir>/teams/<team_id>/`, so this fired on *every* team, which is why creating a
-//! team always failed. `--dangerously-skip-permissions` does not suppress it (verified);
-//! headless `claude -p` never shows it, only the interactive mode a pane runs.
+//! `--dangerously-skip-permissions` does not suppress it (verified); headless `claude -p`
+//! never shows it, only the interactive mode a pane runs.
 //!
-//! The fix is to write, before the members start, exactly the record the dialog would have
+//! The fix is to write, before the bot starts, exactly the record the dialog would have
 //! written:
 //!
 //! * claude — `projects["<dir>"].hasTrustDialogAccepted = true` in `.claude.json`;
@@ -231,23 +228,23 @@ async fn config_env(app: &Arc<App>, bot: &db::Bot, home: &str) -> BTreeMap<Strin
     env
 }
 
-/// Mark every member's cwd as already trusted, in whichever config file that member's
-/// identity actually reads. Best effort: returns one message per store that could not be
-/// updated, because a team that might still start is better than one refused outright.
+/// Mark every bot's cwd as already trusted, in whichever config file that bot's identity
+/// actually reads. Best effort: returns one message per store that could not be updated,
+/// because a bot that might still start is better than one refused outright.
 ///
-/// **Local host only.** Teams are local-only in this stage (SPEC-team §13); a remote member
-/// would need the same record written over ssh in the *remote* home, which is not done here.
-pub async fn pretrust_members(app: &Arc<App>, members: &[db::Bot]) -> Vec<String> {
+/// **Local host only**: a remote bot would need the same record written over ssh in the
+/// *remote* home, which is not done here.
+pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
     let Some(home) = dirs::home_dir() else {
-        return vec!["no home directory; cannot pre-trust the team worktrees".into()];
+        return vec!["no home directory; cannot pre-trust the working directory".into()];
     };
     let home = home.to_string_lossy().into_owned();
 
-    // One read-modify-write per file, not per member: four members on one identity share a
+    // One read-modify-write per file, not per bot: four bots on one identity share a
     // `.claude.json`, and rewriting it four times only widens the window against the agent
     // CLIs, which write this file themselves.
     let mut jobs: BTreeMap<PathBuf, (String, BTreeSet<String>)> = BTreeMap::new();
-    for b in members {
+    for b in bots {
         let Some(cwd) = b.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
         let env = config_env(app, b, &home).await;
         let Some(store) = store_path(&b.kind, &env, &home) else { continue };
@@ -320,7 +317,7 @@ mod tests {
   },
   "autoUpdates": false
 }"#;
-        let after = claude_merge(before, &["/data/teams/t1/main".into()]).unwrap().unwrap();
+        let after = claude_merge(before, &["/data/proj/main".into()]).unwrap().unwrap();
         let a: Value = serde_json::from_str(&after).unwrap();
         let b: Value = serde_json::from_str(before).unwrap();
 
@@ -339,7 +336,7 @@ mod tests {
         assert_eq!(a["projects"]["/home/u"]["lastCost"], json!(1.25));
         assert_eq!(a["projects"]["/home/u/other"]["allowedTools"], json!(["Bash"]));
         // …and the new one is trusted.
-        assert_eq!(a["projects"]["/data/teams/t1/main"][CLAUDE_KEY], json!(true));
+        assert_eq!(a["projects"]["/data/proj/main"][CLAUDE_KEY], json!(true));
         assert_eq!(a["projects"].as_object().unwrap().len(), 3);
         assert!(after.ends_with("}\n"));
     }
@@ -363,7 +360,7 @@ mod tests {
             assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["projects"]["/w"][k], json!(true));
         }
 
-        // A member's other project keys are preserved when only the flag is missing.
+        // A bot's other project keys are preserved when only the flag is missing.
         let out = claude_merge(r#"{"projects":{"/w":{"lastCost":3}}}"#, &["/w".into()]).unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["projects"]["/w"]["lastCost"], json!(3));
@@ -389,19 +386,19 @@ theme = "dark"
 [projects."/home/u/project"]
 trust_level = "trusted"
 "#;
-        let out = codex_merge(before, &["/data/teams/t1/dev-1".into()]).unwrap().unwrap();
+        let out = codex_merge(before, &["/data/proj/dev-1".into()]).unwrap().unwrap();
         assert!(out.starts_with("# my codex config\n"), "comment lost:\n{out}");
         assert!(out.contains("[tui]\ntheme = \"dark\""), "table lost:\n{out}");
         assert!(out.contains("[projects.\"/home/u/project\"]"), "existing project lost:\n{out}");
-        assert!(out.contains("[projects.\"/data/teams/t1/dev-1\"]"), "new project missing:\n{out}");
+        assert!(out.contains("[projects.\"/data/proj/dev-1\"]"), "new project missing:\n{out}");
         // Parses back, with both projects trusted and `model` intact.
         let v: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(v["model"].as_str(), Some("gpt-5"));
         assert_eq!(v["projects"]["/home/u/project"]["trust_level"].as_str(), Some("trusted"));
-        assert_eq!(v["projects"]["/data/teams/t1/dev-1"]["trust_level"].as_str(), Some("trusted"));
+        assert_eq!(v["projects"]["/data/proj/dev-1"]["trust_level"].as_str(), Some("trusted"));
 
         // Already trusted → nothing to write.
-        assert!(codex_merge(&out, &["/data/teams/t1/dev-1".into()]).unwrap().is_none());
+        assert!(codex_merge(&out, &["/data/proj/dev-1".into()]).unwrap().is_none());
         // Empty file → a fresh document.
         let fresh = codex_merge("", &["/w".into()]).unwrap().unwrap();
         assert!(fresh.contains("[projects.\"/w\"]"), "{fresh}");

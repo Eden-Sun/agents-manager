@@ -257,7 +257,7 @@ pub fn to_json(a: &Attachment) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::testing as tt;
+    use crate::testing as tt;
 
     #[tokio::test]
     async fn local_attachment_copy_rejects_unsafe_bot_ids() {

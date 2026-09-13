@@ -236,7 +236,6 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
     """一顆 bot 的精簡投影。`run` 裡帶的是**執行期**真值（可能與設定不同）。"""
     run = b.get("run") if isinstance(b.get("run"), dict) else b.get("active_run")
     run = run if isinstance(run, dict) else {}
-    team = b.get("team") if isinstance(b.get("team"), dict) else {}
     bid = _s(b.get("id") or b.get("bot_id"))
     row = {
         "id": bid,
@@ -263,16 +262,6 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         row["queued_turn"] = b.get("queued")
     else:
         row["queued_turn"] = None
-    if team:
-        row["team"] = {
-            "id": _s(team.get("id")),
-            "name": _s(team.get("label") or team.get("name")),
-            "role": _s(team.get("role")),
-            # team 的狀態欄位叫 `phase`；`state` 是舊寫法，兩個都讀。
-            "phase": _s(team.get("phase") or team.get("state")),
-        }
-    elif _s(b.get("team_id")):
-        row["team"] = {"id": _s(b.get("team_id")), "name": "", "role": "", "phase": ""}
     if run:
         row["run"] = {
             "id": _s(run.get("id") or run.get("run_id")),
@@ -316,8 +305,8 @@ def slim_state(state: object, manager_id: str = "") -> dict:
     可能給頂層 `bots`——兩種都吃。env、args、persona、token 一律不帶出來。
     """
     if not isinstance(state, dict):
-        return {"projects": [], "bots": [], "teams": []}
-    projects, bots, teams = [], [], []
+        return {"projects": [], "bots": []}
+    projects, bots = [], []
     seen: set[str] = set()
 
     def add_bot(b: object, project_id: str = "") -> None:
@@ -328,20 +317,6 @@ def slim_state(state: object, manager_id: str = "") -> dict:
             return
         seen.add(row["id"])
         bots.append(row)
-
-    def add_team(t: object, project_id: str = "") -> None:
-        if not isinstance(t, dict):
-            return
-        teams.append(
-            {
-                "id": _s(t.get("id")),
-                "name": _s(t.get("name")),
-                "project_id": _s(t.get("project_id")) or project_id,
-                # team 的階段欄位是 `phase`。
-                "phase": _s(t.get("phase") or t.get("state")),
-                "pause_reason": _s(t.get("pause_reason")),
-            }
-        )
 
     for p in state.get("projects") or []:
         if not isinstance(p, dict):
@@ -357,14 +332,10 @@ def slim_state(state: object, manager_id: str = "") -> dict:
         )
         for b in p.get("bots") or []:
             add_bot(b, pid)
-        for t in p.get("teams") or []:
-            add_team(t, pid)
     for b in state.get("bots") or []:
         add_bot(b)
-    for t in state.get("teams") or []:
-        add_team(t)
 
-    out: dict = {"projects": projects, "bots": bots, "teams": teams}
+    out: dict = {"projects": projects, "bots": bots}
     if manager_id:
         out["manager_bot_id"] = manager_id
     return out
@@ -886,7 +857,7 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
     if not args.bot_id:
         raise AgmError("bad_args", f"bot {args.op} 需要 bot id", 2)
     if args.op == "delete":
-        # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。team 成員回 409 team_managed。
+        # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
         return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}")
     return client.post(f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}", {})
 
@@ -923,7 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--compact", action="store_true", help="輸出成單行 JSON")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("state", help="精簡的 bot / project / team 狀態（不含 env 等敏感欄位）")
+    s = sub.add_parser("state", help="精簡的 bot / project 狀態（不含 env 等敏感欄位）")
     s.set_defaults(func=cmd_state)
 
     s = sub.add_parser("supervisor", help="總管自己的設定與狀態（GET /api/supervisor）")

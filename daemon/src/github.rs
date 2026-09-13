@@ -31,16 +31,6 @@ pub struct Submodule {
     pub github: Option<GithubInfo>,
 }
 
-/// `<project.path>/<repo>`; `repo = ""` is the project itself.
-pub fn repo_path(project_path: &str, repo: &str) -> String {
-    let r = repo.trim().trim_matches('/');
-    if r.is_empty() {
-        project_path.to_string()
-    } else {
-        format!("{}/{r}", project_path.trim_end_matches('/'))
-    }
-}
-
 /// Reject anything that is not a plain relative path: no `..`, no absolute, no empty segments.
 pub fn valid_repo_rel(repo: &str) -> bool {
     let r = repo.trim();
@@ -382,63 +372,6 @@ pub async fn get_issue(app: &Arc<App>, project_id: &str, repo: &str, number: u64
         o.insert("body".into(), json!(v.get("body").and_then(|b| b.as_str()).unwrap_or("")));
     }
     Ok(json!({"project_id": p.id, "repo": gh.slug(), "repo_path": repo.trim().trim_matches('/'), "issue": issue}))
-}
-
-/// `gh issue close` — the daemon's only write to GitHub outside `deliver=pr`.
-///
-/// **Never called on the daemon's own initiative.** `team::close_issue` is reached from one
-/// explicit user action on a finished team, which is the whole point of the feature: the team
-/// says the work is done, a human decides whether that closes the issue.
-///
-/// The issue's state is read first because `gh issue close` exits non-zero on an
-/// already-closed issue, and an exit code alone cannot tell "someone else closed it" from
-/// "the repo is unreachable". An issue that is already closed is reported, not failed — the
-/// user's intent already holds.
-pub async fn close_issue(
-    app: &Arc<App>,
-    project_id: &str,
-    repo: &str,
-    number: u64,
-    comment: Option<&str>,
-) -> Result<Value, LcError> {
-    let (p, gh) = project_with_github(app, project_id, repo).await?;
-    let slug = gh.slug();
-    let view = format!(
-        "{PATH_FIX}gh issue view {number} --repo {} --json number,state,url,title",
-        sh_quote(&slug)
-    );
-    let out = run_on_host(app, &p.host, &view, GH_TIMEOUT).await.map_err(gh_error)?;
-    let cleaned = strip_ansi(&out);
-    let before: Value =
-        serde_json::from_str(cleaned.trim()).map_err(|e| gh_error(format!("{e}: {}", cleaned.trim())))?;
-    let url = before.get("url").and_then(Value::as_str).unwrap_or("").to_string();
-    let title = before.get("title").and_then(Value::as_str).unwrap_or("").to_string();
-    let was_closed = before
-        .get("state")
-        .and_then(Value::as_str)
-        .map(|s| s.eq_ignore_ascii_case("closed"))
-        .unwrap_or(false);
-
-    if !was_closed {
-        let mut cmd = format!("{PATH_FIX}gh issue close {number} --repo {}", sh_quote(&slug));
-        if let Some(c) = comment.map(str::trim).filter(|s| !s.is_empty()) {
-            cmd.push_str(&format!(" --comment {}", sh_quote(c)));
-        }
-        run_on_host(app, &p.host, &cmd, GH_TIMEOUT).await.map_err(gh_error)?;
-        // The IssuesBar reads a two-minute cache; a closed issue lingering in it looks like
-        // the close silently failed.
-        let prefix = format!("{}|", p.id);
-        app.issues_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
-    }
-    Ok(json!({
-        "project_id": p.id,
-        "repo": slug,
-        "number": number,
-        "title": title,
-        "url": url,
-        "state": "CLOSED",
-        "already_closed": was_closed,
-    }))
 }
 
 #[cfg(test)]

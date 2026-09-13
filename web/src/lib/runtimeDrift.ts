@@ -1,5 +1,5 @@
-// `.ts` 副檔名是為了 `node --test --experimental-strip-types` 跑得起來（同
-// `components/teamPanelLogic.ts`）：node 的 resolver 不會自己補副檔名。
+// `.ts` 副檔名是為了 `node --test --experimental-strip-types` 跑得起來：node 的 resolver
+// 不會自己補副檔名。
 import { effortLabel } from '../api/types.ts'
 import type { Bot, Run } from '../api/types.ts'
 

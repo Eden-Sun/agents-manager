@@ -32,7 +32,7 @@ flowchart LR
 
 | 層 | 做什麼 | 不做什麼 |
 |---|---|---|
-| **web**（`web/`） | 側欄、對話、群組、設定、額度條、Team 面板 | 不直接碰 agent 程序 |
+| **web**（`web/`） | 側欄、對話、群組、群組任務、設定、額度條 | 不直接碰 agent 程序 |
 | **daemon**（`daemon/`，二進位 `agents-managerd`） | 對帳 herdr、注入 hook、配對 Turn、投影 TOML→SQLite、開 HTTP / WS | 不 `spawn` claude / codex / grok |
 | **herdr** | 真正的 pane / agent 生命週期、送 prompt、讀畫面 | 不理解 Bot / Turn / 群組 |
 
@@ -95,15 +95,9 @@ bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要帶 `rel
 
 ![身份](docs/screenshots/350-identities-shell-local.png)
 
-**Team 面板** — 從 Issues 列對某個 GitHub issue 按「組 team」：逐角色選 kind / 模型 / 強度 / **身分**（PM 用 cc2、執行者用預設帳號這種分法很常見），daemon 在資料目錄下建 git worktree 與獨立 herdr workspace，使用者自己的 checkout 不動。側欄出現 team 節點，主區是成員燈號、轉送時間軸、task 清單與暫停 / 插話 / 中止。成員的身分兩邊都標得出來。
-
-![Team 面板](docs/screenshots/357-team-member-identity.png)
-
-實作見 [`docs/SPEC-team.md`](docs/SPEC-team.md)。**Scheduler 是第一刀原型**：會跑、會在預算 / 協定 / 額度觸頂時暫停、daemon 重啟會把它拉回來，但還不穩定，請當實驗功能。team 可以整個中止；成員自己開出去的子 agent 也會被認領回 team 底下。
-
 **子 agent 追蹤** — bot 在 pane 裡用 herdr 再開子 agent（平行子任務、reviewer 之類）時，AG Man 會把它掛在父 bot 底下，而不是變成一個沒人管的 pane。這靠三層機制，不靠 agent 自覺：
 
-- **pane 血緣**：一個 bot 一個 tab，對帳時凡是 split 在某個 bot 活動 run 那個 tab 裡的 agent，一律當它的子代；名字前綴只是跨 tab / team workspace 的備援。孫代照樣掛在子代下面。
+- **pane 血緣**：一個 bot 一個 tab，對帳時凡是 split 在某個 bot 活動 run 那個 tab 裡的 agent，一律當它的子代；名字前綴只是跨 tab 的備援。孫代照樣掛在子代下面。
 - **herdr PATH shim**：daemon 起的每個 pane，PATH 最前面放一支包裝過的 `herdr`。`agent start <name>` 自動補上 `<父 agent 名>-` 前綴；`pane split` / `tab create` 自動把父的帳號（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）與 hook 環境用 `--env` 帶下去——herdr 的 pane 是 server 生的，不會繼承呼叫端 shell，沒有這段子 pane 會用預設帳號起來、也收不到 hook。
 - **herdr skill**：啟動 claude bot 前，daemon 把 `herdr --skill` 寫進該身份的 `skills/herdr/SKILL.md`（內容相同就不動），前面插一段 AG Man 規則：先重用閒置的 child、命名、`pane split --pane "$HERDR_PANE_ID"`、不要 `git stash`。codex / grok 在 persona 裡拿到同一份文字。
 
@@ -111,9 +105,9 @@ bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要帶 `rel
 
 ![遠端主機 shell](docs/screenshots/host-shell/433-remote-shell-light.png)
 
-**遠端 `gh` 登入** — issue / team 功能靠該主機上的 `gh`。遠端沒登入時，主機列給一顆按鈕，daemon 依序試：切到已有效的帳號 → 丟掉失效的 active 帳號再切 → 把本機 `gh auth token` 經 ssh stdin 轉發過去（不進 argv、不落 log）→ 最後才走 GitHub 裝置碼，UI 顯示 `user_code` 與連結。
+**遠端 `gh` 登入** — issue 列表靠該主機上的 `gh`。遠端沒登入時，主機列給一顆按鈕，daemon 依序試：切到已有效的帳號 → 丟掉失效的 active 帳號再切 → 把本機 `gh auth token` 經 ssh stdin 轉發過去（不進 argv、不落 log）→ 最後才走 GitHub 裝置碼，UI 顯示 `user_code` 與連結。
 
-**圖片暫存托盤** — 畫面右緣一條常駐托盤，圖片可以先 drop 進去再切到別的 bot，拖或點進那個對話的附件托盤一起送出。跨 bot / project / team 都在，只存記憶體，重新整理就清空。
+**圖片暫存托盤** — 畫面右緣一條常駐托盤，圖片可以先 drop 進去再切到別的 bot，拖或點進那個對話的附件托盤一起送出。跨 bot / project 都在，只存記憶體，重新整理就清空。
 
 ![圖片托盤](docs/screenshots/231-drop-tray-dark.png)
 
@@ -200,7 +194,6 @@ VITE_MOCK=1 bun run dev
 | 文件 | 內容 |
 |---|---|
 | [`docs/SPEC.md`](docs/SPEC.md) | 規格書（現況）：資料模型、架構、hook、對帳、遠端主機、grok、群組聊天、額度、身份、AGM 運維與群組任務 |
-| [`docs/SPEC-team.md`](docs/SPEC-team.md) | 「以 issue 為單位叫出一整個 team」的設計提案（PM / 執行者 / reviewer）。**提案 + 早期實作**，尚未併入 SPEC.md |
 | [`docs/API.md`](docs/API.md) | HTTP / WebSocket 契約（前端以此為準） |
 | [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、驗證指令、讀程式看不出來的約定 |
 | [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令契約與時序測試 |
@@ -213,5 +206,4 @@ VITE_MOCK=1 bun run dev
 ## 現況
 
 - 單 bot 對話、群組 `@mention`、遠端 host（SSH 轉發 + herdr 事件／spool）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領，是正在用的路徑。
-- 判斷邏輯（專案刪除守門、team 面板狀態、bot 燈號）抽成純函式，用 `node --test` 跑；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。
-- **Issue Team 的 scheduler 仍早期**：能組隊、轉送、暫停，但不是穩定產品。協定解析失敗、預算觸頂都會 `paused`，不會自己無限轉。
+- 判斷邏輯（專案刪除守門、bot 燈號）抽成純函式，用 `node --test` 跑；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。

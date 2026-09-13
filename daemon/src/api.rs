@@ -81,24 +81,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/git/pull", post(git_pull))
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
-        // SPEC-team §10
-        .route("/projects/{id}/teams", post(create_team))
-        .route("/teams/{id}", get(get_team).patch(patch_team).delete(delete_team))
-        .route("/teams/{id}/events", get(get_team_events))
-        .route("/teams/{id}/pause", post(pause_team))
-        .route("/teams/{id}/resume", post(resume_team))
-        .route("/teams/{id}/approve", post(approve_team))
-        .route("/teams/{id}/abort", post(abort_team))
-        .route("/teams/{id}/cleanup", post(cleanup_team))
-        // SPEC-team §2.3: the issue queue of a running team.
-        .route("/teams/{id}/issues", post(add_team_issues))
-        .route("/teams/{id}/rescue", post(rescue_team))
-        .route("/teams/{id}/issues/retry-failed", post(retry_failed_issues))
-        .route("/teams/{id}/issues/{issue_id}", delete(remove_team_issue))
-        .route("/teams/{id}/close-issue", post(close_team_issue))
-        .route("/teams/{id}/say", post(say_team))
-        .route("/teams/{id}/answer", post(answer_team))
-        .route("/teams/{tid}/tasks/{task_id}/decide", post(decide_team_task))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
         // SPEC §6.9: 一鍵把等著套用 claude 更新的閒置 bot 全部 exit + resume。放在 `{id}` 那組
         // 前面——axum 的 `/bots/{id}` 會把 `restart-idle` 當成 bot id 吃掉。
@@ -388,13 +370,11 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "identity": b.identity,
                 "env": b.env(),
                 "herdr_session": b.herdr_session.clone(),
-                // SPEC-team §10.2: `user` for config.toml bots, `team` for team members.
                 "managed_by": b.managed_by,
                 "parent_bot_id": b.parent_bot_id,
                 // 使用者釘的「主要執行的 bot」（純顯示，不影響啟動）。
                 "primary": b.is_primary == 1,
                 "cwd": b.cwd,
-                "team": crate::team::bot_team_json(b),
                 // herdr agent name: the live run's, else what the next start will use.
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
@@ -409,8 +389,6 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "workspace_id": p.workspace_id,
             "github": crate::github::cached(app, &p.id).await,
             "bots": bl,
-            // SPEC-team §10.2
-            "teams": crate::team::teams_json_for_project(app, &p.id).await,
         }));
     }
     Ok(json!({
@@ -634,229 +612,6 @@ async fn get_issue(
     Ok(Json(crate::github::get_issue(&app, &id, q.repo.as_deref().unwrap_or(""), number).await?))
 }
 
-// ---------------------------------------------------------------- SPEC-team §10: teams
-
-/// `POST /api/projects/:id/teams` — 200 `{team_id}`; the members are created but not started
-/// yet, so the caller follows along on the WS.
-async fn create_team(
-    State(app): State<Arc<App>>,
-    Path(pid): Path<String>,
-    Json(b): Json<crate::team::CreateTeam>,
-) -> Result<Response, LcError> {
-    let out = crate::team::create(&app, &pid, b).await?;
-    Ok((StatusCode::OK, Json(out)).into_response())
-}
-
-/// `GET /api/teams/:id` — the state object plus `tasks[]`, `roles`, base and worktree root.
-async fn get_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
-    Ok(Json(crate::team::detail(&app, &id).await?))
-}
-
-/// `DELETE /api/teams/:id?branches=keep|delete` — SPEC-team §6.5a.
-///
-/// Any phase; a live team is stopped on the way out. `branches=delete` is the one flag that
-/// destroys work, so it is opt-in and never inferred; anything else (including a typo) is
-/// read as `keep`. Remote branches are never touched.
-async fn delete_team(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Result<Response, LcError> {
-    let branches = q.get("branches").map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
-    if !branches.is_empty() && !["keep", "delete"].contains(&branches.as_str()) {
-        return Err(LcError::Bad("branches must be `keep` or `delete`".into()));
-    }
-    let out = crate::team::delete(&app, &id, branches == "delete").await?;
-    Ok((StatusCode::OK, Json(out)).into_response())
-}
-
-/// `GET /api/teams/:id/events?before=&limit=` — the team log, oldest-first within a page.
-async fn get_team_events(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, LcError> {
-    let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
-    let before = q.get("before").map(|s| s.as_str()).filter(|s| !s.is_empty());
-    Ok(Json(crate::team::events(&app, &id, before, limit).await?))
-}
-
-async fn patch_team(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(b): Json<crate::team::PatchTeam>,
-) -> Result<Response, LcError> {
-    Ok((StatusCode::OK, Json(crate::team::patch(&app, &id, b).await?)).into_response())
-}
-
-async fn pause_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    Ok((StatusCode::OK, Json(crate::team::pause(&app, &id).await?)).into_response())
-}
-
-async fn resume_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    Ok((StatusCode::OK, Json(crate::team::resume(&app, &id).await?)).into_response())
-}
-
-/// `POST /api/teams/:id/close-issue` — SPEC-team §10.7.
-///
-/// The user's consent *is* this request: the daemon never closes an issue on its own, and the
-/// UI only offers the action on a team that reached `done`.
-#[derive(serde::Deserialize)]
-struct CloseIssueBody {
-    /// Absent = the daemon writes its own summary comment; `""` = close with no comment.
-    #[serde(default)]
-    comment: Option<String>,
-    /// Optional queued-issue id. Omitted keeps the legacy current-issue behaviour.
-    #[serde(default)]
-    issue_id: Option<String>,
-}
-
-/// The body is read as bytes rather than `Json<…>` because every field in it is optional:
-/// `POST` with no body at all, with `{}`, or with a JSON content-type and an empty body all
-/// mean the same thing ("close it, write the default comment"), and `Json` rejects the last
-/// two with a parse error.
-async fn close_team_issue(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    body: axum::body::Bytes,
-) -> Result<Response, LcError> {
-    let (issue_id, comment) = match std::str::from_utf8(&body).unwrap_or("").trim() {
-        "" => (None, None),
-        s => {
-            let b = serde_json::from_str::<CloseIssueBody>(s).map_err(|e| LcError::Bad(format!("bad body: {e}")))?;
-            (b.issue_id, b.comment)
-        }
-    };
-    Ok((StatusCode::OK, Json(crate::team::close_issue_for(&app, &id, issue_id.as_deref(), comment).await?)).into_response())
-}
-
-#[derive(serde::Deserialize)]
-struct AddIssues {
-    #[serde(default)]
-    issue_numbers: Vec<i64>,
-    /// Single-issue convenience, matching `POST /projects/:id/teams`.
-    #[serde(default)]
-    issue_number: Option<i64>,
-}
-
-async fn add_team_issues(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(b): Json<AddIssues>,
-) -> Result<Response, LcError> {
-    let mut ns = b.issue_numbers;
-    if let Some(n) = b.issue_number {
-        if !ns.contains(&n) {
-            ns.push(n);
-        }
-    }
-    Ok((StatusCode::OK, Json(crate::team::add_issues(&app, &id, &ns).await?)).into_response())
-}
-
-async fn remove_team_issue(
-    State(app): State<Arc<App>>,
-    Path((id, issue_id)): Path<(String, String)>,
-) -> Result<Response, LcError> {
-    Ok((StatusCode::OK, Json(crate::team::remove_queued_issue(&app, &id, &issue_id).await?)).into_response())
-}
-
-async fn approve_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    Ok((StatusCode::OK, Json(crate::team::approve(&app, &id).await?)).into_response())
-}
-
-#[derive(Deserialize)]
-struct AbortTeam {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-async fn abort_team(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    body: Option<Json<AbortTeam>>,
-) -> Result<Response, LcError> {
-    let reason = body.and_then(|Json(b)| b.reason).filter(|s| !s.trim().is_empty());
-    Ok((StatusCode::OK, Json(crate::team::abort(&app, &id, reason.as_deref()).await?)).into_response())
-}
-
-async fn cleanup_team(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    Ok((StatusCode::OK, Json(crate::team::cleanup(&app, &id).await?)).into_response())
-}
-
-#[derive(Deserialize)]
-struct SayIn {
-    text: String,
-    /// `pm` (default) | `reviewer` | a member short name | a bot id.
-    #[serde(default)]
-    to: Option<String>,
-    #[serde(default)]
-    client_request_id: Option<String>,
-}
-
-async fn say_team(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(b): Json<SayIn>,
-) -> Result<Response, LcError> {
-    let to = b.to.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "pm".into());
-    let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    Ok((StatusCode::OK, Json(crate::team::say(&app, &id, &b.text, &to, &crid).await?)).into_response())
-}
-
-#[derive(Deserialize)]
-struct AnswerIn {
-    text: String,
-    #[serde(default)]
-    client_request_id: Option<String>,
-}
-
-async fn answer_team(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(b): Json<AnswerIn>,
-) -> Result<Response, LcError> {
-    let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    Ok((StatusCode::OK, Json(crate::team::answer(&app, &id, &b.text, &crid).await?)).into_response())
-}
-
-#[derive(Deserialize)]
-struct DecideIn {
-    action: String,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-/// SPEC-team §2.6 — hand every unresolved task of a finished team to one member.
-#[derive(Deserialize)]
-struct RescueBody {
-    /// The member to carry it; omitted = the reviewer.
-    #[serde(default)]
-    bot_id: Option<String>,
-}
-
-async fn rescue_team(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    body: Option<Json<RescueBody>>,
-) -> Result<Json<Value>, LcError> {
-    let bot = body.and_then(|Json(b)| b.bot_id);
-    Ok(Json(crate::team::rescue(&app, &id, bot.as_deref()).await?))
-}
-
-/// SPEC-team §2.6b — put every failed / skipped issue back on the queue.
-async fn retry_failed_issues(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
-    Ok(Json(crate::team::retry_failed_issues(&app, &id).await?))
-}
-
-async fn decide_team_task(
-    State(app): State<Arc<App>>,
-    Path((tid, task_id)): Path<(String, String)>,
-    Json(b): Json<DecideIn>,
-) -> Result<Response, LcError> {
-    let out = crate::team::decide(&app, &tid, &task_id, &b.action, b.note.as_deref()).await?;
-    Ok((StatusCode::OK, Json(out)).into_response())
-}
-
 #[derive(Deserialize)]
 struct PatchProject {
     label: Option<String>,
@@ -904,12 +659,6 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     for b in bots.iter().filter(|b| b.project_id == id) {
         if db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": b.id})));
-        }
-    }
-    // SPEC-team §5.4: a live team owns bots and worktrees under this project.
-    for t in db::teams_of_project(&app.db, &id).await.map_err(any_err)? {
-        if !crate::team::is_terminal(&t.phase) {
-            return Err(LcError::conflict("team is still running", json!({"team_id": t.id, "phase": t.phase})));
         }
     }
     app.cfg
@@ -1138,7 +887,7 @@ struct PatchBot {
     inject_hooks: Option<bool>,
     auto_approve: Option<bool>,
     /// 使用者把這顆釘成「主要執行的 bot」。純顯示用，所以不進 config.toml、不需要重啟，
-    /// team 成員與 child bot 也能釘（那兩種本來就沒有 TOML 條目）。
+    /// child bot 也能釘（它本來就沒有 TOML 條目）。
     #[serde(rename = "primary")]
     is_primary: Option<bool>,
     /// `Some(Some(name))` binds, `Some(None)` / `Some("")` unbinds, absent = unchanged.
@@ -1154,7 +903,7 @@ where
     serde::Deserialize::deserialize(d).map(Some)
 }
 
-/// PATCH for a bot that has no config.toml entry (`managed_by` = `team` / `child`)：
+/// PATCH for a bot that has no config.toml entry (`managed_by` = `child`)：
 /// same fields as the TOML branch of `patch_bot`, written straight to `bots`.
 async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &Option<Option<String>>) -> Result<(), LcError> {
     let mut sets: Vec<String> = Vec::new();
@@ -1255,7 +1004,7 @@ async fn patch_bot(
             check_identity(&app, &host, &Some(name.clone()), &kind).await?;
         }
     }
-    // `managed_by != 'user'`（team 成員、agent 自己 spawn 的 child）從來不進 config.toml，
+    // `managed_by != 'user'`（agent 自己 spawn 的 child）從來不進 config.toml，
     // 走 cfg.update 只會拿到 `no-bot` 404——2026-09-09 使用者：child bot 的身分改不了、按儲存沒反應。
     // 這些直接改 DB 列；projection 不管它們，所以也不用 reproject。
     // 釘選只是 UI 的顯示狀態：直接寫 DB 欄位，不經過 config.toml，也不算「要重啟」。
@@ -1393,17 +1142,6 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
-    // SPEC-team §5.3: a team member never entered config.toml, so the path below could not
-    // retire it — it answered 200 having only stopped the agent and deleted its hook material,
-    // and the row stayed live for the scheduler to report `member_lost` (review 2026-09-12 #3).
-    // Members leave through the team (retire / swap / delete the team), not through here.
-    if bot.managed_by == "team" {
-        return Err(LcError::conflict(
-            "team_managed",
-            json!({"bot_id": id, "team_id": bot.team_id, "team_role": bot.team_role,
-                   "message": "這顆是 team 的成員，由 team 管：要拿掉請退役 worker、換成員或刪掉整個 team。"}),
-        ));
-    }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
     // 2026-09-08: the children it spawned go with it. They only exist as panes their parent
     // opened and rows the daemon adopted; left behind they would sit in the sidebar as
@@ -1492,8 +1230,7 @@ async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<d
 /// 唯一救不回的是 bot 的工作目錄（刪除時 `purge_bot_dir` 真的砍了）：那裡面是 hook 設定與
 /// 包裝腳本，下次啟動會重新產生，所以不影響復原。
 ///
-/// `managed_by = "child"` 與 `"team"` 的 bot 從來沒進過 config.toml，projection 不管它們，直接清欄位。
-/// team 成員以前走 user 那條路，會被寫進 config.toml 變成使用者的 bot（review 2026-09-12 可能 e）。
+/// `managed_by = "child"` 的 bot 從來沒進過 config.toml，projection 不管它，直接清欄位。
 async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // `db::bot` 不過濾 deleted_at，所以軟刪除的也拿得到——這裡要的就是它。
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -1895,7 +1632,7 @@ mod project_tests {
     /// the label only feeds the `agent_name` slug of the next start.
     #[tokio::test]
     async fn patch_renames_the_project_and_rejects_a_blank_label() {
-        let e = crate::team::testing::env().await;
+        let e = crate::testing::env().await;
         let (app, pid) = (e.app.clone(), e.project_id.clone());
         // `testing::env` only seeds the db row; the rename edits config.toml, so register it.
         app.cfg
@@ -2649,7 +2386,7 @@ mod message_tests {
 
     #[tokio::test]
     async fn messages_page_by_insert_order_when_ids_are_not_monotonic() {
-        let e = crate::team::testing::env().await;
+        let e = crate::testing::env().await;
         let app = e.app.clone();
         let bot_id = "messages-test-bot";
         sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,'claude','tok',?)")
@@ -2700,7 +2437,7 @@ mod message_tests {
     /// answers, because its history is kept (API.md §10.4).
     #[tokio::test]
     async fn messages_for_an_unknown_bot_are_not_found() {
-        let e = crate::team::testing::env().await;
+        let e = crate::testing::env().await;
         let app = e.app.clone();
         assert!(matches!(
             get_messages(State(app.clone()), Path("no-such-bot".into()), Query(HashMap::new())).await,
@@ -2727,7 +2464,7 @@ mod message_tests {
 mod delete_bot_tests {
     use super::*;
 
-    async fn a_bot(e: &crate::team::testing::Env, name: &str, managed_by: &str) -> String {
+    async fn a_bot(e: &crate::testing::Env, name: &str, managed_by: &str) -> String {
         let id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
@@ -2744,36 +2481,12 @@ mod delete_bot_tests {
         id
     }
 
-    /// `DELETE` on a team member is refused outright (review 2026-09-12 #3). It used to answer
-    /// 200 after stopping the agent and purging `bots/<id>/`, with the row still live: the
-    /// sidebar kept the bot and the scheduler saw `member_lost`.
-    #[tokio::test]
-    async fn a_team_member_is_refused_and_left_untouched() {
-        let e = crate::team::testing::env().await;
-        let app = e.app.clone();
-        let id = a_bot(&e, "dev-1", "team").await;
-        let run = crate::team::testing::fake_run(&app, &id).await;
-        let dir = app.bot_dir(&id).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let err = delete_bot(State(app.clone()), Path(id.clone())).await.err().expect("refused");
-        match err {
-            LcError::Conflict(v) => assert_eq!(v["reason"], "team_managed"),
-            other => panic!("expected 409, got {other:?}"),
-        }
-        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
-        assert!(bot.deleted_at.is_none(), "still live");
-        assert_eq!(db::active_run(&app.db, &id).await.unwrap().map(|r| r.id), Some(run), "not stopped");
-        assert!(dir.exists(), "hook material kept");
-        assert!(!e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
-    }
-
     /// Deleting a bot whose host is unreachable must not leave its run `running` for ever
     /// (review 2026-09-12 d): the bot is gone from every list a reconcile walks, so nothing
     /// else would ever end that run.
     #[tokio::test]
     async fn a_bot_deleted_while_its_host_is_down_does_not_keep_a_running_run() {
-        let e = crate::team::testing::env().await;
+        let e = crate::testing::env().await;
         let app = e.app.clone();
         let id = a_bot(&e, "remote-ish", "user").await;
         let run = db::ulid();
@@ -2799,28 +2512,6 @@ mod delete_bot_tests {
         assert!(r.ended_at.is_some());
     }
 
-    /// Restoring a soft-deleted team member clears `deleted_at` and nothing else: it must not be
-    /// written into config.toml as a user bot (review 2026-09-12 e).
-    #[tokio::test]
-    async fn restoring_a_team_member_does_not_write_it_into_config() {
-        let e = crate::team::testing::env().await;
-        let app = e.app.clone();
-        let id = a_bot(&e, "dev-2", "team").await;
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
-            .bind(db::now())
-            .bind(&id)
-            .execute(&app.db)
-            .await
-            .unwrap();
-
-        restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
-
-        let bot = db::bot(&app.db, &id).await.unwrap().unwrap();
-        assert!(bot.deleted_at.is_none());
-        assert_eq!(bot.managed_by, "team");
-        let in_config = app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|b| b.id.as_deref() == Some(id.as_str()));
-        assert!(!in_config, "a team member never enters config.toml");
-    }
 }
 
 #[cfg(test)]
@@ -2841,7 +2532,7 @@ mod attachment_tests {
 
     #[tokio::test]
     async fn upload_rejects_empty_oversized_unknown_and_deleted_bots() {
-        let e = crate::team::testing::env().await;
+        let e = crate::testing::env().await;
         let query = Query(HashMap::new());
 
         assert_eq!(

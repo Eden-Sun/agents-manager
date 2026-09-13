@@ -9,8 +9,6 @@ import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
 import { MobilePreview } from './components/MobilePreview'
 import { Sidebar } from './components/Sidebar'
-import { TeamLaunchPanel } from './components/TeamLaunchPanel'
-import { TeamPanel } from './components/TeamPanel'
 import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
 import { totalUnread } from './store/unread'
@@ -35,9 +33,9 @@ const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : documen
  * 它們與改名、＋ 都不是導覽，所以另外列一組排除。會在抽屜裡開對話框的按鈕（新增 Bot、
  * 刪除專案…）一樣要留著抽屜：抽屜一收，`inert` 就把那張對話框一起關進去了。
  */
-const DRAWER_NAV = '.bot-row, .project-head, .team-node-btn'
+const DRAWER_NAV = '.bot-row, .project-head'
 const DRAWER_STAY =
-  '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions, .team-node-chev'
+  '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions'
 
 /**
  * 未讀的兩件全域雜事：分頁標題的 `(N)`，以及「視窗回到前景 = 現在開著的那個對話被讀到了」。
@@ -163,10 +161,7 @@ export default function App() {
   const bootError = useStore((s) => s.bootError)
   const bootstrap = useStore((s) => s.bootstrap)
   const groupProjectId = useStore((s) => s.selectedProjectId)
-  // SPEC-team §11.5：`teamLaunch` / `selectedTeamId` 與 `selectedProjectId` 互斥。
-  const teamLaunch = useStore((s) => s.teamLaunch)
-  const teamId = useStore((s) => s.selectedTeamId)
-  // 主機 shell：同樣與上面每一個互斥，而且排在最前面——它是使用者剛剛按出來的暫時性視圖。
+  // 主機 shell：與群組互斥，而且排在最前面——它是使用者剛剛按出來的暫時性視圖。
   const shellView = useStore((s) => s.shellView)
   // 只為了下面那個 key：ChatPanel 自己從 store 讀 selectedBotId。
   const botId = useStore((s) => s.selectedBotId)
@@ -195,7 +190,7 @@ export default function App() {
   // Compared during render rather than from an effect: that is React's own answer for
   // "adjust state when a prop changes", and it avoids the extra paint of the stale open
   // drawer that a post-render effect would leave on screen for a frame.
-  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${teamId ?? ''}|${teamLaunch ? `${teamLaunch.projectId}:${teamLaunch.issueNumber}` : ''}|${shellView ? `${shellView.host}:${shellView.paneId}` : ''}|${settingsBotId ?? ''}`
+  const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${shellView ? `${shellView.host}:${shellView.paneId}` : ''}|${settingsBotId ?? ''}`
   const [lastNav, setLastNav] = useState({ selection, isMobile })
   if (lastNav.selection !== selection || lastNav.isMobile !== isMobile) {
     setLastNav({ selection, isMobile })
@@ -270,8 +265,8 @@ export default function App() {
       <main className="main">
         <ConnBanner />
         {/* 選著 bot 時 shell 掛在 ChatPanel 的標題列底下（當第三個分頁）；其他選取
-            （group / team / 沒選）才整個換成 shell 面板。 */}
-        {shellView && (teamLaunch || teamId || groupProjectId || !botId) ? (
+            （group / 沒選）才整個換成 shell 面板。 */}
+        {shellView && (groupProjectId || !botId) ? (
           <HostShellPanel
             key={`${shellView.host}:${shellView.paneId}`}
             host={shellView.host}
@@ -279,27 +274,17 @@ export default function App() {
             cwd={shellView.cwd}
             onOpenSidebar={() => setDrawer(true)}
           />
-        ) : teamLaunch ? (
-          <TeamLaunchPanel
-            key={`${teamLaunch.projectId}:${teamLaunch.repo}:${teamLaunch.issueNumber}`}
-            projectId={teamLaunch.projectId}
-            issueNumber={teamLaunch.issueNumber}
-            repo={teamLaunch.repo}
-            onOpenSidebar={() => setDrawer(true)}
-          />
-        ) : teamId ? (
-          <TeamPanel key={teamId} teamId={teamId} onOpenSidebar={() => setDrawer(true)} />
         ) : groupProjectId ? (
           <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
-          // 跟 TeamPanel / GroupChatPanel 一樣要 key：換 bot 就重新掛載，還沒送出的圖片
+          // 跟 GroupChatPanel 一樣要 key：換 bot 就重新掛載，還沒送出的圖片
           // （useAttachments）、捲動位置等本地狀態才不會跟著跑到下一個 bot 身上。草稿存在
           // store 裡（依 bot 分開），不受重新掛載影響。
           <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />
         )}
       </main>
       {/* 版面上的第三格（桌機在右緣、≤1024px 在底部），刻意掛在 `main` 外面：換 bot /
-          project / team 都不會 unmount，暫存的圖片才跨得過去。 */}
+          project 都不會 unmount，暫存的圖片才跨得過去。 */}
       <ImageShelf />
       {/* 右欄第二格：桌機才有、預設關閉的手機版預覽（環境設定 → 顯示）。 */}
       <MobilePreview />

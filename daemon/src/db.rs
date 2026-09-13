@@ -797,13 +797,9 @@ pub struct Bot {
     pub auto_approve: i64,
     pub identity: Option<String>,
     pub env_json: String,
-    /// SPEC-team §2.1: `user` (from config.toml) or `team` (a daemon-owned team member,
-    /// which the TOML projection must leave alone).
+    /// `user` (from config.toml) or `child` (an agent another bot spawned; never in the TOML).
     pub managed_by: String,
-    pub team_id: Option<String>,
-    /// `pm` | `worker` | `reviewer` for team members; NULL otherwise.
-    pub team_role: Option<String>,
-    /// SPEC-team §2.2: working directory for `pane.split`. NULL = the project's path.
+    /// Working directory for the pane. NULL = the project's path.
     pub cwd: Option<String>,
     /// Herdr session override. `Some("default")` identifies an imported user-session bot.
     pub herdr_session: Option<String>,
@@ -894,9 +890,6 @@ pub struct Turn {
     pub client_request_id: Option<String>,
     pub native_session_id: Option<String>,
     pub native_turn_id: Option<String>,
-    /// SPEC-team §2.1: the team this turn belongs to, and the relay that produced it.
-    pub team_id: Option<String>,
-    pub team_event_id: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
     /// Exact prompt payload for a queued web turn; never exposed in REST/WS turn JSON.
@@ -919,8 +912,7 @@ pub struct Message {
     pub group_id: Option<String>,
     /// JSON array of the images sent with this message (`attach.rs`); NULL when there are none.
     pub attachments_json: Option<String>,
-    /// SPEC-team §2.1: the team this message belongs to, and (for a relay) the bot it came from.
-    pub team_id: Option<String>,
+    /// The bot (or `daemon`) that relayed this message; NULL = the user typed it.
     pub relay_from: Option<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
@@ -936,221 +928,7 @@ pub struct GroupMessage {
     pub bot_name: String,
 }
 
-/// SPEC-team §2.1 — one issue's team. SQLite is authoritative; teams never enter config.toml.
-#[derive(Debug, Clone, FromRow, serde::Serialize)]
-pub struct Team {
-    pub id: String,
-    pub project_id: String,
-    pub issue_number: i64,
-    pub issue_title: String,
-    pub issue_url: String,
-    /// 使用者自己取的短名；`None` / `""` = 用 `#編號 issue 標題`。
-    pub label: Option<String>,
-    pub phase: String,
-    pub pause_reason: Option<String>,
-    /// SPEC-team §4.5: JSON detail for `pause_reason` — for `quota_low`, which members are
-    /// out of quota, on which window, and when it resets. `None` when the reason says it all.
-    pub pause_detail_json: Option<String>,
-    pub resume_phase: Option<String>,
-    pub base_ref: String,
-    pub base_sha: String,
-    pub branch: String,
-    pub worktree_root: String,
-    /// SPEC-team §6.4a: the herdr workspace this team's panes live in. `None` on a row from
-    /// before the column existed, or after the workspace was closed.
-    pub workspace_id: Option<String>,
-    pub deliver: String,
-    pub supervised: i64,
-    pub roles_json: String,
-    pub budget_json: String,
-    pub usage_json: String,
-    pub pr_url: Option<String>,
-    pub summary: Option<String>,
-    /// When the user closed the issue from this team (SPEC-team §10.7). `None` = the issue was
-    /// never closed from here; nothing in the daemon ever sets it without a human asking.
-    pub issue_closed_at: Option<String>,
-    /// Submodule path (relative to the project) this team works in; empty = the project itself.
-    pub repo: String,
-    /// SPEC-team §2.6: the member currently carrying a rescue (all the unresolved tasks handed
-    /// to one bot). `None` outside a rescue.
-    pub rescue_bot_id: Option<String>,
-    pub created_at: String,
-    pub started_at: Option<String>,
-    pub ended_at: Option<String>,
-}
-
-/// SPEC-team §8.2 — one dispatched piece of work and its review state machine.
-#[derive(Debug, Clone, FromRow, serde::Serialize)]
-pub struct TeamTask {
-    pub id: String,
-    pub team_id: String,
-    /// Which queued issue this task belongs to (SPEC-team §2.3). `None` only on a row that
-    /// predates the queue and whose team has since been deleted.
-    pub issue_id: Option<String>,
-    pub seq: i64,
-    pub title: String,
-    pub brief: String,
-    pub files_json: String,
-    /// Which executor is on it. `None` = queued, waiting for a free slot (§4.5).
-    pub worker_bot_id: Option<String>,
-    /// The executor the PM named in its `dispatch`, if it named one. `None` = any (§4.5).
-    pub want_worker_bot_id: Option<String>,
-    pub branch: String,
-    pub state: String,
-    pub round: i64,
-    pub rebase_attempts: i64,
-    pub last_report: Option<String>,
-    pub last_verdict: Option<String>,
-    pub merge_sha: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-/// SPEC-team §2.1 — the team audit log and the pending-relay outbox in one table.
-#[derive(Debug, Clone, FromRow, serde::Serialize)]
-pub struct TeamEvent {
-    pub id: String,
-    pub team_id: String,
-    /// Per-team insertion order (1, 2, 3…). The log is ordered and paged by this, never by
-    /// `id`: several events written inside one millisecond get ULIDs whose relative order is
-    /// random, which made §10.4's "oldest first" contract non-deterministic.
-    pub seq: i64,
-    /// The queued issue this event happened under; `None` for team-level events.
-    pub issue_id: Option<String>,
-    pub kind: String,
-    pub from_bot_id: Option<String>,
-    pub to_bot_id: Option<String>,
-    pub task_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub status: Option<String>,
-    pub payload_json: String,
-    pub created_at: String,
-}
-
-/// SPEC-team §2.3 — one entry in a team's issue queue.
-#[derive(Debug, Clone, FromRow, serde::Serialize)]
-pub struct TeamIssue {
-    pub id: String,
-    pub team_id: String,
-    pub seq: i64,
-    pub issue_number: i64,
-    pub issue_title: String,
-    pub issue_url: String,
-    pub state: String,
-    pub branch: Option<String>,
-    pub base_sha: Option<String>,
-    pub summary: Option<String>,
-    pub pr_url: Option<String>,
-    pub issue_closed_at: Option<String>,
-    pub fail_reason: Option<String>,
-    pub created_at: String,
-    pub started_at: Option<String>,
-    pub ended_at: Option<String>,
-}
-
-/// The queue states that still owe work; the queue is done when none are left.
-pub const OPEN_ISSUE_STATES: &str = "('queued','working')";
-
 pub const ACTIVE_STATES: &str = "('starting','running','stopping')";
-
-pub async fn team(pool: &SqlitePool, id: &str) -> Result<Option<Team>> {
-    Ok(sqlx::query_as::<_, Team>("SELECT * FROM teams WHERE id = ?").bind(id).fetch_optional(pool).await?)
-}
-
-/// Every team of a project, oldest first.
-pub async fn teams_of_project(pool: &SqlitePool, project_id: &str) -> Result<Vec<Team>> {
-    Ok(sqlx::query_as::<_, Team>("SELECT * FROM teams WHERE project_id = ? ORDER BY created_at")
-        .bind(project_id)
-        .fetch_all(pool)
-        .await?)
-}
-
-/// Teams that still need a scheduler (SPEC-team §7.5): anything not in a terminal phase.
-pub async fn live_teams(pool: &SqlitePool) -> Result<Vec<Team>> {
-    Ok(sqlx::query_as::<_, Team>(
-        "SELECT * FROM teams WHERE phase NOT IN ('done','aborted','failed') ORDER BY created_at",
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
-/// A team's member bots (including soft-deleted ones after cleanup), in creation order.
-pub async fn team_members(pool: &SqlitePool, team_id: &str) -> Result<Vec<Bot>> {
-    Ok(sqlx::query_as::<_, Bot>("SELECT * FROM bots WHERE team_id = ? ORDER BY created_at")
-        .bind(team_id)
-        .fetch_all(pool)
-        .await?)
-}
-
-pub async fn team_tasks(pool: &SqlitePool, team_id: &str) -> Result<Vec<TeamTask>> {
-    Ok(sqlx::query_as::<_, TeamTask>("SELECT * FROM team_tasks WHERE team_id = ? ORDER BY seq")
-        .bind(team_id)
-        .fetch_all(pool)
-        .await?)
-}
-
-pub async fn team_task(pool: &SqlitePool, id: &str) -> Result<Option<TeamTask>> {
-    Ok(sqlx::query_as::<_, TeamTask>("SELECT * FROM team_tasks WHERE id = ?").bind(id).fetch_optional(pool).await?)
-}
-
-/// A team's whole issue queue, in working order.
-pub async fn team_issues(pool: &SqlitePool, team_id: &str) -> Result<Vec<TeamIssue>> {
-    Ok(sqlx::query_as::<_, TeamIssue>("SELECT * FROM team_issues WHERE team_id = ? ORDER BY seq")
-        .bind(team_id)
-        .fetch_all(pool)
-        .await?)
-}
-
-pub async fn team_issue(pool: &SqlitePool, id: &str) -> Result<Option<TeamIssue>> {
-    Ok(sqlx::query_as::<_, TeamIssue>("SELECT * FROM team_issues WHERE id = ?").bind(id).fetch_optional(pool).await?)
-}
-
-/// Every issue the team has open right now, in queue order.
-///
-/// SPEC-team §4.5 (unlimited parallelism): with `workers.count = 0` several rows are
-/// `working` at the same time, and `issue_id` on a task — not the `teams` mirror — is what
-/// says which integration branch it belongs to. With a finite parallelism this is always
-/// zero or one row, and `current_team_issue` is exactly its first element.
-pub async fn working_team_issues(pool: &SqlitePool, team_id: &str) -> Result<Vec<TeamIssue>> {
-    Ok(sqlx::query_as::<_, TeamIssue>(
-        "SELECT * FROM team_issues WHERE team_id = ? AND state = 'working' ORDER BY seq",
-    )
-    .bind(team_id)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// The issue the team is on right now, or `None` between issues / once the queue is empty.
-pub async fn current_team_issue(pool: &SqlitePool, team_id: &str) -> Result<Option<TeamIssue>> {
-    Ok(sqlx::query_as::<_, TeamIssue>(
-        "SELECT * FROM team_issues WHERE team_id = ? AND state = 'working' ORDER BY seq LIMIT 1",
-    )
-    .bind(team_id)
-    .fetch_optional(pool)
-    .await?)
-}
-
-/// The next issue waiting to be picked up, if any.
-pub async fn next_queued_issue(pool: &SqlitePool, team_id: &str) -> Result<Option<TeamIssue>> {
-    Ok(sqlx::query_as::<_, TeamIssue>(
-        "SELECT * FROM team_issues WHERE team_id = ? AND state = 'queued' ORDER BY seq LIMIT 1",
-    )
-    .bind(team_id)
-    .fetch_optional(pool)
-    .await?)
-}
-
-/// The tasks of one issue, in dispatch order. Task `seq` stays team-global (its unique index
-/// is `(team_id, seq)`), so this filters on `issue_id`, not on a per-issue counter.
-pub async fn team_tasks_of_issue(pool: &SqlitePool, team_id: &str, issue_id: &str) -> Result<Vec<TeamTask>> {
-    Ok(sqlx::query_as::<_, TeamTask>(
-        "SELECT * FROM team_tasks WHERE team_id = ? AND issue_id = ? ORDER BY seq",
-    )
-    .bind(team_id)
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await?)
-}
 
 pub async fn bot(pool: &SqlitePool, id: &str) -> Result<Option<Bot>> {
     Ok(sqlx::query_as::<_, Bot>("SELECT * FROM bots WHERE id = ?").bind(id).fetch_optional(pool).await?)
@@ -1185,8 +963,7 @@ pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
-/// The most recent native session from an ended run. Reopen deliberately does not resume an
-/// active run: the scheduler only calls this after the team has reached `done`.
+/// The most recent native session from an ended run.
 pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
     Ok(last_native_session(pool, bot_id).await?.map(|(id, _)| id))
 }
@@ -1362,7 +1139,7 @@ pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Opti
 }
 
 #[cfg(test)]
-mod team_migration_tests {
+mod migration_tests {
     use super::*;
 
     /// A pre-SPEC-team database: no `bots.{managed_by,team_id,team_role,cwd}`, no
@@ -1450,7 +1227,7 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         let b = bot(&pool, "b1").await.unwrap().expect("old bot row still there");
         assert_eq!(b.name, "old");
         assert_eq!(b.managed_by, "user");
-        assert!(b.team_id.is_none() && b.team_role.is_none() && b.cwd.is_none());
+        assert!(b.cwd.is_none());
 
         // `grok` is now accepted (the CHECK really was rebuilt).
         sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b2','p1','g','grok','t',?)")
@@ -1775,67 +1552,6 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file written by the first cut of this branch has `team_events` without `seq`.
-    /// The upgrade must add the column, number the existing rows by their old (`id`) order
-    /// and only then put the UNIQUE index on — the index cannot live in SCHEMA, which runs
-    /// before the ALTER on an existing table.
-    #[tokio::test]
-    async fn team_events_gains_its_sequence_and_backfills() {
-        let dir = tmp_dir();
-        let file = dir.join("pre-seq.sqlite3");
-        {
-            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display()))
-                .unwrap()
-                .create_if_missing(true);
-            let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
-            for stmt in [
-                "CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
-                   host TEXT NOT NULL DEFAULT 'local', workspace_id TEXT, deleted_at TEXT, created_at TEXT NOT NULL)",
-                "CREATE TABLE teams (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-                   issue_number INTEGER NOT NULL, issue_title TEXT NOT NULL, issue_url TEXT NOT NULL, phase TEXT NOT NULL,
-                   pause_reason TEXT, resume_phase TEXT, base_ref TEXT NOT NULL, base_sha TEXT NOT NULL,
-                   branch TEXT NOT NULL, worktree_root TEXT NOT NULL, deliver TEXT NOT NULL,
-                   supervised INTEGER NOT NULL DEFAULT 0, roles_json TEXT NOT NULL, budget_json TEXT NOT NULL,
-                   usage_json TEXT NOT NULL DEFAULT '{}', pr_url TEXT, summary TEXT,
-                   created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT)",
-                // No `seq`, and the index the first cut created.
-                "CREATE TABLE team_events (id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
-                   kind TEXT NOT NULL, from_bot_id TEXT, to_bot_id TEXT, task_id TEXT, turn_id TEXT, status TEXT,
-                   payload_json TEXT NOT NULL, created_at TEXT NOT NULL)",
-                "CREATE INDEX team_events_team_time ON team_events(team_id, id)",
-                "INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p','x')",
-                "INSERT INTO teams VALUES ('tmA','p1',7,'t','u','working',NULL,NULL,'HEAD','','b','','branch',0,'{}','{}','{}',NULL,NULL,'x',NULL,NULL)",
-                "INSERT INTO teams VALUES ('tmB','p1',8,'t','u','working',NULL,NULL,'HEAD','','b','','branch',0,'{}','{}','{}',NULL,NULL,'x',NULL,NULL)",
-                "INSERT INTO team_events VALUES ('01A','tmA','phase',NULL,NULL,NULL,NULL,NULL,'{}','x')",
-                "INSERT INTO team_events VALUES ('01B','tmA','note',NULL,NULL,NULL,NULL,NULL,'{}','x')",
-                "INSERT INTO team_events VALUES ('01C','tmB','note',NULL,NULL,NULL,NULL,NULL,'{}','x')",
-                "INSERT INTO team_events VALUES ('01D','tmA','note',NULL,NULL,NULL,NULL,NULL,'{}','x')",
-            ] {
-                sqlx::query(stmt).execute(&pool).await.unwrap();
-            }
-            pool.close().await;
-        }
-
-        let pool = open(&file).await.expect("upgrade a pre-seq database");
-        assert!(columns(&pool, "team_events").await.contains(&"seq".to_string()));
-        let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT id, seq FROM team_events ORDER BY team_id, seq").fetch_all(&pool).await.unwrap();
-        // Numbering is per team, dense from 1, in the old id order.
-        assert_eq!(
-            rows,
-            vec![("01A".into(), 1), ("01B".into(), 2), ("01D".into(), 3), ("01C".into(), 1)]
-        );
-        // The stale index is gone and the unique one is on.
-        let idx: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'team_events%' ORDER BY name")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(idx, vec!["team_events_pending".to_string(), "team_events_seq".to_string()]);
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Running `open` twice must be a no-op the second time (every migration is guarded).
     #[tokio::test]
     async fn open_is_idempotent() {
@@ -1933,230 +1649,6 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERE
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A queue row can already exist when an older build is upgraded. Preserve the legacy
-    /// scalar close stamp on that row so the per-issue close guard is not reset by migration.
-    #[tokio::test]
-    async fn issue_closed_at_is_backfilled_for_an_existing_queue_row() {
-        let dir = tmp_dir();
-        let file = dir.join("closed-issue.sqlite3");
-        let pool = open(&file).await.unwrap();
-        let at = now();
-        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
-            .bind(&at)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, base_ref, base_sha,
-               branch, worktree_root, deliver, roles_json, budget_json, issue_closed_at, created_at)
-             VALUES ('tm1','p1',42,'done','https://example.invalid/42','done','HEAD','base','team/i42-x','/tmp/team',
-                     'branch','{}','{}',?,?)",
-        )
-        .bind(&at)
-        .bind(&at)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO team_issues (id, team_id, seq, issue_number, issue_title, issue_url, state,
-               branch, base_sha, created_at)
-             VALUES ('tm1-i1','tm1',1,42,'done','https://example.invalid/42','done','team/i42-x','base',?)",
-        )
-        .bind(&at)
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-
-        let pool = open(&file).await.unwrap();
-        let stamp: Option<String> = sqlx::query_scalar("SELECT issue_closed_at FROM team_issues WHERE id='tm1-i1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(stamp.as_deref(), Some(at.as_str()));
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    async fn seed(pool: &SqlitePool) {
-        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
-            .bind(now())
-            .execute(pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO bots (id, project_id, name, kind, managed_by, team_id, team_role, cwd, hook_token, created_at)
-             VALUES ('w1','p1','i9-dev-1','claude','team','tm1','worker','/tmp/p','tok',?)",
-        )
-        .bind(now())
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO teams (id, project_id, issue_number, issue_title, issue_url, phase, base_ref, base_sha,
-               branch, worktree_root, deliver, supervised, roles_json, budget_json, usage_json, created_at)
-             VALUES ('tm1','p1',9,'t','u','working','HEAD','','team/i9-x','','branch',0,'{}','{}','{}',?)",
-        )
-        .bind(now())
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    /// SPEC-team §4.5 (2026-09-08) — a database written with the old `worker_bot_id NOT NULL`
-    /// opens with the column nullable, the two indexes back in place, and its rows intact.
-    #[tokio::test]
-    async fn team_tasks_worker_becomes_nullable_and_keeps_its_rows() {
-        let dir = tmp_dir();
-        let path = dir.join("old.sqlite3");
-        {
-            let pool = open(&path).await.unwrap();
-            seed(&pool).await;
-            // Put the table back the way it was before this migration existed.
-            sqlx::query("DROP TABLE team_tasks")
-                .execute(&pool)
-                .await
-                .unwrap();
-            sqlx::query(
-                "CREATE TABLE team_tasks (
-                   id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id), seq INTEGER NOT NULL,
-                   title TEXT NOT NULL, brief TEXT NOT NULL, files_json TEXT NOT NULL DEFAULT '[]',
-                   worker_bot_id TEXT NOT NULL, branch TEXT NOT NULL, state TEXT NOT NULL,
-                   round INTEGER NOT NULL DEFAULT 0, rebase_attempts INTEGER NOT NULL DEFAULT 0,
-                   last_report TEXT, last_verdict TEXT, merge_sha TEXT,
-                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
-                 VALUES ('t1','tm1',1,'A','做 A','w1','b-t1','working',?,?)",
-            )
-            .bind(now())
-            .bind(now())
-            .execute(&pool)
-            .await
-            .unwrap();
-            pool.close().await;
-        }
-        let pool = open(&path).await.unwrap();
-        let notnull: i64 = sqlx::query_scalar(
-            "SELECT \"notnull\" FROM pragma_table_info('team_tasks') WHERE name = 'worker_bot_id'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(notnull, 0, "the column is nullable now");
-        let rows = team_tasks(&pool, "tm1").await.unwrap();
-        assert_eq!(rows.len(), 1, "the row survived the rebuild");
-        assert_eq!(rows[0].worker_bot_id.as_deref(), Some("w1"));
-        assert!(
-            rows[0].want_worker_bot_id.is_none(),
-            "the added column reads as NULL"
-        );
-
-        // Two unassigned tasks do not collide: NULL is exempt from UNIQUE in SQLite, which is
-        // exactly the "many queued, one open each" rule the pool needs.
-        for (id, seq) in [("t2", 2), ("t3", 3)] {
-            sqlx::query(
-                "INSERT INTO team_tasks (id, team_id, seq, title, brief, branch, state, created_at, updated_at)
-                 VALUES (?,'tm1',?,'B','做 B','b','queued',?,?)",
-            )
-            .bind(id)
-            .bind(seq)
-            .bind(now())
-            .bind(now())
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        // …while one-open-task-per-worker still holds for the assigned ones.
-        assert!(
-            sqlx::query(
-                "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
-                 VALUES ('t4','tm1',4,'C','做 C','w1','b','queued','x','x')",
-            )
-            .execute(&pool)
-            .await
-            .is_err(),
-            "w1 already has an open task"
-        );
-    }
-
-    /// The team tables behave: FK to the project, per-team task ordering, the
-    /// "one open task per worker" unique index, and the `live_teams` phase filter.
-    #[tokio::test]
-    async fn team_rows_and_indexes() {
-        let dir = tmp_dir();
-        let pool = open(&dir.join("t.sqlite3")).await.unwrap();
-        seed(&pool).await;
-
-        assert_eq!(teams_of_project(&pool, "p1").await.unwrap().len(), 1);
-        assert_eq!(live_teams(&pool).await.unwrap().len(), 1);
-        assert_eq!(team_members(&pool, "tm1").await.unwrap()[0].name, "i9-dev-1");
-
-        let insert_task = |id: &'static str, seq: i64, state: &'static str| {
-            let pool = pool.clone();
-            async move {
-                sqlx::query(
-                    "INSERT INTO team_tasks (id, team_id, seq, title, brief, worker_bot_id, branch, state, created_at, updated_at)
-                     VALUES (?,'tm1',?,'t','b','w1','br',?,?,?)",
-                )
-                .bind(id)
-                .bind(seq)
-                .bind(state)
-                .bind(now())
-                .bind(now())
-                .execute(&pool)
-                .await
-            }
-        };
-        insert_task("t1", 1, "working").await.unwrap();
-        // §4.5: a worker may only have one task that is not in a terminal state.
-        assert!(insert_task("t2", 2, "queued").await.is_err(), "second open task for the same worker");
-        // …but once the first one is merged, the next may be dispatched.
-        sqlx::query("UPDATE team_tasks SET state='merged' WHERE id='t1'").execute(&pool).await.unwrap();
-        insert_task("t2", 2, "queued").await.unwrap();
-        assert_eq!(team_tasks(&pool, "tm1").await.unwrap().iter().map(|t| t.seq).collect::<Vec<_>>(), vec![1, 2]);
-        // §2.1: `(team_id, seq)` is unique.
-        assert!(insert_task("t3", 2, "skipped").await.is_err(), "duplicate seq");
-
-        for (id, seq) in [("e1", 1), ("e2", 2)] {
-            sqlx::query(
-                "INSERT INTO team_events (id, team_id, seq, kind, to_bot_id, status, payload_json, created_at)
-                 VALUES (?,'tm1',?,'relay','w1','pending','{\"a\":1}',?)",
-            )
-            .bind(id)
-            .bind(seq)
-            .bind(now())
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        let pending: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM team_events WHERE team_id='tm1' AND status='pending'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(pending, 2);
-        // §10.4: `seq` is unique per team, so the log can never have two "same position" rows.
-        assert!(sqlx::query(
-            "INSERT INTO team_events (id, team_id, seq, kind, payload_json, created_at)
-             VALUES ('e3','tm1',2,'note','{}','x')"
-        )
-        .execute(&pool)
-        .await
-        .is_err());
-
-        // A finished team drops out of `live_teams` but stays on the project.
-        sqlx::query("UPDATE teams SET phase='done' WHERE id='tm1'").execute(&pool).await.unwrap();
-        assert!(live_teams(&pool).await.unwrap().is_empty());
-        assert_eq!(teams_of_project(&pool, "p1").await.unwrap().len(), 1);
-
-        pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
     /// A database written before `runs.tab_id` existed — which is every live install right
     /// now — must open, keep its runs, and gain the column. This project has already been
     /// bitten once by a column added to `SCHEMA` without the matching additive `ALTER`: the

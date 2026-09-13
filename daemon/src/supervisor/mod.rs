@@ -208,19 +208,11 @@ pub async fn assign(
     if target_bot_id == manager_id {
         return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
     }
-    let target = crate::db::bot(&app.db, target_bot_id)
+    crate::db::bot(&app.db, target_bot_id)
         .await
         .map_err(up)?
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
-    // SPEC-team: a team member takes work from its PM through the team relay. Dropping an
-    // ordinary prompt on it would race the scheduler, so this is refused, not queued.
-    if target.managed_by == "team" {
-        return Err(LcError::conflict(
-            "target bot is team-managed; coordinate through the team instead",
-            json!({"reason": "team_managed", "team_id": target.team_id}),
-        ));
-    }
 
     // The user's own words behind this assignment, with a stable id to dedupe on. A text hash
     // would not be one — two identical asks are two asks.
@@ -308,23 +300,17 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// before opening a transaction (and get a plain 400/409 instead of a rolled-back write).
 ///
 /// Shares its rules with [`assign`]: the manager may not assign to itself, the bot has to exist
-/// and not be deleted, and a team member takes work through its PM, never through here.
+/// and not be deleted.
 pub async fn check_assignable(app: &Arc<App>, target_bot_id: &str) -> Result<(), LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     if sup.bot_id.as_deref() == Some(target_bot_id) {
         return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
     }
-    let target = crate::db::bot(&app.db, target_bot_id)
+    crate::db::bot(&app.db, target_bot_id)
         .await
         .map_err(up)?
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
-    if target.managed_by == "team" {
-        return Err(LcError::conflict(
-            "target bot is team-managed; coordinate through the team instead",
-            json!({"reason": "team_managed", "team_id": target.team_id}),
-        ));
-    }
     Ok(())
 }
 
@@ -421,8 +407,6 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
             "effort": b.effort,
             "identity": b.identity,
             "managed_by": b.managed_by,
-            "team_id": b.team_id,
-            "team_role": b.team_role,
             "parent_bot_id": b.parent_bot_id,
             "is_supervisor": Some(&b.id) == sup.bot_id.as_ref(),
             "cwd": b.cwd,

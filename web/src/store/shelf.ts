@@ -54,7 +54,7 @@ export interface ShelfItem {
 /**
  * Where a shelf image goes when it is tapped: the attachment tray of the conversation that
  * is currently on screen. Registered by whichever chat panel is mounted (`ChatPanel`,
- * `GroupChatPanel`); `null` while the open panel has no composer (a team, or no bot yet).
+ * `GroupChatPanel`); `null` while the open panel has no composer (no bot yet).
  */
 export interface ShelfSink {
   add: (files: File[]) => void

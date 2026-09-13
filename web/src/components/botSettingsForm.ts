@@ -5,7 +5,7 @@ import type { BotKind, PatchBotInput } from '../api/types'
  *
  * 表單值只有**使用者動過的欄位**（`touched`）才算數；沒動過的欄位一律跟著 `base`（store 裡
  * 那份 bot，套上這次開啟以來已存成功的值）。這樣面板開著時別處（標題列的快速選單、另一個
- * 分頁、TeamRoleEditor）改了同一顆 bot 的 model／effort，這裡不會顯示「已變更」、也不會在
+ * 分頁）改了同一顆 bot 的 model／effort，這裡不會顯示「已變更」、也不會在
  * 儲存時用開啟當下的舊值把剛套用的蓋回去。
  */
 

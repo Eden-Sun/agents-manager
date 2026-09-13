@@ -63,7 +63,7 @@ export const KIND_TITLE: Record<BotKind, string> = {
 
 /**
  * 訊息時間只到分。秒數在對話裡沒有人在讀，但它是每一則訊息旁邊都有的一串數字——
- * 精確到秒的完整時間仍在 `title` 裡。（Team 時間軸是事件記錄，那邊保留秒。）
+ * 精確到秒的完整時間仍在 `title` 裡。
  */
 function timeOf(iso: string): string {
   const d = new Date(iso)
@@ -588,7 +588,7 @@ function RunDebugBar({ botId }: { botId: string }) {
 }
 
 /**
- * 這回合要回想的那則提問：優先找**這個回合自己**的 user 訊息，沒有（bot / team 起頭的回合）
+ * 這回合要回想的那則提問：優先找**這個回合自己**的 user 訊息，沒有（bot 起頭的回合）
  * 才退回整串的最後一則。退回的那則仍然是「使用者最後說的話」，比什麼都不顯示有用。
  */
 function lastAskOf(list: Message[], turnId: string): Message | null {

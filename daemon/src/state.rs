@@ -25,7 +25,7 @@ pub struct WsEvent {
     pub data: Value,
 }
 
-/// SPEC-team §3: an internal "this turn is no longer in flight" notification.
+/// An internal "this turn is no longer in flight" notification.
 ///
 /// Deliberately **not** a WS event: the WS bus is the front end's, with a 200-entry ring
 /// buffer and a `resync` escape hatch, which is fine for a UI and useless for a scheduler
@@ -39,8 +39,6 @@ pub struct TurnEvent {
     /// `in_flight` | `completed` | `completed_fallback` | `failed`.
     pub status: String,
     pub delivery: String,
-    pub team_id: Option<String>,
-    pub team_event_id: Option<String>,
 }
 
 impl TurnEvent {
@@ -78,7 +76,7 @@ pub struct App {
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     bus: broadcast::Sender<WsEvent>,
-    /// SPEC-team §3: internal turn-completion bus the team schedulers subscribe to.
+    /// Internal turn-completion bus (the supervisor controller subscribes).
     turn_bus: broadcast::Sender<TurnEvent>,
     seq: AtomicU64,
     ring: Mutex<VecDeque<WsEvent>>,
@@ -272,7 +270,7 @@ impl App {
         self.bus.subscribe()
     }
 
-    /// SPEC-team §3: subscribe to turn completions. There is no ring buffer here — a
+    /// Subscribe to turn completions. There is no ring buffer here — a
     /// subscriber that lags gets `RecvError::Lagged` and must re-read the DB.
     #[allow(dead_code)]
     pub fn subscribe_turns(&self) -> broadcast::Receiver<TurnEvent> {
@@ -284,7 +282,7 @@ impl App {
         let _ = self.turn_bus.send(ev);
     }
 
-    /// How many team schedulers are currently listening (for tests / diagnostics).
+    /// How many subscribers are currently listening (for tests / diagnostics).
     #[allow(dead_code)]
     pub fn turn_subscribers(&self) -> usize {
         self.turn_bus.receiver_count()
@@ -456,7 +454,7 @@ mod ws_seq_tests {
     /// the ring lock, 6 could land in the ring before 5 and a client that saw 6 never got 5.
     #[tokio::test]
     async fn concurrent_emits_land_in_the_ring_in_seq_order() {
-        let env = crate::team::testing::env().await;
+        let env = crate::testing::env().await;
         let app = env.app.clone();
         let mut tasks = Vec::new();
         for i in 0..200 {
