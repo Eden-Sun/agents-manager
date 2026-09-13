@@ -21,6 +21,7 @@ const STATUS_LABEL: Record<string, string> = {
   starting: '啟動中',
   running: '執行中',
   busy: '處理中',
+  idle: '待命中',
   waiting_quota: '等額度恢復',
   failed: '啟動失敗',
   unknown: '狀態不明',
@@ -30,6 +31,7 @@ const STATUS_LABEL: Record<string, string> = {
 const STATUS_TONE: Record<string, string> = {
   running: 'ok',
   busy: 'ok',
+  idle: 'ok',
   starting: 'warn',
   waiting_quota: 'warn',
   failed: 'bad',
@@ -95,6 +97,58 @@ type IncidentState =
 
 function label(map: Record<string, string>, key: string): string {
   return map[key] ?? key
+}
+
+/**
+ * 兩個角色各做什麼、各被叫醒幾次。巡檢就是上面那顆 AGM（使用者入口、Remote Control）；協調者只回應
+ * bot。協調者停了或沒額度時事件留在 inbox，不會改由巡檢處理——這一行要讓人看得出「在等」而不是「壞了」。
+ */
+function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: string) => void }) {
+  const r = live.responder
+  const wake = (st: SupervisorInfo['stats']) =>
+    st.wakes > 0 ? `叫醒 ${st.wakes} 次${st.last_wake_reason ? `・最近：${st.last_wake_reason}` : ''}` : '還沒被叫醒過'
+  return (
+    <section className="agm-sec">
+      <h4>角色</h4>
+      <div className="agm-row">
+        <span className="agm-key">巡檢</span>
+        <span className="agm-chip mono">{live.identity} · {live.model} · {live.effort}</span>
+        <span className="agm-note inline">使用者入口・遠端入口・健康與故障</span>
+      </div>
+      <p className="agm-note">{wake(live.stats)}{live.stats.merged > 0 ? `・合併重複 ${live.stats.merged} 則` : ''}</p>
+      <div className="agm-row">
+        <span className="agm-key">協調</span>
+        {r.configured ? (
+          <>
+            <span className={`agm-chip ${STATUS_TONE[r.status] ?? ''}`}>{label(STATUS_LABEL, r.status)}</span>
+            <span className="agm-chip mono">{r.identity} · {r.model} · {r.effort}</span>
+            {r.inbox_open > 0 ? <span className="agm-chip warn">{r.inbox_open} 則待處理</span> : null}
+            {r.bot_id ? (
+              <button type="button" className="btn" onClick={() => onOpen(r.bot_id)}>
+                打開協調者對話
+              </button>
+            ) : null}
+          </>
+        ) : (
+          <span className="agm-note inline">尚未建立：bot 的申請仍由巡檢處理（`agm responder setup` 後再 start）</span>
+        )}
+      </div>
+      {r.configured ? (
+        <p className="agm-note">
+          只回應 bot（申請、交辦回報、核准、任務），沒有遠端入口。{wake(r.stats)}
+          {r.stats.duplicates > 0 ? `・擋下重複申請 ${r.stats.duplicates} 則` : ''}
+        </p>
+      ) : null}
+      {r.status === 'waiting_quota' ? (
+        <p className="agm-note">
+          {r.status_detail || '協調者額度見底'}。事件留在 inbox 等它恢復，不會轉給巡檢。
+          {r.stats.notify_next_at ? `下次重試 ${r.stats.notify_next_at}` : ''}
+        </p>
+      ) : r.status_detail && r.configured ? (
+        <p className="agm-note">{r.status_detail}</p>
+      ) : null}
+    </section>
+  )
 }
 
 function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName: string }) {
@@ -328,6 +382,11 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
           遠端入口沒確認不代表 AGM 沒起來——bot 仍會照常收交辦，只是手機上能不能連到這個對話，daemon 說不準。
         </p>
       ) : null}
+
+      <RoleSummary live={live} onOpen={(id) => {
+        selectBot(id)
+        onOpenChat?.()
+      }} />
 
       <div className="agm-actions">
         {!live.configured ? (
