@@ -1,5 +1,7 @@
 /**
- * 桌機右緣的手機預覽：在圖片暫存區底下嵌一個 390px 寬的 iframe，載入同一個 app。
+ * 桌機右緣的手機預覽：在圖片暫存區底下嵌一個 iPhone 16（393×852）的 iframe，載入同一個 app，
+ * 畫面上縮到 50%（2026-09-13 使用者：整格 406px 吃掉桌機太多寬度）。縮的是 `transform`，
+ * iframe 自己的視窗仍然是 393×852，所以量到的版面就是手機上的那一份。
  *
  * 為什麼要有：手機版的版面 bug（標題列折行、抽屜蓋住東西、bar 高度）只有在窄視窗才看得
  * 到，而開發時常態是寬視窗。以前要驗手機版得另開一個視窗再拉窄，或跑截圖腳本；現在把
@@ -19,6 +21,8 @@ import { useCallback, useState } from 'react'
 import { DRAWER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import {
   IN_MOBILE_PREVIEW,
+  MOBILE_PREVIEW_H,
+  MOBILE_PREVIEW_SCALE,
   MOBILE_PREVIEW_W,
   setMobilePreviewOpen,
   useMobilePreviewOpen,
@@ -35,7 +39,10 @@ export function MobilePreviewToggle() {
       <span className="mp-toggle-label">手機預覽</span>
       <label className="mp-toggle-switch">
         <input type="checkbox" checked={open} onChange={(e) => setMobilePreviewOpen(e.target.checked)} />
-        <span>在右欄圖片暫存區下方嵌一個 {MOBILE_PREVIEW_W}px 寬的預覽</span>
+        <span>
+          在右欄圖片暫存區下方嵌一個 iPhone 16（{MOBILE_PREVIEW_W}×{MOBILE_PREVIEW_H}）的預覽，
+          畫面上縮到 {Math.round(MOBILE_PREVIEW_SCALE * 100)}%
+        </span>
       </label>
       {drawer ? <p className="mp-toggle-note">目前視窗寬度已經是手機／平板版面，預覽不會顯示。</p> : null}
     </div>
@@ -59,7 +66,10 @@ export function MobilePreview() {
     <aside className="mobile-preview" aria-label="手機預覽">
       <div className="mp-head">
         <span className="mp-title">手機預覽</span>
-        <span className="mp-size">{MOBILE_PREVIEW_W}px</span>
+        {/* 寫出來的是 iframe 真正的視窗尺寸，不是它畫在畫面上的大小——量版面靠的是前者。 */}
+        <span className="mp-size">
+          {MOBILE_PREVIEW_W}×{MOBILE_PREVIEW_H} · {Math.round(MOBILE_PREVIEW_SCALE * 100)}%
+        </span>
         <button type="button" className="icon-btn" title="重新載入預覽" aria-label="重新載入預覽" onClick={reload}>
           ↻
         </button>
@@ -74,6 +84,8 @@ export function MobilePreview() {
         </button>
       </div>
       <div className="mp-frame-wrap">
+        {/* 盒子佔「縮放後」的格子，iframe 用 transform 縮進去（見 mobilePreview.css）。 */}
+        <div className="mp-frame-box">
         <iframe
           key={nonce}
           className="mp-frame"
@@ -82,6 +94,7 @@ export function MobilePreview() {
           // 預覽是同源的自己：不需要額外權限，但也不該讓它彈出視窗或導走上層。
           sandbox="allow-same-origin allow-scripts allow-forms"
         />
+        </div>
       </div>
     </aside>
   )

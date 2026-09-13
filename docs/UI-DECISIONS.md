@@ -1748,9 +1748,16 @@ agents-manager-qn0ssg]」也長成使用者的藍泡泡（使用者：「這則�
   開關在那個寬度會多寫一行說明為什麼看不到。
 - **iframe 帶 `?mobilePreview=1`**：載的是同一個 app，不擋就會長出巢狀預覽。參數只在模組載入
   時讀一次，`routeSync` 之後改寫網址不影響。
-- **第三欄開預覽時從 `auto` 改成固定 406px**（390 + 左右 8px 留白）：`auto` 量的是 max-content，
-  暫存區撐滿之後沒有上界，1600px 實測整欄長到 706px、把對話擠掉一半。
+- **第三欄開預覽時從 `auto` 改成固定寬**：`auto` 量的是 max-content，暫存區撐滿之後沒有上界，
+  1600px 實測整欄長到 706px、把對話擠掉一半。
+- **視窗是 iPhone 16（393×852），畫面上縮到 50%**（2026-09-13 晚，使用者：那一格 406px 吃掉桌機
+  太多寬度）。縮的是 `transform: scale(.5)`，**不是** iframe 的寬高——iframe 裡量到的仍然是
+  393×852，媒體查詢、`100dvh`、安全區都照手機那一份走；把寬度直接改小就變成在預覽一個沒人用的
+  尺寸，這個工具也就白做了。`transform` 不會縮小它在版面裡佔的格子，所以格子大小寫在外面那層
+  `.mp-frame-box`（視窗 × 縮放 = 197×426），第三欄因此從 406px 降到 **213px**（197 + 左右 8px）。
+  標題列一起收緊（尺寸字級 10px、標題與尺寸都不折行）：213px 寬的工具列折行就變兩層樓高。
 - 版面覆寫整段鎖在 `body:has(.mobile-preview)` 底下，關著時版面跟原本完全一樣。
 
 截圖 `docs/screenshots/mobile-preview/`：`settings-toggle-1600.png`（開關）、
-`desktop-with-mobile-preview-1600.png`（右欄上暫存、下 390px 預覽）。
+`desktop-with-mobile-preview-1600.png`（右欄上暫存、下 390px 預覽）、
+`scaled-1600.png` 與 `scaled-panel.png`（2026-09-13 晚改成 393×852 縮 50% 之後）。
