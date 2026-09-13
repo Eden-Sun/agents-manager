@@ -790,13 +790,20 @@ class MissionCommandTest(CliCase):
             self.assertEqual(self.bad("mission", op, "m1", "--request-id", "r1")["error"], "bad_args")
         self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "缺欄位時什麼都不送")
 
-    def test_question_is_plain_user_speech(self):
-        """追問是使用者本人問的，不要帶 relay_from 把它標成 bot 說的。"""
+    def test_question_and_revise_keep_the_manager_as_the_source(self):
+        """總管代問／代開續作時要留下來源，不然時間軸上會長得像使用者自己說的。"""
         FakeDaemon.routes["POST /api/missions/m1/question"] = (200, {"event": {"id": "e1"}})
+        FakeDaemon.routes["POST /api/missions/m1/revise"] = (200, {"id": "m2"})
         self.ok("mission", "question", "m1", "--text", "這會影響登入嗎", "--request-id", "q1")
-        body = self.posts("/api/missions/m1/question")[0]["body"]
-        self.assertEqual(body, {"text": "這會影響登入嗎", "client_request_id": "q1"})
-        self.assertNotIn("relay_from", body)
+        self.assertEqual(self.posts("/api/missions/m1/question")[0]["body"]["relay_from"], "bot-agm")
+        self.ok("mission", "revise", "m1", "--text", "順便改標題", "--request-id", "rev1")
+        self.assertEqual(self.posts("/api/missions/m1/revise")[0]["body"]["relay_from"], "bot-agm")
+
+    def test_answering_for_the_user_does_not_wear_the_manager_identity(self):
+        """沒有 --reply-to ＝ 替使用者回答暫停的任務；標成總管的話 daemon 會當成 bot 回覆而不放行。"""
+        FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {"resumed": True})
+        self.ok("mission", "answer", "m1", "--text", "照你說的做", "--request-id", "a1")
+        self.assertNotIn("relay_from", self.posts("/api/missions/m1/answer")[0]["body"])
 
     def test_answer_carries_the_manager_identity_when_replying(self):
         """AGM 回覆追問要指回那一則，並用自己的身分；不帶 --reply-to 就是使用者回答暫停那條路。"""
@@ -810,10 +817,8 @@ class MissionCommandTest(CliCase):
         FakeDaemon.routes["POST /api/missions/m1/revise"] = (200, {"id": "m2", "parent_mission_id": "m1"})
         out = self.ok("mission", "revise", "m1", "--text", "順便改標題", "--request-id", "rev1")
         self.assertEqual(out["parent_mission_id"], "m1", "續作是新的一筆，指回原成果")
-        self.assertEqual(
-            self.posts("/api/missions/m1/revise")[0]["body"],
-            {"text": "順便改標題", "client_request_id": "rev1"},
-        )
+        body = self.posts("/api/missions/m1/revise")[0]["body"]
+        self.assertEqual((body["text"], body["client_request_id"]), ("順便改標題", "rev1"))
 
     def test_event_without_kind_or_text_sends_nothing(self):
         self.assertEqual(self.bad("mission", "event", "m1", "--text", "x")["error"], "bad_args")

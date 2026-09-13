@@ -819,6 +819,12 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
             # 不帶 --reply-to 就是「使用者回答暫停的任務」那條路，daemon 會 resume 並喚醒。
             if args.reply_to:
                 body["reply_to"] = args.reply_to
+                _with_relay(body, cfg, args)
+            # 沒有 --reply-to：這是在替**使用者**回答，不能標成總管說的，否則 daemon 會當成
+            # bot 回覆而不放行任務。要代答請明說（--as-user 之外沒有別的路）。
+        else:
+            # question / revise 由總管代打時同樣要留下來源：不帶 relay_from 會被記成使用者本人，
+            # 群組時間軸上就看不出那句話其實是 AGM 問的、那筆續作其實是 AGM 開的。
             _with_relay(body, cfg, args)
         return client.post(f"{base}/{op}", body)
     if op == "complete":
