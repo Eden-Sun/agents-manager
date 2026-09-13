@@ -2274,3 +2274,5 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
 **Fable 週桶**用盡 → 執行者／reviewer 同一身分改用 opus，驗證者不能用這個身分。`limit_hit` 本身不帶桶別，
 從當下的桶子讀數推（claude 撞限時 `turn_error.rs` 會把撞到的那個桶標成 100%）；過了 `until` 就不算。
 讀不到額度視為可以用（未知不等於用盡），但驗證者例外：必須讀得到 Fable 桶且未見底。停用的身分一律跳過。
+
+（本節於 2026-09-13 P4 端到端驗收過）
