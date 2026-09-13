@@ -95,11 +95,36 @@ if [ -n "$PENDING" ]; then
   log "上一筆更新還沒結案（${PENDING}），跳過"; exit 0
 fi
 
-# 等安全窗口。safety 只說「現在」，所以它只是決定要不要往下走；真正的保證在 acquire。
-SAFE=$("$AGM" --compact lease safety 2>/dev/null | python3 -c '
+# SPEC §18.2 條件 3：建置前等待其他 bot 空閒，排除建置 child 與 AGM 自己。
+# 不把 runtime 路徑插進 Python 原始碼，路徑含空白／引號也能正常讀取。
+MANAGER=$(python3 -c '
 import json,sys
-d = json.load(sys.stdin)
-print("yes" if d.get("safe") else ",".join(b.get("name","?") for b in d.get("working", [])) or "busy")
+with open(sys.argv[1]) as f: d=json.load(f)
+manager=d.get("manager_bot_id")
+if not isinstance(manager,str) or not manager.strip(): sys.exit(1)
+print(manager.strip())
+' "$DIR/runtime.json" 2>/dev/null) || {
+  log "無法從 runtime.json 取得 manager_bot_id，這輪不派"; exit 0;
+}
+EXCL=(--exclude-bot "$BOT" --exclude-bot "$MANAGER")
+
+# GET /maintenance/safety 目前不接受排除清單：先在快照中過濾這兩顆的
+# working / in_flight；acquire 才把同一份清單交 daemon 在鎖內重驗。
+# unreadable 不過濾；讀不到或回應格式有誤，不能當作安全。重啟仍另行核准。
+SAFE=$("$AGM" --compact lease safety 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" python3 -c '
+import json,sys,os
+d=json.load(sys.stdin)
+if not isinstance(d,dict) or not isinstance(d.get("safe"),bool): sys.exit(1)
+for key in ("working","in_flight","unreadable"):
+    if not isinstance(d.get(key),list) or any(not isinstance(x,dict) for x in d[key]): sys.exit(1)
+ex={os.environ["BUILD_BOT"],os.environ["MANAGER_BOT"]}
+working=[b for b in d["working"] if b.get("bot_id") not in ex]
+in_flight=[t for t in d["in_flight"] if t.get("bot_id") not in ex]
+unreadable=d["unreadable"]
+# A false safe flag with no explained blockers is not permission to proceed.
+explained=d["safe"] or bool(d["working"] or d["in_flight"] or d["unreadable"])
+ok=explained and not working and not in_flight and not unreadable
+print("yes" if ok else ",".join(b.get("name","?") for b in working) or ("unreadable" if unreadable else "in_flight" if in_flight else "unknown"))
 ' 2>/dev/null) || SAFE="unknown"
 if [ "$SAFE" != "yes" ]; then
   log "還有人在跑（${SAFE}），這輪不派"; exit 0
@@ -163,7 +188,7 @@ fi
 
 # 取得 rebuild 窗口：acquire 會在同一個鎖裡重驗一次 idle 再把窗口拿走。
 LEASE=$("$AGM" --compact lease acquire rebuild --approval "$APPROVAL" --commit "$HEAD_SHA" \
-  --owner "$OWNER" --ttl 3600 --exclude-bot "$BOT" 2>>"$LOG" | python3 -c '
+  --owner "$OWNER" --ttl 3600 "${EXCL[@]}" 2>>"$LOG" | python3 -c '
 import json,sys
 print(json.load(sys.stdin).get("lease", {}).get("fence") or "")
 ' 2>/dev/null) || LEASE=""

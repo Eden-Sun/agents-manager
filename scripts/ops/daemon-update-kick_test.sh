@@ -16,6 +16,7 @@ setup() {
   ROOT=$(mktemp -d)
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_BUILD_BOT="bot-build" AM_AGENT_NAME="test-owner"
   mkdir -p "$AGM_DIR/bin"
+  printf '%s' '{"manager_bot_id":"bot-manager","bot_id":"legacy-not-manager"}' > "$AGM_DIR/runtime.json"
   # 一個有 origin/main 的最小 repo。
   /usr/bin/git init -q "$AGM_REPO"
   ( cd "$AGM_REPO" && /usr/bin/git config user.email t@t && /usr/bin/git config user.name t \
@@ -51,7 +52,7 @@ STUB
   export STUB_BUILD_INPUTS='{"paths":["daemon","web","Cargo.toml","docs/goals/agm-supervisor-persona.md","scripts/agm.py"]}'
   export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
   export STUB_ASSIGNMENTS='{"assignments":[]}'
-  export STUB_SAFETY='{"safe":true,"working":[]}'
+  export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[]}'
   export STUB_ACQUIRE='{"lease":{"fence":7,"resource":"rebuild"}}'
   export STUB_APPROVAL='{"id":"ap-1","status":"pending"}'
   export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
@@ -96,7 +97,7 @@ teardown
 
 # 3. 有人在跑：連核准都不申請。
 setup
-export STUB_SAFETY='{"safe":false,"working":[{"name":"bot-busy"}]}'
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[]}'
 bash "$SCRIPT"
 check "有人在跑就不派" "還有人在跑（bot-busy）" "$AGM_DIR/daemon-update.log"
 check_no "不會申請核准" "approval request" "$AGM_DIR/calls.log"
@@ -194,6 +195,58 @@ bash "$SCRIPT"
 check "重疊執行停止" "已有執行者或殘留鎖" "$AGM_DIR/daemon-update.log"
 check_no "重疊執行不申請" "approval request" "$AGM_DIR/calls.log"
 teardown
+
+# 14. AGM handling its inbox and the builder itself must not block the rebuild window.
+setup
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-manager","name":"AGM"},{"bot_id":"bot-build","name":"build"}],"in_flight":[{"bot_id":"bot-manager","turn_id":"t1"},{"bot_id":"bot-build","turn_id":"t2"}],"unreadable":[]}'
+bash "$SCRIPT"
+check "只有 AGM 與建置者忙碌仍可派工" "已派工" "$AGM_DIR/daemon-update.log"
+check "acquire 帶同一份兩顆排除名單" "--exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
+check_no "不得拿相容 bot_id 當管理員" "--exclude-bot legacy-not-manager" "$AGM_DIR/calls.log"
+teardown
+
+# 15. Exclude identities, not names: an unrelated bot also named AGM is still protected.
+setup
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-manager","name":"AGM"},{"bot_id":"user-bot","name":"AGM"}],"in_flight":[],"unreadable":[]}'
+bash "$SCRIPT"
+check_no "其他同名 bot 忙碌時不取租約" "lease acquire" "$AGM_DIR/calls.log"
+check "仍回報有人在跑" "還有人在跑（AGM）" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 16. The in-flight check protects user turns even when working is empty.
+setup
+export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[{"bot_id":"user-bot","turn_id":"t3"}],"unreadable":[]}'
+bash "$SCRIPT"
+check_no "其他 bot 的 in-flight 不可被排除" "lease acquire" "$AGM_DIR/calls.log"
+check "in-flight 理由可見" "還有人在跑（in_flight）" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 17. Do not hide failed reads, including reads of the excluded manager itself.
+setup
+export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[],"unreadable":[{"bot_id":"bot-manager"}]}'
+bash "$SCRIPT"
+check_no "讀取失敗不取租約" "lease acquire" "$AGM_DIR/calls.log"
+check "unreadable 理由可見" "還有人在跑（unreadable）" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 18. A missing/corrupt manager identity must not turn into a guessed exclusion.
+for runtime in '{}' '{"manager_bot_id":null}' '{"manager_bot_id":" "}' 'broken'; do
+  setup
+  printf '%s' "$runtime" > "$AGM_DIR/runtime.json"
+  bash "$SCRIPT"
+  check "無效 runtime 不會猜 AGM 身分" "無法從 runtime.json 取得 manager_bot_id" "$AGM_DIR/daemon-update.log"
+  check_no "無效 runtime 不取租約" "lease acquire" "$AGM_DIR/calls.log"
+  teardown
+done
+
+# 19. Filtering must not turn malformed safety responses into an empty safe window.
+for safety in '{}' '{"safe":false}' '{"safe":false,"working":[],"in_flight":[],"unreadable":[]}' '{"safe":true,"working":[],"in_flight":{},"unreadable":[]}'; do
+  setup
+  export STUB_SAFETY="$safety"
+  bash "$SCRIPT"
+  check_no "錯誤或無法解釋的 safety 不取租約" "lease acquire" "$AGM_DIR/calls.log"
+  teardown
+done
 
 echo "----"
 echo "$PASS passed, $FAIL failed"
