@@ -3,6 +3,7 @@ import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetC
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
@@ -441,7 +442,8 @@ function Gauge({
   const seven = remaining(q?.seven_day)
   // 上下兩條邊框量表**只有手機畫**（2026-09-11 使用者）：桌機同一格裡已經有 5h／7d 的 bar
   // 與數字，邊框是同一份資訊再畫一次；手機的量表被壓成純文字 chip，看不到 bar，才需要它。
-  const borderWindows = focused && compact ? [
+  // 2026-09-13 使用者：**每一格都畫**，不只目前這顆 bot 的那格（「上下條不侷限於現在的種類」）。
+  const borderWindows = compact ? [
     { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
     { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
   ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []

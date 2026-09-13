@@ -1,0 +1,26 @@
+/*
+ * 手機（≤640px）額度列：樣式維持純文字 chip（不改成桌機的 bar），只做兩件事
+ * （2026-09-13 使用者：「上下條不侷限於現在的種類」「上下空間貼齊以節省」）：
+ * 1. 上下兩條邊框量表（5h 在上、7d／週在下）**每一格都畫**，不只目前這顆 bot 的那格。
+ *    focused 那格照舊多一層 accent 底色；其他格只有那兩條線。
+ * 2. 上下留白收緊：格子內距 3px → 2px、min-height 40 → 0、strip／open 的內距歸零。
+ */
+@media (width <= 640px) {
+  /* 非 focused 的格也要能放絕對定位的邊框量表。 */
+  .main-head .quota-hp.quota-framed {
+    position: relative;
+  }
+
+  .main-head .quota-hp {
+    padding: 2px 8px;
+    min-height: 0;
+  }
+
+  .main-head > .quota-strip {
+    padding-bottom: 0;
+  }
+
+  .main-head .quota-open {
+    padding: 0;
+  }
+}
