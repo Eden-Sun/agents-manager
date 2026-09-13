@@ -59,12 +59,24 @@ pub fn quota_key(host: &str, base: &str) -> String {
 /// 規則跟 UI 的額度條同一套：有 identity 就是 `<kind>:<identity>`，沒有就是裸的 kind；
 /// `cc0` 這種預設身份可能沒有自己的那一把，所以呼叫端要連裸 kind 一起看。
 pub fn bot_quota_keys(host: &str, kind: &str, identity: Option<&str>) -> Vec<String> {
+    let base = quota_base(kind, identity);
     let mut out = Vec::new();
-    if let Some(id) = identity.map(str::trim).filter(|s| !s.is_empty()) {
-        out.push(quota_key(host, &format!("{kind}:{id}")));
+    if base != kind {
+        out.push(quota_key(host, &base));
     }
     out.push(quota_key(host, kind));
     out
+}
+
+/// 這顆 bot 的讀數要寫進哪一把（還沒加主機前綴的）key：`<kind>:<identity>`，沒有身分就是裸 kind。
+///
+/// 寫入端（`refresh_codex_from_panes`、claude 的 statusLine）與查詢端（[`bot_quota_keys`]、
+/// [`limit_hit_for_bot`]）共用這一支，兩邊才不會各自拼字串然後對不起來。
+pub fn quota_base(kind: &str, identity: Option<&str>) -> String {
+    match identity.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("{kind}:{id}"),
+        None => kind.to_string(),
+    }
 }
 
 /// 這顆 bot 的帳號現在是不是被 CLI 擋著（[`LimitHit`]），還沒過期的才算。
@@ -437,10 +449,8 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     let mut wrote = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (pane_id, identity) in rows {
-        let base = match identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(id) => format!("codex:{id}"),
-            None => "codex".to_string(),
-        };
+        // 查詢端（`limit_hit_for_bot` / `bot_quota_keys`）用的是同一支，兩邊不會對不起來。
+        let base = quota_base("codex", identity.as_deref());
         // 同一個身分讀一次就夠：兩顆 bot 共用帳號時第二顆只是再寫一次同樣的數字。
         if !seen.insert(base.clone()) {
             continue;
@@ -528,6 +538,49 @@ mod tests {
         assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-13T12:00:00Z"), "重置時間沿用");
         assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00Z"));
         assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
+    }
+
+    /// AGM 的條件：寫進去的 key 要跟 `limit_hit_for_bot` 的查法（`<kind>:<identity>` → 裸 kind）
+    /// 對得起來，而且狀態列的讀數不能把 CLI 說的「撞上限」洗掉。
+    #[tokio::test]
+    async fn the_status_line_writes_where_the_lookup_reads_and_keeps_the_limit_hit() {
+        let app = crate::team::testing::env().await.app.clone();
+        // 帶身分的 codex bot：寫進 `codex:astra`，查也先查它。
+        let base = quota_base("codex", Some("astra"));
+        assert_eq!(base, "codex:astra");
+        assert_eq!(bot_quota_keys(LOCAL_HOST, "codex", Some("astra"))[0], quota_key(LOCAL_HOST, &base));
+        // 沒有身分的寫裸 kind，查的第一把也是它。
+        assert_eq!(quota_base("codex", None), "codex");
+        assert_eq!(bot_quota_keys(LOCAL_HOST, "codex", Some("  "))[0], quota_key(LOCAL_HOST, "codex"));
+
+        // CLI 說撞上限之後，狀態列再寫一次讀數不能把它清掉——清掉的話 assignment 那邊會
+        // 立刻又把工作派過去（718d025 的 quota_blocked 就是靠這一格）。
+        let hit = LimitHit {
+            message: "You've hit your usage limit.".into(),
+            until: Some("2999-01-01T00:00:00Z".into()),
+            at: crate::db::now(),
+        };
+        let mut server = quota_from_codex_status(
+            &crate::codex_live::CodexStatusQuota { five_hour_left: Some(50.0), weekly_left: Some(50.0) },
+            Some("astra"),
+        )
+        .unwrap();
+        server.limit_hit = Some(hit);
+        server.source = "codex-app-server".into();
+        set(&app, LOCAL_HOST, &base, server).await;
+
+        let fresh = quota_from_codex_status(
+            &crate::codex_live::CodexStatusQuota { five_hour_left: Some(90.0), weekly_left: Some(48.0) },
+            Some("astra"),
+        )
+        .unwrap();
+        assert!(fresh.limit_hit.is_none(), "狀態列本來就讀不到這一格");
+        set(&app, LOCAL_HOST, &base, fresh).await;
+
+        let q = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, &base)).cloned().unwrap();
+        assert_eq!(q.source, "codex-statusline", "來源分得出來");
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 10.0);
+        assert!(q.limit_hit.is_some(), "撞上限那一格要留著");
     }
 
     /// 狀態列讀不到額度時不要寫一筆空的——那會把 app-server 的數字蓋成「不知道」。
