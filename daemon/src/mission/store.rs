@@ -237,7 +237,7 @@ pub enum ChildCreate {
 /// 不包含快照（原成果的摘要、commit、PR），因為那些會隨原任務變動；用會變的東西當冪等鍵，
 /// 同一個請求重送兩次就會被判成兩個不同的請求。
 pub fn revise_fingerprint(parent_id: &str, text: &str, delivery: &str, executor: &str, on_5h: &str, max_rounds: i64) -> String {
-    format!("{parent_id}\u{1}{text}\u{1}{delivery}\u{1}{executor}\u{1}{on_5h}\u{1}{max_rounds}")
+    serde_json::json!([parent_id, text, delivery, executor, on_5h, max_rounds]).to_string()
 }
 
 /// 目前還沒結案的那筆續作（如果有）。
@@ -305,7 +305,8 @@ pub async fn create_child(
         }
         return Err(e.into());
     }
-    insert_event(&mut tx, &id, "instruction", m.text, None, instruction_payload, None, None).await?;
+    let requested_by = instruction_payload.get("requested_by").and_then(serde_json::Value::as_str);
+    insert_event(&mut tx, &id, "instruction", m.text, requested_by, instruction_payload, None, None).await?;
     insert_event(
         &mut tx,
         parent_id,
@@ -465,7 +466,7 @@ pub enum ReplyOutcome {
 /// `reply_to` 之後也還是同一段字。這些都是不同的請求，卻共用一個冪等鍵——不比對就會把後者
 /// 當成前者的重送靜靜吞掉。
 pub fn reply_fingerprint(kind: &str, text: &str, relay_from: Option<&str>, reply_to: Option<&str>) -> String {
-    format!("{kind}\u{1}{text}\u{1}{}\u{1}{}", relay_from.unwrap_or("-"), reply_to.unwrap_or("-"))
+    serde_json::json!([kind, text, relay_from, reply_to]).to_string()
 }
 
 /// 任務現在允許什麼。`write_reply` 在**交易裡**重新讀一次狀態再比對，所以不會有「檢查完才被別人
@@ -499,11 +500,13 @@ pub async fn write_reply(
     inbox: Option<(String, &str, &serde_json::Value)>,
 ) -> Result<ReplyOutcome> {
     let fingerprint = reply_fingerprint(kind, text, relay_from, reply_to);
-    let mut tx = pool.begin().await?;
+    // Reserve the writer before reading. Deferred read transactions can fail their
+    // write upgrade with SQLITE_BUSY_SNAPSHOT under WAL even with a busy timeout.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     // 重放**優先於**狀態：重送多半發生在任務已經被放行之後（網路慢、使用者連點），那時候它已經
     // 不是 paused 了。先看狀態就會把一個正確的重送擋成 not_paused。查詢在交易內做，所以它跟下面的
-    // INSERT 之間沒有別人能插進來；真的同時撞進來的那種，最後會被 INSERT 的唯一索引攔下。
+    // INSERT 之間以 BEGIN IMMEDIATE 保留寫入權，其他 writer 必須等本次交易結束。
     if let Some(existing) = sqlx::query_as::<_, MissionEvent>(
         "SELECT * FROM mission_events WHERE mission_id = ? AND client_request_id = ?",
     )
@@ -778,23 +781,20 @@ mod tests {
         pool
     }
 
-    /// 真正能並發的池：多條連線共用同一個 in-memory 資料庫。
-    ///
-    /// `sqlite::memory:` 每條連線都是**各自獨立**的空資料庫，用它跑併發測試只會兩邊都成功而且
-    /// 什麼都沒驗到。要 shared-cache 的 URI 才是同一個 DB。
-    async fn shared_pool(name: &str) -> SqlitePool {
-        let url = format!("sqlite:file:{name}?mode=memory&cache=shared");
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(4)
-            // 併發寫入時 SQLite 會回 SQLITE_BUSY；讓它等一下而不是直接失敗。
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&url)
-            .await
-            .unwrap();
-        sqlx::query("PRAGMA busy_timeout = 5000").execute(&pool).await.unwrap();
+    // Exercise the production-style WAL writer contention, rather than shared-cache
+    // in-memory locking (which uses a different SQLite lock protocol).
+    async fn shared_pool(name: &str) -> (SqlitePool, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("am-mission-{name}-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.join("test.db"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(4).connect_with(options).await.unwrap();
         migrate(&pool).await.unwrap();
         crate::supervisor::store::migrate(&pool).await.unwrap();
-        pool
+        (pool, dir)
     }
 
     fn revision<'a>(parent: &'a str, crid: &'a str, text: &'a str) -> NewMission<'a> {
@@ -825,7 +825,7 @@ mod tests {
     /// 這是 partial unique index 在擋，不是應用層的「先查再寫」——所以兩條連線同時進來也成立。
     #[tokio::test]
     async fn two_concurrent_revises_create_exactly_one_child() {
-        let pool = shared_pool("revise_race").await;
+        let (pool, dir) = shared_pool("revise_race").await;
         let parent = done_parent(&pool, "r1").await;
         // 借用要活過 join!，所以先把參數綁成變數。
         let (ra, rb) = (revision(&parent.id, "crid-A", "把 A 做完"), revision(&parent.id, "crid-B", "另一個方向"));
@@ -858,6 +858,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inbox, 1, "只有一次喚醒");
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 續作的四樣東西（新任務、instruction、parent 的 note、inbox）同生共死。
@@ -965,7 +967,7 @@ mod tests {
     /// 兩個同 crid 的回答真正同時進來：只會有一則事件、一次喚醒，而且沒有人拿到 500。
     #[tokio::test]
     async fn two_concurrent_answers_with_one_request_id_write_once() {
-        let pool = shared_pool("answer_race").await;
+        let (pool, dir) = shared_pool("answer_race").await;
         let (m, _) = create(&pool, &new("r1")).await.unwrap();
         pause(&pool, &m.id, "clarify", None).await.unwrap();
         let key = format!("mission:{}:answer:same", m.id);
@@ -984,6 +986,8 @@ mod tests {
         assert_eq!(n, 1, "只有一則回答");
         let inbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE event_key = ?").bind(&key).fetch_one(&pool).await.unwrap();
         assert_eq!(inbox, 1, "只有一次喚醒");
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 「不回答直接繼續」也是一個交易，而且只有真的 paused→open 才通知。
