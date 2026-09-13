@@ -783,6 +783,38 @@ class MissionCommandTest(CliCase):
         self.ok("mission", "event", "m1", "--kind", "note", "--text", "排程", "--as-daemon")
         self.assertEqual(self.posts("/api/missions/m1/events")[1]["body"]["relay_from"], "daemon")
 
+    def test_question_answer_revise_need_an_idempotency_key(self):
+        """三支都會改變狀態，沒有穩定的 request id 就不要送——重送會變成第二個問題／第二輪續作。"""
+        for op in ("question", "answer", "revise"):
+            self.assertEqual(self.bad("mission", op, "m1", "--text", "x")["error"], "bad_args")
+            self.assertEqual(self.bad("mission", op, "m1", "--request-id", "r1")["error"], "bad_args")
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "缺欄位時什麼都不送")
+
+    def test_question_is_plain_user_speech(self):
+        """追問是使用者本人問的，不要帶 relay_from 把它標成 bot 說的。"""
+        FakeDaemon.routes["POST /api/missions/m1/question"] = (200, {"event": {"id": "e1"}})
+        self.ok("mission", "question", "m1", "--text", "這會影響登入嗎", "--request-id", "q1")
+        body = self.posts("/api/missions/m1/question")[0]["body"]
+        self.assertEqual(body, {"text": "這會影響登入嗎", "client_request_id": "q1"})
+        self.assertNotIn("relay_from", body)
+
+    def test_answer_carries_the_manager_identity_when_replying(self):
+        """AGM 回覆追問要指回那一則，並用自己的身分；不帶 --reply-to 就是使用者回答暫停那條路。"""
+        FakeDaemon.routes["POST /api/missions/m1/answer"] = (200, {"resumed": True})
+        self.ok("mission", "answer", "m1", "--text", "不會", "--request-id", "a1", "--reply-to", "e9")
+        body = self.posts("/api/missions/m1/answer")[0]["body"]
+        self.assertEqual(body["reply_to"], "e9")
+        self.assertEqual(body["relay_from"], "bot-agm")
+
+    def test_revise_posts_to_its_own_endpoint(self):
+        FakeDaemon.routes["POST /api/missions/m1/revise"] = (200, {"id": "m2", "parent_mission_id": "m1"})
+        out = self.ok("mission", "revise", "m1", "--text", "順便改標題", "--request-id", "rev1")
+        self.assertEqual(out["parent_mission_id"], "m1", "續作是新的一筆，指回原成果")
+        self.assertEqual(
+            self.posts("/api/missions/m1/revise")[0]["body"],
+            {"text": "順便改標題", "client_request_id": "rev1"},
+        )
+
     def test_event_without_kind_or_text_sends_nothing(self):
         self.assertEqual(self.bad("mission", "event", "m1", "--text", "x")["error"], "bad_args")
         self.assertEqual(self.bad("mission", "event", "m1", "--kind", "report", "--text", "  ")["error"], "bad_args")
