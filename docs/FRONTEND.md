@@ -45,6 +45,8 @@ web/src/
   store/routeSync.ts # 網址 ↔ store 的雙向同步（pushState / popstate / document.title）
   lib/routes.ts    # `parse(pathname) → Route` / `build(Route) → pathname`（純函式，有單元測試）
   lib/tuiChoices.ts # 終端快照 → 編號選單（`❯ 1.` / 權限框 / codex），純函式，有單元測試
+  lib/missionView.ts # 任務欄位＋事件串 → 五段進度／角色／撞限換手／停下來問人，純函式，有單元測試
+  lib/missionOpts.ts # 「交給 AGM」三個選項的型別與 localStorage 記憶
   hooks/
     useTerminalSnapshot.ts # `GET /terminal` 輪詢（blocked 面板與全畫面共用，可 pause）
     usePaneKeys.ts         # 鍵名對照（KeyboardEvent → herdr）＋ 依序送鍵的佇列、KEYPAD 按鍵列
@@ -54,6 +56,8 @@ web/src/
     ChatPanel.tsx  # 標題列、對話/終端分頁、氣泡列表、輸入框（export Bubble）
     GroupChatPanel.tsx # SPEC §13 專案群組聊天：成員燈號列、合併時間軸、@mention 自動完成
     BotSettingsPanel.tsx # Bot 設定（改名 / 模型 / args / 身份 / env / 刪除），另 export ModelField
+    MissionsBar.tsx  # 群組任務：進行中的任務卡（進度／角色／換手／回答入口）＋已完成清單
+    MissionOptions.tsx # 群組輸入框「交給 AGM」的三個選項（交付／執行者 kind／5h 撞限）
     BlockedPanel.tsx # blocked 時對話上方的終端快照 + 按鍵面板
     BlockedModal.tsx # blocked 時自動彈出的全畫面 herdr 終端（鍵盤直通 + 按鍵列）
     BlockedChoices.tsx # 編號選單畫成可以點的清單（44px 一列，送 ↓／↑ + Enter）

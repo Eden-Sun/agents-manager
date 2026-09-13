@@ -4,7 +4,7 @@
  */
 
 import { MockTransport } from './mock'
-import { toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTeamDetail, toTeamEvents, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
@@ -18,6 +18,10 @@ import type {
   GhLoginMode,
   GhStatus,
   GroupChatResult,
+  Mission,
+  MissionDetail,
+  MissionEvent,
+  NewMissionInput,
   GroupMessagesPage,
   GroupSkipReason,
   HostResult,
@@ -910,4 +914,72 @@ export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/git/${op}`, op === 'commit' ? { message } : undefined)
   const o = isRec(raw) ? raw : {}
   return str(pick(o, 'output'), '')
+}
+
+// -------------------------------------------------------- 群組任務（docs/API.md「群組任務」）
+
+/**
+ * `POST /api/projects/:id/missions`——群組裡的「交給 AGM」。
+ *
+ * 同一個 `client_request_id` 回同一筆（`created:false`），所以重送不會多開一個任務。
+ * 遠端專案 daemon 回 400 `remote_not_supported`（第一版只支援本機專案）。
+ */
+export async function createMission(
+  projectId: string,
+  input: NewMissionInput,
+): Promise<{ mission: Mission | null; created: boolean }> {
+  const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/missions`, input)
+  const root = isRec(raw) ? raw : {}
+  return { mission: toMission(pick(root, 'mission') ?? raw), created: pick(root, 'created') !== false }
+}
+
+/** 這個專案有沒有支援群組任務（舊 daemon 沒有這些路由，SPA fallback 會回 index.html）。 */
+export function isMissionsUnsupported(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501)
+}
+
+/** 建任務時被擋下來的原因（遠端專案）。 */
+export function missionRejectReason(e: unknown): string | null {
+  return e instanceof ApiError ? (e.body?.error ?? null) : null
+}
+
+/** `GET /api/projects/:id/missions?status=` — 已完成任務清單就是 `status=done`。 */
+export async function fetchMissions(
+  projectId: string,
+  status: 'all' | 'open' | 'done' | 'cancelled' = 'all',
+  limit = 50,
+): Promise<Mission[]> {
+  const qs = new URLSearchParams({ status, limit: String(limit) }).toString()
+  return toMissions(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/missions?${qs}`))
+}
+
+/** `GET /api/missions/:id` — 任務本身＋它的事件串。 */
+export async function fetchMission(missionId: string): Promise<MissionDetail | null> {
+  return toMissionDetail(await transport.request('GET', `/missions/${encodeURIComponent(missionId)}`))
+}
+
+/**
+ * `POST /api/missions/:id/events`。
+ *
+ * 使用者在任務卡上回答「停下來問人」時走這裡：**不帶 `relay_from`**＝這句話是使用者本人說的
+ * （契約：`relay_from` 為 null 就是使用者），bot 轉述才要帶自己的 bot id。
+ */
+export async function addMissionEvent(
+  missionId: string,
+  input: { kind: 'report' | 'note' | 'verified'; text: string; relay_from?: string; payload?: unknown },
+): Promise<MissionEvent | null> {
+  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/events`, input)
+  const root = isRec(raw) ? raw : {}
+  return toMissionEvent(pick(root, 'event') ?? raw, missionId)
+}
+
+/** `POST /api/missions/:id/{pause,resume,cancel}` — 都回同一份任務。 */
+export async function controlMission(
+  missionId: string,
+  action: 'pause' | 'resume' | 'cancel',
+  body?: unknown,
+): Promise<Mission | null> {
+  const raw = await transport.request('POST', `/missions/${encodeURIComponent(missionId)}/${action}`, body ?? {})
+  const root = isRec(raw) ? raw : {}
+  return toMission(pick(root, 'mission') ?? raw)
 }

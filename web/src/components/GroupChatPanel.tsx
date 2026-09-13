@@ -16,6 +16,9 @@ import { HostBadge } from './HostsPanel'
 import { useShelfSink } from './ImageShelf'
 import { IssuesBar } from './IssuesBar'
 import { KindIcon } from './KindTag'
+import { loadMissionOpts, type MissionOpts } from '../lib/missionOpts'
+import { MissionOptions } from './MissionOptions'
+import { MissionsBar } from './MissionsBar'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { UnreadChip } from './UnreadChip'
@@ -241,6 +244,14 @@ function GroupComposer({
     return Math.max(0, Math.min(value.length, saved))
   })
   const [sending, setSending] = useState(false)
+  /**
+   * 「交給 AGM」開關（§11）。開著時這一則不是發給某幾顆 bot，而是建一個任務——收件者 chip
+   * 與 @mention 都不適用，送出鍵也換一顆。
+   */
+  const [toAgm, setToAgm] = useState(false)
+  const [missionOpts, setMissionOpts] = useState<MissionOpts>(loadMissionOpts)
+  const startMission = useStore((s) => s.startMission)
+  const missionsSupported = useStore((s) => s.missionsSupported)
   const [popOpen, setPopOpen] = useState(true)
   const [active, setActive] = useState(0)
   const ref = inputRef
@@ -325,8 +336,24 @@ function GroupComposer({
 
   const submit = () => {
     const body = text.trim()
+    if (!body) return
+    // 交給 AGM：建一個任務，不送給任何一顆 bot（AGM 不是專案成員，見設計 §9）。
+    if (toAgm) {
+      if (sending) return
+      setSending(true)
+      void startMission(projectId, {
+        text: body,
+        // 同一個請求重送回同一筆任務，手滑連按兩下不會開兩個。
+        client_request_id: `mission-${projectId}-${Date.now()}`,
+        ...missionOpts,
+      }).then((id) => {
+        setSending(false)
+        if (id) setText('')
+      })
+      return
+    }
     // Unlike a bot chat, a group send always needs text: the recipients come from it.
-    if (!body || targets.length === 0) return
+    if (targets.length === 0) return
     // 打字沒被鎖，送不出去就講原因，別默默吃掉 Enter。
     if (state.disabled) {
       notify('error', state.reason || '目前無法送出訊息')
@@ -351,13 +378,30 @@ function GroupComposer({
 
   return (
     <div className="composer group-composer">
-      {state.disabled && state.reason ? (
+      {/* 交給 AGM 不需要專案裡有跑著的 bot（AGM 自己會開），那條鎖定提示在這個模式下是錯的。 */}
+      {state.disabled && state.reason && !toAgm ? (
         <div className="composer-lock" role="status">
           {/* 同 `ChatPanel`：emoji 吃不到 `color`，拿掉。 */}
           <span>{state.reason}</span>
         </div>
       ) : null}
-      <div className="recipient-row" role="group" aria-label="收件者">
+      {missionsSupported ? (
+        <div className="agm-row">
+          <button
+            type="button"
+            className={`agm-toggle${toAgm ? ' on' : ''}`}
+            aria-pressed={toAgm}
+            disabled={sending}
+            title="交給 AGM：由它派執行者、reviewer 與驗證者做完，而不是直接丟給某一顆 bot"
+            onClick={() => setToAgm((v) => !v)}
+          >
+            <span aria-hidden="true">{toAgm ? '☑' : '☐'}</span> 交給 AGM
+          </button>
+          {toAgm ? <span className="agm-note">這一則會變成一個任務，AGM 自己調度</span> : null}
+        </div>
+      ) : null}
+      {toAgm ? <MissionOptions opts={missionOpts} disabled={sending} onChange={setMissionOpts} /> : null}
+      <div className="recipient-row" role="group" aria-label="收件者" hidden={toAgm}>
         <button
           type="button"
           className={`recipient-chip all${allSelected ? ' on' : ''}`}
@@ -413,7 +457,13 @@ function GroupComposer({
           value={text}
           /* 連線斷了也讓人繼續打（草稿會存），只是送不出去。 */
           disabled={sending}
-          placeholder={state.disabled ? `${state.reason || '目前無法送出訊息'}——可以先打，恢復後再送` : '@bot 或 @all …'}
+          placeholder={
+            toAgm
+              ? '要 AGM 做什麼？（它會派執行者、reviewer 與驗證者）'
+              : state.disabled
+                ? `${state.reason || '目前無法送出訊息'}——可以先打，恢復後再送`
+                : '@bot 或 @all …'
+          }
           title="以 @<bot> 或 @all 指定收件者；Enter 送出，Shift+Enter 換行"
           onChange={(e) => {
             setText(e.target.value)
@@ -464,22 +514,26 @@ function GroupComposer({
         />
         <button
           type="button"
-          className="send-btn"
-          disabled={state.disabled || sending || files.uploading || !text.trim() || targets.length === 0}
+          className={`send-btn${toAgm ? ' agm' : ''}`}
+          disabled={
+            sending || files.uploading || !text.trim() || (toAgm ? false : state.disabled || targets.length === 0)
+          }
           title={
-            files.uploading
-              ? '圖片上傳中…'
-              : targets.length === 0
-                ? '請選擇收件者（上方 chip 或 @mention）'
-                : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`
+            toAgm
+              ? '建一個任務交給 AGM'
+              : files.uploading
+                ? '圖片上傳中…'
+                : targets.length === 0
+                  ? '請選擇收件者（上方 chip 或 @mention）'
+                  : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`
           }
           onClick={submit}
         >
-          {sending ? '送出中…' : files.uploading ? '上傳中…' : '送出'}
+          {sending ? '送出中…' : files.uploading ? '上傳中…' : toAgm ? '交給 AGM' : '送出'}
         </button>
       </div>
       {/* Only while there is something to say: no mention yet, or the resolved recipient list. */}
-      {text.trim() && targets.length === 0 ? (
+      {toAgm ? null : text.trim() && targets.length === 0 ? (
         <div className="composer-hint group-hint">
           <span className="mention-warn">請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定</span>
         </div>
@@ -597,6 +651,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           {drop.over ? <DropVeil /> : null}
           <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
           <GroupMessageList projectId={projectId} />
+          <MissionsBar projectId={projectId} />
           <GroupComposer projectId={projectId} inputRef={composerRef} files={files} />
         </div>
       )}
