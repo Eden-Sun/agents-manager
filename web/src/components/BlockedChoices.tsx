@@ -345,18 +345,23 @@ export function BlockedChoices({
         </ul>
       ) : null}
 
-      <ol className={`bc-list${menu.multi ? ' bc-list-multi' : ''}`}>
+      <ol
+        className={`bc-list${menu.multi ? ' bc-list-multi' : ' bc-list-radio'}`}
+        role={menu.multi ? undefined : 'radiogroup'}
+      >
         {menu.choices.map((c, i) => {
           const shown = open.includes(i)
           return (
           <li key={`${c.number}-${c.title}`} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
             <button
               type="button"
+              role={menu.multi ? undefined : 'radio'}
               className={`bc-item${c.current ? ' bc-current' : ''}${c.checked ? ' bc-checked' : ''}${
                 shown ? ' bc-open' : ''
               }`}
               disabled={Boolean(busy)}
               aria-current={c.current ? 'true' : undefined}
+              aria-checked={menu.multi ? undefined : c.current}
               aria-pressed={c.checked === null ? undefined : c.checked}
               title={
                 c.checked === null
@@ -372,11 +377,17 @@ export function BlockedChoices({
               </span>
               {/* 多選清單裡沒有方框的列（`Chat about this`）也要占住那一欄，不然本文會比
                   上面幾列往左凸一截。 */}
-              {menu.multi ? (
-                <span className="bc-box" aria-hidden="true">
-                  {c.checked === null ? '' : c.checked ? '☑' : '☐'}
-                </span>
-              ) : null}
+              <span className="bc-box" aria-hidden="true">
+                {menu.multi
+                  ? c.checked === null
+                    ? ''
+                    : c.checked
+                      ? '☑'
+                      : '☐'
+                  : c.current
+                    ? '●'
+                    : '○'}
+              </span>
               <span className="bc-title">{c.title}</span>
               <span className="bc-mark">
                 {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : c.current ? '游標在此' : ''}

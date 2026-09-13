@@ -141,9 +141,24 @@ export async function preload(
   return full.length === n ? { pages: full, startTab, tabs } : null
 }
 
-/** 這一頁預設的「想要的狀態」＝讀到當下的勾選狀態。 */
+/** 這一頁預設的「想要的狀態」＝讀到當下的勾選狀態。單選沒有方框，預設全沒選。 */
 export function wantOf(page: DraftPage): boolean[] {
+  if (!page.multi) return page.choices.map(() => false)
   return page.choices.map((c) => c.checked === true)
+}
+
+/** 單選頁使用者點了哪一項（最多一個 `true`）。沒點過是 `-1`。 */
+export function radioPick(want: boolean[] | undefined): number {
+  if (!want) return -1
+  const i = want.findIndex(Boolean)
+  return i
+}
+
+/** 這一頁送出時要不要動終端。單選看有沒有點過；複選看差集。 */
+export function pageNeedsCommit(page: DraftPage, want: boolean[] | undefined): boolean {
+  if (page.isSubmit) return false
+  if (!page.multi) return radioPick(want) >= 0
+  return togglesFor(page.choices, want ?? wantOf(page)).length > 0
 }
 
 /**
@@ -231,9 +246,7 @@ export async function commit(
   want: boolean[][],
   onProgress?: (done: number, total: number) => void,
 ): Promise<CommitResult> {
-  const todo = draft.pages
-    .map((p, i) => ({ p, i }))
-    .filter(({ p, i }) => !p.isSubmit && togglesFor(p.choices, want[i] ?? wantOf(p)).length > 0)
+  const todo = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
 
   let cur = await io.read()
   if (!cur) return { ok: false, error: '讀不到畫面，什麼都沒送出。' }
@@ -258,7 +271,23 @@ export async function commit(
       return { ok: false, error: `第 ${p.tab + 1} 題（${p.label}）的選項跟讀進來時不一樣，沒有送出。`, at: i }
     }
 
-    // 只送差集
+    // 單選：沒有核取方塊、沒有這一頁的 Submit 列。走到那一項再 Enter，畫面可能自己跳下一題。
+    if (!p.multi) {
+      const idx = radioPick(want[i])
+      if (idx < 0) continue
+      const landed = await walkTo(io, idx, p)
+      if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${idx + 1} 項，停在這裡。`, at: i }
+      await io.send(['enter'])
+      await io.wait(SETTLE_STEP * 3)
+      const now = await io.read()
+      if (!now) return { ok: false, error: `第 ${p.tab + 1} 題送出後讀不到畫面，請重新讀取。`, at: i }
+      cur = now
+      at = locate(draft, now) ?? at
+      onProgress?.(++done, total)
+      continue
+    }
+
+    // 複選：只送差集
     for (const idx of togglesFor(cur.choices, want[i])) {
       const landed = await walkTo(io, idx, p)
       if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${idx + 1} 項，停在這裡。`, at: i }

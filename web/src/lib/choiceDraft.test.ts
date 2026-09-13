@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { commit, preload, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
+import { commit, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
 import { parseChoiceMenu } from './tuiChoices.ts'
 
 /**
@@ -248,6 +248,147 @@ test('按不動就停在那裡，不會繼續送後面的鍵', async () => {
   assert.match(res.error ?? '', /按不動/)
   assert.equal(tui.submitted, false)
   assert.deepEqual(tui.checked[0], [false, false, false])
+})
+
+/**
+ * 多分頁單選：沒有 `[ ]`、沒有每頁的 Submit 列。Enter 選一項；送出頁才有 Submit answers。
+ * 版型照 `opu-radio.txt`（真機 0-opu 那份，題目改成假的，不拿真人問卷來按）。
+ */
+class FakeRadioTui {
+  tab = 0
+  cursor = 0
+  chosen: (number | null)[] = [null, null, null, null]
+  sent: string[] = []
+  submitted = false
+
+  private readonly pages = [
+    { label: '換身分門檻', q: 'cc2 撞到哪一種才換下一個身分？', opts: ['7d 或 limit_hit 才換', '任一桶撞限就換', '只看 7d'] },
+    { label: 'Fable 用完', q: 'Fable 用完怎麼辦？', opts: ['切 opus', '換身分', '停住等'] },
+    { label: '執行者 kind', q: '執行者用哪一種？', opts: ['跟 PM 同一 kind', '固定 grok', '隨便'] },
+    { label: '推 main 失敗', q: 'push 被拒怎麼辦？', opts: ['rebase 再推', '開 PR', '停住'] },
+  ]
+
+  private rows(): number {
+    return this.tab < 4 ? this.pages[this.tab].opts.length + 2 : 2
+  }
+
+  private tabBar(): string {
+    const cells = this.pages.map((p, i) => `${this.chosen[i] !== null ? '☒' : '☐'} ${p.label}`)
+    cells.push('✔ Submit')
+    return `←  ${cells.join('  ')}  →`
+  }
+
+  screen(): string {
+    const mark = (i: number) => (this.cursor === i ? '❯ ' : '  ')
+    const out = ['前面一堆別的輸出', '─'.repeat(60), this.tabBar(), '']
+    if (this.tab === 4) {
+      out.push('Review your answers', '')
+      this.pages.forEach((p, i) => {
+        const a = this.chosen[i] !== null ? p.opts[this.chosen[i]!] : '（沒選）'
+        out.push(` ● ${p.q}`, `   → ${a}`)
+      })
+      out.push('', 'Ready to submit your answers?', '', `${mark(0)}1. Submit answers`, `${mark(1)}2. Cancel`)
+      return out.join('\n')
+    }
+    const p = this.pages[this.tab]
+    out.push(p.q, '')
+    p.opts.forEach((o, i) => out.push(`${mark(i)}${i + 1}. ${o}`))
+    out.push(`${mark(p.opts.length)}${p.opts.length + 1}. Type something.`)
+    out.push('─'.repeat(60))
+    out.push(`${mark(p.opts.length + 1)}${p.opts.length + 2}. Chat about this`)
+    out.push('Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
+    return out.join('\n')
+  }
+
+  key(k: string) {
+    this.sent.push(k)
+    if (k === 'right' || k === 'tab') {
+      if (this.tab < 4) {
+        this.tab += 1
+        this.cursor = 0
+      }
+      return
+    }
+    if (k === 'left' || k === 'shift+tab') {
+      if (this.tab > 0) {
+        this.tab -= 1
+        this.cursor = 0
+      }
+      return
+    }
+    if (k === 'down') {
+      this.cursor = Math.min(this.cursor + 1, this.rows() - 1)
+      return
+    }
+    if (k === 'up') {
+      this.cursor = Math.max(this.cursor - 1, 0)
+      return
+    }
+    if (this.tab === 4) {
+      if (k === 'enter' && this.cursor === 0) this.submitted = true
+      return
+    }
+    if (k === 'enter') this.chosen[this.tab] = this.cursor
+  }
+
+  io(): Io {
+    return {
+      read: async () => parseChoiceMenu(this.screen()),
+      send: async (keys) => keys.forEach((k) => this.key(k)),
+      wait: async () => {},
+    }
+  }
+}
+
+test('假單選 TUI 畫得出來的畫面，parseChoiceMenu 認成單選多分頁', () => {
+  const tui = new FakeRadioTui()
+  const m = parseChoiceMenu(tui.screen())
+  assert.ok(m)
+  assert.equal(m.multi, false)
+  assert.equal(m.tabs.length, 5)
+  assert.equal(m.choices.length, 5)
+  assert.equal(m.choices[0].checked, null)
+  assert.equal(m.submit, null)
+})
+
+test('單選預載五頁走完停回起點，全程不送 Enter', async () => {
+  const tui = new FakeRadioTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  assert.equal(draft.pages.length, 5)
+  assert.equal(draft.pages[4].isSubmit, true)
+  assert.equal(draft.pages.every((p, i) => i === 4 || p.multi === false), true)
+  assert.deepEqual(wantOf(draft.pages[0]), [false, false, false, false, false])
+  assert.equal(pageNeedsCommit(draft.pages[0], wantOf(draft.pages[0])), false)
+  assert.equal(tui.tab, 0)
+  assert.equal(tui.sent.includes('enter'), false)
+  assert.deepEqual(tui.chosen, [null, null, null, null])
+})
+
+test('單選一次送出：每頁 Enter 那一項，最後 Submit answers；不送 space', async () => {
+  const tui = new FakeRadioTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+
+  const want = [
+    [true, false, false, false, false],
+    [false, true, false, false, false],
+    [false, false, true, false, false],
+    [true, false, false, false, false],
+    [],
+  ]
+  assert.equal(radioPick(want[1]), 1)
+  tui.sent = []
+  const res = await commit(tui.io(), draft, want)
+  assert.deepEqual(res, { ok: true })
+  assert.deepEqual(tui.chosen, [0, 1, 2, 0])
+  assert.equal(tui.submitted, true)
+  assert.equal(tui.sent.includes('space'), false)
+  assert.ok(tui.sent.filter((k) => k === 'enter').length >= 5)
 })
 
 test('wantOf 拿讀到當下的勾選當預設；samePage 只比題目與選項字串', async () => {

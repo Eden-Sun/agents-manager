@@ -402,6 +402,11 @@ export function keysToSelect(menu: TuiChoiceMenu, target: number): string[] {
   return [...(keysToMove(menu, target) ?? []), 'enter']
 }
 
+/** `Type something.` / `Chat about this`：編號列，但不是勾選項。 */
+export function isActionChoice(c: Pick<TuiChoice, 'title'>): boolean {
+  return /^type something\.?$/i.test(c.title.trim()) || /^chat about this$/i.test(c.title.trim())
+}
+
 /**
  * 兩張快照上是不是同一份選單。送鍵前拿它比對「我剛剛看到的那一份還在嗎」——不在就什麼都
  * 不送，因為 ↓ 的次數是相對的，畫面換了就會按到別的東西。

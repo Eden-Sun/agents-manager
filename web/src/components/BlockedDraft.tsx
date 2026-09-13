@@ -10,7 +10,7 @@
  * 預載失敗（走不動、某頁讀不完整）就整個退回即時模式（`BlockedChoices`），不留半套草稿。
  */
 import { useEffect, useRef, useState } from 'react'
-import { commit, preload, togglesFor, wantOf, type Draft, type Io } from '../lib/choiceDraft'
+import { commit, pageNeedsCommit, preload, wantOf, type Draft, type Io } from '../lib/choiceDraft'
 import { acquirePreload, restartPreload } from '../lib/draftPreload'
 import { parseChoiceMenu, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
@@ -122,11 +122,20 @@ export function BlockedDraft({
     )
   }
 
-  const dirty = draft.pages.some((p, i) => !p.isSubmit && togglesFor(p.choices, want[i] ?? []).length > 0)
+  const dirty = draft.pages.some((p, i) => pageNeedsCommit(p, want[i]))
   const busy = phase === 'sending'
 
-  const toggle = (page: number, idx: number) =>
-    setWant((v) => v.map((row, i) => (i === page ? row.map((b, j) => (j === idx ? !b : b)) : row)))
+  const pick = (page: number, idx: number) => {
+    const p = draft.pages[page]
+    if (p.multi && p.choices[idx]?.checked === null) return
+    setWant((v) =>
+      v.map((row, i) => {
+        if (i !== page) return row
+        if (p.multi) return row.map((b, j) => (j === idx ? !b : b))
+        return row.map((_, j) => j === idx)
+      }),
+    )
+  }
 
   const send = async () => {
     setPhase('sending')
@@ -142,7 +151,7 @@ export function BlockedDraft({
 
   const answerOf = (page: number) =>
     draft.pages[page].choices
-      .filter((c, j) => c.checked !== null && want[page]?.[j])
+      .filter((_, j) => Boolean(want[page]?.[j]))
       .map((c) => c.title)
       .join('、')
 
@@ -168,7 +177,7 @@ export function BlockedDraft({
           ))}
         </div>
         <p className="bc-question">
-          這份問卷有 {draft.pages.filter((p) => !p.isSubmit).length} 題，勾好之後一次送出
+          這份問卷有 {draft.pages.filter((p) => !p.isSubmit).length} 題，選好之後一次送出
         </p>
       </div>
 
@@ -193,32 +202,43 @@ export function BlockedDraft({
           ) : (
             <section key={page.tab} className="bc-page" data-tab={page.tab}>
               <h4 className="bc-page-q">{page.question ?? page.label}</h4>
-              <ol className="bc-list bc-list-multi">
+              <ol
+                className={`bc-list${page.multi ? ' bc-list-multi' : ' bc-list-radio'}`}
+                role={page.multi ? 'group' : 'radiogroup'}
+                aria-label={page.question ?? page.label}
+              >
                 {page.choices.map((c, j) => {
                   const key = `${page.tab}:${j}`
                   const shown = open.includes(key)
-                  const picked = c.checked !== null && Boolean(want[i]?.[j])
+                  const action = page.multi && c.checked === null
+                  const picked = Boolean(want[i]?.[j])
                   return (
                     <li key={key} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
                       <button
                         type="button"
+                        role={page.multi ? undefined : 'radio'}
                         className={`bc-item${picked ? ' bc-checked' : ''}${shown ? ' bc-open' : ''}`}
-                        disabled={busy || c.checked === null}
-                        aria-pressed={c.checked === null ? undefined : picked}
+                        disabled={busy || action}
+                        aria-checked={page.multi ? undefined : picked}
+                        aria-pressed={page.multi && !action ? picked : undefined}
                         title={
-                          c.checked === null
+                          action
                             ? '這一列是動作不是勾選，要用它請先關掉這個畫面回終端'
-                            : picked
-                              ? '取消勾選（只改這裡，還沒送出）'
-                              : '勾選（只改這裡，還沒送出）'
+                            : page.multi
+                              ? picked
+                                ? '取消勾選（只改這裡，還沒送出）'
+                                : '勾選（只改這裡，還沒送出）'
+                              : picked
+                                ? '已選（再點其他項會改選）'
+                                : '選這一項（只改這裡，還沒送出）'
                         }
-                        onClick={() => toggle(i, j)}
+                        onClick={() => pick(i, j)}
                       >
                         <span className="bc-num" aria-hidden="true">
                           {c.number}
                         </span>
                         <span className="bc-box" aria-hidden="true">
-                          {c.checked === null ? '' : picked ? '☑' : '☐'}
+                          {action ? '' : page.multi ? (picked ? '☑' : '☐') : picked ? '●' : '○'}
                         </span>
                         <span className="bc-title">{c.title}</span>
                         <span className="bc-mark" />
