@@ -212,7 +212,8 @@ label = "foo"
 - 改 `listen` port 需重啟 daemon，既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）。
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
-  `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。
+  `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。只管巡檢；協調者見 §18.15。
+- `[supervisor] responder_batch_secs`（預設 15）、`responder_max_backoff_secs`（預設 300）：協調者的短窗批次與重試上限（§18.15）。
 
 ## 6. 生命週期
 
@@ -782,7 +783,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **例行檢查** launchd `com.agm.daemon-update`（每小時整點）跑 `daemon-update-kick.sh`：`git fetch` → 無程式碼差異跳過 → 同 commit 已派過 skip（`daemon-update.last`）→
   建置 child 不存在寫 `build child missing` 並 exit 0（不改派）→ 上一筆 `agm-daemon-update-*` 派工未結案 skip → 還有 bot `working` 就 defer →
   派 `daemon-update-task.md`（`--request-id agm-daemon-update-<sha>`）。
-- **可動手的判準是沒有 bot 在 `working`**（看 `agm --compact state` 的 `run.agent_status`，排除建置 child 與 AGM），不是 `health.busy ≤ 1`：busy 含 `blocked`，
+- **可動手的判準是沒有 bot 在 `working`**（看 `agm --compact state` 的 `run.agent_status`，排除建置 child 與 AGM 兩個角色），不是 `health.busy ≤ 1`：busy 含 `blocked`，
   而 blocked 可能等使用者好幾小時，重啟也不會打斷它。
 - **誰重建**：有 bot 申請（帶已 push 的 commit）→ 核准後由申請者自己建；例行更新 → AGM 建置 child `agm-pxf2pv-build`（cc0/opus/low）。絕不派給使用者的專案 bot。
 - **docs-only 不重啟**：建置驗證通過後把 origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾不寫）。kick 用
@@ -799,7 +800,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
 
 ### 18.3 喚醒 AGM 的節流
-`[supervisor] notify_interval_secs`（預設 600），規則見 §5。API 端狀態機見 `API.md` 的 `GET /api/supervisor/inbox`。
+巡檢：`[supervisor] notify_interval_secs`（預設 600），規則見 §5；只有 `wake=1` 的事件會開一次喚醒，送前合併重複（§18.15）。協調者：短窗批次（§18.15）。
+API 端狀態機見 `API.md` 的 `GET /api/supervisor/inbox`。
 
 ### 18.4 瀏覽器殭屍清理
 
@@ -827,7 +829,8 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 - 記憶體不足導致指令被殺就回報並停止，不重試迴圈。
 
 ### 18.5 AGM 派 child 的模型預設
-`cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。AGM 自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）。
+`cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。巡檢自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）；
+協調者固定 `cc0/opus/high`，沒有自動切換（§18.15）。
 
 ### 18.6 persona 的副本
 由 §18.11 規範：改人設走 `PUT /api/supervisor/persona`，不要手改 `config.toml` 或 `persona.md`。`ConfigStore` 寫入前比 mtime，磁碟變了會在同一把 mutex 內重讀再套用
@@ -1011,6 +1014,47 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - D7 執行者 kind 開任務時選（claude／codex／grok）；帳號輪換只對 claude 有效。
 - D8 推 main 失敗（非 fast-forward、rebase 衝突、驗證沒過）→ 停下來問使用者，不自動改開 PR。
 
+
+### 18.15 AGM 雙角色：巡檢與協調（2026-09-13）
+
+使用者 2026-09-13：主動找問題用 fable-low（不足 opus-low），回應 bots 用 opus-high。在那之前每個 bot 申請、交辦回報、核准請求、健康事件都打進同一顆 AGM，
+而它跑在 fable 上——bot 的例行申請與十分鐘一次的 `health_changed` 是 fable 用量最大的來源。
+
+| | 巡檢（patrol） | 協調（responder） |
+| --- | --- | --- |
+| 是誰 | 原本那顆 AGM：`supervisors.bot_id`、`GET /api/supervisor` 的頂層欄位 | 第二顆 bot `AGM-responder`：`supervisor_roles` 的 `responder` 列 |
+| 模型 | cc0/fable/low → cc0/opus/low（§18.5 的控制器） | cc0/opus/high，固定，沒有自動切換（`responder setup` 可指定） |
+| 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
+| 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（自己的專案；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
+| 收什麼 | `health_changed`、`incident_*`、`watchdog_gave_up`、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報 |
+| 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
+
+**路由由 daemon 決定**（`supervisor/roles.rs::route`，純函式），只看事件種類、payload 明寫的欄位與交辦的 `review_role`，不問模型、不比對名字；
+不先叫醒巡檢再請它轉交。每筆 inbox 事件記 `role`、`wake`、`claimed_by`、`acked_by`、`merged_into`。
+
+- **只記錄、不叫醒**（`wake=0`）：`assignment_noticed`、`quota_blocked`／`quota_resumed`、`incident_resolved`、`manager_health.status=healthy` 的 `health_changed`、
+  bot 對通知型交辦（`--notice`）的回覆、角色之間在同一次喚醒回合裡的回信。它們跟下一次有事的喚醒一起送，自己不開回合。
+- **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
+- **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
+  協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋正規化內容雜湊＋十分鐘一格。
+  一般 bot → 協調者；巡檢 ↔ 協調者互相交接給對方。不攔：使用者（沒有 `relay_from`）、`relay_from=daemon`、目標不是角色 bot、協調者未建立。
+- **一件事只有一個角色**：送出時以 `claimed_by` 條件更新；`ack` 帶角色 bot token 時只能結自己收的（另一個角色的回 409 `claimed_by_other_role`），UI／使用者照舊全能結。
+  核准決定改為條件寫入（`WHERE status=<讀到的狀態>`），兩個角色同時決定只有一個成功（409 `decided_concurrently`）；交辦驗收本來就是條件寫入。
+- **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`）。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
+  驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
+- **協調者故障不倒回巡檢**：沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
+  停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。送不出去是有界退避（15 秒倍增到 `responder_max_backoff_secs`），**沒有次數上限**，
+  也不開 `notify_exhausted`。巡檢自己的事件照舊有 `notify_max_attempts`。
+- **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
+- **交辦的驗收角色**：`POST /api/supervisor/assignments` 的 `review_role`；省略 = 呼叫的角色（token）自己，UI／腳本呼叫 = 協調者。巡檢的例行維運（daemon-update、browser-gc、健康追查）寫 `patrol`。
+  followup 沿用父交辦的 `review_role`。協調者存在且驗收角色是它時，派工訊息的 `relay_from` 標協調者，bot 回話才找對人。
+- **計數**：每個角色 `wakes`、`events_delivered`、`duplicates`（擋下的重複申請）、`merged`、`last_wake_at`、`last_wake_reason`（這一批的事件種類）。
+  「fable 不會因為 bot 申請被叫醒」看巡檢的 `wakes` 與 `last_wake_reason` 裡沒有 `bot_request`。
+- **健康**：`GET /api/supervisor/health` 另有 `responder_health{status,responder_status,inbox_open,retry_at}`，不併進頂層 `status`（協調者等額度不等於使用者入口不能用）。
+- **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane、或 daemon 不在時 shim 退回直送，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
+  協調者在自己的專案，web 的「剛跑完」晶片列目前只排除 `GET /api/supervisor` 的 `project_id`（巡檢專案），協調者會出現在那一列。
+- **部署**（合入 main 後由 AGM 安排，不在程式裡自動做）：`agm responder setup` → 同步兩份 persona（§18.11，協調者走 `PUT /api/supervisor/responder/persona`）→
+  `agm responder start`。回滾到舊 binary：新欄位是 additive，舊 binary 忽略 `role`／`wake`，所有事件回到巡檢收；先停協調者。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 
