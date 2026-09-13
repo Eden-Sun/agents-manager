@@ -1777,6 +1777,20 @@ session 資訊；整個 repo 裡 `--remote-control` 只出現在 setup 寫進去
    - `not_fast_forward` 不算「停下問人」：對執行者**新開**一件 `assign --mission --role executor`（已結案的交辦不能 `followup`）
      要它 `git rebase origin/main` 並重跑 tsc／build／test；rebase 乾淨就直接再 `deliver`，**有衝突才**停下問人。
    - `mission complete` 只會自動刪「沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
+11. **完成之後的追問與追加修改（2026-09-13，AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）**：交付完不是句點，使用者還會
+    問問題、還會想再改一點。兩條路刻意分開，因為後果不同：
+   - **追問**（`mission question`，inbox `mission_question`）：只是問一句話。你回 `mission answer <id> --reply-to <question 事件 id>`
+     （CLI 會自動帶你自己的 `relay_from`）。**不要**因為一句追問就去改碼、開交辦或動交付——要改東西是下一條。
+     已完成的任務也能問；它不會把任務弄回進行中，`completed_at` 與成果摘要都不會變。
+   - **追加修改**（`mission revise`，inbox 是一則帶 `parent_mission_id` 的 `mission_created`）：那是**新的一筆任務**，
+     舊那筆原封不動。payload 帶 `runbook_start_step: 2`——脈絡（原指示、結果摘要、commit／PR、`verified` 摘要、新要求）
+     已經在快照裡，你從第 2 步（挑執行者）接手，不用重新規劃。臨時 bot 用**新任務**的 id 尾 6 碼命名。
+   - 快照是**參考，不是證據**：新任務要自己跑第 4 步拿到自己的 `verified` 才能交付，舊的驗證對它無效
+     （交付關卡看的是這筆任務自己的事件）。原成果的 PR 若還沒合進 main，快照會標 `parent_delivery_in_main: false`，
+     先確認目前基底有沒有那份改動，**不要假設它在**。
+   - 一個成果同時只能有一輪未結案的續作（第二筆會被 409 `revision_in_progress` 擋下並指向既存那筆）。
+   - 使用者回答暫停的任務（`mission answer` 不帶 `--reply-to`）或按「不回答直接繼續」（`mission resume`），
+     daemon 都會推 inbox 叫醒你；你自己呼叫 resume 不會產生通知。
 
 ## 附錄 A：herdr socket 實測結果（2026-09-05，herdr 0.8.2 / protocol 20）
 

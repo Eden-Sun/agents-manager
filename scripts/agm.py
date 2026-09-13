@@ -807,6 +807,20 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         return client.post(f"{base}/pause", body)
     if op in ("resume", "cancel", "round"):
         return client.post(f"{base}/{op}", {})
+    if op in ("question", "answer", "revise"):
+        # 三個都要冪等鍵：重送回同一筆，不會變成第二個問題／第二輪續作。
+        if not (args.text or args.text_file):
+            raise AgmError("bad_args", f"mission {op} 需要 --text 或 --text-file", 2)
+        if not args.request_id:
+            raise AgmError("bad_args", f"mission {op} 需要 --request-id（穩定的冪等鍵，重送沿用同一個）", 2)
+        body = {"text": _mission_text(args), "client_request_id": args.request_id}
+        if op == "answer":
+            # AGM 回覆使用者的追問：要指回那一則 question，並帶自己的身分。
+            # 不帶 --reply-to 就是「使用者回答暫停的任務」那條路，daemon 會 resume 並喚醒。
+            if args.reply_to:
+                body["reply_to"] = args.reply_to
+            _with_relay(body, cfg, args)
+        return client.post(f"{base}/{op}", body)
     if op == "complete":
         if not (args.text or args.text_file):
             raise AgmError("bad_args", "mission complete 需要 --text 或 --text-file（結果摘要）", 2)
@@ -1069,7 +1083,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument(
         "op",
-        choices=["list", "get", "events", "event", "pause", "resume", "cancel", "complete", "round", "pick", "deliver"],
+        choices=[
+            "list", "get", "events", "event", "pause", "resume", "cancel", "complete", "round", "pick", "deliver",
+            # 完成之後還能往下談：question 問一句（不改東西）、answer 回覆、revise 開續作。
+            "question", "answer", "revise",
+        ],
     )
     s.add_argument("mission_id", nargs="?", help="list 以外都需要")
     s.add_argument("--project", help="list：專案 id")
@@ -1083,6 +1101,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身分")
     s.add_argument("--exclude", help="pick：排除的身分（reviewer 排除執行者的身分）")
     s.add_argument("--worktree", help="deliver：要交付的 worktree（本機絕對路徑）")
+    s.add_argument("--request-id", dest="request_id", help="question/answer/revise：穩定的冪等鍵，重送沿用同一個")
+    s.add_argument("--reply-to", dest="reply_to", help="answer：回的是哪一則 question 的事件 id")
     s.add_argument("--title", help="deliver（pr）：PR 標題")
     s.add_argument("--body", help="deliver（pr）：PR 內文")
     s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
