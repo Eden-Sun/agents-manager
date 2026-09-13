@@ -50,7 +50,8 @@
   同時推一則 `approval_requested` inbox 事件給 AGM（它自己核駁，不用使用者轉達）。`purpose`：`rebuild` | `restart`。
   `POST /api/supervisor/approvals/{id}/decide {decision,actor?,reason?,expires_in_secs?}`，`decision`：`approve` | `deny` | `revoke`。
   同樣的 decision 重送回 `idempotent:true`；只有 `pending` 能被 approve（已決定過的要重新申請）。
-- `GET /api/supervisor/maintenance/safety` → `{safe,working[],in_flight[],blocked_waiting_for_user[],queued_assignments,checked_at}`。
+- `GET /api/supervisor/maintenance/safety?exclude=<id,id>` → `{safe,working[],in_flight[],unreadable[],blocked_waiting_for_user[],queued_assignments,checked_at,excluded_bot_ids[]}`。
+  `exclude` 可省略（不排除任何 bot），以逗號分隔 bot ID，忽略空項與重複 ID；同 acquire 的 `exclude_bot_ids` 語意，回 `excluded_bot_ids` 供核對。CLI `agm lease safety --exclude-bot <builder> --exclude-bot <AGM>` 會傳此查詢；檢查仍為唯讀，不取得租約。
   **唯讀**，只說「現在」。`blocked`（在等使用者回答）只回報不阻擋，重啟本來就會跳過它。
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`；
   `POST /api/supervisor/leases/{resource}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}`

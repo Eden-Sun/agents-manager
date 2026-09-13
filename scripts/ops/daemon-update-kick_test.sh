@@ -52,7 +52,7 @@ STUB
   export STUB_BUILD_INPUTS='{"paths":["daemon","web","Cargo.toml","docs/goals/agm-supervisor-persona.md","scripts/agm.py"]}'
   export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
   export STUB_ASSIGNMENTS='{"assignments":[]}'
-  export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[]}'
+  export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
   export STUB_ACQUIRE='{"lease":{"fence":7,"resource":"rebuild"}}'
   export STUB_APPROVAL='{"id":"ap-1","status":"pending"}'
   export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
@@ -97,7 +97,7 @@ teardown
 
 # 3. 有人在跑：連核准都不申請。
 setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[]}'
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
 check "有人在跑就不派" "還有人在跑（bot-busy）" "$AGM_DIR/daemon-update.log"
 check_no "不會申請核准" "approval request" "$AGM_DIR/calls.log"
@@ -196,9 +196,9 @@ check "重疊執行停止" "已有執行者或殘留鎖" "$AGM_DIR/daemon-update
 check_no "重疊執行不申請" "approval request" "$AGM_DIR/calls.log"
 teardown
 
-# 14. AGM handling its inbox and the builder itself must not block the rebuild window.
+# 14. The daemon filtered AGM and builder activity; consume its result and forward both IDs.
 setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-manager","name":"AGM"},{"bot_id":"bot-build","name":"build"}],"in_flight":[{"bot_id":"bot-manager","turn_id":"t1"},{"bot_id":"bot-build","turn_id":"t2"}],"unreadable":[]}'
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
 check "只有 AGM 與建置者忙碌仍可派工" "已派工" "$AGM_DIR/daemon-update.log"
 check "acquire 帶同一份兩顆排除名單" "--exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
@@ -207,7 +207,7 @@ teardown
 
 # 15. Exclude identities, not names: an unrelated bot also named AGM is still protected.
 setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-manager","name":"AGM"},{"bot_id":"user-bot","name":"AGM"}],"in_flight":[],"unreadable":[]}'
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"user-bot","name":"AGM"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
 check_no "其他同名 bot 忙碌時不取租約" "lease acquire" "$AGM_DIR/calls.log"
 check "仍回報有人在跑" "還有人在跑（AGM）" "$AGM_DIR/daemon-update.log"
@@ -215,7 +215,7 @@ teardown
 
 # 16. The in-flight check protects user turns even when working is empty.
 setup
-export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[{"bot_id":"user-bot","turn_id":"t3"}],"unreadable":[]}'
+export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[{"bot_id":"user-bot","turn_id":"t3"}],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
 check_no "其他 bot 的 in-flight 不可被排除" "lease acquire" "$AGM_DIR/calls.log"
 check "in-flight 理由可見" "還有人在跑（in_flight）" "$AGM_DIR/daemon-update.log"
@@ -223,7 +223,7 @@ teardown
 
 # 17. Do not hide failed reads, including reads of the excluded manager itself.
 setup
-export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[],"unreadable":[{"bot_id":"bot-manager"}]}'
+export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[],"unreadable":[{"bot_id":"bot-manager"}],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
 check_no "讀取失敗不取租約" "lease acquire" "$AGM_DIR/calls.log"
 check "unreadable 理由可見" "還有人在跑（unreadable）" "$AGM_DIR/daemon-update.log"
@@ -247,6 +247,35 @@ for safety in '{}' '{"safe":false}' '{"safe":false,"working":[],"in_flight":[],"
   check_no "錯誤或無法解釋的 safety 不取租約" "lease acquire" "$AGM_DIR/calls.log"
   teardown
 done
+
+# 20. Upgraded daemon applies exclusions server-side and echoes the applied IDs.
+setup
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "safety 傳兩顆排除 ID" "lease safety --exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
+check "新版 daemon 確認安全後派工" "已派工" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 21. Never override a new daemon's refusal with client-side filtering.
+setup
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-manager","name":"AGM"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check_no "新版 daemon 判不安全時不靠過濾繞過" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 22. The server must confirm the exact exclusions before its preflight can be trusted.
+setup
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","unrelated-bot"]}'
+bash "$SCRIPT"
+check_no "排除名單不一致時停止" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 23. An old daemon that did not apply exclusions cannot authorize this script.
+setup
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[]}'
+bash "$SCRIPT"
+check_no "舊端點沒有回排除名單時不取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
 
 echo "----"
 echo "$PASS passed, $FAIL failed"

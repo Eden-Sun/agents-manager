@@ -778,8 +778,27 @@ pub async fn get_approvals(State(app): State<Arc<App>>) -> Result<Json<Value>, L
 
 /// Whether a window would be safe *right now*. A read: poll it while you wait, and take the
 /// window with `acquire`, which re-checks this under the lock.
-pub async fn get_maintenance_safety(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(super::maintenance::safety(&app, &[]).await?))
+#[derive(Deserialize, Default)]
+pub struct SafetyQuery {
+    /// Comma-separated bot IDs, matching acquire's exclude_bot_ids.
+    #[serde(default)]
+    pub exclude: Option<String>,
+}
+
+pub async fn get_maintenance_safety(
+    State(app): State<Arc<App>>,
+    Query(q): Query<SafetyQuery>,
+) -> Result<Json<Value>, LcError> {
+    let mut exclude = Vec::new();
+    for id in q.exclude.as_deref().unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !exclude.iter().any(|s| s == id) {
+            exclude.push(id.to_string());
+        }
+    }
+    let mut snapshot = super::maintenance::safety(&app, &exclude).await?;
+    // Echo the applied IDs so callers can distinguish an older daemon ignoring the query.
+    snapshot["excluded_bot_ids"] = json!(exclude);
+    Ok(Json(snapshot))
 }
 
 pub async fn get_leases(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
@@ -987,6 +1006,48 @@ mod review_boundary_tests {
                 ownership: &[], request_id: None })).await;
         assert!(mismatch.is_err(), "the transaction also rejects adopting a different instruction");
         assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn safety_query_excludes_only_requested_bots_and_matches_acquire_probe() {
+        let app = app().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        for id in ["builder", "manager", "user"] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude','t',?)")
+                .bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','working',?)")
+                .bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES (?,?,?)")
+                .bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES (?,?,?,'web','in_flight',?)")
+                .bind(id).bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+        }
+        let get = |query: &str| {
+            Query::<SafetyQuery>::try_from_uri(&format!("/api/supervisor/maintenance/safety{query}").parse().unwrap()).unwrap()
+        };
+        let all = get_maintenance_safety(State(app.clone()), get("")).await.unwrap().0;
+        assert_eq!(all["safe"], false);
+        assert_eq!(all["working"].as_array().unwrap().len(), 3);
+        assert_eq!(all["excluded_bot_ids"], json!([]));
+        let q = "?exclude=builder%2C%20manager%20%2Cbuilder%2C%2C";
+        let filtered = get_maintenance_safety(State(app.clone()), get(q)).await.unwrap().0;
+        assert_eq!(filtered["excluded_bot_ids"], json!(["builder", "manager"]));
+        assert_eq!(filtered["safe"], false, "user work is still protected");
+        assert_eq!(filtered["working"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["in_flight"][0]["bot_id"], "user");
+        let acquire_probe = super::super::maintenance::safety(&app, &["builder".into(), "manager".into()]).await.unwrap();
+        for field in ["safe", "working", "in_flight", "unreadable"] {
+            assert_eq!(filtered[field], acquire_probe[field]);
+        }
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id='user'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id='user'").execute(&app.db).await.unwrap();
+        assert_eq!(get_maintenance_safety(State(app.clone()), get(q)).await.unwrap().0["safe"], true);
+        assert_eq!(get_maintenance_safety(State(app.clone()), get("")).await.unwrap().0["safe"], false);
+        assert!(store::leases(&app.db).await.unwrap().is_empty(), "preflight never acquires a lease");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
