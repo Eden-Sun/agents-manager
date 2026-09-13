@@ -3695,6 +3695,17 @@ pub async fn prompt_grouped(
 /// and complete the Turn ourselves. ~14s: long enough that a merely slow hook still wins.
 const IDLE_POLLS: u32 = 20;
 
+/// 畫面從頭到尾**什麼都沒出現過**時，要靜止到這麼多輪才敢當成「它在等你輸入」。
+///
+/// 2026-09-13（bot GROK、pane w168:pN）：使用者送出 15 秒後，grok 還在想，畫面就是一個空的
+/// `❯`——它連第一個字都還沒印。[`pane_awaits_input`] 只看得到那個空框，於是備援把回合關掉，
+/// 而 36 秒後真正的回覆（Stop hook）撞上一個已經關掉的回合。
+///
+/// 「有印過東西然後停住」跟「從來沒印過東西」是兩種情況：前者是它講完了在等你，14 秒足夠；
+/// 後者多半是 CLI 還沒開始渲染，那就多等一會兒。等待的代價只是備援晚一點接手（hook 正常的
+/// bot 根本走不到這條路）；等不夠的代價是把使用者的問題吃掉。
+const IDLE_POLLS_SILENT: u32 = 90;
+
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(700);
 const PROGRESS_MAX: Duration = Duration::from_secs(40 * 60);
 
@@ -3805,7 +3816,9 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
                 continue;
             }
             quiet += 1;
-            if quiet >= IDLE_POLLS {
+            // 這個回合到現在為止，畫面上出現過任何東西嗎（回覆、spinner、警示都算）。
+            let said_something = !(last.0.is_empty() && last.1.is_empty() && last.2.is_empty());
+            if quiet >= idle_threshold(said_something) {
                 tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
                 // Under the bot's lock like every other caller: `try_fallback` reads the pane
                 // and then claims the turn, and the Stop hook does the same under the lock. Run
@@ -3944,6 +3957,15 @@ fn pane_awaits_input(kind: &str, text: &str) -> bool {
         let mut chars = l.chars().filter(|c| !"│┃╭╮╰╯─━ \t".contains(*c));
         chars.next() == Some(marker) && chars.next().is_none()
     })
+}
+
+/// 空 composer 要靜止幾輪才算「它在等你輸入」。見 [`IDLE_POLLS_SILENT`]。
+fn idle_threshold(said_something: bool) -> u32 {
+    if said_something {
+        IDLE_POLLS
+    } else {
+        IDLE_POLLS_SILENT
+    }
 }
 
 /// Every form of "what we sent this turn" worth matching a pane echo against.
@@ -6388,6 +6410,16 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(last_prompt_echo_text("claude", TWO_TURNS).as_deref(), Some("echo 2"));
         assert_eq!(last_prompt_echo_text("claude", NOT_LOGGED_IN).as_deref(), Some("echo 1"));
         assert_eq!(last_prompt_echo_text("codex", "› 幫我看一下這個 bug\n  thinking…\n").as_deref(), Some("幫我看一下這個 bug"));
+    }
+
+    /// 2026-09-13（GROK／w168:pN）：送出 15 秒後畫面還是一個空的 `❯`——它連第一個字都還沒印，
+    /// 卻被當成「在等你輸入」，回合被備援關掉，真正的回覆 36 秒後才到。「印過東西然後停住」
+    /// 才是 14 秒就算數的那種；「從頭到尾沒印過東西」要多等。
+    #[test]
+    fn a_pane_that_never_rendered_anything_gets_a_longer_grace() {
+        assert_eq!(idle_threshold(true), IDLE_POLLS);
+        assert_eq!(idle_threshold(false), IDLE_POLLS_SILENT);
+        assert!(IDLE_POLLS_SILENT > IDLE_POLLS * 3, "要明顯長過那 14 秒，不然等於沒改");
     }
 
     /// 2026-09-12 使用者實機：長 prompt 被 TUI 折成兩行，只讀 `❯` 那一行的話使用者訊息斷在
