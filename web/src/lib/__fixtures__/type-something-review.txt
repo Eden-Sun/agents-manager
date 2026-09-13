@@ -1,0 +1,26 @@
+m4p@m4p tmp % claude
+ ▐▛███▛█   Claude Code v2.1.270
+▝▜██████▀  Opus 5 · Claude Max
+  ▝▝ ▝▝    /private/tmp
+
+
+❯ 請立刻用 AskUserQuestion 工具問我，然後停著等我在終端回答、不要自己選。第一題 header
+  設為「顏色」，question 問「喜歡哪種顏色？」，options 三個：紅、藍、綠（不要
+  multiSelect）。第二題 header 設為「備註」，question 問「還有什麼想說的？」，options
+  兩個：沒有、之後再說（不要 multiSelect）。問完就停。
+
+─────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ 顏色  ☒ 備註  ✔ Submit  →
+
+Review your answers
+
+ ● 喜歡哪種顏色？
+   → 測試中文 第二行
+ ● 還有什麼想說的？
+   → 第一行
+   第二行中文
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel

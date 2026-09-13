@@ -360,6 +360,34 @@
   cursor: default;
 }
 
+/* Type something. 展開的輸入：手機要能打中文、能貼多行，觸控 ≥44px。 */
+.bc-type {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 88px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.bc-type:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.bc-type-send {
+  margin-top: 6px;
+  min-height: 44px;
+}
+
 
 /* ---- 說明預設收起來（2026-09-12 第四輪） */
 

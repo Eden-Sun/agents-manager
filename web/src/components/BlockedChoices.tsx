@@ -18,6 +18,8 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { usePaneKeys } from '../hooks/usePaneKeys'
 import {
+  customAnswerShown,
+  isTypeSomething,
   keysToMove,
   keysToSelect,
   parseChoiceMenu,
@@ -26,6 +28,7 @@ import {
   type WalkTarget,
 } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
+import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -65,8 +68,11 @@ export function BlockedChoices({
 }) {
   const readTerminal = useStore((s) => s.readTerminal)
   const sendKeys = useStore((s) => s.sendKeys)
+  const sendText = useStore((s) => s.sendText)
   const [busy, setBusy] = useState<Busy>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [typeText, setTypeText] = useState('')
+  const [typeFor, setTypeFor] = useState<number | null>(null)
   /**
    * 「現在在第幾個分頁」**讀不出來**：終端上那是用顏色標的，快照只剩純文字。先猜第一個還沒
    * 答（☐）的那一格——claude 是照順序帶著人走的——之後每次自己切分頁就記下切到哪，UI 上也
@@ -200,6 +206,29 @@ export function BlockedChoices({
       return null
     })
 
+  /** 真機：游標停在 Type something. 上直接貼字，不必先 Enter；貼完 Enter 才答完並跳頁。 */
+  const sendTyped = (i: number) =>
+    run({ kind: 'choice', key: String(i) }, async () => {
+      const text = typeText.trim()
+      if (!text) return '請先打字，或改選別項。'
+      const landed = await walkTo(i)
+      if (!landed) return '游標走不到這一項（畫面可能換了），什麼都沒送出。'
+      const ok = await sendText(botId, text, false)
+      if (!ok) return '文字沒有送出去。'
+      let shown = false
+      for (let t = 0; t < TRIES; t++) {
+        await sleep(STEP)
+        const now = await read()
+        if (now?.choices[i] && customAnswerShown(now.choices[i], text)) {
+          shown = true
+          break
+        }
+      }
+      if (!shown) return '自訂文字沒有出現在畫面上，沒有按 Enter。'
+      await sendKeys(botId, ['enter'])
+      return null
+    })
+
   /**
    * 多選：切換勾選。**一次都不按 Enter**——Enter 在這種選單上可能是「交卷」，猜錯就替使用者
    * 答了一整題。先走到那一列，再試 space；沒反應才試數字鍵；兩個都沒反應就照實說，按鍵面板
@@ -218,7 +247,14 @@ export function BlockedChoices({
     })
 
   /** 沒有核取方塊的列（`Type something` / `Chat about this`）是動作，不是勾選。 */
-  const activate = (i: number) => (menu.multi && menu.choices[i].checked !== null ? toggle(i) : pickOne(i))
+  const activate = (i: number) => {
+    if (isTypeSomething(menu.choices[i])) {
+      setTypeFor(i)
+      setNote(null)
+      return
+    }
+    return menu.multi && menu.choices[i].checked !== null ? toggle(i) : pickOne(i)
+  }
 
   /** 送出這一題：走到清單裡那列 `Submit`，**確認游標真的停在它上面**，才按 Enter。 */
   const submit = () =>
@@ -351,12 +387,13 @@ export function BlockedChoices({
       >
         {menu.choices.map((c, i) => {
           const shown = open.includes(i)
+          const typeOpen = typeFor === i && isTypeSomething(c)
           return (
           <li key={`${c.number}-${c.title}`} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
             <button
               type="button"
               role={menu.multi ? undefined : 'radio'}
-              className={`bc-item${c.current ? ' bc-current' : ''}${c.checked ? ' bc-checked' : ''}${
+              className={`bc-item${c.current ? ' bc-current' : ''}${c.checked || typeOpen ? ' bc-checked' : ''}${
                 shown ? ' bc-open' : ''
               }`}
               disabled={Boolean(busy)}
@@ -406,6 +443,19 @@ export function BlockedChoices({
               >
                 <span aria-hidden="true">{shown ? '▾' : '▸'}</span>
               </button>
+              {typeOpen ? (
+                <>
+                  <TypeAnswerField value={typeText} onChange={setTypeText} disabled={Boolean(busy)} />
+                  <button
+                    type="button"
+                    className="bc-submit bc-type-send"
+                    disabled={Boolean(busy) || !typeText.trim()}
+                    onClick={() => void sendTyped(i)}
+                  >
+                    {busy?.kind === 'choice' && busy.key === String(i) ? '送出中…' : '用這段作答'}
+                  </button>
+                </>
+              ) : null}
           </li>
           )
         })}

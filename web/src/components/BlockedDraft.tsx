@@ -12,9 +12,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { commit, pageNeedsCommit, preload, wantOf, type Draft, type Io } from '../lib/choiceDraft'
 import { acquirePreload, restartPreload } from '../lib/draftPreload'
-import { parseChoiceMenu, type TuiChoiceMenu } from '../lib/tuiChoices'
+import { isTypeSomething, parseChoiceMenu, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import { BlockedChoices } from './BlockedChoices'
+import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
 
 type Phase = 'loading' | 'ready' | 'sending' | 'live'
@@ -30,9 +31,11 @@ export function BlockedDraft({
 }) {
   const readTerminal = useStore((s) => s.readTerminal)
   const sendKeys = useStore((s) => s.sendKeys)
+  const sendText = useStore((s) => s.sendText)
   const [phase, setPhase] = useState<Phase>('loading')
   const [draft, setDraft] = useState<Draft | null>(null)
   const [want, setWant] = useState<boolean[][]>([])
+  const [custom, setCustom] = useState<string[]>([])
   const [step, setStep] = useState({ done: 0, total: 0 })
   const [err, setErr] = useState<string | null>(null)
   const [open, setOpen] = useState<string[]>([])
@@ -56,6 +59,9 @@ export function BlockedDraft({
     },
     send: (keys) => sendKeys(botId, keys),
     wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+    paste: async (text) => {
+      await sendText(botId, text, false)
+    },
   }
   const ioRef = useRef(io)
   ioRef.current = io
@@ -98,6 +104,7 @@ export function BlockedDraft({
       }
       setDraft(d)
       setWant(d.pages.map((p) => wantOf(p)))
+      setCustom(d.pages.map(() => ''))
       setPhase('ready')
     })
     return () => {
@@ -141,7 +148,17 @@ export function BlockedDraft({
     setPhase('sending')
     setErr(null)
     setStep({ done: 0, total: 0 })
-    const res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }))
+    const typedEmpty = draft.pages.some((p, i) => {
+      const idx = (want[i] ?? []).findIndex(Boolean)
+      return idx >= 0 && isTypeSomething(p.choices[idx] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()
+    })
+    if (typedEmpty) {
+      setErr('選了「Type something.」的題請先打字，或改選別項。')
+      setPhase('ready')
+      return
+    }
+    const byTab = draft.pages.map((p) => custom[p.tab] ?? '')
+    const res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }), byTab)
     onAnswered?.()
     if (res.ok) return
     // 失敗就停在那裡，並且把「終端現在到底長什麼樣」重讀回來，不要假裝成功。
@@ -149,11 +166,13 @@ export function BlockedDraft({
     setPhase('ready')
   }
 
-  const answerOf = (page: number) =>
-    draft.pages[page].choices
-      .filter((_, j) => Boolean(want[page]?.[j]))
-      .map((c) => c.title)
-      .join('、')
+  const answerOf = (page: number) => {
+    const p = draft.pages[page]
+    const idx = (want[page] ?? []).findIndex(Boolean)
+    if (idx < 0) return ''
+    if (isTypeSomething(p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
+    return p.choices.filter((_, j) => Boolean(want[page]?.[j])).map((c) => c.title).join('、')
+  }
 
   const jump = (tab: number) =>
     listRef.current?.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.scrollIntoView({ block: 'nearest' })
@@ -212,6 +231,7 @@ export function BlockedDraft({
                   const shown = open.includes(key)
                   const action = page.multi && c.checked === null
                   const picked = Boolean(want[i]?.[j])
+                  const typeRow = isTypeSomething(c)
                   return (
                     <li key={key} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
                       <button
@@ -253,6 +273,20 @@ export function BlockedDraft({
                       >
                         <span aria-hidden="true">{shown ? '▾' : '▸'}</span>
                       </button>
+                      {typeRow && picked ? (
+                        <TypeAnswerField
+                          value={custom[page.tab] ?? ''}
+                          disabled={busy}
+                          onChange={(text) =>
+                            setCustom((v) => {
+                              const next = v.slice()
+                              while (next.length <= page.tab) next.push('')
+                              next[page.tab] = text
+                              return next
+                            })
+                          }
+                        />
+                      ) : null}
                     </li>
                   )
                 })}
