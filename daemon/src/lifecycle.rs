@@ -947,24 +947,27 @@ pub fn toml_basic_string(s: &str) -> String {
 pub fn child_agent_rules(agent_name: &str) -> String {
     format!(
         "你在 agents-manager（AG Man）裡的 agent 名稱是 `{agent_name}`。\
-需要開子任務或平行工作時，就用 herdr 開子 agent，並照這些規則：\n\
+以下是**硬規則，不是建議**：一律照做，不要自行判斷要不要遵守，也不要事後才補。違反就是錯誤。\n\
 \n\
-- **先找閒置的 child**：開新的子 agent 前先 `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent；\
-有就直接 `herdr agent prompt <名稱> \"…\"` 交下一份工作，不要每件事都開一顆新的（除非使用者指定要新開一個）。\n\
-- **命名**：`herdr agent start <名稱> …` 的名稱要以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
-PATH 上的 herdr 會自動幫你補，但自己寫對比較清楚。\n\
-- **開 pane**：`herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。不要省略目標——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
-- **帳號與 hook 會自動帶進子 pane**（`CLAUDE_CONFIG_DIR`、`AM_*`），不要自己覆蓋這些環境變數。\n\
-- **不要 `git stash` 或 `--autostash`**：同一個工作樹上可能有別的 agent 還沒提交的改動。\n\
-- 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示），做完請自己把它的 pane 收掉。\n\
+需要開子任務或平行工作時，一律用 herdr 開子 agent：\n\
 \n\
-瀏覽器的用法：\n\
+- **先找閒置的 child**：開新的子 agent 之前，**必須先跑** `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent。\
+有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\n\
+- **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
+PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
+- **開 pane**：一律 `herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。\
+**禁止省略目標**——省略時 herdr 會去拆使用者正在看的那個 pane。\n\
+- **環境變數**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止覆蓋**這些變數。\n\
+- **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
+- 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
 \n\
-- **一律用 ego lite**（`ego-browser` skill），不要開 Chrome、不要用其他 headless / 內建的瀏覽器工具。\n\
+瀏覽器（同樣是硬規則）：\n\
+\n\
+- **一律用 ego lite**（`ego-browser` skill）。**禁止**開 Chrome、**禁止**用其他 headless 或內建的瀏覽器工具。\n\
 - **一個 bot 最多一個分頁**（你和你的子 agent 各自算一個）：用 `openOrReuseTab` 在同一個分頁裡換頁，\
-不要為了每個網址開新分頁；同一個 task space 重複用（`useOrCreateTaskSpace(\"{agent_name}\")`）。\n\
-- **bot 結束就關分頁**：工作做完、或子 agent 收掉之前，先 `closeTab` / `completeTaskSpace(…, {{ keep: false }})`；\
-分頁留著不關，RAM 就是這樣被吃掉的。"
+**禁止**一個網址開一個新分頁；task space 一律重用（`useOrCreateTaskSpace(\"{agent_name}\")`）。\n\
+- **結束就關分頁**：工作做完、或收掉子 agent 之前，**必須先** `closeTab` / `completeTaskSpace(…, {{ keep: false }})`。\
+分頁留著不關，RAM 就是這樣被吃光的。"
     )
 }
 
@@ -972,7 +975,7 @@ PATH 上的 herdr 會自動幫你補，但自己寫對比較清楚。\n\
 /// 「只有使用者明確提到 Herdr 才用……不要只因為工作可能受益於背景終端或平行處理就用」, which is
 /// exactly backwards for a bot living inside AG Man: opening sub-agents is the point.
 const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr 的 pane、tab、workspace 與子 agent。\
-需要開子任務、平行工作、或把工作分給另一個 agent 時就用這個 skill，並照裡面的 AG Man 規則命名與開 pane。";
+需要開子任務、平行工作、或把工作分給另一個 agent 時，一律用這個 skill，並**必須**照裡面的 AG Man 規則命名與開 pane。";
 
 /// Turn `herdr --skill`'s output into the copy this bot should read: our own description in
 /// the front matter, and `child_agent_rules` as the first section of the body.
@@ -981,7 +984,7 @@ const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr �
 /// is the CLI's own authority on its commands and is passed through untouched, so a herdr
 /// upgrade brings its new text along.
 fn herdr_skill_doc(raw: &str, agent_name: &str) -> String {
-    let rules = format!("## AG Man 規則（先讀這段）\n\n{}\n", child_agent_rules(agent_name));
+    let rules = format!("## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n{}\n", child_agent_rules(agent_name));
     let lines: Vec<&str> = raw.lines().collect();
     // Front matter is `---` … `---`; without one, put ours in front and leave the rest alone.
     let end = if lines.first().map(|l| l.trim_end()) == Some("---") {
@@ -1354,6 +1357,17 @@ mod model_args_tests {
         assert!(rule.contains("ego lite"));
         assert!(rule.contains("useOrCreateTaskSpace(\"proj-abc123\")"));
         assert!(rule.contains("{ keep: false }"));
+    }
+
+    /// 2026-09-13 使用者要求：人設與注入提示一律用命令語氣。客氣的寫法（「請…」「不要…比較好」）
+    /// agent 會當成建議，實際上不照做；硬規則要寫成命令才會被執行。
+    #[test]
+    fn the_rules_read_as_orders_not_suggestions() {
+        let rule = super::child_agent_rules("proj-abc123");
+        assert!(rule.contains("硬規則，不是建議"), "the register is stated up front");
+        assert!(rule.contains("必須"));
+        assert!(rule.contains("禁止"));
+        assert!(!rule.contains("請"), "no polite softeners in an injected rule");
     }
 }
 
