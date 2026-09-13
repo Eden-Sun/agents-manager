@@ -13,13 +13,7 @@ export function humanBytes(n: number): string {
   return `${Math.max(1, Math.round(n / 1024))}K`
 }
 
-/**
- * 一台主機上 herdr 進程樹現在佔的常駐記憶體（SPEC §15）。
- *
- * **一格只講一台**。左上角固定是本機——那是「我這台現在多重」，隨時都想知道；遠端主機的
- * 數字只在你正在看那台上面的東西時才出現（bot / 群組的標題列），不然一個平常用不到
- * 的數字會一直佔著版面，而且把兩台加總出來的那個大數字也不好懂（8G 裡有 5G 是別台的）。
- */
+/** 一台主機上 herdr 進程樹的常駐記憶體（SPEC §15）。一格只講一台，不加總：跨機總和讀不懂。 */
 export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: string; onlyRemote?: boolean }) {
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
   const remote = host !== LOCAL_HOST
@@ -40,8 +34,7 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
 
   const tabs = tabsTotal(row.browsers)
   const tabsHot = tabs >= TABS_WARN
-  // 整機剩餘（2026-09-12 使用者）：「herdr 樹吃了 7G」回答不了「還能不能再開一顆 bot」，
-  // 那要看這台還剩什麼。daemon 讀不出整機量（null）就只顯示已用量，不要畫成「剩 0」。
+  // 整機剩餘（2026-09-12 使用者）：判斷還能不能開 bot 要看這個；null 就不畫，別畫成「剩 0」。
   const machine = row.machine
   const freePct = machine && machine.total_bytes > 0 ? (machine.available_bytes / machine.total_bytes) * 100 : null
   const low = freePct !== null && freePct < 15
@@ -60,13 +53,11 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
     '算的是「跑在 herdr pane 裡的一切」，不只是這裡管的 bot。',
     '每 15 秒更新一次。',
   ]
-  // 點得開：一個總數看不出「哪些是我自己開的、可以砍」，明細見 `MemPopover`（SPEC §15.2）。
   return (
     <MemPopover host={host}>
       <span className={`mem-badge${remote ? ' remote' : ''}${tabsHot ? ' tabs-hot' : ''}${low ? ' mem-low' : ''}`} title={`${tip.join('\n')}\n\n點一下看有哪些程序。`}>
         <span className="mem-k">{remote ? `@${host}` : 'RAM'}</span>
         <span className="mem-v">{humanBytes(row.total_bytes)}</span>
-        {/* 已用量旁邊直接寫「這台還剩多少」——要判斷還能不能再開一顆 bot，看的是這個數字。 */}
         {machine ? (
           <span className="mem-free" title={`這台機器還可用 ${humanBytes(machine.available_bytes)}，共 ${humanBytes(machine.total_bytes)}`}>
             剩 {humanBytes(machine.available_bytes)}

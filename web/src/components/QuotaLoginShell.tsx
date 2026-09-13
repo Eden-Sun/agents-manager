@@ -5,14 +5,8 @@ import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 
 /**
- * 額度 popover 裡「未登入」那列的**開 shell 登入**動作。
- *
- * 兩種情況會走到這裡：codex 的 TUI 沒有 `/login`；claude / grok 有，但這個身份現在沒有
- * 正在跑的 Bot、沒有畫面可以送。都改成在該主機開一個 shell（`store.openHostShell`）再把
- * `<cli> login` 打進去——使用者只要看著那個終端把瀏覽器那段做完就好。daemon 完全沒動。
- *
- * 登入完成後 CLI 的狀態不會自己回來，所以送出後補一顆「登入好了，重新偵測」，跟
- * `BotSettingsPanel` 的那顆同一個行為（`refreshTools(host)`、同一個 busy key）。
+ * 額度 popover「未登入」列的開 shell 登入：codex 沒有 `/login`，或 claude / grok 沒有在跑的 Bot。
+ * CLI 狀態不會自己回來，所以送出後補「重新偵測」（同 `BotSettingsPanel`）。
  */
 export function QuotaLoginShell({
   host,
@@ -24,7 +18,6 @@ export function QuotaLoginShell({
   /** 已經算好的主機顯示名（本機 / 主機名），免得這裡再抄一份規則。 */
   hostLabel: string
   kind: BotKind
-  /** 要打進 shell 的那一行（`cliLoginCommand`）。 */
   command: string
 }) {
   const [open, setOpen] = useState(false)
@@ -73,8 +66,6 @@ export function QuotaLoginShell({
         </button>
       ) : null}
 
-      {/* 按下去會換畫面（shell 佔掉主區），而且登入沒完成之前這個身份的 codex 還是不能用。
-          這兩件事先講，按鈕才誠實——同 BotSettingsPanel 那顆 `/login` 的作法。 */}
       <ConfirmDialog
         open={open}
         title={`開 shell 登入 ${kind}？`}

@@ -1,34 +1,6 @@
-/*
- * 桌機標題列（`.bot-head`）名字截太早、額度列前有一段空白沒被名字吃掉（2026-09-11 使用者
- * 截圖：5 個額度 kind 的 bot，名字被截成「c0-fa…」、pane id 截成「w1…」，★/⚙ 之後到額度列
- * 之間卻空著一截）。
- *
- * 量過（ego-browser，同一顆 bot、1500/1700/2000px）：`.bot-head .main-title` 靠
- * `flex-grow: 1` 從 spacer 搶回中間的空白沒錯，但 `align-items: flex-start` 讓底下兩行
- * （名字那行、kind/model/pane 那行）各自只取自己內容的寬度，不會跟著 `.main-title` 一起變
- * 寬——搶回來的寬度晾在 `.main-title` 自己的框裡，沒人用。名字與 pane id 這兩個元素本身又是
- * `flex: 0 1 auto`（只會縮，不會長），撐不滿那段空間。結果視窗 2000px 時量到量表前空白到
- * 304px，名字卻還卡在 `min-width: 4.5em` 的下限——空白跟截斷同時發生，是同一個 bug 的兩面。
- *
- * 改法：兩行改 `align-items: stretch` 跟著撐滿 `.main-title`；名字與 pane id 這兩個「有內容
- * 可以長」的元素改成 `flex: 1 1 auto`，真的有多餘寬度時先讓它們用掉。名字另外加
- * `max-width: 22em` 頂住——不然短名字配上空盪盪的標題列，會被撐成一整條大半是空白的按鈕。
- * `min-width: 4.5em`（名字）、`min-width: 0`（pane id）兩條下限本來就在 styles.css，這裡只
- * 覆寫 `flex`，不動那兩條——那是「分頁 > 名字」優先序底下今天才定案的地板，量表五格全開時
- * 名字量到就是會縮到那裡，不是這次要修的範圍。
- *
- * 量到（同一顆 bot「c0-fable-畫面部分」，5 個 kind，側欄開著）：
- *
- * | 視窗  | 改前名字寬 | 改後名字寬 | 改前「★/⚙ 到量表」空白 | 改後空白 |
- * | ---  | ---       | ---       | ---                    | ---      |
- * | 1500 | 63px（floor） | 63px（floor，沒變） | 20px（本來就是 `.main-head` 的 `gap`，不是浪費） | 20px |
- * | 1700 | 131px（自然寬度） | 173px | 42px | 20px |
- * | 2000 | 131px（同上） | 308px（撞到 max-width） | 304px | 20px |
- *
- * 1500px 那一格名字沒變：那個寬度下 `.main-title` 本身就被壓到跟內容一樣窄，沒有多餘寬度可以
- * 讓名字或 pane id 長回去——這條規則不介入，也不去搶量表的寬度（見下面 `.quota-hp`）。
- * 截圖：`docs/screenshots/desktop-head/`。
- */
+/* 桌機 `.bot-head` 名字截太早、量表前卻有空白（2026-09-11 使用者截圖）：`align-items: flex-start` 讓兩行只取內容寬，
+   `.main-title` 搶回的寬度沒人用。改 stretch，名字與 pane id 改 `flex: 1 1 auto`，名字 `max-width: 22em` 防撐成空按鈕。
+   styles.css 的 min-width 下限不動（分頁 > 名字的優先序）。量測與截圖：`docs/screenshots/desktop-head/`。 */
 .bot-head .main-title {
   align-items: stretch;
 }
@@ -44,27 +16,13 @@
   flex: 1 1 auto;
 }
 
-/* 額度格內距收一點（2026-09-11 使用者：桌機額度「全顯示」的決定不翻案，但格子裡的留白可以
-   收）。水平 `7px` → `5px`，五格一共省 20px，讓給標題列吃緊時的名字／pane id。垂直 `3px`
-   不動——那是量表上下兩排（5h/7d）跟外框之間的留白，跟這次要收的水平留白無關。 */
+/* 額度格水平內距收一點（2026-09-11 使用者：「全顯示」不翻案，但留白可收），讓給名字／pane id；垂直 3px 不動。 */
 .quota-hp {
   padding: 3px 5px;
 }
 
-/*
- * 額度列四周與格內的留白再收一次（2026-09-11 使用者截圖：「額度 box 左邊、周圍的邊界都留
- * 太大了」）。1500px 量到的浪費，由左到右：
- *
- * - `.bot-head > .spacer`：名字那叢已經 `flex-grow: 1`，spacer 永遠是 0px 寬，但它還是
- *   `.main-head` 裡的一個 flex item，白白吃掉一個 10px 的 gap。拿掉。
- * - `.quota-open` 左右 2px 內距 + 更新 chevron 左 8px／右 7px 的外距：chevron 到第一格之間
- *   17px。收成 0 / 4px / 5px。
- * - `.quota-head` 固定 3.2em（45px）：定案是「固定寬度＝最寬的標籤（codex）」，但 codex 量
- *   到只有 33px，多出來的 12px 每一格都在付。改 2.5em（35px），仍然放得下 codex，五格省 50px。
- * - `.quota-hp` 水平內距 5px → 4px，五格再省 10px。
- *
- * 合計約 80px，全部回到名字／pane id 身上（同檔上面那條 `flex: 1 1 auto`）。
- */
+/* 額度列留白再收（2026-09-11 使用者截圖：「額度 box 左邊、周圍的邊界都留太大了」），約 80px 還給名字：
+   spacer 永遠 0 寬卻吃一個 gap（拿掉）；`.quota-head` 3.2em → 2.5em（codex 實際 33px）；chevron 外距與格內距收小。 */
 .bot-head > .spacer {
   display: none;
 }
@@ -86,18 +44,13 @@
   padding: 3px 4px;
 }
 
-/* 上面收回來的寬度讓名字那叢長回 249px 之後，分頁「終端」被推出右緣（1500px 量到
-   `.main-head` scrollWidth 1023 > clientWidth 1004）。原因是 styles.css 給 `.bot-head .main-title`
-   的 `flex: 1 0.25 auto`：flex 規範規定 shrink 因子**總和小於 1** 時，只吸收那個比例的溢位
-   ——它是唯一會縮的項目，卻永遠只讓 25%，其餘 75% 直接溢出。改回 1；「mem badge 那些先讓」
-   的順序靠它們的 1000 維持，不需要把名字壓到 1 以下。 */
+/* 名字長回來後分頁被推出右緣（1500px scrollWidth 1023 > 1004）：flex shrink 總和 < 1 時只吸收該比例溢位，
+   `flex: 1 0.25 auto` 永遠只讓 25%。改回 1；mem badge 先讓靠它們的 1000。 */
 .bot-head .main-title {
   flex-shrink: 1;
 }
 
-/* 格與格之間的分隔線本來是「把左邊那條 1px 外框染色」，但外框有 7px 圓角，染出來的是一段
-   彎的「(」，看起來像多了一個框（2026-09-11 使用者截圖）。改成 `::before` 畫一條直的 1px
-   細線，上下各縮 6px；選取那格自己有整圈 accent 外框，線就不畫。 */
+/* 分隔線染外框左邊會因 7px 圓角變成「(」（2026-09-11 使用者截圖），改 `::before` 直線；選取格不畫。 */
 .quota-hp + .quota-hp {
   position: relative;
   border-left-color: transparent;
@@ -119,16 +72,14 @@
   display: none;
 }
 
-/* 手機的額度列格與格之間有 5px gap，不畫線（見 styles.css ≤640 那條）。 */
+/* 手機格間有 5px gap，不畫線（見 styles.css ≤640）。 */
 @media (width <= 640px) {
   .quota-hp + .quota-hp::before {
     display: none;
   }
 }
 
-/* 上面那條 `.quota-hp + .quota-hp { border-left-color: transparent }` 跟 `.quota-hp.focused`
-   同權重又排在後面，把選取那格的左邊框也吃掉了（2026-09-11 使用者截圖：藍框左邊缺一段）。
-   選取那格整圈都要是 accent。 */
+/* `.quota-hp + .quota-hp` 透明左框同權重且在後，吃掉選取格左框（2026-09-11 使用者截圖：藍框缺一段）。 */
 .quota-hp + .quota-hp.focused {
   border-left-color: var(--accent);
 }

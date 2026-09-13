@@ -9,12 +9,7 @@ import { labelStyle } from '../lib/labelStyle'
 import { GhLoginButton, isGhAuthError } from './GhAuth'
 import { onTabListKeyDown } from './tabKeys'
 
-/**
- * v4.0 GitHub issues (`GET /api/projects/:id/issues`, via `gh` on the daemon). A thin bar
- * under the header with one button (`owner/repo · N open`) that opens a panel: search
- * (300 ms debounce → `q`), open / closed toggle (remembered), the list, and per row
- * 「插入」(`#n title\nurl` at the composer caret) / 「插入完整內容」(body as a `> ` quote).
- */
+/** v4.0 GitHub issues (via `gh` on the daemon): search, open / closed toggle, insert into the composer. */
 
 const STATE_KEY = 'am.issueState'
 type IssueState = 'open' | 'closed'
@@ -47,9 +42,7 @@ function errorText(e: unknown): string {
 
 export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string; draftKey: DraftKey; inputRef: RefObject<HTMLTextAreaElement | null> }) {
   const github = useStore((s) => s.projects.find((p) => p.id === projectId)?.github ?? null)
-  // effect 的依賴用字串：`github` 是 `projects[]` 上的物件欄位，normalize 每次 `GET /api/state` 都重建，
-  // 拿它當 deps 等於任何 bot_changed／project_changed／resync 都重抓 submodules 與 issues（daemon 的
-  // 2 分鐘快取一冷就是一次 gh）。
+  // deps 用字串：`github` 物件每次 normalize 都重建，當 deps 會讓任何 state 事件都重抓（快取冷了就是一次 gh）。
   const githubUrl = github?.url ?? null
   const host = useStore((s) => s.projects.find((p) => p.id === projectId)?.host ?? 'local')
   const setDraft = useStore((s) => s.setDraft)
@@ -64,8 +57,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const [authError, setAuthError] = useState(false)
   const [openCount, setOpenCount] = useState<number | null>(null)
   const [fetching, setFetching] = useState<number | null>(null)
-  // 專案的 submodule（有自己 GitHub origin 的才能選）與目前選的那個：`''` = 專案本身。
-  // 兩者都掛在 projectId 上，換專案就自然歸零，不用在 effect 裡 setState。
+  // `''` = 專案本身；掛在 projectId 上，換專案自然歸零，不用在 effect 裡 setState。
   const [subsFor, setSubsFor] = useState<{ pid: string; subs: ProjectSubmodule[] }>({ pid: '', subs: [] })
   const [repoFor, setRepoFor] = useState<{ pid: string; repo: string }>({ pid: '', repo: '' })
   const submodules = subsFor.pid === projectId ? subsFor.subs : []
@@ -76,7 +68,6 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
   const seq = useRef(0)
   const tabsId = useId()
 
-  // Submodules once per project; the picker only appears when at least one is on GitHub.
   useEffect(() => {
     if (!githubUrl) return
     let alive = true
@@ -89,7 +80,6 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     }
   }, [projectId, githubUrl])
 
-  // Open-issue count for the button (once per project and repo).
   useEffect(() => {
     if (!githubUrl) return
     let alive = true
@@ -155,7 +145,6 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
 
   if (!github) return null
 
-  // 按鈕上顯示目前選的 repo（submodule 的 slug 或專案自己的）。
   const shown = submodules.find((s) => s.path === repo)?.github ?? github
 
   const pickState = (st: IssueState) => {
@@ -221,12 +210,10 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
           <circle cx="8" cy="8" r="2" fill="currentColor" />
         </svg>
         <span className="issues-repo">
-          {/* owner 在手機上是這一列最先讓位的東西：同一畫面沒有第二個 repo 可混淆。 */}
           <span className="issues-owner">{shown.owner}/</span>
           {shown.repo}
         </span>
-        {/* 數字還沒回來時本來會顯示 `Issues`——一個長得像計數的藥丸裡放一個單字，讀起來
-            像壞掉的數字。沒有數字就不畫這顆；repo 名與 tooltip 已經說明這是什麼。 */}
+        {/* 沒有數字就不畫：藥丸裡放單字讀起來像壞掉的數字。 */}
         {openCount === null ? null : (
           <span className="issues-count">{openCount >= 100 ? '100+' : openCount} open</span>
         )}
@@ -271,7 +258,6 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
               </button>
             </div>
           </div>
-          {/* 結果清單就是那兩個分頁的 tabpanel（同一塊，內容跟著 open / closed 換）。 */}
           <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${state}`}>
           {error ? (
             <div className="issues-status err" role="alert">

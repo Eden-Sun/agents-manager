@@ -1,23 +1,12 @@
 import { useStore } from '../store/store'
 
-/**
- * 「claude 有更新」按下去之後的那條進度／摘要（SPEC §6.9）。
- *
- * 觸發那顆按鈕原本也在這裡（側欄搜尋框上面一整條）。現在搬到額度列上的 chip
- * （`UpdateQuotaChip`）：那一列每個畫面都在，側欄收起來也看得到，而「有沒有新版」跟
- * 「還剩多少額度」本來就是同一個 kind 的全域狀態。
- *
- * 留在側欄的是**結果**：跑到第幾顆、哪幾顆失敗、哪幾顆被跳過與為什麼。這幾行放不進標題列的
- * chip 裡，而它們才是要動手的部分——chip 上只寫成功幾顆，名單看這裡。整條寬度、只在真的按過
- * 之後出現，收掉之後一個 pixel 都不佔。
- */
+/** 「claude 有更新」按下去之後側欄的進度／失敗與跳過名單（SPEC §6.9）；觸發鈕在 `UpdateQuotaChip`。 */
 export function UpdateAllBanner() {
   const batch = useStore((s) => s.restartBatch)
   if (!batch) return null
   return <BatchRow />
 }
 
-/** 送出之後的那一條：跑的時候是進度，跑完是摘要。 */
 function BatchRow() {
   const batch = useStore((s) => s.restartBatch)
   const clear = useStore((s) => s.clearRestartBatch)

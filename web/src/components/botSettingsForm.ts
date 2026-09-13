@@ -1,12 +1,8 @@
 import type { BotKind, PatchBotInput } from '../api/types'
 
 /**
- * Bot 設定面板的「要送什麼」純函式（docs/reviews/2026-09-12/web.md §1 BotSettingsPanel）。
- *
- * 表單值只有**使用者動過的欄位**（`touched`）才算數；沒動過的欄位一律跟著 `base`（store 裡
- * 那份 bot，套上這次開啟以來已存成功的值）。這樣面板開著時別處（標題列的快速選單、另一個
- * 分頁）改了同一顆 bot 的 model／effort，這裡不會顯示「已變更」、也不會在
- * 儲存時用開啟當下的舊值把剛套用的蓋回去。
+ * Bot 設定面板的純函式（docs/reviews/2026-09-12/web.md §1）。只有 `touched` 欄位算數，其餘跟 `base`：
+ * 別處改了同一顆 bot 時，儲存才不會用開啟當下的舊值蓋回去。
  */
 
 export type BotFormKey = 'name' | 'model' | 'effort' | 'fast' | 'persona' | 'identity'
@@ -43,10 +39,7 @@ export function effectiveForm(base: BotFormBase, form: BotFormValues, touched: R
   }
 }
 
-/**
- * 跟 base 不同的、且使用者動過的欄位才進 patch。`fast` 只有 codex 有；`identity` 三種 kind 都收
- * （codex／grok 的身份也是可指派的，之前只在 claude 才送，其他 kind 永遠指派不了）。
- */
+/** 動過且跟 base 不同的欄位才進 patch。`fast` 只有 codex；`identity` 三種 kind 都收。 */
 export function computeBotPatch(
   base: BotFormBase,
   form: BotFormValues,

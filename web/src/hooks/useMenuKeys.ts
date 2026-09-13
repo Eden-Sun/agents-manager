@@ -17,15 +17,8 @@ function focusStart(menu: HTMLElement) {
 }
 
 /**
- * `role="menu"` 彈窗的鍵盤行為（WAI-ARIA APG 的 menu button）：
- * - 打開時焦點進選單：落在已勾選的那一項（menuitemradio），沒有就第一項；
- * - ↑/↓（chip 橫排，所以 ←/→ 也算）在項目間移動、Home/End 跳頭尾，Enter/Space 交給按鈕自己的 click；
- * - Esc 與 Tab 都關掉選單、焦點回觸發鍵。
- * 關掉時焦點若還留在選單裡（被移掉之後落回 body），就還給觸發鍵——不然鍵盤使用者選完一項就迷路。
- *
- * 項目用 `tabIndex={-1}`：整個選單只靠方向鍵走，Tab 不會一格一格停在裡面。
- * 處理過的鍵會 `stopPropagation`：選單常是 portal，React 事件照樣會冒泡回觸發鍵所在的
- * 那一列（例如側欄 bot 列的 ↑/↓ 換 bot）。
+ * `role="menu"` 彈窗鍵盤行為（WAI-ARIA APG menu button）：方向鍵／Home/End 移動，Esc／Tab 關掉並還焦點給觸發鍵。
+ * 項目用 `tabIndex={-1}`。處理過的鍵要 `stopPropagation`：portal 的 React 事件仍會冒泡回觸發鍵那一列。
  */
 export function useMenuKeys(
   open: boolean,
@@ -40,8 +33,7 @@ export function useMenuKeys(
     const menu = menuRef.current
     const trigger = triggerRef.current
     if (!menu) return
-    // 等一格：浮動選單第一次 render 時還是 `visibility: hidden`（位置在 layout effect 裡才算好），
-    // 那時候 focus() 會落空。
+    // 等一格：第一次 render 還是 `visibility: hidden`，focus() 會落空。
     const raf = requestAnimationFrame(() => focusStart(menu))
     return () => {
       cancelAnimationFrame(raf)
@@ -50,8 +42,7 @@ export function useMenuKeys(
     }
   }, [open, menuRef, triggerRef])
 
-  // 選單開著時內容換掉了（例如模型清單第一次打開才載入，整排按鈕重建），原本有焦點的那一項
-  // 被移掉、焦點掉回 body——撿回來，不然方向鍵就沒反應了。
+  // 內容重建（如模型清單載入完）焦點掉回 body 時撿回來，否則方向鍵沒反應。
   useEffect(() => {
     const menu = menuRef.current
     if (!open || !menu) return
@@ -69,7 +60,7 @@ export function useMenuKeys(
       return
     }
     if (e.key === 'Tab') {
-      // 選單多半是掛在 body 尾端的 portal，放 Tab 照 DOM 順序走會掉到頁尾；關掉、焦點回觸發鍵。
+      // portal 在 body 尾端，放 Tab 會掉到頁尾。
       e.preventDefault()
       e.stopPropagation()
       close()

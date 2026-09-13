@@ -3,25 +3,16 @@ import type { ReactNode } from 'react'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { MoreIcon } from './Icons'
 
-/**
- * 標題列的 `⋯`：收「不常按、又不該常駐在標題列上」的動作。
- *
- * 兩顆紅框按鈕肩並肩時，紅色會變成標題列的常態色，也很容易多按一格就把東西整筆刪掉。
- * UI-DECISIONS 已經定了「一般畫面最多一個常駐危險操作」，所以刪除收進來。
- *
- * 側欄的 project 標題列（新增 Bot 的 `＋` 旁邊就是刪除專案的 `✕`）用的是這一顆。
- */
+/** 標題列／側欄 project 列的 `⋯`：刪除收進來，照 UI-DECISIONS「一般畫面最多一個常駐危險操作」。 */
 export function HeadMoreMenu({ children, label }: { children: ReactNode; label: string }) {
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const btn = useRef<HTMLButtonElement>(null)
-  // role="menu" 的鍵盤行為（Tools／ModelPicker 用的同一顆）：開啟時焦點進選單、↑↓/Home/End 走項目、
-  // Esc／Tab 關掉並把焦點還給 ⋯。以前只有 role 沒有行為，Tab 直接走出去。
+  // role="menu" 的鍵盤行為（同 Tools／ModelPicker）。
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
 
-  // 選單是錨在按鈕上的 absolute 方塊，CSS 只能選一邊展開：`⋯` 在最右邊時，整個選單會滑出右緣、
-  // 裡面的項目點不到（390px 實測 right=510）。打開當下量一次，超出視窗就推回來——按鈕這次落在哪，CSS 不知道。
+  // CSS 只能選一邊展開，`⋯` 在最右時選單滑出右緣（390px 實測 right=510）；打開時量一次推回來。
   useLayoutEffect(() => {
     const el = pop.current
     if (!open || !el) return
@@ -63,7 +54,6 @@ export function HeadMoreMenu({ children, label }: { children: ReactNode; label: 
         <MoreIcon />
       </button>
       {open ? (
-        // 點到裡面任何一顆按鈕就關起來：每一項都是「開確認框」或「離開」，沒有留著的理由。
         <div ref={pop} className="head-menu-pop" role="menu" aria-label={label} onClick={() => setOpen(false)} onKeyDown={menuKeys}>
           {children}
         </div>

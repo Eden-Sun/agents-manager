@@ -5,12 +5,8 @@ import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
 
 /**
- * 專案 checkout 的 git 一眼看（2026-09-08）：`+N −M`（工作樹的行數差）、`↑a ↓b`（跟 upstream
- * 的 commit 差）、以及三顆快捷鍵：commit（`git add -A && git commit`）、push、pull
- * （`--rebase --no-autostash`）。放在 chat 標題列的 repo chip 旁邊，不是 git 客戶端——只是
- * 「agent 剛改完，我要立刻推出去」這一個手勢。
- *
- * 不是 git repo（或專案已不在 daemon 上）整條消失。每 15 秒重讀一次，做完動作立刻重讀。
+ * 專案 checkout 的 git 一眼看（2026-09-08）：行數差、upstream 差，與 commit / push / pull 快捷鍵。
+ * 不是 git client，只服務「agent 剛改完，立刻推出去」這個手勢。
  */
 const POLL_MS = 15_000
 
@@ -99,8 +95,7 @@ export function GitBar({ projectId }: { projectId: string }) {
           {sum.behind ? <span title={`比 upstream 少 ${sum.behind} 個 commit`}>↓{sum.behind}</span> : null}
         </span>
       ) : null}
-      {/* 桌面有游標時 commit / push / pull 收進 hover 才彈出的小面板（2026-09-12 使用者）；
-          正在打 commit 訊息時 `.open` 讓它常駐。觸控裝置與手機照舊攤開。 */}
+      {/* 桌面 hover 才彈出（2026-09-12 使用者）；打 commit 訊息時 `.open` 常駐。 */}
       <span className={`git-actions${composing ? ' open' : ''}`}>
       {composing ? (
         <form

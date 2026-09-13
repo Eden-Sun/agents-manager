@@ -122,8 +122,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .foreign_keys(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .busy_timeout(std::time::Duration::from_secs(10));
-    // Migrations run on a throw-away single-connection pool, so no pooled connection keeps a
-    // table layout from before a migration changed it.
+    // Throw-away single-connection pool: no pooled connection keeps a pre-migration table layout.
     {
         let mpool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -141,12 +140,8 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
-/// Apply the schema (`CREATE … IF NOT EXISTS`, so an existing file is left as it is), then the
-/// supervisor and mission stores' own migrations. Runs on one connection.
-///
-/// Only the current schema is supported: a database from before these columns existed is not
-/// upgraded. Tables of removed features (`teams`, `team_*`) and their columns may still exist
-/// in an old file; nothing reads them.
+/// Only the current schema is supported: older databases are not upgraded. Leftover tables of
+/// removed features (`teams`, `team_*`) may exist; nothing reads them.
 async fn migrate(pool: &SqlitePool) -> Result<()> {
     for stmt in SCHEMA.split(";\n") {
         let s = stmt.trim();
@@ -155,9 +150,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(pool).await.with_context(|| format!("apply schema: {s}"))?;
     }
-    // AGM 總管的持久資料（supervisor/store.rs）。
     crate::supervisor::store::migrate(pool).await?;
-    // 群組任務（mission/store.rs）。
     crate::mission::store::migrate(pool).await?;
     Ok(())
 }
@@ -188,12 +181,12 @@ pub struct Bot {
     pub project_id: String,
     pub name: String,
     pub kind: String,
-    /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; NULL = the CLI's own default.
+    /// NULL = the CLI's own default.
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// v4.0: codex Fast service tier (`-c service_tier="priority"`).
+    /// codex Fast service tier (`-c service_tier="priority"`).
     pub fast: i64,
-    /// v4.0: text appended to the agent's system prompt.
+    /// Appended to the agent's system prompt.
     pub persona: Option<String>,
     pub args_json: String,
     pub autostart: i64,
@@ -203,13 +196,13 @@ pub struct Bot {
     pub env_json: String,
     /// `user` (from config.toml) or `child` (an agent another bot spawned; never in the TOML).
     pub managed_by: String,
-    /// Working directory for the pane. NULL = the project's path.
+    /// NULL = the project's path.
     pub cwd: Option<String>,
-    /// Herdr session override. `Some("default")` identifies an imported user-session bot.
+    /// `Some("default")` identifies an imported user-session bot.
     pub herdr_session: Option<String>,
-    /// The bot whose agent spawned this one (`<parent agent name>-<suffix>`); None = top-level.
+    /// None = top-level.
     pub parent_bot_id: Option<String>,
-    /// 使用者釘選的「主要執行的 bot」（見 SCHEMA 的欄位註解）。0 = 一般。
+    /// 使用者釘選的「主要執行的 bot」（見 SCHEMA 欄位註解）。
     pub is_primary: i64,
     #[serde(skip_serializing)]
     pub hook_token: String,
@@ -234,43 +227,29 @@ pub struct Run {
     pub agent_status: String,
     pub workspace_id: Option<String>,
     pub pane_id: Option<String>,
-    /// The herdr tab the run's pane sits in — from `tab.create` at start, from `pane.move`
-    /// when the user gives a running bot its own tab, or refreshed from herdr on reconcile.
-    /// `None` on runs from before the column existed, which were split into a shared tab and
-    /// have not been reconciled since. Tearing the run down never closes a tab on the
-    /// strength of this field alone: the tab is only closed if it is left with no panes.
+    /// Tearing the run down never closes a tab on this field alone: only if it is left with no panes.
     pub tab_id: Option<String>,
     pub adopted: i64,
-    /// The herdr agent name this run was started (or adopted) under. `None` on rows from
-    /// before the column existed; `run_target` falls back to the bot's bare name then.
+    /// Name the run was started under, so a project-label rename keeps working; `None` → bot name.
     pub agent_name: Option<String>,
-    /// Effective Herdr session for this run. NULL on older rows means the project's session.
+    /// NULL on older rows = the project's session.
     pub herdr_session: Option<String>,
-    /// The agent's self-chosen label — herdr's `terminal_title_stripped`, which for Claude
-    /// Code is its running summary of the current task. NULL until one is seen.
+    /// herdr's `terminal_title_stripped` (Claude Code's running task summary).
     pub agent_title: Option<String>,
-    /// What the pane's status bar reads right now — the user's own claude statusLine
-    /// command's output, relayed by `statusline_cmd`. NULL for kinds/bots without one.
+    /// The user's own claude statusLine output, relayed by `statusline_cmd`.
     pub status_line: Option<String>,
-    /// The statusLine payload verbatim (minus the transcript path), for the richer web
-    /// status bar: context window, full model name, cost, rate limits.
+    /// statusLine payload verbatim (minus transcript path).
     pub status_json: Option<String>,
-    /// The pending-update notice claude prints on its bottom line once it has downloaded a
-    /// new version ("Update installed · Restart to update"). NULL when there is none on
-    /// screen; [`crate::update_watch`] keeps it in step.
+    /// Kept in step by [`crate::update_watch`].
     pub update_notice: Option<String>,
-    /// SPEC §4.4a: the model this run's CLI is actually on — read back from the argv it was
-    /// started with (the inverse of `lifecycle::model_args`), and rewritten when a slash
-    /// command applies a change live. `None` on an adopted run, whose argv we never built,
-    /// and on rows written before the column existed: unknown, which the UI shows as nothing.
+    /// SPEC §4.4a: parsed back from the start argv, updated by live slash commands. `None` on
+    /// adopted runs (argv unknown).
     pub runtime_model: Option<String>,
-    /// The reasoning effort this run is actually on. See [`Run::runtime_model`].
+    /// See [`Run::runtime_model`].
     pub runtime_effort: Option<String>,
-    /// Whether this run is actually on the fast/priority tier. See [`Run::runtime_model`].
+    /// See [`Run::runtime_model`].
     pub runtime_fast: Option<i64>,
-    /// The `API Error: …` line the pane showed when this run's last turn ended — the turn was
-    /// cut short by the API, not finished. NULL when the last turn ended cleanly; cleared the
-    /// moment the next turn opens ([`crate::turn_error`]).
+    /// `API Error: …` that cut the last turn short; cleared when the next turn opens ([`crate::turn_error`]).
     pub turn_error: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
@@ -278,8 +257,7 @@ pub struct Run {
     pub last_read_tail_hash: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
-    /// The native session id a reopen asked the CLI to continue. It is consumed by the first
-    /// identity hook (Claude) or first completed turn hook (Codex/Grok).
+    /// Consumed by the first identity hook (Claude) or first completed turn hook (Codex/Grok).
     pub resume_session_id: Option<String>,
 }
 
@@ -311,18 +289,16 @@ pub struct Message {
     pub source: String,
     pub incomplete: i64,
     pub terminal_snapshot: Option<String>,
-    /// SPEC §13: set on every message produced by one `POST /projects/:id/chat` send
-    /// (the per-bot user copies and the "skipped" system notes); NULL otherwise.
+    /// SPEC §13: shared by every message of one `POST /projects/:id/chat` send.
     pub group_id: Option<String>,
-    /// JSON array of the images sent with this message (`attach.rs`); NULL when there are none.
+    /// See `attach.rs`.
     pub attachments_json: Option<String>,
-    /// The bot (or `daemon`) that relayed this message; NULL = the user typed it.
+    /// NULL = the user typed it.
     pub relay_from: Option<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
 }
 
-/// A message row joined with the bot it belongs to — the unit of the project group timeline.
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
 pub struct GroupMessage {
     #[sqlx(flatten)]
@@ -367,14 +343,11 @@ pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
-/// The most recent native session from an ended run.
 pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
     Ok(last_native_session(pool, bot_id).await?.map(|(id, _)| id))
 }
 
-/// The last ended run's native session id and, when the provider's hook reported one, the
-/// transcript file it lives in — so a restart can tell a session it can resume from one that
-/// was never written.
+/// Transcript path included so a restart can tell a resumable session from one never written.
 pub async fn last_native_session(pool: &SqlitePool, bot_id: &str) -> Result<Option<(String, Option<String>)>> {
     Ok(sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT native_session_id, transcript_path FROM runs
@@ -411,7 +384,6 @@ pub async fn conversation_id(pool: &SqlitePool, bot_id: &str) -> Result<String> 
         .await?)
 }
 
-/// Bots on one host (join through their project), in creation order.
 pub async fn live_bots_on_host(pool: &SqlitePool, host: &str) -> Result<Vec<Bot>> {
     Ok(sqlx::query_as::<_, Bot>(
         "SELECT b.* FROM bots b JOIN projects p ON p.id = b.project_id
@@ -422,7 +394,6 @@ pub async fn live_bots_on_host(pool: &SqlitePool, host: &str) -> Result<Vec<Bot>
     .await?)
 }
 
-/// The host a bot lives on. Missing rows fall back to `local`.
 pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT p.host FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
@@ -433,11 +404,8 @@ pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
     .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string()))
 }
 
-/// Every identity that has a live bot run on `host` right now.
-///
-/// A bot chatting under `cc1` on that host is proof the account *is* logged in there, whatever
-/// the last `claude auth status` answered — see [`crate::quota_claude`]. Unlike the in-memory
-/// statusLine trace this survives a daemon restart, because it is just the run table.
+/// A live run under an identity proves that account is logged in on `host`, whatever
+/// `claude auth status` said ([`crate::quota_claude`]); survives a daemon restart.
 pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BTreeSet<String>> {
     let rows = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT b.identity FROM runs r
@@ -453,8 +421,7 @@ pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BT
     Ok(rows.into_iter().collect())
 }
 
-/// Active runs sitting on `pane_id` in a host/session. `fallback_session` is used for old rows
-/// whose effective session was not stored yet.
+/// `fallback_session` covers old rows without a stored session.
 pub async fn active_runs_for_pane(
     pool: &SqlitePool,
     host: &str,
@@ -475,7 +442,7 @@ pub async fn active_runs_for_pane(
     .await?)
 }
 
-/// The herdr agent name a *new* run of this bot should use: `<project label slug>-<bot>`.
+/// For a *new* run; existing runs use [`run_target`].
 pub async fn agent_name_for_bot(pool: &SqlitePool, bot: &Bot) -> Result<String> {
     let label: Option<String> = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?")
         .bind(&bot.project_id)
@@ -484,14 +451,11 @@ pub async fn agent_name_for_bot(pool: &SqlitePool, bot: &Bot) -> Result<String> 
     Ok(crate::config::agent_name(label.as_deref().unwrap_or(""), &bot.id))
 }
 
-/// The herdr target to address an *existing* run with. Runs record the name they were
-/// started under, so a rename of the project label keeps working.
 pub fn run_target(run: &Run, bot: &Bot) -> String {
     run.agent_name.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| bot.name.clone())
 }
 
-/// The user messages already stored on a turn — used to keep the Stop hook from re-adding a
-/// prompt that was already scraped off the pane's prompt echo.
+/// Keeps the Stop hook from re-adding a prompt already scraped off the pane's echo.
 pub async fn turn_user_messages(pool: &SqlitePool, turn_id: &str) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at")
         .bind(turn_id)
@@ -499,9 +463,8 @@ pub async fn turn_user_messages(pool: &SqlitePool, turn_id: &str) -> Result<Vec<
         .await?)
 }
 
-/// The same rows, each with its `attachments_json`. The timeline stores what the user
-/// *typed*; what the agent was actually handed also carries the attachment paths
-/// (`attach::deliver_text`), and only that fuller text matches the echo on the pane.
+/// Only the text with attachment paths (`attach::deliver_text`) matches the pane echo,
+/// not what the user typed.
 pub async fn turn_user_messages_with_attachments(
     pool: &SqlitePool,
     turn_id: &str,
@@ -521,7 +484,6 @@ pub async fn in_flight_turn(pool: &SqlitePool, run_id: &str) -> Result<Option<Tu
         .await?)
 }
 
-/// The one daemon-owned prompt waiting behind the current turn, if any.
 pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Option<Turn>> {
     Ok(sqlx::query_as::<_, Turn>(
         "SELECT * FROM turns WHERE conversation_id = ? AND status = 'queued' ORDER BY created_at, id LIMIT 1",
@@ -531,7 +493,6 @@ pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Opt
     .await?)
 }
 
-/// Same lookup by bot id, used by the state snapshot without making callers know conversation ids.
 pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Turn>> {
     Ok(sqlx::query_as::<_, Turn>(
         "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
@@ -559,7 +520,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Running `open` twice must be a no-op the second time (every migration is guarded).
     #[tokio::test]
     async fn open_is_idempotent() {
         let dir = tmp_dir();
@@ -611,8 +571,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Reopen only considers a native session from an ended run. An active run, and an ended
-    /// run whose provider never reported an id, must not steal the continuation slot.
+    /// Active runs and ended runs without an id must not steal the continuation slot.
     #[tokio::test]
     async fn last_native_session_id_uses_the_latest_ended_run() {
         let dir = tmp_dir();
@@ -656,9 +615,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The daemon-restart-proof half of the claude quota gate: an identity with a live run on a
-    /// host counts as logged in there, whatever the last `auth status` said (see
-    /// [`crate::quota_claude::should_probe_identity`]).
+    /// See [`crate::quota_claude::should_probe_identity`].
     #[tokio::test]
     async fn live_identities_are_per_host_and_only_count_active_runs() {
         let dir = tmp_dir();
@@ -671,10 +628,10 @@ mod tests {
         // (bot, project, identity, run state)
         let bots = [
             ("b1", "pm", "cc1", "running"),
-            ("b2", "pm", "cc2", "stopped"),   // ended — proves nothing
-            ("b3", "pl", "cc3", "running"),   // another host
-            ("b4", "pm", "", "running"),      // no identity (default account)
-            ("b5", "pm", "cc4", "starting"),  // still counts
+            ("b2", "pm", "cc2", "stopped"),
+            ("b3", "pl", "cc3", "running"),
+            ("b4", "pm", "", "running"),
+            ("b5", "pm", "cc4", "starting"),
         ];
         for (b, p, ident, state) in bots {
             sqlx::query(
@@ -690,7 +647,6 @@ mod tests {
         assert_eq!(live, ["cc1".to_string(), "cc4".to_string()].into_iter().collect());
         assert_eq!(live_identities_on_host(&pool, "local").await.unwrap(), ["cc3".to_string()].into_iter().collect());
 
-        // A deleted bot stops vouching for its account.
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b1'").bind(now()).execute(&pool).await.unwrap();
         assert_eq!(live_identities_on_host(&pool, "m4p").await.unwrap(), ["cc4".to_string()].into_iter().collect());
 

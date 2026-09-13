@@ -2,21 +2,13 @@ import type { KeyboardEvent } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
 
-/**
- * v4.0: a bot's kind, shown as a glyph or as the word (global `kindDisplay`, persisted in
- * localStorage). The `.kind-tag.<kind>` class is what the acceptance scripts key on, so it
- * stays the same in both modes; the word is always in `title` / `aria-label`.
- */
+/** v4.0: a bot's kind as glyph or word. Acceptance scripts key on `.kind-tag.<kind>`, so it stays the same in both modes. */
 
 export const KIND_LABEL: Record<BotKind, string> = { claude: 'claude', codex: 'codex', grok: 'grok' }
 
 /**
- * 沒有人傳 `title` 時的說明（2026-09-12 使用者：「header 裡 codex 的 kind 文字說明可以優化」）。
- *
- * 圖示模式下這一格只剩一個字形，tooltip 卻只寫 `codex`——那是把看得見的東西再講一次。OpenAI
- * 的標誌尤其不直覺：看到它的人問的是「這顆 bot 在跑哪個 CLI、哪家的模型」，所以說明寫成
- * 「這是什麼」而不是重複 kind 名。`aria-label` 維持只有 kind 名：驗收腳本與側欄的朗讀都靠它，
- * 讀出一整句反而吵。
+ * 預設 tooltip 寫「這是什麼」而非重複 kind 名（2026-09-12 使用者：「header 裡 codex 的 kind 文字說明可以優化」）。
+ * `aria-label` 維持只有 kind 名：驗收腳本與朗讀靠它。
  */
 export const KIND_DESC: Record<BotKind, string> = {
   claude: 'claude · Anthropic 的 CLI（Claude 模型）',
@@ -73,8 +65,7 @@ export function KindTag({ kind, title, className }: { kind: BotKind; title?: str
 export function KindDisplayToggle() {
   const mode = useStore((s) => s.kindDisplay)
   const setKindDisplay = useStore((s) => s.setKindDisplay)
-  // radio 只用 aria-checked（aria-selected 是 tab / option 的）。鍵盤照 radio 的規矩：
-  // 整組一個 Tab 停點，←/→ 直接換選項——兩個選項、換了就生效，不用再按 Enter。
+  // radio 只用 aria-checked（aria-selected 是 tab / option 的）；整組一個 Tab 停點，←/→ 換選項。
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return
     e.preventDefault()

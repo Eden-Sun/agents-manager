@@ -4,17 +4,8 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { driftLine, runtimeDrift } from '../lib/runtimeDrift'
 
 /**
- * 「設定改了，但這顆 bot 還跑在舊的值上」——標出來，並且點得下去（SPEC §4.4a）。
- *
- * codex 的模型／強度／fast 只有**啟動時**吃得到（`-m`、`-c model_reasoning_effort=…`、
- * `-c service_tier="priority"`）：它的 TUI 沒有 `/model`、`/effort` 可以讓 daemon 當場送進去，
- * 所以 `PATCH /api/bots/{id}` 只會回 `needs_restart: true`。在這顆 badge 之前，那件事只存在
- * 於一則會自己消失的 toast 裡，之後 UI 就一路顯示新設定——使用者在 AG Man 上看到
- * `gpt-5.6-luna-High`，終端裡 codex 自己印的卻是 `gpt-5.6-luna xhigh fast`。
- *
- * daemon 現在把 run 真正啟動時的 argv 讀回來（`run.runtime_*`），這裡拿它跟設定比，不一致
- * 就在標題列上留一顆常駐的 chip，寫明哪個欄位、實際在跑什麼、設定成什麼；按下去就是重啟
- * （既有的 `POST /api/bots/{id}/restart`），忙的時候先問一句。
+ * 「設定改了，但 bot 還跑在舊值上」的常駐 chip，點下去重啟（SPEC §4.4a）。
+ * codex 的模型／強度／fast 只在啟動時吃得到，比對的是 `run.runtime_*` 與設定。
  */
 export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)

@@ -1,12 +1,6 @@
 /**
- * 標題列上的「把這顆設成主要執行的 bot」開關。
- *
- * 「主要」是使用者自己的分類，不是 daemon 算得出來的東西：一堆 bot 裡真正在推進工作的
- * 通常只有兩三顆，其餘是備援、實驗、或某次任務留下來的。釘起來之後它們會固定排在標題列
- * 下面那一列的最前面（`UnreadChip`），不管有沒有未讀、在不在跑。
- *
- * 存在 daemon（`PATCH /api/bots/:id {primary}`）而不是瀏覽器：使用者在手機與電腦上追的
- * 是同一組 bot。這個欄位不影響啟動參數，所以 `needs_restart` 永遠是 false。
+ * 「主要 bot」開關：使用者自己的分類，釘起來後固定排在 `UnreadChip` 最前面。
+ * 存 daemon 而非瀏覽器，手機與電腦追同一組；不影響啟動參數，`needs_restart` 恆為 false。
  */
 import { useStore } from '../store/store'
 

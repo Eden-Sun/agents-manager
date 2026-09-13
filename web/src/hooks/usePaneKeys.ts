@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useStore } from '../store/store'
 
-/**
- * 送鍵按鈕列，blocked 的小面板與全畫面視窗共用（兩邊的答案必須一樣，不然同一個問題在兩個
- * 地方按出不同結果）。鍵名原樣送 herdr `agent.send_keys`，daemon 不翻譯。
- */
+/** blocked 小面板與全畫面視窗共用，兩邊答案才一致。鍵名原樣送 herdr，daemon 不翻譯。 */
 export const KEYPAD: { label: string; keys: string[]; title: string }[] = [
   { label: 'Enter', keys: ['enter'], title: '送出 Enter' },
   { label: 'Esc', keys: ['esc'], title: '送出 Esc' },
@@ -16,16 +13,9 @@ export const KEYPAD: { label: string; keys: string[]; title: string }[] = [
 ]
 
 /**
- * `KeyboardEvent` → herdr `agent.send_keys` 的鍵名，`null` = 這顆鍵留給瀏覽器。
- *
- * 鍵名是實測 herdr 0.8.2 的結果（`pane.send_keys` 對不認得的鍵回 `invalid_key`）：
- * - 具名鍵：`enter` / `esc` / `tab` / `backspace` / `up` / `down` / `left` / `right` / `f1`…`f12`
- * - 任何單一字元原樣送（含大寫、標點、`\`、中文），**唯獨空白要寫成 `space`**
- * - 修飾詞可疊：`ctrl+c`、`shift+tab`、`alt+enter`、`ctrl+shift+c` 都收
- * - `home` / `end` / `pageup` / `pagedown` / `delete` / `insert` **不支援** → 回 `null`，
- *   讓它們在瀏覽器裡做原本的事（捲動這個終端畫面），而不是送出去被拒絕。
- *
- * Cmd（`metaKey`）一律不攔：使用者要能用 ⌘C 複製終端上的錯誤訊息、⌘R 重新整理。
+ * `KeyboardEvent` → herdr 鍵名，`null` 留給瀏覽器。herdr 0.8.2 實測：單字元原樣送但空白要寫
+ * `space`；修飾詞可疊；home/end/pageup/pagedown/delete/insert 不支援（回 `invalid_key`）。
+ * ⌘ 不攔：要能 ⌘C 複製、⌘R 重整。
  */
 export function herdrKeyFromEvent(e: KeyboardEvent): string | null {
   if (e.metaKey || e.isComposing) return null
@@ -46,32 +36,25 @@ export function herdrKeyFromEvent(e: KeyboardEvent): string | null {
   const mods = `${e.ctrlKey ? 'ctrl+' : ''}${e.altKey ? 'alt+' : ''}`
   if (base) return `${mods}${e.shiftKey ? 'shift+' : ''}${base}`
 
-  // 單一字元。大小寫已經寫在字元本身（`A` 就是 shift+a），再加 `shift+` 反而是另一顆鍵。
+  // 大小寫已在字元本身，再加 `shift+` 反而是另一顆鍵。
   if (Array.from(e.key).length === 1) return `${mods}${e.key === ' ' ? 'space' : e.key}`
   return null
 }
 
-/**
- * 把按鍵送進 bot 的 pane，**依序而且合批**。
- *
- * 一顆鍵一個 `POST /keys` 的話，打字快一點就會有好幾個請求同時在路上，HTTP 不保證誰先到，
- * 送出去的字就會亂序。這裡排成一條佇列：正在送的時候按下的鍵先累積起來，下一輪一次送出
- * （`agent.send_keys` 本來就吃陣列，順序由它保證），順便把請求數壓下來。
- */
+/** 依序且合批送鍵：一鍵一個 POST 會同時在路上而亂序，送的期間累積、下一輪一次送。 */
 export function usePaneKeys(botId: string, onSent?: () => void) {
   const sendKeys = useStore((s) => s.sendKeys)
   const pending = useRef<string[]>([])
   const sending = useRef(false)
   const onSentRef = useRef(onSent)
-  // 迴圈每一輪都讀最新的 botId：`pending`／`sending` 兩個 ref 跨 botId 共用，換 bot 時上一顆的
-  // `while` 可能還在等一次 POST /keys 回來，接著按的鍵不能用舊閉包的 botId 送到上一顆 bot 的 pane。
+  // ref 跨 botId 共用：換 bot 時舊 while 可能還在跑，每輪讀最新 botId，免得送進上一顆的 pane。
   const botIdRef = useRef(botId)
   useEffect(() => {
     onSentRef.current = onSent
     botIdRef.current = botId
   })
 
-  // 換 bot 時把還沒送出去的鍵丟掉：那些是給上一個 bot 的答案。
+  // 換 bot 丟掉未送的鍵：那是給上一個 bot 的答案。
   useEffect(() => {
     return () => {
       pending.current = []

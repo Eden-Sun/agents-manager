@@ -5,12 +5,8 @@ import type { MemProcess, TerminalSnapshot } from '../api/types'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 
 /**
- * RAM 清單裡點「自己開的 pane wM:pB」之後開的視窗：那個 pane 現在畫面上的字。
- *
- * 開 modal 而不是在列底下攤開：清單只有 560px 寬，攤開的那塊得把終端 185 欄的畫面塞進去，
- * 每行都折、看不出是哪個 claude——而「認出它」正是這個功能存在的理由。modal 跟 `BlockedModal`
- * 一樣寬（1100px），畫面幾乎原樣。只讀、每 2 秒重讀；不給打字，要操作去 herdr。
- * 清單留在後面不關，看完回去按「結束」。
+ * RAM 清單裡點 pane 後看它現在的畫面（唯讀）。用寬 modal 而不是列內攤開：
+ * 560px 塞 185 欄會每行折斷，認不出是哪個 claude。
  */
 const REFRESH_MS = 2000
 const LINES = 200

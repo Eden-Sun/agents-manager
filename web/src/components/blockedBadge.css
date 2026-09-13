@@ -1,5 +1,4 @@
-/* 標題列的「● 需要回應」chip（BlockedBadge.tsx）。外觀對齊同一列的 `.turn-error-badge`：
-   同樣是 `--danger`，同樣是「你以為在跑其實停著等你」那一級的事。 */
+/* 「● 需要回應」chip（BlockedBadge.tsx）：對齊 `.turn-error-badge`，同是 --danger「你以為在跑其實停著等你」那一級。 */
 .blocked-badge {
   flex: none;
   display: inline-flex;
@@ -41,8 +40,7 @@
   }
 }
 
-/* 手機：名字那列 200px 左右，chip 放名字後面會把名字截掉；擺到第二行（kind · 模型 · 版本）
-   的最右邊，那一行本來就有空位，且觸控高度拉到 24px。 */
+/* 手機：放名字後會截掉名字，擺到第二行最右邊（本來有空位），觸控高 24px。 */
 @media (width <= 640px) {
   .bot-head .main-title-row > .blocked-badge,
   .bot-head .main-title-row > .turn-error-badge {
@@ -56,15 +54,13 @@
     margin-left: auto;
   }
 
-  /* ★／⚙ 是絕對定位跨兩行貼右邊（mobileBotHead.css），第二行得跟第一行一樣讓出 84px，
-     chip 才不會被壓在星號底下點不到。只在有 chip 時讓。 */
+  /* ★／⚙ 絕對定位跨兩行貼右，第二行也要讓 84px，chip 才不被壓在星號底下。只在有 chip 時讓。 */
   .bot-head .mobile-bot-version:has(> .blocked-badge),
   .bot-head .mobile-bot-version:has(> .turn-error-badge) {
     padding-right: 84px;
   }
 
-  /* 那一行只剩約 150px：chip 71px 進來之後模型名被截成「o.」。版本號是三樣裡最不急的
-     （tooltip 與設定面板都有），有 chip 時讓掉，模型名留得住。 */
+  /* 那行只剩約 150px，chip 進來模型名會被截成「o.」：版本號最不急（tooltip／設定面板都有），先讓。 */
   .bot-head .mobile-bot-version:has(> .blocked-badge) > .mobile-bot-ver,
   .bot-head .mobile-bot-version:has(> .turn-error-badge) > .mobile-bot-ver {
     display: none;
@@ -76,9 +72,7 @@
     display: none;
   }
 
-  /* 桌機：第二行（kind · 模型 · pane id）的最前面。名字那一列在 1440px＋側欄開著時只有約
-     161px，塞不下 71px 的 chip（實測不是 chip 被剪剩「● 需」就是 ⚙ 被剪掉）。這裡把 pane id
-     讓掉——它是 debug 用的識別碼，tooltip 與 run 識別列都還有；模型名照舊可截尾。 */
+  /* 桌機：放第二行最前面。1440px＋側欄時名字列只剩約 161px 塞不下 71px chip；讓掉 pane id（debug 用，tooltip 與識別列都有）。 */
   .bot-head .main-title-sub > .blocked-badge {
     margin-right: 2px;
   }

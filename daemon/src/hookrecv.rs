@@ -59,11 +59,8 @@ pub async fn receive(
     (StatusCode::OK, Json(json!({})))
 }
 
-/// 這句 prompt 回音是別的 agent 打進來的嗎？（SPEC §6.5d）
-///
-/// hook 只帶回音本身，說不出是誰打的。PATH 上的 herdr shim 在 `agent prompt` 轉發前會先向
-/// `/relay/announce` 報一聲，所以這裡拿 run 的 agent 名字去認領；認不出來就回 `None`，那則訊息
-/// 維持「使用者自己打的」——寧可少標一次，也不要冤枉一句話。
+/// 這句 prompt 回音是別的 agent 打進來的嗎？（見 SPEC §6.5d）
+/// 認不出來就當使用者自己打的——寧可少標一次，也不要冤枉一句話。
 fn relay_source(run: Option<&db::Run>, echo: &str) -> Option<String> {
     let agent = run?.agent_name.as_deref()?;
     crate::agent_relay::claim(agent, echo)
@@ -71,9 +68,8 @@ fn relay_source(run: Option<&db::Run>, echo: &str) -> Option<String> {
 
 #[derive(Debug)]
 enum HookKind {
-    /// Session / thread identity only — never creates a Turn.
+    /// Never creates a Turn.
     Identity { session_id: Option<String>, transcript_path: Option<String> },
-    /// A completed turn.
     TurnComplete {
         session_id: Option<String>,
         turn_id: Option<String>,
@@ -81,21 +77,15 @@ enum HookKind {
         assistant: Option<String>,
         user: Option<String>,
     },
-    /// v4.0: Claude Code statusLine input — rate limits only, never a Turn.
+    /// Claude Code statusLine input — never a Turn.
     StatusLine,
     Ignore(String),
 }
 
 const DEFAULT_CLAUDE_IDENTITY: &str = "cc0";
 
-/// What the run's status bar should say about the account: `(email, warning)`.
-///
-/// The identity's login state **on the bot's host** is the authority (`tools` probes each
-/// host with `claude auth status`). Reading `.claude.json` off the daemon's own disk was wrong
-/// twice over for a remote bot (issue #4): the wrong machine, and a file whose `oauthAccount`
-/// is only metadata — on m4p `cc1` carried tony.lin's e-mail while the CLI, with no login in
-/// that config dir, quietly fell back to the machine's legacy Keychain entry and ran as cc0.
-/// That case is exactly the warning: identity set, host says not logged in.
+/// `(email, warning)` from the identity's login state **on the bot's host**, not the daemon's
+/// `.claude.json` (issue #4: wrong machine, and a logged-out cc1 silently ran as cc0).
 fn claude_account_from_tools(
     tools: &std::collections::HashMap<String, crate::tools::HostTools>,
     host: &str,
@@ -217,9 +207,7 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
                 .filter(|s| !s.is_empty());
-            // Codex runs a hidden follow-up turn after each reply to name the thread
-            // ("Generate a concise, single-line task title …" → `{"title": …}`). It is not a
-            // user-visible turn, so it must not become an external Turn in the timeline.
+            // Codex runs a hidden title-generation turn after each reply; not user-visible.
             let assistant = s("last-assistant-message");
             let is_title_turn = user.as_deref().map(|u| u.contains("single-line task title")).unwrap_or(false)
                 || assistant
@@ -238,8 +226,7 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 user,
             }
         }
-        // SPEC §12 / appendix F: grok's stdin envelope. Keys come in camelCase (and, on 1.0.13,
-        // a snake_case copy of some of them); we read the camelCase ones and fall back to snake.
+        // SPEC §12 / appendix F: camelCase keys, grok 1.0.13 also sends some snake_case copies.
         "grok" => {
             let either = |camel: &str, snake: &str| s(camel).or_else(|| s(snake));
             let ev = either("hookEventName", "hook_event_name").unwrap_or_default().to_lowercase();
@@ -335,19 +322,13 @@ pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
     process_locked(app, body).await
 }
 
-/// Whitespace collapsed, so a prompt echo the pane wrapped across columns still compares equal
-/// to the hook's single-line copy of the same text.
+/// A pane-wrapped echo must still compare equal to the hook's single-line copy.
 fn squash_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Should the Stop hook's `user` payload be stored on a turn that already carries `existing`
-/// user messages?
-///
-/// A turn opened by `lifecycle::begin_external_turn` already holds the prompt echo scraped off
-/// the pane — the *same* text the hook reports, except the pane can wrap or clip it at the
-/// column width. Comparing for equality alone would let a clipped echo through as a second
-/// bubble, so a containment either way counts as the same message.
+/// The scraped echo may be wrapped or clipped at the column width, so containment either way
+/// counts as the same message (equality alone would add a second bubble).
 fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     let inc = squash_ws(incoming);
     if inc.is_empty() {
@@ -359,11 +340,7 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     })
 }
 
-/// 把 turn 上「從畫面刮下來、但被截斷」的那則使用者訊息補成 hook 給的完整原文。
-///
-/// 判斷用去空白後的前綴：畫面折行會在中間多出換行與縮排，字面上不會相等。只有「既有那則是
-/// 完整原文的前綴，而且原文更長」才覆蓋——長度一樣就是同一句話，沒必要動；不是前綴的話代表
-/// 兩者根本不是同一句，那更不該覆蓋。
+/// 只在既有那則是原文的（去空白）前綴且較短時才覆蓋；不是前綴就是另一句話，不能動。
 async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str) -> Result<()> {
     let full_sq = squash_ws(full);
     let rows: Vec<(String, String)> =
@@ -388,20 +365,9 @@ async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str)
     Ok(())
 }
 
-/// 遲到的 hook 撞上已經被終端備援關掉的回合：能補的就補，不能補的才丟。
-///
-/// 2026-09-13 實例（bot GROK、pane w168:pN）：使用者送出後 15 秒，畫面還停在空的 `❯`（grok
-/// 在想事情時就是長這樣），備援把回合關成 `completed_fallback` 且「只看到我們自己的 prompt」，
-/// 一則 assistant 訊息都沒存。36 秒後 grok 的 Stop hook 帶著真正的回覆回來，卻被這裡丟掉——
-/// 使用者看到的是「沒回應」，而 pane 上明明寫著它做了 5 分鐘、推了一個 commit。
-///
-/// 規則：那個回合**沒有任何 assistant 訊息**時，hook 的回覆是我們唯一有的答案，寫進去並把
-/// 狀態修正成 `completed`（hook 是比畫面更硬的證據）。已經有回覆的照舊丟——那才是這條分支
-/// 原本要防的「一個回合兩則回覆」。
-///
-/// 為什麼這個判斷不會把 c1526f7 補起來的洞再打開：`try_fallback` 的「認領回合」與「寫回覆」
-/// 在同一個交易裡，而它跟這裡都在同一把 bot lock 下跑（poller 那條路 c1526f7 已經補上鎖），
-/// 所以不存在「回合關了、回覆還在半路」的中間狀態可以被這裡看見。這裡讀到零則，就真的是零則。
+/// 遲到的 hook 撞上備援關掉的回合：沒有 assistant 訊息就用 hook 的回覆補上並改 `completed`，
+/// 已有回覆才丟（防一回合兩則）。2026-09-13 GROK 備援 15 秒就關回合、36 秒後的真回覆被丟。
+/// 不會重開 c1526f7 的洞：`try_fallback` 認領與寫回覆同一交易、同一把 bot lock，讀到零則就真的是零則。
 async fn fill_or_drop_late_hook(
     app: &Arc<App>,
     turn: &db::Turn,
@@ -439,9 +405,7 @@ async fn fill_or_drop_late_hook(
     Ok(())
 }
 
-/// Consume the one-shot native session request written by a `resume_native` start. Claude
-/// reports its identity in `SessionStart`; Codex and Grok have no equivalent hook, so callers
-/// pass their first completed turn instead. Clearing the column before recording a mismatch
+/// Consume the one-shot `resume_native` request. Clearing the column before recording a mismatch
 /// makes retries idempotent.
 async fn consume_resume_session(
     app: &Arc<App>,
@@ -450,17 +414,14 @@ async fn consume_resume_session(
     reported_session_id: Option<&str>,
 ) -> Result<()> {
     let Some(expected) = run.resume_session_id.as_deref() else { return Ok(()) };
-    // A hook that carries no session id proves nothing either way (codex's notify payload does
-    // not always have `thread-id`). Leave the marker for the next hook rather than reading the
-    // silence as "the CLI opened a new conversation".
+    // No session id proves nothing (codex notify may lack `thread-id`); leave the marker for the next hook.
     let Some(reported) = reported_session_id else { return Ok(()) };
     let mismatch = reported != expected;
     let consumed = sqlx::query("UPDATE runs SET resume_session_id = NULL WHERE id = ? AND resume_session_id IS NOT NULL")
         .bind(&run.id)
         .execute(&app.db)
         .await?;
-    // A second hook may arrive with a stale in-memory `Run` snapshot. Only the request that
-    // actually cleared the marker is allowed to record the mismatch note.
+    // A second hook may hold a stale `Run` snapshot; only the one that cleared the marker records a mismatch.
     if consumed.rows_affected() == 0 {
         return Ok(());
     }
@@ -488,14 +449,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
     }
 
-    // Codex's usage-reset hint is a standalone TUI row, not `last-assistant-message`. Give the
-    // pane a moment to render it after the notify hook, then capture it under the same bot lock.
+    // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
     if body.provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
             lifecycle::schedule_codex_notice_capture(app, &bot.id, &r.id);
         }
-        // 真的答完一回合＝這個帳號又能跑了，把「撞上限」拿掉，不必等橫幅寫的那個時間
-        // （券兌換、方案升級、或它自己提早恢復都算）。
+        // 真的答完一回合＝帳號又能跑了，不必等橫幅寫的重置時間。
         if matches!(&kind, HookKind::TurnComplete { assistant: Some(a), .. } if !a.trim().is_empty()) {
             let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| "local".to_string());
             crate::quota::clear_limit_hit(app, &host, "codex").await;
@@ -509,13 +468,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         }
         HookKind::StatusLine => {
             let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-            // The rendered status bar, for the chat header. Written only when it changed —
-            // claude refreshes this line often and every write would wake every client.
+            // Written only when changed — claude refreshes often and every write wakes every client.
             if let Some(r) = &run {
                 let text = body.payload.get("status_line").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
-                // The rest of the payload (context window, model, cost, limits) so the web
-                // bar can be fuller than the pane's single line. `status_line` itself is
-                // stored separately, so drop it from the copy.
                 let mut rich = body.payload.clone();
                 if let Some(o) = rich.as_object_mut() {
                     o.remove("status_line");
@@ -541,16 +496,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     app.emit_bot_status(&bot.id).await;
                 }
             }
-            // Quota only. Bots with an identity write `claude:<identity>` alone so they do not
-            // overwrite the default-account `claude` row (cc0 / no-identity bots keep that key).
-            // It is always stored under the bot's **host**: a remote bot reports the remote
-            // account's limits, which must not land on the local row (SPEC §14).
+            // Always keyed under the bot's **host**: remote limits must not land on the local row (SPEC §14).
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
-                    // 空 env 的身份（cc0）跟預設帳號是同一組憑證，`/usage` 探測也是寫進裸的
-                    // `claude`。這裡若另開一列 `claude:cc0`，那一列永遠沒有探測才讀得到的
-                    // Fable 週窗，頂端那條就只有 cc0 少一條 F。同一個帳號寫同一個 key。
+                    // 空 env 身份（cc0）就是預設帳號：另開 `claude:cc0` 會少掉 `/usage` 探測的 Fable 週窗。
                     let default_account = crate::tools::identity_for_host(app, &host, idn)
                         .await
                         .is_some_and(|i| i.env.is_empty());
@@ -560,7 +510,6 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             } else if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
                 crate::quota::set(app, &host, "claude", q).await;
             }
-            // The statusLine also carries the session id — backfill it like SessionStart does.
             if let (Some(r), Some(sid)) = (&run, body.payload.get("session_id").and_then(|v| v.as_str())) {
                 let _ = sqlx::query("UPDATE runs SET native_session_id = COALESCE(native_session_id, ?) WHERE id = ?")
                     .bind(sid)
@@ -572,9 +521,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         }
         HookKind::Identity { session_id, transcript_path } => {
             if let Some(r) = &run {
-                // Claude reports the native id in SessionStart. Codex and Grok are checked on
-                // their first completed turn instead; an identity-shaped hook from either
-                // provider must not consume the one-shot request early.
+                // Codex/Grok are checked on their first completed turn; don't consume the request early.
                 if body.provider == "claude" {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
@@ -592,15 +539,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
-            // Claude's SessionStart is authoritative for its resume check. Codex and Grok
-            // identify the continued session on the first completed turn instead.
             if body.provider == "codex" || body.provider == "grok" {
                 if let Some(r) = &run {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
             }
-            // Backfill run identity opportunistically (Codex has no SessionStart equivalent;
-            // grok's SessionStart carries no transcript path).
+            // Codex has no SessionStart; grok's carries no transcript path.
             if let Some(r) = &run {
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(native_session_id, ?),
@@ -645,13 +589,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .bind(&t.id)
                 .execute(&app.db)
                 .await?;
-                // The CAS lost: between reading the turn and claiming it, someone else closed it.
-                // When that was the §4.3 terminal fallback (the idle-prompt poller used to run it
-                // outside the bot lock — review 2026-09-12 #5) the reply is already stored from
-                // the pane; adding the hook's copy made two assistant messages for one turn, and
-                // with no native ids on the turn a retried hook was not even deduplicated. Stamp
-                // the ids and drop the payload, exactly like the late-hook branch below. A turn
-                // closed any other way (stopped, failed) keeps the reply as before.
+                // Lost the CAS to the §4.3 fallback: adding the hook's copy made two replies
+                // (review 2026-09-12 #5). Stopped/failed turns still keep the reply.
                 if claimed.rows_affected() == 0 {
                     let now_t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
                         .bind(&t.id)
@@ -662,11 +601,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         return Ok(());
                     }
                 }
-                // This turn may be one `begin_external_turn` opened when the user typed into the
-                // pane — claim it instead of opening a second one at step 5. Its user message
-                // was scraped off the prompt echo, so only store the hook's copy (codex sends
-                // `input-messages`) when it is not the same text we already have. A `web` turn
-                // always has its user message from the composer, so it never takes this branch.
+                // `begin_external_turn` already stored the scraped echo; add the hook's copy only if different.
                 if t.origin == "external" {
                     if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         let have = db::turn_user_messages(&app.db, &t.id).await?;
@@ -674,9 +609,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                             let from = relay_source(run.as_ref(), u);
                             lifecycle::insert_message_full(app, &conv, Some(&t.id), "user", u, "hook", false, None, None, from.as_deref()).await?;
                         } else {
-                            // 畫面刮下來的那則可能是**截斷**的（TUI 把長 prompt 折行，回音只讀得到
-                            // 前面那幾行）。hook 送來的是 claude 自己記的原文，比畫面可信：既有那則
-                            // 是它的前綴時就補完，不要只因為「看起來是同一則」就丟掉整段下半截。
+                            // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
                             upgrade_clipped_user_message(app, &t.id, u).await?;
                         }
                     }
@@ -685,16 +618,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     lifecycle::insert_message(app, &conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?;
                 }
                 lifecycle::emit_turn(app, &t.id).await;
-                // A hook that lands after a fallback already claimed the turn is dropped.
                 return Ok(());
             }
 
-            // §4.3: a hook that arrives after the terminal fallback already claimed the
-            // turn must not overwrite it. Stamp the native ids onto that turn (so a retry
-            // dedups) and drop the payload.
+            // §4.3: a late hook must not overwrite a fallback-claimed turn.
             if let Some(r) = &run {
-                // Only a *recent* fallback counts as "this hook's turn"; timestamps are
-                // fixed-width RFC3339 UTC so lexicographic comparison is chronological.
+                // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
                 let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120))
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                 let late = sqlx::query_as::<_, db::Turn>(
@@ -739,21 +668,18 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------- remote drain (§11.4.3)
+// Remote drain: see SPEC §11.4.3–§11.4.5.
 
-/// Separates the spool lines from the single-slot `hook-status.json` in one drain's output.
 const STATUS_MARKER: &str = "---AM-STATUS---";
 
-/// How long one bot's drains are merged into one ssh (§11.4.4).
 const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The event can beat the spool write; retry once, still ahead of the 5s terminal fallback.
 const DRAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One scan per connected host, every 30s, for the status events that never arrived (§11.4.4).
+/// Catches status events that never arrived (§11.4.4).
 const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Split a drain's stdout into the spool lines and the optional statusLine JSON.
 fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
     let mut lines = Vec::new();
     let mut status: Option<String> = None;
@@ -771,8 +697,7 @@ fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
     (lines, status.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
-/// SPEC §11.4.3 — rename the remote spool aside, replay every line, and pick up the
-/// statusLine slot file in the same ssh. Returns how many spool lines were replayed.
+/// SPEC §11.4.3.
 pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
@@ -799,8 +724,7 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
                     n += 1;
                 }
             }
-            // A4: the line is already removed from the remote spool, so this is a drop, not a
-            // retry — say so once and move on.
+            // A4: already removed from the remote spool, so this is a drop, not a retry.
             Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line; dropped"),
         }
     }
@@ -820,7 +744,7 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
     Ok(n)
 }
 
-/// The remote sh: spool → `.replaying` → stdout → gone, then the statusLine slot (§11.4.5).
+/// §11.4.5.
 fn drain_script(bot_id: &str) -> Result<String> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
@@ -838,7 +762,6 @@ fn drain_script(bot_id: &str) -> Result<String> {
     ))
 }
 
-/// The statusLine slot file as a `HookBody` for the existing `HookKind::StatusLine` branch.
 fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
     let mut payload: Value = serde_json::from_str(raw).ok()?;
     // hook.sh already stamps it; a hand-written or older file may not.
@@ -882,13 +805,11 @@ fn gate_admit(g: &mut DrainGate, now: std::time::Instant) -> bool {
     true
 }
 
-/// Take the "somebody asked again while we were draining" flag.
 fn gate_take_again(g: &mut DrainGate) -> bool {
     std::mem::take(&mut g.again)
 }
 
-/// SPEC §11.4.4 — `drain_remote` with the 1s merge window and the T+2s empty-handed retry.
-/// Awaited by `events::handle_status`; the follow-up runs on its own task.
+/// SPEC §11.4.4.
 pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
     {
         let mut g = drain_gates().lock().unwrap();
@@ -903,8 +824,7 @@ pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) ->
         let mut g = drain_gates().lock().unwrap();
         gate_take_again(g.entry(bot_id.to_string()).or_default())
     };
-    // A merged trigger is served right after the window; an empty drain means the hook may
-    // still be writing its line (§11.4.4), so look once more before the fallback takes over.
+    // An empty drain may mean the hook is still writing its line (§11.4.4).
     let delay = if again {
         Some(DRAIN_WINDOW)
     } else if n == 0 {
@@ -924,8 +844,7 @@ pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) ->
     Ok(n)
 }
 
-/// SPEC §11.4.4 — one ssh per connected host every 30s, listing the bot dirs that have
-/// something to drain (a lost status event, or a host that had no `herdr` on PATH).
+/// SPEC §11.4.4.
 pub fn spawn_spool_scanner(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
@@ -959,13 +878,12 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
     });
 }
 
-/// Loops the bot dirs on the host and prints the ids that have spool or statusLine material.
 const SCAN_SCRIPT: &str = "for d in \"$HOME/.config/agents-manager/bots\"/*/; do \
      [ -d \"$d\" ] || continue; b=$(basename \"$d\"); \
      if [ -f \"$d/hook-spool.jsonl\" ] || [ -f \"$d/hook-spool.jsonl.replaying\" ] || [ -f \"$d/hook-status.json\" ]; \
      then echo \"$b\"; fi; done\n";
 
-/// SPEC §4.4.6: take the per-bot lock, rename the spool aside, replay each line, delete.
+/// SPEC §4.4.6.
 pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
     if host != crate::config::LOCAL_HOST {
@@ -1024,7 +942,6 @@ pub async fn replay_all(app: &Arc<App>) {
     }
 }
 
-/// Replay every bot's spool on one host (called after a host (re)connects).
 pub async fn replay_host(app: &Arc<App>, host: &str) {
     for b in db::live_bots_on_host(&app.db, host).await.unwrap_or_default() {
         if let Err(e) = replay_spool(app, &b.id).await {
@@ -1032,7 +949,6 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
         }
     }
 }
-
 
 #[cfg(test)]
 mod drain_tests {
@@ -1047,7 +963,6 @@ mod drain_tests {
         assert_eq!(status.as_deref(), Some("{\n  \"session_id\": \"s\"\n}"));
     }
 
-    /// No statusLine file: everything is spool, and nothing is mistaken for a status blob.
     #[test]
     fn output_without_the_marker_is_all_spool() {
         let (lines, status) = parse_drain_output("{\"bot_id\":\"b\"}\n");
@@ -1057,7 +972,6 @@ mod drain_tests {
         assert!(lines.is_empty() && status.is_none());
     }
 
-    /// An empty slot file must not turn into an unparseable statusline warning.
     #[test]
     fn an_empty_status_slot_is_no_status() {
         let (_, status) = parse_drain_output("---AM-STATUS---\n\n");
@@ -1075,8 +989,7 @@ mod drain_tests {
         assert!(status_body("bot1", "3").is_none());
     }
 
-    /// §11.4.4: the second `working -> idle` of the same turn rides on the first drain's ssh,
-    /// and the first drain notices it has to look once more on its way out.
+    /// §11.4.4.
     #[test]
     fn a_second_trigger_inside_the_window_is_merged() {
         let mut g = DrainGate::default();
@@ -1113,8 +1026,6 @@ mod external_claim_tests {
     use super::*;
     use crate::testing as tt;
 
-    /// The prompt echo scraped off the pane and the hook's own copy are the same message,
-    /// however the pane wrapped or clipped it.
     #[test]
     fn hook_user_dedups_against_the_scraped_echo() {
         let echo = vec!["Reply with exactly MERGED-OK".to_string()];
@@ -1125,8 +1036,6 @@ mod external_claim_tests {
         assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
     }
 
-    /// …but a genuinely different prompt, or a turn that has no user message at all (the echo
-    /// was off screen), must still be stored.
     #[test]
     fn hook_user_is_stored_when_it_is_not_the_echo() {
         assert!(hook_user_is_new(&[], "Reply with exactly MERGED-OK"));
@@ -1135,8 +1044,7 @@ mod external_claim_tests {
         assert!(!hook_user_is_new(&[], "   "));
     }
 
-    /// A throwaway on-disk database (`db::open` needs a path) seeded with one running bot.
-    /// The directory removes itself when the returned guard drops.
+    /// `db::open` needs a path; the directory removes itself on drop.
     struct TmpDb(std::path::PathBuf);
     impl Drop for TmpDb {
         fn drop(&mut self) {
@@ -1160,11 +1068,7 @@ mod external_claim_tests {
         (TmpDb(dir), pool, "r".to_string(), "c".to_string())
     }
 
-    /// 2026-09-12 使用者實機：畫面折行讓刮下來的那則使用者訊息斷在一半（「…請設 multiSelect:」），
-    /// hook 之後送來的才是完整原文。既有那則是原文的前綴時要補完，不是當重複丟掉。
-    /// 2026-09-13（bot GROK、pane w168:pN）：畫面停在空的 `❯`，備援 15 秒就把回合關掉、
-    /// 一則回覆都沒存；36 秒後 grok 的 Stop hook 帶著真正的答案回來卻被丟掉，使用者看到
-    /// 「沒回應」。沒有回覆的那種回合要用 hook 的答案補起來。
+    /// 2026-09-13（GROK）：備援關掉的回合沒存回覆，遲到 hook 的答案被丟、使用者看到「沒回應」。
     #[tokio::test]
     async fn a_late_hook_fills_a_fallback_turn_that_has_no_reply() {
         let env = tt::env().await;
@@ -1219,7 +1123,7 @@ mod external_claim_tests {
                 .unwrap();
         assert_eq!(replies, vec!["側欄那組徽章已收齊，cdcf165 已推".to_string()]);
 
-        // 已經有回覆的那種照舊丟掉——這條分支本來就是要防「一個回合兩則回覆」。
+        // 已有回覆的照舊丟，防一回合兩則。
         let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
             .bind(&turn_id)
             .fetch_one(&app.db)
@@ -1234,7 +1138,7 @@ mod external_claim_tests {
         assert_eq!(n, 1, "不會變成兩則");
     }
 
-    /// 空的 hook（只有 Stop、沒有內容）不要把回合改成 completed——那等於宣稱有答案。
+    /// 空的 hook 不能把回合改成 completed——那等於宣稱有答案。
     #[tokio::test]
     async fn an_empty_late_hook_changes_nothing_but_the_native_ids() {
         let env = tt::env().await;
@@ -1277,6 +1181,7 @@ mod external_claim_tests {
         assert_eq!(status, "completed_fallback");
     }
 
+    /// 2026-09-12 使用者實機：折行讓刮下來的訊息斷在一半，既有那則是原文前綴時要補完。
     #[tokio::test]
     async fn a_clipped_scraped_prompt_is_upgraded_to_the_hooks_full_text() {
         let env = tt::env().await;
@@ -1407,12 +1312,8 @@ mod external_claim_tests {
         assert_eq!(assistant_messages, 1);
     }
 
-    /// **Hook vs. fallback race** (review 2026-09-12 #5). The fallback claims the turn between
-    /// the hook reading it and the hook's own CAS; the hook's UPDATE then touches no row. It used
-    /// to insert its assistant message anyway — two answers for one turn — and leave the turn
-    /// without native ids, so the same hook retried was not even a duplicate. A BEFORE UPDATE
-    /// trigger stands in for the fallback: it moves the row to `completed_fallback` and makes
-    /// the hook's UPDATE skip it, which is precisely "lost the CAS".
+    /// Hook vs. fallback race (review 2026-09-12 #5). The BEFORE UPDATE trigger stands in for the
+    /// fallback winning the CAS.
     #[tokio::test]
     async fn a_hook_that_loses_the_cas_to_the_fallback_adds_no_second_reply() {
         let env = tt::env().await;
@@ -1507,10 +1408,7 @@ mod external_claim_tests {
         assert_eq!(turns, 1, "and no external turn was opened for the dropped payload");
     }
 
-    /// The Stop hook must *claim* the in-flight turn `begin_external_turn` opened when the user
-    /// typed into the pane, not open a second one. Step 4 of `process_locked` looks the target
-    /// up with exactly this query, so an `external` / `in_flight` turn has to come back from it
-    /// — otherwise the handler falls through to step 5 and inserts a duplicate.
+    /// Step 4 must find the `external` turn, or step 5 inserts a duplicate.
     #[tokio::test]
     async fn stop_hook_finds_the_open_external_turn() {
         let (_tmp, pool, run, conv) = fixture().await;
@@ -1532,8 +1430,7 @@ mod external_claim_tests {
         // `delivery` must be `ok` or the §4.3 terminal fallback refuses to close the turn.
         assert_eq!(found.delivery, "ok");
 
-        // Claiming it is the same UPDATE a web turn gets; afterwards nothing is in flight, so a
-        // retried hook dedups instead of opening a second turn.
+        // Afterwards nothing is in flight, so a retried hook dedups.
         sqlx::query("UPDATE turns SET status='completed', completed_at=?, native_turn_id='u' WHERE id=? AND status='in_flight'")
             .bind(&now)
             .bind("t")
@@ -1543,8 +1440,6 @@ mod external_claim_tests {
         assert!(db::in_flight_turn(&pool, &run).await.unwrap().is_none());
     }
 
-    /// The scraped echo lives on the turn as a `hook`-sourced user message; that is what the
-    /// dedup in step 4 compares the hook's `input-messages` against.
     #[tokio::test]
     async fn turn_user_messages_returns_the_scraped_echo() {
         let (_tmp, pool, run, conv) = fixture().await;
@@ -1605,7 +1500,6 @@ mod resume_tests {
         sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run.id).fetch_one(&e.app.db).await.unwrap()
     }
 
-    /// A reported id — matching or not — consumes the one-shot marker.
     #[tokio::test]
     async fn a_reported_session_id_consumes_the_marker() {
         let (e, bot, run) = fixture().await;
@@ -1617,8 +1511,6 @@ mod resume_tests {
         assert_eq!(remaining(&e, &run).await, None);
     }
 
-    /// A hook with no session id is not evidence of a new conversation. The marker survives so
-    /// the next hook — the one that does carry an id — gets to decide.
     #[tokio::test]
     async fn a_hook_without_a_session_id_leaves_the_request_pending() {
         let (e, bot, run) = fixture().await;

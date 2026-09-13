@@ -1,11 +1,5 @@
-//! v4.0 — GitHub origin detection (`projects[].github`) and issue listing through `gh`.
-//!
-//! Origin: `git -C <path> remote get-url origin` on the project's host (local process, or
-//! `ssh_exec_path` for a remote host), parsed for the usual GitHub URL shapes. Cached per
-//! project until the next reconcile or `POST /projects/:id/github/refresh`.
-//!
-//! Issues: `gh issue list --repo owner/repo --json …` on the same host (the user has run
-//! `gh auth login` there). Cached 2 min per (project, state, q, limit).
+//! GitHub origin detection (`projects[].github`, cached until reconcile or refresh) and issue
+//! listing through `gh` on the project's host.
 
 use crate::config::LOCAL_HOST;
 use crate::db;
@@ -21,17 +15,14 @@ use std::time::{Duration, Instant};
 pub const ISSUES_TTL: Duration = Duration::from_secs(120);
 const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 const GH_TIMEOUT: Duration = Duration::from_secs(40);
-/// `body_excerpt` length in characters.
 const EXCERPT_CHARS: usize = 300;
 
-/// A git submodule of a project: where it is (relative to the project) and what it points at.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Submodule {
     pub path: String,
     pub github: Option<GithubInfo>,
 }
 
-/// Reject anything that is not a plain relative path: no `..`, no absolute, no empty segments.
 pub fn valid_repo_rel(repo: &str) -> bool {
     let r = repo.trim();
     if r.is_empty() {
@@ -55,8 +46,6 @@ impl GithubInfo {
     }
 }
 
-/// `git@github.com:owner/repo.git` / `https://github.com/owner/repo(.git)` /
-/// `ssh://git@github.com/owner/repo` / `github.com/owner/repo` → (owner, repo).
 pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
     let u = url.trim();
     let rest = if let Some(r) = u.strip_prefix("git@github.com:") {
@@ -69,12 +58,10 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
             .or_else(|| u.strip_prefix("git://"));
         let had_scheme = no_scheme.is_some();
         let no_scheme = no_scheme.unwrap_or(u);
-        // drop userinfo (`git@`, `user:token@`)
         let no_user = no_scheme.rsplit_once('@').map(|(_, h)| h).unwrap_or(no_scheme);
         let host_path = no_user.strip_prefix("github.com")?;
         if had_scheme {
-            // With a scheme the colon is a **port** (`ssh://git@github.com:22/owner/repo`), never
-            // the scp-style separator; the path still has to start with `/`.
+            // With a scheme the colon is a **port**, never the scp-style separator.
             let after_port = match host_path.strip_prefix(':') {
                 Some(p) => p.trim_start_matches(|c: char| c.is_ascii_digit()),
                 None => host_path,
@@ -93,9 +80,6 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
     Some(GithubInfo { owner: owner.into(), repo: repo.into(), url: format!("https://github.com/{owner}/{repo}") })
 }
 
-// ---------------------------------------------------------------- running commands on a host
-
-/// Run a POSIX `sh` script on `host`; stdout on success.
 async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
         let o = crate::hosts::sh_local(script, timeout).await?.ok_or_else(|| anyhow!("command timed out"))?;
@@ -110,13 +94,11 @@ async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration
     conn.ssh_exec_path_timeout(script, timeout).await
 }
 
-/// PATH prefix so `gh` / `git` from Homebrew are found even from a launchd daemon.
-/// Also kill color forcing: some agent / IDE shells export `CLICOLOR_FORCE=1`, and
-/// `gh --json` then pretty-prints with ANSI — which breaks `serde_json`.
+/// Homebrew `gh`/`git` from a launchd daemon; and `CLICOLOR_FORCE=1` from agent/IDE shells makes
+/// `gh --json` emit ANSI, which breaks `serde_json`.
 pub(crate) const PATH_FIX: &str = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"\n\
 export NO_COLOR=1\nunset CLICOLOR_FORCE FORCE_COLOR CLICOLOR 2>/dev/null\n";
 
-/// Strip CSI / OSC ANSI sequences so a colored `gh` dump is still parseable.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -154,7 +136,6 @@ pub fn strip_ansi(s: &str) -> String {
     }
     out
 }
-// ---------------------------------------------------------------- origin detection
 
 pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInfo> {
     let script = format!("{PATH_FIX}git -C {} remote get-url origin 2>/dev/null", sh_quote(&p.path));
@@ -170,7 +151,7 @@ pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInf
     info
 }
 
-/// Detect every live project on `host` (spawned; off the reconcile path).
+/// Spawned, off the reconcile path.
 pub fn spawn_detect_host(app: Arc<App>, host: String) {
     tokio::spawn(async move {
         let projects = db::live_projects(&app.db).await.unwrap_or_default();
@@ -192,8 +173,7 @@ pub fn spawn_detect_all(app: Arc<App>) {
     spawn_detect_host(app, LOCAL_HOST.to_string());
 }
 
-/// `GET /api/projects/:id/submodules` — every `.gitmodules` entry, with its own GitHub origin
-/// when it has one. Cached like the issue list; `refresh` bypasses the cache.
+/// `GET /api/projects/:id/submodules`
 pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> Result<Vec<Submodule>, LcError> {
     if !refresh {
         if let Some((at, v)) = app.submodules_cache.lock().await.get(&p.id) {
@@ -202,8 +182,7 @@ pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> 
             }
         }
     }
-    // One round trip: each line is `<path>|<origin url or empty>`. A submodule that is listed
-    // but not checked out has no `.git`, so its origin comes back empty and it is still listed.
+    // A submodule not checked out has no `.git`: empty origin, still listed.
     let script = format!(
         "{PATH_FIX}cd {} || exit 0\n\
          test -f .gitmodules || exit 0\n\
@@ -227,12 +206,10 @@ pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> 
     Ok(subs)
 }
 
-/// The cached value for `GET /api/state` (`None` = unknown / not GitHub → `null`).
 pub async fn cached(app: &Arc<App>, project_id: &str) -> Option<GithubInfo> {
     app.github.lock().await.get(project_id).cloned().flatten()
 }
 
-// ---------------------------------------------------------------- issues via gh
 
 fn gh_error(e: impl std::fmt::Display) -> LcError {
     let msg = e.to_string();
@@ -279,9 +256,8 @@ pub fn issue_summary(v: &Value) -> Value {
     })
 }
 
-/// The project and the GitHub origin of `repo` within it: the project's own when `repo` is
-/// empty, otherwise the submodule's. A `repo` that is not a listed submodule is a 400 — the
-/// list is the only thing that turns a user-supplied path into a directory git runs in.
+/// A `repo` that is not a listed submodule is a 400: the list is the only thing that turns a
+/// user-supplied path into a directory git runs in.
 async fn project_with_github(app: &Arc<App>, project_id: &str, repo: &str) -> Result<(db::Project, GithubInfo), LcError> {
     let p = db::project(&app.db, project_id)
         .await
@@ -356,7 +332,7 @@ pub async fn list_issues(
     Ok(v)
 }
 
-/// `GET /api/projects/:id/issues/:number` — full body, uncached.
+/// `GET /api/projects/:id/issues/:number` — uncached.
 pub async fn get_issue(app: &Arc<App>, project_id: &str, repo: &str, number: u64) -> Result<Value, LcError> {
     let (p, gh) = project_with_github(app, project_id, repo).await?;
     let cmd = format!(

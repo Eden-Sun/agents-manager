@@ -7,14 +7,7 @@ import { useMenuKeys } from '../hooks/useMenuKeys'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
-/**
- * v4.0 model / effort / fast, driven by `GET /api/models?kind=&host=`.
- * Claude is static on the daemon (opus / sonnet / haiku / fable, all with the same five
- * `--effort` levels — claude has no per-model list the way codex does);
- * codex and grok come from their CLIs. When the call fails the static
- * `MODEL_OPTIONS` list (and kind-specific efforts) is used instead, so the
- * form still works when the catalogue can't be read.
- */
+/** v4.0 model / effort / fast from `GET /api/models?kind=&host=`; falls back to static `MODEL_OPTIONS` on failure. */
 
 function staticModels(kind: BotKind): ModelInfo[] {
   const efforts =
@@ -30,31 +23,19 @@ function staticModels(kind: BotKind): ModelInfo[] {
   }))
 }
 
-/**
- * 選單要顯示的清單：拿掉 `HIDDEN_MODELS`（見 types.ts），但**留下這顆 bot 現在選的那個**——
- * 藏掉一個已經設好的值會讓它靜靜變成「自訂」，看起來像設定被改掉了。
- */
+/** 拿掉 `HIDDEN_MODELS` 但留下目前選的，否則看起來像設定被改掉。 */
 function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[] {
   return models.filter((m) => m.id === selected || !HIDDEN_MODELS.includes(m.id))
 }
 
-/**
- * 按鈕上寫的字：拿掉整組模型都一樣的前綴（codex 全部都是 `gpt-`），只留真正分辨得出彼此
- * 的那一段（`gpt-5.6-luna` → `5.6-luna`）。四顆按鈕重複同一個 `gpt-` 只是在吃寬度，手機上
- * 更是直接把名字擠掉；完整 id 還在 `title` 裡（2026-09-09 使用者決定）。
- */
+/** 按鈕字拿掉 `gpt-` 前綴省寬度，完整 id 在 `title`（2026-09-09 使用者決定）。 */
 function modelLabel(m: ModelInfo): string {
   const name = m.display_name || m.id
-  // API 回來的是 `GPT-5.6-Luna`（大寫），id 是 `gpt-5.6-luna`——兩種都要認。
+  // display_name 是大寫 `GPT-`，id 是小寫。
   return name.replace(/^gpt-/i, '')
 }
 
-/**
- * 選單順序照 `MODEL_OPTIONS`（claude 是 haiku → sonnet → opus → fable，由輕到重）。
- *
- * API 回來的順序是 CLI 自己的，會隨版本換位置；一排按鈕的位置天天變，肌肉記憶就沒了。
- * 清單上有、`MODEL_OPTIONS` 沒有的（新模型）維持 API 順序接在後面，不會被藏起來。
- */
+/** 照 `MODEL_OPTIONS` 排序：API 順序隨 CLI 版本變會毀掉肌肉記憶；新模型接在後面。 */
 function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
   const want = MODEL_OPTIONS[kind] ?? []
   const rank = (id: string) => {
@@ -80,10 +61,7 @@ export function ApiModelFields({
 }: {
   kind: BotKind
   host: string
-  /**
-   * claude only：這個 bot／角色目前選的身份。只影響「預設」那顆按鈕顯示的提示（那個身份
-   * 的 `settings.json` 目前設的強度，SPEC §17.1）——不指定就是預設帳號。
-   */
+  /** claude only：身份，只影響預設強度提示（SPEC §17.1）。 */
   identity?: string | null
   model: string | null
   onModel: (v: string | null) => void
@@ -105,20 +83,14 @@ export function ApiModelFields({
   const models = fromApi ? cached : staticModels(kind)
   const shownModels = sortModels(kind, visibleModels(models, model))
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
-  // The effort / fast rows follow the chosen model (or the CLI default when unset).
   const current = (model && models.find((m) => m.id === model)) || defaultModel
   const efforts = current?.efforts ?? []
-  // 沒設就顯示「實際會跑的那一個」：模型是 CLI 預設那顆，強度是該模型的廠推薦。
   const selectedModel = model ?? defaultModel?.id ?? null
   const selectedEffort = effort ?? current?.default_effort ?? null
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
-  // 存著的值這個模型不支援（清單是 per-model 的：codex 對 gpt-5.5 送 `-c model_reasoning_effort="max"`
-  // 會回 `400 unsupported_value`；Fast 只有部分模型有 priority tier）。以前是 effect 一載入清單就
-  // 主動 `onEffort(null)`／`onFast(false)` 改父層表單，使用者什麼都沒動設定面板就 dirty、關閉被問
-  // 「放棄未儲存的變更？」、儲存還悄悄送 `effort: null`（docs/reviews/2026-09-12/web.md §1 ModelPicker）。
-  // 現在只**標出來**，要不要清由使用者按；使用者自己換模型時 `pickModel` 照舊順手清掉。
-  // 只認真的 API 清單：載入中／失敗時 `models` 是靜態退路，拿它判斷會把好的值也標成不支援。
+  // 不支援的存值只標出來、不自動清（自動清會讓表單無故 dirty，docs/reviews/2026-09-12/web.md §1 ModelPicker）。
+  // 只認 API 清單：靜態退路會把好的值誤標不支援。
   const effortUnsupported = fromApi && effort !== null && efforts.length > 0 && !efforts.includes(effort)
   const fastUnsupported = fromApi && fast && !hasFast
 
@@ -135,11 +107,9 @@ export function ApiModelFields({
         <span>
           模型
           {loading ? <span className="field-note">載入中…</span> : fromApi ? null : <span className="field-note warn">API 不可用，使用內建清單</span>}
-          {/* 「執行中改會即時套用」不再標（2026-09-13 使用者：模型與強度不用特別說明）；daemon 照舊當場套用。 */}
+          {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
         </span>
-        {/* 「使用 CLI 預設」與「自訂…」都拿掉（2026-09-09 使用者決定）：清單上就那幾顆，
-            多一顆「預設」等於要人先猜它是誰，多一顆「自訂」則是幾乎沒人走、卻天天佔一格的路。
-            沒設 model 的 bot 直接把 CLI 預設那顆標成選取中——它本來就是會跑的那一個。 */}
+        {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
         <div className="opt-group models" role="radiogroup" aria-label="model">
           {shownModels.map((m) => (
             <button
@@ -159,16 +129,12 @@ export function ApiModelFields({
         <div className="field">
           <span>
             強度
-            {/* claude 的五級跟模型無關（`claude --help` 就那一組），標「依 <模型>」會是假資訊。 */}
+            {/* claude 的強度與模型無關，標「依 <模型>」是假資訊。 */}
             {current && current.id !== model && kind !== 'claude' ? (
               <span className="field-note">依 {current.display_name}</span>
             ) : null}
-            {/* grok / claude 的 TUI 有 `/effort <level>`，codex 走 `/model` 的第二層選單；
-                三個都是 daemon 直接操作。claude 與 codex 會順手把它存成該帳號的預設
-                （CLI 行為，見 SPEC §17 與 §4.4a）。 */}
-
+            {/* claude／codex 切強度會存成帳號預設（SPEC §17、§4.4a）。 */}
           </span>
-          {/* 同模型：不放「預設」那一顆，沒設就把廠推薦的那一級標成選取中。 */}
           <div className="opt-group" role="radiogroup" aria-label="reasoning effort">
             {efforts.map((e) => (
               <button
@@ -214,7 +180,7 @@ export function ApiModelFields({
             <span className="field-note">
               {current?.service_tiers.find((t) => t.id === FAST_TIER)?.description || '優先佇列（service_tier=priority）'}
             </span>
-            {/* codex 的 `/fast` 是執行中就能切的開關（SPEC §4.4a）。 */}
+            {/* codex `/fast` 執行中可切（SPEC §4.4a）。 */}
             {liveFast(kind) ? <span className="field-note live-note">執行中改會即時套用，不用重啟</span> : null}
           </span>
         </label>
@@ -228,27 +194,16 @@ export function ApiModelFields({
   )
 }
 
-
-/**
- * 「預設」按鈕括號裡那個值是從哪來的：codex / grok 是那個模型自己回報的
- * `default_effort`（API / cache 檔），claude 則是**帳號的 `settings.json`**
- * （`effortLevel` 或 per-model override，SPEC §17.1）——不是模型內建的，講清楚才不會
- * 誤以為換帳號也不會變。
- */
+/** claude 的預設強度來自帳號 `settings.json`（SPEC §17.1），不是模型內建。 */
 function defaultEffortNote(kind: BotKind): string {
   return kind === 'claude' ? '帳號目前設定' : '模型預設'
 }
 
-/** codex 的 `/fast` 是個開關，執行中也切得掉；其他 kind 根本沒有這個旗標。 */
 function liveFast(kind: BotKind): boolean {
   return kind === 'codex'
 }
 
-/**
- * Compact model (and grok effort) picker, used from the status line and the header
- * model-tag. Choosing an option PATCHes immediately; live kinds apply via slash
- * command, the rest report `needs_restart`.
- */
+/** Compact picker for status line / header; PATCHes immediately. */
 export function ModelQuickPicker({
   botId,
   kind,
@@ -369,7 +324,6 @@ export function ModelQuickPicker({
     void apply({ effort: id })
   }
 
-  /** 同 `bots.fast`、同一條 `PATCH`——設定面板那顆勾與這顆 chip 是同一個欄位。 */
   const toggleFast = () => {
     if (!bot || patching) {
       setOpen(false)
@@ -379,15 +333,12 @@ export function ModelQuickPicker({
     void apply({ fast: !bot.fast })
   }
 
-  // 這個模型有沒有 fast tier（`model/list` 的 `serviceTiers`），跟設定面板同一條判斷。
   const hasFast = current?.service_tiers.some((t) => t.id === FAST_TIER) ?? false
 
   const menuKeys = useMenuKeys(open, popRef, btnRef, () => setOpen(false), cached)
   const hintId = useId()
 
-  // 選單（menu + menuitemradio）而不是 listbox：原本 listbox > radiogroup > option 三層角色
-  // 互相矛盾（option 必須直屬 listbox），而且點一下就直接 PATCH 並關掉——那是選單的行為。
-  // 方向鍵只移焦點、Enter/Space 才套用：用 radio 的「方向鍵即選取」會每按一下就送一次 PATCH。
+  // role=menu 非 listbox：點一下即 PATCH 並關閉；方向鍵只移焦點，否則每按一下送一次 PATCH。
   const pop = open ? (
       <div
         ref={popRef}

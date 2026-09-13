@@ -47,13 +47,7 @@ test('輸出是在比 columns 窄的時候印的：拿最長的一行當折行�
   assert.equal(rows[3][0].text, l4)
 })
 
-/**
- * 實際壞掉的畫面（2026-09-08，bot `o2-low` 的終端分頁）。claude 登入畫面的 OAuth URL 在 93 欄
- * 折成 5 行，但同一份快照裡有兩條 600 欄以上的行——`recent_unwrapped` 已經幫 shell 指令接回原長。
- *
- * 舊邏輯拿「畫面上最長的一行」當折行寬度（618），URL 那五行都判定成沒塞滿，於是只有第一行變成
- * 連結，點到／複製到的是腰斬的 `…88ed-5944d1962f`，登入必失敗。
- */
+/** 2026-09-08 實際壞掉的畫面：OAuth URL 在 93 欄折 5 行，但快照有 600+ 欄的行，拿最長行當寬度就只連到第一段。 */
 const OAUTH_URL =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e' +
   '&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' +

@@ -1,28 +1,12 @@
-/*
- * 「這個帳號現在被 CLI 擋住」的畫法（2026-09-12 使用者：codex 量表全滿，送出去卻一直回
- * `You've hit your usage limit`）。
- *
- * 為什麼量表本身不夠：5h／7d 是**速率**視窗，codex 的 credits 用完時那兩條可以是 0% 已用，
- * app-server 也照實回報滿格。唯一講出這件事的是 CLI 自己印的橫幅，daemon 收在
- * `quota.limit_hit`，所以這裡把它畫成格子上的一個狀態，而不是只寫在 popover 裡。
- */
-/*
- * 畫法（2026-09-13 使用者：「目前看來很衝突」）：紅底 + 紅字 + ⛔ 三種紅一起上，而格子裡的
- * 綠色量表還在說「還很夠」——同一格同時喊兩件相反的事。改成**一個紅點 + 其餘全部退色**：
- *
- * - 量表與數字轉成灰階：帳號收不了工作時，「5h 還剩多少」不是現在要讀的東西，但也不必消失。
- * - 紅只留一處：名字前面那顆點（跟 app 其他地方的燈號同一個語彙），外框跟著淡紅一圈定位它。
- * - 底色拿掉：整格染紅會跟隔壁格搶，而它想說的只是「這一格現在不能用」。
- *
- * class 叫 `quota-blocked` 不是 `blocked`：`styles.css` 有一條**裸的** `.blocked`（BlockedPanel
- * 的外框，`background: var(--danger-soft)` + 10px 內距），額度格撞上它就被整片染紅、還多了一圈
- * 內距——那正是使用者看到的「很衝突」的一半。
- */
+/* 「帳號被 CLI 擋住」（2026-09-12 使用者：codex 量表全滿卻回 `You've hit your usage limit`）：5h／7d 是速率視窗，
+   credits 用完時仍可滿格；唯一訊號是 CLI 橫幅（daemon 的 `quota.limit_hit`），所以畫成格子狀態。 */
+/* 畫法（2026-09-13 使用者：「目前看來很衝突」）：**一個紅點 + 其餘全部退色**，不整格染紅（綠量表同時說「還很夠」）。
+   class 叫 `quota-blocked` 不是 `blocked`：`styles.css` 有裸的 `.blocked`（BlockedPanel 外框），撞上會整片染紅加內距。 */
 .quota-hp.quota-blocked {
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
 }
 
-/* 灰階而不只是降透明度：留著綠色就還是在說「還很夠用」，那正是衝突的來源。 */
+/* 灰階而非降透明：留著綠色就還在說「還很夠用」。 */
 .quota-hp.quota-blocked .quota-bar,
 .quota-hp.quota-blocked .quota-bar-wrap,
 .quota-hp.quota-blocked .quota-bar-pct,
@@ -33,7 +17,7 @@
   opacity: 0.5;
 }
 
-/* 唯一的紅：名字前面一顆 6px 的點。比 ⛔ 小、不跟 kind 圖示搶形狀，跟側欄燈號同一個語彙。 */
+/* 唯一的紅：6px 點，不跟 kind 圖示搶形狀，同側欄燈號語彙。 */
 .quota-blocked-ico {
   flex: none;
   width: 6px;
@@ -43,9 +27,8 @@
   background: var(--danger);
 }
 
-/* 被擋住時整格退色，logo 也一起退：這是這個 app 裡唯一讓 kind logo 失去顏色的狀態，所以
-   「灰掉的 logo」就等於「這個帳號現在收不了工作」（2026-09-13 使用者：有顏色的才是正常的）。
-   多帶一個 class 贏過 `.quota-hp.<kind> .quota-kind`，不靠檔案載入順序。 */
+/* 灰掉的 logo＝帳號收不了工作，是唯一讓 kind logo 失色的狀態（2026-09-13 使用者：有顏色的才是正常的）。
+   多帶一個 kind class 的特異度贏過 `.quota-hp.<kind> .quota-kind` 的品牌色，不靠檔案載入順序。 */
 .quota-hp.quota-blocked .quota-kind,
 .quota-hp.quota-blocked.claude .quota-kind,
 .quota-hp.quota-blocked.codex .quota-kind,
@@ -59,7 +42,6 @@
   color: var(--text-dim);
 }
 
-/* popover 裡那一行：跟「重置券」同一種排版，左邊是標籤欄，右邊是內容。 */
 .quota-pop-line.limit-hit .quota-limit-hit {
   display: flex;
   flex-direction: column;

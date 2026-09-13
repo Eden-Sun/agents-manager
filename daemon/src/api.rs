@@ -21,8 +21,6 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// The host-shell endpoints' implementation. Declared here rather than in `main.rs` because
-/// this file is its only caller; the file itself sits alongside the other modules.
 #[path = "shell.rs"]
 pub mod shell;
 
@@ -53,7 +51,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
         .route("/projects/{id}/chat", post(project_chat))
-        // 群組任務（docs/goals/agm-missions.md）：群組的「交給 AGM」與 AGM 調度用的端點。
+        // 群組任務（docs/goals/agm-missions.md）。
         .route(
             "/projects/{id}/missions",
             get(crate::mission::api::get_missions).post(crate::mission::api::post_mission),
@@ -82,8 +80,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
         .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
-        // SPEC §6.9: 一鍵把等著套用 claude 更新的閒置 bot 全部 exit + resume。放在 `{id}` 那組
-        // 前面——axum 的 `/bots/{id}` 會把 `restart-idle` 當成 bot id 吃掉。
+        // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
@@ -187,12 +184,8 @@ pub fn router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
-/// `POST /relay/announce` — PATH 上的 herdr shim 在把 `agent prompt` 轉給真的 herdr 之前先報一聲
-/// 「我要送這段字給那個 agent」（SPEC §6.5d）。daemon 記著，等那句話的 prompt 回音從 hook 回來時
-/// 補上 `messages.relay_from`，總管的裁示才不會在對話裡長得跟使用者自己打的一樣。
-///
-/// 驗證跟 hook 同一把鑰匙（該 bot 的 `hook_token`，走 `X-AM-Bot-Token`）：pane 裡本來就有它，
-/// 而且它只證明「我是那顆 bot」——這個端點也只用來說明來源。
+/// SPEC §6.5d：shim 先報，hook 回音時補 `relay_from`，總管裁示才不像使用者打的。
+/// 驗證用該 bot 的 `hook_token`（`X-AM-Bot-Token`）：它只證明「我是那顆 bot」，也只用來標來源。
 #[derive(serde::Deserialize)]
 struct RelayAnnounce {
     bot_id: String,
@@ -203,8 +196,7 @@ struct RelayAnnounce {
 async fn relay_announce(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    // 表單而不是 JSON：送出這一報的是 pane 裡的 POSIX sh shim，`--data-urlencode` 對任意
-    // prompt 內容（引號、換行、`&`）都安全，不必在 sh 裡拼 JSON。
+    // 表單而非 JSON：POSIX sh shim 用 `--data-urlencode` 對任意內容都安全。
     axum::extract::Form(body): axum::extract::Form<RelayAnnounce>,
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -219,18 +211,10 @@ async fn relay_announce(
     (StatusCode::OK, Json(json!({})))
 }
 
-// ---------------------------------------------------------------- auth
-
-/// The peer address of the TCP connection, **not** the `Host` header: the header is chosen
-/// freely by the caller, so with `server.listen = "0.0.0.0:…"` anyone on the LAN could ask
-/// for the UI token with `curl -H 'Host: localhost:…'`. Needs the router to be served with
-/// `into_make_service_with_connect_info::<SocketAddr>()` (main.rs).
-///
-/// `allow_lan` (on for every dev run, off inside the packaged macOS app — see
-/// `main.rs::dev_lan_default`, which also binds every interface) accepts any peer. Binding 0.0.0.0 while still rejecting
-/// everything non-loopback would make the daemon reachable but useless; and "LAN" in practice
-/// includes overlay networks like Tailscale (100.64.0.0/10), not just RFC1918, so an allowlist
-/// of ranges chases an open-ended set. `allow_lan` is itself the explicit dev-only opt-in.
+/// TCP peer address, **not** `Host`: the header is caller-chosen, so on 0.0.0.0 anyone on the LAN
+/// could fetch the UI token with `curl -H 'Host: localhost:…'`. Needs connect_info (main.rs).
+/// `allow_lan` is the explicit dev-only opt-in (off in the packaged app, `main.rs::dev_lan_default`);
+/// no range allowlist because "LAN" includes overlays like Tailscale (100.64.0.0/10).
 fn peer_is_local(peer: &std::net::SocketAddr, allow_lan: bool) -> bool {
     if allow_lan {
         return true;
@@ -241,22 +225,15 @@ fn peer_is_local(peer: &std::net::SocketAddr, allow_lan: bool) -> bool {
     }
 }
 
-/// A5: parse the Origin and compare the **host** exactly. `starts_with` used to let
-/// `http://localhost.attacker.com` through, and `null` (file://) is not a supported caller.
-///
-/// The port is deliberately *not* pinned to `listen`: the dev UI is served by Vite on another
-/// local port and its proxy forwards the browser's Origin verbatim (`web/vite.config.ts` only
-/// rewrites `Host`), so pinning it would reject every dev-server request. Cross-origin reads
-/// still need the UI token.
-///
-/// `allow_lan` accepts any Origin — see `peer_is_local` above; same rationale.
+/// A5: compare the **host** exactly — `starts_with` let `http://localhost.attacker.com` through.
+/// Port not pinned: the Vite dev proxy forwards Origin verbatim; cross-origin reads still need the token.
+/// `allow_lan` accepts any Origin, same rationale as `peer_is_local`.
 fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     if allow_lan {
         return true;
     }
     let Some(o) = headers.get("origin").and_then(|v| v.to_str().ok()) else { return true };
     let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else { return false };
-    // Reject anything with a path / userinfo; an Origin is scheme + host + optional port.
     if rest.contains('/') || rest.contains('@') {
         return false;
     }
@@ -291,8 +268,6 @@ async fn get_session(
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
 }
 
-// ---------------------------------------------------------------- state
-
 fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
     if !connected {
         return "disconnected";
@@ -313,7 +288,7 @@ fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
     }
 }
 
-/// `hosts[]` for `GET /api/state` (SPEC §11.6). `local` always comes first.
+/// SPEC §11.6. `local` always comes first.
 async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
     let mut out = Vec::new();
     let tools = app.tools.lock().await.clone();
@@ -329,13 +304,11 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "remote_path": c.cfg.as_ref().map(|x| x.remote_path.clone()),
             "connected": connected,
             "error": c.error_string().await,
-            // v4.0
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
             "tools": t.map(|x| json!(x.tools)),
-            // v4.0: per-identity login state *on this host* (same shape as `tools`), covering
-            // both `[[identities]]` and the `ccN` aliases read off this host (SPEC §16).
+            // Login state *on this host*, `[[identities]]` + this host's `ccN` aliases (SPEC §16).
             "identities": t.map(|x| json!(x.identities)),
-            // v4.1: the raw `ccN` aliases this host defines (env unexpanded, as written).
+            // Env unexpanded, as written.
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
         }));
@@ -372,13 +345,11 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "herdr_session": b.herdr_session.clone(),
                 "managed_by": b.managed_by,
                 "parent_bot_id": b.parent_bot_id,
-                // 使用者釘的「主要執行的 bot」（純顯示，不影響啟動）。
+                // 使用者釘的主要 bot（純顯示）。
                 "primary": b.is_primary == 1,
                 "cwd": b.cwd,
-                // herdr agent name: the live run's, else what the next start will use.
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
-                // The queued web prompt is durable in SQLite; the UI only renders this state.
                 "queued_turn": queued_turn,
                 "lamp": lamp(bot_connected, run.as_ref()),
                 "unread": 0,
@@ -406,8 +377,6 @@ async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> 
     Ok(Json(state_json(&app).await?))
 }
 
-// ---------------------------------------------------------------- config mutation
-
 async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(any_err)
 }
@@ -416,7 +385,6 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
 struct NewProject {
     path: String,
     label: Option<String>,
-    /// `"local"` (default) or a configured host name.
     host: Option<String>,
 }
 
@@ -424,14 +392,11 @@ struct NewProject {
 struct DirsQuery {
     path: Option<String>,
     host: Option<String>,
-    /// `1` / `true` also lists dot-directories (`.config`, `.claude`, …).
     hidden: Option<String>,
 }
 
-/// Directory browser for the "new project" picker. Lists only directories (no files),
-/// hides dot-entries unless `hidden=1`, never follows into unreadable places, and reports the parent.
 async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
-    // SPEC §11.5: the same JSON, produced by a remote `sh` snippet.
+    // SPEC §11.5.
     let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
     let hidden = matches!(q.hidden.as_deref(), Some("1" | "true" | "yes"));
     if host != LOCAL_HOST {
@@ -490,7 +455,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
     let path = if host == LOCAL_HOST {
         canonical_path(&b.path).map_err(|e| LcError::Bad(e.to_string()))?
     } else {
-        // Remote paths cannot be canonicalized locally; ask the host (SPEC §11.6).
+        // SPEC §11.6.
         let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
         crate::hosts::remote_canonical_dir(&conn, &b.path)
             .await
@@ -524,15 +489,12 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         Err(e) => return Err(any_err(e)),
     }
     reproject(&app).await?;
-    // v4.0: GitHub origin detection for the new project (blocking is fine: one git call).
     if let Ok(Some(p)) = db::project(&app.db, &id).await {
         crate::github::detect_project(&app, &p).await;
     }
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"project_id": id}))).into_response())
 }
-
-// ---------------------------------------------------------------- v4.0: GitHub
 
 async fn refresh_github(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let p = db::project(&app.db, &id)
@@ -551,12 +513,10 @@ struct IssuesQuery {
     limit: Option<u32>,
     q: Option<String>,
     refresh: Option<String>,
-    /// Submodule path (relative to the project); absent or empty = the project itself.
+    /// Submodule path; absent or empty = the project itself.
     repo: Option<String>,
 }
 
-/// `GET /api/projects/:id/submodules?refresh=1` — the project's `.gitmodules` entries with
-/// their GitHub origins, so the UI can offer a submodule's issues next to the project's.
 async fn get_submodules(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -570,8 +530,6 @@ async fn get_submodules(
     let subs = crate::github::list_submodules(&app, &p, flag(&q.refresh)).await?;
     Ok(Json(json!({"project_id": id, "submodules": subs})))
 }
-
-// ---------------------------------------------------------------- quick git (chat header chip)
 
 async fn get_git(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
     Ok(Json(serde_json::to_value(crate::git_quick::summary(&app, &id).await?).unwrap_or_default()))
@@ -617,9 +575,7 @@ struct PatchProject {
     label: Option<String>,
 }
 
-/// `PATCH /api/projects/:id` `{"label"}` — rename a project. Never blocked by a live run:
-/// a bot's herdr identity is derived from its bot id, so only the legacy names and the
-/// `agent_name` slug of the *next* start follow the label, hence `needs_restart: false`.
+/// Never blocked by a live run: herdr identity derives from the bot id, so `needs_restart: false`.
 async fn patch_project(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -676,22 +632,18 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
 #[derive(Deserialize)]
 struct NewBot {
     name: String,
-    /// 2026-09-08: the sidebar's quick-add chips compute `<identity>-<n>` from the browser's
-    /// bot list, which can be a beat behind right after a create — so the second click sent the
-    /// same `cc1-1` and got a 409. With this set the daemon picks the next free suffix itself
-    /// (`name` minus any trailing `-<n>` is the base) and returns the name it used.
+    /// 2026-09-08: quick-add chips compute `<identity>-<n>` from a stale list → second click 409'd.
+    /// The daemon picks the next free suffix and returns the name it used.
     #[serde(default)]
     name_auto: bool,
     kind: String,
-    /// claude `--model <m>` / codex `-m <m>` / grok `-m <m>`; omitted / null / "" = the CLI's own default.
+    /// omitted / null / "" = the CLI's own default.
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
-    /// v4.0: codex Fast tier.
     #[serde(default)]
     fast: bool,
-    /// v4.0: appended to the agent's system prompt.
     #[serde(default)]
     persona: Option<String>,
     #[serde(default)]
@@ -708,8 +660,7 @@ struct NewBot {
     env: Option<BTreeMap<String, String>>,
 }
 
-/// `None` = no identity requested; `Some(name)` = must exist **on that bot's host** and match
-/// `kind` — the list is `[[identities]]` plus that host's `ccN` aliases (SPEC §16).
+/// Must exist **on that bot's host** (`[[identities]]` + its `ccN` aliases, SPEC §16) and match `kind`.
 async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, kind: &str) -> Result<Option<String>, LcError> {
     let Some(name) = identity.clone().filter(|s| !s.trim().is_empty()) else { return Ok(None) };
     let Some(id) = crate::tools::identity_for_host(app, host, &name).await else {
@@ -732,14 +683,13 @@ async fn create_bot(
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
-    // The identity has to exist on the *project's* host — `cc1` is a different account there.
+    // `cc1` is a different account on each host.
     let host = db::project(&app.db, &pid)
         .await
         .map_err(any_err)?
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
-    // v4.0: effort is kind-dependent (claude → always None).
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
@@ -752,7 +702,6 @@ async fn create_bot(
                 .iter_mut()
                 .find(|p| p.id.as_deref() == Some(pid.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("no-project"))?;
-            // Bot names are unique per project (the herdr agent name is `<project>-<bot>`).
             let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
             let name = if taken(&b.name) {
                 if !b.name_auto {
@@ -796,8 +745,7 @@ async fn create_bot(
     Ok((StatusCode::OK, Json(json!({"bot_id": id, "name": name}))).into_response())
 }
 
-/// `cc1-1` taken → `cc1-2`, `cc1-3`, …; a name with no numeric suffix (`review`) becomes
-/// `review-2`. Always stays inside the 32-char bot-name limit by trimming the base.
+/// `cc1-1` → `cc1-2`; `review` → `review-2`. Trims the base to stay within 32 chars.
 fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
     let base = match wanted.rfind('-') {
         Some(i) if wanted[i + 1..].chars().all(|c| c.is_ascii_digit()) && i + 1 < wanted.len() => &wanted[..i],
@@ -814,22 +762,17 @@ fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
     unreachable!()
 }
 
-/// `POST /api/order` — 側欄的專案／bot 排序。
-///
-/// 順序本來只存在瀏覽器的 localStorage，所以同一個 daemon 在手機上跟桌機上長得不一樣
-/// （使用者 2026-09-09 回報）。config.toml 的陣列順序本身就是順序，把它寫回去就等於
-/// 全裝置一致，也不用另開一份狀態。沒列到的（別的 client 剛新增的）維持相對順序接在後面。
+/// 側欄排序寫回 config.toml 陣列順序，全裝置一致（使用者 2026-09-09 回報手機桌機不同）。
 #[derive(Deserialize)]
 struct SetOrder {
-    /// 專案 id，由上而下。
     #[serde(default)]
     projects: Option<Vec<String>>,
-    /// `project_id` → 該專案的 bot id，由上而下。config.toml 沒有的（child bot）忽略。
+    /// config.toml 沒有的（child bot）忽略。
     #[serde(default)]
     bots: Option<BTreeMap<String, Vec<String>>>,
 }
 
-/// `want` 給的順序排 `items`，沒被點名的維持原相對順序接在後面。
+/// 沒被點名的（別的 client 剛新增的）維持原相對順序接在後面。
 fn reorder_by<T>(items: &mut Vec<T>, want: &[String], id_of: impl Fn(&T) -> Option<String>) {
     let rank: BTreeMap<&str, usize> = want.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
     let n = want.len();
@@ -876,9 +819,7 @@ struct PatchBot {
     model: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     effort: Option<Option<String>>,
-    /// v4.0
     fast: Option<bool>,
-    /// v4.0: `Some(None)` / `Some("")` clears.
     #[serde(default, deserialize_with = "double_option")]
     persona: Option<Option<String>>,
     args: Option<Vec<String>>,
@@ -886,11 +827,9 @@ struct PatchBot {
     name: Option<String>,
     inject_hooks: Option<bool>,
     auto_approve: Option<bool>,
-    /// 使用者把這顆釘成「主要執行的 bot」。純顯示用，所以不進 config.toml、不需要重啟，
-    /// child bot 也能釘（它本來就沒有 TOML 條目）。
+    /// 使用者釘的主要 bot：純顯示，不進 config.toml（child bot 也能釘）、不需重啟。
     #[serde(rename = "primary")]
     is_primary: Option<bool>,
-    /// `Some(Some(name))` binds, `Some(None)` / `Some("")` unbinds, absent = unchanged.
     #[serde(default, deserialize_with = "double_option")]
     identity: Option<Option<String>>,
     env: Option<BTreeMap<String, String>>,
@@ -903,8 +842,7 @@ where
     serde::Deserialize::deserialize(d).map(Some)
 }
 
-/// PATCH for a bot that has no config.toml entry (`managed_by` = `child`)：
-/// same fields as the TOML branch of `patch_bot`, written straight to `bots`.
+/// For bots with no config.toml entry (`managed_by` = `child`): written straight to `bots`.
 async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &Option<Option<String>>) -> Result<(), LcError> {
     let mut sets: Vec<String> = Vec::new();
     let mut vals: Vec<Option<String>> = Vec::new();
@@ -970,7 +908,6 @@ async fn patch_bot(
         if !valid_bot_name(n) {
             return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
         }
-        // v3.8: the name is a nickname (herdr sees `<project>-<hash>`), so renaming is free.
         let me = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
         if db::live_bots(&app.db)
             .await
@@ -981,7 +918,6 @@ async fn patch_bot(
             return Err(LcError::conflict("bot name already in use in this project", json!({"name": n})));
         }
     }
-    // Everything else may change while a run is live — it just needs a restart to take effect.
     let restart_relevant = b.model.is_some()
         || b.effort.is_some()
         || b.fast.is_some()
@@ -993,7 +929,6 @@ async fn patch_bot(
         || b.inject_hooks.is_some();
     let needs_restart = active.is_some() && restart_relevant;
     let kind = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.kind).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    // v4.0: effort is kind-dependent; `Some(None)` clears.
     let effort: Option<Option<String>> = match &b.effort {
         None => None,
         Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
@@ -1004,10 +939,7 @@ async fn patch_bot(
             check_identity(&app, &host, &Some(name.clone()), &kind).await?;
         }
     }
-    // `managed_by != 'user'`（agent 自己 spawn 的 child）從來不進 config.toml，
-    // 走 cfg.update 只會拿到 `no-bot` 404——2026-09-09 使用者：child bot 的身分改不了、按儲存沒反應。
-    // 這些直接改 DB 列；projection 不管它們，所以也不用 reproject。
-    // 釘選只是 UI 的顯示狀態：直接寫 DB 欄位，不經過 config.toml，也不算「要重啟」。
+    // child bot 不在 config.toml，cfg.update 只會 404（2026-09-09 使用者：child 身分改不了）→ 直接改 DB。
     if let Some(pin) = b.is_primary {
         let n = sqlx::query("UPDATE bots SET is_primary = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(pin as i64)
@@ -1020,7 +952,6 @@ async fn patch_bot(
             return Err(LcError::NotFound("bot".into()));
         }
     }
-    // 只改釘選時就到此為止：再走一次 cfg.update + reproject 只是把整份 TOML 重寫一遍。
     let touches_config =
         restart_relevant || b.name.is_some() || b.autostart.is_some();
     let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
@@ -1079,16 +1010,12 @@ async fn patch_bot(
     reproject(&app).await?;
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    // 有 slash 指令可以當場套用的欄位（grok effort / model、claude model）：
-    // 只動這些欄位的話就不用重啟。grok 改模型時可以順便帶 effort（TUI `/model <id> <effort>`）。
+    // 只動可用 slash 指令當場套用的欄位就不用重啟；grok `/model <id> <effort>` 可順帶 effort。
     let extras = |skip: &[&str]| {
         let hit = |name: &str, present: bool| present && !skip.contains(&name);
         hit("model", b.model.is_some())
             || hit("effort", b.effort.is_some())
-            // `fast` 也要吃 `skip`：codex 把它列進 live 欄位（`/fast` 開關，SPEC §4.4a），
-            // 漏掉這一層的話「只改 fast」永遠被自己算成「還有別的欄位」，於是連試都不試就回
-            // `needs_restart: true`——2026-09-09 實測：PATCH `{"fast":true}` 0.017 秒就回來，
-            // pane 上一個鍵都沒送。
+            // `fast` 也要吃 `skip`（SPEC §4.4a），否則只改 fast 永遠回 needs_restart（2026-09-09 實測）。
             || hit("fast", b.fast.is_some())
             || b.persona.is_some()
             || b.args.is_some()
@@ -1097,9 +1024,7 @@ async fn patch_bot(
             || b.auto_approve.is_some()
             || b.inject_hooks.is_some()
     };
-    // codex 的三個都能在執行中換（SPEC §4.4a）：`/model` 的兩層選單一次決定模型與強度，
-    // `/fast` 開關 service tier。所以它可以一次收下 model / effort / fast 的任意組合，
-    // claude / grok 則維持一次一個欄位（它們的 slash 指令就是一行一個值）。
+    // codex 可一次收 model / effort / fast 任意組合（SPEC §4.4a）；claude / grok 的 slash 指令一次一個值。
     let live_fields: Vec<&str> = match kind.as_str() {
         "codex" if !extras(&["model", "effort", "fast"]) => ["model", "effort", "fast"]
             .into_iter()
@@ -1115,8 +1040,7 @@ async fn patch_bot(
         "claude" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
         _ => Vec::new(),
     };
-    // 當場套用失敗時要說得出是哪一步（2026-09-13 使用者：codex 改 effort 其實不用重啟，但那天
-    // 它落回重啟，而每個失敗出口都是靜默的）。`live_apply` 只在真的試過時才出現。
+    // 失敗要說得出哪一步（2026-09-13 使用者：codex 改 effort 靜默落回重啟）。只在真的試過時才出現。
     let live = if needs_restart && !live_fields.is_empty() {
         Some(lifecycle::apply_live_setting(&app, &id, &live_fields).await)
     } else {
@@ -1143,9 +1067,7 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
-    // 2026-09-08: the children it spawned go with it. They only exist as panes their parent
-    // opened and rows the daemon adopted; left behind they would sit in the sidebar as
-    // orphans with nothing to hang from. Deepest first, each stopped the same way.
+    // 2026-09-08: spawned children go with it, else they're sidebar orphans. Deepest first.
     let mut removed_children = Vec::new();
     for child in descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev() {
         stop_for_delete(&app, &child.id).await;
@@ -1160,9 +1082,8 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         app.emit("bot_changed", json!({"bot_id": child.id})).await;
         removed_children.push(child.id);
     }
-    // SPEC §6.4: stop first (ctrl+c x2, pane closed on timeout), then drop the config entry.
+    // SPEC §6.4: stop first, then drop the config entry.
     stop_for_delete(&app, &id).await;
-    // A spawned child never entered config.toml, so the projection cannot retire it.
     if bot.managed_by == "child" {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
         lifecycle::purge_bot_dir(&app, &id, &host).await;
@@ -1179,20 +1100,15 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         })
         .await
         .map_err(any_err)?;
-    // Projection soft-deletes the row (`bots.deleted_at`); the conversation and its messages stay.
+    // Soft delete; the conversation and its messages stay.
     reproject(&app).await?;
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
 }
 
-/// Stop a bot that is about to be deleted. A stop that could not even reach herdr (the host is
-/// down: `client_for_run` fails before the run is touched) used to be ignored with `let _ =`,
-/// leaving a run `running` on a bot nobody can see any more — `live_bots_on_host` skips deleted
-/// bots, so no reconcile ever ends it, and `purge_deleted_bot_dirs` waits for it for ever
-/// (review 2026-09-12 d). End the run here instead: the row is going away. An agent that is in
-/// fact still alive on that host keeps its pane until someone closes it; once it exits, the
-/// orphan-pane sweep of the next reconcile reclaims the pane like any other ended run's.
+/// If the host is down the stop fails; end the run anyway, else no reconcile ever ends it and
+/// `purge_deleted_bot_dirs` waits forever (review 2026-09-12 d). The orphan-pane sweep reclaims the pane later.
 async fn stop_for_delete(app: &Arc<App>, bot_id: &str) {
     if let Err(e) = lifecycle::stop_bot(app, bot_id).await {
         tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot before deleting it; ending its run");
@@ -1202,9 +1118,7 @@ async fn stop_for_delete(app: &Arc<App>, bot_id: &str) {
     }
 }
 
-/// Every live `managed_by = 'child'` bot under `root`, parents before their children
-/// (so `.rev()` deletes deepest first). Only spawned children follow the parent: a bot the
-/// user created in config.toml is never someone's child.
+/// Parents before children, so `.rev()` deletes deepest first.
 async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<db::Bot>> {
     let all = db::live_bots(&app.db).await?;
     let mut out = Vec::new();
@@ -1221,23 +1135,13 @@ async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<d
     Ok(out)
 }
 
-
-/// `POST /api/bots/:id/restore` — 把誤刪的 bot 放回來。
-///
-/// 刪除本來就是軟的（`bots.deleted_at`，對話與訊息完整留著），所以「恢復」就是把 config.toml
-/// 的條目寫回去、讓 projection 把 `deleted_at` 清掉——歷史會跟著整個回來。
-///
-/// 唯一救不回的是 bot 的工作目錄（刪除時 `purge_bot_dir` 真的砍了）：那裡面是 hook 設定與
-/// 包裝腳本，下次啟動會重新產生，所以不影響復原。
-///
-/// `managed_by = "child"` 的 bot 從來沒進過 config.toml，projection 不管它，直接清欄位。
+/// 刪除是軟的：寫回 config.toml 條目讓 projection 清 `deleted_at`；child bot 直接清欄位。
+/// 被 `purge_bot_dir` 砍掉的工作目錄下次啟動會重新產生。
 async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // `db::bot` 不過濾 deleted_at，所以軟刪除的也拿得到——這裡要的就是它。
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_none() {
         return Err(LcError::conflict("bot is not deleted", json!({"bot_id": id})));
     }
-    // 名字在專案內要唯一（docs/API.md）：同名的已經被建回來時，講清楚而不是默默失敗。
     let taken: Option<String> = sqlx::query_scalar(
         "SELECT id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL AND id <> ?",
     )
@@ -1292,8 +1196,6 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
     Ok((StatusCode::OK, Json(json!({"bot_id": id}))).into_response())
 }
 
-// ---------------------------------------------------------------- hosts (§11.6)
-
 #[derive(Deserialize)]
 struct NewHost {
     name: String,
@@ -1304,7 +1206,6 @@ struct NewHost {
     remote_path: Option<String>,
 }
 
-/// Write the `[[hosts]]` entry (upsert), then connect and report the outcome.
 async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Result<Response, LcError> {
     if b.name == LOCAL_HOST {
         return Err(LcError::Bad("`local` is reserved for this machine".into()));
@@ -1376,9 +1277,6 @@ async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -
     Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
 }
 
-// ---------------------------------------------------------------- v4.0: tools / models / quota
-
-/// `POST /api/hosts/:name/tools/refresh` — re-run CLI detection now.
 async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     if app.hosts.get(&name).await.is_none() {
         return Err(LcError::NotFound("host".into()));
@@ -1406,7 +1304,6 @@ struct InstallTool {
     via_bot_id: String,
 }
 
-/// `POST /api/hosts/:name/tools/install` — ask a running agent on that host to install + log in.
 async fn install_tool(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
@@ -1417,9 +1314,7 @@ async fn install_tool(
         .into_response())
 }
 
-/// `POST /api/hosts/:name/identities/:identity/login` — open a temporary host shell and run
-/// the identity-scoped CLI login. Terminal output is intentionally only available through the
-/// returned shell pane; it is never put in logs, events, or the response body.
+/// Login output is only visible through the returned shell pane — never in logs, events, or the response.
 async fn login_identity(
     State(app): State<Arc<App>>,
     Path((name, identity)): Path<(String, String)>,
@@ -1451,7 +1346,6 @@ async fn login_identity(
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
 }
 
-/// `GET /api/hosts/:name/gh` — whether `gh` on that host can talk to GitHub.
 async fn get_gh_status(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let v = crate::gh_auth::status(&app, &name).await?;
     Ok((StatusCode::OK, Json(v)).into_response())
@@ -1463,7 +1357,6 @@ struct GhLoginBody {
     user: Option<String>,
 }
 
-/// `POST /api/hosts/:name/gh/login` — auto / copy / device / switch. See API.md.
 async fn login_gh(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
@@ -1473,20 +1366,16 @@ async fn login_gh(
     Ok((StatusCode::OK, Json(v)).into_response())
 }
 
-/// `POST /api/hosts/:name/gh/cancel` — drop an in-flight device-flow login.
 async fn cancel_gh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let v = crate::gh_auth::cancel(&app, &name).await?;
     Ok((StatusCode::OK, Json(v)).into_response())
 }
-
-// ---------------------------------------------------------------- host shells
 
 #[derive(Default, Deserialize)]
 struct NewShell {
     cwd: Option<String>,
 }
 
-/// `POST /api/hosts/:name/shells` — open a plain shell pane on that host.
 async fn open_host_shell(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
@@ -1497,13 +1386,11 @@ async fn open_host_shell(
     Ok((StatusCode::OK, Json(json!(s))).into_response())
 }
 
-/// `GET /api/hosts/:name/shells` — the shells still alive on that host.
 async fn list_host_shells(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
     let shells = shell::list(&app, &name).await?;
     Ok((StatusCode::OK, Json(json!({"host": name, "shells": shells, "max": shell::MAX_PER_HOST}))).into_response())
 }
 
-/// `GET /api/hosts/:name/shells/:pane_id/terminal?source=&lines=` — shape as §7.
 async fn get_host_shell_terminal(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
@@ -1517,11 +1404,10 @@ async fn get_host_shell_terminal(
 #[derive(Deserialize)]
 struct ShellTextIn {
     text: String,
-    /// Defaults to true: typing a line and *not* running it is the unusual case.
+    /// Defaults to true.
     enter: Option<bool>,
 }
 
-/// `POST /api/hosts/:name/shells/:pane_id/text` — type a line into the shell.
 async fn host_shell_text(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
@@ -1531,14 +1417,12 @@ async fn host_shell_text(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-/// Deliberately not `KeysIn`: a shell has no run, so there is no `expect_run_id` to honour
-/// and accepting one would only look as though it did something.
+/// Not `KeysIn`: a shell has no run, so accepting `expect_run_id` would be a lie.
 #[derive(Deserialize)]
 struct ShellKeysIn {
     keys: Vec<String>,
 }
 
-/// `POST /api/hosts/:name/shells/:pane_id/keys` — ctrl+c / esc / arrows.
 async fn host_shell_keys(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
@@ -1548,7 +1432,7 @@ async fn host_shell_keys(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-/// `DELETE /api/hosts/:name/shells/:pane_id` — close it (idempotent).
+/// Idempotent.
 async fn close_host_shell(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
@@ -1562,8 +1446,7 @@ struct ModelsQuery {
     kind: String,
     host: Option<String>,
     refresh: Option<String>,
-    /// claude only: whose `settings.json` the "預設" effort hint is read from. Not required to
-    /// exist — an unknown or wrong-kind name just falls back to the default account (SPEC §17.1).
+    /// claude only; unknown / wrong-kind names fall back to the default account (SPEC §17.1).
     identity: Option<String>,
 }
 
@@ -1575,15 +1458,13 @@ fn flag(v: &Option<String>) -> bool {
 struct ChangelogQuery {
     kind: Option<String>,
     host: Option<String>,
-    /// 現在跑著的版本（claude statusLine 報的）；沒有就只給新版那一段。
+    /// 沒有就只給新版那一段。
     from: Option<String>,
-    /// 目標版本。codex 的更新是 TUI 當場問的、新版還沒進磁碟，版本要由畫面上那句
-    /// `Update available! 0.153.4 -> 0.154.0` 帶進來；不給就回頭探磁碟（claude 的作法）。
+    /// codex 新版還沒進磁碟，要由畫面 `Update available! a -> b` 帶進來；不給就探磁碟。
     to: Option<String>,
 }
 
-/// `GET /api/changelog?kind=claude&host=&from=&to=` — 「有更新」徽章／codex 更新提示按下去先看這個。
-/// 永遠 200：抓不到 changelog 時 `found:false` + `error`，UI 要照實寫「找不到 changelog」。
+/// 永遠 200：抓不到時 `found:false` + `error`，UI 照實寫「找不到 changelog」。
 async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQuery>) -> Result<Json<Value>, LcError> {
     let kind = q.kind.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "claude".to_string());
     if !crate::config::valid_kind(&kind) {
@@ -1599,7 +1480,6 @@ async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQue
     Ok(Json(serde_json::to_value(r).map_err(any_err)?))
 }
 
-/// `GET /api/models?kind=&host=&identity=&refresh=1`
 async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -> Result<Json<Value>, LcError> {
     if !crate::config::valid_kind(&q.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
@@ -1613,21 +1493,15 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
     Ok(Json(v))
 }
 
-/// `GET /api/quota?refresh=1&host=`
-///
-/// `host` narrows a refresh to one host (default: `local` plus every connected remote one).
-/// The body is always the full map — one entry per host + kind (SPEC §14).
 #[cfg(test)]
 mod project_tests {
     use super::*;
 
-    /// `PATCH /api/projects/:id {label}` renames in place and never asks for a restart:
-    /// the label only feeds the `agent_name` slug of the next start.
     #[tokio::test]
     async fn patch_renames_the_project_and_rejects_a_blank_label() {
         let e = crate::testing::env().await;
         let (app, pid) = (e.app.clone(), e.project_id.clone());
-        // `testing::env` only seeds the db row; the rename edits config.toml, so register it.
+        // `testing::env` only seeds the db row; the rename edits config.toml.
         app.cfg
             .update(|cfg| {
                 cfg.projects.push(crate::config::ProjectCfg {
@@ -1654,14 +1528,12 @@ mod project_tests {
         assert_eq!(p.label, "改過的名字", "the label is trimmed and projected into the db");
         assert!(app.cfg.get().await.projects.iter().any(|x| x.label == "改過的名字"), "and written to config.toml");
 
-        // Blank is a 400, and the old label survives.
         let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("   ".into()) }))
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::Bad(_)), "blank label is a 400, got {err:?}");
         assert_eq!(db::project(&app.db, &pid).await.unwrap().unwrap().label, "改過的名字");
 
-        // An unknown project is a 404.
         let err = patch_project(State(app), Path("nope".into()), Json(PatchProject { label: Some("x".into()) }))
             .await
             .unwrap_err();
@@ -1696,9 +1568,7 @@ mod search_tests {
         assert_eq!(s, "資料夾選擇介面的問題");
     }
 
-    /// `İ.to_lowercase()` is two chars, so the lowercased copy is *longer* than the original:
-    /// a hit position measured in it used to index past the end of the original and panic
-    /// (`/search/messages` answered 500 for any message holding one).
+    /// `İ` lowercases to two chars; an index into the lowercased copy used to panic (500).
     #[test]
     fn a_hit_after_a_char_that_grows_when_lowercased_stays_in_bounds() {
         let content = format!("{}命中", "İ".repeat(40));
@@ -1715,32 +1585,23 @@ struct SearchQuery {
     limit: Option<i64>,
 }
 
-/// `%` and `_` are LIKE wildcards and `\` is the escape we declare: a user typing any of
-/// them means the character, not the pattern.
+/// A user typing `%`, `_` or `\` means the character, not the pattern.
 fn like_escape(q: &str) -> String {
     q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
-/// Where `needle_lower` (already lowercase) first appears in `chars`, compared
-/// case-insensitively — as an index into `chars` itself.
-///
-/// Not `content.to_lowercase().find(..)`: lowercasing is not one char per char. `İ` becomes
-/// two (`i` + a combining dot), so an index taken from the lowercased copy can point past the
-/// end of the original — and slicing `chars` with it panicked the whole `/search/messages`
-/// into a 500. Comparing char by char keeps every index in the original's coordinates.
+/// Not `to_lowercase().find(..)`: `İ` lowercases to two chars, so that index can overrun the
+/// original and panicked `/search/messages` into a 500. Char-by-char keeps original coordinates.
 fn find_ci(chars: &[char], needle_lower: &str) -> Option<usize> {
     (0..=chars.len()).find(|&at| starts_with_ci(&chars[at..], needle_lower))
 }
 
-/// Does `hay` start with `needle_lower`, ignoring case? Each haystack char is expanded by
-/// `char::to_lowercase` (one char can yield several) and matched against the needle in order.
 fn starts_with_ci(hay: &[char], needle_lower: &str) -> bool {
     let mut lows = hay.iter().flat_map(|c| c.to_lowercase());
     needle_lower.chars().all(|w| lows.next() == Some(w))
 }
 
-/// A window around the first hit, so the caller sees *why* the message matched rather than
-/// its first 80 characters. Character-based, not byte-based: the content is mostly CJK.
+/// Window around the first hit; char-based since content is mostly CJK.
 fn snippet_around(content: &str, needle_lower: &str, width: usize) -> String {
     let chars: Vec<char> = content.chars().collect();
     let at = find_ci(&chars, needle_lower).unwrap_or(0);
@@ -1757,11 +1618,7 @@ fn snippet_around(content: &str, needle_lower: &str, width: usize) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `GET /api/search/messages?q=` — which bots have said (or been told) this.
-///
-/// Plain `LIKE`, no FTS: the table is small (hundreds to low thousands of rows) and a scan
-/// measures at ~20ms, so an index and its migration would cost more than they save. Revisit
-/// if `messages` ever grows by an order of magnitude.
+/// Plain `LIKE`, no FTS: scan measures ~20ms on a small table; revisit if `messages` grows 10×.
 async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuery>) -> Result<Json<Value>, LcError> {
     let needle = q.q.unwrap_or_default();
     let needle = needle.trim();
@@ -1797,14 +1654,12 @@ async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuer
     Ok(Json(json!({"q": needle, "bots": bots})))
 }
 
-/// Live RSS of every herdr process tree we can reach (SPEC §15). The poller pushes
-/// `mem_updated` when it moves; this is here for the first paint and for anyone polling.
+/// SPEC §15. The poller pushes `mem_updated`; this is for the first paint.
 async fn get_mem(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     Ok(Json(serde_json::to_value(crate::memstat::sample(&app).await).map_err(any_err)?))
 }
 
-/// SPEC §15.4: what that RAM number is made of on one host, so the user can see which
-/// processes are theirs to reclaim and which belong to a bot.
+/// SPEC §15.4.
 async fn get_mem_processes(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
     let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     if app.hosts.get(&host).await.is_none() {
@@ -1813,8 +1668,6 @@ async fn get_mem_processes(State(app): State<Arc<App>>, Query(q): Query<HashMap<
     crate::memproc::processes(&app, &host).await.map(Json).map_err(|e| LcError::Upstream(format!("{e:#}")))
 }
 
-/// `GET /api/mem/processes/pane?host=&pane_id=&socket=&lines=` — the visible text of one pane in the
-/// RAM list, so "自己開的 pane wM:pB" can be told apart from the other nine.
 async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
     let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let Some(pane_id) = q.get("pane_id").filter(|p| !p.is_empty()) else {
@@ -1828,8 +1681,7 @@ async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<Strin
     Ok(Json(crate::memproc::pane_preview(&app, &host, pane_id, socket, lines).await?))
 }
 
-/// SPEC §15.4: signal one process inside a herdr tree. The guard rails (must be in the tree,
-/// never herdr, never a bot) live in `memproc::kill`, which re-samples first.
+/// SPEC §15.4. Guard rails (in the tree, never herdr, never a bot) live in `memproc::kill`, which re-samples first.
 async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Result<Json<Value>, LcError> {
     let host = body.get("host").and_then(|v| v.as_str()).unwrap_or(crate::config::LOCAL_HOST).to_string();
     let Some(pid) = body.get("pid").and_then(|v| v.as_i64()) else {
@@ -1876,9 +1728,6 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
     Ok(Json(crate::quota::snapshot(&app).await))
 }
 
-
-// ---------------------------------------------------------------- identities
-
 #[derive(Deserialize)]
 struct NewIdentity {
     name: String,
@@ -1916,7 +1765,6 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     }
     reproject(&app).await?;
     app.emit("identities_changed", json!({})).await;
-    // A new identity has no login answer on any host yet; ask each one in the background.
     for c in app.hosts.list().await {
         crate::tools::spawn_detect(app.clone(), c.name.clone());
     }
@@ -1937,9 +1785,7 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
         })
         .await
         .map_err(any_err)?;
-    // Drop the stale per-host login rows rather than leaving a deleted identity on the strip.
-    // A `ccN` alias of the same name is a *different* entry (SPEC §16) and survives: it is put
-    // back from that host's `shell_identities`, which the config never owned.
+    // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
     for ht in app.tools.lock().await.values_mut() {
         ht.identities.remove(&name);
         if let Some(i) = ht.shell_identities.iter().find(|i| i.name == name) {
@@ -1952,25 +1798,19 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-// ---------------------------------------------------------------- run control
-
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let run_id = lifecycle::start_bot(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
 }
 
-/// SPEC §6.9 — 批次：挑出「帶著 claude 更新且閒置」的 bot，背景一顆一顆 exit + resume。
-///
-/// 立刻回計畫（誰要重啟、誰被跳過與原因），進度與摘要走 WS。一顆 `stop_bot` 最久等十秒，
-/// 五顆就一分鐘——同步做完再回會把 HTTP 連線拖死。
+/// SPEC §6.9。立刻回計畫、進度走 WS：一顆 `stop_bot` 最久十秒，同步做完會拖死 HTTP 連線。
 async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcError> {
     let plan = crate::bulk_restart::spawn(&app).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok((StatusCode::ACCEPTED, Json(plan)).into_response())
 }
 
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 子 agent 的 pane 是父 agent 開的，一般的 stop + start 會拒絕（SPEC §6.5a）：改成在它
-    // 自己那個 pane 裡 exit + resume，套用 claude 更新的入口對子 agent 才是通的。
+    // 子 agent 的 pane 是父開的，stop + start 會被拒（SPEC §6.5a），改在原 pane 裡 exit + resume。
     let child = db::bot(&app.db, &id).await.map_err(any_err)?.is_some_and(|b| b.managed_by == "child");
     let run_id =
         if child { lifecycle::restart_child_in_pane(&app, &id).await? } else { lifecycle::restart_bot(&app, &id).await? };
@@ -1992,28 +1832,19 @@ async fn interrupt_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> R
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-/// `POST /api/bots/:id/abort` — 強制結束目前回合（送不送得出 `esc` 都解鎖）。
+/// 送不送得出 `esc` 都解鎖。
 async fn abort_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let out = lifecycle::abort_turns(&app, &id).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 
-/// 對正在跑的 bot 送登入指令：它的 TUI 會切進登入 / 切換帳號流程（claude 與 grok 的
-/// `/login`），在使用者完成之前這個 bot 不能工作。這裡只負責把指令送進去——登入完成與否
-/// 由 `POST /hosts/:name/tools/refresh` 重新偵測。
-///
-/// 404 = 沒有這個 bot；400 `login_unsupported` = 這個 kind 的 TUI 沒有登入指令（codex）；
-/// 409 = 現在送不出去（`not_running` / `agent_busy` / `turn_in_flight` / `no_pane`）；
-/// 502 = herdr 拒絕。
+/// 只把 `/login` 送進去；完成與否由 `tools/refresh` 重新偵測。
 async fn login_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let out = lifecycle::login(&app, &id).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 
-/// Move a running bot's pane into a tab of its own, so it stops sharing the workspace's
-/// width with its neighbours. The retrofit for bots started before one-bot-one-tab; the bot
-/// keeps running throughout. 404 when there is no active run or no pane behind it, 502 when
-/// herdr refuses; already-solo is a 200 that changes nothing.
+/// Retrofit for bots started before one-bot-one-tab; the bot keeps running.
 async fn move_bot_pane_to_tab(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     lifecycle::move_pane_to_own_tab(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -2023,14 +1854,11 @@ async fn move_bot_pane_to_tab(State(app): State<Arc<App>>, Path(id): Path<String
 struct PromptIn {
     text: String,
     client_request_id: Option<String>,
-    /// Attachment ids from `POST /bots/:id/attachments`, in display order.
+    /// In display order.
     #[serde(default)]
     attachments: Vec<String>,
-    /// 送出這句話的**不是**畫面前的使用者時要帶：另一顆 bot 的 id，或哨符 `daemon`
-    /// （launchd 的例行腳本、daemon 自己的通知）。省略 = 使用者自己打的。
-    ///
-    /// 2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」——
-    /// 總管的對話裡混著使用者的指示、別的 bot 的申請與排程腳本的派工，全部長成同一顆藍泡泡。
+    /// 另一顆 bot 的 id 或哨符 `daemon`；省略 = 使用者自己打的。
+    /// 2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」。
     #[serde(default)]
     relay_from: Option<String>,
 }
@@ -2041,8 +1869,7 @@ async fn prompt_bot(
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    // 來源只收「真的存在的 bot」或哨符 daemon：這顆欄位會直接畫成「X → 這顆 bot」，
-    // 讓呼叫端隨便填等於讓它冒名。
+    // 只收存在的 bot 或哨符 daemon：隨便填等於讓呼叫端冒名。
     let relay_from = match b.relay_from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(crate::agent_relay::DAEMON_SENDER) => Some(crate::agent_relay::DAEMON_SENDER.to_string()),
@@ -2055,10 +1882,7 @@ async fn prompt_bot(
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 
-/// `POST /api/bots/:id/attachments?name=<filename>` with the raw image as the body.
-///
-/// Raw bytes rather than multipart: the composer only ever sends one file per call, and it
-/// keeps the daemon free of a form-parsing dependency.
+/// Raw bytes, not multipart: one file per call, and no form-parsing dependency.
 async fn upload_attachment(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -2098,14 +1922,13 @@ async fn upload_attachment(
     if !crate::attach::is_image(&mime) {
         return Err(LcError::Bad(format!("only images can be attached (Content-Type was `{mime}`)")));
     }
-    // `{:#}` so the ssh / filesystem cause reaches the UI, not just "copy attachment to …".
+    // `{:#}` so the ssh / filesystem cause reaches the UI.
     let a = crate::attach::save(&app, &id, name, &mime, &body)
         .await
         .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok((StatusCode::OK, Json(crate::attach::to_json(&a))).into_response())
 }
 
-/// The stored bytes, for the UI's thumbnail (fetched with the token, then blob-URL'd).
 async fn get_attachment(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let (mime, data) = crate::attach::read(&app, &id).await.map_err(|e| {
         tracing::warn!(attachment = %id, error = %e, "attachment read failed");
@@ -2133,12 +1956,11 @@ async fn keys_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): 
 #[derive(Deserialize)]
 struct TextIn {
     text: String,
-    /// 打完字要不要按 Enter。預設要——呼叫端要的幾乎都是「送出這句」。
+    /// 預設 true。
     enter: Option<bool>,
     expect_run_id: Option<String>,
 }
 
-/// `POST /api/bots/:id/text` — 把整段文字打進 bot 的 pane（多行照原樣），預設接一個 Enter。
 async fn text_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<TextIn>) -> Result<Response, LcError> {
     lifecycle::send_text(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -2149,16 +1971,12 @@ async fn abandon_turn(State(app): State<Arc<App>>, Path(id): Path<String>) -> Re
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-// ---------------------------------------------------------------- reads
-
 async fn get_messages(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
-    // `conversation_id` creates the conversation on first use; for an id that is not a bot at
-    // all that INSERT trips the foreign key and came back as 502 (review 2026-09-12 #9). A
-    // deleted bot is still readable — API.md §10.4 promises its history stays.
+    // Unknown id would trip the FK in `conversation_id` → 502 (review 2026-09-12 #9); deleted bots stay readable (API.md §10.4).
     if db::bot(&app.db, &id).await.map_err(any_err)?.is_none() {
         return Err(LcError::NotFound("bot".into()));
     }
@@ -2201,7 +2019,7 @@ async fn get_messages(
     Ok(Json(json!({"bot_id": id, "conversation_id": conv, "messages": msgs, "turns": turns, "has_more": has_more})))
 }
 
-/// SPEC §13.4: the project group timeline (every member bot's messages, merged).
+/// SPEC §13.4.
 async fn get_project_messages(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -2251,10 +2069,7 @@ async fn get_terminal(
         .await
         .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))?;
     let read = client.pane_read(&pane, &source, lines).await.map_err(any_err)?;
-    // Pane geometry, so the UI can explain an unreadable snapshot instead of just showing it:
-    // below roughly 60 columns a TUI agent lays its own text out one fragment per row and the
-    // spaces fall off the ends, which no amount of parsing recovers (observed on `w8:pK` at 31).
-    // Best effort — a snapshot is still worth returning without it.
+    // Below ~60 columns TUI text is unrecoverably fragmented (seen on `w8:pK` at 31); lets the UI explain it.
     let (columns, rows) = match client.pane_size(&pane).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
@@ -2266,8 +2081,6 @@ async fn get_terminal(
         "columns": columns, "rows": rows,
     })))
 }
-
-// ---------------------------------------------------------------- websocket
 
 async fn ws_handler(
     State(app): State<Arc<App>>,
@@ -2287,7 +2100,6 @@ async fn ws_handler(
 
 async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     let mut rx = app.subscribe();
-    // Replay or ask for a resync before streaming live events.
     let backlog = match since {
         Some(s) => app.backlog(s).await,
         None => Some(vec![]),
@@ -2341,7 +2153,6 @@ mod order_tests {
         assert_eq!(items, ids(&["c", "a", "b"]));
     }
 
-    /// 別的 client 剛新增、這個請求還不知道的項目：維持原相對順序接在後面，不被丟掉。
     #[test]
     fn unnamed_items_keep_their_relative_order_at_the_end() {
         let mut items = ids(&["a", "new1", "b", "new2"]);
@@ -2349,7 +2160,6 @@ mod order_tests {
         assert_eq!(items, ids(&["b", "a", "new1", "new2"]));
     }
 
-    /// 沒有 id 的（手寫 config 還沒補 id）也一樣不能消失。
     #[test]
     fn items_without_an_id_survive() {
         let mut items = vec![Some("a".to_string()), None, Some("b".to_string())];
@@ -2426,8 +2236,7 @@ mod message_tests {
         ));
     }
 
-    /// An id that is not a bot is 404, not 502 (review 2026-09-12 #9) — and a deleted bot still
-    /// answers, because its history is kept (API.md §10.4).
+    /// review 2026-09-12 #9; deleted bots still answer (API.md §10.4).
     #[tokio::test]
     async fn messages_for_an_unknown_bot_are_not_found() {
         let e = crate::testing::env().await;
@@ -2474,16 +2283,13 @@ mod delete_bot_tests {
         id
     }
 
-    /// Deleting a bot whose host is unreachable must not leave its run `running` for ever
-    /// (review 2026-09-12 d): the bot is gone from every list a reconcile walks, so nothing
-    /// else would ever end that run.
+    /// review 2026-09-12 d: no reconcile walks deleted bots, so nothing else would end that run.
     #[tokio::test]
     async fn a_bot_deleted_while_its_host_is_down_does_not_keep_a_running_run() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         let id = a_bot(&e, "remote-ish", "user").await;
         let run = db::ulid();
-        // A session no client answers for: `stop_bot` fails before touching anything.
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)
              VALUES (?,?,'running','idle','pane-x','agent','no-such-session',?)",
@@ -2504,7 +2310,6 @@ mod delete_bot_tests {
         assert_eq!(r.state, "exited");
         assert!(r.ended_at.is_some());
     }
-
 }
 
 #[cfg(test)]

@@ -25,13 +25,8 @@ pub struct WsEvent {
     pub data: Value,
 }
 
-/// An internal "this turn is no longer in flight" notification.
-///
-/// Deliberately **not** a WS event: the WS bus is the front end's, with a 200-entry ring
-/// buffer and a `resync` escape hatch, which is fine for a UI and useless for a scheduler
-/// that must not miss a single turn. Everything that leaves `turns.status = 'in_flight'`
-/// (hook match, terminal fallback, stall watchdog, stop, interrupt) goes through
-/// `lifecycle::emit_turn`, so publishing there covers every path.
+/// 內部的「這個回合不再 in-flight」通知。刻意**不是** WS 事件：WS 有 200 筆 ring 與 resync，
+/// 對 UI 夠用，對不能漏任何一筆的訂閱者不行。所有離開 `in_flight` 的路徑都走 `lifecycle::emit_turn`。
 #[derive(Debug, Clone, Serialize)]
 pub struct TurnEvent {
     pub bot_id: String,
@@ -93,12 +88,10 @@ pub struct App {
     pub stall_timers: Mutex<HashMap<String, u64>>,
     /// run_id -> live-progress poller (streams the partial reply while a turn is in flight)
     pub progress_pollers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    /// run_id -> when that run last emitted a `turn_progress` frame (API.md: at most 4/s per run).
-    /// Kept on `App` rather than inside the poller task so re-arming a poller — a new turn on the
-    /// same run — cannot restart the budget and burst.
+    /// run_id -> 上次發 `turn_progress` 的時間（API.md：每個 run 每秒最多 4 幀）。放在 `App` 而不是
+    /// poller 裡，否則同一個 run 換一回合就重開預算、一次爆量。
     pub progress_emitted: Mutex<HashMap<String, std::time::Instant>>,
-    /// run_id -> pane revision for the last feedback survey dismissal attempt. The status event
-    /// path and the periodic sweep share this guard so one survey cannot be dismissed twice.
+    /// run_id -> 上次關滿意度問卷時的 pane revision：事件路徑與定期巡邏共用，避免按兩次。
     pub survey_revisions: Mutex<HashMap<String, u64>>,
     /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
@@ -116,8 +109,7 @@ pub struct App {
     pub submodules_cache: Mutex<HashMap<String, (std::time::Instant, Vec<crate::github::Submodule>)>>,
     /// In-flight GitHub device-flow logins, keyed by host name. Memory only; never persisted.
     pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
-    /// Plain shells this daemon opened on a host (`POST /hosts/:name/shells`). Memory only:
-    /// it doubles as the whitelist for sending keys, and a restart must not inherit one.
+    /// 這個 daemon 開過的主機 shell。只放記憶體：它同時是送鍵的白名單，重啟不該繼承。
     pub host_shells: crate::api::shell::Registry,
 }
 
@@ -190,8 +182,7 @@ impl App {
         }
     }
 
-    /// Resolve a client for an explicit host/session pair. The local default session is a
-    /// second socket, not another HostConn, and is intentionally never started by the daemon.
+    /// 指定 host/session 的 client。本機 default session 是另一條 socket，daemon 不會去啟動它。
     pub async fn herdr_for_session(&self, host: &str, session: &str) -> Option<HerdrClient> {
         if host == LOCAL_HOST {
             if session == "default" {
@@ -204,8 +195,7 @@ impl App {
         (expected == session).then(|| conn.client.clone())
     }
 
-    /// Resolve the effective session for a bot. Remote bots always use their host's configured
-    /// named session; only local imported bots can point at `default`.
+    /// bot 實際用的 session：遠端一律是該 host 設定的 named session，只有本機採用的 bot 可指向 `default`。
     pub async fn session_for_bot(&self, bot: &crate::db::Bot, host: &str) -> Option<String> {
         if host == LOCAL_HOST {
             Some(bot.herdr_session.clone().unwrap_or_else(|| self.herdr_session.clone()))
@@ -232,8 +222,7 @@ impl App {
         self.session_connected(&host, &session).await
     }
 
-    /// Effective session for an existing run. New runs store it explicitly; old rows inherit
-    /// their bot/project session so restarts remain compatible.
+    /// 既有 run 的 session：新 run 會存，沒存的沿用 bot／專案的設定。
     pub async fn session_for_run(&self, run: &crate::db::Run) -> Option<String> {
         if let Some(session) = run.herdr_session.clone().filter(|s| !s.is_empty()) {
             return Some(session);
@@ -270,8 +259,7 @@ impl App {
         self.bus.subscribe()
     }
 
-    /// Subscribe to turn completions. There is no ring buffer here — a
-    /// subscriber that lags gets `RecvError::Lagged` and must re-read the DB.
+    /// 訂閱回合結束。沒有 ring buffer：落後的訂閱者拿到 `RecvError::Lagged`，自己回頭讀 DB。
     #[allow(dead_code)]
     pub fn subscribe_turns(&self) -> broadcast::Receiver<TurnEvent> {
         self.turn_bus.subscribe()
@@ -289,10 +277,8 @@ impl App {
     }
 
     pub async fn emit(&self, kind: &str, data: Value) {
-        // The seq is taken *inside* the ring lock, so ring order and seq order are the same
-        // thing and the bus sees events in seq order too. Numbered outside it, two concurrent
-        // emits could take 5 and 6 and push 6 first; a client that disconnected after 6 asked
-        // for `since=6` on reconnect and never got 5 (review 2026-09-12 f).
+        // seq 在 ring 鎖**內**取，ring 順序＝seq 順序。在鎖外編號的話兩個並行 emit 可能先推 6 再推 5，
+        // 斷線後帶 `since=6` 重連的客戶端就永遠收不到 5（review 2026-09-12 f）。
         {
             let mut ring = self.ring.lock().await;
             let ev = WsEvent { seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1, kind: kind.to_string(), data };

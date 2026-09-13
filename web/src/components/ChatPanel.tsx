@@ -61,10 +61,7 @@ export const KIND_TITLE: Record<BotKind, string> = {
   grok: 'Grok',
 }
 
-/**
- * 訊息時間只到分。秒數在對話裡沒有人在讀，但它是每一則訊息旁邊都有的一串數字——
- * 精確到秒的完整時間仍在 `title` 裡。
- */
+/** 訊息時間只到分；完整時間在 `title`。 */
 function timeOf(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })
@@ -78,20 +75,7 @@ function systemNoticeText(content: string): string {
   return n === '1' ? 'Codex 還有 1 次額度重置可用' : `Codex 還有 ${n} 次額度重置可用`
 }
 
-/**
- * One message, shown in full (long content scrolls with the list — nothing is folded).
- * Metadata (speaker / recipients + time) always sits ABOVE the bubble (18px row).
- */
-/**
- * 一則訊息。`memo`：串流中每個 `turn_progress`（每秒兩三個）都會讓 `MessageList` 重新
- * render，沒有 memo 的話畫面上每一則的 react-markdown 都跟著重新解析——200 則時每個 tick
- * 一兩百毫秒的 long task（issue #8）。訊息物件本身不會變，所以 shallow 比較就夠。
- */
-/**
- * `relay_from` 有值的 user 訊息不是使用者自己打的，是別的 bot（目前只有 AGM 總管）
- * 代為交辦的。不標的話它跟使用者的話長得一模一樣，讀對話的人會以為是自己派的工。
- * 對不到 bot（已刪除／daemon 自己發的）就退回 ID，不假裝知道是誰。
- */
+/** `relay_from` 有值＝別的 bot 代為交辦，不標會被當成使用者自己派的工；對不到 bot 就退回 ID。 */
 const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; toId: string | null }) {
   const names = useStore(
     useShallow((s) => ({
@@ -99,9 +83,7 @@ const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; to
       to: toId ? (s.bots.find((b) => b.id === toId)?.name ?? '') : '',
     })),
   )
-  // `daemon` 是哨符不是 bot id（`agent_relay::DAEMON_SENDER`）：launchd 的例行腳本與 daemon 自己
-  // 發的通知都掛這個。寫成「daemon 自動觸發」比印一個 `daemon` 清楚——讀的人要知道的是「沒有人
-  // 按過這一下」。
+  // `daemon` 是哨符不是 bot id（`agent_relay::DAEMON_SENDER`）：排程／daemon 自發，沒有人按過。
   const daemon = fromId === 'daemon'
   return (
     <span
@@ -114,6 +96,7 @@ const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; to
   )
 })
 
+/** 一則訊息。`memo`：串流 tick 會重 render 清單，不 memo 就每則重解析 Markdown（issue #8）。 */
 export const Bubble = memo(function Bubble({
   msg,
   from,
@@ -134,10 +117,8 @@ export const Bubble = memo(function Bubble({
   const system = msg.role === 'system'
   const rail = system || msg.source === 'hook' || msg.source === 'system'
   const daemonNotice = msg.role === 'user' && msg.content.trimStart().startsWith('[AG Man 通知]')
-  // 使用者親手轉述的總管訊息（2026-09-12 使用者：「算在 AGM 訊息不算在 user」）。AGM 自己透過
-  // relay 送的那種有 `relay_from`，畫法早就分開了（`relayedMessage.css`）；但使用者常常是自己把
-  // AGM 的裁示貼進來的——那種 `relay_from` 是空的，於是整段變成他自己的藍泡泡，回頭讀對話就
-  // 分不出哪句是他的決定、哪句是總管的。只認開頭：`AGM …：` 或 `[AGM …]`，句中提到 AGM 不算。
+  // 使用者貼進來的 AGM 裁示（沒有 relay_from）另標（2026-09-12 使用者：「算在 AGM 訊息不算在 user」）。
+  // 只認開頭 `AGM …：` 或 `[AGM …]`，句中提到不算。
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
   const notify = useStore((s) => s.notify)
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
@@ -145,7 +126,7 @@ export const Bubble = memo(function Bubble({
   })
 
   return (
-    /* `data-msg-id`：唯一能從清單外面（浮窗、之後的搜尋）指回某一則訊息的把手。 */
+    /* `data-msg-id`：從清單外（浮窗）指回這則訊息的把手。 */
     <article className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}`} data-msg-id={msg.id}>
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
@@ -162,9 +143,7 @@ export const Bubble = memo(function Bubble({
             </span>
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
-          {/* 來源只在「不是正常那條路」時才標。`hook` 是每一則回覆的常態，在每顆氣泡上
-              印一次「回覆」等於沒說話；會影響你要不要信這段文字的是另外那幾種——終端
-              擷取、對話紀錄、系統通知。 */}
+          {/* 來源只在非 `hook` 常態時才標（影響可信度的那幾種）。 */}
           {system || msg.source === 'system' ? (
             <span className="src-tag mono" title={`訊息來源：${msg.source}`}>
               {SOURCE_LABEL[msg.source] ?? msg.source}
@@ -184,8 +163,7 @@ export const Bubble = memo(function Bubble({
       </div>
       <div
         className={`bubble bubble-copyable${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}`}
-        /* 不放 title：桌機游標停在氣泡上時，瀏覽器的原生 tooltip 會直接壓在正文上
-           （2026-09-12 使用者截圖）。點一下複製本來就有 toast 回饋，不需要預告。 */
+        /* 不放 title：原生 tooltip 會壓在正文上（2026-09-12 使用者截圖）。 */
         {...tapCopy}
       >
         {!msg.content ? (
@@ -203,23 +181,14 @@ export const Bubble = memo(function Bubble({
 })
 
 /**
- * The whole pane as it looked when a terminal-fallback message was captured.
- *
- * `content` is a slice cut out of this, and the cut is what goes wrong: the fallback fires
- * 5s after a `working -> idle` edge, so a screen that still says `Running 1 shell command…`
- * gets stored as the reply while the real answer prints a moment later. The daemon has kept
- * the full screen all along (`messages.terminal_snapshot`, already on the wire) — it just was
- * not shown anywhere, so the answer looked lost when it was one click away.
- *
- * 只掛在 `terminal_fallback` 上。Codex 帳號提示也曾把整片啟動畫面存進來，塞進系統 pill
- * 會變成框中框（框線、model/directory、Tip，兩千字沒人要讀）。
+ * Full pane at terminal-fallback capture time: the cut `content` can miss the real answer
+ * (fallback fires 5s after working→idle). 只掛 `terminal_fallback`，系統 pill 不放（框中框）。
  */
 function TerminalSnapshot({ msg }: { msg: Message }) {
   const [open, setOpen] = useState(false)
   if (msg.source !== 'terminal_fallback') return null
   const snap = msg.terminal_snapshot?.trim()
   if (!snap) return null
-  // Nothing to expand when the cut kept everything there was.
   if (snap === msg.content.trim()) return null
   return (
     <div className="msg-snapshot">
@@ -233,18 +202,8 @@ function TerminalSnapshot({ msg }: { msg: Message }) {
 }
 
 /**
- * The in-flight turn's tail: a live bubble with the partial reply (`turn_progress`, API.md
- * v3.9) once there is text, otherwise the typing indicator. Styled like an assistant bubble
- * so it turns into the final message in place.
- *
- * The meta line is three-state: streaming text → 「輸出中…」; no text but an `activity` row
- * (API.md v4.1, e.g. `Thinking… (12s · ↑ 1.2k tokens)`) → that row verbatim, so a long
- * thinking / tool phase is not silent; neither → 「等待回覆…」. `activity` comes
- * straight off the terminal, so it is rendered as plain text, never Markdown.
- *
- * `alert` (API.md v4.2) is the one thing that outranks all of it: while the CLI is retrying an
- * upstream failure the spinner keeps spinning and the turn stays in flight, so the bubble would
- * otherwise look perfectly healthy. It gets its own warning row under the meta line.
+ * In-flight turn tail (`turn_progress`, API.md v3.9). `activity` (v4.1) is raw terminal text —
+ * never Markdown. `alert` (v4.2) gets its own row: a retrying CLI otherwise looks healthy.
  */
 export function LiveBubble({
   text,
@@ -259,13 +218,12 @@ export function LiveBubble({
   alert?: string | null
   from?: string
   kind?: BotKind
-  /** 這一泡泡專屬的逃生門（`AbandonTurnAction`）；放在狀態列右端，沒有就不佔位。 */
+  /** 狀態列右端的逃生門（`AbandonTurnAction`）。 */
   action?: ReactNode
 }) {
   const act = activity?.trim() ? activity.trim() : null
   const warn = alert?.trim() ? alert.trim() : null
-  // 有字也先不攤開（2026-09-08）：還在長的半成品逐字跳，讀了也是白讀，而且會把整串訊息
-  // 一直往下推。預設只留「輸出中…」，使用者想看才點開；這一回合內記住選擇。
+  // 半成品預設收起（2026-09-08）：逐字跳讀了白讀、還會一直推動清單。
   const [open, setOpen] = useState(false)
   const showText = Boolean(text) && open
   return (
@@ -280,8 +238,7 @@ export function LiveBubble({
           <TypingDots />
         )}
       </div>
-      {/* Below the bubble, unlike a finished message: the status belongs at the growing
-          edge of the output, which is where the eye already is. */}
+      {/* Below the bubble: status sits at the growing edge, where the eye is. */}
       <div className="msg-meta msg-meta-below">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
@@ -307,11 +264,7 @@ export function LiveBubble({
   )
 }
 
-/**
- * The live tail owns all turn-progress subscriptions. Historical message lists only need
- * their stable message array; ResizeObserver in `useScrollTail` still follows this bubble as
- * its height changes without making the list parse every historical Markdown message again.
- */
+/** Owns the turn-progress subscriptions so history lists don't re-render on every tick. */
 export function LiveReplyBubble({
   botId,
   kind,
@@ -375,12 +328,7 @@ export function TypingDots() {
   )
 }
 
-/**
- * 「載入更早的訊息」（issue #25）。
- *
- * store 只留每個對話最近 `MESSAGE_CAP` 則——第一頁本來就可能有 `has_more`，開一整天之後
- * 更早的也會被截掉。這顆按鈕釘在清單最上方，按下去走 `before=` 分頁把上一頁接回去。
- */
+/** 「載入更早的訊息」（issue #25）：store 只留最近 `MESSAGE_CAP` 則，走 `before=` 分頁接回。 */
 export function LoadEarlier({ id, onLoad }: { id: string; onLoad: (id: string) => void }) {
   const show = useStore((s) => Boolean(s.moreMessages[id]))
   const loading = useStore((s) => Boolean(s.loadingMore[id]))
@@ -407,27 +355,15 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
 }
 
 /**
- * 「這回合的提問」浮窗：桌面在回合跑起來之後把問題釘在對話區最下方；手機只在回合
- * 已經完成後保留，避免執行中的提示蓋住輸出與輸入區。
- *
- * 為什麼要有它：回合一長，agent 的輸出會把提問推到捲軸上面幾千 px 之外，而「它到底在做
- * 我交代的哪件事」正是這段等待裡唯一想確認的事。這時候要嘛往回捲（就失去了輸出的尾巴），
- * 要嘛憑記憶——兩個都不好。
- *
- * 為什麼是浮窗而不是一條固定的列：它只在回合進行中存在，若佔掉版面高度，每個回合的開始
- * 與結束都會讓整串訊息上下跳一次。浮在最下方、貼著 composer：等待時視線本來就盯著底部，
- * 提問跟輸出的尾巴在同一個地方（2026-09-08 依使用者要求從上緣移下來，見 UI-DECISIONS）。
- *
- * 互動是兩段的：夾成三行 → 點一下展開全文 → 再點一下捲到那則訊息並閃一下。第二段之後
- * 收回夾行狀態——人已經被送到訊息本身了，浮窗不必再佔著三行以上。內容本來就短（沒被夾）
- * 時沒有第一段，一點就直接捲過去。
+ * 「這回合的提問」浮窗：輸出把提問推遠時不必往回捲。浮窗不佔高度，免得回合開始／結束讓清單跳動；
+ * 貼 composer 下緣（2026-09-08 依使用者要求從上緣移下來，見 UI-DECISIONS）。手機只在回合完成後顯示。
  */
 function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
-  // 關閉與展開都綁在 turn 上：換回合就自動回到「夾三行、沒關過」，不需要 effect 去清。
+  // 狀態綁 turn：換回合自動重設，不需要 effect。
   const [ui, setUi] = useState({ turn: turnId, closed: false, open: false })
   if (ui.turn !== turnId) setUi({ turn: turnId, closed: false, open: false })
   const bodyRef = useRef<HTMLButtonElement>(null)
-  // 只有真的被夾掉才有「展開」這一段；短提問一點就走。夾行狀態下量，展開後沿用上次的值。
+  // 真的被夾掉才有「展開」這一段；只在夾行狀態下量。
   const [clamped, setClamped] = useState(false)
   useLayoutEffect(() => {
     const el = bodyRef.current
@@ -481,12 +417,7 @@ function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; on
   )
 }
 
-/**
- * 這個回合跑多久之後，才把「強制中止」露出來（秒）。
- *
- * 刻意不是立刻出現：正常回合開頭本來就會有一段只在想、沒有輸出的時間，那時候按這顆只會
- * 弄壞好好的回合。等一分鐘之後還停在「等待回覆…」，才比較像是收尾判斷失準。
- */
+/** 回合跑多久才露出「強制中止」（秒）：開頭本來就會安靜一陣，太早出現只會誘導誤按。 */
 const ABANDON_AFTER_S = 60
 
 function elapsedLabel(sec: number): string {
@@ -496,24 +427,19 @@ function elapsedLabel(sec: number): string {
 }
 
 /**
- * 卡住時的逃生門：`POST /api/turns/:id/abandon`，把這個回合標成 failed，讓 composer 解鎖。
- *
- * 跟標題列的「中斷」是兩件事：「中斷」是對 pane 送 esc（要 agent 停手），這裡完全不碰 agent，
- * 只推翻 daemon 這邊「回合還在跑」的認定。所以它不放在標題列——放在 live 泡泡的狀態列右端，
- * 也就是使用者盯著「等待回覆…」出不來時眼睛已經在的地方，而且一分鐘後才出現。
+ * 卡住時的逃生門：`POST /api/turns/:id/abandon` 標 failed 解鎖 composer。不碰 agent（不同於送 esc
+ * 的「中斷」），只推翻 daemon 的 in-flight 認定。
  */
 export function AbandonTurnAction({ botId }: { botId: string }) {
   const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
   const createdAt = useStore((s) => inFlightTurn(s, botId)?.created_at ?? null)
   const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? '這個 Bot')
   const abandonTurn = useStore((s) => s.abandonTurn)
-  // 確認框記的是「替哪個 turn 開的」而不是單純的布林：回合換人 / 結束時對話框自己就關了，
-  // 不需要一個只為了 setState 的 effect（也不會誤把確認套到下一個回合上）。
+  // 記 turn id 而非布林：回合換掉時確認框自動失效，不會套到下一回合。
   const [openFor, setOpenFor] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
-  // 只有真的有回合在跑才計時。turnId 換人時 `now` 可能還是舊的，算出來的 elapsed 會偏小 →
-  // 按鈕晚幾秒才出現，這個方向是安全的（寧可晚出現，不要對剛開始的回合誘導誤按）。
+  // 換 turn 時 `now` 可能舊→elapsed 偏小、按鈕晚出現，這方向安全。
   useEffect(() => {
     if (!turnId) return
     const t = setInterval(() => setNow(Date.now()), 5000)
@@ -565,12 +491,7 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
   )
 }
 
-/**
- * debug 用的 run 識別列：herdr 那邊的 pane / agent / workspace / session，加上 daemon 這邊的
- * run id。以前只有 `.main-status` 的 tooltip 藏著 pane_id，要 hover 又不能複製。
- *
- * 收在標題列底下、預設收合：常態使用不需要它，但要 debug 時一鍵就能全部攤開來複製。
- */
+/** debug 用的 run 識別列（herdr pane/agent/session/workspace＋run id），預設收合、可複製。 */
 function RunDebugBar({ botId }: { botId: string }) {
   const run = useStore((s) => s.runs[botId] ?? null)
   const agentName = useStore((s) => s.bots.find((b) => b.id === botId)?.agent_name ?? null)
@@ -587,10 +508,7 @@ function RunDebugBar({ botId }: { botId: string }) {
   )
 }
 
-/**
- * 這回合要回想的那則提問：優先找**這個回合自己**的 user 訊息，沒有（bot 起頭的回合）
- * 才退回整串的最後一則。退回的那則仍然是「使用者最後說的話」，比什麼都不顯示有用。
- */
+/** 優先這回合自己的 user 訊息；bot 起頭的回合退回整串最後一則。 */
 function lastAskOf(list: Message[], turnId: string): Message | null {
   let newest: Message | null = null
   for (let i = list.length - 1; i >= 0; i--) {
@@ -605,13 +523,7 @@ function lastAskOf(list: Message[], turnId: string): Message | null {
 /** 捲過去之後那則訊息閃多久（毫秒）。 */
 const FLASH_MS = 1600
 
-/**
- * 這則訊息現在還在不在捲軸的可視範圍裡。
- *
- * 「這回合的提問」浮窗只有在提問被輸出推出畫面之外時才有意義。回覆預設是收著的（畫面上
- * 只有一行「輸出中…」），這時提問就在眼前，再浮一張寫著同一句話的卡片只是重複
- * （2026-09-11 使用者）。所以看得見就不浮，被推走了才浮。
- */
+/** 訊息是否在可視範圍：提問看得見就不浮浮窗，免得重複（2026-09-11 使用者）。 */
 function useMsgVisible(boxRef: RefObject<HTMLDivElement | null>, msgId: string | null, listLen: number): boolean {
   const [visible, setVisible] = useState(false)
   useEffect(() => {
@@ -629,7 +541,7 @@ function useMsgVisible(boxRef: RefObject<HTMLDivElement | null>, msgId: string |
     )
     io.observe(el)
     return () => io.disconnect()
-    // `listLen`：那則訊息可能是這一輪才掛上來的，清單長度一變就重新綁。
+    // `listLen`：訊息可能這一輪才掛上來，長度變就重綁。
   }, [boxRef, msgId, listLen])
   return visible
 }
@@ -658,8 +570,7 @@ function MessageList({ botId }: { botId: string }) {
   }, [flashId])
 
   const list = messages ?? []
-  // 手機的提示只在已完成且確實有回覆的回合顯示；doing / in-flight 時讓輸出區保持乾淨。
-  // 桌面維持原本的「執行中固定住問題」行為。
+  // 手機只在已完成且有回覆的回合顯示；桌面在執行中顯示。
   const completedAnswered = latestCompletedTurnId !== null && list.some(
     (m) => m.role === 'assistant' && m.turn_id === latestCompletedTurnId,
   )
@@ -669,20 +580,15 @@ function MessageList({ botId }: { botId: string }) {
   const lastAsk = turnId ? lastAskOf(list, turnId) : null
   const askVisible = useMsgVisible(tail.ref, lastAsk?.id ?? null, list.length)
 
-  /**
-   * 捲到某一則訊息。用 rect 差而不是 `offsetTop`：`.msg-list` 自己沒有 `position`，
-   * offsetParent 會落到 `.msg-list-wrap` 上，算出來的值差一個 padding。
-   * `scrollIntoView` 也不用——它會連帶捲動外層容器。
-   */
+  // 用 rect 差：`offsetTop` 會差一個 wrap 的 padding；`scrollIntoView` 會連帶捲外層容器。
   const jumpTo = (id: string) => {
     const box = tail.ref.current
     const el = box?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`)
     if (!box || !(el instanceof HTMLElement)) return
     const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
-    // 浮窗自己蓋住最上緣，多留一點空間，免得捲過去正好被它蓋掉。
     const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
     box.scrollTo({ top: Math.max(0, top - 72), behavior: still ? 'auto' : 'smooth' })
-    // 先關再開：連按兩次時 class 一直掛著，CSS 動畫不會自己重播（也順便重設熄滅的計時器）。
+    // 先關再開：class 一直掛著的話 CSS 動畫不會重播。
     setFlashId(null)
     requestAnimationFrame(() => setFlashId(id))
   }
@@ -721,15 +627,13 @@ function Composer({
 }: {
   botId: string
   inputRef: RefObject<HTMLTextAreaElement | null>
-  /** Parent already shows a stopped / start bar — skip the duplicate lock strip. */
+  /** Parent already shows a stopped bar. */
   hideLock?: boolean
-  /** Empty chat: focus as soon as the composer is usable. */
   forceFocus?: boolean
-  /** Owned by `ChatPanel` so a drop anywhere in the chat area lands here. */
+  /** Owned by `ChatPanel` so a drop anywhere in the chat lands here. */
   files: ReturnType<typeof useAttachments>
 }) {
-  // `composerState` builds a fresh object every call, so it must be compared shallowly —
-  // returning it raw from the selector would spin `useSyncExternalStore`.
+  // Fresh object per call: raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abandonTurn = useStore((s) => s.abandonTurn)
@@ -742,8 +646,7 @@ function Composer({
   const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
-  // v4.0: the draft lives in the store (per bot, mirrored to localStorage) so switching
-  // bots / tabs and reloading keep it; it is cleared only on a successful send.
+  // Draft lives in the store (localStorage) so switching / reload keep it; cleared only on send.
   const draftKey = `bot:${botId}` as const
   const phone = useMediaQuery(PHONE_QUERY)
   const text = useStore((s) => s.drafts[draftKey] ?? '')
@@ -765,16 +668,14 @@ function Composer({
 
   const submit = () => {
     const body = text.trim()
-    // An image on its own is a valid message; text is only required when there is none.
     if (!body && files.ids.length === 0) return
-    // 打字沒被鎖，所以 Enter 也可能落在「送不出去」的狀態：說一聲，別默默吃掉。
+    // 打字沒鎖，Enter 可能送不出：說一聲，別默默吃掉。
     if (state.disabled) {
       notify('error', state.reason || '目前無法送出訊息')
       return
     }
     if (sending || files.uploading) return
-    // A turn is still running: park the message instead of eating a 409. The store sends it
-    // as soon as that turn ends.
+    // Turn still running: queue instead of eating a 409.
     if (state.queued) {
       queueSend(botId, body, files.ids)
       setText('')
@@ -792,15 +693,9 @@ function Composer({
   }
   const enterToSend = useEnterToSend()
 
-  /** 排隊中的那一則優先，否則是輸入框裡打到一半的字。 */
   const pending = queued?.text ?? text
 
-  /**
-   * 中止目前這一輪，然後立刻把待送的內容送出去。
-   *
-   * 分成兩步而不是一個 API：`abortBot` 只把 turn 標成失敗並解鎖，agent 那頭可能還在跑，
-   * 所以要等它回來、確認鎖開了才送——不然新的 prompt 會撞上還沒清掉的 in-flight turn。
-   */
+  // 中止再送，分兩步：等 `abortBot` 確認解鎖才送，否則新 prompt 會撞上未清的 in-flight turn。
   const abortAndSend = async () => {
     const body = pending.trim()
     const ids = queued ? queued.attachments : files.ids
@@ -808,7 +703,7 @@ function Composer({
     const wasQueued = queued
     if (wasQueued) cancelQueuedSend(botId)
     setSending(true)
-    // esc 沒送進終端就別送新的：agent 還在跑，新 prompt 只會撞上它。排隊的那一則放回去。
+    // esc 沒送進終端就別送新的；排隊的放回去。
     const stopped = await abortBot(botId)
     const ok = stopped && (await sendPrompt(botId, body, ids))
     setSending(false)
@@ -820,29 +715,21 @@ function Composer({
     }
   }
 
-  /**
-   * 直接把文字打進 pane，不建立新回合。等同你自己在終端裡輸入：CLI 會自己排,
-   * 回覆併在目前這一輪。送出後把輸入框清掉，因為字已經出去了。
-   */
+  // 直接打進 pane、不建新回合：回覆併在目前這一輪。
   const sendAlongside = async () => {
     const body = pending.trim()
     if (!body) return
     const wasQueued = queued
     if (wasQueued) cancelQueuedSend(botId)
     setSending(true)
-    // 整段文字走 `POST /bots/:id/text`，Enter 由 daemon 另外送（見 store/alongside.ts）：
-    // 拆成鍵名的舊寫法會把多行內容的 `\n` 當成一顆不存在的鍵，內容送不完整。
+    // 整段走 `POST /bots/:id/text`、Enter 另送（見 store/alongside.ts）；拆鍵名會把 `\n` 當鍵弄丟內容。
     const ok = await typeAlongside({ sendText }, botId, body)
     setSending(false)
     if (ok) setText('')
     else if (wasQueued) restoreQueuedSend(botId, wasQueued)
   }
 
-  /**
-   * 這條的舊條件是「輸入框被鎖住」，但回合進行中並不鎖（可以先打、送出排隊），結果
-   * **對話跑起來之後反而沒有任何中斷入口**——連本來就寫在這裡的「中斷回覆」都不會出現，
-   * 使用者只能去停掉整個 bot。所以 in-flight 也顯示這一條，只是語氣不同（`.running`）。
-   */
+  // in-flight 時輸入框不鎖，但仍要顯示這條，否則回合中沒有中斷入口（`.running`）。
   const showLock = !hideLock && Boolean(state.reason) && (state.disabled || Boolean(state.inFlightTurnId))
 
   const nothingToSend = !text.trim() && files.ids.length === 0
@@ -876,8 +763,6 @@ function Composer({
       ) : null}
       {showLock ? (
         <div className={`composer-lock${state.disabled ? '' : ' running'}`} role="status">
-          {/* 拿掉 ⛔：emoji 吃不到 `color`（OS 自己上色），跟琥珀色的框對不上，
-              每個平台長得也不一樣。框與文字本身已經是訊號。 */}
           <span title={state.reason}>{phone && !state.disabled && state.inFlightTurnId ? '執行中 · 送出排隊' : state.reason}</span>
           {state.unknownTurnId ? (
             <button type="button" className="mini-btn" onClick={() => void abandonTurn(botId, state.unknownTurnId!)}>
@@ -889,7 +774,6 @@ function Composer({
               中斷回覆
             </button>
           ) : null}
-          {/* 這兩顆是「我不想等」的兩種答案，差別在要不要留住目前這一輪的回覆。 */}
           {state.inFlightTurnId && pending.trim() ? (
             <>
               <button
@@ -901,9 +785,7 @@ function Composer({
               >
                 中止並取代
               </button>
-              {/* 併行不是「同時跑兩輪」——daemon 一次只認一個 turn（SPEC §2），第二輪的回覆
-                  沒有辦法跟 hook 對上。這顆做的是「直接打進 pane」，跟你自己在終端裡插一句話
-                  完全一樣：CLI 自己決定何時處理，回覆會併在目前這一輪裡。 */}
+              {/* 併行＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。 */}
               <button
                 type="button"
                 className="mini-btn"
@@ -915,8 +797,7 @@ function Composer({
               </button>
             </>
           ) : null}
-          {/* 「中斷回覆」是請 agent 停；`esc` 送不進去（pane 沒了、herdr 斷、agent 不理）時
-              那一回合會一直卡著、輸入框跟著鎖死。這顆反過來：先解鎖，送鍵只是順帶。 */}
+          {/* esc 送不進去時回合會卡死；這顆先解鎖，送鍵只是順帶。 */}
           {state.inFlightTurnId || state.unknownTurnId ? (
             <button
               type="button"
@@ -937,10 +818,9 @@ function Composer({
           ref={ref}
           rows={phone ? 1 : 2}
           value={text}
-          /* 連線斷了也讓人繼續打（草稿本來就會存），只是送不出去。 */
+          /* 斷線也讓人繼續打（草稿會存）。 */
           disabled={sending}
-          /* 手機用短版：括號裡那句在 390px 會把輸入框撐成兩行，而且觸控裝置也拖放不了檔案。
-             完整說明留在 `title`（桌機 hover 看得到）。 */
+          /* 手機短版：390px 會撐成兩行，且觸控不能拖放。 */
           placeholder={
             state.disabled
               ? `${state.reason || '目前無法送出訊息'}${phone ? '' : '——可以先打，恢復後再送'}`
@@ -960,7 +840,6 @@ function Composer({
           onPaste={(e) => {
             const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
             if (imgs.length === 0) return
-            // Only swallow the paste when it really carries images, so copied text still lands.
             e.preventDefault()
             files.add(imgs)
           }}
@@ -977,9 +856,7 @@ function Composer({
           className="send-btn"
           disabled={state.disabled || sending || files.uploading || nothingToSend}
           title={files.uploading ? '圖片上傳中…' : state.queued ? '這回合結束後自動送出' : undefined}
-          /* 手機第一下常常只把鍵盤收掉、訊息沒送出去：按下去的瞬間輸入框失焦、鍵盤關閉，
-             版面往下長回來，`pointerup` 就不在這顆鍵上了，click 因此不成立（2026-09-10）。
-             擋掉 mousedown 的預設行為＝不讓焦點離開輸入框＝鍵盤不動＝版面不動，一下就送出。 */
+          /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
           onMouseDown={(e) => e.preventDefault()}
           onClick={submit}
         >
@@ -1015,15 +892,7 @@ function SlItem({ k, children, title, className }: { k: string; children: ReactN
   )
 }
 
-/**
- * A status bar for the kinds that have no statusLine *hook*.
- *
- * codex renders its own status line inside the TUI (`[tui] status_line` in
- * `~/.codex/config.toml` — model, cwd, 5h, weekly), and grok likewise; neither can hand it
- * to us the way claude's statusLine command does. Build the stable fields from the store
- * instead, including the host's detected CLI version, so the browser gets the same version
- * indicator without depending on terminal width.
- */
+/** Status bar for kinds without a statusLine hook (codex/grok draw theirs in the TUI): built from the store. */
 function derivedStatus(
   kind: BotKind,
   model: string | null,
@@ -1036,7 +905,6 @@ function derivedStatus(
   if (!model && !quota && !cwd && !version) return null
   const win = (w: QuotaWindow | null | undefined) => ({
     pct: typeof w?.used_pct === 'number' ? w.used_pct : null,
-    // The quota API gives an ISO string; the bar wants epoch seconds.
     at: w?.resets_at ? Math.floor(new Date(w.resets_at).getTime() / 1000) || null : null,
   })
   const five = win(quota?.five_hour)
@@ -1063,25 +931,16 @@ function derivedStatus(
   }
 }
 
-/**
- * `高 · fast · thinking` — the model's *settings*, as opposed to its name. Lives next to the
- * model badge in the header now; the status bar used to carry its own copy of both.
- */
+/** `高 · fast` — the model's settings, shown beside the model badge. */
 function modelExtraOf(status: StatusInfo | null): string {
   if (!status) return ''
-  // 全部用 `·`：`opus-高` 這種連字號黏法讀起來像模型 id 的一部分（見 `ModelTag`）。
-  // `thinking` 不放：claude 對這些模型永遠開著，字面上像是一個特別狀態，其實是常態。側欄那顆
-  // `ModelTag` 早就只把它留在 tooltip（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
+  // 用 `·` 不用連字號（像 model id）；`thinking` 是常態不放（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
   return [status.effort ? effortLabel(status.effort) : null, status.fast_mode ? 'fast' : null]
     .filter(Boolean)
     .join(' · ')
 }
 
-/**
- * One row for the repo chip + the status fields. `hasStatus` is passed rather than inferred:
- * `<StatusLineBar>` is a truthy element even on the render where it returns null, so the row
- * would keep a hairline border for a bot that has no status line at all.
- */
+/** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
 function ContextBar({ issues, status, hasStatus, mobileOpen, onClose }: {
   issues: ReactNode
   status: ReactNode
@@ -1127,7 +986,7 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
           ⚠ 未登入，用的是預設帳號
         </SlItem>
       ) : status.account_email ? (
-        // 手機上這一欄最長也最不急（側欄與設定都看得到），`sl-account` 讓 CSS 把它收掉。
+        // `sl-account`：手機上 CSS 收掉（最長也最不急）。
         <SlItem k="帳號" className="sl-account">
           {status.account_email}
         </SlItem>
@@ -1141,7 +1000,7 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
           {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
         </SlItem>
       ) : null}
-      {/* 花費不放（2026-09-12 使用者）。版本固定貼最右（CSS `margin-left: auto`），窄視窗第一個讓位（`sl-version`）。 */}
+      {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
       {status.version ? (
         <SlItem k="版本" className="sl-version">
           {status.version}
@@ -1152,15 +1011,14 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
   )
 }
 
-/** blocked 到「自動彈出全畫面終端」之間的緩衝，見下方 armed 的說明。 */
+/** blocked 到自動彈出全畫面終端的緩衝（見 armed）。 */
 const AUTO_OPEN_DELAY_MS = 1000
 
 export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
-  // 這顆 bot 自己的未讀。看著它就會被清掉（`selectBot` / 回到前景），所以平常是 0——
-  // 會亮的是「人不在畫面前，回覆已經進來」的那一段，回來的第一眼就知道剛剛跑完了。
+  // 這顆 bot 的未讀：看著就清掉，只在人離開時亮。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
   const phone = useMediaQuery(PHONE_QUERY)
   const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
@@ -1180,11 +1038,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const startBot = useStore((s) => s.startBot)
   const busy = useStore((s) => s.busy)
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  // debug 用的 run 識別列（pane / agent / run id）預設收合，不佔常態版面。
   const [runDebugOpen, setRunDebugOpen] = useState(false)
   const [gitInfoBotId, setGitInfoBotId] = useState<string | null>(null)
-  // claude hands us its statusLine payload; the other kinds render their status line inside
-  // their own TUI, so it is rebuilt from what the store already knows.
   const statusInfo = useStore(
     useShallow((s): StatusInfo | null => {
       const b = s.bots.find((x) => x.id === s.selectedBotId)
@@ -1198,9 +1053,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const q = s.quota[key] ?? s.quota[quotaKey(host, b.kind)] ?? null
       const tool = toolsOfHost(s, host)[b.kind]
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
-      // SPEC §4.4a：這條狀態列講的是「現在在跑什麼」，所以模型／強度／fast 一律用 run 真正
-      // 啟動時的值（`run.runtime_*`），不是 `bots` 那份「下次啟動才會用的設定」——codex 的
-      // 強度改了不重啟就不會變，照設定畫等於在 UI 上編一條跟終端不符的狀態列。
+      // SPEC §4.4a：用 run 實際啟動值（`run.runtime_*`），不是下次啟動才生效的 bot 設定。
       const live = runtimeKnown(r)
       return derivedStatus(
         b.kind,
@@ -1214,12 +1067,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     }),
   )
   const modelExtra = modelExtraOf(statusInfo)
-  // Images live outside the store: they only matter until the send that carries them.
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId, botId)
   const drop = useDropTarget(files.add, !botId)
-  // 右側圖片暫存區要知道「現在這個對話」是誰：點暫存縮圖時，圖片就落進這個托盤（也就是
-  // 上傳給這隻 bot）。終端分頁時這個托盤不在畫面上，就別接收——圖會像憑空消失。
+  // 暫存區縮圖落進這個托盤；終端分頁時托盤不在畫面上就不接收，免得圖憑空消失。
   useShelfSink(files.add, botId && bot && (tab !== 'terminal' || settingsBotId === botId) ? bot.name : null)
 
   const messages = useStore((s) => (botId ? s.messages[botId] : undefined))
@@ -1228,27 +1079,18 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const composerReason = useStore((s) => (botId ? composerState(s, botId).reason : ''))
 
   /**
-   * agent 需要回應時，整個 herdr 畫面自己跳出來——判斷「該按 y 還是 n」要看的是完整的對話框，
-   * 不是對話上方那塊 300px 的截角。只彈**現在正在看的**這個 bot：別的 bot 進 blocked 留給側欄
-   * 的紅點，不打斷手上的事。
-   *
-   * 關掉之後不會再自己彈回來（`dismissed`），直到這個 bot 離開 blocked 又再進去一次——那是另一
-   * 個問題，值得再問一次。手動「展開全畫面」隨時可以叫回來。
-   *
-   * 狀態轉換在 render 當下算完（比對上一次的 bot / blocked），不放進 effect：從 effect 裡
-   * setState 會多跑一輪 render，而這個彈窗要跟紅燈同一幀出現。
+   * 目前看的 bot blocked 時自動彈全畫面終端（要看完整對話框）；關掉後（`dismissed`）要離開 blocked
+   * 再進入才重彈。轉換在 render 中算，不放 effect：彈窗要跟紅燈同一幀。
    */
   const blockedNow = run?.agent_status === 'blocked'
   const [blockedUi, setBlockedUi] = useState({ bot: botId ?? '', blocked: false, armed: false, open: false, dismissed: false })
   if (blockedUi.bot !== (botId ?? '') || blockedUi.blocked !== blockedNow) {
     const sameBot = blockedUi.bot === (botId ?? '')
-    // 離開 blocked（或換了 bot）就把「關掉過」忘掉，下一次 blocked 才會再自己彈出來。
     const dismissed = sameBot && blockedNow ? blockedUi.dismissed : false
     const armed = blockedNow && !dismissed
     setBlockedUi({ bot: botId ?? '', blocked: blockedNow, armed, open: armed && blockedUi.open, dismissed })
   }
-  // 有些 blocked 是 daemon 自己會按掉的（claude 的滿意度問卷 → `tui_prompts`），一秒內就過去了。
-  // 等一下再彈，免得為了那種東西閃一個全畫面視窗出來。
+  // 延遲再彈：有些 blocked 一秒內會被 daemon 自己按掉（`tui_prompts`），免得閃一下全畫面。
   useEffect(() => {
     if (!blockedUi.armed) return
     const t = setTimeout(() => setBlockedUi((u) => (u.armed ? { ...u, armed: false, open: true } : u)), AUTO_OPEN_DELAY_MS)
@@ -1287,7 +1129,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   /** 主機 shell 當第三個分頁：標題列不變，只有下面的內容換成終端（2026-09-08）。 */
   const shellOpen = shellView !== null && !settingsOpen
   const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
-  // 標題列「● 需要回應」chip 按下去：立刻開，不等 AUTO_OPEN_DELAY，也不管關過沒。
+  // 手動點 chip：立刻開，不管關過沒。
   const openBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: true }))
 
   return (
@@ -1305,14 +1147,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="main-title">
           <div className="main-title-row">
             <StatusLamp lamp={lamp} />
-            {/* kind logo 排在下面那行的 model 左邊（2026-09-11 使用者）：kind 講的是「哪個 CLI、
-                哪個模型」，跟 model 是同一件事，掛在名字前面只是佔掉名字的寬度。燈號留在這裡
-                ——那是狀態不是 kind。 */}
-            {/* 手機：點名字是換 bot（BotSwitcher），改名走設定；桌面：點名字直接改。 */}
+            {/* kind logo 放第二行 model 左邊（2026-09-11 使用者），不佔名字寬度。 */}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
-            {/* Ahead of the badges on purpose: `.main-title-row` clips its own tail when the
-                header is busy, and the settings button is the one thing in here that is not
-                repeated somewhere else — the badges all are. */}
+            {/* Ahead of the badges: the row clips its tail, and the gear is the only non-duplicated entry. */}
             <PrimaryStar botId={botId} />
             <button
               type="button"
@@ -1334,13 +1171,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </span>
             ) : null}
           </div>
-          {/* `bot.model` is what was *configured* (null = 由 CLI 自己決定); the statusLine
-              reports what the CLI actually loaded, so fall back to that rather than
-              showing nothing. The settings (`高 · thinking`) ride along as a dim suffix —
-              they used to cost the status bar its own 模型 field. Second row under the name
-              so the identity row above doesn't have to yield space to it. */}
-          {/* 名字下面那一行：模型標籤與 ★ 釘選。標題列那條線已經被額度條佔滿（2026-09-10
-              實測釘選放右上角會被擠掉一半），這一行本來只有一顆模型標籤，空著。 */}
+          {/* `bot.model` null = CLI 預設，退回 statusLine 回報的實際模型。第二行：標題列已被額度條佔滿（2026-09-10 實測）。 */}
           {phone ? (
             <div className="mobile-bot-version" title={`${bot.kind} · ${statusInfo?.version ?? '版本未回報'}`}>
               <span className={`mobile-kind-icon ${bot.kind}`} role="img" aria-label={bot.kind}><KindIcon kind={bot.kind} /></span>
@@ -1355,13 +1186,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               <TurnErrorBadge botId={botId} />
             </div>
           ) : <div className="main-title-sub">
-            {/* 桌機也放第二行（跟手機同一個位置）：名字那一列在 1440px＋側欄開著時只有約 161px，
-                lamp＋名字＋★＋⚙ 就滿了，71px 的 chip 擠進去一定有人被剪——實測不是 chip 自己剩
-                半顆就是 ⚙ 被剪掉，而 ⚙ 是那一列唯一不重複的入口。第二行的 pane id 是 debug 用的
-                識別碼，blocked 時讓給它（見 blockedBadge.css）。 */}
+            {/* 放第二行：名字列在 1440px＋側欄時放不下 chip，會剪掉 ⚙（實測）；pane id 讓位（blockedBadge.css）。 */}
             <BlockedBadge botId={botId} onOpen={openBlockedFull} />
-            {/* 同理：1400px 側欄開著時名字列連 71px 的紅 chip 都放不下，整顆被 overflow 剪掉——
-                使用者就是「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
+            {/* 同理：名字列會整顆剪掉，使用者「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
             <TurnErrorBadge botId={botId} />
             <KindTag kind={bot.kind} />
             {bot.model || statusInfo?.model_name ? (
@@ -1380,12 +1207,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
-            {/* pane id 而不是狀態文字：狀態看左邊的燈號就好（它自己帶 tooltip），這個位置留給
-                debug 時真正要抄的那串。點一下展開整組識別資訊（agent / session / workspace / run）。
-                沒有 pane 就什麼都不放——燈號已經說了它沒在跑。
-                2026-09-11 使用者：從第一排搬到這一排。它是 debug 用的識別碼，不是每天在看的
-                東西，卻在第一排佔掉 70px；第一排要留給名字、齒輪、★、更新提示與分頁鍵。
-                窄到放不下時 `.pane-id` 先收掉，只剩 `▾`（完整 pane id 在 tooltip 裡）。 */}
+            {/* pane id（debug 用，點開識別列）；2026-09-11 使用者：從第一排搬到這一排。窄時只剩 `▾`。 */}
             {run?.pane_id ? (
               <button
                 type="button"
@@ -1414,7 +1236,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             >
               <GitIcon />
             </button>
-            {/* 2026-09-11: 主力晶片搬到 `.unread-bar` 了，這一格暫時空著（`:empty` 會把它藏起來）。 */}
+            {/* 2026-09-11：暫時空著（`:empty` 藏起來）。 */}
             <div className="mobile-primary-row" />
           </>
         ) : null}
@@ -1422,7 +1244,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
-        {/* UI-DECISIONS〈無障礙語意（#11）〉：分頁吃 ←/→/Home/End（`tabKeys`），內容區掛 `tabpanel`。 */}
+        {/* UI-DECISIONS〈無障礙語意（#11）〉。 */}
         <div className="tabs" role="tablist" aria-label="主面板" onKeyDown={onTabListKeyDown}>
           <button
             type="button"
@@ -1470,9 +1292,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       <UnreadChip />
       {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
-      {/* The repo chip and the status bar were a row each; neither fills one, so they share.
-          The issues popup must stay outside an `overflow` box, hence the scrolling is on the
-          status half only. The chip is chat-only — the terminal tab has no composer to insert into. */}
+      {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}
       <ContextBar
         mobileOpen={gitInfoBotId === botId}
         onClose={() => setGitInfoBotId(null)}
@@ -1491,8 +1311,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
 
       {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
-      {/* 內容區就是那幾個分頁的 tabpanel（同一塊，內容跟著分頁換）。`.tab-panel` 是 display: contents，
-          不改排版。 */}
+      {/* `.tab-panel` 是 display: contents，不改排版。 */}
       <div
         className="tab-panel"
         role="tabpanel"

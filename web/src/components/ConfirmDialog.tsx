@@ -13,20 +13,14 @@ export interface ConfirmDialogProps {
   /** When set, confirm stays disabled until the input equals this string. */
   requireText?: string
   requireTextLabel?: string
-  /**
-   * Confirm stays disabled regardless of the typed text — for a delete the daemon would
-   * 409 anyway (project with an active run, host / identity still in use); the body says why.
-   */
+  /** Confirm stays disabled regardless of text — the daemon would 409 anyway; the body says why. */
   confirmDisabled?: boolean
   width?: number
   onConfirm: () => void
   onCancel: () => void
 }
 
-/**
- * Reusable confirm modal. Escape / Cancel never call onConfirm.
- * Optional requireText match gates the confirm button (delete Bot).
- */
+/** Reusable confirm modal. Escape / Cancel never call onConfirm; optional requireText gates confirm. */
 export function ConfirmDialog({
   open,
   title,
@@ -49,19 +43,14 @@ export function ConfirmDialog({
   const needsMatch = requireText !== undefined
   const matched = !needsMatch || typed === requireText
 
-  // Clearing the field belongs to the open/close transition, not to an effect: resetting it
-  // from an effect re-rendered the component, and since every call site passes an inline
-  // `onCancel={() => …}` (a new identity each render) the effect re-ran and reset again —
-  // "Maximum update depth exceeded". Comparing against the previous prop during render is
-  // React's own answer for this; it settles in one extra render because `lastOpen` then matches.
+  // Reset during render, not in an effect: inline `onCancel` props re-ran the effect → "Maximum update depth exceeded".
   const [lastOpen, setLastOpen] = useState(open)
   if (lastOpen !== open) {
     setLastOpen(open)
     if (!open && typed !== '') setTyped('')
   }
 
-  // Read through a ref so the Escape listener always calls the current handler without making
-  // the unstable prop a dependency of the effect below.
+  // Via ref so the Escape listener needn't depend on the unstable prop.
   const onCancelRef = useRef(onCancel)
   useEffect(() => {
     onCancelRef.current = onCancel
@@ -71,9 +60,7 @@ export function ConfirmDialog({
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        // Window-level capture, so with a confirm stacked over another dialog the outer
-        // listener runs first. Focus is trapped in the innermost one, so let the keystroke's
-        // target decide which dialog the Escape belongs to.
+        // Window-level capture runs the outer dialog first; let the target decide which dialog owns Escape.
         const dialog = dialogRef.current
         if (dialog && e.target instanceof Node && !dialog.contains(e.target)) return
         e.preventDefault()
@@ -85,16 +72,14 @@ export function ConfirmDialog({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [open])
 
-  // Focus the require-text field when present; otherwise focus Cancel — never Confirm, so an
-  // accidental Enter or Space on a just-opened destructive dialog must not go through.
+  // Focus the require-text field or Cancel — never Confirm, so a stray Enter can't go through.
   useDialogFocus(open, dialogRef, {
     initialFocus: () => (needsMatch ? inputRef.current : cancelRef.current),
   })
 
   if (!open) return null
 
-  // 掛到 body：原本就地渲染時，會被外層的 stacking context（`.main`／聊天面板）壓在
-  // `.shelf`（z-index 30）底下——手機上「圖片暫存」那條蓋住按鈕，點不到（2026-09-10）。
+  // 掛到 body：就地渲染會被外層 stacking context 壓在 `.shelf`（z-index 30）底下，手機點不到（2026-09-10）。
   return createPortal(
     <div className="confirm-backdrop" role="presentation" onMouseDown={onCancel}>
       <div

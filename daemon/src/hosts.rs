@@ -1,14 +1,8 @@
 //! Remote hosts over SSH (SPEC §11.3).
 //!
-//! One `HostConn` per configured `[[hosts]]` entry plus the implicit `local` one.
-//! A remote host is reached by an `ssh -N -M` master that forwards the remote herdr socket
-//! to a **short** local path (`/tmp/agents-manager-<uid>/<host>.sock`; macOS AF_UNIX caps
-//! paths at 104 bytes). That one `-L` is the whole tunnel: since v4.3 remote hooks report
-//! their state through that host's own herdr (`pane report-agent`) and leave the payload in a
-//! spool file the daemon reads over ssh (SPEC §11.4), so nothing has to come back the other
-//! way and there is no `-R` / `hook_port` to collide with anything.
-//!
-//! Everything else in the daemon then talks to `HerdrClient` exactly as it does locally.
+//! One `ssh -N -M` master per host forwards the remote herdr socket to a **short** local path
+//! (macOS AF_UNIX caps paths at 104 bytes). That single `-L` is the whole tunnel: hooks report
+//! via the remote herdr + a spool file read over ssh (SPEC §11.4), so no `-R` / `hook_port`.
 
 use crate::config::{HostCfg, LOCAL_HOST};
 use crate::herdr::HerdrClient;
@@ -23,36 +17,27 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Health probe interval once a master is up (SPEC §11.3.4).
+/// SPEC §11.3.4.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// How long to wait for `ssh -M` + the forwarded socket to become pingable.
 const MASTER_UP_TIMEOUT: Duration = Duration::from_secs(20);
-/// One-shot `ssh <host> '<script>'` budget.
 const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// `ssh_put` budget — an attachment is bigger than a script, so it gets more room.
 const SSH_PUT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Short directory for AF_UNIX paths (control socket + forwarded herdr socket).
+/// Short on purpose: AF_UNIX path limit.
 pub fn short_dir() -> PathBuf {
     use std::os::unix::fs::MetadataExt;
     let uid = dirs::home_dir().and_then(|h| std::fs::metadata(h).ok()).map(|m| m.uid()).unwrap_or(0);
     PathBuf::from(format!("/tmp/agents-manager-{uid}"))
 }
 
-// ---------------------------------------------------------------- shell helpers
-
-/// POSIX single-quote one argument for embedding in a remote `sh` script.
 pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Run `/bin/sh -c <script>` locally with stdin closed. `None` means the budget ran out —
-/// and by then the script **and everything it forked** are gone: the child gets its own
-/// process group and the whole group is killed on timeout, so a hung `git merge` (pinentry,
-/// a stuck remote) cannot keep `index.lock` while the caller has already given up on it.
+/// `None` = timed out. The whole process group is killed so a hung `git merge` (pinentry,
+/// stuck remote) cannot keep holding `index.lock` after the caller gave up.
 pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::process::Output>> {
     let mut cmd = tokio::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -78,7 +63,6 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
         r = async { tokio::join!(child.wait(), gather) } => (r.0.context("wait /bin/sh")?, r.1),
         _ = tokio::time::sleep(timeout) => {
             if let Some(pid) = pid {
-                // Group kill first (grandchildren too), then the direct child for good measure.
                 let _ = std::process::Command::new("/bin/kill").args(["-9", "--", &format!("-{pid}")]).status();
             }
             let _ = child.kill().await;
@@ -88,9 +72,7 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
     Ok(Some(std::process::Output { status, stdout, stderr }))
 }
 
-/// `export PATH=<remote_path>:"$PATH"` for a configured `remote_path`, quoted so a value with a
-/// space (or worse) is one PATH entry and not a shell command: unquoted, `/Users/me/my tools/bin`
-/// made every remote script start with `export: not a valid identifier` and lose PATH entirely.
+/// Quoted so a value with a space (or `;`, `$(…)`) is one PATH entry, not a shell command.
 pub fn remote_path_prefix(remote_path: &str) -> String {
     let p = remote_path.trim();
     if p.is_empty() {
@@ -100,8 +82,6 @@ pub fn remote_path_prefix(remote_path: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------- HostConn
-
 pub struct HostConn {
     pub name: String,
     /// `None` for `local`.
@@ -109,7 +89,6 @@ pub struct HostConn {
     pub client: HerdrClient,
     pub connected: AtomicBool,
     pub error: Mutex<Option<String>>,
-    /// Remote `$HOME`, learned during `ensure remote session`.
     pub remote_home: Mutex<Option<String>>,
     master: Mutex<Option<tokio::process::Child>>,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -163,7 +142,6 @@ impl HostConn {
         short_dir().join(format!("{}.ctl", self.name))
     }
 
-    /// `ssh` arguments shared by the master and every one-shot command.
     fn ssh_args(&self) -> Vec<String> {
         let Some(cfg) = &self.cfg else { return vec![] };
         let mut v: Vec<String> = vec![
@@ -183,17 +161,12 @@ impl HostConn {
         v
     }
 
-    /// Run one `sh` script on the remote and return stdout. Errors carry stderr.
-    ///
-    /// The script is piped into `/bin/sh -s` rather than passed as an argument: the login
-    /// shell on the far side may be zsh/fish/…, and this keeps everything POSIX sh and
-    /// sidesteps a second round of shell quoting.
+    /// Script is piped into `/bin/sh -s`, not argv: the remote login shell may be zsh/fish,
+    /// and this avoids a second round of quoting.
     pub async fn ssh_exec(&self, script: &str) -> Result<String> {
         self.ssh_exec_timeout(script, SSH_EXEC_TIMEOUT).await
     }
 
-    /// `ssh_exec` with the caller's own budget: a push, a `worktree add` or an identity probe
-    /// is allowed more than the 30 s one-liner default (`SSH_EXEC_TIMEOUT`).
     pub async fn ssh_exec_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
         let Some(cfg) = &self.cfg else { bail!("ssh_exec called on the local host") };
         let mut cmd = tokio::process::Command::new("ssh");
@@ -218,11 +191,7 @@ impl HostConn {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    /// Stream raw bytes into `path` on the remote (parent directories created first).
-    ///
-    /// `ssh_exec` pipes the *script* through stdin, so it cannot also carry a payload;
-    /// this variant puts the script in argv and keeps stdin for the file itself. The
-    /// budget is larger than `SSH_EXEC_TIMEOUT` because an image is not a one-liner.
+    /// Script in argv, stdin carries the file (`ssh_exec` already uses stdin for the script).
     pub async fn ssh_put(&self, path: &str, data: &[u8]) -> Result<()> {
         let Some(cfg) = &self.cfg else { bail!("ssh_put called on the local host") };
         let dir = match path.rsplit_once('/') {
@@ -230,9 +199,7 @@ impl HostConn {
             _ => ".",
         };
         let script = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
-        // ssh joins its command argv with spaces and hands the result to the *remote login
-        // shell*, so the script has to survive one more round of word splitting: quote it
-        // as a single argument to `/bin/sh -c`.
+        // ssh joins argv and hands it to the remote login shell: quote once more for that split.
         let remote = format!("/bin/sh -c {}", sh_quote(&script));
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
@@ -255,11 +222,8 @@ impl HostConn {
         Ok(())
     }
 
-    /// Run a script on the remote with `data` piped to stdin.
-    ///
-    /// `ssh_exec` uses stdin for the script itself, so a payload (a gh token, a file)
-    /// has to go this way: script in argv, bytes on stdin. Same quoting as `ssh_put`.
-    /// Stdout is returned; failures report stderr only (stdout may be sensitive).
+    /// For payloads like a gh token: script in argv, bytes on stdin (same quoting as `ssh_put`).
+    /// Failures report stderr only — stdout may be sensitive.
     pub async fn ssh_exec_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
         let Some(cfg) = &self.cfg else { bail!("ssh_exec_stdin called on the local host") };
         let remote = format!("/bin/sh -c {}", sh_quote(script));
@@ -284,23 +248,19 @@ impl HostConn {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    /// The `export PATH=…` line SPEC §11.2 `remote_path` prepends to every remote script,
-    /// or empty when the host has none.
+    /// SPEC §11.2 `remote_path`.
     fn path_prefix(&self) -> String {
         remote_path_prefix(self.cfg.as_ref().map(|c| c.remote_path.as_str()).unwrap_or_default())
     }
 
-    /// `ssh_exec_stdin` with SPEC §11.2 `remote_path` prepended.
     pub async fn ssh_exec_path_stdin(&self, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
         self.ssh_exec_stdin(&format!("{}{script}", self.path_prefix()), data, timeout).await
     }
 
-    /// Same, but with the remote PATH fixed up first (SPEC §11.2 `remote_path`).
     pub async fn ssh_exec_path(&self, script: &str) -> Result<String> {
         self.ssh_exec_path_timeout(script, SSH_EXEC_TIMEOUT).await
     }
 
-    /// `ssh_exec_path` with the caller's own budget (see `ssh_exec_timeout`).
     pub async fn ssh_exec_path_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
         self.ssh_exec_timeout(&format!("{}{script}", self.path_prefix()), timeout).await
     }
@@ -317,18 +277,9 @@ impl HostConn {
         Ok(h)
     }
 
-    // ------------------------------------------------------------ connect
-
-    /// SPEC §11.3.1 — make sure the remote named session's herdr server is running.
-    ///
-    /// On macOS the server is registered as a **launchd GUI-domain agent**
-    /// (`launchctl bootstrap gui/<uid>`) instead of being `nohup`ed from the ssh shell:
-    /// a process spawned from a non-interactive ssh session cannot read the user's login
-    /// Keychain (`security` → errSecInteractionNotAllowed), so Claude Code started inside
-    /// that herdr reports "Not logged in" even though the host *is* logged in. A GUI-domain
-    /// agent runs in the console user's session where the Keychain is unlocked, survives
-    /// ssh disconnects, and launchd restarts it if it dies. Falls back to `nohup` when the
-    /// remote is not macOS, nobody owns /dev/console, or launchctl refuses.
+    /// SPEC §11.3.1. On macOS herdr runs as a launchd GUI-domain agent, not `nohup` from ssh:
+    /// an ssh-spawned process can't read the login Keychain, so Claude Code inside reports
+    /// "Not logged in". Falls back to `nohup` when not macOS / no console owner / launchctl refuses.
     async fn ensure_remote_session(&self) -> Result<String> {
         let cfg = self.cfg.as_ref().unwrap();
         let sess = &cfg.herdr_session;
@@ -429,8 +380,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         Ok(sock)
     }
 
-
-    /// SPEC §11.3.2 — bring up (or replace) the ssh master with its single `-L` forward.
+    /// SPEC §11.3.2.
     async fn start_master(&self, remote_sock: &str) -> Result<()> {
         let cfg = self.cfg.as_ref().unwrap();
         let dir = short_dir();
@@ -441,7 +391,6 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
             bail!("forwarded socket path is too long for AF_UNIX: {}", local_sock.display());
         }
 
-        // Tear down anything left over from a previous run.
         self.kill_master().await;
 
         let mut cmd = tokio::process::Command::new("ssh");
@@ -475,7 +424,6 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         }
         *self.master.lock().await = Some(child);
 
-        // Wait for the forwarded socket to answer a herdr ping.
         let deadline = std::time::Instant::now() + MASTER_UP_TIMEOUT;
         loop {
             if let Some(m) = self.master.lock().await.as_mut() {
@@ -517,9 +465,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
     }
 }
 
-// ---------------------------------------------------------------- supervisor
-
-/// Per-host connect / health-check / backoff loop (SPEC §11.3.4).
+/// SPEC §11.3.4.
 fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut backoff = BACKOFF_MIN;
@@ -541,16 +487,13 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     *conn.error.lock().await = None;
                     crate::state::emit_host_changed(&app, &conn).await;
 
-                    // Reconcile + (re)build subscriptions for this host.
                     if let Err(e) = crate::reconcile::reconcile_host(&app, &conn.name).await {
                         tracing::error!(host = %conn.name, error = ?e, "reconcile after connect failed");
                     }
                     crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
-                    // v4.0: tool detection (claude / codex / grok) runs once per connect, off-path.
                     crate::tools::spawn_detect(app.clone(), conn.name.clone());
 
-                    // Health loop.
                     loop {
                         tokio::time::sleep(PING_INTERVAL).await;
                         if conn.generation.load(Ordering::SeqCst) != generation {
@@ -596,8 +539,6 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
     })
 }
 
-// ---------------------------------------------------------------- HostManager
-
 pub struct HostManager {
     conns: Mutex<HashMap<String, Arc<HostConn>>>,
 }
@@ -633,13 +574,11 @@ impl HostManager {
         self.list().await.into_iter().map(|c| c.name.clone()).collect()
     }
 
-    /// Reconcile the live connection set against `[[hosts]]`. Started supervisors are
-    /// left alone when their config is unchanged.
+    /// Supervisors whose config is unchanged are left alone.
     pub async fn apply_config(&self, app: &Arc<App>, hosts: &[HostCfg]) -> HashSet<String> {
         let wanted: HashMap<String, HostCfg> = hosts.iter().map(|h| (h.name.clone(), h.clone())).collect();
         let mut changed_hosts = HashSet::new();
 
-        // Remove hosts that are gone.
         let existing: Vec<Arc<HostConn>> = self.list().await;
         for c in existing {
             if c.is_local() {
@@ -685,15 +624,14 @@ impl HostManager {
         }
         c.kill_master().await;
         c.connected.store(false, Ordering::SeqCst);
-        // Its quota rows would otherwise linger in the map (and, keyed `<gone>/claude`, read
-        // as local ones downstream) — SPEC §14.
+        // Stale `<gone>/claude` quota rows would read as local downstream — SPEC §14.
         app.quotas.lock().await.retain(|k, _| !k.starts_with(&format!("{name}/")));
         app.emit("host_changed", json!({"name": name, "connected": false, "error": "removed"})).await;
         crate::state::emit_daemon_status(app).await;
         tracing::info!(host = %name, "host removed");
     }
 
-    /// Force a reconnect and wait (bounded) for the outcome. Returns `(connected, error)`.
+    /// Returns `(connected, error)`.
     pub async fn reconnect(&self, app: &Arc<App>, name: &str) -> Option<(bool, Option<String>)> {
         let conn = self.get(name).await?;
         if conn.is_local() {
@@ -717,9 +655,8 @@ impl HostManager {
         self.wait_for_connection(conn).await
     }
 
-    /// Wait for the first connection attempt to report an outcome. Returns `(connected, error)`.
+    /// Bounded wait so the HTTP caller gets a real answer. Returns `(connected, error)`.
     pub async fn wait_for_connection(&self, conn: Arc<HostConn>) -> Option<(bool, Option<String>)> {
-        // Give the first attempt a chance so the HTTP caller gets a real answer.
         let deadline = std::time::Instant::now() + MASTER_UP_TIMEOUT + Duration::from_secs(15);
         loop {
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -733,7 +670,7 @@ impl HostManager {
         }
     }
 
-    /// SPEC §11.3.5 — close every master on daemon exit.
+    /// SPEC §11.3.5.
     pub async fn shutdown(&self) {
         for c in self.list().await {
             if c.is_local() {
@@ -756,19 +693,15 @@ fn cfg_differs(a: &HostCfg, b: &HostCfg) -> bool {
         || a.remote_path != b.remote_path
 }
 
-// ---------------------------------------------------------------- remote fs (§11.5)
-
-/// `GET /api/fs/dirs?host=` for a remote host. Same JSON shape as the local branch.
+/// `GET /api/fs/dirs?host=` (§11.5); same JSON shape as the local branch.
 pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool) -> Result<serde_json::Value> {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
         None => "\"$HOME\"".to_string(),
         Some(p) if p == "~" => "\"$HOME\"".to_string(),
-        // The tail is user input: it has to be quoted like every other branch, so only the
-        // `$HOME` expansion stays outside the quotes (itself quoted, for a home with spaces).
+        // Tail is user input: must be quoted; only `"$HOME"` stays outside.
         Some(p) if p.starts_with("~/") => format!("\"$HOME\"/{}", sh_quote(&p[2..])),
         Some(p) => sh_quote(p),
     };
-    // `.*/` only when asked for; the glob is quoted into the loop so an empty match is skipped below.
     let globs = if hidden { "*/ .*/" } else { "*/" };
     let script = format!(
         r#"cd -- {target} 2>/dev/null || {{ printf 'AM_ERR=no such directory\n'; exit 0; }}
@@ -803,7 +736,7 @@ done
             let name = it.next().unwrap_or("").to_string();
             let git = it.next().unwrap_or("0") == "1";
             if name.is_empty() || (name.starts_with('.') && !hidden) {
-                continue; // hidden directories are skipped unless asked for, like the local branch
+                continue;
             }
             let full = if cwd == "/" { format!("/{name}") } else { format!("{cwd}/{name}") };
             entries.push(json!({"name": name, "path": full, "git": git}));
@@ -819,13 +752,11 @@ done
     Ok(json!({"path": cwd, "parent": parent, "home": home, "entries": entries}))
 }
 
-/// Validate + canonicalize a project path on a remote host.
 pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String> {
     let target = if path == "~" {
         "\"$HOME\"".to_string()
     } else if let Some(rest) = path.strip_prefix("~/") {
-        // Quote the tail like every other branch (it is user input); only the `$HOME`
-        // expansion stays outside the quotes, itself quoted for a home with spaces.
+        // Tail is user input: must be quoted; only `"$HOME"` stays outside.
         format!("\"$HOME\"/{}", sh_quote(rest))
     } else {
         sh_quote(path)
@@ -863,7 +794,6 @@ mod tests {
         let r = sh_local(&script, Duration::from_millis(300)).await.unwrap();
         assert!(r.is_none(), "expected a timeout");
         assert!(t0.elapsed() < Duration::from_secs(5));
-        // Give the kernel a moment to reap, then make sure nothing with our marker survived.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
         let alive: Vec<&str> = std::str::from_utf8(&ps.stdout).unwrap().lines().filter(|l| l.contains(&marker) && !l.contains("ps ")).collect();
@@ -900,8 +830,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let mut host_cfg = cfg();
         host_cfg.name = "reconnect-stale-error-test".into();
-        // Keep the TCP connection queued without accepting it, so SSH stays in its initial
-        // handshake past the first 250 ms poll and the stale error is observable if it leaks.
+        // Never accept: ssh stays in handshake past the first 250 ms poll, exposing a leaked stale error.
         host_cfg.ssh = "127.0.0.1".into();
         host_cfg.ssh_port = port;
         host_cfg.ssh_opts = vec!["-o".into(), "ConnectTimeout=2".into()];

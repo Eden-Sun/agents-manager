@@ -12,12 +12,8 @@ import { computeBotPatch, effectiveForm, type BotFormKey } from './botSettingsFo
 import './botSettings.css'
 
 /**
- * 「Bot 設定」面板（API.md v3.3）：改名 / 模型 / 身份 / autostart / auto_approve，
- * 以及刪除 Bot。儲存走 `PATCH /api/bots/:id`，只送有變更的欄位；後端回
- * `needs_restart: true` 時面板頂部提示要重啟才生效（`POST /api/bots/:id/restart`）。
- *
- * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`：契約與型別保留，但這裡既不顯示
- * 也不會出現在 PATCH body 裡（維持 config.toml 既有的值）。
+ * 「Bot 設定」面板（API.md v3.3）：`PATCH /api/bots/:id` 只送變更欄位，`needs_restart` 時提示重啟。
+ * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`（不顯示也不進 PATCH body）。
  */
 
 /** v4.0 人設：auto-growing textarea; empty = null. */
@@ -68,12 +64,7 @@ export function PersonaMark({ persona }: { persona: string | null }) {
   )
 }
 
-/**
- * 一個身份在**目標主機**上的登入狀態，翻成 UI 用的一句話。
- *
- * `logged_in === null` 是「問不到」，不是「沒登入」——CLI 沒裝、偵測失敗、或這台主機還沒
- * 偵測過都會落在這裡，所以不出警語，免得把不知道講成壞掉。
- */
+/** 身份在目標主機上的登入警語；`logged_in === null` 是「問不到」不是「沒登入」。 */
 function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
   if (!st) {
     return {
@@ -96,7 +87,6 @@ function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { m
   return null
 }
 
-/** 已登入時把帳號寫進 title，讓使用者一眼確認選到的是哪個帳號。 */
 function identityTitle(env: Record<string, string>, st: IdentityStatus | undefined, hostLabel: string): string {
   const envText = Object.entries(env)
     .map(([k, v]) => `${k}=${v}`)
@@ -109,7 +99,7 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
   } else {
     parts.push(`${hostLabel}：登入狀態未知${st?.reason ? ` — ${st.reason}` : ''}`)
   }
-  // 從 shell alias 認到的身份不在 config.toml 裡，改不了也刪不掉——講清楚它從哪來。
+  // shell alias 身份不在 config.toml，改不了也刪不掉——講清楚來源。
   if (st?.source === 'shell') {
     parts.push(`來自 ${hostLabel} 的 shell alias（ccN），不是 config.toml`)
   }
@@ -117,11 +107,8 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
 }
 
 /**
- * claude only: identity as a row of options（無下拉）. Renders nothing when there are no identities.
- *
- * 身份是全域設定，但它指到的帳號**每台主機各自登入**（`CLAUDE_CONFIG_DIR` 在每台機器都
- * 展得開，帳號卻不一定在），所以要標的是「這個身份在 bot 會跑的那台主機上」能不能用。
- * 未登入**不停用**按鈕：使用者可能正打算去登入（登入入口在下面的「帳號」那一段）。
+ * Identity as a row of options（無下拉）. 帳號每台主機各自登入，所以標的是 bot 那台主機上能否用；
+ * 未登入不停用按鈕（使用者可能正要去登入）。
  */
 export function IdentityOptions({
   kind,
@@ -130,19 +117,16 @@ export function IdentityOptions({
   onChange,
 }: {
   kind: BotKind
-  /** bot 會跑在哪台主機（`''` / `local` = 本機）。 */
   host: string
   value: string
   onChange: (v: string) => void
 }) {
-  // Select the stable array and filter outside: a selector that returns a fresh array
-  // re-renders forever (React #185).
+  // Filter outside the selector: a fresh array re-renders forever (React #185).
   const all = useStore((s) => s.identities)
   const status = useStore((s) => identityStatusOfHost(s, host))
   const refreshTools = useStore((s) => s.refreshTools)
   const busy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
-  // config 的身份加上這台主機 shell 裡的 `ccN`（SPEC §16），只留這個 kind 的：新增身份表單
-  // 允許 codex／grok，以前這裡對 kind !== 'claude' 直接回 null，那些身份建了也永遠指派不了。
+  // config 身份＋主機 shell 的 `ccN`（SPEC §16），依 kind 過濾（codex／grok 身份也要指派得到）。
   const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === kind), [all, status, kind])
   if (identities.length === 0) return null
   const hostLabel = !host || host === 'local' ? '本機' : host
@@ -221,14 +205,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
   const [fast, setFast] = useState<boolean>(bot?.fast ?? false)
   const [persona, setPersona] = useState(bot?.persona ?? '')
-  /** 人設那格要不要攤開：已經有人設就是勾著的，否則收起來（2026-09-13 使用者）。 */
+  /** 人設預設收起，已有人設才勾著（2026-09-13 使用者）。 */
   const [personaOn, setPersonaOn] = useState(Boolean(bot?.persona))
   const [identity, setIdentity] = useState(bot?.identity ?? '')
-  /**
-   * 使用者動過哪些欄位。沒動過的欄位畫面上永遠跟著 store 裡的 bot 走（`effectiveForm`）：
-   * 面板開著時在標題列快速選單或另一個分頁改了同一顆的 model／effort，
-   * 這裡不會標「已變更」，儲存也不會拿開啟當下的舊值把剛套用的蓋回去。
-   */
+  /** 沒動過的欄位跟著 store 走，別處改了 model／effort 時不會被開啟當下的舊值蓋回去。 */
   const [touched, setTouched] = useState<ReadonlySet<BotFormKey>>(() => new Set())
   const touch = (k: BotFormKey) =>
     setTouched((t) => {
@@ -239,23 +219,16 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     })
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
-  /**
-   * 已經送出去並成功的那些欄位。「有沒有未儲存的變更」要跟**存進去的值**比，不是只跟 store
-   * 裡那份 bot 比：store 慢一拍（或像 2026-09-11 那樣因為 daemon 重啟而卡住不更新）時，
-   * 剛存好的欄位會被算成還沒存，關閉時跳一個沒有道理的「放棄未儲存的變更？」。
-   */
+  /** 已存成功的欄位；dirty 要跟它比，store 慢一拍時才不會誤跳「放棄未儲存？」（2026-09-11）。 */
   const [saved, setSaved] = useState<PatchBotInput>({})
   const [saving, setSaving] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
-  /** 送出過一次之後才冒出「重新偵測」——沒送過就沒有東西需要重新偵測。 */
   const [loginSent, setLoginSent] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
-  // 彈窗貼著觸發它的齒輪開，超出視窗才翻邊/夾住；沒有 anchor（例如鍵盤流程）就置中。
-  // 手機沒有「貼著齒輪」這回事——卡片本來就跟畫面一樣寬，整張是全螢幕 sheet
-  // （styles.css 的 mobile 區塊），量出來的座標只會把它推歪。
+  // 手機是全螢幕 sheet，不用 anchor 座標（只會推歪）。
   const phone = useMediaQuery(PHONE_QUERY)
   const anchor = useStore((s) => (phone ? null : s.settingsAnchor))
   const running = useStore((s) => {
@@ -274,11 +247,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       const gap = 8
       const margin = 12
       const { offsetWidth: w, offsetHeight: h } = el
-      // 桌機一律水平置中（2026-09-13 使用者：「按下該要置中」）。760px 寬的卡片貼著齒輪開會偏到
-      // 右邊、壓住側欄與圖片暫存；垂直方向仍然從標題列底下開始（見下面的 minTop）。
+      // 桌機水平置中（2026-09-13 使用者：「按下該要置中」）。
       const left = Math.min(Math.max(margin, (window.innerWidth - w) / 2), Math.max(margin, window.innerWidth - w - margin))
-      // 不蓋到標題列（2026-09-13 使用者）：齒輪就在標題列上，貼著它往下開會把名字、額度、分頁
-      // 都壓住。上緣至少在標題列（與它下面那排晶片）底下。
+      // 不蓋到標題列與晶片列（2026-09-13 使用者）。
       const headBottom = Math.max(
         document.querySelector('.main-head')?.getBoundingClientRect().bottom ?? 0,
         document.querySelector('.unread-bar-wrap')?.getBoundingClientRect().bottom ?? 0,
@@ -293,7 +264,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => window.removeEventListener('resize', place)
   }, [anchor])
 
-  // Esc 關閉：實際行為（髒表單要先確認）在 render 時塞進 ref，避免 effect 依賴整個表單狀態。
+  // Esc 行為在 render 時塞進 ref，避免 effect 依賴整個表單狀態。
   const escRef = useRef<() => void>(() => {})
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -303,10 +274,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
-  // 點卡片外面就關（髒表單一樣先問）。以前是靠鋪滿全螢幕的 `.bs-scrim` 接這一下，代價是
-  // 整個 app 被蓋住——設定開著就不能拖圖進對話、不能點旁邊的 bot。改成 document 上的
-  // pointerdown：不需要任何一層擋住背景的 div，滑鼠與觸控也走同一條路。
-  // 疊在上面的確認框走 portal，不在卡片裡，所以要一起放行。
+  // 點外面就關：用 document pointerdown 而非全螢幕 scrim，背景才能拖圖／點 bot。確認框走 portal，要放行。
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
       const card = cardRef.current
@@ -320,8 +288,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('pointerdown', onDown, true)
   }, [])
 
-  // 桌機設定是貼著齒輪開的非模態浮窗：只把開場焦點放到名稱欄，不攔背景的 Tab，也不還原
-  // 齒輪焦點。手機則是全螢幕 sheet，才啟用共用 modal focus trap。
+  // 桌機非模態：只設開場焦點；手機全螢幕 sheet 才啟用 focus trap。
   useDialogFocus(phone, cardRef, { initialFocus: () => nameRef.current })
   useEffect(() => {
     if (phone) return
@@ -329,7 +296,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => cancelAnimationFrame(raf)
   }, [phone])
 
-  // 換 bot 時整個表單重置（父層也給了 key，這裡是保險）。
   useEffect(() => {
     const b = useStore.getState().bots.find((x) => x.id === botId)
     if (!b) return
@@ -364,14 +330,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     )
   }
 
-  // 名稱不做前端檢查（2026-09-09 使用者決定）：真正的規則在 daemon，擋在這裡只會多一段
-  // 沒人看的紅字，而且它跟 daemon 的規則會慢慢漂走。送出去被拒就照常跳通知。
+  // 名稱不做前端檢查（2026-09-09 使用者決定）：規則在 daemon，前端會漂走。
   const nameOk = name.trim().length > 0
-  // `host` 在本機專案上可能是 `''` 也可能是字面的 `local`，兩個都得寫成「本機」——照
-  // `IdentityOptions` 的同一條規則，兩處講法才一致。
   const hostLabel = !host || host === 'local' ? '本機' : host
 
-  // 基準＝store 裡那份 bot，套上這次開啟以來已經存成功的欄位。
   const base = {
     name: 'name' in saved ? (saved.name ?? bot.name) : bot.name,
     model: 'model' in saved ? saved.model ?? null : bot.model,
@@ -396,7 +358,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       setSaving(false)
       if (needsRestart === null) return
       setSaved((s) => ({ ...s, ...sent }))
-      // 存進去的欄位之後跟著 base（已含 saved）走，別再算「動過」。
       setTouched((t) => {
         const n = new Set(t)
         for (const k of Object.keys(sent)) n.delete(k as BotFormKey)
@@ -435,7 +396,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <span className="bs-sub" title={project?.path}>
           {bot.name}
         </span>
-        {/* 識別放標題列就好（2026-09-13 使用者），不再在內文另開一整列。 */}
+        {/* 識別放標題列（2026-09-13 使用者）。 */}
         <RunIdents botId={botId} />
         <span className="spacer" />
         <button type="button" className="icon-btn bs-close" onClick={requestClose} aria-label="關閉設定" title="關閉，回到對話">
@@ -445,7 +406,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
       {banner === 'restart' ? (
         <div className="bs-banner warn" role="status">
-          {/* 同上：`.bs-banner.warn` 的琥珀色已經說了這是提醒。 */}
           <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
           <button
             type="button"
@@ -520,10 +480,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               setFast(v)
             }}
           />
-          {/* 這一排本來會在「目前這個 run 用的身份」旁邊再插一顆底線樣式的「登入」。
-              它送的 `/login` 跟下面「帳號」那顆一模一樣，卻夾在一排藥丸狀的選項中間，
-              讀起來像多了一個身份可以選。留下面那顆——它有標題、有說明，也有登完之後的
-              「重新偵測」。 */}
           <IdentityOptions
             kind={bot.kind}
             host={host}
@@ -574,8 +530,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           ) : (
-            // codex 的 TUI 只有 `/logout`——與其給一個按了必定失敗的按鈕，不如直接說要去哪裡
-            // 登入。「重新偵測」還是留著：使用者在別的地方登完，回來就是按它。
+            // codex TUI 只有 `/logout`：不給必定失敗的按鈕，改說去哪登入。
             <div className="field account-field">
               <span>帳號</span>
               <div className="bs-login-row">
@@ -595,8 +550,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           )}
-          {/* 人設預設不勾、不顯示（2026-09-13 使用者）：大多數 bot 用不到，常駐一個空的大輸入框只是
-              把卡片撐高。已經有人設的 bot 一打開就是勾著的；取消勾選等於清掉人設。 */}
+          {/* 人設預設不勾（2026-09-13 使用者）；取消勾選＝清掉人設。 */}
           <label className="bs-persona-toggle">
             <input
               type="checkbox"
@@ -622,7 +576,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           ) : null}
         </form>
 
-        {/* 刪除只要一顆鍵（2026-09-13 使用者）：後果寫在按下去之後的確認框裡，不必在這裡再講一次。 */}
+        {/* 刪除只要一顆鍵，後果寫在確認框（2026-09-13 使用者）。 */}
         <div className="bs-danger bare">
           <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>
             刪除 Bot
@@ -641,8 +595,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </button>
       </div>
 
-      {/* 送 `/login` 不是「按了就登入好了」：畫面會跑到 agent 那邊，而且在使用者完成之前
-          那個 Bot 不能工作。這三件事在按下去**之前**講清楚，按鈕才誠實。 */}
+      {/* `/login` 會讓 Bot 在登完前不能工作，按下去之前講清楚。 */}
       <ConfirmDialog
         open={loginOpen}
         title="送出登入指令？"
@@ -714,12 +667,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   )
 }
 
-/**
- * Bot 設定裡的識別列：有 run 才有東西可抄。點一下複製（`CopyChip`）。
- *
- * 只留 pane id（2026-09-09 使用者決定）：agent / session / workspace 幾乎不會被拿去打指令，
- * 四顆並排卻把這一整列撐成兩行——手機上尤其。要那三個的人在 `herdr pane list` 裡都查得到。
- */
+/** 識別列只留 pane id（2026-09-09 使用者決定）：其餘在 `herdr pane list` 查得到，四顆並排會撐成兩行。 */
 function RunIdents({ botId }: { botId: string }) {
   const run = useStore((s) => s.runs[botId] ?? null)
   if (!run) return null

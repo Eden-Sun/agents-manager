@@ -8,11 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
 import { ToolBadges } from './Tools'
 
-/**
- * SPEC §11.6 host management: the list of configured remote hosts (connection lamp,
- * error string, reconnect / delete) plus the "new host" form. The four §11.2 tuning
- * fields have defaults and live behind a collapsed 進階 section.
- */
+/** SPEC §11.6 host management: configured remote hosts plus the "new host" form; §11.2 tuning fields sit behind 進階. */
 
 /** SPEC §11.6: remote projects carry an `@<host>` badge; local ones show nothing. */
 export function HostBadge({ host, connected }: { host: string; connected: boolean }) {
@@ -28,23 +24,15 @@ export function HostBadge({ host, connected }: { host: string; connected: boolea
 }
 
 /**
- * 收掉包著這個面板的彈窗（這裡是「環境設定」）。
- *
- * shell 開在主面板上，而這張清單是彈窗裡的一頁——不收掉的話按完「開 shell」什麼都沒發生，
- * 因為新面板正好被蓋在後面。走的是 `Modal` 自己記載的關閉路徑（Escape，而且它會比對事件
- * 的 target，所以彈窗疊彈窗時只收最裡面那一層），而不是另外拉一條 store 狀態：這個彈窗的
- * 開關是 `Sidebar` 的本地狀態，模擬它自己的關閉動作才不會讓兩邊對不上。
+ * 收掉包著這個面板的「環境設定」彈窗，否則新開的 shell 面板被蓋在後面。模擬 `Modal` 自己的 Escape 關閉路徑
+ * （只收最內層），不另拉 store 狀態：彈窗開關是 `Sidebar` 本地狀態。
  */
 function closeEnclosingPopup(from: HTMLElement | null) {
   if (!from?.closest('.modal-backdrop')) return
   from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
 
-/**
- * 「開 shell」——在那台主機開（或接回）一個純 shell 並切到 `HostShellPanel`。
- *
- * 主機沒連線時停用而不是隱藏：使用者要看得出「這顆在這裡、現在不能按、因為主機斷了」。
- */
+/** 「開 shell」並切到 `HostShellPanel`；主機斷線時停用而非隱藏，讓人看得出為什麼不能按。 */
 function OpenShellButton({ host, connected }: { host: string; connected: boolean }) {
   const busy = useStore((s) => Boolean(s.busy[`shell:${host}`]))
   const openHostShell = useStore((s) => s.openHostShell)
@@ -67,10 +55,7 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
   )
 }
 
-/**
- * 這台主機目前開著的 shell（`GET /api/hosts/:name/shells`）：點一下切回去（接既有的，不新開），
- * 或直接結束。清單在列出現、面板切換、結束之後重讀；主機沒連線時不畫。
- */
+/** 這台主機開著的 shell（`GET /api/hosts/:name/shells`）：點一下接回，或直接結束；主機沒連線時不畫。 */
 function HostShellList({ host, connected }: { host: string; connected: boolean }) {
   const current = useStore((s) => s.shellView)
   const viewHostShell = useStore((s) => s.viewHostShell)
@@ -89,7 +74,7 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
         if (alive) setShells(list)
       },
       () => {
-        /* 讀不到就當沒有：這只是清單，開 shell 那顆按鈕自己會報錯 */
+        /* 讀不到就當沒有：開 shell 那顆按鈕自己會報錯 */
       },
     )
     return () => {
@@ -189,8 +174,6 @@ function HostRow({ name }: { name: string }) {
           ✕
         </button>
       </span>
-      {/* 本來是 `window.confirm()`——整個 app 只有這裡跳原生對話框，樣式、Escape 與
-          focus trap 都跟其他刪除不一樣。 */}
       <ConfirmDialog
         open={confirmDelete}
         title="刪除主機"
@@ -269,7 +252,6 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
         {name && !nameOk ? (
-          /* 這裡本來直接把 regex 印給使用者看。改成講規則本身——bot 名稱那一欄早就是這樣寫的。 */
           <span className="hint">小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字；不能叫 local。</span>
         ) : null}
       </label>

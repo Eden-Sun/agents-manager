@@ -6,21 +6,13 @@ import { useMenuKeys } from '../hooks/useMenuKeys'
 import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 
-/**
- * v4.0 agent-CLI detection (`hosts[].tools`) and "install via a running bot"
- * (`POST /api/hosts/:name/tools/install`). The daemon turns that into a prompt for the
- * chosen bot, which installs + logs in inside its own pane (login usually ends up as a
- * `blocked` prompt the user answers in the existing panel).
- */
+/** v4.0 agent-CLI detection and "install via a running bot": the daemon prompts that bot to install + log in inside its own pane. */
 
 export function hostLabel(host: string): string {
   return host === 'local' ? '本機' : host
 }
 
-/**
- * The install button: picks a running bot on that host (a popover when there are several,
- * straight through when there is one, a hint when there is none).
- */
+/** The install button: picks a running bot on that host. */
 export function InstallToolButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
   const candidates = useStore(useShallow((s) => runningBotsOnHost(s, host)))
   const busy = useStore((s) => Boolean(s.busy[`install:${host}:${kind}`]))
@@ -73,8 +65,7 @@ export function InstallToolButton({ host, kind, small }: { host: string; kind: B
         {busy ? '送出中…' : small ? '安裝' : '用現有 agent 安裝'}
       </button>
       {open ? (
-        // 點一下就送出安裝、沒有「選取中」可言——是選單不是 listbox。項目本來沒有 tabIndex，
-        // 鍵盤根本選不到；現在打開時焦點進第一項，↑/↓ 移動、Enter/Space 送出、Esc 收回。
+        // 點一下就送出、沒有「選取中」——是選單不是 listbox。
         <ul ref={menuRef} className="install-pop" role="menu" tabIndex={-1} aria-label={`選擇執行安裝的 Bot（${hostLabel(host)}）`} onKeyDown={menuKeys}>
           {candidates.map((b) => (
             <li

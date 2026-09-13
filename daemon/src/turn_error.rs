@@ -1,21 +1,5 @@
-//! 「這一回合其實被 API 斷線截斷了」的偵測（SPEC §4.3a）。
-//!
-//! claude 的連線在回應中途掉了會在 pane 上印
-//!
-//! ```text
-//! ⏺ API Error: Connection lost mid-response. The response above may be incomplete.
-//!
-//! ✻ Baked for 5m 21s · done 12:56 AM
-//! ```
-//!
-//! 然後就收工回到 idle。hook 照樣送 Stop、herdr 照樣報 `working -> idle`，於是這回合被記成
-//! `completed`、側欄一顆綠燈——使用者以為做完了，實際上回應是斷的。
-//!
-//! 這支在 `working -> idle` 的終端備援掃描裡多認這一種：把那行讀出來掛到 run 上
-//! （`runs.turn_error`），並在對話裡補一則 system 訊息釘在那個回合上。web 拿 `turn_error`
-//! 畫紅色 badge 與「重送上一則」；下一回合一開始（`arm_progress`）就清掉。
-//!
-//! 判定跟 `update_notice` / codex 額度公告同一套：讀 pane、比對上次存的值、只在變了的時候寫。
+//! 「這一回合其實被 API 斷線截斷了」的偵測（見 SPEC §4.3a）。
+//! 斷線時 hook 照樣送 Stop、herdr 照樣報 idle，回合會被誤記成 `completed`，所以要讀 pane 補認。
 
 use crate::db;
 use crate::lifecycle;
@@ -23,28 +7,22 @@ use crate::state::App;
 use anyhow::Result;
 use std::sync::Arc;
 
-/// 從螢幕底部往上找幾行。錯誤行後面只會剩下狀態列與輸入框那幾行 chrome。
+/// 錯誤行後面只會剩下狀態列與輸入框那幾行 chrome。
 const TAIL_LINES: usize = 30;
 
-/// 這行是不是 API 錯誤橫幅（去掉裝飾字元之後以 `API error` 開頭），或是額度用盡的拒絕
-/// （`You've reached your Fable limit. Run /usage-credits to continue or switch models with
-/// /model.`）。後者 claude 根本沒開始回，0 秒就 `done`，pane 只剩這一行；
-/// 對使用者來說一樣是「送了沒回」，一樣要釘在那個回合上（2026-09-10）。
+/// 額度拒絕也算：claude 0 秒就 `done`，對使用者一樣是「送了沒回」（2026-09-10）。
 fn is_api_error(body: &str) -> bool {
     lower_is_api_error(&body.to_ascii_lowercase())
 }
 
 fn lower_is_api_error(lower: &str) -> bool {
-    // 橫幅只有兩種長相：`API Error: <原因>`（帶冒號）與重試列 `API error · Retrying in 0s ·
-    // attempt 1/10`。光看「以 api error 開頭」會把 agent 自己的回覆行「API error handling 已補上」
-    // 也釘成斷線（2026-09-12 review h）。
+    // 只認 `API Error:` 與重試列；光看開頭會把回覆「API error handling 已補上」誤釘（2026-09-12 review h）。
     let banner = lower.starts_with("api error:")
         || (lower.starts_with("api error") && (lower.contains("retrying") || lower.contains("attempt ") || lower.contains("connection")));
     banner || is_quota_limit_lower(lower)
 }
 
-/// 額度用盡的拒絕（`You've reached your Fable limit…`），跟 API 斷線分開認：這種回合不是
-/// 「重送一次」救得回來的，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
+/// 跟斷線分開認：重送救不回來，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
 pub fn is_quota_limit(body: &str) -> bool {
     is_quota_limit_lower(&body.to_ascii_lowercase())
 }
@@ -53,37 +31,29 @@ fn is_quota_limit_lower(lower: &str) -> bool {
     lower.starts_with("you've reached your") && lower.contains("limit")
 }
 
-/// 這行在錯誤行**之後**出現的話，代表 agent 後來又說了話——那次錯誤已經被重試蓋過去了。
-///
-/// 只有 chrome（空行、輸入框、分隔線、狀態列、spinner）不算數。`is_noise` /
-/// `is_activity_shape` 是終端備援本來就在用的那組判斷，這裡直接沿用，不另外寫一套。
+/// 錯誤行之後出現非 chrome 行，代表錯誤已被重試蓋過。
 fn is_chrome(s: &str) -> bool {
     s.is_empty()
         || s == "❯"
         || s == "›"
         || lifecycle::is_noise(s)
         || lifecycle::is_activity_shape(s)
-        // claude 自動更新的那一行釘在輸入框上方（`current: 2.1.266 · latest: 2.1.267 ✔ Update
-        // installed · Restart to update`），不是 agent 說的話。
+        // claude 自動更新提示釘在輸入框上方，不是 agent 說的話（2.1.266）。
         || s.contains("Update installed")
-        // claude 2.1.269 在額度拒絕那行底下再印一行 `0 tokens`（回合統計），它是 chrome 不是回覆；
-        // 沒認出來的話從底部往上掃第一個就撞到它，橫幅永遠找不到——2026-09-12 使用者實測
-        // 「已用盡卻沒有正確的提示」：那句被當成一則普通的 terminal_fallback 回覆。
+        // claude 2.1.269 在額度拒絕下多印 `0 tokens`，沒認出來橫幅就永遠找不到（2026-09-12 使用者實測）。
         || is_token_count(s)
 }
 
-/// `0 tokens` / `1,234 tokens` / `12k tokens`：回合結束時的統計行。
 fn is_token_count(s: &str) -> bool {
     let Some(head) = s.strip_suffix(" tokens").or_else(|| s.strip_suffix(" token")) else { return false };
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.' || c == 'k' || c == 'K')
 }
 
-/// 把一行的框線剝掉，留下 TUI 真正畫的那串（前導記號還在——`is_noise` 要靠它認 spinner）。
+/// 只剝框線、保留前導記號——`is_noise` 要靠它認 spinner。
 fn undecorated(line: &str) -> &str {
     line.trim().trim_matches(|c| "│┃".contains(c)).trim()
 }
 
-/// 再把前導記號剝掉，留下內容本身：`⏺ API Error: …` -> `API Error: …`。
 fn body_of(s: &str) -> &str {
     match s.chars().next() {
         Some(c) if !c.is_alphanumeric() && c != '❯' && c != '›' => s[c.len_utf8()..].trim_start(),
@@ -91,11 +61,7 @@ fn body_of(s: &str) -> &str {
     }
 }
 
-/// 這張快照的**最後一件事**是不是一則 API 錯誤？是的話回傳那行原文。
-///
-/// 「最後一件事」是關鍵：claude 遇到暫時性錯誤會印 `API error · Retrying in 0s · attempt 1/10`
-/// 然後接著把答案講完，那種橫幅留在畫面上但下面還有回覆——不算斷線。所以從底部往上掃，
-/// 碰到的第一個非 chrome 行必須就是錯誤行。
+/// 必須是「最後一件事」：重試成功後橫幅仍留在畫面上，但下面還有回覆，不算斷線。
 pub fn api_error_line(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
@@ -105,8 +71,7 @@ pub fn api_error_line(screen: &str) -> Option<String> {
         if is_api_error(body) {
             return Some(body.to_string());
         }
-        // chrome 判斷吃**帶記號**的那串：`✻ Baked for 5m 21s · done` 的 `✻` 正是 `is_noise`
-        // 用來認出它是 spinner 收尾行的依據。
+        // 用帶記號的那串：`is_noise` 靠 `✻` 認出 spinner 收尾行。
         if !is_chrome(raw) {
             return None;
         }
@@ -114,10 +79,7 @@ pub fn api_error_line(screen: &str) -> Option<String> {
     None
 }
 
-/// 讀 pane，把「這回合被 API 截斷」記到 run 與對話上。呼叫端要持有 bot lock。
-///
-/// 跟 [`lifecycle::capture_codex_usage_notices`] 一樣是 best-effort、而且在回合已經被 hook
-/// 收掉之後也要跑——斷線的那一回合正是 hook 會照常送 Stop 的那一種。
+/// 呼叫端要持有 bot lock。回合已被 hook 收掉後也要跑——斷線回合正是 hook 照常送 Stop 的那種。
 pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Result<()> {
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
     if run.id != expected_run_id {
@@ -127,7 +89,7 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     let Some(client) = app.herdr_for_run(&run).await else { return Ok(()) };
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
     let Some(line) = api_error_line(&read.text) else { return Ok(()) };
-    // 同一則錯誤只記一次：值沒變就是同一回合的同一行，`arm_progress` 開下一回合時會清掉。
+    // 同一則錯誤只記一次；`arm_progress` 開下一回合時清掉。
     if run.turn_error.as_deref() == Some(line.as_str()) {
         return Ok(());
     }
@@ -139,13 +101,12 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
         .await?;
     tracing::warn!(bot = %bot_id, run = %run.id, error = %line, "turn cut short by an API error");
 
-    // 額度用盡：把那個帳號的額度格標成「被擋」（跟 codex 的 `limit_hit` 同一格），量表與標題列
-    // 才對得上；`until` 取橫幅講的那個桶子的重置時間，過了就自動解除（`quota::set`）。
+    // 額度格標成被擋，量表與標題列才對得上。
     if is_quota_limit(&line) {
         mark_claude_limit_hit(app, bot_id, &line).await;
     }
 
-    // 釘在那一回合上：對話裡看得到是「哪一則回覆」斷的，不是一句飄在最後面的通知。
+    // 釘在那一回合上，看得出是哪一則回覆斷的。
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
     let turn = last_turn(app, &run.id).await?;
     lifecycle::insert_message(
@@ -160,7 +121,7 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     )
     .await?;
 
-    // 還在 in_flight 的話一併收掉，不然輸入框會一直鎖著（codex 額度用完走的是同一條）。
+    // 不收掉 in_flight 的話輸入框會一直鎖著。
     if let Some(t) = turn {
         if t.status == "in_flight" {
             let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
@@ -177,7 +138,6 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     Ok(())
 }
 
-/// 下一回合開始了：把上一回合的錯誤旗標清掉（`arm_progress` 呼叫）。
 pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) {
     let res = sqlx::query("UPDATE runs SET turn_error = NULL WHERE id = ? AND turn_error IS NOT NULL")
         .bind(run_id)
@@ -188,7 +148,7 @@ pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) {
     }
 }
 
-/// 這個 run 最近開的一回合——斷線那回合可能已經被 Stop hook 收成 `completed` 了。
+/// 不篩 status：斷線那回合可能已被 Stop hook 收成 `completed`。
 async fn last_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
     Ok(sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC LIMIT 1")
         .bind(run_id)
@@ -224,7 +184,6 @@ mod tests {
         );
     }
 
-    /// 其他 `API Error:` 變體一併吃。
     #[test]
     fn other_api_error_variants_count_too() {
         let screen = "❯ hi\n⏺ API Error: 500 Internal Server Error\n\n✻ Worked for 3s · done 1:07 AM\n❯\n";
@@ -234,7 +193,6 @@ mod tests {
         assert_eq!(api_error_line(retry).as_deref(), Some("API error · Retrying in 0s · attempt 1/10"));
     }
 
-    /// 重試之後答案講完了：橫幅還留在畫面上，但它不是最後一件事——不能算斷線。
     #[test]
     fn a_retry_that_recovered_is_not_an_interruption() {
         let screen = "\
@@ -247,7 +205,6 @@ mod tests {
         assert_eq!(api_error_line(screen), None);
     }
 
-    /// 一般收工的畫面不能誤判。
     #[test]
     fn usage_limit_refusal_counts_as_an_error() {
         let screen = "\
@@ -276,8 +233,7 @@ mod tests {
         assert_eq!(api_error_line(""), None);
     }
 
-    /// 回覆的最後一行剛好以「API error」開頭（沒有冒號、不是重試列）是 agent 在講話，不是橫幅
-    /// （2026-09-12 review h：以前整回合被釘成斷線、紅 chip、多一則 system 訊息）。
+    /// 2026-09-12 review h：以「API error」開頭的回覆行被誤釘成斷線。
     #[test]
     fn a_reply_line_that_merely_starts_with_api_error_is_not_a_banner() {
         let prose = "❯ 補上錯誤處理\n⏺ API error handling 已補上，測試也過了。\n✻ Worked for 9s · done 1:07 AM\n❯\n";
@@ -289,7 +245,6 @@ mod tests {
         assert_eq!(api_error_line(banner).as_deref(), Some("API Error: Request timed out."));
     }
 
-    /// 窄 pane 把橫幅畫進框線裡也要認得。
     #[test]
     fn boxed_line_is_unwrapped() {
         let screen = "❯ hi\n│ ⏺ API Error: Connection lost mid-response. │\n│ ❯                                        │\n";
@@ -300,11 +255,8 @@ mod tests {
     }
 }
 
-/// claude 印了「You've reached your <桶子> limit」：把該 bot 帳號的額度標成 `limit_hit`。
-///
-/// 只認 claude 的 key（`claude` / `claude:<identity>`），桶子看橫幅的字：`Fable` → 週的 Fable 桶，
-/// 其餘 → 5h（沒有 5h 讀數就 7d）。跟 codex 不同的是**不**在下一回合成功時清掉——Fable 用盡後
-/// 換 opus 照樣能跑，那不代表 Fable 恢復了；只靠 `until`（該桶子的 `resets_at`）到期解除。
+/// 跟 codex 不同，**不**在下一回合成功時清掉：Fable 用盡後換 opus 照樣能跑，不代表 Fable 恢復；
+/// 只靠 `until`（該桶子的 `resets_at`）到期解除。
 async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return };
     if bot.kind != "claude" {

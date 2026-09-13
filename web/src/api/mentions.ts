@@ -1,8 +1,4 @@
-/**
- * SPEC §13.2 mention rules, same as `daemon/src/group.rs::parse_mentions`: `@all` = everyone;
- * `@<name>` case-insensitive; `@` must start the text or follow a non-word char; trailing
- * `-` / `_` are retried without.
- */
+/** SPEC §13.2 mention rules; must match `daemon/src/group.rs::parse_mentions`. */
 export function parseMentions<T extends { name: string }>(text: string, members: T[]): T[] {
   const hits: T[] = []
   const re = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu

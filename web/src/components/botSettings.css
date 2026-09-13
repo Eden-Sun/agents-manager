@@ -1,18 +1,11 @@
-/*
- * Bot 設定卡片的版面（2026-09-13 使用者）：
- * 「不要擋到 header、寬度大一點不至於高度那麼高」「模型與強度不用特別說明」「人設預設不勾也不
- * 顯示」「刪除只要一顆鍵」「識別放 modal header 就好」「header 不用 project name」。
- *
- * 位置（不蓋標題列）在 `BotSettingsPanel` 量的；這裡只管尺寸與排版。手機是全螢幕 sheet，不受影響。
- */
+/* Bot 設定卡片版面（2026-09-13 使用者）：「不要擋到 header、寬度大一點不至於高度那麼高」「模型與強度不用特別說明」
+   「人設預設不勾也不顯示」「刪除只要一顆鍵」「識別放 modal header 就好」「header 不用 project name」。位置在 `BotSettingsPanel` 量。 */
 @media (width > 640px) {
-  /* 加寬：一排放得下更多選項藥丸，整張卡就不必往下長。選擇器多一層 `.bs-scrim`：
-     `styles.css` 在這個檔案之後載入，同權重的 `.bot-settings { width: 520px }` 會蓋回來。 */
+  /* 多一層 `.bs-scrim`：`styles.css` 在此檔之後載入，同權重的 `width: 520px` 會蓋回來。 */
   .bs-scrim > .bot-settings {
     width: min(760px, 100%);
   }
 
-  /* 表單兩欄：名稱、模型、強度、人設這些「一整排選項」維持滿寬；身份與帳號並排。 */
   .bot-settings .bs-body > .form {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -24,14 +17,12 @@
     grid-column: 1 / -1;
   }
 
-  /* 身份（第 N 個 field）與帳號並排：兩個都是短的一排按鈕。 */
   .bot-settings .bs-body > .form > .field.identity-field,
   .bot-settings .bs-body > .form > .field.account-field {
     grid-column: auto;
   }
 }
 
-/* 識別搬進標題列：不再是一整條灰底列，就是名字旁邊一顆可複製的小籤。 */
 .bs-head .bs-idents {
   padding: 0;
   border: 0;
@@ -43,7 +34,6 @@
   display: none;
 }
 
-/* 人設的開關：一行勾選框，勾了才攤開輸入框。 */
 .bs-persona-toggle {
   display: inline-flex;
   align-items: center;
@@ -54,7 +44,6 @@
   cursor: pointer;
 }
 
-/* 刪除只剩一顆鍵：不要外框、不要標題與說明，靠右擺在內容最後。 */
 .bs-danger.bare {
   justify-content: flex-end;
   margin-top: 16px;

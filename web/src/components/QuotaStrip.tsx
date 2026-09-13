@@ -13,41 +13,18 @@ import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 
 /**
- * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
- *
- * Decision (Codex sol, docs/UI-DECISIONS.md follow-up): the strip keeps every kind that has
- * reported quota permanently visible; only the *windows* per kind collapse below 1100px, never
- * a whole kind. Drawn as frameless health bars: the fill length carries the level, colour only
- * reinforces it, so it survives greyscale. Full numbers live in the tooltip and popover.
- *
- * 桌機上**每個帳號都畫完整的量表**（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省
- * 他的空間」）：五個帳號各自身分名 + 5h／7d／F 三行，焦點那格只是多一圈外框，不是「只有它
- * 完整」。這條列佔掉 ~700px 是刻意的資訊密度，標題列放不下由標題列自己排收縮優先序解決，
- * 不從額度身上省，也不收進 `+N`。
- *
- * 窄視窗與手機的判斷（`collapsed`／`compact`）量的是**標題列**（`ResizeObserver` 掛在父節點），
- * 不是 `window.innerWidth`：後者少算了側欄與圖片暫存欄約 500px。
- *
- * The kinds do not report the same windows: claude and codex have both 5h and 7d, grok only a
- * weekly one (scraped from its `/usage` dialog, SPEC §12.6). A kind therefore draws one bar per
- * window it actually reports — never a filler bar for a window that does not exist.
- *
- * Claude identities (`cc0`, `cc1`, …) each get their own gauge on the strip (icon + identity
- * label). The bare `claude` quota key is the default account — when a `cc0` (or empty-env)
- * identity exists it is shown as that label, not as an unlabeled Claude row.
- *
- * 額度是按主機分開的（SPEC §14）。這條列一次只顯示**一台**主機：預設本機，看的是
- * 遠端 bot／專案時就換成那台，並在最左邊掛一個主機名稱標籤（本機不掛，維持原樣）。
- * store 裡遠端的 key 帶 `<host>/` 前綴，這裡先投影成裸 key 再跑原本那套排序規則。
+ * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
+ * only its windows collapse. Fill length carries the level so it survives greyscale.
+ * 桌機每個帳號都畫完整量表，不收進 `+N`（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
+ * grok 只有週窗（SPEC §12.6），每種 kind 只畫實際回報的窗口。
+ * 額度按主機分開（SPEC §14），一次只顯示一台；遠端 key 帶 `<host>/` 前綴，先投影成裸 key。
  */
 
-/** Every kind can report quota; grok arrives from the `/usage` probe. */
 const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok']
 
-/** One strip / popover row: base kind or `kind:identity`, plus the host-scoped map key. */
 type QuotaEntry = { key: string; fullKey: string; kind: BotKind; identity: string | null }
 
-/** 只留下屬於 `host` 的額度，並把 key 還原成裸的（`m4p/claude:cc1` → `claude:cc1`）。 */
+/** `m4p/claude:cc1` → `claude:cc1`，只留屬於 `host` 的。 */
 function scopeToHost(quota: QuotaMap, host: string): QuotaMap {
   const out: QuotaMap = {}
   const prefix = `${host}/`
@@ -61,17 +38,14 @@ function scopeToHost(quota: QuotaMap, host: string): QuotaMap {
   return out
 }
 
-/** 這台主機在 UI 上的名字。 */
 function hostLabel(host: string): string {
   return host === LOCAL_HOST ? '本機' : host
 }
 
-/** 標題／aria 用的說法：「本機額度」對上「m4p 的額度」。 */
 function quotaTitle(host: string): string {
   return host === LOCAL_HOST ? '本機額度' : `${host} 的額度`
 }
 
-/** 一列額度對應的 store 值：身份專屬的 key 優先，沒有才退回這列自己的 key。 */
 function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
   return useStore((s) => {
     if (entry.identity) {
@@ -82,18 +56,11 @@ function useEntryQuota(entry: QuotaEntry, host: string): KindQuota | null {
   })
 }
 
-/**
- * 這個身份在**這台**主機上有沒有被判定為沒登入。
- *
- * cc1 在本機是一個帳號、在 m4p 可能根本沒登入過，所以要看那台 host 的 `identity_status`，
- * 不是全域那份 `[[identities]]`。條子（`Gauge`）和 popover（`PopRow`）講的是同一件事，
- * 兩邊共用這一支——各寫一份的話，判斷會慢慢漂走。
- */
+/** 看該 host 的 `identity_status`（同名身份在各主機可能是不同帳號）；Gauge 與 PopRow 共用以免判斷漂移。 */
 function useLoggedOut(entry: QuotaEntry, host: string): boolean {
   return useStore((s) => {
     const name = entry.identity
-    // 預設帳號（沒有身份名）看的是 `tools.<kind>.logged_in`：grok / codex 沒登入時一直寫
-    // 「背景查詢中」，其實是永遠查不到。
+    // 預設帳號看 `tools.<kind>.logged_in`，否則沒登入會永遠顯示「背景查詢中」。
     if (!name) return toolsOfHost(s, host)[entry.kind]?.logged_in === false
     return identityStatusOfHost(s, host)[name]?.logged_in === false
   })
@@ -101,25 +68,18 @@ function useLoggedOut(entry: QuotaEntry, host: string): boolean {
 
 type Level = 'crit' | 'warn' | 'ok'
 
-/**
- * 剩餘百分比。10 以上取整數；**不到 10 時留一位小數**（2026-09-08）：快用完的時候 9.8 和 9.1
- * 差一整回合，四捨五入成 10 反而讓人以為還有餘裕。
- */
+/** 不到 10 留一位小數：快用完時 9.8 與 9.1 差一整回合（2026-09-08）。 */
 function remaining(w: QuotaWindow | null | undefined): number | null {
   if (!w) return null
   const left = Math.max(0, 100 - w.used_pct)
   return left < 10 ? Math.round(left * 10) / 10 : Math.round(left)
 }
 
-/** `remaining` 的顯示字：不到 10 且有小數才帶一位（`9.8`）；`9.0` 就是 `9`，10 以上整數。 */
 function fmtPct(pct: number): string {
   return String(pct)
 }
 
-/**
- * daemon 算好的旗標決定顏色（見 docs/API.md §12.4）——不在前端另外用 pct 寫死門檻，
- * 否則會跟 daemon 的 low/critical 各說各話（條紅了側欄卻沒警告，或反過來）。
- */
+/** 顏色吃 daemon 旗標（docs/API.md §12.4），前端不另寫 pct 門檻以免跟側欄警告不一致。 */
 function levelOf(w: { low: boolean; critical: boolean } | null | undefined): Level {
   if (!w) return 'ok'
   if (w.critical) return 'crit'
@@ -127,7 +87,6 @@ function levelOf(w: { low: boolean; critical: boolean } | null | undefined): Lev
   return 'ok'
 }
 
-/** 兩個窗口取最嚴重的旗標，一樣不碰 pct 數字。 */
 function worst(q: KindQuota | null): Level {
   const windows = [q?.five_hour, q?.seven_day, q?.fable].filter((w): w is QuotaWindow => w != null)
   if (windows.some((w) => w.critical)) return 'crit'
@@ -135,7 +94,7 @@ function worst(q: KindQuota | null): Level {
   return 'ok'
 }
 
-/** The window that is closest to running out — what the collapsed pill shows. */
+/** The window closest to running out — what the collapsed pill shows. */
 function worstWindow(q: KindQuota | null): { name: WindowName; pct: number | null } {
   const cands: { name: WindowName; pct: number }[] = []
   const five = remaining(q?.five_hour)
@@ -143,7 +102,6 @@ function worstWindow(q: KindQuota | null): { name: WindowName; pct: number | nul
   const fable = remaining(q?.fable)
   if (five !== null) cands.push({ name: '5h', pct: five })
   if (seven !== null) cands.push({ name: '7d', pct: seven })
-  // 沒有 Fable 桶就不進來，收合的膠囊也不會憑空多一個窗口。
   if (fable !== null) cands.push({ name: 'F', pct: fable })
   if (cands.length === 0) return { name: '5h', pct: null }
   return cands.reduce((a, b) => (b.pct < a.pct ? b : a))
@@ -183,7 +141,6 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false): strin
   return parts.join('，')
 }
 
-/** Parse `claude` / `claude:cc1` into a strip entry; unknown kinds are ignored. */
 function parseQuotaKey(key: string): QuotaEntry | null {
   const i = key.indexOf(':')
   const kind = (i === -1 ? key : key.slice(0, i)) as BotKind
@@ -209,10 +166,7 @@ function isDefaultClaudeIdentity(idn: Identity): boolean {
   return idn.name === 'cc0' || Object.keys(idn.env).length === 0
 }
 
-/**
- * Quota map key for a Claude identity. Prefers `claude:<name>`; the default/cc0 identity
- * falls back to bare `claude` when that is where statusline data landed.
- */
+/** Prefers `claude:<name>`; default/cc0 falls back to bare `claude` when statusline data landed there. */
 function claudeQuotaKey(quota: QuotaMap, idn: Identity, bareClaimed: boolean): { key: string; claimedBare: boolean } {
   const keyed = `claude:${idn.name}`
   if (quota[keyed] != null) return { key: keyed, claimedBare: false }
@@ -226,14 +180,7 @@ function entryReactKey(entry: Omit<QuotaEntry, 'fullKey'>): string {
   return entry.identity ? `${entry.kind}:${entry.identity}` : entry.key
 }
 
-/**
- * Strip / popover entries in a **fixed** order — never by remaining %:
- *   cc0 → cc1 → (other claude identities) → codex → grok
- * When no Claude identities are configured, bare `claude` stands in for the Claude slot.
- *
- * `host` 決定看哪一台的數字：先把 map 投影成該主機的裸 key，最後再把 `fullKey` 補回去，
- * 所以底下這套排序規則完全不必知道主機的存在。
- */
+/** Fixed order, never by remaining %: cc0 → cc1 → other claude → codex → grok. */
 function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string): QuotaEntry[] {
   const quota = scopeToHost(quotaAll, host)
   const out: QuotaEntry[] = []
@@ -247,7 +194,6 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
     out.push({ ...entry, fullKey: quotaKey(host, entry.key) })
   }
 
-  // 1) Claude identities first (cc0, cc1, …)
   if (claudeIds.length > 0) {
     let bareClaimed = false
     const bareOwner = claudeIds.find((i) => i.name === 'cc0') ?? claudeIds.find(isDefaultClaudeIdentity) ?? null
@@ -263,7 +209,7 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
     push({ key: 'claude', kind: 'claude', identity: null })
   }
 
-  // Orphan claude:<id> keys not in the identities list (still after known ones, before codex)
+  // Orphan claude:<id> keys not in the identities list
   for (const key of Object.keys(quota).sort()) {
     const entry = parseQuotaKey(key)
     if (!entry || entry.kind !== 'claude' || !entry.identity) continue
@@ -271,12 +217,10 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
     push(entry)
   }
 
-  // 2) codex, then grok — fixed kind order, no remaining-% sort
   for (const kind of ['codex', 'grok'] as const) {
     if (kind in quota) push({ key: kind, kind, identity: null })
   }
 
-  // Any other kind:identity orphans (future-proof), after the fixed kinds
   for (const key of Object.keys(quota).sort()) {
     const entry = parseQuotaKey(key)
     if (!entry || !entry.identity || entry.kind === 'claude') continue
@@ -292,22 +236,17 @@ function RiskDot({ level }: { level: Level }) {
   return <span className={`quota-risk ${level}`} aria-hidden="true" />
 }
 
-/** 額度條上的窗口名稱：`F` 是 Max 方案的 Fable 週窗，只有 claude 有。 */
+/** `F` 是 Max 方案的 Fable 週窗，只有 claude 有。 */
 type WindowName = '5h' | '7d' | '週' | 'F'
 
-/** 每個窗口有多長：位置刻度就是拿「離重置還有多久」去除這個。 */
 const WINDOW_MS: Record<WindowName, number> = {
   '5h': 5 * 3_600_000,
   '7d': 7 * 86_400_000,
   '週': 7 * 86_400_000,
-  // Fable 也是週窗，刻度跟 7d 同一把尺。
   F: 7 * 86_400_000,
 }
 
-/**
- * 重置刻度在條上的位置：剩 3 小時、窗口 5 小時 → 60%。時間過去刻度就往左走，
- * 碰到左緣就是要重置了。拿不到 `resets_at` 時不畫。
- */
+/** 重置刻度位置＝剩餘時間 ÷ 窗口長度（剩 3h／5h → 60%）。 */
 function resetMark(resetsAt: string | null | undefined, span: number, now: number): number | null {
   if (!resetsAt) return null
   const t = new Date(resetsAt).getTime()
@@ -317,7 +256,7 @@ function resetMark(resetsAt: string | null | undefined, span: number, now: numbe
   return Math.min(100, (left / span) * 100)
 }
 
-/** `2h13m` / `4d0h` / `12m`——和狀態列那條同一種寫法。 */
+/** `2h13m` / `4d0h` / `12m`——和狀態列同一種寫法。 */
 function fmtLeft(ms: number): string {
   if (ms <= 0) return '即將重置'
   const m = Math.floor(ms / 60_000)
@@ -328,12 +267,7 @@ function fmtLeft(ms: number): string {
   return `${m}m`
 }
 
-/**
- * 彈出層那一列用的「還剩多久」：`2 天 3 小時` / `4 小時 20 分` / `12 分`。
- *
- * 跟 [`fmtLeft`] 是同一個數字，只是那個是給 tooltip 與窄處用的緊縮寫法（`2d3h`）。這裡有位置，
- * 就寫成讀得出口的樣子——這一列的主角是「還能撐多久」。
- */
+/** popover 用的長寫法（`2 天 3 小時`）；`fmtLeft` 是窄處的緊縮版。 */
 function fmtLeftLong(ms: number): string {
   if (ms <= 0) return '即將重置'
   const m = Math.floor(ms / 60_000)
@@ -344,10 +278,7 @@ function fmtLeftLong(ms: number): string {
   return `${m} 分`
 }
 
-/**
- * 5h 窗口不到一小時就要重置時，窗口名直接換成剩幾分（`12m`）：使用者要能提早準備
- * （2026-09-09）。回 null 表示照常寫 `5h`。只做 5h——7d／週的重置沒有「等一下就回來」的意義。
- */
+/** 5h 不到一小時就重置時窗口名換成剩幾分（`12m`），讓使用者提早準備（2026-09-09）；只做 5h。 */
 function soonLabel(name: WindowName, resetsAt: string | null, now: number): string | null {
   if (name !== '5h' || !resetsAt) return null
   const left = new Date(resetsAt).getTime() - now
@@ -355,7 +286,6 @@ function soonLabel(name: WindowName, resetsAt: string | null, now: number): stri
   return left <= 0 ? '0m' : `${Math.max(1, Math.ceil(left / 60_000))}m`
 }
 
-/** 每分鐘動一次就夠：刻度是分鐘級的。 */
 function useMinuteNow(): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -365,7 +295,7 @@ function useMinuteNow(): number {
   return now
 }
 
-/** Health bar; daemon-decided `low` / `critical` (see docs/API.md §12.4) drive both colour and the countdown number. */
+/** Health bar; colour follows daemon `low` / `critical` (docs/API.md §12.4). */
 function Bar({
   pct,
   low,
@@ -386,11 +316,9 @@ function Bar({
         <span className={`quota-bar ${lv}${pct === null ? ' nodata' : ''}`}>
           <span className="quota-bar-fill" style={{ width: pct === null ? '0%' : `${pct}%` }} />
         </span>
-        {/* 黑針＝下次 reset 的位置（剩餘時間 ÷ 窗口長度）。 */}
         {mark !== null ? <span className="quota-bar-mark" style={{ left: `${mark}%` }} title={markTitle} /> : null}
       </span>
-      {/* 數字一律印（UI-DECISIONS：百分比始終保留）：以前只有 low 才印，健康的那行沒有數字，
-          三行右緣參差不齊（2026-09-09 使用者截圖）。健康的用淡色，黃／紅照舊。 */}
+      {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。 */}
       <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
         {pct === null ? '—' : fmtPct(pct)}
       </span>
@@ -400,11 +328,7 @@ function Bar({
 
 type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
 
-/**
- * 手機一格只放得下一個數字，所以要挑「誰比較急」：先看 daemon 的旗標（critical > low > 一般），
- * 同一級才比剩得少的。**平手時留著現任**——常駐的 7d 不會因為另一個窗口剛好同分就換掉，
- * 那樣格子上的數字會在兩個窗口之間跳來跳去。門檻一律吃 daemon 的旗標，前端不另外寫死 pct。
- */
+/** 手機一格只放一個數字：先比 daemon 旗標再比 pct；平手留現任，免得數字在窗口間跳。 */
 function moreUrgent(w: WindowBar, best: WindowBar): boolean {
   const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
   if (rank(w) !== rank(best)) return rank(w) > rank(best)
@@ -416,7 +340,6 @@ function weekLabel(kind: BotKind): '7d' | '週' {
   return kind === 'grok' ? '週' : '7d'
 }
 
-/** Frameless, compact: icon above identity, bars to the right — keeps label glued to its bars. */
 function Gauge({
   entry,
   host,
@@ -429,10 +352,9 @@ function Gauge({
   entry: QuotaEntry
   host: string
   collapsed: boolean
-  /** 手機：條子縮成一顆 chip，剩餘量改用數字寫出來（見 `QuotaStrip` 的 `compact`）。 */
+  /** 手機：條子縮成 chip，剩餘量用數字寫。 */
   compact: boolean
   focused: boolean
-  /** popover 開著沒（給 `aria-expanded`）。 */
   open: boolean
   onOpen: () => void
 }) {
@@ -440,9 +362,7 @@ function Gauge({
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  // 上下兩條邊框量表**只有手機畫**（2026-09-11 使用者）：桌機同一格裡已經有 5h／7d 的 bar
-  // 與數字，邊框是同一份資訊再畫一次；手機的量表被壓成純文字 chip，看不到 bar，才需要它。
-  // 2026-09-13 使用者：**每一格都畫**，不只目前這顆 bot 的那格（「上下條不侷限於現在的種類」）。
+  // 上下邊框量表只有手機畫（2026-09-11 使用者：桌機已有 bar），且每一格都畫（2026-09-13 使用者）。
   const borderWindows = compact ? [
     { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
     { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
@@ -450,17 +370,9 @@ function Gauge({
   const fable = remaining(q?.fable)
   const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
-  // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  // 手機：一格**只寫一個**窗口（2026-09-12 使用者，推翻同日稍早的「7d 常駐＋追加警戒窗口」）。
-  //
-  // 追加的那一個本來往下排，於是 `7d 19% / F 0%`、`7d 42% / 3m 0%` 這種格子變成兩行，整條
-  // 額度列跟著長高；而 390px 一次要放五格（cc0/cc1/cc2/codex/grok），沒有那個高度可以給。
-  //
-  // 保留的仍然是 7d（grok 是「週」）——它決定「今天還能不能開工」，5h 兩三個小時就回來了。
-  // 只有另一個窗口被 daemon 標成 low／critical **而且比 7d 更急**時才**取代**它，不並列：
-  // 「5h 只剩 3%」是現在就會擋住你的事，那時候 7d 還剩多少已經不是重點。
-  // 三個窗口的完整數字照舊在 tooltip 與點開的底部 sheet 裡，一個都沒有少。
+  // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
+  // 5h／F 被 daemon 標 low／critical 且更急時才取代，不並列；完整數字在 tooltip 與 sheet。
   if (compact && seven !== null) {
     const shown: WindowBar = {
       name: weekLabel(entry.kind),
@@ -469,7 +381,7 @@ function Gauge({
       low: q?.seven_day?.low ?? false,
       critical: q?.seven_day?.critical ?? false,
     }
-    // 5h / Fable 只有在 daemon 標成 low／critical 時才有資格搶這一格（門檻見 docs/API.md §12.4）。
+    // 門檻見 docs/API.md §12.4。
     const rivals: WindowBar[] = []
     if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
       rivals.push({
@@ -524,7 +436,6 @@ function Gauge({
         critical: q?.seven_day?.critical ?? false,
       })
     }
-    // Max 方案的 Fable 週額度：daemon 有回報才多這一條，沒有就不畫也不佔位。
     if (fable !== null) {
       windows.push({
         name: 'F',
@@ -535,13 +446,10 @@ function Gauge({
       })
     }
   }
-  // 主機名寫進 tooltip：條上只掛得下一個小標籤，但滑過去要能確定是哪一台的數字。
   const title = `${hostLabel(host)} · ${label(entry, q, loggedOut)}`
-  // 停用中的那一格在條上也要看得出來，不然得先點開 popover 才知道側欄少了誰。
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
-  // CLI 說這個帳號現在收不下工作。量表是速率視窗，codex 的 credits 用完時它們照樣是滿的
-  // （2026-09-12 使用者：滿格卻一直 hit limit），所以這件事要畫在格子上，不是只寫在 popover。
+  // 量表是速率視窗，codex credits 用完時仍滿格卻一直 hit limit，所以畫在格子上（2026-09-12 使用者）。
   const blocked = q?.limit_hit ?? null
   const accessibleTitle = focused
     ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!)}%`).join('')}`
@@ -552,8 +460,7 @@ function Gauge({
       className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}`}
       title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
-      // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
-      // 不放行就會一次開一次關。
+      // input／button 的點擊放行，否則量表按鈕會一次開一次關。
       onClick={(e) => {
         if ((e.target as HTMLElement).closest('input, button')) return
         onOpen()
@@ -576,18 +483,14 @@ function Gauge({
         <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
         </span>
-        {/* claude 才有身分名（cc0 / cc1 …）；codex、grok 就寫 kind 自己的名字。三種 kind 的左欄
-            因此都是「圖示 / 名稱 / 開關」三層，開關一律貼在名稱正下方，不會有一格歪掉。 */}
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {/* 紅點（不是 ⛔）：emoji 跟 kind 圖示一樣是圓的、一樣大，兩顆並排讀起來像壞掉的圖示
-                （2026-09-13 使用者）。點由 CSS 畫，見 `quotaLimitHit.css`。 */}
+            {/* 紅點不用 ⛔：跟 kind 圖示並排像壞掉的圖示（2026-09-13 使用者）。 */}
             {blocked ? <span className="quota-blocked-ico" aria-hidden="true" /> : null}
             {entry.identity ?? entry.kind}
           </span>
         )}
-        {/* 停用開關跟圖示／名稱同一直欄，貼在名稱正下方：右邊那幾條進度條的高度不變，
-            整格也就不會因為它變高。 */}
+        {/* 開關放左欄名稱下方，整格不會因它變高。 */}
         <StripDisableToggle entry={entry} host={host} />
       </span>
       <button
@@ -599,8 +502,7 @@ function Gauge({
         onClick={onOpen}
       >
       {compact ? (
-        /* 手機上一條 38px 的量表比它旁邊的所有東西都不重要，但風險不能只剩顏色
-           （UI-DECISIONS：百分比始終保留），所以把最吃緊的那個窗口寫成數字。 */
+        /* 手機風險不能只剩顏色（UI-DECISIONS：百分比始終保留），寫成數字。 */
         <span className="quota-compact">
           {windows.map((w) => {
             const soon = soonLabel(w.name, w.resetsAt, now)
@@ -641,10 +543,7 @@ function Gauge({
   )
 }
 
-/**
- * 這一格「暫時停用」時，什麼時候自動解除——這組額度最近一次還沒到的 reset 時刻。
- * 三個視窗都沒有時間就回 null（那格只能手動解除）。
- */
+/** 暫時停用的自動解除時刻＝最近一次未到的 reset；null 表示只能手動解除。 */
 function nextResetOf(q: KindQuota | null, now: number): number | null {
   let next: number | null = null
   for (const w of [q?.five_hour, q?.seven_day, q?.fable]) {
@@ -656,13 +555,7 @@ function nextResetOf(q: KindQuota | null, now: number): number | null {
   return next
 }
 
-/**
- * 「暫時停用這個身分」的勾選格。額度快用完時勾起來，它底下的 bot 就先從側欄收起來，
- * 額度視窗 reset 到了自動解除（見 docs/UI-DECISIONS.md）。
- *
- * 卡片整格可點：`PopRow` 的 `onClick` 會轉呼叫這裡，所以這顆 input 只要管自己的鍵盤與
- * 勾選語意——`aria-label` 講完整句，卡片上的字只是提示。
- */
+/** popover 裡的暫時停用勾選格（見 docs/UI-DECISIONS.md）；卡片點擊由 `PopRow` 轉呼叫。 */
 function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
   return (
     <span className="quota-disable">
@@ -679,11 +572,7 @@ function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: stri
   )
 }
 
-/**
- * 條上的停用開關——主要入口就在這裡，貼在 kind 圖示／身分名底下的同一直欄。
- * 條子很擠，所以只留方塊本身：說明走 `aria-label`，滑過去用既有的 `.icon-tip` 泡泡。
- * popover 裡那份（`DisableToggle`）留著當詳細版，兩邊共用同一份狀態。
- */
+/** 條上的停用開關（主要入口）；條子擠只留方塊，說明走 aria-label 與 `.icon-tip`。 */
 function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }) {
   const q = useEntryQuota(entry, host)
   const disabledMap = useDisabledQuota()
@@ -716,21 +605,6 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
   return <QuotaLoginShell host={host} hostLabel={hostLabel(host)} kind="codex" command={command} />
 }
 
-/**
- * 彈出層裡的一條窗口：`⏱ 5h ▐▇▇▇░░ 20% ↻ 11:00`。
- *
- * 條子跟 reset 的黑針跟條上那顆量表用**同一個** `Bar`（2026-09-09 使用者要求：手機點開額度
- * 要看得到跟電腦一樣的圖示化進度）。手機的條子是純文字 chip（38px 的量表在那裡沒有意義），
- * 所以「還剩多少 / 什麼時候回來」的圖形版本只剩這裡能看——那就不能只有數字。
- */
-/**
- * codex 的「額度重置券」（`rateLimitResetCredits`，2026-09-10 使用者要求接進來）。
- *
- * 兩條桶子回答「什麼時候自己回血」，這一行回答另一件事：「你現在就能把它清掉，還有幾張、
- * 那張什麼時候過期」。額度歸零的當下那是唯一還能做的動作，所以它跟桶子並排、不是藏在別處。
- * daemon 只讀不用：真的要用還是在 codex 那邊（`/status` → `Reset usage`），這裡不代按。
- */
-/** 「⛔ 額度被擋 · 19:07 恢復」——橫幅沒寫時間就只說要等它下一次跑得動。 */
 function blockedLine(hit: QuotaLimitHit): string {
   const when = hit.until ? new Date(hit.until) : null
   const back = when && !Number.isNaN(when.getTime())
@@ -757,6 +631,7 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
   )
 }
 
+/** codex 額度重置券（2026-09-10 使用者）；daemon 只讀不用，要用在 codex `/status` → Reset usage。 */
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   if (!credits || credits.available <= 0) return null
   const left = credits.expires_at ? new Date(credits.expires_at).getTime() - now : null
@@ -776,6 +651,7 @@ function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null |
   )
 }
 
+/** 共用 `Bar`：手機點開也要看得到圖示化進度（2026-09-09 使用者）。 */
 function PopWindow({
   icon,
   name,
@@ -807,9 +683,7 @@ function PopWindow({
         mark={resetMark(w?.resets_at, WINDOW_MS[win], now)}
         markTitle={left === null ? undefined : `${name} 還有 ${fmtLeft(left)} 重置`}
       />
-      {/* 「還有多久」而不是「幾號幾點」（2026-09-09 使用者要求）：讀的人問的是「還能撐多久」，
-          日期要自己跟現在相減才知道答案，而黑針畫的本來就是這段剩餘時間。絕對時刻留在
-          tooltip，跨日或要跟別人約時間時才需要。 */}
+      {/* 寫「還有多久」不寫時刻（2026-09-09 使用者要求）；絕對時刻留在 tooltip。 */}
       <span className="quota-reset" title={w?.resets_at ? `重置時刻 ${fmtTime(w.resets_at)}` : undefined}>
         <span className="quota-ico" aria-hidden="true">
           ↻
@@ -839,8 +713,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   return (
     <div
       className={`quota-pop-row${off ? ' off' : ''}`}
-      // 整格可點：點卡片本身就等於切換那顆 checkbox。從 checkbox 自己或登入鈕發出來的
-      // 點擊要放行，不然會一次切換兩下／順手把登入按鈕吃掉。
+      // 點卡片＝切換 checkbox；控制項自己的點擊放行，免得切兩下或吃掉登入鈕。
       onClick={(e) => {
         if ((e.target as HTMLElement).closest('input, button, a, select, textarea')) return
         toggle()
@@ -860,12 +733,9 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       ) : !known || (five === null && seven === null) ? (
         <>
           <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>
-            {/* 登入偵測改在該主機的 herdr pane 裡跑（claude 是 `claude auth status --json`），
-                看得到 Keychain，所以這裡的「沒登入」就是真的沒登入，直接叫使用者去登入。 */}
+            {/* 登入偵測在該主機 herdr pane 裡跑、看得到 Keychain，所以「沒登入」可信。 */}
             {loggedOut
-              ? // 後半句「請去 Bot 設定按登入」由下面那顆按鈕取代：claude / grok 直接送 `/login`，
-                // codex 沒有 `/login`，改開 shell 跑 `codex login`。
-                `${hostLabel(host)} 上這個帳號未登入。`
+              ? `${hostLabel(host)} 上這個帳號未登入。`
               : entry.kind === 'grok'
                 ? '背景查詢中'
                 : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
@@ -897,38 +767,24 @@ export function QuotaStrip({
   host = LOCAL_HOST,
 }: {
   focusKind?: BotKind | null
-  /** Selected bot's identity; null = default / cc0 account. */
+  /** null = default / cc0 account. */
   focusIdentity?: string | null
-  /**
-   * 要顯示哪一台主機的額度（SPEC §14）。預設本機；選到 ssh 主機上的 bot／專案時
-   * 傳它的 host，數字就換成 daemon 從那台讀回來的。
-   */
+  /** 顯示哪一台主機的額度（SPEC §14），預設本機。 */
   host?: string
 }) {
   const quota = useStore((s) => s.quota)
   const configured = useStore((s) => s.identities)
-  // 這台主機認得的身份：config 的加上它 shell 裡的 `ccN`（SPEC §16）。遠端的 cc1 可能指到
-  // 跟本機不同的帳號，額度列本來就一次只看一台，所以身份清單也要跟著那一台。
+  // 身份清單跟著該主機（SPEC §16）：遠端 cc1 可能是不同帳號。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
   const identities = useMemo(() => identitiesOfHost(configured, idStatus), [configured, idStatus])
-  /**
-   * 這條列**實際拿得到的寬度**，不是視窗寬。
-   *
-   * 原本用 `window.innerWidth` 比 1500：可是標題列的寬度是「視窗 − 側欄 − 圖片暫存欄」，
-   * 大約少 500px。於是視窗一過 1500，量表就從「只留焦點那格」變成全部攤開（696px），
-   * 而標題列其實只有 ~970px——排在最後的「對話／終端」分頁被推出畫面右緣
-   * （2026-09-11 於 1500–1555px 量到，正好是最常見的筆電寬度）。改成量自己的容器，
-   * 側欄開關、暫存欄多寬、視窗多大都判斷得對。
-   *
-   * 量的是**父節點**（標題列）而不是 `wrap` 自己：`.quota-strip` 是 `flex: none`，寬度由
-   * 內容決定，拿它回頭決定要畫幾格會來回震盪。標題列的寬度由版面給，不受這條列影響。
-   */
+  // 量父節點（標題列）寬而非 window.innerWidth（少算側欄與暫存欄約 500px，2026-09-11 分頁被推出畫面）；
+  // 不量 wrap 自己：`.quota-strip` 是 `flex: none`，會來回震盪。
   const [avail, setAvail] = useState<number | null>(null)
   const [open, setOpen] = useState(false)
-  // 手機點某一格只看那一格（2026-09-09 使用者）：記下是哪一格開的；`+N` 與桌面仍看全部。
+  // 手機點某一格只看那一格（2026-09-09 使用者）。
   const [only, setOnly] = useState<string | null>(null)
   const phone = useMediaQuery(PHONE_QUERY)
-  // 手機的明細貼在額度列正下方、靠上對齊（2026-09-09 使用者：跳在底下太遠）。
+  // 手機明細貼在額度列正下方（2026-09-09 使用者：跳在底下太遠）。
   const [popTop, setPopTop] = useState<number | null>(null)
   const measure = () => {
     const r = wrap.current?.getBoundingClientRect()
@@ -936,7 +792,7 @@ export function QuotaStrip({
   }
   const wrap = useRef<HTMLDivElement>(null)
 
-  // `useLayoutEffect`：第一次繪製前就量到，不然開頁會先閃一次「全部攤開」再收回去。
+  // layout effect：首次繪製前量到，避免開頁先閃一次全部攤開。
   useLayoutEffect(() => {
     const box = wrap.current?.parentElement
     if (!box) return
@@ -968,10 +824,8 @@ export function QuotaStrip({
     wrap.current?.querySelector('.quota-hp.focused')?.scrollIntoView({ inline: 'center', block: 'nearest' })
   }, [phone, focusKind, focusIdentity])
 
-  /** Fixed: cc0 → cc1 → codex → grok. No remaining-% / focus reshuffle. */
   const ordered = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
 
-  /** Same fixed order as the strip (Claude identities expanded). */
   const popEntries = ordered
 
   if (ordered.length === 0) return null
@@ -983,34 +837,19 @@ export function QuotaStrip({
     .sort()
     .pop()
 
-  /** 還沒量到（第一次繪製、或沒有 ResizeObserver）就當作桌機寬度。 */
   const box = avail ?? 1416
-  /**
-   * Both queryable kinds always stay on the bar; only the per-kind windows collapse.
-   *
-   * 門檻量的是標題列（見 `avail`），不是視窗：`window.innerWidth` 少算了側欄與圖片暫存欄
-   * 約 500px，同一個視窗寬在開／關側欄時給額度的空間差很多。
-   */
   const collapsed = box < 604
-  /** 手機：標題列連一顆量表都放不下，剩餘量改用數字寫在 chip 上。CSS 也是 640px 那條線。 */
+  /** CSS 也是 640px 那條線。 */
   const compact = phone
-  /**
-   * 每一個帳號都在條上，而且都是完整的量表——**不收進 `+N`、也不縮成窄格**
-   * （2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
-   * 標題列排不下時由標題列自己讓位（名字、pane chip、分頁鍵的收縮優先序），不從額度身上省。
-   */
+  // 全部帳號都畫完整量表（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
   const shown = ordered
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
-      {/* 這排本來整個是一顆 `<button>`。停用開關要長在每一格身分卡裡（數字正下方），
-          checkbox 不能塞在 button 裡，所以改成一個容器：每一格自己有「點開 popover」的
-          按鈕，開關是它的兄弟節點。點條子照樣打開 popover，行為沒變。 */}
+      {/* 容器而非 button：checkbox 不能塞在 button 裡。 */}
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
-        {/* 「claude 有更新」放在整條額度的**最左邊**（2026-09-11 使用者）。本來貼在 claude
-            那幾格右邊，於是它夾在兩個 kind 中間，看起來像是後面那個 kind 的東西；靠左先出現
-            就沒有這個誤會，位置也不會隨著窄視窗少畫幾格而跳來跳去。沒有更新時它自己不畫。 */}
+        {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。 */}
         <UpdateQuotaChip />
-        {/* 遠端才掛主機名：本機是預設狀態，多一個「本機」標籤只會佔掉標題列的寬度。 */}
+        {/* 遠端才掛主機名。 */}
         {remote ? (
           <span className="quota-host" aria-hidden="true">
             {host}
@@ -1068,7 +907,6 @@ export function QuotaStrip({
               看全部（{popEntries.length}）
             </button>
           ) : null}
-          {/* 一行就夠：每個帳號各印一次「更新於」時，那幾個時間差不到一分鐘。 */}
           {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · ↻ 是距離重置還有多久</p> : null}
         </div>
       ) : null}

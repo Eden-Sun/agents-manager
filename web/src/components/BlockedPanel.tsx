@@ -10,14 +10,8 @@ import { linkifyTerm } from './TermLinks'
 import { useTermWrap } from './termWrap'
 
 /**
- * SPEC §3.2：agent `blocked` 時對話上方的終端快照 + 按鍵面板。
- *
- * 完整畫面在 `BlockedModal`（blocked 一發生就自動彈出來）。這條面板是它關掉之後的留守：
- * 狀態還在、隨時可以「展開全畫面」再叫回來。全畫面開著的時候 `paused` 會停掉這裡的輪詢，
- * 同一個 bot 不會有兩條 `GET /terminal` 在跑。
- *
- * 認得出編號選單時走**選單模式**（2026-09-12 第二輪回饋）：畫面上只留問題、選項與 Esc，
- * 終端原文、整排按鍵、抓法與 revision 這些除錯用的東西全部收進「終端原文與更多按鍵」。
+ * SPEC §3.2：agent `blocked` 時對話上方的快照＋按鍵面板，`BlockedModal` 關掉後的留守；
+ * 全畫面開著時 `paused` 停掉這裡的輪詢。認得出編號選單時走選單模式（2026-09-12 第二輪回饋）。
  */
 export function BlockedPanel({
   botId,
@@ -47,7 +41,6 @@ export function BlockedPanel({
       <div className="blocked-head">
         <span
           className="blocked-title"
-          // 選單模式下條上不再寫抓法與 revision（那是除錯資訊，不是要回答的問題），但也不丟掉。
           title={`終端 visible 快照${snap?.revision != null ? `・revision ${snap.revision}` : ''}`}
         >
           ● agent 需要回應
@@ -70,7 +63,6 @@ export function BlockedPanel({
           </button>
         ) : null}
       </div>
-      {/* codex 的升級提示（TUI 當場問的）也要在這裡就能先看 changelog，不必先展開全畫面。 */}
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       {menu ? (
         <>
@@ -92,8 +84,6 @@ export function BlockedPanel({
               {k.label}
             </button>
           ))}
-          {/* 本來寫的是 `按鍵會帶 expect_run_id，Run 不符時後端回 409`——那是 API 的約定，
-              不是使用者要知道的事。他要知道的是這顆按下去安不安全。 */}
           <span className="hint">按鍵只會送到目前這個 Run；bot 中途重啟就不會誤送。</span>
         </div>
       ) : null}

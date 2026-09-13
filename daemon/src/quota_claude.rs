@@ -1,37 +1,8 @@
-//! Claude Code quota + login, read from a throwaway herdr pane (complements the statusLine push).
-//!
-//! StatusLine only updates while a bot is running and chatting. The background probe opens one
-//! pane in the dedicated `am-quota` herdr session (the daemon's own named session on a remote
-//! host) and runs **one** shell line there:
-//!
-//! ```text
-//! claude auth status --json      → loggedIn / email / subscriptionType
-//! claude -p "/usage"             → the three plan lines
-//! ```
-//!
-//! It is a pane rather than ssh on purpose: a non-login ssh session cannot read the macOS
-//! Keychain, where some accounts keep their OAuth credentials, so it answers `loggedIn: false`
-//! for accounts that work fine here. A pane runs under the user's own login session and sees
-//! what the user sees — local and remote alike.
-//!
-//! `claude -p "/usage"` prints plain text (no TUI dialog to drive, no first-run trust prompt):
-//!
-//! ```text
-//! Current session: 47% used · resets Sep 7 at 9:59pm (Asia/Taipei)
-//! Current week (all models): 15% used · resets Sep 14 at 11:59am (Asia/Taipei)
-//! Current week (Fable): 23% used · resets Sep 14 at 11:59am (Asia/Taipei)
-//! ```
-//!
-//! `Current session` → `five_hour`；`Current week (all models)` → `seven_day`；Max 方案才有的
-//! `Current week (Fable)` → `fable`（一樣是週窗，只算 Fable 那一份）。其餘 model-specific 的
-//! 週列（Sonnet / Opus）仍舊忽略，額度條上只多 Fable 這一條。沒登入時 `/usage` 只印一段
-//! 成本摘要、沒有那三條，於是解析回 `None`，而同一次探測的 `auth status` 已經說了為什麼。
-//!
-//! [`parse_claude_usage`] 仍認得舊的 TUI 對話框版面（標題／長條／`Resets` 各一行），因為
-//! statusLine 之外還有人手動貼那個畫面進來測。
-//!
-//! Each configured Claude identity is probed separately (empty-env / `cc0` shares the bare
-//! `claude` key with the default account).
+//! Claude Code quota + login via one throwaway herdr pane running `auth status --json` and
+//! `-p "/usage"` (statusLine only updates while a bot chats). A pane, not ssh: non-login ssh
+//! can't read the macOS Keychain and wrongly reports `loggedIn: false`.
+//! Sonnet/Opus 週列忽略；[`parse_claude_usage`] 仍認舊 TUI 對話框版面（有人手動貼畫面來測）。
+//! Each identity is probed separately (empty-env / `cc0` shares the bare `claude` key).
 
 use crate::config::{expand_home, LOCAL_HOST};
 use crate::herdr::HerdrClient;
@@ -44,18 +15,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// One pane + two `claude` invocations is cheap now, but still not free; once a minute is
-/// plenty for the strip.
 pub const CLAUDE_POLL: Duration = Duration::from_secs(60);
 
-/// How long the whole `auth status` + `-p "/usage"` line may take in the pane. `-p` starts a
-/// real session, so a cold start on a busy host is measured in seconds, not milliseconds.
+/// `-p` starts a real session; a cold start on a busy host takes seconds.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
 
 const PROBE_SESSION: &str = "am-quota";
 const PROBE_LABEL_PREFIX: &str = "am-quota-claude";
-
-// ------------------------------------------------------------------ parsing
 
 fn clean(line: &str) -> String {
     let s: String = line
@@ -69,10 +35,8 @@ fn clean(line: &str) -> String {
     s.trim().to_string()
 }
 
-/// `78% used` or a bar row ending in `78%` / `78% used`.
 fn parse_used_pct(line: &str) -> Option<f64> {
     let low = line.to_ascii_lowercase();
-    // Prefer the explicit "N% used" form from the Usage tab.
     if let Some(at) = low.find("% used") {
         let head = &line[..at];
         let num: String = head.chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
@@ -80,7 +44,6 @@ fn parse_used_pct(line: &str) -> Option<f64> {
             return num.chars().rev().collect::<String>().parse().ok();
         }
     }
-    // Bar row fallback (same shape as grok): glyphs then a percentage.
     if line.contains('█') || line.contains('░') || line.contains('▌') {
         let (head, _) = line.split_once('%')?;
         let num: String = head.chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
@@ -191,9 +154,7 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-/// 一行的標題部分屬於哪個桶子。純文字版是 `Current week (Fable): 23% used · …`，對話框版是
-/// 單獨一行的 `Current week (Fable)`——切在第一個 `:` 之前兩種都認得（時間裡的 `9:59pm` 在後面，
-/// 切不到）。
+/// 切在第一個 `:` 前，純文字與對話框兩種版面都認得（`9:59pm` 在後面切不到）。
 fn header_kind(line: &str) -> Option<&'static str> {
     let head = line.split(':').next().unwrap_or(line).trim().to_ascii_lowercase();
     if head == "current session" || head.starts_with("current session ") {
@@ -210,14 +171,12 @@ fn header_kind(line: &str) -> Option<&'static str> {
     None
 }
 
-/// `… · resets Sep 7 at 9:59pm (Asia/Taipei)` → 從 `resets` 起的那一段（大小寫不敏感）。
 fn resets_tail(line: &str) -> Option<&str> {
     let at = line.to_ascii_lowercase().find("resets")?;
     Some(&line[at..])
 }
 
-/// A `/usage` answer → Quota, or `None` when the plan lines are not there (logged out, or the
-/// dialog has not drawn them yet).
+/// `None` when the plan lines are not there (logged out, or not drawn yet).
 pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&str>) -> Option<Quota> {
     let lines: Vec<String> = screen.lines().map(clean).filter(|l| !l.is_empty()).collect();
     let mut five: Option<Window> = None;
@@ -284,15 +243,8 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
     })
 }
 
-// ------------------------------------------------------------------ probe
-
-/// Where the probe runs for `host`.
-///
-/// Local keeps its dedicated `am-quota` session (SPEC §12.6) so nothing shows up in the
-/// user's own herdr. A remote host has exactly **one** forwarded socket — the daemon's own
-/// named session — so the probe borrows that one: it is the daemon's session, not the user's,
-/// and the throwaway workspace (label `am-quota-claude*`, agent `amquota…`) is not in the DB,
-/// so reconcile never mistakes it for a bot.
+/// Local uses the dedicated `am-quota` session (SPEC §12.6); a remote host has only one
+/// forwarded socket (the daemon's session), and the probe workspace isn't in the DB so reconcile ignores it.
 async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
     if host == LOCAL_HOST {
         return probe_client().await;
@@ -304,7 +256,6 @@ async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
     app.herdr_for(host).await.ok_or_else(|| anyhow!("no herdr client for `{host}`"))
 }
 
-/// `$HOME` on `host` (the local home for `local`), used for the probe cwd and `~` expansion.
 async fn host_home(app: &Arc<App>, host: &str) -> String {
     if let Some(conn) = app.hosts.get(host).await {
         if let Ok(h) = conn.home().await {
@@ -341,8 +292,6 @@ pub async fn sweep_stale(app: &Arc<App>) {
     if let Ok(c) = probe_client().await {
         clients.push(c);
     }
-    // Local session (older builds probed there) plus every connected remote session, where
-    // the probe lives by design.
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
             clients.push(c);
@@ -393,26 +342,21 @@ impl Drop for Probe {
     }
 }
 
-/// 標記名稱拆成 `printf` 的參數，shell 回顯的指令本身才不會也長得像標記
-/// （回顯的是 `AM_AUTH_%s`，輸出的才是 `AM_AUTH_BEGIN`）。
+/// 標記拆成 `printf` 參數，shell 回顯的指令才不會長得像標記。
 const AUTH_BEGIN: &str = "AM_AUTH_BEGIN";
 const AUTH_END: &str = "AM_AUTH_END";
 const USAGE_DONE: &str = "AM_USAGE_DONE=";
 
-/// 一次 pane 探測拿到的東西：登入狀態與（有登入才有的）額度。
 #[derive(Debug, Default)]
 pub(crate) struct ProbeOutcome {
-    /// `auth status --json` 的 `loggedIn`；讀不懂就是 `None`（「判不出來」，不是「沒登入」）。
+    /// `None` = 判不出來，不是「沒登入」。
     pub logged_in: Option<bool>,
     pub email: Option<String>,
-    /// `subscriptionType`（`max`、`pro`…）。
     pub plan: Option<String>,
     pub quota: Option<Quota>,
 }
 
-/// The one shell line the pane runs. `env` (an identity's `CLAUDE_CONFIG_DIR`) is spelled out
-/// in front of each call as well as being the pane's env, so the command is self-contained if
-/// anyone reads it off the screen.
+/// `env` is spelled out before each call too, so the line is self-contained when read off screen.
 fn probe_command(bin: &str, env: &BTreeMap<String, String>) -> String {
     let mut pfx = String::new();
     for (k, v) in env.iter().filter(|(k, _)| crate::tools::valid_env_name(k)) {
@@ -427,10 +371,7 @@ fn probe_command(bin: &str, env: &BTreeMap<String, String>) -> String {
     )
 }
 
-/// `(auth json, /usage text)` once the trailing `AM_USAGE_DONE=` marker is on screen.
-///
-/// Everything is searched from the **end**: a pane that swallowed the first line and had it
-/// retyped has two runs in its scrollback, and only the last one finished.
+/// Searched from the **end**: a retyped command leaves two runs in scrollback; only the last finished.
 fn split_probe_output(out: &str) -> Option<(String, String)> {
     let done = out.rfind(USAGE_DONE)?;
     let head = &out[..done];
@@ -445,10 +386,7 @@ async fn send_line(client: &HerdrClient, pane_id: &str, line: &str) -> Result<()
     client.pane_send_keys(pane_id, &["Enter"]).await
 }
 
-/// One account probe on `host`. `env` is the pane env (e.g. `CLAUDE_CONFIG_DIR` for cc1).
-/// `base_key` is the host-less quota key (`claude` / `claude:cc1`).
-/// `Ok(None)` means claude is not installed there. Caller must hold
-/// [`crate::quota::probe_lock`] for that host.
+/// `Ok(None)` = claude not installed. Caller must hold [`crate::quota::probe_lock`] for that host.
 async fn refresh_claude_account(
     app: &Arc<App>,
     host: &str,
@@ -464,8 +402,7 @@ async fn refresh_claude_account(
     };
 
     let client = client_for(app, host).await?;
-    // Prefer a cwd Claude already trusts; `-p` does not ask about workspace trust, but a
-    // sane cwd still keeps the session's project files out of `/`.
+    // A sane cwd keeps the session's project files out of `/`.
     let home = host_home(app, host).await;
     let cwd = if host == LOCAL_HOST {
         std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or(home)
@@ -482,8 +419,7 @@ async fn refresh_claude_account(
     let pane_id = pane.pane_id.clone();
     let cmd = probe_command(&bin, &env);
 
-    // workspace.create returns before the interactive shell is always ready to take input, and
-    // a line typed too early is simply lost — so if no marker shows up at all, type it again.
+    // workspace.create can return before the shell takes input; a line typed too early is lost, so retype.
     tokio::time::sleep(Duration::from_millis(700)).await;
     let mut sends = 1u32;
     let mut sent_at = tokio::time::Instant::now();
@@ -523,7 +459,7 @@ async fn refresh_claude_account(
     Ok(Some(out))
 }
 
-/// Was `updated_at` written within `window`? Unparsable timestamps count as stale.
+/// Unparsable timestamps count as stale.
 fn fresher_than(updated_at: &str, window: Duration) -> bool {
     let Ok(t) = chrono::DateTime::parse_from_rfc3339(updated_at) else { return false };
     match chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).to_std() {
@@ -533,35 +469,23 @@ fn fresher_than(updated_at: &str, window: Duration) -> bool {
     }
 }
 
-// ------------------------------------------------ which identities are worth probing
-
-/// How long a failed probe parks an identity when the login state is merely unknown — long
-/// enough that a genuinely broken account is not retried every cycle, short enough that a
-/// transient failure (herdr busy, TUI slow) heals on its own.
+/// Short enough that a transient failure (herdr busy, TUI slow) heals on its own.
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
-/// Same, for an identity the CLI itself reported as logged out in the probe pane: nothing but
-/// a login will change that, so back off much harder.
+/// The CLI said logged out: only a login changes that, so back off harder.
 const RETRY_WHEN_LOGGED_OUT: Duration = Duration::from_secs(30 * 60);
 
-/// Everything known about one identity when deciding whether to open a probe pane for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ProbeEvidence {
-    /// The last probe's `claude auth status --json` said `loggedIn: false`. Since that now runs
-    /// in the same herdr pane as `/usage` — which *can* read the macOS Keychain, unlike a
-    /// non-login ssh session — it is a real answer, not the guess ssh used to give.
     pub cli_says_logged_out: bool,
-    /// A statusLine from a real bot under this account has reached the daemon (this process).
+    /// Seen by this process only.
     pub reported_statusline: bool,
-    /// A bot with this identity has a live run on this host — survives a daemon restart.
+    /// Survives a daemon restart.
     pub has_live_run: bool,
-    /// A probe failed recently and its cool-down has not expired.
     pub cooling_down: bool,
 }
 
-/// A stale "logged out" must never park an identity forever (that is exactly how m4p's `cc1`
-/// and `cc2` ended up with no quota at all) — the user may have just logged in. Positive
-/// evidence — a statusLine, or a live bot run under this account — always wins; otherwise the
-/// only thing that holds a probe back is a probe of our own that just failed.
+/// A stale "logged out" must never park an identity forever (how m4p's `cc1`/`cc2` lost their
+/// quota). Positive evidence always wins; otherwise only our own recent failure holds a probe back.
 pub(crate) fn should_probe_identity(e: ProbeEvidence) -> bool {
     if e.reported_statusline || e.has_live_run {
         return true;
@@ -569,7 +493,6 @@ pub(crate) fn should_probe_identity(e: ProbeEvidence) -> bool {
     !e.cooling_down
 }
 
-/// How long to park an identity after its probe failed.
 pub(crate) fn failure_backoff(e: ProbeEvidence) -> Duration {
     if e.cli_says_logged_out && !e.reported_statusline && !e.has_live_run {
         RETRY_WHEN_LOGGED_OUT
@@ -578,8 +501,7 @@ pub(crate) fn failure_backoff(e: ProbeEvidence) -> Duration {
     }
 }
 
-/// `quota_key` → when the identity may be probed again. In memory only: a restart just means
-/// one extra probe, which is the safe direction to err in.
+/// In memory only: a restart costs one extra probe, the safe direction to err in.
 fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
         std::sync::OnceLock::new();
@@ -606,42 +528,32 @@ fn unpark(key: &str) {
     backoff_map().lock().unwrap().remove(key);
 }
 
-/// Forget the failure backoff for one identity on one host, so the next poll cycle probes it
-/// again right away. Called after a login recheck says the account is back: a logged-out
-/// identity is parked for 30 minutes, which is exactly how long the popover used to stay
-/// wrong after the user logged in.
+/// After a login recheck, so the popover isn't wrong for the 30-minute logged-out park.
 pub fn unpark_identity(host: &str, name: &str) {
     unpark(&crate::quota::quota_key(host, &format!("claude:{name}")));
 }
 
-/// One account to probe this cycle.
 struct Target {
-    /// Host-less quota key (`claude`, `claude:cc1`, …).
     key: String,
     account: Option<String>,
     env: BTreeMap<String, String>,
-    /// Which identity rows this probe's `auth status` answer describes. The bare target speaks
-    /// for every claude identity with no env of its own (`cc0`), because that *is* the default
-    /// account; an identity target speaks only for itself.
+    /// Identity rows the `auth status` answer describes; the bare target speaks for every
+    /// no-env identity (`cc0`), since that *is* the default account.
     names: Vec<String>,
     /// `None` for the bare default account, which is never parked.
     evidence: Option<ProbeEvidence>,
 }
 
-/// Default account + every Claude identity with a distinct config dir, on `host`.
 pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
-    // `~` in an identity's env expands against the *probed* host's home, not the daemon's.
+    // `~` expands against the *probed* host's home, not the daemon's.
     let home = host_home(app, host).await;
-    // `[[identities]]` plus the `ccN` aliases discovered on *this* host (SPEC §16): cc1 is a
-    // different account on m4p than it is here, and each gets its own probe there.
+    // `ccN` are per host (SPEC §16): cc1 on m4p is a different account than here.
     let identities = crate::tools::identities_for_host(app, host).await;
     let mut targets: Vec<Target> = Vec::new();
 
-    // Login state as we last knew it — the previous probe's answer, see `ProbeEvidence`.
     let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
-    // Which accounts are demonstrably usable here right now (DB-backed, so a daemon restart
-    // does not throw the proof away the way the in-memory statusLine trace does).
+    // DB-backed so a daemon restart doesn't lose the proof.
     let live = crate::db::live_identities_on_host(&app.db, host).await.unwrap_or_default();
 
     let mut bare_names = Vec::new();
@@ -652,7 +564,6 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             env.insert(k.clone(), expand_home(v, &home));
         }
         if env.is_empty() {
-            // Same credentials as the default account — strip already maps cc0 → `claude`.
             bare_names.push(id.name.clone());
             continue;
         }
@@ -670,7 +581,6 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         }
         rest.push(Target { key, account: Some(id.name.clone()), env, names: vec![id.name.clone()], evidence: Some(evidence) });
     }
-    // Bare default account (also covers empty-env identities like cc0), first.
     targets.push(Target {
         key: "claude".into(),
         account: bare_names.first().cloned(),
@@ -685,12 +595,8 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let mut touched = false;
     for t in targets {
         let full = crate::quota::quota_key(host, &t.key);
-        // A bot chatting under this account already pushes its limits through the statusLine
-        // hook. Opening a pane to re-read what arrived seconds ago is pure cost — and with
-        // `cc0`…`cc6` discovered from the shell (SPEC §16) there can be several accounts per
-        // host, so this is what keeps one 60 s cycle from turning into a queue of probes.
-        // The login answer rides along on the same probe, though, so an identity we have never
-        // had an answer for is still worth one pane even while its statusLine is fresh.
+        // Fresh statusLine = skip (many `ccN` per host, SPEC §16, would queue probes), unless
+        // we've never had a login answer for it — that rides on the probe.
         let login_known = t.names.iter().all(|n| logins.get(n).is_some_and(|i| i.logged_in.is_some()));
         if login_known {
             if let Some(q) = app.quotas.lock().await.get(&full) {
@@ -710,8 +616,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
                     any = true;
                     unpark(&full);
                 } else if let Some(ev) = t.evidence {
-                    // Ran fine, but there were no plan lines — logged out, or an account the
-                    // CLI will not answer for. Park it with the answer we just got.
+                    // No plan lines: park it using the login answer we just got.
                     let how_long = failure_backoff(ProbeEvidence { cli_says_logged_out: o.logged_in == Some(false), ..ev });
                     park(&full, how_long);
                     tracing::info!(host, key = %t.key, logged_in = ?o.logged_in, retry_in_s = how_long.as_secs(), "claude reported no plan lines; parking this identity");
@@ -739,8 +644,6 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     Ok(any || !saw_missing)
 }
 
-/// Start-up + every 60 s, for `local` and every connected remote host (one host at a time:
-/// each probe opens a real TUI, and the hosts share nothing but this loop).
 pub fn spawn_claude_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
@@ -808,7 +711,6 @@ Last 24h · 2950 requests · 43 sessions
         let q = parse_claude_usage(SCREEN, at("2026-09-06T10:00:00+08:00"), Some("cc0")).unwrap();
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 78.0);
         assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 31.0);
-        // Fable-only weekly must not overwrite all-models — it gets its own window.
         assert_ne!(q.seven_day.as_ref().unwrap().used_pct, 39.0);
         assert_eq!(q.fable.as_ref().unwrap().used_pct, 39.0);
         let fable_reset = q.fable.as_ref().unwrap().resets_at.as_deref().unwrap();
@@ -821,7 +723,6 @@ Last 24h · 2950 requests · 43 sessions
         assert!(week_reset.starts_with("2026-09-11"), "{week_reset}");
     }
 
-    /// 沒有 Fable 那條（非 Max 方案）時 `fable` 要留空，UI 才不會多畫一條空的。
     #[test]
     fn no_fable_row_leaves_the_window_empty() {
         const NO_FABLE: &str = r#"
@@ -838,7 +739,6 @@ Last 24h · 2950 requests · 43 sessions
         assert!(q.fable.is_none());
     }
 
-    /// 標題大小寫不固定（`FABLE` / `fable`），一律要認得。
     #[test]
     fn fable_header_is_case_insensitive() {
         const LOUD: &str = r#"
@@ -856,10 +756,8 @@ Last 24h · 2950 requests · 43 sessions
 
     #[test]
     fn time_only_reset_rolls_to_tomorrow_when_past() {
-        // 3pm asked after 3pm → tomorrow.
         let r = parse_claude_reset("Resets 3:00pm (Asia/Taipei)", at("2026-09-06T16:00:00+08:00")).unwrap();
         assert!(r.starts_with("2026-09-07T"), "{r}");
-        // 3pm asked before 3pm → today.
         let r = parse_claude_reset("Resets 3:00pm (Asia/Taipei)", at("2026-09-06T10:00:00+08:00")).unwrap();
         assert!(r.starts_with("2026-09-06T"), "{r}");
     }
@@ -883,15 +781,12 @@ Last 24h · 2950 requests · 43 sessions
         assert_eq!(q.fable.as_ref().unwrap().used_pct, 23.0);
         assert_eq!(q.account.as_deref(), Some("cc1"));
         assert_eq!(q.source, "claude-usage");
-        // `resets Sep 7 at 9:59pm` → 今天稍晚；`Sep 14 …` → 一週後。
         assert!(q.five_hour.as_ref().unwrap().resets_at.as_deref().unwrap().starts_with("2026-09-07"));
         assert!(q.seven_day.as_ref().unwrap().resets_at.as_deref().unwrap().starts_with("2026-09-14"));
         assert!(q.fable.as_ref().unwrap().resets_at.as_deref().unwrap().starts_with("2026-09-14"));
-        // 底下的 `83% of your usage …` 不是桶子，不能被當成資料。
         assert_ne!(q.seven_day.as_ref().unwrap().used_pct, 83.0);
     }
 
-    /// 沒登入時 `-p "/usage"` 只印成本摘要，一條桶子都沒有 → 不能生出假的 Quota。
     #[test]
     fn a_logged_out_run_is_not_a_quota() {
         const OUT: &str = "Total cost:            $0.0000\nTotal duration (API):  0s\nUsage: 0 input, 0 output\n";
@@ -902,21 +797,18 @@ Last 24h · 2950 requests · 43 sessions
     fn the_probe_command_carries_the_identity_env() {
         let mut env = BTreeMap::new();
         env.insert("CLAUDE_CONFIG_DIR".to_string(), "/home/u/.claude-cc1".to_string());
-        // 空字串鍵之類的壞名字不能被 export 進去。
         env.insert("bad name".to_string(), "x".to_string());
         let cmd = probe_command("/opt/homebrew/bin/claude", &env);
         assert!(cmd.contains("CLAUDE_CONFIG_DIR='/home/u/.claude-cc1'"), "{cmd}");
         assert!(!cmd.contains("bad name"), "{cmd}");
         assert!(cmd.contains("auth status --json"), "{cmd}");
         assert!(cmd.contains("-p '/usage'"), "{cmd}");
-        // 標記本身不能出現在指令裡，否則 shell 回顯就會被當成輸出。
         assert!(!cmd.contains(AUTH_BEGIN) && !cmd.contains(AUTH_END) && !cmd.contains(USAGE_DONE), "{cmd}");
     }
 
     #[test]
     fn the_echoed_command_does_not_look_like_the_markers() {
         let cmd = probe_command("/bin/claude", &BTreeMap::new());
-        // 真實畫面：先是 shell 回顯整行指令，接著才是輸出。
         let screen = format!(
             "u@host ~ % {cmd}\n\n{AUTH_BEGIN}\n{{\"loggedIn\":true,\"email\":\"a@b.c\"}}\n\n{AUTH_END}\n{PLAIN}\n{USAGE_DONE}0\n"
         );
@@ -927,7 +819,6 @@ Last 24h · 2950 requests · 43 sessions
         assert_eq!(crate::tools::read_login_answer("claude", &auth).1.as_deref(), Some("a@b.c"));
     }
 
-    /// 第一行被 shell 吃掉、重打一次時，畫面上會有兩輪；只有最後一輪算數。
     #[test]
     fn only_the_last_run_on_screen_counts() {
         let screen = format!(
@@ -940,57 +831,46 @@ Last 24h · 2950 requests · 43 sessions
         assert_eq!(parse_claude_usage(&usage, at("2026-09-07T12:00:00+08:00"), None).unwrap().fable.unwrap().used_pct, 23.0);
     }
 
-    /// 指令還沒跑完（沒有 `AM_USAGE_DONE=`）就不能收工——半截的 `/usage` 會少一條桶子。
+    /// 半截的 `/usage` 會少一條桶子。
     #[test]
     fn an_unfinished_run_has_no_answer_yet() {
         let screen = format!("{AUTH_BEGIN}\n{{\"loggedIn\":true}}\n{AUTH_END}\nCurrent session: 47% used\n");
         assert!(split_probe_output(&screen).is_none());
     }
 
-    // ---------------------------------------------------------- probe gating
-
-    /// m4p's `cc1`: the last probe answered `loggedIn: false` and the daemon has just
-    /// restarted, so no statusLine has arrived yet. The bot running under `cc1` on that host
-    /// is proof enough that it is worth asking again.
+    /// m4p's `cc1` right after a daemon restart: no statusLine yet, but a live run is proof enough.
     #[test]
     fn a_live_bot_run_beats_the_login_answer() {
         let e = ProbeEvidence { cli_says_logged_out: true, has_live_run: true, ..Default::default() };
         assert!(should_probe_identity(e));
-        // …and it keeps beating it even while a failed probe is cooling down.
         assert!(should_probe_identity(ProbeEvidence { cooling_down: true, ..e }));
     }
 
-    /// A statusLine seen this process contradicts a stale "logged out". Still true.
     #[test]
     fn a_statusline_beats_the_login_answer() {
         let e = ProbeEvidence { cli_says_logged_out: true, reported_statusline: true, ..Default::default() };
         assert!(should_probe_identity(e));
     }
 
-    /// The regression this whole gate caused: with no positive evidence yet, a previous
-    /// `loggedIn: false` must NOT park the identity forever — the user may have logged in
-    /// since, and only another probe can find out.
+    /// Regression: a previous `loggedIn: false` must NOT park the identity forever.
     #[test]
     fn the_login_answer_alone_never_blocks_a_probe() {
         let e = ProbeEvidence { cli_says_logged_out: true, ..Default::default() };
         assert!(should_probe_identity(e));
     }
 
-    /// Only our own failed probe holds one back, and only until it expires.
     #[test]
     fn a_failed_probe_parks_the_identity_until_its_cooldown_expires() {
         assert!(!should_probe_identity(ProbeEvidence { cooling_down: true, ..Default::default() }));
         assert!(should_probe_identity(ProbeEvidence { cooling_down: false, ..Default::default() }));
     }
 
-    /// A genuinely logged-out account (m4p's `cc2`) costs one probe per half hour, not one per
-    /// minute; anything else retries soon in case it was just a busy herdr.
+    /// m4p's `cc2`: a genuinely logged-out account costs one probe per half hour.
     #[test]
     fn backoff_is_longer_when_the_cli_also_says_logged_out() {
         let out = ProbeEvidence { cli_says_logged_out: true, ..Default::default() };
         assert_eq!(failure_backoff(out), RETRY_WHEN_LOGGED_OUT);
         assert_eq!(failure_backoff(ProbeEvidence::default()), RETRY_AFTER_FAILURE);
-        // Positive evidence means the account does work here: a failure is transient.
         assert_eq!(failure_backoff(ProbeEvidence { has_live_run: true, ..out }), RETRY_AFTER_FAILURE);
         assert_eq!(failure_backoff(ProbeEvidence { reported_statusline: true, ..out }), RETRY_AFTER_FAILURE);
     }

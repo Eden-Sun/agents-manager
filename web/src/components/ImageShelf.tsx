@@ -1,21 +1,7 @@
 /**
- * The image shelf: a staging area for images that belongs to no conversation.
- *
- * The composer's own tray is per-draft and dies with the panel, so a screenshot you happen
- * to have in front of bot A cannot be walked over to bot B. Park it here instead — the
- * shelf lives outside `<main>` in `App.tsx`, so switching bot / project never
- * unmounts it — then hand it to whichever conversation is open, by dragging it into the
- * chat (desktop) or tapping it (everywhere, and the only way on touch).
- *
- * Nothing is uploaded while an image waits here: an attachment id is scoped to the
- * receiving bot's project, so the upload has to happen against the conversation that ends
- * up with the image, which is what the drop / tap does via that panel's `useAttachments`.
- *
- * The cards are 96px wide, which is enough to tell two screenshots apart but not to read
- * one, so hover / focus (and a long press on touch) floats a 300px preview *outside* the
- * shelf — left of the rail on desktop, above the strip on a phone — where it cannot cover
- * the card's own remove button. Design notes in
- * `docs/goals/image-drop-tray-2026-09-07.md`.
+ * Image shelf: conversation-independent staging (lives outside `<main>`, survives bot switches).
+ * Nothing uploads here — attachment ids are project-scoped, so the receiving panel uploads on hand-off.
+ * See `docs/goals/image-drop-tray-2026-09-07.md`.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -27,30 +13,21 @@ import type { ShelfItem } from '../store/shelf'
 import { useStore } from '../store/store'
 import { MobilePreviewButton } from './MobilePreview'
 
-/** Collapsed / expanded is a layout preference, so it — and only it — is remembered. */
 const OPEN_KEY = 'am.shelf.open'
 
-/** Fallback preview width, used when there is no conversation on screen to measure. */
 const PEEK_W = 300
 
-/**
- * 預覽要跟托盤裡的縮圖一樣大就白開了：一律撐到對話框那麼寬（`.chat` 就是聊天／群組共用的
- * 那一欄），高度仍由 `--peek-avail` 夾住。量不到就退回固定寬度。
- */
+/** 預覽撐到對話欄（`.chat`）寬，量不到退回 PEEK_W。 */
 function peekWidth(): number {
   const w = document.querySelector('.chat')?.getBoundingClientRect().width ?? 0
   return w > PEEK_W ? Math.round(w - 24) : PEEK_W
 }
-/** A short delay, so sweeping the pointer down the rail does not flash every card. */
+/** Delay so sweeping down the rail does not flash every card. */
 const PEEK_HOVER_MS = 180
 /** Touch: a long press opens the preview — a plain tap still means 「放進對話」. */
 const PEEK_PRESS_MS = 450
 
-/**
- * Where the preview is anchored, in viewport coordinates: the card it belongs to (which it
- * lines up with) and the shelf's own edge (which it stays outside of). Both are needed —
- * clearing just the card would still put the box on top of the header's ＋ / ✕ / » row.
- */
+/** Preview anchor: the card (to align) and the shelf edge (to stay outside, else it covers the header buttons). */
 interface PeekAt {
   key: string
   /** Opened by a long press, so the next tap closes it instead of handing the image over. */
@@ -59,7 +36,6 @@ interface PeekAt {
   left: number
   width: number
   height: number
-  /** The shelf's top and left; the preview is placed above / left of these. */
   boundTop: number
   boundLeft: number
 }
@@ -73,30 +49,15 @@ function readOpen(fallback: boolean): boolean {
   }
 }
 
-/**
- * `true` while a text field somewhere has focus — on a phone that means the on-screen
- * keyboard is up and roughly half the window is gone. The collapsed bar is the only part of
- * the shelf that is on screen without being asked for, so it is the part that gets out of
- * the way; an expanded shelf was opened on purpose and stays (and its cards stay where the
- * finger is aiming, which a bar that came and went underneath them would not).
- */
+/** `true` while a text field has focus (phone keyboard up) — hides the collapsed bar only. */
 function useTypingAway(): boolean {
   const [typing, setTyping] = useState(false)
   useEffect(() => {
     const isField = (el: EventTarget | null) =>
       el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['checkbox', 'radio', 'file'].includes(el.type))
 
-    /*
-     * 這一條收起來時是 `display: none`，回來就把它上面的東西整個往上推 36px。要是這件事
-     * 發生在手指「按下去到放開」之間，使用者瞄準的鍵就從指頭底下跑掉了——最常見的正是
-     * 送出鍵：按下去的瞬間輸入框失焦、焦點落到送出鍵上，bar 回來把它上移 36px，`mouseup`
-     * 於是落在「圖片暫存」那一條上，click 只好退回共同祖先 `.app`，訊息沒送出去
-     * （2026-09-08 在 390px 實測，第一下必失敗、第二下才成功）。
-     *
-     * 所以焦點變動一律**延到下一個 task** 才改狀態：`mousedown` → `focusout`/`focusin` →
-     * `mouseup` → `click` 全都在同一個 task 裡跑完，排在後面的 timer 動版面就傷不到它們。
-     * （microtask 不夠：它會插在 mousedown 與 mouseup 之間。）指標還按著時再多等到放開。
-     */
+    // bar 在按下與放開之間出現會把送出鍵推走、click 落空（2026-09-08 390px 實測），
+    // 所以延到下一個 task（microtask 會插在 mousedown/mouseup 之間）且等指標放開才改狀態。
     let pointerDown = false
     let pending = false
     const settle = () => {
@@ -131,10 +92,7 @@ function useTypingAway(): boolean {
   return typing
 }
 
-/**
- * `true` while a drag carrying OS files is anywhere over the window. The collapsed rail is
- * 38px wide — too small to aim at — so it grows a drop pad for the duration of the drag.
- */
+/** `true` while an OS file drag is over the window; the 38px collapsed rail grows a drop pad. */
 function useFileDragActive(): boolean {
   const [active, setActive] = useState(false)
   useEffect(() => {
@@ -168,20 +126,14 @@ function useFileDragActive(): boolean {
   return active
 }
 
-/**
- * Register the conversation on screen as the shelf's hand-off target: its `useAttachments`
- * `add`, plus a name for the shelf's own tooltip. Called by the chat panels; the shelf has
- * no other way to know which composer is live, and this is what makes the upload land on
- * the bot the user actually meant.
- */
+/** Register the on-screen conversation as the shelf's hand-off target (called by chat panels). */
 export function useShelfSink(add: (files: File[]) => void, label: string | null) {
   useEffect(() => {
     if (!label) return
     const sink = { add, label }
     useShelf.getState().setSink(sink)
     return () => {
-      // Only clear our own registration: on a panel swap the next panel's effect may
-      // already have run.
+      // Only clear our own: on a panel swap the next panel's effect may already have run.
       if (useShelf.getState().sink === sink) useShelf.getState().setSink(null)
     }
   }, [add, label])
@@ -195,11 +147,9 @@ export function ImageShelf() {
   const notify = useStore((s) => s.notify)
   // 手機沒有拖放，空狀態那段字也會在 390px 折成兩行、白佔掉底部一段：短版只講點得到的那條路。
   const phone = useMediaQuery(PHONE_QUERY)
-  // 手機預設是收起來的那一條：展開的托盤在 390px 上會吃掉約 120px（標題列＋提示字），
-  // 而它是「等一下也許會用到」的東西，不該從對話身上先扣一塊。桌機仍然預設展開。
+  // 手機預設收起：展開在 390px 會吃掉約 120px 對話空間。
   const [open, setOpen] = useState(() => readOpen(!window.matchMedia(PHONE_QUERY).matches))
   const typing = useTypingAway()
-  // 同一個斷點決定托盤在右邊還是在底部，也就決定預覽要浮在左邊還是上面。
   const atBottom = useMediaQuery(DRAWER_QUERY)
   const fileDrag = useFileDragActive()
   const picker = useRef<HTMLInputElement>(null)
@@ -215,7 +165,6 @@ export function ImageShelf() {
     setPeek(null)
   }, [])
 
-  /** The card's box is read when the preview actually opens, not when the hover began. */
   const startPeek = useCallback((key: string, el: HTMLElement, delay: number, touch: boolean) => {
     if (peekTimer.current !== null) window.clearTimeout(peekTimer.current)
     const show = () => {
@@ -247,8 +196,6 @@ export function ImageShelf() {
     }
   }, [])
 
-  // The preview is anchored to a box that scrolling / resizing moves, and Escape should
-  // dismiss it like any other transient overlay.
   useEffect(() => {
     if (!peek) return
     const off = () => setPeek(null)
@@ -274,11 +221,11 @@ export function ImageShelf() {
     try {
       localStorage.setItem(OPEN_KEY, next ? '1' : '0')
     } catch {
-      // Private mode / blocked storage: the preference just does not survive a reload.
+      // Blocked storage: preference just does not survive a reload.
     }
   }
 
-  /** Park files, and say out loud whatever was refused — a silently dropped image reads as a bug. */
+  /** Report whatever was refused — a silently dropped image reads as a bug. */
   const take = (files: File[]) => {
     if (files.length === 0) return
     const r = addToShelf(files)
@@ -292,7 +239,6 @@ export function ImageShelf() {
   const drop = useDropTarget(take)
 
   const count = items.length
-  // The parked image may have been removed (or everything cleared) while its preview was up.
   const peekItem = peek ? (items.find((it) => it.key === peek.key) ?? null) : null
 
   return (
@@ -302,7 +248,6 @@ export function ImageShelf() {
         !open && typing ? ' typing' : ''
       }`}
       aria-label="圖片暫存區"
-      // Works wherever focus is inside the shelf, including on the collapsed handle.
       onPaste={(e) => {
         const imgs = Array.from(e.clipboardData?.files ?? [])
         if (imgs.length === 0) return
@@ -318,7 +263,6 @@ export function ImageShelf() {
         hidden
         onChange={(e) => {
           take(Array.from(e.target.files ?? []))
-          // Reset so picking the same file twice still fires `change`.
           e.target.value = ''
         }}
       />
@@ -410,15 +354,7 @@ export function ImageShelf() {
   )
 }
 
-/**
- * One parked image. Click / Enter hands it to the conversation on screen (which is where
- * the upload happens); on desktop it can also be dragged into the chat, carrying just its
- * key — `useDropTarget` fetches the `File` back out of the shelf.
- *
- * Hover and focus open the big preview. On touch that is a long press instead: a tap is
- * already the hand-over, and taking it away would leave phones with no way to use the
- * shelf at all. The press swallows the click it produces, and the next tap closes.
- */
+/** One parked image: click hands over, drag carries its key. On touch a tap is the hand-over, so preview is long press. */
 function ShelfCard({
   item,
   sinkLabel,
@@ -428,7 +364,6 @@ function ShelfCard({
 }: {
   item: ShelfItem
   sinkLabel: string | null
-  /** Whether this card's preview is up, and what opened it. */
   peek: 'off' | 'pointer' | 'touch'
   onPeekStart: (key: string, el: HTMLElement, delay: number, touch: boolean) => void
   onPeekEnd: () => void
@@ -463,7 +398,6 @@ function ShelfCard({
       y: e.clientY,
       timer: window.setTimeout(() => {
         press.current = null
-        // The press is over as far as we are concerned; the click it still fires is not ours.
         swallowClick.current = true
         onPeekStart(item.key, el, 0, true)
       }, PEEK_PRESS_MS),
@@ -481,7 +415,6 @@ function ShelfCard({
         onDragStart={(e) => {
           e.dataTransfer.setData(SHELF_MIME, item.key)
           e.dataTransfer.effectAllowed = 'copy'
-          // 拖著的時候不要再浮一張大圖在旁邊。
           onPeekEnd()
         }}
         onPointerEnter={(e) => {
@@ -495,7 +428,6 @@ function ShelfCard({
         onPointerUp={endPress}
         onPointerCancel={endPress}
         onPointerMove={(e) => {
-          // 捲動或滑開就不算長按。
           if (!press.current) return
           if (Math.abs(e.clientX - press.current.x) > 10 || Math.abs(e.clientY - press.current.y) > 10) endPress()
         }}
@@ -531,16 +463,7 @@ function ShelfCard({
   )
 }
 
-/**
- * The floating preview. Fixed-positioned outside the shelf — left of the rail, or above
- * the strip when the shelf is along the bottom — so it never covers the card it belongs to
- * (and so its × stays clickable); `pointer-events: none` makes that impossible anyway.
- *
- * The box is placed after measuring it, in a layout effect, so it lands on screen in one
- * paint. Its height is capped by the room actually available above the card
- * (`--peek-avail`), which is what keeps the "above" placement from being clamped back down
- * on top of the strip on a short landscape phone.
- */
+/** Floating preview outside the shelf; measured in a layout effect, height capped by `--peek-avail` so short landscape phones don't clamp it onto the strip. */
 function ShelfPeek({ item, at, above }: { item: ShelfItem; at: PeekAt; above: boolean }) {
   const box = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
@@ -552,13 +475,11 @@ function ShelfPeek({ item, at, above }: { item: ShelfItem; at: PeekAt; above: bo
     const w = el.offsetWidth
     const h = el.offsetHeight
     if (above) {
-      // Above the whole shelf (header included), lined up with the card.
       setPos({
         left: clamp(at.left + at.width / 2 - w / 2, 8, Math.max(8, window.innerWidth - w - 8)),
         top: clamp(at.boundTop - 10 - h, 8, Math.max(8, at.boundTop - 10 - h)),
       })
     } else {
-      // Left of the rail, vertically centred on the card.
       setPos({
         left: clamp(at.boundLeft - 10 - w, 8, Math.max(8, at.boundLeft - 10 - w)),
         top: clamp(at.top + at.height / 2 - h / 2, 8, Math.max(8, window.innerHeight - h - 8)),
@@ -573,7 +494,6 @@ function ShelfPeek({ item, at, above }: { item: ShelfItem; at: PeekAt; above: bo
   const style: CSSProperties = {
     '--peek-avail': `${avail}px`,
     width: `min(${peekWidth()}px, calc(100vw - 24px))`,
-    // 量完之前先放在畫面外：layout effect 會在同一次繪製前補上真正的位置。
     left: pos ? pos.left : -9999,
     top: pos ? pos.top : 0,
   } as CSSProperties

@@ -1,11 +1,8 @@
 import type { KeyboardEvent } from 'react'
 
 /**
- * `role="tablist"` 的方向鍵（WAI-ARIA APG tabs，自動啟用）：←/→ 換到隔壁那個分頁、
- * Home/End 跳頭尾，焦點與選取一起走（直接 click 它，切換邏輯只寫在按鈕的 onClick 一處）。
- *
- * 分頁本身**不做** roving tabindex，每個分頁照樣是一個 Tab 停點：UI-DECISIONS 的
- * 「只用 Tab / Enter / Space / Escape 就能切聊天／終端」是驗收條件，方向鍵是額外加的路。
+ * `role="tablist"` 的方向鍵（WAI-ARIA APG tabs，自動啟用），透過 click 切換。
+ * 不做 roving tabindex：UI-DECISIONS 的驗收條件是只用 Tab 就能切聊天／終端。
  */
 export function onTabListKeyDown(e: KeyboardEvent<HTMLElement>) {
   const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key]

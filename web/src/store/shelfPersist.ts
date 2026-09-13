@@ -1,12 +1,6 @@
 /**
- * Keeps the image shelf across a reload: every parked `File` is mirrored into IndexedDB
- * (localStorage cannot hold blobs, and 24 × 12MB would not fit anyway) and read back on
- * the next page load. An item lives `SHELF_TTL_MS` (30 min) from the moment it was parked,
- * whether the tab was reloaded in between or not; expiry is checked on load and once a
- * minute while the page is open. Removing an item or clearing the shelf deletes it here too.
- *
- * All IndexedDB failures are swallowed: a private window or a blocked store just means the
- * shelf is back to memory-only, which is what it was before.
+ * Mirrors the image shelf into IndexedDB (localStorage can't hold blobs) so it survives reload;
+ * expiry checked on load and every minute. IDB failures are swallowed → memory-only shelf.
  */
 
 import { SHELF_TTL_MS, useShelf } from './shelf'
@@ -82,7 +76,7 @@ function del(keys: string[]): Promise<void> {
 
 let started = false
 
-/** Load what survived the last page, then mirror every change. Idempotent. */
+/** Idempotent. */
 export function startShelfPersistence(): void {
   if (started) return
   started = true

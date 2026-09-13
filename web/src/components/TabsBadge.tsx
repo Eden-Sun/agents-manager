@@ -4,11 +4,7 @@ import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { useStore } from '../store/store'
 import { BrowserIcon } from './BrowserIcons'
 
-/**
- * 本機瀏覽器（Chrome / ego）的分頁總數與它們吃的 RAM，直接列在 RAM 那格底下：
- * 「分頁 ◉ 10 / 1.2G ◎ 6 / 886M」，Chrome 與 ego 各自一組、用 logo 認。之前只在超線時才在 RAM 格冒一個小字，使用者要看得點開明細——
- * 這個數字跟 pane 數一樣是「現在開著多少東西」，就該一直在。沒有瀏覽器就整格不出現。
- */
+/** 本機瀏覽器（Chrome / ego）各自的分頁數與 RAM，常駐在 RAM 格底下（跟 pane 數一樣是「現在開著多少」）；沒有瀏覽器就不出現。 */
 export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {
   const browsers = useStore((s) => s.mem?.hosts.find((h) => h.host === host)?.browsers ?? null)
   if (!browsers || browsers.length === 0) return null
@@ -30,8 +26,7 @@ export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {
           <BrowserIcon name={b.name} />
           <span className="tabs-v">
             {b.tabs}
-            {/* 位元組數包成自己的 span：手機的抽屜標題列要把徽章排成一列，那一列只放得下
-                分頁數（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4），CSS 才收得掉。 */}
+            {/* 自己的 span：手機抽屜標題列只放得下分頁數，CSS 要能收掉（mobile-rwd-round2-2026-09-08 問題 4）。 */}
             <span className="tabs-bytes">
               <span className="tabs-sep">/</span>
               {humanBytes(b.bytes)}

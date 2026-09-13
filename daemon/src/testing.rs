@@ -7,23 +7,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-/// A stand-in herdr server speaking the real newline-JSON protocol on a real unix socket:
-/// one request per connection, `{"id","method","params"}` in, `{"id","result"}` out.
+/// Mock herdr on a real unix socket, one newline-JSON request per connection. Hook injection and
+/// `ensure_kind_installed` probing are deliberately left to a live agent.
 ///
-/// It answers `ping`, the `workspace.*` calls, and the tab / pane bookkeeping the one-bot-one-tab
-/// work turns on: `tab.create`,
-/// `tab.list`, `tab.close`, `pane.split`, `pane.close`, `pane.get`, `pane.move`, and the
-/// `session.snapshot` / `agent.list` pair a reconcile runs on, plus the two calls that make
-/// a pane readable — `pane.read` (`set_screen`) and `pane.process_info` (`set_argv`), which
-/// is all an adopted, hook-less agent can be observed through. It stops there, deliberately:
-/// `agent.start` / `agent.wait` are covered with lightweight bookkeeping so the real lifecycle
-/// path can run; hook injection and
-/// `ensure_kind_installed` probing for a real CLI still belong to a live agent.
-///
-/// One place it knowingly differs from herdr 0.8.2: closing a tab's last pane does **not**
-/// reap the tab here, though the real server does. That is on purpose — the daemon must
-/// tidy the tab up itself rather than rely on that, and only a mock that leaves the empty
-/// tab standing can show whether it did.
+/// Knowingly differs from herdr 0.8.2: closing a tab's last pane does **not** reap the tab, so tests
+/// can show the daemon tidies the tab up itself.
 #[derive(Debug, Clone)]
 pub struct MockTab {
     pub tab_id: String,
@@ -35,21 +23,16 @@ pub struct MockTab {
 pub struct MockHerdr {
     #[allow(dead_code)]
     pub workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
-    /// Tabs in creation order, each holding its panes.
     pub tabs: Arc<StdMutex<Vec<MockTab>>>,
-    /// `pane.read` answers, per pane id: the terminal snapshot a test wants scraped.
+    /// `pane.read` answers, per pane id.
     pub screens: Arc<StdMutex<BTreeMap<String, String>>>,
-    /// `pane.process_info` answers, per pane id: the argv the pane's CLI is running with.
+    /// `pane.process_info` argv, per pane id.
     pub argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
-    /// `pane.process_info` answers, per pane id: the pid of that CLI (default 1). Only a
-    /// test that reads something *off* the process — its account (SPEC §16.6) — needs the
-    /// panes to be told apart by pid.
+    /// `pane.process_info` pid (default 1); only tests reading the process's account (SPEC §16.6) need it.
     pub pids: Arc<StdMutex<BTreeMap<String, i64>>>,
-    /// Every `(method, params)` the daemon sent, so a test can assert *how* it asked —
-    /// "started through `tab.create`, never `pane.split`" is only checkable here.
+    /// Every `(method, params)` sent, so a test can assert *how* the daemon asked.
     pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
-    /// What `agent.list` and `agent.get` answer with. A test fills this in to describe
-    /// the agents herdr is supposed to be running.
+    /// What `agent.list` and `agent.get` answer with.
     pub agents: Arc<StdMutex<Vec<Value>>>,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -60,7 +43,6 @@ impl Drop for MockHerdr {
     }
 }
 
-/// The mock's whole mutable world, so one lock covers a request.
 #[derive(Clone)]
 struct MockState {
     workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
@@ -78,8 +60,7 @@ impl MockState {
         self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
     fn pane_json(&self, pane_id: &str, tab: &MockTab, cwd: Option<&Value>) -> Value {
-        // Whatever `agents` says is sitting in this pane — named or, like herdr after it
-        // cleared a name, not — is what `pane.get` reports as the pane's agent.
+        // Named or not (like herdr after clearing a name), the occupant is the pane's agent.
         let occupant = self
             .agents
             .lock()
@@ -98,7 +79,6 @@ impl MockState {
         json!({"tab_id": t.tab_id, "workspace_id": t.workspace_id, "label": t.label,
                "pane_count": t.panes.len()})
     }
-    /// Add a tab holding one fresh pane. Returns (tab, pane_id).
     fn new_tab(&self, workspace_id: &str, label: &str) -> (MockTab, String) {
         let n = self.next();
         let tab = MockTab {
@@ -253,8 +233,7 @@ impl MockHerdr {
                             match st.find_pane(&pid) {
                                 None => json!({"id": id, "error": {"code": "pane_not_found", "message": pid}}),
                                 Some(prev) => {
-                                    // Take it out of its old tab (left standing, empty or not)
-                                    // and give it a brand new one, keeping the pane id.
+                                    // Old tab is left standing, empty or not.
                                     st.tabs.lock().unwrap().iter_mut().for_each(|t| t.panes.retain(|p| *p != pid));
                                     let n = st.next();
                                     let tab = MockTab {
@@ -398,8 +377,7 @@ impl MockHerdr {
                             json!({"id": id, "result": {"agents": st.agents.lock().unwrap().clone()}})
                         }
                         "agent.get" => {
-                            // Like herdr, a target is a live agent name or the id of the pane
-                            // hosting it.
+                            // Like herdr: a live agent name or its pane id.
                             let target = wid_of("target");
                             let found = st
                                 .agents
@@ -429,27 +407,22 @@ impl MockHerdr {
         MockHerdr { workspaces, tabs, calls, agents, screens, argvs, pids, handle }
     }
 
-    /// The methods the daemon called, in order.
     pub fn methods(&self) -> Vec<String> {
         self.calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
     }
 
-    /// The params of the first call to `method`, if it was made at all.
     pub fn first_call(&self, method: &str) -> Option<Value> {
         self.calls.lock().unwrap().iter().find(|(m, _)| m == method).map(|(_, p)| p.clone())
     }
 
-    /// What `pane.read` will answer for `pane_id`.
     pub fn set_screen(&self, pane_id: &str, text: &str) {
         self.screens.lock().unwrap().insert(pane_id.to_string(), text.to_string());
     }
 
-    /// What `pane.process_info` will report as the pane's foreground argv.
     pub fn set_argv(&self, pane_id: &str, argv: &[&str]) {
         self.argvs.lock().unwrap().insert(pane_id.to_string(), argv.iter().map(|s| s.to_string()).collect());
     }
 
-    /// What `pane.process_info` will report as that CLI's pid.
     pub fn set_pid(&self, pane_id: &str, pid: i64) {
         self.pids.lock().unwrap().insert(pane_id.to_string(), pid);
     }
@@ -466,7 +439,6 @@ impl MockHerdr {
 pub struct Env {
     pub app: Arc<App>,
     pub project_id: String,
-    /// A throw-away git checkout used as the project directory.
     pub repo: std::path::PathBuf,
     pub dir: std::path::PathBuf,
     pub herdr: MockHerdr,
@@ -478,11 +450,7 @@ impl Drop for Env {
     }
 }
 
-/// A daemon with a real sqlite file, a real (throw-away) git repository as its project,
-/// and a mock herdr behind the socket.
-///
-/// The data directory is a **sibling** of the repository, so nothing the daemon writes lands
-/// inside the checkout.
+/// The data directory is a **sibling** of the repo, so nothing the daemon writes lands in the checkout.
 pub async fn env() -> Env {
     let dir = std::env::temp_dir().join(format!("am-test-{}", db::ulid()));
     let repo = dir.join("repo");
@@ -519,7 +487,7 @@ pub async fn env() -> Env {
     Env { app, project_id: pid, repo, dir, herdr }
 }
 
-/// An ordinary claude bot in `project_id`, straight into the DB (not config.toml).
+/// Straight into the DB, not config.toml.
 pub async fn claude_bot(app: &Arc<App>, project_id: &str, name: &str) -> db::Bot {
     let id = db::ulid();
     sqlx::query(
@@ -536,9 +504,8 @@ pub async fn claude_bot(app: &Arc<App>, project_id: &str, name: &str) -> db::Bot
     db::bot(&app.db, &id).await.unwrap().unwrap()
 }
 
-/// A `runs` row that looks running to every precondition in `prompt_grouped`, without a
-/// live agent behind it. The RPC that follows fails, which is `delivery = "unknown"` —
-/// a real outcome, and the one that lets a prompt's DB side be tested end to end.
+/// Looks running to `prompt_grouped` with no live agent; the RPC then fails as
+/// `delivery = "unknown"`, which lets a prompt's DB side be tested end to end.
 pub async fn fake_run(app: &Arc<App>, bot_id: &str) -> String {
     let id = db::ulid();
     sqlx::query(
@@ -556,7 +523,7 @@ pub async fn fake_run(app: &Arc<App>, bot_id: &str) -> String {
 }
 
 pub mod git {
-    //! A throw-away git repository, so the git tests never touch the repo they run in.
+    //! So the git tests never touch the repo they run in.
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -574,7 +541,6 @@ pub mod git {
         String::from_utf8_lossy(&o.stdout).trim().to_string()
     }
 
-    /// A repo with one commit on `main` and a `README.md`.
     pub fn init_repo(dir: &PathBuf) {
         std::fs::create_dir_all(dir).unwrap();
         run(dir, &["init", "--initial-branch=main", "-q"]);

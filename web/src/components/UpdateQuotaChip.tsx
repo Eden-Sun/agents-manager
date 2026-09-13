@@ -6,41 +6,15 @@ import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 
 /**
- * 「claude 有更新」擺在額度列**最左邊**（SPEC §6.9；位置與外觀 2026-09-11 使用者定）。
- *
- * 原本是側欄搜尋框上面一整條橫幅。但那條只在側欄裡看得到——手機把側欄收起來、
- * 或視窗窄到側欄讓位時，就完全沒有提示；而「claude 有沒有新版」跟「claude 還剩多少額度」是
- * 同一件事的兩面（都是這個 kind 的全域狀態，跟你現在選哪顆 bot 無關），額度列本來就已經
- * 掛在每個畫面的標題列上，且每個 kind 一格。所以更新提示搬進來，跟 kind 的量表排在一起。
- *
- * 外觀跟側欄那顆（`UpdateBadge variant="dot"`／`.bot-update-dot`）一致：綠色的裸 chevron，
- * 沒有方框。同一件事在兩個地方本來就該長同一個樣子，而且夾在兩個 kind 的量表中間的方框
- * 看起來像是後面那個 kind 的按鈕——所以也一併移到整條額度的最左邊。
- *
- * 位置再修一次（2026-09-11）：靠左之後它兩邊都是空白，又對著三行高的量表垂直置中，看起來
- * 不屬於任何東西。改成**對齊量表的第一行**（5h），左邊補一條 1px 的細分隔線——線左邊是標題
- * 那一群（名字、狀態、pane），右邊是額度，它是額度列的一員。樣式在 styles.css 的
- * `.quota-update`／`.quota-update::before`；綠色裸 chevron 不變。
- *
- * 條子上放不下「重啟 N 顆閒置的 Bot」那句話，所以只留箭頭與數字，整句話走 tooltip 與
- * `aria-label`（跟同一列的停用開關同一套做法）。按下去做的事完全沒變：閒置的一次全部
- * exit + `--resume` 接回來，忙的跳過。
- *
- * 跑起來之後 chip 自己顯示 `done/total`，做完顯示成功幾顆並且點一下收掉——側欄那條橫幅仍然
- * 畫完整的進度與失敗／跳過名單（`UpdateAllBanner`），這裡是隨處都看得見的那份精簡版。
- *
- * **按下去先問一句**：重啟一次動的是好幾顆 bot，而且 chip 上只寫得下一個數字——是哪幾顆、
- * 哪幾顆在忙會被跳過，只有 tooltip 看得到，滑不到（手機）或沒滑過的人等於盲按。確認框把那份
- * 名單攤開來再問，這是整個流程裡唯一一個「還來得及反悔」的地方（送出之後是背景序列跑，沒有
- * 取消）。
+ * 「claude 有更新」擺在額度列最左邊（SPEC §6.9；位置與外觀 2026-09-11 使用者定）：更新與額度都是 kind 的全域狀態，
+ * 側欄收起時也要看得到。對齊量表第一行並補 1px 分隔線（2026-09-11）。按下去先確認：批次重啟沒有取消，確認框是唯一反悔點。
  */
 export function UpdateQuotaChip() {
   const batch = useStore((s) => s.restartBatch)
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
   const sending = useStore((s) => Boolean(s.busy['restart-idle']))
-  // 兩個 selector 各自回**純值**：`updateBatchCounts` 每次都回新的陣列，包成物件回去連
-  // `useShallow` 都擋不住，React 會噴 `getSnapshot should be cached`（側欄踩過同一個坑）。
+  // 各 selector 回純值：`updateBatchCounts` 每次回新陣列，包成物件連 `useShallow` 都擋不住（getSnapshot should be cached）。
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
   const readyNames = useStore((s) =>
     updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)

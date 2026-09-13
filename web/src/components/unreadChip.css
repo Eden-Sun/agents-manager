@@ -1,15 +1,5 @@
-/*
- * 標題列下面那一列（`UnreadChip`）。排序是緊急度（見 `UnreadChip.tsx` 檔頭），版面分兩套：
- *
- * - **桌機**：換行，最多兩行（`.clipped` 把高度切在第二行）；再多就由右邊那顆 `+N` 展開。
- *   不用橫捲——2026-09-12 使用者截圖：2000px 寬、9 顆晶片，左邊那顆被切一半，看起來像壞掉，
- *   而且看不出可以捲，等人回答的那顆就這樣躺在視野外。
- * - **手機**：單行橫捲（寬度就是不夠），但要看得出來能捲：兩端陰影 + 可點的 ◂ ▸，滾輪的垂直
- *   滾動映射成橫捲，`scroll-snap` 讓停下來的位置不會把晶片切一半。
- *
- * 正在看的那一顆由 `UnreadChip` 自己捲進畫面（`useScrollCurrentIntoView`）——只動這一列的
- * `scrollLeft`，不用 `scrollIntoView`（那會連祖先一起捲）。
- */
+/* `UnreadChip` 列（排序見 `UnreadChip.tsx`）。桌機換行最多兩行，多的由 `+N` 展開——不橫捲（2026-09-12 使用者截圖：左邊晶片被切一半、看不出能捲）。
+   手機單行橫捲，兩端陰影＋可點 ◂ ▸、`scroll-snap`。捲進畫面只動 `scrollLeft`，不用 `scrollIntoView`（會連祖先一起捲）。 */
 .unread-bar-wrap {
   position: relative;
   display: flex;
@@ -29,20 +19,19 @@
   min-width: 0;
 }
 
-/* 兩行的高度：晶片 20px + 行距 6px。第三行起看不到，數量由 `+N` 說。 */
+/* 兩行高：晶片 20px + 行距 6px。 */
 .unread-bar.clipped {
   max-height: 46px;
   overflow: hidden;
 }
 
-/* 展開時給個上限再自己捲，免得 30 顆 bot 把對話區壓掉半個畫面。 */
+/* 展開時給上限自己捲，免得 30 顆 bot 壓掉對話區。 */
 .unread-bar.expanded {
   max-height: 30vh;
   overflow-y: auto;
 }
 
-/* 右邊那顆展開／收合：絕對定位，不進 flex 流——它若佔一格，測量「兩行放得下幾顆」就會
-   跟著自己的存在震盪。 */
+/* 絕對定位不進 flex 流：佔一格的話「兩行放得下幾顆」的測量會跟著自己震盪。 */
 .unread-bar-more {
   position: absolute;
   top: 4px;
@@ -64,13 +53,11 @@
   color: var(--accent-ink);
 }
 
-/* 有 `+N` 時右邊留出它的位置，晶片不會被壓在它底下。 */
 .unread-bar:has(~ .unread-bar-more) {
   padding-right: 58px;
 }
 
-/* 可捲的那一端：陰影 + 箭頭。陰影單獨存在時使用者看不出「還有東西」（2026-09-12 使用者），
-   所以箭頭是可以點的按鈕，不是裝飾。 */
+/* 只有陰影使用者看不出還有東西（2026-09-12 使用者），箭頭是可點按鈕。 */
 .unread-bar-arrow {
   position: absolute;
   top: 0;
@@ -101,24 +88,14 @@
 }
 
 
-/*
- * 這一列的兩個狀態是**正交**的，所以分開兩條規則、不要互相蓋（2026-09-11 使用者）：
- *
- * - `unread`（有東西等你看）＝ accent 底色。
- * - `current`（你正在看這一顆）＝ accent 邊框 + 一圈 ring + 粗體，**不動底色**。
- *
- * 兩者可能同時成立（例如視窗在背景時那一顆又跑完一輪），疊起來仍然看得出是哪一種。
- * 底色因此從這條基底規則移到 `.unread-chip.unread`：基底是中性的，誰該亮由狀態決定。
- */
+/* 兩個狀態**正交**，分兩條規則不互蓋（2026-09-11 使用者）：`unread`＝accent 底，`current`＝邊框＋ring＋粗體、不動底色。基底是中性的。 */
 .unread-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   max-width: 180px;
   padding: 1px 8px;
-  /* 沒事的那幾顆退到背景去：字淡一級、字重降一級，讓「有事」與「正在看」有對比可以站出來
-     （2026-09-12 使用者：這一列在寬視窗上分不出狀態）。邊框留 `--border-strong`：形狀本身
-     要讀得出來，淡到看不見反而變成「一排文字」。 */
+  /* 沒事的退到背景：字淡、字重降（2026-09-12 使用者：寬視窗分不出狀態）；邊框留 `--border-strong` 讓形狀讀得出來。 */
   border: 1px solid var(--border-strong);
   border-radius: 999px;
   background: transparent;
@@ -129,24 +106,16 @@
   cursor: pointer;
 }
 
-/* 有未讀＝「該去看」。三組（剛跑完／釘選／進行中）共用同一個意思、同一個畫法，
-   一排晶片看過去才挑得出來是哪幾顆。排在 `:hover` 前面，hover 才蓋得過它。 */
-/*
- * 洗底自己調，不用 `--accent-soft`：那組 token 是給 52px 側欄選取列用的，蓋在這一列的
- * `--bg-sunken` 上只有 1.1（淺）／1.3（深）:1——20px 藥丸上等於沒有面積差，所以描邊、加 ring
- * 都救不回來（2026-09-12 w168:pN 量測）。目標是跟旁邊閒置膠囊有 ~1.8:1 的圖形對比。
- */
+/* 三組有未讀同一畫法才挑得出來；排在 `:hover` 前，hover 才蓋得過。 */
+/* 不用 `--accent-soft`：蓋在 `--bg-sunken` 上只有 1.1／1.3:1，20px 藥丸上等於沒差（2026-09-12 w168:pN 量測）。目標 ~1.8:1。 */
 .unread-chip.unread {
-  /* 實心 accent：量過了，洗底再怎麼調都不夠——淺色主題把 accent 混到 22%／32% 對這一列的
-     `--bg-sunken` 只有 1.26:1（深色 1.86:1），而 12px 的字要留在 4.5:1 以上就不能再壓深。
-     實心之後淺色 5.4:1、深色 3.7:1，形狀也一眼看得出來。最強的顏色給「待辦」是對的：
-     `current` 只是定位點，改用形狀（左側石墨條）表示。 */
+  /* 實心 accent：洗底 22%／32% 只有 1.26:1，而 12px 字要 4.5:1 不能再深；實心淺色 5.4:1、深色 3.7:1。`current` 改用形狀表示。 */
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-text);
 }
 
-/* 實心底上的數字籤要翻過來，不然藍底藍籤看不見。 */
+/* 實心底上數字籤要反白，否則藍底藍籤看不見。 */
 .unread-chip.unread .unread-chip-n {
   background: var(--accent-text);
   color: var(--accent);
@@ -162,7 +131,7 @@
   border-color: var(--accent);
 }
 
-/* 還在跑的：中性色，別跟「該去看」的藍色搶注意力。 */
+/* 還在跑的中性色，不搶「該去看」的藍。 */
 .unread-chip.working {
   background: transparent;
   color: var(--text-dim);
@@ -188,43 +157,22 @@
   }
 }
 
-/*
- * 正在看的那一顆（2026-09-11 使用者：「即使現在正在 view 也是 focus 而不是消失」）。
- * 三組都用同一個 focus 外觀，一眼看出「這顆就是我現在在看的」：實線 accent 邊框 + accent 底。
- * 本來是虛線邊框（意思是「不用再點一次」），但那個做法把它畫得像被停用；現在它是**固定**
- * 留在原位的定位點，要看起來像被選中，不是被淡掉。
- */
-/*
- * 2026-09-12（第二輪，w168:pN 的診斷）：使用者連說兩次「不夠明顯」。第一版把 current 推成
- * 實心 accent，反而讓它跟「有未讀」的藍**更像**——同一個色相上「填色 vs 描邊」在 18–20px 的
- * 藥丸上是最弱的對比。所以兩件正交的事分兩個通道：
- *
- * - 有未讀＝**顏色與面積**（上面那檔藍洗底 + 放大的數字籤）。
- * - 正在看＝**形狀與位置**：中性底 + 左側 3px 石墨條，比照側欄選取列的語言，不再搶藍。
- *
- * `inset` shadow 不佔盒模型，所以被選中仍然不會讓這一列位移。
- */
+/* 正在看的那顆（2026-09-11 使用者：「即使現在正在 view 也是 focus 而不是消失」）：虛線邊框曾畫得像停用，改成像被選中的定位點。 */
+/* 2026-09-12（第二輪，w168:pN 的診斷）：使用者兩次說「不夠明顯」——同色相「填色 vs 描邊」在 20px 藥丸上對比最弱。
+   有未讀＝顏色與面積；正在看＝形狀與位置（中性底＋左側 3px 石墨條）。`inset` shadow 不佔盒模型、不位移。 */
 .unread-chip.current {
   background: var(--bg-hover);
   border-color: var(--border-strong);
   color: var(--text);
-  /* **形狀**才是這顆的主訊號：一列都是藥丸，只有它是方角，掃過去立刻挑得出來，而且完全不靠
-     顏色。999px 的圓角會把 `inset` 左條削成一條細月牙（2026-09-12 實拍），收成 6px 之後那條
-     3px 石墨條才是完整的一根。 */
+  /* 方角是主訊號（不靠顏色）；999px 圓角會把 inset 左條削成月牙（2026-09-12 實拍），收成 6px。 */
   border-radius: 6px;
   box-shadow: inset 3px 0 0 var(--text);
   font-weight: 650;
-  /* 左邊讓出那條的寬度，字不會壓在上面。 */
   padding-left: 11px;
 }
 
-/* 同時有未讀：底維持未讀的實心藍（有東西等你看），左條改成反白色才看得見（你在這裡）。 */
-/*
- * 目前使用中的那一顆再加一圈**綠色外框**（2026-09-13 使用者：「目前使用窗不夠明顯，要有綠色外框
- * 標注」）。方角＋石墨左條是形狀訊號，這圈綠是一眼就看到的顏色訊號；綠在這一列沒有別的意思
- * （藍＝未讀、紅＝要你回答、黃＝等子 agent），所以不會跟任何狀態混在一起。外框用 `box-shadow`
- * 疊在左條旁邊，不佔版面、不位移。
- */
+/* 同時有未讀：底維持實心藍，左條反白才看得見。 */
+/* 使用中那顆加**綠色外框**（2026-09-13 使用者：「目前使用窗不夠明顯，要有綠色外框標注」）：綠在這列沒別的意思（藍未讀、紅要回答、黃等子 agent）。 */
 .unread-chip.current {
   border-color: var(--lamp-green);
   box-shadow: inset 3px 0 0 var(--text), 0 0 0 1px var(--lamp-green);
@@ -237,7 +185,7 @@
   box-shadow: inset 3px 0 0 var(--accent-text), 0 0 0 1px var(--lamp-green);
 }
 
-/* 方角照舊套在紅、黃、進行中那幾種身上——它是「你在這裡」的記號，跟顏色講的事無關。 */
+/* 方角照舊套在紅、黃、進行中：它是「你在這裡」，跟顏色無關。 */
 .unread-chip.current.needs-reply {
   border-color: var(--lamp-green);
   box-shadow: inset 3px 0 0 var(--danger), 0 0 0 1px var(--lamp-green);
@@ -248,8 +196,7 @@
   box-shadow: inset 3px 0 0 var(--warn), 0 0 0 1px var(--lamp-green);
 }
 
-/* 紅（要你回答）與黃（等子 agent）講的是「該做什麼」，比「你在哪裡」重要：整顆填色維持它們
-   自己的語意，左條照舊疊上去。 */
+/* 紅／黃講「該做什麼」比「你在哪」重要：填色維持語意，左條疊上去。 */
 .unread-chip.current.needs-reply {
   background: var(--danger-soft);
   border-color: var(--danger);
@@ -262,17 +209,14 @@
   color: var(--warn);
 }
 
-/* 停在要你回答的提示上（`needs-reply`；不叫 `blocked`——styles.css 有一條裸的 `.blocked` 是
-   BlockedPanel 面板的外框，晶片撞到會被撐成 44px 高）：紅框紅字紅點。跟 `unread`／`current` 一樣是疊加的狀態；
-   放在 `.working` 之後，同一顆既在「進行中」列又 blocked 時紅色要蓋過中性灰。`current` 的
-   accent ring 照舊疊上去。 */
+/* `needs-reply`（不叫 `blocked`：styles.css 裸的 `.blocked` 會把晶片撐成 44px）：紅框紅字紅點。放 `.working` 之後，紅要蓋過中性灰。 */
 .unread-chip.needs-reply {
   border-color: var(--danger);
   background: var(--danger-soft);
   color: var(--danger);
 }
 
-/* 要你回答的那顆：圓點換成 `!`——紅色之外多一個非顏色的記號，跟「等子 agent」的黃點一眼分得開。 */
+/* 圓點換成 `!`：顏色之外的記號，跟黃點一眼分得開。 */
 .unread-chip.needs-reply .unread-chip-dot {
   width: 10px;
   height: 10px;
@@ -300,9 +244,7 @@
   color: #fff;
 }
 
-/* 在等子 agent（自己沒 blocked）：黃。`--lamp-yellow` 淺色主題只有 2.4:1，只能當實心點；
-   字與框用 `--warn`（文字安全的那組），底用 `--warn-soft`（2026-09-12 使用者：「等待 child
-   更好，用黃色」，紅色只留給「需要我本人動手」）。 */
+/* 等子 agent：黃（2026-09-12 使用者：「等待 child 更好，用黃色」，紅只留給需要本人動手）。`--lamp-yellow` 只有 2.4:1 只能當點，字框用 `--warn`。 */
 .unread-chip.waits-kids {
   border-color: var(--warn);
   background: var(--warn-soft);
@@ -319,7 +261,7 @@
   white-space: nowrap;
 }
 
-/* 未讀數字是這一列最強的**非顏色**訊號，原本 10px／14px 行高在 2000px 上讀不到。 */
+/* 未讀數是最強的非顏色訊號，10px 在 2000px 上讀不到。 */
 .unread-chip-n {
   flex: none;
   min-width: 16px;
@@ -335,9 +277,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 釘選的中性外觀就是基底那一套（★ 當標籤、不搶色）；帶未讀時由 `.unread-chip.unread` 把它
-   亮起來——一排 ★ 看過去，有東西等你看的那幾顆要一眼挑得出來，不能只靠名字後面那個小數字。
-   ★、名字、進行中的圓點都照舊：那是**加一層狀態**，不是把它換成「剛跑完」那一組。 */
+/* 釘選基底中性；帶未讀時由 `.unread-chip.unread` 亮起來，不能只靠小數字。是加一層狀態，不是換組。 */
 
 .unread-chip-star {
   flex: none;
@@ -345,7 +285,6 @@
   font-size: 11px;
 }
 
-/* 標題列的星星開關（`PrimaryStar`）：沒釘時是空心、跟其他 icon 一樣淡。 */
 .icon-btn.primary-star {
   color: var(--text-faint);
 }
@@ -358,9 +297,7 @@
   min-width: 0;
 }
 
-/* 手機：換行會把半個畫面吃掉，所以這裡維持單行橫捲。捲軸藏起來（兩端的 ◂ ▸ 與陰影才是
-   提示），`overscroll-behavior-x: contain` 擋住捲到底之後把整頁往旁邊帶，`scroll-snap` 讓
-   停下來的位置對齊晶片左緣——被切一半的晶片正是使用者回報的那個問題。 */
+/* 手機單行橫捲（換行吃半個畫面）：捲軸藏起來、`overscroll-behavior-x: contain` 防帶動整頁、`scroll-snap` 防切一半晶片（使用者回報的問題）。 */
 @media (max-width: 720px) {
   .unread-bar {
     flex-wrap: nowrap;
@@ -371,11 +308,8 @@
     overscroll-behavior-x: contain;
     scroll-snap-type: x proximity;
     scroll-padding-inline: 16px;
-    /* 兩端讓出箭頭的位置，晶片不會被壓在箭頭底下。 */
     padding-inline: 24px;
-    /* scroll shadow 跟 `.context-bar > .git-bar` 同一套（2026-09-12 早上那版留下來的）：
-       `local` 兩層跟著內容走、捲到底時蓋掉 `scroll` 兩層的陰影，所以「還有東西」只在真的
-       還有東西時才畫。箭頭是另一半提示——只有陰影使用者看不出來。 */
+    /* scroll shadow 同 `.context-bar > .git-bar`：只在真的還有東西時畫；只有陰影看不出來，所以另有箭頭。 */
     background:
       linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
       linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
@@ -384,7 +318,7 @@
       var(--bg-sunken);
   }
 
-  /* 橫捲列裡的東西自己不能再縮，不然又被擠回原樣、名字全變成 `c…`。 */
+  /* 不能再縮，否則名字全變 `c…`。 */
   .unread-bar > * {
     flex: none;
   }
@@ -402,7 +336,7 @@
     line-height: 20px;
   }
 
-  /* 手機上星號是辨識「主要 bot」最快的符號，放大它；左右留白縮到只保留觸控需要的量。 */
+  /* 手機上星號是辨識主要 bot 最快的符號，放大；左右留白只留觸控所需。 */
   .unread-chip-star {
     font-size: 18px;
     line-height: 20px;

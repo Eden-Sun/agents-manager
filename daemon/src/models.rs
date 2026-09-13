@@ -1,17 +1,9 @@
-//! v4.0 — `GET /api/models`: live model lists from the agent CLIs, per host, cached 10 min.
+//! `GET /api/models`: live model lists from the agent CLIs, per host, cached 10 min.
 //!
-//! * codex: `codex app-server` (stdio JSON-RPC) `model/list`. The server never exits on its
-//!   own; locally we drive it with a tokio child (write three lines, read stdout until the
-//!   matching id, kill), remotely with a `sh` pipeline that feeds stdin, waits a few seconds
-//!   and lets `awk` cut the stream at the answer.
-//! * grok: `grok models` text output; per-model `reasoning_efforts` from
-//!   `~/.grok/models_cache.json` when present; default effort from that cache (or
-//!   `~/.grok/config.toml`'s `default_reasoning_effort` as a fallback).
-//! * claude: static `opus / sonnet / haiku / fable` (no list API); `default_effort` per
-//!   alias comes from that identity's `settings.json` on that host (`effortLevel` account
-//!   default, overridden per real model id by `modelSettings.<id>.effortLevel` — matched to
-//!   an alias by substring, e.g. `claude-opus-5` for `opus`), so "預設" tells you what it
-//!   actually resolves to instead of just "unspecified".
+//! * codex: `codex app-server` `model/list`. The server never exits on its own, so we kill it
+//!   locally / let `awk` cut the remote stream at the answer.
+//! * grok: `grok models` text + `~/.grok/models_cache.json` efforts (`config.toml` fallback).
+//! * claude: static aliases (no list API); `default_effort` from that identity's `settings.json`.
 
 use crate::config::{expand_home, LOCAL_HOST};
 use crate::hosts::sh_quote;
@@ -24,8 +16,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 pub const CACHE_TTL: Duration = Duration::from_secs(600);
-/// How long a local `codex app-server` round trip may take (initialize is instant,
-/// `model/list` ≈ 1 s locally).
 const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(20);
 /// Seconds the remote pipeline keeps stdin open before the server is allowed to exit.
 const REMOTE_RPC_HOLD_SECS: u32 = 6;
@@ -40,7 +30,6 @@ fn rpc_lines(id: u64, method: &str, params: &Value) -> Vec<String> {
     ]
 }
 
-/// Pick the response with `id` out of a stream of JSON-RPC lines.
 fn find_response(text: &str, id: u64) -> Option<Result<Value>> {
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
@@ -54,8 +43,6 @@ fn find_response(text: &str, id: u64) -> Option<Result<Value>> {
     None
 }
 
-/// One `codex app-server` JSON-RPC call on `host`. `codex_path` overrides the executable
-/// (from the tools cache); otherwise the login shell's `codex` is used.
 pub async fn codex_rpc(app: &Arc<App>, host: &str, method: &str, params: Value) -> Result<Value> {
     const ID: u64 = 2;
     let lines = rpc_lines(ID, method, &params);
@@ -119,7 +106,6 @@ async fn codex_rpc_local(exe: &str, lines: &[String], id: u64) -> Result<Value> 
     result
 }
 
-/// `model/list` → the API shape.
 pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
     result
         .get("data")
@@ -163,8 +149,7 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// `grok models` text → the API shape. Lines: `Default model: grok-4.5`, then under
-/// `Available models:` either `  - grok-4.6` or `  * grok-4.5 (default)`.
+/// Lines: `Default model: grok-4.5`, then `  - grok-4.6` or `  * grok-4.5 (default)`.
 pub fn grok_models_from_text(text: &str) -> Vec<Value> {
     let mut default: Option<String> = None;
     let mut ids: Vec<(String, bool)> = Vec::new();
@@ -199,10 +184,9 @@ pub fn grok_models_from_text(text: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Preferred display / validation order for known grok effort ids.
 const GROK_EFFORT_ORDER: &[&str] = &["low", "medium", "high", "xhigh"];
 
-/// Sort known grok efforts low→xhigh; keep any unknown ids at the end in input order.
+/// Unknown ids go to the end in input order.
 fn sort_grok_efforts(ids: Vec<String>) -> Vec<String> {
     let mut known: Vec<String> = GROK_EFFORT_ORDER
         .iter()
@@ -217,9 +201,7 @@ fn sort_grok_efforts(ids: Vec<String>) -> Vec<String> {
     known
 }
 
-/// Per-model efforts from `~/.grok/models_cache.json`:
-/// `models.<id>.info.reasoning_efforts[{id|value, default}]`.
-/// Returns `(efforts ascending, default_effort)` when the model entry exists.
+/// `models.<id>.info.reasoning_efforts[{id|value, default}]` → `(efforts ascending, default)`.
 fn grok_efforts_from_cache(cache: &Value, model_id: &str) -> Option<(Vec<String>, Option<String>)> {
     let efforts = cache
         .pointer(&format!("/models/{model_id}/info/reasoning_efforts"))?
@@ -252,8 +234,6 @@ fn grok_efforts_from_cache(cache: &Value, model_id: &str) -> Option<(Vec<String>
     Some((sort_grok_efforts(ids), default))
 }
 
-/// Overlay per-model efforts / defaults from models_cache; fall back to config.toml's
-/// `default_reasoning_effort` when a model has no cache default.
 fn enrich_grok_models(mut models: Vec<Value>, cache_text: &str, cfg_text: &str) -> Vec<Value> {
     let cache: Value = serde_json::from_str(cache_text).unwrap_or(Value::Null);
     let cfg_default = grok_default_effort_from_config(cfg_text);
@@ -271,12 +251,7 @@ fn enrich_grok_models(mut models: Vec<Value>, cache_text: &str, cfg_text: &str) 
     models
 }
 
-/// `~/.grok/config.toml`'s `[models] default_reasoning_effort = "high"` — installer-written,
-/// and a fallback when `models_cache.json` has no per-model default. `grok models` itself
-/// never reports effort levels.
-///
-/// Parsed as real TOML (so `# comments`, `'single quotes'` and table scoping behave), accepting
-/// both the top-level and the `[models]` spelling; a top-level key wins over the table's.
+/// Real TOML parse (comments, single quotes, table scoping); top-level key wins over `[models]`.
 fn grok_default_effort_from_config(text: &str) -> Option<String> {
     let doc: toml::Value = toml::from_str(text).ok()?;
     let pick = |v: &toml::Value| {
@@ -289,14 +264,8 @@ fn grok_default_effort_from_config(text: &str) -> Option<String> {
     pick(&doc).or_else(|| doc.get("models").and_then(pick))
 }
 
-/// `settings.json`'s `effortLevel` (account default) and `modelSettings.<real-id>.effortLevel`
-/// (per-model override) → `(global, per_model)`. Anything unreadable or unparsable is
-/// `(None, {})` — a hint that cannot be read is just no hint, never an error.
-///
-/// Real model ids (`claude-opus-5`, `claude-sonnet-5`, `claude-fable-5-1`, …) aren't the
-/// aliases this CLI is started with (`opus`, `sonnet`, `fable`); [`claude_static_models`]
-/// matches an override to an alias by substring, which holds for every id seen so far
-/// (verified against local + m4p `settings.json`, 2026-09-07).
+/// Unparsable is `(None, {})`, never an error. Overrides are keyed by real model id and matched
+/// to aliases by substring (verified against local + m4p `settings.json`, 2026-09-07).
 pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<String, String>) {
     let mut per_model = BTreeMap::new();
     let Ok(v) = serde_json::from_str::<Value>(text) else { return (None, per_model) };
@@ -311,10 +280,7 @@ pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<Str
     (global, per_model)
 }
 
-/// `identity`'s `CLAUDE_CONFIG_DIR` on `host`, already expanded against that host's home —
-/// `None` means the default account (`~/.claude`). `identity` not existing on this host, or
-/// not being a claude identity, is silently the default account too: a bad hint is nothing
-/// worth failing the model list over.
+/// `None` = `~/.claude`; an unknown or non-claude identity silently falls back to that too.
 async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> Option<String> {
     let name = identity?;
     let idn = crate::tools::identity_for_host(app, host, name).await?;
@@ -326,8 +292,6 @@ async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -
     Some(expand_home(dir, &home))
 }
 
-/// Read + parse that account's `settings.json` on `host`. `config_dir` is [`claude_config_dir`]'s
-/// output (`None` = `~/.claude`).
 async fn read_claude_effort_settings(app: &Arc<App>, host: &str, config_dir: Option<&str>) -> (Option<String>, BTreeMap<String, String>) {
     let script = match config_dir {
         Some(dir) => format!("cat {}/settings.json 2>/dev/null", sh_quote(dir)),
@@ -350,19 +314,11 @@ async fn read_claude_effort_settings(app: &Arc<App>, host: &str, config_dir: Opt
     parse_claude_effort_settings(&text)
 }
 
-/// claude's own built-in default once neither an account-wide `effortLevel` nor a per-model
-/// override applies. Verified two ways, 2026-09-07: Claude Code's own docs
-/// (`code.claude.com/docs/en/model-config`, "Choose an effort level") say "`high` … The default
-/// on every model except Opus 4.7"; and directly against the CLI — a fresh identity with an
-/// empty `settings.json` (no `effortLevel`, no `modelSettings`) started at `Sonnet 5 with high
-/// effort` and its `/effort` slider's ▲ sat on `high`. None of our four aliases resolve to
-/// Opus 4.7, so the one documented exception never applies here.
+/// claude's built-in default with no `effortLevel` / override: docs and a fresh identity both say
+/// `high` (2026-09-07); the documented exception (Opus 4.7) is none of our aliases.
 const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
 
-/// What "不帶 `--effort`" resolves to for `alias` on this account: the per-model override in
-/// that identity's `settings.json`, else its account-wide `effortLevel`, else the CLI's
-/// built-in default. Used to fill in a spawned child's effort — its argv never says, but the
-/// CLI still runs at *some* level and the sidebar should show it.
+/// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
 pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<&str>, alias: &str) -> String {
     let dir = claude_config_dir(app, host, identity).await;
     let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await;
@@ -376,17 +332,12 @@ pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<
 }
 
 pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>) -> Vec<Value> {
-    // `claude --model` 的 alias（`claude --help`：'fable'、'opus'、'sonnet'…）。
-    // `efforts` 是 `claude --help` 對 `--effort` 列的那五級，對每個 alias 都一樣（claude 沒有
-    // 像 codex `model/list` 那種 per-model 清單）；不指定就不帶旗標，由 CLI 決定。
+    // claude 沒有 per-model effort 清單，每個 alias 都用 `--effort` 那五級。
     let efforts: Vec<Value> = crate::config::efforts_for_kind("claude").iter().map(|e| json!(e)).collect();
     ["opus", "sonnet", "haiku", "fable"]
         .iter()
         .enumerate()
         .map(|(i, id)| {
-            // A real model id containing the alias (`claude-opus-5` for `opus`) wins over the
-            // account-wide default, which in turn wins over the CLI's own built-in default —
-            // that is exactly what "不帶 --effort" resolves to for *this* model.
             let overridden = per_model.iter().find(|(k, _)| k.to_ascii_lowercase().contains(id)).map(|(_, v)| v.clone());
             let default_effort = overridden.or_else(|| global.map(str::to_string)).unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string());
             json!({
@@ -397,8 +348,7 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .collect()
 }
 
-/// Uncached fetch. `identity` (claude only) picks whose `settings.json` the "預設" effort
-/// hint is read from; `None` is the default account.
+/// Uncached. `identity` (claude only) picks whose `settings.json` the "預設" hint comes from.
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
     let (source, models) = match kind {
         "codex" => {
@@ -476,7 +426,6 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
     }))
 }
 
-/// Cached fetch (10 min per host+kind+identity); `refresh` bypasses the cache.
 pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
     let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
     if !refresh {
@@ -491,26 +440,13 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
     Ok(v)
 }
 
-// ---------------------------------------------------------------- what a running CLI is on
-
-/// The model / reasoning effort a **running** CLI was launched with, read off its own argv.
-///
-/// This is the inverse of `lifecycle::model_args`. It exists for agents the daemon did not
-/// start — an adopted pane, above all the `managed_by='child'` bots `reconcile` picks up when
-/// one agent spawns another: nothing in our database says which model they are on, so the
-/// sidebar badge would forever read 「預設」. `pane.process_info` reports the pane's foreground
-/// argv (`["claude","--dangerously-skip-permissions","--model","opus"]`), which is exactly
-/// what we would have passed ourselves.
-///
-/// Both `--flag value` and `--flag=value` are accepted, and so are the abbreviations each CLI
-/// takes (`-m`). The effort is normalised through [`crate::config::normalize_effort`], so a
-/// value this kind does not accept comes back as `None` rather than poisoning `bots.effort`.
-/// Anything unrecognised is `None` — an unset field is honest, a guessed one is not.
+/// Inverse of `lifecycle::model_args`, for panes the daemon did not start (adopted /
+/// `managed_by='child'`), which would otherwise read 「預設」 forever. Unrecognised → `None`:
+/// an unset field is honest, a guessed one is not.
 pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, Option<String>) {
     let mut model: Option<String> = None;
     let mut effort: Option<String> = None;
-    // codex takes its effort as a config assignment (`-c model_reasoning_effort="high"`), and
-    // will take the model the same way, so both flag styles have to be understood.
+    // codex also takes both via `-c key=value`.
     let assignment = |s: &str, key: &str| -> Option<String> {
         let (k, v) = s.split_once('=')?;
         (k.trim() == key).then(|| v.trim().trim_matches('"').trim_matches('\'').to_string())
@@ -518,7 +454,6 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        // `--flag=value` first: splitting it up front keeps the match arms below to one shape.
         let (flag, inline) = match arg.split_once('=') {
             Some((f, v)) if f.starts_with('-') => (f, Some(v.to_string())),
             _ => (arg, None),
@@ -553,9 +488,8 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
     (model, effort)
 }
 
-/// grok's fallback: before it has a task to name itself after, its terminal title *is* the
-/// model and effort — `Grok 4.6 (xhigh)`. Only ever consulted when the argv carried neither
-/// (the user launched it bare and picked a model with `/model` inside the TUI).
+/// grok's fallback when argv says nothing: before it renames itself to a task, the terminal
+/// title is `Grok 4.6 (xhigh)`.
 pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) {
     let t = title.trim();
     let Some(rest) = t.strip_prefix("Grok ").or_else(|| t.strip_prefix("grok ")) else {
@@ -650,9 +584,7 @@ mod tests {
         let models2 = claude_static_models(global2.as_deref(), &per_model2);
         let of2 = |id: &str| models2.iter().find(|m| m["id"] == id).unwrap()["default_effort"].clone();
         assert_eq!(of2("fable"), json!("low"));
-        // No override and no global: not a guess — this is what the CLI itself defaults to,
-        // verified against a fresh cc2 identity whose `settings.json` has never mentioned
-        // effort (`Sonnet 5 with high effort`, `/effort` slider ▲ on `high`).
+        // No override and no global: the CLI's own default (verified on a fresh cc2 identity).
         assert_eq!(of2("opus"), json!("high"));
 
         // Unreadable / not JSON: no override, no global — same built-in fallback.

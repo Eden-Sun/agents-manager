@@ -9,17 +9,9 @@ import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPaneModal } from './MemPaneModal'
 
 /**
- * 「RAM 4.5G」點開之後的那張清單（SPEC §15.2）。
- *
- * 一個總數回答不了使用者真正的問題：**這裡面哪些是我自己開的、可以砍掉**。一台機器底下
- * 十幾個 `claude`，一半是手動開的 pane 或舊的 `--resume`。所以清單依 `subtree_bytes`
- * 降冪——那正是「砍掉這個能省多少」——並把 owner 直接寫在列上。
- *
- * bot 不給 kill，給的是「停止 bot」：走 `POST /bots/{id}/stop` 那條路才會記錄停止、收掉
- * run，直接送訊號只會留下一個 daemon 以為還活著的 bot。
- *
- * 結束是兩段式（TERM → 再按一次才 KILL）。TERM 讓 CLI 有機會把 session 寫完；第一次按下去
- * 通常就夠了，KILL 要使用者再確認一次，因為它會把還沒存的東西一起帶走。
+ * 「RAM」點開的清單（SPEC §15.2）：依 `subtree_bytes` 降冪（砍掉能省多少）並列 owner。
+ * bot 只給「停止 bot」（走 `POST /bots/{id}/stop`，直接送訊號會留下 daemon 以為還活著的 bot）；
+ * 其餘兩段式 TERM → 再按才 KILL，KILL 會帶走沒存的東西所以要再確認。
  */
 
 /** 15 秒 = daemon 的取樣間隔（SPEC §15.1）；比它快只會拿到同一份數字。 */
@@ -47,7 +39,7 @@ function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: (
         await fn()
         onDone()
       } catch (e) {
-        // daemon 的訊息照著顯示（「這是 AG Man 的 bot，請用停止 bot」等），不在前端另編一套。
+        // daemon 的訊息照著顯示，不在前端另編一套。
         setErr(e instanceof Error ? e.message : '失敗')
       } finally {
         setBusy(false)
@@ -78,8 +70,7 @@ function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: (
         onClick={() =>
           void run(async () => {
             await killMemProcess(host, p.pid, armed ? 'KILL' : 'TERM')
-            // TERM 送出去之後就把按鈕換成「強制」：程序死了這一列會消失，還在就是它沒理
-            // TERM，那時使用者要的正是下一段。KILL 之後沒有下一段了。
+            // TERM 後按鈕換成「強制」：程序還在就是沒理 TERM。
             setArmed(!armed)
           })
         }
@@ -91,7 +82,7 @@ function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: (
   )
 }
 
-/** 點得開的 RAM 徽章：外觀跟原本那顆一樣，差在它是 `button` 且會掛清單。 */
+/** 點得開的 RAM 徽章。 */
 export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; children: React.ReactNode }) {
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<MemProcesses | null>(null)
@@ -115,8 +106,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
     }
   }, [host])
 
-  // 關著就不抓：這是一次 `ps`（遠端還是一趟 ssh），沒人在看的時候跑它只是白花錢。
-  // 第一筆由「點開」那個動作去抓（見下面的 `onClick`），這裡只負責之後的重取樣。
+  // 關著就不抓：每次是一趟 `ps`（遠端還要 ssh）；第一筆由點開的 `onClick` 抓。
   useEffect(() => {
     if (!open) return
     const t = setInterval(() => void load(), REFRESH_MS)
@@ -193,7 +183,6 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
               重新整理
             </button>
           </div>
-          {/* 整機那一行放在最上面：明細是「我們自己吃了什麼」，這一行才是「這台還剩什麼」。 */}
           {row?.machine ? (
             <p className={`mem-pop-machine${row.machine.available_bytes / row.machine.total_bytes < 0.15 ? ' low' : ''}`}>
               這台機器 剩 <strong>{humanBytes(row.machine.available_bytes)}</strong> / 共 {humanBytes(row.machine.total_bytes)}

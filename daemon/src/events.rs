@@ -1,14 +1,7 @@
-//! herdr event subscription topology (SPEC §3.1, §11.3.6) and event handling (§6.6).
+//! herdr 事件訂閱與處理（SPEC §3.1、§6.6、§11.3.6）。
 //!
-//! - one global connection **per host/session**: pane.exited / pane.closed / workspace.closed /
-//!   pane.agent_detected
-//! - one connection per active Run: pane.agent_status_changed {pane_id}
-//!
-//! pane ids are only unique within a Herdr session, so every lookup is keyed by
-//! `(host, session, pane_id)`.
-//!
-//! herdr is inconsistent about event naming (`pane.agent_status_changed` uses dots,
-//! `pane_updated` uses underscores), so every name is normalized before matching.
+//! pane id 只在一個 herdr session 內唯一，所以查表一律以 `(host, session, pane_id)` 為鍵。
+//! herdr 的事件名稱點號／底線兩種寫法都有，比對前先正規化。
 
 use crate::config::LOCAL_HOST;
 use crate::state::App;
@@ -24,9 +17,8 @@ fn norm(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// Start (or restart) the global subscription for one host's configured session. Replacing the old task and
-/// registering the new one happens under one lock, so two quick calls cannot leave two
-/// loops running (each of which would reconcile independently).
+/// 起（或重起）一個 host 的全域訂閱。換掉舊 task 與登記新的在同一把鎖內，否則兩次快速呼叫會留下
+/// 兩個迴圈各自對帳。
 pub async fn spawn_global_for_host(app: Arc<App>, host: String) {
     let Some(session) = app.session_for_host(&host).await else {
         tracing::warn!(host, "cannot start global subscription without a configured session");
@@ -47,7 +39,7 @@ pub async fn spawn_global_for_session(app: Arc<App>, host: String, session: Stri
     g.insert(key, t);
 }
 
-/// Local host convenience (kept for `main.rs`).
+/// `main.rs` 用的本機捷徑。
 pub async fn spawn_global(app: Arc<App>) {
     spawn_global_for_host(app, LOCAL_HOST.to_string()).await;
 }
@@ -101,8 +93,7 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
             Err(e) => {
                 if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
-                    // A6: tell the UI right away, otherwise the lamp stays green until a
-                    // later attempt succeeds.
+                    // 馬上讓 UI 知道，不然燈號會一直綠到下次連上為止。
                     crate::state::emit_daemon_status(&app).await;
                 }
                 if is_local_default {
@@ -111,8 +102,7 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                 tracing::debug!(host = %host, session = %session, error = %e, "herdr subscribe failed");
             }
         }
-        // A remote host's reconnect is owned by its HostConn supervisor: stop retrying here
-        // once the host is down, and let the supervisor respawn us after the master is back.
+        // 遠端的重連歸 HostConn supervisor 管：這裡停手，等它在 master 回來後重開我們。
         if host != LOCAL_HOST && !app.host_connected(&host).await {
             tracing::info!(host = %host, "host disconnected; global subscription yields to the supervisor");
             return;
@@ -156,10 +146,8 @@ async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
                     tracing::debug!(host, session, error = ?e, "default session sync after agent detection failed");
                 }
             } else if app.session_for_host(host).await.as_deref() == Some(session) {
-                // A new agent in the manager's own session: most often a child pane a bot just
-                // opened (`<parent>-<suffix>`, see `reconcile`), which nobody would otherwise
-                // notice until the next restart. Off this task, and a beat late, so an agent
-                // that is still settling reports its name and kind.
+                // 多半是 bot 剛開的子 pane（見 `reconcile`），不排一次對帳就要等到下次重啟才看得到。
+                // 另開 task 並晚一拍，讓還在啟動的 agent 先報出名字與 kind。
                 let app = app.clone();
                 let host = host.to_string();
                 tokio::spawn(async move {
@@ -184,11 +172,8 @@ async fn end_runs_for_pane(app: &Arc<App>, host: &str, session: &str, pane_id: &
         }
     }
     unwatch_pane_on_session(app, host, session, pane_id).await;
-    // #60: retiring a child whose pane closed is the reconcile's call (it checks that herdr no
-    // longer lists the agent — a moved pane reports its old id closed too). But closing a pane
-    // is not guaranteed to produce the `pane.agent_detected` that would schedule one, so the
-    // child could sit in the sidebar until some unrelated event. Ask for a reconcile, a beat
-    // late like the agent-detected path, so herdr has settled.
+    // #60：子 agent 退役由對帳判定（pane 被搬走也會報舊 id 關閉），但關 pane 不保證會發
+    // `pane.agent_detected`，所以這裡自己排一次，同樣晚一拍等 herdr 穩定。
     if ended_a_child {
         let app = app.clone();
         let host = host.to_string();
@@ -207,12 +192,9 @@ pub async fn watch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
     watch_pane_on_session(app, host, &session, pane_id).await;
 }
 
-/// Generation of the watcher currently registered for a pane, only ever read or written
-/// while holding `pane_watchers`. A watcher that ends by itself has to take its own map entry
-/// with it — `watch_pane_on_session` treats a present key as "already watching", so a
-/// leftover entry meant that pane could never be subscribed again: the bot's lamp froze at
-/// its adoption-time status and neither `cancel_stall` nor `begin_external_turn` ever fired
-/// (§6.6) — but it must not evict a *newer* watcher installed for the same pane meanwhile.
+/// 這個 pane 目前登記的 watcher 世代（只在持有 `pane_watchers` 時讀寫）。自己結束的 watcher 要把
+/// 自己的登記帶走——留著會讓 `watch_pane_on_session` 以為「已經在看」，那個 pane 從此訂閱不起來
+/// （燈號凍在收編當下，§6.6）；但不能把同一個 pane 後來裝的**新** watcher 踢掉。
 fn watcher_gens() -> &'static std::sync::Mutex<std::collections::HashMap<PaneKey, u64>> {
     static G: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PaneKey, u64>>> =
         std::sync::OnceLock::new();
@@ -329,8 +311,7 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         crate::lifecycle::cancel_stall(app, &run.id).await;
     }
 
-    // 剛停下來等人回答的話，先看一眼是不是 claude 那份滿意度問卷——是的話 daemon 自己按 0，
-    // 使用者不必為了一個跟工作無關的問題被彈窗打斷（§3.2）。其他 blocked 原封不動。
+    // 停下來等人回答時先看是不是 claude 的滿意度問卷——是就自己按 0（§3.1）。其他 blocked 不動。
     if prev != "blocked" && status == "blocked" {
         let (app2, run2) = (app.clone(), run.clone());
         tokio::spawn(async move {
@@ -338,19 +319,14 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         });
     }
 
-    // An agent that starts working with no turn in flight was prompted from the tmux pane, not
-    // from the web. Open the external turn now so the UI streams it live; waiting for the Stop
-    // hook would leave the conversation blank for the whole run. A turn already in flight means
-    // this is the web's own prompt taking effect — leave it alone.
+    // 沒有 in-flight turn 卻開始 working＝有人在 pane 裡打字：現在就開 external turn，UI 才串得到；
+    // 等 Stop hook 的話整段回合對話都是空的。
     if prev != "working" && status == "working" && matches!(crate::db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
         crate::lifecycle::begin_external_turn(app, &run).await;
     }
 
-    // §11.4.3: a remote run reports its status through herdr but leaves the payload in a
-    // spool file on that host. Drain it *before* arming the fallback, so the terminal
-    // snapshot only wins when the hook really never came. Budgeted, because this watcher's
-    // next event waits behind it; a timeout just falls through to the fallback (whose CAS
-    // keeps the two from both writing).
+    // §11.4.3：遠端 run 的內容留在那台的 spool，先 drain 再 arm 備援，終端快照才只在 hook 真的沒來時贏。
+    // 有預算上限（下一個事件排在它後面），逾時就讓備援接手，CAS 保證不雙寫。
     if host != LOCAL_HOST && ((prev == "working" && status == "idle") || (prev != "blocked" && status == "blocked")) {
         let drain = crate::hookrecv::drain_remote_coalesced(app, host, &run.bot_id);
         match tokio::time::timeout(DRAIN_BUDGET, drain).await {
@@ -370,20 +346,14 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
 
 // ---------------------------------------------------------------- agent titles
 
-/// How often the agents' self-chosen titles are refreshed.
-///
-/// There is no herdr event for a title change, so this polls. One `agent.list` per host
-/// covers every run on it, and a write only happens when the text actually changed.
+/// 標題輪詢間隔：herdr 沒有標題變更事件，只能問。一台一次 `agent.list` 覆蓋所有 run，變了才寫。
 const TITLE_POLL: Duration = Duration::from_secs(4);
 
 /// Titles that carry no information: the CLI's own name before it has been given a task.
 const PLACEHOLDER_TITLES: &[&str] = &["claude code", "claude", "codex", "grok", "grok cli", "terminal", "zsh", "bash"];
 
-/// Tidy one raw terminal title.
-///
-/// herdr already strips the spinner glyph, but some CLIs bake their status into the title
-/// itself (grok: `- Thinking - <task> - grok`), so trim the leading/trailing dashes too.
-/// Returns `None` for a title that says nothing the status lamp does not already say.
+/// 清理終端標題：herdr 已去掉 spinner，但有些 CLI 把狀態寫進標題本身（grok 的 `- Thinking - … - grok`），
+/// 所以前後的破折號也要修掉。只重複燈號資訊的標題回 `None`。
 fn clean_title(raw: &str) -> Option<String> {
     let t = raw.trim().trim_matches('-').trim();
     if t.is_empty() || PLACEHOLDER_TITLES.contains(&t.to_ascii_lowercase().as_str()) {
@@ -392,8 +362,7 @@ fn clean_title(raw: &str) -> Option<String> {
     Some(t.to_string())
 }
 
-/// Keep `runs.agent_title` in step with what each agent currently calls itself
-/// (`terminal_title_stripped` — for Claude Code, a running summary of its task).
+/// 讓 `runs.agent_title` 跟上 agent 自己現在的標題（claude 會寫成它正在做的事）。
 pub fn spawn_title_poller(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
@@ -406,8 +375,7 @@ pub fn spawn_title_poller(app: Arc<App>) {
                 let Some(client) = app.herdr_for_session(&conn.name, &session).await else { continue };
                 poll_titles(&app, &conn.name, &session, &session, &client).await;
             }
-            // The default session is not represented by HostManager. It may contain agents
-            // imported into the UI, so keep their live titles current as well.
+            // default session 不在 HostManager 裡，但可能有被採用的 agent，標題也要跟。
             if app.herdr_session != "default" && app.default_connected.load(Ordering::SeqCst) {
                 let fallback = app.herdr_session.clone();
                 let client = app.default_herdr.clone();
@@ -425,7 +393,7 @@ async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session
         };
         let Some(title) = clean_title(raw) else { continue };
         let title = title.as_str();
-        // Match on both the agent name and session; named and default sessions may reuse names.
+        // 名字與 session 都要對：兩個 session 可能有同名 agent。
         let row = sqlx::query_as::<_, (String, String, Option<String>)>(
             &format!(
                 "SELECT id, bot_id, agent_title FROM runs WHERE agent_name = ? AND state IN {} AND COALESCE(herdr_session, ?) = ? LIMIT 1",

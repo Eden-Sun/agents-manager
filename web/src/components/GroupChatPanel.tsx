@@ -26,10 +26,7 @@ import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 
-/**
- * SPEC §13 project group chat: one Project = one group. The timeline is every member bot's
- * conversation merged (by message id); `@<bot>` / `@all` in the composer picks recipients.
- */
+/** SPEC §13 project group chat: timeline merges every member bot's conversation; `@<bot>` / `@all` picks recipients. */
 
 const MENTION_RE = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
 
@@ -57,10 +54,7 @@ type Row =
   | { key: string; kind: 'user'; msg: GroupMessage; targets: string[] }
   | { key: string; kind: 'bot'; msg: GroupMessage }
 
-/**
- * §13.1: a group send writes one user Message per recipient (same `group_id`); fold those
- * copies into one row that lists the recipients. Everything else is one row per message.
- */
+/** §13.1: fold per-recipient copies of one group send (same `group_id`) into one row. */
 function foldRows(list: GroupMessage[]): Row[] {
   const rows: Row[] = []
   const byGroup = new Map<string, Row & { kind: 'user' }>()
@@ -103,15 +97,10 @@ function MemberStrip({ projectId }: { projectId: string }) {
   )
 }
 
-/**
- * Icon only. The names used to be spelled out here, which cost the header ~90px per member
- * to repeat what the sidebar already lists; the count lives in `.main-status` next to the
- * strip, and the name is one hover away.
- */
+/** Icon only: names are the sidebar's job; the name is one hover away. */
 function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
   const lamp = useStore((s) => botLamp(s, bot.id))
-  // listitem 放外層殼（display: contents，不改排版），按鈕保留原生 button 語意——
-  // role 蓋在 button 上 AT 會唸成「清單項目」而不是按鈕。
+  // listitem 放外層殼（display: contents），role 蓋在 button 上 AT 會唸成清單項目而非按鈕。
   return (
     <span role="listitem" className="li-wrap">
       <button
@@ -173,12 +162,7 @@ function GroupMessageList({ projectId }: { projectId: string }) {
             <Bubble
               key={r.key}
               msg={r.msg}
-              /*
-               * 代發的那一則**不是使用者送的**（P4 驗收缺陷 3：同一則同時印「你 → X」與
-               * 「AGM → X」）。有 `relay_from` 時來源交給 `Bubble` 裡的 `RelayFrom` 畫，
-               * 這裡不要再掛一個「你 →」。收件者多於一個時才補一條純箭頭的清單——
-               * `RelayFrom` 只寫得下一個收件者。
-               */
+              /* 代發的那則不是使用者送的（P4 驗收缺陷 3）：來源交給 `RelayFrom`；多收件者才補純箭頭清單。 */
               from={
                 r.msg.relay_from
                   ? r.targets.length > 1
@@ -232,8 +216,7 @@ function GroupComposer({
   /** Owned by `GroupChatPanel` so a drop anywhere in the chat area lands here. */
   files: ReturnType<typeof useAttachments>
 }) {
-  // `groupComposerState` builds a fresh object (with an array) every call; flatten it to
-  // primitives so the shallow comparison is stable.
+  // `groupComposerState` returns a fresh object each call; flatten to primitives for stable shallow compare.
   const state = useStore(
     useShallow((s) => {
       const g = groupComposerState(s, projectId)
@@ -256,10 +239,7 @@ function GroupComposer({
     return Math.max(0, Math.min(value.length, saved))
   })
   const [sending, setSending] = useState(false)
-  /**
-   * 「交給 AGM」開關（§11）。開著時這一則不是發給某幾顆 bot，而是建一個任務——收件者 chip
-   * 與 @mention 都不適用，送出鍵也換一顆。
-   */
+  /** 「交給 AGM」開關（§11）：建任務而非發給 bot，收件者 chip 與 @mention 不適用。 */
   const [toAgm, setToAgm] = useState(false)
   const [missionOpts, setMissionOpts] = useState<MissionOpts>(loadMissionOpts)
   const startMission = useStore((s) => s.startMission)
@@ -337,7 +317,6 @@ function GroupComposer({
     setDraftCursor(draftKey, pos)
     setPopOpen(true)
     setActive(0)
-    // Put the caret right after the completion once React has flushed the new value.
     requestAnimationFrame(() => {
       const el = ref.current
       if (!el) return
@@ -364,7 +343,6 @@ function GroupComposer({
       })
       return
     }
-    // Unlike a bot chat, a group send always needs text: the recipients come from it.
     if (targets.length === 0) return
     // 打字沒被鎖，送不出去就講原因，別默默吃掉 Enter。
     if (state.disabled) {
@@ -544,7 +522,6 @@ function GroupComposer({
           {sending ? '送出中…' : files.uploading ? '上傳中…' : toAgm ? '交給 AGM' : '送出'}
         </button>
       </div>
-      {/* Only while there is something to say: no mention yet, or the resolved recipient list. */}
       {toAgm ? null : text.trim() && targets.length === 0 ? (
         <div className="composer-hint group-hint">
           <span className="mention-warn">請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定</span>
@@ -577,8 +554,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const requestOpenBotSheet = useStore((s) => s.requestOpenBotSheet)
   const attachCommand = useStore((s) => attachCommandOf(s, projectId))
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  // Attachments are project-scoped, so any member can receive the upload; held here so a
-  // drop anywhere in the group chat area is accepted.
+  // Held here so a drop anywhere in the group chat area is accepted (attachments are project-scoped).
   const files = useAttachments(members[0]?.id ?? null, projectId)
   const drop = useDropTarget(files.add, memberCount === 0)
   const [renaming, setRenaming] = useState(false)

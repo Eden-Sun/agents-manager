@@ -1,34 +1,21 @@
-/**
- * Transport abstraction: one implementation talks to the real daemon over
- * fetch + WebSocket, the other (`mock.ts`) serves everything from memory.
- * `index.ts` picks between them; nothing else in the app knows which is live.
- */
-
 import { ApiError } from './types'
 import type { ApiErrorBody } from './types'
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE'
 
 export interface SocketHandlers {
-  /** A `{seq, type, data}` frame from `/ws`. */
   onFrame: (frame: { seq?: number; type: string; data?: unknown }) => void
-  /** Socket liveness, for the header indicator. */
   onStatus: (status: 'connecting' | 'open' | 'closed') => void
-  /** Highest seq the client has processed; sent as `?since=`. */
+  /** Highest processed seq; sent as `?since=`. */
   since: () => number
 }
 
 export interface Transport {
   readonly mock: boolean
-  /** `GET /api/session` → token, cached for subsequent calls. */
   session: () => Promise<string>
   request: (method: HttpMethod, path: string, body?: unknown) => Promise<unknown>
-  /** POST raw bytes (an image) with `Content-Type: <mime>`; used by attachment upload. */
   upload: (path: string, file: Blob) => Promise<unknown>
-  /**
-   * GET binary content as an object URL. Attachments are behind the token, and an
-   * `<img src>` cannot carry a header — so the bytes are fetched and blob-URL'd instead.
-   */
+  /** Attachments need the token header, which `<img src>` can't carry — so fetch and blob-URL. */
   blobUrl: (path: string) => Promise<string>
   openSocket: (handlers: SocketHandlers) => () => void
 }
@@ -113,9 +100,7 @@ export class HttpTransport implements Transport {
 
     const connect = () => {
       if (closed) return
-      // 先把上一條 socket 徹底斷乾淨再開新的。CLOSING 中的 socket 過得了 `retryNow` 的檢查，
-      // 它的 onclose 之後才會補跑，那時 `closed` 還是 false——狀態會被它改成 closed、還會再排
-      // 一次 connect，最後變成兩條都活著、每個 frame 收兩次。
+      // 先拆乾淨舊 socket：CLOSING 的會過 `retryNow` 檢查，其 onclose 晚到會再排 connect，變兩條、frame 收兩次。
       if (sock) {
         const old = sock
         sock = null
@@ -141,11 +126,10 @@ export class HttpTransport implements Transport {
         try {
           frame = JSON.parse(ev.data) as { seq?: number; type: string; data?: unknown }
         } catch {
-          /* ignore malformed frame */
+          /* malformed */
         }
         if (!frame || typeof frame.type !== 'string') return
-        // handleFrame 丟出來的例外不能跟「JSON 壞掉」一起吞：`lastSeq` 在它開頭就推進了，重連時
-        // 不會補這一則，無聲消失等於資料就這樣少一筆。至少在 console 留下痕跡。
+        // handler 例外不能吞：`lastSeq` 已推進，重連不會補這則，至少留 console 痕跡。
         try {
           handlers.onFrame(frame)
         } catch (e) {
@@ -154,19 +138,17 @@ export class HttpTransport implements Transport {
       }
       ws.onerror = () => ws.close()
       ws.onclose = () => {
-        // 已經被新的連線取代掉的話什麼都別做（狀態和重連都歸新的那條管）。
+        // 已被新連線取代就不動（狀態與重連歸新的管）。
         if (closed || sock !== ws) return
         handlers.onStatus('closed')
-        // Exponential backoff, capped at 3s — a dropped daemon usually comes back fast and
-        // the UI is unusable until it does, so waiting 10s for a retry is worse than the
-        // extra attempts.
+        // Cap 3s: daemon usually returns fast and the UI is unusable meanwhile.
         const delay = Math.min(3_000, 250 * 2 ** attempt) + Math.random() * 150
         attempt += 1
         timer = setTimeout(connect, delay)
       }
     }
 
-    // 回到分頁 / 網路回來時不要等 backoff 跑完，直接重試一次。
+    // 回到分頁／網路恢復時不等 backoff。
     const retryNow = () => {
       if (closed) return
       if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return

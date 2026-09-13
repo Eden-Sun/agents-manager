@@ -58,21 +58,15 @@ function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boo
   )
 }
 
-/**
- * 現在開著幾個 herdr pane（＝有幾個 bot 的終端還活著）。和 RAM 那格並排：兩個都是
- * 「整套系統現在佔多少」，一個講記憶體、一個講終端；哪一台開了幾個放 tooltip。
- *
- * 一個都沒有就整格不出現——`pane 0` 只是佔位置，狀態燈已經說了沒有東西在跑。
- */
+/** 開著幾個 herdr pane，和 RAM 並排；0 個就不出現（狀態燈已說明沒在跑）。 */
 function PaneBadge() {
-  // 字串而不是物件：`useShallow` 是逐一 `Object.is`，每次都給新物件就永遠不相等，
-  // 於是每次 render 都算「變了」→ 無限重繪。
+  // 回字串不回物件：useShallow 逐一 Object.is，新物件永不相等 → 無限重繪。
   const panes = useStore(
     useShallow((s) =>
       s.bots
         .filter((b) => {
           const r = s.runs[b.id]
-          // 和 BotSettingsPanel 同一條判準：pane 還在就算開著。
+          // 同 BotSettingsPanel 的判準。
           return Boolean(r) && r!.state !== 'stopped' && r!.state !== 'exited'
         })
         .map((b) => `${projectHostName(s, b.project_id)}\t${b.name}`),
@@ -123,18 +117,16 @@ function BotRow({
   onStep,
 }: {
   botId: string
-  /** 這一列是因為對話內容命中而留下來的話，把命中的前後文一起顯示。 */
+  /** 對話內容命中時的前後文。 */
   hit?: MessageHit
-  /** 這個 bot 底下有幾個子 agent；0 = 不顯示收合鈕。 */
   childCount?: number
   collapsed?: boolean
-  /** 收合時底下子 agent 最要緊的燈號（blocked > working）；null = 沒有在忙的，不畫。 */
+  /** 收合時子 agent 最要緊的燈號；null 不畫。 */
   kidsLamp?: Lamp | null
-  /** 這一列在等它的子 agent：`busy` = 還有 child 在跑／卡住，`reply` = child 回報了還沒看。 */
   kidsWait?: KidsWait | null
-  /** 展開中的子 agent 清單的 id：DOM 上它是這一列的兄弟，用 `aria-owns` 掛回這一項底下。 */
+  /** 子清單在 DOM 上是兄弟，用 aria-owns 掛回這一項。 */
   kidsListId?: string
-  /** 子 agent 列：單行、不重複 kind，只留身份／模型。 */
+  /** 子 agent 列：單行、只留身份／模型。 */
   compact?: boolean
   onToggleChildren?: () => void
   drag: DragState
@@ -145,29 +137,25 @@ function BotRow({
 }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const lamp = useStore((s) => botLamp(s, botId))
-  // SPEC：bot 對應額度 critical（daemon 算好，見 docs/API.md §12.4）時，整列反灰＋警語。
-  // `botQuotaWarning` 每次都 new 一個新物件，跟 ChatPanel 的 `composerState` 同一個坑
-  // （見 ChatPanel.tsx 的 `useShallow(composerState)`）——要淺比較，否則 useSyncExternalStore 會判斷
-  // 每次快照都變了而無限重渲染／噴 getSnapshot 警告，整個側欄的 bot 列都不會 render。
+  // 額度 critical 時整列反灰＋警語（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
-      // 額度按主機分（SPEC §14）：遠端 bot 要看它自己那台的數字，不是本機的。
+      // 額度按主機分（SPEC §14）。
       return b ? botQuotaWarning(s.quota, b.kind, b.identity, projectHostName(s, b.project_id)) : null
     }),
   )
-  // 黃燈（low）也要在側欄看得到：同一個淺比較的坑，一樣用 useShallow。
+  // 黃燈（low）；同樣要 useShallow。
   const quotaLevel = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
-      // 跟 ModelTag 同一個「現在跑的模型」：run 有報就用 run 的，沒有才看設定。
+      // 同 ModelTag：run 報的模型優先。
       const run = s.runs[botId] ?? null
       const model = run?.status?.model_name ?? (runtimeKnown(run) ? run!.runtime_model : (b?.model ?? null))
       return b ? botQuotaLevel(s.quota, b.kind, b.identity, projectHostName(s, b.project_id), model) : null
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
-  // 已完成但還沒被看到的回合數（store/unread.ts）。0 = 不佔位。
   const unread = useStore((s) => s.botUnread[botId] ?? 0)
   const selectBot = useStore((s) => s.selectBot)
   const agentTitle = useStore((s) => {
@@ -179,10 +167,7 @@ function BotRow({
   })
 
   const hasUpdate = useStore((s) => s.runs[botId]?.update_notice ?? null)
-  // 子 bot 跟母 bot 用不同帳號時要標出來（2026-09-10 使用者）：子 agent 默默吃另一個帳號的
-  // 額度，等到用盡才發現。標在母 bot 上（使用者 2026-09-10 改的）：一眼看母 bot 就知道底下
-  // 有人在用別的帳號，不用把子 bot 一顆顆展開。claude 沒指定身分就是 cc0，比較前先補上。
-  // 回物件，跟上面 quotaWarning 一樣要 useShallow，不然每次都是新物件、React 會無限重繪。
+  // 使用者 2026-09-10：子 bot 用不同帳號時標在母 bot 上，免得默默吃光另一帳號額度。未指定身分＝cc0。
   const divergedChildren = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
@@ -194,11 +179,11 @@ function BotRow({
       return { identities: identities.join('/'), names: kids.map((x) => x.name).join('、') }
     }),
   )
-  // 上一回合被 API 斷線截斷（`runs.turn_error`）。燈號是綠的，這顆才是「其實沒做完」。
+  // 回合被 API 斷線截斷：燈號仍是綠的，只有這個說「其實沒做完」。
   const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
 
   if (!bot) return null
-  // 佔位列：分身剛按下去、daemon 還沒建好。灰的、不能點、不能拖，只告訴你「它會出現在這裡」。
+  // 佔位列：daemon 還沒建好，不能點、不能拖。
   if (bot.pending) {
     return (
       <div className="bot-row pending" role="listitem" aria-busy="true" data-bot-id={botId}>
@@ -215,16 +200,14 @@ function BotRow({
       </div>
     )
   }
-  // 標題只在選取中的那一列展開成一行——一次只有一列，清單的掃讀節奏不會被打亂。
-  // 子 agent 列是單行，標題留在 tooltip，不把樹撐高。
+  // 標題只在選取列展開成一行，不打亂掃讀；子列留在 tooltip。
   const showTitle = Boolean(agentTitle) && selected && !compact
 
   const dragging = drag?.id === botId
-  // 只在同一個專案內排序：跨專案拖曳不畫插入線，也不會有動作。
+  // 只在同專案內排序。
   const sameProject = drag?.projectId === bot.project_id
   const dropEdge = drag && sameProject && drag.id !== botId && drag.overId === botId ? drag.edge : null
 
-  /** 落點：拖到上半 = 插在這列之前，下半 = 插在這列之後。 */
   const edgeAt = (e: { currentTarget: HTMLElement; clientY: number }): 'before' | 'after' => {
     const r = e.currentTarget.getBoundingClientRect()
     return e.clientY < r.top + r.height / 2 ? 'before' : 'after'
@@ -235,12 +218,11 @@ function BotRow({
       className={`bot-row${compact ? ' compact' : ''}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${
         dropEdge ? ` drop-${dropEdge}` : ''
       }${quotaWarning ? ' quota-critical' : ''}${childCount > 0 ? ' has-kids' : ''}`}
-      // 不是 listbox 的 option：option 裡不准有按鈕（收合鈕、改名、⋯ 選單），螢幕閱讀器會把
-      // 它們吃掉。清單項目可以裝互動子元素；「選取中」改用 aria-current 講「你在這裡」。
+      // 不用 listbox option：option 內不准有按鈕，螢幕閱讀器會吃掉。
       role="listitem"
       aria-current={selected ? 'true' : undefined}
       aria-owns={kidsListId}
-      // 手機的子列不畫名字（見 styles.css），名字改由這裡帶著走。
+      // 手機子列不畫名字（styles.css），由這裡帶。
       aria-label={compact ? bot.name : undefined}
       data-bot-id={botId}
       tabIndex={0}
@@ -253,14 +235,12 @@ function BotRow({
         }
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
         const dir = e.key === 'ArrowUp' ? -1 : 1
-        // 鍵盤也要能排序：Alt + ↑/↓（拖曳不是每個人都能用）。只有父列可以換位置——
-        // 子 agent 跟著父列走，拖曳同樣不開放（`draggable={!compact}`），兩邊一致。
+        // Alt+↑/↓ 鍵盤排序；子列跟父列走，與 draggable 一致。
         if (e.altKey) {
           e.preventDefault()
           if (!compact) onNudge(botId, dir)
           return
         }
-        // 沒按 Alt 就是換 bot，焦點跟著跳到新的那一列。
         e.preventDefault()
         onStep(botId, dir)
       }}
@@ -284,13 +264,11 @@ function BotRow({
         onDrag(null)
       }}
     >
-      {/* 沒展開標題的列，agent 的標題掛在燈號的 tooltip 上，資訊沒有掉。 */}
-      {/* 左邊那一欄是**直的**：燈號在上、收合鈕在它正下方（2026-09-13 使用者）。收合鈕本來跟燈號
-          並排，於是有子 agent 的列整條往右推一格，子 agent 的縮排看起來對不齊自己的父列。 */}
+      {/* 燈號在上、收合鈕在正下方（使用者 2026-09-13），子列縮排才對齊父列。 */}
       <span className="bot-gutter">
         <span className="bot-gutter-top">
           <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
-          {/* 等子 agent 的黃點：紅色留給「要你本人回答」，這裡只是「底下還沒好」。 */}
+          {/* 黃點：紅色留給「要你本人回答」。 */}
           {kidsWait ? (
             <span
               className={`bot-kids-wait ${kidsWait}`}
@@ -302,15 +280,13 @@ function BotRow({
               aria-label={kidsWait === 'busy' ? '等子 agent 完成' : '子 agent 已回報'}
             />
           ) : null}
-          {/* 「已完成（未讀）」：燈號說的是**現在**在做什麼，這顆說的是**你還沒看過**幾回合——
-              兩件不同的事，所以是兩個記號。`!` 讓它就算被截斷也不會被讀成模型參數。 */}
+          {/* 未讀回合數，與燈號是兩件事；`!` 前綴免得截斷後被讀成模型參數。 */}
           {unread > 0 ? (
             <span className="unread-turns" title={`${unread} 個回合已完成，還沒看過`}>
               !{unread > 99 ? '99+' : unread}
             </span>
           ) : null}
         </span>
-        {/* 收起來時把數量帶上——不然收合後就看不出底下還有東西。 */}
         {childCount > 0 && onToggleChildren ? (
         <button
           type="button"
@@ -328,28 +304,22 @@ function BotRow({
         >
           <span className="chev">{collapsed ? '▶' : '▼'}</span>
           {collapsed ? <span className="bot-kids-n">{childCount}</span> : null}
-          {/* 收起來時子 agent 的燈號跟著藏了；還在忙／卡住的那顆要透出來，不然收合等於把它藏掉。 */}
+          {/* 收合時透出忙／卡住的子燈號。 */}
           {collapsed && kidsLamp ? <span className={`bot-kids-lamp lamp lamp-${kidsLamp}`} aria-hidden="true" /> : null}
         </button>
         ) : null}
       </span>
       <span className="bot-main" onScroll={compact ? syncKidsScroll : undefined}>
         <span className="bot-ident">
-          {/* claude 有新版等著重啟套用時的小記號，掛在 kind icon 的右上角（2026-09-10 使用者：
-              放這裡、用綠色）。2026-09-11 起它自己就點得下去（`UpdateBadge` 的 dot 版，同一條
-              「先看 changelog 再重啟」的流程）——看到記號的當下人就在側欄，不必先切過去。 */}
+          {/* 新版記號在 kind icon 右上、綠色（使用者 2026-09-10）；可直接點（2026-09-11）。 */}
           <span className={`bot-kind-wrap${hasUpdate ? ' has-update' : ''}`}>
             <KindTag kind={bot.kind} className="bot-kind" />
             <UpdateBadge botId={botId} variant="dot" />
           </span>
-          {/* 選取中的那一列，名字點下去就改名（未選取的第一下還是「開啟這個 bot」）。 */}
+          {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
             {compact ? null : <PersonaMark persona={bot.persona} />}
-            {/* agent 自己的標題不再跟名字擠同一行——那樣兩邊各剩六個字
-                （`C0-畫面修改者 資料夾…`）。選取中的那一列給它自己一行（見下面），
-                其餘的列名字獨佔第一行，標題在整列的 tooltip 裡。 */}
-            {/* 側欄放不下一顆按鈕，但這件事不能只留在 tooltip：燈號說 idle、實際上回合是斷的。
-                所以給它一個看得見的紅記號，點進去 header 那顆 chip 有原文與「重送上一則」。 */}
+            {/* 燈號說 idle 但回合是斷的，不能只留 tooltip；重送在 header chip。 */}
             {turnError ? (
               <span className="bot-turn-error" title={`${turnError}｜這一回合被 API 中斷，回應不完整。點進去可以重送上一則`}>
                 ⚠ 中斷
@@ -358,8 +328,6 @@ function BotRow({
             {showTitle || compact ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
           </BotNameField>
         </span>
-        {/* 對話內容命中時，把命中的那一段秀出來——只說「命中」不告訴你命中什麼，
-            等於要你一個一個點進去確認。 */}
         {hit ? (
           <span className="bot-hit" title={`對話中有 ${hit.hits} 則提到`}>
             <span className="bot-hit-n">{hit.hits}</span>
@@ -367,7 +335,7 @@ function BotRow({
           </span>
         ) : null}
         <span className="bot-sub">
-          {/* 身份（cc0 / cc1…）一定要標，同一個 CLI 兩個帳號才分得出來。 */}
+          {/* 身份一定要標，同 CLI 兩帳號才分得出來。 */}
           {divergedChildren ? (
             <span
               className="identity-diverged"
@@ -380,7 +348,7 @@ function BotRow({
             <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
           )}
           {quotaWarning ? (
-            // 額度 critical：警語取代模型標籤（側欄窄，優先顯示這個）；文字撐不下就截斷，完整內容看 title。
+            // critical 警語取代模型標籤（側欄窄）；截斷時看 title。
             <span
               className="bot-quota-warn"
               title={`${KIND_LABEL[bot.kind]}${bot.identity ? ` · ${bot.identity}` : ''} ${quotaWarning.window} 額度剩 ${quotaWarning.pct}%，快用完了`}
@@ -390,8 +358,7 @@ function BotRow({
           ) : (
             <>
               <ModelTag botId={botId} />
-              {/* 額度黃燈：頂端 QuotaStrip 已經黃了，側欄不提示等於兩套數字。只在還沒到
-                  critical 時出現（critical 走上面那條警語，不重複佔位）。 */}
+              {/* 黃燈：與頂端 QuotaStrip 一致；critical 走上面的警語。 */}
               {quotaLevel ? (
                 <span
                   className={`bot-quota-chip ${quotaLevel.level}`}
@@ -403,8 +370,7 @@ function BotRow({
             </>
           )}
         </span>
-        {/* agent 對自己工作的一句話（claude 的 pane 標題）。只有選取中的那一列給它一整行：
-            側欄第二行已經被 kind / 身份 / 模型三顆徽章佔滿，硬擠進去只會把模型也截成 `op…`。 */}
+        {/* agent 標題獨佔一行：第二行擠進去會把模型截成 `op…`。 */}
         {showTitle ? (
           <span className="bot-agent-title" title={`agent 目前的標題：${agentTitle}`}>
             {agentTitle}
@@ -426,7 +392,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false)
   const [browsing, setBrowsing] = useState(false)
 
-  // A host removed while the form is open falls back to the local machine.
+  // A host removed while the form is open falls back to local.
   const hostOk = host === 'local' || hosts.some((h) => h.name === host)
   const effectiveHost = hostOk ? host : 'local'
 
@@ -730,10 +696,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   )
 }
 
-/**
- * SPEC §13.5/§13.6: the project title opens the group view; unread replies pile up on it.
- * v4.0: the whole row (label + host + path) is the hit area, ≥ 32px tall.
- */
+/** SPEC §13.5/§13.6: title opens the group view; whole row is the hit area (v4.0, ≥ 32px). */
 function ProjectTitle({
   projectId,
   label,
@@ -748,13 +711,9 @@ function ProjectTitle({
   host: string
   path: string
   hostUp: boolean
-  /** 標題列是專案的拖曳把手（搜尋中不能拖）；提示掛在這顆鍵上而不是外層 header——
-   *  header 的 `title` 會被 `＋` / `⋯` 繼承，跟它們的 `data-tip` 泡泡疊成兩個提示。 */
+  /** 拖曳提示掛這裡不掛 header：header 的 title 會被 ＋/⋯ 繼承，與 data-tip 疊成兩個提示。 */
   draggable?: boolean
-  /**
-   * 專案收起來時，底下每個 bot 的未讀加總掛回標題上——不然收合等於把徽章藏起來。
-   * 選擇性：收合是側欄自己的本地狀態，沒傳就是沒收合。
-   */
+  /** 收合時把底下 bot 的未讀加總掛回標題。 */
   folded?: boolean
 }) {
   const selected = useStore((s) => s.selectedProjectId === projectId)
@@ -763,8 +722,7 @@ function ProjectTitle({
     folded ? s.bots.reduce((n, b) => (b.project_id === projectId ? n + (s.botUnread[b.id] ?? 0) : n), 0) : 0,
   )
   const selectProject = useStore((s) => s.selectProject)
-  // An `<input>` may not live inside a `<button>`, so renaming swaps the whole row for a
-  // plain `<div>` wearing the same class — the row keeps its size and the field gets focus.
+  // `<input>` can't live in a `<button>`: renaming swaps the row for a same-class `<div>`.
   const [editing, setEditing] = useState(false)
   const inner = (
     <>
@@ -796,7 +754,7 @@ function ProjectTitle({
       type="button"
       className={`project-label-btn${selected ? ' selected' : ''}`}
       title={`開啟「${label}」的群組聊天（@bot 或 @all 對多個 Bot 發言）\n${path}${draggable ? '\n拖曳可調整專案順序' : ''}`}
-      // 不是開關（再按一次不會「放開」），是「現在開著的是這個專案」——跟 bot 列同一個 aria-current。
+      // 不是開關，用 aria-current（同 bot 列）。
       aria-current={selected ? 'true' : undefined}
       onClick={(e) => {
         e.stopPropagation()
@@ -808,13 +766,7 @@ function ProjectTitle({
   )
 }
 
-/**
- * 這一列在等它的子 agent 嗎（2026-09-12 使用者：「這個 parent 要該標注 waiting children response」）。
- *
- * 分兩種，因為要做的事不一樣：`busy` 是子 agent 還在跑／卡住，父列只是在等；`reply` 是子 agent
- * 已經回報、還沒有人看過（子列上的 `!N`）——那是父列該去收的東西。收合與展開都要畫：展開時
- * 子列雖然看得到，但父列自己那顆燈是綠的，整條看過去會以為它沒事。
- */
+/** 父列在等子 agent（使用者 2026-09-12）：`busy` 子還在跑／卡住，`reply` 子回報了未讀。展開時也畫。 */
 export type KidsWait = 'busy' | 'reply'
 
 function kidsWaitOf(st: Parameters<typeof botLamp>[0], unread: Record<string, number>, ids: string[]): KidsWait | null {
@@ -827,7 +779,7 @@ function kidsWaitOf(st: Parameters<typeof botLamp>[0], unread: Record<string, nu
   return out
 }
 
-/** 一群子 agent 裡最要緊的燈號：blocked > working；都不是就 null（idle / done 不值得在父列上亮）。 */
+/** 子 agent 最要緊的燈號：blocked > working，否則 null。 */
 function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | null {
   let out: Lamp | null = null
   for (const id of ids) {
@@ -838,26 +790,23 @@ function kidsLampOf(st: Parameters<typeof botLamp>[0], ids: string[]): Lamp | nu
   return out
 }
 
-/** 原生 wheel 事件的 `currentTarget` 型別是 `EventTarget | null`，套上 `.bot-kids` 那個節點再交給 `wheelKidsScroll`。 */
 function kidsWheel(e: WheelEvent) {
   const el = e.currentTarget
   if (!(el instanceof HTMLElement)) return
   wheelKidsScroll({ currentTarget: el, deltaX: e.deltaX, deltaY: e.deltaY, shiftKey: e.shiftKey, preventDefault: () => e.preventDefault() })
 }
 
-/** 拖曳中的專案，以及游標落在哪個專案的哪一半。與 bot 的 `DragState` 分開：兩種拖曳不互相干擾。 */
+/** 專案拖曳；與 bot 的 DragState 分開，互不干擾。 */
 type ProjectDrag = { id: string; overId: string | null; edge: 'before' | 'after' } | null
 
 export function Sidebar() {
-  // 搜尋框在 ≤640 是 16px（iOS 聚焦不放大），括號那半句就放不下、會被切在字中間。
-  // 括號裡本來也只是說明「搜尋範圍不只名字」，手機少一行說明比多半個字好。
+  // 手機搜尋框 16px（iOS 聚焦不放大），placeholder 括號說明放不下。
   const phone = useMediaQuery(PHONE_QUERY)
   const rawProjects = useStore((s) => s.projects)
   const projectOrder = useStore((s) => s.projectOrder)
   const moveProject = useStore((s) => s.moveProject)
   const projects = useMemo(() => orderedProjects({ projects: rawProjects, projectOrder }), [rawProjects, projectOrder])
   const [pdrag, setPdrag] = useState<ProjectDrag>(null)
-  /** 專案落點：上半 = 插在這個專案之前，下半 = 之後。 */
   const projectEdgeAt = (e: { currentTarget: HTMLElement; clientY: number }): 'before' | 'after' => {
     const r = e.currentTarget.getBoundingClientRect()
     return e.clientY < r.top + r.height / 2 ? 'before' : 'after'
@@ -878,20 +827,16 @@ export function Sidebar() {
   const selectProject = useStore((s) => s.selectProject)
   const removeProject = useStore((s) => s.removeProject)
   const [open, setOpen] = useState<'project' | 'env' | 'agm' | null>(null)
-  // config 的身份加上本機 shell 認到的 `ccN`（SPEC §16）——腳註寫的是「這台機器有幾個身份」。
+  // config 身份＋本機 shell 認到的 ccN（SPEC §16）。
   const configuredIdentities = useStore((s) => s.identities)
   const localIdentityStatus = useStore((s) => s.localIdentityStatus)
   const identityCount = useMemo(
     () => identitiesOfHost(configuredIdentities, localIdentityStatus).length,
     [configuredIdentities, localIdentityStatus],
   )
-  // 刪 Project 本來是 `window.confirm()`：整個 app 只有這裡（與主機／身分）跳原生對話框，
-  // 沒有專案全名以外的說明，也沒有 focus trap。改用跟其他刪除一致的 `ConfirmDialog`。
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
   const runs = useStore((s) => s.runs)
-  // 父列收合時要看子 agent 的燈號（`kidsLampOf`／`kidsWaitOf` → `botLamp`）。燈號除了 `runs`
-  // 還讀 herdr／遠端主機的連線狀態：herdr 或 host 斷線只改 `connected`／`hosts`（`daemon_status`／
-  // `host_changed`），以前只訂閱 `runs`，父列收合處會一直藍點、「在等子 agent」到下一個 bot_status。
+  // botLamp 也讀 connected／hosts：只訂閱 runs 的話斷線後父列會殘留舊燈號到下一個 bot_status。
   const defaultConnected = useStore((s) => s.defaultConnected)
   const lampState = useMemo(
     () => ({ ...useStore.getState(), runs, hosts, connected, defaultConnected, bots, projects: rawProjects }),
@@ -906,19 +851,14 @@ export function Sidebar() {
   const clearOpenBotSheet = useStore((s) => s.clearOpenBotSheet)
   const botOrder = useStore((s) => s.botOrder)
   const moveBot = useStore((s) => s.moveBot)
-  // shift+滾輪橫捲子 agent 列要 preventDefault，React 的 onWheel 是 passive 做不到（見 useWheelRef）。
+  // shift+滾輪要 preventDefault，React onWheel 是 passive（見 useWheelRef）。
   const kidsWheelRef = useWheelRef<HTMLDivElement>(kidsWheel)
   const [drag, setDrag] = useState<DragState>(null)
   const openHostShell = useStore((s) => s.openHostShell)
-  /**
-   * 頂端額度卡片上被勾成「暫時停用」的身分／kind：它們底下的 bot 先從清單收起來。
-   * 到了額度視窗的 reset 時刻，`quotaHide` 那邊的 timer 會把該格掃掉並通知所有訂閱者，
-   * 這裡就跟著重算——bot 自己回到清單上，不用重新整理。
-   */
+  /** 額度卡片上暫時停用的身分／kind，其 bot 先收起；reset 時 quotaHide 的 timer 會自動放回。 */
   const disabledQuota = useDisabledQuota()
   const hiddenQuotaIds = useStore(useShallow((s) => quotaHiddenBotIds(s, disabledQuota)))
   const hiddenQuota = useMemo(() => new Set(hiddenQuotaIds), [hiddenQuotaIds])
-  /** 收合起來的父 bot；記在 localStorage，重新整理後不會全部又攤開。 */
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem('am.collapsedChildren')
@@ -938,7 +878,6 @@ export function Sidebar() {
       }
       return next
     })
-  /** 收合起來的專案；跟子 agent 那組同一個模式，各自一個 localStorage key。 */
   const [shutProjects, setShutProjects] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem('am.collapsedProjects')
@@ -947,8 +886,7 @@ export function Sidebar() {
       return new Set()
     }
   })
-  // 新建 / 分身 / 程式化選取的 bot 要看得到：那一列可能在收合的專案裡，或在捲出畫面的地方。
-  // 只在「選取的 bot 換了」時做，使用者自己捲動不會被拉回來；也不搶焦點（那是鍵盤 ↑/↓ 的事）。
+  // 選取的 bot 換了才展開其專案並捲到可見；不搶焦點、不干擾手動捲動。
   const selectedBotId = useStore((s) => s.selectedBotId)
   const selectedBotProject = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
   useEffect(() => {
@@ -966,12 +904,12 @@ export function Sidebar() {
         return next
       })
     }
-    // 展開之後那一列才會在 DOM 裡，所以等下一個 frame 再捲。
+    // 展開後才進 DOM，等下一 frame。
     const id = requestAnimationFrame(() => {
       document.querySelector<HTMLElement>(`[data-bot-id="${selectedBotId}"]`)?.scrollIntoView({ block: 'nearest' })
     })
     return () => cancelAnimationFrame(id)
-    // shutProjects 故意不放進依賴：使用者手動收合正在選取的專案時不該被立刻彈開。
+    // 故意不依賴 shutProjects：手動收合選取中的專案不該被彈開。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedBotId, selectedBotProject])
   const toggleProject = (id: string) =>
@@ -986,10 +924,7 @@ export function Sidebar() {
       return next
     })
   const [query, setQuery] = useState('')
-  /**
-   * 訊息內容的命中（`GET /api/search/messages`）。屬性比對是本地的、即時的；內容要問
-   * daemon，所以 debounce 250ms，並用 `seq` 擋掉晚回來的舊請求覆蓋新結果。
-   */
+  /** 內容命中問 daemon：debounce 250ms，seq 擋晚到的舊結果。 */
   const [hits, setHits] = useState<Record<string, MessageHit>>({})
   const hitSeq = useRef(0)
   useEffect(() => {
@@ -1005,21 +940,19 @@ export function Sidebar() {
         .then((r) => {
           if (hitSeq.current === mine) setHits(r)
         })
-        // 內容搜尋失敗：屬性搜尋照常運作，只是沒有內容命中。
+        // 失敗時屬性搜尋照常。
         .catch(() => {
           if (hitSeq.current === mine) setHits({})
         })
     }, 250)
     return () => clearTimeout(id)
   }, [query])
-  // 比對讀的是整個 store（專案、run 的 agent 標題…），所以在這裡取一次 state 就好。
   const matches = (bot: Bot) => botMatches(useStore.getState(), bot, query) || bot.id in hits
-  // 只數「真的命中」的，不含為了讓子 agent 有地方掛而一起顯示的父 bot。
+  // 只數真的命中的，不含陪子 agent 顯示的父 bot。
   const matchCount = query ? bots.filter((b) => matches(b)).length : bots.length
-  // 只數跟 `matchCount` 同一群的，不然會出現「1 個符合（3 個含對話）」這種自相矛盾的數字。
+  // 與 matchCount 同一群，免得數字自相矛盾。
   const hitCount = bots.filter((b) => b.id in hits).length
 
-  /** 拖放：落在 overId 的上/下半 → 插到它前面 / 後面（後面 = 下一列的前面）。 */
   const dropAt = (dragId: string, overId: string, edge: 'before' | 'after') => {
     const bot = bots.find((b) => b.id === overId)
     if (!bot) return
@@ -1027,18 +960,12 @@ export function Sidebar() {
     const at = ids.indexOf(overId)
     if (at < 0) return
     const beforeId = edge === 'before' ? overId : (ids[at + 1] ?? null)
-    // 「插在自己前面」就是放回原位 → 什麼都不做。不能傳 null：在 store 裡 beforeId === null
-    // 是「移到最後」，那會把原地放下變成掉到清單尾巴。
+    // 原地放下：不能傳 null（null＝移到最後）。
     if (beforeId === dragId) return
     moveBot(dragId, beforeId)
   }
 
-  /** Alt + ↑/↓：跟相鄰的那列交換。 */
-  /**
-   * Alt + ↑/↓ 換位置。只動父列：子 agent 是掛在父列底下畫的，順序由父列決定，
-   * 自己搬沒有意義；而父列要跳過的也是「下一個父列」，不是夾在中間的子 agent
-   * （原本把子 agent 也算進索引，往下一格常常等於原地不動）。
-   */
+  /** Alt+↑/↓ 換位置：只動父列，索引也只算父列（算進子列會原地不動）。 */
   const nudge = (botId: string, dir: -1 | 1) => {
     const bot = bots.find((b) => b.id === botId)
     if (!bot || bot.parent_bot_id) return
@@ -1051,7 +978,7 @@ export function Sidebar() {
     moveBot(botId, dir === -1 ? ids[to] : (ids[to + 1] ?? null))
   }
 
-  /** ↑/↓：換到相鄰的 bot，焦點跟著走（不然下一次按鍵還是從舊的那一列算）。 */
+  /** ↑/↓ 換 bot，焦點跟著走。 */
   const step = (botId: string, dir: -1 | 1) => {
     const st = useStore.getState()
     const next = adjacentBotId(st, botId, dir)
@@ -1091,7 +1018,6 @@ export function Sidebar() {
   return (
     <>
       <div className="sidebar-head">
-        {/* 左：標題；下面 pane 數與連線。中：RAM。右：上 Chrome、下 ego。 */}
         <div className="head-brand">
           <div className="head-brand-title">
             <h1 title="Agents Manager">AG Man</h1>
@@ -1108,11 +1034,10 @@ export function Sidebar() {
         <TabsBadge />
       </div>
 
-      {/* claude 有新版等著套用時的那一條（SPEC §6.9）。平常不佔位，只在真的有更新時出現。 */}
+      {/* SPEC §6.9 */}
       <UpdateAllBanner />
 
-      {/* 搜尋 bot：名字、專案、主機、kind、身分、模型、人設、agent 目前的標題都算數，
-          因為你記得的往往不是名字（見 store 的 `botSearchText`）。 */}
+      {/* 搜尋範圍見 store 的 botSearchText。 */}
       <div className="bot-search">
         <input
           type="search"
@@ -1123,8 +1048,7 @@ export function Sidebar() {
           aria-label="搜尋 bot"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            // 只擋 Escape（別讓它一路關掉上層的東西）；其他鍵要放行，App 掛在 window 的 ⌥↑/⌥↓
-            // 換 bot 才收得到（FRONTEND.md：「任何地方（輸入框裡也算）」）。
+            // 只擋 Escape；其他鍵放行給 window 的 ⌥↑/⌥↓（FRONTEND.md）。
             if (e.key === 'Escape') {
               e.stopPropagation()
               e.preventDefault()
@@ -1143,16 +1067,14 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      {/* 不是 listbox：裡面是專案卡片、標題列與一堆按鈕，不是一排 option。每個專案底下的
-          bot 自己是一個 list（見下面 `.bot-list`）。 */}
+      {/* 不是 listbox：內含按鈕；各專案的 bot 各自是 list。 */}
       <nav className="sidebar-scroll" aria-label="Bot 清單">
         {query && matchCount === 0 ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
             沒有符合「{query}」的 Bot。
           </p>
         ) : null}
-        {/* 斷線或重連中拿不到 state 時，空清單是「還不知道」，不是「沒有專案」——
-            daemon 重啟那幾秒曾把這句誤當成引導畫面顯示出來。 */}
+        {/* 未連線時空清單是「還不知道」，不是「沒有專案」。 */}
         {projects.length === 0 && socket !== 'open' ? (
           <p className="hint" style={{ padding: '12px 14px' }}>
             正在連線 daemon，稍等一下就會列出 Project…
@@ -1164,24 +1086,21 @@ export function Sidebar() {
         ) : null}
         {projects.map((p) => {
           const every = botsOfProject({ bots, botOrder }, p.id)
-          // 命中的子 agent 要連父 bot 一起留著（不然它沒有地方掛，會整個消失）；
-          // 父 bot 命中時，它底下的子 agent 也一起顯示，當作它的脈絡。
+          // 命中子 agent 連父 bot 一起留；父命中則帶出子 agent 當脈絡。
           const hit = new Set(every.filter((b) => matches(b)).map((b) => b.id))
           const all = every.filter(
             (b) =>
               hit.has(b.id) ||
               (b.parent_bot_id ? hit.has(b.parent_bot_id) : every.some((c) => c.parent_bot_id === b.id && hit.has(c.id))),
           )
-          // 身分被停用的先收起來。搜尋中不收：搜到的東西藏起來等於沒搜到（同「搜尋中一律展開」）。
+          // 停用身分的 bot 收起；搜尋中不收。
           const shown = query ? all : all.filter((b) => !hiddenQuota.has(b.id))
           const hiddenCount = all.length - shown.length
-          // 子 agent（bot 自己用 herdr 開的，名稱帶父 agent 前綴）縮排在父 bot 底下，不參與拖曳排序。
           const list = shown.filter((b) => !b.parent_bot_id)
           const childrenOf = (id: string) => shown.filter((b) => b.parent_bot_id === id)
           const projectSelected = selectedProjectId === p.id
-          // 搜尋中一律展開：命中的 bot 藏在收合的專案裡等於沒搜到。
+          // 搜尋中一律展開。
           const projectShut = shutProjects.has(p.id) && !query
-          // 搜尋時，整個專案都沒有命中的就不佔版面——留一個空的專案標題只是雜訊。
           if (query && list.length === 0) return null
           const pDragging = pdrag?.id === p.id
           const pDropEdge = pdrag && pdrag.id !== p.id && pdrag.overId === p.id ? pdrag.edge : null
@@ -1205,16 +1124,10 @@ export function Sidebar() {
             >
               <header
                 className={`project-head${projectSelected ? ' selected' : ''}`}
-                // 滑鼠專用的延伸命中區（鍵之間的空隙也點得到）。鍵盤等價就是裡面的
-                // `ProjectTitle` 按鈕（同一個 selectProject），這裡不再給 tabIndex——
-                // 同一件事兩個 Tab 停點只會多按一下。
+                // 滑鼠延伸命中區；鍵盤等價是 ProjectTitle 按鈕，故不給 tabIndex。
                 onClick={() => selectProject(p.id)}
-                // 抓標題列拖：整個專案（含底下的 bot）一起搬。bot 列自己也是拖曳來源，
-                // 但它的 dragstart 不會冒泡到這裡（它有自己的 handler 且 pdrag 不設）。
                 draggable={!query}
-                // 拖曳提示掛在 `ProjectTitle` 上，不掛這裡：`title` 會被沒有自己 title 的
-                // 子孫繼承，掛在 header 上時 `＋` / `⋯` 一 hover 就同時冒出原生 tooltip
-                // 與自製的 `data-tip` 泡泡（兩個提示疊在一起）。
+                // 不在此掛 title：會被 ＋/⋯ 繼承（見 ProjectTitle）。
                 onDragStart={(e) => {
                   e.stopPropagation()
                   e.dataTransfer.effectAllowed = 'move'
@@ -1223,7 +1136,7 @@ export function Sidebar() {
                 }}
                 onDragEnd={() => setPdrag(null)}
               >
-                {/* 收合鈕吃掉自己的 click，不然會連帶把整個專案選起來（開群組對話）。 */}
+                {/* stopPropagation：不然會連帶選取專案。 */}
                 <button
                   type="button"
                   className={`project-fold${projectShut ? ' shut' : ''}`}
@@ -1250,12 +1163,8 @@ export function Sidebar() {
                   >
                     ＋
                   </button>
-                  {/* 刪除專案本來是一顆 `✕`，就排在「新增 Bot」的 `＋` 旁邊——建設性與
-                      破壞性的動作肩並肩，而且在選取中的專案上是常駐的。收進 `⋯`。 */}
+                  {/* 刪除這種破壞性動作收進 ⋯，不跟 ＋ 並排。 */}
                   <HeadMoreMenu label={`更多動作 · ${p.label}`}>
-                    {/* 開 shell 原本只長在「環境設定 → 主機」裡，要開一個 shell 得先想到它在
-                        設定頁。從專案開才是常態：主機跟目錄都已經知道了（`openHostShell`
-                        吃 cwd），不必再選一次。 */}
                     <button
                       type="button"
                       className="head-menu-item"
@@ -1292,10 +1201,7 @@ export function Sidebar() {
                   {all.length} 個 Bot·點一下展開
                 </button>
               ) : list.length === 0 && hiddenCount > 0 ? (
-                // 整張卡片一顆可用的 bot 都不剩了，那就跟空專案長一樣：同一個 `.project-empty`
-                // 容器、同一排快速新增。差別只在標題——「已隱藏」而不是「尚無」，使用者才知道
-                // bot 沒有不見，只是所屬身分被停用了。停用中的那幾顆 chip 在 `QuickAddBots`
-                // 裡是 disabled，不然只會再開一顆同樣沒額度的。
+                // 全被隱藏：同空專案版面，但標「已隱藏」讓人知道 bot 沒不見。
                 <div className="project-empty">
                   <span className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</span>
                   <QuickAddBots projectId={p.id} />
@@ -1306,16 +1212,13 @@ export function Sidebar() {
                   <QuickAddBots projectId={p.id} />
                 </div>
               ) : (
-                // 每個專案的 bot 是一個 list；子 agent 清單在 DOM 上是父列的兄弟（排版要這樣），
-                // 用父列的 `aria-owns` 掛回它底下，巢狀 list 才合法。
+                // 子清單是父列的兄弟，靠 aria-owns 掛回，巢狀 list 才合法。
                 <div className="bot-list" role="list" aria-label={`${p.label} 的 Bot`}>
                 {list.map((b) => {
                   const kids = childrenOf(b.id)
-                  // 搜尋中一律展開：把命中的子 agent 藏在收合的父列底下等於沒搜到。
+                  // 搜尋中一律展開。
                   const shut = kids.length > 0 && collapsed.has(b.id) && !query
-                  // 收合時把子 agent 裡最要緊的燈號帶到父列：卡住的優先於在忙的，其餘不畫。
                   const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
-                  // 收合與否都算：父列自己的燈說不出「底下還沒好」。
                   const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
                   return (
                     <Fragment key={b.id}>
@@ -1357,8 +1260,7 @@ export function Sidebar() {
                 })}
                 </div>
               )}
-              {/* 被停用的身分收走了幾個。清單非空時當一行腳註——執行中／有未讀的現在也會被收，
-                  不留一句話交代的話，使用者會以為 bot 不見了。 */}
+              {/* 腳註交代隱藏數，免得以為 bot 不見了。 */}
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
                 <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>
               ) : null}
@@ -1377,7 +1279,6 @@ export function Sidebar() {
           </button>
         </div>
 
-        {/* 本機 shell 擺在最外層：這是「我想打個指令」最短的路徑，不該埋在設定頁裡。 */}
         <button
           type="button"
           className="disclosure"
@@ -1388,8 +1289,7 @@ export function Sidebar() {
           <span className="disclosure-note">本機</span>
         </button>
 
-        {/* 總管是「找人／交辦」的入口，跟環境設定平級擺在最外層；它自己不是聊天室，
-            要跟 AGM 說話請從面板裡打開它既有的對話。 */}
+        {/* 總管面板不是聊天室，對話從面板裡開。 */}
         <button
           type="button"
           className="disclosure"

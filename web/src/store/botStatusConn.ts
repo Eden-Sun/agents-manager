@@ -1,10 +1,6 @@
 /**
- * Which connection flag a `bot_status` frame's `connected` field is allowed to touch (#20).
- *
- * `bot_status.connected` is the connection state of the host/session the bot lives on
- * (daemon `App::bot_connected`), not the local herdr link. Only a local, non-default-session
- * bot may write the global `connected`; a local default-session bot writes `defaultConnected`;
- * a remote bot only patches its own `hosts[name].connected`.
+ * Which flag `bot_status.connected` may touch (#20): it is the bot's host/session state
+ * (`App::bot_connected`), not the local herdr link.
  */
 export type BotStatusConnTarget =
   | { kind: 'none' }

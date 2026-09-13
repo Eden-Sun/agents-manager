@@ -1,19 +1,9 @@
-//! The `herdr` PATH shim (SPEC §6.5b).
-//!
-//! `lifecycle::child_agent_rules` asks an agent to name its children `<parent>-<suffix>` and the
-//! reconcile picks them up from that. Asking is not a mechanism: an agent forgets, renames,
-//! or was started as codex / grok and never read the rule, and the child becomes a sub-task
-//! nobody can see. Descent (`reconcile`'s tab match) recovers those; this shim stops them
-//! from happening — it sits at the front of a managed pane's PATH and rewrites the command
-//! the agent actually typed.
-//!
-//! It also does what descent cannot: a pane herdr creates is spawned by the herdr *server*,
-//! not by the calling shell, so a child pane inherits nothing. The shim passes the parent's
-//! account (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`) and hook environment down with `--env`.
+//! The `herdr` PATH shim (SPEC §6.5b): enforces `<parent>-<suffix>` child names (agents forget
+//! the persona rule) and passes account/hook env down, since herdr's *server* spawns panes and
+//! a child inherits nothing.
 
 use std::path::{Path, PathBuf};
 
-/// The shim itself. Kept verbatim so `sh` can be handed exactly what a pane will run.
 pub const SHIM_SH: &str = r##"#!/bin/sh
 # agents-manager herdr shim (SPEC §6.5b). Installed at the front of a managed pane's PATH.
 #
@@ -185,9 +175,7 @@ case "${1:-} ${2:-}" in
 esac
 "##;
 
-/// Write the shim into `<bot dir>/bin/herdr` and return that directory, which is what goes on
-/// the pane's PATH. Idempotent: same bytes, same mode, rewritten every start so an upgraded
-/// daemon never leaves an old shim behind.
+/// Rewritten every start so an upgraded daemon never leaves an old shim behind.
 pub fn install_local(bot_dir: &Path) -> std::io::Result<PathBuf> {
     let dir = bot_dir.join("bin");
     std::fs::create_dir_all(&dir)?;
@@ -201,8 +189,7 @@ pub fn install_local(bot_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// The remote half, over the same ssh path `hook.sh` takes (SPEC §11.4): `<remote bot
-/// dir>/bin/herdr`. Returns the directory to prepend to that host's pane PATH.
+/// Same ssh path as `hook.sh` (SPEC §11.4).
 pub async fn install_remote(conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> anyhow::Result<String> {
     let dir = format!("{remote_bot_dir}/bin");
     let script = format!(
@@ -219,8 +206,7 @@ pub async fn install_remote(conn: &crate::hosts::HostConn, remote_bot_dir: &str)
 
 #[cfg(test)]
 mod tests {
-    //! The shim is a shell script, so the test runs it with `sh` against a fake `herdr` that
-    //! prints its argv one per line. Anything less would only be testing a Rust string.
+    //! Runs the real script against a fake `herdr` that prints argv one per line.
     use std::io::Write as _;
     use std::process::Command;
 
@@ -242,8 +228,7 @@ mod tests {
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
             let mut f = std::fs::File::create(fake.join("herdr")).unwrap();
-            // `agent get <name>` answers from `AM_TEST_AGENTS` (space-separated), the way the
-            // real herdr would know AGM or another top-level bot; everything else echoes argv.
+            // `agent get <name>` answers from `AM_TEST_AGENTS`; everything else echoes argv.
             f.write_all(
                 b"#!/bin/sh\n\
                   if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
@@ -261,18 +246,15 @@ mod tests {
             Sandbox { dir }
         }
 
-        /// Run the shim with `AM_AGENT_NAME` set, returning `(stdout lines, stderr)`.
         fn run(&self, env: &[(&str, &str)], args: &[&str]) -> (Vec<String>, String) {
             let mut cmd = Command::new(self.dir.join("bin/herdr"));
-            // The real herdr is behind the shim's own directory, exactly as on a pane.
             let path = format!(
                 "{}:{}:/usr/bin:/bin",
                 self.dir.join("bin").display(),
                 self.dir.join("real").display()
             );
             cmd.env("PATH", path).args(args);
-            // Parent pane model settings are not test inputs. Remove them only from the
-            // subprocess, then apply each fixture's explicit inheritance settings below.
+            // Don't inherit the test runner's own pane model settings.
             for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND"] {
                 cmd.env_remove(key);
             }
@@ -285,8 +267,6 @@ mod tests {
         }
     }
 
-    /// The rule the persona could only ask for: a child agent comes out prefixed whatever the
-    /// agent typed, and the agent is told so on stderr.
     #[test]
     fn agent_start_prefixes_the_child_name() {
         let s = Sandbox::new();
@@ -296,8 +276,7 @@ mod tests {
         assert!(err.contains("proj-abc123-review"), "the rename is announced: {err}");
     }
 
-    /// `agent prompt` 也要補前綴（不然送不到那顆子 agent），而且只補名字、內容原樣轉。
-    /// 報給 daemon 的那一步在測試環境裡沒有 daemon 可報，失敗也不能擋住轉發。
+    /// 回報 daemon 失敗（測試裡沒有 daemon）也不能擋住轉發。
     #[test]
     fn agent_prompt_prefixes_the_target_and_forwards_the_text() {
         let s = Sandbox::new();
@@ -305,12 +284,11 @@ mod tests {
             &[("AM_AGENT_NAME", "proj-abc123")],
             &["agent", "prompt", "review", "把 daemon 重建一次，然後回報"],
         );
-        // 假 herdr 一行印一個參數，所以這裡順便證明：整段文字仍是**一個**參數，沒有被拆開。
+        // 整段文字仍是**一個**參數。
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "把 daemon 重建一次，然後回報"]);
     }
 
-    /// 目標本來就存在（AGM、別的頂層 bot）就不改名：bot 照 CLAUDE.md 直接向 AGM 申請時，
-    /// 之前會被改成 `proj-abc123-agm-pxf2pv` 而 unknown_target。
+    /// 既有目標（AGM、頂層 bot）不改名，否則 unknown_target。
     #[test]
     fn an_existing_target_is_prompted_under_its_own_name() {
         let s = Sandbox::new();
@@ -318,12 +296,10 @@ mod tests {
         let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
         assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
         assert!(!err.contains("已改名"), "{err}");
-        // 自己的子 agent 用短名仍然補前綴。
         let (out, _) = s.run(&env, &["agent", "prompt", "review", "hi"]);
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "hi"]);
     }
 
-    /// 名字前面就帶旗標時不猜：整串原樣交給真的 herdr。
     #[test]
     fn an_agent_prompt_with_flags_first_is_forwarded_verbatim() {
         let s = Sandbox::new();
@@ -331,8 +307,6 @@ mod tests {
         assert_eq!(out, ["agent", "prompt", "--json", "review", "hi"]);
     }
 
-    /// A name that already carries the prefix is left alone — and so is the argv order, flags
-    /// before the name included, plus everything after `--` (the agent's own argv).
     #[test]
     fn a_prefixed_name_and_the_argv_order_are_left_alone() {
         let s = Sandbox::new();
@@ -348,8 +322,7 @@ mod tests {
         assert_eq!(out, ["agent", "start", "--kind", "claude", "--pane", "w1:p3", "p-1-ui", "--", "--model", "opus"]);
     }
 
-    /// 2026-09-08：子 agent 沒帶 `--model` 就跑 CLI 預設，側欄多一顆「claude-fable-5-1」。母 bot 的
-    /// 模型從 `AM_MODEL` / `AM_EFFORT` 補上；同 kind 才補，自己有寫的不動。
+    /// 2026-09-08：沒帶 `--model` 的子 agent 跑 CLI 預設；同 kind 才補母 bot 的，自己有寫的不動。
     #[test]
     fn a_child_without_a_model_inherits_the_parents() {
         let s = Sandbox::new();
@@ -358,15 +331,12 @@ mod tests {
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--", "--model", "opus", "--effort", "medium"]);
         assert!(err.contains("沿用母 bot"), "{err}");
 
-        // 自己寫了 --model：不動，也不補 effort 以外的東西。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--", "--model", "sonnet"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--", "--model", "sonnet"]);
 
-        // 不同 kind：母 bot 的模型名對它沒意義。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex"]);
 
-        // codex／grok 的 `-m` 與 codex 的 `-c model=` 也算「自己有寫」，同 kind 也不補。
         let cenv = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "codex"), ("AM_MODEL", "gpt-5.6-luna")];
         let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--kind", "codex", "--", "-m", "o3"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "codex", "--", "-m", "o3"]);
@@ -375,13 +345,10 @@ mod tests {
         let (out, _) = s.run(&cenv, &["agent", "start", "kid", "--", "-m=o3"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--", "-m=o3"]);
 
-        // 已經有 `--` 但沒有 --model：接在後面。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--", "--verbose"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--", "--verbose", "--model", "opus", "--effort", "medium"]);
     }
 
-    /// `--pane w1:p3` is a *value*, not the agent name; renaming it would target a pane that
-    /// does not exist.
     #[test]
     fn an_option_value_is_never_mistaken_for_the_name() {
         let s = Sandbox::new();
@@ -389,7 +356,6 @@ mod tests {
         assert_eq!(out, ["agent", "start", "--pane", "w1:p3", "p-1-kid"]);
     }
 
-    /// herdr agent names are `[a-z][a-z0-9_-]{0,31}`; a long suffix is cut, not rejected.
     #[test]
     fn a_long_name_is_cut_to_herdrs_32_characters() {
         let s = Sandbox::new();
@@ -398,8 +364,6 @@ mod tests {
         assert!(out[2].starts_with("proj-abc123-x"));
     }
 
-    /// A pane herdr creates is spawned by the server, so it inherits nothing: without this the
-    /// child would come up on the user's default claude account and with no hook token.
     #[test]
     fn a_new_pane_carries_the_parents_account_and_hook_env() {
         let s = Sandbox::new();
@@ -419,7 +383,6 @@ mod tests {
         }
     }
 
-    /// A value the agent set by hand wins: the shim fills gaps, it does not overrule.
     #[test]
     fn an_env_the_caller_set_is_not_overridden() {
         let s = Sandbox::new();
@@ -431,7 +394,6 @@ mod tests {
         assert!(out.contains(&"CLAUDE_CONFIG_DIR=/other".to_string()));
     }
 
-    /// Everything else is the real herdr, untouched — and the shim must never find *itself*.
     #[test]
     fn every_other_subcommand_is_forwarded_verbatim() {
         let s = Sandbox::new();

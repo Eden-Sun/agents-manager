@@ -2,14 +2,7 @@ import { useEffect, useId, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { focusableIn, useDialogFocus } from '../hooks/useDialogFocus'
 
-/**
- * Centred popup for the sidebar's three big forms (新增 Project / 新增 Bot / 環境設定).
- * They used to replace the whole sidebar or push the footer around; as popups the bot
- * list stays visible behind them and every one of them closes the same way.
- *
- * The body keeps the `sheet-body` class so the form styling written for the old
- * in-sidebar sheets (field heights, the DirPicker's fill-the-height rule) still applies.
- */
+/** Centred popup for the sidebar's big forms. The body keeps `sheet-body` so the existing form styling still applies. */
 export function Modal({
   open,
   title,
@@ -30,16 +23,12 @@ export function Modal({
   const bodyRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
 
-  // Trap on the dialog (so the close button is reachable by Tab) but still land on the first
-  // field, which is what makes the form usable straight from the keyboard. `focusableIn`
-  // rather than a plain query: the first control in a form is often disabled until something
-  // else is filled in, and focusing it would silently drop focus on the body.
+  // Land on the first field; `focusableIn` skips disabled controls, which would drop focus on the body.
   useDialogFocus(open, dialogRef, {
     initialFocus: () => (bodyRef.current ? focusableIn(bodyRef.current)[0] : null),
   })
 
-  // Read through a ref so the Escape listener always sees the current handler without
-  // making an inline `onClose={() => …}` prop re-register it on every render.
+  // Ref so an inline `onClose` doesn't re-register the Escape listener every render.
   const onCloseRef = useRef(onClose)
   useEffect(() => {
     onCloseRef.current = onClose
@@ -51,9 +40,7 @@ export function Modal({
       if (e.key !== 'Escape') return
       // A picker or menu inside the body handles Escape first; only close when nothing did.
       if (e.defaultPrevented) return
-      // With one modal open on top of another, both listeners sit on window and the outer
-      // one runs first (it registered first), so `defaultPrevented` cannot sort them out.
-      // Focus is trapped in the innermost dialog, so the keystroke's target names the owner.
+      // Stacked modals: the outer listener runs first, so decide ownership by the focus-trapped target.
       const dialog = dialogRef.current
       if (dialog && e.target instanceof Node && !dialog.contains(e.target)) return
       e.preventDefault()

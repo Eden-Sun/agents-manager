@@ -1,32 +1,6 @@
-//! v4.0 — per-host CLI detection (`hosts[].tools`) and "install / log in through an existing
-//! agent" (`POST /api/hosts/:name/tools/install`).
-//!
-//! Detection runs one POSIX `sh` script on the host (locally through `/bin/sh`, remotely
-//! through `HostConn::ssh_exec_path`). Executables are looked up the way a pane sees them —
-//! through the user's *login* shell — so a tool installed by e.g. Homebrew or `~/.local/bin`
-//! is found even though the daemon / a non-interactive ssh shell has a bare PATH.
-//!
-//! A second pass answers the *per-identity* question (`hosts[].identities`): an
-//! `[[identities]]` entry is global config, but whether the account it points at is usable is
-//! a property of each host — `CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"` resolves on every
-//! machine and is logged in on only some of them. That pass runs the CLI's own
-//! "am I logged in" question **under the identity's env** (`$HOME` expanded against *that*
-//! host's home), because the credential may live in the macOS Keychain or the environment
-//! rather than in a file next to the config dir.
-//!
-//! The same pass also *discovers* identities (SPEC §16): people who run several Claude
-//! accounts already keep them as shell aliases —
-//!
-//! ```sh
-//! alias cc1='CLAUDE_CONFIG_DIR=$HOME/.claude-cc1 claude --dangerously-skip-permissions'
-//! ```
-//!
-//! — so `cc0`…`cc6` are read off the host's own login shell (`$SHELL -lic alias`, falling back
-//! to `~/.zshrc`) and offered as identities without anyone writing `[[identities]]` by hand.
-//! They are **per host**: `cc1` is `~/.claude-cc1` here and `~/.claude-ccompany` on m4p, and
-//! that is exactly right — the alias is the account, and the account lives on the machine.
-//! Only `CLAUDE_CONFIG_DIR` is taken from the alias; the flags after `claude` are left alone
-//! (the daemon decides those, e.g. `auto_approve`).
+//! Per-host CLI detection, per-identity login state and `ccN` alias discovery (see SPEC §16).
+//! Executables are looked up through the user's *login* shell: the daemon / non-interactive ssh has a bare PATH.
+//! Login is asked per host under the identity's env — the credential may live in the Keychain, not a file.
 
 use crate::config::{valid_kind, LOCAL_HOST};
 use crate::hosts::sh_quote;
@@ -52,29 +26,22 @@ impl Default for ToolInfo {
     }
 }
 
-/// One identity as seen *from one host*. Same shape as `ToolInfo`'s login half, so the UI can
-/// read both the same way.
+/// One identity as seen *from one host*.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct IdentityInfo {
     pub name: String,
     pub kind: String,
     /// `None` = could not tell (CLI missing, probe failed, output not understood).
     pub logged_in: Option<bool>,
-    /// Why `logged_in` is unknown. Kept explicit so a failed probe cannot look like a
-    /// successful (or empty) status in the UI.
+    /// Explicit so a failed probe cannot look like a successful (or empty) status in the UI.
     pub reason: Option<String>,
-    /// Who is logged in, when the CLI says so (claude: e-mail, codex: `ChatGPT`, grok: `grok.com`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    /// claude's `subscriptionType` (`max`, `team`, …) when reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// `config` = an `[[identities]]` entry; `shell` = discovered from a `ccN` alias on this
-    /// host. The UI needs the difference: only a config one can be edited or deleted.
+    /// `config` | `shell` (`ccN` alias); only a config one can be edited or deleted.
     pub source: &'static str,
-    /// The config dir this identity points at *on this host*, when it has one (`cc0` and other
-    /// default-account identities have none). Display only — the real env goes through
-    /// [`identities_for_host`].
+    /// Display only — the real env goes through [`identities_for_host`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_dir: Option<String>,
 }
@@ -83,7 +50,6 @@ pub const SOURCE_CONFIG: &str = "config";
 pub const SOURCE_SHELL: &str = "shell";
 
 impl IdentityInfo {
-    /// A discovered identity whose login state is not known yet (the next detection fills it in).
     pub fn shell(name: &str, kind: &str, config_dir: Option<String>) -> Self {
         Self::unknown(name, kind, SOURCE_SHELL, config_dir)
     }
@@ -105,17 +71,13 @@ impl IdentityInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct HostTools {
     pub tools: BTreeMap<String, ToolInfo>,
-    /// Login state on this host for every identity it knows — config ones and the `ccN`
-    /// aliases discovered here — keyed by identity name.
     pub identities: BTreeMap<String, IdentityInfo>,
-    /// The `ccN` aliases found on this host, in `cc0`…`cc6` order. Not config: they are
-    /// re-read on every detection and never written back to `config.toml`.
+    /// Re-read on every detection and never written back to `config.toml`.
     pub shell_identities: Vec<crate::config::IdentityCfg>,
     pub checked_at: String,
 }
 
-/// The `ccN` alias half of the probe, on its own so the poller can re-run just this part
-/// every minute without a CLI round trip (SPEC §16.5).
+/// Separate so the poller can re-run just the alias part without a CLI round trip (SPEC §16.5).
 macro_rules! alias_sh {
     () => {
         r#"
@@ -129,10 +91,8 @@ done
 }
 pub const ALIAS_SH: &str = alias_sh!();
 
-/// The probe. Every line is `AM_<WHAT> <kind> <value>`; a missing value means unknown.
-/// claude's login on macOS lives in the Keychain: `security find-generic-password` without
-/// `-w` needs no unlock, but a non-interactive session can still be refused — that case is
-/// reported as unknown rather than "not logged in".
+/// Lines are `AM_<WHAT> <kind> <value>`. `security` without `-w` needs no unlock but a
+/// non-interactive session can still be refused — reported as unknown, not "not logged in".
 pub const PROBE_SH: &str = concat!(r#"
 for k in claude codex grok; do
   p=$( "${SHELL:-/bin/sh}" -lic "command -v $k" 2>/dev/null | tail -1 )
@@ -189,8 +149,7 @@ pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
             _ => {}
         }
     }
-    // A tool that is not installed cannot be "logged in"; keep the file-based answer only
-    // when it is positive (credentials may survive an uninstall).
+    // Keep a not-installed tool's login answer only when positive (credentials may survive an uninstall).
     for t in m.values_mut() {
         if !t.installed && t.logged_in == Some(false) {
             t.logged_in = None;
@@ -199,12 +158,8 @@ pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
     m
 }
 
-// ------------------------------------------------------------------ ccN aliases
-
-/// The alias names looked for, in the order they are offered.
 pub const SHELL_IDENTITY_NAMES: [&str; 7] = ["cc0", "cc1", "cc2", "cc3", "cc4", "cc5", "cc6"];
 
-/// Strip one layer of matching quotes.
 fn unquote(s: &str) -> &str {
     let t = s.trim();
     for q in ['\'', '"'] {
@@ -216,15 +171,11 @@ fn unquote(s: &str) -> &str {
 }
 
 /// `CLAUDE_CONFIG_DIR=$HOME/.claude-cc1 claude …` → `$HOME/.claude-cc1`.
-///
-/// Only a leading assignment counts (that is the only place a shell would honour it), and the
-/// value ends at the first unquoted space — the flags after `claude` are not ours to take.
+/// Only a leading assignment counts (the only place a shell honours it); the flags are not ours.
 fn config_dir_of(cmd: &str) -> Option<String> {
     const KEY: &str = "CLAUDE_CONFIG_DIR=";
     let at = cmd.find(KEY)?;
-    // Anything before it must be other `VAR=value` assignments, never a word like `env` or a
-    // second command — an alias whose config dir is set *after* the binary is not one we
-    // understand, so it is skipped rather than guessed at.
+    // Only `VAR=value` before it; `env …` or a dir set after the binary is skipped, not guessed.
     if cmd[..at].split_whitespace().any(|w| !w.contains('=')) {
         return None;
     }
@@ -237,11 +188,8 @@ fn config_dir_of(cmd: &str) -> Option<String> {
     (!val.is_empty()).then(|| val.to_string())
 }
 
-/// `AM_ALIAS` lines → identities, in [`SHELL_IDENTITY_NAMES`] order.
-///
-/// A `ccN` alias only counts when it actually runs `claude`; `cc0`-style aliases with no
-/// `CLAUDE_CONFIG_DIR` become an identity with an **empty env** — the default account, which
-/// is what the strip already folds onto the bare `claude` quota key.
+/// An alias without `CLAUDE_CONFIG_DIR` becomes an **empty env** identity — the default account
+/// (folded onto the bare `claude` quota key).
 pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
     let mut found: BTreeMap<String, crate::config::IdentityCfg> = BTreeMap::new();
     for line in out.lines() {
@@ -261,14 +209,12 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
             Some(dir) => {
                 env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
             }
-            // The alias *does* pick a config dir, just not in a shape we read (`env
-            // CLAUDE_CONFIG_DIR=… claude`, `claude --settings CLAUDE_CONFIG_DIR=…`). Treating
-            // it as the default account would run bots on the wrong login and fold its quota
-            // into the bare `claude` key — skip it rather than guess.
+            // Picks a config dir in a shape we don't read: treating it as default would run bots
+            // on the wrong login — skip rather than guess.
             None if cmd.contains("CLAUDE_CONFIG_DIR=") => continue,
             None => {}
         }
-        // Later definitions win, the way the shell itself resolves a redefined alias.
+        // Later definitions win, like the shell.
         found.insert(
             name.to_string(),
             crate::config::IdentityCfg { name: name.to_string(), kind: "claude".into(), env, args: vec![] },
@@ -277,8 +223,7 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
     SHELL_IDENTITY_NAMES.iter().filter_map(|n| found.remove(*n)).collect()
 }
 
-/// Every identity usable on `host`: the global `[[identities]]` first, then this host's `ccN`
-/// aliases that do not collide with one (hand-written config always wins).
+/// Hand-written `[[identities]]` always win over a colliding `ccN` alias.
 pub async fn identities_for_host(app: &Arc<App>, host: &str) -> Vec<crate::config::IdentityCfg> {
     let mut out = app.cfg.get().await.identities.clone();
     if let Some(ht) = app.tools.lock().await.get(host) {
@@ -291,25 +236,14 @@ pub async fn identities_for_host(app: &Arc<App>, host: &str) -> Vec<crate::confi
     out
 }
 
-/// One identity by name on `host` — [`identities_for_host`] plus a lookup.
 pub async fn identity_for_host(app: &Arc<App>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
     identities_for_host(app, host).await.into_iter().find(|i| i.name == name)
 }
 
-// ------------------------------------------------------------------ per-identity login
-
-/// The CLI's own "am I logged in" question, per kind. Deliberately *not* a file check: a
-/// claude account can live in the macOS Keychain with nothing in `$CLAUDE_CONFIG_DIR`, so
-/// `.credentials.json` being absent proves nothing. Every one of these is read-only and
-/// answers for whatever env it is given.
-///
-/// * claude — **not here**: `auth status --json` over a non-login ssh session cannot read the
-///   macOS Keychain, so it answers `loggedIn: false` for accounts that work fine. It runs in a
-///   herdr pane instead, alongside `/usage` ([`crate::quota_claude`]), and the answer lands
-///   back here through [`record_identity_login`].
-/// * codex  — `login status` (`Logged in using …` / `Not logged in`)
-/// * grok   — `models` (`You are logged in with …` / `You are not authenticated.`); grok has
-///   no `status` subcommand, and `models` is already how `models.rs` talks to it.
+/// Deliberately *not* a file check: a claude account can live in the Keychain with no `.credentials.json`.
+/// claude is **not here**: over non-login ssh it can't read the Keychain and says `loggedIn: false`;
+/// it's asked in a pane instead ([`crate::quota_claude`] → [`record_identity_login`]).
+/// grok has no `status` subcommand, so `models` is used.
 pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
         "codex" => Some(&["login", "status"]),
@@ -318,13 +252,10 @@ pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// The claude arguments the pane probe uses. Kept next to [`login_status_args`] so the two
-/// stay in step even though claude deliberately no longer goes through the ssh pass.
 pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
 
-/// Build the interactive host-level login command. The command is intentionally sent to a
-/// temporary host shell so the CLI's device code / URL remains terminal output visible only to
-/// the UI. Identity env is quoted as shell data; it is never logged or persisted by this path.
+/// Sent to a temporary host shell so the device code / URL stays terminal output visible only to
+/// the UI. Identity env is quoted as shell data; never logged or persisted by this path.
 pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
     let login = match kind {
         "claude" => "claude /login",
@@ -344,9 +275,7 @@ pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Opt
     }
 }
 
-/// Write one identity's login answer into the cached `HostTools`, creating the row if the
-/// tools pass has not seen this identity yet. Returns whether anything actually changed, so
-/// the caller only pushes `host_changed` when the UI would see something new.
+/// Returns whether anything changed, so the caller only pushes `host_changed` when needed.
 pub async fn record_identity_login(
     app: &Arc<App>,
     host: &str,
@@ -375,16 +304,8 @@ pub async fn record_identity_login(
     before != (info.logged_in, info.account.clone(), info.plan.clone())
 }
 
-/// Ask the CLI *right now* whether `name` is logged in on `host`, and update the cache.
-///
-/// The tools pass and the quota poller keep the login state, but the poller parks a
-/// logged-out identity for 30 minutes — so after the user logs in (via the popover's shell
-/// button, or on their own) the cache said "not logged in" until 「重新偵測」. `start_bot`
-/// calls this when the cache says logged-out, before it warns.
-///
-/// Locally this is `claude auth status --json` with the identity's env. Over ssh the answer
-/// can be a false negative (no Keychain), so a remote `false` is **not** written back — only
-/// a positive answer updates the cache there. Returns the fresh answer when there is one.
+/// The poller parks a logged-out identity for 30 min, so after a login the cache stays stale;
+/// `start_bot` rechecks before warning. A remote `false` is **not** written back (no Keychain over ssh).
 pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> Option<bool> {
     let idn = identity_for_host(app, host, name).await?;
     let args: Vec<&str> = match idn.kind.as_str() {
@@ -419,9 +340,7 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
     Some(logged_in)
 }
 
-/// Watch a temporary identity-login pane without copying its terminal output anywhere else.
-/// Once the CLI exits (success or failure), re-probe the identity and close the pane. A pane
-/// that never reaches the CLI is also closed after the short startup grace period.
+/// Never copies the login pane's terminal output anywhere else.
 pub fn spawn_identity_login_watch(app: Arc<App>, host: String, pane_id: String, name: String, kind: String) {
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
@@ -456,11 +375,8 @@ pub fn spawn_identity_login_watch(app: Arc<App>, host: String, pane_id: String, 
     });
 }
 
-/// A headless `claude auth login` (what the popover's 「開 shell 登入」 runs) writes the
-/// credentials but never marks onboarding done, so the next *interactive* `claude` in that
-/// config dir opens on 「Select login method」 even though `auth status` says logged in
-/// (observed on cc2, 2026-09-08). Set `hasCompletedOnboarding` when the account is there and
-/// the flag is not. Local host only; returns whether the file was changed.
+/// Headless `claude auth login` never marks onboarding done, so interactive `claude` opens on
+/// 「Select login method」 despite being logged in (cc2, 2026-09-08). Local host only.
 pub fn ensure_claude_onboarded(config_dir: &std::path::Path) -> bool {
     let path = config_dir.join(".claude.json");
     let Ok(text) = std::fs::read_to_string(&path) else { return false };
@@ -481,28 +397,24 @@ pub fn ensure_claude_onboarded(config_dir: &std::path::Path) -> bool {
     std::fs::rename(&tmp, &path).is_ok()
 }
 
-/// One identity to ask about, already resolved for a specific host.
 #[derive(Debug, Clone)]
 pub struct IdentityProbe {
     pub name: String,
     pub kind: String,
-    /// Absolute path from the tools pass (never a bare name: the probe runs in a bare PATH).
+    /// Absolute path: the probe runs in a bare PATH.
     pub bin: String,
-    /// The identity's env with `$HOME` expanded against *this* host's home.
+    /// `$HOME` expanded against *this* host's home.
     pub env: BTreeMap<String, String>,
 }
 
-/// A shell-assignable variable name. Config is user-written, and these values are `export`ed
-/// into a script, so anything else is dropped rather than quoted around.
+/// Config is user-written and `export`ed into a script, so invalid names are dropped, not quoted.
 pub(crate) fn valid_env_name(k: &str) -> bool {
     !k.is_empty()
         && !k.starts_with(|c: char| c.is_ascii_digit())
         && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The identity pass: each CLI call is fenced by `AM_IDENT_BEGIN`/`AM_IDENT_END <name>` so the
-/// output can be handed to the per-kind reader verbatim. Each runs in its own subshell, so one
-/// identity's env never leaks into the next, and with stdin closed so nothing waits for a TTY.
+/// Each call in its own subshell (env never leaks to the next) with stdin closed (no TTY wait).
 pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
     let mut s = String::new();
     for it in items {
@@ -525,8 +437,7 @@ pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
     s
 }
 
-/// Read one CLI's answer → `(logged_in, account, plan)`. Anything unrecognised stays `None`
-/// ("could not tell"), never `Some(false)`.
+/// Anything unrecognised stays `None` ("could not tell"), never `Some(false)`.
 pub(crate) fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option<String>, Option<String>) {
     let text = body.trim();
     if text.is_empty() {
@@ -570,8 +481,6 @@ pub(crate) fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option
     }
 }
 
-/// Split the fenced identity output and read each block. `kinds` maps identity name → kind;
-/// blocks for names that are not in it are ignored.
 pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTreeMap<String, IdentityInfo> {
     let mut m = BTreeMap::new();
     let mut cur: Option<(String, String)> = None;
@@ -611,8 +520,7 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
             } else {
                 None
             };
-            // `source` / `config_dir` belong to the identity, not to its answer — the caller
-            // fills them in from the entry it asked about.
+            // `source` / `config_dir` are filled in by the caller.
             m.insert(
                 open.clone(),
                 IdentityInfo {
@@ -636,7 +544,6 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
     m
 }
 
-/// `$HOME` on `host` (the daemon's own home for `local`), for expanding identity env values.
 pub(crate) async fn host_home(app: &Arc<App>, host: &str) -> String {
     if let Some(conn) = app.hosts.get(host).await {
         if let Ok(h) = conn.home().await {
@@ -646,9 +553,7 @@ pub(crate) async fn host_home(app: &Arc<App>, host: &str) -> String {
     dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
 }
 
-/// Ask every identity known on this host — config ones plus the `ccN` aliases just read off
-/// its shell — whether it is logged in *here*. Never fails: an identity whose CLI is missing,
-/// or whose probe could not run, is reported as unknown.
+/// Never fails: a missing CLI or failed probe is reported as unknown.
 async fn detect_identities(
     app: &Arc<App>,
     host: &str,
@@ -656,8 +561,7 @@ async fn detect_identities(
     shell: &[crate::config::IdentityCfg],
 ) -> BTreeMap<String, IdentityInfo> {
     let cfg = app.cfg.get().await;
-    // Config first, then the discovered aliases that do not collide — same precedence as
-    // [`identities_for_host`], which is what actually starts the bots.
+    // Same precedence as [`identities_for_host`], which is what actually starts the bots.
     let mut all: Vec<(&crate::config::IdentityCfg, &'static str)> =
         cfg.identities.iter().map(|i| (i, SOURCE_CONFIG)).collect();
     for i in shell {
@@ -689,8 +593,6 @@ async fn detect_identities(
         if login_status_args(&i.kind).is_none() {
             continue;
         }
-        // Without an installed CLI there is nothing to ask; `logged_in` stays unknown and the
-        // UI falls back to the host's `tools` row ("not installed").
         let Some(bin) = tools.get(&i.kind).and_then(|t| t.path.clone()) else { continue };
         let env = i
             .env
@@ -709,8 +611,7 @@ async fn detect_identities(
         run_local(&script, IDENTITY_PROBE_TIMEOUT).await
     } else {
         match app.hosts.get(host).await {
-            // Same budget as the local probe: a multi-identity host easily takes more than
-            // the 30 s one-liner default, and a timeout marks *every* identity unprobed.
+            // The 30 s default is too short for many identities, and a timeout marks *every* one unprobed.
             Some(conn) => conn.ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await,
             None => Err(anyhow::anyhow!("unknown host `{host}`")),
         }
@@ -737,7 +638,6 @@ async fn detect_identities(
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
-/// One CLI round trip per identity, so this gets more room than the single tools probe.
 const IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 
 async fn run_local(script: &str, budget: Duration) -> Result<String> {
@@ -745,9 +645,7 @@ async fn run_local(script: &str, budget: Duration) -> Result<String> {
     Ok(String::from_utf8_lossy(&o.stdout).to_string())
 }
 
-/// Run the probe on `host` and cache the result. Errors are returned (remote ssh failures);
-/// the cache is left untouched then. The identity pass runs afterwards and never fails the
-/// whole detection — a missing login answer is "unknown", not "no tools".
+/// On error the cache is left untouched; the identity pass never fails the whole detection.
 pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let out = if host == LOCAL_HOST {
         run_local(PROBE_SH, PROBE_TIMEOUT).await?
@@ -769,7 +667,6 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     Ok(ht)
 }
 
-/// Fire-and-forget detection (on connect); pushes `host_changed` when done so the UI refetches.
 pub fn spawn_detect(app: Arc<App>, host: String) {
     tokio::spawn(async move {
         match detect(&app, &host).await {
@@ -783,11 +680,9 @@ pub fn spawn_detect(app: Arc<App>, host: String) {
     });
 }
 
-/// How often the `ccN` aliases are re-read. Cheap (one login shell, no CLI), so a new
-/// alias in `~/.zshrc` shows up within a minute instead of at the next daemon restart.
+/// Cheap (one login shell, no CLI), so a new alias shows up within a minute, not at restart.
 const ALIAS_POLL_EVERY: Duration = Duration::from_secs(60);
 
-/// Read only the aliases off `host`; `None` when the host is unreachable.
 async fn poll_aliases(app: &Arc<App>, host: &str) -> Option<Vec<crate::config::IdentityCfg>> {
     let out = if host == LOCAL_HOST {
         run_local(ALIAS_SH, PROBE_TIMEOUT).await
@@ -807,10 +702,7 @@ async fn poll_aliases(app: &Arc<App>, host: &str) -> Option<Vec<crate::config::I
     }
 }
 
-/// Every [`ALIAS_POLL_EVERY`] compare each host's `ccN` aliases with the cached detection
-/// and run a full [`detect`] only when the set changed (a name added, removed, or pointed
-/// at a different `CLAUDE_CONFIG_DIR`). Hosts with no cache yet are left to their own
-/// first detection, which runs on connect.
+/// Full [`detect`] only when the alias set changed; uncached hosts wait for their on-connect detection.
 pub fn spawn_alias_poller(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
@@ -829,12 +721,10 @@ pub fn spawn_alias_poller(app: Arc<App>) {
     });
 }
 
-/// The resolved executable path for a kind on a host, from the detection cache.
 pub async fn cached_path(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
     app.tools.lock().await.get(host).and_then(|h| h.tools.get(kind)).and_then(|t| t.path.clone())
 }
 
-/// The prompt sent to an existing agent to install + log in `kind` (official installers).
 pub fn install_prompt(kind: &str) -> Option<String> {
     let (name, install, login) = match kind {
         "claude" => (
@@ -855,8 +745,7 @@ pub fn install_prompt(kind: &str) -> Option<String> {
     ))
 }
 
-/// `POST /api/hosts/:name/tools/install` — validate, then send the prompt through the
-/// ordinary prompt path (per-bot lock, idempotency, delivery states).
+/// `POST /api/hosts/:name/tools/install` — goes through the ordinary prompt path (lock, idempotency).
 pub async fn install_via_bot(
     app: &Arc<App>,
     host: &str,
@@ -907,8 +796,7 @@ mod tests {
 
     use super::*;
 
-    /// Real `alias` output from both machines (2026-09-06): the local box keys cc1/cc2 to
-    /// `~/.claude-cc1` / `-cc2`, m4p keys cc1 to `~/.claude-ccompany`.
+    /// Real `alias` output from both machines (2026-09-06); m4p keys cc1 to `~/.claude-ccompany`.
     #[test]
     fn reads_ccn_aliases_off_the_shell() {
         let out = r#"
@@ -945,8 +833,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             "AM_ALIAS cc2='env CLAUDE_CONFIG_DIR=$HOME/.x claude'",
         ] {
             let got = parse_shell_identities(line);
-            // Skipped outright — never an empty-env identity that would run on the default
-            // account under that name.
+            // Never an empty-env identity that would run on the default account.
             assert!(got.is_empty(), "should not have made an identity from `{line}`: {got:?}");
         }
         // No config dir at all *is* the default account, and still counts.

@@ -122,8 +122,7 @@ fn main() {
     }
 }
 
-/// `~/.config/agents-manager`, or `AM_DATA_DIR` when set (a second daemon instance for
-/// tests / verification; `hook_cmd.rs` honours the same variable for its spool).
+/// `AM_DATA_DIR` is for a second daemon instance; `hook_cmd.rs` honours it for its spool too.
 fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("AM_DATA_DIR") {
         let d = PathBuf::from(d);
@@ -181,9 +180,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
 
     let mut addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
     let exe = std::env::current_exe()?;
-    // Bind every interface instead of just loopback, so a phone or another machine on the
-    // LAN/Tailscale reaches this daemon directly. Paired with `App::allow_lan` relaxing the
-    // peer and Origin checks below — binding alone would still 403 everything non-local.
+    // LAN/Tailscale access; binding alone would still 403 non-local peers, `App::allow_lan` relaxes that.
     let dev_lan = dev_lan_default(&exe);
     if dev_lan {
         addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
@@ -206,7 +203,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         local.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    // §11.3: bring up every configured remote host (each supervisor reconciles on connect).
+    // §11.3: each remote host's supervisor reconciles on connect.
     app.hosts.apply_config(&app, &cfg.hosts).await;
 
     // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
@@ -219,9 +216,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     lifecycle::purge_deleted_bot_dirs(&app).await;
     events::spawn_global(app.clone()).await;
 
-    // Observe the user's default session when it is separate from the manager's named session.
-    // A default session is never spawned by the daemon; the event subscription and poller are
-    // both best-effort until the user has one running.
+    // The daemon never spawns the user's default session; watching it is best-effort.
     if app.herdr_session != default_session::SESSION {
         if let Err(e) = default_session::sync(&app).await {
             tracing::debug!(session = default_session::SESSION, error = ?e, "initial default session sync skipped");
@@ -241,7 +236,6 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
 
     hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
-    // v4.0: local CLI detection, codex quota poller (5 min), GitHub origin detection.
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
     tools::spawn_alias_poller(app.clone());
     quota::spawn_codex_poller(app.clone());
@@ -249,10 +243,9 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     quota_claude::spawn_claude_poller(app.clone());
     quota_grok::spawn_grok_poller(app.clone());
     github::spawn_detect_all(app.clone());
-    // AGM: pick the supervisor's open assignments and undelivered results back up.
     supervisor::controller::respawn(&app).await;
     supervisor::health::spawn(app.clone());
-    // Agent titles (what each agent calls itself) — no herdr event for it, so it polls.
+    // Agent titles have no herdr event, so they are polled.
     events::spawn_title_poller(app.clone());
     tui_prompts::spawn_survey_watcher(app.clone());
     update_watch::spawn_update_watcher(app.clone());
@@ -300,20 +293,10 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     Ok(())
 }
 
-// Keep Arc<App> in scope for the type checker in all builds.
 #[allow(dead_code)]
-/// LAN access is the default for every *dev* run of the daemon, and only the packaged macOS
-/// app stays localhost-only.
-///
-/// It used to be the other way round — off unless `cargo dev` set `AM_DEV_LAN=1` — but the
-/// binary is restarted by hand and by other agents dozens of times a day (`cargo build
-/// --release && ./target/release/agents-managerd serve`), and every restart that forgot the
-/// variable silently dropped the phone and the other machines off `:7788`. A forgotten
-/// environment variable is not a security boundary; being *inside an .app bundle* is one the
-/// launcher cannot forget, and the shipped app is the only build a non-developer runs.
-///
-/// `AM_DEV_LAN` still overrides in both directions: `=0` forces loopback for a dev binary,
-/// `=1` opens up a bundled one.
+/// LAN is the default for dev runs; only the packaged macOS app stays localhost-only. Security
+/// boundary: an .app bundle can't be forgotten like an env var on the many manual restarts.
+/// `AM_DEV_LAN=0|1` overrides either way.
 fn dev_lan_default(exe: &std::path::Path) -> bool {
     match std::env::var("AM_DEV_LAN").as_deref() {
         Ok("1") => true,
@@ -322,8 +305,7 @@ fn dev_lan_default(exe: &std::path::Path) -> bool {
     }
 }
 
-/// `scripts/package-dmg.sh` puts the daemon at `<app>.app/Contents/MacOS/agents-managerd`;
-/// nothing else in this repo runs it from such a path.
+/// `scripts/package-dmg.sh` puts the daemon at `<app>.app/Contents/MacOS/agents-managerd`.
 fn in_app_bundle(exe: &std::path::Path) -> bool {
     let mut dirs = exe.ancestors().skip(1);
     dirs.next().is_some_and(|d| d.file_name().is_some_and(|n| n == "MacOS"))
