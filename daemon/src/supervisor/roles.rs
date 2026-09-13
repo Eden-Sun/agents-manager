@@ -387,7 +387,14 @@ async fn count_merged(pool: &SqlitePool, role: Role, n: usize) -> Result<()> {
     Ok(())
 }
 
-/// 協調者的 bot，且那顆 bot 還在（使用者可能刪掉它）。`None` = 單角色的舊部署。
+/// 協調者**建立過**沒有。這跟「它現在活著」是兩件事：一旦雙角色啟用，協調的事件就永遠是
+/// 協調的——它停了、沒額度、bot 被刪掉，事件都留在 inbox 等，不會倒回巡檢（那等於又去燒 fable）。
+pub async fn responder_configured(pool: &SqlitePool) -> Result<bool> {
+    Ok(get(pool, Role::Responder).await?.bot_id.is_some())
+}
+
+/// 協調者的 bot，且那顆 bot 還在（使用者可能刪掉它）。`None` **不代表**回到單角色——
+/// 那要看 [`responder_configured`]。
 pub async fn responder_bot(pool: &SqlitePool) -> Result<Option<crate::db::Bot>> {
     let row = get(pool, Role::Responder).await?;
     let Some(id) = row.bot_id else { return Ok(None) };
@@ -404,20 +411,30 @@ pub async fn role_of_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Role>
     Ok((r.bot_id.as_deref() == Some(bot_id)).then_some(Role::Responder))
 }
 
+/// 角色**登記**的 bot id（不管那顆 bot 現在在不在）。路由與 claim 都認這個；要送信才需要
+/// [`responder_bot`] 那種「還活著」的版本。
 pub async fn bot_for(pool: &SqlitePool, role: Role) -> Result<Option<String>> {
     Ok(match role {
         Role::Patrol => super::store::get_or_init(pool).await?.bot_id,
-        Role::Responder => responder_bot(pool).await?.map(|b| b.id),
+        Role::Responder => get(pool, Role::Responder).await?.bot_id,
     })
 }
 
 // ---------------------------------------------------------------- per-role inbox
 
+/// 一筆事件「歸誰」的唯一定義：送出去之後看 `claimed_by`，還沒送就看路由表寫的 `role`。
+///
+/// 兩個角色的查詢、ack 的守衛與 UI 的過濾全部用這一條，否則會出現「A 查得到、B 才寫得進去」的
+/// 交錯：雙角色剛啟用時，先前由巡檢收走（`claimed_by='patrol'`）的協調事件會被 recover 放回
+/// pending，若只看 `role` 就會被協調者撈去送，而 `mark_delivered` 的 claim 守衛又不讓它寫成
+/// delivered——同一則事件每個 tick 送一次，兩邊都以為是自己的。
+const OWNER: &str = "COALESCE(claimed_by, role)";
+
 /// 這個角色這一輪可以送的事件（最舊在前）。
 ///
-/// * 巡檢：自己的事件，外加協調者**還沒建立**時的協調事件（舊部署的行為）。巡檢的事件照舊有
-///   重試上限（`max_attempts`），用完就交給 `notify_exhausted` incident。
-/// * 協調：只有自己的。沒有重試上限——送不出去是有界退避（見 `responder::notify`），事件一直留著。
+/// * 巡檢：自己擁有的；協調者**還沒建立**時（舊部署）連協調的一起收。
+/// * 協調：只有自己擁有的。沒有重試上限——送不出去是有界退避（見 `responder::notify`），
+///   事件一直留著。巡檢的事件照舊有 `max_attempts`。
 pub async fn due_for(
     pool: &SqlitePool,
     role: Role,
@@ -425,15 +442,17 @@ pub async fn due_for(
     now: &str,
     max_attempts: i64,
 ) -> Result<Vec<super::store::InboxEvent>> {
-    // 巡檢的重試上限只套在巡檢自己的事件上；協調的事件（不論誰在收）一律不設上限。
-    let (roles, cap) = match (role, responder_configured) {
-        (Role::Patrol, true) => ("role='patrol'", "notify_attempts < ?1"),
-        (Role::Patrol, false) => ("role IS NOT NULL", "(role='responder' OR notify_attempts < ?1)"),
-        (Role::Responder, _) => ("role='responder'", "?1 = ?1"),
+    let (owned, cap) = match (role, responder_configured) {
+        (Role::Patrol, true) => (format!("{OWNER}='patrol'"), "notify_attempts < ?1".to_string()),
+        (Role::Patrol, false) => (
+            format!("{OWNER} IN ('patrol','responder')"),
+            format!("({OWNER}='responder' OR notify_attempts < ?1)"),
+        ),
+        (Role::Responder, _) => (format!("{OWNER}='responder'"), "?1 = ?1".to_string()),
     };
     // 編號參數：三種組合用同一組 bind，不必各自對齊順序。
     let sql = format!(
-        "SELECT * FROM supervisor_inbox WHERE supervisor_id=?2 AND state='pending' AND {roles}
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=?2 AND state='pending' AND {owned}
            AND (notify_next_at IS NULL OR notify_next_at <= ?3) AND {cap}
          ORDER BY created_at ASC, id ASC"
     );
@@ -441,6 +460,25 @@ pub async fn due_for(
         .bind(max_attempts)
         .bind(super::store::SUPERVISOR_ID)
         .bind(now)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// `GET /api/supervisor/inbox` 的清單。角色條件在 **SQL 的 LIMIT 之前**：先取 200 筆再過濾的話，
+/// 最舊的 200 筆全是另一個角色時，自己的待辦永遠翻不到。
+pub async fn list_for(pool: &SqlitePool, role: Option<Role>, all: bool, limit: i64) -> Result<Vec<super::store::InboxEvent>> {
+    let owned = match role {
+        Some(r) => format!("AND {OWNER}='{}'", r.as_str()),
+        None => String::new(),
+    };
+    // 稽核視圖（`all`）最新在前；工作視圖只列沒結案的、最舊在前，照順序 ack 才清得掉。
+    let (state, order) = if all { ("", "created_at DESC, id DESC") } else { ("AND state!='handled'", "created_at ASC, id ASC") };
+    let sql = format!(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? {state} {owned} ORDER BY {order} LIMIT ?"
+    );
+    Ok(sqlx::query_as::<_, super::store::InboxEvent>(&sql)
+        .bind(super::store::SUPERVISOR_ID)
+        .bind(limit)
         .fetch_all(pool)
         .await?)
 }
@@ -484,6 +522,30 @@ pub enum AckOutcome {
 ///
 /// 協調者還沒建立時，巡檢可以結協調的事件（因為那時就是它在收）。
 pub async fn ack(pool: &SqlitePool, id: &str, actor: Option<Role>, responder_configured: bool) -> Result<AckOutcome> {
+    // 守衛跟寫入在同一句 SQL：先 SELECT 再 UPDATE 的話，兩者之間送出的那一次 `mark_delivered`
+    // 會把 claim 換成另一個角色，而這一句照樣寫下去——等於跨角色結了別人的案。
+    let allowed = match actor {
+        None => "1=1".to_string(),
+        // 協調者還沒建立時，協調的事件就是巡檢在收，所以巡檢結得了。
+        Some(Role::Patrol) if !responder_configured => format!("{OWNER} IN ('patrol','responder')"),
+        Some(r) => format!("{OWNER}='{}'", r.as_str()),
+    };
+    let acked_by = actor.map(Role::as_str).unwrap_or("user");
+    let sql = format!(
+        "UPDATE supervisor_inbox SET state='handled', acked_by=?, updated_at=?
+          WHERE supervisor_id=? AND id=? AND state!='handled' AND {allowed}"
+    );
+    let res = sqlx::query(&sql)
+        .bind(acked_by)
+        .bind(crate::db::now())
+        .bind(super::store::SUPERVISOR_ID)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if res.rows_affected() > 0 {
+        return Ok(AckOutcome::Acked);
+    }
+    // 沒寫到：說得出是哪一種——不存在、已經結過，還是別的角色的。
     let row: Option<(String, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT state, role, claimed_by FROM supervisor_inbox WHERE supervisor_id=? AND id=?")
             .bind(super::store::SUPERVISOR_ID)
@@ -494,23 +556,7 @@ pub async fn ack(pool: &SqlitePool, id: &str, actor: Option<Role>, responder_con
     if state == "handled" {
         return Ok(AckOutcome::AlreadyHandled);
     }
-    let owner = claimed.or(role).unwrap_or_else(|| "patrol".into());
-    if let Some(a) = actor {
-        let legacy_patrol = a == Role::Patrol && !responder_configured;
-        if owner != a.as_str() && !legacy_patrol {
-            return Ok(AckOutcome::ClaimedByOther(owner));
-        }
-    }
-    let acked_by = actor.map(Role::as_str).unwrap_or("user");
-    let res = sqlx::query(
-        "UPDATE supervisor_inbox SET state='handled', acked_by=?, updated_at=? WHERE id=? AND state!='handled'",
-    )
-    .bind(acked_by)
-    .bind(crate::db::now())
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(if res.rows_affected() > 0 { AckOutcome::Acked } else { AckOutcome::AlreadyHandled })
+    Ok(AckOutcome::ClaimedByOther(claimed.or(role).unwrap_or_else(|| "patrol".into())))
 }
 
 /// 巡檢的合併去重（今天 fable 用量最大的來源）。在送之前、每個 tick 跑一次：

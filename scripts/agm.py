@@ -984,7 +984,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_messages)
 
     s = sub.add_parser("assign", help="建立持久交辦並送出（逾時不自動重試）")
-    s.add_argument("--bot", required=True, help="目標 bot id")
+    s.add_argument("--bot", required=True, help="目標 bot id（填另一個 AGM 角色的 bot 就是交接：排進它的佇列，回佇列收據而不是交辦）")
     s.add_argument("--text", help="交辦內容")
     s.add_argument("--text-file", help="從檔案讀交辦內容")
     s.add_argument("--request-id", required=True, help="穩定的 client_request_id；重試沿用同一個")

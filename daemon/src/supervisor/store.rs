@@ -1723,6 +1723,10 @@ pub async fn inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
 
 /// Everything the manager has not acked yet — `pending` *and* `delivered` — oldest first, so a
 /// backlog is worked through in the order it happened and an ack loop actually drains it.
+///
+/// 讀取端改走 `roles::list_for`（角色條件要在 SQL 的 LIMIT 之前）；這一支留給既有測試釘住
+/// 「未 ack 的順序」這條規則。
+#[cfg(test)]
 pub async fn open_inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state!='handled' ORDER BY created_at ASC, id ASC LIMIT ?",

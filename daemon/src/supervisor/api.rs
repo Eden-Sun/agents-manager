@@ -130,9 +130,10 @@ pub async fn post_assignment(
     headers: HeaderMap,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
+    let actor = super::bot_requests::actor_role(&app, &headers).await;
     let review_role = match b.review_role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("review_role must be patrol | responder".into()))?),
-        None => super::bot_requests::actor_role(&app, &headers).await,
+        None => actor,
     };
     // 任務連結先驗證再建交辦：錯的 mission_id 不該留下一件已派出去、卻掛不回任務的工作。
     let mission = match (b.mission_id.as_deref().map(str::trim).filter(|s| !s.is_empty()), b.role.as_deref().map(str::trim)) {
@@ -157,6 +158,7 @@ pub async fn post_assignment(
         b.expects_review(),
         mission.as_ref().map(|(m, r)| (m.as_str(), r.as_str())),
         review_role,
+        actor,
     )
     .await?;
     Ok(Json(a))
@@ -479,14 +481,9 @@ pub async fn get_inbox(
     };
     // 分類在 controller tick 做；讀的人不必等下一個 tick 才看得到角色。
     let _ = super::roles::classify(&app.db).await;
-    let mut events = if all {
-        store::inbox(&app.db, limit).await.map_err(up)?
-    } else {
-        store::open_inbox(&app.db, limit).await.map_err(up)?
-    };
-    if let Some(r) = role {
-        events.retain(|e| e.claimed_by.as_deref().or(e.role.as_deref()) == Some(r.as_str()));
-    }
+    // 角色條件在 SQL 裡（LIMIT 之前）：先取 limit 筆再過濾，最舊的一批全是另一個角色時，
+    // 自己的待辦會永遠翻不到。
+    let events = super::roles::list_for(&app.db, role, all, limit).await.map_err(up)?;
     Ok(Json(json!({
         "events": events.iter().map(store::InboxEvent::to_json).collect::<Vec<_>>(),
         "open": store::open_inbox_count(&app.db).await.map_err(up)?,
@@ -505,7 +502,7 @@ pub async fn post_inbox_ack(
 ) -> Result<Json<Value>, LcError> {
     use super::roles::AckOutcome;
     let actor = super::bot_requests::actor_role(&app, &headers).await;
-    let responder_configured = super::roles::responder_bot(&app.db).await.map_err(up)?.is_some();
+    let responder_configured = super::roles::responder_configured(&app.db).await.map_err(up)?;
     match super::roles::ack(&app.db, &id, actor, responder_configured).await.map_err(up)? {
         AckOutcome::NotFound => Err(LcError::NotFound("inbox event".into())),
         AckOutcome::ClaimedByOther(owner) => Err(LcError::conflict(
