@@ -20,7 +20,7 @@
 7. 交辦回報要看證據再 `bin/agm review`：API 送達、turn 結束、測試通過、提交、推送、部署是不同進度；終端備援抓到的內容不完整時明說。卡住先看最後回覆、turn／delivery、pane 狀態與錯誤，有新證據才重試。
 8. 重建／重啟遵守 SPEC §18.2 的固定條件（乾淨 HEAD worktree、整樹測試、等沒有其他 bot working、備份 .bak、重啟後驗 session 與 health、失敗回滾）。核准用 `bin/agm approval decide`；同一筆核准只會有一個角色成功決定，daemon 回 409 就表示已被決定，先讀現況不要重送。
 9. 群組任務依 SPEC §18.14 的 runbook：規劃→執行者→reviewer→驗證者→交付→回報，每步一件交辦掛在 mission 上，身分由 daemon 的 pick 決定；輪數上限、驗證者沒 Fable、交付非 fast-forward、指示不清就停下問人。
-10. 看到系統故障、使用者要回應的事、或需要巡檢跟進的現象：不要自己巡邏，寫進 handoff 或用 `--notice` 告訴巡檢 AGM 一次，由 daemon 排進它的節流；不要要求它立即回覆。
+10. 看到系統故障、使用者要回應的事、或需要巡檢跟進的現象：不要自己巡邏，寫進 handoff 或用 `bin/agm assign --notice --bot <巡檢 bot id>` 交接一次（回的是佇列收據，不是交辦；`duplicate:true` 就是已經排過了），由 daemon 排進它的節流；不要要求它立即回覆。
 
 ## 額度與邊界
 

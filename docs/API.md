@@ -859,8 +859,9 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   `responder`（同 `GET /api/supervisor/responder`）。
 
 ### 協調者（responder，SPEC §18.15）
-- `GET /api/supervisor/responder` → `{configured,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,stats:{…}}`。
-  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota`。
+- `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,stats:{…}}`。
+  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `missing`（登記過但那顆 bot 被刪了；事件仍留在它的佇列，另推一則 `responder_bot_missing` 給巡檢）。
+  `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。
 - `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。自己的專案與 cwd `supervisor/AGM-responder`
   （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空（rc off）。身分不存在 409 `identity_missing`。
 - `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
@@ -926,7 +927,8 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   - 先落地再送 prompt；同 `client_request_id` 重試回同一筆（換 bot 或 text 409）。對方忙 → 留 `queued`，`error` 記真正理由
     （`bot has no active run`、`a turn is already in flight`、`needs_login: …`），`next_attempt_at` 下次重試時間，controller 依 15/30/60/120/300 秒退避、沿用同一 crid。delivery `unknown` 只對帳不重送。
   - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id（驗收角色是已建立的協調者時為協調者 id）；daemon 自己送給 AGM 的通知帶 `daemon`。
-  - `review_role`：回報進哪個角色的 inbox。省略 = 呼叫的角色（`X-AM-Bot-Id`+`X-AM-Bot-Token` 驗證）；沒有角色 token = 協調者。followup 沿用。目標是任一角色 bot → 400。
+  - `review_role`：回報進哪個角色的 inbox。省略 = 呼叫的角色（`X-AM-Bot-Id`+`X-AM-Bot-Token` 驗證）；沒有角色 token = 協調者。followup 沿用。
+  - **目標是另一個角色 bot** → 這是交接不是交辦：不建交辦列、不開回合，回 `{kind:"handover",routed,queued,duplicate,wake,inbox_event_id,delivery:"queued",turn_id:null}`（同下方 bot 申請的形狀）。對自己的角色 400。
   - `source_turn_id` 可以是巡檢或協調者的回合。
 - `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
@@ -937,7 +939,7 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 ### 交接、inbox、狀態、證據
 - `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；`PUT {summary}` → `{summary,summary_version}`，同時寫 `handoff.md`（權威在 DB）。
 - `GET /api/supervisor/inbox?all=0|1&limit=200&role=patrol|responder` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},role,wake,claimed_by,acked_by,merged_into,created_at,updated_at}],open,all,limit,role}`。
-  預設只列未 handled、最舊在前；`all=1` 含已處理（最新在前）；`limit` 上限 1000；`role` 以 `claimed_by`（沒送過則 `role`）過濾。
+  預設只列未 handled、最舊在前；`all=1` 含已處理（最新在前）；`limit` 上限 1000；`role` 以 `COALESCE(claimed_by, role)` 在 **SQL 的 LIMIT 之前**過濾（先取一頁再過濾的話，最舊一整頁都是另一個角色時就翻不到自己的）。
   `POST /api/supervisor/inbox/{id}/ack` → `{}`；已結過 `{already_handled:true}`；帶角色 bot token 而事件歸另一個角色 → 409 `claimed_by_other_role`。
   - `role`／`wake`：SPEC §18.15 的路由表。`wake=false` 的事件不會自己開一次喚醒；`merged_into` 非空 = 被 daemon 合併掉（`acked_by:"daemon"`）。
   - `kind:"bot_request"`（`payload{to_role,wake,quiet_reason,from_bot_id,from_name,from_role,target_bot_id,text,client_request_id,attachments,sender_verified,via}`）：見下方「bot 寫給 AGM」。
@@ -958,7 +960,8 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   `{routed:"responder"|"patrol",queued:true,duplicate,wake,inbox_event_id,state,delivery:"queued",turn_id:null,message_id:null,note}`。
   沒有 `relay_from`（使用者）、`relay_from:"daemon"`、目標不是角色 bot、協調者未建立 → 照舊 200 `PromptOut`。
 - `POST /relay/announce`（shim，`X-AM-Bot-Token`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
-- 去重：同寄件者同 `client_request_id` 一筆；沒 id 時同寄件者、正規化後同內容、同一個十分鐘格子一筆。重複 → `duplicate:true`，同一個 `inbox_event_id`。
+- 去重：同寄件者同 `client_request_id` 一筆；沒 id 時同寄件者、同內容指紋、同一個十分鐘格子一筆。指紋 = 收件角色＋目標＋正文（逐字）＋附件。
+  重複且指紋相同 → `duplicate:true`、同一個 `inbox_event_id`；指紋不同 → 409 `request_mismatch`（不寫入，回報既有事件 id）。
 - `wake:false`：寄件者當下的回合是一件通知型交辦（`quiet_reason:"reply_to_notice"`），或是一次喚醒而那批事件來自收件角色（`"reply_between_roles"`）。
 
 ### `bin/agm`
