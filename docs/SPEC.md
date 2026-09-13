@@ -313,6 +313,10 @@ daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/her
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
 （`--append-system-prompt` / `--rules` / `developer_instructions`）都用它。
 
+**語氣是規格的一部分（2026-09-13）**：注入給 bot 與 child 的人設／提示一律寫成**命令**——「必須」「一律」「禁止」，
+開頭先講明「硬規則，不是建議」。客氣的寫法（「請…」「…比較清楚」）agent 會當成建議而不執行，實測就是這樣漏掉找閒置 child、
+漏掉關分頁。`lifecycle` 的 `the_rules_read_as_orders_not_suggestions` 測試守這條：出現「請」就紅燈。
+
 ### 6.5d agent 對 agent 的 prompt 標出來源
 
 走 daemon 的派工（`POST /api/bots/{id}/prompt` 帶 `relay_from`、總管的 assignment）會寫 `messages.relay_from`，UI 畫成「X → 這顆 bot」。
