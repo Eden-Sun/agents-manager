@@ -2874,20 +2874,39 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 ///
 /// 回傳 `true` = 已經套用（呼叫端就不用回 `needs_restart`）。做不到的一律 `false`
 /// （kind 不符、沒在跑、正在忙、選單長得不對、回讀對不上），讓呼叫端退回「重啟才生效」。
-pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> bool {
+/// 為什麼沒有當場套用。`None` = 套用成功，呼叫端就不必重啟。
+///
+/// 2026-09-13 使用者：「codex 改 effort 其實不用重啟」——對，但那天它落回重啟，而**每一個失敗
+/// 出口都是靜默的 `return false`**，log 裡只看得到 pane 被關掉重開，查不出是哪一步。理由現在
+/// 一路帶回呼叫端（`PATCH /api/bots/{id}` 的 `live_apply`）並寫進 log。
+pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
+    let reason = apply_live_setting_inner(app, bot_id, fields).await;
+    match &reason {
+        Some(why) => tracing::info!(bot_id, ?fields, reason = %why, "設定沒能當場套用，改用重啟"),
+        None => tracing::info!(bot_id, ?fields, "設定已當場套用，不需要重啟"),
+    }
+    reason
+}
+
+async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
-    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
+    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return Some("bot_missing".into()) };
+    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return Some("no_active_run".into()) };
     let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
-    let Ok(pane_id) = slash_gate(&run, in_flight) else { return false };
-    let Ok(client) = client_for_run(app, &run).await else { return false };
+    let pane_id = match slash_gate(&run, in_flight) {
+        Ok(p) => p,
+        // slash_gate 自己說得出是「沒有 pane」「正在忙」還是「停在提示上」。
+        Err(why) => return Some(format!("slash_gate: {}", why.reason())),
+    };
+    let Ok(client) = client_for_run(app, &run).await else { return Some("no_herdr_client".into()) };
 
     if bot.kind == "codex" {
         // 這個 run 現在是不是 fast——`/fast` 是開關，不知道現在的狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
-        let Some(seen) = crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await else {
-            return false;
+        let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
+            Ok(seen) => seen,
+            Err(why) => return Some(format!("codex: {why}")),
         };
         // 回讀到的狀態列就是 runtime 的定義（SPEC §4.4a），不是我們以為送出去的東西。
         let _ = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
@@ -2899,23 +2918,25 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -
             .await;
         app.emit_bot_status(bot_id).await;
         tracing::info!(bot_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast, "codex applied live");
-        return true;
+        return None;
     }
 
     // claude / grok：一個欄位一行 slash 指令。
-    let [field] = fields else { return false };
+    let [field] = fields else { return Some("not_a_single_field".into()) };
     let value = match *field {
         "effort" => bot.effort.as_deref(),
         "model" => bot.model.as_deref(),
         _ => None,
     };
     // 清成「不指定」沒有 slash 指令可用（`/effort` 與 `/model` 都一定要帶值）。
-    let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else { return false };
+    let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Some(format!("{field}_cleared_to_default"));
+    };
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
-        return false;
+        return Some(format!("no_slash_command_for_{field}"));
     };
     if send_slash_line(&client, &pane_id, &line).await.is_err() {
-        return false;
+        return Some("slash_send_failed".into());
     }
     // SPEC §4.4a: the run really is on the new value now, so the drift marker must clear with
     // it. Only the field that was sent — `/model` does not touch the effort, and grok's
@@ -2940,7 +2961,7 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -
     }
     app.emit_bot_status(bot_id).await;
     tracing::info!(bot_id, line, "applied live via slash command");
-    true
+    None
 }
 
 /// 現在不能把一行 slash 指令送進 agent 輸入列的理由。

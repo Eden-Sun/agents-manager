@@ -1366,12 +1366,26 @@ async fn patch_bot(
         "claude" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
         _ => Vec::new(),
     };
-    let needs_restart = if needs_restart && !live_fields.is_empty() {
-        !lifecycle::apply_live_setting(&app, &id, &live_fields).await
+    // 當場套用失敗時要說得出是哪一步（2026-09-13 使用者：codex 改 effort 其實不用重啟，但那天
+    // 它落回重啟，而每個失敗出口都是靜默的）。`live_apply` 只在真的試過時才出現。
+    let live = if needs_restart && !live_fields.is_empty() {
+        Some(lifecycle::apply_live_setting(&app, &id, &live_fields).await)
     } else {
-        needs_restart
+        None
     };
-    Ok((StatusCode::OK, Json(json!({"needs_restart": needs_restart}))).into_response())
+    let needs_restart = match &live {
+        Some(reason) => reason.is_some(),
+        None => needs_restart,
+    };
+    let mut out = json!({"needs_restart": needs_restart});
+    if let Some(reason) = live {
+        out["live_apply"] = json!({
+            "fields": live_fields,
+            "applied": reason.is_none(),
+            "reason": reason,
+        });
+    }
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {

@@ -822,7 +822,8 @@ pub async fn switch_candidate(
     // Apply it to the session that is already running, if there is one. `send_slash_line`
     // answers claude's "Switch model?" confirmation and backs out (Err → false) if it will
     // not close, so `applied` means the session really is on the new model.
-    let applied = liveness == "idle" && lifecycle::apply_live_setting(app, &bot_id, &["model", "effort"]).await;
+    let applied =
+        liveness == "idle" && lifecycle::apply_live_setting(app, &bot_id, &["model", "effort"]).await.is_none();
     let gen = store::set_active_model(&app.db, next, Some(&iso_in(SWITCH_COOLDOWN_SECS)))
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
