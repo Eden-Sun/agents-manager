@@ -3810,15 +3810,18 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             // ever. So also believe the pane directly: an empty composer plus nothing changing
             // is the agent telling us it wants input. `blocked` is excluded — SPEC §4.3 keeps
             // it out of the fallback because a modal is not an ended turn.
-            let blocked = matches!(db::run(&app2.db, &run_id).await, Ok(Some(r)) if r.agent_status == "blocked");
-            if blocked || !pane_awaits_input(&bot.kind, &read.text) {
+            let agent_status = match db::run(&app2.db, &run_id).await {
+                Ok(Some(r)) => r.agent_status,
+                _ => String::new(),
+            };
+            if agent_status == "blocked" || !pane_awaits_input(&bot.kind, &read.text) {
                 quiet = 0;
                 continue;
             }
             quiet += 1;
             // 這個回合到現在為止，畫面上出現過任何東西嗎（回覆、spinner、警示都算）。
             let said_something = !(last.0.is_empty() && last.1.is_empty() && last.2.is_empty());
-            if quiet >= idle_threshold(said_something) {
+            if quiet >= idle_threshold(said_something, &agent_status) {
                 tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
                 // Under the bot's lock like every other caller: `try_fallback` reads the pane
                 // and then claims the turn, and the Stop hook does the same under the lock. Run
@@ -3959,9 +3962,17 @@ fn pane_awaits_input(kind: &str, text: &str) -> bool {
     })
 }
 
-/// 空 composer 要靜止幾輪才算「它在等你輸入」。見 [`IDLE_POLLS_SILENT`]。
-fn idle_threshold(said_something: bool) -> u32 {
-    if said_something {
+/// 空 composer 要靜止幾輪才算「它在等你輸入」。
+///
+/// 短的那條（14 秒）是給「herdr 的狀態卡住了」準備的安全網（2026-09-06：grok 答完坐在空
+/// composer，herdr 卻一直說 working）。可是 herdr 說 `working` 時它**也可能真的在做事**——
+/// 2026-09-13 的 GROK 就是這樣被關掉回合的。所以兩個訊號都要看：
+///
+/// * herdr 說閒著、畫面也印過東西然後停住 → 它講完了在等你，14 秒。
+/// * herdr 說還在跑，或這回合畫面上從頭到尾什麼都沒出現過 → 多半是它真的在想／CLI 還沒開始
+///   渲染，等到 63 秒。安全網仍然在（卡住的 `working` 最後還是收得掉），只是晚一點接手。
+fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
+    if said_something && agent_status != "working" {
         IDLE_POLLS
     } else {
         IDLE_POLLS_SILENT
@@ -6412,13 +6423,30 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(last_prompt_echo_text("codex", "› 幫我看一下這個 bug\n  thinking…\n").as_deref(), Some("幫我看一下這個 bug"));
     }
 
+    /// grok 那張常駐的 telemetry 橫幅不是內容，也不是活動跡象：它一直在畫面上，所以把它算成
+    /// 「畫面有東西」會讓 [`idle_threshold`] 誤判成「它講完了」。2026-09-13 GROK 那顆 pane 尾端
+    /// 就一直壓著這張。
+    #[test]
+    fn the_grok_opt_in_banner_is_not_content() {
+        let screen = "❯ fix ui\n\n  Help improve Grok                                    [Opt out] [Opt in]\n  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g.,\n  prompts, traces, & metrics, for training and debugging purposes.\n  Change anytime via settings.\n  Read Terms and Privacy Policy.\n\n  ╭──────────────────────────────╮\n  │ ❯                            │\n  ╰──────── Grok 4.6 (low) ──────╯\n\n  Shift+Tab:mode  │  Ctrl+.:shortcuts\n";
+        assert!(live_reply("grok", screen).unwrap_or_default().trim().is_empty(), "橫幅不是回覆");
+        // 而且這個畫面確實是「在等輸入」——空的 composer 還在。
+        assert!(pane_awaits_input("grok", screen));
+    }
+
     /// 2026-09-13（GROK／w168:pN）：送出 15 秒後畫面還是一個空的 `❯`——它連第一個字都還沒印，
     /// 卻被當成「在等你輸入」，回合被備援關掉，真正的回覆 36 秒後才到。「印過東西然後停住」
     /// 才是 14 秒就算數的那種；「從頭到尾沒印過東西」要多等。
     #[test]
     fn a_pane_that_never_rendered_anything_gets_a_longer_grace() {
-        assert_eq!(idle_threshold(true), IDLE_POLLS);
-        assert_eq!(idle_threshold(false), IDLE_POLLS_SILENT);
+        // 只有「herdr 說閒著」+「印過東西然後停住」才走短的那條。
+        assert_eq!(idle_threshold(true, "idle"), IDLE_POLLS);
+        assert_eq!(idle_threshold(false, "idle"), IDLE_POLLS_SILENT);
+        // herdr 說還在跑：它可能真的在做事（2026-09-13 GROK），不要 14 秒就收掉。
+        assert_eq!(idle_threshold(true, "working"), IDLE_POLLS_SILENT);
+        assert_eq!(idle_threshold(false, "working"), IDLE_POLLS_SILENT);
+        // 讀不到狀態時不要比原本更急。
+        assert_eq!(idle_threshold(true, ""), IDLE_POLLS);
         assert!(IDLE_POLLS_SILENT > IDLE_POLLS * 3, "要明顯長過那 14 秒，不然等於沒改");
     }
 
