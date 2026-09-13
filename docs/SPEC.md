@@ -1382,14 +1382,14 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
   代理仍能通，是因為 `web/vite.config.ts` 把 `Origin` 改寫成 daemon 自己的位址（daemon 的 Origin 檢查照舊只信 localhost）。
   代價要知道：同網段任何裝置都能透過 5173 的 `/api` 代理打到 7788，公共網路上要另外收斂。
 - **看門狗** launchd `com.agm.dev-server`（`~/Library/LaunchAgents/com.agm.dev-server.plist`）：
-  `StartInterval 300`、`RunAtLoad true`，`ProgramArguments` 是
+  `StartInterval 60`、`RunAtLoad true`，`ProgramArguments` 是
   `/opt/homebrew/bin/bun run supervisor/AGM/bin/dev-server-kick.ts`，`EnvironmentVariables.PATH` 含
   `/opt/homebrew/bin`（bun）與 `/Users/m4p/.local/bin`（node）——launchd 不給登入 shell 的 PATH，
   少了這行就會「手動跑得起來、排程跑不起來」。看門狗自己用 bun 沒問題：它只做 fetch / lsof / spawn，
   不當 HTTP 代理，碰不到上面那個 socket 差異。腳本的行為順序：
   1. **健康 = 對外可達**，不是「127.0.0.1 有回應」：先用 `lsof -nP -iTCP:5173 -sTCP:LISTEN -Fpn` 看
      LISTEN 的位址，綁 `*:5173`／`0.0.0.0:5173` 且 curl `127.0.0.1` 有回應才算健康 → 直接 `exit 0`，
-     **不寫 log**（每 5 分鐘一行會把 log 灌爆）。只綁 `127.0.0.1`／`[::1]` 的實例本機看得到、使用者的手機
+     **不寫 log**（每一輪一行會把 log 灌爆）。只綁 `127.0.0.1`／`[::1]` 的實例本機看得到、使用者的手機
      看不到，一律當成**錯誤實例**。（`lsof` 要用 `-F` 機器格式：人類格式的最後一欄是 `(LISTEN)` 不是位址，
      照欄位切會把每顆都誤判成 loopback-only。）
   2. 錯誤實例怎麼處理，看它是誰的：
@@ -1399,9 +1399,15 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 只是
      - **非 vite 程序** → 一律只記錄 pid 與完整 command，不 kill。
   3. 找不到 node 或找不到 `vite.js` → 寫 log 跳過這輪，**不拿 bun 代跑**（等於把 crash 裝回去）。
   4. 真的沒人聽 → `nohup node vite.js --host 0.0.0.0 --port 5173 --strictPort`，最多等 15 秒複驗；
-     仍失敗就寫 log 交給下一輪，**不在腳本裡重試迴圈**（web/ 編不過時才不會每 5 分鐘炸一次）。
+     仍失敗就寫 log 交給下一輪，**不在腳本裡重試迴圈**（web/ 編不過時才不會每一輪炸一次）。
   log 在 `supervisor/AGM/dev-server.log`；launchd 自己的 stdout 在 `dev-server.launchd.log`。
   舊的 bash 版留成 `dev-server-kick.sh.bak-bun`，確認 .ts 版跑滿一輪沒問題後刪掉。
+- **頻率 60 秒是 2026-09-13 使用者指示**（原本 300）：5173 吃的是只跟 origin/main 的乾淨 worktree，
+  所以 bot 推上去之後要等下一輪 `git fetch && git reset --hard` 才看得到——300 秒的等待被使用者
+  當成「vite 壞了」。成本是**每分鐘一次 `git fetch`**（一次網路往返，加一次 `lsof`；沒有 spawn），
+  vite 只有在 `bun.lock` 變動時才重啟，所以提高頻率不會每分鐘打斷 HMR。舊 plist 備份成
+  `com.agm.dev-server.plist.bak-300s`。要看**還沒 commit** 的改動仍然是各 bot 自己的 port
+  （5188／`VITE_MOCK=1` 慣例），不是把 5173 指回共用樹。
 - 這條規則的由來：2026-09-12 有 bot 用 `npx vite --port 5173 --strictPort`（沒帶 `--host`）起了一顆只聽
   `[::1]` 的實例，看門狗當時只認「127.0.0.1 有回應」，於是判定「被占用、不動它」，5173 對使用者等於掛著。
   現在兩道都補上了：`vite.config.ts` 的 `server.host: true` 讓手動起的也對外，看門狗則會收掉沒人認領的
