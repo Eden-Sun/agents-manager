@@ -388,6 +388,53 @@ async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str)
     Ok(())
 }
 
+/// 遲到的 hook 撞上已經被終端備援關掉的回合：能補的就補，不能補的才丟。
+///
+/// 2026-09-13 實例（bot GROK、pane w168:pN）：使用者送出後 15 秒，畫面還停在空的 `❯`（grok
+/// 在想事情時就是長這樣），備援把回合關成 `completed_fallback` 且「只看到我們自己的 prompt」，
+/// 一則 assistant 訊息都沒存。36 秒後 grok 的 Stop hook 帶著真正的回覆回來，卻被這裡丟掉——
+/// 使用者看到的是「沒回應」，而 pane 上明明寫著它做了 5 分鐘、推了一個 commit。
+///
+/// 規則：那個回合**沒有任何 assistant 訊息**時，hook 的回覆是我們唯一有的答案，寫進去並把
+/// 狀態修正成 `completed`（hook 是比畫面更硬的證據）。已經有回覆的照舊丟——那才是這條分支
+/// 原本要防的「一個回合兩則回覆」。
+async fn fill_or_drop_late_hook(
+    app: &Arc<App>,
+    turn: &db::Turn,
+    body_text: &str,
+    session_id: &Option<String>,
+    native_turn_id: &Option<String>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE turns SET native_session_id=COALESCE(?, native_session_id),
+                          native_turn_id=COALESCE(?, native_turn_id) WHERE id=?",
+    )
+    .bind(session_id)
+    .bind(native_turn_id)
+    .bind(&turn.id)
+    .execute(&app.db)
+    .await?;
+    let has_reply: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn.id)
+            .fetch_one(&app.db)
+            .await?;
+    if body_text.trim().is_empty() || has_reply > 0 {
+        tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
+        return Ok(());
+    }
+    sqlx::query("UPDATE turns SET status='completed', completed_at=COALESCE(completed_at, ?) WHERE id=?")
+        .bind(db::now())
+        .bind(&turn.id)
+        .execute(&app.db)
+        .await?;
+    lifecycle::insert_message(app, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None)
+        .await?;
+    tracing::info!(turn = %turn.id, "late hook filled a fallback-closed turn that had no reply");
+    lifecycle::emit_turn(app, &turn.id).await;
+    Ok(())
+}
+
 /// Consume the one-shot native session request written for a reopened Team member. Claude
 /// reports its identity in `SessionStart`; Codex and Grok have no equivalent hook, so callers
 /// pass their first completed turn instead. Clearing the column before recording a mismatch
@@ -606,17 +653,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         .bind(&t.id)
                         .fetch_optional(&app.db)
                         .await?;
-                    if now_t.is_some_and(|c| c.status == "completed_fallback") {
-                        sqlx::query(
-                            "UPDATE turns SET native_session_id=COALESCE(?, native_session_id),
-                             native_turn_id=COALESCE(?, native_turn_id) WHERE id=?",
-                        )
-                        .bind(&session_id)
-                        .bind(&turn_id)
-                        .bind(&t.id)
-                        .execute(&app.db)
-                        .await?;
-                        tracing::info!(turn = %t.id, "late hook dropped; the terminal fallback claimed this turn first");
+                    if let Some(closed) = now_t.filter(|c| c.status == "completed_fallback") {
+                        fill_or_drop_late_hook(app, &closed, &body_text, &session_id, &turn_id).await?;
                         return Ok(());
                     }
                 }
@@ -664,13 +702,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .fetch_optional(&app.db)
                 .await?;
                 if let Some(t) = late {
-                    sqlx::query("UPDATE turns SET native_session_id=?, native_turn_id=? WHERE id=?")
-                        .bind(&session_id)
-                        .bind(&turn_id)
-                        .bind(&t.id)
-                        .execute(&app.db)
-                        .await?;
-                    tracing::info!(turn = %t.id, "late hook dropped; turn already completed via terminal fallback");
+                    fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id).await?;
                     return Ok(());
                 }
             }
@@ -1126,6 +1158,121 @@ mod external_claim_tests {
 
     /// 2026-09-12 使用者實機：畫面折行讓刮下來的那則使用者訊息斷在一半（「…請設 multiSelect:」），
     /// hook 之後送來的才是完整原文。既有那則是原文的前綴時要補完，不是當重複丟掉。
+    /// 2026-09-13（bot GROK、pane w168:pN）：畫面停在空的 `❯`，備援 15 秒就把回合關掉、
+    /// 一則回覆都沒存；36 秒後 grok 的 Stop hook 帶著真正的答案回來卻被丟掉，使用者看到
+    /// 「沒回應」。沒有回覆的那種回合要用 hook 的答案補起來。
+    #[tokio::test]
+    async fn a_late_hook_fills_a_fallback_turn_that_has_no_reply() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'late-hook','grok','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web','completed_fallback','ok',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+
+        fill_or_drop_late_hook(&app, &turn, "側欄那組徽章已收齊，cdcf165 已推", &Some("s1".into()), &Some("n1".into()))
+            .await
+            .unwrap();
+
+        let (status, native): (String, Option<String>) =
+            sqlx::query_as("SELECT status, native_turn_id FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(status, "completed", "有 hook 的證據就不再是「只看到畫面」");
+        assert_eq!(native.as_deref(), Some("n1"), "native id 照舊蓋上去，重送才去得掉重");
+        let replies: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+                .bind(&turn_id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(replies, vec!["側欄那組徽章已收齊，cdcf165 已推".to_string()]);
+
+        // 已經有回覆的那種照舊丟掉——這條分支本來就是要防「一個回合兩則回覆」。
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        fill_or_drop_late_hook(&app, &turn, "第二份回覆", &Some("s1".into()), &Some("n1".into())).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "不會變成兩則");
+    }
+
+    /// 空的 hook（只有 Stop、沒有內容）不要把回合改成 completed——那等於宣稱有答案。
+    #[tokio::test]
+    async fn an_empty_late_hook_changes_nothing_but_the_native_ids() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'late-hook-empty','grok','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web','completed_fallback','ok',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        fill_or_drop_late_hook(&app, &turn, "   ", &Some("s2".into()), &Some("n2".into())).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(status, "completed_fallback");
+    }
+
     #[tokio::test]
     async fn a_clipped_scraped_prompt_is_upgraded_to_the_hooks_full_text() {
         let env = tt::env().await;
