@@ -376,15 +376,6 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     if limit_hit_expired(q.limit_hit.as_ref()) {
         q.limit_hit = None;
     }
-    // 更新的結構化讀數說帳號還有額度 → 那張橫幅是歷史了。
-    //
-    // 2026-09-13：橫幅的 `try again at` 被解析成隔天，於是 `limit_hit` 整整黏了 24 小時，
-    // 期間 app-server 明明回報 5h 只用了 21%、22:20 就重置——`quota_blocked` 的交辦因此一直
-    // 等不到重送。只靠 `until` 過期是不夠的：那個時間本身就可能是錯的。
-    if q.limit_hit.is_some() && reading_contradicts_limit_hit(&q) {
-        tracing::info!(key = %key, "新的額度讀數說帳號還有餘裕，清掉舊的上限橫幅");
-        q.limit_hit = None;
-    }
     // 重置時間只有 app-server／statusLine 那種結構化來源帶得出來。CLI 自己的狀態列只寫
     // 「還剩幾 %」，沒有時間——那不代表重置時間變成未知，所以沿用上一份讀數的。少了這一條，
     // pane 讀數一寫進來，量表上的「N 小時後重置」就會消失。
@@ -401,24 +392,6 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     quotas.insert(key.clone(), q.clone());
     drop(quotas);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": q})).await;
-}
-
-/// 這一份讀數是否**推翻**了它自己帶著的那張上限橫幅。
-///
-/// 條件要嚴：只有「結構化來源（app-server／statusLine，不是橫幅自己）」、「讀數比橫幅新」、
-/// 而且「5 小時窗還有餘裕」三個同時成立才算。CLI 印的橫幅是它當下拒絕你的理由，不能因為
-/// 量表看起來滿就當它沒發生過（那正是 limit_hit 這一格存在的原因）——但反過來，量表是**後來**
-/// 才讀到的、而且說還有得用時，那張橫幅就已經是歷史。
-fn reading_contradicts_limit_hit(q: &Quota) -> bool {
-    if q.source == "codex-limit-hit" {
-        return false;
-    }
-    let Some(hit) = q.limit_hit.as_ref() else { return false };
-    // 兩個時間都是 RFC3339 UTC，字典序就是時間序。
-    if q.updated_at <= hit.at {
-        return false;
-    }
-    q.five_hour.as_ref().is_some_and(|w| w.remaining_pct() > 0.0)
 }
 
 /// 這張「撞上限」已經過了它自己寫的恢復時間了嗎？沒寫時間的一律**不**過期——只能靠下一次
@@ -631,65 +604,6 @@ mod tests {
         assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00.000Z"));
     }
 
-    /// 2026-09-13 實況（AGM 補的證據）：22:21 那筆交辦根本沒送到 pane，daemon 卻在派送前置檢查
-    /// 就 park 了，帶的是 22:15 那張舊橫幅、resume_at 還是明天；同一時刻 app-server 說 5h 只用了
-    /// 21%、22:20 重置。更新的結構化讀數說帳號還有餘裕時，那張橫幅就該被清掉。
-    #[tokio::test]
-    async fn a_newer_reading_that_says_there_is_room_clears_the_banner() {
-        let app = crate::testing::env().await.app.clone();
-        let hit_at = "2026-09-13T14:15:30.000Z";
-        let mut blocked = codex_q("codex-limit-hit", None);
-        blocked.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
-        blocked.updated_at = hit_at.into();
-        blocked.limit_hit = Some(LimitHit {
-            message: "ERROR: You've hit your usage limit, or try again at 10:15 PM.".into(),
-            // 被解析成隔天的那個時間：只靠 `until` 過期，這一格會黏 24 小時。
-            until: Some("2026-09-14T14:15:00.000Z".into()),
-            at: hit_at.into(),
-        });
-        set(&app, LOCAL_HOST, "codex", blocked).await;
-        assert!(app.quotas.lock().await.get("codex").unwrap().limit_hit.is_some());
-
-        // 22:20 的 app-server 讀數：5h 用 21%、22:20 重置。
-        let mut fresh = codex_q("codex-app-server", None);
-        fresh.five_hour = Some(Window { used_pct: 21.0, resets_at: Some("2026-09-13T14:20:00.000Z".into()) });
-        fresh.updated_at = "2026-09-13T14:21:00.000Z".into();
-        set(&app, LOCAL_HOST, "codex", fresh).await;
-
-        let q = app.quotas.lock().await.get("codex").cloned().unwrap();
-        assert!(q.limit_hit.is_none(), "更新的讀數說還有餘裕，橫幅就是歷史了");
-    }
-
-    /// 但**同一份**橫幅讀數（source 就是 codex-limit-hit）不會自己把自己清掉，比橫幅舊的讀數
-    /// 也不算數——不然 CLI 才剛拒絕你，五分鐘前的一份快取就能把它蓋掉。
-    #[tokio::test]
-    async fn an_older_or_self_reported_reading_keeps_the_banner() {
-        let app = crate::testing::env().await.app.clone();
-        let hit = LimitHit {
-            message: "ERROR: You've hit your usage limit.".into(),
-            until: Some("2999-01-01T00:00:00.000Z".into()),
-            at: "2026-09-13T14:15:30.000Z".into(),
-        };
-        let mut blocked = codex_q("codex-limit-hit", Some(hit.clone()));
-        blocked.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
-        blocked.updated_at = "2026-09-13T14:15:30.000Z".into();
-        set(&app, LOCAL_HOST, "codex", blocked).await;
-
-        // 比橫幅舊的讀數：不算數。
-        let mut stale = codex_q("codex-app-server", None);
-        stale.five_hour = Some(Window { used_pct: 10.0, resets_at: None });
-        stale.updated_at = "2026-09-13T14:10:00.000Z".into();
-        set(&app, LOCAL_HOST, "codex", stale).await;
-        assert!(app.quotas.lock().await.get("codex").unwrap().limit_hit.is_some(), "舊讀數蓋不掉");
-
-        // 橫幅自己再寫一次（source=codex-limit-hit）：也不算「新讀數推翻它」。
-        let mut again = codex_q("codex-limit-hit", Some(hit));
-        again.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
-        again.updated_at = "2026-09-13T14:30:00.000Z".into();
-        set(&app, LOCAL_HOST, "codex", again).await;
-        assert!(app.quotas.lock().await.get("codex").unwrap().limit_hit.is_some());
-    }
-
     /// AGM 的條件：寫進去的 key 要跟 `limit_hit_for_bot` 的查法（`<kind>:<identity>` → 裸 kind）
     /// 對得起來，而且狀態列的讀數不能把 CLI 說的「撞上限」洗掉。
     #[tokio::test]
@@ -789,15 +703,28 @@ mod tests {
     #[tokio::test]
     async fn a_codex_limit_hit_outlives_the_app_server_poll() {
         let app = crate::testing::env().await.app.clone();
-        let soon = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
-        let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(soon), at: crate::db::now() };
-        set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
-        // 輪詢回來：桶子空的、而且它根本不知道有這回事。
-        set(&app, LOCAL_HOST, "codex", codex_q("codex-app-server", None)).await;
+        // 時間全部寫死：這個測試講的是「兩份讀數誰蓋掉誰」，不該跟著現在幾點變答案
+        // （2026-09-13 它 6 跑 2 敗——`db::now()` 有時候跨過一毫秒，就變成另一個情境）。
+        let hit = LimitHit {
+            message: "ERROR: You've hit your usage limit.".into(),
+            until: Some("2999-01-01T00:00:00.000Z".into()),
+            at: "2026-09-13T14:15:30.000Z".into(),
+        };
+        let mut blocked = codex_q("codex-limit-hit", Some(hit));
+        blocked.updated_at = "2026-09-13T14:15:30.000Z".into();
+        set(&app, LOCAL_HOST, "codex", blocked).await;
+        // 輪詢回來（比橫幅晚六分鐘）：桶子空的、而且它根本不知道有這回事。
+        let mut poll = codex_q("codex-app-server", None);
+        poll.updated_at = "2026-09-13T14:21:00.000Z".into();
+        set(&app, LOCAL_HOST, "codex", poll).await;
         let got = |app: &std::sync::Arc<crate::state::App>| {
             let app = app.clone();
             async move { app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap() }
         };
+        // 這是 2026-09-12 立下的那條不變量：codex 的 credits 用完時，5h／7d 兩條**速率**視窗可以
+        // 是滿的，app-server 也照實回報 0% 已用——唯一講出「現在收不下工作」的是 CLI 的橫幅。
+        // 所以後到的輪詢再怎麼說還有額度，都不會把它蓋掉；只有 `until` 到了、或下一回合真的跑完
+        // （`clear_limit_hit`）才算數。
         assert!(got(&app).await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
         // 一回合真的跑完就清掉。
         clear_limit_hit(&app, LOCAL_HOST, "codex").await;
