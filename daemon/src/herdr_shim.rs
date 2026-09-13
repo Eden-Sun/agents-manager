@@ -136,11 +136,19 @@ am_agent_prompt() {
     fi
     if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
         # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。
-        curl -s -m 2 -o /dev/null -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
+        _resp=$(curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
             -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
             --data-urlencode "bot_id=${AM_BOT_ID}" \
             --data-urlencode "to_agent=${_name}" \
-            --data-urlencode "text=$*" 2>/dev/null || true
+            --data-urlencode "text=$*" 2>/dev/null) || _resp=""
+        # 寫給 AGM 的申請 daemon 已經排進協調者的佇列（SPEC §18.15）：不再打進 AGM 的 pane，
+        # 否則同一句話會先燒一輪巡檢的回合。daemon 沒回應時照舊送（寧可多一回合，不能掉訊息）。
+        case "$_resp" in
+            *'"routed":'*)
+                printf 'agents-manager: 已排入 AGM 協調佇列，不直接打進 %s 的 pane：%s\n' "$_name" "$_resp" >&2
+                exit 0
+                ;;
+        esac
     fi
     exec "$AM_HERDR" agent prompt "$_name" "$@"
 }
@@ -298,6 +306,31 @@ mod tests {
         assert!(!err.contains("已改名"), "{err}");
         let (out, _) = s.run(&env, &["agent", "prompt", "review", "hi"]);
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "hi"]);
+    }
+
+    /// daemon 說「排進協調佇列了」：不再轉給真的 herdr（那會打進 AGM 的 pane、燒巡檢一回合）。
+    /// daemon 沒說（一般 bot、舊部署、daemon 不在）就照舊轉發。
+    #[test]
+    fn a_request_the_daemon_queued_for_agm_is_not_typed_into_its_pane() {
+        let s = Sandbox::new();
+        let fake_curl = s.dir.join("real").join("curl");
+        std::fs::write(&fake_curl, "#!/bin/sh\nprintf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let mut env = base.to_vec();
+        env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e1"}"#));
+        let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+        assert!(out.is_empty(), "真的 herdr 沒被叫到：{out:?}");
+        assert!(err.contains("協調佇列") && err.contains("e1"), "{err}");
+
+        let mut env = base.to_vec();
+        env.push(("AM_TEST_CURL_REPLY", "{}"));
+        let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
     }
 
     #[test]

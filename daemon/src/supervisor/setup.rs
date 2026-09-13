@@ -128,6 +128,10 @@ fn runtime_json(port: u16, bot_id: &str, data_dir: &str) -> Value {
         // The CLI also accepts `bot_id`, which an earlier draft wrote. Both are emitted so a
         // deployment cannot be broken by whichever half is upgraded first.
         "bot_id": bot_id,
+        // 雙角色（SPEC §18.15）：這個目錄是巡檢的。`bin/agm` 用它決定預設看哪個角色的 inbox、
+        // 回報時以誰的名義；真正的身分驗證靠 pane 環境裡的 bot token，不靠這個字串。
+        "role": "patrol",
+        "self_bot_id": bot_id,
         "data_dir": data_dir,
         "supervisor_id": store::SUPERVISOR_ID,
         "remote_name": REMOTE_NAME,
@@ -325,6 +329,8 @@ mod tests {
         assert_eq!(v["daemon_url"], "http://127.0.0.1:7788");
         assert_eq!(v["manager_bot_id"], "botULID");
         assert_eq!(v["bot_id"], "botULID", "the older key stays, so either half can upgrade first");
+        assert_eq!(v["role"], "patrol");
+        assert_eq!(v["self_bot_id"], "botULID");
         let text = v.to_string().to_lowercase();
         assert!(!text.contains("token"), "no token, and no field that could hold one: {text}");
     }

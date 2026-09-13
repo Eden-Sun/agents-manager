@@ -27,6 +27,15 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     } else if supervisor_status == "not_configured" || supervisor_status == "stopped" || !app.connected.load(std::sync::atomic::Ordering::SeqCst) {
         "degraded"
     } else { "healthy" };
+    // 協調者自己一格，跟巡檢分開：協調者等額度或倒了，不是「AGM 不能用」——使用者入口還在。
+    let responder = supervisor.get("responder").cloned().unwrap_or(Value::Null);
+    let responder_status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
+    let responder_severity = match responder_status {
+        "not_configured" | "idle" | "busy" | "starting" => "healthy",
+        "waiting_quota" => "degraded",
+        _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
+        _ => "healthy",
+    };
     let hosts = app.hosts.list().await;
     let disconnected_hosts = hosts.iter().filter(|h| !h.is_connected()).count();
     let system = crate::supervisor::incidents::system_health(app).await;
@@ -46,6 +55,12 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
             "daemon_connected": app.connected.load(std::sync::atomic::Ordering::SeqCst),
         },
         "system_health": system,
+        "responder_health": {
+            "status": responder_severity,
+            "responder_status": responder_status,
+            "inbox_open": responder.get("inbox_open"),
+            "retry_at": responder.pointer("/stats/notify_next_at"),
+        },
         "daemon": {"connected": app.connected.load(std::sync::atomic::Ordering::SeqCst)},
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},

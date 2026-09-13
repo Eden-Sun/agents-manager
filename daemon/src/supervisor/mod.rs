@@ -5,6 +5,7 @@
 //! The model understands and decides. The daemon persists, retries, watches and switches.
 
 pub mod api;
+pub mod bot_requests;
 pub mod controller;
 pub mod health;
 pub mod incidents;
@@ -12,6 +13,9 @@ pub mod maintenance;
 pub mod persona;
 pub mod policy;
 pub mod remote;
+pub mod responder;
+pub mod responder_api;
+pub mod roles;
 pub mod setup;
 pub mod store;
 pub mod watchdog;
@@ -151,6 +155,11 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "remote": remote::status(app).await,
         "pending_count": store::pending_count(&app.db).await.map_err(up)?,
         "assignments": assignments.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
+        // 雙角色（SPEC §18.15）。上面那些欄位一直是巡檢的，舊的呼叫端照讀不受影響。
+        "role": roles::Role::Patrol.as_str(),
+        "remote_provider": roles::Role::Patrol.as_str(),
+        "stats": roles::get(&app.db, roles::Role::Patrol).await.map_err(up)?.stats_json(),
+        "responder": responder::status_json(app).await?,
     }))
 }
 
@@ -173,6 +182,8 @@ pub async fn assign(
     expects_review: bool,
     // 群組任務：(mission_id, role)。呼叫端已驗證過。
     mission: Option<(&str, &str)>,
+    // 回報給哪個 AGM 角色驗收；`None` = 協調者（roles.rs 的預設）。
+    review_role: Option<roles::Role>,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -205,7 +216,7 @@ pub async fn assign(
     let manager_id = sup.bot_id.clone().ok_or_else(|| {
         LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"}))
     })?;
-    if target_bot_id == manager_id {
+    if target_bot_id == manager_id || roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)?.is_some() {
         return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
     }
     crate::db::bot(&app.db, target_bot_id)
@@ -244,6 +255,10 @@ pub async fn assign(
     // 派送之前就要掛上任務：派送當下撞到額度時，controller 要看得到這件屬於哪個任務、什麼角色。
     if let Some((mission_id, role)) = mission {
         store::set_mission_link(&app.db, &a.id, mission_id, role).await.map_err(up)?;
+    }
+    // 同樣要在派送之前：派工訊息標成哪個角色送的，看的就是這一欄。
+    if let Some(r) = review_role {
+        store::set_review_role(&app.db, &a.id, r.as_str()).await.map_err(up)?;
     }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
@@ -302,8 +317,7 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// Shares its rules with [`assign`]: the manager may not assign to itself, the bot has to exist
 /// and not be deleted.
 pub async fn check_assignable(app: &Arc<App>, target_bot_id: &str) -> Result<(), LcError> {
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    if sup.bot_id.as_deref() == Some(target_bot_id) {
+    if roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)?.is_some() {
         return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
     }
     crate::db::bot(&app.db, target_bot_id)
@@ -329,13 +343,20 @@ async fn source_of(
     source_turn_id: Option<&str>,
     text: &str,
 ) -> Result<(&'static str, Option<String>, String), LcError> {
+    // 兩個 AGM 角色的回合都算：協調者依 bot 申請派工時，來源就是它自己的那一回合。
+    let responder = roles::responder_bot(&app.db).await.map_err(up)?.map(|b| b.id);
     let conv = crate::db::conversation_id(&app.db, manager_id).await.map_err(up)?;
+    let responder_conv = match responder.as_deref() {
+        Some(id) => Some(crate::db::conversation_id(&app.db, id).await.map_err(up)?),
+        None => None,
+    };
     let turn_id = match source_turn_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(t) => {
             let owned: Option<String> =
-                sqlx::query_scalar("SELECT id FROM turns WHERE id=? AND conversation_id=?")
+                sqlx::query_scalar("SELECT id FROM turns WHERE id=? AND (conversation_id=? OR conversation_id=?)")
                     .bind(t)
                     .bind(&conv)
+                    .bind(responder_conv.as_deref().unwrap_or(&conv))
                     .fetch_optional(&app.db)
                     .await
                     .map_err(up)?;
@@ -345,11 +366,16 @@ async fn source_of(
             Some(t.to_string())
         }
         None => {
-            let run = crate::db::active_run(&app.db, manager_id).await.map_err(up)?;
-            match run {
-                Some(r) => crate::db::in_flight_turn(&app.db, &r.id).await.map_err(up)?.map(|t| t.id),
-                None => None,
+            let mut found = None;
+            for id in std::iter::once(manager_id).chain(responder.as_deref()) {
+                if let Some(r) = crate::db::active_run(&app.db, id).await.map_err(up)? {
+                    if let Some(t) = crate::db::in_flight_turn(&app.db, &r.id).await.map_err(up)? {
+                        found = Some(t.id);
+                        break;
+                    }
+                }
             }
+            found
         }
     };
     let Some(turn_id) = turn_id else {
@@ -378,6 +404,7 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
     let projects = crate::db::live_projects(&app.db).await.map_err(up)?;
     let bots = crate::db::live_bots(&app.db).await.map_err(up)?;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
+    let responder_id = roles::get(&app.db, roles::Role::Responder).await.map_err(up)?.bot_id;
     let hosts: std::collections::HashMap<String, String> =
         projects.iter().map(|p| (p.id.clone(), p.host.clone())).collect();
     let mut connected: std::collections::HashSet<String> = Default::default();
@@ -408,7 +435,9 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
             "identity": b.identity,
             "managed_by": b.managed_by,
             "parent_bot_id": b.parent_bot_id,
-            "is_supervisor": Some(&b.id) == sup.bot_id.as_ref(),
+            "is_supervisor": Some(&b.id) == sup.bot_id.as_ref() || Some(&b.id) == responder_id.as_ref(),
+            "supervisor_role": if Some(&b.id) == sup.bot_id.as_ref() { Some("patrol") }
+                else if Some(&b.id) == responder_id.as_ref() { Some("responder") } else { None },
             "cwd": b.cwd,
             "host": hosts.get(&b.project_id).cloned(),
             "host_connected": hosts.get(&b.project_id).map(|h| connected.contains(h)),

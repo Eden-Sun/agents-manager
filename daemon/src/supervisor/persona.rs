@@ -39,12 +39,13 @@ pub fn hash(text: &str) -> String {
 /// question from whether it is urgent enough to restart anything.
 ///
 /// Kept in sync with the real `include_str!` sites by the test below.
-pub const BUILD_INPUTS: [&str; 6] = [
+pub const BUILD_INPUTS: [&str; 7] = [
     "daemon",
     "web",
     "Cargo.toml",
     "Cargo.lock",
     "docs/goals/agm-supervisor-persona.md",
+    "docs/goals/agm-responder-persona.md",
     "scripts/agm.py",
 ];
 
@@ -56,6 +57,7 @@ pub fn build_inputs_json() -> Value {
         // ones: a change here means the *binary* is stale, not that anything must restart now.
         "embedded": [
             {"path": "docs/goals/agm-supervisor-persona.md", "symbol": "supervisor::setup::PERSONA_DOC"},
+            {"path": "docs/goals/agm-responder-persona.md", "symbol": "supervisor::responder::PERSONA_DOC"},
             {"path": "scripts/agm.py", "symbol": "supervisor::setup::AGM_CLI"},
         ],
         "note": "changes here mean the release binary is behind; when to rebuild or restart is AGM's call",
