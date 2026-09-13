@@ -398,6 +398,10 @@ async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str)
 /// 規則：那個回合**沒有任何 assistant 訊息**時，hook 的回覆是我們唯一有的答案，寫進去並把
 /// 狀態修正成 `completed`（hook 是比畫面更硬的證據）。已經有回覆的照舊丟——那才是這條分支
 /// 原本要防的「一個回合兩則回覆」。
+///
+/// 為什麼這個判斷不會把 c1526f7 補起來的洞再打開：`try_fallback` 的「認領回合」與「寫回覆」
+/// 在同一個交易裡，而它跟這裡都在同一把 bot lock 下跑（poller 那條路 c1526f7 已經補上鎖），
+/// 所以不存在「回合關了、回覆還在半路」的中間狀態可以被這裡看見。這裡讀到零則，就真的是零則。
 async fn fill_or_drop_late_hook(
     app: &Arc<App>,
     turn: &db::Turn,
