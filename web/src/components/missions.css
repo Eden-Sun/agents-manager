@@ -1,0 +1,525 @@
+/* 群組任務（MissionsBar / MissionOptions，docs/goals/agm-missions.md §5、§11）。 */
+
+/*
+ * 任務條在輸入框正上方。它自己收得住高度——任務卡是「要動手的東西」，不能因為開了三個任務
+ * 就把訊息列擠沒（同 blocked 選單那條的教訓：沒有捲動容器就是滑不動）。
+ */
+.missions-bar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 46vh;
+  max-height: 46svh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.mission-more {
+  align-self: flex-start;
+}
+
+/* ---- 進行中的一張卡 */
+
+.mission-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+/* 在等使用者回答的那張要一眼認出來：這是整個群組裡唯一卡住的東西。 */
+.mission-card.paused {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.mission-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mission-phase {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.mission-phase.paused {
+  background: var(--warn);
+  color: #fff;
+}
+
+.mission-phase.done {
+  background: var(--bg-hover);
+  color: var(--status-ok);
+}
+
+.mission-text {
+  flex: 1 1 12em;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.mission-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mission-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.mission-tag.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.mission-tag.ok {
+  border-color: var(--status-ok);
+  color: var(--status-ok);
+}
+
+/* 五段進度。用的是「點＋文字」而不是一條填色的 bar：填色說不出現在停在哪一段，
+   而停在哪一段正是使用者要看的（尤其停下來問人的時候）。 */
+.mission-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mission-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mission-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+}
+
+.mission-step.past .mission-dot {
+  background: var(--status-ok);
+  border-color: var(--status-ok);
+}
+
+.mission-step.past {
+  color: var(--text);
+}
+
+.mission-step.at {
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+.mission-step.at .mission-dot {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 停下來的那一格：實心換成空心加粗邊，跟「正在跑」分得開。 */
+.mission-step.stopped {
+  color: var(--warn);
+}
+
+.mission-step.stopped .mission-dot {
+  background: transparent;
+  border: 2px solid var(--warn);
+}
+
+.mission-actors,
+.mission-handoffs,
+.mission-evidence,
+.mission-resets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.mission-actors li,
+.mission-handoffs li,
+.mission-evidence li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mission-role {
+  flex: none;
+  min-width: 4.5em;
+  color: var(--text-dim);
+}
+
+.mission-who {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.mission-evidence code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.mission-latest {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.mission-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---- 停下來問人 */
+
+.mission-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.mission-ask-why,
+.mission-ask-q {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.mission-ask-q {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.mission-ask-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.mission-answer {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.mission-send {
+  flex: none;
+  min-height: 44px;
+}
+
+.mission-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.mission-actions .danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ---- 已完成任務（D1：一份可回顧的完成清單） */
+
+.mission-done {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mission-done-head {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mission-done-head:hover {
+  color: var(--text);
+}
+
+.mission-done-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mission-done-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mission-done-row-head:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.mission-done-row.cancelled .mission-done-text {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+.mission-done-mark {
+  flex: none;
+  color: var(--status-ok);
+}
+
+.mission-done-row.cancelled .mission-done-mark {
+  color: var(--text-dim);
+}
+
+.mission-done-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-done-when {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mission-done-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 8px 8px 30px;
+}
+
+.mission-summary {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 輸入框的「交給 AGM」 */
+
+/* 交給 AGM 時收件者 chip 不適用（AGM 不是專案成員）。`.recipient-row` 自己是 flex，
+   `hidden` 屬性壓不過它，要明講。 */
+.recipient-row[hidden] {
+  display: none;
+}
+
+.agm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agm-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.agm-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.agm-toggle.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+.agm-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.send-btn.agm {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.mission-opts-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.mo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mo-label {
+  flex: none;
+  min-width: 5.5em;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.mo-choices {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* 選到的那顆不只換底色，字也變粗——這三個選項會改變任務怎麼跑，不能只靠顏色分辨。 */
+.mo-choice {
+  min-height: 30px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mo-choice:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.mo-choice.at {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 650;
+}
+
+.mo-choice:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---- 手機：選項一行一組，觸控目標拉到 44px */
+
+@media (width <= 640px) {
+  .missions-bar {
+    padding: 8px 12px;
+    max-height: 52svh;
+  }
+
+  .mo-row {
+    align-items: flex-start;
+  }
+
+  .mo-label {
+    min-width: 100%;
+  }
+
+  .mo-choice,
+  .agm-toggle {
+    min-height: 40px;
+    padding: 6px 12px;
+  }
+
+  .mission-ask-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mission-send {
+    width: 100%;
+  }
+
+  .mission-actions button {
+    min-height: 40px;
+    flex: 1 1 0;
+  }
+}

@@ -526,6 +526,48 @@ const REPLIES = [
   '```\n1\n```',
 ]
 
+interface MockMission {
+  id: string
+  project_id: string
+  client_request_id: string
+  text: string
+  delivery_mode: 'push_main' | 'pr'
+  executor_kind: BotKind
+  on_5h_limit: 'wait' | 'switch'
+  max_rounds: number
+  rounds_used: number
+  paused_reason: string | null
+  paused_detail: string | null
+  result_summary: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  cancelled_at: string | null
+}
+
+interface MockMissionAssignment {
+  id: string
+  mission_id: string
+  role: 'executor' | 'reviewer' | 'verifier'
+  status: string
+  target_bot_id: string | null
+  turn_status: string | null
+  turn_error: string | null
+  follow_up_of: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+interface MockMissionEvent {
+  id: string
+  mission_id: string
+  kind: string
+  text: string
+  relay_from: string | null
+  payload: Rec | null
+  created_at: string
+}
+
 export class MockTransport implements Transport {
   readonly mock = true
 
@@ -588,6 +630,10 @@ export class MockTransport implements Transport {
   private runs: MockRun[] = []
   private turns: MockTurn[] = []
   private messages: MockMessage[] = []
+  /** 群組任務（docs/API.md「群組任務」）。mock 只做狀態與事件，不真的派 bot。 */
+  private missions: MockMission[] = []
+  private missionEvents: MockMissionEvent[] = []
+  private missionAssignments: MockMissionAssignment[] = []
   private teams: MockTeam[] = []
   private teamTasks: MockTeamTask[] = []
   private teamEvents: MockTeamEvent[] = []
@@ -600,6 +646,9 @@ export class MockTransport implements Transport {
 
   /** Dev helper：模擬「舊 daemon 完全沒有 team 端點」（`__amMock.teamsOff()`）。 */
   private teamsDisabled = false
+
+  /** Dev helper：模擬「舊 daemon 沒有 `/api/missions`」（`__amMock.missionsOff()`）。 */
+  private missionsDisabled = false
 
   /** Dev helper：模擬「daemon 還沒有 `pane/move-to-tab`」（`__amMock.paneMoveOff()`）。 */
   private paneMoveDisabled = false
@@ -638,6 +687,7 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     this.projects.push(p)
+    this.seedMissions(p.id)
     this.bots.push({
       id: ulid('bot'),
       project_id: p.id,
@@ -836,6 +886,20 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'chat') return this.projectChat(seg[1], b)
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'teams' && !this.teamsDisabled) {
       return this.createTeam(seg[1], b)
+    }
+
+    // ---- 群組任務（docs/API.md「群組任務」）------------------------------
+    if (seg[0] === 'projects' && seg[2] === 'missions' && !this.missionsDisabled) {
+      if (method === 'POST') return this.createMission(seg[1], b)
+      if (method === 'GET') return this.listMissions(seg[1], q.get('status') ?? 'all')
+    }
+    if (seg[0] === 'missions' && seg.length >= 2 && !this.missionsDisabled) {
+      const id = seg[1]
+      if (method === 'GET' && seg.length === 2) return this.missionDetail(id)
+      if (method === 'POST' && seg[2] === 'events') return this.addMissionEvent(id, b)
+      if (method === 'POST' && (seg[2] === 'pause' || seg[2] === 'resume' || seg[2] === 'cancel')) {
+        return this.controlMission(id, seg[2], b)
+      }
     }
 
     // ---- SPEC-team §10 -------------------------------------------------
@@ -1478,6 +1542,236 @@ export class MockTransport implements Transport {
 
   hostNames(): string[] {
     return this.hosts.map((h) => h.name)
+  }
+
+  // ---- 群組任務 -------------------------------------------------------
+
+  private missionJson(m: MockMission): Rec {
+    const status = m.cancelled_at ? 'cancelled' : m.completed_at ? 'done' : m.paused_reason ? 'paused' : 'open'
+    // P1b：`phase` 從交辦推導（最新一件還開著的那件的 role）。
+    const mine = this.missionAssignments.filter((a) => a.mission_id === m.id)
+    const openOne = [...mine].reverse().find((a) => !a.completed_at)
+    const phase =
+      status !== 'open'
+        ? status
+        : openOne
+          ? openOne.status === 'quota_blocked'
+            ? 'waiting_quota'
+            : openOne.role === 'reviewer'
+              ? 'reviewing'
+              : openOne.role === 'verifier'
+                ? 'verifying'
+                : 'executing'
+          : mine.length
+            ? 'awaiting_agm'
+            : 'planning'
+    return { ...m, status, phase }
+  }
+
+  private missionAssignment(missionId: string, over: Partial<MockMissionAssignment>): MockMissionAssignment {
+    const a: MockMissionAssignment = {
+      id: ulid('asg'),
+      mission_id: missionId,
+      role: 'executor',
+      status: 'completed',
+      target_bot_id: null,
+      turn_status: null,
+      turn_error: null,
+      follow_up_of: null,
+      created_at: now(),
+      completed_at: now(),
+      ...over,
+    }
+    this.missionAssignments.push(a)
+    return a
+  }
+
+  private missionEvent(missionId: string, kind: string, text: string, payload: Rec | null = null, relayFrom: string | null = null) {
+    const e: MockMissionEvent = {
+      id: ulid('mev'),
+      mission_id: missionId,
+      kind,
+      text,
+      relay_from: relayFrom,
+      payload,
+      created_at: now(),
+    }
+    this.missionEvents.push(e)
+    return e
+  }
+
+  private touchMission(m: MockMission) {
+    m.updated_at = now()
+    this.emit('mission_updated', {
+      mission_id: m.id,
+      project_id: m.project_id,
+      status: this.missionJson(m).status,
+    })
+  }
+
+  private createMission(projectId: string, b: Rec): Rec {
+    const reqId = String(b.client_request_id ?? '')
+    const same = reqId ? this.missions.find((m) => m.client_request_id === reqId) : undefined
+    if (same) return { mission: this.missionJson(same), created: false }
+    const m: MockMission = {
+      id: ulid('mis'),
+      project_id: projectId,
+      client_request_id: reqId,
+      text: String(b.text ?? ''),
+      delivery_mode: b.delivery_mode === 'push_main' ? 'push_main' : 'pr',
+      executor_kind: (b.executor_kind === 'codex' || b.executor_kind === 'grok' ? b.executor_kind : 'claude') as BotKind,
+      on_5h_limit: b.on_5h_limit === 'switch' ? 'switch' : 'wait',
+      max_rounds: typeof b.max_rounds === 'number' ? b.max_rounds : 2,
+      rounds_used: 0,
+      paused_reason: null,
+      paused_detail: null,
+      result_summary: null,
+      created_at: now(),
+      updated_at: now(),
+      completed_at: null,
+      cancelled_at: null,
+    }
+    this.missions.unshift(m)
+    this.missionEvent(m.id, 'instruction', m.text)
+    this.touchMission(m)
+    return { mission: this.missionJson(m), created: true }
+  }
+
+  private listMissions(projectId: string, status: string): Rec {
+    const all = this.missions.filter((m) => m.project_id === projectId)
+    const keep = all.filter((m) => {
+      const s = this.missionJson(m).status
+      return status === 'all' || s === status || (status === 'open' && s === 'paused')
+    })
+    return { project_id: projectId, missions: keep.map((m) => this.missionJson(m)) }
+  }
+
+  private missionDetail(id: string): Rec {
+    const m = this.missions.find((x) => x.id === id)
+    if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    return {
+      ...this.missionJson(m),
+      events: this.missionEvents.filter((e) => e.mission_id === id),
+      assignments: this.missionAssignments.filter((a) => a.mission_id === id),
+    }
+  }
+
+  private addMissionEvent(id: string, b: Rec): Rec {
+    const m = this.missions.find((x) => x.id === id)
+    if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    const e = this.missionEvent(
+      id,
+      String(b.kind ?? 'note'),
+      String(b.text ?? ''),
+      (b.payload ?? null) as Rec | null,
+      b.relay_from ? String(b.relay_from) : null,
+    )
+    this.touchMission(m)
+    return { event: e }
+  }
+
+  private controlMission(id: string, action: 'pause' | 'resume' | 'cancel', b: Rec): Rec {
+    const m = this.missions.find((x) => x.id === id)
+    if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
+    if (m.completed_at || m.cancelled_at) throw new ApiError(409, { error: 'already_closed' }, 'closed')
+    if (action === 'pause') {
+      m.paused_reason = String(b.reason ?? 'manual')
+      m.paused_detail = b.detail ? String(b.detail) : null
+      this.missionEvent(id, 'paused', m.paused_detail ?? '已暫停', null, 'daemon')
+    }
+    if (action === 'resume') {
+      m.paused_reason = null
+      m.paused_detail = null
+      this.missionEvent(id, 'resumed', '繼續', null, 'daemon')
+    }
+    if (action === 'cancel') {
+      m.cancelled_at = now()
+      this.missionEvent(id, 'cancelled', '已取消', null, 'daemon')
+    }
+    this.touchMission(m)
+    return { mission: this.missionJson(m) }
+  }
+
+  /**
+   * 種三種任務：跑到一半、停下來問人、已完成。三種都要有畫面才看得出卡片對不對
+   * （P1b 還沒落地，角色與撞限換手是靠事件 payload 帶的，這裡照 API.md 的形狀塞）。
+   */
+  private seedMissions(projectId: string) {
+    const mk = (over: Partial<MockMission>): MockMission => ({
+      id: ulid('mis'),
+      project_id: projectId,
+      client_request_id: ulid('req'),
+      text: '',
+      delivery_mode: 'pr',
+      executor_kind: 'claude',
+      on_5h_limit: 'wait',
+      max_rounds: 2,
+      rounds_used: 0,
+      paused_reason: null,
+      paused_detail: null,
+      result_summary: null,
+      created_at: now(),
+      updated_at: now(),
+      completed_at: null,
+      cancelled_at: null,
+      ...over,
+    })
+
+    const running = mk({ text: '把設定頁的錯字修掉，順便補一個 tsc 的 CI 檢查', delivery_mode: 'push_main', rounds_used: 1 })
+    this.missions.push(running)
+    this.missionEvent(running.id, 'instruction', running.text)
+    this.missionEvent(running.id, 'report', '拆成兩塊：錯字（4 處）與 CI workflow', { role: 'executor', bot: 'mission-exec', identity: 'cc2', model: 'opus' }, 'bot_exec')
+    this.missionEvent(running.id, 'note', 'cc2 的 5h 桶撞限，換 cc1 接手（同一個 worktree、新 session）', { handoff: true, reason: 'limit_hit', from: 'cc2', to: 'cc1' }, 'daemon')
+    this.missionEvent(running.id, 'report', '錯字改好了，CI workflow 還在寫', { role: 'executor', bot: 'mission-exec-2', identity: 'cc1', model: 'opus' }, 'bot_exec2')
+    this.missionEvent(running.id, 'report', 'changes：workflow 少了 bun install 的快取', { role: 'reviewer', bot: 'mission-rev', identity: 'cc0' }, 'bot_rev')
+    this.missionEvent(running.id, 'round', 'reviewer 退回一次', null, 'daemon')
+    const first = this.missionAssignment(running.id, {
+      role: 'executor',
+      target_bot_id: 'mission-exec',
+      status: 'failed',
+      turn_status: 'identity_switch',
+      turn_error: "You've hit your usage limit",
+    })
+    this.missionAssignment(running.id, { role: 'executor', target_bot_id: 'mission-exec-2', follow_up_of: first.id })
+    this.missionAssignment(running.id, {
+      role: 'reviewer',
+      target_bot_id: 'mission-rev',
+      status: 'delivered',
+      completed_at: null,
+    })
+
+    const asking = mk({
+      text: '把 blocked 選單那幾個元件的測試補起來',
+      paused_reason: 'no_fable_for_verifier',
+      paused_detail: '三個身分的 Fable 週桶都見底了',
+    })
+    this.missions.push(asking)
+    this.missionEvent(asking.id, 'instruction', asking.text)
+    this.missionEvent(asking.id, 'report', '補了 12 個測試，tsc 與 lint 都過', { role: 'executor', bot: 'mission-exec-3', identity: 'cc2', model: 'opus' }, 'bot_exec3')
+    this.missionEvent(
+      asking.id,
+      'paused',
+      '沒有身分的 Fable 額度可以當驗證者。要等額度回來，還是這次先不跑獨立驗證？',
+      { resets: [{ identity: 'cc2', resets_at: inHours(9) }, { identity: 'cc1', resets_at: inHours(31) }] },
+      'daemon',
+    )
+    this.missionAssignment(asking.id, { role: 'executor', target_bot_id: 'mission-exec-3' })
+
+    const done = mk({
+      text: '群組訊息的時間戳改成本地時區',
+      completed_at: now(),
+      result_summary: '改了 3 個檔案，時間戳統一走 Intl；驗證者跑過 tsc / oxlint / build 與 390px 截圖。',
+    })
+    this.missions.push(done)
+    this.missionEvent(done.id, 'instruction', done.text)
+    this.missionEvent(done.id, 'report', '改好了', { role: 'executor', bot: 'mission-exec-4', identity: 'cc2', model: 'opus' }, 'bot_exec4')
+    this.missionEvent(done.id, 'report', 'approve', { role: 'reviewer', bot: 'mission-rev-2', identity: 'cc1' }, 'bot_rev2')
+    this.missionEvent(done.id, 'verified', 'tsc 0 錯、oxlint 0 新警告、build 過、390px 截圖 2 張', { role: 'verifier', bot: 'mission-ver', identity: 'cc0', model: 'fable' }, 'bot_ver')
+    this.missionEvent(done.id, 'delivered', '已開 PR', { mode: 'pr', branch: 'mission/demo', url: 'https://github.com/edansun/agents-manager/pull/42' }, 'daemon')
+    this.missionEvent(done.id, 'completed', done.result_summary ?? '', null, 'daemon')
+    this.missionAssignment(done.id, { role: 'executor', target_bot_id: 'mission-exec-4' })
+    this.missionAssignment(done.id, { role: 'reviewer', target_bot_id: 'mission-rev-2' })
+    this.missionAssignment(done.id, { role: 'verifier', target_bot_id: 'mission-ver' })
   }
 
   private emit(type: string, data: unknown) {

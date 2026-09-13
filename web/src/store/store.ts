@@ -33,7 +33,7 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamRoleKey, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, NewTeamInput, PatchBotInput, PatchProjectInput, PatchTeamInput, Project, QuotaMap, Run, Team, TeamBranchDisposal, TeamControlAction, TeamDetail, TeamEvent, TeamRoleKey, TeamTaskDecision, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, TEAM_EVENT_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -404,6 +404,21 @@ export interface StoreState {
   /** TeamLaunchPanel（右側暫時性 sheet）；null = 未開啟。 */
   teamLaunch: { projectId: string; issueNumber: number; repo: string } | null
 
+  // ---- 群組任務（mission，docs/goals/agm-missions.md §5）
+  /** 每個 project 的任務清單（新的在前）。 */
+  missions: Record<string, Mission[]>
+  /** 展開過的任務：任務本身＋事件串。 */
+  missionDetail: Record<string, MissionDetail>
+  /** false = 這個 daemon 沒有 `/api/missions`（舊版）。同 `teamsSupported`：入口靜默消失。 */
+  missionsSupported: boolean
+  loadMissions: (projectId: string) => Promise<void>
+  loadMission: (missionId: string) => Promise<void>
+  /** 群組「交給 AGM」：成功回任務 id。 */
+  startMission: (projectId: string, input: NewMissionInput) => Promise<string | null>
+  controlMission: (missionId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
+  /** 任務停下來問人時，使用者在卡片上回答：記一則 `note`（使用者本人）再 resume。 */
+  answerMission: (missionId: string, text: string) => Promise<boolean>
+
   /**
    * 非 null = 主面板顯示 `HostShellPanel`（與上面每一個選取互斥，而且優先）。
    *
@@ -750,6 +765,9 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedTeamId: initialSelection.teamId,
   teamsSupported: true,
   teamLaunch: null,
+  missions: {},
+  missionDetail: {},
+  missionsSupported: true,
   shellView: initialShellView,
   hostShellSupported: true,
 
@@ -1873,6 +1891,86 @@ export const useStore = create<StoreState>((set, get) => ({
 
   closeTeamLaunch: () => set({ teamLaunch: null }),
 
+  // ---- 群組任務（mission）
+  async loadMissions(projectId) {
+    if (!get().missionsSupported) return
+    try {
+      const list = await api.fetchMissions(projectId)
+      set((s) => ({ missions: { ...s.missions, [projectId]: list } }))
+    } catch (e) {
+      if (api.isMissionsUnsupported(e)) {
+        set({ missionsSupported: false })
+        return
+      }
+      get().notify('error', `載入任務失敗：${errText(e)}`)
+    }
+  },
+
+  async loadMission(missionId) {
+    if (!get().missionsSupported) return
+    try {
+      const detail = await api.fetchMission(missionId)
+      if (!detail) return
+      set((s) => ({
+        missionDetail: { ...s.missionDetail, [missionId]: detail },
+        missions: mergeMission(s.missions, detail),
+      }))
+    } catch (e) {
+      if (api.isMissionsUnsupported(e)) {
+        set({ missionsSupported: false })
+        return
+      }
+      get().notify('error', `載入任務失敗：${errText(e)}`)
+    }
+  },
+
+  async startMission(projectId, input) {
+    try {
+      const { mission, created } = await api.createMission(projectId, input)
+      if (!mission) return null
+      set((s) => ({ missions: mergeMission(s.missions, mission) }))
+      // 同一個 client_request_id 重送會回同一筆（`created:false`），不要再提示一次。
+      if (created) get().notify('info', '已交給 AGM，任務卡會顯示進度')
+      return mission.id
+    } catch (e) {
+      if (api.isMissionsUnsupported(e)) {
+        set({ missionsSupported: false })
+        get().notify('error', '這個 daemon 還沒有群組任務（需要更新）')
+        return null
+      }
+      const reason = api.missionRejectReason(e)
+      get().notify(
+        'error',
+        reason === 'remote_not_supported' ? '群組任務目前只支援本機專案' : `交給 AGM 失敗：${errText(e)}`,
+      )
+      return null
+    }
+  },
+
+  async controlMission(missionId, action) {
+    try {
+      const mission = await api.controlMission(missionId, action)
+      if (mission) set((s) => ({ missions: mergeMission(s.missions, mission) }))
+      await get().loadMission(missionId)
+    } catch (e) {
+      get().notify('error', `任務操作失敗：${errText(e)}`)
+    }
+  },
+
+  async answerMission(missionId, text) {
+    try {
+      // 先把回答記進事件串（不帶 relay_from ＝ 使用者本人），再放行——AGM 接回去時
+      // 讀得到這句話。順序反過來的話 AGM 可能先醒來卻看不到答案。
+      await api.addMissionEvent(missionId, { kind: 'note', text })
+      await api.controlMission(missionId, 'resume')
+      await get().loadMission(missionId)
+      return true
+    } catch (e) {
+      get().notify('error', `回覆任務失敗：${errText(e)}`)
+      return false
+    }
+  },
+
   async createTeam(projectId, input) {
     try {
       const id = await api.createTeam(projectId, input)
@@ -2115,6 +2213,18 @@ function forgetTeamPatch(s: StoreState, teamId: string, dropRow: boolean): Parti
     drafts,
     draftCursors,
   }
+}
+
+/**
+ * 把一筆任務併回它那個 project 的清單（新的在前）。
+ *
+ * 清單還沒載過就不要憑一筆建出半份清單——那會讓「已完成任務」看起來只有一筆。
+ */
+function mergeMission(map: Record<string, Mission[]>, mission: Mission): Record<string, Mission[]> {
+  const list = map[mission.project_id]
+  if (!list) return map
+  const next = [mission, ...list.filter((m) => m.id !== mission.id)]
+  return { ...map, [mission.project_id]: next }
 }
 
 /** `TeamDetail` 的 `Team` 部分（`teams` map 只存共同欄位，細節留在 `teamDetail`）。 */
@@ -2556,6 +2666,20 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       })
       return
     }
+    case 'mission_updated': {
+      // 只帶 id 與狀態（API.md），細節重抓一次；清單還沒載過就不主動去載（使用者沒在看）。
+      const d = isRec(frame.data) ? frame.data : {}
+      const missionId = str(d.mission_id)
+      const projectId = str(d.project_id)
+      if (!missionId) return null
+      queueMicrotask(() => {
+        const s = useStore.getState()
+        if (s.missionDetail[missionId]) void s.loadMission(missionId)
+        if (projectId && s.missions[projectId]) void s.loadMissions(projectId)
+      })
+      return null
+    }
+
     case 'team_event': {
       if (!isRec(data)) return
       const teamId = str(pick(data, 'team_id'))

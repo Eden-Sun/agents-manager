@@ -1409,3 +1409,114 @@ export function teamPauseLabel(reason: string | null): string {
   }
   return reason
 }
+
+// ---------------------------------------------- 群組任務（mission，docs/API.md「群組任務」）
+
+/** 交付方式（D2）：直接推 main，或開 PR 給使用者看。 */
+export type MissionDelivery = 'push_main' | 'pr'
+
+/** 5h 撞限時（D5）：原地等重置，或直接換下一個身分。7d 撞限一律換。 */
+export type MissionOn5h = 'wait' | 'switch'
+
+/** 從欄位算出來的，不是另外存一份：`cancelled_at → done_at → paused_reason → open`。 */
+export type MissionStatus = 'open' | 'paused' | 'done' | 'cancelled'
+
+export type MissionRole = 'executor' | 'reviewer' | 'verifier'
+
+export type MissionEventKind =
+  | 'instruction'
+  | 'report'
+  | 'note'
+  | 'verified'
+  | 'round'
+  | 'paused'
+  | 'resumed'
+  | 'cancelled'
+  | 'delivered'
+  | 'completed'
+
+export interface Mission {
+  id: string
+  project_id: string
+  client_request_id: string
+  text: string
+  delivery_mode: MissionDelivery
+  executor_kind: BotKind
+  on_5h_limit: MissionOn5h
+  max_rounds: number
+  rounds_used: number
+  /** `max_rounds` / `no_fable_for_verifier` / `push_main_failed` / `pr_failed`，或呼叫端自己寫的。 */
+  paused_reason: string | null
+  paused_detail: string | null
+  result_summary: string | null
+  status: MissionStatus
+  /**
+   * P1b：daemon 從 assignments 推導的細分階段。`null` = 舊 daemon 沒給，前端自己從事件推。
+   *
+   * `done | cancelled | paused` 同 `status`；其餘看最新一件還開著的交辦：`executing` /
+   * `reviewing` / `verifying`（依 role），那件停在 `quota_blocked` 時是 `waiting_quota`；
+   * 還沒有任何交辦＝`planning`；交辦都結案了但任務還開著＝`awaiting_agm`。
+   */
+  phase: MissionPhaseServer | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  cancelled_at: string | null
+}
+
+/** daemon 給的細分階段（P1b）。 */
+export type MissionPhaseServer =
+  | 'planning'
+  | 'executing'
+  | 'reviewing'
+  | 'verifying'
+  | 'waiting_quota'
+  | 'awaiting_agm'
+  | 'done'
+  | 'cancelled'
+  | 'paused'
+
+/** `relay_from`：`null` = 使用者本人，bot id = 那顆 bot，`"daemon"` = daemon 自己記的。 */
+export interface MissionEvent {
+  id: string
+  mission_id: string
+  kind: MissionEventKind
+  text: string
+  relay_from: string | null
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+/**
+ * 這個任務的一件交辦（P1b）。`role` 與 `turn_error` 就是任務卡上「誰在跑」「為什麼換手」
+ * 的權威來源——比從事件 payload 猜可靠。
+ */
+export interface MissionAssignment {
+  id: string
+  role: MissionRole | null
+  status: string
+  target_bot_id: string | null
+  turn_status: string | null
+  /** 撞限時 daemon 從 `run.turn_error` 抄過來的那一句。 */
+  turn_error: string | null
+  /** 這件是誰的 follow-up（撞限換手接手的那一件）。 */
+  follow_up_of: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+export interface MissionDetail extends Mission {
+  events: MissionEvent[]
+  /** 舊的在前。舊 daemon 沒有這個欄位就是空陣列。 */
+  assignments: MissionAssignment[]
+}
+
+/** `POST /api/projects/:id/missions` 的 body（§11 的三個選項）。 */
+export interface NewMissionInput {
+  text: string
+  client_request_id: string
+  delivery_mode: MissionDelivery
+  executor_kind: BotKind
+  on_5h_limit: MissionOn5h
+  max_rounds?: number
+}

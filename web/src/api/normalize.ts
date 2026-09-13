@@ -76,6 +76,16 @@ import type {
  TeamWorkerSpec, TeamRoles, ProjectSubmodule } from './types'
 import {
   BOT_KINDS,
+  type Mission,
+  type MissionAssignment,
+  type MissionDelivery,
+  type MissionDetail,
+  type MissionEvent,
+  type MissionEventKind,
+  type MissionOn5h,
+  type MissionPhaseServer,
+  type MissionRole,
+  type MissionStatus,
   hostOfQuotaKey,
   TEAM_BUDGET_DEFAULTS,
   TEAM_PHASES,
@@ -1193,4 +1203,146 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
     processes: n(r.processes),
     hosts,
   }
+}
+
+// ---------------------------------------------- 群組任務（mission，docs/API.md「群組任務」）
+
+const MISSION_DELIVERIES = ['push_main', 'pr'] as const
+const MISSION_ON_5H = ['wait', 'switch'] as const
+const MISSION_STATUSES = ['open', 'paused', 'done', 'cancelled'] as const
+const MISSION_PHASES_SERVER = [
+  'planning',
+  'executing',
+  'reviewing',
+  'verifying',
+  'waiting_quota',
+  'awaiting_agm',
+  'done',
+  'cancelled',
+  'paused',
+] as const
+const MISSION_ROLES = ['executor', 'reviewer', 'verifier'] as const
+const MISSION_EVENT_KINDS = [
+  'instruction',
+  'report',
+  'note',
+  'verified',
+  'round',
+  'paused',
+  'resumed',
+  'cancelled',
+  'delivered',
+  'completed',
+] as const
+
+export function toMission(v: unknown): Mission | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id', 'mission_id'))
+  if (!id) return null
+  const completed = optStr(pick(v, 'completed_at'))
+  const cancelled = optStr(pick(v, 'cancelled_at'))
+  const paused = optStr(pick(v, 'paused_reason'))
+  return {
+    id,
+    project_id: str(pick(v, 'project_id')),
+    client_request_id: str(pick(v, 'client_request_id')),
+    text: str(pick(v, 'text')),
+    delivery_mode: oneOf<MissionDelivery>(pick(v, 'delivery_mode'), MISSION_DELIVERIES, 'pr'),
+    executor_kind: oneOf<BotKind>(pick(v, 'executor_kind'), BOT_KINDS, 'claude'),
+    on_5h_limit: oneOf<MissionOn5h>(pick(v, 'on_5h_limit'), MISSION_ON_5H, 'wait'),
+    max_rounds: num(pick(v, 'max_rounds'), 2),
+    rounds_used: num(pick(v, 'rounds_used'), 0),
+    paused_reason: paused,
+    paused_detail: optStr(pick(v, 'paused_detail')),
+    result_summary: optStr(pick(v, 'result_summary')),
+    // daemon 算過一次就照它的；沒給才自己照同一條規則推（cancelled → done → paused → open）。
+    status: oneOf<MissionStatus>(
+      pick(v, 'status'),
+      MISSION_STATUSES,
+      cancelled ? 'cancelled' : completed ? 'done' : paused ? 'paused' : 'open',
+    ),
+    // P1b 的 `phase`；舊 daemon 沒給就是 null，UI 自己從事件推。
+    phase: (() => {
+      const p = pick(v, 'phase')
+      return typeof p === 'string' && (MISSION_PHASES_SERVER as readonly string[]).includes(p)
+        ? (p as MissionPhaseServer)
+        : null
+    })(),
+    created_at: str(pick(v, 'created_at')),
+    updated_at: str(pick(v, 'updated_at'), str(pick(v, 'created_at'))),
+    completed_at: completed,
+    cancelled_at: cancelled,
+  }
+}
+
+export function toMissionAssignment(v: unknown): MissionAssignment | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id', 'assignment_id'))
+  if (!id) return null
+  const role = pick(v, 'role', 'mission_role')
+  return {
+    id,
+    role:
+      typeof role === 'string' && (MISSION_ROLES as readonly string[]).includes(role) ? (role as MissionRole) : null,
+    status: str(pick(v, 'status')),
+    target_bot_id: optStr(pick(v, 'target_bot_id', 'bot_id')),
+    turn_status: optStr(pick(v, 'turn_status')),
+    turn_error: optStr(pick(v, 'turn_error')),
+    follow_up_of: optStr(pick(v, 'follow_up_of')),
+    created_at: str(pick(v, 'created_at')),
+    completed_at: optStr(pick(v, 'completed_at')),
+  }
+}
+
+export function toMissions(raw: unknown): Mission[] {
+  const root = isRec(raw) ? raw : {}
+  const list = Array.isArray(raw) ? raw : arr(pick(root, 'missions', 'items'))
+  const out: Mission[] = []
+  for (const m of list) {
+    const one = toMission(m)
+    if (one) out.push(one)
+  }
+  return out
+}
+
+export function toMissionEvent(v: unknown, missionId = ''): MissionEvent | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id', 'event_id'))
+  if (!id) return null
+  // `payload_json` 可能是字串也可能已經是物件（同 team event）。
+  const raw = pick(v, 'payload', 'payload_json')
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = { text: raw }
+    }
+  }
+  return {
+    id,
+    mission_id: str(pick(v, 'mission_id'), missionId),
+    kind: oneOf<MissionEventKind>(pick(v, 'kind'), MISSION_EVENT_KINDS, 'note'),
+    text: str(pick(v, 'text')),
+    relay_from: optStr(pick(v, 'relay_from')),
+    payload: isRec(parsed) ? parsed : null,
+    created_at: str(pick(v, 'created_at')),
+  }
+}
+
+export function toMissionDetail(raw: unknown): MissionDetail | null {
+  if (!isRec(raw)) return null
+  const base = toMission(pick(raw, 'mission') ?? raw)
+  if (!base) return null
+  const events: MissionEvent[] = []
+  for (const e of arr(pick(raw, 'events'))) {
+    const one = toMissionEvent(e, base.id)
+    if (one) events.push(one)
+  }
+  const assignments: MissionAssignment[] = []
+  for (const a of arr(pick(raw, 'assignments'))) {
+    const one = toMissionAssignment(a)
+    if (one) assignments.push(one)
+  }
+  return { ...base, events: sortByTime(events), assignments }
 }
