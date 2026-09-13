@@ -6,6 +6,7 @@
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -104,7 +105,12 @@ pub struct AssignIn {
     pub kind: Option<String>,
     /// `kind` 的等價寫法，給既有的呼叫端用；兩個都給時以 `expects_review` 為準。
     #[serde(default)]
-    pub expects_review: Option<bool>,    /// 群組任務：這件交辦屬於哪個任務（`/api/missions/{id}`），以及擔任的角色
+    pub expects_review: Option<bool>,
+    /// 回報給哪個 AGM 角色驗收：`patrol` | `responder`。省略 = 呼叫的角色自己（驗證過的 bot
+    /// token），UI／腳本呼叫則是協調者。
+    #[serde(default)]
+    pub review_role: Option<String>,
+    /// 群組任務：這件交辦屬於哪個任務（`/api/missions/{id}`），以及擔任的角色
     /// `executor | reviewer | verifier`。兩個一起給或都不給。
     #[serde(default)]
     pub mission_id: Option<String>,
@@ -121,8 +127,13 @@ impl AssignIn {
 
 pub async fn post_assignment(
     State(app): State<Arc<App>>,
+    headers: HeaderMap,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
+    let review_role = match b.review_role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("review_role must be patrol | responder".into()))?),
+        None => super::bot_requests::actor_role(&app, &headers).await,
+    };
     // 任務連結先驗證再建交辦：錯的 mission_id 不該留下一件已派出去、卻掛不回任務的工作。
     let mission = match (b.mission_id.as_deref().map(str::trim).filter(|s| !s.is_empty()), b.role.as_deref().map(str::trim)) {
         (None, None | Some("")) => None,
@@ -145,6 +156,7 @@ pub async fn post_assignment(
         None,
         b.expects_review(),
         mission.as_ref().map(|(m, r)| (m.as_str(), r.as_str())),
+        review_role,
     )
     .await?;
     Ok(Json(a))
@@ -195,8 +207,10 @@ pub struct ReviewIn {
 pub async fn post_review(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<ReviewIn>,
 ) -> Result<Json<Value>, LcError> {
+    let verified = super::bot_requests::actor_role(&app, &headers).await;
     let _g = super::lock().await;
     let to_status = store::decision_status(&b.decision).ok_or_else(|| {
         LcError::Bad("decision must be one of accept | block | followup | fail | cancel".into())
@@ -249,7 +263,11 @@ pub async fn post_review(
         ));
     }
 
-    let actor = b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string());
+    // 驗證過的角色以 token 為準，不信 body 裡自稱的名字。
+    let actor = match verified {
+        Some(r) => format!("{}:{}", store::SUPERVISOR_ID, r.as_str()),
+        None => b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string()),
+    };
     let source = b.source.clone().unwrap_or_else(|| "api".to_string());
 
     // Cancelling work that is (or may be) already running stops the *tracking*, not the bot.
@@ -444,6 +462,9 @@ pub struct InboxQuery {
     pub all: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// `patrol` | `responder`：只看這個角色的事件（含還沒分類的列不算）。
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 pub async fn get_inbox(
@@ -452,25 +473,51 @@ pub async fn get_inbox(
 ) -> Result<Json<Value>, LcError> {
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let all = q.all.as_deref().is_some_and(|v| matches!(v, "1" | "true" | "yes"));
-    let events = if all {
+    let role = match q.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("role must be patrol | responder".into()))?),
+        None => None,
+    };
+    // 分類在 controller tick 做；讀的人不必等下一個 tick 才看得到角色。
+    let _ = super::roles::classify(&app.db).await;
+    let mut events = if all {
         store::inbox(&app.db, limit).await.map_err(up)?
     } else {
         store::open_inbox(&app.db, limit).await.map_err(up)?
     };
+    if let Some(r) = role {
+        events.retain(|e| e.claimed_by.as_deref().or(e.role.as_deref()) == Some(r.as_str()));
+    }
     Ok(Json(json!({
         "events": events.iter().map(store::InboxEvent::to_json).collect::<Vec<_>>(),
         "open": store::open_inbox_count(&app.db).await.map_err(up)?,
         "all": all,
         "limit": limit,
+        "role": role.map(super::roles::Role::as_str),
     })))
 }
 
-pub async fn post_inbox_ack(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
-    if !store::ack_inbox(&app.db, &id).await.map_err(up)? {
-        return Err(LcError::NotFound("inbox event".into()));
+/// 結案一則通知。帶了角色 bot 的 token 就只能結自己收的那些（另一個角色收的回 409）；
+/// UI 與使用者照舊什麼都能結。重複 ack 是冪等的。
+pub async fn post_inbox_ack(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LcError> {
+    use super::roles::AckOutcome;
+    let actor = super::bot_requests::actor_role(&app, &headers).await;
+    let responder_configured = super::roles::responder_bot(&app.db).await.map_err(up)?.is_some();
+    match super::roles::ack(&app.db, &id, actor, responder_configured).await.map_err(up)? {
+        AckOutcome::NotFound => Err(LcError::NotFound("inbox event".into())),
+        AckOutcome::ClaimedByOther(owner) => Err(LcError::conflict(
+            "this event belongs to the other AGM role",
+            json!({"reason": "claimed_by_other_role", "claimed_by": owner, "event_id": id}),
+        )),
+        AckOutcome::AlreadyHandled => Ok(Json(json!({"already_handled": true}))),
+        AckOutcome::Acked => {
+            app.emit("supervisor_changed", json!({"acked": id})).await;
+            Ok(Json(json!({})))
+        }
     }
-    app.emit("supervisor_changed", json!({"acked": id})).await;
-    Ok(Json(json!({})))
 }
 
 pub async fn get_sanitized_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
@@ -770,8 +817,10 @@ pub struct DecisionIn {
 pub async fn post_approval_decision(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<DecisionIn>,
 ) -> Result<Json<Value>, LcError> {
+    let verified = super::bot_requests::actor_role(&app, &headers).await;
     let _g = super::lock().await;
     let status = match b.decision.as_str() {
         "approve" => "approved",
@@ -794,11 +843,22 @@ pub async fn post_approval_decision(
         ));
     }
     let expires = b.expires_in_secs.map(iso_in);
-    let actor = b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string());
-    let a = store::decide_approval(&app.db, &id, status, &actor, b.reason.as_deref(), expires.as_deref())
+    let actor = match verified {
+        Some(r) => format!("{}:{}", store::SUPERVISOR_ID, r.as_str()),
+        None => b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string()),
+    };
+    // 條件寫入：讀到的狀態還在才寫。另一個角色（或 UI）在中間先決定了，這裡什麼都不寫。
+    let Some(a) = store::decide_approval_from(&app.db, &id, &current.status, status, &actor, b.reason.as_deref(), expires.as_deref())
         .await
         .map_err(up)?
-        .ok_or_else(|| LcError::NotFound("approval".into()))?;
+    else {
+        let now = store::approval(&app.db, &id).await.map_err(up)?;
+        return Err(LcError::conflict(
+            "the approval was decided by someone else first; nothing was written",
+            json!({"reason": "decided_concurrently", "approval_id": id,
+                   "status": now.as_ref().map(|n| n.status.clone()), "decided_by": now.as_ref().and_then(|n| n.decided_by.clone())}),
+        ));
+    };
     app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
     Ok(Json(a.to_json()))
 }
@@ -1027,7 +1087,7 @@ mod review_boundary_tests {
                                         ("follow-1", "different task", false)] {
             let input: ReviewIn = serde_json::from_value(json!({"decision":"followup",
                 "followup_request_id":crid,"followup_text":text})).unwrap();
-            let result = post_review(State(app.clone()), Path(parent.id.clone()), Json(input)).await;
+            let result = post_review(State(app.clone()), Path(parent.id.clone()), HeaderMap::new(), Json(input)).await;
             assert_eq!(result.is_ok(), should_pass);
             if let Err(e) = result { assert!(format!("{e:?}").contains("followup_mismatch")); }
         }

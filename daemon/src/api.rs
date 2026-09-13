@@ -168,6 +168,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
         .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search))
+        .merge(crate::supervisor::responder_api::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
@@ -206,6 +207,14 @@ async fn relay_announce(
     };
     if !ok {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
+    }
+    // 寫給 AGM 的：協調者存在時排進它的佇列，shim 看到 `routed` 就不再打進 pane（SPEC §18.15）。
+    if let Ok(Some(target)) = crate::supervisor::bot_requests::role_bot_by_agent(&app, &body.to_agent).await {
+        match crate::supervisor::bot_requests::intercept(&app, &target, &body.bot_id, &body.text, None, &[], true, "herdr_shim").await {
+            Ok(Some(v)) => return (StatusCode::OK, Json(v)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = ?e, "could not queue a bot request for AGM; falling back to the pane"),
+        }
     }
     crate::agent_relay::announce(&body.bot_id, &body.to_agent, &body.text);
     (StatusCode::OK, Json(json!({})))
@@ -1866,8 +1875,10 @@ struct PromptIn {
 async fn prompt_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<PromptIn>,
 ) -> Result<Response, LcError> {
+    let given_crid = b.client_request_id.clone();
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
     // 只收存在的 bot 或哨符 daemon：隨便填等於讓呼叫端冒名。
     let relay_from = match b.relay_from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -1878,6 +1889,15 @@ async fn prompt_bot(
             _ => return Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
         },
     };
+    // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
+    if let Some(from) = relay_from.as_deref().filter(|f| *f != crate::agent_relay::DAEMON_SENDER) {
+        let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok());
+        let verified = crate::supervisor::bot_requests::sender_verified(&app, token, from).await;
+        let queued = crate::supervisor::bot_requests::intercept(&app, &id, from, &b.text, given_crid.as_deref(), &b.attachments, verified, "api");
+        if let Some(v) = queued.await? {
+            return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
+        }
+    }
     let out = lifecycle::prompt_relayed(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }

@@ -58,6 +58,21 @@ pub struct SupervisorCfg {
     pub bot_stopped_secs: u64,
     #[serde(default = "default_assignment_stalled_secs")]
     pub assignment_stalled_secs: u64,
+    /// 協調者（AGM responder）的短窗批次：第一件待辦等滿這麼久、距上次喚醒也滿這麼久才叫醒，
+    /// 同一陣的申請合成一次（SPEC §18.15）。
+    #[serde(default = "default_responder_batch_secs")]
+    pub responder_batch_secs: u64,
+    /// 協調者送不出去或等額度時，下一次重試最多隔多久。沒有次數上限。
+    #[serde(default = "default_responder_max_backoff_secs")]
+    pub responder_max_backoff_secs: u64,
+}
+
+fn default_responder_batch_secs() -> u64 {
+    15
+}
+
+fn default_responder_max_backoff_secs() -> u64 {
+    300
 }
 
 fn default_notify_interval_secs() -> u64 {
@@ -93,6 +108,8 @@ impl Default for SupervisorCfg {
             host_disconnected_secs: default_host_disconnected_secs(),
             bot_stopped_secs: default_bot_stopped_secs(),
             assignment_stalled_secs: default_assignment_stalled_secs(),
+            responder_batch_secs: default_responder_batch_secs(),
+            responder_max_backoff_secs: default_responder_max_backoff_secs(),
         }
     }
 }
