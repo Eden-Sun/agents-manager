@@ -198,6 +198,9 @@ class Client:
     def post(self, path: str, body: object = None) -> object:
         return self._raw("POST", path, body if body is not None else {})
 
+    def delete(self, path: str) -> object:
+        return self._raw("DELETE", path, None)
+
     def put(self, path: str, body: object = None) -> object:
         return self._raw("PUT", path, body if body is not None else {})
 
@@ -866,6 +869,9 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
         return client.post(f"/api/projects/{urllib.parse.quote(args.project)}/bots", body)
     if not args.bot_id:
         raise AgmError("bad_args", f"bot {args.op} 需要 bot id", 2)
+    if args.op == "delete":
+        # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。team 成員回 409 team_managed。
+        return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}")
     return client.post(f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}", {})
 
 
@@ -1082,9 +1088,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
     s.set_defaults(func=cmd_mission)
 
-    s = sub.add_parser("bot", help="管理 bot：start / stop / restart / create")
-    s.add_argument("op", choices=["start", "stop", "restart", "create"])
-    s.add_argument("bot_id", nargs="?", help="start/stop/restart 的目標")
+    s = sub.add_parser("bot", help="管理 bot：start / stop / restart / create / delete")
+    s.add_argument("op", choices=["start", "stop", "restart", "create", "delete"])
+    s.add_argument("bot_id", nargs="?", help="start/stop/restart/delete 的目標（delete＝停 pane 並軟刪，子 agent 一起收）")
     s.add_argument("--project", help="create：所屬 project id")
     s.add_argument("--name", help="create：bot 名稱")
     s.add_argument("--kind", help="create：claude / codex / grok")

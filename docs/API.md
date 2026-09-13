@@ -102,9 +102,10 @@
   `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?,expects_review?}` → 一筆 assignment
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,
   turn_status,evidence_complete,open,awaiting_review,review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts}`。
+  （剛派出去、回合還在跑時 `turn_status` 是 `null`，status 為 `queued`／`delivered`／`unknown`；回合結束才有值。）
   `status` 是**生命週期**，不是傳輸狀態：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review`（回合結束，等驗收）
   → `completed` | `failed` | `cancelled` | `superseded`（AGM 決定過），另有 `blocked`（AGM 說還在等，仍算未結案）。
-  傳輸的原始事實留在 `delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing`）
+  傳輸的原始事實留在 `delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`，回合還在跑時是 `null`）
   與 `evidence_complete`。**回合結束不會自己變成 `completed`**——連送不出去的交辦也是進 `awaiting_review`，
   daemon 不會替沒人看過的工作結案（SPEC §18.8）。
   `kind`（2026-09-13）：`task`（預設）或 `notice`。**notice = 只是把話說給 bot 聽**（「收到」「進 idle」「看完即可」），
@@ -166,8 +167,8 @@
 ### 總管的工具入口 `bin/agm`
 
 `scripts/agm.py` 由 `include_str!` 編進 daemon 二進位，`setup` 時寫成 `<cwd>/bin/agm`（0755），所以
-release 安裝不依賴 build 機上的 repo 路徑。子命令：`state`、`supervisor`、`search`、`messages`、
-`assign`（含 `--mission`／`--role`）、`assignments`、`inbox`（預設只列未 ack、最舊在前；`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`bot`、`mission`（見「群組任務」一節的 CLI 對照）；輸出一律 JSON。
+release 安裝不依賴 build 機上的 repo 路徑。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`）、
+`assign`（含 `--mission`／`--role`）、`assignments`、`inbox`（預設只列未 ack、最舊在前；`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`mission`（見「群組任務」一節的 CLI 對照）；輸出一律 JSON。
 
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`。
 **沒有 token**——CLI 自己在執行期 `GET /api/session` 取，不進 argv、不進檔案、不進交接摘要；
@@ -2224,13 +2225,13 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
 | 方法 | 路徑 | 說明 |
 |---|---|---|
 | POST | `/api/projects/{id}/missions` | `{text, client_request_id?, delivery_mode, executor_kind, on_5h_limit, max_rounds?(0..=10，預設 2)}` → 任務＋`created`。同一個 `client_request_id` 回同一筆（`created:false`）。建立時記一則 `instruction` 事件，並往 AGM inbox 放一則 `mission_created`（event_key `mission:<id>:created`，payload 含 `mission_id/project_id/project/cwd/text` 與三個選項）。遠端專案回 400 `{"error":"remote_not_supported","host":…}`。 |
-| GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`**。 |
+| GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`，不含已取消的**；取消的另用 `status=cancelled` 取（UI 若要一起顯示須分開標示，不能混進「已完成」）。 |
 | GET | `/api/missions/{id}` | 任務＋`events[]`。 |
 | POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?}` → 事件。`relay_from` 規則同 `POST /api/bots/{id}/prompt`（不存在的值 400）。**交付前必須有一則 `verified`**。 |
 | POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。 |
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
-| POST | `/api/missions/{id}/cancel` | → 任務。 |
-| POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`）。 |
+| POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）。 |
+| POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`），多 `temp_bots: {deleted:[{bot_id,name}], skipped:[{bot_id,name,reason}]}`：結案時 daemon 自動軟刪這個任務的臨時 bot，條件是「任務某件交辦的目標」＋「名字以 `agm-mission-<任務 id 尾 6 碼（相容 5 碼）>-<角色>` 開頭」＋「沒有進行中的 run」；`reason ∈ not_a_temp_bot \| still_running \| delete_failed`。刪除走 `DELETE /api/bots/{id}` 同一條路（停 pane、軟刪、子 agent 一起收、對話保留），並在任務記一則 `note`。 |
 | POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`。 |
 | GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`。 |
 | POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/main` 必須是 HEAD 的祖先 → `git push origin HEAD:main`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。成功記 `delivered` 事件並回 `{mode, sha}` 或 `{mode, branch, url}`。沒有 `verified` 事件 → 409 `not_verified`；其餘失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |

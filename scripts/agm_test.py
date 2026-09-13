@@ -65,6 +65,9 @@ class FakeDaemon(BaseHTTPRequestHandler):
     def do_PUT(self):  # noqa: N802
         self._run("PUT")
 
+    def do_DELETE(self):  # noqa: N802
+        self._run("DELETE")
+
 
 class FakeServer(ThreadingHTTPServer):
     # 不設 daemon_threads 的話 `server_close()` 會去 join 還掛在 keep-alive 上的
@@ -717,6 +720,18 @@ class MiscCommandTest(CliCase):
 
     def test_bot_create_needs_project_and_name(self):
         self.assertEqual(self.bad("bot", "create")["error"], "bad_args")
+
+    def test_bot_delete_uses_http_delete(self):
+        FakeDaemon.routes["DELETE /api/bots/b9"] = (200, {"removed_children": []})
+        self.assertEqual(self.ok("bot", "delete", "b9"), {"removed_children": []})
+        self.assertEqual([r["method"] for r in FakeDaemon.seen if r["path"] == "/api/bots/b9"], ["DELETE"])
+        self.assertEqual(self.bad("bot", "delete")["error"], "bad_args")
+
+    def test_bot_delete_of_a_team_member_is_a_structured_error(self):
+        FakeDaemon.routes["DELETE /api/bots/tm"] = (409, {"error": "conflict", "reason": "team_managed"})
+        err = self.bad("bot", "delete", "tm")
+        self.assertEqual(err["status"], 409)
+        self.assertEqual(err["detail"]["reason"], "team_managed")
 
     def test_bot_restart(self):
         FakeDaemon.routes["POST /api/bots/b1/restart"] = (200, {"run_id": "r1"})
