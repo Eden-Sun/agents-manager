@@ -2239,9 +2239,9 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
 | POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）。 |
 | POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`），多 `temp_bots: {deleted:[{bot_id,name}], skipped:[{bot_id,name,reason}]}`：結案時 daemon 自動軟刪這個任務的臨時 bot，條件是「任務某件交辦的目標」＋「名字以 `agm-mission-<任務 id 尾 6 碼（相容 5 碼）>-<角色>` 開頭」＋「沒有進行中的 run」；`reason ∈ not_a_temp_bot \| still_running \| delete_failed`。刪除走 `DELETE /api/bots/{id}` 同一條路（停 pane、軟刪、子 agent 一起收、對話保留），並在任務記一則 `note`。 |
-| POST | `/api/missions/{id}/question` | `{text, client_request_id}` → `{event, replayed}`。對成果追問，**已完成的任務也接受**。只寫 `question` 事件並推 AGM inbox（`mission_question`，`expects: answer_only`）；不 resume、不碰 `completed_at`、不建任務、不產生交付。 |
-| POST | `/api/missions/{id}/answer` | `{text, client_request_id, reply_to?, relay_from?}` → `{event, replayed, resumed, mission}`。兩種語意由 `relay_from` 分：**沒有**（使用者本人）＝回答暫停的任務，daemon 在**同一個交易**裡寫事件、`paused→open`、推 inbox（`mission_answered`，event_key `mission:<id>:answer:<crid>`）；**有**（AGM／bot）＝回覆某則追問，要帶 `reply_to`，不 resume、不推 inbox（自己叫醒自己就是通知迴圈）。已完成的任務不接受使用者 answer（409 `already_closed`，請改用 question 或 revise）。 |
-| POST | `/api/missions/{id}/revise` | `{text, client_request_id, delivery_mode?, executor_kind?, on_5h_limit?, max_rounds?}` → **新的一筆任務**（`parent_mission_id` 指回來，`created`）。原成果完全不動。沒指定的選項沿用原任務。新任務的 `instruction` 事件與 inbox `mission_created` 帶快照（原指示／結果摘要／commit 或 PR／`verified` 摘要／新要求／`runbook_start_step: 2`），所以原本的臨時 bot 被清掉也不影響續作——快照是**參考，不是證據**，新任務仍要自己的 `verified` 才能交付。只有 `done` 能續作（進行中或已取消 → 409 `not_completed`）；同一個 parent 同時只能有一筆未結案的續作（第二筆 → 409 `revision_in_progress`，附既存那筆的 id），由 partial unique index 擋，並發也只會成立一筆。 |
+| POST | `/api/missions/{id}/question` | `{text, client_request_id, relay_from?}` → `{event, replayed}`。對成果追問，**已完成的任務也接受**。只寫 `question` 事件並推 AGM inbox（`mission_question`，`expects: answer_only`）；不 resume、不碰 `completed_at`、不建任務、不產生交付。AGM 代問時帶 `relay_from`，時間軸才看得出那句話是誰問的。 |
+| POST | `/api/missions/{id}/answer` | `{text, client_request_id, reply_to?, relay_from?}` → `{event, replayed, resumed, mission}`。兩種語意由 `relay_from` 分：**沒有**（使用者本人）＝回答暫停的任務，daemon 在**同一個交易**裡寫事件、`paused→open`、推 inbox（`mission_answered`，event_key `mission:<id>:answer:<crid>`）；**有**（AGM／bot）＝回覆某則追問，`reply_to` **必填**且必須真的是這筆任務的 `question` 事件，不 resume、不推 inbox（自己叫醒自己就是通知迴圈）。使用者的 answer 只在任務真的 `paused` 時成立：`open` → 409 `not_paused`、`done` → 409 `already_closed`、`cancelled` → 409 `cancelled`，而且**被拒時什麼都不寫**（沒有事件、沒有 inbox）。 |
+| POST | `/api/missions/{id}/revise` | `{text, client_request_id, relay_from?, delivery_mode?, executor_kind?, on_5h_limit?, max_rounds?}` → **新的一筆任務**（`parent_mission_id` 指回來，`created`）。原成果完全不動。沒指定的選項沿用原任務，**有指定就照 `POST /projects/{id}/missions` 同一套驗證**（enum 與 `max_rounds` 0..=10，專案還要存在且是本機）。新任務、它的 `instruction`、原成果那邊的 `note`、以及 inbox 是**同一個交易**：中途失敗不會留下沒人知道的續作。新任務的 `instruction` 事件與 inbox `mission_created` 帶快照（原指示／結果摘要／commit 或 PR／`verified` 摘要／新要求／`runbook_start_step: 2`），所以原本的臨時 bot 被清掉也不影響續作——快照是**參考，不是證據**，新任務仍要自己的 `verified` 才能交付。只有 `done` 能續作（進行中或已取消 → 409 `not_completed`）；同一個 parent 同時只能有一筆未結案的續作（第二筆 → 409 `revision_in_progress`，附既存那筆的 id），由 partial unique index 擋，並發也只會成立一筆。 |
 | POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`。 |
 | GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`。 |
 | POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/main` 必須是 HEAD 的祖先 → `git push origin HEAD:main`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。成功記 `delivered` 事件並回 `{mode, sha}` 或 `{mode, branch, url}`。沒有 `verified` 事件 → 409 `not_verified`；其餘失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
@@ -2253,8 +2253,13 @@ push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull�
 每次變更推 WS `mission_updated {mission_id, project_id, status}`。
 
 `question`／`answer`／`revise` 都要 `client_request_id`：內容相同的重送回原結果（`replayed: true`，
-不會重複喚醒也不會開第二輪），**同 id 換內容**是 409 `request_id_reused`。重送判斷排在狀態檢查**之前**——
-重送多半發生在任務已經被放行之後，先看狀態會把正確的重送擋掉。
+不會重複喚醒也不會開第二輪），**同 id 換內容**是 409 `request_id_reused`。
+「內容相同」比的是**正規化指紋**，不是只有文字：事件看 `kind`＋文字＋來源＋`reply_to`，續作看
+parent＋文字＋四個選項。只比文字的話，一則 `question` 與一則 `answer` 可以有同樣的字而被誤判成重送，
+同一個 project 底下不同 parent 用同一個 crid 也會拿到別人的續作。指紋不含會變的快照，否則同一個請求
+重送兩次會被判成兩個不同的請求。
+重送判斷排在狀態檢查**之前**（而且兩者都在同一個交易裡）——重送多半發生在任務已經被放行之後，
+先看狀態會把正確的重送擋掉；而放在交易外先查，兩個同 crid 的並發請求會雙雙通過檢查、其中一個撞索引變成 500。
 `POST /resume`（不回答直接繼續）同樣會推 inbox（`mission_resumed`），但只在真的發生 `paused→open` 時推一次，
 所以 AGM 自己呼叫 resume 不會把自己叫醒。
 
