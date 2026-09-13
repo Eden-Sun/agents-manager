@@ -100,6 +100,8 @@ export interface MissionView {
   delivered: MissionDelivered | null
   /** 最後一則有內容的回報，摺疊時當一行摘要用。 */
   latest: MissionEvent | null
+  /** 這個任務的交辦（P1b），舊的在前；舊 daemon 沒給就是空的。 */
+  assignments: MissionAssignment[]
 }
 
 function rec(v: unknown): Record<string, unknown> {
@@ -258,6 +260,7 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
     verified,
     delivered,
     latest,
+    assignments,
   }
 }
 
@@ -280,4 +283,44 @@ export function pausedLabel(reason: string): string {
 /** 交付方式講成人話。 */
 export function deliveryLabel(mode: string): string {
   return mode === 'push_main' ? '直接推 main' : '開 PR'
+}
+
+/**
+ * 一件交辦現在到哪了，講成人話（P1b）。
+ *
+ * `turn_status` 比 `status` 精確——撞限換手與「驗證者沒 Fable」都是停在 `awaiting_review`，
+ * 差別只在 `turn_status`，所以先看它。認不得的機器碼原樣顯示，不要吞掉。
+ */
+export function assignmentLabel(a: MissionAssignment): string {
+  if (a.turn_status === 'identity_switch') return '撞限，等 AGM 換身分接手'
+  if (a.turn_status === 'quota_exhausted') return '沒有可用額度'
+  switch (a.status) {
+    case 'queued':
+      return '排隊中'
+    case 'delivered':
+      return '進行中'
+    case 'unknown':
+      return '送出了但不確定收到'
+    case 'awaiting_review':
+      return '等 AGM 驗收'
+    case 'completed':
+      return '完成'
+    case 'failed':
+      return '失敗'
+    case 'cancelled':
+      return '取消'
+    case 'superseded':
+      return '被後來的取代'
+    case 'blocked':
+      return '卡住'
+    case 'quota_blocked':
+      return '等額度重置'
+    default:
+      return a.status || '—'
+  }
+}
+
+/** 這件交辦還開著嗎（沒有 `completed_at` 就是還在跑或還在等）。 */
+export function assignmentOpen(a: MissionAssignment): boolean {
+  return !a.completed_at && a.status !== 'completed' && a.status !== 'cancelled' && a.status !== 'superseded'
 }

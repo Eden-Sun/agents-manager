@@ -40,6 +40,13 @@
   background: var(--warn-soft);
 }
 
+/* 等額度／等 AGM：也要看得出來它自己不會動，但**不用**染成警示色——那會讓人以為要動手。
+   虛線框＝「在等，不用你」，實心警示色＝「在等你」。 */
+.mission-card.waiting {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
 .mission-head {
   display: flex;
   align-items: baseline;
@@ -522,4 +529,82 @@
     min-height: 40px;
     flex: 1 1 0;
   }
+}
+
+/* ---- 每一件交辦的 role 與狀態（P1b） */
+
+.mission-asgs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.mission-asgs li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 還開著的那幾件要挑得出來——那才是「現在在跑／在等」的。 */
+.mission-asgs li.open {
+  background: var(--bg-sunken);
+}
+
+.mission-asg-state {
+  color: var(--text);
+}
+
+.mission-asgs li.open .mission-asg-state {
+  font-weight: 650;
+  color: var(--accent-ink);
+}
+
+.mission-asg-state.warn {
+  color: var(--warn);
+  font-weight: 650;
+}
+
+/* 撞限那句是終端橫幅原文，長度不一定；一行截尾，全文留在 tooltip。 */
+.mission-asg-err {
+  flex: 1 1 8em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+/* ---- 等 AGM／等額度：不用動手，但要看得出來它自己不會動 */
+
+.mission-wait {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.mission-wait strong {
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.mission-wait-last {
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
 }
