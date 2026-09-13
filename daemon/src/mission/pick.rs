@@ -346,3 +346,55 @@ mod tests {
         assert!(matches!(pick(Role::Verifier, &cands(&qs), On5hLimit::Switch, None, now()), Pick::AskUser { .. }));
     }
 }
+
+/// 任務裡的一件交辦撞到額度時，controller 要怎麼做（`supervisor/controller.rs` 的 `park_quota`）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuotaPolicy {
+    /// 照 supervisor 原本的規則停在 `quota_blocked`，額度回來自己重送。
+    Wait,
+    /// 換手：交給 AGM 用這個身分（或模型）開 followup 接手。
+    Switch { identity: String, model: Option<String>, reason: String },
+    /// 停下來問使用者（驗證者找不到 Fable 有效額度）。
+    AskUser { reason: String },
+}
+
+/// 把 [`pick`] 的結果對上「這顆 bot 現在是哪個身分、哪個模型」。
+///
+/// 同一個身分、同一個模型還被挑中 → 額度讀數可能比 CLI 慢一步，照原本的規則等；
+/// 挑到別的身分，或同一身分但要換模型（Fable 用盡改 opus）→ 換手。
+pub fn quota_policy(current_identity: &str, current_model: Option<&str>, decision: &Pick) -> QuotaPolicy {
+    match decision {
+        Pick::Use { identity, model, reason } => {
+            let other_identity = identity != current_identity;
+            let other_model = model.as_deref().is_some_and(|m| Some(m) != current_model);
+            if other_identity || other_model {
+                QuotaPolicy::Switch { identity: identity.clone(), model: model.clone(), reason: reason.clone() }
+            } else {
+                QuotaPolicy::Wait
+            }
+        }
+        Pick::AskUser { reason, .. } => QuotaPolicy::AskUser { reason: reason.clone() },
+        Pick::Wait { .. } | Pick::NoIndependentReviewer { .. } => QuotaPolicy::Wait,
+    }
+}
+
+#[cfg(test)]
+mod quota_policy_tests {
+    use super::*;
+
+    fn use_(identity: &str, model: Option<&str>) -> Pick {
+        Pick::Use { identity: identity.into(), model: model.map(String::from), reason: "r".into() }
+    }
+
+    #[test]
+    fn a_different_identity_or_model_is_a_switch_and_the_same_one_waits() {
+        assert!(matches!(quota_policy("cc2", Some("fable"), &use_("cc1", None)), QuotaPolicy::Switch { .. }));
+        assert!(matches!(quota_policy("cc2", Some("fable"), &use_("cc2", Some("opus"))), QuotaPolicy::Switch { .. }));
+        assert_eq!(quota_policy("cc2", Some("opus"), &use_("cc2", Some("opus"))), QuotaPolicy::Wait);
+        assert_eq!(quota_policy("cc2", None, &use_("cc2", None)), QuotaPolicy::Wait);
+        let wait = Pick::Wait { identity: "cc2".into(), until: None, reason: "5h".into() };
+        assert_eq!(quota_policy("cc2", None, &wait), QuotaPolicy::Wait);
+        let ask = Pick::AskUser { reason: "no fable".into(), resets: vec![] };
+        assert!(matches!(quota_policy("cc1", Some("fable"), &ask), QuotaPolicy::AskUser { .. }));
+    }
+}

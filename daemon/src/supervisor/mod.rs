@@ -171,6 +171,8 @@ pub async fn assign(
     ownership: &[String],
     follow_up_of: Option<&str>,
     expects_review: bool,
+    // 群組任務：(mission_id, role)。呼叫端已驗證過。
+    mission: Option<(&str, &str)>,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -246,6 +248,10 @@ pub async fn assign(
     .map_err(up)?;
     if let Some(parent) = follow_up_of {
         let _ = store::link_followup(&app.db, parent, &a.id).await;
+    }
+    // 派送之前就要掛上任務：派送當下撞到額度時，controller 要看得到這件屬於哪個任務、什麼角色。
+    if let Some((mission_id, role)) = mission {
+        store::set_mission_link(&app.db, &a.id, mission_id, role).await.map_err(up)?;
     }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
