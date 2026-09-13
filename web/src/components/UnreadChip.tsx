@@ -36,12 +36,15 @@
  *   東西；整隊只出一顆 `team #N`。
  * - **AGM（總管）不算**：它靠例行 loop 醒來，每一輪都會跑完一回合，會把這一列洗成永遠有東西。
  *   真的想追還是可以用 ★ 釘它（釘選是使用者自己指定的，不受這條影響）。
+ *   「總管的環境」不只 `AGM` 那個專案——daemon 也會把總管開出去的工人放在 `AGM-…` 底下
+ *   （2026-09-13 使用者：`agm-pxf2pv-browser-gc` 這種 daemon 的雜務 bot 跑完不該出現在這一列）。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { Bot, TeamPhase } from '../api/types'
 import { TEAM_PHASE_LABEL, TEAM_TERMINAL_PHASES } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { chipTracked, isSupervisorProject } from '../lib/supervisorProject'
 import { useStore } from '../store/store'
 import './unreadChip.css'
 
@@ -77,7 +80,7 @@ export function UnreadChip() {
   const selectBot = useStore((s) => s.selectBot)
   const selectTeam = useStore((s) => s.selectTeam)
   // AGM 專案（daemon 自己建的總管環境）整個不算——那底下只有總管與它開出去的工人。
-  const agmProjectIds = useStore(useShallow((s) => s.projects.filter((p) => p.label === 'AGM').map((p) => p.id)))
+  const agmProjectIds = useStore(useShallow((s) => s.projects.filter((p) => isSupervisorProject(p.label)).map((p) => p.id)))
   // 點進一顆 bot 的那一刻 `selectBot` 會同步清掉它的未讀，所以光看 `botUnread`，晶片會在手指
   // 底下當場消失。記住「它在被選走的前一刻有沒有未讀」，讓它留在列上。
   const keptId = keepSelectedRow(selectedBotId, botUnread)
@@ -85,7 +88,7 @@ export function UnreadChip() {
   const narrow = useMediaQuery(NARROW_QUERY)
 
   const items = useMemo(() => {
-    const tracked = (b: Bot) => !b.pending && b.parent_bot_id === null && !b.team && !agmProjectIds.includes(b.project_id)
+    const tracked = (b: Bot) => chipTracked(b, agmProjectIds)
     const waitsKids = (id: string) =>
       bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
     const out: ChipItem[] = []
