@@ -2,7 +2,7 @@
  * `GET /api/changelog?kind=&host=&from=`：「有更新 · 重啟套用」按下去先看新版改了什麼
  * （2026-09-10 使用者需求）。獨立成一檔，`index.ts` 只借 transport。
  *
- * daemon 抓不到時仍回 200（`found:false` + `error`）；這裡再把傳輸層的錯（舊 daemon 404、
+ * daemon 抓不到時仍回 200（`found:false` + `error`）；這裡再把傳輸層的錯（404、
  * mock 模式、斷線）也收成同一個形狀，UI 一律有東西可寫，不會靜默略過。
  */
 import { rawTransport } from './index'

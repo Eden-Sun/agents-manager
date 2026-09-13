@@ -210,7 +210,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
           ) : null}
           {err ? <p className="mem-pop-err">{err}</p> : null}
           {!err && rows.length === 0 ? (
-            <p className="mem-pop-empty">{loading ? '取樣中…' : '這台 daemon 還不會列程序（需要重啟成新版）。'}</p>
+            <p className="mem-pop-empty">{loading ? '取樣中…' : '沒有程序。'}</p>
           ) : null}
           {rows.length > 0 ? (
             <table className="mem-pop-table">

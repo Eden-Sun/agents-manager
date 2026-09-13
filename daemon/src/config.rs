@@ -196,11 +196,6 @@ pub struct HostCfg {
     /// PATH a non-interactive ssh shell is missing; prefixed to the remote PATH.
     #[serde(default)]
     pub remote_path: String,
-    /// Ignored since v4.3 (SPEC §11.4): remote hooks report through that host's own herdr and
-    /// leave their payload in a spool file, so there is no reverse forward and no port to pick.
-    /// Still parsed — and warned about once — so an older config keeps loading.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hook_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -359,24 +354,6 @@ pub fn agent_name(project_label: &str, bot_id: &str) -> String {
     }
 }
 
-/// The v3.5 scheme (`<project slug>-<bot name>`); still recognised by reconcile so runs started
-/// under it keep working until they restart.
-pub fn agent_name_legacy(project_label: &str, bot_name: &str) -> String {
-    const MAX: usize = 32;
-    let mut slug = label_slug(project_label);
-    let room = MAX.saturating_sub(bot_name.len() + 1);
-    if slug.is_empty() || room == 0 {
-        return bot_name.to_string();
-    }
-    if slug.len() > room {
-        slug.truncate(room);
-        slug = slug.trim_end_matches('-').to_string();
-        if slug.is_empty() {
-            return bot_name.to_string();
-        }
-    }
-    format!("{slug}-{bot_name}")
-}
 
 /// Identity names use the same shape as bot names.
 pub fn valid_identity_name(name: &str) -> bool {
@@ -535,7 +512,6 @@ mod v40_tests {
             ssh_opts: vec![],
             herdr_session: "agents-manager".into(),
             remote_path: String::new(),
-            hook_port: None,
         }
     }
 
@@ -570,7 +546,7 @@ mod v40_tests {
 
 #[cfg(test)]
 mod agent_name_tests {
-    use super::{agent_name, agent_name_legacy, valid_bot_name};
+    use super::{agent_name, valid_bot_name};
 
     #[test]
     fn prefix_plus_id_tail() {
@@ -581,11 +557,6 @@ mod agent_name_tests {
         let n = agent_name("a-very-long-project-label-indeed-and-more", "01M1S2SQPSYMQ8B1VQ50R963B9");
         assert!(n.len() <= 32, "{n}");
         assert!(n.ends_with("-r963b9"));
-    }
-
-    #[test]
-    fn legacy_scheme_still_computable() {
-        assert_eq!(agent_name_legacy("agents-manager", "am-claude"), "agents-manager-am-claude");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useScrollTail } from '../hooks/useScrollTail'
-import { isPaneMoveUnsupported, movePaneToTab } from '../api'
+import { movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
 import { linkifyTerm } from './TermLinks'
@@ -12,13 +12,6 @@ import { setTermWrap, useTermWrap } from './termWrap'
  * 31-column grok pane (2026-09-06), whose widest row held four characters.
  */
 const READABLE_COLUMNS = 60
-
-/**
- * 「這版 daemon 沒有 `pane/move-to-tab`」是 daemon 的能力，不是這個 bot 的狀態，問一次就夠了。
- * 放在 module scope：切 bot / 切分頁讓元件重新掛載時不會再打一次已知會 405 的請求，
- * 按鈕也就從此不再出現（docs/FRONTEND.md §8：缺端點要靜默退回，不是每次都噴錯）。
- */
-let paneMoveUnsupported = false
 
 /** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
 function squeeze(text: string): string {
@@ -40,7 +33,6 @@ export function TerminalTab({ botId }: { botId: string }) {
    */
   const [movedBot, setMovedBot] = useState<string | null>(null)
   const [moveErr, setMoveErr] = useState<{ botId: string; text: string } | null>(null)
-  const [noMove, setNoMove] = useState(paneMoveUnsupported)
   const wrap = useTermWrap()
 
   const refresh = useCallback(async () => {
@@ -68,13 +60,7 @@ export function TerminalTab({ botId }: { botId: string }) {
       // 搬完立刻重讀：columns 會從幾十欄跳回整個 workspace 的寬度，警示自己就消失了。
       await refresh()
     } catch (e) {
-      if (isPaneMoveUnsupported(e)) {
-        // 刻意不 notify()：這是「daemon 還沒跟上」，不是使用者做錯了什麼。
-        paneMoveUnsupported = true
-        setNoMove(true)
-      } else {
-        setMoveErr({ botId, text: e instanceof Error ? e.message : String(e) })
-      }
+      setMoveErr({ botId, text: e instanceof Error ? e.message : String(e) })
     } finally {
       setMoving(false)
     }
@@ -145,15 +131,11 @@ export function TerminalTab({ botId }: { botId: string }) {
           （拉寬只是把窄的問題推給鄰居，放大也沒用——終端的字元格線是固定的）。
           hook 取得的回覆不受影響。
           <div className="term-warn-actions">
-            {noMove ? null : (
-              <button type="button" className="btn" onClick={() => void move()} disabled={moving}>
-                {moving ? '移動中…' : '移到自己的分頁'}
-              </button>
-            )}
+            <button type="button" className="btn" onClick={() => void move()} disabled={moving}>
+              {moving ? '移動中…' : '移到自己的分頁'}
+            </button>
             <span className="term-warn-caveat">
-              {noMove
-                ? '這版 daemon 還沒有自動搬移，請在 herdr 手動把這個 pane 移到新分頁（pane.move → new_tab）。搬 pane 不會重啟 bot，但一樣只影響之後的輸出。'
-                : '搬的是現有的 pane：不會重啟 bot，也不會中斷正在跑的回合。只影響之後的輸出——上面已經被終端折斷的內容是 scrollback 裡的原文，救不回來。'}
+              搬的是現有的 pane：不會重啟 bot，也不會中斷正在跑的回合。只影響之後的輸出——上面已經被終端折斷的內容是 scrollback 裡的原文，救不回來。
             </span>
           </div>
           {moveErrText ? <div className="term-warn-caveat">搬移失敗：{moveErrText}</div> : null}

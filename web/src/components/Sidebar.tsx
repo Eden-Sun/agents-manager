@@ -909,7 +909,6 @@ export function Sidebar() {
   // shift+滾輪橫捲子 agent 列要 preventDefault，React 的 onWheel 是 passive 做不到（見 useWheelRef）。
   const kidsWheelRef = useWheelRef<HTMLDivElement>(kidsWheel)
   const [drag, setDrag] = useState<DragState>(null)
-  const shellSupported = useStore((s) => s.hostShellSupported)
   const openHostShell = useStore((s) => s.openHostShell)
   /**
    * 頂端額度卡片上被勾成「暫時停用」的身分／kind：它們底下的 bot 先從清單收起來。
@@ -1006,7 +1005,7 @@ export function Sidebar() {
         .then((r) => {
           if (hitSeq.current === mine) setHits(r)
         })
-        // 舊 daemon 沒有這支：屬性搜尋照常運作，只是沒有內容命中。
+        // 內容搜尋失敗：屬性搜尋照常運作，只是沒有內容命中。
         .catch(() => {
           if (hitSeq.current === mine) setHits({})
         })
@@ -1257,25 +1256,23 @@ export function Sidebar() {
                     {/* 開 shell 原本只長在「環境設定 → 主機」裡，要開一個 shell 得先想到它在
                         設定頁。從專案開才是常態：主機跟目錄都已經知道了（`openHostShell`
                         吃 cwd），不必再選一次。 */}
-                    {shellSupported ? (
-                      <button
-                        type="button"
-                        className="head-menu-item"
-                        role="menuitem"
-                        disabled={!hostUp(p.host)}
-                        title={
-                          hostUp(p.host)
-                            ? `在 ${p.host === 'local' ? '本機' : p.host} 的 ${p.path} 開一個 shell`
-                            : '主機未連線，開不了 shell'
-                        }
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void openHostShell(p.host, p.path)
-                        }}
-                      >
-                        在這裡開 shell
-                      </button>
-                    ) : null}
+                    <button
+                      type="button"
+                      className="head-menu-item"
+                      role="menuitem"
+                      disabled={!hostUp(p.host)}
+                      title={
+                        hostUp(p.host)
+                          ? `在 ${p.host === 'local' ? '本機' : p.host} 的 ${p.path} 開一個 shell`
+                          : '主機未連線，開不了 shell'
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void openHostShell(p.host, p.path)
+                      }}
+                    >
+                      在這裡開 shell
+                    </button>
                     <button
                       type="button"
                       className="head-menu-item danger"
@@ -1381,17 +1378,15 @@ export function Sidebar() {
         </div>
 
         {/* 本機 shell 擺在最外層：這是「我想打個指令」最短的路徑，不該埋在設定頁裡。 */}
-        {shellSupported ? (
-          <button
-            type="button"
-            className="disclosure"
-            title="在本機開一個 shell，直接下指令"
-            onClick={() => void openHostShell(LOCAL_HOST)}
-          >
-            <TerminalIcon /> 開 shell
-            <span className="disclosure-note">本機</span>
-          </button>
-        ) : null}
+        <button
+          type="button"
+          className="disclosure"
+          title="在本機開一個 shell，直接下指令"
+          onClick={() => void openHostShell(LOCAL_HOST)}
+        >
+          <TerminalIcon /> 開 shell
+          <span className="disclosure-note">本機</span>
+        </button>
 
         {/* 總管是「找人／交辦」的入口，跟環境設定平級擺在最外層；它自己不是聊天室，
             要跟 AGM 說話請從面板裡打開它既有的對話。 */}

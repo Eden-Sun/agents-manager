@@ -80,14 +80,6 @@ fn child_name_from_agent(name: &str) -> String {
     }
 }
 
-/// Run ids whose remote hook material was already rewritten by this daemon process.
-/// Returns `true` the first time a run id is seen.
-fn mark_hook_refreshed(run_id: &str) -> bool {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
-    let set = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    set.lock().unwrap().insert(run_id.to_string())
-}
-
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let Some(session) = app.session_for_host(host).await else {
         anyhow::bail!("unknown host `{host}`");
@@ -161,8 +153,8 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         {
             continue;
         }
-        // Names this bot may be running under: the run's recorded name, the current
-        // `<project>-<bot>` scheme, and the legacy bare bot name (runs from before v3.5).
+        // Names this bot may be running under: the run's recorded name, then the computed
+        // `<project>-<id tail>` name.
         let computed = db::agent_name_for_bot(&app.db, &bot).await?;
         let mut candidates: Vec<String> = Vec::new();
         if let Some(r) = &active {
@@ -183,21 +175,11 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 candidates.push(n);
             }
         }
-        let label: String = sqlx::query_scalar("SELECT label FROM projects WHERE id = ?")
-            .bind(&bot.project_id)
-            .fetch_optional(&app.db)
-            .await?
-            .unwrap_or_default();
-        let legacy = crate::config::agent_name_legacy(&label, &bot.name);
         // A spawned child is only ever the herdr agent it was adopted from: its run's name.
         // The computed `<project>-<hash>` name would match a pane the daemon started for it
-        // by mistake, and the bare name is whatever suffix the parent picked.
-        if bot.managed_by != "child" {
-            for n in [computed.clone(), legacy, bot.name.clone()] {
-                if !candidates.contains(&n) {
-                    candidates.push(n);
-                }
-            }
+        // by mistake.
+        if bot.managed_by != "child" && !candidates.contains(&computed) {
+            candidates.push(computed.clone());
         }
         let mut found: Option<crate::herdr::AgentInfo> = None;
         let mut found_name: Option<String> = None;
@@ -333,21 +315,6 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 // build a conversation from, and the daemon was not watching while it was down.
                 crate::lifecycle::spawn_adopted_capture(app, &run.id, &bot.id);
                 sync_pane_model(app, host, &client, &bot, agent).await;
-                // SPEC §11.4.7: a run we keep may have been started by a pre-v4.3 daemon, whose
-                // `hook.sh` still curls a port that no longer exists. Rewriting the material is
-                // one ssh per bot, so it runs off-path — reconcile must not wait on the network.
-                // Once per run per daemon lifetime: the herdr event stream replays a burst of
-                // `pane.agent_detected` on (re)connect, each scheduling a reconcile, and one ssh
-                // per bot per reconcile turned that into a storm sshd refused (2026-09-07).
-                if host != LOCAL_HOST && bot.inject_hooks != 0 && mark_hook_refreshed(&run.id) {
-                    let app2 = app.clone();
-                    let bot2 = bot.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::lifecycle::refresh_remote_hook(&app2, &bot2).await {
-                            tracing::warn!(bot = %bot2.name, error = ?e, "could not refresh the remote hook");
-                        }
-                    });
-                }
                 tracing::info!(host, bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
             }
             (Some(run), None) => {
@@ -859,54 +826,6 @@ mod compat_tests {
             .fetch_optional(&app.db)
             .await
             .unwrap()
-    }
-
-    /// **The compatibility guarantee.** A run recorded the old way — a pane split into a tab
-    /// it shares, `tab_id` NULL — is kept running and simply learns which tab it is sitting
-    /// in. It is emphatically not marked `exited` for lacking a tab of its own.
-    #[tokio::test]
-    async fn a_split_pane_from_before_tabs_is_kept_and_learns_its_tab() {
-        let env = tt::env().await;
-        let app = env.app.clone();
-        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
-        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
-        // Two bots sharing one tab, the way every bot started before this change was.
-        let old_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
-
-        let bot = a_bot(&env, "alfa").await;
-        let agent = crate::config::agent_name("proj", &bot);
-        let run = db::ulid();
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,'test',?)",
-        )
-        .bind(&run)
-        .bind(&bot)
-        .bind(&ws.workspace_id)
-        .bind(&old_pane.pane_id)
-        .bind(&agent)
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-        assert!(run_of(&app, &bot).await.unwrap().tab_id.is_none(), "precondition: no tab of its own");
-
-        *env.herdr.agents.lock().unwrap() = vec![json!({
-            "name": agent, "agent": "claude", "agent_status": "idle",
-            "workspace_id": ws.workspace_id, "tab_id": old_pane.tab_id, "pane_id": old_pane.pane_id,
-            "cwd": "/tmp/p"})];
-
-        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
-
-        let r = run_of(&app, &bot).await.unwrap();
-        assert_eq!(r.id, run, "the same run, not a replacement");
-        assert_eq!(r.state, "running", "an old split pane is still a live bot");
-        assert!(r.ended_at.is_none());
-        assert_eq!(r.pane_id.as_deref(), Some(old_pane.pane_id.as_str()));
-        assert_eq!(r.tab_id.as_deref(), Some(old_pane.tab_id.as_str()), "tab_id is backfilled from herdr");
-        // And the shared tab is untouched — the reconcile closes orphan *panes*, and this
-        // pane is not orphaned.
-        assert!(env.herdr.tab(&old_pane.tab_id).unwrap().panes.contains(&old_pane.pane_id));
     }
 
     /// A run left in `stopping` — a stop or in-pane restart that gave up on an agent which would

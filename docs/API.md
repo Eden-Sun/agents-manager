@@ -1,7 +1,7 @@
 # agents-managerd HTTP / WebSocket API
 
 daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。行為與理由在 `SPEC.md`，這份只寫契約；前端以此為準。
-時間欄位一律 RFC3339 UTC（毫秒）；id 為 ULID 字串。沒有某個端點的舊 daemon 回 404，前端據此隱藏入口。
+時間欄位一律 RFC3339 UTC（毫秒）；id 為 ULID 字串。
 
 ## 0. 認證
 
@@ -355,7 +355,6 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | `herdr_session` | | `"agents-manager"` |
 | `remote_path` | | `""`（前置到遠端 PATH） |
 | `ssh_opts` | | `[]`，原樣附加到每個 ssh 指令 |
-| `hook_port` | | 忽略（舊 client 相容） |
 
 回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。
 
@@ -370,7 +369,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 目錄瀏覽 `GET /api/fs/dirs?host=` 只走 ssh 不經 herdr：host 斷線時仍可能 200，只有 ssh 失敗才 502；host 不存在 404。
 
 ### WebSocket
-- `daemon_status`：`{"herdr_connected","connected","hosts":{"local":{"connected","error"},…}}`（`connected` 是 `herdr_connected` 的舊同義欄位）。
+- `daemon_status`：`{"herdr_connected","default_connected","hosts":{"local":{"connected","error"},…}}`。
 - `host_changed`：連上／斷線／新增／刪除／設定變更時推。狀態改變時該 host 底下每個 bot 也會收到 `bot_status`。
 
 ### GitHub CLI 登入

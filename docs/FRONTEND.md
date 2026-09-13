@@ -53,7 +53,7 @@ web/src/
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
   全畫面的鍵盤直通把 `KeyboardEvent` 翻成 herdr 鍵名（⌘ 系列留給瀏覽器，Home/End/PgUp/PgDn herdr 不收）；直通時 Esc 也送給 agent。
   送鍵走佇列合批（`agent.send_keys` 吃陣列），不然快打會亂序。
-- **舊 daemon 相容**：沒有某個端點（例如 `/api/missions`）時整個入口靜默不出現，不重試不報錯。
+- **群組任務入口**：`/api/missions` 不存在時整個入口靜默不出現，不重試不報錯。
 - **Mock**：`api/mock.ts` 的回應形狀刻意與 `daemon/src/api.rs` 一致。訊息含 `blocked`／`rm -rf` → 進 blocked；`fallback` → terminal_fallback 回覆；
   `slow` → 延遲 8 秒。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`。
 - 深淺色跟隨系統，不提供手動切換；`prefers-reduced-motion` 關掉所有動畫。

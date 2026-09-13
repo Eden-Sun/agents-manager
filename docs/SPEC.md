@@ -15,7 +15,7 @@ agent 一律由 **herdr**（terminal workspace manager，socket API protocol 20�
 |---|---|---|---|
 | **Project** | 以目錄為單位的分組，canonical path 唯一 | `project_id`（`[A-Za-z0-9_-]{1,64}`，缺省產生 ULID） | 一個 `workspace`（記 `workspace_id`；對帳發現不存在就設 NULL，下次啟動 bot 時重建） |
 | **Bot** | agent 設定：暱稱 `name`、kind、`model`、`effort`、args…，屬於一個 Project | `bot_id`（同上規則，永久） | — |
-| **Run** | Bot 的一次執行。**每個 Bot 最多一個 active Run（DB 部分唯一索引）**。含 `agent_name`、`native_session_id`、`transcript_path`（hook 回填） | `run_id`（ULID） | `pane_id` + herdr agent name = `agent_name(project.label, bot.id)` = `<label slug>-<id 尾 6 碼>`（與暱稱無關；舊格式 `<label>-<name>`／裸 `bot.name` 由對帳沿用） |
+| **Run** | Bot 的一次執行。**每個 Bot 最多一個 active Run（DB 部分唯一索引）**。含 `agent_name`、`native_session_id`、`transcript_path`（hook 回填） | `run_id`（ULID） | `pane_id` + herdr agent name = `agent_name(project.label, bot.id)` = `<label slug>-<id 尾 6 碼>`（與暱稱無關） |
 | **Conversation** | 與 Bot 1:1，跨 Run 延續，不拆分 | `conversation_id` | — |
 | **Turn** | 一次「prompt → 回覆完成」。**每個 active Run 最多一筆 in-flight** | `turn_id` | Claude `prompt_id` / Codex `turn-id` |
 | **Message** | `role ∈ {user, assistant, system}` | `message_id` | — |
@@ -57,6 +57,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 ### 3.1 daemon（`agents-managerd`）
 
 - axum + tokio + serde；SQLite 用 sqlx（每條連線 `foreign_keys=ON`、`journal_mode=WAL`）。
+- **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor／mission 各自的 migration），不升級更舊的檔案；
+  已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
@@ -237,7 +239,7 @@ label = "foo"
    timeout/error → 不關 pane，`agent.get` 有 agent → running+unknown，沒有 → `exited` + 關 pane。
 
 **tab 生命週期**：停止與 orphan 回收共用 `close_pane_and_tab`：先 `pane.close`，再 `tab.list` 確認該 tab `pane_count == 0` 才 `tab.close`；共享 tab 不動，
-tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的舊 Run 只關 pane。
+tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run 只關 pane。
 `POST /api/bots/{id}/pane/move-to-tab`（`move_pane_to_own_tab`）把非獨占的 pane 搬到新 tab 並更新 `tab_id`；pane id、訂閱、進行中 Turn 不變，不重啟 agent。
 
 ### 6.3 送訊息（per-bot 鎖內，單一 DB 交易）
@@ -444,7 +446,6 @@ path = "/Users/m4p/work/foo"
 label = "foo@m4p"
 ```
 - 只用使用者現有的 ssh key / agent / ssh_config，一律 `BatchMode=yes`，絕不互動輸入密碼。認證失敗 → host `disconnected`，UI 顯示錯誤字串。
-- 舊設定的 `hosts[].hook_port` 仍被解析但忽略（啟動時 warn 一次）。
 
 ### 11.3 HostManager
 每個 host 一個 `HostConn`：
@@ -480,9 +481,8 @@ label = "foo@m4p"
 - 狀態上報與 herdr 的終端偵測並存；相同狀態不再發事件，所以「偵測先報 idle、hook 才寫 spool」是真實競態（§11.4.4 補）。
 
 #### 11.4.2 遠端 `hook.sh`
-路徑 `~/.config/agents-manager/bots/<bot_id>/hook.sh`，每次啟動 Run（與 reconcile 修 hook 時）覆寫。argv `hook.sh <provider> <bot_id> <token> [port]`：
-第 4 個參數忽略（活著的舊 agent argv 是啟動時寫死的）；第 3 個參數 daemon 填 `-`——codex 的 notify argv 在 `ps` 對全機使用者可見，而 hook token 同時是本機 `/hook/*` 與
-`/relay/announce` 的鑰匙；舊 agent 帶真 token 照收。
+路徑 `~/.config/agents-manager/bots/<bot_id>/hook.sh`，每次啟動 Run（與 reconcile 修 hook 時）覆寫。argv `hook.sh <provider> <bot_id> <token-slot>`：
+第 3 個參數 daemon 填 `-`、腳本不讀——codex 的 notify argv 在 `ps` 對全機使用者可見，而 hook token 同時是本機 `/hook/*` 與 `/relay/announce` 的鑰匙。
 
 | provider | payload 來源 | 上報狀態 | 寫 spool |
 |---|---|---|---|
@@ -519,9 +519,6 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 - `hook.sh statusline …` 把 stdin JSON 加 `"hook_event_name":"StatusLine"` 後**覆寫**遠端 `bots/<bot_id>/hook-status.json`，再 exec 使用者自己的 statusLine 命令（讀遠端 `~/.claude/settings.json`）。
 - daemon 每次 drain 的同一段 ssh 順便 `cat` 並 `rm` 這個檔，當成 `provider=claude`、`StatusLine` 的 `HookBody` 走 `HookKind::StatusLine`（寫 `runs.status_line` / `status_json`，§14）。
   遠端額度最多晚 30 秒。
-
-#### 11.4.6 遷移
-`hook.sh`、`claude-settings.json`、grok 分派腳本每次啟動 Run 都覆寫；活著的舊 run 由對帳 `refresh_remote_hook` 重寫一次。spool 格式不變。
 
 ### 11.5 目錄選擇器
 `GET /api/fs/dirs?host=<name>&path=` 對遠端跑一段 sh（`cd <path> && pwd && for d in */ .[!.]*/; …` 輸出 `名稱\t是否有 .git`），daemon 解析成與本機相同的 JSON

@@ -13,7 +13,7 @@ import { KindTag } from './KindTag'
  * `--effort` levels — claude has no per-model list the way codex does);
  * codex and grok come from their CLIs. When the call fails the static
  * `MODEL_OPTIONS` list (and kind-specific efforts) is used instead, so the
- * form still works against an older daemon.
+ * form still works when the catalogue can't be read.
  */
 
 function staticModels(kind: BotKind): ModelInfo[] {

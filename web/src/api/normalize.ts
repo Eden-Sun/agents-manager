@@ -53,7 +53,7 @@ import type {
   TurnDelivery,
   TurnOrigin,
   TurnStatus,
- ProjectSubmodule } from './types'
+ ProjectSubmodule } from './types.ts'
 import {
   BOT_KINDS,
   type Mission,
@@ -70,7 +70,7 @@ import {
   type MissionStatus,
   hostOfQuotaKey,
   TOOL_UNKNOWN,
-} from './types'
+} from './types.ts'
 
 type Rec = Record<string, unknown>
 
@@ -123,26 +123,25 @@ const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
 
 /**
- * SPEC §11.6 `hosts[]`. The daemon may report the connection flag as `connected` /
- * `ok` / `up` and the failure text as `error` / `last_error` / `message`.
+ * SPEC §11.6 `hosts[]`（`GET /api/state`、`host_changed`、`daemon_status` 的 hosts map）。
  */
 export function toHost(v: unknown): Host | null {
   if (!isRec(v)) return null
-  const name = str(pick(v, 'name', 'host', 'id'))
+  const name = str(pick(v, 'name'))
   if (!name) return null
   return {
     name,
-    ssh: str(pick(v, 'ssh', 'target', 'ssh_target')),
-    ssh_port: num(pick(v, 'ssh_port', 'port'), 22),
-    herdr_session: str(pick(v, 'herdr_session', 'session'), 'agents-manager'),
-    remote_path: str(pick(v, 'remote_path', 'path')),
-    connected: bool(pick(v, 'connected', 'ok', 'up'), false),
-    error: optStr(pick(v, 'error', 'last_error', 'message', 'reason')),
+    ssh: str(pick(v, 'ssh')),
+    ssh_port: num(pick(v, 'ssh_port'), 22),
+    herdr_session: str(pick(v, 'herdr_session'), 'agents-manager'),
+    remote_path: str(pick(v, 'remote_path')),
+    connected: bool(pick(v, 'connected'), false),
+    error: optStr(pick(v, 'error')),
     attach_command:
-      str(pick(v, 'attach_command', 'attach')) ||
-      `herdr --remote ${str(pick(v, 'ssh', 'target', 'ssh_target'))} --session ${str(pick(v, 'herdr_session', 'session'), 'agents-manager')}`,
+      str(pick(v, 'attach_command')) ||
+      `herdr --remote ${str(pick(v, 'ssh'))} --session ${str(pick(v, 'herdr_session'), 'agents-manager')}`,
     tools: toToolMap(pick(v, 'tools')),
-    identity_status: toIdentityStatusMap(pick(v, 'identities', 'identity_status')),
+    identity_status: toIdentityStatusMap(pick(v, 'identities')),
   }
 }
 
@@ -155,15 +154,15 @@ export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
   const out: IdentityStatusMap = {}
   for (const [key, v] of Object.entries(root)) {
     if (!isRec(v)) continue
-    const li = pick(v, 'logged_in', 'loggedIn')
+    const li = pick(v, 'logged_in')
     out[key] = {
       name: str(pick(v, 'name')) || key,
       kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
       logged_in: typeof li === 'boolean' ? li : null,
       reason: optStr(pick(v, 'reason')),
-      account: optStr(pick(v, 'account', 'email')),
-      plan: optStr(pick(v, 'plan', 'subscriptionType')),
-      // 舊 daemon 沒有這兩個欄位：一律當成 config 來源（唯一會被編輯的那種）。
+      account: optStr(pick(v, 'account')),
+      plan: optStr(pick(v, 'plan')),
+      // 只有 `shell` 會另外標；其餘都是 config 來源（唯一會被編輯的那種）。
       source: str(pick(v, 'source')) === 'shell' ? 'shell' : 'config',
       config_dir: optStr(pick(v, 'config_dir')),
     }
@@ -176,9 +175,9 @@ export function toToolMap(raw: unknown): ToolMap {
   const root = isRec(raw) ? raw : {}
   const one = (v: unknown): ToolStatus => {
     if (!isRec(v)) return TOOL_UNKNOWN
-    const li = pick(v, 'logged_in', 'loggedIn')
+    const li = pick(v, 'logged_in')
     return {
-      installed: bool(pick(v, 'installed', 'ok'), true),
+      installed: bool(pick(v, 'installed'), true),
       path: optStr(pick(v, 'path')),
       version: optStr(pick(v, 'version')),
       logged_in: typeof li === 'boolean' ? li : null,
@@ -205,22 +204,22 @@ export function hostArray(v: unknown): unknown[] {
 
 export function toProject(v: unknown): Project | null {
   if (!isRec(v)) return null
-  const id = str(pick(v, 'id', 'project_id'))
+  const id = str(pick(v, 'id'))
   if (!id) return null
-  const path = str(pick(v, 'path', 'cwd', 'dir'))
+  const path = str(pick(v, 'path'))
   return {
     id,
     path,
-    label: str(pick(v, 'label', 'name'), path.split('/').pop() ?? id),
+    label: str(pick(v, 'label'), path.split('/').pop() ?? id),
     workspace_id: optStr(v.workspace_id),
-    host: str(pick(v, 'host', 'host_name'), 'local') || 'local',
+    host: str(pick(v, 'host'), 'local') || 'local',
     github: (() => {
       const g = pick(v, 'github')
       if (!isRec(g)) return null
       const owner = str(pick(g, 'owner'))
-      const repo = str(pick(g, 'repo', 'name'))
+      const repo = str(pick(g, 'repo'))
       if (!owner || !repo) return null
-      return { owner, repo, url: str(pick(g, 'url', 'html_url')) || `https://github.com/${owner}/${repo}` }
+      return { owner, repo, url: str(pick(g, 'url')) || `https://github.com/${owner}/${repo}` }
     })(),
     created_at: str(v.created_at),
   }
@@ -228,25 +227,15 @@ export function toProject(v: unknown): Project | null {
 
 export function toBot(v: unknown, projectId?: string): Bot | null {
   if (!isRec(v)) return null
-  const id = str(pick(v, 'id', 'bot_id'))
+  const id = str(pick(v, 'id'))
   if (!id) return null
-  let args: string[] = []
-  const rawArgs = pick(v, 'args', 'args_json')
-  if (Array.isArray(rawArgs)) args = rawArgs.map((a) => str(a))
-  else if (typeof rawArgs === 'string') {
-    try {
-      const parsed: unknown = JSON.parse(rawArgs)
-      if (Array.isArray(parsed)) args = parsed.map((a) => str(a))
-    } catch {
-      args = rawArgs.split(/\s+/).filter(Boolean)
-    }
-  }
+  const args = arr(pick(v, 'args')).map((a) => str(a))
   return {
     id,
-    project_id: str(pick(v, 'project_id', 'projectId'), projectId ?? ''),
-    name: str(pick(v, 'name', 'label'), id),
+    project_id: str(pick(v, 'project_id'), projectId ?? ''),
+    name: str(pick(v, 'name'), id),
     kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
-    // API.md v3.3; older daemons omit it entirely → treated as "no explicit model".
+    // API.md v3.3; null → "no explicit model".
     model: optStr(pick(v, 'model')),
     effort: optStr(pick(v, 'effort')),
     fast: bool(pick(v, 'fast'), false),
@@ -262,15 +251,15 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
       const i = pick(v, 'identity')
       return typeof i === 'string' && i.trim() ? i : null
     })(),
-    env: envMap(pick(v, 'env', 'env_json')),
-    // 舊 daemon 沒有這些欄位 → `user` / null。
+    env: envMap(pick(v, 'env')),
+    // 沒有 parent 時 `managed_by` 是 `user`、`parent_bot_id` 是 null。
     managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'child'], 'user'),
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
-    primary: bool(pick(v, 'primary', 'is_primary')),
+    primary: bool(pick(v, 'primary')),
     cwd: optStr(pick(v, 'cwd')),
-    herdr_session: optStr(pick(v, 'herdr_session', 'session')),
-    // debug 用的 herdr agent 名稱；舊 daemon 不送就是 null（UI 那顆晶片自己不渲染）。
-    agent_name: optStr(pick(v, 'agent_name', 'agentName')),
+    herdr_session: optStr(pick(v, 'herdr_session')),
+    // debug 用的 herdr agent 名稱；null 時 UI 那顆晶片自己不渲染。
+    agent_name: optStr(pick(v, 'agent_name')),
     created_at: str(v.created_at),
   }
 }
@@ -348,27 +337,27 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
 
 export function toRun(v: unknown, botId?: string): Run | null {
   if (!isRec(v)) return null
-  const id = str(pick(v, 'id', 'run_id'))
-  const bot_id = str(pick(v, 'bot_id', 'botId'), botId ?? '')
+  const id = str(pick(v, 'id'))
+  const bot_id = str(pick(v, 'bot_id'), botId ?? '')
   if (!id || !bot_id) return null
   return {
     id,
     bot_id,
-    state: oneOf<RunState>(pick(v, 'state', 'run_state'), RUN_STATES, 'running'),
-    agent_status: oneOf<AgentStatus>(pick(v, 'agent_status', 'agentStatus', 'status'), AGENT_STATUSES, 'unknown'),
+    state: oneOf<RunState>(pick(v, 'state'), RUN_STATES, 'running'),
+    agent_status: oneOf<AgentStatus>(pick(v, 'agent_status'), AGENT_STATUSES, 'unknown'),
     workspace_id: optStr(v.workspace_id),
     pane_id: optStr(v.pane_id),
     adopted: bool(v.adopted),
-    herdr_session: optStr(pick(v, 'herdr_session', 'session')),
-    agent_title: optStr(pick(v, 'agent_title', 'agentTitle')),
-    status_line: optStr(pick(v, 'status_line', 'statusLine')),
-    status: toStatusInfo(pick(v, 'status_json', 'status')),
-    update_notice: optStr(pick(v, 'update_notice', 'updateNotice')),
-    turn_error: optStr(pick(v, 'turn_error', 'turnError')),
-    // SPEC §4.4a：`runtime_fast` 是 daemon 的 0/1，舊 daemon 三個都沒有 → null（不知道）。
-    runtime_model: optStr(pick(v, 'runtime_model', 'runtimeModel')),
-    runtime_effort: optStr(pick(v, 'runtime_effort', 'runtimeEffort')),
-    runtime_fast: pick(v, 'runtime_fast', 'runtimeFast') == null ? null : bool(pick(v, 'runtime_fast', 'runtimeFast')),
+    herdr_session: optStr(pick(v, 'herdr_session')),
+    agent_title: optStr(pick(v, 'agent_title')),
+    status_line: optStr(pick(v, 'status_line')),
+    status: toStatusInfo(pick(v, 'status_json')),
+    update_notice: optStr(pick(v, 'update_notice')),
+    turn_error: optStr(pick(v, 'turn_error')),
+    // SPEC §4.4a：`runtime_fast` 是 daemon 的 0/1；三個都是 null = daemon 不知道。
+    runtime_model: optStr(pick(v, 'runtime_model')),
+    runtime_effort: optStr(pick(v, 'runtime_effort')),
+    runtime_fast: pick(v, 'runtime_fast') == null ? null : bool(pick(v, 'runtime_fast')),
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),
@@ -378,7 +367,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
 
 export function toTurn(v: unknown, botId?: string): Turn | null {
   if (!isRec(v)) return null
-  const id = str(pick(v, 'id', 'turn_id'))
+  const id = str(pick(v, 'id'))
   if (!id) return null
   return {
     id,
@@ -428,7 +417,7 @@ export function toAttachments(v: unknown): Attachment[] {
 
 export function toMessage(v: unknown, botId?: string): Message | null {
   if (!isRec(v)) return null
-  const id = str(pick(v, 'id', 'message_id'))
+  const id = str(pick(v, 'id'))
   if (!id) return null
   return {
     id,
@@ -436,13 +425,13 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     turn_id: optStr(v.turn_id),
     bot_id: optStr(v.bot_id) ?? botId ?? null,
     role: oneOf<MessageRole>(v.role, ROLES, 'system'),
-    content: str(pick(v, 'content', 'text', 'body')),
+    content: str(pick(v, 'content')),
     source: oneOf<MessageSource>(v.source, SOURCES, 'system'),
     incomplete: bool(v.incomplete),
-    group_id: optStr(pick(v, 'group_id', 'groupId')),
-    attachments: toAttachments(pick(v, 'attachments_json', 'attachments')),
-    relay_from: optStr(pick(v, 'relay_from', 'relayFrom')),
-    terminal_snapshot: optStr(pick(v, 'terminal_snapshot', 'terminalSnapshot')),
+    group_id: optStr(pick(v, 'group_id')),
+    attachments: toAttachments(pick(v, 'attachments_json')),
+    relay_from: optStr(pick(v, 'relay_from')),
+    terminal_snapshot: optStr(pick(v, 'terminal_snapshot')),
     created_at: str(v.created_at),
   }
 }
@@ -451,15 +440,15 @@ export function toMessage(v: unknown, botId?: string): Message | null {
 export function toGroupMessage(v: unknown): GroupMessage | null {
   const m = toMessage(v)
   if (!m || !isRec(v)) return null
-  const bot_id = str(pick(v, 'bot_id', 'botId'))
+  const bot_id = str(pick(v, 'bot_id'))
   if (!bot_id) return null
-  return { ...m, bot_id, bot_name: str(pick(v, 'bot_name', 'botName'), bot_id) }
+  return { ...m, bot_id, bot_name: str(pick(v, 'bot_name'), bot_id) }
 }
 
 export function toGroupMessagesPage(raw: unknown, projectId: string): GroupMessagesPage {
   const o = isRec(raw) ? raw : {}
   const out: GroupMessage[] = []
-  for (const m of arr(pick(o, 'messages', 'items'))) {
+  for (const m of arr(pick(o, 'messages'))) {
     const gm = toGroupMessage(m)
     if (gm) out.push(gm)
   }
@@ -492,14 +481,14 @@ export function toState(raw: unknown): AppState {
   let attachCommand = `herdr --session ${session}`
   let localTools = toToolMap(undefined)
   let localIdentityStatus: IdentityStatusMap = {}
-  for (const h of hostArray(pick(root, 'hosts', 'host_list'))) {
+  for (const h of hostArray(pick(root, 'hosts'))) {
     // API.md: `hosts[0]` is always the reserved `local` entry (ssh fields null). The UI
     // models the local machine separately (`state.connected`), so drop it here — keeping
     // only its v4.0 `attach_command`.
     const host = toHost(h)
     if (!host) continue
     if (host.name === 'local') {
-      if (isRec(h) && str(pick(h, 'attach_command', 'attach'))) attachCommand = str(pick(h, 'attach_command', 'attach'))
+      if (isRec(h) && str(h.attach_command)) attachCommand = str(h.attach_command)
       localTools = host.tools
       localIdentityStatus = host.identity_status
       continue
@@ -507,26 +496,26 @@ export function toState(raw: unknown): AppState {
     if (!hosts.some((x) => x.name === host.name)) hosts.push(host)
   }
 
-  for (const i of arr(pick(root, 'identities', 'identity_list'))) {
+  for (const i of arr(pick(root, 'identities'))) {
     const ident = toIdentity(i)
     if (ident && !identities.some((x) => x.name === ident.name)) identities.push(ident)
   }
 
-  for (const p of arr(pick(root, 'projects', 'project_list'))) {
+  for (const p of arr(pick(root, 'projects'))) {
     const project = toProject(p)
     if (!project) continue
     projects.push(project)
     if (isRec(p)) {
-      for (const b of arr(pick(p, 'bots', 'bot_list'))) collectBot(b, project.id)
+      for (const b of arr(pick(p, 'bots'))) collectBot(b, project.id)
     }
   }
-  for (const b of arr(pick(root, 'bots', 'bot_list'))) collectBot(b)
+  for (const b of arr(pick(root, 'bots'))) collectBot(b)
 
-  for (const r of arr(pick(root, 'runs', 'active_runs', 'activeRuns'))) {
+  for (const r of arr(pick(root, 'runs'))) {
     const run = toRun(r)
     if (run) runs.push(run)
   }
-  for (const t of arr(pick(root, 'turns', 'in_flight_turns'))) {
+  for (const t of arr(pick(root, 'turns'))) {
     const turn = toTurn(t)
     if (turn) turns.push(turn)
   }
@@ -536,10 +525,10 @@ export function toState(raw: unknown): AppState {
     if (!bot || bots.some((x) => x.id === bot.id)) return
     bots.push(bot)
     if (isRec(b)) {
-      const embedded = pick(b, 'run', 'active_run')
+      const embedded = pick(b, 'run')
       const run = toRun(embedded, bot.id)
       if (run && !runs.some((x) => x.id === run.id)) runs.push(run)
-      const t = toTurn(pick(b, 'in_flight_turn', 'turn'), bot.id)
+      const t = toTurn(pick(b, 'in_flight_turn'), bot.id)
       if (t && !turns.some((x) => x.id === t.id)) turns.push(t)
       const queued = toTurn(pick(b, 'queued_turn'), bot.id)
       if (queued && !turns.some((x) => x.id === queued.id)) turns.push(queued)
@@ -547,8 +536,8 @@ export function toState(raw: unknown): AppState {
   }
 
   return {
-    daemon_seq: num(pick(root, 'daemon_seq', 'seq'), 0),
-    connected: bool(pick(root, 'connected', 'herdr_connected'), true),
+    daemon_seq: num(pick(root, 'daemon_seq'), 0),
+    connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,
     tools: localTools,
@@ -563,7 +552,7 @@ export function toState(raw: unknown): AppState {
 }
 
 export function toMessages(raw: unknown, botId: string): Message[] {
-  const list = Array.isArray(raw) ? raw : isRec(raw) ? arr(pick(raw, 'messages', 'items', 'data')) : []
+  const list = Array.isArray(raw) ? raw : isRec(raw) ? arr(pick(raw, 'messages')) : []
   const out: Message[] = []
   for (const m of list) {
     const msg = toMessage(m, botId)
@@ -627,16 +616,15 @@ export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapsh
   if (typeof raw === 'string')
     return { text: raw, revision: null, truncated: false, source, pane_id: null, columns: null, rows: null }
   const o = isRec(raw) ? raw : {}
-  const textRaw = pick(o, 'text', 'content', 'data', 'output', 'snapshot', 'lines')
-  const text = Array.isArray(textRaw) ? textRaw.map((l) => str(l)).join('\n') : str(textRaw)
-  const rev = pick(o, 'revision', 'rev')
+  const text = str(pick(o, 'text'))
+  const rev = pick(o, 'revision')
   return {
     text,
     revision: rev === undefined ? null : num(rev, 0),
     truncated: bool(o.truncated),
     source: oneOf<TerminalSource>(pick(o, 'source'), ['visible', 'recent_unwrapped'], source),
     pane_id: optStr(pick(o, 'pane_id')),
-    // Absent on an older daemon: the UI must fall back to saying nothing, not to a wrong size.
+    // Absent when herdr doesn't report it: the UI must fall back to saying nothing, not to a wrong size.
     columns: o.columns === undefined || o.columns === null ? null : num(o.columns, 0) || null,
     rows: o.rows === undefined || o.rows === null ? null : num(o.rows, 0) || null,
   }
@@ -666,7 +654,7 @@ export function toHostShells(raw: unknown, fallbackHost: string): HostShell[] {
 /** Best-effort bot_id for a WS payload that may carry it directly or on a nested entity. */
 export function frameBotId(data: unknown): string | null {
   if (!isRec(data)) return null
-  const direct = optStr(pick(data, 'bot_id', 'botId'))
+  const direct = optStr(pick(data, 'bot_id'))
   if (direct) return direct
   for (const key of ['message', 'turn', 'run', 'bot']) {
     const nested = data[key]
@@ -691,18 +679,18 @@ export { isRec, num, str, bool, optStr, pick, arr }
 /** `GET /api/models` → `ModelInfo[]`（缺欄位時給安全預設）。 */
 export function toModels(raw: unknown): ModelInfo[] {
   const root = isRec(raw) ? raw : {}
-  return arr(pick(root, 'models', 'items'))
+  return arr(pick(root, 'models'))
     .filter(isRec)
     .map((m) => {
-      const id = str(pick(m, 'id', 'name', 'model'))
+      const id = str(pick(m, 'id'))
       return {
         id,
-        display_name: str(pick(m, 'display_name', 'label'), id),
+        display_name: str(pick(m, 'display_name'), id),
         description: str(pick(m, 'description')),
-        is_default: bool(pick(m, 'is_default', 'default'), false),
+        is_default: bool(pick(m, 'is_default'), false),
         default_effort: optStr(pick(m, 'default_effort')),
         efforts: arr(pick(m, 'efforts')).map((e) => str(e)).filter(Boolean),
-        service_tiers: arr(pick(m, 'service_tiers', 'tiers'))
+        service_tiers: arr(pick(m, 'service_tiers'))
           .filter(isRec)
           .map((t) => ({ id: str(pick(t, 'id')), name: str(pick(t, 'name'), str(pick(t, 'id'))), description: str(pick(t, 'description')) })),
       }
@@ -713,10 +701,9 @@ export function toModels(raw: unknown): ModelInfo[] {
 function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   if (!isRec(v)) return null
   return {
-    used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct', 'used'), 0))),
-    resets_at: optStr(pick(v, 'resets_at', 'reset_at')),
-    // 門檻在 daemon 算好（見 docs/API.md §12.4）；舊 daemon 沒有這兩個欄位時預設 false，
-    // 額度條退回「只有長條」的行為，不在前端自己補算。
+    used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct'), 0))),
+    resets_at: optStr(pick(v, 'resets_at')),
+    // 門檻在 daemon 算好（見 docs/API.md §12.4），不在前端自己補算。
     low: bool(pick(v, 'low'), false),
     critical: bool(pick(v, 'critical'), false),
   }
@@ -724,7 +711,7 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
 
 /**
  * 一個 kind 的額度；null 代表沒有資訊。
- * `key` 只用來補 `host`：舊 daemon 不送 `host`，就從 `m4p/claude` 這種 key 前綴推回來。
+ * `key` 只用來補 `host`：缺 `host` 時從 `m4p/claude` 這種 key 前綴推回來。
  */
 function toResetCredits(v: unknown): QuotaResetCredits | null {
   if (!isRec(v)) return null
@@ -742,13 +729,13 @@ function toLimitHit(v: unknown): QuotaLimitHit | null {
 export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   if (!isRec(v)) return null
   return {
-    five_hour: toQuotaWindow(pick(v, 'five_hour', '5h')),
-    seven_day: toQuotaWindow(pick(v, 'seven_day', '7d')),
-    // 舊 daemon 沒有這個欄位 → null，額度條就完全不畫 Fable 那條。
+    five_hour: toQuotaWindow(pick(v, 'five_hour')),
+    seven_day: toQuotaWindow(pick(v, 'seven_day')),
+    // 沒有 Fable 窗口 → null，額度條就完全不畫 Fable 那條。
     fable: toQuotaWindow(pick(v, 'fable')),
-    // 舊 daemon（與 claude / grok）沒有這個欄位 → null，UI 不畫那顆券。
+    // 沒有重置券（claude / grok 一律沒有）→ null，UI 不畫那顆券。
     reset_credits: toResetCredits(pick(v, 'reset_credits')),
-    // 舊 daemon 沒有這個欄位 → null，格子就不會標成「被擋」。
+    // 沒被擋 → null，格子就不會標成「被擋」。
     limit_hit: toLimitHit(pick(v, 'limit_hit')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
@@ -770,7 +757,7 @@ export function toQuota(raw: unknown): QuotaMap {
 function toLabel(v: unknown): IssueLabel | null {
   if (typeof v === 'string') return v ? { name: v, color: null } : null
   if (!isRec(v)) return null
-  const name = str(pick(v, 'name', 'label'))
+  const name = str(pick(v, 'name'))
   if (!name) return null
   const c = str(pick(v, 'color')).replace(/^#/, '')
   return { name, color: /^[0-9a-fA-F]{6}$/.test(c) ? c : null }
@@ -778,7 +765,7 @@ function toLabel(v: unknown): IssueLabel | null {
 
 export function toIssue(v: unknown): Issue | null {
   if (!isRec(v)) return null
-  const number = num(pick(v, 'number', 'id'), 0)
+  const number = num(pick(v, 'number'), 0)
   if (!number) return null
   const state = str(pick(v, 'state'), 'open').toLowerCase()
   return {
@@ -786,13 +773,13 @@ export function toIssue(v: unknown): Issue | null {
     title: str(pick(v, 'title')),
     state: state === 'closed' ? 'closed' : 'open',
     labels: arr(pick(v, 'labels')).map(toLabel).filter((l): l is IssueLabel => l !== null),
-    url: str(pick(v, 'url', 'html_url')),
-    updated_at: str(pick(v, 'updated_at', 'updatedAt')),
+    url: str(pick(v, 'url')),
+    updated_at: str(pick(v, 'updated_at')),
     author: (() => {
-      const a = pick(v, 'author', 'user')
-      return isRec(a) ? str(pick(a, 'login', 'name')) : str(a)
+      const a = pick(v, 'author')
+      return isRec(a) ? str(pick(a, 'login')) : str(a)
     })(),
-    body_excerpt: str(pick(v, 'body_excerpt', 'excerpt')),
+    body_excerpt: str(pick(v, 'body_excerpt')),
   }
 }
 
@@ -813,7 +800,7 @@ export function toSubmodules(raw: unknown): ProjectSubmodule[] {
 
 export function toIssues(raw: unknown): Issue[] {
   const root = isRec(raw) ? raw : {}
-  return arr(pick(root, 'issues', 'items')).map(toIssue).filter((i): i is Issue => i !== null)
+  return arr(pick(root, 'issues')).map(toIssue).filter((i): i is Issue => i !== null)
 }
 
 export function toIssueDetail(raw: unknown): IssueDetail | null {
@@ -833,7 +820,7 @@ function toOwner(v: unknown): MemOwner {
   return s === 'bot' || s === 'pane' || s === 'herdr' ? s : 'unknown'
 }
 
-/** `GET /api/mem/processes`（SPEC §15.2）。舊 daemon 沒有這支 → 空清單。 */
+/** `GET /api/mem/processes`（SPEC §15.2）。 */
 export function toMemProcesses(v: unknown): MemProcesses {
   const r = isRec(v) ? v : {}
   const rows: MemProcess[] = arr(r.processes)
@@ -856,7 +843,7 @@ export function toMemProcesses(v: unknown): MemProcesses {
   return { host: str(r.host), sampled_at: str(r.sampled_at), processes: rows }
 }
 
-/** `GET /api/mem` / WS `mem_updated`（SPEC §15）。舊 daemon 沒有這支 → 全 0，UI 就不顯示。 */
+/** `GET /api/mem` / WS `mem_updated`（SPEC §15）。缺的數字一律當 0。 */
 export function toMemSnapshot(v: unknown): MemSnapshot {
   const r = isRec(v) ? v : {}
   const n = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0)
@@ -873,7 +860,7 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
       bytes: n(b.bytes),
       processes: n(b.processes),
     })),
-    // 舊 daemon 沒有整機那一節 → null，UI 只顯示已用量（不要畫成「剩 0」）。
+    // daemon 讀不出整機記憶體時沒有這一節 → null，UI 只顯示已用量（不要畫成「剩 0」）。
     machine: isRec(h.machine) && n(h.machine.total_bytes) > 0
       ? { total_bytes: n(h.machine.total_bytes), available_bytes: n(h.machine.available_bytes) }
       : null,

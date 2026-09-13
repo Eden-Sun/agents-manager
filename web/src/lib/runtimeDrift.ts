@@ -33,7 +33,7 @@ function comparesFast(kind: string): boolean {
 const NONE = '（CLI 預設）'
 
 /**
- * daemon 知不知道這個 run 實際在跑什麼。三個欄位都是 `null` = 舊 daemon、或收編來的 pane
+ * daemon 知不知道這個 run 實際在跑什麼。三個欄位都是 `null` = 收編來的 pane
  * （argv 不是我們組的）：不知道就不要拿 `bots` 的設定假裝成 runtime。
  */
 export function runtimeKnown(run: Run | null): boolean {

@@ -1302,8 +1302,6 @@ struct NewHost {
     ssh_opts: Option<Vec<String>>,
     herdr_session: Option<String>,
     remote_path: Option<String>,
-    /// Accepted so an older client still posts cleanly; ignored since v4.3 (SPEC §11.4).
-    hook_port: Option<u16>,
 }
 
 /// Write the `[[hosts]]` entry (upsert), then connect and report the outcome.
@@ -1324,12 +1322,7 @@ async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Res
         ssh_opts: b.ssh_opts.unwrap_or_default(),
         herdr_session: b.herdr_session.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "agents-manager".into()),
         remote_path: b.remote_path.unwrap_or_default(),
-        // v4.3: dropped on the way in, so saving a host from the UI also clears a stale value.
-        hook_port: None,
     };
-    if b.hook_port.is_some() {
-        tracing::warn!(host = %b.name, "hook_port is ignored since v4.3 (remote hooks report through herdr; see SPEC §11.4)");
-    }
     let c2 = cfg.clone();
     app.cfg
         .update(move |f| {
