@@ -39,7 +39,10 @@ class FakeDaemon(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"null") if length else None
         path = self.path
-        type(self).seen.append({"method": method, "path": path, "token": self.headers.get("X-AM-Token"), "body": body})
+        type(self).seen.append({
+            "method": method, "path": path, "token": self.headers.get("X-AM-Token"), "body": body,
+            "bot_id": self.headers.get("X-AM-Bot-Id"), "bot_token": self.headers.get("X-AM-Bot-Token"),
+        })
         if path in type(self).slow:
             time.sleep(1.5)
         entry = type(self).routes.get(f"{method} {path.split('?')[0]}")
@@ -751,6 +754,70 @@ class MiscCommandTest(CliCase):
         self.write_runtime({"daemon_url": "http://10.0.0.5:7788", "manager_bot_id": "b"})
         self.assertEqual(self.bad("state")["error"], "not_loopback")
         self.assertEqual(FakeDaemon.seen, [])
+
+
+class DualRoleTest(CliCase):
+    """AGM 雙角色（SPEC §18.15）：CLI 知道自己是哪個角色，身分靠 pane 的 bot token，不靠字串。"""
+
+    def setUp(self):
+        super().setUp()
+        for k in ("AM_BOT_ID", "AM_HOOK_TOKEN"):
+            old = os.environ.pop(k, None)
+            self.addCleanup(lambda k=k, v=old: os.environ.__setitem__(k, v) if v is not None else os.environ.pop(k, None))
+        self.write_runtime({
+            "daemon_url": f"http://127.0.0.1:{self.port}", "manager_bot_id": "bot-agm",
+            "role": "responder", "self_bot_id": "bot-resp",
+        })
+
+    def last(self, method: str, prefix: str) -> dict:
+        return [r for r in FakeDaemon.seen if r["method"] == method and r["path"].startswith(prefix)][-1]
+
+    def test_the_role_token_rides_along_only_from_its_own_pane(self):
+        FakeDaemon.routes["POST /api/supervisor/inbox/e1/ack"] = (200, {})
+        os.environ["AM_BOT_ID"], os.environ["AM_HOOK_TOKEN"] = "bot-resp", "hook-secret"
+        self.ok("ack", "e1")
+        seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
+        self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-resp", "hook-secret"))
+        # 同一支 CLI 在別顆 bot 的 pane 裡跑：不帶那顆 bot 的 token，也就冒充不了協調者。
+        os.environ["AM_BOT_ID"] = "bot-worker"
+        self.ok("ack", "e1")
+        seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
+        self.assertIsNone(seen["bot_token"])
+        self.assertNotIn("hook-secret", json.dumps(self.ok("whoami")))
+
+    def test_whoami_and_inbox_mine_follow_the_runtime_role(self):
+        self.assertEqual(self.ok("whoami")["role"], "responder")
+        FakeDaemon.routes["GET /api/supervisor/inbox"] = (200, {"events": []})
+        self.ok("inbox", "--role", "mine")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.last("GET", "/api/supervisor/inbox")["path"]).query)
+        self.assertEqual(q["role"], ["responder"])
+        self.write_runtime({"daemon_url": f"http://127.0.0.1:{self.port}", "manager_bot_id": "bot-agm"})
+        self.assertEqual(self.ok("whoami")["role"], "patrol", "舊的 runtime.json 就是巡檢")
+
+    def test_responder_lifecycle_and_review_role(self):
+        for op in ("setup", "start", "stop"):
+            FakeDaemon.routes[f"POST /api/supervisor/responder/{op}"] = (200, {"status": op})
+        FakeDaemon.routes["GET /api/supervisor/responder"] = (200, {"configured": True})
+        self.assertTrue(self.ok("responder", "show")["configured"])
+        self.ok("responder", "setup", "--model", "opus", "--effort", "high")
+        self.assertEqual(self.last("POST", "/api/supervisor/responder/setup")["body"], {"model": "opus", "effort": "high"})
+        self.ok("responder", "start")
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1"})
+        self.ok("assign", "--bot", "b1", "--text", "清 chrome", "--request-id", "gc-1", "--review-by", "patrol")
+        self.assertEqual(self.last("POST", "/api/supervisor/assignments")["body"]["review_role"], "patrol")
+        self.ok("assign", "--bot", "b1", "--text", "x", "--request-id", "r-2")
+        self.assertNotIn("review_role", self.last("POST", "/api/supervisor/assignments")["body"])
+
+    def test_reports_are_attributed_to_this_role_not_the_patrol(self):
+        FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
+        self.ok("mission", "event", "m1", "--kind", "note", "--text", "已核准")
+        self.assertEqual(self.last("POST", "/api/missions/m1/events")["body"]["relay_from"], "bot-resp")
+
+    def test_responder_persona_goes_to_its_own_endpoint(self):
+        FakeDaemon.routes["PUT /api/supervisor/responder/persona"] = (200, {"role": "responder"})
+        self.ok("persona", "set", "--role", "responder", "--text", "你是 AGM 的協調者")
+        self.assertEqual(self.last("PUT", "/api/supervisor/responder/persona")["body"], {"text": "你是 AGM 的協調者"})
+        self.assertEqual(self.bad("persona", "adopt-embedded", "--role", "responder")["error"], "bad_args")
 
 
 class MissionCommandTest(CliCase):
