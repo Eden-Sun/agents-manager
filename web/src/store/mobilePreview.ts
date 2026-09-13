@@ -1,0 +1,54 @@
+/**
+ * 桌機手機預覽的開關狀態（見 `components/MobilePreview.tsx`）。
+ *
+ * 只是一個 localStorage 布林值，不進 zustand：它不影響任何資料，純粹是本機的版面偏好，
+ * 而且 iframe 裡那份 app 是另一個 JS 世界，共用 store 沒有意義。
+ */
+
+import { useSyncExternalStore } from 'react'
+
+const KEY = 'am.mobilePreview.open'
+/** 同一個 tab 內跨元件同步（`storage` 事件只會送到其他 tab）。 */
+const EVENT = 'am:mobile-preview'
+
+/**
+ * iframe 裡載入的是同一個 app，所以它自己也會想再開一個預覽——用網址參數把它關掉。
+ * 只在模組載入時讀一次：`routeSync` 之後改寫網址也不該讓預覽突然長出巢狀預覽。
+ */
+export const IN_MOBILE_PREVIEW =
+  typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('mobilePreview')
+
+/** 預覽的視窗寬度。390 = iPhone 直向寬度，也是 `scripts/ui-goal-shots.mjs` 用的那個數字。 */
+export const MOBILE_PREVIEW_W = 390
+
+function read(): boolean {
+  try {
+    return window.localStorage.getItem(KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function subscribe(onChange: () => void): () => void {
+  window.addEventListener(EVENT, onChange)
+  window.addEventListener('storage', onChange)
+  return () => {
+    window.removeEventListener(EVENT, onChange)
+    window.removeEventListener('storage', onChange)
+  }
+}
+
+/** 預覽是否開著。在預覽自己裡面一律 `false`。 */
+export function useMobilePreviewOpen(): boolean {
+  const on = useSyncExternalStore(subscribe, read, () => false)
+  return on && !IN_MOBILE_PREVIEW
+}
+
+export function setMobilePreviewOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(KEY, open ? '1' : '0')
+  } catch {
+    // 無痕視窗寫不進去：這一輪仍然要生效，所以照樣發事件。
+  }
+  window.dispatchEvent(new Event(EVENT))
+}

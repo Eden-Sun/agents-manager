@@ -7,6 +7,7 @@ import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
+import { MobilePreview } from './components/MobilePreview'
 import { Sidebar } from './components/Sidebar'
 import { TeamLaunchPanel } from './components/TeamLaunchPanel'
 import { TeamPanel } from './components/TeamPanel'
@@ -300,6 +301,8 @@ export default function App() {
       {/* 版面上的第三格（桌機在右緣、≤1024px 在底部），刻意掛在 `main` 外面：換 bot /
           project / team 都不會 unmount，暫存的圖片才跨得過去。 */}
       <ImageShelf />
+      {/* 右欄第二格：桌機才有、預設關閉的手機版預覽（環境設定 → 顯示）。 */}
+      <MobilePreview />
       <Notices />
     </div>
   )
