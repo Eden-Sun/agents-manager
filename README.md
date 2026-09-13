@@ -136,14 +136,14 @@ cargo dev
 cargo down    # 兩個都停掉
 ```
 
-> **有 AGM 總管的機器上，5173 看的是已經合併進 `origin/main` 的東西**：dev server 由 AGM 的看門狗維護（不是 `cargo dev` 起的那顆），吃的是一棵只跟 `origin/main` 的乾淨 worktree（每 5 分鐘 `git fetch && git reset --hard origin/main`），推上去重新整理就看得到。bot 要驗自己**還沒提交**的改動請另開自己的 port，不要佔 5173——那是使用者的視窗（[SPEC §18.1](docs/SPEC.md)）。7788 是正式 daemon，前端改動要等下一次 release 重建才會進去。
+> **有 AGM 總管的機器上，5173 看的是已經合併進 `origin/main` 的東西**：dev server 由 AGM 的看門狗維護（不是 `cargo dev` 起的那顆），吃的是一棵只跟 `origin/main` 的乾淨 worktree（每分鐘 `git fetch && git reset --hard origin/main`），推上去重新整理就看得到。bot 要驗自己**還沒提交**的改動請另開自己的 port，不要佔 5173——那是使用者的視窗（[SPEC §18.1](docs/SPEC.md)）。7788 是正式 daemon，前端改動要等下一次 release 重建才會進去。
 
 
 `cargo dev` / `cargo down` 是 `xtask/` 的別名（見 `.cargo/config.toml`），行為是 `cargo build --bin agents-managerd` + `bun install` 之後，把 daemon 與 `vite --host` 當成一般子行程啟動，PID 記在 `target/dev.pids`，log 在 `target/dev-logs/`。
 
 **開發版的 daemon 一律 bind 每張網卡**（不只 loopback），peer 位址與 Origin 檢查也整個放行（不只 RFC1918——Tailscale 之類 overlay network 用的是 100.64.0.0/10，硬列白名單追不完），這樣同一區網或 Tailscale 上的手機/其他機器可以直接連 `:7788` 或 `:5173`，不必再過 SSH tunnel。**只有打包成 macOS app**（`scripts/package-dmg.sh`，執行檔在 `…app/Contents/MacOS/agents-managerd`）才只 bind `127.0.0.1`、只認本機。
 
-以前反過來：預設關閉，只有 `cargo dev` 帶的 `AM_DEV_LAN=1` 才打開。但這顆 binary 一天會被人和其他 agent 用 `cargo build --release && ./target/release/agents-managerd serve` 重啟幾十次，每次忘記帶環境變數，手機和其他機器就悄悄連不上 `:7788`。忘得掉的環境變數不是安全邊界，「在不在 .app bundle 裡」是啟動器忘不掉的，而且非開發者只會跑打包版。要覆寫就用 `AM_DEV_LAN`：`=0` 讓開發版只收本機，`=1` 讓打包版對外開。
+判斷依據是「在不在 .app bundle 裡」而不是環境變數（daemon 一天被重啟幾十次，忘得掉的環境變數不是安全邊界）。要覆寫就用 `AM_DEV_LAN`：`=0` 讓開發版只收本機，`=1` 讓打包版對外開。
 
 也可以手動分開跑，這樣 7788 自己就送 UI，不必另開 Vite：
 
@@ -199,22 +199,19 @@ VITE_MOCK=1 bun run dev
 
 | 文件 | 內容 |
 |---|---|
-| [`docs/SPEC.md`](docs/SPEC.md) | 規格書（目前標 v3.6，內文含後續修訂）：目標、資料模型、架構、hook、對帳、遠端主機、grok、群組聊天 |
+| [`docs/SPEC.md`](docs/SPEC.md) | 規格書（現況）：資料模型、架構、hook、對帳、遠端主機、grok、群組聊天、額度、身份、AGM 運維與群組任務 |
 | [`docs/SPEC-team.md`](docs/SPEC-team.md) | 「以 issue 為單位叫出一整個 team」的設計提案（PM / 執行者 / reviewer）。**提案 + 早期實作**，尚未併入 SPEC.md |
 | [`docs/API.md`](docs/API.md) | HTTP / WebSocket 契約（前端以此為準） |
-| [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、mock、與 API 的對齊、已知 UI 決策 |
-| [`docs/PROGRESS.md`](docs/PROGRESS.md) | 實作進度、驗收紀錄、**已知問題** |
+| [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、驗證指令、讀程式看不出來的約定 |
 | [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令契約與時序測試 |
 | [`docs/PACKAGING.md`](docs/PACKAGING.md) | 打包成 macOS `.dmg`（Apple Silicon、ad-hoc 簽章）|
 | [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 已定案的 UI 取捨 |
-| [`docs/goals/`](docs/goals/) | 每項功能的目標、設計與實測紀錄（子 agent 追蹤、主機 shell、遠端 gh 登入、圖片托盤、UI 打磨） |
-| [`docs/screenshots/`](docs/screenshots/) | 歷次 UI 截圖 |
+| [`docs/goals/agm-supervisor-persona.md`](docs/goals/agm-supervisor-persona.md) | AGM 人設的內嵌來源（`include_str!` 編進 daemon） |
 
-後端 / 前端交接筆記在 `docs/HANDOFF-BACKEND.md`、`docs/HANDOFF-FRONTEND.md`。
+文件只寫現況；設計演進、驗收紀錄與舊截圖看 git 歷史。
 
 ## 現況
 
-- 單 bot 對話、群組 `@mention`、遠端 host（SSH + 反向 hook）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領，是正在用的路徑。
+- 單 bot 對話、群組 `@mention`、遠端 host（SSH 轉發 + herdr 事件／spool）、額度條、身份、圖片附件與暫存托盤、主機 shell、遠端 gh 登入、子 agent 血緣認領，是正在用的路徑。
 - 判斷邏輯（專案刪除守門、team 面板狀態、bot 燈號）抽成純函式，用 `node --test` 跑；daemon 端 `cargo test -p agents-managerd`，shim 腳本另有 `sh` 測試。
 - **Issue Team 的 scheduler 仍早期**：能組隊、轉送、暫停，但不是穩定產品。協定解析失敗、預算觸頂都會 `paused`，不會自己無限轉。
-- 已知問題（Codex hook 未在真帳號驗完、群組時間軸 ULID 同毫秒排序等）寫在 [`docs/PROGRESS.md`](docs/PROGRESS.md) 的「已知問題」。

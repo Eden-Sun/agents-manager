@@ -1,196 +1,16 @@
 # agents-managerd HTTP / WebSocket API
 
-## AGM：歷史證據搜尋（2026-09-09）
-
-`GET /api/supervisor/evidence?q=<文字>&bot_id=<可選>&project_id=<可選>&before=<cursor>&limit=20`
-
-沿用 `X-AM-Token` 認證。`q` 必填，去除頭尾空白後 1–500 字；搜尋是字面子字串（`%`、`_` 不作萬用字元），不是語意搜尋。`limit` 限制 1–100。含已刪除 bot 的歷史，保留 bot/project ID 與名稱供接續判斷。
-
-回應 `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,content,source,incomplete,created_at,truncated}],has_more,next_cursor}`。
-依 `(created_at DESC,id DESC)` 排序；`next_cursor` 是不透明字串，下頁原樣 URL encode 放入 `before`。同毫秒訊息不會因分頁漏掉。每筆 content 最多 16,000 字，超過會有 `truncated:true`；原文仍可由既有 bot messages 介面查閱。
-空查詢、過長查詢或壞 cursor 回 400。此介面只提供證據，不宣稱回合完成等於工作成功，也不把命中次數當 bot 適合度。
-
-## AGM：總管持久層（2026-09-09）
-
-全部掛在既有 `X-AM-Token` 認證下。未部署的 daemon 對這些路徑回 404 —— 前端可以直接用 404 判斷「這台還不支援」，daemon 不會用 200＋空 body 假裝支援。
-
-- `GET /api/supervisor` →
-  `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{status,url},pending_count,assignments:[]}`。
-  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。
-  `pending_count` = 未結案 assignment ＋ 未 ack 的 inbox 事件。
-- `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
-  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `notify_exhausted`（門檻見 SPEC §18.9）。
-  一個 resource 同時只會有一筆 `open`（partial unique index），重啟不會開出第二筆；恢復後再壞是新的一筆。
-  開啟與恢復各推一則 inbox 事件（`incident_opened` / `incident_resolved`）。
-- `GET /api/supervisor/remote` →
-  `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
-  狀態只有 `requested` | `verified` | `unavailable` | `unknown`——**沒有 `active`**。argv 帶了
-  `--remote-control` 只買到 `requested`。`capability.status` 目前是 `unsupported`：這台 daemon 沒有可靠的
-  Remote Control 觀測來源（herdr pane、hook、session 都不帶這個資訊），所以它不會宣稱手機連上了。
-  `status` 是算過的：觀測超過 `ttl_secs`（900 秒）或 AGM 換了 session 就退回 `unknown`（`revoked` 說明原因），
-  `url` 也跟著不回——URL 不是連線證據（`url_is_evidence:false`）。
-  `POST /api/supervisor/remote {status,source,actor?,evidence?,url?}` → 同上。`source` 本部署只收 `manual`；`provider` 保留給未來觀測 adapter，外部宣稱會被拒絕。
-  （`argv` 是 daemon 自己的紀錄，會被拒）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run。人工確認記成一個人的宣稱，15 分鐘後失效。
-- `GET /api/supervisor/persona` →
-  `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
-  **持久版是權威**：`setup` 只在沒有人設時用內嵌版 seed，之後不再覆寫（支援此機制的 binary 即使內嵌版較舊，也不會因 setup 降版）。
-  `loaded.status` 只有三種，沒有 `verified`：`unknown`（沒在跑）、`stale`（session 比人設舊，**確定**沒載到）、
-  `unverified`（session 啟動時間晚於人設，所以是帶著這份啟動的，但 daemon 看不到 session 現在握著什麼）。
-  `needs_restart` 只有 `stale` 時為 true；它是「要重啟才會載到」，不是「已經載到了」。
-  `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1、重算 hash，並把 `config.toml` 的 bot
-  persona 與總管 cwd 的 `persona.md` 一起改寫（那兩份是副本，不要手改）。`expected_version` 對不上且正文不同時回 409 `version_mismatch`。若副本同步失敗，回 409 `persona_sync_incomplete`，帶 `stored:true` 與已保存的 `version`；重送相同正文可修復副本，不增加版本，也不會被舊 expected_version 阻擋。
-  首次升級先保留既有 AGM `bots.persona`（source=`legacy_bot`）；完全沒有既有人設才使用內建版。
-  `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`。這是內嵌版**唯一**能
-  取代持久版的路徑：明確的遷移，不是 setup 的副作用；內容相同時回 `changed:false`。
-- `GET /api/supervisor/build-inputs` → `{paths:[…],embedded:[{path,symbol}],note}`。
-  會被編進 binary 的路徑，含 `include_str!` 進來的 `docs/goals/agm-supervisor-persona.md` 與 `scripts/agm.py`。
-  例行更新判斷「只動到 docs」要吃這份，不然人設改了會被當成不必重建（SPEC §18.11）。
-- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,...}]}`；
-  `POST /api/supervisor/approvals {requester,purpose,scope,target_commit?,expires_in_secs?}` → 一筆 `pending` 核准，
-  同時推一則 `approval_requested` inbox 事件給 AGM（它自己核駁，不用使用者轉達）。`purpose`：`rebuild` | `restart`。
-  `POST /api/supervisor/approvals/{id}/decide {decision,actor?,reason?,expires_in_secs?}`，`decision`：`approve` | `deny` | `revoke`。
-  同樣的 decision 重送回 `idempotent:true`；只有 `pending` 能被 approve（已決定過的要重新申請）。
-- `GET /api/supervisor/maintenance/safety?exclude=<id,id>` → `{safe,working[],in_flight[],unreadable[],blocked_waiting_for_user[],queued_assignments,checked_at,excluded_bot_ids[]}`。
-  `exclude` 可省略（不排除任何 bot），以逗號分隔 bot ID，忽略空項與重複 ID；同 acquire 的 `exclude_bot_ids` 語意，回 `excluded_bot_ids` 供核對。CLI `agm lease safety --exclude-bot <builder> --exclude-bot <AGM>` 會傳此查詢；檢查仍為唯讀，不取得租約。
-  **唯讀**，只說「現在」。`blocked`（在等使用者回答）只回報不阻擋，重啟本來就會跳過它。
-- `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`；
-  `POST /api/supervisor/leases/{resource}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}`
-  → `{lease,approval,safety}`。resource 只能是 `rebuild` / `restart`。acquire 會在同一個 supervisor lock 裡
-  重驗核准（狀態、到期、purpose、commit 必須對得上）與 idle，再以單一條件式 UPDATE 拿走窗口——兩個執行者搶同一個
-  窗口只有一個會成功（409 `lease_held`）。ttl 預設 900 秒、上限 3600。
-  `POST …/renew {owner,fence,ttl_secs?}`、`POST …/release {owner,fence}`：fence 是 acquire 回的號碼，
-  只會往上加；租約過期被別人接手後舊 fence 立刻失效（409 `lease_lost`），所以舊持有人不能靠昨天的核准繼續動作。
-  release 會把對應核准標成 `consumed`：一次核准一個窗口。
-  拿著 `restart` 租約期間，daemon 的 assignment 派送會 hold 住（留在 `queued`，不丟工作、不算重試次數）。
-- `GET /api/supervisor/health` → daemon 端的健康摘要，包含 `status`（`healthy`、`degraded`、`critical`）、AGM
-  狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（真正未結案的 assignment 數，
-  含 `awaiting_review` 與 `blocked`）、`awaiting_review`（其中等驗收的）與
-  `inbox_open`（尚未 ack 的 inbox 事件數；三者分開，不相加）。
-  `manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents}` 分開：
-  前者只回答「AGM 自己能不能工作」，後者是 incident 推出來的系統狀態。頂層 `status` 是**相容投影**＝兩者取較嚴重者，
-  所以只讀 `status` 的舊呼叫端不會在 host 掛掉時仍看到 `healthy`（SPEC §18.9）。daemon 每 30 秒檢查一次，
-  只在摘要指紋變化時發 `supervisor_health` 事件；`health_changed` inbox 事件**只在** `status` 或總管狀態
-  （`idle`／`busy` 視為同一個 `running`）真的改變時入列，bot 忙碌／數量等數字變動不算；總管 `stopped`／`starting`
-  期間不入列，恢復後只補一則最新快照。不需要 AGM 使用 `/loop`。
-- `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，
-  寫入 `CLAUDE.md`、`persona.md`、`runtime.json`（`{daemon_url,manager_bot_id,bot_id,data_dir,…}`，**不含 token**）、
-  `bin/agm`（`scripts/agm.py`，`include_str!` 編進二進位，release 安裝一樣可用）、`handoff.md`（已存在就不覆蓋）。
-  args 設為 `["--remote-control","AGM"]`，`autostart=false`。**只建立，不啟動。**
-  身份 `cc0` 不存在 → 409 `identity_missing`；專案裡有另一個同名 `AGM` 但不是本總管 → 409 `name_taken`。
-  總管認的是持久化的 `bot_id`，不是名字：使用者在側欄改名不會讓重跑 setup 多開一個。
-- `POST /api/supervisor/start {}` / `stop {}` → 同 `GET` 的 status。`start` 後 `remote.status` 是 `requested`，
-  **不是** `active`：argv 帶了 `--remote-control` 只代表要求過，遠端有沒有真的起來要另外觀察才能宣稱。
-  2026-09-12 起 `remote` 是完整物件（見 `GET /api/supervisor/remote`），`active` 這個值已經不存在。
-  `start` 同時把總管標成「應該在跑」、`stop` 標成「使用者要它停」：之後總管不是經由這支 `stop` 而停掉
-  （被殺、崩潰、更新重啟沒回來），daemon 的 watchdog 會自動再 `start`——第一次等 30 秒，之後 60／120／300 秒退避，
-  連續 5 次失敗就把原因寫進 `status_detail` 並停止重試，直到人再 `start` 一次。`waiting_quota` 期間不會自動啟動；
-  `setup` 後還沒 `start` 過的總管也不會被拉起。
-- `POST /api/supervisor/fallback {}` → 同 status，多一個 `switched:bool`。在 cc0 的兩個候選之間切換，
-  一個冷卻窗（30 分）內最多自動切一次；額度是同一個帳號的，切第二次不會生出額度，所以會停在
-  `waiting_quota` 並記 `quota_reset_at`（讀不到就留 null，不當成 100%）。
-  切換（手動與自動皆同）只在總管 `idle` 且無 in-flight turn、或根本沒在跑時執行；正在回合中回 409 `busy`
-  （自動路徑則下一個 tick 再問）。`/model` 走 `send_slash_line`：會答 claude 的「Switch model?」確認框，
-  框關不掉就退出；live 套用不成而總管仍 idle 時改用重啟套用（`status_detail` 會註明「重啟套用」）。
-  自動判斷（controller 每 10 秒，`supervisor/policy.rs`）：
-  1. 5 小時或 7 天窗任一 `critical`（兩個候選共用）→ `waiting_quota`，`quota_reset_at` = 其中最近的 `resets_at`，
-     不做無效切換；窗恢復（新讀數、或 `resets_at` 已過）→ 解除。
-  2. 在 `fable`、Fable 週桶剩餘 < 5% → 切 `opus`，`quota_reset_at` = Fable 桶的 `resets_at`。
-  3. 在 `opus`、Fable 桶剩餘 ≥ 20%（或其 `resets_at` 已過——探測讀數可能比重置舊）、且上次切換的 30 分冷卻已過
-     → 切回 `fable`，`quota_reset_at` 清空。
-  讀不到額度就什麼都不做（未知不等於滿）。
-- `GET /api/supervisor/assignments` → `{assignments:[]}`；
-  `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?,expects_review?}` → 一筆 assignment
-  `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,
-  turn_status,evidence_complete,open,awaiting_review,review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts}`。
-  （剛派出去、回合還在跑時 `turn_status` 是 `null`，status 為 `queued`／`delivered`／`unknown`；回合結束才有值。）
-  `status` 是**生命週期**，不是傳輸狀態：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review`（回合結束，等驗收）
-  → `completed` | `failed` | `cancelled` | `superseded`（AGM 決定過），另有 `blocked`（AGM 說還在等，仍算未結案）。
-  傳輸的原始事實留在 `delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`，回合還在跑時是 `null`）
-  與 `evidence_complete`。**回合結束不會自己變成 `completed`**——連送不出去的交辦也是進 `awaiting_review`，
-  daemon 不會替沒人看過的工作結案（SPEC §18.8）。
-  `kind`（2026-09-13）：`task`（預設）或 `notice`。**notice = 只是把話說給 bot 聽**（「收到」「進 idle」「看完即可」），
-  送達且回合正常結束就直接 `completed`，不進 `awaiting_review`、不會被 `assignment_stalled` 探針看到；
-  inbox 事件是 `assignment_noticed`（`needs_review=false`）。送**失敗**的 notice 仍然停在 `awaiting_review`——
-  送不出去本身就是要有人看的壞消息。`expects_review:false` 是同一件事的等價寫法，兩個都給時以它為準；
-  兩個都不給 = 舊行為（CLI：`agm assign --notice`）。
-  `quota_blocked`（2026-09-13）：目標 bot 的帳號被 CLI 擋著（`quota.limit_hit`）。**仍算未結案**，回應多帶
-  `resume_at`（額度預計回來的時間）與 `quota_retries`（已自動重送次數）。daemon 會在額度回來後用
-  `<client_request_id>#r<n>` 自己重送（同一次重送仍然冪等），並各推一則 `assignment_quota_blocked` /
-  `assignment_quota_resumed` inbox 事件；重送超過 6 次才交給 AGM（`awaiting_review`，`turn_status=quota_exhausted`）。
-  `legacy_closed=true` 是驗收狀態出現之前就被關掉的舊資料：關掉了，但沒有人驗收過，不要當成已驗收。
-  `ownership` 是這筆交辦負責的檔案／模組；建立時 daemon 會回 `ownership_conflicts`（前綴重疊的其他未結案交辦），
-  只回報、不阻擋，協調仍由 AGM 決定。
-- `GET /api/supervisor/assignments/{id}` → 單筆，多一個 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
-- `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}`
-  → 更新後的 assignment（含 `reviews`，`followup` 時另含 `followup`）。這是**唯一**能把交辦結案的路徑。
-  `decision`：`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`（仍未結案）、
-  `followup`→原本那筆變 `superseded`，並用 `followup_request_id` 另開一筆 `follow_up_of` 指回來的新交辦
-  （**不會**改寫已經送出去的 text）。
-  冪等：同樣的 decision 重送回同一筆（`idempotent:true`），不會寫第二筆稽核；`followup` 靠 `followup_request_id` 去重。
-  409：已結案的不能再決定（`already_closed`，要接續請開 follow-up）；還在跑的只接受 `cancel`（`still_executing`）。
-  `cancel` 不會中止那個回合：bot 接下來說什麼不會再記到這筆交辦上。`block` 要等回合結束（會停在
-  `awaiting_review`）再標，否則 row 會在回合還開著時離開執行中集合，結果就沒有地方可去。
-  先落地再送 prompt；同 `client_request_id` 重試回同一筆（換了 bot 或換了 text 都回 409，不會靜靜當成已生效）。
-  對方是 team 成員 → 409 `team_managed`。對方在忙 → 留 `queued`，`error` 記**真正的理由**
-  （`bot has no active run`、`a turn is already in flight`、`needs_login: …`；不是分類字串 `conflict`），
-  `next_attempt_at` 說下次什麼時候再試。由 controller 依 15/30/60/120/300 秒退避重試，
-  一律沿用同一個 `client_request_id`，所以 worker 不會收到第二份。delivery `unknown` 只對帳、不重送。
-  送出的那則 user message 在寫入時就帶 `messages.relay_from` = 總管 bot id（走 `prompt_relayed`，不是事後補寫），來源顯示是「AGM → bot」而不是使用者。
-  daemon 自己送給 AGM 的通知（inbox digest、啟動握手）帶哨符 `daemon`，所以 AGM 的對話裡分得出哪幾句是使用者真的打的。
-- `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；
-  `PUT /api/supervisor/handoff {summary}` → `{summary,summary_version}`，同時寫一份 `handoff.md` 到總管 cwd（權威仍在資料庫）。
-- `GET /api/supervisor/inbox?all=0|1&limit=200` →
-  `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},created_at,updated_at}],open,all,limit}`。
-  預設只列 `state!='handled'`，`created_at` 升序（最舊在前，照順序 ack 才清得掉）；`all=1` 才含已處理的（最新在前）。
-  `limit` 預設 200、上限 1000；`open` 是未 ack 的總數。
-  `POST /api/supervisor/inbox/{id}/ack` → `{}`。`state`：`pending`（還沒告訴總管）→ `delivered`（已送出通知）→ `handled`（總管確認）。
-  送出不等於處理完：通知失敗會留在 `pending`，總管自己的回合不會產生對自己的通知。
-  送達判斷看 `lifecycle` 回的 `delivery`：`failed` **不算**已送達（留 `pending` 並退避），`unknown` 記成 `unknown`
-  並綁 `notify.turn_id`，之後對帳原回合而不是重送第二份。delivered 但通知回合失敗／消失，或超過
-  `[supervisor] notify_ack_deadline_secs`（預設 1800 秒）還沒 ack，會被放回 `pending`；
-  重送次數上限 `[supervisor] notify_max_attempts`（預設 5）——用完就停止推送並開一筆 `notify_exhausted` incident，
-  事件本身仍留在 inbox（不吞事件，也不無限燒額度）。ack 是單向的：ack 之後遲到的 delivered 寫入不會把它打回未處理。
-  assignment 的狀態遷移與它的完成事件在**同一個 transaction**，daemon 在中間死掉不會留下「已結案但沒人被通知」；
-  啟動時另有一次補掃（舊 daemon 留下的那種）。
-  `pending` → `delivered` 的推送本身節流成每 `[supervisor] notify_interval_secs`（預設 600 秒，見 SPEC §18.3）最多一次，
-  一次把視窗內累積的事件併成一則通知；入庫不受影響（事件仍即時寫入、即時出現在這個端點）。
-  `kind` 除了 assignment 相關與 `health_changed`，另有 `bot_restart_failed`（批次更新重啟後某顆沒回來，payload
-  `batch_id,bot_id,name,error`）與 `supervisor_restart_retry`（總管自己重啟後 60 秒沒回來、已自動再啟動一次，payload
-  `batch_id,bot_id,name,ok,error`），見 §10.3a。
-- `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（含 run 的 `agent_status`、
-  `native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`）、未結案 assignment、待處理 inbox。
-  刻意不含 env、hook token、args 與 persona 全文。
-
-> AGM 的運維職責（dev server 看門狗、正式 daemon 的例行更新與重建條件、瀏覽器清理、persona 四份同步、
-> 共用工作樹規範）寫在 `docs/SPEC.md` §18，不在這裡也不在任何 bot 的記憶裡。
-
-### 總管的工具入口 `bin/agm`
-
-`scripts/agm.py` 由 `include_str!` 編進 daemon 二進位，`setup` 時寫成 `<cwd>/bin/agm`（0755），所以
-release 安裝不依賴 build 機上的 repo 路徑。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`）、
-`assign`（含 `--mission`／`--role`）、`assignments`、`inbox`（預設只列未 ack、最舊在前；`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`mission`（見「群組任務」一節的 CLI 對照）；輸出一律 JSON。
-
-執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`。
-**沒有 token**——CLI 自己在執行期 `GET /api/session` 取，不進 argv、不進檔案、不進交接摘要；
-`daemon_url` 只接受 loopback。設定目錄可用 `AGM_RUNTIME_DIR` 覆寫（測試用），其次 `--runtime-dir`。
-`bot_id` 是早期部署的欄位名，與 `manager_bot_id` 一起寫出，兩邊誰先升級都不會壞。
-
-daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。本文件是 SPEC §7 的具體定案，
-前端請以此為準。所有時間欄位皆為 RFC3339 UTC 字串（毫秒精度）。所有 id 為 ULID 字串。
+daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。行為與理由在 `SPEC.md`，這份只寫契約；前端以此為準。
+時間欄位一律 RFC3339 UTC（毫秒）；id 為 ULID 字串。沒有某個端點的舊 daemon 回 404，前端據此隱藏入口。
 
 ## 0. 認證
 
-1. `GET /api/session` — **不需 token**，但 daemon 會檢查 `Host` 必須是 `127.0.0.1:<port>` /
-   `localhost:<port>` / `[::1]:<port>`，且 `Origin`（若有）為本機。
-   ```json
-   { "token": "<32 hex chars>", "port": 7788 }
-   ```
-2. 其餘 `/api/*` 需 header `X-AM-Token: <token>`。缺或錯 → `401 {"error":"missing or bad X-AM-Token"}`。
-3. WebSocket：`/ws?token=<token>`（可加 `&since=<seq>`）。
-4. `/hook/*` 用 per-bot 的 `X-AM-Bot-Token`，前端不會用到。
+1. `GET /api/session` 不需 token，但 `Host` 必須是 `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`，`Origin`（若有）為本機。回 `{"token":"<32 hex>","port":7788}`。
+2. 其餘 `/api/*` 需 header `X-AM-Token`；缺或錯 → `401 {"error":"missing or bad X-AM-Token"}`。
+3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
+4. `/hook/*`、`/relay/announce` 用 per-bot 的 `X-AM-Bot-Token`。
 
-> 開發期 Vite proxy 需把 `/api`、`/ws`（含 WebSocket upgrade）、`/hook` 轉到 `127.0.0.1:7788`。
-> 因為 daemon 會檢查 `Host`，proxy 請開 `changeOrigin: true`（Vite 預設會改寫 Host 為 target）。
+Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並開 `changeOrigin: true`（daemon 檢查 `Host`）。
 
 ## 1. 錯誤格式
 
@@ -200,12 +20,12 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 | 401 | `{"error":"..."}` | token 錯 |
 | 403 | `{"error":"..."}` | Host / Origin 非本機 |
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"}` | 找不到 |
-| 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突，extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
+| 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
 
 ## 2. `GET /api/state`
 
-一次取回整棵樹。前端啟動、收到 `resync` 或 `project_changed` / `bot_changed` 時重新拉。
+一次取回整棵樹。前端啟動、收到 `resync`、`project_changed` / `bot_changed` 時重拉。
 
 ```json
 {
@@ -216,7 +36,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
   "projects": [
     {
       "id": "01M1S2SQPS9TA1DYRKNYCF2SJK",
-      "path": "/Users/m1pro/project/agents-manager",
+      "path": "/Users/me/project/agents-manager",
       "label": "agents-manager",
       "workspace_id": null,
       "bots": [
@@ -229,7 +49,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
           "args": [],
           "autostart": false,
           "inject_hooks": true,
-    "auto_approve": true,
+          "auto_approve": true,
           "primary": false,
           "run": null,
           "lamp": "offline",
@@ -242,10 +62,11 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 }
 ```
 
-`queued_turn`：這顆 bot 排在下一個要送的 Turn（`status = "queued"`，§6 的 turn 物件），沒有就 `null`。
-前端據此把輸入框畫成「已排隊」而不是可送出。
+- `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。
+- `unread` 固定 `0`（未讀由前端算）。
+- 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
-### `run` 物件（`null` = 目前沒有 active Run）
+### `run` 物件（`null` = 沒有 active Run）
 
 ```json
 {
@@ -259,171 +80,112 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 }
 ```
 
-### `lamp`（合成燈號，SPEC §2.2；前端直接用即可）
+### `lamp`（SPEC §2.2）
 
-| 值 | 建議顏色 | 條件 |
+| 值 | 顏色 | 條件 |
 |---|---|---|
-| `disconnected` | 灰 | daemon 與 herdr socket 斷線 |
+| `disconnected` | 灰 | daemon ↔ herdr（或該 host）斷線 |
 | `offline` | 離線灰 | 無 active Run |
-| `starting` | 黃閃 | run.state = starting |
-| `stopping` | 黃 | run.state = stopping |
-| `idle` | 綠 | running + idle |
-| `working` | 藍動畫 | running + working |
-| `blocked` | 紅 | running + blocked |
-| `unknown` | 灰黃 | running + unknown |
-
-`unread` 第一階段固定為 `0`。
+| `starting` / `stopping` | 黃閃 / 黃 | run.state |
+| `idle` / `working` / `blocked` / `unknown` | 綠 / 藍動畫 / 紅 / 灰黃 | running + agent_status |
 
 ## 3. 設定變更（寫回 config.toml）
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/api/projects` | `{"path":"/abs/or/~/path","label":"foo"}`（`label` 可省，預設取目錄名） | `200 {"project_id":"..."}`；路徑不存在 400；重複 409 |
-| DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 bot 有 active Run → 409 |
-| PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id":"...","needs_restart":false}`；label trim 後為空 → 400。不擋 active run：herdr 的 agent 身分取自 bot id，label 只影響 legacy 名稱與**下次啟動**的 `agent_name` slug |
-| POST | `/api/projects/{id}/bots` | `{"name":"foo-claude","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false}` | `200 {"bot_id":"...","name":"foo-claude"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；名稱重複 409，但 `name_auto:true` 時 daemon 自己往後找 `<base>-<n>`（回應的 `name` 是實際用的） |
-| PATCH | `/api/bots/{id}` | `{"name"?,"model"?,"args"?,"autostart"?,"auto_approve"?,"inject_hooks"?,"identity"?,"env"?,"primary"?}` | `200 {"needs_restart":bool}`；改名時有 active Run → 409（詳見 §10） |
-| DELETE | `/api/bots/{id}` | — | `200 {}`（會先 stop；conversation 與訊息保留，詳見 §10） |
-| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個欄位都沒有 → 400 |
+| POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
+| DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
+| PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id","needs_restart":false}`；trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug） |
+| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的） |
+| PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}` |
+| DELETE | `/api/bots/{id}` | — | 見 §10.4 |
+| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個都沒有 400 |
 
-這些操作成功後 daemon 會推 `project_changed` / `bot_changed`，前端收到後重新 `GET /api/state`。
+成功後推 `project_changed` / `bot_changed`。
 
-### `POST /api/order`（2026-09-09 新增）
+**`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
+config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
 
-側欄的排序。順序就是 config.toml 裡 `[[projects]]` / `[[projects.bots]]` 的陣列順序，
-所以 `GET /api/state` 回來的順序即是權威——前端不需要（也不該）自己存一份。
-
-- 只送要改的那一半：`projects` 只排專案，`bots` 只排指定專案底下的 bot。
-- **沒被列到的維持原相對順序接在後面**：別的 client 剛新增的項目不會因為這個請求消失或亂序。
-- config.toml 裡沒有的 id（child bot、已刪除的）直接忽略。
-- 成功後推 `project_changed`。
+**`bot.primary`**、**`bot.auto_approve`** 等欄位語意見 §10。
 
 ## 4. Run 控制
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/api/bots/{id}/start` | — | `200 {"run_id":"..."}`；已有 active Run → `409 {"error":"conflict","reason":"active run already exists","run_id":"..."}`；從使用者 herdr `default` session 匯入的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session","message":…}`（`/restart` 同，且在送 ctrl+c 之前就拒絕；2026-09-12）；herdr 失敗 502 |
-| POST | `/api/bots/{id}/stop` | — | `200 {}`；本來就沒有 Run → `204`（無 body）。default session 的 bot 只送 ctrl+c、**不關使用者的 pane** |
-| POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，並把 in-flight Turn 標 failed）；送不出 `esc` → 502，Turn **維持** in-flight |
-| POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}` — **強制**結束目前回合，見 §4.2 |
-| POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?:"..."}` | `200 {}`；`expect_run_id` 與現行 Run 不符 → 409 |
-| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?:"..."}` | `200 {}`；Run 沒有 pane → 404；`expect_run_id` 不符 → 409 |
-| POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `status='in_flight'`（包括 `delivery=unknown`）可放棄，其餘以 per-bot lock 內最新狀態及 CAS 判定為 `409 {"error":"conflict","reason":"turn is neither in-flight nor of unknown delivery","turn_id":"..."}`；409 不新增 system message |
-| POST | `/api/bots/{id}/login` | — | `200 {"run_id":"...","kind":"claude","command":"/login"}`；見下 |
+| POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502 |
+| POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run → `204`。default session 的 bot 只送 ctrl+c、不關 pane |
+| POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，in-flight Turn 標 failed）；`esc` 送不出 → 502，Turn 維持 in-flight |
+| POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
+| POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?}` | `200 {}`；`expect_run_id` 不符 409 |
+| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?}` | `200 {}`；沒有 pane 404；`expect_run_id` 不符 409 |
+| POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `in_flight`（含 `delivery=unknown`）可放棄，其餘在 per-bot lock 內 CAS 判定為 `409 {"reason":"turn is neither in-flight nor of unknown delivery","turn_id"}`（不新增 system message） |
+| POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
 
-`keys` 可用的鍵名由 herdr 驗證，常用：`enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
-
-**文字要用 `/text`，不要用 `/keys`。** `keys` 送的是鍵名，`\n` 不是任何一顆鍵的名字；一段
-多行文字拆成鍵名會在半路被擋掉。`/text` 走 `pane.send_text`（herdr 眼中的貼上，換行原樣
-留著），`enter`（預設 `true`）之後**另外**送一個 `enter` 鍵才是送出——同
-`/api/hosts/{name}/shells/{pane_id}/text`。這條不看 `agent_status`：它的用途正是回合跑到一半
-時再補一句（前端的「併送」）。
+- `keys` 的鍵名由 herdr 驗證，常用 `enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
+- **文字用 `/text` 不用 `/keys`**：`\n` 不是鍵名。`/text` 走 `pane.send_text`（herdr 眼中的貼上，換行保留），`enter`（預設 true）後另送 `enter` 鍵才是送出。
+  不看 `agent_status`（用途就是回合中途補一句）。
 
 ### 4.1 登入 / 切換帳號
+把登入 slash 指令打進**正在跑的** bot 的 TUI；之後 agent 停在登入畫面，使用者完成前不能工作。登入結果由 `POST /api/hosts/{name}/tools/refresh` 重新偵測。
 
-`POST /api/bots/{id}/login` 把登入用的 slash 指令打進**正在跑的** bot 自己的 TUI，讓它進入
-登入流程。daemon 只負責送指令：agent 接著會停在登入畫面（通常會開瀏覽器），**在使用者完成
-之前那個 bot 不能工作**；登入完成與否由 `POST /api/hosts/{name}/tools/refresh` 重新偵測。
-
-各 kind 的指令（實測 CLI 的 slash 補完選單，非推測）：
-
-| kind | 指令 | 出處 |
-|---|---|---|
-| `claude` | `/login` | claude 2.1.263 選單：「Sign in with your Anthropic account」 |
-| `grok` | `/login` | grok 1.0.13 選單：「Log in or re-authenticate with your account」；另見 `~/.grok/docs/user-guide/04-slash-commands.md` §Account and Billing |
-| `codex` | **無** | codex 0.153.4 的選單只有 `/logout`，登入要在 TUI 外面跑 `codex login` |
-
-錯誤（`error` / `reason` 是穩定的機器 key，文案由前端翻）：
+| kind | 指令 |
+|---|---|
+| `claude` / `grok` | `/login` |
+| `codex` | 無（TUI 只有 `/logout`，要在外面跑 `codex login`；見主機層登入 §身份） |
 
 | 狀況 | 回應 |
 |---|---|
 | 沒有這個 bot | `404 {"error":"not_found","what":"bot"}` |
-| 這個 kind 的 TUI 沒有登入指令 | `400 {"error":"login_unsupported","kind":"codex","message":"..."}` |
-| 沒在跑 / run 不是 `running` | `409 {"error":"conflict","reason":"not_running",...}` |
-| agent 正在忙（`working` / `blocked`） | `409 {"error":"conflict","reason":"agent_busy",...}` |
-| 有回合進行中（會被吃成 prompt 的一部分） | `409 {"error":"conflict","reason":"turn_in_flight",...}` |
-| run 沒有 pane 可以打字 | `409 {"error":"conflict","reason":"no_pane",...}` |
-| herdr 拒絕 | `502 {"error":"upstream","message":"..."}` |
+| kind 沒有登入指令 | `400 {"error":"login_unsupported","kind":"codex","message"}` |
+| 沒在跑 / 不是 running | `409 {"reason":"not_running"}` |
+| agent `working` / `blocked` | `409 {"reason":"agent_busy"}` |
+| 有回合進行中 | `409 {"reason":"turn_in_flight"}` |
+| run 沒有 pane | `409 {"reason":"no_pane"}` |
+| herdr 拒絕 | 502 |
 
 ### 4.2 強制中止 `POST /api/bots/{id}/abort`
-
-`interrupt` 的語義是「請 agent 停下來」：`esc` 送不出去（pane 沒了、herdr 斷線、run 已經不在）
-就整個失敗，那一回合仍掛在 `in_flight`，輸入框跟著鎖死，使用者只剩「停掉整個 bot」。
-
-`abort` 反過來——**先保證解鎖**，送鍵只是順帶：
-
-- `esc` 盡力送一次，成功與否寫在 `keys_sent`（失敗時 `key_error` 帶原因），**不影響**其餘步驟。
-- in-flight 的回合標成 `failed`，並在對話裡留一則系統訊息「回合已由使用者強制中止」。
-- 同一個 bot 底下 `delivery = "unknown"` 的回合一併收掉（改成 `failed`）——它同樣會擋住下一則
-  prompt（§5），使用者要的是「現在就能再打字」，不是分兩顆按鈕點兩次。
-- **沒有 active run 不是錯誤**：run 已經沒了、回合卻還掛著，正是最需要這支的情況。
-- bot 不存在 → `404`。回合本來就沒有卡住 → `200 {"aborted":[]}`（冪等）。
-
-註：agent 那頭可能還在跑（`esc` 沒送成功時），daemon 只是不再等它；真的要停就 `stop`。
+`interrupt` 在 `esc` 送不出去時整個失敗、輸入框鎖死；`abort` **先保證解鎖**：
+- `esc` 盡力送一次，結果寫在 `keys_sent` / `key_error`，不影響其餘步驟。
+- in-flight 回合標 `failed`，對話留一則「回合已由使用者強制中止」；同 bot 的 `delivery = "unknown"` 回合一併收掉。
+- 沒有 active run 不是錯誤。bot 不存在 404；沒有卡住的回合 → `200 {"aborted":[]}`（冪等）。agent 可能還在跑，要停就 `stop`。
 
 ## 5. 送訊息
 
 `POST /api/bots/{id}/prompt`
 
 ```json
-{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"" }
+{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"", "attachments"?: ["<attachment id>"] }
 ```
 
-`relay_from` 省略 = **使用者自己在畫面上打的**。不是的話一定要帶，UI 才畫得出來源（靠左、不用使用者
-的藍底、標上「誰 → 誰」）：另一顆 bot 送的帶它的 `bot_id`，launchd 的例行腳本與 daemon 自己的自動
-通知帶哨符 `"daemon"`（顯示成「daemon 自動觸發」）。值不是存在中的 bot 也不是 `daemon` → `400`，
-避免呼叫端冒名。2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」。
+- `relay_from` 省略 = **使用者自己打的**。其他來源一定要帶：另一顆 bot 帶它的 `bot_id`，launchd 腳本與 daemon 的自動通知帶 `"daemon"`。不是存在中的 bot 也不是 `daemon` → 400。
+  寫入 `messages.relay_from`，UI 據此畫「誰 → 誰」。
+- `client_request_id` 可省（daemon 補），建議自帶：同 id 重送回同一個 `turn_id`（即使已有新 Turn 在飛）。
 
-`client_request_id` 可省（daemon 會補），但**建議前端自己帶**以取得冪等：同一個 id 重送會回同一個
-`turn_id`，不會重複送給 agent。
+成功 `200 { "turn_id", "message_id", "delivery": "ok" | "unknown" | "failed" }`：
 
-成功 `200`：
-```json
-{ "turn_id": "01M1...", "message_id": "01M1...", "delivery": "ok" | "unknown" | "failed" }
-```
+- `ok`：已送達，等 hook（或終端備援）。
+- `unknown`：RPC 逾時；該 Turn 仍 in_flight 時，**abandon / interrupt / stop 之前不能再送**（409）。Stop hook 完成時會收成 `ok`。UI 顯示「送出狀態不明」並提供放棄按鈕。
+- `failed`：agent 當下 blocked 或附件綁定失敗；Turn 直接 failed，並推 `message_added`（system）與 `turn_updated`。
 
-- `delivery = "ok"`：已送達 agent，等 hook 回覆（或 5 秒後的終端備援）。
-- `delivery = "unknown"`：RPC 逾時；只要該 Turn 仍是 `status='in_flight'`，**該 bot 在 abandon / interrupt / stop
-  之前不能再送 prompt**（再送會 409）。Stop hook 完成這個 Turn 時會把 delivery 收成 `ok`；UI 應在仍為 in-flight
-  時顯示「送出狀態不明」並提供「放棄這回合」按鈕（呼叫 `/api/turns/{id}/abandon`）。
-- `delivery = "failed"`：agent 當下處於 blocked，或附件綁定失敗；Turn 直接標 failed，並推送
-  `message_added`（system）與非 `in_flight` 的 `turn_updated`，讓 UI 不會停在 `pending`。
+判斷送達看回應有沒有 `message_id`：409 的 body 也可能帶 `turn_id`。
+active Run 的 herdr session 已不可用 → 寫入 Turn 前回 502，不留 Turn 或 user message。
+排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後送出。
 
-若 active Run 對應的 Herdr session 已不可用，daemon 會在寫入 Turn 前回 `502 upstream`；這種情況不會留下
-Turn 或 user message，重試不會因為上一回合卡住而得到 409。
+409 `reason`：`bot has no active run`、`run is not running`、`agent is blocked; answer the prompt first`、`a turn is already in flight`、
+`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`。後三者 daemon 送之前先讀 pane：
 
-409 的 `reason` 可能是：`bot has no active run`、`run is not running`、
-`agent is blocked; answer the prompt first`、`a turn is already in flight`、
-`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`。
+| reason | 畫面 | daemon 的處理 |
+|---|---|---|
+| `needs_login` | claude 停在「Select login method」（該 `CLAUDE_CONFIG_DIR` 沒登入過） | 不建 turn，回 `{"reason":"needs_login","identity":"cc2","message"}`，對話插 system 訊息說明怎麼登入 |
+| `picker_open` | codex 的 `/model` 選單開著（字會變成選單操作，Enter 會換模型） | 先 Esc 到真的關掉（`esc` 只退一層）再送；關不掉才回 `{"reason":"picker_open","run_id","message"}` + system 訊息 |
+| `dialog_open` | claude 的「Switch model?」確認框（herdr 判成 idle；Enter 會替使用者按 Yes） | 按 Esc（No, go back）再送；退不掉才回 409 + system 訊息 |
 
-`needs_login`（2026-09-08）：claude 的 pane 正停在開場的「Select login method」選單（那個
-`CLAUDE_CONFIG_DIR` 還沒登入過）。送 prompt 前 daemon 會先讀一次 pane 畫面；中了就不建 turn、
-直接回 `{"error":"conflict","reason":"needs_login","identity":"cc2","message":"…"}`，並在對話裡
-插一則 system 訊息說明怎麼登入。以前這種情況 prompt 會被打進選單、回合掛到 stall 才失敗。
-
-`picker_open`（2026-09-10）：codex 的 `/model` 選單（`Select Model and Effort` /
-`Select Reasoning Level`）開著。那不是輸入框，是吃鍵的選單——送進去的字會變成選單操作，訊息
-整段消失，Enter 還會順手把 session 換到別的模型。所以 codex 送 prompt 前 daemon 會先讀 pane、
-把選單 Esc 到真的關掉（`esc` 只退一層，要走到底）；關得掉就照常送，關不掉才不建 turn、回
-`{"error":"conflict","reason":"picker_open","run_id":"…","message":"…"}` 並插一則 system 訊息。
-
-`dialog_open`（2026-09-11）：claude 的「Switch model?」確認框開著（有對話紀錄的 session 打
-`/model <alias>` 時 claude 會先問，herdr 把這個框判成 `idle`）。送進去的字會被丟掉、Enter 會替
-使用者按下 Yes。claude 送 prompt 前 daemon 先讀 pane，看到這個框就按 Esc（No, go back）退掉再送；
-退不掉才不建 turn、回 `{"error":"conflict","reason":"dialog_open","run_id":"…","message":"…"}`
-並插一則 system 訊息。
-
-**排隊中的 prompt 送出時也過同樣三道檢查**（2026-09-12）：queued turn 被 claim 之後、`agent.prompt` 之前，
-daemon 先看畫面；中了就把 turn **放回 `queued`**（`run_id` 清掉）並插同一則 system 訊息，等下一個
-`working → idle` 再試。以前這條路直接打字，使用者排的下一句會被打進 codex 的 `/model` 選單。
+**排隊中的 prompt 送出時也過這三道**：claim 之後、`agent.prompt` 之前中了就把 turn 放回 `queued`（清 `run_id`）並插同一則 system 訊息，等下一個 idle 再試。
 
 ## 6. 讀訊息
 
-`GET /api/bots/{id}/messages?before=<message_id>&limit=100`
-
-沒有這個 bot → `404 {"error":"not_found","what":"bot"}`（2026-09-12 前是 502）；已刪除的 bot 仍讀得到歷史（§10.4）。
-
-倒序分頁（`before` 傳目前最舊一則的 `id`，以插入順序分頁），但回傳的 `messages` 已**依時間正序**排好，可直接 append/prepend。
+`GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` = 目前最舊一則的 `id`），回傳的 `messages` 已依時間正序。
+沒有這個 bot → 404；已刪除的 bot 仍讀得到歷史。
 
 ```json
 {
@@ -438,6 +200,8 @@ daemon 先看畫面；中了就把 turn **放回 `queued`**（`run_id` 清掉）
       "incomplete": 0,
       "terminal_snapshot": null,
       "group_id": null,
+      "relay_from": null,
+      "attachments": [],
       "created_at": "2026-09-05T15:31:00.000Z",
       "updated_at": null
     }
@@ -456,494 +220,214 @@ daemon 先看畫面；中了就把 turn **放回 `queued`**（`run_id` 清掉）
 }
 ```
 
-`turns` 為最近 `limit+1` 筆（時間倒序），用來判斷「這回合還在跑」與顯示 delivery 警示。
-
-UI 標籤建議：
-- `source = "hook"` → 不加標籤（正常回覆）
-- `source = "terminal_fallback"` 或 `incomplete = 1` → 標「終端備援 · 可能不完整」
-- `source = "system"` → 系統列（灰字）
+`turns` 為最近 `limit+1` 筆（時間倒序），用來判斷回合是否還在跑與 delivery 警示。
+UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終端備援 · 可能不完整」；`system` 灰字系統列。
 
 ## 7. 終端快照
 
-`GET /api/bots/{id}/terminal?source=visible&lines=200`
-
-`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000（預設 200）。
-無 active Run → 404。
+`GET /api/bots/{id}/terminal?source=visible&lines=200`：`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000。無 active Run → 404。
 
 ```json
-{
-  "bot_id": "01M1...", "run_id": "01M1...", "pane_id": "w1:p2",
-  "source": "visible", "text": "……純文字，已去 ANSI……",
-  "revision": 42, "truncated": false,
-  "agent_status": "blocked"
-}
+{ "bot_id": "01M1...", "run_id": "01M1...", "pane_id": "w1:p2", "source": "visible", "text": "……已去 ANSI……", "revision": 42, "truncated": false, "agent_status": "blocked" }
 ```
 
-第一階段前端在 `lamp = "blocked"` 時每 1 秒輪詢此端點，並提供按鍵按鈕打 `/api/bots/{id}/keys`。
+前端在 `lamp = "blocked"` 時每秒輪詢，按鍵打 `/api/bots/{id}/keys`。
 
 ## 8. WebSocket `/ws`
 
-連線：`ws://127.0.0.1:7788/ws?token=<token>`，重連時帶 `&since=<最後收到的 seq>`。
-
-每則訊息是一行 JSON：
-
-```json
-{ "seq": 12, "type": "bot_status", "data": { ... } }
-```
-
-`seq` 從 1 遞增（daemon 重啟歸零）。daemon 保留最近 200 則；若 `since` 無法補齊或 seq 倒退，
-會先送 **不帶 seq 的**：
-
-```json
-{ "type": "resync", "seq": 12 }
-```
-
-收到 `resync` 就重新 `GET /api/state` 與各 bot 的 messages。
-
-### 事件型別
+`ws://127.0.0.1:7788/ws?token=<token>`，重連帶 `&since=<最後收到的 seq>`。每則一行 `{ "seq": 12, "type": "bot_status", "data": { ... } }`。
+`seq` 從 1 遞增（daemon 重啟歸零），保留最近 200 則；補不齊或 seq 倒退會先送不帶 data 的 `{ "type": "resync", "seq": 12 }`，收到就重新 `GET /api/state` 與訊息。
 
 | type | data |
 |---|---|
-| `bot_status` | `{"bot_id":"...", "host":"local"\|"<name>", "run": <run 物件或 null>, "connected": true}`（`connected` 是**該 bot 所屬 host** 的連線狀態） |
-| `message_added` | `{"bot_id":"...", "message": <message 物件>}` |
-| `turn_updated` | `{"bot_id":"...", "turn": <turn 物件>}` |
-| `project_changed` | `{"project_id":"..."}`（或 `{}`） |
-| `bot_changed` | `{"bot_id":"..."}` |
-| `daemon_status` | `{"connected": true\|false}` — daemon 與 herdr 的連線狀態 |
+| `bot_status` | `{"bot_id", "host":"local"\|"<name>", "run": <run 物件或 null>, "connected"}`（`connected` 是該 bot 所屬 host 的連線狀態） |
+| `message_added` | `{"bot_id", "message": <message 物件>}` |
+| `turn_updated` | `{"bot_id", "turn": <turn 物件>}` |
+| `turn_progress` | 即時輸出，見「WS `turn_progress`」 |
+| `project_changed` | `{"project_id"}`（或 `{}`） |
+| `bot_changed` | `{"bot_id"}` |
+| `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?}}}` |
+| `host_changed` | `{"name","connected","error"?}` |
+| `quota_updated` | 見 §12.5 |
+| `mem_updated` | 與 `GET /api/mem` 同形 |
+| `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
+| `supervisor_health` | 見「總管」一節 |
 
-範例：
+終端畫面不走 WS，輪詢 §7。
 
-```json
-{"seq":31,"type":"bot_status","data":{"bot_id":"01M1...","connected":true,"run":{"id":"01M1...","bot_id":"01M1...","state":"running","agent_status":"working","workspace_id":"w1","pane_id":"w1:p2","adopted":0,"native_session_id":"3f2c…","transcript_path":"/Users/…/.claude/projects/…/3f2c….jsonl","last_read_revision":null,"last_read_tail_hash":null,"started_at":"2026-09-05T15:40:02.113Z","ended_at":null}}}
-{"seq":32,"type":"message_added","data":{"bot_id":"01M1...","message":{"id":"01M1...","conversation_id":"01M1...","turn_id":"01M1...","role":"assistant","content":"PONG","source":"hook","incomplete":0,"terminal_snapshot":null,"created_at":"2026-09-05T15:40:09.882Z","updated_at":null}}}
-{"seq":33,"type":"turn_updated","data":{"bot_id":"01M1...","turn":{"id":"01M1...","conversation_id":"01M1...","run_id":"01M1...","origin":"web","status":"completed","delivery":"ok","client_request_id":"c-1","native_session_id":"3f2c…","native_turn_id":"prompt_01…","created_at":"2026-09-05T15:40:05.001Z","completed_at":"2026-09-05T15:40:09.880Z"}}}
-{"seq":34,"type":"daemon_status","data":{"connected":false}}
-```
+## 9. 前端流程
 
-`terminal_snapshot` 推送為第二階段；第一階段請輪詢 §7。
+1. `GET /api/session` 取 token（只存記憶體）。
+2. `GET /api/state` 畫 sidebar。
+3. 開 `/ws`：`bot_status` 更新燈號，`message_added` / `turn_updated` 更新聊天；`project_changed` / `bot_changed` / `resync` → 重拉 state。
+4. 選 bot 時 `GET /api/bots/{id}/messages?limit=100`。
+5. `POST /api/bots/{id}/prompt`（自帶 `client_request_id`）；user 氣泡經 `message_added` 推回，用 `message.id` 去重，不做本地暫存氣泡。
 
-## 9. 前端流程建議
+## 目錄瀏覽 `GET /api/fs/dirs?host=&path=&hidden=`
 
-1. `GET /api/session` 取 token（存記憶體即可）。
-2. `GET /api/state` 畫 sidebar（依 project 分組）。
-3. 開 `/ws?token=…`，收到 `bot_status` 更新燈號、`message_added` / `turn_updated` 更新聊天視窗；
-   `project_changed` / `bot_changed` / `resync` → 重新 `GET /api/state`。
-4. 選定 bot 時 `GET /api/bots/{id}/messages?limit=100`。
-5. 送訊息用 `POST /api/bots/{id}/prompt`（自帶 `client_request_id`），user 氣泡會同時經
-   `message_added` 推回來——請用 `message.id` 去重，不要用本地暫存氣泡重複顯示。
-
-
-## GET /api/fs/dirs?path=&hidden=
-
-目錄瀏覽（新增 Project 的目錄選擇器用）。`path` 省略或空白時為家目錄；支援 `~` 前綴。只列子目錄；symlink 指向目錄者也列出。
-`.` 開頭的隱藏目錄預設略過，帶 `hidden=1`（或 `true` / `yes`）才會一起列出——選擇器的「隱藏資料夾」勾選框就是打這個參數（本機與 `host=` 遠端行為一致）。
+新增 Project 的目錄選擇器。`path` 空白為家目錄，支援 `~`；只列子目錄（含指向目錄的 symlink）。`.` 開頭預設略過，`hidden=1|true|yes` 才列。`host` 省略 = 本機，遠端見 SPEC §11.5。
 
 ```json
-{"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me",
- "entries":[{"name":"foo","path":"/Users/me/project/foo","git":true}]}
+{"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me","entries":[{"name":"foo","path":"/Users/me/project/foo","git":true}]}
 ```
 
-錯誤：路徑不存在或不是目錄 → 400 `{"error":"bad_request","message":"..."}`。
+路徑不存在或不是目錄 → 400。
 
+## 記憶體
 
-## bot.primary（2026-09-10 新增）
-
-每個 bot 的布林欄位，預設 `false`，出現在 `GET /api/state` 的 `bots[].primary`，用 `PATCH /api/bots/{id} {"primary": true|false}` 設定。**純顯示用的釘選**：使用者把常用的那幾顆標成「主要執行的 bot」，網頁把它們固定排在標題列下面那一列的最前面。
-
-- 不影響啟動 argv / env，所以永遠不列入 `needs_restart` 的判斷（只帶這個欄位時回 `{"needs_restart": false}`）。
-- 不進 `config.toml`：直接寫 `bots.is_primary` 欄位，投影（`projection.rs`）不會覆蓋它，`managed_by` 是 `team` / `child` 的 bot 也能釘。
-- 存在 daemon 而不是瀏覽器，所以手機與電腦看到同一組。舊資料庫啟動時自動 `ALTER TABLE` 補欄位；舊 daemon 沒有這個欄位時前端當 `false`。
-
-## bot.auto_approve（2026-09-06 新增）
-
-每個 bot 的布林欄位，預設 `true`。啟動時 daemon 依 kind 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`（等同 `--dangerously-bypass-approvals-and-sandbox`）、grok `--always-approve`（等同 `--permission-mode bypassPermissions`）。`POST /projects/:id/bots` 與 `PATCH /bots/:id` 皆接受 `auto_approve`。舊資料庫啟動時自動 `ALTER TABLE` 補欄位。
-
-
-## GET /api/mem（SPEC §15，2026-09-06 新增）
-
-herdr 這一側現在佔多少常駐記憶體。左上角那一格用的就是這支。
-
-**量的是整棵 herdr 進程樹**：`herdr` 本身 ＋ 它底下的 pane 與 agent CLI。錢是花在 pane 裡那個
-`claude` 上，只報 herdr daemon 自己沒有意義。判定方式是「執行檔名等於 `herdr`」的 process 當
-樹根（`grep herdr` 這種 argv 裡剛好有這個字的不算），再把子孫全部加總；herdr 底下再開 herdr
-只算一次。
+### `GET /api/mem`
+herdr 進程樹佔多少常駐記憶體（SPEC §15）。
 
 ```json
 {"total_bytes":1610612736,"herdr_bytes":50331648,"agents_bytes":1560281088,"processes":5,
- "hosts":[{"host":"local","herdr_bytes":50331648,"agents_bytes":1560281088,
-           "total_bytes":1610612736,"processes":5,"error":null},
-          {"host":"m4p","herdr_bytes":0,"agents_bytes":0,"total_bytes":0,"processes":0,
-           "error":"未連線"}]}
+ "hosts":[{"host":"local","herdr_bytes":50331648,"agents_bytes":1560281088,"total_bytes":1610612736,"processes":5,"error":null,
+           "browsers":[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}],
+           "machine":{"total_bytes":17179869184,"available_bytes":5536579584}},
+          {"host":"m4p","herdr_bytes":0,"agents_bytes":0,"total_bytes":0,"processes":0,"error":"未連線","browsers":[],"machine":null}]}
 ```
 
-- `hosts[].browsers`（2026-09-08 新增）：同一份 `ps` 裡的 Chromium 系瀏覽器，依 app bundle 分組
-  （`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`）：
-  `[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}]`。`tabs` = `--type=renderer`
-  的 process 數（≈ 分頁數）。**不算進** `total_bytes`；前端在總分頁 ≥ 30 時把左上角那格標紅並顯示分頁數。
-- `hosts[].machine`（2026-09-12 新增，SPEC §15.1a）：**整台機器**的記憶體，
-  `{"total_bytes":17179869184,"available_bytes":5536579584}`。`total_bytes` 那一欄只講 herdr 樹，
-  回答不了「還能不能再開一顆 bot」。取法：Linux 讀 `/proc/meminfo` 的 `MemTotal`/`MemAvailable`；
-  macOS 用 `sysctl -n hw.memsize` ＋ `vm_stat` 的 free/inactive/speculative/purgeable 頁數換算
-  （核心可回收的部分算「可用」）。**不是** `total − 我們用掉的`：機器上還有瀏覽器與系統。
-  認不出來（舊 daemon、指令不存在）→ `null`，UI 只顯示已用量。跟 `ps` 同一次往返取回。
-- 每台主機一次 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走既有的 ssh master），RSS 由 KiB 換成 bytes。
-- **量不到的主機用 `error` 回報，不會從清單消失**：總和悄悄變小比沒有數字更糟。UI 會在數字旁
-  標星號。
-- daemon 每 15 秒取樣一次，**變化超過 1 MiB 才**推 WS `mem_updated`（frame 與這支同形狀）；
-  這支端點任何時候都可以直接問。
+- `browsers`：同一份 `ps` 裡的 Chromium 系瀏覽器依 app bundle 分組（`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`），`tabs` = `--type=renderer` 數。不算進 `total_bytes`；前端總分頁 ≥ 30 時標紅。
+- `machine`：整台機器（SPEC §15.1a），認不出來 `null`。
+- 量不到的主機用 `error` 回報，不從清單消失（UI 標星號）。每 15 秒取樣，變化超過 1 MiB 才推 `mem_updated`。
 
-舊 daemon 沒有這支 → 前端拿不到就整格不顯示。
-
-
-## GET /api/mem/processes（SPEC §15.2，2026-09-08 新增）
-
-`GET /api/mem/processes?host=local`（`host` 省略 = `local`；不認得的主機回 404）。
-那一格的數字是由哪些程序組成的，以及**哪些是使用者自己開的、可以砍**。
+### `GET /api/mem/processes?host=local`
+`host` 省略 = `local`，不認得 404。
 
 ```json
 {"host":"local","sampled_at":"2026-09-08T04:11:02Z","processes":[
-  {"pid":59407,"ppid":37845,"rss_bytes":412000000,"exe":"claude",
-   "argv":"claude --dangerously-skip-permissions",
-   "pane_id":"w168:p1","bot_id":"b3","bot_name":"opus","project_id":"p1",
+  {"pid":59407,"ppid":37845,"rss_bytes":412000000,"exe":"claude","argv":"claude --dangerously-skip-permissions",
+   "pane_id":"w168:p1","socket_path":"/Users/me/.config/herdr/herdr.sock","bot_id":"b3","bot_name":"opus","project_id":"p1",
    "owner":"bot","subtree_bytes":420000000,"children":3}]}
 ```
 
-- `owner`：`bot`（環境有 `AM_BOT_ID`）、`pane`（只有 `HERDR_PANE_ID`，使用者自己開的）、
-  `herdr`（herdr 本身，不會出現在清單裡）、`unknown`（兩個都讀不到）。判定規則見 SPEC §15.2。
-- `bot_id` 查得到就補 `bot_name` / `project_id`；bot 已刪仍回 `bot_id`、`owner` 仍是 `bot`。
-- `subtree_bytes` = 自己 ＋ 所有子孫的 RSS，也就是「砍掉這個能省多少」；清單依它降冪。
-- 只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 `subtree_bytes ≥ 8 MiB` 的，
-  其餘併進父程序的 `subtree_bytes`。
-- 一次取樣同時拿樹與環境（macOS `ps -Ewwo`、Linux `/proc/<pid>/environ`），遠端走 ssh。
+- `owner`：`bot`（有 `AM_BOT_ID`）/ `pane`（只有 `HERDR_PANE_ID`）/ `herdr`（不列）/ `unknown`。bot 已刪仍回 `bot_id`。
+- `subtree_bytes` = 自己 + 子孫 RSS，清單依它降冪。只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 ≥ 8 MiB 的，其餘併進父程序。
 
-## POST /api/mem/processes/kill（SPEC §15.2，2026-09-08 新增）
+### `POST /api/mem/processes/kill`
+`{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，預設 TERM）→ `{"host","pid","signal","exe","freed_bytes"}`，並立刻推一次 `mem_updated`。
+送訊號前重新取樣判定：不在該主機 herdr 樹裡 400；就是 herdr 400；`owner == "bot"` → `409 {"reason":"bot_process","bot_id","message"}`（走 `POST /bots/{id}/stop`）。
 
-```json
-{"host":"local","pid":59407,"signal":"TERM"}
-```
-
-`signal` 省略 = `TERM`，只認 `TERM` / `KILL`。成功回
-`{"host":"local","pid":59407,"signal":"TERM","exe":"claude","freed_bytes":420000000}`，
-並立刻取樣推一次 `mem_updated`。
-
-**送訊號前一定重新取樣再判定**（pid 會被回收）：
-
-| 情況 | 回應 |
-|---|---|
-| pid 不在該主機的 herdr 樹裡 | 400 `pid … 不在 … 的 herdr 樹裡` |
-| 該 pid 就是 `herdr` | 400 `不能砍 herdr 本身` |
-| `owner == "bot"` | 409 `{"error":"conflict","reason":"bot_process","bot_id":"b3","message":"這是 AG Man 的 bot，請用停止 bot"}` |
-
-砍 bot 走既有的 `POST /bots/{id}/stop`，那條路才會記錄停止。
-
-
-## GET /api/mem/processes/pane（SPEC §15.2，2026-09-08 新增）
-
-`?host=local&pane_id=wM:pB&socket=/Users/me/.config/herdr/herdr.sock&lines=40`（`lines` 1–500，預設 40）。
-`socket` 是清單那列的 `socket_path`：**pane id 是 per herdr session 的**，使用者自己開的 pane 多半在 `default`
-session 而不是 `agents-manager`，daemon 就直接連那個 socket 讀（只限本機；遠端給了 `socket` 回 400）。
-省略 `socket` 時走該主機設定的 session。回那個 pane 現在畫面上的字，
-形狀同 `GET /api/hosts/{name}/shells/{pane_id}/terminal`，但 `source` 固定 `visible`，而且
-**不要求那個 pane 是 AG Man 開的**——清單裡的 pane 正是使用者自己開的。只讀不寫；沒有對應的
-text / keys 端點。
+### `GET /api/mem/processes/pane?host=local&pane_id=wM:pB&socket=<socket_path>&lines=40`
+回那個 pane 現在畫面的字（`lines` 1–500），形狀同主機 shell 的 terminal，`source` 固定 `visible`，**不要求 pane 是 AG Man 開的**。只讀。
+`socket` 是清單那列的 `socket_path`（pane id 是 per session 的；只限本機，遠端給 `socket` 回 400），省略時走該主機設定的 session。
 
 ```json
 { "host":"local","pane_id":"wM:pB","source":"visible","text":"…","revision":12,"truncated":false,"columns":185,"rows":54 }
 ```
 
-主機沒接上 herdr → 502；`pane_id` 缺 → 400；pane 不存在 → herdr 的錯誤照回（502）。
+主機沒接上 herdr 502；缺 `pane_id` 400；pane 不存在 502。
 
+## 遠端主機 hosts（SPEC §11）
 
-## 遠端主機 hosts（SPEC §11.6，2026-09-06 新增）
+Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host` 是 host 名稱，`"local"` 保留給本機。
 
-Project 可位於另一台機器。daemon 仍在本機，透過 SSH 轉發連到遠端 herdr。UI 操作方式完全相同，
-差別只在 Project 多了一個 `host` 欄位，以及多了一組 `/api/hosts` 端點。
-
-`host` 是 host 名稱字串，`"local"` 為保留字，代表本機（不可被使用者建立/刪除）。
-
-### `GET /api/state` 新增欄位
+### `GET /api/state` 的 host 欄位
 
 ```json
 {
-  "daemon_seq": 6,
-  "connected": true,
-  "herdr_session": "agents-manager",
   "hosts": [
-    {"name":"local","ssh":null,"ssh_port":null,"ssh_opts":[],"herdr_session":"agents-manager",
-     "remote_path":null,"connected":true,"error":null},
-    {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"ssh_opts":[],
-     "herdr_session":"agents-manager","remote_path":"/opt/homebrew/bin:$HOME/.local/bin",
-     "connected":false,"error":"ssh master exited immediately (exit status: 255)"}
+    {"name":"local","ssh":null,"ssh_port":null,"ssh_opts":[],"herdr_session":"agents-manager","remote_path":null,"connected":true,"error":null},
+    {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"ssh_opts":[],"herdr_session":"agents-manager",
+     "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","connected":false,"error":"ssh master exited immediately (exit status: 255)"}
   ],
-  "projects": [
-    {"id":"01M1...","path":"/Users/m4p/work/foo","label":"foo@m4p","host":"m4p",
-     "workspace_id":null,"bots":[ ... ]}
-  ]
+  "projects": [ {"id":"01M1...","path":"/Users/m4p/work/foo","label":"foo@m4p","host":"m4p","workspace_id":null,"bots":[ ... ]} ]
 }
 ```
 
-- `hosts` **必定含 `local`**，且 `local` 永遠排在第一個；`local` 的 `ssh` / `ssh_port` /
-  `remote_path` 為 `null`，`connected` = 本機 herdr 連線狀態（與頂層 `connected` 同值）。
-- `default_connected` 是本機使用者 Herdr `default` session 的觀察連線狀態；採用該 session 的 Bot
-  只依這個欄位判斷，不會因 manager 的 named session 狀態誤亮或誤灰。
-- UI 的「主機」下拉可直接用這個陣列；sidebar 的 host 徽章在 `project.host !== "local"` 時才顯示。
-- `error` 為 `null` 或人類可讀的錯誤字串（ssh 認證失敗、herdr 起不來、ping 失敗…）。
-- `projects[].host` 永遠存在，本機專案為 `"local"`。
-
-### bot `lamp`
-
-host 斷線時（`hosts[].connected = false`），該 host 底下所有 bot 的 `lamp` 一律為 `"disconnected"`
-（灰），不論 run 狀態為何。本機 bot 的行為不變（沿用頂層 `connected`）。
+- `hosts` 必含 `local` 且排第一；`local` 的 `connected` = 本機 herdr 連線（同頂層 `connected`）。`error` 為 `null` 或人類可讀字串。
+- `default_connected`：本機使用者 Herdr `default` session 的連線狀態；採用該 session 的 bot 只看這個欄位。
+- `projects[].host` 永遠存在（本機 `"local"`）；sidebar 徽章在 `host !== "local"` 時才顯示。
+- host 斷線時其下所有 bot 的 `lamp` 一律 `"disconnected"`。
+- 另有 `hosts[].tools`、`identities`、`shell_identities`、`attach_command`（§12、身份一節）。
 
 ### `POST /api/hosts`
-
-新增或更新一台遠端主機。寫回 `config.toml` 的 `[[hosts]]`，接著**立即**嘗試連線後才回應
-（含 ensure remote session + ssh master + ping，最多約 20 秒）。
+新增或更新遠端主機，寫回 `[[hosts]]`，**同步等第一次連線結果**（ensure session + ssh master + ping，最長約 35 秒）才回應。
 
 ```json
-{
-  "name": "m4p",
-  "ssh": "m4p@100.112.229.82",
-  "ssh_port": 22,
-  "herdr_session": "agents-manager",
-  "remote_path": "/opt/homebrew/bin:$HOME/.local/bin",
-  "ssh_opts": ["-i", "/path/to/key"]
-}
+{ "name": "m4p", "ssh": "m4p@100.112.229.82", "ssh_port": 22, "herdr_session": "agents-manager", "remote_path": "/opt/homebrew/bin:$HOME/.local/bin", "ssh_opts": ["-i", "/path/to/key"] }
 ```
 
 | 欄位 | 必填 | 預設 |
 |---|---|---|
-| `name` | ✅ | —，須符合 `[a-z][a-z0-9_-]{0,31}`，`"local"` 保留 |
-| `ssh` | ✅ | — ，`user@host` 或 ssh_config 別名 |
+| `name` | ✅ | `[a-z][a-z0-9_-]{0,31}`，`"local"` 保留 |
+| `ssh` | ✅ | `user@host` 或 ssh_config 別名 |
 | `ssh_port` | | `22` |
 | `herdr_session` | | `"agents-manager"` |
-| `remote_path` | | `""`（非互動 ssh shell 缺少的 PATH，會前置到遠端 PATH） |
-| `hook_port` | | v4.3 起**忽略**（仍接受，只為相容舊 client）。遠端 hook 改走該機器自己的 herdr 上報狀態、payload 寫進 spool 檔由 daemon 讀回，沒有反向轉發也沒有埠可挑，見 SPEC §11.4 |
-| `ssh_opts` | | `[]`，額外的 ssh 參數，原樣附加到每個 ssh 指令（例：`["-i","~/.ssh/id_x"]`） |
+| `remote_path` | | `""`（前置到遠端 PATH） |
+| `ssh_opts` | | `[]`，原樣附加到每個 ssh 指令 |
+| `hook_port` | | 忽略（舊 client 相容） |
 
-回應 `200`（同步等待第一次連線結果，最長約 35 秒）：
-
-```json
-{ "name": "m4p", "connected": true, "error": null }
-```
-
-連不上時仍回 `200`（設定已寫入），`connected: false` 且 `error` 有字串；UI 應顯示錯誤並提供重連。
-名稱不合法或為 `local` → `400`。已存在同名 host → 視為更新（會先斷開舊連線再以新設定連）。
+回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。
 
 ### `DELETE /api/hosts/{name}`
-
-`200 {}`。仍有 project 使用該 host → `409 {"error":"conflict","reason":"host still used by projects","project_id":"..."}`。
-`name = "local"` → `400`。
+`200 {}`；仍有 project 使用 → `409 {"reason":"host still used by projects","project_id"}`；`local` 400。刪除時推 `host_changed {"connected":false,"error":"removed"}` 與 `project_changed`。
 
 ### `POST /api/hosts/{name}/reconnect`
+強制重建 ssh master 與訂閱，回應同 `POST /api/hosts`。`local` 也可（重新 ping）。找不到 404。
 
-強制斷開並重建 ssh master 與訂閱，回應同 `POST /api/hosts`：
+### 遠端 project
+`POST /api/projects` 帶 `host`（未設定的 host → 404）。遠端 `path` 不在本機 canonicalize，daemon 經 ssh 確認目錄存在並取遠端 canonical path，失敗 400。
+目錄瀏覽 `GET /api/fs/dirs?host=` 只走 ssh 不經 herdr：host 斷線時仍可能 200，只有 ssh 失敗才 502；host 不存在 404。
 
-```json
-{ "name": "m4p", "connected": true, "error": null }
-```
+### WebSocket
+- `daemon_status`：`{"herdr_connected","connected","hosts":{"local":{"connected","error"},…}}`（`connected` 是 `herdr_connected` 的舊同義欄位）。
+- `host_changed`：連上／斷線／新增／刪除／設定變更時推。狀態改變時該 host 底下每個 bot 也會收到 `bot_status`。
 
-`local` 亦可呼叫（重新 ping 本機 herdr）。找不到 host → `404`。
+### GitHub CLI 登入
 
-### `GET /api/hosts/{name}/gh`（2026-09-07）
-
-該主機上的 GitHub CLI 登入狀態。issue 列表與 team 都靠這台上的 `gh`，遠端主機沒登入（或作用中帳號的 token 失效）時，`GET /projects/{id}/issues` 會 502。`name = local` 是本機。
-
-```json
-{
-  "name": "m4p",
-  "installed": true,
-  "path": "/opt/homebrew/bin/gh",
-  "logged_in": false,
-  "account": "eddysun-alt",
-  "accounts": [
-    {"login": "eddysun-alt", "active": true, "ok": false},
-    {"login": "Eden-Sun", "active": false, "ok": true}
-  ],
-  "mode": null,
-  "pending": null,
-  "error": null
-}
-```
-
-- `logged_in`：**作用中**帳號的 `gh auth status --json` 為 `success` 才是 `true`。有帳號但 token 401 仍是 `false`。
-- `pending`：進行中的裝置碼（見下一支），不含 `device_code`、不含 token。
-- host 不存在 → 404；ssh 失敗 → 502。`gh` 沒裝時 `installed: false`、`logged_in: false`（仍 200）。
-
-### `POST /api/hosts/{name}/gh/login`
-
-在 UI 裡對該主機做 `gh` 登入，不必 ssh 過去。body：
+`GET /api/hosts/{name}/gh` → 該主機 `gh` 的登入狀態（issue 列表與 team 靠它）：
 
 ```json
-{ "mode": "auto", "user": null }
+{ "name": "m4p", "installed": true, "path": "/opt/homebrew/bin/gh", "logged_in": false, "account": "eddysun-alt",
+  "accounts": [ {"login": "eddysun-alt", "active": true, "ok": false}, {"login": "Eden-Sun", "active": false, "ok": true} ],
+  "mode": null, "pending": null, "error": null }
 ```
 
-`mode` 可省，預設 `auto`。`user` 只在 `switch` 時用。
+- `logged_in`：**作用中**帳號的 `gh auth status --json` 為 success 才 true。`pending` 是進行中的裝置碼（不含 `device_code`、token）。
+- host 不存在 404；ssh 失敗 502；沒裝 gh → `installed:false`（仍 200）。
+
+`POST /api/hosts/{name}/gh/login {"mode"?: "auto", "user"?: null}`：
 
 | mode | 行為 |
 |---|---|
-| `auto` | 已可用 → 原樣回。否則若有有效但非 active 的帳號 → `switch`。遠端且本機已登入 → `copy`。其餘 → `device`。 |
-| `switch` | `gh auth switch --hostname github.com --user <user>`。沒給 `user` 就切到第一個有效的非 active 帳號。 |
-| `copy` | 本機 `gh auth token` 經 ssh **stdin** 餵給遠端 `gh auth login --with-token --insecure-storage`（token 不進 argv、不進 log）。只適用遠端。 |
-| `device` | daemon 向 GitHub 要裝置碼，立刻回 `pending`；背景輪詢，授權後同樣 `--with-token` 餵給該主機。 |
+| `auto` | 已可用 → 原樣回；有有效但非 active 的帳號 → `switch`；遠端且本機已登入 → `copy`；其餘 → `device` |
+| `switch` | `gh auth switch --hostname github.com --user <user>`（沒給 user 切到第一個有效的非 active 帳號） |
+| `copy` | 本機 `gh auth token` 經 ssh **stdin** 餵給遠端 `gh auth login --with-token --insecure-storage`（token 不進 argv、log）；只適用遠端 |
+| `device` | daemon 向 GitHub 要裝置碼、立刻回 `pending {user_code, verification_uri, verification_uri_complete, expires_in}`；背景輪詢，授權後同樣 `--with-token` 餵給該主機 |
 
-回應形狀同 GET，外加實際走的 `mode`。`device` 當下：
+回應同 GET 外加實際 `mode`；前端每 ~2 秒 GET，`logged_in:true` 完成、`error` 有字失敗。token、`device_code` 絕不出現在 JSON 或 log。
+錯誤：host 不存在 404；`mode` 不合法 400；`copy` 打在 `local` 400；`copy` 但本機未登入 `409 {"reason":"local_gh_not_logged_in"}`；沒有可切的帳號 400；上游失敗 502（message 已打碼）。
 
-```json
-{
-  "name": "m4p",
-  "installed": true,
-  "logged_in": false,
-  "mode": "device",
-  "pending": {
-    "user_code": "WDJB-MJHT",
-    "verification_uri": "https://github.com/login/device",
-    "verification_uri_complete": "https://github.com/login/device?user_code=WDJB-MJHT",
-    "expires_in": 899
-  }
-}
-```
+`POST /api/hosts/{name}/gh/cancel` → 放棄裝置碼，回應同 GET（`mode:"cancel"`、`pending:null`）。
 
-之後前端每 ~2 秒 `GET …/gh`：`logged_in: true` 即完成；`error` 有字則失敗（過期 / 拒絕）。token、`device_code` 絕不出現在 JSON 或 log。
+## 主機 shell
 
-| 狀況 | 回應 |
-|---|---|
-| host 不存在 | `404 {"error":"not_found","what":"host"}` |
-| `mode` 不合法 | `400` |
-| `copy` 打在 `local` | `400` |
-| `copy` 但本機 gh 未登入 | `409 {"error":"conflict","reason":"local_gh_not_logged_in"}` |
-| 沒有可切的帳號 | `400` |
-| ssh / gh / GitHub API 失敗 | `502 {"error":"upstream","message":"…"}`（message 已打碼，不含 token） |
+在某台主機開**純 shell** 的 herdr pane（裝工具、看 log、清 worktree）。沒有 agent／run／turn，不發 WS 事件，由呼叫端輪詢終端快照。
 
-### `POST /api/hosts/{name}/gh/cancel`
+- daemon 只認**它自己開的** pane：除建立外每支端點先在記憶體清單找 `(host, pane_id)`，找不到 → `404 {"what":"shell"}`。清單不落地，daemon 重啟後舊 pane 一律不認。
+- pane 開在該主機 manager 的 session，不往使用者的 `default` session 開。
 
-放棄進行中的裝置碼。回應同 GET（`mode: "cancel"`，`pending: null`）。
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| POST | `/api/hosts/{name}/shells` | `{"cwd"?}`（省略取該主機任一 live project 的 path，否則 `$HOME`）→ `{host,pane_id,tab_id,workspace_id,cwd,herdr_session,created_at}` |
+| GET | `/api/hosts/{name}/shells` | `{host,max:8,shells:[…]}`；回之前逐列 `pane.get`，pane 已不在就移除（herdr 問不到時保留） |
+| GET | `/api/hosts/{name}/shells/{pane_id}/terminal?source=visible&lines=200` | `{host,pane_id,cwd,source,text,revision,truncated,columns,rows}`；`source`／`lines` 同 §7 |
+| POST | `/api/hosts/{name}/shells/{pane_id}/text` | `{"text","enter"?:true}`；Enter 是另一次 `send_keys(["enter"])`；`{"text":"","enter":true}` = 只按 Enter |
+| POST | `/api/hosts/{name}/shells/{pane_id}/keys` | `{"keys":["ctrl+c"]}` 原樣送 herdr；空陣列 400 |
+| DELETE | `/api/hosts/{name}/shells/{pane_id}` | `pane.close`（分頁空了一起收）；冪等，清單沒有也 200 |
 
-## 主機 shell（2026-09-07 新增）
+- 建立：先借該主機某 project 的 workspace 開新 tab，借不到才 `workspace.create`（標籤 `shell`，不寫回 `projects.workspace_id`）。回的 `cwd` 是 herdr 實際開起來的目錄。
+- 每台最多 8 個：`409 {"reason":"too_many_shells","host","max":8}`。host 不存在 404；沒連線 502。
+- `recent` / `recent_unwrapped` 只給**已捲出畫面**的內容：沒捲過的 pane 兩者回 `text:""` + `truncated:true`，前端要說明而不是顯示空白。
 
-在某台主機（`local` 或設定過的 `[[hosts]]`）開一個**純 shell** 的 herdr pane，用來裝工具、看 log、跑 `gh auth status`、清 worktree 這類雜事。沒有 agent、沒有 run、沒有 turn，也不發任何 WebSocket 事件——狀態就是那張終端快照，由呼叫端自己輪詢。
+## 身份 identities（SPEC §16）
 
-daemon 只認**它自己開的** pane：每一支端點（`POST …/shells` 以外）都先在記憶體的清單裡找 `(host, pane_id)`，找不到就 404 `{"error":"not_found","what":"shell"}`。這張清單不落地，所以 daemon 重啟後所有舊 pane 一律不認（也就不可能拿 bot 的 pane_id 來送鍵）。
-
-pane 開在該主機**manager 的那個 session**（`[server] herdr_session` / `hosts[].herdr_session`）。本機的 `default` session 是使用者自己的，daemon 不會往裡面開東西。
-
-### `POST /api/hosts/{name}/shells`
-
-```json
-{ "cwd": "/Users/m4p/work/foo" }
-```
-
-`cwd` 可省（body 也可以整個省）：省略時取該主機任一 live project 的 `path`，都沒有就用該主機的 `$HOME`。
-
-```json
-{
-  "host": "m4p",
-  "pane_id": "wPQ:p1",
-  "tab_id": "wPQ:t1",
-  "workspace_id": "wPQ",
-  "cwd": "/Users/m4p",
-  "herdr_session": "agents-manager",
-  "created_at": "2026-09-07T03:19:40.911Z"
-}
-```
-
-- workspace 先**借**該主機某個 project 的（用 `workspace.get` 確認還在），借到就 `tab.create` 開一個新分頁；都借不到才 `workspace.create`（標籤 `shell`）並直接用它的 root pane。新建的 workspace **不會**寫回 `projects.workspace_id`。
-- `cwd` 回的是 herdr **實際**開起來的目錄，不一定等於送進來的那個。
-- 每台主機最多 8 個：超過 → `409 {"error":"conflict","reason":"too_many_shells","host":"…","max":8}`。
-- host 不存在 → 404；主機沒連線 → `502 {"error":"upstream","message":"host \`m4p\` is not connected"}`。
-
-### `GET /api/hosts/{name}/shells`
-
-```json
-{ "host": "m4p", "max": 8, "shells": [ { …同上… } ] }
-```
-
-回之前會對每一列打 `pane.get`，pane 已經不在（使用者在 herdr 裡自己關掉）就從清單移除再回。herdr 問不到（不是「不在」）時保留該列，交給下一次輪詢——問不到不等於死掉。
-
-### `GET /api/hosts/{name}/shells/{pane_id}/terminal?source=visible&lines=200`
-
-形狀比照 §7，只是主體是 host / pane 而不是 bot / run：
-
-```json
-{
-  "host": "m4p", "pane_id": "wPQ:p1", "cwd": "/Users/m4p",
-  "source": "visible", "text": "……純文字，已去 ANSI……",
-  "revision": 0, "truncated": false,
-  "columns": 185, "rows": 54
-}
-```
-
-`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000（預設 200）。
-
-⚠️ `recent` / `recent_unwrapped` 只給**已經捲出畫面**的內容：還沒捲過的 pane 兩者都回 `text: ""` + `truncated: true`，而 `visible` 是有內容的（實測 2026-09-07，herdr 0.8.2）。前端要把這件事說出來，不要顯示一片空白。
-
-### `POST /api/hosts/{name}/shells/{pane_id}/text`
-
-```json
-{ "text": "echo hi", "enter": true }
-```
-
-`enter` 可省（預設 `true`）。Enter 是獨立的一次 `pane.send_keys(["enter"])`，**不是**文字裡的 `\n`——對 herdr 來說換行是「貼上」而不是「按下 Enter」。`text` 允許空字串：`{"text":"","enter":true}` 就是「只按 Enter」。回 `200 {}`。
-
-### `POST /api/hosts/{name}/shells/{pane_id}/keys`
-
-```json
-{ "keys": ["ctrl+c"] }
-```
-
-鍵名原樣送 herdr `pane.send_keys`，daemon 不翻譯（同 `POST /bots/{id}/keys`：`enter` / `esc` / `tab` / `up` / `down` / 單一字元 / `ctrl+c` 這種疊修飾詞）。空陣列 → 400。回 `200 {}`。
-
-### `DELETE /api/hosts/{name}/shells/{pane_id}`
-
-`pane.close`，若這樣讓分頁空了就連分頁一起收。**冪等**：清單裡沒有那一列也回 `200 {}`（已經沒了就是成功）。只有連主機都解析不出來才是錯誤。
-
-### `POST /api/projects` 新增 `host`
-
-```json
-{ "path": "/Users/m4p/work/foo", "label": "foo@m4p", "host": "m4p" }
-```
-
-`host` 可省（預設 `"local"`）。指定未設定的 host → `404 {"error":"not_found","what":"host"}`。
-**遠端 project 的 `path` 不做本機 canonicalize**（本機不存在該路徑）：daemon 會透過 ssh 檢查該目錄
-存在並取得遠端 canonical path，失敗 → `400`。
-
-### `GET /api/fs/dirs?host=<name>&path=<path>&hidden=`
-
-`host` 可省（預設 `local`）。指定 host 時，daemon 透過 ssh 列出**遠端**目錄，回傳格式與本機完全相同（`hidden=1` 同樣會把 `.` 開頭的目錄一起列出）：
-
-```json
-{"path":"/Users/m4p/work","parent":"/Users/m4p","home":"/Users/m4p",
- "entries":[{"name":"foo","path":"/Users/m4p/work/foo","git":true}]}
-```
-
-host 不存在 → `404`；ssh 失敗（含認證失敗、目錄不存在）→ `502 {"error":"upstream","message":"..."}`。
-
-> 目錄瀏覽只用 ssh，不經過 herdr，所以 **host 斷線（`connected:false`）時仍可能成功回 200**；
-> 只有 ssh 本身失敗才回 502。UI 可以在 host 斷線時照樣讓使用者瀏覽目錄。
-
-### WebSocket 事件變更
-
-| type | data |
-|---|---|
-| `daemon_status` | `{"herdr_connected":true,"connected":true,"hosts":{"local":{"connected":true,"error":null},"m4p":{"connected":false,"error":"..."}}}` |
-| `host_changed` | `{"name":"m4p","connected":true,"error":null}` |
-
-- `daemon_status` 的 `connected` 保留為 `herdr_connected` 的同義欄位（相容舊前端），新程式請用
-  `herdr_connected`；`hosts` 是 map，key 為 host name（含 `local`）。
-- `host_changed` 在 host 連上 / 斷線 / 新增 / 刪除 / 設定變更時推送。刪除時送
-  `{"name":"m4p","connected":false,"error":"removed"}`，並同時推 `project_changed`。
-- host 連線狀態改變時，該 host 底下每個 bot 也會收到 `bot_status`（`lamp` 已反映 disconnected）。
-
-
-## 身份 identities（2026-09-06 新增）
-
-同一種 agent 想用不同帳號執行時，用 **identity**：一組具名的 env + args，套在 bot 上。
-典型用法是 claude 的 `CLAUDE_CONFIG_DIR`（等同使用者原本的 `cc0` / `cc1` alias）：
+同一種 agent 用不同帳號：identity = 一組具名 env + args，套在 bot 上。
 
 ```toml
 [[identities]]
-name = "cc1"                                          # [a-z][a-z0-9_-]{0,31}，唯一
-kind = "claude"                                       # claude | codex | grok
+name = "cc1"                         # [a-z][a-z0-9_-]{0,31}，唯一
+kind = "claude"                      # claude | codex | grok
 args = []
 [identities.env]
 CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
@@ -952,706 +436,280 @@ CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
   name = "foo-cc1"
   kind = "claude"
   identity = "cc1"
-  [projects.bots.env]                                 # bot 自己的 env（覆蓋 identity）
+  [projects.bots.env]                # bot 自己的 env（覆蓋 identity）
   FOO = "bar"
 ```
 
-啟動 Run 時：
+啟動 Run 時：pane env = daemon 注入 ∪ `identity.env` ∪ `bot.env`（後者覆蓋前者）；args = daemon 注入 ++ `identity.args` ++ `bot.args`。
+env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。identity 與 bot 的 kind 不符 → 400。
 
-- **pane env** = daemon 既有注入（`AM_BOT_ID` / `AM_RUN_ID` / `AM_PORT`（v4.3 起只有本機 bot 帶，遠端 hook 不打 HTTP） /
-  `CLAUDE_CODE_CHILD_SESSION` / `CLAUDECODE`）∪ `identity.env` ∪ `bot.env`，後者覆蓋前者。
-- **args** = daemon 注入（`--dangerously-skip-permissions` / `--settings` …）
-  ++ `identity.args` ++ `bot.args`。
-- env 值中的 `$HOME`、`${HOME}` 與**開頭**的 `~` 會展開成**該 host 的 home**
-  （本機用本機 home，遠端用 ssh `echo $HOME` 取得並快取）。
-- identity 的 `kind` 與 bot 的 `kind` 不符 → `400`。
-- `hosts[].identities.<name>.logged_in`：`true` / `false` / `null`。`null` 是「未知」，不是未登入；同時帶
-  `reason`（例如 CLI 不在 PATH、`auth status` 指令失敗、輸出無法解析），讓 UI 不會把探測失敗看成已登入。
+### `GET /api/state` 的身份欄位
+
+```json
+{
+  "identities": [ {"name":"cc1","kind":"claude","env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]} ],
+  "hosts": [ {
+    "name": "m4p",
+    "shell_identities": [ {"name": "cc0", "kind": "claude", "env": {}, "args": []} ],
+    "identities": {
+      "cc0": {"name":"cc0","kind":"claude","logged_in":true,"account":"me@example.com","plan":"max","source":"shell"},
+      "cc1": {"name":"cc1","kind":"claude","logged_in":null,"reason":"…","source":"config","config_dir":"/Users/m4p/.claude-ccompany"}
+    }
+  } ],
+  "projects": [ {"bots": [ {"id":"01M1…","identity":"cc1","env":{"FOO":"bar"}} ]} ]
+}
+```
+
+- 頂層 `identities` 是 config.toml 那一份（沒設定 `[]`）；`hosts[].shell_identities` 是那台登入 shell alias 認出的 `cc0`…`cc6`（env 為字面值、`args` 永遠 `[]`）。
+- `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
+- 同名時 config 勝出（`tools::identities_for_host`）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
+- 每個 bot 都有 `identity`（`string|null`）與 `env`（預設 `{}`）。
+
+### bot 建立 / 修改
+`POST /api/projects/{id}/bots`、`PATCH /api/bots/{id}` 接受 `identity` 與 `env`：`identity` 省略 = 不變（PATCH）／`null`（POST），傳 `null` 或 `""` 解除；
+`env` 傳整個物件會**取代**。不存在的 identity 404；kind 不符 400。
+
+### `POST /api/identities` / `DELETE /api/identities/{name}`
+- POST `{name, kind, env, args}` → `200 {"name"}`；名稱或 kind 不合法 400；重複 `409 {"reason":"identity name already in use","name"}`。
+- DELETE → `200 {}`；仍有 bot 綁著 `409 {"reason":"identity still used by bots","bot_id"}`。
+- WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
-
-在指定主機為指定身份開一個**臨時 host-shell pane**，並以該身份在該主機展開後的 env 執行登入：
-
-| kind | 指令 |
-|---|---|
-| `claude` | `claude /login` |
-| `codex` | `codex login` |
-| `grok` | `grok login` |
-
-env（包含 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME`）只送進該 pane，不寫入 daemon log、事件或
-team timeline。回應是「主機 shell」的 pane 物件；UI 從該 pane 的 terminal snapshot 顯示 device code / URL。
-登入指令結束（成功或失敗）後 daemon 重新跑該身份的 `auth status` 探測並關閉臨時 pane；主機斷線時則等
-重連後由使用者重新偵測。
+在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude /login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log、事件或 team timeline。
+回應是主機 shell 的 pane 物件；UI 從它的 terminal 顯示 device code / URL。登入指令結束後 daemon 重新探測該身份並關 pane。
 
 | 狀況 | 回應 |
 |---|---|
-| identity 不存在 | `404 {"error":"not_found","what":"identity"}` |
-| 該 kind 的 CLI 不在偵測到的 PATH | `409 {"error":"conflict","reason":"identity_login_unavailable",...}` |
-| host 不存在 / 未連線 / pane 建立失敗 | `404` / `502` |
+| identity 不存在 | `404 {"what":"identity"}` |
+| 該 kind 的 CLI 不在偵測到的 PATH | `409 {"reason":"identity_login_unavailable"}` |
+| host 不存在 / 未連線 / pane 建立失敗 | 404 / 502 |
 
-### `GET /api/state` 新增欄位
+## 10. Bot 欄位、編輯、重啟、刪除
 
-```json
-{
-  "identities": [
-    {"name":"cc0","kind":"claude","env":{},"args":[]},
-    {"name":"cc1","kind":"claude","env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]}
-  ],
-  "projects": [
-    {"bots": [
-      {"id":"01M1…","name":"foo-cc1","kind":"claude","identity":"cc1","env":{"FOO":"bar"}, "…": "…"}
-    ]}
-  ]
-}
-```
+### 10.1 bot 欄位
 
-- `identities` 一定存在（沒設定時為 `[]`）。**這是 config.toml 的那一份**；每台主機另外還有從它自己
-  登入 shell 認出來的 `ccN`（見下方「shell 認出來的身份」）。
-- 每個 bot 物件都有 `identity`（`string | null`）與 `env`（物件，預設 `{}`）。
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `name` | string | 暱稱：1–32 字、允許 CJK，不可含空白或 `@ , : ;`；專案內唯一（重複 409 `bot name already in use in this project`）。執行中也可改，不影響 herdr |
+| `agent_name` | string（唯讀） | herdr 內的 agent 名：有 active Run 時是實際啟動的名稱，否則是下次會用的 `<project slug>-<bot id 尾 6 碼>` |
+| `kind` | `claude` \| `codex` \| `grok` | 其他值 400 `kind must be claude, codex or grok` |
+| `model` | string \| null | `null` = CLI 自己決定；不做白名單驗證，空白字串正規化成 `null` |
+| `effort` | string \| null | 依 kind 驗證，其他值 400。claude `low\|medium\|high\|xhigh\|max`；grok `low\|medium\|high\|xhigh`；codex `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra` |
+| `fast` | bool | §12.2 |
+| `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve` |
+| `inject_hooks` | bool，預設 `true` | `false` 時回覆走終端備援 |
+| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），team/child bot 也能釘，手機與電腦同步 |
+| `identity` / `env` | 見身份一節 | |
+| `persona` | §12.8 | |
+| `managed_by` / `parent_bot_id` | 唯讀 | `child` = bot 自己開的子 agent（§子 agent）；`team` = team 成員 |
 
-### shell 認出來的身份 `ccN`（v4.1，SPEC §16）
-
-daemon 在每台主機的工具偵測裡順便讀那台登入 shell 的 alias（`"$SHELL" -lic alias`，讀不到時退回
-`~/.zshrc`），把 `cc0`…`cc6` 當成身份用，**不寫回 config.toml**：
-
-```json
-{
-  "name": "m4p", "…": "…",
-  "shell_identities": [
-    {"name": "cc0", "kind": "claude", "env": {}, "args": []},
-    {"name": "cc1", "kind": "claude", "env": {"CLAUDE_CONFIG_DIR": "$HOME/.claude-ccompany"}, "args": []}
-  ],
-  "identities": {
-    "cc0": {"name":"cc0","kind":"claude","logged_in":true,"account":"me@example.com","plan":"max","source":"config"},
-    "cc1": {"name":"cc1","kind":"claude","logged_in":true,"account":"ops@example.com","source":"shell",
-            "config_dir":"/Users/m4p/.claude-ccompany"}
-  }
-}
-```
-
-- `shell_identities`：那台主機讀到的原始 `ccN`（`env` 未展開，就是 alias 裡的字面值）。
-- `identities.<name>.source`：`config`（config.toml 的 `[[identities]]`，可編輯 / 可刪）或 `shell`
-  （alias 認來的，唯讀）。舊 daemon 沒有這個欄位 → 一律當 `config`。
-- `identities.<name>.config_dir`：該身份在**這台**指到的設定目錄，`$HOME` 已用那台的家目錄展開；
-  `cc0` 這種預設帳號沒有這個欄位。
-- 只取 alias 開頭的 `CLAUDE_CONFIG_DIR=`；alias 裡的旗標（`--dangerously-skip-permissions` 等）
-  **不會**被帶進來，授權旗標仍由 daemon 的 `auto_approve` 決定，所以 `args` 一定是 `[]`。
-- 同名時 config 的那一個勝出（`tools::identities_for_host`），bot 啟動、identity 驗證、額度探測與 UI
-  選單走的都是這條合併規則。
-- `identity` 的存在性是**在該 bot / 專案的 host 上**檢查的：本機有 `cc2`、遠端沒有時，把遠端 bot 設成
-  `cc2` 會拿到 `404 {"error":"not_found","what":"identity"}`。
-
-### bot 建立 / 修改
-
-`POST /api/projects/{id}/bots` 與 `PATCH /api/bots/{id}` 都多接受兩個欄位：
-
-```json
-{ "name":"foo-cc1", "kind":"claude", "identity":"cc1", "env":{"FOO":"bar"} }
-```
-
-- `identity` 省略 = 不變（PATCH）／`null`（POST）；傳 `null` 或 `""` 可解除綁定。
-- `env` 省略 = 不變（PATCH）／`{}`（POST）；傳整個物件會**取代**既有的 env。
-- 指定不存在的 identity → `404 {"error":"not_found","what":"identity"}`（存在與否看的是那個 bot 所在
-  主機的清單：config.toml 的 `[[identities]]` ∪ 那台 shell 的 `ccN`）。
-- identity 的 kind 與 bot kind 不符 → `400`。
-
-### `POST /api/identities`
-
-```json
-{ "name":"cc1", "kind":"claude", "env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"}, "args":[] }
-```
-
-`200 {"name":"cc1"}`；名稱不合 `[a-z][a-z0-9_-]{0,31}` 或 `kind` 不是 claude/codex/grok → `400`；
-名稱重複 → `409 {"error":"conflict","reason":"identity name already in use","name":"cc1"}`。
-
-### `DELETE /api/identities/{name}`
-
-`200 {}`；仍有 bot 綁著 → `409 {"error":"conflict","reason":"identity still used by bots","bot_id":"…"}`。
-
-### WebSocket
-
-| type | data |
-|---|---|
-| `identities_changed` | `{}` — 重新 `GET /api/state` |
-
-bot 的 `identity` / `env` 變更沿用既有的 `bot_changed`。
-
----
-
-## 10. Bot 編輯 / 刪除 / 指定模型（v3.3，2026-09-06 新增）
-
-### 10.1 `bot.model`
-
-每個 bot 新增可選欄位 **`model`**（`string | null`，預設 `null` = 不指定，由 CLI 自己決定）。
-啟動 Run 時 daemon 依 kind 注入：
-
-| kind | 注入 |
-|---|---|
-| `claude` | `--model <model>` |
-| `codex` | `-m <model>` |
-| `grok` | `-m <model>`（`grok models`：`grok-4.6` 預設、`grok-4.5`） |
-
-**argv 組合順序**（前端可據此預覽）：
-
-```
-daemon 旗標（auto_approve: --dangerously-skip-permissions / --yolo；hooks: --settings / -c notify=…）
-  → model（--model <m> / -m <m>）
-  → identity.args
-  → bot.args
-```
-
-- TOML：`model = "opus"`（`[[projects.bots]]` 內）。
-- DB：`bots.model TEXT`（additive migration，舊 DB 啟動時自動補欄位）。
-- `GET /api/state` 的每個 bot 物件都有 `model`（`string | null`）。
-- `POST /api/projects/{id}/bots` 可帶 `model`（省略 = `null`）。
-- 值不做白名單驗證（各 CLI 自己驗），只把空白字串正規化成 `null`。
+啟動 argv 順序（前端可據此預覽）：daemon 旗標（auto_approve、hooks、persona）→ model（claude `--model`、codex/grok `-m`）→ effort（claude `--effort`、grok `--reasoning-effort`、
+codex `-c model_reasoning_effort="<level>"`）→ identity.args → bot.args。
 
 ### 10.2 `PATCH /api/bots/{id}`
 
-body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）：
+body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env` 傳整個物件為**取代**：
 
 ```json
-{
-  "name": "am-codex",
-  "model": "gpt-5.5",
-  "args": ["--search"],
-  "autostart": false,
-  "auto_approve": true,
-  "inject_hooks": true,
-  "identity": "cc1",
-  "env": {"FOO": "bar"},
-  "primary": false
-}
+{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…" }
 ```
 
-回應：
+回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。
 
-```json
-200 {"needs_restart": true}
-```
-
-- **`needs_restart`**：`true` 表示這次修改要等 bot 重啟後才會生效（有 active Run，且本次動到會影響啟動 argv / env 的欄位：`model`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`）。
-  - 例外（daemon 直接操作 TUI 當場套用）：這次只動了下列欄位、Run 在 `running` 且不忙（非 working /
-    blocked、沒有 in-flight turn）、新值不是清成 `null`（codex 的 `fast` 例外，它是開關）時，daemon 會操作
-    pane 並回 `needs_restart: false`。任何一個條件不成立就退回 `true`。
-    - grok `effort` → `/effort <level>`
-    - grok `model` → `/model <id>`；若這次 PATCH 也帶了 `effort`（或 bot 本來就有），第二參數一併送（`/model grok-4.6 high`）
-    - claude `model` → `/model <alias>`（alias 同 `claude --model`：`opus` / `sonnet` / `haiku` / `fable`）。
-      有對話紀錄時 claude 會先跳「Switch model?」確認框：daemon 送完會回頭看畫面，看到框就按 `1`（Yes），
-      確認框關掉才算套用；關不掉就按 Esc 退出並回 `needs_restart: true`，**不會把框留在畫面上**（2026-09-11）
-    - claude `effort` → `/effort <level>`（2.1.263 實測：帶參數就直接套用；不帶參數的 `/effort` 才是拉桿）。
-      **副作用**：claude 會把它一併存成該帳號之後新 session 的預設強度（CLI 行為，TUI 上按 `s` 才是只此一次）
-    - codex `model` / `effort` / `fast`（2026-09-09 新增，0.153.4 實測）→ 不是一行指令，是操作 TUI：
-      `/model` 開「模型」「強度」兩層編號選單（**不吃參數**，`/model gpt-5.6-sol high` 會被當成 prompt
-      送給模型），daemon 讀 pane 找對應的號碼按下去；`fast` 用 `/fast` 這個**開關**，只有在現在的 tier
-      跟目標不同時才按（先看 `run.runtime_fast`，那一欄是 NULL 的收編 pane 就改讀狀態列）。三個欄位
-      可以在同一次 PATCH 一起改，**只改 `fast` 也走這條**（2026-09-09 修：以前會直接回
-      `needs_restart: true`）。送完會**回讀狀態列**
-      （`<model> [<effort>] [fast] · <cwd> · Context …`）確認真的變了，`run.runtime_*` 存的就是讀回來的值；
-      對不上就回 `needs_restart: true`。**副作用**：codex 同樣會把選擇存成該帳號的預設
-      （`~/.codex/config.toml`）。詳見 SPEC §4.4a
-  沒有 active Run，或只改 `autostart`（下次啟動才用得到）→ `false`。
-  前端可據此顯示「需要重新啟動」並提供 §10.3 的按鈕。
-- **`name`**：有 active Run 時 **409**（herdr agent name 綁在啟動時的名稱上）：
-
-  ```json
-  409 {"error":"conflict","reason":"cannot rename a bot with an active run","run_id":"01M1…","bot_id":"01M1…"}
-  ```
-
-  停掉 bot 之後即可改名。名稱不合 `[a-z][a-z0-9_-]{0,31}` → 400；與其他 bot 重名 → 409 `{"reason":"bot name already in use","name":"…"}`。
-- **其他欄位在有 active Run 時允許修改**（不再 409），只是回 `needs_restart: true`。
-- `identity` 指向不存在的 identity → `404 {"error":"not_found","what":"identity"}`；kind 與 bot 不符 → `400`。
-- `env` 傳整個物件即為**取代**（不 merge）；`identity` / `model` 傳 `null` 或 `""` 即為清除。
-- 成功後推 WS `bot_changed {bot_id}`。
+- **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`）。
+  沒有 active Run，或只改 `name` / `autostart` / `primary` → `false`。前端顯示「需要重新啟動」並提供 §10.3。
+- **當場套用的例外**：只動了下列欄位、Run `running` 且不忙（非 working/blocked、無 in-flight turn）、新值不是清成 `null`（codex `fast` 例外）時，daemon 操作 TUI 並回 `false`；
+  任一條件不成立或回讀對不上就回 `true`。細節見 SPEC §4.4a：
+  - grok `effort` → `/effort <level>`；grok `model` → `/model <id> [effort]`。
+  - claude `model` → `/model <alias>`；有對話紀錄時的「Switch model?」框 daemon 會按 `1` 確認，關不掉就 Esc 並回 `true`（不會把框留在畫面上）。
+  - claude `effort` → `/effort <level>`（副作用：claude 存成該帳號新 session 的預設）。
+  - codex `model` / `effort` / `fast` → 操作 `/model` 兩層選單與 `/fast` 開關（可一起改，只改 `fast` 也走這條），回讀狀態列確認，`run.runtime_*` 存讀回的值（副作用：寫進 `~/.codex/config.toml`）。
+- `identity` 不存在 404；kind 不符 400。
 
 ### 10.3 `POST /api/bots/{id}/restart`
+有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start。過程推 `bot_status`。
+子 agent 在原 pane 重開（SPEC §6.9）。
 
-等同「有 Run 就先 stop（§6.4：ctrl+c ×2、逾時關 pane）→ 再 start」，用來讓改過的 `model` / `args` /
-`identity` / `env` 生效。
-
-```json
-200 {"run_id":"01M1…"}        // 新 Run 的 id
-```
-
-- 本來就沒有 Run 也可以呼叫，等同 start。
-- start 失敗的錯誤與 `POST /bots/{id}/start` 相同（502 / 409 / 404）。
-- 過程中會推 `bot_status`（stopping → offline → starting → idle）。
-
-### `POST /relay/announce`（2026-09-12 新增，SPEC §6.5d）
-
-**不在 `/api` 下**，也不吃 UI token：送出的是 pane 裡的 herdr shim。驗證用該 bot 的 `hook_token`
-（header `X-AM-Bot-Token`），跟 `/hook/{provider}` 同一把鑰匙。
-
-表單編碼（`application/x-www-form-urlencoded`）：`bot_id`、`to_agent`、`text`。回 `200 {}`；
-bot 不存在、已刪除或 token 不符 → `401`。
-
-用途：`herdr agent prompt` 是 agent 直接打進另一個 agent 的 pane，daemon 只看得到 prompt 回音。
-這一報讓 daemon 認得出來源，回音進對話時就帶著 `relay_from`（UI 畫成「AGM → …」而不是使用者自己打的）。
-記錄只留在行程內、5 分鐘過期，認領一次就用掉。
-
-### 10.3a `POST /api/bots/restart-idle`（2026-09-09 新增，SPEC §6.9）
-
-一鍵把「帶著 claude 更新且現在閒置」的 bot 全部 exit + resume。無 body。
+### 10.3a `POST /api/bots/restart-idle`
+一鍵把「帶著 claude 更新且閒置」的 bot 全部 exit + resume（SPEC §6.9）。無 body。
 
 ```json
-202 {
-  "batch_id": "01M2…",
-  "total": 2,
-  "planned": [{"bot_id":"01M1…","name":"am-claude"}, {"bot_id":"01M1…","name":"C1-fable"}],
-  "skipped": [{"bot_id":"01M1…","name":"am-claude-2","reason":"working",
-               "reason_label":"正在跑，重啟會把這一回合砍掉"}]
-}
+202 { "batch_id": "01M2…", "total": 2,
+      "planned": [{"bot_id":"01M1…","name":"am-claude"}, {"bot_id":"01M1…","name":"C1-fable"}],
+      "skipped": [{"bot_id":"01M1…","name":"am-claude-2","reason":"working","reason_label":"正在跑，重啟會把這一回合砍掉"}] }
 ```
 
-- **202 而不是 200**：回的是**計畫**不是結果。實際重啟在 daemon 背景一顆一顆跑，因為一顆
-  `stop_bot` 最久要等 agent 十秒，五顆就一分鐘——同步做完再回會把 HTTP 連線拖死。
-- 每顆走的是既有的單顆路徑加上續接旗標：`restart_bot_with(resume_native)`（stop 與 start 在同一次持有
-  bot 鎖裡做完，2026-09-11 修正 23:02 的 reconcile 競態，見 SPEC §6.9），claude 拿到
-  `--resume <上一個 session>`，所以**不會開新對話、上下文不掉**。與 `/bots/{id}/restart` 的差別
-  只有這個旗標。例外：hook 回報過的 `transcript_path` 在本機不存在（bot 起來後從沒被 prompt 過，claude
-  不會寫 transcript；`--resume` 這種 id 會印 `No conversation found` 直接退出），就不帶 `--resume`、
-  開新對話，log `native session has no transcript on disk`。
-- 候選 = kind 為 `claude` 且該 run 的 `update_notice` 非空。其他 kind 與沒有更新在等的**不會出現在
-  任何一張清單裡**。
-- `reason` 的取值與判斷順序見 SPEC §6.9：`team_member` / `default_session` / `not_running` / `working` /
-  `blocked` / `unknown_status` / `turn_in_flight`。`reason_label` 是同一件事給人看的那句（前端直接
-  顯示，不另編一套）。
-- `total = 0` 也是 `202`：計畫是空的不是錯誤，daemon 仍會立刻推一次 `bots_restart_done`。
-- 一顆失敗不中斷整批；失敗的進最終的 `failed` 清單。
-- 總管 bot（AGM）在 `planned` 裡**永遠排最後**；它重啟後 daemon 會在 60 秒內確認它回來，沒回來自動再啟動一次
-  （結果推 supervisor inbox `supervisor_restart_retry`）。
-- 某顆最終啟動失敗時不會留下「run 還在、pane 已關」的狀態（該 run 會被結束，bot 顯示停止），並推 supervisor inbox
-  `bot_restart_failed`。
+- **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
+- 每顆 `restart_bot_with(resume_native)`，claude 拿到 `--resume <上一個 session>`（上下文不掉）；本機找不到 `transcript_path` 時開新對話。
+- 候選 = claude 且 run 的 `update_notice` 非空；非候選不出現在任何清單。`reason`：`team_member` / `default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
+  `reason_label` 是給人看的那句（前端直接顯示）。
+- 一顆失敗不中斷整批。AGM 在 `planned` 永遠排最後，60 秒內沒回來自動再啟動一次（inbox `supervisor_restart_retry`）；最終啟動失敗推 inbox `bot_restart_failed`。
 
-#### WS：`bots_restart_progress` / `bots_restart_done`
+WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed` 帶 `error`），每顆之後另推 `bot_changed`；收尾一次 `bots_restart_done`：
 
 ```json
 {"batch_id":"01M2…","index":1,"total":2,"bot_id":"01M1…","name":"am-claude","status":"restarting"}
-{"batch_id":"01M2…","index":1,"total":2,"bot_id":"01M1…","name":"am-claude","status":"ok"}
-{"batch_id":"01M2…","index":2,"total":2,"bot_id":"01M1…","name":"C1-fable","status":"failed",
- "error":"active run already exists"}
-```
-
-- 每顆送兩次：開始時 `restarting`，結束時 `ok` 或 `failed`（`failed` 帶 `error`）。每顆之後另推一次
-  既有的 `bot_changed`。
-- 收尾一次 `bots_restart_done`：
-
-```json
 {"batch_id":"01M2…",
  "ok":[{"bot_id":"…","name":"am-claude","run_id":"01M3…"}],
  "failed":[{"bot_id":"…","name":"C1-fable","error":"…"}],
- "skipped":[{"bot_id":"…","name":"am-claude-2","reason":"working","reason_label":"正在跑，重啟會把這一回合砍掉"}]}
+ "skipped":[{"bot_id":"…","name":"am-claude-2","reason":"working","reason_label":"…"}]}
 ```
 
-- `done` 的三張清單是權威：中途漏掉的 progress frame 到這裡會被補齊，前端照它重畫摘要。
-- `batch_id` 用來擋掉不是自己那一批的 frame（同時有兩個分頁按下去時）。
+`done` 的三張清單是權威（補齊漏掉的 progress）；用 `batch_id` 擋掉別的分頁那一批。
 
 ### 10.4 `DELETE /api/bots/{id}`
+`200 {}`（有連帶刪子 agent 時 `{"removed_children":["<bot_id>",…]}`）。
+
+- 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
+  刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
+- **子 agent 一起刪**：`managed_by = "child"` 且 `parent_bot_id` 指到它的（含孫代），最深的先。每顆各推 `bot_changed`。
+- team 成員（`managed_by = "team"`）→ `409 {"reason":"team_managed","bot_id","team_id","team_role","message"}`，要走 team 的退役／換成員／刪 team。
+- 找不到 404。
+- hook 材料目錄的其他清理路徑：team 退役 worker、換成員、建立失敗回滾；daemon 啟動時也掃一次 `bots/`，只刪 DB 裡已 `deleted_at` 且沒有 active Run 的目錄。
+
+### 10.5 `POST /relay/announce`
+**不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
+表單編碼 `bot_id`、`to_agent`、`text` → `200 {}`；bot 不存在、已刪或 token 不符 → 401。
+daemon 記在行程內（5 分鐘、認領一次就用掉），該句回音進對話時帶上 `relay_from`（SPEC §6.5d）。
+
+### 10.6 hook 端點 `POST /hook/{claude|codex|grok}`
+body `{bot_id, provider, payload, received_at, truncated?}`，header `X-AM-Bot-Token`；入佇列立即回 200。grok 的 `payload` 是 stdin JSON（`hookEventName`、`sessionId`、`promptId`、
+`transcriptPath`、`lastAssistantMessage`、`reason`、`stopHookActive`）；`reason ≠ end_turn` 與 `session_end` 忽略，`session_start` 只回填 `native_session_id`（SPEC §12.3）。
+
+## 11. 專案群組聊天（SPEC §13）
+
+一個 Project 就是一個群組：`@<暱稱>` 或 `@all` 經 §5 的 prompt 路徑送給每個目標 bot，回覆回到合併時間軸。不自動啟動 bot。
+
+- **`messages.group_id`**：同一次 chat 產生的 user 副本與「未送達」system 註記共用（= 該次 `client_request_id`），其他訊息 `null`。
+- **mention（daemon 為準，前端一致）**：`@all` = 專案內所有 bot；`@<name>` token 為連續非空白、非標點字元（支援 `@小幫手，看一下`），不分大小寫；
+  `@` 須在開頭或非字元之後（`me@example.com` 不算）。目標依專案內 bot 順序去重。送給 bot 的文字去掉 mention 與其後的 `, : ; ，：；、`。
+
+### 11.1 `GET /api/projects/{id}/messages?before=<message_id>&limit=100`
+Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒序分頁、回傳正序；`limit` 1–500。每則多 `bot_id`、`bot_name`。Project 不存在 404。
 
 ```json
-200 {}
-```
-
-流程：有 active Run 先 stop（ctrl+c ×2、逾時關 pane；遠端 host 亦同；**host 連不上而 stop 根本送不出去時，
-run 直接標 `exited`、照常刪**——不然那個 run 會永遠 `running`，沒有任何對帳會再看它，2026-09-12）→ 從 config.toml 移除 →
-DB `bots.deleted_at`（**Conversation 與所有訊息保留**，同一個 bot id 之後仍查得到歷史）→
-刪除該 bot 的 hook 材料目錄 `~/.config/agents-manager/bots/<bot_id>/`（遠端 host 以 ssh `rm -rf`，
-失敗只寫 log、不影響回應）。
-
-> **hook 材料目錄的清理不只這條路（#61，2026-09-11）**：team 退役 worker（`retire_workers`）、換成員（`swap_member`，
-> 座位保留名字、舊 bot id 的目錄清掉）、建立失敗回滾（`rollback_create`）也都會在軟刪 bot 時一併清 `bots/<bot_id>/`。
-> 另外 daemon 啟動時掃一次 `bots/`：**只刪** DB 裡 `deleted_at` 非空、且沒有 active Run 的 bot 目錄；沒有對應 bot 列的
-> 目錄不動（不是這個 daemon 能判斷的）。
-
-- 找不到 bot → `404`。
-- **team 成員（`managed_by = "team"`）→ `409 {"error":"conflict","reason":"team_managed","bot_id":…,"team_id":…,"team_role":…,"message":…}`**
-  （2026-09-12）。成員從不進 config.toml，這條路刪不掉它——以前回 200 但只停了 agent、砍了 hook 目錄，
-  bot 列還活著、team 排程接著報 `member_lost`。要拿掉成員走 team 的路：退役 worker、`swap_member`、或刪整個 team。
-- **它開的子 agent 一起刪**（2026-09-08）：`managed_by = "child"`、`parent_bot_id` 指到它的 bot（含孫代）
-  先各自停掉、軟刪、清目錄，最深的先；回應 `{"removed_children":["<bot_id>", …]}`。使用者在
-  config.toml 建的 bot 不會是誰的 child，不受影響。
-- 刪除後推 `bot_changed {bot_id}`（每個被連帶刪掉的 child 也各推一次）；前端重新 `GET /api/state`（該 bot 會從 `projects[].bots` 消失）。
-- 訊息歷史仍可用 `GET /api/bots/{id}/messages` 讀到（第一階段不提供「已刪除 bot」的列表 UI）。
-
-### 10.5 WebSocket
-
-沿用既有事件，沒有新型別：
-
-| type | data |
-|---|---|
-| `bot_changed` | `{"bot_id":"…"}` — PATCH / DELETE / restart 都推這個，收到後重新 `GET /api/state` |
-
-
----
-
-## 11. 專案群組聊天（SPEC §13，v3.6，2026-09-06 新增）
-
-一個 Project 就是一個群組。使用者在群組裡輸入 `@<bot 名稱>` 或 `@all`，daemon 把同一段文字
-（保留原文，含 `@`）以 §5 的 prompt 路徑送給每個目標 bot；各 bot 的回覆回到同一條合併時間軸。
-**沒有新的 conversation 型別**，也不會自動啟動 bot。
-
-### 11.1 `messages.group_id`
-
-每個 message 物件多一個欄位 **`group_id`**（`string | null`）：同一次 `POST /projects/:id/chat`
-產生的每個收件 bot 的 user 副本、以及「未送達」的 system 註記共用同一個 `group_id`
-（= 該次的 `client_request_id`）。bot 的回覆與其他訊息為 `null`。
-`GET /bots/:id/messages` 與 WS `message_added` 的 message 物件都帶這個欄位。
-
-### 11.2 `GET /api/projects/{id}/messages?before=<message_id>&limit=100`
-
-Project 底下**所有存活 bot** 的訊息合併，以插入順序（SQLite `rowid`，非 `id` 字典序）倒序分頁，
-回傳時已**正序**排好。`before` 對外仍傳 message id，由後端解析成插入順序游標；`limit` 1–500（預設 100）。
-Project 不存在 → 404。
-
-```json
-{
-  "project_id": "01M1...",
+{ "project_id": "01M1...",
   "messages": [
-    {
-      "id": "01M1...", "conversation_id": "01M1...", "turn_id": "01M1...",
-      "role": "user", "content": "@all Reply with exactly GROUP-OK",
-      "source": "web", "incomplete": 0, "terminal_snapshot": null,
-      "group_id": "c-group-1",
-      "created_at": "2026-09-05T18:12:30.121Z", "updated_at": null,
-      "bot_id": "01M1...", "bot_name": "g-claude"
-    },
-    { "...": "同一則 user 訊息在 g-codex 上的副本（group_id 相同）", "bot_name": "g-codex" },
+    { "id": "01M1...", "role": "user", "content": "@all Reply with exactly GROUP-OK", "source": "web", "group_id": "c-group-1", "bot_id": "01M1...", "bot_name": "g-claude", "...": "…" },
     { "role": "assistant", "content": "GROUP-OK", "source": "hook", "group_id": null, "bot_name": "g-claude", "...": "…" }
   ],
-  "has_more": false
-}
+  "has_more": false }
 ```
 
-前端把同一 `group_id` 的 user 訊息折疊成一則並列出目標 bot。
-
-### 11.3 `POST /api/projects/{id}/chat`
+### 11.2 `POST /api/projects/{id}/chat`
+`{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...] }`。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。
 
 ```json
-{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "<前端產生的唯一字串>" }
+200 { "group_id": "c-group-4", "project_id": "01M1...",
+      "sent": [ { "bot_id": "01M1...", "bot_name": "g-claude", "turn_id": "01M1...", "message_id": "01M1...", "delivery": "ok" } ],
+      "skipped": [ { "bot_id": "01M1...", "bot_name": "g-codex", "reason": "not_running", "detail": "bot has no active run" } ] }
 ```
 
-- **mention 規則（daemon 為準）**：`@all` = 專案內所有 bot；`@<name>` 比對專案內 bot 名稱，
-  大小寫不敏感，token 為 `[A-Za-z0-9_-]+`（`@name,` / `@name:` 的尾隨標點會被切掉；
-  `@name-` / `@name_` 整個對不上時去掉尾隨 `-` `_` 再試）；`@` 必須在開頭或接在非字元後
-  （`me@example.com` 不算）。目標依專案內 bot 順序去重。
-- `client_request_id` 同時是 **`group_id`**；每個收件 bot 的 prompt 用 `<crid>:<bot_id>` 做冪等鍵，
-  所以同一 id 重送會回同一組 `turn_id`，也不會再寫第二則「未送達」註記。
+- 部分略過仍 200。`sent[].delivery` 同 §5。`skipped[].reason`：`not_running`、`blocked`、`in_flight`、`unknown_delivery`、`conflict`、`not_found`、`bad_request`、`upstream`；
+  `detail` 即單 bot prompt 的 409 reason。每個略過的 bot 對話多一則同 `group_id` 的 system 訊息（經 `message_added` 推）。
+- 錯誤：`400 {"error":"no_mention","message","bots":[{id,name,kind}]}`；`400` 空 text；`404` project。
+- WS 沒有新事件：各 bot 各自推 `message_added`（帶 `group_id`）與 `turn_updated`，前端依 `bot_id → project_id` 歸群組。
 
-成功 `200`（部分 bot 略過仍是 200）：
+### 11.3 第二個 daemon 實例
+`agents-managerd serve` 讀 `AM_DATA_DIR` 覆蓋資料目錄（預設 `~/.config/agents-manager`；`hook` 子命令同）。驗證用：
+`AM_DATA_DIR=/tmp/am-x agents-managerd serve --config /tmp/am-x/config.toml`（另一個 `listen` port 與 `herdr_session`）。
 
-```json
-{
-  "group_id": "c-group-4",
-  "project_id": "01M1...",
-  "sent": [
-    { "bot_id": "01M1...", "bot_name": "g-claude", "turn_id": "01M1...", "message_id": "01M1...", "delivery": "ok" }
-  ],
-  "skipped": [
-    { "bot_id": "01M1...", "bot_name": "g-codex", "reason": "not_running", "detail": "bot has no active run" }
-  ]
-}
-```
+## WS `turn_progress`（即時輸出）
 
-- `sent[].delivery` 意義同 §5（`ok` / `unknown` / `failed`）。
-- `skipped[].reason`：`not_running`（無 active Run 或 Run 非 running）、`blocked`、`in_flight`、
-  `unknown_delivery`、`conflict`、`not_found`、`bad_request`、`upstream`；`detail` 為人類可讀原因
-  （即單一 bot prompt 會回的 409 `reason`）。每個略過的 bot 的 conversation 會多一則
-  `role=system`、`group_id` 相同的訊息（例：「群組訊息未送達 g-codex：bot 未啟動（不會自動啟動）」），
-  並經 `message_added` 推送。**不會自動啟動 bot。**
+回合 `in_flight` 且 `delivery=ok` 時，daemon 每 0.7 秒讀 pane（`recent_unwrapped`），推 prompt 回音之後、清掉 TUI 雜訊的文字：
 
-錯誤：
-
-| 狀態碼 | body |
-|---|---|
-| 400 | `{"error":"no_mention","message":"…","bots":[{"id":"…","name":"g-claude","kind":"claude"}]}` — 沒有任何有效 mention；`bots` 列出可用名稱 |
-| 400 | `{"error":"bad_request","message":"text must not be empty"}` |
-| 404 | `{"error":"not_found","what":"project"}` |
-
-### 11.4 WebSocket
-
-沒有新事件。每個收件 bot 各自推 `message_added`（user 副本，帶 `group_id`）與 `turn_updated`；
-回覆到達時推該 bot 的 `message_added`。前端依 `bot_id → project_id` 歸入群組時間軸。
-
-### 11.5 daemon 的 `AM_DATA_DIR`
-
-`agents-managerd serve` 讀環境變數 `AM_DATA_DIR` 覆蓋資料目錄（預設 `~/.config/agents-manager`；
-`hook` 子命令早已支援同名變數）。用途：在不動正式 daemon 的情況下起第二個實例驗證，例如
-`AM_DATA_DIR=/tmp/am-group agents-managerd serve --config /tmp/am-group/config.toml`
-（config 用另一個 `listen` port 與 `herdr_session`）。
-## bot.agent_name（v3.5）
-
-`GET /api/state` 的 bot 物件新增唯讀欄位 `agent_name`：herdr 內的 agent 名稱。有 active Run 時為該 run 實際啟動的名稱；否則為下次啟動會用的 `<project label slug>-<bot name>`（例如 `agents-manager-am-codex`）。bot `name` 的唯一性改為**專案內**唯一（同名 bot 可存在於不同專案）；`POST /projects/:id/bots` 與 `PATCH /bots/:id` 的重名 409 訊息改為 `bot name already in use in this project`。
-
-
-## bot.kind = "grok"（v3.6，SPEC §12）
-
-第三種 kind：xAI grok CLI（1.0.13）。`POST /projects/:id/bots`、`POST /identities` 的 `kind` 接受 `claude | codex | grok`（其他值 → `400 {"error":"bad_request","message":"kind must be claude, codex or grok"}`）。前端與 mock 都已有 `grok` 選項與 `am-grok` 種子。
-
-啟動時 daemon 注入：`auto_approve` → `--always-approve`；`model` → `-m <model>`；hook **不走 argv**（grok 沒有每次啟動的 hook 旗標），改為寫入 `<GROK_HOME>/hooks/agents-manager.json` + `~/.config/agents-manager/grok-hook.sh`，靠 pane env `AM_BOT_ID` / `AM_HOOK_TOKEN`（本機另有 `AM_PORT`）分派到正確的 bot；`inject_hooks = false` 時不給 `AM_HOOK_TOKEN`，hook 變成 no-op，回覆走 `terminal_fallback`。
-
-hook 端點：`POST /hook/grok`（body 與 claude 相同，`payload` 為 grok 的 stdin JSON：`hookEventName: "stop"`、`sessionId`、`promptId`、`transcriptPath`、`lastAssistantMessage`、`reason: "end_turn"`、`stopHookActive`）。`reason ≠ end_turn`（session 結束時的觀察用 Stop）與 `session_end` 會被忽略；`session_start` 只回填 `runs.native_session_id`。
-
-對前端可見的差異：`kind: "grok"`；`GET /api/state` 其餘欄位相同；`terminal_fallback` 訊息不再含 grok 的遙測 banner / 時戳 / 捲軸字元。
-
-
-## v3.8：暱稱、hash 式 agent name、effort
-
-- `bot.name` 是暱稱：1–32 字、不可含空白或 `@ , : ;`，允許 CJK；`PATCH /bots/:id {name}` 在 run 執行中也可改（回 `needs_restart:false`），herdr 不受影響。
-- `bot.agent_name`（唯讀）= `<project slug>-<bot id 尾 6 碼>`，例如 `agents-manager-rbmyf7`。
-- `bot.effort`（`POST /projects/:id/bots`、`PATCH /bots/:id` 皆可設；值依 kind，其他值 400）：
-  - `claude`：`low|medium|high|xhigh|max|null` → `--effort <level>`（claude **2.1+**；v4.1 起支援）。
-  - `grok`：`low|medium|high|xhigh|null` → `--reasoning-effort <level>`。
-  - `codex`：`none|minimal|low|medium|high|xhigh|max|ultra|null` → `-c model_reasoning_effort="<level>"`。
-- `@mention` 解析（daemon 與前端一致）：token 為連續非空白、非標點字元，支援 `@小幫手，看一下`；送給 bot 的文字會去掉 mention 與其後的 `, : ; ，：；、`。
-
-
-## WS `turn_progress`（v3.9，即時輸出）
-
-回合 `in_flight` 且 `delivery=ok` 時，daemon 每 0.7 秒讀一次 pane（`recent_unwrapped`），把 prompt 回音之後、去掉 TUI 雜訊與回覆標記的文字推成：
 ```json
 {"type":"turn_progress","seq":123,"data":{"bot_id":"…","run_id":"…","turn_id":"…","text":"目前為止的部分回覆","activity":"Thinking… (12s · ↑ 1.2k tokens)","alert":"","revision":42}}
 ```
 
 - `text`：目前為止的部分回覆（同最終訊息的清理規則）。
-- `activity`（**選填**，v4.1 新增）：agent 目前的**活動狀態**——畫面上該回合最後一行 spinner／事件行去掉開頭字元後的內容，例如 `Boogieing… (3m 18s · ↓ 11.0k tokens)`、`Thought for 0.1s`。上限 120 字元（超過截斷並補 `…`），沒有就送空字串。它**只給前端在 `text` 還是空的時候顯示用**，是純文字（不要當 Markdown 渲染），**不會**寫進 DB、也**不會**進入最終訊息。
+- `activity`：該回合畫面上最後一行 spinner／事件行（去開頭字元，≤ 120 字元，沒有送空字串）。純文字、不寫 DB、不進最終訊息，只在 `text` 還空時顯示——agent 純思考／跑工具時畫面只剩被清理掉的
+  spinner 行，沒有它氣泡會永遠停在「等待回覆」。辨識取聯集、以最後命中的一行為準：glyph 白名單（claude/codex `✻ ✽ ✶ ✳ ✢ ·`、grok `◆`），或結構後備 `is_activity_shape`
+  （`<單字>… (…)` 且括號內含 `tokens` 或 `12s`/`3m`/`1h`）。**spinner 動詞是隨機的**，不可字面比對。
+- `alert`：重試／API 錯誤橫幅（`API error · Retrying in 0s · attempt 1/10`、`stream error: 503 upstream; retrying 2/5 in 1s`），≤ 120 字元、純文字、不寫 DB。
+  CLI 重試上游時回合看起來完全健康，這是唯一說出這件事的訊號。辨識：最後一行 ≤ 240 字元且**同時**有 error／錯誤／overloaded 與重試 token（retry／retrying／attempt／reconnect／retries／重試），
+  或以 `API error` 開頭（兩條件都要，擋掉 agent 回覆裡談論錯誤的散文）。
+- **節流**：同一 `run_id` 每秒最多 4 幀（間隔 ≥ 250 ms），窗內只留最新一幀（快照非增量，不漏內容）；回合結束時壓著的最後一幀無條件補送。
+- 只在 `text`／`activity`／`alert` 任一變化時推；回合結束後停止。前端顯示為即時氣泡，收到同 turn 的 assistant `message_added` 或非 in_flight 的 `turn_updated` 時移除。
 
-  辨識規則是兩條**取聯集**、以該回合畫面上**最後一行**命中者為準：
-  1. **glyph 白名單**（快路徑）：claude / codex `✻ ✽ ✶ ✳ ✢ ·`，grok `◆`。
-  2. **結構性後備**（`is_activity_shape`）：不管前面是什麼 glyph、甚至沒有 glyph，只要 trim 後長成 `<單字>… (…)` 且括號內含 `tokens` 或時間樣式（`12s` / `3m` / `1h`）就算活動行。
+## 12. 模型、fast、attach、額度、工具、人設、GitHub
 
-  ⚠️ **spinner 的動詞是隨機的**（`Thinking`、`Boogieing`、`Improvising`、`Puttering`、`Simmering`…），任何字面比對都是錯的；glyph 集合也會隨 CLI 版本增減，所以白名單只是快路徑，真正撐住的是第 2 條的形狀比對。
+### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>&identity=<name>&refresh=1`
 
-  括號內的秒數每次輪詢都在變，因此 `activity` 幾乎每 0.7 秒都不同、每次都想發幀——這是**預期且想要**的行為（前端計時會跟著跳）。發幀的頻率上限見下面的「發幀節流」。
-
-- `alert`（**選填**，v4.2 新增）：畫面上的**重試／API 錯誤橫幅**，例如 claude 的 `API error · Retrying in 0s · attempt 1/10`、codex 的 `stream error: 503 upstream; retrying 2/5 in 1s`。沒有就送空字串。同樣是純文字、不寫 DB、不進最終訊息，上限 120 字元。
-
-  **為什麼需要它**：CLI 在重試上游失敗時，回合仍然 `in_flight`、spinner 仍然在轉、`activity` 仍然正常，UI 看起來完全健康——實際上 agent 卡在那裡重試。`alert` 是唯一會說出這件事的訊號，前端把它畫成氣泡下方的警示列（`docs/screenshots/280-live-alert-light.png` / `281-…-dark.png`）。
-
-  辨識同樣**只看形狀不看字面**：該回合畫面上最後一行「夠短（≤240 字元）」且**同時**滿足「說了 error／錯誤／overloaded」與「帶重試 token（retry／retrying／attempt／reconnect／retries／重試）」；或該行以 `API error` 開頭。兩個條件都要，是為了把 agent 自己在回覆裡談論錯誤的散文擋在外面。
-
-### 發幀節流（v4.3）
-
-**同一個 `run_id` 每秒最多 4 個 `turn_progress` frame。** 兩幀之間至少隔 250 毫秒；在這段窗內產生的幀
-會被**合併**——daemon 只留最新的那一個，中間的狀態不會補送（`text` / `activity` 本來就是「目前為止」
-的快照，不是增量，丟掉中間態不會漏內容）。窗一開就把手上最新的那個送出去；回合結束、poller 收工時，
-還壓在手上的最後一幀會**無條件**補送，所以回覆的最後狀態不會卡住。
-
-實務上 0.7 秒的輪詢間隔本來就低於這個上限，所以正常串流看不出差別；這條是**協定保證**，讓前端可以
-依此估算負載（多個 agent 同時串流時，每個 bot 的上界是 4 frame/s），也讓輪詢間隔之後調快時不會
-一次把幀數乘上去。前端另有自己的合併（同一個 bot 250 毫秒內只套用最後一幀，見 docs/FRONTEND.md）。
-
-只在 `text`、`activity` 或 `alert` **任一**變化時推；回合結束（hook / 備援 / watchdog / stop）後停止。前端應顯示為該回合的「即時氣泡」，收到同 turn 的 `message_added`（assistant）或 `turn_updated` 非 in_flight 時移除。實測 claude 8 行清單：5 幀、每幀 0.7 秒、內容逐步增長。
-
-> 為什麼要 `activity`：清理管線（`clean_screen` / `is_noise`）把 spinner 行、框線與狀態列整行濾掉，而 agent 在**純思考／跑工具**的階段畫面上就只剩這些。整頁被濾成空字串後 `text` 一直沒變化 → 一幀都不發 → 前端氣泡永遠停在「等待回覆（hook）…」。`activity` 是繞過清理的獨立旁路，讓進度透出而不污染回覆內容。
-
-
----
-
-## 12. v4.0：模型清單、fast 模式、attach 指令、額度
-
-### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>&identity=<name>`
-
-列出某 host 上某 kind 可用的模型。`host` 省略 = `local`。daemon 端快取 **10 分鐘**（key =
-host+kind+identity），`?refresh=1` 強制重抓。遠端 host 透過 ssh（`HostConn::ssh_exec_path`）
-在遠端跑同樣的管線。
-
-`identity`（**claude only**，v4.2）：claude 的 `default_effort` 不是模型內建的，是那個帳號
-`settings.json` 目前的設定（見下表與 SPEC §17.1）；`identity` 決定讀哪個
-`CLAUDE_CONFIG_DIR/settings.json`（走 `identities_for_host`，含 SPEC §16 那些 shell 認來的
-`ccN`）。省略、或給一個不存在 / 非 claude 的名字，一律退回預設帳號的 `~/.claude/settings.json`
-——不是錯誤，只是沒有那個身份專屬的提示。codex / grok 忽略這個參數。
+某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。
+`identity` 只對 claude 有意義：決定讀哪個 `CLAUDE_CONFIG_DIR/settings.json` 算 `default_effort`（SPEC §17.1）；省略或不存在 → 預設帳號（不是錯誤）。
 
 ```json
-{
-  "kind": "codex",
-  "host": "local",
-  "source": "codex-app-server" | "grok-cli" | "static",
-  "fetched_at": "2026-09-06T10:00:00.000Z",
-  "models": [
-    {
-      "id": "gpt-6-astra",
-      "display_name": "gpt-6-astra",
-      "description": "…",
-      "is_default": true,
-      "default_effort": "medium",
-      "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
-      "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}]
-    }
-  ]
-}
+{ "kind": "codex", "host": "local", "source": "codex-app-server" | "grok-cli" | "static", "fetched_at": "2026-09-06T10:00:00.000Z",
+  "models": [ { "id": "gpt-6-astra", "display_name": "gpt-6-astra", "description": "…", "is_default": true, "default_effort": "medium",
+                "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}] } ] }
 ```
 
 | kind | source | 來源 | efforts | service_tiers |
 |---|---|---|---|---|
-| `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型自己的 `supportedReasoningEfforts`（可能含 `none/minimal/low/medium/high/xhigh/max/ultra`） | 每個模型自己的 `serviceTiers`（目前只有 `priority` = Fast） |
-| `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 時退回 `["low","medium","high"]`） | 依模型（grok-4.6 含 `xhigh`；grok-4.5 為 low/medium/high） | `[]` |
-| `claude` | `static` | 靜態（`opus / sonnet / haiku / fable`） | `["low","medium","high","xhigh","max"]` — `claude --help` 對 `--effort` 列的五級，**每個 alias 都一樣**（claude 沒有 per-model 清單） | `[]` |
+| `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型的 `supportedReasoningEfforts` | 每個模型的 `serviceTiers`（目前只有 `priority` = Fast） |
+| `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 退回 low/medium/high） | 依模型 | `[]` |
+| `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
 
-`default_effort`：codex / grok 是那個模型自己回報的值；**claude 讀 `identity` 那個帳號的
-`settings.json`**——`effortLevel`（全域）先墊底，`modelSettings.<真實 model id>.effortLevel`
-（per-model 覆寫）蓋過去。真實 id（`claude-opus-5` 這種）不是啟動用的 alias，比對用子字串
-（含 `opus`/`sonnet`/`haiku`/`fable` 哪個字就算命中）。兩者都沒有、檔案讀不到、或不是合法
-JSON → **`"high"`**（claude 自己的內建預設；官方文件 `code.claude.com/docs/en/model-config`：
-「`high`…The default on every model except Opus 4.7」，`opus/sonnet/haiku/fable` 都不是
-Opus 4.7；也拿一個從未動過 effort 的乾淨帳號實測過，`/effort` 拉桿確實停在 `high`）。
+- `default_effort`：codex/grok 是模型回報的值（可能 `null`）；claude 一律有值——帳號 `settings.json` 的 per-model 覆寫 > `effortLevel` > 內建 `"high"`。
+- `display_name` / `description` 可能為空字串。
+- 失敗（CLI 不存在、逾時、解析失敗、ssh 失敗）→ 502，**前端退回靜態清單**。`kind` 不合法 400；host 不存在 404。
 
-- `display_name` / `description` 可能為空字串；`default_effort` claude 一律有值（見上），
-  codex / grok 仍可能為 `null`（該模型沒回報預設）。
-- 失敗（CLI 不存在、逾時、解析失敗、ssh 失敗）→ `502 {"error":"upstream","message":"…"}`，
-  **前端應退回靜態清單**（claude：`opus / sonnet / haiku / fable` 加上那五級 effort；codex / grok 由前端自備）。
-- `kind` 不合法 → 400；`host` 不存在 → `404 {"error":"not_found","what":"host"}`。
-
-### 12.2 `bot.fast`（布林，預設 `false`）
-
-| 欄位 | TOML | DB | `GET state` | `POST bots` | `PATCH bots` |
-|---|---|---|---|---|---|
-| `fast` | `fast = true` | `bots.fast INTEGER`（additive migration） | 每個 bot 物件都有 | 可省，預設 `false` | 可改；有 active Run 時列入 `needs_restart` |
-
-啟動注入（依 kind）：
+### 12.2 `bot.fast`
+布林，預設 `false`；TOML `fast = true`；POST 可省，PATCH 可改（有 active Run 時列入 `needs_restart`，codex 可當場套用）。
 
 | kind | model | effort | fast |
 |---|---|---|---|
-| `codex` | `-m <model>` | `-c model_reasoning_effort="<effort>"` | `-c service_tier="priority"`（僅 `fast=true`） |
-| `grok` | `-m <model>` | `--reasoning-effort <effort>` | 不注入 |
-| `claude` | `--model <model>` | 不注入（`effort` 一律存為 `null`） | 不注入 |
-
-**`effort` 驗證改為 kind 相依**（`POST` / `PATCH` 皆同，違反 → 400）：
-
-- `grok`：`low | medium | high | xhigh`（啟動時若該模型不支援會被丟掉，例如 grok-4.5 不接受 xhigh）
-- `codex`：`none | minimal | low | medium | high | xhigh | max | ultra`
-- `claude`：任何值都被清成 `null`（不報錯）
-
-argv 順序不變：daemon 旗標 → model → effort → fast → identity.args → bot.args。
+| `codex` | `-m <model>` | `-c model_reasoning_effort="<effort>"` | 一律帶：`-c service_tier="priority"`（勾）或 `-c service_tier=""`（沒勾），見 SPEC §4.4a |
+| `grok` | `-m <model>` | `--reasoning-effort <effort>`（模型不支援的等級啟動時丟掉） | 不注入 |
+| `claude` | `--model <model>` | `--effort <effort>` | 不注入 |
 
 ### 12.3 `hosts[].attach_command`
-
-`GET /api/state` 的 `hosts[]` 每項新增唯讀字串 **`attach_command`**：在使用者終端貼上即可接上該 host 的 herdr session。
-
-| host | 指令 |
-|---|---|
-| `local` | `herdr --session <herdr_session>` |
-| 遠端、`ssh_port = 22` | `herdr --remote <ssh> --session <herdr_session>` |
-| 遠端、其他埠 | `herdr --remote ssh://<ssh>:<port> --session <herdr_session>` |
-
-範例：`{"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":2222,"herdr_session":"agents-manager","attach_command":"herdr --remote ssh://m4p@100.112.229.82:2222 --session agents-manager", …}`
+唯讀字串，貼到終端即可接上該 host 的 herdr session：`local` → `herdr --session <s>`；遠端 port 22 → `herdr --remote <ssh> --session <s>`；其他 port → `herdr --remote ssh://<ssh>:<port> --session <s>`。
 
 ### 12.4 額度 `GET /api/quota?refresh=1&host=<name>`
 
-額度是**按主機**分開的（SPEC §14）：本機用裸 key，遠端主機把自己的名字加在前面
-（`m4p/claude`、`m4p/claude:cc1`、`m4p/codex`、`m4p/grok`），每筆另有 `host` 欄位。
-每台主機（`local` + 每個 `hosts[]`）的三個基本 kind 一定都在 map 裡，沒資料就是 `null`。
+額度**按主機**分（SPEC §14）：本機裸 key，遠端加 `<host>/` 前綴。每台主機的三個基本 kind 一定在 map 裡，沒資料 `null`。
 
 ```json
-{
-  "kinds": {
+{ "kinds": {
     "codex": {
       "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z", "low": false, "critical": false},
       "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "reset_credits": {"available": 1, "title": "Full reset (Weekly + 5 hr)", "expires_at": "2026-10-11T05:31:28.000Z"},
-      "plan": "pro",
-      "updated_at": "2026-09-06T10:00:00.000Z",
-      "source": "codex-app-server",
-      "host": "local"
-    },
+      "limit_hit": null,
+      "plan": "pro", "updated_at": "2026-09-06T10:00:00.000Z", "source": "codex-app-server", "host": "local" },
     "claude": {
-      "five_hour": {"used_pct": 97.0, "resets_at": "2026-09-06T14:00:00.000Z", "low": true, "critical": true},
-      "seven_day": {"used_pct": 22.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
-      "fable": {"used_pct": 39.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
-      "reset_credits": null,
-      "plan": null,
-      "updated_at": "2026-09-06T10:00:00.000Z",
-      "source": "statusline",
-      "account": null,
-      "host": "local"
-    },
+      "five_hour": {"used_pct": 97.0, "resets_at": "…", "low": true, "critical": true},
+      "seven_day": {"used_pct": 22.0, "resets_at": "…", "low": false, "critical": false},
+      "fable": {"used_pct": 39.0, "resets_at": "…", "low": false, "critical": false},
+      "reset_credits": null, "plan": null, "updated_at": "…", "source": "statusline", "account": null, "host": "local" },
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
     "m4p/claude": { "…": "m4p 上讀到的同一組欄位，host = \"m4p\"" },
-    "m4p/codex": { "…": "同上" },
-    "grok": {
-      "five_hour": null,
-      "seven_day": {"used_pct": 14.0, "resets_at": "2026-09-12T08:28:00.000Z", "low": false, "critical": false},
-      "plan": "SuperGrok",
-      "updated_at": "2026-09-06T10:00:00.000Z",
-      "source": "grok-usage",
-      "host": "local"
-    }
-  }
-}
+    "grok": { "five_hour": null, "seven_day": {"used_pct": 14.0, "resets_at": "…", "low": false, "critical": false}, "plan": "SuperGrok", "updated_at": "…", "source": "grok-usage", "host": "local" }
+} }
 ```
 
-- `kinds` 的 key：`codex`、`claude`、`grok`，以及有 identity 的 claude bot 另存一份 `claude:<identity>`
-  （`account` = identity 名稱）；遠端主機的同一組 key 前面加 `<host>/`。**沒有資料的 kind 為 `null`**
-  （沒裝該 CLI 就是 `null`；claude 在第一個 StatusLine 事件到達前為 `null`，grok 在第一次 `/usage`
-  探測回來前為 `null`）。host 名不含 `/`，所以 key 永遠拆得回 `(host, kind[:identity])`；不屬於任何
-  現存主機的 `<host>/…` key 不會出現在回應裡（主機一被移除就連同它的額度一起丟掉）。
-- `host`：這筆是在哪台主機讀到的（`local` 或 `hosts[].name`）。UI 的標題列一次只顯示一台
-  （看哪個 bot / 專案就是哪一台），所以遠端 bot 的 statusLine 不會蓋掉本機那列。
-- `used_pct` 為 0–100 的數字；`resets_at` 為 RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
-- `fable`：Claude **Max 方案**才有的 Fable 週額度（`/usage` 的 `Current week (Fable)`），欄位型別與
-  `seven_day` 完全相同（也是週窗，只是只算 Fable 那一份）。沒有這條桶子的方案／來源（codex、grok、
-  非 Max 帳號）一律 `null`——**額度條在 `null` 時完全不畫這條，也不佔位**；有值時在 5h / 7d 之後多一條
-  標籤 `F` 的同款長條。舊 daemon 沒有這個欄位，前端讀不到就當 `null`（相容）。
-- `reset_credits`（2026-09-10 新增，**只有 codex 有**）：codex 的「額度重置券」，從
-  `account/rateLimits/read` 的 `rateLimitResetCredits` 讀來。額度用完時 OpenAI 會送一張可以立刻把桶子
-  清掉的券（codex TUI 的 `Reset usage`），形狀是
-  `{"available": 1, "title": "Full reset (Weekly + 5 hr)", "expires_at": "2026-10-11T…Z"}`：
-  `available` 是 `availableCount`（可用張數），`title` / `expires_at` 取 `credits[]` 裡第一張
-  `status == "available"` 的。沒有這個欄位（claude / grok、舊 codex）一律 `null`，UI 完全不畫。
-  daemon **只讀不用**：要用還是在 codex 那邊按（`/status` → `Reset usage`）。
-- `limit_hit`（2026-09-12 新增，目前只有 codex 會寫）：CLI 自己印的上限橫幅，形狀是
-  `{"message": "ERROR: You've hit your usage limit…", "until": "2026-09-12T21:07:00Z"|null, "at": "…"}`。
-  **為什麼需要它**：`five_hour` / `seven_day` 是速率視窗，codex 的 credits 用完時那兩條可以是 0% 已用
-  （2026-09-12 使用者：量表全滿、送出去卻一直回 hit your usage limit）。這一格是唯一講出「現在收不了
-  工作」的地方，所以它**黏著**：每 5 分鐘一次的 app-server 輪詢不帶這個欄位，`quota::set` 會沿用舊值，
-  直到 `until` 過了、或該 kind 下一回合真的答完（`quota::clear_limit_hit`）。`until` 為 `null` 表示橫幅
-  沒寫時間，只能等下一次成功的回合。UI 把該格標成「被擋」並把量表壓灰。
-- `low` / `critical` 為 daemon 算好的門檻旗標（`daemon/src/quota.rs` 的 `LOW_REMAINING_PCT` = 30、
-  `CRITICAL_REMAINING_PCT` = 5，皆用「剩餘 % = 100 − used_pct」判斷）：**門檻在 API server 端決定，
-  前端只讀旗標，不得自己寫死百分比比較**。`low` → 額度條除了長條外要把剩餘數字顯示出來；
-  `critical` → 該 bot 在側欄 bot 列上要有提示（用哪組額度見 §12.4 的 key 對應）。
-- `?refresh=1`：立刻重讀 codex、claude（`claude -p "/usage"` pane 探測）與 grok，對象是 `local` 加上
-  每一台**已連線**的遠端主機；加 `&host=<name>` 只重讀那一台（主機不存在 → 404）。claude / grok 的探測
-  要開 pane（claude 最久 40 秒、grok 25 秒），多台是依序跑的。
-- 背景輪詢的節奏不變（codex 5 分、claude 60 秒、grok 30 秒），每一輪把 `local` 與每一台已連線遠端
-  **併發**跑一次——一次探測要數十秒，序列跑會把本機的週期拉長（SPEC §14.3）。
-- `source`：`codex-app-server`（每 5 分鐘一次的 `account/rateLimits/read`）、**`codex-statusline`**（2026-09-13 新增：
-  codex 自己底下那行 `… · 5h 90% left · weekly 48% left`，同一輪順便讀每個 running 的 codex pane）、
-  `claude-usage`、`statusline`、`grok-usage`。codex 兩個來源寫**同一把 key**，後到的覆蓋先到的——狀態列是 CLI
-  **當下**拿來擋你的依據，app-server 那份可能差一整輪（2026-09-13 使用者：量表停在 5h 100，pane 上寫 5h 90% left）。
-  狀態列只寫剩餘 %，沒有重置時間，所以 `resets_at`（以及 `reset_credits`、`limit_hit`）沿用前一份讀數，不會被洗掉。
-  有 identity 的 codex bot 寫進 `codex:<identity>`，沒有的寫裸 `codex`。
-- 來源（每一台主機各自跑一份）：
-  - **codex**：daemon 啟動後與每 5 分鐘用該主機的 `codex app-server` 的 `account/rateLimits/read`
-    （遠端走 ssh），**同一輪**再讀一次每個 running 的 codex pane 底下那行狀態列（`source=codex-statusline`，
-    見上一條）。
-  - **claude**：兩路並存。
-    1. **statusLine 推送**（bot 對話中）：daemon 注入的 `statusLine` 指令把 `rate_limits.five_hour / seven_day`
-       （若哪天多了 `rate_limits.fable` 也會一起收；實測 2.1.263 的 payload 只有前兩個桶，所以 statusLine
-       來源的 `fable` 目前都是 `null`）POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`）；不建 Turn。`source` = `statusline`。
-    2. **`claude -p "/usage"` pane 探測**（背景，每 60 秒）：在專屬 `am-quota` herdr session 開用完即丟的
-       pane，在裡面跑**一行**指令：`claude auth status --json` 接 `claude -p "/usage"`，輸出用
-       `AM_AUTH_BEGIN` / `AM_AUTH_END` / `AM_USAGE_DONE=` 三個標記包起來，用 `pane.read`
-       （`source = recent_unwrapped`）等到最後那個標記出現（逾時 40 秒）。`-p` 印的是純文字，一條桶子一行：
-
-       ```text
-       Current session: 47% used · resets Sep 7 at 9:59pm (Asia/Taipei)
-       Current week (all models): 15% used · resets Sep 14 at 11:59am (Asia/Taipei)
-       Current week (Fable): 23% used · resets Sep 14 at 11:59am (Asia/Taipei)
-       ```
-
-       依序對應 `five_hour` / `seven_day` / `fable`（Max 方案才有第三條，標題大小寫不敏感），其餘
-       model-specific 的週列（Sonnet / Opus）仍忽略；`plan` 取自同一次 `auth status` 的 `subscriptionType`。
-       **不再有 TUI 對話框、first-run 信任視窗與滿意度問卷要對付**（`-p` 一律不問），也**不再用 ssh 探登入**。
-       每個有獨立 `CLAUDE_CONFIG_DIR` 的 identity 各探一次（空 env / `cc0` 與預設帳號共用 `claude` key）；
-       identity 清單是**該主機**的（含它 shell 的 `ccN`，SPEC §16）。跳過不探的條件：該列在 60 秒內剛被
-       statusLine 更新過**且**這個身份的 `logged_in` 已經知道（登入答案是搭同一次探測回來的，所以還沒有
-       答案的身份仍值得開一次 pane）。沒登入時 `/usage` 只印一段成本摘要、一條桶子都沒有 → 該身份被
-       park 30 分鐘（其餘失敗 5 分鐘），下一輪再試。`source` = `claude-usage`。**遠端主機**的探測開在
-       daemon 自己在那台上的 named session（遠端只有一條被轉發的 socket），cwd 與 identity env 的 `~`
-       都用遠端的 `$HOME`（SPEC §14.2）。statusLine 則依 bot 所在主機寫入對應的列。
-  - **grok**：CLI 沒有可查額度的介面，daemon 每 30 秒在專屬的 `am-quota` herdr session（永不 attach，
-    因此版面夠寬）開一個用完即丟的 pane 跑 grok、送 `/usage`、讀回對話框文字解析（SPEC §12.6）。只回報週額度 → 放在 `seven_day`，`five_hour` 為 `null`，`plan` 取自
-    `Weekly limit (SuperGrok)` 的括號，`source` = `grok-usage`。
+- **key**：`codex`、`claude`、`grok`；有 identity 的 bot 另存 `<kind>:<identity>`（`account` = identity 名）；遠端加 `<host>/`。沒裝 CLI、還沒讀到 → `null`。
+  不屬於現存主機的 `<host>/…` key 不出現。
+- `used_pct` 0–100；`resets_at` RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
+- `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
+- `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。
+- `limit_hit`：CLI 印的上限橫幅 `{"message","until": "…"|null,"at"}`。速率視窗可以顯示 0% 已用但 credits 用完，這一格是唯一說「現在收不了工作」的地方，所以**黏著**：
+  不帶這欄的輪詢沿用舊值，直到 `until` 過了、同一身份有更新的結構化讀數說 5h 還有餘裕、或下一回合真的答完（`quota::clear_limit_hit`）。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
+- `low` / `critical`：daemon 算好的門檻（`quota.rs` 的 `LOW_REMAINING_PCT = 30`、`CRITICAL_REMAINING_PCT = 5`，以剩餘 % 判斷）。**前端只讀旗標，不寫死百分比。**
+  `low` → 顯示剩餘數字；`critical` → 側欄 bot 列提示。
+- `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（依序；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
+- 背景輪詢：codex 5 分、claude 60 秒、grok 30 秒，每輪各主機併發。
+- `source`：
+  - `codex-app-server`：每 5 分鐘 `account/rateLimits/read`（遠端 ssh）。
+  - `codex-statusline`：同一輪讀每個 running codex pane 底下 `… · 5h 90% left · weekly 48% left`，寫同一把 key、後到覆蓋；只有剩餘 %，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
+  - `statusline`：claude bot 對話中，daemon 注入的 `statusLine` 把 `rate_limits.five_hour/seven_day` POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`，不建 Turn）。
+  - `claude-usage`：背景 pane 探測 `claude auth status --json` + `claude -p "/usage"`（SPEC §14.2），純文字一行一個桶，依序對應 `five_hour` / `seven_day` / `fable`
+    （`Current session` / `Current week (all models)` / `Current week (Fable)`，其他 model 週列忽略）；`plan` 取 `subscriptionType`。
+    每個有獨立 `CLAUDE_CONFIG_DIR` 的身份各探一次（該主機清單，含 shell `ccN`）；60 秒內剛被 statusLine 更新**且**登入狀態已知的跳過；沒登入的 park 30 分鐘、其他失敗 5 分鐘。
+  - `grok-usage`：`am-quota` session 的 TUI `/usage` 探測，只有週額度（`seven_day`），`plan` 取 `Weekly limit (SuperGrok)` 括號。
 
 ### 12.5 WS `quota_updated`
 
@@ -1659,149 +717,141 @@ argv 順序不變：daemon 旗標 → model → effort → fast → identity.arg
 {"seq":57,"type":"quota_updated","data":{"kind":"m4p/claude","host":"m4p","quota":{ "five_hour":{…},"seven_day":{…},"fable":null,"plan":null,"updated_at":"…","source":"statusline","account":null,"host":"m4p" }}}
 ```
 
-`kind` 為 `kinds` 的完整 key（含 `claude:<identity>`，遠端主機含 `<host>/` 前綴），`host` 是同一個值的
-方便欄位。每次額度數值更新時推送；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
+`kind` 是完整 key；前端把 `data.quota` 直接寫進 `kinds[data.kind]`。
 
 ### 12.6 工具偵測 `hosts[].tools`
 
-每個 host 連線成功時（本機為 daemon 啟動時）daemon 用該主機的登入 shell 偵測三種 CLI 是否存在、版本與登入狀態，
-結果快取在 `GET /api/state` 的 `hosts[]`：
+主機連線成功（本機為 daemon 啟動）時用登入 shell 偵測三種 CLI：
 
 ```json
-{
-  "name": "m4p", "…": "…",
-  "tools": {
+{ "tools": {
     "claude": {"installed": true,  "path": "/opt/homebrew/bin/claude", "version": "2.1.0 (Claude Code)", "logged_in": true},
     "codex":  {"installed": true,  "path": "/opt/homebrew/bin/codex",  "version": "codex-cli 0.120.0",   "logged_in": true},
-    "grok":   {"installed": false, "path": null, "version": null, "logged_in": null}
-  },
-  "tools_checked_at": "2026-09-06T10:00:00.000Z"
-}
+    "grok":   {"installed": false, "path": null, "version": null, "logged_in": null} },
+  "tools_checked_at": "2026-09-06T10:00:00.000Z" }
 ```
 
-- `installed`：登入 shell（`"$SHELL" -lic 'command -v <kind>'`）找得到執行檔。
-- `path` / `version`：`command -v` 與 `<kind> --version` 的輸出（第一行，trim）；沒裝為 `null`。
-- `logged_in`：`true | false | null`（判不了為 `null`）。判斷依據：claude `~/.claude/.credentials.json`（或 Keychain
-  `Claude Code-credentials`）存在；codex `~/.codex/auth.json` 存在；grok `~/.grok/` 下有 auth 檔。
-- **`hosts[].identities[]` 的 `logged_in` / `account` / `plan` 是分開一條路**：codex 與 grok 走這裡的 ssh
-  探測（`codex login status` / `grok models`），**claude 不走 ssh**——非登入的 ssh session 讀不到 macOS
-  Keychain，會對明明能用的帳號答 `loggedIn: false`（m4p 的 cc1 就是這樣）。claude 改在該主機的
-  `am-quota` herdr pane 裡跑 `claude auth status --json`，和 §12.4 的 `/usage` 是**同一次**探測，
-  `email` → `account`、`subscriptionType` → `plan`；因此 claude 身份的登入狀態在第一輪額度輪詢
-  （最多 60 秒）之後才會從 `null` 變成真正的答案，變了會推 WS `host_changed`。
-- host 尚未偵測（例如遠端還沒連上）時 `tools` 為 `null`、`tools_checked_at` 為 `null`。
-- `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測，回 `200 {"name":"m4p","tools":{…},"tools_checked_at":"…"}`
-  （host 不存在 404；ssh 失敗 502）。重新偵測後亦推 WS `host_changed`（前端重新 `GET /api/state`）。
+- `installed`：`"$SHELL" -lic 'command -v <kind>'` 找得到；`path`/`version` 是 `command -v` 與 `--version` 第一行。
+- `logged_in`：`true|false|null`；claude 看 `~/.claude/.credentials.json`（或 Keychain `Claude Code-credentials`），codex `~/.codex/auth.json`，grok `~/.grok/` 的 auth 檔。
+- `hosts[].identities.<name>` 的 `logged_in`/`account`/`plan` 另一條路：codex、grok 走 ssh（`codex login status` / `grok models`）；**claude 不走 ssh**（讀不到 Keychain 會誤答 false），
+  搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
+- 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
+- `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502），並推 `host_changed`。
 
-### 12.7 透過現有 agent 安裝 / 登入 `POST /api/hosts/{name}/tools/install`
-
-```json
-{ "kind": "grok", "via_bot_id": "01M1…" }
-```
-
-daemon 組一則安裝 prompt（依 kind 用官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、
-codex `npm i -g @openai/codex`、grok `curl -fsSL https://x.ai/cli/install.sh | bash`（`~/.grok/README.md` 記載的官方安裝腳本）；接著要求 agent 確認
-`<kind> --version`、執行登入（claude 直接執行 `claude` / codex `codex login` / grok `grok login`）並把登入 URL 原樣印出），
-走既有的 §5 prompt 路徑送給 `via_bot_id`（`client_request_id` 由 daemon 產生）。
-
-回應 `200`：
-
-```json
-{ "turn_id": "01M1…", "message_id": "01M1…", "delivery": "ok" }
-```
-
-- `via_bot_id` 不存在 → `404 {"error":"not_found","what":"bot"}`；bot 不屬於該 host → `400`；
-  bot 沒有 running 的 Run / blocked / in-flight → 與 §5 相同的 `409`。
-- `kind` 不合法 → 400。
-- 登入是互動式的：agent 執行 `login` 後 pane 會變 `blocked`，使用者在 UI 的終端快照處理即可。
-- 安裝完成後前端可呼叫 `POST /api/hosts/{name}/tools/refresh` 更新 `tools`。
+### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
+`{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、
+grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給 `via_bot_id`。
+回 `200 {"turn_id","message_id","delivery"}`。bot 不存在 404；不屬於該 host 400；bot 不可送 → §5 的 409；`kind` 不合法 400。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
 
 ### 12.8 bot 人設 `bot.persona`
-
-每個 bot 新增可選欄位 **`persona`**（`string | null`，預設 `null`）：一段附加到 agent system prompt 尾端的文字
-（使用者的「附加在 agent 的 md 最後」）。**不會**動到專案目錄裡共用的 `CLAUDE.md` / `AGENTS.md`。
-
-| 欄位 | TOML | DB | `GET state` | `POST bots` | `PATCH bots` |
-|---|---|---|---|---|---|
-| `persona` | `persona = """多行字串"""` | `bots.persona TEXT`（additive migration） | 每個 bot 物件都有（`string \| null`） | 可省 | 可改，`null` / `""` 清除；有 active Run 時列入 `needs_restart` |
-
-啟動注入（有值才注入；位置在 daemon 旗標之後、model / effort 之前；遠端主機同樣走 argv，不需額外檔案）：
+`string | null`：附加到 agent system prompt 尾端的文字，不動專案裡共用的 `CLAUDE.md` / `AGENTS.md`。TOML `persona = """…"""`；POST 可省、PATCH 可改（`null`/`""` 清除，有 active Run 列入 `needs_restart`）。
 
 | kind | 注入 |
 |---|---|
 | `claude` | `--append-system-prompt "<persona>"` |
-| `grok` | `--rules "<persona>"`（`grok --help`：Extra rules to append to the system prompt） |
-| `codex` | `-c developer_instructions=<TOML 字串>`（daemon 以 TOML basic string 逃逸換行與引號；實測結果見 PROGRESS v4.0） |
+| `grok` | `--rules "<persona>"` |
+| `codex` | `-c developer_instructions=<TOML basic string>`（daemon 逃逸換行與引號） |
 
-argv 順序：daemon 旗標 → persona → model → effort → fast → identity.args → bot.args。
+位置在 daemon 旗標之後、model 之前。AGM 的人設另走 `/api/supervisor/persona`（總管一節）。
 
-### 12.9 GitHub 專案偵測 `projects[].github` 與 issues
+### 12.9 GitHub 專案偵測與 issues
 
-daemon 在專案載入 / 對帳 / `POST /projects` 時偵測 git origin（本機 `git -C <path> remote get-url origin`，遠端經 ssh 同指令），
-解析 `git@github.com:owner/repo.git`、`https://github.com/owner/repo(.git)`、`ssh://git@github.com/owner/repo`，放進
-`GET /api/state` 的每個 project：
+專案載入／對帳／`POST /projects` 時偵測 git origin（遠端 ssh），解析 `git@github.com:owner/repo.git`、`https://github.com/owner/repo(.git)`、`ssh://git@github.com/owner/repo`：
+`projects[].github = {"owner","repo","url"} | null`（非 GitHub、沒 remote、git 失敗為 `null`；快取到下次對帳）。`POST /api/projects/{id}/github/refresh` → `{"project_id","github"}` 並推 `project_changed`。
 
-```json
-{ "id": "01M1…", "path": "…", "label": "powertech-hub", "host": "local",
-  "github": {"owner": "Eden-Sun", "repo": "powertech-hub", "url": "https://github.com/Eden-Sun/powertech-hub"},
-  "bots": [ … ] }
-```
+- `GET /api/projects/{id}/issues?state=open|closed|all&limit=30&q=<關鍵字>&refresh=1&repo=<submodule path>`：該主機 `gh issue list …`，快取 2 分鐘。
 
-- 非 GitHub、沒有 remote、或 git 指令失敗 → `github: null`。結果快取到下次對帳。
-- `POST /api/projects/{id}/github/refresh` → 立即重測，回 `200 {"project_id":"…","github":{…}|null}`；並推 `project_changed`。
+  ```json
+  { "project_id": "01M1…", "repo": "Eden-Sun/powertech-hub", "repo_path": "", "source": "gh", "fetched_at": "…",
+    "issues": [ {"number": 42, "title": "…", "state": "OPEN", "labels": ["bug"], "url": "…", "updated_at": "…", "author": "Eden-Sun", "body_excerpt": "前 300 字，換行壓成空白"} ] }
+  ```
 
-#### `GET /api/projects/{id}/issues?state=open|closed|all&limit=30&q=<關鍵字>&refresh=1`
+- `GET /api/projects/{id}/issues/{number}?repo=` → `{"project_id","repo","issue":{…,"body":"完整 markdown"}}`（不快取；找不到 issue 也是 502）。
+- `GET /api/projects/{id}/submodules?refresh=1` → `{"project_id","submodules":[{"path":"vendor/foo","github":{…}|null}]}`（快取 2 分鐘）。
+  `repo=<submodule path>` 相對專案根，省略 = 專案本身；不在清單或沒有 GitHub origin → 400。
+- 錯誤：`project.github` 為 `null` → `400 project has no GitHub origin`；`gh` 不存在／未登入／失敗 → 502（遠端走 `POST /api/hosts/{name}/gh/login`）；project 不存在 404。
 
-用該主機的 `gh issue list --repo owner/repo --state <s> --limit <n> [--search "<q>"] --json …` 取得。
-`state` 預設 `open`；`limit` 1–100（預設 30）；`q` 可省。daemon 快取 **2 分鐘**（key = project + state + q + limit），`refresh=1` 跳過。
+## 子 agent（bot 自己開的 pane，SPEC §6.5a–c）
 
-```json
-{
-  "project_id": "01M1…", "repo": "Eden-Sun/powertech-hub", "source": "gh",
-  "fetched_at": "2026-09-06T10:00:00.000Z",
-  "issues": [
-    {"number": 42, "title": "…", "state": "OPEN", "labels": ["bug"], "url": "https://github.com/Eden-Sun/powertech-hub/issues/42",
-     "updated_at": "2026-09-05T12:00:00Z", "author": "Eden-Sun", "body_excerpt": "前 300 字，換行壓成空白"}
-  ]
-}
-```
+- daemon 起的每個 agent 帶一段預設人設 `lifecycle::child_agent_rules`（接在 `bot.persona` 前面，三種 kind 同一份）；claude 另外拿到改寫過的 herdr skill。
+- 對帳時 herdr 裡沒被 bot 認領的 agent 會建成子 bot：`managed_by = "child"`、`parent_bot_id`、kind 取 herdr 偵測（偵測不到沿用父的）、不注入 hook，並建 `adopted = 1` 的 run。
+  認父線索血緣（同 tab）優先，其次名字前綴 `<父 agent_name>-<字尾>`。子 bot `name` 取字尾，否則 herdr agent 名。
+- 身份從子 agent 行程的環境變數判定（SPEC §16.6）；`model` / `effort` 從 `pane.process_info` argv 反推（grok 可退回終端標題 `Grok 4.6 (xhigh)`），只補空值。
+- PATH 上的 herdr shim 自動補命名前綴、把帳號與 hook 環境帶進子 pane（SPEC §6.5b）。
+- `GET /api/state` 的 bot 物件：`parent_bot_id`（頂層 `null`）、`managed_by`。子 bot 不進 config.toml；pane 消失即 `deleted_at`（對話保留）。UI 側欄縮排掛在父 bot 底下。
+- 子 bot 的對話來自終端擷取：pane 的 `working → idle` 就是回合邊界，寫成 `origin = external` / `completed_fallback` 的 Turn（SPEC §4.3）。
 
-- `project.github` 為 `null` → `400 {"error":"bad_request","message":"project has no GitHub origin"}`。
-- `gh` 不存在 / 未登入 / 執行失敗 → `502 {"error":"upstream","message":"gh 未安裝或未登入…"}`。
-  遠端主機請走 `POST /api/hosts/{name}/gh/login`（見上方），不要叫使用者自己 ssh。
-- project 不存在 → 404。
+## 圖片附件
 
-#### `GET /api/projects/{id}/issues/{number}`
+CLI agent 只吃文字，所以附件是先把檔案放到 bot 所在主機，再把路徑寫進 agent 讀到的文字。
 
-單一 issue 的完整內容（`gh issue view <n> --repo … --json …`，不快取）：
+### `POST /api/bots/{id}/attachments?name=<檔名>`
+body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖片 MIME。
 
 ```json
-{"project_id":"…","repo":"owner/repo","issue":{"number":42,"title":"…","state":"OPEN","labels":["bug"],"url":"…",
- "updated_at":"…","author":"…","body":"完整 markdown 內文"}}
+200 {"id":"01M1…","name":"screenshot.png","mime":"image/png","size":10158,"path":"/Users/me/proj/.agents-manager/attachments/01M1…-screenshot.png"}
 ```
 
-錯誤同上（找不到 issue 也是 502，message 含 gh 的輸出）。
+- 檔案落在 `<project.path>/.agents-manager/attachments/`（agent cwd 之內，沙箱化的 CLI 才讀得到），該目錄自動寫一個 `*` 的 `.gitignore`。
+- 遠端專案經 ssh（`hosts.rs::ssh_put`）寫到遠端同路徑，daemon 另存本機副本供縮圖。
+- 只收 `image/*`。空 body、超過 12 MB 或其他輸入錯誤 400；超過 12 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
 
-#### submodule 的 issue（2026-09-07 新增）
+### `GET /api/attachments/{id}`
+回原始位元組（原 MIME）。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。
 
-專案若有 git submodule，submodule 自己的 GitHub issue 也能看、也能組隊。
+### prompt / 群組聊天帶附件
+`POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 可帶 `"attachments": ["01M1…"]`：
+- id 以 **project** 為範圍（群組一次上傳、每個收件 bot 拿同一路徑）；跨專案 `400 unknown attachment`。
+- agent 收到「文字 + 附加圖片（請讀取這些檔案來查看）：<絕對路徑>」；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
 
-`GET /api/projects/{id}/submodules?refresh=1` — `.gitmodules` 列出的每一個，帶各自的 origin（快取 2 分鐘）：
+## run 的附加欄位（`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件）
+
+| 欄位 | 說明 |
+|---|---|
+| `agent_title` | herdr `agent.list` 的 `terminal_title_stripped`（agent 自己替工作取的名字）。herdr 沒有標題事件，daemon 每 4 秒輪詢，變了才寫並推。前後的 `-` 去掉；只是 CLI 名字（`Claude Code`、`codex`）當 `null`。run 結束不清，UI 只在 run 活著時讀 |
+| `status_line` | 使用者自己的 claude `statusLine` 命令輸出（ANSI 已去）。daemon 的 `agents-managerd statusline` 代跑它並把同一份輸出放進 POST `/hook/claude` 的 payload。只有 claude；沒設 `statusLine.command` 為 `null`；變了才寫 |
+| `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫 |
+| `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
+| `update_notice` | 等重啟套用的 claude 更新，固定字串 `"Update installed · Restart to update"` 或 `null`（SPEC §3.1）。單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle` |
+| `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標 |
+| `turn_error` | 上一回合被 API 中斷或額度拒絕時 pane 上那行原文，否則 `null`；下一回合開始清回（SPEC §4.3a）。命中時對話多一則釘在回合上的 system 訊息（`incomplete = 1`、附 `terminal_snapshot`），回合還 in_flight 就收成 failed。重送就是再 `POST /prompt` 最後一則 user 訊息 |
+
+`turn_error` 為額度用盡（`You've reached your Fable limit…`）時，daemon 同時把該 bot 帳號的額度格標 `limit_hit`，`until` 取橫幅講的桶（`Fable` → `fable`，否則 5h）的 `resets_at`；
+**不**在下一回合成功時清掉（換 opus 能跑不代表 Fable 恢復），只靠 `until` 到期。UI chip「⛔ Fable 額度用盡」、給重置時間與「改用 opus」，重送鍵在重置前灰掉。
+
+## 快速 git（chat 標題列的 chip）
+
+都在專案的 host、專案目錄裡跑（遠端 ssh），不開 worktree、不切分支。
+
+- `GET /api/projects/{id}/git` → `{"git":true,"branch":"main","upstream":"origin/main","ahead":0,"behind":0,"changed":7,"untracked":3,"insertions":246,"deletions":9}`。
+  `git:false`（其他欄位省略）= 不是 git repo；`changed` 來自 `status --porcelain=v2`，行數來自 `diff --shortstat HEAD`（未追蹤檔不算）；detached HEAD 時 `branch` 為 `null`。
+- `POST /api/projects/{id}/git/commit {"message"}`：`git add -A && git commit -m`。`200 {"ok":true,"output"}`；空訊息 400；沒有變更 `409 nothing_to_commit`；失敗 `409 {"reason":"git_commit_failed","output"}`。
+- `POST …/git/push`：有 upstream `git push`，否則 `git push -u origin HEAD`。`POST …/git/pull`：`git pull --rebase --no-autostash`。回應同 commit（`git_push_failed` / `git_pull_failed`），逾時 180 秒。
+
+## 更新的 changelog `GET /api/changelog?kind=&host=&from=&to=`
+
+更新徽章／批次重啟 chip 按下去先呼叫這支，把 changelog 放進確認框。
+
+- `kind` 省略 = `claude`，支援 `claude`、`codex`（其他回 `found:false`）。`host` 省略 = `local`。
+- 沒給 `to` 時 daemon 在該主機再跑 `claude --version` 當 `installed_version`（磁碟已是新版，不快取）。`from` 有給就回 `from`（不含）到目標（含）之間每一版，新的在前。
+- **codex 一定要給 `to`**：它的更新是 TUI 當場問（`✨ Update available! 0.153.4 -> 0.154.0`），新版還沒進磁碟；UI 從畫面那句解出 `from` / `to`。
+- 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式）。各自快取 10 分鐘，認 `## x.y.z`。
+- **永遠 200**；抓不到就 `found:false` + `error`，UI 必須寫「找不到 changelog」。
 
 ```json
-{"project_id":"…","submodules":[{"path":"vendor/foo","github":{"owner":"acme","repo":"foo","url":"https://github.com/acme/foo"}},
-                                {"path":"tools/bar","github":null}]}
+{ "kind": "claude", "host": "local", "installed_version": "2.1.5", "from_version": "2.1.3", "found": true,
+  "sections": [{ "version": "2.1.5", "body": "- …" }, { "version": "2.1.4", "body": "- …" }],
+  "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
 
-上面兩個 issue 端點都多一個查詢參數 `repo=<submodule path>`（相對於專案根目錄；省略或空字串 = 專案本身），
-回應多 `repo_path` 回顯。`repo` 不在 submodule 清單裡 → `400`；該 submodule 沒有 GitHub origin → `400`。
+## Team（SPEC-team.md）
 
 `POST /api/projects/{id}/teams` 的 `workers.count` 接受 `0`（無限併行，見 `PATCH /api/teams/{id}` 底下的說明）與 `1`–`4`。
 
 `POST /api/projects/{id}/teams` 的 body 也接受 `repo`：team 的 worktree、分支、合併、PR 與關 issue 全部在**那個 submodule 的 repo** 裡進行；
 team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4。
 
-#### `POST /api/teams/{id}/issues` 的 409（2026-09-07 修正）
+### `POST /api/teams/{id}/issues` 的 409
 
 追加 issue 到 team 佇列（`{"issue_numbers":[57,58]}`，或單數 `{"issue_number":57}`），成功回 `200 {"issues":[…]}`。
 409 的 `reason` 有三種：
@@ -1818,7 +868,7 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 > 修正前是拿**全部**列（含 `done` / `failed` / `skipped`）比對 issue 號，所以一個 issue 在同一隊做過一次
 > 就永遠不能再排，UI 只會看到「追加 issue 失敗：issue already queued」。
 
-#### team 物件的 `pause_detail`（2026-09-09 新增）
+### team 物件的 `pause_detail`
 
 `GET /api/state`、`GET /api/teams/{id}` 的 team 物件與 WS 的 `team_changed` 多一個 `pause_detail`，
 補 `pause_reason` 這個機器碼講不出來的那一半：**是誰**的額度不夠。目前只有 `quota_low` 會帶（其餘 `null`）：
@@ -1836,7 +886,7 @@ team 物件多 `repo` 欄位（`""` = 專案本身）。詳見 SPEC-team §2.4�
 名字與 `GET /api/quota` 相同（`five_hour` / `seven_day`）。每次 phase 變動都重寫，`resume` 之後就是 `null`。
 舊 daemon 沒有這個欄位，前端會退回只寫原因的舊文案。詳見 SPEC-team §4.5。
 
-#### `PATCH /api/teams/{id}` 的角色（2026-09-08 新增）
+### `PATCH /api/teams/{id}` 的角色
 
 改預算 / supervised / deliver 之外，三個角色也能就地改：
 
@@ -1870,227 +920,15 @@ issue，其他 issue 照跑。`teams` 上的 `issue_number` / `branch` 變成「
 前端在 TeamPanel 副標題列畫成三列（`TeamRoleEditor.tsx`），側欄成員列的齒輪也開同一份表單——
 **不要**改用 `PATCH /api/bots/{id}`：那只會改到那一列 bot，`roles_json` 不動，下一批又跑回舊設定。
 
-#### `POST /api/teams/{id}/close-issue`（2026-09-08）
+### `POST /api/teams/{id}/close-issue`
 
 關閉一個已完成的 team issue。body 可省略、為 `{}`，或帶 `comment`；reopen 後要關閉較早完成的 issue
 時帶 `issue_id`：`{"issue_id":"…","comment":"…"}`。省略 `issue_id` 會使用 `teams.issue_number` 對應的最後一趟。
 只有指定的 `team_issues` 列為 `done` 才會成功；每一列各自以 `issue_closed_at` 防止重複關閉，且只有目前鏡像
 issue 才會同步寫入 `teams.issue_closed_at`。預設留言也只讀該列的 branch、summary、PR 與該列 tasks。
 
-## 子 agent（bot 自己開的 pane，2026-09-07 新增）
 
-daemon 起的每個 agent 都帶一段預設人設（`lifecycle::child_agent_rules`，接在使用者的 `bot.persona` 前面）：
-自己的 agent 名稱、子 agent 的命名前綴、`herdr pane split --pane "$HERDR_PANE_ID"`、
-不要 `git stash` / `--autostash`、子 agent 會被掛在自己底下追蹤。三種 kind 都用同一份文字
-（claude `--append-system-prompt`、grok `--rules`、codex `developer_instructions`）。
-
-**claude 另外拿到 herdr skill**（SPEC §6.5c）：啟動前 daemon 把 `herdr --skill` 寫到
-`$CLAUDE_CONFIG_DIR/skills/herdr/SKILL.md`（預設 `~/.claude/skills`），frontmatter 的 `description`
-換成 AG Man 的版本（原文是「只有使用者明確提到 Herdr 才用」，這裡改成「需要開子任務 / 平行工作就用」），
-body 最前面插上同一份 AG Man 規則。內容相同就不寫。
-
-對帳（`reconcile`）時，herdr 裡沒有任何 bot 認領的 agent 會被建成某個 bot 的**子 bot**：
-`managed_by = "child"`、`parent_bot_id = <父 bot id>`、kind 取 herdr 偵測到的（偵測不到就沿用父的）、
-identity 沿用父的、不注入 hook（回覆走終端擷取）。同時建一筆 `adopted = 1` 的 run，之後跟一般 bot 一樣有燈號、對話、終端。
-
-認父的線索有兩條，**血緣優先**（SPEC §6.5a）：
-
-1. **血緣**：一個 bot 一個 tab，所以子 pane 一定 split 在父的 tab 裡。這個 agent 的 `tab_id` 等於某個 bot
-   活動 run 的 `tab_id` → 就是那個 bot 的子 agent。人設只是請求（agent 會忘、codex / grok 可能沒讀），
-   tab 是事實，因此不管子 agent 叫什麼名字都追得到。同一 tab 內有父也有已認領的子時取名字前綴最長的，
-   平手取非 `child` 的那個，孫代因此掛在子代下面。
-2. **名字前綴**：`<某 bot 的 agent_name>-<字尾>`，最長匹配。跨 tab 與 team workspace 只有這條。
-
-子 bot 的 `name`：有前綴就取字尾，否則用 herdr 的 agent 名（去掉空白與 `@,:;`、截到 32 字）。
-
-**herdr PATH shim**（SPEC §6.5b）：daemon 在 `<bot 目錄>/bin/herdr` 放一支 `sh` 包裝腳本並放到 pane 的 `PATH` 最前面，
-把命名從「請求」變成「機制」——`herdr agent start <名稱>` 會自動補上 `$AM_AGENT_NAME-` 前綴，
-`herdr pane split` / `tab create` 會自動用 `--env` 把父的帳號（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`）與
-hook 環境（`AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` / `AM_RUN_ID` / `AM_AGENT_NAME`）帶進子 pane，
-其餘子指令原樣轉發。pane env 因此多 `AM_AGENT_NAME`。子 agent 指定自己的 pane 用 herdr 注入的 `$HERDR_PANE_ID` 或 `--current`。
-
-- `GET /api/state` 的 bot 物件多 `parent_bot_id`（頂層為 `null`），`managed_by` 多一個值 `child`。
-- 子 bot 不進 config.toml；pane 消失時 daemon 把它 `deleted_at`（對話保留）。`DELETE /api/bots/{id}` 對子 bot 直接停 pane 並軟刪。
-- UI：側欄把子 bot 縮排掛在父 bot 底下。
-- 子 bot 的**對話**來自終端擷取（SPEC §4.3）：pane 不是 daemon 開的、沒有注入 hook，所以 pane 的
-  `working → idle` 就是回合邊界——daemon 從 `recent_unwrapped` 快照擷取這一段（沿用既有的雜訊過濾與回音剝除），
-  寫成一筆 `origin = external` / `status = completed_fallback` 的 Turn：prompt 回音存成 user 訊息、抽出的回覆
-  存成 `source = terminal_fallback`、`incomplete = 1` 的 assistant 訊息。認領當下 agent 還在 `working` 的話
-  改開一筆 in-flight Turn，回覆就跟一般 bot 一樣即時串流；已經 idle 則只在對話**還是空的**時候補記螢幕上那一輪。
-- 子 bot 的 `model` / `effort` 從 pane 的 `pane.process_info` argv 反推（claude `--model` / `--effort`、
-  codex `-m` / `-c model_reasoning_effort=…`、grok `-m` / `--reasoning-effort`，grok 另可退回終端標題
-  `Grok 4.6 (xhigh)`），認領時寫進 `bots.model` / `bots.effort`，於是 `GET /api/state` 的 `model` / `effort`
-  與側欄徽章直接就對。解析不到留 `null`（UI 顯示「預設」）；**只補空值**——TUI 裡的 `/model` 改不到 argv，
-  已經記錄的值不會被下一次對帳蓋回去。
-
-## 圖片附件（2026-09-06 新增）
-
-CLI agent 只吃文字（`agent.prompt`），所以「拖一張圖進對話」是**先把檔案放到 bot 所在主機**，
-再把路徑寫進 agent 讀到的那段文字。
-
-### `POST /api/bots/{id}/attachments?name=<檔名>`
-
-body 直接是圖片位元組（**不是** multipart），`Content-Type` 就是圖片的 MIME：
-
-```
-POST /api/bots/01.../attachments?name=screenshot.png
-Content-Type: image/png
-X-AM-Token: <token>
-<raw bytes>
-```
-
-成功 `200`：
-```json
-{"id":"01M1…","name":"screenshot.png","mime":"image/png","size":10158,
- "path":"/Users/me/proj/.agents-manager/attachments/01M1…-screenshot.png"}
-```
-
-- 檔案落在 **`<project.path>/.agents-manager/attachments/`**（agent 的 cwd 之內，沙箱化的 CLI
-  才讀得到）；該目錄會自動寫一個內容為 `*` 的 `.gitignore`，repo 不會看到這些檔案。
-- 專案在遠端 host 時，位元組經 `ssh`（`hosts.rs::ssh_put`）寫到遠端同一路徑，daemon 另存一份
-  本機副本供 UI 取縮圖。
-- 只收圖片（`Content-Type` 必須是 `image/*`）。空 body、超過 12 MB 但未超過 route 的 12 MB + 4 KiB body limit、或其他使用者輸入錯誤回 `400 bad_request`；超過 12 MB + 4 KiB 由 `DefaultBodyLimit` 拒絕並回 `413`（沒有 JSON body）。不存在或已刪除的 bot／project 回 `404 not_found`。
-
-### `GET /api/attachments/{id}`
-
-回傳原始位元組（`Content-Type` 為原 MIME）。一樣要 `X-AM-Token`，所以 UI 是用 fetch 取回再轉
-object URL，不能直接塞進 `<img src>`。
-
-### prompt / 群組聊天帶附件
-
-`POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 都多接一個可選欄位：
-
-```json
-{ "text": "這張圖哪裡怪？", "client_request_id": "…", "attachments": ["01M1…", "01M1…"] }
-```
-
-- attachment id 以 **project** 為範圍：同專案的 bot 共用（群組聊天一次上傳、每個收件 bot 都拿到
-  同一個路徑）；跨專案的 id 會 `400 unknown attachment`。
-- agent 實際收到的是「文字 + 附加圖片（請讀取這些檔案來查看）：<絕對路徑>」；時間軸存的仍是
-  使用者原本打的字。
-- 這些圖片會記在該則 user message 的 `attachments_json`（`GET /messages` 一併回傳），格式是
-  上面 upload 回應的物件陣列，UI 靠它重畫縮圖。
-
-### `run.agent_title`（2026-09-06 新增）
-
-`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件多一個欄位：
-
-```json
-{"id":"01M1…","state":"running","agent_status":"working","agent_title":"V40-OK", …}
-```
-
-- 來源是 herdr `agent.list` 的 `terminal_title_stripped`——**agent 自己替當前工作取的名字**
-  （Claude Code 會寫成任務摘要，codex / grok 通常是目錄名或狀態）。
-- herdr 沒有「標題變了」的事件，所以 daemon 每 4 秒對每個已連線的 host 做一次 `agent.list`
-  （`events::spawn_title_poller`），只有真的變了才寫 DB 並推 `bot_status`。
-- 存進 `runs.agent_title`（新欄位）。寫入前會過濾：前後的 `-` 去掉（grok 把狀態寫進標題，
-  像 `- Thinking - <task> - grok`），標題若只是 CLI 自己的名字（`Claude Code`、`codex`…）
-  就當作沒有，維持 `null`。
-- run 結束後不會清除，但 UI 只在 run 還活著時讀它。
-
-### `run.status_line`（2026-09-06 新增）
-
-`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件再多一個欄位：bot 自己那條狀態列的原文。
-
-```json
-{"id":"01M1…","status_line":"hunta | agents-manager | OP5 42% | 5h:59%(rst 3h 25m) | 7d:73%(rst 5d 4h) | F5:61%"}
-```
-
-- 來源是**使用者自己的** claude `statusLine` 命令。daemon 的 `agents-managerd statusline`
-  本來就會代跑它並把 stdout 原樣送回 pane（v4.0）；現在同一份輸出（ANSI 已 strip）也放進
-  POST 給 `/hook/claude` 的 payload（`status_line`），存進 `runs.status_line`。
-- 只有 claude 有：codex / grok 沒有 statusLine 機制，欄位維持 `null`；使用者沒設定
-  `statusLine.command` 時也是 `null`。
-- claude 刷新得很勤，所以 daemon 只在文字**變了**才寫 DB 並推 `bot_status`。
-- 順序上，使用者的命令跑在 POST 之前（要拿它的輸出），整體仍在 statusline 的 1.9 秒預算內。
-
-### `bot.herdr_session` / `run.herdr_session`（2026-09-06 新增）
-
-- 一般 Bot 的 `herdr_session` 為 `null`，表示沿用 Project host 的設定 session。
-- 從使用者本機 `default` session 自動採用的 Bot 會帶 `herdr_session: "default"`，其 active
-  Run 也會帶相同值；這讓 prompt、keys、terminal 與狀態事件不會送到 manager 的 named session。
-- default session 的採用條件是支援的 agent kind 且 `foreground_cwd` / `cwd` 與既有 local
-  Project 路徑完全相同；普通 pane 不會出現在 state 裡。
-
-### `run.status_json`（2026-09-06 新增，接續 `run.status_line`）
-
-`status_line` 是使用者腳本壓縮過的一行；`status_json` 是**壓縮前**的原始資料，給網頁用
-（`statusline_cmd` 除了 `transcript_path` 之外整份轉發）：
-
-```json
-{"account_email":"…@gmail.com","model":{"display_name":"Opus 5 (1M context)","id":"claude-opus-5"},
- "context_window":{"used_percentage":44,"total_input_tokens":442000,"context_window_size":1000000},
- "rate_limits":{"five_hour":{"used_percentage":55,"resets_at":1788671400}, "seven_day":{…}},
- "cost":{"total_cost_usd":50.89}, "effort":{"level":"high"}, "thinking":{"enabled":true},
- "session_name":"…", "version":"2.1.261", "workspace":{"current_dir":"…"}}
-```
-
-- `account_email` 是 daemon 補上的（payload 本身沒有）：照使用者腳本的做法讀
-  `.claude.json` 的 `oauthAccount.emailAddress`，identity 決定是哪個設定目錄，因此
-  cc0 / cc1 各自對得上自己的帳號。
-- 一樣只在內容變動時寫入並推 `bot_status`。
-
-### `run.update_notice`（2026-09-08 新增）
-
-claude 把新版下載好、等重啟才會換過去時，會在 pane 最底下那行（跟使用者 statusLine 同一行、
-靠右）印一句。daemon 讀到就把它掛在 run 上：
-
-```json
-{"id":"01M1…","update_notice":"Update installed · Restart to update"}
-```
-
-- 沒有更新在等就是 `null`。存的是**固定字串**而不是那一整行——同一行左半邊是 statusLine，
-  每回合都在變。
-- 認法：`update installed` 與 `restart to update` 兩段都要中，且只看畫面最下面 6 行非空白的
-  （那句印在 statusLine 那一列）；否則正文裡引到這兩句的畫面會誤判。
-- `update_watch::spawn_update_watcher` 每 30 秒對每個 `state=running` 的 claude run 做一次
-  `pane.read visible 80`，跟現值不同才寫 DB 並推 `bot_status`；讀不到畫面就跳過（不清除）。
-- 掛在 run 不是 bot：等著套用的更新是這個 claude process 的事，重啟後的新 run 是 `null`。
-- 套用方式：單顆就是既有的 `POST /api/bots/{id}/restart`；全部一起走 `POST /api/bots/restart-idle`（§10.3a）。
-
-### `run.runtime_model` / `runtime_effort` / `runtime_fast`（2026-09-09 新增，SPEC §4.4a）
-
-這個 run **實際上**在跑的模型／強度／fast，跟 `bot.model` / `bot.effort` / `bot.fast`（那是「下次啟動
-會用的設定」）分開：
-
-```json
-{"id":"01M1…","runtime_model":"gpt-5.6-luna","runtime_effort":"xhigh","runtime_fast":1}
-```
-
-- daemon 在 `agent.start` 前把最終 argv 讀回來存的（`-m` / `-c model_reasoning_effort=…` /
-  `-c service_tier="priority"`），不是抄 `bots`——該模型不收的強度會在啟動前被丟掉，使用者自己的
-  `args` 也可能再蓋一次。
-- claude / grok 用 slash 指令當場套用成功時（`PATCH` 回 `needs_restart: false`）會一起更新。
-- **三個都是 `null`＝不知道**：收編的 pane（`adopted`）不是我們組的 argv，舊 run 也沒有這幾欄。
-  前端這時不做任何比對，也不標任何東西。
-- 用途：codex 的模型／強度／fast 只有啟動時吃得到，`PATCH` 之後 UI 要顯示的是**還在跑的那個值**，
-  並標「需重啟」，不是把新設定當成已生效。詳見 SPEC §4.4a。
-
-### `run.turn_error`（2026-09-09 新增，SPEC §4.3a）
-
-上一回合被 API 連線中斷截斷、或被額度用盡拒絕（`You've reached your Fable limit…`，2026-09-10）時，
-pane 上那行原文。daemon 在 `working → idle` 的終端掃描裡讀到就掛在
-run 上：
-
-```json
-{"id":"01M1…","turn_error":"API Error: Connection lost mid-response. The response above may be incomplete."}
-```
-
-- 上一回合正常收尾就是 `null`；下一回合一開就會被清回 `null` 並推 `bot_status`。
-- 為什麼需要它：這種回合 hook 照樣送 Stop、herdr 照樣報 idle，`turns.status` 是 `completed`、燈號是
-  綠的。單看既有欄位分不出「做完了」與「斷在半路」。
-- 判定與清除規則見 SPEC §4.3a；命中時對話裡也會多一則釘在該回合上的 `system` 訊息（`incomplete = 1`），
-  內容就是同一行，`terminal_snapshot` 是當時的整張畫面。
-- 回合當下若還是 `in_flight`，會一併收成 `status = failed` 並推 `turn_updated`。
-- **沒有新的重試 API**：UI 的「重送上一則」就是把對話裡最後一則 user 訊息再送一次
-  `POST /api/bots/{id}/prompt`。
-- 額度用盡那一種（2026-09-12）：daemon 同時把該 bot 帳號的額度格（`claude` / `claude:<identity>`）
-  標成 `limit_hit`（同 codex 那一格），`until` 取橫幅講的桶子（`Fable` → `fable`，否則 5h）的
-  `resets_at`；**不**在下一回合成功時清掉（換 opus 照樣能跑不代表 Fable 恢復了），只靠 `until`
-  到期解除。UI 的 chip 寫「⛔ Fable 額度用盡」、給重置時間與「改用 opus」，重送鍵在重置前灰掉。
-  claude 2.1.269 起橫幅底下多一行 `0 tokens`，掃描時視為 chrome。
-
-## `POST /api/teams/{id}/rescue`（SPEC-team §2.6，2026-09-11 新增）
+### `POST /api/teams/{id}/rescue`（SPEC-team §2.6）
 
 跑完的 team 裡沒解決的 task（`failed` / `skipped`）一次交給一個成員收尾。
 
@@ -2105,7 +943,7 @@ run 上：
 - 成功後 team 回到 `starting`：成員重新啟動，收尾者成為這個 issue 唯一的執行者，做完照常
   合併、由 PM 宣告 `done`。
 
-## `POST /api/teams/{id}/issues/retry-failed`（SPEC-team §2.6b，2026-09-11 新增）
+### `POST /api/teams/{id}/issues/retry-failed`（SPEC-team §2.6b）
 
 把佇列上失敗 / 被跳過的 issue 重新排回去接力做完（每個號碼只看最後一次嘗試）。
 
@@ -2116,72 +954,99 @@ run 上：
 - 沒有失敗的 issue → `409 no failed issue to retry`。其餘驗證與 `POST /teams/{id}/issues` 相同
   （issue 存在、未在佇列上、總數上限、額度），`done` 且未 cleanup 的 team 會照 §2.5 reopen 起來。
 
-## 快速 git（chat 標題列的 chip，2026-09-08 新增）
 
-專案 checkout 的 `+N −M ↑a ↓b` 與 commit / push / pull 三顆按鈕。都在專案的 host 上、專案的目錄裡跑
-（本機直接跑、遠端走 ssh），不開 worktree、不切分支。
+## 總管 AGM（SPEC §18）
 
-### `GET /api/projects/{id}/git`
+全部走 `X-AM-Token`。未部署的 daemon 對這些路徑回 404（前端用 404 判斷「這台不支援」）。
 
-```json
-{"git":true,"branch":"main","upstream":"origin/main","ahead":0,"behind":0,
- "changed":7,"untracked":3,"insertions":246,"deletions":9}
-```
+### 狀態、啟停、模型切換
+- `GET /api/supervisor` → `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{…},pending_count,assignments:[]}`。
+  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。`pending_count` = 未結案 assignment + 未 ack inbox。`remote` 同 `GET /api/supervisor/remote`。
+- `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，寫 `CLAUDE.md`、`persona.md`、`runtime.json`（**不含 token**）、`bin/agm`、
+  `handoff.md`（已存在不覆蓋）。args `["--remote-control","AGM"]`、`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`。
+  總管認持久化的 `bot_id`，改名不會多開一個。
+- `POST /api/supervisor/start {}` / `stop {}` → 同 GET。`start` 後 `remote.status` 是 `requested`。`start` 標「應該在跑」、`stop` 標「使用者要它停」：不是經 `stop` 停掉的
+  （被殺、崩潰、更新重啟沒回來），watchdog 自動再 `start`（30 秒，之後 60／120／300 秒退避，連續 5 次失敗寫進 `status_detail` 並停止）。`waiting_quota` 期間與 setup 後沒 start 過的不拉起。
+- `POST /api/supervisor/fallback {}` → 同 status 加 `switched:bool`。在 cc0 的 `fable`／`opus` 之間切換，冷卻窗 30 分內最多自動切一次。只在總管 idle 且無 in-flight turn（或沒在跑）時切，
+  回合中 409 `busy`。`/model` 走 `send_slash_line`（答「Switch model?」框）；live 套用不成而仍 idle 時改重啟套用。自動判斷（controller 每 10 秒，`supervisor/policy.rs`）：
+  1. 5h 或 7d 任一 `critical` → `waiting_quota`，`quota_reset_at` = 最近的 `resets_at`；窗恢復即解除。
+  2. 在 `fable` 且 Fable 週桶剩 < 5% → 切 `opus`，`quota_reset_at` = Fable 桶 `resets_at`。
+  3. 在 `opus`、Fable 剩 ≥ 20%（或 `resets_at` 已過）、冷卻已過 → 切回 `fable`。
+  讀不到額度就不動（未知不等於滿）。
 
-- `git:false`（其他欄位省略）= 那個目錄不是 git repo（或沒裝 git）；前端把整條收掉。
-- `changed` = 有改動的已追蹤檔案數（`status --porcelain=v2`），`insertions` / `deletions` 來自
-  `diff --shortstat HEAD`（未追蹤檔不算行數）。`branch` 在 detached HEAD 時是 `null`。
+### 健康與 incident
+- `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、
+  `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents}`，頂層 `status` 取兩者較嚴重者。
+  daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在 `status` 或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
+- `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
+  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted`（SPEC §18.9）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
 
-### `POST /api/projects/{id}/git/commit` `{"message": "…"}`
+### 遠端入口
+`GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
+`status` 只有 `requested` | `verified` | `unavailable` | `unknown`（SPEC §18.12）；`capability.status` 目前 `unsupported`。觀測超過 `ttl_secs`（900）或 AGM 換 session 退回 `unknown`（`revoked` 說明），`url` 不回（`url_is_evidence:false`）。
+`POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
 
-`git add -A && git commit -m <message>`。`200 {"ok":true,"output":"…"}`；訊息空白 → `400`；
-沒有變更 → `409 {"error":"conflict","reason":"nothing_to_commit"}`；git 失敗 →
-`409 {"reason":"git_commit_failed","output":"<git 的輸出>"}`。
+### 人設
+- `GET /api/supervisor/persona` → `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
+  持久版是權威（SPEC §18.11）。`loaded.status`：`unknown`（沒在跑）、`stale`（session 比人設舊，確定沒載到）、`unverified`（帶著這份啟動，但看不到 session 現在握著什麼）；`needs_restart` 只在 `stale` 時 true。
+- `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1，並改寫 config.toml 的 bot persona 與 `persona.md`（副本，不要手改）。
+  `expected_version` 對不上且正文不同 409 `version_mismatch`；副本同步失敗 409 `persona_sync_incomplete`（帶 `stored:true` 與 `version`，重送相同正文可修復且不加版本）。
+- `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`：內嵌版取代持久版的唯一路徑。
+- `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`scripts/agm.py`）。
 
-### `POST /api/projects/{id}/git/push`、`POST /api/projects/{id}/git/pull`
+### 核准與租約（SPEC §18.10）
+- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,…}]}`。
+- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?}` → 一筆 `pending`，並推 inbox `approval_requested` 給 AGM。
+- `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`；只有 `pending` 能 approve。
+  核准決定與租約續租共用 supervisor lock；核准紀錄遺失 409 `approval_missing`（不延長租約）。
+- `GET /api/supervisor/maintenance/safety?exclude=<id,id>` → `{safe,working,in_flight,unreadable,blocked_waiting_for_user,queued_assignments,checked_at,excluded_bot_ids}`。唯讀快照；`blocked` 只回報不阻擋。
+  CLI `agm lease safety --exclude-bot <id>` 傳此查詢。
+- `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
+- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}` → `{lease,approval,safety}`；同 lock 內重驗核准與 idle，
+  搶輸 409 `lease_held`。ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?}`、`POST …/release {owner,fence}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。
+  持有 `restart` 租約期間 assignment 派送 hold（留 `queued`、不算重試）。
 
-push：有 upstream 就 `git push`，沒有就 `git push -u origin HEAD`。pull：`git pull --rebase --no-autostash`
-（不 stash 別的 agent 的半成品）。回應同 commit（`git_push_failed` / `git_pull_failed`）。逾時 180 秒。
+### 交辦 assignments（SPEC §18.8）
+- `GET /api/supervisor/assignments` → `{assignments:[]}`。
+- `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?:"task"|"notice",expects_review?,mission_id?,role?}` → 一筆 assignment：
+  `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,turn_status,evidence_complete,open,awaiting_review,
+  review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts,resume_at,quota_retries,next_attempt_at}`。
+  - `status`：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review` → `completed` | `failed` | `cancelled` | `superseded`；另有 `blocked`、`quota_blocked`（都算未結案）。
+  - `turn_status`（回合還在跑時 `null`）：`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`。**回合結束不會自己變 `completed`。**
+  - `kind:"notice"`（或 `expects_review:false`，兩者都給時以它為準）：送達且回合正常結束直接 `completed`、inbox `assignment_noticed`；送失敗仍進 `awaiting_review`。CLI `agm assign --notice`。
+  - `quota_blocked`：目標帳號被 CLI 擋著；帶 `resume_at`、`quota_retries`。額度回來後用 `<client_request_id>#r<n>` 自動重送，推 `assignment_quota_blocked` / `assignment_quota_resumed`；超過 6 次 → `awaiting_review` + `quota_exhausted`。
+  - `legacy_closed=true`：驗收狀態出現前就關掉的舊資料，未經驗收。
+  - `ownership_conflicts`：前綴重疊的其他未結案交辦，只回報不阻擋。
+  - `mission_id` 與 `role` 見「群組任務」。
+  - 先落地再送 prompt；同 `client_request_id` 重試回同一筆（換 bot 或 text 409）。對方是 team 成員 409 `team_managed`。對方忙 → 留 `queued`，`error` 記真正理由
+    （`bot has no active run`、`a turn is already in flight`、`needs_login: …`），`next_attempt_at` 下次重試時間，controller 依 15/30/60/120/300 秒退避、沿用同一 crid。delivery `unknown` 只對帳不重送。
+  - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id；daemon 自己送給 AGM 的通知帶 `daemon`。
+- `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
+- `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
+  **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
+  同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
 
-## 更新的 changelog `GET /api/changelog?kind=&host=<name>&from=<version>&to=<version>`（2026-09-10 新增）
+### 交接、inbox、狀態、證據
+- `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；`PUT {summary}` → `{summary,summary_version}`，同時寫 `handoff.md`（權威在 DB）。
+- `GET /api/supervisor/inbox?all=0|1&limit=200` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},created_at,updated_at}],open,all,limit}`。
+  預設只列未 handled、最舊在前；`all=1` 含已處理（最新在前）；`limit` 上限 1000。`POST /api/supervisor/inbox/{id}/ack` → `{}`。
+  - `state`：`pending` → `delivered`（已送通知）→ `handled`（總管 ack）。送達看 `delivery`：`failed` 留 pending 退避；`unknown` 綁 `notify.turn_id` 對帳不重送。
+    delivered 但通知回合失敗／消失，或超過 `notify_ack_deadline_secs`（1800）沒 ack → 放回 pending；重送上限 `notify_max_attempts`（5），用完開 `notify_exhausted` incident（事件仍留著）。ack 單向。
+  - assignment 狀態遷移與完成事件同一個 transaction；啟動時補掃一次。
+  - pending → delivered 的推送節流成每 `notify_interval_secs`（600）最多一次，一次併成一則通知；入庫不受影響。
+  - `kind` 另有 `bot_restart_failed`（`batch_id,bot_id,name,error`）、`supervisor_restart_retry`（`batch_id,bot_id,name,ok,error`）、`approval_requested`、mission 相關事件（見群組任務）。
+- `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
+- `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,content,source,incomplete,created_at,truncated}],has_more,next_cursor}`。
+  `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。
+  每筆 content 最多 16,000 字（超過 `truncated:true`）。空查詢、過長、壞 cursor 400。只提供證據，不把命中當完成或適合度。
 
-「有更新 · 重啟套用」徽章／額度列的批次重啟 chip 按下去，**先**呼叫這支把新版 changelog
-擺進確認框，使用者看過按了才真的 `POST /bots/{id}/restart`。
+### `bin/agm`
+`scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`）、
+`assign`（含 `--notice`、`--mission`／`--role`）、`assignments`、`inbox`（`--all`、`--limit`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`；輸出一律 JSON。
+執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, bot_id, data_dir, supervisor_id, remote_name}`；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
+設定目錄可用 `AGM_RUNTIME_DIR` 或 `--runtime-dir` 覆寫。
 
-- `kind` 省略 = `claude`。支援 `claude` 與 `codex`（其他 kind 回 `found:false`）。
-- `host` 省略 = `local`。daemon 在那台主機上再跑一次 `claude --version`——磁碟上已經是新版
-  （pane 裡跑著的 process 還是舊的），那就是 `installed_version`。這一步不快取。
-- `from`：現在跑著的版本（claude statusLine 報的 `runs[].status.version`）。有給就回
-  `from`（不含）到 `installed_version`（含）之間每一版的段落，新的在前；沒給只回新版那一段。
-- `to`：已知的目標版本。**codex 一定要給**——它的更新是 TUI 當場問（`✨ Update available!
-  0.153.4 -> 0.154.0`），新版還沒進磁碟，探 `codex --version` 只會拿到舊版；UI 從終端畫面
-  那句解出 `from` / `to` 一起帶進來。給了 `to` 就完全不探磁碟。
-- 來源：claude 是 `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；
-  codex 沒有 CHANGELOG.md（repo 那份只寫「去看 releases」），改抓
-  `https://api.github.com/repos/openai/codex/releases`，濾掉 draft／prerelease（`-alpha`），
-  把 `rust-vX.Y.Z` + release body 併成同格式的 markdown。兩者各自全文快取 10 分鐘，都認
-  `## x.y.z` 二級標題。
-
-**永遠 200**。抓不到（`--version` 失敗、GitHub 連不上、CHANGELOG 沒那一版）就是
-`found:false` + `error`，UI 必須寫「找不到 changelog」而不是靜默略過。
-
-```json
-{
-  "kind": "claude", "host": "local",
-  "installed_version": "2.1.5", "from_version": "2.1.3",
-  "found": true,
-  "sections": [{ "version": "2.1.5", "body": "- …" }, { "version": "2.1.4", "body": "- …" }],
-  "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md",
-  "error": null
-}
-```
-
-### Supervisor review 補正（2026-09-13）
-
-- followup 的冪等重送須同 request ID、文字與目標；不同續派回 409 `followup_mismatch`，不冒充已送出。
-- 核准決定與租約續租共用 supervisor lock，撤銷與續租的檢查／寫入不交錯。核准紀錄遺失回 409 `approval_missing`，不延長租約。
-
-## 群組任務（mission，2026-09-13 新增，設計 `docs/goals/agm-missions.md`）
+## 群組任務（mission，2026-09-13 新增，使用者決策見 SPEC §18.14 D1–D8）
 
 群組裡的「交給 AGM」：使用者下一句指示，AGM 派執行者／reviewer／驗證者完成。daemon 只提供確定性的部分——
 任務與事件的持久化、身分挑選規則、輪數上限、交付前的 fast-forward 檢查；拆工與判斷結果是 AGM 的事。

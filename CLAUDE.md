@@ -23,7 +23,7 @@
 2. 進入自己的 worktree 後跑 `git status`，先辨認**其他 agent 未提交的改動**；那些不是你的，不要動，
    也不要在主樹 `git stash`、`--autostash` 或 `git checkout -- <file>`。HEAD 已等於 `origin/main` 時不用 pull；要 pull 一律
    `git pull --rebase --no-autostash`。
-3. 有 goal 檔（`docs/goals/*.md`）就照它做；新 goal 請參考 [`docs/goals/TEMPLATE.md`](docs/goals/TEMPLATE.md)，做完在檔裡打勾。
+3. 文件只寫現況：功能做完，把仍有效的決定併進 `docs/SPEC.md`／`docs/API.md`／`docs/UI-DECISIONS.md`，不另留 goal、進度或驗收紀錄檔（git 歷史就是紀錄）。
 
 ## 改動邊界
 - 只改任務需要的檔案與行；共用檔（`store.ts`、`ChatPanel.tsx`、`Sidebar.tsx`、`styles.css`、`api.rs`、`lifecycle.rs`）hunk 要小，新邏輯優先獨立成新檔。
