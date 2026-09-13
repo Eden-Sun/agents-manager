@@ -69,7 +69,10 @@ async fn with_phase(app: &Arc<App>, m: &store::Mission) -> Result<Value, LcError
     Ok(out)
 }
 
-/// 已結案的任務不能再動：一律 409 `already_closed`，讓呼叫端知道要開新任務而不是重試。
+/// 已結案的任務不能再**動狀態**：一律 409 `already_closed`，讓呼叫端知道要開新任務而不是重試。
+///
+/// 追問與回覆（`question` / `answer`）不走這裡：對著已完成的成果問一句話不會改變任何交付，
+/// 擋掉它只是讓使用者沒地方問（原本連記一句都會 409）。要改東西請用 `revise` 開續作。
 fn ensure_open(m: &store::Mission) -> Result<(), LcError> {
     if m.completed_at.is_some() || m.cancelled_at.is_some() {
         return Err(LcError::conflict("already_closed", json!({"mission_id": m.id, "status": m.status()})));
@@ -146,6 +149,7 @@ pub async fn post_mission(
             executor_kind: &b.executor_kind,
             on_5h_limit: &b.on_5h_limit,
             max_rounds,
+            parent_mission_id: None,
         },
     )
     .await
@@ -202,7 +206,170 @@ pub async fn get_mission(State(app): State<Arc<App>>, Path(id): Path<String>) ->
     let events = store::events(&app.db, &id).await.map_err(up)?;
     let mut out = with_phase(&app, &m).await?;
     out["events"] = json!(events);
+    // 兩個方向都要連得回去：成果卡要能往下走到續作，續作也要知道自己是從哪一筆來的。
+    out["revisions"] = json!(store::children(&app.db, &id).await.map_err(up)?.iter().map(|c| json!({
+        "id": c.id,
+        "text": c.text,
+        "status": c.status(),
+        "created_at": c.created_at,
+        "result_summary": c.result_summary,
+    })).collect::<Vec<_>>());
+    out["parent"] = match m.parent_mission_id.as_deref() {
+        Some(pid) => match store::get(&app.db, pid).await.map_err(up)? {
+            Some(p) => json!({"id": p.id, "text": p.text, "status": p.status(), "result_summary": p.result_summary}),
+            // 父任務被刪掉了也不要假裝沒有過：id 留著，讓畫面說得出「來源已不在」。
+            None => json!({"id": pid, "missing": true}),
+        },
+        None => Value::Null,
+    };
     Ok(Json(out))
+}
+
+/// 追問／回覆／續作共用的重送規則。
+///
+/// 同一個 `client_request_id`：內容一樣就回原本那一則（`replayed`），內容不一樣是 409 —— 同一個
+/// 冪等鍵配兩種內容，呼叫端一定有一邊會誤以為自己那句話送出去了。
+fn replay_guard(existing: &store::MissionEvent, text: &str) -> Result<(), LcError> {
+    if existing.text != text {
+        return Err(LcError::conflict(
+            "request_id_reused",
+            json!({"event_id": existing.id, "detail": "same client_request_id, different text"}),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct QuestionIn {
+    text: String,
+    client_request_id: String,
+}
+
+/// 使用者對成果追問。**已完成的任務也接受**。
+///
+/// 只寫一則事件並叫醒 AGM，不改任何狀態：不 resume、不碰 completed、不建任務、不產生交付。
+/// 使用者想真的改東西，走 `revise`。
+pub async fn post_question(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<QuestionIn>,
+) -> Result<Json<Value>, LcError> {
+    let text = b.text.trim();
+    let crid = b.client_request_id.trim();
+    if text.is_empty() {
+        return Err(LcError::Bad("text is empty".into()));
+    }
+    if crid.is_empty() {
+        return Err(LcError::Bad("client_request_id is empty".into()));
+    }
+    let m = load(&app, &id).await?;
+    if let Some(existing) = store::event_by_crid(&app.db, &id, crid).await.map_err(up)? {
+        replay_guard(&existing, text)?;
+        return Ok(Json(json!({"event": existing, "replayed": true})));
+    }
+    let payload = json!({
+        "mission_id": m.id,
+        "project_id": m.project_id,
+        "status": m.status(),
+        "mission_text": m.text,
+        "result_summary": m.result_summary,
+        "question": text,
+        // 說清楚這是問問題，不是改東西：AGM 回答就好，不要開工。
+        "expects": "answer_only",
+    });
+    let w = store::write_reply(
+        &app.db,
+        &id,
+        "question",
+        text,
+        // 使用者本人：relay_from 留空，泡泡才會是他自己的。
+        None,
+        None,
+        crid,
+        false,
+        Some((&format!("mission:{}:question:{}", id, crid), "mission_question", &payload)),
+    )
+    .await
+    .map_err(up)?;
+    emit(&app, &load(&app, &id).await?).await;
+    Ok(Json(json!({"event": w.event, "replayed": w.replayed})))
+}
+
+#[derive(Deserialize)]
+pub struct AnswerIn {
+    text: String,
+    client_request_id: String,
+    /// AGM 回覆追問時指回那一則 question 事件。
+    #[serde(default)]
+    reply_to: Option<String>,
+    #[serde(default)]
+    relay_from: Option<String>,
+}
+
+/// 使用者回答「停下來問人」的任務：記下回答、放行、叫醒 AGM，**一個交易**。
+///
+/// 以前是前端連打 `POST /events` 再 `POST /resume` 兩支，中間斷掉就留下半套；而 `resume` 從來
+/// 沒有推過 inbox，所以 AGM 要自己去查才知道有人回答了。
+pub async fn post_answer(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<AnswerIn>,
+) -> Result<Json<Value>, LcError> {
+    let text = b.text.trim();
+    let crid = b.client_request_id.trim();
+    if text.is_empty() {
+        return Err(LcError::Bad("text is empty".into()));
+    }
+    if crid.is_empty() {
+        return Err(LcError::Bad("client_request_id is empty".into()));
+    }
+    let m = load(&app, &id).await?;
+    // 重放優先，狀態其次：重送多半發生在任務已經被放行之後，先檢查狀態會把正確的重送擋掉。
+    if let Some(existing) = store::event_by_crid(&app.db, &id, crid).await.map_err(up)? {
+        replay_guard(&existing, text)?;
+        return Ok(Json(json!({"event": existing, "replayed": true, "resumed": false, "mission": m.json()})));
+    }
+    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    // AGM 回覆追問（帶 relay_from + reply_to）不放行任務，也不該把已完成的任務弄成進行中；
+    // 使用者回答暫停才會 resume。兩種語意分開，不靠猜。
+    let is_bot_reply = from.is_some();
+    if !is_bot_reply && m.completed_at.is_some() {
+        return Err(LcError::conflict(
+            "already_closed",
+            json!({"mission_id": m.id, "status": m.status(), "hint": "已完成的任務用 question 追問，或用 revise 開續作"}),
+        ));
+    }
+    if let Some(rt) = b.reply_to.as_deref() {
+        let known = store::events(&app.db, &id).await.map_err(up)?.into_iter().any(|e| e.id == rt && e.kind == "question");
+        if !known {
+            return Err(LcError::Bad("reply_to is not a question of this mission".into()));
+        }
+    }
+    let payload = json!({
+        "mission_id": m.id,
+        "project_id": m.project_id,
+        "answer": text,
+        "reply_to": b.reply_to,
+        "from": from,
+    });
+    let w = store::write_reply(
+        &app.db,
+        &id,
+        "answer",
+        text,
+        from.as_deref(),
+        b.reply_to.as_deref(),
+        crid,
+        // 只有使用者回答暫停才放行。
+        !is_bot_reply,
+        // AGM 自己寫的回覆不要再叫醒它自己——那是通知迴圈的起點。
+        (!is_bot_reply).then_some((&format!("mission:{}:answer:{}", id, crid), "mission_answered", &payload)),
+    )
+    .await
+    .map_err(up)?;
+    let m = load(&app, &id).await?;
+    emit(&app, &m).await;
+    Ok(Json(json!({"event": w.event, "replayed": w.replayed, "resumed": w.resumed, "mission": m.json()})))
 }
 
 #[derive(Deserialize)]
@@ -257,15 +424,209 @@ pub async fn post_pause(State(app): State<Arc<App>>, Path(id): Path<String>, Jso
     Ok(Json(m.json()))
 }
 
+/// 「不回答，直接繼續」。
+///
+/// 跟 `answer` 一樣要**叫醒** AGM：以前這裡只寫事件加發 SSE，使用者按了按鈕、任務也放行了，
+/// 但 AGM 不主動查就永遠不知道，等於那顆按鈕沒有接線。
+///
+/// 只在真的發生 `paused → open` 時推一次：`store::resume` 的 UPDATE 帶了 `paused_reason IS NOT NULL`
+/// 條件，所以對一個沒有暫停的任務按下去不會產生通知——AGM 自己呼叫 resume 也就不會把自己叫醒，
+/// 這是通知迴圈的防線。event_key 綁那一次轉移的時刻，重送不會變成第二則。
 pub async fn post_resume(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    let paused_reason = m.paused_reason.clone();
     if store::resume(&app.db, &id).await.map_err(up)? {
-        store::add_event(&app.db, &id, "resumed", "繼續", Some(crate::agent_relay::DAEMON_SENDER), &json!({})).await.map_err(up)?;
+        let ev = store::add_event(&app.db, &id, "resumed", "繼續", Some(crate::agent_relay::DAEMON_SENDER), &json!({}))
+            .await
+            .map_err(up)?;
+        let payload = json!({
+            "mission_id": m.id,
+            "project_id": m.project_id,
+            "was_paused_for": paused_reason,
+            "answered": false,
+            "note": "使用者沒有回答，要求直接繼續",
+        });
+        crate::supervisor::store::push_inbox(
+            &app.db,
+            &format!("mission:{}:resumed:{}", id, ev.id),
+            "mission_resumed",
+            None,
+            None,
+            None,
+            &payload,
+        )
+        .await
+        .map_err(up)?;
     }
     let m = load(&app, &id).await?;
     emit(&app, &m).await;
     Ok(Json(m.json()))
+}
+
+#[derive(Deserialize)]
+pub struct ReviseIn {
+    text: String,
+    client_request_id: String,
+    #[serde(default)]
+    delivery_mode: Option<String>,
+    #[serde(default)]
+    executor_kind: Option<String>,
+    #[serde(default)]
+    on_5h_limit: Option<String>,
+    #[serde(default)]
+    max_rounds: Option<i64>,
+}
+
+/// 追加修改：從一筆**已完成**的成果開一筆新任務。
+///
+/// 新任務是獨立的一筆（`parent_mission_id` 指回來），所以它自己的 `verified` / `delivered` /
+/// `completed` 全都要重新來過——舊的那些事件屬於舊的 mission id，交付關卡（`has_event(id,"verified")`）
+/// 天生看不到它們。這正是「不沿用舊驗證」不需要額外防呆的原因。
+///
+/// 脈絡是**快照**：原指示、結果摘要、commit/PR、驗證摘要都在建立當下寫進新任務的 instruction 事件與
+/// inbox payload，所以原本那顆臨時 bot 早就被清掉也不影響續作。快照只是參考資料，不是證據——
+/// 它不會、也不能讓新任務跳過自己的驗證。
+pub async fn post_revise(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<ReviseIn>,
+) -> Result<Json<Value>, LcError> {
+    let text = b.text.trim();
+    let crid = b.client_request_id.trim();
+    if text.is_empty() {
+        return Err(LcError::Bad("text is empty".into()));
+    }
+    if crid.is_empty() {
+        return Err(LcError::Bad("client_request_id is empty".into()));
+    }
+    let parent = load(&app, &id).await?;
+    // 契約鎖死：只有已完成的成果能續作。進行中的請直接回答／等它做完（要改方向就先 cancel），
+    // 取消掉的沒有成果可以接續——兩種都回明確的理由，不要讓呼叫端猜。
+    if parent.completed_at.is_none() {
+        return Err(LcError::conflict(
+            "not_completed",
+            json!({
+                "mission_id": parent.id,
+                "status": parent.status(),
+                "hint": if parent.cancelled_at.is_some() { "已取消的任務沒有成果可以續作，請開新任務" } else { "任務還在進行中，等它完成或先取消" },
+            }),
+        ));
+    }
+
+    let events = store::events(&app.db, &id).await.map_err(up)?;
+    let last = |kind: &str| events.iter().rev().find(|e| e.kind == kind).cloned();
+    let verified = last("verified");
+    let delivered = last("delivered");
+    let delivered_payload: Value =
+        delivered.as_ref().and_then(|e| serde_json::from_str(&e.payload_json).ok()).unwrap_or_else(|| json!({}));
+    // 原成果的交付**可能還沒進 main**（PR 還開著、或 push 失敗）。把事實原樣帶過去並講明要自己確認，
+    // 不要讓續作預設「基底已經有那份改動」。
+    let delivery_merged = delivered_payload.get("mode").and_then(Value::as_str) == Some("push_main");
+    let snapshot = json!({
+        "parent_mission_id": parent.id,
+        "parent_text": parent.text,
+        "parent_result_summary": parent.result_summary,
+        "parent_completed_at": parent.completed_at,
+        "parent_verified": verified.as_ref().map(|e| json!({"text": e.text, "at": e.created_at})),
+        "parent_delivery": delivered_payload,
+        "parent_delivery_in_main": delivery_merged,
+        "request": text,
+        "caveat": if delivery_merged {
+            "原成果已推 main；仍以目前基底實際狀態為準"
+        } else {
+            "原成果尚未進 main（PR 可能還開著或交付失敗）：先確認基底有沒有那份改動，不要假設它在"
+        },
+        "evidence_note": "以上是參考脈絡，不是驗證證據；這一筆要自己重新驗證才能交付",
+    });
+
+    let project_id = parent.project_id.clone();
+    let outcome = store::create_child(
+        &app.db,
+        &store::NewMission {
+            project_id: &project_id,
+            client_request_id: crid,
+            text,
+            // 沒指定就沿用原任務的設定——追加修改多半跟著同一套交付方式走。
+            delivery_mode: b.delivery_mode.as_deref().unwrap_or(&parent.delivery_mode),
+            executor_kind: b.executor_kind.as_deref().unwrap_or(&parent.executor_kind),
+            on_5h_limit: b.on_5h_limit.as_deref().unwrap_or(&parent.on_5h_limit),
+            max_rounds: b.max_rounds.unwrap_or(parent.max_rounds),
+            parent_mission_id: Some(&parent.id),
+        },
+    )
+    .await
+    .map_err(up)?;
+    let child = match outcome {
+        store::ChildCreate::Created(c) => c,
+        store::ChildCreate::Replayed(c) => {
+            // 同 crid 重送：回原本那一筆。內容不同就是冪等鍵被重用，講明白而不是默默開第二筆。
+            if c.text != text {
+                return Err(LcError::conflict(
+                    "request_id_reused",
+                    json!({"mission_id": c.id, "detail": "same client_request_id, different text"}),
+                ));
+            }
+            let mut out = c.json();
+            out["created"] = false.into();
+            out["replayed"] = true.into();
+            return Ok(Json(out));
+        }
+        // 這個 parent 已經有一輪續作還沒結束（在跑、暫停、等額度都算）。第二筆會讓兩輪同時改同一份
+        // 成果，所以擋下來並指向那一筆——不是「重送」，是「你要找的在那裡」。
+        store::ChildCreate::OpenChildExists(open) => {
+            return Err(LcError::conflict(
+                "revision_in_progress",
+                json!({
+                    "mission_id": open.id,
+                    "status": open.status(),
+                    "text": open.text,
+                    "hint": "這筆成果已經有一輪續作還沒結束，先看那一筆（或等它完成／取消）",
+                }),
+            ));
+        }
+    };
+
+    store::add_event(&app.db, &child.id, "instruction", text, None, &snapshot).await.map_err(up)?;
+    // 原成果那邊也留一筆，成果卡才連得到續作。
+    store::add_event(
+        &app.db,
+        &parent.id,
+        "note",
+        &format!("追加修改：已開續作任務 {}", child.id),
+        Some(crate::agent_relay::DAEMON_SENDER),
+        &json!({"revision_mission_id": child.id}),
+    )
+    .await
+    .map_err(up)?;
+    let mut payload = snapshot.clone();
+    if let Some(o) = payload.as_object_mut() {
+        o.insert("mission_id".into(), child.id.clone().into());
+        o.insert("project_id".into(), project_id.clone().into());
+        o.insert("text".into(), text.into());
+        o.insert("delivery_mode".into(), child.delivery_mode.clone().into());
+        o.insert("executor_kind".into(), child.executor_kind.clone().into());
+        o.insert("on_5h_limit".into(), child.on_5h_limit.clone().into());
+        o.insert("max_rounds".into(), child.max_rounds.into());
+        // AGM 的 runbook 對續作從第 2 步接手：不用重新規劃，脈絡都在這裡。
+        o.insert("runbook_start_step".into(), 2.into());
+    }
+    crate::supervisor::store::push_inbox(
+        &app.db,
+        &format!("mission:{}:created", child.id),
+        "mission_created",
+        None,
+        None,
+        None,
+        &payload,
+    )
+    .await
+    .map_err(up)?;
+    emit(&app, &child).await;
+    emit(&app, &load(&app, &id).await?).await;
+    let mut out = child.json();
+    out["created"] = true.into();
+    Ok(Json(out))
 }
 
 pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
@@ -549,6 +910,238 @@ mod tests {
             LcError::Conflict(v) => v["reason"].as_str().unwrap_or_default().to_string(),
             other => panic!("expected a conflict, got {other:?}"),
         }
+    }
+
+    fn q(text: &str, crid: &str) -> QuestionIn {
+        QuestionIn { text: text.into(), client_request_id: crid.into() }
+    }
+
+    fn ans(text: &str, crid: &str) -> AnswerIn {
+        AnswerIn { text: text.into(), client_request_id: crid.into(), reply_to: None, relay_from: None }
+    }
+
+    fn rev(text: &str, crid: &str) -> ReviseIn {
+        ReviseIn {
+            text: text.into(),
+            client_request_id: crid.into(),
+            delivery_mode: None,
+            executor_kind: None,
+            on_5h_limit: None,
+            max_rounds: None,
+        }
+    }
+
+    async fn inbox_keys(app: &Arc<App>, like: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at")
+            .bind(like)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// 完成的任務可以被追問，而追問**不能**改變任何交付事實。這是「已完成清單不可覆寫」的底線。
+    #[tokio::test]
+    async fn a_finished_mission_can_be_asked_about_without_changing_anything() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let done = CompleteIn { result_summary: "改好了".into(), relay_from: None };
+        post_complete(State(app.clone()), Path(id.clone()), Json(done)).await.unwrap();
+        let before = get_mission(State(app.clone()), Path(id.clone())).await.unwrap().0;
+
+        let Json(out) = post_question(State(app.clone()), Path(id.clone()), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
+        assert_eq!(out["event"]["kind"], "question");
+        assert!(out["event"]["relay_from"].is_null(), "使用者本人問的，不冒充 bot");
+
+        let after = get_mission(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(after["status"], "done", "追問不會把已完成的任務弄回進行中");
+        assert_eq!(after["completed_at"], before["completed_at"], "完成時間不變");
+        assert_eq!(after["result_summary"], before["result_summary"]);
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:question:%")).await.len(), 1, "AGM 被叫醒一次");
+
+        // 同一個 crid 重送：回原本那一則，不會變成第二個問題。
+        let Json(replay) = post_question(State(app.clone()), Path(id.clone()), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["event"]["id"], out["event"]["id"]);
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:question:%")).await.len(), 1);
+        // 同 crid 換內容是冪等鍵被重用，要講出來。
+        let err = post_question(State(app.clone()), Path(id.clone()), Json(q("換一句話", "q1"))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "request_id_reused");
+
+        // 使用者自己在已完成的任務上按「回答」是沒有意義的（沒有東西在等他），要講清楚該去哪：
+        let err = post_answer(State(app.clone()), Path(id.clone()), Json(ans("那就這樣", "a0"))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "already_closed");
+
+        // AGM 回覆追問：帶自己的身分、指回那一則 question，而且**不會**放行或改狀態。
+        // 這裡用 `daemon` 哨符（測試環境沒有跑 AGM bot）；正式環境帶的是 AGM 自己的 bot id，
+        // 兩者都會走 `check_relay_from`，也都算「不是使用者本人」。
+        let qid = out["event"]["id"].as_str().unwrap().to_string();
+        let reply = AnswerIn {
+            text: "不會，只動到文案".into(),
+            client_request_id: "a1".into(),
+            reply_to: Some(qid.clone()),
+            relay_from: Some(crate::agent_relay::DAEMON_SENDER.into()),
+        };
+        let Json(r) = post_answer(State(app.clone()), Path(id.clone()), Json(reply)).await.unwrap();
+        assert_eq!(r["event"]["reply_to"], json!(qid), "答得出是回哪一句");
+        assert_eq!(r["event"]["relay_from"], json!(crate::agent_relay::DAEMON_SENDER), "不是使用者的泡泡");
+        assert_eq!(r["resumed"], false);
+        assert_eq!(r["mission"]["status"], "done", "回覆追問不會改變交付狀態");
+        assert!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await.is_empty(), "AGM 自己的回覆不會叫醒它自己");
+
+        // reply_to 必須真的是這筆任務的某則追問，不能亂指。
+        let bogus = AnswerIn {
+            text: "亂指".into(),
+            client_request_id: "a2".into(),
+            reply_to: Some("no-such-event".into()),
+            relay_from: Some(crate::agent_relay::DAEMON_SENDER.into()),
+        };
+        assert!(post_answer(State(app.clone()), Path(id.clone()), Json(bogus)).await.is_err());
+    }
+
+    /// 使用者回答暫停的任務：回答、放行、喚醒是一筆交易，而且重送不會派出第二次續作。
+    #[tokio::test]
+    async fn answering_a_paused_mission_resumes_and_wakes_the_manager_once() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "max_rounds".into(), detail: None }))
+            .await
+            .unwrap();
+
+        let Json(out) = post_answer(State(app.clone()), Path(id.clone()), Json(ans("照你說的做", "a1"))).await.unwrap();
+        assert_eq!(out["resumed"], true);
+        assert_eq!(out["mission"]["status"], "open", "放行了");
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await, [format!("mission:{id}:answer:a1")]);
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM mission_events WHERE mission_id = ? ORDER BY created_at")
+            .bind(&id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(kinds.contains(&"answer".to_string()) && kinds.contains(&"resumed".to_string()));
+
+        // 重送——而且是在任務已經被放行之後。先查重放再看狀態，所以回原結果而不是 409。
+        let Json(replay) = post_answer(State(app.clone()), Path(id.clone()), Json(ans("照你說的做", "a1"))).await.unwrap();
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["event"]["id"], out["event"]["id"]);
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await.len(), 1, "沒有第二次喚醒");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id = ? AND kind = 'answer'")
+            .bind(&id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "沒有第二則回答");
+    }
+
+    /// 「不回答直接繼續」那顆按鈕也要真的叫醒 AGM；而 AGM 自己對沒暫停的任務按 resume 不會產生通知。
+    #[tokio::test]
+    async fn plain_resume_wakes_the_manager_but_cannot_loop() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "waiting_quota".into(), detail: None }))
+            .await
+            .unwrap();
+
+        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:resumed:%")).await.len(), 1, "按鈕有接線");
+
+        // 已經在跑的任務再按一次：沒有 paused→open 的轉移，就不該再有通知。
+        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:resumed:%")).await.len(), 1, "不會自己叫醒自己");
+    }
+
+    /// 追加修改開的是**新的一筆**任務：舊成果原封不動，而新任務拿不到舊的 verified。
+    #[tokio::test]
+    async fn a_revision_is_a_new_mission_that_cannot_inherit_the_old_verification() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let ev = EventIn { kind: "verified".into(), text: "cargo test 全過".into(), relay_from: Some("daemon".into()), payload: None };
+        post_event(State(app.clone()), Path(id.clone()), Json(ev)).await.unwrap();
+        post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "第一版".into(), relay_from: None }))
+            .await
+            .unwrap();
+
+        let Json(child) = post_revise(State(app.clone()), Path(id.clone()), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
+        assert_eq!(child["created"], true);
+        let cid = child["id"].as_str().unwrap().to_string();
+        assert_ne!(cid, id, "是新的一筆，不是把舊的打開");
+        assert_eq!(child["parent_mission_id"], json!(id));
+        assert_eq!(child["status"], "open");
+
+        // 舊那筆完全沒被動到。
+        let Json(parent) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(parent["status"], "done");
+        assert_eq!(parent["result_summary"], "第一版");
+        assert_eq!(parent["revisions"][0]["id"], json!(cid), "成果卡連得到續作");
+        let Json(kid) = get_mission(State(app.clone()), Path(cid.clone())).await.unwrap();
+        assert_eq!(kid["parent"]["id"], json!(id), "續作也連得回來源");
+
+        // 舊的 verified 不屬於新任務：不重新驗證就交付要被擋下來。
+        let deliver = DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: None };
+        let err = post_deliver(State(app.clone()), Path(cid.clone()), Json(deliver)).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "not_verified", "舊證據不能放行新交付");
+
+        // 脈絡是持久化的快照：原指示／摘要／驗證摘要都在新任務的 instruction 事件裡，
+        // 所以原本那顆臨時 bot 被清掉也不影響續作。
+        let snap: String = sqlx::query_scalar(
+            "SELECT payload_json FROM mission_events WHERE mission_id = ? AND kind = 'instruction'",
+        )
+        .bind(&cid)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        let snap: Value = serde_json::from_str(&snap).unwrap();
+        assert_eq!(snap["parent_mission_id"], json!(id));
+        assert_eq!(snap["parent_result_summary"], "第一版");
+        assert!(snap["parent_verified"]["text"].as_str().unwrap().contains("cargo test"));
+        assert!(snap["evidence_note"].as_str().unwrap().contains("不是驗證證據"));
+        // PR 還沒合進 main：續作不可以假設基底已經有那份改動。
+        assert_eq!(snap["parent_delivery_in_main"], false);
+        assert!(snap["caveat"].as_str().unwrap().contains("不要假設"));
+
+        // inbox 帶 parent 與快照，AGM 的 runbook 從第 2 步接手。
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE event_key = ?")
+            .bind(format!("mission:{cid}:created"))
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["parent_mission_id"], json!(id));
+        assert_eq!(payload["runbook_start_step"], 2);
+
+        // 同 crid 重送回同一筆；換內容是 409。
+        let Json(again) = post_revise(State(app.clone()), Path(id.clone()), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
+        assert_eq!(again["id"], json!(cid));
+        assert_eq!(again["created"], false);
+        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("不一樣的要求", "rev1"))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "request_id_reused");
+    }
+
+    /// 續作只能從**已完成**的成果開。進行中與已取消各自回明確理由。
+    #[tokio::test]
+    async fn only_a_finished_mission_can_be_revised() {
+        let env = crate::team::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev1"))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "not_completed");
+
+        post_cancel(State(app.clone()), Path(id.clone())).await.unwrap();
+        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev2"))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "not_completed");
     }
 
     #[tokio::test]
