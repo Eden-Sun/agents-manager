@@ -225,15 +225,13 @@ export interface Bot {
   herdr_session: string | null
   /**
    * `user` = 使用者建立（受 TOML 投影管轄）；`child` = 別的 bot 用 herdr 開出來的子 agent。
-   * 舊 daemon 沒有這個欄位時一律當 `user`。
    */
   managed_by: BotManagedBy
   /** 由哪個 bot 的 agent 用 herdr 開出來的子 agent（名稱 `<父 agent 名>-<字尾>`）；null = 頂層。 */
   parent_bot_id: string | null
   /**
    * 使用者釘的「主要執行的 bot」（`PATCH /api/bots/:id {primary}`）。純顯示用的釘選：
-   * 不影響啟動參數、不用重啟，存在 daemon 所以手機與電腦看到同一組。舊 daemon 沒有這個
-   * 欄位 → false。
+   * 不影響啟動參數、不用重啟，存在 daemon 所以手機與電腦看到同一組。
    */
   primary: boolean
   /** pane 的工作目錄；null = 用 `project.path`。 */
@@ -246,7 +244,6 @@ export interface Bot {
   /**
    * herdr 那邊的 agent 名稱（`GET /api/state` 的 `bots[].agent_name`）。有 active run 時是
    * 這個 run 實際用的名字，否則是「下次啟動會用的」。debug 時要拿它去 herdr 對照 pane。
-   * 舊 daemon 沒有這個欄位 → null。
    */
   agent_name: string | null
   created_at: string
@@ -288,7 +285,7 @@ export interface Run {
   workspace_id: string | null
   pane_id: string | null
   adopted: boolean
-  /** Effective Herdr session; old daemons may omit it and the normalizer returns null. */
+  /** Effective Herdr session; null when the run has none recorded. */
   herdr_session: string | null
   /** agent 目前替自己取的名字（herdr `terminal_title_stripped`，claude 會寫成當前任務摘要）。 */
   agent_title: string | null
@@ -504,7 +501,7 @@ export interface TerminalSnapshot {
   truncated: boolean
   source: TerminalSource
   pane_id: string | null
-  /** Pane geometry; null on an older daemon that does not report it. */
+  /** Pane geometry; null when herdr does not report it. */
   columns: number | null
   rows: number | null
 }
@@ -742,11 +739,11 @@ export interface HostMem {
   processes: number
   /** 這台量不到時的原因；此時數字都是 0，不是「真的 0」。 */
   error: string | null
-  /** 這台上的 Chromium 系瀏覽器（Chrome / ego）：分頁數與 RSS（2026-09-08）。舊 daemon 沒有 → 空陣列。 */
+  /** 這台上的 Chromium 系瀏覽器（Chrome / ego）：分頁數與 RSS（2026-09-08）；沒有就是空陣列。 */
   browsers: BrowserMem[]
   /**
    * 整台機器的總量與剩餘可用量（2026-09-12）。`total_bytes` 只講「herdr 樹吃掉多少」，回答不了
-   * 「還能不能再開一顆 bot」；舊 daemon 沒有這個欄位 → null，UI 就只顯示已用量。
+   * 「還能不能再開一顆 bot」；daemon 讀不出時為 null，UI 就只顯示已用量。
    */
   machine: MachineMem | null
 }

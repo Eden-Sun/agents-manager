@@ -32,7 +32,6 @@ export function QuotaLoginShell({
   const openHostShell = useStore((s) => s.openHostShell)
   const refreshTools = useStore((s) => s.refreshTools)
   const notify = useStore((s) => s.notify)
-  const supported = useStore((s) => s.hostShellSupported)
   const shellBusy = useStore((s) => s.busy[`shell:${host}`] === true)
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
 
@@ -56,12 +55,8 @@ export function QuotaLoginShell({
       <button
         type="button"
         className="btn"
-        disabled={!supported || shellBusy}
-        title={
-          supported
-            ? `在 ${hostLabel} 開一個 shell 並輸入 ${command}`
-            : `這版 daemon 沒有主機 shell，請自己在終端跑 ${command}`
-        }
+        disabled={shellBusy}
+        title={`在 ${hostLabel} 開一個 shell 並輸入 ${command}`}
         onClick={() => setOpen(true)}
       >
         {shellBusy ? '開 shell 中…' : '開 shell 登入'}

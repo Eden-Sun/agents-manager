@@ -425,16 +425,12 @@ pub const REMOTE_TOKEN_SLOT: &str = "-";
 /// drains the spool when it sees that state change (§11.4.3).
 pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
-# Argument 4 used to be the reverse-forwarded daemon port. Agents started by an older daemon
-# still pass it (their argv was fixed at launch), so accept and ignore a numeric one.
-if [ $# -gt 0 ]; then case "$1" in ''|*[!0-9]*) ;; *) shift ;; esac; fi
 LIMIT=1048576
 DIR="$HOME/.config/agents-manager/bots/$BOT"
 mkdir -p "$DIR" 2>/dev/null
 # Argument 3 is the token slot. It is never used here (the spool file is already only ours to
-# read) and since 2026-09-12 the daemon passes `-` in it: the real token sat on codex's argv
-# for the whole run, where `ps` shows it to every user of the host. Older agents still pass
-# the real thing; either is accepted.
+# read), and the daemon passes `-` in it: a real token on codex's argv would be visible to
+# every user of the host through `ps`.
 : "$TOKEN"
 
 # v4.0 statusLine mode: the rate limits arrive on every repaint, so they go to a single-slot
@@ -700,36 +696,6 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<R
     }
     tracing::info!(host = %conn.name, bot = %bot.name, dir = %p.dir, "remote hook installed");
     Ok(p)
-}
-
-/// SPEC §11.4.7 — rewrite a *live* remote run's hook material without restarting it.
-///
-/// Reconcile calls this for every remote run it keeps, so that an agent launched by an older
-/// daemon starts spooling + reporting through herdr the moment we come back. The agent's own
-/// argv is fixed at launch and cannot be rewritten, which is exactly why `hook.sh` still
-/// accepts (and ignores) the old 4th port argument.
-pub async fn refresh_remote_hook(app: &Arc<App>, bot: &db::Bot) -> anyhow::Result<()> {
-    if bot.inject_hooks == 0 {
-        return Ok(());
-    }
-    let project = db::project(&app.db, &bot.project_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("bot `{}` has no project", bot.id))?;
-    if project.host == LOCAL_HOST {
-        return Ok(());
-    }
-    let conn = app
-        .hosts
-        .get(&project.host)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
-    install_remote_hook(&conn, bot).await?;
-    if bot.kind == "grok" {
-        // The dispatcher is global and static, but its `hook.sh` argv changed in v4.3.
-        let env: Value = serde_json::from_str(&bot.env_json).unwrap_or_else(|_| json!({}));
-        install_remote_grok_hook(&conn, &env).await?;
-    }
-    Ok(())
 }
 
 /// Put the `herdr` shim (SPEC §6.5b) where this bot's pane can reach it, and answer with the
@@ -8079,27 +8045,6 @@ mod remote_hook_tests {
     }
 
     #[test]
-    fn the_legacy_port_argument_changes_nothing() {
-        // H7: agents launched by an older daemon have `7788` welded into their argv.
-        let with = Sandbox::new(true);
-        with.run(&["claude", &with.bot, "tok", "7788"], STOP);
-        let without = Sandbox::new(true);
-        without.run(&["claude", &without.bot, "tok"], STOP);
-        // `received_at` and `--seq` are wall clock, so they are the two things allowed to differ.
-        let strip = |c: Vec<String>| -> Vec<String> {
-            c.iter().map(|l| l.split(" --seq ").next().unwrap_or(l).to_string()).collect()
-        };
-        let undate = |s: String| -> String {
-            match (s.find(r#","received_at""#), s.find(r#","truncated""#)) {
-                (Some(a), Some(b)) => format!("{}{}", &s[..a], &s[b..]),
-                _ => s,
-            }
-        };
-        assert_eq!(undate(with.read("hook-spool.jsonl")), undate(without.read("hook-spool.jsonl")));
-        assert_eq!(strip(with.calls()), strip(without.calls()));
-    }
-
-    #[test]
     fn statusline_overwrites_a_single_slot_and_runs_the_user_command() {
         let sb = Sandbox::new(true);
         let cfg = sb.dir.join(".claude");
@@ -8110,7 +8055,7 @@ mod remote_hook_tests {
         )
         .unwrap();
         sb.run(&["statusline", &sb.bot, "tok"], r#"{"cost":{"a":1}}"#);
-        let (out, ok) = sb.run(&["statusline", &sb.bot, "tok", "7788"], r#"{"cost":{"b":2}}"#);
+        let (out, ok) = sb.run(&["statusline", &sb.bot, "tok"], r#"{"cost":{"b":2}}"#);
         assert!(ok);
         assert_eq!(out, "USERLINE", "stdout is the user's own status line, nothing else");
         let slot = sb.read("hook-status.json");

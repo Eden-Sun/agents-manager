@@ -126,7 +126,6 @@ async function applyRoute(r: Route) {
       s.selectProject(r.projectId)
       return
     case 'shell': {
-      if (!s.hostShellSupported) return backHome('這個 daemon 沒有主機 shell')
       try {
         // pane 活不過 daemon 重啟，所以連結一定要對一次現況，順便把 `cwd`（網址裡沒有）補回來。
         const shell = (await api.fetchHostShells(r.host)).find((x) => x.pane_id === r.paneId)

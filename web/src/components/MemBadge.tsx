@@ -41,7 +41,7 @@ export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: str
   const tabs = tabsTotal(row.browsers)
   const tabsHot = tabs >= TABS_WARN
   // 整機剩餘（2026-09-12 使用者）：「herdr 樹吃了 7G」回答不了「還能不能再開一顆 bot」，
-  // 那要看這台還剩什麼。舊 daemon 沒有這一節就只顯示已用量，不要畫成「剩 0」。
+  // 那要看這台還剩什麼。daemon 讀不出整機量（null）就只顯示已用量，不要畫成「剩 0」。
   const machine = row.machine
   const freePct = machine && machine.total_bytes > 0 ? (machine.available_bytes / machine.total_bytes) * 100 : null
   const low = freePct !== null && freePct < 15

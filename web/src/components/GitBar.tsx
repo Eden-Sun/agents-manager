@@ -10,7 +10,7 @@ import { useStore } from '../store/store'
  * （`--rebase --no-autostash`）。放在 chat 標題列的 repo chip 旁邊，不是 git 客戶端——只是
  * 「agent 剛改完，我要立刻推出去」這一個手勢。
  *
- * 不是 git repo（或舊 daemon 沒這支端點）整條消失。每 15 秒重讀一次，做完動作立刻重讀。
+ * 不是 git repo（或專案已不在 daemon 上）整條消失。每 15 秒重讀一次，做完動作立刻重讀。
  */
 const POLL_MS = 15_000
 

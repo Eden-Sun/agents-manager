@@ -45,7 +45,7 @@ test('fast 只有 codex 會變成啟動旗標，其他 kind 不比', () => {
   assert.deepEqual(runtimeDrift(bot({ kind: 'grok', fast: false }), run({ runtime_fast: true })), [])
 })
 
-test('不知道 runtime 就不要猜：舊 daemon、收編的 pane、沒在跑的 run', () => {
+test('不知道 runtime 就不要猜：收編的 pane、沒在跑的 run', () => {
   const unknown = run({ runtime_model: null, runtime_effort: null, runtime_fast: null })
   assert.equal(runtimeKnown(unknown), false)
   assert.deepEqual(runtimeDrift(bot({ effort: 'low' }), unknown), [])

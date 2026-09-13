@@ -10,9 +10,7 @@
  *   - text containing `slow`                 → the reply takes ~8s (good for testing the composer lock)
  *
  * Dev helpers on `window.__amMock`: `resync()`, `dropSocket()`, `block(botId)`, `disconnect()`,
- * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts), `paneSqueeze(n)` /
- * `paneMoveOff()` / `paneMoveOn()`（窄 pane 警示與「移到自己的分頁」的退回路徑）、
- * `hostShellsOff()` / `hostShellsOn()`（主機 shell 的缺端點退回路徑）。
+ * `hostDown(name)`, `hostUp(name)` (SPEC §11.6 remote hosts), `paneSqueeze(n)`（窄 pane 警示）。
  */
 
 import { parseMentions } from './mentions'
@@ -502,15 +500,9 @@ export class MockTransport implements Transport {
   /** Dev helper：模擬「舊 daemon 沒有 `/api/missions`」（`__amMock.missionsOff()`）。 */
   private missionsDisabled = false
 
-  /** Dev helper：模擬「daemon 還沒有 `pane/move-to-tab`」（`__amMock.paneMoveOff()`）。 */
-  private paneMoveDisabled = false
-
   /** `POST /api/hosts/:name/shells` 開出來的假 shell，key = `<host>/<pane_id>`。 */
   private shells = new Map<string, MockShell>()
   private shellSeq = 0
-
-  /** Dev helper：模擬「這版 daemon 沒有主機 shell」（`__amMock.hostShellsOff()`）。 */
-  private hostShellsDisabled = false
 
   /** `GET|POST /api/hosts/:name/gh` — 本機預設已登入；新加的遠端主機預設跟 m4p 一樣（active token 失效、另有可切帳號）。 */
   private gh = new Map<string, MockGh>()
@@ -729,7 +721,7 @@ export class MockTransport implements Transport {
     if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'login' && method === 'POST') return this.ghLogin(seg[1], b)
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'cancel' && method === 'POST') return this.ghCancel(seg[1])
-    if (seg[0] === 'hosts' && seg[2] === 'shells' && !this.hostShellsDisabled) {
+    if (seg[0] === 'hosts' && seg[2] === 'shells') {
       const host = decodeURIComponent(seg[1])
       const pane = seg[3] ? decodeURIComponent(seg[3]) : ''
       if (method === 'POST' && !pane) return this.openShell(host, String(b.cwd ?? ''))
@@ -798,7 +790,7 @@ export class MockTransport implements Transport {
         if (action === 'prompt') return this.prompt(botId, b)
         if (action === 'keys') return this.keys(botId, b)
         if (action === 'text') return this.text(botId, b)
-        if (action === 'pane' && seg[3] === 'move-to-tab' && !this.paneMoveDisabled) return this.movePaneToTab(botId)
+        if (action === 'pane' && seg[3] === 'move-to-tab') return this.movePaneToTab(botId)
       }
     }
 
@@ -1985,7 +1977,7 @@ export class MockTransport implements Transport {
     if (bot.identity) this.checkIdentity(bot.identity, bot.kind)
     this.bots.push(bot)
     this.emit('bot_changed', { bot_id: bot.id })
-    return { bot_id: bot.id }
+    return { bot_id: bot.id, name: bot.name }
   }
 
   /** identity 必須存在且 kind 相符（API.md identities 章節）。 */
@@ -2881,16 +2873,6 @@ export class MockTransport implements Transport {
   setForeignPanes(n: number) {
     this.foreignPanes = Math.max(0, Math.floor(n))
   }
-
-  /** Dev helper: 模擬舊 daemon —— `POST /bots/:id/pane/move-to-tab` 落到查無此路由的 404。 */
-  setPaneMoveSupported(on: boolean) {
-    this.paneMoveDisabled = !on
-  }
-
-  /** Dev helper: 模擬舊 daemon —— `/api/hosts/:name/shells*` 全部落到查無此路由的裸 404。 */
-  setHostShellsSupported(on: boolean) {
-    this.hostShellsDisabled = !on
-  }
 }
 
 function sleep(ms: number) {
@@ -2909,10 +2891,5 @@ function installDevHelpers(mock: MockTransport) {
     hosts: () => mock.hostNames(),
     // 窄 pane / 移到自己的分頁
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
-    paneMoveOff: () => mock.setPaneMoveSupported(false),
-    paneMoveOn: () => mock.setPaneMoveSupported(true),
-    // 主機 shell
-    hostShellsOff: () => mock.setHostShellsSupported(false),
-    hostShellsOn: () => mock.setHostShellsSupported(true),
   }
 }

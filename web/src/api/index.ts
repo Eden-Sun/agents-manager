@@ -124,7 +124,7 @@ export async function sendGroupChat(
         bot_id: str(pick(x, 'bot_id')),
         bot_name: str(pick(x, 'bot_name')),
         reason: str(pick(x, 'reason'), 'conflict') as GroupSkipReason,
-        detail: str(pick(x, 'detail', 'message')),
+        detail: str(pick(x, 'detail')),
       })),
   }
 }
@@ -155,20 +155,6 @@ export async function movePaneToTab(botId: string): Promise<void> {
 }
 
 /**
- * 「這版 daemon 沒有 `pane/move-to-tab` 這個端點」與真正的失敗分開（docs/FRONTEND.md §8）。
- *
- * 現行 daemon 對 `/api/bots/:id/` 底下的未知路徑回的是**裸 405、空 body**（已實測 2026-09-06），
- * 所以 405 / 501 一律當成沒實作；404 只在**沒有機器碼**時才算——daemon 自己的 404 一定帶
- * `{error, what}`，那是「這個 bot 不見了」，不是「這版沒有這個功能」。
- */
-export function isPaneMoveUnsupported(e: unknown): boolean {
-  if (!(e instanceof ApiError)) return false
-  if (e.status === 405 || e.status === 501) return true
-  if (e.status !== 404) return false
-  return !e.body.error && !e.body.what
-}
-
-/**
  * `GET /api/fs/dirs?host=<name>&path=` — SPEC §11.5. `host` omitted / `"local"` lists the
  * daemon's own filesystem; anything else is listed over ssh on that host.
  */
@@ -195,8 +181,8 @@ function toHostResult(raw: unknown, name: string): HostResult {
   const o = isRec(raw) ? raw : {}
   return {
     name: str(pick(o, 'name'), name),
-    connected: o.connected === true || o.ok === true,
-    error: optStr(pick(o, 'error', 'last_error', 'message', 'reason')),
+    connected: o.connected === true,
+    error: optStr(pick(o, 'error')),
   }
 }
 
@@ -214,7 +200,7 @@ export async function reconnectHost(name: string): Promise<HostResult> {
 
 export async function createProject(input: NewProjectInput): Promise<string> {
   const raw = await transport.request('POST', '/projects', input)
-  return isRec(raw) ? str(pick(raw, 'project_id', 'id')) : ''
+  return isRec(raw) ? str(pick(raw, 'project_id')) : ''
 }
 
 /**
@@ -240,8 +226,7 @@ export async function deleteIdentity(name: string): Promise<void> {
 export async function createBot(projectId: string, input: NewBotInput): Promise<{ id: string; name: string }> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/bots`, input)
   const o = isRec(raw) ? raw : {}
-  // 舊 daemon 不回 `name`：那就是送出去的那個。
-  return { id: str(pick(o, 'bot_id', 'id')), name: str(pick(o, 'name'), input.name) }
+  return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')) }
 }
 
 /**
@@ -437,7 +422,7 @@ export async function fetchQuota(): Promise<QuotaMap> {
 
 /**
  * `GET /api/search/messages?q=` — 哪些 bot 的對話裡出現過這段文字。
- * 舊 daemon 沒有這支 → 丟出來由呼叫端當成「沒有訊息命中」。
+ * 失敗就丟出來，由呼叫端當成「沒有訊息命中」。
  */
 export async function searchMessages(q: string): Promise<Record<string, MessageHit>> {
   const raw = await transport.request('GET', `/search/messages?q=${encodeURIComponent(q)}`)
@@ -453,7 +438,7 @@ export async function searchMessages(q: string): Promise<Record<string, MessageH
 
 /**
  * `POST /api/bots/:id/restore` — 把誤刪的 bot 放回來（連同它全部的對話）。
- * 舊 daemon 沒有這支 → false，呼叫端顯示失敗而不是假裝成功。
+ * 任何失敗 → false，呼叫端顯示失敗而不是假裝成功。
  */
 export async function restoreBot(botId: string): Promise<boolean> {
   try {
@@ -469,10 +454,6 @@ export async function fetchMem(): Promise<MemSnapshot> {
   return toMemSnapshot(await transport.request('GET', '/mem'))
 }
 
-/**
- * `GET /api/mem/processes?host=…` — 那個數字是由哪些程序組成的（SPEC §15.2）。
- * 舊 daemon 沒有這支 → 空清單，popover 顯示「這台 daemon 還不會列」而不是壞掉。
- */
 /** `GET /api/mem/processes/pane` — 清單裡「自己開的 pane」現在畫面上的字（SPEC §15.2）。 */
 export async function fetchMemPane(host: string, paneId: string, socket: string | null, lines = 40): Promise<TerminalSnapshot> {
   const sock = socket ? `&socket=${encodeURIComponent(socket)}` : ''
@@ -483,13 +464,9 @@ export async function fetchMemPane(host: string, paneId: string, socket: string 
   return toTerminal(raw, 'visible')
 }
 
+/** `GET /api/mem/processes?host=…` — 那個數字是由哪些程序組成的（SPEC §15.2）。 */
 export async function fetchMemProcesses(host: string): Promise<MemProcesses> {
-  try {
-    return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`))
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return { host, sampled_at: '', processes: [] }
-    throw e
-  }
+  return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`))
 }
 
 /**
@@ -652,18 +629,6 @@ export async function closeHostShell(host: string, paneId: string): Promise<void
   )
 }
 
-/**
- * 「這版 daemon 沒有主機 shell」與真正的失敗分開（docs/FRONTEND.md §8），判準同
- * `isPaneMoveUnsupported`：405 / 501 一律當沒實作；404 只在**沒有機器碼**時算——daemon 自己的
- * 404 一定帶 `{error, what}`，那是「主機不見了」或「這個 shell 已經關了」，不是缺功能。
- */
-export function isHostShellUnsupported(e: unknown): boolean {
-  if (!(e instanceof ApiError)) return false
-  if (e.status === 405 || e.status === 501) return true
-  if (e.status !== 404) return false
-  return !e.body.error && !e.body.what
-}
-
 /** `GET /api/projects/:id/issues?state=&limit=&q=` (v4.0; the daemon shells out to `gh`). */
 export async function fetchIssues(
   projectId: string,
@@ -686,15 +651,9 @@ export async function fetchIssue(projectId: string, number: number, repo = ''): 
 
 /**
  * `GET /api/projects/:id/submodules` — the project's git submodules with their GitHub origins.
- * 舊 daemon 沒有這個端點：裸 404 當成「沒有 submodule」，不是錯誤。
  */
 export async function fetchSubmodules(projectId: string): Promise<ProjectSubmodule[]> {
-  try {
-    return toSubmodules(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/submodules`))
-  } catch (e) {
-    if (isPaneMoveUnsupported(e)) return []
-    throw e
-  }
+  return toSubmodules(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/submodules`))
 }
 
 /** `crypto.randomUUID()` with a fallback for non-secure origins. */
@@ -727,7 +686,7 @@ export interface GitSummary {
   deletions: number
 }
 
-/** `GET /api/projects/:id/git`。舊 daemon 沒這支端點（404）→ `{git:false}`，chip 靜默消失。 */
+/** `GET /api/projects/:id/git`。專案不在了（404）→ `{git:false}`，chip 靜默消失。 */
 export async function fetchGit(projectId: string): Promise<GitSummary> {
   const none: GitSummary = { git: false, branch: null, upstream: null, ahead: 0, behind: 0, changed: 0, untracked: 0, insertions: 0, deletions: 0 }
   let raw: unknown

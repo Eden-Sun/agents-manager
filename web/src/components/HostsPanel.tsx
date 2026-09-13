@@ -44,13 +44,10 @@ function closeEnclosingPopup(from: HTMLElement | null) {
  * 「開 shell」——在那台主機開（或接回）一個純 shell 並切到 `HostShellPanel`。
  *
  * 主機沒連線時停用而不是隱藏：使用者要看得出「這顆在這裡、現在不能按、因為主機斷了」。
- * 這版 daemon 沒有這支端點時整顆消失（`hostShellSupported`，docs/FRONTEND.md §8）。
  */
 function OpenShellButton({ host, connected }: { host: string; connected: boolean }) {
-  const supported = useStore((s) => s.hostShellSupported)
   const busy = useStore((s) => Boolean(s.busy[`shell:${host}`]))
   const openHostShell = useStore((s) => s.openHostShell)
-  if (!supported) return null
   return (
     <button
       type="button"
@@ -72,10 +69,9 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
 
 /**
  * 這台主機目前開著的 shell（`GET /api/hosts/:name/shells`）：點一下切回去（接既有的，不新開），
- * 或直接結束。清單在列出現、面板切換、結束之後重讀；主機沒連線或這版 daemon 沒端點時不畫。
+ * 或直接結束。清單在列出現、面板切換、結束之後重讀；主機沒連線時不畫。
  */
 function HostShellList({ host, connected }: { host: string; connected: boolean }) {
-  const supported = useStore((s) => s.hostShellSupported)
   const current = useStore((s) => s.shellView)
   const viewHostShell = useStore((s) => s.viewHostShell)
   const endHostShell = useStore((s) => s.endHostShell)
@@ -83,7 +79,7 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
   const opening = Boolean(busy[`shell:${host}`])
   const [shells, setShells] = useState<HostShell[]>([])
   const [tick, setTick] = useState(0)
-  const enabled = supported && connected
+  const enabled = connected
 
   useEffect(() => {
     if (!enabled) return

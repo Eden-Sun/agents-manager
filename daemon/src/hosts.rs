@@ -672,14 +672,6 @@ impl HostManager {
             let gen = conn.generation.load(Ordering::SeqCst);
             let t = spawn_supervisor(app.clone(), conn.clone(), gen);
             *conn.supervisor.lock().await = Some(t);
-            if h.hook_port.is_some() {
-                // SPEC §11.4.6 — kept parseable so an existing config still loads, but it no
-                // longer means anything: remote hooks report through herdr, not over a port.
-                tracing::warn!(
-                    host = %h.name,
-                    "hook_port is ignored since v4.3 (remote hooks report through herdr; see SPEC §11.4)"
-                );
-            }
             tracing::info!(host = %h.name, ssh = %h.ssh, "host configured");
         }
         changed_hosts
@@ -889,17 +881,13 @@ mod tests {
             ssh_opts: vec![],
             herdr_session: "agents-manager".into(),
             remote_path: String::new(),
-            hook_port: None,
         }
     }
 
-    /// v4.3: `hook_port` no longer reaches the ssh master, so changing it must not tear down a
-    /// perfectly good connection — only the fields that shape the `-L` forward count.
     #[test]
-    fn hook_port_is_not_a_reason_to_reconnect() {
+    fn only_forward_shaping_fields_reconnect() {
         let a = cfg();
         let mut b = cfg();
-        b.hook_port = Some(9999);
         assert!(!cfg_differs(&a, &b));
         b.ssh_port = 2222;
         assert!(cfg_differs(&a, &b));

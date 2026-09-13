@@ -321,7 +321,7 @@ export interface StoreState {
   localTools: ToolMap
   /** v4.0: per-identity login detection on the local machine (`hosts[0].identities`). */
   localIdentityStatus: IdentityStatusMap
-  /** SPEC §15: `GET /api/mem` + WS `mem_updated`；null = 舊 daemon 沒有這支。 */
+  /** SPEC §15: `GET /api/mem` + WS `mem_updated`；null = 還沒讀到。 */
   mem: MemSnapshot | null
   /** v4.0: `GET /api/quota` + WS `quota_updated`; key = kind or `kind:identity`. */
   quota: QuotaMap
@@ -421,11 +421,6 @@ export interface StoreState {
    * 開啟時指向一個已經不存在的 shell。
    */
   shellView: { host: string; paneId: string; cwd: string } | null
-  /**
-   * false = 這版 daemon 沒有 `/api/hosts/:name/shells`。第一次撞到就翻成 false，
-   * 「開 shell」的入口從此靜默消失（docs/FRONTEND.md §8）。
-   */
-  hostShellSupported: boolean
 
   selectedBotId: string | null
   rightTab: RightTab
@@ -534,7 +529,7 @@ export interface StoreState {
   /**
    * 在某台主機開一個 shell 並切到 `HostShellPanel`。已經有活著的就接回**最新那個**，
    * 不再多開：按第二次「開 shell」想看的是剛剛那個，不是一個空白的新終端。
-   * false = 沒開起來（原因已經跳通知，或這版 daemon 沒有這個功能）。
+   * false = 沒開起來（原因已經跳通知）。
    */
   openHostShell: (host: string, cwd?: string) => Promise<boolean>
   /** 切到一個**已經開著**的 shell（環境設定裡的清單點回去用），不打 API、不新開。 */
@@ -708,7 +703,6 @@ export const useStore = create<StoreState>((set, get) => ({
   missionsSupported: true,
   shellView: initialShellView,
   supervisorProjectId: null,
-  hostShellSupported: true,
 
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
@@ -1573,7 +1567,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       set({ quota: await api.fetchQuota() })
     } catch {
-      /* older daemon without /quota: the strip just shows nothing */
+      /* unreadable: the strip keeps what it had (nothing, on first load) */
     }
   },
 
@@ -1581,7 +1575,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       set({ mem: await api.fetchMem() })
     } catch {
-      /* older daemon without /mem: the header just shows nothing */
+      /* unreadable: the header keeps what it had (nothing, on first load) */
     }
   },
 
@@ -1712,25 +1706,18 @@ export const useStore = create<StoreState>((set, get) => ({
   // ------------------------------------------------------- 主機 shell
 
   async openHostShell(host, cwd) {
-    if (!get().hostShellSupported) return false
     let ok = false
     await guarded(set, get, `shell:${host}`, async () => {
-      try {
-        // 先看有沒有活著的：一台主機通常只需要一個 shell，而按第二次「開 shell」想回到的
-        // 是剛剛那個終端（裡面還有上一個指令的輸出），不是一片空白。指定了 cwd 就是明確
-        // 要「在那個目錄」開一個，這時不接回舊的。
-        const existing = cwd ? [] : await api.fetchHostShells(host)
-        const reuse = existing.length > 0 ? existing[existing.length - 1] : null
-        const shell = reuse ?? (await api.openHostShell(host, cwd))
-        // 不動 selectedBotId：shell 掛在目前這個 bot 的標題列底下（2026-09-08），
-        // 使用者要的是「在這個 bot 旁邊開個終端」，不是離開對話。
-        set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
-        ok = true
-      } catch (e) {
-        // 缺端點不是失敗，是這版 daemon 沒有這個功能：入口收掉，不跳錯誤。
-        if (!api.isHostShellUnsupported(e)) throw e
-        set({ hostShellSupported: false })
-      }
+      // 先看有沒有活著的：一台主機通常只需要一個 shell，而按第二次「開 shell」想回到的
+      // 是剛剛那個終端（裡面還有上一個指令的輸出），不是一片空白。指定了 cwd 就是明確
+      // 要「在那個目錄」開一個，這時不接回舊的。
+      const existing = cwd ? [] : await api.fetchHostShells(host)
+      const reuse = existing.length > 0 ? existing[existing.length - 1] : null
+      const shell = reuse ?? (await api.openHostShell(host, cwd))
+      // 不動 selectedBotId：shell 掛在目前這個 bot 的標題列底下（2026-09-08），
+      // 使用者要的是「在這個 bot 旁邊開個終端」，不是離開對話。
+      set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
+      ok = true
     })
     return ok
   },
@@ -1756,8 +1743,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       const alive = await api.fetchHostShells(v.host)
       if (!alive.some((sh) => sh.pane_id === v.paneId)) set({ shellView: null })
-    } catch (e) {
-      if (api.isHostShellUnsupported(e)) set({ shellView: null, hostShellSupported: false })
+    } catch {
       // 主機暫時連不上就先留著：面板自己會顯示讀取失敗，使用者可以按「關閉」。
     }
   },
@@ -2037,12 +2023,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       return
     }
     case 'daemon_status': {
-      // SPEC §11.6: `{herdr_connected, hosts: {<name>: {connected, error?}}}`.
-      // The pre-§11 shape was `{connected}`; accept both.
+      // SPEC §11.6: `{herdr_connected, default_connected, hosts: {<name>: {connected, error?}}}`.
       if (!isRec(data)) return
       set((s) => {
         const patch: Partial<StoreState> = {
-          connected: bool(pick(data, 'herdr_connected', 'connected'), s.connected),
+          connected: bool(pick(data, 'herdr_connected'), s.connected),
         }
         if (pick(data, 'default_connected') !== undefined) {
           patch.defaultConnected = bool(pick(data, 'default_connected'), s.defaultConnected)
@@ -2055,7 +2040,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     }
     case 'host_changed': {
       if (!isRec(data)) return
-      const name = str(pick(data, 'name', 'host'))
+      const name = str(pick(data, 'name'))
       if (!name) return
       // issue #26: a host that just came back may now answer `GET /api/models`.
       const wasConnected = name === 'local'
@@ -2210,9 +2195,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // thinking, and any retry / API-error banner (`alert`).
       const botId = frameBotId(data)
       if (!botId || !isRec(data)) return
-      const turnId = str(pick(data, 'turn_id', 'turnId'))
+      const turnId = str(pick(data, 'turn_id'))
       if (!turnId) return
-      const text = str(pick(data, 'text', 'content'))
+      const text = str(pick(data, 'text'))
       const activity = str(pick(data, 'activity'))
       const alert = str(pick(data, 'alert'))
       const revision = Number(pick(data, 'revision') ?? 0) || 0
@@ -2381,11 +2366,11 @@ function flushQueued(botId: string) {
 function mergeHosts(current: Host[], updates: unknown[]): Host[] {
   let changed = false
   const next = current.map((h) => {
-    const u = updates.find((x) => isRec(x) && str(pick(x, 'name', 'host')) === h.name)
+    const u = updates.find((x) => isRec(x) && str(pick(x, 'name')) === h.name)
     if (!isRec(u)) return h
-    const connected = bool(pick(u, 'connected', 'ok', 'up'), h.connected)
-    const error = u.error !== undefined || u.last_error !== undefined
-      ? optStr(pick(u, 'error', 'last_error'))
+    const connected = bool(pick(u, 'connected'), h.connected)
+    const error = u.error !== undefined
+      ? optStr(pick(u, 'error'))
       : connected
         ? null
         : h.error

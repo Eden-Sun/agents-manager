@@ -365,8 +365,6 @@ pub async fn emit_daemon_status(app: &Arc<App>) {
         "daemon_status",
         json!({
             "herdr_connected": herdr_connected,
-            // Deprecated alias kept for older clients.
-            "connected": herdr_connected,
             "default_connected": app.default_connected.load(Ordering::SeqCst),
             "hosts": hosts_json(app).await,
         }),
