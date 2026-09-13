@@ -125,3 +125,22 @@
 - **標題列**：只寫 bot 名稱＋可複製的 pane 識別籤，不再帶專案名；內文的「識別」整列拿掉。
 
 截圖 `docs/screenshots/bot-settings/compact-1600.png`。
+## 晶片列：daemon 自己的雜務 bot 跑完不出現（2026-09-13）
+
+使用者：「w8WM:pC 屬於 daemon 的，完成不需要在 header 列標示」。那顆是 `agm-pxf2pv-browser-gc`
+（AGM 開出去清 Chrome 殭屍的工人），跑完會進標題列下面那條「剛跑完」。
+
+根因不是規則錯，是**比對太窄**：那條列排除總管環境時寫的是 `project.label === 'AGM'`，但 daemon
+把總管開出去的工人放在 `AGM-DM-GRUP` 底下；那顆又 `parent_bot_id = null`、不是 team 成員，
+其他排除條件也攔不到，於是被當成使用者自己的 bot。
+
+改成認**前綴**（`AGM` 或 `AGM-…`，`lib/supervisorProject.ts`）。只認前綴不認「名字裡有 AGM」——
+使用者自己的 `my-AGM-tools` 不該被吃掉。順手把那條晶片列的 `tracked` 判斷式抽成純函式一起測，
+免得下次再改排除規則時只有肉眼能驗。
+
+不靠 `managed_by`：那顆的 `managed_by` 是 `user`（daemon 現在只有 `user` / `child` 兩種），
+真要乾淨得由 daemon 另給一個「總管開的」標記，那是 daemon 端的事，這裡先用專案前綴。
+
+截圖 `docs/screenshots/unread/supervisor-hidden-*.png` 是改完之後的晶片列（真 daemon）。
+**看不出前後差別是正常的**：那一列只列「有未讀」的 bot，那顆當下未讀是 0；真正釘住這個洞的是
+`supervisorProject.test.ts` 裡「改之前 `chipTracked` 會回 true、改之後 false」那一條。
