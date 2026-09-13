@@ -62,6 +62,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/missions/{id}/events", post(crate::mission::api::post_event))
         .route("/missions/{id}/pause", post(crate::mission::api::post_pause))
         .route("/missions/{id}/resume", post(crate::mission::api::post_resume))
+        // 完成後的追問／回覆／追加修改（AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）。
+        .route("/missions/{id}/question", post(crate::mission::api::post_question))
+        .route("/missions/{id}/answer", post(crate::mission::api::post_answer))
+        .route("/missions/{id}/revise", post(crate::mission::api::post_revise))
         .route("/missions/{id}/cancel", post(crate::mission::api::post_cancel))
         .route("/missions/{id}/complete", post(crate::mission::api::post_complete))
         .route("/missions/{id}/round", post(crate::mission::api::post_round))
