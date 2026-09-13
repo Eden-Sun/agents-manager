@@ -496,6 +496,14 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     if getattr(args, "notice", False):
         body["kind"] = "notice"
         body["expects_review"] = False
+    # 群組任務：這件交辦屬於哪個任務、擔任哪個角色。兩個一起給——少一個 daemon 會回 400，
+    # 在這裡先擋，免得一件沒掛上任務的工作被派出去。
+    mission, role = getattr(args, "mission", None), getattr(args, "role", None)
+    if bool(mission) != bool(role):
+        raise AgmError("bad_args", "--mission 與 --role 要一起給（role：executor / reviewer / verifier）", 2)
+    if mission:
+        body["mission_id"] = mission
+        body["role"] = role
     try:
         return client.post("/api/supervisor/assignments", body)
     except AgmError as e:
@@ -763,6 +771,86 @@ def cmd_handoff(client: Client, cfg: dict, args) -> object:
     return client.put("/api/supervisor/handoff", {"summary": summary})
 
 
+def cmd_mission(client: Client, cfg: dict, args) -> object:
+    """群組任務（docs/API.md「群組任務」）。每個 op 對一個端點，不在 CLI 裡另外拼流程。"""
+    op = args.op
+    if op == "list":
+        if not args.project:
+            raise AgmError("bad_args", "mission list 需要 --project", 2)
+        return client.get(
+            f"/api/projects/{urllib.parse.quote(args.project)}/missions",
+            {"status": args.status, "limit": args.limit},
+        )
+    if not args.mission_id:
+        raise AgmError("bad_args", f"mission {op} 需要 mission id", 2)
+    base = f"/api/missions/{urllib.parse.quote(args.mission_id)}"
+    if op == "get":
+        return client.get(base)
+    if op == "events":
+        out = client.get(base)
+        return {"mission_id": args.mission_id, "events": out.get("events", []) if isinstance(out, dict) else []}
+    if op == "event":
+        if not args.kind or not (args.text or args.text_file):
+            raise AgmError("bad_args", "mission event 需要 --kind（report / note / verified）與 --text 或 --text-file", 2)
+        body: dict = {"kind": args.kind, "text": _mission_text(args)}
+        _with_relay(body, cfg, args)
+        return client.post(f"{base}/events", body)
+    if op == "pause":
+        if not args.reason:
+            raise AgmError("bad_args", "mission pause 需要 --reason", 2)
+        body = {"reason": args.reason}
+        if args.detail:
+            body["detail"] = args.detail
+        return client.post(f"{base}/pause", body)
+    if op in ("resume", "cancel", "round"):
+        return client.post(f"{base}/{op}", {})
+    if op == "complete":
+        if not (args.text or args.text_file):
+            raise AgmError("bad_args", "mission complete 需要 --text 或 --text-file（結果摘要）", 2)
+        body = {"result_summary": _mission_text(args)}
+        _with_relay(body, cfg, args)
+        return client.post(f"{base}/complete", body)
+    if op == "pick":
+        if not args.role:
+            raise AgmError("bad_args", "mission pick 需要 --role（executor / reviewer / verifier）", 2)
+        return client.get(f"{base}/pick", {"role": args.role, "exclude": args.exclude})
+    if op == "deliver":
+        if not args.worktree:
+            raise AgmError("bad_args", "mission deliver 需要 --worktree（本機絕對路徑）", 2)
+        body = {"worktree": str(Path(args.worktree).expanduser())}
+        for key, val in (("title", args.title), ("body", args.body)):
+            if val:
+                body[key] = val
+        _with_relay(body, cfg, args)
+        return client.post(f"{base}/deliver", body)
+    raise AgmError("bad_args", f"未知的 mission op：{op}", 2)
+
+
+def _mission_text(args) -> str:
+    if args.text_file:
+        try:
+            text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
+        except OSError as e:
+            raise AgmError("bad_args", f"讀不到 --text-file：{e.strerror}", 2)
+    else:
+        text = args.text or ""
+    if not text.strip():
+        raise AgmError("bad_args", "內容是空的", 2)
+    return text
+
+
+def _with_relay(body: dict, cfg: dict, args) -> None:
+    """回報進群組時間軸的話要標來源。預設是總管自己（runtime.json 的 manager_bot_id），
+    `--as-daemon` 標成 daemon。沒有 bot id 就不帶——daemon 會當成使用者本人，這裡寧可報錯。"""
+    if getattr(args, "as_daemon", False):
+        body["relay_from"] = "daemon"
+        return
+    manager = cfg.get("manager_bot_id") or cfg.get("bot_id")
+    if not manager:
+        raise AgmError("bad_args", "runtime.json 沒有 manager_bot_id，無法標示這則回報是誰說的", 2)
+    body["relay_from"] = manager
+
+
 def cmd_quota(client: Client, cfg: dict, args) -> object:
     return client.get("/api/quota")
 
@@ -802,6 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm lease safety / agm lease acquire rebuild --approval <id> --commit <sha>\n"
             "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
+            "  agm mission list --project <id> --status open  群組任務；pick --role verifier 照規則挑身分\n"
             "\n"
             "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。\n"
             "注意：回合結束不等於工作完成。交辦會停在 awaiting_review，要 `agm review` 才會結案。"
@@ -856,6 +945,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="通知，不是交辦：送到、回合結束就自動結案，不進 awaiting_review、不會被當成卡住的工作",
     )
+    s.add_argument("--mission", help="群組任務 id：這件交辦屬於哪個任務（要和 --role 一起給）")
+    s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="在任務裡擔任的角色")
     s.set_defaults(func=cmd_assign)
 
     s = sub.add_parser("assignments", help="列出交辦，或用 --id 查一筆")
@@ -964,6 +1055,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("quota", help="各身分的額度狀態")
     s.set_defaults(func=cmd_quota)
+
+    s = sub.add_parser(
+        "mission",
+        help="群組任務：list / get / events / event / pause / resume / cancel / complete / round / pick / deliver",
+        description="對應 docs/API.md「群組任務」的端點。回報進群組的 event / complete / deliver 預設標成總管說的。",
+    )
+    s.add_argument(
+        "op",
+        choices=["list", "get", "events", "event", "pause", "resume", "cancel", "complete", "round", "pick", "deliver"],
+    )
+    s.add_argument("mission_id", nargs="?", help="list 以外都需要")
+    s.add_argument("--project", help="list：專案 id")
+    s.add_argument("--status", choices=["all", "open", "done", "cancelled"], help="list：篩選（已完成任務＝done）")
+    s.add_argument("--limit", type=int, help="list：筆數上限")
+    s.add_argument("--kind", choices=["report", "note", "verified"], help="event：事件種類（verified＝驗證通過，交付前必須有）")
+    s.add_argument("--text", help="event：內容／complete：結果摘要")
+    s.add_argument("--text-file", dest="text_file", help="從檔案讀 --text")
+    s.add_argument("--reason", help="pause：暫停原因（機器碼，例如 waiting_user）")
+    s.add_argument("--detail", help="pause：補充說明")
+    s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身分")
+    s.add_argument("--exclude", help="pick：排除的身分（reviewer 排除執行者的身分）")
+    s.add_argument("--worktree", help="deliver：要交付的 worktree（本機絕對路徑）")
+    s.add_argument("--title", help="deliver（pr）：PR 標題")
+    s.add_argument("--body", help="deliver（pr）：PR 內文")
+    s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
+    s.set_defaults(func=cmd_mission)
 
     s = sub.add_parser("bot", help="管理 bot：start / stop / restart / create")
     s.add_argument("op", choices=["start", "stop", "restart", "create"])

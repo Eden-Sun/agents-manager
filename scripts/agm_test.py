@@ -739,6 +739,111 @@ class MiscCommandTest(CliCase):
         self.assertEqual(FakeDaemon.seen, [])
 
 
+class MissionCommandTest(CliCase):
+    """群組任務：每個 op 打對一個端點，回報預設標成總管說的。"""
+
+    def posts(self, path: str) -> list:
+        return [r for r in FakeDaemon.seen if r["method"] == "POST" and r["path"] == path]
+
+    def test_list_needs_project_and_passes_status(self):
+        self.assertEqual(self.bad("mission", "list")["error"], "bad_args")
+        FakeDaemon.routes["GET /api/projects/p1/missions"] = (200, {"missions": [{"id": "m1"}]})
+        out = self.ok("mission", "list", "--project", "p1", "--status", "done", "--limit", "5")
+        self.assertEqual(out["missions"][0]["id"], "m1")
+        gets = [r["path"] for r in FakeDaemon.seen if r["method"] == "GET" and r["path"].startswith("/api/projects/")]
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(gets[0]).query)
+        self.assertEqual(q, {"status": ["done"], "limit": ["5"]})
+
+    def test_get_and_events(self):
+        FakeDaemon.routes["GET /api/missions/m1"] = (200, {"id": "m1", "phase": "executing", "events": [{"kind": "instruction"}]})
+        self.assertEqual(self.ok("mission", "get", "m1")["phase"], "executing")
+        self.assertEqual(self.ok("mission", "events", "m1"), {"mission_id": "m1", "events": [{"kind": "instruction"}]})
+        self.assertEqual(self.bad("mission", "get")["error"], "bad_args", "沒給 mission id 要先擋")
+
+    def test_event_is_attributed_to_the_manager_by_default(self):
+        FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
+        self.ok("mission", "event", "m1", "--kind", "verified", "--text", "cargo test 644 passed")
+        body = self.posts("/api/missions/m1/events")[0]["body"]
+        self.assertEqual(body, {"kind": "verified", "text": "cargo test 644 passed", "relay_from": "bot-agm"})
+        self.ok("mission", "event", "m1", "--kind", "note", "--text", "排程", "--as-daemon")
+        self.assertEqual(self.posts("/api/missions/m1/events")[1]["body"]["relay_from"], "daemon")
+
+    def test_event_without_kind_or_text_sends_nothing(self):
+        self.assertEqual(self.bad("mission", "event", "m1", "--text", "x")["error"], "bad_args")
+        self.assertEqual(self.bad("mission", "event", "m1", "--kind", "report", "--text", "  ")["error"], "bad_args")
+        self.assertEqual(self.posts("/api/missions/m1/events"), [])
+
+    def test_event_refuses_to_speak_without_a_manager_id(self):
+        """沒有 bot id 就不帶來源，daemon 會把它當成使用者本人說的——寧可報錯。"""
+        self.write_runtime({"daemon_url": f"http://127.0.0.1:{self.port}"})
+        self.assertEqual(self.bad("mission", "event", "m1", "--kind", "report", "--text", "x")["error"], "bad_args")
+        self.assertEqual(self.posts("/api/missions/m1/events"), [])
+
+    def test_pause_resume_cancel_round(self):
+        for op in ("pause", "resume", "cancel", "round"):
+            FakeDaemon.routes[f"POST /api/missions/m1/{op}"] = (200, {"status": op})
+        self.assertEqual(self.bad("mission", "pause", "m1")["error"], "bad_args")
+        self.ok("mission", "pause", "m1", "--reason", "waiting_user", "--detail", "等使用者選交付方式")
+        self.assertEqual(self.posts("/api/missions/m1/pause")[0]["body"], {"reason": "waiting_user", "detail": "等使用者選交付方式"})
+        for op in ("resume", "cancel", "round"):
+            self.assertEqual(self.ok("mission", op, "m1")["status"], op)
+
+    def test_round_over_the_cap_surfaces_the_conflict(self):
+        FakeDaemon.routes["POST /api/missions/m1/round"] = (409, {"error": "conflict", "reason": "max_rounds", "rounds_used": 2})
+        err = self.bad("mission", "round", "m1")
+        self.assertEqual(err["status"], 409)
+        self.assertEqual(err["detail"]["reason"], "max_rounds")
+
+    def test_complete_sends_the_summary_as_the_manager(self):
+        FakeDaemon.routes["POST /api/missions/m1/complete"] = (200, {"status": "done"})
+        f = Path(self.dir.name) / "summary.md"
+        f.write_text("修好了，commit abc123", encoding="utf-8")
+        self.ok("mission", "complete", "m1", "--text-file", str(f))
+        body = self.posts("/api/missions/m1/complete")[0]["body"]
+        self.assertEqual(body, {"result_summary": "修好了，commit abc123", "relay_from": "bot-agm"})
+
+    def test_pick_passes_role_and_exclude(self):
+        self.assertEqual(self.bad("mission", "pick", "m1")["error"], "bad_args")
+        FakeDaemon.routes["GET /api/missions/m1/pick"] = (200, {"pick": {"decision": "use", "identity": "cc1"}})
+        out = self.ok("mission", "pick", "m1", "--role", "reviewer", "--exclude", "cc2")
+        self.assertEqual(out["pick"]["identity"], "cc1")
+        path = [r["path"] for r in FakeDaemon.seen if r["path"].startswith("/api/missions/m1/pick")][0]
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(path).query), {"role": ["reviewer"], "exclude": ["cc2"]})
+
+    def test_deliver_needs_a_worktree(self):
+        self.assertEqual(self.bad("mission", "deliver", "m1")["error"], "bad_args")
+        FakeDaemon.routes["POST /api/missions/m1/deliver"] = (200, {"mode": "push_main", "sha": "abc"})
+        self.ok("mission", "deliver", "m1", "--worktree", "/tmp/wt", "--title", "修錯字")
+        body = self.posts("/api/missions/m1/deliver")[0]["body"]
+        self.assertEqual(body, {"worktree": "/tmp/wt", "title": "修錯字", "relay_from": "bot-agm"})
+
+    def test_deliver_failure_is_a_non_zero_structured_error(self):
+        FakeDaemon.routes["POST /api/missions/m1/deliver"] = (409, {"error": "conflict", "reason": "not_fast_forward"})
+        err = self.bad("mission", "deliver", "m1", "--worktree", "/tmp/wt")
+        self.assertEqual(err["detail"]["reason"], "not_fast_forward")
+
+
+class AssignMissionFlagsTest(CliCase):
+    def test_mission_and_role_go_into_the_body(self):
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1", "mission_id": "m1", "role": "executor"})
+        self.ok("assign", "--bot", "b1", "--text", "做 X", "--request-id", "r1", "--mission", "m1", "--role", "executor")
+        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
+        self.assertEqual(body["mission_id"], "m1")
+        self.assertEqual(body["role"], "executor")
+
+    def test_one_without_the_other_is_refused_before_sending(self):
+        self.assertEqual(self.bad("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--mission", "m1")["error"], "bad_args")
+        self.assertEqual(self.bad("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--role", "verifier")["error"], "bad_args")
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
+
+    def test_plain_assign_stays_unchanged(self):
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a2"})
+        self.ok("assign", "--bot", "b1", "--text", "做這個", "--request-id", "t-1")
+        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
+        self.assertNotIn("mission_id", body)
+        self.assertNotIn("role", body)
+
+
 class HelpTest(unittest.TestCase):
     def test_help_mentions_the_no_retry_rule(self):
         out = io.StringIO()
