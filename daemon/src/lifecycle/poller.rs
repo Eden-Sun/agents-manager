@@ -1758,6 +1758,42 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 
+    /// 記號寫不進 DB 就不要打字：打了卻沒記住，下一則與重啟後又會走回會吞訊息的那條路（第三輪 #2）。
+    #[tokio::test]
+    async fn nothing_is_typed_when_the_pane_typed_marker_cannot_be_stored() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        // 讓寫入失敗：把 runs 換成讀得到、寫不進去的檢視。
+        sqlx::query("ALTER TABLE runs RENAME TO runs_real").execute(&app.db).await.unwrap();
+        sqlx::query("CREATE VIEW runs AS SELECT * FROM runs_real").execute(&app.db).await.unwrap();
+
+        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.is_err());
+        assert_eq!(count(&f, "pane.send_text"), 0, "記不住就不要打");
+        assert_eq!(count(&f, "agent.prompt"), 0, "也不要退回會吞訊息的那條路");
+    }
+
+    /// 就算 DB 之後讀不出來，這次啟動內也不會忘記「這個 pane 要用打字的」。
+    #[tokio::test]
+    async fn the_in_process_memo_keeps_a_pane_on_the_typing_path() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        f.env.herdr.set_agent("issue-17", "pane-17", true);
+        let app = f.env.app.clone();
+        crate::lifecycle::remember_pane_typed(&f.run_id);
+        // DB 說「沒打過」，但行程內記得打過。
+        assert!(!db::pane_typed(&app.db, &f.run_id).await.unwrap());
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(count(&f, "agent.prompt"), 0);
+        assert_eq!(count(&f, "pane.send_text"), 1);
+    }
+
     /// 讀不到畫面是錯誤，不是空畫面；而且錯誤發生時不會亂打字。
     #[tokio::test]
     async fn a_screen_that_cannot_be_read_is_an_error_not_an_empty_screen() {

@@ -22,6 +22,21 @@ mod poller;
 mod screen;
 mod limit_banner;
 
+/// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
+/// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
+/// pane back to the herdr `agent.prompt` path that swallowed prompts (sol review round three #2).
+static PANE_TYPED_MEMO: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+pub(crate) fn remember_pane_typed(run_id: &str) {
+    if let Ok(mut set) = PANE_TYPED_MEMO.get_or_init(Default::default).lock() {
+        set.insert(run_id.to_string());
+    }
+}
+
+pub(crate) fn pane_typed_memo(run_id: &str) -> bool {
+    PANE_TYPED_MEMO.get_or_init(Default::default).lock().map(|s| s.contains(run_id)).unwrap_or(true)
+}
+
 pub(crate) use messages::*;
 pub(crate) use poller::*;
 pub(crate) use prompt::*;
