@@ -861,7 +861,9 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 ### 協調者（responder，SPEC §18.15）
 - `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,stats:{…}}`。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `missing`（登記過但那顆 bot 被刪了；事件仍留在它的佇列，另推一則 `responder_bot_missing` 給巡檢）。
-  `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。
+  `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。`model`／`effort` 是設定值，
+  `runtime{model,effort,started_at}` 是它現在實際跑的（`/model` 換過就會不一樣）。
+  `setup` 會驗 `model`（`[a-z0-9][a-z0-9._-]{0,39}`）與 `effort`（`config::normalize_effort`），不合格 400——這兩個值會直接變成 CLI 的 argv。
 - `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。自己的專案與 cwd `supervisor/AGM-responder`
   （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空（rc off）。身分不存在 409 `identity_missing`。
 - `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
@@ -900,10 +902,13 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
 ### 核准與租約（SPEC §18.10）
-- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,…}]}`。
+- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,decisions:[{from,to,actor,reason,at}],…}]}`。
+  `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
 - `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?}` → 一筆 `pending`，並推 inbox `approval_requested` 給 AGM。
-- `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`；只有 `pending` 能 approve。
-  條件寫入：讀到之後被別人（另一個 AGM 角色、UI）先決定了 → 409 `decided_concurrently`，什麼都沒寫。帶角色 bot token 時 `decided_by` 記 `AGM:patrol`／`AGM:responder`。
+- `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
+  **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
+  `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。
+  成功回 `decided_from` 與 `audit_note_id`；決定歷程 append-only 存在 `supervisor_notes`。帶角色 bot token 時 `decided_by` 記 `AGM:patrol`／`AGM:responder`。
   核准決定與租約續租共用 supervisor lock；核准紀錄遺失 409 `approval_missing`（不延長租約）。
 - `GET /api/supervisor/maintenance/safety?exclude=<id,id>` → `{safe,working,in_flight,unreadable,blocked_waiting_for_user,queued_assignments,checked_at,excluded_bot_ids}`。唯讀快照；`blocked` 只回報不阻擋。
   CLI `agm lease safety --exclude-bot <id>` 傳此查詢。
@@ -929,7 +934,8 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
   - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id（驗收角色是已建立的協調者時為協調者 id）；daemon 自己送給 AGM 的通知帶 `daemon`。
   - `review_role`：回報進哪個角色的 inbox。省略 = 呼叫的角色（`X-AM-Bot-Id`+`X-AM-Bot-Token` 驗證）；沒有角色 token = 協調者。followup 沿用。
   - **目標是另一個角色 bot** → 這是交接不是交辦：不建交辦列、不開回合，回 `{kind:"handover",routed,queued,duplicate,wake,inbox_event_id,delivery:"queued",turn_id:null}`（同下方 bot 申請的形狀）。對自己的角色 400。
-  - `source_turn_id` 可以是巡檢或協調者的回合。
+  - `source_turn_id` 只能是**呼叫的那個角色自己**的回合（帶 bot token 時）；沒帶 token 的呼叫端可以指兩個角色之一的回合。
+    省略時只認呼叫者自己在跑的回合，認不出呼叫者就記 `assignment_text_fallback`（不猜另一個角色的回合）。
 - `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
   帶角色 bot token 時 `actor` 以 token 為準（`AGM:<role>`）。
