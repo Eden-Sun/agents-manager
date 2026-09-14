@@ -68,11 +68,29 @@ am_agent_start() {
     _kind=""
     _has_model=0
     _has_effort=0
+    _reserved_done=0
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
         _i=$((_i + 1))
         _orig=$_a
+        # 保留變數（見 am_forward_with_env）：`--` 之前 herdr 自己的 `--env` 帶這兩個 key 的一律丟掉。
+        if [ "$_stop" = 0 ]; then
+            case "$_a" in
+                --env)
+                    if [ "$_i" -lt "$_n" ]; then
+                        case "$1" in
+                            AM_INSTANCE=* | AM_DATA_DIR=*)
+                                shift
+                                _i=$((_i + 1))
+                                continue
+                                ;;
+                        esac
+                    fi
+                    ;;
+                --env=AM_INSTANCE=* | --env=AM_DATA_DIR=*) continue ;;
+            esac
+        fi
         if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
         if [ "$_stop" = 1 ]; then
             # codex / grok spell it `-m`, codex also `-c model=…`: all of them are "the child
@@ -102,9 +120,23 @@ am_agent_start() {
                 --) _stop=1 ;;
             esac
         fi
+        # 母 pane 的值放在 `--` 之前（之後是 agent CLI 自己的參數）。
+        if [ "$_stop" = 1 ] && [ "$_reserved_done" = 0 ]; then
+            _reserved_done=1
+            for _k in AM_INSTANCE AM_DATA_DIR; do
+                eval "_v=\${$_k:-}"
+                [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
+            done
+        fi
         _prev=$_orig
         set -- "$@" "$_a"
     done
+    if [ "$_reserved_done" = 0 ]; then
+        for _k in AM_INSTANCE AM_DATA_DIR; do
+            eval "_v=\${$_k:-}"
+            [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
+        done
+    fi
     # 沒指定模型的子 agent 會跑 CLI 的預設（claude 現在是 fable），跟母 bot 明明選的 opus 對不上，
     # 側欄就多出一顆「claude-fable-5-1」看不懂的。母 bot 的模型／強度在 AM_MODEL / AM_EFFORT，
     # 同 kind 就補上；自己有寫 --model 的一律尊重。
@@ -157,8 +189,41 @@ am_agent_prompt() {
 # pane would come up on the user's default account, with no hook token and no way to name its
 # own children. Pass the parent's environment down explicitly, without overriding a value the
 # caller set by hand.
+#
+# 例外是 AM_INSTANCE、AM_DATA_DIR：它們決定 child 的 hook／spool 屬於哪顆 daemon，是保留變數。
+# 呼叫者自帶的 `--env KEY=…`／`--env=KEY=…` 一律剝掉，再照母 pane 的實際值補（母 pane 沒有就不帶）；
+# 否則 child 可以偽造隔離 slug 或清掉它，把 grok hook／spool 送進別的實例（sol 五輪）。
 am_forward_with_env() {
-    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_DATA_DIR AM_INSTANCE AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
+    _sub1=$1
+    _sub2=$2
+    shift 2
+    _n=$#
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _a=$1
+        shift
+        _i=$((_i + 1))
+        case "$_a" in
+            --env)
+                if [ "$_i" -lt "$_n" ]; then
+                    case "$1" in
+                        AM_INSTANCE=* | AM_DATA_DIR=*)
+                            shift
+                            _i=$((_i + 1))
+                            continue
+                            ;;
+                    esac
+                fi
+                ;;
+            --env=AM_INSTANCE=* | --env=AM_DATA_DIR=*) continue ;;
+        esac
+        set -- "$@" "$_a"
+    done
+    for _k in AM_INSTANCE AM_DATA_DIR; do
+        eval "_v=\${$_k:-}"
+        [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
+    done
+    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         case " $* " in
@@ -166,7 +231,7 @@ am_forward_with_env() {
         esac
         set -- "$@" --env "$_k=$_v"
     done
-    exec "$AM_HERDR" "$@"
+    exec "$AM_HERDR" "$_sub1" "$_sub2" "$@"
 }
 
 AM_HERDR=$(am_real_herdr | head -n 1)
@@ -266,7 +331,7 @@ mod tests {
             // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
             // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
             // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
-            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT"] {
+            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR"] {
                 cmd.env_remove(key);
             }
             for (k, v) in env {
@@ -428,6 +493,62 @@ mod tests {
         );
         assert_eq!(out.iter().filter(|a| a.starts_with("CLAUDE_CONFIG_DIR=")).count(), 1);
         assert!(out.contains(&"CLAUDE_CONFIG_DIR=/other".to_string()));
+    }
+
+    /// AM_INSTANCE／AM_DATA_DIR 是保留變數：呼叫者自帶的偽造值（兩種寫法）一律剝掉，只留母 pane 的值；
+    /// 母 pane 沒有（正式實例、遠端）就完全不帶（sol 五輪）。四條會建 pane 的路都驗。
+    #[test]
+    fn reserved_env_comes_only_from_the_parent_pane() {
+        let s = Sandbox::new();
+        let forged = ["--env", "AM_INSTANCE=forged", "--env=AM_DATA_DIR=/forged", "--env", "FOO=kept"];
+        let commands: [Vec<&str>; 4] = [
+            vec!["pane", "split", "--pane", "w1:p1", "--direction", "right"],
+            vec!["pane", "new", "--workspace", "w1"],
+            vec!["tab", "create", "--workspace", "w1"],
+            vec!["agent", "start", "review", "--kind", "claude"],
+        ];
+        let parents: [&[(&str, &str)]; 2] = [
+            &[("AM_AGENT_NAME", "p-1")],
+            &[("AM_AGENT_NAME", "p-1"), ("AM_INSTANCE", "a1b2"), ("AM_DATA_DIR", "/data/iso")],
+        ];
+        for parent in parents {
+            let iso = parent.iter().any(|(k, _)| *k == "AM_INSTANCE");
+            for cmd in &commands {
+                let mut args = cmd.clone();
+                args.extend(forged);
+                // agent start：`--` 之後是 agent CLI 自己的參數，不歸 shim 管。
+                if cmd[0] == "agent" {
+                    args.extend(["--", "--env", "AM_INSTANCE=agent-cli-own"]);
+                }
+                let (out, err) = s.run(parent, &args);
+                let case = format!("iso={iso} cmd={cmd:?} out={out:?} err={err}");
+                let head = out.iter().position(|a| a == "--").unwrap_or(out.len());
+                let herdr_args = &out[..head];
+                let values = |key: &str| -> Vec<String> {
+                    herdr_args
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, a)| {
+                            let v = a.strip_prefix("--env=").map(String::from).or_else(|| {
+                                (i > 0 && herdr_args[i - 1] == "--env").then(|| a.clone())
+                            })?;
+                            v.strip_prefix(&format!("{key}=")).map(String::from)
+                        })
+                        .collect()
+                };
+                let want_instance: Vec<String> = if iso { vec!["a1b2".into()] } else { vec![] };
+                let want_dir: Vec<String> = if iso { vec!["/data/iso".into()] } else { vec![] };
+                assert_eq!(values("AM_INSTANCE"), want_instance, "{case}");
+                assert_eq!(values("AM_DATA_DIR"), want_dir, "{case}");
+                assert!(!out.iter().any(|a| a.contains("forged")), "{case}");
+                assert_eq!(values("FOO"), vec!["kept".to_string()], "其他 --env 照舊：{case}");
+                if cmd[0] == "agent" {
+                    assert_eq!(&out[head..], ["--", "--env", "AM_INSTANCE=agent-cli-own"], "{case}");
+                } else {
+                    assert_eq!(&out[..cmd.len()], cmd.as_slice(), "子命令與原參數順序不變：{case}");
+                }
+            }
+        }
     }
 
     #[test]

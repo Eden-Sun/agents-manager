@@ -639,13 +639,9 @@ async fn patch_project(
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
     // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
-    let mut ids: Vec<String> =
+    let ids: Vec<String> =
         db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).map(|b| b.id).collect();
-    ids.sort();
-    let mut guards = Vec::with_capacity(ids.len());
-    for bot_id in &ids {
-        guards.push(app.bot_lock(bot_id).await.lock_owned().await);
-    }
+    let (ids, guards) = lock_bots_in_order(&app, ids).await;
     for bot_id in &ids {
         if db::active_run(&app.db, bot_id).await.map_err(any_err)?.is_some() {
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": bot_id})));
@@ -1092,17 +1088,33 @@ async fn patch_bot(
 }
 
 pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 整個刪除都拿著這顆 bot 的 per-bot 鎖：start 要同一把，等它拿到時 bot 已經刪了（NotFound），
-    // 不會在「定案」和「停機」之間插進來重開一個 run。
-    let lock = app.bot_lock(&id).await;
-    let _g = lock.lock().await;
+    // 整個刪除都拿著這顆 bot 與它所有 child 的 per-bot 鎖：start 要同一把，等它拿到時 bot 已經刪了
+    // （NotFound），不會在「定案」和「停機」之間插進來重開一個 run。
+    // 鎖要跟 delete_project 一樣**依 id 排序一次拿齊**：先拿 parent、之後再逐顆拿 child 的話，child id
+    // 排在 parent 前面時會跟 delete_project 互等成死鎖（ULID 不保證 parent 比較小；sol 五輪）。
+    // 2026-09-08: spawned children go with it, else they're sidebar orphans. Deepest first.
+    let mut attempt = 0;
+    let (children, _guards) = loop {
+        let before: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?;
+        let ids = std::iter::once(id.clone()).chain(before.iter().map(|c| c.id.clone())).collect();
+        let (_, guards) = lock_bots_in_order(&app, ids).await;
+        // 拿鎖的途中又認領了新的 child：它沒被鎖住，放掉重來（不能在持鎖時再補拿，那就又亂了順序）。
+        let now: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?;
+        if now.iter().map(|c| &c.id).eq(before.iter().map(|c| &c.id)) {
+            break (now, guards);
+        }
+        drop(guards);
+        attempt += 1;
+        if attempt >= 3 {
+            return Err(LcError::conflict("children_changed", json!({"bot_id": id})));
+        }
+    };
+    let children: Vec<db::Bot> = children.into_iter().rev().collect();
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
-    // 2026-09-08: spawned children go with it, else they're sidebar orphans. Deepest first.
-    let children: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev().collect();
     // 先定案、再停機（sol 四輪）：會 409 的只有這一步，這時什麼都還沒停；定案之後沒有會失敗回頭的步驟，
     // 所以不會留下「已停、未刪」。（child 由母 agent 開，daemon 本來就重開不了它，事後回滾做不到。）
     if bot.managed_by == "child" {
@@ -1112,7 +1124,7 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     }
     let mut removed_children = Vec::new();
     for child in children {
-        stop_for_delete(&app, &child.id).await;
+        stop_for_delete_locked(&app, &child.id).await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&child.id)
@@ -1124,7 +1136,7 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         app.emit("bot_changed", json!({"bot_id": child.id})).await;
         removed_children.push(child.id);
     }
-    // 已經拿著鎖：用 locked 版停自己（stop_bot 會再拿同一把而卡死）。
+    // 已經拿著全部的鎖：一律用 locked 版（stop_bot 會再拿同一把而卡死）。
     stop_for_delete_locked(&app, &id).await;
     // Soft delete; the conversation and its messages stay.
     lifecycle::purge_bot_dir(&app, &id, &host).await;
@@ -1137,10 +1149,19 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
 
 /// If the host is down the stop fails; end the run anyway, else no reconcile ever ends it and
 /// `purge_deleted_bot_dirs` waits forever (review 2026-09-12 d). The orphan-pane sweep reclaims the pane later.
-async fn stop_for_delete(app: &Arc<App>, bot_id: &str) {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
-    stop_for_delete_locked(app, bot_id).await;
+/// 多顆 bot 的 per-bot 鎖一律**依 id 排序、一次拿齊**（刪除是唯一會同時持多把的路徑；其他路徑一次只拿一把）。
+/// 回傳排序去重後的 id 與鎖。
+async fn lock_bots_in_order(
+    app: &Arc<App>,
+    mut ids: Vec<String>,
+) -> (Vec<String>, Vec<tokio::sync::OwnedMutexGuard<()>>) {
+    ids.sort();
+    ids.dedup();
+    let mut guards = Vec::with_capacity(ids.len());
+    for bot_id in &ids {
+        guards.push(app.bot_lock(bot_id).await.lock_owned().await);
+    }
+    (ids, guards)
 }
 
 async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) {
@@ -2474,6 +2495,59 @@ mod delete_bot_tests {
             assert!(!(bot_gone && running), "round {round}: 刪掉了正在跑的 bot（started={started} deleted={deleted:?}）");
             assert_eq!(started, running, "round {round}");
             assert_eq!(deleted.is_ok(), bot_gone, "round {round}: {deleted:?}");
+        }
+    }
+
+    /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
+    /// delete_project 依序先持 child 再等 parent → 互等。現在兩邊都依 id 排序一次拿齊，必須在時限內都結束。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn project_delete_and_parent_delete_never_deadlock() {
+        for round in 0..10 {
+            let e = crate::testing::env().await;
+            let app = e.app.clone();
+            let parent = format!("zz-parent-{round}");
+            let child = format!("aa-child-{round}");
+            for (bot_id, name, managed_by) in [(&parent, "alfa", "user"), (&child, "alfa-kid", "child")] {
+                sqlx::query(
+                    "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+                     VALUES (?,?,?,'claude','[]',0,1,'tok',?,?)",
+                )
+                .bind(bot_id)
+                .bind(&e.project_id)
+                .bind(name)
+                .bind(managed_by)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            }
+            sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&parent).bind(&child).execute(&app.db).await.unwrap();
+            assert!(child < parent, "這條測試要 child 排在前面");
+            in_config(&e, &[(&parent, "alfa")]).await;
+
+            let gate = Arc::new(tokio::sync::Barrier::new(2));
+            let by_bot = tokio::spawn({
+                let (app, parent, gate) = (app.clone(), parent.clone(), gate.clone());
+                async move {
+                    gate.wait().await;
+                    delete_bot(State(app), Path(parent)).await.map(|_| ()).map_err(reason)
+                }
+            });
+            let by_project = tokio::spawn({
+                let (app, pid, gate) = (app.clone(), e.project_id.clone(), gate.clone());
+                async move {
+                    gate.wait().await;
+                    delete_project(State(app), Path(pid)).await.map(|_| ()).map_err(reason)
+                }
+            });
+            let both = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                (by_bot.await.unwrap(), by_project.await.unwrap())
+            })
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: delete_bot 與 delete_project 互等卡死"));
+            // 至少有一邊成功，parent 一定刪掉了；另一邊看到的是「已經不在」而不是卡住。
+            assert!(both.0.is_ok() || both.1.is_ok(), "round {round}: {both:?}");
+            assert!(db::bot(&app.db, &parent).await.unwrap().unwrap().deleted_at.is_some(), "round {round}");
         }
     }
 
