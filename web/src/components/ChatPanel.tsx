@@ -35,6 +35,7 @@ import { KindIcon, KindTag } from './KindTag'
 import { Modal } from './Modal'
 import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
+import { trimClippedTail } from '../lib/statusLineTail'
 import { quotedFrom } from '../lib/agmQuote'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
@@ -970,7 +971,8 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
     if (!line) return null
     return (
       <div className="statusline-bar" role="status" title={line}>
-        <span className="statusline-text mono">{line}</span>
+        {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
+        <span className="statusline-text mono">{trimClippedTail(line)}</span>
       </div>
     )
   }
