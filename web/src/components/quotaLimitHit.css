@@ -54,3 +54,21 @@
   color: var(--text-faint);
   font-weight: 400;
 }
+
+/* 歸零且三小時內重置的那一格：寫出重置時刻與倒數（2026-09-14 使用者）。數字用等寬，
+   每分鐘跳一次時不會左右抖動；顏色跟「用完了」一致，不另開一種語意。 */
+.quota-reset-at {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  flex: none;
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quota-reset-left {
+  color: var(--text-faint);
+}

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
@@ -9,6 +10,7 @@ import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
+import { resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 
@@ -302,12 +304,15 @@ function Bar({
   critical,
   mark,
   markTitle,
+  instead,
 }: {
   pct: number | null
   low: boolean
   critical: boolean
   mark: number | null
   markTitle?: string
+  /** 用完的那條：把右邊那個不會再動的「0」換成重置時刻與倒數（2026-09-14 使用者）。 */
+  instead?: ReactNode
 }) {
   const lv = levelOf({ low, critical })
   return (
@@ -318,10 +323,13 @@ function Bar({
         </span>
         {mark !== null ? <span className="quota-bar-mark" style={{ left: `${mark}%` }} title={markTitle} /> : null}
       </span>
-      {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。 */}
-      <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
-        {pct === null ? '—' : fmtPct(pct)}
-      </span>
+      {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。歸零那條例外：
+          0 不會再變，換成「幾點回來 · 還有多久」才是這時唯一還在動的數字。 */}
+      {instead ?? (
+        <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
+          {pct === null ? '—' : fmtPct(pct)}
+        </span>
+      )}
     </span>
   )
 }
@@ -506,10 +514,19 @@ function Gauge({
         <span className="quota-compact">
           {windows.map((w) => {
             const soon = soonLabel(w.name, w.resetsAt, now)
+            // 歸零且三小時內就回來：把用不到的「0%」換成重置時刻與倒數（2026-09-14 使用者）。
+            const back = resetBadge(w.pct, w.resetsAt, now)
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
-              <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
+              {back ? (
+                <span className="quota-reset-at" title={`用完了，${back.at} 重置（還有 ${back.left}）`}>
+                  ↻{back.at}
+                  <span className="quota-reset-left">{back.left}</span>
+                </span>
+              ) : (
+                <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
+              )}
             </span>
             )
           })}
@@ -521,6 +538,7 @@ function Gauge({
           const mark = resetMark(w.resetsAt, span, now)
           const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
           const soon = soonLabel(w.name, w.resetsAt, now)
+          const back = resetBadge(w.pct, w.resetsAt, now)
           return (
             <span key={w.name} className="quota-window">
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
@@ -532,6 +550,14 @@ function Gauge({
                 critical={w.critical}
                 mark={mark}
                 markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
+                instead={
+                  back ? (
+                    <span className="quota-reset-at" title={`用完了，${back.at} 重置（還有 ${back.left}）`}>
+                      ↻{back.at}
+                      <span className="quota-reset-left">{back.left}</span>
+                    </span>
+                  ) : undefined
+                }
               />
             </span>
           )
