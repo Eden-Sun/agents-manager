@@ -236,7 +236,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return r ? r.state !== 'stopped' && r.state !== 'exited' : false
   })
   const cardRef = useRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null)
   useLayoutEffect(() => {
     const el = cardRef.current
     if (!el || !anchor) {
@@ -257,7 +257,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       )
       const minTop = Math.max(margin, headBottom + gap)
       const top = Math.min(Math.max(minTop, anchor.top - gap), Math.max(minTop, window.innerHeight - h - margin))
-      setPos({ left, top })
+      // 上緣被推到標題列底下之後，高度上限要跟著扣掉那一段——以前一律是 `100vh - 24px`，卡片一高，
+      // 底下的「關閉／儲存」就被推出視窗外（2026-09-14 使用者）。內文自己捲，標題與按鈕列固定。
+      setPos({ left, top, maxHeight: Math.max(240, window.innerHeight - top - margin) })
     }
     place()
     window.addEventListener('resize', place)
@@ -385,7 +387,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     <div
       ref={cardRef}
       className={`bot-settings${pos ? ' anchored' : ''}${anchor && !pos ? ' measuring' : ''}`}
-      style={pos ? { left: pos.left, top: pos.top } : undefined}
+      style={pos ? { left: pos.left, top: pos.top, maxHeight: pos.maxHeight } : undefined}
       role="dialog"
       aria-modal={phone ? 'true' : undefined}
       aria-label={`${bot.name} 的設定`}
