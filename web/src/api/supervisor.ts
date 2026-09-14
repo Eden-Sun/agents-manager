@@ -61,6 +61,8 @@ export interface SupervisorResponder {
   quota_reset_at: string | null
   inbox_open: number
   stats: SupervisorRoleStats
+  /** 它**現在實際**跑在什麼上面（`/model` 換過就會跟設定值不一樣）。沒在跑就都是 null。 */
+  runtime: { model: string | null; effort: string | null }
 }
 
 /**
@@ -231,6 +233,10 @@ export function toResponder(v: unknown): SupervisorResponder {
     quota_reset_at: typeof o.quota_reset_at === 'string' ? o.quota_reset_at : null,
     inbox_open: n(o.inbox_open),
     stats: toStats(o.stats),
+    runtime: {
+      model: isRec(o.runtime) && typeof o.runtime.model === 'string' ? o.runtime.model : null,
+      effort: isRec(o.runtime) && typeof o.runtime.effort === 'string' ? o.runtime.effort : null,
+    },
   }
 }
 
