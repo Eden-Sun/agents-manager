@@ -828,3 +828,13 @@
   white-space: nowrap;
   color: var(--text-faint);
 }
+
+/*
+ * 額度格的提示被下面那排晶片蓋住（2026-09-14 使用者截圖）。停用方塊的提示往下開（標題列貼著視窗上緣），
+ * 而 `.unread-bar-wrap` 是 `position: relative`、DOM 又排在標題列後面，於是整條晶片列畫在提示上面。
+ * 標題列自己開一個比它高的疊層；標題列裡其他往下開的東西（額度明細、模型選單）也一併不再被晶片列蓋住。
+ */
+.main-head {
+  position: relative;
+  z-index: 4;
+}
