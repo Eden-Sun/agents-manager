@@ -79,6 +79,9 @@ const TYPE_SETTLE_MS: u64 = 700;
 const SUBMIT_SETTLE_MS: u64 = 1200;
 const SUBMIT_CHECKS: u32 = 3;
 const DELIVER_SCAN_LINES: u32 = 400;
+/// The `pane.read` source for delivery scans. herdr only knows `visible | recent | recent_unwrapped |
+/// detection` — the hyphenated spelling is an `invalid_request` (4713c5c P0).
+pub(crate) const SCAN_SOURCE: &str = "recent_unwrapped";
 /// Longest prompt the daemon will type and try to prove.
 pub(crate) const MAX_PROVABLE_CHARS: usize = 200_000;
 /// Columns kept free at the right edge when deciding a prompt fits on one row: the TUI's own
@@ -560,7 +563,7 @@ pub(crate) fn should_warn_plain_for_ansi(pane: &str) -> bool {
 /// Read the pane for the composer checks: styled when herdr can, plain when it cannot. A plain
 /// read is the fail-closed fallback — no dim flags, so a placeholder simply reads as `NonEmpty`.
 async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<String> {
-    match client.pane_read_ansi(pane, "recent-unwrapped", DELIVER_SCAN_LINES).await {
+    match client.pane_read_ansi(pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await {
         Ok(r) => {
             // A herdr that ignores the parameter answers `format: text`: the read is still usable
             // (placeholders just read as busy), but say so, or the downgrade is invisible.
@@ -573,7 +576,7 @@ async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<Strin
             if should_warn_plain_for_ansi(pane) {
                 tracing::warn!(pane, error = %e, "herdr has no styled pane.read; using the plain read");
             }
-            Ok(client.pane_read(pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text)
+            Ok(client.pane_read(pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?.text)
         }
         Err(e) => Err(e),
     }
@@ -814,6 +817,24 @@ pub(crate) async fn deliver_prompt(
 
 #[cfg(test)]
 mod tests {
+    /// 送達掃描用的 source 必須是 herdr 認得的；本機有 herdr socket 與 pane 時，直接丟給真 herdr 的 RPC
+    /// （CLI 的 clap 連字號也收，所以只有 socket 能證明）。
+    #[test]
+    fn the_scan_source_is_one_real_herdr_accepts() {
+        assert!(["visible", "recent", "recent_unwrapped", "detection"].contains(&SCAN_SOURCE));
+        let (Ok(sock), Ok(pane)) = (std::env::var("HERDR_SOCKET_PATH"), std::env::var("HERDR_PANE_ID")) else { return };
+        use std::io::{BufRead, Write};
+        let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock) else { return };
+        let req = json!({"id": "scan-source", "method": "pane.read",
+            "params": {"pane_id": pane, "source": SCAN_SOURCE, "lines": 1, "format": "ansi"}});
+        stream.write_all(format!("{req}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream).read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert!(v.get("error").is_none(), "real herdr rejected source {SCAN_SOURCE}: {v}");
+        assert!(v.get("result").is_some(), "{v}");
+    }
+
     use super::*;
 
     const RULE: &str = "─────────────────────────────────────────────";
