@@ -1308,8 +1308,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null}
         </div>
       </div>
-      <UnreadChip />
+      {/* 識別列緊貼它的開關所在的標題列，排在主力／晶片列之上（2026-09-14 使用者）：展開的東西要出現在
+          按下去的地方旁邊，不是隔一整排晶片。 */}
       {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
+      <UnreadChip />
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
       {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}
       <ContextBar
