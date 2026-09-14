@@ -5,9 +5,9 @@ import { resetBadge } from './quotaReset.ts'
 const at = (h: number, m: number) => new Date(2026, 8, 14, h, m, 0).toISOString()
 const now = new Date(2026, 8, 14, 0, 44, 0).getTime()
 
-test('歸零且三小時內重置：寫出時刻與倒數', () => {
-  assert.deepEqual(resetBadge(0, at(3, 25), now), { at: '3:25', left: '2h41m' })
-  assert.deepEqual(resetBadge(0, at(0, 56), now), { at: '0:56', left: '12m' })
+test('歸零且三小時內重置：只寫倒數（使用者 2026-09-14：不要重置時刻）', () => {
+  assert.equal(resetBadge(0, at(3, 25), now), '2h41m')
+  assert.equal(resetBadge(0, at(0, 56), now), '12m')
 })
 
 test('還有額度就不寫——那時候要看的是還剩多少', () => {

@@ -520,9 +520,8 @@ function Gauge({
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
               {back ? (
-                <span className="quota-reset-at" title={`用完了，${back.at} 重置（還有 ${back.left}）`}>
-                  ↻{back.at}
-                  <span className="quota-reset-left">{back.left}</span>
+                <span className="quota-reset-at" title={`用完了，還有 ${back} 重置`}>
+                  ↻{back}
                 </span>
               ) : (
                 <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
@@ -552,9 +551,8 @@ function Gauge({
                 markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
                 instead={
                   back ? (
-                    <span className="quota-reset-at" title={`用完了，${back.at} 重置（還有 ${back.left}）`}>
-                      ↻{back.at}
-                      <span className="quota-reset-left">{back.left}</span>
+                    <span className="quota-reset-at" title={`用完了，還有 ${back} 重置`}>
+                      ↻{back}
                     </span>
                   ) : undefined
                 }
