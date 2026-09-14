@@ -44,6 +44,54 @@ LOCK="$DIR/daemon-update.lock"
 mkdir "$LOCK" 2>/dev/null || { log "更新檢查已有執行者或殘留鎖，交 AGM 檢查"; exit 0; }
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 log "== check"
+
+# 觸發條件有兩個（使用者 2026-09-14）：整點的例行檢查，或**累積夠多重建申請**。
+# launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；門檻 `AGM_REBUILD_THRESHOLD`（預設 5）。
+# 請求＝上次真的上線（`daemon-update.built` 的 mtime）之後建立、還沒被否決的 rebuild 核准申請，
+# 同一個 requester 對同一個 commit 只算一筆。數不出來就當 0，也就是退回純整點的舊行為。
+THRESHOLD=${AGM_REBUILD_THRESHOLD:-5}
+MINUTE=$(( 10#${AGM_TEST_MINUTE:-$(date +%M)} ))   # AGM_TEST_MINUTE 只給隔離測試用
+REQUESTS=$("$AGM" --compact approval list 2>/dev/null | BUILT_FILE="$BUILT" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+try:
+    rows = json.load(sys.stdin)["approvals"]
+except Exception:
+    sys.exit(1)
+if not isinstance(rows, list):
+    sys.exit(1)
+since = 0.0
+try:
+    since = os.path.getmtime(os.environ["BUILT_FILE"])
+except OSError:
+    pass
+def created(row):
+    s = str(row.get("created_at") or "").replace("Z", "+00:00")
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.timestamp()
+seen = set()
+for r in rows:
+    if not isinstance(r, dict) or r.get("purpose") != "rebuild":
+        continue
+    if r.get("status") not in ("pending", "approved"):
+        continue
+    at = created(r)
+    if at is None or at <= since:
+        continue
+    seen.add((str(r.get("requester") or ""), str(r.get("target_commit") or "")))
+print(len(seen))
+' 2>/dev/null) || REQUESTS=""
+case "$REQUESTS" in ''|*[!0-9]*) log "讀不到重建申請數，當 0"; REQUESTS=0 ;; esac
+if [ "$REQUESTS" -ge "$THRESHOLD" ]; then
+  log "重建申請 ${REQUESTS}/${THRESHOLD}，不等整點"
+elif [ "$MINUTE" -ge 5 ]; then
+  log "非整點且重建申請只有 ${REQUESTS}/${THRESHOLD}，這輪不檢查"; exit 0
+fi
 "$GIT" -C "$REPO" fetch -q origin main 2>>"$LOG" || log "fetch 失敗，用本地 origin/main"
 HEAD_SHA=$("$GIT" -C "$REPO" rev-parse origin/main) || { log "無法讀取 origin/main，跳過"; exit 0; }
 

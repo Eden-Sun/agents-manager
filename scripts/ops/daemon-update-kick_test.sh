@@ -15,6 +15,7 @@ FAIL=0
 setup() {
   ROOT=$(mktemp -d)
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_BUILD_BOT="bot-build" AM_AGENT_NAME="test-owner"
+  export AGM_TEST_MINUTE="00"   # 預設當成整點那一輪；門檻的 case 自己覆寫
   mkdir -p "$AGM_DIR/bin"
   printf '%s' '{"manager_bot_id":"bot-manager","bot_id":"legacy-not-manager"}' > "$AGM_DIR/runtime.json"
   # 一個有 origin/main 的最小 repo。
@@ -59,7 +60,7 @@ STUB
   export STUB_ASSIGN_FAIL=""
 }
 
-teardown() { rm -rf "$ROOT"; unset AGM_BUILD_BOT; }
+teardown() { rm -rf "$ROOT"; unset AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD; }
 
 check() { # check <描述> <要出現的字串> <檔案>
   if grep -q -- "$2" "$3" 2>/dev/null; then
@@ -278,5 +279,61 @@ check_no "舊端點沒有回排除名單時不取租約" "lease acquire" "$AGM_D
 teardown
 
 echo "----"
+# 8. 非整點又沒有累積夠的重建申請：整輪跳過，連 fetch 之後的判斷都不做（使用者 2026-09-14）。
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST='{"approvals":[]}'
+bash "$SCRIPT"
+check "非整點且請求不足就不檢查" "非整點且重建申請只有 0/5" "$AGM_DIR/daemon-update.log"
+check_no "不會申請核准" "approval request" "$AGM_DIR/calls.log"
+check_no "不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 9. 非整點但申請集滿門檻：照樣走完整流程。
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"ap-1","status":"approved"},
+  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a2","purpose":"rebuild","status":"approved","requester":"bot-2","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a3","purpose":"rebuild","status":"pending","requester":"bot-3","target_commit":"c2","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a4","purpose":"rebuild","status":"pending","requester":"bot-4","target_commit":"c2","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a5","purpose":"rebuild","status":"pending","requester":"bot-4","target_commit":"c2","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a6","purpose":"rebuild","status":"pending","requester":"bot-5","target_commit":"c3","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a7","purpose":"restart","status":"pending","requester":"bot-9","target_commit":"c9","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a8","purpose":"rebuild","status":"denied","requester":"bot-8","target_commit":"c8","created_at":"2099-01-01T00:00:00.000Z"}
+]}'
+bash "$SCRIPT"
+check "集滿門檻就不等整點" "重建申請 5/5，不等整點" "$AGM_DIR/daemon-update.log"
+check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 10. 門檻可調：AGM_REBUILD_THRESHOLD=2 時兩筆就夠。
+setup
+export AGM_TEST_MINUTE="37" AGM_REBUILD_THRESHOLD=2
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"ap-1","status":"approved"},
+  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a2","purpose":"rebuild","status":"pending","requester":"bot-2","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"}
+]}'
+bash "$SCRIPT"
+check "門檻可以調小" "重建申請 2/2，不等整點" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 11. 上次上線之後才算：built 之前建立的申請不列入。
+setup
+export AGM_TEST_MINUTE="37"
+printf '%s' "$(cd "$AGM_REPO" && /usr/bin/git rev-parse --short HEAD)x" > "$AGM_DIR/daemon-update.built"
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"a2","purpose":"rebuild","status":"pending","requester":"bot-2","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"a3","purpose":"rebuild","status":"pending","requester":"bot-3","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"a4","purpose":"rebuild","status":"pending","requester":"bot-4","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"a5","purpose":"rebuild","status":"pending","requester":"bot-5","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
+]}'
+bash "$SCRIPT"
+check "上次上線之前的申請不算" "非整點且重建申請只有 0/5" "$AGM_DIR/daemon-update.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
