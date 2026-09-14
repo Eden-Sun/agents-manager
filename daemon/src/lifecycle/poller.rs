@@ -1721,7 +1721,7 @@ mod issue_17_tests {
     #[tokio::test]
     async fn a_prompt_with_no_lossless_proof_is_typed_once_and_unverified() {
         let f = fixture("grok", "").await;
-        live(&f, wide());
+        live(&f, crate::testing::LivePane { boxed: true, ..wide() });
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
@@ -1738,7 +1738,7 @@ mod issue_17_tests {
     #[tokio::test]
     async fn an_unverified_turn_is_never_resent() {
         let f = fixture("grok", "").await;
-        live(&f, wide());
+        live(&f, crate::testing::LivePane { boxed: true, ..wide() });
         let app = f.env.app.clone();
         sqlx::query("UPDATE turns SET delivery_verified = 0 WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
         let sent = vec!["Reply with PONG".to_string()];
@@ -2034,6 +2034,19 @@ mod lost_prompt_tests {
 
     fn sent(s: &str) -> Vec<String> {
         vec![s.to_string()]
+    }
+
+    /// claude 現行框（兩條全寬框線夾著 `❯`）與它的 `Try "…"` 佔位字：都是空框（sol 第八輪 #2）。
+    #[test]
+    fn the_current_claude_frame_and_its_placeholder_are_empty() {
+        use crate::lifecycle::{box_state, BoxState};
+        assert_eq!(box_state("claude", EFFORT_MAX_LOST), BoxState::Empty, "w1HJ:pH 的真實空框");
+        let placeholder = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ Try \"refactor <filepath>\"\n", 1);
+        assert_eq!(box_state("claude", &placeholder), BoxState::Empty);
+        let typed = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ Try \"refactor\" please\n", 1);
+        assert_eq!(box_state("claude", &typed), BoxState::NonEmpty);
+        let one_space = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯  \n", 1);
+        assert_eq!(box_state("claude", &one_space), BoxState::NonEmpty, "使用者真的打了一格");
     }
 
     #[test]

@@ -61,6 +61,8 @@ pub struct LivePane {
     pub transcript_file: Option<std::path::PathBuf>,
     /// Columns `pane.layout` reports for this pane; `None` answers like herdr without a layout.
     pub width: Option<u32>,
+    /// Draw grok's boxed composer (`│ ❯ … │` over `╰── Grok 4.6 (low) ─╯`) instead of claude's.
+    pub boxed: bool,
 }
 
 impl LivePane {
@@ -71,6 +73,20 @@ impl LivePane {
             out.push('\n');
         }
         out.push_str(&format!("✻ Crunching… ({}s · esc to interrupt)\n", self.reads));
+        if self.boxed {
+            out.push_str("  ╭──────────────────────────────────────────╮\n");
+            match self.composer.split_first() {
+                None => out.push_str("  │ ❯                                        │\n"),
+                Some((first, rest)) => {
+                    out.push_str(&format!("  │ ❯ {first:<40} │\n"));
+                    for r in rest {
+                        out.push_str(&format!("  │   {r:<40} │\n"));
+                    }
+                }
+            }
+            out.push_str("  ╰──────────────── Grok 4.6 (low) · always-approve ─╯\n");
+            return out;
+        }
         out.push_str("─────────────────────────────────────────────\n");
         match self.composer.split_first() {
             None => out.push_str("❯\n"),

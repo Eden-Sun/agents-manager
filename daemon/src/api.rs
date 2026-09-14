@@ -31,6 +31,7 @@ impl IntoResponse for LcError {
             LcError::Conflict(v) => (StatusCode::CONFLICT, Json(v)).into_response(),
             LcError::Bad(m) => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "message": m}))).into_response(),
             LcError::BadValue(v) => (StatusCode::BAD_REQUEST, Json(v)).into_response(),
+            LcError::Unprocessable(v) => (StatusCode::UNPROCESSABLE_ENTITY, Json(v)).into_response(),
             LcError::Upstream(m) => {
                 (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream", "message": m}))).into_response()
             }
@@ -2732,5 +2733,68 @@ mod attachment_tests {
             status(upload_attachment(State(e.app.clone()), Path(bot_id), query, HeaderMap::new(), Bytes::from_static(b"# hi")).await).await,
             StatusCode::OK
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_route_tests {
+    //! Through the real `prompt_bot` handler and `IntoResponse`: the status codes the API documents.
+    use super::*;
+
+    async fn typed_bot(e: &crate::testing::Env, kind: &str) -> String {
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "route-bot").await;
+        sqlx::query("UPDATE bots SET kind = ? WHERE id = ?").bind(kind).bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-route','route-bot','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        bot.id
+    }
+
+    async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None };
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
+            Ok(r) => r,
+            Err(err) => err.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// 不可能照原樣送出的 prompt 是真的 HTTP 422，body 說清楚原因（sol 第八輪 #1）。
+    #[tokio::test]
+    async fn an_unsendable_prompt_is_http_422_with_a_machine_readable_body() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        let (status, body) = call(&e, &bot, "x".repeat(crate::lifecycle::MAX_PROVABLE_CHARS + 1), "route-422").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "delivery_unprovable");
+        assert_eq!(body["reason"], "prompt_too_long_to_prove");
+        assert_eq!(body["sent"], false);
+    }
+
+    /// 輸入框有字是 HTTP 409、可重試，沒有建立 turn。
+    #[tokio::test]
+    async fn a_busy_composer_is_http_409_and_retryable() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        e.herdr.live_pane(
+            "pane-route",
+            crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
+        );
+        let (status, body) = call(&e, &bot, "Reply with PONG".into(), "route-409").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["reason"], "composer_busy");
+        assert_eq!(body["retryable"], true);
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(turns, 0);
     }
 }

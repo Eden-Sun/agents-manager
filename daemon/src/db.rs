@@ -164,6 +164,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // predates this state and cannot be widened without rebuilding the table — and this column
         // carries the "check it by hand" mark to the API, the UI and the supervisor.
         ("turns", "delivery_verified", "ALTER TABLE turns ADD COLUMN delivery_verified INTEGER NOT NULL DEFAULT 1"),
+        // A queued prompt that could not be typed yet (busy box, transcript not reported): how many
+        // times it has been put back, and not before when it is tried again. Persisted so the
+        // backoff and its limit survive a restart and cannot be reset by extra wake-ups.
+        ("turns", "flush_retries", "ALTER TABLE turns ADD COLUMN flush_retries INTEGER NOT NULL DEFAULT 0"),
+        ("turns", "next_flush_at", "ALTER TABLE turns ADD COLUMN next_flush_at TEXT"),
     ] {
         if !has_column(pool, table, col).await? {
             sqlx::query(ddl).execute(pool).await.with_context(|| format!("add {table}.{col}"))?;
@@ -334,6 +339,14 @@ pub struct Turn {
     /// 0 = delivered without lossless evidence ("unverified"); see the migration note.
     #[sqlx(default)]
     pub delivery_verified: i64,
+    /// Times a queued prompt was put back because it could not be typed yet.
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub flush_retries: i64,
+    /// Not before this (RFC 3339) is that queued prompt tried again.
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub next_flush_at: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

@@ -193,7 +193,10 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 沒有無損證據可用的 run（grok、遠端主機、codex 還沒回報 session 的多行 prompt…，矩陣見 SPEC §4.4a）**照樣送出**，回
 `200 {"delivery":"unverified"}`：已打字、框收下並在 Enter 後清空，但無法逐字核對。turn JSON 帶 `delivery:"ok"` 與
 `delivery_verified:0`，UI 標「未驗證送達」；它不會被自動重送。按過鍵、該有證據卻證明不了，才是 `200 {"delivery":"unknown"}`。
-排隊中的 prompt 遇到 409 類原因放回 `queued` 並在 15 秒後重試；422 類原因直接把 turn 標成 failed 並插 system 訊息說明。
+排隊中的 prompt 遇到 409 類原因放回 `queued`，以 15 秒起、每次加倍、上限 5 分鐘的退避重試（每顆 bot 同時只有一個重試
+timer；次數與下次時間存在 turn 上，重啟與其他喚醒都不會提前花掉額度），放回 12 次仍送不出就標 failed 並插 system 訊息；
+422 類原因直接標 failed 並插 system 訊息（狀態與說明同一個 transaction）。規劃後、打字前才發現送不出而剛建的 turn 收不回來時，
+回 502（不是 409），避免以同一個 request id 重送卻只拿到 failed turn。
 
 ## 6. 讀訊息
 

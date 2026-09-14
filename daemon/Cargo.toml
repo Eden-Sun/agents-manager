@@ -34,3 +34,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 # flock(2)：同一個資料目錄只准一顆 daemon（startup.rs）
 libc = "0.2"
+
+[dev-dependencies]
+# paused Tokio time for timer tests (lifecycle/queue.rs): same tokio crate, test builds only.
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -73,13 +73,13 @@ pub(crate) fn not_attempted_error(run_id: &str, not: Delivered) -> LcError {
     if retry {
         LcError::conflict(reason, detail)
     } else {
-        LcError::BadValue(json!({"error": "delivery_unprovable", "reason": reason, "run_id": run_id, "sent": false}))
+        LcError::Unprocessable(json!({"error": "delivery_unprovable", "reason": reason, "run_id": run_id, "sent": false}))
     }
 }
 
 /// Remove a turn and its user message that never reached the agent. They were committed before the
 /// delivery so an early hook could match; nothing was typed, so nothing can match them now.
-async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) {
+async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> anyhow::Result<()> {
     let res = async {
         let mut tx = app.db.begin().await?;
         sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
@@ -88,8 +88,11 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) {
         anyhow::Ok(())
     }
     .await;
-    match res {
-        Ok(()) => tracing::info!(turn = turn_id, "retracted a prompt that was never typed into the pane"),
+    let out = match res {
+        Ok(()) => {
+            tracing::info!(turn = turn_id, "retracted a prompt that was never typed into the pane");
+            Ok(())
+        }
         Err(e) => {
             tracing::error!(turn = turn_id, error = %e, "could not retract an unsent turn; failing it instead");
             let _ = sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=? AND status='in_flight'")
@@ -97,9 +100,11 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) {
                 .bind(turn_id)
                 .execute(&app.db)
                 .await;
+            Err(e)
         }
-    }
+    };
     emit_turn(app, turn_id).await;
+    out
 }
 
 #[derive(serde::Serialize)]
@@ -316,7 +321,11 @@ pub async fn prompt_grouped(
         // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
         // back out so the same request id can be sent again, and answer 409 like the plan would.
         Ok(not @ Delivered::NotAttempted { .. }) => {
-            retract_unsent_turn(app, &turn_id, &msg_id).await;
+            // If the turn cannot be taken back, the same request id would only ever find a failed
+            // turn: answer 5xx (final for this id), not a retryable 409.
+            if let Err(e) = retract_unsent_turn(app, &turn_id, &msg_id).await {
+                return Err(LcError::Upstream(format!("prompt was not sent and its turn could not be withdrawn: {e}")));
+            }
             return Err(not_attempted_error(&run.id, not));
         }
         // Keys were sent and the result cannot be proven: that is what `unknown` means (§6.3).

@@ -15,6 +15,12 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
         }
     };
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
+    // Put back with a backoff: other wake-ups must not spend its retries early. Its timer brings it back.
+    if let Some(at) = turn.next_flush_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
+        if at > chrono::Utc::now() {
+            return Ok(());
+        }
+    }
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
     // `working` holds the queue too: a prompt pasted while claude is still drawing loses its
@@ -78,19 +84,21 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
         // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
         // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
-            requeue_turn(app, &turn.id, bot_id, &format!("not sent yet: {reason}")).await;
-            schedule_flush_retry(app, bot_id, QUEUE_RETRY_SECS);
+            match defer_queued_turn(app, &conv, &turn.id, reason).await {
+                Ok(Some(delay)) => schedule_flush_retry(app, bot_id, delay),
+                Ok(None) => tracing::warn!(bot = %bot_id, turn = %turn.id, reason, "queued prompt gave up after its retry limit"),
+                Err(e) => tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not put a queued prompt back"),
+            }
+            emit_turn(app, &turn.id).await;
             return Ok(());
         }
-        // A prompt that can never be proven on this run: fail it visibly instead of retrying forever.
+        // A prompt that can never be sent as asked on this run: fail it visibly, in one transaction
+        // with its explanation, instead of retrying forever.
         Ok(Delivered::NotAttempted { reason, retry: false }) => {
-            let _ = sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'")
-                .bind(db::now())
-                .bind(&turn.id)
-                .execute(&app.db)
-                .await;
-            let hint = format!("沒有送出（{reason}）：這一則在這個 bot 上沒有辦法確認送達，所以一個字都沒打。");
-            let _ = insert_message(app, &conv, Some(&turn.id), "system", &hint, "system", false, None).await;
+            let hint = format!("沒有送出（{reason}）：這一則在這個 bot 上沒有辦法照原樣送出，所以一個字都沒打。");
+            if let Err(e) = fail_queued_turn(app, &conv, &turn.id, &hint).await {
+                tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not fail an unsendable queued prompt");
+            }
             emit_turn(app, &turn.id).await;
             return Ok(());
         }
@@ -146,21 +154,106 @@ async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str)
     emit_turn(app, turn_id).await;
 }
 
-/// Seconds before a queued prompt that could not be typed yet (busy box, transcript not reported)
-/// is tried again.
-const QUEUE_RETRY_SECS: u64 = 15;
+/// Backoff for a queued prompt that could not be typed yet: 15 s, doubling, capped at 5 min.
+const QUEUE_RETRY_BASE_SECS: u64 = 15;
+const QUEUE_RETRY_MAX_SECS: u64 = 300;
+/// After this many put-backs the prompt is failed with an explanation (about 40 minutes of a box
+/// that never emptied), so it cannot sit in the queue forever.
+pub(crate) const QUEUE_RETRY_LIMIT: i64 = 12;
 
-/// Try the queue again after `secs`, for conditions no lifecycle edge will announce.
-pub fn schedule_flush_retry(app: &Arc<App>, bot_id: &str, secs: u64) {
-    if cfg!(test) {
-        return;
+pub(crate) fn queue_retry_delay(retries: i64) -> std::time::Duration {
+    let shift = retries.clamp(0, 16) as u32;
+    std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS.saturating_mul(1u64 << shift).min(QUEUE_RETRY_MAX_SECS))
+}
+
+/// Put a claimed turn back on the queue with its retry count and next attempt time, or — past the
+/// limit — fail it with an explanation. One transaction either way. `Some(delay)` = requeued.
+async fn defer_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, reason: &str) -> anyhow::Result<Option<std::time::Duration>> {
+    let mut tx = app.db.begin().await?;
+    let retries: i64 = sqlx::query_scalar("SELECT flush_retries FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
+    if retries >= QUEUE_RETRY_LIMIT {
+        sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=? AND status='in_flight'")
+            .bind(db::now())
+            .bind(turn_id)
+            .execute(&mut *tx)
+            .await?;
+        let hint = format!("沒有送出：試了 {QUEUE_RETRY_LIMIT} 次都沒辦法打字（最後一次是 {reason}），已停止自動重試。請清空輸入框後重送。");
+        insert_message_tx(&mut tx, conv, Some(turn_id), "system", &hint, "system", false, None).await?;
+        tx.commit().await?;
+        return Ok(None);
     }
-    let app = app.clone();
+    let delay = queue_retry_delay(retries);
+    let next = (chrono::Utc::now() + chrono::Duration::from_std(delay)?).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        "UPDATE turns SET status='queued', run_id=NULL, flush_retries=flush_retries+1, next_flush_at=?
+          WHERE id=? AND status='in_flight'",
+    )
+    .bind(&next)
+    .bind(turn_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    tracing::info!(turn = turn_id, reason, attempt = retries + 1, retry_in_s = delay.as_secs(), "queued prompt not sent yet; put back");
+    Ok(Some(delay))
+}
+
+/// Fail a claimed turn together with the system message that explains it.
+async fn fail_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, hint: &str) -> anyhow::Result<()> {
+    let mut tx = app.db.begin().await?;
+    sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'")
+        .bind(db::now())
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
+    insert_message_tx(&mut tx, conv, Some(turn_id), "system", hint, "system", false, None).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// One pending retry timer per bot. The value is the timer's generation, so only the timer that is
+/// still registered fires.
+static QUEUE_RETRY_TIMERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+static QUEUE_RETRY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Arm `fire` after `delay`, unless this bot already has a retry timer waiting — extra wake-ups
+/// must not pile up timers. `false` = one was already armed.
+pub(crate) fn arm_queue_retry<F>(bot_id: &str, delay: std::time::Duration, fire: F) -> bool
+where
+    F: FnOnce() + Send + 'static,
+{
+    let timers = QUEUE_RETRY_TIMERS.get_or_init(Default::default);
+    let generation = {
+        let Ok(mut map) = timers.lock() else { return false };
+        if map.contains_key(bot_id) {
+            return false;
+        }
+        let g = QUEUE_RETRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        map.insert(bot_id.to_string(), g);
+        g
+    };
     let bot_id = bot_id.to_string();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-        schedule_flush_queued(&app, &bot_id);
+        tokio::time::sleep(delay).await;
+        let mine = timers.lock().map(|mut map| {
+            if map.get(&bot_id) == Some(&generation) {
+                map.remove(&bot_id);
+                true
+            } else {
+                false
+            }
+        });
+        if mine.unwrap_or(false) {
+            fire();
+        }
     });
+    true
+}
+
+/// Try the queue again after `delay`, for conditions no lifecycle edge will announce.
+pub fn schedule_flush_retry(app: &Arc<App>, bot_id: &str, delay: std::time::Duration) {
+    let app = app.clone();
+    let id = bot_id.to_string();
+    arm_queue_retry(bot_id, delay, move || schedule_flush_queued(&app, &id));
 }
 
 /// Wake the durable prompt queue after a turn / Run transition. No-op in tests so a background
@@ -339,8 +432,12 @@ mod flush_queue_tests {
         let writes = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "pane.send_keys").count();
         assert_eq!(writes(&f), 0);
 
-        // 使用者把草稿清掉了。
+        // 使用者把草稿清掉了；在退避時間到之前的喚醒不會搶先送。
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "still inside its backoff");
+        // 退避時間到了（重試 timer 觸發）。
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
@@ -355,12 +452,87 @@ mod flush_queue_tests {
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
-        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str(), t.delivery_verified), ("in_flight", "ok", 0));
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
+    }
+
+    #[test]
+    fn the_retry_backoff_doubles_and_is_capped() {
+        let secs: Vec<u64> = (0..8).map(|n| queue_retry_delay(n).as_secs()).collect();
+        assert_eq!(secs, vec![15, 30, 60, 120, 240, 300, 300, 300]);
+        assert_eq!(queue_retry_delay(-3).as_secs(), 15);
+        assert_eq!(queue_retry_delay(i64::MAX).as_secs(), 300);
+    }
+
+    /// 每顆 bot 只會有一個重試 timer：多次喚醒不會疊出好幾條；觸發之後才可以再排（paused Tokio time）。
+    #[tokio::test(start_paused = true)]
+    async fn only_one_retry_timer_per_bot_and_it_fires_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let bot = format!("timer-bot-{}", db::ulid());
+        let fired = Arc::new(AtomicUsize::new(0));
+        let hit = |fired: &Arc<AtomicUsize>| {
+            let fired = fired.clone();
+            move || {
+                fired.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(15), hit(&fired)));
+        assert!(!arm_queue_retry(&bot, std::time::Duration::from_secs(15), hit(&fired)), "second wake-up does not add a timer");
+        assert!(!arm_queue_retry(&bot, std::time::Duration::from_secs(1), hit(&fired)), "not even a sooner one");
+        let other = format!("timer-bot-{}", db::ulid());
+        assert!(arm_queue_retry(&other, std::time::Duration::from_secs(15), hit(&fired)), "another bot has its own");
+
+        tokio::time::sleep(std::time::Duration::from_secs(14)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "not before its delay");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fired.load(Ordering::SeqCst), 2, "each bot's single timer fired exactly once");
+
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(fired.load(Ordering::SeqCst), 2, "and never again on its own");
+        assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(30), hit(&fired)), "after firing, the next retry can be armed");
+    }
+
+    /// 框永遠有字：每次放回都記次數與下次時間，額度用完就明確失敗並留說明（同一個 transaction）。
+    #[tokio::test]
+    async fn a_box_that_never_empties_ends_in_a_failed_turn_with_an_explanation() {
+        let f = queued_kind("grok", "test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        f.env.herdr.live_pane(
+            "pane-1",
+            crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
+        );
+        for n in 1..=QUEUE_RETRY_LIMIT {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!(t.status, "queued", "put back #{n}");
+            assert_eq!(t.flush_retries, n);
+            assert!(t.next_flush_at.is_some());
+            // 另一次喚醒在 next_flush_at 之前：不動它、不花額度。
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, &f.turn_id).await.flush_retries, n, "early wake-ups do not spend retries");
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        }
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        let hints: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
+            .bind(&f.turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("已停止自動重試"));
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "從頭到尾沒打過字");
     }
 
     /// Regression: a client lookup failing after the claim abandoned the turn `in_flight` +
