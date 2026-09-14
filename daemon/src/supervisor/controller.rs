@@ -557,6 +557,11 @@ async fn sweep_missing_events(app: &Arc<App>) {
 
 /// Offer every due queued assignment again.
 async fn drain_queue(app: &Arc<App>) {
+    // A hold whose window is no longer held (released by any path, or expired) is not a reason
+    // to wait: lift it before looking at deadlines.
+    if super::maintenance::dispatch_paused(app).await.is_none() {
+        super::maintenance::window_closed(app, "no restart window is held").await;
+    }
     let Ok(open) = store::open_assignments(&app.db).await else { return };
     for a in open {
         if a.status != "queued" {
@@ -1454,5 +1459,93 @@ mod mission_quota_tests {
         assert_eq!(all.len(), 2);
         let m = mstore::get(&app.db, &mid).await.unwrap().unwrap();
         assert_eq!(crate::mission::api::phase(&m, &all), "executing");
+    }
+}
+
+/// 重啟後沒有保護期（SPEC §18.10）：restart 窗口一結束——release、daemon 起來、或租約已不 held——
+/// 被它 hold 的交辦就在下一輪派送，不等 hold 寫的到期時間。
+#[cfg(test)]
+mod no_grace_period_tests {
+    use super::*;
+    use crate::supervisor::api::{post_lease_release, LeaseHolderIn};
+    use axum::extract::{Path, State};
+    use axum::Json;
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-no-grace-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        app
+    }
+
+    /// 拿 restart 租約，再讓一件交辦照 controller 的做法被 hold 到租約到期。
+    async fn held_window(app: &Arc<App>, crid: &str) -> (store::Lease, store::Assignment) {
+        let ap = store::create_approval(&app.db, "owner", "restart", "daemon", None, None).await.unwrap();
+        store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
+        let until = iso_in(900);
+        let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let a = store::insert_assignment(&app.db, None, "gone-bot", crid, "do it", &[], None, true).await.unwrap();
+        let paused = super::super::maintenance::dispatch_paused(app).await.expect("window is held");
+        store::hold(&app.db, &a.id, &paused, &super::super::maintenance::pause_note(&paused)).await.unwrap();
+        let held = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(held.next_attempt_at.as_deref(), Some(paused.as_str()));
+        (lease, held)
+    }
+
+    #[tokio::test]
+    async fn releasing_the_window_sends_held_work_on_the_next_pass() {
+        let app = app().await;
+        let (lease, a) = held_window(&app, "held-1").await;
+        let input: LeaseHolderIn = serde_json::from_value(json!({"owner": "owner", "fence": lease.fence})).unwrap();
+        post_lease_release(State(app.clone()), Path("restart".into()), Json(input)).await.unwrap();
+        let lifted = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(lifted.status, "queued");
+        assert_eq!(lifted.next_attempt_at, None, "hold 解除，不等原本的 until");
+        assert_eq!(lifted.attempts, 0, "等窗口不算重試");
+        drain_queue(&app).await;
+        let sent = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_ne!(sent.status, "queued", "下一輪直接派送（目標 bot 不存在所以落 dispatch_failed）");
+    }
+
+    #[tokio::test]
+    async fn the_daemon_starting_releases_a_leftover_restart_lease_and_its_holds() {
+        let app = app().await;
+        let (lease, a) = held_window(&app, "held-2").await;
+        super::super::maintenance::release_restart_on_startup(&app).await;
+        let l = store::lease(&app.db, "restart").await.unwrap().unwrap();
+        assert!(l.released_at.is_some(), "啟動即視窗結束");
+        assert_eq!(l.fence, lease.fence);
+        let ap = store::approval(&app.db, lease.approval_id.as_deref().unwrap()).await.unwrap().unwrap();
+        assert_eq!(ap.status, "consumed");
+        let lifted = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(lifted.next_attempt_at, None);
+        // 沒有租約可放時照樣安全：再跑一次什麼都不動。
+        super::super::maintenance::release_restart_on_startup(&app).await;
+    }
+
+    #[tokio::test]
+    async fn a_hold_outliving_its_window_is_not_waited_out() {
+        let app = app().await;
+        let (_lease, a) = held_window(&app, "held-3").await;
+        // 租約沒走 release 就不再 held（例如到期、或被直接改掉），hold 還寫著未來的時間。
+        sqlx::query("UPDATE supervisor_leases SET expires_at='2000-01-01T00:00:00Z' WHERE resource='restart'")
+            .execute(&app.db).await.unwrap();
+        drain_queue(&app).await;
+        let sent = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_ne!(sent.status, "queued");
+    }
+
+    #[tokio::test]
+    async fn a_window_still_held_keeps_its_holds() {
+        let app = app().await;
+        let (_lease, a) = held_window(&app, "held-4").await;
+        drain_queue(&app).await;
+        let still = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(still.status, "queued");
+        assert!(still.next_attempt_at.is_some());
     }
 }

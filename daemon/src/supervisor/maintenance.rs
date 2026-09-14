@@ -63,6 +63,68 @@ pub async fn dispatch_paused(app: &Arc<App>) -> Option<String> {
     None
 }
 
+/// A restart window is over: lift the holds it put on queued assignments so the next controller
+/// pass sends them, instead of each waiting out the deadline it was held to. No window is open
+/// any more when this runs, so there is nothing left to protect (SPEC §18.10: no grace period).
+pub async fn window_closed(app: &Arc<App>, why: &str) -> u64 {
+    match store::clear_restart_holds(&app.db).await {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(released = n, why, "restart window closed; held assignments go out on the next pass");
+            }
+            n
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, why, "could not lift restart-window holds");
+            0
+        }
+    }
+}
+
+/// Release a lease and consume its approval — one yes, one window. When it was a restart
+/// window, the holds it placed are lifted at once.
+pub async fn release(app: &Arc<App>, resource: &str, owner: &str, fence: i64) -> anyhow::Result<bool> {
+    let released = store::release_lease(&app.db, resource, owner, fence).await?;
+    if released {
+        if let Some(l) = store::lease(&app.db, resource).await? {
+            if let Some(ap) = l.approval_id.as_deref() {
+                if let Ok(Some(a)) = store::approval(&app.db, ap).await {
+                    if a.status == "approved" {
+                        let _ = store::decide_approval(&app.db, ap, "consumed", owner, Some("lease released"), None).await;
+                    }
+                }
+            }
+        }
+        if EXCLUSIVE.contains(&resource) && dispatch_paused(app).await.is_none() {
+            window_closed(app, "lease released").await;
+        }
+    }
+    Ok(released)
+}
+
+/// The daemon answering again *is* the end of the restart it was restarted for: a restart lease
+/// still held from before the restart is released here, and every hold it placed is lifted.
+pub async fn release_restart_on_startup(app: &Arc<App>) {
+    for resource in EXCLUSIVE {
+        match store::lease(&app.db, resource).await {
+            Ok(Some(l)) if l.released_at.is_none() => {
+                let owner = l.owner.clone().unwrap_or_default();
+                match release(app, resource, &owner, l.fence).await {
+                    Ok(true) => {
+                        tracing::info!(resource, owner, fence = l.fence, "daemon started: released the restart lease left from before the restart");
+                        app.emit("supervisor_changed", json!({"lease": store::lease(&app.db, resource).await.ok().flatten().map(|l| l.to_json())})).await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(resource, error = ?e, "daemon started: could not release the restart lease"),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(resource, error = ?e, "daemon started: could not read the restart lease"),
+        }
+    }
+    window_closed(app, "daemon started").await;
+}
+
 /// What is going on that a restart would interrupt.
 ///
 /// `blocked` panes are counted but are *not* a reason to refuse: a pane waiting for a human can

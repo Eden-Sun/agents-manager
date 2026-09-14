@@ -1163,6 +1163,20 @@ pub async fn hold(pool: &SqlitePool, id: &str, until: &str, why: &str) -> Result
     Ok(())
 }
 
+/// Lift every hold a restart window put on queued assignments (their `error` is the
+/// `pause_note`). A window ends when its lease is released or the daemon comes back, not at the
+/// deadline written into the hold; returns how many were lifted.
+pub async fn clear_restart_holds(pool: &SqlitePool) -> Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE supervisor_assignments SET next_attempt_at=NULL, error=NULL, updated_at=?
+          WHERE status='queued' AND error LIKE 'restart window held until %'",
+    )
+    .bind(crate::db::now())
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 pub async fn defer(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str) -> Result<()> {
     sqlx::query(
         "UPDATE supervisor_assignments SET attempts=attempts+1, next_attempt_at=?, error=?, updated_at=?
