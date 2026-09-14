@@ -4717,6 +4717,14 @@ fn parse_codex_try_again(notice: &str) -> Option<String> {
 const STALE_BANNER_GRACE_MINS: i64 = 15;
 const STALE_BANNER_RETRY_MINS: i64 = 5;
 
+/// 只寫鐘點（沒有日期）的橫幅最多能指向多久以後。
+///
+/// codex 只在「今天之內就會回來」時寫裸的鐘點——那幾乎都是 5 小時視窗；真的要等到某一天會連
+/// 日期一起寫。所以一個鐘點解出來若在半天之外，那不是「明天的那個時刻」，而是**畫面上留著的舊
+/// 橫幅**（2026-09-14 使用者：08:53 讀到寫著 `3:22 AM` 的舊橫幅，被滾成隔天 03:22，等於平白鎖
+/// 24 小時，而 app-server 當時說 5h 還剩 79%）。這種一律改成「幾分鐘後再問」。
+const MAX_CLOCK_AHEAD_HOURS: i64 = 6;
+
 /// 可測版本：`now` 由呼叫端給。
 fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) -> Option<String> {
     use chrono::{Datelike, Local, NaiveDate, TimeZone};
@@ -4797,6 +4805,13 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
                 (Some(_), Some(_)) => naive.with_year(naive.year() + 1)?,
                 _ => naive + chrono::Duration::days(1),
             };
+        }
+    }
+    // 裸鐘點指到半天之外＝畫面上留著的舊橫幅，不是「明天的那個時刻」（見 `MAX_CLOCK_AHEAD_HOURS`）。
+    if month.is_none() || day.is_none() {
+        let ahead = naive.signed_duration_since(now.naive_local());
+        if ahead > chrono::Duration::hours(MAX_CLOCK_AHEAD_HOURS) {
+            naive = now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS);
         }
     }
     let dt = Local.from_local_datetime(&naive).earliest()?;
@@ -5114,15 +5129,31 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!((4..=6).contains(&mins), "應該是幾分鐘後再問，不是隔天：{got}（{mins} 分）");
     }
 
-    /// 真的過去很久的（超過 15 分鐘）才當成「明天的那個時刻」。
+    /// 2026-09-14 使用者：08:53 讀到寫著 `3:22 AM` 的舊橫幅。裸鐘點過去很久不代表「明天那個時刻」
+    /// ——codex 只在今天之內就會回來時寫裸鐘點——那是畫面上留著的舊字，改成幾分鐘後再問。
     #[test]
-    fn a_clock_time_long_past_still_means_tomorrow() {
+    fn a_clock_time_long_past_is_a_stale_banner_not_tomorrow() {
         use chrono::TimeZone;
-        let now = chrono::Local.with_ymd_and_hms(2026, 9, 13, 22, 15, 22).unwrap();
-        let got = parse_codex_try_again_at("or try again at 9:00 PM.", now).expect("讀得到時間");
+        let now = chrono::Local.with_ymd_and_hms(2026, 9, 14, 8, 53, 3).unwrap();
+        let got = parse_codex_try_again_at(
+            "ERROR: You've hit your usage limit. Upgrade to Pro, visit …/usage to purchase more credits or try again at 3:22 AM.",
+            now,
+        )
+        .expect("讀得到時間");
         let t = chrono::DateTime::parse_from_rfc3339(&got).unwrap();
-        let hours = (t.timestamp() - now.timestamp()) / 3600;
-        assert!((22..=23).contains(&hours), "隔天的 21:00：{got}（{hours} 小時後）");
+        let mins = (t.timestamp() - now.timestamp()) / 60;
+        assert!((4..=6).contains(&mins), "應該是幾分鐘後再問，不是明天 03:22（鎖 18 小時）：{got}（{mins} 分）");
+    }
+
+    /// 今天稍晚的鐘點照舊當真：那才是 5 小時視窗真的會回來的時間。
+    #[test]
+    fn a_clock_time_later_today_is_taken_at_face_value() {
+        use chrono::{Local, TimeZone, Timelike};
+        let now = chrono::Local.with_ymd_and_hms(2026, 9, 14, 8, 53, 3).unwrap();
+        let got = parse_codex_try_again_at("or try again at 11:30 AM.", now).expect("讀得到時間");
+        let dt = chrono::DateTime::parse_from_rfc3339(&got).unwrap().with_timezone(&Local);
+        assert_eq!((dt.hour(), dt.minute()), (11, 30), "{got}");
+        assert_eq!(dt.date_naive(), now.date_naive(), "今天，不是明天：{got}");
     }
 
 
@@ -5143,13 +5174,22 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
             if behind >= chrono::Duration::zero() && behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
                 continue;
             }
+            // 已經過去的鐘點現在一律當舊橫幅（見 `a_clock_time_long_past_is_a_stale_banner_not_tomorrow`），
+            // 這個迴圈只管「今天稍晚、而且在半天之內」的那幾個鐘點。
+            let ahead = candidate.signed_duration_since(now.naive_local());
+            if ahead <= chrono::Duration::zero() || ahead > chrono::Duration::hours(MAX_CLOCK_AHEAD_HOURS) {
+                continue;
+            }
             // 同一個 `now` 解析：各讀各的時鐘時跨過邊界會偶發紅燈（2026-09-13）。
             let parsed = parse_codex_try_again_at(&at(h), now).unwrap_or_else(|| panic!("hour {h} did not parse"));
             let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
             assert_eq!(dt.hour(), h, "{parsed}");
             assert_eq!(dt.minute(), 7);
             assert!(dt > now, "a reset is always ahead of us: {parsed}");
-            assert!(dt.signed_duration_since(now).num_hours() < 25, "and never more than a day out: {parsed}");
+            assert!(
+                dt.signed_duration_since(now) <= chrono::Duration::hours(MAX_CLOCK_AHEAD_HOURS),
+                "裸鐘點最多指到半天之外：{parsed}"
+            );
             // Today or tomorrow, never some other date.
             let day = dt.date_naive();
             assert!(day == now.date_naive() || day == now.date_naive() + chrono::Duration::days(1));
