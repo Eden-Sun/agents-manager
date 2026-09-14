@@ -77,7 +77,16 @@ pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_defau
 /// 也不要把兩個帳號的數字疊在一起。
 pub async fn quota_base_for_host(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> String {
     let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
-    let shares = crate::tools::identity_for_host(app, host, idn).await.is_some_and(|i| identity_shares_default(kind, &i.env));
+    let found = crate::tools::identity_for_host(app, host, idn).await;
+    // 身分有 kind（`identity_kind`）：別的 kind 的身分（codex bot 身上的 claude `cc1`）根本不是這個 CLI 的
+    // 帳號代號，一律寫裸 kind——codex 不該有任何 `codex:ccN`（2026-09-14 使用者指正）。
+    // 同 kind 才看 home 變數那條保險；查不到那個身分（主機的身分還沒偵測完）維持分開，免得把兩個
+    // claude 帳號的數字疊進同一格。
+    let shares = match &found {
+        Some(i) if i.kind != kind => true,
+        Some(i) => identity_shares_default(kind, &i.env),
+        None => false,
+    };
     quota_base_default_aware(kind, Some(idn), shares)
 }
 
@@ -576,8 +585,8 @@ mod tests {
         assert!(identity_shares_default("grok", &cc2), "沒有 GROK_HOME 的身分對 grok 是預設帳號");
     }
 
-    /// 寫入端與查詢端走同一支：cc1 的 codex bot 寫裸 `codex`、`limit_hit_for_bot` 也從裸 `codex` 讀到；
-    /// cc2 帶自己的 `CODEX_HOME` 時寫 `codex:cc2`，而且**不借**裸 `codex` 的數字。
+    /// 寫入端與查詢端走同一支：帶 claude 身分（cc1）的 codex bot 寫裸 `codex`、`limit_hit_for_bot` 也從裸
+    /// `codex` 讀到；只有 codex 自己的身分（cx2）才寫 `codex:cx2`，而且**不借**裸 `codex` 的數字。
     #[tokio::test]
     async fn codex_bots_on_cc1_share_the_bare_key_and_cc2_keeps_its_own() {
         let env_ = crate::testing::env().await;
@@ -597,13 +606,23 @@ mod tests {
                     ident("cc0", &[]),
                     ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-ccompany")]),
                     ident("cc2", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc2"), ("CODEX_HOME", "$HOME/.codex-cc2")]),
+                    // codex 自己的身分（kind = codex）才可能分開成 `codex:<name>`。
+                    crate::config::IdentityCfg {
+                        name: "cx2".into(),
+                        kind: "codex".into(),
+                        env: env(&[("CODEX_HOME", "$HOME/.codex-cx2")]),
+                        args: vec![],
+                    },
                 ],
                 checked_at: crate::db::now(),
             },
         );
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc1")).await, "codex");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc0")).await, "codex");
-        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc2")).await, "codex:cc2");
+        // 2026-09-14 使用者指正：ccN 是 Claude Code 的帳號代號，就算 cc2 設了 CODEX_HOME，它仍是 claude 的身分，
+        // codex 不該有 `codex:cc2`。
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc2")).await, "codex");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cx2")).await, "codex:cx2", "codex 自己的身分才分開");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc1")).await, "claude:cc1");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("nobody")).await, "codex:nobody", "查不到的身分寧可分開");
 
@@ -637,7 +656,7 @@ mod tests {
             created_at: crate::db::now(),
         };
         assert!(limit_hit_for_bot(&app, &bot("cc1")).await.is_some(), "cc1 的 codex bot 讀的是裸 codex");
-        assert!(limit_hit_for_bot(&app, &bot("cc2")).await.is_none(), "cc2 有自己的 CODEX_HOME，不借預設帳號的撞限");
+        assert!(limit_hit_for_bot(&app, &bot("cx2")).await.is_none(), "cx2 是 codex 自己的另一個帳號，不借預設帳號的撞限");
     }
 
     /// AGM 的條件：寫入 key 要跟 `limit_hit_for_bot` 查法對得起來，且不能洗掉「撞上限」。

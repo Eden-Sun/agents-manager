@@ -463,6 +463,15 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 - `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
 - 同名時 config 勝出（`tools::identities_for_host`）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
 - 每個 bot 都有 `identity`（`string|null`）與 `env`（預設 `{}`）。
+- **身分有 kind，bot 只能帶同 kind 的身分**（2026-09-14 使用者指正：`cc0`／`cc1`／`cc2` 是 Claude Code 的帳號代號，跟
+  codex 無關）。API 建立／修改已經擋（kind 不符 400）；daemon 收編子 agent 的那條路也照這條：**只繼承同 kind 母 bot 的
+  identity**，codex 子 agent 從 claude 母 bot 收編時 `identity = null`（之後 `pane_identity` 依它 pane 真正的帳號目錄只補
+  同 kind 的身分）。子 agent 被重新收編成別的 kind 時，舊 identity 一併清掉。
+- **偵測完一台主機的身分就清理一次**（`identity_kind::cleanup_host`）：kind 不符的 identity 設 `null` 並記 log（使用者自建
+  的 bot 是 config.toml 設定，只記 warn 不改）；quota 表裡 `<kind>:<name>` 而 `name` 是別的 kind 的身分（例如 `codex:cc1`）
+  那種殘留 key 刪掉，推一次 `quota_updated`（`quota: null`）。
+- quota key 的組法見 §12.4：身分的 kind 跟 bot 不同 → 裸 kind；同 kind 才看該 kind 的 home 變數決定要不要分開；
+  找不到那個身分（偵測還沒完成）維持分開。
 
 ### bot 建立 / 修改
 `POST /api/projects/{id}/bots`、`PATCH /api/bots/{id}` 接受 `identity` 與 `env`：`identity` 省略 = 不變（PATCH）／`null`（POST），傳 `null` 或 `""` 解除；
@@ -697,7 +706,8 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 
 - **key**：`codex`、`claude`、`grok`；有 identity 的 bot 另存 `<kind>:<identity>`（`account` = identity 名）；遠端加 `<host>/`。沒裝 CLI、還沒讀到 → `null`。
   不屬於現存主機的 `<host>/…` key 不出現。
-  **身分對某個 kind 是不是預設帳號，看的是那個 kind 的 home 變數**（codex＝`CODEX_HOME`、claude＝`CLAUDE_CONFIG_DIR`、
+  **身分的 kind 跟 bot 不同一律寫裸 kind**（codex 不會有 `codex:ccN`，`ccN` 是 claude 的身分）。
+  同 kind 時，**身分對某個 kind 是不是預設帳號，看的是那個 kind 的 home 變數**（codex＝`CODEX_HOME`、claude＝`CLAUDE_CONFIG_DIR`、
   grok＝`GROK_HOME`）：身分的 env 沒定義那個變數，那個 CLI 就用它自己的預設目錄，讀數收斂到**裸 kind**。例如 cc1 只設
   `CLAUDE_CONFIG_DIR`——對 claude 寫 `claude:cc1`，對 codex 卻是裸 `codex`；cc2 帶自己的 `CODEX_HOME` 才寫 `codex:cc2`，
   而且不借裸 `codex` 的數字。查不到那個身分就當它有自己的帳號（寧可多一格，也不疊兩個帳號的數字）。

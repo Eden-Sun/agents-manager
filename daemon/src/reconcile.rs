@@ -494,8 +494,11 @@ async fn adopt_child(
             if let Some(r) = db::active_run(&app.db, &id).await? {
                 anyhow::bail!("child `{child_name}` still has active run `{}` under agent `{:?}`", r.id, r.agent_name);
             }
-            sqlx::query("UPDATE bots SET cwd = COALESCE(?, cwd), kind = ? WHERE id = ?")
+            // kind 換了就把舊 identity 丟掉（SQLite 的 SET 右邊讀的是舊列值）：身分有 kind，
+            // 換成別的 CLI 之後那個身分就不適用了（`identity_kind`）。
+            sqlx::query("UPDATE bots SET cwd = COALESCE(?, cwd), identity = CASE WHEN kind = ? THEN identity ELSE NULL END, kind = ? WHERE id = ?")
                 .bind(agent.cwd.clone())
+                .bind(kind)
                 .bind(kind)
                 .bind(&id)
                 .execute(&app.db)
@@ -535,7 +538,8 @@ async fn adopt_child(
             .bind(&parent.project_id)
             .bind(&use_name)
             .bind(kind)
-            .bind(&parent.identity)
+            // 只繼承同 kind 母 bot 的身分：codex 子 agent 抄到 claude 的 cc1，quota 就長出 `codex:cc1`。
+            .bind(crate::identity_kind::child_identity(parent.identity.as_deref(), &parent.kind, kind))
             .bind(agent.cwd.clone())
             .bind(session)
             .bind(&parent.id)
@@ -1306,6 +1310,63 @@ mod compat_tests {
         sqlx::query("UPDATE bots SET model='sonnet' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         assert_eq!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().model.as_deref(), Some("sonnet"));
+    }
+
+    /// 2026-09-14 使用者指正：codex 子 agent 從 claude 母 bot 抄了 `cc1`，quota 就長出 `codex:cc1`。
+    /// 身分有 kind，只有同 kind 的子 agent 才繼承（`identity_kind::child_identity`）。
+    #[tokio::test]
+    async fn a_codex_child_of_a_claude_parent_does_not_inherit_its_identity() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let codex_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let claude_pane = client.pane_split(&root.pane_id, "down", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?").bind(&parent).execute(&app.db).await.unwrap();
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": format!("{parent_agent}-rtsp"), "agent": "codex", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": codex_pane.tab_id, "pane_id": codex_pane.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": format!("{parent_agent}-review"), "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": claude_pane.tab_id, "pane_id": claude_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kid = |name: &str| {
+            let app = app.clone();
+            let (parent, name) = (parent.clone(), name.to_string());
+            async move {
+                sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ? AND name = ?")
+                    .bind(&parent)
+                    .bind(&name)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap_or_else(|_| panic!("child {name} adopted"))
+            }
+        };
+        let codex = kid("rtsp").await;
+        assert_eq!(codex.kind, "codex");
+        assert_eq!(codex.identity, None, "claude 的 cc1 不能抄給 codex 子 agent");
+        let claude = kid("review").await;
+        assert_eq!(claude.identity.as_deref(), Some("cc1"), "同 kind 的子 agent 照舊繼承");
     }
 
     /// Stand-in for `ps eww -p <pid>` that records every pid asked (one ssh per ask on remote).
