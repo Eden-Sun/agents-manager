@@ -265,6 +265,20 @@ export function ImageShelf() {
           e.target.value = ''
         }}
       />
+      {open && !atBottom ? (
+        // 收合鍵做在右欄左邊那條分割線上（2026-09-14 使用者：「收合做在分割線上以節省空間」）：
+        // 一顆壓在線上的小耳朵，標題列就不必再擠一顆 »。
+        <button
+          type="button"
+          className="shelf-edge-fold"
+          aria-expanded={true}
+          aria-label="收合檔案暫存區"
+          title="收合檔案暫存區"
+          onClick={() => setOpenPersisted(false)}
+        >
+          »
+        </button>
+      ) : null}
       {open ? (
         <div className="shelf-body" {...drop.props}>
           <div className="shelf-head">
@@ -290,16 +304,20 @@ export function ImageShelf() {
               </button>
             ) : null}
             <MobilePreviewButton />
-            <button
-              type="button"
-              className="icon-btn shelf-fold icon-tip"
-              aria-expanded={true}
-              aria-label="收合檔案暫存區"
-              data-tip="收合 · 暫存"
-              onClick={() => setOpenPersisted(false)}
-            >
-              »
-            </button>
+            {/* 桌機的收合鍵掛在分割線上（見下面的 `.shelf-edge-fold`），標題列省一格；底部那條版面沒有
+                左分割線，照舊放在標題列。 */}
+            {atBottom ? (
+              <button
+                type="button"
+                className="icon-btn shelf-fold icon-tip"
+                aria-expanded={true}
+                aria-label="收合檔案暫存區"
+                data-tip="收合 · 暫存"
+                onClick={() => setOpenPersisted(false)}
+              >
+                »
+              </button>
+            ) : null}
           </div>
           <div className="shelf-list" role="list">
             {count === 0 ? (
