@@ -1055,6 +1055,24 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   也不開 `notify_exhausted`。巡檢自己的事件照舊有 `notify_max_attempts`。
   登記的 bot 被刪掉 → `status=missing`（`configured:true`、`bot_present:false`），推一次 `responder_bot_missing` 給巡檢，事件照樣留在協調者的佇列等它被建回來。
 - **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
+- **交辦的來源綁呼叫者**：`POST /supervisor/assignments` 記的「使用者原話」只認**呼叫的那個角色自己**的回合
+  （`X-AM-Bot-Id`+token 驗過）。兩個角色同時在回合中時，照固定順序先撿巡檢的回合，會把協調者派的工記成
+  「使用者對巡檢說的另一句話」，授權與稽核從此對不上人。明講 `source_turn_id` 也只能指自己的回合；
+  認不出呼叫者（UI／腳本）就不猜，記 `assignment_text_fallback`。
+- **核准只有第一個裁示算數**：`approve`／`deny` 只從 `pending` 條件寫入（不看先前讀到的值，`op_lock` 不是
+  唯一防線）；已決定的回 409 `already_decided`，並列出 `allowed_from`。翻案要明講 `revoke`（從 `approved`
+  或 `pending`），決定歷程 append-only 記在 `supervisor_notes`（`kind=approval_decision`），
+  `GET /supervisor/approvals` 每筆附 `decisions`。撤銷之後不能就地再核准，要開新的一筆申請。
+- **協調者的額度只看自己的帳號**：`claude:<identity>`（含主機前綴）那一把，不退回裸 `claude`——那實務上是 cc0
+  的數字，一顆 cc1／cc2 的協調者照著它等，等的是別人的重置時間。讀不到自己的就是「不知道」，不等於見底。
+  額度狀態每個 tick 重算一次，跟佇列有沒有待辦無關；只在有事要送時才解除的話，佇列清空後 `waiting_quota`
+  會永遠掛著，而看門狗把它當成「不是故障」，協調者再也不會被拉起來。
+- **Remote Control 明講在每顆 bot 的設定檔**：`claude-settings.json` 一律寫 `remoteControlAtStartup`，值就是
+  「這顆 bot 的 argv 有沒有 `--remote-control`」。使用者帳號的全域 `settings.json` 開了它的話，原本**每一顆**
+  bot 起來都會多開一個手機入口——協調者的 rc off 不能只靠 `args=[]`。
+- **協調者的 model／effort 會變成 argv**：`responder setup` 驗形狀（模型 `[a-z0-9][a-z0-9._-]{0,39}`、effort 走
+  `config::normalize_effort`），擋掉旗標、空白與超長字串；不釘死型號，CLI 換代不必改。`GET /supervisor/responder`
+  的 `model`／`effort` 是設定值，`runtime{model,effort,started_at}` 才是它現在實際跑的。
 - **交辦的驗收角色**：`POST /api/supervisor/assignments` 的 `review_role`；省略 = 呼叫的角色（token）自己，UI／腳本呼叫 = 協調者。巡檢的例行維運（daemon-update、browser-gc、健康追查）寫 `patrol`。
   followup 沿用父交辦的 `review_role`。協調者存在且驗收角色是它時，派工訊息的 `relay_from` 標協調者，bot 回話才找對人。
 - **計數**：每個角色 `wakes`、`events_delivered`、`duplicates`（擋下的重複申請）、`merged`、`last_wake_at`、`last_wake_reason`（這一批的事件種類）。
