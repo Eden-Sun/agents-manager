@@ -325,3 +325,48 @@
     height: 36px;
   }
 }
+
+/*
+ * 右欄標題列擠不下（2026-09-14 使用者截圖）：多了手機預覽那顆之後，標題被切成「檔…」，而且
+ * 滑到 ＋ 上的提示往上彈、被視窗上緣裁掉一半。
+ *
+ * - 圖示鍵收窄到 26px、間距 2px，四顆鍵省下約 40px 給標題。觸控不在這一欄（≤1024px 右欄變底部
+ *   那一條，另有自己的尺寸），桌機游標 26px 仍好點。
+ * - 標題前面那個檔案圖示在桌機拿掉：旁邊就寫著「檔案暫存」，圖示只是重複，而且在 207px 寬的欄裡
+ *   它先被 flex 擠成 0 寬（實測），等於一個看不見卻佔位的元素。
+ * - 提示改往**下**、靠右展開：這一列貼著視窗上緣，往上一定被裁；最右邊那幾顆置中展開也會超出右緣。
+ */
+@media (width > 1024px) {
+  .shelf-head {
+    gap: 2px;
+  }
+
+  .shelf-head .icon-btn {
+    width: 26px;
+    min-width: 26px;
+    height: 26px;
+    min-height: 26px;
+    padding: 0;
+  }
+
+  .shelf-head > svg {
+    display: none;
+  }
+
+  .shelf-title {
+    min-width: 4.5em;
+  }
+}
+
+.shelf-head .icon-tip[data-tip]::after {
+  top: calc(100% + 6px);
+  bottom: auto;
+  left: auto;
+  right: 0;
+  transform: translateY(-2px);
+}
+
+.shelf-head .icon-tip[data-tip]:hover::after,
+.shelf-head .icon-tip[data-tip]:focus-visible::after {
+  transform: translateY(0);
+}
