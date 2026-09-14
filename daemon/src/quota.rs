@@ -38,18 +38,7 @@ pub fn quota_key(host: &str, base: &str) -> String {
     }
 }
 
-/// 規則同 UI 額度條；`cc0` 這種預設身份可能沒有自己那把，所以連裸 kind 一起回。
-pub fn bot_quota_keys(host: &str, kind: &str, identity: Option<&str>) -> Vec<String> {
-    let base = quota_base(kind, identity);
-    let mut out = Vec::new();
-    if base != kind {
-        out.push(quota_key(host, &base));
-    }
-    out.push(quota_key(host, kind));
-    out
-}
-
-/// 寫入端與查詢端（[`bot_quota_keys`]、[`limit_hit_for_bot`]）共用，免得各自拼字串對不起來。
+/// 拼 key 的最底層；要不要收斂到裸 kind 由 [`quota_base_for_host`] 決定（寫入端與查詢端共用）。
 pub fn quota_base(kind: &str, identity: Option<&str>) -> String {
     match identity.map(str::trim).filter(|s| !s.is_empty()) {
         Some(id) => format!("{kind}:{id}"),
@@ -57,29 +46,51 @@ pub fn quota_base(kind: &str, identity: Option<&str>) -> String {
     }
 }
 
-/// 同上，但**空 env 的身分（`cc0`）就是預設帳號**，寫回裸 kind。
+/// 這個身分**對這個 kind** 是不是就是預設帳號？
 ///
-/// 2026-09-14 使用者：額度列上冒出兩個 codex——一顆 bot 沒指定身分（寫裸 `codex`）、另一顆指定
-/// `cc0`（寫 `codex:cc0`），但 `cc0` 的 alias 本來就沒有自己的 `CODEX_HOME`，兩者是同一個帳號。
-/// claude 那邊早就這樣收斂（`hookrecv` 的 statusLine 路徑），這裡把規則挪成共用的一條。
-pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, identity_env_empty: bool) -> String {
+/// 看的是**該 kind 的 home 變數**（codex＝`CODEX_HOME`、claude＝`CLAUDE_CONFIG_DIR`、grok＝`GROK_HOME`，
+/// 見 `pane_identity::config_dir_var`），不是「env 空不空」。
+///
+/// 2026-09-14 第二次冒出兩個 codex：中午所有 cc0 bot 改用 cc1，而 cc1 的 alias 只設
+/// `CLAUDE_CONFIG_DIR`、沒有 `CODEX_HOME`——對 codex 來說 cc1 仍是同一個帳號，但 708a81a 只把
+/// 「env 整個空的 cc0」當預設，於是 codex 又寫出一把 `codex:cc1`。env 裡沒有該 kind 的 home
+/// 變數，那個 CLI 就會用它自己的預設目錄，也就是預設帳號。
+pub fn identity_shares_default(kind: &str, env: &std::collections::BTreeMap<String, String>) -> bool {
+    match crate::pane_identity::config_dir_var(kind) {
+        Some(var) => !env.contains_key(var),
+        // 不認得的 kind 沒有「home 變數」可看，只好退回「env 整個是空的才算」。
+        None => env.is_empty(),
+    }
+}
+
+/// 同 [`quota_base`]，但身分對這個 kind 就是預設帳號時（見 [`identity_shares_default`]）寫回裸 kind。
+pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_default: bool) -> String {
     match identity.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(_) if identity_env_empty => kind.to_string(),
+        Some(_) if shares_default => kind.to_string(),
         other => quota_base(kind, other),
     }
 }
 
-/// [`quota_base_default_aware`]，環境從那台主機的身分表查（§16.2）。查不到那個身分就當它有自己的
-/// 帳號——寧可多開一格，也不要把兩個帳號的數字疊在一起。
+/// [`quota_base_default_aware`]，身分的 env 從那台主機的身分表查（§16.2）。**寫入端與查詢端都走這支**：
+/// codex statusline、撞限橫幅、claude statusLine、`limit_hit_for_bot`／`next_reset_for_bot`、
+/// supervisor 的額度判讀、mission 挑身分。查不到那個身分就當它有自己的帳號——寧可多開一格，
+/// 也不要把兩個帳號的數字疊在一起。
 pub async fn quota_base_for_host(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> String {
     let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
-    let empty_env = crate::tools::identity_for_host(app, host, idn).await.is_some_and(|i| i.env.is_empty());
-    quota_base_default_aware(kind, Some(idn), empty_env)
+    let shares = crate::tools::identity_for_host(app, host, idn).await.is_some_and(|i| identity_shares_default(kind, &i.env));
+    quota_base_default_aware(kind, Some(idn), shares)
+}
+
+/// 查詢端：這顆 bot 的讀數在哪幾把 key。先查它自己那一把（收斂規則同寫入端），**只有**收斂到裸 kind
+/// 的身分才會落在裸 key——有自己 home 的身分（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。
+async fn keys_for_bot(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> Vec<String> {
+    let base = quota_base_for_host(app, host, &bot.kind, bot.identity.as_deref()).await;
+    vec![quota_key(host, &base)]
 }
 
 pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
     let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-    let keys = bot_quota_keys(&host, &bot.kind, bot.identity.as_deref());
+    let keys = keys_for_bot(app, &host, bot).await;
     let q = app.quotas.lock().await;
     for k in keys {
         if let Some(hit) = q.get(&k).and_then(|x| x.limit_hit.clone()) {
@@ -94,7 +105,7 @@ pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<L
 /// 只回未來的重置時間；CLI 橫幅時間會舊，supervisor 要兩邊都看（2026-09-13：橫幅 22:15、app-server 22:20）。
 pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
     let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-    let keys = bot_quota_keys(&host, &bot.kind, bot.identity.as_deref());
+    let keys = keys_for_bot(app, &host, bot).await;
     let now = chrono::Utc::now();
     let future = |t: &Option<String>| {
         t.as_deref()
@@ -546,20 +557,102 @@ mod tests {
         assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00.000Z"));
     }
 
+    fn env(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// 2026-09-14 第二次冒出兩個 codex（AGM 交辦）：cc1 只設 `CLAUDE_CONFIG_DIR`，對 codex 它仍是預設
+    /// 帳號；要看的是**該 kind 的 home 變數**，不是 env 空不空。
+    #[test]
+    fn an_identity_shares_the_default_account_unless_it_sets_that_kinds_home() {
+        let cc0 = env(&[]);
+        let cc1 = env(&[("CLAUDE_CONFIG_DIR", "$HOME/.claude-ccompany")]);
+        let cc2 = env(&[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc2"), ("CODEX_HOME", "$HOME/.codex-cc2")]);
+        assert!(identity_shares_default("codex", &cc0));
+        assert!(identity_shares_default("codex", &cc1), "cc1 沒有 CODEX_HOME：對 codex 就是預設帳號");
+        assert!(!identity_shares_default("codex", &cc2), "cc2 有自己的 CODEX_HOME 才分開");
+        assert!(identity_shares_default("claude", &cc0));
+        assert!(!identity_shares_default("claude", &cc1), "對 claude，cc1 有自己的 config dir");
+        assert!(identity_shares_default("grok", &cc2), "沒有 GROK_HOME 的身分對 grok 是預設帳號");
+    }
+
+    /// 寫入端與查詢端走同一支：cc1 的 codex bot 寫裸 `codex`、`limit_hit_for_bot` 也從裸 `codex` 讀到；
+    /// cc2 帶自己的 `CODEX_HOME` 時寫 `codex:cc2`，而且**不借**裸 `codex` 的數字。
+    #[tokio::test]
+    async fn codex_bots_on_cc1_share_the_bare_key_and_cc2_keeps_its_own() {
+        let env_ = crate::testing::env().await;
+        let app = env_.app.clone();
+        let ident = |name: &str, pairs: &[(&str, &str)]| crate::config::IdentityCfg {
+            name: name.into(),
+            kind: "claude".into(),
+            env: env(pairs),
+            args: vec![],
+        };
+        app.tools.lock().await.insert(
+            LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![
+                    ident("cc0", &[]),
+                    ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-ccompany")]),
+                    ident("cc2", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc2"), ("CODEX_HOME", "$HOME/.codex-cc2")]),
+                ],
+                checked_at: crate::db::now(),
+            },
+        );
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc1")).await, "codex");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc0")).await, "codex");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc2")).await, "codex:cc2");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc1")).await, "claude:cc1");
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("nobody")).await, "codex:nobody", "查不到的身分寧可分開");
+
+        // 裸 codex 撞限：cc1 的 codex bot 讀得到，cc2 的讀不到（它有自己的帳號）。
+        let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some("2999-01-01T00:00:00Z".into()), at: crate::db::now() };
+        let mut q = codex_q("codex-limit-hit", Some(hit));
+        q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        set(&app, LOCAL_HOST, "codex", q).await;
+        let bot = |identity: &str| crate::db::Bot {
+            id: format!("b-{identity}"),
+            project_id: "p".into(),
+            name: identity.into(),
+            kind: "codex".into(),
+            model: None,
+            effort: None,
+            fast: 0,
+            persona: None,
+            args_json: "[]".into(),
+            autostart: 0,
+            inject_hooks: 1,
+            auto_approve: 1,
+            identity: Some(identity.into()),
+            env_json: "{}".into(),
+            managed_by: "user".into(),
+            cwd: None,
+            herdr_session: None,
+            parent_bot_id: None,
+            is_primary: 0,
+            hook_token: "t".into(),
+            deleted_at: None,
+            created_at: crate::db::now(),
+        };
+        assert!(limit_hit_for_bot(&app, &bot("cc1")).await.is_some(), "cc1 的 codex bot 讀的是裸 codex");
+        assert!(limit_hit_for_bot(&app, &bot("cc2")).await.is_none(), "cc2 有自己的 CODEX_HOME，不借預設帳號的撞限");
+    }
+
     /// AGM 的條件：寫入 key 要跟 `limit_hit_for_bot` 查法對得起來，且不能洗掉「撞上限」。
     #[tokio::test]
     async fn the_status_line_writes_where_the_lookup_reads_and_keeps_the_limit_hit() {
         let app = crate::testing::env().await.app.clone();
         let base = quota_base("codex", Some("astra"));
         assert_eq!(base, "codex:astra");
-        assert_eq!(bot_quota_keys(LOCAL_HOST, "codex", Some("astra"))[0], quota_key(LOCAL_HOST, &base));
         assert_eq!(quota_base("codex", None), "codex");
-        // 2026-09-14 使用者：額度列冒出第二個 codex。空 env 的 `cc0` 就是預設帳號，寫裸 key。
+        // 2026-09-14 使用者：額度列冒出第二個 codex。對 codex 共用預設帳號的身分寫裸 key。
         assert_eq!(quota_base_default_aware("codex", Some("cc0"), true), "codex");
         assert_eq!(quota_base_default_aware("codex", Some("cc2"), false), "codex:cc2");
         assert_eq!(quota_base_default_aware("codex", None, true), "codex");
         assert_eq!(quota_base_default_aware("claude", Some("cc1"), false), "claude:cc1");
-        assert_eq!(bot_quota_keys(LOCAL_HOST, "codex", Some("  "))[0], quota_key(LOCAL_HOST, "codex"));
+        assert_eq!(quota_base("codex", Some("  ")), "codex", "空白身分就是沒指定");
 
         // 清掉的話 assignment 會立刻又派工過去（718d025 的 quota_blocked 靠這一格）。
         let hit = LimitHit {

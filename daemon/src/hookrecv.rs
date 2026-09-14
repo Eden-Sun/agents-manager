@@ -500,11 +500,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
-                    // 空 env 身份（cc0）就是預設帳號：另開 `claude:cc0` 會少掉 `/usage` 探測的 Fable 週窗。
-                    let default_account = crate::tools::identity_for_host(app, &host, idn)
-                        .await
-                        .is_some_and(|i| i.env.is_empty());
-                    let key = if default_account { "claude".to_string() } else { format!("claude:{idn}") };
+                    // 對 claude 共用預設帳號的身分（沒設 CLAUDE_CONFIG_DIR）寫裸 `claude`：另開 `claude:cc0` 會少掉
+                    // `/usage` 探測的 Fable 週窗。規則跟 codex 同一支（`quota::quota_base_for_host`）。
+                    let key = crate::quota::quota_base_for_host(app, &host, "claude", Some(idn)).await;
                     crate::quota::set(app, &host, &key, q).await;
                 }
             } else if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
