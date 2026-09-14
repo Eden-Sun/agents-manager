@@ -84,7 +84,9 @@ pub fn parse_status_quota(screen: &str) -> Option<CodexStatusQuota> {
     let mut out = None;
     for raw in screen.lines() {
         let line = raw.trim();
-        if !line.contains("Context") || !line.contains('·') {
+        // fork／resume 起來的 codex 狀態列可能沒有 `Context` 那一段（2026-09-14 實況：
+        // `gpt-5.6-sol medium · ~/project/agents-manager · 5h 82% left · weekly 97% left`），`% left` 也算。
+        if !line.contains('·') || !(line.contains("Context") || line.contains("% left")) {
             continue;
         }
         let q = CodexStatusQuota { five_hour_left: pct_after(line, "5h"), weekly_left: pct_after(line, "weekly") };
@@ -303,6 +305,14 @@ pub async fn apply(
 
 #[cfg(test)]
 mod tests {
+    /// 2026-09-14 實況：fork 起來的 codex 狀態列沒有 `Context` 那段，照樣要讀得到剩餘額度。
+    #[test]
+    fn a_status_line_without_context_still_yields_the_quota() {
+        let q = parse_status_quota("  gpt-5.6-sol medium · ~/project/agents-manager · 5h 82% left · weekly 97% left\n").unwrap();
+        assert_eq!(q.five_hour_left, Some(82.0));
+        assert_eq!(q.weekly_left, Some(97.0));
+    }
+
     use super::*;
 
     /// Real pane text, codex 0.153.4 (2026-09-09).

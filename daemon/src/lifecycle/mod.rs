@@ -20,6 +20,7 @@ mod slash;
 mod prompt;
 mod poller;
 mod screen;
+mod limit_banner;
 
 pub(crate) use messages::*;
 pub(crate) use poller::*;

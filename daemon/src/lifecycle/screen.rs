@@ -35,7 +35,24 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
-    for notice in codex_usage_notice_lines(&read.text) {
+    let notices = codex_usage_notice_lines(&read.text);
+    let limit_banners: Vec<String> = notices.iter().filter(|n| codex_limit_hit_line(n).is_some()).cloned().collect();
+    // 同一畫面裡比最後一張橫幅更新的狀態列還有餘裕 → 畫面上的撞限橫幅都是舊的（見 `limit_banner`）。
+    let headroom_below = super::limit_banner::status_line_says_headroom(&read.text);
+    for notice in notices {
+        let is_limit = codex_limit_hit_line(&notice).is_some();
+        if is_limit {
+            // fork／resume 重播的舊橫幅、或同一畫面更新的狀態列說還有額度：不寫系統訊息、不標額度、
+            // 不解開回合（2026-09-14 AGM：fork 重播讓交辦被 quota_blocked）。`sighting` 每次讀取都要問，
+            // 它同時更新「上一次看到幾次」。
+            let in_flight_now = db::in_flight_turn(&app.db, &run.id).await?.is_some();
+            let seen = super::limit_banner::sighting(&run.id, &read.text, &notice, &limit_banners);
+            let replayed = super::limit_banner::is_history(seen, in_flight_now);
+            if replayed || headroom_below {
+                tracing::debug!(bot = %bot.name, replayed, headroom_below, "codex limit banner on screen is history, not a limit hit");
+                continue;
+            }
+        }
         // 去重只看這個 run 開始之後：比對整段對話時，兩天前一樣的上限橫幅讓這次被跳過，
         // 額度沒標、回合沒解開（2026-09-12 使用者）。
         let exists: i64 = sqlx::query_scalar(
@@ -53,7 +70,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
             insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
             tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         }
-        if codex_limit_hit_line(&notice).is_some() {
+        if is_limit {
             // 有回合在飛＝橫幅就是那句的答案，照樣處理；否則只認這個 run 內第一次看到的，
             // 舊橫幅才不會反覆把額度打回 100%。
             let in_flight = db::in_flight_turn(&app.db, &run.id).await?;
