@@ -1881,18 +1881,43 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 
+    /// 打字前讀不到畫面：一個字都沒打，是「稍後再試」，不是錯誤也不是 unknown（sol 第十輪 #1）。
     #[tokio::test]
-    async fn a_screen_that_cannot_be_read_is_an_error_not_an_empty_screen() {
+    async fn a_pane_that_cannot_be_read_before_typing_is_not_attempted() {
         let f = fixture("claude", "__READ_ERROR__").await;
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        // 沒有寬度也沒有 transcript 時會先被「證據」擋下；給一個 transcript 讓它走到讀畫面那一步。
         let t = f.env.dir.join("t.jsonl");
         std::fs::write(&t, "").unwrap();
         let run = db::Run { native_session_id: Some("s".into()), transcript_path: Some(t.to_str().unwrap().into()), ..run };
-        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.is_err());
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
+        assert_eq!(out, not("composer_unreadable", true));
+        assert_eq!(count(&f, "pane.send_text"), 0);
+    }
+
+    /// herdr 不認得 `format: ansi`：退回純文字讀法照樣送；純文字讀法下佔位字自然當非空。
+    #[tokio::test]
+    async fn a_herdr_without_styled_reads_falls_back_to_plain_reads() {
+        let f = fixture("claude", "").await;
+        live(&f, wide());
+        f.env.herdr.reject_ansi.store(true, std::sync::atomic::Ordering::SeqCst);
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(count(&f, "pane.send_text"), 1);
+
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { composer: vec!["Try \"fix lint errors\"".into()], ..wide() });
+        f.env.herdr.reject_ansi.store(true, std::sync::atomic::Ordering::SeqCst);
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(), not("composer_busy", true));
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 

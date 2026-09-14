@@ -34,6 +34,8 @@ pub struct MockHerdr {
     pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
     /// Panes that behave like a TUI: typing lands in a composer, Enter moves it to the transcript.
     pub live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
+    /// Answer `pane.read` with `format: ansi` like a herdr that does not know the parameter.
+    pub reject_ansi: Arc<std::sync::atomic::AtomicBool>,
     /// What `agent.list` and `agent.get` answer with.
     pub agents: Arc<StdMutex<Vec<Value>>>,
     handle: tokio::task::JoinHandle<()>,
@@ -131,6 +133,7 @@ struct MockState {
     agents: Arc<StdMutex<Vec<Value>>>,
     screens: Arc<StdMutex<BTreeMap<String, String>>>,
     live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
+    reject_ansi: Arc<std::sync::atomic::AtomicBool>,
     argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
@@ -188,6 +191,7 @@ impl MockHerdr {
             agents: Default::default(),
             screens: Default::default(),
             live: Default::default(),
+            reject_ansi: Default::default(),
             argvs: Default::default(),
             pids: Default::default(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -196,6 +200,7 @@ impl MockHerdr {
             (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
         let (screens, argvs, pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone());
         let live = state.live.clone();
+        let reject_ansi = state.reject_ansi.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
@@ -360,6 +365,11 @@ impl MockHerdr {
                             json!({"id": id, "result": {"type": "session_snapshot", "snapshot":
                                 {"workspaces": wss, "panes": panes,
                                  "tabs": tabs.iter().map(MockState::tab_json).collect::<Vec<_>>()}}})
+                        }
+                        "pane.read" if params.get("format").and_then(Value::as_str) == Some("ansi")
+                            && st.reject_ansi.load(std::sync::atomic::Ordering::SeqCst) =>
+                        {
+                            json!({"id": id, "error": {"code": "invalid_params", "message": "unknown field `format`"}})
                         }
                         "pane.read" => {
                             let pid = wid_of("pane_id");
@@ -556,7 +566,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, argvs, pids, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, argvs, pids, handle }
     }
 
     pub fn methods(&self) -> Vec<String> {
@@ -662,6 +672,29 @@ pub async fn env() -> Env {
         .await
         .unwrap();
     Env { app, project_id: pid, repo, dir, herdr }
+}
+
+/// A second `App` on the same database and mock herdr, the way a restarted daemon would open them.
+/// In-memory state (timers, pollers) starts empty; everything persisted is still there.
+pub async fn restart_app(env: &Env) -> Arc<App> {
+    let data = env.dir.join("data");
+    let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
+    let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
+    let client = crate::herdr::HerdrClient::new(data.join("herdr.sock"));
+    let app = App::new(
+        pool,
+        client.clone(),
+        client,
+        cfg,
+        data.clone(),
+        data.join("agents-managerd"),
+        7799,
+        "test-token".into(),
+        "test".into(),
+        false,
+    );
+    app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    app
 }
 
 /// Straight into the DB, not config.toml.
