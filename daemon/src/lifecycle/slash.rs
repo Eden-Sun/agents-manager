@@ -126,6 +126,10 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     if send_slash_line(&client, &pane_id, &line).await.is_err() {
         return Some("slash_send_failed".into());
     }
+    // 還握著 bot 鎖：`prompt_grouped` 拿同一把鎖，所以下一則 prompt 一定排在 TUI 回到輸入列之後。
+    if !wait_for_composer_settled(&client, &pane_id, &bot.kind).await {
+        tracing::warn!(bot_id, line, "TUI did not settle back to an empty composer after the slash command");
+    }
     // SPEC §4.4a: clear the drift marker only for the field sent (`/model` doesn't touch effort).
     let col = match *field {
         "effort" => "runtime_effort",
@@ -217,6 +221,34 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
 }
 
 
+/// slash 指令送出後，TUI 要多久內回到「空的輸入列、畫面不再變」。
+const SLASH_SETTLE_MAX_MS: u64 = 6_000;
+const SLASH_SETTLE_POLL_MS: u64 = 500;
+
+/// 等 TUI 回到空輸入列，且連續兩次讀到的畫面一模一樣才算穩（2026-09-14 w1HJ:pH：`/effort max`
+/// 當場套用後緊接的 prompt 沒進 pane，12 秒後 stall）。握著 bot 鎖等，下一則 prompt 自然排在後面。
+/// 等不到回 `false`，呼叫端只記 log——套用本身已經成功，送達的保險在 stall watchdog 的自動重送。
+async fn wait_for_composer_settled(client: &HerdrClient, pane_id: &str, kind: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(SLASH_SETTLE_MAX_MS);
+    let mut prev: Option<String> = None;
+    loop {
+        let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+        if composer_settled(kind, prev.as_deref(), &screen) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        prev = Some(screen);
+        tokio::time::sleep(std::time::Duration::from_millis(SLASH_SETTLE_POLL_MS)).await;
+    }
+}
+
+/// 純函式：這一次讀到的畫面是空輸入列，而且跟上一次讀到的一樣。
+fn composer_settled(kind: &str, prev: Option<&str>, screen: &str) -> bool {
+    pane_awaits_input(kind, screen) && prev == Some(screen)
+}
+
 /// 登入／換帳號的 slash 指令（拋棄式 herdr session 實測）：claude 2.1.263 與 grok 1.0.13 是
 /// `/login`；codex 0.153.4 沒有（只有 `/logout`），送進去會被當一般 prompt 丟給模型，所以 `None`。
 pub fn login_slash_command(kind: &str) -> Option<&'static str> {
@@ -260,7 +292,35 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
 
 #[cfg(test)]
 mod live_slash_tests {
-    use super::live_slash_command;
+    use super::{composer_settled, live_slash_command};
+
+    /// 2026-09-14 w1HJ:pH 在 `/effort max` 之後的真實畫面（使用者名稱換掉）。
+    const EFFORT_MAX_SETTLED: &str = "✻ Sautéed for 15m 9s · done 2:18 PM
+
+❯ /effort max
+  ⎿  Set effort level to max (this session only): Maximum capability with deepest reasoning.
+     May use excessive tokens resulting in long response times or overthinking. Use sparingly
+     for the hardest tasks.
+                                                                              615330 tokens
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────
+  user. | web | OP5 61% | 5h:53%(rst 2h 35m) | 7d:95%(rst 6d 21h) | F5:100%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+";
+
+    #[test]
+    fn a_slash_counts_as_settled_only_on_two_identical_empty_composer_reads() {
+        // 第一次讀到還沒有可比的上一張：不算穩。
+        assert!(!composer_settled("claude", None, EFFORT_MAX_SETTLED));
+        assert!(composer_settled("claude", Some(EFFORT_MAX_SETTLED), EFFORT_MAX_SETTLED));
+        // 畫面還在變（回饋文字剛印出來、token 數在跳）：不算穩。
+        let earlier = EFFORT_MAX_SETTLED.replace("615330 tokens", "615201 tokens");
+        assert!(!composer_settled("claude", Some(&earlier), EFFORT_MAX_SETTLED));
+        // 輸入列裡還有字：不是空的，不算穩。
+        let typing = EFFORT_MAX_SETTLED.replace("\n❯\n", "\n❯ /effort max\n");
+        assert!(!composer_settled("claude", Some(&typing), &typing));
+    }
 
     #[test]
     fn grok_effort_and_model() {
