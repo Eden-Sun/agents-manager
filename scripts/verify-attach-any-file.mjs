@@ -38,4 +38,18 @@ await sleep(1200)
 console.log('tray names:', await ev(`[...document.querySelectorAll('.attach-thumb-name')].map(n=>n.textContent).join(' | ')`))
 console.log('tray glyphs:', await ev(`document.querySelectorAll('.attach-thumb-file').length`))
 await shot('tray-any-file')
+// 3) 直接把非圖片檔拖進對話（不經暫存區）
+await ev(`(() => {
+  const el = document.querySelector('.chat')
+  const dt = new DataTransfer()
+  dt.items.add(new File(['bug at line 42'], 'server.log', { type: 'text/plain' }))
+  for (const type of ['dragenter', 'dragover', 'drop']) {
+    el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }))
+  }
+  return 'dropped'
+})()`)
+await sleep(1200)
+console.log('after chat drop:', await ev(`[...document.querySelectorAll('.attach-thumb-name')].map(n=>n.textContent).join(' | ')`))
+console.log('placeholder:', await ev(`document.querySelector('.composer textarea')?.placeholder ?? document.querySelector('textarea')?.placeholder`))
+await shot('chat-drop-any-file')
 chrome.kill(); process.exit(0)

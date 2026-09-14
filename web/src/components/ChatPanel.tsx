@@ -375,7 +375,7 @@ function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; on
 
   if (ui.closed) return null
 
-  const body = msg.content.trim() || (msg.attachments.length ? `（${msg.attachments.length} 張圖片）` : '（空白訊息）')
+  const body = msg.content.trim() || (msg.attachments.length ? `（${msg.attachments.length} 個附件）` : '（空白訊息）')
   const jumpable = !clamped || ui.open
 
   return (
@@ -747,7 +747,7 @@ function Composer({
         <div className="composer-queued" role="status">
           <span className="composer-queued-label">已排隊，這回合結束後送出：</span>
           <span className="composer-queued-text" title={queued.text}>
-            {queued.text || `（${queued.attachments.length} 張圖片）`}
+            {queued.text || `（${queued.attachments.length} 個附件）`}
           </span>
           <button
             type="button"
@@ -828,9 +828,9 @@ function Composer({
               ? `${state.reason || '目前無法送出訊息'}${phone ? '' : '——可以先打，恢復後再送'}`
               : state.queued
                 ? (phone ? '下一則訊息…' : '這回合還在跑，先打下一則…（送出會排隊）')
-                : `輸入訊息…${phone ? '' : '（圖片可直接拖放或貼上）'}`
+                : `輸入訊息…${phone ? '' : '（檔案可直接拖放或貼上）'}`
           }
-          title="Enter 送出，Shift+Enter 換行；圖片可拖放或貼上"
+          title="Enter 送出，Shift+Enter 換行；檔案可拖放或貼上"
           onChange={(e) => {
             setText(e.target.value)
             setDraftCursor(draftKey, e.target.selectionStart, e.target.selectionEnd)
@@ -858,7 +858,7 @@ function Composer({
           type="button"
           className="send-btn"
           disabled={state.disabled || sending || files.uploading || nothingToSend}
-          title={files.uploading ? '圖片上傳中…' : state.queued ? '這回合結束後自動送出' : undefined}
+          title={files.uploading ? '附件上傳中…' : state.queued ? '這回合結束後自動送出' : undefined}
           /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
           onMouseDown={(e) => e.preventDefault()}
           onClick={submit}

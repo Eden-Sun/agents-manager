@@ -1023,7 +1023,7 @@ export const useStore = create<StoreState>((set, get) => ({
     const r = restoreQueued(get(), botId, pending)
     set(r.patch)
     if (r.droppedAttachments > 0) {
-      get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 張圖片要重新加`)
+      get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 個附件要重新加`)
     }
   },
 

@@ -514,7 +514,7 @@ function GroupComposer({
             toAgm
               ? '建一個任務交給 AGM'
               : files.uploading
-                ? '圖片上傳中…'
+                ? '附件上傳中…'
                 : targets.length === 0
                   ? '請選擇收件者（上方 chip 或 @mention）'
                   : `送給 ${targets.map((t) => `@${t.name}`).join(', ')}`
@@ -560,7 +560,7 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
   const files = useAttachments(members[0]?.id ?? null, projectId)
   const drop = useDropTarget(files.add, memberCount === 0)
   const [renaming, setRenaming] = useState(false)
-  // 同 ChatPanel：讓右側圖片暫存區把「點一下」的圖片交給這個群組草稿。
+  // 同 ChatPanel：讓右側檔案暫存區把「點一下」的檔案交給這個群組草稿。
   useShelfSink(files.add, memberCount > 0 ? `${project?.label ?? ''} 群組` : null)
 
   if (!project) {
