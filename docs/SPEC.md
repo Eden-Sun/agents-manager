@@ -1043,6 +1043,11 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **角色之間的交接**：`assign` 的目標是另一個角色 bot 時，**不是交辦**——不建交辦列、不開回合，而是走同一條佇列
   （回 `{kind:"handover", routed, queued, duplicate, wake, inbox_event_id}`），批次、節流與「回覆不再叫醒對方」只有一份規則。
   對自己的角色下交辦仍是 400。排隊中的交辦若目標在期間變成角色 bot，`dispatch` 停手並記 `dispatch_failed`，不直接打進對方 pane。
+- **升級時舊事件歸誰**：第一次加 `claimed_by` 欄時，與回填**同一個 transaction**（回填失敗連欄位一起回滾，重啟會再做一次）。
+  只有送達痕跡（`notify_turn_id`、`delivered_at`、`state='delivered'`）的舊事件記給巡檢；`notify_attempts>0` 不算——
+  `defer_notify` 在完全送不出去時也會加一。先前版本曾把「只有嘗試次數」的 pending 誤記給巡檢；migrate 每次都會把
+  「還在 pending、`claimed_by='patrol'`、沒有任何送達痕跡、沒人 ack」的列放回路由表（`mark_delivered` 寫 claim 時一定
+  同時寫送達痕跡，所以這種列只可能出自那次回填），真的被角色收走或結案的工作一律不碰。
 - **一件事只有一個角色**：擁有者的定義是 `COALESCE(claimed_by, role)`——送出去之後看實際收的人，還沒送就看路由表。
   兩個角色的待送查詢、`ack` 的守衛與 UI 過濾都用這一條，所以雙角色剛啟用時、先前由巡檢收走（`claimed_by='patrol'`）
   而被 recover 放回 pending 的協調事件仍歸巡檢，不會被協調者撈去送、卻又寫不進 delivered（每個 tick 重送一次）。
@@ -1065,10 +1070,13 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   唯一防線）；已決定的回 409 `already_decided`，並列出 `allowed_from`。翻案要明講 `revoke`（從 `approved`
   或 `pending`），決定歷程 append-only 記在 `supervisor_notes`（`kind=approval_decision`），
   `GET /supervisor/approvals` 每筆附 `decisions`。撤銷之後不能就地再核准，要開新的一筆申請。
-- **協調者的額度只看自己的帳號**：`claude:<identity>`（含主機前綴）那一把，不退回裸 `claude`——那實務上是 cc0
-  的數字，一顆 cc1／cc2 的協調者照著它等，等的是別人的重置時間。讀不到自己的就是「不知道」，不等於見底。
-  額度狀態每個 tick 重算一次，跟佇列有沒有待辦無關；只在有事要送時才解除的話，佇列清空後 `waiting_quota`
-  會永遠掛著，而看門狗把它當成「不是故障」，協調者再也不會被拉起來。
+- **協調者的額度只看自己的帳號，而且分三態**：key 走 `quota_base_for_host`（`cc0` 這種 env 空的身分讀裸 `claude`，
+  有自己 env 的 cc1／cc2 只讀自己那把），主機要確定——查不到專案或主機欄讀不出來就當不知道，不退回本機借數字。
+  狀態是 Unknown／Available／Blocked：`Available` 要 5 小時與 7 天兩格都有讀數、都沒見底、也沒撞限；空的或不完整的讀數
+  是 Unknown。已知的 `waiting_quota` 只有兩種證據能解除：可信的 Available 讀數，或協調者在**開始等待之後**答完了一個
+  沒留 `turn_error` 的回合（`supervisor_roles.waiting_since`）。prompt 送達（`ok`／`unknown`）**不算**——那只代表字進了
+  pane 或佇列，CLI 可能下一刻才報撞限；等待期間送出後只把下一次重試推到有界間隔之後。額度狀態每個 tick 重算，
+  撞限期間沒有新讀數不改 `notify_next_at`，也不重寫 DB、不推事件。
 - **Remote Control 明講在每顆 bot 的設定檔**：`claude-settings.json` 一律寫 `remoteControlAtStartup`，值就是
   「這顆 bot 的 argv 有沒有 `--remote-control`」。使用者帳號的全域 `settings.json` 開了它的話，原本**每一顆**
   bot 起來都會多開一個手機入口——協調者的 rc off 不能只靠 `args=[]`。
