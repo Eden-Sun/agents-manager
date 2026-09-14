@@ -16,12 +16,15 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const busyClone = useStore((s) => Boolean(s.busy[`clone:${botId}`]))
   const busyFork = useStore((s) => Boolean(s.busy[`fork:${botId}`]))
+  // 接續得了才給 fork：daemon 取的是最近一次記到的 native session，這裡用最近一個 run 當提示。
+  const canFork = useStore((s) => Boolean(s.runs[botId]?.native_session_id))
   const openSettings = useStore((s) => s.openSettings)
   const startBot = useStore((s) => s.startBot)
   const cloneBot = useStore((s) => s.cloneBot)
   const forkBot = useStore((s) => s.forkBot)
   const removeBot = useStore((s) => s.removeBot)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [cloneOpen, setCloneOpen] = useState(false)
   if (!bot) return null
 
   return (
@@ -46,35 +49,55 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             啟動
           </button>
         )}
-        {compact ? null : (
-          <button
-            type="button"
-            className="head-menu-item"
-            role="menuitem"
-            disabled={busyClone}
-            title="同 kind、模型、身份、人設"
-            onClick={() => void cloneBot(botId)}
-          >
-            開同類分身並啟動
-          </button>
-        )}
-        {/* fork 只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來。 */}
+        {/* 分身只給頂層 bot（child 列是 compact）：child 的 pane 與帳號環境是母 agent 開的。 */}
         {compact || bot.managed_by === 'child' ? null : (
           <button
             type="button"
             className="head-menu-item"
             role="menuitem"
-            disabled={busyFork}
-            title="開一顆同設定的新 bot，接續這顆到目前為止的完整對話脈絡，之後各走各的"
-            onClick={() => void forkBot(botId)}
+            disabled={busyClone || busyFork}
+            title="同 kind、模型、身份、人設；可選擇接續目前的對話"
+            onClick={() => setCloneOpen(true)}
           >
-            Fork（接續對話）
+            開同類分身…
           </button>
         )}
         <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>
           刪除…
         </button>
       </HeadMoreMenu>
+
+      <ConfirmDialog
+        open={cloneOpen}
+        title="開同類分身"
+        body={
+          <>
+            照 <strong>{bot.name}</strong> 的設定（kind、模型、身份、人設）開一顆新的並啟動。要接續它目前的對話嗎？
+            <ul className="confirm-choices">
+              <li>
+                <strong>接續對話（fork）</strong>：帶著它到目前為止的完整脈絡，之後各走各的。
+              </li>
+              <li>
+                <strong>全新對話</strong>：從零開始。
+              </li>
+            </ul>
+            {canFork ? null : <p className="confirm-note">這顆還沒有可以接續的對話，只能開全新的。</p>}
+          </>
+        }
+        secondaryLabel="全新對話"
+        onSecondary={() => {
+          setCloneOpen(false)
+          void cloneBot(botId)
+        }}
+        confirmLabel="接續對話（fork）"
+        confirmDisabled={!canFork}
+        width={380}
+        onCancel={() => setCloneOpen(false)}
+        onConfirm={() => {
+          setCloneOpen(false)
+          void forkBot(botId)
+        }}
+      />
 
       <ConfirmDialog
         open={deleteOpen}

@@ -16,6 +16,10 @@ export interface ConfirmDialogProps {
   requireTextLabel?: string
   /** Confirm stays disabled regardless of text — the daemon would 409 anyway; the body says why. */
   confirmDisabled?: boolean
+  /** 取消與確認之間的第二個選擇（例如「全新對話」vs「接續對話」）。 */
+  secondaryLabel?: string
+  secondaryDisabled?: boolean
+  onSecondary?: () => void
   width?: number
   onConfirm: () => void
   onCancel: () => void
@@ -32,6 +36,9 @@ export function ConfirmDialog({
   requireText,
   requireTextLabel,
   confirmDisabled = false,
+  secondaryLabel,
+  secondaryDisabled = false,
+  onSecondary,
   width = 360,
   onConfirm,
   onCancel,
@@ -120,6 +127,11 @@ export function ConfirmDialog({
           <button type="button" className="btn" ref={cancelRef} onClick={onCancel}>
             {cancelLabel}
           </button>
+          {secondaryLabel && onSecondary ? (
+            <button type="button" className="btn" disabled={secondaryDisabled} onClick={onSecondary}>
+              {secondaryLabel}
+            </button>
+          ) : null}
           <button
             type="button"
             className={`btn${danger ? ' danger' : ' primary'}`}
