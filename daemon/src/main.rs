@@ -4,6 +4,7 @@
 //!   serve                       run the daemon (REST + WS + hook receiver)
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
+mod build_info;
 mod agent_relay;
 mod api;
 mod assets;
@@ -237,6 +238,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
+    // 這顆 binary 是哪一版、什麼時候起來的（`GET /api/supervisor` 的 `last_deploy`）。
+    build_info::mark_started();
     tools::spawn_alias_poller(app.clone());
     quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());

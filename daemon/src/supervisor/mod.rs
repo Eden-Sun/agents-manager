@@ -160,6 +160,9 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "remote_provider": roles::Role::Patrol.as_str(),
         "stats": roles::get(&app.db, roles::Role::Patrol).await.map_err(up)?.stats_json(),
         "responder": responder::status_json(app).await?,
+        // 上次成功上線：現在跑的這顆 binary 的 commit 與它起來的時間。前端用它排掉上線以前的
+        // 舊申請，AGM 用它判斷「origin/main 動了」跟「已經上線了」是不是同一件事。
+        "last_deploy": crate::build_info::last_deploy(),
     }))
 }
 
