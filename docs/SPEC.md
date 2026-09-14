@@ -308,9 +308,10 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 佔位字與「有人打了同樣的字」在純文字快照裡一模一樣，所以判斷空框時一律用 `pane.read format=ansi` 讀：只有每個可見字元都
 在 SGR `2`（dim）底下才算佔位字（`38`/`48` 顏色參數裡的 `2` 不算）；讀不到樣式、或只有部分 dim，一律當成非空。
-herdr 不認得 `format` 參數（舊版或遠端）時退回純文字讀法——沒有樣式可看，佔位字自然判非空。打第一個字**之前**讀不到畫面
-一律是 `NotAttempted(composer_unreadable, retry)`（直接送回 409、排隊的放回），不會變成 502 或 `delivery=unknown`；打字之後
-的讀取失敗才是錯誤。
+herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參數）時退回純文字讀法——沒有樣式可看，佔位字自然判非空；herdr
+接受參數卻回 `format: text` 時也照樣用，但每個 pane 每 10 分鐘最多記一次 warn，讓降級看得見。打第一個字**之前**的失敗——讀不到
+畫面（`composer_unreadable`）、證據檔在規劃後被刪除或讀不到而無法建立基準（`transcript_unreadable`）——一律是可重試的
+`NotAttempted`（直接送撤回 turn 回 409、排隊的放回），不會變成 502 或 `delivery=unknown`；只有 `pane.send_text` 之後的失敗才可能是 unknown。
 
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、佔位字後面多了字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。

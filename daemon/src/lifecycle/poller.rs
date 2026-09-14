@@ -1702,6 +1702,36 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text"), 1);
     }
 
+    /// 規劃完、打字前證據檔被刪掉：一個字都沒打，回 NotAttempted(transcript_unreadable)（sol 第十一輪）。
+    #[tokio::test]
+    async fn an_evidence_file_removed_after_planning_is_not_attempted() {
+        let f = fixture("claude", "").await;
+        let t = with_transcript(&f, wide()).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let plan = plan_delivery(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap().unwrap();
+        std::fs::remove_file(&t).unwrap();
+        let out = execute_delivery(&app, &client, &run, &bot, "第一行\n第二行", plan).await.unwrap();
+        assert_eq!(out, not("transcript_unreadable", true));
+        assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0);
+    }
+
+    /// herdr 收了 `format: ansi` 卻回 `format: text`：照樣用，但會（節流地）警告一次。
+    #[tokio::test]
+    async fn a_plain_answer_to_a_styled_read_is_warned_about() {
+        let f = fixture("claude", "").await;
+        live(&f, wide());
+        f.env.herdr.ignore_ansi.store(true, std::sync::atomic::Ordering::SeqCst);
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(), Delivered::Submitted);
+        assert!(!should_warn_plain_for_ansi("pane-17"), "the read already used this pane's warning");
+    }
+
     /// session 在送出途中換掉：transcript 證據不再適用，回 Unproven（不是 Submitted、也不是沒送）。
     #[tokio::test]
     async fn a_session_change_mid_delivery_is_unproven() {
