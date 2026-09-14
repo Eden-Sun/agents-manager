@@ -68,13 +68,14 @@ am_agent_start() {
     _kind=""
     _has_model=0
     _has_effort=0
-    _reserved_done=0
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
         _i=$((_i + 1))
         _orig=$_a
-        # 保留變數（見 am_forward_with_env）：`--` 之前 herdr 自己的 `--env` 帶這兩個 key 的一律丟掉。
+        # 保留變數（見 am_forward_with_env）：`--` 之前帶這兩個 key 的 `--env` 一律丟掉。
+        # 只剝、不補：`herdr agent start` 沒有 `--env`（它在既有 pane 裡開 agent，env 在建 pane 時就注入了），
+        # 補上去會變成未知旗標，每一次開 child 都失敗（sol 六輪，herdr 0.8.2 實測）。
         if [ "$_stop" = 0 ]; then
             case "$_a" in
                 --env)
@@ -120,23 +121,9 @@ am_agent_start() {
                 --) _stop=1 ;;
             esac
         fi
-        # 母 pane 的值放在 `--` 之前（之後是 agent CLI 自己的參數）。
-        if [ "$_stop" = 1 ] && [ "$_reserved_done" = 0 ]; then
-            _reserved_done=1
-            for _k in AM_INSTANCE AM_DATA_DIR; do
-                eval "_v=\${$_k:-}"
-                [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
-            done
-        fi
         _prev=$_orig
         set -- "$@" "$_a"
     done
-    if [ "$_reserved_done" = 0 ]; then
-        for _k in AM_INSTANCE AM_DATA_DIR; do
-            eval "_v=\${$_k:-}"
-            [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
-        done
-    fi
     # 沒指定模型的子 agent 會跑 CLI 的預設（claude 現在是 fable），跟母 bot 明明選的 opus 對不上，
     # 側欄就多出一顆「claude-fable-5-1」看不懂的。母 bot 的模型／強度在 AM_MODEL / AM_EFFORT，
     # 同 kind 就補上；自己有寫 --model 的一律尊重。
@@ -243,7 +230,9 @@ fi
 case "${1:-} ${2:-}" in
     "agent start") am_agent_start "$@" ;;
     "agent prompt") am_agent_prompt "$@" ;;
-    "pane split" | "pane new" | "tab create") am_forward_with_env "$@" ;;
+    # `workspace create` 也會開一個 root pane（herdr 0.8.2 有 `--env`）。`worktree create/open` 同樣開 workspace，
+    # 但沒有 `--env` 可帶：那個 pane 由 herdr server 開，什麼 AM_* 都拿不到，hook 不會觸發，也就不會送錯實例。
+    "pane split" | "pane new" | "tab create" | "workspace create") am_forward_with_env "$@" ;;
     *) exec "$AM_HERDR" "$@" ;;
 esac
 "##;
@@ -495,60 +484,109 @@ mod tests {
         assert!(out.contains(&"CLAUDE_CONFIG_DIR=/other".to_string()));
     }
 
-    /// AM_INSTANCE／AM_DATA_DIR 是保留變數：呼叫者自帶的偽造值（兩種寫法）一律剝掉，只留母 pane 的值；
-    /// 母 pane 沒有（正式實例、遠端）就完全不帶（sol 五輪）。四條會建 pane 的路都驗。
+    /// `--env KEY=V`／`--env=KEY=V` 裡某個 key 的所有值（只看 `--` 之前）。
+    fn env_values(argv: &[String], key: &str) -> Vec<String> {
+        let head = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+        let argv = &argv[..head];
+        argv.iter()
+            .enumerate()
+            .filter_map(|(i, a)| {
+                let v = a.strip_prefix("--env=").map(String::from).or_else(|| (i > 0 && argv[i - 1] == "--env").then(|| a.clone()))?;
+                v.strip_prefix(&format!("{key}=")).map(String::from)
+            })
+            .collect()
+    }
+
+    const PARENTS: [&[(&str, &str)]; 2] = [
+        &[("AM_AGENT_NAME", "p-1")],
+        &[("AM_AGENT_NAME", "p-1"), ("AM_INSTANCE", "a1b2"), ("AM_DATA_DIR", "/data/iso")],
+    ];
+    const FORGED: [&str; 4] = ["--env", "AM_INSTANCE=forged", "--env=AM_DATA_DIR=/forged", "--no-focus"];
+
+    /// 會建 pane 的指令（herdr 0.8.2 有 `--env` 的：pane split、tab create、workspace create；pane new 沿用同一條）：
+    /// 呼叫者自帶的偽造值（兩種寫法）一律剝掉，只留母 pane 的值；母 pane 沒有（正式、遠端）就完全不帶（sol 五、六輪）。
     #[test]
     fn reserved_env_comes_only_from_the_parent_pane() {
         let s = Sandbox::new();
-        let forged = ["--env", "AM_INSTANCE=forged", "--env=AM_DATA_DIR=/forged", "--env", "FOO=kept"];
         let commands: [Vec<&str>; 4] = [
             vec!["pane", "split", "--pane", "w1:p1", "--direction", "right"],
             vec!["pane", "new", "--workspace", "w1"],
             vec!["tab", "create", "--workspace", "w1"],
-            vec!["agent", "start", "review", "--kind", "claude"],
+            vec!["workspace", "create", "--cwd", "/tmp"],
         ];
-        let parents: [&[(&str, &str)]; 2] = [
-            &[("AM_AGENT_NAME", "p-1")],
-            &[("AM_AGENT_NAME", "p-1"), ("AM_INSTANCE", "a1b2"), ("AM_DATA_DIR", "/data/iso")],
-        ];
-        for parent in parents {
+        for parent in PARENTS {
             let iso = parent.iter().any(|(k, _)| *k == "AM_INSTANCE");
             for cmd in &commands {
                 let mut args = cmd.clone();
-                args.extend(forged);
-                // agent start：`--` 之後是 agent CLI 自己的參數，不歸 shim 管。
-                if cmd[0] == "agent" {
-                    args.extend(["--", "--env", "AM_INSTANCE=agent-cli-own"]);
-                }
+                args.extend(FORGED);
+                args.extend(["--env", "FOO=kept"]);
                 let (out, err) = s.run(parent, &args);
                 let case = format!("iso={iso} cmd={cmd:?} out={out:?} err={err}");
-                let head = out.iter().position(|a| a == "--").unwrap_or(out.len());
-                let herdr_args = &out[..head];
-                let values = |key: &str| -> Vec<String> {
-                    herdr_args
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, a)| {
-                            let v = a.strip_prefix("--env=").map(String::from).or_else(|| {
-                                (i > 0 && herdr_args[i - 1] == "--env").then(|| a.clone())
-                            })?;
-                            v.strip_prefix(&format!("{key}=")).map(String::from)
-                        })
-                        .collect()
-                };
-                let want_instance: Vec<String> = if iso { vec!["a1b2".into()] } else { vec![] };
-                let want_dir: Vec<String> = if iso { vec!["/data/iso".into()] } else { vec![] };
-                assert_eq!(values("AM_INSTANCE"), want_instance, "{case}");
-                assert_eq!(values("AM_DATA_DIR"), want_dir, "{case}");
+                let want = |v: &str| if iso { vec![v.to_string()] } else { vec![] };
+                assert_eq!(env_values(&out, "AM_INSTANCE"), want("a1b2"), "{case}");
+                assert_eq!(env_values(&out, "AM_DATA_DIR"), want("/data/iso"), "{case}");
                 assert!(!out.iter().any(|a| a.contains("forged")), "{case}");
-                assert_eq!(values("FOO"), vec!["kept".to_string()], "其他 --env 照舊：{case}");
-                if cmd[0] == "agent" {
-                    assert_eq!(&out[head..], ["--", "--env", "AM_INSTANCE=agent-cli-own"], "{case}");
-                } else {
-                    assert_eq!(&out[..cmd.len()], cmd.as_slice(), "子命令與原參數順序不變：{case}");
-                }
+                assert_eq!(env_values(&out, "FOO"), vec!["kept".to_string()], "其他 --env 照舊：{case}");
+                assert_eq!(&out[..cmd.len()], cmd.as_slice(), "子命令與原參數順序不變：{case}");
             }
         }
+    }
+
+    /// `herdr agent start` 沒有 `--env`（0.8.2：只有 NAME、--kind、--pane、--timeout、`--` 之後的 agent 參數）。
+    /// 母 pane 有值也不能補，否則每一次開 child 都是未知旗標（sol 六輪）；呼叫者自帶的保留值照樣剝掉。
+    #[test]
+    fn agent_start_never_gains_an_env_flag() {
+        let s = Sandbox::new();
+        for parent in PARENTS {
+            let mut args = vec!["agent", "start", "review", "--kind", "claude", "--pane", "w1:p1"];
+            args.extend(&FORGED[..3]);
+            args.extend(["--", "--env", "AM_INSTANCE=agent-cli-own"]);
+            let (out, err) = s.run(parent, &args);
+            let case = format!("parent={parent:?} out={out:?} err={err}");
+            let head = out.iter().position(|a| a == "--").unwrap();
+            assert!(!out[..head].iter().any(|a| a == "--env" || a.starts_with("--env=")), "`--` 之前不能有 --env：{case}");
+            assert_eq!(&out[head..], ["--", "--env", "AM_INSTANCE=agent-cli-own"], "agent CLI 自己的參數原樣：{case}");
+        }
+    }
+
+    /// 真的 herdr 在的話，把 shim 產生的 argv 丟給它的 parser：在最後（`--` 之前）放一個假旗標，
+    /// 回報的未知選項是那個假旗標，就代表前面每個參數它都認得。找不到真的 herdr 就略過。
+    #[test]
+    fn the_generated_argv_parses_with_the_real_herdr() {
+        let Some(real) = real_herdr() else {
+            eprintln!("skip: no real herdr on PATH");
+            return;
+        };
+        let s = Sandbox::new();
+        let cases: [Vec<&str>; 4] = [
+            vec!["agent", "start", "review", "--kind", "claude", "--pane", "w1:p1", "--env", "AM_INSTANCE=forged"],
+            vec!["pane", "split", "--pane", "w1:p1", "--direction", "right", "--env", "AM_DATA_DIR=/forged"],
+            vec!["tab", "create", "--workspace", "w1", "--env=AM_INSTANCE=forged"],
+            vec!["workspace", "create", "--cwd", "/tmp", "--env", "AM_INSTANCE=forged"],
+        ];
+        for parent in PARENTS {
+            for args in &cases {
+                let (mut out, _) = s.run(parent, args);
+                let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
+                out.insert(at, "--am-dry-parse".into());
+                let res = std::process::Command::new(&real).args(&out).output().unwrap();
+                let text = format!("{}{}", String::from_utf8_lossy(&res.stdout), String::from_utf8_lossy(&res.stderr));
+                assert!(
+                    text.contains("unknown option: --am-dry-parse") || text.contains("unexpected argument '--am-dry-parse'"),
+                    "真的 herdr 不認得 shim 產生的參數：parent={parent:?} argv={out:?}\n{text}"
+                );
+            }
+        }
+    }
+
+    /// PATH 上第一個不是 agents-manager shim 的 herdr（或 `AM_REAL_HERDR`）。
+    fn real_herdr() -> Option<std::path::PathBuf> {
+        if let Some(p) = std::env::var_os("AM_REAL_HERDR").map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+            return Some(p);
+        }
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|d| d.join("herdr"))
+            .find(|p| p.is_file() && !std::fs::read(p).map(|b| b.starts_with(b"#!")).unwrap_or(true))
     }
 
     #[test]
