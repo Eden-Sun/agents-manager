@@ -47,8 +47,9 @@
   position: absolute;
   z-index: 20;
   top: calc(100% + 4px);
-  left: 0;
-  width: min(320px, calc(100vw - 24px));
+  /* chip 在標題列右欄，左錨會掉出畫面右緣（手機實測），所以靠右對齊。 */
+  right: 0;
+  width: min(260px, calc(100vw - 24px));
   padding: 8px 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -74,13 +75,22 @@
 
 .rebuild-list li {
   display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr);
+  /* 兩行：誰＋commit＋狀態一行，scope 自己一行（260px 塞不下同一行，擠著看不懂）。 */
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: baseline;
-  gap: 6px;
+  gap: 2px 6px;
+}
+
+.rebuild-list .rebuild-scope {
+  grid-column: 1 / -1;
 }
 
 .rebuild-who {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rebuild-commit {
@@ -107,5 +117,3 @@
   margin-top: 6px;
   color: var(--text-faint);
 }
-
-/* chip 在左上角，所以下拉一律左錨；寬度夾在視窗內，手機不會被切掉。 */

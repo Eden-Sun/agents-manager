@@ -1028,13 +1028,15 @@ export function Sidebar() {
           <div className="head-brand-meta">
             <PaneBadge />
             <ConnBadge socket={socket} connected={connected} />
-            <RebuildBadge />
           </div>
         </div>
         <div className="head-ram">
           <MemBadge />
         </div>
-        <TabsBadge />
+        <div className="head-right">
+          <TabsBadge />
+          <RebuildBadge />
+        </div>
       </div>
 
       {/* SPEC §6.9 */}
