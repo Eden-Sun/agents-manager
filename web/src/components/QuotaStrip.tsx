@@ -521,7 +521,7 @@ function Gauge({
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
               {back ? (
                 <span className="quota-reset-at" title={`用完了，還有 ${back} 重置`}>
-                  ↻{back}
+                  {back}
                 </span>
               ) : (
                 <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
@@ -552,7 +552,7 @@ function Gauge({
                 instead={
                   back ? (
                     <span className="quota-reset-at" title={`用完了，還有 ${back} 重置`}>
-                      ↻{back}
+                      {back}
                     </span>
                   ) : undefined
                 }

@@ -8,10 +8,13 @@
  */
 export const RESET_SOON_MS = 3 * 60 * 60 * 1000
 
+/**
+ * `2h42` / `0h42`——使用者 2026-09-14：「不要 m」。一律 `<小時>h<分>`，不到一小時寫 `0h42`
+ * 而不是裸的數字：那一格旁邊全是百分比，只寫 `42` 會被讀成 42%。
+ */
 function short(ms: number): string {
   const m = Math.max(0, Math.ceil(ms / 60_000))
-  const h = Math.floor(m / 60)
-  return h > 0 ? `${h}h${String(m % 60).padStart(2, '0')}m` : `${m}m`
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
 }
 
 /**
