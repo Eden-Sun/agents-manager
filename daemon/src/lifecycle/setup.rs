@@ -444,7 +444,10 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
         "outputStyle": "Concise",
         // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
         // once per config dir; this is the record accepting it writes (2026-09-08).
-        "skipDangerousModePermissionPrompt": true
+        "skipDangerousModePermissionPrompt": true,
+        // 使用者 2026-09-15：每顆 bot 的 CLI 時間統一台北時間 24 小時制（claude 2.1.257 起的設定；本機、遠端都一樣）。
+        "timeFormat": "24-hour",
+        "timeZone": "Asia/Taipei"
     })
 }
 
@@ -1379,6 +1382,8 @@ mod claude_settings_tests {
             assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "hook");
             assert_eq!(v["outputStyle"], "Concise");
             assert_eq!(v["skipDangerousModePermissionPrompt"], json!(true));
+            assert_eq!(v["timeFormat"], "24-hour");
+            assert_eq!(v["timeZone"], "Asia/Taipei");
         }
     }
 }

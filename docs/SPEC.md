@@ -113,6 +113,8 @@ Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 
 **Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart` 與 `Stop` 兩個 hook，
 command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`。`stop_hook_active = true` 的 Stop 忽略。
 stdin：SessionStart 含 `session_id`、`transcript_path`、`cwd`；Stop 另含 `prompt_id`、`last_assistant_message`、`stop_hook_active`。
+同一個設定檔另外固定寫：`outputStyle: Concise`、`skipDangerousModePermissionPrompt`、`remoteControlAtStartup`（§18），以及 `timeFormat: "24-hour"`＋`timeZone: "Asia/Taipei"`
+（使用者 2026-09-15：CLI 畫面裡的時間一律台北時間 24 小時制；claude 2.1.257 起才認，本機與遠端同一份）。
 
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
 `{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。
