@@ -833,36 +833,68 @@ pub async fn post_approval_decision(
         out["idempotent"] = json!(true);
         return Ok(Json(out));
     }
-    if status == "approved" && current.status != "pending" {
-        return Err(LcError::conflict(
-            "only a pending approval can be approved; ask again with a new request",
-            json!({"approval_id": current.id, "status": current.status, "reason": "already_decided"}),
-        ));
-    }
     let expires = b.expires_in_secs.map(iso_in);
     let actor = match verified {
         Some(r) => format!("{}:{}", store::SUPERVISOR_ID, r.as_str()),
         None => b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string()),
     };
-    // 條件寫入：讀到的狀態還在才寫。另一個角色（或 UI）在中間先決定了，這裡什麼都不寫。
-    let Some(a) = store::decide_approval_from(&app.db, &id, &current.status, status, &actor, b.reason.as_deref(), expires.as_deref())
-        .await
-        .map_err(up)?
-    else {
+    // **第一個裁示定案**：approve／deny 只從 `pending` 寫得進去，而且條件寫在 SQL 裡、不看先前
+    // 讀到的值。否則兩個角色同時決定時，後到的那個會把 `approved` 改成 `denied`——同一筆核准就
+    // 有了兩個「第一次裁示」。要翻案得明講 `revoke`，而且歷程留著（`supervisor_notes`）。
+    let allowed_from: &[&str] = match status {
+        "approved" | "denied" => &["pending"],
+        // 撤銷的是還有效的許可：已核准的收回，還沒決定的等於作廢。
+        _ => &["approved", "pending"],
+    };
+    let mut decided = None;
+    let mut from_status = "";
+    for from in allowed_from {
+        if let Some(a) = store::decide_approval_from(&app.db, &id, from, status, &actor, b.reason.as_deref(), expires.as_deref())
+            .await
+            .map_err(up)?
+        {
+            decided = Some(a);
+            from_status = from;
+            break;
+        }
+    }
+    let Some(a) = decided else {
         let now = store::approval(&app.db, &id).await.map_err(up)?;
+        let status_now = now.as_ref().map(|n| n.status.clone());
+        let reason = if status_now.as_deref() == Some("pending") { "decided_concurrently" } else { "already_decided" };
         return Err(LcError::conflict(
-            "the approval was decided by someone else first; nothing was written",
-            json!({"reason": "decided_concurrently", "approval_id": id,
-                   "status": now.as_ref().map(|n| n.status.clone()), "decided_by": now.as_ref().and_then(|n| n.decided_by.clone())}),
+            "this approval already has a decision; nothing was written",
+            json!({
+                "reason": reason,
+                "approval_id": id,
+                "status": status_now,
+                "decided_by": now.as_ref().and_then(|n| n.decided_by.clone()),
+                "allowed_from": allowed_from,
+                "hint": "翻案要明講 revoke；要重新申請就開一筆新的 approval",
+            }),
         ));
     };
+    let note = store::add_approval_decision(&app.db, &id, from_status, status, &actor, b.reason.as_deref()).await.map_err(up)?;
     app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
-    Ok(Json(a.to_json()))
+    let mut out = a.to_json();
+    out["audit_note_id"] = json!(note);
+    out["decided_from"] = json!(from_status);
+    Ok(Json(out))
 }
 
 pub async fn get_approvals(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let rows = store::approvals(&app.db, 100).await.map_err(up)?;
-    Ok(Json(json!({"approvals": rows.iter().map(store::Approval::to_json).collect::<Vec<_>>()})))
+    // 決定歷程跟著回：核准列只有最後一個狀態，「誰核准的、後來被誰撤銷」要查得到。
+    let mut history = store::approval_decisions(&app.db).await.map_err(up)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|a| {
+            let mut v = a.to_json();
+            v["decisions"] = json!(history.remove(&a.id).unwrap_or_default());
+            v
+        })
+        .collect();
+    Ok(Json(json!({"approvals": out})))
 }
 
 /// Whether a window would be safe *right now*. A read: poll it while you wait, and take the
@@ -1054,6 +1086,96 @@ mod persona_sync_tests {
         })).await.is_err());
         app.db.close().await;
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod approval_decision_tests {
+    use super::*;
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-approval-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        app
+    }
+
+    async fn decide(app: &Arc<App>, id: &str, decision: &str, actor: &str) -> Result<Json<Value>, LcError> {
+        let body: DecisionIn = serde_json::from_value(json!({"decision": decision, "actor": actor})).unwrap();
+        post_approval_decision(State(app.clone()), Path(id.to_string()), HeaderMap::new(), Json(body)).await
+    }
+
+    async fn pending(app: &Arc<App>) -> String {
+        store::create_approval(&app.db, "fixer", "rebuild", "release", Some("abc123"), None).await.unwrap().id
+    }
+
+    /// 第一個裁示定案。後到的 deny 不能把 approved 翻成 denied——那會讓同一筆核准有兩個
+    /// 「第一次決定」，而執行端可能已經拿著 approved 去建置了。
+    #[tokio::test]
+    async fn a_second_opposite_decision_is_refused_not_written() {
+        let app = app().await;
+        let id = pending(&app).await;
+        assert_eq!(decide(&app, &id, "approve", "AGM:patrol").await.unwrap().0["status"], "approved");
+        let err = decide(&app, &id, "deny", "AGM:responder").await.unwrap_err();
+        match err {
+            LcError::Conflict(v) => {
+                assert_eq!(v["reason"], "already_decided");
+                assert_eq!(v["status"], "approved");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "approved", "沒有被改寫");
+    }
+
+    /// 兩個角色同時決定：只有一個寫得進去，另一個拿到 409，狀態是贏的那個。
+    #[tokio::test]
+    async fn concurrent_approve_and_deny_leave_exactly_one_ruling() {
+        let app = app().await;
+        let id = pending(&app).await;
+        let (a, b) = tokio::join!(decide(&app, &id, "approve", "AGM:patrol"), decide(&app, &id, "deny", "AGM:responder"));
+        let winners = [&a, &b].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(winners, 1, "只能有一個裁示：{a:?} / {b:?}");
+        let now = store::approval(&app.db, &id).await.unwrap().unwrap();
+        assert!(now.status == "approved" || now.status == "denied");
+        let winner_status = if a.is_ok() { "approved" } else { "denied" };
+        assert_eq!(now.status, winner_status);
+    }
+
+    /// 翻案要明講 revoke，而且歷程留著（approvals 那一列只有最後一個狀態）。
+    #[tokio::test]
+    async fn revoking_an_approval_keeps_the_whole_history() {
+        let app = app().await;
+        let id = pending(&app).await;
+        decide(&app, &id, "approve", "AGM:responder").await.unwrap();
+        let out = decide(&app, &id, "revoke", "AGM:patrol").await.unwrap().0;
+        assert_eq!(out["status"], "revoked");
+        assert_eq!(out["decided_from"], "approved");
+        let listed = get_approvals(State(app.clone())).await.unwrap().0;
+        let decisions = listed["approvals"][0]["decisions"].as_array().cloned().unwrap_or_default();
+        let pairs: Vec<(String, String)> = decisions
+            .iter()
+            .map(|d| (d["from"].as_str().unwrap_or("").into(), d["to"].as_str().unwrap_or("").into()))
+            .collect();
+        assert_eq!(pairs, vec![("pending".to_string(), "approved".to_string()), ("approved".into(), "revoked".into())]);
+        assert_eq!(decisions[0]["actor"], "AGM:responder", "誰核准的要查得到");
+        // 撤銷之後不能就地再核准：要開新的一筆申請。
+        assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err());
+    }
+
+    /// 重送同一個決定是冪等的（逾時重試不是新的裁示）。
+    #[tokio::test]
+    async fn repeating_the_same_decision_is_idempotent() {
+        let app = app().await;
+        let id = pending(&app).await;
+        decide(&app, &id, "deny", "AGM:patrol").await.unwrap();
+        let again = decide(&app, &id, "deny", "AGM:patrol").await.unwrap().0;
+        assert_eq!(again["idempotent"], json!(true));
+        let listed = get_approvals(State(app.clone())).await.unwrap().0;
+        assert_eq!(listed["approvals"][0]["decisions"].as_array().unwrap().len(), 1, "重試不留第二筆歷程");
     }
 }
 

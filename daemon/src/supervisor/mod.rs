@@ -255,7 +255,7 @@ pub async fn assign(
 
     // The user's own words behind this assignment, with a stable id to dedupe on. A text hash
     // would not be one — two identical asks are two asks.
-    let (source, source_key, request_text) = source_of(app, &manager_id, source_turn_id, text).await?;
+    let (source, source_key, request_text) = source_of(app, &manager_id, source_turn_id, text, actor).await?;
     let request_id = store::upsert_request(&app.db, source, source_key.as_deref(), &request_text)
         .await
         .map_err(up)?;
@@ -371,41 +371,53 @@ async fn source_of(
     manager_id: &str,
     source_turn_id: Option<&str>,
     text: &str,
+    actor: Option<roles::Role>,
 ) -> Result<(&'static str, Option<String>, String), LcError> {
-    // 兩個 AGM 角色的回合都算：協調者依 bot 申請派工時，來源就是它自己的那一回合。
-    let responder = roles::responder_bot(&app.db).await.map_err(up)?.map(|b| b.id);
-    let conv = crate::db::conversation_id(&app.db, manager_id).await.map_err(up)?;
-    let responder_conv = match responder.as_deref() {
-        Some(id) => Some(crate::db::conversation_id(&app.db, id).await.map_err(up)?),
+    // 來源綁**呼叫者自己**（bot token 驗過的角色）。兩個角色同時在回合中時，若照固定順序先撿巡檢
+    // 的回合，協調者派的工就會被記成「使用者對巡檢說的另一句話」——授權與稽核從此對不上人。
+    let actor_bot = match actor {
+        Some(r) => roles::bot_for(&app.db, r).await.map_err(up)?,
         None => None,
     };
+    let conv_of = |id: String| async move { crate::db::conversation_id(&app.db, &id).await.map_err(up) };
     let turn_id = match source_turn_id.map(str::trim).filter(|s| !s.is_empty()) {
+        // 明講了是哪個回合：那是呼叫端拿得出來的證據。驗過的角色只能指自己的回合；沒驗過的
+        // 呼叫端（UI、腳本）仍只能指兩個角色其中之一的回合。
         Some(t) => {
-            let owned: Option<String> =
-                sqlx::query_scalar("SELECT id FROM turns WHERE id=? AND (conversation_id=? OR conversation_id=?)")
-                    .bind(t)
-                    .bind(&conv)
-                    .bind(responder_conv.as_deref().unwrap_or(&conv))
-                    .fetch_optional(&app.db)
-                    .await
-                    .map_err(up)?;
-            if owned.is_none() {
-                return Err(LcError::Bad("source_turn_id is not a turn of the supervisor".into()));
-            }
-            Some(t.to_string())
-        }
-        None => {
-            let mut found = None;
-            for id in std::iter::once(manager_id).chain(responder.as_deref()) {
-                if let Some(r) = crate::db::active_run(&app.db, id).await.map_err(up)? {
-                    if let Some(t) = crate::db::in_flight_turn(&app.db, &r.id).await.map_err(up)? {
-                        found = Some(t.id);
-                        break;
+            let mut convs = Vec::new();
+            match actor_bot.clone() {
+                Some(id) => convs.push(conv_of(id).await?),
+                None => {
+                    convs.push(crate::db::conversation_id(&app.db, manager_id).await.map_err(up)?);
+                    if let Some(id) = roles::bot_for(&app.db, roles::Role::Responder).await.map_err(up)? {
+                        convs.push(crate::db::conversation_id(&app.db, &id).await.map_err(up)?);
                     }
                 }
             }
-            found
+            let sql = format!(
+                "SELECT id FROM turns WHERE id=? AND conversation_id IN ({})",
+                convs.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+            );
+            let mut q = sqlx::query_scalar::<_, String>(&sql).bind(t);
+            for c in &convs {
+                q = q.bind(c);
+            }
+            let owned: Option<String> = q.fetch_optional(&app.db).await.map_err(up)?;
+            if owned.is_none() {
+                let whose = actor.map(roles::Role::as_str).unwrap_or("the supervisor");
+                return Err(LcError::Bad(format!("source_turn_id is not a turn of {whose}")));
+            }
+            Some(t.to_string())
         }
+        // 沒講：只認呼叫者自己現在跑的那一回合。認不出呼叫者就**不猜**別人的回合——
+        // 記成 `assignment_text_fallback`（交辦文字就是交辦文字），不要替某個人編一句話。
+        None => match actor_bot {
+            Some(id) => match crate::db::active_run(&app.db, &id).await.map_err(up)? {
+                Some(r) => crate::db::in_flight_turn(&app.db, &r.id).await.map_err(up)?.map(|t| t.id),
+                None => None,
+            },
+            None => None,
+        },
     };
     let Some(turn_id) = turn_id else {
         return Ok(("assignment_text_fallback", None, text.to_string()));

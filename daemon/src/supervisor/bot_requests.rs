@@ -444,6 +444,79 @@ pub(crate) mod flow_tests {
         assert!(err.is_err());
     }
 
+    /// 兩個角色同時在回合中時，交辦的來源要綁**呼叫者自己**。照固定順序先撿巡檢的回合，
+    /// 協調者派的工就會被記成「使用者對巡檢說的另一句話」，授權與稽核從此對不上人。
+    #[tokio::test]
+    async fn the_assignment_source_follows_the_caller_not_whoever_is_busy_first() {
+        let app = app().await;
+        configure_responder(&app).await;
+        for (bot, run, conv, turn, said) in [
+            ("patrol", "run-p", "c-p", "t-p", "幫我看一下登入流程"),
+            ("resp", "run-r", "c-r", "t-r", "builder 申請重建 abc123"),
+        ] {
+            turn_for(&app, bot, run, conv, turn).await;
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,?,?,'user',?, 'web', ?)")
+                .bind(crate::db::ulid())
+                .bind(conv)
+                .bind(turn)
+                .bind(said)
+                .bind(crate::db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+
+        let by_responder = crate::supervisor::assign(
+            &app, "w1", "去修 builder 的 rebase", "src-resp", None, &[], None, true, None, None, Some(Role::Responder),
+        )
+        .await
+        .unwrap();
+        let by_patrol = crate::supervisor::assign(
+            &app, "w2", "去看登入流程", "src-patrol", None, &[], None, true, None, None, Some(Role::Patrol),
+        )
+        .await
+        .unwrap();
+        let src = |a: &serde_json::Value| -> (String, String) {
+            let rid = a["request_id"].as_str().unwrap().to_string();
+            (rid, String::new())
+        };
+        let (rid_r, _) = src(&by_responder);
+        let (rid_p, _) = src(&by_patrol);
+        let text_of = |rid: String| {
+            let db = app.db.clone();
+            async move {
+                sqlx::query_as::<_, (String, Option<String>)>("SELECT text, source_key FROM supervisor_requests WHERE id=?")
+                    .bind(rid)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap()
+            }
+        };
+        let (text_r, key_r) = text_of(rid_r).await;
+        assert_eq!(key_r.as_deref(), Some("t-r"), "協調者派的工綁它自己的回合");
+        assert_eq!(text_r, "builder 申請重建 abc123");
+        let (text_p, key_p) = text_of(rid_p).await;
+        assert_eq!(key_p.as_deref(), Some("t-p"));
+        assert_eq!(text_p, "幫我看一下登入流程");
+
+        // 認不出呼叫者就不猜：記成交辦文字本身，不替某個人編一句話。
+        let anon = crate::supervisor::assign(
+            &app, "w1", "腳本派的例行工作", "src-anon", None, &[], None, true, None, None, None,
+        )
+        .await
+        .unwrap();
+        let (text_a, key_a) = text_of(anon["request_id"].as_str().unwrap().to_string()).await;
+        assert_eq!(key_a, None);
+        assert_eq!(text_a, "腳本派的例行工作");
+
+        // 明講別人的回合也不行。
+        let err = crate::supervisor::assign(
+            &app, "w1", "借別人的授權", "src-borrow", Some("t-p"), &[], None, true, None, None, Some(Role::Responder),
+        )
+        .await;
+        assert!(err.is_err(), "協調者不能指巡檢的回合當來源");
+    }
+
     /// 同一個 request id 換一段話**不是**重播：回 409 而不是假裝送到了（那會讓申請靜靜消失）。
     #[tokio::test]
     async fn the_same_request_id_with_different_content_is_refused_not_swallowed() {
