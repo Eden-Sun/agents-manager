@@ -30,11 +30,15 @@ pub struct ServerConfig {
     pub listen: String,
     #[serde(default = "default_session")]
     pub herdr_session: String,
+    /// 資料目錄（SQLite、ui-token、spool）。留空＝跟著設定檔所在目錄，預設設定檔就是 `~/.config/agents-manager`。
+    /// 相對路徑以設定檔所在目錄為準；`startup.rs` 負責解析。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { listen: default_listen(), herdr_session: default_session() }
+        Self { listen: default_listen(), herdr_session: default_session(), data_dir: None }
     }
 }
 

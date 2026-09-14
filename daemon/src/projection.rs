@@ -15,6 +15,22 @@ pub fn new_token() -> String {
     (0..32).map(|_| std::char::from_digit(rng.gen_range(0..16), 16).unwrap()).collect()
 }
 
+/// 啟動時的投影：多一道大量軟刪的閘門。**只有** `main.rs` 走這條。
+///
+/// daemon 跑起來之後的投影（API／總管改完設定就重投）不走閘門：那些是當下這顆 daemon 自己剛寫進
+/// config 的單筆改動，一次刪掉一個有很多 bot 的專案是正常操作。會投錯 DB 的是「啟動時拿到一份陌生
+/// config」這個形狀（2026-09-14 事故），擋在這裡才不會把正常刪除也擋掉。
+pub async fn project_config_at_startup(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
+    let cfg = store.get().await;
+    let live_projects: std::collections::HashSet<String> =
+        cfg.projects.iter().filter_map(|p| p.id.clone()).collect();
+    let live_bots: std::collections::HashSet<String> =
+        cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
+    // 任何寫入之前先擋：投錯 DB 的投影長得就像「config 裡什麼都沒有」。
+    guard_removals(pool, &live_projects, &live_bots).await?;
+    project_config(store, pool).await
+}
+
 /// Fill in missing ids (writing them back to the TOML) and upsert everything into SQLite.
 pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
     // 1. fill in ids / canonicalize paths, write back only if something changed.
@@ -95,12 +111,12 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
 
     let cfg = store.get().await;
     let now = db::now();
-    let mut live_projects: HashSet<String> = HashSet::new();
-    let mut live_bots: HashSet<String> = HashSet::new();
+    let live_projects: HashSet<String> = cfg.projects.iter().filter_map(|p| p.id.clone()).collect();
+    let live_bots: HashSet<String> =
+        cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
 
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
-        live_projects.insert(pid.clone());
         sqlx::query(
             "INSERT INTO projects (id, path, label, host, position, created_at) VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
@@ -118,7 +134,6 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
 
         for (b_at, b) in p.bots.iter().enumerate() {
             let bid = b.id.clone().unwrap();
-            live_bots.insert(bid.clone());
             let args_json = serde_json::to_string(&b.args)?;
             let env_json = serde_json::to_string(&b.env)?;
             let token = new_token();
@@ -175,6 +190,74 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
     Ok(())
 }
 
+/// 一次從 config 消失超過這麼多列，就不是「使用者刪了一顆」，而是投影投錯了 DB。
+const MAX_REMOVED: usize = 3;
+/// 或是一口氣少掉三成以上；兩顆以上才算，免得「三顆刪一顆」這種正常操作被擋。
+const MAX_REMOVED_RATIO: f64 = 0.30;
+/// 真的要刪這麼多（人已確認）時，用這個 env 放行一次。
+pub const ALLOW_BULK_ENV: &str = "AM_ALLOW_BULK_DELETE";
+
+fn too_many(gone: usize, total: usize) -> bool {
+    gone > MAX_REMOVED || (gone > 1 && gone as f64 > total as f64 * MAX_REMOVED_RATIO)
+}
+
+fn some_names(names: &[String]) -> String {
+    let head: Vec<&str> = names.iter().take(5).map(String::as_str).collect();
+    if names.len() > head.len() {
+        format!("{}…", head.join("、"))
+    } else {
+        head.join("、")
+    }
+}
+
+/// 大量軟刪的閘門（2026-09-14 事故）：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，
+/// 8 秒內把 15 顆 bot、6 個專案標成 `deleted_at`。啟動時 DB 的活列＝上一次投影的結果，
+/// 所以「config 空了但 DB 還有列」必然是拿錯 config／開錯 DB，不是使用者剛刪完。
+async fn guard_removals(
+    pool: &SqlitePool,
+    live_projects: &HashSet<String>,
+    live_bots: &HashSet<String>,
+) -> Result<()> {
+    // `child` bot 本來就不在 config.toml 裡，不算「少掉」。
+    let db_bots: Vec<db::Bot> =
+        db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
+    let db_projects = db::live_projects(pool).await?;
+    let gone_bots: Vec<String> =
+        db_bots.iter().filter(|b| !live_bots.contains(&b.id)).map(|b| b.name.clone()).collect();
+    let gone_projects: Vec<String> =
+        db_projects.iter().filter(|p| !live_projects.contains(&p.id)).map(|p| p.label.clone()).collect();
+    if gone_bots.is_empty() && gone_projects.is_empty() {
+        return Ok(());
+    }
+
+    let empty_config = live_projects.is_empty();
+    let bulk = too_many(gone_bots.len(), db_bots.len()) || too_many(gone_projects.len(), db_projects.len());
+    if !empty_config && !bulk {
+        return Ok(());
+    }
+
+    let why = if empty_config { "config.toml 沒有任何專案" } else { "一次少掉太多列" };
+    let detail = format!(
+        "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）",
+        db_bots.len(),
+        db_projects.len(),
+        gone_bots.len(),
+        some_names(&gone_bots),
+        gone_projects.len(),
+        some_names(&gone_projects),
+    );
+    if std::env::var(ALLOW_BULK_ENV).map(|v| v == "1").unwrap_or(false) {
+        tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{detail}）");
+        return Ok(());
+    }
+    tracing::error!("拒絕投影 config.toml：{detail}");
+    bail!(
+        "拒絕投影 config.toml：{detail}。\
+         這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
+         先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪就用 {ALLOW_BULK_ENV}=1 放行一次。"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +276,79 @@ mod tests {
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
         error
+    }
+
+    fn config_text(bots: &[&str]) -> String {
+        let mut text = String::from(
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n",
+        );
+        for b in bots {
+            text.push_str(&format!("\n[[projects.bots]]\nid = '{b}'\nname = '{b}'\nkind = 'claude'\n"));
+        }
+        text
+    }
+
+    async fn project_text(path: &std::path::Path, pool: &SqlitePool, text: &str) -> Result<()> {
+        std::fs::write(path, text).unwrap();
+        project_config_at_startup(&ConfigStore::load(path.to_path_buf()).await.unwrap(), pool).await
+    }
+
+    /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，8 秒軟刪 15 顆 bot／6 個專案。
+    #[tokio::test]
+    async fn refuses_an_empty_config_over_a_populated_db() {
+        let dir = std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4);
+
+        let err = project_text(&path, &pool, "[server]\nlisten = '127.0.0.1:7788'\n")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("拒絕投影"), "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "拒絕投影時一列都不能動");
+        assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1);
+
+        // 人確認過就放行一次。
+        std::env::set_var(ALLOW_BULK_ENV, "1");
+        let out = project_text(&path, &pool, "[server]\nlisten = '127.0.0.1:7788'\n").await;
+        std::env::remove_var(ALLOW_BULK_ENV);
+        out.unwrap();
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
+        assert_eq!(db::live_projects(&pool).await.unwrap().len(), 0);
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 正常路徑不變：刪一顆還是刪一顆。
+    #[tokio::test]
+    async fn a_single_removal_still_projects() {
+        let dir = std::env::temp_dir().join(format!("am-projection-one-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
+        project_text(&path, &pool, &config_text(&["b1", "b2", "b3"])).await.unwrap();
+        let live: Vec<String> = db::live_bots(&pool).await.unwrap().into_iter().map(|b| b.id).collect();
+        assert_eq!(live, vec!["b1", "b2", "b3"]);
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_threshold_lets_normal_deletes_through() {
+        assert!(!too_many(1, 1));
+        assert!(!too_many(1, 20));
+        assert!(!too_many(3, 20));
+        assert!(too_many(4, 20));
+        assert!(too_many(2, 4));
+        assert!(too_many(15, 15));
     }
 
     #[tokio::test]

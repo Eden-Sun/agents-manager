@@ -32,3 +32,5 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = "2"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
+# flock(2)：同一個資料目錄只准一顆 daemon（startup.rs）
+libc = "0.2"
