@@ -1,0 +1,312 @@
+/* components/ImageShelf.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.shelf-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Same 60px as `.main-head`, so the two headers read as one line. */
+
+.shelf-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 60px;
+  min-height: 60px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+}
+
+.shelf-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.shelf-count {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+.shelf-head .shelf-clear:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.shelf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.shelf-empty {
+  margin: 0;
+  padding: 4px 2px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+.shelf-card {
+  position: relative;
+  flex: none;
+}
+
+/* Long press opens the preview, so the iOS callout / text selection has to go. */
+
+.shelf-card-main {
+  -webkit-touch-callout: none;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  text-align: left;
+  cursor: grab;
+}
+
+.shelf-card-main:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.shelf-card-main img {
+  width: 100%;
+  height: 74px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  pointer-events: none;
+}
+
+.shelf-card-name {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shelf-card-size {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* Image stays parked (often sent to several bots), so the only feedback is this flash. */
+
+.shelf-card.handed .shelf-card-main {
+  border-color: var(--status-ok);
+}
+
+.shelf-card.handed .shelf-card-size {
+  color: var(--status-ok);
+  font-weight: 600;
+}
+
+.shelf-card-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.shelf-card-x:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.shelf.dropping .shelf-body {
+  background: var(--accent-soft);
+}
+
+.shelf-veil {
+  position: absolute;
+  inset: 6px;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
+.shelf-handle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 38px;
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.shelf-handle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.shelf-handle-label {
+  writing-mode: vertical-rl;
+  letter-spacing: 1px;
+}
+
+/* A 38px handle is hard to hit while dragging a file, so the collapsed rail grows this pad.
+   Absolute on purpose: widening the grid column mid-drag would reflow the chat under the pointer. */
+
+.shelf-pad {
+  position: absolute;
+  top: 50%;
+  right: 46px;
+  z-index: 22;
+  translate: 0 -50%;
+  width: 168px;
+  padding: 22px 12px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.shelf-pad.over {
+  background: var(--accent-soft);
+}
+
+@media (width <= 1024px) {
+  .shelf-head {
+    height: 42px;
+    min-height: 42px;
+  }
+
+  .shelf-list {
+    flex-direction: row;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .shelf-card {
+    width: 104px;
+  }
+
+  .shelf-card-main img {
+    height: 64px;
+  }
+
+  .shelf-empty {
+    padding: 2px 4px;
+  }
+
+  .shelf-handle {
+    flex-direction: row;
+    justify-content: center;
+    width: 100%;
+    height: 38px;
+    padding: 0;
+    gap: 8px;
+  }
+
+  .shelf-handle-label {
+    writing-mode: horizontal-tb;
+  }
+
+  .shelf-pad {
+    display: none;
+  }
+}
+
+/* 放大預覽刻意浮在托盤**外面**，永不蓋住卡片的移除鍵；`pointer-events: none`。位置由 `ShelfPeek` 量，`--peek-avail` 是上方剩餘高度。 */
+
+.shelf-peek {
+  position: fixed;
+  z-index: 40;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+.shelf-peek img {
+  display: block;
+  /* 圖只到原尺寸（小圖放大只會糊）。 */
+  max-width: 100%;
+  margin: 0 auto;
+  /* 34px 是檔名那行 + padding。 */
+  max-height: min(60vh, calc(var(--peek-avail, 60vh) - 34px));
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--bg-hover);
+}
+
+.shelf-peek-cap {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 預覽中的卡片標一下，否則看不出正在看哪張。 */
+
+.shelf-card.peeking .shelf-card-main {
+  border-color: var(--accent);
+}
+
+/* 手機暫存區預設收起（`ImageShelf` `readOpen` fallback）：展開在 390px 吃掉約 120px。 */
+
+@media (width <= 640px) {
+  .shelf-handle {
+    height: 36px;
+  }
+}

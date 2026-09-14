@@ -12,6 +12,7 @@ import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
 import type { ShelfItem } from '../store/shelf'
 import { useStore } from '../store/store'
 import { MobilePreviewButton } from './MobilePreview'
+import './imageShelf.css'
 
 const OPEN_KEY = 'am.shelf.open'
 

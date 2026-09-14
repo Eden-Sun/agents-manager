@@ -1,0 +1,127 @@
+/* components/GitBar.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.git-bar {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.git-stat,
+.git-ab {
+  display: inline-flex;
+  gap: 5px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.git-stat.dirty .git-ins {
+  color: var(--lamp-green);
+}
+
+.git-stat.dirty .git-del {
+  color: var(--danger);
+}
+
+.git-ab {
+  color: var(--accent-ink);
+}
+
+.git-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 桌面：git 動作平常收起，hover／Tab 才彈出；上緣 padding 接住游標，移過去不會斷。 */
+
+@media (hover: hover) and (width > 640px) {
+  .git-bar {
+    position: relative;
+  }
+
+  .git-actions {
+    position: absolute;
+    top: 100%;
+    left: -8px;
+    z-index: 30;
+    display: none;
+    padding: 6px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--bg-panel);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+  }
+
+  .git-actions::before {
+    content: '';
+    position: absolute;
+    inset: -8px 0 100%;
+  }
+
+  .git-bar:hover .git-actions,
+  .git-bar:focus-within .git-actions,
+  .git-actions.open {
+    display: inline-flex;
+  }
+}
+
+.git-commit-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-commit-msg {
+  width: 260px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
+/* GitBar 在 390px 排不下；`.context-bar` 不能捲（會剪掉 `.issues-pop`），所以捲 git 這段自己。 */
+
+@media (width <= 640px) {
+  .context-bar > .git-bar {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* scroll shadow：`local` 層跟內容走，捲到底時蓋住 `scroll` 層陰影，只有真的還有東西時才看得見。 */
+    background:
+      linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 32%), transparent) left / 10px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 32%), transparent) right / 10px 100% no-repeat scroll;
+  }
+
+  .context-bar > .git-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 捲軸內不可再縮；`+N −M` 排最前面。 */
+
+  .context-bar > .git-bar > * {
+    flex: none;
+  }
+
+  /* 260px 的訊息框在 390px 等於逼人橫捲著打字。 */
+
+  .git-commit-msg {
+    width: 40vw;
+    min-width: 120px;
+  }
+}
+
+@media (width <= 640px) {
+  .context-bar > .git-bar {
+    flex: 1 0 100%;
+    order: 1;
+    padding: 2px 0 3px;
+  }
+}

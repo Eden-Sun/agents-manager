@@ -1,0 +1,51 @@
+/* components/CopyChip.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.copy-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 340px;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.copy-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.copy-chip.done {
+  border-color: var(--lamp-green);
+}
+
+.copy-chip-label {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.copy-chip-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-chip-ok {
+  flex: none;
+  color: var(--status-ok);
+}
+
+/* run 識別 / 逃生門（debug）：只加新 class，顏色全走既有 token。 */
+
+/* pane 晶片 shrink 較大，寬度不夠時先讓，不截 bot 名字。 */
+
+.main-head > .copy-chip {
+  flex: 0 20 auto;
+  max-width: 150px;
+}

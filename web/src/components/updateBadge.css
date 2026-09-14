@@ -1,0 +1,81 @@
+/* components/UpdateBadge.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* 版本被窄視窗收掉時由升級鈕自己貼右。 */
+
+.sl-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--lamp-green) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--lamp-green) 10%, transparent);
+  color: var(--lamp-green);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sl-update:hover:not(:disabled) {
+  border-color: var(--lamp-green);
+}
+
+.sl-update:disabled {
+  color: var(--text-faint);
+  border-color: var(--border-strong);
+  background: none;
+  cursor: default;
+}
+
+.bot-update-dot {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: inline-grid;
+  place-items: center;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--lamp-green);
+  line-height: 1;
+  /* 2026-09-11：這顆就是「套用更新」按鈕；11px 太小，用 `::after` 撐 20px 透明命中區。 */
+  cursor: pointer;
+  z-index: 1;
+  filter: drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
+}
+
+.bot-update-dot::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+}
+
+.bot-update-dot:hover {
+  color: var(--lamp-green);
+  filter: brightness(1.25) drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
+}
+
+.bot-update-dot:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+@media (width <= 640px) {
+  /* 390px 上整句會把分頁擠到第二行；手機只留箭頭，字在 title。 */
+
+  .main-head .update-badge .update-badge-text {
+    display: none;
+  }
+}
+
+/* 1100px 以下放不下整句（bot 名被截、徽章被切）：同手機只留箭頭。 */
+
+@media (width <= 1100px) {
+  .main-head .update-badge .update-badge-text {
+    display: none;
+  }
+}

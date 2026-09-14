@@ -2,6 +2,7 @@ import { useStore } from '../store/store'
 import { LOCAL_HOST } from '../api/types'
 import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPopover } from './MemPopover'
+import './memBadge.css'
 
 /** 1.4G / 820M / 64M — 一格寬度就要看得懂，所以個位數才給小數。 */
 export function humanBytes(n: number): string {

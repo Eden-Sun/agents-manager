@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
+import './projectNameField.css'
 
 /**
  * In-place project rename, same gesture as `BotNameField`; safe while bots run (docs/API.md §3).

@@ -13,6 +13,7 @@ import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
+import './quotaStrip.css'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;

@@ -1,0 +1,71 @@
+/* components/AttachButton.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.attach-btn:hover:not(:disabled),
+.attach-btn.on {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.attach-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(260px, calc(100vh - 32px));
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: left;
+  white-space: normal;
+}
+
+.attach-hint {
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.attach-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attach-cmd {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.project-head:has(.attach-pop) {
+  overflow: visible;
+  z-index: 31;
+}
+
+.project-head:has(.attach-pop) .project-head-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.project-head .attach-pop {
+  left: 8px;
+  right: 8px;
+  width: auto;
+}
+
+/* 指令泡泡已開時不再疊 tooltip（鍵按完還留 focus）。 */
+
+.attach-btn.on[data-tip]::after {
+  display: none;
+}

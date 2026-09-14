@@ -1,0 +1,77 @@
+/* components/KindTag.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.kind-tag.icon {
+  padding: 0;
+  width: 20px;
+  justify-content: center;
+}
+
+.kind-tag.icon svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+.bot-row.compact .kind-tag.icon {
+  width: 18px;
+}
+
+.kind-tag {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.kind-tag.claude {
+  background: #f6ede4;
+  border-color: #e0c8ae;
+  color: var(--kind-claude);
+}
+
+.kind-tag.codex {
+  background: #e7f6f1;
+  border-color: #b3e0d3;
+  color: var(--kind-codex);
+}
+
+.kind-tag.grok {
+  background: #efeaff;
+  border-color: #cfc2ff;
+  color: var(--kind-grok);
+}
+
+@media (prefers-color-scheme: dark) {
+  .kind-tag.claude {
+    background: #38291b;
+    border-color: #5c4429;
+    color: var(--kind-claude);
+  }
+
+  .kind-tag.codex {
+    background: #12261f;
+    border-color: #1f5546;
+    color: var(--kind-codex);
+  }
+
+  .kind-tag.grok {
+    background: #221d38;
+    border-color: #41387a;
+    color: var(--kind-grok);
+  }
+}
+
+.kind-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+}
+
+.kind-display-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}

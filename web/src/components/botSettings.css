@@ -51,3 +51,246 @@
   border: 0;
   background: none;
 }
+
+/* components/BotSettingsPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.bot-name > .persona-mark {
+  flex: none;
+}
+
+/* Pop-up anchored to the gear. 只是擺放框不是遮罩（`pointer-events: none`）：反灰吃點擊會讓人開設定時不能拖圖、點別的 bot；
+   關閉靠外部 pointerdown 與 Escape。真正的 modal 才用 backdrop。 */
+
+.bs-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  pointer-events: none;
+}
+
+.bot-settings {
+  position: relative;
+  pointer-events: auto;
+  width: min(520px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* First paint is only for measuring the card; don't show it centred for a frame. */
+
+.bot-settings.measuring {
+  visibility: hidden;
+}
+
+.bot-settings.anchored {
+  position: fixed;
+  margin: 0;
+  max-height: calc(100vh - 24px);
+}
+
+.bs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 56px;
+  min-height: 56px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+  flex: none;
+}
+
+.bs-head strong {
+  font-size: 14px;
+}
+
+.bs-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bs-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bs-banner.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.bs-banner.ok {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.bs-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.bs-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.bs-body > .form {
+  max-width: none;
+  gap: 20px;
+  padding: 0;
+}
+
+.bs-body .field input[type='text']:disabled,
+.bs-body .field select:disabled {
+  color: var(--text-dim);
+  background: var(--bg-hover);
+  -webkit-text-fill-color: var(--text-dim);
+  opacity: 1;
+}
+
+.bs-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 72px;
+  min-height: 72px;
+  padding: 0 24px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-side);
+  flex: none;
+  position: sticky;
+  bottom: 0;
+}
+
+/* 不能存的「儲存」退成中性 disabled，不要淡藍實心像可按。 */
+
+.bs-danger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 32px;
+  padding: 12px 14px;
+  /* 紅色留給標題與按鈕；整塊粉紅會蓋過表單。 */
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.bs-danger > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.bs-danger strong {
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.bs-danger .hint {
+  margin: 2px 0 0;
+  font-family: var(--font-ui);
+  color: var(--text-dim);
+}
+
+@media (width <= 1080px) {
+  .bs-danger {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.persona-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* v4.0: identity login per host */
+
+/* 「未登入」跟 `.kind-missing-reason` 同語彙：警示色、不擋操作。 */
+
+.identity-logged-out {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+.identity-logged-out.is-unknown {
+  color: var(--text-dim);
+}
+
+.identity-selection-warning.is-unknown {
+  color: var(--text-dim);
+}
+
+.identity-login.is-unknown {
+  color: var(--text-faint);
+}
+
+@media (width <= 640px) {
+  /* `.anchored` 保險：手機不量齒輪位置，免得殘留 inline left/top 推歪 sheet。 */
+
+  .bot-settings,
+  .bot-settings.anchored {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .bs-head,
+  .bs-banner,
+  .bs-body,
+  .bs-actions {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .bs-actions {
+    height: auto;
+    min-height: 64px;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+.bs-idents {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.bs-idents-k {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}

@@ -8,6 +8,7 @@ import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 import { linkifyTerm } from './TermLinks'
 import { useTermWrap } from './termWrap'
+import './blockedPanel.css'
 
 /**
  * SPEC §3.2：agent `blocked` 時對話上方的快照＋按鍵面板，`BlockedModal` 關掉後的留守；

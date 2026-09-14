@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchChangelog, type ChangelogReply } from '../api/changelog'
+import './updateChangelog.css'
 
 /**
  * 「有更新 · 重啟套用」確認框裡的 changelog（2026-09-10 使用者需求：先看改了什麼才重啟）。

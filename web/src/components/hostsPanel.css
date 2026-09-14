@@ -1,0 +1,120 @@
+/* components/HostsPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.hosts-empty {
+  padding: 6px 4px;
+}
+
+.host-list {
+  display: grid;
+  gap: 4px;
+  padding: 4px 0 2px;
+}
+
+.host-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.host-row .lamp {
+  margin-top: 5px;
+}
+
+.host-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.host-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.host-ssh {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.host-err {
+  font-size: 11px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.host-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.host-shells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.host-shell {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.host-shell.active {
+  border-color: var(--accent);
+}
+
+.host-shell-open {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 1px 2px;
+  cursor: pointer;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-shell-open:hover {
+  color: var(--text);
+}
+
+.host-result {
+  margin: 6px 0 2px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.host-result.ok {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.host-result.err {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}

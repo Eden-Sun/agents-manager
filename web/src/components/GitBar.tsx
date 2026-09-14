@@ -3,6 +3,7 @@ import * as api from '../api'
 import type { GitSummary } from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
+import './gitBar.css'
 
 /**
  * 專案 checkout 的 git 一眼看（2026-09-08）：行數差、upstream 差，與 commit / push / pull 快捷鍵。

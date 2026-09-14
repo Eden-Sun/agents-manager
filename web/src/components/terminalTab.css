@@ -1,0 +1,59 @@
+/* components/TerminalTab.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.term-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+  gap: 8px;
+}
+
+/* terminal: unreadable pane notice */
+
+.term-warn {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 按鈕是唯一該搶眼的，但書刻意比本文再淡一階。 */
+
+.term-warn-actions {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/* `flex-basis` 夠大，窄視窗時但書整段換到按鈕下，不被擠成一欄一字。 */
+
+.term-warn-caveat {
+  flex: 1 1 320px;
+  min-width: 0;
+  margin-top: 4px;
+  color: color-mix(in srgb, var(--warn) 75%, transparent);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* 搬完後警示不成立但話還沒講完：同位置用中性色說完。 */
+
+.term-warn.is-done {
+  background: var(--bg-sunken);
+  border-bottom-color: var(--border);
+  color: var(--text-dim);
+}
+
+.term-warn.is-done .term-warn-caveat {
+  color: var(--text-faint);
+}
+
+@media (width <= 640px) {
+  .term-pane {
+    padding: 10px 12px 12px;
+  }
+}

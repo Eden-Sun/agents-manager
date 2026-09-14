@@ -1,0 +1,75 @@
+/* components/MemBadge.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* herdr 進程樹記憶體（SPEC §15）。本機固定左上角；遠端只在標題列看著那台時出現。等寬數字防跳動。 */
+
+.mem-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: default;
+  white-space: nowrap;
+}
+
+.mem-badge .mem-k {
+  color: var(--text-faint);
+  letter-spacing: 0.03em;
+}
+
+.mem-badge .mem-v {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「剩 N」與已用量同一行，總容量只放 tooltip：折第二行會撐高徽章、擠掉分頁列與連線（2026-09-13 實拍）。 */
+
+.mem-badge .mem-free {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.mem-badge.mem-low {
+  border-color: var(--danger);
+}
+
+.mem-badge.mem-low .mem-free {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+/* 量不到就顯示「—」，不拿 0 假裝。 */
+
+.mem-badge.tabs-hot {
+  border-color: var(--danger);
+}
+
+.mem-tabs {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.mem-badge.partial .mem-v {
+  color: var(--warn);
+}
+
+/* 遠端那顆掛在標題列，跟 host-badge 同一種語彙。 */
+
+.mem-badge.remote {
+  flex: none;
+  border-color: var(--border-strong);
+}
+
+.mem-badge.remote .mem-k {
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-weight: 650;
+}

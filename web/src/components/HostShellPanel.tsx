@@ -8,6 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './TermLinks'
 import { setTermWrap, useTermWrap } from './termWrap'
+import './hostShellPanel.css'
 
 /**
  * 對某台主機開著的 shell：終端快照 + 一行指令輸入；不是 bot（沒有 run／回合／訊息）。

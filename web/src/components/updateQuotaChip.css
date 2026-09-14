@@ -1,0 +1,90 @@
+/* components/UpdateQuotaChip.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.confirm-note {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--border-strong);
+  background: var(--bg-sunken);
+  border-radius: var(--radius);
+}
+
+/* 單欄可捲：十顆以上時不能把按鈕擠出畫面。 */
+
+.confirm-list {
+  margin: 0 0 8px;
+  padding: 0 0 0 18px;
+  max-height: 168px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.confirm-list.dim {
+  color: var(--text-dim);
+}
+
+/* 「claude 有更新」（UpdateQuotaChip.tsx）。2026-09-11 使用者：跟側欄 `.bot-update-dot` 一致——**綠色裸 chevron，不要方框**。 */
+
+.quota-update {
+  flex: none;
+  /* 對齊量表第一行（5h），不要垂直置中：置中時浮在空白中間不屬於任何東西（2026-09-11 使用者）。 */
+  align-self: flex-start;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin-top: 2px;
+  margin-left: 8px;
+  margin-right: 7px;
+  padding: 0 2px;
+  font-size: 11px;
+  font-weight: 650;
+  border: 0;
+  background: none;
+  color: var(--lamp-green);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* 1px 分隔線比 chip 上下各高 3px，才讀得出是「換一組」而非 chip 邊框。 */
+
+.quota-update::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--border);
+}
+
+/* 用 2px 內距不用 gap（額度區塊一律不留 gap 間距）。 */
+
+.quota-update-n {
+  padding-left: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-update:hover:not(:disabled) {
+  filter: brightness(1.25);
+}
+
+.quota-update:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 有更新但全在忙：數字改「在忙幾顆」並退成灰——按不動，不該搶眼。 */
+
+.quota-update.waiting,
+.quota-update:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.quota-update.running.done {
+  cursor: pointer;
+}
+
+.quota-update.running.bad {
+  color: var(--danger);
+}

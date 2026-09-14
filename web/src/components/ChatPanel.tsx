@@ -46,6 +46,7 @@ import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
+import './chatPanel.css'
 
 // `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
 const SOURCE_LABEL: Record<string, string> = {

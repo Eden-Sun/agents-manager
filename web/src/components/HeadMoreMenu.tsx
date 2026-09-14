@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { MoreIcon } from './Icons'
+import './headMoreMenu.css'
 
 /** 標題列／側欄 project 列的 `⋯`：刪除收進來，照 UI-DECISIONS「一般畫面最多一個常駐危險操作」。 */
 export function HeadMoreMenu({ children, label }: { children: ReactNode; label: string }) {

@@ -1,0 +1,216 @@
+/* components/MemPopover.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.mem-pop-machine {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mem-pop-machine.low {
+  color: var(--danger);
+}
+
+.mem-pop-machine-used {
+  color: var(--text-faint);
+}
+
+.mem-pop-browsers {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mem-pop-browsers.hot {
+  color: var(--danger);
+}
+
+/* 紅框小鍵 hover 直接填滿：只壓深底色時紅字剩 4.3:1。 */
+
+.mini-btn.danger:hover:not(:disabled),
+.mem-pop-act button.danger:hover:not(:disabled) {
+  background: var(--btn-danger-bg);
+  border-color: var(--btn-danger-bg);
+  color: var(--btn-danger-fg);
+}
+
+/* RAM 程序清單（SPEC §15.2）：語彙沿用 `.quota-pop`；是表格，因為使用者要在幾十列裡比大小找能砍的。 */
+
+.mem-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.mem-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.mem-pop {
+  position: fixed;
+  z-index: 80;
+  width: min(560px, calc(100vw - 24px));
+  max-width: none;
+  max-height: 460px;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.mem-pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mem-pop-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+
+.mem-pop-refresh {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mem-pop-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.mem-pop-table th {
+  padding: 0 6px 4px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+  font-weight: 600;
+  text-align: left;
+}
+
+.mem-pop-table td {
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: baseline;
+}
+
+/* bot 列淡一點：重點是「可以砍的」。 */
+
+.mem-pop-table tr.is-bot {
+  color: var(--text-faint);
+}
+
+.mem-pop-size {
+  width: 52px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* argv 一行，全文在 tooltip——換行難掃大小。 */
+
+.mem-pop-argv {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.mem-pop-owner {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.mem-pop-peek {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mem-pop-peek:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.mem-pop-caret {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.mem-pop-act {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.mem-pop-act button {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mem-pop-act button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.mem-pop-act button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mem-pop-err {
+  margin: 0;
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.mem-pop-empty,
+.mem-pop-foot {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+@media (width <= 640px) {
+  .mem-open {
+    min-width: 40px;
+  }
+}

@@ -7,6 +7,7 @@ import { useStore } from '../store/store'
 import { humanBytes } from './MemBadge'
 import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPaneModal } from './MemPaneModal'
+import './memPopover.css'
 
 /**
  * 「RAM」點開的清單（SPEC §15.2）：依 `subtree_bytes` 降冪（砍掉能省多少）並列 owner。

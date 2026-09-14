@@ -1,0 +1,57 @@
+/* components/TabsBadge.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* 本機瀏覽器分頁數 / RAM，超線才變琥珀色。 */
+
+.tabs-badge {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: default;
+  justify-self: end;
+}
+
+.tabs-badge .tabs-v {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabs-badge .tabs-one {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  white-space: nowrap;
+}
+
+.tabs-badge .tabs-one + .tabs-one {
+  margin-left: 0;
+}
+
+.tabs-badge.hot .tabs-one {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+
+.tabs-badge .tabs-sep {
+  margin: 0 2px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.tabs-badge.hot {
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+
+.tabs-badge.hot .tabs-v {
+  color: var(--warn);
+}

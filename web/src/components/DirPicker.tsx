@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { listDirs } from '../api'
 import type { DirListing } from '../api/types'
+import './dirPicker.css'
 
 /**
  * Server-backed directory browser (browsers cannot expose real paths); with `host`, listed over ssh (SPEC §11.5).

@@ -1,0 +1,830 @@
+/* components/QuotaStrip.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.main-head > .quota-strip {
+  flex: none;
+}
+
+@media (width <= 640px) {
+  .main-head .quota-open {
+    gap: 5px;
+    padding: 4px 4px;
+  }
+
+  .main-head .quota-hp {
+    gap: 5px;
+    padding: 3px 5px;
+    min-height: 26px;
+  }
+
+  /* `.quota-open` 已有 5px gap，再加分隔線會變成表格。 */
+
+  .main-head .quota-hp + .quota-hp {
+    border-left-color: transparent;
+  }
+
+  /* 手機身分名與停用方塊都讓位，標籤欄寬收回自動。 */
+
+  .main-head .quota-head {
+    flex-direction: row;
+    gap: 4px;
+    width: auto;
+  }
+}
+
+/* quota (sol decision, 2026-09-06): at most two queryable kinds; grok never takes strip space. Risk = shape + colour. */
+
+.quota-strip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+/* 格與格之間不留空白（2026-09-11 使用者）：五格各 8px 白吃 40px；分界改用 7px 內距＋1px 細線。 */
+
+.quota-open {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.quota-bars-open {
+  display: inline-flex;
+  padding: 0 0 0 3px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.quota-bars-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 停用方塊只有方塊沒文字（說明走 aria-label／`.icon-tip`）；負 margin-top 塞進圖示欄比量表矮的空白（27 vs 36px），高度不變。 */
+
+.quota-cell-toggle {
+  display: inline-flex;
+  margin-top: -1px;
+  cursor: pointer;
+}
+
+.quota-cell-toggle input {
+  width: 10px;
+  height: 10px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* 遠端名牌比 .host-badge 矮，免得撐高標題列（本機不掛）。 */
+
+.quota-host {
+  flex: none;
+  margin-right: 7px;
+  max-width: 7em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+}
+
+/* 格子裡不用 gap（2026-09-11 使用者）：改量表自己 3px 左內距。 */
+
+.quota-hp {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+/* 只染 1px 透明外框的左邊，拿掉 gap 後格寬不變；選取格整圈上色會蓋掉這條。 */
+
+.quota-hp + .quota-hp {
+  border-left-color: var(--border);
+}
+
+/* Highlight only the selected bot's identity gauge. 只留**一種**強調（2026-09-11 使用者）：原本三層疊太搶眼。
+   有數字時強調＝量表上下邊框（`.quota-framed`；「額度外框＝剩餘量」已定案），沒數字才退回 1px accent 外框。 */
+
+.quota-hp.focused {
+  border-color: var(--accent);
+}
+
+/* 上邊 5H、下邊 7D 表示剩餘量。2026-09-11 起**只有手機**掛 `.quota-framed`（桌機已有 bar 與數字，重畫是重複）。 */
+
+.quota-hp.focused.quota-framed {
+  position: relative;
+  border-color: transparent;
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.quota-border-meter {
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  height: 2px;
+  border-radius: 1px;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--border-strong);
+  color: var(--accent);
+}
+
+.quota-border-meter.top {
+  top: -1px;
+}
+
+.quota-border-meter.bottom {
+  bottom: -1px;
+}
+
+.quota-border-fill {
+  display: block;
+  height: 100%;
+  background: currentColor;
+}
+
+.quota-border-meter.warn {
+  color: var(--warn);
+}
+
+.quota-border-meter.critical {
+  color: var(--danger);
+}
+
+/* 身分名欄**固定寬度**（2026-09-11 使用者）：寬度跟內容跑時 bar 起點不同，五個帳號的 5h 無法橫比。3.2em = `codex` 寬。 */
+
+.quota-head {
+  flex: none;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  width: 3.2em;
+}
+
+.quota-identity {
+  flex: none;
+  max-width: 4.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+/* 沒登入：條子永遠空，名字上講清楚，免得以為還沒回報。 */
+
+.quota-identity.logged-out {
+  color: var(--warn);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.quota-pop-note.warn {
+  color: var(--warn);
+}
+
+.quota-kind {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+/* 三個 kind 都用品牌色（2026-09-13 使用者：grok 沒顏色很像用盡）——灰色是 `quotaLimitHit.css` 的「擋住」畫法。
+   **嚴重程度不畫在 logo 上**：由量表與數字說，否則跟量表重複、讓「灰 = 擋住」失焦。 */
+
+.quota-hp.claude .quota-kind {
+  color: var(--kind-claude);
+}
+
+.quota-hp.codex .quota-kind {
+  color: var(--kind-codex);
+}
+
+.quota-hp.grok .quota-kind {
+  color: var(--kind-grok);
+}
+
+/* Selection is shown by the gauge frame only; never replace the kind's brand colour with accent. */
+
+.quota-hp.focused.claude .quota-kind {
+  color: var(--kind-claude);
+}
+
+.quota-hp.focused.codex .quota-kind {
+  color: var(--kind-codex);
+}
+
+.quota-hp.focused.grok .quota-kind {
+  color: var(--kind-grok);
+}
+
+.quota-hp.focused .quota-identity {
+  color: var(--text-dim);
+}
+
+.quota-bars {
+  display: grid;
+  /* Match the height of a 5h+7d stack so a lone grok "週" bar doesn't float like a missing 5h. */
+  min-height: 20px;
+  align-content: start;
+}
+
+.quota-bars.single {
+  align-content: center;
+}
+
+.quota-window {
+  display: grid;
+  grid-template-columns: 16px auto;
+  align-items: center;
+}
+
+/* `5h` / `7d`：唯一允許 10.5px 的一類。 */
+
+.quota-window-name {
+  padding-right: 2px;
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 條與數字之間 3px：使用者點名「不能黏在一起」，間距不減。 */
+
+.quota-bar-row {
+  display: inline-flex;
+  align-items: center;
+  min-width: 38px;
+}
+
+/* 手機 chip：窗口名＋剩餘 %，取代 38px 量表（QuotaStrip `compact`）。 */
+
+.quota-compact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.quota-compact .quota-window-name {
+  text-align: left;
+}
+
+/* 等級顏色掛在每個窗口上而非整格：5h 綠 7d 黃時整格一色就得說謊。 */
+
+.quota-compact-win {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.quota-compact-win + .quota-compact-win {
+  margin-left: 8px;
+}
+
+.quota-compact-win.warn .quota-compact-pct,
+.quota-compact-win.warn .quota-window-name {
+  color: var(--warn);
+}
+
+.quota-compact-win.critical .quota-compact-pct,
+.quota-compact-win.critical .quota-window-name {
+  color: var(--danger);
+}
+
+.quota-compact-pct {
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-hp.warn .quota-compact-pct {
+  color: var(--warn);
+}
+
+.quota-hp.crit .quota-compact-pct {
+  color: var(--danger);
+}
+
+/* 針要凸出條的上下緣，定位掛外層（條有 overflow: hidden）。 */
+
+.quota-bar-wrap {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 38px;
+}
+
+.quota-bar {
+  display: block;
+  flex: none;
+  width: 38px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.quota-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--lamp-green);
+  transition: width 240ms ease;
+}
+
+/* 黑針＝下次 reset：剩餘時間 ÷ 窗口長度。 */
+
+.quota-bar-mark {
+  position: absolute;
+  top: -3px;
+  height: 10px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--bg-panel);
+  transition: left 240ms ease;
+  pointer-events: auto;
+}
+
+.quota-bar.warn .quota-bar-fill {
+  background: var(--warn);
+}
+
+.quota-bar.crit .quota-bar-fill {
+  background: var(--danger);
+}
+
+/* 剩餘 < 30% 才出現：條太短時它是唯一看得清的訊息，字要夠大。 */
+
+.quota-bar-pct {
+  flex: none;
+  padding-left: 3px;
+  min-width: 1.6em;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--warn);
+}
+
+.quota-bar-pct.crit {
+  color: var(--danger);
+}
+
+.quota-bar-pct.ok {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+/* no data: hatched track, no fill */
+
+.quota-bar.nodata {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--border) 0 2px,
+    transparent 2px 4px
+  );
+}
+
+.quota-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  width: 336px;
+  max-height: 420px;
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.quota-pop-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.quota-pop-row {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+/* 停用態整格降透明＋名字劃掉；量表不劃線——數字正是使用者停用它的理由。 */
+
+.quota-pop-row.off {
+  opacity: 0.5;
+}
+
+.quota-pop-row.off .quota-name {
+  text-decoration: line-through;
+}
+
+.quota-disable {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.quota-disable input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.quota-disable-note {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* 停用中的格降透明＋劃掉，不必開 popover 就知道側欄少了誰。 */
+
+.quota-hp.off {
+  opacity: 0.45;
+}
+
+.quota-hp.off .quota-identity {
+  text-decoration: line-through;
+}
+
+.quota-pop-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.quota-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quota-plan {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+.quota-win {
+  min-width: 3.2em;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+.quota-pop-foot {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.quota-pop-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-pop-line > :first-child {
+  width: 44px;
+  flex: none;
+}
+
+/* `align-items: baseline` 會把條壓在基線上，改 center 才跟兩邊字對齊。 */
+
+.quota-pop-line {
+  align-items: center;
+}
+
+.quota-pop-line .quota-bar-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.quota-pop-line .quota-bar-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.quota-pop-line .quota-bar {
+  flex: 1 1 auto;
+  width: auto;
+  height: 6px;
+}
+
+.quota-pop-line .quota-bar-mark {
+  top: -3px;
+  height: 12px;
+}
+
+/* 條上省 `%`，彈出層補回：否則 `97` 像次數。`—` 不加。 */
+
+.quota-pop-line .quota-bar-pct:not(.nodata)::after {
+  content: '%';
+  opacity: 0.7;
+}
+
+.quota-reset {
+  margin-left: auto;
+  color: var(--text-faint);
+}
+
+.quota-pop-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+@media (width <= 640px) {
+  /* `.quota-hp` 是一列 flex，撐高會讓圖示與數字分兩行：只放大可按範圍（手法 2）。 */
+
+  .main-head .quota-bars-open,
+  .sidebar .quota-bars-open {
+    padding-top: 14px;
+    padding-bottom: 14px;
+    margin-top: -14px;
+    margin-bottom: -14px;
+  }
+}
+
+/* 手機名字被截成五個字，旁邊卻是 190px 額度 chip（其他欄位 popover 已有），讓出寬度給名字。 */
+
+@media (width <= 640px) {
+  /* 身分名與停用方塊讓位（側欄與 popover 都有，10px 方塊也不是觸控目標）；視窗名留下——沒 hover 分不出 5h／7d／Fable。 */
+
+  .main-head .quota-hp .quota-identity,
+  .main-head .quota-hp .quota-cell-toggle {
+    display: none;
+  }
+}
+
+/* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
+
+@media (width <= 640px) {
+  .main-head .quota-compact .quota-window-name,
+  .main-head .quota-compact-pct {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  /* 一格只有一個窗口（compact：7d 常駐，更急的取代），單行；column 排法曾讓額度列長高，390px 塞不下五個帳號（2026-09-12）。 */
+
+  .main-head .quota-compact {
+    flex-wrap: nowrap;
+  }
+
+  /* 顏色跟每個窗口自己的等級，否則健康的也被染黃。 */
+
+  .main-head .quota-compact-win.warn .quota-compact-pct,
+  .main-head .quota-compact-win.warn .quota-window-name {
+    color: var(--warn);
+  }
+
+  .main-head .quota-compact-win.critical .quota-compact-pct,
+  .main-head .quota-compact-win.critical .quota-window-name {
+    color: var(--danger);
+  }
+
+  /* 貼額度列正下方而非底部 sheet：底部要滑很遠且擋輸入框（2026-09-09 使用者）。 */
+
+  .quota-pop {
+    position: fixed;
+    top: 100px;
+    right: 8px;
+    left: 8px;
+    bottom: auto;
+    width: auto;
+    max-width: none;
+    max-height: min(60dvh, 480px);
+    border-radius: 12px;
+    padding: 10px 12px;
+    z-index: 80;
+  }
+
+  .quota-pop .quota-pop-foot {
+    display: none;
+  }
+
+  /* 手機 chip 是純文字，圖形版只在彈出層：條高一點、黑針粗一點。 */
+
+  .quota-pop .quota-pop-line {
+    font-size: 13px;
+    gap: 10px;
+  }
+
+  .quota-pop .quota-bar {
+    height: 10px;
+  }
+
+  .quota-pop .quota-bar-mark {
+    top: -3px;
+    height: 16px;
+    width: 3px;
+  }
+
+  .quota-pop .quota-bar-pct {
+    font-size: 12px;
+  }
+
+  .quota-pop .quota-ico {
+    display: inline-block;
+    width: 1.3em;
+    color: var(--text-faint);
+  }
+
+  /* 「✦ Fable」在 44px 會折成兩行。 */
+
+  .quota-pop .quota-pop-line > :first-child {
+    width: 64px;
+    white-space: nowrap;
+  }
+
+  .quota-pop-title,
+  .quota-pop-line,
+  .quota-pop-note,
+  .quota-pop-foot,
+  .quota-disable-note {
+    font-size: 12px;
+  }
+
+  .quota-disable input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .quota-pop-line {
+    min-height: 28px;
+    align-items: center;
+  }
+
+  .main-head > .quota-strip {
+    flex: 1 1 100%;
+    min-width: 0;
+    order: 20;
+    margin: 0 -8px;
+    padding: 0 8px 6px;
+  }
+
+  .main-head .quota-open {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 2px 0 4px;
+    scrollbar-width: none;
+    background:
+      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 20px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 20px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 28%), transparent) left / 10px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 28%), transparent) right / 10px 100% no-repeat scroll;
+  }
+
+  .main-head .quota-open::-webkit-scrollbar {
+    display: none;
+  }
+
+  .main-head .quota-hp {
+    flex: none;
+  }
+
+  /* 同列三個 claude 身分時，沒有 cc0／cc1／cc2 會一模一樣。 */
+
+  .main-head .quota-hp .quota-identity {
+    display: inline;
+    font-size: 12px;
+    max-width: 4.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.quota-ico {
+  display: none;
+}
+
+.quota-pop-all {
+  margin: 6px 0 2px;
+  width: 100%;
+}
+
+/* 手機額度 chip 改上下兩行（2026-09-09 使用者：黃字要在 kind 下方，不是右邊）：整顆變窄，一列擠更多。 */
+
+@media (width <= 640px) {
+  .main-head .quota-hp {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 3px 8px;
+    min-height: 40px;
+  }
+
+  .main-head .quota-hp .quota-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* 兩行 chip 已夠高，不再用負 margin 撐可按範圍。 */
+
+  .main-head .quota-bars-open {
+    padding: 0;
+    margin: 0;
+  }
+
+  .main-head .quota-compact {
+    padding-left: 2px;
+  }
+}
+
+/* 5h 不到一小時重置：窗口名換剩幾分並用 accent 提亮；欄寬放寬塞得下三字元。 */
+
+.quota-window {
+  grid-template-columns: minmax(16px, auto) auto;
+}
+
+.quota-window-name.soon {
+  color: var(--accent-ink);
+}
+
+@media (width <= 640px) {
+  /* 額度按鈕含多行數字，不套固定方形或負邊距。 */
+
+  .main-head .quota-bars-open {
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+  }
+}
+
+/* codex 額度重置券（`PopResetCredits`）不是進度條只有字；券數強調色——額度歸零時是唯一能做的動作。 */
+
+.quota-pop-line.reset-credits .quota-reset-credit {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.quota-pop-line.reset-credits .quota-reset-credit strong {
+  color: var(--accent-ink);
+  font-size: 12px;
+}
+
+.quota-reset-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+}

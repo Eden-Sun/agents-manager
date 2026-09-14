@@ -10,6 +10,7 @@ import type { Attachment } from '../api/types'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
+import './attachments.css'
 
 export function isImageFile(f: File): boolean {
   return f.type.startsWith('image/')
