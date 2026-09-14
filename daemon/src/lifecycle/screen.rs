@@ -1074,13 +1074,32 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(box_state("grok", GROK_SCREEN), BoxState::Empty);
         assert_eq!(box_state("grok", GROK_SCREEN_NARROW), BoxState::Empty);
         assert_eq!(box_state("grok", GROK_AWAITING), BoxState::Empty, "窄到只剩 `╰─ Grok ─╯`");
-        // codex：沒有框，佔位字是它輪播的範例句。
-        assert_eq!(box_state("codex", CODEX_IDLE_SPLASH), BoxState::Empty, "› Ask Codex to do anything");
-        assert_eq!(box_state("codex", CODEX_STARTUP), BoxState::Empty, "› Write tests for @filename");
+        // codex：沒有框。純文字快照看不出佔位字是不是有人打的 → 保守當非空（sol 第九輪 #2）。
+        assert_eq!(box_state("codex", CODEX_IDLE_SPLASH), BoxState::NonEmpty, "純文字的 › Ask Codex to do anything");
+        assert_eq!(box_state("codex", CODEX_STARTUP), BoxState::NonEmpty, "純文字的 › Write tests for @filename");
+        // 同一列用 ANSI 讀（2026-09-14 w168:p3E 實機）：佔位字被畫成 dim（SGR 2）→ 才是空框。
+        let styled = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", CODEX_PLACEHOLDER_ANSI, 1);
+        assert_eq!(box_state("codex", &styled), BoxState::Empty);
         // claude 舊版：`│ ❯ │` 框。
         assert_eq!(box_state("claude", THINKING_ONLY), BoxState::Empty);
         // claude 現行：兩條全寬框線中間的輸入列，裡面是使用者真的打的字 → 非空。
         assert_eq!(box_state("claude", CLAUDE_UNSENT_PROMPT), BoxState::NonEmpty);
+    }
+
+    /// w168:p3E（codex 0.154，2026-09-14）用 `pane.read format=ansi` 讀到的輸入列原樣。
+    const CODEX_PLACEHOLDER_ANSI: &str = "\u{1b}[0m\u{1b}[1m\u{1b}[48;2;59;64;76m›\u{1b}[0m\u{1b}[48;2;59;64;76m \u{1b}[0m\u{1b}[2m\u{1b}[48;2;59;64;76mAsk Codex to do anything\u{1b}[0m\u{1b}[48;2;59;64;76m   \u{1b}[0m";
+
+    /// 跟佔位字一字不差、但不是 dim 的字＝使用者打的：非空（sol 第九輪 #2）。
+    #[test]
+    fn typed_text_identical_to_a_placeholder_is_not_empty() {
+        use crate::lifecycle::{box_state, BoxState};
+        let typed = "\u{1b}[0m\u{1b}[1m›\u{1b}[0m Ask Codex to do anything";
+        let s = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", typed, 1);
+        assert_eq!(box_state("codex", &s), BoxState::NonEmpty);
+        // 一半 dim、一半不是：也不算佔位字。
+        let half = "›\u{1b}[0m \u{1b}[2mAsk Codex\u{1b}[22m to do anything";
+        let s = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", half, 1);
+        assert_eq!(box_state("codex", &s), BoxState::NonEmpty);
     }
 
     /// 同一個框，真的有人打了字（或多打一格）就不是空的。

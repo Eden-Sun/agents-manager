@@ -75,7 +75,10 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
             return Ok(());
         }
     };
-    let res = deliver_prompt(app, &client, &run, &bot, &text, false).await;
+    // A queued prompt waits for a codex rollout that is on its way for a few put-backs (15+30+60 s),
+    // then stops waiting and goes out with what is available.
+    let waited_for_log = turn.flush_retries >= CODEX_LOG_WAIT_RETRIES;
+    let res = deliver_prompt(app, &client, &run, &bot, &text, false, waited_for_log).await;
     let delivery = match res {
         Ok(Delivered::Submitted) => "ok",
         // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
@@ -153,6 +156,9 @@ async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str)
     }
     emit_turn(app, turn_id).await;
 }
+
+/// Put-backs a queued prompt spends waiting for a codex rollout that has not been written yet.
+pub(crate) const CODEX_LOG_WAIT_RETRIES: i64 = 3;
 
 /// Backoff for a queued prompt that could not be typed yet: 15 s, doubling, capped at 5 min.
 const QUEUE_RETRY_BASE_SECS: u64 = 15;
@@ -247,6 +253,64 @@ where
         }
     });
     true
+}
+
+/// Queued prompts waiting out a backoff, one entry per bot (its soonest), with the time left.
+pub(crate) async fn pending_queue_retries(app: &Arc<App>) -> anyhow::Result<Vec<(String, std::time::Duration)>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.bot_id, t.next_flush_at FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE t.status = 'queued' AND t.next_flush_at IS NOT NULL",
+    )
+    .fetch_all(&app.db)
+    .await?;
+    let now = chrono::Utc::now();
+    let mut soonest: std::collections::BTreeMap<String, std::time::Duration> = std::collections::BTreeMap::new();
+    for (bot, at) in rows {
+        let left = chrono::DateTime::parse_from_rfc3339(&at)
+            .ok()
+            .map(|t| (t.with_timezone(&chrono::Utc) - now).to_std().unwrap_or_default())
+            .unwrap_or_default();
+        soonest.entry(bot).and_modify(|d| *d = (*d).min(left)).or_insert(left);
+    }
+    Ok(soonest.into_iter().collect())
+}
+
+/// After a restart the in-memory retry timers are gone while `next_flush_at` survived: arm one per
+/// bot again at `max(now, next_flush_at)` (sol review round nine #3). `fire` is what the timer does.
+pub(crate) async fn rearm_queue_retries_with<F>(app: &Arc<App>, fire: F) -> usize
+where
+    F: Fn(String) + Clone + Send + 'static,
+{
+    let pending = match pending_queue_retries(app).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot re-arm queued prompt retries");
+            return 0;
+        }
+    };
+    let mut armed = 0;
+    for (bot, delay) in pending {
+        let fire = fire.clone();
+        let id = bot.clone();
+        if arm_queue_retry(&bot, delay, move || fire(id)) {
+            armed += 1;
+            tracing::info!(bot = %bot, retry_in_s = delay.as_secs(), "re-armed a queued prompt retry after restart");
+        }
+    }
+    armed
+}
+
+pub async fn rearm_queue_retries(app: &Arc<App>) -> usize {
+    let a = app.clone();
+    rearm_queue_retries_with(app, move |bot| schedule_flush_queued(&a, &bot)).await
+}
+
+/// Test hook: what a process restart does to the in-memory timers.
+#[cfg(test)]
+pub(crate) fn forget_queue_retry_timer(bot_id: &str) {
+    if let Ok(mut map) = QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock() {
+        map.remove(bot_id);
+    }
 }
 
 /// Try the queue again after `delay`, for conditions no lifecycle edge will announce.
@@ -533,6 +597,83 @@ mod flush_queue_tests {
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("已停止自動重試"));
         assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "從頭到尾沒打過字");
+    }
+
+    /// codex 已知 session、rollout 還沒寫出來：先放回隊列等，等滿 CODEX_LOG_WAIT_RETRIES 次才退回 unverified 送出。
+    #[tokio::test]
+    async fn a_queued_codex_prompt_waits_for_its_rollout_then_falls_back() {
+        let f = queued_kind("codex", "test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let home = f.env.dir.join("codex-home-q");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+            .bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-q' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
+
+        for n in 1..=CODEX_LOG_WAIT_RETRIES {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!((t.status.as_str(), t.flush_retries), ("queued", n), "waiting for the rollout #{n}");
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        }
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0, "等的時候一個字都沒打");
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str(), t.delivery_verified), ("in_flight", "ok", 0), "等過了就照樣送、標 unverified");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
+    }
+
+    /// 退避中重啟：記憶體裡的 timer 沒了，啟動時依 next_flush_at 重建每 bot 唯一的 timer，到期恰好送一次（sol 第九輪 #3）。
+    #[tokio::test]
+    async fn a_backoff_survives_a_restart_and_the_prompt_goes_out_exactly_once() {
+        let f = queued_kind("grok", "test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        f.env.herdr.live_pane(
+            "pane-1",
+            crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
+        );
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+        // 「重啟」：舊行程的 timer 全沒了；框也清空了。退避剩 150 ms。
+        forget_queue_retry_timer(&f.bot_id);
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        let soon = (chrono::Utc::now() + chrono::Duration::milliseconds(150)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?").bind(&soon).bind(&f.turn_id).execute(&app.db).await.unwrap();
+
+        let fire = {
+            let app = app.clone();
+            move |bot: String| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let lock = app.bot_lock(&bot).await;
+                    let _g = lock.lock().await;
+                    flush_queued_locked(&app, &bot).await.unwrap();
+                });
+            }
+        };
+        assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await, 1, "one timer for the bot");
+        assert_eq!(rearm_queue_retries_with(&app, fire).await, 0, "a second pass does not add another");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "not before it is due");
+
+        // The timer fires after ~150 ms; the typed delivery itself then takes about two seconds.
+        let mut t = turn(&app, &f.turn_id).await;
+        for _ in 0..80 {
+            if t.delivery != "pending" && t.status != "queued" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            t = turn(&app, &f.turn_id).await;
+        }
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1, "exactly once");
     }
 
     /// Regression: a client lookup failing after the claim abandoned the turn `in_flight` +

@@ -42,6 +42,8 @@ pub async fn rearm_progress(app: &Arc<App>) {
             crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
         }
     }
+    // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
+    crate::lifecycle::rearm_queue_retries(app).await;
 }
 
 /// A possible parent this pass. One bot, one tab: the tab makes descent observable whatever a

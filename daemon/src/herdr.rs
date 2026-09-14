@@ -349,6 +349,12 @@ impl HerdrClient {
         self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines}), "read").await
     }
 
+    /// Same read with SGR styling kept (`format: ansi`): the only way to tell a TUI's dim
+    /// placeholder from the same words typed by a person.
+    pub async fn pane_read_ansi(&self, pane_id: &str, source: &str, lines: u32) -> Result<PaneRead> {
+        self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines, "format": "ansi"}), "read").await
+    }
+
     pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
         self.rects(json!({"workspace_id": workspace_id})).await
     }

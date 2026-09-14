@@ -147,14 +147,14 @@ fn composer_glyph(kind: &str) -> Option<char> {
     }
 }
 
-/// Placeholders a TUI draws in an **empty** composer, taken from the real frames. Anything else
-/// after the marker is text someone typed.
-fn is_placeholder(kind: &str, content: &str) -> bool {
+/// The words a TUI draws in an **empty** composer. Matching these words is never enough on its
+/// own — a person can type exactly the same thing — so [`box_state`] also requires them to be
+/// rendered **dim** (SGR 2), which the provider does for its placeholder and never for typed text.
+fn placeholder_words(kind: &str, content: &str) -> bool {
     match kind {
         // claude: `❯ Try "refactor <filepath>"` in a fresh or idle session.
         "claude" => content.starts_with("Try \"") && content.ends_with('"') && content.matches('"').count() == 2,
-        // codex 0.15x rotates example prompts in an empty composer (`CODEX_IDLE_SPLASH`,
-        // `CODEX_STARTUP` in screen.rs). Only these exact strings count.
+        // codex 0.15x rotates these example prompts in an empty composer.
         "codex" => matches!(
             content,
             "Ask Codex to do anything"
@@ -171,13 +171,72 @@ fn is_placeholder(kind: &str, content: &str) -> bool {
     }
 }
 
+/// One row of a screen read with `format: ansi`: the visible characters, each with whether it was
+/// drawn dim. SGR is followed exactly: `0`/empty resets, `2` sets dim, `22` clears it, and the
+/// arguments of `38`/`48` colour selectors (`;5;n`, `;2;r;g;b`) are skipped so their `2` is never
+/// mistaken for dim. Other escape sequences are dropped.
+pub(crate) fn styled_chars(row: &str) -> Vec<(char, bool)> {
+    let mut out = Vec::new();
+    let mut dim = false;
+    let mut it = row.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            if c != '\r' {
+                out.push((c, dim));
+            }
+            continue;
+        }
+        if it.peek() != Some(&'[') {
+            it.next();
+            continue;
+        }
+        it.next();
+        let mut params = String::new();
+        let mut fin = None;
+        for d in it.by_ref() {
+            if ('@'..='~').contains(&d) {
+                fin = Some(d);
+                break;
+            }
+            params.push(d);
+        }
+        if fin != Some('m') {
+            continue;
+        }
+        let nums: Vec<&str> = params.split(';').collect();
+        let mut i = 0;
+        while i < nums.len() {
+            match nums[i] {
+                "" | "0" => dim = false,
+                "2" => dim = true,
+                "22" => dim = false,
+                "38" | "48" | "58" => {
+                    i += match nums.get(i + 1).copied() {
+                        Some("5") => 2,
+                        Some("2") => 4,
+                        _ => 0,
+                    };
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The row with styling removed.
+pub(crate) fn strip_ansi(row: &str) -> String {
+    styled_chars(row).into_iter().map(|(c, _)| c).collect()
+}
+
 /// Where the composer is, and what its marker row holds.
-struct ComposerRow<'a> {
+struct ComposerRow {
     idx: usize,
     /// Drawn inside `│ … │`: trailing spaces before the right edge are the box's padding.
     boxed: bool,
-    /// Everything after the marker glyph, box edge removed.
-    after_glyph: &'a str,
+    /// Characters after the marker glyph (box edge removed), with their dim flag.
+    after_glyph: Vec<(char, bool)>,
 }
 
 /// The last row near the bottom whose first visible glyph is the kind's composer marker.
@@ -185,40 +244,62 @@ fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
     locate_composer(kind, lines).map(|c| c.idx)
 }
 
-fn locate_composer<'a>(kind: &str, lines: &[&'a str]) -> Option<ComposerRow<'a>> {
+fn locate_composer(kind: &str, lines: &[&str]) -> Option<ComposerRow> {
     let glyph = composer_glyph(kind)?;
     let from = lines.len().saturating_sub(COMPOSER_TAIL);
     (from..lines.len()).rev().find_map(|idx| {
-        let row = lines[idx].trim_start();
-        let (boxed, inner) = match row.strip_prefix('│') {
-            Some(rest) => (true, rest.trim_end().strip_suffix('│').unwrap_or(rest).trim_start()),
-            None => (false, row),
-        };
-        inner.strip_prefix(glyph).map(|after_glyph| ComposerRow { idx, boxed, after_glyph })
+        let chars = styled_chars(lines[idx]);
+        let mut i = chars.iter().position(|(c, _)| !c.is_whitespace())?;
+        let boxed = chars[i].0 == '│';
+        let mut end = chars.len();
+        if boxed {
+            i += 1;
+            while i < end && chars[i].0 == ' ' {
+                i += 1;
+            }
+            while end > i && chars[end - 1].0.is_whitespace() {
+                end -= 1;
+            }
+            if end > i && chars[end - 1].0 == '│' {
+                end -= 1;
+            }
+        }
+        (i < end && chars[i].0 == glyph).then(|| ComposerRow { idx, boxed, after_glyph: chars[i + 1..end].to_vec() })
     })
 }
 
 /// Pure: what the composer holds, read against each provider's real frame.
 ///
-/// * claude (current): `❯` between two full-width rules; placeholder `Try "…"`.
+/// * claude (current): `❯` + a no-break space between two full-width rules.
 /// * claude (older) and grok: `│ ❯ … │` closed by `╰…╯` (grok writes its model into that edge).
-/// * codex: an unboxed `› …` row; placeholders are the example prompts it rotates.
+/// * codex: an unboxed `› …` row.
 ///
-/// Empty only when the marker row holds nothing but the one space after the glyph (and, inside a
-/// box, the box's padding) or an exact placeholder, and the frame closes right under it. One extra
-/// space typed after the marker in an unboxed composer is text: `NonEmpty`.
+/// Empty when the marker row holds nothing but the one separator after the glyph (a space or the
+/// no-break space claude draws; inside a box, also the box's padding) — or a known placeholder that
+/// is **entirely dim**, which only a styled (`format: ansi`) read can show. A plain-text read never
+/// accepts a placeholder: the same words could have been typed (sol review round nine #2).
 pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     let Some(c) = locate_composer(kind, &lines) else { return BoxState::Unready };
-    let content = if c.boxed { c.after_glyph.trim_end() } else { c.after_glyph };
-    let content = content.strip_prefix(' ').unwrap_or(content);
-    let first_row_empty = content.is_empty() || is_placeholder(kind, content);
-    if !first_row_empty {
+    let mut content = c.after_glyph;
+    if matches!(content.first(), Some((' ' | '\u{a0}', _))) {
+        content.remove(0);
+    }
+    if c.boxed {
+        while matches!(content.last(), Some((ch, _)) if ch.is_whitespace()) {
+            content.pop();
+        }
+    }
+    let text: String = content.iter().map(|(ch, _)| *ch).collect();
+    let dim_placeholder = !content.is_empty()
+        && content.iter().filter(|(ch, _)| !ch.is_whitespace()).all(|(_, dim)| *dim)
+        && placeholder_words(kind, text.trim_end());
+    if !(text.is_empty() || dim_placeholder) {
         return BoxState::NonEmpty;
     }
     // Where the frame closes. Any row between the marker row and that edge is more of the
     // composer — a blank second line is still something typed.
-    let rest = &lines[c.idx + 1..];
+    let rest: Vec<String> = lines[c.idx + 1..].iter().map(|r| strip_ansi(r)).collect();
     let edge = match (kind, c.boxed) {
         (_, true) => rest.iter().take(COMPOSER_TAIL).position(|r| is_box_bottom(r)),
         ("claude", false) => rest.iter().take(COMPOSER_TAIL).position(|r| is_rule_row(r)),
@@ -327,48 +408,46 @@ pub(crate) fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: 
     Ok(body.lines().filter_map(|l| log_user_text(format, l)).filter(|t| t == text).count())
 }
 
-/// Day directories searched for a codex rollout, newest first. A session that has run longer than
-/// this is resumed into a new rollout file anyway.
-const CODEX_LOG_DAYS: usize = 14;
-
-/// Find the rollout file codex writes for `session_id` under `codex_home/sessions`. Only the file
-/// named for exactly this session counts; `None` when it is not there.
+/// Find the rollout codex writes for `session_id` under `codex_home/sessions`.
+///
+/// The date tree is walked newest first, all of it — a session that has run for weeks is still
+/// found. Inside a day, several files for the same session (a resume on the same day) resolve to the
+/// newest by modification time. The winner is canonicalized and must still lie under the canonical
+/// `sessions` root, so a symlinked entry cannot point the proof at some other file.
 pub(crate) fn codex_session_log(codex_home: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
     let id = session_id.trim();
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
+    let root = std::fs::canonicalize(codex_home.join("sessions")).ok()?;
     let suffix = format!("-{id}.jsonl");
-    let sorted_dirs = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+    let children = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
         let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
             .unwrap_or_default();
         v.sort();
         v.reverse();
         v
     };
-    let mut days = Vec::new();
-    for year in sorted_dirs(&codex_home.join("sessions")) {
-        for month in sorted_dirs(&year) {
-            for day in sorted_dirs(&month) {
-                days.push(day);
-                if days.len() >= CODEX_LOG_DAYS {
-                    break;
+    for year in children(&root).into_iter().filter(|p| p.is_dir()) {
+        for month in children(&year).into_iter().filter(|p| p.is_dir()) {
+            for day in children(&month).into_iter().filter(|p| p.is_dir()) {
+                let newest = children(&day)
+                    .into_iter()
+                    .filter(|p| {
+                        p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("rollout-") && n.ends_with(&suffix)).unwrap_or(false)
+                    })
+                    .filter_map(|p| std::fs::metadata(&p).and_then(|m| m.modified()).ok().map(|t| (t, p)))
+                    .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+                    .map(|(_, p)| p);
+                if let Some(found) = newest {
+                    let real = std::fs::canonicalize(&found).ok()?;
+                    return (real.starts_with(&root) && real.is_file()).then_some(real);
                 }
             }
-            if days.len() >= CODEX_LOG_DAYS {
-                break;
-            }
-        }
-        if days.len() >= CODEX_LOG_DAYS {
-            break;
         }
     }
-    days.into_iter().find_map(|day| {
-        std::fs::read_dir(&day).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
-            p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("rollout-") && n.ends_with(&suffix)).unwrap_or(false)
-        })
-    })
+    None
 }
 
 /// `CODEX_HOME` for this bot on the local host: identity env, then the bot's own env, else `~/.codex`.
@@ -400,6 +479,9 @@ pub(crate) struct ProofInputs<'a> {
     pub transcript_path: Option<&'a str>,
     /// The codex rollout for `session_id`, when found.
     pub codex_log: Option<std::path::PathBuf>,
+    /// This prompt has already waited for evidence that is on its way (a codex rollout not written
+    /// yet); stop waiting and fall back to what is available now.
+    pub waited_for_log: bool,
     pub pane_cols: Option<u32>,
 }
 
@@ -420,9 +502,18 @@ pub(crate) fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Deliver
             }
         }
         ("codex", true) => {
-            if let (Some(session), Some(log)) = (session, i.codex_log.as_ref()) {
-                if log.is_file() {
-                    return Ok(Proof::Transcript { format: LogFormat::Codex, path: log.clone(), session_id: session.to_string() });
+            if let Some(session) = session {
+                match i.codex_log.as_ref().filter(|log| log.is_file()) {
+                    Some(log) => {
+                        return Ok(Proof::Transcript { format: LogFormat::Codex, path: log.clone(), session_id: session.to_string() });
+                    }
+                    // The session is known, so its rollout is coming: wait for the lossless proof
+                    // instead of typing unverified right away (sol review round nine #1). Only a
+                    // prompt that already waited falls through.
+                    None if !i.waited_for_log => {
+                        return Err(Delivered::NotAttempted { reason: "codex_log_not_ready", retry: true });
+                    }
+                    None => {}
                 }
             }
         }
@@ -458,6 +549,7 @@ pub(crate) async fn plan_delivery(
     bot: &db::Bot,
     text: &str,
     force_pane: bool,
+    waited_for_log: bool,
 ) -> anyhow::Result<Result<Plan, Delivered>> {
     let target = db::run_target(run, bot);
     let marked = crate::lifecycle::pane_typed_memo(&run.id)
@@ -487,13 +579,14 @@ pub(crate) async fn plan_delivery(
         session_id: run.native_session_id.as_deref(),
         transcript_path: run.transcript_path.as_deref(),
         codex_log,
+        waited_for_log,
         pane_cols,
     };
     let proof = match choose_proof(&inputs, text) {
         Ok(p) => p,
         Err(not) => return Ok(Err(not)),
     };
-    let screen = client.pane_read(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text;
+    let screen = client.pane_read_ansi(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text;
     match box_state(&bot.kind, &screen) {
         BoxState::Empty => Ok(Ok(Plan::Type { pane, proof })),
         BoxState::NonEmpty => Ok(Err(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
@@ -504,7 +597,10 @@ pub(crate) async fn plan_delivery(
 /// Current evidence count for `proof`.
 fn evidence(kind: &str, proof: &Proof, offset: u64, screen: &str, text: &str) -> std::io::Result<usize> {
     match proof {
-        Proof::EchoRow => Ok(echo_row_hits(kind, screen, text)),
+        Proof::EchoRow => {
+            let plain: String = screen.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+            Ok(echo_row_hits(kind, &plain, text))
+        }
         Proof::Transcript { format, path, .. } => log_hits_since(*format, path, offset, text),
         Proof::Unverified => Ok(0),
     }
@@ -551,7 +647,8 @@ pub(crate) async fn execute_delivery(
     if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
         anyhow::bail!("could not record runs.pane_typed for {} before typing into its pane: {e}", run.id);
     }
-    let read = || async { client.pane_read(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await.map(|r| r.text) };
+    // Styled read: `box_state` needs the dim flag; echo evidence reads the same screen unstyled.
+    let read = || async { client.pane_read_ansi(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await.map(|r| r.text) };
 
     // The box may have changed since the plan (someone typing in the terminal): look again.
     let before = read().await?;
@@ -629,8 +726,9 @@ pub(crate) async fn deliver_prompt(
     bot: &db::Bot,
     text: &str,
     force_pane: bool,
+    waited_for_log: bool,
 ) -> anyhow::Result<Delivered> {
-    match plan_delivery(app, client, run, bot, text, force_pane).await? {
+    match plan_delivery(app, client, run, bot, text, force_pane, waited_for_log).await? {
         Ok(plan) => execute_delivery(app, client, run, bot, text, plan).await,
         Err(not) => Ok(not),
     }
@@ -684,9 +782,11 @@ mod tests {
         assert_eq!(box_state("claude", &blank_second), BoxState::NonEmpty, "空白第二行");
         let second_line = empty.replacen("❯\n", "❯\n  草稿\n", 1);
         assert_eq!(box_state("claude", &second_line), BoxState::NonEmpty, "第二行有字");
-        // claude 空框的佔位字（實機 `❯ Try "…"`）是空框；佔位字後面多打了字就不是。
-        let placeholder = empty.replacen("❯\n", "❯ Try \"fix lint errors\"\n", 1);
-        assert_eq!(box_state("claude", &placeholder), BoxState::Empty, "佔位字");
+        // 佔位字只有畫成 dim 才算空框；純文字的同一句可能是使用者打的。
+        let plain = empty.replacen("❯\n", "❯ Try \"fix lint errors\"\n", 1);
+        assert_eq!(box_state("claude", &plain), BoxState::NonEmpty, "純文字的佔位字");
+        let dim = empty.replacen("❯\n", "❯ \u{1b}[2mTry \"fix lint errors\"\u{1b}[0m\n", 1);
+        assert_eq!(box_state("claude", &dim), BoxState::Empty, "dim 的佔位字");
         let past_placeholder = empty.replacen("❯\n", "❯ Try \"fix lint errors\" now\n", 1);
         assert_eq!(box_state("claude", &past_placeholder), BoxState::NonEmpty);
         assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n"), BoxState::Unready);
@@ -770,7 +870,7 @@ mod tests {
     }
 
     fn inputs<'a>(kind: &'a str, local: bool, session: Option<&'a str>, path: Option<&'a str>, codex_log: Option<std::path::PathBuf>, cols: Option<u32>) -> ProofInputs<'a> {
-        ProofInputs { kind, host_is_local: local, hooks: true, session_id: session, transcript_path: path, codex_log, pane_cols: cols }
+        ProofInputs { kind, host_is_local: local, hooks: true, session_id: session, transcript_path: path, codex_log, waited_for_log: false, pane_cols: cols }
     }
 
     /// 證據矩陣（SPEC §4.4a）：provider × 本機／遠端 × 單行／多行 → 用哪種證據，或 unverified。
@@ -799,6 +899,8 @@ mod tests {
             ("codex 本機 有 rollout 單行", inputs("codex", true, Some("s1"), None, Some(clog.clone()), w), "go", Ok(codex_t.clone())),
             ("codex 本機 有 rollout 多行", inputs("codex", true, Some("s1"), None, Some(clog.clone()), w), multi, Ok(codex_t)),
             ("codex 本機 還不知道 session 多行", inputs("codex", true, None, None, None, w), multi, Ok(Proof::Unverified)),
+            ("codex 本機 session 已知但 rollout 未寫", inputs("codex", true, Some("s1"), None, None, w), multi,
+                Err(Delivered::NotAttempted { reason: "codex_log_not_ready", retry: true })),
             ("codex 遠端 單行放得下", inputs("codex", false, Some("s1"), None, None, w), "go", Ok(Proof::EchoRow)),
             ("codex 遠端 多行", inputs("codex", false, Some("s1"), None, None, w), multi, Ok(Proof::Unverified)),
             ("grok 本機 單行放得下", inputs("grok", true, None, None, None, w), "go", Ok(Proof::EchoRow)),
@@ -818,6 +920,60 @@ mod tests {
             Err(Delivered::NotAttempted { reason: "prompt_too_long_to_prove", retry: false }),
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SGR 解析：dim 的開關、重設，38/48 顏色參數裡的 `2` 不會被當成 dim。
+    #[test]
+    fn styled_chars_follow_sgr_exactly() {
+        let row = "\u{1b}[48;2;59;64;76ma\u{1b}[2mb\u{1b}[22mc\u{1b}[2;38;5;2md\u{1b}[0me\r";
+        let got: Vec<(char, bool)> = styled_chars(row);
+        assert_eq!(got, vec![('a', false), ('b', true), ('c', false), ('d', true), ('e', false)]);
+        assert_eq!(strip_ansi(row), "abcde");
+    }
+
+    /// 同一天有兩個同 session 的 rollout 取最新；超過兩週前的舊 session 也找得到；symlink 指到 sessions 外面不收。
+    #[test]
+    fn the_codex_rollout_lookup_prefers_the_newest_and_stays_inside_sessions() {
+        let home = std::env::temp_dir().join(format!("am-codex-lookup-{}", db::ulid()));
+        let day = home.join("sessions/2026/09/14");
+        let ancient = home.join("sessions/2026/01/02");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(&ancient).unwrap();
+        let older = day.join("rollout-2026-09-14T08-00-00-sess-same.jsonl");
+        let newer = day.join("rollout-2026-09-14T09-00-00-sess-same.jsonl");
+        std::fs::write(&newer, "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&older, "").unwrap();
+        // 檔名排序在前的 older 反而是最後寫的：以修改時間為準。
+        assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&older).unwrap()));
+        std::fs::write(ancient.join("rollout-2026-01-02T00-00-00-sess-ancient.jsonl"), "").unwrap();
+        for d in 3..=28 {
+            std::fs::create_dir_all(home.join(format!("sessions/2026/02/{d:02}"))).unwrap();
+        }
+        assert!(codex_session_log(&home, "sess-ancient").is_some(), "日期樹整棵走，不限 14 天");
+        let outside = home.join("elsewhere.jsonl");
+        std::fs::write(&outside, "").unwrap();
+        let link = home.join("sessions/2026/09/14/rollout-2026-09-14T10-00-00-sess-link.jsonl");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert_eq!(codex_session_log(&home, "sess-link"), None, "指到 sessions 外面的 symlink 不算");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// codex session 已知但 rollout 還沒寫出來：先等（可重試），等過了才退回一列回音或 unverified（sol 第九輪 #1）。
+    #[test]
+    fn a_known_codex_session_waits_for_its_rollout_before_falling_back() {
+        let waiting = ProofInputs { waited_for_log: false, ..inputs("codex", true, Some("s1"), None, None, Some(80)) };
+        assert_eq!(choose_proof(&waiting, "a\nb"), Err(Delivered::NotAttempted { reason: "codex_log_not_ready", retry: true }));
+        assert_eq!(choose_proof(&waiting, "go"), Err(Delivered::NotAttempted { reason: "codex_log_not_ready", retry: true }), "單行也先等無損證據");
+        let waited = ProofInputs { waited_for_log: true, ..inputs("codex", true, Some("s1"), None, None, Some(80)) };
+        assert_eq!(choose_proof(&waited, "a\nb"), Ok(Proof::Unverified));
+        assert_eq!(choose_proof(&waited, "go"), Ok(Proof::EchoRow));
+        // session 本身還不知道：沒有東西可等，照舊。
+        let unknown = inputs("codex", true, None, None, None, Some(80));
+        assert_eq!(choose_proof(&unknown, "a\nb"), Ok(Proof::Unverified));
     }
 
     /// codex rollout：只算頂層 response_item 的 user 訊息；compacted 重播、非 input_text、developer 都不算；逐字比對。
@@ -857,8 +1013,9 @@ mod tests {
         let want = new.join("rollout-2026-09-14T15-49-57-01a09ee4-eabb-7682-b363-941a606ed002.jsonl");
         std::fs::write(&want, "").unwrap();
         std::fs::write(new.join("rollout-2026-09-14T16-00-00-01a09ee4-eabb-7682-b363-941a606ed0029.jsonl"), "").unwrap();
-        assert_eq!(codex_session_log(&home, "01a09ee4-eabb-7682-b363-941a606ed002"), Some(want));
-        assert_eq!(codex_session_log(&home, "01a0aaaa-0000"), Some(old.join("rollout-2026-09-01T00-00-00-01a0aaaa-0000.jsonl")));
+        let canon = |p: std::path::PathBuf| Some(std::fs::canonicalize(p).unwrap());
+        assert_eq!(codex_session_log(&home, "01a09ee4-eabb-7682-b363-941a606ed002"), canon(want));
+        assert_eq!(codex_session_log(&home, "01a0aaaa-0000"), canon(old.join("rollout-2026-09-01T00-00-00-01a0aaaa-0000.jsonl")));
         assert_eq!(codex_session_log(&home, "nope"), None);
         assert_eq!(codex_session_log(&home, "../../etc"), None, "不接受會跑出目錄的 id");
         let _ = std::fs::remove_dir_all(&home);
@@ -925,6 +1082,25 @@ mod api_tests {
         let out = prompt(&app, &bot_id, "Reply with PONG please", "crid-1").await.unwrap();
         assert_eq!(out.delivery, "ok");
         assert_eq!(turns(&app, &conv).await, 1);
+    }
+
+    /// codex 已知 session 但 rollout 還沒寫：直接送的 prompt 回可重試的 409，不建 turn（sol 第九輪 #1）。
+    #[tokio::test]
+    async fn a_codex_prompt_before_its_rollout_exists_is_a_retryable_409() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, run_id) = idle_bot(&env, "codex").await;
+        let home = env.dir.join("codex-home-api");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?").bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string()).bind(&bot_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-api' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
+        match prompt(&app, &bot_id, "第一行\n第二行", "crid-codex").await {
+            Err(LcError::Conflict(v)) => assert_eq!(v.get("reason").and_then(Value::as_str), Some("codex_log_not_ready")),
+            other => panic!("expected 409, got {:?}", other.map(|o| o.delivery)),
+        }
+        assert_eq!(turns(&app, &conv).await, 0);
+        assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
     }
 
     /// grok 多行沒有無損證據：照樣打字送出，回 200 `unverified`，turn 留下「要人工核對」的標記（不是 unknown）。
