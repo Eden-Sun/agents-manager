@@ -697,6 +697,13 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 
 - **key**：`codex`、`claude`、`grok`；有 identity 的 bot 另存 `<kind>:<identity>`（`account` = identity 名）；遠端加 `<host>/`。沒裝 CLI、還沒讀到 → `null`。
   不屬於現存主機的 `<host>/…` key 不出現。
+  **身分對某個 kind 是不是預設帳號，看的是那個 kind 的 home 變數**（codex＝`CODEX_HOME`、claude＝`CLAUDE_CONFIG_DIR`、
+  grok＝`GROK_HOME`）：身分的 env 沒定義那個變數，那個 CLI 就用它自己的預設目錄，讀數收斂到**裸 kind**。例如 cc1 只設
+  `CLAUDE_CONFIG_DIR`——對 claude 寫 `claude:cc1`，對 codex 卻是裸 `codex`；cc2 帶自己的 `CODEX_HOME` 才寫 `codex:cc2`，
+  而且不借裸 `codex` 的數字。查不到那個身分就當它有自己的帳號（寧可多一格，也不疊兩個帳號的數字）。
+  寫入端（codex statusline、撞限橫幅、claude statusLine）與查詢端（`limit_hit_for_bot`／`next_reset_for_bot`、
+  supervisor 額度判讀、mission 挑身分）都走同一支 `quota::quota_base_for_host`。（2026-09-14：cc0 改用 cc1 之後額度列
+  又冒出 `codex:cc1`，因為舊規則只把「env 整個空的身分」當預設。）
 - `used_pct` 0–100；`resets_at` RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
 - `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
 - `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。

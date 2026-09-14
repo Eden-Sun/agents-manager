@@ -19,16 +19,21 @@ pub const CLAUDE_ORDER: [&str; 3] = ["cc2", "cc1", "cc0"];
 /// 回一個名字為空的候選。
 pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> Vec<(String, bool, Option<crate::quota::Quota>)> {
     let disabled = store::disabled_identities(&app.db, host, kind).await.unwrap_or_default();
-    let quotas = app.quotas.lock().await;
-    let get = |base: String| quotas.get(&crate::quota::quota_key(host, &base)).cloned();
     if kind != "claude" {
-        return vec![(String::new(), false, get(kind.to_string()))];
+        let quotas = app.quotas.lock().await;
+        return vec![(String::new(), false, quotas.get(&crate::quota::quota_key(host, kind)).cloned())];
     }
-    CLAUDE_ORDER
-        .iter()
-        .map(|name| {
-            // 只有 cc0（預設帳號）可以退回裸的 `claude` 那一把；cc1/cc2 退回去就會讀到 cc0 的額度。
-            let q = get(format!("claude:{name}")).or_else(|| if *name == "cc0" { get("claude".into()) } else { None });
+    // 每個身分的讀數在哪一把 key，跟寫入端同一條規則（`quota::quota_base_for_host`）：沒有自己
+    // CLAUDE_CONFIG_DIR 的身分落在裸 `claude`，有的只讀自己那把，不借預設帳號的數字。先把 key 算好再上鎖。
+    let mut bases = Vec::with_capacity(CLAUDE_ORDER.len());
+    for name in CLAUDE_ORDER {
+        bases.push((name, crate::quota::quota_base_for_host(app, host, "claude", Some(name)).await));
+    }
+    let quotas = app.quotas.lock().await;
+    bases
+        .into_iter()
+        .map(|(name, base)| {
+            let q = quotas.get(&crate::quota::quota_key(host, &base)).cloned();
             (name.to_string(), disabled.iter().any(|d| d == name), q)
         })
         .collect()
