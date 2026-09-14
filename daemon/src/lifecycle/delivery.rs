@@ -150,30 +150,6 @@ fn composer_glyph(kind: &str) -> Option<char> {
     }
 }
 
-/// The words a TUI draws in an **empty** composer. Matching these words is never enough on its
-/// own — a person can type exactly the same thing — so [`box_state`] also requires them to be
-/// rendered **dim** (SGR 2), which the provider does for its placeholder and never for typed text.
-fn placeholder_words(kind: &str, content: &str) -> bool {
-    match kind {
-        // claude: `❯ Try "refactor <filepath>"` in a fresh or idle session.
-        "claude" => content.starts_with("Try \"") && content.ends_with('"') && content.matches('"').count() == 2,
-        // codex 0.15x rotates these example prompts in an empty composer.
-        "codex" => matches!(
-            content,
-            "Ask Codex to do anything"
-                | "Explain this codebase"
-                | "Summarize recent commits"
-                | "Implement {feature}"
-                | "Find and fix a bug in @filename"
-                | "Write tests for @filename"
-                | "Improve documentation in @filename"
-                | "Run /review on my current changes"
-                | "Use /skills to list available skills"
-        ),
-        _ => false,
-    }
-}
-
 /// One row of a screen read with `format: ansi`: the visible characters, each with whether it was
 /// drawn dim. SGR is followed exactly: `0`/empty resets, `2` sets dim, `22` clears it, and the
 /// arguments of `38`/`48` colour selectors (`;5;n`, `;2;r;g;b`) are skipped so their `2` is never
@@ -278,8 +254,8 @@ fn locate_composer(kind: &str, lines: &[&str]) -> Option<ComposerRow> {
 /// * codex: an unboxed `› …` row.
 ///
 /// Empty when the marker row holds nothing but the one separator after the glyph (a space or the
-/// no-break space claude draws; inside a box, also the box's padding) — or a known placeholder that
-/// is **entirely dim**, which only a styled (`format: ansi`) read can show. A plain-text read never
+/// no-break space claude draws; inside a box, also the box's padding) — or content that is
+/// **entirely dim** (a placeholder or suggested prompt, whatever it says), which only a styled (`format: ansi`) read can show. A plain-text read never
 /// accepts a placeholder: the same words could have been typed (sol review round nine #2).
 pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
@@ -294,9 +270,11 @@ pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
         }
     }
     let text: String = content.iter().map(|(ch, _)| *ch).collect();
-    let dim_placeholder = !content.is_empty()
-        && content.iter().filter(|(ch, _)| !ch.is_whitespace()).all(|(_, dim)| *dim)
-        && placeholder_words(kind, text.trim_end());
+    // Anything the TUI draws dim after the marker is its own hint — `Try "…"`, codex's example
+    // prompts, claude's suggested next prompt — never typed text, whatever the words say. One
+    // visible non-dim character makes it a draft (sol review round nine #2).
+    let visible: Vec<bool> = content.iter().filter(|(ch, _)| !ch.is_whitespace()).map(|(_, dim)| *dim).collect();
+    let dim_placeholder = !visible.is_empty() && visible.iter().all(|dim| *dim);
     if !(text.is_empty() || dim_placeholder) {
         return BoxState::NonEmpty;
     }
@@ -886,6 +864,17 @@ mod tests {
         assert_eq!(box_state("claude", &plain), BoxState::NonEmpty, "純文字的佔位字");
         let dim = empty.replacen("❯\n", "❯ \u{1b}[2mTry \"fix lint errors\"\u{1b}[0m\n", 1);
         assert_eq!(box_state("claude", &dim), BoxState::Empty, "dim 的佔位字");
+        // Claude Code 的「建議下一句」：整句 dim，不管寫什麼都是空框；同一句沒 dim、或混進一個非 dim 字就是草稿。
+        let suggestion = empty.replacen("❯\n", "❯\u{a0}\u{1b}[2m把 4b 和 4c 補做完\u{1b}[0m\r\n", 1);
+        assert_eq!(box_state("claude", &suggestion), BoxState::Empty, "dim 的建議句");
+        let typed_same = empty.replacen("❯\n", "❯\u{a0}把 4b 和 4c 補做完\n", 1);
+        assert_eq!(box_state("claude", &typed_same), BoxState::NonEmpty, "非 dim 的同一句");
+        let mixed = empty.replacen("❯\n", "❯\u{a0}\u{1b}[2m把 4b 和 4c\u{1b}[0m 補做完\n", 1);
+        assert_eq!(box_state("claude", &mixed), BoxState::NonEmpty, "混進非 dim 字");
+        let dim_codex = "› \u{1b}[2mSomething codex suggests\u{1b}[0m\n\ngpt-6-astra low · ~/proj\n";
+        assert_eq!(box_state("codex", dim_codex), BoxState::Empty, "codex 任何 dim 提示");
+        let dim_spaces = empty.replacen("❯\n", "❯ \u{1b}[2m  \u{1b}[0m\n", 1);
+        assert_eq!(box_state("claude", &dim_spaces), BoxState::NonEmpty, "只有空白不算提示");
         let past_placeholder = empty.replacen("❯\n", "❯ Try \"fix lint errors\" now\n", 1);
         assert_eq!(box_state("claude", &past_placeholder), BoxState::NonEmpty);
         assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n"), BoxState::Unready);

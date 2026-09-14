@@ -69,6 +69,8 @@ pub struct LivePane {
     pub boxed: bool,
     /// Draw codex's unboxed `› …` composer and echo rows instead of claude's.
     pub codex: bool,
+    /// claude's suggested next prompt: drawn dim in an empty composer, gone once anything is typed.
+    pub suggestion: Option<String>,
 }
 
 impl LivePane {
@@ -113,7 +115,10 @@ impl LivePane {
         }
         out.push_str("─────────────────────────────────────────────\n");
         match self.composer.split_first() {
-            None => out.push_str("❯\n"),
+            None => match &self.suggestion {
+                Some(s) => out.push_str(&format!("❯\u{a0}\u{1b}[2m{s}\u{1b}[0m\n")),
+                None => out.push_str("❯\n"),
+            },
             Some((first, rest)) => {
                 out.push_str(&format!("❯ {first}\n"));
                 for r in rest {
