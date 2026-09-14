@@ -670,9 +670,8 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     // `sent[0]` is the delivered form (attachment paths included), exactly what `agent.prompt` got.
     let Some(text) = sent.first() else { return false };
     note_resend(turn_id);
-    let res = client
-        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": text}), Duration::from_secs(10))
-        .await;
+    // The first delivery just failed silently; re-deliver the way that is verified on screen.
+    let res = deliver_prompt(&client, &run, &bot, text, true).await;
     match res {
         Ok(_) => {
             tracing::warn!(run_id, turn = %turn_id, bot = %bot.name, attempt = resend_count(turn_id),
@@ -1668,12 +1667,14 @@ mod issue_17_tests {
         let f = fixture("claude", lost).await;
         let app = f.env.app.clone();
         let sent = vec!["Reply with PONG".to_string()];
-        let prompts = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "agent.prompt").count();
+        let typed = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count();
 
-        let _ = resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await;
-        assert_eq!(prompts(&f), 1, "the lost prompt is delivered again");
-        let _ = resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await;
-        assert_eq!(prompts(&f), 1, "capped: a second loss fails the turn instead of looping");
+        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
+        // 重送走 pane 直接打字（agent.prompt 剛靜默失敗過）；這個 mock 畫面不會變，所以打一次、沒看到、再打一次。
+        assert_eq!(typed(&f), 2, "the lost prompt is typed into the pane again");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "not through the path that just failed");
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
+        assert_eq!(typed(&f), 2, "capped: a second loss fails the turn instead of looping");
     }
 
     #[tokio::test]
@@ -1684,6 +1685,56 @@ mod issue_17_tests {
         let sent = vec!["Reply with PONG".to_string()];
         assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
         assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "claude took it: resending would duplicate the work");
+    }
+
+    fn count(f: &Fixture, method: &str) -> usize {
+        f.env.herdr.methods().iter().filter(|m| *m == method).count()
+    }
+
+    async fn run_and_bot(f: &Fixture) -> (db::Run, db::Bot) {
+        let app = &f.env.app;
+        (db::run(&app.db, &f.run_id).await.unwrap().unwrap(), db::bot(&app.db, &f.bot_id).await.unwrap().unwrap())
+    }
+
+    /// 沒被 daemon 打過 slash 的 run：照舊走 herdr `agent.prompt`，不動 pane。
+    #[tokio::test]
+    async fn an_untouched_run_still_prompts_through_the_agent() {
+        let f = fixture("claude", "──────\n❯\n").await;
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&f.env.app, &run).await.unwrap();
+        let _ = deliver_prompt(&client, &run, &bot, "Reply with PONG", false).await;
+        assert_eq!(count(&f, "agent.prompt"), 1);
+        assert_eq!(count(&f, "pane.send_text"), 0);
+    }
+
+    /// 2026-09-14 wits-c1-op-xh：打過 `/effort` 的 pane，`agent.prompt` 回 ok 卻沒進去。那種 run 改成直接
+    /// 打字進 pane，而且看畫面：字沒出現在輸入框就再打一次，**沒看到字就絕不按 Enter**（空框按 Enter 無害，
+    /// 但也證明不了什麼），兩次都沒出現就交給 stall watchdog。
+    #[tokio::test]
+    async fn after_a_slash_the_prompt_is_typed_and_retyped_when_it_never_shows() {
+        let lost = "❯ /effort high\n  ⎿  Set effort level to high\n──────\n❯\n";
+        let f = fixture("claude", lost).await;
+        mark_pane_typed(&f.run_id);
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&f.env.app, &run).await.unwrap();
+        deliver_prompt(&client, &run, &bot, "加一個功能除了按 SKU 之外", false).await.unwrap();
+        assert_eq!(count(&f, "agent.prompt"), 0, "the path that failed is not used again");
+        assert_eq!(count(&f, "pane.send_text"), 2, "typed, not seen, typed once more");
+        assert_eq!(count(&f, "pane.send_keys"), 0, "never Enter on a box that does not hold our text");
+    }
+
+    /// 字在輸入框裡 → Enter；按了還在（這個 mock 畫面不會變）→ 再按一次，就停。
+    #[tokio::test]
+    async fn after_a_slash_a_prompt_seen_in_the_box_is_submitted_and_checked() {
+        let in_box = "❯ /effort high\n  ⎿  Set effort level to high\n──────\n❯ 加一個功能除了按 SKU 之外\n──────\n";
+        let f = fixture("claude", in_box).await;
+        mark_pane_typed(&f.run_id);
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&f.env.app, &run).await.unwrap();
+        deliver_prompt(&client, &run, &bot, "加一個功能除了按 SKU 之外", false).await.unwrap();
+        assert_eq!(count(&f, "pane.send_text"), 1);
+        assert_eq!(count(&f, "pane.send_keys"), 2, "Enter, still in the box, Enter once more");
+        assert_eq!(count(&f, "agent.prompt"), 0);
     }
 
     #[tokio::test]
@@ -1770,6 +1821,17 @@ mod lost_prompt_tests {
 
     fn sent(s: &str) -> Vec<String> {
         vec![s.to_string()]
+    }
+
+    #[test]
+    fn typed_state_reads_the_incident_screens() {
+        use crate::lifecycle::{typed_state, TypedState};
+        let text = "think more if can be even faster";
+        assert_eq!(typed_state("claude", EFFORT_MAX_LOST, text), TypedState::Missing);
+        let in_box = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ think more if can be even faster\n", 1);
+        assert_eq!(typed_state("claude", &in_box, text), TypedState::InBox);
+        let sent = EFFORT_MAX_LOST.replacen("615330 tokens", "615330 tokens\n❯ think more if can be even faster", 1);
+        assert_eq!(typed_state("claude", &sent, text), TypedState::LeftBox);
     }
 
     #[test]

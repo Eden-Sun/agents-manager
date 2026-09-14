@@ -69,9 +69,7 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
             return Ok(());
         }
     };
-    let res = client
-        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": &text}), Duration::from_secs(10))
-        .await;
+    let res = deliver_prompt(&client, &run, &bot, &text, false).await;
     let delivery = match res {
         Ok(_) => "ok",
         Err(e) => {

@@ -296,6 +296,8 @@ impl MockHerdr {
                                     "cwd": "/tmp/p", "pid": os_pid}]}}}),
                             }
                         }
+                        // Typing into a pane: recorded in `calls`; the screen is whatever the test set.
+                        "pane.send_text" | "pane.send_keys" => json!({"id": id, "result": {"type": "ok"}}),
                         "agent.send_keys" => {
                             let target = wid_of("target");
                             let ctrl_c = params
