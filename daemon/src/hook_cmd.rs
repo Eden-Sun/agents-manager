@@ -184,9 +184,14 @@ fn post(
     })
 }
 
+/// `AM_DATA_DIR` 由 daemon 注入 pane env（`lifecycle::setup::pane_env`）：spool 必須落在
+/// **啟動這顆 bot 的 daemon 的**資料目錄，否則隔離跑的 daemon 不會重播，正式 daemon 反而吃到它。
 fn data_dir() -> PathBuf {
-    // For tests.
-    if let Some(d) = std::env::var_os("AM_DATA_DIR") {
+    data_dir_from(std::env::var_os("AM_DATA_DIR"))
+}
+
+fn data_dir_from(env: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(d) = env.filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
     }
     match dirs::home_dir() {
@@ -201,7 +206,11 @@ fn bot_dir(bot_id: &str) -> PathBuf {
 
 /// SPEC §4.4.4: one JSON line, `O_APPEND`, same body as the failed POST.
 fn spool(bot_id: &str, body: &serde_json::Value) {
-    let dir = bot_dir(bot_id);
+    spool_to(&data_dir(), bot_id, body)
+}
+
+fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) {
+    let dir = data_dir.join("bots").join(bot_id);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log_line(bot_id, &format!("spool mkdir failed: {e}"));
         return;
@@ -238,6 +247,24 @@ fn log_line(bot_id: &str, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 隔離跑的 daemon 會把自己的資料目錄注入 pane env；spool 一定要落在那裡，
+    /// 否則隔離的 daemon 不會重播、正式 daemon 反而吃到它（2026-09-14 事故）。
+    #[test]
+    fn the_spool_follows_the_injected_data_dir() {
+        let dir = std::env::temp_dir().join(format!("am-hook-spool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        spool_to(&dir, "b1", &serde_json::json!({"event": "Stop"}));
+
+        let line = std::fs::read_to_string(dir.join("bots/b1/hook-spool.jsonl")).unwrap();
+        assert!(line.contains("\"event\":\"Stop\""), "{line}");
+        let home_spool = data_dir_from(None).join("bots/b1/hook-spool.jsonl");
+        assert!(!home_spool.starts_with(&dir), "沒注入時才回到預設目錄");
+
+        assert_eq!(data_dir_from(Some("/tmp/am-iso".into())), PathBuf::from("/tmp/am-iso"));
+        assert_eq!(data_dir_from(Some("".into())), data_dir_from(None), "空字串當沒設");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn explicit_token_wins_over_env() {

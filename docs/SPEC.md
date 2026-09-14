@@ -61,11 +61,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
-  只擋**啟動時**那一次投影（`project_config_at_startup`）：啟動時 DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／開錯 DB。
-  daemon 跑起來後的重投（API／總管改完設定）不走閘門——那是這顆 daemon 自己剛寫進 config 的單筆改動，刪一個含多顆 bot 的專案是正常操作。
-  真的要在啟動時刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
+  啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
+  DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
+  唯一的例外是明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`）：它們走帶授權的 `project_config_after_delete`，所以「刪一個含多顆 bot 的專案」仍是正常操作。
+  其他情況真的要刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
 - **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
 - **同一資料目錄只准一顆 daemon**：啟動時對 `<資料目錄>/daemon.lock` 拿 `flock(LOCK_EX|LOCK_NB)`（拿到才寫自己的 pid 進去），拿不到就拒絕啟動、**不做任何寫入**（重啟時前一顆還在收攤，最多等 5 秒再判定失敗）；鎖綁在 fd 上，行程死掉自動放開（`startup.rs`）。
+  順序是**唯讀解析設定 → 建立資料目錄 → 拿鎖 → 才允許建立目錄／寫檔**：`ConfigStore::load` 在設定檔不存在時會寫一份預設 config，那是共用設定，還沒拿到鎖的程序不能碰。拿鎖後重讀的設定若把 `data_dir` 改掉也拒絕啟動（拿著 A 的鎖寫 B 的 DB）。
+- **資料目錄要跟著 bot 與 hook 走**：本機 pane 的 env 一律注入解析後的 `AM_DATA_DIR`（`pane_env`），herdr shim 也把它往子 agent 傳；否則 hook 在 HTTP 打不通時會 spool 進預設目錄，隔離跑的 daemon 不會重播，正式 daemon 反而吃到它。遠端 pane 不注入（bot 目錄在遠端家目錄，§11.4）。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
   - 事件訂閱是長連線：**一條全域**（`pane.exited`、`pane.closed`、`workspace.closed`、`pane.agent_detected`）+ **每個 active Run 一條**

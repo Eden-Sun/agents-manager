@@ -390,6 +390,11 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(any_err)
 }
 
+/// 刪除 bot／專案之後的重投：使用者明確要刪，繞過大量軟刪閘門（`projection` 的註解）。
+async fn reproject_after_delete(app: &Arc<App>) -> Result<(), LcError> {
+    crate::projection::project_config_after_delete(&app.cfg, &app.db).await.map_err(any_err)
+}
+
 #[derive(Deserialize)]
 struct NewProject {
     path: String,
@@ -633,7 +638,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
         })
         .await
         .map_err(any_err)?;
-    reproject(&app).await?;
+    reproject_after_delete(&app).await?;
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -1110,7 +1115,7 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         .await
         .map_err(any_err)?;
     // Soft delete; the conversation and its messages stay.
-    reproject(&app).await?;
+    reproject_after_delete(&app).await?;
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
