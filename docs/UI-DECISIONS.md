@@ -166,3 +166,23 @@
 ——那時候該說的是「回來了」，不是倒數負數。
 
 截圖 `docs/screenshots/quota-reset/`。
+## 左上角的重建申請計數（2026-09-14，使用者指定）
+
+AGM 的重建排程原本只在整點檢查；使用者要它**集滿 5 個重建申請就不等整點**，並要「這個 counter 標在左上角」。
+
+- **位置**：側欄最上面、`AG Man` 標題底下那一列（pane 晶片與連線燈旁），桌機與手機同一個位置。
+  不放在 RAM 那一格旁邊：側欄只有 280px，兩顆並排會把標題列擠成兩行。
+- **樣子**：`⟳ 3/5`。一筆都沒有時整顆不出現——常態是 0，畫一顆永遠寫 0 的 chip 只是噪音。
+  到門檻時邊框與數字轉警示色：那一刻的意思是「下一輪檢查就會重建」，使用者該看得出來。
+- **點開**：列出申請者、commit、待裁示／已核准、scope 一句話，底下寫明滿幾筆會提前重建。
+- **資料**：唯讀的 `GET /api/supervisor/approvals`，計數規則在 `web/src/lib/rebuildCount.ts`，
+  與 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態 `pending`／`approved`，
+  同一個 requester 對同一個 commit 算一筆。每 30 秒重讀一次（申請是人在動的）。
+- **已知的一個差**：腳本還會丟掉「上次真的上線之前建立」的申請（它讀得到 `daemon-update.built`
+  的 mtime），瀏覽器讀不到那個檔，所以沒被裁示掉的舊申請在 chip 上仍算一筆。daemon 哪天把
+  「上次上線時間」放進 `GET /api/supervisor`，這裡就跟著改。
+- **門檻**：腳本吃 `AGM_REBUILD_THRESHOLD`（預設 5）；daemon 沒有這個欄位，所以前端是常數 5
+  （`web/src/api/rebuildRequests.ts`）。兩邊要一起改。
+
+![桌機](screenshots/rebuild-counter/desktop-1440.png)
+![手機 390](screenshots/rebuild-counter/mobile-390.png)
