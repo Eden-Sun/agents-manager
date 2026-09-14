@@ -531,6 +531,27 @@ pub(crate) fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Deliver
     Ok(Proof::Unverified)
 }
 
+/// herdr refused the `format` parameter itself (an older or remote herdr), as opposed to failing to
+/// read the pane.
+fn ansi_unsupported(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<HerdrError>()
+        .map(|h| matches!(h.code.as_str(), "unsupported" | "invalid_params" | "invalid_request") || h.message.contains("format"))
+        .unwrap_or(false)
+}
+
+/// Read the pane for the composer checks: styled when herdr can, plain when it cannot. A plain
+/// read is the fail-closed fallback — no dim flags, so a placeholder simply reads as `NonEmpty`.
+async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<String> {
+    match client.pane_read_ansi(pane, "recent-unwrapped", DELIVER_SCAN_LINES).await {
+        Ok(r) => Ok(r.text),
+        Err(e) if ansi_unsupported(&e) => {
+            tracing::debug!(pane, error = %e, "herdr has no styled pane.read; using the plain read");
+            Ok(client.pane_read(pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// `agent.prompt` on an agent herdr has no session bound to answered ok while the text never
 /// reached the pane (2026-09-14 wits-c1-op-xh).
 async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
@@ -586,7 +607,15 @@ pub(crate) async fn plan_delivery(
         Ok(p) => p,
         Err(not) => return Ok(Err(not)),
     };
-    let screen = client.pane_read_ansi(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text;
+    // Nothing has been typed yet: a pane that cannot be read is "try again later", never a 502
+    // and never an unknown delivery (sol review round ten #1).
+    let screen = match read_composer(client, &pane).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = %e, "could not read the pane before typing");
+            return Ok(Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }));
+        }
+    };
     match box_state(&bot.kind, &screen) {
         BoxState::Empty => Ok(Ok(Plan::Type { pane, proof })),
         BoxState::NonEmpty => Ok(Err(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
@@ -647,11 +676,18 @@ pub(crate) async fn execute_delivery(
     if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
         anyhow::bail!("could not record runs.pane_typed for {} before typing into its pane: {e}", run.id);
     }
-    // Styled read: `box_state` needs the dim flag; echo evidence reads the same screen unstyled.
-    let read = || async { client.pane_read_ansi(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await.map(|r| r.text) };
+    // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
+    let read = || read_composer(client, &pane);
 
-    // The box may have changed since the plan (someone typing in the terminal): look again.
-    let before = read().await?;
+    // The box may have changed since the plan (someone typing in the terminal): look again. Still
+    // before the first keystroke, so a failed read is "not attempted".
+    let before = match read().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = %e, "could not read the pane before typing");
+            return Ok(Delivered::NotAttempted { reason: "composer_unreadable", retry: true });
+        }
+    };
     match box_state(&bot.kind, &before) {
         BoxState::Empty => {}
         BoxState::NonEmpty => return Ok(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
@@ -1101,6 +1137,30 @@ mod api_tests {
         }
         assert_eq!(turns(&app, &conv).await, 0);
         assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+    }
+
+    /// 直接送：herdr 拒絕 `format: ansi` 時退回純文字讀法照樣送出；讀不到畫面時回 409、不建 turn，不是 502。
+    #[tokio::test]
+    async fn direct_prompts_survive_a_herdr_without_styled_reads_and_unreadable_panes() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "claude").await;
+        env.herdr.reject_ansi.store(true, std::sync::atomic::Ordering::SeqCst);
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        let out = prompt(&app, &bot_id, "Reply with PONG please", "crid-plain").await.unwrap();
+        assert_eq!(out.delivery, "ok");
+
+        let env = tt::env().await;
+        let app = env.app.clone();
+        // grok 沒有要等的證據，所以會真的走到讀畫面那一步。
+        let (bot_id, conv2, _run) = idle_bot(&env, "grok").await;
+        env.herdr.set_screen("pane-api", "__READ_ERROR__");
+        match prompt(&app, &bot_id, "Reply with PONG please", "crid-unreadable").await {
+            Err(LcError::Conflict(v)) => assert_eq!(v.get("reason").and_then(Value::as_str), Some("composer_unreadable")),
+            other => panic!("expected a retryable 409, got {:?}", other.map(|o| o.delivery)),
+        }
+        assert_eq!(turns(&app, &conv2).await, 0);
+        let _ = conv;
     }
 
     /// grok 多行沒有無損證據：照樣打字送出，回 200 `unverified`，turn 留下「要人工核對」的標記（不是 unknown）。

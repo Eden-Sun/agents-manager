@@ -195,7 +195,8 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 `delivery_verified:0`，UI 標「未驗證送達」；它不會被自動重送。按過鍵、該有證據卻證明不了，才是 `200 {"delivery":"unknown"}`。
 排隊中的 prompt 遇到 409 類原因放回 `queued`，以 15 秒起、每次加倍、上限 5 分鐘的退避重試（每顆 bot 同時只有一個重試
 timer；次數與下次時間存在 turn 上，重啟與其他喚醒都不會提前花掉額度），放回 12 次仍送不出就標 failed 並插 system 訊息；daemon 重啟後依 `next_flush_at` 為每顆 bot 重建一個重試 timer；
-codex 的 rollout 還沒寫出來時先放回等 3 次，之後照樣送出並標 `unverified`；
+codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，綁 run 與 session，換了就重算），之後照樣送出並標 `unverified`；
+打字前讀不到 pane（含 herdr 讀取失敗）一律 409 `composer_unreadable`、排隊的放回，不回 502；herdr 不支援 `format=ansi` 時改用純文字讀法；
 422 類原因直接標 failed 並插 system 訊息（狀態與說明同一個 transaction）。規劃後、打字前才發現送不出而剛建的 turn 收不回來時，
 回 502（不是 409），避免以同一個 request id 重送卻只拿到 failed turn。
 

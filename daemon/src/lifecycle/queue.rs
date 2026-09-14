@@ -75,9 +75,10 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
             return Ok(());
         }
     };
-    // A queued prompt waits for a codex rollout that is on its way for a few put-backs (15+30+60 s),
-    // then stops waiting and goes out with what is available.
-    let waited_for_log = turn.flush_retries >= CODEX_LOG_WAIT_RETRIES;
+    // A queued prompt waits a few put-backs for a codex rollout that is on its way, then goes out
+    // with what is available. Counted only for that reason and only for this run and session.
+    let wait_key = rollout_wait_key(&run);
+    let waited_for_log = turn.rollout_wait_key.as_deref() == Some(wait_key.as_str()) && turn.rollout_waits >= CODEX_LOG_WAIT_RETRIES;
     let res = deliver_prompt(app, &client, &run, &bot, &text, false, waited_for_log).await;
     let delivery = match res {
         Ok(Delivered::Submitted) => "ok",
@@ -87,7 +88,7 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
         // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
         // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
-            match defer_queued_turn(app, &conv, &turn.id, reason).await {
+            match defer_queued_turn(app, &conv, &turn.id, reason, &wait_key).await {
                 Ok(Some(delay)) => schedule_flush_retry(app, bot_id, delay),
                 Ok(None) => tracing::warn!(bot = %bot_id, turn = %turn.id, reason, "queued prompt gave up after its retry limit"),
                 Err(e) => tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not put a queued prompt back"),
@@ -160,6 +161,11 @@ async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str)
 /// Put-backs a queued prompt spends waiting for a codex rollout that has not been written yet.
 pub(crate) const CODEX_LOG_WAIT_RETRIES: i64 = 3;
 
+/// Which run and session a rollout wait belongs to. A restarted bot or a new session is a new key.
+pub(crate) fn rollout_wait_key(run: &db::Run) -> String {
+    format!("{}:{}", run.id, run.native_session_id.as_deref().unwrap_or(""))
+}
+
 /// Backoff for a queued prompt that could not be typed yet: 15 s, doubling, capped at 5 min.
 const QUEUE_RETRY_BASE_SECS: u64 = 15;
 const QUEUE_RETRY_MAX_SECS: u64 = 300;
@@ -174,7 +180,13 @@ pub(crate) fn queue_retry_delay(retries: i64) -> std::time::Duration {
 
 /// Put a claimed turn back on the queue with its retry count and next attempt time, or — past the
 /// limit — fail it with an explanation. One transaction either way. `Some(delay)` = requeued.
-async fn defer_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, reason: &str) -> anyhow::Result<Option<std::time::Duration>> {
+async fn defer_queued_turn(
+    app: &Arc<App>,
+    conv: &str,
+    turn_id: &str,
+    reason: &str,
+    wait_key: &str,
+) -> anyhow::Result<Option<std::time::Duration>> {
     let mut tx = app.db.begin().await?;
     let retries: i64 = sqlx::query_scalar("SELECT flush_retries FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
     if retries >= QUEUE_RETRY_LIMIT {
@@ -198,6 +210,19 @@ async fn defer_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, reason: &s
     .bind(turn_id)
     .execute(&mut *tx)
     .await?;
+    if reason == "codex_log_not_ready" {
+        // Only this reason spends the rollout wait, and a different run or session starts over.
+        sqlx::query(
+            "UPDATE turns SET rollout_waits = CASE WHEN rollout_wait_key = ? THEN rollout_waits + 1 ELSE 1 END,
+                              rollout_wait_key = ?
+              WHERE id = ?",
+        )
+        .bind(wait_key)
+        .bind(wait_key)
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     tracing::info!(turn = turn_id, reason, attempt = retries + 1, retry_in_s = delay.as_secs(), "queued prompt not sent yet; put back");
     Ok(Some(delay))
@@ -303,6 +328,12 @@ where
 pub async fn rearm_queue_retries(app: &Arc<App>) -> usize {
     let a = app.clone();
     rearm_queue_retries_with(app, move |bot| schedule_flush_queued(&a, &bot)).await
+}
+
+/// Test hook: is a retry timer waiting for this bot?
+#[cfg(test)]
+pub(crate) fn queue_retry_timer_armed(bot_id: &str) -> bool {
+    QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock().map(|m| m.contains_key(bot_id)).unwrap_or(false)
 }
 
 /// Test hook: what a process restart does to the in-memory timers.
@@ -674,6 +705,136 @@ mod flush_queue_tests {
         }
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1, "exactly once");
+    }
+
+    /// 排隊送：herdr 拒絕 `format: ansi` 照樣送出；讀不到畫面就放回隊列（不是 delivery=unknown 卡住後面的訊息）。
+    #[tokio::test]
+    async fn queued_prompts_survive_a_herdr_without_styled_reads_and_unreadable_panes() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        f.env.herdr.reject_ansi.store(true, std::sync::atomic::Ordering::SeqCst);
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
+
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        // 讀畫面失敗（兩種讀法都失敗）。
+        f.env.herdr.live.lock().unwrap().remove("pane-1");
+        f.env.herdr.set_screen("pane-1", "__READ_ERROR__");
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("queued", "pending"), "put back, not parked as unknown");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+    }
+
+    fn codex_queue_env<'a>(f: &'a Fixture) -> impl std::future::Future<Output = ()> + 'a {
+        async move {
+            let app = &f.env.app;
+            db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+            let home = f.env.dir.join("codex-home-w");
+            std::fs::create_dir_all(home.join("sessions")).unwrap();
+            sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+                .bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string())
+                .bind(&f.bot_id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        }
+    }
+
+    async fn clear_backoff(f: &Fixture) {
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&f.env.app.db).await.unwrap();
+    }
+
+    /// 先因為框忙放回好幾次，之後 session 已知但 rollout 未寫：rollout 的等待額度不被框忙吃掉，還是要等滿 3 次（sol 第十輪 #2）。
+    #[tokio::test]
+    async fn busy_put_backs_do_not_spend_the_rollout_wait() {
+        let f = queued_kind("codex", "test").await;
+        codex_queue_env(&f).await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, composer: vec!["草稿".into()], ..Default::default() });
+        for _ in 0..3 {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            clear_backoff(&f).await;
+        }
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.flush_retries, t.rollout_waits), (3, 0), "busy put-backs are not rollout waits");
+
+        // 框清空了；codex 回報了 session，但 rollout 還沒寫。
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-busy' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        for n in 1..=CODEX_LOG_WAIT_RETRIES {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!((t.status.as_str(), t.rollout_waits), ("queued", n), "still waiting for the rollout #{n}");
+            clear_backoff(&f).await;
+        }
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "waited its three, then went out");
+    }
+
+    /// 等到一半 bot 重啟／換了 session：等待次數跟著新的 run／session 重新算。
+    #[tokio::test]
+    async fn a_new_run_or_session_starts_the_rollout_wait_over() {
+        let f = queued_kind("codex", "test").await;
+        codex_queue_env(&f).await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-a' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        for _ in 0..2 {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            clear_backoff(&f).await;
+        }
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.rollout_waits, 2);
+        assert_eq!(t.rollout_wait_key.as_deref(), Some(format!("{}:sess-a", f.run_id).as_str()));
+
+        // 新 session：前一個 session 等過的兩次不算數。
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-b' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.rollout_waits), ("queued", 1), "counted again from one");
+        assert_eq!(t.rollout_wait_key.as_deref(), Some(format!("{}:sess-b", f.run_id).as_str()));
+        clear_backoff(&f).await;
+        // 已經等滿三次也不能讓換了 session 的 turn 直接送：key 不同就不算等過。
+        sqlx::query("UPDATE turns SET rollout_waits = 9 WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-c' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+    }
+
+    /// 真的「重啟」：同一個 DB 開一個新的 App，走啟動時真正呼叫的 `reconcile::rearm_progress`，timer 被接回來。
+    #[tokio::test]
+    async fn the_startup_path_rearms_a_backoff_on_a_fresh_app() {
+        let f = queued_kind("grok", "test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        f.env.herdr.live_pane(
+            "pane-1",
+            crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["草稿".into()], ..Default::default() },
+        );
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert!(queue_retry_timer_armed(&f.bot_id), "the first process armed it");
+
+        // 程序結束：記憶體裡的 timer 沒了。新的 App 開在同一個資料庫上。
+        forget_queue_retry_timer(&f.bot_id);
+        drop(app);
+        let fresh = crate::testing::restart_app(&f.env).await;
+        assert!(!queue_retry_timer_armed(&f.bot_id));
+        crate::reconcile::rearm_progress(&fresh).await;
+        assert!(queue_retry_timer_armed(&f.bot_id), "startup re-armed it from next_flush_at");
+        let again = rearm_queue_retries(&fresh).await;
+        assert_eq!(again, 0, "a second startup pass does not add another timer");
     }
 
     /// Regression: a client lookup failing after the claim abandoned the turn `in_flight` +

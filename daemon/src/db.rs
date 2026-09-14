@@ -169,6 +169,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // backoff and its limit survive a restart and cannot be reset by extra wake-ups.
         ("turns", "flush_retries", "ALTER TABLE turns ADD COLUMN flush_retries INTEGER NOT NULL DEFAULT 0"),
         ("turns", "next_flush_at", "ALTER TABLE turns ADD COLUMN next_flush_at TEXT"),
+        // Put-backs spent waiting for a codex rollout, counted only for that reason and only for
+        // the run and session in `rollout_wait_key` (`<run id>:<session id>`); a different key
+        // starts the count again (sol review round ten #2).
+        ("turns", "rollout_waits", "ALTER TABLE turns ADD COLUMN rollout_waits INTEGER NOT NULL DEFAULT 0"),
+        ("turns", "rollout_wait_key", "ALTER TABLE turns ADD COLUMN rollout_wait_key TEXT"),
     ] {
         if !has_column(pool, table, col).await? {
             sqlx::query(ddl).execute(pool).await.with_context(|| format!("add {table}.{col}"))?;
@@ -347,6 +352,12 @@ pub struct Turn {
     #[sqlx(default)]
     #[serde(skip_serializing)]
     pub next_flush_at: Option<String>,
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub rollout_waits: i64,
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub rollout_wait_key: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

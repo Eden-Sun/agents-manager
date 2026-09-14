@@ -258,7 +258,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
   `CODEX_HOME`（identity env → bot env → `~/.codex`）底下 `sessions/` 日期樹（由新到舊整棵走）找到檔名恰為
   `rollout-…-<session id>.jsonl` 的檔案；同一天有多個取修改時間最新的，canonicalize 後必須仍在 `sessions/` 底下。
   session 已知但 rollout 還沒寫出來時先不打（`NotAttempted(codex_log_not_ready, retry)`）：直接送的回 409，排隊中的
-  放回等 3 次（15＋30＋60 秒）後才退回一列回音或 unverified。只算頂層 `response_item`／`message`／`role=user` 且全部是
+  放回等 3 次後才退回一列回音或 unverified。等待次數另存在 `turns.rollout_waits`，綁 `turns.rollout_wait_key =
+  <run id>:<session id>`：只有這個原因會累計（框忙等其他放回不算），run 或 session 換了就從頭算。只算頂層 `response_item`／`message`／`role=user` 且全部是
   `input_text` 的項目；`compacted` 重播的歷史、developer 訊息、帶圖片的訊息都不算。
 - **一列回音**：單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元，且在 herdr `pane.layout`
   回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
@@ -307,6 +308,9 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 佔位字與「有人打了同樣的字」在純文字快照裡一模一樣，所以判斷空框時一律用 `pane.read format=ansi` 讀：只有每個可見字元都
 在 SGR `2`（dim）底下才算佔位字（`38`/`48` 顏色參數裡的 `2` 不算）；讀不到樣式、或只有部分 dim，一律當成非空。
+herdr 不認得 `format` 參數（舊版或遠端）時退回純文字讀法——沒有樣式可看，佔位字自然判非空。打第一個字**之前**讀不到畫面
+一律是 `NotAttempted(composer_unreadable, retry)`（直接送回 409、排隊的放回），不會變成 502 或 `delivery=unknown`；打字之後
+的讀取失敗才是錯誤。
 
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、佔位字後面多了字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。
