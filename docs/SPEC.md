@@ -63,8 +63,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
-  唯一的例外是明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`）：它們用 `project_config_deleting` 授權**這一次**要刪的 id（該專案／該 bot 與它的 child），其餘 removals 照樣過閘門。
-  授權是綁 id 的，不是「這支 API 全放行」：不然外面先把 TOML 清空、再隨便呼叫一支 DELETE，整份 config 的 removals 就全放行了。
+  唯一的例外是明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`），走 `projection::delete_from_config` 的單一臨界區：
+  **重讀 config → 確認目標此刻在 TOML（不在就 409 `not_in_config`）→ 從當下的 TOML 算出實際要拿掉的 id → 閘門（寫檔前）→ 寫 config → 投影**。
+  刪除模式的閘門是嚴格的：除了這次拿掉的 id，只要還有任何一列會不見就 409 `delete_refused`，不套小量門檻、不吃 `AM_ALLOW_BULK_DELETE`。
+  所有投影與刪除共用同一把鎖，兩支 DELETE 並發時不會互相把對方的刪除當成未授權、也不會替對方放行。
+  `DELETE /api/bots/:id` 先以 dry run 過閘門，過了才停 bot／child；寫入時在臨界區裡再確認一次，定案後才軟刪 child、清目錄。
   其他情況真的要刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
 - **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
 - **同一資料目錄只准一顆 daemon**：啟動時對 `<資料目錄>/daemon.lock` 拿 `flock(LOCK_EX|LOCK_NB)`（拿到才寫自己的 pid 進去），拿不到就拒絕啟動、**不做任何寫入**（重啟時前一顆還在收攤，最多等 5 秒再判定失敗）；鎖綁在 fd 上，行程死掉自動放開（`startup.rs`）。
@@ -72,7 +75,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **資料目錄要跟著 bot 與 hook 走**：`hook.sh`／statusLine／grok dispatcher 的 argv 一律寫死 `--data-dir <解析後的資料目錄>`，本機 pane env 另外注入 `AM_DATA_DIR`（`pane_env`），herdr shim 也往子 agent 傳。
   argv 優先於 env：pane env 只保護這顆 daemon 新開的 pane，daemon 重啟前就存在的 pane 換不掉 env，但這些檔案每次啟動都重寫。遠端 pane 不注入 env（bot 目錄在遠端家目錄，§11.4）。
 - **隔離實例不認領既有 pane**：資料目錄非預設時，reconcile 不把既有 agent／子 agent 收編成自己的 Run，`default_session` 的收編整個跳過，並記 `error` 要人在這顆 daemon 底下重啟那顆 bot——那些 pane 的 hook 指向別顆 daemon 的資料目錄，收編只會讓兩顆互相吃對方的 spool。
-- **遠端也要分實例**：遠端的 bot 目錄與 drain／scan 路徑是 `$HOME/.config/agents-manager[/instances/<slug>]/bots/<bot_id>`，`slug` 是資料目錄的短雜湊（正式實例沒有這一段）。同一台遠端被兩顆 daemon 管、bot id 又相同時，spool 才不會共用（`startup::remote_root`）。
+- **遠端也要分實例**：遠端的 bot 目錄、`hook.sh` 裡寫的 spool 目錄、drain／scan 路徑是同一個根 `$HOME/.config/agents-manager[/instances/<slug>]/bots/<bot_id>`，`slug` 是資料目錄的短雜湊（正式實例沒有這一段，路徑與腳本一字不變）。
+  grok 的 dispatcher 也按實例分址（`<根>/grok-hook.sh`），hooks 檔名是 `agents-manager[-<slug>].json`（grok 會合併整個 hooks 目錄）；每支 dispatcher 只接自己實例的 pane：隔離實例的 pane env 帶 `AM_INSTANCE=<slug>`，正式實例不帶（升級前開的舊 pane 也沒有，照舊歸正式）。
+- **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
   - 事件訂閱是長連線：**一條全域**（`pane.exited`、`pane.closed`、`workspace.closed`、`pane.agent_detected`）+ **每個 active Run 一條**

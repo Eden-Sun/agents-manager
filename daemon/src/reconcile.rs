@@ -876,7 +876,7 @@ mod compat_tests {
     async fn an_isolated_instance_refuses_to_adopt_an_existing_pane() {
         let env = tt::env().await;
         let app = env.app.clone();
-        app.set_isolated(true);
+        app.set_instance(Some("iso-test".into()));
         let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
         let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
         let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
@@ -892,9 +892,64 @@ mod compat_tests {
         assert!(run_of(&app, &bot).await.is_none(), "隔離實例不該把正式 daemon 的 pane 收編成自己的 run");
 
         // 正式實例照收（同一組輸入，只差這個旗標）。
-        app.set_isolated(false);
+        app.set_instance(None);
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         assert_eq!(run_of(&app, &bot).await.expect("正式實例照舊收編").adopted, 1);
+    }
+
+    /// 正式實例的收編沒被隔離閘門關掉——不靠測試 setter：`App::new` 從行程層級的實例名初始化，
+    /// 測試行程從沒叫過 `startup::set_instance`，所以這就是 `slug = None` 的真實接線（sol 三輪 non-blocking）。
+    #[tokio::test]
+    async fn a_production_instance_still_adopts_through_reconcile_and_the_default_session() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        assert_eq!(crate::startup::instance(), None);
+        assert_eq!(app.instance(), None);
+        assert!(!app.isolated());
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+
+        // reconcile：自己開的 bot pane。
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "working",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id,
+            "cwd": "/tmp/p"})];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(run_of(&app, &bot).await.expect("reconcile 照收").adopted, 1);
+
+        // default session：使用者自己在專案目錄裡開的 agent。收編會寫回 config.toml，所以專案要在裡面。
+        let repo = env.repo.to_string_lossy().to_string();
+        let (pid, path, alfa) = (env.project_id.clone(), repo.clone(), bot.clone());
+        app.cfg
+            .update(move |cfg| {
+                let b: crate::config::BotCfg =
+                    toml::from_str(&format!("id = '{alfa}'\nname = 'alfa'\nkind = 'claude'\n")).unwrap();
+                cfg.projects = vec![crate::config::ProjectCfg {
+                    id: Some(pid),
+                    path,
+                    label: "proj".into(),
+                    host: crate::config::LOCAL_HOST.into(),
+                    bots: vec![b],
+                }];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let user_pane = client.tab_create(&ws.workspace_id, &repo, "mine", json!({})).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "users-own", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": user_pane.tab_id, "pane_id": user_pane.pane_id,
+            "cwd": repo})];
+        crate::default_session::sync(&app).await.unwrap();
+        let adopted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE pane_id = ? AND adopted = 1")
+            .bind(&user_pane.pane_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(adopted, 1, "default session 照收");
     }
 
     /// Until the mock herdr was asked `method`, i.e. the reconcile is heading for a bot's lock.
