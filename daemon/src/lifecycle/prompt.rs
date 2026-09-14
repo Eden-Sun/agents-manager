@@ -47,6 +47,94 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
 }
 
 
+/// Where our typed prompt is on the screen after typing / after Enter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TypedState {
+    /// Still in the input box (typed, not submitted).
+    InBox,
+    /// Out of the box and visible above it: submitted (or queued by the TUI).
+    LeftBox,
+    /// Nowhere on screen: the keystrokes never landed, or the TUI threw them away.
+    Missing,
+}
+
+/// Pure: classify one screen for `text`. Head match on whitespace-squashed text, same rule as the
+/// Enter nudge, so wrapping and `[Image #n]` prefixes do not matter.
+pub(crate) fn typed_state(kind: &str, screen: &str, text: &str) -> TypedState {
+    if composer_holds_prompt(kind, screen, text) {
+        return TypedState::InBox;
+    }
+    if prompt_never_reached_screen(kind, screen, &[text.to_string()]) {
+        return TypedState::Missing;
+    }
+    TypedState::LeftBox
+}
+
+/// Pause after typing before the box is read (the TUI has to draw the paste).
+const TYPE_SETTLE_MS: u64 = 700;
+/// Pause after Enter before checking the prompt left the box.
+const SUBMIT_SETTLE_MS: u64 = 1500;
+
+/// Deliver a prompt to the agent.
+///
+/// Normal runs: herdr `agent.prompt` (bracketed paste + Enter, `agent_blocked` refusal).
+/// Runs whose pane the daemon has typed a slash command into ([`pane_typed`]): herdr's
+/// `agent.prompt` returned ok twice on such a pane without the text ever appearing
+/// (2026-09-14 wits-c1-op-xh, 14:24 and 15:33 — the second two minutes after `/effort`), while
+/// `pane.send_text` + Enter into the same pane always worked. Those runs, and every re-delivery
+/// after a stall (`force_pane`), type into the pane and **look**: the text must reach the box, and
+/// must leave it after Enter. Each step is retried once; what still cannot be verified is logged
+/// and left to the stall watchdog, never typed a third time.
+pub(crate) async fn deliver_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bot, text: &str, force_pane: bool) -> anyhow::Result<()> {
+    let pane = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let Some(pane) = pane.filter(|_| force_pane || pane_typed(&run.id)) else {
+        client
+            .call_timeout("agent.prompt", json!({"target": db::run_target(run, bot), "text": text}), Duration::from_secs(10))
+            .await?;
+        return Ok(());
+    };
+    let read = |client: &HerdrClient| {
+        let client = client.clone();
+        let pane = pane.to_string();
+        async move { client.pane_read(&pane, "visible", 80).await.map(|r| r.text).unwrap_or_default() }
+    };
+
+    // 1. Type, and see it in the box. Missing → type once more.
+    client.pane_send_text(pane, text).await?;
+    tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+    let mut state = typed_state(&bot.kind, &read(client).await, text);
+    if state == TypedState::Missing {
+        tracing::warn!(run = %run.id, bot = %bot.name, "typed prompt did not show up in the composer; typing it again");
+        client.pane_send_text(pane, text).await?;
+        tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+        state = typed_state(&bot.kind, &read(client).await, text);
+    }
+    if state == TypedState::LeftBox {
+        return Ok(());
+    }
+    if state == TypedState::Missing {
+        tracing::warn!(run = %run.id, bot = %bot.name, "prompt still not in the composer after typing twice; leaving it to the stall watchdog");
+        return Ok(());
+    }
+
+    // 2. Submit, and see it leave the box. Still there → one more Enter.
+    client.pane_send_keys(pane, &["Enter"]).await?;
+    tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
+    match typed_state(&bot.kind, &read(client).await, text) {
+        TypedState::LeftBox => {
+            tracing::info!(run = %run.id, bot = %bot.name, "prompt typed into the pane and verified on screen");
+        }
+        TypedState::InBox => {
+            tracing::warn!(run = %run.id, bot = %bot.name, "prompt still in the composer after Enter; pressing Enter again");
+            client.pane_send_keys(pane, &["Enter"]).await?;
+        }
+        TypedState::Missing => {
+            tracing::warn!(run = %run.id, bot = %bot.name, "prompt vanished on Enter without an echo; leaving it to the stall watchdog");
+        }
+    }
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub struct PromptOut {
     pub turn_id: String,
@@ -243,9 +331,7 @@ pub async fn prompt_grouped(
     emit_turn(app, &turn_id).await;
 
     // 4. deliver
-    let res = client
-        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": &deliver}), Duration::from_secs(10))
-        .await;
+    let res = deliver_prompt(&client, &run, &bot, &deliver, false).await;
     let delivery = match res {
         Ok(_) => "ok",
         Err(e) => {

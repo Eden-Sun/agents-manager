@@ -93,6 +93,7 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     if bot.kind == "codex" {
         // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
+        mark_pane_typed(&run.id);
         let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
             Ok(seen) => seen,
             Err(why) => return Some(format!("codex: {why}")),
@@ -123,6 +124,8 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
         return Some(format!("no_slash_command_for_{field}"));
     };
+    // 不管套用成不成功，pane 都被直接打過字了。
+    mark_pane_typed(&run.id);
     if send_slash_line(&client, &pane_id, &line).await.is_err() {
         return Some("slash_send_failed".into());
     }
@@ -221,6 +224,26 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
 }
 
 
+/// 這個 run 的 pane 被 daemon 直接打過 slash 指令（當場套用設定、登入）。
+///
+/// 2026-09-14 wits-c1-op-xh 兩次（w1HJ:pH 14:24、w1HJ:pM 15:33）：daemon 對 pane 打 `/effort` 之後，
+/// 經 herdr `agent.prompt` 送的 prompt 回 ok 卻沒進 pane——第二次隔了兩分鐘，所以不是回穩時間的問題；
+/// 同一個 pane 用 `pane.send_text`＋Enter 直接打字每次都成功（AGM 15:21、15:40 兩次都這樣救回來）。
+/// 拋棄式 claude（新 session、haiku）照同樣順序重現不出來，herdr 那端為何失效 daemon 看不到，所以
+/// 打過 slash 的 run 之後一律改走 pane 直接打字、並回頭看畫面確認（`prompt::deliver_prompt`）。
+/// 只存在行程內：daemon 重啟就忘，那時靠 stall watchdog 的重送（同樣走 pane）接住。
+static PANE_TYPED_RUNS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+pub(crate) fn mark_pane_typed(run_id: &str) {
+    if let Ok(mut set) = PANE_TYPED_RUNS.get_or_init(Default::default).lock() {
+        set.insert(run_id.to_string());
+    }
+}
+
+pub(crate) fn pane_typed(run_id: &str) -> bool {
+    PANE_TYPED_RUNS.get_or_init(Default::default).lock().map(|set| set.contains(run_id)).unwrap_or(true)
+}
+
 /// slash 指令送出後，TUI 要多久內回到「空的輸入列、畫面不再變」。
 const SLASH_SETTLE_MAX_MS: u64 = 6_000;
 const SLASH_SETTLE_POLL_MS: u64 = 500;
@@ -285,6 +308,7 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
     let client = client_for_run(app, &run).await?;
+    mark_pane_typed(&run.id);
     send_slash_line(&client, &pane_id, line).await?;
     tracing::info!(bot_id, kind = %bot.kind, line, "sent login slash command");
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
