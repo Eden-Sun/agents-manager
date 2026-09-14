@@ -849,16 +849,19 @@ pub async fn post_approval_decision(
     let mut decided = None;
     let mut from_status = "";
     for from in allowed_from {
-        if let Some(a) = store::decide_approval_from(&app.db, &id, from, status, &actor, b.reason.as_deref(), expires.as_deref())
+        // 決定與它的稽核紀錄在同一個 transaction 裡（`decide_approval_from`）：分兩步寫的話，
+        // note 失敗會留下「有決定、沒紀錄」，而重送同一個決定會撞上 idempotent 直接回成功，
+        // 那筆 audit 就永遠補不回來。
+        if let Some(pair) = store::decide_approval_from(&app.db, &id, from, status, &actor, b.reason.as_deref(), expires.as_deref())
             .await
             .map_err(up)?
         {
-            decided = Some(a);
+            decided = Some(pair);
             from_status = from;
             break;
         }
     }
-    let Some(a) = decided else {
+    let Some((a, note)) = decided else {
         let now = store::approval(&app.db, &id).await.map_err(up)?;
         let status_now = now.as_ref().map(|n| n.status.clone());
         let reason = if status_now.as_deref() == Some("pending") { "decided_concurrently" } else { "already_decided" };
@@ -874,7 +877,6 @@ pub async fn post_approval_decision(
             }),
         ));
     };
-    let note = store::add_approval_decision(&app.db, &id, from_status, status, &actor, b.reason.as_deref()).await.map_err(up)?;
     app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
     let mut out = a.to_json();
     out["audit_note_id"] = json!(note);
@@ -1164,6 +1166,30 @@ mod approval_decision_tests {
         assert_eq!(decisions[0]["actor"], "AGM:responder", "誰核准的要查得到");
         // 撤銷之後不能就地再核准：要開新的一筆申請。
         assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err());
+    }
+
+    /// 稽核寫不進去時，決定本身也不能留下來：兩者同一個 transaction。否則會出現「有決定、沒紀錄」
+    /// 的半套，而呼叫端重試同一個決定會撞上 idempotent 直接回成功，那筆 audit 永遠補不回來。
+    #[tokio::test]
+    async fn a_decision_whose_audit_cannot_be_written_is_not_written_either() {
+        let app = app().await;
+        let id = pending(&app).await;
+        // 故障注入：稽核表不見了。
+        sqlx::query("DROP TABLE supervisor_notes").execute(&app.db).await.unwrap();
+        assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err(), "寫不了紀錄就不該有決定");
+        assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "核准沒有被改掉");
+
+        // 表回來之後，同一個決定照樣能做（沒有被 idempotent 擋住）。
+        sqlx::query(
+            "CREATE TABLE supervisor_notes (id TEXT PRIMARY KEY, supervisor_id TEXT NOT NULL, kind TEXT NOT NULL,
+               body TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(decide(&app, &id, "approve", "AGM:patrol").await.unwrap().0["status"], "approved");
+        let history = store::approval_decisions(&app.db).await.unwrap();
+        assert_eq!(history.get(&id).map(Vec::len), Some(1), "只有一筆歷程，內容對得上");
     }
 
     /// 重送同一個決定是冪等的（逾時重試不是新的裁示）。
