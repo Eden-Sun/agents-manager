@@ -15,24 +15,21 @@ pub fn new_token() -> String {
     (0..32).map(|_| std::char::from_digit(rng.gen_range(0..16), 16).unwrap()).collect()
 }
 
-/// 啟動時的投影：多一道大量軟刪的閘門。**只有** `main.rs` 走這條。
+/// Fill in missing ids (writing them back to the TOML) and upsert everything into SQLite.
 ///
-/// daemon 跑起來之後的投影（API／總管改完設定就重投）不走閘門：那些是當下這顆 daemon 自己剛寫進
-/// config 的單筆改動，一次刪掉一個有很多 bot 的專案是正常操作。會投錯 DB 的是「啟動時拿到一份陌生
-/// config」這個形狀（2026-09-14 事故），擋在這裡才不會把正常刪除也擋掉。
-pub async fn project_config_at_startup(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
-    let cfg = store.get().await;
-    let live_projects: std::collections::HashSet<String> =
-        cfg.projects.iter().filter_map(|p| p.id.clone()).collect();
-    let live_bots: std::collections::HashSet<String> =
-        cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
-    // 任何寫入之前先擋：投錯 DB 的投影長得就像「config 裡什麼都沒有」。
-    guard_removals(pool, &live_projects, &live_bots).await?;
-    project_config(store, pool).await
+/// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 會在磁碟 mtime 變了
+/// 時重讀，所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
+pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
+    project_inner(store, pool, true).await
 }
 
-/// Fill in missing ids (writing them back to the TOML) and upsert everything into SQLite.
-pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
+/// 明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`）授權繞過閘門：
+/// 使用者就是要刪，一次刪掉一個含多顆 bot 的專案是正常操作。其他寫回 config 的端點不給這條。
+pub async fn project_config_after_delete(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
+    project_inner(store, pool, false).await
+}
+
+async fn project_inner(store: &ConfigStore, pool: &SqlitePool, guard: bool) -> Result<()> {
     // 1. fill in ids / canonicalize paths, write back only if something changed.
     let changed = store
         .update(|cfg| {
@@ -114,6 +111,11 @@ pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()
     let live_projects: HashSet<String> = cfg.projects.iter().filter_map(|p| p.id.clone()).collect();
     let live_bots: HashSet<String> =
         cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
+
+    // 任何寫入之前先擋：投錯 DB／被換掉的 config 長得就像「config 裡什麼都沒有」。
+    if guard {
+        guard_removals(pool, &live_projects, &live_bots).await?;
+    }
 
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
@@ -211,8 +213,9 @@ fn some_names(names: &[String]) -> String {
 }
 
 /// 大量軟刪的閘門（2026-09-14 事故）：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，
-/// 8 秒內把 15 顆 bot、6 個專案標成 `deleted_at`。啟動時 DB 的活列＝上一次投影的結果，
-/// 所以「config 空了但 DB 還有列」必然是拿錯 config／開錯 DB，不是使用者剛刪完。
+/// 8 秒內把 15 顆 bot、6 個專案標成 `deleted_at`。DB 的活列＝上一次投影的結果，所以
+/// 「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案，不是使用者剛刪完——
+/// 真的刪走的是刪除 API，那條路自己帶授權（`project_config_after_delete`）。
 async fn guard_removals(
     pool: &SqlitePool,
     live_projects: &HashSet<String>,
@@ -290,7 +293,7 @@ mod tests {
 
     async fn project_text(path: &std::path::Path, pool: &SqlitePool, text: &str) -> Result<()> {
         std::fs::write(path, text).unwrap();
-        project_config_at_startup(&ConfigStore::load(path.to_path_buf()).await.unwrap(), pool).await
+        project_config(&ConfigStore::load(path.to_path_buf()).await.unwrap(), pool).await
     }
 
     /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，8 秒軟刪 15 顆 bot／6 個專案。
@@ -319,6 +322,34 @@ mod tests {
         out.unwrap();
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 0);
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// runtime 也要擋：外面把 TOML 換掉／清空，`ConfigStore::update` 會在 mtime 變了時重讀，
+    /// 再由 API／總管觸發重投——不擋的話事故路徑只是換個入口（sol 複審 2026-09-14）。
+    #[tokio::test]
+    async fn a_config_swapped_under_a_running_daemon_is_refused() {
+        let dir = std::env::temp_dir().join(format!("am-projection-reload-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        std::fs::write(&path, config_text(&["b1", "b2", "b3", "b4"])).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        project_config(&store, &pool).await.unwrap();
+
+        // daemon 還活著、store 還在手上，檔案被外面換成另一份（這裡是空的）。
+        std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
+        store.update(|_| Ok(())).await.unwrap();
+        let err = project_config(&store, &pool).await.unwrap_err().to_string();
+        assert!(err.contains("拒絕投影"), "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
+
+        // 明確的刪除 API 仍然刪得掉（刪一個含多顆 bot 的專案是正常操作）。
+        project_config_after_delete(&store, &pool).await.unwrap();
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();

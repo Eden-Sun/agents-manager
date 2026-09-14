@@ -452,6 +452,9 @@ pub(crate) async fn pane_env(
     // Only local hook commands call home over HTTP; remote panes have no port since v4.3 (§11.4.6).
     if host == LOCAL_HOST {
         env.insert("AM_PORT".into(), json!(app.port.to_string()));
+        // HTTP 打不通時 hook 會 spool；沒有這個值它會猜 ~/.config/agents-manager，隔離跑的 daemon
+        // 就換成正式 daemon 去吃那些檔（SPEC §3.1 資料目錄隔離）。遠端的 bot 目錄在遠端家目錄，不適用。
+        env.insert("AM_DATA_DIR".into(), json!(app.data_dir.to_string_lossy()));
     }
     // Hook token rides in the pane env for every kind: grok's dispatcher learns the bot only here
     // (SPEC §12), and local hooks read it so it never shows in `ps` (issue #43).
@@ -1125,6 +1128,27 @@ mod remote_hook_tests {
         assert!(ch.wait().unwrap().success());
         assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
         assert!(sb.calls().is_empty(), "no pane to report against");
+    }
+}
+
+#[cfg(test)]
+mod pane_env_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// hook 打不通時會 spool 到 `AM_DATA_DIR`；沒注入的話隔離跑的 bot 會把檔案丟進正式資料目錄，
+    /// 換成正式 daemon 去重播它（sol 複審 2026-09-14）。
+    #[tokio::test]
+    async fn a_local_pane_learns_the_daemons_data_dir() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        assert_eq!(e["AM_DATA_DIR"], json!(env.app.data_dir.to_string_lossy()));
+        assert_ne!(e["AM_DATA_DIR"], json!(""));
+
+        // 遠端 pane 的 bot 目錄在遠端家目錄，注入本機路徑只會誤導（§11.4）。
+        let remote = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await;
+        assert!(remote.get("AM_DATA_DIR").is_none());
     }
 }
 

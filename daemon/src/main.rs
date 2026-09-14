@@ -152,19 +152,19 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         .with_target(false)
         .init();
 
-    // 資料目錄跟著設定檔走，而且開 DB 前先拿鎖：只換 --config 與 port 的「隔離測試」曾經打到正式 DB（startup.rs）。
-    let env_dir = startup::env_dir();
+    // 資料目錄跟著設定檔走，而且**在建立或寫入任何檔案之前**先拿鎖：只換 --config 與 port 的
+    // 「隔離測試」曾經打到正式 DB，連 ConfigStore::load 都會先寫一份預設 config（startup.rs）。
     let config_given = config_path.is_some();
-    let cfg_path = startup::config_path(config_path, env_dir.clone());
+    let prepared = startup::prepare(config_path, startup::LOCK_WAIT)?;
+    let (cfg_path, dir) = (prepared.cfg_path.clone(), prepared.dir.clone());
     let store = config::ConfigStore::load(cfg_path.clone()).await?;
     let cfg = store.get().await;
-    let dir = startup::data_dir(&cfg_path, config_given, cfg.server.data_dir.as_deref(), env_dir)?;
-    std::fs::create_dir_all(&dir)?;
-    let _dir_lock = startup::lock_dir(&dir, startup::LOCK_WAIT)?;
+    startup::confirm_data_dir(&prepared, cfg.server.data_dir.as_deref(), config_given)?;
+    let _dir_lock = prepared.lock;
     tracing::info!(config = %cfg_path.display(), data_dir = %dir.display(), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
 
     let pool = db::open(&dir.join("agents-manager.sqlite3")).await?;
-    projection::project_config_at_startup(&store, &pool).await.context("project config into sqlite")?;
+    projection::project_config(&store, &pool).await.context("project config into sqlite")?;
 
     let herdr_client = state::ensure_session(&cfg.server.herdr_session, &dir).await?;
     let pong = herdr_client.ping().await?;
