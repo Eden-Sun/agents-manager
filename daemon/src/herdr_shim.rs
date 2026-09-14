@@ -158,7 +158,7 @@ am_agent_prompt() {
 # own children. Pass the parent's environment down explicitly, without overriding a value the
 # caller set by hand.
 am_forward_with_env() {
-    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_DATA_DIR AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
+    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_DATA_DIR AM_INSTANCE AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         case " $* " in

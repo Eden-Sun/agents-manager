@@ -14,18 +14,19 @@ pub fn default_dir() -> PathBuf {
 }
 
 /// `AM_DATA_DIR`（空字串當沒設）。`hook_cmd.rs` 的 spool 也讀同一個變數。
-pub fn env_dir() -> Option<PathBuf> {
+pub fn env_dir() -> Result<Option<PathBuf>> {
     std::env::var_os("AM_DATA_DIR")
         .map(PathBuf::from)
         .filter(|d| !d.as_os_str().is_empty())
-        .map(|d| normalize(&d))
+        .map(|d| normalize(&d).context("AM_DATA_DIR"))
+        .transpose()
 }
 
 /// 設定檔位置：`--config` 給了就用它，否則是資料目錄底下那一份。
-pub fn config_path(config_arg: Option<PathBuf>, env_dir: Option<PathBuf>) -> PathBuf {
+pub fn config_path(config_arg: Option<PathBuf>, env_dir: Option<PathBuf>) -> Result<PathBuf> {
     match config_arg {
-        Some(p) => normalize(&p),
-        None => env_dir.unwrap_or_else(default_dir).join("config.toml"),
+        Some(p) => normalize(&p).context("--config"),
+        None => Ok(env_dir.unwrap_or_else(default_dir).join("config.toml")),
     }
 }
 
@@ -57,9 +58,9 @@ pub fn data_dir(
         None if config_arg_given => beside_config,
         None => env_dir.clone().unwrap_or_else(default_dir),
     };
-    let dir = normalize(&dir);
+    let dir = normalize(&dir)?;
     if let Some(env) = env_dir {
-        if !same_dir(&env, &dir) {
+        if !same_dir(&env, &dir)? {
             bail!(
                 "AM_DATA_DIR={} 與設定檔 {} 算出來的資料目錄 {} 不一致：\
                  這正是「以為在隔離、其實開到正式 DB」的形狀，拒絕啟動。\
@@ -101,9 +102,9 @@ pub struct Prepared {
 }
 
 pub fn prepare(config_arg: Option<PathBuf>, wait: std::time::Duration) -> Result<Prepared> {
-    let env_dir = env_dir();
+    let env_dir = env_dir()?;
     let config_given = config_arg.is_some();
-    let cfg_path = config_path(config_arg, env_dir.clone());
+    let cfg_path = config_path(config_arg, env_dir.clone())?;
     let dir = data_dir(&cfg_path, config_given, peek_data_dir(&cfg_path).as_deref(), env_dir)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create data dir {}", dir.display()))?;
     let lock = lock_dir(&dir, wait)?;
@@ -129,7 +130,7 @@ pub async fn open_instance(config_arg: Option<PathBuf>, wait: std::time::Duratio
     let data_dir_in_cfg = store.get().await.server.data_dir;
     confirm_data_dir(&prepared, data_dir_in_cfg.as_deref(), config_given)?;
     // 只算不設：行程層級的 `set_instance` 由 `serve` 自己叫（測試不該汙染整個行程）。
-    let slug = instance_slug(&prepared.dir);
+    let slug = instance_slug(&prepared.dir)?;
     let pool = crate::db::open(&prepared.dir.join("agents-manager.sqlite3")).await?;
     let Prepared { cfg_path, dir, lock } = prepared;
     Ok(Instance { dir, cfg_path, store, pool, lock, slug })
@@ -138,8 +139,8 @@ pub async fn open_instance(config_arg: Option<PathBuf>, wait: std::time::Duratio
 /// 拿鎖之後載入的設定，`data_dir` 必須跟當初唯讀看到的同一個——不同就是有人在這中間改了檔案，
 /// 這時繼續跑等於拿著 A 的鎖寫 B 的 DB。
 pub fn confirm_data_dir(prepared: &Prepared, loaded: Option<&str>, config_given: bool) -> Result<()> {
-    let again = data_dir(&prepared.cfg_path, config_given, loaded, env_dir())?;
-    if !same_dir(&again, &prepared.dir) {
+    let again = data_dir(&prepared.cfg_path, config_given, loaded, env_dir()?)?;
+    if !same_dir(&again, &prepared.dir)? {
         bail!(
             "設定檔 {} 在拿鎖之後把資料目錄從 {} 改成 {}：拒絕啟動，請重跑。",
             prepared.cfg_path.display(),
@@ -156,17 +157,17 @@ pub const REMOTE_ROOT: &str = ".config/agents-manager";
 /// 這顆 daemon 的「實例名」：預設資料目錄＝`None`（正式），其他＝資料目錄的短雜湊。
 /// 遠端主機上只看得到 `$HOME`，兩顆 daemon 管同一台遠端、bot id 又相同時會共用 spool 檔，
 /// 所以遠端的 bot 目錄要照這個名字分開（SPEC §11.4）。
-pub fn instance_slug(data_dir: &Path) -> Option<String> {
-    if same_dir(data_dir, &default_dir()) {
-        return None;
+pub fn instance_slug(data_dir: &Path) -> Result<Option<String>> {
+    if same_dir(data_dir, &default_dir())? {
+        return Ok(None);
     }
-    let bytes = normalize(data_dir).to_string_lossy().into_owned();
+    let bytes = normalize(data_dir)?.to_string_lossy().into_owned();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes.as_bytes() {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }
-    Some(format!("{hash:016x}"))
+    Ok(Some(format!("{hash:016x}")))
 }
 
 /// 遠端主機上這顆實例的根目錄（`$HOME` 之下的相對路徑）。
@@ -185,13 +186,9 @@ pub fn set_instance(slug: Option<String>) {
     let _ = INSTANCE.set(slug);
 }
 
-pub fn remote_root() -> String {
-    remote_root_for(INSTANCE.get().and_then(|s| s.as_deref()))
-}
-
-/// 這顆行程是不是隔離實例。`serve` 之外（測試、hook 子命令）沒設過，一律當正式實例。
-pub fn is_isolated() -> bool {
-    INSTANCE.get().map(|s| s.is_some()).unwrap_or(false)
+/// 這顆行程的實例名。`serve` 之外（測試、hook 子命令）沒設過，一律當正式實例（`None`）。
+pub fn instance() -> Option<String> {
+    INSTANCE.get().cloned().flatten()
 }
 
 /// 資料目錄的獨佔鎖，活到行程結束為止（`flock` 綁在 fd 上，關檔／行程死掉就自動放開）。
@@ -267,42 +264,63 @@ fn expand_tilde(s: &str) -> PathBuf {
 
 /// 逐段解析：每走一段就 canonicalize（把途中的 symlink 展開），遇到 `..` 才在**已展開**的路徑上回退。
 ///
-/// 不能先在字面上消掉 `..`：`/a/link/../state`（link → `/b/c`）真正指的是 `/b/state`，字面摺疊會算成
-/// `/a/state`，兩顆 daemon 就可能一個鎖 A、一個開 B。尾段還不存在時 canonicalize 會失敗，那段原樣接著。
-fn normalize(p: &Path) -> PathBuf {
+/// 不能先在字面上消掉 `..`：`/a/link/../state`（link → `/b/c`）真正指的是 `/b/state`。
+/// 也不能吞掉 canonicalize 的錯：dangling symlink 或 symlink 迴圈若保留字面、下一個 `..` 又把它 pop 掉，
+/// 本該 ENOENT／ELOOP 的路徑就被錯映成另一個能用的目錄，在那裡拿鎖開 DB。所以只有「這一段真的不存在」
+/// （`symlink_metadata` 回 NotFound）才進入「尾段還沒建立」模式，其餘解析失敗一律回錯、拒絕啟動。
+fn normalize(p: &Path) -> Result<PathBuf> {
     use std::path::Component;
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(p)
+        std::env::current_dir().context("current dir")?.join(p)
     };
     let mut out = PathBuf::from("/");
+    // 從第一個不存在的段開始算起，已經疊了幾段「還沒建立」的尾巴。
+    let mut pending = 0usize;
     for comp in abs.components() {
         match comp {
             Component::Prefix(prefix) => out = PathBuf::from(prefix.as_os_str()),
             Component::RootDir | Component::CurDir => {}
             Component::ParentDir => {
                 out.pop();
+                pending = pending.saturating_sub(1);
             }
             Component::Normal(name) => {
                 out.push(name);
-                if let Ok(real) = std::fs::canonicalize(&out) {
-                    out = real;
+                if pending > 0 {
+                    pending += 1;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&out) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => pending = 1,
+                    Err(e) => bail!("無法解析路徑 {}：{e}", out.display()),
+                    Ok(_) => match std::fs::canonicalize(&out) {
+                        Ok(real) => out = real,
+                        Err(e) => bail!(
+                            "{} 是解析不了的 symlink（{e}）：拒絕把它當成資料目錄的一段",
+                            out.display()
+                        ),
+                    },
                 }
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// symlink 別名（`/tmp` vs `/private/tmp`）、`..`、還不存在的目錄都要算同一個。
-fn same_dir(a: &Path, b: &Path) -> bool {
-    normalize(a) == normalize(b)
+fn same_dir(a: &Path, b: &Path) -> Result<bool> {
+    Ok(normalize(a)? == normalize(b)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn same(a: &Path, b: &Path) -> bool {
+        same_dir(a, b).unwrap()
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("am-startup-{name}-{}", crate::db::ulid()));
@@ -313,10 +331,10 @@ mod tests {
     #[test]
     fn config_in_another_dir_takes_its_db_with_it() {
         let dir = tmp("iso");
-        let cfg = config_path(Some(dir.join("config.toml")), None);
+        let cfg = config_path(Some(dir.join("config.toml")), None).unwrap();
         let got = data_dir(&cfg, true, None, None).unwrap();
-        assert!(same_dir(&got, &dir), "{} != {}", got.display(), dir.display());
-        assert!(!same_dir(&got, &default_dir()), "不得沿用 ~/.config/agents-manager");
+        assert!(same(&got, &dir), "{} != {}", got.display(), dir.display());
+        assert!(!same(&got, &default_dir()), "不得沿用 ~/.config/agents-manager");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -326,16 +344,16 @@ mod tests {
         let dir = tmp("alias");
         let cfg = dir.join("config.toml");
         let missing = dir.join("state");
-        assert!(same_dir(&missing, &dir.join("sub/../state")), "`..` 要先摺疊");
+        assert!(same(&missing, &dir.join("sub/../state")), "`..` 要先摺疊");
         data_dir(&cfg, true, Some("state"), Some(dir.join("state"))).unwrap();
         data_dir(&cfg, true, Some("state"), Some(dir.join("sub/../state"))).unwrap();
         // /tmp 與 /private/tmp 是同一個目錄（macOS）。
         let slash_tmp = PathBuf::from("/tmp").join(dir.file_name().unwrap());
         if slash_tmp.exists() {
-            assert!(same_dir(&slash_tmp, &dir));
+            assert!(same(&slash_tmp, &dir));
         }
         assert_eq!(expand_tilde("~"), dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
-        assert_eq!(data_dir(&cfg, true, Some("~"), None).unwrap(), normalize(&expand_tilde("~")));
+        assert_eq!(data_dir(&cfg, true, Some("~"), None).unwrap(), normalize(&expand_tilde("~")).unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -356,7 +374,7 @@ mod tests {
 
         drop(held);
         let ready = prepare(Some(cfg.clone()), std::time::Duration::ZERO).unwrap();
-        assert!(same_dir(&ready.dir, &dir), "{} != {}", ready.dir.display(), dir.display());
+        assert!(same(&ready.dir, &dir), "{} != {}", ready.dir.display(), dir.display());
         assert!(!cfg.exists(), "prepare 自己也不寫 config，那是拿鎖之後的事");
         // 設定檔在拿鎖之後把 data_dir 改掉 → 拒絕（拿著 A 的鎖寫 B 的 DB）。
         let err = confirm_data_dir(&ready, Some("elsewhere"), true).unwrap_err().to_string();
@@ -375,11 +393,42 @@ mod tests {
         std::fs::create_dir_all(&bc).unwrap();
         std::os::unix::fs::symlink(&bc, a.join("link")).unwrap();
 
-        let got = normalize(&a.join("link/../state"));
-        assert!(same_dir(&got, &root.join("b/state")), "{} 應該落在 b/ 底下", got.display());
-        assert!(!same_dir(&got, &a.join("state")), "字面摺疊會算成 a/state，那會鎖錯 DB");
+        let got = normalize(&a.join("link/../state")).unwrap();
+        assert!(same(&got, &root.join("b/state")), "{} 應該落在 b/ 底下", got.display());
+        assert!(!same(&got, &a.join("state")), "字面摺疊會算成 a/state，那會鎖錯 DB");
         // 拒絕啟動的判斷也跟著對：AM_DATA_DIR 寫成別名不算不一致。
         data_dir(&a.join("link/config.toml"), true, None, Some(bc.clone())).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// dangling symlink、symlink 迴圈不能被當成「尾段還沒建立」：保留字面再被 `..` pop 掉，
+    /// 就會把本該 ENOENT／ELOOP 的路徑錯映成另一個能用的目錄（sol 三輪）。
+    #[test]
+    fn unresolvable_symlinks_are_refused_not_guessed() {
+        let root = tmp("badlink");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(root.join("self"), root.join("self")).unwrap();
+        std::os::unix::fs::symlink(root.join("loop-b"), root.join("loop-a")).unwrap();
+        std::os::unix::fs::symlink(root.join("loop-a"), root.join("loop-b")).unwrap();
+
+        for bad in ["dangling/../real", "dangling", "self/../real", "loop-a/../real", "loop-b/state"] {
+            let err = normalize(&root.join(bad)).unwrap_err().to_string();
+            assert!(err.contains("symlink"), "{bad}: {err}");
+            // 拒絕啟動（不在別的目錄拿鎖）。
+            let cfg = root.join("config.toml");
+            assert!(data_dir(&cfg, true, Some(&root.join(bad).to_string_lossy()), None).is_err(), "{bad}");
+        }
+
+        // 有效 link 後面接 `..` 與還沒建立的尾巴照常。
+        std::os::unix::fs::symlink(&real, root.join("good")).unwrap();
+        let got = normalize(&root.join("good/../new/tail")).unwrap();
+        assert_eq!(got, normalize(&root).unwrap().join("new/tail"));
+        // 尾巴不存在時的 `..` 只在尾巴裡回退，回到已存在的路徑後照樣展開 symlink。
+        let back = normalize(&root.join("new/../good")).unwrap();
+        assert_eq!(back, normalize(&real).unwrap());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -401,15 +450,15 @@ mod tests {
 
         drop(held);
         let inst = open_instance(Some(cfg.clone()), std::time::Duration::ZERO).await.unwrap();
-        assert!(same_dir(&inst.dir, &dir));
+        assert!(same(&inst.dir, &dir));
         assert!(dir.join("agents-manager.sqlite3").exists(), "DB 開在設定檔旁邊");
         assert!(!default_dir().join("agents-manager.sqlite3").starts_with(&dir));
         assert!(cfg.exists(), "拿到鎖之後才寫出預設 config");
         // 隔離實例有自己的遠端 namespace，正式實例沒有。
         let slug = inst.slug.clone().expect("非預設資料目錄＝隔離實例");
         assert_eq!(remote_root_for(Some(&slug)), format!("{REMOTE_ROOT}/instances/{slug}"));
-        assert_eq!(instance_slug(&default_dir()), None);
-        assert_eq!(instance_slug(&dir), Some(slug), "同一個目錄每次都算出同一個名字");
+        assert_eq!(instance_slug(&default_dir()).unwrap(), None);
+        assert_eq!(instance_slug(&dir).unwrap(), Some(slug), "同一個目錄每次都算出同一個名字");
 
         inst.pool.close().await;
         drop(inst.lock);
@@ -432,9 +481,9 @@ mod tests {
 
     #[test]
     fn no_config_flag_keeps_the_default_dir() {
-        let cfg = config_path(None, None);
+        let cfg = config_path(None, None).unwrap();
         assert_eq!(cfg, default_dir().join("config.toml"));
-        assert!(same_dir(&data_dir(&cfg, false, None, None).unwrap(), &default_dir()));
+        assert!(same(&data_dir(&cfg, false, None, None).unwrap(), &default_dir()));
     }
 
     #[test]
@@ -443,9 +492,9 @@ mod tests {
         let data = dir.join("state");
         let cfg = dir.join("config.toml");
         let got = data_dir(&cfg, true, Some(data.to_str().unwrap()), None).unwrap();
-        assert!(same_dir(&got, &data), "{} != {}", got.display(), data.display());
+        assert!(same(&got, &data), "{} != {}", got.display(), data.display());
         // 相對路徑以設定檔所在目錄為準。
-        assert!(same_dir(&data_dir(&cfg, true, Some("state"), None).unwrap(), &data));
+        assert!(same(&data_dir(&cfg, true, Some("state"), None).unwrap(), &data));
         std::fs::remove_dir_all(&dir).ok();
     }
 

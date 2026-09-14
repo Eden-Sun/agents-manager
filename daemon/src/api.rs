@@ -390,10 +390,22 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(any_err)
 }
 
-/// 刪除 bot／專案之後的重投：只豁免**這次**要刪的 id，其餘 removals 照樣過閘門
-/// （否則外面先清空 TOML、再隨便呼叫一支 DELETE 就能全部放行）。
-async fn reproject_deleting(app: &Arc<App>, allow: crate::projection::Deleting) -> Result<(), LcError> {
-    crate::projection::project_config_deleting(&app.cfg, &app.db, &allow).await.map_err(any_err)
+/// 刪除走 `projection::delete_from_config` 的單一臨界區。目標不在 config、或授權以外還有列會不見，
+/// 都是 409：狀態不對，不是上游壞掉。
+async fn delete_in_config(
+    app: &Arc<App>,
+    target: crate::projection::DeleteTarget<'_>,
+    dry_run: bool,
+) -> Result<crate::projection::Deleting, LcError> {
+    crate::projection::delete_from_config(&app.cfg, &app.db, target, dry_run).await.map_err(|e| {
+        if let Some(n) = e.downcast_ref::<crate::projection::NotInConfig>() {
+            LcError::conflict("not_in_config", json!({"message": n.to_string()}))
+        } else if let Some(r) = e.downcast_ref::<crate::projection::DeleteRefused>() {
+            LcError::conflict("delete_refused", json!({"message": r.to_string()}))
+        } else {
+            any_err(e)
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -627,24 +639,13 @@ async fn patch_project(
 
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
-    // 這個專案底下的 bot（含它們認領的 child）就是這次授權要刪的範圍。
-    let allow = crate::projection::Deleting::project(
-        &id,
-        bots.iter().filter(|b| b.project_id == id).map(|b| b.id.clone()),
-    );
     for b in bots.iter().filter(|b| b.project_id == id) {
         if db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": b.id})));
         }
     }
-    app.cfg
-        .update(|cfg| {
-            cfg.projects.retain(|p| p.id.as_deref() != Some(id.as_str()));
-            Ok(())
-        })
-        .await
-        .map_err(any_err)?;
-    reproject_deleting(&app, allow).await?;
+    // 授權範圍在臨界區裡從**當下的** TOML 算，不從上面這份 DB 清單猜。
+    delete_in_config(&app, crate::projection::DeleteTarget::Project(&id), false).await?;
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -1087,10 +1088,27 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+    let user_bot = bot.managed_by != "child";
+    // 閘門先問（不寫檔）：過不了就什麼都不停、不刪、不 purge（sol 三輪）。child 不在 config 裡，沒有這一關。
+    if user_bot {
+        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id), true).await?;
+    }
     // 2026-09-08: spawned children go with it, else they're sidebar orphans. Deepest first.
-    let mut removed_children = Vec::new();
-    for child in descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev() {
+    let children: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev().collect();
+    // SPEC §6.4: stop first, then drop the config entry.
+    for child in &children {
         stop_for_delete(&app, &child.id).await;
+    }
+    stop_for_delete(&app, &id).await;
+    if user_bot {
+        // 真的寫入時在臨界區裡再確認一次：停 bot 那段時間 config 可能又被改過。失敗就停在「已停、未刪」。
+        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id), false).await?;
+    } else {
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
+    }
+    // 刪除定案之後才軟刪 child、清目錄。
+    let mut removed_children = Vec::new();
+    for child in children {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&child.id)
@@ -1102,32 +1120,12 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         app.emit("bot_changed", json!({"bot_id": child.id})).await;
         removed_children.push(child.id);
     }
-    // SPEC §6.4: stop first, then drop the config entry.
-    stop_for_delete(&app, &id).await;
-    if bot.managed_by == "child" {
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
-        lifecycle::purge_bot_dir(&app, &id, &host).await;
-        app.emit("bot_changed", json!({"bot_id": id})).await;
-        app.emit("project_changed", json!({"project_id": bot.project_id})).await;
-        return Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response());
-    }
-    app.cfg
-        .update(|cfg| {
-            for p in cfg.projects.iter_mut() {
-                p.bots.retain(|x| x.id.as_deref() != Some(id.as_str()));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(any_err)?;
     // Soft delete; the conversation and its messages stay.
-    reproject_deleting(
-        &app,
-        crate::projection::Deleting::bots(std::iter::once(id.clone()).chain(removed_children.iter().cloned())),
-    )
-    .await?;
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
+    if !user_bot {
+        app.emit("project_changed", json!({"project_id": bot.project_id})).await;
+    }
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
 }
 
@@ -2317,12 +2315,131 @@ mod delete_bot_tests {
         id
     }
 
+    /// user bot 由 config.toml 管：測試要把它寫進 config，刪除才會在 TOML 裡找到目標。
+    async fn in_config(e: &crate::testing::Env, bots: &[(&str, &str)]) {
+        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+        let bots: Vec<crate::config::BotCfg> = bots
+            .iter()
+            .map(|(id, name)| {
+                toml::from_str(&format!("id = '{id}'\nname = '{name}'\nkind = 'claude'\n")).unwrap()
+            })
+            .collect();
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.projects = vec![crate::config::ProjectCfg {
+                    id: Some(pid),
+                    path: repo,
+                    label: "proj".into(),
+                    host: crate::config::LOCAL_HOST.into(),
+                    bots,
+                }];
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn a_running_run(app: &Arc<App>, bot_id: &str) -> String {
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','pane-x','agent','no-such-session',?)",
+        )
+        .bind(&run)
+        .bind(bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        run
+    }
+
+    fn reason(e: LcError) -> String {
+        match e {
+            LcError::Conflict(v) => v["reason"].as_str().unwrap_or_default().to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// 閘門沒過就什麼都不動：不停 bot、不停也不刪 child、不 purge、config 不寫（sol 三輪）。
+    /// 1 個專案、2 顆 bot，TOML 被外部拿掉 b2 之後刪 b1：小資料集也不能靠「沒到門檻」放行。
+    #[tokio::test]
+    async fn a_refused_delete_stops_and_removes_nothing() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        let b2 = a_bot(&e, "bravo", "user").await;
+        let child = a_bot(&e, "alfa-kid", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&b1).bind(&child).execute(&app.db).await.unwrap();
+        let (r1, rc) = (a_running_run(&app, &b1).await, a_running_run(&app, &child).await);
+        in_config(&e, &[(&b1, "alfa")]).await; // bravo 被外部拿掉了
+
+        let err = delete_bot(State(app.clone()), Path(b1.clone())).await.unwrap_err();
+        assert_eq!(reason(err), "delete_refused");
+        for (bot, run) in [(&b1, &r1), (&child, &rc)] {
+            assert!(db::bot(&app.db, bot).await.unwrap().unwrap().deleted_at.is_none(), "{bot} 不該被刪");
+            assert_eq!(db::run(&app.db, run).await.unwrap().unwrap().state, "running", "{bot} 不該被停");
+        }
+        assert!(db::bot(&app.db, &b2).await.unwrap().unwrap().deleted_at.is_none());
+        assert!(app.cfg.get().await.projects[0].bots.iter().any(|b| b.id.as_deref() == Some(b1.as_str())), "config 沒寫");
+    }
+
+    /// TOML 被外部清空後刪原本的專案：目標此刻不在 TOML → 拒絕，DB 裡的專案與 bot 一列都不動。
+    #[tokio::test]
+    async fn deleting_a_project_the_toml_no_longer_has_is_refused() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        app.cfg.update(|cfg| { cfg.projects.clear(); Ok(()) }).await.unwrap();
+
+        let err = delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap_err();
+        assert_eq!(reason(err), "not_in_config");
+        assert!(db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_none());
+        assert_eq!(db::live_projects(&app.db).await.unwrap().len(), 1);
+
+        let err = delete_bot(State(app.clone()), Path(b1.clone())).await.unwrap_err();
+        assert_eq!(reason(err), "not_in_config");
+        assert!(db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_none());
+    }
+
+    /// 兩支不同的 DELETE 真的同時跑：各自只刪自己那顆，不會把對方剛寫進 config 的刪除當成未授權而拒絕，
+    /// 也不會替對方放行。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_deletes_at_once_each_remove_only_their_own_bot() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let ids: Vec<String> = futures::future::join_all(["a", "b", "c", "d"].map(|n| a_bot(&e, n, "user"))).await;
+        in_config(&e, &[(&ids[0], "a"), (&ids[1], "b"), (&ids[2], "c"), (&ids[3], "d")]).await;
+
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let spawn = |id: String| {
+            let (app, gate) = (app.clone(), gate.clone());
+            tokio::spawn(async move {
+                gate.wait().await;
+                delete_bot(State(app), Path(id)).await.map(|_| ()).map_err(reason)
+            })
+        };
+        let (x, y) = (spawn(ids[0].clone()), spawn(ids[1].clone()));
+        assert_eq!(x.await.unwrap(), Ok(()));
+        assert_eq!(y.await.unwrap(), Ok(()));
+
+        let live: Vec<String> = db::live_bots(&app.db).await.unwrap().into_iter().map(|b| b.id).collect();
+        assert_eq!(live.len(), 2, "{live:?}");
+        assert!(live.contains(&ids[2]) && live.contains(&ids[3]));
+        let in_toml: Vec<String> =
+            app.cfg.get().await.projects[0].bots.iter().filter_map(|b| b.id.clone()).collect();
+        assert_eq!(in_toml, vec![ids[2].clone(), ids[3].clone()]);
+    }
+
     /// review 2026-09-12 d: no reconcile walks deleted bots, so nothing else would end that run.
     #[tokio::test]
     async fn a_bot_deleted_while_its_host_is_down_does_not_keep_a_running_run() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         let id = a_bot(&e, "remote-ish", "user").await;
+        in_config(&e, &[(&id, "remote-ish")]).await;
         let run = db::ulid();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)

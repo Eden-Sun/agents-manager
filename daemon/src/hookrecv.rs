@@ -706,7 +706,8 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
     if !conn.is_connected() {
         return Ok(0);
     }
-    let text = conn.ssh_exec(&drain_script(bot_id)?).await?;
+    let root = crate::startup::remote_root_for(app.instance().as_deref());
+    let text = conn.ssh_exec(&drain_script(bot_id, &root)?).await?;
     let (lines, status) = parse_drain_output(&text);
     let mut n = 0usize;
     for line in lines {
@@ -743,11 +744,11 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
 }
 
 /// §11.4.5.
-fn drain_script(bot_id: &str) -> Result<String> {
+fn drain_script(bot_id: &str, root: &str) -> Result<String> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
-    let dir = format!("\"$HOME/{}/bots/\"{}", crate::startup::remote_root(), sh_quote(bot_id));
+    let dir = format!("\"$HOME/{root}/bots/\"{}", sh_quote(bot_id));
     Ok(format!(
         "d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
@@ -851,7 +852,8 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
                 if conn.is_local() || !conn.is_connected() {
                     continue;
                 }
-                let pending = match conn.ssh_exec(&scan_script()).await {
+                let root = crate::startup::remote_root_for(app.instance().as_deref());
+                let pending = match conn.ssh_exec(&scan_script(&root)).await {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
@@ -876,14 +878,13 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
     });
 }
 
-/// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`startup::remote_root`）。
-fn scan_script() -> String {
+/// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`App::instance`）。
+fn scan_script(root: &str) -> String {
     format!(
         "for d in \"$HOME/{root}/bots\"/*/; do \
      [ -d \"$d\" ] || continue; b=$(basename \"$d\"); \
      if [ -f \"$d/hook-spool.jsonl\" ] || [ -f \"$d/hook-spool.jsonl.replaying\" ] || [ -f \"$d/hook-status.json\" ]; \
      then echo \"$b\"; fi; done\n",
-        root = crate::startup::remote_root()
     )
 }
 
@@ -1010,11 +1011,14 @@ mod drain_tests {
 
     #[test]
     fn the_drain_script_takes_the_spool_and_the_status_slot() {
-        let s = drain_script("botX").unwrap();
+        let s = drain_script("botX", crate::startup::REMOTE_ROOT).unwrap();
         assert!(s.contains("bots/\"'botX'"));
-        // 遠端根目錄跟著實例走：兩顆 daemon 管同一台遠端時 spool 不能共用（startup::remote_root）。
-        assert!(s.contains(&format!("$HOME/{}/bots", crate::startup::remote_root())), "{s}");
-        assert!(scan_script().contains(&format!("$HOME/{}/bots", crate::startup::remote_root())));
+        // 遠端根目錄跟著實例走：兩顆 daemon 管同一台遠端時 spool 不能共用。
+        assert!(s.contains("\"$HOME/.config/agents-manager/bots/\""), "正式實例路徑不變：{s}");
+        let iso = crate::startup::remote_root_for(Some("a1b2"));
+        assert!(drain_script("botX", &iso).unwrap().contains("\"$HOME/.config/agents-manager/instances/a1b2/bots/\""));
+        assert!(scan_script(crate::startup::REMOTE_ROOT).contains("\"$HOME/.config/agents-manager/bots\"/*/"));
+        assert!(scan_script(&iso).contains("\"$HOME/.config/agents-manager/instances/a1b2/bots\"/*/"));
         assert_eq!(crate::startup::remote_root_for(None), crate::startup::REMOTE_ROOT);
         assert_eq!(crate::startup::remote_root_for(Some("a1b2")), ".config/agents-manager/instances/a1b2");
         assert!(s.contains("mv \"$f\" \"$f.replaying\""));
@@ -1025,7 +1029,7 @@ mod drain_tests {
     #[test]
     fn the_drain_script_rejects_unsafe_ids() {
         for id in ["../..", "x/y", r"..\..", "", "x\";id"] {
-            assert!(drain_script(id).is_err(), "unsafe id was accepted: {id:?}");
+            assert!(drain_script(id, crate::startup::REMOTE_ROOT).is_err(), "unsafe id was accepted: {id:?}");
         }
     }
 }

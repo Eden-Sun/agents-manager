@@ -31,10 +31,17 @@ pub const REMOTE_TOKEN_SLOT: &str = "-";
 
 /// SPEC §11.4 — the POSIX sh hook for remote hosts. Payload goes to the bot's spool; state goes
 /// to this machine's herdr (`pane report-agent`), whose event makes the daemon drain the spool (§11.4.3).
-pub const REMOTE_HOOK_SH: &str = r#"#!/bin/sh
+///
+/// 根目錄是參數（`remote_hook_sh`）：隔離實例的事件要寫進自己的 `instances/<slug>`，否則會落進正式實例的
+/// spool，而它自己的 scanner 永遠看不到（sol 三輪）。正式實例（`REMOTE_ROOT`）產出的腳本一字不差。
+pub fn remote_hook_sh(root: &str) -> String {
+    REMOTE_HOOK_SH_TEMPLATE.replace("__AM_REMOTE_ROOT__", root)
+}
+
+const REMOTE_HOOK_SH_TEMPLATE: &str = r#"#!/bin/sh
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
 LIMIT=1048576
-DIR="$HOME/.config/agents-manager/bots/$BOT"
+DIR="$HOME/__AM_REMOTE_ROOT__/bots/$BOT"
 mkdir -p "$DIR" 2>/dev/null
 # Argument 3 is the token slot. It is never used here (the spool file is already only ours to
 # read), and the daemon passes `-` in it: a real token on codex's argv would be visible to
@@ -161,23 +168,37 @@ exit 0
 pub const GROK_HOOKS_FILE: &str = "agents-manager.json";
 pub const GROK_DISPATCH_SH: &str = "grok-hook.sh";
 
+/// grok 會合併 `hooks/*.json` 全部檔案，所以每個實例一份檔、各自指向自己的 dispatcher，
+/// 不會互相覆寫。正式實例沿用原檔名。
+pub fn grok_hooks_file(instance: Option<&str>) -> String {
+    match instance {
+        Some(slug) => format!("agents-manager-{slug}.json"),
+        None => GROK_HOOKS_FILE.to_string(),
+    }
+}
+
+/// 每個實例的 dispatcher 都會被 grok 叫到；只處理自己實例的 pane（pane env 的 `AM_INSTANCE`）。
+/// 正式實例的 pane 沒有這個變數，所以舊 pane 照舊歸正式實例。
+fn instance_gate(instance: Option<&str>) -> String {
+    match instance {
+        Some(slug) => format!("[ \"${{AM_INSTANCE:-}}\" = {} ] || exit 0\n", sh_quote(slug)),
+        None => "[ -z \"${AM_INSTANCE:-}\" ] || exit 0\n".to_string(),
+    }
+}
+
 /// Dispatcher installed on remote hosts: forwards to the per-bot `hook.sh` (SPEC §11.4).
-/// 根目錄跟著實例走：兩顆 daemon 管同一台遠端、bot id 又一樣時，不能共用同一份 spool。
-pub fn remote_grok_dispatch_sh(root: &str) -> String {
+/// 根目錄與實例閘門都跟著實例走：兩顆 daemon 管同一台遠端、bot id 又一樣時，不能共用同一份 spool。
+pub fn remote_grok_dispatch_sh(root: &str, instance: Option<&str>) -> String {
     format!(
-        r#"#!/bin/sh
-# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.
-[ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
-H="$HOME/{root}/bots/$AM_BOT_ID/hook.sh"
-[ -x "$H" ] || exit 0
-exec "$H" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN"
-"#
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" \"$AM_HOOK_TOKEN\"\n",
+        gate = instance_gate(instance),
     )
 }
 
-fn local_grok_dispatch_sh(exe: &str, data_dir: &str) -> String {
+fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String {
     format!(
-        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\nexec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir}\n",
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}exec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir}\n",
+        gate = instance_gate(instance),
         exe = sh_quote(exe),
         data_dir = sh_quote(data_dir)
     )
@@ -218,8 +239,14 @@ fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?.to_string_lossy().to_string();
     let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
     let exe = app.exe.to_string_lossy().to_string();
-    let a = write_if_changed(&dispatcher, &local_grok_dispatch_sh(&exe, &app.data_dir.to_string_lossy()), true)?;
-    let hooks_path = std::path::PathBuf::from(grok_home(env, &home)).join("hooks").join(GROK_HOOKS_FILE);
+    let instance = app.instance();
+    let a = write_if_changed(
+        &dispatcher,
+        &local_grok_dispatch_sh(&exe, &app.data_dir.to_string_lossy(), instance.as_deref()),
+        true,
+    )?;
+    let hooks_path =
+        std::path::PathBuf::from(grok_home(env, &home)).join("hooks").join(grok_hooks_file(instance.as_deref()));
     let b = write_if_changed(&hooks_path, &grok_hooks_json(&dispatcher.to_string_lossy()), false)?;
     if a || b {
         tracing::info!(dispatcher = %dispatcher.display(), hooks = %hooks_path.display(), "grok hook installed");
@@ -228,16 +255,18 @@ fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
 }
 
 /// Remote grok bot: the same two files, written over ssh after `install_remote_hook`.
-async fn install_remote_grok_hook(conn: &HostConn, env: &Value) -> anyhow::Result<()> {
+async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<()> {
     let home = conn.home().await?;
-    let dispatcher = format!("{home}/.config/agents-manager/{GROK_DISPATCH_SH}");
+    let root = crate::startup::remote_root_for(instance);
+    // 按實例分址：共用一個 dispatcher 的話，兩顆 daemon 會互相把它改寫成指向自己（sol 三輪）。
+    let dispatcher = format!("{home}/{root}/{GROK_DISPATCH_SH}");
     let hooks_dir = format!("{}/hooks", grok_home(env, &home));
     let script = format!(
         "set -e\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\ncat > \"$W\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod +x \"$W\"\nG={g}\nmkdir -p \"$G\"\ncat > \"$G/{file}\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nprintf 'AM_GROK_INSTALLED\\n'\n",
         w = sh_quote(&dispatcher),
-        wrap = remote_grok_dispatch_sh(&crate::startup::remote_root()),
+        wrap = remote_grok_dispatch_sh(&root, instance),
         g = sh_quote(&hooks_dir),
-        file = GROK_HOOKS_FILE,
+        file = grok_hooks_file(instance),
         json = grok_hooks_json(&dispatcher),
     );
     let out = conn.ssh_exec(&script).await?;
@@ -254,19 +283,24 @@ pub struct RemoteHookPaths {
     pub settings: String,
 }
 
+/// 沒有 `App` 在手的呼叫端（`stop.rs` 的清目錄）用行程層級的實例名；`App::instance` 也是從它初始化的。
 pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<RemoteHookPaths> {
+    remote_bot_dir_for(conn, bot_id, crate::startup::instance().as_deref()).await
+}
+
+pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
     let home = conn.home().await?;
     // 隔離實例在遠端也要有自己的根（`instances/<slug>`），否則同 id 的 bot 會共用 spool。
-    let dir = format!("{home}/{}/bots/{bot_id}", crate::startup::remote_root());
+    let dir = format!("{home}/{}/bots/{bot_id}", crate::startup::remote_root_for(instance));
     Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
 }
 
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
-async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<RemoteHookPaths> {
-    let p = remote_bot_dir(conn, &bot.id).await?;
+async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
+    let p = remote_bot_dir_for(conn, &bot.id, instance).await?;
     // Token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it and the real key opens
     // `/relay/announce` + `/hook/*`. Kept positional for older agents.
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
@@ -279,7 +313,8 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<R
     let script = format!(
         "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod +x \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nprintf 'AM_INSTALLED\\n'\n",
         dir = sh_quote(&p.dir),
-        hook = REMOTE_HOOK_SH,
+        // 腳本裡寫的根目錄與上面的安裝位置同一個：事件才會進這個實例自己的 spool。
+        hook = remote_hook_sh(&crate::startup::remote_root_for(instance)),
         settings = settings_text,
     );
     let out = conn.ssh_exec(&script).await?;
@@ -301,7 +336,7 @@ pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Pr
         })
     } else {
         match app.hosts.get(&project.host).await {
-            Some(conn) => match remote_bot_dir(&conn, &bot.id).await {
+            Some(conn) => match remote_bot_dir_for(&conn, &bot.id, app.instance().as_deref()).await {
                 Ok(p) => crate::herdr_shim::install_remote(&conn, &p.dir).await,
                 Err(e) => Err(e),
             },
@@ -340,7 +375,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             .get(&project.host)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
-        let paths = install_remote_hook(&conn, bot).await?;
+        let paths = install_remote_hook(&conn, bot, app.instance().as_deref()).await?;
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
@@ -351,7 +386,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             }
             // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
             "grok" => {
-                install_remote_grok_hook(&conn, env).await?;
+                install_remote_grok_hook(&conn, env, app.instance().as_deref()).await?;
                 vec![]
             }
             other => anyhow::bail!("unknown bot kind {other}"),
@@ -468,6 +503,10 @@ pub(crate) async fn pane_env(
         env.insert("PATH".into(), json!(path));
     }
     env.insert("AM_RUN_ID".into(), json!(run_id));
+    // grok 的 dispatcher 每個實例各一支、全都會被叫到；靠這個分辨 pane 屬於哪一顆（正式實例不設）。
+    if let Some(slug) = app.instance() {
+        env.insert("AM_INSTANCE".into(), json!(slug));
+    }
     // Only local hook commands call home over HTTP; remote panes have no port since v4.3 (§11.4.6).
     if host == LOCAL_HOST {
         env.insert("AM_PORT".into(), json!(app.port.to_string()));
@@ -950,9 +989,14 @@ mod remote_hook_tests {
     impl Sandbox {
         /// `with_herdr = false` is the §11.4.2 "no herdr on this host" path (acceptance H5).
         fn new(with_herdr: bool) -> Self {
+            Self::with_root(with_herdr, crate::startup::REMOTE_ROOT)
+        }
+
+        /// 用哪個遠端根產生腳本（正式實例＝`REMOTE_ROOT`，隔離實例＝`instances/<slug>`）。
+        fn with_root(with_herdr: bool, root: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("am-hook-{}", crate::db::ulid()));
             std::fs::create_dir_all(&dir).unwrap();
-            write_exec(&dir.join("hook.sh"), super::REMOTE_HOOK_SH);
+            write_exec(&dir.join("hook.sh"), &super::remote_hook_sh(root));
             if with_herdr {
                 // Records one invocation per line so `--seq` ordering stays observable.
                 write_exec(
@@ -1004,6 +1048,62 @@ mod remote_hook_tests {
     }
 
     const STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}"#;
+
+    /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例路徑一字不變。
+    #[test]
+    fn the_generated_hook_spools_under_its_own_instance_root() {
+        let default = super::remote_hook_sh(crate::startup::REMOTE_ROOT);
+        assert!(default.contains("DIR=\"$HOME/.config/agents-manager/bots/$BOT\""), "正式實例的腳本路徑不能變");
+        assert!(!default.contains("__AM_REMOTE_ROOT__"));
+
+        for slug in [None, Some("a1b2c3d4")] {
+            let root = crate::startup::remote_root_for(slug);
+            let sb = Sandbox::with_root(false, &root);
+            let (_, ok) = sb.run(&["claude", &sb.bot, "-"], STOP);
+            assert!(ok);
+            let spool = sb.dir.join(&root).join("bots").join(&sb.bot).join("hook-spool.jsonl");
+            let line = std::fs::read_to_string(&spool).unwrap_or_else(|_| panic!("{slug:?}: 沒寫到 {}", spool.display()));
+            assert!(line.contains("\"Stop\""), "{line}");
+            if slug.is_some() {
+                let prod = sb.dir.join(".config/agents-manager/bots").join(&sb.bot).join("hook-spool.jsonl");
+                assert!(!prod.exists(), "隔離實例的事件跑進了正式 spool");
+            }
+        }
+    }
+
+    /// grok 會把每個實例的 dispatcher 都叫一次：各自只接自己實例的 pane（`AM_INSTANCE`），
+    /// 同 id 的 bot 才不會被兩邊各記一次。正式實例的舊 pane 沒有這個變數，照舊歸正式。
+    #[test]
+    fn each_grok_dispatcher_only_serves_its_own_instance() {
+        let home = std::env::temp_dir().join(format!("am-grok-{}", crate::db::ulid()));
+        let run = |slug: Option<&str>, pane_instance: Option<&str>| -> bool {
+            let root = crate::startup::remote_root_for(slug);
+            let bot_dir = home.join(&root).join("bots/b1");
+            std::fs::create_dir_all(&bot_dir).unwrap();
+            let marker = bot_dir.join("called");
+            let _ = std::fs::remove_file(&marker);
+            write_exec(&bot_dir.join("hook.sh"), &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+            let disp = home.join(format!("{}-dispatch.sh", slug.unwrap_or("default")));
+            write_exec(&disp, &super::remote_grok_dispatch_sh(&root, slug));
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg(&disp).env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &home);
+            cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "t");
+            if let Some(i) = pane_instance {
+                cmd.env("AM_INSTANCE", i);
+            }
+            assert!(cmd.status().unwrap().success());
+            marker.exists()
+        };
+        assert!(run(None, None), "正式實例接沒有 AM_INSTANCE 的 pane（含升級前開的舊 pane）");
+        assert!(!run(None, Some("a1b2")), "正式實例不碰隔離實例的 pane");
+        assert!(run(Some("a1b2"), Some("a1b2")));
+        assert!(!run(Some("a1b2"), None), "隔離實例不碰正式實例的 pane");
+        assert!(!run(Some("a1b2"), Some("zzzz")));
+
+        assert_eq!(super::grok_hooks_file(None), super::GROK_HOOKS_FILE, "正式實例檔名不變");
+        assert_eq!(super::grok_hooks_file(Some("a1b2")), "agents-manager-a1b2.json");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn claude_stop_spools_then_reports_idle() {
@@ -1171,6 +1271,14 @@ mod pane_env_tests {
         // 遠端 pane 的 bot 目錄在遠端家目錄，注入本機路徑只會誤導（§11.4）。
         let remote = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await;
         assert!(remote.get("AM_DATA_DIR").is_none());
+
+        // 正式實例不設 AM_INSTANCE（舊 pane 也沒有，兩者一致）；隔離實例本機、遠端都要帶。
+        assert!(e.get("AM_INSTANCE").is_none());
+        env.app.set_instance(Some("a1b2".into()));
+        for host in [LOCAL_HOST, "box"] {
+            let iso = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
+            assert_eq!(iso["AM_INSTANCE"], json!("a1b2"), "{host}");
+        }
     }
 }
 
