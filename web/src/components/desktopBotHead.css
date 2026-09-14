@@ -83,3 +83,27 @@
 .quota-hp + .quota-hp.focused {
   border-left-color: var(--accent);
 }
+
+/*
+ * 名字與 model 那一塊要大一點（2026-09-14 使用者截圖：「這塊要大一點，保留 max-width for showing name and
+ * model name」）。實拍時 model 被切成 `opus –L…`、pane id 切成 `w168…`，額度格卻整排攤開。
+ *
+ * - `.main-title` 的基準寬給 16em（名字＋`opus – Low`＋kind 圖示放得下），最小 12em；量表與分頁仍然
+ *   `flex: none` 不讓（UI-DECISIONS 的收縮優先序不翻），所以真的不夠寬時它照舊可以縮，只是不再一開始就縮。
+ * - 同一塊裡先讓的是 pane id（debug 用的識別碼），model 標籤不縮——使用者要看的是 model。
+ */
+@media (width > 1024px) {
+  .bot-head .main-title {
+    flex: 1 1 16em;
+    min-width: 12em;
+  }
+
+  .bot-head .main-title-sub > .model-tag {
+    flex: none;
+  }
+
+  .bot-head .main-title-sub > .main-status.pane-toggle {
+    flex: 0 1000 auto;
+    min-width: 0;
+  }
+}
