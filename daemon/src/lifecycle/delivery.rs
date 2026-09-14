@@ -125,38 +125,113 @@ pub(crate) fn provable_by_echo_row(text: &str, marker_cols: usize, pane_cols: Op
         && marker_cols + max_cols(text) + ROW_SAFETY_COLS <= cols as usize
 }
 
+/// A full-width rule the TUI draws above and below claude's current composer.
 fn is_rule_row(row: &str) -> bool {
     let t = row.trim();
-    !t.is_empty() && t.chars().all(|c| "─━╭╮╰╯".contains(c))
+    !t.is_empty() && t.chars().all(|c| "─━".contains(c))
 }
 
-/// Index of the composer's marker row: the last row near the bottom that starts with a marker or
-/// is a bare marker.
+/// The bottom edge of a boxed composer: `╰──…──╯`, which grok fills with its model label
+/// (`╰── Grok 4.6 (low) · always-approve ─╯`).
+fn is_box_bottom(row: &str) -> bool {
+    let t = row.trim();
+    t.starts_with('╰') && t.ends_with('╯')
+}
+
+/// The marker glyph a kind's composer row starts with.
+fn composer_glyph(kind: &str) -> Option<char> {
+    match kind {
+        "claude" | "grok" => Some('❯'),
+        "codex" => Some('›'),
+        _ => None,
+    }
+}
+
+/// Placeholders a TUI draws in an **empty** composer, taken from the real frames. Anything else
+/// after the marker is text someone typed.
+fn is_placeholder(kind: &str, content: &str) -> bool {
+    match kind {
+        // claude: `❯ Try "refactor <filepath>"` in a fresh or idle session.
+        "claude" => content.starts_with("Try \"") && content.ends_with('"') && content.matches('"').count() == 2,
+        // codex 0.15x rotates example prompts in an empty composer (`CODEX_IDLE_SPLASH`,
+        // `CODEX_STARTUP` in screen.rs). Only these exact strings count.
+        "codex" => matches!(
+            content,
+            "Ask Codex to do anything"
+                | "Explain this codebase"
+                | "Summarize recent commits"
+                | "Implement {feature}"
+                | "Find and fix a bug in @filename"
+                | "Write tests for @filename"
+                | "Improve documentation in @filename"
+                | "Run /review on my current changes"
+                | "Use /skills to list available skills"
+        ),
+        _ => false,
+    }
+}
+
+/// Where the composer is, and what its marker row holds.
+struct ComposerRow<'a> {
+    idx: usize,
+    /// Drawn inside `│ … │`: trailing spaces before the right edge are the box's padding.
+    boxed: bool,
+    /// Everything after the marker glyph, box edge removed.
+    after_glyph: &'a str,
+}
+
+/// The last row near the bottom whose first visible glyph is the kind's composer marker.
 fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
-    let markers = echo_markers(kind);
-    let from = lines.len().saturating_sub(COMPOSER_TAIL);
-    lines[from..]
-        .iter()
-        .rposition(|l| {
-            let t = l.trim_start_matches('│');
-            markers.iter().any(|m| t.starts_with(m) || t == m.trim_end())
-        })
-        .map(|i| from + i)
+    locate_composer(kind, lines).map(|c| c.idx)
 }
 
-/// Pure: what the composer holds. `Empty` only for the exact known shape — a bare marker row
-/// (`❯` or `❯ ` with nothing after it) with the box's rule directly under it. A lone space, a
-/// blank second row, a suggestion, a draft: all `NonEmpty` (sol review round seven #1).
+fn locate_composer<'a>(kind: &str, lines: &[&'a str]) -> Option<ComposerRow<'a>> {
+    let glyph = composer_glyph(kind)?;
+    let from = lines.len().saturating_sub(COMPOSER_TAIL);
+    (from..lines.len()).rev().find_map(|idx| {
+        let row = lines[idx].trim_start();
+        let (boxed, inner) = match row.strip_prefix('│') {
+            Some(rest) => (true, rest.trim_end().strip_suffix('│').unwrap_or(rest).trim_start()),
+            None => (false, row),
+        };
+        inner.strip_prefix(glyph).map(|after_glyph| ComposerRow { idx, boxed, after_glyph })
+    })
+}
+
+/// Pure: what the composer holds, read against each provider's real frame.
+///
+/// * claude (current): `❯` between two full-width rules; placeholder `Try "…"`.
+/// * claude (older) and grok: `│ ❯ … │` closed by `╰…╯` (grok writes its model into that edge).
+/// * codex: an unboxed `› …` row; placeholders are the example prompts it rotates.
+///
+/// Empty only when the marker row holds nothing but the one space after the glyph (and, inside a
+/// box, the box's padding) or an exact placeholder, and the frame closes right under it. One extra
+/// space typed after the marker in an unboxed composer is text: `NonEmpty`.
 pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
-    let Some(idx) = composer_row(kind, &lines) else { return BoxState::Unready };
-    let row = lines[idx].trim_start_matches('│').trim_end_matches('│');
-    let bare = echo_markers(kind).iter().any(|m| row == *m || row == m.trim_end());
-    let closed = lines.get(idx + 1).map(|r| is_rule_row(r)).unwrap_or(false);
-    match (bare, closed) {
-        (true, true) if pane_awaits_input(kind, screen) => BoxState::Empty,
-        (true, true) => BoxState::Unready,
-        _ => BoxState::NonEmpty,
+    let Some(c) = locate_composer(kind, &lines) else { return BoxState::Unready };
+    let content = if c.boxed { c.after_glyph.trim_end() } else { c.after_glyph };
+    let content = content.strip_prefix(' ').unwrap_or(content);
+    let first_row_empty = content.is_empty() || is_placeholder(kind, content);
+    if !first_row_empty {
+        return BoxState::NonEmpty;
+    }
+    // Where the frame closes. Any row between the marker row and that edge is more of the
+    // composer — a blank second line is still something typed.
+    let rest = &lines[c.idx + 1..];
+    let edge = match (kind, c.boxed) {
+        (_, true) => rest.iter().take(COMPOSER_TAIL).position(|r| is_box_bottom(r)),
+        ("claude", false) => rest.iter().take(COMPOSER_TAIL).position(|r| is_rule_row(r)),
+        // codex draws no frame: the composer ends at the first row that is not an indented
+        // continuation (a blank row, the status line, or the end of the screen).
+        ("codex", false) => Some(rest.iter().position(|r| r.trim().is_empty() || !r.starts_with("  ")).unwrap_or(rest.len())),
+        _ => None,
+    };
+    match edge {
+        Some(0) => BoxState::Empty,
+        Some(_) => BoxState::NonEmpty,
+        // An empty-looking marker row with no frame under it: not a screen we know.
+        None => BoxState::Unready,
     }
 }
 
@@ -609,8 +684,11 @@ mod tests {
         assert_eq!(box_state("claude", &blank_second), BoxState::NonEmpty, "空白第二行");
         let second_line = empty.replacen("❯\n", "❯\n  草稿\n", 1);
         assert_eq!(box_state("claude", &second_line), BoxState::NonEmpty, "第二行有字");
-        let suggestion = empty.replacen("❯\n", "❯ Try \"fix lint errors\"\n", 1);
-        assert_eq!(box_state("claude", &suggestion), BoxState::NonEmpty, "建議句也不是空框");
+        // claude 空框的佔位字（實機 `❯ Try "…"`）是空框；佔位字後面多打了字就不是。
+        let placeholder = empty.replacen("❯\n", "❯ Try \"fix lint errors\"\n", 1);
+        assert_eq!(box_state("claude", &placeholder), BoxState::Empty, "佔位字");
+        let past_placeholder = empty.replacen("❯\n", "❯ Try \"fix lint errors\" now\n", 1);
+        assert_eq!(box_state("claude", &past_placeholder), BoxState::NonEmpty);
         assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n"), BoxState::Unready);
     }
 
@@ -855,7 +933,7 @@ mod api_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, conv, _run) = idle_bot(&env, "grok").await;
-        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
 
         let out = prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await.unwrap();
         assert_eq!(out.delivery, "unverified");

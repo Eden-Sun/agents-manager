@@ -58,6 +58,9 @@ pub enum LcError {
     /// A 400 whose body is machine-readable rather than a message, e.g.
     /// `{"error":"remote_not_supported","host":"m4p"}`.
     BadValue(Value),
+    /// 422: the request is well-formed and allowed, but this one can never be carried out as asked
+    /// (e.g. a prompt too long to prove delivered). Machine-readable body; callers treat it as final.
+    Unprocessable(Value),
 }
 
 impl LcError {

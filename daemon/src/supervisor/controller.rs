@@ -139,6 +139,8 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         // loudly, rather than holding work the user believes is running.
         Err(LcError::Bad(m)) => dispatch_failed(app, &a, &m).await,
         Err(LcError::BadValue(v)) => dispatch_failed(app, &a, &v.to_string()).await,
+        // 422: this prompt can never be delivered as asked; retrying the same text changes nothing.
+        Err(LcError::Unprocessable(v)) => dispatch_failed(app, &a, &v.to_string()).await,
         Err(e) => {
             // Upstream / bad-request: retry a bounded number of times, then give up loudly
             // rather than silently holding work the user thinks is running.

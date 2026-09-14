@@ -1066,6 +1066,35 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
   Shift+Tab:mode  │  Ctrl+.:shortcuts
 ";
 
+    /// 空框判定吃各 provider 的實機畫面（sol 第八輪 #2）：這些 fixture 都是真的 pane 抓下來的。
+    #[test]
+    fn the_real_empty_composers_of_every_provider_are_empty() {
+        use crate::lifecycle::{box_state, BoxState};
+        // grok：`│ ❯   │` 裡的結構空白、`╰── Grok 4.6 (low) · always-approve ─╯` 框底。
+        assert_eq!(box_state("grok", GROK_SCREEN), BoxState::Empty);
+        assert_eq!(box_state("grok", GROK_SCREEN_NARROW), BoxState::Empty);
+        assert_eq!(box_state("grok", GROK_AWAITING), BoxState::Empty, "窄到只剩 `╰─ Grok ─╯`");
+        // codex：沒有框，佔位字是它輪播的範例句。
+        assert_eq!(box_state("codex", CODEX_IDLE_SPLASH), BoxState::Empty, "› Ask Codex to do anything");
+        assert_eq!(box_state("codex", CODEX_STARTUP), BoxState::Empty, "› Write tests for @filename");
+        // claude 舊版：`│ ❯ │` 框。
+        assert_eq!(box_state("claude", THINKING_ONLY), BoxState::Empty);
+        // claude 現行：兩條全寬框線中間的輸入列，裡面是使用者真的打的字 → 非空。
+        assert_eq!(box_state("claude", CLAUDE_UNSENT_PROMPT), BoxState::NonEmpty);
+    }
+
+    /// 同一個框，真的有人打了字（或多打一格）就不是空的。
+    #[test]
+    fn a_real_composer_with_typed_text_is_not_empty() {
+        use crate::lifecycle::{box_state, BoxState};
+        let grok_typed = GROK_SCREEN.replacen("│ ❯                                                                        │", "│ ❯ 我在打字                                                               │", 1);
+        assert_eq!(box_state("grok", &grok_typed), BoxState::NonEmpty);
+        let codex_typed = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", "› Ask Codex to do anything please", 1);
+        assert_eq!(box_state("codex", &codex_typed), BoxState::NonEmpty, "佔位字多一個字就是使用者的字");
+        let codex_space = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", "›  ", 1);
+        assert_eq!(box_state("codex", &codex_space), BoxState::NonEmpty, "marker 後多打一格");
+    }
+
     #[test]
     fn grok_reply_comes_from_clean_screen() {
         assert_eq!(extract_reply("grok", GROK_SCREEN), None);

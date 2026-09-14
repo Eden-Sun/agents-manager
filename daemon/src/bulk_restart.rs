@@ -316,7 +316,7 @@ fn why(e: LcError) -> anyhow::Error {
     let s = match e {
         LcError::NotFound(what) => format!("找不到 {what}"),
         LcError::Upstream(m) | LcError::Bad(m) => m,
-        LcError::Conflict(v) | LcError::BadValue(v) => v
+        LcError::Conflict(v) | LcError::BadValue(v) | LcError::Unprocessable(v) => v
             .get("reason")
             .or_else(|| v.get("message"))
             .and_then(|x| x.as_str())
