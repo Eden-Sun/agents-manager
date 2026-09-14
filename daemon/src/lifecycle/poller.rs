@@ -597,6 +597,95 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
     true
 }
 
+/// How many times one turn may be re-delivered because the prompt never showed up on screen.
+/// One: a second loss means something is really wrong with the pane, and repeating a prompt the
+/// agent *did* get is worse than failing the turn.
+const MAX_PROMPT_RESENDS: u32 = 1;
+
+/// Scrollback searched for our prompt before deciding it never arrived. Generous on purpose: a
+/// resend is only safe when the echo is truly nowhere, not merely scrolled off the visible rows.
+const RESEND_SCAN_LINES: u32 = 400;
+
+/// Turns already re-delivered, so the watchdog never loops (in-process: a restart forgets, which
+/// only means one more careful attempt).
+static RESENT_TURNS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::OnceLock::new();
+
+fn resend_count(turn_id: &str) -> u32 {
+    RESENT_TURNS.get_or_init(Default::default).lock().map(|m| m.get(turn_id).copied().unwrap_or(0)).unwrap_or(u32::MAX)
+}
+
+fn note_resend(turn_id: &str) {
+    if let Ok(mut m) = RESENT_TURNS.get_or_init(Default::default).lock() {
+        *m.entry(turn_id.to_string()).or_insert(0) += 1;
+    }
+}
+
+/// Did our prompt never reach the TUI at all? An empty composer **and** no trace of the prompt
+/// anywhere in the scrollback — not in the box (that is [`composer_holds_prompt`]'s Enter nudge),
+/// not as a submitted `❯ …` row, not as a queued message.
+///
+/// 2026-09-14 w1HJ:pH (wits-c1-op-xh)：使用者在 UI 改 effort，daemon 對 pane 打 `/effort max`
+/// 當場套用；4 秒後的 prompt 由 herdr 回報送達（`delivery=ok`），畫面上卻一個字都沒有，transcript
+/// 也沒有這則，12 秒後被判 stall。畫面停在 `/effort max` 的回饋加上空的 `❯`。
+pub(crate) fn prompt_never_reached_screen(kind: &str, screen: &str, sent: &[String]) -> bool {
+    if !pane_awaits_input(kind, screen) {
+        return false;
+    }
+    let hay = squash(screen);
+    let mut any_needle = false;
+    for p in sent {
+        let needle: String = squash(p).chars().take(COMPOSER_HEAD).collect();
+        if needle.chars().count() < COMPOSER_HEAD_MIN {
+            continue;
+        }
+        any_needle = true;
+        if hay.contains(&needle) {
+            return false;
+        }
+    }
+    // Nothing long enough to look for: cannot prove absence, so never resend.
+    any_needle
+}
+
+/// Re-deliver a prompt that never reached the pane, at most [`MAX_PROMPT_RESENDS`] times per turn.
+/// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `false`.
+async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> bool {
+    if resend_count(turn_id) >= MAX_PROMPT_RESENDS {
+        return false;
+    }
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
+    if run.agent_status == "working" || run.agent_status == "blocked" {
+        return false;
+    }
+    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok") {
+        return false;
+    }
+    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
+    let Some(pane) = run.pane_id.clone() else { return false };
+    let Ok(client) = client_for_run(app, &run).await else { return false };
+    let Ok(read) = client.pane_read(&pane, "recent-unwrapped", RESEND_SCAN_LINES).await else { return false };
+    if !prompt_never_reached_screen(&bot.kind, &read.text, sent) {
+        return false;
+    }
+    // `sent[0]` is the delivered form (attachment paths included), exactly what `agent.prompt` got.
+    let Some(text) = sent.first() else { return false };
+    note_resend(turn_id);
+    let res = client
+        .call_timeout("agent.prompt", json!({"target": db::run_target(&run, &bot), "text": text}), Duration::from_secs(10))
+        .await;
+    match res {
+        Ok(_) => {
+            tracing::warn!(run_id, turn = %turn_id, bot = %bot.name, attempt = resend_count(turn_id),
+                           "prompt never reached the pane (empty composer, no echo in scrollback); re-delivered it");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed");
+            false
+        }
+    }
+}
+
 /// The agent must leave `idle` within `STALL_SECS` after delivery, or the Turn sits `in_flight`
 /// forever (not logged in, invisible modal). Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
@@ -631,15 +720,38 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
             }
             nudged |= nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
         }
-        if nudged {
+        // Not in the box either: the prompt never reached the TUI. Deliver it again once instead of
+        // failing the turn with a system message the user has to act on.
+        let mut resent = false;
+        if !nudged {
+            let lock = app2.bot_lock(&bot_id).await;
+            let _g = lock.lock().await;
+            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+                return;
+            }
+            resent = resend_lost_prompt(&app2, &run_id, &turn_id, &sent).await;
+        }
+        if nudged || resent {
             tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;
+        }
+        // A resend can land in a busy box just like the first try did.
+        if resent {
+            let lock = app2.bot_lock(&bot_id).await;
+            let _g = lock.lock().await;
+            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+                return;
+            }
+            if nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await {
+                drop(_g);
+                tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;
+            }
         }
         let lock = app2.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
         if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
             return;
         }
-        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged).await {
+        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged, resent).await {
             tracing::warn!(error = ?e, "stall watchdog failed");
         }
         let mut timers = app2.stall_timers.lock().await;
@@ -659,6 +771,7 @@ async fn fail_stalled_turn(
     bot_id: &str,
     turn_id: &str,
     nudged: bool,
+    resent: bool,
 ) -> anyhow::Result<()> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(()) };
     if run.agent_status == "working" || run.agent_status == "blocked" {
@@ -679,7 +792,10 @@ async fn fail_stalled_turn(
             }
         }
     }
-    let reason = stall_reason(&hints, nudged);
+    let mut reason = stall_reason(&hints, nudged);
+    if resent {
+        reason.push_str(&format!("\n（第一次送出後畫面上完全沒有這則訊息，已自動重送 {MAX_PROMPT_RESENDS} 次，仍沒有反應。）"));
+    }
     let mut tx = app.db.begin().await?;
     let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
         .bind(db::now())
@@ -1543,13 +1659,40 @@ mod issue_17_tests {
         assert_eq!(kinds, vec!["message_added", "turn_updated"]);
     }
 
+    /// 2026-09-14 w1HJ:pH：畫面上完全沒有這則 prompt，watchdog 重送一次，而且**只**一次；
+    /// 畫面上看得到（已送出或還在框裡）就絕不重送。mock 對 `agent.prompt` 回 unsupported，
+    /// 所以這裡驗的是「有沒有去送、送幾次」，不是送成功。
+    #[tokio::test]
+    async fn a_prompt_missing_from_the_screen_is_resent_once_and_only_once() {
+        let lost = "❯ /effort max\n  ⎿  Set effort level to max (this session only)\n──────\n❯\n";
+        let f = fixture("claude", lost).await;
+        let app = f.env.app.clone();
+        let sent = vec!["Reply with PONG".to_string()];
+        let prompts = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "agent.prompt").count();
+
+        let _ = resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await;
+        assert_eq!(prompts(&f), 1, "the lost prompt is delivered again");
+        let _ = resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await;
+        assert_eq!(prompts(&f), 1, "capped: a second loss fails the turn instead of looping");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_visible_on_the_screen_is_never_resent() {
+        let accepted = "❯ /effort max\n  ⎿  Set effort level to max\n❯ Reply with PONG\n──────\n❯\n";
+        let f = fixture("claude", accepted).await;
+        let app = f.env.app.clone();
+        let sent = vec!["Reply with PONG".to_string()];
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "claude took it: resending would duplicate the work");
+    }
+
     #[tokio::test]
     async fn stall_commits_system_message_before_turn_updated() {
         let f = fixture("claude", "not logged in\n").await;
         let app = f.env.app.clone();
         let rx = app.subscribe();
 
-        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false).await.unwrap();
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false).await.unwrap();
         let message: (String, String, String) = sqlx::query_as(
             "SELECT role, content, source FROM messages WHERE conversation_id=? AND turn_id=? AND role='system'",
         )
@@ -1600,3 +1743,73 @@ mod progress_rate_tests {
     }
 }
 
+
+#[cfg(test)]
+mod lost_prompt_tests {
+    use super::prompt_never_reached_screen;
+
+    /// 2026-09-14 w1HJ:pH（wits-c1-op-xh）turn 01M2F9DRR09TBHHYZA211ZRDHY 被判 stall 時的真實畫面：
+    /// `/effort max` 的回饋加上空輸入列，使用者的「think more if can be even faster」一個字都沒有。
+    const EFFORT_MAX_LOST: &str = "  Any screen that mounts many MUI inputs at once will hit this. If other pages also stall,
+  the same default can go into the app-wide theme. Everything is still uncommitted: this fix,
+  the round-2 performance changes, and the iStore multi-page parser fix.
+
+✻ Sautéed for 15m 9s · done 2:18 PM
+
+❯ /effort max
+  ⎿  Set effort level to max (this session only): Maximum capability with deepest reasoning.
+     May use excessive tokens resulting in long response times or overthinking. Use sparingly
+     for the hardest tasks.
+                                                                              615330 tokens
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────
+  user. | web | OP5 61% | 5h:53%(rst 2h 35m) | 7d:95%(rst 6d 21h) | F5:100%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+";
+
+    fn sent(s: &str) -> Vec<String> {
+        vec![s.to_string()]
+    }
+
+    #[test]
+    fn the_effort_max_incident_is_a_prompt_that_never_arrived() {
+        assert!(prompt_never_reached_screen("claude", EFFORT_MAX_LOST, &sent("think more if can be even faster")));
+    }
+
+    #[test]
+    fn a_submitted_prompt_is_not_resent() {
+        // claude 收下了：`❯ …` 印在對話區、輸入列又空了。重送就是重複派工。
+        let accepted = EFFORT_MAX_LOST.replacen(
+            "─────────────────────────────────────────────────────────────────────────────────────────────\n❯\n",
+            "❯ think more if can be even faster\n─────────────────────────────────────────────────────────────────────────────────────────────\n❯\n",
+            1,
+        );
+        assert!(!prompt_never_reached_screen("claude", &accepted, &sent("think more if can be even faster")));
+        // 排隊中的訊息（`  ❯ …`）一樣算到了。
+        let queued = EFFORT_MAX_LOST.replacen("615330 tokens", "615330 tokens\n  ❯ think more if can be even faster", 1);
+        assert!(!prompt_never_reached_screen("claude", &queued, &sent("think more if can be even faster")));
+    }
+
+    #[test]
+    fn text_still_in_the_box_is_the_enter_nudges_job_not_a_resend() {
+        let in_box = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ think more if can be even faster\n", 1);
+        assert!(!prompt_never_reached_screen("claude", &in_box, &sent("think more if can be even faster")));
+    }
+
+    #[test]
+    fn a_prompt_too_short_to_look_for_is_never_resent() {
+        // 兩個字的 prompt 在任何畫面都找得到／找不到都不可靠：證明不了「沒到」就不重送。
+        assert!(!prompt_never_reached_screen("claude", EFFORT_MAX_LOST, &sent("go")));
+        assert!(!prompt_never_reached_screen("claude", EFFORT_MAX_LOST, &[]));
+    }
+
+    #[test]
+    fn a_long_prompt_matches_on_its_head_even_when_wrapped() {
+        // 長訊息在畫面上會折行；比對去掉空白後的開頭，折在哪裡都一樣。
+        let long = "please make the offline quote import even faster and report the numbers again";
+        let wrapped = EFFORT_MAX_LOST.replacen("615330 tokens", "615330 tokens\n❯ please make the offline\n  quote import even faster", 1);
+        assert!(!prompt_never_reached_screen("claude", &wrapped, &sent(long)));
+        assert!(prompt_never_reached_screen("claude", EFFORT_MAX_LOST, &sent(long)));
+    }
+}
