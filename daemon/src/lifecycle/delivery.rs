@@ -4,69 +4,72 @@
 //! 15:33, the second two minutes after a live `/effort`) while the text never reached the pane.
 //! Those runs type into the pane instead, and a delivery only counts when it can be **proven**.
 //!
-//! What is *not* used as proof any more (sol review rounds one to five): the text as the TUI drew
-//! it. A TUI wraps long lines itself, so a row break on screen cannot be told apart from a newline
-//! the user typed; herdr reports no column width; trailing spaces are not visible; tabs, emoji,
-//! combining marks and ZWJ sequences have no dependable width. Every attempt to rebuild the prompt
-//! from rows was lossy somewhere. So the evidence is chosen **before typing**, and only two kinds
-//! are accepted:
+//! The text as the TUI drew it is never used to rebuild the prompt (sol review rounds one to
+//! five: soft wraps look like typed newlines, trailing spaces are invisible, character widths are
+//! unreliable). The evidence is fixed **before typing**, and only two kinds are accepted:
 //!
-//! * **one echo row** — for a single-line prompt with no trailing whitespace and no characters of
-//!   uncertain width: a submitted message shows as exactly one row `❯ <text>` (or `> <text>`)
-//!   with no continuation row under it. No width is needed: a wrapped or multi-line message would
-//!   have a continuation row, and then this proof simply does not apply.
-//! * **the agent's own transcript** — for claude, a new user entry in the session transcript whose
-//!   text is byte-for-byte what was sent. Lossless for any length and any whitespace.
+//! * **the agent's own transcript** (claude, local host, bound to the run's current session):
+//!   the bytes appended after the baseline must contain a user entry that is exactly the prompt.
+//! * **one echo row** (when there is no transcript): only for a one-line prompt that provably fits
+//!   on one row of the pane at its current width, so a wrap cannot happen; the submitted message
+//!   must appear as exactly one row `❯ <text>` with no continuation row under it.
 //!
-//! When neither applies, nothing is typed and the delivery is `Unknown`.
+//! Outcomes are three, and they mean different things to the caller (sol review round seven #2):
+//! `Submitted`; `NotAttempted` — **nothing was sent**, the turn must not be left in flight; and
+//! `Unproven` — keys were sent and the result cannot be proven, which is what `unknown` means.
 
 use super::*;
 use std::time::Duration;
 
-/// What the composer holds right now. Ownership is never inferred from the text: the box has to
-/// be empty before typing, and after an atomic paste under the bot lock the text in it is ours.
+/// What the composer holds right now. Ownership is never inferred from text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoxState {
-    /// The bare marker row.
+    /// Exactly the bare marker row, with the box's own rule directly under it.
     Empty,
-    /// Anything typed into it — a draft someone is writing, or our paste.
+    /// Anything else in the box — a draft, a lone space, a blank second line, a suggestion.
     NonEmpty,
     /// No readable composer on this screen.
     Unready,
 }
 
-/// The outcome of one delivery attempt. Anything short of `Submitted` is not success.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Delivered {
     Submitted,
-    /// Could not be proven either way. The caller parks the turn and never re-types on this.
-    Unknown(&'static str),
+    /// Nothing reached the pane or the agent. `retry` = the condition can clear by itself (a busy
+    /// box, a transcript not yet reported); `false` = this prompt can never be proven on this run.
+    NotAttempted { reason: &'static str, retry: bool },
+    /// Keys were sent; whether the agent took the prompt cannot be proven.
+    Unproven(&'static str),
 }
 
-/// The evidence a delivery will be judged by, fixed before the first keystroke.
+/// The evidence a delivery will be judged by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Proof {
-    /// Count single echo rows equal to this line.
+    /// Count single echo rows equal to the prompt.
     EchoRow,
-    /// Count transcript user entries equal to the text, in this local file.
-    Transcript(std::path::PathBuf),
+    /// Count exact user entries appended to this transcript after `offset`, while the run still
+    /// points at this session and path.
+    Transcript { path: std::path::PathBuf, session_id: String },
 }
 
-/// Pause after typing before the box is read (the TUI has to draw the paste).
+/// How the prompt will be delivered, decided before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Plan {
+    AgentPrompt { target: String },
+    Type { pane: String, proof: Proof },
+}
+
 const TYPE_SETTLE_MS: u64 = 700;
-/// Pause after Enter before the evidence is checked, and how many times it is re-checked.
 const SUBMIT_SETTLE_MS: u64 = 1200;
 const SUBMIT_CHECKS: u32 = 3;
-/// Rows read from the pane for every check.
 const DELIVER_SCAN_LINES: u32 = 400;
-/// Longest prompt the daemon will type and try to prove. Beyond this the transcript tail below
-/// could not hold the entry, so the delivery is refused up front rather than left unprovable.
+/// Longest prompt the daemon will type and try to prove.
 pub(crate) const MAX_PROVABLE_CHARS: usize = 200_000;
-/// Bytes read from the end of the transcript. Bounded so a long session never costs a full read.
-const TRANSCRIPT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+/// Columns kept free at the right edge when deciding a prompt fits on one row: the TUI's own
+/// padding and cursor cell. Generous on purpose — a false "does not fit" only costs a deferral.
+const ROW_SAFETY_COLS: usize = 6;
 
-/// The echo markers a kind draws at the start of a submitted message. claude has drawn both `❯ `
-/// and `> ` across versions; matched as the exact prefix of the row, never after trimming.
+/// The echo markers a kind draws at the start of a message; matched as exact row prefixes.
 pub(crate) fn echo_markers(kind: &str) -> &'static [&'static str] {
     match kind {
         "claude" => &["❯ ", "> "],
@@ -76,9 +79,7 @@ pub(crate) fn echo_markers(kind: &str) -> &'static [&'static str] {
     }
 }
 
-/// Characters whose rendered form is not a dependable copy of the input: control characters
-/// (tab included — it expands by column), zero-width joiners and non-joiners, variation
-/// selectors, and combining marks.
+/// Characters whose rendered form is not a dependable copy of the input.
 fn uncertain_char(c: char) -> bool {
     let u = c as u32;
     c.is_control()
@@ -89,19 +90,32 @@ fn uncertain_char(c: char) -> bool {
         || matches!(u, 0x3099..=0x309A)
 }
 
-/// Can one echo row prove this prompt? One line, nothing invisible at its end, nothing whose
-/// rendering may differ from the input.
-pub(crate) fn provable_by_echo_row(text: &str) -> bool {
+/// An upper bound on the columns `text` can take: ASCII is one column, everything else is
+/// counted as two. Over-estimating only makes the fit check stricter.
+fn max_cols(text: &str) -> usize {
+    text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+}
+
+/// Can one echo row prove this prompt on a pane `pane_cols` wide? One line, nothing invisible at
+/// either end, nothing of uncertain rendering, and short enough that the marker plus the text plus
+/// a safety margin fit on one row — so a wrap is impossible, not merely unlikely.
+pub(crate) fn provable_by_echo_row(text: &str, marker_cols: usize, pane_cols: Option<u32>) -> bool {
+    let Some(cols) = pane_cols else { return false };
     !text.is_empty()
         && !text.contains('\n')
         && !text.contains('\r')
-        && text == text.trim_end()
-        && !text.starts_with(char::is_whitespace)
+        && text == text.trim()
         && !text.chars().any(uncertain_char)
+        && marker_cols + max_cols(text) + ROW_SAFETY_COLS <= cols as usize
 }
 
-/// Index of the composer's marker row: the last row in the bottom of the screen that starts with
-/// one of the kind's markers or is the bare marker.
+fn is_rule_row(row: &str) -> bool {
+    let t = row.trim();
+    !t.is_empty() && t.chars().all(|c| "─━╭╮╰╯".contains(c))
+}
+
+/// Index of the composer's marker row: the last row near the bottom that starts with a marker or
+/// is a bare marker.
 fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
     let markers = echo_markers(kind);
     let from = lines.len().saturating_sub(COMPOSER_TAIL);
@@ -109,59 +123,48 @@ fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
         .iter()
         .rposition(|l| {
             let t = l.trim_start_matches('│');
-            let bare = t.trim_end();
-            markers.iter().any(|m| t.starts_with(m) || bare == m.trim_end())
+            markers.iter().any(|m| t.starts_with(m) || t == m.trim_end())
         })
         .map(|i| from + i)
 }
 
-/// Is `row` a continuation of the row above it (the TUI's two-column gutter plus text)?
+/// Pure: what the composer holds. `Empty` only for the exact known shape — a bare marker row
+/// (`❯` or `❯ ` with nothing after it) with the box's rule directly under it. A lone space, a
+/// blank second row, a suggestion, a draft: all `NonEmpty` (sol review round seven #1).
+pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(idx) = composer_row(kind, &lines) else { return BoxState::Unready };
+    let row = lines[idx].trim_start_matches('│').trim_end_matches('│');
+    let bare = echo_markers(kind).iter().any(|m| row == *m || row == m.trim_end());
+    let closed = lines.get(idx + 1).map(|r| is_rule_row(r)).unwrap_or(false);
+    match (bare, closed) {
+        (true, true) if pane_awaits_input(kind, screen) => BoxState::Empty,
+        (true, true) => BoxState::Unready,
+        _ => BoxState::NonEmpty,
+    }
+}
+
 fn continuation_row(row: &str) -> bool {
     row.strip_prefix("  ").map(|rest| !rest.trim().is_empty()).unwrap_or(false)
         && !row.trim_start().starts_with(['⏺', '✻', '⎿', '●', '─', '│'])
 }
 
-/// Pure: what the composer holds on this screen.
-pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
-    let lines: Vec<&str> = screen.lines().collect();
-    let Some(idx) = composer_row(kind, &lines) else { return BoxState::Unready };
-    let row = lines[idx].trim_start_matches('│');
-    let after_marker = echo_markers(kind)
-        .iter()
-        .find_map(|m| row.strip_prefix(m).or_else(|| (row.trim_end() == m.trim_end()).then_some("")))
-        .unwrap_or("");
-    let more = lines.get(idx + 1).map(|r| continuation_row(r)).unwrap_or(false);
-    if after_marker.trim().is_empty() && !more {
-        if pane_awaits_input(kind, screen) {
-            BoxState::Empty
-        } else {
-            BoxState::Unready
-        }
-    } else {
-        BoxState::NonEmpty
-    }
-}
-
-/// How many single, un-continued echo rows above the composer say exactly `line`.
-///
-/// A row followed by a continuation row is never counted — whether the break under it was a soft
-/// wrap or a typed newline cannot be told, and neither reading proves this prompt.
-pub(crate) fn echo_row_hits(kind: &str, screen: &str, line: &str) -> usize {
+/// How many single, un-continued echo rows above the composer say exactly `text`.
+pub(crate) fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
     let lines: Vec<&str> = screen.lines().collect();
     let end = composer_row(kind, &lines).unwrap_or(lines.len());
     let markers = echo_markers(kind);
     (0..end)
         .filter(|&i| {
-            let row = lines[i].trim_end();
-            let exact = markers.iter().any(|m| row.strip_prefix(m) == Some(line));
-            let continued = lines.get(i + 1).map(|r| i + 1 < end && continuation_row(r)).unwrap_or(false);
+            let row = lines[i];
+            let exact = markers.iter().any(|m| row.strip_prefix(m) == Some(text));
+            let continued = i + 1 < end && continuation_row(lines[i + 1]);
             exact && !continued
         })
         .count()
 }
 
-/// The text of one transcript line if it is a user message typed by a person (not a tool result,
-/// not a meta or synthetic entry). Content is taken exactly as stored.
+/// The text of one transcript line if it is a user message a person typed.
 pub(crate) fn transcript_user_text(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v.get("type").and_then(Value::as_str) != Some("user") || v.get("isMeta").and_then(Value::as_bool) == Some(true) {
@@ -180,45 +183,68 @@ pub(crate) fn transcript_user_text(line: &str) -> Option<String> {
     }
 }
 
-/// How many user entries in the tail of `path` are exactly `text`. `Err` when the file cannot be
-/// read — the caller must not read that as zero.
-pub(crate) fn transcript_hits(path: &std::path::Path, text: &str) -> std::io::Result<usize> {
+pub(crate) fn transcript_len(path: &std::path::Path) -> std::io::Result<u64> {
+    Ok(std::fs::metadata(path)?.len())
+}
+
+/// Exact user entries for `text` in the bytes of `path` from `offset` on. Only what was appended
+/// after the baseline is read, so an old identical message sliding out of any window cannot hide
+/// a new one, and the cost is the new bytes only. A partial first line fails to parse and is
+/// skipped; a partial last line is simply not complete yet. `Err` = unreadable, never zero.
+pub(crate) fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
-    let start = len.saturating_sub(TRANSCRIPT_TAIL_BYTES);
-    f.seek(SeekFrom::Start(start))?;
+    if len < offset {
+        // The file was replaced or truncated: whatever is there is not the baseline we took.
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "transcript shrank below the baseline"));
+    }
+    f.seek(SeekFrom::Start(offset))?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     let body = String::from_utf8_lossy(&buf);
-    // A tail that starts mid-line has a broken first line; it simply fails to parse.
     Ok(body.lines().filter_map(transcript_user_text).filter(|t| t == text).count())
 }
 
-/// Choose the evidence for this prompt on this run, or say why there is none.
-pub(crate) fn choose_proof(kind: &str, host_is_local: bool, transcript_path: Option<&str>, text: &str) -> Result<Proof, &'static str> {
+/// Choose the evidence. Transcript first whenever the run has a current, local claude session;
+/// the echo row only when there is no transcript and the prompt provably fits on one row.
+pub(crate) fn choose_proof(
+    kind: &str,
+    host_is_local: bool,
+    session_id: Option<&str>,
+    transcript_path: Option<&str>,
+    pane_cols: Option<u32>,
+    text: &str,
+) -> Result<Proof, Delivered> {
     if text.chars().count() > MAX_PROVABLE_CHARS {
-        return Err("prompt_too_long_to_prove");
+        return Err(Delivered::NotAttempted { reason: "prompt_too_long_to_prove", retry: false });
     }
-    if provable_by_echo_row(text) && !echo_markers(kind).is_empty() {
+    let session = session_id.map(str::trim).filter(|s| !s.is_empty());
+    let path = transcript_path.map(str::trim).filter(|p| !p.is_empty());
+    if kind == "claude" && host_is_local {
+        if let (Some(session), Some(path)) = (session, path) {
+            if std::path::Path::new(path).is_file() {
+                return Ok(Proof::Transcript { path: path.into(), session_id: session.to_string() });
+            }
+        }
+    }
+    let marker_cols = echo_markers(kind).first().map(|m| m.chars().count()).unwrap_or(0);
+    if marker_cols > 0 && provable_by_echo_row(text, marker_cols, pane_cols) {
         return Ok(Proof::EchoRow);
     }
-    match (kind, host_is_local, transcript_path.map(str::trim).filter(|p| !p.is_empty())) {
-        ("claude", true, Some(path)) if std::path::Path::new(path).is_file() => Ok(Proof::Transcript(path.into())),
-        _ => Err("no_lossless_proof"),
+    // A local claude whose SessionStart has not reported (or reported a path not written yet) will
+    // have a transcript shortly: wait for it rather than giving up on the prompt.
+    if kind == "claude" && host_is_local {
+        return Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true });
     }
-}
-
-/// Count the evidence on the current screen / transcript.
-fn evidence(kind: &str, proof: &Proof, screen: &str, text: &str) -> std::io::Result<usize> {
-    match proof {
-        Proof::EchoRow => Ok(echo_row_hits(kind, screen, text)),
-        Proof::Transcript(path) => transcript_hits(path, text),
+    if pane_cols.is_none() && !text.contains('\n') {
+        return Err(Delivered::NotAttempted { reason: "pane_width_unknown", retry: true });
     }
+    Err(Delivered::NotAttempted { reason: "no_lossless_proof", retry: false })
 }
 
 /// `agent.prompt` on an agent herdr has no session bound to answered ok while the text never
-/// reached the pane (2026-09-14 wits-c1-op-xh). Treat that as "cannot deliver through the agent".
+/// reached the pane (2026-09-14 wits-c1-op-xh).
 async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
     match client.agent_get(target).await {
         Ok(Some(info)) => info.agent_session.is_some(),
@@ -226,27 +252,16 @@ async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
     }
 }
 
-/// Deliver a prompt to the agent, and know whether it landed.
-///
-/// `agent.prompt` stays the path for a run whose pane the daemon has not typed into and whose
-/// agent herdr has a session bound to. Every other run types into its pane:
-///
-/// 1. the evidence is chosen first ([`choose_proof`]); no evidence → nothing is typed;
-/// 2. the box must be empty; a draft is never cleared or typed over;
-/// 3. the prompt is pasted in one write and must show up as a non-empty box — only a box that is
-///    still provably empty is typed into a second time;
-/// 4. Enter; the box must be empty again and the evidence must have grown by one.
-///
-/// Read failures are errors, never empty screens. The run is marked before the first keystroke.
-pub(crate) async fn deliver_prompt(
+/// Decide how to deliver, touching nothing: the route, the evidence and an empty box. Callers run
+/// this **before** committing a turn, so a prompt that cannot be sent never becomes one.
+pub(crate) async fn plan_delivery(
     app: &Arc<App>,
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
     text: &str,
     force_pane: bool,
-) -> anyhow::Result<Delivered> {
-    let pane = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
+) -> anyhow::Result<Result<Plan, Delivered>> {
     let target = db::run_target(run, bot);
     let marked = crate::lifecycle::pane_typed_memo(&run.id)
         || match db::pane_typed(&app.db, &run.id).await {
@@ -256,30 +271,72 @@ pub(crate) async fn deliver_prompt(
                 true
             }
         };
-    let must_type = force_pane || marked || !agent_prompt_usable(client, &target).await;
-    let Some(pane) = pane.filter(|_| must_type) else {
-        if must_type {
-            return Ok(Delivered::Unknown("no_pane_to_type_into"));
-        }
-        client
-            .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
-            .await?;
-        return Ok(Delivered::Submitted);
+    if !(force_pane || marked || !agent_prompt_usable(client, &target).await) {
+        return Ok(Ok(Plan::AgentPrompt { target }));
+    }
+    let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string) else {
+        return Ok(Err(Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
     };
-
-    // 1. Evidence first: never type what cannot be proven afterwards.
-    let host_is_local = match db::project(&app.db, &bot.project_id).await {
-        Ok(Some(p)) => p.host == LOCAL_HOST,
-        _ => false,
-    };
-    let proof = match choose_proof(&bot.kind, host_is_local, run.transcript_path.as_deref(), text) {
+    let host_is_local = matches!(db::project(&app.db, &bot.project_id).await, Ok(Some(p)) if p.host == LOCAL_HOST);
+    let pane_cols = client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w);
+    let proof = match choose_proof(
+        &bot.kind,
+        host_is_local,
+        run.native_session_id.as_deref(),
+        run.transcript_path.as_deref(),
+        pane_cols,
+        text,
+    ) {
         Ok(p) => p,
-        Err(why) => {
-            tracing::warn!(run = %run.id, bot = %bot.name, reason = why, "no lossless way to prove this prompt; not typing it");
-            return Ok(Delivered::Unknown(why));
-        }
+        Err(not) => return Ok(Err(not)),
     };
+    let screen = client.pane_read(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text;
+    match box_state(&bot.kind, &screen) {
+        BoxState::Empty => Ok(Ok(Plan::Type { pane, proof })),
+        BoxState::NonEmpty => Ok(Err(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
+        BoxState::Unready => Ok(Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true })),
+    }
+}
 
+/// Current evidence count for `proof`.
+fn evidence(kind: &str, proof: &Proof, offset: u64, screen: &str, text: &str) -> std::io::Result<usize> {
+    match proof {
+        Proof::EchoRow => Ok(echo_row_hits(kind, screen, text)),
+        Proof::Transcript { path, .. } => transcript_hits_since(path, offset, text),
+    }
+}
+
+/// Is the run still on the session the transcript proof was taken from?
+async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) -> bool {
+    let Proof::Transcript { path, session_id } = proof else { return true };
+    match db::run(&app.db, run_id).await {
+        Ok(Some(r)) => {
+            r.native_session_id.as_deref() == Some(session_id.as_str())
+                && r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path())
+        }
+        _ => false,
+    }
+}
+
+/// Carry out a plan. Up to the first keystroke every give-up is `NotAttempted`; after it, every
+/// give-up is `Unproven`. Read failures are errors, never empty screens.
+pub(crate) async fn execute_delivery(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    plan: Plan,
+) -> anyhow::Result<Delivered> {
+    let (pane, proof) = match plan {
+        Plan::AgentPrompt { target } => {
+            client
+                .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
+                .await?;
+            return Ok(Delivered::Submitted);
+        }
+        Plan::Type { pane, proof } => (pane, proof),
+    };
     // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
     crate::lifecycle::remember_pane_typed(&run.id);
     if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
@@ -287,20 +344,23 @@ pub(crate) async fn deliver_prompt(
     }
     let read = || async { client.pane_read(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await.map(|r| r.text) };
 
-    // 2. The box has to be empty.
+    // The box may have changed since the plan (someone typing in the terminal): look again.
     let before = read().await?;
     match box_state(&bot.kind, &before) {
         BoxState::Empty => {}
-        BoxState::NonEmpty => return Ok(Delivered::Unknown("composer_busy")),
-        BoxState::Unready => return Ok(Delivered::Unknown("composer_unreadable")),
+        BoxState::NonEmpty => return Ok(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
+        BoxState::Unready => return Ok(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
     }
-    let baseline = evidence(&bot.kind, &proof, &before, text)?;
+    let offset = match &proof {
+        Proof::Transcript { path, .. } => transcript_len(path)?,
+        Proof::EchoRow => 0,
+    };
+    let baseline = evidence(&bot.kind, &proof, offset, &before, text)?;
 
-    // 3. Paste, and see the box fill.
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
     let mut seen = read().await?;
-    if box_state(&bot.kind, &seen) == BoxState::Empty && evidence(&bot.kind, &proof, &seen, text)? == baseline {
+    if box_state(&bot.kind, &seen) == BoxState::Empty && evidence(&bot.kind, &proof, offset, &seen, text)? == baseline {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
         client.pane_send_text(&pane, text).await?;
         tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
@@ -308,22 +368,24 @@ pub(crate) async fn deliver_prompt(
     }
     match box_state(&bot.kind, &seen) {
         BoxState::NonEmpty => {}
-        BoxState::Empty if evidence(&bot.kind, &proof, &seen, text)? > baseline => {
-            tracing::info!(run = %run.id, bot = %bot.name, "the paste was submitted without an Enter");
+        BoxState::Empty if evidence(&bot.kind, &proof, offset, &seen, text)? > baseline => {
             return Ok(Delivered::Submitted);
         }
-        BoxState::Empty => return Ok(Delivered::Unknown("nothing_typed")),
-        BoxState::Unready => return Ok(Delivered::Unknown("composer_unreadable")),
+        BoxState::Empty => return Ok(Delivered::Unproven("nothing_typed")),
+        BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
     }
 
-    // 4. Enter, then wait for the evidence. A box that still holds text gets one more Enter.
     client.pane_send_keys(&pane, &["Enter"]).await?;
     let mut pressed_again = false;
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let now = read().await?;
+        if !same_session(app, &run.id, &proof).await {
+            tracing::warn!(run = %run.id, bot = %bot.name, "the session changed while delivering; the transcript proof no longer applies");
+            return Ok(Delivered::Unproven("session_changed"));
+        }
         match box_state(&bot.kind, &now) {
-            BoxState::Empty if evidence(&bot.kind, &proof, &now, text)? > baseline => {
+            BoxState::Empty if evidence(&bot.kind, &proof, offset, &now, text)? > baseline => {
                 tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
                 return Ok(Delivered::Submitted);
             }
@@ -341,12 +403,29 @@ pub(crate) async fn deliver_prompt(
         BoxState::Empty => "not_proven_submitted",
     };
     tracing::warn!(run = %run.id, bot = %bot.name, reason = why, "could not prove the prompt was submitted");
-    Ok(Delivered::Unknown(why))
+    Ok(Delivered::Unproven(why))
+}
+
+/// Plan and execute in one go, for callers that have no turn to hold back (queue flush, resend).
+pub(crate) async fn deliver_prompt(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    force_pane: bool,
+) -> anyhow::Result<Delivered> {
+    match plan_delivery(app, client, run, bot, text, force_pane).await? {
+        Ok(plan) => execute_delivery(app, client, run, bot, text, plan).await,
+        Err(not) => Ok(not),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RULE: &str = "─────────────────────────────────────────────";
 
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
         let mut s = String::new();
@@ -355,7 +434,8 @@ mod tests {
             s.push('\n');
         }
         s.push_str("✻ Crunching… (3s · esc to interrupt)\n");
-        s.push_str("─────────────────────────────────────────────\n");
+        s.push_str(RULE);
+        s.push('\n');
         match box_rows.split_first() {
             None => s.push_str("❯\n"),
             Some((first, rest)) => {
@@ -365,109 +445,222 @@ mod tests {
                 }
             }
         }
-        s.push_str("─────────────────────────────────────────────\n");
+        s.push_str(RULE);
+        s.push('\n');
         s.push_str("  user. | web | OP5 61% | 5h:53% | 7d:95%\n");
         s
     }
 
-    /// 哪些 prompt 可以用「一列回音」證明：只看內容本身，不需要任何欄寬。
+    /// 只有已知的空框形狀才算空：任何額外位元組、任何續行（含空白列）都是非空（第七輪 #1）。
     #[test]
-    fn which_prompts_one_echo_row_can_prove() {
-        let table: &[(&str, bool, &str)] = &[
-            ("Reply with PONG", true, "一般單行"),
-            ("加一個功能除了按 SKU 之外", true, "CJK 單行"),
-            ("看這個 🎉 對不對", true, "單一 emoji（沒有 ZWJ、沒有變體選擇符）"),
-            ("go", true, "短"),
-            ("line one\nline two", false, "硬換行：一列回音證明不了"),
-            ("trailing two spaces  ", false, "行尾空白在畫面上看不見"),
-            ("trailing ideographic space\u{3000}", false, "全形空白結尾"),
-            ("  indented", false, "開頭縮排可能被 TUI 吃掉"),
-            ("tab\there", false, "tab 依欄位展開"),
-            ("family 👨\u{200D}👩\u{200D}👧", false, "ZWJ 序列"),
-            ("heart ❤\u{FE0F}", false, "變體選擇符"),
-            ("e\u{0301}clair", false, "組合字元"),
-            ("", false, "空字串"),
+    fn only_the_exact_empty_shape_is_an_empty_box() {
+        let empty = screen(&["⏺ 先前的回覆"], &[]);
+        assert_eq!(box_state("claude", &empty), BoxState::Empty);
+        let table: &[(&str, &str)] = &[
+            ("❯  ", "marker 後多一個空白"),
+            ("❯ x", "有字"),
+            ("❯   ", "只有空白"),
         ];
-        for (text, want, why) in table {
-            assert_eq!(provable_by_echo_row(text), *want, "{why}: {text:?}");
+        for (row, why) in table {
+            let s = empty.replacen("❯\n", &format!("{row}\n"), 1);
+            assert_eq!(box_state("claude", &s), BoxState::NonEmpty, "{why}");
         }
+        let blank_second = empty.replacen("❯\n", "❯\n  \n", 1);
+        assert_eq!(box_state("claude", &blank_second), BoxState::NonEmpty, "空白第二行");
+        let second_line = empty.replacen("❯\n", "❯\n  草稿\n", 1);
+        assert_eq!(box_state("claude", &second_line), BoxState::NonEmpty, "第二行有字");
+        let suggestion = empty.replacen("❯\n", "❯ Try \"fix lint errors\"\n", 1);
+        assert_eq!(box_state("claude", &suggestion), BoxState::NonEmpty, "建議句也不是空框");
+        assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n"), BoxState::Unready);
     }
 
-    /// 硬換行和軟折行在畫面上長得一樣：兩種讀法都不能拿來證明（第五輪 #1/#4）。
+    /// 一列回音只給「保證不會折行」的單行：要知道 pane 寬度，而且保守估寬後放得下。
+    #[test]
+    fn one_echo_row_is_only_for_a_prompt_that_provably_fits() {
+        let w = Some(80);
+        let table: &[(&str, Option<u32>, bool, &str)] = &[
+            ("Reply with PONG", w, true, "一般單行"),
+            ("加一個功能除了按 SKU 之外", w, true, "CJK 單行，保守估寬仍放得下"),
+            ("Reply with PONG", None, false, "不知道寬度就證明不了不折行"),
+            ("Reply with PONG", Some(20), false, "窄 pane 放不下"),
+            (&"x".repeat(80), w, false, "跟 pane 一樣長"),
+            ("line one\nline two", w, false, "硬換行"),
+            ("trailing  ", w, false, "行尾空白"),
+            ("  indented", w, false, "開頭空白"),
+            ("tab\there", w, false, "tab"),
+            ("family 👨\u{200D}👩", w, false, "ZWJ"),
+            ("heart ❤\u{FE0F}", w, false, "變體選擇符"),
+            ("e\u{0301}clair", w, false, "組合字元"),
+        ];
+        for (text, cols, want, why) in table {
+            assert_eq!(provable_by_echo_row(text, 2, *cols), *want, "{why}");
+        }
+        // 剛好放得下／差一欄的邊界。
+        let fits = "x".repeat(80 - 2 - ROW_SAFETY_COLS);
+        assert!(provable_by_echo_row(&fits, 2, Some(80)));
+        assert!(!provable_by_echo_row(&format!("{fits}x"), 2, Some(80)));
+    }
+
     #[test]
     fn a_row_with_a_continuation_under_it_proves_nothing() {
         let ambiguous = screen(&["❯ ab", "  cd"], &[]);
-        assert_eq!(echo_row_hits("claude", &ambiguous, "ab"), 0, "下面有續行：可能是 ab\\ncd 也可能是 abcd");
+        assert_eq!(echo_row_hits("claude", &ambiguous, "ab"), 0);
         assert_eq!(echo_row_hits("claude", &ambiguous, "abcd"), 0);
-        assert!(choose_proof("claude", true, None, "ab\ncd").is_err(), "多行又沒有 transcript：不打字");
-        let single = screen(&["❯ ab", "⏺ 好"], &[]);
-        assert_eq!(echo_row_hits("claude", &single, "ab"), 1);
-    }
-
-    /// 回音列要精確：marker 以原樣前綴比對，內容不 trim，縮排與空白都算。
-    #[test]
-    fn an_echo_row_matches_exactly_including_the_marker_variant() {
-        let s = screen(&["> Reply with PONG", "⏺ PONG"], &[]);
-        assert_eq!(echo_row_hits("claude", &s, "Reply with PONG"), 1, "claude 的 `> ` 變體");
-        let s = screen(&["❯  Reply with PONG"], &[]);
-        assert_eq!(echo_row_hits("claude", &s, "Reply with PONG"), 0, "多一個空白就不是同一句");
-        let s = screen(&["❯ Reply with pong"], &[]);
-        assert_eq!(echo_row_hits("claude", &s, "Reply with PONG"), 0);
-        // 還在輸入框裡的同一句不是回音。
-        let s = screen(&[], &["Reply with PONG"]);
-        assert_eq!(echo_row_hits("claude", &s, "Reply with PONG"), 0);
-    }
-
-    #[test]
-    fn the_box_is_empty_nonempty_or_unreadable_and_nothing_else() {
-        assert_eq!(box_state("claude", &screen(&["⏺ 先前的回覆"], &[])), BoxState::Empty);
-        assert_eq!(box_state("claude", &screen(&[], &["我自己在打的草稿"])), BoxState::NonEmpty);
-        assert_eq!(box_state("claude", &screen(&[], &["", "第二行有字"])), BoxState::NonEmpty, "首列空白、續行有字仍然不是空框");
-        assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n"), BoxState::Unready);
+        assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "⏺ 好"], &[]), "ab"), 1);
+        assert_eq!(echo_row_hits("claude", &screen(&["> Reply with PONG"], &[]), "Reply with PONG"), 1, "`> ` 變體");
+        assert_eq!(echo_row_hits("claude", &screen(&["❯  Reply with PONG"], &[]), "Reply with PONG"), 0, "多一個空白");
+        // 回覆若以兩格縮排的純文字開頭，會被當成續行 → 假陰性（Unproven），不會假陽性。
+        assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "  plain reply text"], &[]), "ab"), 0);
     }
 
     fn user_entry(content: Value) -> String {
         json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
     }
 
-    /// transcript 是逐位元組比對：縮排、行尾兩空白、空白行、2k 行都原樣保留。
+    /// transcript 只看基準點之後新增的位元組；逐字比對，截半的 UTF-8／JSON 行不會誤判。
     #[test]
-    fn the_transcript_is_compared_byte_for_byte() {
+    fn the_transcript_is_read_from_the_baseline_offset_and_compared_byte_for_byte() {
         let dir = std::env::temp_dir().join(format!("am-transcript-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
         let code = "修這段：\n\nfn main() {\n    println!(\"hi\");  \n}";
+        // 舊的同一句已經在基準點之前：不算。
+        std::fs::write(&path, format!("{}\n", user_entry(json!(code)))).unwrap();
+        let offset = transcript_len(&path).unwrap();
+        assert_eq!(transcript_hits_since(&path, offset, code).unwrap(), 0);
         let long: String = (0..2000).map(|i| format!("  line {i}\n")).collect();
-        let lines = [
-            user_entry(json!(code)),
+        let appended = [
             user_entry(json!("修這段：\nfn main() {\nprintln!(\"hi\");\n}")),
             user_entry(json!([{"type": "tool_result", "content": code}])),
             json!({"type": "user", "isMeta": true, "message": {"content": code}}).to_string(),
+            user_entry(json!(code)),
             user_entry(json!([{"type": "text", "text": long.clone()}])),
-            json!({"type": "assistant", "message": {"content": code}}).to_string(),
         ];
-        std::fs::write(&path, lines.join("\n")).unwrap();
-        assert_eq!(transcript_hits(&path, code).unwrap(), 1, "縮排被抹平、tool_result、meta、assistant 都不算");
-        assert_eq!(transcript_hits(&path, &code.replace("  \n", "\n")).unwrap(), 0, "行尾兩空白是內容");
-        assert_eq!(transcript_hits(&path, &long).unwrap(), 1, "2k 行照樣逐字比");
-        assert!(transcript_hits(&dir.join("missing.jsonl"), code).is_err(), "讀不到是錯誤，不是 0");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write as _;
+        writeln!(f, "{}", appended.join("\n")).unwrap();
+        assert_eq!(transcript_hits_since(&path, offset, code).unwrap(), 1);
+        assert_eq!(transcript_hits_since(&path, offset, &code.replace("  \n", "\n")).unwrap(), 0, "行尾兩空白是內容");
+        assert_eq!(transcript_hits_since(&path, offset, &long).unwrap(), 1, "2k 行");
+        // 基準點落在一個多位元組字元中間：第一段解析失敗被略過，後面的完整行照常。
+        assert!(transcript_hits_since(&path, offset + 1, code).unwrap() <= 1);
+        // 檔案被換掉變短：不是基準點那一份，回錯。
+        std::fs::write(&path, "").unwrap();
+        assert!(transcript_hits_since(&path, offset, code).is_err());
+        assert!(transcript_hits_since(&dir.join("missing.jsonl"), 0, code).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 本機 claude 有當前 session 與 transcript 時一律優先 transcript（長單行不再走一列回音，第七輪 #3）。
     #[test]
-    fn proof_is_chosen_before_typing_and_refused_when_there_is_none() {
+    fn the_transcript_is_preferred_and_refusals_say_whether_to_retry() {
         let dir = std::env::temp_dir().join(format!("am-proof-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("t.jsonl");
         std::fs::write(&t, "").unwrap();
         let tp = t.to_str().unwrap();
-        assert_eq!(choose_proof("claude", true, Some(tp), "go"), Ok(Proof::EchoRow));
-        assert_eq!(choose_proof("claude", true, Some(tp), "a\nb"), Ok(Proof::Transcript(t.clone())));
-        assert_eq!(choose_proof("claude", false, Some(tp), "a\nb"), Err("no_lossless_proof"), "遠端 transcript 不讀");
-        assert_eq!(choose_proof("grok", true, Some(tp), "a\nb"), Err("no_lossless_proof"));
-        assert_eq!(choose_proof("claude", true, None, "a\nb"), Err("no_lossless_proof"));
+        let long_line = "x".repeat(5000);
+        let transcript = Proof::Transcript { path: t.clone(), session_id: "s1".into() };
+        assert_eq!(choose_proof("claude", true, Some("s1"), Some(tp), Some(20), &long_line), Ok(transcript.clone()), "極窄 pane＋長單行");
+        assert_eq!(choose_proof("claude", true, Some("s1"), Some(tp), Some(80), "go"), Ok(transcript));
+        assert_eq!(choose_proof("claude", true, None, Some(tp), Some(80), "go"), Ok(Proof::EchoRow), "沒有 session id 就不用 transcript");
+        assert_eq!(
+            choose_proof("claude", true, None, Some(tp), Some(80), "a\nb"),
+            Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true }),
+            "等 SessionStart 回報",
+        );
+        assert_eq!(
+            choose_proof("grok", true, None, None, Some(80), "a\nb"),
+            Err(Delivered::NotAttempted { reason: "no_lossless_proof", retry: false }),
+        );
+        assert_eq!(
+            choose_proof("grok", true, None, None, None, "go"),
+            Err(Delivered::NotAttempted { reason: "pane_width_unknown", retry: true }),
+        );
         let huge = "x".repeat(MAX_PROVABLE_CHARS + 1);
-        assert_eq!(choose_proof("claude", true, Some(tp), &huge), Err("prompt_too_long_to_prove"));
+        assert_eq!(
+            choose_proof("claude", true, Some("s1"), Some(tp), Some(80), &huge),
+            Err(Delivered::NotAttempted { reason: "prompt_too_long_to_prove", retry: false }),
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod api_tests {
+    //! Through `prompt()` itself: what reaches the database when nothing could be sent.
+    use super::*;
+    use crate::testing as tt;
+
+    async fn idle_bot(env: &tt::Env, kind: &str) -> (String, String, String) {
+        let app = &env.app;
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'api-bot',?,'[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(kind)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-api','api-bot','test',1,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot_id, conv, run_id)
+    }
+
+    async fn turns(app: &Arc<App>, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ?").bind(conv).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 框裡有字：回可重試的 409，而且**沒有**建立 turn；框清空後同一個 request id 再送就成功（第七輪 #2）。
+    #[tokio::test]
+    async fn a_busy_box_is_a_retryable_409_with_no_turn_and_the_retry_goes_through() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "claude").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { composer: vec!["草稿".into()], width: Some(120), ..Default::default() });
+
+        match prompt(&app, &bot_id, "Reply with PONG please", "crid-1").await {
+            Err(LcError::Conflict(v)) => {
+                assert_eq!(v.get("reason").and_then(Value::as_str), Some("composer_busy"));
+                assert_eq!(v.get("retryable").and_then(Value::as_bool), Some(true));
+            }
+            other => panic!("expected a retryable 409, got {:?}", other.map(|o| o.delivery)),
+        }
+        assert_eq!(turns(&app, &conv).await, 0, "沒送出就沒有 in-flight unknown turn");
+
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        let out = prompt(&app, &bot_id, "Reply with PONG please", "crid-1").await.unwrap();
+        assert_eq!(out.delivery, "ok");
+        assert_eq!(turns(&app, &conv).await, 1);
+    }
+
+    /// 永遠證明不了（grok 多行）：422、沒有 turn、pane 零寫入。
+    #[tokio::test]
+    async fn a_prompt_with_no_lossless_proof_is_refused_without_a_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "grok").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+
+        match prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await {
+            Err(LcError::BadValue(v)) => assert_eq!(v.get("reason").and_then(Value::as_str), Some("no_lossless_proof")),
+            other => panic!("expected 422, got {:?}", other.map(|o| o.delivery)),
+        }
+        assert_eq!(turns(&app, &conv).await, 0);
+        assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
     }
 }

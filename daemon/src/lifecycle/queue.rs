@@ -72,8 +72,27 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     let res = deliver_prompt(app, &client, &run, &bot, &text, false).await;
     let delivery = match res {
         Ok(Delivered::Submitted) => "ok",
-        Ok(Delivered::Unknown(why)) => {
-            tracing::warn!(bot = %bot_id, reason = why, "queued prompt delivery could not be confirmed");
+        // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
+        // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
+        Ok(Delivered::NotAttempted { reason, retry: true }) => {
+            requeue_turn(app, &turn.id, bot_id, &format!("not sent yet: {reason}")).await;
+            schedule_flush_retry(app, bot_id, QUEUE_RETRY_SECS);
+            return Ok(());
+        }
+        // A prompt that can never be proven on this run: fail it visibly instead of retrying forever.
+        Ok(Delivered::NotAttempted { reason, retry: false }) => {
+            let _ = sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'")
+                .bind(db::now())
+                .bind(&turn.id)
+                .execute(&app.db)
+                .await;
+            let hint = format!("沒有送出（{reason}）：這一則在這個 bot 上沒有辦法確認送達，所以一個字都沒打。");
+            let _ = insert_message(app, &conv, Some(&turn.id), "system", &hint, "system", false, None).await;
+            emit_turn(app, &turn.id).await;
+            return Ok(());
+        }
+        Ok(Delivered::Unproven(why)) => {
+            tracing::warn!(bot = %bot_id, reason = why, "queued prompt delivery could not be proven");
             "unknown"
         }
         Err(e) => {
@@ -122,6 +141,23 @@ async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str)
         }
     }
     emit_turn(app, turn_id).await;
+}
+
+/// Seconds before a queued prompt that could not be typed yet (busy box, transcript not reported)
+/// is tried again.
+const QUEUE_RETRY_SECS: u64 = 15;
+
+/// Try the queue again after `secs`, for conditions no lifecycle edge will announce.
+pub fn schedule_flush_retry(app: &Arc<App>, bot_id: &str, secs: u64) {
+    if cfg!(test) {
+        return;
+    }
+    let app = app.clone();
+    let bot_id = bot_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        schedule_flush_queued(&app, &bot_id);
+    });
 }
 
 /// Wake the durable prompt queue after a turn / Run transition. No-op in tests so a background
@@ -282,6 +318,48 @@ mod flush_queue_tests {
             .unwrap()
     }
 
+    /// 框裡有字時排隊的 prompt 一個字都不打、放回隊列；框清空後再 flush 就送出去（第七輪 #2）。
+    #[tokio::test]
+    async fn a_queued_prompt_waits_for_a_busy_box_and_goes_out_once_it_clears() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane(
+            "pane-1",
+            crate::testing::LivePane { composer: vec!["我自己在打的草稿".into()], width: Some(120), ..Default::default() },
+        );
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued", "沒送出就回隊列，不是 in-flight unknown");
+        let writes = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "pane.send_keys").count();
+        assert_eq!(writes(&f), 0);
+
+        // 使用者把草稿清掉了。
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
+        let pane = f.env.herdr.pane("pane-1").unwrap();
+        assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG please")).count(), 1);
+    }
+
+    /// 這個 bot 上永遠證明不了的 prompt：不打字、不卡在 in-flight，直接失敗並說明。
+    #[tokio::test]
+    async fn a_queued_prompt_that_can_never_be_proven_fails_visibly_instead_of_hanging() {
+        let f = queued_kind("grok", "test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+    }
+
     /// Regression: a client lookup failing after the claim abandoned the turn `in_flight` +
     /// `delivery='pending'` (nothing finishes that), 409-ing every later prompt. It must be requeued.
     #[tokio::test]
@@ -307,6 +385,7 @@ mod flush_queue_tests {
         );
 
         // Still retryable: requeueing didn't poison `turns_one_queued` or the CAS.
+        f.env.herdr.set_agent("agent", "pane-1", true);
         sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?")
             .bind(&f.run_id)
             .execute(&app.db)
@@ -323,6 +402,8 @@ mod flush_queue_tests {
     #[tokio::test]
     async fn a_failure_after_the_rpc_is_parked_as_unknown_not_requeued() {
         let f = queued("test").await;
+        // The agent.prompt path needs an agent herdr has a session bound to.
+        f.env.herdr.set_agent("agent", "pane-1", true);
         let app = f.env.app.clone();
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();

@@ -47,6 +47,46 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
 }
 
 
+/// The API answer for a prompt that was not sent. `retry` → 409 (temporary: a busy box, a
+/// transcript not reported yet; callers retry and assignments stay queued). Otherwise 422: this
+/// prompt can never be proven on this run, and saying so beats holding it forever.
+pub(crate) fn not_attempted_error(run_id: &str, not: Delivered) -> LcError {
+    let Delivered::NotAttempted { reason, retry } = not else {
+        return LcError::Upstream("not_attempted_error called with a delivered outcome".into());
+    };
+    let detail = json!({"run_id": run_id, "reason": reason, "retryable": retry, "sent": false});
+    if retry {
+        LcError::conflict(reason, detail)
+    } else {
+        LcError::BadValue(json!({"error": "delivery_unprovable", "reason": reason, "run_id": run_id, "sent": false}))
+    }
+}
+
+/// Remove a turn and its user message that never reached the agent. They were committed before the
+/// delivery so an early hook could match; nothing was typed, so nothing can match them now.
+async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) {
+    let res = async {
+        let mut tx = app.db.begin().await?;
+        sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match res {
+        Ok(()) => tracing::info!(turn = turn_id, "retracted a prompt that was never typed into the pane"),
+        Err(e) => {
+            tracing::error!(turn = turn_id, error = %e, "could not retract an unsent turn; failing it instead");
+            let _ = sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=? AND status='in_flight'")
+                .bind(db::now())
+                .bind(turn_id)
+                .execute(&app.db)
+                .await;
+        }
+    }
+    emit_turn(app, turn_id).await;
+}
+
 #[derive(serde::Serialize)]
 pub struct PromptOut {
     pub turn_id: String,
@@ -203,6 +243,13 @@ pub async fn prompt_grouped(
     }
     // Resolve the client before committing: must stay a retryable 502, not a stuck `pending` turn.
     let client = client_for_run(app, &run).await?;
+    // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
+    // (box busy, no way to prove it) must never become an in-flight turn nobody can release
+    // (sol review round seven #2). A 409 keeps a supervisor assignment queued with backoff.
+    let plan = match plan_delivery(app, &client, &run, &bot, &deliver, false).await.map_err(up)? {
+        Ok(plan) => plan,
+        Err(not) => return Err(not_attempted_error(&run.id, not)),
+    };
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
     let turn_id = db::ulid();
@@ -243,13 +290,18 @@ pub async fn prompt_grouped(
     emit_turn(app, &turn_id).await;
 
     // 4. deliver
-    let res = deliver_prompt(app, &client, &run, &bot, &deliver, false).await;
+    let res = execute_delivery(app, &client, &run, &bot, &deliver, plan).await;
     let delivery = match res {
         Ok(Delivered::Submitted) => "ok",
-        // Unproven is not delivered: park the turn (§6.3) instead of arming a watchdog for a
-        // prompt that may never have reached the agent.
-        Ok(Delivered::Unknown(why)) => {
-            tracing::warn!(bot = %bot_id, reason = why, "prompt delivery could not be confirmed");
+        // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
+        // back out so the same request id can be sent again, and answer 409 like the plan would.
+        Ok(not @ Delivered::NotAttempted { .. }) => {
+            retract_unsent_turn(app, &turn_id, &msg_id).await;
+            return Err(not_attempted_error(&run.id, not));
+        }
+        // Keys were sent and the result cannot be proven: that is what `unknown` means (§6.3).
+        Ok(Delivered::Unproven(why)) => {
+            tracing::warn!(bot = %bot_id, reason = why, "prompt delivery could not be proven");
             "unknown"
         }
         Err(e) => {
@@ -317,6 +369,8 @@ mod prompt_tests {
         .execute(&app.db)
         .await
         .unwrap();
+        // These exercise the agent.prompt path, which needs an agent herdr has a session bound to.
+        env.herdr.set_agent("prompt-test", "pane-prompt-test", true);
         Fixture { env, bot_id, conv, run_id }
     }
 
