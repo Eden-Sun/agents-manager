@@ -45,6 +45,10 @@ pub fn spawn_poller(app: Arc<App>) {
 /// This function intentionally does not create/close workspaces or panes. A default-session
 /// agent is adopted as an already-running Run and its pane remains user-owned.
 pub async fn sync(app: &Arc<App>) -> Result<()> {
+    // 使用者的 default session 屬於正式那顆 daemon；隔離實例收編它等於兩顆搶同一批 pane。
+    if app.isolated() {
+        return Ok(());
+    }
     let _guard = app.default_sync_lock.lock().await;
     let client = app.default_herdr.clone();
 

@@ -20,16 +20,34 @@ pub fn new_token() -> String {
 /// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 會在磁碟 mtime 變了
 /// 時重讀，所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
 pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
-    project_inner(store, pool, true).await
+    project_inner(store, pool, None).await
 }
 
-/// 明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`）授權繞過閘門：
-/// 使用者就是要刪，一次刪掉一個含多顆 bot 的專案是正常操作。其他寫回 config 的端點不給這條。
-pub async fn project_config_after_delete(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
-    project_inner(store, pool, false).await
+/// 明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`）授權**這一次**要刪掉的 id。
+///
+/// 只豁免這些 id：其餘 removals 照樣過閘門。不然外面先把 TOML 清空、再隨便呼叫一支 DELETE，
+/// 就能讓整份 config 的 removals 全部放行（sol 複審二輪）。
+#[derive(Debug, Default)]
+pub struct Deleting {
+    pub projects: HashSet<String>,
+    pub bots: HashSet<String>,
 }
 
-async fn project_inner(store: &ConfigStore, pool: &SqlitePool, guard: bool) -> Result<()> {
+impl Deleting {
+    pub fn project(id: &str, bots: impl IntoIterator<Item = String>) -> Self {
+        Self { projects: HashSet::from([id.to_string()]), bots: bots.into_iter().collect() }
+    }
+
+    pub fn bots(ids: impl IntoIterator<Item = String>) -> Self {
+        Self { projects: HashSet::new(), bots: ids.into_iter().collect() }
+    }
+}
+
+pub async fn project_config_deleting(store: &ConfigStore, pool: &SqlitePool, allow: &Deleting) -> Result<()> {
+    project_inner(store, pool, Some(allow)).await
+}
+
+async fn project_inner(store: &ConfigStore, pool: &SqlitePool, allow: Option<&Deleting>) -> Result<()> {
     // 1. fill in ids / canonicalize paths, write back only if something changed.
     let changed = store
         .update(|cfg| {
@@ -113,9 +131,7 @@ async fn project_inner(store: &ConfigStore, pool: &SqlitePool, guard: bool) -> R
         cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
 
     // 任何寫入之前先擋：投錯 DB／被換掉的 config 長得就像「config 裡什麼都沒有」。
-    if guard {
-        guard_removals(pool, &live_projects, &live_bots).await?;
-    }
+    guard_removals(pool, &live_projects, &live_bots, allow).await?;
 
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
@@ -220,26 +236,43 @@ async fn guard_removals(
     pool: &SqlitePool,
     live_projects: &HashSet<String>,
     live_bots: &HashSet<String>,
+    allow: Option<&Deleting>,
 ) -> Result<()> {
     // `child` bot 本來就不在 config.toml 裡，不算「少掉」。
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let gone_bots: Vec<String> =
-        db_bots.iter().filter(|b| !live_bots.contains(&b.id)).map(|b| b.name.clone()).collect();
-    let gone_projects: Vec<String> =
-        db_projects.iter().filter(|p| !live_projects.contains(&p.id)).map(|p| p.label.clone()).collect();
+    // 這次刪除 API 授權的 id 先扣掉；剩下的才是「沒人說要刪卻不見了」的列。
+    let ok_bots = allow.map(|a| &a.bots);
+    let ok_projects = allow.map(|a| &a.projects);
+    let gone_bots: Vec<String> = db_bots
+        .iter()
+        .filter(|b| !live_bots.contains(&b.id) && !ok_bots.is_some_and(|ids| ids.contains(&b.id)))
+        .map(|b| b.name.clone())
+        .collect();
+    let gone_projects: Vec<String> = db_projects
+        .iter()
+        .filter(|p| !live_projects.contains(&p.id) && !ok_projects.is_some_and(|ids| ids.contains(&p.id)))
+        .map(|p| p.label.clone())
+        .collect();
     if gone_bots.is_empty() && gone_projects.is_empty() {
         return Ok(());
     }
 
-    let empty_config = live_projects.is_empty();
+    // 授權刪除時，config 只剩下沒被刪的那些：空不空不能拿來判斷，改看「沒授權的 removals」多不多。
+    let empty_config = live_projects.is_empty() && allow.is_none();
     let bulk = too_many(gone_bots.len(), db_bots.len()) || too_many(gone_projects.len(), db_projects.len());
     if !empty_config && !bulk {
         return Ok(());
     }
 
-    let why = if empty_config { "config.toml 沒有任何專案" } else { "一次少掉太多列" };
+    let why = if empty_config {
+        "config.toml 沒有任何專案"
+    } else if allow.is_some() {
+        "這次刪除沒授權到的列也不見了"
+    } else {
+        "一次少掉太多列"
+    };
     let detail = format!(
         "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）",
         db_bots.len(),
@@ -347,9 +380,34 @@ mod tests {
         assert!(err.contains("拒絕投影"), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
 
-        // 明確的刪除 API 仍然刪得掉（刪一個含多顆 bot 的專案是正常操作）。
-        project_config_after_delete(&store, &pool).await.unwrap();
+        // 刪除 API 的授權只涵蓋它自己那一筆：清空的 TOML 不會因為有人按了一次刪除就全部放行。
+        let err = project_config_deleting(&store, &pool, &Deleting::bots(["b1".to_string()]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("沒授權到"), "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "授權一顆不能連坐刪掉另外三顆");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 授權的那一筆照刪：刪掉一個含多顆 bot 的專案仍是正常操作。
+    #[tokio::test]
+    async fn an_authorized_delete_still_removes_its_own_rows() {
+        let dir = std::env::temp_dir().join(format!("am-projection-scoped-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
+        // 刪掉整個專案：config 空了，但這次刪除授權了這個專案與它底下四顆 bot。
+        std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let allow = Deleting::project("p1", ["b1", "b2", "b3", "b4"].map(String::from));
+        project_config_deleting(&store, &pool, &allow).await.unwrap();
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
+        assert_eq!(db::live_projects(&pool).await.unwrap().len(), 0);
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();

@@ -390,9 +390,10 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(any_err)
 }
 
-/// 刪除 bot／專案之後的重投：使用者明確要刪，繞過大量軟刪閘門（`projection` 的註解）。
-async fn reproject_after_delete(app: &Arc<App>) -> Result<(), LcError> {
-    crate::projection::project_config_after_delete(&app.cfg, &app.db).await.map_err(any_err)
+/// 刪除 bot／專案之後的重投：只豁免**這次**要刪的 id，其餘 removals 照樣過閘門
+/// （否則外面先清空 TOML、再隨便呼叫一支 DELETE 就能全部放行）。
+async fn reproject_deleting(app: &Arc<App>, allow: crate::projection::Deleting) -> Result<(), LcError> {
+    crate::projection::project_config_deleting(&app.cfg, &app.db, &allow).await.map_err(any_err)
 }
 
 #[derive(Deserialize)]
@@ -626,6 +627,11 @@ async fn patch_project(
 
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
+    // 這個專案底下的 bot（含它們認領的 child）就是這次授權要刪的範圍。
+    let allow = crate::projection::Deleting::project(
+        &id,
+        bots.iter().filter(|b| b.project_id == id).map(|b| b.id.clone()),
+    );
     for b in bots.iter().filter(|b| b.project_id == id) {
         if db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": b.id})));
@@ -638,7 +644,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
         })
         .await
         .map_err(any_err)?;
-    reproject_after_delete(&app).await?;
+    reproject_deleting(&app, allow).await?;
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -1115,7 +1121,11 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         .await
         .map_err(any_err)?;
     // Soft delete; the conversation and its messages stay.
-    reproject_after_delete(&app).await?;
+    reproject_deleting(
+        &app,
+        crate::projection::Deleting::bots(std::iter::once(id.clone()).chain(removed_children.iter().cloned())),
+    )
+    .await?;
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())

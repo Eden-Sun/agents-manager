@@ -111,6 +111,8 @@ pub struct App {
     pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
     /// 這個 daemon 開過的主機 shell。只放記憶體：它同時是送鍵的白名單，重啟不該繼承。
     pub host_shells: crate::api::shell::Registry,
+    /// `serve` 起在非預設資料目錄（`startup::is_isolated`）。測試裡預設 false。
+    isolated: std::sync::atomic::AtomicBool,
 }
 
 impl App {
@@ -129,6 +131,7 @@ impl App {
         let (bus, _) = broadcast::channel(1024);
         let (turn_bus, _) = broadcast::channel(1024);
         Arc::new(Self {
+            isolated: std::sync::atomic::AtomicBool::new(crate::startup::is_isolated()),
             db,
             hosts: HostManager::new(herdr.clone()),
             herdr,
@@ -307,6 +310,17 @@ impl App {
             Some(o) if since + 1 >= o => Some(ring.iter().filter(|e| e.seq > since).cloned().collect()),
             Some(_) => None,
         }
+    }
+
+    /// 非預設資料目錄＝隔離實例。它不能認領既有 pane：那些 pane 的 hook 指向別顆 daemon 的
+    /// 資料目錄，收編只會讓兩顆 daemon 互相吃對方的 spool（sol 複審二輪）。
+    pub fn isolated(&self) -> bool {
+        self.isolated.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn set_isolated(&self, v: bool) {
+        self.isolated.store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn bot_dir(&self, bot_id: &str) -> Result<PathBuf> {

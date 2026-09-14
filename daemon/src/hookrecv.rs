@@ -747,7 +747,7 @@ fn drain_script(bot_id: &str) -> Result<String> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
-    let dir = format!("\"$HOME/.config/agents-manager/bots/\"{}", sh_quote(bot_id));
+    let dir = format!("\"$HOME/{}/bots/\"{}", crate::startup::remote_root(), sh_quote(bot_id));
     Ok(format!(
         "d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
@@ -851,7 +851,7 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
                 if conn.is_local() || !conn.is_connected() {
                     continue;
                 }
-                let pending = match conn.ssh_exec(SCAN_SCRIPT).await {
+                let pending = match conn.ssh_exec(&scan_script()).await {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
@@ -876,10 +876,16 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
     });
 }
 
-const SCAN_SCRIPT: &str = "for d in \"$HOME/.config/agents-manager/bots\"/*/; do \
+/// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`startup::remote_root`）。
+fn scan_script() -> String {
+    format!(
+        "for d in \"$HOME/{root}/bots\"/*/; do \
      [ -d \"$d\" ] || continue; b=$(basename \"$d\"); \
      if [ -f \"$d/hook-spool.jsonl\" ] || [ -f \"$d/hook-spool.jsonl.replaying\" ] || [ -f \"$d/hook-status.json\" ]; \
-     then echo \"$b\"; fi; done\n";
+     then echo \"$b\"; fi; done\n",
+        root = crate::startup::remote_root()
+    )
+}
 
 /// SPEC §4.4.6.
 pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
@@ -1006,6 +1012,11 @@ mod drain_tests {
     fn the_drain_script_takes_the_spool_and_the_status_slot() {
         let s = drain_script("botX").unwrap();
         assert!(s.contains("bots/\"'botX'"));
+        // 遠端根目錄跟著實例走：兩顆 daemon 管同一台遠端時 spool 不能共用（startup::remote_root）。
+        assert!(s.contains(&format!("$HOME/{}/bots", crate::startup::remote_root())), "{s}");
+        assert!(scan_script().contains(&format!("$HOME/{}/bots", crate::startup::remote_root())));
+        assert_eq!(crate::startup::remote_root_for(None), crate::startup::REMOTE_ROOT);
+        assert_eq!(crate::startup::remote_root_for(Some("a1b2")), ".config/agents-manager/instances/a1b2");
         assert!(s.contains("mv \"$f\" \"$f.replaying\""));
         assert!(s.contains("hook-status.json"));
         assert!(s.contains(STATUS_MARKER));
