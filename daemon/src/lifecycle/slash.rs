@@ -93,7 +93,9 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     if bot.kind == "codex" {
         // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
-        mark_pane_typed(app, &run.id).await;
+        if let Err(why) = mark_pane_typed(app, &run.id).await {
+            return Some(why);
+        }
         let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
             Ok(seen) => seen,
             Err(why) => return Some(format!("codex: {why}")),
@@ -125,7 +127,9 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
         return Some(format!("no_slash_command_for_{field}"));
     };
     // 不管套用成不成功，pane 都被直接打過字了。
-    mark_pane_typed(app, &run.id).await;
+    if let Err(why) = mark_pane_typed(app, &run.id).await {
+        return Some(why);
+    }
     if send_slash_line(&client, &pane_id, &line).await.is_err() {
         return Some("slash_send_failed".into());
     }
@@ -231,10 +235,14 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
 /// 同一個 pane 用 `pane.send_text`＋Enter 直接打字每次都成功。之後這個 run 一律走「打字進 pane 再看
 /// 畫面確認」（`prompt::deliver_prompt`）。**寫進 `runs.pane_typed`**：daemon 重啟後不能忘記，否則
 /// 第一則又走回已知會失效的那條路（sol review 2026-09-14 #3）。
-async fn mark_pane_typed(app: &Arc<App>, run_id: &str) {
-    if let Err(e) = db::set_pane_typed(&app.db, run_id).await {
-        tracing::warn!(run = run_id, error = %e, "could not record that the daemon typed into this pane");
-    }
+/// 打字之前先把記號寫進 DB；寫不進去就**不要打**——打完卻沒記住，下一則與重啟後又會走回會吞訊息的
+/// `agent.prompt`（sol review 第三輪 #2）。行程內的備份記號同時記上，這次啟動內不會忘。
+async fn mark_pane_typed(app: &Arc<App>, run_id: &str) -> Result<(), String> {
+    crate::lifecycle::remember_pane_typed(run_id);
+    db::set_pane_typed(&app.db, run_id).await.map_err(|e| {
+        tracing::warn!(run = run_id, error = %e, "could not record that the daemon types into this pane; not typing");
+        format!("pane_typed_not_persisted: {e}")
+    })
 }
 
 /// slash 指令送出後，TUI 要多久內回到「空的輸入列、畫面不再變」。
@@ -301,7 +309,7 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
     let client = client_for_run(app, &run).await?;
-    mark_pane_typed(app, &run.id).await;
+    mark_pane_typed(app, &run.id).await.map_err(|why| LcError::Upstream(why))?;
     send_slash_line(&client, &pane_id, line).await?;
     tracing::info!(bot_id, kind = %bot.kind, line, "sent login slash command");
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })

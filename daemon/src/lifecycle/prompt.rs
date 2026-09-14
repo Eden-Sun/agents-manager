@@ -59,6 +59,10 @@ pub(crate) enum BoxState {
     Holds,
     /// Text that is not ours: a draft someone typed in the terminal.
     NonEmpty,
+    /// A piece of our text, but not all of it — the box is scrolled, the paste is half in, or the
+    /// TUI truncated it. Provable neither way, so it is never typed over and never submitted
+    /// (sol review round three #1).
+    Truncated,
     /// No readable composer on this screen.
     Unready,
 }
@@ -94,25 +98,67 @@ pub(crate) fn needles(text: &str) -> Option<(String, String)> {
 /// composer itself are all excluded, so a redraw can never look like a delivery — sol review
 /// 2026-09-14 #1, where a short prompt was called delivered because the screen merely changed.
 pub(crate) fn echo_hits(kind: &str, screen: &str, text: &str) -> usize {
-    let Some(marker) = prompt_echo_prefix(kind).map(str::trim_end) else { return 0 };
-    let first_line = squash_ws(text.lines().find(|l| !l.trim().is_empty()).unwrap_or(""));
-    if first_line.is_empty() {
+    let whole = squash_ws(text);
+    if whole.is_empty() {
         return 0;
     }
+    echo_blocks(kind, screen)
+        .into_iter()
+        .filter(|block| {
+            // The whole prompt, or — for a long one — its head and its tail, both present and in
+            // the right places. A block the TUI truncated (`…`) matches neither, so it does not
+            // count and the delivery stays Unknown.
+            if *block == whole {
+                return true;
+            }
+            match needles(text) {
+                Some((head, tail)) => block.starts_with(&head) && block.ends_with(&tail),
+                None => false,
+            }
+        })
+        .count()
+}
+
+/// Every echoed user message above the composer, whitespace-squashed, **whole**: a multi-line
+/// prompt is one block (marker row plus its continuation rows), not one per line.
+pub(crate) fn echo_blocks(kind: &str, screen: &str) -> Vec<String> {
+    let Some(marker) = prompt_echo_prefix(kind).map(str::trim_end) else { return Vec::new() };
     let lines: Vec<&str> = screen.lines().collect();
-    // Everything below the composer's marker row belongs to the box and the chrome under it.
+    // Everything from the composer's marker row down belongs to the box and the chrome under it.
     let cut = lines.len().saturating_sub(COMPOSER_TAIL);
     let box_row = lines[cut..].iter().rposition(|l| composer_marker_row(l, marker)).map(|i| cut + i);
     let above = &lines[..box_row.unwrap_or(lines.len())];
-    above
-        .iter()
-        .filter(|l| {
-            let row = l.trim();
-            let Some(rest) = row.strip_prefix(marker) else { return false };
-            let body = squash_ws(rest);
-            !body.is_empty() && (body == first_line || first_line.starts_with(&body) || body.starts_with(&first_line))
-        })
-        .count()
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in above {
+        let trimmed = line.trim();
+        let is_rule = !trimmed.is_empty() && trimmed.chars().all(|c| "─━-=_╭╮╰╯│".contains(c));
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            if let Some(done) = current.take() {
+                out.push(done);
+            }
+            current = Some(squash_ws(rest));
+            continue;
+        }
+        // A continuation row is indented under the marker and is plain text; anything else — a
+        // blank line, a rule, the agent's own `⏺` reply — ends the block.
+        let continued = line.starts_with("  ") && !trimmed.is_empty() && !is_rule && !trimmed.starts_with('⏺') && !trimmed.starts_with('✻');
+        match (&mut current, continued) {
+            (Some(block), true) => block.push_str(&squash_ws(trimmed)),
+            (slot @ Some(_), false) => {
+                if let Some(done) = slot.take() {
+                    out.push(done);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(done) = current {
+        out.push(done);
+    }
+    out.retain(|b| !b.is_empty());
+    out
 }
 
 /// Is this row the composer's own marker row (with or without text after it)?
@@ -130,16 +176,15 @@ pub(crate) fn box_state(kind: &str, screen: &str, text: &str) -> BoxState {
         Some(inside) => {
             let flat = squash_ws(&inside);
             let whole = squash_ws(text);
+            // Ours only when the box holds **all** of it. A fragment used to count, so a user
+            // draft that happened to quote the task, or a paste where only the first line landed,
+            // was submitted with an Enter (sol review round three #1).
             if flat == whole {
-                return BoxState::Holds;
-            }
-            // 框裡看得到的可能只是整段的一截（長訊息把開頭捲出框，或框只畫得下前幾行）：
-            // 那一截是我們這段文字的子字串就算數，反過來框裡含頭或含尾也算。
-            let fragment = flat.chars().count() >= NEEDLE_MIN && whole.contains(&flat);
-            match needles(text) {
-                _ if fragment => BoxState::Holds,
-                Some((head, tail)) if flat.contains(&head) || flat.contains(&tail) => BoxState::Holds,
-                _ => BoxState::NonEmpty,
+                BoxState::Holds
+            } else if !flat.is_empty() && (whole.contains(&flat) || flat.contains(&whole)) {
+                BoxState::Truncated
+            } else {
+                BoxState::NonEmpty
             }
         }
     }
@@ -167,6 +212,7 @@ const DELIVER_SCAN_LINES: u32 = 400;
 pub(crate) fn submit_outcome(kind: &str, echoes_before: usize, after: &str, text: &str) -> Delivered {
     match box_state(kind, after, text) {
         BoxState::Holds => Delivered::Unknown("still_in_box"),
+        BoxState::Truncated => Delivered::Unknown("composer_partial"),
         BoxState::NonEmpty => Delivered::Unknown("composer_busy"),
         BoxState::Unready => Delivered::Unknown("composer_unreadable"),
         // The box held our text and is now empty. That alone is not proof — the TUI can throw the
@@ -213,13 +259,14 @@ pub(crate) async fn deliver_prompt(
     let target = db::run_target(run, bot);
     // Unreadable marker → assume the pane needs typing (sol review #3: a read error used to read
     // as "no, use agent.prompt", which is the path known to swallow prompts).
-    let marked = match db::pane_typed(&app.db, &run.id).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(run = %run.id, error = %e, "could not read runs.pane_typed; assuming this pane needs typing");
-            true
-        }
-    };
+    let marked = crate::lifecycle::pane_typed_memo(&run.id)
+        || match db::pane_typed(&app.db, &run.id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(run = %run.id, error = %e, "could not read runs.pane_typed; assuming this pane needs typing");
+                true
+            }
+        };
     let must_type = force_pane || marked || !agent_prompt_usable(client, &target).await;
     let Some(pane) = pane.filter(|_| must_type) else {
         if must_type {
@@ -231,10 +278,13 @@ pub(crate) async fn deliver_prompt(
             .await?;
         return Ok(Delivered::Submitted);
     };
-    // Typing into the pane is itself a reason to keep typing into it from now on. A write failure
-    // only costs the next prompt one `agent.get`, so it is logged, not fatal.
+    // Persist "this pane gets typed into" **before** the first keystroke. If the marker cannot be
+    // stored, the next prompt (and every prompt after a restart) would go back to the path that
+    // silently swallows them — so the delivery is abandoned instead (sol review round three #2).
+    // The in-process memo covers the rest of this boot even if the row is later unreadable.
+    crate::lifecycle::remember_pane_typed(&run.id);
     if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
-        tracing::warn!(run = %run.id, error = %e, "could not record runs.pane_typed");
+        anyhow::bail!("could not record runs.pane_typed for {} before typing into its pane: {e}", run.id);
     }
     let read = || async { client.pane_read(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await.map(|r| r.text) };
 
@@ -267,6 +317,8 @@ pub(crate) async fn deliver_prompt(
         }
         // A draft someone is typing in the terminal. Not ours to clear, not ours to type over.
         BoxState::NonEmpty => return Ok(Delivered::Unknown("composer_busy")),
+        // Part of our text, or part of something that quotes it: cannot tell, so hands off.
+        BoxState::Truncated => return Ok(Delivered::Unknown("composer_partial")),
         BoxState::Unready => return Ok(Delivered::Unknown("composer_unreadable")),
     };
     match box_state(&bot.kind, &typed, text) {
@@ -278,6 +330,9 @@ pub(crate) async fn deliver_prompt(
         }
         BoxState::Empty => return Ok(Delivered::Unknown("nothing_typed")),
         BoxState::NonEmpty => return Ok(Delivered::Unknown("composer_busy")),
+        // Only some of the paste is in the box (or the TUI truncated the row). Never Enter on
+        // half a prompt: park it and let the watchdog look again.
+        BoxState::Truncated => return Ok(Delivered::Unknown("composer_partial")),
         BoxState::Unready => return Ok(Delivered::Unknown("composer_unreadable")),
     }
 
@@ -742,13 +797,34 @@ mod delivery_tests {
         assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n", TEXT), BoxState::Unready);
     }
 
+    /// 折行的多行中文整段都在框裡＝我們的；只看得到一截＝判不出來，不能按 Enter（第三輪 #1）。
     #[test]
-    fn a_wrapped_multi_line_chinese_paste_is_still_seen_in_the_box() {
+    fn only_the_whole_prompt_in_the_box_counts_as_ours() {
         let wrapped = screen("⏺ 先前的回覆\n", &["加一個功能除了按 SKU 之外，", "也要能用品名批次置換"]);
         assert_eq!(box_state("claude", &wrapped, TEXT), BoxState::Holds);
-        let long = "先把離線報價匯入的效能問題整理成一份報告，接著加一個功能：除了按 SKU 之外，也要能用品名批次置換";
-        let tail_only = screen("⏺ 先前的回覆\n", &["也要能用品名批次置換"]);
-        assert_eq!(box_state("claude", &tail_only, long), BoxState::Holds);
+        // 多行貼上只落了第一行：以前算 Holds 會直接按 Enter 送半段出去。
+        let first_line_only = screen("⏺ 先前的回覆\n", &["加一個功能除了按 SKU 之外，"]);
+        assert_eq!(box_state("claude", &first_line_only, TEXT), BoxState::Truncated);
+        // 使用者草稿剛好引用了任務片段，也不能被當成我們的字。
+        let quoting_draft = screen("⏺ 先前的回覆\n", &["也要能用品名批次置換"]);
+        assert_eq!(box_state("claude", &quoting_draft, TEXT), BoxState::Truncated);
+    }
+
+    /// 多行回音要整塊解析：頭尾都對才算送出，被截斷（…）判不出來就不算。
+    #[test]
+    fn a_multi_line_echo_is_matched_as_one_block() {
+        let multi = "第一行：先看報告\n第二行：再改程式\n第三行：最後回報";
+        let after = screen("⏺ 先前的回覆\n❯ 第一行：先看報告\n  第二行：再改程式\n  第三行：最後回報\n", &[]);
+        assert_eq!(echo_blocks("claude", &after).len(), 1, "三列是一則，不是三則");
+        assert_eq!(echo_hits("claude", &after, multi), 1);
+        assert_eq!(submit_outcome("claude", 0, &after, multi), Delivered::Submitted);
+        // 只回音了第一行（TUI 截斷或只送出半段）：判不出整段送出。
+        let partial = screen("⏺ 先前的回覆\n❯ 第一行：先看報告\n", &[]);
+        assert_eq!(echo_hits("claude", &partial, multi), 0);
+        assert_eq!(submit_outcome("claude", 0, &partial, multi), Delivered::Unknown("no_new_echo"));
+        // 尾巴被省略號吃掉的一列也不算。
+        let clipped = screen("⏺ 先前的回覆\n❯ 第一行：先看報告 第二行：再改程式…\n", &[]);
+        assert_eq!(echo_hits("claude", &clipped, multi), 0);
     }
 
     /// 只有「agent 把這句回音在對話區多印了一次」才算送出。
