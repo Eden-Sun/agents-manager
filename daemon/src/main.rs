@@ -86,6 +86,9 @@ enum Cmd {
         token: String,
         #[arg(long, default_value_t = 7788)]
         port: u16,
+        /// 這顆 hook 屬於哪顆 daemon 的資料目錄（daemon 啟動 bot 時寫進 hook.sh）。
+        #[arg(long, default_value = "")]
+        data_dir: String,
         /// Codex passes the event JSON as the last argv element.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         payload: Vec<String>,
@@ -106,9 +109,9 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Hook { provider, bot, token, port, payload } => {
+        Cmd::Hook { provider, bot, token, port, data_dir, payload } => {
             let payload_arg = if provider == "codex" { payload.last().cloned() } else { None };
-            hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, payload_arg });
+            hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, data_dir, payload_arg });
             std::process::exit(0);
         }
         Cmd::Statusline { bot, token, port } => {
@@ -154,16 +157,12 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
 
     // 資料目錄跟著設定檔走，而且**在建立或寫入任何檔案之前**先拿鎖：只換 --config 與 port 的
     // 「隔離測試」曾經打到正式 DB，連 ConfigStore::load 都會先寫一份預設 config（startup.rs）。
-    let config_given = config_path.is_some();
-    let prepared = startup::prepare(config_path, startup::LOCK_WAIT)?;
-    let (cfg_path, dir) = (prepared.cfg_path.clone(), prepared.dir.clone());
-    let store = config::ConfigStore::load(cfg_path.clone()).await?;
+    let startup::Instance { dir, cfg_path, store, pool, lock, slug } =
+        startup::open_instance(config_path, startup::LOCK_WAIT).await?;
+    let _dir_lock = lock;
+    startup::set_instance(slug.clone());
     let cfg = store.get().await;
-    startup::confirm_data_dir(&prepared, cfg.server.data_dir.as_deref(), config_given)?;
-    let _dir_lock = prepared.lock;
-    tracing::info!(config = %cfg_path.display(), data_dir = %dir.display(), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
-
-    let pool = db::open(&dir.join("agents-manager.sqlite3")).await?;
+    tracing::info!(config = %cfg_path.display(), data_dir = %dir.display(), instance = slug.as_deref().unwrap_or("default"), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
     projection::project_config(&store, &pool).await.context("project config into sqlite")?;
 
     let herdr_client = state::ensure_session(&cfg.server.herdr_session, &dir).await?;

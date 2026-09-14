@@ -629,7 +629,9 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 
 - `--config` 指到非預設路徑時資料目錄**一定**跟著設定檔走，不會沿用預設目錄；`AM_DATA_DIR` 與它不一致 → 拒絕啟動。
 - 同一個資料目錄同時只准一顆 daemon（`daemon.lock` 的 `flock`），拿不到鎖就拒絕啟動，連預設 config 都不會寫出來。
-- 解析出來的資料目錄會注入本機 pane 的 `AM_DATA_DIR`，hook 的 spool 跟著走；跨 bot 的 `DELETE` 之外的重投都受大量軟刪閘門保護。
+- 解析出來的資料目錄寫進 hook 的 argv（`--data-dir`）並注入本機 pane 的 `AM_DATA_DIR`，spool 跟著走；遠端則多一層 `instances/<slug>`。
+- 隔離實例不認領既有 pane（要在它底下重啟那顆 bot）。
+- 兩支 `DELETE` 只授權自己這次要刪的 id，其他 removals 一樣受大量軟刪閘門保護。
 - 只換 `listen` port **不算隔離**：2026-09-14 這樣起的第二顆開到正式 DB，被空 config 投影軟刪 15 顆 bot（SPEC §3.1）。
 
 ## WS `turn_progress`（即時輸出）

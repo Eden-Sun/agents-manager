@@ -326,6 +326,12 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 }
             }
             (None, Some(agent)) => {
+                // 隔離實例不收編既有 pane：它是別顆 daemon 開的，hook 仍寫著那顆的資料目錄。
+                if app.isolated() {
+                    tracing::error!(host, bot = %bot.name, pane = %agent.pane_id,
+                        "隔離實例不認領既有 pane（hook 指向別的資料目錄）；要在這顆 daemon 底下跑就重啟這顆 bot");
+                    continue;
+                }
                 let run_id = db::ulid();
                 let status = agent.agent_status.normalized().as_str().to_string();
                 sqlx::query(
@@ -475,6 +481,9 @@ async fn adopt_child(
     child_name: &str,
     kind: &str,
 ) -> anyhow::Result<String> {
+    if app.isolated() {
+        anyhow::bail!("隔離實例不認領既有子 agent（`{child_name}` 的 hook 指向別的資料目錄）；請在這顆 daemon 底下重開");
+    }
     let now = db::now();
     let full_name = child_name_from_agent(name);
     let existing: Option<String> = sqlx::query_scalar(
@@ -859,6 +868,33 @@ mod compat_tests {
         assert_eq!(r.adopted, 1);
         assert_eq!(r.pane_id.as_deref(), Some(pane.pane_id.as_str()));
         assert_eq!(r.tab_id.as_deref(), Some(pane.tab_id.as_str()));
+    }
+
+    /// 隔離實例（`serve --config` 到別的目錄）不能收編既有 pane：那顆 pane 的 hook 寫著別顆
+    /// daemon 的資料目錄，收編之後兩顆會互相吃對方的 spool（sol 複審二輪）。
+    #[tokio::test]
+    async fn an_isolated_instance_refuses_to_adopt_an_existing_pane() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        app.set_isolated(true);
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+
+        let bot = a_bot(&env, "alfa").await;
+        let agent = crate::config::agent_name("proj", &bot);
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "claude", "agent_status": "working",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert!(run_of(&app, &bot).await.is_none(), "隔離實例不該把正式 daemon 的 pane 收編成自己的 run");
+
+        // 正式實例照收（同一組輸入，只差這個旗標）。
+        app.set_isolated(false);
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(run_of(&app, &bot).await.expect("正式實例照舊收編").adopted, 1);
     }
 
     /// Until the mock herdr was asked `method`, i.e. the reconcile is heading for a bot's lock.

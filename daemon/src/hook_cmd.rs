@@ -25,6 +25,9 @@ pub struct HookArgs {
     pub bot: String,
     pub token: String,
     pub port: u16,
+    /// 這顆 hook 屬於哪一顆 daemon 的資料目錄。空字串＝回頭看 `AM_DATA_DIR`，再沒有才是預設目錄。
+    /// 寫死在 argv 裡：pane env 只保護「這顆 daemon 新開的 pane」，舊 pane 沒有新 env（sol 複審二輪）。
+    pub data_dir: String,
     /// codex: the last argv JSON string; claude / grok: None (payload comes from stdin)
     pub payload_arg: Option<String>,
 }
@@ -54,6 +57,7 @@ pub fn run(args: HookArgs) {
 
 fn inner(args: HookArgs) {
     let deadline = Instant::now() + TOTAL_BUDGET;
+    let data_dir = resolve_data_dir(&args.data_dir);
 
     let (text, truncated) = match args.payload_arg {
         Some(s) => {
@@ -86,9 +90,9 @@ fn inner(args: HookArgs) {
     match post(&body, &args.provider, &token, port, deadline) {
         Ok(()) => {}
         Err(e) => {
-            log_line(&args.bot, &format!("post failed: {e}"));
+            log_line_in(&data_dir, &args.bot, &format!("post failed: {e}"));
             let _ = writeln!(std::io::stderr(), "agents-managerd hook: {e}; spooled");
-            spool(&args.bot, &body);
+            spool_to(&data_dir, &args.bot, &body);
         }
     }
 }
@@ -184,9 +188,13 @@ fn post(
     })
 }
 
-/// `AM_DATA_DIR` 由 daemon 注入 pane env（`lifecycle::setup::pane_env`）：spool 必須落在
-/// **啟動這顆 bot 的 daemon 的**資料目錄，否則隔離跑的 daemon 不會重播，正式 daemon 反而吃到它。
-fn data_dir() -> PathBuf {
+/// spool 必須落在**啟動這顆 bot 的 daemon 的**資料目錄，否則隔離跑的 daemon 不會重播、
+/// 正式 daemon 反而吃到它。順序：argv 的 `--data-dir`（daemon 寫死在 hook.sh 裡）> `AM_DATA_DIR`
+/// （pane env）> 預設目錄。argv 優先是因為舊 pane 的 env 換不掉，但 hook.sh 每次啟動都重寫。
+fn resolve_data_dir(arg: &str) -> PathBuf {
+    if !arg.trim().is_empty() {
+        return PathBuf::from(arg);
+    }
     data_dir_from(std::env::var_os("AM_DATA_DIR"))
 }
 
@@ -200,42 +208,34 @@ fn data_dir_from(env: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
-fn bot_dir(bot_id: &str) -> PathBuf {
-    data_dir().join("bots").join(bot_id)
-}
-
 /// SPEC §4.4.4: one JSON line, `O_APPEND`, same body as the failed POST.
-fn spool(bot_id: &str, body: &serde_json::Value) {
-    spool_to(&data_dir(), bot_id, body)
-}
-
 fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) {
     let dir = data_dir.join("bots").join(bot_id);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        log_line(bot_id, &format!("spool mkdir failed: {e}"));
+        log_line_in(data_dir, bot_id, &format!("spool mkdir failed: {e}"));
         return;
     }
     let path = dir.join("hook-spool.jsonl");
     let line = match serde_json::to_string(body) {
         Ok(s) => s,
         Err(e) => {
-            log_line(bot_id, &format!("spool encode failed: {e}"));
+            log_line_in(data_dir, bot_id, &format!("spool encode failed: {e}"));
             return;
         }
     };
     match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(format!("{line}\n").as_bytes()) {
-                log_line(bot_id, &format!("spool write failed: {e}"));
+                log_line_in(data_dir, bot_id, &format!("spool write failed: {e}"));
             }
         }
-        Err(e) => log_line(bot_id, &format!("spool open failed: {e}")),
+        Err(e) => log_line_in(data_dir, bot_id, &format!("spool open failed: {e}")),
     }
 }
 
 /// Last resort; if this fails too we stay silent.
-fn log_line(bot_id: &str, msg: &str) {
-    let dir = bot_dir(bot_id);
+fn log_line_in(data_dir: &std::path::Path, bot_id: &str, msg: &str) {
+    let dir = data_dir.join("bots").join(bot_id);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -263,6 +263,10 @@ mod tests {
 
         assert_eq!(data_dir_from(Some("/tmp/am-iso".into())), PathBuf::from("/tmp/am-iso"));
         assert_eq!(data_dir_from(Some("".into())), data_dir_from(None), "空字串當沒設");
+
+        // argv 贏過 env：daemon 重啟前就開著的 pane 換不掉 env，但 hook.sh 每次啟動都重寫。
+        assert_eq!(resolve_data_dir("/tmp/am-iso"), PathBuf::from("/tmp/am-iso"));
+        assert_eq!(resolve_data_dir("  "), data_dir_from(std::env::var_os("AM_DATA_DIR")), "沒給才看 env");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

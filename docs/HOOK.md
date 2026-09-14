@@ -17,7 +17,7 @@ agent CLI 每個事件 fork 一次，位在 agent 的關鍵路徑上（Claude �
 - POST `http://127.0.0.1:<port>/hook/<provider>`，header `X-AM-Bot-Token`，body `{bot_id, provider, payload, received_at, truncated}`。寫死 IPv4 loopback、reqwest `.no_proxy()`；
   crate 的 reqwest 沒開 `blocking`，用 tokio current-thread runtime `block_on`。`--port` 為 0 時退回 `AM_PORT`，再退回 7788。
 - 任何失敗（拒絕、逾時、非 2xx）→ 同一份 body `O_APPEND` 到 `<data dir>/bots/<bot_id>/hook-spool.jsonl`；寫不進去追加 `hook.log`；再失敗靜默。重放在 `hookrecv.rs::replay_spool`。
-- `AM_DATA_DIR` 覆寫資料目錄根（daemon 與子命令都讀），測試用拋棄式目錄。daemon 啟動 bot 時會把自己解析出來的資料目錄注入本機 pane env，所以 spool 一定落在啟動它的那顆 daemon 的目錄（SPEC §3.1）。
+- `AM_DATA_DIR` 覆寫資料目錄根（daemon 與子命令都讀），測試用拋棄式目錄。hook 子命令另收 `--data-dir`，daemon 寫進 `hook.sh`／dispatcher 的 argv，**優先於** env：舊 pane 的 env 換不掉，但這些檔案每次啟動都重寫，spool 才一定落在啟動它的那顆 daemon 的目錄（SPEC §3.1）。
 
 ## `scripts/hook-timing-test.sh`
 

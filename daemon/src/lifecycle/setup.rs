@@ -6,11 +6,23 @@ use super::*;
 /// on the argv (issue #43: `ps` shows every user the full command line, and the statusLine
 /// runs on every redraw); the subcommands read `AM_HOOK_TOKEN` from the pane env instead.
 fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
-    hook_cmd_parts_for(&app.exe.to_string_lossy(), app.port, &bot.id, provider)
+    hook_cmd_parts_for(&app.exe.to_string_lossy(), app.port, &bot.id, provider, &app.data_dir.to_string_lossy())
 }
 
-fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str) -> Vec<String> {
-    vec![exe.into(), "hook".into(), provider.into(), "--bot".into(), bot_id.into(), "--port".into(), port.to_string()]
+/// `--data-dir` 寫死在 argv 裡：pane env 只保護這顆 daemon 新開的 pane，舊 pane 的 env 換不掉，
+/// 但 hook.sh／設定檔每次啟動都重寫，spool 才不會跑去別顆 daemon 的目錄（sol 複審二輪）。
+fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str, data_dir: &str) -> Vec<String> {
+    vec![
+        exe.into(),
+        "hook".into(),
+        provider.into(),
+        "--bot".into(),
+        bot_id.into(),
+        "--port".into(),
+        port.to_string(),
+        "--data-dir".into(),
+        data_dir.into(),
+    ]
 }
 
 /// What goes in `hook.sh`'s third argv slot. The script ignores it; the real `hook_token` is
@@ -150,18 +162,24 @@ pub const GROK_HOOKS_FILE: &str = "agents-manager.json";
 pub const GROK_DISPATCH_SH: &str = "grok-hook.sh";
 
 /// Dispatcher installed on remote hosts: forwards to the per-bot `hook.sh` (SPEC §11.4).
-pub const REMOTE_GROK_DISPATCH_SH: &str = r#"#!/bin/sh
+/// 根目錄跟著實例走：兩顆 daemon 管同一台遠端、bot id 又一樣時，不能共用同一份 spool。
+pub fn remote_grok_dispatch_sh(root: &str) -> String {
+    format!(
+        r#"#!/bin/sh
 # agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.
 [ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
-H="$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh"
+H="$HOME/{root}/bots/$AM_BOT_ID/hook.sh"
 [ -x "$H" ] || exit 0
 exec "$H" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN"
-"#;
+"#
+    )
+}
 
-fn local_grok_dispatch_sh(exe: &str) -> String {
+fn local_grok_dispatch_sh(exe: &str, data_dir: &str) -> String {
     format!(
-        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\nexec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\"\n",
-        exe = sh_quote(exe)
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\nexec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir}\n",
+        exe = sh_quote(exe),
+        data_dir = sh_quote(data_dir)
     )
 }
 
@@ -200,7 +218,7 @@ fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?.to_string_lossy().to_string();
     let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
     let exe = app.exe.to_string_lossy().to_string();
-    let a = write_if_changed(&dispatcher, &local_grok_dispatch_sh(&exe), true)?;
+    let a = write_if_changed(&dispatcher, &local_grok_dispatch_sh(&exe, &app.data_dir.to_string_lossy()), true)?;
     let hooks_path = std::path::PathBuf::from(grok_home(env, &home)).join("hooks").join(GROK_HOOKS_FILE);
     let b = write_if_changed(&hooks_path, &grok_hooks_json(&dispatcher.to_string_lossy()), false)?;
     if a || b {
@@ -217,7 +235,7 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value) -> anyhow::Resul
     let script = format!(
         "set -e\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\ncat > \"$W\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod +x \"$W\"\nG={g}\nmkdir -p \"$G\"\ncat > \"$G/{file}\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nprintf 'AM_GROK_INSTALLED\\n'\n",
         w = sh_quote(&dispatcher),
-        wrap = REMOTE_GROK_DISPATCH_SH,
+        wrap = remote_grok_dispatch_sh(&crate::startup::remote_root()),
         g = sh_quote(&hooks_dir),
         file = GROK_HOOKS_FILE,
         json = grok_hooks_json(&dispatcher),
@@ -241,7 +259,8 @@ pub async fn remote_bot_dir(conn: &HostConn, bot_id: &str) -> anyhow::Result<Rem
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
     let home = conn.home().await?;
-    let dir = format!("{home}/.config/agents-manager/bots/{bot_id}");
+    // 隔離實例在遠端也要有自己的根（`instances/<slug>`），否則同 id 的 bot 會共用 spool。
+    let dir = format!("{home}/{}/bots/{bot_id}", crate::startup::remote_root());
     Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
 }
 
@@ -742,8 +761,11 @@ mod hook_cmd_parts_tests {
     /// Issue #43: the hook / statusLine command line must not carry the token.
     #[test]
     fn hook_cmd_parts_has_no_token() {
-        let parts = hook_cmd_parts_for("/usr/bin/agents-managerd", 7788, "b1", "claude");
-        assert_eq!(parts, vec!["/usr/bin/agents-managerd", "hook", "claude", "--bot", "b1", "--port", "7788"]);
+        let parts = hook_cmd_parts_for("/usr/bin/agents-managerd", 7788, "b1", "claude", "/tmp/am-iso");
+        assert_eq!(
+            parts,
+            vec!["/usr/bin/agents-managerd", "hook", "claude", "--bot", "b1", "--port", "7788", "--data-dir", "/tmp/am-iso"]
+        );
         assert!(!parts.iter().any(|p| p == "--token"));
     }
 

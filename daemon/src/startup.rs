@@ -110,6 +110,31 @@ pub fn prepare(config_arg: Option<PathBuf>, wait: std::time::Duration) -> Result
     Ok(Prepared { cfg_path, dir, lock })
 }
 
+/// `serve` 的前半段，原封不動：prepare（唯讀解析 → 建資料目錄 → 拿鎖）→ 載入設定 → 確認 →
+/// 開 DB。測試走同一條，才驗得到「拿不到鎖時一個檔都沒生出來」這種順序性質。
+pub struct Instance {
+    pub dir: PathBuf,
+    pub cfg_path: PathBuf,
+    pub store: crate::config::ConfigStore,
+    pub pool: sqlx::SqlitePool,
+    pub lock: DirLock,
+    /// `None` = 正式實例（預設資料目錄）。
+    pub slug: Option<String>,
+}
+
+pub async fn open_instance(config_arg: Option<PathBuf>, wait: std::time::Duration) -> Result<Instance> {
+    let config_given = config_arg.is_some();
+    let prepared = prepare(config_arg, wait)?;
+    let store = crate::config::ConfigStore::load(prepared.cfg_path.clone()).await?;
+    let data_dir_in_cfg = store.get().await.server.data_dir;
+    confirm_data_dir(&prepared, data_dir_in_cfg.as_deref(), config_given)?;
+    // 只算不設：行程層級的 `set_instance` 由 `serve` 自己叫（測試不該汙染整個行程）。
+    let slug = instance_slug(&prepared.dir);
+    let pool = crate::db::open(&prepared.dir.join("agents-manager.sqlite3")).await?;
+    let Prepared { cfg_path, dir, lock } = prepared;
+    Ok(Instance { dir, cfg_path, store, pool, lock, slug })
+}
+
 /// 拿鎖之後載入的設定，`data_dir` 必須跟當初唯讀看到的同一個——不同就是有人在這中間改了檔案，
 /// 這時繼續跑等於拿著 A 的鎖寫 B 的 DB。
 pub fn confirm_data_dir(prepared: &Prepared, loaded: Option<&str>, config_given: bool) -> Result<()> {
@@ -123,6 +148,50 @@ pub fn confirm_data_dir(prepared: &Prepared, loaded: Option<&str>, config_given:
         );
     }
     Ok(())
+}
+
+/// 遠端主機上的預設根（正式實例）。
+pub const REMOTE_ROOT: &str = ".config/agents-manager";
+
+/// 這顆 daemon 的「實例名」：預設資料目錄＝`None`（正式），其他＝資料目錄的短雜湊。
+/// 遠端主機上只看得到 `$HOME`，兩顆 daemon 管同一台遠端、bot id 又相同時會共用 spool 檔，
+/// 所以遠端的 bot 目錄要照這個名字分開（SPEC §11.4）。
+pub fn instance_slug(data_dir: &Path) -> Option<String> {
+    if same_dir(data_dir, &default_dir()) {
+        return None;
+    }
+    let bytes = normalize(data_dir).to_string_lossy().into_owned();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    Some(format!("{hash:016x}"))
+}
+
+/// 遠端主機上這顆實例的根目錄（`$HOME` 之下的相對路徑）。
+pub fn remote_root_for(slug: Option<&str>) -> String {
+    match slug {
+        Some(s) => format!("{REMOTE_ROOT}/instances/{s}"),
+        None => REMOTE_ROOT.to_string(),
+    }
+}
+
+static INSTANCE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// `serve` 開完 instance 後叫一次，之後 hook 安裝與遠端 drain 都讀同一個值
+/// （同一個行程只有一顆 daemon；測試不叫它，所以一律當正式實例）。
+pub fn set_instance(slug: Option<String>) {
+    let _ = INSTANCE.set(slug);
+}
+
+pub fn remote_root() -> String {
+    remote_root_for(INSTANCE.get().and_then(|s| s.as_deref()))
+}
+
+/// 這顆行程是不是隔離實例。`serve` 之外（測試、hook 子命令）沒設過，一律當正式實例。
+pub fn is_isolated() -> bool {
+    INSTANCE.get().map(|s| s.is_some()).unwrap_or(false)
 }
 
 /// 資料目錄的獨佔鎖，活到行程結束為止（`flock` 綁在 fd 上，關檔／行程死掉就自動放開）。
@@ -196,8 +265,10 @@ fn expand_tilde(s: &str) -> PathBuf {
     }
 }
 
-/// 補上工作目錄、摺掉 `.`／`..`，再把**已經存在的那段前綴** canonicalize（`/tmp` 在 macOS 是
-/// `/private/tmp` 的 symlink，而目錄還不存在時 `canonicalize` 整條會失敗）。尾巴那段原樣接回去。
+/// 逐段解析：每走一段就 canonicalize（把途中的 symlink 展開），遇到 `..` 才在**已展開**的路徑上回退。
+///
+/// 不能先在字面上消掉 `..`：`/a/link/../state`（link → `/b/c`）真正指的是 `/b/state`，字面摺疊會算成
+/// `/a/state`，兩顆 daemon 就可能一個鎖 A、一個開 B。尾段還不存在時 canonicalize 會失敗，那段原樣接著。
 fn normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let abs = if p.is_absolute() {
@@ -205,35 +276,23 @@ fn normalize(p: &Path) -> PathBuf {
     } else {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(p)
     };
-    let mut root = PathBuf::from("/");
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
-    for c in abs.components() {
-        match c {
-            Component::Prefix(prefix) => root = PathBuf::from(prefix.as_os_str()),
+    let mut out = PathBuf::from("/");
+    for comp in abs.components() {
+        match comp {
+            Component::Prefix(prefix) => out = PathBuf::from(prefix.as_os_str()),
             Component::RootDir | Component::CurDir => {}
             Component::ParentDir => {
-                parts.pop();
+                out.pop();
             }
-            Component::Normal(n) => parts.push(n.to_os_string()),
+            Component::Normal(name) => {
+                out.push(name);
+                if let Ok(real) = std::fs::canonicalize(&out) {
+                    out = real;
+                }
+            }
         }
     }
-    let join = |n: usize| {
-        let mut out = root.clone();
-        for part in &parts[..n] {
-            out.push(part);
-        }
-        out
-    };
-    for cut in (0..=parts.len()).rev() {
-        if let Ok(real) = std::fs::canonicalize(join(cut)) {
-            let mut out = real;
-            for part in &parts[cut..] {
-                out.push(part);
-            }
-            return out;
-        }
-    }
-    join(parts.len())
+    out
 }
 
 /// symlink 別名（`/tmp` vs `/private/tmp`）、`..`、還不存在的目錄都要算同一個。
@@ -303,6 +362,57 @@ mod tests {
         let err = confirm_data_dir(&ready, Some("elsewhere"), true).unwrap_err().to_string();
         assert!(err.contains("拿鎖之後"), "{err}");
         confirm_data_dir(&ready, None, true).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 先在字面上消 `..` 會錯解 symlink：`/a/link/../state`（link → `/b/c`）真正是 `/b/state`。
+    #[test]
+    fn parent_dir_after_a_symlink_resolves_to_the_link_target() {
+        let root = tmp("symlink");
+        let a = root.join("a");
+        let bc = root.join("b/c");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&bc).unwrap();
+        std::os::unix::fs::symlink(&bc, a.join("link")).unwrap();
+
+        let got = normalize(&a.join("link/../state"));
+        assert!(same_dir(&got, &root.join("b/state")), "{} 應該落在 b/ 底下", got.display());
+        assert!(!same_dir(&got, &a.join("state")), "字面摺疊會算成 a/state，那會鎖錯 DB");
+        // 拒絕啟動的判斷也跟著對：AM_DATA_DIR 寫成別名不算不一致。
+        data_dir(&a.join("link/config.toml"), true, None, Some(bc.clone())).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 真的走一次 serve 的前半段（prepare → 載入設定 → 確認 → 開 DB），順序性質才驗得到。
+    #[tokio::test]
+    async fn open_instance_writes_nothing_until_it_owns_the_dir() {
+        let dir = tmp("open");
+        let cfg = dir.join("config.toml");
+        let held = lock_dir(&dir, std::time::Duration::ZERO).unwrap();
+
+        let err = match open_instance(Some(cfg.clone()), std::time::Duration::ZERO).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("鎖被別人拿著時不該開得起來"),
+        };
+        assert!(err.contains("已經有一顆 daemon"), "{err}");
+        let left: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        assert_eq!(left, vec!["daemon.lock".to_string()], "config、sqlite、ui-token 都不該生出來");
+
+        drop(held);
+        let inst = open_instance(Some(cfg.clone()), std::time::Duration::ZERO).await.unwrap();
+        assert!(same_dir(&inst.dir, &dir));
+        assert!(dir.join("agents-manager.sqlite3").exists(), "DB 開在設定檔旁邊");
+        assert!(!default_dir().join("agents-manager.sqlite3").starts_with(&dir));
+        assert!(cfg.exists(), "拿到鎖之後才寫出預設 config");
+        // 隔離實例有自己的遠端 namespace，正式實例沒有。
+        let slug = inst.slug.clone().expect("非預設資料目錄＝隔離實例");
+        assert_eq!(remote_root_for(Some(&slug)), format!("{REMOTE_ROOT}/instances/{slug}"));
+        assert_eq!(instance_slug(&default_dir()), None);
+        assert_eq!(instance_slug(&dir), Some(slug), "同一個目錄每次都算出同一個名字");
+
+        inst.pool.close().await;
+        drop(inst.lock);
         std::fs::remove_dir_all(&dir).ok();
     }
 
