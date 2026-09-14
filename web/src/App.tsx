@@ -246,11 +246,11 @@ export default function App() {
         ) : groupProjectId ? (
           <GroupChatPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
-          // key：換 bot 重新掛載，未送出的圖片與捲動位置才不會跑到下一顆（草稿在 store，不受影響）。
+          // key：換 bot 重新掛載，未送出的附件與捲動位置才不會跑到下一顆（草稿在 store，不受影響）。
           <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />
         )}
       </main>
-      {/* 刻意掛在 `main` 外：換 bot／project 不 unmount，暫存圖片才跨得過去。 */}
+      {/* 刻意掛在 `main` 外：換 bot／project 不 unmount，暫存的檔案才跨得過去。 */}
       <ImageShelf />
       <MobilePreview />
       <Notices />
