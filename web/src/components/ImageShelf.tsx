@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
-import { ImageIcon, formatSize, useDropTarget } from './Attachments'
+import { FileIcon, formatSize, useDropTarget } from './Attachments'
 import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
 import type { ShelfItem } from '../store/shelf'
 import { useStore } from '../store/store'
@@ -230,7 +230,6 @@ export function ImageShelf() {
   const take = (files: File[]) => {
     if (files.length === 0) return
     const r = addToShelf(files)
-    if (r.notImage > 0) notify('error', `已略過 ${r.notImage} 個非圖片檔案，暫存區只收圖片。`)
     for (const name of r.tooBig) notify('error', `「${name}」超過 ${formatSize(MAX_BYTES)} 上限，沒有放進暫存區。`)
     if (r.overflow > 0) notify('error', `暫存區最多 ${SHELF_MAX} 張，有 ${r.overflow} 張沒放進去。`)
     // Dropping onto the collapsed rail would otherwise look like nothing happened.
@@ -248,7 +247,7 @@ export function ImageShelf() {
       className={`shelf${open ? ' open' : ''}${drop.over ? ' dropping' : ''}${!open && fileDrag ? ' armed' : ''}${
         !open && typing ? ' typing' : ''
       }`}
-      aria-label="圖片暫存區"
+      aria-label="檔案暫存區"
       onPaste={(e) => {
         const imgs = Array.from(e.clipboardData?.files ?? [])
         if (imgs.length === 0) return
@@ -259,7 +258,6 @@ export function ImageShelf() {
       <input
         ref={picker}
         type="file"
-        accept="image/*"
         multiple
         hidden
         onChange={(e) => {
@@ -270,18 +268,18 @@ export function ImageShelf() {
       {open ? (
         <div className="shelf-body" {...drop.props}>
           <div className="shelf-head">
-            <ImageIcon />
-            <span className="shelf-title">圖片暫存</span>
+            <FileIcon />
+            <span className="shelf-title">檔案暫存</span>
             {count > 0 ? (
-              <span className="shelf-count" aria-label={`暫存 ${count} 張`}>
+              <span className="shelf-count" aria-label={`暫存 ${count} 個`}>
                 {count}
               </span>
             ) : null}
             <button
               type="button"
               className="icon-btn shelf-add icon-tip"
-              aria-label="加入圖片到暫存區"
-              data-tip="加入圖片 · 暫存"
+              aria-label="加入檔案到暫存區"
+              data-tip="加入檔案 · 暫存"
               onClick={() => picker.current?.click()}
             >
               ＋
@@ -296,7 +294,7 @@ export function ImageShelf() {
               type="button"
               className="icon-btn shelf-fold icon-tip"
               aria-expanded={true}
-              aria-label="收合圖片暫存區"
+              aria-label="收合檔案暫存區"
               data-tip="收合 · 暫存"
               onClick={() => setOpenPersisted(false)}
             >
@@ -307,8 +305,8 @@ export function ImageShelf() {
             {count === 0 ? (
               <p className="shelf-empty">
                 {phone
-                  ? '用 ＋ 把圖片放這裡，之後點一下就進對話。'
-                  : '把圖片拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project 都在，重新整理也還在，放進來 30 分鐘後自動清掉。'}
+                  ? '用 ＋ 把檔案放這裡，之後點一下就進對話。'
+                  : '把檔案（圖片、PDF、log 都可以）拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project 都在，重新整理也還在，放進來 30 分鐘後自動清掉。'}
               </p>
             ) : (
               items.map((it) => (
@@ -328,7 +326,7 @@ export function ImageShelf() {
               放開以暫存
             </div>
           ) : null}
-          {peekItem && peek ? <ShelfPeek item={peekItem} at={peek} above={atBottom} /> : null}
+          {peekItem?.isImage && peek ? <ShelfPeek item={peekItem} at={peek} above={atBottom} /> : null}
         </div>
       ) : (
         <>
@@ -336,13 +334,13 @@ export function ImageShelf() {
             type="button"
             className="shelf-handle"
             aria-expanded={false}
-            aria-label={count > 0 ? `展開圖片暫存區，目前 ${count} 張` : '展開圖片暫存區'}
-            title="圖片暫存區：先放著，之後再拖進任何對話"
+            aria-label={count > 0 ? `展開檔案暫存區，目前 ${count} 個` : '展開檔案暫存區'}
+            title="檔案暫存區：先放著，之後再拖進任何對話"
             onClick={() => setOpenPersisted(true)}
           >
-            <ImageIcon />
+            <FileIcon />
             {count > 0 ? <span className="shelf-count">{count}</span> : null}
-            <span className="shelf-handle-label">圖片暫存</span>
+            <span className="shelf-handle-label">檔案暫存</span>
           </button>
           {fileDrag ? (
             <div className={`shelf-pad${drop.over ? ' over' : ''}`} {...drop.props}>
@@ -378,7 +376,7 @@ function ShelfCard({
   const hand = () => {
     const { sink, markHanded } = useShelf.getState()
     if (!sink) {
-      notify('error', '先開一個對話（bot 或群組），才能把暫存的圖片放進去。')
+      notify('error', '先開一個對話（bot 或群組），才能把暫存的檔案放進去。')
       return
     }
     sink.add([item.file])
@@ -391,7 +389,8 @@ function ShelfCard({
   }
 
   const onPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
-    if (e.pointerType === 'mouse') return
+    // 非圖片沒有預覽可開，長按就不該吃掉那一下點擊。
+    if (e.pointerType === 'mouse' || !item.isImage) return
     const el = e.currentTarget
     endPress()
     press.current = {
@@ -419,7 +418,7 @@ function ShelfCard({
           onPeekEnd()
         }}
         onPointerEnter={(e) => {
-          if (e.pointerType === 'mouse') onPeekStart(item.key, e.currentTarget, PEEK_HOVER_MS, false)
+          if (e.pointerType === 'mouse' && item.isImage) onPeekStart(item.key, e.currentTarget, PEEK_HOVER_MS, false)
         }}
         onPointerLeave={(e) => {
           if (e.pointerType === 'mouse') onPeekEnd()
@@ -432,7 +431,7 @@ function ShelfCard({
           if (!press.current) return
           if (Math.abs(e.clientX - press.current.x) > 10 || Math.abs(e.clientY - press.current.y) > 10) endPress()
         }}
-        onFocus={(e) => onPeekStart(item.key, e.currentTarget, 0, false)}
+        onFocus={(e) => item.isImage && onPeekStart(item.key, e.currentTarget, 0, false)}
         onBlur={onPeekEnd}
         onClick={() => {
           if (swallowClick.current) {
@@ -453,7 +452,13 @@ function ShelfCard({
           remove(item.key)
         }}
       >
-        <img src={item.url} alt="" />
+        {item.isImage ? (
+          <img src={item.url} alt="" />
+        ) : (
+          <span className="shelf-card-file" aria-hidden="true">
+            <FileIcon />
+          </span>
+        )}
         <span className="shelf-card-name">{item.name}</span>
         <span className="shelf-card-size">{handed ? '已放入' : formatSize(item.size)}</span>
       </button>

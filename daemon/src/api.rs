@@ -1932,16 +1932,15 @@ async fn upload_attachment(
     if !project_is_live {
         return Err(LcError::NotFound("bot".into()));
     }
-    let name = q.get("name").map(String::as_str).unwrap_or("image").trim();
-    let name = if name.is_empty() { "image" } else { name };
+    let name = q.get("name").map(String::as_str).unwrap_or("file").trim();
+    let name = if name.is_empty() { "file" } else { name };
     let mime = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|m| m.split(';').next().unwrap_or(m).trim().to_string())
         .unwrap_or_default();
-    if !crate::attach::is_image(&mime) {
-        return Err(LcError::Bad(format!("only images can be attached (Content-Type was `{mime}`)")));
-    }
+    // 2026-09-14：任何檔案都收。mime 只決定 UI 畫縮圖還是檔案晶片，agent 讀到的一律是路徑。
+    let mime = if mime.is_empty() { "application/octet-stream".to_string() } else { mime };
     // `{:#}` so the ssh / filesystem cause reaches the UI.
     let a = crate::attach::save(&app, &id, name, &mime, &body)
         .await
@@ -2415,6 +2414,25 @@ mod attachment_tests {
             .await)
             .await,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    /// 2026-09-14 使用者：暫存區要收任意檔。上傳端不再看 mime，沒帶 Content-Type 也要收。
+    #[tokio::test]
+    async fn upload_takes_any_file_not_just_images() {
+        let e = crate::testing::env().await;
+        let bot_id = crate::testing::claude_bot(&e.app, &e.project_id, "attach-bot").await.id;
+        let query = Query(HashMap::from([("name".to_string(), "run.log".to_string())]));
+        let headers = HeaderMap::from_iter([(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"))]);
+        assert_eq!(
+            status(upload_attachment(State(e.app.clone()), Path(bot_id.clone()), query, headers, Bytes::from_static(b"boom\n")).await).await,
+            StatusCode::OK
+        );
+        // 完全沒有 Content-Type 的上傳（有些瀏覽器貼上就是這樣）也不能被擋。
+        let query = Query(HashMap::from([("name".to_string(), "notes.md".to_string())]));
+        assert_eq!(
+            status(upload_attachment(State(e.app.clone()), Path(bot_id), query, HeaderMap::new(), Bytes::from_static(b"# hi")).await).await,
+            StatusCode::OK
         );
     }
 }

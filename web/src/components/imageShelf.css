@@ -106,6 +106,21 @@
   pointer-events: none;
 }
 
+/* 非圖片的卡：跟縮圖同高的圖示塊，一排看下來高度才一致（2026-09-14 暫存區收任何檔案）。 */
+
+.shelf-card-file {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 74px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 26px;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .shelf-card-name {
   font-size: 11px;
   color: var(--text-dim);

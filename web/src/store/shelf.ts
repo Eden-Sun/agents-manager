@@ -24,7 +24,9 @@ export interface ShelfItem {
   file: File
   name: string
   size: number
-  /** Revoked when the item leaves the shelf. */
+  /** Only an image can be previewed; everything else is drawn as an icon card. */
+  isImage: boolean
+  /** Object URL for an image, revoked when the item leaves the shelf; `''` otherwise. */
   url: string
   addedAt: number
 }
@@ -41,7 +43,7 @@ interface ShelfState {
   sink: ShelfSink | null
   /** Keys just handed off, for the brief 「已放入」 flash. */
   handed: string[]
-  add: (files: File[]) => { added: number; tooBig: string[]; notImage: number; overflow: number }
+  add: (files: File[]) => { added: number; tooBig: string[]; overflow: number }
   remove: (key: string) => void
   clear: () => void
   filesFor: (keys: string[]) => File[]
@@ -53,6 +55,11 @@ interface ShelfState {
   expire: () => string[]
 }
 
+/** A `File` restored from IndexedDB keeps its `type`, so this works on both paths. */
+function isImage(file: File): boolean {
+  return file.type.startsWith('image/')
+}
+
 let seq = 0
 
 export const useShelf = create<ShelfState>((set, get) => ({
@@ -61,16 +68,12 @@ export const useShelf = create<ShelfState>((set, get) => ({
   handed: [],
 
   add: (files) => {
-    const result = { added: 0, tooBig: [] as string[], notImage: 0, overflow: 0 }
+    const result = { added: 0, tooBig: [] as string[], overflow: 0 }
     const accepted: ShelfItem[] = []
     let room = SHELF_MAX - get().items.length
     for (const file of files) {
-      if (!file.type.startsWith('image/')) {
-        result.notImage += 1
-        continue
-      }
       if (file.size > MAX_BYTES) {
-        result.tooBig.push(file.name || '圖片')
+        result.tooBig.push(file.name || '檔案')
         continue
       }
       if (room <= 0) {
@@ -82,9 +85,11 @@ export const useShelf = create<ShelfState>((set, get) => ({
       accepted.push({
         key: `s${seq}`,
         file,
-        name: file.name || '圖片',
+        name: file.name || '檔案',
         size: file.size,
-        url: URL.createObjectURL(file),
+        isImage: isImage(file),
+        // 只有圖片需要 object URL；其他檔案畫的是圖示，開一條 blob 只是白佔記憶體。
+        url: isImage(file) ? URL.createObjectURL(file) : '',
         addedAt: Date.now(),
       })
     }
@@ -96,13 +101,13 @@ export const useShelf = create<ShelfState>((set, get) => ({
   remove: (key) =>
     set((s) => {
       const gone = s.items.find((it) => it.key === key)
-      if (gone) URL.revokeObjectURL(gone.url)
+      if (gone?.url) URL.revokeObjectURL(gone.url)
       return { items: s.items.filter((it) => it.key !== key), handed: s.handed.filter((k) => k !== key) }
     }),
 
   clear: () =>
     set((s) => {
-      for (const it of s.items) URL.revokeObjectURL(it.url)
+      for (const it of s.items) if (it.url) URL.revokeObjectURL(it.url)
       return { items: [], handed: [] }
     }),
 
@@ -123,7 +128,15 @@ export const useShelf = create<ShelfState>((set, get) => ({
         if (have.has(it.key) || s.items.length + back.length >= SHELF_MAX) continue
         const n = Number(it.key.replace(/^s/, ''))
         if (Number.isFinite(n) && n > seq) seq = n
-        back.push({ key: it.key, file: it.file, name: it.file.name || '圖片', size: it.file.size, url: URL.createObjectURL(it.file), addedAt: it.addedAt })
+        back.push({
+          key: it.key,
+          file: it.file,
+          name: it.file.name || '檔案',
+          size: it.file.size,
+          isImage: isImage(it.file),
+          url: isImage(it.file) ? URL.createObjectURL(it.file) : '',
+          addedAt: it.addedAt,
+        })
       }
       if (!back.length) return {}
       return { items: [...s.items, ...back].sort((a, b) => a.addedAt - b.addedAt) }
@@ -133,7 +146,7 @@ export const useShelf = create<ShelfState>((set, get) => ({
     const cutoff = Date.now() - SHELF_TTL_MS
     const gone = get().items.filter((it) => it.addedAt < cutoff)
     if (!gone.length) return []
-    for (const it of gone) URL.revokeObjectURL(it.url)
+    for (const it of gone) if (it.url) URL.revokeObjectURL(it.url)
     const keys = gone.map((it) => it.key)
     set((s) => ({ items: s.items.filter((it) => !keys.includes(it.key)), handed: s.handed.filter((k) => !keys.includes(k)) }))
     return keys

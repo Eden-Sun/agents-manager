@@ -9,7 +9,7 @@ import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
 import { AttachButton } from './AttachButton'
-import { AttachPicker, AttachTray, DropVeil, isImageFile, useAttachments, useDropTarget } from './Attachments'
+import { AttachPicker, AttachTray, DropVeil, useAttachments, useDropTarget } from './Attachments'
 import { ProjectNameField } from './ProjectNameField'
 import { Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveReplyBubble, LoadEarlier } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
@@ -466,10 +466,11 @@ function GroupComposer({
           onClick={syncCaret}
           onBlur={syncCaret}
           onPaste={(e) => {
-            const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
-            if (imgs.length === 0) return
+            // 貼上帶的檔案一律收（不再只收圖片）；純文字貼上不帶 files，不受影響。
+            const pasted = Array.from(e.clipboardData?.files ?? [])
+            if (pasted.length === 0) return
             e.preventDefault()
-            files.add(imgs)
+            files.add(pasted)
           }}
           onKeyUp={syncCaret}
           onKeyDown={(e) => {

@@ -45,6 +45,13 @@ fn ext_for(name: &str, mime: &str) -> String {
         "image/svg+xml" => "svg",
         "image/heic" => "heic",
         "image/bmp" => "bmp",
+        "application/pdf" => "pdf",
+        "application/json" => "json",
+        "application/zip" => "zip",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "text/html" => "html",
         _ => "bin",
     }
     .to_string()
@@ -60,12 +67,13 @@ fn safe_stem(name: &str) -> String {
         .collect();
     let trimmed = cleaned.trim_matches('-').to_string();
     if trimmed.is_empty() {
-        "image".into()
+        "file".into()
     } else {
         trimmed.chars().take(48).collect()
     }
 }
 
+/// Only the UI cares: an image gets a thumbnail, everything else a file chip.
 pub fn is_image(mime: &str) -> bool {
     mime.starts_with("image/")
 }
@@ -83,9 +91,6 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
     }
     if data.len() > MAX_BYTES {
         bail!("attachment is {} bytes; the limit is {}", data.len(), MAX_BYTES);
-    }
-    if !is_image(mime) {
-        bail!("only images can be attached (got {mime})");
     }
     let bot = db::bot(&app.db, bot_id)
         .await?
@@ -209,7 +214,11 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
     if !s.is_empty() {
         s.push_str("\n\n");
     }
-    s.push_str(if items.len() == 1 { "附加圖片（請讀取這個檔案來查看）：\n" } else { "附加圖片（請讀取這些檔案來查看）：\n" });
+    // 全是圖片就照舊說「圖片」——那是最常見的情況，講得具體一點；混到別的檔案就講「檔案」。
+    let images_only = items.iter().all(|a| is_image(&a.mime));
+    let kind = if images_only { "圖片" } else { "檔案" };
+    let one = items.len() == 1;
+    s.push_str(&format!("附加{kind}（請讀取{}檔案來查看）：\n", if one { "這個" } else { "這些" }));
     for a in items {
         s.push_str(&a.path);
         s.push('\n');
@@ -247,5 +256,34 @@ mod tests {
             assert!(local_copy_dir(&env.app, id).is_err(), "unsafe id was accepted: {id:?}");
             assert!(protected.exists(), "path construction touched the protected directory for {id:?}");
         }
+    }
+
+    /// 2026-09-14 使用者：暫存區要收任意檔。附件不再限圖片，所以延伸檔名與那句提示都得跟著走。
+    #[test]
+    fn a_non_image_keeps_its_own_name_and_extension() {
+        assert_eq!(ext_for("report.PDF", "application/pdf"), "pdf");
+        // 沒有副檔名時才看 mime。
+        assert_eq!(ext_for("report", "application/pdf"), "pdf");
+        assert_eq!(ext_for("blob", "application/octet-stream"), "bin");
+        assert_eq!(safe_stem("../../etc/passwd"), "passwd");
+        assert_eq!(safe_stem("???"), "file");
+    }
+
+    #[test]
+    fn the_prompt_says_files_unless_everything_is_an_image() {
+        let a = |mime: &str, path: &str| Attachment {
+            id: "1".into(),
+            name: "n".into(),
+            mime: mime.into(),
+            size: 1,
+            path: path.into(),
+        };
+        let shot = a("image/png", "/p/shot.png");
+        let log = a("text/plain", "/p/run.log");
+        assert!(deliver_text("看這個", &[shot.clone()]).contains("附加圖片（請讀取這個檔案來查看）"));
+        assert!(deliver_text("看這個", &[log.clone()]).contains("附加檔案（請讀取這個檔案來查看）"));
+        let both = deliver_text("看這些", &[shot, log]);
+        assert!(both.contains("附加檔案（請讀取這些檔案來查看）"), "{both}");
+        assert!(both.contains("/p/shot.png") && both.contains("/p/run.log"));
     }
 }
