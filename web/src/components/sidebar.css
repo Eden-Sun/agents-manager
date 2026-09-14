@@ -13,6 +13,16 @@
   overflow: visible;
 }
 
+/* 標題列右欄：瀏覽器晶片在上，重建 chip 接在它下面（使用者 2026-09-14 指定的位置）。 */
+.head-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-self: end;
+  gap: 3px;
+  min-width: 0;
+}
+
 .head-brand {
   display: flex;
   flex-direction: column;
