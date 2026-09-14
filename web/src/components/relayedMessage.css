@@ -26,3 +26,17 @@
 .msg.user.daemon-notice .msg-meta-above {
   justify-content: flex-start;
 }
+
+/* 代發／轉述預設收合成一行（2026-09-14 使用者：「agm 交辦的訊息都不用全顯示，收合就好」）。
+   摘要本身已經是單行字串，這裡只防長網址或 sha 撐破泡泡。 */
+.bubble.folded {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.msg.user .relay-fold {
+  align-self: flex-start;
+  margin-top: 2px;
+}
