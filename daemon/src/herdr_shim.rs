@@ -263,7 +263,10 @@ mod tests {
             );
             cmd.env("PATH", path).args(args);
             // Don't inherit the test runner's own pane model settings.
-            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND"] {
+            // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
+            // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
+            // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
+            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT"] {
                 cmd.env_remove(key);
             }
             for (k, v) in env {
