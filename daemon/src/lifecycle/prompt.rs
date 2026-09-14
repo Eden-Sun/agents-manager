@@ -67,61 +67,113 @@ pub(crate) enum BoxState {
     Unready,
 }
 
-/// Chars of the prompt used as a needle, at each end. Long enough not to match everything,
-/// short enough to survive the TUI's own wrapping.
-const NEEDLE_LEN: usize = 24;
-/// Below this a needle proves nothing (a two-character prompt is in every screen).
-const NEEDLE_MIN: usize = 8;
-
-fn squash_ws(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).collect()
+/// Display columns: East Asian wide characters take two, box drawing and the rest take one.
+/// `screen.rs`'s cruder estimate (everything above U+1100 is wide) would call a row of `─` rules
+/// twice its real width, and the pane width is measured from exactly those rules.
+pub(crate) fn display_cols(s: &str) -> usize {
+    s.chars()
+        .map(|c| {
+            let u = c as u32;
+            let wide = (0x1100..=0x115F).contains(&u)
+                || (0x2E80..=0x303E).contains(&u)
+                || (0x3041..=0x33FF).contains(&u)
+                || (0x3400..=0x4DBF).contains(&u)
+                || (0x4E00..=0x9FFF).contains(&u)
+                || (0xA000..=0xA4CF).contains(&u)
+                || (0xAC00..=0xD7A3).contains(&u)
+                || (0xF900..=0xFAFF).contains(&u)
+                || (0xFE30..=0xFE6F).contains(&u)
+                || (0xFF00..=0xFF60).contains(&u)
+                || (0xFFE0..=0xFFE6).contains(&u)
+                || (0x20000..=0x3FFFD).contains(&u);
+            if wide {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
-/// Head and tail needles, or `None` when the text is too short to prove anything with.
-pub(crate) fn needles(text: &str) -> Option<(String, String)> {
-    let flat = squash_ws(text);
-    if flat.chars().count() < NEEDLE_MIN {
-        return None;
+/// Below this a row cannot have been wrapped by any real terminal, so a following row must be a
+/// newline the user typed. Real panes wrap past 100 columns; 60 keeps a margin.
+const WRAP_MIN_COLS: usize = 60;
+
+/// The two columns the TUI indents continuation rows by (both soft wraps and typed newlines).
+const GUTTER: &str = "  ";
+
+/// Put the TUI's rows back together into the logical lines the user typed.
+///
+/// Only whitespace that is **provably** the terminal's own is removed: the two-column gutter in
+/// front of every continuation row, and the row break after a row that ran to the edge of the
+/// pane (a soft wrap). Everything else — the prompt's own newlines and its indentation — is kept,
+/// so a code block whose indentation the TUI mangled no longer compares equal (sol review round
+/// four). `None` = the rows cannot be reconstructed with certainty; the caller must treat that as
+/// unknown, never as a match.
+///
+/// `wrap_cols` is the pane width when the screen showed it (its full-width rules), else `None`:
+/// then any row long enough to have wrapped makes the reconstruction uncertain.
+pub(crate) fn rejoin_rows(rows: &[String], wrap_cols: Option<usize>) -> Option<Vec<String>> {
+    let threshold = wrap_cols.unwrap_or(WRAP_MIN_COLS);
+    let unknown_width = wrap_cols.is_none();
+    let mut out: Vec<String> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let body = if i == 0 { row.clone() } else { row.strip_prefix(GUTTER).unwrap_or(row).to_string() };
+        let body = body.trim_end().to_string();
+        let prev_full = out.last().map(|p: &String| display_cols(p) + 1 >= threshold).unwrap_or(false);
+        if prev_full {
+            if unknown_width {
+                // A full-looking row with no known pane width: soft wrap and typed newline are
+                // indistinguishable, so refuse to guess.
+                return None;
+            }
+            if let Some(prev) = out.last_mut() {
+                prev.push_str(&body);
+                continue;
+            }
+        }
+        out.push(body);
     }
-    let head: String = flat.chars().take(NEEDLE_LEN).collect();
-    let tail: String = {
-        let all: Vec<char> = flat.chars().collect();
-        all[all.len().saturating_sub(NEEDLE_LEN)..].iter().collect()
-    };
-    Some((head, tail))
+    Some(out)
+}
+
+/// The pane's width, if the screen drew one of its full-width rules.
+pub(crate) fn pane_width(screen: &str) -> Option<usize> {
+    screen
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.chars().count() >= 20 && t.chars().all(|c| "─━".contains(c))
+        })
+        .map(display_cols)
+        .max()
+}
+
+/// Do these TUI rows say exactly what we sent? Line for line, indentation included.
+pub(crate) fn rows_are_text(rows: &[String], wrap_cols: Option<usize>, text: &str) -> bool {
+    let Some(lines) = rejoin_rows(rows, wrap_cols) else { return false };
+    let want: Vec<&str> = text.lines().map(str::trim_end).collect();
+    lines.len() == want.len() && lines.iter().zip(&want).all(|(a, b)| a.trim_end() == *b)
 }
 
 /// How many times **the agent has echoed this prompt back** above the composer.
 ///
 /// Only rows the TUI draws for a submitted user message count (claude / grok write the prompt
 /// marker at the start of the row). Spinner rows, the status line, the token counter and the
-/// composer itself are all excluded, so a redraw can never look like a delivery — sol review
-/// 2026-09-14 #1, where a short prompt was called delivered because the screen merely changed.
+/// composer itself are all excluded, so a redraw can never look like a delivery. The block has to
+/// say exactly what we sent — a truncated (`…`) or re-indented echo does not count, and the
+/// delivery stays Unknown.
 pub(crate) fn echo_hits(kind: &str, screen: &str, text: &str) -> usize {
-    let whole = squash_ws(text);
-    if whole.is_empty() {
+    if text.trim().is_empty() {
         return 0;
     }
-    echo_blocks(kind, screen)
-        .into_iter()
-        .filter(|block| {
-            // The whole prompt, or — for a long one — its head and its tail, both present and in
-            // the right places. A block the TUI truncated (`…`) matches neither, so it does not
-            // count and the delivery stays Unknown.
-            if *block == whole {
-                return true;
-            }
-            match needles(text) {
-                Some((head, tail)) => block.starts_with(&head) && block.ends_with(&tail),
-                None => false,
-            }
-        })
-        .count()
+    let width = pane_width(screen);
+    echo_blocks(kind, screen).into_iter().filter(|rows| rows_are_text(rows, width, text)).count()
 }
 
-/// Every echoed user message above the composer, whitespace-squashed, **whole**: a multi-line
-/// prompt is one block (marker row plus its continuation rows), not one per line.
-pub(crate) fn echo_blocks(kind: &str, screen: &str) -> Vec<String> {
+/// Every echoed user message above the composer, as the **rows the TUI drew** for it: the marker
+/// row (marker stripped) plus its continuation rows, so a multi-line prompt is one block.
+pub(crate) fn echo_blocks(kind: &str, screen: &str) -> Vec<Vec<String>> {
     let Some(marker) = prompt_echo_prefix(kind).map(str::trim_end) else { return Vec::new() };
     let lines: Vec<&str> = screen.lines().collect();
     // Everything from the composer's marker row down belongs to the box and the chrome under it.
@@ -129,8 +181,8 @@ pub(crate) fn echo_blocks(kind: &str, screen: &str) -> Vec<String> {
     let box_row = lines[cut..].iter().rposition(|l| composer_marker_row(l, marker)).map(|i| cut + i);
     let above = &lines[..box_row.unwrap_or(lines.len())];
 
-    let mut out: Vec<String> = Vec::new();
-    let mut current: Option<String> = None;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut current: Option<Vec<String>> = None;
     for line in above {
         let trimmed = line.trim();
         let is_rule = !trimmed.is_empty() && trimmed.chars().all(|c| "─━-=_╭╮╰╯│".contains(c));
@@ -138,14 +190,15 @@ pub(crate) fn echo_blocks(kind: &str, screen: &str) -> Vec<String> {
             if let Some(done) = current.take() {
                 out.push(done);
             }
-            current = Some(squash_ws(rest));
+            current = Some(vec![rest.trim_start().to_string()]);
             continue;
         }
         // A continuation row is indented under the marker and is plain text; anything else — a
         // blank line, a rule, the agent's own `⏺` reply — ends the block.
-        let continued = line.starts_with("  ") && !trimmed.is_empty() && !is_rule && !trimmed.starts_with('⏺') && !trimmed.starts_with('✻');
+        let continued = line.starts_with(GUTTER) && !trimmed.is_empty() && !is_rule && !trimmed.starts_with('⏺') && !trimmed.starts_with('✻');
         match (&mut current, continued) {
-            (Some(block), true) => block.push_str(&squash_ws(trimmed)),
+            // Keep the row as drawn: `rejoin_rows` is the only place allowed to remove whitespace.
+            (Some(block), true) => block.push(line.trim_end().to_string()),
             (slot @ Some(_), false) => {
                 if let Some(done) = slot.take() {
                     out.push(done);
@@ -157,7 +210,7 @@ pub(crate) fn echo_blocks(kind: &str, screen: &str) -> Vec<String> {
     if let Some(done) = current {
         out.push(done);
     }
-    out.retain(|b| !b.is_empty());
+    out.retain(|b| b.iter().any(|r| !r.trim().is_empty()));
     out
 }
 
@@ -167,26 +220,63 @@ fn composer_marker_row(line: &str, marker: &str) -> bool {
     t.starts_with(marker)
 }
 
+/// The composer's rows **as drawn** (marker stripped from the first, continuation rows raw), or
+/// `None` when the box is empty or there is no readable box. Raw on purpose: only
+/// [`rejoin_rows`] may take whitespace away, so the prompt's own indentation survives the trip.
+pub(crate) fn composer_rows(kind: &str, screen: &str) -> Option<Vec<String>> {
+    let marker = prompt_echo_prefix(kind)?.trim_end();
+    if pane_awaits_input(kind, screen) {
+        return None;
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let from = lines.len().saturating_sub(COMPOSER_TAIL);
+    let tail = &lines[from..];
+    let idx = tail.iter().rposition(|l| {
+        let t = l.trim().trim_start_matches('│').trim();
+        t.strip_prefix(marker).map(|rest| !rest.trim().is_empty()).unwrap_or(false)
+    })?;
+    let mut rows: Vec<String> = Vec::new();
+    for (n, line) in tail[idx..].iter().enumerate() {
+        let stripped = line.trim_end().trim_start_matches('│').trim_end_matches('│').trim_end();
+        if n == 0 {
+            let head = stripped.trim_start();
+            let rest = head.strip_prefix(marker).unwrap_or(head);
+            rows.push(rest.trim_start_matches(' ').to_string());
+            continue;
+        }
+        let t = stripped.trim();
+        let is_rule = !t.is_empty() && t.chars().all(|c| "─━-=_╭╮╰╯│".contains(c));
+        if t.is_empty() || is_rule {
+            break;
+        }
+        rows.push(stripped.to_string());
+    }
+    if rows.iter().all(|r| r.trim().is_empty()) {
+        return None;
+    }
+    Some(rows)
+}
+
 /// Pure: what is in the composer on this screen.
 pub(crate) fn box_state(kind: &str, screen: &str, text: &str) -> BoxState {
-    let box_text = composer_text(kind, screen);
-    match box_text {
-        None if pane_awaits_input(kind, screen) => BoxState::Empty,
-        None => BoxState::Unready,
-        Some(inside) => {
-            let flat = squash_ws(&inside);
-            let whole = squash_ws(text);
-            // Ours only when the box holds **all** of it. A fragment used to count, so a user
-            // draft that happened to quote the task, or a paste where only the first line landed,
-            // was submitted with an Enter (sol review round three #1).
-            if flat == whole {
-                BoxState::Holds
-            } else if !flat.is_empty() && (whole.contains(&flat) || flat.contains(&whole)) {
-                BoxState::Truncated
-            } else {
-                BoxState::NonEmpty
-            }
-        }
+    let Some(rows) = composer_rows(kind, screen) else {
+        return if pane_awaits_input(kind, screen) { BoxState::Empty } else { BoxState::Unready };
+    };
+    let width = pane_width(screen);
+    // Ours only when the box says exactly what we sent, line for line, indentation included.
+    if rows_are_text(&rows, width, text) {
+        return BoxState::Holds;
+    }
+    let Some(lines) = rejoin_rows(&rows, width) else {
+        // Cannot undo the TUI's wrapping with certainty: never type over it, never Enter on it.
+        return BoxState::Truncated;
+    };
+    let seen = lines.join("\n");
+    let want: String = text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+    if !seen.is_empty() && (want.contains(&seen) || seen.contains(&want)) {
+        BoxState::Truncated
+    } else {
+        BoxState::NonEmpty
     }
 }
 
@@ -797,17 +887,23 @@ mod delivery_tests {
         assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n", TEXT), BoxState::Unready);
     }
 
-    /// 折行的多行中文整段都在框裡＝我們的；只看得到一截＝判不出來，不能按 Enter（第三輪 #1）。
+    /// 真的排到行尾才是軟折行，接回來要跟整段一字不差；只看得到一截＝判不出來，不能按 Enter。
     #[test]
     fn only_the_whole_prompt_in_the_box_counts_as_ours() {
-        let wrapped = screen("⏺ 先前的回覆\n", &["加一個功能除了按 SKU 之外，", "也要能用品名批次置換"]);
-        assert_eq!(box_state("claude", &wrapped, TEXT), BoxState::Holds);
+        // 一行長訊息被終端機折成兩列（第一列排到行尾），還原後跟原文相同。
+        let long = "please rewrite the offline quote importer so it is much faster";
+        let wrapped = screen("⏺ 先前的回覆\n", &["please rewrite the offline quote importer so", " it is much faster"]);
+        assert_eq!(box_state("claude", &wrapped, long), BoxState::Holds);
         // 多行貼上只落了第一行：以前算 Holds 會直接按 Enter 送半段出去。
-        let first_line_only = screen("⏺ 先前的回覆\n", &["加一個功能除了按 SKU 之外，"]);
-        assert_eq!(box_state("claude", &first_line_only, TEXT), BoxState::Truncated);
+        let multi = "第一行：先看報告\n第二行：再改程式";
+        let first_line_only = screen("⏺ 先前的回覆\n", &["第一行：先看報告"]);
+        assert_eq!(box_state("claude", &first_line_only, multi), BoxState::Truncated);
         // 使用者草稿剛好引用了任務片段，也不能被當成我們的字。
-        let quoting_draft = screen("⏺ 先前的回覆\n", &["也要能用品名批次置換"]);
-        assert_eq!(box_state("claude", &quoting_draft, TEXT), BoxState::Truncated);
+        let quoting_draft = screen("⏺ 先前的回覆\n", &["第二行：再改程式"]);
+        assert_eq!(box_state("claude", &quoting_draft, multi), BoxState::Truncated);
+        // 完全不相干的草稿。
+        let draft = screen("⏺ 先前的回覆\n", &["我自己在打的別的東西"]);
+        assert_eq!(box_state("claude", &draft, multi), BoxState::NonEmpty);
     }
 
     /// 多行回音要整塊解析：頭尾都對才算送出，被截斷（…）判不出來就不算。
@@ -866,14 +962,53 @@ mod delivery_tests {
             .replace("5h:53%", "5h:52%");
         assert_ne!(before, redrawn, "畫面確實不一樣了");
         assert_eq!(submit_outcome("claude", 0, &redrawn, TEXT), Delivered::Unknown("no_new_echo"));
-        // 短到沒有可信 needle 的 prompt 也一樣，不能因為畫面變了就當送出。
+        // 短 prompt 也一樣，不能因為畫面變了就當送出。
         let short = "go";
-        assert!(needles(short).is_none());
         assert_eq!(submit_outcome("claude", 0, &redrawn, short), Delivered::Unknown("no_new_echo"));
         // 短 prompt 的證據就是它自己的回音行。
         let echoed = screen("⏺ 先前的回覆\n❯ go\n⏺ 好\n", &[]);
         assert_eq!(echo_hits("claude", &echoed, short), 1);
         assert_eq!(submit_outcome("claude", 0, &echoed, short), Delivered::Submitted);
+    }
+
+    /// 縮排與硬換行是內容的一部分：程式碼被 TUI 弄壞縮排就不是「同一段」（sol review 第四輪）。
+    #[test]
+    fn indentation_and_hard_newlines_are_part_of_the_text() {
+        let code = "修這段：\nfn main() {\n    println!(\"hi\");\n}";
+        let intact = screen("⏺ 先前的回覆\n", &["修這段：", "fn main() {", "    println!(\"hi\");", "}"]);
+        assert_eq!(box_state("claude", &intact, code), BoxState::Holds);
+        // 縮排被吃掉：以前 squash 之後照樣相等，現在不算我們的字。
+        let flattened = screen("⏺ 先前的回覆\n", &["修這段：", "fn main() {", "println!(\"hi\");", "}"]);
+        assert_ne!(box_state("claude", &flattened, code), BoxState::Holds);
+        // 換行被併成一行也不算。
+        let joined = screen("⏺ 先前的回覆\n", &["修這段： fn main() { println!(\"hi\"); }"]);
+        assert_ne!(box_state("claude", &joined, code), BoxState::Holds);
+        // 回音同理：縮排壞掉就不算送到。
+        let echoed_flat = screen("❯ 修這段：\n  fn main() {\n  println!(\"hi\");\n  }\n", &[]);
+        assert_eq!(echo_hits("claude", &echoed_flat, code), 0);
+        let echoed_ok = screen("❯ 修這段：\n  fn main() {\n      println!(\"hi\");\n  }\n", &[]);
+        assert_eq!(echo_hits("claude", &echoed_ok, code), 1);
+    }
+
+    /// 只有排到行尾的那種折行才可以接回去；短行後面的下一列是使用者自己按的換行。
+    #[test]
+    fn only_a_row_that_ran_to_the_edge_is_treated_as_a_soft_wrap() {
+        let width = Some(40);
+        let wrapped = vec!["這是一段很長的中文會被終端機折到下一行去".to_string(), "  繼續講完這句".to_string()];
+        assert_eq!(
+            rejoin_rows(&wrapped, width).unwrap(),
+            vec!["這是一段很長的中文會被終端機折到下一行去繼續講完這句".to_string()],
+            "排到行尾＝軟折行，接回去",
+        );
+        let typed = vec!["短短一行".to_string(), "  第二行".to_string()];
+        assert_eq!(
+            rejoin_rows(&typed, width).unwrap(),
+            vec!["短短一行".to_string(), "第二行".to_string()],
+            "沒排到行尾＝使用者自己按的換行，保留",
+        );
+        // 量不到 pane 寬度、又有長到可能折行的列：還原不了就不猜。
+        let long = vec!["x".repeat(80), "  continued".to_string()];
+        assert!(rejoin_rows(&long, None).is_none());
     }
 
     /// 回音只認對話區：輸入框裡的同一句、spinner 行裡出現的字都不算。
