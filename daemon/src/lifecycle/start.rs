@@ -10,9 +10,11 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String>
 
 
 /// `resume_native` continues the bot's last native session (batch update restart).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `fork_session`：從這個 native session 分出一個新 session（`POST /bots/:id/fork` 的第一次啟動，SPEC §6.10）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartOpts {
     pub resume_native: bool,
+    pub fork_session: Option<String>,
 }
 
 pub async fn start_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
@@ -130,7 +132,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     }
     app.emit_bot_status(bot_id).await;
 
-    match start_inner(app, &bot, &project, &run_id, opts).await {
+    match start_inner(app, &bot, &project, &run_id, opts.clone()).await {
         Ok(()) => Ok(run_id),
         Err(e) => {
             let _ = sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?")
@@ -153,6 +155,19 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
         "claude" => Ok(vec!["--resume".into(), session_id.into()]),
         "codex" => Ok(vec!["resume".into(), session_id.into()]),
         "grok" => Err("unsupported_kind"),
+        _ => Err("unsupported_kind"),
+    }
+}
+
+/// 分出新 session 的參數。claude、grok 是 `--resume <id> --fork-session`；codex 的 `fork` 跟 `resume`
+/// 一樣是子命令，要排最前面（三家 CLI 的 help 2026-09-14 實測）。
+pub(crate) fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'static str> {
+    if session_id.trim().is_empty() {
+        return Err("no_session_id");
+    }
+    match kind {
+        "claude" | "grok" => Ok(vec!["--resume".into(), session_id.into(), "--fork-session".into()]),
+        "codex" => Ok(vec!["fork".into(), session_id.into()]),
         _ => Err("unsupported_kind"),
     }
 }
@@ -334,6 +349,18 @@ async fn start_inner(
     } else {
         None
     };
+    // fork：換一個新 session 接著同一段脈絡。不寫 `resume_session_id`——那是「應該回到同一個 id」的檢查，
+    // fork 本來就會拿到新 id。
+    if let Some(from) = opts.fork_session.as_deref() {
+        let fork = fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?;
+        if bot.kind == "codex" {
+            let mut forked = fork;
+            forked.extend(args);
+            args = forked;
+        } else {
+            args.extend(fork);
+        }
+    }
     if let Some((session_id, resume_args)) = resume {
         if bot.kind == "codex" {
             let mut resumed = resume_args;
@@ -563,10 +590,10 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     refuse_default_session(&bot)?;
     stop_bot_locked(app, bot_id).await?;
-    match start_bot_locked_with(app, bot_id, opts).await {
+    match start_bot_locked_with(app, bot_id, opts.clone()).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
             let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
-                return start_bot_locked_with(app, bot_id, opts).await;
+                return start_bot_locked_with(app, bot_id, opts.clone()).await;
             };
             let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
             if run_alive(app, &run, &bot).await {
@@ -774,7 +801,7 @@ mod resume_args_tests {
         .await
         .unwrap();
 
-        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true }).await.unwrap();
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(args.windows(2).any(|w| w == ["--resume", "native-previous"]));
         stop_bot(&e.app, &pm.id).await.unwrap();
@@ -804,7 +831,7 @@ mod resume_args_tests {
         };
         let missing = e.dir.join("never-written.jsonl");
         ended("sid-unwritten", missing.to_str().unwrap(), "2026-09-11T00:00:00Z").execute(&e.app.db).await.unwrap();
-        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true }).await.unwrap();
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()), "resumed a session that has no transcript: {args:?}");
         stop_bot(&e.app, &pm.id).await.unwrap();
@@ -812,7 +839,7 @@ mod resume_args_tests {
         let written = e.dir.join("written.jsonl");
         std::fs::write(&written, "{}\n").unwrap();
         ended("sid-written", written.to_str().unwrap(), "2026-09-11T00:10:00Z").execute(&e.app.db).await.unwrap();
-        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true }).await.unwrap();
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(args.windows(2).any(|w| w == ["--resume", "sid-written"]), "{args:?}");
         stop_bot(&e.app, &pm.id).await.unwrap();

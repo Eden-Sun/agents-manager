@@ -219,6 +219,20 @@ export async function saveOrder(input: { projects?: string[]; bots?: Record<stri
   await transport.request('POST', '/order', input)
 }
 
+/** API.md §fork：從頂層 bot 分出新 bot，CLI 接續來源的對話脈絡。建好但沒起來時 `start_error` 有值。 */
+export interface ForkResult {
+  id: string
+  name: string
+  start_error: string | null
+}
+
+export async function forkBot(botId: string, name?: string): Promise<ForkResult> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/fork`, name ? { name } : {})
+  const o = isRec(raw) ? raw : {}
+  const err = pick(o, 'start_error')
+  return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')), start_error: typeof err === 'string' && err ? err : null }
+}
+
 export async function restartBot(botId: string): Promise<string> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart`)
   return isRec(raw) ? str(pick(raw, 'run_id')) : ''

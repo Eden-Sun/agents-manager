@@ -85,6 +85,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
+        .route("/bots/{id}/fork", post(crate::fork::fork_bot))
         .route("/bots/{id}/stop", post(stop_bot))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))
@@ -773,7 +774,7 @@ async fn create_bot(
 }
 
 /// `cc1-1` → `cc1-2`; `review` → `review-2`. Trims the base to stay within 32 chars.
-fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
+pub(crate) fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
     let base = match wanted.rfind('-') {
         Some(i) if wanted[i + 1..].chars().all(|c| c.is_ascii_digit()) && i + 1 < wanted.len() => &wanted[..i],
         _ => wanted,

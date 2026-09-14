@@ -98,6 +98,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並�
 | PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id","needs_restart":false}`；trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug） |
 | POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}` |
+| POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | DELETE | `/api/bots/{id}` | — | 見 §10.4 |
 | POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個都沒有 400 |
 
@@ -561,6 +562,12 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 ### 10.3 `POST /api/bots/{id}/restart`
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start。過程推 `bot_status`。
 子 agent 在原 pane 重開（SPEC §6.9）。
+
+### 10.3b `POST /api/bots/{id}/fork`
+從頂層 bot 分出一顆新 bot，讓它的 CLI 接續來源到目前為止的完整對話脈絡（SPEC §6.10）。body 可省略：`{"name"?:"alfa-fork"}`（省略＝`<來源>-fork`，撞名自動加 `-N`）。
+- 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
+- `200 {"bot_id","name","forked_from":{"bot_id","session_id"},"run_id"|null,"start_error"|null}`：建好但沒啟動成功仍回 200，`start_error` 帶原因。推 `bot_changed`；新 bot 的對話裡有一則系統訊息說明從哪裡分出來。
+- 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`unsupported_kind`、`not_in_config`；名字不合法 400。
 
 ### 10.3a `POST /api/bots/restart-idle`
 一鍵把「帶著 claude 更新且閒置」的 bot 全部 exit + resume（SPEC §6.9）。無 body。

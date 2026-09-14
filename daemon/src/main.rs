@@ -18,6 +18,7 @@ mod capture;
 mod default_session;
 mod db;
 mod events;
+mod fork;
 mod gh_auth;
 mod git_quick;
 mod git_sh;

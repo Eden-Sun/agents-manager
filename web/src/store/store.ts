@@ -402,6 +402,8 @@ export interface StoreState {
   addProject: (input: NewProjectInput) => Promise<boolean>
   addBot: (projectId: string, input: NewBotInput) => Promise<string | null>
   cloneBot: (botId: string) => Promise<string | null>
+  /** 分出新 bot 並接續來源的對話脈絡（daemon 建好就啟動）。null = 失敗（原因已跳通知）。 */
+  forkBot: (botId: string) => Promise<string | null>
   /** 回傳 `needs_restart`；null = 失敗（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
@@ -1256,6 +1258,25 @@ export const useStore = create<StoreState>((set, get) => ({
         return { busy }
       })
     }
+  },
+
+  async forkBot(botId) {
+    const bot = get().bots.find((b) => b.id === botId)
+    if (!bot) return null
+    let id: string | null = null
+    await guarded(set, get, `fork:${botId}`, async () => {
+      const res = await api.forkBot(botId)
+      id = res.id || null
+      await get().refreshState()
+      if (!id) return
+      set({ selectedBotId: id })
+      if (res.start_error) {
+        get().notify('error', `已從 ${bot.name} fork 出 ${res.name}，但沒有啟動：${res.start_error}`)
+      } else {
+        get().notify('info', `已從 ${bot.name} fork 出 ${res.name}，接續它的對話脈絡`)
+      }
+    })
+    return id
   },
 
   async patchBot(botId, input) {
