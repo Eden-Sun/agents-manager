@@ -28,7 +28,53 @@ pub fn is_quota_limit(body: &str) -> bool {
 }
 
 fn is_quota_limit_lower(lower: &str) -> bool {
-    lower.starts_with("you've reached your") && lower.contains("limit")
+    let reached = lower.starts_with("you've reached your") && lower.contains("limit");
+    // 2.1.271 起速率上限也會寫成「You've hit your session／weekly／Opus limit」（CLI 的橫幅前綴清單同時有
+    // hit 與 reached）。只認速率桶：`hit your monthly spend limit`、`fast limit`、團隊預算不是 5h／7d 用完，
+    // 記成撞限會把量表釘成 100%（2026-09-15）。
+    let hit = lower.starts_with("you've hit your") && limit_bucket(lower) != LimitBucket::Unknown;
+    reached || hit
+}
+
+/// 橫幅說的是哪一桶。CLI 的字：`session limit`（5h）、`weekly limit`、`Opus limit`／`Sonnet limit`（每週的
+/// 模型桶，daemon 只有 7d 可放）、`Fable limit`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LimitBucket {
+    Session,
+    Weekly,
+    Fable,
+    Unknown,
+}
+
+fn limit_bucket(lower: &str) -> LimitBucket {
+    if lower.contains("fable") {
+        LimitBucket::Fable
+    } else if lower.contains("weekly") || lower.contains("opus limit") || lower.contains("sonnet limit") {
+        LimitBucket::Weekly
+    } else if lower.contains("session limit") || lower.contains("5-hour") || lower.contains("five-hour") {
+        LimitBucket::Session
+    } else {
+        LimitBucket::Unknown
+    }
+}
+
+/// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
+fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str) -> Option<String> {
+    let full = |w: &mut Option<crate::quota::Window>| {
+        w.as_mut().map(|w| {
+            w.used_pct = 100.0;
+            w.resets_at.clone()
+        })
+    };
+    match limit_bucket(lower) {
+        LimitBucket::Fable => full(&mut q.fable).flatten(),
+        LimitBucket::Weekly => full(&mut q.seven_day).flatten(),
+        LimitBucket::Session => full(&mut q.five_hour).flatten(),
+        LimitBucket::Unknown => match full(&mut q.five_hour) {
+            Some(until) => until,
+            None => full(&mut q.seven_day).flatten(),
+        },
+    }
 }
 
 /// 錯誤行之後出現非 chrome 行，代表錯誤已被重試蓋過。
@@ -281,24 +327,7 @@ async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
         account: bot.identity.clone(),
         host: host.clone(),
     });
-    let lower = line.to_ascii_lowercase();
-    let until = if lower.contains("fable") {
-        match q.fable.as_mut() {
-            Some(w) => {
-                w.used_pct = 100.0;
-                w.resets_at.clone()
-            }
-            None => None,
-        }
-    } else if let Some(w) = q.five_hour.as_mut() {
-        w.used_pct = 100.0;
-        w.resets_at.clone()
-    } else if let Some(w) = q.seven_day.as_mut() {
-        w.used_pct = 100.0;
-        w.resets_at.clone()
-    } else {
-        None
-    };
+    let until = saturate_bucket(&mut q, &line.to_ascii_lowercase());
     q.limit_hit = Some(crate::quota::LimitHit { message: line.to_string(), until, at: db::now() });
     q.updated_at = db::now();
     crate::quota::set(app, &host, &base, q).await;
@@ -320,6 +349,59 @@ mod quota_limit_tests {
         assert!(is_token_count("1,234 tokens"));
         assert!(!is_token_count("tokens"));
         assert!(!is_token_count("API error handling tokens"));
+    }
+
+    fn window(pct: f64, resets: &str) -> Option<crate::quota::Window> {
+        Some(crate::quota::Window { used_pct: pct, resets_at: Some(resets.into()) })
+    }
+
+    fn quota() -> crate::quota::Quota {
+        crate::quota::Quota {
+            five_hour: window(40.0, "5h-reset"),
+            seven_day: window(60.0, "7d-reset"),
+            fable: window(10.0, "fable-reset"),
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: String::new(),
+            source: String::new(),
+            account: None,
+            host: "local".into(),
+        }
+    }
+
+    /// 前綴與桶名取自 2.1.271 binary 的字串表（`You've hit your`／`You've reached your`、`session limit`、`weekly limit`、
+    /// `Opus limit`、`Fable limit`）；`· resets …` 那段是示意，判斷不看它。
+    /// 以前非 Fable 一律記 5h——撞週額度卻把 5h 釘成 100%、而且等 5h 重置就當成解除了。
+    #[test]
+    fn each_banner_saturates_its_own_bucket() {
+        for (line, bucket, until) in [
+            ("You've hit your session limit · resets 4pm (Asia/Taipei)", "5h", "5h-reset"),
+            ("You've hit your weekly limit · resets Sep 18", "7d", "7d-reset"),
+            ("You've hit your Opus limit · resets Sep 18", "7d", "7d-reset"),
+            ("You've reached your Fable limit. Run /usage-credits to continue", "fable", "fable-reset"),
+        ] {
+            assert!(is_quota_limit(line), "{line}");
+            let mut q = quota();
+            assert_eq!(saturate_bucket(&mut q, &line.to_ascii_lowercase()).as_deref(), Some(until), "{line}");
+            let pct = |w: &Option<crate::quota::Window>| w.as_ref().unwrap().used_pct;
+            let got = [("5h", pct(&q.five_hour)), ("7d", pct(&q.seven_day)), ("fable", pct(&q.fable))];
+            for (name, p) in got {
+                assert_eq!(p == 100.0, name == bucket, "{line}: {name}={p}");
+            }
+        }
+    }
+
+    /// 花費上限、fast 上限、團隊預算不是速率桶用完，不當撞限（否則量表被釘成 100%）。
+    #[test]
+    fn spend_and_fast_limits_are_not_rate_limits() {
+        for line in [
+            "You've hit your monthly spend limit.",
+            "You've hit your fast limit",
+            "You've hit your team's shared budget. Switch to another model",
+        ] {
+            assert!(!is_quota_limit(line), "{line}");
+        }
     }
 
     #[test]

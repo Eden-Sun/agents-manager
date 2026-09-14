@@ -154,6 +154,9 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **觸發**：同一個 `working → idle` 邊、同一次 `recent_unwrapped` 讀取；備援有沒有出手都要跑。
 - **判定**（`turn_error.rs`）：從畫面底部往上最多 30 行，剝框線與前導記號後，第一個非 chrome 行以 `API error`（不分大小寫）開頭，
   或是額度拒絕（`You've reached your Fable limit. Run /usage-credits …`）就命中。chrome = `is_noise`／`is_activity_shape` + 空輸入框列 + 更新通知行。
+  額度拒絕認兩種前綴（CLI 2.1.271 的橫幅前綴表同時有 `You've hit your` 與 `You've reached your`）：`reached your … limit` 照舊；`hit your … limit` 只認速率桶。
+  標成用完的桶照字面分：`session limit`→5h、`weekly`／`Opus limit`／`Sonnet limit`→7d、`Fable`→Fable 桶，認不出才先 5h 再 7d。
+  `hit your monthly spend limit`、`fast limit`、團隊預算不是速率桶用完，不當撞限（2026-09-15；以前非 Fable 一律記 5h，撞週額度會把 5h 釘滿、等 5h 重置就當成解除）。
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
 - **記錄**：原文寫 `runs.turn_error`（屬於這個 CLI 程序，重啟即清），對話補一則釘在該回合的 `system` 訊息（`incomplete = 1`、附快照）；
   回合還 `in_flight` 就收成 `failed`（不然輸入框鎖死）。同一行只記一次。
@@ -308,6 +311,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 佔位字與「有人打了同樣的字」在純文字快照裡一模一樣，所以判斷空框時一律用 `pane.read format=ansi` 讀：marker 後每個可見字元都
 在 SGR `2`（dim）底下就是 TUI 自己畫的提示，不看字面內容（`38`/`48` 顏色參數裡的 `2` 不算）；讀不到樣式、只有空白、或任一可見字元非 dim，一律當成非空。
+「建議下一句」是 **provider 行為**、不是穩定介面：claude 2.1.269 起中／日／泰文 prompt 也會出建議句（之前那幾種語言的建議被丟掉，是 CLI 修了 bug 才冒出來，
+2026-09-14 的 dim 建議句 409 就是它，55deeb5 修）。內容、語言、出現時機以後還會變，所以只能看 dim 樣式判斷，不要加字面或語言的特例。
 herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參數）時退回純文字讀法——沒有樣式可看，佔位字自然判非空；herdr
 接受參數卻回 `format: text` 時也照樣用，但每個 pane 每 10 分鐘最多記一次 warn，讓降級看得見。打第一個字**之前**的失敗——讀不到
 畫面（`composer_unreadable`）、證據檔在規劃後被刪除或讀不到而無法建立基準（`transcript_unreadable`）——一律是可重試的
