@@ -6,8 +6,9 @@ const at = (h: number, m: number) => new Date(2026, 8, 14, h, m, 0).toISOString(
 const now = new Date(2026, 8, 14, 0, 44, 0).getTime()
 
 test('歸零且三小時內重置：只寫倒數（使用者 2026-09-14：不要重置時刻）', () => {
-  assert.equal(resetBadge(0, at(3, 25), now), '2h41m')
-  assert.equal(resetBadge(0, at(0, 56), now), '12m')
+  assert.equal(resetBadge(0, at(3, 25), now), '2h41')
+  // 不到一小時也寫 `0h12`：旁邊全是百分比，裸的 `12` 會被讀成 12%。
+  assert.equal(resetBadge(0, at(0, 56), now), '0h12')
 })
 
 test('還有額度就不寫——那時候要看的是還剩多少', () => {
