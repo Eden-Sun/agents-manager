@@ -54,8 +54,24 @@
 
 .confirm-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* 兩個選擇並列說明（開同類分身：接續 vs 全新）。 */
+.confirm-choices {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.confirm-choices li + li {
+  margin-top: 4px;
+}
+
+.confirm-note {
+  margin: 8px 0 0;
+  color: var(--text-faint);
 }
 
 /* 確認框封頂在畫面內、內文自己捲，按鈕才不被推出去（2026-09-10 使用者截圖）。用 dvh：iOS 網址列收合前後 100vh 不同。 */

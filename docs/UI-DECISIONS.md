@@ -28,10 +28,11 @@
 ## 側欄
 
 - 專案卡：第一行名稱、第二行截斷路徑（完整路徑在 tooltip）。拖標題列整個專案一起搬；**排序存 daemon**（`POST /api/order`），手機桌機一致；搜尋中不能拖。
-- bot 列操作收成一顆常駐 `⋯`（設定／啟動／開同類分身／Fork／刪除，危險項最後）。
-- **Fork（接續對話）**（2026-09-14）：放在「開同類分身並啟動」正下方——兩者都是「再開一顆同設定的」，差別只在帶不帶脈絡，放一起才比得出來。子 agent 列不出現（fork 不了）。
-  不跳確認框：它不破壞任何東西，建錯了刪掉就好；建好直接選到新 bot，沒啟動成功就跳錯誤通知（bot 仍留在側欄）。
-  ![選單](screenshots/fork/menu-1440.png) ![fork 之後](screenshots/fork/after-1440.png)
+- bot 列操作收成一顆常駐 `⋯`（設定／啟動／開同類分身…／刪除，危險項最後）。
+- **開同類分身要問接不接續對話**（使用者 2026-09-14）：不另開「Fork」選單項，「開同類分身…」跳一個三鈕框——`取消`／`全新對話`／`接續對話（fork）`。
+  兩者都是「照這顆的設定再開一顆」，差別只在帶不帶脈絡，放在同一個問題裡才比得出來。接續是主按鈕（這個入口多半是想接著做）；
+  這顆還沒記到 session（最近一個 run 沒有 `native_session_id`）時接續鈕灰掉並寫原因。焦點照確認框慣例落在取消，Enter 不會直接建。子 agent 列沒有這一項。
+  ![分身框](screenshots/fork/clone-dialog-1440.png) ![還沒有對話](screenshots/fork/clone-dialog-no-session-1440.png) ![fork 之後](screenshots/fork/after-fork-1440.png) ![手機](screenshots/fork/clone-dialog-390.png)
 - 子 agent：縮排樹，不另貼「子 worker」之類標籤；**子列整段（kind logo＋名字＋chip）可左右滑、同一組子列同步捲**（使用者指定），名字至少 3 字。
 - 子 bot 帳號跟母 bot 不同時，把子 bot 的身分標在**母 bot** 上（琥珀色，多個用 `/`）（使用者指定）。
 - 父列：收合時收合鈕帶子 agent 最要緊的燈（blocked > working）；收合與展開都在燈號旁畫 7px 黃點——實心＝子 agent 還在跑，空心＝子 agent 回報了還沒人看。
