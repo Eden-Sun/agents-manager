@@ -37,6 +37,7 @@ import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { trimClippedTail } from '../lib/statusLineTail'
 import { quotedFrom } from '../lib/agmQuote'
+import { relayPreview } from '../lib/relayPreview'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
 import { MemBadge } from './MemBadge'
@@ -122,6 +123,10 @@ export const Bubble = memo(function Bubble({
   // 使用者貼進來的 AGM 裁示（沒有 relay_from）另標（2026-09-12 使用者：「算在 AGM 訊息不算在 user」）。
   // 只認開頭 `AGM …：` 或 `[AGM …]`，句中提到不算。
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
+  // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
+  const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
+  const [expanded, setExpanded] = useState(false)
+  const folded = Boolean(preview?.truncated) && !expanded
   const notify = useStore((s) => s.notify)
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
     notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
@@ -164,7 +169,7 @@ export const Bubble = memo(function Bubble({
         )}
       </div>
       <div
-        className={`bubble bubble-copyable${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}`}
+        className={`bubble bubble-copyable${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}${folded ? ' folded' : ''}`}
         /* 不放 title：原生 tooltip 會壓在正文上（2026-09-12 使用者截圖）。 */
         {...tapCopy}
       >
@@ -172,12 +177,22 @@ export const Bubble = memo(function Bubble({
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
           <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+        ) : folded && preview ? (
+          preview.text
         ) : (
           system ? systemNoticeText(msg.content) : msg.content
         )}
-        {msg.attachments.length ? <MessageAttachments items={msg.attachments} /> : null}
+        {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
+      {preview?.truncated ? (
+        <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+          <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? '收合' : '展開全文'}
+          <span className="disclosure-note">
+            {preview.length} 字{msg.attachments.length ? `・${msg.attachments.length} 個附件` : ''}
+          </span>
+        </button>
+      ) : null}
     </article>
   )
 })
