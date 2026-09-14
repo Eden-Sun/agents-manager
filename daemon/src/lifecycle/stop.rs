@@ -465,7 +465,7 @@ mod default_session_tests {
             other => panic!("expected 409, got {other:?}"),
         };
         assert_eq!(reason(restart_bot(&app, &bot_id).await.unwrap_err()), "default_session");
-        assert_eq!(reason(restart_bot_with(&app, &bot_id, StartOpts { resume_native: true }).await.unwrap_err()), "default_session");
+        assert_eq!(reason(restart_bot_with(&app, &bot_id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap_err()), "default_session");
         assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| r.id), Some(run_id.clone()), "still running");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
 

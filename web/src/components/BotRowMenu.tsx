@@ -15,9 +15,11 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   })
   const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const busyClone = useStore((s) => Boolean(s.busy[`clone:${botId}`]))
+  const busyFork = useStore((s) => Boolean(s.busy[`fork:${botId}`]))
   const openSettings = useStore((s) => s.openSettings)
   const startBot = useStore((s) => s.startBot)
   const cloneBot = useStore((s) => s.cloneBot)
+  const forkBot = useStore((s) => s.forkBot)
   const removeBot = useStore((s) => s.removeBot)
   const [deleteOpen, setDeleteOpen] = useState(false)
   if (!bot) return null
@@ -54,6 +56,19 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             onClick={() => void cloneBot(botId)}
           >
             開同類分身並啟動
+          </button>
+        )}
+        {/* fork 只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來。 */}
+        {compact || bot.managed_by === 'child' ? null : (
+          <button
+            type="button"
+            className="head-menu-item"
+            role="menuitem"
+            disabled={busyFork}
+            title="開一顆同設定的新 bot，接續這顆到目前為止的完整對話脈絡，之後各走各的"
+            onClick={() => void forkBot(botId)}
+          >
+            Fork（接續對話）
           </button>
         )}
         <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>

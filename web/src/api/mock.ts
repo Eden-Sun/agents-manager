@@ -724,6 +724,7 @@ export class MockTransport implements Transport {
         if (action === 'start') return this.start(botId)
         if (action === 'stop') return this.stop(botId)
         if (action === 'restart') return this.restart(botId)
+        if (action === 'fork') return this.fork(botId, b)
         if (action === 'interrupt') return this.interrupt(botId)
     if (action === 'abort') return this.abort(botId)
         if (action === 'login') return this.login(botId)
@@ -1889,6 +1890,40 @@ export class MockTransport implements Transport {
     this.bots.push(bot)
     this.emit('bot_changed', { bot_id: bot.id })
     return { bot_id: bot.id, name: bot.name }
+  }
+
+  /** 規則照 `daemon/src/fork.rs`：只給頂層 bot；設定照抄、autostart 關、名字 `<來源>-fork` 撞名加尾碼。 */
+  private fork(botId: string, b: Rec) {
+    const src = this.bots.find((x) => x.id === botId)
+    if (!src) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
+    // mock 沒有 child bot（`managed_by` 恆為 user），所以不必擋 `fork_child`。
+    const wanted = typeof b.name === 'string' && b.name.trim() ? b.name.trim() : `${src.name.slice(0, 27)}-fork`
+    let name = wanted
+    for (let n = 1; this.bots.some((x) => x.name === name); n += 1) name = `${wanted}-${n}`
+    const created = this.addBot(src.project_id, {
+      name,
+      kind: src.kind,
+      model: src.model,
+      effort: src.effort,
+      fast: src.fast === 1,
+      persona: src.persona,
+      args: JSON.parse(src.args_json) as unknown,
+      identity: src.identity,
+      env: JSON.parse(src.env_json) as unknown,
+      auto_approve: src.auto_approve === 1,
+      cwd: src.cwd,
+    })
+    this.addMessage({
+      conversation_id: this.conv(created.bot_id),
+      turn_id: null,
+      bot_id: created.bot_id,
+      role: 'system',
+      content: `從 ${src.name} fork 出來：接續它到目前為止的完整對話脈絡（mock），之後各走各的。分叉前的訊息請到 ${src.name} 看。`,
+      source: 'system',
+      incomplete: 0,
+    })
+    const { run_id } = this.start(created.bot_id)
+    return { ...created, forked_from: { bot_id: src.id, session_id: 'mock-session' }, run_id, start_error: null }
   }
 
   /** 須存在且 kind 相符（API.md identities）。 */

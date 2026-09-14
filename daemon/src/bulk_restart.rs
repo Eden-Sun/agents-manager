@@ -227,7 +227,7 @@ async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String
         return lifecycle::restart_child_in_pane(app, bot_id).await.map_err(why);
     }
     // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
-    lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true }).await.map_err(why)
+    lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, ..Default::default() }).await.map_err(why)
 }
 
 /// Read straight off the row: `get_or_init` would create a supervisor the user never asked for.
@@ -279,7 +279,7 @@ async fn verify_supervisor_back(app: Arc<App>, bot_id: String, name: String, bat
     settle_failed_restart(&app, &bot_id).await;
     let res = match db::active_run(&app.db, &bot_id).await {
         Ok(Some(run)) => Ok(run.id),
-        _ => lifecycle::start_bot_with(&app, &bot_id, StartOpts { resume_native: true }).await.map_err(why),
+        _ => lifecycle::start_bot_with(&app, &bot_id, StartOpts { resume_native: true, ..Default::default() }).await.map_err(why),
     };
     let (ok, error) = match &res {
         Ok(_) => (true, None),
