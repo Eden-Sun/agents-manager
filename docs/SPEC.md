@@ -67,7 +67,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   **重讀 config → 確認目標此刻在 TOML（不在就 409 `not_in_config`）→ 從當下的 TOML 算出實際要拿掉的 id → 閘門（寫檔前）→ 寫 config → 投影**。
   刪除模式的閘門是嚴格的：除了這次拿掉的 id，只要還有任何一列會不見就 409 `delete_refused`，不套小量門檻、不吃 `AM_ALLOW_BULK_DELETE`。
   所有投影與刪除共用同一把鎖，兩支 DELETE 並發時不會互相把對方的刪除當成未授權、也不會替對方放行。
-  `DELETE /api/bots/:id` 先以 dry run 過閘門，過了才停 bot／child；寫入時在臨界區裡再確認一次，定案後才軟刪 child、清目錄。
+  **先定案、再停機**：`DELETE /api/bots/:id` 全程拿著該 bot 的 per-bot 鎖（start 用同一把，拿到時 bot 已刪 → NotFound），會 409 的只有定案那一步、那時什麼都還沒停；
+  定案後才停 child 與自己、軟刪 child、清目錄，所以停機期間 TOML 再怎麼變都不會留下「已停、未刪」（child 由母 agent 開、daemon 重開不了，事後回滾本來就做不到）。
+  `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   其他情況真的要刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
 - **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
 - **同一資料目錄只准一顆 daemon**：啟動時對 `<資料目錄>/daemon.lock` 拿 `flock(LOCK_EX|LOCK_NB)`（拿到才寫自己的 pid 進去），拿不到就拒絕啟動、**不做任何寫入**（重啟時前一顆還在收攤，最多等 5 秒再判定失敗）；鎖綁在 fd 上，行程死掉自動放開（`startup.rs`）。
@@ -75,8 +77,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **資料目錄要跟著 bot 與 hook 走**：`hook.sh`／statusLine／grok dispatcher 的 argv 一律寫死 `--data-dir <解析後的資料目錄>`，本機 pane env 另外注入 `AM_DATA_DIR`（`pane_env`），herdr shim 也往子 agent 傳。
   argv 優先於 env：pane env 只保護這顆 daemon 新開的 pane，daemon 重啟前就存在的 pane 換不掉 env，但這些檔案每次啟動都重寫。遠端 pane 不注入 env（bot 目錄在遠端家目錄，§11.4）。
 - **隔離實例不認領既有 pane**：資料目錄非預設時，reconcile 不把既有 agent／子 agent 收編成自己的 Run，`default_session` 的收編整個跳過，並記 `error` 要人在這顆 daemon 底下重啟那顆 bot——那些 pane 的 hook 指向別顆 daemon 的資料目錄，收編只會讓兩顆互相吃對方的 spool。
-- **遠端也要分實例**：遠端的 bot 目錄、`hook.sh` 裡寫的 spool 目錄、drain／scan 路徑是同一個根 `$HOME/.config/agents-manager[/instances/<slug>]/bots/<bot_id>`，`slug` 是資料目錄的短雜湊（正式實例沒有這一段，路徑與腳本一字不變）。
+- **遠端也要分實例**：遠端的 bot 目錄、`hook.sh` 裡寫的 spool 目錄、drain／scan 路徑是同一個根 `$HOME/.config/agents-manager[/instances/<slug>]/bots/<bot_id>`，`slug` 是資料目錄的短雜湊（正式實例沒有這一段：既有路徑、檔名，以及沒有 `AM_INSTANCE` 的舊 pane 行為都不變；dispatcher 內容多了實例閘門）。
   grok 的 dispatcher 也按實例分址（`<根>/grok-hook.sh`），hooks 檔名是 `agents-manager[-<slug>].json`（grok 會合併整個 hooks 目錄）；每支 dispatcher 只接自己實例的 pane：隔離實例的 pane env 帶 `AM_INSTANCE=<slug>`，正式實例不帶（升級前開的舊 pane 也沒有，照舊歸正式）。
+  `AM_INSTANCE` 與 `AM_DATA_DIR` 是**保留變數**：identity.env、bot.env 合併之後才由 daemon 蓋回去（隔離實例設 slug／正式實例移除；本機設資料目錄／遠端移除），自訂 env 寫了也不算。
 - **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
@@ -318,9 +321,10 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
 - `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。
-- DELETE Bot：stop → TOML 移除 → DB `deleted_at`（保留對話）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
-  `child` 不在 TOML，直接停 pane 並 `deleted_at`。
-- DELETE Project：所有 bot 須已停止 → TOML 移除；不關 workspace、不刪目錄。
+- DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
+  先定案再停：拒絕只會發生在任何東西被停之前（2026-09-14 sol 四輪；原本是 stop 在前）。全程持該 bot 的 per-bot 鎖。
+  `child` 不在 TOML，直接 `deleted_at` 並停 pane。
+- DELETE Project：拿齊專案內每顆 bot 的 per-bot 鎖 → 鎖內確認都已停止 → TOML 移除；不關 workspace、不刪目錄。
 
 ### 6.5 對帳（啟動、事件連線重連；逐 bot 在鎖內）
 1. `session.snapshot` + `agent.list`。
