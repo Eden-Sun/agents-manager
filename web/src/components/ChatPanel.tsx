@@ -13,7 +13,7 @@ import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
-import { AttachPicker, AttachTray, DropVeil, MessageAttachments, isImageFile, useAttachments, useDropTarget } from './Attachments'
+import { AttachPicker, AttachTray, DropVeil, MessageAttachments, useAttachments, useDropTarget } from './Attachments'
 import { BlockedBadge } from './BlockedBadge'
 import { BlockedModal } from './BlockedModal'
 import { BlockedPanel } from './BlockedPanel'
@@ -840,10 +840,11 @@ function Composer({
           onBlur={syncCursor}
           onKeyUp={syncCursor}
           onPaste={(e) => {
-            const imgs = Array.from(e.clipboardData?.files ?? []).filter(isImageFile)
-            if (imgs.length === 0) return
+            // 貼上帶的檔案一律收（不再只收圖片）；純文字貼上不帶 files，不受影響。
+            const pasted = Array.from(e.clipboardData?.files ?? [])
+            if (pasted.length === 0) return
             e.preventDefault()
-            files.add(imgs)
+            files.add(pasted)
           }}
           onKeyDown={(e) => {
             if (enterToSend.enterSends && e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {

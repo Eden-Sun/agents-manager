@@ -785,12 +785,14 @@ grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`�
 - `GET /api/state` 的 bot 物件：`parent_bot_id`（頂層 `null`）、`managed_by`。子 bot 不進 config.toml；pane 消失即 `deleted_at`（對話保留）。UI 側欄縮排掛在父 bot 底下。
 - 子 bot 的對話來自終端擷取：pane 的 `working → idle` 就是回合邊界，寫成 `origin = external` / `completed_fallback` 的 Turn（SPEC §4.3）。
 
-## 圖片附件
+## 附件（任意檔案；2026-09-14 起不限圖片）
 
 CLI agent 只吃文字，所以附件是先把檔案放到 bot 所在主機，再把路徑寫進 agent 讀到的文字。
+**任何檔案都收**——mime 只決定 UI 畫縮圖還是檔案晶片，agent 拿到的一律是路徑。
 
 ### `POST /api/bots/{id}/attachments?name=<檔名>`
-body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖片 MIME。
+body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是該檔的 MIME；沒帶時當
+`application/octet-stream`。
 
 ```json
 200 {"id":"01M1…","name":"screenshot.png","mime":"image/png","size":10158,"path":"/Users/me/proj/.agents-manager/attachments/01M1…-screenshot.png"}
@@ -798,7 +800,7 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 
 - 檔案落在 `<project.path>/.agents-manager/attachments/`（agent cwd 之內，沙箱化的 CLI 才讀得到），該目錄自動寫一個 `*` 的 `.gitignore`。
 - 遠端專案經 ssh（`hosts.rs::ssh_put`）寫到遠端同路徑，daemon 另存本機副本供縮圖。
-- 只收 `image/*`。空 body、超過 12 MB 或其他輸入錯誤 400；超過 12 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
+- 不看 mime（2026-09-14 前只收 `image/*`）。空 body、超過 12 MB 或其他輸入錯誤 400；超過 12 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
 
 ### `GET /api/attachments/{id}`
 回原始位元組（原 MIME）。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。
@@ -806,7 +808,7 @@ body 直接是圖片位元組（**不是** multipart），`Content-Type` 為圖�
 ### prompt / 群組聊天帶附件
 `POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 可帶 `"attachments": ["01M1…"]`：
 - id 以 **project** 為範圍（群組一次上傳、每個收件 bot 拿同一路徑）；跨專案 `400 unknown attachment`。
-- agent 收到「文字 + 附加圖片（請讀取這些檔案來查看）：<絕對路徑>」；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
+- agent 收到「文字 + 附加圖片／附加檔案（請讀取這些檔案來查看）：<絕對路徑>」（全是圖片才說「圖片」）；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
 
 ## run 的附加欄位（`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件）
 

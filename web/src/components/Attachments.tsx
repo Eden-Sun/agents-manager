@@ -1,5 +1,6 @@
 /**
- * Image attachments: uploaded first (`POST /bots/:id/attachments`), the send carries ids since agents only read text.
+ * Attachments: uploaded first (`POST /bots/:id/attachments`), the send carries ids since agents only read text.
+ * **Any file, not just images** (2026-09-14) — the mime only decides the card: image → thumbnail, else icon + name.
  * Bytes sit behind the UI token, so thumbnails are fetched into object URLs rather than a plain `src`.
  */
 
@@ -22,13 +23,16 @@ export function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-/** One image waiting to be sent: uploading, ready (has an id), or failed. */
+/** One file waiting to be sent: uploading, ready (has an id), or failed. */
 export interface Pending {
   key: string
   /** 名稱｜大小｜修改時間，擋重複用。 */
   fp: string
   name: string
   size: number
+  /** An image is drawn as a thumbnail; anything else as an icon card. */
+  isImage: boolean
+  /** Local preview for an image; `''` for everything else (no blob held for nothing). */
   previewUrl: string
   id: string | null
   error: string | null
@@ -72,6 +76,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
   }, [])
 
   const revokePreview = useCallback((previewUrl: string) => {
+    if (!previewUrl) return
     URL.revokeObjectURL(previewUrl)
     urls.current.delete(previewUrl)
   }, [])
@@ -90,14 +95,11 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
 
   const add = useCallback(
     (files: File[]) => {
-      const images = files.filter(isImageFile)
-      const rejected = files.length - images.length
-      if (rejected > 0) notify('error', `已略過 ${rejected} 個非圖片檔案，目前只支援圖片。`)
       if (!uploadTo) {
-        if (images.length) notify('error', '找不到可接收圖片的 bot。')
+        if (files.length) notify('error', '找不到可接收檔案的 bot。')
         return
       }
-      for (const file of images) {
+      for (const file of files) {
         // 同一張不重複放入（2026-09-09 使用者：同一張暫存會重複放入對話）。
         const fp = `${file.name}|${file.size}|${file.lastModified}`
         if (seen.current.has(fp)) continue
@@ -108,9 +110,10 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
           notify('error', `「${file.name}」有 ${formatSize(file.size)}，超過 ${formatSize(MAX_BYTES)} 上限。`)
           continue
         }
-        const previewUrl = URL.createObjectURL(file)
-        urls.current.add(previewUrl)
-        dispatch({ type: 'add', item: { key, fp, name: file.name || '圖片', size: file.size, previewUrl, id: null, error: null } })
+        const isImage = isImageFile(file)
+        const previewUrl = isImage ? URL.createObjectURL(file) : ''
+        if (previewUrl) urls.current.add(previewUrl)
+        dispatch({ type: 'add', item: { key, fp, name: file.name || '檔案', size: file.size, isImage, previewUrl, id: null, error: null } })
         void api
           .uploadAttachment(uploadTo, file)
           .then((a: Attachment) => {
@@ -119,7 +122,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
           .catch((e: unknown) => {
             const msg = e instanceof Error ? e.message : String(e)
             dispatch({ type: 'failed', key, error: msg })
-            notify('error', `圖片「${file.name}」上傳失敗：${msg}`)
+            notify('error', `「${file.name}」上傳失敗：${msg}`)
           })
       }
     },
@@ -214,11 +217,11 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
   return { over, props }
 }
 
-export function DropVeil({ label = '放開以附加圖片' }: { label?: string }) {
+export function DropVeil({ label = '放開以附加檔案' }: { label?: string }) {
   return (
     <div className="drop-veil" aria-hidden="true">
       <span className="drop-veil-box">
-        <ImageIcon />
+        <FileIcon />
         {label}
       </span>
     </div>
@@ -232,8 +235,8 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
   const peeked = items.find((it) => it.key === peek) ?? null
   const off = (key: string) => setPeek((k) => (k === key ? null : k))
   return (
-    <div className="attach-tray" role="list" aria-label="待送出的圖片">
-      {peeked ? (
+    <div className="attach-tray" role="list" aria-label="待送出的檔案">
+      {peeked?.isImage ? (
         <div className="attach-peek" aria-hidden="true">
           <img src={peeked.previewUrl} alt="" />
           <span className="attach-peek-cap">
@@ -251,7 +254,13 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
           onFocus={() => setPeek(it.key)}
           onBlur={() => off(it.key)}
         >
-          <img src={it.previewUrl} alt={it.name} />
+          {it.isImage ? (
+            <img src={it.previewUrl} alt={it.name} />
+          ) : (
+            <span className="attach-thumb-file" aria-hidden="true">
+              <FileIcon />
+            </span>
+          )}
           <span className="attach-thumb-name" title={`${it.name} · ${formatSize(it.size)}`}>
             {it.name}
           </span>
@@ -279,7 +288,6 @@ export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) =
       <input
         ref={ref}
         type="file"
-        accept="image/*"
         multiple
         hidden
         onChange={(e) => {
@@ -291,13 +299,29 @@ export function AttachPicker({ onFiles, disabled }: { onFiles: (files: File[]) =
         type="button"
         className="icon-btn attach-pick icon-tip"
         disabled={disabled}
-        aria-label="附加圖片"
-        data-tip="附加圖片 · 拖放 / 貼上"
+        aria-label="附加檔案"
+        data-tip="附加檔案 · 拖放 / 貼上"
         onClick={() => ref.current?.click()}
       >
-        <ImageIcon />
+        <FileIcon />
       </button>
     </>
+  )
+}
+
+/** A document glyph, for everything that is not an image. */
+export function FileIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
+      <path
+        d="M9.25 1.75H4.75a1.5 1.5 0 0 0-1.5 1.5v9.5a1.5 1.5 0 0 0 1.5 1.5h6.5a1.5 1.5 0 0 0 1.5-1.5V5.25z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M9.25 1.75v3.5h3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
   )
 }
 
@@ -355,22 +379,36 @@ export function MessageAttachments({ items }: { items: Attachment[] }) {
 }
 
 function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void }) {
-  const url = useStoredUrl(item.id)
+  const isImage = item.mime.startsWith('image/')
+  // 非圖片不去抓位元組：一個 CSV 的縮圖沒有意義，看的是檔名。
+  const url = useStoredUrl(isImage ? item.id : null)
   return (
     <button
       type="button"
-      className={`msg-attachment${url ? '' : ' loading'}`}
+      className={`msg-attachment${isImage ? '' : ' file'}${isImage && !url ? ' loading' : ''}`}
       title={`${item.name} · ${formatSize(item.size)}\n${item.path}`}
       onClick={onOpen}
     >
-      {url ? <img src={url} alt={item.name} /> : <span className="msg-attachment-fallback">…</span>}
+      {isImage ? (
+        url ? (
+          <img src={url} alt={item.name} />
+        ) : (
+          <span className="msg-attachment-fallback">…</span>
+        )
+      ) : (
+        <>
+          <FileIcon />
+          <span className="msg-attachment-name">{item.name}</span>
+        </>
+      )}
     </button>
   )
 }
 
-function useStoredUrl(id: string): string | null {
+function useStoredUrl(id: string | null): string | null {
   const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
+    if (!id) return
     let live = true
     storedUrl(id)
       .then((u) => {
@@ -387,7 +425,8 @@ function useStoredUrl(id: string): string | null {
 }
 
 function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) {
-  const url = useStoredUrl(item.id)
+  const isImage = item.mime.startsWith('image/')
+  const url = useStoredUrl(isImage ? item.id : null)
   const boxRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
@@ -412,7 +451,19 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
       onClick={onClose}
     >
       <div className="lightbox-inner" onClick={(e) => e.stopPropagation()}>
-        {url ? <img src={url} alt={item.name} /> : <div className="lightbox-loading">載入中…</div>}
+        {isImage ? (
+          url ? (
+            <img src={url} alt={item.name} />
+          ) : (
+            <div className="lightbox-loading">載入中…</div>
+          )
+        ) : (
+          <div className="lightbox-file">
+            <FileIcon />
+            <span className="lightbox-file-name">{item.name}</span>
+            <span className="lightbox-file-hint">agent 讀得到下面這個路徑；這裡只說它放在哪。</span>
+          </div>
+        )}
         <div className="lightbox-bar">
           <span className="lightbox-name" title={item.path}>
             {item.name} · {formatSize(item.size)}
