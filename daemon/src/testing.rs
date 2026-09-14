@@ -371,6 +371,14 @@ impl MockHerdr {
                                 {"workspaces": wss, "panes": panes,
                                  "tabs": tabs.iter().map(MockState::tab_json).collect::<Vec<_>>()}}})
                         }
+                        // Same enum as real herdr: an unknown source is a request error, not a read.
+                        "pane.read" if !matches!(params.get("source").and_then(Value::as_str),
+                            None | Some("visible" | "recent" | "recent_unwrapped" | "detection")) =>
+                        {
+                            json!({"id": id, "error": {"code": "invalid_request", "message": format!(
+                                "invalid request: unknown variant `{}`, expected one of `visible`, `recent`, `recent_unwrapped`, `detection`",
+                                params["source"].as_str().unwrap_or_default())}})
+                        }
                         "pane.read" if params.get("format").and_then(Value::as_str) == Some("ansi")
                             && st.reject_ansi.load(std::sync::atomic::Ordering::SeqCst) =>
                         {

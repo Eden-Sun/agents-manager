@@ -648,7 +648,7 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
     let Some(pane) = run.pane_id.clone() else { return false };
     let Ok(client) = client_for_run(app, &run).await else { return false };
-    let Ok(read) = client.pane_read(&pane, "recent-unwrapped", RESEND_SCAN_LINES).await else { return false };
+    let Ok(read) = client.pane_read(&pane, crate::lifecycle::delivery::SCAN_SOURCE, RESEND_SCAN_LINES).await else { return false };
     if !prompt_never_reached_screen(&bot.kind, &read.text, sent) {
         return false;
     }
