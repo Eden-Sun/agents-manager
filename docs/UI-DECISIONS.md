@@ -179,9 +179,9 @@ AGM 的重建排程原本只在整點檢查；使用者要它**集滿 5 個重�
 - **資料**：唯讀的 `GET /api/supervisor/approvals`，計數規則在 `web/src/lib/rebuildCount.ts`，
   與 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態 `pending`／`approved`，
   同一個 requester 對同一個 commit 算一筆。每 30 秒重讀一次（申請是人在動的）。
-- **已知的一個差**：腳本還會丟掉「上次真的上線之前建立」的申請（它讀得到 `daemon-update.built`
-  的 mtime），瀏覽器讀不到那個檔，所以沒被裁示掉的舊申請在 chip 上仍算一筆。daemon 哪天把
-  「上次上線時間」放進 `GET /api/supervisor`，這裡就跟著改。
+- **上次上線之前的申請不算**：時間取 `GET /api/supervisor` 的 `last_deploy.at`（daemon 960ba06 起，
+  SPEC §18.15），跟腳本讀 `daemon-update.built` mtime 是同一個意思。舊 daemon 沒有這個欄位就不濾
+  時間——寧可多算一筆，也不要把真的在等的申請藏起來。
 - **門檻**：腳本吃 `AGM_REBUILD_THRESHOLD`（預設 5）；daemon 沒有這個欄位，所以前端是常數 5
   （`web/src/api/rebuildRequests.ts`）。兩邊要一起改。
 
