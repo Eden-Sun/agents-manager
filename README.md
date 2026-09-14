@@ -173,7 +173,7 @@ bun install
 VITE_MOCK=1 bun run dev
 ```
 
-設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫）。`config.toml`、SQLite、`ui-token` 都在那裡，**不要**提交進 git。
+設定與資料在 `~/.config/agents-manager/`（可用 `AM_DATA_DIR` 覆寫；`--config` 指到別處時資料目錄會跟著設定檔走，同一個目錄只准一顆 daemon）。`config.toml`、SQLite、`ui-token` 都在那裡，**不要**提交進 git。
 
 ## 支援的 agent kind 與 hook
 

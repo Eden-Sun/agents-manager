@@ -60,6 +60,12 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor／mission 各自的 migration），不升級更舊的檔案；
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
+- **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
+  只擋**啟動時**那一次投影（`project_config_at_startup`）：啟動時 DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／開錯 DB。
+  daemon 跑起來後的重投（API／總管改完設定）不走閘門——那是這顆 daemon 自己剛寫進 config 的單筆改動，刪一個含多顆 bot 的專案是正常操作。
+  真的要在啟動時刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
+- **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
+- **同一資料目錄只准一顆 daemon**：啟動時對 `<資料目錄>/daemon.lock` 拿 `flock(LOCK_EX|LOCK_NB)`（拿到才寫自己的 pid 進去），拿不到就拒絕啟動、**不做任何寫入**（重啟時前一顆還在收攤，最多等 5 秒再判定失敗）；鎖綁在 fd 上，行程死掉自動放開（`startup.rs`）。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
   - 事件訂閱是長連線：**一條全域**（`pane.exited`、`pane.closed`、`workspace.closed`、`pane.agent_detected`）+ **每個 active Run 一條**
@@ -191,6 +197,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 [server]
 listen = "127.0.0.1:7788"
 herdr_session = "agents-manager"
+# data_dir = "/tmp/am-iso"          # 留空＝跟著這份設定檔所在的目錄；相對路徑也以它為準
 
 [supervisor]
 notify_interval_secs = 600
@@ -208,6 +215,8 @@ label = "foo"
 ```
 
 - 未知欄位用 `serde_ignored` 收集並 WARN 完整路徑，仍可載入。
+- **設定檔在哪，資料就在哪**：`--config` 指到非預設路徑時，SQLite／`ui-token`／spool 一律跟著設定檔的目錄（或 `[server] data_dir`），不得沿用 `~/.config/agents-manager`；`AM_DATA_DIR` 與它不一致就拒絕啟動（§3.1）。隔離測試請用
+  `agents-managerd serve --config /tmp/am-iso/config.toml`（要跑 hook 就再 `AM_DATA_DIR=/tmp/am-iso`，兩者必須一致），**不要**只換 `listen` port：2026-09-14 就是這樣開到正式 DB，被空 config 投影軟刪了 15 顆 bot。
 - 寫回：serde 全量序列化（註解不保留），暫存檔 + 原子 rename，單一 mutex；mtime 與上次讀取不符時在同一把 mutex 內重讀再套用。內容沒變就不碰檔案。
 - 改 `listen` port 需重啟 daemon，既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）。
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
@@ -233,7 +242,9 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。
 
 ### 6.1 daemon 啟動
-1. 載入 config、補寫缺少的 id、TOML→SQLite 投影。
+0. 決定資料目錄（§3.1：`data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > 預設）、對它拿 `daemon.lock`；
+   `AM_DATA_DIR` 不一致或鎖被別人佔著就**在開 DB 之前**結束，不寫任何一列。
+1. 載入 config、補寫缺少的 id、TOML→SQLite 投影（大量軟刪會被擋下，見 §3.1）。
 2. 確保 herdr session 在跑、`ping`。
 3. 對帳（§6.5）。
 4. 建全域事件連線與各 active Run 的狀態連線。

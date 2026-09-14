@@ -624,8 +624,12 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - WS 沒有新事件：各 bot 各自推 `message_added`（帶 `group_id`）與 `turn_updated`，前端依 `bot_id → project_id` 歸群組。
 
 ### 11.3 第二個 daemon 實例
-`agents-managerd serve` 讀 `AM_DATA_DIR` 覆蓋資料目錄（預設 `~/.config/agents-manager`；`hook` 子命令同）。驗證用：
-`AM_DATA_DIR=/tmp/am-x agents-managerd serve --config /tmp/am-x/config.toml`（另一個 `listen` port 與 `herdr_session`）。
+資料目錄＝`[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`（`hook` 子命令讀 `AM_DATA_DIR`）。
+驗證用：`AM_DATA_DIR=/tmp/am-x agents-managerd serve --config /tmp/am-x/config.toml`（另一個 `listen` port 與 `herdr_session`）。
+
+- `--config` 指到非預設路徑時資料目錄**一定**跟著設定檔走，不會沿用預設目錄；`AM_DATA_DIR` 與它不一致 → 拒絕啟動。
+- 同一個資料目錄同時只准一顆 daemon（`daemon.lock` 的 `flock`），拿不到鎖就拒絕啟動，不寫任何一列。
+- 只換 `listen` port **不算隔離**：2026-09-14 這樣起的第二顆開到正式 DB，被空 config 投影軟刪 15 顆 bot（SPEC §3.1）。
 
 ## WS `turn_progress`（即時輸出）
 

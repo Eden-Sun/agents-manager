@@ -42,6 +42,7 @@ mod reconcile;
 mod state;
 mod supervisor;
 mod supervisor_evidence;
+mod startup;
 mod statusline_cmd;
 #[cfg(test)]
 mod testing;
@@ -124,17 +125,6 @@ fn main() {
     }
 }
 
-/// `AM_DATA_DIR` is for a second daemon instance; `hook_cmd.rs` honours it for its spool too.
-fn data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("AM_DATA_DIR") {
-        let d = PathBuf::from(d);
-        if !d.as_os_str().is_empty() {
-            return d;
-        }
-    }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/agents-manager")
-}
-
 fn load_or_create_ui_token(dir: &PathBuf) -> Result<String> {
     let path = dir.join("ui-token");
     if let Ok(s) = std::fs::read_to_string(&path) {
@@ -162,15 +152,19 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         .with_target(false)
         .init();
 
-    let dir = data_dir();
-    std::fs::create_dir_all(&dir)?;
-    let cfg_path = config_path.unwrap_or_else(|| dir.join("config.toml"));
+    // 資料目錄跟著設定檔走，而且開 DB 前先拿鎖：只換 --config 與 port 的「隔離測試」曾經打到正式 DB（startup.rs）。
+    let env_dir = startup::env_dir();
+    let config_given = config_path.is_some();
+    let cfg_path = startup::config_path(config_path, env_dir.clone());
     let store = config::ConfigStore::load(cfg_path.clone()).await?;
     let cfg = store.get().await;
-    tracing::info!(config = %cfg_path.display(), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
+    let dir = startup::data_dir(&cfg_path, config_given, cfg.server.data_dir.as_deref(), env_dir)?;
+    std::fs::create_dir_all(&dir)?;
+    let _dir_lock = startup::lock_dir(&dir, startup::LOCK_WAIT)?;
+    tracing::info!(config = %cfg_path.display(), data_dir = %dir.display(), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
 
     let pool = db::open(&dir.join("agents-manager.sqlite3")).await?;
-    projection::project_config(&store, &pool).await.context("project config into sqlite")?;
+    projection::project_config_at_startup(&store, &pool).await.context("project config into sqlite")?;
 
     let herdr_client = state::ensure_session(&cfg.server.herdr_session, &dir).await?;
     let pong = herdr_client.ping().await?;
