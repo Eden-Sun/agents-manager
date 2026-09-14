@@ -47,16 +47,20 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
 }
 
 
-/// What the composer holds right now.
+/// What the composer holds right now. `NonEmpty` and `Unready` are deliberately separate: one is
+/// someone else's text (a draft the user is typing — never touch it), the other is "the screen
+/// does not say" (sol review 2026-09-14 #2 — the old single `Other` sent `ctrl+c` at both).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoxState {
     /// The bare marker row: nothing typed (a Tip/spinner line elsewhere does not count).
     Empty,
-    /// Our text is in there (matched on its head **or** its tail, so wrapping and a long
-    /// multi-line paste whose first line scrolled out of the box still count).
+    /// Our text is in there (matched on its head, its tail, or a fragment of it, so wrapping and a
+    /// long multi-line paste whose first line scrolled out of the box still count).
     Holds,
-    /// Something else is in there, or the screen does not say — never type into this.
-    Other,
+    /// Text that is not ours: a draft someone typed in the terminal.
+    NonEmpty,
+    /// No readable composer on this screen.
+    Unready,
 }
 
 /// Chars of the prompt used as a needle, at each end. Long enough not to match everything,
@@ -83,18 +87,38 @@ pub(crate) fn needles(text: &str) -> Option<(String, String)> {
     Some((head, tail))
 }
 
-/// How many times the prompt shows on this screen. Counted on the whitespace-squashed screen so
-/// wrapped Chinese and re-indented rows still match; the head is counted, falling back to the
-/// tail (a very long paste can have its head scrolled away while its tail is on screen).
-pub(crate) fn screen_hits(screen: &str, text: &str) -> usize {
-    let Some((head, tail)) = needles(text) else { return 0 };
-    let flat = squash_ws(screen);
-    let n = flat.matches(head.as_str()).count();
-    if n > 0 {
-        n
-    } else {
-        flat.matches(tail.as_str()).count()
+/// How many times **the agent has echoed this prompt back** above the composer.
+///
+/// Only rows the TUI draws for a submitted user message count (claude / grok write the prompt
+/// marker at the start of the row). Spinner rows, the status line, the token counter and the
+/// composer itself are all excluded, so a redraw can never look like a delivery — sol review
+/// 2026-09-14 #1, where a short prompt was called delivered because the screen merely changed.
+pub(crate) fn echo_hits(kind: &str, screen: &str, text: &str) -> usize {
+    let Some(marker) = prompt_echo_prefix(kind).map(str::trim_end) else { return 0 };
+    let first_line = squash_ws(text.lines().find(|l| !l.trim().is_empty()).unwrap_or(""));
+    if first_line.is_empty() {
+        return 0;
     }
+    let lines: Vec<&str> = screen.lines().collect();
+    // Everything below the composer's marker row belongs to the box and the chrome under it.
+    let cut = lines.len().saturating_sub(COMPOSER_TAIL);
+    let box_row = lines[cut..].iter().rposition(|l| composer_marker_row(l, marker)).map(|i| cut + i);
+    let above = &lines[..box_row.unwrap_or(lines.len())];
+    above
+        .iter()
+        .filter(|l| {
+            let row = l.trim();
+            let Some(rest) = row.strip_prefix(marker) else { return false };
+            let body = squash_ws(rest);
+            !body.is_empty() && (body == first_line || first_line.starts_with(&body) || body.starts_with(&first_line))
+        })
+        .count()
+}
+
+/// Is this row the composer's own marker row (with or without text after it)?
+fn composer_marker_row(line: &str, marker: &str) -> bool {
+    let t = line.trim().trim_start_matches('│').trim();
+    t.starts_with(marker)
 }
 
 /// Pure: what is in the composer on this screen.
@@ -102,7 +126,7 @@ pub(crate) fn box_state(kind: &str, screen: &str, text: &str) -> BoxState {
     let box_text = composer_text(kind, screen);
     match box_text {
         None if pane_awaits_input(kind, screen) => BoxState::Empty,
-        None => BoxState::Other,
+        None => BoxState::Unready,
         Some(inside) => {
             let flat = squash_ws(&inside);
             let whole = squash_ws(text);
@@ -115,7 +139,7 @@ pub(crate) fn box_state(kind: &str, screen: &str, text: &str) -> BoxState {
             match needles(text) {
                 _ if fragment => BoxState::Holds,
                 Some((head, tail)) if flat.contains(&head) || flat.contains(&tail) => BoxState::Holds,
-                _ => BoxState::Other,
+                _ => BoxState::NonEmpty,
             }
         }
     }
@@ -140,23 +164,15 @@ const DELIVER_SCAN_LINES: u32 = 400;
 
 /// Decide the outcome from the two screens around Enter. Pure, so every case is a test:
 /// `before_enter` is the screen with our text in the box, `after` the one after Enter.
-pub(crate) fn submit_outcome(kind: &str, hits_before: usize, before_enter: &str, after: &str, text: &str) -> Delivered {
+pub(crate) fn submit_outcome(kind: &str, echoes_before: usize, after: &str, text: &str) -> Delivered {
     match box_state(kind, after, text) {
         BoxState::Holds => Delivered::Unknown("still_in_box"),
-        BoxState::Other => Delivered::Unknown("composer_unreadable"),
-        BoxState::Empty => {
-            // The box held our text and is now empty: the Enter was taken. Confirm the screen
-            // gained an occurrence, so a TUI that silently threw the text away is not counted.
-            if screen_hits(after, text) > hits_before {
-                Delivered::Submitted
-            } else if needles(text).is_none() && after != before_enter {
-                // Too short to count occurrences; the box emptying plus a changed screen is all
-                // the evidence there is.
-                Delivered::Submitted
-            } else {
-                Delivered::Unknown("no_new_echo")
-            }
-        }
+        BoxState::NonEmpty => Delivered::Unknown("composer_busy"),
+        BoxState::Unready => Delivered::Unknown("composer_unreadable"),
+        // The box held our text and is now empty. That alone is not proof — the TUI can throw the
+        // text away — so the agent must also have echoed it back one more time than before.
+        BoxState::Empty if echo_hits(kind, after, text) > echoes_before => Delivered::Submitted,
+        BoxState::Empty => Delivered::Unknown("no_new_echo"),
     }
 }
 
@@ -173,15 +189,18 @@ async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
 ///
 /// `agent.prompt` (herdr types with bracketed paste and refuses at a dialog with `agent_blocked`)
 /// is still the normal path — but only for a run whose pane the daemon has **not** typed into and
-/// whose agent has a session bound. Everything else types into the pane and watches the screen:
+/// whose agent herdr has a session bound to. Everything else types into the pane and watches:
 ///
-/// 1. the box must start empty (residue is cleared once with `ctrl+c`, then re-checked);
-/// 2. after `pane.send_text` our text must be **in the box** — if nothing landed at all it is
-///    typed once more, and only then; anything unreadable stops here;
-/// 3. after Enter the box must be empty **and** the screen must have gained the text.
+/// 1. the box must already be **empty**. Someone else's draft is never cleared and never typed
+///    over (`composer_busy`); our own leftover text is submitted rather than typed again.
+/// 2. after `pane.send_text` our text must be in the box. Only when the box is provably empty and
+///    the agent has echoed nothing new is it typed a second time; nothing else is ever re-typed.
+/// 3. after Enter the box must be empty **and** the agent must have echoed the prompt once more
+///    than before ([`echo_hits`], which ignores spinner and status rows).
 ///
-/// Every read failure is an error, never an empty screen (sol review #2). Anything unproven comes
-/// back as `Unknown`, which the caller parks — it must never look like a delivery.
+/// Every read failure is an error, never an empty screen. Everything unproven is `Unknown`, which
+/// the caller parks: it must never look like a delivery. Fail closed — when the daemon cannot tell
+/// whether this pane needs typing, it types (or gives up), it does not fall back to `agent.prompt`.
 pub(crate) async fn deliver_prompt(
     app: &Arc<App>,
     client: &HerdrClient,
@@ -192,67 +211,92 @@ pub(crate) async fn deliver_prompt(
 ) -> anyhow::Result<Delivered> {
     let pane = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
     let target = db::run_target(run, bot);
-    let must_type = force_pane || db::pane_typed(&app.db, &run.id).await || !agent_prompt_usable(client, &target).await;
+    // Unreadable marker → assume the pane needs typing (sol review #3: a read error used to read
+    // as "no, use agent.prompt", which is the path known to swallow prompts).
+    let marked = match db::pane_typed(&app.db, &run.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = %e, "could not read runs.pane_typed; assuming this pane needs typing");
+            true
+        }
+    };
+    let must_type = force_pane || marked || !agent_prompt_usable(client, &target).await;
     let Some(pane) = pane.filter(|_| must_type) else {
+        if must_type {
+            // No pane to type into and the agent cannot be trusted to deliver: say so.
+            return Ok(Delivered::Unknown("no_pane_to_type_into"));
+        }
         client
             .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
             .await?;
         return Ok(Delivered::Submitted);
     };
-    // Typing into the pane is itself a reason to keep typing into it from now on.
-    let _ = db::set_pane_typed(&app.db, &run.id).await;
+    // Typing into the pane is itself a reason to keep typing into it from now on. A write failure
+    // only costs the next prompt one `agent.get`, so it is logged, not fatal.
+    if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
+        tracing::warn!(run = %run.id, error = %e, "could not record runs.pane_typed");
+    }
     let read = || async { client.pane_read(&pane, "recent-unwrapped", DELIVER_SCAN_LINES).await.map(|r| r.text) };
 
-    // 1. Start from an empty box.
+    // 1. The box has to be ours to use.
     let before = read().await?;
-    let hits_before = screen_hits(&before, text);
-    if box_state(&bot.kind, &before, text) != BoxState::Empty {
-        tracing::warn!(run = %run.id, bot = %bot.name, "composer was not empty before typing; clearing it");
-        client.pane_send_keys(&pane, &["ctrl+c"]).await?;
-        tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
-        if box_state(&bot.kind, &read().await?, text) != BoxState::Empty {
-            return Ok(Delivered::Unknown("composer_not_empty"));
+    let echoes_before = echo_hits(&bot.kind, &before, text);
+    let mut typed = match box_state(&bot.kind, &before, text) {
+        BoxState::Empty => {
+            // 2. Type, and see it in the box.
+            client.pane_send_text(&pane, text).await?;
+            tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+            let seen = read().await?;
+            if box_state(&bot.kind, &seen, text) == BoxState::Empty
+                && echo_hits(&bot.kind, &seen, text) == echoes_before
+            {
+                // Nothing landed anywhere: the box is provably empty, so typing again cannot
+                // duplicate anything.
+                tracing::warn!(run = %run.id, bot = %bot.name, "typed prompt did not reach the composer; typing it once more");
+                client.pane_send_text(&pane, text).await?;
+                tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+                read().await?
+            } else {
+                seen
+            }
         }
-    }
-
-    // 2. Type, and see it in the box.
-    client.pane_send_text(&pane, text).await?;
-    tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
-    let mut typed = read().await?;
-    if box_state(&bot.kind, &typed, text) == BoxState::Empty && screen_hits(&typed, text) == hits_before {
-        // Nothing landed anywhere: the box is provably empty, so re-typing cannot duplicate.
-        tracing::warn!(run = %run.id, bot = %bot.name, "typed prompt did not reach the composer; typing it once more");
-        client.pane_send_text(&pane, text).await?;
-        tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
-        typed = read().await?;
-    }
+        // Our own text from an earlier attempt: submit that, never type it twice.
+        BoxState::Holds => {
+            tracing::info!(run = %run.id, bot = %bot.name, "the prompt is already in the composer; submitting it instead of typing again");
+            before
+        }
+        // A draft someone is typing in the terminal. Not ours to clear, not ours to type over.
+        BoxState::NonEmpty => return Ok(Delivered::Unknown("composer_busy")),
+        BoxState::Unready => return Ok(Delivered::Unknown("composer_unreadable")),
+    };
     match box_state(&bot.kind, &typed, text) {
         BoxState::Holds => {}
-        BoxState::Empty if screen_hits(&typed, text) > hits_before => {
+        BoxState::Empty if echo_hits(&bot.kind, &typed, text) > echoes_before => {
             // The TUI submitted it as it was pasted (bracketed paste with a trailing newline).
             tracing::info!(run = %run.id, bot = %bot.name, "the pasted prompt was submitted without an Enter");
             return Ok(Delivered::Submitted);
         }
         BoxState::Empty => return Ok(Delivered::Unknown("nothing_typed")),
-        BoxState::Other => return Ok(Delivered::Unknown("composer_has_other_text")),
+        BoxState::NonEmpty => return Ok(Delivered::Unknown("composer_busy")),
+        BoxState::Unready => return Ok(Delivered::Unknown("composer_unreadable")),
     }
 
-    // 3. Enter, and see it leave the box for the transcript.
+    // 3. Enter, and see the agent echo it back.
     client.pane_send_keys(&pane, &["Enter"]).await?;
     tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
-    let after = read().await?;
-    let outcome = match submit_outcome(&bot.kind, hits_before, &typed, &after, text) {
+    typed = read().await?;
+    let outcome = match submit_outcome(&bot.kind, echoes_before, &typed, text) {
         Delivered::Unknown("still_in_box") => {
-            // One more Enter, and it is checked too (sol review #2: the second Enter was blind).
+            // One more Enter, and it is checked too (the second Enter used to be blind).
             tracing::warn!(run = %run.id, bot = %bot.name, "prompt still in the composer after Enter; pressing Enter again");
             client.pane_send_keys(&pane, &["Enter"]).await?;
             tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
-            submit_outcome(&bot.kind, hits_before, &after, &read().await?, text)
+            submit_outcome(&bot.kind, echoes_before, &read().await?, text)
         }
         other => other,
     };
     match outcome {
-        Delivered::Submitted => tracing::info!(run = %run.id, bot = %bot.name, "prompt typed into the pane and seen submitted"),
+        Delivered::Submitted => tracing::info!(run = %run.id, bot = %bot.name, "prompt typed into the pane and seen echoed back"),
         Delivered::Unknown(why) => tracing::warn!(run = %run.id, bot = %bot.name, reason = why, "could not confirm the prompt was submitted"),
     }
     Ok(outcome)
@@ -665,7 +709,7 @@ mod prompt_tests {
 mod delivery_tests {
     use super::*;
 
-    /// 真實畫面骨架（2026-09-14 w1HJ:pM 那類 claude）：對話區 + Tip/spinner 行 + 空輸入框 + 狀態列。
+    /// 真實畫面骨架（2026-09-14 w1HJ:pM 那類 claude）：對話區 + spinner 行 + 輸入框 + 狀態列。
     fn screen(transcript: &str, box_rows: &[&str]) -> String {
         let mut s = String::new();
         s.push_str(transcript);
@@ -689,78 +733,79 @@ mod delivery_tests {
     const HISTORY: &str = "❯ 加一個功能除了按 SKU 之外，也要能用品名批次置換\n⏺ 好，我看一下。\n";
 
     #[test]
-    fn an_empty_box_a_full_box_and_someone_elses_text_are_told_apart() {
+    fn an_empty_box_our_text_someone_elses_draft_and_an_unreadable_screen_are_four_things() {
         assert_eq!(box_state("claude", &screen("⏺ 先前的回覆\n", &[]), TEXT), BoxState::Empty);
         assert_eq!(box_state("claude", &screen("⏺ 先前的回覆\n", &[TEXT]), TEXT), BoxState::Holds);
-        assert_eq!(box_state("claude", &screen("⏺ 先前的回覆\n", &["/effort high"]), TEXT), BoxState::Other);
+        // 使用者自己在終端打到一半的字：不是我們的，不能清也不能蓋。
+        assert_eq!(box_state("claude", &screen("⏺ 先前的回覆\n", &["我自己在打的草稿"]), TEXT), BoxState::NonEmpty);
+        // 完全沒有輸入框可讀（畫面被別的東西佔滿）。
+        assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n", TEXT), BoxState::Unready);
     }
 
-    /// 中文折行、多行貼上：開頭在第一列、結尾在最後一列，兩邊都認得。
     #[test]
     fn a_wrapped_multi_line_chinese_paste_is_still_seen_in_the_box() {
         let wrapped = screen("⏺ 先前的回覆\n", &["加一個功能除了按 SKU 之外，", "也要能用品名批次置換"]);
         assert_eq!(box_state("claude", &wrapped, TEXT), BoxState::Holds);
-        // 長訊息的開頭被捲出框、只剩尾巴看得到，也算（長度要超過 needle，否則頭尾是同一段）。
         let long = "先把離線報價匯入的效能問題整理成一份報告，接著加一個功能：除了按 SKU 之外，也要能用品名批次置換";
         let tail_only = screen("⏺ 先前的回覆\n", &["也要能用品名批次置換"]);
         assert_eq!(box_state("claude", &tail_only, long), BoxState::Holds);
     }
 
-    /// 送前→框內→送出：三張畫面的轉換就是唯一的成功條件。
+    /// 只有「agent 把這句回音在對話區多印了一次」才算送出。
     #[test]
-    fn the_before_in_box_after_transition_is_what_counts_as_submitted() {
+    fn only_a_new_echo_above_the_box_counts_as_submitted() {
         let before = screen("⏺ 先前的回覆\n", &[]);
-        let in_box = screen("⏺ 先前的回覆\n", &[TEXT]);
         let after = screen(&format!("⏺ 先前的回覆\n❯ {TEXT}\n"), &[]);
-        let hits_before = screen_hits(&before, TEXT);
-        assert_eq!(hits_before, 0);
-        assert_eq!(submit_outcome("claude", hits_before, &in_box, &after, TEXT), Delivered::Submitted);
+        assert_eq!(echo_hits("claude", &before, TEXT), 0);
+        assert_eq!(echo_hits("claude", &after, TEXT), 1);
+        assert_eq!(submit_outcome("claude", 0, &after, TEXT), Delivered::Submitted);
+        assert_eq!(submit_outcome("claude", 0, &before, TEXT), Delivered::Unknown("no_new_echo"));
     }
 
-    /// 對話裡早就有同樣一句（使用者重送）：只有「又多一次」才算送出。
+    /// 對話裡早就有同一句：只有再多一次才算這一次送出的。
     #[test]
     fn an_identical_prompt_already_in_the_history_is_not_mistaken_for_this_one() {
         let before = screen(HISTORY, &[]);
-        let in_box = screen(HISTORY, &[TEXT]);
-        let hits_before = screen_hits(&before, TEXT);
-        assert_eq!(hits_before, 1, "舊的那一句本來就在畫面上");
-        // 框空了但畫面沒有新增一次：證明不了，回 Unknown。
-        assert_eq!(
-            submit_outcome("claude", hits_before, &in_box, &before, TEXT),
-            Delivered::Unknown("no_new_echo"),
-        );
+        let echoes_before = echo_hits("claude", &before, TEXT);
+        assert_eq!(echoes_before, 1, "舊的那一句本來就在畫面上");
+        assert_eq!(submit_outcome("claude", echoes_before, &before, TEXT), Delivered::Unknown("no_new_echo"));
         let after = screen(&format!("{HISTORY}❯ {TEXT}\n"), &[]);
-        assert_eq!(submit_outcome("claude", hits_before, &in_box, &after, TEXT), Delivered::Submitted);
+        assert_eq!(submit_outcome("claude", echoes_before, &after, TEXT), Delivered::Submitted);
     }
 
-    /// Enter 之後字還在框裡、或框變成別人的字：都不算送出。
     #[test]
     fn text_left_in_the_box_or_replaced_is_never_counted_as_submitted() {
-        let before = screen("⏺ 先前的回覆\n", &[]);
         let in_box = screen("⏺ 先前的回覆\n", &[TEXT]);
-        assert_eq!(submit_outcome("claude", 0, &in_box, &in_box, TEXT), Delivered::Unknown("still_in_box"));
-        let other = screen("⏺ 先前的回覆\n", &["/effort high"]);
-        assert_eq!(submit_outcome("claude", 0, &in_box, &other, TEXT), Delivered::Unknown("composer_unreadable"));
-        assert_eq!(submit_outcome("claude", 0, &in_box, &before, TEXT), Delivered::Unknown("no_new_echo"));
+        assert_eq!(submit_outcome("claude", 0, &in_box, TEXT), Delivered::Unknown("still_in_box"));
+        let draft = screen("⏺ 先前的回覆\n", &["我自己在打的草稿"]);
+        assert_eq!(submit_outcome("claude", 0, &draft, TEXT), Delivered::Unknown("composer_busy"));
+        assert_eq!(submit_outcome("claude", 0, "Select login method:\n 1. …\n", TEXT), Delivered::Unknown("composer_unreadable"));
     }
 
-    /// Tip／spinner 行不會被當成輸入框裡的字。
+    /// spinner／計時／狀態列刷新都不是證據：畫面變了但沒有新回音 → 不算送出（sol review 二輪 #1）。
     #[test]
-    fn a_tip_or_spinner_row_is_not_composer_text() {
-        let spinner = screen("⏺ 先前的回覆\n✻ Crunching… (12s · esc to interrupt)\n", &[]);
-        assert_eq!(box_state("claude", &spinner, TEXT), BoxState::Empty);
-        assert_eq!(submit_outcome("claude", 0, &spinner, &spinner, TEXT), Delivered::Unknown("no_new_echo"));
-    }
-
-    /// 太短的 prompt 沒有可信的 needle：靠「框空了而且畫面變了」，畫面沒變就不算。
-    #[test]
-    fn a_prompt_too_short_to_count_needs_the_screen_to_change() {
+    fn a_redrawn_spinner_or_status_line_is_not_evidence_of_delivery() {
+        let before = screen("⏺ 先前的回覆\n✻ Crunching… (3s · esc to interrupt)\n", &[]);
+        let redrawn = screen("⏺ 先前的回覆\n✻ Crunching… (9s · esc to interrupt)\n", &[])
+            .replace("5h:53%", "5h:52%");
+        assert_ne!(before, redrawn, "畫面確實不一樣了");
+        assert_eq!(submit_outcome("claude", 0, &redrawn, TEXT), Delivered::Unknown("no_new_echo"));
+        // 短到沒有可信 needle 的 prompt 也一樣，不能因為畫面變了就當送出。
         let short = "go";
         assert!(needles(short).is_none());
-        let in_box = screen("⏺ 先前的回覆\n", &[short]);
-        let after = screen("⏺ 先前的回覆\n❯ go\n⏺ 好\n", &[]);
-        assert_eq!(submit_outcome("claude", 0, &in_box, &after, short), Delivered::Submitted);
-        let unchanged = screen("⏺ 先前的回覆\n", &[]);
-        assert_eq!(submit_outcome("claude", 0, &unchanged, &unchanged, short), Delivered::Unknown("no_new_echo"));
+        assert_eq!(submit_outcome("claude", 0, &redrawn, short), Delivered::Unknown("no_new_echo"));
+        // 短 prompt 的證據就是它自己的回音行。
+        let echoed = screen("⏺ 先前的回覆\n❯ go\n⏺ 好\n", &[]);
+        assert_eq!(echo_hits("claude", &echoed, short), 1);
+        assert_eq!(submit_outcome("claude", 0, &echoed, short), Delivered::Submitted);
+    }
+
+    /// 回音只認對話區：輸入框裡的同一句、spinner 行裡出現的字都不算。
+    #[test]
+    fn echoes_are_counted_above_the_box_only() {
+        let in_box = screen("⏺ 先前的回覆\n", &[TEXT]);
+        assert_eq!(echo_hits("claude", &in_box, TEXT), 0, "還在框裡不是回音");
+        let both = screen(&format!("⏺ 先前的回覆\n❯ {TEXT}\n"), &[TEXT]);
+        assert_eq!(echo_hits("claude", &both, TEXT), 1, "只算框上面那一次");
     }
 }

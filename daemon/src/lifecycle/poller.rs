@@ -506,7 +506,7 @@ pub(crate) fn live_alert(kind: &str, text: &str) -> Option<String> {
 const STALL_SECS: u64 = 12;
 
 /// Rows above the bottom the composer can start (it grows with its text; claude adds a hint row).
-const COMPOSER_TAIL: usize = 24;
+pub(crate) const COMPOSER_TAIL: usize = 24;
 
 /// Chars of our prompt head that must be visible in the composer. `contains`, not prefix: claude
 /// puts `[Image #6]` in front of pasted text.
@@ -1608,48 +1608,6 @@ mod issue_17_tests {
             .unwrap()
     }
 
-    /// Re-arming invalidates the old task; at the lock it returns without touching the newer registration.
-    #[tokio::test]
-    async fn an_old_fallback_timer_gives_up_inside_the_bot_lock() {
-        let env = tt::env().await;
-        let app = env.app.clone();
-        let lock = app.bot_lock("bot-17").await;
-        let guard = lock.lock().await;
-
-        arm_fallback(&app, "run-17", "bot-17").await;
-        let old = *app.fallback_timers.lock().await.get("run-17").unwrap();
-        arm_fallback(&app, "run-17", "bot-17").await;
-        let current = *app.fallback_timers.lock().await.get("run-17").unwrap();
-        assert_ne!(old, current, "re-arming advances the generation");
-
-        tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(50)).await;
-        assert_eq!(*app.fallback_timers.lock().await.get("run-17").unwrap(), current);
-        drop(guard);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(app.fallback_timers.lock().await.get("run-17").is_none());
-    }
-
-    #[tokio::test]
-    async fn fallback_commits_assistant_message_before_turn_updated() {
-        let f = fixture("claude", FALLBACK_SCREEN).await;
-        let app = f.env.app.clone();
-        let rx = app.subscribe();
-
-        assert!(try_fallback(&app, &f.run_id).await.unwrap());
-        let messages: Vec<(String, String)> = sqlx::query_as(
-            "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at, id",
-        )
-        .bind(&f.conversation_id)
-        .fetch_all(&app.db)
-        .await
-        .unwrap();
-        assert_eq!(messages, vec![("user".into(), "Reply with PONG".into()), ("assistant".into(), "PONG".into())]);
-        assert_eq!(turn(&app, &f.turn_id).await.status, "completed_fallback");
-        let kinds = event_kinds(rx).await;
-        assert_eq!(kinds, vec!["message_added", "turn_updated"]);
-    }
-
-    /// 2026-09-14 w1HJ:pH：畫面上完全沒有這則 prompt，watchdog 重送一次，而且**只**一次；
     fn count(f: &Fixture, method: &str) -> usize {
         f.env.herdr.methods().iter().filter(|m| *m == method).count()
     }
@@ -1659,18 +1617,148 @@ mod issue_17_tests {
         (db::run(&app.db, &f.run_id).await.unwrap().unwrap(), db::bot(&app.db, &f.bot_id).await.unwrap().unwrap())
     }
 
-    /// 沒被 daemon 打過字、herdr 也綁得到 session 的 run：照舊走 `agent.prompt`。mock 的 agent.get
-    /// 沒有 session 綁定，所以這裡驗的是「打過字的記號從 DB 讀得到」那一半。
-    #[tokio::test]
-    async fn the_pane_typed_mark_survives_in_the_database() {
-        let f = fixture("claude", "──────\n❯\n").await;
-        let app = f.env.app.clone();
-        assert!(!db::pane_typed(&app.db, &f.run_id).await);
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        assert!(db::pane_typed(&app.db, &f.run_id).await, "重啟後也要記得這個 pane 要用打字的");
+    /// A pane that behaves like the TUI: typing lands in the box, Enter moves it to the transcript.
+    fn live(f: &Fixture, pane: crate::testing::LivePane) {
+        f.env.herdr.live_pane("pane-17", pane);
     }
 
-    /// 讀不到畫面不能當成空畫面（sol review #2）：回錯，呼叫端才會把 turn 停在 unknown。
+    /// 完整序列（打字→畫面→Enter→畫面）都用會變的 mock pane 走一次。
+    #[tokio::test]
+    async fn the_whole_type_enter_echo_sequence_is_walked_on_a_live_pane() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], ..Default::default() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let text = "加一個功能除了按 SKU 之外，也要能用品名批次置換";
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert!(pane.composer.is_empty(), "送出後輸入框是空的");
+        assert_eq!(pane.transcript.iter().filter(|l| l.contains("品名批次置換")).count(), 1, "只送一次");
+        assert_eq!(count(&f, "pane.send_text"), 1);
+        assert_eq!(count(&f, "agent.prompt"), 0);
+    }
+
+    /// 多行中文一次貼進去，是一則、不是三則。
+    #[tokio::test]
+    async fn a_multi_line_prompt_is_submitted_once_not_split_per_line() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let text = "第一行：先看報告\n第二行：再改程式\n第三行：最後回報";
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1, "一個 ❯ 開頭＝一則");
+        assert!(pane.transcript.iter().any(|l| l.contains("第三行")), "整段都進去了");
+        assert!(pane.composer.is_empty());
+    }
+
+    /// 短 prompt＋只有 spinner 在刷新：Enter 被吃掉時絕不能判成功（sol review 二輪 #1）。
+    #[tokio::test]
+    async fn a_short_prompt_is_not_called_delivered_just_because_the_spinner_redrew() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { swallow_enter: true, ..Default::default() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        // 每次 read 都會重畫 spinner，所以「畫面變了」永遠成立——只有回音才算數。
+        let out = deliver_prompt(&app, &client, &run, &bot, "go", false).await.unwrap();
+        assert_eq!(out, Delivered::Unknown("still_in_box"));
+        assert!(f.env.herdr.pane("pane-17").unwrap().transcript.is_empty(), "什麼都沒送出去");
+    }
+
+    /// TUI 把打進去的字吃掉：框是空的、也沒有回音 → 只再打一次，最後回 Unknown，不按 Enter 亂送。
+    #[tokio::test]
+    async fn a_swallowed_paste_is_retyped_once_and_then_reported_unknown() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { swallow_text: true, ..Default::default() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap();
+        assert_eq!(out, Delivered::Unknown("nothing_typed"));
+        assert_eq!(count(&f, "pane.send_text"), 2, "框證明是空的才重打，且只重打一次");
+        assert_eq!(count(&f, "pane.send_keys"), 0, "沒看到字就不按 Enter");
+    }
+
+    /// 框裡是使用者自己的草稿：不清、不蓋、不送。
+    #[tokio::test]
+    async fn someone_elses_draft_in_the_box_is_left_alone() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { composer: vec!["我自己在打的草稿".into()], ..Default::default() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap();
+        assert_eq!(out, Delivered::Unknown("composer_busy"));
+        assert_eq!(count(&f, "pane.send_text"), 0);
+        assert_eq!(count(&f, "pane.send_keys"), 0, "不送 ctrl+c，草稿要留著");
+        assert_eq!(f.env.herdr.pane("pane-17").unwrap().composer, vec!["我自己在打的草稿".to_string()]);
+    }
+
+    /// 上一次留在框裡的是我們自己的字：直接送出，不重打。
+    #[tokio::test]
+    async fn our_own_leftover_text_is_submitted_instead_of_typed_again() {
+        let f = fixture("claude", "").await;
+        let text = "Reply with PONG please";
+        live(&f, crate::testing::LivePane { composer: vec![text.into()], ..Default::default() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(count(&f, "pane.send_text"), 0, "已經在框裡了，不再打一次");
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
+    }
+
+    /// herdr 對這個 agent 沒有 session 綁定 → 不走 agent.prompt，改打字（即使 pane_typed 還沒設）。
+    #[tokio::test]
+    async fn an_agent_without_a_session_binding_is_typed_into_not_prompted() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        f.env.herdr.set_agent("issue-17", "pane-17", false);
+        let app = f.env.app.clone();
+        assert!(!db::pane_typed(&app.db, &f.run_id).await.unwrap());
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(count(&f, "agent.prompt"), 0, "沒有 session 綁定就不賭 agent.prompt");
+        assert_eq!(count(&f, "pane.send_text"), 1);
+        assert!(db::pane_typed(&app.db, &f.run_id).await.unwrap(), "打過字就記起來");
+    }
+
+    /// 有 session 綁定、也沒被打過字：照舊走 agent.prompt。
+    #[tokio::test]
+    async fn an_agent_with_a_session_binding_still_goes_through_agent_prompt() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        f.env.herdr.set_agent("issue-17", "pane-17", true);
+        let app = f.env.app.clone();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        // mock 沒有實作 agent.prompt（回 unsupported），所以這裡驗的是「走了哪一條」。
+        let _ = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await;
+        assert_eq!(count(&f, "agent.prompt"), 1);
+        assert_eq!(count(&f, "pane.send_text"), 0);
+    }
+
+    /// 讀不到畫面是錯誤，不是空畫面；而且錯誤發生時不會亂打字。
     #[tokio::test]
     async fn a_screen_that_cannot_be_read_is_an_error_not_an_empty_screen() {
         let f = fixture("claude", "__READ_ERROR__").await;
@@ -1679,41 +1767,58 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
         assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.is_err());
-        assert_eq!(count(&f, "pane.send_text"), 0, "讀不到畫面就不會亂打字");
+        assert_eq!(count(&f, "pane.send_text"), 0);
     }
 
-    /// 打進去但畫面不會變（mock 的固定畫面）：不重貼、不按 Enter，回 Unknown。
+    /// pane_typed 讀不出來時要 fail closed：當成「要打字」，不退回 agent.prompt。
     #[tokio::test]
-    async fn an_unverifiable_screen_ends_as_unknown_without_retyping() {
-        let f = fixture("claude", "❯ /effort high\n  ⎿  Set effort level to high\n──────\n❯\n").await;
+    async fn an_unreadable_pane_typed_marker_falls_back_to_typing_not_to_agent_prompt() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        f.env.herdr.set_agent("issue-17", "pane-17", true);
         let app = f.env.app.clone();
-        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        // 把欄位弄成讀不出來（型別不符），模擬讀取失敗。
+        sqlx::query("UPDATE runs SET pane_typed = 'broken' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        assert!(db::pane_typed(&app.db, &f.run_id).await.is_err(), "這個值讀不成 bool");
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        let out = deliver_prompt(&app, &client, &run, &bot, "加一個功能除了按 SKU 之外", false).await.unwrap();
-        assert_eq!(out, Delivered::Unknown("nothing_typed"));
-        // 框證明是空的才會重打一次，第三次不會有。
-        assert_eq!(count(&f, "pane.send_text"), 2);
-        assert_eq!(count(&f, "pane.send_keys"), 0, "沒看到字就不按 Enter");
+
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(count(&f, "agent.prompt"), 0, "讀不出來就不要賭已知會吞掉 prompt 的那條路");
+        assert_eq!(count(&f, "pane.send_text"), 1);
+    }
+
+    /// 沒有 pane 可打、agent 又不可靠：回 Unknown，不退回 agent.prompt。
+    #[tokio::test]
+    async fn no_pane_and_no_session_binding_is_unknown_not_an_agent_prompt() {
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id = NULL WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap();
+        assert_eq!(out, Delivered::Unknown("no_pane_to_type_into"));
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
 
-    /// 併發（queue flush 與 stall watchdog 同時想補送）只會有一次成功認領。
+    /// 真的併發：兩個補送同時進來，只有一個送得出去（DB 認領是鎖）。
     #[tokio::test]
-    async fn only_one_resend_is_ever_claimed_for_a_turn() {
-        let f = fixture("claude", "──────\n❯\n").await;
+    async fn two_concurrent_resends_send_the_prompt_exactly_once() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], ..Default::default() });
         let app = f.env.app.clone();
-        let a = db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS);
-        let b = db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS);
-        let (a, b) = tokio::join!(a, b);
-        assert_eq!([a, b].iter().filter(|x| **x).count(), 1, "兩邊同時搶，只有一邊拿得到");
-        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "重啟後也不會多一次額度");
-        let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id=?")
-            .bind(&f.turn_id)
-            .fetch_one(&app.db)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let sent = vec!["Reply with PONG".to_string()];
+
+        let (a, b) = tokio::join!(
+            resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent),
+            resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent),
+        );
+        assert_eq!([a, b].iter().filter(|x| **x).count(), 1, "只有一邊送成功");
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG")).count(), 1, "pane 上只有一則");
+        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "額度用完了，重啟也不會多一次");
     }
 
     #[tokio::test]

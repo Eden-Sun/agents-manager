@@ -32,6 +32,8 @@ pub struct MockHerdr {
     pub pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     /// Every `(method, params)` sent, so a test can assert *how* the daemon asked.
     pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
+    /// Panes that behave like a TUI: typing lands in a composer, Enter moves it to the transcript.
+    pub live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
     /// What `agent.list` and `agent.get` answer with.
     pub agents: Arc<StdMutex<Vec<Value>>>,
     handle: tokio::task::JoinHandle<()>,
@@ -43,6 +45,44 @@ impl Drop for MockHerdr {
     }
 }
 
+/// A pane that reacts: `pane.send_text` fills the composer, Enter moves it into the transcript,
+/// `ctrl+c` clears it, and every read redraws a spinner row so "the screen changed" is worthless
+/// as evidence on its own (sol review 2026-09-14 #1).
+#[derive(Clone, Default)]
+pub struct LivePane {
+    pub transcript: Vec<String>,
+    pub composer: Vec<String>,
+    pub reads: u32,
+    /// A TUI that eats the Enter: the text stays in the box.
+    pub swallow_enter: bool,
+    /// A TUI that throws the typed text away without submitting it (the 2026-09-14 incident).
+    pub swallow_text: bool,
+}
+
+impl LivePane {
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for line in &self.transcript {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(&format!("✻ Crunching… ({}s · esc to interrupt)\n", self.reads));
+        out.push_str("─────────────────────────────────────────────\n");
+        match self.composer.split_first() {
+            None => out.push_str("❯\n"),
+            Some((first, rest)) => {
+                out.push_str(&format!("❯ {first}\n"));
+                for r in rest {
+                    out.push_str(&format!("  {r}\n"));
+                }
+            }
+        }
+        out.push_str("─────────────────────────────────────────────\n");
+        out.push_str("  user. | proj | OP5 61% | 5h:53%(rst 2h 35m) | 7d:95%\n");
+        out
+    }
+}
+
 #[derive(Clone)]
 struct MockState {
     workspaces: Arc<StdMutex<BTreeMap<String, String>>>,
@@ -50,6 +90,7 @@ struct MockState {
     calls: Arc<StdMutex<Vec<(String, Value)>>>,
     agents: Arc<StdMutex<Vec<Value>>>,
     screens: Arc<StdMutex<BTreeMap<String, String>>>,
+    live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
     argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
@@ -106,6 +147,7 @@ impl MockHerdr {
             calls: Default::default(),
             agents: Default::default(),
             screens: Default::default(),
+            live: Default::default(),
             argvs: Default::default(),
             pids: Default::default(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -113,6 +155,7 @@ impl MockHerdr {
         let (workspaces, tabs, calls, agents) =
             (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
         let (screens, argvs, pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone());
+        let live = state.live.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
@@ -280,7 +323,14 @@ impl MockHerdr {
                         }
                         "pane.read" => {
                             let pid = wid_of("pane_id");
-                            let text = st.screens.lock().unwrap().get(&pid).cloned().unwrap_or_default();
+                            let live_text = {
+                                let mut live = st.live.lock().unwrap();
+                                live.get_mut(&pid).map(|p| {
+                                    p.reads += 1;
+                                    p.render()
+                                })
+                            };
+                            let text = live_text.unwrap_or_else(|| st.screens.lock().unwrap().get(&pid).cloned().unwrap_or_default());
                             // A screen set to this marker answers like a broken pane: the caller
                             // must treat a read failure as an error, never as an empty screen.
                             if text == "__READ_ERROR__" {
@@ -302,8 +352,46 @@ impl MockHerdr {
                                     "cwd": "/tmp/p", "pid": os_pid}]}}}),
                             }
                         }
-                        // Typing into a pane: recorded in `calls`; the screen is whatever the test set.
-                        "pane.send_text" | "pane.send_keys" => json!({"id": id, "result": {"type": "ok"}}),
+                        // Typing into a pane: recorded in `calls`. A live pane reacts like a TUI;
+                        // any other pane just answers ok and keeps whatever screen the test set.
+                        "pane.send_text" => {
+                            let pid = wid_of("pane_id");
+                            let text = params.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                            if let Some(p) = st.live.lock().unwrap().get_mut(&pid) {
+                                if !p.swallow_text {
+                                    for line in text.split('\n') {
+                                        p.composer.push(line.to_string());
+                                    }
+                                }
+                            }
+                            json!({"id": id, "result": {"type": "ok"}})
+                        }
+                        "pane.send_keys" => {
+                            let pid = wid_of("pane_id");
+                            let keys: Vec<String> = params
+                                .get("keys")
+                                .and_then(Value::as_array)
+                                .map(|a| a.iter().filter_map(Value::as_str).map(|k| k.to_ascii_lowercase()).collect())
+                                .unwrap_or_default();
+                            if let Some(p) = st.live.lock().unwrap().get_mut(&pid) {
+                                for k in &keys {
+                                    match k.as_str() {
+                                        "enter" if !p.swallow_enter => {
+                                            let rows: Vec<String> = p.composer.drain(..).collect();
+                                            if let Some((first, rest)) = rows.split_first() {
+                                                p.transcript.push(format!("❯ {first}"));
+                                                for r in rest {
+                                                    p.transcript.push(format!("  {r}"));
+                                                }
+                                            }
+                                        }
+                                        "ctrl+c" => p.composer.clear(),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            json!({"id": id, "result": {"type": "ok"}})
+                        }
                         "agent.send_keys" => {
                             let target = wid_of("target");
                             let ctrl_c = params
@@ -412,7 +500,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, argvs, pids, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, argvs, pids, handle }
     }
 
     pub fn methods(&self) -> Vec<String> {
@@ -421,6 +509,31 @@ impl MockHerdr {
 
     pub fn first_call(&self, method: &str) -> Option<Value> {
         self.calls.lock().unwrap().iter().find(|(m, _)| m == method).map(|(_, p)| p.clone())
+    }
+
+    /// Make this pane behave like a TUI (see [`LivePane`]). Returns nothing; inspect it with
+    /// [`MockHerdr::pane`].
+    pub fn live_pane(&self, pane_id: &str, pane: LivePane) {
+        self.live.lock().unwrap().insert(pane_id.to_string(), pane);
+    }
+
+    pub fn pane(&self, pane_id: &str) -> Option<LivePane> {
+        self.live.lock().unwrap().get(pane_id).cloned()
+    }
+
+    /// Register an agent for `agent.get` / `agent.list`, with or without herdr's session binding.
+    pub fn set_agent(&self, name: &str, pane_id: &str, session_bound: bool) {
+        let mut agent = serde_json::Map::new();
+        agent.insert("name".into(), json!(name));
+        agent.insert("agent".into(), json!("claude"));
+        agent.insert("agent_status".into(), json!("idle"));
+        agent.insert("workspace_id".into(), json!("ws-1"));
+        agent.insert("tab_id".into(), json!("tab-1"));
+        agent.insert("pane_id".into(), json!(pane_id));
+        if session_bound {
+            agent.insert("agent_session".into(), json!({"agent": "claude", "kind": "id", "value": "sess-1"}));
+        }
+        self.agents.lock().unwrap().push(Value::Object(agent));
     }
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {

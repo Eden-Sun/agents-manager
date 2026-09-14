@@ -231,12 +231,16 @@ label = "foo"
 pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 slash 兩分鐘）。之後這個 run 的 prompt
 一律改成打字進 pane 並看畫面驗證，`agent.get` 查不到 `agent_session` 綁定的 agent 也走這條：
 
-1. 框必須是空的才開始打；有殘字先 `ctrl+c` 清一次再確認（claude 實測：`ctrl+u`／`ctrl+a ctrl+k` 只清最後一行，`Esc` 不清）。
+1. 框必須是空的才開始打。框裡是**別人的字**（使用者在終端打到一半的草稿）就停手回 `Unknown`，
+   不清框也不覆蓋；框裡已經是**我們自己**上一次留下的同一段，就直接送出，不重打。
 2. `pane.send_text` 之後必須在框裡看到這段文字（比對去空白後的頭、尾或整段片段，折行與中文都認得）；
    框證明是空的（什麼都沒落地）才重打一次，其他情況一律不重貼。
-3. Enter 之後框要空、而且畫面比送出前多一次這段文字，才算送出；第二次 Enter 同樣要驗。
+3. Enter 之後框要空、而且 agent 在**對話區**（輸入框上方、以 prompt 標記開頭的回音行）多印一次這段
+   文字，才算送出；spinner、計時、狀態列刷新一律不算證據，短 prompt 也一樣要有回音行。第二次 Enter
+   同樣要驗。
 4. 任何一步讀不到畫面就是錯誤，不是空畫面；驗不出來回 `Unknown`，turn 停在 `delivery='unknown'`（§6.3），
-   不武斷當成已送達，也不再自動重打。
+   不武斷當成已送達，也不再自動重打。fail closed：`runs.pane_typed` 讀不出來就當「要打字」，沒有 pane
+   可打又不能信任 agent 時回 `Unknown`，不退回 `agent.prompt`。
 
 stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.resend_count`（每個 turn 上限 1，UPDATE 認領
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。

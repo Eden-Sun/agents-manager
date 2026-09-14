@@ -181,15 +181,14 @@ pub async fn set_pane_typed(pool: &SqlitePool, run_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn pane_typed(pool: &SqlitePool, run_id: &str) -> bool {
-    sqlx::query_scalar::<_, i64>("SELECT pane_typed FROM runs WHERE id = ?")
+/// `Err` is not `false`: the caller decides what an unreadable marker means, and for delivery it
+/// means "assume this pane needs typing" (sol review 2026-09-14 #3).
+pub async fn pane_typed(pool: &SqlitePool, run_id: &str) -> Result<bool> {
+    let v: Option<i64> = sqlx::query_scalar("SELECT pane_typed FROM runs WHERE id = ?")
         .bind(run_id)
         .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0)
-        != 0
+        .await?;
+    Ok(v.unwrap_or(0) != 0)
 }
 
 /// Claim one re-delivery for `turn_id`, at most `max` per turn. `true` = claimed (and counted);
