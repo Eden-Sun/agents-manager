@@ -2037,8 +2037,14 @@ pub async fn decide_approval(
     approval(pool, id).await
 }
 
-/// 只在狀態仍是 `from_status` 時才寫。`Ok(None)` = 已經被別人（另一個 AGM 角色、UI）先決定了，
-/// 這一次什麼都沒寫。兩個角色同時核准同一筆，只有一個會成功。
+/// 決定一筆核准並把它寫進歷程——**同一個 transaction**。
+///
+/// `Ok(None)` = 狀態已經不是 `from_status`（別人先決定了），什麼都沒寫。
+///
+/// 兩件事綁在一起的理由：歷程是 append-only 的承諾。先 UPDATE 再另外 INSERT 的話，note 寫失敗
+/// 就留下「有決定、沒紀錄」的半套狀態，而呼叫端重試會撞上 `idempotent`（同一個決定）直接回成功
+/// ——那筆 audit 永遠補不回來。
+#[allow(clippy::too_many_arguments)]
 pub async fn decide_approval_from(
     pool: &SqlitePool,
     id: &str,
@@ -2047,8 +2053,10 @@ pub async fn decide_approval_from(
     actor: &str,
     reason: Option<&str>,
     expires_at: Option<&str>,
-) -> Result<Option<Approval>> {
+) -> Result<Option<(Approval, String)>> {
     let now = crate::db::now();
+    let note_id = crate::db::ulid();
+    let mut tx = pool.begin().await?;
     let res = sqlx::query(
         "UPDATE supervisor_approvals
             SET status=?, decided_by=?, decided_at=?, reason=COALESCE(?, reason),
@@ -2063,42 +2071,29 @@ pub async fn decide_approval_from(
     .bind(&now)
     .bind(id)
     .bind(from_status)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     if res.rows_affected() == 0 {
+        tx.rollback().await?;
         return Ok(None);
     }
-    approval(pool, id).await
-}
-
-/// 核准的決定歷程（append-only）。`supervisor_approvals` 那一列只留最後一個決定，而「誰在什麼
-/// 時候用什麼理由核准、後來被誰撤銷」是運維要查得到的事實，不能被下一次寫入蓋掉。
-pub async fn add_approval_decision(
-    pool: &SqlitePool,
-    approval_id: &str,
-    from_status: &str,
-    to_status: &str,
-    actor: &str,
-    reason: Option<&str>,
-) -> Result<String> {
-    let id = crate::db::ulid();
-    let body = json!({
-        "approval_id": approval_id,
-        "from": from_status,
-        "to": to_status,
-        "actor": actor,
-        "reason": reason,
-    });
+    let body = json!({"approval_id": id, "from": from_status, "to": status, "actor": actor, "reason": reason});
     sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
-        .bind(&id)
+        .bind(&note_id)
         .bind(SUPERVISOR_ID)
         .bind("approval_decision")
         .bind(body.to_string())
-        .bind(crate::db::now())
-        .execute(pool)
+        .bind(&now)
+        .execute(&mut *tx)
         .await?;
-    Ok(id)
+    let row = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some((row, note_id)))
 }
+
 
 /// 每筆核准的決定歷程，最舊在前。一次查完再分組：核准筆數不多，但一筆一次查詢會變 N+1。
 pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Vec<Value>>> {

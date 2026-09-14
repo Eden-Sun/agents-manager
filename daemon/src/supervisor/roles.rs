@@ -80,6 +80,7 @@ CREATE INDEX IF NOT EXISTS supervisor_inbox_role_open
 
 /// 從 `store::migrate` 最後呼叫。可重入：每一步都有 `IF NOT EXISTS` 或欄位檢查。
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    let mut added_claimed_by = false;
     for (col, ddl) in [
         // NULL = 還沒分類（剛寫進來、或這個欄位出現以前的舊列）；controller 每個 tick 先補上。
         ("role", "ALTER TABLE supervisor_inbox ADD COLUMN role TEXT"),
@@ -93,7 +94,11 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     ] {
         if !super::store::has_column(pool, "supervisor_inbox", col).await? {
             sqlx::query(ddl).execute(pool).await?;
+            added_claimed_by |= col == "claimed_by";
         }
+    }
+    if added_claimed_by {
+        backfill_claimed_by(pool).await?;
     }
     if !super::store::has_column(pool, "supervisor_assignments", "review_role").await? {
         // 回報給誰驗收。NULL = 協調者（巡檢自己的例行派工會明寫 patrol）。
@@ -104,6 +109,31 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         if !s.is_empty() {
             sqlx::query(s).execute(pool).await?;
         }
+    }
+    Ok(())
+}
+
+/// 雙角色以前的那些事件歸誰。**只在第一次加欄時跑一次。**
+///
+/// 升級前只有一顆 AGM（＝現在的巡檢），它收過的事件不會因為換了版本就變成協調者的：
+/// `approval_requested`、交辦回報這些種類照新路由表會被分到協調者，於是舊庫裡「已經送給巡檢、
+/// 還沒 ack」的那些（包含通知回合失敗被 recover 成 pending 的）會被協調者再送一次，而
+/// `mark_delivered` 的 claim 守衛又不讓它寫成 delivered——同一則事件每個 tick 送一次。
+///
+/// 判準是持久證據，不是猜的：送過就會留下 `notify_turn_id`／`delivered_at`／`notify_attempts>0`
+/// （`requeue_inbox` 特地保留 `notify_turn_id`，就是為了讓「送過」這件事在 recover 之後還看得見），
+/// 已經結案的 `handled` 也是巡檢結的。沒有任何送出痕跡的 pending 才交給新路由表決定。
+async fn backfill_claimed_by(pool: &SqlitePool) -> Result<()> {
+    let n = sqlx::query(
+        "UPDATE supervisor_inbox SET claimed_by='patrol'
+          WHERE claimed_by IS NULL
+            AND (notify_turn_id IS NOT NULL OR delivered_at IS NOT NULL OR notify_attempts > 0 OR state='handled')",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if n > 0 {
+        tracing::info!(events = n, "dual-role migration: events the single AGM already handled stay with patrol");
     }
     Ok(())
 }
@@ -677,6 +707,100 @@ mod tests {
         let rows: Vec<(String, String, i64)> =
             sqlx::query_as("SELECT kind, role, wake FROM supervisor_inbox ORDER BY event_key").fetch_all(&p).await.unwrap();
         assert_eq!(rows, vec![("approval_requested".into(), "responder".into(), 1), ("incident_resolved".into(), "patrol".into(), 0)]);
+    }
+
+    /// **真的舊庫**（雙角色以前的 schema）升級。測試不先造 `claimed_by`——那正是要驗的東西：
+    /// 升級當下只能靠持久證據（`notify_turn_id`／`delivered_at`／`notify_attempts`／`handled`）
+    /// 判斷「這件事舊的單顆 AGM 已經收走了」。
+    async fn pre_dual_pool() -> SqlitePool {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        // 雙角色以前的 supervisor_inbox：沒有 role／wake／claimed_by／acked_by／merged_into。
+        for stmt in [
+            "CREATE TABLE supervisors (id TEXT PRIMARY KEY, bot_id TEXT, project_id TEXT, cwd TEXT,
+               identity TEXT NOT NULL DEFAULT 'cc0', effort TEXT NOT NULL DEFAULT 'low',
+               active_model TEXT NOT NULL DEFAULT 'fable', generation INTEGER NOT NULL DEFAULT 0,
+               status TEXT NOT NULL DEFAULT '', status_detail TEXT, fallback_tries INTEGER NOT NULL DEFAULT 0,
+               cooldown_until TEXT, quota_reset_at TEXT, remote_status TEXT NOT NULL DEFAULT 'unknown',
+               remote_url TEXT, summary TEXT, summary_version INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE supervisor_inbox (id TEXT PRIMARY KEY, supervisor_id TEXT NOT NULL, event_key TEXT NOT NULL,
+               assignment_id TEXT, bot_id TEXT, turn_id TEXT, kind TEXT NOT NULL,
+               payload_json TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending', notify_turn_id TEXT,
+               notify_delivery TEXT, notify_attempts INTEGER NOT NULL DEFAULT 0, notify_next_at TEXT,
+               notify_error TEXT, delivered_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE UNIQUE INDEX supervisor_inbox_key ON supervisor_inbox(supervisor_id, event_key)",
+        ] {
+            sqlx::query(stmt).execute(&p).await.unwrap();
+        }
+        // 舊庫裡的四種列：送出過（等 ack）、送過但通知回合失敗被 recover 成 pending、已結案、從沒送過。
+        let rows = [
+            ("old-delivered", "approval_requested", "delivered", Some("t-old-1"), 1, Some("2026-09-01T00:00:00Z")),
+            ("old-recovered", "assignment_completed", "pending", Some("t-old-2"), 2, Some("2026-09-01T00:05:00Z")),
+            ("old-handled", "approval_requested", "handled", None, 0, None),
+            ("old-untouched", "approval_requested", "pending", None, 0, None),
+        ];
+        for (key, kind, state, turn, attempts, delivered) in rows {
+            sqlx::query(
+                "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, payload_json, state,
+                   notify_turn_id, notify_attempts, delivered_at, created_at, updated_at)
+                 VALUES (?,?,?,?,'{}',?,?,?,?,?,?)",
+            )
+            .bind(key)
+            .bind(super::super::store::SUPERVISOR_ID)
+            .bind(key)
+            .bind(kind)
+            .bind(state)
+            .bind(turn)
+            .bind(attempts)
+            .bind(delivered)
+            .bind("2026-09-01T00:00:00Z")
+            .bind("2026-09-01T00:00:00Z")
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        p
+    }
+
+    async fn claimed(pool: &SqlitePool, key: &str) -> (Option<String>, Option<String>, String) {
+        sqlx::query_as("SELECT claimed_by, role, state FROM supervisor_inbox WHERE event_key=?")
+            .bind(key)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upgrading_a_real_pre_dual_database_keeps_the_old_managers_events_with_patrol() {
+        let p = pre_dual_pool().await;
+        super::super::store::migrate(&p).await.unwrap();
+        super::super::store::migrate(&p).await.unwrap(); // 可重入：跑兩次結果一樣
+        classify(&p).await.unwrap();
+
+        // 送過的（含 recover 成 pending 的）仍是巡檢的，即使路由表把這些種類分給協調者。
+        for key in ["old-delivered", "old-recovered", "old-handled"] {
+            let (claimed_by, role, _) = claimed(&p, key).await;
+            assert_eq!(claimed_by.as_deref(), Some("patrol"), "{key} 舊 AGM 已經收走了");
+            assert_eq!(role.as_deref(), Some("responder"), "{key} 的種類照新路由表仍屬協調者");
+        }
+        // 從沒送出去的那件交給新路由表決定。
+        let (claimed_by, role, _) = claimed(&p, "old-untouched").await;
+        assert_eq!(claimed_by, None);
+        assert_eq!(role.as_deref(), Some("responder"));
+
+        // 雙角色啟用之後：協調者只拿沒送過的那件，送過的留給巡檢，不會兩邊各送一次。
+        set_env(&p, Role::Responder, "resp", "proj", "/tmp").await.unwrap();
+        let now = "2999-01-01T00:00:00Z";
+        let resp: Vec<String> = due_for(&p, Role::Responder, true, now, 0).await.unwrap().into_iter().map(|e| e.event_key).collect();
+        assert_eq!(resp, vec!["old-untouched".to_string()]);
+        let patrol: Vec<String> = due_for(&p, Role::Patrol, true, now, 5).await.unwrap().into_iter().map(|e| e.event_key).collect();
+        assert_eq!(patrol, vec!["old-recovered".to_string()], "recover 成 pending 的那件回到原收件者");
+
+        // 原收件者才 ack 得動；協調者送不進去也結不掉。
+        let id: String = sqlx::query_scalar("SELECT id FROM supervisor_inbox WHERE event_key='old-recovered'").fetch_one(&p).await.unwrap();
+        assert_eq!(mark_delivered(&p, &[id.clone()], Role::Responder, "t-new", "ok").await.unwrap(), 0);
+        assert_eq!(ack(&p, &id, Some(Role::Responder), true).await.unwrap(), AckOutcome::ClaimedByOther("patrol".into()));
+        assert_eq!(ack(&p, &id, Some(Role::Patrol), true).await.unwrap(), AckOutcome::Acked);
     }
 
     #[tokio::test]
