@@ -34,3 +34,19 @@ test('新的排前面：chip 點開先看到最新那筆', () => {
   ]
   assert.deepEqual(pendingRebuilds(rows).map((r) => r.id), ['new', 'old'])
 })
+
+test('上次上線之前建立的申請不算（daemon 有 last_deploy 時）', () => {
+  const rows = [
+    row({ id: 'old', created_at: '2026-09-14T00:00:00.000Z' }),
+    row({ id: 'new', requester: 'bot-2', created_at: '2026-09-14T03:00:00.000Z' }),
+  ]
+  assert.deepEqual(pendingRebuilds(rows, '2026-09-14T01:00:00.000Z').map((r) => r.id), ['new'])
+  // 舊 daemon 沒有那個欄位：不濾時間，兩筆都算。
+  assert.equal(pendingRebuilds(rows, null).length, 2)
+})
+
+test('時間壞掉就留著：少算一筆比多算一筆難查', () => {
+  const rows = [row({ id: 'bad', created_at: 'not-a-date' })]
+  assert.equal(pendingRebuilds(rows, '2026-09-14T01:00:00.000Z').length, 1)
+  assert.equal(pendingRebuilds(rows, 'also-bad').length, 1)
+})
