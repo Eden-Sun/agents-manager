@@ -370,3 +370,38 @@
 .shelf-head .icon-tip[data-tip]:focus-visible::after {
   transform: translateY(0);
 }
+
+/*
+ * 收合鍵做在分割線上（2026-09-14 使用者：「收合做在分割線上以節省空間」）。
+ *
+ * 右欄的 `border-left` 就是那條分割線；一顆 16×40 的小耳朵壓在線的正中、垂直置中於標題列下緣，
+ * 一半在對話區、一半在右欄。平常淡，滑上去才亮——它是版面控制，不該跟內容搶眼。
+ */
+.shelf-edge-fold {
+  position: absolute;
+  top: 72px;
+  left: -9px;
+  z-index: 31;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shelf-edge-fold:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.shelf-edge-fold:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
