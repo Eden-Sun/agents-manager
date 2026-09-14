@@ -7,6 +7,7 @@
 mod build_info;
 mod agent_relay;
 mod api;
+mod identity_kind;
 mod assets;
 mod attach;
 mod bulk_restart;

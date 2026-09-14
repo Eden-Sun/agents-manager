@@ -658,6 +658,8 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let identities = detect_identities(app, host, &tools, &shell_identities).await;
     let ht = HostTools { tools, identities, shell_identities, checked_at: crate::db::now() };
     app.tools.lock().await.insert(host.to_string(), ht.clone());
+    // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
+    crate::identity_kind::cleanup_host(app, host).await;
     tracing::info!(
         host,
         tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),
