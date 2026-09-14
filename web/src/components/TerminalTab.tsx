@@ -5,6 +5,7 @@ import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
 import { linkifyTerm } from './TermLinks'
 import { setTermWrap, useTermWrap } from './termWrap'
+import './terminalTab.css'
 
 /** Below this many columns a TUI agent's output is fragmented beyond repair (31-column grok pane, 2026-09-06). */
 const READABLE_COLUMNS = 60

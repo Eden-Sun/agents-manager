@@ -5,6 +5,7 @@ import type { GhPending, GhStatus } from '../api/types'
 import { useStore } from '../store/store'
 import { CopyChip } from './CopyChip'
 import { hostLabel } from './Tools'
+import './ghAuth.css'
 
 /** 502 from `gh issue list` when the host is not authenticated (or the active token is dead). */
 export function isGhAuthError(e: unknown): boolean {

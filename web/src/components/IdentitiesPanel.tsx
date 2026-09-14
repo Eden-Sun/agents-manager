@@ -3,6 +3,7 @@ import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
+import './identitiesPanel.css'
 
 /** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）：daemon 啟動 bot 時注入 `env`；`args` 契約仍在但 UI 不提供輸入。 */
 

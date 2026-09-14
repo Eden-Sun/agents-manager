@@ -120,6 +120,7 @@
 }
 
 /* 減少動態：集中一處，含打字點與全部 transition（分散寫曾漏掉）。 */
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -202,6 +203,7 @@ button:disabled {
 
 /* 側欄鍵貼右緣，置中泡泡會被裁：改靠右展開。`white-space: normal` 必要——
    nowrap 下 max-width 無效，長提示會從側欄左緣漏出去。 */
+
 .bot-actions .icon-tip[data-tip]::after {
   left: auto;
   right: 0;
@@ -266,46 +268,6 @@ button:disabled {
   border-right: 1px solid var(--border-strong);
 }
 
-.sidebar-head {
-  position: relative;
-  z-index: 6;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  column-gap: 8px;
-  min-height: 46px;
-  padding: 6px 10px 6px 14px;
-  border-bottom: 1px solid var(--border);
-  /* RAM 下拉是 absolute，不能 hidden（曾把下拉裁掉）。 */
-  overflow: visible;
-}
-
-.head-brand {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  min-width: 0;
-}
-
-.head-brand-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.head-brand-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* 側欄不夠寬時「剩 N」在這格折行，不去擠左右兩欄。 */
-.head-ram {
-  justify-self: center;
-  min-width: 0;
-}
-
 .head-ram .mem-badge {
   flex-wrap: wrap;
   white-space: normal;
@@ -316,53 +278,6 @@ button:disabled {
 .head-ram .mem-free {
   flex: 1 0 100%;
   text-align: center;
-}
-
-/* 側欄放不下「已連線」（會切成「已連」），燈＋title 就夠。 */
-.sidebar-head .conn-label {
-  display: none;
-}
-
-/* 本機瀏覽器分頁數 / RAM，超線才變琥珀色。 */
-.tabs-badge {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
-  padding: 0;
-  border: 0;
-  background: none;
-  font-size: 11px;
-  line-height: 1.6;
-  cursor: default;
-  justify-self: end;
-}
-
-.tabs-badge .tabs-v {
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-
-.tabs-badge .tabs-one {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  white-space: nowrap;
-}
-
-.tabs-badge .tabs-one + .tabs-one {
-  margin-left: 0;
-}
-
-.tabs-badge.hot .tabs-one {
-  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
 }
 
 .browser-icon {
@@ -382,154 +297,6 @@ button:disabled {
   font-weight: 700;
 }
 
-.tabs-badge .tabs-sep {
-  margin: 0 2px;
-  color: var(--text-faint);
-  font-weight: 400;
-}
-
-.tabs-badge.hot {
-  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
-}
-
-.tabs-badge.hot .tabs-v {
-  color: var(--warn);
-}
-
-/* herdr pane 數，與 RAM 同一種徽章；細節在 tooltip。 */
-.pane-badge {
-  flex: none;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  font-size: 11px;
-  line-height: 1.6;
-  cursor: default;
-}
-
-.pane-badge .pane-k {
-  color: var(--text-faint);
-  letter-spacing: 0.03em;
-}
-
-.pane-badge .pane-v {
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-
-/* herdr 進程樹記憶體（SPEC §15）。本機固定左上角；遠端只在標題列看著那台時出現。等寬數字防跳動。 */
-.mem-badge {
-  flex: none;
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: nowrap;
-  gap: 4px;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  font-size: 11px;
-  line-height: 1.6;
-  cursor: default;
-  white-space: nowrap;
-}
-
-.mem-badge .mem-k {
-  color: var(--text-faint);
-  letter-spacing: 0.03em;
-}
-
-.mem-badge .mem-v {
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 「剩 N」與已用量同一行，總容量只放 tooltip：折第二行會撐高徽章、擠掉分頁列與連線（2026-09-13 實拍）。 */
-.mem-badge .mem-free {
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.mem-badge.mem-low {
-  border-color: var(--danger);
-}
-
-.mem-badge.mem-low .mem-free {
-  color: var(--danger);
-  font-weight: 650;
-}
-
-.mem-pop-machine {
-  margin: 0 0 6px;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.mem-pop-machine.low {
-  color: var(--danger);
-}
-
-.mem-pop-machine-used {
-  color: var(--text-faint);
-}
-
-/* 量不到就顯示「—」，不拿 0 假裝。 */
-.mem-badge.tabs-hot {
-  border-color: var(--danger);
-}
-
-.mem-tabs {
-  color: var(--danger);
-  font-weight: 700;
-}
-
-.mem-pop-browsers {
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.mem-pop-browsers.hot {
-  color: var(--danger);
-}
-
-.mem-badge.partial .mem-v {
-  color: var(--warn);
-}
-
-/* 遠端那顆掛在標題列，跟 host-badge 同一種語彙。 */
-.mem-badge.remote {
-  flex: none;
-  border-color: var(--border-strong);
-}
-
-.mem-badge.remote .mem-k {
-  color: var(--accent-ink);
-  font-family: var(--font-mono);
-  font-weight: 650;
-}
-
-/* 標題縮成「AG Man」是為了讓徽章有位置，所以它不再被壓縮（`flex: 1` 會截成「A…」）；推空白改由徽章前的 auto margin。 */
-.sidebar-head h1 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-  flex: none;
-  white-space: nowrap;
-}
-
-
-
 .conn {
   display: inline-flex;
   align-items: center;
@@ -542,6 +309,7 @@ button:disabled {
 }
 
 /* 13×13 的勾選框在觸控上幾乎按不到，墊大。 */
+
 .conn select {
   min-height: 24px;
 }
@@ -571,191 +339,6 @@ button:disabled {
   background: var(--lamp-red);
 }
 
-.mock-badge {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--warn-soft);
-  color: var(--warn);
-  border: 1px solid currentcolor;
-}
-
-/* SPEC §6.9：只在真的有更新時出現、做完收掉，所以放在顯眼處不擋事。 */
-.update-all {
-  flex: none;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--accent-soft);
-}
-
-.update-all-go {
-  display: block;
-  width: 100%;
-  min-height: 32px;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 650;
-  border-radius: 5px;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--accent-text);
-  cursor: pointer;
-}
-
-.update-all-go:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
-.update-all-go:disabled {
-  background: var(--bg-sunken);
-  border-color: var(--border-strong);
-  color: var(--text-dim);
-  cursor: default;
-}
-
-.update-all-note {
-  margin: 6px 0 0;
-  font-size: 11px;
-  color: var(--text-dim);
-  cursor: help;
-}
-
-.update-all.running {
-  background: var(--bg-sunken);
-}
-
-.update-all-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text);
-}
-
-.update-all-line strong {
-  flex: 1;
-  min-width: 0;
-  font-weight: 650;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.update-all-x {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-}
-
-.update-all-x:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.update-all-bar {
-  margin-top: 6px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border);
-  overflow: hidden;
-}
-
-.update-all-bar span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  transition: width 160ms ease-out;
-}
-
-.update-all-list {
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.update-all-list li {
-  display: flex;
-  gap: 6px;
-  line-height: 1.6;
-}
-
-.update-all-list li b {
-  flex: none;
-  font-weight: 650;
-  color: var(--text);
-}
-
-.update-all-list.bad li b {
-  color: var(--danger);
-}
-
-.bot-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-.bot-search-input {
-  flex: 1;
-  min-width: 0;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-panel);
-  color: var(--text);
-  font-size: 12px;
-}
-
-.bot-search-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.bot-search-count {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-  font-size: 11px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.bot-search-clear {
-  border: 0;
-  background: none;
-  padding: 0 2px;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-
-.bot-search-clear:hover {
-  color: var(--text);
-}
-
-.sidebar-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  /* 側欄只該有直捲軸：`overflow-y: auto` 會連帶 x 軸 auto，而貼右緣鍵的 `.icon-tip` 泡泡用 translateX(-50%)，
-     會多撐出橫捲軸（scrollWidth 324 vs 287）。x 軸關掉不影響泡泡顯示。 */
-  overflow-x: hidden;
-  padding: 8px 8px 16px;
-}
-
 .project {
   margin-bottom: 10px;
   padding-bottom: 6px;
@@ -766,10 +349,6 @@ button:disabled {
 
 .project {
   position: relative;
-}
-
-.project.dragging {
-  opacity: 0.4;
 }
 
 .project.drop-before::before,
@@ -862,14 +441,6 @@ button:disabled {
   flex: none;
 }
 
-/* Action strip stays absolute so hover does not resize the title; active header reserves 112px (108 + 4px inset). */
-.project-head.selected,
-.project-head:has(.project-head-actions:hover),
-.project-head:focus-within,
-.project-head:has(.head-menu-pop) {
-  padding-right: 112px;
-}
-
 .project-head:hover .project-head-actions,
 .project-head:focus-within .project-head-actions {
   opacity: 1;
@@ -909,31 +480,8 @@ button:disabled {
   box-shadow: inset 0 0 0 1px var(--ring);
 }
 
-.project-label {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.project-path {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: left;
-}
-
 /* 無標籤圖示鍵只有字高（~20px）不好按：底線 28px，需要更大的地方自己加。 */
+
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -953,9 +501,11 @@ button:disabled {
   background: var(--btn-danger-bg-soft);
   color: var(--btn-danger-fg-soft);
 }
+
 .icon-btn.add {
   font-weight: 700;
 }
+
 .icon-btn.add:hover:not(:disabled),
 .icon-btn.add[aria-expanded='true'] {
   color: var(--accent-ink);
@@ -963,21 +513,16 @@ button:disabled {
 }
 
 /* Keep ＋/✕ readable on row hover / selected: 14% 紅 wash 疊 --bg-active 時紅字只剩 2.93:1，改吃 ghost 的中性 wash。 */
+
 .project-head .icon-btn:hover:not(:disabled):not(.add) {
   background: var(--btn-danger-bg-soft);
   color: var(--btn-danger-fg-soft);
 }
+
 .project-head .icon-btn.add:hover:not(:disabled),
 .project-head .icon-btn.add[aria-expanded='true'] {
   color: var(--accent-ink);
   background: var(--accent-soft);
-}
-.inline-form {
-  margin: 2px 10px 8px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-panel);
 }
 
 .bot-row {
@@ -1003,10 +548,6 @@ button:disabled {
   position: relative;
 }
 
-.bot-row.dragging {
-  opacity: 0.4;
-}
-
 .bot-row.drop-before::before,
 .bot-row.drop-after::after {
   content: '';
@@ -1028,18 +569,15 @@ button:disabled {
 }
 
 /* 分身 / 新增的佔位列：灰、不可點，daemon 建好後原地替換。 */
+
 .bot-row.pending {
   opacity: 0.45;
   pointer-events: none;
   cursor: default;
 }
 
-.bot-pending-note {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
 /* 收合時帶上數量，否則看不出底下有東西。 */
+
 .project-fold {
   display: inline-flex;
   align-items: center;
@@ -1057,42 +595,6 @@ button:disabled {
 
 .project-fold .chev {
   font-size: 9px;
-}
-
-/* 收合後留一條可點細列，否則收起的專案看起來像沒有 bot。 */
-.project-folded {
-  display: block;
-  width: 100%;
-  padding: 5px 14px;
-  border: 0;
-  background: none;
-  color: var(--text-faint);
-  font-size: 11px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.project-folded:hover {
-  background: var(--bg-hover);
-  color: var(--text-dim);
-}
-
-/* 燈號在上、收合鈕在正下方（2026-09-13 使用者）：並排會讓有子 agent 的列右移一格，名字對不齊。 */
-.bot-gutter {
-  display: flex;
-  flex: none;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  /* 固定寬度裝得下 `▶ 1 ●`：這欄是所有列的共同基準線，寬度一變就對不齊。 */
-  width: 26px;
-}
-
-.bot-gutter-top {
-  display: flex;
-  align-items: center;
-  gap: 5px;
 }
 
 .bot-kids-toggle {
@@ -1117,73 +619,11 @@ button:disabled {
   font-size: 9px;
 }
 
-/* 小燈比列燈小一號，不搶父列自己那顆。 */
-.bot-kids-lamp {
-  width: 6px;
-  height: 6px;
-  margin-left: 1px;
-}
-
-/* 父列「在等子 agent」記號（2026-09-12 使用者）。黃不是紅：紅只代表「要你本人回答」。
-   實心 = 還在跑，空心 = 子 agent 回報了還沒人看。 */
-.bot-kids-wait {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  margin-left: -2px;
-  border-radius: 50%;
-  border: 1.5px solid var(--lamp-yellow);
-}
-
-.bot-kids-wait.busy {
-  background: var(--lamp-yellow);
-}
-
-.bot-kids-n {
-  font-size: 10px;
-  font-weight: 650;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
 /* 最後一列縱軌只畫到中線，變成 └。 */
+
 .bot-kids {
   margin: 0 6px 8px 22px;
   padding: 0 0 4px 12px;
-}
-
-.bot-child.last .bot-row.compact {
-  border-radius: 0 0 8px 6px;
-}
-
-.bot-child {
-  position: relative;
-  margin: 0;
-  border: 0;
-}
-
-.bot-child::before {
-  content: '';
-  position: absolute;
-  left: -12px;
-  top: 0;
-  bottom: 0;
-  width: 1.5px;
-  background: var(--border-strong);
-}
-
-.bot-child.last::before {
-  bottom: 50%;
-}
-
-.bot-child::after {
-  content: '';
-  position: absolute;
-  left: -12px;
-  top: 50%;
-  width: 12px;
-  height: 1.5px;
-  background: var(--border-strong);
 }
 
 .bot-row.compact {
@@ -1194,6 +634,7 @@ button:disabled {
 }
 
 /* 子列中段可左右滑（2026-09-10 使用者）：只有樹線、燈號、選單鈕固定；名字不截尾、chip 不縮，捲軸藏起來。 */
+
 .bot-row.compact .bot-main {
   display: flex;
   flex-direction: row;
@@ -1210,35 +651,9 @@ button:disabled {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
 }
+
 .bot-row.compact .bot-main::-webkit-scrollbar {
   display: none;
-}
-
-.bot-row.compact .bot-ident {
-  flex: none;
-  min-width: 0;
-}
-
-.bot-row.compact .bot-ident .bot-name {
-  flex: none;
-  min-width: 0;
-  max-width: none;
-  overflow: visible;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.bot-row.compact .bot-sub {
-  flex: none;
-  min-width: 0;
-  max-width: none;
-  height: 18px;
-  overflow: visible;
-}
-.bot-row.compact .bot-sub > * {
-  flex: none;
-  max-width: none;
 }
 
 .bot-row.compact .bot-sub .identity-badge {
@@ -1249,26 +664,8 @@ button:disabled {
   font-size: 10.5px;
 }
 
-.bot-row.compact .bot-sub .model-tag {
-  flex: none;
-  min-width: 2.8em;
-  max-width: none;
-  height: 18px;
-  max-height: 18px;
-  line-height: 18px;
-  font-size: 10.5px;
-}
-
-.bot-row.compact .bot-actions .menu-btn,
-.bot-row.compact .bot-actions .head-menu-btn {
-  width: 26px;
-  height: 26px;
-  min-width: 26px;
-  min-height: 26px;
-  border-radius: 6px;
-}
-
 /* 32px 列高，往上開的泡泡會蓋到上一列，改開左邊。 */
+
 .bot-row.compact .bot-actions .icon-tip[data-tip]::after {
   left: auto;
   right: calc(100% + 6px);
@@ -1283,10 +680,6 @@ button:disabled {
 .bot-row.compact .bot-actions .icon-tip[data-tip]:hover::after,
 .bot-row.compact .bot-actions .icon-tip[data-tip]:focus-visible::after {
   transform: translateY(-50%);
-}
-
-.bot-row.compact .bot-hit-text {
-  display: none;
 }
 
 .bot-row.selected {
@@ -1313,17 +706,13 @@ button:disabled {
 
 /* 額度 critical（docs/API.md §12.4）：整列反灰但仍可點。只降子元素 opacity，不動 .bot-row 底色／左線，選取狀態才不被蓋；
    `.bot-quota-warn` 刻意不降以拉視線。名字不用 opacity（15:1 → 4.4:1 讀不出是誰），改 --text-dim。 */
+
 .bot-row.quota-critical .lamp,
 .bot-row.quota-critical .bot-kind,
 .bot-row.quota-critical .bot-sub .identity-badge,
 .bot-row.quota-critical .bot-actions {
   opacity: 0.5;
   filter: saturate(0.35);
-}
-
-.bot-row.quota-critical .bot-name {
-  color: var(--text-dim);
-  font-weight: 500;
 }
 
 .bot-row .lamp {
@@ -1339,6 +728,7 @@ button:disabled {
 }
 
 /* 名字第一順位，kind／model／身份退一階（--text-faint），狀態字才用彩色拉回視線。 */
+
 .bot-name {
   display: flex;
   align-items: center;
@@ -1352,10 +742,6 @@ button:disabled {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.bot-name > .persona-mark {
-  flex: none;
 }
 
 .bot-name.renamable {
@@ -1372,6 +758,7 @@ button:disabled {
 }
 
 /* Sidebar field must occupy exactly the name's box: shared padding/border/-4px margin grew the row and painted over the row above. */
+
 .bot-name-input.row {
   align-self: flex-start;
   box-sizing: border-box;
@@ -1384,57 +771,6 @@ button:disabled {
   line-height: 1.25;
 }
 
-.bot-hit {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.bot-hit-n {
-  flex: none;
-  padding: 0 5px;
-  border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-
-.bot-hit-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-style: italic;
-}
-
-.bot-search-hits {
-  color: var(--accent);
-}
-
-.bot-sub {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  height: 20px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-faint);
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.bot-ident {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
 .bot-ident .bot-kind,
 .bot-ident .kind-tag {
   flex: none;
@@ -1445,42 +781,11 @@ button:disabled {
   box-sizing: border-box;
 }
 
-.bot-ident .bot-name,
-.bot-ident .bot-name-input.row {
-  flex: 1;
-  min-width: 0;
-}
-
-.src-tag.daemon {
-  border-color: color-mix(in srgb, #d69e2e 70%, transparent);
-  color: #d69e2e;
-}
-.msg.daemon-notice .bubble {
-  border-left: 3px solid #d69e2e;
-  background: color-mix(in srgb, #d69e2e 8%, var(--bg-panel));
-}
-
 .bot-row.compact .bot-ident .bot-kind,
 .bot-row.compact .bot-ident .kind-tag {
   height: 18px;
   max-height: 18px;
   padding: 0 5px;
-}
-
-.kind-tag.icon {
-  padding: 0;
-  width: 20px;
-  justify-content: center;
-}
-
-.kind-tag.icon svg {
-  display: block;
-  width: 12px;
-  height: 12px;
-}
-
-.bot-row.compact .kind-tag.icon {
-  width: 18px;
 }
 
 .bot-sub .model-tag,
@@ -1493,47 +798,6 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-/* bot 額度 critical（剩 < 5%，docs/API.md §12.4）：取代 model-tag 的警語，窄就 ellipsis，全文在 title。 */
-.bot-quota-warn {
-  height: 20px;
-  max-height: 20px;
-  display: inline-flex;
-  align-items: center;
-  box-sizing: border-box;
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--danger);
-  font-weight: 600;
-  cursor: default;
-}
-
-/* 跟頂端 QuotaStrip 同一組 low/critical 門檻。 */
-.bot-quota-chip {
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  padding: 0 6px;
-  border-radius: 8px;
-  border: 1px solid var(--warn);
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 11px;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  cursor: default;
-}
-
-.bot-quota-chip.crit {
-  border-color: var(--danger);
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
 .bot-sub .model-tag {
   flex: 0 1 auto;
   min-width: 0;
@@ -1544,54 +808,6 @@ button:disabled {
   line-height: 20px;
 }
 
-/* The lamp already says idle / offline; only transitional or attention states get words. */
-.bot-state {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bot-state.idle,
-.bot-state.offline {
-  display: none;
-}
-
-/* agent 自己的標題放第二行尾巴：擠在第一行時兩邊各剩六個字。仍會截，全文在 title。 */
-.bot-agent-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-faint);
-  font-style: italic;
-}
-
-.bot-state.working {
-  color: var(--status-working);
-}
-
-.bot-state.blocked {
-  color: var(--status-blocked);
-  font-weight: 600;
-}
-
-.bot-state.starting,
-.bot-state.stopping {
-  color: var(--warn);
-}
-
-.kind-tag {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  padding: 0 6px;
-  border-radius: 3px;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
-}
-
 :root {
   /* kind 品牌色（2026-09-12 使用者：header 的 kind logo 要有顏色）。codex 用 OpenAI 綠；xAI 官方黑白在深色底等於沒顏色，
      使用者選了紫色。標題列、側欄、額度列共用。 */
@@ -1600,51 +816,16 @@ button:disabled {
   --kind-grok: #7c5cff;
 }
 
-.kind-tag.claude {
-  background: #f6ede4;
-  border-color: #e0c8ae;
-  color: var(--kind-claude);
-}
-
-.kind-tag.codex {
-  background: #e7f6f1;
-  border-color: #b3e0d3;
-  color: var(--kind-codex);
-}
-
-.kind-tag.grok {
-  background: #efeaff;
-  border-color: #cfc2ff;
-  color: var(--kind-grok);
-}
-
 @media (prefers-color-scheme: dark) {
   :root {
     --kind-claude: #e08a6b;
     --kind-codex: #19c39c;
     --kind-grok: #9b83ff;
   }
-
-  .kind-tag.claude {
-    background: #38291b;
-    border-color: #5c4429;
-    color: var(--kind-claude);
-  }
-
-  .kind-tag.codex {
-    background: #12261f;
-    border-color: #1f5546;
-    color: var(--kind-codex);
-  }
-
-  .kind-tag.grok {
-    background: #221d38;
-    border-color: #41387a;
-    color: var(--kind-grok);
-  }
 }
 
 /* 收成一顆 `⋯` 固定一格，不疊在名字上也不靠 hover：overlay + hover:none 兩份規則曾在寬度變化時壞一邊。 */
+
 .bot-actions {
   position: static;
   display: flex;
@@ -1656,8 +837,8 @@ button:disabled {
   pointer-events: auto;
 }
 
-
 /* `⋯` 常駐但低調，不做 opacity: 0——看不見的鍵在觸控上等於不存在。 */
+
 .bot-actions .icon-btn {
   /* 0.55 對白底只有 2.26:1（圖示門檻 3:1）；0.78 仍顯淡且過門檻（白底 3.47）。 */
   opacity: 0.78;
@@ -1675,46 +856,6 @@ button:disabled {
   .bot-actions .icon-btn {
     opacity: 1;
   }
-}
-
-.bot-delete-btn {
-  width: 30px;
-  height: 24px;
-  min-width: 30px;
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.bot-delete-btn:hover:not(:disabled) {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.bot-run-btn {
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-dim);
-  font-size: 15px;
-  line-height: 0;
-}
-
-.bot-run-btn.start:hover:not(:disabled) {
-  color: var(--status-ok);
-  background: color-mix(in srgb, var(--lamp-green) 16%, transparent);
-}
-
-.bot-run-btn.stop:hover:not(:disabled) {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.bot-run-btn:disabled {
-  opacity: 0.45;
 }
 
 .bot-row .mini-btn {
@@ -1752,34 +893,6 @@ button:disabled {
   color: var(--danger);
 }
 
-/* 危險項目（刪除）住在 `⋯` 選單而非「中止」旁：紅色留給確認與 hover（見 UI-DECISIONS）。 */
-.head-menu {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-}
-
-.head-menu-btn.on {
-  background: var(--bg-active);
-  color: var(--text);
-}
-
-.head-menu-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 40;
-  min-width: 168px;
-  display: grid;
-  gap: 2px;
-  padding: 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  text-align: left;
-}
-
 .head-menu-item {
   display: block;
   width: 100%;
@@ -1800,6 +913,7 @@ button:disabled {
 }
 
 /* 危險項目只在選單裡轉紅（下一步就是確認框）。 */
+
 .head-menu-item.danger {
   color: var(--danger);
 }
@@ -1885,22 +999,6 @@ button:disabled {
   }
 }
 
-/* forms */
-
-.sidebar-foot {
-  border-top: 1px solid var(--border);
-  padding: 8px 10px 10px;
-  background: var(--bg-side);
-  display: grid;
-  gap: 6px;
-}
-
-.sidebar-foot-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
 .sidebar-foot-actions .btn {
   height: 36px;
   min-height: 36px;
@@ -1910,26 +1008,6 @@ button:disabled {
   justify-content: center;
   font-size: 12.5px;
   font-weight: 600;
-}
-
-.env-panel {
-  display: grid;
-  gap: 4px;
-  padding: 2px 0 4px;
-}
-
-.env-sec + .env-sec {
-  margin-top: 14px;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-}
-
-.env-sec h3 {
-  margin: 0 0 2px;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
 }
 
 .disclosure {
@@ -2008,6 +1086,7 @@ button:disabled {
    起因：primary hover 被 `.btn:hover`（0,3,0）蓋成白底白字（1.18:1）；focus 環 #76a7ff 白底只有 2.4:1。
    規則：文字 ≥ 4.5:1、圖示 ≥ 3:1、hover 底色差 ≥ 8 L*、focus 環 ≥ 3:1 且 2px offset。
    量測見 `docs/screenshots/btn-contrast/audit.json`。 */
+
 :root {
   /* focus 環加深一階，所有面都過 3:1（白 5.58、琥珀 banner 5.04）。 */
   --ring: #2a63cd;
@@ -2087,6 +1166,7 @@ button:disabled {
 }
 
 /* banner 上的鍵：白底 .btn 在有色條子上浮成一塊白、hover 更亮就消失；改透明底＋墨色 wash，文字邊框脫離 banner 繼承色。 */
+
 .bs-banner,
 .notice,
 .term-warn,
@@ -2100,11 +1180,11 @@ button:disabled {
 }
 
 /* 這些鍵 hover 原本 ΔL* = 0，統一補 ghost wash。 */
+
 .tab:not([aria-selected='true']):hover:not(:disabled),
 .mem-open:hover:not(:disabled) .mem-badge,
 .mem-pop-refresh:hover:not(:disabled),
 .mem-pop-act button:hover:not(:disabled),
-.quota-more:hover:not(:disabled),
 .quota-bars-open:hover:not(:disabled),
 .quota-pop-row:hover,
 .copy-chip:hover:not(:disabled),
@@ -2113,15 +1193,8 @@ button.run-debug-toggle:hover:not(:disabled) {
   color: var(--btn-ghost-fg-hover);
 }
 
-/* 紅框小鍵 hover 直接填滿：只壓深底色時紅字剩 4.3:1。 */
-.mini-btn.danger:hover:not(:disabled),
-.mem-pop-act button.danger:hover:not(:disabled) {
-  background: var(--btn-danger-bg);
-  border-color: var(--btn-danger-bg);
-  color: var(--btn-danger-fg);
-}
-
 /* 停用的主要鈕不該仍像主要動作（opacity 0.5 仍最搶眼），改中性沉底；`.send-btn` 同。 */
+
 .btn.primary:disabled,
 .send-btn:disabled {
   opacity: 1;
@@ -2167,6 +1240,7 @@ button.run-debug-toggle:hover:not(:disabled) {
 }
 
 /* Model + effort ride the row below `.main-title` so they don't fight the name for width. */
+
 .main-title-row {
   display: flex;
   align-items: center;
@@ -2231,16 +1305,6 @@ button.run-debug-toggle:hover:not(:disabled) {
   min-width: 0;
 }
 
-/* tabpanel 殼只為語意存在（UI-DECISIONS #11），不參與排版。 */
-.tab-panel {
-  display: contents;
-}
-
-/* `role="listitem"` 不能蓋在 button 上（AT 會唸成清單項目），包一層不參與排版的殼。 */
-.li-wrap {
-  display: contents;
-}
-
 .tabs {
   display: flex;
   flex: none;
@@ -2281,6 +1345,7 @@ button.run-debug-toggle:hover:not(:disabled) {
    1. 分頁不讓（導覽，被切就沒入口），並疊在最上層。
    2. 名字第二：可截尾，不能消失。
    3. 先讓：遠端記憶體與附屬 chip。量表不可讓（2026-09-11 使用者：「額度顯示是很重要的訊息…desktop 都要全顯示」），`flex: none`。 */
+
 .main-head > .tabs {
   flex: none;
   position: relative;
@@ -2294,47 +1359,8 @@ button.run-debug-toggle:hover:not(:disabled) {
   min-width: 0;
 }
 
-.main-head > .quota-strip {
-  flex: none;
-}
-
-/* `overflow: hidden` zeroes flex auto min-size, so the name disappears first without a floor; clip at the cluster.
-   Scoped to `.bot-head` — group headers keep a single-row `.main-title`. */
-.bot-head .main-title {
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 1px;
-  overflow: hidden;
-  /* 空白先給名字（2026-09-11：2000px 時 spacer 空 127px 名字卻截尾）：`flex-grow: 1`、spacer 不搶；縮時權重 0.25，別人先讓。 */
-  flex: 1 0.25 auto;
-  /* Not decoration: the `working` lamp ring draws 4px outside its box; padding moves the clip out, negative margin restores position. */
-  padding-left: 5px;
-  margin-left: -5px;
-}
-
-/* spacer 在 `.bot-head` 不再分空間；group 標題列的 `.main-title` 不伸縮，spacer 仍要推。 */
-.bot-head > .spacer {
-  flex-grow: 0;
-}
-
-/* `.main-title` 是 overflow: hidden 直排，子元素會被硬切（2026-09-10 使用者截圖：`opus-Medium · thi`）；這行自己可壓縮、收成 `…`。 */
-.bot-head .main-title-sub {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.bot-head .main-title-sub > .model-tag {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* kind logo 排在 model 前（2026-09-11 使用者）。固定 20px 不參與縮放；字級同 `.model-tag` 不撐高。 */
+
 .bot-head .main-title-sub > .kind-tag {
   flex: none;
   /* 2026-09-11 使用者：這顆不要框，要貼近 model／effort——框會讓它像另一顆按鈕。gap 在後面收掉一半。 */
@@ -2345,28 +1371,8 @@ button.run-debug-toggle:hover:not(:disabled) {
   margin-right: -3px;
 }
 
-/* pane id 排在 model 後（2026-09-11 使用者）；擠到極限時只留 `▾`，完整值在 tooltip。 */
-.bot-head .main-title-sub > .main-status.pane-toggle {
-  flex: 0 1 auto;
-  min-width: 0;
-}
-
-/* 桌面名字下限 3em（2026-09-11，原 168px）：分頁不得被推出 > 名字不消失，量表又五格全開；1500–1560px 下 168px 會把分頁推出 56–116px。
-   真正要修的是 QuotaStrip 按剩餘寬度畫格數。 */
-@media (min-width: 721px) {
-  .bot-head .main-title {
-    min-width: 3em;
-  }
-}
-
-.bot-head .main-title-row > strong,
-.bot-head .main-title-row > .bot-name-btn,
-.bot-head .main-title-row > .bot-name-input {
-  flex: 0 1 auto;
-  min-width: 4.5em;
-}
-
 /* The name *is* the rename field — renaming is frequent enough that the settings panel is the wrong default. */
+
 .bot-name-btn {
   display: inline-flex;
   align-items: center;
@@ -2410,6 +1416,7 @@ button.run-debug-toggle:hover:not(:disabled) {
 }
 
 /* 1–32 chars, no whitespace, no `@ , : ;` — same rule the settings panel enforces. */
+
 .bot-name-input.bad {
   border-color: var(--danger);
 }
@@ -2429,6 +1436,7 @@ button.run-debug-toggle:hover:not(:disabled) {
 }
 
 /* Jump-to-bottom must float over the list, not the composer, and not scroll with content. */
+
 .msg-list-wrap {
   position: relative;
   flex: 1;
@@ -2452,21 +1460,10 @@ button.run-debug-toggle:hover:not(:disabled) {
   box-sizing: border-box;
 }
 
-/* issue #25：對話只留最近 500 則，更早的按這顆補回來（`LoadEarlier`）。 */
-.load-earlier {
-  display: flex;
-  justify-content: center;
-  padding: 0 0 12px;
-}
-
 .load-earlier .btn {
   font-size: 12px;
   padding: 4px 12px;
   opacity: 0.75;
-}
-
-.load-earlier .btn:hover:not(:disabled) {
-  opacity: 1;
 }
 
 .msg-empty {
@@ -2494,36 +1491,6 @@ button.run-debug-toggle:hover:not(:disabled) {
   color: var(--text-faint);
 }
 
-.msg-empty-icon {
-  width: 40px;
-  height: 40px;
-  display: grid;
-  place-items: center;
-  font-size: 22px;
-  line-height: 1;
-  color: var(--text-dim);
-}
-
-.msg-empty-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 1.35;
-  color: var(--text);
-}
-
-.msg-empty-body {
-  margin: 0;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--text-dim);
-}
-
-.msg-empty-action {
-  display: flex;
-  justify-content: center;
-}
-
 .empty-add-btn {
   height: 40px;
   min-height: 40px;
@@ -2533,99 +1500,6 @@ button.run-debug-toggle:hover:not(:disabled) {
   justify-content: center;
   font-size: 13px;
   font-weight: 600;
-}
-
-.project-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 14px 12px;
-}
-
-/* 「N 個 Bot 已隱藏（額度不足）」：全隱藏時當 `.project-empty` 標題，還有剩時當卡片腳註。 */
-.project-quota-hidden {
-  margin: 0;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-dim);
-}
-
-p.project-quota-hidden {
-  padding: 8px 14px 12px;
-  font-size: 11px;
-  font-weight: 400;
-}
-
-/* 已停用的身分列出但不可點——再開一顆也是同一組沒額度的帳號。 */
-.quick-add-chip.quota-off .quick-add-label {
-  text-decoration: line-through;
-}
-
-.quick-add-chip.quota-off .quick-add-out {
-  color: var(--text-faint);
-}
-
-.quick-add {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.quick-add-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  min-height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-panel);
-  color: var(--text);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.quick-add-chip:hover:not(:disabled) {
-  border-color: var(--accent);
-}
-
-.quick-add-chip:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.quick-add-out {
-  font-size: 11px;
-  color: var(--warn);
-}
-
-.quick-add-label {
-  font-weight: 600;
-}
-
-.project-empty-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-dim);
-}
-
-.bot-stopped-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  height: 48px;
-  min-height: 48px;
-  width: 100%;
-  max-width: var(--chat-max);
-  margin: 0 auto;
-  padding: 0 28px;
-  box-sizing: border-box;
-  border-top: 1px solid var(--border);
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 13px;
 }
 
 .bot-stopped-bar .mini-btn {
@@ -2679,6 +1553,7 @@ p.project-quota-hidden {
 }
 
 /* 一行 60–75 字是舒服的閱讀寬度；助理段落長，給多一點。 */
+
 .msg.user {
   align-self: flex-end;
   align-items: flex-end;
@@ -2726,16 +1601,6 @@ p.project-quota-hidden {
   border-style: dashed;
 }
 
-.msg.live.streaming .bubble {
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--bubble-assistant-border));
-}
-
-.msg.live.streaming .bubble {
-  position: relative;
-  padding-right: 18px;
-}
-
 .msg.live .caret {
   position: absolute;
   right: 8px;
@@ -2747,40 +1612,10 @@ p.project-quota-hidden {
   animation: blink 1s steps(2, start) infinite;
 }
 
-.msg.live .msg-meta {
-  color: var(--accent-ink);
-}
-
-/* 輸出中的半成品預設收著，這顆是唯一入口；連結樣式對齊狀態字。 */
-.live-peek {
-  margin-left: 8px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent-ink);
-  font: inherit;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-
-.live-peek:hover {
-  color: var(--text);
-}
-
 .msg.rail .bubble.rail,
 .bubble.rail {
   border-left: 3px solid var(--border-strong);
   border-bottom-left-radius: 4px;
-}
-
-.link-btn {
-  border: 0;
-  background: transparent;
-  color: var(--accent-ink);
-  padding: 2px 0;
-  font-size: 11.5px;
-  text-decoration: underline;
 }
 
 .msg.system .bubble {
@@ -2792,130 +1627,10 @@ p.project-quota-hidden {
   padding: 3px 12px;
 }
 
-.msg-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 16px;
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-faint);
-  padding: 0 3px;
-  white-space: nowrap;
-}
-
-.msg-meta-above {
-  width: 100%;
-  height: 20px;
-  min-height: 20px;
-  justify-content: space-between;
-  gap: 8px;
-  box-sizing: border-box;
-}
-
-.msg-meta-below {
-  width: 100%;
-  height: 20px;
-  min-height: 20px;
-  justify-content: space-between;
-  gap: 8px;
-  box-sizing: border-box;
-  margin-top: 4px;
-  margin-bottom: 0;
-}
-
 .msg-snapshot {
   margin-top: 8px;
   border-top: 1px solid var(--border);
   padding-top: 6px;
-}
-
-.msg-snapshot-body {
-  margin: 6px 0 0;
-  max-height: 320px;
-  overflow: auto;
-  padding: 8px 10px;
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.msg-meta-left {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.msg-meta time,
-.msg-time {
-  flex: none;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-faint);
-}
-
-.kind-mark {
-  flex: none;
-  width: 3px;
-  height: 12px;
-  border-radius: 1px;
-  background: var(--border-strong);
-}
-
-.kind-mark.claude {
-  background: #c9853a;
-}
-
-.kind-mark.codex {
-  background: #3b6fb8;
-}
-
-.kind-mark.grok {
-  background: #5c636b;
-}
-
-@media (prefers-color-scheme: dark) {
-  .kind-mark.claude {
-    background: #e0b483;
-  }
-
-  .kind-mark.codex {
-    background: #8fb8e8;
-  }
-
-  .kind-mark.grok {
-    background: #a8aeb6;
-  }
-}
-
-.src-tag {
-  font-size: 11px;
-  line-height: 1.45;
-  padding: 0 5px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-  color: var(--text-faint);
-}
-
-.src-tag.mono {
-  font-family: var(--font-mono);
-}
-
-.src-tag.fallback {
-  border-color: var(--warn);
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.meta-warn {
-  color: var(--warn);
 }
 
 .typing {
@@ -2967,57 +1682,6 @@ p.project-quota-hidden {
   min-height: 76px;
 }
 
-.recipient-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  min-height: 36px;
-  margin-bottom: 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-.recipient-chip {
-  flex: none;
-  height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-sunken);
-  color: var(--text-dim);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.recipient-chip:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.recipient-chip.on {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
-
-.recipient-chip.all {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
-}
-
-.recipient-chip.all.on {
-  background: var(--danger-soft);
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-.recipient-chip:disabled {
-  opacity: 0.5;
-}
-
 .composer-lock {
   display: flex;
   align-items: center;
@@ -3032,6 +1696,7 @@ p.project-quota-hidden {
 }
 
 /* 正常做完也會關輸入框：做完用中性色，警示色留給中止與失敗。 */
+
 .composer-lock.ok {
   color: var(--status-ok);
   background: var(--bg-sunken);
@@ -3039,38 +1704,11 @@ p.project-quota-hidden {
 }
 
 /* 回合進行中那條只是中斷入口，不是警告，走中性色。 */
+
 .composer-lock.running {
   color: var(--text-dim);
   background: var(--bg-sunken);
   border-color: var(--border-strong);
-}
-
-/* Not a warning: the turn is still running, but the message is safely parked. */
-.composer-queued {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-  background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: 6px;
-  padding: 4px 10px;
-  margin-bottom: 8px;
-}
-
-.composer-queued-label {
-  flex: none;
-  font-weight: 600;
-  color: var(--accent-ink);
-}
-
-.composer-queued-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .composer-box {
@@ -3094,13 +1732,6 @@ p.project-quota-hidden {
 
 .composer textarea::placeholder {
   color: var(--text-faint);
-}
-
-/* 複製手勢不攔截長按、選取或捲動，iOS 仍可用原生文字選取選單。 */
-.bubble-copyable {
-  -webkit-user-select: text;
-  user-select: text;
-  -webkit-touch-callout: default;
 }
 
 @media (width <= 640px) {
@@ -3134,150 +1765,6 @@ p.project-quota-hidden {
   filter: brightness(1.08);
 }
 
-/* attachments (drop / paste) */
-
-.drop-veil {
-  position: absolute;
-  inset: 8px;
-  z-index: 20;
-  display: grid;
-  place-items: center;
-  border: 2px dashed var(--accent);
-  border-radius: var(--radius-lg);
-  /* 幾乎透明：拖圖時對話要看得見判斷丟哪。只留虛線框＋小標籤，別加 backdrop-filter。 */
-  background: color-mix(in srgb, var(--accent-soft) 12%, transparent);
-  pointer-events: none;
-}
-
-.drop-veil-box {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 22px;
-  border-radius: 999px;
-  background: var(--bg-panel);
-  box-shadow: var(--shadow);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--accent-ink);
-}
-
-.attach-tray {
-  /* 放大預覽貼托盤上緣浮出，定位基準在這（預覽寬＝對話框寬）。 */
-  position: relative;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.attach-peek {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 24;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: var(--bg-panel);
-  box-shadow: var(--shadow);
-  pointer-events: none;
-}
-
-.attach-peek img {
-  max-width: 100%;
-  /* 不長過對話區，否則從畫面上緣被切掉。 */
-  max-height: min(52vh, 460px);
-  object-fit: contain;
-  border-radius: var(--radius);
-}
-
-.attach-peek-cap {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-
-.attach-thumb.peeking {
-  border-color: var(--accent);
-}
-
-.attach-thumb {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 220px;
-  padding: 4px 26px 4px 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-}
-
-.attach-thumb img {
-  width: 40px;
-  height: 40px;
-  flex: none;
-  object-fit: cover;
-  border-radius: 4px;
-  background: var(--bg-hover);
-}
-
-.attach-thumb-name {
-  font-size: 11.5px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.attach-thumb-state {
-  flex: none;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-.attach-thumb-state.err {
-  color: var(--danger);
-}
-
-.attach-thumb.uploading img {
-  opacity: 0.55;
-}
-
-.attach-thumb.failed {
-  border-color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.attach-thumb-x {
-  position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 14px;
-  line-height: 1;
-}
-
-.attach-thumb-x:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
 .attach-pick {
   flex: none;
   align-self: flex-end;
@@ -3287,208 +1774,11 @@ p.project-quota-hidden {
   color: var(--text-dim);
 }
 
-.attach-pick:hover:not(:disabled) {
-  color: var(--accent-ink);
-}
-
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
-}
-
-.msg-attachment {
-  padding: 0;
-  border: 1px solid color-mix(in srgb, currentcolor 25%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, currentcolor 8%, transparent);
-  overflow: hidden;
-  line-height: 0;
-  cursor: zoom-in;
-}
-
-/* 卡片坐在實心藍的使用者泡泡上，--ring 只有 1.2:1：環跟泡泡文字色走（白環 4.65:1）；hover 原本無回饋。 */
-.msg-attachment {
-  --ring: currentcolor;
-}
-
-.msg-attachment:hover {
-  background: color-mix(in srgb, currentcolor 24%, transparent);
-}
-
-.msg-attachment img {
-  display: block;
-  max-width: 220px;
-  max-height: 160px;
-  /* `contain`, not `cover`: a tall screenshot must stay recognisable, not be cropped. */
-  object-fit: contain;
-}
-
-.msg-attachment.loading {
-  width: 96px;
-  height: 72px;
-}
-
-.msg-attachment-fallback {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
-  font-size: 12px;
-  line-height: 1;
-  opacity: 0.6;
-}
-
-.lightbox {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: grid;
-  place-items: center;
-  padding: 32px;
-  background: rgb(0 0 0 / 62%);
-}
-
-.lightbox-inner {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-width: min(1100px, 92vw);
-  max-height: 88vh;
-}
-
-.lightbox-inner img {
-  max-width: 100%;
-  max-height: calc(88vh - 52px);
-  object-fit: contain;
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-}
-
-.lightbox-loading {
-  display: grid;
-  place-items: center;
-  width: 320px;
-  height: 200px;
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-  color: var(--text-dim);
-}
-
-.lightbox-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-}
-
-.lightbox-name {
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.lightbox-path {
-  flex: 1;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Only shown when it has something to say; never a static blurb. */
-.composer-hint {
-  margin-top: 5px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-faint);
-}
-
-.jump-bottom {
-  position: absolute;
-  right: 24px;
-  bottom: 12px;
-  z-index: 15;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--bg-panel);
-  box-shadow: var(--shadow);
-  color: var(--text-dim);
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1;
-}
-
-.jump-bottom:hover {
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-
-/* 「這回合的提問」浮窗（`LastAskPeek`）：貼 `.msg-list-wrap` 下緣（2026-09-08 使用者要它在視線處），不佔高度以免訊息跳動。
-   slot 不吃指標事件（兩側訊息仍可選取）；底色不透明，否則兩層字疊在一起。 */
-.lastq-slot {
-  position: absolute;
-  /* top 一定要給：只釘 bottom 時長訊息會長出 .msg-list-wrap 外，把 × 頂出畫面；釘上下 + max-height:100%。 */
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 14;
-  margin: 0 auto;
-  max-width: var(--chat-max);
-  padding: 8px 28px 10px;
-  box-sizing: border-box;
-  pointer-events: none;
-  /* 靠右、同使用者氣泡寬（2026-09-08）：長得像剛送出的那則才讀得出「還在跑」，置中像系統通知。 */
-  display: flex;
-  justify-content: flex-end;
-  align-items: flex-end;
-}
-
-.lastq {
-  pointer-events: auto;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  /* 超過的由 .lastq-body 自己捲，× 永遠在畫面內。 */
-  max-height: 100%;
-  max-width: min(560px, 82%);
-  min-width: 260px;
-  padding: 7px 8px 9px 14px;
-  border: 0;
-  border-radius: 14px;
-  border-bottom-right-radius: 4px;
-  background: var(--bubble-user);
-  color: var(--bubble-user-text);
-  box-shadow: var(--shadow);
-}
-
-/* 「進行中」：亮光每 2.4 秒掃過；只掃光不動位置，不跟底下的輸出搶注意力。 */
-.lastq::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 60%;
-  pointer-events: none;
-  background: linear-gradient(105deg, transparent 0%, rgb(255 255 255 / 0.18) 50%, transparent 100%);
-  /* 只動 transform（compositor），不動 background-position——後者每幀重繪整張氣泡。 */
-  will-change: transform;
-  animation: lastq-sweep 2.4s ease-in-out infinite;
 }
 
 @keyframes lastq-sweep {
@@ -3501,116 +1791,8 @@ p.project-quota-hidden {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .lastq::after {
-    animation: none;
-  }
-}
-
-.lastq-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.lastq-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--bubble-user-text);
-  white-space: nowrap;
-}
-
-.lastq-tag::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: blink 1.2s ease-in-out infinite;
-}
-
-.lastq-time {
-  font-size: 11px;
-  color: rgb(255 255 255 / 0.7);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 兩個都 `margin-left: auto`：有提示時提示吃剩餘空間，沒有時 × 自己貼右。 */
-.lastq-hint,
-.lastq-x {
-  margin-left: auto;
-}
-
-.lastq-hint {
-  font-size: 11px;
-  color: rgb(255 255 255 / 0.7);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.lastq-x {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  color: rgb(255 255 255 / 0.75);
-  font-size: 15px;
-  line-height: 1;
-}
-
-.lastq-x:hover {
-  background: rgb(255 255 255 / 0.18);
-  color: #fff;
-}
-
-/* 夾成三行（長提問常是整段規格）；展開上限 40vh 自己捲。 */
-.lastq-body {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  overflow: hidden;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  font: inherit;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--bubble-user-text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-@media (hover: hover) {
-  .lastq-body:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-}
-
-.lastq.open .lastq-body {
-  display: block;
-  /* 用 flex 分配而非固定 vh：行動瀏覽器網址列收合會讓 vh 大於可視區。min-height:0 讓 flex 子項縮得下去。 */
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: none;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
 /* 從浮窗捲過去後閃一下，否則不知道停在哪則。 */
+
 .msg.flash .bubble {
   animation: msg-flash 1.6s ease-out;
 }
@@ -3627,7 +1809,9 @@ p.project-quota-hidden {
 }
 
 /* The bot's own status bar, mirrored from the pane. */
+
 /* Only the status half scrolls: `.issues-pop` is absolute inside `.issues-bar`, an `overflow` ancestor would clip it. */
+
 .context-bar {
   display: flex;
   align-items: center;
@@ -3639,54 +1823,10 @@ p.project-quota-hidden {
   background: var(--bg-sunken);
 }
 
-.context-bar > .issues-bar {
-  flex: none;
-  padding: 0;
-  border-bottom: 0;
-  background: transparent;
-}
-
-.context-bar > .statusline-bar {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 0;
-  border-bottom: 0;
-  background: transparent;
-}
-
 .context-bar > .issues-bar + .statusline-bar,
 .context-bar > .git-bar + .statusline-bar {
   padding-left: 10px;
   border-left: 1px solid var(--border);
-}
-
-.git-bar {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  gap: 6px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.git-stat,
-.git-ab {
-  display: inline-flex;
-  gap: 5px;
-  font-family: var(--font-mono);
-  color: var(--text-faint);
-}
-
-.git-stat.dirty .git-ins {
-  color: var(--lamp-green);
-}
-
-.git-stat.dirty .git-del {
-  color: var(--danger);
-}
-
-.git-ab {
-  color: var(--accent-ink);
 }
 
 .git-bar .mini-btn {
@@ -3696,207 +1836,10 @@ p.project-quota-hidden {
   font-size: 11.5px;
 }
 
-.git-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* 桌面：git 動作平常收起，hover／Tab 才彈出；上緣 padding 接住游標，移過去不會斷。 */
-@media (hover: hover) and (width > 640px) {
-  .git-bar {
-    position: relative;
-  }
-
-  .git-actions {
-    position: absolute;
-    top: 100%;
-    left: -8px;
-    z-index: 30;
-    display: none;
-    padding: 6px 8px;
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    background: var(--bg-panel);
-    box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
-  }
-
-  .git-actions::before {
-    content: '';
-    position: absolute;
-    inset: -8px 0 100%;
-  }
-
-  .git-bar:hover .git-actions,
-  .git-bar:focus-within .git-actions,
-  .git-actions.open {
-    display: inline-flex;
-  }
-}
-
-/* 版本固定貼這一列最右邊（2026-09-12 使用者）。 */
-.context-bar .sl-item.sl-version {
-  margin-left: auto;
-}
-
-/* 版本被窄視窗收掉時由升級鈕自己貼右。 */
-.sl-update {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex: none;
-  height: 20px;
-  padding: 0 7px;
-  border: 1px solid color-mix(in srgb, var(--lamp-green) 45%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--lamp-green) 10%, transparent);
-  color: var(--lamp-green);
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.sl-update:hover:not(:disabled) {
-  border-color: var(--lamp-green);
-}
-
-.sl-update:disabled {
-  color: var(--text-faint);
-  border-color: var(--border-strong);
-  background: none;
-  cursor: default;
-}
-
 @media (width <= 1080px) {
   .context-bar .sl-version + .sl-update {
     margin-left: auto;
   }
-}
-
-.git-commit-form {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.git-commit-msg {
-  width: 260px;
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--bg-panel);
-  color: var(--text);
-  font-size: 12px;
-}
-
-.statusline-bar {
-  display: flex;
-  align-items: center;
-  flex: none;
-  gap: 8px;
-  padding: 5px 24px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-sunken);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.statusline-bar::-webkit-scrollbar {
-  display: none;
-}
-
-.statusline-text {
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-dim);
-  white-space: pre;
-}
-
-.sl-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  flex: none;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.sl-item + .sl-item {
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
-  margin-left: 2px;
-}
-
-.sl-k {
-  color: var(--text-faint);
-  font-size: 11px;
-  letter-spacing: 0.02em;
-}
-
-.sl-v {
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.sl-dim {
-  color: var(--text-faint);
-}
-
-/* The wrap stays `.sl-item` so the left-rule between fields still matches. */
-.sl-pick-wrap {
-  position: relative;
-}
-
-.sl-pick-btn {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  border-radius: 4px;
-}
-
-.sl-pick-btn:hover .sl-v,
-.sl-pick-btn[aria-expanded='true'] .sl-v {
-  color: var(--accent-ink);
-}
-
-.model-quick-pop {
-  position: fixed;
-  z-index: 50;
-  display: grid;
-  gap: 8px;
-  min-width: 220px;
-  max-width: min(360px, calc(100vw - 16px));
-  padding: 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  text-align: left;
-}
-
-.model-quick-pop .field {
-  margin: 0;
-}
-
-.model-quick-pop .hint {
-  margin: 0;
-}
-
-/* 說明要能自己換行，否則 `2x speed, increased usage` 把 popover 撐到 max-width。 */
-.model-quick-pop .opt-group .field-note {
-  flex: 1 1 100%;
-  margin: 0;
 }
 
 /* blocked / term */
@@ -3907,22 +1850,10 @@ p.project-quota-hidden {
   padding: 10px 16px 12px;
 }
 
-.blocked-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
 .blocked-title {
   font-size: 12.5px;
   font-weight: 650;
   color: var(--danger);
-}
-
-.blocked-sub {
-  font-size: 11px;
-  color: var(--text-dim);
 }
 
 .term {
@@ -3942,15 +1873,12 @@ p.project-quota-hidden {
 
 /* 折行模式（`termWrap.ts`，手機預設開）：會弄亂 TUI 框線，但 390px 不折就讀不到右半邊。
    `break-all` 必要（無空白的長路徑仍會撐橫捲）；`overflow-x: hidden` 收掉殘留溢出。 */
+
 .term.term-wrap {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-all;
   overflow-x: hidden;
-}
-
-.term.blocked-term {
-  max-height: 300px;
 }
 
 .keypad {
@@ -3977,6 +1905,7 @@ p.project-quota-hidden {
 }
 
 /* blocked 全畫面終端（BlockedModal）：吃掉大半畫面是刻意的，要判斷的就是這張圖。 */
+
 .modal.blocked-modal {
   width: min(1100px, calc(100vw - 48px));
   /* 高度跟內容走：TUI 對話框常只有十幾行，固定滿版會留一大片空白。 */
@@ -4008,6 +1937,7 @@ p.project-quota-hidden {
 }
 
 /* codex 升級提示（2026-09-10）：changelog 按了才長，手機上攤開會把終端推出視野。 */
+
 .blocked-modal-update {
   margin: 0 16px;
   display: flex;
@@ -4017,6 +1947,7 @@ p.project-quota-hidden {
 }
 
 /* 對話上方的 blocked 面板已有 16px 內距，不需要 modal 邊距。 */
+
 .blocked > .blocked-modal-update {
   margin: 0 0 8px;
 }
@@ -4035,6 +1966,7 @@ p.project-quota-hidden {
 }
 
 /* 焦點停在終端（可捲），但不畫成可打字的輸入框。 */
+
 .term.blocked-modal-term:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -4064,15 +1996,6 @@ p.project-quota-hidden {
   flex: 1;
   min-width: 0;
   line-height: 1.5;
-}
-
-.term-pane {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 12px 16px 16px;
-  gap: 8px;
 }
 
 .term-pane .term {
@@ -4141,6 +2064,7 @@ p.project-quota-hidden {
 }
 
 /* 關閉鍵不用 opacity 0.6 繼承色（錯誤通知上紅字對比掉到 3.3），改固定次要文字色。 */
+
 .notice button {
   display: inline-flex;
   align-items: center;
@@ -4170,6 +2094,7 @@ p.project-quota-hidden {
 /* responsive */
 
 /* 窄視窗標題列分三段讓：先收邊距，再丟重複資訊（模型後綴、主機標），最後丟 pane 鍵。名字、燈號、設定、分頁全程保留。 */
+
 @media (width <= 1240px) {
   .main-head {
     gap: 8px;
@@ -4186,11 +2111,6 @@ p.project-quota-hidden {
 }
 
 @media (width <= 1160px) {
-  /* 主機標在設定面板／側欄都看得到，先讓；模型後綴只在手機讓（1024–1160 還有空間）。 */
-  .bot-head .host-badge {
-    display: none;
-  }
-
   .main-head {
     gap: 6px;
     padding: 0 10px;
@@ -4198,21 +2118,6 @@ p.project-quota-hidden {
 }
 
 @media (width <= 1080px) {
-  /* context bar 排不下時 `版本` 先讓。門檻不是 1024：1025–1080 側欄還在，主區域反而更擠。 */
-  .context-bar .sl-item.sl-version {
-    display: none;
-  }
-
-  /* `.main-status.pane-toggle` has two classes later, so a bare `.main-status` here loses on specificity. */
-  .main-status,
-  .main-head .main-status.pane-toggle {
-    display: none;
-  }
-
-  .conn-label {
-    display: none;
-  }
-
   .tab {
     padding: 0 9px;
   }
@@ -4247,6 +2152,7 @@ p.project-quota-hidden {
 }
 
 /* 手機（≤640px）標題列只回答「誰、在做什麼、去哪頁」：額度收成 chip（數字，風險不能只剩顏色）、模型徽章讓位；context bar 丟帳號欄與 repo owner。 */
+
 @media (width <= 640px) {
   .main-head {
     gap: 6px;
@@ -4254,49 +2160,25 @@ p.project-quota-hidden {
   }
 
   /* 模型在側欄與設定面板都看得到，手機不值標題列第二行。 */
+
   .bot-head .model-tag {
     display: none;
   }
 
   /* 手機第二行是版本號不是 model，kind logo 沒對照物，只會多佔高度（桌面見 `.main-title-sub`）。 */
+
   .bot-head .main-title-sub > .kind-tag {
     display: none;
   }
 
-  .main-head .quota-open {
-    gap: 5px;
-    padding: 4px 4px;
-  }
-
-  .main-head .quota-hp {
-    gap: 5px;
-    padding: 3px 5px;
-    min-height: 26px;
-  }
-
-  /* `.quota-open` 已有 5px gap，再加分隔線會變成表格。 */
-  .main-head .quota-hp + .quota-hp {
-    border-left-color: transparent;
-  }
-
-  /* 手機身分名與停用方塊都讓位，標籤欄寬收回自動。 */
-  .main-head .quota-head {
-    flex-direction: row;
-    gap: 4px;
-    width: auto;
-  }
-
   /* 群組標題列在手機也讓掉額度，每個 bot 的標題列仍有。 */
+
   .group-head > .quota-strip {
     display: none;
   }
 
-  /* 群組標題列在 390px 排到 451px，「關閉群組」被推出畫面就回不去單一 bot；成員在收件者 chip 列已有，讓位。 */
-  .group-head > .members {
-    display: none;
-  }
-
   /* 氣泡百分比上限是為了限行長；390px 反而一行只剩三十幾字。收窄 padding、agent 氣泡放滿，使用者氣泡留縮排。 */
+
   .msg-list {
     padding-left: 14px;
     padding-right: 14px;
@@ -4311,36 +2193,10 @@ p.project-quota-hidden {
   }
 
   /* 終端工具列在 390px 折成三行；pane 那顆標題列已有、結尾是說明，兩個都讓。 */
+
   .term-bar .term-pane-chip,
   .term-bar .term-bar-note {
     display: none;
-  }
-
-  /* `+4`：popover 已列出全部，這 20px 讓給設定鍵。 */
-  .main-head .quota-more {
-    display: none;
-  }
-
-  /* 手機沒有氣泡右邊的空白，「↓ 最新」會蓋在字上：縮成箭頭圓鈕（~130px → 34px）。 */
-  .jump-bottom {
-    right: 12px;
-    width: 34px;
-    padding: 0;
-    justify-content: center;
-  }
-
-  .jump-bottom > span {
-    display: none;
-  }
-
-  /* 跟訊息區 14px padding 對齊；兩行就夠，三行加標題列會蓋掉近四分之一畫面。 */
-  .lastq-slot {
-    padding: 8px 14px 8px;
-  }
-
-  .lastq-body {
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
   }
 
   /* 手機不壓 vh 上限：卡片已被 max-height:100% 約束。 */
@@ -4349,32 +2205,11 @@ p.project-quota-hidden {
     gap: 8px;
     padding: 4px 10px;
   }
-
-  .context-bar > .issues-bar {
-    min-width: 0;
-  }
-
-  .issues-btn {
-    min-width: 0;
-  }
-
-  .issues-repo {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .issues-owner {
-    display: none;
-  }
-
-  .sl-item.sl-account {
-    display: none;
-  }
 }
 
 @media (width > 1024px) {
   /* Must out-specify `.main-head .menu-btn` — a media query adds no specificity, so a bare `.menu-btn` loses. */
+
   .main-head .menu-btn {
     display: none;
   }
@@ -4384,274 +2219,33 @@ p.project-quota-hidden {
   }
 }
 
-/* directory picker (new project) */
-.field-with-btn {
-  display: flex;
-  gap: 6px;
-}
-.field-with-btn input[type='text'] {
-  flex: 1;
-  min-width: 0;
-}
 /* The list stretches to the sheet bottom and only it scrolls, so crumb bar and actions stay in view. */
+
 .sheet-body:has(> .dirpicker) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
   padding-bottom: 12px;
 }
+
 .sheet-body > .dirpicker {
   flex: 1;
   min-height: 0;
 }
+
 .dirpicker {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 8px 4px 10px;
 }
+
 .dirpicker > * {
   flex: 0 0 auto;
 }
-.dirpicker-top {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  min-width: 0;
-}
-.dirpicker-top .btn.icon {
-  padding: 3px 8px;
-  line-height: 1.2;
-}
-.dirpicker-manual {
-  flex: 1;
-  min-width: 0;
-}
-.dirpicker-manual input[type='text'] {
-  width: 100%;
-  padding: 4px 8px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-}
-.dirpicker-crumbs {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  font-size: 11.5px;
-  padding: 2px 4px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  overflow-x: auto;
-  scrollbar-width: none;
-  white-space: nowrap;
-}
-.dirpicker-crumbs::-webkit-scrollbar {
-  display: none;
-}
-.dirpicker-crumbs .crumb-wrap {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-}
-.dirpicker-crumbs .sep {
-  color: var(--text-faint);
-  margin: 0 1px;
-}
-.dirpicker-crumbs .crumb {
-  background: none;
-  border: none;
-  padding: 1px 4px;
-  border-radius: 4px;
-  color: var(--accent-ink);
-  cursor: pointer;
-  font-family: var(--font-mono);
-  white-space: nowrap;
-}
-.dirpicker-crumbs .crumb.cur {
-  color: var(--text);
-  font-weight: 600;
-}
-.dirpicker-crumbs .crumb:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-.dirpicker-crumbs .crumb-edit {
-  position: sticky;
-  right: 0;
-  margin-left: auto;
-  flex: 0 0 auto;
-  background: var(--bg-sunken);
-  border: none;
-  padding: 1px 3px;
-  border-radius: 4px;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-.dirpicker-crumbs .crumb-edit:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--bg-hover);
-}
-.dirpicker-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.dirpicker-filter {
-  flex: 1;
-  min-width: 0;
-  padding: 4px 8px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 11.5px;
-}
-.dirpicker-filter:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.dirpicker-hidden {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--text-dim);
-  cursor: pointer;
-  user-select: none;
-}
-.dirpicker-list {
-  flex: 1 1 auto;
-  min-height: 120px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  display: grid;
-  align-content: start;
-}
-.dirpicker-row {
-  display: flex;
-  align-items: stretch;
-  width: 100%;
-  border-bottom: 1px solid var(--border);
-}
-.dirpicker-row:last-child {
-  border-bottom: none;
-}
-.dirpicker-row:hover {
-  background: var(--bg-hover);
-}
-.dirpicker-row.sel {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-.dirpicker-pick {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  padding: 6px 8px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 12.5px;
-  color: inherit;
-}
-.dirpicker-row .name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dirpicker-row.sel .name {
-  font-weight: 600;
-}
-.dirpicker-row .tag {
-  font-size: 11px;
-  padding: 0 5px;
-  border-radius: 8px;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
-}
-.dirpicker-enter {
-  flex: 0 0 auto;
-  padding: 0 10px;
-  background: none;
-  border: none;
-  border-left: 1px solid transparent;
-  color: var(--text-faint);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-}
-.dirpicker-row:hover .dirpicker-enter,
-.dirpicker-row.sel .dirpicker-enter {
-  color: var(--accent-ink);
-  border-left-color: var(--border);
-}
-.dirpicker-enter:hover:not(:disabled) {
-  background: var(--bg-active);
-}
-.dirpicker-empty {
-  padding: 10px;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-.dirpicker-empty.err {
-  color: #d04a4a;
-}
-.dirpicker-foot {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-.dirpicker-target {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-.dirpicker-target .lbl {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-.dirpicker-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 0;
-}
-.dirpicker-keys {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.dirpicker-cur {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  align-self: center;
-}
-
 
 /* attach (在終端開啟) */
+
 .attach {
   position: relative;
   display: inline-flex;
@@ -4667,55 +2261,6 @@ p.project-quota-hidden {
   color: var(--text-dim);
 }
 
-.attach-btn:hover:not(:disabled),
-.attach-btn.on {
-  color: var(--accent-ink);
-  background: var(--accent-soft);
-}
-
-.attach-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 30;
-  width: min(440px, calc(100vw - 32px));
-  max-height: min(260px, calc(100vh - 32px));
-  overflow: auto;
-  padding: 10px 12px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  text-align: left;
-  white-space: normal;
-}
-
-.attach-hint {
-  margin-bottom: 6px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.attach-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.attach-cmd {
-  flex: 1;
-  min-width: 0;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-
 .btn.primary.ok {
   background: var(--lamp-green);
   border-color: var(--lamp-green);
@@ -4725,24 +2270,8 @@ p.project-quota-hidden {
   position: static;
 }
 
-.project-head:has(.attach-pop) {
-  overflow: visible;
-  z-index: 31;
-}
-
-.project-head:has(.attach-pop) .project-head-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
 .project-head .attach-btn {
   padding: 2px 4px;
-}
-
-.project-head .attach-pop {
-  left: 8px;
-  right: 8px;
-  width: auto;
 }
 
 .host-row .attach-btn {
@@ -4750,23 +2279,33 @@ p.project-quota-hidden {
 }
 
 /* markdown inside assistant bubbles */
+
 .bubble.md {
   white-space: normal;
   font-size: 15px;
   line-height: 24px;
 }
+
 .bubble.md > :first-child { margin-top: 0; }
+
 .bubble.md > :last-child { margin-bottom: 0; }
+
 .bubble.md p { margin: 0 0 6px; }
+
 .bubble.md ul, .bubble.md ol { margin: 0 0 6px; padding-left: 20px; }
+
 .bubble.md li { margin: 1px 0; }
+
 .bubble.md h1, .bubble.md h2, .bubble.md h3, .bubble.md h4 {
   margin: 8px 0 4px;
   font-size: 1em;
   font-weight: 600;
 }
+
 .bubble.md h1 { font-size: 1.15em; }
+
 .bubble.md h2 { font-size: 1.08em; }
+
 .bubble.md code {
   font-family: var(--font-mono);
   font-size: 13px;
@@ -4775,7 +2314,9 @@ p.project-quota-hidden {
   border-radius: 4px;
   background: var(--code-bg);
 }
+
 /* No border, so fenced blocks don't read as a box inside a box. */
+
 .bubble.md pre {
   margin: 4px 0 6px;
   padding: 6px 9px;
@@ -4785,6 +2326,7 @@ p.project-quota-hidden {
   white-space: pre;
   line-height: 20px;
 }
+
 .bubble.md pre code {
   padding: 0;
   border: none;
@@ -4792,21 +2334,25 @@ p.project-quota-hidden {
   font-size: 13px;
   line-height: 20px;
 }
+
 .bubble.md > pre:only-child {
   margin: 0;
   padding: 0;
   background: transparent;
   white-space: pre-wrap;
 }
+
 .bubble.md > pre:only-child code {
   font-size: 0.95em;
 }
+
 .bubble.md blockquote {
   margin: 6px 0;
   padding: 2px 10px;
   border-left: 3px solid var(--border-strong);
   color: var(--text-dim);
 }
+
 .bubble.md table {
   border-collapse: collapse;
   margin: 6px 0 8px;
@@ -4814,12 +2360,16 @@ p.project-quota-hidden {
   overflow-x: auto;
   font-size: 0.92em;
 }
+
 .bubble.md th, .bubble.md td {
   border: 1px solid var(--border);
   padding: 3px 8px;
 }
+
 .bubble.md th { background: var(--bg-sunken); }
+
 .bubble.md a { color: var(--accent-ink); }
+
 .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 
 /* remote hosts (§11.6) */
@@ -4846,6 +2396,7 @@ p.project-quota-hidden {
 }
 
 /* 可點，比 `.host-badge` 多一點內距與 hover；色沿用 accent-soft。 */
+
 .update-badge {
   flex: none;
   font-size: 11px;
@@ -4872,123 +2423,10 @@ p.project-quota-hidden {
   cursor: default;
 }
 
-/* 側欄「待升級」記號：綠色雙 chevron、沒有底（2026-09-10 使用者）。 */
-.bot-kind-wrap {
-  position: relative;
-  flex: none;
-  display: inline-flex;
-}
-.bot-update-dot {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  display: inline-grid;
-  place-items: center;
-  width: 11px;
-  height: 11px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--lamp-green);
-  line-height: 1;
-  /* 2026-09-11：這顆就是「套用更新」按鈕；11px 太小，用 `::after` 撐 20px 透明命中區。 */
-  cursor: pointer;
-  z-index: 1;
-  filter: drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
-}
-.bot-update-dot::after {
-  content: '';
-  position: absolute;
-  inset: -5px;
-}
-
-.bot-update-dot:hover {
-  color: var(--lamp-green);
-  filter: brightness(1.25) drop-shadow(0 0 1px var(--bg-panel)) drop-shadow(0 0 1px var(--bg-panel));
-}
-
-.bot-update-dot:disabled {
-  cursor: progress;
-  opacity: 0.6;
-}
-
 .bot-update-dot .upgrade-icon {
   width: 11px;
   height: 11px;
   stroke-width: 4;
-}
-
-/* 「回合被中斷（API 錯誤）」SPEC §4.3a：燈號說 idle 時這是唯一「沒做完」的訊號，不能是 tooltip，也不能用 accent（那是好消息色）。 */
-.turn-error-badge {
-  flex: none;
-  font-size: 11px;
-  font-weight: 650;
-  padding: 0 7px;
-  height: 18px;
-  border-radius: 3px;
-  border: 1px solid var(--danger);
-  background: var(--danger-soft);
-  color: var(--danger);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.turn-error-badge:hover {
-  background: var(--danger);
-  color: #fff;
-}
-
-/* portal 到 body 再 fixed（見 TurnErrorBadge）：標題列會被對話區蓋住。 */
-.turn-error-pop {
-  position: fixed;
-  z-index: 50;
-  width: min(420px, calc(100vw - 16px));
-  padding: 10px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--bg-panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  text-align: left;
-}
-
-.turn-error-why {
-  margin: 0 0 8px;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text);
-}
-
-.turn-error-raw {
-  margin: 0 0 10px;
-  padding: 7px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg-sunken);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--danger);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.turn-error-act {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
-/* 側欄記號點不下去（列本身是按鈕），但要看得見，不能只有 tooltip。 */
-.bot-turn-error {
-  flex: none;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 14px;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--danger);
-  color: #fff;
-  white-space: nowrap;
 }
 
 .disclosure-note {
@@ -5010,130 +2448,10 @@ p.project-quota-hidden {
   padding: 2px 0 4px;
 }
 
-.hosts-empty {
-  padding: 6px 4px;
-}
-
-.host-list {
-  display: grid;
-  gap: 4px;
-  padding: 4px 0 2px;
-}
-
-.host-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-}
-
-.host-row .lamp {
-  margin-top: 5px;
-}
-
-.host-main {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-
-.host-name {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
 .host-count {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-faint);
-}
-
-.host-ssh {
-  font-size: 11px;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.host-err {
-  font-size: 11px;
-  color: var(--danger);
-  overflow-wrap: anywhere;
-}
-
-.host-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: none;
-}
-
-.host-shells {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 2px;
-}
-
-.host-shell {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 2px 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 11px;
-}
-
-.host-shell.active {
-  border-color: var(--accent);
-}
-
-.host-shell-open {
-  border: 0;
-  background: none;
-  color: var(--text-dim);
-  font-size: 11px;
-  padding: 1px 2px;
-  cursor: pointer;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.host-shell-open:hover {
-  color: var(--text);
-}
-
-.host-result {
-  margin: 6px 0 2px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  font-size: 11.5px;
-  border: 1px solid var(--border);
-  overflow-wrap: anywhere;
-}
-
-.host-result.ok {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.host-result.err {
-  background: var(--danger-soft);
-  border-color: var(--danger);
-  color: var(--danger);
 }
 
 .host-form-hint {
@@ -5147,76 +2465,6 @@ p.project-quota-hidden {
   flex-wrap: wrap;
 }
 
-.dirpicker-host {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 2px 6px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-/* identities */
-.identity-badge {
-  display: inline-block;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 0 6px;
-  border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  border: 1px solid transparent;
-  font-family: var(--font-mono);
-  line-height: 1.6;
-}
-.identity-badge.is-default {
-  background: transparent;
-  color: var(--text-dim);
-  border-color: var(--border);
-  font-weight: 500;
-}
-.identity-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 6px 4px;
-  border-bottom: 1px solid var(--border);
-}
-/* shell alias 認來的身份（SPEC §16）唯讀，退一階和可編輯的 config 列分開。 */
-.identity-shell-block {
-  display: grid;
-  gap: 2px;
-  margin-top: 4px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--border-strong);
-}
-
-.identity-row.is-shell {
-  background: var(--bg-sunken);
-  border-radius: 6px;
-  border-bottom: 0;
-  padding-right: 8px;
-}
-
-.identity-main {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-.identity-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.identity-detail {
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .field textarea {
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -5250,23 +2498,27 @@ button.model-tag {
 }
 
 /* Reported by the CLI rather than configured on the bot — quieter border. */
+
 .model-tag.reported {
   border-style: dashed;
 }
 
 /* `·` 由 CSS 生成而不寫在 JSX：省一個空白字元，側欄模型徽章差幾 px 就會被截。 */
+
 .model-tag-extra {
   color: var(--text-faint);
   font-weight: 500;
 }
 
 /* `-`，不是 `·`：使用者指名要這個字元（「effort不要那個。改用-」）。已來回改三次——要換之前先問他。 */
+
 .model-tag-extra::before {
   content: '-';
   margin: 0 1px 0 2px;
 }
 
 /* SPEC §4.4a：這格是「下次啟動才用的設定」，⟳ 只是記號，實際值在 tooltip（側欄放不下兩組數字）。 */
+
 .model-tag.stale {
   border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
 }
@@ -5278,6 +2530,7 @@ button.model-tag {
 }
 
 /* 同 `.update-badge` 形狀、換警示色：意思是「你看到的設定現在不是真的」。 */
+
 .drift-badge {
   background: var(--warn-soft);
   color: var(--warn);
@@ -5294,16 +2547,11 @@ button.model-tag[aria-expanded='true'] {
 }
 
 /* hover 與「開著」分家：深色 --accent-ink 疊 wash 只有 4.14:1。 */
+
 button.model-tag:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--btn-ghost-bg-hover);
   color: var(--btn-ghost-fg-hover);
-}
-
-.icon-btn.gear {
-  font-size: 16px;
-  line-height: 0;
-  color: var(--text-dim);
 }
 
 .icon-btn.gear:hover:not(:disabled),
@@ -5323,180 +2571,12 @@ button.model-tag:hover:not(:disabled) {
   background: var(--btn-accent-bg-hover);
 }
 
-/* Selected row's wash is accent-tinted, so resting state needs more contrast; same specificity as hover, so exclude hover/open explicitly. */
-.bot-row.selected .icon-btn.gear:not(:hover):not([aria-expanded='true']),
-.bot-row.selected .icon-btn.menu-btn:not(:hover),
-.bot-row.selected .bot-run-btn:not(:hover) {
-  color: var(--text);
-}
-
-/* Pop-up anchored to the gear. 只是擺放框不是遮罩（`pointer-events: none`）：反灰吃點擊會讓人開設定時不能拖圖、點別的 bot；
-   關閉靠外部 pointerdown 與 Escape。真正的 modal 才用 backdrop。 */
-.bs-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12px;
-  pointer-events: none;
-}
-
-.bot-settings {
-  position: relative;
-  pointer-events: auto;
-  width: min(520px, 100%);
-  max-height: 100%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  box-shadow: var(--shadow);
-  overflow: hidden;
-}
-
-/* First paint is only for measuring the card; don't show it centred for a frame. */
-.bot-settings.measuring {
-  visibility: hidden;
-}
-
-.bot-settings.anchored {
-  position: fixed;
-  margin: 0;
-  max-height: calc(100vh - 24px);
-}
-
-.bs-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 56px;
-  min-height: 56px;
-  padding: 0 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-side);
-  flex: none;
-}
-
-.bs-head strong {
-  font-size: 14px;
-}
-
-.bs-sub {
-  font-size: 11px;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bs-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 24px;
-  font-size: 12.5px;
-  border-bottom: 1px solid var(--border);
-}
-
-.bs-banner.warn {
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.bs-banner.ok {
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
-
-.bs-banner > span {
-  flex: 1;
-  min-width: 0;
-}
-
-.bs-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 24px;
-}
-
-.bs-body > .form {
-  max-width: none;
-  gap: 20px;
-  padding: 0;
-}
-
 .bs-body .field input[type='text'],
 .bs-body .field select,
 .bs-body .field textarea {
   min-height: 40px;
   background: var(--bg-sunken);
   border-color: var(--border-strong);
-}
-
-.bs-body .field input[type='text']:disabled,
-.bs-body .field select:disabled {
-  color: var(--text-dim);
-  background: var(--bg-hover);
-  -webkit-text-fill-color: var(--text-dim);
-  opacity: 1;
-}
-
-.bs-inline-note {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 11px;
-  color: var(--warn);
-}
-
-.bs-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 72px;
-  min-height: 72px;
-  padding: 0 24px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-side);
-  flex: none;
-  position: sticky;
-  bottom: 0;
-}
-
-/* 不能存的「儲存」退成中性 disabled，不要淡藍實心像可按。 */
-.bs-danger {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 32px;
-  padding: 12px 14px;
-  /* 紅色留給標題與按鈕；整塊粉紅會蓋過表單。 */
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-}
-
-.bs-danger > div {
-  flex: 1;
-  min-width: 0;
-}
-
-.bs-danger strong {
-  font-size: 12.5px;
-  color: var(--danger);
-}
-
-.bs-danger .hint {
-  margin: 2px 0 0;
-  font-family: var(--font-ui);
-  color: var(--text-dim);
 }
 
 .btn.danger {
@@ -5518,138 +2598,9 @@ button.model-tag:hover:not(:disabled) {
   color: var(--btn-danger-fg-hover);
 }
 
-@media (width <= 1080px) {
-  .bs-danger {
-    flex-direction: column;
-    align-items: stretch;
-  }
-}
-
-/* project group chat (SPEC §13) */
-.project-label-btn {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  grid-template-rows: auto auto;
-  align-items: center;
-  column-gap: 6px;
-  row-gap: 1px;
-  flex: 1;
-  min-width: 0;
-  height: 40px;
-  min-height: 40px;
-  border: 0;
-  background: transparent;
-  padding: 2px 6px;
-  border-radius: 6px;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.project-label-btn .project-group-icon {
-  grid-row: 1;
-  grid-column: 1;
-}
-
 .project-label-btn .project-label {
   grid-row: 1;
   grid-column: 2;
-}
-
-/* 比照 `.bot-name`：選取中的專案再點標題才編輯，未選取時第一下是開專案。 */
-.project-label.renamable {
-  cursor: text;
-  padding: 0 3px;
-  margin-left: -3px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-}
-
-.project-label.renamable:hover {
-  border-color: var(--border-strong);
-  background: var(--bg-panel);
-}
-
-/* 輸入框要剛好佔住標題那格，否則列變高、白框蓋到上一列。 */
-.project-label-input.row {
-  grid-row: 1;
-  grid-column: 2;
-  justify-self: start;
-  box-sizing: border-box;
-  max-width: 100%;
-  height: 19px;
-  padding: 0 2px;
-  margin-left: -3px;
-  border: 1px solid var(--accent);
-  border-radius: 5px;
-  background: var(--bg-panel);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-
-.project-label-head-btn {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 4px;
-  margin-left: -4px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: text;
-  overflow: hidden;
-}
-
-.project-label-head-btn > strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-label-head-btn:hover {
-  border-color: var(--border);
-  background: var(--bg-hover);
-}
-
-.project-label-input.head {
-  max-width: 16em;
-  padding: 1px 4px;
-  margin-left: -4px;
-  border: 1px solid var(--accent);
-  border-radius: 5px;
-  background: var(--bg-panel);
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.project-label-input.bad {
-  border-color: var(--danger);
-}
-
-.project-label-btn .unread-badge {
-  grid-row: 1;
-  grid-column: 3;
-}
-
-.project-label-btn .host-badge {
-  grid-row: 1;
-  grid-column: 4;
-  justify-self: end;
-}
-
-.project-label-btn .project-path {
-  grid-row: 2;
-  grid-column: 2 / -1;
-}
-
-.project-label-btn:hover {
-  background: var(--bg-hover);
 }
 
 .project-head:hover .project-label,
@@ -5657,15 +2608,6 @@ button.model-tag:hover:not(:disabled) {
 .project-label-btn:hover .project-label,
 .project-head.selected .project-label,
 .project-label-btn.selected .project-label {
-  color: var(--accent-ink);
-}
-
-.project-label-btn.selected {
-  background: var(--accent-soft);
-}
-
-.project-head.selected .project-group-icon,
-.project-label-btn.selected .project-group-icon {
   color: var(--accent-ink);
 }
 
@@ -5683,20 +2625,8 @@ button.model-tag:hover:not(:disabled) {
   line-height: 1;
 }
 
-.unread-badge {
-  flex: none;
-  min-width: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
-}
-
 /* 「已完成（未讀）」：方角＋`!` 而非圓丸，跟狀態燈並排才不會被看成第二顆燈。 */
+
 .unread-turns {
   flex: none;
   padding: 0 4px;
@@ -5714,21 +2644,6 @@ button.model-tag:hover:not(:disabled) {
   margin-left: -2px;
 }
 
-.group-tag {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.03em;
-  padding: 0 5px;
-  border-radius: 3px;
-  border: 1px solid var(--border-strong);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
-
-.group-head .main-title {
-  flex: none;
-}
-
 .members {
   display: flex;
   align-items: center;
@@ -5736,14 +2651,6 @@ button.model-tag:hover:not(:disabled) {
   min-width: 0;
   gap: 4px;
   overflow-x: auto;
-}
-
-.members-count {
-  flex: none;
-  margin-left: 2px;
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
 }
 
 .member {
@@ -5762,148 +2669,15 @@ button.model-tag:hover:not(:disabled) {
   background: var(--bg-hover);
 }
 
-/* Group header only: icon without name — name is in tooltip and sidebar. */
-.member.member-icon {
-  position: relative;
-  justify-content: center;
-  flex: none;
-  width: 26px;
-  height: 26px;
-  gap: 0;
-  padding: 0;
-  font-size: 13px;
-  color: var(--text-dim);
-}
-
-.member.member-icon:hover {
-  border-color: var(--border-strong);
-}
-
-.member.member-icon.claude {
-  color: var(--kind-claude);
-}
-
-.member.member-icon .lamp {
-  position: absolute;
-  right: -1px;
-  bottom: -1px;
-  width: 8px;
-  height: 8px;
-  box-shadow: 0 0 0 1.5px var(--bg-panel);
-}
-
-.bot-badge {
-  display: inline-block;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 650;
-  padding: 0 6px;
-  border-radius: 8px;
-  line-height: 1.6;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-
-.bot-badge.claude {
-  background: #f6ede4;
-  border-color: #e0c8ae;
-  color: #8a5a26;
-}
-
-.bot-badge.codex {
-  background: #e7edf6;
-  border-color: #b9cae4;
-  color: #33587f;
-}
-
-.bot-badge.grok {
-  background: #ebebeb;
-  border-color: #c4c4c4;
-  color: #3a3a3a;
-}
-
-.bot-badge.all {
-  background: var(--accent-soft);
-  border-color: transparent;
-  color: var(--accent-ink);
-}
-
-@media (prefers-color-scheme: dark) {
-  .bot-badge.claude {
-    background: #38291b;
-    border-color: #5c4429;
-    color: #e0b483;
-  }
-
-  .bot-badge.codex {
-    background: #1d2836;
-    border-color: #33506f;
-    color: #8fb8e8;
-  }
-
-  .bot-badge.grok {
-    background: #2a2a2a;
-    border-color: #555;
-    color: #d6d6d6;
-  }
-}
-
-.msg-from {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.2;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.msg-speaker {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .msg-meta .msg-from .bot-badge {
   font-size: 11px;
   line-height: 1.4;
   padding: 0 5px;
 }
 
-.msg.system .msg-from {
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 0 4px;
-}
-
 .msg-targets {
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.group-composer .composer-box {
-  position: relative;
-}
-
-.mention-pop {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 10;
-  min-width: 240px;
-  max-height: 220px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
 }
 
 .mention-item {
@@ -5920,42 +2694,13 @@ button.model-tag:hover:not(:disabled) {
   background: var(--bg-active);
 }
 
-.mention-label {
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.group-hint .mention-warn {
-  color: var(--warn);
-}
-
-.group-targets {
-  font-family: var(--font-mono);
-}
-
-.group-head .main-status {
-  font-family: var(--font-mono);
-}
-
-@media (width <= 1080px) {
-  .group-head .members {
-    display: none;
-  }
-}
-
-/* option rows (kind / effort / identity / project) */
-.opt-filter {
-  width: 100%;
-  font-size: 12px;
-  padding: 4px 8px;
-}
-
 .opt-group {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 5px;
 }
+
 .opt-group .opt {
   display: inline-flex;
   align-items: center;
@@ -5971,33 +2716,17 @@ button.model-tag:hover:not(:disabled) {
   color: var(--text);
   cursor: pointer;
 }
+
 .opt-group .opt:hover:not(:disabled):not(.on) {
   background: var(--btn-ghost-bg-hover);
   border-color: var(--border-strong);
   color: var(--btn-ghost-fg-hover);
 }
+
 .opt-group .opt.on {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-text);
-}
-
-/* 「廠推薦」：原廠回報的實際預設級（docs/API.md §12.1 `default_effort`），不是猜的；標在按鈕上不必 hover。 */
-.opt-group .opt .effort-recommended {
-  flex: none;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  line-height: 1.5;
-}
-
-.opt-group .opt.on .effort-recommended {
-  background: rgb(255 255 255 / 25%);
-  color: inherit;
 }
 
 /* confirm dialog */
@@ -6015,215 +2744,8 @@ button.model-tag:hover:not(:disabled) {
   backdrop-filter: blur(2px);
 }
 
-.confirm-dialog {
-  max-width: calc(100vw - 48px);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
-  padding: 16px 18px 14px;
-}
-
-.confirm-title {
-  margin: 0 0 8px;
-  font-size: 15px;
-  font-weight: 650;
-  line-height: 1.3;
-}
-
-.confirm-body {
-  margin: 0 0 14px;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-dim);
-}
-
-.confirm-body strong {
-  color: var(--text);
-  font-weight: 650;
-}
-
-.confirm-require {
-  display: grid;
-  gap: 6px;
-  margin: 0 0 14px;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.confirm-require input {
-  height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 13px;
-}
-
-.confirm-require input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-
-.confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.confirm-note {
-  margin: 0 0 8px;
-  padding: 6px 8px;
-  border-left: 3px solid var(--border-strong);
-  background: var(--bg-sunken);
-  border-radius: var(--radius);
-}
-
-/* 單欄可捲：十顆以上時不能把按鈕擠出畫面。 */
-.confirm-list {
-  margin: 0 0 8px;
-  padding: 0 0 0 18px;
-  max-height: 168px;
-  overflow-y: auto;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.confirm-list.dim {
-  color: var(--text-dim);
-}
-
-/* quota (sol decision, 2026-09-06): at most two queryable kinds; grok never takes strip space. Risk = shape + colour. */
-
-.quota-strip {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 0 0 auto;
-}
-
-/* 格與格之間不留空白（2026-09-11 使用者）：五格各 8px 白吃 40px；分界改用 7px 內距＋1px 細線。 */
-.quota-open {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  padding: 4px 2px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-}
-
-/* 「claude 有更新」（UpdateQuotaChip.tsx）。2026-09-11 使用者：跟側欄 `.bot-update-dot` 一致——**綠色裸 chevron，不要方框**。 */
-.quota-update {
-  flex: none;
-  /* 對齊量表第一行（5h），不要垂直置中：置中時浮在空白中間不屬於任何東西（2026-09-11 使用者）。 */
-  align-self: flex-start;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  height: 18px;
-  margin-top: 2px;
-  margin-left: 8px;
-  margin-right: 7px;
-  padding: 0 2px;
-  font-size: 11px;
-  font-weight: 650;
-  border: 0;
-  background: none;
-  color: var(--lamp-green);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-/* 1px 分隔線比 chip 上下各高 3px，才讀得出是「換一組」而非 chip 邊框。 */
-.quota-update::before {
-  content: '';
-  position: absolute;
-  left: -8px;
-  top: -3px;
-  bottom: -3px;
-  width: 1px;
-  background: var(--border);
-}
-
-/* 用 2px 內距不用 gap（額度區塊一律不留 gap 間距）。 */
-.quota-update-n {
-  padding-left: 2px;
-  font-variant-numeric: tabular-nums;
-}
-
-.quota-update:hover:not(:disabled) {
-  filter: brightness(1.25);
-}
-
-.quota-update:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* 有更新但全在忙：數字改「在忙幾顆」並退成灰——按不動，不該搶眼。 */
-.quota-update.waiting,
-.quota-update:disabled {
-  color: var(--text-faint);
-  cursor: default;
-}
-
-.quota-update.running.done {
-  cursor: pointer;
-}
-
-.quota-update.running.bad {
-  color: var(--danger);
-}
-
-/* 窄視窗只留焦點那組，其餘在 popover。 */
-.quota-more {
-  flex: none;
-  align-self: center;
-  padding: 0 2px 0 4px;
-  border: 0;
-  background: transparent;
-  font-size: 11px;
-  font-weight: 650;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-}
-
-.quota-bars-open {
-  display: inline-flex;
-  padding: 0 0 0 3px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-}
-
-.quota-bars-open:focus-visible,
-.quota-more:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* 停用方塊只有方塊沒文字（說明走 aria-label／`.icon-tip`）；負 margin-top 塞進圖示欄比量表矮的空白（27 vs 36px），高度不變。 */
-.quota-cell-toggle {
-  display: inline-flex;
-  margin-top: -1px;
-  cursor: pointer;
-}
-
-.quota-cell-toggle input {
-  width: 10px;
-  height: 10px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
 /* 條子在標題列最上緣，泡泡改往下開；`white-space: normal` 必要（同 `.bot-actions` 的坑）。 */
+
 .quota-cell-toggle.icon-tip[data-tip]::after {
   bottom: auto;
   top: calc(100% + 6px);
@@ -6239,564 +2761,6 @@ button.model-tag:hover:not(:disabled) {
   transform: translateX(-50%) translateY(0);
 }
 
-/* 遠端名牌比 .host-badge 矮，免得撐高標題列（本機不掛）。 */
-.quota-host {
-  flex: none;
-  margin-right: 7px;
-  max-width: 7em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  padding: 1px 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  font-family: var(--font-mono);
-}
-
-/* 格子裡不用 gap（2026-09-11 使用者）：改量表自己 3px 左內距。 */
-.quota-hp {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 3px 7px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
-}
-
-/* 只染 1px 透明外框的左邊，拿掉 gap 後格寬不變；選取格整圈上色會蓋掉這條。 */
-.quota-hp + .quota-hp {
-  border-left-color: var(--border);
-}
-
-/* Highlight only the selected bot's identity gauge. 只留**一種**強調（2026-09-11 使用者）：原本三層疊太搶眼。
-   有數字時強調＝量表上下邊框（`.quota-framed`；「額度外框＝剩餘量」已定案），沒數字才退回 1px accent 外框。 */
-.quota-hp.focused {
-  border-color: var(--accent);
-}
-
-/* 上邊 5H、下邊 7D 表示剩餘量。2026-09-11 起**只有手機**掛 `.quota-framed`（桌機已有 bar 與數字，重畫是重複）。 */
-.quota-hp.focused.quota-framed {
-  position: relative;
-  border-color: transparent;
-  background: var(--accent-soft);
-  box-shadow: none;
-}
-
-.quota-border-meter {
-  position: absolute;
-  left: 5px;
-  right: 5px;
-  height: 2px;
-  border-radius: 1px;
-  overflow: hidden;
-  pointer-events: none;
-  background: var(--border-strong);
-  color: var(--accent);
-}
-
-.quota-border-meter.top {
-  top: -1px;
-}
-
-.quota-border-meter.bottom {
-  bottom: -1px;
-}
-
-.quota-border-fill {
-  display: block;
-  height: 100%;
-  background: currentColor;
-}
-
-.quota-border-meter.warn {
-  color: var(--warn);
-}
-
-.quota-border-meter.critical {
-  color: var(--danger);
-}
-
-/* 身分名欄**固定寬度**（2026-09-11 使用者）：寬度跟內容跑時 bar 起點不同，五個帳號的 5h 無法橫比。3.2em = `codex` 寬。 */
-.quota-head {
-  flex: none;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  width: 3.2em;
-}
-
-.quota-identity {
-  flex: none;
-  max-width: 4.5em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  font-family: var(--font-mono);
-}
-
-/* 沒登入：條子永遠空，名字上講清楚，免得以為還沒回報。 */
-.quota-identity.logged-out {
-  color: var(--warn);
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
-}
-
-.quota-pop-note.warn {
-  color: var(--warn);
-}
-
-.quota-kind {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  color: var(--text-dim);
-}
-
-/* 三個 kind 都用品牌色（2026-09-13 使用者：grok 沒顏色很像用盡）——灰色是 `quotaLimitHit.css` 的「擋住」畫法。
-   **嚴重程度不畫在 logo 上**：由量表與數字說，否則跟量表重複、讓「灰 = 擋住」失焦。 */
-.quota-hp.claude .quota-kind {
-  color: var(--kind-claude);
-}
-
-.quota-hp.codex .quota-kind {
-  color: var(--kind-codex);
-}
-
-.quota-hp.grok .quota-kind {
-  color: var(--kind-grok);
-}
-
-/* Selection is shown by the gauge frame only; never replace the kind's brand colour with accent. */
-.quota-hp.focused.claude .quota-kind {
-  color: var(--kind-claude);
-}
-
-.quota-hp.focused.codex .quota-kind {
-  color: var(--kind-codex);
-}
-
-.quota-hp.focused.grok .quota-kind {
-  color: var(--kind-grok);
-}
-
-.quota-hp.focused .quota-identity {
-  color: var(--text-dim);
-}
-
-.quota-bars {
-  display: grid;
-  /* Match the height of a 5h+7d stack so a lone grok "週" bar doesn't float like a missing 5h. */
-  min-height: 20px;
-  align-content: start;
-}
-
-.quota-bars.single {
-  align-content: center;
-}
-
-.quota-window {
-  display: grid;
-  grid-template-columns: 16px auto;
-  align-items: center;
-}
-
-/* `5h` / `7d`：唯一允許 10.5px 的一類。 */
-.quota-window-name {
-  padding-right: 2px;
-  font-size: 10.5px;
-  font-weight: 650;
-  line-height: 1;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-/* 條與數字之間 3px：使用者點名「不能黏在一起」，間距不減。 */
-.quota-bar-row {
-  display: inline-flex;
-  align-items: center;
-  min-width: 38px;
-}
-
-/* 手機 chip：窗口名＋剩餘 %，取代 38px 量表（QuotaStrip `compact`）。 */
-.quota-compact {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  white-space: nowrap;
-}
-
-.quota-compact .quota-window-name {
-  text-align: left;
-}
-
-/* 等級顏色掛在每個窗口上而非整格：5h 綠 7d 黃時整格一色就得說謊。 */
-.quota-compact-win {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-}
-
-.quota-compact-win + .quota-compact-win {
-  margin-left: 8px;
-}
-
-.quota-compact-win.warn .quota-compact-pct,
-.quota-compact-win.warn .quota-window-name {
-  color: var(--warn);
-}
-
-.quota-compact-win.critical .quota-compact-pct,
-.quota-compact-win.critical .quota-window-name {
-  color: var(--danger);
-}
-
-.quota-compact-pct {
-  font-size: 11px;
-  font-weight: 650;
-  line-height: 1;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.quota-hp.warn .quota-compact-pct {
-  color: var(--warn);
-}
-
-.quota-hp.crit .quota-compact-pct {
-  color: var(--danger);
-}
-
-/* 針要凸出條的上下緣，定位掛外層（條有 overflow: hidden）。 */
-.quota-bar-wrap {
-  position: relative;
-  display: block;
-  flex: none;
-  width: 38px;
-}
-
-.quota-bar {
-  display: block;
-  flex: none;
-  width: 38px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border);
-  overflow: hidden;
-}
-
-.quota-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--lamp-green);
-  transition: width 240ms ease;
-}
-
-/* 黑針＝下次 reset：剩餘時間 ÷ 窗口長度。 */
-.quota-bar-mark {
-  position: absolute;
-  top: -3px;
-  height: 10px;
-  width: 2px;
-  margin-left: -1px;
-  border-radius: 1px;
-  background: var(--text);
-  box-shadow: 0 0 0 1px var(--bg-panel);
-  transition: left 240ms ease;
-  pointer-events: auto;
-}
-
-.quota-bar.warn .quota-bar-fill {
-  background: var(--warn);
-}
-
-.quota-bar.crit .quota-bar-fill {
-  background: var(--danger);
-}
-
-/* 剩餘 < 30% 才出現：條太短時它是唯一看得清的訊息，字要夠大。 */
-.quota-bar-pct {
-  flex: none;
-  padding-left: 3px;
-  min-width: 1.6em;
-  font-size: 10.5px;
-  font-weight: 700;
-  line-height: 1;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--warn);
-}
-
-.quota-bar-pct.crit {
-  color: var(--danger);
-}
-
-.quota-bar-pct.ok {
-  color: var(--text-faint);
-  font-weight: 600;
-}
-
-/* no data: hatched track, no fill */
-.quota-bar.nodata {
-  background: repeating-linear-gradient(
-    135deg,
-    var(--border) 0 2px,
-    transparent 2px 4px
-  );
-}
-
-.quota-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 40;
-  width: 336px;
-  max-height: 420px;
-  overflow-y: auto;
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  text-align: left;
-}
-
-.quota-pop-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-dim);
-  letter-spacing: 0.02em;
-}
-
-.quota-pop-row {
-  display: grid;
-  gap: 4px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-}
-
-/* 停用態整格降透明＋名字劃掉；量表不劃線——數字正是使用者停用它的理由。 */
-.quota-pop-row.off {
-  opacity: 0.5;
-}
-
-.quota-pop-row.off .quota-name {
-  text-decoration: line-through;
-}
-
-.quota-disable {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: none;
-}
-
-.quota-disable input {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-.quota-disable-note {
-  font-size: 10px;
-  color: var(--text-faint);
-}
-
-/* 停用中的格降透明＋劃掉，不必開 popover 就知道側欄少了誰。 */
-.quota-hp.off {
-  opacity: 0.45;
-}
-
-.quota-hp.off .quota-identity {
-  text-decoration: line-through;
-}
-
-.quota-pop-row:last-child {
-  padding-bottom: 0;
-  border-bottom: 0;
-}
-
-.quota-pop-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.quota-plan {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text-faint);
-  text-transform: uppercase;
-}
-
-.quota-win {
-  min-width: 3.2em;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-}
-
-.quota-pop-foot {
-  margin: 6px 0 0;
-  font-size: 10.5px;
-  color: var(--text-faint);
-}
-
-.quota-pop-line {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.quota-pop-line > :first-child {
-  width: 44px;
-  flex: none;
-}
-
-/* `align-items: baseline` 會把條壓在基線上，改 center 才跟兩邊字對齊。 */
-.quota-pop-line {
-  align-items: center;
-}
-
-.quota-pop-line .quota-bar-row {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.quota-pop-line .quota-bar-wrap {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.quota-pop-line .quota-bar {
-  flex: 1 1 auto;
-  width: auto;
-  height: 6px;
-}
-
-.quota-pop-line .quota-bar-mark {
-  top: -3px;
-  height: 12px;
-}
-
-/* 條上省 `%`，彈出層補回：否則 `97` 像次數。`—` 不加。 */
-.quota-pop-line .quota-bar-pct:not(.nodata)::after {
-  content: '%';
-  opacity: 0.7;
-}
-
-.quota-reset {
-  margin-left: auto;
-  color: var(--text-faint);
-}
-
-.quota-pop-note {
-  margin: 0;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-/* P1: tools hint */
-
-.tools-hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  min-height: 44px;
-  padding: 6px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.tools-hint.collapsed {
-  align-items: center;
-}
-
-.tools-hint-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-  min-height: 32px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  padding: 0;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.tools-hint-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tools-hint-list {
-  flex: 1 1 100%;
-  max-height: 160px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 0 0 0 18px;
-  list-style: none;
-  display: grid;
-  gap: 6px;
-}
-
-.tools-hint-list li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  justify-content: space-between;
-  font-size: 12.5px;
-  color: var(--text);
-}
-
-.tools-hint-icon {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
-  border-radius: 999px;
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.tools-hint-icon .tools-hint-count {
-  font-variant-numeric: tabular-nums;
-}
-
 .install {
   position: relative;
   display: inline-flex;
@@ -6809,78 +2773,9 @@ button.model-tag:hover:not(:disabled) {
   font-size: 12px;
 }
 
-.install-btn.primary {
-  background: var(--btn-bg);
-  border-color: var(--btn-border);
-  color: var(--btn-fg);
-}
-
-.install-btn.primary:hover:not(:disabled) {
-  background: var(--btn-bg-hover);
-  color: var(--btn-fg-hover);
-}
-
 .mini-btn.install-btn {
   height: 28px;
   min-height: 28px;
-}
-
-.install-pop {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 40;
-  min-width: 180px;
-  max-height: 220px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-.tool-badges {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.tool-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.tool-mark {
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.tool-badge.ok .tool-mark { color: var(--status-ok); }
-.tool-badge.missing .tool-mark { color: var(--danger); }
-.tool-badge.nologin .tool-mark { color: var(--warn); }
-
-.persona-mark {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.kind-display {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 4px;
-}
-
-.kind-display-label {
-  font-size: 11px;
-  color: var(--text-dim);
 }
 
 .tabs.small {
@@ -6924,6 +2819,7 @@ button.model-tag:hover:not(:disabled) {
 }
 
 /* The directory picker wants every pixel, so a fixed-height popup instead of shrink-wrap. */
+
 .modal:has(.dirpicker) {
   width: min(660px, calc(100vw - 48px));
   height: min(760px, calc(100vh - 48px));
@@ -6987,12 +2883,6 @@ button.model-tag:hover:not(:disabled) {
   gap: 4px;
 }
 
-.opt-wrap .hint,
-.kind-missing-reason {
-  font-size: 11px;
-  color: var(--warn);
-}
-
 .field-note {
   margin-left: 6px;
   font-size: 11px;
@@ -7004,470 +2894,24 @@ button.model-tag:hover:not(:disabled) {
   color: var(--warn);
 }
 
-.msg-meta-above .msg-from,
-.msg-meta-above .msg-time,
-.msg-meta-below .msg-from,
-.msg-meta-below .msg-time {
-  color: var(--text-dim);
-}
-
 .main {
   position: relative;
 }
 
-
-/* v4.0: github issues */
-
-.issues-bar {
-  position: relative;
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-.issues-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  min-height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.issues-btn svg {
-  flex: none;
-  font-size: 13px;
-}
-
-.issues-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.issues-btn.on {
-  background: var(--bg-active);
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.issues-repo {
-  font-family: var(--font-mono);
-  color: var(--text);
-}
-
-.issues-count {
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-sunken);
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.issues-btn.on .issues-count {
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-
-.issues-pop {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 16px;
-  z-index: 40;
-  width: min(640px, 92vw);
-  min-width: min(420px, 92vw);
-  max-width: calc(100% - 32px);
-  max-height: min(480px, 70vh);
-  overflow-y: auto;
-  padding: 0;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  text-align: left;
-}
-
-.issues-tools {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-.issues-repo-pick {
-  flex: none;
-  max-width: 46%;
-  height: 28px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-}
-
-.issues-tools input[type='search'] {
-  flex: 1;
-  min-width: 0;
-  height: 28px;
-  min-height: 28px;
-  padding: 0 8px;
-  box-sizing: border-box;
-  appearance: none;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 12px;
-}
-
-.issues-tools input[type='search']:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-
-.issues-tools .tabs {
-  flex: none;
-}
-
-.issues-status {
-  padding: 14px 12px;
-  font-size: 12px;
-  color: var(--text-dim);
-  overflow-wrap: anywhere;
-}
-
-.issues-status.err {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.issues-list {
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  transition: opacity 0.15s;
-}
-
-.issues-list.stale {
-  opacity: 0.55;
-  pointer-events: none;
-}
-
-.issue-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 7px 8px;
-}
-
-.issue-row + .issue-row {
-  border-top: 1px solid var(--border);
-}
-
-.issue-row:hover {
-  background: var(--bg-hover);
-}
-
-.issue-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.issue-title {
-  /* 夾兩行的 `-webkit-box` 只有 17px 高，墊到 24。 */
-  min-height: 24px;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12.5px;
-  line-height: 1.35;
-  text-decoration: none;
-  overflow-wrap: anywhere;
-}
-
-.issue-title:hover {
-  color: var(--accent-ink);
-  text-decoration: underline;
-}
-
-.issue-num {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-
-.issue-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 6px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-dim);
-}
-
-/* Background / text colour come inline from labelStyle() when GitHub gives a colour. */
-.issue-label {
-  display: inline-block;
-  max-width: 160px;
-  padding: 0 7px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--bg-sunken);
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 16px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.issue-author {
-  font-weight: 500;
-}
-
-.issue-time {
-  white-space: nowrap;
-}
-
-.issue-author + .issue-time::before {
-  content: '·';
-  margin-right: 6px;
-}
-
-.issue-actions {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-}
-
-/* Retry / API-error banner (`turn_progress.alert`): spinner still spins, so this row must read as a warning, not status text. */
-.live-alert {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 4px 0 0;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.live-alert-mark {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--warn);
-  color: var(--warn-soft);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.copy-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 340px;
-  min-height: 24px;
-  padding: 2px 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: pointer;
-}
-.copy-chip:hover {
-  border-color: var(--border-strong);
-}
-.copy-chip.done {
-  border-color: var(--lamp-green);
-}
-.copy-chip-label {
-  flex: none;
-  color: var(--text-faint);
-}
-.copy-chip-value {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-family: var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.copy-chip-ok {
-  flex: none;
-  color: var(--status-ok);
-}
-
 /* daemon 代轉的訊息用不同色，免得誤以為是自己送的。 */
+
 .msg-targets.relay {
   color: var(--accent-ink);
 }
 
 /* daemon 自己發的轉送跟 bot→bot 轉送分色。 */
+
 .msg-targets.relay.daemon {
   color: var(--text-dim);
 }
 
-/* run 識別 / 逃生門（debug）：只加新 class，顏色全走既有 token。 */
-
-/* pane 晶片 shrink 較大，寬度不夠時先讓，不截 bot 名字。 */
-.main-head > .copy-chip {
-  flex: 0 20 auto;
-  max-width: 150px;
-}
-
-/* 燈號文字兼識別列開關：維持文字外觀，只補可點手感。 */
-button.run-debug-toggle {
-  border: 0;
-  background: transparent;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-
-/* 不改文字色：燈號顏色本身是狀態，開合交給 ▾▴。 */
-button.run-debug-toggle:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* Carries the pane id (what you retype while debugging), neutral colour so the lamp stays the status signal. */
-.main-status.pane-toggle {
-  display: inline-flex;
-  align-items: center;
-  /* 同 `button.model-tag`：17px 高按不太到。 */
-  min-height: 24px;
-  padding: 0 4px;
-  border-radius: 5px;
-  gap: 3px;
-  max-width: 120px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.main-status.pane-toggle .pane-id {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.main-status.pane-toggle .pane-chev {
-  flex: none;
-  font-size: 10px;
-  color: var(--text-faint);
-}
-
-.main-status.pane-toggle.on .pane-chev {
-  color: var(--accent-ink);
-}
-
-.run-debug {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 5px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-sunken);
-}
-
-.run-debug-hint {
-  flex: none;
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
 .run-debug .copy-chip {
   max-width: 280px;
-}
-
-/* 逃生門刻意比 `.mini-btn` 更輕，不搶「中斷 / 停止」。 */
-.live-abandon {
-  flex: none;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 15px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.live-abandon:hover {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-/* `white-space` 必須寫死：對話框掛在 nowrap 的 `.msg-meta` 底下，否則說明一行拉出框外。 */
-.abandon-note {
-  margin: 0 0 8px;
-  white-space: normal;
-  text-align: start;
-}
-
-.abandon-note:last-child {
-  margin-bottom: 0;
-}
-
-/* terminal: unreadable pane notice */
-
-.term-warn {
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-/* 按鈕是唯一該搶眼的，但書刻意比本文再淡一階。 */
-.term-warn-actions {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 6px;
 }
 
 .term-warn-actions .btn {
@@ -7475,42 +2919,8 @@ button.run-debug-toggle:hover {
   border-color: var(--border-strong);
 }
 
-/* `flex-basis` 夠大，窄視窗時但書整段換到按鈕下，不被擠成一欄一字。 */
-.term-warn-caveat {
-  flex: 1 1 320px;
-  min-width: 0;
-  margin-top: 4px;
-  color: color-mix(in srgb, var(--warn) 75%, transparent);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-/* 搬完後警示不成立但話還沒講完：同位置用中性色說完。 */
-.term-warn.is-done {
-  background: var(--bg-sunken);
-  border-bottom-color: var(--border);
-  color: var(--text-dim);
-}
-
-.term-warn.is-done .term-warn-caveat {
-  color: var(--text-faint);
-}
-
-/* v4.0: identity login per host */
-
-/* 「未登入」跟 `.kind-missing-reason` 同語彙：警示色、不擋操作。 */
-.identity-logged-out {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--warn);
-  white-space: nowrap;
-}
-
-.identity-logged-out.is-unknown {
-  color: var(--text-dim);
-}
-
 /* 窄面板下換行，不把按鈕壓扁。 */
+
 .bs-login-row {
   display: flex;
   align-items: center;
@@ -7519,6 +2929,7 @@ button.run-debug-toggle:hover {
 }
 
 /* 「重新偵測」長得像連結，免得跟身份選項搶。 */
+
 .identity-recheck {
   /* 可按的一律至少 24px 高（WCAG 2.2 最小目標）。 */
   display: inline-flex;
@@ -7546,20 +2957,6 @@ button.run-debug-toggle:hover {
   opacity: 0.7;
 }
 
-/* 已登入用中性色（常態），未登入警示色，問不到則淡掉。 */
-.identity-logins {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 2px;
-}
-
-.identity-login-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
 .identity-login-btn {
   min-height: 22px;
   padding-inline: 7px;
@@ -7568,10 +2965,6 @@ button.run-debug-toggle:hover {
 
 .identity-selection-warning {
   color: var(--danger);
-}
-
-.identity-selection-warning.is-unknown {
-  color: var(--text-dim);
 }
 
 .identity-login {
@@ -7591,64 +2984,6 @@ button.run-debug-toggle:hover {
   font-weight: 600;
 }
 
-.identity-login.is-unknown {
-  color: var(--text-faint);
-}
-
-/* 遠端 / 本機 gh 登入（HostsPanel 列、IssuesBar 錯誤列） */
-.gh-auth {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.gh-auth.ok .gh-auth-label {
-  color: var(--text-dim);
-}
-
-.gh-auth.out .gh-auth-label,
-.gh-auth.missing .gh-auth-label {
-  color: var(--warn);
-  font-weight: 600;
-}
-
-.gh-login-cta {
-  display: grid;
-  gap: 8px;
-  margin-top: 8px;
-  justify-items: start;
-}
-
-.gh-device {
-  display: grid;
-  gap: 6px;
-  width: 100%;
-  padding: 8px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-}
-
-.gh-device-lead {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text);
-}
-
-.gh-device-err {
-  margin: 0;
-  font-size: 12px;
-  color: var(--danger);
-}
-
-.gh-device-link {
-  font-size: 12px;
-}
-
 /* image shelf — third grid cell of `.app` (not floating), so it never covers the timeline and survives bot switches.
    See `docs/goals/image-drop-tray-2026-09-07.md`. */
 
@@ -7664,65 +2999,16 @@ button.run-debug-toggle:hover {
 }
 
 /* 208px：剛好放得下標題＋張數＋三顆鍵，再窄標題會被裁。 */
+
 .shelf.open {
   width: 208px;
 }
 
-.shelf-body {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-}
-
-/* Same 60px as `.main-head`, so the two headers read as one line. */
-.shelf-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: none;
-  height: 60px;
-  min-height: 60px;
-  padding: 0 4px 0 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--text-dim);
-}
-
-.shelf-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-}
-
-.shelf-count {
-  flex: none;
-  min-width: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-  text-align: center;
-}
-
 /* `.icon-btn`'s hover is red because most users delete; here only 「清空」 does. */
+
 .shelf-head .icon-btn:hover:not(:disabled) {
   background: var(--btn-ghost-bg-hover);
   color: var(--btn-ghost-fg-hover);
-}
-
-.shelf-head .shelf-clear:hover:not(:disabled) {
-  color: var(--danger);
 }
 
 .shelf-add {
@@ -7730,172 +3016,8 @@ button.run-debug-toggle:hover {
   font-weight: 700;
 }
 
-.shelf-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  overflow-y: auto;
-  min-height: 0;
-  flex: 1;
-}
-
-.shelf-empty {
-  margin: 0;
-  padding: 4px 2px;
-  font-size: 11.5px;
-  line-height: 1.7;
-  color: var(--text-faint);
-}
-
-.shelf-card {
-  position: relative;
-  flex: none;
-}
-
-/* Long press opens the preview, so the iOS callout / text selection has to go. */
-.shelf-card-main {
-  -webkit-touch-callout: none;
-  user-select: none;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 2px;
-  width: 100%;
-  padding: 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-  text-align: left;
-  cursor: grab;
-}
-
-.shelf-card-main:hover {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.shelf-card-main img {
-  width: 100%;
-  height: 74px;
-  object-fit: cover;
-  border-radius: 4px;
-  background: var(--bg-hover);
-  pointer-events: none;
-}
-
-.shelf-card-name {
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.shelf-card-size {
-  font-size: 10.5px;
-  color: var(--text-faint);
-}
-
-/* Image stays parked (often sent to several bots), so the only feedback is this flash. */
-.shelf-card.handed .shelf-card-main {
-  border-color: var(--status-ok);
-}
-
-.shelf-card.handed .shelf-card-size {
-  color: var(--status-ok);
-  font-weight: 600;
-}
-
-.shelf-card-x {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
-  color: var(--text-dim);
-  font-size: 14px;
-  line-height: 1;
-}
-
-.shelf-card-x:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.shelf.dropping .shelf-body {
-  background: var(--accent-soft);
-}
-
-.shelf-veil {
-  position: absolute;
-  inset: 6px;
-  z-index: 10;
-  display: grid;
-  place-items: center;
-  padding: 8px;
-  border: 2px dashed var(--accent);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
-  color: var(--accent-ink);
-  font-size: 12px;
-  font-weight: 600;
-  text-align: center;
-  pointer-events: none;
-}
-
-.shelf-handle {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  width: 38px;
-  padding: 12px 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 11.5px;
-}
-
-.shelf-handle:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.shelf-handle-label {
-  writing-mode: vertical-rl;
-  letter-spacing: 1px;
-}
-
-/* A 38px handle is hard to hit while dragging a file, so the collapsed rail grows this pad.
-   Absolute on purpose: widening the grid column mid-drag would reflow the chat under the pointer. */
-.shelf-pad {
-  position: absolute;
-  top: 50%;
-  right: 46px;
-  z-index: 22;
-  translate: 0 -50%;
-  width: 168px;
-  padding: 22px 12px;
-  border: 2px dashed var(--accent);
-  border-radius: var(--radius-lg);
-  background: var(--bg-panel);
-  box-shadow: var(--shadow);
-  color: var(--accent-ink);
-  font-size: 12px;
-  font-weight: 600;
-  text-align: center;
-}
-
-.shelf-pad.over {
-  background: var(--accent-soft);
-}
-
 /* ≤1024px: shelf becomes a bottom strip (still a grid cell). Touch has no HTML5 drag, so tapping a card is the way in. */
+
 @media (width <= 1024px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
@@ -7903,6 +3025,7 @@ button.run-debug-toggle:hover {
   }
 
   /* 抽屜開著時收掉暫存：同 z-index 30 且 DOM 在後，會蓋住側欄底部「環境設定」（2026-09-08 實測 390px）。同 `body:has(.modal-backdrop) .shelf`。 */
+
   body:has(.sidebar.open) .shelf {
     display: none;
   }
@@ -7916,127 +3039,6 @@ button.run-debug-toggle:hover {
   .shelf.open {
     width: auto;
   }
-
-  .shelf-head {
-    height: 42px;
-    min-height: 42px;
-  }
-
-  .shelf-list {
-    flex-direction: row;
-    gap: 8px;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .shelf-card {
-    width: 104px;
-  }
-
-  .shelf-card-main img {
-    height: 64px;
-  }
-
-  .shelf-empty {
-    padding: 2px 4px;
-  }
-
-  .shelf-handle {
-    flex-direction: row;
-    justify-content: center;
-    width: 100%;
-    height: 38px;
-    padding: 0;
-    gap: 8px;
-  }
-
-  .shelf-handle-label {
-    writing-mode: horizontal-tb;
-  }
-
-  .shelf-pad {
-    display: none;
-  }
-}
-
-/* 放大預覽刻意浮在托盤**外面**，永不蓋住卡片的移除鍵；`pointer-events: none`。位置由 `ShelfPeek` 量，`--peek-avail` 是上方剩餘高度。 */
-.shelf-peek {
-  position: fixed;
-  z-index: 40;
-  padding: 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: var(--bg-panel);
-  box-shadow: var(--shadow);
-  pointer-events: none;
-}
-
-.shelf-peek img {
-  display: block;
-  /* 圖只到原尺寸（小圖放大只會糊）。 */
-  max-width: 100%;
-  margin: 0 auto;
-  /* 34px 是檔名那行 + padding。 */
-  max-height: min(60vh, calc(var(--peek-avail, 60vh) - 34px));
-  object-fit: contain;
-  border-radius: 6px;
-  background: var(--bg-hover);
-}
-
-.shelf-peek-cap {
-  display: block;
-  margin-top: 4px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 預覽中的卡片標一下，否則看不出正在看哪張。 */
-.shelf-card.peeking .shelf-card-main {
-  border-color: var(--accent);
-}
-
-/* 主機 shell（HostShellPanel）：終端吃掉所有剩下高度。 */
-
-.shell-head .shell-icon {
-  font-family: var(--font-mono);
-  font-size: 15px;
-  color: var(--accent);
-  line-height: 1;
-}
-
-/* 擠不下時 cwd 膠囊縮；主機名不折行（斷兩行會撐高整條）。 */
-.shell-head .main-title strong {
-  white-space: nowrap;
-}
-
-.shell-cwd {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-dim);
-  padding: 2px 7px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-
-.shell-pane {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 12px 16px 16px;
-  gap: 8px;
-}
-
-.shell-pane .shell-term {
-  flex: 1;
-  min-height: 0;
 }
 
 .shell-bar {
@@ -8044,227 +3046,17 @@ button.run-debug-toggle:hover {
   row-gap: 6px;
 }
 
-/* 讀失敗但留著上一張快照：不能讓它看起來像現況。 */
-.shell-err {
-  flex: none;
-  padding: 6px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--warn-soft);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-.shell-input {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.shell-prompt {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--accent);
-  flex: none;
-}
-
-.shell-cmd {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  /* composer 是 surface 不是 canvas 色（UI-DECISIONS「重建淺色主題的對比角色」），同角色。 */
-  background: var(--bg-panel);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 8px 10px;
-  min-height: 38px;
-}
-
-.shell-cmd:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-  border-color: var(--accent);
-}
-
 .shell-keypad {
   flex: none;
   margin-top: 0;
-}
-
-.shell-keypad-note {
-  flex: 1;
-  min-width: 180px;
-  line-height: 1.5;
-  text-align: right;
-}
-
-@media (width <= 1024px) {
-  .shell-pane {
-    padding: 10px 12px 12px;
-  }
-
-  /* 手機說明文字左對齊佔一行，擠右邊會被切。 */
-  .shell-keypad-note {
-    flex-basis: 100%;
-    text-align: left;
-  }
-
-  .shell-cwd {
-    /* 窄螢幕路徑只留最後一段，全文在 tooltip。 */
-    max-width: 36vw;
-  }
-
-  .shell-cwd-parent {
-    display: none;
-  }
-}
-
-.sl-item.sl-warn {
-  color: var(--status-warn);
-}
-
-/* RAM 程序清單（SPEC §15.2）：語彙沿用 `.quota-pop`；是表格，因為使用者要在幾十列裡比大小找能砍的。 */
-.mem-wrap {
-  position: relative;
-  flex: none;
-  display: inline-flex;
-}
-
-.mem-open {
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
 }
 
 .mem-open .mem-badge {
   cursor: pointer;
 }
 
-.mem-pop {
-  position: fixed;
-  z-index: 80;
-  width: min(560px, calc(100vw - 24px));
-  max-width: none;
-  max-height: 460px;
-  overflow-y: auto;
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  text-align: left;
-}
-
-.mem-pop-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.mem-pop-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-dim);
-}
-
-.mem-pop-refresh {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.mem-pop-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 11px;
-}
-
-.mem-pop-table th {
-  padding: 0 6px 4px 0;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-faint);
-  font-weight: 600;
-  text-align: left;
-}
-
-.mem-pop-table td {
-  padding: 4px 6px 4px 0;
-  border-bottom: 1px solid var(--border);
-  vertical-align: baseline;
-}
-
-/* bot 列淡一點：重點是「可以砍的」。 */
-.mem-pop-table tr.is-bot {
-  color: var(--text-faint);
-}
-
-.mem-pop-size {
-  width: 52px;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-/* argv 一行，全文在 tooltip——換行難掃大小。 */
-.mem-pop-argv {
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-}
-
-.mem-pop-owner {
-  max-width: 130px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-dim);
-}
-
-.mem-pop-peek {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mem-pop-peek:hover {
-  color: var(--text);
-  text-decoration: underline;
-}
-
-.mem-pop-caret {
-  font-size: 10px;
-  opacity: 0.7;
-}
-
 /* 同 BlockedModal 寬；沒按鍵列，底部 padding 收掉。 */
+
 .modal.mem-pane-modal {
   padding-bottom: 0;
 }
@@ -8275,47 +3067,8 @@ button.run-debug-toggle:hover {
   min-height: 200px;
 }
 
-.mem-pop-act {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.mem-pop-act button {
-  padding: 1px 7px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.mem-pop-act button.danger {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-.mem-pop-act button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.mem-pop-err {
-  margin: 0;
-  color: var(--warn);
-  font-size: 11px;
-}
-
-.mem-pop-empty,
-.mem-pop-foot {
-  margin: 0;
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
 /* 終端 URL（TermLinks.tsx）：點一下複製不開分頁——登入連結貼到別處才是使用者要的。 */
+
 .term-link {
   all: unset;
   cursor: pointer;
@@ -8345,6 +3098,7 @@ button.run-debug-toggle:hover {
 /* 卡片最上緣的泡泡往上開會被 `.sidebar-scroll` 裁掉，改往下開、靠右。 */
 
 /* 往下開會被 `.bot-actions`（z-index 1、不透明底、DOM 在後）蓋掉；這排是 stacking context，泡泡的 40 無效，整排抬到 bot 列之上。 */
+
 .project-head-actions {
   z-index: 3;
 }
@@ -8370,6 +3124,7 @@ button.run-debug-toggle:hover {
 
 @media (width <= 640px) {
   /* iOS 網址列伸縮時 `100%` 比可視區高，底部輸入區被推出去；用 `dvh`。 */
+
   html,
   body,
   #root {
@@ -8378,6 +3133,7 @@ button.run-debug-toggle:hover {
   }
 
   /* 標題列要一直在最上面（2026-09-08 使用者回報）：iOS 鍵盤會捲整個文件，body 釘 fixed 就沒東西可捲；`.main-head` sticky 當保險。 */
+
   html,
   body {
     position: fixed;
@@ -8394,16 +3150,19 @@ button.run-debug-toggle:hover {
   }
 
   /* 底部三樣都要避開 home indicator。 */
+
   .composer {
     padding-bottom: calc(12px + env(safe-area-inset-bottom));
   }
 
   /* 打字時 `--vvh` 只剩三百多 px，200px 上限加暫存區會切掉游標行：上限改畫面三分之一。 */
+
   .composer textarea {
     max-height: calc(var(--vvh, 100dvh) * 0.33);
   }
 
   /* 打字時收掉圖片暫存（鍵盤已吃半個畫面），收鍵盤就回來。 */
+
   body:has(.composer textarea:focus) .shelf {
     display: none;
   }
@@ -8412,11 +3171,8 @@ button.run-debug-toggle:hover {
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  .sidebar-foot {
-    padding-bottom: calc(10px + env(safe-area-inset-bottom));
-  }
-
   /* 觸控目標取 40 當下限（Apple/Material 44/48）：標題列只有 60px，再大撐不下。 */
+
   .main-head .icon-btn,
   .main-head .menu-btn,
   .main-head .attach .icon-btn,
@@ -8430,6 +3186,7 @@ button.run-debug-toggle:hover {
   }
 
   /* `.tabs` 有 2px 內距，40 + 4 剛好塞進 60px。 */
+
   .tab {
     height: 40px;
     min-width: 40px;
@@ -8437,6 +3194,7 @@ button.run-debug-toggle:hover {
   }
 
   /* 只放大真的會被讀的標籤，整體放大會撐破標題列與側欄。 */
+
   .term-bar,
   .git-bar,
   .git-bar .mini-btn,
@@ -8449,12 +3207,10 @@ button.run-debug-toggle:hover {
 }
 
 /* 手機暫存區預設收起（`ImageShelf` `readOpen` fallback）：展開在 390px 吃掉約 120px。 */
-@media (width <= 640px) {
-  .shelf-handle {
-    height: 36px;
-  }
 
+@media (width <= 640px) {
   /* 只收「沒展開」那條：展開是使用者自己按開的，卡片不能在瞄準時被推走。 */
+
   .shelf.typing {
     display: none;
   }
@@ -8462,23 +3218,21 @@ button.run-debug-toggle:hover {
 
 /* 表單欄位手機一律 ≥16px（2026-09-08）：iOS Safari < 16px 聚焦會放大整頁，而 viewport 不該有 `maximum-scale`。
    只管可輸入欄位，`docs/UI-DECISIONS.md` 的「其餘文字下限 12px」照舊。 */
+
 @media (width <= 640px) {
   input:not([type='checkbox'], [type='radio'], [type='file'], [type='range']),
   textarea,
   select {
     font-size: 16px;
   }
-
-  /* 搜尋框（側欄最常點）補到 40 高。 */
-  .bot-search-input {
-    min-height: 40px;
-  }
 }
 
 /* 觸控目標下限（2026-09-08 逐頁掃）：手指約 40px。兩種手法：1. 容器夠大就撐到 40；
    2. 會推開別人的，用 padding + 等量負 margin 放大可按範圍。未處理的見 `docs/screenshots/mobile-walkthrough/WALKTHROUGH.md`。 */
+
 @media (width <= 640px) {
   /* 1. `.bot-row.compact .bot-actions .head-menu-btn`（0,3,0）要寫全：media query 不加特異性，否則「⋯」維持 26×26。 */
+
   .bot-row.compact .bot-actions .head-menu-btn,
   .bot-row.compact .bot-actions .menu-btn,
   .sidebar .icon-btn,
@@ -8500,21 +3254,18 @@ button.run-debug-toggle:hover {
   }
 
   /* 同一列可能三四顆，撐高不撐寬。 */
+
   .mini-btn {
     display: inline-flex;
     align-items: center;
   }
 
   /* 2. 列首摺疊三角只放大可按範圍，右邊留給緊接的按鍵，不搶點擊。 */
+
   .project-fold {
     justify-content: center;
     padding: 13px 10px;
     margin: -11px -10px;
-  }
-
-  /* 收合鈕在燈號下面（2026-09-13）：負上下 margin 會疊到燈號上，改為欄寬 34px、鈕吃滿。 */
-  .bot-gutter {
-    width: 34px;
   }
 
   .bot-kids-toggle {
@@ -8524,22 +3275,10 @@ button.run-debug-toggle:hover {
     padding: 5px 0;
     margin: 0;
   }
-
-  /* `.quota-hp` 是一列 flex，撐高會讓圖示與數字分兩行：只放大可按範圍（手法 2）。 */
-  .main-head .quota-bars-open,
-  .sidebar .quota-bars-open {
-    padding-top: 14px;
-    padding-bottom: 14px;
-    margin-top: -14px;
-    margin-bottom: -14px;
-  }
-
-  .mem-open {
-    min-width: 40px;
-  }
 }
 
 /* 手機通知改從上面出現：390px 右下是送出鍵，且 `.shelf`（30）高於 `.notices`（20）會切掉它（2026-09-08 實測）。z-index 80：高於 shelf、低於 modal 900。 */
+
 @media (width <= 640px) {
   .notices {
     top: calc(env(safe-area-inset-top) + 8px);
@@ -8551,50 +3290,13 @@ button.run-debug-toggle:hover {
   }
 }
 
-/* GitBar 在 390px 排不下；`.context-bar` 不能捲（會剪掉 `.issues-pop`），所以捲 git 這段自己。 */
-@media (width <= 640px) {
-  .context-bar > .git-bar {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-    /* scroll shadow：`local` 層跟內容走，捲到底時蓋住 `scroll` 層陰影，只有真的還有東西時才看得見。 */
-    background:
-      linear-gradient(to right, var(--bg-sunken) 30%, transparent) left / 24px 100% no-repeat local,
-      linear-gradient(to left, var(--bg-sunken) 30%, transparent) right / 24px 100% no-repeat local,
-      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 32%), transparent) left / 10px 100% no-repeat scroll,
-      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 32%), transparent) right / 10px 100% no-repeat scroll;
-  }
-
-  .context-bar > .git-bar::-webkit-scrollbar {
-    display: none;
-  }
-
-  /* 捲軸內不可再縮；`+N −M` 排最前面。 */
-  .context-bar > .git-bar > * {
-    flex: none;
-  }
-
-  /* 260px 的訊息框在 390px 等於逼人橫捲著打字。 */
-  .git-commit-msg {
-    width: 40vw;
-    min-width: 120px;
-  }
-}
-
 /* `.context-bar` 在 390px 橫捲到 700px，觸控無捲軸使用者以為按鈕壞了（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 2）。
    拆兩行：repo／git 是會按的（照舊橫捲），context／花費只看（換行）。`.statusline-text` 是 pre 折不了，`overflow-x: auto` 留著。 */
+
 @media (width <= 640px) {
   .context-bar {
     flex-wrap: wrap;
     row-gap: 4px;
-  }
-
-  /* `1 0 100%`：一定被擠到第二行。 */
-  .context-bar > .statusline-bar {
-    flex: 1 0 100%;
-    flex-wrap: wrap;
-    row-gap: 2px;
   }
 
   .context-bar > .issues-bar + .statusline-bar,
@@ -8602,69 +3304,13 @@ button.run-debug-toggle:hover {
     padding-left: 0;
     border-left: 0;
   }
-
-  /* 11px 在手機是裝飾不是資訊（同 12px 下限）。 */
-  .context-bar .sl-item,
-  .context-bar .sl-k,
-  .context-bar .sl-v {
-    font-size: 12px;
-  }
-
-  /* 換行後等寬數字，刷新不左右跳。 */
-  .context-bar .sl-v {
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* 目錄可能是整條路徑：縮、截尾，不把整列推出畫面。 */
-  .context-bar .sl-item {
-    flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* 帳號欄 `display: none` 仍是 `.sl-item + .sl-item` 的兄弟，context 開頭會多一條分隔線。 */
-  .context-bar .sl-item.sl-account + .sl-item {
-    padding-left: 0;
-    border-left: 0;
-    margin-left: 0;
-  }
-}
-
-/* 手機名字被截成五個字，旁邊卻是 190px 額度 chip（其他欄位 popover 已有），讓出寬度給名字。 */
-@media (width <= 640px) {
-  /* 身分名與停用方塊讓位（側欄與 popover 都有，10px 方塊也不是觸控目標）；視窗名留下——沒 hover 分不出 5h／7d／Fable。 */
-  .main-head .quota-hp .quota-identity,
-  .main-head .quota-hp .quota-cell-toggle {
-    display: none;
-  }
-
-  /* 名字**不能有下限**：它不肯縮時被切的是齒輪（手機進設定唯一入口）。曾寫 `min-width: 10ch`，齒輪被切成 17px（2026-09-08 於 390px 量到）。 */
-  .bot-head .main-title-row > strong,
-  .bot-head .main-title-row > .bot-name-btn,
-  .bot-head .main-title-row > .bot-name-input {
-    min-width: 0;
-  }
 }
 
 /* 抽屜標題列（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4）：兩列徽章撐到 100px，收成一列。 */
+
 @media (width <= 640px) {
-  /* 標題只視覺上收掉，不從 a11y 樹拿走：它是唯一的 `<h1>`。 */
-  .sidebar-head h1 {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-
-  .sidebar-head {
-    justify-content: unset;
-  }
-
   /* 排一列後每格縮：拿掉標籤與第二個數字（圖示即標籤，細節在 popover／tooltip）。 */
+
   .sidebar-head .pane-k,
   .sidebar-head .mem-k,
   .sidebar-head .mem-free,
@@ -8674,25 +3320,10 @@ button.run-debug-toggle:hover {
 }
 
 /* 390px 被切掉時看不出右邊還有東西：會按的讓它捲得動，只看的允許換行。 */
+
 @media (width <= 640px) {
-
-  /* `.composer` 底是 `--bg-panel`，漸層要跟著換，否則遮蓋色亮一階。 */
-  .recipient-row {
-    scrollbar-width: none;
-    background:
-      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 24px 100% no-repeat local,
-      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 24px 100% no-repeat local,
-      radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) left / 14px
-        100% no-repeat scroll,
-      radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) right /
-        14px 100% no-repeat scroll;
-  }
-
-  .recipient-row::-webkit-scrollbar {
-    display: none;
-  }
-
   /* 統計列只看、也不能捲（整條是展開鍵，橫捲搶手勢）：換行，並取消 `margin-left: auto` 免得第二列靠右。 */
+
   .disclosure.sub {
     flex-wrap: wrap;
     row-gap: 2px;
@@ -8709,23 +3340,23 @@ button.run-debug-toggle:hover {
 }
 
 /* 終端分頁：固定字元格線，方向相反——收窄邊界、調小字級換視野。 */
+
 @media (width <= 640px) {
   /* `wrap` 是保險：行數 select 在別的語系／字型下變寬時折行而非被切。 */
+
   .term-bar {
     flex-wrap: wrap;
     row-gap: 6px;
   }
 
   /* ≤640「字級不低於 12px」的唯一例外：終端是等寬格線不是散文，11px 多看一成欄位。 */
+
   .term {
     font-size: 11px;
   }
 
-  .term-pane {
-    padding: 10px 12px 12px;
-  }
-
   /* 七顆鍵在 390px 差二十幾 px 就把 ctrl+c 擠到第二行——中斷鍵最不該折行。 */
+
   .keypad {
     gap: 5px;
   }
@@ -8736,39 +3367,15 @@ button.run-debug-toggle:hover {
 }
 
 /* 對話框在 ≤640 一律全螢幕 sheet：390px 上貼鍵開沒意義，24px 邊只縮表單、鍵盤一彈更擠。head / body / foot 三段式撐滿即成立。 */
+
 @media (width <= 640px) {
   .bs-scrim,
   .modal-backdrop {
     padding: 0;
   }
 
-  /* `.anchored` 保險：手機不量齒輪位置，免得殘留 inline left/top 推歪 sheet。 */
-  .bot-settings,
-  .bot-settings.anchored {
-    position: fixed;
-    inset: 0;
-    width: auto;
-    max-width: none;
-    max-height: none;
-    border: 0;
-    border-radius: 0;
-  }
-
-  .bs-head,
-  .bs-banner,
-  .bs-body,
-  .bs-actions {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-  .bs-actions {
-    height: auto;
-    min-height: 64px;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-
   /* 特異性要蓋過 `:has(.dirpicker)`。寬度 `100%` 不能 `auto`：backdrop 是置中 flex，`auto` 會縮成 262px。 */
+
   .modal,
   .modal:has(.dirpicker) {
     width: 100%;
@@ -8784,11 +3391,13 @@ button.run-debug-toggle:hover {
   }
 
   /* `.sidebar` 在 ≤1024 是 fixed z-index 30 的 stacking context，backdrop 900 蓋不過同 30 的暫存區；sheet 開著時收掉暫存。 */
+
   body:has(.modal-backdrop) .shelf {
     display: none;
   }
 
   /* 關閉鍵是 sheet 唯一退路，不能是 24px 小叉。 */
+
   .modal-head .icon-btn,
   .bs-head .icon-btn {
     width: 40px;
@@ -8799,104 +3408,10 @@ button.run-debug-toggle:hover {
 }
 
 /* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
+
 @media (width <= 640px) {
-  .main-head .quota-compact .quota-window-name,
-  .main-head .quota-compact-pct {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  /* 一格只有一個窗口（compact：7d 常駐，更急的取代），單行；column 排法曾讓額度列長高，390px 塞不下五個帳號（2026-09-12）。 */
-  .main-head .quota-compact {
-    flex-wrap: nowrap;
-  }
-
-  /* 顏色跟每個窗口自己的等級，否則健康的也被染黃。 */
-  .main-head .quota-compact-win.warn .quota-compact-pct,
-  .main-head .quota-compact-win.warn .quota-window-name {
-    color: var(--warn);
-  }
-
-  .main-head .quota-compact-win.critical .quota-compact-pct,
-  .main-head .quota-compact-win.critical .quota-window-name {
-    color: var(--danger);
-  }
-
-  .bot-quota-chip {
-    font-size: 12px;
-    min-height: 22px;
-  }
-
-  /* 貼額度列正下方而非底部 sheet：底部要滑很遠且擋輸入框（2026-09-09 使用者）。 */
-  .quota-pop {
-    position: fixed;
-    top: 100px;
-    right: 8px;
-    left: 8px;
-    bottom: auto;
-    width: auto;
-    max-width: none;
-    max-height: min(60dvh, 480px);
-    border-radius: 12px;
-    padding: 10px 12px;
-    z-index: 80;
-  }
-
-  .quota-pop .quota-pop-foot {
-    display: none;
-  }
-
-  /* 手機 chip 是純文字，圖形版只在彈出層：條高一點、黑針粗一點。 */
-  .quota-pop .quota-pop-line {
-    font-size: 13px;
-    gap: 10px;
-  }
-
-  .quota-pop .quota-bar {
-    height: 10px;
-  }
-
-  .quota-pop .quota-bar-mark {
-    top: -3px;
-    height: 16px;
-    width: 3px;
-  }
-
-  .quota-pop .quota-bar-pct {
-    font-size: 12px;
-  }
-
-  .quota-pop .quota-ico {
-    display: inline-block;
-    width: 1.3em;
-    color: var(--text-faint);
-  }
-
-  /* 「✦ Fable」在 44px 會折成兩行。 */
-  .quota-pop .quota-pop-line > :first-child {
-    width: 64px;
-    white-space: nowrap;
-  }
-
-  .quota-pop-title,
-  .quota-pop-line,
-  .quota-pop-note,
-  .quota-pop-foot,
-  .quota-disable-note {
-    font-size: 12px;
-  }
-
-  .quota-disable input {
-    width: 20px;
-    height: 20px;
-  }
-
-  .quota-pop-line {
-    min-height: 28px;
-    align-items: center;
-  }
-
   /* 一顆 chip 只能代表目前 bot 的 kind，改成標題列下獨立一列，所有身分橫捲。 */
+
   .main-head {
     flex-wrap: wrap;
     height: auto;
@@ -8904,99 +3419,18 @@ button.run-debug-toggle:hover {
     row-gap: 0;
   }
 
-  .main-head > .quota-strip {
-    flex: 1 1 100%;
-    min-width: 0;
-    order: 20;
-    margin: 0 -8px;
-    padding: 0 8px 6px;
-  }
-
-  .main-head .quota-open {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    gap: 6px;
-    padding: 2px 0 4px;
-    scrollbar-width: none;
-    background:
-      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 20px 100% no-repeat local,
-      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 20px 100% no-repeat local,
-      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 28%), transparent) left / 10px 100% no-repeat scroll,
-      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 28%), transparent) right / 10px 100% no-repeat scroll;
-  }
-
-  .main-head .quota-open::-webkit-scrollbar {
-    display: none;
-  }
-
-  .main-head .quota-hp {
-    flex: none;
-  }
-
-  /* 同列三個 claude 身分時，沒有 cc0／cc1／cc2 會一模一樣。 */
-  .main-head .quota-hp .quota-identity {
-    display: inline;
-    font-size: 12px;
-    max-width: 4.5em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .group-head > .quota-strip {
     display: flex;
-  }
-
-  .main-head .quota-more {
-    display: none;
   }
 }
 
 /* 手機標題列第二行（2026-09-09 使用者截圖：三行吃 170px）：改兩行各 28px；git 動作整寬橫捲，標籤字只留數值。 */
+
 @media (width <= 640px) {
   .context-bar {
     padding: 2px 10px;
     gap: 6px;
     row-gap: 0;
-  }
-
-  .context-bar > .issues-bar {
-    flex: 0 1 auto;
-    min-width: 0;
-    order: 0;
-    padding: 2px 0;
-    border-bottom: 0;
-    background: transparent;
-  }
-
-  /* 靠右、排不下自己橫捲（不會遮到 issues-pop：它不在這個 overflow 底下）。 */
-  .context-bar > .statusline-bar {
-    flex: 1 1 0;
-    order: 0;
-    min-width: 0;
-    flex-wrap: nowrap;
-    justify-content: flex-end;
-    gap: 6px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .context-bar > .git-bar {
-    flex: 1 0 100%;
-    order: 1;
-    padding: 2px 0 3px;
-  }
-
-  .context-bar .sl-k {
-    display: none;
-  }
-
-  /* 目錄在手機不看；版本本來就第一個讓。 */
-  .context-bar .sl-item.sl-version,
-  .context-bar .sl-item[data-k='目錄'] {
-    display: none;
   }
 
   .context-bar .mini-btn,
@@ -9006,11 +3440,6 @@ button.run-debug-toggle:hover {
     font-size: 12px;
   }
 
-  /* 390px 上整句會把分頁擠到第二行；手機只留箭頭，字在 title。 */
-  .main-head .update-badge .update-badge-text {
-    display: none;
-  }
-
   .main-head .update-badge {
     min-width: 28px;
     padding: 0 6px;
@@ -9018,56 +3447,12 @@ button.run-debug-toggle:hover {
 }
 
 /* 手機的 repo / git / context 收成一顆（2026-09-09）：預設一列 28px 摘要，點了展開兩行。 */
+
 @media (width <= 640px) {
   .context-bar.collapsed {
     padding: 0 10px;
     min-height: 28px;
   }
-
-  .ctx-toggle {
-    all: unset;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 28px;
-    max-width: 100%;
-    padding: 0 2px;
-    color: var(--text-dim);
-    font-size: 12px;
-    font-family: var(--font-mono);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .ctx-toggle .ctx-summary {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .ctx-toggle .ctx-chev {
-    color: var(--text-faint);
-    font-size: 11px;
-  }
-
-  .ctx-toggle-open {
-    min-width: 24px;
-    justify-content: center;
-    order: -1;
-  }
-
-  .ctx-toggle:focus-visible {
-    outline: 2px solid var(--ring, var(--accent));
-    outline-offset: 2px;
-    border-radius: 4px;
-  }
-}
-
-/* 手機標題列 bot 切換下拉（BotSwitcher，2026-09-09），只在 ≤640px。 */
-.bot-switcher {
-  position: relative;
-  display: inline-flex;
-  min-width: 0;
 }
 
 .bot-switcher-btn {
@@ -9075,69 +3460,8 @@ button.run-debug-toggle:hover {
   gap: 4px;
 }
 
-.bot-switcher-chev {
-  flex: none;
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
-.bot-switcher-pop {
-  position: fixed;
-  z-index: 60;
-  min-width: 240px;
-  max-width: calc(100vw - 16px);
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: var(--shadow);
-}
-
-.bot-switcher-project {
-  padding: 6px 8px 2px;
-  color: var(--text-faint);
-  font-size: 11px;
-  letter-spacing: 0.03em;
-}
-
-.bot-switcher-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 40px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.bot-switcher-item.on {
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
-
-.bot-switcher-item:hover:not(.on) {
-  background: var(--bg-hover);
-}
-
-.bot-switcher-name {
-  /* `min-width: 0` 必要：預設 `min-width: auto` 會撐開泡泡，ellipsis 永不發生。 */
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-}
-
 /* 手機「這回合還在跑」（2026-09-09 使用者截圖：四顆鍵擠得說明字一字一行）：說明一行、鍵換行、30px 高。`.composer-queued` 同理。 */
+
 @media (width <= 640px) {
   .composer-lock,
   .composer-queued {
@@ -9145,13 +3469,6 @@ button.run-debug-toggle:hover {
     gap: 6px 6px;
     padding: 6px 8px;
     font-size: 12px;
-  }
-
-  .composer-lock > span:first-child,
-  .composer-queued > span:first-child {
-    flex: 1 0 100%;
-    min-width: 0;
-    white-space: normal;
   }
 
   .composer-lock .mini-btn,
@@ -9163,100 +3480,32 @@ button.run-debug-toggle:hover {
   }
 
   /* Bot 執行中只需一條緊湊工具列；完整錯誤原因仍沿用上面的換行規則。 */
+
   .bot-composer {
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
     min-height: 0;
-  }
-
-  .bot-composer .composer-lock.running {
-    gap: 4px;
-    padding: 0;
-    margin-bottom: 4px;
-    border: 0;
-    background: transparent;
-  }
-
-  .bot-composer .composer-lock.running > span:first-child {
-    flex: 1 0 auto;
-    white-space: nowrap;
-  }
-
-  .bot-composer .composer-lock.running .mini-btn {
-    min-height: 32px;
-    padding: 0 6px;
-  }
-
-  .bot-composer .composer-box {
-    gap: 6px;
   }
 
   .bot-composer textarea {
     min-width: 0;
     padding: 8px;
   }
-
-  .bot-composer .send-btn {
-    flex: none;
-    padding: 8px 12px;
-  }
 }
 
 /* 手機：模型／強度／Fast（BotSettingsPanel、ModelQuickPicker） */
+
 @media (width <= 640px) {
   /* 桌面 24px chip 手指點不到，撐到 36px：這是手機上**唯一**能改模型／強度／fast 的地方。 */
+
   .opt-group .opt {
     min-height: 36px;
     padding: 6px 12px;
     font-size: 13px;
   }
-
-  /* 「執行中改會即時套用」三排各講一次在 390px 佔三段；只留模型那句（對整個面板成立），其餘走 tooltip。 */
-  .live-note:not(.primary) {
-    display: none;
-  }
-
-  /* 勾選格撐大，說明字換到下方一整行，不再斷成「不用重／啟」。 */
-  .field.row.fast-row {
-    align-items: flex-start;
-    gap: 10px;
-    padding: 4px 0;
-  }
-
-  .field.row.fast-row input[type='checkbox'] {
-    width: 20px;
-    height: 20px;
-    margin-top: 2px;
-    flex: none;
-  }
-
-  .field.row.fast-row > span {
-    display: grid;
-    gap: 2px;
-    font-size: 13px;
-  }
-
-  /* 自己一行後 `.field-note` 的左邊距會多縮一格，對齊同一條左邊界。 */
-  .field.row.fast-row > span .field-note {
-    margin-left: 0;
-  }
-
-  /* 定位算出的 left 常只剩十幾 px，貼齊左右邊界，chip 才不被壓成兩行。 */
-  .model-quick-pop {
-    max-width: calc(100vw - 16px);
-    min-width: calc(100vw - 16px);
-  }
-}
-
-.quota-ico {
-  display: none;
-}
-
-.quota-pop-all {
-  margin: 6px 0 2px;
-  width: 100%;
 }
 
 /* 關閉鍵是唯一出口且在角落最易點偏（2026-09-09 使用者要求放大）。 */
+
 .bs-close {
   width: 40px;
   height: 40px;
@@ -9266,55 +3515,9 @@ button.run-debug-toggle:hover {
   line-height: 1;
 }
 
-.bs-idents {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-sunken);
-}
-
-.bs-idents-k {
-  color: var(--text-faint);
-  font-size: 11px;
-  letter-spacing: 0.03em;
-}
-
-/* 手機額度 chip 改上下兩行（2026-09-09 使用者：黃字要在 kind 下方，不是右邊）：整顆變窄，一列擠更多。 */
-@media (width <= 640px) {
-  .main-head .quota-hp {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1px;
-    padding: 3px 8px;
-    min-height: 40px;
-  }
-
-  .main-head .quota-hp .quota-head {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  /* 兩行 chip 已夠高，不再用負 margin 撐可按範圍。 */
-  .main-head .quota-bars-open {
-    padding: 0;
-    margin: 0;
-  }
-
-  .main-head .quota-compact {
-    padding-left: 2px;
-  }
-}
-
 /* 1100px 以下放不下整句（bot 名被截、徽章被切）：同手機只留箭頭。 */
-@media (width <= 1100px) {
-  .main-head .update-badge .update-badge-text {
-    display: none;
-  }
 
+@media (width <= 1100px) {
   .main-head .update-badge {
     min-width: 28px;
     padding: 0 6px;
@@ -9325,46 +3528,27 @@ button.run-debug-toggle:hover {
   flex: none;
   vertical-align: -1px;
 }
+
 .update-badge .upgrade-icon,
 .quota-update .upgrade-icon {
   vertical-align: -2px;
 }
 
 /* 最上排泡泡往上長會被視窗頂端裁成白條（2026-09-09 使用者截圖），一律往下長。 */
+
 .main-head .icon-tip[data-tip]::after {
   bottom: auto;
   top: calc(100% + 6px);
   transform: translateX(-50%) translateY(-2px);
 }
+
 .main-head .icon-tip[data-tip]:hover::after,
 .main-head .icon-tip[data-tip]:focus-visible::after {
   transform: translateX(-50%) translateY(0);
 }
-/* 指令泡泡已開時不再疊 tooltip（鍵按完還留 focus）。 */
-.attach-btn.on[data-tip]::after {
-  display: none;
-}
-
-/* 5h 不到一小時重置：窗口名換剩幾分並用 accent 提亮；欄寬放寬塞得下三字元。 */
-.quota-window {
-  grid-template-columns: minmax(16px, auto) auto;
-}
-.quota-window-name.soon {
-  color: var(--accent-ink);
-}
-
-/* 齒輪 36px 會把兩層叢集撐到 61px 超過標題列，chip 壓到底線（2026-09-10 使用者截圖）：縮到 28px 並封頂。 */
-.bot-head .main-title {
-  max-height: 100%;
-}
-.bot-head .main-title-row > .icon-btn.gear {
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
-  min-height: 28px;
-}
 
 /* 手機純圖示控制都要拇指點得到：補上較晚載入的圖示鍵，免得新頁面落回 18–30px；標題列維持 40px。 */
+
 @media (width <= 640px) {
   button.icon-btn,
   button.jump-bottom,
@@ -9378,54 +3562,12 @@ button.run-debug-toggle:hover {
     font-size: 18px;
   }
 
-  button.icon-btn svg,
-  button.jump-bottom svg {
-    width: 20px;
-    height: 20px;
-  }
-
-  /* 已以 40px 排好，放大範圍時不撐破列高。 */
-  .main-head button.icon-btn,
-  .bot-actions button.icon-btn,
-  .bot-actions button.head-menu-btn,
-  .bot-actions button.menu-btn {
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
-    min-height: 40px;
-    padding: 4px;
-  }
-
-  /* 額度按鈕含多行數字，不套固定方形或負邊距。 */
-  .main-head .quota-bars-open {
-    width: auto;
-    height: auto;
-    min-width: 0;
-    min-height: 0;
-    padding: 0;
-    margin: 0;
-  }
-
   .bot-head {
     display: grid;
     grid-template-columns: 40px minmax(0, 1fr) 40px 40px auto;
     grid-template-rows: auto auto auto;
     gap: 2px 4px;
     padding: 4px 8px;
-  }
-
-  .bot-head > .menu-btn {
-    grid-area: 1 / 1;
-  }
-
-  .bot-head > .main-title {
-    grid-area: 1 / 2;
-    max-height: none;
-  }
-
-  .bot-head > .tabs {
-    grid-area: 1 / 5;
-    align-self: start;
   }
 
   .bot-head > .primary-star {
@@ -9439,107 +3581,8 @@ button.run-debug-toggle:hover {
     color: #f05033;
   }
 
-  .bot-head .main-title-row {
-    width: 100%;
-    gap: 4px;
-  }
-
   .bot-head .bot-switcher {
     flex: 1;
-  }
-
-  /* 未讀數已在主力／剛跑完列顯示，名稱這排保留空間給 Git 與設定入口。 */
-  .bot-head .main-title-row > .unread-turns {
-    display: none;
-  }
-
-  .mobile-bot-version {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    max-width: 100%;
-    font-size: 12px;
-    line-height: 18px;
-    color: var(--text-dim);
-  }
-
-  /* kind 圖示 → 模型 · effort → 版本號（2026-09-11 使用者指定順序）；太長時模型先省略。 */
-  .mobile-bot-model {
-    flex: 0 1 auto;
-    min-width: 0;
-    color: var(--text);
-  }
-
-  /* 2026-09-12 使用者（手機實拍）：「name 下方的還是灰」。模型名吃 kind 品牌色（經 `--head-kind`），版本號維持淡灰（同桌面 pane id）。 */
-  .mobile-kind-icon.claude ~ .mobile-bot-model {
-    --head-kind: var(--kind-claude);
-  }
-
-  .mobile-kind-icon.codex ~ .mobile-bot-model {
-    --head-kind: var(--kind-codex);
-  }
-
-  .mobile-kind-icon.grok ~ .mobile-bot-model {
-    --head-kind: var(--kind-grok);
-  }
-
-  .mobile-bot-version > .mobile-bot-model {
-    /* 無 chip 底，純品牌色在淺色只有 3.2–4.35:1（12px 要 4.5）：混一成多文字色過 4.5，色相仍看得出。 */
-    color: color-mix(in srgb, var(--head-kind, var(--text)) 72%, var(--text));
-    font-weight: 600;
-  }
-
-  .mobile-bot-ver {
-    flex: none;
-  }
-
-  .mobile-bot-model,
-  .mobile-bot-version > span:last-child {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .mobile-kind-icon {
-    display: inline-flex;
-    flex: none;
-    font-size: 16px;
-  }
-
-  /* kind 圖示原吃 --text-dim，跟桌面與額度列的彩色 kind 對不起來，改同一組品牌色。 */
-  .mobile-kind-icon.claude {
-    color: var(--kind-claude);
-  }
-
-  .mobile-kind-icon.codex {
-    color: var(--kind-codex);
-  }
-
-  .mobile-kind-icon.grok {
-    color: var(--kind-grok);
-  }
-
-  .bot-head > .spacer {
-    display: none;
-  }
-
-  .bot-head > .mobile-primary-row {
-    grid-area: 3 / 1 / 4 / -1;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-  }
-
-  .bot-head > .mobile-primary-row:empty {
-    display: none;
-  }
-
-  .mobile-primary-row > .unread-strip {
-    flex: 1;
-    overflow-x: auto;
-    scrollbar-width: none;
   }
 
   .mobile-primary-row .unread-chip {
@@ -9550,13 +3593,6 @@ button.run-debug-toggle:hover {
     grid-area: 2 / 1 / 3 / -1;
     margin: 0;
     padding: 0;
-  }
-
-  .bot-head .main-title-row > .icon-btn.gear {
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
-    min-height: 40px;
   }
 }
 
@@ -9577,124 +3613,12 @@ button.run-debug-toggle:hover {
   }
 }
 
-/* changelog（UpdateChangelog.tsx）：長的自己捲。 */
-.update-changelog {
-  margin: 8px 0 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-  font-size: 12px;
-}
-.update-changelog.loading {
-  color: var(--text-dim);
-}
-.update-changelog.missing strong {
-  color: var(--warn, #c9a227);
-}
-.update-changelog-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.update-changelog-ver {
-  margin-left: 6px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-}
-.update-changelog-why {
-  margin: 4px 0;
-  color: var(--text-dim);
-}
-.update-changelog-body {
-  max-height: min(40vh, 320px);
-  overflow: auto;
-}
-.update-changelog-body h4 {
-  margin: 6px 0 2px;
-  font-size: 12px;
-  font-family: var(--font-mono);
-}
-.update-changelog-body pre {
-  margin: 0 0 6px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font: inherit;
-  color: var(--text);
-}
-.update-changelog-src,
-.update-changelog.missing a {
-  display: inline-block;
-  margin-top: 4px;
-  font-size: 11px;
-}
-
-/* 子 bot 用別的帳號：母 bot 身分徽章描琥珀色，後面掛子 bot 用的身分。 */
-.identity-diverged {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  cursor: help;
-}
 .identity-diverged .identity-badge {
   border-color: var(--warn, #c9a227);
 }
-.identity-diverged-mark {
-  font-size: 10px;
-  font-weight: 650;
-  font-family: var(--font-mono);
-  color: var(--warn, #c9a227);
-  white-space: nowrap;
-}
 
-/* 確認框封頂在畫面內、內文自己捲，按鈕才不被推出去（2026-09-10 使用者截圖）。用 dvh：iOS 網址列收合前後 100vh 不同。 */
-.confirm-dialog {
-  display: flex;
-  flex-direction: column;
-  max-height: calc(100vh - 32px);
-  max-height: calc(100dvh - 32px);
-  min-height: 0;
-}
-.confirm-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.confirm-title,
-.confirm-require,
-.confirm-actions {
-  flex: none;
-}
 @media (width <= 640px) {
   .confirm-backdrop {
     padding: 12px;
   }
-  .confirm-dialog {
-    max-height: calc(100vh - 24px);
-    max-height: calc(100dvh - 24px);
-  }
-}
-
-/* codex 額度重置券（`PopResetCredits`）不是進度條只有字；券數強調色——額度歸零時是唯一能做的動作。 */
-.quota-pop-line.reset-credits .quota-reset-credit {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.quota-pop-line.reset-credits .quota-reset-credit strong {
-  color: var(--accent-ink);
-  font-size: 12px;
-}
-
-.quota-reset-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-faint);
 }

@@ -5,6 +5,7 @@ import { BOT_KINDS } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../store/store'
 import { KindTag } from './KindTag'
+import './tools.css'
 
 /** v4.0 agent-CLI detection and "install via a running bot": the daemon prompts that bot to install + log in inside its own pane. */
 

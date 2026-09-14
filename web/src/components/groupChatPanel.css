@@ -1,0 +1,255 @@
+/* components/GroupChatPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* `role="listitem"` 不能蓋在 button 上（AT 會唸成清單項目），包一層不參與排版的殼。 */
+
+.li-wrap {
+  display: contents;
+}
+
+.recipient-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  min-height: 36px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.recipient-chip {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recipient-chip:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.recipient-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.recipient-chip.all {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+}
+
+.recipient-chip.all.on {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.recipient-chip:disabled {
+  opacity: 0.5;
+}
+
+/* Only shown when it has something to say; never a static blurb. */
+
+.composer-hint {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
+@media (width <= 640px) {
+  /* 群組標題列在 390px 排到 451px，「關閉群組」被推出畫面就回不去單一 bot；成員在收件者 chip 列已有，讓位。 */
+
+  .group-head > .members {
+    display: none;
+  }
+}
+
+.group-tag {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.group-head .main-title {
+  flex: none;
+}
+
+.members-count {
+  flex: none;
+  margin-left: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* Group header only: icon without name — name is in tooltip and sidebar. */
+
+.member.member-icon {
+  position: relative;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  gap: 0;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.member.member-icon:hover {
+  border-color: var(--border-strong);
+}
+
+.member.member-icon.claude {
+  color: var(--kind-claude);
+}
+
+.member.member-icon .lamp {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 1.5px var(--bg-panel);
+}
+
+.bot-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+  padding: 0 6px;
+  border-radius: 8px;
+  line-height: 1.6;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.bot-badge.claude {
+  background: #f6ede4;
+  border-color: #e0c8ae;
+  color: #8a5a26;
+}
+
+.bot-badge.codex {
+  background: #e7edf6;
+  border-color: #b9cae4;
+  color: #33587f;
+}
+
+.bot-badge.grok {
+  background: #ebebeb;
+  border-color: #c4c4c4;
+  color: #3a3a3a;
+}
+
+.bot-badge.all {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  .bot-badge.claude {
+    background: #38291b;
+    border-color: #5c4429;
+    color: #e0b483;
+  }
+
+  .bot-badge.codex {
+    background: #1d2836;
+    border-color: #33506f;
+    color: #8fb8e8;
+  }
+
+  .bot-badge.grok {
+    background: #2a2a2a;
+    border-color: #555;
+    color: #d6d6d6;
+  }
+}
+
+.msg-speaker {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-composer .composer-box {
+  position: relative;
+}
+
+.mention-pop {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 10;
+  min-width: 240px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.mention-label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.group-hint .mention-warn {
+  color: var(--warn);
+}
+
+.group-targets {
+  font-family: var(--font-mono);
+}
+
+.group-head .main-status {
+  font-family: var(--font-mono);
+}
+
+@media (width <= 1080px) {
+  .group-head .members {
+    display: none;
+  }
+}
+
+/* 390px 被切掉時看不出右邊還有東西：會按的讓它捲得動，只看的允許換行。 */
+
+@media (width <= 640px) {
+  /* `.composer` 底是 `--bg-panel`，漸層要跟著換，否則遮蓋色亮一階。 */
+
+  .recipient-row {
+    scrollbar-width: none;
+    background:
+      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) left / 14px
+        100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--text) 34%, transparent), transparent) right /
+        14px 100% no-repeat scroll;
+  }
+
+  .recipient-row::-webkit-scrollbar {
+    display: none;
+  }
+}

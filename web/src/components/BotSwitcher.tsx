@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { botLamp, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
+import './botSwitcher.css'
 
 /**
  * 手機標題列的 bot 名：點一下是換 bot 而非改名（2026-09-09 使用者決定）；列出母 bot，依 project 分組。

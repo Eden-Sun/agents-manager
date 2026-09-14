@@ -4,6 +4,7 @@ import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
+import './updateBadge.css'
 
 /**
  * claude 下載好新版只在 pane 底部印 `Update installed`；daemon 讀成 `runs.update_notice`，這顆 chip 點下去走重啟套用。

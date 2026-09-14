@@ -1,0 +1,91 @@
+/* components/ModelPicker.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.model-quick-pop {
+  position: fixed;
+  z-index: 50;
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  text-align: left;
+}
+
+.model-quick-pop .field {
+  margin: 0;
+}
+
+.model-quick-pop .hint {
+  margin: 0;
+}
+
+/* 說明要能自己換行，否則 `2x speed, increased usage` 把 popover 撐到 max-width。 */
+
+.model-quick-pop .opt-group .field-note {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+/* 「廠推薦」：原廠回報的實際預設級（docs/API.md §12.1 `default_effort`），不是猜的；標在按鈕上不必 hover。 */
+
+.opt-group .opt .effort-recommended {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  line-height: 1.5;
+}
+
+.opt-group .opt.on .effort-recommended {
+  background: rgb(255 255 255 / 25%);
+  color: inherit;
+}
+
+@media (width <= 640px) {
+  /* 「執行中改會即時套用」三排各講一次在 390px 佔三段；只留模型那句（對整個面板成立），其餘走 tooltip。 */
+
+  .live-note:not(.primary) {
+    display: none;
+  }
+
+  /* 勾選格撐大，說明字換到下方一整行，不再斷成「不用重／啟」。 */
+
+  .field.row.fast-row {
+    align-items: flex-start;
+    gap: 10px;
+    padding: 4px 0;
+  }
+
+  .field.row.fast-row input[type='checkbox'] {
+    width: 20px;
+    height: 20px;
+    margin-top: 2px;
+    flex: none;
+  }
+
+  .field.row.fast-row > span {
+    display: grid;
+    gap: 2px;
+    font-size: 13px;
+  }
+
+  /* 自己一行後 `.field-note` 的左邊距會多縮一格，對齊同一條左邊界。 */
+
+  .field.row.fast-row > span .field-note {
+    margin-left: 0;
+  }
+
+  /* 定位算出的 left 常只剩十幾 px，貼齊左右邊界，chip 才不被壓成兩行。 */
+
+  .model-quick-pop {
+    max-width: calc(100vw - 16px);
+    min-width: calc(100vw - 16px);
+  }
+}

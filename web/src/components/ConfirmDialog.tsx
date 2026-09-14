@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import './confirmDialog.css'
 
 export interface ConfirmDialogProps {
   open: boolean

@@ -1,6 +1,7 @@
 import { copyText } from '../lib/copyText'
 import { useEffect, useRef, useState } from 'react'
 import { TerminalIcon } from './Icons'
+import './attachButton.css'
 
 /** v4.0 "open in terminal": one-click copy of the host's `herdr …` attach command; a popover shows what was copied. */
 export function AttachButton({ command, compact }: { command: string; compact?: boolean }) {

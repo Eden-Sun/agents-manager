@@ -1,4 +1,5 @@
 import { useStore } from '../store/store'
+import './updateAllBanner.css'
 
 /** 「claude 有更新」按下去之後側欄的進度／失敗與跳過名單（SPEC §6.9）；觸發鈕在 `UpdateQuotaChip`。 */
 export function UpdateAllBanner() {

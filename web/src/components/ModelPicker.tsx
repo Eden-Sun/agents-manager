@@ -6,6 +6,7 @@ import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER,
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
+import './modelPicker.css'
 
 /** v4.0 model / effort / fast from `GET /api/models?kind=&host=`; falls back to static `MODEL_OPTIONS` on failure. */
 

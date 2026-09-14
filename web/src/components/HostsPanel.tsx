@@ -7,6 +7,7 @@ import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
 import { ToolBadges } from './Tools'
+import './hostsPanel.css'
 
 /** SPEC §11.6 host management: configured remote hosts plus the "new host" form; §11.2 tuning fields sit behind 進階. */
 

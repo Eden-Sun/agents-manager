@@ -1,6 +1,7 @@
 import type { KeyboardEvent } from 'react'
 import type { BotKind } from '../api/types'
 import { useStore } from '../store/store'
+import './kindTag.css'
 
 /** v4.0: a bot's kind as glyph or word. Acceptance scripts key on `.kind-tag.<kind>`, so it stays the same in both modes. */
 

@@ -25,6 +25,7 @@ import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import './groupChatPanel.css'
 
 /** SPEC §13 project group chat: timeline merges every member bot's conversation; `@<bot>` / `@all` picks recipients. */
 

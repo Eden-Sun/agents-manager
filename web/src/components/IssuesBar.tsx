@@ -8,6 +8,7 @@ import type { DraftKey } from '../store/store'
 import { labelStyle } from '../lib/labelStyle'
 import { GhLoginButton, isGhAuthError } from './GhAuth'
 import { onTabListKeyDown } from './tabKeys'
+import './issuesBar.css'
 
 /** v4.0 GitHub issues (via `gh` on the daemon): search, open / closed toggle, insert into the composer. */
 

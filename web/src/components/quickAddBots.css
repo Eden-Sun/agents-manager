@@ -1,0 +1,48 @@
+/* components/QuickAddBots.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* 已停用的身分列出但不可點——再開一顆也是同一組沒額度的帳號。 */
+
+.quick-add-chip.quota-off .quick-add-label {
+  text-decoration: line-through;
+}
+
+.quick-add-chip.quota-off .quick-add-out {
+  color: var(--text-faint);
+}
+
+.quick-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.quick-add-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.quick-add-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.quick-add-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.quick-add-out {
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.quick-add-label {
+  font-weight: 600;
+}

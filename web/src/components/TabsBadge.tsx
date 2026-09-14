@@ -3,6 +3,7 @@ import { humanBytes } from './MemBadge'
 import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { useStore } from '../store/store'
 import { BrowserIcon } from './BrowserIcons'
+import './tabsBadge.css'
 
 /** 本機瀏覽器（Chrome / ego）各自的分頁數與 RAM，常駐在 RAM 格底下（跟 pane 數一樣是「現在開著多少」）；沒有瀏覽器就不出現。 */
 export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {

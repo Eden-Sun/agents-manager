@@ -1,0 +1,84 @@
+/* components/IdentitiesPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* identities */
+
+.identity-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  line-height: 1.6;
+}
+
+.identity-badge.is-default {
+  background: transparent;
+  color: var(--text-dim);
+  border-color: var(--border);
+  font-weight: 500;
+}
+
+.identity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* shell alias 認來的身份（SPEC §16）唯讀，退一階和可編輯的 config 列分開。 */
+
+.identity-shell-block {
+  display: grid;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-strong);
+}
+
+.identity-row.is-shell {
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  border-bottom: 0;
+  padding-right: 8px;
+}
+
+.identity-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.identity-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.identity-detail {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 已登入用中性色（常態），未登入警示色，問不到則淡掉。 */
+
+.identity-logins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.identity-login-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

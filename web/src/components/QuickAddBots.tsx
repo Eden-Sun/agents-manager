@@ -4,6 +4,7 @@ import { BOT_KINDS } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { isQuotaDisabled, quotaDisableKey, useDisabledQuota } from '../store/quotaHide'
 import { KindTag } from './KindTag'
+import './quickAddBots.css'
 
 /** 空專案的一鍵新增：只列這台主機上真的能開的 kind／已登入身份，點一下就建好並啟動。 */
 type Choice = {

@@ -1,0 +1,16 @@
+/* components/BlockedPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+.blocked-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.blocked-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.term.blocked-term {
+  max-height: 300px;
+}

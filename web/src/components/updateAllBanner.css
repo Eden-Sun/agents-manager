@@ -1,0 +1,85 @@
+/* components/UpdateAllBanner.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
+/* SPEC §6.9：只在真的有更新時出現、做完收掉，所以放在顯眼處不擋事。 */
+
+.update-all {
+  flex: none;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+}
+
+.update-all.running {
+  background: var(--bg-sunken);
+}
+
+.update-all-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.update-all-line strong {
+  flex: 1;
+  min-width: 0;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-all-x {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.update-all-x:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.update-all-bar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.update-all-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+
+.update-all-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.update-all-list li {
+  display: flex;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.update-all-list li b {
+  flex: none;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.update-all-list.bad li b {
+  color: var(--danger);
+}

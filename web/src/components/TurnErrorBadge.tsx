@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { projectHostName, useStore } from '../store/store'
 import { quotaKey } from '../api/types'
+import './turnErrorBadge.css'
 
 /**
  * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）：claude 斷線只在 pane 印一行、照常 idle，`runs.turn_error` 在此顯示。

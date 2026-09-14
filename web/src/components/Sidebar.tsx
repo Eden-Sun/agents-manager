@@ -47,6 +47,7 @@ import { UpdateBadge } from './UpdateBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { useWheelRef } from '../hooks/useWheelRef'
+import './sidebar.css'
 
 function ConnBadge({ socket, connected }: { socket: SocketStatus; connected: boolean }) {
   const label =
