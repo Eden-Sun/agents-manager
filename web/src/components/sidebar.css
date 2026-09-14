@@ -13,7 +13,7 @@
   overflow: visible;
 }
 
-/* 標題列右欄：瀏覽器晶片在上，重建 chip 接在它下面（使用者 2026-09-14 指定的位置）。 */
+/* 標題列右欄：瀏覽器晶片。重建 chip 已搬到「AG Man」右上（見 `.head-brand`）。 */
 .head-right {
   display: flex;
   flex-direction: column;
@@ -23,10 +23,16 @@
   min-width: 0;
 }
 
+/*
+ * 品牌那一欄兩行，右緣對齊（2026-09-14 使用者：「counter 數就放在 AG Man 的右上 = 燈號上面」）：
+ *   AG Man ……… ⟳ 1/5
+ *   pane 27 ………… ●
+ * 兩行都撐滿這一欄、內容左右分開，重建申請數才會剛好疊在連線燈號正上方。
+ */
 .head-brand {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 3px;
   min-width: 0;
 }
@@ -41,6 +47,17 @@
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.head-brand-title > .rebuild-badge-box,
+.head-brand-meta > .conn {
+  margin-left: auto;
+}
+
+/* chip 現在在左欄：清單改靠左展開，靠右會掉出畫面左緣。 */
+.head-brand .rebuild-pop {
+  right: auto;
+  left: 0;
 }
 
 /* 側欄不夠寬時「剩 N」在這格折行，不去擠左右兩欄。 */
