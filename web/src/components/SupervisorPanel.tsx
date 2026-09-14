@@ -123,7 +123,11 @@ function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: s
         {r.configured ? (
           <>
             <span className={`agm-chip ${STATUS_TONE[r.status] ?? ''}`}>{label(STATUS_LABEL, r.status)}</span>
+            {/* 設定值；實際在跑的不一樣時兩個都畫出來，不要只給一個會騙人的數字。 */}
             <span className="agm-chip mono">{r.identity} · {r.model} · {r.effort}</span>
+            {r.runtime.model && (r.runtime.model !== r.model || (r.runtime.effort && r.runtime.effort !== r.effort)) ? (
+              <span className="agm-chip warn mono">實際 {r.runtime.model}{r.runtime.effort ? ` · ${r.runtime.effort}` : ''}</span>
+            ) : null}
             {r.inbox_open > 0 ? <span className="agm-chip warn">{r.inbox_open} 則待處理</span> : null}
             {r.bot_id && r.bot_present ? (
               <button type="button" className="btn" onClick={() => onOpen(r.bot_id)}>

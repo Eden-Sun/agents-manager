@@ -114,6 +114,10 @@ test('協調者：舊 daemon 沒這一塊、或是垃圾，都當成沒建立，
   assert.equal(gone.bot_present, false)
   // 舊 daemon 沒有 bot_present：有 bot_id 就當它還在。
   assert.equal(toResponder({ configured: true, bot_id: 'b-resp', status: 'idle' }).bot_present, true)
+  // 實際跑的模型跟設定值分開讀；沒給就是 null，不要拿設定值冒充。
+  const live = toResponder({ configured: true, bot_id: 'b', model: 'opus', runtime: { model: 'fable', effort: 'low' } })
+  assert.equal(live.runtime.model, 'fable')
+  assert.equal(toResponder({ configured: true }).runtime.model, null)
   const r = toResponder({ configured: true, status: 'waiting_quota', quota_reset_at: '2026-09-13T18:00:00Z', stats: { wakes: 'nope', duplicates: 99 } })
   assert.equal(r.status, 'waiting_quota')
   assert.equal(r.quota_reset_at, '2026-09-13T18:00:00Z')
