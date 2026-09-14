@@ -47,6 +47,21 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
 }
 
 
+/// Record a delivery outcome. `unverified` is stored as `delivery='ok'` plus
+/// `delivery_verified=0` (the column's CHECK constraint only knows the four original states).
+pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, delivery: &str) {
+    let (stored, verified) = match delivery {
+        "unverified" => ("ok", 0),
+        other => (other, 1),
+    };
+    let _ = sqlx::query("UPDATE turns SET delivery=?, delivery_verified=? WHERE id=?")
+        .bind(stored)
+        .bind(verified)
+        .bind(turn_id)
+        .execute(&app.db)
+        .await;
+}
+
 /// The API answer for a prompt that was not sent. `retry` → 409 (temporary: a busy box, a
 /// transcript not reported yet; callers retry and assignments stay queued). Otherwise 422: this
 /// prompt can never be proven on this run, and saying so beats holding it forever.
@@ -214,7 +229,9 @@ pub async fn prompt_grouped(
             .await
             .map_err(up)?
             .unwrap_or_default();
-        return Ok(PromptOut { turn_id: t.id, message_id: mid, delivery: t.delivery });
+        // The same request asked again reports the same outcome, including "unverified".
+        let delivery = if t.delivery == "ok" && t.delivery_verified == 0 { "unverified".to_string() } else { t.delivery };
+        return Ok(PromptOut { turn_id: t.id, message_id: mid, delivery });
     }
 
     // 1. preconditions
@@ -293,6 +310,9 @@ pub async fn prompt_grouped(
     let res = execute_delivery(app, &client, &run, &bot, &deliver, plan).await;
     let delivery = match res {
         Ok(Delivered::Submitted) => "ok",
+        // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
+        // session is known): delivered as far as anyone can tell, marked for a human, never re-sent.
+        Ok(Delivered::Unverified) => "unverified",
         // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
         // back out so the same request id can be sent again, and answer 409 like the plan would.
         Ok(not @ Delivered::NotAttempted { .. }) => {
@@ -320,9 +340,9 @@ pub async fn prompt_grouped(
             "unknown"
         }
     };
-    let _ = sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(&turn_id).execute(&app.db).await;
+    mark_delivery(app, &turn_id, delivery).await;
     emit_turn(app, &turn_id).await;
-    if delivery == "ok" {
+    if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn_id).await;
         arm_progress(app, &run.id, bot_id, &turn_id).await;
     }

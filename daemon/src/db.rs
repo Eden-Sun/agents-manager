@@ -159,6 +159,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("runs", "pane_typed", "ALTER TABLE runs ADD COLUMN pane_typed INTEGER NOT NULL DEFAULT 0"),
         // 這個 turn 已經被 watchdog 重送過幾次。存在 DB 才擋得住「重啟後又重送同一則」。
         ("turns", "resend_count", "ALTER TABLE turns ADD COLUMN resend_count INTEGER NOT NULL DEFAULT 0"),
+        // 0 = the prompt was typed and submitted on a run with no lossless evidence (grok, remote
+        // hosts, codex before its session is known). `delivery` stays 'ok' — its CHECK constraint
+        // predates this state and cannot be widened without rebuilding the table — and this column
+        // carries the "check it by hand" mark to the API, the UI and the supervisor.
+        ("turns", "delivery_verified", "ALTER TABLE turns ADD COLUMN delivery_verified INTEGER NOT NULL DEFAULT 1"),
     ] {
         if !has_column(pool, table, col).await? {
             sqlx::query(ddl).execute(pool).await.with_context(|| format!("add {table}.{col}"))?;
@@ -326,6 +331,9 @@ pub struct Turn {
     /// Exact prompt payload for a queued web turn; never exposed in REST/WS turn JSON.
     #[serde(skip_serializing)]
     pub prompt_text: Option<String>,
+    /// 0 = delivered without lossless evidence ("unverified"); see the migration note.
+    #[sqlx(default)]
+    pub delivery_verified: i64,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

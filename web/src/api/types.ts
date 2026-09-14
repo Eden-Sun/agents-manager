@@ -309,6 +309,8 @@ export interface Turn {
   origin: TurnOrigin
   status: TurnStatus
   delivery: TurnDelivery
+  /** 打字送出但沒有無損證據可以確認（grok、遠端、codex 還沒回報 session）；要人工核對。`turns.delivery_verified = 0`。 */
+  unverified: boolean
   client_request_id: string | null
   created_at: string
   completed_at: string | null

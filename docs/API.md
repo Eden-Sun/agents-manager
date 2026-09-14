@@ -161,7 +161,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
   寫入 `messages.relay_from`，UI 據此畫「誰 → 誰」。
 - `client_request_id` 可省（daemon 補），建議自帶：同 id 重送回同一個 `turn_id`（即使已有新 Turn 在飛）。
 
-成功 `200 { "turn_id", "message_id", "delivery": "ok" | "unknown" | "failed" }`：
+成功 `200 { "turn_id", "message_id", "delivery": "ok" | "unverified" | "unknown" | "failed" }`：
 
 - `ok`：已送達，等 hook（或終端備援）。
 - `unknown`：RPC 逾時；該 Turn 仍 in_flight 時，**abandon / interrupt / stop 之前不能再送**（409）。Stop hook 完成時會收成 `ok`。UI 顯示「送出狀態不明」並提供放棄按鈕。
@@ -187,11 +187,13 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 
 | 狀態 | body | 意思 |
 |---|---|---|
-| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"pane_width_unknown"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
-| 422 | `{"error":"delivery_unprovable","reason":"no_lossless_proof"|"prompt_too_long_to_prove","sent":false,"run_id"}` | 這一則在這個 run 上沒有辦法確認送達（例如 grok／codex 的多行 prompt），所以不打。 |
+| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
+| 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
 
-按過鍵之後才證明不了，才是 `200 {"delivery":"unknown"}`。排隊中的 prompt 遇到 409 類原因放回 `queued` 並在 15 秒後重試；
-422 類原因直接把 turn 標成 failed 並插 system 訊息說明。
+沒有無損證據可用的 run（grok、遠端主機、codex 還沒回報 session 的多行 prompt…，矩陣見 SPEC §4.4a）**照樣送出**，回
+`200 {"delivery":"unverified"}`：已打字、框收下並在 Enter 後清空，但無法逐字核對。turn JSON 帶 `delivery:"ok"` 與
+`delivery_verified:0`，UI 標「未驗證送達」；它不會被自動重送。按過鍵、該有證據卻證明不了，才是 `200 {"delivery":"unknown"}`。
+排隊中的 prompt 遇到 409 類原因放回 `queued` 並在 15 秒後重試；422 類原因直接把 turn 標成 failed 並插 system 訊息說明。
 
 ## 6. 讀訊息
 

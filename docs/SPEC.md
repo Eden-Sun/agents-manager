@@ -246,27 +246,50 @@ label = "foo"
 pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 slash 兩分鐘）。之後這個 run 的 prompt
 一律改成打字進 pane，`agent.get` 查不到 `agent_session` 綁定的 agent 也走這條（`lifecycle/delivery.rs`）。
 
-**證據在打字之前就決定，而且只接受無損的兩種**。畫面上 TUI 畫出來的文字不能拿來重建 prompt（軟折行與
-使用者按的換行在畫面上一樣、行尾空白看不見、tab／emoji／組合字元／ZWJ 的寬度不可靠），所以不做任何還原。
+**證據在打字之前就決定**。畫面上 TUI 畫出來的文字不能拿來重建 prompt（軟折行與使用者按的換行在畫面上一樣、
+行尾空白看不見、tab／emoji／組合字元／ZWJ 的寬度不可靠），所以不做任何還原。無損證據有三種：
 
-1. **claude 的 transcript（優先）**：本機 claude、run 有 `native_session_id` 且 `transcript_path` 檔案存在時，
-   **任何** prompt 都用它。打字前記下檔案長度當基準，送出後只讀基準之後新增的位元組，要出現一筆 `type=user`、
-   非 meta、非 tool_result、內容與送出文字**逐位元組相同**的訊息；同時 run 仍須指向同一個 session id 與路徑，
-   途中換了就是 `Unproven("session_changed")`。檔案比基準還短（被換掉）視為讀取錯誤。
-2. **一列回音（沒有 transcript 時）**：只給「單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元」，
-   而且**在當下 pane 寬度保證放得進一列**的 prompt——寬度取 herdr `pane.layout` 回報的欄數，文字寬度以
-   「ASCII 一欄、其他一律兩欄」保守估，加上 marker 與 6 欄餘裕 ≤ 欄數才算。送出後在輸入框上方要多出**恰好一列**
-   `❯ <原文>`（claude 也接受 `> `），marker 以原樣前綴比對、內容不 trim，而且這列底下**沒有續行**。量不到寬度就不用這條。
-3. **都不適用**：本機 claude 但 session／transcript 還沒回報 → `NotAttempted(transcript_not_ready, retry)`；
-   量不到 pane 寬度的單行 → `NotAttempted(pane_width_unknown, retry)`；grok／codex 多行、遠端主機 → 
-   `NotAttempted(no_lossless_proof)`；超過 20 萬字 → `NotAttempted(prompt_too_long_to_prove)`。
+- **claude transcript**：本機、run 有 `native_session_id` 且 `transcript_path` 檔案存在。
+- **codex rollout**：本機、run 有 `native_session_id`（codex 第一次回合結束時回報），且在該 bot 的
+  `CODEX_HOME`（identity env → bot env → `~/.codex`）底下 `sessions/YYYY/MM/DD/` 最近 14 個日期資料夾裡找到
+  檔名恰為 `rollout-…-<session id>.jsonl` 的檔案。只算頂層 `response_item`／`message`／`role=user` 且全部是
+  `input_text` 的項目；`compacted` 重播的歷史、developer 訊息、帶圖片的訊息都不算。
+- **一列回音**：單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元，且在 herdr `pane.layout`
+  回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
+  恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），原樣前綴比對、不 trim，且底下沒有續行。
 
-**三種結果，對呼叫端意義不同**：`Submitted`；`NotAttempted` —— **一個字都沒送**；`Unproven` —— 已經按過鍵、
-證明不了。只有 `Unproven` 會變成 `delivery='unknown'`。直接送出的 prompt 在建立 turn **之前**先規劃
-（路徑、證據、空框），`NotAttempted` 不建 turn：可重試的回 409（AGM 交辦維持 queued 退避），不可能證明的回 422。
-規劃後、打第一個字前框才被填上的極小競態，把剛建的 turn 與 user 訊息刪回去再回 409，讓同一個 request id 能重送。
-排隊中的 prompt：可重試原因放回 `queued` 並在 15 秒後重試（忙碌的框不會產生 working→idle 事件），不可能證明的直接標
-failed 並插 system 訊息。
+兩種 session log 都是：打字前記下檔案長度當基準，送出後只讀基準之後新增的位元組，要多一筆與送出文字**逐位元組
+相同**的 user 訊息；同時 run 仍須指向同一個 session（claude 另比對路徑），途中換了就是 `Unproven("session_changed")`；
+檔案比基準還短視為讀取錯誤。
+
+**證據矩陣**（先符合的先用）：
+
+| provider | 主機 | 單行、放得進一列 | 其他（多行、長文、縮排／行尾空白、特殊字元、量不到欄寬） |
+|---|---|---|---|
+| claude | 本機，transcript 已回報 | transcript | transcript |
+| claude | 本機，hooks 開著但 transcript 還沒回報 | 一列回音 | 不打，`NotAttempted(transcript_not_ready, retry)` 等 SessionStart |
+| claude | 本機，hooks 關閉 | 一列回音 | **unverified** |
+| claude | 遠端 | 一列回音 | **unverified** |
+| codex | 本機，找到 rollout | rollout | rollout |
+| codex | 本機，session 還不知道／找不到 rollout | 一列回音 | **unverified** |
+| codex | 遠端 | 一列回音 | **unverified** |
+| grok | 任何 | 一列回音 | **unverified** |
+
+超過 20 萬字一律 `NotAttempted(prompt_too_long_to_prove)`（422），不打。
+
+**結果四種，對呼叫端意義不同**：
+- `Submitted`：有無損證據證明送出。
+- `Unverified`：沒有無損證據可用，照樣打字送出；框收下貼上、Enter 後清空，就回報成送出，但標成「要人工核對」。
+  DB 存 `delivery='ok'`＋`turns.delivery_verified=0`（`delivery` 的 CHECK 只有原本四種狀態，不改表），API 回
+  `"delivery":"unverified"`，AGM 交辦記成 `delivery=unverified`，UI 在使用者泡泡上標「未驗證送達」。它照常掛 stall
+  與進度輪詢、Enter 補送，但**絕不自動重送**（可能已經被收下）。
+- `NotAttempted`：一個字都沒送。
+- `Unproven`：按過鍵、該有證據卻證明不了——只有這種會變成 `delivery='unknown'`。
+
+直接送出的 prompt 在建立 turn **之前**先規劃（路徑、證據、空框），`NotAttempted` 不建 turn：可重試的回 409（AGM 交辦
+維持 queued 退避），不可能的回 422。規劃後、打第一個字前框才被填上的極小競態，把剛建的 turn 與 user 訊息刪回去再回
+409，讓同一個 request id 能重送。排隊中的 prompt：可重試原因放回 `queued` 並在 15 秒後重試（忙碌的框不會產生
+working→idle 事件），不可能的直接標 failed 並插 system 訊息。
 
 **空框的判定只接受已知形狀**：輸入框那列恰好是 marker（`❯` 或 `❯ `、後面沒有任何東西），而且下一列就是框線。
 marker 後多一個空白、空白的第二列、行尾空白的草稿、建議句、跟要送的一模一樣的字——全部是非空，一律不代送、零寫入。
