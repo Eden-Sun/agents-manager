@@ -59,6 +59,8 @@ pub struct LivePane {
     pub swallow_text: bool,
     /// Like claude's session transcript: every submitted message is appended as a user entry.
     pub transcript_file: Option<std::path::PathBuf>,
+    /// Columns `pane.layout` reports for this pane; `None` answers like herdr without a layout.
+    pub width: Option<u32>,
 }
 
 impl LivePane {
@@ -356,6 +358,15 @@ impl MockHerdr {
                         }
                         // Typing into a pane: recorded in `calls`. A live pane reacts like a TUI;
                         // any other pane just answers ok and keeps whatever screen the test set.
+                        "pane.layout" => {
+                            let pid = wid_of("pane_id");
+                            let width = st.live.lock().unwrap().get(&pid).and_then(|p| p.width);
+                            match width {
+                                Some(w) => json!({"id": id, "result": {"layout": {"panes": [
+                                    {"pane_id": pid, "rect": {"x": 0, "y": 0, "width": w, "height": 40}}]}}}),
+                                None => json!({"id": id, "error": {"code": "unsupported", "message": "no layout"}}),
+                            }
+                        }
                         "pane.send_text" => {
                             let pid = wid_of("pane_id");
                             let text = params.get("text").and_then(Value::as_str).unwrap_or("").to_string();

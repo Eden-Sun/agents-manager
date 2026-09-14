@@ -243,25 +243,34 @@ label = "foo"
 pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 slash 兩分鐘）。之後這個 run 的 prompt
 一律改成打字進 pane，`agent.get` 查不到 `agent_session` 綁定的 agent 也走這條（`lifecycle/delivery.rs`）。
 
-**證據在打字之前就決定，而且只接受無損的兩種**。畫面上 TUI 畫出來的文字不能拿來重建 prompt：TUI 會
-自己折行（軟折行與使用者按的換行在畫面上一樣）、herdr 不回報欄寬、行尾空白看不見、tab／emoji／組合字元
-／ZWJ 的寬度不可靠——所以不做任何「還原」。
+**證據在打字之前就決定，而且只接受無損的兩種**。畫面上 TUI 畫出來的文字不能拿來重建 prompt（軟折行與
+使用者按的換行在畫面上一樣、行尾空白看不見、tab／emoji／組合字元／ZWJ 的寬度不可靠），所以不做任何還原。
 
-1. **一列回音**：只適用於「單行、首尾沒有空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元」的
-   prompt。送出後在輸入框上方要多出**恰好一列** `❯ <原文>`（claude 也接受 `> <原文>`），而且這列底下
-   **沒有續行**；marker 以原樣前綴比對，內容不 trim。底下有續行的列一律不算——那可能是軟折行也可能是
-   硬換行，兩種讀法都證明不了。不需要知道欄寬。
-2. **claude 的 transcript**：其餘 prompt（多行、長文、含縮排或行尾空白）只在 claude、本機、
-   `runs.transcript_path` 存在時可用。送出後 transcript 尾端（最多 2 MiB）要多一筆 `type=user`、非 meta、
-   非 tool_result 的訊息，內容與送出的文字**逐位元組相同**（縮排、空白行、行尾兩空白都算）。
-3. 以上都不適用（grok／codex 的多行 prompt、遠端主機、沒有 transcript、超過 20 萬字）→ **不打字**，
-   直接回 `Unknown`。
+1. **claude 的 transcript（優先）**：本機 claude、run 有 `native_session_id` 且 `transcript_path` 檔案存在時，
+   **任何** prompt 都用它。打字前記下檔案長度當基準，送出後只讀基準之後新增的位元組，要出現一筆 `type=user`、
+   非 meta、非 tool_result、內容與送出文字**逐位元組相同**的訊息；同時 run 仍須指向同一個 session id 與路徑，
+   途中換了就是 `Unproven("session_changed")`。檔案比基準還短（被換掉）視為讀取錯誤。
+2. **一列回音（沒有 transcript 時）**：只給「單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元」，
+   而且**在當下 pane 寬度保證放得進一列**的 prompt——寬度取 herdr `pane.layout` 回報的欄數，文字寬度以
+   「ASCII 一欄、其他一律兩欄」保守估，加上 marker 與 6 欄餘裕 ≤ 欄數才算。送出後在輸入框上方要多出**恰好一列**
+   `❯ <原文>`（claude 也接受 `> `），marker 以原樣前綴比對、內容不 trim，而且這列底下**沒有續行**。量不到寬度就不用這條。
+3. **都不適用**：本機 claude 但 session／transcript 還沒回報 → `NotAttempted(transcript_not_ready, retry)`；
+   量不到 pane 寬度的單行 → `NotAttempted(pane_width_unknown, retry)`；grok／codex 多行、遠端主機 → 
+   `NotAttempted(no_lossless_proof)`；超過 20 萬字 → `NotAttempted(prompt_too_long_to_prove)`。
 
-打字流程：框必須是空的（別人的草稿不清、不覆蓋；框裡已經有同一段也不代送）→ 一次貼上 → 框變成非空
-（仍是空的且證據沒變才再貼一次）→ Enter → 框回到空的**且**證據比送前多一。框在 Enter 後仍有字就再按一次
-並繼續驗。任何讀取失敗都是錯誤，不是空畫面；驗不出來回 `Unknown`，turn 停在 `delivery='unknown'`（§6.3），
-不當成已送達、不自動重打。`runs.pane_typed` 要先寫成功才碰 pane（slash 與 prompt 都是），寫不進去就中止；
-行程內另有保守記號，讀不出來時當成「要打字」，不退回 `agent.prompt`。
+**三種結果，對呼叫端意義不同**：`Submitted`；`NotAttempted` —— **一個字都沒送**；`Unproven` —— 已經按過鍵、
+證明不了。只有 `Unproven` 會變成 `delivery='unknown'`。直接送出的 prompt 在建立 turn **之前**先規劃
+（路徑、證據、空框），`NotAttempted` 不建 turn：可重試的回 409（AGM 交辦維持 queued 退避），不可能證明的回 422。
+規劃後、打第一個字前框才被填上的極小競態，把剛建的 turn 與 user 訊息刪回去再回 409，讓同一個 request id 能重送。
+排隊中的 prompt：可重試原因放回 `queued` 並在 15 秒後重試（忙碌的框不會產生 working→idle 事件），不可能證明的直接標
+failed 並插 system 訊息。
+
+**空框的判定只接受已知形狀**：輸入框那列恰好是 marker（`❯` 或 `❯ `、後面沒有任何東西），而且下一列就是框線。
+marker 後多一個空白、空白的第二列、行尾空白的草稿、建議句、跟要送的一模一樣的字——全部是非空，一律不代送、零寫入。
+
+打字流程：空框 → 一次貼上 → 框變成非空（仍是空的且證據沒變才再貼一次）→ Enter → 框回到空的**且**證據比基準多一。
+框在 Enter 後仍有字就再按一次並繼續驗。任何讀取失敗都是錯誤，不是空畫面。`runs.pane_typed` 要先寫成功才碰 pane
+（slash 與 prompt 都是），寫不進去就中止；行程內另有保守記號，讀不出來時當成「要打字」，不退回 `agent.prompt`。
 
 stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.resend_count`（每個 turn 上限 1，UPDATE 認領
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。

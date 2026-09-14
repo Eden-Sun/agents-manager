@@ -182,6 +182,17 @@ active Run 的 herdr session 已不可用 → 寫入 Turn 前回 502，不留 Tu
 
 **排隊中的 prompt 送出時也過這三道**：claim 之後、`agent.prompt` 之前中了就把 turn 放回 `queued`（清 `run_id`）並插同一則 system 訊息，等下一個 idle 再試。
 
+**打字送出的 run（2026-09-14，SPEC §4.4a）**：daemon 對 pane 直接打過字、或 herdr 沒綁到 agent session 的 run，
+prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時不建立 turn**，回：
+
+| 狀態 | body | 意思 |
+|---|---|---|
+| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"pane_width_unknown"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
+| 422 | `{"error":"delivery_unprovable","reason":"no_lossless_proof"|"prompt_too_long_to_prove","sent":false,"run_id"}` | 這一則在這個 run 上沒有辦法確認送達（例如 grok／codex 的多行 prompt），所以不打。 |
+
+按過鍵之後才證明不了，才是 `200 {"delivery":"unknown"}`。排隊中的 prompt 遇到 409 類原因放回 `queued` 並在 15 秒後重試；
+422 類原因直接把 turn 標成 failed 並插 system 訊息說明。
+
 ## 6. 讀訊息
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` = 目前最舊一則的 `id`），回傳的 `messages` 已依時間正序。
