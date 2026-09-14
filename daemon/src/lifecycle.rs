@@ -4822,7 +4822,7 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
 async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Option<&str>, notice: &str) {
     let resets = parse_codex_try_again(notice);
     // 寫進這顆 bot 身分的 key：查詢端先查 `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）。
-    let base = crate::quota::quota_base("codex", identity);
+    let base = crate::quota::quota_base_for_host(app, host, "codex", identity).await;
     let key = crate::quota::quota_key(host, &base);
     let mut q = app
         .quotas

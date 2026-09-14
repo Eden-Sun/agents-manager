@@ -57,6 +57,26 @@ pub fn quota_base(kind: &str, identity: Option<&str>) -> String {
     }
 }
 
+/// 同上，但**空 env 的身分（`cc0`）就是預設帳號**，寫回裸 kind。
+///
+/// 2026-09-14 使用者：額度列上冒出兩個 codex——一顆 bot 沒指定身分（寫裸 `codex`）、另一顆指定
+/// `cc0`（寫 `codex:cc0`），但 `cc0` 的 alias 本來就沒有自己的 `CODEX_HOME`，兩者是同一個帳號。
+/// claude 那邊早就這樣收斂（`hookrecv` 的 statusLine 路徑），這裡把規則挪成共用的一條。
+pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, identity_env_empty: bool) -> String {
+    match identity.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(_) if identity_env_empty => kind.to_string(),
+        other => quota_base(kind, other),
+    }
+}
+
+/// [`quota_base_default_aware`]，環境從那台主機的身分表查（§16.2）。查不到那個身分就當它有自己的
+/// 帳號——寧可多開一格，也不要把兩個帳號的數字疊在一起。
+pub async fn quota_base_for_host(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> String {
+    let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
+    let empty_env = crate::tools::identity_for_host(app, host, idn).await.is_some_and(|i| i.env.is_empty());
+    quota_base_default_aware(kind, Some(idn), empty_env)
+}
+
 pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
     let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
     let keys = bot_quota_keys(&host, &bot.kind, bot.identity.as_deref());
@@ -419,7 +439,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     let mut wrote = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (pane_id, identity) in rows {
-        let base = quota_base("codex", identity.as_deref());
+        let base = quota_base_for_host(app, host, "codex", identity.as_deref()).await;
         // 同一個身分讀一次就夠。
         if !seen.insert(base.clone()) {
             continue;
@@ -534,6 +554,11 @@ mod tests {
         assert_eq!(base, "codex:astra");
         assert_eq!(bot_quota_keys(LOCAL_HOST, "codex", Some("astra"))[0], quota_key(LOCAL_HOST, &base));
         assert_eq!(quota_base("codex", None), "codex");
+        // 2026-09-14 使用者：額度列冒出第二個 codex。空 env 的 `cc0` 就是預設帳號，寫裸 key。
+        assert_eq!(quota_base_default_aware("codex", Some("cc0"), true), "codex");
+        assert_eq!(quota_base_default_aware("codex", Some("cc2"), false), "codex:cc2");
+        assert_eq!(quota_base_default_aware("codex", None, true), "codex");
+        assert_eq!(quota_base_default_aware("claude", Some("cc1"), false), "claude:cc1");
         assert_eq!(bot_quota_keys(LOCAL_HOST, "codex", Some("  "))[0], quota_key(LOCAL_HOST, "codex"));
 
         // 清掉的話 assignment 會立刻又派工過去（718d025 的 quota_blocked 靠這一格）。
