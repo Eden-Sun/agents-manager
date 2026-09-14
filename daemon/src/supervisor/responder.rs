@@ -501,9 +501,21 @@ pub enum QuotaState {
 /// 不知道自己撞限了。反過來，有自己 env 的身分（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
 async fn quota_key_for(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
     let identity = bot.identity.clone().filter(|s| !s.trim().is_empty())?;
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    // 主機要**確定**。`db::bot_host` 查不到專案或讀錯時退回本機，那對一般顯示是合理的預設，
+    // 但拿來判斷額度就是借別台機器（本機）的數字——讀不到就回 `None`，由呼叫端當成 Unknown。
+    let host = strict_bot_host(&app.db, &bot.id).await?;
     let base = crate::quota::quota_base_for_host(app, &host, &bot.kind, Some(&identity)).await;
     Some(crate::quota::quota_key(&host, &base))
+}
+
+async fn strict_bot_host(pool: &sqlx::SqlitePool, bot_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT p.host FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?")
+        .bind(bot_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .filter(|h| !h.trim().is_empty())
 }
 
 pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
@@ -528,8 +540,39 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     if !critical.is_empty() {
         return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min());
     }
-    // 有讀數、沒撞限、共用視窗也還有：這才是「可以用」。
-    QuotaState::Available
+    // 「可以用」要有證據：5 小時與 7 天兩個共用視窗**都有讀數**、都沒見底，也沒撞限。
+    // 空的或不完整的讀數（探測只回了一半、剛起來還沒拿到）不能拿來宣稱恢復——少的那一格
+    // 可能正是見底的那一格。
+    if quota.five_hour.is_some() && quota.seven_day.is_some() {
+        QuotaState::Available
+    } else {
+        QuotaState::Unknown
+    }
+}
+
+/// 協調者真的**答完**了一個回合，而且那個回合沒有以錯誤結束——這是讀不到額度時唯一可信的
+/// 「帳號答得動」證據。
+///
+/// 只看「送達」不行：`prompt` 成功（含 `delivery=unknown`）只代表字進了 pane 或排進佇列，CLI 可能
+/// 下一刻才印出撞限。所以要回合**結束**（`completed`／`completed_fallback`），且 run 上沒有留下
+/// `turn_error`，並且這個回合比開始等待的時間晚。
+async fn answered_since(app: &Arc<App>, bot_id: &str, since: Option<&str>) -> bool {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT t.status, r.turn_error FROM turns t
+           JOIN conversations c ON c.id = t.conversation_id
+           LEFT JOIN runs r ON r.id = t.run_id
+          WHERE c.bot_id = ? AND t.completed_at IS NOT NULL AND (? IS NULL OR t.completed_at > ?)
+          ORDER BY t.completed_at DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .bind(since)
+    .bind(since)
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten();
+    matches!(row, Some((status, err)) if matches!(status.as_str(), "completed" | "completed_fallback")
+        && err.as_deref().is_none_or(|e| e.trim().is_empty()))
 }
 
 fn digest(events: &[store::InboxEvent]) -> String {
@@ -632,7 +675,16 @@ pub async fn notify(app: &Arc<App>) {
             next_at = None;
             app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
         }
-        // 讀不到：不宣稱恢復、也不新增等待。已排定的重試時間到了就照常試一次（送成功才算恢復）。
+        // 讀不到：不宣稱恢復、也不新增等待。唯一能解除的是協調者**答完**了一個沒出錯的回合
+        // （`answered_since`）；已排定的重試時間到了照常試一次，但送出去不等於恢復。
+        QuotaState::Unknown if waiting => {
+            if answered_since(app, &bot.id, row.waiting_since.as_deref()).await {
+                let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復（協調者完成了一個回合）"), None).await;
+                let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
+                next_at = None;
+                app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
+            }
+        }
         QuotaState::Unknown | QuotaState::Available => {}
     }
     // 還沒到下一次可以試的時間（上一次送不出去的退避，或讀不到額度時仍在等的那個點）。
@@ -663,10 +715,11 @@ pub async fn notify(app: &Arc<App>) {
                 .await
                 .unwrap_or(0);
             let _ = roles::record_wake(&app.db, Role::Responder, n, &roles::wake_reason(&due)).await;
-            // 真的送出去了就是最硬的證據：帳號答得動，等待結束。讀不到額度（`Unknown`）時
-            // 這是唯一能合法解除 `waiting_quota` 的路。
+            // **送達不是恢復**：`ok`／`unknown` 只代表字進了 pane 或佇列，CLI 可能下一刻才報撞限。
+            // 還在等額度時不動狀態，只把下一次重試推到有界的間隔之後（不然每個批次窗都再送一次）；
+            // 解除要等可信讀數或協調者真的答完一個回合。
             if waiting {
-                let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復（通知送出成功）"), None).await;
+                let _ = roles::set_notify_next(&app.db, Role::Responder, Some(&watchdog::iso_in(cap))).await;
             }
             app.emit("supervisor_changed", json!({"responder": "woken", "events": n})).await;
         }
@@ -914,6 +967,97 @@ mod flow_tests {
         app.quotas.lock().await.insert("claude:cc1".into(), blocked());
         notify(&app).await;
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota");
+    }
+
+    /// 空的、不完整的讀數都不是「可以用」：少的那一格可能正是見底的那一格。
+    #[tokio::test]
+    async fn empty_or_partial_readings_are_unknown_not_available() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
+        let key = "claude:cc0".to_string();
+        let w = |used: f64| Some(crate::quota::Window { used_pct: used, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+
+        let mut empty = available();
+        empty.five_hour = None;
+        empty.seven_day = None;
+        empty.fable = None;
+        app.quotas.lock().await.insert(key.clone(), empty);
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "有一列但一格讀數都沒有");
+
+        let mut partial = available();
+        partial.seven_day = None;
+        app.quotas.lock().await.insert(key.clone(), partial);
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "只有 5 小時那格");
+
+        let mut partial_bad = available();
+        partial_bad.seven_day = None;
+        partial_bad.five_hour = w(100.0);
+        app.quotas.lock().await.insert(key.clone(), partial_bad);
+        assert!(matches!(quota_state(&app, &bot).await, QuotaState::Blocked(_)), "有的那格已經見底就是見底");
+
+        app.quotas.lock().await.insert(key, available());
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Available);
+    }
+
+    /// 送達不是恢復：prompt 成功（`ok`／`unknown`）只代表字進了 pane 或佇列。還沒有回答、或回合
+    /// 以錯誤結束，都不能解除等待；協調者**答完**一個沒出錯的回合才算。
+    #[tokio::test]
+    async fn a_delivered_notify_is_not_a_quota_recovery_until_the_responder_answers() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        roles::set_status(&app.db, Role::Responder, "waiting_quota", Some("撞限"), None).await.unwrap();
+        // 等待開始在過去；重試時間已到，允許嘗試。
+        sqlx::query("UPDATE supervisor_roles SET waiting_since='2026-09-14T00:00:00Z' WHERE role='responder'").execute(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','working',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-r','resp',?)").bind(&now).execute(&app.db).await.unwrap();
+
+        for (delivery, turn) in [("ok", "t-ok"), ("unknown", "t-unknown")] {
+            // 通知剛送出去：回合還在跑（CLI 可能下一刻才報撞限）。同一個 run 一次只能有一個
+            // in-flight 回合，所以前一個先標成 queued（還沒回答），再開下一個。
+            sqlx::query("UPDATE turns SET status='queued' WHERE run_id='run-r' AND status='in_flight'").execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES (?,'c-r','run-r','web','in_flight',?)")
+                .bind(turn).bind(&now).execute(&app.db).await.unwrap();
+            let id = store::push_inbox(&app.db, &format!("k-{turn}"), "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
+            roles::classify(&app.db).await.unwrap();
+            roles::mark_delivered(&app.db, &[id], Role::Responder, turn, delivery).await.unwrap();
+            notify(&app).await;
+            let row = roles::get(&app.db, Role::Responder).await.unwrap();
+            assert_eq!(row.status, "waiting_quota", "delivery={delivery} 但還沒有回答，不算恢復");
+        }
+
+        // 回合結束了，但是以撞限錯誤收場：仍然不算。
+        sqlx::query("UPDATE turns SET status='completed', completed_at='2999-01-01T00:00:00Z' WHERE id='t-ok'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET turn_error=? WHERE id='run-r'").bind("You've hit your usage limit").execute(&app.db).await.unwrap();
+        notify(&app).await;
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota", "撞限收場的回合不是答得動");
+
+        // 答完、沒有錯誤：這才是證據。
+        sqlx::query("UPDATE runs SET turn_error=NULL WHERE id='run-r'").execute(&app.db).await.unwrap();
+        notify(&app).await;
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!(row.status, "");
+        assert_eq!(row.status_detail.as_deref(), Some("額度已恢復（協調者完成了一個回合）"));
+        assert_eq!(row.waiting_since, None);
+    }
+
+    /// 查不到協調者屬於哪台主機（專案列不見了）時，不能退回本機、拿本機帳號的數字來判斷。
+    #[tokio::test]
+    async fn an_unresolvable_host_is_unknown_not_the_local_accounts_reading() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        app.quotas.lock().await.insert("claude:cc0".into(), blocked());
+        app.quotas.lock().await.insert("claude".into(), blocked());
+        // 協調者在另一台主機：本機帳號的數字跟它無關。
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p-remote','/srv','remote','box-a',?)")
+            .bind(crate::db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET project_id='p-remote' WHERE id='resp'").execute(&app.db).await.unwrap();
+        let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "遠端的協調者不借本機的讀數");
+        // 主機欄讀不出來（空字串）：也不能退回本機。
+        sqlx::query("UPDATE projects SET host='' WHERE id='p-remote'").execute(&app.db).await.unwrap();
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "主機不確定就是不知道");
     }
 
     /// 佇列清空之後**有明確可用讀數**才算恢復；只有「查不到讀數」不能拿來宣稱額度回來了。
