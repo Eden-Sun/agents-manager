@@ -32,6 +32,17 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+/// 模型別名的形狀：小寫開頭、只有字母數字與 `.`／`_`／`-`，最多 40 字。擋掉旗標（`--…`）、
+/// 空白、超長字串這些會變成 argv 的東西；不釘死型號，CLI 換代不必改這裡。
+pub fn valid_model(m: &str) -> bool {
+    let mut chars = m.chars();
+    let Some(first) = chars.next() else { return false };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    m.len() <= 40 && m.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
 pub fn dir(app: &Arc<App>) -> PathBuf {
     app.data_dir.join("supervisor").join(BOT_NAME)
 }
@@ -169,6 +180,16 @@ pub async fn ensure_env(
     let identity = identity.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.identity).to_string();
     let model = model.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.model).to_string();
     let effort = effort.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.effort).to_string();
+    // 這三個值會直接變成 CLI 的 argv。不驗的話，一句 `--dangerously-skip-permissions` 或一段空白
+    // 就能從 setup 的欄位混進命令列；模型名單會隨 CLI 改版變動，所以驗的是**形狀**不是白名單。
+    if !valid_model(&model) {
+        return Err(LcError::Bad(format!(
+            "model must look like a CLI alias ([a-z0-9][a-z0-9._-]{{0,39}}), got {model:?}"
+        )));
+    }
+    let effort = crate::config::normalize_effort("claude", Some(&effort))
+        .map_err(LcError::Bad)?
+        .ok_or_else(|| LcError::Bad("effort must not be empty".into()))?;
     if crate::tools::identity_for_host(app, crate::config::LOCAL_HOST, &identity).await.is_none() {
         return Err(LcError::conflict(
             "responder identity is not configured on this host",
@@ -460,17 +481,27 @@ pub fn backoff_secs(attempts: i64, cap: u64) -> u64 {
 
 /// 協調者現在能不能跑：`Some(reset_at)` = 等額度（`None` 表示不知道何時回來）。
 async fn quota_wait(app: &Arc<App>, bot: &crate::db::Bot) -> Option<Option<String>> {
-    if let Some(hit) = crate::quota::limit_hit_for_bot(app, bot).await {
-        let reset = match hit.until.clone() {
-            Some(t) => Some(t),
-            None => crate::quota::next_reset_for_bot(app, bot).await,
-        };
-        return Some(reset);
+    // **只看這個身分自己的讀數。** `limit_hit_for_bot` / `next_reset_for_bot` 會退回裸 `claude`
+    // 那一把（實務上是 cc0 的數字），對一顆 cc1／cc2 的協調者來說那是別人的帳號：照著它等，
+    // 等的是別人的重置時間。讀不到自己的就是「不知道」，不知道不等於見底。
+    let identity = bot.identity.clone().unwrap_or_default();
+    if identity.is_empty() {
+        return None;
     }
-    let identity = bot.identity.clone().unwrap_or_else(|| "cc0".into());
-    let q = app.quotas.lock().await;
-    let quota = q.get(&format!("claude:{identity}")).or_else(|| q.get("claude"))?;
+    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    let key = crate::quota::quota_key(&host, &crate::quota::quota_base(&bot.kind, Some(&identity)));
     let now = chrono::Utc::now();
+    let q = app.quotas.lock().await;
+    let quota = q.get(&key)?;
+    // CLI 明說被擋住（還沒過期）：等它說的時間，沒說就等最近的視窗重置。
+    if let Some(hit) = quota.limit_hit.clone().filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
+        let soonest = [&quota.five_hour, &quota.seven_day, &quota.fable]
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w.resets_at.clone())
+            .min();
+        return Some(hit.until.clone().or(soonest));
+    }
     let critical: Vec<&crate::quota::Window> = [&quota.five_hour, &quota.seven_day]
         .into_iter()
         .flatten()
@@ -548,21 +579,19 @@ pub async fn notify(app: &Arc<App>) {
     let (batch, cap) = (cfg.supervisor.responder_batch_secs, cfg.supervisor.responder_max_backoff_secs);
     let now = chrono::Utc::now();
     let now_iso = crate::db::now();
-    if row.notify_next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
-        return;
-    }
-    let Ok(due) = roles::due_for(&app.db, Role::Responder, true, &now_iso, 0).await else { return };
-    let Some(oldest) = due.iter().find(|e| e.wake != Some(0)) else { return };
-    if !batch_due(&oldest.created_at, row.last_notify_at.as_deref(), batch, now) {
-        return;
-    }
-    if let Some(reset) = quota_wait(app, &bot).await {
+    // 額度狀態**每個 tick 都算一次**，跟「現在有沒有待辦」無關：只在有事要送時才重算的話，
+    // 佇列清空後 `waiting_quota` 會永遠掛著——看門狗把它當成「不是故障」，協調者就再也不會被拉起來。
+    let blocked = quota_wait(app, &bot).await;
+    if let Some(reset) = blocked {
         let retry = watchdog::iso_in(cap);
         let next = match reset.as_deref() {
             Some(t) if t < retry.as_str() && !watchdog::past(t) => t.to_string(),
             _ => retry,
         };
-        let detail = format!("{} 的額度見底；協調事件留在 inbox，{next} 再試，不會改由巡檢處理", bot.identity.as_deref().unwrap_or("cc0"));
+        let detail = format!(
+            "{} 的額度見底；協調事件留在 inbox，{next} 再試，不會改由巡檢處理",
+            bot.identity.as_deref().unwrap_or("(身分不明)")
+        );
         if row.status != "waiting_quota" || row.notify_next_at.as_deref() != Some(next.as_str()) {
             let _ = roles::set_status(&app.db, Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
             let _ = roles::set_notify_next(&app.db, Role::Responder, Some(&next)).await;
@@ -572,6 +601,16 @@ pub async fn notify(app: &Arc<App>) {
     }
     if row.status == "waiting_quota" {
         let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復"), None).await;
+        let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
+        app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
+    } else if row.notify_next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
+        // 上一次送不出去的有界退避還沒到。
+        return;
+    }
+    let Ok(due) = roles::due_for(&app.db, Role::Responder, true, &now_iso, 0).await else { return };
+    let Some(oldest) = due.iter().find(|e| e.wake != Some(0)) else { return };
+    if !batch_due(&oldest.created_at, row.last_notify_at.as_deref(), batch, now) {
+        return;
     }
     if super::manager_liveness(app, &bot.id).await.unwrap_or("stopped") != "idle" {
         return;
@@ -610,6 +649,15 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         (Some(_), _) if !row.status.is_empty() => row.status.clone(),
         (Some(b), _) => super::manager_liveness(app, &b.id).await?.to_string(),
     };
+    let run = match bot.as_ref() {
+        Some(b) => crate::db::active_run(&app.db, &b.id).await.map_err(up)?,
+        None => None,
+    };
+    let runtime = json!({
+        "model": run.as_ref().and_then(|r| r.runtime_model.clone()),
+        "effort": run.as_ref().and_then(|r| r.runtime_effort.clone()),
+        "started_at": run.as_ref().map(|r| r.started_at.clone()),
+    });
     let open: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE COALESCE(claimed_by, role)='responder' AND state!='handled'")
             .fetch_one(&app.db)
@@ -621,8 +669,11 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "bot_id": row.bot_id.clone(),
         "project_id": bot.as_ref().map(|b| b.project_id.clone()),
         "identity": row.identity,
+        // 設定值。實際在跑的是 `runtime`：`/model` 換過、或 bot 被人改過設定時，這兩個會不一樣，
+        // 而「協調者現在跑在什麼上面」要看後者，不是 setup 當下的快照。
         "model": row.model,
         "effort": row.effort,
+        "runtime": runtime,
         "remote_control": false,
         "status": status,
         "status_detail": row.status_detail,
@@ -753,6 +804,81 @@ mod flow_tests {
         assert!(roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap().is_empty(), "不倒回巡檢");
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
         assert_eq!(turns, 0);
+    }
+
+    /// 額度是**帳號的**：cc1 的協調者不能看著 cc0 的讀數決定要不要等。讀不到自己的就是不知道，
+    /// 不知道不等於見底。
+    #[tokio::test]
+    async fn another_accounts_quota_is_not_this_responders_quota() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        sqlx::query("UPDATE bots SET identity='cc1' WHERE id='resp'").execute(&app.db).await.unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api").await.unwrap().unwrap();
+        age_everything(&app).await;
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        // 只有裸 `claude`（實務上是 cc0 那份）撞限：跟 cc1 無關。
+        app.quotas.lock().await.insert("claude".into(), blocked());
+        notify(&app).await;
+        assert_ne!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota", "別人的額度不是自己的");
+
+        // 自己這個身分撞限才算。
+        app.quotas.lock().await.insert("claude:cc1".into(), blocked());
+        notify(&app).await;
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota");
+    }
+
+    /// 佇列清空之後額度恢復：狀態也要跟著解除。只在「有待辦要送」時才重算的話，`waiting_quota`
+    /// 會永遠掛著，而看門狗把它當成「不是故障」——協調者就再也不會被拉起來。
+    #[tokio::test]
+    async fn waiting_quota_is_released_even_with_an_empty_queue() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        roles::set_status(&app.db, Role::Responder, "waiting_quota", Some("撞限"), Some("2999-01-01T00:00:00Z")).await.unwrap();
+        roles::set_notify_next(&app.db, Role::Responder, Some("2999-01-01T00:00:00Z")).await.unwrap();
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap();
+        assert_eq!(events, 0, "佇列是空的");
+
+        notify(&app).await;
+
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!(row.status, "", "額度回來就解除，不必等下一件事進來");
+        assert_eq!(row.notify_next_at, None);
+        assert_eq!(row.status_detail.as_deref(), Some("額度已恢復"));
+    }
+
+    /// 設定值是 setup 當下的快照；`runtime` 才是它現在實際跑在什麼上面。
+    #[tokio::test]
+    async fn the_status_reports_the_running_model_next_to_the_configured_one() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        sqlx::query(
+            "INSERT INTO runs (id,bot_id,state,agent_status,runtime_model,runtime_effort,started_at)
+             VALUES ('run-r','resp','running','idle','opus','medium',?)",
+        )
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let out = status_json(&app).await.unwrap();
+        assert_eq!(out["model"], "opus");
+        assert_eq!(out["effort"], "high", "設定值");
+        assert_eq!(out["runtime"]["model"], "opus");
+        assert_eq!(out["runtime"]["effort"], "medium", "實際跑的強度跟設定不一樣時要看得出來");
+    }
+
+    /// setup 的欄位會變成 CLI 的 argv：旗標、空白、超長字串都不能寫進去。
+    #[test]
+    fn the_model_field_only_takes_a_cli_alias() {
+        for ok in ["opus", "fable", "claude-opus-5", "gpt-5.6-luna", "o3"] {
+            assert!(valid_model(ok), "{ok}");
+        }
+        for bad in ["", " ", "--dangerously-skip-permissions", "opus --effort xhigh", "Opus", "模型", &"x".repeat(41)] {
+            assert!(!valid_model(bad), "{bad:?}");
+        }
     }
 
     #[tokio::test]
