@@ -1026,19 +1026,10 @@ pub async fn post_lease_release(
     Path(resource): Path<String>,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
-    let released = store::release_lease(&app.db, &resource, &b.owner, b.fence).await.map_err(up)?;
+    // Consumes the approval (one yes, one window) and, for a restart window, lifts the holds it
+    // placed so held assignments go out on the next pass.
+    let released = super::maintenance::release(&app, &resource, &b.owner, b.fence).await.map_err(up)?;
     let l = store::lease(&app.db, &resource).await.map_err(up)?.ok_or_else(|| LcError::NotFound("lease".into()))?;
-    // Consume the approval with the lease: one yes, one window. Asking again is cheap; a
-    // permission that silently stays usable is not.
-    if released {
-        if let Some(ap) = l.approval_id.as_deref() {
-            if let Ok(Some(a)) = store::approval(&app.db, ap).await {
-                if a.status == "approved" {
-                    let _ = store::decide_approval(&app.db, ap, "consumed", &b.owner, Some("lease released"), None).await;
-                }
-            }
-        }
-    }
     app.emit("supervisor_changed", json!({"lease": l.to_json()})).await;
     Ok(Json(json!({"released": released, "lease": l.to_json()})))
 }

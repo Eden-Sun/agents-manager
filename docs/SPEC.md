@@ -911,7 +911,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   2. 整樹 `cargo test -p agents-managerd` 全過，`bunx tsc --noEmit -p tsconfig.app.json` 通過（不帶 `-p` 是假綠燈）。
   3. 沒有別的 bot 在 `working`，最多等 30 分鐘，超過回報延後。**換 binary 前一刻再查一次**；更好的是用 §18.10 的租約持有窗口。
   4. 備份舊 binary 為 `target/release/agents-managerd.bak`。
-  5. 重啟後 30 秒內驗 `/api/session` 與 `agm health`。
+  5. 重啟後 30 秒內驗 `/api/session` 與 `agm health`。daemon 起來即自動釋放 `restart` 租約，被 hold 的交辦馬上派送——**重啟後無等待期**（§18.10）。
   6. 60 秒內確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾並回報。
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
@@ -1027,6 +1027,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - 核准是紀錄：申請者、purpose、範圍、`target_commit`、有效期、決定者、理由。acquire 逐項核對（purpose 不符、過期、撤銷、commit 不同都拒）；release 時標 `consumed`——一次核准一個窗口。
 - 租約有只增不減的 `fence`；過期被接手後舊 fence 的 renew／release 一律失敗。到期自動釋放。acquire 與 renew 取「要求到期」與「核准到期」較早者，renew 重驗核准狀態。
 - 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt` 沒被 gate。
+- **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。
 - 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
 - assignment 可帶 `ownership`（檔案／模組），重疊時 `POST /assignments` 回 `ownership_conflicts`，**只回報不阻擋**。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
