@@ -69,9 +69,13 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
             return Ok(());
         }
     };
-    let res = deliver_prompt(&client, &run, &bot, &text, false).await;
+    let res = deliver_prompt(app, &client, &run, &bot, &text, false).await;
     let delivery = match res {
-        Ok(_) => "ok",
+        Ok(Delivered::Submitted) => "ok",
+        Ok(Delivered::Unknown(why)) => {
+            tracing::warn!(bot = %bot_id, reason = why, "queued prompt delivery could not be confirmed");
+            "unknown"
+        }
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {

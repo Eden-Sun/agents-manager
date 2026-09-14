@@ -217,6 +217,21 @@ label = "foo"
 
 ## 6. 生命週期
 
+**送 prompt 的路徑（2026-09-14，sol review 後定案）**：daemon 一旦直接對某個 run 的 pane 打過字
+（當場套用 slash、codex 選單、`/login`），就把 `runs.pane_typed` 設為 1；herdr `agent.prompt` 在這種
+pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 slash 兩分鐘）。之後這個 run 的 prompt
+一律改成打字進 pane 並看畫面驗證，`agent.get` 查不到 `agent_session` 綁定的 agent 也走這條：
+
+1. 框必須是空的才開始打；有殘字先 `ctrl+c` 清一次再確認（claude 實測：`ctrl+u`／`ctrl+a ctrl+k` 只清最後一行，`Esc` 不清）。
+2. `pane.send_text` 之後必須在框裡看到這段文字（比對去空白後的頭、尾或整段片段，折行與中文都認得）；
+   框證明是空的（什麼都沒落地）才重打一次，其他情況一律不重貼。
+3. Enter 之後框要空、而且畫面比送出前多一次這段文字，才算送出；第二次 Enter 同樣要驗。
+4. 任何一步讀不到畫面就是錯誤，不是空畫面；驗不出來回 `Unknown`，turn 停在 `delivery='unknown'`（§6.3），
+   不武斷當成已送達，也不再自動重打。
+
+stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.resend_count`（每個 turn 上限 1，UPDATE 認領
+即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。
+
 ### 6.1 daemon 啟動
 1. 載入 config、補寫缺少的 id、TOML→SQLite 投影。
 2. 確保 herdr session 在跑、`ping`。

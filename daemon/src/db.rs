@@ -150,9 +150,59 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(pool).await.with_context(|| format!("apply schema: {s}"))?;
     }
+    // Additive columns for databases created before they existed.
+    for (table, col, ddl) in [
+        // 2026-09-14: daemon 對這個 pane 直接打過字（當場套用 slash、codex 選單、/login）。之後這個
+        // run 的 prompt 一律改走「打字進 pane 再看畫面」，因為 herdr `agent.prompt` 在這種 pane 上
+        // 回 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33）。存在 DB：daemon 重啟後不能忘記，否則第一則
+        // 又走回已知會失效的那條路。
+        ("runs", "pane_typed", "ALTER TABLE runs ADD COLUMN pane_typed INTEGER NOT NULL DEFAULT 0"),
+        // 這個 turn 已經被 watchdog 重送過幾次。存在 DB 才擋得住「重啟後又重送同一則」。
+        ("turns", "resend_count", "ALTER TABLE turns ADD COLUMN resend_count INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !has_column(pool, table, col).await? {
+            sqlx::query(ddl).execute(pool).await.with_context(|| format!("add {table}.{col}"))?;
+        }
+    }
     crate::supervisor::store::migrate(pool).await?;
     crate::mission::store::migrate(pool).await?;
     Ok(())
+}
+
+pub async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
+    let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
+    Ok(cols.iter().any(|c| c.1 == col))
+}
+
+/// `runs.pane_typed`: has the daemon typed straight into this run's pane?
+pub async fn set_pane_typed(pool: &SqlitePool, run_id: &str) -> Result<()> {
+    sqlx::query("UPDATE runs SET pane_typed = 1 WHERE id = ?").bind(run_id).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn pane_typed(pool: &SqlitePool, run_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT pane_typed FROM runs WHERE id = ?")
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+        != 0
+}
+
+/// Claim one re-delivery for `turn_id`, at most `max` per turn. `true` = claimed (and counted);
+/// the UPDATE is the lock, so a queue flush and the stall watchdog cannot both resend.
+pub async fn claim_resend(pool: &SqlitePool, turn_id: &str, max: i64) -> bool {
+    matches!(
+        sqlx::query("UPDATE turns SET resend_count = resend_count + 1 WHERE id = ? AND resend_count < ?")
+            .bind(turn_id)
+            .bind(max)
+            .execute(pool)
+            .await,
+        Ok(r) if r.rows_affected() > 0
+    )
 }
 
 pub fn now() -> String {

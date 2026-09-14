@@ -78,6 +78,12 @@ pub struct PaneInfo {
 pub struct AgentInfo {
     pub name: Option<String>,
     pub agent: Option<String>,
+    /// herdr's binding to the CLI's own session. Missing on an agent herdr has adopted but never
+    /// bound; `agent.prompt` answered ok on such an agent without the text reaching the pane
+    /// (2026-09-14 wits-c1-op-xh), so the daemon types into the pane instead.
+    #[serde(default)]
+    pub agent_session: Option<Value>,
+
     /// Pane title minus spinner glyph (herdr 0.8.2 `agent.list` / `agent.get`).
     #[serde(default)]
     pub terminal_title_stripped: Option<String>,

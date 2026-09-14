@@ -281,9 +281,15 @@ impl MockHerdr {
                         "pane.read" => {
                             let pid = wid_of("pane_id");
                             let text = st.screens.lock().unwrap().get(&pid).cloned().unwrap_or_default();
-                            json!({"id": id, "result": {"type": "pane_read", "read": {
-                                "pane_id": pid, "source": params.get("source").cloned().unwrap_or(json!("recent_unwrapped")),
-                                "format": "text", "text": text, "revision": 1, "truncated": false}}})
+                            // A screen set to this marker answers like a broken pane: the caller
+                            // must treat a read failure as an error, never as an empty screen.
+                            if text == "__READ_ERROR__" {
+                                json!({"id": id, "error": {"code": "pane_unavailable", "message": "pane read failed"}})
+                            } else {
+                                json!({"id": id, "result": {"type": "pane_read", "read": {
+                                    "pane_id": pid, "source": params.get("source").cloned().unwrap_or(json!("recent_unwrapped")),
+                                    "format": "text", "text": text, "revision": 1, "truncated": false}}})
+                            }
                         }
                         "pane.process_info" => {
                             let pid = wid_of("pane_id");
