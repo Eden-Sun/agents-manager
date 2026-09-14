@@ -600,25 +600,11 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
 /// How many times one turn may be re-delivered because the prompt never showed up on screen.
 /// One: a second loss means something is really wrong with the pane, and repeating a prompt the
 /// agent *did* get is worse than failing the turn.
-const MAX_PROMPT_RESENDS: u32 = 1;
+const MAX_PROMPT_RESENDS: i64 = 1;
 
 /// Scrollback searched for our prompt before deciding it never arrived. Generous on purpose: a
 /// resend is only safe when the echo is truly nowhere, not merely scrolled off the visible rows.
 const RESEND_SCAN_LINES: u32 = 400;
-
-/// Turns already re-delivered, so the watchdog never loops (in-process: a restart forgets, which
-/// only means one more careful attempt).
-static RESENT_TURNS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::OnceLock::new();
-
-fn resend_count(turn_id: &str) -> u32 {
-    RESENT_TURNS.get_or_init(Default::default).lock().map(|m| m.get(turn_id).copied().unwrap_or(0)).unwrap_or(u32::MAX)
-}
-
-fn note_resend(turn_id: &str) {
-    if let Ok(mut m) = RESENT_TURNS.get_or_init(Default::default).lock() {
-        *m.entry(turn_id.to_string()).or_insert(0) += 1;
-    }
-}
 
 /// Did our prompt never reach the TUI at all? An empty composer **and** no trace of the prompt
 /// anywhere in the scrollback — not in the box (that is [`composer_holds_prompt`]'s Enter nudge),
@@ -650,9 +636,6 @@ pub(crate) fn prompt_never_reached_screen(kind: &str, screen: &str, sent: &[Stri
 /// Re-deliver a prompt that never reached the pane, at most [`MAX_PROMPT_RESENDS`] times per turn.
 /// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `false`.
 async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> bool {
-    if resend_count(turn_id) >= MAX_PROMPT_RESENDS {
-        return false;
-    }
     let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return false;
@@ -667,16 +650,24 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     if !prompt_never_reached_screen(&bot.kind, &read.text, sent) {
         return false;
     }
-    // `sent[0]` is the delivered form (attachment paths included), exactly what `agent.prompt` got.
+    // `sent[0]` is the delivered form (attachment paths included), exactly what was sent before.
     let Some(text) = sent.first() else { return false };
-    note_resend(turn_id);
+    // The claim is the lock and it lives in the DB: a queue flush and this watchdog cannot both
+    // resend, and a daemon restart does not hand the same turn a fresh budget (sol review #3).
+    if !db::claim_resend(&app.db, turn_id, MAX_PROMPT_RESENDS).await {
+        return false;
+    }
     // The first delivery just failed silently; re-deliver the way that is verified on screen.
-    let res = deliver_prompt(&client, &run, &bot, text, true).await;
+    let res = deliver_prompt(app, &client, &run, &bot, text, true).await;
     match res {
-        Ok(_) => {
-            tracing::warn!(run_id, turn = %turn_id, bot = %bot.name, attempt = resend_count(turn_id),
+        Ok(Delivered::Submitted) => {
+            tracing::warn!(run_id, turn = %turn_id, bot = %bot.name,
                            "prompt never reached the pane (empty composer, no echo in scrollback); re-delivered it");
             true
+        }
+        Ok(Delivered::Unknown(why)) => {
+            tracing::warn!(run_id, turn = %turn_id, reason = why, "re-delivery could not be confirmed either");
+            false
         }
         Err(e) => {
             tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed");
@@ -698,7 +689,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
         let sent = turn_echo_texts(&app2, &turn_id).await;
-        let mut nudged = false;
+        let mut nudged;
     // Every prompt gets the early look: a single line pasted into a busy TUI loses its Enter too.
         tokio::time::sleep(Duration::from_secs(NUDGE_EARLY_SECS)).await;
         {
@@ -1659,34 +1650,6 @@ mod issue_17_tests {
     }
 
     /// 2026-09-14 w1HJ:pH：畫面上完全沒有這則 prompt，watchdog 重送一次，而且**只**一次；
-    /// 畫面上看得到（已送出或還在框裡）就絕不重送。mock 對 `agent.prompt` 回 unsupported，
-    /// 所以這裡驗的是「有沒有去送、送幾次」，不是送成功。
-    #[tokio::test]
-    async fn a_prompt_missing_from_the_screen_is_resent_once_and_only_once() {
-        let lost = "❯ /effort max\n  ⎿  Set effort level to max (this session only)\n──────\n❯\n";
-        let f = fixture("claude", lost).await;
-        let app = f.env.app.clone();
-        let sent = vec!["Reply with PONG".to_string()];
-        let typed = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count();
-
-        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
-        // 重送走 pane 直接打字（agent.prompt 剛靜默失敗過）；這個 mock 畫面不會變，所以打一次、沒看到、再打一次。
-        assert_eq!(typed(&f), 2, "the lost prompt is typed into the pane again");
-        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "not through the path that just failed");
-        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
-        assert_eq!(typed(&f), 2, "capped: a second loss fails the turn instead of looping");
-    }
-
-    #[tokio::test]
-    async fn a_prompt_visible_on_the_screen_is_never_resent() {
-        let accepted = "❯ /effort max\n  ⎿  Set effort level to max\n❯ Reply with PONG\n──────\n❯\n";
-        let f = fixture("claude", accepted).await;
-        let app = f.env.app.clone();
-        let sent = vec!["Reply with PONG".to_string()];
-        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
-        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"), "claude took it: resending would duplicate the work");
-    }
-
     fn count(f: &Fixture, method: &str) -> usize {
         f.env.herdr.methods().iter().filter(|m| *m == method).count()
     }
@@ -1696,45 +1659,61 @@ mod issue_17_tests {
         (db::run(&app.db, &f.run_id).await.unwrap().unwrap(), db::bot(&app.db, &f.bot_id).await.unwrap().unwrap())
     }
 
-    /// 沒被 daemon 打過 slash 的 run：照舊走 herdr `agent.prompt`，不動 pane。
+    /// 沒被 daemon 打過字、herdr 也綁得到 session 的 run：照舊走 `agent.prompt`。mock 的 agent.get
+    /// 沒有 session 綁定，所以這裡驗的是「打過字的記號從 DB 讀得到」那一半。
     #[tokio::test]
-    async fn an_untouched_run_still_prompts_through_the_agent() {
+    async fn the_pane_typed_mark_survives_in_the_database() {
         let f = fixture("claude", "──────\n❯\n").await;
-        let (run, bot) = run_and_bot(&f).await;
-        let client = client_for_run(&f.env.app, &run).await.unwrap();
-        let _ = deliver_prompt(&client, &run, &bot, "Reply with PONG", false).await;
-        assert_eq!(count(&f, "agent.prompt"), 1);
-        assert_eq!(count(&f, "pane.send_text"), 0);
+        let app = f.env.app.clone();
+        assert!(!db::pane_typed(&app.db, &f.run_id).await);
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        assert!(db::pane_typed(&app.db, &f.run_id).await, "重啟後也要記得這個 pane 要用打字的");
     }
 
-    /// 2026-09-14 wits-c1-op-xh：打過 `/effort` 的 pane，`agent.prompt` 回 ok 卻沒進去。那種 run 改成直接
-    /// 打字進 pane，而且看畫面：字沒出現在輸入框就再打一次，**沒看到字就絕不按 Enter**（空框按 Enter 無害，
-    /// 但也證明不了什麼），兩次都沒出現就交給 stall watchdog。
+    /// 讀不到畫面不能當成空畫面（sol review #2）：回錯，呼叫端才會把 turn 停在 unknown。
     #[tokio::test]
-    async fn after_a_slash_the_prompt_is_typed_and_retyped_when_it_never_shows() {
-        let lost = "❯ /effort high\n  ⎿  Set effort level to high\n──────\n❯\n";
-        let f = fixture("claude", lost).await;
-        mark_pane_typed(&f.run_id);
+    async fn a_screen_that_cannot_be_read_is_an_error_not_an_empty_screen() {
+        let f = fixture("claude", "__READ_ERROR__").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
-        let client = client_for_run(&f.env.app, &run).await.unwrap();
-        deliver_prompt(&client, &run, &bot, "加一個功能除了按 SKU 之外", false).await.unwrap();
-        assert_eq!(count(&f, "agent.prompt"), 0, "the path that failed is not used again");
-        assert_eq!(count(&f, "pane.send_text"), 2, "typed, not seen, typed once more");
-        assert_eq!(count(&f, "pane.send_keys"), 0, "never Enter on a box that does not hold our text");
+        let client = client_for_run(&app, &run).await.unwrap();
+        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.is_err());
+        assert_eq!(count(&f, "pane.send_text"), 0, "讀不到畫面就不會亂打字");
     }
 
-    /// 字在輸入框裡 → Enter；按了還在（這個 mock 畫面不會變）→ 再按一次，就停。
+    /// 打進去但畫面不會變（mock 的固定畫面）：不重貼、不按 Enter，回 Unknown。
     #[tokio::test]
-    async fn after_a_slash_a_prompt_seen_in_the_box_is_submitted_and_checked() {
-        let in_box = "❯ /effort high\n  ⎿  Set effort level to high\n──────\n❯ 加一個功能除了按 SKU 之外\n──────\n";
-        let f = fixture("claude", in_box).await;
-        mark_pane_typed(&f.run_id);
+    async fn an_unverifiable_screen_ends_as_unknown_without_retyping() {
+        let f = fixture("claude", "❯ /effort high\n  ⎿  Set effort level to high\n──────\n❯\n").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
-        let client = client_for_run(&f.env.app, &run).await.unwrap();
-        deliver_prompt(&client, &run, &bot, "加一個功能除了按 SKU 之外", false).await.unwrap();
-        assert_eq!(count(&f, "pane.send_text"), 1);
-        assert_eq!(count(&f, "pane.send_keys"), 2, "Enter, still in the box, Enter once more");
+        let client = client_for_run(&app, &run).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "加一個功能除了按 SKU 之外", false).await.unwrap();
+        assert_eq!(out, Delivered::Unknown("nothing_typed"));
+        // 框證明是空的才會重打一次，第三次不會有。
+        assert_eq!(count(&f, "pane.send_text"), 2);
+        assert_eq!(count(&f, "pane.send_keys"), 0, "沒看到字就不按 Enter");
         assert_eq!(count(&f, "agent.prompt"), 0);
+    }
+
+    /// 併發（queue flush 與 stall watchdog 同時想補送）只會有一次成功認領。
+    #[tokio::test]
+    async fn only_one_resend_is_ever_claimed_for_a_turn() {
+        let f = fixture("claude", "──────\n❯\n").await;
+        let app = f.env.app.clone();
+        let a = db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS);
+        let b = db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS);
+        let (a, b) = tokio::join!(a, b);
+        assert_eq!([a, b].iter().filter(|x| **x).count(), 1, "兩邊同時搶，只有一邊拿得到");
+        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "重啟後也不會多一次額度");
+        let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id=?")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[tokio::test]
@@ -1821,17 +1800,6 @@ mod lost_prompt_tests {
 
     fn sent(s: &str) -> Vec<String> {
         vec![s.to_string()]
-    }
-
-    #[test]
-    fn typed_state_reads_the_incident_screens() {
-        use crate::lifecycle::{typed_state, TypedState};
-        let text = "think more if can be even faster";
-        assert_eq!(typed_state("claude", EFFORT_MAX_LOST, text), TypedState::Missing);
-        let in_box = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ think more if can be even faster\n", 1);
-        assert_eq!(typed_state("claude", &in_box, text), TypedState::InBox);
-        let sent = EFFORT_MAX_LOST.replacen("615330 tokens", "615330 tokens\n❯ think more if can be even faster", 1);
-        assert_eq!(typed_state("claude", &sent, text), TypedState::LeftBox);
     }
 
     #[test]
