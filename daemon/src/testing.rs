@@ -36,6 +36,8 @@ pub struct MockHerdr {
     pub live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
     /// Answer `pane.read` with `format: ansi` like a herdr that does not know the parameter.
     pub reject_ansi: Arc<std::sync::atomic::AtomicBool>,
+    /// Accept `format: ansi` but answer `format: text`, like a herdr that ignores unknown params.
+    pub ignore_ansi: Arc<std::sync::atomic::AtomicBool>,
     /// What `agent.list` and `agent.get` answer with.
     pub agents: Arc<StdMutex<Vec<Value>>>,
     handle: tokio::task::JoinHandle<()>,
@@ -134,6 +136,7 @@ struct MockState {
     screens: Arc<StdMutex<BTreeMap<String, String>>>,
     live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
     reject_ansi: Arc<std::sync::atomic::AtomicBool>,
+    ignore_ansi: Arc<std::sync::atomic::AtomicBool>,
     argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
@@ -192,6 +195,7 @@ impl MockHerdr {
             screens: Default::default(),
             live: Default::default(),
             reject_ansi: Default::default(),
+            ignore_ansi: Default::default(),
             argvs: Default::default(),
             pids: Default::default(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -201,6 +205,7 @@ impl MockHerdr {
         let (screens, argvs, pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone());
         let live = state.live.clone();
         let reject_ansi = state.reject_ansi.clone();
+        let ignore_ansi = state.ignore_ansi.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
@@ -386,9 +391,11 @@ impl MockHerdr {
                             if text == "__READ_ERROR__" {
                                 json!({"id": id, "error": {"code": "pane_unavailable", "message": "pane read failed"}})
                             } else {
+                                let asked_ansi = params.get("format").and_then(Value::as_str) == Some("ansi");
+                                let format = if asked_ansi && !st.ignore_ansi.load(std::sync::atomic::Ordering::SeqCst) { "ansi" } else { "text" };
                                 json!({"id": id, "result": {"type": "pane_read", "read": {
                                     "pane_id": pid, "source": params.get("source").cloned().unwrap_or(json!("recent_unwrapped")),
-                                    "format": "text", "text": text, "revision": 1, "truncated": false}}})
+                                    "format": format, "text": text, "revision": 1, "truncated": false}}})
                             }
                         }
                         "pane.process_info" => {
@@ -566,7 +573,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, argvs, pids, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, handle }
     }
 
     pub fn methods(&self) -> Vec<String> {

@@ -734,6 +734,32 @@ mod flush_queue_tests {
         assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
     }
 
+    /// 證據檔在打字前讀不到：排隊中的 prompt 放回隊列，不停在 unknown，pane 零寫入（sol 第十一輪）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_evidence_file_puts_the_queued_prompt_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let t = f.env.dir.join("locked-q.jsonl");
+        std::fs::write(&t, "").unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 's-q', transcript_path = ? WHERE id = ?")
+            .bind(t.to_str().unwrap())
+            .bind(&f.run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = '第一行\n第二行' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let tr = turn(&app, &f.turn_id).await;
+        assert_eq!((tr.status.as_str(), tr.delivery.as_str()), ("queued", "pending"));
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+    }
+
     fn codex_queue_env<'a>(f: &'a Fixture) -> impl std::future::Future<Output = ()> + 'a {
         async move {
             let app = &f.env.app;

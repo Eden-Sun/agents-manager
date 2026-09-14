@@ -187,7 +187,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 
 | 狀態 | body | 意思 |
 |---|---|---|
-| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"codex_log_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
+| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"transcript_unreadable"|"codex_log_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
 | 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
 
 沒有無損證據可用的 run（grok、遠端主機、codex 還沒回報 session 的多行 prompt…，矩陣見 SPEC §4.4a）**照樣送出**，回

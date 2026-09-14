@@ -534,18 +534,45 @@ pub(crate) fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Deliver
 /// herdr refused the `format` parameter itself (an older or remote herdr), as opposed to failing to
 /// read the pane.
 fn ansi_unsupported(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<HerdrError>()
-        .map(|h| matches!(h.code.as_str(), "unsupported" | "invalid_params" | "invalid_request") || h.message.contains("format"))
-        .unwrap_or(false)
+    // Only an error that names the parameter: a generic `invalid_params` could be anything.
+    e.downcast_ref::<HerdrError>().map(|h| h.message.to_ascii_lowercase().contains("format")).unwrap_or(false)
+}
+
+/// Seconds between warnings that herdr answered a styled read with plain text.
+const PLAIN_FOR_ANSI_WARN_SECS: u64 = 600;
+static PLAIN_FOR_ANSI_WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+/// Whether to warn now that `pane` gave plain text for a styled read — at most once per pane every
+/// ten minutes, so a herdr that silently ignores `format` is visible without flooding the log.
+pub(crate) fn should_warn_plain_for_ansi(pane: &str) -> bool {
+    let Ok(mut seen) = PLAIN_FOR_ANSI_WARNED.get_or_init(Default::default).lock() else { return false };
+    let now = std::time::Instant::now();
+    match seen.get(pane) {
+        Some(at) if now.duration_since(*at) < std::time::Duration::from_secs(PLAIN_FOR_ANSI_WARN_SECS) => false,
+        _ => {
+            seen.insert(pane.to_string(), now);
+            true
+        }
+    }
 }
 
 /// Read the pane for the composer checks: styled when herdr can, plain when it cannot. A plain
 /// read is the fail-closed fallback — no dim flags, so a placeholder simply reads as `NonEmpty`.
 async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<String> {
     match client.pane_read_ansi(pane, "recent-unwrapped", DELIVER_SCAN_LINES).await {
-        Ok(r) => Ok(r.text),
+        Ok(r) => {
+            // A herdr that ignores the parameter answers `format: text`: the read is still usable
+            // (placeholders just read as busy), but say so, or the downgrade is invisible.
+            if r.format != "ansi" && should_warn_plain_for_ansi(pane) {
+                tracing::warn!(pane, format = %r.format, "asked herdr for a styled read and got plain text; placeholders will read as busy");
+            }
+            Ok(r.text)
+        }
         Err(e) if ansi_unsupported(&e) => {
-            tracing::debug!(pane, error = %e, "herdr has no styled pane.read; using the plain read");
+            if should_warn_plain_for_ansi(pane) {
+                tracing::warn!(pane, error = %e, "herdr has no styled pane.read; using the plain read");
+            }
             Ok(client.pane_read(pane, "recent-unwrapped", DELIVER_SCAN_LINES).await?.text)
         }
         Err(e) => Err(e),
@@ -693,11 +720,26 @@ pub(crate) async fn execute_delivery(
         BoxState::NonEmpty => return Ok(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
         BoxState::Unready => return Ok(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
     }
+    // The baseline is still before the first keystroke: an evidence file that vanished, was swapped
+    // or became unreadable since the plan means "not attempted", never an unknown delivery
+    // (sol review round eleven). Only failures after `pane_send_text` may become `unknown`.
     let offset = match &proof {
-        Proof::Transcript { path, .. } => transcript_len(path)?,
+        Proof::Transcript { path, .. } => match transcript_len(path) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(run = %run.id, path = %path.display(), error = %e, "evidence file unreadable before typing");
+                return Ok(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
+            }
+        },
         Proof::EchoRow | Proof::Unverified => 0,
     };
-    let baseline = evidence(&bot.kind, &proof, offset, &before, text)?;
+    let baseline = match evidence(&bot.kind, &proof, offset, &before, text) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = %e, "could not take the evidence baseline before typing");
+            return Ok(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
+        }
+    };
 
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
@@ -958,6 +1000,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_plain_for_ansi_warning_is_throttled_per_pane() {
+        let a = format!("pane-throttle-{}", db::ulid());
+        let b = format!("pane-throttle-{}", db::ulid());
+        assert!(should_warn_plain_for_ansi(&a));
+        assert!(!should_warn_plain_for_ansi(&a), "not again within the window");
+        assert!(should_warn_plain_for_ansi(&b), "another pane warns on its own");
+    }
+
+    /// 只有錯誤訊息明確提到 format 才降級成純文字讀法。
+    #[test]
+    fn only_an_error_about_format_downgrades_the_read() {
+        let e = |code: &str, msg: &str| anyhow::Error::new(HerdrError { code: code.into(), message: msg.into() });
+        assert!(ansi_unsupported(&e("invalid_params", "unknown field `format`")));
+        assert!(!ansi_unsupported(&e("invalid_params", "lines must be positive")));
+        assert!(!ansi_unsupported(&e("unsupported", "pane is gone")));
+    }
+
     /// SGR 解析：dim 的開關、重設，38/48 顏色參數裡的 `2` 不會被當成 dim。
     #[test]
     fn styled_chars_follow_sgr_exactly() {
@@ -1161,6 +1221,35 @@ mod api_tests {
         }
         assert_eq!(turns(&app, &conv2).await, 0);
         let _ = conv;
+    }
+
+    /// 證據檔在打字前讀不到（這裡是權限被拿掉）：直接送撤回剛建的 turn、回 409，pane 零寫入（sol 第十一輪）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_evidence_file_withdraws_the_direct_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, run_id) = idle_bot(&env, "claude").await;
+        let t = env.dir.join("locked.jsonl");
+        std::fs::write(&t, "").unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 's-locked', transcript_path = ? WHERE id = ?")
+            .bind(t.to_str().unwrap())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        // is_file() 仍然成立，所以規劃會選 transcript；真正讀內容時才失敗。
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let res = prompt(&app, &bot_id, "第一行\n第二行", "crid-locked").await;
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
+        match res {
+            Err(LcError::Conflict(v)) => assert_eq!(v.get("reason").and_then(Value::as_str), Some("transcript_unreadable")),
+            other => panic!("expected a retryable 409, got {:?}", other.map(|o| o.delivery)),
+        }
+        assert_eq!(turns(&app, &conv).await, 0, "the turn was withdrawn, not left unknown");
+        assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
     }
 
     /// grok 多行沒有無損證據：照樣打字送出，回 200 `unverified`，turn 留下「要人工核對」的標記（不是 unknown）。
