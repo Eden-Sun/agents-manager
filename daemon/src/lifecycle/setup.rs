@@ -33,7 +33,7 @@ pub const REMOTE_TOKEN_SLOT: &str = "-";
 /// to this machine's herdr (`pane report-agent`), whose event makes the daemon drain the spool (§11.4.3).
 ///
 /// 根目錄是參數（`remote_hook_sh`）：隔離實例的事件要寫進自己的 `instances/<slug>`，否則會落進正式實例的
-/// spool，而它自己的 scanner 永遠看不到（sol 三輪）。正式實例（`REMOTE_ROOT`）產出的腳本一字不差。
+/// spool，而它自己的 scanner 永遠看不到（sol 三輪）。正式實例（`REMOTE_ROOT`）的 spool 路徑與行為不變。
 pub fn remote_hook_sh(root: &str) -> String {
     REMOTE_HOOK_SH_TEMPLATE.replace("__AM_REMOTE_ROOT__", root)
 }
@@ -503,16 +503,9 @@ pub(crate) async fn pane_env(
         env.insert("PATH".into(), json!(path));
     }
     env.insert("AM_RUN_ID".into(), json!(run_id));
-    // grok 的 dispatcher 每個實例各一支、全都會被叫到；靠這個分辨 pane 屬於哪一顆（正式實例不設）。
-    if let Some(slug) = app.instance() {
-        env.insert("AM_INSTANCE".into(), json!(slug));
-    }
     // Only local hook commands call home over HTTP; remote panes have no port since v4.3 (§11.4.6).
     if host == LOCAL_HOST {
         env.insert("AM_PORT".into(), json!(app.port.to_string()));
-        // HTTP 打不通時 hook 會 spool；沒有這個值它會猜 ~/.config/agents-manager，隔離跑的 daemon
-        // 就換成正式 daemon 去吃那些檔（SPEC §3.1 資料目錄隔離）。遠端的 bot 目錄在遠端家目錄，不適用。
-        env.insert("AM_DATA_DIR".into(), json!(app.data_dir.to_string_lossy()));
     }
     // Hook token rides in the pane env for every kind: grok's dispatcher learns the bot only here
     // (SPEC §12), and local hooks read it so it never shows in `ps` (issue #43).
@@ -542,7 +535,29 @@ pub(crate) async fn pane_env(
     for (k, v) in bot.env() {
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
+    let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir.to_string_lossy().into_owned());
+    reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
     Value::Object(env)
+}
+
+/// 決定「這個 pane 屬於哪顆 daemon」的兩個變數是保留的：identity.env、bot.env 合併**之後**才由 daemon
+/// 蓋回去，自訂 env 寫了也不算（sol 四輪）。否則正式 bot 可以偽造隔離 slug、隔離 bot 可以清掉 slug，
+/// grok dispatcher 就把事件送錯實例；`AM_DATA_DIR` 被改掉則 hook 的 spool 落到別顆 daemon 的目錄。
+/// - `AM_INSTANCE`：隔離實例＝它的 slug；正式實例＝移除（dispatcher 以「沒有這個變數」認正式實例）。
+/// - `AM_DATA_DIR`：本機＝這顆 daemon 的資料目錄；遠端＝移除（遠端 bot 目錄在遠端家目錄，§11.4）。
+fn reserve_instance_env(
+    env: &mut serde_json::Map<String, Value>,
+    instance: Option<&str>,
+    local_data_dir: Option<&str>,
+) {
+    match instance {
+        Some(slug) => env.insert("AM_INSTANCE".into(), json!(slug)),
+        None => env.remove("AM_INSTANCE"),
+    };
+    match local_data_dir {
+        Some(dir) => env.insert("AM_DATA_DIR".into(), json!(dir)),
+        None => env.remove("AM_DATA_DIR"),
+    };
 }
 
 /// Quote `s` as a TOML basic string (for codex `-c key="…"`).
@@ -1049,7 +1064,7 @@ mod remote_hook_tests {
 
     const STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}"#;
 
-    /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例路徑一字不變。
+    /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。
     #[test]
     fn the_generated_hook_spools_under_its_own_instance_root() {
         let default = super::remote_hook_sh(crate::startup::REMOTE_ROOT);
@@ -1258,6 +1273,26 @@ mod pane_env_tests {
     use super::*;
     use crate::testing as tt;
 
+    /// 正式／隔離 × 本機／遠端 × 自訂 env 帶了偽造值、清空值、完全沒帶：結果只看 daemon 自己。
+    #[test]
+    fn reserved_instance_keys_ignore_whatever_custom_env_says() {
+        for instance in [None, Some("a1b2")] {
+            for local in [Some("/data/iso"), None] {
+                for custom in [Some("forged"), Some(""), None] {
+                    let mut env = serde_json::Map::new();
+                    if let Some(v) = custom {
+                        env.insert("AM_INSTANCE".into(), json!(v));
+                        env.insert("AM_DATA_DIR".into(), json!(v));
+                    }
+                    reserve_instance_env(&mut env, instance, local);
+                    let case = format!("instance={instance:?} local={local:?} custom={custom:?}");
+                    assert_eq!(env.get("AM_INSTANCE"), instance.map(|s| json!(s)).as_ref(), "{case}");
+                    assert_eq!(env.get("AM_DATA_DIR"), local.map(|s| json!(s)).as_ref(), "{case}");
+                }
+            }
+        }
+    }
+
     /// hook 打不通時會 spool 到 `AM_DATA_DIR`；沒注入的話隔離跑的 bot 會把檔案丟進正式資料目錄，
     /// 換成正式 daemon 去重播它（sol 複審 2026-09-14）。
     #[tokio::test]
@@ -1278,6 +1313,51 @@ mod pane_env_tests {
         for host in [LOCAL_HOST, "box"] {
             let iso = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
             assert_eq!(iso["AM_INSTANCE"], json!("a1b2"), "{host}");
+        }
+
+        // identity.env、bot.env 各自寫了偽造值都蓋不過去：真的走 pane_env 的合併順序。
+        env.app
+            .cfg
+            .update(|cfg| {
+                cfg.identities = vec![crate::config::IdentityCfg {
+                    name: "cc9".into(),
+                    kind: "claude".into(),
+                    env: [("AM_INSTANCE", "forged-by-identity"), ("AM_DATA_DIR", "/identity/dir"), ("ID_ONLY", "kept")]
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .into(),
+                    args: vec![],
+                }];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for layer in ["identity", "bot"] {
+            let (identity, env_json) = match layer {
+                "identity" => (Some("cc9"), r#"{"FOO":"kept"}"#),
+                _ => (None, r#"{"AM_INSTANCE":"forged-by-bot","AM_DATA_DIR":"/bot/dir","FOO":"kept"}"#),
+            };
+            sqlx::query("UPDATE bots SET identity = ?, env_json = ? WHERE id = ?")
+                .bind(identity)
+                .bind(env_json)
+                .bind(&bot.id)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+            let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+            for instance in [None, Some("a1b2".to_string())] {
+                env.app.set_instance(instance.clone());
+                for host in [LOCAL_HOST, "box"] {
+                    let got = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
+                    let case = format!("layer={layer} instance={instance:?} host={host}");
+                    assert_eq!(got.get("AM_INSTANCE"), instance.as_ref().map(|s| json!(s)).as_ref(), "{case}");
+                    let dir = (host == LOCAL_HOST).then(|| json!(env.app.data_dir.to_string_lossy()));
+                    assert_eq!(got.get("AM_DATA_DIR"), dir.as_ref(), "{case}");
+                    assert_eq!(got["FOO"], json!("kept"), "其他自訂 env 照舊生效：{case}");
+                    if layer == "identity" {
+                        assert_eq!(got["ID_ONLY"], json!("kept"), "{case}");
+                    }
+                }
+            }
         }
     }
 }

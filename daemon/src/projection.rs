@@ -37,7 +37,9 @@ pub struct Deleting {
 }
 
 pub enum DeleteTarget<'a> {
-    Project(&'a str),
+    /// `held`：呼叫端已經拿著這些 bot 的 per-bot 鎖並確認都停了。TOML 裡這個專案只要多出一顆不在名單上的
+    /// bot（例如剛建立、可能正要啟動）就拒絕——不能刪掉一顆沒被鎖住、可能正在跑的 bot（sol 四輪）。
+    Project { id: &'a str, held: &'a HashSet<String> },
     Bot(&'a str),
 }
 
@@ -52,13 +54,8 @@ pub struct NotInConfig(pub String);
 pub struct DeleteRefused(pub String);
 
 /// 刪除的單一臨界區：重讀 config → 確認目標此刻在 TOML → 算出實際要拿掉的 id → 閘門（寫入前）→
-/// 寫 config → 投影。`dry_run` 只做到閘門為止，不寫檔、不投影：`delete_bot` 在停 bot／刪 child 之前先問這一次。
-pub async fn delete_from_config(
-    store: &ConfigStore,
-    pool: &SqlitePool,
-    target: DeleteTarget<'_>,
-    dry_run: bool,
-) -> Result<Deleting> {
+/// 寫 config → 投影。呼叫端（API）在這之前拿好 per-bot 鎖、在這之後才停機，所以拒絕一定發生在任何東西被停之前。
+pub async fn delete_from_config(store: &ConfigStore, pool: &SqlitePool, target: DeleteTarget<'_>) -> Result<Deleting> {
     let _g = PROJECTION.lock().await;
     // 臨界區內 DB 的 user bot／project 只有投影會改，所以這份快照在寫 config 之前都成立。
     let db_bots: Vec<db::Bot> =
@@ -67,16 +64,21 @@ pub async fn delete_from_config(
     let allow = store
         .update(|cfg| {
             let allow = match target {
-                DeleteTarget::Project(id) => {
+                DeleteTarget::Project { id, held } => {
                     let p = cfg
                         .projects
                         .iter()
                         .find(|p| p.id.as_deref() == Some(id))
                         .ok_or_else(|| anyhow::Error::new(NotInConfig(format!("專案 `{id}`"))))?;
-                    Deleting {
-                        projects: HashSet::from([id.to_string()]),
-                        bots: p.bots.iter().filter_map(|b| b.id.clone()).collect(),
+                    let bots: HashSet<String> = p.bots.iter().filter_map(|b| b.id.clone()).collect();
+                    let unheld: Vec<String> = bots.iter().filter(|b| !held.contains(*b)).cloned().collect();
+                    if !unheld.is_empty() {
+                        return Err(anyhow::Error::new(DeleteRefused(format!(
+                            "專案 `{id}` 在刪除途中多了沒鎖住的 bot（{}），可能正要啟動；請重試",
+                            some_names(&unheld)
+                        ))));
                     }
+                    Deleting { projects: HashSet::from([id.to_string()]), bots }
                 }
                 DeleteTarget::Bot(id) => {
                     if !cfg.projects.iter().any(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(id))) {
@@ -103,15 +105,11 @@ pub async fn delete_from_config(
                     some_names(&gone_projects),
                 ))));
             }
-            if !dry_run {
-                *cfg = next;
-            }
+            *cfg = next;
             Ok(allow)
         })
         .await?;
-    if !dry_run {
-        project_inner(store, pool, Some(&allow)).await?;
-    }
+    project_inner(store, pool, Some(&allow)).await?;
     Ok(allow)
 }
 
@@ -472,7 +470,7 @@ mod tests {
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
 
         // 刪除 API 找不到目標（TOML 被清空）就拒絕：不會因為有人按了一次刪除就全部放行。
-        let err = delete_from_config(&store, &pool, DeleteTarget::Bot("b1"), false).await.unwrap_err();
+        let err = delete_from_config(&store, &pool, DeleteTarget::Bot("b1")).await.unwrap_err();
         assert!(err.downcast_ref::<NotInConfig>().is_some(), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
 
@@ -493,7 +491,8 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_project_removes_it_and_its_bots() {
         let (dir, store, pool) = seeded("del-project", &["b1", "b2", "b3", "b4"]).await;
-        let allow = delete_from_config(&store, &pool, DeleteTarget::Project("p1"), false).await.unwrap();
+        let held: HashSet<String> = ["b1", "b2", "b3", "b4"].map(String::from).into();
+        let allow = delete_from_config(&store, &pool, DeleteTarget::Project { id: "p1", held: &held }).await.unwrap();
         assert_eq!(allow.bots.len(), 4);
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 0);
@@ -507,8 +506,9 @@ mod tests {
     async fn a_cleared_toml_turns_every_delete_into_a_refusal() {
         let (dir, store, pool) = seeded("del-cleared", &["b1"]).await;
         std::fs::write(&store.path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
-        for target in [DeleteTarget::Project("p1"), DeleteTarget::Bot("b1")] {
-            let err = delete_from_config(&store, &pool, target, false).await.unwrap_err();
+        let held: HashSet<String> = ["b1".to_string()].into();
+        for target in [DeleteTarget::Project { id: "p1", held: &held }, DeleteTarget::Bot("b1")] {
+            let err = delete_from_config(&store, &pool, target).await.unwrap_err();
             assert!(err.downcast_ref::<NotInConfig>().is_some(), "{err}");
         }
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 1);
@@ -518,24 +518,29 @@ mod tests {
     }
 
     /// 1 個專案／2 顆 bot，外部拿掉 b2 之後刪 b1：只要授權以外還有一列會不見就拒絕，
-    /// 不套一般的小量刪除門檻；config 也不寫（b1 還在）。dry run 同樣不寫。
+    /// 不套一般的小量刪除門檻；config 也不寫（b1 還在）。
     #[tokio::test]
     async fn a_delete_refuses_any_removal_it_did_not_ask_for() {
         let (dir, store, pool) = seeded("del-extra", &["b1", "b2"]).await;
         std::fs::write(&store.path, config_text(&["b1"])).unwrap();
-        for dry_run in [true, false] {
-            let err = delete_from_config(&store, &pool, DeleteTarget::Bot("b1"), dry_run).await.unwrap_err();
-            assert!(err.downcast_ref::<DeleteRefused>().is_some(), "{err}");
-        }
+        let err = delete_from_config(&store, &pool, DeleteTarget::Bot("b1")).await.unwrap_err();
+        assert!(err.downcast_ref::<DeleteRefused>().is_some(), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 2);
         let on_disk = std::fs::read_to_string(&store.path).unwrap();
         assert!(on_disk.contains("b1"), "拒絕時 config 不能寫：{on_disk}");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
-        // 健康的 config 上 dry run 不寫檔也不投影。
-        std::fs::write(&store.path, config_text(&["b1", "b2"])).unwrap();
-        delete_from_config(&store, &pool, DeleteTarget::Bot("b1"), true).await.unwrap();
-        assert!(std::fs::read_to_string(&store.path).unwrap().contains("'b1'"));
+    /// 刪專案時 TOML 裡多了一顆呼叫端沒鎖住的 bot（剛建立、可能正要啟動）→ 拒絕，一列都不動。
+    #[tokio::test]
+    async fn a_project_delete_refuses_bots_it_does_not_hold() {
+        let (dir, store, pool) = seeded("del-unheld", &["b1", "b2"]).await;
+        let held: HashSet<String> = ["b1".to_string()].into();
+        let err = delete_from_config(&store, &pool, DeleteTarget::Project { id: "p1", held: &held }).await.unwrap_err();
+        assert!(err.downcast_ref::<DeleteRefused>().is_some(), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 2);
+        assert_eq!(store.get().await.projects.len(), 1);
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -552,7 +557,7 @@ mod tests {
                 let (store, pool, gate) = (store.clone(), pool.clone(), gate.clone());
                 tokio::spawn(async move {
                     gate.wait().await;
-                    delete_from_config(&store, &pool, DeleteTarget::Bot(id), false).await.map(|_| ()).map_err(|e| e.to_string())
+                    delete_from_config(&store, &pool, DeleteTarget::Bot(id)).await.map(|_| ()).map_err(|e| e.to_string())
                 })
             };
             let (a, b) = (run("b1"), run("b2"));

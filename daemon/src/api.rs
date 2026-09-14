@@ -395,9 +395,8 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
 async fn delete_in_config(
     app: &Arc<App>,
     target: crate::projection::DeleteTarget<'_>,
-    dry_run: bool,
 ) -> Result<crate::projection::Deleting, LcError> {
-    crate::projection::delete_from_config(&app.cfg, &app.db, target, dry_run).await.map_err(|e| {
+    crate::projection::delete_from_config(&app.cfg, &app.db, target).await.map_err(|e| {
         if let Some(n) = e.downcast_ref::<crate::projection::NotInConfig>() {
             LcError::conflict("not_in_config", json!({"message": n.to_string()}))
         } else if let Some(r) = e.downcast_ref::<crate::projection::DeleteRefused>() {
@@ -638,14 +637,24 @@ async fn patch_project(
 }
 
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let bots = db::live_bots(&app.db).await.map_err(any_err)?;
-    for b in bots.iter().filter(|b| b.project_id == id) {
-        if db::active_run(&app.db, &b.id).await.map_err(any_err)?.is_some() {
-            return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": b.id})));
+    // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
+    // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
+    let mut ids: Vec<String> =
+        db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).map(|b| b.id).collect();
+    ids.sort();
+    let mut guards = Vec::with_capacity(ids.len());
+    for bot_id in &ids {
+        guards.push(app.bot_lock(bot_id).await.lock_owned().await);
+    }
+    for bot_id in &ids {
+        if db::active_run(&app.db, bot_id).await.map_err(any_err)?.is_some() {
+            return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": bot_id})));
         }
     }
-    // 授權範圍在臨界區裡從**當下的** TOML 算，不從上面這份 DB 清單猜。
-    delete_in_config(&app, crate::projection::DeleteTarget::Project(&id), false).await?;
+    // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
+    let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
+    delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await?;
+    drop(guards);
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -1083,32 +1092,27 @@ async fn patch_bot(
 }
 
 pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    // 整個刪除都拿著這顆 bot 的 per-bot 鎖：start 要同一把，等它拿到時 bot 已經刪了（NotFound），
+    // 不會在「定案」和「停機」之間插進來重開一個 run。
+    let lock = app.bot_lock(&id).await;
+    let _g = lock.lock().await;
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
-    let user_bot = bot.managed_by != "child";
-    // 閘門先問（不寫檔）：過不了就什麼都不停、不刪、不 purge（sol 三輪）。child 不在 config 裡，沒有這一關。
-    if user_bot {
-        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id), true).await?;
-    }
     // 2026-09-08: spawned children go with it, else they're sidebar orphans. Deepest first.
     let children: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?.into_iter().rev().collect();
-    // SPEC §6.4: stop first, then drop the config entry.
-    for child in &children {
-        stop_for_delete(&app, &child.id).await;
-    }
-    stop_for_delete(&app, &id).await;
-    if user_bot {
-        // 真的寫入時在臨界區裡再確認一次：停 bot 那段時間 config 可能又被改過。失敗就停在「已停、未刪」。
-        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id), false).await?;
-    } else {
+    // 先定案、再停機（sol 四輪）：會 409 的只有這一步，這時什麼都還沒停；定案之後沒有會失敗回頭的步驟，
+    // 所以不會留下「已停、未刪」。（child 由母 agent 開，daemon 本來就重開不了它，事後回滾做不到。）
+    if bot.managed_by == "child" {
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
+    } else {
+        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id)).await?;
     }
-    // 刪除定案之後才軟刪 child、清目錄。
     let mut removed_children = Vec::new();
     for child in children {
+        stop_for_delete(&app, &child.id).await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&child.id)
@@ -1120,10 +1124,12 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         app.emit("bot_changed", json!({"bot_id": child.id})).await;
         removed_children.push(child.id);
     }
+    // 已經拿著鎖：用 locked 版停自己（stop_bot 會再拿同一把而卡死）。
+    stop_for_delete_locked(&app, &id).await;
     // Soft delete; the conversation and its messages stay.
     lifecycle::purge_bot_dir(&app, &id, &host).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    if !user_bot {
+    if bot.managed_by == "child" {
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     }
     Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
@@ -1132,8 +1138,14 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
 /// If the host is down the stop fails; end the run anyway, else no reconcile ever ends it and
 /// `purge_deleted_bot_dirs` waits forever (review 2026-09-12 d). The orphan-pane sweep reclaims the pane later.
 async fn stop_for_delete(app: &Arc<App>, bot_id: &str) {
-    if let Err(e) = lifecycle::stop_bot(app, bot_id).await {
-        tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot before deleting it; ending its run");
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    stop_for_delete_locked(app, bot_id).await;
+}
+
+async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) {
+    if let Err(e) = lifecycle::stop_bot_locked(app, bot_id).await {
+        tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot while deleting it; ending its run");
         if let Ok(Some(run)) = db::active_run(&app.db, bot_id).await {
             lifecycle::mark_run_exited(app, &run.id, "the bot was deleted while its host was unreachable").await;
         }
@@ -2383,6 +2395,86 @@ mod delete_bot_tests {
         }
         assert!(db::bot(&app.db, &b2).await.unwrap().unwrap().deleted_at.is_none());
         assert!(app.cfg.get().await.projects[0].bots.iter().any(|b| b.id.as_deref() == Some(b1.as_str())), "config 沒寫");
+    }
+
+    /// 停機期間外部改 TOML：定案已經在停機之前做完，所以不會 409、不會留下「已停、未刪」（sol 四輪）。
+    /// 舊的「預檢 → 停 → 再定案」在這裡會因為 bravo 不見了而 409，留下停掉卻沒刪的 alfa。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_toml_changing_while_the_bot_stops_does_not_strand_it() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (b1, b2) = (a_bot(&e, "alfa", "user").await, a_bot(&e, "bravo", "user").await);
+        in_config(&e, &[(&b1, "alfa"), (&b2, "bravo")]).await;
+        let run = crate::testing::fake_run(&app, &b1).await; // session `test`＝mock herdr，stop 會真的送鍵
+
+        let task = tokio::spawn({
+            let (app, b1) = (app.clone(), b1.clone());
+            async move { delete_bot(State(app), Path(b1)).await.map(|_| ()).map_err(reason) }
+        });
+        for _ in 0..400 {
+            if e.herdr.methods().iter().any(|m| m == "agent.send_keys") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "stop 應該已經開始");
+        // 停機進行中，外面把 bravo 從 TOML 拿掉。
+        let text = std::fs::read_to_string(&app.cfg.path).unwrap();
+        let pruned: crate::config::ConfigFile = {
+            let mut c: crate::config::ConfigFile = toml::from_str(&text).unwrap();
+            c.projects[0].bots.retain(|b| b.id.as_deref() != Some(b2.as_str()));
+            c
+        };
+        std::fs::write(&app.cfg.path, toml::to_string(&pruned).unwrap()).unwrap();
+
+        assert_eq!(task.await.unwrap(), Ok(()), "定案在停機前已經做完，不該 409");
+        assert!(db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_some(), "alfa 刪掉了");
+        assert_ne!(db::run(&app.db, &run).await.unwrap().unwrap().state, "running", "而且停了");
+        assert!(db::bot(&app.db, &b2).await.unwrap().unwrap().deleted_at.is_none(), "bravo 沒被順手刪掉");
+    }
+
+    /// 刪專案與 start 並發：start 的關鍵段是「拿 per-bot 鎖 → 確認沒被刪 → 建 run」（`start_bot_locked_with`，
+    /// 中間還有開 workspace 那段時間）。刪專案若在鎖外檢查 stopped，會刪掉剛啟動的 bot（sol 四輪）。
+    /// 不變式：不會出現「bot 已刪、run 還在跑」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_project_delete_never_removes_a_bot_that_just_started() {
+        for round in 0..10 {
+            let e = crate::testing::env().await;
+            let app = e.app.clone();
+            let b1 = a_bot(&e, "alfa", "user").await;
+            in_config(&e, &[(&b1, "alfa")]).await;
+
+            let gate = Arc::new(tokio::sync::Barrier::new(2));
+            let starter = tokio::spawn({
+                let (app, b1, gate) = (app.clone(), b1.clone(), gate.clone());
+                async move {
+                    gate.wait().await;
+                    let lock = app.bot_lock(&b1).await;
+                    let _g = lock.lock().await;
+                    if db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_some() {
+                        return false;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await; // 開 workspace 那段
+                    a_running_run(&app, &b1).await;
+                    true
+                }
+            });
+            let deleter = tokio::spawn({
+                let (app, pid, gate) = (app.clone(), e.project_id.clone(), gate.clone());
+                async move {
+                    gate.wait().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    delete_project(State(app), Path(pid)).await.map(|_| ()).map_err(reason)
+                }
+            });
+            let started = starter.await.unwrap();
+            let deleted = deleter.await.unwrap();
+            let bot_gone = db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_some();
+            let running = db::active_run(&app.db, &b1).await.unwrap().is_some();
+            assert!(!(bot_gone && running), "round {round}: 刪掉了正在跑的 bot（started={started} deleted={deleted:?}）");
+            assert_eq!(started, running, "round {round}");
+            assert_eq!(deleted.is_ok(), bot_gone, "round {round}: {deleted:?}");
+        }
     }
 
     /// TOML 被外部清空後刪原本的專案：目標此刻不在 TOML → 拒絕，DB 裡的專案與 bot 一列都不動。
