@@ -70,6 +70,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   **先定案、再停機**：`DELETE /api/bots/:id` 全程拿著該 bot 的 per-bot 鎖（start 用同一把，拿到時 bot 已刪 → NotFound），會 409 的只有定案那一步、那時什麼都還沒停；
   定案後才停 child 與自己、軟刪 child、清目錄，所以停機期間 TOML 再怎麼變都不會留下「已停、未刪」（child 由母 agent 開、daemon 重開不了，事後回滾本來就做不到）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
+  **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。
   其他情況真的要刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
 - **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
 - **同一資料目錄只准一顆 daemon**：啟動時對 `<資料目錄>/daemon.lock` 拿 `flock(LOCK_EX|LOCK_NB)`（拿到才寫自己的 pid 進去），拿不到就拒絕啟動、**不做任何寫入**（重啟時前一顆還在收攤，最多等 5 秒再判定失敗）；鎖綁在 fd 上，行程死掉自動放開（`startup.rs`）。
@@ -80,6 +81,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **遠端也要分實例**：遠端的 bot 目錄、`hook.sh` 裡寫的 spool 目錄、drain／scan 路徑是同一個根 `$HOME/.config/agents-manager[/instances/<slug>]/bots/<bot_id>`，`slug` 是資料目錄的短雜湊（正式實例沒有這一段：既有路徑、檔名，以及沒有 `AM_INSTANCE` 的舊 pane 行為都不變；dispatcher 內容多了實例閘門）。
   grok 的 dispatcher 也按實例分址（`<根>/grok-hook.sh`），hooks 檔名是 `agents-manager[-<slug>].json`（grok 會合併整個 hooks 目錄）；每支 dispatcher 只接自己實例的 pane：隔離實例的 pane env 帶 `AM_INSTANCE=<slug>`，正式實例不帶（升級前開的舊 pane 也沒有，照舊歸正式）。
   `AM_INSTANCE` 與 `AM_DATA_DIR` 是**保留變數**：identity.env、bot.env 合併之後才由 daemon 蓋回去（隔離實例設 slug／正式實例移除；本機設資料目錄／遠端移除），自訂 env 寫了也不算。
+  child 建立線同樣保留：herdr shim 在 `pane split`／`pane new`／`tab create`／`agent start` 剝掉呼叫者自帶的 `--env AM_INSTANCE=…`／`--env AM_DATA_DIR=…`（含 `--env=` 寫法；`agent start` 只看 `--` 之前），再照母 pane 的實際值補，母 pane 沒有就不帶。
 - **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
