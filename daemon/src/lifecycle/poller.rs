@@ -1867,6 +1867,24 @@ mod issue_17_tests {
         }
     }
 
+    /// 輸入框只有 dim 的「建議下一句」（2026-09-14 k8bw2f 的交辦卡 queued）：是空框，照樣送出，建議句不會被一起送。
+    #[tokio::test]
+    async fn a_dim_suggested_prompt_is_an_empty_box_and_the_prompt_goes_through() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { suggestion: Some("把 4b 和 4c 補做完".into()), ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
+        assert_ne!(out, not("composer_busy", true));
+        assert!(!matches!(out, Delivered::NotAttempted { .. }), "{out:?}");
+        assert_eq!(count(&f, "pane.send_text"), 1);
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert!(pane.transcript.iter().any(|l| l.contains("Reply with PONG please")), "{:?}", pane.transcript);
+        assert!(!pane.transcript.iter().any(|l| l.contains("補做完")));
+    }
+
     /// 使用者真的打了跟佔位字一字不差的草稿（mock 讀不到 dim）：不能當空框，零寫入（sol 第九輪 #2）。
     #[tokio::test]
     async fn a_draft_identical_to_the_placeholder_is_left_alone() {
