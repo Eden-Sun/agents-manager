@@ -1,0 +1,111 @@
+/* 左上角「重建 N/5」chip 與它的清單（使用者 2026-09-14）。RAM 那一格旁邊，桌機與手機同一列。 */
+.rebuild-badge-box {
+  position: relative;
+  flex: none;
+}
+
+.rebuild-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rebuild-badge:hover {
+  border-color: var(--border-strong);
+}
+
+/* 到門檻＝下一輪就會動手，用警示色而不是只換字：那一刻使用者該知道重啟即將發生。 */
+.rebuild-badge.hot {
+  border-color: var(--lamp-amber);
+  color: var(--text);
+}
+
+.rebuild-k {
+  color: var(--text-faint);
+  letter-spacing: 0.03em;
+}
+
+.rebuild-v {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.rebuild-badge.hot .rebuild-v {
+  color: var(--lamp-amber);
+}
+
+.rebuild-pop {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(320px, calc(100vw - 24px));
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+}
+
+.rebuild-pop-head {
+  margin-bottom: 6px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.rebuild-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rebuild-list li {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px;
+}
+
+.rebuild-who {
+  color: var(--text);
+}
+
+.rebuild-commit {
+  color: var(--text-faint);
+}
+
+.rebuild-status {
+  color: var(--text-dim);
+}
+
+.rebuild-status.ok {
+  color: var(--lamp-green);
+}
+
+.rebuild-scope {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rebuild-pop-foot {
+  margin-top: 6px;
+  color: var(--text-faint);
+}
+
+/* chip 在左上角，所以下拉一律左錨；寬度夾在視窗內，手機不會被切掉。 */

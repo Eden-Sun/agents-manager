@@ -34,6 +34,7 @@ import { HostBadge, HostsPanel } from './HostsPanel'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
+import { RebuildBadge } from './RebuildBadge'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
@@ -1026,6 +1027,7 @@ export function Sidebar() {
           <div className="head-brand-meta">
             <PaneBadge />
             <ConnBadge socket={socket} connected={connected} />
+            <RebuildBadge />
           </div>
         </div>
         <div className="head-ram">
