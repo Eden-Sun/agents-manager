@@ -81,7 +81,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **遠端也要分實例**：遠端的 bot 目錄、`hook.sh` 裡寫的 spool 目錄、drain／scan 路徑是同一個根 `$HOME/.config/agents-manager[/instances/<slug>]/bots/<bot_id>`，`slug` 是資料目錄的短雜湊（正式實例沒有這一段：既有路徑、檔名，以及沒有 `AM_INSTANCE` 的舊 pane 行為都不變；dispatcher 內容多了實例閘門）。
   grok 的 dispatcher 也按實例分址（`<根>/grok-hook.sh`），hooks 檔名是 `agents-manager[-<slug>].json`（grok 會合併整個 hooks 目錄）；每支 dispatcher 只接自己實例的 pane：隔離實例的 pane env 帶 `AM_INSTANCE=<slug>`，正式實例不帶（升級前開的舊 pane 也沒有，照舊歸正式）。
   `AM_INSTANCE` 與 `AM_DATA_DIR` 是**保留變數**：identity.env、bot.env 合併之後才由 daemon 蓋回去（隔離實例設 slug／正式實例移除；本機設資料目錄／遠端移除），自訂 env 寫了也不算。
-  child 建立線同樣保留：herdr shim 在 `pane split`／`pane new`／`tab create`／`agent start` 剝掉呼叫者自帶的 `--env AM_INSTANCE=…`／`--env AM_DATA_DIR=…`（含 `--env=` 寫法；`agent start` 只看 `--` 之前），再照母 pane 的實際值補，母 pane 沒有就不帶。
+  child 建立線同樣保留：herdr shim 在會建 pane 的 `pane split`／`tab create`／`workspace create`（及 `pane new`）剝掉呼叫者自帶的 `--env AM_INSTANCE=…`／`--env AM_DATA_DIR=…`（含 `--env=` 寫法），再照母 pane 的實際值補，母 pane 沒有就不帶。
+  `agent start` **只剝不補**：herdr 0.8.2 的 `agent start` 沒有 `--env`（它在既有 pane 裡開 agent，env 在建 pane 時已注入），補上去就是未知旗標；`--` 之後是 agent CLI 自己的參數，原樣保留。
+  `worktree create/open` 也會開 workspace，但沒有 `--env`：那個 root pane 由 herdr server 開、拿不到任何 `AM_*`，hook 不會觸發（dispatcher 要 `AM_BOT_ID`＋`AM_HOOK_TOKEN`），所以不會送錯實例，只是不被追蹤。
 - **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
 - **herdr client**：
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
