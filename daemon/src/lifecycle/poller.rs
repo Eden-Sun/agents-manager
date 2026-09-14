@@ -640,7 +640,9 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return false;
     }
-    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok") {
+    // Only a proven-sent turn is ever re-sent: an unverified prompt (`delivery_verified = 0`) may
+    // well have been taken, and typing it again would duplicate the work.
+    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.delivery_verified != 0) {
         return false;
     }
     let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
@@ -663,6 +665,10 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
         Ok(Delivered::Submitted) => {
             tracing::warn!(run_id, turn = %turn_id, bot = %bot.name,
                            "prompt never reached the pane (empty composer, no echo in scrollback); re-delivered it");
+            true
+        }
+        Ok(Delivered::Unverified) => {
+            tracing::warn!(run_id, turn = %turn_id, "prompt re-delivered without lossless evidence");
             true
         }
         Ok(Delivered::NotAttempted { reason, .. }) => {
@@ -1711,9 +1717,9 @@ mod issue_17_tests {
         assert_eq!(execute_delivery(&app, &client, &run, &bot, text, plan).await.unwrap(), Delivered::Unproven("session_changed"));
     }
 
-    /// 多行又沒有任何無損證據：一個字都不打，而且標明「沒送出、不必重試」。
+    /// 沒有無損證據（grok 多行）：照樣打字送出一次，回 Unverified。
     #[tokio::test]
-    async fn a_prompt_with_no_lossless_proof_is_not_typed_at_all() {
+    async fn a_prompt_with_no_lossless_proof_is_typed_once_and_unverified() {
         let f = fixture("grok", "").await;
         live(&f, wide());
         let app = f.env.app.clone();
@@ -1722,8 +1728,58 @@ mod issue_17_tests {
         let client = client_for_run(&app, &run).await.unwrap();
 
         let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false).await.unwrap();
-        assert_eq!(out, not("no_lossless_proof", false));
+        assert_eq!(out, Delivered::Unverified);
+        assert_eq!(count(&f, "pane.send_text"), 1);
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
+    }
+
+    /// unverified 的 turn 絕不自動重送：它很可能已經被收下了。
+    #[tokio::test]
+    async fn an_unverified_turn_is_never_resent() {
+        let f = fixture("grok", "").await;
+        live(&f, wide());
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery_verified = 0 WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let sent = vec!["Reply with PONG".to_string()];
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
         assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0);
+    }
+
+    /// codex 本機：找到它自己的 rollout 就用 rollout 逐字證明多行 prompt。
+    #[tokio::test]
+    async fn a_codex_multi_line_prompt_is_proven_by_its_rollout() {
+        let f = fixture("codex", "").await;
+        let app = f.env.app.clone();
+        let home = f.env.dir.join("codex-home");
+        let day = home.join("sessions/2026/09/14");
+        std::fs::create_dir_all(&day).unwrap();
+        let log = day.join("rollout-2026-09-14T10-00-00-sess-codex.jsonl");
+        std::fs::write(&log, "").unwrap();
+        sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+            .bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-codex' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        // codex 的 composer／回音 marker 是 `› `；mock pane 畫的是 `❯`，所以這裡只看 rollout 證據本身。
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let pane_cols = client.pane_size("pane-17").await.ok().flatten().map(|(w, _)| w);
+        let inputs = ProofInputs {
+            kind: &bot.kind,
+            host_is_local: true,
+            hooks: true,
+            session_id: run.native_session_id.as_deref(),
+            transcript_path: None,
+            codex_log: codex_home(&app, &bot).await.and_then(|h| codex_session_log(&h, "sess-codex")),
+            pane_cols,
+        };
+        assert_eq!(
+            choose_proof(&inputs, "第一行\n第二行"),
+            Ok(Proof::Transcript { format: LogFormat::Codex, path: log, session_id: "sess-codex".into() }),
+        );
     }
 
     /// Enter 被吃掉，spinner 一直在重畫：不能判成功；已經按過鍵，所以是 Unproven。

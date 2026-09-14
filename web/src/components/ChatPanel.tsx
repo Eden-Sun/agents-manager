@@ -123,6 +123,10 @@ export const Bubble = memo(function Bubble({
   // 使用者貼進來的 AGM 裁示（沒有 relay_from）另標（2026-09-12 使用者：「算在 AGM 訊息不算在 user」）。
   // 只認開頭 `AGM …：` 或 `[AGM …]`，句中提到不算。
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
+  // 打字送出但沒有無損證據（SPEC §4.4a）：留一個看得到的標記讓人核對。
+  const unverified = useStore((s) =>
+    msg.role === 'user' && msg.turn_id && msg.bot_id ? s.turns[msg.bot_id]?.[msg.turn_id]?.unverified === true : false,
+  )
   // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
   const [expanded, setExpanded] = useState(false)
@@ -150,6 +154,11 @@ export const Bubble = memo(function Bubble({
             </span>
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
+          {unverified ? (
+            <span className="src-tag fallback" title="已打字送出，但這個 bot 沒有可以逐字核對的紀錄（grok、遠端主機、codex 尚未回報 session），請到終端分頁確認它真的收到">
+              未驗證送達
+            </span>
+          ) : null}
           {/* 來源只在非 `hook` 常態時才標（影響可信度的那幾種）。 */}
           {system || msg.source === 'system' ? (
             <span className="src-tag mono" title={`訊息來源：${msg.source}`}>

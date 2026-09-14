@@ -72,6 +72,9 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     let res = deliver_prompt(app, &client, &run, &bot, &text, false).await;
     let delivery = match res {
         Ok(Delivered::Submitted) => "ok",
+        // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
+        // session is known): delivered as far as anyone can tell, marked for a human, never re-sent.
+        Ok(Delivered::Unverified) => "unverified",
         // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
         // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
@@ -113,9 +116,9 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
             "unknown"
         }
     };
-    let _ = sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(&turn.id).execute(&app.db).await;
+    mark_delivery(app, &turn.id, delivery).await;
     emit_turn(app, &turn.id).await;
-    if delivery == "ok" {
+    if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn.id).await;
         arm_progress(app, &run.id, bot_id, &turn.id).await;
     }
@@ -345,9 +348,9 @@ mod flush_queue_tests {
         assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG please")).count(), 1);
     }
 
-    /// 這個 bot 上永遠證明不了的 prompt：不打字、不卡在 in-flight，直接失敗並說明。
+    /// 排隊中的 grok 多行 prompt：沒有無損證據也照樣送出，turn 標成 unverified（delivery ok＋delivery_verified 0）。
     #[tokio::test]
-    async fn a_queued_prompt_that_can_never_be_proven_fails_visibly_instead_of_hanging() {
+    async fn a_queued_prompt_without_lossless_proof_goes_out_marked_unverified() {
         let f = queued_kind("grok", "test").await;
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
@@ -356,8 +359,8 @@ mod flush_queue_tests {
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
-        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
-        assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+        assert_eq!((t.status.as_str(), t.delivery.as_str(), t.delivery_verified), ("in_flight", "ok", 0));
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
     }
 
     /// Regression: a client lookup failing after the claim abandoned the turn `in_flight` +

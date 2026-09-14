@@ -40,6 +40,20 @@ pub(crate) enum Delivered {
     NotAttempted { reason: &'static str, retry: bool },
     /// Keys were sent; whether the agent took the prompt cannot be proven.
     Unproven(&'static str),
+    /// Typed and submitted (the box took the paste and emptied on Enter), on a run where no
+    /// lossless evidence exists — grok, remote hosts, a codex session not reported yet. Delivered
+    /// as far as the screen can tell, **never** re-sent, and marked for a human to check.
+    Unverified,
+}
+
+/// Which agent wrote a session log, i.e. how to read a user entry out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogFormat {
+    /// claude `projects/<cwd>/<session>.jsonl`: `{"type":"user","message":{"content":…}}`.
+    Claude,
+    /// codex `sessions/YYYY/MM/DD/rollout-…-<session>.jsonl`:
+    /// `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text",…}]}}`.
+    Codex,
 }
 
 /// The evidence a delivery will be judged by.
@@ -47,9 +61,11 @@ pub(crate) enum Delivered {
 pub(crate) enum Proof {
     /// Count single echo rows equal to the prompt.
     EchoRow,
-    /// Count exact user entries appended to this transcript after `offset`, while the run still
-    /// points at this session and path.
-    Transcript { path: std::path::PathBuf, session_id: String },
+    /// Count exact user entries appended to the agent's own session log after the baseline offset,
+    /// while the run still points at this session.
+    Transcript { format: LogFormat, path: std::path::PathBuf, session_id: String },
+    /// No lossless evidence on this run: type, submit, and report `Unverified`.
+    Unverified,
 }
 
 /// How the prompt will be delivered, decided before anything is written.
@@ -164,7 +180,33 @@ pub(crate) fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
         .count()
 }
 
-/// The text of one transcript line if it is a user message a person typed.
+/// The text of one session-log line if it is a user message a person typed.
+pub(crate) fn log_user_text(format: LogFormat, line: &str) -> Option<String> {
+    match format {
+        LogFormat::Claude => transcript_user_text(line),
+        LogFormat::Codex => codex_user_text(line),
+    }
+}
+
+/// codex rollout: only a top-level `response_item` user message counts. `compacted` entries replay
+/// old history inside `replacement_history` and are not new messages; parts other than
+/// `input_text` (images, files) make the entry something other than our typed prompt.
+pub(crate) fn codex_user_text(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let p = v.get("payload")?;
+    if p.get("type").and_then(Value::as_str) != Some("message") || p.get("role").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let parts = p.get("content")?.as_array()?;
+    if parts.is_empty() || parts.iter().any(|x| x.get("type").and_then(Value::as_str) != Some("input_text")) {
+        return None;
+    }
+    Some(parts.iter().filter_map(|x| x.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"))
+}
+
 pub(crate) fn transcript_user_text(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v.get("type").and_then(Value::as_str) != Some("user") || v.get("isMeta").and_then(Value::as_bool) == Some(true) {
@@ -192,6 +234,10 @@ pub(crate) fn transcript_len(path: &std::path::Path) -> std::io::Result<u64> {
 /// a new one, and the cost is the new bytes only. A partial first line fails to parse and is
 /// skipped; a partial last line is simply not complete yet. `Err` = unreadable, never zero.
 pub(crate) fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
+    log_hits_since(LogFormat::Claude, path, offset, text)
+}
+
+pub(crate) fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
@@ -203,44 +249,120 @@ pub(crate) fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     let body = String::from_utf8_lossy(&buf);
-    Ok(body.lines().filter_map(transcript_user_text).filter(|t| t == text).count())
+    Ok(body.lines().filter_map(|l| log_user_text(format, l)).filter(|t| t == text).count())
+}
+
+/// Day directories searched for a codex rollout, newest first. A session that has run longer than
+/// this is resumed into a new rollout file anyway.
+const CODEX_LOG_DAYS: usize = 14;
+
+/// Find the rollout file codex writes for `session_id` under `codex_home/sessions`. Only the file
+/// named for exactly this session counts; `None` when it is not there.
+pub(crate) fn codex_session_log(codex_home: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
+    let id = session_id.trim();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let suffix = format!("-{id}.jsonl");
+    let sorted_dirs = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v.reverse();
+        v
+    };
+    let mut days = Vec::new();
+    for year in sorted_dirs(&codex_home.join("sessions")) {
+        for month in sorted_dirs(&year) {
+            for day in sorted_dirs(&month) {
+                days.push(day);
+                if days.len() >= CODEX_LOG_DAYS {
+                    break;
+                }
+            }
+            if days.len() >= CODEX_LOG_DAYS {
+                break;
+            }
+        }
+        if days.len() >= CODEX_LOG_DAYS {
+            break;
+        }
+    }
+    days.into_iter().find_map(|day| {
+        std::fs::read_dir(&day).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+            p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("rollout-") && n.ends_with(&suffix)).unwrap_or(false)
+        })
+    })
+}
+
+/// `CODEX_HOME` for this bot on the local host: identity env, then the bot's own env, else `~/.codex`.
+pub(crate) async fn codex_home(app: &Arc<App>, bot: &db::Bot) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?.to_string_lossy().into_owned();
+    let mut value: Option<String> = None;
+    if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(id) = crate::tools::identity_for_host(app, LOCAL_HOST, name).await {
+            if let Some(v) = id.env.get("CODEX_HOME") {
+                value = Some(v.clone());
+            }
+        }
+    }
+    if let Some(v) = bot.env().get("CODEX_HOME") {
+        value = Some(v.clone());
+    }
+    let dir = value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).map(|v| crate::config::expand_home(&v, &home));
+    Some(std::path::PathBuf::from(dir.unwrap_or_else(|| format!("{home}/.codex"))))
 }
 
 /// Choose the evidence. Transcript first whenever the run has a current, local claude session;
 /// the echo row only when there is no transcript and the prompt provably fits on one row.
-pub(crate) fn choose_proof(
-    kind: &str,
-    host_is_local: bool,
-    session_id: Option<&str>,
-    transcript_path: Option<&str>,
-    pane_cols: Option<u32>,
-    text: &str,
-) -> Result<Proof, Delivered> {
+pub(crate) struct ProofInputs<'a> {
+    pub kind: &'a str,
+    pub host_is_local: bool,
+    /// Whether the daemon injected hooks: without them claude never reports a transcript.
+    pub hooks: bool,
+    pub session_id: Option<&'a str>,
+    pub transcript_path: Option<&'a str>,
+    /// The codex rollout for `session_id`, when found.
+    pub codex_log: Option<std::path::PathBuf>,
+    pub pane_cols: Option<u32>,
+}
+
+/// The evidence matrix (SPEC §4.4a). Lossless evidence when it exists; otherwise the prompt is
+/// still typed and reported `Unverified` — never refused, never re-sent.
+pub(crate) fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Delivered> {
     if text.chars().count() > MAX_PROVABLE_CHARS {
         return Err(Delivered::NotAttempted { reason: "prompt_too_long_to_prove", retry: false });
     }
-    let session = session_id.map(str::trim).filter(|s| !s.is_empty());
-    let path = transcript_path.map(str::trim).filter(|p| !p.is_empty());
-    if kind == "claude" && host_is_local {
-        if let (Some(session), Some(path)) = (session, path) {
-            if std::path::Path::new(path).is_file() {
-                return Ok(Proof::Transcript { path: path.into(), session_id: session.to_string() });
+    let session = i.session_id.map(str::trim).filter(|s| !s.is_empty());
+    let path = i.transcript_path.map(str::trim).filter(|p| !p.is_empty());
+    match (i.kind, i.host_is_local) {
+        ("claude", true) => {
+            if let (Some(session), Some(path)) = (session, path) {
+                if std::path::Path::new(path).is_file() {
+                    return Ok(Proof::Transcript { format: LogFormat::Claude, path: path.into(), session_id: session.to_string() });
+                }
             }
         }
+        ("codex", true) => {
+            if let (Some(session), Some(log)) = (session, i.codex_log.as_ref()) {
+                if log.is_file() {
+                    return Ok(Proof::Transcript { format: LogFormat::Codex, path: log.clone(), session_id: session.to_string() });
+                }
+            }
+        }
+        _ => {}
     }
-    let marker_cols = echo_markers(kind).first().map(|m| m.chars().count()).unwrap_or(0);
-    if marker_cols > 0 && provable_by_echo_row(text, marker_cols, pane_cols) {
+    let marker_cols = echo_markers(i.kind).first().map(|m| m.chars().count()).unwrap_or(0);
+    if marker_cols > 0 && provable_by_echo_row(text, marker_cols, i.pane_cols) {
         return Ok(Proof::EchoRow);
     }
-    // A local claude whose SessionStart has not reported (or reported a path not written yet) will
-    // have a transcript shortly: wait for it rather than giving up on the prompt.
-    if kind == "claude" && host_is_local {
+    // A local claude with hooks reports its transcript at SessionStart: worth a short wait, since a
+    // lossless proof is coming. Everything else has no lossless evidence to wait for.
+    if i.kind == "claude" && i.host_is_local && i.hooks && (session.is_none() || path.is_none()) {
         return Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true });
     }
-    if pane_cols.is_none() && !text.contains('\n') {
-        return Err(Delivered::NotAttempted { reason: "pane_width_unknown", retry: true });
-    }
-    Err(Delivered::NotAttempted { reason: "no_lossless_proof", retry: false })
+    Ok(Proof::Unverified)
 }
 
 /// `agent.prompt` on an agent herdr has no session bound to answered ok while the text never
@@ -279,14 +401,20 @@ pub(crate) async fn plan_delivery(
     };
     let host_is_local = matches!(db::project(&app.db, &bot.project_id).await, Ok(Some(p)) if p.host == LOCAL_HOST);
     let pane_cols = client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w);
-    let proof = match choose_proof(
-        &bot.kind,
+    let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
+        ("codex", true, Some(session)) => codex_home(app, bot).await.and_then(|h| codex_session_log(&h, session)),
+        _ => None,
+    };
+    let inputs = ProofInputs {
+        kind: &bot.kind,
         host_is_local,
-        run.native_session_id.as_deref(),
-        run.transcript_path.as_deref(),
+        hooks: bot.inject_hooks != 0,
+        session_id: run.native_session_id.as_deref(),
+        transcript_path: run.transcript_path.as_deref(),
+        codex_log,
         pane_cols,
-        text,
-    ) {
+    };
+    let proof = match choose_proof(&inputs, text) {
         Ok(p) => p,
         Err(not) => return Ok(Err(not)),
     };
@@ -302,17 +430,23 @@ pub(crate) async fn plan_delivery(
 fn evidence(kind: &str, proof: &Proof, offset: u64, screen: &str, text: &str) -> std::io::Result<usize> {
     match proof {
         Proof::EchoRow => Ok(echo_row_hits(kind, screen, text)),
-        Proof::Transcript { path, .. } => transcript_hits_since(path, offset, text),
+        Proof::Transcript { format, path, .. } => log_hits_since(*format, path, offset, text),
+        Proof::Unverified => Ok(0),
     }
 }
 
 /// Is the run still on the session the transcript proof was taken from?
 async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) -> bool {
-    let Proof::Transcript { path, session_id } = proof else { return true };
+    let Proof::Transcript { format, path, session_id } = proof else { return true };
     match db::run(&app.db, run_id).await {
         Ok(Some(r)) => {
-            r.native_session_id.as_deref() == Some(session_id.as_str())
-                && r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path())
+            let same_id = r.native_session_id.as_deref() == Some(session_id.as_str());
+            // codex has no transcript_path column value; its log is named for the session id.
+            let same_path = match format {
+                LogFormat::Claude => r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path()),
+                LogFormat::Codex => true,
+            };
+            same_id && same_path
         }
         _ => false,
     }
@@ -353,7 +487,7 @@ pub(crate) async fn execute_delivery(
     }
     let offset = match &proof {
         Proof::Transcript { path, .. } => transcript_len(path)?,
-        Proof::EchoRow => 0,
+        Proof::EchoRow | Proof::Unverified => 0,
     };
     let baseline = evidence(&bot.kind, &proof, offset, &before, text)?;
 
@@ -368,7 +502,7 @@ pub(crate) async fn execute_delivery(
     }
     match box_state(&bot.kind, &seen) {
         BoxState::NonEmpty => {}
-        BoxState::Empty if evidence(&bot.kind, &proof, offset, &seen, text)? > baseline => {
+        BoxState::Empty if proof != Proof::Unverified && evidence(&bot.kind, &proof, offset, &seen, text)? > baseline => {
             return Ok(Delivered::Submitted);
         }
         BoxState::Empty => return Ok(Delivered::Unproven("nothing_typed")),
@@ -385,6 +519,12 @@ pub(crate) async fn execute_delivery(
             return Ok(Delivered::Unproven("session_changed"));
         }
         match box_state(&bot.kind, &now) {
+            // No evidence to wait for: the box took the paste and emptied on Enter. That is all
+            // that can be said, and it is said as `Unverified`, not as a proven delivery.
+            BoxState::Empty if proof == Proof::Unverified => {
+                tracing::warn!(run = %run.id, bot = %bot.name, "prompt typed and submitted; no lossless evidence on this run");
+                return Ok(Delivered::Unverified);
+            }
             BoxState::Empty if evidence(&bot.kind, &proof, offset, &now, text)? > baseline => {
                 tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
                 return Ok(Delivered::Submitted);
@@ -551,38 +691,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 本機 claude 有當前 session 與 transcript 時一律優先 transcript（長單行不再走一列回音，第七輪 #3）。
+    fn inputs<'a>(kind: &'a str, local: bool, session: Option<&'a str>, path: Option<&'a str>, codex_log: Option<std::path::PathBuf>, cols: Option<u32>) -> ProofInputs<'a> {
+        ProofInputs { kind, host_is_local: local, hooks: true, session_id: session, transcript_path: path, codex_log, pane_cols: cols }
+    }
+
+    /// 證據矩陣（SPEC §4.4a）：provider × 本機／遠端 × 單行／多行 → 用哪種證據，或 unverified。
     #[test]
-    fn the_transcript_is_preferred_and_refusals_say_whether_to_retry() {
+    fn the_evidence_matrix() {
         let dir = std::env::temp_dir().join(format!("am-proof-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("t.jsonl");
         std::fs::write(&t, "").unwrap();
         let tp = t.to_str().unwrap();
+        let clog = dir.join("rollout-x-sess.jsonl");
+        std::fs::write(&clog, "").unwrap();
+        let claude_t = Proof::Transcript { format: LogFormat::Claude, path: t.clone(), session_id: "s1".into() };
+        let codex_t = Proof::Transcript { format: LogFormat::Codex, path: clog.clone(), session_id: "s1".into() };
         let long_line = "x".repeat(5000);
-        let transcript = Proof::Transcript { path: t.clone(), session_id: "s1".into() };
-        assert_eq!(choose_proof("claude", true, Some("s1"), Some(tp), Some(20), &long_line), Ok(transcript.clone()), "極窄 pane＋長單行");
-        assert_eq!(choose_proof("claude", true, Some("s1"), Some(tp), Some(80), "go"), Ok(transcript));
-        assert_eq!(choose_proof("claude", true, None, Some(tp), Some(80), "go"), Ok(Proof::EchoRow), "沒有 session id 就不用 transcript");
-        assert_eq!(
-            choose_proof("claude", true, None, Some(tp), Some(80), "a\nb"),
-            Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true }),
-            "等 SessionStart 回報",
-        );
-        assert_eq!(
-            choose_proof("grok", true, None, None, Some(80), "a\nb"),
-            Err(Delivered::NotAttempted { reason: "no_lossless_proof", retry: false }),
-        );
-        assert_eq!(
-            choose_proof("grok", true, None, None, None, "go"),
-            Err(Delivered::NotAttempted { reason: "pane_width_unknown", retry: true }),
-        );
+        let multi = "a\nb";
+        let w = Some(80);
+        let table: Vec<(&str, ProofInputs, &str, Result<Proof, Delivered>)> = vec![
+            ("claude 本機 單行", inputs("claude", true, Some("s1"), Some(tp), None, w), "go", Ok(claude_t.clone())),
+            ("claude 本機 多行", inputs("claude", true, Some("s1"), Some(tp), None, w), multi, Ok(claude_t.clone())),
+            ("claude 本機 極窄＋長單行", inputs("claude", true, Some("s1"), Some(tp), None, Some(20)), &long_line, Ok(claude_t.clone())),
+            ("claude 本機 還沒回報 session", inputs("claude", true, None, None, None, w), multi,
+                Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true })),
+            ("claude 遠端 單行放得下", inputs("claude", false, Some("s1"), Some(tp), None, w), "go", Ok(Proof::EchoRow)),
+            ("claude 遠端 多行", inputs("claude", false, Some("s1"), Some(tp), None, w), multi, Ok(Proof::Unverified)),
+            ("codex 本機 有 rollout 單行", inputs("codex", true, Some("s1"), None, Some(clog.clone()), w), "go", Ok(codex_t.clone())),
+            ("codex 本機 有 rollout 多行", inputs("codex", true, Some("s1"), None, Some(clog.clone()), w), multi, Ok(codex_t)),
+            ("codex 本機 還不知道 session 多行", inputs("codex", true, None, None, None, w), multi, Ok(Proof::Unverified)),
+            ("codex 遠端 單行放得下", inputs("codex", false, Some("s1"), None, None, w), "go", Ok(Proof::EchoRow)),
+            ("codex 遠端 多行", inputs("codex", false, Some("s1"), None, None, w), multi, Ok(Proof::Unverified)),
+            ("grok 本機 單行放得下", inputs("grok", true, None, None, None, w), "go", Ok(Proof::EchoRow)),
+            ("grok 本機 多行", inputs("grok", true, None, None, None, w), multi, Ok(Proof::Unverified)),
+            ("grok 本機 量不到寬度的單行", inputs("grok", true, None, None, None, None), "go", Ok(Proof::Unverified)),
+            ("grok 遠端 多行", inputs("grok", false, None, None, None, w), multi, Ok(Proof::Unverified)),
+        ];
+        for (why, i, text, want) in table {
+            assert_eq!(choose_proof(&i, text), want, "{why}");
+        }
+        // hooks 關掉的 claude 永遠不會回報 transcript：不等，直接打並標 unverified。
+        let no_hooks = ProofInputs { hooks: false, ..inputs("claude", true, None, None, None, w) };
+        assert_eq!(choose_proof(&no_hooks, multi), Ok(Proof::Unverified));
         let huge = "x".repeat(MAX_PROVABLE_CHARS + 1);
         assert_eq!(
-            choose_proof("claude", true, Some("s1"), Some(tp), Some(80), &huge),
+            choose_proof(&inputs("claude", true, Some("s1"), Some(tp), None, w), &huge),
             Err(Delivered::NotAttempted { reason: "prompt_too_long_to_prove", retry: false }),
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// codex rollout：只算頂層 response_item 的 user 訊息；compacted 重播、非 input_text、developer 都不算；逐字比對。
+    #[test]
+    fn codex_rollout_user_entries_are_read_exactly() {
+        let dir = std::env::temp_dir().join(format!("am-codex-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout.jsonl");
+        let text = "第一行：先看報告\n    縮排的第二行  \n";
+        let entry = |role: &str, parts: Value| json!({"type": "response_item", "payload": {"type": "message", "role": role, "content": parts}}).to_string();
+        std::fs::write(&path, format!("{}\n", json!({"type": "session_meta", "payload": {"id": "s1"}}))).unwrap();
+        let offset = transcript_len(&path).unwrap();
+        let lines = [
+            json!({"type": "compacted", "payload": {"replacement_history": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}]}}).to_string(),
+            entry("developer", json!([{"type": "input_text", "text": text}])),
+            entry("user", json!([{"type": "input_text", "text": text}, {"type": "input_image", "image_url": "x"}])),
+            entry("user", json!([{"type": "input_text", "text": text.trim_end()}])),
+            entry("user", json!([{"type": "input_text", "text": text}])),
+        ];
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write as _;
+        writeln!(f, "{}", lines.join("\n")).unwrap();
+        assert_eq!(log_hits_since(LogFormat::Codex, &path, offset, text).unwrap(), 1, "只有最後那筆一字不差");
+        assert_eq!(log_hits_since(LogFormat::Claude, &path, offset, text).unwrap(), 0, "格式不同就不認");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 只認「檔名就是這個 session」的 rollout，最新的日期資料夾先找。
+    #[test]
+    fn the_codex_rollout_is_found_by_its_session_id() {
+        let home = std::env::temp_dir().join(format!("am-codex-home-{}", db::ulid()));
+        let old = home.join("sessions/2026/09/01");
+        let new = home.join("sessions/2026/09/14");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("rollout-2026-09-01T00-00-00-01a0aaaa-0000.jsonl"), "").unwrap();
+        let want = new.join("rollout-2026-09-14T15-49-57-01a09ee4-eabb-7682-b363-941a606ed002.jsonl");
+        std::fs::write(&want, "").unwrap();
+        std::fs::write(new.join("rollout-2026-09-14T16-00-00-01a09ee4-eabb-7682-b363-941a606ed0029.jsonl"), "").unwrap();
+        assert_eq!(codex_session_log(&home, "01a09ee4-eabb-7682-b363-941a606ed002"), Some(want));
+        assert_eq!(codex_session_log(&home, "01a0aaaa-0000"), Some(old.join("rollout-2026-09-01T00-00-00-01a0aaaa-0000.jsonl")));
+        assert_eq!(codex_session_log(&home, "nope"), None);
+        assert_eq!(codex_session_log(&home, "../../etc"), None, "不接受會跑出目錄的 id");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 
@@ -648,19 +849,25 @@ mod api_tests {
         assert_eq!(turns(&app, &conv).await, 1);
     }
 
-    /// 永遠證明不了（grok 多行）：422、沒有 turn、pane 零寫入。
+    /// grok 多行沒有無損證據：照樣打字送出，回 200 `unverified`，turn 留下「要人工核對」的標記（不是 unknown）。
     #[tokio::test]
-    async fn a_prompt_with_no_lossless_proof_is_refused_without_a_turn() {
+    async fn a_grok_multi_line_prompt_is_sent_and_marked_unverified() {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, conv, _run) = idle_bot(&env, "grok").await;
         env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
 
-        match prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await {
-            Err(LcError::BadValue(v)) => assert_eq!(v.get("reason").and_then(Value::as_str), Some("no_lossless_proof")),
-            other => panic!("expected 422, got {:?}", other.map(|o| o.delivery)),
-        }
-        assert_eq!(turns(&app, &conv).await, 0);
-        assert_eq!(env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+        let out = prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await.unwrap();
+        assert_eq!(out.delivery, "unverified");
+        assert_eq!(turns(&app, &conv).await, 1);
+        let (delivery, verified): (String, i64) = sqlx::query_as("SELECT delivery, delivery_verified FROM turns WHERE id = ?")
+            .bind(&out.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((delivery.as_str(), verified), ("ok", 0), "不是 unknown，而是帶標記的已送出");
+        assert_eq!(env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
+        // 同一個 request id 再問一次，答案一樣是 unverified。
+        assert_eq!(prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await.unwrap().delivery, "unverified");
     }
 }

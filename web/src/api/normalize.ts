@@ -354,6 +354,7 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
     // 未知 status 當終態：daemon 新增終態時退回 in_flight 會把輸入框鎖進排隊模式。
     status: oneOf<TurnStatus>(v.status, TURN_STATUSES, 'failed'),
     delivery: oneOf<TurnDelivery>(v.delivery, DELIVERIES, 'pending'),
+    unverified: v.delivery_verified === 0,
     client_request_id: optStr(v.client_request_id),
     created_at: str(v.created_at),
     completed_at: optStr(v.completed_at),
