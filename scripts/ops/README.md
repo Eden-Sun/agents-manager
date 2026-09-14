@@ -11,6 +11,16 @@
 例行更新：正式 daemon 的 release binary 落後 `origin/main` 時，申請核准、取得 rebuild 租約，
 再把重建重啟任務派給建置 child。
 
+**兩個觸發條件**（使用者 2026-09-14）：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪），
+或**重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 5）。兩個都不成立就立刻 `exit 0`，
+連 `git fetch` 之後的判斷都不做。
+
+「申請」的定義：`purpose=rebuild` 的核准申請（`agm approval request`／`POST /api/supervisor/approvals`），
+建立時間晚於上次真的上線（`daemon-update.built` 的 mtime）、狀態是 `pending` 或 `approved`；
+`denied` 不算，同一個 requester 對同一個 commit 重複申請算一筆。bot 在對話裡的口頭申請由 AGM 補一筆
+approval，所以 approval 表就是唯一真相。數不出來（端點壞了、格式不符）就當 0，退回純整點的舊行為。
+網頁左上角 RAM 那一格旁邊的 chip 顯示同一個數字（`web/src/api/rebuildRequests.ts`）。
+
 環境變數：
 
 | 變數 | 預設 | 意義 |
@@ -19,6 +29,8 @@
 | `AGM_REPO` | `~/project/agents-manager` | 要比對的 repo |
 | `AGM_BUILD_BOT` | （無） | 建置 child 的 bot id。**沒設就整支跳過**——寧可不做，也不要改派給使用者的 bot |
 | `AM_AGENT_NAME` | `daemon-update-kick` | 租約 owner |
+| `AGM_REBUILD_THRESHOLD` | `5` | 累積幾個重建申請就不等整點，立刻檢查 |
+| `AGM_TEST_MINUTE` | （無） | 只給隔離測試用：假裝現在是第幾分鐘 |
 
 跟 2026-09-12 之前那份的差別：
 
@@ -50,8 +62,8 @@ cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
-launchd 設定沿用既有的 `com.agm.daemon-update`（`StartCalendarInterval Minute=0`），
-只是把 `AGM_BUILD_BOT` 加進 `EnvironmentVariables`。
+launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 300`），由腳本自己判斷
+「整點或集滿門檻」；`AGM_BUILD_BOT`（必要）與 `AGM_REBUILD_THRESHOLD`（可選）放 `EnvironmentVariables`。
 
 ## 租約管得到什麼、管不到什麼
 
