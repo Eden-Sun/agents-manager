@@ -2071,6 +2071,53 @@ pub async fn decide_approval_from(
     approval(pool, id).await
 }
 
+/// 核准的決定歷程（append-only）。`supervisor_approvals` 那一列只留最後一個決定，而「誰在什麼
+/// 時候用什麼理由核准、後來被誰撤銷」是運維要查得到的事實，不能被下一次寫入蓋掉。
+pub async fn add_approval_decision(
+    pool: &SqlitePool,
+    approval_id: &str,
+    from_status: &str,
+    to_status: &str,
+    actor: &str,
+    reason: Option<&str>,
+) -> Result<String> {
+    let id = crate::db::ulid();
+    let body = json!({
+        "approval_id": approval_id,
+        "from": from_status,
+        "to": to_status,
+        "actor": actor,
+        "reason": reason,
+    });
+    sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+        .bind(&id)
+        .bind(SUPERVISOR_ID)
+        .bind("approval_decision")
+        .bind(body.to_string())
+        .bind(crate::db::now())
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+/// 每筆核准的決定歷程，最舊在前。一次查完再分組：核准筆數不多，但一筆一次查詢會變 N+1。
+pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Vec<Value>>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT body, created_at FROM supervisor_notes WHERE supervisor_id=? AND kind='approval_decision' ORDER BY created_at ASC, id ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .fetch_all(pool)
+    .await?;
+    let mut out: std::collections::HashMap<String, Vec<Value>> = Default::default();
+    for (body, at) in rows {
+        let Ok(mut v) = serde_json::from_str::<Value>(&body) else { continue };
+        let Some(id) = v.get("approval_id").and_then(Value::as_str).map(str::to_string) else { continue };
+        v["at"] = json!(at);
+        out.entry(id).or_default().push(v);
+    }
+    Ok(out)
+}
+
 pub async fn set_review_role(pool: &SqlitePool, id: &str, role: &str) -> Result<()> {
     sqlx::query("UPDATE supervisor_assignments SET review_role=? WHERE id=?")
         .bind(role)
