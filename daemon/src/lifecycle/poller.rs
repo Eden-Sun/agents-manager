@@ -600,7 +600,7 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
 /// How many times one turn may be re-delivered because the prompt never showed up on screen.
 /// One: a second loss means something is really wrong with the pane, and repeating a prompt the
 /// agent *did* get is worse than failing the turn.
-const MAX_PROMPT_RESENDS: i64 = 1;
+pub(crate) const MAX_PROMPT_RESENDS: i64 = 1;
 
 /// Scrollback searched for our prompt before deciding it never arrived. Generous on purpose: a
 /// resend is only safe when the echo is truly nowhere, not merely scrolled off the visible rows.
@@ -660,7 +660,7 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
         return false;
     }
     // The first delivery just failed silently; re-deliver the way that is verified on screen.
-    let res = deliver_prompt(app, &client, &run, &bot, text, true).await;
+    let res = deliver_prompt(app, &client, &run, &bot, text, true, true).await;
     match res {
         Ok(Delivered::Submitted) => {
             tracing::warn!(run_id, turn = %turn_id, bot = %bot.name,
@@ -1664,7 +1664,7 @@ mod issue_17_tests {
         let client = client_for_run(&app, &run).await.unwrap();
 
         let text = "加一個功能除了按 SKU 之外";
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Submitted);
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert!(pane.composer.is_empty());
         assert_eq!(pane.transcript.iter().filter(|l| l.contains("SKU")).count(), 1, "只送一次");
@@ -1682,7 +1682,7 @@ mod issue_17_tests {
         let client = client_for_run(&app, &run).await.unwrap();
 
         let text = "please rewrite the offline quote importer so that it is at least three times faster";
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Submitted);
         assert_eq!(count(&f, "pane.send_text"), 1);
     }
 
@@ -1696,7 +1696,7 @@ mod issue_17_tests {
         let client = client_for_run(&app, &run).await.unwrap();
 
         let text = "第一行：先看報告\n第二行：再改程式\n第三行：最後回報";
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Submitted);
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
         assert_eq!(count(&f, "pane.send_text"), 1);
@@ -1712,7 +1712,7 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
         let text = "第一行\n第二行";
-        let plan = plan_delivery(&app, &client, &run, &bot, text, false).await.unwrap().unwrap();
+        let plan = plan_delivery(&app, &client, &run, &bot, text, false, false).await.unwrap().unwrap();
         sqlx::query("UPDATE runs SET native_session_id = 'sess-2' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
         assert_eq!(execute_delivery(&app, &client, &run, &bot, text, plan).await.unwrap(), Delivered::Unproven("session_changed"));
     }
@@ -1727,7 +1727,7 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
 
-        let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap();
         assert_eq!(out, Delivered::Unverified);
         assert_eq!(count(&f, "pane.send_text"), 1);
         let pane = f.env.herdr.pane("pane-17").unwrap();
@@ -1774,11 +1774,12 @@ mod issue_17_tests {
             session_id: run.native_session_id.as_deref(),
             transcript_path: None,
             codex_log: codex_home(&app, &bot).await.and_then(|h| codex_session_log(&h, "sess-codex")),
+            waited_for_log: false,
             pane_cols,
         };
         assert_eq!(
             choose_proof(&inputs, "第一行\n第二行"),
-            Ok(Proof::Transcript { format: LogFormat::Codex, path: log, session_id: "sess-codex".into() }),
+            Ok(Proof::Transcript { format: LogFormat::Codex, path: std::fs::canonicalize(&log).unwrap(), session_id: "sess-codex".into() }),
         );
     }
 
@@ -1792,7 +1793,7 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
 
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "go", false).await.unwrap(), Delivered::Unproven("still_in_box"));
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "go", false, false).await.unwrap(), Delivered::Unproven("still_in_box"));
         assert!(f.env.herdr.pane("pane-17").unwrap().transcript.is_empty());
     }
 
@@ -1805,7 +1806,7 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
 
-        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
         assert_eq!(out, Delivered::Unproven("nothing_typed"));
         assert_eq!(count(&f, "pane.send_text"), 2);
         assert_eq!(count(&f, "pane.send_keys"), 0);
@@ -1829,11 +1830,27 @@ mod issue_17_tests {
             let (run, bot) = run_and_bot(&f).await;
             let client = client_for_run(&app, &run).await.unwrap();
 
-            let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap();
+            let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
             assert_eq!(out, not("composer_busy", true), "{why}");
             assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0, "{why}: 零寫入");
             assert_eq!(f.env.herdr.pane("pane-17").unwrap().composer, composer, "{why}: 框原封不動");
         }
+    }
+
+    /// 使用者真的打了跟佔位字一字不差的草稿（mock 讀不到 dim）：不能當空框，零寫入（sol 第九輪 #2）。
+    #[tokio::test]
+    async fn a_draft_identical_to_the_placeholder_is_left_alone() {
+        let f = fixture("claude", "").await;
+        let draft = vec!["Try \"fix lint errors\"".to_string()];
+        live(&f, crate::testing::LivePane { composer: draft.clone(), ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
+        assert_eq!(out, not("composer_busy", true));
+        assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0);
+        assert_eq!(f.env.herdr.pane("pane-17").unwrap().composer, draft);
     }
 
     #[tokio::test]
@@ -1846,7 +1863,7 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
 
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(), Delivered::Submitted);
         assert_eq!(count(&f, "agent.prompt"), 0);
         assert!(db::pane_typed(&app.db, &f.run_id).await.unwrap());
     }
@@ -1859,7 +1876,7 @@ mod issue_17_tests {
         let app = f.env.app.clone();
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        let _ = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await;
+        let _ = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await;
         assert_eq!(count(&f, "agent.prompt"), 1);
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
@@ -1875,7 +1892,7 @@ mod issue_17_tests {
         let t = f.env.dir.join("t.jsonl");
         std::fs::write(&t, "").unwrap();
         let run = db::Run { native_session_id: Some("s".into()), transcript_path: Some(t.to_str().unwrap().into()), ..run };
-        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.is_err());
+        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.is_err());
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 
@@ -1890,7 +1907,7 @@ mod issue_17_tests {
         sqlx::query("ALTER TABLE runs RENAME TO runs_real").execute(&app.db).await.unwrap();
         sqlx::query("CREATE VIEW runs AS SELECT * FROM runs_real").execute(&app.db).await.unwrap();
 
-        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.is_err());
+        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.is_err());
         assert_eq!(count(&f, "pane.send_text"), 0);
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
@@ -1904,7 +1921,7 @@ mod issue_17_tests {
         crate::lifecycle::remember_pane_typed(&f.run_id);
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(), Delivered::Submitted);
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
 
@@ -1917,7 +1934,7 @@ mod issue_17_tests {
         sqlx::query("UPDATE runs SET pane_typed = 'broken' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap(), Delivered::Submitted);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(), Delivered::Submitted);
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
 
@@ -1928,7 +1945,7 @@ mod issue_17_tests {
         sqlx::query("UPDATE runs SET pane_id = NULL WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
         assert_eq!(out, not("no_pane_to_type_into", true));
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
@@ -2041,8 +2058,14 @@ mod lost_prompt_tests {
     fn the_current_claude_frame_and_its_placeholder_are_empty() {
         use crate::lifecycle::{box_state, BoxState};
         assert_eq!(box_state("claude", EFFORT_MAX_LOST), BoxState::Empty, "w1HJ:pH 的真實空框");
-        let placeholder = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ Try \"refactor <filepath>\"\n", 1);
-        assert_eq!(box_state("claude", &placeholder), BoxState::Empty);
+        // 實機 idle claude 的輸入列是 `❯` 加一個不斷行空白（ANSI 讀法還帶 `\r`）。
+        let nbsp = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯\u{a0}\r\n", 1);
+        assert_eq!(box_state("claude", &nbsp), BoxState::Empty);
+        // 佔位字只有畫成 dim 才算；純文字的 `Try "…"` 可能是有人打的。
+        let plain = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ Try \"refactor <filepath>\"\n", 1);
+        assert_eq!(box_state("claude", &plain), BoxState::NonEmpty);
+        let dim = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯\u{a0}\u{1b}[2mTry \"refactor <filepath>\"\u{1b}[22m\n", 1);
+        assert_eq!(box_state("claude", &dim), BoxState::Empty);
         let typed = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ Try \"refactor\" please\n", 1);
         assert_eq!(box_state("claude", &typed), BoxState::NonEmpty);
         let one_space = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯  \n", 1);

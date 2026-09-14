@@ -54,12 +54,20 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, delivery: &str)
         "unverified" => ("ok", 0),
         other => (other, 1),
     };
-    let _ = sqlx::query("UPDATE turns SET delivery=?, delivery_verified=? WHERE id=?")
-        .bind(stored)
-        .bind(verified)
-        .bind(turn_id)
-        .execute(&app.db)
-        .await;
+    // An unverified prompt also has its resend budget used up: a binary rolled back to one that
+    // does not know `delivery_verified` still will not type it a second time.
+    let _ = sqlx::query(
+        "UPDATE turns SET delivery=?, delivery_verified=?,
+                resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END
+          WHERE id=?",
+    )
+    .bind(stored)
+    .bind(verified)
+    .bind(verified)
+    .bind(crate::lifecycle::MAX_PROMPT_RESENDS)
+    .bind(turn_id)
+    .execute(&app.db)
+    .await;
 }
 
 /// The API answer for a prompt that was not sent. `retry` → 409 (temporary: a busy box, a
@@ -268,7 +276,9 @@ pub async fn prompt_grouped(
     // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
     // (box busy, no way to prove it) must never become an in-flight turn nobody can release
     // (sol review round seven #2). A 409 keeps a supervisor assignment queued with backoff.
-    let plan = match plan_delivery(app, &client, &run, &bot, &deliver, false).await.map_err(up)? {
+    // A direct prompt never waits inside the request: a missing codex rollout answers 409 and the
+    // caller (or AGM's backoff) asks again.
+    let plan = match plan_delivery(app, &client, &run, &bot, &deliver, false, false).await.map_err(up)? {
         Ok(plan) => plan,
         Err(not) => return Err(not_attempted_error(&run.id, not)),
     };

@@ -255,8 +255,10 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 - **claude transcript**：本機、run 有 `native_session_id` 且 `transcript_path` 檔案存在。
 - **codex rollout**：本機、run 有 `native_session_id`（codex 第一次回合結束時回報），且在該 bot 的
-  `CODEX_HOME`（identity env → bot env → `~/.codex`）底下 `sessions/YYYY/MM/DD/` 最近 14 個日期資料夾裡找到
-  檔名恰為 `rollout-…-<session id>.jsonl` 的檔案。只算頂層 `response_item`／`message`／`role=user` 且全部是
+  `CODEX_HOME`（identity env → bot env → `~/.codex`）底下 `sessions/` 日期樹（由新到舊整棵走）找到檔名恰為
+  `rollout-…-<session id>.jsonl` 的檔案；同一天有多個取修改時間最新的，canonicalize 後必須仍在 `sessions/` 底下。
+  session 已知但 rollout 還沒寫出來時先不打（`NotAttempted(codex_log_not_ready, retry)`）：直接送的回 409，排隊中的
+  放回等 3 次（15＋30＋60 秒）後才退回一列回音或 unverified。只算頂層 `response_item`／`message`／`role=user` 且全部是
   `input_text` 的項目；`compacted` 重播的歷史、developer 訊息、帶圖片的訊息都不算。
 - **一列回音**：單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元，且在 herdr `pane.layout`
   回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
@@ -275,7 +277,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 | claude | 本機，hooks 關閉 | 一列回音 | **unverified** |
 | claude | 遠端 | 一列回音 | **unverified** |
 | codex | 本機，找到 rollout | rollout | rollout |
-| codex | 本機，session 還不知道／找不到 rollout | 一列回音 | **unverified** |
+| codex | 本機，session 已知但 rollout 還沒寫 | 先等（409／排隊放回 3 次）→ 一列回音 | 先等 → **unverified** |
+| codex | 本機，session 還不知道 | 一列回音 | **unverified** |
 | codex | 遠端 | 一列回音 | **unverified** |
 | grok | 任何 | 一列回音 | **unverified** |
 
@@ -298,16 +301,23 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 | provider | 輸入框長相 | 算空框 |
 |---|---|---|
-| claude（現行） | 兩條全寬 `───` 夾著 `❯` 那一列 | `❯` 後什麼都沒有，或恰為佔位字 `Try "…"`；下一列就是框線 |
+| claude（現行） | 兩條全寬 `───` 夾著 `❯` 那一列（實機是 `❯` 加一個不斷行空白） | `❯` 後什麼都沒有，或佔位字 `Try "…"` **整段畫成 dim**；下一列就是框線 |
 | claude（舊版）、grok | `│ ❯ … │`，框底 `╰…╯`（grok 在框底寫模型：`╰── Grok 4.6 (low) · always-approve ─╯`） | `❯` 後只有框內的補齊空白；下一列就是框底 |
-| codex | 沒有框的 `› …` 那一列 | `›` 後什麼都沒有，或恰為它輪播的範例句之一（`Ask Codex to do anything`、`Write tests for @filename` 等）；下一列不是縮排續行 |
+| codex | 沒有框的 `› …` 那一列 | `›` 後什麼都沒有，或它輪播的範例句（`Ask Codex to do anything`、`Write tests for @filename` 等）**整段畫成 dim**；下一列不是縮排續行 |
+
+佔位字與「有人打了同樣的字」在純文字快照裡一模一樣，所以判斷空框時一律用 `pane.read format=ansi` 讀：只有每個可見字元都
+在 SGR `2`（dim）底下才算佔位字（`38`/`48` 顏色參數裡的 `2` 不算）；讀不到樣式、或只有部分 dim，一律當成非空。
 
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、佔位字後面多了字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。
 
 **排隊中的 prompt 重試**：可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
-12 次仍送不出就標 failed 並插說明（同一個 transaction）。直接送出的 409 回應則由呼叫端（或 AGM 交辦的既有退避）重試。
+12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描所有帶
+`next_flush_at` 的 queued turn，以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
+交辦的既有退避）重試。
+
+unverified 的 turn 同時把 `turns.resend_count` 設到上限：就算退回不認得 `delivery_verified` 的舊 binary，也不會被自動重打一次。
 
 打字流程：空框 → 一次貼上 → 框變成非空（仍是空的且證據沒變才再貼一次）→ Enter → 框回到空的**且**證據比基準多一。
 框在 Enter 後仍有字就再按一次並繼續驗。任何讀取失敗都是錯誤，不是空畫面。`runs.pane_typed` 要先寫成功才碰 pane

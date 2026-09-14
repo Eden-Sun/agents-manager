@@ -63,11 +63,31 @@ pub struct LivePane {
     pub width: Option<u32>,
     /// Draw grok's boxed composer (`│ ❯ … │` over `╰── Grok 4.6 (low) ─╯`) instead of claude's.
     pub boxed: bool,
+    /// Draw codex's unboxed `› …` composer and echo rows instead of claude's.
+    pub codex: bool,
 }
 
 impl LivePane {
     pub fn render(&self) -> String {
         let mut out = String::new();
+        if self.codex {
+            for line in &self.transcript {
+                out.push_str(&line.replacen("❯ ", "› ", 1));
+                out.push('\n');
+            }
+            out.push('\n');
+            match self.composer.split_first() {
+                None => out.push_str("›\n"),
+                Some((first, rest)) => {
+                    out.push_str(&format!("› {first}\n"));
+                    for r in rest {
+                        out.push_str(&format!("  {r}\n"));
+                    }
+                }
+            }
+            out.push_str("\ngpt-6-astra low · ~/proj · Context 3% used\n");
+            return out;
+        }
         for line in &self.transcript {
             out.push_str(line);
             out.push('\n');
