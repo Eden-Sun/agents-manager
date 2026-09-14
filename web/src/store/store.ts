@@ -592,6 +592,9 @@ export const useStore = create<StoreState>((set, get) => ({
     connectSocket(set, get)
     void get().loadQuota()
     void get().loadMem()
+    // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身分），WS 不會說。
+    // 每 5 分鐘整份換一次，最慢 5 分鐘內消失；GET /api/quota 很便宜。
+    if (!quotaSweep) quotaSweep = setInterval(() => void get().loadQuota(), QUOTA_SWEEP_MS)
   },
 
   // issue #23：single-flight + trailing，N 個 frame 只換一、兩次請求；`acceptStateSeq` 丟掉較舊快照。
@@ -1743,6 +1746,8 @@ async function guarded(set: SetFn, get: GetFn, key: string, fn: () => Promise<vo
 }
 
 let disconnect: (() => void) | null = null
+let quotaSweep: ReturnType<typeof setInterval> | null = null
+const QUOTA_SWEEP_MS = 5 * 60_000
 
 function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
@@ -1754,6 +1759,9 @@ function connectSocket(set: SetFn, get: GetFn) {
         // Re-fetch on every open: a failed frame already advanced lastSeq; the snapshot repairs the gap.
         set({ socket, stateStale: false })
         void get().refreshState()
+        // 額度也整份重抓（取代，不合併）：WS 只會推「某個 key 更新了」，daemon 刪掉的 key 永遠不會
+        // 通知。2026-09-14 daemon 重啟清掉 `codex:cc1` 之後，開著的分頁標題列仍一直顯示它。
+        void get().loadQuota()
         return
       }
       set({ socket })
@@ -1804,6 +1812,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         try {
           const loadedBotIds = Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
           await get().refreshState()
+          await get().loadQuota()
           for (const botId of loadedBotIds) await get().loadMessages(botId)
           const proj = get().selectedProjectId
           if (proj) await get().loadGroupMessages(proj)
