@@ -1024,6 +1024,8 @@ export function Sidebar() {
           <div className="head-brand-title">
             <h1 title="Agents Manager">AG Man</h1>
             {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
+            {/* 重建申請數放在「AG Man」右上、連線燈號正上方（2026-09-14 使用者）。 */}
+            <RebuildBadge />
           </div>
           <div className="head-brand-meta">
             <PaneBadge />
@@ -1035,7 +1037,6 @@ export function Sidebar() {
         </div>
         <div className="head-right">
           <TabsBadge />
-          <RebuildBadge />
         </div>
       </div>
 
