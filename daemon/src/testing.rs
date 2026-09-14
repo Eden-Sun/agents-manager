@@ -57,6 +57,8 @@ pub struct LivePane {
     pub swallow_enter: bool,
     /// A TUI that throws the typed text away without submitting it (the 2026-09-14 incident).
     pub swallow_text: bool,
+    /// Like claude's session transcript: every submitted message is appended as a user entry.
+    pub transcript_file: Option<std::path::PathBuf>,
 }
 
 impl LivePane {
@@ -378,6 +380,13 @@ impl MockHerdr {
                                     match k.as_str() {
                                         "enter" if !p.swallow_enter => {
                                             let rows: Vec<String> = p.composer.drain(..).collect();
+                                            if let (Some(path), false) = (&p.transcript_file, rows.is_empty()) {
+                                                use std::io::Write as _;
+                                                let entry = json!({"type": "user", "message": {"role": "user", "content": rows.join("\n")}});
+                                                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                                                    let _ = writeln!(f, "{entry}");
+                                                }
+                                            }
                                             if let Some((first, rest)) = rows.split_first() {
                                                 p.transcript.push(format!("❯ {first}"));
                                                 for r in rest {

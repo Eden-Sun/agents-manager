@@ -1641,12 +1641,15 @@ mod issue_17_tests {
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
 
-    /// 多行中文一次貼進去，是一則、不是三則。
+    /// 多行中文：有 transcript 時逐字比對證明送出，一則、不是三則。
     #[tokio::test]
-    async fn a_multi_line_prompt_is_submitted_once_not_split_per_line() {
+    async fn a_multi_line_prompt_is_proven_by_the_transcript_and_sent_once() {
         let f = fixture("claude", "").await;
-        live(&f, crate::testing::LivePane::default());
         let app = f.env.app.clone();
+        let t = f.env.dir.join("session.jsonl");
+        std::fs::write(&t, "").unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(t.to_str().unwrap()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        live(&f, crate::testing::LivePane { transcript_file: Some(t.clone()), ..Default::default() });
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
@@ -1655,11 +1658,26 @@ mod issue_17_tests {
         assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1, "一個 ❯ 開頭＝一則");
-        assert!(pane.transcript.iter().any(|l| l.contains("第三行")), "整段都進去了");
         assert!(pane.composer.is_empty());
+        assert_eq!(count(&f, "pane.send_text"), 1);
     }
 
-    /// 短 prompt＋只有 spinner 在刷新：Enter 被吃掉時絕不能判成功（sol review 二輪 #1）。
+    /// 多行又沒有 transcript 可比：證明不了就一個字都不打（第五輪：不猜）。
+    #[tokio::test]
+    async fn a_multi_line_prompt_without_a_transcript_is_not_typed_at_all() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane::default());
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false).await.unwrap();
+        assert_eq!(out, Delivered::Unknown("no_lossless_proof"));
+        assert_eq!(count(&f, "pane.send_text"), 0);
+        assert_eq!(count(&f, "pane.send_keys"), 0);
+    }
+
     #[tokio::test]
     async fn a_short_prompt_is_not_called_delivered_just_because_the_spinner_redrew() {
         let f = fixture("claude", "").await;
@@ -1708,9 +1726,9 @@ mod issue_17_tests {
         assert_eq!(f.env.herdr.pane("pane-17").unwrap().composer, vec!["我自己在打的草稿".to_string()]);
     }
 
-    /// 上一次留在框裡的是我們自己的字：直接送出，不重打。
+    /// 框裡已經有字，就算看起來跟要送的一樣也不動它：畫面上的文字證明不了是誰打的、是不是完整的。
     #[tokio::test]
-    async fn our_own_leftover_text_is_submitted_instead_of_typed_again() {
+    async fn text_already_in_the_box_is_never_submitted_on_our_behalf() {
         let f = fixture("claude", "").await;
         let text = "Reply with PONG please";
         live(&f, crate::testing::LivePane { composer: vec![text.into()], ..Default::default() });
@@ -1719,13 +1737,12 @@ mod issue_17_tests {
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
 
-        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Submitted);
-        assert_eq!(count(&f, "pane.send_text"), 0, "已經在框裡了，不再打一次");
-        let pane = f.env.herdr.pane("pane-17").unwrap();
-        assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
+        assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false).await.unwrap(), Delivered::Unknown("composer_busy"));
+        assert_eq!(count(&f, "pane.send_text"), 0);
+        assert_eq!(count(&f, "pane.send_keys"), 0);
+        assert_eq!(f.env.herdr.pane("pane-17").unwrap().composer, vec![text.to_string()]);
     }
 
-    /// herdr 對這個 agent 沒有 session 綁定 → 不走 agent.prompt，改打字（即使 pane_typed 還沒設）。
     #[tokio::test]
     async fn an_agent_without_a_session_binding_is_typed_into_not_prompted() {
         let f = fixture("claude", "").await;

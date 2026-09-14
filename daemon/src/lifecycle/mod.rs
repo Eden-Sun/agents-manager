@@ -17,6 +17,7 @@ mod setup;
 mod start;
 mod stop;
 mod slash;
+mod delivery;
 mod prompt;
 mod poller;
 mod screen;
@@ -44,6 +45,7 @@ pub(crate) use queue::*;
 pub(crate) use screen::*;
 pub(crate) use setup::*;
 pub(crate) use slash::*;
+pub(crate) use delivery::*;
 pub(crate) use start::*;
 pub(crate) use stop::*;
 
