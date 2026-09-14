@@ -808,6 +808,21 @@ class DualRoleTest(CliCase):
         self.ok("assign", "--bot", "b1", "--text", "x", "--request-id", "r-2")
         self.assertNotIn("review_role", self.last("POST", "/api/supervisor/assignments")["body"])
 
+    def test_a_handover_receipt_is_not_reported_as_a_failed_assignment(self):
+        """交辦給另一個角色時 daemon 回的是佇列收據（沒有 assignment id）。CLI 不能因為少了 id
+        就當成派工失敗——那會讓 AGM 以為交接沒送到而一直重送。"""
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (
+            200,
+            {"kind": "handover", "routed": "patrol", "queued": True, "duplicate": False, "wake": True,
+             "inbox_event_id": "e1", "delivery": "queued", "turn_id": None, "message_id": None},
+        )
+        code, out, err = self.run_cli("assign", "--bot", "bot-agm", "--text", "交接：builder 卡住", "--request-id", "h-1")
+        self.assertEqual(code, 0, f"stderr={err}")
+        body = json.loads(out)
+        self.assertEqual(body["kind"], "handover")
+        self.assertEqual(body["inbox_event_id"], "e1")
+        self.assertNotIn("error", body)
+
     def test_reports_are_attributed_to_this_role_not_the_patrol(self):
         FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
         self.ok("mission", "event", "m1", "--kind", "note", "--text", "已核准")

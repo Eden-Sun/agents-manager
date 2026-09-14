@@ -253,18 +253,9 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot) -> anyhow::Result<R
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     // `hook.sh statusline` writes `hook-status.json` (§11.4.5), then execs the user's own statusLine.
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
-    let settings = json!({
-        "hooks": {
-            "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
-        },
-        "statusLine": {"type": "command", "command": statusline},
-            // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
-            "outputStyle": "Concise",
-            // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
-            // once per config dir; this is the record accepting it writes (2026-09-08).
-            "skipDangerousModePermissionPrompt": true
-    });
+    // 遠端也用同一支：`remoteControlAtStartup` 要明講，否則那台機器帳號的全域設定會替每顆 bot
+    // 決定要不要開手機入口（見 `claude_settings`）。
+    let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"));
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
         "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod +x \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nprintf 'AM_INSTALLED\\n'\n",
@@ -360,18 +351,9 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             sl[1] = "statusline".into();
             sl.remove(2);
             let statusline = shell_join(&sl);
-            let settings = json!({
-                "hooks": {
-                    "SessionStart": [{"hooks": [{"type": "command", "command": cmd}]}],
-                    "Stop": [{"hooks": [{"type": "command", "command": cmd}]}]
-                },
-                "statusLine": {"type": "command", "command": statusline},
-            // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
-            "outputStyle": "Concise",
-            // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
-            // once per config dir; this is the record accepting it writes (2026-09-08).
-            "skipDangerousModePermissionPrompt": true
-            });
+            // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
+            let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
+            let settings = claude_settings(&cmd, &statusline, wants_remote);
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
             vec!["--settings".into(), path.to_string_lossy().to_string(), "--verbose".into()]
@@ -391,6 +373,27 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
     out.extend(hook_args);
     Ok(out)
 }
+/// 每顆 claude bot 自己的 `claude-settings.json`。
+///
+/// `remoteControlAtStartup` 明講而不是省略：使用者帳號的全域 `settings.json` 只要開了它，
+/// **每一顆** bot 起來都會多開一個手機入口（SPEC §18.15 說入口只有巡檢一個，背景 worker 一律
+/// rc off）。判準是這顆 bot 自己有沒有要求——argv 帶了 `--remote-control` 才是 true。
+fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Value {
+    json!({
+        "remoteControlAtStartup": wants_remote,
+        "hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
+        },
+        "statusLine": {"type": "command", "command": statusline},
+        // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
+        "outputStyle": "Concise",
+        // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
+        // once per config dir; this is the record accepting it writes (2026-09-08).
+        "skipDangerousModePermissionPrompt": true
+    })
+}
+
 
 /// Write a file only its owner can read (0600): bot settings may carry secrets.
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1122,5 +1125,26 @@ mod remote_hook_tests {
         assert!(ch.wait().unwrap().success());
         assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
         assert!(sb.calls().is_empty(), "no pane to report against");
+    }
+}
+
+#[cfg(test)]
+mod claude_settings_tests {
+    use super::*;
+
+    /// 2026-09-14 review：協調者的 rc off 只靠 `args=[]`，但帳號的全域設定可以把它打開。
+    /// 現在每顆 bot 的設定檔都明講，且只有自己 argv 要求過才是 true。
+    #[test]
+    fn remote_control_is_stated_per_bot_not_inherited_from_the_account() {
+        let off = claude_settings("hook", "sl", false);
+        assert_eq!(off["remoteControlAtStartup"], json!(false));
+        let on = claude_settings("hook", "sl", true);
+        assert_eq!(on["remoteControlAtStartup"], json!(true));
+        for v in [&off, &on] {
+            assert_eq!(v["statusLine"]["command"], "sl");
+            assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "hook");
+            assert_eq!(v["outputStyle"], "Concise");
+            assert_eq!(v["skipDangerousModePermissionPrompt"], json!(true));
+        }
     }
 }

@@ -354,7 +354,7 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
 }
 
 /// 沒寫時間的一律**不**過期，只能靠 [`clear_limit_hit`]。
-fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
+pub fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
     let Some(until) = hit.and_then(|h| h.until.as_deref()) else { return false };
     match chrono::DateTime::parse_from_rfc3339(until) {
         Ok(t) => chrono::Utc::now() >= t.with_timezone(&chrono::Utc),
