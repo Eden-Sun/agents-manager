@@ -107,8 +107,8 @@ def main(argv=None):
                 raise OBError("claude／ego-browser 必須是存在且可執行的絕對路徑")
         with exclusive(store.root / "worker.lock"):
             store.set_setting("operator", dict(model="sonnet", effort="low", claude_config_dir=str(config_dir),
-                                              claude_binary=str(Path(args.claude_binary).resolve()),
-                                              ego_binary=str(Path(args.ego_binary).resolve())))
+                                              claude_binary=str(Path(args.claude_binary).absolute()),
+                                              ego_binary=str(Path(args.ego_binary).absolute())))
         result = {"configured": True, "model": "sonnet", "effort": "low", "fallback": None}
     elif args.command == "ask":
         if bool(args.file) == bool(args.text):
