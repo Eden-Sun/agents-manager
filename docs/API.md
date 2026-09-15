@@ -1162,3 +1162,7 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 **Fable 週桶**用盡 → 執行者／reviewer 同一身分改用 opus，驗證者不能用這個身分。`limit_hit` 本身不帶桶別，
 從當下的桶子讀數推（claude 撞限時 `turn_error.rs` 會把撞到的那個桶標成 100%）；過了 `until` 就不算。
 讀不到額度視為可以用（未知不等於用盡），但驗證者例外：必須讀得到 Fable 桶且未見底。停用的身分一律跳過。
+
+### OB 本機 CLI（網頁 GPT）
+
+OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id> --request-id <stable-id> "問題"` 透過既有 `GET /api/supervisor/state` 核對 project ID，排入本機 SQLite 佇列，由單一 Sonnet-low worker 操作專案固定 ChatGPT 對話。`status <id>` 回 `{id,project_id,request_id,status,answer,url,error,...}`；只有 `done` 表示網頁原文已保存。`waiting_quota` 留待恢復、不切回 Fable；`unknown` 用 `collect` 對帳，不盲目重送。完整狀態、安裝與舊 label 登錄轉 ID 的明確綁定方式見 [OB 操作文件](CHATGPT-CONSULT.md)。
