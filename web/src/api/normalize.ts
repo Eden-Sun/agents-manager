@@ -237,6 +237,14 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     cwd: optStr(pick(v, 'cwd')),
     herdr_session: optStr(pick(v, 'herdr_session')),
     agent_name: optStr(pick(v, 'agent_name')),
+    ...(() => {
+      const n = pick(v, 'unread')
+      const m = pick(v, 'read_mark')
+      return {
+        unread: typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined,
+        read_mark: isRec(m) && typeof m.at === 'string' && m.at ? { at: m.at, id: typeof m.id === 'string' ? m.id : '' } : null,
+      }
+    })(),
     created_at: str(v.created_at),
   }
 }

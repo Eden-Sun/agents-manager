@@ -180,6 +180,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
     }
     crate::supervisor::store::migrate(pool).await?;
+    crate::read_marks::migrate(pool).await?;
     crate::mission::store::migrate(pool).await?;
     Ok(())
 }
