@@ -34,7 +34,7 @@ import { missionRequests } from './missionRequests'
 
 import type { QueuedSend } from './queuedSend'
 import { laterMark, serverUnread } from './sharedUnread'
-import { dropLegacyGroupCounts, isGroupTurn, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
+import { confirmGroupTurn, dropLegacyGroupCounts, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
   botKey,
   clearHookCompletion,
@@ -207,7 +207,7 @@ function readKindDisplay(): KindDisplay {
 }
 
 /** 未讀見 `store/unread.ts`。已讀標記留模組層不進 state：沒畫面讀它，進 state 只多一次 render。 */
-const initialUnread = loadCounts()
+const initialUnread = dropLegacyGroupCounts(loadCounts())
 let readMarks = loadMarks()
 
 function setReadMark(key: string, mark: ReadMark) {
@@ -564,7 +564,7 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
   loadedProjects: {},
-  groupUnread: dropLegacyGroupCounts(initialUnread.groups),
+  groupUnread: initialUnread.groups,
 
   missions: {},
   missionDetail: {},
@@ -890,6 +890,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       const startedAt = new Date().toISOString()
       const page = await api.fetchMessages(botId)
+      noteGroupPrompts(page.messages)
       set((s) => {
         const kept = keptAfterPage(s.messages[botId] ?? [], page.messages, startedAt)
         const turns: Record<string, Turn> = {}
@@ -1853,6 +1854,15 @@ function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: st
   persistUnread(get())
 }
 
+/** 只有群組回合才記到專案（`store/groupUnread.ts`）；要抓訊息確認時非同步記。 */
+function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: string | null, key: string, turn: Turn | null | undefined) {
+  const pid = get().bots.find((b) => b.id === botId)?.project_id
+  if (!pid) return
+  void confirmGroupTurn(botId, turnId, turn, api.fetchMessages).then((yes) => {
+    if (yes) noteGroupTurnDone(set, get, pid, key)
+  })
+}
+
 function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string; data?: unknown }) {
   if (typeof frame.seq === 'number') {
     set((s) => ({ lastSeq: Math.max(s.lastSeq, frame.seq as number) }))
@@ -1961,8 +1971,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         const key = idleEdgeCompletionKey(botId, run.id, latest ? map[latest] : null)
         if (key) {
           noteTurnDone(set, get, botId, key)
-          const pid = get().bots.find((b) => b.id === botId)?.project_id
-          if (pid && isGroupTurn(latest)) noteGroupTurnDone(set, get, pid, key)
+          noteGroupCompletion(set, get, botId, latest, key, latest ? map[latest] : null)
         }
       }
       return
@@ -2012,8 +2021,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         const turnId = completionKey(msg, Object.keys(get().turns[botId] ?? {}))
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turnId)
-        const pid = get().bots.find((b) => b.id === botId)?.project_id
-        if (pid && isGroupTurn(turnId)) noteGroupTurnDone(set, get, pid, turnId)
+        noteGroupCompletion(set, get, botId, msg.turn_id, turnId, get().turns[botId]?.[turnId])
       }
       return
     }
@@ -2033,8 +2041,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         // 沒有 assistant 訊息的回合（中止、只有終端輸出）也要算完成。
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turn.id)
-        const pid = get().bots.find((b) => b.id === botId)?.project_id
-        if (pid && isGroupTurn(turn.id)) noteGroupTurnDone(set, get, pid, turn.id)
+        noteGroupCompletion(set, get, botId, turn.id, turn.id, turn)
       }
       return
     }
