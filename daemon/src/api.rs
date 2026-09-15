@@ -100,6 +100,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
+        .route("/bots/{id}/local-image", get(crate::local_image::get))
         .route("/turns/{id}/abandon", post(abandon_turn))
         .route("/bots/{id}/abort", post(abort_bot))
         .route("/hosts", post(create_host))

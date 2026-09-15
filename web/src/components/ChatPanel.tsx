@@ -45,6 +45,7 @@ import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { markdownComponents } from '../lib/markdownComponents'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
 import './chatPanel.css'
@@ -185,7 +186,7 @@ export const Bubble = memo(function Bubble({
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
-          <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(msg.bot_id)}>{msg.content}</Markdown>
         ) : folded && preview ? (
           preview.text
         ) : (
