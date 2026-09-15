@@ -361,3 +361,16 @@
     line-height: 1;
   }
 }
+
+/* 主力 ★ 一排，其餘（在跑、剛跑完）換到下一排（2026-09-15 使用者）。零高度、撐滿一整行的 flex 子元素
+   就是換行；手機是單行橫捲，不能插滿寬元素，所以在那裡不佔位。 */
+.unread-row-break {
+  flex-basis: 100%;
+  height: 0;
+}
+
+@media (max-width: 720px) {
+  .unread-row-break {
+    display: none;
+  }
+}

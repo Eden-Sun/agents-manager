@@ -5,10 +5,13 @@
  * 同級照 `bots` 順序。不分組標籤：分組會把第 9 顆 needs-reply 擠出視野（使用者 2026-09-12 錯過 blocked bot）。
  * 手機不排序（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：單行橫捲靠位置肌肉記憶。
  * 版面（同日）：桌機換行最多兩行、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
+ * 兩排（2026-09-15 使用者：「非標主力之現執行中與剛完成的 bot 要出現在主力的下一排」）：★ 主力一排，
+ * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。手機單行橫捲放不下兩排，照同樣分組
+ * 接在主力後面。
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { chipTracked } from '../lib/supervisorProject'
@@ -102,9 +105,11 @@ export function UnreadChip() {
         role="status"
         aria-live="polite"
       >
-        {items.map((it) => (
+        {[...items.filter((it) => it.pinned), ...items.filter((it) => !it.pinned)].map((it, i, all) => (
+          <Fragment key={it.id}>
+            {/* 主力與非主力之間強制換排（桌機）；手機這個分隔不佔位。 */}
+            {!it.pinned && i > 0 && all[i - 1].pinned ? <span className="unread-row-break" aria-hidden="true" /> : null}
           <button
-            key={it.id}
             type="button"
             className={chipClass(it)}
             title={it.title}
@@ -120,6 +125,7 @@ export function UnreadChip() {
             {it.unread > 0 ? <span className="unread-chip-n">{it.unread > 99 ? '99+' : it.unread}</span> : null}
             {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
           </button>
+          </Fragment>
         ))}
       </div>
       {scroll.right ? (
