@@ -32,6 +32,7 @@
 - **開同類分身要問接不接續對話**（使用者 2026-09-14）：不另開「Fork」選單項，「開同類分身…」跳一個三鈕框——`取消`／`全新對話`／`接續對話（fork）`。
   兩者都是「照這顆的設定再開一顆」，差別只在帶不帶脈絡，放在同一個問題裡才比得出來。接續是主按鈕（這個入口多半是想接著做）；
   這顆還沒記到 session（最近一個 run 沒有 `native_session_id`）時接續鈕灰掉並寫原因。焦點照確認框慣例落在取消，Enter 不會直接建。子 agent 列沒有這一項。
+  新 bot（兩種都一樣）排在本尊**正下方**，不是專案最底下（使用者 2026-09-15）：fork 由 daemon 插在 config 陣列裡本尊的下一格；全新分身建好後前端存一次排序。
   ![分身框](screenshots/fork/clone-dialog-1440.png) ![還沒有對話](screenshots/fork/clone-dialog-no-session-1440.png) ![fork 之後](screenshots/fork/after-fork-1440.png) ![手機](screenshots/fork/clone-dialog-390.png)
 - 子 agent：縮排樹，不另貼「子 worker」之類標籤；**子列整段（kind logo＋名字＋chip）可左右滑、同一組子列同步捲**（使用者指定），名字至少 3 字。
 - 子 bot 帳號跟母 bot 不同時，把子 bot 的身分標在**母 bot** 上（琥珀色，多個用 `/`）（使用者指定）。
