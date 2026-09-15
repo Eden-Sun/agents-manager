@@ -90,6 +90,26 @@ pub(crate) fn is_history(s: Sighting, turn_in_flight: bool) -> bool {
     }
 }
 
+/// 擷取那條路（`capture_codex_usage_notices`）已經記過這張橫幅、而且畫面上沒有比那次更多張？只讀不改記錄。
+fn already_seen(run_id: &str, screen: &str, notice: &str) -> bool {
+    let key = banner_key(notice);
+    let m = last_counts().lock().unwrap();
+    m.get(run_id).and_then(|seen| seen.get(&key)).is_some_and(|&before| banner_count(screen, &key) <= before)
+}
+
+/// 終端備援收回合時（`poller`），畫面上哪一張撞限橫幅算「這個回合撞到的」。
+///
+/// 2026-09-15 使用者截圖：codex 量表 5h 用 0%，卻寫「被擋、下午 06:43 恢復」。擷取那條路早就判定那是 fork 重播的
+/// 舊橫幅（8ece2ca），但備援收回合時是把整個畫面（連游標以上的舊字）掃一遍、看到就當撞限——回合被標失敗、
+/// 額度被釘到 9/19。規則跟擷取那條一致：同一畫面有比較新的狀態列還有餘裕 → 都不算；擷取已經記過、次數沒增加的 → 不算。
+/// 游標之後的新字優先；擷取沒記過的（例如 daemon 中途重啟）照舊算數。
+pub(crate) fn fallback_hit(run_id: &str, screen: &str, in_fresh: Vec<String>, on_screen: Vec<String>) -> Option<String> {
+    if status_line_says_headroom(screen) {
+        return None;
+    }
+    in_fresh.into_iter().chain(on_screen).find(|b| !already_seen(run_id, screen, b))
+}
+
 /// 同一畫面裡，最後一張撞限橫幅之後是否有 codex 的狀態列、而且 5h／weekly 都還有剩？
 pub(crate) fn status_line_says_headroom(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
@@ -152,6 +172,26 @@ mod tests {
         // 折行把時間拆到下一行也認得是同一張。
         let wrapped = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026\n6:43 PM.\n";
         assert_eq!(banner_count(wrapped, &banner_key(banner)), 1);
+    }
+
+    /// 終端備援收回合（2026-09-15 使用者截圖）：fork 重播的舊橫幅不能讓回合失敗、把額度釘到 9/19。
+    #[test]
+    fn the_terminal_fallback_does_not_revive_a_replayed_banner() {
+        let banner = FORK_REPLAY.lines().find(|l| l.contains("hit your usage limit")).unwrap().trim_start_matches("■ ").to_string();
+        let hits = vec![banner.clone()];
+        // 同一畫面有比較新、還有餘裕的狀態列 → 不算（就算擷取從沒讀過這個 run）。
+        assert_eq!(fallback_hit("run-fallback-headroom", FORK_REPLAY, hits.clone(), hits.clone()), None);
+
+        // 沒有狀態列可比時：擷取已經把它記成歷史 → 不算；同一句又印一次（次數加一）→ 算。
+        let no_status = format!("■ {banner}\n\n› Ask Codex to do anything\n");
+        let run = "run-fallback-seen";
+        assert_eq!(sighting(run, &no_status, &banner, &hits), Sighting::FirstRead);
+        assert_eq!(fallback_hit(run, &no_status, hits.clone(), hits.clone()), None, "擷取記過、次數沒變");
+        let again = format!("{no_status}\n› 繼續\n\n■ {banner}\n");
+        assert_eq!(fallback_hit(run, &again, hits.clone(), hits.clone()).as_deref(), Some(banner.as_str()), "又印了一次＝真的撞到");
+
+        // 擷取沒記過（例如 daemon 中途重啟）且沒有狀態列：照舊算數，不能漏掉真的撞限。
+        assert_eq!(fallback_hit("run-fallback-unknown", &no_status, hits.clone(), hits).as_deref(), Some(banner.as_str()));
     }
 
     /// 第一次讀畫面就碰上在飛的回合（daemon 中途重啟）：那張字是這個回合的答案，不能當歷史。

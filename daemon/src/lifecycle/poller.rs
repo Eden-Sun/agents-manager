@@ -974,12 +974,13 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
 
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
 
-    // Codex hard limit: system notice + failed turn, not a fake reply. Banner may sit above the cursor.
+    // Codex hard limit: system notice + failed turn, not a fake reply. Banner may sit above the cursor,
+    // but a replayed old one must not count (`limit_banner::fallback_hit`, 2026-09-15).
     let codex_hit = if bot.kind == "codex" {
-        codex_usage_notice_lines(&fresh)
-            .into_iter()
-            .chain(codex_usage_notice_lines(&read.text))
-            .find(|n| codex_limit_hit_line(n).is_some())
+        let limits = |t: &str| -> Vec<String> {
+            codex_usage_notice_lines(t).into_iter().filter(|n| codex_limit_hit_line(n).is_some()).collect()
+        };
+        super::limit_banner::fallback_hit(run_id, &read.text, limits(&fresh), limits(&read.text))
     } else {
         None
     };
