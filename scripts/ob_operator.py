@@ -64,13 +64,17 @@ def journal_state(store, ident):
         return None
 
 
-def browser_consult(store, ident, config, collect=False):
+def browser_consult(store, ident, config, collect=False, token=None):
     job = store.get(ident)
     if job["status"] == "done":
         return job
     if job["status"] != ("unknown" if collect else "running"):
         raise OBError("request_not_claimed")
     with exclusive(store.root / "browser.lock"):
+        # Re-check under browser.lock: an operator orphaned by a dead worker must not send for a later claim.
+        job = store.get(ident)
+        if not collect and (job["status"] != "running" or not token or job["claim_token"] != token):
+            raise OBError("request_not_claimed")
         progress = journal_state(store, ident)
         if progress and progress.get("phase") == "done":
             return store.finish(ident, progress["answer"], progress["url"])
@@ -91,7 +95,7 @@ def browser_consult(store, ident, config, collect=False):
         raise OBError("browser_failed_or_interrupted" if code else "browser_no_receipt")
 
 
-def mcp_server(root, ident):
+def mcp_server(root, ident, token=None):
     store = Store(root)
     config = store.setting("operator")
     attempted = False
@@ -117,7 +121,7 @@ def mcp_server(root, ident):
                     if attempted and store.get(ident)["status"] != "done":
                         raise OBError("already_attempted：停止，不再次操作")
                     attempted = True
-                    answer = browser_consult(store, ident, config)
+                    answer = browser_consult(store, ident, config, token=token)
                     result = {"content": [{"type": "text", "text": json.dumps({k: answer[k] for k in ("id", "project_id", "status", "url", "answer")}, ensure_ascii=False)}]}
                 except Exception as e:
                     result = {"isError": True, "content": [{"type": "text", "text": str(e)[:500]}]}
@@ -157,7 +161,7 @@ def operate(store, job, config):
         with tempfile.TemporaryDirectory(prefix="ob-operator-") as cwd:
             mcp = Path(cwd) / "mcp.json"
             mcp.write_text(json.dumps({"mcpServers": {"ob": {
-                "command": sys.executable, "args": ["-B", str(HERE / "ob.py"), "--data-dir", str(store.root), "_mcp", ident]
+                "command": sys.executable, "args": ["-B", str(HERE / "ob.py"), "--data-dir", str(store.root), "_mcp", ident, job["claim_token"] or ""]
             }}}))
             # The fresh Sonnet context sees just this request. No --resume/--continue.
             prompt = json.dumps({"project_id": job["project_id"], "request_id": job["request_id"], "question": job["question"]}, ensure_ascii=False)
@@ -179,20 +183,40 @@ def operate(store, job, config):
             store.fail(ident, "unknown" if journal_for(store, ident).exists() else "failed", type(e).__name__)
 
 
+def recover_under_lock(store):
+    ids = store.recover()
+    for row in store.list():
+        if row["status"] == "unknown":
+            # Preserve a URL learned before the previous worker was interrupted.
+            try:
+                journal_state(store, row["id"])
+            except Exception:
+                pass  # unknown stays blocked; never retry on unreadable evidence
+    return ids
+
+
+def recover_orphaned(store):
+    """Return None while a worker holds worker.lock, else the running ids turned unknown.
+
+    Only a worker holding worker.lock claims, so a free lock proves every running row lost its worker.
+    Such a request may already be in ChatGPT: it becomes unknown (collect/resolve), never pending.
+    """
+    try:
+        with exclusive(store.root / "worker.lock"):
+            return recover_under_lock(store)
+    except OBError as e:
+        if str(e) != "busy":
+            raise
+        return None
+
+
 def work(store, once=False):
     config = store.setting("operator")
     if not config:
         raise OBError("not_configured：先 ob configure 指定 Sonnet 訂閱帳號")
-    with exclusive(store.root / "worker.lock"):
+    with exclusive(store.root / "worker.lock", wait=3):
         store.set_setting("stop_requested", False)
-        store.recover()
-        for row in store.list():
-            if row["status"] == "unknown":
-                # Preserve a URL learned before the previous worker was interrupted.
-                try:
-                    journal_state(store, row["id"])
-                except Exception:
-                    pass  # unknown stays blocked; never retry on unreadable evidence
+        recover_under_lock(store)
         def stop(_signal, _frame):
             raise SystemExit(0)
         signal.signal(signal.SIGTERM, stop)
