@@ -34,6 +34,7 @@ import { HostBadge, HostsPanel } from './HostsPanel'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
+import { ProjectMemBadge } from './ProjectMemBadge'
 import { RebuildBadge } from './RebuildBadge'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
@@ -743,6 +744,7 @@ function ProjectTitle({
         </span>
       ) : null}
       <HostBadge host={host} connected={hostUp} />
+      <ProjectMemBadge projectId={projectId} />
       <span className="project-path" title={path}>
         {shortPath(path, 36)}
       </span>

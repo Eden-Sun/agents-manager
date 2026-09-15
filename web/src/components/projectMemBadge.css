@@ -1,0 +1,26 @@
+/* components/ProjectMemBadge.tsx：側欄專案標題的 pane 數與 RAM。跟左上角 RAM 徽章同一種外觀，縮小一號。 */
+
+.project-mem {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+.project-mem-k {
+  color: var(--text-faint);
+}
+
+.project-mem-v {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}

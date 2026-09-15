@@ -824,6 +824,12 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
     agents_bytes: n(r.agents_bytes),
     processes: n(r.processes),
     hosts,
+    projects: (Array.isArray(r.projects) ? r.projects : []).filter(isRec).map((pm) => ({
+      project_id: str(pm.project_id),
+      host: str(pm.host),
+      panes: n(pm.panes),
+      bytes: n(pm.bytes),
+    })),
   }
 }
 

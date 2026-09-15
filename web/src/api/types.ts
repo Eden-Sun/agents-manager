@@ -632,6 +632,15 @@ export interface MemSnapshot {
   agents_bytes: number
   processes: number
   hosts: HostMem[]
+  /** 每個專案的 bot（含 child）佔幾個 pane、多少 RAM（2026-09-15）；量不到的主機上的專案不在清單裡。 */
+  projects: ProjectMem[]
+}
+
+export interface ProjectMem {
+  project_id: string
+  host: string
+  panes: number
+  bytes: number
 }
 
 /** `GET /api/mem/processes`（SPEC §15.2） */
