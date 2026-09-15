@@ -1,33 +1,21 @@
-/* components/ThemeToggle.tsx：左上角三段式主題鈕，跟 pane／RAM 徽章同一種小尺寸。 */
+/* components/ThemeToggle.tsx：左上角單顆主題鈕，點一下輪到下一段（自動 → 淺 → 深）。 */
 .theme-toggle {
   flex: none;
-  display: inline-flex;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-sunken);
-  overflow: hidden;
-}
-
-.theme-toggle > button {
-  padding: 0 5px;
-  border: 0;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 10px;
-  line-height: 1.6;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
   cursor: pointer;
 }
 
-.theme-toggle > button + button {
-  border-left: 1px solid var(--border);
-}
-
-.theme-toggle > button:hover {
+.theme-toggle:hover {
   color: var(--text);
-}
-
-.theme-toggle > button.on {
-  background: var(--bg-panel);
-  color: var(--text);
-  font-weight: 650;
+  border-color: var(--border-strong);
 }
