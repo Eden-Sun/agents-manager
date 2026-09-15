@@ -38,7 +38,6 @@ if (progress?.phase === "done") {
   await page.waitForSelector("#prompt-textarea", { state: "visible", timeout: 60000 });
   if (!collect) {
     const state = await page.evaluate(() => ({
-      count: document.querySelectorAll('[data-message-author-role="assistant"]').length,
       busy: !!document.querySelector('[data-testid="stop-button"]'),
       draft: document.querySelector('#prompt-textarea')?.innerText?.trim() || ""
     }));
@@ -46,19 +45,17 @@ if (progress?.phase === "done") {
     const intro = known ? "" : `OB｜${label}｜${project}\n這是此 project ID 的固定諮詢對話。只使用此專案提供的脈絡；回答是建議，不是操作授權。\n\n`;
     await page.snapshot();
     await page.click("#prompt-textarea", { label: "focus OB project composer" });
-    await save({ phase: "preparing", before: state.count, url: url || null, page: page.label });
+    await save({ phase: "preparing", url: url || null, page: page.label });
     await page.keyboard.insertText(`[OB request=${requestKey}]\n` + intro + question);
     await page.waitForSelector('[data-testid="send-button"]', { state: "visible", timeout: 30000 });
     // Journal BEFORE sending. A crash from here onwards must never blindly resend.
-    await save({ phase: "dispatching", before: state.count, url: url || null, page: page.label });
+    await save({ phase: "dispatching", url: url || null, page: page.label });
     await page.click('[data-testid="send-button"]', { label: "send OB project question" });
     await page.waitForFunction(() => location.pathname.startsWith("/c/"), undefined, { timeout: 60000 });
     await save({ phase: "sent", url: (await page.url()).split("?")[0] });
   }
-  await page.waitForFunction(
-    n => document.querySelectorAll('[data-message-author-role="assistant"]').length > n,
-    progress.before, { timeout }
-  );
+  // Wait on the request marker and its completed answer only. The assistant DOM count saved in
+  // progress.before is not comparable after reopening: ChatGPT may render less history (100 -> 20).
   const boundAnswer = marker => {
     if (document.querySelector('[data-testid="stop-button"]')) return "";
     const all = [...document.querySelectorAll('[data-message-author-role]')];
