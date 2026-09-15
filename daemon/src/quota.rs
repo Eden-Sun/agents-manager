@@ -14,6 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const CODEX_POLL: Duration = Duration::from_secs(300);
+/// 讀 pane 狀態列只是一個 `pane.read`，比 app-server RPC 便宜得多：這個頻率跟上 CLI 自己的數字
+/// （2026-09-15 使用者：pane 寫 5h 93% left、header 還是 100）。
+pub const CODEX_PANE_POLL: Duration = Duration::from_secs(60);
 
 /// Requirement: the low/critical decision is the daemon's; the UI only reads [`Window::low`].
 pub const LOW_REMAINING_PCT: f64 = 30.0;
@@ -442,9 +445,11 @@ pub fn quota_from_codex_status(q: &crate::codex_live::CodexStatusQuota, account:
 /// CLI 狀態列才是它當下擋你的依據。與 app-server 共用同一格，後到覆蓋先到。
 pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     let rows: Vec<(String, Option<String>)> = match sqlx::query_as(
+        // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
         "SELECT r.pane_id, b.identity FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
-            AND b.deleted_at IS NULL",
+            AND b.deleted_at IS NULL
+          ORDER BY COALESCE((SELECT MAX(t.created_at) FROM turns t WHERE t.run_id = r.id), r.started_at) DESC",
     )
     .bind(host)
     .fetch_all(&app.db)
@@ -460,8 +465,9 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (pane_id, identity) in rows {
         let base = quota_base_for_host(app, host, "codex", identity.as_deref()).await;
-        // 同一個身分讀一次就夠。
-        if !seen.insert(base.clone()) {
+        // 同一個身分讀到一次就夠——但要「讀到」才算：那顆 pane 正在壓縮對話、捲動中讀不到狀態列時，
+        // 換同帳號的下一顆，而不是整個帳號這輪都停在 app-server 落後的數字（2026-09-15）。
+        if seen.contains(&base) {
             continue;
         }
         let Some(client) = app.herdr_for(host).await else { continue };
@@ -469,6 +475,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
         let Some(q) = quota_from_codex_status(&parsed, identity.as_deref()) else { continue };
         set(app, host, &base, q).await;
+        seen.insert(base);
         wrote += 1;
     }
     wrote
@@ -493,20 +500,28 @@ pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
 
 pub fn spawn_codex_poller(app: Arc<App>) {
     tokio::spawn(async move {
+        let mut last_server: Option<std::time::Instant> = None;
         loop {
+            // app-server 每 CODEX_POLL 問一次；狀態列每 CODEX_PANE_POLL 讀一次。同一輪兩個都做時先問 app-server，
+            // 狀態列後到蓋前（CLI 狀態列較即時且分得出身分）。
+            let ask_server = last_server.map_or(true, |t| t.elapsed() >= CODEX_POLL);
+            if ask_server {
+                last_server = Some(std::time::Instant::now());
+            }
             for host in pollable_hosts(&app).await {
-                match refresh_codex(&app, &host).await {
-                    Ok(true) => {}
-                    Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
-                    Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
+                if ask_server {
+                    match refresh_codex(&app, &host).await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
+                        Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
+                    }
                 }
-                // CLI 狀態列較即時且分得出身分；兩個都收，後到蓋前。
                 let n = refresh_codex_from_panes(&app, &host).await;
                 if n > 0 {
                     tracing::debug!(host = %host, panes = n, "codex quota read off the status line");
                 }
             }
-            tokio::time::sleep(CODEX_POLL).await;
+            tokio::time::sleep(CODEX_PANE_POLL).await;
         }
     });
 }
@@ -544,6 +559,68 @@ mod tests {
         assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-13T12:00:00Z"), "重置時間沿用");
         assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00Z"));
         assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
+    }
+
+    /// 同帳號有好幾顆 codex pane：先讀最近有動靜的那顆；它讀不到狀態列（壓縮對話中）就換下一顆，
+    /// 不是整個帳號停在舊數字（2026-09-15 使用者：pane 寫 93% left、header 還是 100）。
+    #[tokio::test]
+    async fn the_freshest_readable_codex_pane_sets_the_numbers() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let codex = |name: &'static str| {
+            let app = app.clone();
+            let pid = env.project_id.clone();
+            async move {
+                let id = crate::db::ulid();
+                sqlx::query(
+                    "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+                     VALUES (?,?,?,'codex','[]',0,1,'tok','user',?)",
+                )
+                .bind(&id)
+                .bind(&pid)
+                .bind(name)
+                .bind(crate::db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+                let run = crate::testing::fake_run(&app, &id).await;
+                (id, run)
+            }
+        };
+        let (_old_bot, old_run) = codex("idle-old").await;
+        let (fresh_bot, fresh_run) = codex("busy-fresh").await;
+        let turn = |run: String, bot: String, at: &'static str| {
+            let app = app.clone();
+            async move {
+                let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
+                sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, created_at) VALUES (?,?,?,'web','completed',?)")
+                    .bind(crate::db::ulid())
+                    .bind(conv)
+                    .bind(run)
+                    .bind(at)
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+            }
+        };
+        turn(old_run.clone(), _old_bot.clone(), "2026-09-15T03:00:00Z").await;
+        turn(fresh_run.clone(), fresh_bot.clone(), "2026-09-15T09:00:00Z").await;
+        let pane = |run: &str| futures::executor::block_on(crate::db::run(&app.db, run)).unwrap().unwrap().pane_id.unwrap();
+        let (old_pane, fresh_pane) = (pane(&old_run), pane(&fresh_run));
+        let line = |five: u32| format!("\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h {five}% left · weekly 65% left\n");
+
+        // 兩顆都讀得到：最近有動靜的那顆說了算。
+        env.herdr.screens.lock().unwrap().insert(old_pane.clone(), line(100));
+        env.herdr.screens.lock().unwrap().insert(fresh_pane.clone(), line(93));
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
+        let used = |app: Arc<App>| async move { app.quotas.lock().await.get("codex").unwrap().five_hour.clone().unwrap().used_pct };
+        assert_eq!(used(app.clone()).await, 7.0, "93% left 那顆較新");
+
+        // 最新那顆正在壓縮、讀不到狀態列：換同帳號的下一顆，不是這輪整個跳過。
+        env.herdr.screens.lock().unwrap().insert(fresh_pane, "• Compacting context (1m 17s • esc to interrupt)\n".into());
+        env.herdr.screens.lock().unwrap().insert(old_pane, line(88));
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
+        assert_eq!(used(app.clone()).await, 12.0);
     }
 
     /// 截斷只讀到 5h 時不可洗掉 7d（2026-09-13 使用者：header 的 codex 只剩一條）。

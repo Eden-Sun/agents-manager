@@ -762,7 +762,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - 刪主機連同它的額度列；`GET /api/quota` 丟掉不屬於現存主機的 `<host>/…` key。
 
 ### 14.2 三個來源都跟著主機走
-- **codex**：`codex_rpc(app, host, "account/rateLimits/read")`，遠端走 `ssh_exec_path`。同一輪再讀每個 running codex pane 底下的狀態列（`5h 90% left · weekly 48% left`，`source=codex-statusline`），寫同一把 key、後到覆蓋——狀態列是 CLI 當下拿來擋人的依據；它沒有重置時間，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
+- **codex**：`codex_rpc(app, host, "account/rateLimits/read")`，遠端走 `ssh_exec_path`。另外每 60 秒讀 running codex pane 底下的狀態列（`5h 90% left · weekly 48% left`，`source=codex-statusline`；app-server 每 5 分鐘才問一次、而且落後），寫同一把 key、後到覆蓋——狀態列是 CLI 當下拿來擋人的依據。同帳號有多顆 pane 時先讀最近有回合的那顆，讀不到狀態列（壓縮對話中、捲動中）就換下一顆（2026-09-15 使用者：pane 寫 93% left、header 還是 100）；它沒有重置時間，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
 - **claude statusLine**：hook 進來時查 `bot_host(bot_id)` 寫進那台的列（遠端經 §11.4.5 的單槽檔）。有 bot 在對話的帳號就有即時數字。
 - **claude `/usage` 探測**：在用完即丟的 pane 跑一行 `claude auth status --json` 接 `claude -p "/usage"`，輸出以 `AM_AUTH_BEGIN` / `AM_AUTH_END` / `AM_USAGE_DONE=` 標記包起來，
   `pane.read recent_unwrapped` 等到最後標記（逾時 40 秒）。`-p` 印純文字、不會有 TUI 對話框或信任視窗；同一次探測順便拿到該身份的登入狀態、`account`、`plan`
