@@ -18,16 +18,21 @@ export function copyText(text: string): Promise<boolean> {
 function legacyCopy(text: string): boolean {
   const ta = document.createElement('textarea')
   ta.value = text
-  ta.setAttribute('readonly', '')
+  // iOS Safari：readonly 的 textarea `select()` 選不到字，execCommand 會回 false、什麼都沒複製
+  // （手機點 pane 名沒反應的原因）。改用 inputmode=none 擋鍵盤，並用 setSelectionRange 選取。
+  ta.setAttribute('inputmode', 'none')
   ta.style.position = 'fixed'
   ta.style.opacity = '0'
   ta.style.top = '0'
   ta.style.left = '0'
+  // 小於 16px 的輸入框 focus 時 iOS 會自動放大畫面。
+  ta.style.fontSize = '16px'
   document.body.appendChild(ta)
   // 記住原本的焦點：copy 完要還回去，不然輸入框的游標會不見。
   const prev = document.activeElement as HTMLElement | null
-  ta.focus()
+  ta.focus({ preventScroll: true })
   ta.select()
+  ta.setSelectionRange(0, text.length)
   let ok = false
   try {
     ok = document.execCommand('copy')
@@ -35,6 +40,7 @@ function legacyCopy(text: string): boolean {
     ok = false
   }
   document.body.removeChild(ta)
-  prev?.focus?.()
+  window.getSelection()?.removeAllRanges()
+  prev?.focus?.({ preventScroll: true })
   return ok
 }

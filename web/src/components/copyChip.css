@@ -49,3 +49,8 @@
   flex: 0 20 auto;
   max-width: 150px;
 }
+
+.copy-chip-fail {
+  flex: none;
+  color: var(--danger);
+}
