@@ -449,6 +449,20 @@ export interface StoreState {
 
 let noticeSeq = 0
 
+/**
+ * fork 的錯誤說人話。405／404（不是 `bot` 找不到）＝daemon 還沒有這支 API：開發用的前端常常比跑著的 daemon 新
+ * （2026-09-15 使用者按了「接續對話」卻只看到 Method Not Allowed）。409 帶的 `message` 比 `reason` 代碼好懂。
+ */
+function forkErrText(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 405 || (e.status === 404 && e.body.what !== 'bot')) {
+      return 'fork 失敗：正在跑的 daemon 還沒有 fork 功能，要重新 build 並重啟 daemon 後才能用。'
+    }
+    if (typeof e.body.message === 'string' && e.body.message) return `fork 失敗：${e.body.message}`
+  }
+  return `fork 失敗：${errText(e)}`
+}
+
 function errText(e: unknown): string {
   if (e instanceof ApiError) return `${e.message}（HTTP ${e.status}）`
   if (e instanceof Error) return e.message
@@ -1265,7 +1279,9 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!bot) return null
     let id: string | null = null
     await guarded(set, get, `fork:${botId}`, async () => {
-      const res = await api.forkBot(botId)
+      const res = await api.forkBot(botId).catch((e: unknown) => {
+        throw new Error(forkErrText(e))
+      })
       id = res.id || null
       await get().refreshState()
       if (!id) return
