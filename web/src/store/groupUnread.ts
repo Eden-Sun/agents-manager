@@ -48,41 +48,40 @@ export function isGroupTurnCandidate(turn: Pick<Turn, 'client_request_id'> | nul
   return Boolean(botId && crid && crid.length > suffix.length && crid.endsWith(suffix))
 }
 
-type PageMessage = Pick<Message, 'id' | 'role' | 'group_id' | 'turn_id' | 'created_at'>
-/** `GET /api/bots/:id/messages?limit=&before=`：最新（或 `before` 之前）一頁，頁內舊到新（API.md §6）。 */
-export type LoadMessagesPage = (botId: string, limit: number, before?: string) => Promise<{ messages: readonly PageMessage[]; has_more: boolean }>
+type PageMessage = Pick<Message, 'id' | 'role' | 'group_id' | 'turn_id'>
+/** `GET /api/bots/:id/messages`：只要那個回合的 user 訊息（API.md §6 的 `turn_id` / `role`）。 */
+export type LoadTurnPrompts = (
+  botId: string,
+  turnId: string,
+  before?: string,
+) => Promise<{ messages: readonly PageMessage[]; has_more: boolean }>
 
-const PAGE = 50
-const MAX_PAGES = 4
 const RETRY_MS = [1_000, 4_000]
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** 往前翻到那回合開始之前（該回合的 user 訊息一定在那之後）；最多 MAX_PAGES 頁，有界。 */
-async function scanForGroupPrompt(botId: string, turnId: string, since: string, load: LoadMessagesPage): Promise<boolean> {
-  // 用時間值比（秒與毫秒兩種寫法字串比會錯）；留一分鐘餘裕，user 訊息跟 turn 不是同一刻寫入。
-  const sinceMs = Date.parse(since) - 60_000
+/** 掃完那個回合的 user 訊息為止（一般就一則）：不是「翻幾頁沒看到就算了」，所以長回合不會漏。 */
+async function scanTurnPrompts(botId: string, turnId: string, load: LoadTurnPrompts): Promise<boolean> {
   let before: string | undefined
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const page = await load(botId, PAGE, before)
+  for (;;) {
+    const page = await load(botId, turnId, before)
     noteGroupPrompts(page.messages)
     if (groupTurns.has(turnId)) return true
     const oldest = page.messages[0]
-    if (!page.has_more || !oldest || Date.parse(oldest.created_at) < sinceMs) return false
+    if (!page.has_more || !oldest) return false
     before = oldest.id
   }
-  return false
 }
 
 /**
- * 認得就回 true；候選就抓訊息頁找同回合帶 `group_id` 的 user 訊息。同一回合同時只抓一次。
- * 確定不是才記進 `directTurns`；抓失敗退避重試，全失敗也不記，之後的 frame 還能再試。
+ * 認得就回 true；候選就問那個回合的 user 訊息有沒有帶 `group_id`。同一回合同時只問一次。
+ * 得到明確答案才記進 `directTurns`；抓失敗退避重試，全失敗不記，之後的 frame 還能再確認。
  */
 export async function confirmGroupTurn(
   botId: string,
   turnId: string | null | undefined,
-  turn: Pick<Turn, 'client_request_id' | 'created_at'> | null | undefined,
-  load: LoadMessagesPage,
+  turn: Pick<Turn, 'client_request_id'> | null | undefined,
+  load: LoadTurnPrompts,
   retryMs: readonly number[] = RETRY_MS,
 ): Promise<boolean> {
   if (!turnId) return false
@@ -94,7 +93,7 @@ export async function confirmGroupTurn(
     try {
       for (let attempt = 0; ; attempt++) {
         try {
-          const yes = await scanForGroupPrompt(botId, turnId, turn?.created_at ?? '', load)
+          const yes = await scanTurnPrompts(botId, turnId, load)
           if (!yes) remember(directTurns, turnId)
           return yes
         } catch {

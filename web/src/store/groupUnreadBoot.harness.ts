@@ -44,15 +44,25 @@ g.location = { protocol: 'http:', host: '127.0.0.1:7788' }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 const fetches: string[] = []
+interface PageMsg {
+  role?: string
+  turn_id?: string | null
+}
 g.fetch = async (input: string) => {
-  const path = String(input).split('?')[0]
+  const [path, query] = String(input).split('?')
   if (path === '/api/session') return json({ token: 't' })
   if (path === '/api/state') return json(scenario.state)
   const m = /^\/api\/bots\/([^/]+)\/messages$/.exec(path)
   if (m) {
     const botId = decodeURIComponent(m[1])
     fetches.push(botId)
-    return json(scenario.messages?.[botId] ?? { messages: [], turns: [], has_more: false })
+    const page = (scenario.messages?.[botId] ?? { messages: [], turns: [], has_more: false }) as { messages: PageMsg[] }
+    // daemon 的 `turn_id` / `role` 過濾（API.md §6）：測試要看到跟真 daemon 一樣的那一頁。
+    const q = new URLSearchParams(query ?? '')
+    const turnId = q.get('turn_id')
+    const role = q.get('role')
+    const messages = page.messages.filter((x) => (!turnId || x.turn_id === turnId) && (!role || x.role === role))
+    return json({ ...page, messages })
   }
   return json({ error: 'not_found' }, 404)
 }

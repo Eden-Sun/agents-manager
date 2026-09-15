@@ -1858,7 +1858,7 @@ function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: st
 function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: string | null, key: string, turn: Turn | null | undefined) {
   const pid = get().bots.find((b) => b.id === botId)?.project_id
   if (!pid) return
-  void confirmGroupTurn(botId, turnId, turn, api.fetchMessages).then((yes) => {
+  void confirmGroupTurn(botId, turnId, turn, (id, tid, before) => api.fetchMessages(id, 50, before, { turnId: tid, role: 'user' })).then((yes) => {
     if (yes) noteGroupTurnDone(set, get, pid, key)
   })
 }
