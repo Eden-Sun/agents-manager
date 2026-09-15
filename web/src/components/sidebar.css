@@ -752,3 +752,11 @@ p.project-quota-hidden {
   color: var(--warn, #c9a227);
   white-space: nowrap;
 }
+
+/* 左上角 RAM 徽章縮一號（2026-09-15 使用者：「ram 的顯示可以不用那麼大」）。 */
+.sidebar-head .head-ram .mem-badge {
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1.45;
+  gap: 3px;
+}
