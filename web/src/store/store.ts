@@ -34,6 +34,7 @@ import { missionRequests } from './missionRequests'
 
 import type { QueuedSend } from './queuedSend'
 import { laterMark, serverUnread } from './sharedUnread'
+import { dropLegacyGroupCounts, isGroupTurn, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
   botKey,
   clearHookCompletion,
@@ -563,7 +564,7 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
   loadedProjects: {},
-  groupUnread: initialUnread.groups,
+  groupUnread: dropLegacyGroupCounts(initialUnread.groups),
 
   missions: {},
   missionDetail: {},
@@ -746,6 +747,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       const startedAt = new Date().toISOString()
       const page = await api.fetchProjectMessages(projectId)
+      noteGroupPrompts(page.messages)
       set((s) => {
         // 同 `loadMessages`：請求飛在半路時進來的 `message_added` 不能被舊的那一頁蓋掉。
         const kept = keptAfterPage(s.groupMessages[projectId] ?? [], page.messages, startedAt)
@@ -1960,7 +1962,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (key) {
           noteTurnDone(set, get, botId, key)
           const pid = get().bots.find((b) => b.id === botId)?.project_id
-          if (pid) noteGroupTurnDone(set, get, pid, key)
+          if (pid && isGroupTurn(latest)) noteGroupTurnDone(set, get, pid, key)
         }
       }
       return
@@ -1968,6 +1970,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     case 'message_added': {
       const botId = frameBotId(data)
       const msg = toMessage(unwrap(data, 'message'), botId ?? undefined)
+      if (msg) noteGroupPrompt(msg)
       if (!msg || !botId) {
         // Cannot attribute it — reload the visible conversation.
         const sel = get().selectedBotId
@@ -2010,7 +2013,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turnId)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
-        if (pid) noteGroupTurnDone(set, get, pid, turnId)
+        if (pid && isGroupTurn(turnId)) noteGroupTurnDone(set, get, pid, turnId)
       }
       return
     }
@@ -2031,7 +2034,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turn.id)
         const pid = get().bots.find((b) => b.id === botId)?.project_id
-        if (pid) noteGroupTurnDone(set, get, pid, turn.id)
+        if (pid && isGroupTurn(turn.id)) noteGroupTurnDone(set, get, pid, turn.id)
       }
       return
     }
