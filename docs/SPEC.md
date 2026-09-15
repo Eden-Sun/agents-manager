@@ -750,7 +750,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - sidebar Project 標題可點進群組視圖；標題列顯示專案名、群組標籤、host 徽章與成員燈號列（點成員跳到單獨對話）。
 - 時間軸：bot 回覆／system 訊息帶 bot 名徽章（依 kind 配色）；user 副本折疊顯示 `→ @a, @b`；每個仍在回覆的成員各一個 typing 指示。
 - 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
-- 未打開群組時 sidebar 顯示未讀計數（前端記憶體，打開即歸零）。
+- 未打開群組時 sidebar 顯示未讀計數（前端記憶體，打開即歸零）。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。舊算法累積的數字升級後清一次。
 
 ## 14. 每台主機各自的額度
 
