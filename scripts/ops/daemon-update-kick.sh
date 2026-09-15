@@ -45,11 +45,13 @@ mkdir "$LOCK" 2>/dev/null || { log "更新檢查已有執行者或殘留鎖，�
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 log "== check"
 
-# 觸發條件有兩個（使用者 2026-09-14）：整點的例行檢查，或**累積夠多重建申請**。
-# launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；門檻 `AGM_REBUILD_THRESHOLD`（預設 5）。
+# 觸發條件有三個：整點的例行檢查、**累積夠多重建申請**（使用者 2026-09-14），或**最早一筆申請已經等太久**
+# （使用者 2026-09-15：不能一直卡著等湊滿 5 筆）。launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；
+# 門檻 `AGM_REBUILD_THRESHOLD`（預設 5）、等待上限 `AGM_REBUILD_MAX_WAIT_MIN`（預設 30 分鐘）。
 # 請求＝上次真的上線（`daemon-update.built` 的 mtime）之後建立、還沒被否決的 rebuild 核准申請，
 # 同一個 requester 對同一個 commit 只算一筆。數不出來就當 0，也就是退回純整點的舊行為。
 THRESHOLD=${AGM_REBUILD_THRESHOLD:-5}
+MAX_WAIT_MIN=${AGM_REBUILD_MAX_WAIT_MIN:-30}
 MINUTE=$(( 10#${AGM_TEST_MINUTE:-$(date +%M)} ))   # AGM_TEST_MINUTE 只給隔離測試用
 REQUESTS=$("$AGM" --compact approval list 2>/dev/null | BUILT_FILE="$BUILT" python3 -c '
 import json, os, sys
@@ -75,6 +77,7 @@ def created(row):
         d = d.replace(tzinfo=timezone.utc)
     return d.timestamp()
 seen = set()
+oldest = None
 for r in rows:
     if not isinstance(r, dict) or r.get("purpose") != "rebuild":
         continue
@@ -84,13 +87,21 @@ for r in rows:
     if at is None or at <= since:
         continue
     seen.add((str(r.get("requester") or ""), str(r.get("target_commit") or "")))
-print(len(seen))
+    oldest = at if oldest is None else min(oldest, at)
+# 第二欄＝最早那筆等了幾分鐘（沒有申請、或時間在未來就是 0）。
+waited = 0 if oldest is None else max(0, int((datetime.now(timezone.utc).timestamp() - oldest) // 60))
+print(len(seen), waited)
 ' 2>/dev/null) || REQUESTS=""
+WAITED=${REQUESTS#* }
+REQUESTS=${REQUESTS%% *}
 case "$REQUESTS" in ''|*[!0-9]*) log "讀不到重建申請數，當 0"; REQUESTS=0 ;; esac
+case "$WAITED" in ''|*[!0-9]*) WAITED=0 ;; esac
 if [ "$REQUESTS" -ge "$THRESHOLD" ]; then
   log "重建申請 ${REQUESTS}/${THRESHOLD}，不等整點"
+elif [ "$REQUESTS" -gt 0 ] && [ "$WAITED" -ge "$MAX_WAIT_MIN" ]; then
+  log "最早一筆重建申請已等 ${WAITED} 分鐘（上限 ${MAX_WAIT_MIN}），不等整點（申請 ${REQUESTS}/${THRESHOLD}）"
 elif [ "$MINUTE" -ge 5 ]; then
-  log "非整點且重建申請只有 ${REQUESTS}/${THRESHOLD}，這輪不檢查"; exit 0
+  log "非整點且重建申請只有 ${REQUESTS}/${THRESHOLD}（最早一筆等了 ${WAITED} 分鐘），這輪不檢查"; exit 0
 fi
 "$GIT" -C "$REPO" fetch -q origin main 2>>"$LOG" || log "fetch 失敗，用本地 origin/main"
 HEAD_SHA=$("$GIT" -C "$REPO" rev-parse origin/main) || { log "無法讀取 origin/main，跳過"; exit 0; }

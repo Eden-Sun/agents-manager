@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { pendingRebuilds, type RebuildRequest } from './rebuildCount.ts'
+import { oldestWaitMinutes, pendingRebuilds, type RebuildRequest } from './rebuildCount.ts'
 
 const row = (o: Partial<RebuildRequest>): RebuildRequest => ({
   id: 'x',
@@ -49,4 +49,16 @@ test('時間壞掉就留著：少算一筆比多算一筆難查', () => {
   const rows = [row({ id: 'bad', created_at: 'not-a-date' })]
   assert.equal(pendingRebuilds(rows, '2026-09-14T01:00:00.000Z').length, 1)
   assert.equal(pendingRebuilds(rows, 'also-bad').length, 1)
+})
+
+test('最早那筆等了幾分鐘：看最舊的，壞時間不算，未來時間當 0', () => {
+  const now = Date.parse('2026-09-15T01:00:00.000Z')
+  const rows = [
+    row({ id: 'new', created_at: '2026-09-15T00:50:00.000Z' }),
+    row({ id: 'old', created_at: '2026-09-15T00:15:00.000Z' }),
+    row({ id: 'bad', created_at: 'not-a-date' }),
+  ]
+  assert.equal(oldestWaitMinutes(rows, now), 45)
+  assert.equal(oldestWaitMinutes([], now), 0)
+  assert.equal(oldestWaitMinutes([row({ created_at: '2026-09-15T02:00:00.000Z' })], now), 0)
 })
