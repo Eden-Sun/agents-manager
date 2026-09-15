@@ -760,3 +760,8 @@ p.project-quota-hidden {
   line-height: 1.45;
   gap: 3px;
 }
+
+/* 「剩 N」自己不折：最多兩行（RAM 已用／剩 N），不要折成三行把徽章撐高。 */
+.sidebar-head .head-ram .mem-free {
+  white-space: nowrap;
+}

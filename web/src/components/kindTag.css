@@ -44,24 +44,43 @@
   color: var(--kind-grok);
 }
 
+/* 深色：跟隨系統時看 prefers-color-scheme；左上角三段鈕選「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
-  .kind-tag.claude {
+  :root:not([data-theme="light"]) .kind-tag.claude {
     background: #38291b;
     border-color: #5c4429;
     color: var(--kind-claude);
   }
 
-  .kind-tag.codex {
+  :root:not([data-theme="light"]) .kind-tag.codex {
     background: #12261f;
     border-color: #1f5546;
     color: var(--kind-codex);
   }
 
-  .kind-tag.grok {
+  :root:not([data-theme="light"]) .kind-tag.grok {
     background: #221d38;
     border-color: #41387a;
     color: var(--kind-grok);
   }
+}
+
+:root[data-theme="dark"] .kind-tag.claude {
+  background: #38291b;
+  border-color: #5c4429;
+  color: var(--kind-claude);
+}
+
+:root[data-theme="dark"] .kind-tag.codex {
+  background: #12261f;
+  border-color: #1f5546;
+  color: var(--kind-codex);
+}
+
+:root[data-theme="dark"] .kind-tag.grok {
+  background: #221d38;
+  border-color: #41387a;
+  color: var(--kind-grok);
 }
 
 .kind-display {

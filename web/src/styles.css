@@ -62,8 +62,9 @@
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
+/* 深色：跟隨系統時看 prefers-color-scheme；左上角三段鈕選「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     /* 深色層級「畫布 < 側欄 < 沉陷 < 面板」四階都要看得出來；純白字在暗底會炫光，改 #e5e9f0。 */
     --bg: #12161c;
     --bg-panel: #1e242d;
@@ -113,6 +114,57 @@
 
     --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 18px rgb(0 0 0 / 28%);
   }
+}
+
+:root[data-theme="dark"] {
+  /* 深色層級「畫布 < 側欄 < 沉陷 < 面板」四階都要看得出來；純白字在暗底會炫光，改 #e5e9f0。 */
+  --bg: #12161c;
+  --bg-panel: #1e242d;
+  --bg-side: #171c23;
+  --bg-sunken: #191e26;
+  --bg-hover: #262d38;
+  --bg-active: #2c3950;
+  --border: #39434f;
+  --border-strong: #4d5867;
+  --text: #e5e9f0;
+  --text-dim: #a3afbf;
+  --text-faint: #96a2b3;
+  --accent: #7aa5f8;
+  /* 深色 accent 當文字已夠亮（最低 6.1:1）。 */
+  --accent-ink: #7aa5f8;
+  --accent-text: #0f1115;
+  --accent-soft: #26375c;
+
+  --bubble-user: #3f68cf;
+  --bubble-user-text: #f2f5fb;
+  --bubble-assistant: #232a35;
+  --bubble-assistant-border: #39434f;
+  --bubble-shadow: none;
+  --bubble-system: #262d38;
+  --code-bg: rgb(0 0 0 / 26%);
+
+  --lamp-green: #3fc27d;
+  --lamp-blue: #6ba6ff;
+  --lamp-red: #ff7b64;
+  --lamp-yellow: #e8b451;
+  --lamp-grey: #7f8794;
+  --lamp-greyyellow: #b4a473;
+  --lamp-offline: #4a505a;
+
+  --status-working: #7fb0ff;
+  --status-blocked: #ff9483;
+  --status-ok: #52cb8b;
+  --status-warn: #e3bd72;
+
+  --danger: #ff8b78;
+  --danger-soft: #38241f;
+  --warn: #e3bd72;
+  --warn-soft: #332b18;
+
+  --term-bg: #0e1116;
+  --term-text: #cbd1da;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 18px rgb(0 0 0 / 28%);
 }
 
 * {
@@ -816,12 +868,19 @@ button:disabled {
   --kind-grok: #7c5cff;
 }
 
+/* 深色：跟隨系統時看 prefers-color-scheme；左上角三段鈕選「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --kind-claude: #e08a6b;
     --kind-codex: #19c39c;
     --kind-grok: #9b83ff;
   }
+}
+
+:root[data-theme="dark"] {
+  --kind-claude: #e08a6b;
+  --kind-codex: #19c39c;
+  --kind-grok: #9b83ff;
 }
 
 /* 收成一顆 `⋯` 固定一格，不疊在名字上也不靠 hover：overlay + hover:none 兩份規則曾在寬度變化時壞一邊。 */
@@ -1126,8 +1185,9 @@ button:disabled {
   --btn-accent-fg-hover: var(--accent-ink);
 }
 
+/* 深色：跟隨系統時看 prefers-color-scheme；左上角三段鈕選「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     /* 深色 --accent 當環已夠亮（面板 6.37、選取藍 4.74）。 */
     --ring: var(--accent);
     --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 15%, transparent);
@@ -1137,6 +1197,17 @@ button:disabled {
     /* 深色 --danger-soft 幾乎貼著面板色（ΔL* 2.5），才需要不透明混色。 */
     --btn-danger-bg-menu: var(--btn-danger-bg-soft);
   }
+}
+
+:root[data-theme="dark"] {
+  /* 深色 --accent 當環已夠亮（面板 6.37、選取藍 4.74）。 */
+  --ring: var(--accent);
+  --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 15%, transparent);
+  --btn-bg-hover: color-mix(in srgb, var(--text) 15%, var(--bg-panel));
+  --btn-primary-bg-hover: #a3c0fa;
+  --btn-danger-bg-hover: #ffb4a8;
+  /* 深色 --danger-soft 幾乎貼著面板色（ΔL* 2.5），才需要不透明混色。 */
+  --btn-danger-bg-menu: var(--btn-danger-bg-soft);
 }
 
 .btn {
@@ -3630,4 +3701,13 @@ button.model-tag:hover:not(:disabled) {
   .confirm-backdrop {
     padding: 12px;
   }
+}
+
+/* 三段式主題鈕強制時，原生控制項（捲軸、表單）也跟著換。 */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }

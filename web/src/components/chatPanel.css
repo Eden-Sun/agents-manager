@@ -252,18 +252,31 @@
   background: #5c636b;
 }
 
+/* 深色：跟隨系統時看 prefers-color-scheme；左上角三段鈕選「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
-  .kind-mark.claude {
+  :root:not([data-theme="light"]) .kind-mark.claude {
     background: #e0b483;
   }
 
-  .kind-mark.codex {
+  :root:not([data-theme="light"]) .kind-mark.codex {
     background: #8fb8e8;
   }
 
-  .kind-mark.grok {
+  :root:not([data-theme="light"]) .kind-mark.grok {
     background: #a8aeb6;
   }
+}
+
+:root[data-theme="dark"] .kind-mark.claude {
+  background: #e0b483;
+}
+
+:root[data-theme="dark"] .kind-mark.codex {
+  background: #8fb8e8;
+}
+
+:root[data-theme="dark"] .kind-mark.grok {
+  background: #a8aeb6;
 }
 
 .src-tag {
