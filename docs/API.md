@@ -299,6 +299,7 @@ herdr 進程樹佔多少常駐記憶體（SPEC §15）。
 
 ```json
 {"total_bytes":1610612736,"herdr_bytes":50331648,"agents_bytes":1560281088,"processes":5,
+ "projects":[{"project_id":"p1","host":"local","panes":3,"bytes":1932735283}],
  "hosts":[{"host":"local","herdr_bytes":50331648,"agents_bytes":1560281088,"total_bytes":1610612736,"processes":5,"error":null,
            "browsers":[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}],
            "machine":{"total_bytes":17179869184,"available_bytes":5536579584}},
@@ -307,6 +308,7 @@ herdr 進程樹佔多少常駐記憶體（SPEC §15）。
 
 - `browsers`：同一份 `ps` 裡的 Chromium 系瀏覽器依 app bundle 分組（`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`），`tabs` = `--type=renderer` 數。不算進 `total_bytes`；前端總分頁 ≥ 30 時標紅。
 - `machine`：整台機器（SPEC §15.1a），認不出來 `null`。
+- `projects`（2026-09-15）：`[{"project_id","host","panes","bytes"}]`，側欄專案標題的「N pane · RAM」。只算 herdr 樹裡帶 `AM_BOT_ID` 的程序（該專案的 bot 與 child；每個程序算自己的 RSS 一次），`panes` 以 socket＋pane id 去重；bot 已刪或量不到的主機不列，沒有程序的專案不在清單裡。多一趟帶環境變數的 `ps`（同 `/mem/processes`）；pane 數變了或任一專案差 ≥ 1 MiB 也會推 `mem_updated`。
 - 量不到的主機用 `error` 回報，不從清單消失（UI 標星號）。每 15 秒取樣，變化超過 1 MiB 才推 `mem_updated`。
 
 ### `GET /api/mem/processes?host=local`

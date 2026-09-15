@@ -36,6 +36,15 @@ fn split_sample(out: &str) -> (Option<MachineMem>, &str) {
     (machine, &out[pi + PS_MARK.len()..])
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProjectMem {
+    pub project_id: String,
+    pub host: String,
+    /// Distinct panes those processes run in.
+    pub panes: u32,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct HostMem {
     pub host: String,
@@ -143,6 +152,10 @@ pub struct MemSnapshot {
     pub agents_bytes: u64,
     pub processes: u32,
     pub hosts: Vec<HostMem>,
+    /// 2026-09-15 使用者：側欄每個專案標「幾個 pane · 多少 RAM」。只算帶 `AM_BOT_ID` 的程序（該專案的
+    /// bot 與它們的 child）；量不到的主機上的專案不出現，不是 0。
+    #[serde(default)]
+    pub projects: Vec<ProjectMem>,
 }
 
 pub(crate) struct Proc {
@@ -314,13 +327,49 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
         }
     }
 
+    let projects = project_totals(app, &hosts).await;
     MemSnapshot {
+        projects,
         total_bytes: hosts.iter().map(|h| h.total_bytes).sum(),
         herdr_bytes: hosts.iter().map(|h| h.herdr_bytes).sum(),
         agents_bytes: hosts.iter().map(|h| h.agents_bytes).sum(),
         processes: hosts.iter().map(|h| h.processes).sum(),
         hosts,
     }
+}
+
+/// Per-project totals for every host that sampled cleanly. The environment dump is a second round
+/// trip per host (the plain sample carries no env); a host that fails it just has no project rows.
+async fn project_totals(app: &Arc<App>, hosts: &[HostMem]) -> Vec<ProjectMem> {
+    let mut acc: HashMap<(String, String), (u64, std::collections::HashSet<String>)> = HashMap::new();
+    let mut project_of: HashMap<String, Option<String>> = HashMap::new();
+    for h in hosts.iter().filter(|h| h.error.is_none()) {
+        let Ok(out) = crate::memproc::dump(app, &h.host).await else { continue };
+        for (bot, (bytes, panes)) in crate::memproc::bot_totals_from_dump(&out) {
+            if !project_of.contains_key(&bot) {
+                let pid = crate::db::bot(&app.db, &bot).await.ok().flatten().filter(|b| b.deleted_at.is_none()).map(|b| b.project_id);
+                project_of.insert(bot.clone(), pid);
+            }
+            let Some(Some(pid)) = project_of.get(&bot) else { continue };
+            let e = acc.entry((pid.clone(), h.host.clone())).or_default();
+            e.0 += bytes;
+            e.1.extend(panes);
+        }
+    }
+    let mut rows: Vec<ProjectMem> = acc
+        .into_iter()
+        .map(|((project_id, host), (bytes, panes))| ProjectMem { project_id, host, panes: panes.len() as u32, bytes })
+        .collect();
+    rows.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.host.cmp(&b.host)));
+    rows
+}
+
+/// A project's row moved enough to be worth a frame: pane count changed or ≥1 MiB drift.
+fn projects_changed(prev: &[ProjectMem], next: &[ProjectMem]) -> bool {
+    prev.len() != next.len()
+        || prev.iter().zip(next).any(|(a, b)| {
+            a.project_id != b.project_id || a.host != b.host || a.panes != b.panes || a.bytes.abs_diff(b.bytes) >= 1024 * 1024
+        })
 }
 
 /// Only pushes changes (≥1 MiB drift): a frame per client every 15s for KiB jitter is noise.
@@ -330,7 +379,11 @@ pub fn spawn_poller(app: Arc<App>) {
         loop {
             let snap = sample(&app).await;
             let changed = match &last {
-                Some(prev) => prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024 || prev.hosts.len() != snap.hosts.len(),
+                Some(prev) => {
+                    prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024
+                        || prev.hosts.len() != snap.hosts.len()
+                        || projects_changed(&prev.projects, &snap.projects)
+                }
                 None => true,
             };
             if changed {

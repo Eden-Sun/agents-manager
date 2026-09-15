@@ -190,13 +190,33 @@ fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
     rows
 }
 
+/// Resident memory by bot, from one dump: every process in the herdr tree that carries `AM_BOT_ID`
+/// counts once (its own RSS, not its subtree — children inherit the variable and count themselves),
+/// with the panes those processes run in. Bot ids only; the caller maps them to projects.
+pub fn bot_totals_from_dump(out: &str) -> HashMap<String, (u64, HashSet<String>)> {
+    let (procs, raws) = scan(out);
+    let mut by_bot: HashMap<String, (u64, HashSet<String>)> = HashMap::new();
+    for r in &raws {
+        let Some(bot) = r.bot_id.clone() else { continue };
+        if r.owner != "bot" {
+            continue;
+        }
+        let e = by_bot.entry(bot).or_default();
+        e.0 += procs[r.p_index].rss_kib * 1024;
+        if let Some(pane) = &r.pane_id {
+            e.1.insert(format!("{}|{pane}", r.socket_path.as_deref().unwrap_or("")));
+        }
+    }
+    by_bot
+}
+
 /// Split out from the ssh/`sh` plumbing so ownership and subtree rules are testable.
 pub fn processes_from_dump(out: &str) -> Vec<MemProcess> {
     let (procs, raws) = scan(out);
     listed(&procs, &raws)
 }
 
-async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
+pub(crate) async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
         let o = tokio::process::Command::new("/bin/sh").arg("-c").arg(PS_TREE_ENV).output().await?;
@@ -337,6 +357,18 @@ mod tests {
         assert_eq!(row(&rows, 405).bot_id, None);
         // No env at all: we cannot claim it for anyone.
         assert_eq!(row(&rows, 407).owner, "unknown");
+    }
+
+    /// 專案標籤的底：每顆 bot 的程序各算自己的 RSS（不重複算子樹），pane 以 socket+pane id 去重；沒有 AM_BOT_ID 的不歸任何 bot。
+    #[test]
+    fn bot_totals_count_each_process_once_with_its_panes() {
+        let dump = DUMP.replace("---AM-ENV---\n", "  408   400  50000 /bin/zsh -l\n  409   408 200000 claude\n---AM-ENV---\n")
+            + "  408 /bin/zsh HERDR_PANE_ID=w1:p2 AM_BOT_ID=b1\n  409 claude HERDR_PANE_ID=w1:p2 AM_BOT_ID=b1\n";
+        let totals = bot_totals_from_dump(&dump);
+        assert_eq!(totals.len(), 1, "只有 b1 帶 AM_BOT_ID");
+        let (bytes, panes) = &totals["b1"];
+        assert_eq!(*bytes, (30_000 + 820_000 + 40_000 + 50_000 + 200_000) * 1024);
+        assert_eq!(panes.len(), 2);
     }
 
     #[test]

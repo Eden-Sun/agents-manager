@@ -957,6 +957,12 @@ export class MockTransport implements Transport {
       agents_bytes: rows.reduce((n, r) => n + r.agents_bytes, 0),
       processes: rows.reduce((n, r) => n + r.processes, 0),
       hosts: rows,
+      projects: this.projects
+        .map((p) => {
+          const live = this.bots.filter((b) => b.project_id === p.id && this.activeRun(b.id))
+          return { project_id: p.id, host: p.host, panes: live.length, bytes: live.reduce((n, b) => n + (PER_BOT[b.kind] ?? 500) * 1024 * 1024, 0) }
+        })
+        .filter((r) => r.panes > 0),
     }
   }
 

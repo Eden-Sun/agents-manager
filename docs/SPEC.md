@@ -801,6 +801,10 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 `available` 不是 `total − 我們用掉的`（還有瀏覽器與系統）。認不出輸出就回 `null`，UI 只顯示已用量——不猜。
 UI：左上格「已用 · 剩 N」，剩餘 < 15% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
 
+### 15.1b 每個專案佔多少（2026-09-15）
+
+側欄（手機是選單抽屜）每個專案標題旁標「N pane · RAM」。來源是 `GET /api/mem` 的 `projects`：同一次 15 秒取樣裡，對每台量得到的主機多跑一趟帶環境變數的 `ps`，把 herdr 樹裡帶 `AM_BOT_ID` 的程序歸給那顆 bot 的專案——每個程序只算自己的 RSS（child 程序繼承變數、自己算），pane 數以 socket＋pane id 去重。沒在跑的專案不畫；量不到就不畫，不畫成 0。使用者自己開的 shell pane 沒有 `AM_BOT_ID`，不算進任何專案。
+
 ### 15.2 展開看程序 / 砍程序
 **owner 判定讀 process 環境變數，不讀我們的帳本**：daemon 起 bot 注入 `AM_BOT_ID`，herdr 對每個 pane 注入 `HERDR_PANE_ID`，子孫繼承——連 daemon 開機前就在跑的也判得對。
 macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。
