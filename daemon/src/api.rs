@@ -2066,20 +2066,36 @@ async fn get_messages(
         ),
         None => None,
     };
-    let rows = match before_rowid {
-        Some(b) => sqlx::query_as::<_, db::Message>(
-            "SELECT * FROM messages WHERE conversation_id=? AND rowid < ? ORDER BY rowid DESC LIMIT ?",
-        )
-        .bind(&conv)
-        .bind(b)
-        .bind(limit + 1),
-        None => sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid DESC LIMIT ?")
-            .bind(&conv)
-            .bind(limit + 1),
+    // `turn_id` / `role`：前端要證明某個回合是不是群組回覆（帶 `group_id` 的 user 訊息），沒有它就得
+    // 翻整段歷史猜。只在同一個 conversation 底下過濾，查不到的 turn 是空清單不是 404。
+    let turn_filter = q.get("turn_id").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let role_filter = match q.get("role").map(|s| s.as_str()).filter(|s| !s.is_empty()) {
+        // 靜默忽略會讓呼叫端以為過濾過了，拿整段當成某個 role 的全部。
+        Some(r) if !["user", "assistant", "system"].contains(&r) => return Err(LcError::Bad(format!("bad role `{r}`"))),
+        other => other,
+    };
+    let mut sql = String::from("SELECT * FROM messages WHERE conversation_id=?");
+    if before_rowid.is_some() {
+        sql.push_str(" AND rowid < ?");
     }
-    .fetch_all(&app.db)
-    .await
-    .map_err(any_err)?;
+    if turn_filter.is_some() {
+        sql.push_str(" AND turn_id = ?");
+    }
+    if role_filter.is_some() {
+        sql.push_str(" AND role = ?");
+    }
+    sql.push_str(" ORDER BY rowid DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, db::Message>(&sql).bind(&conv);
+    if let Some(b) = before_rowid {
+        query = query.bind(b);
+    }
+    if let Some(t) = turn_filter {
+        query = query.bind(t);
+    }
+    if let Some(r) = role_filter {
+        query = query.bind(r);
+    }
+    let rows = query.bind(limit + 1).fetch_all(&app.db).await.map_err(any_err)?;
     let has_more = rows.len() as i64 > limit;
     let mut msgs: Vec<db::Message> = rows.into_iter().take(limit as usize).collect();
     msgs.reverse();
@@ -2307,6 +2323,137 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::Bad(_))
         ));
+    }
+
+    async fn a_bot_with_conv(e: &crate::testing::Env, name: &str) -> (String, String) {
+        let id = db::ulid();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,'claude','tok',?)")
+            .bind(&id)
+            .bind(&e.project_id)
+            .bind(name)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let conv = db::conversation_id(&e.app.db, &id).await.unwrap();
+        (id, conv)
+    }
+
+    async fn a_turn(db: &sqlx::SqlitePool, conv: &str, id: &str) {
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web','completed','ok',?)")
+            .bind(id)
+            .bind(conv)
+            .bind(db::now())
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    async fn a_message(db: &sqlx::SqlitePool, conv: &str, id: &str, turn: &str, role: &str, group: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, created_at) VALUES (?,?,?,?,?, 'web', ?, ?)",
+        )
+        .bind(id)
+        .bind(conv)
+        .bind(turn)
+        .bind(role)
+        .bind(id)
+        .bind(group)
+        .bind(db::now())
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    /// 前端要判斷「這個回合是不是群組回覆」：只問那個 turn 的 user 訊息，不必翻整段歷史。
+    #[tokio::test]
+    async fn turn_id_and_role_filter_the_page() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (bot_id, conv) = a_bot_with_conv(&e, "filter-bot").await;
+        a_turn(&app.db, &conv, "t-old").await;
+        a_turn(&app.db, &conv, "t-group").await;
+        a_message(&app.db, &conv, "m-old", "t-old", "user", None).await;
+        a_message(&app.db, &conv, "m-group", "t-group", "user", Some("grp-1")).await;
+        // 群組 prompt 後面跟著一長串 assistant：以前靠翻頁找就會被擠出去。
+        for i in 0..250 {
+            a_message(&app.db, &conv, &format!("m-a{i:03}"), "t-group", "assistant", None).await;
+        }
+
+        let q = HashMap::from([("turn_id".to_string(), "t-group".to_string()), ("role".to_string(), "user".to_string())]);
+        let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], "m-group");
+        assert_eq!(messages[0]["group_id"], "grp-1");
+        assert_eq!(body["has_more"], false);
+
+        // turn 只過濾 turn，不順便挑 role。
+        let q = HashMap::from([("turn_id".to_string(), "t-group".to_string()), ("limit".to_string(), "500".to_string())]);
+        let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(251));
+
+        // 別的回合、別顆 bot 的同名 turn 都查不到（查詢限定在這個 conversation）。
+        let q = HashMap::from([("turn_id".to_string(), "t-nope".to_string())]);
+        let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(0));
+        let (other_id, other_conv) = a_bot_with_conv(&e, "other-bot").await;
+        a_turn(&app.db, &other_conv, "t-other").await;
+        a_message(&app.db, &other_conv, "m-other", "t-other", "user", Some("grp-9")).await;
+        let q = HashMap::from([("turn_id".to_string(), "t-group".to_string()), ("role".to_string(), "user".to_string())]);
+        let Json(body) = get_messages(State(app.clone()), Path(other_id.clone()), Query(q)).await.unwrap();
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(0));
+        let q = HashMap::from([("turn_id".to_string(), "t-other".to_string()), ("role".to_string(), "user".to_string())]);
+        let Json(body) = get_messages(State(app.clone()), Path(other_id), Query(q)).await.unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], "m-other");
+
+        // 沒帶過濾＝現狀（整段、依插入順序）。
+        let q = HashMap::from([("limit".to_string(), "500".to_string())]);
+        let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(252));
+
+        // role 打錯要說，不能默默當作沒過濾。
+        let q = HashMap::from([("role".to_string(), "assistant ".to_string())]);
+        assert!(matches!(
+            get_messages(State(app), Path(bot_id), Query(q)).await,
+            Err(LcError::Bad(msg)) if msg.contains("role")
+        ));
+    }
+
+    /// 同一回合的 user 訊息超過一頁：`before` 要能在過濾後繼續往前翻。
+    #[tokio::test]
+    async fn filtered_pages_keep_paging_with_before() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (bot_id, conv) = a_bot_with_conv(&e, "filter-page-bot").await;
+        a_turn(&app.db, &conv, "t-g").await;
+        a_message(&app.db, &conv, "u-group", "t-g", "user", Some("grp-1")).await;
+        for i in 0..3 {
+            a_message(&app.db, &conv, &format!("u-more{i}"), "t-g", "user", None).await;
+        }
+
+        let q = HashMap::from([
+            ("turn_id".to_string(), "t-g".to_string()),
+            ("role".to_string(), "user".to_string()),
+            ("limit".to_string(), "2".to_string()),
+        ]);
+        let Json(first) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
+        assert_eq!(first["has_more"], true);
+        let oldest = first["messages"][0]["id"].as_str().unwrap().to_string();
+        assert!(first["messages"].as_array().unwrap().iter().all(|m| m["group_id"].is_null()));
+
+        let q = HashMap::from([
+            ("turn_id".to_string(), "t-g".to_string()),
+            ("role".to_string(), "user".to_string()),
+            ("limit".to_string(), "2".to_string()),
+            ("before".to_string(), oldest),
+        ]);
+        let Json(second) = get_messages(State(app), Path(bot_id), Query(q)).await.unwrap();
+        assert_eq!(second["has_more"], false);
+        assert_eq!(second["messages"][0]["id"], "u-group");
+        assert_eq!(second["messages"][0]["group_id"], "grp-1");
     }
 
     /// review 2026-09-12 #9; deleted bots still answer (API.md §10.4).

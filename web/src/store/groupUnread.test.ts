@@ -44,49 +44,42 @@ test('候選：client_request_id 以收件 bot 的 id 結尾（只決定要不�
 })
 
 type Pg = Awaited<ReturnType<Parameters<typeof confirmGroupTurn>[3]>>
-const um = (id: string, turnId: string, groupId: string | null, at: string) => ({ id, role: 'user' as const, turn_id: turnId, group_id: groupId, created_at: at })
+const um = (id: string, turnId: string, groupId: string | null) => ({ id, role: 'user' as const, turn_id: turnId, group_id: groupId })
 
-test('確認：直接 prompt 冒用同樣結尾不算；非候選不抓；同回合同時只抓一次、結果記住', async () => {
+test('確認：直接 prompt 冒用同樣結尾不算；非候選不問；同回合同時只問一次、結果記住', async () => {
   resetGroupTurnsForTest()
-  const calls: string[] = []
-  const load = async (botId: string): Promise<Pg> => {
-    calls.push(botId)
-    return { messages: [um('m1', 't-fake', null, '2026-09-15T10:00:00Z')], has_more: false }
+  const calls: string[][] = []
+  const load = async (botId: string, turnId: string): Promise<Pg> => {
+    calls.push([botId, turnId])
+    return { messages: [um('m1', 't-fake', null)], has_more: false }
   }
-  const turnRec = { client_request_id: 'mine:B1', created_at: '2026-09-15T10:00:00Z' }
+  const turnRec = { client_request_id: 'mine:B1' }
   const [a, b] = await Promise.all([confirmGroupTurn('B1', 't-fake', turnRec, load), confirmGroupTurn('B1', 't-fake', turnRec, load)])
   assert.deepEqual([a, b], [false, false])
   assert.equal(await confirmGroupTurn('B1', 't-fake', turnRec, load), false)
-  assert.equal(await confirmGroupTurn('B1', 't-web', { client_request_id: 'web-1', created_at: '' }, load), false)
-  assert.deepEqual(calls, ['B1'])
+  assert.equal(await confirmGroupTurn('B1', 't-web', { client_request_id: 'web-1' }, load), false)
+  assert.deepEqual(calls, [['B1', 't-fake']])
 })
 
-test('確認：群組 prompt 不在最新頁就往前翻，翻過回合開始就停', async () => {
+test('確認：只問那個回合的 user 訊息，多到一頁放不下就續翻到掃完，不會中途放棄', async () => {
   resetGroupTurnsForTest()
   const befores: (string | undefined)[] = []
   const pages: Record<string, Pg> = {
-    top: { messages: [um('m3', 't-other', null, '2026-09-15T10:30:00Z')], has_more: true },
-    m3: { messages: [um('m2', 't-g', 'grp', '2026-09-15T10:00:01Z')], has_more: true },
+    top: { messages: [um('u3', 't-g', null)], has_more: true },
+    u3: { messages: [um('u2', 't-g', null)], has_more: true },
+    u2: { messages: [um('u1', 't-g', 'grp')], has_more: true },
   }
-  const load = async (_b: string, _l: number, before?: string): Promise<Pg> => {
+  const load = async (_b: string, _t: string, before?: string): Promise<Pg> => {
     befores.push(before)
     return pages[before ?? 'top']
   }
-  assert.equal(await confirmGroupTurn('B1', 't-g', { client_request_id: 'grp:B1', created_at: '2026-09-15T10:00:00Z' }, load), true)
-  assert.deepEqual(befores, [undefined, 'm3'])
+  assert.equal(await confirmGroupTurn('B1', 't-g', { client_request_id: 'grp:B1' }, load), true)
+  assert.deepEqual(befores, [undefined, 'u3', 'u2'])
 
-  // 翻過回合開始（再往前一分鐘以上）還沒找到＝不是，不再往前抓。
+  // 掃完（has_more=false）才算「不是群組」。
   resetGroupTurnsForTest()
-  befores.length = 0
-  const old: Record<string, Pg> = {
-    top: { messages: [um('m9', 't-x', null, '2026-09-15T09:00:00Z')], has_more: true },
-  }
-  const load2 = async (_b: string, _l: number, before?: string): Promise<Pg> => {
-    befores.push(before)
-    return old[before ?? 'top']
-  }
-  assert.equal(await confirmGroupTurn('B1', 't-g', { client_request_id: 'grp:B1', created_at: '2026-09-15T10:00:00Z' }, load2), false)
-  assert.deepEqual(befores, [undefined])
+  const load2 = async (): Promise<Pg> => ({ messages: [um('u9', 't-g', null)], has_more: false })
+  assert.equal(await confirmGroupTurn('B1', 't-g', { client_request_id: 'grp:B1' }, load2), false)
 })
 
 test('確認：抓失敗會退避重試；全失敗不記成「不是」，之後還能再確認', async () => {
@@ -95,9 +88,9 @@ test('確認：抓失敗會退避重試；全失敗不記成「不是」，之�
   const flaky = async (): Promise<Pg> => {
     n += 1
     if (n <= 3) throw new Error('offline')
-    return { messages: [um('m1', 't-g', 'grp', '2026-09-15T10:00:00Z')], has_more: false }
+    return { messages: [um('m1', 't-g', 'grp')], has_more: false }
   }
-  const rec = { client_request_id: 'grp:B1', created_at: '2026-09-15T10:00:00Z' }
+  const rec = { client_request_id: 'grp:B1' }
   assert.equal(await confirmGroupTurn('B1', 't-g', rec, flaky, [1, 1]), false)
   assert.equal(n, 3)
   assert.equal(await confirmGroupTurn('B1', 't-g', rec, flaky, [1, 1]), true)
@@ -209,7 +202,8 @@ test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停
   const page = (...m: unknown[]) => ({ messages: m, turns: [], has_more: false })
   const messages = {
     O1: page(msg('m5', 't-o', 'user', 'grp-3')),
-    B1: page(msg('m0', 't-g', 'user', 'grp-1')),
+    // 群組 prompt 後面跟著 250 則 assistant：問的是該回合的 user 訊息，長回合照樣認得。
+    B1: page(msg('m0', 't-g', 'user', 'grp-1'), ...Array.from({ length: 250 }, (_, i) => msg(`ma${String(i).padStart(3, '0')}`, 't-g', 'assistant'))),
     B2: page(msg('m00', 't-d', 'user')),
   }
   const out = boot(storage, { state, frames, messages })

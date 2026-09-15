@@ -68,9 +68,17 @@ export async function fetchState(): Promise<AppState> {
 }
 
 /** API.md §6: `before` = 目前最舊一則的 id（往前翻，issue #25）。 */
-export async function fetchMessages(botId: string, limit = 200, before?: string): Promise<MessagesPage> {
+export async function fetchMessages(
+  botId: string,
+  limit = 200,
+  before?: string,
+  /** API.md §6：只要某個回合（或某個 role）的訊息，不必翻整段歷史。 */
+  filter?: { turnId?: string; role?: 'user' | 'assistant' | 'system' },
+): Promise<MessagesPage> {
   const q = new URLSearchParams({ limit: String(limit) })
   if (before) q.set('before', before)
+  if (filter?.turnId) q.set('turn_id', filter.turnId)
+  if (filter?.role) q.set('role', filter.role)
   const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/messages?${q.toString()}`)
   return toMessagesPage(raw, botId)
 }
