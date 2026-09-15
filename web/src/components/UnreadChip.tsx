@@ -7,7 +7,7 @@
  * 版面（同日）：桌機換行最多兩行、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
  * 兩排（2026-09-15 使用者：「非標主力之現執行中與剛完成的 bot 要出現在主力的下一排」）：★ 主力一排，
  * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。手機單行橫捲放不下兩排，照同樣分組
- * 接在主力後面。
+ * 分成上下兩排，各自橫捲（2026-09-16 使用者：「已完成放下一排，方便我點選」）。
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
@@ -35,6 +35,51 @@ interface ChipItem {
   waitsKids: boolean
   working: boolean
   title: string
+}
+
+function Chip({ it }: { it: ChipItem }) {
+  return (
+    <button type="button" className={chipClass(it)} title={it.title} aria-current={it.current ? 'true' : undefined} onClick={it.go}>
+      {it.pinned ? (
+        <span className="unread-chip-star" aria-hidden="true">
+          ★
+        </span>
+      ) : null}
+      <span className="unread-chip-name">{it.name}</span>
+      {it.unread > 0 ? <span className="unread-chip-n">{it.unread > 99 ? '99+' : it.unread}</span> : null}
+      {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+    </button>
+  )
+}
+
+/**
+ * 手機的一排：自己橫捲、自己一組箭頭。★ 主力一排、在跑／剛完成的另一排（2026-09-16 使用者：
+ * 「已完成放下一排，方便我點選」），不必先把主力捲過去才點得到剛跑完的那顆。
+ */
+function ScrollRow({ items, label, selectedBotId }: { items: ChipItem[]; label: string; selectedBotId: string | null }) {
+  const barRef = useRef<HTMLDivElement | null>(null)
+  const scroll = useHorizontalScroll(barRef, true)
+  useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
+  if (items.length === 0) return null
+  return (
+    <div className={`unread-bar-wrap row${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
+      {scroll.left ? (
+        <button type="button" className="unread-bar-arrow left" aria-label="往左看更多" onClick={() => scroll.by(-1)}>
+          ◂
+        </button>
+      ) : null}
+      <div className="unread-bar" ref={barRef} role="status" aria-live="polite" aria-label={label}>
+        {items.map((it) => (
+          <Chip key={it.id} it={it} />
+        ))}
+      </div>
+      {scroll.right ? (
+        <button type="button" className="unread-bar-arrow right" aria-label="往右看更多" onClick={() => scroll.by(1)}>
+          ▸
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 export function UnreadChip() {
@@ -86,19 +131,19 @@ export function UnreadChip() {
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
   const hidden = useOverflowRows(barRef, !narrow && !expanded, items.length)
-  const scroll = useHorizontalScroll(barRef, narrow)
-  useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
 
   if (items.length === 0) return null
-  const clipped = !narrow && !expanded && hidden > 0
+  if (narrow) {
+    return (
+      <>
+        <ScrollRow items={items.filter((it) => it.pinned)} label="主力 bot" selectedBotId={selectedBotId} />
+        <ScrollRow items={items.filter((it) => !it.pinned)} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
+      </>
+    )
+  }
+  const clipped = !expanded && hidden > 0
   return (
-    <div className={`unread-bar-wrap${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
-      {/* 箭頭：只有陰影看不出能捲（2026-09-12 使用者回報）。 */}
-      {scroll.left ? (
-        <button type="button" className="unread-bar-arrow left" aria-label="往左看更多" onClick={() => scroll.by(-1)}>
-          ◂
-        </button>
-      ) : null}
+    <div className="unread-bar-wrap">
       <div
         className={`unread-bar${clipped ? ' clipped' : ''}${expanded ? ' expanded' : ''}`}
         ref={barRef}
@@ -107,33 +152,13 @@ export function UnreadChip() {
       >
         {[...items.filter((it) => it.pinned), ...items.filter((it) => !it.pinned)].map((it, i, all) => (
           <Fragment key={it.id}>
-            {/* 主力與非主力之間強制換排（桌機）；手機這個分隔不佔位。 */}
+            {/* 主力與非主力之間強制換排。 */}
             {!it.pinned && i > 0 && all[i - 1].pinned ? <span className="unread-row-break" aria-hidden="true" /> : null}
-          <button
-            type="button"
-            className={chipClass(it)}
-            title={it.title}
-            aria-current={it.current ? 'true' : undefined}
-            onClick={it.go}
-          >
-            {it.pinned ? (
-              <span className="unread-chip-star" aria-hidden="true">
-                ★
-              </span>
-            ) : null}
-            <span className="unread-chip-name">{it.name}</span>
-            {it.unread > 0 ? <span className="unread-chip-n">{it.unread > 99 ? '99+' : it.unread}</span> : null}
-            {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
-          </button>
+            <Chip it={it} />
           </Fragment>
         ))}
       </div>
-      {scroll.right ? (
-        <button type="button" className="unread-bar-arrow right" aria-label="往右看更多" onClick={() => scroll.by(1)}>
-          ▸
-        </button>
-      ) : null}
-      {!narrow && (hidden > 0 || expanded) ? (
+      {hidden > 0 || expanded ? (
         <button
           type="button"
           className="unread-bar-more"

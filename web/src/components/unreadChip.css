@@ -323,6 +323,16 @@
     flex: none;
   }
 
+  /* 兩排（2026-09-16 使用者：「已完成放下一排，方便我點選」）：★ 主力一排、在跑／剛完成一排，各自橫捲。
+     第二排接在第一排下面，只有排與排之間留一條細線，整體不比原本高太多。 */
+  .unread-bar-wrap.row + .unread-bar-wrap.row {
+    border-top: 1px solid var(--border);
+  }
+
+  .unread-bar-wrap.row .unread-bar {
+    padding-block: 4px;
+  }
+
   .unread-bar::-webkit-scrollbar {
     display: none;
   }
