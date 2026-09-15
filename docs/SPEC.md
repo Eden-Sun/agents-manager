@@ -767,6 +767,9 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - **claude `/usage` 探測**：在用完即丟的 pane 跑一行 `claude auth status --json` 接 `claude -p "/usage"`，輸出以 `AM_AUTH_BEGIN` / `AM_AUTH_END` / `AM_USAGE_DONE=` 標記包起來，
   `pane.read recent_unwrapped` 等到最後標記（逾時 40 秒）。`-p` 印純文字、不會有 TUI 對話框或信任視窗；同一次探測順便拿到該身份的登入狀態、`account`、`plan`
   （claude 身份不經 ssh 探登入：非登入 ssh 讀不到 Keychain）。沒登入的身份 park 30 分鐘，其他失敗 5 分鐘。
+  `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report`：claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
+  （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO。
+  `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。
 - **grok `/usage` 探測**：§12.6 的 TUI 流程。
 - 兩者本機開在專屬 `am-quota` session；遠端借 **daemon 在那台的 named session**（遠端只有一條轉發 socket，再開 session 要多一條轉發）。
   label 是 `am-quota-claude*` / `am-quota-grok`、agent 名 `amquota<6碼>`（不在 DB）；`sweep_stale()` 掃本機 `am-quota` 與每台已連線主機的 session。
@@ -973,6 +976,16 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 ### 18.5 AGM 派 child 的模型預設
 `cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。巡檢自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）；
 協調者固定 `cc0/opus/high`，沒有自動切換（§18.15）。
+
+### 18.5a Claude Code 換版就解析（使用者 2026-09-16）
+
+launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`：比對 `~/.local/share/claude/versions` 最新的版本與 `claude-release.last`，
+換版才派 `claude-release-task.md` 給 AGM 自己（`--review-by patrol`，request id `agm-claude-release-<版本>`），AGM 的回覆就是使用者看到的通知。規則：
+
+- 第一次執行只記下目前版本，不為「本來就在的版本」派一次工；沒換版安靜退出（不寫 log）。
+- 派工失敗不寫 `claude-release.last`，下一輪重派；同時只准一個執行者（`claude-release.lock`），殘留鎖交 AGM 檢查。
+- 任務本身**唯讀**：比 `--help`、比 binary 裡的 `describe()` 欄位與 `CLAUDE*_` 環境變數、疑似有用的實測一次（拋棄式目錄 + `-p`），
+  結論三到五行（是什麼、對應哪個痛點、要改哪個檔）。要改程式另外走派工與核准，不在這筆交辦裡動手。
 
 ### 18.6 persona 的副本
 由 §18.11 規範：改人設走 `PUT /api/supervisor/persona`，不要手改 `config.toml` 或 `persona.md`。`ConfigStore` 寫入前比 mtime，磁碟變了會在同一把 mutex 內重讀再套用

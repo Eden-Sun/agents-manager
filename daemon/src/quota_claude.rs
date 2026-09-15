@@ -364,11 +364,61 @@ fn probe_command(bin: &str, env: &BTreeMap<String, String>) -> String {
     }
     let b = crate::hosts::sh_quote(bin);
     let auth = crate::tools::CLAUDE_LOGIN_ARGS.join(" ");
+    // `/usage` 先要結構化版本（claude 2.1.273 起：`usage_report` 帶 kind／percent／ISO resets_at／scope）。
+    // `grep -m1` 沒抓到（舊 CLI 不認 `--output-format`、或還沒有這個欄位）才跑純文字版給 [`parse_claude_usage`]。
     format!(
         "printf '\\nAM_AUTH_%s\\n' BEGIN; {pfx}{b} {auth} </dev/null 2>&1; \
-         printf '\\nAM_AUTH_%s\\n' END; {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; \
+         printf '\\nAM_AUTH_%s\\n' END; \
+         {pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report \
+           || {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; \
          printf '\\nAM_USAGE_%s=%s\\n' DONE \"$rc\""
     )
+}
+
+/// `/usage` 的結構化版本（claude 2.1.273 起）。`limits[]` 的 `kind` 才是分桶依據，不看顯示字串：
+/// `session`→5h、`weekly_all`→7d、`weekly_scoped` 且 scope 是 Fable→Fable 桶。其餘 scoped 列（別的模型）
+/// 沒有對應的桶，先忽略。時間直接用 `resets_at`，不必再解析「Sep 16 at 7:50am」這種跟語系綁在一起的字。
+pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option<Quota> {
+    let line = segment.lines().find(|l| l.contains("\"usage_report\""))?;
+    let start = line.find('{')?;
+    let v: Value = serde_json::from_str(line[start..].trim_end()).ok()?;
+    let limits = v.pointer("/usage_report/rate_limits/limits")?.as_array()?;
+    let iso = |row: &Value| -> Option<String> {
+        let s = row.get("resets_at")?.as_str()?;
+        DateTime::parse_from_rfc3339(s).ok().map(|t| t.to_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    };
+    let win = |row: &Value| -> Option<Window> {
+        Some(Window { used_pct: row.get("percent")?.as_f64()?.clamp(0.0, 100.0), resets_at: iso(row) })
+    };
+    let (mut five, mut seven, mut fable) = (None, None, None);
+    for row in limits {
+        match row.get("kind").and_then(Value::as_str) {
+            Some("session") => five = win(row),
+            Some("weekly_all") => seven = win(row),
+            Some("weekly_scoped") => {
+                let model = row.pointer("/scope/model/display_name").and_then(Value::as_str).unwrap_or_default();
+                if model.eq_ignore_ascii_case("fable") {
+                    fable = win(row);
+                }
+            }
+            _ => {}
+        }
+    }
+    if five.is_none() && seven.is_none() && fable.is_none() {
+        return None;
+    }
+    Some(Quota {
+        five_hour: five,
+        seven_day: seven,
+        fable,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: crate::db::now(),
+        source: "claude-usage".into(),
+        account: account.map(String::from),
+        host: LOCAL_HOST.into(),
+    })
 }
 
 /// Searched from the **end**: a retyped command leaves two runs in scrollback; only the last finished.
@@ -449,7 +499,8 @@ async fn refresh_claude_account(
     };
     let (logged_in, email, plan) = crate::tools::read_login_answer("claude", &auth);
     let mut out = ProbeOutcome { logged_in, email, plan: plan.clone(), quota: None };
-    if let Some(mut q) = parse_claude_usage(&usage, Local::now(), account) {
+    let parsed = parse_claude_usage_report(&usage, account).or_else(|| parse_claude_usage(&usage, Local::now(), account));
+    if let Some(mut q) = parsed {
         q.plan = plan;
         crate::quota::set(app, host, base_key, q.clone()).await;
         out.quota = Some(q);
@@ -704,6 +755,41 @@ Last 24h · 2950 requests · 43 sessions
 
     fn at(s: &str) -> DateTime<Local> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Local)
+    }
+
+    /// claude 2.1.273 的 `/usage --output-format stream-json`：分桶看 `kind`、時間直接用 ISO，
+    /// 不再解析「Sep 16 at 7:50am」。實機抓到的那一行（只留這段會用到的欄位）。
+    #[test]
+    fn the_structured_usage_report_fills_every_window() {
+        let line = r#"{"type":"assistant","local_command_source":"<local-command-stdout>Current session: 30% used</local-command-stdout>","usage_report":{"session":{"total_cost_usd":0},"rate_limits":{"limits":[
+          {"kind":"session","group":"session","percent":30,"resets_at":"2026-09-15T23:50:00.594923+00:00","scope":null,"severity":"normal","is_active":false},
+          {"kind":"weekly_all","group":"weekly","percent":66,"resets_at":"2026-09-21T04:00:00.594948+00:00","scope":null,"severity":"normal","is_active":true},
+          {"kind":"weekly_scoped","group":"weekly","percent":24,"resets_at":"2026-09-21T03:59:59.595145+00:00","scope":{"model":{"display_name":"Fable"},"surface":null},"severity":"normal","is_active":false},
+          {"kind":"weekly_scoped","group":"weekly","percent":9,"resets_at":"2026-09-21T03:59:59.595145+00:00","scope":{"model":{"display_name":"Opus"},"surface":null},"severity":"normal","is_active":false}]}}}"#;
+        let screen = format!("$ claude -p '/usage' --output-format stream-json
+{}
+AM_USAGE_DONE=0
+", line.replace('\n', " "));
+        let q = parse_claude_usage_report(&screen, Some("cc1")).expect("structured report");
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 30.0);
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-15T23:50:00Z"));
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 66.0);
+        assert_eq!(q.fable.as_ref().unwrap().used_pct, 24.0, "weekly_scoped 的 Fable 列");
+        assert_eq!(q.fable.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-21T03:59:59Z"));
+        assert_eq!(q.account.as_deref(), Some("cc1"));
+        assert_eq!(q.source, "claude-usage");
+    }
+
+    /// 舊 CLI 沒有這個欄位（`grep` 沒抓到 → 跑純文字版）：JSON 解析回 None，交給原本的文字解析。
+    #[test]
+    fn a_plain_text_usage_screen_is_left_to_the_text_parser() {
+        let screen = "Current session: 30% used · resets Sep 16 at 7:50am
+AM_USAGE_DONE=0
+";
+        assert!(parse_claude_usage_report(screen, None).is_none());
+        assert!(parse_claude_usage(screen, at("2026-09-15T20:00:00+08:00"), None).is_some());
+        // 有那一行但壞掉（截斷）也不能當成有資料。
+        assert!(parse_claude_usage_report("{\"usage_report\":{\"rate_limits\":{\"limi", None).is_none());
     }
 
     #[test]
