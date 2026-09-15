@@ -58,12 +58,12 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`，完成後移除自己的 worktree。」
 - 做完的子 agent 關掉 pane（`herdr pane close`），不要留一堆 done 的 pane。
 
-## GPT 外腦（ChatGPT Consult，使用者 2026-09-15）
-- 「問 GPT 外腦／請 GPT 外腦 review」＝透過 ego lite 的 ChatGPT 網頁取得第二意見，不是新增 bot 或更換 API 模型。先查本機事實；一般諮詢不用先問 AGM，不要每個請求都問外腦。
-- 父 bot 派工或重用 child 時傳遞這個名稱、下方文件與同一個 AG Man project label；一律明確帶 `-p`，不可用 worktree／bot 名稱代替專案名。
-- 要取捨的設計、兩個做法選一個、review 意見要不要採、根因要第二意見 → `scripts/chatgpt-consult.sh -p <AG Man 的 project label> "問題"`。
-- 每個專案一個固定對話、一個分頁，腳本會自己找回同一個對話，**不要自己在 ego 另開 ChatGPT 對話或分頁**。問題裡不要貼 token／密碼／客戶資料。
-- ego lite 裡的 task space「ChatGPT 決策顧問」與它的分頁**任何人都不准關**（含 AGM 的 browser-gc）。完整說明：`docs/CHATGPT-CONSULT.md`。
+## OB（網頁 GPT 外腦，使用者 2026-09-15）
+- 「問 OB／請 OB review」＝透過 ego lite 的 ChatGPT 網頁取得第二意見。先查本機事實；一般諮詢不用先問 AGM，也不是每個請求必問。
+- 透過 `python3 scripts/ob.py ask --project-id <AG Man project ID> --request-id <穩定請求ID> --wait 600 "問題"` 提交。用 ID，不用 label、worktree 或 bot 名。父 bot 派工／重用 child 時傳遞同一 project ID 與本指引。
+- 共用一個 Sonnet-low worker，逐筆用乾淨 context 操作；每專案獨立固定 ChatGPT 對話。額度不足保留佇列，不切回 Fable。原任務 bot 自己判讀與驗證回覆，不把 OB 建議當授權。
+- `done` 才有答案；`pending/running/waiting_quota` 用 `status <id>` 查原單。`unknown` 要對帳／`collect`，不可換 request ID 重送。不要各自直接操作瀏覽器。
+- 不貼 token／密碼／客戶資料；任何 bot（含 AGM/browser-gc）都不可關「ChatGPT 決策顧問」task space 與分頁或刪登錄資料。啟用與舊對話綁定見 `docs/CHATGPT-CONSULT.md`。
 
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
