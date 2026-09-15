@@ -33,6 +33,7 @@ import { restoreQueued } from './queuedSend'
 import { missionRequests } from './missionRequests'
 
 import type { QueuedSend } from './queuedSend'
+import { laterMark, serverUnread } from './sharedUnread'
 import {
   botKey,
   clearHookCompletion,
@@ -688,6 +689,14 @@ export const useStore = create<StoreState>((set, get) => ({
         selectedProjectId: selectedProject,
       }
     })
+    {
+      const s = get()
+      const next = serverUnread(s.bots, s.botUnread, (id) => viewingBot(s, id) && windowActive())
+      if (next) {
+        set({ botUnread: next })
+        persistUnread(get())
+      }
+    }
     get().pruneUnread()
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
@@ -924,7 +933,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   markBotRead: (botId) => {
-    setReadMark(botKey(botId), markOfMessages(get().messages[botId] ?? []) ?? markNow())
+    const mark = markOfMessages(get().messages[botId] ?? []) ?? markNow()
+    setReadMark(botKey(botId), mark)
+    // 跨裝置：送不出去只是別台晚一點才知道，本機照常清。
+    if (!botId.startsWith('pending:')) void api.markBotRead(botId, mark).catch(() => {})
     if (!get().botUnread[botId]) return
     set((s) => ({ botUnread: withoutKey(s.botUnread, botId) }))
     persistUnread(get())
@@ -968,7 +980,8 @@ export const useStore = create<StoreState>((set, get) => ({
       get().markBotRead(botId)
       return
     }
-    const n = countUnreadTurns(s.messages[botId] ?? [], readMarks[botKey(botId)])
+    const serverMark = s.bots.find((b) => b.id === botId)?.read_mark
+    const n = countUnreadTurns(s.messages[botId] ?? [], laterMark(readMarks[botKey(botId)], serverMark))
     if ((s.botUnread[botId] ?? 0) === n) return
     set((cur) => ({ botUnread: n > 0 ? { ...cur.botUnread, [botId]: n } : withoutKey(cur.botUnread, botId) }))
     persistUnread(get())
@@ -2154,6 +2167,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     }
     case 'identities_changed':
     case 'project_changed':
+    case 'bot_read':
     case 'bot_changed': {
       void get().refreshState()
       return

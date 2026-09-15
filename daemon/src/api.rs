@@ -101,6 +101,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/local-image", get(crate::local_image::get))
+        .route("/bots/{id}/read", post(crate::read_marks::post))
         .route("/turns/{id}/abandon", post(abandon_turn))
         .route("/bots/{id}/abort", post(abort_bot))
         .route("/hosts", post(create_host))
@@ -332,6 +333,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
+    let unread = crate::read_marks::unread_counts(&app.db).await.map_err(any_err)?;
+    let read_marks = crate::read_marks::marks(&app.db).await.map_err(any_err)?;
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -364,7 +367,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "run": run,
                 "queued_turn": queued_turn,
                 "lamp": lamp(bot_connected, run.as_ref()),
-                "unread": 0,
+                // 跨裝置共用的未讀回合數與已讀標記（read_marks.rs）。
+                "unread": unread.get(&b.id).copied().unwrap_or(0),
+                "read_mark": read_marks.get(&b.id).map(|m| json!({"at": m.at, "id": m.message_id})),
             }));
         }
         out.push(json!({

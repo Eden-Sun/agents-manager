@@ -653,6 +653,8 @@ export class MockTransport implements Transport {
 
     if (method === 'GET' && rawPath === '/state') return this.state()
     // 前端已樂觀套用排序，mock 收下就好。
+    // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
+    { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     if (method === 'POST' && rawPath === '/order') return this.saveOrder(b)
     if (method === 'GET' && rawPath === '/fs/dirs') {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')

@@ -134,6 +134,11 @@ export async function fetchTerminal(
  * 搬到新分頁是救回窄 pane 唯一可預期的做法（`pane.resize` 零和、`zoom` 只放大字）。
  * 搬既有 pane 不重開：`pane_id`、run、進行中回合都不受影響。
  */
+/** 跨裝置共用的已讀位置：只往前推，daemon 會推 `bot_read` 給其他分頁／裝置。 */
+export async function markBotRead(botId: string, mark: { at: string; id: string }): Promise<void> {
+  await transport.request('POST', `/bots/${encodeURIComponent(botId)}/read`, { at: mark.at, message_id: mark.id })
+}
+
 export async function movePaneToTab(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/pane/move-to-tab`)
 }

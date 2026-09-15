@@ -53,7 +53,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並�
           "primary": false,
           "run": null,
           "lamp": "offline",
-          "unread": 0,
+          "unread": 0, "read_mark": {"at": "2026-09-15T08:00:00.000Z", "id": "01M…"},
           "queued_turn": null
         }
       ]
@@ -291,6 +291,11 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 ```
 
 路徑不存在或不是目錄 → 400。
+
+### `POST /api/bots/{id}/read`
+跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省（`at` 省略＝現在）；標記**只往前推**，較舊的送來不會倒退。
+回 `{"bot_id","read_mark":{"at","id"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；bot 不存在 404。
+`GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 
 ### `GET /api/bots/{id}/local-image?path=<路徑>`
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑以該 bot 的**專案目錄**為底；符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。

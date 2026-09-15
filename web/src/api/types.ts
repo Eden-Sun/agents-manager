@@ -189,6 +189,10 @@ export interface Bot {
   pending?: boolean
   /** 有 active run 時是實際用的名字，否則是下次啟動會用的；debug 時拿去 herdr 對照 pane。 */
   agent_name: string | null
+  /** daemon 算的未讀回合數（跨裝置共用，2026-09-15）；舊 daemon 沒有這欄就是 undefined。 */
+  unread?: number
+  /** daemon 存的已讀位置（跨裝置共用）；null＝還沒有。 */
+  read_mark?: { at: string; id: string } | null
   created_at: string
 }
 
