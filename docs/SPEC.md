@@ -750,7 +750,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - sidebar Project 標題可點進群組視圖；標題列顯示專案名、群組標籤、host 徽章與成員燈號列（點成員跳到單獨對話）。
 - 時間軸：bot 回覆／system 訊息帶 bot 名徽章（依 kind 配色）；user 副本折疊顯示 `→ @a, @b`；每個仍在回覆的成員各一個 typing 指示。
 - 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
-- 未打開群組時 sidebar 顯示未讀計數（前端記憶體，打開即歸零）。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。舊算法累積的數字升級後清一次。
+- 未打開群組時 sidebar 顯示未讀計數（前端記憶體，打開即歸零）。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。群組計數保存在 localStorage，v3 遷移先保存清空結果才寫完成標記，bot 未讀保留；包含 v2 已遷移的瀏覽器會再清一次群組計數。
 
 ## 14. 每台主機各自的額度
 
@@ -956,6 +956,7 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 - ego lite：`listTaskSpaces()`，`ownership=agent` 且無進行中 assignment、2 小時無活動才 `completeTaskSpace(id, {keep:false})`；**`ownership=user` 或 `agentDelegatedToUser` 一律不動**。
 - **ego lite 的「ChatGPT 決策顧問」task space 與它的分頁一律不動**，不論 `ownership=agent`、閒置多久（使用者 2026-09-15；用途見 `docs/CHATGPT-CONSULT.md`）。
 - OB 以 AG Man project ID 對應獨立固定對話；共用 Sonnet-low worker，每筆乾淨 context，原任務 bot 判讀結果。SQLite 持久佇列與 URL 唯一鍵隔離專案；Sonnet 額度不足留 waiting_quota、不回 Fable，送達未知不重送。完整 CLI／部署／對帳契約見 `docs/CHATGPT-CONSULT.md`。
+  worker 崩潰後的 `running` 只在取得 worker lock 時恢復為 `unknown`，不自動重送；每次 claim 的識別值限制孤兒操作員回寫與送出，原回答由 request marker 及完成控制項確認，不依賴歷史 DOM 數量。
   CLI 卡死重開 ego lite 時回報受影響的 OB 請求；正常後續請求按 OB 資料庫回原 URL，`unknown` 先 collect／對帳，不自動重送。舊 JSON 只供明確 link，不能再當寫入索引。
 - Chrome：只動 Claude in Chrome 的 MCP tab group。
 - **bot 的 headless Chrome**（`--headless=new --remote-debugging-port=93xx --user-data-dir=/tmp/am-cdp-*｜/tmp/am-codex-*-profile｜/tmp/am-ui-rc`；使用者的 Chrome 沒有 `--headless`）：

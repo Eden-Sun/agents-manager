@@ -203,7 +203,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 ## 6. 讀訊息
 
-`GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` = 目前最舊一則的 `id`），回傳的 `messages` 已依時間正序。
+`GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` = 目前最舊一則的 `id`），回傳的 `messages` 已依時間正序。可選 `turn_id` 限定該回合、`role=user|assistant|system` 限定角色，均在該 bot 的 conversation 內過濾後才分頁；不存在或其他 bot 的回合回空訊息清單，非法 role 回 400。不帶篩選參數沿用原行為。
 沒有這個 bot → 404；已刪除的 bot 仍讀得到歷史。
 
 ```json
@@ -294,7 +294,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 ### `POST /api/bots/{id}/read`
 跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省（`at` 省略＝現在）；標記**只往前推**，較舊的送來不會倒退。
-回 `{"bot_id","read_mark":{"at","id"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；bot 不存在 404。
+回 `{"bot_id","read_mark":{"at","id"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；bot 不存在 404。有效時間先轉為 UTC 毫秒 `Z` 格式，晚於 daemon 現在的值夾到現在，避免裝置時鐘錯誤永久遮住新訊息；回傳 `read_mark.at` 為正規化後的值。
 `GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 
 ### `GET /api/bots/{id}/local-image?path=<路徑>`
@@ -646,7 +646,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 ```
 
 ### 11.2 `POST /api/projects/{id}/chat`
-`{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...] }`。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。
+`{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...] }`。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。此格式是群組未讀查詢的穩定候選契約；前端仍需以同回合 user 訊息的 `group_id` 核實群組來源。
 
 ```json
 200 { "group_id": "c-group-4", "project_id": "01M1...",
@@ -1165,4 +1165,4 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 
 ### OB 本機 CLI（網頁 GPT）
 
-OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id> --request-id <stable-id> "問題"` 透過既有 `GET /api/supervisor/state` 核對 project ID，排入本機 SQLite 佇列，由單一 Sonnet-low worker 操作專案固定 ChatGPT 對話。`status <id>` 回 `{id,project_id,request_id,status,answer,url,error,...}`；只有 `done` 表示網頁原文已保存。`waiting_quota` 留待恢復、不切回 Fable；`unknown` 用 `collect` 對帳，不盲目重送。完整狀態、安裝與舊 label 登錄轉 ID 的明確綁定方式見 [OB 操作文件](CHATGPT-CONSULT.md)。
+OB 不新增 daemon HTTP endpoint；`python3 scripts/ob.py ask --project-id <id> --request-id <stable-id> "問題"` 透過既有 `GET /api/supervisor/state` 核對 project ID，排入本機 SQLite 佇列，由單一 Sonnet-low worker 操作專案固定 ChatGPT 對話。`status <id>` 回 `{id,project_id,request_id,status,answer,url,error,...}`；只有 `done` 表示網頁原文已保存。`waiting_quota` 留待恢復、不切回 Fable；`unknown` 用 `collect` 對帳，不盲目重送。`recover` 回 `{worker_running,recovered[]}`：僅在 worker lock 可取得時把孤立的 `running` 轉成 `unknown`；不重新送出。`status` 也會執行此恢復，無 id 的回應附 `recovered[]`。完整狀態、安裝與舊 label 登錄轉 ID 的明確綁定方式見 [OB 操作文件](CHATGPT-CONSULT.md)。
