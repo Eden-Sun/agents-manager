@@ -765,3 +765,12 @@ p.project-quota-hidden {
 .sidebar-head .head-ram .mem-free {
   white-space: nowrap;
 }
+
+/* 主題鈕跟連線燈號一起靠右，疊在重建申請數正下方（2026-09-15 使用者）。 */
+.head-brand-meta > .theme-toggle {
+  margin-left: auto;
+}
+
+.head-brand-meta > .theme-toggle + .conn {
+  margin-left: 0;
+}
