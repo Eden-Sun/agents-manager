@@ -70,6 +70,28 @@ install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/superv
 launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 300`），由腳本自己判斷
 「整點、集滿門檻，或等太久」；`AGM_BUILD_BOT`（必要）與 `AGM_REBUILD_THRESHOLD`／`AGM_REBUILD_MAX_WAIT_MIN`（可選）放 `EnvironmentVariables`。
 
+## claude-release-kick.sh
+
+Claude Code 換版就派 AGM 解析新版有什麼用得上的，AGM 的回覆就是給使用者的通知（使用者 2026-09-16）。
+唯讀、只派工，不 build 不重啟。任務內容在 `claude-release-task.md`（安裝到 AGM 目錄）。
+
+| 變數 | 預設 | 意義 |
+| --- | --- | --- |
+| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state） |
+| `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | 版本目錄；目錄名就是版本號，最新的那個是現在會跑的 |
+| `AGM_RELEASE_BOT` | `runtime.json` 的 `manager_bot_id` | 派給誰；查不到就跳過，不亂派給別的 bot |
+
+狀態檔 `claude-release.last`＝已經解析過的版本；派工成功才寫。隔離測試：`bash scripts/ops/claude-release-kick_test.sh`（假的 AGM 目錄、版本目錄與 `bin/agm`）。
+
+安裝（需要 AGM 核准）：
+
+```sh
+install -m 755 scripts/ops/claude-release-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 644 scripts/ops/claude-release-task.md ~/.config/agents-manager/supervisor/AGM/
+```
+
+launchd：`com.agm.claude-release`，`StartInterval 1800`，`ProgramArguments = [/bin/bash, …/bin/claude-release-kick.sh]`。
+
 ## 租約管得到什麼、管不到什麼
 
 租約約束的是**走 API 與這些腳本的路徑**：
