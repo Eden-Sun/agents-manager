@@ -1,14 +1,17 @@
-# ChatGPT 決策顧問（ego lite）
+# GPT 外腦（ChatGPT Consult）
+
+**統一用語：「GPT 外腦」**。使用者說「問 GPT 外腦」「請 GPT 外腦 review」，就是使用這份流程，透過 ego lite 的 ChatGPT 網頁取得第二意見；不是建立新的 bot 或改用 API 模型。技術上的 task space 名稱仍是「ChatGPT 決策顧問」，腳本與登錄檔名稱不變。
 
 使用者在 ego lite 登入了 ChatGPT，用來補強各方（claude／codex／grok bot、AGM）的決策：遇到要取捨、要第二意見的問題，
 就去問它。**每個專案一個固定的 ChatGPT 對話、一個分頁，不重複開**——同一個專案的問題永遠問在同一個對話裡，脈絡才接得起來。
 
 ## 怎麼問
 
+先讀本機程式與測試，整理真正需要第二意見的問題，再呼叫腳本。**所有 bot（含 child）都明確帶 `-p <AG Man 的 project label>`**；不要用 worktree／bot 名稱，否則同專案會分成不同對話。從其他 repo 呼叫時，使用 agents-manager checkout 裡腳本的絕對路徑。
+
 ```sh
-scripts/chatgpt-consult.sh "問題"                       # 專案名＝目前 git repo 的目錄名
-scripts/chatgpt-consult.sh -p agents-manager "問題"     # 指定專案名（用 AG Man 的 project label）
-scripts/chatgpt-consult.sh -p agents-manager -f q.md     # 問題很長就寫成檔案
+scripts/chatgpt-consult.sh -p "Agents Manager" "問題"     # 指定專案名（用 AG Man 的 project label）
+scripts/chatgpt-consult.sh -p "Agents Manager" -f q.md     # 問題很長就寫成檔案
 ```
 
 輸出第一行是 `[chatgpt-consult] project=… conversation=https://chatgpt.com/c/… tab=pN space=N`，接著是 ChatGPT 的回答全文。
@@ -18,7 +21,11 @@ scripts/chatgpt-consult.sh -p agents-manager -f q.md     # 問題很長就寫成
 **別問什麼**：查得到的事實（讀程式、跑測試比較準）、例行進度。問題裡**不要貼 token、密碼、ui-token、客戶資料**——那是外部服務。
 
 問題寫清楚背景：專案、現況、選項、各自的代價、你傾向哪個。ChatGPT 看不到 repo，只看得到你貼給它的。
-它的回答是參考意見：照做前自己核對，最後的決定仍照原本的流程（使用者、AGM 的裁示）。
+它的回答是參考意見：照做前自己核對，最後的決定仍照原本的流程（使用者、AGM 的裁示）。回報時區分外腦的建議與本機已驗證的事實，並保留輸出的對話連結方便追查。
+
+遇到忙碌或逾時，先檢查原對話是否仍在生成；不要連續重送或用 `--new` 繞過等待。這是需要第二意見時使用的工具，不是每個請求的必經關卡，也不用先向 AGM 申請一般諮詢。
+
+父 bot 派工或重用 child 時，把「GPT 外腦」、本文件位置與相同的 project label 帶進交接；child 同樣遵守本文件。教學通知不用回覆「收到」，避免額外喚醒 AGM。
 
 ## 怎麼做到「每個專案一個對話、不重複開」
 

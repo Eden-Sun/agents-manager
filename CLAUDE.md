@@ -58,7 +58,9 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`，完成後移除自己的 worktree。」
 - 做完的子 agent 關掉 pane（`herdr pane close`），不要留一堆 done 的 pane。
 
-## 決策卡住時問 ChatGPT（ego lite，使用者 2026-09-15）
+## GPT 外腦（ChatGPT Consult，使用者 2026-09-15）
+- 「問 GPT 外腦／請 GPT 外腦 review」＝透過 ego lite 的 ChatGPT 網頁取得第二意見，不是新增 bot 或更換 API 模型。先查本機事實；一般諮詢不用先問 AGM，不要每個請求都問外腦。
+- 父 bot 派工或重用 child 時傳遞這個名稱、下方文件與同一個 AG Man project label；一律明確帶 `-p`，不可用 worktree／bot 名稱代替專案名。
 - 要取捨的設計、兩個做法選一個、review 意見要不要採、根因要第二意見 → `scripts/chatgpt-consult.sh -p <AG Man 的 project label> "問題"`。
 - 每個專案一個固定對話、一個分頁，腳本會自己找回同一個對話，**不要自己在 ego 另開 ChatGPT 對話或分頁**。問題裡不要貼 token／密碼／客戶資料。
 - ego lite 裡的 task space「ChatGPT 決策顧問」與它的分頁**任何人都不准關**（含 AGM 的 browser-gc）。完整說明：`docs/CHATGPT-CONSULT.md`。
