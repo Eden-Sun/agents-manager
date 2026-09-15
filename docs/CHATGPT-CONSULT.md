@@ -35,6 +35,8 @@ python3 scripts/ob.py status --project-id <project-id>
 - `failed`：沒有送出收據，檢查登入／CLI／瀏覽器後可 `retry <id>`。不能把 Sonnet 自己輸出的文字當答案。
 - `unknown`：可能送出過或 worker 中斷。該 project 的後續單暫停，其他 project 可繼續。用 `collect <id>` **只讀取原回答、不再送出**，依 request marker 配對，不拿最後一則不相關回答冒充。尚無 URL 或對話狀態無法確認時，先人工／bot 查看 journal 指向的原分頁；確定根本沒送出才 `resolve <id> --confirmed-not-sent`，並保留原 journal 作為對帳紀錄。不要用新 request ID 繞過。
 
+worker 意外退出留下的 `running`，在重放 `ask`、`ask --wait`、`status`、`collect` 或執行 `recover` 時，以 `worker.lock` 確認沒有存活 worker 後轉為 `unknown`；保留原單與瀏覽器 journal，絕不重新送出。存活 worker 持鎖時不改狀態。`recover` 回 `{worker_running,recovered[]}`，無 id 的 `status` 也列出本次恢復的 id。`collect` 等待原 request marker 對應的完整回答，不以頁面目前渲染的歷史訊息數判斷完成。
+
 問題先整理專案、現況、選項與取捨；ChatGPT 看不到 repo，只看得到提供的內容。不要送 token、密碼、ui-token 或客戶資料。回報區分「OB 建議」與「本機已驗證」，附對話 URL 方便查證。OB 不替代使用者授權或 AGM 的 ownership／運維裁示。
 
 ## 安裝與帳號
