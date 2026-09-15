@@ -40,10 +40,10 @@ def kick(store):
     return True
 
 
-def recover(store):
+def recover(store, start=True):
     from ob_operator import recover_orphaned
     recovered = recover_orphaned(store)
-    if recovered and store.claimable():
+    if start and recovered and store.claimable():
         kick(store)  # queued work behind the dead worker; recovered rows stay unknown and are never claimed
     return recovered
 
@@ -128,7 +128,7 @@ def main(argv=None):
         project = daemon_project(args.project_id)
         question = Path(args.file).read_text() if args.file else args.text
         result = store.submit(project["id"], project["label"], args.request_id, question, os.environ.get("AM_BOT_ID"))
-        if result["status"] == "running" and recover(store):
+        if result["status"] == "running" and recover(store, not args.no_start):
             result = store.get(result["id"])  # replay after a worker crash: unknown, not resent
         if not args.no_start and result["status"] in ("pending", "waiting_quota"):
             kick(store)
@@ -136,7 +136,7 @@ def main(argv=None):
         while result["status"] in ("pending", "running") and time.monotonic() < deadline and store.setting("operator"):
             time.sleep(1)
             result = store.get(result["id"])
-            if result["status"] == "running" and recover(store):
+            if result["status"] == "running" and recover(store, not args.no_start):
                 result = store.get(result["id"])
         result["operator_configured"] = bool(store.setting("operator"))
     elif args.command == "status":
