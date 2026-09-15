@@ -249,6 +249,22 @@ class OperatorTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def test_configure_preserves_stable_cli_symlinks_across_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / 'version-one'
+            binary.write_text('#!/bin/sh\nexit 0\n')
+            binary.chmod(0o755)
+            link = root / 'stable-cli'
+            link.symlink_to(binary)
+            with contextlib.redirect_stdout(io.StringIO()):
+                ob.main(['--data-dir', str(root / 'db'), 'configure', '--claude-config-dir', tmp,
+                         '--claude-binary', str(link), '--ego-binary', str(link)])
+            store = Store(root / 'db')
+            self.addCleanup(store.db.close)
+            self.assertEqual(store.setting('operator')['claude_binary'], str(link))
+            self.assertEqual(store.setting('operator')['ego_binary'], str(link))
+
     def test_ask_resolves_project_from_daemon_not_cwd(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(ob, 'daemon_project', return_value={"id": A, "label": "AM"}), patch.dict(os.environ, {"AM_BOT_ID": "caller"}), contextlib.redirect_stdout(io.StringIO()) as output:
             ob.main(['--data-dir', tmp, 'ask', '--request-id', 'id', '--no-start', 'Question'])
