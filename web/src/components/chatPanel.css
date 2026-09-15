@@ -632,6 +632,11 @@
     padding: 8px 14px 8px;
   }
 
+  /* 展開全文最高只到訊息區的三分之二（2026-09-15 使用者：手機太高會擋住畫面），其餘由 .lastq-body 自己捲。 */
+  .lastq {
+    max-height: calc(200% / 3);
+  }
+
   .lastq-body {
     -webkit-line-clamp: 2;
     line-clamp: 2;
