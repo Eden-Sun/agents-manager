@@ -1,5 +1,5 @@
 /**
- * 「集滿幾個重建申請就不等整點」的計數規則（使用者 2026-09-14）。
+ * 「集滿幾個重建申請、或最早一筆等太久，就不等整點」的計數規則（使用者 2026-09-14、09-15）。
  *
  * 跟 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態還沒被決定掉
  * （`pending` / `approved`）、建立時間晚於上次成功上線，同一個 requester 對同一個 commit
@@ -35,4 +35,11 @@ export function pendingRebuilds(rows: RebuildRequest[], since?: string | null): 
     out.push(r)
   }
   return out.sort((a, b) => b.created_at.localeCompare(a.created_at))
+}
+
+/** 最早那筆還在等的申請等了幾分鐘（沒有、或時間壞掉就是 0）。`now` 給測試用。 */
+export function oldestWaitMinutes(rows: RebuildRequest[], now: number = Date.now()): number {
+  const times = rows.map((r) => Date.parse(r.created_at)).filter((t) => !Number.isNaN(t))
+  if (times.length === 0) return 0
+  return Math.max(0, Math.floor((now - Math.min(...times)) / 60_000))
 }

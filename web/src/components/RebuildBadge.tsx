@@ -1,12 +1,12 @@
 /**
- * 左上角的「重建 N/5」chip（使用者 2026-09-14）：累積夠多重建申請時，AGM 的排程不等整點就會
+ * 左上角的「重建 N/5」chip（使用者 2026-09-14）：累積夠多重建申請、或最早一筆等超過 30 分鐘（09-15）時，AGM 的排程不等整點就會
  * 動手，所以這個數字要看得到。點開列出是誰申請的、哪個 commit、要做什麼。
  *
  * 一筆都沒有就整顆不出現——左上角那一列很窄，常態是 0，畫一顆永遠寫 0 的 chip 只是噪音。
  */
 import { useEffect, useRef, useState } from 'react'
-import { fetchRebuildRequests, REBUILD_THRESHOLD } from '../api/rebuildRequests'
-import type { RebuildRequest } from '../lib/rebuildCount'
+import { fetchRebuildRequests, REBUILD_MAX_WAIT_MIN, REBUILD_THRESHOLD } from '../api/rebuildRequests'
+import { oldestWaitMinutes, type RebuildRequest } from '../lib/rebuildCount'
 import './rebuildBadge.css'
 
 /** 申請是人在動的，不必跟得比這更緊。 */
@@ -46,7 +46,10 @@ export function RebuildBadge() {
   }, [open])
 
   if (!rows || rows.length === 0) return null
-  const hot = rows.length >= REBUILD_THRESHOLD
+  const waited = oldestWaitMinutes(rows)
+  // 集滿門檻、或最早那筆等太久：下一輪檢查就會安排重建（與 daemon-update-kick.sh 同一套）。
+  const full = rows.length >= REBUILD_THRESHOLD
+  const hot = full || waited >= REBUILD_MAX_WAIT_MIN
 
   return (
     <div className="rebuild-badge-box" ref={boxRef}>
@@ -56,9 +59,11 @@ export function RebuildBadge() {
         aria-label={`還在等的重建申請 ${rows.length} 筆，門檻 ${REBUILD_THRESHOLD} 筆`}
         onClick={() => setOpen((v) => !v)}
         title={
-          hot
+          full
             ? `重建申請已達 ${REBUILD_THRESHOLD} 筆：AGM 不等整點，下一輪檢查就會安排重建。`
-            : `還在等的重建申請 ${rows.length} 筆；滿 ${REBUILD_THRESHOLD} 筆就不等整點。`
+            : hot
+              ? `最早一筆重建申請已等 ${waited} 分鐘：AGM 不等整點，下一輪檢查就會安排重建。`
+              : `還在等的重建申請 ${rows.length} 筆（最早一筆等了 ${waited} 分鐘）；滿 ${REBUILD_THRESHOLD} 筆或等滿 ${REBUILD_MAX_WAIT_MIN} 分鐘就不等整點。`
         }
       >
         <span className="rebuild-k" aria-hidden="true">⟳</span>
@@ -85,7 +90,9 @@ export function RebuildBadge() {
               </li>
             ))}
           </ul>
-          <div className="rebuild-pop-foot">滿 {REBUILD_THRESHOLD} 筆時，AGM 的排程不等整點就會安排重建。</div>
+          <div className="rebuild-pop-foot">
+            滿 {REBUILD_THRESHOLD} 筆、或最早一筆等滿 {REBUILD_MAX_WAIT_MIN} 分鐘（現在 {waited} 分鐘），AGM 的排程就不等整點安排重建。
+          </div>
         </div>
       ) : null}
     </div>

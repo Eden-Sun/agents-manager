@@ -196,6 +196,8 @@ AGM 的重建排程原本只在整點檢查；使用者要它**集滿 5 個重�
   時間——寧可多算一筆，也不要把真的在等的申請藏起來。
 - **門檻**：腳本吃 `AGM_REBUILD_THRESHOLD`（預設 5）；daemon 沒有這個欄位，所以前端是常數 5
   （`web/src/api/rebuildRequests.ts`）。兩邊要一起改。
+- **等太久也提前**（使用者 2026-09-15）：最早一筆申請等超過 30 分鐘（`AGM_REBUILD_MAX_WAIT_MIN`，前端常數
+  `REBUILD_MAX_WAIT_MIN`）也不等整點。chip 在這種時候同樣轉警示色，提示寫出最早那筆等了幾分鐘。
 
 ![桌機](screenshots/rebuild-counter/desktop-1440.png)
 ![手機 390](screenshots/rebuild-counter/mobile-390.png)

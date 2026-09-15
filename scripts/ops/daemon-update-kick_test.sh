@@ -61,7 +61,7 @@ STUB
   export STUB_ASSIGN_FAIL=""
 }
 
-teardown() { rm -rf "$ROOT"; unset AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD; }
+teardown() { rm -rf "$ROOT"; unset AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD AGM_REBUILD_MAX_WAIT_MIN; }
 
 check() { # check <描述> <要出現的字串> <檔案>
   if grep -q -- "$2" "$3" 2>/dev/null; then
@@ -353,6 +353,38 @@ export STUB_APPROVAL_LIST='{"approvals":[
 ]}'
 bash "$SCRIPT"
 check "上次上線之前的申請不算" "非整點且重建申請只有 0/5" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 12. 申請沒湊滿，但最早一筆已經等超過 30 分鐘：不等整點（使用者 2026-09-15）。
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"ap-1","status":"approved"},
+  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
+]}'
+bash "$SCRIPT"
+check "等超過上限就不等整點" "最早一筆重建申請已等" "$AGM_DIR/daemon-update.log"
+check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 13. 申請還沒等滿 30 分鐘（剛建立）而且沒湊滿：照舊等整點。
+setup
+export AGM_TEST_MINUTE="37"
+now_iso=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"a1\",\"purpose\":\"rebuild\",\"status\":\"pending\",\"requester\":\"bot-1\",\"target_commit\":\"c1\",\"created_at\":\"$now_iso\"}]}"
+bash "$SCRIPT"
+check "剛建立的申請不觸發" "非整點且重建申請只有 1/5（最早一筆等了 0 分鐘）" "$AGM_DIR/daemon-update.log"
+check_no "不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 14. 等待上限可調：AGM_REBUILD_MAX_WAIT_MIN 設很大時，舊申請也不觸發。
+setup
+export AGM_TEST_MINUTE="37" AGM_REBUILD_MAX_WAIT_MIN=99999999
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
+]}'
+bash "$SCRIPT"
+check "等待上限可以調大" "非整點且重建申請只有 1/5" "$AGM_DIR/daemon-update.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
