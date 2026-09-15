@@ -952,6 +952,8 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 每輪確認 `agm-pxf2pv-browser-gc` 在跑（沒跑就 `agm bot start`），派 `browser-gc-task.md`（request id `agm-browser-gc-<YYYYmmdd-HHMM>`）。規則：
 
 - ego lite：`listTaskSpaces()`，`ownership=agent` 且無進行中 assignment、2 小時無活動才 `completeTaskSpace(id, {keep:false})`；**`ownership=user` 或 `agentDelegatedToUser` 一律不動**。
+- **ego lite 的「ChatGPT 決策顧問」task space 與它的分頁一律不動**，不論 `ownership=agent`、閒置多久（使用者 2026-09-15；用途見 `docs/CHATGPT-CONSULT.md`）。
+  CLI 卡死要重開 ego lite 時會連它一起關，回報寫明即可、不必手動復原——下一次 `scripts/chatgpt-consult.sh` 會照 `~/.config/agents-manager/chatgpt-consult.json` 回到同一個對話。
 - Chrome：只動 Claude in Chrome 的 MCP tab group。
 - **bot 的 headless Chrome**（`--headless=new --remote-debugging-port=93xx --user-data-dir=/tmp/am-cdp-*｜/tmp/am-codex-*-profile｜/tmp/am-ui-rc`；使用者的 Chrome 沒有 `--headless`）：
   - 孤兒（`ppid=1`）+ debug port 無 ESTABLISHED + 活超過 2 分鐘 → TERM、3 秒後 KILL，刪 `/tmp/am-*` profile。三條缺一不可（`nohup` 起的在用實例 ppid 也是 1，但一定有 CDP 連線）。
