@@ -26,13 +26,19 @@ def conversation_url(value):
 
 
 @contextlib.contextmanager
-def exclusive(path):
+def exclusive(path, wait=0):
     # Never unlink lock files: an old fd and a new inode could both hold the lock.
+    # wait: seconds to retry, so a short status/recover probe cannot turn a fresh kick away.
     with open(path, "a") as fd:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise OBError("busy")
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OBError("busy")
+                time.sleep(0.05)
         try:
             yield fd
         finally:
@@ -40,6 +46,9 @@ def exclusive(path):
 
 
 class Store:
+    CLAIMABLE = """SELECT * FROM requests r WHERE status IN ('pending','waiting_quota')
+        AND NOT EXISTS (SELECT 1 FROM requests u WHERE u.project_id=r.project_id AND u.status IN ('unknown','running'))"""
+
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -61,6 +70,9 @@ class Store:
             );
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        if "claim_token" not in {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}:
+            # Binds browser sends to the claim that started them; an orphaned operator of an old claim cannot send.
+            self.db.execute("ALTER TABLE requests ADD COLUMN claim_token TEXT")
 
     @contextlib.contextmanager
     def transaction(self):
@@ -121,18 +133,19 @@ class Store:
 
     def recover(self):
         # Only under worker.lock. A crashed operation may already have sent to GPT.
-        self.db.execute("UPDATE requests SET status='unknown',error='worker_interrupted; inspect original conversation',updated_at=? WHERE status='running'", (time.time(),))
+        with self.transaction():
+            ids = [r[0] for r in self.db.execute("SELECT id FROM requests WHERE status='running'")]
+            self.db.execute("UPDATE requests SET status='unknown',claim_token=NULL,error='worker_interrupted; inspect original conversation',updated_at=? WHERE status='running'", (time.time(),))
+        return ids
 
-    def claim(self):
+    def claim(self, token=None):
         with self.transaction():
             if self.setting("retry_after", 0) > time.time():
                 return None
-            row = self.db.execute("""SELECT * FROM requests r WHERE status IN ('pending','waiting_quota')
-                AND NOT EXISTS (SELECT 1 FROM requests u WHERE u.project_id=r.project_id AND u.status IN ('unknown','running'))
-                ORDER BY created_at,id LIMIT 1""").fetchone()
+            row = self.db.execute(self.CLAIMABLE + " ORDER BY created_at,id LIMIT 1").fetchone()
             if not row:
                 return None
-            self.db.execute("UPDATE requests SET status='running',error=NULL,updated_at=? WHERE id=?", (time.time(), row["id"]))
+            self.db.execute("UPDATE requests SET status='running',claim_token=?,error=NULL,updated_at=? WHERE id=?", (token or uuid.uuid4().hex, time.time(), row["id"]))
             return self.get(row["id"])
 
     def finish(self, ident, answer, url):
@@ -178,6 +191,10 @@ class Store:
             self.db.execute("UPDATE requests SET status='pending',error=NULL,updated_at=? WHERE id=?", (time.time(), ident))
             self.set_setting("retry_after", 0)
         return self.get(ident)
+
+    def claimable(self):
+        # Same eligibility as claim(), ignoring retry_after (a kicked worker just waits it out).
+        return self.db.execute(self.CLAIMABLE + " LIMIT 1").fetchone() is not None
 
     def list(self, pid=None):
         sql = "SELECT id,project_id,request_id,status,url,error,created_at,updated_at FROM requests"

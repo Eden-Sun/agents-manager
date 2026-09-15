@@ -20,6 +20,7 @@ from ob_store import OBError, Store, exclusive
 
 A = "01M1Y7BNVP843V9MFEDJ2KW9NQ"
 B = "01M1Y75JS1G8PZ4EHF6Y98AFB1"
+C = "01M1Y7BNVP843V9MFEDJ2KW9NR"
 UA = "https://chatgpt.com/c/project-a"
 UB = "https://chatgpt.com/c/project-b"
 
@@ -272,6 +273,166 @@ class CLITests(unittest.TestCase):
             self.assertEqual(row['project_id'], A)
             self.assertEqual(row['source_bot_id'], 'caller')
             self.assertFalse(row['operator_configured'])
+
+
+HOLDER = r"""
+import os, sys, json
+from pathlib import Path
+from ob_store import Store, exclusive
+root, journal = sys.argv[1], sys.argv[2]
+s = Store(root)
+with exclusive(Path(root) / "worker.lock"):
+    job = s.claim()
+    if journal:
+        (Path(root) / (job["id"] + ".browser.json")).write_text(journal)
+    print(job["id"], flush=True)
+    if sys.stdin.readline().strip() == "die":
+        os.kill(os.getpid(), 9)  # no cleanup, no finally: a crashed or rebooted worker
+"""
+
+
+class WorkerLossTests(unittest.TestCase):
+    """Real worker processes and flock; only daemon lookup and process spawning are stubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.s = Store(self.tmp.name)
+        self.addCleanup(self.s.db.close)
+        self.s.set_setting("operator", {"claude_binary": "/fake/claude", "ego_binary": "/fake/ego",
+                                        "claude_config_dir": str(Path.home() / ".claude")})
+        self.kicks = []
+        for p in (patch.object(ob, "daemon_project", return_value={"id": A, "label": "AM"}),
+                  patch.object(ob, "kick", side_effect=lambda store: self.kicks.append(1)),
+                  patch.object(operator, "run_process", side_effect=AssertionError("must not send")),
+                  patch.dict(os.environ, {"AM_BOT_ID": "bot-a"})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def cli(self, *argv):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ob.main(["--data-dir", self.tmp.name, *argv])
+        return json.loads(out.getvalue())
+
+    def ask(self, rid="q1"):
+        return self.cli("ask", "--request-id", rid, "Which design?")
+
+    def worker(self, journal=""):
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent))
+        proc = subprocess.Popen([sys.executable, "-B", "-c", HOLDER, self.tmp.name, journal], env=env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        def cleanup():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            proc.stdout.close()
+            proc.stdin.close()
+        self.addCleanup(cleanup)
+        ident = proc.stdout.readline().strip()
+        self.assertEqual(self.s.get(ident)["status"], "running")
+        return proc, ident
+
+    def kill(self, proc):
+        proc.stdin.write("die\n")
+        proc.stdin.flush()
+        self.assertEqual(proc.wait(10), -9)
+
+    def test_replay_after_worker_crash_marks_unknown_and_never_resends(self):
+        first = self.ask()
+        proc, ident = self.worker('{"phase":"sent","url":"%s"}' % UA)
+        self.assertEqual(ident, first["id"])
+        self.kill(proc)
+        self.kicks.clear()
+        again = self.ask()
+        self.assertEqual((again["id"], again["status"]), (first["id"], "unknown"))
+        self.assertNotIn("claim_token", again)
+        self.assertEqual(self.kicks, [])  # nothing claimable: no worker started for a possibly sent request
+        self.assertEqual(len(self.s.list()), 1)
+        self.assertEqual(self.s.project(A)["url"], UA)  # URL learned before the crash kept for collect
+        with self.assertRaisesRegex(OBError, "unknown"):
+            self.cli("retry", ident)
+        # A restarted worker does not pick it up; a later request of the same project waits behind it.
+        self.ask("q2")
+        with exclusive(Path(self.tmp.name) / "worker.lock"):
+            self.assertIsNone(self.s.claim())
+        # collect only reads back the original answer.
+        operator.journal_for(self.s, ident).write_text(json.dumps({"phase": "done", "answer": "original", "url": UA}))
+        self.assertEqual(self.cli("collect", ident)["answer"], "original")
+
+    def test_live_worker_request_is_not_rewritten_by_replay_status_or_recover(self):
+        self.ask()
+        proc, ident = self.worker()
+        self.assertEqual(self.ask()["status"], "running")
+        self.assertEqual(self.cli("status", ident)["status"], "running")
+        status = self.cli("status")
+        self.assertEqual((status["worker_running"], status["recovered"]), (True, []))
+        self.assertEqual(self.cli("recover"), {"worker_running": True, "recovered": []})
+        with self.assertRaisesRegex(OBError, "request_not_claimed"):
+            self.cli("collect", ident)
+        self.assertEqual(self.s.get(ident)["status"], "running")
+        proc.stdin.write("exit\n")  # a clean exit that skipped finish/fail also leaves running
+        proc.stdin.flush()
+        self.assertEqual(proc.wait(10), 0)
+        self.assertEqual(self.cli("recover"), {"worker_running": False, "recovered": [ident]})
+        self.assertEqual(self.cli("recover"), {"worker_running": False, "recovered": []})
+
+    def test_status_recovers_stale_running_and_recover_kicks_only_claimable_work(self):
+        self.ask()
+        proc, ident = self.worker()
+        self.kill(proc)
+        self.s.submit(A, "AM", "q2", "same project, blocked behind the unknown one")
+        status = self.cli("status")
+        self.assertEqual((status["worker_running"], status["recovered"]), (False, [ident]))
+        self.assertEqual(self.s.get(ident)["status"], "unknown")
+        self.assertEqual(self.kicks, [1])  # only the original ask kicked; status never starts a worker
+        c = self.s.submit(C, "C", "q", "project c")
+        proc, claimed = self.worker()
+        self.assertEqual(claimed, c["id"])
+        self.kill(proc)
+        self.assertEqual(self.cli("recover"), {"worker_running": False, "recovered": [c["id"]]})
+        self.assertEqual(self.kicks, [1])  # A and C are both blocked: nothing a worker could claim
+        b = self.s.submit(B, "B", "q", "project b")
+        self.s.db.execute("UPDATE requests SET status='running' WHERE id=?", (c["id"],))  # a second lost claim
+        self.assertEqual(self.cli("recover")["recovered"], [c["id"]])
+        self.assertEqual(self.kicks, [1, 1])  # queued work of another project is restarted
+        self.assertEqual(self.s.get(b["id"])["status"], "pending")
+
+    def test_orphaned_operator_cannot_send_for_a_later_claim(self):
+        self.ask()
+        proc, ident = self.worker()
+        old_token = self.s.get(ident)["claim_token"]
+        self.kill(proc)
+        self.cli("recover")
+        ob.resolve_unknown(self.s, ident, True)  # operator checked the conversation: not sent
+        with exclusive(Path(self.tmp.name) / "worker.lock"):
+            self.assertEqual(self.s.claim()["id"], ident)
+        self.assertNotEqual(self.s.get(ident)["claim_token"], old_token)
+        with self.assertRaisesRegex(OBError, "request_not_claimed"):
+            operator.browser_consult(self.s, ident, {}, token=old_token)
+        with self.assertRaisesRegex(OBError, "request_not_claimed"):
+            operator.browser_consult(self.s, ident, {})
+
+    def test_kicked_worker_waits_out_a_short_probe_instead_of_exiting_busy(self):
+        lock = Path(self.tmp.name) / "worker.lock"
+        held = threading.Event()
+        def probe():
+            with exclusive(lock):
+                held.set()
+                time.sleep(0.5)
+        t = threading.Thread(target=probe)
+        t.start()
+        held.wait(5)
+        with patch.object(operator, "operate") as op:
+            self.s.submit(A, "AM", "q", "question")
+            operator.work(self.s, once=True)
+        t.join()
+        self.assertEqual(op.call_count, 1)
+        with self.assertRaisesRegex(OBError, "busy"):
+            with exclusive(lock):
+                start = time.monotonic()
+                with exclusive(lock, wait=0.3):
+                    pass
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
 
 
 if __name__ == '__main__':
