@@ -106,6 +106,10 @@ enum Cmd {
         token: String,
         #[arg(long, default_value_t = 7788)]
         port: u16,
+        /// 跟 hook 同一套 argv（`lifecycle::setup::hook_cmd_parts_for`）帶進來；statusline 不 spool，用不到。
+        /// 不收的話 clap 直接報錯退出，claude 的狀態列整個不見、額度也不回報（2026-09-15 回歸，6e09a2e）。
+        #[arg(long, default_value = "", hide = true)]
+        data_dir: String,
     },
 }
 
@@ -117,7 +121,7 @@ fn main() {
             hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, data_dir, payload_arg });
             std::process::exit(0);
         }
-        Cmd::Statusline { bot, token, port } => {
+        Cmd::Statusline { bot, token, port, data_dir: _ } => {
             statusline_cmd::run(statusline_cmd::StatuslineArgs { bot, token, port });
             std::process::exit(0);
         }
