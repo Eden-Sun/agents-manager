@@ -3312,10 +3312,19 @@ button.model-tag:hover:not(:disabled) {
   /* 排一列後每格縮：拿掉標籤與第二個數字（圖示即標籤，細節在 popover／tooltip）。 */
 
   .sidebar-head .pane-k,
-  .sidebar-head .mem-k,
-  .sidebar-head .mem-free,
   .sidebar-head .tabs-bytes {
     display: none;
+  }
+
+  /* RAM 例外（2026-09-15 使用者：手機 menu 上方放得下）：「RAM 已用」與「剩 N」都留著。放得下排一列；
+     更窄的手機（360px）在兩段之間折成兩行，不擠到兩旁的徽章。 */
+  .sidebar-head .head-ram .mem-badge {
+    column-gap: 4px;
+  }
+
+  .sidebar-head .head-ram .mem-free {
+    flex: none;
+    white-space: nowrap;
   }
 }
 
