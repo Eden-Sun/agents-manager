@@ -155,13 +155,27 @@ fn composer_glyph(kind: &str) -> Option<char> {
 /// arguments of `38`/`48` colour selectors (`;5;n`, `;2;r;g;b`) are skipped so their `2` is never
 /// mistaken for dim. Other escape sequences are dropped.
 pub(crate) fn styled_chars(row: &str) -> Vec<(char, bool)> {
+    styled_cells(row).into_iter().map(|c| (c.ch, c.dim)).collect()
+}
+
+/// One visible cell of a styled row: the character, whether it is dim, and whether an explicit
+/// foreground colour (`30–37`, `90–97`, `38;5;n`, `38;2;r;g;b`) is in effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cell {
+    pub ch: char,
+    pub dim: bool,
+    pub fg: bool,
+}
+
+pub(crate) fn styled_cells(row: &str) -> Vec<Cell> {
     let mut out = Vec::new();
     let mut dim = false;
+    let mut fg = false;
     let mut it = row.chars().peekable();
     while let Some(c) = it.next() {
         if c != '\u{1b}' {
             if c != '\r' {
-                out.push((c, dim));
+                out.push(Cell { ch: c, dim, fg });
             }
             continue;
         }
@@ -186,10 +200,18 @@ pub(crate) fn styled_chars(row: &str) -> Vec<(char, bool)> {
         let mut i = 0;
         while i < nums.len() {
             match nums[i] {
-                "" | "0" => dim = false,
+                "" | "0" => {
+                    dim = false;
+                    fg = false;
+                }
                 "2" => dim = true,
                 "22" => dim = false,
+                "39" => fg = false,
+                n if matches!(n.parse::<u8>(), Ok(30..=37 | 90..=97)) => fg = true,
                 "38" | "48" | "58" => {
+                    if nums[i] == "38" {
+                        fg = true;
+                    }
                     i += match nums.get(i + 1).copied() {
                         Some("5") => 2,
                         Some("2") => 4,
@@ -220,14 +242,31 @@ struct ComposerRow {
 
 /// The last row near the bottom whose first visible glyph is the kind's composer marker.
 fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
-    locate_composer(kind, lines).map(|c| c.idx)
+    locate_composer(kind, lines, false).map(|c| c.idx)
 }
 
-fn locate_composer(kind: &str, lines: &[&str]) -> Option<ComposerRow> {
+/// codex (gpt-6-astra and later) animates braille particles (`⠁⠂⠄⠈⠐⠠⢀`) across its composer and
+/// the rows around it, each in its own colour, never dim — and they land on blank cells, including
+/// the space after `›` and the gaps inside a draft. Only a styled read can tell a particle (coloured,
+/// not dim) from typed text; a plain read keeps them as characters and stays fail-closed.
+fn is_particle(c: &Cell) -> bool {
+    ('\u{2800}'..='\u{28FF}').contains(&c.ch) && c.fg && !c.dim
+}
+
+/// A particle erased back to the blank cell it was drawn on.
+fn blank_particles(cells: Vec<Cell>, drop: bool) -> Vec<Cell> {
+    if !drop {
+        return cells;
+    }
+    cells.into_iter().map(|c| if is_particle(&c) { Cell { ch: ' ', dim: false, fg: false } } else { c }).collect()
+}
+
+fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool) -> Option<ComposerRow> {
     let glyph = composer_glyph(kind)?;
     let from = lines.len().saturating_sub(COMPOSER_TAIL);
     (from..lines.len()).rev().find_map(|idx| {
-        let chars = styled_chars(lines[idx]);
+        let chars: Vec<(char, bool)> =
+            blank_particles(styled_cells(lines[idx]), drop_particles).into_iter().map(|c| (c.ch, c.dim)).collect();
         let mut i = chars.iter().position(|(c, _)| !c.is_whitespace())?;
         let boxed = chars[i].0 == '│';
         let mut end = chars.len();
@@ -259,12 +298,16 @@ fn locate_composer(kind: &str, lines: &[&str]) -> Option<ComposerRow> {
 /// accepts a placeholder: the same words could have been typed (sol review round nine #2).
 pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
-    let Some(c) = locate_composer(kind, &lines) else { return BoxState::Unready };
+    // codex's braille animation is only separable from typed text on a styled read (see
+    // `is_particle`); a plain read is never relaxed.
+    let particles = kind == "codex" && screen.contains("\u{1b}[");
+    let Some(c) = locate_composer(kind, &lines, particles) else { return BoxState::Unready };
     let mut content = c.after_glyph;
     if matches!(content.first(), Some((' ' | '\u{a0}', _))) {
         content.remove(0);
     }
-    if c.boxed {
+    // With the particles erased, what trails the marker row is the composer's own padding.
+    if c.boxed || particles {
         while matches!(content.last(), Some((ch, _)) if ch.is_whitespace()) {
             content.pop();
         }
@@ -280,7 +323,10 @@ pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
     }
     // Where the frame closes. Any row between the marker row and that edge is more of the
     // composer — a blank second line is still something typed.
-    let rest: Vec<String> = lines[c.idx + 1..].iter().map(|r| strip_ansi(r)).collect();
+    let rest: Vec<String> = lines[c.idx + 1..]
+        .iter()
+        .map(|r| blank_particles(styled_cells(r), particles).into_iter().map(|c| c.ch).collect())
+        .collect();
     let edge = match (kind, c.boxed) {
         (_, true) => rest.iter().take(COMPOSER_TAIL).position(|r| is_box_bottom(r)),
         ("claude", false) => rest.iter().take(COMPOSER_TAIL).position(|r| is_rule_row(r)),
@@ -839,6 +885,53 @@ mod tests {
         s.push('\n');
         s.push_str("  user. | web | OP5 61% | 5h:53% | 7d:95%\n");
         s
+    }
+
+    const CODEX_PARTICLES_EMPTY: &str = include_str!("fixtures/codex_astra_particles_empty.ansi");
+    const CODEX_PARTICLES_DRAFT: &str = include_str!("fixtures/codex_astra_particles_draft.ansi");
+
+    /// codex v0.154.0（gpt-6-astra）輸入列的點字動畫：2026-09-15 在 herdr pane 開一個 codex、`pane read --format ansi`
+    /// 實抓（fixtures/codex_astra_particles_*.ansi）。上下兩列與 marker 列都撒了帶顏色、非 dim 的 ⠁⠂⠄⠈⠐⠠⢀。
+    #[test]
+    fn codex_braille_particles_are_not_a_draft_on_a_styled_read() {
+        assert_eq!(box_state("codex", CODEX_PARTICLES_EMPTY), BoxState::Empty, "只有 dim 佔位字與點字底紋");
+        // 2026-09-14 w168:p4R：點字蓋在 `›` 後面那一格上（`›⠁Ask Codex…`）。
+        let glued = CODEX_PARTICLES_EMPTY.replacen(
+            "\u{1b}[1m\u{1b}[48;2;59;64;76m›\u{1b}[0m\u{1b}[48;2;59;64;76m \u{1b}[0m",
+            "\u{1b}[1m\u{1b}[48;2;59;64;76m›\u{1b}[0m\u{1b}[38;2;85;89;99m\u{1b}[48;2;59;64;76m⠁\u{1b}[0m",
+            1,
+        );
+        assert_ne!(glued, CODEX_PARTICLES_EMPTY, "fixture 的 marker 形狀沒變");
+        assert_eq!(box_state("codex", &glued), BoxState::Empty, "點字蓋掉 marker 後的空格");
+        // 真草稿：點字還蓋在字與字之間的空格上（`login⠁bug`），一般字元照樣算非空。
+        assert_eq!(box_state("codex", CODEX_PARTICLES_DRAFT), BoxState::NonEmpty, "點字底紋＋真草稿");
+    }
+
+    #[test]
+    fn braille_is_only_ignored_when_it_is_a_coloured_codex_particle() {
+        // 純文字讀法不放寬：分不出點字是不是打的（sol 第九輪 #2）。
+        let plain: String = CODEX_PARTICLES_EMPTY.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+        assert_eq!(box_state("codex", &plain), BoxState::NonEmpty, "plain read");
+        let row = |marker_row: &str, below: &str| format!("\u{1b}[0m\n{marker_row}\n{below}\n\n  gpt-6-astra medium · ~/proj\n");
+        let dim_ph = "\u{1b}[1m›\u{1b}[0m \u{1b}[2mAsk Codex to do anything\u{1b}[0m";
+        let particle = "\u{1b}[38;2;139;141;148m⠐\u{1b}[0m";
+        // 使用者真的打了點字（沒有顏色、非 dim）：是草稿。
+        assert_eq!(box_state("codex", &row(&format!("\u{1b}[1m›\u{1b}[0m ⠁⠂"), "")), BoxState::NonEmpty, "uncoloured braille typed");
+        // 點字底紋之間混進一個一般字元：草稿。
+        assert_eq!(box_state("codex", &row(&format!("{dim_ph}   {particle}  x"), "")), BoxState::NonEmpty, "one ordinary char");
+        // 下一列只有縮排＋點字：空白列；下一列有真字：續行。
+        assert_eq!(box_state("codex", &row(&format!("{dim_ph}  {particle}"), &format!("      {particle}   {particle}"))), BoxState::Empty);
+        assert_eq!(box_state("codex", &row(&format!("{dim_ph}  {particle}"), &format!("  more {particle}"))), BoxState::NonEmpty, "second line typed");
+        // claude 不套這條：同樣的點字仍是內容。
+        let claude = format!("─────\n❯ {particle}\n─────\n");
+        assert_eq!(box_state("claude", &claude), BoxState::NonEmpty);
+    }
+
+    #[test]
+    fn styled_cells_track_the_foreground_colour() {
+        let got = styled_cells("a\u{1b}[38;5;2mb\u{1b}[39mc\u{1b}[31md\u{1b}[0me\u{1b}[48;2;1;2;3mf");
+        let fg: Vec<(char, bool)> = got.iter().map(|c| (c.ch, c.fg)).collect();
+        assert_eq!(fg, vec![('a', false), ('b', true), ('c', false), ('d', true), ('e', false), ('f', false)]);
     }
 
     /// 只有已知的空框形狀才算空：任何額外位元組、任何續行（含空白列）都是非空（第七輪 #1）。
