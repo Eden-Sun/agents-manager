@@ -25,6 +25,13 @@ fn hook_cmd_parts_for(exe: &str, port: u16, bot_id: &str, provider: &str, data_d
     ]
 }
 
+/// `agents-managerd hook claude …` → `agents-managerd statusline …`（同一套旗標）。
+fn statusline_parts(mut hook: Vec<String>) -> Vec<String> {
+    hook[1] = "statusline".into();
+    hook.remove(2);
+    hook
+}
+
 /// What goes in `hook.sh`'s third argv slot. The script ignores it; the real `hook_token` is
 /// never put on a remote command line (review 2026-09-12 #8).
 pub const REMOTE_TOKEN_SLOT: &str = "-";
@@ -401,10 +408,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
         "claude" => {
             let cmd = shell_join(&hook_cmd_parts(app, bot, "claude"));
             // Status line reports rate limits, then runs the user's own statusLine command.
-            let mut sl = hook_cmd_parts(app, bot, "claude");
-            sl[1] = "statusline".into();
-            sl.remove(2);
-            let statusline = shell_join(&sl);
+            let statusline = shell_join(&statusline_parts(hook_cmd_parts(app, bot, "claude")));
             // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
             let settings = claude_settings(&cmd, &statusline, wants_remote);
@@ -824,6 +828,18 @@ mod hook_cmd_parts_tests {
             vec!["/usr/bin/agents-managerd", "hook", "claude", "--bot", "b1", "--port", "7788", "--data-dir", "/tmp/am-iso"]
         );
         assert!(!parts.iter().any(|p| p == "--token"));
+    }
+
+    /// 產生出來的 hook 與 statusLine 指令，真的丟給 daemon 自己的 CLI parser 要過（2026-09-15 回歸：hook 加了
+    /// `--data-dir`，statusline 子命令不認，claude 的狀態列整個不見）。只比對字串抓不到這種事。
+    #[test]
+    fn the_generated_hook_and_statusline_commands_parse() {
+        use clap::Parser as _;
+        let hook = hook_cmd_parts_for("/usr/bin/agents-managerd", 7788, "b1", "claude", "/tmp/am-iso");
+        crate::Cli::try_parse_from(&hook).unwrap_or_else(|e| panic!("hook argv 不合法：{e}\n{hook:?}"));
+        let statusline = super::statusline_parts(hook);
+        assert_eq!(statusline[1], "statusline");
+        crate::Cli::try_parse_from(&statusline).unwrap_or_else(|e| panic!("statusline argv 不合法：{e}\n{statusline:?}"));
     }
 
     #[cfg(unix)]
