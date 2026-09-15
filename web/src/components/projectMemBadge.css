@@ -24,3 +24,11 @@
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
+
+/* 觸控裝置的 ＋／⋯ 常駐（沒有 hover 可以叫出來），疊在標題右側會蓋住這顆 RAM（2026-09-15 使用者：手機 menu 被控制項擋住）。
+   讓標題內容讓出兩顆 36px 按鈕＋右側 4px 的寬度。 */
+@media (hover: none) {
+  .project-head .project-label-btn {
+    margin-right: 76px;
+  }
+}
