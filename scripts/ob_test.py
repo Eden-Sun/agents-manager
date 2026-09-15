@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -45,8 +46,7 @@ class QueueTests(unittest.TestCase):
 
     def test_request_replay_does_not_requeue_completed_work(self):
         a = self.ask()
-        self.s.claim()
-        self.s.finish(a["id"], "answer", UA)
+        self.s.finish(a["id"], "answer", UA, self.s.claim()["claim_token"])
         again = self.ask()
         self.assertEqual(again["status"], "done")
         self.assertEqual(len(self.s.list()), 1)
@@ -120,8 +120,7 @@ class QueueTests(unittest.TestCase):
 
     def test_quota_waiting_preserves_queue_and_backs_off_globally(self):
         a = self.ask()
-        self.s.claim()
-        self.s.fail(a["id"], "waiting_quota", "exhausted")
+        self.s.fail(a["id"], "waiting_quota", "exhausted", self.s.claim()["claim_token"])
         self.ask(B)
         self.assertIsNone(self.s.claim())
         self.assertEqual(self.s.get(a["id"])["status"], "waiting_quota")
@@ -131,9 +130,9 @@ class QueueTests(unittest.TestCase):
     def test_finish_rolls_back_if_conversation_is_owned_by_another_project(self):
         self.s.link(B, "b", UB)
         a = self.ask()
-        self.s.claim()
-        with self.assertRaises(Exception):
-            self.s.finish(a["id"], "answer", UB)
+        token = self.s.claim()["claim_token"]
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.s.finish(a["id"], "answer", UB, token)
         self.assertEqual(self.s.get(a["id"])["status"], "running")
         self.assertIsNone(self.s.project(A)["url"])
 
@@ -203,34 +202,34 @@ class OperatorTests(unittest.TestCase):
         self.assertFalse(operator.quota_error("invalid json"))
 
     def test_operator_quota_error_never_calls_browser_or_changes_model(self):
-        job = self.ask()
-        self.s.claim()
+        self.ask()
+        job = self.s.claim()
         with patch.object(operator, "run_process", return_value=(1, '{"is_error":true,"result":"usage limit reached"}', "")) as proc:
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "waiting_quota")
         self.assertEqual(proc.call_count, 1)
 
     def test_sonnet_fabricated_answer_is_not_accepted(self):
-        job = self.ask()
-        self.s.claim()
+        self.ask()
+        job = self.s.claim()
         with patch.object(operator, "run_process", return_value=(0, '{"result":"Pretend answer"}', "")):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "failed")
         self.assertIsNone(self.s.get(job["id"])["answer"])
 
     def test_browser_receipt_wins_if_sonnet_later_hits_quota(self):
-        job = self.ask()
-        self.s.claim()
+        self.ask()
+        job = self.s.claim()
         def run(*a, **kw):
-            self.s.finish(job["id"], "actual web answer", UA)
+            self.s.finish(job["id"], "actual web answer", UA, job["claim_token"])
             return (1, '{"is_error":true,"result":"usage limit"}', "")
         with patch.object(operator, "run_process", side_effect=run):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "done")
 
     def test_timeout_after_dispatch_is_unknown_not_retryable(self):
-        job = self.ask()
-        self.s.claim()
+        self.ask()
+        job = self.s.claim()
         def run(*a, **kw):
             operator.journal_for(self.s, job["id"]).write_text('{"phase":"dispatching"}')
             raise subprocess.TimeoutExpired("claude", 900)
@@ -247,6 +246,44 @@ class OperatorTests(unittest.TestCase):
             operator.mcp_server(self.tmp.name, job["id"])
         self.assertTrue(json.loads(output.getvalue())["result"]["isError"])
         browser.assert_not_called()
+
+
+MIGRATE = r"""
+import sys, time
+from ob_store import Store
+root, at = sys.argv[1], float(sys.argv[2])
+time.sleep(max(0, at - time.time()))
+Store(root).db.close()
+"""
+
+
+class MigrationTests(unittest.TestCase):
+    def test_concurrent_first_runs_upgrade_an_old_database_once(self):
+        for _ in range(3):
+            with tempfile.TemporaryDirectory() as tmp:
+                db = sqlite3.connect(Path(tmp) / "ob.sqlite3")
+                db.execute("PRAGMA journal_mode=WAL")  # as every existing OB database was created
+                db.executescript("""CREATE TABLE projects (id TEXT PRIMARY KEY, label TEXT NOT NULL, url TEXT UNIQUE);
+                    CREATE TABLE requests (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                        request_id TEXT NOT NULL, question TEXT NOT NULL, source_bot_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending', answer TEXT, url TEXT,
+                        error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE(project_id, request_id));
+                    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);""")
+                db.execute("INSERT INTO projects VALUES (?,?,NULL)", (A, "AM"))
+                db.execute("INSERT INTO requests(id,project_id,request_id,question,status,created_at,updated_at) VALUES ('r',?,'q','x','running',0,0)", (A,))
+                db.commit()
+                db.close()
+                env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent))
+                at = time.time() + 1
+                procs = [subprocess.Popen([sys.executable, "-B", "-c", MIGRATE, tmp, str(at)], env=env,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(12)]
+                errors = [err for p in procs for _, err in [p.communicate(30)] if p.returncode]
+                self.assertEqual(errors, [])
+                s = Store(tmp)
+                cols = [r[1] for r in s.db.execute("PRAGMA table_info(requests)")]
+                self.assertEqual(cols.count("claim_token"), 1)
+                self.assertEqual(s.get("r")["status"], "running")  # upgrade alone never touches requests
+                s.db.close()
 
 
 class CLITests(unittest.TestCase):
@@ -411,6 +448,72 @@ class WorkerLossTests(unittest.TestCase):
             operator.browser_consult(self.s, ident, {}, token=old_token)
         with self.assertRaisesRegex(OBError, "request_not_claimed"):
             operator.browser_consult(self.s, ident, {})
+
+    def test_results_of_a_lost_claim_never_overwrite_the_new_claim(self):
+        first = self.ask()
+        proc, ident = self.worker()
+        stale = self.s.get(ident)  # what the dead worker's operate() was holding
+        self.kill(proc)
+        self.cli("recover")
+        ob.resolve_unknown(self.s, ident, True)
+        with exclusive(Path(self.tmp.name) / "worker.lock"):
+            fresh = self.s.claim()
+        self.assertEqual(fresh["id"], first["id"])
+        # Late post-processing of the old claim: quota, no receipt, exception with a journal, and a done journal.
+        for out in ('{"is_error":true,"result":"usage limit"}', '{"result":"no receipt"}'):
+            with patch.object(operator, "run_process", return_value=(1, out, "")):
+                operator.operate(self.s, stale, {})
+        self.assertEqual(self.s.setting("retry_after", 0), 0)
+        operator.journal_for(self.s, ident).write_text('{"phase":"dispatching"}')
+        with patch.object(operator, "run_process", side_effect=RuntimeError("late")):
+            operator.operate(self.s, stale, {})
+        operator.journal_for(self.s, ident).write_text(json.dumps({"phase": "done", "answer": "old", "url": UA}))
+        with patch.object(operator, "run_process", return_value=(0, "", "")):
+            operator.operate(self.s, stale, {})
+        with self.assertRaisesRegex(OBError, "claim_lost"):
+            self.s.finish(ident, "old", UA, stale["claim_token"])
+        row = self.s.get(ident)
+        self.assertEqual((row["status"], row["claim_token"], row["answer"]), ("running", fresh["claim_token"], None))
+        self.assertEqual(self.s.finish(ident, "new", UA, fresh["claim_token"])["status"], "done")
+
+    def test_collect_that_loses_the_race_to_resolve_and_reclaim_cannot_finish(self):
+        self.ask()
+        proc, ident = self.worker()
+        self.kill(proc)
+        self.cli("recover")
+        real_exclusive = operator.exclusive
+        @contextlib.contextmanager
+        def resolve_first(path, wait=0):
+            # collect passed its unlocked unknown check; resolve and a new claim win browser.lock first.
+            if path.name == "browser.lock" and self.s.get(ident)["status"] == "unknown":
+                ob.resolve_unknown(self.s, ident, True)
+                with real_exclusive(Path(self.tmp.name) / "worker.lock"):
+                    self.s.claim()
+            with real_exclusive(path, wait) as fd:
+                yield fd
+        operator.journal_for(self.s, ident).write_text(json.dumps({"phase": "done", "answer": "stale", "url": UA}))
+        with patch.object(operator, "exclusive", resolve_first), patch.object(ob, "recover"):
+            with self.assertRaisesRegex(OBError, "request_not_unknown"):
+                self.cli("collect", ident)
+        row = self.s.get(ident)
+        self.assertEqual((row["status"], row["answer"]), ("running", None))
+        with self.assertRaisesRegex(OBError, "claim_lost"):
+            self.s.finish(ident, "stale", UA)  # no token: never over a running claim
+        self.s.db.execute("UPDATE requests SET status='unknown' WHERE id=?", (ident,))
+        self.assertEqual(self.s.finish(ident, "collected", UA)["status"], "done")
+        self.assertEqual(self.cli("collect", ident)["answer"], "collected")  # done returns the original result
+
+    def test_no_start_replay_recovers_without_starting_a_worker(self):
+        self.ask()
+        proc, ident = self.worker()
+        self.kill(proc)
+        self.s.submit(B, "B", "q", "claimable work of another project")
+        self.kicks.clear()
+        row = self.cli("ask", "--request-id", "q1", "--no-start", "--wait", "1", "Which design?")
+        self.assertEqual(row["status"], "unknown")
+        self.assertEqual(self.kicks, [])
+        self.cli("ask", "--request-id", "q9", "--no-start", "new question")
+        self.assertEqual(self.kicks, [])
 
     def test_kicked_worker_waits_out_a_short_probe_instead_of_exiting_busy(self):
         lock = Path(self.tmp.name) / "worker.lock"

@@ -70,9 +70,11 @@ class Store:
             );
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
-        if "claim_token" not in {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}:
-            # Binds browser sends to the claim that started them; an orphaned operator of an old claim cannot send.
-            self.db.execute("ALTER TABLE requests ADD COLUMN claim_token TEXT")
+        # Binds sends and results to the claim that started them; an orphan of an old claim cannot act for a new one.
+        # Check and ALTER in one write transaction: concurrent first runs of a new CLI must not both add it.
+        with self.transaction():
+            if "claim_token" not in {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}:
+                self.db.execute("ALTER TABLE requests ADD COLUMN claim_token TEXT")
 
     @contextlib.contextmanager
     def transaction(self):
@@ -148,7 +150,7 @@ class Store:
             self.db.execute("UPDATE requests SET status='running',claim_token=?,error=NULL,updated_at=? WHERE id=?", (token or uuid.uuid4().hex, time.time(), row["id"]))
             return self.get(row["id"])
 
-    def finish(self, ident, answer, url):
+    def finish(self, ident, answer, url, token=None):
         conversation_url(url)
         if not answer.strip():
             raise OBError("empty_answer")
@@ -158,6 +160,9 @@ class Store:
                 return job
             if job["status"] not in ("running", "unknown"):
                 raise OBError("request_not_running")
+            # running belongs to its claim; only unknown may be finished without one (manual collect).
+            if job["status"] == "running" and (not token or job["claim_token"] != token):
+                raise OBError("claim_lost：原單已被重新 claim，不覆寫")
             current = self.project(job["project_id"])["url"]
             if current and current != url:
                 raise OBError("conversation_changed")
@@ -175,12 +180,13 @@ class Store:
             self.db.execute("UPDATE projects SET url=? WHERE id=?", (url, job["project_id"]))
             self.db.execute("UPDATE requests SET url=? WHERE id=?", (url, ident))
 
-    def fail(self, ident, status, error):
+    def fail(self, ident, status, error, token=None):
         if status not in ("failed", "unknown", "waiting_quota"):
             raise OBError("invalid_failure")
         with self.transaction():
-            self.db.execute("UPDATE requests SET status=?,error=?,updated_at=? WHERE id=? AND status='running'", (status, error, time.time(), ident))
-            if status == "waiting_quota":
+            changed = self.db.execute("UPDATE requests SET status=?,error=?,updated_at=? WHERE id=? AND status='running' AND claim_token=?",
+                                      (status, error, time.time(), ident, token)).rowcount
+            if status == "waiting_quota" and changed:
                 self.set_setting("retry_after", time.time() + 1800)
 
     def retry(self, ident):

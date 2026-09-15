@@ -71,13 +71,19 @@ def browser_consult(store, ident, config, collect=False, token=None):
     if job["status"] != ("unknown" if collect else "running"):
         raise OBError("request_not_claimed")
     with exclusive(store.root / "browser.lock"):
-        # Re-check under browser.lock: an operator orphaned by a dead worker must not send for a later claim.
+        # Re-check under browser.lock: resolve/re-claim may have run since, and an orphaned operator
+        # of a dead worker must not send or finish for a later claim.
         job = store.get(ident)
+        if job["status"] == "done":
+            return job
+        if collect and job["status"] != "unknown":
+            raise OBError("request_not_unknown")
         if not collect and (job["status"] != "running" or not token or job["claim_token"] != token):
             raise OBError("request_not_claimed")
+        token = None if collect else token
         progress = journal_state(store, ident)
         if progress and progress.get("phase") == "done":
-            return store.finish(ident, progress["answer"], progress["url"])
+            return store.finish(ident, progress["answer"], progress["url"], token)
         if progress and not collect:
             raise OBError("delivery_unknown：不可再次送出，請 collect")
         project = store.project(job["project_id"])
@@ -90,7 +96,7 @@ def browser_consult(store, ident, config, collect=False, token=None):
                                    env=clean_env(config), timeout=720, stdin=script, new_session=False)
         progress = journal_state(store, ident)
         if progress and progress.get("phase") == "done":
-            return store.finish(ident, progress["answer"], progress["url"])
+            return store.finish(ident, progress["answer"], progress["url"], token)
         # Never trust Sonnet's prose as the answer: only the browser journal is evidence.
         raise OBError("browser_failed_or_interrupted" if code else "browser_no_receipt")
 
@@ -156,7 +162,8 @@ def quota_error(output):
 
 
 def operate(store, job, config):
-    ident = job["id"]
+    # Every result is written for this claim only; a request re-claimed meanwhile is left to its new owner.
+    ident, token = job["id"], job["claim_token"]
     try:
         with tempfile.TemporaryDirectory(prefix="ob-operator-") as cwd:
             mcp = Path(cwd) / "mcp.json"
@@ -171,16 +178,16 @@ def operate(store, job, config):
         progress = journal_state(store, ident)
         if progress:
             if progress.get("phase") == "done":
-                store.finish(ident, progress["answer"], progress["url"])
+                store.finish(ident, progress["answer"], progress["url"], token)
             else:
-                store.fail(ident, "unknown", "可能已送出；用 collect 取回，不可重送")
+                store.fail(ident, "unknown", "可能已送出；用 collect 取回，不可重送", token)
         elif quota_error(out):
-            store.fail(ident, "waiting_quota", "Sonnet 額度不足；30 分鐘後重試，不換帳號或模型")
+            store.fail(ident, "waiting_quota", "Sonnet 額度不足；30 分鐘後重試，不換帳號或模型", token)
         else:
-            store.fail(ident, "failed", "Sonnet 未取得瀏覽器收據；檢查登入、CLI 與 MCP，再 retry")
+            store.fail(ident, "failed", "Sonnet 未取得瀏覽器收據；檢查登入、CLI 與 MCP，再 retry", token)
     except Exception as e:
         if store.get(ident)["status"] != "done":
-            store.fail(ident, "unknown" if journal_for(store, ident).exists() else "failed", type(e).__name__)
+            store.fail(ident, "unknown" if journal_for(store, ident).exists() else "failed", type(e).__name__, token)
 
 
 def recover_under_lock(store):
